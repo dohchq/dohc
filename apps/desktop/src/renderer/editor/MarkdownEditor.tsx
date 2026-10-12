@@ -58,7 +58,15 @@ import {
   pickAndInsertImages,
   type ImagePasteContext,
 } from "./imagePaste";
-import { handleUrlPaste, type UrlPasteOffer } from "./urlPaste";
+import {
+  chooseUrlForm,
+  dismissUrlPasteOffer,
+  makeUrlPasteOfferPlugin,
+  urlPasteOfferKeyDown,
+  type UrlForm,
+  type UrlPasteOfferState,
+} from "./urlPaste";
+import { UrlPasteOffer } from "./UrlPasteOffer";
 import { bridge } from "../bridge";
 import { FindReplaceBar } from "./FindReplaceBar";
 import { findReplaceExtension } from "./findReplace";
@@ -178,7 +186,6 @@ export type MarkdownEditorProps = {
   value: string;
   onDirty: (materialize?: () => string) => void;
   onFocus?: () => void;
-  onUrlPasteOffer?: (offer: UrlPasteOffer) => void;
   workspaceId: string;
   path: string;
   knownFiles: ReadonlyArray<WikilinkFile>;
@@ -481,7 +488,6 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
       value,
       onDirty,
       onFocus,
-      onUrlPasteOffer,
       knownFiles,
       onOpenWikilink,
       onOpenWorkspaceLink,
@@ -536,8 +542,10 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
     const onOpenWorkspaceLinkRef = useRef<
       ((target: WorkspaceLinkTarget) => void) | null
     >(onOpenWorkspaceLink ?? null);
-    const urlPasteOfferRef = useRef(onUrlPasteOffer);
-    urlPasteOfferRef.current = onUrlPasteOffer;
+    // The offer a URL pasted on its own line raises, and its row. Mod+K in
+    // the editor moves focus to the row.
+    const [urlOffer, setUrlOffer] = useState<UrlPasteOfferState | null>(null);
+    const urlOfferRowRef = useRef<HTMLDivElement>(null);
     const onFocusRef = useRef(onFocus);
     onFocusRef.current = onFocus;
     // The shell's error hook, for a code block's copy the clipboard refused.
@@ -708,6 +716,7 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
               makeTableControlsPlugin({
                 rowResizeEnabled: Boolean(collab?.ydoc),
               }),
+              makeUrlPasteOfferPlugin(setUrlOffer),
             ];
           },
         }),
@@ -831,13 +840,16 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
             class: "dohc-notion-editor",
             "data-testid": "markdown-editor",
           },
-          handlePaste: (view, event) => {
-            if (handleImagePaste(view, event, pasteContextRef.current)) return true;
-            return handleUrlPaste(view, event, urlPasteOfferRef.current);
-          },
+          handlePaste: (view, event) =>
+            handleImagePaste(view, event, pasteContextRef.current),
           handleDrop: (view, event) =>
             handleImageDrop(view, event as DragEvent, pasteContextRef.current),
-          handleKeyDown: readCaretBeforeKey,
+          handleKeyDown: (view, event) => {
+            readCaretBeforeKey(view, event);
+            return urlPasteOfferKeyDown(view, event, () =>
+              urlOfferRowRef.current?.querySelector("button")?.focus(),
+            );
+          },
           handleDOMEvents: {
             focus: (view) => {
               collaborationHistory?.stopCapturing();
@@ -909,6 +921,26 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
         pane.removeEventListener("dragover", onDragOver);
         pane.removeEventListener("drop", onDrop);
       };
+    }, [editor]);
+
+    // A choice is its own undo step in either history, so Undo, like Ctrl+Z,
+    // takes back the choice and keeps the paste.
+    const chooseUrlOffer = useCallback(
+      (form: UrlForm) => {
+        if (!editor || editor.isDestroyed) return;
+        collaborationHistory?.stopCapturing();
+        chooseUrlForm(editor.view, form);
+        collaborationHistory?.stopCapturing();
+      },
+      [editor, collaborationHistory],
+    );
+    const undoUrlOffer = useCallback(() => {
+      if (!editor || editor.isDestroyed) return;
+      editor.chain().focus().undo().run();
+      dismissUrlPasteOffer(editor.view);
+    }, [editor]);
+    const dismissUrlOffer = useCallback(() => {
+      if (editor && !editor.isDestroyed) dismissUrlPasteOffer(editor.view);
     }, [editor]);
 
     const openSlashMenuAtPosition = useCallback(
@@ -1248,6 +1280,14 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
               editor={editor}
               state={linkMenuState}
               onDismiss={() => setLinkMenuState(CLOSED_LINK_MENU_STATE)}
+            />
+            <UrlPasteOffer
+              offer={urlOffer}
+              view={pickerView}
+              rowRef={urlOfferRowRef}
+              onChoose={chooseUrlOffer}
+              onUndo={undoUrlOffer}
+              onDismiss={dismissUrlOffer}
             />
           </>
         ) : null}

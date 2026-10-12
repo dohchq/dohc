@@ -20,6 +20,7 @@ import { DocumentMenu } from "../DocumentMenu";
 import { FrontmatterAsWritten } from "../FrontmatterAsWritten";
 import { DocumentControls, OPENING_TITLE, OpeningState, ViewActions } from "../fileInspectorUi";
 import { BlockMenu } from "../editor/blockControls";
+import { UrlPasteOfferRow } from "../editor/UrlPasteOffer";
 import { SlashCommandMenu, type SlashCommandState } from "../editor/slashCommands";
 import { buildTableMenu, type TableMenuRow } from "../editor/tableControls";
 import { OverlayFrame } from "../Overlay";
@@ -191,10 +192,28 @@ function EditorGroupSpecimen(props: { groupId: string; groupNumber: number; tabs
   );
 }
 
+// A URL pasted on its own line, on a strip of paper, with the offer's row
+// where the editor floats it: under the line. Before a choice the URL is
+// plain text; after one it is a link and the row offers Undo.
+function UrlOfferSpecimen(props: { force?: string; chosen?: boolean }) {
+  return (
+    <div className="w-[420px] rounded-lg border border-line bg-bg px-4 pb-10 pt-3 text-[15px] text-ink">
+      <p className={`m-0 ${props.chosen ? "underline" : ""}`}>https://example.com/trip/itinerary</p>
+      <div
+        className="mt-1"
+        data-force-state={props.force ? "focus-visible" : undefined}
+        data-force-target={props.force ? `[data-testid="${props.force}"]` : undefined}
+      >
+        <UrlPasteOfferRow form={props.chosen ? "link" : "plain"} chosen={props.chosen ?? false} />
+      </div>
+    </div>
+  );
+}
+
 // One group's tab row carrying an open document's actions, as the shell lays
 // it out, over a strip of paper.
-function TabRowActionsSpecimen(props: { width: string; testId?: string; children: ReactNode }) {
-  const path = "trip/plan.md";
+function TabRowActionsSpecimen(props: { width: string; testId?: string; path?: string; children: ReactNode }) {
+  const path = props.path ?? "trip/plan.md";
   return (
     <div data-testid={props.testId} className={`${props.width} rounded-lg border border-line`}>
       <EditorGroupFrame
@@ -274,6 +293,7 @@ const treeRowCallbacks = {
 function Row(props: {
   name: string;
   folder?: boolean;
+  app?: boolean;
   selected?: boolean;
   active?: boolean;
   drop?: boolean;
@@ -282,8 +302,9 @@ function Row(props: {
   return (
     <div data-force-state={props.force} data-force-target="button">
       <TreeRow
-        row={treeRow(props.name, props.folder)}
+        row={treeRow(props.name, props.folder || props.app)}
         collection={false}
+        app={props.app ?? false}
         selected={props.selected ?? false}
         active={props.active ?? false}
         tabbable={false}
@@ -323,6 +344,7 @@ function KindRows(props: { label: string; selected: boolean }) {
             kind: kind.displayKind === "database" ? "database" : "file",
           }}
           collection={false}
+          app={false}
           selected={props.selected}
           active={false}
           tabbable={false}
@@ -1861,6 +1883,32 @@ function Pane(props: { theme: "light" | "dark" }) {
               value={COMPOSER_DRAFT} sending placeholder="Write a message…" sendLabel="Send message"
               onChange={noop} onSend={noop} />
           </AboutPanelSpecimen>
+        </Specimen>
+      </Section>
+
+      {/* Last, so the parts above keep their places. Offers sit in space
+          already there: a folder row's glyph, the tab row's end, and a row
+          floating under a pasted line. */}
+      <Section part="offers" title="Offers">
+        <Specimen label="an app folder in Files: at rest, selected, focused">
+          <ul role="tree" aria-label="App folders" className="m-0 w-64 list-none rounded-lg border border-line bg-panel py-1">
+            <Row name="trip-planner" app />
+            <Row name="signup" app selected />
+            <Row name="dashboard" app force="focus-visible" />
+          </ul>
+        </Specimen>
+        <Specimen label="Run in the tab row of an app's entry file" className="w-full">
+          <TabRowActionsSpecimen width="w-full" path="trip-planner/index.html">
+            <ViewActions onShare={noop} onRun={noop} />
+          </TabRowActionsSpecimen>
+        </Specimen>
+        <Specimen label="a URL pasted on its own line: Link focused, Plain text focused, then Undo">
+          <div className="flex flex-col gap-3">
+            {(["link", "plain"] as const).map((focused) => (
+              <UrlOfferSpecimen key={focused} force={focused === "link" ? "url-paste-link" : "url-paste-plain"} />
+            ))}
+            <UrlOfferSpecimen chosen />
+          </div>
         </Specimen>
       </Section>
     </section>

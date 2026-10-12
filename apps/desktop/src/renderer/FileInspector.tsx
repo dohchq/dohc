@@ -299,6 +299,9 @@ type FileInspectorProps = {
   registerDraftFlush?: (flush: DraftFlush | null) => void;
   knownMarkdownFiles?: ReadonlyArray<WikilinkFile>;
   onSharePath?: (path: string) => void;
+  // This file is the entry of the app in `appFolder`: Run opens its preview.
+  appFolder?: string | null;
+  onRunApp?: (folder: string) => void;
   pendingUndo?: PendingFileUndo;
   onPendingUndoConsumed?: (token: number) => void;
   // Read-only shared views: every editable view refuses edits.
@@ -576,6 +579,8 @@ export const FileInspector = memo(function FileInspector(
   const onShareCurrentPath = props.onSharePath
     ? () => props.onSharePath?.(props.path)
     : undefined;
+  const { appFolder, onRunApp } = props;
+  const runApp = appFolder && onRunApp ? () => onRunApp(appFolder) : undefined;
   // Recovery follows the PATH, not the file kind: an
   // extension-changing rename remaps a markdown draft onto a text/CSV/binary
   // view, and Copy/Dismiss must exist wherever the marker shows. The markdown
@@ -674,6 +679,7 @@ export const FileInspector = memo(function FileInspector(
       <div className="flex min-h-0 flex-1 flex-col bg-bg" data-testid="file-inspector">
         <ViewActions
           onShare={onShareCurrentPath}
+          onRun={runApp}
           actions={closedDocumentControls(!error)}
         />
         {engine.engineMayHoldDocument ? (
@@ -823,7 +829,7 @@ export const FileInspector = memo(function FileInspector(
     case "code":
       return (
         <div className="flex min-h-0 flex-1 flex-col bg-bg" data-testid="file-inspector">
-          <ViewActions onShare={onShareCurrentPath} />
+          <ViewActions onShare={onShareCurrentPath} onRun={runApp} />
           {truncatedNotice}
           {recoveryNotices}
           <TextEditorView
