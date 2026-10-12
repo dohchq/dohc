@@ -1960,7 +1960,9 @@ function Pane(props: { theme: "light" | "dark" }) {
         </Specimen>
         <Specimen label="locked: the block must be edited as text">
           <TopmatterSpecimen>
-            <PropertiesPanel body={"---\na: &v .nan\nb: {nested: [*v]}\n---\n"} onChange={noop} />
+            {/* Written on one line, the block cannot change one property
+                without rewriting the others. */}
+            <PropertiesPanel body={"---\n{status: draft, score: .nan}\n---\n"} onChange={noop} />
           </TopmatterSpecimen>
         </Specimen>
         <Specimen label="set by an automation">

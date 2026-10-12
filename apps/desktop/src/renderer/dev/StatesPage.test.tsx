@@ -39,8 +39,10 @@ describe("states page", () => {
       expect(mark.querySelector(mark.dataset.forceTarget ?? "")).not.toBeNull();
       if (trigger) fireEvent.click(trigger);
     }
-    // The reserved pill is typed when it mounts, once per theme.
+    // The reserved pill is typed when it mounts, and the locked pills are
+    // locked at rest, once per theme.
     expect(screen.getAllByTestId("property-reserved")).toHaveLength(2);
+    expect(screen.getAllByTestId("properties-locked")).toHaveLength(2);
 
     unmount();
     expect(document.documentElement.dataset.theme).toBe("dark");
