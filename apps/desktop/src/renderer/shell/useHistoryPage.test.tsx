@@ -953,7 +953,6 @@ it.each([
   expect(reads).toHaveLength(9);
 });
 
-
 it.each(["text", "protected"])("stops a names rescan exactly at the oldest shown %s moment", async (stream) => {
   let notify!: (event: { workspaceId: string }) => void;
   window.dohcDesktop!.onHistoryNamesChanged = listener => { notify = listener; return () => {}; };
