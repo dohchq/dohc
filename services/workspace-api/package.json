@@ -11,6 +11,7 @@
     "start": "node dist/main.js"
   },
   "dependencies": {
+    "@dohc/service-http": "workspace:*",
     "@dohc/workspace-auth": "workspace:*",
     "better-auth": "^1.6.26",
     "nodemailer": "10.0.10",

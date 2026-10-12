@@ -635,6 +635,11 @@ describe("shared view send changes", () => {
       access: "edit",
     },
   };
+  // Send waits for main to open the view in this window.
+  const readySend = async () => {
+    await waitFor(() => expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"));
+    return screen.getByTestId("share-changes-send");
+  };
 
   for (const shareView of [
     { shareId: "share-1", granterEmail: "sam@dohc.test", access: "view" as const },
@@ -720,6 +725,31 @@ describe("shared view send changes", () => {
     await waitFor(() => expect(bridge.submitShareChanges).toHaveBeenCalledWith({ workspaceId: SHARE_VIEW.workspaceId }));
   });
 
+  // Main refuses the window's calls until it has opened the view there. A
+  // read sent before that would leave changes already sent unseen.
+  it("reads changes already sent once main has opened the view in this window", async () => {
+    const status = deferred<typeof SHARE_STATUS>();
+    const bridge = makeShareBridge();
+    let admitted = false;
+    bridge.openWorkspace = vi.fn(async () => {
+      const opened = await status.promise;
+      admitted = true;
+      return opened;
+    });
+    bridge.getSyncStatus = vi.fn(() => status.promise);
+    bridge.listMyShareChanges.mockImplementation(async () => {
+      if (!admitted) throw new Error("Share changes stopped because this window changed workspaces.");
+      return { proposals: [{ proposalId: "proposal-1", state: "open", createdAtMs: 10, files: 1 }] };
+    });
+    renderShell(bridge, EDIT_SHARE);
+    await screen.findByTestId("shared-view-banner");
+    expect(bridge.listMyShareChanges).not.toHaveBeenCalled();
+
+    await act(async () => status.resolve(SHARE_STATUS));
+    expect(await screen.findByTestId("share-changes-state")).toHaveProperty("dataset.state", "open");
+    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+  });
+
   it("listens without pushing from a share view that cannot write", async () => {
     const bridge = makeShareBridge();
     renderShell(bridge, { ...SHARE_VIEW, shareView: { shareId: "share-1", granterEmail: "sam@dohc.test", access: "comment" } });
@@ -743,7 +773,7 @@ describe("shared view send changes", () => {
     });
     renderShell(bridge, EDIT_SHARE);
 
-    await user.click(await screen.findByTestId("share-changes-send"));
+    await user.click(await readySend());
     const line = await screen.findByTestId("share-changes-skipped");
     expect(
       line.textContent,
@@ -760,7 +790,7 @@ describe("shared view send changes", () => {
     const bridge = makeShareBridge();
     renderShell(bridge, EDIT_SHARE);
 
-    const send = await screen.findByTestId("share-changes-send");
+    const send = await readySend();
     await user.click(send);
     await waitFor(() => expect(bridge.submitShareChanges).toHaveBeenCalled());
     await waitFor(() =>
@@ -768,6 +798,48 @@ describe("shared view send changes", () => {
         screen.getByTestId("share-changes-send").hasAttribute("disabled"),
         "comparing the pre-reload token leaves Send stuck on Sending…",
       ).toBe(false),
+    );
+    expect(screen.getByTestId("share-changes-send").textContent).toContain("Send changes");
+  });
+
+  // Readiness re-reads the sent changes under a fresh token. A submit started
+  // before it would outlive that token and read "Sending…" for ever.
+  it("sends only after admission, including from a notice shown before it", async () => {
+    const admission = deferred<typeof SHARE_STATUS>();
+    const bridge = makeShareBridge();
+    const submit = deferred<Awaited<ReturnType<typeof bridge.submitShareChanges>>>();
+    bridge.openWorkspace.mockImplementation(() => admission.promise);
+    bridge.submitShareChanges.mockImplementationOnce(() => submit.promise);
+    renderShell(bridge, EDIT_SHARE);
+    await waitFor(() => expect(bridge.openWorkspace).toHaveBeenCalledOnce());
+    act(() => bridge.emitShareDirectWritesPushed({
+      workspaceId: EDIT_SHARE.workspaceId,
+      result: { status: "pushed", writes: [{ result: "refused", paths: ["trip/packing/automations.yaml"], reason: "" }] },
+    }));
+
+    expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("false");
+    const early = screen.getByTestId("share-changes-send") as HTMLButtonElement;
+    expect(early.disabled).toBe(true);
+    fireEvent.click(early);
+    expect(bridge.submitShareChanges).not.toHaveBeenCalled();
+
+    await act(async () => { admission.resolve(SHARE_STATUS); });
+    await waitFor(() => expect(bridge.listMyShareChanges).toHaveBeenCalled());
+    await userEvent.setup().click(await screen.findByTestId("workspace-shell-error-action"));
+    await waitFor(() => {
+      expect(bridge.submitShareChanges).toHaveBeenCalledOnce();
+      expect(screen.getByTestId("share-changes-send").textContent).toContain("Sending…");
+    });
+
+    await act(async () => submit.resolve({
+      ok: true,
+      submitted: 1,
+      capturedLocalChanges: 0,
+      skippedOutsideShare: 0,
+      morePending: false,
+    }));
+    await waitFor(() =>
+      expect((screen.getByTestId("share-changes-send") as HTMLButtonElement).disabled).toBe(false),
     );
     expect(screen.getByTestId("share-changes-send").textContent).toContain("Send changes");
   });
@@ -791,7 +863,7 @@ describe("shared view send changes", () => {
     const listCallsBeforeSubmit = bridge.listWorkspaceFiles.mock.calls.length;
     const readCallsBeforeSubmit = bridge.readWorkspaceText.mock.calls.length;
 
-    await user.click(await screen.findByTestId("share-changes-send"));
+    await user.click(await readySend());
 
     await waitFor(() =>
       expect(bridge.listWorkspaceFiles.mock.calls.length).toBeGreaterThan(
@@ -827,7 +899,7 @@ describe("shared view send changes", () => {
     });
     bridge.listWorkspaceFiles.mockRejectedValueOnce(new Error("listing failed"));
 
-    await user.click(screen.getByTestId("share-changes-send"));
+    await user.click(await readySend());
 
     await waitFor(() =>
       expect(bridge.listMyShareChanges.mock.calls.length).toBeGreaterThan(
@@ -854,7 +926,7 @@ describe("shared view send changes", () => {
     const listCallsBeforeSubmit = bridge.listWorkspaceFiles.mock.calls.length;
     bridge.listWorkspaceFiles.mockRejectedValueOnce(new Error("listing failed"));
 
-    await user.click(screen.getByTestId("share-changes-send"));
+    await user.click(await readySend());
 
     await waitFor(() =>
       expect(bridge.listWorkspaceFiles.mock.calls.length).toBeGreaterThan(
@@ -884,7 +956,7 @@ describe("shared view send changes", () => {
     });
     renderShell(bridge, EDIT_SHARE);
 
-    await user.click(await screen.findByTestId("share-changes-send"));
+    await user.click(await readySend());
     await screen.findByTestId("share-changes-skipped");
 
     await user.click(await screen.findByTestId("share-changes-withdraw"));
@@ -912,7 +984,7 @@ describe("shared view send changes", () => {
     });
     renderShell(bridge, EDIT_SHARE);
 
-    await user.click(await screen.findByTestId("share-changes-send"));
+    await user.click(await readySend());
     const line = await screen.findByTestId("share-changes-skipped");
     expect(
       line.textContent,
@@ -935,7 +1007,7 @@ describe("shared view send changes", () => {
     });
     renderShell(bridge, EDIT_SHARE);
 
-    await user.click(await screen.findByTestId("share-changes-send"));
+    await user.click(await readySend());
     expect((await screen.findByTestId("share-changes-skipped")).textContent).toBe(
       "More changes are waiting. Send again to send the rest.",
     );
@@ -946,7 +1018,7 @@ describe("shared view send changes", () => {
     const bridge = makeShareBridge();
     renderShell(bridge, EDIT_SHARE);
 
-    await user.click(await screen.findByTestId("share-changes-send"));
+    await user.click(await readySend());
     await waitFor(() => expect(bridge.submitShareChanges).toHaveBeenCalled());
     expect(
       screen.queryByTestId("share-changes-skipped"),
@@ -966,7 +1038,7 @@ describe("shared view send changes", () => {
       });
     renderShell(bridge, EDIT_SHARE);
 
-    await user.click(await screen.findByTestId("share-changes-send"));
+    await user.click(await readySend());
     await waitFor(() =>
       expect(bridge.submitShareChanges).toHaveBeenCalledWith({
         workspaceId: EDIT_SHARE.workspaceId,
@@ -990,7 +1062,7 @@ describe("shared view send changes", () => {
     });
     renderShell(bridge, EDIT_SHARE);
 
-    await user.click(await screen.findByTestId("share-changes-send"));
+    await user.click(await readySend());
     expect((await screen.findByTestId("share-changes-empty")).textContent).toBe(
       "You have no changes to send yet.",
     );

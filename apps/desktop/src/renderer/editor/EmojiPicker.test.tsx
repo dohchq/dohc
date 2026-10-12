@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Editor, Extension } from "@tiptap/core";
 import { StarterKit } from "@tiptap/starter-kit";
 import { Markdown } from "@tiptap/markdown";
-import { dohcMarkdownExtensions } from "./extensions";
+import { desktopMarkdownExtensions } from "./extensions";
 import { applyEmojiPick, EmojiPicker, rankEmoji, type EmojiPickerState } from "./EmojiPicker";
 import { EMOJI_DATA } from "./emojiData";
 import { makeEmojiPlugin } from "./emojiTrigger";
@@ -54,7 +54,7 @@ function makeEditor(markdown: string): Editor {
     element: document.createElement("div"),
     extensions: [
       StarterKit.configure({ trailingNode: false }),
-      ...dohcMarkdownExtensions,
+      ...desktopMarkdownExtensions,
       Markdown.configure({ indentation: { style: "space", size: 2 } }),
     ],
     content: markdown,
@@ -73,7 +73,7 @@ function makeEditorWithEmojiPlugin(markdown: string): Editor {
     element: document.createElement("div"),
     extensions: [
       StarterKit.configure({ trailingNode: false }),
-      ...dohcMarkdownExtensions,
+      ...desktopMarkdownExtensions,
       Markdown.configure({ indentation: { style: "space", size: 2 } }),
       TestEmojiExtension,
     ],

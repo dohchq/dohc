@@ -138,6 +138,7 @@ function fixture(options: {
   const restores = new Map<string, VersionedTextMoment>();
   const capture = {
     findRestoreReceipt: vi.fn(async () => null),
+    publicationApplied: vi.fn(async () => true),
     readMoment: vi.fn(async (momentId: string): Promise<WorkspaceEngineMomentDetail | null> => {
       if (options.protectedMoment) return { protected: true, moment: { ...schemaMoment, momentOrder: 1, protected: true } as never };
       const restore = restores.get(momentId);
@@ -568,6 +569,7 @@ describe("stop and restore in main", () => {
         for (const saved of all) {const receipt = restoreReceiptOf(saved, original, key); if (receipt) return {...receipt, restored: "text"};}
         return null;
       },
+      publicationApplied: async () => true,
       restoreFileToBeforeMoment: async (id: string, _person: unknown, options: {requestId: string}) => {
         const prior = writes.get(options.requestId); if (prior) return prior;
         if (undoCrash && id.startsWith("back-") && writes.size === 170) throw Error("crash");
@@ -647,6 +649,7 @@ describe("stop and restore in main", () => {
         all.push({...original, id: receipt.restoredMomentId, metadata: {origin: "restore", correlationId: options.requestId}});
         return receipt;
       },
+      publicationApplied: async (id: string, key: string) => writes.get(key)?.restoredMomentId === id,
     } as unknown as WorkspaceEngineCapture;
     const granted = [grant({})];
     const ledger = {"grant-edit": [{writes: [{committedAtMs: 2, files: originals.map(m => ({path: m.path, objectId: m.objectId, momentId: m.id, created: false}))}], nextAfterOriginSeq: null}]};

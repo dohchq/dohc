@@ -67,29 +67,11 @@ fn parse_follow_state(raw: &str) -> Result<FollowState, WireError> {
     }
 }
 
-pub(super) fn follow_target_kind_json(kind: &FollowTargetKind) -> Value {
-    json!(match kind {
-        FollowTargetKind::Person => "person",
-        FollowTargetKind::Agent => "agent",
-        FollowTargetKind::Channel => "channel",
-        FollowTargetKind::Thread => "thread",
-    })
-}
-
-fn follow_target_kind_str(kind: FollowTargetKind) -> &'static str {
-    match kind {
-        FollowTargetKind::Person => "person",
-        FollowTargetKind::Agent => "agent",
-        FollowTargetKind::Channel => "channel",
-        FollowTargetKind::Thread => "thread",
-    }
-}
-
 fn follow_json(workspace_id: &str, follow: &ChatFollow) -> Value {
     json!({
         "workspaceId": workspace_id,
         "ownerUserId": follow.owner_user_id,
-        "targetKind": follow_target_kind_str(follow.target_kind),
+        "targetKind": follow.target_kind.as_str(),
         "targetId": follow.target_id,
         "state": match follow.state {
             FollowState::Following => "following",
@@ -149,6 +131,19 @@ impl EngineService {
             &[params.owner_user_id.as_str(), state_filter],
         );
         let cursor = decode_chat_cursor(params.cursor.as_deref(), &binding)?;
+        let after = cursor
+            .as_ref()
+            .map(|cursor| {
+                let (kind, id) = cursor
+                    .second
+                    .split_once('\0')
+                    .filter(|(_, id)| !id.is_empty())
+                    .ok_or_else(|| WireError::new(ErrorCode::InvalidParams, "invalid-cursor"))?;
+                let kind = parse_follow_target_kind(kind)
+                    .map_err(|_| WireError::new(ErrorCode::InvalidParams, "invalid-cursor"))?;
+                Ok::<_, WireError>((kind, id.to_owned()))
+            })
+            .transpose()?;
         let cancellation = OperationCancellation::new(ctx);
         let follows = Self::read_under_ctx(
             &cancellation,
@@ -157,44 +152,22 @@ impl EngineService {
                 open.workspace_id.clone(),
                 params.owner_user_id,
                 params.state,
+                after,
+                page_limit as i64 + 1,
             ),
         )
         .await?;
-        let follows: Vec<_> = follows
-            .into_iter()
-            .filter(|follow| match cursor.as_ref() {
-                Some(cursor) => {
-                    format!(
-                        "{}\0{}",
-                        follow_target_kind_str(follow.target_kind),
-                        follow.target_id
-                    ) > cursor.second
-                }
-                None => true,
-            })
-            .take(page_limit + 1)
-            .collect();
         let row_values: Vec<Value> = follows
             .iter()
             .map(|follow| follow_json(&workspace_id, follow))
             .collect();
         let included = bounded_chat_page_len(&row_values)?.min(page_limit);
-        let next_cursor = chat_page_cursor(
-            &follows,
-            included,
-            cursor.as_ref().map_or(0, |cursor| cursor.consumed),
-            binding,
-            |follow| {
-                (
-                    0,
-                    format!(
-                        "{}\0{}",
-                        follow_target_kind_str(follow.target_kind),
-                        follow.target_id
-                    ),
-                )
-            },
-        )?;
+        let next_cursor = chat_page_cursor(&follows, included, binding, |follow| {
+            (
+                0,
+                format!("{}\0{}", follow.target_kind.as_str(), follow.target_id),
+            )
+        })?;
         Ok(json!({
             "follows": row_values[..included].to_vec(),
             "nextCursor": next_cursor,

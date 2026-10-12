@@ -138,7 +138,11 @@ export function LinkedChatsPanel(props: {
   const [creating, setCreating] = useState<string | null>(null);
   const [composer, setComposer] = useState("");
   const [sending, setSending] = useState(false);
+  // Thread requests and this file's Chats read each own a token, so opening,
+  // leaving or retrying one never drops the other's answer. A file or
+  // workspace switch bumps both.
   const liveToken = useRef(0);
+  const threadsToken = useRef(0);
   const reactions = useReactions();
   const listRef = useRef<ChatMessageListHandle | null>(null);
 
@@ -147,8 +151,8 @@ export function LinkedChatsPanel(props: {
   const { notices } = props;
   const refreshThreads = useCallback(async () => {
     if (!filePath) return;
-    const token = ++liveToken.current;
-    const current = () => token === liveToken.current && currentThreadsKey.current === threadsKey;
+    const token = ++threadsToken.current;
+    const current = () => token === threadsToken.current && currentThreadsKey.current === threadsKey;
     const identity = `about-chats:${filePath}`;
     // The words go to the shell's error hook. The row goes when this file
     // leaves About, so its Try again always reads this file.
@@ -207,6 +211,7 @@ export function LinkedChatsPanel(props: {
     void refreshThreads();
     return () => {
       liveToken.current += 1;
+      threadsToken.current += 1;
       notices.clear(`about-chats:${filePath}`);
     };
   }, [filePath, notices, refreshThreads]);

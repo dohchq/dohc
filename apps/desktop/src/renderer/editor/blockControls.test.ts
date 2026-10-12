@@ -16,17 +16,16 @@ import { TaskList } from "@tiptap/extension-list";
 import { TableKit } from "@tiptap/extension-table";
 import { NodeSelection } from "@tiptap/pm/state";
 import { inListView, mockListLayout } from "../ui/listLayout.testSupport";
-import { DohcTaskItem, dohcMarkdownExtensions } from "./extensions";
+import { DohcTaskItem } from "@dohc/ydoc-projection/markdown-extensions";
+import { desktopMarkdownExtensions } from "./extensions";
 import {
   BlockMenu,
   CLOSED_BLOCK_MENU_STATE,
-  blockDragSlice,
   copyBlockAsMarkdown,
   deleteBlock,
   deleteSelectedTopLevelBlock,
   duplicateBlock,
   makeBlockControlsPlugin,
-  selectBlock,
   resolveTurnIntoDropdown,
   serializeBlockToMarkdown,
   topLevelBlockPos,
@@ -41,7 +40,7 @@ function makeEditor(markdown: string): Editor {
     element: document.createElement("div"),
     extensions: [
       StarterKit.configure({ trailingNode: false }),
-      ...dohcMarkdownExtensions,
+      ...desktopMarkdownExtensions,
       TaskList,
       DohcTaskItem,
       Markdown.configure({ indentation: { style: "space", size: 2 } }),
@@ -67,10 +66,11 @@ function makeEditorWithControls(content: Record<string, unknown>): Editor {
     element: document.createElement("div"),
     extensions: [
       StarterKit.configure({ trailingNode: false }),
-      ...dohcMarkdownExtensions,
+      ...desktopMarkdownExtensions,
       TaskList,
       DohcTaskItem,
-      TableKit,
+      // MarkdownEditor's table option: the gutter selects a whole table.
+      TableKit.configure({ table: { allowTableNodeSelection: true } }),
       controls,
     ],
     content,
@@ -84,6 +84,35 @@ function topLevelBlocks(editor: Editor): { type: string; pos: number }[] {
     blocks.push({ type: node.type.name, pos: offset });
   });
   return blocks;
+}
+
+/** The gutter handle of the top-level block at `index`. */
+function blockHandle(editor: Editor, index: number): HTMLElement {
+  const handle = editor.view.dom.querySelectorAll<HTMLElement>(".dohc-block-handle")[index];
+  if (!handle) throw new Error(`block handle ${index} missing`);
+  return handle;
+}
+
+type RecordingDataTransfer = {
+  data: Map<string, string>;
+  effectAllowed: string;
+};
+
+// jsdom has no DataTransfer. The dragstart handler only writes to it, so a
+// recording stub is enough to read the payload back.
+function dragStart(handle: HTMLElement): RecordingDataTransfer {
+  const data = new Map<string, string>();
+  const dataTransfer = {
+    data,
+    effectAllowed: "none",
+    clearData: () => data.clear(),
+    setData: (type: string, value: string) => data.set(type, value),
+    setDragImage: () => {},
+  };
+  const event = new Event("dragstart", { bubbles: true, cancelable: true });
+  Object.defineProperty(event, "dataTransfer", { value: dataTransfer });
+  handle.dispatchEvent(event);
+  return dataTransfer;
 }
 
 const editors: Editor[] = [];
@@ -380,7 +409,9 @@ describe("blockControls delete", () => {
       }),
     );
     const [, selected] = topLevelBlocks(editor);
-    selectBlock(editor, selected.pos);
+    fireEvent.click(blockHandle(editor, 1));
+    expect(editor.state.selection).toBeInstanceOf(NodeSelection);
+    expect(editor.state.selection.from).toBe(selected.pos);
 
     const event = new KeyboardEvent("keydown", { key, bubbles: true });
     editor.view.dom.dispatchEvent(event);
@@ -782,39 +813,41 @@ describe("blockControls copy as markdown", () => {
 });
 
 describe("blockControls drag payload", () => {
-  it("builds a slice whose single child is the dragged block", () => {
-    const editor = track(makeEditor("First\n\n## Second"));
-    const blocks = topLevelBlocks(editor);
-    const slice = blockDragSlice(editor.view, blocks[1].pos);
-    expect(slice).not.toBeNull();
-    expect(slice?.openStart).toBe(0);
-    expect(slice?.openEnd).toBe(0);
-    expect(slice?.content.childCount).toBe(1);
-    const dragged = slice?.content.firstChild;
-    expect(dragged?.type.name).toBe("heading");
-    expect(dragged?.textContent).toBe("Second");
-    // Matches the actual document node, mirroring ProseMirror's own
-    // NodeSelection.content() drag payload.
-    expect(dragged?.eq(editor.state.doc.child(1))).toBe(true);
+  it("hands the dragged block to DataTransfer and view.dragging as a move", () => {
+    const editor = track(
+      makeEditorWithControls({
+        type: "doc",
+        content: [
+          { type: "paragraph", content: [{ type: "text", text: "First" }] },
+          {
+            type: "heading",
+            attrs: { level: 2 },
+            content: [{ type: "text", text: "Second" }],
+          },
+        ],
+      }),
+    );
+    const [, second] = topLevelBlocks(editor);
+
+    const dataTransfer = dragStart(blockHandle(editor, 1));
+
+    // ProseMirror's drop deletes the selection for a move, so the dragged
+    // block must be the selection.
+    expect(editor.state.selection).toBeInstanceOf(NodeSelection);
+    expect(editor.state.selection.from).toBe(second.pos);
+    const dragging = editor.view.dragging;
+    expect(dragging?.move).toBe(true);
+    expect(dragging?.slice.openStart).toBe(0);
+    expect(dragging?.slice.openEnd).toBe(0);
+    expect(dragging?.slice.content.childCount).toBe(1);
+    expect(dragging?.slice.content.firstChild?.eq(editor.state.doc.child(1))).toBe(true);
+    expect(dataTransfer.data.get("text/plain")).toBe("Second");
+    expect(dataTransfer.data.get("text/html")).toMatch(/<h2[^>]*>Second<\/h2>/);
+    expect(dataTransfer.effectAllowed).toBe("copyMove");
   });
 });
 
 describe("blockControls drag ghost", () => {
-  // jsdom has no DataTransfer. The dragstart handler only writes to it, so a
-  // recording stub is enough to reach the ghost.
-  function dragStart(handle: HTMLElement): void {
-    const event = new Event("dragstart", { bubbles: true, cancelable: true });
-    Object.defineProperty(event, "dataTransfer", {
-      value: {
-        clearData: () => {},
-        setData: () => {},
-        setDragImage: () => {},
-        effectAllowed: "none",
-      },
-    });
-    handle.dispatchEvent(event);
-  }
-
   function parkedGhosts(): HTMLElement[] {
     return Array.from(
       document.body.querySelectorAll<HTMLElement>(".dohc-block-drag-ghost"),

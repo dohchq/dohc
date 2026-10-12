@@ -157,17 +157,24 @@ describe("link browser credential material", () => {
     f.setNow(901_001);
     const controller = new AbortController();
     f.fetchRelay.mockImplementation(async () => {
-      const response = Response.json({ ok: true, grantId: "grant-alpha", capabilityToken: renewed, capabilityExpiresAtMs: 1_801_001 });
-      const json = response.json.bind(response);
-      response.json = async () => {
-        const body = await json();
-        controller.abort();
-        return body;
-      };
-      return response;
+      const body = new TextEncoder().encode(JSON.stringify({ ok: true, grantId: "grant-alpha", capabilityToken: renewed, capabilityExpiresAtMs: 1_801_001 }));
+      let sent = false;
+      return new Response(new ReadableStream<Uint8Array>({
+        pull(stream) {
+          if (!sent) {
+            sent = true;
+            stream.enqueue(body);
+          } else {
+            controller.abort();
+            stream.close();
+          }
+        },
+      }, { highWaterMark: 0 }));
     });
     await expect(f.application.resolveLinkBrowserMaterial(session, cookie, controller.signal)).rejects.toMatchObject({ name: "AbortError" });
+    expect(controller.signal.aborted).toBe(true);
     expect(await f.application.resolveLinkBrowserMaterial(session, cookie, signal())).toMatchObject({ ok: true, capabilityToken: renewed });
+    expect(f.fetchRelay).toHaveBeenCalledTimes(2);
   });
 
   it("cancels one waiter without cancelling another waiter's shared refresh", async () => {

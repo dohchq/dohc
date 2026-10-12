@@ -11,8 +11,8 @@ export function restoreReceiptOf(saved: Pick<VersionedTextMoment, "objectId" | "
     ? {path: saved.path, restoredMomentId: saved.id} : null;
 }
 
-/** Stable request metadata proves this restore committed, even after a later edit. */
-export async function findRestoreReceipt(engine: Pick<VersionedTextStore, "listMoments" | "readTextFile">, original: VersionedTextMoment, requestId: string) {
+/** A keyed restore counts once the engine confirms it reached disk, even after a later edit. */
+export async function findRestoreReceipt(engine: Pick<VersionedTextStore, "listMoments" | "readTextFile" | "publicationApplied">, original: VersionedTextMoment, requestId: string) {
   const objects = new Set([original.objectId]);
   if (original.payload.before?.contentKind === "binary") {
     const current = await engine.readTextFile({workspaceId: original.workspaceId, versionId: original.versionId, path: original.path});
@@ -27,7 +27,9 @@ export async function findRestoreReceipt(engine: Pick<VersionedTextStore, "listM
       for (const saved of page.moments) {
         if (saved.id === original.id) break;
         const receipt = restoreReceiptOf(saved, original, requestId);
-        if (receipt) return {...receipt, restored: saved.operation === "delete" ? "deleted" as const : "text" as const};
+        // One request records one moment, so an unconfirmed match is no receipt.
+        if (receipt) return await engine.publicationApplied({workspaceId: original.workspaceId, requestId, momentId: saved.id})
+          ? {...receipt, restored: saved.operation === "delete" ? "deleted" as const : "text" as const} : null;
       }
       if (page.nextBeforeMomentOrder === null || page.moments.some(saved => saved.id === original.id)) break;
       beforeMomentOrder = page.nextBeforeMomentOrder;

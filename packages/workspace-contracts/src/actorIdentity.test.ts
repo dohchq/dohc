@@ -176,6 +176,21 @@ describe("ActorKey derivation", () => {
       .toBe("owner-asserted");
   });
 
+  it("keys a live snapshot's link holder by its public principal, with no grant", () => {
+    const author = { kind: "link", publicPrincipalId: "public_1", label: "Anonymous" } as const;
+    for (const [context, assurance] of [
+      [received, "owner-asserted"],
+      [{ ...local, source: "own-store" } as const, "relay-verified"],
+    ] as const) {
+      const actor = deriveMomentActor(author, context, "Link holder Anonymous");
+      expect(actor.key).toEqual({ kind: "link", publicPrincipalId: "public_1" });
+      expect(actor.assurance).toBe(assurance);
+    }
+    // The same identifier as a grant's link participant is another identity.
+    const grantLink = deriveMomentActor({ kind: "link", grantId: "grant", grantGeneration: 1, principalId: "public_1" }, received, "Link holder");
+    expect(actorKeysEqual(deriveMomentActor(author, received, "Link holder Anonymous").key, grantLink.key)).toBe(false);
+  });
+
   it("retains only the existing grant-scoped public pseudonym", () => {
     const actor = deriveMomentActor({ kind: "public", grantId: "grant", principalId: "public-pseudonym" }, received, "Someone");
     expect(actor.key).toEqual({ kind: "public", grantId: "grant", principalId: "public-pseudonym" });

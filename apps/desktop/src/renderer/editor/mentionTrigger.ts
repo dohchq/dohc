@@ -6,7 +6,7 @@ import { makeTriggerPlugin } from "./triggerPlugin";
 // `[[` autocomplete (see wikilinkPlugin.ts) — no new schema, no new
 // node type. Typing `@query` at a word boundary opens the shared
 // `WikilinkPicker`; picking a file inserts a real `wikilink` atom
-// node (`extensions.ts`'s `DohcWikilink`) labeled with the file's
+// node (`dohc-markdown-extensions.ts`'s `DohcWikilink`) labeled with the file's
 // display name, so it reads like a mention pill. Pill rendering,
 // click-to-open, and broken-link styling all come from the existing
 // node — this module only detects the trigger.

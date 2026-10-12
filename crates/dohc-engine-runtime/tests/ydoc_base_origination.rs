@@ -1607,26 +1607,26 @@ async fn capture_retiring_a_closed_ydoc_head_retires_the_lineage() {
         .expect("record private Y.Doc update");
     assert!(lineage_exists(&db, &key));
 
-    let retired = handle
-        .capture_retire(
-            CaptureRetire {
-                workspace_id: WS.to_owned(),
-                version_id: "main".to_owned(),
-                path: PATH.to_owned(),
-                metadata_summary: None,
-                metadata_correlation_id: None,
-                now_ms: 300,
-                request_id: None,
-                only_if_text_head: true,
-                only_if_capture_origin: true,
-                allow_ydoc_origin: true,
-            },
-            dohc_engine_collab::LeaseRegistry::new(),
-            Arc::new(NoFaults),
-            CancellationToken::new(),
-        )
-        .await
-        .expect("capture retire");
+    let retired = dohc_engine_testkit::capture::retire_captured_path(
+        &handle,
+        CaptureRetire {
+            workspace_id: WS.to_owned(),
+            version_id: "main".to_owned(),
+            path: PATH.to_owned(),
+            metadata_summary: None,
+            metadata_correlation_id: None,
+            now_ms: 300,
+            request_id: None,
+            only_if_text_head: true,
+            only_if_capture_origin: true,
+            allow_ydoc_origin: true,
+        },
+        scratch.path(),
+        dohc_engine_collab::LeaseRegistry::new(),
+        Arc::new(NoFaults),
+    )
+    .await
+    .expect("capture retire");
     assert!(retired.retired.is_some(), "the Y.Doc-owned head is retired");
     assert!(
         !lineage_exists(&db, &key),
@@ -1748,15 +1748,15 @@ async fn live_lease_blocks_capture_retire_until_retry_and_rolls_back_every_row()
     };
     let leases = LeaseRegistry::new();
     let lease = leases.acquire(&key).expect("hold live session lease");
-    let error = handle
-        .capture_retire(
-            input.clone(),
-            leases.clone(),
-            Arc::new(NoFaults),
-            CancellationToken::new(),
-        )
-        .await
-        .expect_err("a live Y.Doc lease must make capture retirement retryable");
+    let error = dohc_engine_testkit::capture::retire_captured_path(
+        &handle,
+        input.clone(),
+        scratch.path(),
+        leases.clone(),
+        Arc::new(NoFaults),
+    )
+    .await
+    .expect_err("a live Y.Doc lease must make capture retirement retryable");
     assert!(matches!(
         error,
         RuntimeError::Sync(SyncError::RetryableState {
@@ -1770,15 +1770,15 @@ async fn live_lease_blocks_capture_retire_until_retry_and_rolls_back_every_row()
     );
 
     drop(lease);
-    let error = handle
-        .capture_retire(
-            input.clone(),
-            leases.clone(),
-            Arc::new(NoFaults),
-            CancellationToken::new(),
-        )
-        .await
-        .expect_err("an unseen deferred update must keep retirement retryable");
+    let error = dohc_engine_testkit::capture::retire_captured_path(
+        &handle,
+        input.clone(),
+        scratch.path(),
+        leases.clone(),
+        Arc::new(NoFaults),
+    )
+    .await
+    .expect_err("an unseen deferred update must keep retirement retryable");
     assert!(matches!(
         error,
         RuntimeError::Sync(SyncError::RetryableState {
@@ -1810,10 +1810,15 @@ async fn live_lease_blocks_capture_retire_until_retry_and_rolls_back_every_row()
         .open(&db, 3)
         .expect("reopen actor for retry")
         .actor;
-    let retired = handle
-        .capture_retire(input, leases, Arc::new(NoFaults), CancellationToken::new())
-        .await
-        .expect("capture retire retries after the session closes");
+    let retired = dohc_engine_testkit::capture::retire_captured_path(
+        &handle,
+        input,
+        scratch.path(),
+        leases,
+        Arc::new(NoFaults),
+    )
+    .await
+    .expect("capture retire retries after the session closes");
     assert!(retired.retired.is_some());
     let after = capture_retire_state(&db, &key, PATH);
     assert_eq!((after.aliases, after.snapshots), (0, 0));

@@ -67,13 +67,15 @@ test.describe("shared restore review with a notice toast", () => {
   });
 
   // Open the review with the toast already showing, then expand the removed
-  // changes, as a person does before choosing to restore.
-  async function openReview(page: Page, setup: (typeof cases)[number], expand = true) {
+  // changes, as a person does before choosing to restore. `beforeOpen` acts on
+  // the loaded page before the review opens.
+  async function openReview(page: Page, setup: (typeof cases)[number], expand = true, beforeOpen?: () => Promise<void>) {
     await page.setViewportSize(viewports[setup.viewport]);
     await page.emulateMedia({ reducedMotion: setup.motion, colorScheme: setup.theme });
     await page.goto(server.resolvedUrls!.local[0]);
     await page.evaluate((value) => document.documentElement.setAttribute("data-theme", value), setup.theme);
     await expect(page.getByTestId("workspace-shell-error")).toBeVisible();
+    await beforeOpen?.();
     await page.getByRole("button", { name: "Open restore review" }).press("Enter");
     const dialog = page.getByRole("dialog", { name: "Restore shared file" });
     await dialog.getByRole("button", { name: "Retry" }).press("Enter");
@@ -104,6 +106,56 @@ test.describe("shared restore review with a notice toast", () => {
       await expect(page.getByRole("dialog", { name: "File restored" })).toBeVisible();
       await expect(page.getByLabel("Restore result")).toHaveText("restored");
     });
+  }
+
+  // History's day headings stick above the list. The review must still own
+  // every point it covers, including its title and path, once it has settled.
+  for (const setup of cases) {
+    for (const scrolled of [false, true]) {
+      test(`the restore review covers History's ${scrolled ? "scrolled " : ""}day heading at the ${setup.viewport} size in ${setup.theme} with ${setup.motion} motion`, async ({ page }) => {
+        const history = page.getByTestId("engine-history-list");
+        const { dialog } = await openReview(page, setup, false, scrolled ? async () => {
+          await history.hover();
+          await page.mouse.wheel(0, 700);
+          // A later day's heading is pinned to the top of the list.
+          await expect.poll(() => history.evaluate((list) => {
+            const top = list.getBoundingClientRect().top;
+            return [...list.querySelectorAll("[data-testid='engine-history-day-heading']")]
+              .find((heading) => Math.abs(heading.closest("li")!.getBoundingClientRect().top - top) < 1)
+              ?.textContent;
+          })).toMatch(/Sep 1[0-6]/i);
+        } : undefined);
+        await page.evaluate(() => Promise.all(document.getAnimations().map((animation) => animation.finished.catch(() => undefined))));
+
+        const { overlaps, misses } = await dialog.evaluate((review) => {
+          const bounds = review.getBoundingClientRect();
+          const points: Array<{ label: string; x: number; y: number }> = [];
+          for (const part of [review.querySelector("h2")!, review.querySelector("p")!]) {
+            const rect = part.getBoundingClientRect();
+            points.push({ label: part.textContent ?? "", x: rect.left + 2, y: rect.top + rect.height / 2 });
+          }
+          let overlaps = 0;
+          for (const heading of document.querySelectorAll("[data-testid='engine-history-day-heading']")) {
+            const rect = heading.closest("li")!.getBoundingClientRect();
+            const left = Math.max(rect.left, bounds.left);
+            const right = Math.min(rect.right, bounds.right);
+            const top = Math.max(rect.top, bounds.top);
+            const bottom = Math.min(rect.bottom, bounds.bottom);
+            if (left >= right || top >= bottom) continue;
+            overlaps += 1;
+            points.push({ label: heading.textContent ?? "", x: (left + right) / 2, y: (top + bottom) / 2 });
+          }
+          const misses = points
+            .filter((point) => !review.contains(document.elementFromPoint(point.x, point.y)))
+            .map((point) => `${point.label} at ${Math.round(point.x)},${Math.round(point.y)}`);
+          return { overlaps, misses };
+        });
+        await page.screenshot({ path: test.info().outputPath(`restore-over-history-${setup.viewport}-${setup.theme}${scrolled ? "-scrolled" : ""}.png`) });
+        // The large window leaves the review clear of the sidebar.
+        expect(overlaps > 0).toBe(setup.viewport !== "large");
+        expect(misses).toEqual([]);
+      });
+    }
   }
 
   for (const setup of cases.filter((candidate) => candidate.viewport === "minimum")) {

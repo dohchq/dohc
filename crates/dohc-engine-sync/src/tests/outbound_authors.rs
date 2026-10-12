@@ -71,6 +71,14 @@ fn client_author_repair_preserves_work_authors_and_one_exact_marker() {
 }
 
 fn queue_legacy_moment(engine: &mut EngineStore, authors: serde_json::Value) -> serde_json::Value {
+    queue_legacy_moment_as(engine, "record-moment", authors)
+}
+
+fn queue_legacy_moment_as(
+    engine: &mut EngineStore,
+    moment_id: &str,
+    authors: serde_json::Value,
+) -> serde_json::Value {
     seed_identity(engine);
     VersionedTextStore::new(engine)
         .ensure_main_version("ws", "main", 1000, &NoFaults)
@@ -83,7 +91,7 @@ fn queue_legacy_moment(engine: &mut EngineStore, authors: serde_json::Value) -> 
                 object_id: "record".into(),
                 path: "tasks/record.md".into(),
                 text: "hand-made record".into(),
-                moment_id: "record-moment".into(),
+                moment_id: moment_id.into(),
                 metadata_origin: "local-file".into(),
                 metadata_summary: None,
                 metadata_correlation_id: None,
@@ -98,7 +106,7 @@ fn queue_legacy_moment(engine: &mut EngineStore, authors: serde_json::Value) -> 
     engine
         .write_with(&NoFaults, |tx| {
             let (mut payload, recorded_at_ms) =
-                crate::outbound::moment_append_payload_in_tx(tx, "ws", "record-moment")?;
+                crate::outbound::moment_append_payload_in_tx(tx, "ws", moment_id)?;
             // Restore the affected build's already-serialized author list.
             payload["authors"] = authors;
             payload
@@ -114,8 +122,204 @@ fn queue_legacy_moment(engine: &mut EngineStore, authors: serde_json::Value) -> 
     legacy
 }
 
+/// Writes a moment and journals it as the current build does.
+fn queue_fresh_moment_as(engine: &mut EngineStore, moment_id: &str, authors: &serde_json::Value) {
+    seed_identity(engine);
+    VersionedTextStore::new(engine)
+        .ensure_main_version("ws", "main", 1000, &NoFaults)
+        .unwrap();
+    VersionedTextStore::new(engine)
+        .write_text(
+            &WriteText {
+                workspace_id: "ws".into(),
+                version_id: "main".into(),
+                object_id: "record".into(),
+                path: "tasks/record.md".into(),
+                text: "hand-made record".into(),
+                moment_id: moment_id.into(),
+                metadata_origin: "local-file".into(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: Some(authors.to_string()),
+                now_ms: 2000,
+                request_id: None,
+            },
+            &NoFaults,
+        )
+        .unwrap();
+    engine
+        .write_with(&NoFaults, |tx| {
+            crate::journal_moment_append_in_tx(tx, "ws", moment_id)
+        })
+        .unwrap();
+}
+
+const PRIVATE_AUTHOR_FIELDS: [&str; 5] = [
+    r#""named""#,
+    r#""public""#,
+    "grantId",
+    "userId",
+    "principalId",
+];
+
+/// A fresh journal never publishes the grant authority the relay credited a
+/// shared change under. Without a settlement proof, both credentials publish
+/// the moment as attribution unavailable, and no private field reaches the
+/// wire. A live settlement's moment ID earns no exception. A moment without
+/// relay credit keeps its authors.
 #[test]
-fn queued_human_authors_are_durably_repaired_before_push_and_echo() {
+fn a_fresh_journal_publishes_unproved_shared_credit_as_unavailable() {
+    let agent = json!({"kind":"agent","agentId":"writer","onBehalfOf":"owner","depth":0});
+    let named = json!({"kind":"named","userId":"ana","grantId":"grant","grantGeneration":1});
+    let link = json!({"kind":"link","grantId":"grant","grantGeneration":1,"principalId":"holder"});
+    let public = json!({"kind":"public","principalId":"holder","grantId":"grant"});
+    let person = json!({"kind":"human","humanId":"recipient","humanName":"Recipient"});
+    let settlement = format!("moment-ydoc-{}", "a".repeat(64));
+    for (moment_id, authors, published) in [
+        (settlement.as_str(), json!([agent, named]), None),
+        ("record-moment", json!([agent, link]), None),
+        (settlement.as_str(), json!([public]), None),
+        (settlement.as_str(), json!([person, agent, named]), None),
+        // Without relay credit, the authors travel.
+        (settlement.as_str(), json!([agent]), Some(json!([agent]))),
+    ] {
+        for native_settlements in [true, false] {
+            let (_scratch, _path, mut engine) = open_store();
+            queue_fresh_moment_as(&mut engine, moment_id, &authors);
+            let mut ops = list_replication_ops(&engine, "ws", "local", -1, 10).unwrap();
+            assert_eq!(ops[1].op_kind, "moment.append");
+            let journaled = ops[1].payload.to_string();
+            assert!(
+                !PRIVATE_AUTHOR_FIELDS
+                    .iter()
+                    .any(|field| journaled.contains(field))
+            );
+
+            crate::outbound::repair_queued_moment_authors(
+                &mut engine,
+                &mut ops,
+                &NoFaults,
+                native_settlements,
+            )
+            .unwrap();
+            assert_eq!(
+                ops[1].payload.get("authors"),
+                published.as_ref(),
+                "{moment_id} {native_settlements}"
+            );
+            assert_eq!(
+                ops[1].payload.get("attributionUnavailable").is_some(),
+                published.is_none(),
+                "{moment_id} {native_settlements}"
+            );
+            // The wire payload is durable before sending, so an echo matches.
+            assert_eq!(
+                list_replication_ops(&engine, "ws", "local", -1, 10).unwrap(),
+                ops
+            );
+            let repaired = ops.clone();
+            crate::outbound::repair_queued_moment_authors(
+                &mut engine,
+                &mut ops,
+                &NoFaults,
+                native_settlements,
+            )
+            .unwrap();
+            assert_eq!(ops, repaired);
+            let wire = ops[1].payload.to_string();
+            for field in PRIVATE_AUTHOR_FIELDS {
+                assert!(!wire.contains(field), "{field} in {wire}");
+            }
+            let history = VersionedTextStore::new(&mut engine)
+                .get_moment("ws", moment_id)
+                .unwrap()
+                .unwrap();
+            if published.is_some() {
+                assert_eq!(
+                    serde_json::from_str::<serde_json::Value>(
+                        history.author_json.as_deref().unwrap()
+                    )
+                    .unwrap(),
+                    authors
+                );
+            } else {
+                assert_eq!(history.author_json, None);
+                assert_eq!(
+                    history.metadata_summary.as_deref(),
+                    Some("Attribution unavailable")
+                );
+            }
+        }
+    }
+}
+
+/// The unavailable mark a fresh journal gives unproved shared credit is what
+/// the relay first received, so a retry after a lost acknowledgement and the
+/// relay's echo both match it exactly.
+#[test]
+fn a_fresh_unavailable_mark_pushes_retries_and_echoes_exactly() {
+    let authors = json!([
+        {"kind":"agent","agentId":"writer","onBehalfOf":"owner","depth":0},
+        {"kind":"named","userId":"ana","grantId":"grant","grantGeneration":1}
+    ]);
+    let (_scratch, path, mut engine) = open_store();
+    queue_fresh_moment_as(&mut engine, "record-moment", &authors);
+    let client = RelaySyncClient::new(FakeRelay::default());
+    let faults = ScriptedFaults::crash_at(FaultPoint::SyncAfterPushBeforeCursorPersist);
+    assert_eq!(
+        client
+            .push_workspace(&mut engine, "ws", faults.as_ref(), &NoLiveLeases, 2001, 0)
+            .unwrap(),
+        SyncPassOutcome::CrashedAfterRemoteCommit
+    );
+    let first = client.transport().pushes.lock().unwrap()[0].ops.clone();
+    assert!(first[1].payload.get("authors").is_none());
+    assert_eq!(
+        first[1].payload["attributionUnavailable"]["reason"],
+        "unproven-hosted-authors"
+    );
+    let wire = first[1].payload.to_string();
+    for field in PRIVATE_AUTHOR_FIELDS {
+        assert!(!wire.contains(field), "{field} in {wire}");
+    }
+    drop(engine);
+    let mut engine = EngineStore::open(&path, 2002).unwrap();
+    assert_eq!(
+        list_replication_ops(&engine, "ws", "local", 0, 10).unwrap()[0].payload,
+        first[1].payload
+    );
+    client
+        .push_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases, 2003, 0)
+        .unwrap();
+    assert_eq!(client.transport().pushes.lock().unwrap()[1].ops, first);
+    *client.transport().pull.lock().unwrap() = Some(PullResponse {
+        ops: first,
+        next_cursor: 2,
+        has_more: false,
+    });
+    client
+        .pull_chat_workspace(
+            &mut engine,
+            &mut WriterDocCache::new(),
+            "ws",
+            &NoFaults,
+            &NoLiveLeases,
+            2004,
+        )
+        .expect("exact own echo must not diverge");
+    let history = VersionedTextStore::new(&mut engine)
+        .get_moment("ws", "record-moment")
+        .unwrap()
+        .unwrap();
+    assert_eq!(history.author_json, None);
+    assert_eq!(
+        history.metadata_summary.as_deref(),
+        Some("Attribution unavailable")
+    );
+}
+
+#[test]
+fn queued_human_and_shared_authors_are_durably_repaired_before_push_and_echo() {
     for authors in [
         json!([{"kind":"human","humanId":"person"}]),
         json!([{"kind":"human","humanId":"recipient","humanName":"Recipient"}]),
@@ -123,6 +327,12 @@ fn queued_human_authors_are_durably_repaired_before_push_and_echo() {
         json!([{"kind":"human","humanId":"recipient","humanName":"Recipient"},{"kind":"unattributed"}]),
         json!([{"kind":"link","linkId":"link"},{"kind":"named","userId":"recipient"}]),
         json!([{"kind":"human","humanId":"person"},{"kind":"agent","agentId":"agent","onBehalfOf":"owner"}]),
+        // Without a settlement proof, the grant authority a shared change was
+        // accepted under, and a relay-admitted snapshot, mark the moment unavailable.
+        json!([{"kind":"named","userId":"ana","grantId":"grant","grantGeneration":1}]),
+        json!([{"kind":"agent","agentId":"agent","onBehalfOf":"owner"},{"kind":"link","grantId":"grant","grantGeneration":1,"principalId":"holder"}]),
+        json!([{"kind":"human","humanId":"owner","humanName":"Owner"},{"kind":"agent","agentId":"writer","onBehalfOf":"owner","depth":0}]),
+        json!([{"kind":"link","publicPrincipalId":"public_1","label":"Anonymous"},{"kind":"agent","agentId":"writer","agentName":"Writer"}]),
     ] {
         let (_scratch, path, mut engine) = open_store();
         let original_authors = authors.clone();
@@ -140,6 +350,17 @@ fn queued_human_authors_are_durably_repaired_before_push_and_echo() {
         let first = client.transport().pushes.lock().unwrap()[0].ops.clone();
         let repaired = &first[1].payload;
         assert_eq!(repaired, &expected);
+        // The relay's log routes take only a client's own agents and
+        // automations, and the exact unattributed marker.
+        assert!(
+            repaired
+                .get("authors")
+                .and_then(serde_json::Value::as_array)
+                .is_none_or(|authors| authors.iter().all(|author| {
+                    matches!(author["kind"].as_str(), Some("agent" | "automation"))
+                        || author == &json!({"kind":"unattributed"})
+                }))
+        );
         drop(engine);
         let mut engine = EngineStore::open(&path, 2002).unwrap();
         let stored = list_replication_ops(&engine, "ws", "local", 0, 10).unwrap();
@@ -287,18 +508,26 @@ fn a_crashed_queued_author_repair_sends_nothing_and_recovers_on_retry() {
 
 #[test]
 fn service_host_author_repair_refuses_unproved_relay_identities() {
+    // Even a native live settlement carries relay identities only with a proof.
+    let settlement = format!("moment-ydoc-{}", "a".repeat(64));
     let (_scratch, _path, mut engine) = open_store();
-    let authors = json!([
+    let public = json!([
         {"kind":"human","humanId":"recipient","humanName":"Recipient"},
-        {"kind":"public","name":"Guest"},
-        {"kind":"named","userId":"recipient"},
-        {"kind":"link","linkId":"link"}
+        {"kind":"link","publicPrincipalId":"public_1","label":"Anonymous"},
+        {"kind":"agent","agentId":"writer","agentName":"Writer","onBehalfOf":"recipient","depth":1},
+        {"kind":"unattributed"}
     ]);
-    let legacy = queue_legacy_moment(&mut engine, authors.clone());
+    // The grant authority this computer credited beside the public snapshot.
+    let mut authors = public.clone();
+    authors.as_array_mut().unwrap().extend([
+        json!({"kind":"named","userId":"recipient","grantId":"grant","grantGeneration":1}),
+        json!({"kind":"link","grantId":"grant","grantGeneration":1,"principalId":"holder"}),
+        json!({"kind":"public","principalId":"holder","grantId":"grant"}),
+    ]);
+    let legacy = queue_legacy_moment_as(&mut engine, &settlement, authors.clone());
     engine
         .write_with(&NoFaults, |tx| {
-            let (payload, _) =
-                crate::outbound::moment_append_payload_in_tx(tx, "ws", "record-moment")?;
+            let (payload, _) = crate::outbound::moment_append_payload_in_tx(tx, "ws", &settlement)?;
             assert!(payload.get("authors").is_none());
             assert_eq!(
                 payload["attributionUnavailable"]["reason"],
@@ -308,6 +537,7 @@ fn service_host_author_repair_refuses_unproved_relay_identities() {
         })
         .unwrap();
     let mut ops = list_replication_ops(&engine, "ws", "local", -1, 10).unwrap();
+    assert_eq!(ops[1].payload, legacy);
     crate::outbound::repair_queued_moment_authors(&mut engine, &mut ops, &NoFaults, true).unwrap();
     let mut expected = legacy;
     crate::outbound::mark_unproven_hosted_authors(&mut expected);
@@ -315,6 +545,15 @@ fn service_host_author_repair_refuses_unproved_relay_identities() {
     assert_eq!(
         list_replication_ops(&engine, "ws", "local", -1, 10).unwrap(),
         ops
+    );
+    let moment = VersionedTextStore::new(&mut engine)
+        .get_moment("ws", &settlement)
+        .unwrap()
+        .unwrap();
+    assert_eq!(moment.author_json, None);
+    assert_eq!(
+        moment.metadata_summary.as_deref(),
+        Some("Attribution unavailable")
     );
 }
 
@@ -470,14 +709,16 @@ fn public_and_named_authors_are_marked_before_first_push() {
 fn both_lanes_keep_nameless_local_history_and_remove_unproved_hosted_history() {
     let owner = json!({"kind":"human","humanId":"local:8b183289-9c6e-46e9-bc2d-2e08dc144ea2"});
     let recipient = json!({"kind":"human","humanId":"recipient","humanName":"Recipient"});
+    // Even a native live settlement carries relay identities only with a proof.
+    let settlement = format!("moment-ydoc-{}", "a".repeat(64));
     for native_settlements in [false, true] {
         for authors in [json!([owner]), json!([owner, recipient])] {
             let (_scratch, _path, mut engine) = open_store();
-            queue_legacy_moment(&mut engine, authors.clone());
+            queue_legacy_moment_as(&mut engine, &settlement, authors.clone());
             engine
                 .write_with(&NoFaults, |tx| {
                     let (payload, _) =
-                        crate::outbound::moment_append_payload_in_tx(tx, "ws", "record-moment")?;
+                        crate::outbound::moment_append_payload_in_tx(tx, "ws", &settlement)?;
                     assert!(payload.get("authors").is_none());
                     Ok::<_, SyncError>(())
                 })
@@ -502,7 +743,7 @@ fn both_lanes_keep_nameless_local_history_and_remove_unproved_hosted_history() {
                 ops
             );
             let moment = VersionedTextStore::new(&mut engine)
-                .get_moment("ws", "record-moment")
+                .get_moment("ws", &settlement)
                 .unwrap()
                 .unwrap();
             if authors.as_array().unwrap().len() > 1 {

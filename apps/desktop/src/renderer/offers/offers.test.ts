@@ -5,7 +5,7 @@ import { observeFolderAppOffers, readFolderAppOffer } from "./folderApp";
 const candidate = { id: "agent:default", kind: "agent" as const, handle: "agent", label: "Agent" };
 const pick = { candidate, from: 0, to: 6 };
 const facts: AddressedAgentFacts = { workspaceId: "one", agentId: candidate.id, reach: null, runnerAvailable: false,
-  runState: { mcpEnabled: false, activeRun: null, lastRun: null }, versionRunState: null };
+  runState: { activeRun: null, lastRun: null }, versionRunState: null };
 
 describe("CSV preview offer", () => {
   it.each([0, MAX_CSV_PREVIEW_ROWS - 1, MAX_CSV_PREVIEW_ROWS])("does not offer at %i rows", totalRows => {

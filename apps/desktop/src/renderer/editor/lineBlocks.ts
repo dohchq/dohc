@@ -35,10 +35,10 @@
 //    the next `>` line is still the same node.
 //  - A fence's contents are inert, and so are a `$$…$$` block's. Blank lines
 //    and `#` inside either are that block's own text.
-//  - A link reference definition renders NO node, so it starts no block —
-//    label, the destination under it if it is not on the label's own line,
-//    and a title under that. A hit on one lands on the block above it, as any
-//    other gap does; there is nothing of its own to show the reader.
+//  - A link reference definition is a paragraph of its own text, one block
+//    per definition — label, the destination under it if it is not on the
+//    label's own line, and a title under that. Like a heading it ends at its
+//    own last line, so adjacent definitions are separate blocks.
 //
 // That is the top-level shape of an ordinary document, not of every document
 // CommonMark can express — a jump can land a block off. It still shows the
@@ -80,18 +80,19 @@ const TASK_RE = /^[ \t]{0,3}[-+*][ \t]+\[[ xX]\](?:[ \t]|$)/;
 // The captured marker is the list's identity: changing it starts a new list.
 const BULLET_RE = /^[ \t]{0,3}([-+*])(?:[ \t]|$)/;
 const ORDERED_RE = /^[ \t]{0,3}\d{1,9}([.)])(?:[ \t]|$)/;
-// A quoted LINE and the prefix stripped off it, mirroring extensions.ts
-// CALLOUT_LINE_RE and stripBlockquotePrefix exactly: spaces before the `>`,
-// never a tab, and exactly one optional space after it. `>\t# T` therefore
-// keeps its tab, which four columns in makes code rather than a heading.
+// A quoted LINE and the prefix stripped off it, mirroring
+// dohc-markdown-extensions.ts CALLOUT_LINE_RE and stripBlockquotePrefix
+// exactly: spaces before the `>`, never a tab, and exactly one optional space
+// after it. `>\t# T` therefore keeps its tab, which four columns in makes code
+// rather than a heading.
 const QUOTE_LINE_RE = /^ {0,3}>/;
 const QUOTE_PREFIX_RE = /^ {0,3}> ?/;
 // A blank line, which is what ends most blocks. Spaces only — a tab-only line
 // is not blank here, and neither is a non-breaking space.
 const BLANK_RE = /^ *$/;
-// A complete callout header, mirroring extensions.ts CALLOUT_HEADER_RE. An
-// unclosed `> [!oops` is an ordinary blockquote, which continues lazily where
-// a callout would not.
+// A complete callout header, mirroring dohc-markdown-extensions.ts
+// CALLOUT_HEADER_RE. An unclosed `> [!oops` is an ordinary blockquote, which
+// continues lazily where a callout would not.
 const CALLOUT_RE = /^\[![^\]\n]+\]/;
 // Raw HTML, which is a block start to the callout tokenizer but not a kind
 // this module otherwise needs. Spaces only, per CALLOUT_LAZY_BREAK_RE.
@@ -114,17 +115,17 @@ const BREAK_RE = /^[ \t]{0,3}(?:(?:-[ \t]*){3,}|(?:\*[ \t]*){3,}|(?:_[ \t]*){3,}
 // A list can interrupt a paragraph, but an ordered one only when it counts
 // from 1: `2.` under a paragraph is that paragraph's own text.
 const INTERRUPTING_ORDERED_RE = /^[ \t]{0,3}1[.)](?:[ \t]|$)/;
-// `[label]: destination "title"` renders NO node — it is metadata the links
-// resolve through (editor/extensions.ts leaves it to the tokenizer). Four
-// columns makes it code instead.
+// `[label]: destination "title"`, which the links resolve through. The
+// canonical writer keeps each one as paragraph text. Four columns makes it
+// code instead.
 const DEFINITION_LABEL_RE = /^[ \t]{0,3}\[[^\]]+\]:[ \t]*/;
-// A definition's title may sit alone on its own line, indented.
-const DEFINITION_TITLE_RE = /^[ \t]+(?:"[^"]*"|'[^']*'|\([^)]*\))[ \t]*$/;
+// A definition's title may sit alone on its own line, indented or not.
+const DEFINITION_TITLE_RE = /^[ \t]*(?:"[^"]*"|'[^']*'|\([^)]*\))[ \t]*$/;
 // What may follow the label: an angle-bracketed destination (which may hold
 // spaces) or a bare one (which may not, and may not open with `<`), then an
 // optional title and nothing else. `[a]: <broken` is a paragraph.
 const DEFINITION_DESTINATION_RE =
-  /^(?:<[^<>\n]*>|[^<\s]\S*)(?:[ \t]+(?:"[^"]*"|'[^']*'|\([^)]*\)))?[ \t]*$/;
+  /^(?:<[^<>\n]*>|[^<\s]\S*)(?:[ \t]+("[^"]*"|'[^']*'|\([^)]*\)))?[ \t]*$/;
 // A table's delimiter row is what tells its header row apart from an ordinary
 // paragraph, so the header is only a header when this follows it. Leading and
 // trailing pipes are both optional; a pipe somewhere is not, or `---` alone
@@ -134,8 +135,8 @@ const TABLE_DELIMITER_RE =
 
 /** The cells a table row declares. The outer pipes bound the row rather than
  *  dividing it, and a BACKSLASH-escaped pipe is cell text — `A \| B | C` is
- *  two cells. A pipe inside a code span is not protected: the tokenizer
- *  divides on it, and the test below holds that. */
+ *  two cells. A pipe inside a code span still divides here; `opensTable`
+ *  also counts the row with those pipes escaped. */
 function cellCount(text: string): number {
   const row = text.trim();
   let cells = 1;
@@ -148,11 +149,73 @@ function cellCount(text: string): number {
   return cells;
 }
 
+const BACKSLASH = 92;
+const BACKTICK = 96;
+
+/** `line` with each pipe inside a code span escaped, as Tiptap's
+ *  `preprocessTablePipes` escapes a table row's before marked splits it, so
+ *  this module loads without the editor's table extension. Tiptap closes a
+ *  span at the next backtick run as long as its opener, backslashes or not,
+ *  and searches again for each opener. Each run is found once here instead.
+ *  An opener is a whole run, or a run less the backtick an escape took, so
+ *  its closer is the next run as long as that run or one shorter. */
+function escapeCodeSpanPipes(line: string): string {
+  const starts: number[] = [];
+  const ends: number[] = [];
+  for (let at = line.indexOf("`"); at >= 0; at = line.indexOf("`", ends[ends.length - 1])) {
+    let end = at + 1;
+    while (line.charCodeAt(end) === BACKTICK) end += 1;
+    starts.push(at);
+    ends.push(end);
+  }
+  const same: number[] = [];
+  const shorter: number[] = [];
+  const last = new Map<number, number>();
+  for (let run = starts.length - 1; run >= 0; run -= 1) {
+    const length = ends[run] - starts[run];
+    same[run] = last.get(length) ?? -1;
+    shorter[run] = last.get(length - 1) ?? -1;
+    last.set(length, run);
+  }
+  let result = "";
+  let index = 0;
+  let run = 0;
+  while (index < line.length) {
+    const code = line.charCodeAt(index);
+    if (code === BACKSLASH && index + 1 < line.length) {
+      result += line.slice(index, index + 2);
+      index += 2;
+      continue;
+    }
+    if (code !== BACKTICK) {
+      result += line[index];
+      index += 1;
+      continue;
+    }
+    while (ends[run] <= index) run += 1;
+    const open = ends[run];
+    const closer = index === starts[run] ? same[run] : shorter[run];
+    if (closer < 0) {
+      result += line.slice(index, open);
+      index = open;
+      continue;
+    }
+    const close = starts[closer];
+    const span = line.slice(open, close).replace(/\\\||\|/g, (pipe) => (pipe === "|" ? "\\|" : pipe));
+    result += line.slice(index, open) + span + line.slice(close, close + open - index);
+    index = close + open - index;
+  }
+  return result;
+}
+
 /** A header row and the delimiter under it only make a table when they AGREE
  *  on the column count: `A | B` over `--- | --- | ---` is prose. That is the
  *  whole rule — a header needs no pipe of its own, because `Intro` over
- *  `| --- |` is a one-column table the same as `| A |` would be. */
+ *  `| --- |` is a one-column table the same as `| A |` would be. The parser
+ *  reads the pair first with the pipes in code spans escaped and then as
+ *  written, so either count agreeing makes the table. */
 function opensTable(header: string, delimiter: string): boolean {
+  const columns = cellCount(delimiter);
   return (
     // Either row four COLUMNS in is indented code, not a table. The patterns
     // below count a tab as one of three prefix characters; these do not.
@@ -160,14 +223,15 @@ function opensTable(header: string, delimiter: string): boolean {
     leadingColumns(delimiter) < CODE_COLUMNS &&
     delimiter.includes("|") &&
     TABLE_DELIMITER_RE.test(delimiter) &&
-    cellCount(header) === cellCount(delimiter)
+    (cellCount(header) === columns ||
+      (header.includes("`") && cellCount(escapeCodeSpanPipes(header)) === columns))
   );
 }
 
 type Fence = { marker: string; length: number };
 
 /** The line index where a standalone `$$…$$` block ends, or null when the
- *  line does not open one. `editor/extensions.ts` anchors the opener at
+ *  line does not open one. `dohc-markdown-extensions.ts` anchors the opener at
  *  column 0 and needs the first `$$` after it to end a line — anything else
  *  is literal text, so an unclosed `$$` is not math and claims nothing. */
 function mathBlockEnd(lines: string[], start: number): number | null {
@@ -183,9 +247,9 @@ function mathBlockEnd(lines: string[], start: number): number | null {
 
 /** The last line of a link reference definition starting at `start`, or null
  *  when there is none. The destination may sit on the line under the label
- *  and the title under that; the whole run renders no node. A label with
+ *  and the title under that; the whole run is one block. A label with
  *  nothing under it, or one whose destination does not parse, is ordinary
- *  text — and hiding a paragraph would shift every block after it. */
+ *  paragraph text, which runs on into the lines below it. */
 function definitionEnd(lines: string[], start: number): number | null {
   const line = lines[start] ?? "";
   if (leadingColumns(line) >= CODE_COLUMNS) return null;
@@ -199,8 +263,13 @@ function definitionEnd(lines: string[], start: number): number | null {
     rest = next.replace(/^[ \t]+/, "");
     last = start + 1;
   }
-  if (!DEFINITION_DESTINATION_RE.test(rest)) return null;
-  if (DEFINITION_TITLE_RE.test(lines[last + 1] ?? "")) last += 1;
+  const destination = DEFINITION_DESTINATION_RE.exec(rest);
+  if (!destination) return null;
+  // A definition holds one title. With it on the destination's line, a quoted
+  // line under it is a paragraph of its own.
+  if (destination[1] === undefined && DEFINITION_TITLE_RE.test(lines[last + 1] ?? "")) {
+    last += 1;
+  }
   return last;
 }
 
@@ -257,8 +326,8 @@ function blockKind(text: string): BlockKind {
   return "other";
 }
 
-/** `allowBacktickInfo` is the CALLOUT tokenizer's contract (extensions.ts
- *  calloutFenceOpener): it opens a fence on an info string an ordinary fence
+/** `allowBacktickInfo` is the CALLOUT tokenizer's contract
+ *  (dohc-markdown-extensions.ts calloutFenceOpener): it opens a fence on an info string an ordinary fence
  *  rejects, and that one character decides whether the quote around it goes
  *  on absorbing the unquoted line below. */
 function fenceOpener(text: string, allowBacktickInfo = false): Fence | null {
@@ -367,7 +436,7 @@ export function blockForLine(body: string, line: number): LineBlock {
     // it — and once it ends, an unquoted line is a new block while another
     // `>` line is still this one. What ends it was measured, not assumed: a
     // quoted blank for any quote, and for a CALLOUT every quoted block start
-    // (extensions.ts closes the continuable paragraph there). A plain quote
+    // (dohc-markdown-extensions.ts closes the continuable paragraph there). A plain quote
     // absorbs those, which is why it needs the flag.
     //
     // A fence ends it for either, but they do not agree on what a fence IS:
@@ -396,16 +465,15 @@ export function blockForLine(body: string, line: number): LineBlock {
       quoteOpen = true;
       continue;
     }
-    // A definition renders nothing, so it starts no block. Under an open
-    // paragraph it is not a definition at all, just that paragraph's text.
-    const definition = open ? null : definitionEnd(lines, index);
-    if (definition !== null) {
-      index = definition;
-      continue;
-    }
-    const kind = opensTable(text, lines[index + 1] ?? "")
-      ? "table"
-      : blockKind(text);
+    // Under an open paragraph a definition is not a definition at all, just
+    // that paragraph's text. The tokenizer reads one before a table.
+    const definition: number | null = open ? null : definitionEnd(lines, index);
+    const kind: BlockKind =
+      definition !== null
+        ? "other"
+        : opensTable(text, lines[index + 1] ?? "")
+          ? "table"
+          : blockKind(text);
     const marker = listMarker(text);
     const listOpen =
       openKind === "bullet" || openKind === "task" || openKind === "ordered";
@@ -514,6 +582,13 @@ export function blockForLine(body: string, line: number): LineBlock {
     if (mathClose !== null) {
       if (mathClose > index) mathUntil = mathClose;
       else open = false;
+    }
+    // A top-level definition ends at its own last line, as a heading does:
+    // the next line opens its own block, blank line or not. One indented into
+    // a list item leaves that item's list open.
+    if (definition !== null) {
+      if (opens) open = false;
+      index = definition;
     }
   }
   return { index: holder, startLine: holderStart, endLine: lines.length };

@@ -12,8 +12,9 @@ export async function runNativeOwnerDeliveryPass(options: {
   document: DesktopOwnerDeliveryDocument;
   config: DesktopOwnerDeliveryConfig;
   signal: AbortSignal;
+  /** The bearer and its account come from one credential; assertCurrent retires both. */
   bearer: string;
-  accountId: string | undefined;
+  accountId: string;
   assertCurrent(): void;
 }) {
   const {client, document, config, signal} = options;

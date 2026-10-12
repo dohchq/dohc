@@ -2178,6 +2178,57 @@ describe("connection dialog retries", () => {
 });
 
 describe("unavailable MCP launcher settings", () => {
+  it("retries a stopped run's history from Notices after Settings closes", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    const run = { id: "run-old", startedAt: 1, agentId: "agent-1", onBehalfOf: "ice", status: "running" as const };
+    let activeRun: typeof run | null = run;
+    bridge.getAgentRunStatus.mockImplementation(async () => ({ activeRun, lastRun: null }));
+    bridge.endAgentRun.mockImplementationOnce(async () => {
+      activeRun = null;
+      throw new Error("Repair .dohc/agent-runs.json, then try again.");
+    });
+    const user = userEvent.setup();
+    renderShell(bridge);
+    await user.keyboard("{Control>}k{/Control}");
+    await user.click(await within(await screen.findByTestId("command-palette")).findByText("Settings: Open Agents (MCP)"));
+    await waitFor(() => expect(screen.getByTestId("mcp-status").getAttribute("data-state")).toBe("running"));
+    await user.click(screen.getByTestId("mcp-enable-toggle"));
+    await screen.findByTestId("workspace-shell-error");
+    await user.keyboard("{Escape}");
+    await waitFor(() => expect(screen.queryByTestId("settings-dialog")).toBeNull());
+    await user.click(screen.getByTestId("notice-center-toggle"));
+    const notice = await within(await screen.findByTestId("notice-center")).findByText("Repair .dohc/agent-runs.json, then try again.");
+    const row = notice.closest("li");
+    if (!row) throw new Error("The agent failure has no Notices row.");
+    await user.click(within(row).getByRole("button", { name: "Try again" }));
+    await waitFor(() => expect(bridge.endAgentRun).toHaveBeenCalledTimes(2));
+    expect(bridge.endAgentRun).toHaveBeenLastCalledWith({ workspaceId: WORKSPACE.workspaceId, runId: run.id });
+    expect(bridge.startAgentRun).not.toHaveBeenCalled();
+  });
+
+  it("keeps an agent settings retry in Notices when it fails after Settings closes", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    const message = "dohc could not load agent settings.";
+    bridge.getMcpConfig.mockRejectedValueOnce(new Error(message));
+    const user = userEvent.setup();
+    renderShell(bridge);
+    await user.keyboard("{Control>}k{/Control}");
+    await user.click(await within(await screen.findByTestId("command-palette")).findByText("Settings: Open Agents (MCP)"));
+    await screen.findByTestId("workspace-shell-error");
+    await user.keyboard("{Escape}");
+    await waitFor(() => expect(screen.queryByTestId("settings-dialog")).toBeNull());
+    bridge.getMcpConfig.mockRejectedValueOnce(new Error(message));
+    await user.click(screen.getByTestId("workspace-shell-error-retry"));
+    expect((await screen.findByTestId("workspace-shell-error")).textContent).toContain(message);
+    await user.click(screen.getByTestId("notice-center-toggle"));
+    const notice = await within(await screen.findByTestId("notice-center")).findByText(message);
+    const row = notice.closest("li");
+    if (!row) throw new Error("The load failure has no Notices row.");
+    await user.click(within(row).getByRole("button", { name: "Try again" }));
+    await waitFor(() => expect(bridge.getMcpConfig).toHaveBeenCalledTimes(3));
+    await waitFor(() => expect(screen.queryByText(message)).toBeNull());
+  });
+
   it("shows the launcher error without a copyable config", async () => {
     const bridge = makeBridge(Promise.resolve(null));
     bridge.getMcpConfig = vi.fn(

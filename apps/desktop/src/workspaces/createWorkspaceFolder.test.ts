@@ -88,7 +88,7 @@ describe("createWorkspaceFolder", () => {
   it("keeps a workspace's sync history in its folder, so a reattach still knows it synced", async () => {
     const root = join(base, "reattached");
     await createWorkspaceFolder({ rootPath: root, kind: "personal" });
-    recordSynced(root);
+    await recordSynced(root);
     // Forgetting drops only the registry entry; attaching the folder again
     // adopts its manifest and leaves the record.
     await createWorkspaceFolder({ rootPath: root, kind: "personal" });

@@ -19,6 +19,7 @@ const session: RendererWorkspaceSession<typeof sender> = {
   attachmentId: Symbol("workspace-a"),
   rendererDocumentId: "document-1",
   generation: 23,
+  signal: AbortSignal.abort(),
   isCurrent: () => false,
 };
 

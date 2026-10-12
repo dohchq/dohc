@@ -93,7 +93,14 @@ enum MomentAuthor {
     Agent {
         #[serde(rename = "agentId")]
         agent_id: String,
-        #[serde(rename = "agentName", skip_serializing_if = "Option::is_none")]
+        /// The name a live author snapshot declared for its agent. One outside
+        /// the snapshot's bounds applies as none.
+        #[serde(
+            rename = "agentName",
+            default,
+            deserialize_with = "agent_snapshot_name",
+            skip_serializing_if = "Option::is_none"
+        )]
         agent_name: Option<String>,
         #[serde(
             rename = "onBehalfOf",
@@ -193,6 +200,21 @@ fn agent_author_depth<'de, D: serde::Deserializer<'de>>(
         .map(|value| dohc_engine_domain::agent_author_depth(Some(&value)))
 }
 
+fn agent_snapshot_name<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<String>, D::Error> {
+    serde_json::Value::deserialize(deserializer).map(|value| match value {
+        serde_json::Value::String(name)
+            if !name.is_empty()
+                && name.len() <= dohc_engine_domain::MAX_AUTHOR_FIELD_BYTES
+                && !name.bytes().any(|b| b.is_ascii_control()) =>
+        {
+            Some(name)
+        }
+        _ => None,
+    })
+}
+
 fn optional_author_principal<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
 ) -> Result<Option<String>, D::Error> {
@@ -229,7 +251,7 @@ pub struct MomentApplyResult {
 }
 
 impl ContentKind {
-    fn from_wire(value: Option<&str>) -> Self {
+    pub(crate) fn from_wire(value: Option<&str>) -> Self {
         if value == Some("binary") {
             Self::Binary
         } else {
@@ -237,10 +259,17 @@ impl ContentKind {
         }
     }
 
-    const fn as_str(self) -> &'static str {
+    pub(crate) const fn as_str(self) -> &'static str {
         match self {
             Self::Text => "text",
             Self::Binary => "binary",
+        }
+    }
+
+    pub(crate) const fn blob_kind(self) -> crate::BlobKind {
+        match self {
+            Self::Text => crate::BlobKind::Text,
+            Self::Binary => crate::BlobKind::Binary,
         }
     }
 }
@@ -1014,6 +1043,7 @@ fn apply_moment_append(
                         text,
                     )
                     .unwrap_or_else(|| (empty(), Default::default()));
+                let mut provenance = Some(provenance);
                 let before_frontmatter = if let Some(owner) = &owner_settlement {
                     // The index follows the visible draft, including pending
                     // edits that this settled checkpoint does not contain.
@@ -1035,18 +1065,27 @@ fn apply_moment_append(
                         .map_err(SyncError::corrupt)?;
                         let visible = dohc_engine_collab::load_doc_in(tx, &key)
                             .map_err(SyncError::corrupt)?;
-                        frontmatter = match dohc_engine_collab::owner_outbox::draft::apply_pending_to_checkpoint_in(
+                        let replayed = match dohc_engine_collab::owner_outbox::draft::apply_pending_to_checkpoint_in(
                             tx,
                             &owner.binding,
                             &visible,
                         ) {
-                            Ok(()) => visible.frontmatter_json(),
+                            Ok(()) => visible.frontmatter_provenance().ok(),
                             Err(dohc_engine_collab::OwnerOutboxError::Storage(error)) => {
                                 return Err(error.into());
                             }
-                            // Replay-state errors must not invent an indexed change.
-                            Err(_) => indexed_fields.clone(),
+                            Err(_) => None,
                         };
+                        // Replay-state errors, including a draft frontmatter that
+                        // cannot be shown, must not invent an indexed change.
+                        // Otherwise the draft's own frontmatter text says which
+                        // fields hold YAML that their JSON values cannot show.
+                        frontmatter = if replayed.is_some() {
+                            visible.frontmatter_json()
+                        } else {
+                            indexed_fields.clone()
+                        };
+                        provenance = replayed;
                     }
                     indexed.unwrap_or_else(empty)
                 } else {
@@ -1069,7 +1108,7 @@ fn apply_moment_append(
                     &frontmatter,
                     &before_frontmatter,
                     &frontmatter,
-                    Some(&provenance),
+                    provenance.as_ref(),
                     Some(&envelope.origin_id),
                     None,
                     Some((&envelope.origin_id, envelope.origin_seq)),
