@@ -206,10 +206,17 @@ describe("CSV view actions", () => {
     render(<CsvView {...csvFile("ws-1", "data/rows.csv", "name\nAda")} onOpenPath={onOpenPath} />);
 
     const button = screen.getByTestId("csv-import-sqlite") as HTMLButtonElement;
+    const status = within(button.parentElement!).getByRole("status");
+    expect(status.textContent).toBe("");
     await user.click(button);
     expect(button.getAttribute("aria-busy")).toBe("true");
     expect(button.disabled).toBe(false);
     expect(document.activeElement).toBe(button);
+    // The button keeps its name; a polite status says the import started.
+    expect(button.getAttribute("aria-label")).toBe("Import to SQLite");
+    expect(status.getAttribute("aria-live")).toBe("polite");
+    expect(status.textContent).toBe("Importing to SQLite…");
+    expect(within(button).getByTestId("csv-import-sqlite-pending")).toBeTruthy();
     await user.click(button);
     expect(importToDatabase).toHaveBeenCalledExactlyOnceWith({
       workspaceId: "ws-1",
@@ -221,6 +228,7 @@ describe("CSV view actions", () => {
     await act(async () => answer.resolve(importResult("data/rows.sqlite")));
     expect(onOpenPath).toHaveBeenCalledExactlyOnceWith("data/rows.sqlite");
     expect(button.hasAttribute("aria-busy")).toBe(false);
+    expect(status.textContent).toBe("");
   });
 
   it("reports a failed import as a toast and a Notices row with Try again, not in the view", async () => {
@@ -236,14 +244,18 @@ describe("CSV view actions", () => {
 
     await user.click(screen.getByTestId("csv-import-sqlite"));
     const toast = await screen.findByTestId("workspace-shell-error");
-    expect(toast.textContent).toContain("dohc could not import this file to SQLite.");
-    expect(toast.textContent).toContain("Database already exists: data.sqlite");
+    // What happened, naming the database, then the next step; the raw
+    // message stays for Copy details.
+    expect(within(toast).getByText(
+      "dohc could not import this file to data.sqlite. That file already exists. Rename or move it, then try again.",
+    )).toBeTruthy();
+    expect(toast.textContent).not.toContain("Database already exists");
     expect(within(screen.getByTestId("view-csv")).queryByText(/already exists/)).toBeNull();
     expect(screen.queryByTestId("csv-import-error")).toBeNull();
 
     await user.click(screen.getByTestId("notice-center-toggle"));
     const notices = screen.getByRole("dialog", { name: "Notices" });
-    expect(within(notices).getAllByText(/could not import this file to SQLite/)).toHaveLength(1);
+    expect(within(notices).getAllByText(/could not import this file to data\.sqlite/)).toHaveLength(1);
     await user.click(within(notices).getByRole("button", { name: "Try again" }));
     expect(importToDatabase).toHaveBeenCalledTimes(2);
     await waitFor(() => expect(onOpenPath).toHaveBeenCalledExactlyOnceWith("data.sqlite"));
@@ -311,7 +323,7 @@ describe("CSV view actions", () => {
     } else {
       await act(async () => running.reject(importRejected("Database already exists: data.sqlite")));
       const toast = await screen.findByTestId("workspace-shell-error");
-      expect(toast.textContent).toContain("dohc could not import this file to SQLite.");
+      expect(toast.textContent).toContain("dohc could not import this file to data.sqlite.");
       expect(within(toast).getByRole("button", { name: "Try again" })).toBeTruthy();
     }
   });
@@ -341,11 +353,25 @@ describe("CSV view actions", () => {
     await tryAgainInNotices();
     expect(importToDatabase).toHaveBeenCalledTimes(2);
     const toast = await screen.findByTestId("workspace-shell-error");
-    expect(toast.textContent).toContain("dohc could not import this file to SQLite.");
+    expect(toast.textContent).toContain("dohc could not import this file to data.sqlite.");
 
     await tryAgainInNotices();
     expect(importToDatabase).toHaveBeenLastCalledWith(expect.objectContaining({ workspaceId: "ws-1", sourceRelativePath: "data.csv" }));
     await waitFor(() => expect(onOpenPath).toHaveBeenCalledExactlyOnceWith("data.sqlite"));
+  });
+
+  it("keeps an unmapped import error's own words after the sentence naming the database", async () => {
+    const user = userEvent.setup();
+    importToDatabase.mockRejectedValueOnce(importRejected("The CSV has no header row."));
+    render(
+      <Shell>
+        {(onError) => <CsvView {...csvFile("ws-1", "data/rows.csv", "name\nAda")} onOpenPath={vi.fn()} onError={onError} />}
+      </Shell>,
+    );
+
+    await user.click(screen.getByTestId("csv-import-sqlite"));
+    const toast = await screen.findByTestId("workspace-shell-error");
+    expect(within(toast).getByText("dohc could not import this file to data/rows.sqlite. The CSV has no header row.")).toBeTruthy();
   });
 
   it("drops an import answer that arrives after the view closed", async () => {

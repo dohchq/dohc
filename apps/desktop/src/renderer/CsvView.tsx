@@ -76,9 +76,10 @@ function importCsv(workspaceId: string, path: string, join = false): Promise<Imp
   return started;
 }
 
-// Import never overwrites a file, so the most common cause is a database
-// already at the target; the error's words name it.
-const IMPORT_FAILED = "dohc could not import this file to SQLite.";
+// What failed, naming the database the import makes; the error's words say
+// why and what to do next (ipc/errorWords.ts).
+const importFailed = (path: string) =>
+  `dohc could not import this file to ${deriveImportTarget(path).dbPath}.`;
 
 // Try again on a failed import's Notices row. The person asked for it, so it
 // answers through the shell's own hooks whether or not the CSV is still open:
@@ -96,7 +97,7 @@ function retryImport(
       const result = await importCsv(workspaceId, path, true);
       if (result) onOpenPath?.(result.path);
     } catch (cause) {
-      onError?.(IMPORT_FAILED, cause, () => void run());
+      onError?.(importFailed(path), cause, () => void run());
     }
   };
   return () => void run();
@@ -112,7 +113,7 @@ const CSV_MODES: ReadonlyArray<SegmentedOption<CsvMode>> = [
 // A CSV's controls, right of Share: Table or Raw, and Import to SQLite where
 // the view can open the database it makes. A CSV still opening, or one that
 // could not be read, draws them disabled in the same places. A running import
-// keeps its button, and the focus on it, and marks it busy.
+// keeps its button, and the focus on it, marks it busy, and says so.
 export function CsvControls(props: {
   mode: CsvMode;
   onModeChange?: (mode: CsvMode) => void;
@@ -142,11 +143,18 @@ export function CsvControls(props: {
           onClick={props.onImport}
         >
           {props.importing ? (
-            <LoaderCircle size={14} aria-hidden className="motion-safe:animate-spin" />
+            <LoaderCircle data-testid="csv-import-sqlite-pending" size={14} aria-hidden className="motion-safe:animate-spin" />
           ) : (
             <Database size={14} aria-hidden />
           )}
         </IconButton>
+      ) : null}
+      {/* As the chat composer says a slow send: the button keeps its name,
+          and a polite status says the import started. */}
+      {props.importable ? (
+        <span role="status" aria-live="polite" className="sr-only">
+          {props.importing ? "Importing to SQLite…" : ""}
+        </span>
       ) : null}
     </div>
   );
@@ -600,7 +608,7 @@ export function CsvView({
       const result = await importCsv(workspaceId, path);
       if (result && current()) onOpenPath?.(result.path);
     } catch (cause) {
-      if (current()) onError?.(IMPORT_FAILED, cause, retryImport(workspaceId, path, onOpenPath, onError));
+      if (current()) onError?.(importFailed(path), cause, retryImport(workspaceId, path, onOpenPath, onError));
     }
   }
 

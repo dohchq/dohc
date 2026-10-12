@@ -104,8 +104,10 @@ export function SegmentedControl<T extends string>(props: {
             {...group.radio(index)}
             aria-label={Icon ? option.label : undefined}
             title={Icon ? option.label : undefined}
+            // An icon segment is a 24px square, the smallest target WCAG 2.5.8
+            // allows when targets touch.
             className={`rounded-md transition-colors disabled:opacity-50 ${
-              Icon ? "grid h-5 w-6 place-items-center" : "flex-1 px-2.5 py-1 text-xs"
+              Icon ? "grid size-6 place-items-center" : "flex-1 px-2.5 py-1 text-xs"
             } ${
               props.value === option.value
                 ? "bg-bg text-ink shadow-sm"
