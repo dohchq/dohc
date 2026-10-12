@@ -1,3 +1,4 @@
+import type { PresencePeer } from "../src/renderer/collab/presenceChannel";
 import { activityPin } from "../src/testPins";
 import { expect, test, type Page } from "@playwright/test";
 import { mkdir, writeFile } from "node:fs/promises";
@@ -49,12 +50,6 @@ const RECIPIENT_TOKEN = "test:e2e-recipient";
 // the participant's local ops must be authored as this id, not the raw token.
 const RECIPIENT_USER = "e2e-recipient";
 const RECIPIENT_EMAIL = "e2e-recipient@dohc.test";
-
-interface PresencePeer {
-  userId: string;
-  clientId: string;
-  state?: { displayName?: string; typing?: boolean } | null;
-}
 
 // The participant's presence path: publish/poll over the SHARE route (the relay
 // maps the share to the granter's workspace, so this lands in the owner's
@@ -224,16 +219,17 @@ test("owner + participant chat and co-presence converge in the real app", async 
     // real app, and the participant's own relay view converges on the owner. The
     // owner publishes channel presence while viewing the channel, so poll the
     // participant's publish until it sees the owner (bidirectional convergence).
+    // Test auth labels accounts with their user IDs; published state carries no identity.
     let sawOwner = false;
     await expect
       .poll(
         async () => {
           const result = await sharePresence(baseUrl, RECIPIENT_TOKEN, shareId, channelWireId, {
             clientId: "member-channel",
-            state: { displayName: "Morgan", typing: false },
+            state: { typing: false },
           });
           if (result.status !== 200) return `status:${result.status}`;
-          sawOwner = result.peers.some((peer) => peer.userId === GRANTER_USER);
+          sawOwner = result.peers.some((peer) => !peer.isSelf && peer.displayName === GRANTER_USER);
           return sawOwner ? "owner-present" : "owner-absent";
         },
         { timeout: 60_000, intervals: [500] },
@@ -242,7 +238,7 @@ test("owner + participant chat and co-presence converge in the real app", async 
     expect(sawOwner).toBe(true);
 
     // The owner's REAL app renders the participant's presence face.
-    await expect(page.locator('[aria-label="Morgan is here"]')).toBeVisible({ timeout: 30_000 });
+    await expect(page.locator(`[aria-label="${RECIPIENT_USER} is here"]`)).toBeVisible({ timeout: 30_000 });
 
     // --- (e2) THREAD-level typing: the participant typing in the shared thread
     // renders as a typing indicator in the owner's real thread view. The thread
@@ -257,16 +253,16 @@ test("owner + participant chat and co-presence converge in the real app", async 
       while (!stopTyping.done) {
         await sharePresence(baseUrl, RECIPIENT_TOKEN, shareId, threadTopic, {
           clientId: "member-thread",
-          state: { displayName: "Morgan", typing: true },
+          state: { typing: true },
         });
         await new Promise((resolve) => setTimeout(resolve, 400));
       }
     })();
     try {
-      await expect(page.getByTestId("presence-typing")).toContainText("Morgan is typing", {
+      await expect(page.getByTestId("presence-typing")).toContainText(`${RECIPIENT_USER} is typing`, {
         timeout: 45_000,
       });
-      await expect(page.locator('[aria-label="Morgan is here"]')).toBeVisible();
+      await expect(page.locator(`[aria-label="${RECIPIENT_USER} is here"]`)).toBeVisible();
     } finally {
       stopTyping.done = true;
       await typingPump;

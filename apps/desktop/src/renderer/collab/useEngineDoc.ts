@@ -115,6 +115,8 @@ export type UseEngineDoc = {
   // The live session became read-only after it opened. Unconfirmed local
   // edits are retained for recovery; a clean access stop creates no draft.
   readOnlyWhileEditing: boolean;
+  // The recovery row that read-only transition created, if it still exists.
+  readOnlyDraftId: number | null;
   readOnlyCause: ReadOnlyTransitionCause | null;
   // An open lost to a delete or move interval. This is not a terminal outcome:
   // the operation can still fail, so the caller stays read-only and retries.
@@ -286,6 +288,9 @@ export function useEngineDoc(input: EngineDocInput): UseEngineDoc {
   const readOnlyWhileEditing =
     outcome?.kind === "bound" &&
     settled?.readOnlyTransition?.token === outcome.token;
+  const readOnlyDraftId = readOnlyWhileEditing
+    ? (settled?.readOnlyTransition?.draftId ?? null)
+    : null;
   const history = readOnlyHistory?.versionKey === versionKey && readOnlyHistory.retryKey === retryKey
     ? readOnlyHistory : null;
   const readOnlyCause = !input.enabled
@@ -325,6 +330,7 @@ export function useEngineDoc(input: EngineDocInput): UseEngineDoc {
     recoveryAssets,
     permanentFailureWhileEditing,
     readOnlyWhileEditing,
+    readOnlyDraftId,
     readOnlyCause,
     removalInProgress,
     artifactAssets,

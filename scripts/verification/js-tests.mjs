@@ -15,7 +15,7 @@ export function testPlan(packages, testFiles = {}, { maxWorkers } = {}) {
   return packages.filter(({ manifest }) => manifest.scripts?.test).map(({ name, manifest }) => {
     const script = name === "@dohc/desktop" ? "test:unit" : name === "@dohc/app-backend-runtime" ? "test:prepared" : "test";
     if (!manifest.scripts[script]) throw new Error(`Missing ${script} in ${name}.`);
-    const workers = maxWorkers ?? (name === "@dohc/app-backend-runtime" ? 2
+    const workers = maxWorkers ?? (name === "@dohc/app-backend-runtime" ? 1
       : name === "@dohc/desktop" ? Math.min(4, Math.max(2, Math.floor(availableParallelism() / 4))) : 4);
     if (!Number.isInteger(workers) || workers < 1 || workers > 4) throw new Error("Test workers must be between 1 and 4.");
     const vitest = /^vitest run(?: |$)/u.test(manifest.scripts[script]);

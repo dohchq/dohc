@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { SAVED_HERE, SAVED_TO_HOST, SAVING, UNKNOWN_SAVE_STATE, saveProblem, type SaveState } from "@dohc/workspace-contracts/save-state";
 import { markdownToYDoc } from "@dohc/ydoc-projection";
-import { patchFrontmatter } from "@dohc/ydoc-projection/frontmatter";
+import { patchFrontmatter } from "@dohc/ydoc-projection/frontmatter-map";
 import { act, cleanup, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";

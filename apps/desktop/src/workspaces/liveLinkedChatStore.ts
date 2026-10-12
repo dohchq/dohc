@@ -9,17 +9,17 @@ import {
   type ChatChannelSummary,
   type ChatFeedPage,
   type ChatFileMention,
+  type LinkedChatStore,
 } from "@dohc/workspace-contracts/engine";
 import type {
   EngineWorkspace,
   EngineWorkspaceRunOptions,
   EngineWorkspaceSessions,
 } from "@dohc/workspace-engine-client/daemon";
-import type { AwaitableLinkedChatStore } from "./awaitableLinkedChatStore";
 
 const PATH_HINT_ENRICHMENT_CONCURRENCY = 8;
 
-export interface DesktopLinkedChatStore extends AwaitableLinkedChatStore {
+export interface DesktopLinkedChatStore extends LinkedChatStore {
   ensureOpen(): Promise<void>;
   listChannelsPage(input: { workspaceId: string; limit: number }): Promise<{ channels: ChatChannelSummary[]; nextCursor: string | null }>;
 }

@@ -6,7 +6,7 @@ use super::{
 };
 use crate::error::DomainError;
 use dohc_engine_storage::FaultInjector;
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
 /// Dispatch metadata uses the TS store's 16,384 UTF-16-code-unit text bound.
 const MAX_DISPATCH_METADATA_UTF16_UNITS: usize = 16_384;
@@ -89,11 +89,31 @@ fn normalize_verified_user_id(value: Option<&str>) -> Result<Option<String>, Dom
     }
 }
 
+const LOCAL_DISPATCH_DISCOVERY_PAGE: i64 = 500;
+
+pub(super) fn queue_local_dispatch_discovery(
+    tx: &Transaction<'_>,
+    workspace_id: &str,
+    message_id: &str,
+    created_at_ms: i64,
+) -> Result<(), DomainError> {
+    tx.execute(
+        "INSERT INTO chat_dispatch_local_discovery (workspace_id, message_id) \
+         SELECT ?1, ?2 WHERE EXISTS ( \
+           SELECT 1 FROM chat_dispatch_scan_cursor \
+           WHERE workspace_id = ?1 AND max_created_at_ms > ?3)",
+        params![workspace_id, message_id, created_at_ms],
+    )
+    .map_err(DomainError::sql_persist)?;
+    Ok(())
+}
+
 impl<'a> LinkedChatStore<'a> {
     // ------------------------------------------------------------- dispatch
 
     /// Scan new message timestamps and atomically seed all eligible, previously
-    /// unseen agent triggers plus the monotonic high-water cursor.
+    /// unseen agent triggers plus the monotonic high-water cursor. Local writes
+    /// behind that cursor are discovered through a bounded queue page.
     pub fn record_eligible_triggers(
         &mut self,
         workspace_id: &str,
@@ -120,19 +140,27 @@ impl<'a> LinkedChatStore<'a> {
             let scan_after = prior.map_or(-1, |value| value.saturating_sub(1).max(-1));
             let inserted = tx
                 .execute(
-                    "INSERT OR IGNORE INTO chat_dispatch_ledger \
+                    "WITH local_page AS ( \
+                       SELECT message_id FROM chat_dispatch_local_discovery \
+                       WHERE workspace_id = ?1 ORDER BY message_id LIMIT ?5 \
+                     ), discovered AS ( \
+                       SELECT message_id FROM chat_messages \
+                       WHERE workspace_id = ?1 AND created_at_ms > ?2 \
+                       UNION ALL SELECT message_id FROM local_page \
+                     ) \
+                     INSERT OR IGNORE INTO chat_dispatch_ledger \
                      (workspace_id, trigger_message_id, thread_id, state, run_id, \
                       failure_reason, attempt_count, created_at_ms, updated_at_ms) \
                      SELECT m.workspace_id, m.message_id, m.thread_id, 'pending', NULL, \
                             NULL, 0, m.created_at_ms, ?3 \
-                     FROM chat_messages m \
+                     FROM discovered CROSS JOIN chat_messages m \
                      JOIN chat_threads t ON t.workspace_id = m.workspace_id \
                        AND t.thread_id = m.thread_id \
                      LEFT JOIN chat_channels c ON c.workspace_id = t.workspace_id \
                        AND c.channel_id = t.channel_id \
                      LEFT JOIN chat_dispatch_ledger l ON l.workspace_id = m.workspace_id \
                        AND l.trigger_message_id = m.message_id \
-                     WHERE m.workspace_id = ?1 AND m.created_at_ms > ?2 \
+                     WHERE m.workspace_id = ?1 AND m.message_id = discovered.message_id \
                        AND l.trigger_message_id IS NULL \
                        AND m.author_kind = 'human' \
                        AND (m.origin IS NULL OR m.origin <> 'cli') \
@@ -142,7 +170,7 @@ impl<'a> LinkedChatStore<'a> {
                          SELECT 1 FROM chat_mentions x \
                          WHERE x.workspace_id = m.workspace_id \
                            AND x.message_id = m.message_id AND x.handle = 'agent'))",
-                    params![workspace_id, scan_after, at_ms, verified_user_id],
+                    params![workspace_id, scan_after, at_ms, verified_user_id, LOCAL_DISPATCH_DISCOVERY_PAGE],
                 )
                 .map_err(DomainError::sql_persist)?;
             let scanned_max: Option<i64> = tx
@@ -164,6 +192,14 @@ impl<'a> LinkedChatStore<'a> {
                 )
                 .map_err(DomainError::sql_persist)?;
             }
+            // Consume ineligible rows too, preserving the timestamp scanner's posture.
+            tx.execute(
+                "DELETE FROM chat_dispatch_local_discovery \
+                 WHERE workspace_id = ?1 AND message_id IN ( \
+                   SELECT message_id FROM chat_dispatch_local_discovery \
+                   WHERE workspace_id = ?1 ORDER BY message_id LIMIT ?2)",
+                params![workspace_id, LOCAL_DISPATCH_DISCOVERY_PAGE],
+            ).map_err(DomainError::sql_persist)?;
             i64::try_from(inserted).map_err(|_| dispatch_corrupt())
         })?;
         committed(outcome)

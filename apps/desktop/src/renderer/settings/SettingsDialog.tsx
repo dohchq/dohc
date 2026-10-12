@@ -102,7 +102,7 @@ function StatusPill(props: { state: SettingsSaveState }) {
 }
 
 export function SettingsDialog(props: {
-  onError?: (message: string, cause?: unknown) => void;
+  onError?: (message: string, cause?: unknown, retry?: () => Promise<void>) => void;
   /** Each workspace settings answer, so the shell can say what the file ignored. */
   onWorkspaceSettingsRead?: (read: WorkspaceSettingsResult) => void;
   workspaceId: string;
@@ -1118,7 +1118,7 @@ export function SettingsDialog(props: {
       tabIndex={-1}
       data-testid={desktopPins.settingsDialog}
       data-active-section={activeSection}
-      className="dohc-elevated relative flex h-[min(760px,calc(100vh-48px))] w-[min(1040px,calc(100vw-32px))] overflow-hidden rounded-xl border border-line bg-bg max-[720px]:flex-col"
+      className="dohc-elevated relative flex h-[min(760px,calc(100vh-112px))] w-[min(1040px,calc(100vw-32px))] overflow-hidden rounded-xl border border-line bg-bg max-[720px]:flex-col"
     >
       <SettingsNav
         workspacePath={props.workspacePath}

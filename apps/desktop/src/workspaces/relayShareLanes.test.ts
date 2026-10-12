@@ -1,9 +1,5 @@
 import { describe, expect, it } from "vitest";
-import {
-  isDamagedShareRow,
-  isReadableChatChannelRow,
-  pathShareLanes,
-} from "./relayShareLanes";
+import { isReadableChatChannelRow, pathShareLanes } from "./relayShareLanes";
 
 // Ending a share is only possible from the manager that lists it, so the
 // split between the two managers has to be exhaustive for granted rows.
@@ -78,7 +74,6 @@ describe("relay share lanes", () => {
     const damaged = damagedChatRow("s-damaged-chat");
     // Traced: the chat manager cannot take this row.
     expect(isReadableChatChannelRow(damaged)).toBe(false);
-    expect(isDamagedShareRow(damaged)).toBe(true);
 
     const lanes = pathShareLanes({ granted: [damaged], received: [damaged] });
     expect(

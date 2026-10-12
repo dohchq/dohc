@@ -2149,25 +2149,25 @@ describe("settings IPC contract", () => {
     expect(
       SetWorkspaceSettingsPayload.safeParse({
         workspaceId: "WS-settings",
-        settings: DEFAULT_WORKSPACE_SETTINGS,
+        patch: {},
       }).success,
     ).toBe(false);
     expect(
       SetWorkspaceSettingsPayload.safeParse({
         workspaceId: "",
-        settings: DEFAULT_WORKSPACE_SETTINGS,
+        patch: {},
       }).success,
     ).toBe(false);
     expect(
       SetWorkspaceSettingsPayload.safeParse({
         workspaceId: "ws-settings",
-        settings: {
-          ...DEFAULT_WORKSPACE_SETTINGS,
-          agents: {
-            ...DEFAULT_WORKSPACE_SETTINGS.agents,
-            mcpAutoStart: "yes",
-          },
-        },
+        patch: { privacy: { confirmExternalLinks: "yes" } },
+      }).success,
+    ).toBe(false);
+    expect(
+      SetWorkspaceSettingsPayload.safeParse({
+        workspaceId: "ws-settings",
+        patch: { agents: { mcpAutoStart: false } },
       }).success,
     ).toBe(false);
   });

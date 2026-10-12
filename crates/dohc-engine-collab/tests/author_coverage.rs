@@ -1128,9 +1128,169 @@ fn every_author_field_at_its_maximum_fits_one_entry() {
         serde_json::from_str(&authors.json()).expect("author list");
     assert_eq!(
         entries.iter().map(|entry| entry.to_string().len()).max(),
-        Some(author_coverage::MAX_AUTHOR_ENTRY_BYTES),
-        "the automation entry is the derived worst case"
+        Some(2_114),
+        "the automation entry is the largest local one: a 66-byte skeleton and two escaped fields"
     );
+}
+
+/// A declared agent is the largest live entry: an id, a name and a principal,
+/// each up to 512 bytes that escape to twice their size, and its depth. The
+/// host admits it, so the interval admits it too. One more byte is outside the
+/// contract on both sides.
+#[test]
+fn the_largest_declared_agent_fits_one_entry_and_a_larger_one_does_not() {
+    use dohc_engine_collab::live_update_application::LiveAuthorEntry;
+    let mut ts = fresh_store("largest-declared-agent");
+    let key = test_key();
+    seed_parents(&mut ts.store, &key, 1);
+    dohc_engine_collab::ensure_marker(
+        &mut ts.store,
+        &key,
+        ContentKind::Plaintext,
+        Regime::LocalOnly,
+        &NoFaults,
+        1,
+    )
+    .expect("marker");
+    let field = dohc_engine_domain::MAX_AUTHOR_FIELD_BYTES;
+    let agent = |id_bytes: usize| LiveAuthorEntry::Agent {
+        agent_id: "\"".repeat(id_bytes),
+        agent_name: Some("\"".repeat(field)),
+        on_behalf_of: Some("\"".repeat(field)),
+        depth: Some(64),
+    };
+    let largest = agent(field);
+    largest
+        .validate()
+        .expect("the host admits the largest declared agent");
+    let json = serde_json::to_string(&[&largest]).expect("entry");
+    assert_eq!(json.len() - "[]".len(), 3_143);
+    assert_eq!(author_coverage::MAX_AUTHOR_ENTRY_BYTES, 3_143);
+    ts.store
+        .write_with(&NoFaults, |tx| {
+            author_coverage::admit_accepted_in(tx, &key, &[json])
+        })
+        .expect("the interval admits the largest declared agent");
+    assert_eq!(covered_count(&ts.store, &key), 1);
+
+    let larger = agent(field + 1);
+    assert!(larger.validate().is_err());
+    let json = serde_json::to_string(&[&larger]).expect("entry");
+    assert!(matches!(
+        ts.store.write_with(&NoFaults, |tx| {
+            author_coverage::admit_accepted_in(tx, &key, &[json])
+        }),
+        Err(CollabError::AuthorEntryTooLarge)
+    ));
+    assert_eq!(covered_count(&ts.store, &key), 1);
+}
+
+fn pending_authors(
+    store: &dohc_engine_storage::EngineStore,
+    key: &dohc_engine_collab::DocKey,
+) -> String {
+    store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT pending_authors_json FROM ydoc_docs \
+                 WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+                rusqlite::params![key.workspace_id, key.version_id, key.object_id],
+                |row| row.get(0),
+            )
+        })
+        .expect("pending authors")
+}
+
+fn admit_accepted(
+    store: &mut dohc_engine_storage::EngineStore,
+    key: &dohc_engine_collab::DocKey,
+    author: serde_json::Value,
+) -> Result<TxnOutcome<()>, CollabError> {
+    let json = serde_json::Value::Array(vec![author]).to_string();
+    store.write_with(&NoFaults, |tx| {
+        author_coverage::admit_accepted_in(tx, key, &[json])
+    })
+}
+
+/// The relay keeps a known author's first name in its window, but each new
+/// editor session delivers the name that session derived. At the byte bound a
+/// longer name waits for a settlement like a new author and writes nothing.
+/// An unchanged or equally long name still applies.
+#[test]
+fn a_known_author_cannot_lengthen_its_name_past_the_byte_bound() {
+    let mut ts = fresh_store("known-author-name-growth");
+    let key = test_key();
+    seed_parents(&mut ts.store, &key, 1);
+    dohc_engine_collab::ensure_marker(
+        &mut ts.store,
+        &key,
+        ContentKind::Plaintext,
+        Regime::LocalOnly,
+        &NoFaults,
+        1,
+    )
+    .expect("marker");
+    let human = |index: usize, name: &str| {
+        serde_json::json!({
+            "kind": "human",
+            "humanId": format!("{index:04}{}", "h".repeat(116)),
+            "humanName": name,
+        })
+    };
+    let seed = |store: &mut dohc_engine_storage::EngineStore, count: usize| {
+        let pending = serde_json::Value::Array((0..count).map(|index| human(index, "A")).collect())
+            .to_string();
+        assert!(pending.len() <= author_coverage::MAX_INTERVAL_AUTHOR_BYTES);
+        store
+            .write_with(&NoFaults, |tx| {
+                tx.execute(
+                    "UPDATE ydoc_docs SET pending_authors_json=?4 \
+                     WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+                    rusqlite::params![key.workspace_id, key.version_id, key.object_id, pending],
+                )
+                .map_err(dohc_engine_storage::StorageError::persist_public)?;
+                Ok::<_, CollabError>(())
+            })
+            .expect("seed coverage");
+        pending
+    };
+    // As many equal entries as the byte bound holds, each with its comma.
+    let entry_bytes = human(0, "A").to_string().len();
+    let full = (author_coverage::MAX_INTERVAL_AUTHOR_BYTES - 1) / (entry_bytes + 1);
+    assert!(full < author_coverage::MAX_INTERVAL_AUTHORS);
+    let seeded = seed(&mut ts.store, full);
+    assert!(matches!(
+        admit_accepted(&mut ts.store, &key, human(full, "A")),
+        Err(CollabError::AuthorCapacity)
+    ));
+    let longer = "A".repeat(dohc_engine_domain::MAX_AUTHOR_FIELD_BYTES);
+    assert!(matches!(
+        admit_accepted(&mut ts.store, &key, human(0, &longer)),
+        Err(CollabError::AuthorCapacity)
+    ));
+    assert_eq!(pending_authors(&ts.store, &key), seeded);
+    for name in ["A", "B"] {
+        admit_accepted(&mut ts.store, &key, human(0, name))
+            .expect("a known author with an equally long name applies");
+    }
+    let covered = ts
+        .store
+        .read_with(|conn| author_coverage::reserved_in(conn, &key))
+        .expect("coverage");
+    assert_eq!(covered.len(), full);
+    assert!(covered.journal_bytes() <= author_coverage::MAX_INTERVAL_AUTHOR_BYTES);
+
+    // Below the bound the longer name fits and applies.
+    seed(&mut ts.store, full - 4);
+    admit_accepted(&mut ts.store, &key, human(0, &longer))
+        .expect("a longer name applies while it fits");
+    let covered = ts
+        .store
+        .read_with(|conn| author_coverage::reserved_in(conn, &key))
+        .expect("coverage");
+    assert_eq!(covered.len(), full - 4);
+    assert!(covered.json().contains(&longer));
+    assert!(covered.journal_bytes() <= author_coverage::MAX_INTERVAL_AUTHOR_BYTES);
 }
 
 #[test]

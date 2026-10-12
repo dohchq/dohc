@@ -30,12 +30,8 @@ import {
 import { ActivityBar } from "../../desktop/src/renderer/workbench/ActivityBar";
 import { NoticeCenter } from "../../desktop/src/renderer/workbench/NoticeCenter";
 import { useShellError } from "../../desktop/src/renderer/shell/useShellError";
-import { isViewId, VIEW_IDS } from "../../desktop/src/renderer/workbench/workbenchState";
-import {
-  DemoSidebar,
-  type DemoPanelId,
-  type DemoWorkspaceDocument,
-} from "./DemoSidebar";
+import { DemoSidebar, type DemoWorkspaceDocument } from "./DemoSidebar";
+import { DEMO_PANEL_IDS, isDemoPanelId, type DemoPanelId } from "./demoPanels";
 import {
   configureDemoDesktopBridge,
   DEMO_ASSET_PERSISTENCE_EVENT,
@@ -563,12 +559,13 @@ export function ProductDemo() {
 
       <div className="demo-workbench">
         <ActivityBar
-          views={VIEW_IDS}
+          views={DEMO_PANEL_IDS}
           activeView={activeActivity}
           sidebarVisible={sidebarVisible}
           hasConflict={false}
+          showSharing={false}
           onSelectView={(view) => {
-            if (isViewId(view)) selectActivity(view);
+            if (isDemoPanelId(view)) selectActivity(view);
           }}
         />
 

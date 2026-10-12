@@ -12,6 +12,7 @@ import type { ToolContext } from "./tools";
 // changes the granter's files; a chat write posts to a thread.
 const DOCUMENT_WRITE_TOOLS = [
   "dohc_dataset",
+  "dohc_save_kept_copy",
   "dohc_publish_app",
   "dohc_write_file",
   "dohc_create_directory",
@@ -111,11 +112,8 @@ describe("share-level tool profiles", () => {
     }
   });
 
-  // #646 PR2 registers NO write tool at any level, chat included. The two
-  // chat tools are GROUP tools, and a shared view refuses every group
-  // write before the level is read; `comment` grants per-FILE chat, which no
-  // MCP tool writes yet. A tool the workspace always refuses is worse than an
-  // absent one — the agent spends a turn discovering the refusal.
+  // Local file, document, and chat writes require an owning workspace.
+  // Shared views expose Button presses checked by the owner's host.
   it("registers no write tool at all for a comment profile, chat tools included", async () => {
     const { names } = await connectedToolNames({ ...base, shareAccess: "comment" });
     for (const tool of [...DOCUMENT_WRITE_TOOLS, ...CHAT_WRITE_TOOLS]) {

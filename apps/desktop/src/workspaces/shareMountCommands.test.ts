@@ -193,7 +193,8 @@ function harness() {
 
   const dependencies: ShareMountCommandDependencies<{ id: string }> = {
     readMounts: () => mounts,
-    writeMounts: (_workspaceId, next) => {
+    updateMounts: async (_workspaceId, update) => {
+      const next = update(mounts);
       events.push(`registry:${next.length}`);
       mounts = [...next];
     },
@@ -621,7 +622,7 @@ describe("share mount commands", () => {
 
   it("turns registry-write plus projection-remove failure into rollback evidence", async () => {
     const h = harness();
-    h.dependencies.writeMounts = () => {
+    h.dependencies.updateMounts = async () => {
       throw new Error("registry failed");
     };
     h.removeOutcome = { folderLeft: true };

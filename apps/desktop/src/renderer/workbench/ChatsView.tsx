@@ -139,7 +139,7 @@ export interface AgentSetupSummary {
   preferredName?: string;
   runnerConfigured: boolean;
   runnerEnabled: boolean;
-  mcpEnabled: boolean;
+  agentRunActive: boolean;
 }
 
 // The Chats view (PR 13, WS-E): workspace Chats organized in channels, plus
@@ -4439,8 +4439,8 @@ export function ChatsView(props: {
                   : "Runner on"
                 : props.agentSetup.runnerConfigured
                   ? "Runner configured · dispatch is off"
-                  : props.agentSetup.mcpEnabled
-                    ? "Workspace MCP on · connect an agent to reply here"
+                  : props.agentSetup.agentRunActive
+                    ? "Agent run active · connect an agent to reply here"
                     : "No runner yet · add an agent under Agents"}
             </span>
             {props.workspacePath ? (

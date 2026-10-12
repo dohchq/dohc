@@ -1801,11 +1801,7 @@ pub fn prepare_local_ydoc_lineage_in_tx(
 ) -> Result<PreparedLocalYdocLineage, SyncError> {
     let complete = ensure_ydoc_lineage_complete_in_tx(tx, key)?;
     let projection = match complete.state.as_ref() {
-        Some((marker, doc))
-            if marker.lineage_claim_status.has_claimed_base()
-                || marker.head_update_seq > 0
-                || marker.head_snapshot_seq > 0 =>
-        {
+        Some((marker, doc)) if lineage_has_content(marker) => {
             Some(project_ydoc_with_store(tx, key, doc, marker.content_kind)?)
         }
         _ => None,
@@ -2122,10 +2118,7 @@ pub(crate) fn complete_ydoc_projection_in_tx(
     let Some((marker, doc)) = complete.state.as_ref() else {
         return Ok(None);
     };
-    let has_content = marker.lineage_claim_status.has_claimed_base()
-        || marker.head_update_seq > 0
-        || marker.head_snapshot_seq > 0;
-    let content = if has_content {
+    let content = if lineage_has_content(marker) {
         Some(project_ydoc_with_store(tx, key, doc, marker.content_kind)?.content)
     } else {
         None
@@ -2154,7 +2147,7 @@ pub(crate) fn reconcile_conflict_parent_resulting_head_in_tx(
             text,
             LineageFoldAuthor::default(),
             now_ms,
-            false,
+            LineageFoldCause::ConflictParent,
         )
         .map(|_| ()),
         ResultingHead::BinaryOrAbsent => retire_complete_ydoc_lineage_in_tx(tx, &complete),
@@ -2166,9 +2159,10 @@ pub(crate) fn reconcile_conflict_parent_resulting_head_in_tx(
 /// artifact operation, so every peer applies one canonical rewrite. Returns
 /// the collection record fields the mutation changed, if it wrote a bound
 /// record's frontmatter: from the lineage's fold, or, when the lineage holds
-/// no content, from the record's index against the written text.
+/// no content, from the record's index against the written text. Also says
+/// whether the fold kept unsettled text as a recovered sibling file.
 #[allow(clippy::too_many_arguments)]
-pub fn reconcile_local_resulting_head_in_tx(
+pub fn reconcile_local_head_in_tx(
     tx: &rusqlite::Transaction<'_>,
     workspace_id: &str,
     version_id: &str,
@@ -2177,7 +2171,7 @@ pub fn reconcile_local_resulting_head_in_tx(
     actor_origin_id: Option<&str>,
     attribution: Option<&dohc_engine_domain::ChangeAttribution>,
     now_ms: i64,
-) -> Result<Option<dohc_engine_domain::CollectionRecordApplyFacts>, SyncError> {
+) -> Result<LocalHeadReconcile, SyncError> {
     let key =
         DocKey::new(workspace_id, version_id, object_id).map_err(|_| SyncError::InvalidInput {
             reason: "Y.Doc lineage coordinates are invalid",
@@ -2194,15 +2188,16 @@ pub fn reconcile_local_resulting_head_in_tx(
     )
 }
 
-/// Consume capture's pre-mutation lineage without loading or projecting it again.
-pub fn reconcile_prepared_local_resulting_head_in_tx(
+/// [`reconcile_local_head_in_tx`] over capture's pre-mutation lineage, without
+/// loading or projecting it again.
+pub fn reconcile_prepared_local_head_in_tx(
     tx: &rusqlite::Transaction<'_>,
     prepared: PreparedLocalYdocLineage,
     resulting: ResultingHead<'_>,
     actor_origin_id: Option<&str>,
     attribution: Option<&dohc_engine_domain::ChangeAttribution>,
     now_ms: i64,
-) -> Result<Option<dohc_engine_domain::CollectionRecordApplyFacts>, SyncError> {
+) -> Result<LocalHeadReconcile, SyncError> {
     reconcile_local_complete_resulting_head_in_tx(
         tx,
         &prepared.complete,
@@ -2222,10 +2217,20 @@ fn reconcile_local_complete_resulting_head_in_tx(
     actor_origin_id: Option<&str>,
     attribution: Option<&dohc_engine_domain::ChangeAttribution>,
     now_ms: i64,
-) -> Result<Option<dohc_engine_domain::CollectionRecordApplyFacts>, SyncError> {
+) -> Result<LocalHeadReconcile, SyncError> {
     let key = &complete.key;
     match resulting {
         ResultingHead::Text { path, text } => {
+            // The authors of text this write may replace. Read before the
+            // supersede below drops a reserved settle attempt's share of them.
+            let unsettled_authors = match complete.state.as_ref() {
+                Some((marker, _)) if lineage_has_content(marker) => {
+                    dohc_engine_collab::author_coverage::reserved_in(tx, key)
+                        .map_err(map_collab_hard_error)?
+                        .moment_json()
+                }
+                _ => None,
+            };
             // A blocked settlement write must not refuse this head forever.
             dohc_engine_collab::author_coverage::supersede_in(tx, key, now_ms)
                 .map_err(map_collab_hard_error)?;
@@ -2239,11 +2244,17 @@ fn reconcile_local_complete_resulting_head_in_tx(
                     attribution,
                 },
                 now_ms,
-                true,
+                LineageFoldCause::LocalMutation { unsettled_authors },
                 projection,
             )?;
             match folded {
-                LineageFold::Folded(facts) => Ok(facts.map(|facts| *facts)),
+                LineageFold::Folded {
+                    facts,
+                    recovered_sibling,
+                } => Ok(LocalHeadReconcile {
+                    facts: facts.map(|facts| *facts),
+                    recovered_sibling,
+                }),
                 LineageFold::NoContent => dohc_engine_domain::index_collection_record_text_in_tx(
                     tx,
                     &key.workspace_id,
@@ -2255,13 +2266,46 @@ fn reconcile_local_complete_resulting_head_in_tx(
                     attribution,
                     now_ms,
                 )
+                .map(|facts| LocalHeadReconcile {
+                    facts,
+                    recovered_sibling: false,
+                })
                 .map_err(map_domain_hard_error),
             }
         }
         ResultingHead::BinaryOrAbsent => {
-            retire_complete_ydoc_lineage_in_tx(tx, complete).map(|()| None)
+            retire_complete_ydoc_lineage_in_tx(tx, complete).map(|()| LocalHeadReconcile {
+                facts: None,
+                recovered_sibling: false,
+            })
         }
     }
+}
+
+/// [`reconcile_local_head_in_tx`] for a caller that reserves no later moment
+/// order in the same transaction and needs only the record facts.
+#[allow(clippy::too_many_arguments)]
+pub fn reconcile_local_resulting_head_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    workspace_id: &str,
+    version_id: &str,
+    object_id: &str,
+    resulting: ResultingHead<'_>,
+    actor_origin_id: Option<&str>,
+    attribution: Option<&dohc_engine_domain::ChangeAttribution>,
+    now_ms: i64,
+) -> Result<Option<dohc_engine_domain::CollectionRecordApplyFacts>, SyncError> {
+    reconcile_local_head_in_tx(
+        tx,
+        workspace_id,
+        version_id,
+        object_id,
+        resulting,
+        actor_origin_id,
+        attribution,
+        now_ms,
+    )
+    .map(|reconciled| reconciled.facts)
 }
 
 /// Who wrote the text a fold folds in.
@@ -2271,13 +2315,85 @@ pub(crate) struct LineageFoldAuthor<'a> {
     pub(crate) attribution: Option<&'a dohc_engine_domain::ChangeAttribution>,
 }
 
+/// Why a fold folds. The cause decides whether the rewrite is journaled and
+/// whether unsettled text the fold would discard is kept.
+pub(crate) enum LineageFoldCause {
+    /// A locally-originated file mutation over a closed lineage. Its rewrite
+    /// is journaled, and text the lineage held but no artifact ever
+    /// recorded becomes a recovered sibling file credited to these authors.
+    LocalMutation { unsettled_authors: Option<String> },
+    /// A reviewed conflict resolution. Both sides were shown; the chosen
+    /// text is journaled and nothing else is kept.
+    Resolution,
+    /// A replicated conflict parent. The parent is the journaled operation,
+    /// so the receiver's rewrite is not.
+    ConflictParent,
+}
+
+impl LineageFoldCause {
+    fn journals(&self) -> bool {
+        !matches!(self, LineageFoldCause::ConflictParent)
+    }
+}
+
+fn lineage_has_content(marker: &dohc_engine_collab::Marker) -> bool {
+    marker.lineage_claim_status.has_claimed_base()
+        || marker.head_update_seq > 0
+        || marker.head_snapshot_seq > 0
+}
+
+/// Whether an artifact already holds a closed lineage's projection: the
+/// lineage settled it, a moment of this file recorded exactly these bytes,
+/// or the lineage is still the untouched seed of the file's own bytes.
+fn projection_held_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    key: &DocKey,
+    content: &str,
+) -> Result<bool, SyncError> {
+    if dohc_engine_collab::seed_only_lineage_source(tx, key)
+        .map_err(map_collab_hard_error)?
+        .is_some()
+    {
+        return Ok(true);
+    }
+    tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM ydoc_docs \
+           WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND last_settled_sha=?4) \
+         OR EXISTS(SELECT 1 FROM moments \
+           WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND after_blob_sha256=?4)",
+        params![
+            key.workspace_id,
+            key.version_id,
+            key.object_id,
+            hex_sha256(content.as_bytes()),
+        ],
+        |row| row.get(0),
+    )
+    .map_err(SyncError::corrupt)
+}
+
 /// What folding a file's text into its Y.Doc lineage did.
 pub(crate) enum LineageFold {
     /// The lineage holds no content: the file alone carries the text.
     NoContent,
     /// The lineage holds the text now, with the record fields its append
     /// changed, if any. Boxed, since the facts dwarf the empty variant.
-    Folded(Option<Box<dohc_engine_domain::CollectionRecordApplyFacts>>),
+    /// `recovered_sibling` says the fold first kept unsettled text as a
+    /// recovered sibling file, whose moment took the next global order.
+    Folded {
+        facts: Option<Box<dohc_engine_domain::CollectionRecordApplyFacts>>,
+        recovered_sibling: bool,
+    },
+}
+
+/// What reconciling a local text head with its lineage did.
+pub struct LocalHeadReconcile {
+    /// Collection record fields the head changed, if any.
+    pub facts: Option<dohc_engine_domain::CollectionRecordApplyFacts>,
+    /// The fold kept unsettled text as a recovered sibling file. Its moment
+    /// took the next global order, so a caller that reserved later orders in
+    /// this transaction must read the high-water mark again.
+    pub recovered_sibling: bool,
 }
 
 fn pristine_empty_seed_in_tx(
@@ -2376,10 +2492,7 @@ pub(crate) fn reconcile_imported_complete_resulting_head_in_tx(
             let Some((marker, doc)) = complete.state.as_ref() else {
                 return Ok(());
             };
-            let has_content = marker.lineage_claim_status.has_claimed_base()
-                || marker.head_update_seq > 0
-                || marker.head_snapshot_seq > 0;
-            if has_content {
+            if lineage_has_content(marker) {
                 let projection =
                     project_ydoc_with_store(tx, &complete.key, doc, marker.content_kind)?;
                 if projection.content != text {
@@ -2467,7 +2580,7 @@ pub fn fold_resolution_into_ydoc_in_tx(
         chosen_text,
         LineageFoldAuthor::default(),
         now_ms,
-        true,
+        LineageFoldCause::Resolution,
     )
     .map(|_| ())
 }
@@ -2479,7 +2592,7 @@ pub(crate) fn fold_complete_ydoc_lineage_in_tx(
     chosen_text: &str,
     author: LineageFoldAuthor<'_>,
     now_ms: i64,
-    journal: bool,
+    cause: LineageFoldCause,
 ) -> Result<LineageFold, SyncError> {
     fold_projected_complete_ydoc_lineage_in_tx(
         tx,
@@ -2488,7 +2601,7 @@ pub(crate) fn fold_complete_ydoc_lineage_in_tx(
         chosen_text,
         author,
         now_ms,
-        journal,
+        cause,
         None,
     )
 }
@@ -2501,7 +2614,7 @@ fn fold_projected_complete_ydoc_lineage_in_tx(
     chosen_text: &str,
     author: LineageFoldAuthor<'_>,
     now_ms: i64,
-    journal: bool,
+    cause: LineageFoldCause,
     projection: Option<&dohc_engine_collab::Projection>,
 ) -> Result<LineageFold, SyncError> {
     let LineageFoldAuthor {
@@ -2515,10 +2628,7 @@ fn fold_projected_complete_ydoc_lineage_in_tx(
     let Some((marker, doc)) = complete.state.as_ref() else {
         return Ok(LineageFold::NoContent);
     };
-    let has_content = marker.lineage_claim_status.has_claimed_base()
-        || marker.head_update_seq > 0
-        || marker.head_snapshot_seq > 0;
-    if !has_content {
+    if !lineage_has_content(marker) {
         tx.execute(
             "UPDATE ydoc_docs SET path=?4, updated_at_ms=?5 \
              WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
@@ -2534,6 +2644,7 @@ fn fold_projected_complete_ydoc_lineage_in_tx(
         return Ok(LineageFold::NoContent);
     }
     let mut record_facts = None;
+    let mut recovered_sibling = false;
     let loaded_projection;
     let projection = if let Some(projection) = projection {
         projection
@@ -2552,8 +2663,30 @@ fn fold_projected_complete_ydoc_lineage_in_tx(
             // scene. The durable file head is canonical: retire the lineage
             // and let the next open seed a fresh scene from the artifact,
             // exactly like a first open.
-            return retire_complete_ydoc_lineage_in_tx(tx, complete)
-                .map(|()| LineageFold::Folded(None));
+            return retire_complete_ydoc_lineage_in_tx(tx, complete).map(|()| {
+                LineageFold::Folded {
+                    facts: None,
+                    recovered_sibling: false,
+                }
+            });
+        }
+        // The rewrite below discards this projection. Text no artifact holds
+        // leaves as an ordinary sibling file first, in this transaction, so
+        // a rollback of the write takes the copy with it.
+        if let LineageFoldCause::LocalMutation { unsettled_authors } = &cause
+            && !projection.content.is_empty()
+            && !projection_held_in_tx(tx, key, &projection.content)?
+        {
+            crate::ydoc_recovery::recover_unsettled_local_in_tx(
+                tx,
+                key,
+                marker.lineage_claim_id.as_deref(),
+                path,
+                &projection.content,
+                unsettled_authors.as_deref(),
+                now_ms,
+            )?;
+            recovered_sibling = true;
         }
         let mut update = doc
             .rewrite_content_to_markdown_for_fold(marker.content_kind, chosen_text)
@@ -2626,7 +2759,7 @@ fn fold_projected_complete_ydoc_lineage_in_tx(
         // that never enrolled has no sync identity, and its choice needs no
         // peer. `emit_outbound` alone cannot gate this — a claimed lineage
         // exists on identity-less receivers too.
-        if journal
+        if cause.journals()
             && marker.lineage_claim_status == dohc_engine_collab::LineageClaimStatus::Exact
             && !outcome.deduped
             && crate::journal::workspace_replicates_with_relay_in_tx(tx, &key.workspace_id)?
@@ -2658,7 +2791,10 @@ fn fold_projected_complete_ydoc_lineage_in_tx(
     // expectation so the next session does not refuse ConflictStaleTarget
     // over the very state the user just chose.
     settle_ydoc_marker_to_text(tx, key, path, chosen_text, now_ms)?;
-    Ok(LineageFold::Folded(record_facts.map(Box::new)))
+    Ok(LineageFold::Folded {
+        facts: record_facts.map(Box::new),
+        recovered_sibling,
+    })
 }
 
 fn settle_ydoc_marker_to_text(

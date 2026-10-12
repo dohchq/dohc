@@ -170,6 +170,27 @@ export function shareMountRecordsForId<Mount>(
   );
 }
 
+// Changes every record for the share. With none, returns `mounts` itself.
+export function updateShareMountRecords<Mount>(
+  mounts: readonly Mount[],
+  shareId: string,
+  change: (mount: Mount) => Mount,
+): readonly Mount[] {
+  if (shareMountRecordsForId(mounts, shareId).length === 0) return mounts;
+  return mounts.map((mount) =>
+    mountField(mount, "shareId") === shareId ? change(mount) : mount,
+  );
+}
+
+// Every record but the share's. With none, returns `mounts` itself.
+export function withoutShareMountRecords<Mount>(
+  mounts: readonly Mount[],
+  shareId: string,
+): readonly Mount[] {
+  if (shareMountRecordsForId(mounts, shareId).length === 0) return mounts;
+  return mounts.filter((mount) => mountField(mount, "shareId") !== shareId);
+}
+
 export function usableShareMountRecord<Mount>(
   mounts: readonly Mount[],
   mount: Mount,
@@ -192,10 +213,7 @@ export function planShareMountRemoval<Mount>(
   shareId: string,
 ):
   | { kind: "missing" }
-  | {
-      kind: "registry-only";
-      remaining: Mount[];
-    }
+  | { kind: "registry-only" }
   | {
       kind: "owner";
       mount: Mount & { shareId: string; label: string };
@@ -208,11 +226,7 @@ export function planShareMountRemoval<Mount>(
   ) {
     return { kind: "owner", mount: matches[0]! };
   }
-  const damaged = new Set<Mount>(matches);
-  return {
-    kind: "registry-only",
-    remaining: mounts.filter((mount) => !damaged.has(mount)),
-  };
+  return { kind: "registry-only" };
 }
 
 export type ResolvedShareProjectionPath<Mount> =

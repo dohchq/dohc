@@ -24,9 +24,9 @@ function target(initial: Record) {
     effects,
     stored: () => stored,
     recorder: createShareSkipRecorder<Record>({
-      current: () => stored,
-      persist: (next) => {
-        stored = next;
+      update: async (change) => {
+        if (!stored) return;
+        stored = change(stored);
         effects.push("persist");
       },
       now: () => 1000,
@@ -82,8 +82,8 @@ describe("share skip recorder", () => {
     expect(share.effects).toEqual([]);
   });
 
-  // A share revoked mid-pull has no record to write to. The recorder reads
-  // per call for exactly this reason.
+  // A share revoked mid-pull has no record to write to. The recorder changes
+  // the record as it stands at each write for exactly this reason.
   it("writes nothing once the record is gone", async () => {
     const share = target({ shareId: "share-1" });
     await share.recorder([refusal(1)]);

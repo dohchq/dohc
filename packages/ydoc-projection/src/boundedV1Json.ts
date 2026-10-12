@@ -124,7 +124,6 @@ class JsonScanner {
         this.index += 1
         this.budget.visitDecodedPayloadBytes(decodedByteLength)
         if (isValue) return undefined
-        this.observation?.onKeyMaterialized?.()
         return this.decodeKeyAfterCharge(tokenStart + 1, tokenEnd)
       }
       if (unit < 0x20) this.invalid()
@@ -183,6 +182,7 @@ class JsonScanner {
   }
 
   private decodeKeyAfterCharge(start: number, end: number): string {
+    this.observation?.onKeyMaterialized?.()
     const chunks: string[] = []
     let index = start
     let segmentStart = start
