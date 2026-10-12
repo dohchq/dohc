@@ -34,6 +34,8 @@ const BODIES: [string, string, boolean][] = [
   ["setext H1, no line end", "Plan\n===", true],
   ["setext H1 with trailing spaces", "Plan\n===  \n", true],
   ["setext H1 with a trailing tab", "Plan\n===\t\n", false],
+  ["a tab-ended === in the paragraph, then an underline", "Plan\n===\t\n===\n", true],
+  ["a tab-ended --- in the paragraph, then an underline", "Plan\n---\t\n===\n", true],
   ["setext H1 under 17 lines", `${lines(17)}\n===\n`, true],
   ["setext H1 under 400 lines", `${lines(400)}\n===\n`, true],
   ["setext H2", "Plan\n---\n", false],
@@ -70,6 +72,33 @@ describe("opensWithH1", () => {
     expect(lexesAsH1(Lexer, body)).toBe(expected);
     const decided = opensWithH1(body);
     expect(typeof decided === "string" ? lexesAsH1(Lexer, decided) : decided).toBe(expected);
+  });
+
+  // Every document of one to four lines from lines that sit on the rules'
+  // edges, and a sample of them with CRLF line ends, answers as the lexer
+  // reading the whole document does.
+  it("agrees with the lexer on every short document built from the rules' edge lines", () => {
+    const alphabet = [
+      "Plan", "===", "=== ", "===\t", "---", "--- ", "- - -", "", " ",
+      "# x", "# x", "    code", "\t===", "> q", "- item", "<div>", "```",
+    ];
+    const documents: string[][] = [[]];
+    const disagreements: string[] = [];
+    for (let length = 1; length <= 4; length += 1) {
+      for (const lines of documents.splice(0)) {
+        for (const line of alphabet) documents.push([...lines, line]);
+      }
+      documents.forEach((lines, index) => {
+        const endings = index % 7 === 0 ? ["\n", "\r\n"] : ["\n"];
+        for (const ending of endings) {
+          const body = lines.join(ending);
+          const decided = opensWithH1(body);
+          const answer = typeof decided === "string" ? lexesAsH1(Lexer, decided) : decided;
+          if (answer !== lexesAsH1(Lexer, body)) disagreements.push(JSON.stringify(body));
+        }
+      });
+    }
+    expect(disagreements).toEqual([]);
   });
 
   it("decides a clear ATX heading, and a paragraph with no underline, without lexing", () => {

@@ -19,8 +19,11 @@ const ATX_HEADING = /^ {0,3}(#{1,6})(?=\s|$).*$/;
 // setext heading: a first line that starts one is never a heading.
 const NEVER_A_HEADING =
   /^(?: {4}| {0,3}\t| {0,3}(?:`{3,}[^`]*$|~{3,}|(?:(?:-[ \t]*){3,}|(?:_[ \t]*){3,}|(?:\*[ \t]*){3,})$|>|(?:[*+-]|\d{1,9}[.)])(?:[ \t]|$)))/;
-// A setext underline, or anything shaped like one; the lexer decides.
-const UNDERLINE = /^ {0,3}(?:=+|-+)[ \t]*$/;
+// `lheading`'s underline: `=` or `-` and then spaces only, so `===\t` is
+// paragraph text and a later underline can still end the heading. The first
+// one the paragraph reaches ends it, and the lexer decides whether another
+// rule takes the lines first.
+const UNDERLINE = /^ {0,3}(?:=+|-+) *$/;
 // `lheading` cannot continue its paragraph across a whitespace-only line, a
 // `#`, a fence or a quote, so no underline after one makes this block an H1.
 const ENDS_SETEXT = /^(?:\s*$| {0,3}(?:#|`{3}|~{3}|>))/;
