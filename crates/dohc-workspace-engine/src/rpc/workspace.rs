@@ -91,6 +91,7 @@ pub(crate) struct OpenWorkspace {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum WorkspaceOpenMode {
     Full,
+    Passive,
     ReadOnly,
 }
 
@@ -342,6 +343,8 @@ struct WorkspaceOpenParams {
     root_dir: String,
     workspace_id: String,
     #[serde(default)]
+    store_mode: Option<WorkspaceStoreMode>,
+    #[serde(default)]
     capture_author: Option<Value>,
     #[serde(default)]
     recover_running_dispatches: Option<bool>,
@@ -357,6 +360,12 @@ struct WorkspaceOpenParams {
     project_collections: bool,
     #[serde(default)]
     relay: Option<RelayOpenParams>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+enum WorkspaceStoreMode {
+    Passive,
 }
 
 #[derive(Deserialize)]
@@ -605,6 +614,22 @@ impl EngineService {
                 },
             ));
         }
+        let passive = params.store_mode.is_some();
+        if passive
+            && (capture_enabled
+                || capture_author_supplied
+                || params.skip_startup_maintenance
+                || params.reconcile_collections
+                || params.project_collections
+                || params.recover_running_dispatches == Some(true)
+                || self.configured_live_host.get().is_some()
+                || self.ordinary_live_host.get().is_some())
+        {
+            return Err(WireError::new(
+                ErrorCode::InvalidParams,
+                "passive store configuration is incompatible",
+            ));
+        }
         let cancellation = OperationCancellation::new(ctx);
         let _open_serial = tokio::select! {
             biased;
@@ -617,7 +642,9 @@ impl EngineService {
         work.step();
         let root = root_binding::canonical_root(PathBuf::from(&params.root_dir).as_path())
             .map_err(map_root_binding)?;
-        let requested_mode = if params.skip_startup_maintenance {
+        let requested_mode = if passive {
+            WorkspaceOpenMode::Passive
+        } else if params.skip_startup_maintenance {
             WorkspaceOpenMode::ReadOnly
         } else {
             WorkspaceOpenMode::Full
@@ -764,7 +791,7 @@ impl EngineService {
             // The marker precedes database creation. A crash leaves either a marker
             // and no schema, or a schema already bound to that marker.
             let root_token = match requested_mode {
-                WorkspaceOpenMode::Full => {
+                WorkspaceOpenMode::Full | WorkspaceOpenMode::Passive => {
                     root_binding::write_new_root_binding(&binding_root).map_err(map_root_binding)?
                 }
                 WorkspaceOpenMode::ReadOnly => root_binding::read_root_binding(&binding_root)
@@ -776,6 +803,9 @@ impl EngineService {
             let opened = match requested_mode {
                 WorkspaceOpenMode::Full => {
                     supervisor.open_root_bound(&actor_path, now_ms, &root_token, store_work)
+                }
+                WorkspaceOpenMode::Passive => {
+                    supervisor.open_passive_root_bound(&actor_path, now_ms, &root_token, store_work)
                 }
                 WorkspaceOpenMode::ReadOnly => {
                     supervisor.open_read_only_counting(&actor_path, store_work)
@@ -892,6 +922,19 @@ impl EngineService {
         {
             return Err(bound_to_another_workspace());
         }
+        if requested_mode == WorkspaceOpenMode::Passive {
+            Self::read_under_ctx(
+                &cancellation,
+                "workspace.open (passive main version)",
+                actor.ensure_main_version(
+                    params.workspace_id.clone(),
+                    now_ms,
+                    Arc::new(NoFaults),
+                    cancellation.token.clone(),
+                ),
+            )
+            .await?;
+        }
         let open_guard = if requested_mode == WorkspaceOpenMode::Full
             && let Some(config) = self.ordinary_live_host.get()
         {
@@ -952,13 +995,15 @@ impl EngineService {
             .as_ref()
             .and_then(|probe| probe.observation_root.clone())
             .unwrap_or(observation_root);
-        observation.start(observation_root).map_err(|_| {
-            WireError::new(
-                ErrorCode::WorkspaceUnavailable,
-                "file-observation-unavailable",
-            )
-        })?;
-        let capture = if requested_mode == WorkspaceOpenMode::ReadOnly {
+        if requested_mode != WorkspaceOpenMode::Passive {
+            observation.start(observation_root).map_err(|_| {
+                WireError::new(
+                    ErrorCode::WorkspaceUnavailable,
+                    "file-observation-unavailable",
+                )
+            })?;
+        }
+        let capture = if requested_mode != WorkspaceOpenMode::Full {
             None
         } else {
             // Mandatory readiness barrier: derived mention rows must exist before
@@ -1245,6 +1290,235 @@ mod tests {
     use dohc_engine_testkit::ScratchDir;
     use dohc_engine_testkit::ScriptedFaults;
     use std::time::Duration;
+
+    #[tokio::test]
+    async fn passive_store_opens_writable_without_starting_work() {
+        let scratch = dohc_engine_testkit::ScratchDir::new().unwrap();
+        let service = EngineService::new();
+        let params = json!({"rootDir":scratch.path(), "workspaceId":"passive", "captureMode":"none", "storeMode":"passive"});
+        let opened = service
+            .workspace_open(&RequestContext::unbounded(), params.clone())
+            .await
+            .unwrap();
+        let handle: WorkspaceHandle = serde_json::from_value(opened["workspace"].clone()).unwrap();
+        let open = service.open(Some(&handle)).unwrap();
+        assert!(lock(&open.capture).is_none());
+        assert!(lock(&open.automation_recovery).is_none());
+        assert!(lock(&open.collection_projection).is_none());
+        open.actor
+            .ensure_main_version(
+                "passive".into(),
+                1,
+                Arc::new(NoFaults),
+                dohc_engine_runtime::CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        service.workspace_close(Some(handle)).await.unwrap();
+        let reopened = service
+            .workspace_open(&RequestContext::unbounded(), params)
+            .await
+            .unwrap();
+        let handle = serde_json::from_value(reopened["workspace"].clone()).unwrap();
+        assert_eq!(
+            service.open(Some(&handle)).unwrap().mode,
+            WorkspaceOpenMode::Passive
+        );
+        service.workspace_close(Some(handle)).await.unwrap();
+        assert_eq!(std::fs::read_dir(scratch.path()).unwrap().count(), 1);
+    }
+
+    #[tokio::test]
+    async fn passive_store_startup_leaves_existing_file_jobs_pending() {
+        let scratch = ScratchDir::new().unwrap();
+        let service = EngineService::new();
+        let mut params = json!({"rootDir":scratch.path(), "workspaceId":"passive-startup", "captureMode":"none"});
+        let opened = service
+            .workspace_open(&RequestContext::unbounded(), params.clone())
+            .await
+            .unwrap();
+        let handle: WorkspaceHandle = serde_json::from_value(opened["workspace"].clone()).unwrap();
+        let actor = service.open(Some(&handle)).unwrap().actor.clone();
+        actor
+            .ensure_main_version(
+                "passive-startup".into(),
+                1,
+                Arc::new(NoFaults),
+                dohc_engine_runtime::CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        let mut latest = None;
+        for (index, text) in ["old", "new"].into_iter().enumerate() {
+            latest = Some(
+                actor
+                    .versioned_text_write(
+                        WriteText {
+                            workspace_id: "passive-startup".into(),
+                            version_id: "main".into(),
+                            object_id: "note".into(),
+                            path: "note.txt".into(),
+                            text: text.into(),
+                            moment_id: format!("moment-{index}"),
+                            metadata_origin: "api".into(),
+                            metadata_summary: None,
+                            metadata_correlation_id: None,
+                            author_json: None,
+                            now_ms: index as i64 + 2,
+                            request_id: None,
+                        },
+                        Arc::new(NoFaults),
+                        dohc_engine_runtime::CancellationToken::new(),
+                    )
+                    .await
+                    .unwrap(),
+            );
+        }
+        let latest = latest.unwrap();
+        service.workspace_close(Some(handle)).await.unwrap();
+        let db_path = scratch.path().join(".dohc/engine/engine.db");
+        let mut store = dohc_engine_storage::EngineStore::open(&db_path, 4).unwrap();
+        store
+            .write_with(&NoFaults, |tx| {
+                dohc_engine_storage::enqueue_job(
+                    tx,
+                    &dohc_engine_storage::MaterializationJobSpec {
+                        job_id: "pending-startup".into(),
+                        workspace_id: "passive-startup".into(),
+                        target_path: "note.txt".into(),
+                        content_sha256: latest.snapshot.blob_sha256,
+                        preimage: dohc_engine_storage::Preimage::Present(
+                            dohc_engine_storage::hex_sha256(b"old"),
+                        ),
+                        target_generation: latest.moment.moment_order,
+                        now_ms: 4,
+                    },
+                )
+            })
+            .unwrap();
+        drop(store);
+        std::fs::write(scratch.path().join("note.txt"), "old").unwrap();
+        params["storeMode"] = json!("passive");
+        let opened = service
+            .workspace_open(&RequestContext::unbounded(), params)
+            .await
+            .unwrap();
+        let handle: WorkspaceHandle = serde_json::from_value(opened["workspace"].clone()).unwrap();
+        assert_eq!(
+            std::fs::read(scratch.path().join("note.txt")).unwrap(),
+            b"old"
+        );
+        service.workspace_close(Some(handle)).await.unwrap();
+        let store = dohc_engine_storage::EngineStore::open_read_only(&db_path).unwrap();
+        assert_eq!(store.list_pending_materialization_jobs().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn passive_store_refuses_combinations_and_write_methods() {
+        let scratch = dohc_engine_testkit::ScratchDir::new().unwrap();
+        let service = EngineService::new();
+        let params = json!({"rootDir":scratch.path(), "workspaceId":"passive", "captureMode":"none", "storeMode":"passive"});
+        for (name, value) in [
+            ("reconcileCollections", json!(true)),
+            ("projectCollections", json!(true)),
+            ("skipStartupMaintenance", json!(true)),
+            ("recoverRunningDispatches", json!(true)),
+            ("publication", json!(true)),
+            ("automations", json!(true)),
+        ] {
+            let mut invalid = params.clone();
+            invalid[name] = value;
+            assert_eq!(
+                service
+                    .workspace_open(&RequestContext::unbounded(), invalid)
+                    .await
+                    .unwrap_err()
+                    .code,
+                ErrorCode::InvalidParams,
+                "{name}"
+            );
+        }
+        let mut capture = params.clone();
+        capture.as_object_mut().unwrap().remove("captureMode");
+        assert_eq!(
+            service
+                .workspace_open(&RequestContext::unbounded(), capture)
+                .await
+                .unwrap_err()
+                .code,
+            ErrorCode::InvalidParams
+        );
+        let opened = service
+            .workspace_open(&RequestContext::unbounded(), params)
+            .await
+            .unwrap();
+        let handle: WorkspaceHandle = serde_json::from_value(opened["workspace"].clone()).unwrap();
+        for method in [
+            "sync.claim",
+            "sync.push",
+            "sync.resetClaimRefusal",
+            "sync.dismissRefusal",
+            "sync.materializePendingCursor",
+            "sync.shareLogPush",
+            "sync.shareViewPull",
+            "sync.submitShareProposal",
+            "sync.pushDirectWrites",
+            "versions.ensureMain",
+            "versions.createNamed",
+            "versions.setActive",
+            "versionedText.write",
+            "versionedText.writeBlob",
+            "versionedText.rename",
+            "versionedText.delete",
+            "versionedText.rollback",
+            "versionedText.merge",
+            "versionedBinary.write",
+            "versionedBinary.writeBlob",
+            "capture.hold",
+            "capture.release",
+            "capture.reconcile",
+            "capture.updateAuthor",
+            "ydoc.open",
+            "ydoc.recordUpdate",
+            "ydoc.settle",
+            "ydoc.project",
+            "secrets.write",
+            "secrets.materialize",
+            "secrets.list",
+            "secrets.moments.get",
+            "automations.subscribe",
+            "automations.claimNext",
+            "automations.settle",
+            "collections.create",
+            "collections.reconcile",
+            "datasets.execute",
+            "apps.publish",
+            "chats.sendMessage",
+            "chats.dispatch.claimNext",
+            "liveApplication.provisionOwner",
+        ] {
+            assert_eq!(
+                service
+                    .ensure_handle_allows_method(Some(&handle), method)
+                    .unwrap_err()
+                    .code,
+                ErrorCode::Forbidden,
+                "{method}"
+            );
+        }
+        for method in [
+            "sync.adoptJoinIdentity",
+            "sync.pull",
+            "sync.commitCursor",
+            "versionedText.read",
+            "workspace.close",
+        ] {
+            service
+                .ensure_handle_allows_method(Some(&handle), method)
+                .unwrap();
+        }
+        service.workspace_close(Some(handle)).await.unwrap();
+    }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn shared_open_access_keeps_one_handle_until_rebind() {

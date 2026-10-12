@@ -90,6 +90,7 @@ export type WorkspaceOpenParams = WorkspaceJsonObject & {
       })
     | null;
   captureMode?: "none";
+  storeMode?: "passive";
   recoverRunningDispatches?: boolean;
 };
 export type CaptureRecoveryImportParams = WorkspaceJsonObject & {
