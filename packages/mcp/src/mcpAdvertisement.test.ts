@@ -29,6 +29,10 @@ it("does not advertise a tool whose ids agree on no levels", () => {
     .toEqual({ tool: [] });
 });
 
+it("does not advertise a tool with an empty capability id list", () => {
+  expect(deriveMcpToolLevels({ tool: [] }, {})).toEqual({ tool: [] });
+});
+
 it("derives the real multiplexed tools and the Edit-only exception", () => {
   expect(MCP_TOOL_LEVELS.dohc_dataset).toEqual(["owner"]);
   expect(MCP_TOOL_LEVELS.dohc_publish_app).toEqual(["owner"]);

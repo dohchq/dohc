@@ -1,4 +1,4 @@
-// Metadata describes existing doors. It never registers, invokes, or admits a call.
+// Metadata describes existing doors and drives desktop MCP registration. It never invokes a handler or admits a call.
 export const CAPABILITY_WAYS = ["control", "palette", "menu", "shortcut", "cli", "mcp", "app"] as const;
 export const CAPABILITY_ID_PATTERN = /^[a-z][a-z0-9]*(?:\.[a-z][a-z0-9]*)+$/;
 export const RETIRED_CAPABILITY_IDS: readonly string[] = [];

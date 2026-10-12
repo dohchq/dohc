@@ -106,14 +106,12 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
   const server = new McpServer({ name: "dohc", version: "0.3.0" });
 
   const level = ctx.shareAccess ?? "owner";
-  const advertised = new Set(Object.keys(MCP_TOOL_LEVELS).filter(name =>
-    MCP_TOOL_LEVELS[name as keyof typeof MCP_TOOL_CAPABILITIES].includes(level)));
   function register<InputArgs extends z.ZodRawShape>(
     name: keyof typeof MCP_TOOL_CAPABILITIES,
     config: { description: string; inputSchema: InputArgs },
     handler: ToolCallback<InputArgs>,
   ) {
-    if (advertised.has(name)) return server.registerTool(name, config, handler);
+    if (MCP_TOOL_LEVELS[name].includes(level)) server.registerTool(name, config, handler);
   }
 
   register("dohc_list_automations", {

@@ -17,7 +17,7 @@ export function deriveMcpToolLevels<Tool extends string, Id extends string>(
       if (offered.some(value => value !== offered[0])) {
         throw new Error(`MCP capability ids disagree for ${name} at ${level}`);
       }
-      return offered.length > 0 && offered.every(Boolean);
+      return offered[0] === true;
     });
   }
   return levels;
