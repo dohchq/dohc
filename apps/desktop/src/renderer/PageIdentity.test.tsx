@@ -330,13 +330,17 @@ describe("PageIdentity", () => {
     // the title, or the file name in its place.
     const folded = () => titleField().placeholder === "Add title";
 
-    // A local page reads its first block with the editor's lexer, which
-    // loads on first use. Once it has, every page answers on its first render.
+    // A paragraph with a setext underline is read with the editor's lexer,
+    // which loads on first use. Once it has, every page answers on its first
+    // render.
     beforeAll(async () => {
-      render(<PageIdentity body={"# Plan\n"} onChange={() => {}} filenameStem="plan" />);
+      render(<PageIdentity body={"Plan\n===\n"} onChange={() => {}} filenameStem="plan" />);
       await waitFor(() => expect(folded()).toBe(true));
       cleanup();
     });
+
+    // A long first block with no blank line: 5,000 lines of one paragraph.
+    const longLines = (word: string) => Array.from({ length: 5_000 }, (_, line) => `${word} ${line}`).join("\n");
 
     it.each([
       ["an H1 first and no title", "# Plan\n\nBody\n", true],
@@ -354,6 +358,15 @@ describe("PageIdentity", () => {
       ["a fence with a blank line before # x", "~~~\ncode\n\n# x\n~~~\n", false],
       ["a paragraph a fence interrupts", "Intro\n```\n===\n```\n", false],
       ["a setext H2", "Plan\n---\n", false],
+      ["seven #, a paragraph", "####### Plan\n", false],
+      ["indented code", "    # Plan\n", false],
+      ["a quote", "> # Plan\n", false],
+      ["a list item", "- # Plan\n", false],
+      ["a list item before ===", "- Plan\n===\n", false],
+      ["inline HTML with an underline", "<em>Plan</em>\n===\n", true],
+      ["an HTML block holding ===", "<div>\n===\n</div>\n", false],
+      ["an underline after 16 lines", `${Array.from({ length: 16 }, (_, line) => `Line ${line}`).join("\n")}\n===\n`, true],
+      ["an underline after 17 lines, no title", `${Array.from({ length: 17 }, (_, line) => `Line ${line}`).join("\n")}\n===\n`, false],
       ["a title property", "---\ntitle: Plan\n---\n\n# Plan\n", false],
       ["no H1", "Body\n", false],
       ["an H2 first", "## Plan\n", false],
@@ -363,15 +376,40 @@ describe("PageIdentity", () => {
       expect(folded()).toBe(expected);
     });
 
-    it("lexes nothing while a title is typed, since the first block is unchanged", async () => {
+    it("decides a clear ATX heading without the lexer, even with no blank line, and as the title is typed", async () => {
       const user = userEvent.setup();
       const lex = vi.spyOn(Lexer, "lex");
       try {
+        const body = (edit: string) => `# Plan\n${longLines(edit)}\n`;
+        const view = render(<PageIdentity body={body("Body")} onChange={() => {}} filenameStem="plan" />);
+        expect(folded()).toBe(true);
+        view.rerender(<PageIdentity body={body("Edited")} onChange={() => {}} filenameStem="plan" />);
+        expect(folded()).toBe(true);
+        view.unmount();
+
         render(<ControlledPageIdentity initialBody={"# Plan\n\nBody\n"} stem="plan" />);
-        expect(lex).toHaveBeenCalledTimes(1);
         await user.click(titleField());
         await user.keyboard("Q3 plan");
         expect(currentMeta().title).toBe("Q3 plan");
+        expect(lex).not.toHaveBeenCalled();
+      } finally {
+        lex.mockRestore();
+      }
+    });
+
+    it("lexes only an underlined paragraph's lines, once, while the long body after it changes", () => {
+      const lex = vi.spyOn(Lexer, "lex");
+      try {
+        const body = (edit: string) => `First line\nSecond line\n===\n${longLines(edit)}\n`;
+        const view = render(<PageIdentity body={body("Body")} onChange={() => {}} filenameStem="plan" />);
+        expect(folded()).toBe(true);
+        view.rerender(<PageIdentity body={body("Edited")} onChange={() => {}} filenameStem="plan" />);
+        expect(folded()).toBe(true);
+        expect(lex.mock.calls).toEqual([["First line\nSecond line\n==="]]);
+
+        // A long paragraph with no underline needs no lexer at all.
+        view.rerender(<PageIdentity body={`Intro\n${longLines("Body")}\n`} onChange={() => {}} filenameStem="plan" />);
+        expect(folded()).toBe(false);
         expect(lex).toHaveBeenCalledTimes(1);
       } finally {
         lex.mockRestore();
@@ -401,6 +439,63 @@ describe("PageIdentity", () => {
       expect(folded()).toBe(foldsAfter);
       expect(field.value).toBe(composed);
       expect(currentMeta().title).toBe(composed || undefined);
+    });
+
+    // Some input methods never send compositionend after a blur. The next
+    // move elsewhere ends the composition, so the field folds and later blurs
+    // count again.
+    it.each([
+      ["a click elsewhere", () => fireEvent.pointerDown(document.body)],
+      ["a key elsewhere", () => fireEvent.keyDown(screen.getByRole("button", { name: "elsewhere" }), { key: "a" })],
+      ["the window's focus", () => window.dispatchEvent(new Event("focus"))],
+    ])("ends a composition that never ends on %s", (_, move) => {
+      render(
+        <>
+          <ControlledPageIdentity initialBody={"# Plan\n"} stem="plan" />
+          <button type="button">elsewhere</button>
+        </>,
+      );
+      const field = titleField();
+      const elsewhere = screen.getByRole("button", { name: "elsewhere" });
+      act(() => field.focus());
+      fireEvent.compositionStart(field);
+      act(() => elsewhere.focus());
+      expect(folded()).toBe(false);
+
+      act(move);
+      expect(folded()).toBe(true);
+      act(() => field.focus());
+      expect(folded()).toBe(false);
+      act(() => elsewhere.focus());
+      expect(folded()).toBe(true);
+    });
+
+    it("keeps text a composition commits after a blur with no compositionend, and counts later blurs", () => {
+      render(
+        <>
+          <ControlledPageIdentity initialBody={"# Plan\n"} stem="plan" />
+          <button type="button">elsewhere</button>
+        </>,
+      );
+      const field = titleField();
+      const elsewhere = screen.getByRole("button", { name: "elsewhere" });
+      act(() => field.focus());
+      fireEvent.compositionStart(field);
+      act(() => elsewhere.focus());
+
+      fireEvent.change(field, { target: { value: "東京" } });
+      expect(field.value).toBe("東京");
+      expect(currentMeta().title).toBe("東京");
+
+      // A new composition that a refocus ends, then an ordinary blur.
+      act(() => field.focus());
+      fireEvent.compositionStart(field);
+      act(() => elsewhere.focus());
+      act(() => field.focus());
+      fireEvent.change(field, { target: { value: "" } });
+      act(() => elsewhere.focus());
+      expect(folded()).toBe(true);
+      expect(currentMeta().title).toBeUndefined();
     });
 
     it("folds a read-only title too, keeping it mounted and read-only", () => {

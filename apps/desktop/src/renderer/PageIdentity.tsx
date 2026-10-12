@@ -30,26 +30,51 @@ const BODY_FIELD = "body";
 // H1 as its title, and the title field folds into the row beside the icon.
 // Both answers read the first block alone, never the rest of the document.
 
-// In Markdown, the text from the first line with content to the next blank
-// line. No block that starts there can turn into a heading after a blank line,
-// so this text decides the first block, whatever follows it.
-function firstBlockSource(markdown: string): string {
-  let start = 0;
-  let end = 0;
-  while (end < markdown.length) {
-    const next = markdown.indexOf("\n", end);
-    const lineEnd = next === -1 ? markdown.length : next;
-    const blank = /^[ \t\r]*$/.test(markdown.slice(end, lineEnd));
-    if (blank && end > start) return markdown.slice(start, end);
-    end = lineEnd + 1;
-    if (blank) start = end;
+const BLANK = /^[ \t]*$/;
+const ATX_HEADING = /^ {0,3}(#{1,6})(?:[ \t]|$)/;
+// Indented code, a quote, a fence, a list item or a thematic break: a first
+// block no underline can make a heading.
+const NEVER_A_HEADING =
+  /^(?: {4}| {0,3}\t| {0,3}(?:>|`{3,}[^`]*$|~{3,}|(?:[-+*]|\d{1,9}[.)])(?:[ \t]|$)|([-*_])(?:[ \t]*\1){2,}[ \t]*$))/;
+const SETEXT_H1 = /^ {0,3}=+[ \t]*$/;
+// After a paragraph's first line: a blank line, a heading, a quote, a fence,
+// a setext H2 underline or a thematic break ends it without an H1.
+const ENDS_PARAGRAPH = /^(?:[ \t]*$| {0,3}(?:#{1,6}(?:[ \t]|$)|>|`{3,}|~{3,}|-+[ \t]*$|([-*_])(?:[ \t]*\1){2,}[ \t]*$))/;
+// A setext heading longer than this is no page title; its page keeps the
+// title field open.
+const TITLE_LINES = 16;
+
+// In Markdown, whether the body opens with an H1. The first line with content
+// decides an ATX heading or a block that cannot be one. A paragraph is an H1
+// only if a `===` underline ends it, and only then are its lines lexed, so
+// most pages need no lexer and none lexes past its first block.
+function opensWithH1(markdown: string): boolean | string {
+  let start = -1;
+  let lines = 0;
+  for (let at = 0; ; ) {
+    const next = markdown.indexOf("\n", at);
+    const end = next === -1 ? markdown.length : next;
+    const line = markdown.slice(at, end).replace(/\r$/, "");
+    if (start === -1) {
+      if (!BLANK.test(line)) {
+        const atx = ATX_HEADING.exec(line);
+        if (atx) return atx[1]!.length === 1;
+        if (NEVER_A_HEADING.test(line)) return false;
+        start = at;
+      }
+    } else {
+      if (SETEXT_H1.test(line)) return markdown.slice(start, end);
+      if (ENDS_PARAGRAPH.test(line) || ++lines >= TITLE_LINES) return false;
+    }
+    if (next === -1) return false;
+    at = next + 1;
   }
-  return markdown.slice(start);
 }
 
-// The editor's own Markdown lexer, so the fold agrees with the blocks the
-// editor shows. It loads with the editor's chunk, not at launch; until it
-// arrives, a local page shows its title open.
+// The editor's own Markdown lexer, so a paragraph with an underline folds
+// exactly when the editor shows it as an H1: a list item or an HTML block can
+// take the lines first. It loads with the editor's chunk, not at launch; until
+// it arrives, such a page shows its title open.
 let lexer: typeof Lexer | null = null;
 let lexerLoad: Promise<typeof Lexer> | null = null;
 function loadLexer(): Promise<typeof Lexer> {
@@ -68,11 +93,11 @@ function lexesAsH1(lex: typeof Lexer, block: string): boolean {
   return first?.type === "heading" && first.depth === 1;
 }
 
-// A local page's body is the Markdown after its frontmatter. The block's text
-// is a string, so an edit that leaves it unchanged, such as typing a title,
-// lexes nothing.
+// A local page's body is the Markdown after its frontmatter. The lines to lex
+// are a string, so an edit that leaves them unchanged lexes nothing.
 function useLocalOpensWithH1(markdown: string | null): boolean {
-  const block = useMemo(() => (markdown === null ? null : firstBlockSource(markdownEditorBody(markdown))), [markdown]);
+  const decided = useMemo(() => (markdown === null ? false : opensWithH1(markdownEditorBody(markdown))), [markdown]);
+  const block = typeof decided === "string" ? decided : null;
   const [loaded, setLoaded] = useState(() => lexer);
   useEffect(() => {
     if (block === null || loaded) return;
@@ -88,7 +113,8 @@ function useLocalOpensWithH1(markdown: string | null): boolean {
       current = false;
     };
   }, [block, loaded]);
-  return useMemo(() => block !== null && loaded !== null && lexesAsH1(loaded, block), [block, loaded]);
+  const lexed = useMemo(() => block !== null && loaded !== null && lexesAsH1(loaded, block), [block, loaded]);
+  return typeof decided === "boolean" ? decided : lexed;
 }
 
 function isH1(node: unknown): boolean {
@@ -283,6 +309,35 @@ export function PageIdentity(props: PageIdentityProps) {
   // A blur while an input method composes can come before the composed text
   // reaches onChange. The field stays open until the composition ends.
   const titleComposing = useRef(false);
+  const [blurHeld, setBlurHeld] = useState(false);
+  // Ends a composition, and the blur it held back if the field has lost
+  // focus. The draft re-syncs from the title once the composed text, if any,
+  // has been written.
+  function endComposition() {
+    titleComposing.current = false;
+    setBlurHeld(false);
+    if (document.activeElement !== titleRef.current) setTitleFocused(false);
+  }
+  // Some input methods never send compositionend after a blur. The person's
+  // next click or key elsewhere, or the window's next focus, ends the
+  // composition instead, so the field cannot stay open, or ignore later
+  // blurs, for good. Not focusin: the focus move that held the blur can still
+  // be arriving at its new element.
+  useEffect(() => {
+    if (!blurHeld) return;
+    const elsewhere = (event: Event) => {
+      if (event.target !== titleRef.current) endComposition();
+    };
+    const events = ["pointerdown", "keydown"] as const;
+    for (const name of events) document.addEventListener(name, elsewhere, true);
+    window.addEventListener("focus", elsewhere);
+    return () => {
+      for (const name of events) document.removeEventListener(name, elsewhere, true);
+      window.removeEventListener("focus", elsewhere);
+    };
+    // endComposition reads only refs and state setters.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [blurHeld]);
   useLayoutEffect(() => {
     const caret = titleCaret.current;
     if (caret === null) return;
@@ -445,21 +500,24 @@ export function PageIdentity(props: PageIdentityProps) {
           placeholder={folded ? "Add title" : props.filenameStem}
           spellCheck={false}
           readOnly={readOnly}
-          onFocus={() => setTitleFocused(true)}
+          onFocus={() => {
+            // Focus back in the field ends a composition it never ended.
+            titleComposing.current = false;
+            setBlurHeld(false);
+            setTitleFocused(true);
+          }}
           onBlur={() => {
-            if (titleComposing.current) return;
+            if (titleComposing.current) {
+              setBlurHeld(true);
+              return;
+            }
             setTitleFocused(false);
             setTitleDraft(title);
           }}
           onCompositionStart={() => {
             titleComposing.current = true;
           }}
-          onCompositionEnd={(event) => {
-            titleComposing.current = false;
-            // The blur it held back. The draft re-syncs from the title once
-            // the composed text, if any, has been written.
-            if (document.activeElement !== event.currentTarget) setTitleFocused(false);
-          }}
+          onCompositionEnd={endComposition}
           onChange={(event) => {
             const field = event.target;
             const next = oneLine(field.value);
@@ -470,6 +528,8 @@ export function PageIdentity(props: PageIdentityProps) {
             }
             setTitleDraft(next);
             writeField("title", next.length === 0 ? undefined : next);
+            // Text arriving after the blur is the composition's last word.
+            if (blurHeld) endComposition();
           }}
           onKeyDown={(event) => {
             // During IME composition, Enter and ArrowDown pick a candidate.
