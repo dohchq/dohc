@@ -1,7 +1,7 @@
 use super::parser::parse;
 use super::{
     ACTOR_SLICE_BUDGET, Prepared, SETTLE_TO_INDEX_BUDGET, Staged, Work, defer_sources, gc_step,
-    now_ms, prepare_batch, reseed_step, stage_batch,
+    now_ms, prepare_batch, reseed_step, seed_step, stage_batch,
 };
 use dohc_engine_storage::{EngineStore, NoFaults, StorageError};
 use std::sync::{Arc, Mutex, mpsc};
@@ -177,6 +177,9 @@ impl DrainWorker {
         }
         if self.parsing {
             return Ok(Duration::MAX);
+        }
+        if seed_step(store)? {
+            return Ok(Duration::ZERO);
         }
         let jobs = prepare_batch(store, super::SOURCE_SLICE)?;
         if !jobs.is_empty() {

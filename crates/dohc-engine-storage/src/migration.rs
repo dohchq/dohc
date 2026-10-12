@@ -3862,7 +3862,7 @@ mod tests {
             ),
             (
                 "v2-persisted-links",
-                "29a9651e9a40ea8a9d01ca044c6c32bdf0f92e1a0b30b150f4341d3dbc5cfaab",
+                "b77853bb6fef0c09dfa99d17e41ac8586bd7cf2c1f78b7a3e628bd24d8f49914",
             ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());
@@ -6109,14 +6109,16 @@ mod tests {
         let pending: i64 = conn
             .query_row("SELECT COUNT(*) FROM link_pending", [], |r| r.get(0))
             .expect("persisted queue must exist");
-        assert_eq!(pending, 1);
+        assert_eq!(pending, 0);
+        assert_eq!(conn.query_row("SELECT seed_phase FROM link_index_state", [], |r| r.get::<_, String>(0)).unwrap(), "deferred");
+        assert_eq!(conn.query_row("SELECT COUNT(*) FROM link_aliases", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
         conn.execute("DELETE FROM file_objects WHERE object_id='a'", [])
             .unwrap();
         assert_eq!(
             conn.query_row("SELECT COUNT(*) FROM link_pending", [], |r| r
                 .get::<_, i64>(0))
                 .unwrap(),
-            1
+            0
         );
         assert_eq!(
             conn.query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |r| r

@@ -66,7 +66,7 @@ fn head(conn: &Connection, w: &Work, hydrate: bool) -> Result<Option<Head>, Stor
         ) SELECT e.path,COALESCE(e.blob_sha256,e.binary_sha256),e.content_kind,COALESCE(b.byte_length,-1),
           CASE WHEN ?4 AND b.byte_length<=?5 THEN b.text ELSE NULL END
           FROM effective e LEFT JOIN blobs b ON b.sha256=e.blob_sha256
-          WHERE EXISTS(SELECT 1 FROM path_aliases WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3) LIMIT 1",
+          WHERE EXISTS(SELECT 1 FROM link_aliases WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3) LIMIT 1",
         params![w.workspace,w.version,w.object,hydrate,MAX_DOCUMENT_BYTES as i64],
         |r| Ok(Head {path:r.get(0)?,hash:r.get(1)?,kind:r.get(2)?,byte_length:r.get(3)?,text:r.get(4)?,aliases:Vec::new(),unindexed_reason:None}),
     ).optional().map_err(sql)?;
@@ -74,7 +74,7 @@ fn head(conn: &Connection, w: &Work, hydrate: bool) -> Result<Option<Head>, Stor
         if h.kind == "text" && h.byte_length < 0 {
             return Err(StorageError::StateCorrupt { source: None });
         }
-        let mut stmt=conn.prepare_cached("SELECT path FROM path_aliases WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 ORDER BY path LIMIT 65").map_err(sql)?;
+        let mut stmt=conn.prepare_cached("SELECT path FROM link_aliases WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 ORDER BY path LIMIT 65").map_err(sql)?;
         h.aliases = stmt
             .query_map(params![w.workspace, w.version, w.object], |r| r.get(0))
             .map_err(sql)?
@@ -109,7 +109,7 @@ pub fn prepare(store: &EngineStore) -> Result<Option<(Work, Option<Head>)>, Stor
 fn prepare_batch(store: &EngineStore, limit: usize) -> Result<Vec<Prepared>, StorageError> {
     store.read_with(|conn| {
         let began = Instant::now();
-        let mut stmt = conn.prepare_cached("SELECT pending_id,revision,workspace_id,version_id,object_id,queued_at_ms FROM link_pending WHERE retry_after_ms<=?1 ORDER BY pending_id LIMIT ?2").map_err(sql)?;
+        let mut stmt = conn.prepare_cached("SELECT pending_id,revision,workspace_id,version_id,object_id,queued_at_ms FROM link_pending WHERE retry_after_ms<=?1 AND NOT EXISTS(SELECT 1 FROM link_index_state s WHERE s.workspace_id=link_pending.workspace_id AND s.version_id=link_pending.version_id AND s.seed_phase IN ('deferred','aliases')) ORDER BY pending_id LIMIT ?2").map_err(sql)?;
         let work = stmt.query_map(params![now_ms(), limit as i64],|r|Ok(Work {id:r.get(0)?,revision:r.get(1)?,workspace:r.get(2)?,version:r.get(3)?,object:r.get(4)?,queued_at_ms:r.get(5)?})).map_err(sql)?.collect::<Result<Vec<_>,_>>().map_err(sql)?;
         let mut jobs = Vec::new();
         let mut hydrated_bytes = 0;
@@ -516,7 +516,7 @@ pub fn reseed_step(store: &mut EngineStore) -> Result<bool, StorageError> {
     let outcome=store.write_with(&NoFaults,|tx| {
         let state=tx.query_row("SELECT workspace_id,version_id,seed_after_object_id FROM link_index_state WHERE parser_generation<>?1 LIMIT 1",[PARSER_GENERATION],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?))).optional().map_err(sql)?;
         let Some((ws,v,after))=state else{return Ok(false);};
-        let mut stmt=tx.prepare("SELECT object_id FROM path_aliases WHERE workspace_id=?1 AND version_id=?2 AND object_id>?3 GROUP BY object_id ORDER BY object_id LIMIT 32").map_err(sql)?;
+        let mut stmt=tx.prepare("SELECT object_id FROM link_aliases WHERE workspace_id=?1 AND version_id=?2 AND object_id>?3 GROUP BY object_id ORDER BY object_id LIMIT 32").map_err(sql)?;
         let objects=stmt.query_map(params![ws,v,after],|r|r.get::<_,String>(0)).map_err(sql)?.collect::<Result<Vec<_>,_>>().map_err(sql)?;
         for o in &objects {
             tx.execute("INSERT INTO link_pending(workspace_id,version_id,object_id,queued_at_ms) VALUES(?1,?2,?3,?4) ON CONFLICT(workspace_id,version_id,object_id) DO UPDATE SET revision=revision+1,queued_at_ms=excluded.queued_at_ms,retry_after_ms=0",params![ws,v,o,now_ms()]).map_err(sql)?;
@@ -527,6 +527,41 @@ pub fn reseed_step(store: &mut EngineStore) -> Result<bool, StorageError> {
             tx.execute("UPDATE link_index_state SET parser_generation=?3,seed_after_object_id='' WHERE workspace_id=?1 AND version_id=?2",params![ws,v,PARSER_GENERATION]).map_err(sql)?;
         }
         Ok::<_,StorageError>(true)
+    })?;
+    Ok(matches!(outcome, TxnOutcome::Committed(true)))
+}
+
+// Only the drain calls this seam, after capture holds release. Path order uses
+// the authoritative primary key; each transaction visits at most 32 aliases.
+// Once scanning starts, edit triggers cover changes behind the durable cursor.
+fn seed_step(store: &mut EngineStore) -> Result<bool, StorageError> {
+    seed_step_with(store, &NoFaults)
+}
+fn seed_step_with(store: &mut EngineStore, faults: &dyn FaultInjector) -> Result<bool, StorageError> {
+    let needed = store.read_with(|c| c.query_row(
+        "SELECT EXISTS(SELECT 1 FROM link_index_state WHERE seed_phase IN ('deferred','aliases'))",
+        [], |r| r.get::<_, bool>(0))).map_err(sql)?;
+    if !needed { return Ok(false); }
+    let outcome = store.write_with(faults, |tx| {
+        let state = tx.query_row(
+            "SELECT workspace_id,version_id,seed_after_path FROM link_index_state WHERE seed_phase IN ('deferred','aliases') LIMIT 1",
+            [], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?)))
+            .optional().map_err(sql)?;
+        let Some((ws,v,after)) = state else { return Ok(false); };
+        tx.execute("UPDATE link_index_state SET seed_phase='aliases' WHERE workspace_id=?1 AND version_id=?2",params![ws,v]).map_err(sql)?;
+        let mut stmt = tx.prepare("SELECT path,object_id FROM path_aliases WHERE workspace_id=?1 AND version_id=?2 AND path>?3 ORDER BY path LIMIT 32").map_err(sql)?;
+        let aliases = stmt.query_map(params![ws,v,after], |r| Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?)))
+            .map_err(sql)?.collect::<Result<Vec<_>,_>>().map_err(sql)?;
+        for (path,object) in &aliases {
+            tx.execute("INSERT INTO link_aliases(workspace_id,version_id,object_id,path) VALUES(?1,?2,?3,?4) ON CONFLICT(workspace_id,version_id,path) DO UPDATE SET object_id=excluded.object_id",params![ws,v,object,path]).map_err(sql)?;
+            tx.execute("INSERT INTO link_pending(workspace_id,version_id,object_id,queued_at_ms) VALUES(?1,?2,?3,?4) ON CONFLICT(workspace_id,version_id,object_id) DO UPDATE SET revision=revision+1,queued_at_ms=excluded.queued_at_ms,retry_after_ms=0",params![ws,v,object,now_ms()]).map_err(sql)?;
+        }
+        if let Some((last,_)) = aliases.last() {
+            tx.execute("UPDATE link_index_state SET seed_after_path=?3 WHERE workspace_id=?1 AND version_id=?2",params![ws,v,last]).map_err(sql)?;
+        } else {
+            tx.execute("UPDATE link_index_state SET seed_phase=CASE WHEN EXISTS(SELECT 1 FROM link_pending p WHERE p.workspace_id=?1 AND p.version_id=?2) THEN 'draining' ELSE 'ready' END,seed_after_path='' WHERE workspace_id=?1 AND version_id=?2",params![ws,v]).map_err(sql)?;
+        }
+        Ok::<_, StorageError>(true)
     })?;
     Ok(matches!(outcome, TxnOutcome::Committed(true)))
 }

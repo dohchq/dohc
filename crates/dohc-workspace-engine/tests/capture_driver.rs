@@ -2578,7 +2578,8 @@ async fn measure_initial_capture(measure_typing: bool) {
             for draining in [true, false] {
                 let pending = observer.table_row_count("link_pending").unwrap();
                 let certified = actor.link_drain_metrics().certified_sources;
-                assert_eq!(pending > 0, draining);
+                let seeding = observer.read_with(|c| c.query_row("SELECT EXISTS(SELECT 1 FROM link_index_state WHERE seed_phase<>'ready')", [], |r| r.get::<_,bool>(0))).unwrap();
+                assert_eq!(pending > 0 || seeding, draining);
                 let mut timings = Vec::new();
                 for i in 0..200 {
                     let update = doc.plaintext_insert(0, "x");
@@ -2602,7 +2603,7 @@ async fn measure_initial_capture(measure_typing: bool) {
                 samples.push(timings);
                 let deadline = std::time::Instant::now() + Duration::from_secs(120);
                 let mut poll = tokio::time::interval(Duration::from_millis(10));
-                while observer.table_row_count("link_pending").unwrap() != 0 {
+                while observer.table_row_count("link_pending").unwrap() != 0 || observer.read_with(|c| c.query_row("SELECT EXISTS(SELECT 1 FROM link_index_state WHERE seed_phase<>'ready')", [], |r| r.get::<_,bool>(0))).unwrap() {
                     assert!(std::time::Instant::now() < deadline, "drain deadline");
                     poll.tick().await;
                 }
@@ -2637,7 +2638,7 @@ async fn measure_initial_capture(measure_typing: bool) {
         }
         let deadline = std::time::Instant::now() + Duration::from_secs(120);
         let mut drain_poll = tokio::time::interval(Duration::from_millis(10));
-        while observer.table_row_count("link_pending").unwrap() != 0 {
+        while observer.table_row_count("link_pending").unwrap() != 0 || observer.read_with(|c| c.query_row("SELECT EXISTS(SELECT 1 FROM link_index_state WHERE seed_phase<>'ready')", [], |r| r.get::<_,bool>(0))).unwrap() {
             assert!(std::time::Instant::now() < deadline);
             drain_poll.tick().await;
         }

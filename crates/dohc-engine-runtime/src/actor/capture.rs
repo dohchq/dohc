@@ -855,7 +855,8 @@ mod capture_batch_fast_path_tests {
             compiles > 0 && compiles <= 4,
             "link queue trigger programs compiled {compiles} times for one capture batch"
         );
-        assert_eq!(store.table_row_count("link_pending").unwrap(), 3);
+        assert_eq!(store.table_row_count("link_pending").unwrap(), 0);
+        assert_eq!(store.table_row_count("link_aliases").unwrap(), 0);
         assert_eq!(
             *begun_savepoints.lock().expect("read begun savepoints"),
             vec!["dohc_capture_batch_fast"],

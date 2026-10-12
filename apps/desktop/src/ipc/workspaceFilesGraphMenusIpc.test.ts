@@ -371,13 +371,20 @@ describe("registered workspace file handlers", () => {
 describe("registered graph and heading handlers", () => {
   it("reads real links, backlinks, and repeated headings through the existing graph owner", async () => {
     const h = await harness();
+    // Go to and backlinks use files while the engine's deferred index is not ready.
+    h.capture.mockRejectedValue(new Error("link index not ready"));
+    h.index.mockRejectedValue(new Error("link index not ready"));
     await writeFile(join(h.workspace.rootPath, "alpha.md"), "# Alpha\n[[beta]]\n");
     await writeFile(join(h.workspace.rootPath, "beta.md"), "# Same\n\n# Same\n");
     await expect(h.invoke(CHANNELS.readWorkspaceGraph)).resolves.toMatchObject({
       nodes: expect.arrayContaining([expect.objectContaining({ path: "alpha.md" }), expect.objectContaining({ path: "beta.md" })]),
       edges: [{ source: "alpha.md", target: "beta.md", kind: "wikilink" }],
     });
+    await expect(h.invoke(CHANNELS.listWorkspaceFiles)).resolves.toMatchObject({
+      files: expect.arrayContaining([expect.objectContaining({ path: "alpha.md" }), expect.objectContaining({ path: "beta.md" })]),
+    });
     expect(h.capture).not.toHaveBeenCalled();
+    expect(h.index).not.toHaveBeenCalled();
     await expect(h.invoke(CHANNELS.getBacklinks, { workspaceId: "workspace", path: "beta.md" }))
       .resolves.toMatchObject({ sources: [expect.objectContaining({ sourcePath: "alpha.md" })] });
     const headings = await h.invoke(CHANNELS.listWorkspaceHeadings, { workspaceId: "workspace", path: "beta.md" }) as { headings: { occurrence: number }[] };

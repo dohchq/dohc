@@ -119,6 +119,7 @@ const REQUIRED_TABLES: &[&str] = &[
     "link_occurrence_keys",
     "link_target_keys",
     "link_pending",
+    "link_aliases",
     "link_index_state",
     "link_gc",
     "moments",

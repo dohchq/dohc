@@ -939,6 +939,9 @@ fn background_links_writes_do_not_restart_search_pages() {
     let after = first.continuation.expect("second matching line");
     let changed = store
         .write_with(&NO_FAULTS, |tx| {
+            // A raw-store fixture has not run the actor's deferred seed yet.
+            tx.execute("INSERT OR IGNORE INTO link_pending(workspace_id,version_id,object_id,queued_at_ms) SELECT workspace_id,version_id,object_id,1 FROM snapshots", [])
+                .map_err(dohc_engine_runtime::search::SearchError::from)?;
             tx.execute(
                 "UPDATE link_pending SET retry_after_ms = retry_after_ms + 1",
                 [],

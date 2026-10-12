@@ -151,7 +151,7 @@ async fn failed_first_layer_start_releases_link_drain_in_the_open_workspace() {
     let observer = EngineStore::open_read_only(&db).unwrap();
     tokio::time::timeout(Duration::from_secs(30), async {
         let mut poll = tokio::time::interval(Duration::from_millis(10));
-        while observer.table_row_count("link_pending").unwrap() != 0 {
+        while observer.table_row_count("links").unwrap() != 1 {
             poll.tick().await;
         }
     })
