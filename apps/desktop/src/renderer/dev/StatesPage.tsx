@@ -1758,7 +1758,7 @@ function Pane(props: { theme: "light" | "dark" }) {
             <CloudSyncSettings workspaceId="ws-trip" cloud={settingsCloud(CLOUD_SIGNED_IN)} />
           </div>
         </Specimen>
-        <Specimen label="this workspace syncs with another account">
+        <Specimen label="sync paused until dohc confirms this workspace's account, with Try again">
           <div className="w-[640px]">
             <CloudSyncSettings workspaceId="ws-trip" cloud={settingsCloud({ ...CLOUD_SIGNED_IN, workspaceSynced: true })} />
           </div>

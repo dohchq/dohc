@@ -2223,31 +2223,21 @@ describe("Connect server", () => {
     await waitFor(() => expect(bridge.showWorkbenchMenu).toHaveBeenCalledWith(expect.objectContaining({ context: "status" })));
   };
 
-  it("routes the titlebar menu's Connect server the same way", async () => {
-    let connected = true;
+  it.each([
+    ["signed in, to Settings", { connected: true, email: "me@dohc.test", serverUrl: "https://cloud.dohc.test", workspaceSynced: false }, "settings-section-cloud"],
+    ["signed out, to the Cloud dialog", SIGNED_OUT, "cloud-server-url"],
+  ] as const)("routes the titlebar menu's Connect server the same way: %s", async (_case, status, opens) => {
     const bridge = makeBridge(Promise.resolve(null));
-    bridge.cloudStatus = vi.fn(async () =>
-      connected
-        ? { connected: true, email: "me@dohc.test", serverUrl: "https://cloud.dohc.test", workspaceSynced: false }
-        : SIGNED_OUT,
-    );
-    const user = userEvent.setup();
+    bridge.cloudStatus = vi.fn(async () => status);
     renderShell(bridge, WORKSPACE, [WORKSPACE, OTHER_WORKSPACE]);
     await waitFor(() => expect(bridge.cloudStatus).toHaveBeenCalled());
-
-    await connectFromTitlebarMenu(bridge);
-    expect(await screen.findByTestId("settings-section-cloud")).toBeTruthy();
-    expect(screen.queryByTestId("cloud-sync-panel")).toBeNull();
-
-    // Closing Settings reads the status again, and finds nobody signed in.
-    connected = false;
-    await user.keyboard("{Escape}");
-    await waitFor(() => expect(screen.queryByTestId("settings-dialog")).toBeNull());
-    await waitFor(() => expect(bridge.cloudStatus).toHaveBeenCalledTimes(2));
     await act(async () => {});
+
     await connectFromTitlebarMenu(bridge);
-    expect(await screen.findByTestId("cloud-server-url")).toBeTruthy();
-    expect(screen.queryByTestId("settings-dialog")).toBeNull();
+
+    expect(await screen.findByTestId(opens)).toBeTruthy();
+    if (status.connected) expect(screen.queryByTestId("cloud-sync-panel")).toBeNull();
+    else expect(screen.queryByTestId("settings-dialog")).toBeNull();
   });
 
   // Nobody knows yet whether the person is signed in. The dialog would show
@@ -2284,9 +2274,17 @@ describe("Connect server", () => {
     expect(screen.getAllByTestId("settings-row-account")).toHaveLength(1);
   });
 
-  // Access's setup note (About and the Sharing view) offers Connect server
-  // when nobody is signed in.
-  it("routes Access's Connect server to the Cloud dialog while signed out", async () => {
+  // Access's setup notes, in About and the Sharing view: signed out, Connect
+  // server starts the connect flow; signed in to an account the workspace's
+  // sync does not match, the note opens Settings, where Try again lives.
+  it.each([
+    ["signed out", SIGNED_OUT, "sharing-received-unknown", "signed-out", "Connect server", "cloud-server-url"],
+    [
+      "paused for its account",
+      { connected: true, email: "me@dohc.test", serverUrl: "https://cloud.dohc.test", workspaceSynced: true, workspaceSyncConnected: false },
+      "sharing-granted-unknown", "other-account", "Sync and sharing", "settings-section-cloud",
+    ],
+  ] as const)("routes Access's setup action when %s", async (_case, status, noteId, reason, action, opens) => {
     const unknownAnswer = {
       ref: null, rows: [], visibility: "unknown" as const, nextCursor: null, checkedAtMs: null, freshness: "unknown" as const,
       coverage: { kind: "unavailable" as const, complete: false, observation: "interval" as const },
@@ -2295,18 +2293,23 @@ describe("Connect server", () => {
       listSharingAccess: vi.fn(async () => unknownAnswer),
       requestAccessRefresh: vi.fn(async () => undefined),
     });
-    bridge.cloudStatus = vi.fn(async () => SIGNED_OUT);
+    bridge.cloudStatus = vi.fn(async () => status);
     const user = userEvent.setup();
     renderShell(bridge);
     await waitFor(() => expect(bridge.cloudStatus).toHaveBeenCalled());
 
     await user.click(await screen.findByTestId("activity-sharing"));
-    const note = await screen.findByTestId("sharing-received-unknown");
-    expect(note.getAttribute("data-reason")).toBe("signed-out");
-    await user.click(within(note).getByRole("button", { name: "Connect server" }));
+    const note = await screen.findByTestId(noteId);
+    await waitFor(() => expect(note.getAttribute("data-reason")).toBe(reason));
+    await user.click(within(note).getByRole("button", { name: action }));
 
-    expect(await screen.findByTestId("cloud-server-url")).toBeTruthy();
-    expect(screen.queryByTestId("settings-dialog")).toBeNull();
+    expect(await screen.findByTestId(opens)).toBeTruthy();
+    if (opens === "settings-section-cloud") {
+      expect(screen.queryByTestId("cloud-sync-panel")).toBeNull();
+      expect(await screen.findByTestId("cloud-relink-workspace")).toBeTruthy();
+    } else {
+      expect(screen.queryByTestId("settings-dialog")).toBeNull();
+    }
   });
 });
 
@@ -2338,14 +2341,14 @@ describe("sync answers after Settings closed", () => {
     renderShell(bridge);
 
     await startEnableThenClose(bridge);
-    // Closing reads once; the enable is still running.
-    await waitFor(() => expect(bridge.cloudStatus).toHaveBeenCalledTimes(2));
+    // Closing reads nothing; the enable is still running.
+    expect(bridge.cloudStatus).toHaveBeenCalledTimes(1);
     await act(async () => {
       enable.resolve();
     });
 
-    await waitFor(() => expect(bridge.cloudStatus).toHaveBeenCalledTimes(3));
-    expect(await bridge.cloudStatus.mock.results[2]!.value).toMatchObject({ workspaceSynced: true });
+    await waitFor(() => expect(bridge.cloudStatus).toHaveBeenCalledTimes(2));
+    expect(await bridge.cloudStatus.mock.results[1]!.value).toMatchObject({ workspaceSynced: true });
     expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
   });
 

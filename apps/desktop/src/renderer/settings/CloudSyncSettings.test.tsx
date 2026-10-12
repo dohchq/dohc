@@ -4,6 +4,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { CloudStatusResult } from "../../ipc/bridgeContract";
 import { deferred } from "../../testing/deferred";
+import { SYNC_PAUSED_FOR_ACCOUNT } from "../cloudSyncWords";
 import { DISCONNECT_EXPLANATION, PRIVATE_NETWORK_EXPLANATION } from "./CloudAccountRow";
 import { CloudSyncSettings, type CloudSettings } from "./CloudSyncSettings";
 
@@ -53,8 +54,9 @@ const describedBy = (element: HTMLElement) =>
   document.getElementById(element.getAttribute("aria-describedby") ?? "")?.textContent;
 
 beforeEach(() => {
+  // The row's session listener lives as long as the window, so it is kept
+  // across tests, as it is across Disconnect attempts.
   vi.clearAllMocks();
-  sessionListeners.clear();
   bridgeMock.cloudEnableSync.mockReset().mockResolvedValue(undefined);
   bridgeMock.cloudLogout.mockReset().mockResolvedValue(undefined);
 });
@@ -345,17 +347,36 @@ describe("CloudSyncSettings", () => {
     expect(screen.queryByTestId("cloud-protect-secrets")).toBeNull();
   });
 
-  // About says the same facts the same way. Sync again cannot fix another
-  // account; Disconnect, on the row above, is the way to that account.
-  it("names a workspace that syncs with another account in About's words, and points at Disconnect", () => {
-    render(<CloudSyncSettings workspaceId="ws-1" cloud={cloud({ ...SYNCED, workspaceSyncConnected: false })} />);
+  // A Disconnect whose file removal failed leaves main's cache empty while
+  // the saved session still reads as signed in: the same account, not yet
+  // read again. Enabling again reads it and resumes sync.
+  it("pauses sync in About's words, and resumes it with Try again for the same account", async () => {
+    const settings = cloud({ ...SYNCED, workspaceSyncConnected: false });
+    render(<CloudSyncSettings workspaceId="ws-1" cloud={settings} />);
 
-    expect(screen.getByTestId("cloud-workspace-relink").textContent).toBe(
-      "This workspace syncs with another account. Disconnect, then connect that account.",
-    );
+    expect(screen.getByTestId("cloud-workspace-relink").textContent).toBe(SYNC_PAUSED_FOR_ACCOUNT);
     expect(syncSwitch().getAttribute("aria-checked")).toBe("true");
-    expect(screen.queryByTestId("cloud-relink-workspace")).toBeNull();
     expect(screen.queryByTestId("cloud-sync-code-block")).toBeNull();
+    fireEvent.click(screen.getByTestId("cloud-relink-workspace"));
+
+    await waitFor(() => expect(bridgeMock.cloudEnableSync).toHaveBeenCalledWith({ workspaceId: "ws-1" }));
+    await waitFor(() => expect(screen.queryByTestId("cloud-workspace-relink")).toBeNull());
+    expect(screen.getByTestId("cloud-sync-code")).toBeTruthy();
+    expect(settings.onChanged).toHaveBeenCalledOnce();
+  });
+
+  // Another account owns the remote: main refuses, and its reason says what
+  // to do. Disconnect stays on the row above.
+  it("hands another account's refusal to the shell, and stays paused", async () => {
+    bridgeMock.cloudEnableSync.mockRejectedValueOnce(new Error("Sign in to the account that synced this workspace."));
+    const settings = cloud({ ...SYNCED, workspaceSyncConnected: false });
+    render(<CloudSyncSettings workspaceId="ws-1" cloud={settings} />);
+
+    fireEvent.click(screen.getByTestId("cloud-relink-workspace"));
+
+    await waitFor(() => expect(settings.onError).toHaveBeenCalledOnce());
+    expect(vi.mocked(settings.onError).mock.calls[0]![0].message).toBe("Sign in to the account that synced this workspace.");
+    expect(screen.getByTestId("cloud-workspace-relink").textContent).toBe(SYNC_PAUSED_FOR_ACCOUNT);
     expect(screen.getByTestId("cloud-disconnect")).toBeTruthy();
   });
 
@@ -371,7 +392,6 @@ describe("CloudSyncSettings", () => {
     expect(bridgeMock.cloudLogout).toHaveBeenCalledOnce();
     expect(screen.queryByRole("dialog")).toBeNull();
     expect(settings.onError).not.toHaveBeenCalled();
-    expect(sessionListeners.size).toBe(0);
   });
 
   // Main announces the logout before the step that fails. The shell then
@@ -421,21 +441,39 @@ describe("CloudSyncSettings", () => {
 
   // The notice outlives the row. A Try again after a new sign-in would end
   // the new session, so the retry declines and the shell opens Settings.
-  it("refuses to retry a failed disconnect once someone has signed in again", async () => {
-    bridgeMock.cloudLogout.mockRejectedValueOnce(new Error("offline"));
+  // Main saves the new session before it announces "changing", and engine
+  // cleanup can hold "ready" back, so the first announcement already counts.
+  it.each(["changing", "ready"] as const)(
+    "refuses to retry a failed disconnect once a sign-in is announced (%s)",
+    async (phase) => {
+      bridgeMock.cloudLogout.mockRejectedValueOnce(new Error("offline"));
+      const settings = cloud(SIGNED_IN);
+      const { unmount } = render(<CloudSyncSettings workspaceId="ws-1" cloud={settings} />);
+
+      fireEvent.click(screen.getByTestId("cloud-disconnect"));
+      await waitFor(() => expect(settings.onError).toHaveBeenCalledOnce());
+      const report = vi.mocked(settings.onError).mock.calls[0]![0];
+
+      unmount();
+      act(() => announceSession({ sessionKey: "new-session", phase }));
+
+      expect(report.retry?.()).toBe(false);
+      expect(bridgeMock.cloudLogout).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  // One listener counts sign-ins for the window, however many attempts fail
+  // and whether or not anyone presses Try again.
+  it("keeps one session listener for the window across failed attempts", async () => {
+    bridgeMock.cloudLogout.mockRejectedValue(new Error("offline"));
     const settings = cloud(SIGNED_IN);
-    const { unmount } = render(<CloudSyncSettings workspaceId="ws-1" cloud={settings} />);
+    render(<CloudSyncSettings workspaceId="ws-1" cloud={settings} />);
 
-    fireEvent.click(screen.getByTestId("cloud-disconnect"));
-    await waitFor(() => expect(settings.onError).toHaveBeenCalledOnce());
-    const report = vi.mocked(settings.onError).mock.calls[0]![0];
+    for (const attempt of [1, 2, 3]) {
+      fireEvent.click(screen.getByTestId("cloud-disconnect"));
+      await waitFor(() => expect(settings.onError).toHaveBeenCalledTimes(attempt));
+    }
 
-    unmount();
-    act(() => announceSession({ sessionKey: "new-session", phase: "changing" }));
-    act(() => announceSession({ sessionKey: "new-session", phase: "ready" }));
-
-    expect(report.retry?.()).toBe(false);
-    expect(bridgeMock.cloudLogout).toHaveBeenCalledTimes(1);
-    expect(sessionListeners.size).toBe(0);
+    expect(sessionListeners.size).toBe(1);
   });
 });

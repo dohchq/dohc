@@ -628,6 +628,10 @@ export function DesktopWorkspaceShell(props: {
     setSettingsSection(CUSTOMIZE_TARGETS[part].section);
   }, []);
   const openAgentSettings = useCallback(() => openSettings("agents"), [openSettings]);
+  const closeSettings = useCallback(() => {
+    setSettingsSection(null);
+    setSettingsFocus(null);
+  }, []);
 
   const { agentSetup, readAgentStatusForHistory } = useAgentSetup(
     props.workspace.workspaceId,
@@ -915,14 +919,6 @@ export function DesktopWorkspaceShell(props: {
   );
   const { chatCollaboration, refreshCloudStatus, workspaceSynced, cloudStatus, cloudStatusUnreadable } =
     useCloudPresence(workspaceId, reportCloudStatusUnavailable);
-  // Turning sync on sends no session event, so Settings closing reads the
-  // status again for whatever changed there.
-  const settingsOpen = settingsSection !== null;
-  const closeSettings = useCallback(() => {
-    if (settingsOpen) refreshCloudStatus();
-    setSettingsSection(null);
-    setSettingsFocus(null);
-  }, [refreshCloudStatus, settingsOpen]);
   // Connect server, wherever it is asked for. The account and the sync switch
   // are settings, so only a person known to be signed out gets the Cloud
   // dialog. A status still loading, or unreadable, opens Settings, which says

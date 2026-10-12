@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import type { CloudStatusResult } from "../../ipc/bridgeContract";
 import { buildSyncCode } from "../../workspaces/syncCode";
 import { bridge } from "../bridge";
+import { SYNC_PAUSED_FOR_ACCOUNT } from "../cloudSyncWords";
 import { ipcErrorMessage } from "../ipcError";
 import type { ConnectionErrorReport } from "../shell/connectionNotices";
 import { PrimaryButton, SecondaryButton } from "../ui/controls";
@@ -13,10 +14,6 @@ import { SettingRow, SwitchControl } from "./SettingRow";
 
 const SYNC_CODE_SECRET: CopySecret = { what: "the workspace code", again: "Copy it again from Settings." };
 const MIN_PASSPHRASE_LENGTH = 8;
-
-// The words About uses for the same facts: the workspace's remote belongs to
-// another account than the one signed in.
-export const OTHER_ACCOUNT_STATE = "This workspace syncs with another account.";
 
 // The shell's own read of this workspace's server connection, so opening
 // Settings reads nothing new.
@@ -163,7 +160,7 @@ export function CloudSyncSettings(props: {
     );
   }
 
-  const otherAccount = sync.workspaceSynced && !sync.workspaceSyncConnected;
+  const paused = sync.workspaceSynced && !sync.workspaceSyncConnected;
   const secretState = sync.workspaceSynced && sync.workspaceSyncConnected ? sync.workspaceSecretState : "none";
 
   return (
@@ -182,14 +179,27 @@ export function CloudSyncSettings(props: {
             title="Sync this workspace"
             testId="settings-row-sync-workspace"
             description={
-              otherAccount ? (
-                // Disconnect, on the row above, is the way to that account.
+              paused ? (
                 <span data-testid="cloud-workspace-relink" className="text-danger">
-                  {OTHER_ACCOUNT_STATE} Disconnect, then connect that account.
+                  {SYNC_PAUSED_FOR_ACCOUNT}
                 </span>
               ) : undefined
             }
           >
+            {/* Enabling again reads this account's saved session, which
+                resumes sync when it owns the workspace. Another account
+                gets main's reason in a notice, and Disconnect above is the
+                way to the right one. */}
+            {paused ? (
+              <SecondaryButton
+                size="compact"
+                data-testid="cloud-relink-workspace"
+                disabled={syncBusy}
+                onClick={() => void enableSync()}
+              >
+                Try again
+              </SecondaryButton>
+            ) : null}
             {/* Main has no way to stop syncing one workspace yet, so on
                 reads as on and stays on. Disconnect stops sync for every
                 workspace. */}

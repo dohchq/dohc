@@ -1,5 +1,5 @@
 import { LogOut, Network } from "lucide-react";
-import { useEffect, useId, useRef, useState, type ReactNode } from "react";
+import { useId, useRef, useState, type ReactNode } from "react";
 import { canonicalCloudOrigin } from "../../workspaces/cloudConfiguration";
 import { bridge } from "../bridge";
 import { ipcErrorMessage } from "../ipcError";
@@ -13,6 +13,46 @@ export const PRIVATE_NETWORK_EXPLANATION =
   "Everyone you share with needs access to this private network, from every device they use.";
 export const DISCONNECT_EXPLANATION =
   "Stops sync for every workspace on this machine. Your files stay where they are.";
+
+// Sign-ins this window has heard of, counted by one listener for the life of
+// the window. Main announces a logout with no session, and every sign-in
+// with its session from the first announcement on, before it finishes.
+let signIns = 0;
+let watchingSignIns = false;
+function signInCount(): number {
+  if (!watchingSignIns) {
+    watchingSignIns = true;
+    bridge().onCloudSessionChanged((event) => {
+      if (event.sessionKey !== null) signIns += 1;
+    });
+  }
+  return signIns;
+}
+
+// Ends this installation's session, and answers whether that failed. A
+// failure is reported even when nothing on screen asked: Disconnect reaches
+// every workspace, and main announces the logout before the step that
+// failed, so the row that asked may be gone. Its retry declines once anyone
+// has signed in since, so it never ends a newer session.
+async function endSession(report: (error: ConnectionErrorReport) => void): Promise<boolean> {
+  const before = signInCount();
+  try {
+    await bridge().cloudLogout();
+    return false;
+  } catch (cause) {
+    report({
+      message: ipcErrorMessage(cause, "dohc could not finish disconnecting."),
+      cause,
+      serverUrl: null,
+      retry: () => {
+        if (signInCount() !== before) return false;
+        void endSession(report);
+        return true;
+      },
+    });
+    return true;
+  }
+}
 
 // Who this machine is signed in as, on which server, and Disconnect. The
 // session belongs to the installation, so Disconnect stops sync for every
@@ -28,54 +68,19 @@ export function CloudAccountRow(props: {
   onError: (error: ConnectionErrorReport) => void;
 }) {
   const [busy, setBusy] = useState(false);
+  // Bumped when the row unmounts, so an answer after that paints nothing.
   const requests = useRequestSequence();
-  const mounted = useRef(true);
-  useEffect(() => {
-    mounted.current = true;
-    return () => {
-      mounted.current = false;
-    };
-  }, []);
   const latest = useRef(props);
   latest.current = props;
   const server = canonicalCloudOrigin(props.serverUrl) ?? props.serverUrl.trim();
 
   async function disconnect() {
     const request = requests.next();
-    const here = () => mounted.current && requests.isCurrent(request);
-    let failed = false;
-    if (here()) setBusy(true);
-    // Main announces the logout itself with no session. A session announced
-    // after it is a new sign-in, which this attempt's retry must not end.
-    let signedInSince = false;
-    const stopWatching = bridge().onCloudSessionChanged((event) => {
-      if (event.phase === "ready" && event.sessionKey !== null) signedInSince = true;
-    });
-    try {
-      await bridge().cloudLogout();
-      stopWatching();
-    } catch (cause) {
-      failed = true;
-      // Main announces the logout before the step that failed, and a host
-      // that drops this row on that news must still hear the failure.
-      // Disconnect reaches the whole installation, so it is news anywhere.
-      latest.current.onError({
-        message: ipcErrorMessage(cause, "dohc could not finish disconnecting."),
-        cause,
-        serverUrl: null,
-        retry: () => {
-          stopWatching();
-          if (signedInSince) return false;
-          void disconnect();
-          return true;
-        },
-      });
-    } finally {
-      if (here()) {
-        setBusy(false);
-        latest.current.onSettled(failed);
-      }
-    }
+    setBusy(true);
+    const failed = await endSession(latest.current.onError);
+    if (!requests.isCurrent(request)) return;
+    setBusy(false);
+    latest.current.onSettled(failed);
   }
 
   return (
@@ -86,7 +91,7 @@ export function CloudAccountRow(props: {
         <span className="flex flex-wrap items-center gap-x-2">
           <span data-testid="cloud-connected-server" className="font-mono">{server}</span>
           {props.networkAccess === "private" ? (
-            <Explained explanation={PRIVATE_NETWORK_EXPLANATION} testId="cloud-network-access-explanation">
+            <Explained explanation={PRIVATE_NETWORK_EXPLANATION} testId="cloud-network-access-explanation" align="start">
               {(target) => (
                 <span
                   {...target}
@@ -107,7 +112,7 @@ export function CloudAccountRow(props: {
       }
       testId="settings-row-account"
     >
-      <Explained explanation={DISCONNECT_EXPLANATION} testId="cloud-disconnect-explanation">
+      <Explained explanation={DISCONNECT_EXPLANATION} testId="cloud-disconnect-explanation" align="end">
         {({ show: _show, ...target }) => (
           <SecondaryButton
             {...target}
@@ -127,10 +132,13 @@ export function CloudAccountRow(props: {
 }
 
 // Words a mark or a button cannot carry. They show beside it on hover and
-// keyboard focus, and a screen reader reads them with it at any time.
+// keyboard focus, and a screen reader reads them with it at any time. They
+// open from the edge that keeps them inside the page: the start edge for
+// something on the row's left, the end edge for its control.
 function Explained(props: {
   explanation: string;
   testId: string;
+  align: "start" | "end";
   children: (target: {
     "aria-describedby": string;
     // Overlay leaves an Escape to the target while the words show.
@@ -169,7 +177,9 @@ function Explained(props: {
         {...(open ? { role: "tooltip" } : {})}
         className={
           open
-            ? "dohc-popover dohc-pop-in absolute right-0 top-full z-50 mt-1 w-max max-w-72 rounded-xl border border-line bg-panel p-3 text-[12px] font-normal text-ink"
+            ? `dohc-popover dohc-pop-in absolute top-full z-50 mt-1 w-max max-w-72 rounded-xl border border-line bg-panel p-3 text-[12px] font-normal text-ink ${
+                props.align === "start" ? "left-0" : "right-0"
+              }`
             : "sr-only"
         }
       >
