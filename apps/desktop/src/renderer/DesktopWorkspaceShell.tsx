@@ -1,4 +1,3 @@
-import { parseTab, TAB_KINDS } from "./workbench/workbenchState";
 import { useTypingRecoveryNotices } from "./shell/useTypingRecoveryNotices";
 import { CreationPartialError } from "@dohc/cli/creation";
 import {shareSenderLabel} from "@dohc/security-contract/share-labels";
@@ -208,6 +207,8 @@ import type {
   ChatsNav,
 } from "./workbench/ChatsView";
 import {
+  parseTab,
+  TAB_KINDS,
   activeGroup,
   activeTabPath,
   activateTab,
@@ -280,7 +281,7 @@ function groupsMountingNewDocument(
     const before = current.editorGroups.find((group) => group.id === after.id);
     return after.activeTab !== before?.activeTab &&
       after.activeTab !== null &&
-      !TAB_KINDS[parseTab(after.activeTab)?.kind ?? "removed"].virtual
+      !TAB_KINDS[parseTab(after.activeTab).kind].virtual
       ? [after.id]
       : [];
   });
@@ -998,7 +999,7 @@ export function DesktopWorkspaceShell(props: {
   // Whether any group holds a file tab, so About can tell "open a file" apart
   // from "a chat or another non-file tab has focus".
   const fileTabOpen = useMemo(
-    () => wb.editorGroups.some((group) => group.tabs.some((tab) => !TAB_KINDS[parseTab(tab.path)?.kind ?? "removed"].virtual)),
+    () => wb.editorGroups.some((group) => group.tabs.some((tab) => !TAB_KINDS[parseTab(tab.path).kind].virtual)),
     [wb.editorGroups],
   );
 
@@ -1251,7 +1252,7 @@ export function DesktopWorkspaceShell(props: {
           const restoredGroup = activeGroup(parsed);
           if (
             restoredGroup.activeTab !== null &&
-            !TAB_KINDS[parseTab(restoredGroup.activeTab)?.kind ?? "removed"].virtual
+            !TAB_KINDS[parseTab(restoredGroup.activeTab).kind].virtual
           ) {
             restoredFileSurface = {
               selectionGeneration: workspaceSelectionGeneration,
@@ -2635,7 +2636,7 @@ export function DesktopWorkspaceShell(props: {
         current.activeEditorGroup,
         groupId,
       );
-      if (TAB_KINDS[parseTab(path)?.kind ?? "removed"].virtual) {
+      if (TAB_KINDS[parseTab(path).kind].virtual) {
         mutateWb((state) => activateTab(state, groupId, path));
         return;
       }
@@ -3277,7 +3278,7 @@ export function DesktopWorkspaceShell(props: {
         (candidate) => candidate.path === group.activeTab,
       );
       if (!group || !tab) return;
-      if (TAB_KINDS[parseTab(tab.path)?.kind ?? "removed"].singleton) {
+      if (TAB_KINDS[parseTab(tab.path).kind].singleton) {
         showSingletonTabSplitError();
         return;
       }
@@ -3366,13 +3367,13 @@ export function DesktopWorkspaceShell(props: {
         moveTabIntoNewGroup(targetGroupId, path);
       } else if (command === "close-editor-group") {
         closeGroupAfterFlush(targetGroupId);
-      } else if (command === "copy-path" && path && !TAB_KINDS[parseTab(path)?.kind ?? "removed"].virtual) {
+      } else if (command === "copy-path" && path && !TAB_KINDS[parseTab(path).kind].virtual) {
         void navigator.clipboard?.writeText(path);
       } else if (command === "show-in-explorer" && path) {
         const tab = parseTab(path);
-        const appRoot = tab?.kind === "site" ? tab.siteRoot : null;
+        const appRoot = tab.kind === "site" ? tab.siteRoot : null;
         if (appRoot !== null) showPathInExplorer(appRoot, true);
-        else if (!TAB_KINDS[parseTab(path)?.kind ?? "removed"].virtual) showPathInExplorer(path);
+        else if (!TAB_KINDS[tab.kind].virtual) showPathInExplorer(path);
       } else if (command === "open-history") {
         openHistoryView();
       } else if (command === "connect-cloud") {
@@ -5600,7 +5601,7 @@ export function DesktopWorkspaceShell(props: {
                 </div>
               )
             );
-                case "removed": return null;
+                case "removed":
                 case undefined:
                 case "file": return tabPath && tab && editorCallbacks ? (
               <FileInspector

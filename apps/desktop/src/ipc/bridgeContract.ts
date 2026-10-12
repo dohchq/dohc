@@ -1,4 +1,3 @@
-import { parseTab, TAB_KINDS, singletonTabIdentity } from "../renderer/workbench/workbenchState";
 import { SharedDocumentOpenState } from "./sharedDocumentOpenState";
 import { shareCopyOperations } from "./shareCopyOperations";
 export type { ShareCopyInput, ShareCopyResult } from "@dohc/workspace-contracts/share-copy";
@@ -75,6 +74,9 @@ import type {
 } from "@dohc/workspace-engine-client";
 export type { EngineStoreRefusal } from "@dohc/workspace-engine-client";
 import {
+  parseTab,
+  TAB_KINDS,
+  singletonTabIdentity,
   MAX_COLLECTION_VIEWS,
   MAX_EXPANDED_FOLDERS,
   MAX_EDITOR_GROUPS,

@@ -1,11 +1,11 @@
-import { basenameOf } from "../path";
-import { parseDatasetPath } from "@dohc/security-contract/dataset";
 // Pure workbench model: activity-bar view, side-panel visibility
 // and width, open editor tabs, and the right-hand About rail. Pure like
 // window/windowState.ts so every transition and the persistence round-trip
 // are unit-tested without Electron. `dirty` is runtime-only (derived from the
 // editor's save state) and never lives here or on disk.
 
+import { basenameOf } from "../path";
+import { parseDatasetPath } from "@dohc/security-contract/dataset";
 import type { WorkspaceUiState } from "../../ipc/bridgeContract";
 import type { SidebarSettings } from "../../settings/userSettings";
 
@@ -1078,7 +1078,7 @@ export function pruneMissingRestoredTabs(
     const tabs = group.tabs.filter(
       (tab) =>
         !restoredPaths.has(tab.path) ||
-        TAB_KINDS[parseTab(tab.path)?.kind ?? "removed"].virtual ||
+        TAB_KINDS[parseTab(tab.path).kind].virtual ||
         fileExists(tab.path),
     );
     if (tabs.length === group.tabs.length) return group;

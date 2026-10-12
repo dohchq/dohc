@@ -23,7 +23,7 @@ function editorTabSelector(path: string, virtual: boolean): string {
 }
 
 export function editorTabTestId(path: string): string {
-  return editorTabSelector(path, TAB_KINDS[parseTab(path)?.kind ?? "removed"].virtual);
+  return editorTabSelector(path, TAB_KINDS[parseTab(path).kind].virtual);
 }
 
 // Prefix readers cannot classify incomplete identities such as a channel without its ID.

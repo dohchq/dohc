@@ -1,4 +1,3 @@
-import { parseTab, TAB_KINDS } from "./workbenchState";
 import { FILE_KIND_RECORDS, fileKindForPath, type FileKindRecord } from "@dohc/workspace-contracts/kinds";
 import { useFocusSurface } from "../ui/focusReturn";
 import { DangerButton, SecondaryButton, SectionLabel } from "../ui/controls";
@@ -44,6 +43,8 @@ import {
 } from "./file-tree-optimistic";
 import { buildTree, type TreeNode } from "./path-tree";
 import {
+  parseTab,
+  TAB_KINDS,
   type EditorGroup,
   clampOpenEditorsHeight,
 } from "./workbenchState";
@@ -802,7 +803,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
     const target =
       focusedPath ??
       selectedPath ??
-      (activeTab && !TAB_KINDS[parseTab(activeTab)?.kind ?? "removed"].virtual ? activeTab : null);
+      (activeTab && !TAB_KINDS[parseTab(activeTab).kind].virtual ? activeTab : null);
     if (!target) return "";
     return isFolderPath(target) ? target : dirnameOf(target);
   }, [activeTab, focusedPath, isFolderPath, selection]);

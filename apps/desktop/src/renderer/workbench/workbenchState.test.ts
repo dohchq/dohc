@@ -1,7 +1,8 @@
-import { parseTab, TAB_KINDS } from "./workbenchState";
 import { describe, expect, it } from "vitest";
 import { SetWorkspaceUiStatePayload } from "../../ipc/bridgeContract";
 import {
+  parseTab,
+  TAB_KINDS,
   activateTab,
   activeGroup,
   activeTabPath,
@@ -540,38 +541,38 @@ describe("tabs", () => {
   });
 
   it("recognizes history as a virtual workbench tab", () => {
-    expect((parseTab(HISTORY_TAB_PATH)?.kind === "history")).toBe(true);
-    expect(TAB_KINDS[parseTab(HISTORY_TAB_PATH)?.kind ?? "removed"].virtual).toBe(true);
-    expect(TAB_KINDS[parseTab("notes/today.md")?.kind ?? "removed"].virtual).toBe(false);
+    expect(parseTab(HISTORY_TAB_PATH).kind).toBe("history");
+    expect(TAB_KINDS[parseTab(HISTORY_TAB_PATH).kind].virtual).toBe(true);
+    expect(TAB_KINDS[parseTab("notes/today.md").kind].virtual).toBe(false);
   });
 
   it("recognizes chats as a virtual workbench tab", () => {
-    expect((parseTab(CHATS_TAB_PATH)?.kind === "chat")).toBe(true);
-    expect((parseTab("tab://chats/extra")?.kind === "chat")).toBe(false);
-    expect((parseTab(null)?.kind === "chat")).toBe(false);
-    expect(TAB_KINDS[parseTab(CHATS_TAB_PATH)?.kind ?? "removed"].virtual).toBe(true);
+    expect(parseTab(CHATS_TAB_PATH).kind).toBe("chat");
+    expect(parseTab("tab://chats/extra").kind).toBe("removed");
+    expect(parseTab(null)).toBeNull();
+    expect(TAB_KINDS[parseTab(CHATS_TAB_PATH).kind].virtual).toBe(true);
   });
 
   it("recognizes engine moment diffs by their encoded moment id", () => {
     const path = momentDiffTabPath("moment id/with strange chars");
-    expect((parseTab(path)?.kind === "momentDiff")).toBe(true);
-    expect(TAB_KINDS[parseTab(path)?.kind ?? "removed"].virtual).toBe(true);
-    expect(parseTab(path)).toMatchObject({ kind: "momentDiff", momentId: "moment id/with strange chars" });
-    expect(parseTab("tab://moment-diff/")).not.toMatchObject({ momentId: expect.any(String) });
-    expect(parseTab("tab://moment-diff/%ZZ")).not.toMatchObject({ momentId: expect.any(String) });
-    expect(parseTab("notes/today.md")).not.toMatchObject({ momentId: expect.any(String) });
-    expect(parseTab(null)).not.toMatchObject({ momentId: expect.any(String) });
+    expect(parseTab(path).kind).toBe("momentDiff");
+    expect(TAB_KINDS[parseTab(path).kind].virtual).toBe(true);
+    expect(parseTab(path)).toEqual({ kind: "momentDiff", path, momentId: "moment id/with strange chars" });
+    expect(parseTab("tab://moment-diff/")).toEqual({ kind: "momentDiff", path: "tab://moment-diff/", momentId: null });
+    expect(parseTab("tab://moment-diff/%ZZ")).toEqual({ kind: "momentDiff", path: "tab://moment-diff/%ZZ", momentId: null });
+    expect(parseTab("notes/today.md")).toEqual({ kind: "file", path: "notes/today.md" });
+    expect(parseTab(null)).toBeNull();
   });
 
   it("recognizes collections as virtual tabs with encoded folder paths", () => {
     const path = collectionTabPath("projects/road trips");
-    expect((parseTab(path)?.kind === "collection")).toBe(true);
-    expect(TAB_KINDS[parseTab(path)?.kind ?? "removed"].virtual).toBe(true);
-    expect(parseTab(path)).toMatchObject({ kind: "collection", collectionPath: "projects/road trips" });
-    expect(parseTab("tab://collection/")).not.toMatchObject({ collectionPath: expect.any(String) });
-    expect(parseTab("tab://collection/%ZZ")).not.toMatchObject({ collectionPath: expect.any(String) });
-    expect(parseTab("notes/today.md")).not.toMatchObject({ collectionPath: expect.any(String) });
-    expect(parseTab(null)).not.toMatchObject({ collectionPath: expect.any(String) });
+    expect(parseTab(path).kind).toBe("collection");
+    expect(TAB_KINDS[parseTab(path).kind].virtual).toBe(true);
+    expect(parseTab(path)).toEqual({ kind: "collection", path, collectionPath: "projects/road trips" });
+    expect(parseTab("tab://collection/")).toEqual({ kind: "collection", path: "tab://collection/", collectionPath: null });
+    expect(parseTab("tab://collection/%ZZ")).toEqual({ kind: "collection", path: "tab://collection/%ZZ", collectionPath: null });
+    expect(parseTab("notes/today.md")).toEqual({ kind: "file", path: "notes/today.md" });
+    expect(parseTab(null)).toBeNull();
   });
 
   it("persists and restores the largest multibyte moment identity", () => {
@@ -594,26 +595,26 @@ describe("tabs", () => {
 
   it("recognizes version compare pages as virtual tabs with encoded version ids", () => {
     const path = versionCompareTabPath("version id/with strange chars");
-    expect((parseTab(path)?.kind === "versionCompare")).toBe(true);
-    expect(TAB_KINDS[parseTab(path)?.kind ?? "removed"].virtual).toBe(true);
-    expect(parseTab(path)).toMatchObject({ kind: "versionCompare", versionId: "version id/with strange chars" });
-    expect(parseTab("tab://versions/compare/")).not.toMatchObject({ versionId: expect.any(String) });
-    expect(parseTab("tab://versions/compare/%ZZ")).not.toMatchObject({ versionId: expect.any(String) });
-    expect(parseTab("notes/today.md")).not.toMatchObject({ versionId: expect.any(String) });
-    expect(parseTab(null)).not.toMatchObject({ versionId: expect.any(String) });
+    expect(parseTab(path).kind).toBe("versionCompare");
+    expect(TAB_KINDS[parseTab(path).kind].virtual).toBe(true);
+    expect(parseTab(path)).toEqual({ kind: "versionCompare", path, versionId: "version id/with strange chars" });
+    expect(parseTab("tab://versions/compare/")).toEqual({ kind: "versionCompare", path: "tab://versions/compare/", versionId: null });
+    expect(parseTab("tab://versions/compare/%ZZ")).toEqual({ kind: "versionCompare", path: "tab://versions/compare/%ZZ", versionId: null });
+    expect(parseTab("notes/today.md")).toEqual({ kind: "file", path: "notes/today.md" });
+    expect(parseTab(null)).toBeNull();
   });
 
   it("recognizes site previews as virtual tabs with encoded site roots", () => {
     const path = siteTabPath("clients/acme website");
-    expect((parseTab(path)?.kind === "site")).toBe(true);
-    expect(TAB_KINDS[parseTab(path)?.kind ?? "removed"].virtual).toBe(true);
-    expect(parseTab(path)).toMatchObject({ kind: "site", siteRoot: "clients/acme website" });
-    expect(parseTab("tab://app/")).not.toMatchObject({ siteRoot: expect.any(String) });
-    expect(parseTab(null)).not.toMatchObject({ siteRoot: expect.any(String) });
-    expect(parseTab("not-a-site-path")).not.toMatchObject({ siteRoot: expect.any(String) });
+    expect(parseTab(path).kind).toBe("site");
+    expect(TAB_KINDS[parseTab(path).kind].virtual).toBe(true);
+    expect(parseTab(path)).toEqual({ kind: "site", path, siteRoot: "clients/acme website" });
+    expect(parseTab("tab://app/")).toEqual({ kind: "site", path: "tab://app/", siteRoot: null });
+    expect(parseTab(null)).toBeNull();
+    expect(parseTab("not-a-site-path")).toEqual({ kind: "file", path: "not-a-site-path" });
 
     const reservedRoot = "clients/site/nested?view=main#summary";
-    expect(parseTab(siteTabPath(reservedRoot))).toMatchObject({ kind: "site", siteRoot: reservedRoot });
+    expect(parseTab(siteTabPath(reservedRoot))).toEqual({ kind: "site", path: siteTabPath(reservedRoot), siteRoot: reservedRoot });
   });
 
   it("refuses a virtual tab at the open-tab cap, which is what the shell reports", () => {
@@ -803,11 +804,11 @@ describe("ui-state persistence round-trip", () => {
       sitePath,
     ]);
     expect(restored.editorGroups[0]!.activeTab).toBe(sitePath);
-    expect((parseTab(sitePath)?.kind === "removed")).toBe(false);
-    expect((parseTab(removedPath)?.kind === "removed")).toBe(true);
-    expect((parseTab(GRAPH_TAB_PATH)?.kind === "removed")).toBe(false);
-    expect((parseTab("notes/tab://app/a.md")?.kind === "removed")).toBe(false);
-    expect((parseTab("notes/a.md")?.kind === "removed")).toBe(false);
+    expect(parseTab(sitePath).kind).toBe("site");
+    expect(parseTab(removedPath).kind).toBe("removed");
+    expect(parseTab(GRAPH_TAB_PATH).kind).toBe("graph");
+    expect(parseTab("notes/tab://app/a.md").kind).toBe("file");
+    expect(parseTab("notes/a.md").kind).toBe("file");
   });
 
   it("restores the built-in Apps view", () => {
