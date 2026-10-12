@@ -142,8 +142,9 @@ The server emails a link instead, and the person chooses their password there.
 Opening that link also verifies the address and signs out every session of the account.
 Until then, nobody can sign in to the account.
 An existing account that never verified its address works the same way: select **Forgot your password?** to get the link.
-Closing sign-up does not sign anyone out.
-Sessions created while sign-up was open stay valid.
+When the server starts with a list, it signs out everyone whose email is not verified.
+To sign in again, they choose a password from an emailed link.
+People with a verified email stay signed in.
 
 Any other address gets a message that the server creates accounts only for approved or invited addresses.
 Share links need no account, so closed sign-up does not change them.

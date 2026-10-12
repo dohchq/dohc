@@ -54,8 +54,12 @@ export function createWorkspaceAuth(options: WorkspaceAuthOptions) {
   const sendPasswordLink = async (email: string, next: string | null): Promise<void> => {
     await auth.api.requestPasswordReset({ body: { email, ...(next ? { redirectTo: next } : {}) } });
   };
+  // Better Auth commits each step of a reset on its own. Signing out first
+  // means a failure in between leaves an unverified account nobody is in.
   const verifyOnPasswordReset = async (userId: string): Promise<void> => {
-    await (await auth.$context).internalAdapter.updateUser(userId, { emailVerified: true });
+    const { internalAdapter } = await auth.$context;
+    await internalAdapter.deleteUserSessions(userId);
+    await internalAdapter.updateUser(userId, { emailVerified: true });
   };
   const auth = betterAuth({
     ...(admitAccount
@@ -188,6 +192,19 @@ export function createWorkspaceAuth(options: WorkspaceAuthOptions) {
     ],
   });
   return auth;
+}
+
+/**
+ * Signs out every account whose email is not verified, including desktop
+ * sign-ins approved but not yet collected. A closed server runs this before it
+ * serves requests: a session from while sign-up was open never proved its
+ * mailbox, and closed sign-in refuses to create a new one.
+ */
+export async function signOutUnverifiedAccounts(pool: Pool): Promise<void> {
+  await pool.query(`
+    with unverified as (select "id" from "user" where not "emailVerified"),
+      signed_out as (delete from "session" where "userId" in (select "id" from unverified))
+    delete from "deviceCode" where "userId" in (select "id" from unverified)`);
 }
 
 /** The device sign-in an emailed link should continue, if Better Auth's link carries one. */

@@ -1,5 +1,5 @@
 import { Client, Pool } from "pg";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { createWorkspaceAuth, type WorkspaceAuth } from "./betterAuth";
 import { actorFromSession, createSessionActorResolver, UnauthorizedError, type ResolveActor } from "./session";
 import type { SignUpAdmission } from "./signUp";
@@ -250,6 +250,32 @@ describeWithPostgres("closed sign-up", () => {
     });
     const signin = await closed.api.signInEmail({ body: { email, password: ownerPassword } });
     expect(signin.user.emailVerified).toBe(true);
+  });
+
+  it("signs out every session before it verifies the address, so a failure between the two leaves nobody signed in", async () => {
+    const email = `${unique()}@dohc.test`;
+    // A session from while sign-up was open.
+    const { token, user } = await signUp(email);
+    const bearer = { authorization: `Bearer ${token}` };
+    expect(await auth.api.getSession({ headers: bearer })).not.toBeNull();
+
+    const closed = closedAuth("admitted");
+    await closed.api.requestPasswordReset({ body: { email } });
+    const { internalAdapter } = await closed.$context;
+    const verify = vi.spyOn(internalAdapter, "updateUser").mockRejectedValueOnce(new Error("The database went away."));
+    try {
+      await expect(choosePassword(closed, email, "owner-password-ccc")).rejects.toThrow("The database went away.");
+      expect(verify).toHaveBeenCalledWith(user.id, { emailVerified: true });
+    } finally {
+      verify.mockRestore();
+    }
+
+    expect(await closed.api.getSession({ headers: bearer })).toBeNull();
+    const state = await pool.query<{ emailVerified: boolean; sessions: number }>(
+      'SELECT "emailVerified", (SELECT count(*) FROM "session" WHERE "userId" = $1)::int AS sessions FROM "user" WHERE id = $1',
+      [user.id],
+    );
+    expect(state.rows).toEqual([{ emailVerified: false, sessions: 0 }]);
   });
 
   it("sends no link when someone signs up again with a verified address", async () => {

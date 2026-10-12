@@ -1,4 +1,4 @@
-import { createWorkspaceAuth } from "@dohc/workspace-auth/betterAuth";
+import { createWorkspaceAuth, signOutUnverifiedAccounts } from "@dohc/workspace-auth/betterAuth";
 import { signUpInviteKey } from "@dohc/workspace-auth/signUp";
 import {
   createSmtpSender,
@@ -53,6 +53,18 @@ const auth = createWorkspaceAuth({
   ...(config.trustedOrigins.length > 0 ? { trustedOrigins: config.trustedOrigins } : {}),
   ...(config.signUp ? { admitAccount: createSignUpAdmission({ ...config.signUp, key: signUpInviteKey(config.secret) }) } : {}),
 });
+
+// On a closed server, someone may have signed up with another person's
+// address while sign-up was open. They must not still be signed in when the
+// server starts taking requests.
+if (config.signUp) {
+  try {
+    await signOutUnverifiedAccounts(pool);
+  } catch {
+    console.error("FATAL: Signing out accounts without a verified email failed.");
+    process.exit(1);
+  }
+}
 
 const gateway: AuthGateway = {
   handler: (request) => email.handle(request, (forwarded) => auth.handler(forwarded), async () => (await auth.api.getSession({ headers: request.headers }))?.user.email ?? null),
