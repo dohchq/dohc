@@ -37,7 +37,7 @@ export function doctor({ ready = false, engine = true, desktop = true, browser =
   }
   catch { add("electron binary", false, "Run node apps/desktop/scripts/ensure-electron-installed.mjs."); }
   for (const tool of engine || desktop ? ["rustc", "cargo"] : []) {
-    try { add(tool, true, execFileSync(tool, ["--version"], { encoding: "utf8", env: { ...process.env, RUSTUP_AUTO_INSTALL: "0" } }).trim()); }
+    try { add(tool, true, execFileSync(tool, ["--version"], { encoding: "utf8", windowsHide: true, env: { ...process.env, RUSTUP_AUTO_INSTALL: "0" } }).trim()); }
     catch { add(tool, false, "Install the repository Rust toolchain."); }
   }
   const free = freeDiskGb(repoRoot);
