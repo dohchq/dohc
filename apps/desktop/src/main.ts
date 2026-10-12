@@ -1580,10 +1580,11 @@ const accessOwner = createAccessOwner<AccessWorkspaceOperation>({
     const workspace = operation.workspace;
     return resolveAccessObject(workspace, ref, {
       filePathForObjectId: async objectId => {
-        const index = await engineSearchIndexFor(receivedShareEngine.workspaceForRegistered(workspace));
-        if (!index) throw new Error("File aliases are unavailable.");
-        const file = index.files.find(row => row.objectId === objectId);
-        return file ? { path: file.path, versionId: index.versionId } : null;
+        const resolved = await withEngineAdapter(receivedShareEngine.workspaceForRegistered(workspace), adapter =>
+          adapter.resolveFiles({ workspaceId: workspace.workspaceId, targets: [{ objectId }], signal: operation.signal }));
+        if (!resolved) throw new Error("File aliases are unavailable.");
+        const [file] = resolved.results;
+        return file?.status === "found" ? { path: file.path, versionId: resolved.versionId } : null;
       },
       locatePath: async (path, versionId) => {
         if (versionId !== null && versionId !== "main") {
