@@ -18,6 +18,7 @@ use dohc_engine_protocol::error::WireError;
 use dohc_engine_protocol::transport::RequestContext;
 use dohc_engine_protocol::wire::WorkspaceHandle;
 use serde::Deserialize;
+use serde::Serialize;
 use serde_json::Value;
 use serde_json::json;
 
@@ -65,33 +66,59 @@ fn parse_channel_kind(raw: &str) -> Result<ChatChannelKind, WireError> {
     }
 }
 
-pub(super) fn channel_json(channel: &ChatChannel) -> Value {
-    let mut value = json!({
-        "workspaceId": channel.workspace_id,
-        "channelId": channel.channel_id,
-        "name": channel.name,
-        "slug": channel.slug,
-        "kind": match channel.kind {
-            ChatChannelKind::Channel => "channel",
-            ChatChannelKind::Dm => "dm",
-            ChatChannelKind::Agent => "agent",
-        },
-        "type": channel.group.channel_type.as_str(),
-        "purpose": channel.group.purpose,
-        "createdAtMs": channel.created_at_ms,
-        "updatedAtMs": channel.updated_at_ms,
-    });
-    if let Some(folder) = &channel.group.folder_path {
-        value["folderPath"] = json!(folder);
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct ChannelWire<'a> {
+    workspace_id: &'a str,
+    channel_id: &'a str,
+    name: &'a str,
+    slug: &'a str,
+    kind: &'static str,
+    #[serde(rename = "type")]
+    channel_type: &'static str,
+    purpose: &'a str,
+    created_at_ms: i64,
+    updated_at_ms: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    folder_path: Option<&'a str>,
+}
+
+impl<'a> From<&'a ChatChannel> for ChannelWire<'a> {
+    fn from(channel: &'a ChatChannel) -> Self {
+        ChannelWire {
+            workspace_id: &channel.workspace_id,
+            channel_id: &channel.channel_id,
+            name: &channel.name,
+            slug: &channel.slug,
+            kind: channel.kind.as_str(),
+            channel_type: channel.group.channel_type.as_str(),
+            purpose: &channel.group.purpose,
+            created_at_ms: channel.created_at_ms,
+            updated_at_ms: channel.updated_at_ms,
+            folder_path: channel.group.folder_path.as_deref(),
+        }
     }
-    value
+}
+
+fn channel_json(channel: &ChatChannel) -> Value {
+    json!(ChannelWire::from(channel))
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ChannelSummaryWire<'a> {
+    #[serde(flatten)]
+    channel: ChannelWire<'a>,
+    thread_count: i64,
+    unread_count: i64,
 }
 
 fn channel_summary_json(summary: &ChatChannelSummary) -> Value {
-    let mut value = channel_json(&summary.channel);
-    value["threadCount"] = json!(summary.thread_count);
-    value["unreadCount"] = json!(summary.unread_count);
-    value
+    json!(ChannelSummaryWire {
+        channel: ChannelWire::from(&summary.channel),
+        thread_count: summary.thread_count,
+        unread_count: summary.unread_count,
+    })
 }
 
 impl EngineService {
@@ -254,5 +281,56 @@ impl EngineService {
         )
         .await?;
         Ok(json!({ "wireId": wire_id }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn channel_summary_extends_the_channel_record() {
+        let channel = ChatChannel {
+            workspace_id: "workspace".to_owned(),
+            channel_id: "channel".to_owned(),
+            name: "General".to_owned(),
+            slug: "general".to_owned(),
+            kind: ChatChannelKind::Channel,
+            group: ChannelGroup::default(),
+            created_at_ms: 10,
+            updated_at_ms: 11,
+        };
+        let summary = ChatChannelSummary {
+            channel: channel.clone(),
+            thread_count: 2,
+            unread_count: 1,
+        };
+        assert_eq!(
+            channel_summary_json(&summary),
+            json!({
+                "workspaceId": "workspace",
+                "channelId": "channel",
+                "name": "General",
+                "slug": "general",
+                "kind": "channel",
+                "type": "posts",
+                "purpose": "",
+                "createdAtMs": 10,
+                "updatedAtMs": 11,
+                "threadCount": 2,
+                "unreadCount": 1,
+            })
+        );
+        let foldered = ChatChannel {
+            group: ChannelGroup {
+                folder_path: Some("groups/general".to_owned()),
+                ..ChannelGroup::default()
+            },
+            ..channel
+        };
+        assert_eq!(
+            channel_json(&foldered)["folderPath"],
+            json!("groups/general")
+        );
     }
 }

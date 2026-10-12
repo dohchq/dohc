@@ -2,14 +2,14 @@ use crate::EngineService;
 use crate::rpc::capture::reject_capture_origin;
 use crate::rpc::chats::ChatKeysetCursor;
 use crate::rpc::chats::bounded_chat_page_len;
-use crate::rpc::chats::channels::channel_json;
+use crate::rpc::chats::channels::ChannelWire;
 use crate::rpc::chats::chat_cursor_binding;
 use crate::rpc::chats::chat_page_limit;
 use crate::rpc::chats::decode_chat_cursor;
 use crate::rpc::chats::encode_chat_cursor;
 use crate::rpc::chats::threads::ChatLocalAttachmentParams;
 use crate::rpc::chats::threads::ChatThreadPageParams;
-use crate::rpc::chats::threads::thread_b2_json;
+use crate::rpc::chats::threads::ThreadB2Wire;
 use crate::rpc::request::OperationCancellation;
 use crate::rpc::request::deserialize_optional_non_null;
 use crate::rpc::request::now_ms;
@@ -18,7 +18,6 @@ use crate::rpc::request::required_idempotency_key;
 use dohc_engine_domain::ChatActorKind;
 use dohc_engine_domain::ChatAttachment;
 use dohc_engine_domain::ChatDecision;
-use dohc_engine_domain::ChatDecisionState;
 use dohc_engine_domain::ChatFileMention;
 use dohc_engine_domain::ChatMention;
 use dohc_engine_domain::ChatMessage;
@@ -35,6 +34,7 @@ use dohc_engine_protocol::error::WireError;
 use dohc_engine_protocol::transport::RequestContext;
 use dohc_engine_protocol::wire::WorkspaceHandle;
 use serde::Deserialize;
+use serde::Serialize;
 use serde_json::Value;
 use serde_json::json;
 
@@ -179,138 +179,213 @@ fn parse_reactor_kind(raw: &str) -> Result<ChatActorKind, WireError> {
     }
 }
 
-pub(super) fn actor_kind_str(kind: ChatActorKind) -> &'static str {
-    match kind {
-        ChatActorKind::Human => "human",
-        ChatActorKind::Agent => "agent",
-        ChatActorKind::Automation => "automation",
+/// The depth stays in the engine.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct AutomationWire<'a> {
+    automation_id: &'a str,
+}
+
+impl<'a> From<&'a ChatMessageAutomation> for AutomationWire<'a> {
+    fn from(automation: &'a ChatMessageAutomation) -> Self {
+        AutomationWire {
+            automation_id: &automation.automation_id,
+        }
     }
 }
 
-/// The depth stays in the engine.
-pub(super) fn automation_json(automation: &ChatMessageAutomation) -> Value {
-    json!({ "automationId": automation.automation_id })
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct AuthorWire<'a> {
+    kind: &'static str,
+    display_name: &'a str,
+}
+
+impl<'a> AuthorWire<'a> {
+    pub(super) fn new(kind: ChatActorKind, display_name: &'a str) -> Self {
+        AuthorWire {
+            kind: kind.as_str(),
+            display_name,
+        }
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct MessageWire<'a> {
+    id: &'a str,
+    workspace_id: &'a str,
+    thread_id: &'a str,
+    author: AuthorWire<'a>,
+    body: &'a str,
+    created_at_ms: i64,
+    attachments: Vec<AttachmentWire<'a>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    author_owner_display_name: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    author_user_id: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    parent_message_id: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    origin: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    automation: Option<AutomationWire<'a>>,
+}
+
+impl<'a> From<&'a ChatMessage> for MessageWire<'a> {
+    fn from(message: &'a ChatMessage) -> Self {
+        MessageWire {
+            id: &message.message_id,
+            workspace_id: &message.workspace_id,
+            thread_id: &message.thread_id,
+            author: AuthorWire::new(message.author_kind, &message.author_display_name),
+            body: &message.body,
+            created_at_ms: message.created_at_ms,
+            attachments: message
+                .attachments
+                .iter()
+                .map(AttachmentWire::from)
+                .collect(),
+            author_owner_display_name: message.author_owner_display_name.as_deref(),
+            author_user_id: message.author_user_id.as_deref(),
+            parent_message_id: message.parent_message_id.as_deref(),
+            origin: message.origin.as_deref(),
+            automation: message.automation.as_ref().map(AutomationWire::from),
+        }
+    }
 }
 
 pub(super) fn message_json(message: &ChatMessage) -> Value {
-    let mut value = json!({
-        "id": message.message_id,
-        "workspaceId": message.workspace_id,
-        "threadId": message.thread_id,
-        "author": {
-            "kind": actor_kind_str(message.author_kind),
-            "displayName": message.author_display_name,
-        },
-        "body": message.body,
-        "createdAtMs": message.created_at_ms,
-        "attachments": message.attachments.iter().map(attachment_json).collect::<Vec<_>>(),
-    });
-    let object = value.as_object_mut().expect("message is an object");
-    if let Some(owner_name) = &message.author_owner_display_name {
-        object.insert("authorOwnerDisplayName".to_owned(), json!(owner_name));
-    }
-    if let Some(author_user_id) = &message.author_user_id {
-        object.insert("authorUserId".to_owned(), json!(author_user_id));
-    }
-    if let Some(parent_message_id) = &message.parent_message_id {
-        object.insert("parentMessageId".to_owned(), json!(parent_message_id));
-    }
-    if let Some(origin) = &message.origin {
-        object.insert("origin".to_owned(), json!(origin));
-    }
-    if let Some(automation) = &message.automation {
-        object.insert("automation".to_owned(), automation_json(automation));
-    }
-    value
+    json!(MessageWire::from(message))
 }
 
-pub(super) fn reaction_json(reaction: &ChatReaction) -> Value {
-    json!({
-        "reactionId": reaction.reaction_id,
-        "threadId": reaction.thread_id,
-        "messageId": reaction.message_id,
-        "emoji": reaction.emoji,
-        "author": {
-            "authorId": reaction.author_id,
-            "kind": actor_kind_str(reaction.author_kind),
-            "displayName": reaction.author_display_name,
-        },
-        "state": match reaction.state {
-            ChatReactionState::Added => "added",
-            ChatReactionState::Removed => "removed",
-        },
-        "atMs": reaction.at_ms,
-    })
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ReactionAuthorWire<'a> {
+    author_id: &'a str,
+    kind: &'static str,
+    display_name: &'a str,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct ReactionWire<'a> {
+    reaction_id: &'a str,
+    thread_id: &'a str,
+    message_id: &'a str,
+    emoji: &'a str,
+    author: ReactionAuthorWire<'a>,
+    state: &'static str,
+    at_ms: i64,
+}
+
+impl<'a> From<&'a ChatReaction> for ReactionWire<'a> {
+    fn from(reaction: &'a ChatReaction) -> Self {
+        ReactionWire {
+            reaction_id: &reaction.reaction_id,
+            thread_id: &reaction.thread_id,
+            message_id: &reaction.message_id,
+            emoji: &reaction.emoji,
+            author: ReactionAuthorWire {
+                author_id: &reaction.author_id,
+                kind: reaction.author_kind.as_str(),
+                display_name: &reaction.author_display_name,
+            },
+            state: reaction.state.as_str(),
+            at_ms: reaction.at_ms,
+        }
+    }
+}
+
+fn reaction_json(reaction: &ChatReaction) -> Value {
+    json!(ReactionWire::from(reaction))
+}
+
+/// A bare question omits `options`; a poll lists them.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DecisionWire<'a> {
+    thread_id: &'a str,
+    message_id: &'a str,
+    state: &'static str,
+    at_ms: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    options: Option<&'a [String]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    chosen_option: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    resolved_by_message_id: Option<&'a str>,
 }
 
 fn decision_json(decision: &ChatDecision) -> Value {
-    let mut value = json!({
-        "threadId": decision.thread_id,
-        "messageId": decision.message_id,
-        "state": match decision.state {
-            ChatDecisionState::Open => "open",
-            ChatDecisionState::Resolved => "resolved",
-        },
-        "atMs": decision.at_ms,
-    });
-    if !decision.options.is_empty() {
-        value["options"] = json!(decision.options);
+    json!(DecisionWire {
+        thread_id: &decision.thread_id,
+        message_id: &decision.message_id,
+        state: decision.state.as_str(),
+        at_ms: decision.at_ms,
+        options: (!decision.options.is_empty()).then_some(decision.options.as_slice()),
+        chosen_option: decision.chosen_option.as_deref(),
+        resolved_by_message_id: decision.resolved_by_message_id.as_deref(),
+    })
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AttachmentWire<'a> {
+    attachment_id: &'a str,
+    thread_id: &'a str,
+    message_id: &'a str,
+    target_kind: &'static str,
+    created_at_ms: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    object_id: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    path_hint: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    heading_text: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    heading_anchor: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    heading_occurrence: Option<i64>,
+}
+
+impl<'a> From<&'a ChatAttachment> for AttachmentWire<'a> {
+    fn from(attachment: &'a ChatAttachment) -> Self {
+        AttachmentWire {
+            attachment_id: &attachment.attachment_id,
+            thread_id: &attachment.thread_id,
+            message_id: &attachment.message_id,
+            target_kind: "file",
+            created_at_ms: attachment.created_at_ms,
+            object_id: attachment.object_id.as_deref(),
+            path_hint: attachment.path_hint.as_deref(),
+            heading_text: attachment.heading_text.as_deref(),
+            heading_anchor: attachment.heading_anchor.as_deref(),
+            heading_occurrence: attachment.heading_occurrence,
+        }
     }
-    if let Some(chosen) = &decision.chosen_option {
-        value["chosenOption"] = json!(chosen);
-    }
-    if let Some(resolved_by_message_id) = &decision.resolved_by_message_id {
-        value
-            .as_object_mut()
-            .expect("decision is an object")
-            .insert(
-                "resolvedByMessageId".to_owned(),
-                json!(resolved_by_message_id),
-            );
-    }
-    value
 }
 
 fn attachment_json(attachment: &ChatAttachment) -> Value {
-    let mut value = json!({
-        "attachmentId": attachment.attachment_id,
-        "threadId": attachment.thread_id,
-        "messageId": attachment.message_id,
-        "targetKind": "file",
-        "createdAtMs": attachment.created_at_ms,
-    });
-    let object = value.as_object_mut().expect("attachment is an object");
-    if let Some(object_id) = &attachment.object_id {
-        object.insert("objectId".to_owned(), json!(object_id));
-    }
-    if let Some(path_hint) = &attachment.path_hint {
-        object.insert("pathHint".to_owned(), json!(path_hint));
-    }
-    if let Some(heading_text) = &attachment.heading_text {
-        object.insert("headingText".to_owned(), json!(heading_text));
-    }
-    if let Some(heading_anchor) = &attachment.heading_anchor {
-        object.insert("headingAnchor".to_owned(), json!(heading_anchor));
-    }
-    if let Some(heading_occurrence) = attachment.heading_occurrence {
-        object.insert("headingOccurrence".to_owned(), json!(heading_occurrence));
-    }
-    value
+    json!(AttachmentWire::from(attachment))
+}
+
+#[derive(Serialize)]
+struct FileMentionWire<'a> {
+    attachment: AttachmentWire<'a>,
+    message: MessageWire<'a>,
+    thread: ThreadB2Wire<'a>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    channel: Option<ChannelWire<'a>>,
 }
 
 fn file_mention_json(mention: &ChatFileMention) -> Value {
-    let mut value = json!({
-        "attachment": attachment_json(&mention.attachment),
-        "message": message_json(&mention.message),
-        "thread": thread_b2_json(&mention.thread),
-    });
-    if let Some(channel) = &mention.channel {
-        value
-            .as_object_mut()
-            .expect("file mention is an object")
-            .insert("channel".to_owned(), channel_json(channel));
-    }
-    value
+    json!(FileMentionWire {
+        attachment: AttachmentWire::from(&mention.attachment),
+        message: MessageWire::from(&mention.message),
+        thread: ThreadB2Wire::from(&mention.thread),
+        channel: mention.channel.as_ref().map(ChannelWire::from),
+    })
 }
 
 fn mention_json(mention: &ChatMention) -> Value {
@@ -318,7 +393,7 @@ fn mention_json(mention: &ChatMention) -> Value {
         "threadId": mention.thread_id,
         "messageId": mention.message_id,
         "handle": mention.handle,
-        "authorKind": actor_kind_str(mention.author_kind),
+        "authorKind": mention.author_kind.as_str(),
         "createdAtMs": mention.created_at_ms,
     })
 }
@@ -806,5 +881,185 @@ impl EngineService {
             "messages": row_values[..included].to_vec(),
             "nextAfterMessageOrder": next_after,
         }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dohc_engine_domain::ChatDecisionState;
+
+    fn message() -> ChatMessage {
+        ChatMessage {
+            workspace_id: "workspace".to_owned(),
+            thread_id: "thread".to_owned(),
+            message_id: "message".to_owned(),
+            message_order: 7,
+            author_kind: ChatActorKind::Automation,
+            author_display_name: "Stamp".to_owned(),
+            author_owner_display_name: None,
+            author_user_id: None,
+            parent_message_id: None,
+            origin: None,
+            body: "hello".to_owned(),
+            created_at_ms: 10,
+            automation: None,
+            attachments: Vec::new(),
+        }
+    }
+
+    fn attachment() -> ChatAttachment {
+        ChatAttachment {
+            attachment_id: "attachment".to_owned(),
+            thread_id: "thread".to_owned(),
+            message_id: "message".to_owned(),
+            object_id: None,
+            path_hint: None,
+            heading_text: None,
+            heading_anchor: None,
+            heading_occurrence: None,
+            created_at_ms: 11,
+        }
+    }
+
+    #[test]
+    fn message_projection_omits_absent_fields_and_keeps_chain_depth_private() {
+        assert_eq!(
+            message_json(&message()),
+            json!({
+                "id": "message",
+                "workspaceId": "workspace",
+                "threadId": "thread",
+                "author": { "kind": "automation", "displayName": "Stamp" },
+                "body": "hello",
+                "createdAtMs": 10,
+                "attachments": [],
+            })
+        );
+        let full = ChatMessage {
+            author_owner_display_name: Some("Ada".to_owned()),
+            author_user_id: Some("user".to_owned()),
+            parent_message_id: Some("parent".to_owned()),
+            origin: Some("desktop".to_owned()),
+            automation: Some(ChatMessageAutomation {
+                automation_id: "collection:tasks#stamp".to_owned(),
+                chain_depth: 3,
+            }),
+            attachments: vec![attachment()],
+            ..message()
+        };
+        assert_eq!(
+            message_json(&full),
+            json!({
+                "id": "message",
+                "workspaceId": "workspace",
+                "threadId": "thread",
+                "author": { "kind": "automation", "displayName": "Stamp" },
+                "body": "hello",
+                "createdAtMs": 10,
+                "attachments": [{
+                    "attachmentId": "attachment",
+                    "threadId": "thread",
+                    "messageId": "message",
+                    "targetKind": "file",
+                    "createdAtMs": 11,
+                }],
+                "authorOwnerDisplayName": "Ada",
+                "authorUserId": "user",
+                "parentMessageId": "parent",
+                "origin": "desktop",
+                "automation": { "automationId": "collection:tasks#stamp" },
+            })
+        );
+    }
+
+    #[test]
+    fn attachment_projection_keeps_present_empty_and_zero_values() {
+        let located = ChatAttachment {
+            object_id: Some("object".to_owned()),
+            path_hint: Some(String::new()),
+            heading_text: Some("Plan".to_owned()),
+            heading_anchor: Some("plan".to_owned()),
+            heading_occurrence: Some(0),
+            ..attachment()
+        };
+        assert_eq!(
+            attachment_json(&located),
+            json!({
+                "attachmentId": "attachment",
+                "threadId": "thread",
+                "messageId": "message",
+                "targetKind": "file",
+                "createdAtMs": 11,
+                "objectId": "object",
+                "pathHint": "",
+                "headingText": "Plan",
+                "headingAnchor": "plan",
+                "headingOccurrence": 0,
+            })
+        );
+    }
+
+    #[test]
+    fn decision_projection_omits_options_for_a_bare_question() {
+        let open = ChatDecision {
+            thread_id: "thread".to_owned(),
+            message_id: "message".to_owned(),
+            state: ChatDecisionState::Open,
+            resolved_by_message_id: None,
+            at_ms: 12,
+            options: Vec::new(),
+            chosen_option: None,
+        };
+        assert_eq!(
+            decision_json(&open),
+            json!({ "threadId": "thread", "messageId": "message", "state": "open", "atMs": 12 })
+        );
+        let resolved = ChatDecision {
+            state: ChatDecisionState::Resolved,
+            resolved_by_message_id: Some("answer".to_owned()),
+            options: vec!["yes".to_owned(), "no".to_owned()],
+            chosen_option: Some("no".to_owned()),
+            ..open
+        };
+        assert_eq!(
+            decision_json(&resolved),
+            json!({
+                "threadId": "thread",
+                "messageId": "message",
+                "state": "resolved",
+                "atMs": 12,
+                "options": ["yes", "no"],
+                "chosenOption": "no",
+                "resolvedByMessageId": "answer",
+            })
+        );
+    }
+
+    #[test]
+    fn reaction_projection_nests_its_author() {
+        let reaction = ChatReaction {
+            reaction_id: "reaction".to_owned(),
+            thread_id: "thread".to_owned(),
+            message_id: "message".to_owned(),
+            emoji: "+1".to_owned(),
+            author_id: "user".to_owned(),
+            author_kind: ChatActorKind::Human,
+            author_display_name: "Ada".to_owned(),
+            state: ChatReactionState::Removed,
+            at_ms: 13,
+        };
+        assert_eq!(
+            reaction_json(&reaction),
+            json!({
+                "reactionId": "reaction",
+                "threadId": "thread",
+                "messageId": "message",
+                "emoji": "+1",
+                "author": { "authorId": "user", "kind": "human", "displayName": "Ada" },
+                "state": "removed",
+                "atMs": 13,
+            })
+        );
     }
 }

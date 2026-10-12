@@ -67,29 +67,11 @@ fn parse_follow_state(raw: &str) -> Result<FollowState, WireError> {
     }
 }
 
-pub(super) fn follow_target_kind_json(kind: &FollowTargetKind) -> Value {
-    json!(match kind {
-        FollowTargetKind::Person => "person",
-        FollowTargetKind::Agent => "agent",
-        FollowTargetKind::Channel => "channel",
-        FollowTargetKind::Thread => "thread",
-    })
-}
-
-fn follow_target_kind_str(kind: FollowTargetKind) -> &'static str {
-    match kind {
-        FollowTargetKind::Person => "person",
-        FollowTargetKind::Agent => "agent",
-        FollowTargetKind::Channel => "channel",
-        FollowTargetKind::Thread => "thread",
-    }
-}
-
 fn follow_json(workspace_id: &str, follow: &ChatFollow) -> Value {
     json!({
         "workspaceId": workspace_id,
         "ownerUserId": follow.owner_user_id,
-        "targetKind": follow_target_kind_str(follow.target_kind),
+        "targetKind": follow.target_kind.as_str(),
         "targetId": follow.target_id,
         "state": match follow.state {
             FollowState::Following => "following",
@@ -183,11 +165,7 @@ impl EngineService {
         let next_cursor = chat_page_cursor(&follows, included, binding, |follow| {
             (
                 0,
-                format!(
-                    "{}\0{}",
-                    follow_target_kind_str(follow.target_kind),
-                    follow.target_id
-                ),
+                format!("{}\0{}", follow.target_kind.as_str(), follow.target_id),
             )
         })?;
         Ok(json!({

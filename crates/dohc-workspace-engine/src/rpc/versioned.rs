@@ -4,6 +4,7 @@ use crate::rpc::capture::require_capture_hold;
 use crate::rpc::error::map_runtime;
 use crate::rpc::history::moment_json;
 use crate::rpc::reads::MAX_INBAND_CONTENT_BYTES;
+use crate::rpc::reads::TextBody;
 use crate::rpc::reads::file_object_json;
 use crate::rpc::reads::snapshot_json;
 use crate::rpc::reads::snapshot_metadata_json;
@@ -295,7 +296,7 @@ struct VersionedTextMergeParams {
 /// content address in both hash fields, and the blob's byte length.
 fn comparison_side_json(side: &dohc_engine_domain::ComparisonSide) -> Value {
     if !side.binary {
-        return snapshot_json(&side.snapshot);
+        return snapshot_json(&side.snapshot, TextBody::Full);
     }
     json!({
         "workspaceId": side.snapshot.workspace_id,
@@ -469,7 +470,7 @@ impl EngineService {
         }
         Ok(json!({
             "object": file_object_json(&result.object),
-            "snapshot": crate::rpc::reads::settled_snapshot_json(&result.snapshot),
+            "snapshot": snapshot_json(&result.snapshot, TextBody::Capped),
             "moment": moment_json(&result.moment),
             "deduped": result.deduped,
             "materialized": execution.materialized,

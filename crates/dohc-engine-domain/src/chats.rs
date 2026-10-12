@@ -152,7 +152,7 @@ pub enum ChatChannelKind {
 }
 
 impl ChatChannelKind {
-    fn as_str(self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
             ChatChannelKind::Channel => "channel",
             ChatChannelKind::Dm => "dm",
@@ -226,7 +226,7 @@ pub enum ChatActorKind {
 }
 
 impl ChatActorKind {
-    fn as_str(self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
             ChatActorKind::Human => "human",
             ChatActorKind::Agent => "agent",
@@ -371,7 +371,7 @@ pub enum ChatReactionState {
 }
 
 impl ChatReactionState {
-    fn as_str(self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
             Self::Added => "added",
             Self::Removed => "removed",
@@ -411,7 +411,7 @@ pub enum ChatDecisionState {
 }
 
 impl ChatDecisionState {
-    fn as_str(self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
             Self::Open => "open",
             Self::Resolved => "resolved",
@@ -527,7 +527,7 @@ pub enum FollowTargetKind {
 }
 
 impl FollowTargetKind {
-    fn as_str(self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
             FollowTargetKind::Person => "person",
             FollowTargetKind::Agent => "agent",
