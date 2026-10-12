@@ -59,7 +59,6 @@ export function createWorkspaceFilesIpc<
     assertCurrent(): void;
   },
 >(dependencies: {
-  assertTrustedSender(event: Event): void;
   app: { readonly isPackaged: boolean };
   dialog: {
     showOpenDialog(
@@ -96,7 +95,6 @@ export function createWorkspaceFilesIpc<
   notifyRenderer(input: { workspaceId: string }): void;
 }) {
   const {
-    assertTrustedSender,
     app,
     dialog,
     shell,
@@ -280,7 +278,6 @@ export function createWorkspaceFilesIpc<
     moveWorkspacePath: (input, { event }) => workspaceFileMutations.movePath(event, input),
     deleteWorkspacePath: (input, { event }) => workspaceFileMutations.deletePath(event, input),
     exportWorkspaceZip: async (input, { event }) => {
-      assertTrustedSender(event);
       const inactiveMessage =
         "Export stopped because this window changed workspaces.";
       const workspaceReference = await exactRendererWorkspaceReferences.capture(
@@ -334,7 +331,6 @@ export function createWorkspaceFilesIpc<
     // (.html verbatim, .pdf via the hidden offscreen window) — see
     // documentPdfExport.ts for the "only one export in flight" guard.
     exportDocumentFile: async (input, { event }) => {
-      assertTrustedSender(event);
       const inactiveMessage =
         "Export stopped because this window changed workspaces.";
       // workspaceId authorizes the caller (a real, currently-open workspace) —
@@ -404,7 +400,6 @@ export function createWorkspaceFilesIpc<
       );
     },
     importWorkspaceFiles: async (input, { event }) => {
-      assertTrustedSender(event);
       const importInto = (
         operation: Operation,
         absolutePaths: string[],
@@ -519,7 +514,6 @@ export function createWorkspaceFilesIpc<
     // pick, and the bytes are copied INTO the workspace by writeWorkspaceAsset,
     // which re-validates containment. The renderer never sees an absolute path.
     pickImageFiles: async (input, { event }) => {
-      assertTrustedSender(event);
       const inactiveMessage =
         "Image selection stopped because this window changed workspaces.";
       const workspaceReference = await exactRendererWorkspaceReferences.capture(

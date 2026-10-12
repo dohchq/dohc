@@ -5856,7 +5856,6 @@ function registerIpcHandlers(): void {
     DesktopRendererWorkspaceOperation["workspace"],
     DesktopRendererWorkspaceOperation
   >({
-    assertTrustedSender,
     app,
     dialog,
     shell,

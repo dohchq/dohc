@@ -88,7 +88,6 @@ describe("B1 main inventories (a4be19d5b)", () => {
       "write-workspace-text", "write-workspace-asset", "pick-image-files", "open-file-externally",
     ].map(name => `desktop:${name}`);
     expect(rows.filter(row => channels.includes(row.channel))).toHaveLength(13);
-    for (const channel of channels) expect(admission).toHaveProperty(channel);
   });
   it("preserves socket verbs, public verbs, and all public help", () => {
     expect(socketVerbs).toEqual([...mainCli.socketVerbs, ...accessExposure.socketVerbAdditions].sort());

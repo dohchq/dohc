@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -100,7 +101,7 @@ async function harness() {
   const notify = vi.fn();
   const listings = new WorkspaceFileListingCache();
   const fileOwner = createWorkspaceFilesIpc<Sender, Event, Workspace, Operation>({
-    assertTrustedSender: trusted, app: { isPackaged: false },
+    app: { isPackaged: false },
     dialog: { showOpenDialog: openDialog, showSaveDialog: saveDialog }, shell: { openPath },
     withRendererWorkspaceOperation: withOperation, exactRendererWorkspaceReferences: references,
     workspaceFileListings: listings, workspaceFileMutations: mutations,
@@ -159,6 +160,37 @@ async function harness() {
 }
 
 describe("registered workspace file handlers", () => {
+  it("moves a file through the registered move channel", async () => {
+    const h = await harness();
+    await writeFile(join(h.workspace.rootPath, "before.md"), "move me");
+    await expect(h.invoke(workspaceFileOperations.moveWorkspacePath.channel, {
+      workspaceId: "workspace", fromPath: "before.md", toPath: "after.md",
+    })).resolves.toEqual({ path: "after.md" });
+    expect(await readFile(join(h.workspace.rootPath, "after.md"), "utf8")).toBe("move me");
+    await expect(readFile(join(h.workspace.rootPath, "before.md"))).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("replaces text through the registered write-text channel", async () => {
+    const h = await harness();
+    await writeFile(join(h.workspace.rootPath, "notes.md"), "before");
+    await expect(h.invoke(workspaceFileOperations.writeWorkspaceText.channel, {
+      workspaceId: "workspace", relativePath: "notes.md", text: "after",
+      expectedContentHash: createHash("sha256").update("before").digest("hex"),
+    })).resolves.toEqual({
+      status: "written", contentHash: createHash("sha256").update("after").digest("hex"),
+    });
+    expect(await readFile(join(h.workspace.rootPath, "notes.md"), "utf8")).toBe("after");
+  });
+
+  it("writes bytes through the registered write-asset channel", async () => {
+    const h = await harness();
+    const bytes = new Uint8Array([1, 2, 3]);
+    await expect(h.invoke(workspaceFileOperations.writeWorkspaceAsset.channel, {
+      workspaceId: "workspace", relativePath: "assets/pixel.png", bytes,
+    })).resolves.toBeUndefined();
+    expect(await readFile(join(h.workspace.rootPath, "assets/pixel.png"))).toEqual(Buffer.from(bytes));
+  });
+
   it.each(["root", "file", "subfolder"] as const)("refuses a raced %s without rolling back another writer's work", async (collision) => {
     const h = await harness();
     const root = h.workspace.rootPath;
