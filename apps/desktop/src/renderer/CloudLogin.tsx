@@ -68,6 +68,10 @@ export function CloudLogin(props: {
   // Fired when a device-flow login completes inside this panel (the join
   // surface re-checks its own gate on it; the shell moves on to Settings).
   onConnected?: () => void;
+  // Also fire onConnected when the first check finds a session already here.
+  // The shell's dialog uses it to hand an existing session to Settings, where
+  // its account row and sync switch live.
+  handOffSession?: boolean;
   // Nested inside another elevated card (join/open-shared/handoff signed-out
   // gates): drop this panel's own frame so cards never stack elevation, and
   // drop the standalone explanation the host surface already gives.
@@ -148,8 +152,8 @@ export function CloudLogin(props: {
   useEffect(() => {
     const session = sessionRef.next();
     // Only a user-asked recheck tells the host about a session it found. A
-    // mount is not news: the host ran its own check.
-    const announceSession = recheckRef.current;
+    // mount is not news: the host ran its own check, unless it asked to hear.
+    const announceSession = recheckRef.current || props.handOffSession === true;
     recheckRef.current = false;
     clearPollTimer();
     setPhase({ kind: "loading" });

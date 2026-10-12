@@ -628,10 +628,6 @@ export function DesktopWorkspaceShell(props: {
     setSettingsSection(CUSTOMIZE_TARGETS[part].section);
   }, []);
   const openAgentSettings = useCallback(() => openSettings("agents"), [openSettings]);
-  const closeSettings = useCallback(() => {
-    setSettingsSection(null);
-    setSettingsFocus(null);
-  }, []);
 
   const { agentSetup, readAgentStatusForHistory } = useAgentSetup(
     props.workspace.workspaceId,
@@ -919,13 +915,23 @@ export function DesktopWorkspaceShell(props: {
   );
   const { chatCollaboration, refreshCloudStatus, workspaceSynced, cloudStatus, cloudStatusUnreadable } =
     useCloudPresence(workspaceId, reportCloudStatusUnavailable);
-  // Connect server, wherever it is asked for. Signed in, the account and the
-  // sync switch are settings; signed out, connecting is the Cloud dialog.
-  const cloudSignedIn = cloudStatus?.connected === true;
+  // Turning sync on sends no session event, so Settings closing reads the
+  // status again for whatever changed there.
+  const settingsOpen = settingsSection !== null;
+  const closeSettings = useCallback(() => {
+    if (settingsOpen) refreshCloudStatus();
+    setSettingsSection(null);
+    setSettingsFocus(null);
+  }, [refreshCloudStatus, settingsOpen]);
+  // Connect server, wherever it is asked for. The account and the sync switch
+  // are settings, so only a person known to be signed out gets the Cloud
+  // dialog. A status still loading, or unreadable, opens Settings, which says
+  // which it is.
+  const cloudSignedOut = cloudStatus?.connected === false;
   const openCloud = useCallback(() => {
-    if (cloudSignedIn) openSettings("cloud");
-    else setCloudOpen(true);
-  }, [cloudSignedIn, openSettings]);
+    if (cloudSignedOut) setCloudOpen(true);
+    else openSettings("cloud");
+  }, [cloudSignedOut, openSettings]);
   // A failure from the Cloud dialog or the Sync and sharing page. The notice
   // outlives both, so its Try again reopens the dialog with the address that
   // failed, or whichever of the two now applies, once the source has closed.
@@ -944,19 +950,26 @@ export function DesktopWorkspaceShell(props: {
     },
     [openCloud, reportShellFailure],
   );
-  const cloudSettings = useMemo<CloudSettings>(
-    () => ({
+  const cloudSettings = useMemo<CloudSettings>(() => {
+    // The page answers after it closed too. Only this workspace's answers
+    // reach its status and its notices.
+    const forWorkspace = workspaceId;
+    const current = () => workspaceIdRef.current === forWorkspace;
+    return {
       status: cloudStatus,
       unreadable: cloudStatusUnreadable,
-      onChanged: refreshCloudStatus,
+      onChanged: () => {
+        if (current()) refreshCloudStatus();
+      },
       onConnect: () => {
         closeSettings();
         setCloudOpen(true);
       },
-      onError: reportConnectionError,
-    }),
-    [closeSettings, cloudStatus, cloudStatusUnreadable, refreshCloudStatus, reportConnectionError],
-  );
+      onError: (error) => {
+        if (current()) reportConnectionError(error);
+      },
+    };
+  }, [closeSettings, cloudStatus, cloudStatusUnreadable, refreshCloudStatus, reportConnectionError, workspaceId]);
   // About's section reads report through this shell's notices, one row per
   // section and file. A repeat keeps an existing row's toast state only for
   // an unchanged message. A changed message, or a missing row, toasts again.
@@ -6164,8 +6177,9 @@ export function DesktopWorkspaceShell(props: {
           }}
         >
           {/* Once signed in, what is left is settings: the account and the
-              sync switch. */}
+              sync switch. A session the dialog finds goes there too. */}
           <CloudLogin
+            handOffSession
             onConnected={() => {
               setCloudOpen(false);
               setCloudRetryServerUrl("");

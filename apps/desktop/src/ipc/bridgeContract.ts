@@ -3427,7 +3427,6 @@ export const CloudStatusResult = z.object({
   email: z.string().optional(),
   serverUrl: z.string().optional(),
   relayUrl: z.string().optional(),
-  serverName: z.string().max(100).optional(),
   networkAccess: z.enum(["private", "public"]).optional(),
   // Whether the named workspace has cloud sync enabled (registry remote set).
   workspaceSynced: z.boolean().optional(),

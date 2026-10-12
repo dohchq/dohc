@@ -530,6 +530,9 @@ test("@shared-continuity a live document keeps its person's and agent's work thr
       await expect(owner.page.getByTestId("settings-row-account")).toContainText(ownerAccount.email);
       const syncSwitch = owner.page.getByRole("switch", { name: "Sync this workspace" });
       await syncSwitch.click();
+      // The switch shows on from the click. The workspace code shows only once
+      // main has enabled sync.
+      await expect(owner.page.getByTestId("cloud-sync-code")).toBeVisible();
       await expect(syncSwitch).toHaveAttribute("aria-checked", "true");
       await owner.page.keyboard.press("Escape");
       await waitForWorkspaceFile(owner.page, opened.workspaceId, PATH);

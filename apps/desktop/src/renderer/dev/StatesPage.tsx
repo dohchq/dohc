@@ -25,7 +25,7 @@ import { SlashCommandMenu, type SlashCommandState } from "../editor/slashCommand
 import { buildTableMenu, type TableMenuRow } from "../editor/tableControls";
 import { OverlayFrame } from "../Overlay";
 import { CollectionUnavailable } from "../TransactionalCollectionPage";
-import { CloudSyncSettings, type CloudSettings } from "../settings/CloudSyncSettings";
+import { CloudSyncSettings, ProtectedFilesRow, type CloudSettings } from "../settings/CloudSyncSettings";
 import { ColorControl, HueControl, SettingRow, StepperControl, SwitchControl, TextControl, ThemeControl } from "../settings/SettingRow";
 import { PreferredNameControl } from "../settings/PreferredNameControl";
 import { SettingsNav } from "../settings/SettingsNav";
@@ -1758,14 +1758,43 @@ function Pane(props: { theme: "light" | "dark" }) {
             <CloudSyncSettings workspaceId="ws-trip" cloud={settingsCloud(CLOUD_SIGNED_IN)} />
           </div>
         </Specimen>
-        <Specimen label="paused until dohc verifies this account">
+        <Specimen label="this workspace syncs with another account">
           <div className="w-[640px]">
             <CloudSyncSettings workspaceId="ws-trip" cloud={settingsCloud({ ...CLOUD_SIGNED_IN, workspaceSynced: true })} />
+          </div>
+        </Specimen>
+        <Specimen label="protected files: the passphrase field and its error">
+          <div className="w-[640px]">
+            <ProtectedFilesRow
+              secretState="protected-key-present"
+              purpose="protect"
+              passphrase="1234567"
+              error="Enter at least 8 characters to protect synced secrets."
+              busy={false}
+              onStart={noop}
+              onPassphrase={noop}
+              onSubmit={noop}
+            />
+          </div>
+        </Specimen>
+        <Specimen label="a shared view: the account, no switch">
+          <div className="w-[640px]">
+            <CloudSyncSettings workspaceId="ws-trip" sharedView cloud={settingsCloud(CLOUD_SIGNED_IN)} />
           </div>
         </Specimen>
         <Specimen label="signed out">
           <div className="w-[640px]">
             <CloudSyncSettings workspaceId="ws-trip" cloud={settingsCloud({ connected: false })} />
+          </div>
+        </Specimen>
+        <Specimen label="the status still loading">
+          <div className="w-[640px]">
+            <CloudSyncSettings workspaceId="ws-trip" cloud={settingsCloud(null)} />
+          </div>
+        </Specimen>
+        <Specimen label="the status unreadable">
+          <div className="w-[640px]">
+            <CloudSyncSettings workspaceId="ws-trip" cloud={{ ...settingsCloud(null), unreadable: true }} />
           </div>
         </Specimen>
       </Section>
@@ -1781,7 +1810,7 @@ const CLOUD_SIGNED_IN: CloudStatusResult = {
   workspaceSynced: false,
   workspaceSyncConnected: false,
 };
-const settingsCloud = (status: CloudStatusResult): CloudSettings => ({
+const settingsCloud = (status: CloudStatusResult | null): CloudSettings => ({
   status, unreadable: false, onChanged: noop, onConnect: noop, onError: noop,
 });
 

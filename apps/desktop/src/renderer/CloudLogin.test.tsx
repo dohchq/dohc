@@ -12,6 +12,7 @@ const bridgeMock = {
   cloudLoginStart: vi.fn(),
   cloudLoginPoll: vi.fn(),
   cloudLogout: vi.fn(),
+  onCloudSessionChanged: vi.fn(),
   openExternalUrl: vi.fn(),
   platform: "linux",
   // A panel with no owner above it raises its own notices through the shell's
@@ -39,6 +40,7 @@ beforeEach(() => {
     verificationUri: "https://cloud.dohc.dev/device",
   });
   bridgeMock.cloudLogout.mockResolvedValue(undefined);
+  bridgeMock.onCloudSessionChanged.mockReturnValue(() => undefined);
   bridgeMock.openExternalUrl.mockResolvedValue(undefined);
   bridgeMock.getUpdateState.mockResolvedValue({ status: "idle", message: "Up to date" });
   bridgeMock.onUpdateState.mockReturnValue(() => undefined);
@@ -382,11 +384,32 @@ describe("CloudLogin", () => {
       "https://dohc.example.test",
     );
     expect(within(row).getByTestId("cloud-network-access").textContent).toBe("Private network");
-    expect(within(row).getByTestId("cloud-disconnect").getAttribute("title")).toBe(
+    expect(within(row).getByTestId("cloud-disconnect-explanation").textContent).toBe(
       "Stops sync for every workspace on this machine. Your files stay where they are.",
     );
     expect(screen.queryByRole("switch")).toBeNull();
     expect(bridgeMock.cloudEnableSync).not.toHaveBeenCalled();
+  });
+
+  // The join and share screens hear only a sign-in or a recheck. A host that
+  // asks for the hand-off also hears a session the first check finds.
+  it("announces a session the first check finds only to a host that asks for the hand-off", async () => {
+    bridgeMock.cloudStatus.mockResolvedValue(CONNECTED);
+    const onConnected = vi.fn();
+    const { unmount } = render(<CloudLogin embedded onConnected={onConnected} />);
+    await screen.findByTestId("settings-row-account");
+    expect(onConnected).not.toHaveBeenCalled();
+    unmount();
+
+    render(<CloudLogin handOffSession onConnected={onConnected} />);
+    await waitFor(() => expect(onConnected).toHaveBeenCalledOnce());
+  });
+
+  it("hands off nothing when the first check finds nobody signed in", async () => {
+    const onConnected = vi.fn();
+    render(<CloudLogin handOffSession onConnected={onConnected} />);
+    await screen.findByTestId("cloud-server-url");
+    expect(onConnected).not.toHaveBeenCalled();
   });
 
   it("shows the connect form once Disconnect succeeds", async () => {

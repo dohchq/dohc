@@ -2215,6 +2215,190 @@ describe("Connect server", () => {
       vi.useRealTimers();
     }
   });
+
+  // The titlebar's workspace menu holds Connect server.
+  const connectFromTitlebarMenu = async (bridge: ReturnType<typeof makeBridge>) => {
+    bridge.showWorkbenchMenu.mockResolvedValueOnce("connect-cloud");
+    fireEvent.contextMenu(await screen.findByTestId("workspace-switcher"));
+    await waitFor(() => expect(bridge.showWorkbenchMenu).toHaveBeenCalledWith(expect.objectContaining({ context: "status" })));
+  };
+
+  it("routes the titlebar menu's Connect server the same way", async () => {
+    let connected = true;
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.cloudStatus = vi.fn(async () =>
+      connected
+        ? { connected: true, email: "me@dohc.test", serverUrl: "https://cloud.dohc.test", workspaceSynced: false }
+        : SIGNED_OUT,
+    );
+    const user = userEvent.setup();
+    renderShell(bridge, WORKSPACE, [WORKSPACE, OTHER_WORKSPACE]);
+    await waitFor(() => expect(bridge.cloudStatus).toHaveBeenCalled());
+
+    await connectFromTitlebarMenu(bridge);
+    expect(await screen.findByTestId("settings-section-cloud")).toBeTruthy();
+    expect(screen.queryByTestId("cloud-sync-panel")).toBeNull();
+
+    // Closing Settings reads the status again, and finds nobody signed in.
+    connected = false;
+    await user.keyboard("{Escape}");
+    await waitFor(() => expect(screen.queryByTestId("settings-dialog")).toBeNull());
+    await waitFor(() => expect(bridge.cloudStatus).toHaveBeenCalledTimes(2));
+    await act(async () => {});
+    await connectFromTitlebarMenu(bridge);
+    expect(await screen.findByTestId("cloud-server-url")).toBeTruthy();
+    expect(screen.queryByTestId("settings-dialog")).toBeNull();
+  });
+
+  // Nobody knows yet whether the person is signed in. The dialog would show
+  // a session's account row a second time, so Settings answers instead.
+  it("opens Settings while the status is still unknown", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.cloudStatus = vi.fn(() => new Promise<never>(() => {}));
+    renderShell(bridge, WORKSPACE, [WORKSPACE, OTHER_WORKSPACE]);
+    await waitFor(() => expect(bridge.cloudStatus).toHaveBeenCalled());
+
+    await connectFromTitlebarMenu(bridge);
+
+    expect(await screen.findByTestId("settings-cloud-checking")).toBeTruthy();
+    expect(screen.queryByTestId("cloud-sync-panel")).toBeNull();
+  });
+
+  // The shell's status said signed out, but the dialog's own check finds a
+  // session: the dialog hands it to Settings rather than showing the account.
+  it("hands a session the dialog finds to Settings", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.cloudStatus = vi.fn()
+      .mockResolvedValueOnce(SIGNED_OUT)
+      .mockResolvedValue({ connected: true, email: "me@dohc.test", serverUrl: "https://cloud.dohc.test", workspaceSynced: false });
+    const user = userEvent.setup();
+    renderShell(bridge);
+    await waitFor(() => expect(bridge.cloudStatus).toHaveBeenCalledTimes(1));
+    await act(async () => {});
+
+    await openFromPalette(user);
+
+    const section = await screen.findByTestId("settings-section-cloud");
+    await waitFor(() => expect(screen.queryByTestId("cloud-sync-panel")).toBeNull());
+    expect((await within(section).findByTestId("settings-row-account")).textContent).toContain("me@dohc.test");
+    expect(screen.getAllByTestId("settings-row-account")).toHaveLength(1);
+  });
+
+  // Access's setup note (About and the Sharing view) offers Connect server
+  // when nobody is signed in.
+  it("routes Access's Connect server to the Cloud dialog while signed out", async () => {
+    const unknownAnswer = {
+      ref: null, rows: [], visibility: "unknown" as const, nextCursor: null, checkedAtMs: null, freshness: "unknown" as const,
+      coverage: { kind: "unavailable" as const, complete: false, observation: "interval" as const },
+    };
+    const bridge = Object.assign(makeBridge(Promise.resolve(null)), {
+      listSharingAccess: vi.fn(async () => unknownAnswer),
+      requestAccessRefresh: vi.fn(async () => undefined),
+    });
+    bridge.cloudStatus = vi.fn(async () => SIGNED_OUT);
+    const user = userEvent.setup();
+    renderShell(bridge);
+    await waitFor(() => expect(bridge.cloudStatus).toHaveBeenCalled());
+
+    await user.click(await screen.findByTestId("activity-sharing"));
+    const note = await screen.findByTestId("sharing-received-unknown");
+    expect(note.getAttribute("data-reason")).toBe("signed-out");
+    await user.click(within(note).getByRole("button", { name: "Connect server" }));
+
+    expect(await screen.findByTestId("cloud-server-url")).toBeTruthy();
+    expect(screen.queryByTestId("settings-dialog")).toBeNull();
+  });
+});
+
+// Turning sync on sends no session event, and the switch shows on from the
+// click, which invites closing Settings. The answer still reaches the shell.
+describe("sync answers after Settings closed", () => {
+  const SIGNED_IN = { connected: true, email: "me@dohc.test", serverUrl: "https://cloud.dohc.test", workspaceSynced: false };
+
+  async function startEnableThenClose(bridge: ReturnType<typeof makeBridge> & { cloudEnableSync: ReturnType<typeof vi.fn> }) {
+    const user = userEvent.setup();
+    await user.click(await screen.findByTestId("activity-settings"));
+    await user.click(await screen.findByTestId("settings-nav-cloud"));
+    await user.click(await screen.findByRole("switch", { name: "Sync this workspace" }));
+    await waitFor(() => expect(bridge.cloudEnableSync).toHaveBeenCalled());
+    await user.keyboard("{Escape}");
+    await waitFor(() => expect(screen.queryByTestId("settings-dialog")).toBeNull());
+  }
+
+  it("reads the status again when an enable finishes after Settings closed", async () => {
+    const enable = deferred<void>();
+    let synced = false;
+    const bridge = Object.assign(makeBridge(Promise.resolve(null)), {
+      cloudEnableSync: vi.fn(async () => {
+        await enable.promise;
+        synced = true;
+      }),
+    });
+    bridge.cloudStatus = vi.fn(async () => ({ ...SIGNED_IN, workspaceSynced: synced, workspaceSyncConnected: synced }));
+    renderShell(bridge);
+
+    await startEnableThenClose(bridge);
+    // Closing reads once; the enable is still running.
+    await waitFor(() => expect(bridge.cloudStatus).toHaveBeenCalledTimes(2));
+    await act(async () => {
+      enable.resolve();
+    });
+
+    await waitFor(() => expect(bridge.cloudStatus).toHaveBeenCalledTimes(3));
+    expect(await bridge.cloudStatus.mock.results[2]!.value).toMatchObject({ workspaceSynced: true });
+    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+  });
+
+  it("reports an enable that fails after Settings closed, and its Try again opens Settings", async () => {
+    const enable = deferred<void>();
+    const bridge = Object.assign(makeBridge(Promise.resolve(null)), {
+      cloudEnableSync: vi.fn(() => enable.promise),
+    });
+    bridge.cloudStatus = vi.fn(async () => SIGNED_IN);
+    renderShell(bridge);
+
+    await startEnableThenClose(bridge);
+    await act(async () => {
+      enable.reject(new Error("dohc could not reach the relay."));
+    });
+
+    const toast = await screen.findByTestId("workspace-shell-error");
+    expect(toast.textContent).toContain("dohc could not reach the relay.");
+    // No page is watching the attempt, and the notice carries no address, so
+    // Try again opens the place that holds the switch.
+    await userEvent.setup().click(screen.getByTestId("workspace-shell-error-retry"));
+    expect(await screen.findByTestId("settings-section-cloud")).toBeTruthy();
+    expect(screen.queryByTestId("cloud-sync-panel")).toBeNull();
+    expect(bridge.cloudEnableSync).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not show one workspace's failed enable in the next workspace", async () => {
+    const enable = deferred<void>();
+    const bridge = Object.assign(makeBridge(Promise.resolve(null)), {
+      cloudEnableSync: vi.fn(() => enable.promise),
+    });
+    bridge.cloudStatus = vi.fn(async () => SIGNED_IN);
+    vi.stubGlobal("dohcDesktop", bridge);
+    const shell = (workspace: Workspace) => (
+      <DesktopWorkspaceShell
+        workspace={workspace}
+        workspaces={[WORKSPACE, OTHER_WORKSPACE]}
+        {...shellBootstrapProps(bridge)}
+        onSwitchWorkspace={() => {}}
+      />
+    );
+    const view = render(shell(WORKSPACE));
+
+    await startEnableThenClose(bridge);
+    view.rerender(shell(OTHER_WORKSPACE));
+    const reads = bridge.cloudStatus.mock.calls.length;
+    await act(async () => {
+      enable.reject(new Error("dohc could not reach the relay."));
+    });
+
+    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+    expect(bridge.cloudStatus.mock.calls.length).toBe(reads);
+  });
 });
 
 describe("connection dialog retries", () => {
