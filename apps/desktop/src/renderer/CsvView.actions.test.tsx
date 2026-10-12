@@ -273,9 +273,47 @@ describe("CSV view actions", () => {
     expect(importToDatabase).toHaveBeenCalledTimes(2);
     expect(button.getAttribute("aria-busy")).toBe("true");
 
+    // The header's view and the joined retry both answer with the one result.
     await act(async () => running.resolve(importResult("data.sqlite")));
-    expect(onOpenPath).toHaveBeenCalledExactlyOnceWith("data.sqlite");
+    expect(onOpenPath).toHaveBeenCalledWith("data.sqlite");
+    expect(onOpenPath.mock.calls.every(([path]) => path === "data.sqlite")).toBe(true);
     expect(button.hasAttribute("aria-busy")).toBe(false);
+  });
+
+  it.each([
+    ["a success opens the database", true],
+    ["a failure files a new row", false],
+  ])("answers an old row's Try again with the running import's result after the CSV closed: %s", async (_, succeeds) => {
+    const user = userEvent.setup();
+    const running = deferred<ImportResult>();
+    importToDatabase.mockRejectedValueOnce(importRejected("Database already exists: data.sqlite"));
+    importToDatabase.mockReturnValueOnce(running.promise);
+    const onOpenPath = vi.fn();
+    const file = csvFile("ws-1", "data.csv", "name\nAda");
+    const shell = (open: boolean) => (
+      <Shell>{(onError) => (open ? <CsvView {...file} onOpenPath={onOpenPath} onError={onError} /> : null)}</Shell>
+    );
+    const view = render(shell(true));
+
+    await user.click(screen.getByTestId("csv-import-sqlite"));
+    await screen.findByTestId("workspace-shell-error");
+    await user.click(screen.getByTestId("csv-import-sqlite"));
+    view.rerender(shell(false));
+
+    await user.click(screen.getByTestId("notice-center-toggle"));
+    await user.click(within(screen.getByRole("dialog", { name: "Notices" })).getByRole("button", { name: "Try again" }));
+    await user.keyboard("{Escape}");
+    expect(importToDatabase).toHaveBeenCalledTimes(2);
+
+    if (succeeds) {
+      await act(async () => running.resolve(importResult("data.sqlite")));
+      expect(onOpenPath).toHaveBeenCalledExactlyOnceWith("data.sqlite");
+    } else {
+      await act(async () => running.reject(importRejected("Database already exists: data.sqlite")));
+      const toast = await screen.findByTestId("workspace-shell-error");
+      expect(toast.textContent).toContain("dohc could not import this file to SQLite.");
+      expect(within(toast).getByRole("button", { name: "Try again" })).toBeTruthy();
+    }
   });
 
   it("answers a Try again pressed after the CSV closed: a failure files a new row, a success opens the database", async () => {

@@ -30,7 +30,7 @@ import { MAX_CSV_PREVIEW_ROWS, detectCsvBound, type CsvBoundOffer } from "./offe
 // Imports running now, by workspace and file, so a header click and a stored
 // Try again never import one file twice at once, and every view of the file
 // shows the import until it ends.
-const runningImports = new Set<string>();
+const runningImports = new Map<string, Promise<ImportToDatabaseResult>>();
 const importListeners = new Set<() => void>();
 const importKey = (workspaceId: string, path: string) => `${workspaceId}\u0000${path}`;
 const subscribeImports = (listener: () => void) => {
@@ -45,29 +45,35 @@ function useImportRunning(workspaceId: string, path: string): boolean {
   return useSyncExternalStore(subscribeImports, () => runningImports.has(key));
 }
 
-function setImportRunning(key: string, running: boolean) {
-  if (running) runningImports.add(key);
-  else runningImports.delete(key);
+const notifyImports = () => {
   for (const listener of importListeners) listener();
-}
+};
 
-// Imports a CSV into a SQLite file beside it. Answers null, and imports
-// nothing, while an import of the same file is still running.
-async function importCsv(workspaceId: string, path: string): Promise<ImportToDatabaseResult | null> {
+// Imports a CSV into a SQLite file beside it. While an import of the same
+// file runs, a header click starts nothing and answers null, and a retry
+// (`join`) waits for that import and answers with its result.
+function importCsv(workspaceId: string, path: string, join = false): Promise<ImportToDatabaseResult | null> {
   const key = importKey(workspaceId, path);
-  if (runningImports.has(key)) return null;
-  setImportRunning(key, true);
-  try {
-    const { dbPath, tableName } = deriveImportTarget(path);
-    return await bridge().importToDatabase({
-      workspaceId,
-      sourceRelativePath: path,
-      databaseRelativePath: dbPath,
-      tableName,
+  const running = runningImports.get(key);
+  if (running) return join ? running : Promise.resolve(null);
+  const { dbPath, tableName } = deriveImportTarget(path);
+  // Started on the next tick, so the import is listed before it can end.
+  const started = Promise.resolve()
+    .then(() =>
+      bridge().importToDatabase({
+        workspaceId,
+        sourceRelativePath: path,
+        databaseRelativePath: dbPath,
+        tableName,
+      }),
+    )
+    .finally(() => {
+      runningImports.delete(key);
+      notifyImports();
     });
-  } finally {
-    setImportRunning(key, false);
-  }
+  runningImports.set(key, started);
+  notifyImports();
+  return started;
 }
 
 // Import never overwrites a file, so the most common cause is a database
@@ -76,8 +82,9 @@ const IMPORT_FAILED = "dohc could not import this file to SQLite.";
 
 // Try again on a failed import's Notices row. The person asked for it, so it
 // answers through the shell's own hooks whether or not the CSV is still open:
-// success opens the database, and a failure files a new row. The shell
-// remounts for each workspace (DesktopRoot), so its hooks never reach another.
+// success opens the database, and a failure files a new row. An import of the
+// file already running answers it. The shell remounts for each workspace
+// (DesktopRoot), so its hooks never reach another.
 function retryImport(
   workspaceId: string,
   path: string,
@@ -86,7 +93,7 @@ function retryImport(
 ): () => void {
   const run = async () => {
     try {
-      const result = await importCsv(workspaceId, path);
+      const result = await importCsv(workspaceId, path, true);
       if (result) onOpenPath?.(result.path);
     } catch (cause) {
       onError?.(IMPORT_FAILED, cause, () => void run());
