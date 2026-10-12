@@ -563,6 +563,7 @@ export function ProductDemo() {
           activeView={activeActivity}
           sidebarVisible={sidebarVisible}
           hasConflict={false}
+          showSharing={false}
           onSelectView={(view) => {
             if (isDemoPanelId(view)) selectActivity(view);
           }}
