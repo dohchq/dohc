@@ -281,3 +281,52 @@ fn single_file_ingest_and_retire_end_the_shared_busy_episode() {
     drop(sink);
     supervisor.close(&db).unwrap();
 }
+
+#[test]
+fn binary_ingest_ends_the_shared_busy_episode() {
+    let scratch = ScratchDir::new().unwrap();
+    let supervisor = WorkspaceSupervisor::new();
+    let (db, mut sink) = sink_for(&scratch, &supervisor);
+    let hold = sink.actor.defer_link_drain_for_capture();
+    write_file(
+        scratch.path(),
+        "image.png",
+        &[0x89, 0x50, 0x4e, 0x47, 0x00, 0xff],
+    );
+    sink.batch_retry.exhaust_for_test();
+    ingest_as(&mut sink, "image.png", "image/png").unwrap();
+    sink.batch_retry.run(|| Ok(())).unwrap();
+    drop(hold);
+    drop(sink);
+    supervisor.close(&db).unwrap();
+}
+
+#[test]
+fn secret_ingest_ends_the_shared_busy_episode() {
+    let scratch = ScratchDir::new().unwrap();
+    let supervisor = WorkspaceSupervisor::new();
+    let (db, mut sink) = sink_for(&scratch, &supervisor);
+    write_file(scratch.path(), ".env", b"TOKEN=alpha");
+    sink.batch_retry.exhaust_for_test();
+    ingest(&mut sink, ".env").unwrap();
+    sink.batch_retry.run(|| Ok(())).unwrap();
+    assert_eq!(secret_tip_len(&db, ".env"), Some(11));
+    drop(sink);
+    supervisor.close(&db).unwrap();
+}
+
+#[test]
+fn secret_retire_ends_the_shared_busy_episode() {
+    let scratch = ScratchDir::new().unwrap();
+    let supervisor = WorkspaceSupervisor::new();
+    let (db, mut sink) = sink_for(&scratch, &supervisor);
+    write_file(scratch.path(), ".env", b"TOKEN=alpha");
+    ingest(&mut sink, ".env").unwrap();
+    std::fs::remove_file(scratch.path().join(".env")).unwrap();
+    sink.batch_retry.exhaust_for_test();
+    sink.retire(".env").unwrap();
+    sink.batch_retry.run(|| Ok(())).unwrap();
+    assert_eq!(secret_tip_len(&db, ".env"), None);
+    drop(sink);
+    supervisor.close(&db).unwrap();
+}
