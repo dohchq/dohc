@@ -133,7 +133,8 @@ export class ServiceActivationDriver {
       publishOrdinary:signal=>workspace.ordinary.publish(signal),
       ownerAdmission:{shares:new Map([[target.workspaceId,target.shareId]]),maxEntriesPerDrain:o.config.maxEntriesPerDrain,
         maxBytesPerDrain:o.config.maxBytesPerDrain,validate:o.config.validateAdmission}});
-    this.#restoreConsumers.set(key,consumer);this.#loaded.add(targetKey(target));return consumer;
+    // Restore work loads the document again, so a dormant target rejoins passes, which settle that work.
+    this.#restoreConsumers.set(key,consumer);this.#loaded.add(targetKey(target));this.#dormant.delete(targetKey(target));return consumer;
   }
   workspaceReady(workspaceId:string){
     return this.#targets.filter(target=>target.workspaceId===workspaceId && !this.dormant(target)).every(target=>this.#completedTargets.has(targetKey(target)));

@@ -14,6 +14,7 @@ import {createNamedFrameChanges} from "./liveHostChanges.js";
 import {ServiceActivationDriver} from "./serviceActivationDriver.js";
 import {liveEditors} from "./liveEditors.js";
 import { OwnerCommittedDelivery } from "./ownerCommittedDelivery.js";
+import { LiveCommittedDelivery } from "./liveCommittedDelivery.js";
 import type { NativeOwnerActivation } from "@dohc/workspace-engine-client/daemon";
 import { markdownToYDoc } from "../../../packages/ydoc-projection/src/import-export.js";
 import { createLiveMarkdownJournalValidator, createLiveMarkdownRegistrationValidator } from "../../../packages/ydoc-projection/src/liveDocumentValidation.js";
@@ -518,7 +519,8 @@ async function completedServiceOwner(options: {empty?: boolean; frameChanges?: b
   if (options.empty) {f.config.workspaces = []; await f.save();}
 
   let parked: {method: string; entered: ReturnType<typeof deferred<void>>; release: ReturnType<typeof deferred<void>>} | undefined;
-  const pushed = deferred<void>(), unloads: unknown[] = [];
+  // Queued engine replies: an unload reply or an error that loses it, and overrides for a pull page.
+  const pushed = deferred<void>(), unloads: unknown[] = [], pulls: Record<string, unknown>[] = [];
   const membership: {method: string; workspace?: string; params: unknown}[] = [];
   let ownerRequests = 0, client!: ReturnType<typeof clientFrom>["client"] & {captureOwnerActivation: ReturnType<typeof vi.fn>};
   spawn.mockImplementation(async options => {
@@ -535,7 +537,11 @@ async function completedServiceOwner(options: {empty?: boolean; frameChanges?: b
         case "liveApplication.attachWorkspace": return reply({workspaceId: request.params.workspaceId,
           workspaceHandle: request.params.workspaceId === "workspace" ? "attached-handle" : `attached-${request.params.workspaceId}`});
         case "liveApplication.detachWorkspace": return reply({detached: true});
-        case "liveApplication.unloadDocument": return reply(unloads.shift() ?? {status: "unloaded"});
+        case "liveApplication.unloadDocument": {
+          const next = unloads.shift() ?? {status: "unloaded"};
+          if (next instanceof Error) throw next;
+          return reply(next);
+        }
         case "liveApplication.register": return reply({registrationId: 7});
         case "liveApplication.ownerState": return reply({adoptionId: capture.activationId, expectedLocalSequence: 2, throughCursor: 0,
           outboxId: null, pendingBytes: 0, outboxState: "active"});
@@ -549,7 +555,7 @@ async function completedServiceOwner(options: {empty?: boolean; frameChanges?: b
         case "sync.push": pushed.resolve();
           return reply({status: "complete", hasMore: false, pushed: 0, sharingDeclined: [], ownerAdmissionPending: []});
         case "sync.pull": return reply({status: "complete", nextCursor: 3, pendingCursor: {kind: "relay", token: "pending"}, hasMore: false,
-          fetched: 0, applied: 0, refused: 0, skipped: 0, conflictsOpened: 0, refusals: [], sharingDeclined: [], changedPaths: []});
+          fetched: 0, applied: 0, refused: 0, skipped: 0, conflictsOpened: 0, refusals: [], sharingDeclined: [], changedPaths: [], ...pulls.shift()});
         case "sync.materializePendingCursor": return reply({materialized: true});
         case "sync.commitCursor": return reply({committed: true, sharingDeclined: []});
       }
@@ -561,7 +567,7 @@ async function completedServiceOwner(options: {empty?: boolean; frameChanges?: b
   cleanup.push(() => host.close());
   // The activation pass publishes readiness before it pushes ordinary changes.
   if (!options.empty) await pushed.promise;
-  return {f, raw, host, document, workspace, target, pushed, unloads, membership, spawned: () => spawn.mock.calls.length, client: () => client,
+  return {f, raw, host, document, workspace, target, pushed, unloads, pulls, membership, spawned: () => spawn.mock.calls.length, client: () => client,
     ownerRequests: () => ownerRequests,
     park(method: string) { parked = {method, entered: deferred<void>(), release: deferred<void>()}; return parked; },
     restore() {
@@ -746,16 +752,22 @@ it("keeps the daemon after a refused attach and retires it when the engine expir
 // An empty host holding the real document and a held one, on a manual clock.
 // Only Date.now is fake: passes run on real timers, and visits to the held
 // document count them. `hold` keeps passes from activating the real document.
-async function idleHost() {
+// `alone` moves the held document to a second workspace, so the real one is alone in its workspace.
+async function idleHost(options: {alone?: boolean} = {}) {
   let now = 1_000_000;
   vi.spyOn(Date, "now").mockImplementation(() => now);
   const o = await emptyServiceHost({frameChanges: true}), workspaces = [o.workspace];
+  let other = o.other;
+  if (options.alone) {
+    const root = join(o.f.root, "workspace-2"); await mkdir(root);
+    workspaces.push({...o.workspace, root, workspaceId: "workspace-2"}); other = {...o.other, workspaceId: "workspace-2"};
+  }
   const activate = vi.mocked(ServiceActivationDriver.prototype.activate), through = activate.getMockImplementation()!;
   let held = false;
   activate.mockImplementation(function (this: ServiceActivationDriver, ...args) {
     return held && args[0].path === o.sibling.path ? Promise.resolve({kind: "pending" as const, reason: "held"}) : through.apply(this, args);
   });
-  await o.host.update({workspaces, documents: [o.sibling, o.other]});
+  await o.host.update({workspaces, documents: [o.sibling, other]});
   await vi.waitFor(() => expect(o.host.isDocumentReady(o.document)).toBe(true));
   const visits = (path: string) => activate.mock.calls.filter(([target]) => target.path === path).length;
   const requests = () => o.client().sendRequest.mock.calls.map(call => (call as unknown[])[0] as {method: string; params: Record<string, unknown>});
@@ -881,4 +893,95 @@ it("keeps background activation from reloading a dormant document, which leaves 
   expect(o.visits(o.sibling.path)).toBe(visits);
   expect(await o.host.update({workspaces: o.workspaces, documents: [o.other]})).toEqual([]);
   expect(o.unloaded()).toBe(1); expect(o.host.holds(o.sibling)).toBe(false);
+});
+
+it("brings a dormant document back into passes for stop-access work, which settle it before it unloads again", async () => {
+  const o = await idleHost();
+  o.advance(600_000);
+  await vi.waitFor(() => expect(o.unloaded()).toBe(1));
+  expect(o.host.settled(o.sibling)).toBe(true);
+  vi.spyOn(LiveCommittedDelivery.prototype, "documentForRestore").mockReturnValue(o.document);
+  vi.spyOn(OwnerCommittedDelivery.prototype, "documentForRestore").mockReturnValue(o.document);
+  const stopped = vi.spyOn(OwnerCommittedDelivery.prototype, "stopRestore").mockResolvedValue({kind: "pending", reason: "stopping"});
+  o.hold(true);
+  await expect(o.host.stopRestore({operationId: "restore", workspaceId: "workspace", ownerUserId: "owner"}))
+    .resolves.toEqual({kind: "pending", reason: "stopping"});
+  expect(stopped).toHaveBeenCalledOnce();
+  // Passes visit it again, and until one settles it a revoke cannot be released over its restore work.
+  const visits = o.visits(o.sibling.path);
+  await o.passes();
+  expect(o.visits(o.sibling.path)).toBeGreaterThan(visits);
+  expect(o.host.settled(o.sibling)).toBe(false);
+  const settles = o.settles().length;
+  o.hold(false);
+  await vi.waitFor(() => expect(o.host.settled(o.sibling)).toBe(true));
+  expect(o.settles().length).toBeGreaterThan(settles);
+  o.advance(600_000);
+  await vi.waitFor(() => expect(o.unloaded()).toBe(2));
+});
+
+it("records an idle unload whose reply arrives after the sweep deadline and reloads the document on reconnect", async () => {
+  const o = await idleHost(), deadlines: AbortController[] = [];
+  vi.spyOn(AbortSignal, "timeout").mockImplementation(() => {const deadline = new AbortController(); deadlines.push(deadline); return deadline.signal;});
+  o.hold(true);
+  const parked = o.park("liveApplication.unloadDocument"), captures = o.client().captureOwnerActivation.mock.calls.length;
+  o.advance(600_000);
+  await parked.entered.promise;
+  for (const deadline of deadlines) deadline.abort(new Error("Sweep deadline exceeded."));
+  parked.release.resolve();
+  // The document is dormant, so passes no longer visit it.
+  await o.passes();
+  const visits = o.visits(o.sibling.path);
+  await o.passes();
+  expect(o.visits(o.sibling.path)).toBe(visits);
+  o.hold(false);
+  const native = await o.host.captureNative(o.binding());
+  expect(native.invalidated.aborted).toBe(false);
+  // The reconnect reloads it without sending the unload again.
+  expect(o.unloaded()).toBe(1);
+  expect(o.client().captureOwnerActivation.mock.calls.length).toBe(captures + 1);
+  await expect(o.host.drain(o.document)).resolves.toMatchObject({kind: "done"});
+});
+
+it("sends an unanswered idle unload again before settling it or reloading it on reconnect", async () => {
+  const o = await idleHost(), log = vi.spyOn(console, "error").mockImplementation(() => {});
+  o.unloads.push(new Error("Engine connection reset."), new Error("Engine connection reset."));
+  o.advance(600_000);
+  await vi.waitFor(() => expect(log).toHaveBeenCalledWith("Idle live document unload is waiting.", "Engine connection reset."));
+  // Passes leave it alone: the engine may have ended its registration.
+  const settles = o.settles().length, visits = o.visits(o.sibling.path);
+  await o.passes();
+  expect(o.visits(o.sibling.path)).toBe(visits);
+  // The retry sends the unload again without settling first.
+  o.advance(30_000);
+  await vi.waitFor(() => expect(o.unloaded()).toBe(2));
+  await o.passes();
+  expect(o.settles().length).toBe(settles);
+  const captures = o.client().captureOwnerActivation.mock.calls.length;
+  const native = await o.host.captureNative(o.binding());
+  expect(o.unloaded()).toBe(3);
+  expect(native.invalidated.aborted).toBe(false);
+  expect(o.client().captureOwnerActivation.mock.calls.length).toBe(captures + 1);
+  await expect(o.host.drain(o.document)).resolves.toMatchObject({kind: "done"});
+});
+
+it("pulls what the relay received for a fully dormant workspace before a reopened document's first sync", async () => {
+  const o = await idleHost({alone: true}), send = o.client().sendRequest, capture = o.client().captureOwnerActivation;
+  o.advance(600_000);
+  await vi.waitFor(() => expect(o.unloaded()).toBe(1));
+  const sent = o.methods().length;
+  await o.passes(4);
+  expect(o.methods().slice(sent)).not.toContain("sync.pull");
+  // An owner update reached the relay. A catch-up that stops at a page boundary keeps the document dormant.
+  const captures = capture.mock.calls.length;
+  o.pulls.push({hasMore: true, nextCursor: 4, fetched: 1, applied: 1});
+  await expect(o.host.captureNative(o.binding())).rejects.toThrow("Ordinary replication has more pages.");
+  expect(capture.mock.calls.length).toBe(captures);
+  o.pulls.push({nextCursor: 5, fetched: 1, applied: 1});
+  const native = await o.host.captureNative(o.binding());
+  expect(native.invalidated.aborted).toBe(false);
+  // The pull committed before the document reloaded and its owner delivery registered.
+  const order = (method: string) => send.mock.invocationCallOrder.filter((_, index) => o.methods()[index] === method).at(-1)!;
+  expect(order("sync.commitCursor")).toBeLessThan(capture.mock.invocationCallOrder.at(-1)!);
+  expect(capture.mock.invocationCallOrder.at(-1)!).toBeLessThan(order("liveApplication.register"));
 });

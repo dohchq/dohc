@@ -156,6 +156,7 @@ export async function startServiceLiveHost(options: {
   // the count of connection changes it last saw. An idle unload that started
   // under an older count was overtaken by a connection.
   const editors = liveEditors(storage), idle = new Map<string, {due: number; generation: number}>();
+  // Hosted documents whose idle unload is running, or was sent and got no reply.
   const unloading = new Set<string>();
   let generation = 0;
   const hostedKey = (document: {workspaceId: string; objectId: string}) => {
@@ -353,7 +354,9 @@ export async function startServiceLiveHost(options: {
       members.delete(workspaceId); consumers.delete(workspaceId); ordinary.delete(workspaceId);
       attachments.delete(workspaceId); ledgers.delete(workspaceId);
       for (const [key, document] of hosted) {
-        if (document.target.workspaceId === workspaceId) {activation!.removeTarget(document.target, document.objectId); hosted.delete(key); idle.delete(key);}
+        if (document.target.workspaceId === workspaceId) {
+          activation!.removeTarget(document.target, document.objectId); hosted.delete(key); idle.delete(key); unloading.delete(key);
+        }
       }
       changes?.notifyHost([workspaceId]);
     };
@@ -389,36 +392,76 @@ export async function startServiceLiveHost(options: {
     // stays loaded, or undefined once it unloaded or a connection overtook it.
     // Runs in its document work, so no delivery reaches it between settlement
     // and the unload, and it gives way to any connection change until it sends the unload.
+    // The unload's reply is awaited past the caller's deadline. Without a reply
+    // the document stays unloading, and the unload is sent again, without
+    // settling, before anything else uses the document.
     const sleep = async (key: string, row: {target: ServiceActivationTarget; objectId: string}, seen: number, joined: AbortSignal) => {
-      const document = activation!.ownerDocument(row.target);
-      if (!document || !activation!.completed(row.target)) return "Service document activation is incomplete.";
+      const document = activation!.ownerDocument(row.target), lost = unloading.has(key);
+      if (!document || !(lost || activation!.completed(row.target))) return "Service document activation is incomplete.";
       const quiet = () => !editors.connected({workspaceId: row.target.workspaceId, objectId: row.objectId}) && idle.get(key)?.generation === seen;
       unloading.add(key);
+      let unanswered = lost;
       try {
         return await runDocument(document, joined, async operation => {
-          if (!quiet()) return undefined;
-          const {consumer} = activation!.consumer(document);
-          if (settleTarget && !(await consumer.settle(document, operation)).materialized) return "Settlement has not reached the file.";
-          // Publish settled output now: passes skip a dormant document, so they may not push its workspace again.
-          if ((await attachments.get(row.target.workspaceId)!.ordinary.publish(operation)).hasMore) return "Ordinary publication has more pages.";
-          if (!quiet()) return undefined;
-          const pending = await requestUnload(row, operation);
-          if (pending === undefined) activation!.sleep(row.target, document);
-          return pending;
+          if (!lost) {
+            if (!quiet()) return undefined;
+            const {consumer} = activation!.consumer(document);
+            if (settleTarget && !(await consumer.settle(document, operation)).materialized) return "Settlement has not reached the file.";
+            // Publish settled output now: passes skip a dormant document, so they may not push its workspace again.
+            if ((await attachments.get(row.target.workspaceId)!.ordinary.publish(operation)).hasMore) return "Ordinary publication has more pages.";
+            if (!quiet()) return undefined;
+          }
+          try {
+            const pending = await requestUnload(row, signal);
+            unanswered = false;
+            if (pending === undefined) activation!.sleep(row.target, document);
+            return pending;
+          } catch (error) {
+            // An engine refusal answers the unload; any other failure leaves it unknown.
+            unanswered = !(error instanceof EngineRequestError);
+            throw error;
+          }
         });
-      } finally {unloading.delete(key);}
+      } finally {if (!unanswered) unloading.delete(key);}
     };
-    // Opening a dormant document, or one whose idle unload is running, reloads it from its retained source.
+    // Sends an unanswered idle unload again. Runs in a turn, so no sweep holds the document.
+    const resolveUnload = async (key: string, joined: AbortSignal) => {
+      const row = hosted.get(key);
+      if (row && unloading.has(key)) await sleep(key, row, idle.get(key)!.generation, joined);
+    };
+    // Opening a dormant document, or one whose idle unload is running or
+    // unanswered, reloads it from its retained source. Passes skip a fully
+    // dormant workspace, so the open first pulls what the relay received since,
+    // and activation drains it before the first sync.
     const wake = async (document: {workspaceId: string; objectId: string}, callerSignal?: AbortSignal) => {
       const key = hostedKey(document);
       if (!key) return;
       touch(key);
       if (!activation!.dormant(hosted.get(key)!.target) && !unloading.has(key)) return;
       await exclusive(() => withLiveHostSignal(signal, callerSignal, async joined => {
+        await resolveUnload(key, joined);
         const row = hosted.get(key);
         if (!row || !activation!.dormant(row.target)) return;
+        const workspaceId = row.target.workspaceId;
+        if (activation!.workspaceReady(workspaceId) && (await attachments.get(workspaceId)!.ordinary.pull(joined)).hasMore) {
+          throw new Error("Ordinary replication has more pages.");
+        }
         activation!.wake(row.target); touch(key);
         await activation!.activate(row.target, joined, settleTarget);
+      }));
+    };
+    // Restore work takes a turn, so no idle unload runs beside it. On a dormant
+    // document it brings the document back into passes, which settle that work.
+    const restoring = <T>(value: StopRestoreLookup, callerSignal: AbortSignal | undefined,
+      operation: (consumer: NonNullable<ReturnType<typeof consumerForRestore>>, lookup: StopRestoreLookup, joined: AbortSignal) => Promise<T>) => {
+      check();
+      const lookup = snapshotStopRestoreLookup(value);
+      return exclusive(() => withLiveHostSignal(signal, callerSignal, async joined => {
+        const document = consumers.get(lookup.workspaceId)?.documentForRestore(lookup), key = document && hostedKey(document);
+        if (key) {await resolveUnload(key, joined); touch(key);}
+        const consumer = consumerForRestore(lookup);
+        if (!consumer) throw new Error("Workspace is not configured on this service host.");
+        return runDocument(consumer.documentForRestore(lookup), joined, work => operation(consumer, lookup, work));
       }));
     };
     const update = (value: ServiceHostedSet, callerSignal?: AbortSignal) => exclusive(() => withLiveHostSignal(signal, callerSignal, async joined => {
@@ -445,7 +488,7 @@ export async function startServiceLiveHost(options: {
       const retiring: {workspaceId: string; objectId: string}[] = [];
       for (const [key, document] of hosted) {
         if (changed.includes(document.target.workspaceId) || isDeepStrictEqual(wanted.get(key), document)) continue;
-        if (await unload(document, joined)) {hosted.delete(key); idle.delete(key);}
+        if (await unload(document, joined)) {hosted.delete(key); idle.delete(key); unloading.delete(key);}
         else retiring.push({workspaceId: document.target.workspaceId, objectId: document.objectId});
       }
       // Any other workspace detaches only once its last document unloads, so
@@ -467,8 +510,10 @@ export async function startServiceLiveHost(options: {
       registerRetained();
       let index=0,lastError:string|undefined,lastIdleError:string|undefined;
       const pass=async()=>{
-        // A dormant document stays out of memory until someone opens it.
-        const bounds=config.activation!,targets=activation!.targets.filter(target=>!activation!.dormant(target));
+        // A dormant document stays out of memory until someone opens it. One whose
+        // unload is unanswered may hold an ended registration until the unload is sent again.
+        const bounds=config.activation!,targets=activation!.targets.filter(target=>!activation!.dormant(target) &&
+          !unloading.has(JSON.stringify([target.workspaceId,target.path])));
         const passSignal=AbortSignal.any([signal,AbortSignal.timeout(bounds.passDeadlineMs)]);
         try{
           for(let visited=0;visited<Math.min(bounds.maxDocumentsPerPass,targets.length);visited++){
@@ -593,34 +638,19 @@ export async function startServiceLiveHost(options: {
       },
       get restoreConfigured() { return restore !== undefined; },
       async prepareRestore(value: StopRestoreLookup, callerSignal?: AbortSignal) {
-        check();
-        const lookup = snapshotStopRestoreLookup(value), consumer = consumerForRestore(lookup);
-        if (!consumer) throw new Error("Workspace is not configured on this service host.");
-        return runDocument(consumer.documentForRestore(lookup), callerSignal, joined => consumer.prepareRestore(lookup, joined));
+        return restoring(value, callerSignal, (consumer, lookup, joined) => consumer.prepareRestore(lookup, joined));
       },
       async reviewRestore(value: StopRestoreLookup, callerSignal?: AbortSignal) {
-        check();
-        const lookup = snapshotStopRestoreLookup(value), consumer = consumerForRestore(lookup);
-        if (!consumer) throw new Error("Workspace is not configured on this service host.");
-        return runDocument(consumer.documentForRestore(lookup), callerSignal, joined => consumer.reviewRestore(lookup, joined));
+        return restoring(value, callerSignal, (consumer, lookup, joined) => consumer.reviewRestore(lookup, joined));
       },
       async confirmRestore(value: StopRestoreLookup, proposalDigest: string, callerSignal?: AbortSignal) {
-        check();
-        const lookup = snapshotStopRestoreLookup(value), consumer = consumerForRestore(lookup);
-        if (!consumer) throw new Error("Workspace is not configured on this service host.");
-        return runDocument(consumer.documentForRestore(lookup), callerSignal, joined => consumer.confirmRestore(lookup, proposalDigest, joined));
+        return restoring(value, callerSignal, (consumer, lookup, joined) => consumer.confirmRestore(lookup, proposalDigest, joined));
       },
       async completeRestore(value: StopRestoreLookup, proposalDigest: string, callerSignal?: AbortSignal) {
-        check();
-        const lookup = snapshotStopRestoreLookup(value), consumer = consumerForRestore(lookup);
-        if (!consumer) throw new Error("Workspace is not configured on this service host.");
-        return runDocument(consumer.documentForRestore(lookup), callerSignal, joined => consumer.completeRestore(lookup, proposalDigest, joined));
+        return restoring(value, callerSignal, (consumer, lookup, joined) => consumer.completeRestore(lookup, proposalDigest, joined));
       },
       async stopRestore(value: StopRestoreLookup, callerSignal?: AbortSignal) {
-        check();
-        const lookup = snapshotStopRestoreLookup(value), consumer = consumerForRestore(lookup);
-        if (!consumer) throw new Error("Workspace is not configured on this service host.");
-        return runDocument(consumer.documentForRestore(lookup), callerSignal, joined => consumer.stopRestore(lookup, joined));
+        return restoring(value, callerSignal, (consumer, lookup, joined) => consumer.stopRestore(lookup, joined));
       },
       async settle(value: LiveDocumentKey, callerSignal?: AbortSignal) {
         check();
