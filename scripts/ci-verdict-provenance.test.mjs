@@ -470,7 +470,9 @@ test("cloud selection uses the tested Git checkout and evidence has bounded rete
     assert.equal(upload.if, "always()");
     assert.equal(upload.with["retention-days"], 7);
     assert.equal(upload.with["include-hidden-files"], true);
-    assert.ok(upload.with.path.trim().split("\n").every(path => /\/(?:result\.json|\*\.log)$/.test(path)), "upload only receipts and logs, not workspaces or profiles");
+    const paths = upload.with.path.trim().split("\n");
+    assert.ok(paths.every(path => /\/(?:result\.json|\*\.log|ticket-evidence\/\*\.json)$/.test(path)), "upload only receipts, logs, and ticket JSON, not workspaces or profiles");
+    assert.ok(paths.includes(".agent-artifacts/verification/*/ticket-evidence/*.json"), "retain ticket payloads and observations named by the receipt");
   }
 });
 

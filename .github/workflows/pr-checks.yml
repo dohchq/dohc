@@ -207,6 +207,7 @@ jobs:
             .agent-artifacts/verification/*/*.log
             .agent-artifacts/verification/*/js-tests/result.json
             .agent-artifacts/verification/*/js-tests/**/*.log
+            .agent-artifacts/verification/*/ticket-evidence/*.json
           include-hidden-files: true
           if-no-files-found: ignore
           retention-days: 7
@@ -270,6 +271,7 @@ jobs:
           path: |
             .agent-artifacts/verification/*/result.json
             .agent-artifacts/verification/*/*.log
+            .agent-artifacts/verification/*/ticket-evidence/*.json
           include-hidden-files: true
           if-no-files-found: ignore
           retention-days: 7
