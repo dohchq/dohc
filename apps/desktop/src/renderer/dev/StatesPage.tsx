@@ -1888,7 +1888,7 @@ const CLOUD_SIGNED_IN: CloudStatusResult = {
   workspaceSyncConnected: false,
 };
 const settingsCloud = (status: CloudStatusResult | null): CloudSettings => ({
-  status, unreadable: false, onChanged: noop, onConnect: noop, onError: noop,
+  status, unreadable: false, onChanged: noop, onConnect: noop, onError: noop, onAccountError: noop,
 });
 
 const SETTINGS_WORKSPACE = "C:\\Users\\ada\\Documents\\trip";

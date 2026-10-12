@@ -2431,6 +2431,64 @@ describe("sync answers after Settings closed", () => {
   });
 });
 
+// Disconnect reaches every workspace, so its failure is news in whichever
+// workspace is open when it arrives, unlike an enable.
+describe("a Disconnect failure after the workspace changed", () => {
+  it.each([
+    ["the same shell, given another workspace", false],
+    ["a new shell for the other workspace", true],
+  ])("reaches the open workspace's notices: %s", async (_case, remount) => {
+    const logout = deferred<void>();
+    let signedIn = true;
+    const sessionListeners: Array<(event: { sessionKey: string | null; phase: "changing" | "ready" }) => void> = [];
+    const bridge = Object.assign(makeBridge(Promise.resolve(null)), {
+      cloudLogout: vi.fn(() => logout.promise),
+    });
+    bridge.onCloudSessionChanged = vi.fn((listener: (event: { sessionKey: string | null; phase: "changing" | "ready" }) => void) => {
+      sessionListeners.push(listener);
+      return () => {};
+    });
+    bridge.cloudStatus = vi.fn(async () =>
+      signedIn
+        ? { connected: true, email: "me@dohc.test", serverUrl: "https://cloud.dohc.test", workspaceSynced: false }
+        : { connected: false, email: "", serverUrl: "", workspaceSynced: false },
+    );
+    vi.stubGlobal("dohcDesktop", bridge);
+    const shell = (workspace: Workspace) => (
+      <DesktopWorkspaceShell
+        {...(remount ? { key: workspace.workspaceId } : {})}
+        workspace={workspace}
+        workspaces={[WORKSPACE, OTHER_WORKSPACE]}
+        {...shellBootstrapProps(bridge)}
+        onSwitchWorkspace={() => {}}
+      />
+    );
+    const view = render(shell(WORKSPACE));
+    const user = userEvent.setup();
+    await user.click(await screen.findByTestId("activity-settings"));
+    await user.click(await screen.findByTestId("settings-nav-cloud"));
+    await user.click(await screen.findByTestId("cloud-disconnect"));
+    await waitFor(() => expect(bridge.cloudLogout).toHaveBeenCalled());
+
+    // Main announces the logout before the step that fails: the shell drops
+    // its status, and the account row leaves the page.
+    signedIn = false;
+    act(() => {
+      for (const listener of [...sessionListeners]) listener({ sessionKey: null, phase: "ready" });
+    });
+    await waitFor(() => expect(screen.queryByTestId("settings-row-account")).toBeNull());
+
+    view.rerender(shell(OTHER_WORKSPACE));
+    await act(async () => {
+      logout.reject(new Error("dohc could not stop sync for Notes."));
+    });
+
+    expect((await screen.findByTestId("workspace-shell-error")).textContent).toContain(
+      "dohc could not stop sync for Notes.",
+    );
+  });
+});
+
 describe("connection dialog retries", () => {
   // The panel that failed is gone, and the user opened a fresh one by hand
   // before choosing Try again. The notice's address must still reach it.

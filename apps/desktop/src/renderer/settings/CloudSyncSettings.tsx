@@ -28,6 +28,9 @@ export type CloudSettings = {
   onConnect: () => void;
   // The same guard as onChanged applies.
   onError: (error: ConnectionErrorReport) => void;
+  // A failure that reaches every workspace, such as Disconnect's. It goes to
+  // whichever workspace is open when it arrives, with no workspace guard.
+  onAccountError: (error: ConnectionErrorReport) => void;
 };
 
 type WorkspaceSync = Required<Pick<
@@ -170,7 +173,7 @@ export function CloudSyncSettings(props: {
         serverUrl={status.serverUrl ?? ""}
         networkAccess={status.networkAccess ?? null}
         onSettled={props.cloud.onChanged}
-        onError={props.cloud.onError}
+        onError={props.cloud.onAccountError}
       />
       {/* Main refuses to enroll a shared view: it syncs through its share. */}
       {props.sharedView ? null : (

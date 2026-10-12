@@ -1199,7 +1199,7 @@ describe("SettingsDialog", () => {
         workspaceId="ws-1"
         workspacePath="/x"
         initialSection="cloud"
-        cloud={{ status: { connected: false }, unreadable: false, onChanged: vi.fn(), onConnect, onError: vi.fn() }}
+        cloud={{ status: { connected: false }, unreadable: false, onChanged: vi.fn(), onConnect, onError: vi.fn(), onAccountError: vi.fn() }}
         onOpenSharing={() => {}}
         onClose={() => {}}
       />,

@@ -86,6 +86,7 @@ import { useAutomationHolds } from "./shell/useAutomationHolds";
 import { CollectionFieldMarksProvider } from "./collections/collectionFieldMarks";
 import { useCloudPresence } from "./shell/useCloudPresence";
 import type { ConnectionErrorReport } from "./shell/connectionNotices";
+import { reportInstallationFailure, useInstallationNotices } from "./shell/installationNotices";
 import type { CloudSettings } from "./settings/CloudSyncSettings";
 import { useCollectionFolders } from "./shell/useCollectionFolders";
 import { useShareMounts } from "./shell/useShareMounts";
@@ -954,6 +955,8 @@ export function DesktopWorkspaceShell(props: {
     },
     [openCloud, reportShellFailure],
   );
+  // Unguarded by workspace: an installation-wide failure is news here.
+  useInstallationNotices(reportConnectionError);
   const cloudSettings = useMemo<CloudSettings>(() => {
     // The page answers after it closed too. Only this workspace's answers
     // reach its status and its notices.
@@ -972,6 +975,7 @@ export function DesktopWorkspaceShell(props: {
       onError: (error) => {
         if (current()) reportConnectionError(error);
       },
+      onAccountError: reportInstallationFailure,
     };
   }, [closeSettings, cloudStatus, cloudStatusUnreadable, refreshCloudStatus, reportConnectionError, workspaceId]);
   // About's section reads report through this shell's notices, one row per

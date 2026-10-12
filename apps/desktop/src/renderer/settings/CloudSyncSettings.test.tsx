@@ -45,6 +45,7 @@ function cloud(status: CloudStatusResult | null, overrides: Partial<CloudSetting
     onChanged: vi.fn(),
     onConnect: vi.fn(),
     onError: vi.fn(),
+    onAccountError: vi.fn(),
     ...overrides,
   };
 }
@@ -391,28 +392,22 @@ describe("CloudSyncSettings", () => {
     await waitFor(() => expect(settings.onChanged).toHaveBeenCalledOnce());
     expect(bridgeMock.cloudLogout).toHaveBeenCalledOnce();
     expect(screen.queryByRole("dialog")).toBeNull();
-    expect(settings.onError).not.toHaveBeenCalled();
+    expect(settings.onAccountError).not.toHaveBeenCalled();
   });
 
-  // Disconnect reaches every workspace. The shell drops a report through a
-  // workspace it no longer shows, so the failure goes to the one open now.
-  it("reports a disconnect failure to the workspace open when it arrives", async () => {
-    const logout = deferred<void>();
-    bridgeMock.cloudLogout.mockReturnValueOnce(logout.promise);
-    const first = cloud(SIGNED_IN);
-    const { rerender } = render(<CloudSyncSettings workspaceId="ws-1" cloud={first} />);
+  // Disconnect reaches every workspace, so its failure goes through the
+  // installation-wide report, never the workspace-guarded one. The shell's
+  // tests follow it through a workspace switch.
+  it("reports a disconnect failure installation-wide, not for this workspace only", async () => {
+    bridgeMock.cloudLogout.mockRejectedValueOnce(new Error("offline"));
+    const settings = cloud(SIGNED_IN);
+    render(<CloudSyncSettings workspaceId="ws-1" cloud={settings} />);
+
     fireEvent.click(screen.getByTestId("cloud-disconnect"));
-    await waitFor(() => expect(bridgeMock.cloudLogout).toHaveBeenCalled());
 
-    const next = cloud(SIGNED_IN);
-    rerender(<CloudSyncSettings workspaceId="ws-2" cloud={next} />);
-    await act(async () => {
-      logout.reject(new Error("offline"));
-    });
-
-    expect(next.onError).toHaveBeenCalledOnce();
-    expect(vi.mocked(next.onError).mock.calls[0]![0].message).toBe("offline");
-    expect(first.onError).not.toHaveBeenCalled();
+    await waitFor(() => expect(settings.onAccountError).toHaveBeenCalledOnce());
+    expect(vi.mocked(settings.onAccountError).mock.calls[0]![0].message).toBe("offline");
+    expect(settings.onError).not.toHaveBeenCalled();
   });
 
   // Main announces the logout before the step that fails. The shell then
@@ -432,8 +427,8 @@ describe("CloudSyncSettings", () => {
       logout.reject(new Error("dohc could not stop sync for Notes."));
     });
 
-    expect(settings.onError).toHaveBeenCalledOnce();
-    expect(vi.mocked(settings.onError).mock.calls[0]![0].message).toBe("dohc could not stop sync for Notes.");
+    expect(settings.onAccountError).toHaveBeenCalledOnce();
+    expect(vi.mocked(settings.onAccountError).mock.calls[0]![0].message).toBe("dohc could not stop sync for Notes.");
     // Nothing on the page repaints for a row that is gone.
     expect(settings.onChanged).not.toHaveBeenCalled();
     expect(screen.getByTestId("settings-cloud-checking")).toBeTruthy();
@@ -445,8 +440,8 @@ describe("CloudSyncSettings", () => {
     const { unmount } = render(<CloudSyncSettings workspaceId="ws-1" cloud={settings} />);
 
     fireEvent.click(screen.getByTestId("cloud-disconnect"));
-    await waitFor(() => expect(settings.onError).toHaveBeenCalledOnce());
-    const report = vi.mocked(settings.onError).mock.calls[0]![0];
+    await waitFor(() => expect(settings.onAccountError).toHaveBeenCalledOnce());
+    const report = vi.mocked(settings.onAccountError).mock.calls[0]![0];
     expect(report.message).toBe("offline");
     // The session may be gone even so: the shell reads it again.
     await waitFor(() => expect(settings.onChanged).toHaveBeenCalledOnce());
@@ -472,8 +467,8 @@ describe("CloudSyncSettings", () => {
       const { unmount } = render(<CloudSyncSettings workspaceId="ws-1" cloud={settings} />);
 
       fireEvent.click(screen.getByTestId("cloud-disconnect"));
-      await waitFor(() => expect(settings.onError).toHaveBeenCalledOnce());
-      const report = vi.mocked(settings.onError).mock.calls[0]![0];
+      await waitFor(() => expect(settings.onAccountError).toHaveBeenCalledOnce());
+      const report = vi.mocked(settings.onAccountError).mock.calls[0]![0];
 
       unmount();
       act(() => announceSession({ sessionKey: "new-session", phase }));
@@ -492,7 +487,7 @@ describe("CloudSyncSettings", () => {
 
     for (const attempt of [1, 2, 3]) {
       fireEvent.click(screen.getByTestId("cloud-disconnect"));
-      await waitFor(() => expect(settings.onError).toHaveBeenCalledTimes(attempt));
+      await waitFor(() => expect(settings.onAccountError).toHaveBeenCalledTimes(attempt));
     }
 
     expect(sessionListeners.size).toBe(1);
