@@ -265,12 +265,16 @@ export function PageIdentity(props: PageIdentityProps) {
   // reaches onChange. The field keeps its text until the composition ends.
   const titleComposing = useRef(false);
   const [blurHeld, setBlurHeld] = useState(false);
+  // An open title stays open until its composition ends, so interim text
+  // that empties the field does not fold it mid-composition.
+  const [openWhileComposing, setOpenWhileComposing] = useState(false);
   // Ends a composition, and the blur it held back if the field has lost
   // focus. The draft re-syncs from the title once the composed text, if any,
   // has been written.
   function endComposition() {
     titleComposing.current = false;
     setBlurHeld(false);
+    setOpenWhileComposing(false);
     if (document.activeElement !== titleRef.current) setTitleFocused(false);
   }
   // Some input methods never send compositionend after a blur. The person's
@@ -308,8 +312,10 @@ export function PageIdentity(props: PageIdentityProps) {
   // The same field folds and unfolds, so focus, caret and Tab order stay.
   // It folds while it holds no text, whether or not it has focus, so focus
   // and blur never move what is below it: the first character typed opens
-  // it, and clearing it folds it again.
-  const folded = (liveOpensWithH1 || localOpensWithH1) && title === "" && titleDraft === "";
+  // it, and clearing it folds it again. While it has focus, the text on
+  // screen decides, so a title written elsewhere opens it only on blur.
+  const empty = titleFocused ? titleDraft === "" : title === "";
+  const folded = (liveOpensWithH1 || localOpensWithH1) && empty && !openWhileComposing;
 
   const [pickerOpen, setPickerOpen] = useState(false);
   const [emojiInput, setEmojiInput] = useState("");
@@ -465,6 +471,7 @@ export function PageIdentity(props: PageIdentityProps) {
             // Focus back in the field ends a composition it never ended.
             titleComposing.current = false;
             setBlurHeld(false);
+            setOpenWhileComposing(false);
             setTitleFocused(true);
           }}
           onBlur={() => {
@@ -477,6 +484,7 @@ export function PageIdentity(props: PageIdentityProps) {
           }}
           onCompositionStart={() => {
             titleComposing.current = true;
+            if (!folded) setOpenWhileComposing(true);
           }}
           onCompositionEnd={endComposition}
           onChange={(event) => {
@@ -489,6 +497,7 @@ export function PageIdentity(props: PageIdentityProps) {
             }
             setTitleDraft(next);
             writeField("title", next.length === 0 ? undefined : next);
+            if (titleComposing.current && next !== "") setOpenWhileComposing(true);
             // Committed text arriving after the blur is the composition's
             // last word; interim text is not.
             const input = event.nativeEvent;

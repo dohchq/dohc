@@ -486,11 +486,50 @@ describe("PageIdentity", () => {
 
     it("keeps a held composition through interim text, even empty, until it ends", () => {
       const { doc, field, writeOutside } = renderComposing();
+      expect(folded()).toBe(false);
       fireEvent.input(field, { target: { value: "" }, isComposing: true, inputType: "insertCompositionText" });
+      // Text opened the title, so empty interim text does not fold it.
+      expect(folded()).toBe(false);
       writeOutside("Outside");
       expect(field.value).toBe("");
 
       fireEvent.compositionEnd(field);
+      expect(field.value).toBe("Outside");
+      expect(folded()).toBe(false);
+      doc.destroy();
+    });
+
+    it("keeps an open title open through empty interim text while it has focus, and folds when the composition ends empty", () => {
+      render(<PageIdentity body={"# Plan\n"} onChange={() => {}} filenameStem="plan" />);
+      const field = titleField();
+      act(() => field.focus());
+      fireEvent.compositionStart(field);
+      fireEvent.input(field, { target: { value: "東" }, isComposing: true, inputType: "insertCompositionText" });
+      expect(folded()).toBe(false);
+      fireEvent.input(field, { target: { value: "" }, isComposing: true, inputType: "insertCompositionText" });
+      expect(folded()).toBe(false);
+
+      fireEvent.compositionEnd(field);
+      expect(document.activeElement).toBe(field);
+      expect(folded()).toBe(true);
+    });
+
+    it("leaves a focused empty title folded when a title is written elsewhere, and opens it on blur", () => {
+      const doc = markdownToYDoc("# Plan\n");
+      render(
+        <>
+          <PageIdentity ydoc={doc} filenameStem="plan" />
+          <button type="button">elsewhere</button>
+        </>,
+      );
+      const field = titleField();
+      act(() => field.focus());
+      act(() => void doc.getMap("frontmatter").set("title", "Outside"));
+      expect(folded()).toBe(true);
+      expect(field.value).toBe("");
+
+      act(() => screen.getByRole("button", { name: "elsewhere" }).focus());
+      expect(folded()).toBe(false);
       expect(field.value).toBe("Outside");
       doc.destroy();
     });
