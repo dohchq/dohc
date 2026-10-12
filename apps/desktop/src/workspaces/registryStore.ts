@@ -221,6 +221,8 @@ export interface ShareViewIdentity {
   subjectName?: string | null;
   sharerName?: string | null;
   shareId: string;
+  // The relay's workspace owner id; older views learn it on refresh.
+  granterUserId?: string;
   granterEmail: string | null;
   genericChatWritable: boolean;
   // The selector the relay stated for this share, pinned here when the record

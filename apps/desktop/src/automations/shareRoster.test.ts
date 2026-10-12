@@ -27,6 +27,22 @@ import {
 import { listEngineMomentsForIpc } from "../ipc/engineHistoryIpc";
 
 const WORKSPACE = "ws-trip";
+
+it.each(["Mira", null, ""])("names the received share's owner from relay identity (name %s)", sharerName => {
+  const shareView = { granterUserId: "u-owner", sharerName, granterEmail: "mira@example.test" };
+  const lookupAccounts = vi.fn();
+  const names = createHistoryLabels({
+    snapshot: () => ({ roster: null, owner: false, shareView, context: "recipient", inventory: undefined }),
+    lookupAccounts,
+  });
+  names.prepare(WORKSPACE, [{ userId: "u-owner" }, { userId: "someone-else" }]);
+  expect.soft(names.person(WORKSPACE, "u-owner")).toBe(sharerName || "mira@example.test");
+  expect(names.person(WORKSPACE, "someone-else")).toBe("Someone you shared with");
+  expect(lookupAccounts).not.toHaveBeenCalled();
+  // An old identity has no verified owner id until its next refresh.
+  shareView.granterUserId = "";
+  expect(names.person(WORKSPACE, "u-owner")).toBe("Someone you shared with");
+});
 const remote = { serverUrl: "https://server.dohc.test", ownerUserId: "u-owner" };
 
 const facts = { shareId: "s-1", generation: 1, status: "active" as const, granterUserId: "u-owner",

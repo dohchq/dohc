@@ -164,6 +164,7 @@ import {
 } from "./ui/controls";
 import { ActivityBar } from "./workbench/ActivityBar";
 import { EditorTabs } from "./workbench/EditorTabs";
+import { EditorGroupFrame } from "./workbench/tabRowActions";
 import { EditorGroupLayout } from "./workbench/EditorGroupLayout";
 import { Explorer } from "./workbench/Explorer";
 import { projectTreePath, type PendingTreeChange } from "./workbench/file-tree-optimistic";
@@ -4974,6 +4975,33 @@ export function DesktopWorkspaceShell(props: {
         wb={wb}
         toggleSidePanel={toggleSidePanel}
         mutateWb={mutateWb}
+        version={captureAvailable ? (
+          <VersionMenu
+            workspaceId={workspaceId}
+            // Out of the workbench, so it waits for the workspace the way
+            // the inert workbench does.
+            disabled={!workspaceIsReady || storeUpdateRequired}
+            activeTabDirty={anyTabDirty}
+            beginLineageOperation={beginLineageOperation}
+            onOpenCompare={openVersionCompareTab}
+            onWorkspaceStateChanged={onVersionWorkspaceStateChanged}
+            onError={reportFailureMessage}
+            {...(shareView
+              ? {}
+              : {
+                  onShareVersion: (version: { id: string; name: string }) =>
+                    setShareTarget({
+                      kind: "version",
+                      versionId: version.id,
+                      versionName: version.name,
+                    }),
+                })}
+            // versionEpoch bumps whenever any surface changed version
+            // state (the 0N-2 review card switches back to Main outside
+            // this menu) — the selector re-reads instead of going stale.
+            refreshKey={versionEpoch}
+          />
+        ) : undefined}
       />
       {shareView ? (
         <div
@@ -5281,35 +5309,10 @@ export function DesktopWorkspaceShell(props: {
           />
         ) : null}
 
-        {/* Editor area: workspace-wide version controls above independently
-            active editor groups. Each group can host any tab surface. */}
+        {/* Editor area: independently active editor groups. Each group can
+            host any tab surface, and its tab row carries the open
+            document's actions. */}
         <main className="flex min-w-0 flex-1 flex-col bg-bg">
-          {captureAvailable ? (
-            <div className="flex h-9 shrink-0 items-center justify-end border-b border-line bg-panel px-1.5">
-                <VersionMenu
-                  workspaceId={workspaceId}
-                  activeTabDirty={anyTabDirty}
-                  beginLineageOperation={beginLineageOperation}
-                  onOpenCompare={openVersionCompareTab}
-                  onWorkspaceStateChanged={onVersionWorkspaceStateChanged}
-                  onError={reportFailureMessage}
-                  {...(shareView
-                    ? {}
-                    : {
-                        onShareVersion: (version: { id: string; name: string }) =>
-                          setShareTarget({
-                            kind: "version",
-                            versionId: version.id,
-                            versionName: version.name,
-                          }),
-                      })}
-                  // versionEpoch bumps whenever any surface changed version
-                  // state (the 0N-2 review card switches back to Main outside
-                  // this menu) — the selector re-reads instead of going stale.
-                  refreshKey={versionEpoch}
-                />
-            </div>
-          ) : null}
           {/* "Try it in a version" (PR 0N-2): honest run status while the
               agent works, then the review card when the run ends. Never a
               shared view (tryState never exists there). */}
@@ -5348,8 +5351,9 @@ export function DesktopWorkspaceShell(props: {
                 id: editorGroup.id,
                 size: editorGroup.size,
                 content: (
-                  <>
+                  <EditorGroupFrame tabs={(actionsRef) => (
                     <EditorTabs
+                      actionsRef={actionsRef}
                       groupId={editorGroup.id}
                       tabs={editorGroup.tabs}
                       activeTab={tabPath}
@@ -5367,6 +5371,7 @@ export function DesktopWorkspaceShell(props: {
                         ? { onCloseGroup: closeGroupAfterFlush }
                         : {})}
                     />
+                  )}>
                     <div
                       className="flex min-h-0 flex-1 flex-col"
                       onContextMenu={(event) => {
@@ -5721,7 +5726,7 @@ export function DesktopWorkspaceShell(props: {
             )}
             </ErrorBoundary>
                     </div>
-                  </>
+                  </EditorGroupFrame>
                 ),
               };
             })}

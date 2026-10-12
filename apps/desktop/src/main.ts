@@ -93,7 +93,7 @@ import { createOpenPathFailures } from "./window/openPathFailures";
 import { runInWorkspaceAuthorityLane } from "./workspaces/workspaceAuthorityLane";
 import { normalizeAbsolutePath } from "@dohc/workspace-core";
 import { randomUUID } from "node:crypto";
-import { accessCliQueries, createAccessAcquisition, createAccessOwner } from "./access/accessOwner";
+import { accessCliQueries, createAccessAcquisition, createAccessOwner, ownerAccessRoster } from "./access/accessOwner";
 import { hasAccessChat, locateAccessVersionPath, resolveAccessObject } from "./access/accessObjectResolution";
 import { createShareCopyHandler } from "./ipc/shareCopyHandler";
 import { shareCopyOperations } from "./ipc/shareCopyOperations";
@@ -1523,7 +1523,7 @@ function historyLabelsFor(sender: WebContents): ReturnType<typeof createHistoryL
   const labels = createHistoryLabels({
     snapshot: (workspaceId) => {
       const workspace = findWorkspace(workspaceId);
-      return { roster: shareRosters.observation(workspaceId).listing,
+      return { roster: shareRosters.observation(workspaceId).listing, shareView: workspace?.shareView,
         owner: !sender.isDestroyed() && !!workspace?.remote && !workspace.shareView && cachedCredentials?.userId === workspace.remote.ownerUserId,
         context: rosterContext(workspaceId), inventory: workspace?.shareRoster?.version };
     },
@@ -1568,11 +1568,7 @@ const accessOwner = createAccessOwner<AccessWorkspaceOperation>({
   assertCurrent: operation => operation.assertCurrent(),
   account: () => cachedCredentials?.relayUrl ? { userId: cachedCredentials.userId, email: cachedCredentials.email,
     relayUrl: cachedCredentials.relayUrl, generation: credentialCacheGeneration } : null,
-  roster: ({ workspace }) => {
-    if (workspace.shareView || !workspace.remote || cachedCredentials?.userId !== workspace.remote.ownerUserId ||
-        cachedCredentials.relayUrl !== workspace.remote.serverUrl) return { listing: null, checkedAtMs: null, freshness: "unknown" };
-    return shareRosters.observation(workspace.workspaceId);
-  },
+  roster: ({ workspace }) => ownerAccessRoster(workspace, cachedCredentials, shareRosters.observation),
   received: () => receivedShareAcquisition.observation(),
   refresh: async operation => {
     await warmCredentialCache().catch(() => undefined);
