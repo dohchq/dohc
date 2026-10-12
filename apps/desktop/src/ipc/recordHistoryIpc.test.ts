@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { CollectionGetRecordResult } from "@dohc/workspace-contracts";
 import { recordHistoryForIpc, type RecordHistoryAuthors } from "./recordHistoryIpc";
 import { GetCollectionRecordHistoryResult } from "./bridgeContract";
+import { createHistoryLabels } from "../automations/shareRoster";
 
 const change = (actorKind: "human" | "agent"): CollectionGetRecordResult["history"][number] => ({
   historyId: 1, field: "Status", previous: { present: true, value: "Open" }, next: { present: true, value: "Done" },
@@ -14,6 +15,25 @@ const names = (): RecordHistoryAuthors => ({
 });
 
 describe("Record History live authors", () => {
+  it("names the owner's Button press and automation on a recipient using real history labels", async () => {
+    const labels = createHistoryLabels({
+      snapshot: () => ({ roster: null, owner: false, context: "recipient", inventory: undefined,
+        shareView: { granterUserId: "owner", sharerName: "Mira", granterEmail: "mira@example.test" } }),
+      lookupAccounts: vi.fn(),
+    });
+    const page = await recordHistoryForIpc({ history: [
+      { ...change("human"), actorKind: "automation", authorOriginId: "stamp", onBehalfOf: "owner",
+        automationRun: { claimId: "button-press", automationName: "Stamp" } },
+      { ...change("human"), historyId: 2, authorOriginId: "owner" },
+    ], nextBeforeHistoryId: null }, { ...names(),
+      prepare: ids => labels.prepare("received", ids.map(userId => ({ userId }))),
+      person: id => labels.person("received", id),
+    });
+    expect(page.entries.map(entry => entry.author)).toEqual([
+      { kind: "automation", automationId: "stamp", name: "Stamp", person: "Mira", run: { claimId: "button-press", location: "unchecked" } },
+      { kind: "human", name: "Mira" },
+    ]);
+  });
   it.skipIf(process.env.DOHC_FIELD_HISTORY_COST !== "1")("measures preparation of a 50-link page", async () => {
     const history = Array.from({ length: 50 }, (_, historyId) => ({ ...change("human"), historyId, actorKind: null, authorOriginId: null, onBehalfOf: null,
       linkAuthor: { kind: "link" as const, grantId: "link", grantGeneration: 2, publicPrincipalId: `public-holder-${historyId}` } }));

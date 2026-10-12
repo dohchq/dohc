@@ -1523,7 +1523,7 @@ function historyLabelsFor(sender: WebContents): ReturnType<typeof createHistoryL
   const labels = createHistoryLabels({
     snapshot: (workspaceId) => {
       const workspace = findWorkspace(workspaceId);
-      return { roster: shareRosters.observation(workspaceId).listing,
+      return { roster: shareRosters.observation(workspaceId).listing, shareView: workspace?.shareView,
         owner: !sender.isDestroyed() && !!workspace?.remote && !workspace.shareView && cachedCredentials?.userId === workspace.remote.ownerUserId,
         context: rosterContext(workspaceId), inventory: workspace?.shareRoster?.version };
     },
