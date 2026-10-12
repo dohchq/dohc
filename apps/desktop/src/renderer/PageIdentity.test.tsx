@@ -597,6 +597,21 @@ describe("PageIdentity", () => {
       expect(field.value).toBe("Q3");
     });
 
+    // jsdom draws nothing, so these read the classes that draw it: "Add icon"
+    // shows whenever focus is in the header, not only on hover, and the
+    // folded field's square corners keep its focus underline straight.
+    it("shows Add icon beside a focused folded title, and keeps that title's underline straight", () => {
+      render(<PageIdentity body={"# Plan\n"} onChange={() => {}} filenameStem="plan" />);
+      const header = screen.getByTestId("page-identity");
+      const addIcon = screen.getByTestId("page-icon-add");
+      expect(header.className.split(" ")).toContain("group");
+      expect(addIcon.className).toContain("group-hover:opacity-100");
+      expect(addIcon.className).toContain("group-focus-within:opacity-100");
+      expect(header.contains(titleField())).toBe(true);
+      expect(folded()).toBe(true);
+      expect(titleField().className).not.toMatch(/\brounded/);
+    });
+
     it("keeps the Tab order icon, then title, without opening the empty title", async () => {
       const user = userEvent.setup();
       render(<PageIdentity body={"# Plan\n"} onChange={() => {}} filenameStem="plan" />);

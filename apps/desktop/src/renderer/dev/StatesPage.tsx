@@ -1911,10 +1911,12 @@ function Pane(props: { theme: "light" | "dark" }) {
             </div>
           </TopmatterSpecimen>
         </Specimen>
-        <Specimen label="folded, focused: Add title in place, so nothing below moves">
+        <Specimen label="folded, focused: Add icon and Add title in place, so nothing below moves">
           <TopmatterSpecimen>
-            <div data-force-state="focus" data-force-target={`[data-testid="page-title"]`}>
-              <PageIdentity body={"# Q3 product plan\n"} onChange={noop} filenameStem="product-plan" />
+            <div data-force-state="focus-within" data-force-target={`[data-testid="page-identity"]`}>
+              <div data-force-state="focus" data-force-target={`[data-testid="page-title"]`}>
+                <PageIdentity body={"# Q3 product plan\n"} onChange={noop} filenameStem="product-plan" />
+              </div>
             </div>
           </TopmatterSpecimen>
         </Specimen>

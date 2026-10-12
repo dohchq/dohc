@@ -114,8 +114,13 @@ const TITLE_FIELD = "block resize-none overflow-hidden border-0 bg-transparent f
 const TITLE_OPEN = `${TITLE_FIELD} w-full basis-full p-0 font-sans text-[2em] font-bold leading-[1.15] tracking-[-0.02em] text-ink placeholder:text-subtle`;
 // Folded beside "Add icon", and shown with it while the pointer is over the
 // page's identity or the field has focus. A read-only page has nothing to
-// add, so it stays hidden.
-const TITLE_FOLDED = `${TITLE_FIELD} rounded-md px-1.5 py-[3px] text-[12.5px] leading-normal text-subtle placeholder:text-subtle hover:placeholder:text-muted focus:placeholder:text-muted`;
+// add, so it stays hidden. Square corners keep its focus underline straight,
+// like the pills' fields.
+const TITLE_FOLDED = `${TITLE_FIELD} px-1.5 py-[3px] text-[12.5px] leading-normal text-subtle placeholder:text-subtle hover:placeholder:text-muted focus:placeholder:text-muted`;
+// "Add icon" shows while the pointer is over the page's identity or focus is
+// anywhere in it, so a focused "Add title" never sits beside an empty gap.
+const ADD_ICON =
+  "inline-flex cursor-pointer items-center gap-1.5 rounded-md border-0 bg-transparent px-1.5 py-[3px] text-[12.5px] text-subtle opacity-0 transition-[opacity,color] duration-100 ease-out hover:text-muted focus-visible:opacity-100 group-hover:opacity-100 group-focus-within:opacity-100";
 
 // A small curated palette — enough for the common cases (docs, projects,
 // status, life) without shipping a multi-thousand-emoji database. Anything
@@ -399,7 +404,7 @@ export function PageIdentity(props: PageIdentityProps) {
               data-testid="page-icon-add"
               aria-label="Add icon"
               onClick={() => setPickerOpen((open) => !open)}
-              className="dohc-page-identity__add-icon"
+              className={ADD_ICON}
             >
               <Smile size={15} aria-hidden />
               Add icon

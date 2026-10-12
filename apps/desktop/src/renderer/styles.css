@@ -2341,32 +2341,6 @@ body {
   @apply bg-hover;
 }
 
-.dohc-page-identity__add-icon {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  border: 0;
-  border-radius: 6px;
-  background: transparent;
-  padding: 3px 6px;
-  color: var(--dohc-subtle);
-  font-size: 12.5px;
-  cursor: pointer;
-  opacity: 0;
-  transition:
-    opacity 100ms ease-out,
-    color 100ms ease-out;
-}
-
-.dohc-page-identity:hover .dohc-page-identity__add-icon,
-.dohc-page-identity__add-icon:focus-visible {
-  opacity: 1;
-}
-
-.dohc-page-identity__add-icon:hover {
-  color: var(--dohc-muted);
-}
-
 .dohc-page-identity__picker {
   position: absolute;
   top: calc(100% + 6px);
