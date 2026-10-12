@@ -4573,6 +4573,67 @@ mod tests {
         }
     }
 
+    #[test]
+    fn corrupt_pending_preimage_stops_the_batch_before_any_file_is_replaced() {
+        let scratch = Scratch::new("corrupt-pending-preimage");
+        let mut store = EngineStore::open(&scratch.db(), 1).unwrap();
+        let sha = store.put_binary_blob(b"new content").unwrap();
+        std::fs::write(scratch.root.join("existing.bin"), b"outside content").unwrap();
+        store
+            .write_with(&NoFaults, |tx| {
+                for (id, path, preimage) in [
+                    ("first", "new.bin", Preimage::Absent),
+                    (
+                        "corrupt",
+                        "existing.bin",
+                        Preimage::Present(hex_sha256(b"outside content")),
+                    ),
+                ] {
+                    enqueue_job(
+                        tx,
+                        &MaterializationJobSpec {
+                            job_id: id.into(),
+                            workspace_id: "workspace".into(),
+                            target_path: path.into(),
+                            content_sha256: sha.clone(),
+                            preimage,
+                            target_generation: 1,
+                            now_ms: if id == "first" { 1 } else { 2 },
+                        },
+                    )?;
+                }
+                Ok::<_, StorageError>(())
+            })
+            .unwrap();
+        store
+            .write_with(&NoFaults, |tx| {
+                tx.execute(
+                    "UPDATE materialization_jobs SET preimage_sha256 = NULL WHERE job_id = 'corrupt'",
+                    [],
+                )
+                .map_err(StorageError::persist_public)
+            })
+            .unwrap();
+        assert!(matches!(
+            run_pending_jobs(&store, &scratch.root, &options_with(&StdReplacer)),
+            Err(MaterializeError::Storage(StorageError::StateCorrupt { .. }))
+        ));
+        assert!(!scratch.root.join("new.bin").exists());
+        assert_eq!(
+            std::fs::read(scratch.root.join("existing.bin")).unwrap(),
+            b"outside content"
+        );
+        assert_eq!(store.pending_materialization_count().unwrap(), 2);
+        assert_eq!(
+            store
+                .load_materialization_job("first")
+                .unwrap()
+                .unwrap()
+                .status,
+            JobStatus::Pending
+        );
+    }
+
     /// The replace loop retries an ACL denial to its full bounded budget —
     /// a Windows AV handle mid-scan often surfaces as ERROR_ACCESS_DENIED —
     /// but the error that outlives the cap is a terminal io failure, never
