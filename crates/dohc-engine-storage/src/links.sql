@@ -18,7 +18,7 @@ CREATE TABLE link_index_state (
     seed_phase TEXT NOT NULL DEFAULT 'deferred' CHECK(seed_phase IN ('deferred','aliases','draining','ready')),
     seed_after_path TEXT NOT NULL DEFAULT '',
     PRIMARY KEY(workspace_id, version_id)
-) STRICT;
+) STRICT, WITHOUT ROWID;
 -- This object lookup is derived, so initial capture need not maintain it.
 CREATE TABLE link_aliases (
     workspace_id TEXT NOT NULL, version_id TEXT NOT NULL,

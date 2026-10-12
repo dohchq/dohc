@@ -3862,7 +3862,7 @@ mod tests {
             ),
             (
                 "v2-persisted-links",
-                "b77853bb6fef0c09dfa99d17e41ac8586bd7cf2c1f78b7a3e628bd24d8f49914",
+                "3c99088e56007244b565f9e107465f8bbaf2499e50e5ed0b7325ac47de90aed6",
             ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());
@@ -6111,6 +6111,15 @@ mod tests {
             .expect("persisted queue must exist");
         assert_eq!(pending, 0);
         assert_eq!(
+            conn.query_row(
+                "SELECT wr FROM pragma_table_list WHERE name='link_index_state'",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+            1
+        );
+        assert_eq!(
             conn.query_row("SELECT seed_phase FROM link_index_state", [], |r| r
                 .get::<_, String>(0))
                 .unwrap(),
@@ -6137,6 +6146,84 @@ mod tests {
             ))
             .unwrap(),
             0
+        );
+    }
+
+    #[cfg(feature = "fault-injection")]
+    #[test]
+    fn seed_phase_guard_uses_one_primary_key_lookup() {
+        let conn = Connection::open_in_memory().unwrap();
+        let definition = include_str!("links.sql")
+            .split("CREATE TABLE link_index_state ")
+            .nth(1)
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap();
+        conn.execute_batch(&format!(
+            "CREATE TABLE guard_before {}; CREATE TABLE guard_after {};",
+            definition.replace(", WITHOUT ROWID", ""),
+            definition,
+        ))
+        .unwrap();
+        for table in ["guard_before", "guard_after"] {
+            conn.execute(&format!("INSERT INTO {table}(workspace_id,version_id,parser_generation) VALUES('ws','main',1)"), []).unwrap();
+        }
+        let query = |table| {
+            format!("SELECT seed_phase FROM {table} WHERE workspace_id=?1 AND version_id=?2")
+        };
+        let plan: String = conn
+            .query_row(
+                &format!("EXPLAIN QUERY PLAN {}", query("guard_after")),
+                ["ws", "main"],
+                |r| r.get(3),
+            )
+            .unwrap();
+        assert!(plan.contains("USING PRIMARY KEY"), "{plan}");
+        let mut before = conn.prepare(&query("guard_before")).unwrap();
+        let mut after = conn.prepare(&query("guard_after")).unwrap();
+        let mut before_ns = Vec::new();
+        let mut after_ns = Vec::new();
+        let mut phase = crate::capture_phase::Phase::new("trigger_guard_comparison", None, 0, true);
+        // Same prepared lookup as the trigger, including SQL dispatch. Alternate
+        // the two layouts; these timings are diagnostic, never a gate limit.
+        for trial in 0..6 {
+            for is_after in if trial % 2 == 0 {
+                [false, true]
+            } else {
+                [true, false]
+            } {
+                let statement = if is_after { &mut after } else { &mut before };
+                let label = if is_after {
+                    "guard_without_rowid"
+                } else {
+                    "guard_rowid"
+                };
+                let measure = crate::capture_phase::Measure::new(label);
+                let started = std::time::Instant::now();
+                for _ in 0..15_000 {
+                    let value: String = statement.query_row(["ws", "main"], |r| r.get(0)).unwrap();
+                    assert_eq!(value, "deferred");
+                }
+                let elapsed = (started.elapsed().as_nanos() / 15_000) as u64;
+                drop(measure);
+                crate::capture_phase::count(label, 15_000);
+                if is_after {
+                    after_ns.push(elapsed);
+                } else {
+                    before_ns.push(elapsed);
+                }
+            }
+        }
+        before_ns.sort();
+        after_ns.sort();
+        phase.field("before_rowid_ns_per_lookup", before_ns[3]);
+        phase.field("after_without_rowid_ns_per_lookup", after_ns[3]);
+        phase.field("lookups_per_trial", 15_000_u64);
+        phase.finish("measured");
+        eprintln!(
+            "TRIGGER_GUARD before_ns={} after_ns={} lookups_per_trial=15000 trials=6; SQL dispatch included",
+            before_ns[3], after_ns[3]
         );
     }
 
