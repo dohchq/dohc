@@ -106,7 +106,7 @@ describe("metadata-only access checks", () => {
     const h = await harness();
     h.fetchAccess.mockResolvedValue("view");
     h.narrow.mockImplementationOnce(async (_lease, _target, assertCurrent, commit) => {
-      assertCurrent(); commit(["docs/locked.md"], { paths: ["docs/automations.yaml"], unchecked: false, checked: 0 });
+      assertCurrent(); await commit(["docs/locked.md"], { paths: ["docs/automations.yaml"], unchecked: false, checked: 0 });
     });
     expect(await h.invoke(sharedViewAccessOperations.checkSharedViewAccess.channel, { workspaceId: "existing" })).toEqual({ status: "current", access: "view" });
     expect(h.workspace.shareView).toMatchObject({ grantedSelector: { access: "view" }, unsavedPaths: ["docs/locked.md"],

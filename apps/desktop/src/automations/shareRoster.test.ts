@@ -928,7 +928,7 @@ describe("a shared workspace forgotten and attached again", () => {
     await mkdir(join(root, ".dohc"));
     await recordNeverSynced(root);
     store.register({ workspaceId: WORKSPACE, rootPath: root, kind: "personal", mode: "local-first" });
-    recordSynced(root);
+    await recordSynced(root);
     store.setRemote(WORKSPACE, remote);
     const shared = await check();
     expect(shared.map((reach) => reach.allowed)).toEqual([false, false, true]);

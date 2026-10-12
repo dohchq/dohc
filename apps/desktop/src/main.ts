@@ -228,12 +228,12 @@ import {
   removeWorkspace as removeRegisteredWorkspace,
   setWorkspaceRemote,
   acknowledgeWorkspaceShareSkips,
-  setWorkspaceShareMounts,
+  updateWorkspaceShareMounts,
   markWorkspaceShareRosterPulled,
   setWorkspaceShareRoster,
   setWorkspaceAutomationHost,
   setWorkspaceShareView,
-  setWorkspaceSharedChannels,
+  updateWorkspaceSharedChannels,
   reconcileWorkspaceRecipientShares,
   stateDir,
 } from "./workspaces/WorkspaceRegistry";
@@ -305,6 +305,8 @@ import {
 } from "./workspaces/workspaceAuthorityOwner";
 import {
   type RegistryEntry,
+  type ShareMountRecord,
+  type ShareViewIdentity,
 } from "./workspaces/registryStore";
 import {
   readableShareLevel,
@@ -348,7 +350,7 @@ import {
   assertRealMountRoot,
   mountStoreWorkspaceIdFor,
   shareViewFilesMountProjection,
-  shareMountRecordsForId,
+  updateShareMountRecords,
   usableShareMountRecord,
 } from "./workspaces/shareMounts";
 import { createShareMountCommands } from "./workspaces/shareMountCommands";
@@ -1143,7 +1145,7 @@ const syncRecorded = new Set<string>();
 async function recordSyncedIfNeeded(workspace: RegistryEntry): Promise<void> {
   if (syncRecorded.has(workspace.workspaceId)) return;
   if (!existsSync(join(workspace.rootPath, ".dohc", "manifest.json"))) return;
-  if ((await readSyncHistory(workspace.rootPath)) !== "synced") recordSynced(workspace.rootPath);
+  if ((await readSyncHistory(workspace.rootPath)) !== "synced") await recordSynced(workspace.rootPath);
   syncRecorded.add(workspace.workspaceId);
 }
 
@@ -2062,7 +2064,7 @@ const {
   receivedShareEngine: {
     relayForRegistered: (workspace) => receivedShareEngine.relayForRegistered(workspace),
   },
-  setWorkspaceSharedChannels,
+  updateWorkspaceSharedChannels,
   notifyRenderer,
   projectPendingChatBookmarksAfterPull: projectPendingChatBookmarks,
   linkedChatStoreFor,
@@ -4928,11 +4930,11 @@ function createShareMountCommandsFor(
   return createShareMountCommands({
     readMounts: (workspaceId) =>
       storedShareMounts(findWorkspace(workspaceId) ?? {}),
-    writeMounts: (workspaceId, mounts) => {
+    updateMounts: async (workspaceId, update) => {
       if (workspaceId !== binding.workspaceId) {
         throw new Error("Share mount write targeted a different workspace.");
       }
-      setWorkspaceShareMounts(workspaceId, mounts);
+      await updateWorkspaceShareMounts(workspaceId, update);
     },
     loadCredentials: () => loadAndCacheCurrentCredentials(),
     fetchInfo: (relay, shareId) => fetchShareViewInfo({ relay, shareId }),
@@ -5063,29 +5065,19 @@ function createShareViewFilesForOperation(
     recordRefusals: async (target, refusals) => {
       const recorder =
         target.kind === "standalone"
-          ? createShareSkipRecorder({
-              current: () => currentWorkspace().shareView,
-              persist: (next) => {
-                assertCurrent();
-                setWorkspaceShareView(target.workspaceId, next);
+          ? createShareSkipRecorder<ShareViewIdentity>({
+              update: async (change) => {
+                const view = currentWorkspace().shareView;
+                if (!view) return;
+                await setWorkspaceShareView(target.workspaceId, change(view));
               },
             })
-          : createShareSkipRecorder({
-              current: () => {
-                const mounts = storedShareMounts(currentWorkspace());
-                return shareMountRecordsForId(mounts, target.shareId)[0];
-              },
-              persist: (next) => {
-                const mounts = storedShareMounts(currentWorkspace());
-                const matches = new Set(
-                  shareMountRecordsForId(mounts, target.shareId),
-                );
-                assertCurrent();
-                setWorkspaceShareMounts(
-                  target.workspaceId,
-                  mounts.map((mount) => (matches.has(mount) ? next : mount)),
-                );
-              },
+          : createShareSkipRecorder<ShareMountRecord>({
+              update: (change) =>
+                updateWorkspaceShareMounts(target.workspaceId, (mounts) => {
+                  assertCurrent();
+                  return updateShareMountRecords(mounts, target.shareId, change);
+                }),
             });
       await recorder([...refusals]);
     },
@@ -5093,7 +5085,7 @@ function createShareViewFilesForOperation(
       assertCurrent();
       const view = currentWorkspace().shareView;
       if (target.kind !== "standalone" || !view) throw new Error("This shared view is no longer registered.");
-      setWorkspaceShareView(target.workspaceId, { ...view, unsavedPaths: paths });
+      await setWorkspaceShareView(target.workspaceId, { ...view, unsavedPaths: paths });
       notifyRenderer({ workspaceId: target.workspaceId, summaryChanged: true });
     },
     markEnded: async (target, unsavedPaths, unconfirmedChanges) => {
@@ -5101,21 +5093,16 @@ function createShareViewFilesForOperation(
       if (target.kind === "standalone") {
         const view = currentWorkspace().shareView;
         if (!view) throw new Error("This shared view is no longer registered.");
-        setWorkspaceShareView(target.workspaceId, { ...view, ended: true,
+        await setWorkspaceShareView(target.workspaceId, { ...view, ended: true,
           ...(unsavedPaths !== undefined ? { unsavedPaths } : {}),
           ...(unconfirmedChanges !== undefined ? { unconfirmedChanges } : {}) });
         notifyRenderer({ workspaceId: target.workspaceId, summaryChanged: true });
         return;
       }
-      const mounts = storedShareMounts(currentWorkspace());
-      const matches = new Set(shareMountRecordsForId(mounts, target.shareId));
-      assertCurrent();
-      setWorkspaceShareMounts(
-        target.workspaceId,
-        mounts.map((mount) =>
-          matches.has(mount) ? { ...mount, ended: true } : mount,
-        ),
-      );
+      await updateWorkspaceShareMounts(target.workspaceId, (mounts) => {
+        assertCurrent();
+        return updateShareMountRecords(mounts, target.shareId, (mount) => ({ ...mount, ended: true }));
+      });
     },
     retireTarget: async (target) => {
       const retireTarget = workspaceSessionTargetForPhysicalWorkspace(
@@ -6001,8 +5988,8 @@ function registerIpcHandlers(): void {
     withPhysicalWorkspaceOperation, withRendererWorkspaceOperation, receivedShareEngine,
     readWorkspaceSecretState, readWorkspaceDataKeyForEnrollment, assertWritableWorkspace,
     relayClientForWorkspace, enrollWorkspaceKeyEnvelope, installWorkspaceDataKey,
-    setWorkspaceRemote: (workspaceId, remote) => {
-      setWorkspaceRemote(workspaceId, remote);
+    setWorkspaceRemote: async (workspaceId, remote) => {
+      await setWorkspaceRemote(workspaceId, remote);
       retryStopAndRestoreReleases?.();
     }, usableRoot, readdir, mkdir, probeRelayWorkspace,
     createJoinedWorkspace, bootstrapJoinedWorkspace, refreshNativeWorkspaceSurfaces,
@@ -6361,7 +6348,7 @@ function registerIpcHandlers(): void {
     warmCredentialCache,
     relayShareJsonWithCredentials,
     listWorkspaces,
-    setWorkspaceSharedChannels,
+    updateWorkspaceSharedChannels,
     relayClientForWorkspace,
     projectPendingChatBookmarksAfterPull: projectPendingChatBookmarks,
     normalizeServerUrl,

@@ -316,13 +316,13 @@ export async function reserveAndPullSharedChannel(input: {
   rootPath: string;
   recipientUserId: string;
   relayUrl: string;
-  readSharedChannels: (
+  // Stores `update` applied to the channels as they stand when written.
+  updateSharedChannels: (
     workspaceId: string,
-  ) => readonly JoinedSharedChannel[];
-  writeSharedChannels: (
-    workspaceId: string,
-    channels: JoinedSharedChannel[],
-  ) => void;
+    update: (
+      channels: readonly JoinedSharedChannel[],
+    ) => readonly JoinedSharedChannel[],
+  ) => Promise<void>;
   fetchInfo: (input: {
     relay: SyncRelayConnection;
     shareId: string;
@@ -339,6 +339,8 @@ export async function reserveAndPullSharedChannel(input: {
     run: () => Promise<void>,
   ) => Promise<void>;
   afterPull?: (workspaceId: string) => Promise<void>;
+  // Runs in the same step that stores the row, so a check here sees every
+  // workspace as the row lands. It may run twice; throwing stores nothing.
   preWrite?: (info: SharedChannelInfo) => void;
 }): Promise<JoinedSharedChannel> {
   const info = await input.fetchInfo({
@@ -356,11 +358,10 @@ export async function reserveAndPullSharedChannel(input: {
 
   // Record the row before the pull. The row is the write gate, and a pull is
   // durable: pulling first can import channel data without its access gate.
-  input.preWrite?.(info);
-  input.writeSharedChannels(
-    input.workspaceId,
-    mergeJoinedChannel(input.readSharedChannels(input.workspaceId), joined),
-  );
+  await input.updateSharedChannels(input.workspaceId, (channels) => {
+    input.preWrite?.(info);
+    return mergeJoinedChannel(channels, joined);
+  });
   // If a multi-page pull fails, keep the reserved row. Earlier pages can be
   // durable, and removing the row would remove their write gate.
   await input.serialize(input.workspaceId, async () => {
