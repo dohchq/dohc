@@ -1,3 +1,4 @@
+import { parseTab, TAB_KINDS } from "./workbenchState";
 import { describe, expect, it } from "vitest";
 import { SetWorkspaceUiStatePayload } from "../../ipc/bridgeContract";
 import {
@@ -12,9 +13,6 @@ import {
   closeEditorGroup,
   collectionTabPath,
   transactionalCollectionTabPath,
-  parseTransactionalCollectionTabPath,
-  isCollectionTabPath,
-  parseCollectionTabPath,
   createEditorGroupRight,
   defaultWorkbenchState,
   DEFAULT_EDITOR_GROUP_ID,
@@ -24,24 +22,11 @@ import {
   HISTORY_TAB_PATH,
   CHATS_TAB_PATH,
   chatTabPath,
-  parseChatTabPath,
-  isChatsTabPath,
-  isHistoryTabPath,
-  isMomentDiffTabPath,
   momentDiffTabPath,
-  parseMomentDiffTabPath,
-  isVersionCompareTabPath,
-  parseVersionCompareTabPath,
   versionCompareTabPath,
-  isSiteTabPath,
-  isSingletonEditorTabPath,
-  canonicalSingletonEditorTabPath,
   GRAPH_TAB_PATH,
-  isRemovedVirtualTabPath,
-  isVirtualTabPath,
   moveTab,
   openTab,
-  parseSiteTabPath,
   parseUiState,
   pruneMissingRestoredTabs,
   serializeUiState,
@@ -315,9 +300,9 @@ describe("tabs", () => {
     state = moveTabToNewGroup(state, DEFAULT_EDITOR_GROUP_ID, "a.md", "right");
     state = openTab(state, dm, "right");
     state = openTab(state, channel, "right");
-    expect(allTabs(state).filter((tab) => isChatsTabPath(tab.path)).map((tab) => tab.path)).toEqual([CHATS_TAB_PATH, channel, dm]);
+    expect(allTabs(state).filter((tab) => (parseTab(tab.path)?.kind === "chat")).map((tab) => tab.path)).toEqual([CHATS_TAB_PATH, channel, dm]);
     expect(state.activeEditorGroup).toBe(DEFAULT_EDITOR_GROUP_ID);
-    expect(parseChatTabPath(channel)).toEqual({ kind: "channel", id: "channel/with spaces" });
+    expect(parseTab(channel)).toMatchObject({ kind: "chat", target: { kind: "channel", id: "channel/with spaces" } });
     const restored = parseUiState(serializeUiState(state));
     expect(allTabs(restored).map((tab) => tab.path)).toEqual(allTabs(state).map((tab) => tab.path));
     expect(SetWorkspaceUiStatePayload.safeParse({ workspaceId: "workspace", state: serializeUiState(state) }).success).toBe(true);
@@ -555,38 +540,38 @@ describe("tabs", () => {
   });
 
   it("recognizes history as a virtual workbench tab", () => {
-    expect(isHistoryTabPath(HISTORY_TAB_PATH)).toBe(true);
-    expect(isVirtualTabPath(HISTORY_TAB_PATH)).toBe(true);
-    expect(isVirtualTabPath("notes/today.md")).toBe(false);
+    expect((parseTab(HISTORY_TAB_PATH)?.kind === "history")).toBe(true);
+    expect(TAB_KINDS[parseTab(HISTORY_TAB_PATH)?.kind ?? "removed"].virtual).toBe(true);
+    expect(TAB_KINDS[parseTab("notes/today.md")?.kind ?? "removed"].virtual).toBe(false);
   });
 
   it("recognizes chats as a virtual workbench tab", () => {
-    expect(isChatsTabPath(CHATS_TAB_PATH)).toBe(true);
-    expect(isChatsTabPath("tab://chats/extra")).toBe(false);
-    expect(isChatsTabPath(null)).toBe(false);
-    expect(isVirtualTabPath(CHATS_TAB_PATH)).toBe(true);
+    expect((parseTab(CHATS_TAB_PATH)?.kind === "chat")).toBe(true);
+    expect((parseTab("tab://chats/extra")?.kind === "chat")).toBe(false);
+    expect((parseTab(null)?.kind === "chat")).toBe(false);
+    expect(TAB_KINDS[parseTab(CHATS_TAB_PATH)?.kind ?? "removed"].virtual).toBe(true);
   });
 
   it("recognizes engine moment diffs by their encoded moment id", () => {
     const path = momentDiffTabPath("moment id/with strange chars");
-    expect(isMomentDiffTabPath(path)).toBe(true);
-    expect(isVirtualTabPath(path)).toBe(true);
-    expect(parseMomentDiffTabPath(path)).toBe("moment id/with strange chars");
-    expect(parseMomentDiffTabPath("tab://moment-diff/")).toBeNull();
-    expect(parseMomentDiffTabPath("tab://moment-diff/%ZZ")).toBeNull();
-    expect(parseMomentDiffTabPath("notes/today.md")).toBeNull();
-    expect(parseMomentDiffTabPath(null)).toBeNull();
+    expect((parseTab(path)?.kind === "momentDiff")).toBe(true);
+    expect(TAB_KINDS[parseTab(path)?.kind ?? "removed"].virtual).toBe(true);
+    expect(parseTab(path)).toMatchObject({ kind: "momentDiff", momentId: "moment id/with strange chars" });
+    expect(parseTab("tab://moment-diff/")).not.toMatchObject({ momentId: expect.any(String) });
+    expect(parseTab("tab://moment-diff/%ZZ")).not.toMatchObject({ momentId: expect.any(String) });
+    expect(parseTab("notes/today.md")).not.toMatchObject({ momentId: expect.any(String) });
+    expect(parseTab(null)).not.toMatchObject({ momentId: expect.any(String) });
   });
 
   it("recognizes collections as virtual tabs with encoded folder paths", () => {
     const path = collectionTabPath("projects/road trips");
-    expect(isCollectionTabPath(path)).toBe(true);
-    expect(isVirtualTabPath(path)).toBe(true);
-    expect(parseCollectionTabPath(path)).toBe("projects/road trips");
-    expect(parseCollectionTabPath("tab://collection/")).toBeNull();
-    expect(parseCollectionTabPath("tab://collection/%ZZ")).toBeNull();
-    expect(parseCollectionTabPath("notes/today.md")).toBeNull();
-    expect(parseCollectionTabPath(null)).toBeNull();
+    expect((parseTab(path)?.kind === "collection")).toBe(true);
+    expect(TAB_KINDS[parseTab(path)?.kind ?? "removed"].virtual).toBe(true);
+    expect(parseTab(path)).toMatchObject({ kind: "collection", collectionPath: "projects/road trips" });
+    expect(parseTab("tab://collection/")).not.toMatchObject({ collectionPath: expect.any(String) });
+    expect(parseTab("tab://collection/%ZZ")).not.toMatchObject({ collectionPath: expect.any(String) });
+    expect(parseTab("notes/today.md")).not.toMatchObject({ collectionPath: expect.any(String) });
+    expect(parseTab(null)).not.toMatchObject({ collectionPath: expect.any(String) });
   });
 
   it("persists and restores the largest multibyte moment identity", () => {
@@ -609,26 +594,26 @@ describe("tabs", () => {
 
   it("recognizes version compare pages as virtual tabs with encoded version ids", () => {
     const path = versionCompareTabPath("version id/with strange chars");
-    expect(isVersionCompareTabPath(path)).toBe(true);
-    expect(isVirtualTabPath(path)).toBe(true);
-    expect(parseVersionCompareTabPath(path)).toBe("version id/with strange chars");
-    expect(parseVersionCompareTabPath("tab://versions/compare/")).toBeNull();
-    expect(parseVersionCompareTabPath("tab://versions/compare/%ZZ")).toBeNull();
-    expect(parseVersionCompareTabPath("notes/today.md")).toBeNull();
-    expect(parseVersionCompareTabPath(null)).toBeNull();
+    expect((parseTab(path)?.kind === "versionCompare")).toBe(true);
+    expect(TAB_KINDS[parseTab(path)?.kind ?? "removed"].virtual).toBe(true);
+    expect(parseTab(path)).toMatchObject({ kind: "versionCompare", versionId: "version id/with strange chars" });
+    expect(parseTab("tab://versions/compare/")).not.toMatchObject({ versionId: expect.any(String) });
+    expect(parseTab("tab://versions/compare/%ZZ")).not.toMatchObject({ versionId: expect.any(String) });
+    expect(parseTab("notes/today.md")).not.toMatchObject({ versionId: expect.any(String) });
+    expect(parseTab(null)).not.toMatchObject({ versionId: expect.any(String) });
   });
 
   it("recognizes site previews as virtual tabs with encoded site roots", () => {
     const path = siteTabPath("clients/acme website");
-    expect(isSiteTabPath(path)).toBe(true);
-    expect(isVirtualTabPath(path)).toBe(true);
-    expect(parseSiteTabPath(path)).toBe("clients/acme website");
-    expect(parseSiteTabPath("tab://app/")).toBeNull();
-    expect(parseSiteTabPath(null)).toBeNull();
-    expect(parseSiteTabPath("not-a-site-path")).toBeNull();
+    expect((parseTab(path)?.kind === "site")).toBe(true);
+    expect(TAB_KINDS[parseTab(path)?.kind ?? "removed"].virtual).toBe(true);
+    expect(parseTab(path)).toMatchObject({ kind: "site", siteRoot: "clients/acme website" });
+    expect(parseTab("tab://app/")).not.toMatchObject({ siteRoot: expect.any(String) });
+    expect(parseTab(null)).not.toMatchObject({ siteRoot: expect.any(String) });
+    expect(parseTab("not-a-site-path")).not.toMatchObject({ siteRoot: expect.any(String) });
 
     const reservedRoot = "clients/site/nested?view=main#summary";
-    expect(parseSiteTabPath(siteTabPath(reservedRoot))).toBe(reservedRoot);
+    expect(parseTab(siteTabPath(reservedRoot))).toMatchObject({ kind: "site", siteRoot: reservedRoot });
   });
 
   it("refuses a virtual tab at the open-tab cap, which is what the shell reports", () => {
@@ -818,11 +803,11 @@ describe("ui-state persistence round-trip", () => {
       sitePath,
     ]);
     expect(restored.editorGroups[0]!.activeTab).toBe(sitePath);
-    expect(isRemovedVirtualTabPath(sitePath)).toBe(false);
-    expect(isRemovedVirtualTabPath(removedPath)).toBe(true);
-    expect(isRemovedVirtualTabPath(GRAPH_TAB_PATH)).toBe(false);
-    expect(isRemovedVirtualTabPath("notes/tab://app/a.md")).toBe(false);
-    expect(isRemovedVirtualTabPath("notes/a.md")).toBe(false);
+    expect((parseTab(sitePath)?.kind === "removed")).toBe(false);
+    expect((parseTab(removedPath)?.kind === "removed")).toBe(true);
+    expect((parseTab(GRAPH_TAB_PATH)?.kind === "removed")).toBe(false);
+    expect((parseTab("notes/tab://app/a.md")?.kind === "removed")).toBe(false);
+    expect((parseTab("notes/a.md")?.kind === "removed")).toBe(false);
   });
 
   it("restores the built-in Apps view", () => {
@@ -1515,7 +1500,7 @@ describe("pruneMissingRestoredTabs (restored tabs whose file is gone)", () => {
 it("uses the dataset.json address for Collection tabs and rejects old ID-only addresses", () => {
   const tableId = "00000000-0000-4000-8000-000000000002";
   const datasetPath = "旅行/Equipment list/dataset.json";
-  expect(parseTransactionalCollectionTabPath(transactionalCollectionTabPath(datasetPath, tableId))).toEqual({ datasetPath, tableId });
-  expect(parseTransactionalCollectionTabPath(transactionalCollectionTabPath("00000000-0000-4000-8000-000000000001", tableId))).toBeNull();
-  expect(parseTransactionalCollectionTabPath(transactionalCollectionTabPath("../dataset.json", tableId))).toBeNull();
+  expect(parseTab(transactionalCollectionTabPath(datasetPath, tableId))).toMatchObject({ kind: "transactionalCollection", datasetPath, tableId });
+  expect(parseTab(transactionalCollectionTabPath("00000000-0000-4000-8000-000000000001", tableId)).kind).toBe("removed");
+  expect(parseTab(transactionalCollectionTabPath("../dataset.json", tableId)).kind).toBe("removed");
 });

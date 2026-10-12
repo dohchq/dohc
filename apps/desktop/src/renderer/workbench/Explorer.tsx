@@ -1,3 +1,4 @@
+import { parseTab, TAB_KINDS } from "./workbenchState";
 import { FILE_KIND_RECORDS, fileKindForPath, type FileKindRecord } from "@dohc/workspace-contracts/kinds";
 import { useFocusSurface } from "../ui/focusReturn";
 import { DangerButton, SecondaryButton, SectionLabel } from "../ui/controls";
@@ -33,7 +34,6 @@ import type { WorkspaceFileEntry } from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
 import type { DraftFlush } from "../useAutosavedTextDraft";
 import { Overlay } from "../Overlay";
-import { momentDiffName } from "./EditorTabs";
 import { planDrop, type DragSource } from "./file-tree-dnd";
 import { navigateTree, type FlatRow } from "./file-tree-nav";
 import { withMarkdownDefault, withRenameDefault } from "./new-file-name";
@@ -46,18 +46,6 @@ import { buildTree, type TreeNode } from "./path-tree";
 import {
   type EditorGroup,
   clampOpenEditorsHeight,
-  isCollectionTabPath,
-  isChatsTabPath,
-  chatTabDefaultTitle,
-  isGraphTabPath,
-  isHistoryTabPath,
-  isMomentDiffTabPath,
-  isSiteTabPath,
-  isVersionCompareTabPath,
-  isVirtualTabPath,
-  parseCollectionTabPath,
-  parseTransactionalCollectionTabPath,
-  parseSiteTabPath,
 } from "./workbenchState";
 import { useCommitOnRelease } from "./useCommitOnRelease";
 import { ipcErrorMessage } from "../ipcError";
@@ -247,25 +235,15 @@ function resolveTypedPath(value: string, contextDir: string): string {
 }
 
 export function editorTitle(path: string, label?: string): string {
-  if (parseTransactionalCollectionTabPath(path)) return label ?? "Collection";
-  if (isChatsTabPath(path)) return label ?? chatTabDefaultTitle(path);
-  if (isGraphTabPath(path)) return "Graph";
-  if (isCollectionTabPath(path)) {
-    return basenameOf(parseCollectionTabPath(path) ?? "Collection");
-  }
-  if (isHistoryTabPath(path)) return "History";
-  if (isMomentDiffTabPath(path)) {
-    return momentDiffName(label);
-  }
-  if (isSiteTabPath(path)) return `App: ${parseSiteTabPath(path) ?? "preview"}`;
-  if (isVersionCompareTabPath(path)) return "Compare with Main";
-  return basenameOf(path);
+  const tab = parseTab(path);
+  return TAB_KINDS[tab.kind].explorerTitle(tab, label);
 }
 
 function OpenEditorIcon(props: { path: string; kind: WorkspaceFileEntry["kind"] | null; active: boolean }) {
   const tone = glyphTone(props.active);
-  if (isVirtualTabPath(props.path)) {
-    const Icon = isSiteTabPath(props.path) ? Globe2 : LayoutGrid;
+  const tab = parseTab(props.path);
+  if (TAB_KINDS[tab.kind].virtual) {
+    const Icon = tab.kind === "site" ? Globe2 : LayoutGrid;
     return <Icon size={GLYPH_SIZE} aria-hidden className={`shrink-0 ${tone}`} />;
   }
   return <KindGlyph kind={explorerFileKind(props.path, props.kind)} size={GLYPH_SIZE} className={tone} />;
@@ -824,7 +802,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
     const target =
       focusedPath ??
       selectedPath ??
-      (activeTab && !isVirtualTabPath(activeTab) ? activeTab : null);
+      (activeTab && !TAB_KINDS[parseTab(activeTab)?.kind ?? "removed"].virtual ? activeTab : null);
     if (!target) return "";
     return isFolderPath(target) ? target : dirnameOf(target);
   }, [activeTab, focusedPath, isFolderPath, selection]);
