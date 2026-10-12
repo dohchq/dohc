@@ -5,6 +5,20 @@ import { DatasetPermissionsPage } from "@dohc/cli/dataset";
 import { createAccessQuery, decodeAccessCursor, encodeAccessCursor, unknownAccess } from "./accessQuery";
 import type { RosterObservation } from "../automations/shareRoster";
 import type { ReceivedObservation } from "../workspaces/receivedShareStore";
+import type { CloudCredentials } from "../workspaces/cloudCredentialStore";
+import type { RegistryEntry } from "../workspaces/registryStore";
+import { workspaceRemoteMatchesCredentials } from "../workspaces/chatRelayIdentity";
+
+export function ownerAccessRoster(
+  workspace: Pick<RegistryEntry, "workspaceId" | "remote" | "shareView">,
+  credentials: CloudCredentials | null,
+  observation: (workspaceId: string) => RosterObservation,
+): RosterObservation {
+  // The server/account matcher ignores relayUrl; a missing relay must stay unknown, matching account().
+  if (workspace.shareView || !workspace.remote || !credentials?.relayUrl ||
+      !workspaceRemoteMatchesCredentials(workspace.remote, credentials)) return { listing: null, checkedAtMs: null, freshness: "unknown" };
+  return observation(workspace.workspaceId);
+}
 
 export type ResolvedAccessObject = { ref: AccessObjectRef; visibility: "visible" | "hidden" | "missing" | "unknown";
   shareId?: string; shareRoot?: boolean; ended?: boolean; relayUrl?: string; recipientUserId?: string; recipientEmail?: string | null };
