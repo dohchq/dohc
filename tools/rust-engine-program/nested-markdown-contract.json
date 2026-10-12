@@ -1,0 +1,265 @@
+{
+  "cases": [
+    {
+      "canonical": "- [x] \n- [ ]",
+      "name": "empty-task-root",
+      "rustBase64": "AQiB7aamgvWMBwAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5Awh0YXNrTGlzdAcAge2mpoL1jAcBAwh0YXNrSXRlbSgAge2mpoL1jAcCB2NoZWNrZWQBeAcAge2mpoL1jAcCAwlwYXJhZ3JhcGiHge2mpoL1jAcCAwh0YXNrSXRlbSgAge2mpoL1jAcFB2NoZWNrZWQBeQcAge2mpoL1jAcFAwlwYXJhZ3JhcGgA",
+      "source": "- [X]\n- [ ]\n"
+    },
+    {
+      "canonical": "- [x] parent\n  - [x]",
+      "name": "empty-task-nested",
+      "rustBase64": "AQuj2Lf50cWpBgAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5Awh0YXNrTGlzdAcAo9i3+dHFqQYBAwh0YXNrSXRlbSgAo9i3+dHFqQYCB2NoZWNrZWQBeAcAo9i3+dHFqQYCAwlwYXJhZ3JhcGgHAKPYt/nRxakGBAYEAKPYt/nRxakGBQZwYXJlbnSHo9i3+dHFqQYEAwh0YXNrTGlzdAcAo9i3+dHFqQYMAwh0YXNrSXRlbSgAo9i3+dHFqQYNB2NoZWNrZWQBeAcAo9i3+dHFqQYNAwlwYXJhZ3JhcGgA",
+      "source": "- [x] parent\n  - [X]\n"
+    },
+    {
+      "canonical": "1. \n   ```js\n   x()\n   ```",
+      "name": "ordered-fence-first-in-item",
+      "rustBase64": "AQnyx+zRhaLiDAAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwtvcmRlcmVkTGlzdCgA8sfs0YWi4gwBBXN0YXJ0AX0BBwDyx+zRhaLiDAEDCGxpc3RJdGVtBwDyx+zRhaLiDAMDCXBhcmFncmFwaIfyx+zRhaLiDAQDCWNvZGVCbG9jaygA8sfs0YWi4gwFCGxhbmd1YWdlAXcCanMHAPLH7NGFouIMBQYEAPLH7NGFouIMBwN4KCkA",
+      "source": "1. ```js\n   x()\n   ```\n"
+    },
+    {
+      "canonical": "- a\n- b",
+      "name": "flat",
+      "rustBase64": "AQqt3NXGlobTBwAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwCt3NXGlobTBwEDCGxpc3RJdGVtBwCt3NXGlobTBwIDCXBhcmFncmFwaAcArdzVxpaG0wcDBgQArdzVxpaG0wcEAWGHrdzVxpaG0wcCAwhsaXN0SXRlbQcArdzVxpaG0wcGAwlwYXJhZ3JhcGgHAK3c1caWhtMHBwYEAK3c1caWhtMHCAFiAA==",
+      "source": "- a\n- b\n"
+    },
+    {
+      "canonical": "- a\n  - b",
+      "name": "bullet-two",
+      "rustBase64": "AQu22ITgmv3pAgAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwC22ITgmv3pAgEDCGxpc3RJdGVtBwC22ITgmv3pAgIDCXBhcmFncmFwaAcAttiE4Jr96QIDBgQAttiE4Jr96QIEAWGHttiE4Jr96QIDAwpidWxsZXRMaXN0BwC22ITgmv3pAgYDCGxpc3RJdGVtBwC22ITgmv3pAgcDCXBhcmFncmFwaAcAttiE4Jr96QIIBgQAttiE4Jr96QIJAWIA",
+      "source": "+ a\n  * b\n"
+    },
+    {
+      "canonical": "- a\n  - b",
+      "name": "bullet-four",
+      "rustBase64": "AQuVt8Oa0NzBCAAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwCVt8Oa0NzBCAEDCGxpc3RJdGVtBwCVt8Oa0NzBCAIDCXBhcmFncmFwaAcAlbfDmtDcwQgDBgQAlbfDmtDcwQgEAWGHlbfDmtDcwQgDAwpidWxsZXRMaXN0BwCVt8Oa0NzBCAYDCGxpc3RJdGVtBwCVt8Oa0NzBCAcDCXBhcmFncmFwaAcAlbfDmtDcwQgIBgQAlbfDmtDcwQgJAWIA",
+      "source": "* a\n    + b"
+    },
+    {
+      "canonical": "1. a\n   - b",
+      "name": "ordered-three",
+      "rustBase64": "AQy4zPOuh7LCBAAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwtvcmRlcmVkTGlzdCgAuMzzroeywgQBBXN0YXJ0AX0BBwC4zPOuh7LCBAEDCGxpc3RJdGVtBwC4zPOuh7LCBAMDCXBhcmFncmFwaAcAuMzzroeywgQEBgQAuMzzroeywgQFAWGHuMzzroeywgQEAwpidWxsZXRMaXN0BwC4zPOuh7LCBAcDCGxpc3RJdGVtBwC4zPOuh7LCBAgDCXBhcmFncmFwaAcAuMzzroeywgQJBgQAuMzzroeywgQKAWIA",
+      "source": "1. a\n   - b\n"
+    },
+    {
+      "canonical": "3. a\n   1. b\n   2. c\n4. d",
+      "name": "ordered-four",
+      "rustBase64": "ARW+lOX5jKTdCwAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwtvcmRlcmVkTGlzdCgAvpTl+Yyk3QsBBXN0YXJ0AX0DBwC+lOX5jKTdCwEDCGxpc3RJdGVtBwC+lOX5jKTdCwMDCXBhcmFncmFwaAcAvpTl+Yyk3QsEBgQAvpTl+Yyk3QsFAWGHvpTl+Yyk3QsEAwtvcmRlcmVkTGlzdCgAvpTl+Yyk3QsHBXN0YXJ0AX0BBwC+lOX5jKTdCwcDCGxpc3RJdGVtBwC+lOX5jKTdCwkDCXBhcmFncmFwaAcAvpTl+Yyk3QsKBgQAvpTl+Yyk3QsLAWKHvpTl+Yyk3QsJAwhsaXN0SXRlbQcAvpTl+Yyk3QsNAwlwYXJhZ3JhcGgHAL6U5fmMpN0LDgYEAL6U5fmMpN0LDwFjh76U5fmMpN0LAwMIbGlzdEl0ZW0HAL6U5fmMpN0LEQMJcGFyYWdyYXBoBwC+lOX5jKTdCxIGBAC+lOX5jKTdCxMBZAA=",
+      "source": "3) a\n    1) b\n    7) c\n9) d"
+    },
+    {
+      "canonical": "10. a\n    - b",
+      "name": "wide-ordered",
+      "rustBase64": "AQycnKKugqbqDgAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwtvcmRlcmVkTGlzdCgAnJyiroKm6g4BBXN0YXJ0AX0KBwCcnKKugqbqDgEDCGxpc3RJdGVtBwCcnKKugqbqDgMDCXBhcmFncmFwaAcAnJyiroKm6g4EBgQAnJyiroKm6g4FAWGHnJyiroKm6g4EAwpidWxsZXRMaXN0BwCcnKKugqbqDgcDCGxpc3RJdGVtBwCcnKKugqbqDggDCXBhcmFncmFwaAcAnJyiroKm6g4JBgQAnJyiroKm6g4KAWIA",
+      "source": "10. a\n    - b"
+    },
+    {
+      "canonical": "- [x] a\n  - [x] b\n  - [ ] c",
+      "name": "task-casing",
+      "rustBase64": "ARLeur+ejYfACAAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5Awh0YXNrTGlzdAcA3rq/no2HwAgBAwh0YXNrSXRlbSgA3rq/no2HwAgCB2NoZWNrZWQBeAcA3rq/no2HwAgCAwlwYXJhZ3JhcGgHAN66v56Nh8AIBAYEAN66v56Nh8AIBQFhh966v56Nh8AIBAMIdGFza0xpc3QHAN66v56Nh8AIBwMIdGFza0l0ZW0oAN66v56Nh8AICAdjaGVja2VkAXgHAN66v56Nh8AICAMJcGFyYWdyYXBoBwDeur+ejYfACAoGBADeur+ejYfACAsBYofeur+ejYfACAgDCHRhc2tJdGVtKADeur+ejYfACA0HY2hlY2tlZAF5BwDeur+ejYfACA0DCXBhcmFncmFwaAcA3rq/no2HwAgPBgQA3rq/no2HwAgQAWMA",
+      "source": "- [X] a\n  - [x] b\n  - [ ] c"
+    },
+    {
+      "canonical": "- a\n  1. b\n     - [x] c\n       - d",
+      "name": "mixed",
+      "rustBase64": "ARe8wYGT0tiCAQAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwC8wYGT0tiCAQEDCGxpc3RJdGVtBwC8wYGT0tiCAQIDCXBhcmFncmFwaAcAvMGBk9LYggEDBgQAvMGBk9LYggEEAWGHvMGBk9LYggEDAwtvcmRlcmVkTGlzdCgAvMGBk9LYggEGBXN0YXJ0AX0BBwC8wYGT0tiCAQYDCGxpc3RJdGVtBwC8wYGT0tiCAQgDCXBhcmFncmFwaAcAvMGBk9LYggEJBgQAvMGBk9LYggEKAWKHvMGBk9LYggEJAwh0YXNrTGlzdAcAvMGBk9LYggEMAwh0YXNrSXRlbSgAvMGBk9LYggENB2NoZWNrZWQBeAcAvMGBk9LYggENAwlwYXJhZ3JhcGgHALzBgZPS2IIBDwYEALzBgZPS2IIBEAFjh7zBgZPS2IIBDwMKYnVsbGV0TGlzdAcAvMGBk9LYggESAwhsaXN0SXRlbQcAvMGBk9LYggETAwlwYXJhZ3JhcGgHALzBgZPS2IIBFAYEALzBgZPS2IIBFQFkAA==",
+      "source": "- a\n  1) b\n     + [X] c\n       * d\n"
+    },
+    {
+      "canonical": "- a\n  - b\n- c",
+      "name": "loose-space-blank",
+      "rustBase64": "AQ/llvuPkJXFAQAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwDllvuPkJXFAQEDCGxpc3RJdGVtBwDllvuPkJXFAQIDCXBhcmFncmFwaAcA5Zb7j5CVxQEDBgQA5Zb7j5CVxQEEAWGH5Zb7j5CVxQEDAwpidWxsZXRMaXN0BwDllvuPkJXFAQYDCGxpc3RJdGVtBwDllvuPkJXFAQcDCXBhcmFncmFwaAcA5Zb7j5CVxQEIBgQA5Zb7j5CVxQEJAWKH5Zb7j5CVxQECAwhsaXN0SXRlbQcA5Zb7j5CVxQELAwlwYXJhZ3JhcGgHAOWW+4+QlcUBDAYEAOWW+4+QlcUBDQFjAA==",
+      "source": "- a\n   \n  - b\n \n- c\n"
+    },
+    {
+      "canonical": "- a\ncontinued\n- b",
+      "name": "lazy-continuation",
+      "rustBase64": "AQq0i4KJhqkoACgBBG1ldGENc2NoZW1hVmVyc2lvbgF9AQcBBGJvZHkDCmJ1bGxldExpc3QHALSLgomGqSgBAwhsaXN0SXRlbQcAtIuCiYapKAIDCXBhcmFncmFwaAcAtIuCiYapKAMGBAC0i4KJhqkoBAthCmNvbnRpbnVlZIe0i4KJhqkoAgMIbGlzdEl0ZW0HALSLgomGqSgQAwlwYXJhZ3JhcGgHALSLgomGqSgRBgQAtIuCiYapKBIBYgA=",
+      "source": "- a\ncontinued\n- b"
+    },
+    {
+      "canonical": "1. a\n\n   next paragraph\n2. b",
+      "name": "ordered-continuation",
+      "rustBase64": "AQ66sd7Pn6GFBQAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwtvcmRlcmVkTGlzdCgAurHez5+hhQUBBXN0YXJ0AX0BBwC6sd7Pn6GFBQEDCGxpc3RJdGVtBwC6sd7Pn6GFBQMDCXBhcmFncmFwaAcAurHez5+hhQUEBgQAurHez5+hhQUFAWGHurHez5+hhQUEAwlwYXJhZ3JhcGgHALqx3s+foYUFBwYEALqx3s+foYUFCA5uZXh0IHBhcmFncmFwaIe6sd7Pn6GFBQMDCGxpc3RJdGVtBwC6sd7Pn6GFBRcDCXBhcmFncmFwaAcAurHez5+hhQUYBgQAurHez5+hhQUZAWIA",
+      "source": "1. a\n \n   next paragraph\n2. b"
+    },
+    {
+      "canonical": "1. a\n   ```ts\n   x()\n   ```",
+      "name": "fence-in-item",
+      "rustBase64": "AQuCu+uwt/z4CwAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwtvcmRlcmVkTGlzdCgAgrvrsLf8+AsBBXN0YXJ0AX0BBwCCu+uwt/z4CwEDCGxpc3RJdGVtBwCCu+uwt/z4CwMDCXBhcmFncmFwaAcAgrvrsLf8+AsEBgQAgrvrsLf8+AsFAWGHgrvrsLf8+AsEAwljb2RlQmxvY2soAIK767C3/PgLBwhsYW5ndWFnZQF3AnRzBwCCu+uwt/z4CwcGBACCu+uwt/z4CwkDeCgpAA==",
+      "source": "1. a\n   ```ts\n   x()\n   ```\n"
+    },
+    {
+      "canonical": "- a\n  > quoted\n  >\n  > - b",
+      "name": "quote-in-item",
+      "rustBase64": "AQ/tkez2yufKDAAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwDtkez2yufKDAEDCGxpc3RJdGVtBwDtkez2yufKDAIDCXBhcmFncmFwaAcA7ZHs9srnygwDBgQA7ZHs9srnygwEAWGH7ZHs9srnygwDAwpibG9ja3F1b3RlBwDtkez2yufKDAYDCXBhcmFncmFwaAcA7ZHs9srnygwHBgQA7ZHs9srnygwIBnF1b3RlZIftkez2yufKDAcDCmJ1bGxldExpc3QHAO2R7PbK58oMDwMIbGlzdEl0ZW0HAO2R7PbK58oMEAMJcGFyYWdyYXBoBwDtkez2yufKDBEGBADtkez2yufKDBIBYgA=",
+      "source": "- a\n  > quoted\n  > - b\n"
+    },
+    {
+      "canonical": "- a\n  \n  | x   | y   |\n  | --- | --- |\n  | b   | c   |",
+      "name": "table-in-item",
+      "rustBase64": "ASHZu+ejgqnkDQAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwDZu+ejgqnkDQEDCGxpc3RJdGVtBwDZu+ejgqnkDQIDCXBhcmFncmFwaAcA2bvno4Kp5A0DBgQA2bvno4Kp5A0EAWGH2bvno4Kp5A0DAwV0YWJsZQcA2bvno4Kp5A0GAwh0YWJsZVJvdwcA2bvno4Kp5A0HAwt0YWJsZUhlYWRlcigA2bvno4Kp5A0IB2NvbHNwYW4BfQEoANm756OCqeQNCAdyb3dzcGFuAX0BBwDZu+ejgqnkDQgDCXBhcmFncmFwaAcA2bvno4Kp5A0LBgQA2bvno4Kp5A0MAXiH2bvno4Kp5A0IAwt0YWJsZUhlYWRlcigA2bvno4Kp5A0OB2NvbHNwYW4BfQEoANm756OCqeQNDgdyb3dzcGFuAX0BBwDZu+ejgqnkDQ4DCXBhcmFncmFwaAcA2bvno4Kp5A0RBgQA2bvno4Kp5A0SAXmH2bvno4Kp5A0HAwh0YWJsZVJvdwcA2bvno4Kp5A0UAwl0YWJsZUNlbGwoANm756OCqeQNFQdjb2xzcGFuAX0BKADZu+ejgqnkDRUHcm93c3BhbgF9AQcA2bvno4Kp5A0VAwlwYXJhZ3JhcGgHANm756OCqeQNGAYEANm756OCqeQNGQFih9m756OCqeQNFQMJdGFibGVDZWxsKADZu+ejgqnkDRsHY29sc3BhbgF9ASgA2bvno4Kp5A0bB3Jvd3NwYW4BfQEHANm756OCqeQNGwMJcGFyYWdyYXBoBwDZu+ejgqnkDR4GBADZu+ejgqnkDR8BYwA=",
+      "source": "- a\n\n  | x | y |\n  |---|---|\n  | b | c |\n"
+    },
+    {
+      "canonical": "1. a\r\n   - b",
+      "name": "crlf",
+      "rustBase64": "AQ2xv+/41IHACAAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEoAQRtZXRhEGRvaGNNYXJrZG93bkNybGYBeAcBBGJvZHkDC29yZGVyZWRMaXN0KACxv+/41IHACAIFc3RhcnQBfQEHALG/7/jUgcAIAgMIbGlzdEl0ZW0HALG/7/jUgcAIBAMJcGFyYWdyYXBoBwCxv+/41IHACAUGBACxv+/41IHACAYBYYexv+/41IHACAUDCmJ1bGxldExpc3QHALG/7/jUgcAICAMIbGlzdEl0ZW0HALG/7/jUgcAICQMJcGFyYWdyYXBoBwCxv+/41IHACAoGBACxv+/41IHACAsBYgA=",
+      "source": "1. a\r\n   - b\r\n"
+    },
+    {
+      "name": "ordered-one-space",
+      "refuse": true,
+      "source": "1. a\n - b"
+    },
+    {
+      "name": "ordered-two-spaces",
+      "refuse": true,
+      "source": "1. a\n  - b"
+    },
+    {
+      "name": "ordered-blank-under-indent",
+      "refuse": true,
+      "source": "1. a\n\n  next paragraph"
+    },
+    {
+      "name": "letter-item",
+      "refuse": true,
+      "source": "1. a\n   a. b"
+    },
+    {
+      "name": "roman-item",
+      "refuse": true,
+      "source": "1. a\n   iv) b"
+    },
+    {
+      "name": "tab-item",
+      "refuse": true,
+      "source": "- a\n\t- b"
+    },
+    {
+      "name": "tilde-fence",
+      "refuse": true,
+      "source": "- a\n  ~~~\n  b\n  ~~~"
+    },
+    {
+      "name": "star-rule",
+      "refuse": true,
+      "source": "- a\n\n  ***"
+    },
+    {
+      "name": "underscore-rule",
+      "refuse": true,
+      "source": "- a\n\n  ___"
+    },
+    {
+      "name": "root-letter-marker",
+      "refuse": true,
+      "source": "a. child"
+    },
+    {
+      "name": "root-roman-marker",
+      "refuse": true,
+      "source": "iv) child"
+    },
+    {
+      "canonical": "- item\n  - item\n    - item\n      - item\n        - item\n          - item\n            - item\n              - item\n                - item\n                  - item\n                    - item\n                      - item\n                        - item\n                          - item\n                            - item\n                              - item\n                                - item\n                                  - item\n                                    - item\n                                      - item\n                                        - item\n                                          - item\n                                            - item\n                                              - item\n                                                - item\n                                                  - item\n                                                    - item\n                                                      - item\n                                                        - item\n                                                          - item\n                                                            - item\n                                                              - item\n                                                                - item\n                                                                  - item\n                                                                    - item\n                                                                      - item\n                                                                        - item\n                                                                          - item\n                                                                            - item\n                                                                              - item\n                                                                                - item\n                                                                                  - item\n                                                                                    - item\n                                                                                      - item\n                                                                                        - item\n                                                                                          - item\n                                                                                            - item\n                                                                                              - item\n                                                                                                - item\n                                                                                                  - item\n                                                                                                    - item\n                                                                                                      - item\n                                                                                                        - item\n                                                                                                          - item\n                                                                                                            - item\n                                                                                                              - item\n                                                                                                                - item\n                                                                                                                  - item\n                                                                                                                    - item\n                                                                                                                      - item\n                                                                                                                        > quoted",
+      "name": "quote-after-lists",
+      "rustBase64": "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",
+      "source": "- item\n  - item\n    - item\n      - item\n        - item\n          - item\n            - item\n              - item\n                - item\n                  - item\n                    - item\n                      - item\n                        - item\n                          - item\n                            - item\n                              - item\n                                - item\n                                  - item\n                                    - item\n                                      - item\n                                        - item\n                                          - item\n                                            - item\n                                              - item\n                                                - item\n                                                  - item\n                                                    - item\n                                                      - item\n                                                        - item\n                                                          - item\n                                                            - item\n                                                              - item\n                                                                - item\n                                                                  - item\n                                                                    - item\n                                                                      - item\n                                                                        - item\n                                                                          - item\n                                                                            - item\n                                                                              - item\n                                                                                - item\n                                                                                  - item\n                                                                                    - item\n                                                                                      - item\n                                                                                        - item\n                                                                                          - item\n                                                                                            - item\n                                                                                              - item\n                                                                                                - item\n                                                                                                  - item\n                                                                                                    - item\n                                                                                                      - item\n                                                                                                        - item\n                                                                                                          - item\n                                                                                                            - item\n                                                                                                              - item\n                                                                                                                - item\n                                                                                                                  - item\n                                                                                                                    - item\n                                                                                                                      - item\n                                                                                                                        > quoted\n"
+    },
+    {
+      "canonical": "0. a\n   - b",
+      "name": "ordered-zero",
+      "rustBase64": "AQyx+YyKme7hBwAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwtvcmRlcmVkTGlzdCgAsfmMipnu4QcBBXN0YXJ0AX0ABwCx+YyKme7hBwEDCGxpc3RJdGVtBwCx+YyKme7hBwMDCXBhcmFncmFwaAcAsfmMipnu4QcEBgQAsfmMipnu4QcFAWGHsfmMipnu4QcEAwpidWxsZXRMaXN0BwCx+YyKme7hBwcDCGxpc3RJdGVtBwCx+YyKme7hBwgDCXBhcmFncmFwaAcAsfmMipnu4QcJBgQAsfmMipnu4QcKAWIA",
+      "source": "0) a\n   - b\n"
+    },
+    {
+      "canonical": "- [x] a\n\n- [ ] b\n\n- [x] c",
+      "name": "task-marker-changes",
+      "rustBase64": "ARO+kOfr2ubMDwAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5Awh0YXNrTGlzdAcAvpDn69rmzA8BAwh0YXNrSXRlbSgAvpDn69rmzA8CB2NoZWNrZWQBeAcAvpDn69rmzA8CAwlwYXJhZ3JhcGgHAL6Q5+va5swPBAYEAL6Q5+va5swPBQFhh76Q5+va5swPAQMIdGFza0xpc3QHAL6Q5+va5swPBwMIdGFza0l0ZW0oAL6Q5+va5swPCAdjaGVja2VkAXkHAL6Q5+va5swPCAMJcGFyYWdyYXBoBwC+kOfr2ubMDwoGBAC+kOfr2ubMDwsBYoe+kOfr2ubMDwcDCHRhc2tMaXN0BwC+kOfr2ubMDw0DCHRhc2tJdGVtKAC+kOfr2ubMDw4HY2hlY2tlZAF4BwC+kOfr2ubMDw4DCXBhcmFncmFwaAcAvpDn69rmzA8QBgQAvpDn69rmzA8RAWMA",
+      "source": "- [x] a\n* [ ] b\n+ [X] c\n"
+    },
+    {
+      "canonical": "1. a\n\n2. b",
+      "name": "ordered-delimiter-change",
+      "rustBase64": "AQ2SnJnSgN+0CgAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwtvcmRlcmVkTGlzdCgAkpyZ0oDftAoBBXN0YXJ0AX0BBwCSnJnSgN+0CgEDCGxpc3RJdGVtBwCSnJnSgN+0CgMDCXBhcmFncmFwaAcAkpyZ0oDftAoEBgQAkpyZ0oDftAoFAWGHkpyZ0oDftAoBAwtvcmRlcmVkTGlzdCgAkpyZ0oDftAoHBXN0YXJ0AX0CBwCSnJnSgN+0CgcDCGxpc3RJdGVtBwCSnJnSgN+0CgkDCXBhcmFncmFwaAcAkpyZ0oDftAoKBgQAkpyZ0oDftAoLAWIA",
+      "source": "1. a\n2) b\n"
+    },
+    {
+      "name": "tab-after-marker",
+      "refuse": true,
+      "source": "-\titem\n"
+    },
+    {
+      "name": "tab-item-padding",
+      "refuse": true,
+      "source": "- a\n-  \tb\n"
+    },
+    {
+      "canonical": "- \n  ```js\n  i. not a list\n  ```",
+      "name": "fence-first-in-item",
+      "rustBase64": "AQjYyeXXxNSdDgAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwDYyeXXxNSdDgEDCGxpc3RJdGVtBwDYyeXXxNSdDgIDCXBhcmFncmFwaIfYyeXXxNSdDgMDCWNvZGVCbG9jaygA2Mnl18TUnQ4ECGxhbmd1YWdlAXcCanMHANjJ5dfE1J0OBAYEANjJ5dfE1J0OBg1pLiBub3QgYSBsaXN0AA==",
+      "source": "- ```js\n  i. not a list\n  ```\n"
+    },
+    {
+      "name": "tilde-in-item",
+      "refuse": true,
+      "source": "- ~~~\n  hidden\n"
+    },
+    {
+      "name": "quotes-in-deep-item",
+      "refuse": true,
+      "source": "- item\n  - item\n    - item\n      - item\n        - item\n          - item\n            - item\n              - item\n                - item\n                  - item\n                    - item\n                      - item\n                        - item\n                          - item\n                            - item\n                              - item\n                                - item\n                                  - item\n                                    - item\n                                      - item\n                                        - item\n                                          - item\n                                            - item\n                                              - item\n                                                - item\n                                                  - item\n                                                    - item\n                                                      - item\n                                                        - item\n                                                          - item\n                                                            - item\n                                                              - item\n                                                                - item\n                                                                  - item\n                                                                    - item\n                                                                      - item\n                                                                        - item\n                                                                          - item\n                                                                            - item\n                                                                              - item\n                                                                                - item\n                                                                                  - item\n                                                                                    - item\n                                                                                      - item\n                                                                                        - item\n                                                                                          - item\n                                                                                            - item\n                                                                                              - item\n                                                                                                - item\n                                                                                                  - item\n                                                                                                    - item\n                                                                                                      - item\n                                                                                                        - item\n                                                                                                          - item\n                                                                                                            - item\n                                                                                                              - item\n                                                                                                                - item\n                                                                                                                  - item\n                                                                                                                    - item\n                                                                                                                      - item\n                                                                                                                        - item\n                                                                                                                          - item\n                                                                                                                            - > > > > quoted\n"
+    },
+    {
+      "name": "quote-overflow",
+      "refuse": true,
+      "source": "> > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > item\n"
+    },
+    {
+      "name": "ordered-checkbox",
+      "refuse": true,
+      "source": "1. [x] task\n"
+    },
+    {
+      "name": "ordered-checkbox-sibling",
+      "refuse": true,
+      "source": "1. plain\n2. [X] task\n"
+    },
+    {
+      "canonical": "---\nid: nested-record\n---\n\n- parent\n  - child",
+      "name": "collection-record",
+      "rustBase64": "AQzMuJX1xa+EDwAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEoAQtmcm9udG1hdHRlcgJpZAF3DW5lc3RlZC1yZWNvcmQHAQRib2R5AwpidWxsZXRMaXN0BwDMuJX1xa+EDwIDCGxpc3RJdGVtBwDMuJX1xa+EDwMDCXBhcmFncmFwaAcAzLiV9cWvhA8EBgQAzLiV9cWvhA8FBnBhcmVudIfMuJX1xa+EDwQDCmJ1bGxldExpc3QHAMy4lfXFr4QPDAMIbGlzdEl0ZW0HAMy4lfXFr4QPDQMJcGFyYWdyYXBoBwDMuJX1xa+EDw4GBADMuJX1xa+EDw8FY2hpbGQA",
+      "source": "---\nid: nested-record\n---\n\n+ parent\n  - child\n"
+    },
+    {
+      "name": "task-checkbox-tab",
+      "refuse": true,
+      "source": "- normal\n- [X]\ttask\n"
+    },
+    {
+      "canonical": "- \n  1. child\n- sibling",
+      "name": "ordered-first-in-bullet",
+      "rustBase64": "AQ78lsDDhp/lCAAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwD8lsDDhp/lCAEDCGxpc3RJdGVtBwD8lsDDhp/lCAIDCXBhcmFncmFwaIf8lsDDhp/lCAMDC29yZGVyZWRMaXN0KAD8lsDDhp/lCAQFc3RhcnQBfQEHAPyWwMOGn+UIBAMIbGlzdEl0ZW0HAPyWwMOGn+UIBgMJcGFyYWdyYXBoBwD8lsDDhp/lCAcGBAD8lsDDhp/lCAgFY2hpbGSH/JbAw4af5QgCAwhsaXN0SXRlbQcA/JbAw4af5QgOAwlwYXJhZ3JhcGgHAPyWwMOGn+UIDwYEAPyWwMOGn+UIEAdzaWJsaW5nAA==",
+      "source": "- 1. child\n- sibling\n"
+    },
+    {
+      "name": "letter-first-in-bullet",
+      "refuse": true,
+      "source": "- a. child\n- sibling\n"
+    },
+    {
+      "name": "underscore-rule-first-in-bullet",
+      "refuse": true,
+      "source": "- ___\n- sibling\n"
+    },
+    {
+      "name": "ordered-checkbox-first-in-bullet",
+      "refuse": true,
+      "source": "- 1. [x] task\n- sibling\n"
+    }
+  ],
+  "rules": "Blank lines contain only spaces or tabs. Same-kind siblings across blanks form one loose list. An indented line after a blank starts another item paragraph; a nonblank unindented line can lazily continue the current paragraph. Children must reach their parent's marker content column. Task checkboxes are content after a two-column bullet marker."
+}

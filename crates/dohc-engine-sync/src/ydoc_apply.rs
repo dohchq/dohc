@@ -2692,9 +2692,16 @@ fn fold_projected_complete_ydoc_lineage_in_tx(
             )?;
             recovered_sibling = true;
         }
-        let mut update = doc
-            .rewrite_content_to_markdown_for_fold(marker.content_kind, chosen_text)
-            .map_err(map_fold_edit_error)?;
+        let mut update =
+            match doc.rewrite_content_to_markdown_for_fold(marker.content_kind, chosen_text) {
+                Err(CollabError::MarkdownNotRepresentable)
+                    if pristine_empty && empty_seed_never_replicated_in_tx(tx, key)? =>
+                {
+                    retire_complete_ydoc_lineage_in_tx(tx, complete)?;
+                    return Ok(LineageFold::NoContent);
+                }
+                result => result.map_err(map_fold_edit_error)?,
+            };
         // Check the delta before projection, which has a separate byte cap.
         if update.len() > dohc_engine_collab::limits::MAX_YDOC_UPDATE_BYTES {
             return Err(SyncError::BlobTooLarge {
@@ -5591,9 +5598,11 @@ fn map_fold_edit_error(error: CollabError) -> SyncError {
             limit_bytes: max,
             observed_bytes: actual,
         },
-        CollabError::MarkdownQuoteDepthExceeded => SyncError::InvalidInput {
-            reason: "ydoc-resolution-not-representable",
-        },
+        CollabError::MarkdownQuoteDepthExceeded | CollabError::MarkdownNotRepresentable => {
+            SyncError::InvalidInput {
+                reason: "ydoc-resolution-not-representable",
+            }
+        }
         CollabError::MarkdownRewriteUnsupported { .. } => SyncError::InvalidInput {
             reason: "the content kind does not support Markdown conflict resolution",
         },

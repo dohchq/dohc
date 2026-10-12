@@ -18,8 +18,10 @@ import {
   yDocToMarkdown as projectYDocToMarkdown,
 } from "@dohc/ydoc-projection";
 import { escapeHighlightMarkdown } from "@dohc/ydoc-projection/markdown-extensions";
+import nestedMarkdown from "../../../../../tools/rust-engine-program/nested-markdown-contract.json";
 import rawHtml from "../../../../../packages/ydoc-projection/src/fixtures/raw-html.json";
 import { EDGE_FRONTMATTER, receivedYDoc } from "../markdown/frontmatter.edge-fixture";
+import { parseFrontmatter } from "../markdown/frontmatter";
 import { yDocToMarkdown } from "./import-export";
 import { MarkdownEditor, type MarkdownEditorHandle } from "./MarkdownEditor";
 
@@ -520,6 +522,22 @@ describe("literal link source in a browser", () => {
 });
 
 describe("desktop editor schema parity", () => {
+  it.each(nestedMarkdown.cases.filter(item => !('refuse' in item)))("opens and edits the shared $name contract", async item => {
+    const ref = createRef<MarkdownEditorHandle>();
+    const sourceBody = parseFrontmatter(item.source).body;
+    const canonicalBody = parseFrontmatter(item.canonical!).body
+      .replaceAll('\r\n', '\n').replace(/^\n+/u, '');
+    render(createElement(MarkdownEditor, {
+      ref, value: sourceBody, onDirty: vi.fn(), workspaceId: "workspace-1", path: "notes/nested.md", knownFiles: [],
+    }));
+    await screen.findByTestId("markdown-editor");
+    expect(ref.current!.getMarkdown().trimEnd()).toBe(canonicalBody);
+    const editor = mountedEditor();
+    expect(() => editor.state.doc.check()).not.toThrow();
+    act(() => editor.commands.insertContentAt(3, "!"));
+    expect(ref.current!.getMarkdown()).toContain("!");
+  });
+
   it("builds the projection's nodes, marks, and attributes", async () => {
     render(
       createElement(MarkdownEditor, {

@@ -15,6 +15,7 @@ import {
   dohcMarkdownExtensions,
   escapeHighlightMarkdown,
   GFM_TABLE_CELL_BLOCK_SEPARATOR,
+  MarkdownListItem,
   MarkdownOrderedList,
   MarkdownParagraph,
   MarkdownTaskList,
@@ -321,8 +322,9 @@ const extensions: AnyExtension[] = [
   MarkdownHtml,
   MarkdownDefinition,
   ...dohcMarkdownExtensions,
-  StarterKit.configure({ orderedList: false, paragraph: false }),
+  StarterKit.configure({ listItem: false, orderedList: false, paragraph: false }),
   MarkdownParagraph,
+  MarkdownListItem,
   MarkdownOrderedList,
   MarkdownTaskList,
   DohcTaskItem,
@@ -462,7 +464,61 @@ export function markdownToYDoc(
   return doc
 }
 
+// Admission is independent of canonical serialization. Code bodies are opaque;
+// blank lines end lazy continuation, but not an indented continuation block.
+function assertSupportedListMarkdown(markdown: string): void {
+  const parents: Array<{ indent: number; column: number }> = []
+  let blank = false
+  let fenceWidth = 0
+  for (const raw of markdown.split('\n')) {
+    const line = raw.replace(/\r$/u, '')
+    if (/^[ \t]*$/u.test(line)) { blank = true; continue }
+    let indent = /^ */u.exec(line)![0].length
+    let rest = line.slice(indent)
+    let quotes = 0
+    while (rest === '>' || rest.startsWith('> ')) { rest = rest.slice(2); quotes += 1 }
+    const quoteIndent = /^ */u.exec(rest)![0].length
+    indent += quoteIndent
+    rest = rest.slice(quoteIndent)
+    const ticks = /^`{3,}/u.exec(rest)?.[0].length ?? 0
+    if (fenceWidth) {
+      if (ticks >= fenceWidth && rest.slice(ticks).trim() === '') fenceWidth = 0
+      continue
+    }
+    if (ticks) { fenceWidth = ticks; blank = false; continue }
+    const refuse = () => { throw new Error('Markdown is not representable by the live document contract') }
+    if (rest.startsWith('\t') || rest.startsWith('~~~')
+      || /^(?:[-+*]|[0-9]{1,9}[.)])[ \t]*\t/u.test(rest)
+      || /^(?:\*(?:[ \t]*\*){2,}|_(?:[ \t]*_){2,})[ \t]*$/u.test(rest)) refuse()
+    if (quotes > 120 || /^(?:[a-zA-Z]{1,2}|[ivxlcdmIVXLCDM]+)[.)] /u.test(rest)) refuse()
+    if (/^[0-9]{1,9}[.)] \[[ xX]\](?: |$)/u.test(rest)) refuse()
+    const marker = /^(?:[-+*] |[0-9]{1,9}[.)] )/u.exec(rest)
+    if (marker) {
+      const itemBody = rest.slice(marker[0].length)
+      if (/^\[[ xX]\]\t/u.test(itemBody)) refuse()
+      let body = itemBody.replace(/^\[[ xX]\] /u, '')
+      if (/^[ \t]*\t/u.test(body)) refuse()
+      body = body.trimStart()
+      while (body.startsWith('> ')) body = body.slice(2)
+      if (body.startsWith('~~~') || /^(?:\*(?:[ \t]*\*){2,}|_(?:[ \t]*_){2,})[ \t]*$/u.test(body)) refuse()
+      if (/^(?:[a-zA-Z]{1,2}|[ivxlcdmIVXLCDM]+)[.)] /u.test(body)
+        || /^[0-9]{1,9}[.)] \[[ xX]\](?: |$)/u.test(body)) refuse()
+      const itemTicks = /^`{3,}/u.exec(body)?.[0].length ?? 0
+      if (itemTicks) fenceWidth = itemTicks
+      while (parents.length && indent <= parents.at(-1)!.indent) parents.pop()
+      if (parents.length && indent < parents.at(-1)!.column) refuse()
+      parents.push({ indent, column: indent + marker[0].length })
+    } else if (parents.length) {
+      const parent = parents.at(-1)!
+      if (indent > parent.indent && blank && indent < parent.column) refuse()
+      if (indent <= parent.indent && blank) parents.length = 0
+    }
+    blank = false
+  }
+}
+
 export function parseRichdocMarkdown(markdown: string): JSONContent {
+  assertSupportedListMarkdown(markdown)
   const reservedSentinels = new Set(
     markdown.match(PARSE_SENTINEL_RE) ?? [],
   )
@@ -540,8 +596,10 @@ export function parseRichdocMarkdown(markdown: string): JSONContent {
 // first block is a table straight through, and the Y.Doc conversion then
 // drops the item. An annotated table is the first block of an item whose
 // paragraph was empty, so give such an item its paragraph back.
-function ensureListItemParagraphs(node: JSONContent): JSONContent {
-  const content = node.content?.map(ensureListItemParagraphs)
+function ensureListItemParagraphs(node: JSONContent, depth = -1, quoteDepth = 0): JSONContent {
+  const quotes = quoteDepth + (node.type === 'blockquote' ? 1 : 0)
+  if (depth > 128 || quotes > 120) throw new Error('Markdown is not representable by the live document contract')
+  const content = node.content?.map(child => ensureListItemParagraphs(child, depth + 1, quotes))
   if (!content) return node
   const needsParagraph = (node.type === 'listItem' || node.type === 'taskItem')
     && content[0]?.type !== 'paragraph'
@@ -843,7 +901,7 @@ export function serializeRichdocBody(root: JSONContent): string {
     )
   }
 
-  function visit(node: JSONContent, insideTableCell = false): JSONContent {
+  function visit(node: JSONContent, insideTableCell = false, parentType = ''): JSONContent {
     if (node.type === 'table' && node.content?.length) {
       return {
         ...node,
@@ -866,7 +924,7 @@ export function serializeRichdocBody(root: JSONContent): string {
 
     let content = insideTableCell
       ? node.content?.flatMap(prepareTableCellBlock)
-      : node.content?.map(child => visit(child))
+      : node.content?.map(child => visit(child, false, node.type))
     if (content?.length) {
       const definition = node.type === 'paragraph' && isDefinitionParagraph(content)
       // A definition reads back as plain text, so an empty link in it is
@@ -885,6 +943,9 @@ export function serializeRichdocBody(root: JSONContent): string {
           encodeBlockEscape,
           definition,
         )
+        if (parentType === 'doc' && content[0]?.text?.startsWith(' ')) {
+          content = [{ ...content[0], text: encodeLeadingWhitespace(' ') + content[0].text.slice(1) }, ...content.slice(1)]
+        }
       }
       content = renderInlineCodeRuns(
         content,

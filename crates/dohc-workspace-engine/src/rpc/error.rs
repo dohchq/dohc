@@ -485,6 +485,7 @@ fn map_collab_code(error: CollabError) -> ErrorCode {
         | CollabError::UnsupportedContentKind { .. }
         | CollabError::MarkdownRewriteUnsupported { .. }
         | CollabError::MarkdownQuoteDepthExceeded
+        | CollabError::MarkdownNotRepresentable
         | CollabError::BaseAlreadyClaimed
         | CollabError::BaseStateDiverged
         | CollabError::BaseRelaySequencePending

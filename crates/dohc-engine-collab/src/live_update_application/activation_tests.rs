@@ -135,17 +135,17 @@ fn imported_activation_rejects_ordinary_projection_that_does_not_match_native_st
 }
 
 /// An imported document whose file keeps a body the engine's reader holds as
-/// text, such as a nested list, activates: activation compares the version's
+/// text, such as raw HTML, activates: activation compares the version's
 /// file with the projection the store settles, not the strict one.
 #[test]
 fn imported_activation_accepts_a_file_body_the_engine_reads_as_text() {
-    const NESTED: &str = "# Shared\n\n- parent\n  - nested\n";
+    const SOURCE: &str = "# Shared\n\nHello <b>hidden</b> world\n";
     let mut f = imported_fixture();
     f.doc
-        .rewrite_content_to_markdown_preserving_source(ContentKind::Richdoc, NESTED)
+        .rewrite_content_to_markdown_preserving_source(ContentKind::Richdoc, SOURCE)
         .unwrap();
     let projection = f.doc.project(ContentKind::Richdoc).unwrap().content;
-    assert_ne!(projection, NESTED);
+    assert_ne!(projection, SOURCE);
     assert_eq!(f.doc.preserved_markdown_source(&projection), None);
     let update = f.doc.encode_full_state();
     f.store
@@ -160,8 +160,8 @@ fn imported_activation_accepts_a_file_body_the_engine_reads_as_text() {
                 version_id: "main".into(),
                 object_id: "object".into(),
                 path: "owner.md".into(),
-                text: NESTED.into(),
-                moment_id: "imported-nested".into(),
+                text: SOURCE.into(),
+                moment_id: "imported-literal-html".into(),
                 metadata_origin: "sync".into(),
                 metadata_summary: None,
                 metadata_correlation_id: None,
@@ -173,7 +173,7 @@ fn imported_activation_accepts_a_file_body_the_engine_reads_as_text() {
         )
         .unwrap();
     let captured = capture_imported(&mut f, 1_000_000).unwrap();
-    assert_eq!(captured.source.source_digest, hex_sha256(NESTED.as_bytes()));
+    assert_eq!(captured.source.source_digest, hex_sha256(SOURCE.as_bytes()));
 }
 
 #[test]

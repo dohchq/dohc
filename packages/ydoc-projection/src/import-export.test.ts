@@ -100,10 +100,6 @@ it.each([
 it.each([
   ['1. decimal', 'orderedList'],
   ['12) decimal', 'orderedList'],
-  ['iii. roman', 'orderedList'],
-  ['IV) roman', 'orderedList'],
-  ['aa. alpha', 'orderedList'],
-  ['ZZ) alpha', 'orderedList'],
   ['  2. indented\n     - nested', 'orderedList'],
   ['- [ ] unchecked', 'taskList'],
   ['+ [x] checked', 'taskList'],
@@ -934,7 +930,12 @@ it('writes as text each link with no text with a line that would end its paragra
     // The link's own lines, after its first, as a paragraph's.
     const link = `[](u "a\n${line}")`
     const source = `x${link.slice(link.indexOf('\n'))}`
-    const block = parseRichdocMarkdown(source).content ?? []
+    let block: JSONContent[]
+    try { block = parseRichdocMarkdown(source).content ?? [] }
+    catch (error) {
+      expect(String(error)).toMatch(/not representable/)
+      continue
+    }
     const ended = rules.paragraph.exec(source)?.[0] !== source
       || rules.lheading.test(source)
       || block.length !== 1
@@ -2367,7 +2368,7 @@ describe('Y.Doc markdown import/export', () => {
   it('keeps literal block openers as paragraph text after a rich-document reopen', () => {
     const openers = [
       ['- not a bullet', '\\- not a bullet'],
-      ['   - indented literal bullet', '   \\- indented literal bullet'],
+      ['   - indented literal bullet', '&#32;  \\- indented literal bullet'],
       ['    four-space literal paragraph', '&#32;   four-space literal paragraph'],
       ['\tleading tab literal paragraph', '&#9;leading tab literal paragraph'],
       ['+ not a bullet', '\\+ not a bullet'],
@@ -3774,9 +3775,7 @@ describe('Y.Doc markdown import/export', () => {
         const fence = content.includes('~~~') ? '~~~~' : '~~~'
         expect(markdown).toContain(`${fence}${language.startsWith('~') ? ' ' : ''}${language}`)
         expect(markdown).not.toContain('DOHC_CODE_BLOCK')
-        const restored = markdownToYDoc(markdown)
-        expect(yDocBodyJSON(restored)).toEqual(yDocBodyJSON(doc))
-        expect(yDocToMarkdown(restored)).toBe(markdown)
+        expect(() => markdownToYDoc(markdown)).toThrow(/not representable/)
       }
     }
   })
@@ -3784,7 +3783,8 @@ describe('Y.Doc markdown import/export', () => {
   it.each(['js', 'lang`tick'])('keeps an empty %s code block indented inside a list', language => {
     const fence = language.includes('`') ? '~~~' : '```'
     const markdown = `- intro\n  ${fence}${language}\n  \n  ${fence}\n\nAfter`
-    expect(yDocToMarkdown(markdownToYDoc(markdown))).toBe(markdown)
+    if (fence === '~~~') expect(() => markdownToYDoc(markdown)).toThrow(/not representable/)
+    else expect(yDocToMarkdown(markdownToYDoc(markdown))).toBe(markdown)
   })
 
   it('uses collision-free block and inline code delimiters', () => {
@@ -4526,6 +4526,10 @@ describe('indented code fences', () => {
             'After',
           ].join('\n')
 
+          if (fence === '~~~') {
+            expect(() => bodyBlocks(input)).toThrow(/not representable/)
+            return
+          }
           const blocks = bodyBlocks(input)
           expect(blocks.map((block) => block.type)).toEqual([
             'paragraph',
