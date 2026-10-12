@@ -15,13 +15,11 @@ import { SidePanel } from "../../desktop/src/renderer/workbench/SidePanel";
 const emptyCollectionFolders: ReadonlySet<string> = new Set();
 const noopOpenCollection = () => {};
 import { useWorkspaceSearch } from "../../desktop/src/renderer/workbench/useWorkspaceSearch";
-import type { ViewId } from "../../desktop/src/renderer/workbench/workbenchState";
 import {
   projectTreePath,
   type PendingTreeChange,
 } from "../../desktop/src/renderer/workbench/file-tree-optimistic";
-
-export type DemoPanelId = ViewId;
+import type { DemoPanelId } from "./demoPanels";
 
 // The demo has no editing pipeline, so no path ever holds a set-aside draft.
 const NO_PATHS: ReadonlySet<string> = new Set();
@@ -282,7 +280,7 @@ export function DemoSidebar(props: {
           refreshKey={refreshKey}
           onOpenPath={open}
         />
-      ) : (
+      ) : props.activePanel === "history" ? (
         <EngineHistoryView
           moments={moments}
           hasMore={false}
@@ -294,6 +292,8 @@ export function DemoSidebar(props: {
             if (path) open(path);
           }}
         />
+      ) : (
+        props.activePanel satisfies never
       )}
     </SidePanel>
   );
