@@ -138,10 +138,10 @@ describe("About rail (right side)", () => {
     // No file open yet: About says so honestly.
     expect(
       (await screen.findByTestId("linked-chats-empty")).textContent,
-    ).toBe("Open a file to see its chats, history, and access.");
+    ).toBe("Open a file or a conversation to see who has access.");
   });
 
-  it("says it covers files when a conversation has focus and a file is open", async () => {
+  it("points at a file or a conversation when Chats Home has focus", async () => {
     const bridge = makeBridge(Promise.resolve({
       ...STORED_STATE,
       activeView: "chats",
@@ -151,16 +151,16 @@ describe("About rail (right side)", () => {
 
     const rail = await screen.findByTestId("about-rail");
     expect((await within(rail).findByTestId("linked-chats-empty")).textContent).toBe(
-      "About covers files and chats. Switch to a file's tab to see its chats, history, and access.",
+      "Switch to a file or a conversation to see who has access.",
     );
-    // Only conversations open: there is no file to switch to.
+    // No file tab open: nothing to switch to.
     cleanup();
     renderShell(makeBridge(Promise.resolve({
       ...STORED_STATE,
       editorGroups: [{ id: "primary", tabs: [CHATS_TAB_PATH], activeTab: CHATS_TAB_PATH, size: 1 }],
     })));
     expect((await within(await screen.findByTestId("about-rail")).findByTestId("linked-chats-empty")).textContent).toBe(
-      "Open a file to see its chats, history, and access.",
+      "Open a file or a conversation to see who has access.",
     );
   });
 

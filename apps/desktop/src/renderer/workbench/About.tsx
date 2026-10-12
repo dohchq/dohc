@@ -1,4 +1,4 @@
-import type { AccessAnswer } from "@dohc/workspace-contracts/access";
+import type { AccessAnswer, AccessObjectRef } from "@dohc/workspace-contracts/access";
 import { fileKindForPath } from "@dohc/workspace-contracts/kinds";
 import { isSharedWithMePath } from "@dohc/workspace-core/paths";
 import {
@@ -118,10 +118,12 @@ export function AboutHeader(props: { subject: { path: string } | AboutConversati
       ) : (
         <ChatAvatar name={subject.name} kind={subject.kind === "agent" ? "agent" : "human"} own={subject.kind === "agent"} size="strip" />
       )}
-      <span title={"path" in subject ? subject.path : undefined} className="min-w-0 truncate font-semibold text-ink">
+      <span title={"path" in subject ? subject.path : subject.name} className="min-w-0 truncate font-semibold text-ink">
         {name}
       </span>
-      {"path" in subject ? null : <PresenceFaces others={subject.present} className="ml-auto" />}
+      {/* The conversation's own header announces who arrives; this copy
+          only shows them. */}
+      {"path" in subject ? null : <PresenceFaces others={subject.present} live={false} className="ml-auto" />}
     </div>
   );
 }
@@ -532,10 +534,12 @@ export function AboutAccess(props: {
     subject.kind === "path" ? accessReasonFor(facts, subject.path)
     : props.received == null ? "unexplained"
     : accessReasonForLane(facts, props.received ? "received" : "granted");
+  // The key names the subject in full, so a read keyed on it asks about the
+  // ref it was built from.
   const subjectKey = subject.kind === "path" ? subject.path : `chat:${subject.channelWireId}`;
-  // The read's key names the subject, so `begin` changes with it.
-  const latestSubject = useRef(subject);
-  latestSubject.current = subject;
+  const ref: AccessObjectRef = subject.kind === "path"
+    ? { kind: "path", path: subject.path, versionId: null }
+    : { kind: "chat", channelWireId: subject.channelWireId };
   // The server connection the last refresh was asked under. A new one, such
   // as a Connect server that signed in, refreshes and reads again. A session
   // change reads the status twice, passing through "checking" each time, so
@@ -558,12 +562,9 @@ export function AboutAccess(props: {
           if (!request.current()) return;
         }
         const cursor = options.after?.nextCursor ?? undefined;
-        const subject = latestSubject.current;
         const answer = await bridge().getObjectAccess({
           workspaceId,
-          ref: subject.kind === "path"
-            ? { kind: "path", path: subject.path, versionId: null }
-            : { kind: "chat", channelWireId: subject.channelWireId },
+          ref,
           ...(cursor ? { cursor } : {}),
         });
         // A page cursor belongs to the listing it came from. When that
@@ -580,7 +581,8 @@ export function AboutAccess(props: {
         request.fail({ status: "failed" }, ipcErrorMessage(error, `Could not check who has access to this ${noun}.`), error, retry);
       }
     },
-    [begin, noun, workspaceId],
+    // `ref` follows `subjectKey`.
+    [begin, noun, subjectKey, workspaceId],
   );
   const refreshedUnder = useRef<string | null>(null);
   useEffect(() => {

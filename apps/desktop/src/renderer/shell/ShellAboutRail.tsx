@@ -72,18 +72,28 @@ export const ShellAboutRail = memo(function ShellAboutRail(props: {
   } = props;
   // A conversation tab's page says what About shows for it. A shared view
   // has no conversations, so its About stays on files. A chat search hit
-  // opens its file's chat here and keeps it until another tab takes focus.
-  const [searchHitTab, setSearchHitTab] = useState<string | null>(null);
-  if (searchChatTarget !== null && searchHitTab !== focusedTabPath) setSearchHitTab(focusedTabPath);
+  // opens its file's chat here, on the tab that had focus when it arrived,
+  // until focus moves. The shell mints one target per hit, so each hit
+  // latches once, and a hit not yet consumed never follows focus elsewhere.
+  const [searchHit, setSearchHit] = useState<{
+    target: NonNullable<typeof searchChatTarget>;
+    tab: string | null;
+    shown: boolean;
+  } | null>(null);
+  if (searchChatTarget !== null && searchHit?.target !== searchChatTarget) {
+    setSearchHit({ target: searchChatTarget, tab: focusedTabPath, shown: true });
+  }
   useEffect(() => {
-    setSearchHitTab((tab) => (tab === focusedTabPath ? tab : null));
+    setSearchHit((hit) => (hit?.shown && hit.tab !== focusedTabPath ? { ...hit, shown: false } : hit));
   }, [focusedTabPath]);
+  const showsSearchHit = searchHit?.shown === true && searchHit.tab === focusedTabPath;
   const chatTab = parseChatTabPath(focusedTabPath);
-  const conversationTab = !shareView && searchHitTab !== focusedTabPath &&
+  const conversationTab = !shareView && !showsSearchHit &&
     (chatTab?.kind === "channel" || chatTab?.kind === "dm");
   // Null for a tab that is not a conversation's.
   const published = useAboutConversation(workspaceId, conversationTab ? focusedTabPath : null);
   const conversation = conversationTab ? published : null;
+  const [conversationAccessOpen, setConversationAccessOpen] = useState(false);
   const loading = <SkeletonRows inSlot layout="panel" label="Loading About..." />;
   return (
     <AboutRail
@@ -122,6 +132,8 @@ export const ShellAboutRail = memo(function ShellAboutRail(props: {
             <LazyAboutConversationPanel
               workspaceId={workspaceId}
               conversation={conversation}
+              accessOpen={conversationAccessOpen}
+              onToggleAccess={() => setConversationAccessOpen((open) => !open)}
               notices={aboutNotices}
               accessContext={accessContext}
             />

@@ -1,4 +1,3 @@
-import { useState } from "react";
 import { AboutAccess, AboutHeader, type AboutNotices, type AccessContext } from "./About";
 import type { AboutConversation } from "./aboutConversation";
 
@@ -8,13 +7,15 @@ import type { AboutConversation } from "./aboutConversation";
 export function AboutConversationPanel(props: {
   workspaceId: string;
   conversation: AboutConversation;
+  // Closed until opened, like a file's Access: opening it is what asks main
+  // to check again. The rail holds it, so it stays open between chats while
+  // this panel remounts for each one.
+  accessOpen: boolean;
+  onToggleAccess: () => void;
   notices: AboutNotices;
   accessContext: AccessContext;
 }) {
   const { conversation } = props;
-  // Closed until opened, like a file's Access: opening it is what asks main
-  // to check again. It stays open while the person moves between chats.
-  const [accessOpen, setAccessOpen] = useState(false);
   return (
     <div data-testid="about-panel" data-conversation-kind={conversation.kind} className="flex min-h-0 flex-1 flex-col">
       <AboutHeader subject={conversation} />
@@ -23,8 +24,8 @@ export function AboutConversationPanel(props: {
           workspaceId={props.workspaceId}
           subject={{ kind: "chat", channelWireId: conversation.channelWireId }}
           received={conversation.received}
-          expanded={accessOpen}
-          onToggle={() => setAccessOpen((open) => !open)}
+          expanded={props.accessOpen}
+          onToggle={props.onToggleAccess}
           notices={props.notices}
           context={props.accessContext}
         />

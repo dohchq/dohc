@@ -2977,7 +2977,8 @@ export function ChatsView(props: {
         present: presence.others,
       };
     }
-    if (!activeChannel) {
+    // A channel always has a wire id here, the same one presence keys on.
+    if (!activeChannel || activeWireId === null) {
       // The tab's conversation is gone, or Chats could not list it: About
       // has nothing to show. Until then it is still loading.
       const target = parseChatTabPath(props.editorTabPath);
@@ -2995,20 +2996,22 @@ export function ChatsView(props: {
       return {
         kind: "agent",
         name: chatEditorTitle(nav, agentName),
-        channelWireId: activeWireId ?? activeChannel.id,
+        channelWireId: activeWireId,
         received: false,
-        present: presence.others,
+        // The agent is the conversation, so its own presence is not a face,
+        // the same as the page's header.
+        present: peoplePresence,
       };
     }
     const joined = activeChannel.wireId ? joinedByWire.get(activeChannel.wireId) : null;
     return {
       kind: "group",
       name: activeChannel.name,
-      channelWireId: activeWireId ?? activeChannel.id,
+      channelWireId: activeWireId,
       received: joined === undefined ? null : joined !== null,
       present: presence.others,
     };
-  }, [activeChannel, activeDm, activeWireId, agentName, dmRestoreReady, dms, joinedByWire, nav, overview, presence.others, props.editorTabPath]);
+  }, [activeChannel, activeDm, activeWireId, agentName, dmRestoreReady, dms, joinedByWire, nav, overview, peoplePresence, presence.others, props.editorTabPath]);
   useEffect(() => {
     if (!props.editorTabPath || aboutConversation === null) return;
     return publishAboutConversation(workspaceId, props.editorTabPath, aboutConversation);

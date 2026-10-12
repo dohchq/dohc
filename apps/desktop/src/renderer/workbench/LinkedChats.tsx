@@ -89,9 +89,8 @@ function isWorkspaceUpdatingResponse(
 export function LinkedChatsPanel(props: {
   workspaceId: string;
   filePath: string | null;
-  // With no file or chat focused: whether some tab still holds a file. The
-  // empty state then points at that tab instead of asking for a file to be
-  // opened.
+  // With no file or conversation focused: whether some tab still holds a
+  // file. The empty state then says to switch instead of to open.
   fileTabOpen?: boolean;
   // A shared view always passes true. Absent means a workspace this machine
   // owns, which is writable by definition.
@@ -435,15 +434,18 @@ export function LinkedChatsPanel(props: {
   }
 
   if (!filePath) {
-    const sections = props.history ? "chats, history, and access" : "chats and access";
+    // About covers a file or a conversation. A shared view has no
+    // conversations, so there it names a file's own chats.
+    const subject = readOnly ? "a file" : "a file or a conversation";
+    const shows = readOnly ? "its chats and access" : "who has access";
     return (
       <EmptyState
         data-testid="linked-chats-empty"
         icon={Info}
         title={
           props.fileTabOpen
-            ? `About covers files and chats. Switch to a file's tab to see its ${sections}.`
-            : `Open a file to see its ${sections}.`
+            ? `Switch to ${readOnly ? "a file's tab" : subject} to see ${shows}.`
+            : `Open ${subject} to see ${shows}.`
         }
       />
     );
