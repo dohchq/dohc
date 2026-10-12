@@ -1331,6 +1331,7 @@ pub(crate) fn write_result_from_moment(
     )?;
     Ok(WriteResult {
         pending_placement: false,
+        released_capture_hold: false,
         object,
         snapshot: TextSnapshot {
             workspace_id: workspace_id.to_owned(),

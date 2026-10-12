@@ -671,8 +671,13 @@ enum CaptureIndexing {
     UseSnapshot(Arc<SearchPolicySnapshot>),
 }
 
+pub struct CapturePlacementPath {
+    pub path: String,
+    pub released_hold: bool,
+}
+
 pub struct CapturePassSettlement {
-    pub paths: Vec<String>,
+    pub paths: Vec<CapturePlacementPath>,
     pub repair_recoveries: bool,
 }
 
@@ -723,7 +728,9 @@ impl ActorHandle {
                     let mut selected = std::collections::HashSet::new();
                     for path in &settlement.paths {
                         let jobs = query
-                            .query_map(params![workspace_id, path], |row| row.get::<_, String>(0))
+                            .query_map(params![workspace_id, path.path], |row| {
+                                row.get::<_, String>(0)
+                            })
                             .map_err(StorageError::corrupt_public)?;
                         for job in jobs {
                             selected.insert(job.map_err(StorageError::corrupt_public)?);
@@ -733,6 +740,12 @@ impl ActorHandle {
                 })?
             };
             if !selected.is_empty() {
+                let released_hold_paths = settlement
+                    .paths
+                    .iter()
+                    .filter(|path| path.released_hold)
+                    .map(|path| path.path.clone())
+                    .collect();
                 root_guard.validate(&root_dir)?;
                 let replay = super::materialization::replay_pending_materializations(
                     store,
@@ -742,6 +755,7 @@ impl ActorHandle {
                         self_writes: Some(self_writes.as_ref()),
                         progress: None,
                         file_outcomes_settled: true,
+                        released_hold_paths: Some(&released_hold_paths),
                     },
                     now_ms,
                     &dohc_engine_storage::NoFaults,
@@ -1519,6 +1533,7 @@ fn capture_ingest_in_tx(
         capture_file_holds::clear_in(tx, &input.workspace_id, &input.path)?;
     }
     result.pending_placement = pending_placement;
+    result.released_capture_hold = held;
     Ok(result)
 }
 
@@ -1952,6 +1967,7 @@ fn capture_ingest_binary_on_store(
             .map_err(RuntimeError::from)?;
         result.pending_placement =
             pending_placement_in(tx, &input.workspace_id, &input.path, hold.is_some())?;
+        result.released_capture_hold = hold.is_some();
         if hold.is_some() {
             capture_file_holds::clear_in(tx, &input.workspace_id, &input.path)?;
         }
@@ -2215,6 +2231,7 @@ fn capture_retire_on_store(
         }
         result.pending_placement =
             pending_placement_in(tx, &input.workspace_id, &input.path, hold.is_some())?;
+        result.released_capture_hold = hold.is_some();
         if hold.is_some() {
             capture_file_holds::clear_in(tx, &input.workspace_id, &input.path)?;
         }

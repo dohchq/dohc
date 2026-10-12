@@ -140,6 +140,7 @@ impl ActorHandle {
                     self_writes: None,
                     progress: progress.as_deref(),
                     file_outcomes_settled: false,
+                    released_hold_paths: None,
                 },
                 now_ms,
                 &NoFaults,
@@ -171,6 +172,7 @@ impl ActorHandle {
                     self_writes: Some(self_writes.as_ref()),
                     progress: None,
                     file_outcomes_settled: false,
+                    released_hold_paths: None,
                 },
                 now_ms,
                 &NoFaults,
@@ -210,6 +212,7 @@ impl ActorHandle {
                     self_writes: Some(self_writes.as_ref()),
                     progress: None,
                     file_outcomes_settled: false,
+                    released_hold_paths: None,
                 },
                 now_ms,
                 &NoFaults,
@@ -433,6 +436,8 @@ pub(super) struct MaterializationReplayScope<'a> {
     pub(super) progress: Option<&'a AtomicU64>,
     /// Capture drains settle file conflicts without failing the workspace.
     pub(super) file_outcomes_settled: bool,
+    /// Preserve unseen stale relay writes only when this capture released a hold.
+    pub(super) released_hold_paths: Option<&'a std::collections::HashSet<String>>,
 }
 
 const ROLLBACK_RESTORE_PREFIX: &str = "rollback-restore_\u{1f}";
@@ -819,7 +824,11 @@ pub(super) fn replay_pending_materializations(
             if job.job_id.starts_with("version-switch-mat_")
                 && switch_projection_matches_active(store, &job, false)?.is_none()
             {
-                if scope.file_outcomes_settled && job.operation == MaterializationOperation::Write {
+                if scope
+                    .released_hold_paths
+                    .is_some_and(|paths| paths.contains(&job.target_path))
+                    && job.operation == MaterializationOperation::Write
+                {
                     match dohc_engine_files::materialize_write_conflict(
                         store,
                         root_dir,

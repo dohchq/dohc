@@ -9,6 +9,7 @@ use dohc_engine_files::{
     BatchIngestResult, CaptureError, CaptureOp, CaptureSink, IngestOutcome, IngestReason,
     MAX_CAPTURE_BINARY_BYTES, MAX_CAPTURE_TEXT_BYTES,
 };
+use dohc_engine_runtime::actor::CapturePlacementPath;
 use dohc_engine_runtime::search::{
     FilesPolicyRule, SearchPolicySnapshot, read_engine_search_policy, resolve_effective_policy,
 };
@@ -300,7 +301,7 @@ pub struct StoreCaptureSink {
     /// Automation claims this run's captures and reconciliations inserted.
     /// The driver announces them after the run.
     automation_claims: std::cell::RefCell<Vec<AutomationClaim>>,
-    pending_placement_paths: std::cell::RefCell<Vec<String>>,
+    pending_placement_paths: std::cell::RefCell<Vec<CapturePlacementPath>>,
     /// Lazily loaded-or-created on the first secret capture (TS parity:
     /// `loadSecretDataKey` create branch) so workspaces without secrets never
     /// mint a key file.
@@ -488,7 +489,7 @@ impl StoreCaptureSink {
     }
 
     /// Take paths whose committed observations need a placement drain.
-    pub(crate) fn take_pending_placement_paths(&self) -> Vec<String> {
+    pub(crate) fn take_pending_placement_paths(&self) -> Vec<CapturePlacementPath> {
         self.pending_placement_paths.take()
     }
 
@@ -617,7 +618,10 @@ impl StoreCaptureSink {
                 if result.pending_placement {
                     self.pending_placement_paths
                         .borrow_mut()
-                        .push(path.to_owned());
+                        .push(CapturePlacementPath {
+                            path: path.to_owned(),
+                            released_hold: result.released_capture_hold,
+                        });
                 }
                 self.automation_claims
                     .borrow_mut()
@@ -635,7 +639,12 @@ impl StoreCaptureSink {
             // does not own it, so it stops tracking the path rather than
             // overwriting content that may have no disk counterpart.
             Err(RuntimeError::CaptureNotOwnedAfterHold { path }) => {
-                self.pending_placement_paths.borrow_mut().push(path);
+                self.pending_placement_paths
+                    .borrow_mut()
+                    .push(CapturePlacementPath {
+                        path,
+                        released_hold: true,
+                    });
                 Ok(DomainIngest::ForeignHead)
             }
             Err(RuntimeError::Domain(DomainError::CaptureNotOwned)) => {
@@ -674,7 +683,10 @@ impl StoreCaptureSink {
                 if result.pending_placement {
                     self.pending_placement_paths
                         .borrow_mut()
-                        .push(path.to_owned());
+                        .push(CapturePlacementPath {
+                            path: path.to_owned(),
+                            released_hold: result.released_capture_hold,
+                        });
                 }
                 Ok(DomainIngest::Persisted)
             }
@@ -685,7 +697,12 @@ impl StoreCaptureSink {
                 Ok(DomainIngest::NameRefused)
             }
             Err(RuntimeError::CaptureNotOwnedAfterHold { path }) => {
-                self.pending_placement_paths.borrow_mut().push(path);
+                self.pending_placement_paths
+                    .borrow_mut()
+                    .push(CapturePlacementPath {
+                        path,
+                        released_hold: true,
+                    });
                 Ok(DomainIngest::ForeignHead)
             }
             Err(RuntimeError::Domain(DomainError::CaptureNotOwned)) => {
@@ -904,7 +921,10 @@ impl StoreCaptureSink {
                 if result.pending_placement {
                     self.pending_placement_paths
                         .borrow_mut()
-                        .push(path.to_owned());
+                        .push(CapturePlacementPath {
+                            path: path.to_owned(),
+                            released_hold: result.released_capture_hold,
+                        });
                 }
                 Ok(())
             }
@@ -1201,9 +1221,12 @@ impl StoreCaptureSink {
                     outcomes.push(match result {
                         Ok(result) => {
                             if result.pending_placement {
-                                self.pending_placement_paths
-                                    .borrow_mut()
-                                    .push(result.snapshot.path.clone());
+                                self.pending_placement_paths.borrow_mut().push(
+                                    CapturePlacementPath {
+                                        path: result.snapshot.path.clone(),
+                                        released_hold: result.released_capture_hold,
+                                    },
+                                );
                             }
                             self.automation_claims
                                 .borrow_mut()
@@ -1211,7 +1234,12 @@ impl StoreCaptureSink {
                             Ok(IngestOutcome::Captured { size, sha256 })
                         }
                         Err(RuntimeError::CaptureNotOwnedAfterHold { path }) => {
-                            self.pending_placement_paths.borrow_mut().push(path);
+                            self.pending_placement_paths
+                                .borrow_mut()
+                                .push(CapturePlacementPath {
+                                    path,
+                                    released_hold: true,
+                                });
                             Ok(IngestOutcome::Captured { size, sha256 })
                         }
                         Err(RuntimeError::Domain(DomainError::CaptureNotOwned)) => {

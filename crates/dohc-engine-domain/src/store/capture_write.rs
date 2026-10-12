@@ -730,6 +730,7 @@ pub fn capture_retire_in_tx(
         };
         return Ok(CaptureRetireResult {
             pending_placement: false,
+            released_capture_hold: false,
             retired,
             deduped: true,
         });
@@ -746,6 +747,7 @@ pub fn capture_retire_in_tx(
         )?;
         return Ok(CaptureRetireResult {
             pending_placement: false,
+            released_capture_hold: false,
             retired: None,
             deduped: false,
         });
@@ -775,6 +777,7 @@ pub fn capture_retire_in_tx(
             )?;
             return Ok(CaptureRetireResult {
                 pending_placement: false,
+                released_capture_hold: false,
                 retired: None,
                 deduped: false,
             });
@@ -791,6 +794,7 @@ pub fn capture_retire_in_tx(
             )?;
             return Ok(CaptureRetireResult {
                 pending_placement: false,
+                released_capture_hold: false,
                 retired: None,
                 deduped: false,
             });
@@ -842,6 +846,7 @@ pub fn capture_retire_in_tx(
     )?;
     Ok(CaptureRetireResult {
         pending_placement: false,
+        released_capture_hold: false,
         retired: Some(result),
         deduped: false,
     })
@@ -1055,6 +1060,7 @@ where
             .map_err(DomainError::from)?;
             let result = CaptureIngestBinaryResult {
                 pending_placement: false,
+                released_capture_hold: false,
                 object_id: object_id.clone(),
                 moment_id: moment.moment_id.clone(),
                 moment_order: moment.moment_order,
@@ -1172,6 +1178,7 @@ where
     )?;
     Ok(CaptureIngestBinaryResult {
         pending_placement: false,
+        released_capture_hold: false,
         object_id,
         moment_id,
         moment_order,
@@ -1360,6 +1367,7 @@ fn reconstruct_capture_binary(
         })?;
     Ok(CaptureIngestBinaryResult {
         pending_placement: false,
+        released_capture_hold: false,
         object_id: moment.object_id,
         moment_id: moment.moment_id,
         moment_order: moment.moment_order,
@@ -1773,6 +1781,7 @@ fn write_normalized_text_in_tx(
     };
     Ok(WriteResult {
         pending_placement: false,
+        released_capture_hold: false,
         object,
         snapshot: TextSnapshot {
             workspace_id: input.workspace_id.to_owned(),

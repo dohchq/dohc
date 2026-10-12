@@ -384,6 +384,8 @@ pub struct CaptureIngestBinary {
 pub struct CaptureIngestBinaryResult {
     /// Capture observed an outstanding placement or released a file hold.
     pub pending_placement: bool,
+    /// This capture commit cleared the path's file hold.
+    pub released_capture_hold: bool,
     pub object_id: String,
     pub moment_id: String,
     pub moment_order: i64,
@@ -496,6 +498,8 @@ pub struct CreateNamedVersion {
 pub struct WriteResult {
     /// Capture observed an outstanding placement or released a file hold.
     pub pending_placement: bool,
+    /// This capture commit cleared the path's file hold.
+    pub released_capture_hold: bool,
     pub object: FileObjectRecord,
     pub snapshot: TextSnapshot,
     pub moment: MomentRecord,
@@ -541,6 +545,8 @@ pub struct DeleteResult {
 pub struct CaptureRetireResult {
     /// Capture observed an outstanding placement or released a file hold.
     pub pending_placement: bool,
+    /// This capture commit cleared the path's file hold.
+    pub released_capture_hold: bool,
     /// The canonical delete result, or `None` when the path was not present.
     pub retired: Option<DeleteResult>,
     /// True when a committed request or an already-absent path was replayed.

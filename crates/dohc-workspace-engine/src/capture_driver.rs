@@ -38,7 +38,7 @@ use dohc_engine_files::{
     IngestReason, ManifestEntry, PoolGauge, ReconcilePlan, ReconcileRun, ScanBounds,
     ScanGeneration, ScanManifest, apply_reconcile_plan_cancellable,
 };
-use dohc_engine_runtime::actor::CapturePassSettlement;
+use dohc_engine_runtime::actor::{CapturePassSettlement, CapturePlacementPath};
 use dohc_engine_runtime::{ActorHandle, CollectionReconciliation, NoFaults, RuntimeError};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
@@ -2487,7 +2487,7 @@ struct CaptureThreadOutcome {
     collection_release_generation: u64,
     /// Automation claims the captures and the reconciliation committed.
     automation_claims: Vec<dohc_engine_domain::AutomationClaim>,
-    pending_placement_paths: Vec<String>,
+    pending_placement_paths: Vec<CapturePlacementPath>,
 }
 
 /// TS parity (`reconcile-${createId()}` + "Reconciled offline edits"): one
@@ -2959,7 +2959,7 @@ async fn apply_bound_run_with_handle(
                 .collect();
             pending_placement_paths
                 .into_iter()
-                .filter(|path| settled.contains(path))
+                .filter(|path| settled.contains(&path.path))
                 .collect()
         };
         match repair_and_materialize_ydoc_recoveries(

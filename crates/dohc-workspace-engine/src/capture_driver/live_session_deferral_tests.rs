@@ -416,6 +416,108 @@ async fn fix2_repaired_hold_with_relay_job(first_sight: bool) {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fix4_unheld_capture_settles_stale_relay_without_conflict_copy() {
+    let harness = Harness::new();
+    let object_id = seed_held_richdoc(&harness);
+    std::fs::write(harness.root.join(NEW_FILE), SEED).unwrap();
+    let files = FilesActorCloseGuard::new(
+        FilesActor::spawn_async(harness.root.clone(), ScanBounds::default())
+            .await
+            .unwrap(),
+    );
+    assert!(harness.capture(&files.handle()).await);
+    harness
+        .actor
+        .versioned_text_write(
+            dohc_engine_domain::WriteText {
+                workspace_id: WORKSPACE_ID.into(),
+                version_id: "main".into(),
+                object_id,
+                path: NEW_FILE.into(),
+                text: "Remote edit.\n".into(),
+                moment_id: "fix4-remote-edit".into(),
+                metadata_origin: "sync".into(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 4,
+                request_id: None,
+            },
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    harness
+        .actor
+        .materialize_relay_page(
+            WORKSPACE_ID.into(),
+            harness.root.clone(),
+            vec![dohc_engine_sync::MomentMaterializationChange {
+                version_id: "main".into(),
+                path: NEW_FILE.into(),
+                operation: "write",
+                content_kind: "text",
+            }],
+            Arc::new(harness.self_writes.clone()),
+            5,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    let observer = rusqlite::Connection::open(&harness.db).unwrap();
+    let job_id: String = observer
+        .query_row(
+            "SELECT job_id FROM materialization_jobs WHERE target_path=?1 AND job_id LIKE 'version-switch-mat_%'",
+            [NEW_FILE],
+            |r| r.get(0),
+        )
+        .unwrap();
+    // Requeue the real relay intent to model a failed placement without an OS lock.
+    observer
+        .execute(
+            "UPDATE materialization_jobs SET status='pending' WHERE job_id=?1",
+            [&job_id],
+        )
+        .unwrap();
+    assert!(
+        harness
+            .actor
+            .capture_file_holds(WORKSPACE_ID.into())
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    std::fs::write(harness.root.join(NEW_FILE), "Saved outside.\n").unwrap();
+    files.handle().request_rescan();
+    let clean = harness.capture(&files.handle()).await;
+    let degraded = harness.status.degraded();
+    let job_status: String = observer
+        .query_row(
+            "SELECT status FROM materialization_jobs WHERE job_id=?1",
+            [&job_id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let disk = std::fs::read_to_string(harness.root.join(NEW_FILE)).unwrap();
+    let notices = std::fs::read_dir(harness.root.join("notes"))
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .filter(|p| p.to_string_lossy().ends_with(".conflict"))
+        .collect::<Vec<_>>();
+    drop(observer);
+    files.close().await;
+    harness.close();
+    assert!(clean && !degraded, "clean={clean}, degraded={degraded}");
+    assert_eq!(disk, "Saved outside.\n");
+    assert!(
+        notices.is_empty(),
+        "an unheld stale job must settle without a conflict copy: {notices:?}"
+    );
+    assert_eq!(job_status, "complete");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn fix3_repaired_hold_keeps_stale_relay_as_visible_conflict() {
     fix2_repaired_hold_with_relay_job(false).await;
 }
