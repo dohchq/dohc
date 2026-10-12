@@ -1644,7 +1644,7 @@ fn write_normalized_text_in_tx(
     )
     .map_err(DomainError::sql_persist)?;
     crate::collections::index_historical_record_owner_moment_in_tx(tx, ws, moment_order)?;
-    tx.execute(
+    tx.prepare_cached(
         "INSERT INTO snapshots \
          (workspace_id, version_id, object_id, path, blob_sha256, updated_at_ms, \
            latest_moment_id, metadata_origin, metadata_summary, \
@@ -1658,19 +1658,20 @@ fn write_normalized_text_in_tx(
            metadata_correlation_id = excluded.metadata_correlation_id, \
            content_kind = excluded.content_kind, \
            binary_sha256 = excluded.binary_sha256",
-        params![
-            input.workspace_id,
-            input.version_id,
-            object_id,
-            input.path.as_ref(),
-            blob,
-            input.now_ms,
-            input.moment_id,
-            input.metadata_origin,
-            input.metadata_summary,
-            input.metadata_correlation_id,
-        ],
     )
+    .map_err(DomainError::sql_persist)?
+    .execute(params![
+        input.workspace_id,
+        input.version_id,
+        object_id,
+        input.path.as_ref(),
+        blob,
+        input.now_ms,
+        input.moment_id,
+        input.metadata_origin,
+        input.metadata_summary,
+        input.metadata_correlation_id,
+    ])
     .map_err(DomainError::sql_persist)?;
     record_request(
         tx,
@@ -1858,11 +1859,12 @@ fn resolve_capture_object(
                 reserved_moment_order = Some(next_order);
                 disambiguated_object_id
             };
-            tx.execute(
+            tx.prepare_cached(
                 "INSERT INTO path_aliases (workspace_id, version_id, path, object_id) \
                  VALUES (?1, ?2, ?3, ?4)",
-                params![workspace_id, version_id, path, object_id],
             )
+            .map_err(DomainError::sql_persist)?
+            .execute(params![workspace_id, version_id, path, object_id])
             .map_err(DomainError::sql_persist)?;
             object_id
         }

@@ -866,9 +866,19 @@ mod capture_batch_fast_path_tests {
         let mut store = EngineStore::open(&db, 1).expect("open store");
         let begun_savepoints = Arc::new(Mutex::new(Vec::new()));
         let observed_savepoints = Arc::clone(&begun_savepoints);
+        let trigger_compiles = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let observed_compiles = Arc::clone(&trigger_compiles);
         store
             .read_with(|conn| {
                 conn.authorizer(Some(move |context: rusqlite::hooks::AuthContext<'_>| {
+                    if matches!(
+                        context.action,
+                        AuthAction::Insert {
+                            table_name: "link_pending"
+                        }
+                    ) {
+                        observed_compiles.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    }
                     if let AuthAction::Savepoint {
                         operation: TransactionOperation::Begin,
                         savepoint_name,
@@ -912,6 +922,12 @@ mod capture_batch_fast_path_tests {
         .expect("capture clean batch");
 
         assert!(results.iter().all(Result::is_ok));
+        let compiles = trigger_compiles.load(std::sync::atomic::Ordering::Relaxed);
+        assert!(
+            compiles > 0 && compiles <= 4,
+            "link queue trigger programs compiled {compiles} times for one capture batch"
+        );
+        assert_eq!(store.table_row_count("link_pending").unwrap(), 3);
         assert_eq!(
             *begun_savepoints.lock().expect("read begun savepoints"),
             vec!["dohc_capture_batch_fast"],

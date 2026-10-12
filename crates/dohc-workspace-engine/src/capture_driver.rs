@@ -2819,7 +2819,8 @@ async fn apply_bound_run_with_handle(
                 leases: apply_leases.clone(),
                 self_writes: apply_self_writes,
                 provenance: apply_provenance,
-            });
+            })
+            .with_cancellation(apply_cancel.clone());
             let result =
                 apply_reconcile_plan_cancellable(&apply_plan, &mut sink, &NoFaults, &apply_cancel);
             let mut collection_release_generation = 0;

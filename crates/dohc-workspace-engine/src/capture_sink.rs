@@ -66,6 +66,9 @@ const SECRET_KEY_UNAVAILABLE: CaptureError = CaptureError {
 /// serialized database writer.
 const MAX_ADDED_TEXT_PREPARE_WORKERS: usize = 8;
 
+mod busy_retry;
+use busy_retry::CaptureBatchRetry;
+
 /// Per-run moment provenance, mirroring the TS capture metadata: a reconcile
 /// pass stamps one summary + correlation id across every moment it records
 /// ("Reconciled offline edits"); a live watcher batch leaves both unset and
@@ -279,6 +282,7 @@ impl CapturedRoot {
 /// active version and capture-time provenance; `.dohc/files.toml` is read once at construction, matching
 /// the one-policy-snapshot-per-task rule in the TS capture path.
 pub struct StoreCaptureSink {
+    batch_retry: CaptureBatchRetry,
     actor: ActorHandle,
     leases: LeaseRegistry,
     workspace_id: String,
@@ -387,6 +391,7 @@ impl StoreCaptureSink {
             PolicyState::Known(snapshot.files_policy.clone())
         };
         StoreCaptureSink {
+            batch_retry: CaptureBatchRetry::default(),
             actor,
             leases,
             workspace_id,
@@ -403,6 +408,14 @@ impl StoreCaptureSink {
             self_writes,
             provenance,
         }
+    }
+
+    pub(crate) fn with_cancellation(
+        mut self,
+        cancel: dohc_engine_files::CancellationToken,
+    ) -> Self {
+        self.batch_retry.cancel = cancel;
+        self
     }
 
     fn captured_root(&self) -> Result<&CapturedRoot, CaptureError> {
@@ -1149,14 +1162,16 @@ impl StoreCaptureSink {
             inputs.push(prepared.input);
             identities.push((prepared.size, prepared.sha256));
         }
-        let results = self.actor.capture_ingest_batch_blocking(
-            inputs,
-            Arc::clone(&self.search_policy),
-            self.leases.clone(),
-            Arc::new(NoFaults),
-            self.shadow_root.clone(),
-            root_guard,
-        );
+        let results = self.batch_retry.run(|| {
+            self.actor.capture_ingest_batch_blocking(
+                inputs.clone(),
+                Arc::clone(&self.search_policy),
+                self.leases.clone(),
+                Arc::new(NoFaults),
+                self.shadow_root.clone(),
+                Arc::clone(&root_guard),
+            )
+        });
         match results {
             Ok(results) if results.len() == identities.len() => {
                 let mut outcomes = Vec::with_capacity(results.len());
