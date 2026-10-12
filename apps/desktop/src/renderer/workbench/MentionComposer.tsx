@@ -1,4 +1,4 @@
-import { AtSign, FileText, Hash, Send } from "lucide-react";
+import { AtSign, FileText, Hash } from "lucide-react";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   activeMentionQuery,
@@ -10,6 +10,7 @@ import { agentRosterPickIsPresent, mapAgentRosterPick, type AgentRosterPick } fr
 import type { WorkspaceHeadingRecord } from "../../ipc/bridgeContract";
 import { formatChatFileReferenceToken } from "./chatFileMentions";
 import { ChatAvatar } from "./ChatAvatar";
+import { ComposerSendButton } from "./ComposerSendButton";
 import { SkeletonRows } from "../ui/SkeletonRows";
 import {
   MENU_ACTIVE_OPTION,
@@ -44,7 +45,10 @@ export function MentionComposer(props: {
   testIdPrefix: string;
   composerId: string;
   value: string;
+  // A send is in flight. A slow one shows on the send control.
   sending: boolean;
+  // The composer cannot send yet for another reason, such as loading.
+  disabled?: boolean;
   placeholder: string;
   sendLabel: string;
   candidates: readonly MentionCandidate[];
@@ -369,6 +373,8 @@ export function MentionComposer(props: {
   };
 
   const isPost = props.surface === "post";
+  const locked = props.sending || props.disabled === true;
+  const empty = !props.allowEmptySend && props.value.trim().length === 0;
   return (
     <form
       data-expanded={isPost ? expanded : undefined}
@@ -551,7 +557,7 @@ export function MentionComposer(props: {
         id={props.composerId}
         data-testid={`${props.testIdPrefix}-composer`}
         value={props.value}
-        disabled={props.sending}
+        disabled={locked}
         rows={2}
         placeholder={props.placeholder}
         role="combobox"
@@ -619,7 +625,7 @@ export function MentionComposer(props: {
               aria-label="Mention"
               title="Mention a person or agent"
               tabIndex={-1}
-              disabled={props.sending}
+              disabled={locked}
               onMouseDown={(event) => {
                 event.preventDefault();
                 insertAtCaret("@");
@@ -635,7 +641,7 @@ export function MentionComposer(props: {
                 aria-label="Attach a file"
                 title="Attach a file"
                 tabIndex={-1}
-                disabled={props.sending}
+                disabled={locked}
                 onMouseDown={(event) => {
                   event.preventDefault();
                   highlightFileOnOpen.current = true;
@@ -648,18 +654,13 @@ export function MentionComposer(props: {
               </button>
             ) : null}
             <span className="flex-1" />
-            <button
-              type="submit"
-              data-testid={`${props.testIdPrefix}-send`}
-              aria-label={props.sendLabel}
-              title={props.sendLabel}
-              disabled={
-                props.sending || (!props.allowEmptySend && props.value.trim().length === 0)
-              }
-              className="h-7 cursor-pointer rounded-md bg-accent px-3 text-[12px] font-medium text-bg hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
-            >
-              Post
-            </button>
+            <ComposerSendButton
+              testId={`${props.testIdPrefix}-send`}
+              label={props.sendLabel}
+              sending={props.sending}
+              disabled={props.disabled === true || empty}
+              shape="post"
+            />
           </div>
         ) : (
           // Collapsed: the pinned send target still exists for drivers that
@@ -669,7 +670,7 @@ export function MentionComposer(props: {
             data-testid={`${props.testIdPrefix}-send`}
             aria-label={props.sendLabel}
             className="sr-only"
-            disabled={props.sending || props.value.trim().length === 0}
+            disabled={locked || props.value.trim().length === 0}
           >
             Post
           </button>
@@ -681,7 +682,7 @@ export function MentionComposer(props: {
             aria-label="Mention"
             title="Mention a person or agent"
             tabIndex={-1}
-            disabled={props.sending}
+            disabled={locked}
             onMouseDown={(event) => {
               // Insert "@" and open the roster without stealing textarea focus.
               event.preventDefault();
@@ -699,7 +700,7 @@ export function MentionComposer(props: {
               aria-label="Attach a file"
               title="Attach a file"
               tabIndex={-1}
-              disabled={props.sending}
+              disabled={locked}
               onMouseDown={(event) => {
                 event.preventDefault();
                 highlightFileOnOpen.current = true;
@@ -710,18 +711,13 @@ export function MentionComposer(props: {
               <FileText size={14} strokeWidth={1.9} aria-hidden />
             </button>
           ) : null}
-          <button
-            type="submit"
-            data-testid={`${props.testIdPrefix}-send`}
-            aria-label={props.sendLabel}
-            title={props.sendLabel}
-            disabled={
-              props.sending || (!props.allowEmptySend && props.value.trim().length === 0)
-            }
-            className="grid size-8 shrink-0 cursor-pointer place-items-center rounded-md bg-accent text-bg hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
-          >
-            <Send size={13} aria-hidden />
-          </button>
+          <ComposerSendButton
+            testId={`${props.testIdPrefix}-send`}
+            label={props.sendLabel}
+            sending={props.sending}
+            disabled={props.disabled === true || empty}
+            shape="icon"
+          />
         </>
       )}
     </form>
