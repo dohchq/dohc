@@ -1,7 +1,11 @@
+import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { SIGN_UP_INVITE_KEY_HEADER, SIGN_UP_INVITE_PATH } from "@dohc/workspace-auth/signUp";
 import { afterEach, describe, expect, it } from "vitest";
 import { createSignUpInviteRoute } from "./signUpInviteRoute";
-import { claimWorkspace, closeTestStorages, createShare, testHandler, testStorage } from "./testing";
+import { openSyncRelayStorage } from "./storage";
+import { RelayWriteOwner } from "./storage/writeOwner";
+import { claimWorkspace, closeTestStorages, createShare, tempRoot, testHandler, testStorage } from "./testing";
 
 afterEach(closeTestStorages);
 
@@ -65,6 +69,27 @@ describe("sign-up invite check", () => {
     }
     const get = await route(new Request(`http://sync-relay:1788${SIGN_UP_INVITE_PATH}`, { headers: { [SIGN_UP_INVITE_KEY_HEADER]: KEY } }));
     expect(get.status).toBe(404);
+  });
+
+  it("answers 503 instead of an invite once the relay retires its storage", async () => {
+    let owner!: RelayWriteOwner;
+    const path = join(await tempRoot("db"), "relay.sqlite");
+    new DatabaseSync(path).close();
+    const storage = openSyncRelayStorage(path, {}, (db) => (owner = new RelayWriteOwner(db)));
+    try {
+      const h = testHandler(storage);
+      await claimWorkspace(h, OWNER, WORKSPACE);
+      await createShare(h, OWNER, WORKSPACE, { recipientEmail: "late@corp.example", paths: ["docs"] });
+      const route = createSignUpInviteRoute({ storage, key: KEY });
+      expect(await invited(route, "late@corp.example")).toBe(true);
+
+      owner.invalidate();
+      const response = await ask(route, "late@corp.example");
+      expect(response.status).toBe(503);
+      expect(await response.json()).toEqual({ ok: false, error: "service unavailable" });
+    } finally {
+      storage.close();
+    }
   });
 
   it("refuses a body without an address", async () => {

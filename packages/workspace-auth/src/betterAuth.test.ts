@@ -171,11 +171,44 @@ describeWithPostgres("closed sign-up", () => {
     expect(sent.some((message) => message.to === email)).toBe(false);
   });
 
-  it("creates an account the server admitted", async () => {
+  it("creates an account the server admitted, with no session until its email is verified", async () => {
     const email = `${unique()}@dohc.test`;
-    const signup = await closedAuth("admitted").api.signUpEmail({ body: { email, password: PASSWORD, name: "Test User" } });
-    expect(signup.user.email).toBe(email);
+    const closed = closedAuth("admitted");
+    const response = await closed.handler(
+      new Request("http://localhost:1786/api/auth/sign-up/email", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ email, password: PASSWORD, name: "Test User" }),
+      }),
+    );
+    expect(response.status).toBe(200);
+    expect(((await response.json()) as { token: unknown }).token).toBeNull();
+    expect(response.headers.get("set-auth-token")).toBeNull();
+    expect(response.headers.get("set-cookie")).toBeNull();
     expect(await accountExists(email)).toBe(true);
+
+    await expect(closed.api.signInEmail({ body: { email, password: PASSWORD } })).rejects.toMatchObject({
+      statusCode: 403,
+      body: { code: "EMAIL_NOT_VERIFIED" },
+    });
+
+    // Opening the emailed link proves the mailbox; then the desktop's device
+    // sign-in completes as on an open server.
+    await closed.api.verifyEmail({ query: { token: linkIn(lastEmailTo(email)).searchParams.get("token") ?? "" } });
+    const signin = await closed.api.signInEmail({ body: { email, password: PASSWORD }, returnHeaders: true });
+    const cookie = signin.headers.get("set-cookie")?.split(";")[0] ?? "";
+    const device = await closed.api.deviceCode({ body: { client_id: "dohc-desktop" } });
+    await closed.api.deviceVerify({ query: { user_code: device.user_code }, headers: { cookie } });
+    await closed.api.deviceApprove({ body: { userCode: device.user_code }, headers: { cookie } });
+    const token = await closed.api.deviceToken({
+      body: {
+        grant_type: "urn:ietf:params:oauth:grant-type:device_code",
+        device_code: device.device_code,
+        client_id: "dohc-desktop",
+      },
+    });
+    const session = await closed.api.getSession({ headers: { authorization: `Bearer ${token.access_token}` } });
+    expect(session?.user.email).toBe(email);
   });
 
   it("asks the person to try again when the server cannot check invites", async () => {

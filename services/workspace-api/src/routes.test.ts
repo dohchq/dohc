@@ -187,6 +187,8 @@ describe("account pages", () => {
       await router()(get("/account/sign-in?next=%2Fdevice%3Fuser_code%3DABCD-EFGH"))
     ).text();
     expect(body).toContain('data-next="/device?user_code=ABCD-EFGH"');
+    // A closed server refuses an unverified sign-in, so the page offers a new link.
+    expect(body).toContain('href="/account/verify-email?next=%2Fdevice%3Fuser_code%3DABCD-EFGH"');
   });
 
   it("sends a signed-out visitor from the account page to sign-in", async () => {

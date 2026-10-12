@@ -47,6 +47,8 @@ describe("closed sign-up", () => {
     vi.spyOn(console, "error").mockImplementation(() => {});
     const failing = [
       async () => new Response("not found", { status: 404 }),
+      // A relay that retired its storage answers every request this way.
+      async () => Response.json({ ok: false, error: "service unavailable" }, { status: 503 }),
       async () => Response.json({ invited: "yes" }),
       async () => {
         throw new TypeError("fetch failed");

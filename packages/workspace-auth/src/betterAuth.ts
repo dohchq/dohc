@@ -35,6 +35,8 @@ interface WorkspaceAuthOptions {
   sendEmail?: SendEmail;
   // Closed sign-up. Without it, anyone who reaches the server can create an
   // account. The hook runs on every user insert, so no route can skip it.
+  // Admission trusts the typed address, so a closed server also issues no
+  // session until the person proves they own that mailbox.
   admitAccount?: (email: string) => Promise<SignUpAdmission>;
 }
 
@@ -63,6 +65,7 @@ export function createWorkspaceAuth(options: WorkspaceAuthOptions) {
     database: options.pool,
     emailAndPassword: {
       enabled: true,
+      requireEmailVerification: admitAccount !== undefined,
       resetPasswordTokenExpiresIn: EMAIL_LINK_TTL_SECONDS,
       revokeSessionsOnPasswordReset: true,
       sendResetPassword: async ({ user, token }) => {

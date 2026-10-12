@@ -73,7 +73,7 @@ ${field("password", "Password", 'type="password" name="password" autocomplete="c
 <button type="submit">Sign in</button>
 </form>
 ${STATUS}
-<p class="links"><a href="${escapeHtml(signUpHref)}">Create an account</a><a href="/account/forgot-password">Forgot your password?</a></p>`,
+<p class="links"><a href="${escapeHtml(signUpHref)}">Create an account</a><a href="/account/forgot-password">Forgot your password?</a><a href="${escapeHtml(`/account/verify-email?next=${encodeURIComponent(next ?? "/account")}`)}">Send a verification link</a></p>`,
   });
 }
 

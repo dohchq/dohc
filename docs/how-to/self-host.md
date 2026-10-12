@@ -137,9 +137,14 @@ A pending invite exists when someone shares work with an email address that has 
 Revoking that share removes the invite.
 The server ignores case and surrounding spaces when it compares addresses.
 
+With a list, a person cannot sign in until they open the verification link sent to their address.
+This also applies to existing accounts that never verified their address.
+
 Any other address gets a message that the server creates accounts only for approved or invited addresses.
 Share links need no account, so closed sign-up does not change them.
-Removing an address from the list does not remove its existing account.
+The server checks eligibility when it creates the account.
+Removing an address from the list later does not remove its account.
+Revoking an invite after its account exists does not remove that account either.
 Stop and start the deployment to apply a changed list.
 Leave `DOHC_SIGN_UP_EMAILS` empty to open sign-up again.
 

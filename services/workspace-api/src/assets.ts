@@ -212,6 +212,7 @@ function setStatus(kind, text) {
 function errorText(status, data) {
   const message = data && typeof data.message === "string" ? data.message.trim() : "";
   const code = data && typeof data.code === "string" ? data.code : "";
+  if (code === "EMAIL_NOT_VERIFIED") return "Verify your email before you sign in. Open the link dohc sent you, or send a new one.";
   if (message && (status < 500 || code)) return message;
   if (status === 429) return "Too many attempts. Wait a minute, then try again.";
   return "The server could not complete this request. Try again.";
