@@ -12,30 +12,27 @@ import { mergeShareSkippedOps, type ShareSkippedOps } from "./registryStore";
  * every page of a long backlog would fan one pull into an unbounded number of
  * concurrent scans.
  *
- * It cannot notify: it is handed a reader and a writer and nothing else. The
- * pull sites notify once, when the pull settles, success or failure.
+ * It cannot notify: it is handed a writer and nothing else. The pull sites
+ * notify once, when the pull settles, success or failure.
  */
 export function createShareSkipRecorder<
   T extends { skippedOps?: ShareSkippedOps },
 >(target: {
-  /** The record as it stands now, or undefined when it is gone. */
-  current: () => T | undefined;
-  persist: (next: T) => void;
+  /**
+   * Applies `change` to the record as it stands when written, so an
+   * acknowledgement or removal made meanwhile is kept. Writes nothing when
+   * the record is gone.
+   */
+  update: (change: (current: T) => T) => Promise<void>;
   now?: () => number;
 }): (refusals: readonly ShareViewRefusal[]) => Promise<void> {
   const now = target.now ?? (() => Date.now());
   return async (refusals) => {
     if (refusals.length === 0) return;
-    // Read per call, not once: an earlier page of this same pull has already
-    // written, and a share can be revoked mid-pull.
-    const current = target.current();
-    if (!current) return;
-    target.persist({
+    const skipped = refusals.map((refusal) => ({ ...refusal, atMs: now() }));
+    await target.update((current) => ({
       ...current,
-      skippedOps: mergeShareSkippedOps(
-        current.skippedOps,
-        refusals.map((refusal) => ({ ...refusal, atMs: now() })),
-      ),
-    });
+      skippedOps: mergeShareSkippedOps(current.skippedOps, skipped),
+    }));
   };
 }

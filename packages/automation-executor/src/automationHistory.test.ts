@@ -18,7 +18,7 @@ function history(...moments: AutomationHistoryMoment[]): AutomationsFileHistory 
   return {
     flush: async () => {},
     fileObjectIdForPath: async () => "object",
-    listMoments: async () => ({ moments: moments.map((_, index) => ({ id: String(index), protected: false })), nextBeforeMomentOrder: null }),
+    listMoments: async () => ({ moments: moments.map((_, index) => ({ id: String(index), protected: false })), nextCursor: null }),
     readMoment: async (id) => ({ protected: false, moment: moments[Number(id)]! }),
   };
 }
@@ -28,6 +28,8 @@ describe("the last person who changed an automation entry", () => {
     { authors: undefined, expected: "owner" },
     { authors: [], expected: "owner" },
     { authors: [human], expected: "owner" },
+    { authors: [{ kind: "unattributed" } as const], expected: null },
+    { authors: [named("editor"), { kind: "unattributed" } as const], expected: null },
     { authors: [agent], expected: "owner" },
     { authors: [human, agent], expected: "owner" },
     { authors: [named("editor"), named("editor")], expected: "editor" },

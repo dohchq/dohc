@@ -4,7 +4,7 @@ import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
 import { EditorErrorBoundary } from "./EditorErrorBoundary";
-import { markdownToYDoc } from "./import-export";
+import { markdownToYDoc } from "@dohc/ydoc-projection";
 import { MarkdownEditor } from "./MarkdownEditor";
 
 const collaborationModule = vi.hoisted(() => ({ loads: 0 }));

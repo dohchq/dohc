@@ -397,3 +397,27 @@ it("flushes and retries a missing address once after an agent moves its folder",
   await expect(f.handler("agent", { ...request, datasetPath: "absent/dataset.json" })).rejects.toThrow("Collection reference broken");
   expect(f.flushSourceCapture).toHaveBeenCalledTimes(2);
 });
+
+
+it.each(["approve","approveMigration"])("refuses automation and received-share %s authority before calling a host", async action => {
+  const f=fixture(), input={action,workspaceId:"workspace",preparationId:datasetId,revisionSha256:f.revision.revisionSha256,...(action==="approveMigration"?{approvalDigest:"a".repeat(64)}:{})};
+  await expect(f.handler("agent",input,{depth:1})).rejects.toThrow("Automations cannot approve");
+  f.workspace.shareView={};
+  await expect(f.handler("agent",input,{depth:0})).rejects.toThrow("original workspace");
+});
+
+it.each([2, 3])("recovers revision %s to the base address", async number => {
+  const f = fixture();
+  f.sources.clear();
+  const directory = `data/revisions/${number}-00000000-0000-4000-8000-000000000099`;
+  const definition = { ...f.revision.definition, schemaPath: `${directory}/schema.sql`, operationsPath: `${directory}/operations.js` };
+  const revision = describeDatasetRevision({ definition, revision: number, schemaSql: "SCHEMA", operationSource: "OPERATIONS" });
+  const sourceCursor = { workspaceId: "workspace", datasetId, hostEpoch: "old", approvedRevisionHash: revision.revisionSha256, revision: number, digest: "b".repeat(64) };
+  f.host.claimRecovery.mockResolvedValue({ transferId: datasetId, manifestSha256: "a".repeat(64), sourceCursor, targetCursor: { ...sourceCursor, hostEpoch: "new" } });
+  f.host.approvedArtifacts.mockResolvedValue({ active: true, revision, schemaSql: "SCHEMA", operationSource: "OPERATIONS" });
+  expect(await f.handler("window", { action: "claimRecovery", workspaceId: "workspace", transferId: datasetId, manifestSha256: "a".repeat(64), sourceCursor, oldHostStopped: true })).toMatchObject({ datasetPath: "data/dataset.json" });
+  expect(JSON.parse(f.sources.get("data/dataset.json")!)).toEqual(definition);
+  expect(f.sources.get(definition.schemaPath)).toBe("SCHEMA");
+  expect(f.sources.get(definition.operationsPath)).toBe("OPERATIONS");
+  expect(f.sources.has(`${directory}/dataset.json`)).toBe(false);
+});

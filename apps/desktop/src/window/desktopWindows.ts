@@ -18,7 +18,7 @@ interface DesktopWindowsDependencies {
   BrowserWindow: Pick<typeof BrowserWindow, "getAllWindows">;
   Menu: Pick<typeof Menu, "setApplicationMenu" | "buildFromTemplate">;
   dialog: Pick<Dialog, "showErrorBox" | "showMessageBox">;
-  process: Pick<NodeJS.Process, "platform" | "execPath">;
+  process: Pick<NodeJS.Process, "platform" | "execPath" | "argv">;
   workspaceSummaries(): WorkspaceSummary[];
   currentUpdateState(): { canInstall?: boolean };
   stateDir(): string;
@@ -59,11 +59,19 @@ export function createDesktopWindows(dependencies: DesktopWindowsDependencies) {
     }
   }
 
-  let preferredWorkspaceId: string | null = null;
+  const preferredWorkspaceIds = new WeakMap<WebContents, string>();
+  let lastActivatedWorkspaceId: string | null = null;
+
+  function setPreferredWorkspaceId(workspaceId: string, sender: WebContents): void {
+    preferredWorkspaceIds.set(sender, workspaceId);
+    lastActivatedWorkspaceId = workspaceId;
+  }
 
   function prioritizePreferredWorkspace(
     workspaces: WorkspaceSummary[],
+    sender: WebContents,
   ): WorkspaceSummary[] {
+    const preferredWorkspaceId = preferredWorkspaceIds.get(sender);
     if (!preferredWorkspaceId) return workspaces;
     const index = workspaces.findIndex(
       (workspace) => workspace.workspaceId === preferredWorkspaceId,
@@ -101,8 +109,10 @@ export function createDesktopWindows(dependencies: DesktopWindowsDependencies) {
 
   function trackWorkspaceWindow(window: BrowserWindow): BrowserWindow {
     workspaceWindows.track(window);
-    const participantId = window.webContents.id;
+    const contents = window.webContents;
+    const participantId = contents.id;
     window.on("closed", () => {
+      preferredWorkspaceIds.delete(contents);
       workspaceWindows.forget(window);
       dependencies.exitRounds?.remove(participantId);
     });
@@ -164,10 +174,10 @@ export function createDesktopWindows(dependencies: DesktopWindowsDependencies) {
     window: BrowserWindow | undefined,
     workspace: WorkspaceSummary,
   ): Promise<BrowserWindow> {
-    preferredWorkspaceId = workspace.workspaceId;
     const target =
       window && workspaceWindows.allLive().includes(window) ? window : liveWorkspaceWindow();
     if (target) {
+      setPreferredWorkspaceId(workspace.workspaceId, target.webContents);
       target.webContents.send(CHANNELS.workspaceActivated, workspace);
       focusShareHandoffWindow(target);
       return Promise.resolve(target);
@@ -271,6 +281,10 @@ export function createDesktopWindows(dependencies: DesktopWindowsDependencies) {
 
   function refreshNativeWorkspaceSurfaces(): void {
     if (!app.isReady()) return;
+    if (process.argv.includes("--dohc-isolated-test")) {
+      refreshApplicationMenu();
+      return;
+    }
     const roots = nativeWorkspaceSummaries().map((workspace) => workspace.rootPath);
     try {
       if (
@@ -318,22 +332,24 @@ export function createDesktopWindows(dependencies: DesktopWindowsDependencies) {
     // the crashed renderer cannot clean up itself.
     const activeWorkspaceId =
       dependencies.rendererWorkspaceSessions.current(sender)?.workspaceId ??
-      preferredWorkspaceId;
+      preferredWorkspaceIds.get(sender);
     // retireForReload invalidates the lease before returning its promise. The
     // outgoing document cannot admit fresh work while these owners drain.
     const accepted = await dependencies.rendererWorkspaceSessions.retireForReload(
       sender,
       rendererDocumentId,
     );
-    if (accepted && activeWorkspaceId) preferredWorkspaceId = activeWorkspaceId;
+    if (accepted && activeWorkspaceId && !sender.isDestroyed()) {
+      setPreferredWorkspaceId(activeWorkspaceId, sender);
+    }
     return accepted;
   }
 
   async function prepareAfterRendererCrash(sender: WebContents): Promise<void> {
     const activeWorkspaceId =
       dependencies.rendererWorkspaceSessions.current(sender)?.workspaceId ??
-      preferredWorkspaceId;
-    if (activeWorkspaceId) preferredWorkspaceId = activeWorkspaceId;
+      preferredWorkspaceIds.get(sender);
+    if (activeWorkspaceId) setPreferredWorkspaceId(activeWorkspaceId, sender);
     await dependencies.rendererWorkspaceSessions.retireAfterCrash(sender);
   }
 
@@ -360,14 +376,22 @@ export function createDesktopWindows(dependencies: DesktopWindowsDependencies) {
     return window;
   }
 
-  function createWorkspaceWindow(): BrowserWindow {
-    return trackWorkspaceWindow(
+  // A window whose renderer shows Notices: a live workspace window, or the
+  // manager. Never the hidden export window.
+  function showsNotices(window: BrowserWindow): boolean {
+    return workspaceWindows.allLive().includes(window) || (window === managerWindow && !window.isDestroyed());
+  }
+
+  function createWorkspaceWindow(workspaceId: string | null = lastActivatedWorkspaceId): BrowserWindow {
+    const window = trackWorkspaceWindow(
       createMainWindow({
         beforeRendererReload: prepareAfterRendererCrash,
         afterRendererCrashLoop: dependencies.afterRendererCrashLoop,
         preloadArguments: dependencies.preloadArguments,
       }),
     );
+    if (workspaceId) setPreferredWorkspaceId(workspaceId, window.webContents);
+    return window;
   }
 
   // Resolves once the renderer can receive activation; rejects when the
@@ -438,7 +462,7 @@ export function createDesktopWindows(dependencies: DesktopWindowsDependencies) {
       focusShareHandoffWindow(window);
       return window;
     });
-    const window = createWorkspaceWindow();
+    const window = createWorkspaceWindow(workspace.workspaceId);
     const entry = {
       window,
       opening: (async () => {
@@ -495,9 +519,10 @@ export function createDesktopWindows(dependencies: DesktopWindowsDependencies) {
     prepareAfterRendererCrash,
     showOrCreateMainWindow,
     showOrCreateManagerWindow,
+    showsNotices,
     openWorkspaceInWindow,
     get applicationMenuCanInstallUpdate(): boolean | null { return applicationMenuCanInstallUpdate; },
-    setPreferredWorkspaceId(workspaceId: string): void { preferredWorkspaceId = workspaceId; },
+    setPreferredWorkspaceId,
     seedZoomLevel(zoomLevel: number): void { knownZoomLevel ??= zoomLevel; },
   };
 }

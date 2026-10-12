@@ -8,6 +8,9 @@ import {RestoreHistoryBudget} from "./liveAcceptedHistory";
 /** Bind a native draft to its admitted request, including an agent omitted by the window cap. */
 export function nativeSourceAuthorMatches(storage: StorageContext,
   source: NativeRestoreProposalReceipt["nativeSources"][number], metadata: AdmittedLiveUpdateMetadata, budget: RestoreHistoryBudget): boolean {
+  const automation = "adoptionId" in source.source ? undefined : source.source.origin.automationDeclaration;
+  const admittedAutomation = metadata.authorSnapshot?.find(author => author.kind === "automation");
+  if (!isDeepStrictEqual(admittedAutomation, automation ? {kind: "automation", ...automation} : undefined)) return false;
   const header = storage.db.prepare("SELECT COALESCE(length(CAST(author_context_json AS BLOB)),0) AS bytes FROM sync_relay_live_update_journal WHERE delivery_id=?")
     .get(metadata.accepted.receipt.deliveryId);
   if (!header) return false;

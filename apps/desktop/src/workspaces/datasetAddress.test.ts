@@ -49,6 +49,19 @@ it("rejects unknown, invalid, and cross-workspace source captures", async () => 
   }
 });
 
+it("names every conflicting descriptor without including other Collections", async () => {
+  const sources = new Map([
+    ["data/revisions/2-review/dataset.json", JSON.stringify(definition)],
+    ["data/dataset.json", JSON.stringify(definition)],
+    ["copy/dataset.json", JSON.stringify(definition)],
+    ["other/dataset.json", JSON.stringify({ datasetId: id(9) })],
+  ]);
+  const adapter = sourceCaptureAdapter(sources);
+  await expect(resolveDatasetAddress(adapter, "w", "data/dataset.json", signal)).rejects.toMatchObject({
+    message: "Collection address ambiguous: data/dataset.json. These dataset.json files name this Collection: copy/dataset.json, data/dataset.json, data/revisions/2-review/dataset.json. Choose one file to keep. Remove the other files.",
+  });
+});
+
 it("batches discovery, reuses unchanged descriptors, and rejects duplicate IDs", async () => {
   const sources = new Map([["data/dataset.json", JSON.stringify(definition)], ["other/dataset.json", JSON.stringify({ datasetId: id(9), name: "batch-only" })]]);
   const onRequest = vi.fn();

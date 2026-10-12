@@ -30,6 +30,8 @@ function isSubsequence(needle: string, haystack: string): boolean {
   return needle.length === 0;
 }
 
+// The tier a lowercase path matches the lowercase query at, or null when it
+// doesn't match.
 function quickOpenMatchTierLowercase(
   query: string,
   path: string,
@@ -41,14 +43,6 @@ function quickOpenMatchTierLowercase(
   if (path.includes(query)) return TIER_SUBSTRING;
   if (isSubsequence(query, path)) return TIER_FUZZY;
   return null;
-}
-
-// The tier a path matches the query at, or null when it doesn't match.
-// Exported for direct unit testing of the tier rules.
-export function quickOpenMatchTier(query: string, path: string): number | null {
-  const q = query.toLowerCase();
-  const p = path.toLowerCase();
-  return quickOpenMatchTierLowercase(q, p, basenameOf(p));
 }
 
 export interface QuickOpenContext {
@@ -128,8 +122,11 @@ function insertBounded(
   if (selected.length > limit) selected.pop();
 }
 
-// Rank a prepared index and retain at most `limit` paths. A finite limit uses
-// bounded insertion, so a query never sorts the complete match set.
+// Rank a prepared index and retain at most `limit` paths. Non-matching paths
+// are excluded. Sort key, in order: pinned first → match tier → recency rank
+// (more recent first; the "recent files boosted" rule) → shorter path →
+// alphabetical. A finite limit uses bounded insertion, so a query never sorts
+// the complete match set.
 export function rankPreparedQuickOpenPaths(
   query: string,
   paths: readonly PreparedQuickOpenPath[],
@@ -150,16 +147,4 @@ export function rankPreparedQuickOpenPaths(
     insertBounded(selected, path, tier, boundedLimit);
   }
   return selected.map((path) => path.prepared.path);
-}
-
-// Ranks `paths` for `query`. Non-matching paths are excluded. Sort key, in
-// order: pinned first → match tier → recency rank (more recent first; the
-// "recent files boosted" rule) → shorter path → alphabetical.
-export function rankQuickOpenPaths(
-  query: string,
-  paths: readonly string[],
-  context: QuickOpenContext,
-): string[] {
-  const prepared = prepareQuickOpenPaths(paths, context);
-  return rankPreparedQuickOpenPaths(query, prepared, prepared.length);
 }

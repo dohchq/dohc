@@ -1,5 +1,4 @@
 import { ipcErrorMessage } from "./ipcError";
-import { Check, Copy } from "lucide-react";
 import {
   useLayoutEffect,
   useMemo,
@@ -21,7 +20,13 @@ import { bridge } from "./bridge";
 import type { ShareRemovalNotices } from "./shell/useShareRemovalNotices";
 import { AutomationShareNote, useAutomationShareCheck, type AutomationShare } from "./automationShareCheck";
 import { DangerButton, PrimaryButton, SecondaryButton, SectionLabel } from "./ui/controls";
+import { CopyField, type CopySecret } from "./ui/CopyButton";
+
+// Share links are shown once, so a link whose copy is gone is reset, not
+// copied again.
+const SHARE_LINK_SECRET: CopySecret = { what: "the share link", again: "Reset the link in Share to get a new one." };
 import { SegmentedControl } from "./ui/SegmentedControl";
+import { SkeletonRows } from "./ui/SkeletonRows";
 
 type LinkAccess = "view" | "comment" | "edit";
 
@@ -414,7 +419,6 @@ export function useRelayShareLinkPane(props: {
   >({});
   const [linkError, setLinkError] = useState<string | null>(null);
   const [minted, setMinted] = useState<{ grantId: string; url: string } | null>(null);
-  const [linkCopied, setLinkCopied] = useState(false);
   const [links, setLinks] = useState<RelayShareLinkRow[]>([]);
   const [linksLoading, setLinksLoading] = useState(false);
   const [linksError, setLinksError] = useState<string | null>(null);
@@ -436,7 +440,6 @@ export function useRelayShareLinkPane(props: {
     useState<OwnerConfirmation | null>(null);
   const linkScopeGeneration = useRef(0);
   const latestMintRequest = useRef(0);
-  const latestCopyRequest = useRef(0);
   const latestInventoryRequest = useRef(0);
   const latestMutationRequest = useRef(0);
   const latestDiscussionRequestByShareId = useRef(new Map<string, number>());
@@ -540,7 +543,6 @@ export function useRelayShareLinkPane(props: {
     stopAllOwnerActivity();
     linkScopeGeneration.current += 1;
     latestMintRequest.current += 1;
-    latestCopyRequest.current += 1;
     latestInventoryRequest.current += 1;
     latestMutationRequest.current += 1;
     latestDiscussionRequestByShareId.current.clear();
@@ -559,7 +561,6 @@ export function useRelayShareLinkPane(props: {
     setAddAccessByShareId({});
     setLinkError(null);
     setMinted(null);
-    setLinkCopied(false);
     setLinks([]);
     setLinksLoading(false);
     setLinksError(null);
@@ -577,7 +578,6 @@ export function useRelayShareLinkPane(props: {
       stopAllOwnerActivity();
       linkScopeGeneration.current += 1;
       latestMintRequest.current += 1;
-      latestCopyRequest.current += 1;
       latestInventoryRequest.current += 1;
       latestMutationRequest.current += 1;
       latestDiscussionRequestByShareId.current.clear();
@@ -1432,7 +1432,6 @@ export function useRelayShareLinkPane(props: {
     setLinkRequestBusy(action);
     setLinkError(null);
     setMinted(null);
-    setLinkCopied(false);
 
     try {
       const result = await request();
@@ -1443,7 +1442,6 @@ export function useRelayShareLinkPane(props: {
         return;
       }
       setMinted({ grantId: result.grantId, url: result.url });
-      latestCopyRequest.current += 1;
       void refreshLinks(scopeGeneration);
     } catch (cause) {
       if (
@@ -1599,16 +1597,9 @@ export function useRelayShareLinkPane(props: {
         return;
       }
 
-      if (result.outcome === "rotated") {
-        latestCopyRequest.current += 1;
+      if (result.outcome === "rotated" || result.outcome === "widened") {
         setMinted({ grantId: row.grantId, url: result.url });
-        setLinkCopied(false);
-      } else if (result.outcome === "widened") {
-        latestCopyRequest.current += 1;
-        setMinted({ grantId: row.grantId, url: result.url });
-        setLinkCopied(false);
       } else if (result.outcome !== "narrowed") {
-        latestCopyRequest.current += 1;
         setMinted((current) =>
           current?.grantId === row.grantId ? null : current,
         );
@@ -1636,9 +1627,7 @@ export function useRelayShareLinkPane(props: {
       }
       if (!isCurrentLinkScope(scopeGeneration) || latestMutationRequest.current !== requestId) return;
       if (retiresDisplayedCredential) {
-        latestCopyRequest.current += 1;
         setMinted(null);
-        setLinkCopied(false);
       }
       if (action.kind !== "end" || !props.shareRemovals) setLifecycleError(ipcErrorMessage(cause));
       setConfirmation(null);
@@ -1653,29 +1642,10 @@ export function useRelayShareLinkPane(props: {
     }
   }
 
-  async function copyLink() {
-    if (!minted) return;
-    const scopeGeneration = linkScopeGeneration.current;
-    const requestId = ++latestCopyRequest.current;
-    try {
-      await bridge().writeClipboardText({ text: minted.url });
-      if (
-        !isCurrentLinkScope(scopeGeneration) ||
-        latestCopyRequest.current !== requestId
-      ) {
-        return;
-      }
-      setLinkCopied(true);
-    } catch {
-      // The link stays visible for manual selection.
-    }
-  }
-
   function closeDialog() {
     stopAllOwnerActivity();
     linkScopeGeneration.current += 1;
     latestMintRequest.current += 1;
-    latestCopyRequest.current += 1;
     latestInventoryRequest.current += 1;
     latestMutationRequest.current += 1;
     latestDiscussionRequestByShareId.current.clear();
@@ -1698,26 +1668,12 @@ export function useRelayShareLinkPane(props: {
             <p className="m-0 text-xs leading-relaxed text-muted">
               Copy the link now — dohc doesn't keep a copy.
             </p>
-            <div className="flex items-start gap-2">
-              <code
-                data-testid="share-link-url"
-                className="min-w-0 flex-1 select-text break-all rounded-md border border-line bg-bg px-2.5 py-1.5 font-mono text-[11px] leading-snug text-ink"
-              >
-                {minted.url}
-              </code>
-              <button
-                type="button"
-                onClick={() => void copyLink()}
-                className="flex shrink-0 items-center gap-1.5 rounded-md border border-line bg-transparent px-2.5 py-1.5 text-xs text-muted transition-colors hover:bg-hover hover:text-ink"
-              >
-                {linkCopied ? (
-                  <Check size={12} aria-hidden />
-                ) : (
-                  <Copy size={12} aria-hidden />
-                )}
-                {linkCopied ? "Copied" : "Copy"}
-              </button>
-            </div>
+            <CopyField
+              getText={() => minted.url}
+              sensitive={SHARE_LINK_SECRET}
+            >
+              <code data-testid="share-link-url" title={minted.url}>{minted.url}</code>
+            </CopyField>
             <p className="m-0 text-[11px] leading-relaxed text-subtle">
               If you lose the link, reset it to get a new one.
             </p>
@@ -1789,8 +1745,14 @@ export function useRelayShareLinkPane(props: {
             Links
           </SectionLabel>
 
+          {/* Lines stand in only for links not yet shown; a refresh keeps the
+              links on screen and says so. */}
           {linksLoading ? (
-            <p className="m-0 text-xs text-muted">Loading links…</p>
+            visibleLinkGroups.length ? (
+              <p role="status" className="m-0 text-xs text-muted">Loading links…</p>
+            ) : (
+              <SkeletonRows rows={2} label="Loading links…" />
+            )
           ) : null}
 
           {linksError ? (
@@ -1969,7 +1931,11 @@ export function useRelayShareLinkPane(props: {
                         </div>
 
                         {ownerDiscussion.loading ? (
-                          <p className="m-0 text-xs text-muted">Loading comments…</p>
+                          ownerDiscussion.loaded ? (
+                            <p role="status" className="m-0 text-xs text-muted">Loading comments…</p>
+                          ) : (
+                            <SkeletonRows rows={2} label="Loading comments…" />
+                          )
                         ) : null}
 
                         {ownerDiscussion.loadError ? (

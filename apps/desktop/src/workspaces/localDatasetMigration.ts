@@ -41,7 +41,7 @@ interface MigrationAuthority {
   assertCurrent(): void;
   approvedArtifacts(datasetId: string): { revision: DatasetRevision; cursor: DatasetCursor; active: boolean } | Promise<{ revision: DatasetRevision; cursor: DatasetCursor; active: boolean }>;
   prepareMigrationCandidate(input: MigrateDatasetInput): Promise<DatasetMigrationCandidate>;
-  approveMigrationCandidate(input: { workspaceId: string; datasetId: string; candidateId: string; checkpointSha256: string; signal?: AbortSignal }): Promise<{ revision: DatasetRevision; cursor: DatasetCursor }>;
+  approveMigrationCandidate(input: { workspaceId: string; datasetId: string; candidateId: string; checkpointSha256: string; approvalAgent?: import("@dohc/security-contract/approval-provenance").ApprovalAgent | null; signal?: AbortSignal }): Promise<{ revision: DatasetRevision; cursor: DatasetCursor }>;
   discardMigrationCandidate(input: { workspaceId: string; datasetId: string; candidateId: string; signal?: AbortSignal }): Promise<unknown>;
 }
 type MigrationApproval = { preparationId: string; revisionSha256: string; approvalDigest: string; signal?: AbortSignal };
@@ -83,7 +83,7 @@ export function createLocalDatasetMigrations(dependencies: MigrationAuthority) {
       for (const [key, value] of pending) if (value.expiresAtMs <= Date.now()) pending.delete(key);
       if (pending.size + preparing >= 8) throw new Error("Too many Collection changes await approval. Finish or discard a review.");
       if (!allowed(input.descriptorPath) || !allowed(input.migrationPath)
-        || (input.descriptorPath !== "dataset.json" && !input.descriptorPath.endsWith("/dataset.json"))) throw new Error("Choose Collection sources in this workspace.");
+        || !["dataset.json", "revision.json"].includes(input.descriptorPath.split("/").at(-1)!)) throw new Error("Choose Collection sources in this workspace.");
       preparing++;
       try {
         const previous = await dependencies.approvedArtifacts(input.datasetId);

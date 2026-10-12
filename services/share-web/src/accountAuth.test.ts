@@ -120,6 +120,21 @@ describe("browser account transport", () => {
     expect(fetchAuth).toHaveBeenCalledOnce();
   });
 
+  it("forwards a preference cookie without a session and refuses repeated account cookies", async () => {
+    const forwarded: Array<string | null> = [];
+    const serve = handler(async (upstream) => {
+      forwarded.push(upstream.headers.get("cookie"));
+      return Response.json(null);
+    });
+    const preference = `${cookies.dontRememberToken.name}=true`;
+    expect((await serve(request("session", { headers: { cookie: `${preference}; dohc_profile=profile-secret` } }))).status).toBe(200);
+    expect((await serve(request("session", { headers: { cookie: "dohc_profile=profile-secret" } }))).status).toBe(200);
+    for (const cookie of [`${cookies.sessionToken.name}=a; ${cookies.sessionToken.name}=b`, `${preference}; ${preference}`]) {
+      expect((await serve(request("session", { headers: { cookie } }))).status).toBe(404);
+    }
+    expect(forwarded).toEqual([preference, null]);
+  });
+
   it.each(["https://evil.test", "null", `${origin}, https://evil.test`, "", `${origin}/`])(
     "refuses sign-in Origin %j before forwarding", async (value) => {
       const fetchAuth = vi.fn(async () => upstreamSignIn());

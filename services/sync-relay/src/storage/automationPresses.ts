@@ -9,9 +9,11 @@ import {
 import { authorizeShareGrantAction } from "../shareAuthorization";
 import { validateUserWritePath } from "@dohc/workspace-core";
 import { currentCollectionEditGrant, grantEditsCollection } from "../collectionEditGrant";
+import {fileSideOf, pathVisibleThroughShare} from "../shareFilter";
 import { notFound, RelayError, relayError } from "../errors";
 import type { StorageContext } from "./context";
 import type { SqliteDb } from "./types";
+import type {AutomationDeclaration} from "@dohc/live-session-contract/live-authorship";
 import { markNotices, noticeIdFrom } from "./notices";
 
 // Button presses from shared views, waiting for the workspace's automation
@@ -370,6 +372,28 @@ export function resolveAutomationPress(storage: StorageContext, scope: HostScope
     recordId: row.record_id, confirmed: JSON.parse(row.confirmed_json) as string[] };
 }
 
+/** Called inside journal admission's writer transaction, after an exact accepted replay is resolved. */
+export function automationPressAdmissionAllowed(storage: StorageContext, input: {
+  workspaceId: string; ownerUserId: string; currentPath: string; hostPressId: string; automationId: string; declaration: AutomationDeclaration;
+}): boolean {
+  const found = storage.db.prepare("SELECT * FROM sync_relay_automation_presses WHERE workspace_id=? AND host_press_id=?")
+    .get(input.workspaceId, input.hostPressId);
+  if (!found) return false;
+  const row = pressRow(found);
+  if (row.accepted_generation === null || row.automation_id !== input.automationId ||
+    row.user_id !== input.declaration.attribution.onBehalfOf || !storage.workspaceIsOwnedBy(input.workspaceId, input.ownerUserId)) return false;
+  try {
+    const authorized = currentCollectionEditGrant(storage, {shareId: row.share_id, grantId: row.grant_id,
+      grantGeneration: row.grant_generation, userId: row.user_id});
+    if (authorized.share.workspaceId !== input.workspaceId || !grantEditsCollection(storage, authorized, row.collection_path)) return false;
+    const originalFiles = fileSideOf(authorized.effectiveSelector);
+    return originalFiles !== null && originalFiles.versionId === null && pathVisibleThroughShare(originalFiles, input.currentPath);
+  } catch (error) {
+    if (!(error instanceof RelayError) || (error.code !== "not_found" && error.code !== "share_read_only")) throw error;
+    return false;
+  }
+}
+
 /**
  * How one accepted press ended. Any of the owner's computers settles it,
  * since the host may have changed while it ran. The same answer again
@@ -409,4 +433,16 @@ export function settleAutomationPress(
       marks: notices.map(notice => ({ noticeId: String(notice.notice_id), mark: "dismissed" as const })), nowMs: input.nowMs });
   }
   return result.answer;
+}
+
+/** Recheck the original named grant of a non-Button recipient claim at admission. */
+export function automationGrantAdmissionAllowed(storage: StorageContext, input: {
+  workspaceId: string; ownerUserId: string; currentPath: string; grantId: string; grantGeneration: number; declaration: AutomationDeclaration;
+}): boolean {
+  const userId = input.declaration.attribution.onBehalfOf;
+  if (!userId || !storage.workspaceIsOwnedBy(input.workspaceId, input.ownerUserId)) return false;
+  const allowed = authorizeShareGrantAction({storage, grantId: input.grantId, action: "read", principal: {kind: "user", userId}});
+  if (!allowed.ok || allowed.share.workspaceId !== input.workspaceId || allowed.grant.generation !== input.grantGeneration) return false;
+  const files = fileSideOf(allowed.effectiveSelector);
+  return files !== null && files.versionId === null && pathVisibleThroughShare(files, input.currentPath);
 }

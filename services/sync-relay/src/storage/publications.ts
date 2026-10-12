@@ -1,8 +1,10 @@
+import { visibleSharePath } from "@dohc/security-contract/share-selector";
+import { parseApprovalAgent, type ApprovalAgent } from "@dohc/security-contract/approval-provenance";
 import { createHash } from "node:crypto";
 import { parseAppPublicationCandidate, parseAppCollectionCapability, type AppCollectionCapability, type AppPublicationCandidate, type AppPublicationLimits } from "@dohc/security-contract/app-publication";
 import { parseAppDatasetCapability, type AppDatasetCapability } from "@dohc/security-contract/dataset";
 
-import { effectiveShareSelector, parseStoredAnyShareSelectorJson, targetVersionId, visibleSharePath } from "../shareFilter";
+import { effectiveShareSelector, parseStoredAnyShareSelectorJson, targetVersionId } from "../shareFilter";
 import { notFound, badRequest, relayError, RelayError } from "../errors";
 import { assertWorkspaceQuota } from "./workspaces";
 import type { StorageContext } from "./context";
@@ -14,19 +16,22 @@ import { readCurrentShareGrant } from "./currentShareGrant";
 
 export interface PublicationOwner { workspaceId: string; shareId: string; grantId: string; generation: number; ownerUserId: string }
 export interface PublishAppPublicationInput extends PublicationOwner {
+  agent?: ApprovalAgent | null;
   candidate: unknown;
   blobs: readonly { sha256: string; bytes: Uint8Array }[];
   limits: AppPublicationLimits;
   nowMs: number;
 }
+export interface AppPublicationApproval { agent: ApprovalAgent | null; selector: unknown; access: "view" | "comment" | "edit"; committedCandidateDigest: string; sourceRevision: string; capabilities: AppPublicationCandidate["capabilities"] }
 export interface AppPublicationRow {
+  approvalProvenance?: AppPublicationApproval;
   publicationId: string; candidate: AppPublicationCandidate; owner: PublicationOwner;
   active: boolean; authorityRevision: number; createdAtMs: number;
 }
 export type AppPublicationState = Omit<AppPublicationRow, "candidate">;
 export interface ReadAppPublicationInput { workspaceId: string; publicationId: string; ownerUserId: string; limits: AppPublicationLimits }
 export interface WithdrawAppPublicationInput extends Omit<ReadAppPublicationInput, "limits"> { expectedAuthorityRevision: number }
-export interface ReactivateAppPublicationInput extends ReadAppPublicationInput { expectedAuthorityRevision: number }
+export interface ReactivateAppPublicationInput extends ReadAppPublicationInput { expectedAuthorityRevision: number; agent?: ApprovalAgent | null }
 export interface LinkAppPublicationInput {
   publicationId: string;
   // Derived from an authenticated link session. Never accepted from a request body.
@@ -88,6 +93,8 @@ function header(storage: StorageContext, publicationId: string, workspaceId: str
   const state: AppPublicationState = {publicationId,
     owner: {workspaceId,shareId: String(row.share_id),grantId: String(row.grant_id),generation: Number(row.grant_generation),ownerUserId},
     active: row.active === 1,authorityRevision: Number(row.authority_revision),createdAtMs: Number(row.created_at_ms)};
+  const approval = storage.db.prepare("SELECT facts_json FROM sync_relay_app_publication_approvals WHERE publication_id=? ORDER BY authority_revision DESC LIMIT 1").get(publicationId);
+  if (approval) state.approvalProvenance = JSON.parse(String(approval.facts_json));
   return {row, state};
 }
 class PublicationManifestUnavailable extends RelayError {
@@ -129,7 +136,8 @@ export function publishAppPublication(storage: StorageContext, input: PublishApp
     for (const hash of new Set([manifestHash, ...candidate.files.map(file => file.sha256)])) {
       storage.db.prepare("INSERT INTO sync_relay_app_publication_blobs(publication_id,workspace_id,sha256) VALUES(?,?,?)").run(publicationId,owner.workspaceId,hash);
     }
-    return {publicationId,candidate,owner,active:true,authorityRevision:1,createdAtMs:now};
+    const approvalProvenance = recordApproval(storage, publicationId, 1, owner, candidate, input.agent);
+    return {publicationId,candidate,owner,active:true,authorityRevision:1,createdAtMs:now,approvalProvenance};
   });
 }
 export function readAppPublication(storage: StorageContext, input: ReadAppPublicationInput): AppPublicationRow {
@@ -144,7 +152,7 @@ export interface ListAppPublicationsInput {
   appRoot?: string;
 }
 export type AppPublicationListRow = {
-  publicationId: string; authorityRevision: number; shareId: string; grantId: string; active: boolean; linkCurrent: boolean; collectionCapability: AppCollectionCapability | "unavailable" | null; datasetCapability: AppDatasetCapability | "unavailable" | null;
+  approvalProvenance?: AppPublicationApproval; publicationId: string; authorityRevision: number; shareId: string; grantId: string; active: boolean; linkCurrent: boolean; collectionCapability: AppCollectionCapability | "unavailable" | null; datasetCapability: AppDatasetCapability | "unavailable" | null;
 } & ({manifestUnavailable: false; appRoot: string; sourceRevision: string} | {manifestUnavailable: true});
 
 function publicationLinkIsCurrent(storage: StorageContext, owner: PublicationOwner): boolean {
@@ -174,13 +182,13 @@ export function listAppPublications(storage: StorageContext, input: ListAppPubli
         const capability = publication.candidate.capabilities[0];
 
         if (capability?.kind === "dataset") datasetCapability = parseAppDatasetCapability(capability);
-        return [{publicationId, authorityRevision: publication.authorityRevision, manifestUnavailable: false,
+        return [{publicationId, approvalProvenance:publication.approvalProvenance, authorityRevision: publication.authorityRevision, manifestUnavailable: false,
           shareId: publication.owner.shareId, grantId: publication.owner.grantId, appRoot: publication.candidate.appRoot,
           sourceRevision: publication.candidate.sourceRevision, active: publication.active, linkCurrent: publicationLinkIsCurrent(storage, publication.owner), collectionCapability, datasetCapability}];
       } catch (error) {
         if (!(error instanceof PublicationManifestUnavailable)) throw error;
         const {state} = header(storage, publicationId, input.workspaceId, input.ownerUserId);
-        return [{publicationId, authorityRevision: state.authorityRevision, manifestUnavailable: true,
+        return [{publicationId, approvalProvenance:state.approvalProvenance, authorityRevision: state.authorityRevision, manifestUnavailable: true,
           shareId: state.owner.shareId, grantId: state.owner.grantId, active: state.active, linkCurrent: publicationLinkIsCurrent(storage, state.owner), collectionCapability, datasetCapability: null}];
       }
     });
@@ -200,6 +208,13 @@ export function withdrawAppPublication(storage: StorageContext, input: WithdrawA
   });
 }
 
+function recordApproval(storage: StorageContext, publicationId: string, authorityRevision: number, owner: PublicationOwner, candidate: AppPublicationCandidate, agent?: ApprovalAgent | null): AppPublicationApproval {
+  const grant = storage.getShareGrant(owner.grantId)!;
+  const facts: AppPublicationApproval = {agent:parseApprovalAgent(agent),selector:JSON.parse(storage.getShare(owner.shareId)!.selectorJson),access:grant.access as AppPublicationApproval["access"],committedCandidateDigest:sha(JSON.stringify(candidate)),sourceRevision:candidate.sourceRevision,capabilities:candidate.capabilities};
+  storage.db.prepare("INSERT INTO sync_relay_app_publication_approvals(publication_id,authority_revision,facts_json) VALUES(?,?,?)").run(publicationId,authorityRevision,JSON.stringify(facts));
+  return facts;
+}
+
 export function reactivateAppPublication(storage: StorageContext, input: ReactivateAppPublicationInput): AppPublicationState {
   return storage.tx(() => {
     const {state: current} = header(storage, input.publicationId, input.workspaceId, input.ownerUserId);
@@ -216,7 +231,8 @@ export function reactivateAppPublication(storage: StorageContext, input: Reactiv
     if (current.active) return current;
     if (current.authorityRevision >= Number.MAX_SAFE_INTEGER) throw relayError("conflict", "Publication authority is exhausted.");
     storage.db.prepare("UPDATE sync_relay_app_publications SET active=1,authority_revision=authority_revision+1 WHERE publication_id=?").run(input.publicationId);
-    return {...current, active: true, authorityRevision: current.authorityRevision + 1};
+    const approvalProvenance = recordApproval(storage, input.publicationId, current.authorityRevision + 1, current.owner, candidate, input.agent);
+    return {...current, active: true, authorityRevision: current.authorityRevision + 1, approvalProvenance};
   });
 }
 

@@ -1,3 +1,4 @@
+import { parseApprovalAgent } from "@dohc/security-contract/approval-provenance";
 import { readBoundedJson } from "@dohc/service-http";
 import { parseAppPublicationCandidate, parseAppCollectionCapability, type AppPublicationLimits } from "@dohc/security-contract/app-publication";
 import { badRequest, notFound, relayError } from "./errors";
@@ -19,8 +20,8 @@ function response(value: unknown) {
     "content-type": "application/json", "cache-control": "private, no-store",
   }});
 }
-function record(value: unknown, fields: string[]) {
-  try {return ticketRecord(value, fields);} catch {throw badRequest("Invalid publication fields.");}
+function record(value: unknown, fields: string[], optional: string[] = []) {
+  try {return ticketRecord(value, [...fields, ...optional.filter(field => value !== null && typeof value === "object" && Object.hasOwn(value, field))]);} catch {throw badRequest("Invalid publication fields.");}
 }
 
 export function createOwnerAppPublicationRoutes(options: {
@@ -60,7 +61,7 @@ export function createOwnerAppPublicationRoutes(options: {
     signal.throwIfAborted();
     if (!storage.workspaceIsOwnedBy(route.workspaceId, ownerUserId)) throw notFound();
     if (route.action === "withdraw" || route.action === "reactivate" || route.action === "collection-approval") {
-      const input = record(raw, route.action === "collection-approval" ? ["expectedAuthorityRevision", "capability"] : ["expectedAuthorityRevision"]);
+      const input = record(raw, route.action === "collection-approval" ? ["expectedAuthorityRevision", "capability"] : ["expectedAuthorityRevision"], route.action === "reactivate" ? ["agent"] : []);
       if (!Number.isSafeInteger(input.expectedAuthorityRevision) || Number(input.expectedAuthorityRevision) < 1) throw badRequest("Invalid publication authority revision.");
       if (route.action === "collection-approval") {
         if (!options.collectionsEnabled && input.capability !== null) throw notFound();
@@ -69,11 +70,13 @@ export function createOwnerAppPublicationRoutes(options: {
         catch {throw badRequest("Invalid collection capability.");}
         return response(storage.approveAppCollection({...lookup!, expectedAuthorityRevision: Number(input.expectedAuthorityRevision), capability}));
       }
+      let agent;
+      try { agent = parseApprovalAgent(input.agent); } catch { throw badRequest("Invalid publication agent."); }
       return response(route.action === "withdraw"
         ? storage.withdrawAppPublication({...lookup!, expectedAuthorityRevision: Number(input.expectedAuthorityRevision)})
-        : storage.reactivateAppPublication({...lookup!, expectedAuthorityRevision: Number(input.expectedAuthorityRevision)}));
+        : storage.reactivateAppPublication({...lookup!, expectedAuthorityRevision: Number(input.expectedAuthorityRevision), agent}));
     }
-    const input = record(raw, ["shareId", "grantId", "expectedGrantGeneration", "candidate"]);
+    const input = record(raw, ["shareId", "grantId", "expectedGrantGeneration", "candidate"], ["agent"]);
     if (typeof input.shareId !== "string" || typeof input.grantId !== "string") throw badRequest("Invalid publication share or grant.");
     const shareId = parseShareId(input.shareId), grantId = parseShareId(input.grantId);
     const current = readCurrentShareGrant(storage, {grantId});
@@ -85,7 +88,9 @@ export function createOwnerAppPublicationRoutes(options: {
     let candidate;
     try {candidate = parseAppPublicationCandidate(input.candidate, limits);}
     catch {throw badRequest("Invalid publication candidate.");}
-    return response(storage.publishAppPublication({workspaceId: route.workspaceId, ownerUserId, shareId, grantId,
+    let agent;
+    try {agent = parseApprovalAgent(input.agent);} catch {throw badRequest("Invalid publication agent.");}
+    return response(storage.publishAppPublication({agent, workspaceId: route.workspaceId, ownerUserId, shareId, grantId,
       generation: grant.generation, candidate, limits, blobs: [], nowMs: options.nowMs()}));
   };
 }

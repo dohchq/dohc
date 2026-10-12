@@ -36,6 +36,27 @@ use std::{fmt::Write as _, sync::Arc};
 const WORKSPACE_ID: &str = "ws-rpc-collections";
 const RECORD_ID: &str = "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa";
 
+async fn expect_projection_commit(
+    notices: &mut tokio::sync::mpsc::Receiver<EngineEventNotice>,
+    path: &str,
+) {
+    tokio::time::timeout(std::time::Duration::from_secs(120), async {
+        loop {
+            let notice = notices.recv().await.unwrap();
+            assert_ne!(notice.name, AUTOMATION_CLAIMED_EVENT);
+            if notice.name == dohc_workspace_engine::COLLECTIONS_PROJECTED_EVENT
+                && notice.payload["paths"]
+                    .as_array()
+                    .is_some_and(|paths| paths.contains(&json!(path)))
+            {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("projection commit event");
+}
+
 #[tokio::test]
 async fn fresh_received_projection_has_no_index_until_its_first_pull() {
     let scratch = ScratchDir::new().unwrap();
@@ -133,21 +154,7 @@ async fn received_collection_projection_follows_local_definition_writes_and_anno
             "versionId": "main", "path": path, "text": text, "origin": "local-file" }),
         )
         .await;
-        tokio::time::timeout(std::time::Duration::from_secs(120), async {
-            loop {
-                let notice = notices.recv().await.unwrap();
-                assert_ne!(notice.name, AUTOMATION_CLAIMED_EVENT);
-                if notice.name == dohc_workspace_engine::COLLECTIONS_PROJECTED_EVENT
-                    && notice.payload["paths"]
-                        .as_array()
-                        .is_some_and(|paths| paths.contains(&json!(path)))
-                {
-                    break;
-                }
-            }
-        })
-        .await
-        .expect("projection commit event");
+        expect_projection_commit(&mut notices, path).await;
     }
     let listed = call(&transport, &handle, 7, "collections.list", json!({})).await;
     assert_eq!(listed["collections"][0]["path"], json!("tasks"));
@@ -169,16 +176,9 @@ async fn received_collection_projection_follows_local_definition_writes_and_anno
     )
     .await;
     assert_eq!(queried["records"].as_array().unwrap().len(), 1);
-    // local-file writes report bytes already on disk. Give settlement the
-    // same real artifact, so its stale-target fence can check that head.
     let record_path = scratch.path().join("tasks/a.md");
     std::fs::create_dir_all(record_path.parent().unwrap()).unwrap();
-    std::fs::write(
-        &record_path,
-        format!("---\nid: {RECORD_ID}\nTitle: Second\n---\n"),
-    )
-    .unwrap();
-    let opened = call(
+    let refusal = call_error(
         &transport,
         &handle,
         10,
@@ -188,30 +188,12 @@ async fn received_collection_projection_follows_local_definition_writes_and_anno
         }),
     )
     .await;
-    let doc = Ydoc::wire();
-    doc.rewrite_content_to_markdown(
-        ContentKind::Richdoc,
-        &format!("---\nid: {RECORD_ID}\nTitle: Second\n---\n"),
-    )
-    .unwrap();
-    call(&transport, &handle, 11, "ydoc.recordUpdate", json!({
-        "sessionId": opened["sessionId"], "seed": true,
-        "updateBase64": base64::engine::general_purpose::STANDARD.encode(doc.encode_full_state()),
-    })).await;
-    call(&transport, &handle, 12, "ydoc.recordUpdate", json!({
-        "sessionId": opened["sessionId"],
-        "updateBase64": base64::engine::general_purpose::STANDARD.encode(doc.frontmatter_set("Title", "Third").unwrap()),
-    })).await;
-    call(
-        &transport,
-        &handle,
-        13,
-        "ydoc.evict",
-        json!({"sessionId": opened["sessionId"]}),
-    )
-    .await;
-    // A later file write still maintains the closed lineage in a received
-    // store. The old broad early return left this Y.Doc at Third.
+    assert_eq!(refusal.code, ErrorCode::Forbidden);
+    assert_eq!(
+        refusal.message,
+        "received shares do not open live document sessions"
+    );
+    // Received writes still update the table after the live-session refusal.
     std::fs::write(
         &record_path,
         format!("---\nid: {RECORD_ID}\nTitle: Fourth\n---\n"),
@@ -228,6 +210,22 @@ async fn received_collection_projection_follows_local_definition_writes_and_anno
         }),
     )
     .await;
+    expect_projection_commit(&mut notices, "tasks/a.md").await;
+    let queried = call(
+        &transport,
+        &handle,
+        15,
+        "collections.query",
+        json!({ "collectionPath": "tasks" }),
+    )
+    .await;
+    let title = queried["records"][0]["values"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|value| value["field"] == "Title")
+        .unwrap();
+    assert_eq!(title["value"], json!("Fourth"));
     let connection = rusqlite::Connection::open(&db).unwrap();
     for table in ["automation_claims", "collection_field_history"] {
         assert_eq!(
@@ -236,17 +234,11 @@ async fn received_collection_projection_follows_local_definition_writes_and_anno
                     .get::<_, i64>(0))
                 .unwrap(),
             0,
-            "recipient Y.Doc append created {table}"
+            "recipient writes created {table}"
         );
     }
-    let object_id: String = connection.query_row(
-        "SELECT object_id FROM snapshots WHERE workspace_id=?1 AND version_id='main' AND path='tasks/a.md'",
-        [WORKSPACE_ID], |row| row.get(0)).unwrap();
-    let key = DocKey::new(WORKSPACE_ID, "main", object_id).unwrap();
-    let lineage = dohc_engine_collab::load_doc_in(&connection, &key).unwrap();
-    assert_eq!(lineage.frontmatter_json()["Title"], json!("Fourth"));
     drop(connection);
-    call(&transport, &handle, 15, "workspace.close", json!({})).await;
+    call(&transport, &handle, 16, "workspace.close", json!({})).await;
     let connection = rusqlite::Connection::open(&db).unwrap();
     for table in ["automation_claims", "collection_field_history"] {
         let count: i64 = connection
@@ -355,6 +347,403 @@ async fn reconcile_capture(
         status = call(transport, handle, id, "capture.flush", json!({})).await;
     }
     panic!("capture did not settle: {status}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn empty_record_seed_completes_through_watched_capture_and_adopts_every_record() {
+    assert_empty_seed_completion("---\nTitle: Completed\n---\nCompleted\n", false, false).await;
+    assert_empty_seed_completion(
+        "---\nTitle: Completed\n---\n- parent\n  - child\n",
+        true,
+        false,
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_replicated_empty_seed_refuses_unrepresentable_api_and_capture_writes() {
+    assert_empty_seed_completion(
+        "---\nTitle: Completed\n---\n- parent\n  - child\n",
+        false,
+        true,
+    )
+    .await;
+}
+
+async fn assert_empty_seed_completion(full: &'static str, retires: bool, replicated: bool) {
+    let scratch = ScratchDir::new().expect("scratch");
+    write_root_binding(scratch.path(), TOKEN).expect("root binding");
+    seed_schema(&scratch, "name: Tasks\nfields:\n  Title:\n    type: text\n");
+    let service = Arc::new(EngineService::new());
+    let transport = InProcessTransport::new(Arc::clone(&service));
+    let opened = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                1,
+                "workspace.open",
+                None,
+                json!({ "rootDir": scratch.path().to_string_lossy(), "workspaceId": WORKSPACE_ID }),
+            ),
+        )
+        .await
+        .expect("open watched workspace");
+    let handle: WorkspaceHandle =
+        serde_json::from_value(opened.result["workspace"].clone()).unwrap();
+
+    // The writer cannot finish until capture and the durable seed both exist.
+    let (finish, completed) = tokio::sync::oneshot::channel::<()>();
+    let record_path = scratch.path().join("tasks/empty.md");
+    std::fs::write(&record_path, "").expect("create empty record");
+    let writer = tokio::spawn(async move {
+        completed.await.expect("writer barrier");
+        std::fs::write(record_path, full).expect("complete record");
+    });
+    reconcile_capture(&transport, &handle, 10).await;
+    let pending = call(
+        &transport,
+        &handle,
+        40,
+        "collections.listPendingAdoptions",
+        json!({}),
+    )
+    .await;
+    assert_eq!(pending["adoptions"].as_array().unwrap().len(), 1);
+    assert_eq!(pending["adoptions"][0]["filePath"], "tasks/empty.md");
+    let empty = call(
+        &transport,
+        &handle,
+        41,
+        "ydoc.open",
+        json!({
+            "versionId": "main", "path": "tasks/empty.md", "contentKind": "richdoc",
+            "expectedObjectId": pending["adoptions"][0]["objectId"],
+        }),
+    )
+    .await;
+    assert_eq!(empty["seedContent"], "");
+    let doc = Ydoc::wire();
+    doc.rewrite_content_to_markdown(ContentKind::Richdoc, "")
+        .expect("empty importer seed");
+    call(&transport, &handle, 42, "ydoc.recordUpdate", json!({
+        "sessionId": empty["sessionId"], "seed": true,
+        "updateBase64": base64::engine::general_purpose::STANDARD.encode(doc.encode_full_state()),
+    })).await;
+    let db = engine_db_path(&scratch).unwrap();
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    let key = DocKey::new(WORKSPACE_ID, "main", empty["objectId"].as_str().unwrap()).unwrap();
+    let seeded = dohc_engine_collab::load_doc_in(&conn, &key).expect("durable empty lineage");
+    assert_eq!(seeded.project(ContentKind::Richdoc).unwrap().content, "");
+    let source_sha: String = conn
+        .query_row(
+            "SELECT seed_source_sha256 FROM ydoc_docs WHERE object_id=?1",
+            [&key.object_id],
+            |row| row.get(0),
+        )
+        .expect("captured seed source");
+    assert_eq!(source_sha, hex_sha256(b""));
+    drop(conn);
+
+    // Hold observation across lease release and the writer's completion, so
+    // capture folds a closed empty lineage rather than a live edit conflict.
+    let hold = call(&transport, &handle, 43, "capture.hold", json!({})).await["holdId"].clone();
+    call(
+        &transport,
+        &handle,
+        44,
+        "ydoc.evict",
+        json!({ "sessionId": empty["sessionId"] }),
+    )
+    .await;
+    if replicated {
+        let mut store = EngineStore::open(&db, 5).unwrap();
+        store
+            .write_with(&NoFaults, |tx| {
+                tx.execute(
+                    "INSERT INTO sync_identity \
+                     (workspace_id,origin_id,replication_epoch,stream_identity,created_at_ms) \
+                     VALUES (?1,'local-origin','epoch','stream',1)",
+                    [WORKSPACE_ID],
+                )
+                .map_err(dohc_engine_storage::StorageError::persist_public)?;
+                tx.execute(
+                    "INSERT INTO sync_relay_push_state (workspace_id,origin_id,pushed_seq) \
+                     VALUES (?1,'local-origin',0)",
+                    [WORKSPACE_ID],
+                )
+                .map_err(dohc_engine_storage::StorageError::persist_public)
+            })
+            .unwrap();
+        let bytes = doc.encode_full_state();
+        let sha = store.put_binary_blob(&bytes).unwrap();
+        let base = ReplicationEnvelope {
+            settlement_admission: None,
+            admitted_author_snapshot: None,
+            workspace_id: WORKSPACE_ID.into(),
+            origin_id: "seed-origin".into(),
+            origin_seq: 0,
+            relay_seq: Some(0),
+            op_kind: "ydoc.update".into(),
+            recorded_at_ms: 5,
+            payload: json!({
+                "versionId":"main", "objectId":key.object_id, "path":"tasks/empty.md",
+                "contentKind":"richdoc", "updateBlobSha256":sha,
+                "lineageClaimId":hex_sha256(&bytes), "isBaseState":true,
+            }),
+        };
+        let applied = dohc_engine_sync::apply_ydoc_envelope(
+            &mut store,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &base,
+            &NoFaults,
+            &NoLiveLeases,
+        )
+        .unwrap();
+        assert!(
+            matches!(applied.primary, ApplyDisposition::Applied(_)),
+            "{applied:?}"
+        );
+        let refused = call_error(
+            &transport,
+            &handle,
+            46,
+            "versionedText.write",
+            json!({"versionId":"main", "path":"tasks/empty.md", "text":full, "origin":"api"}),
+        )
+        .await;
+        assert_eq!(refused.code, ErrorCode::InvalidParams, "{refused:?}");
+        assert_eq!(refused.retry, dohc_engine_protocol::error::Retryability::No);
+    }
+    finish.send(()).expect("release writer");
+    writer.await.expect("writer completed");
+    for path in ["tasks/b.md", "tasks/c.md"] {
+        write_file(scratch.path(), path, b"Sibling\n");
+    }
+    call(
+        &transport,
+        &handle,
+        45,
+        "capture.release",
+        json!({ "holdId": hold }),
+    )
+    .await;
+    if !replicated {
+        reconcile_capture(&transport, &handle, 50).await;
+    } else {
+        call(&transport, &handle, 50, "capture.reconcile", json!({})).await;
+    }
+    if replicated {
+        for id in 60..63 {
+            let status = call(&transport, &handle, id, "capture.flush", json!({})).await;
+            assert_eq!(status["degraded"], true, "{status}");
+            assert_eq!(status["settled"], false, "{status}");
+        }
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        let captured: String = conn
+            .query_row(
+                "SELECT b.text FROM snapshots s JOIN blobs b ON b.sha256=s.blob_sha256 \
+                 WHERE s.path='tasks/empty.md'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            captured, "",
+            "refused bytes must not be reported as captured"
+        );
+        assert!(
+            dohc_engine_collab::read_marker_in(&conn, &key)
+                .unwrap()
+                .is_some()
+        );
+        let retained = dohc_engine_collab::load_doc_in(&conn, &key).unwrap();
+        assert_eq!(retained.project(ContentKind::Richdoc).unwrap().content, "");
+        let updates: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM ydoc_updates WHERE object_id=?1",
+                [&key.object_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            updates, 0,
+            "refusal must not edit the replicated empty base"
+        );
+        assert_eq!(
+            std::fs::read_to_string(scratch.path().join("tasks/empty.md")).unwrap(),
+            full
+        );
+        let query = call(
+            &transport,
+            &handle,
+            64,
+            "collections.query",
+            json!({"collectionPath":"tasks"}),
+        )
+        .await;
+        let records = query["records"].as_array().unwrap();
+        assert_eq!(records.len(), 3);
+        assert!(
+            !records
+                .iter()
+                .find(|record| record["path"] == "tasks/empty.md")
+                .unwrap()["conflicted"]
+                .as_bool()
+                .unwrap()
+        );
+        drop(conn);
+        // Another unrepresentable edit remains visibly refused.
+        std::fs::write(
+            scratch.path().join("tasks/empty.md"),
+            full.replace("Completed", "Changed"),
+        )
+        .unwrap();
+        let status = call(&transport, &handle, 70, "capture.reconcile", json!({})).await;
+        assert_eq!(status["degraded"], true, "{status}");
+        assert_eq!(status["settled"], false, "{status}");
+        // A representable disk change recovers capture and version creation.
+        std::fs::write(scratch.path().join("tasks/empty.md"), "Completed").unwrap();
+        let named = call(
+            &transport,
+            &handle,
+            110,
+            "versions.createNamed",
+            json!({"workspaceId":WORKSPACE_ID, "name":"recovered", "fromVersionId":"main"}),
+        )
+        .await;
+        assert!(named["id"].is_string(), "{named}");
+        reconcile_capture(&transport, &handle, 120).await;
+        call(&transport, &handle, 240, "workspace.close", json!({})).await;
+        return;
+    }
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    if retires {
+        assert!(
+            dohc_engine_collab::read_marker_in(&conn, &key)
+                .unwrap()
+                .is_none()
+        );
+        let captured: String = conn.query_row(
+            "SELECT b.text FROM moments m JOIN blobs b ON b.sha256=m.after_blob_sha256 \
+             WHERE m.object_id=?1 AND m.metadata_origin='capture' ORDER BY m.moment_order DESC LIMIT 1",
+            [&key.object_id], |row| row.get(0)).unwrap();
+        assert_eq!(
+            captured, full,
+            "completed exact bytes belong to History before reseeding"
+        );
+        assert_eq!(
+            std::fs::read_to_string(scratch.path().join("tasks/empty.md")).unwrap(),
+            full
+        );
+    } else {
+        let folded = dohc_engine_collab::load_doc_in(&conn, &key).expect("completed lineage");
+        let projection =
+            dohc_engine_sync::project_ydoc_with_store(&conn, &key, &folded, ContentKind::Richdoc)
+                .unwrap();
+        let expected = dohc_engine_domain::collection_record_markdown_with_id(
+            full,
+            pending["adoptions"][0]["recordId"].as_str().unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            projection.content, expected,
+            "fold and adoption must keep completed bytes"
+        );
+    }
+    drop(conn);
+
+    // Drain the remaining seeds through the same open/record/evict RPCs used
+    // by desktop adoption. The empty record already has its lineage.
+    let pending = call(
+        &transport,
+        &handle,
+        80,
+        "collections.listPendingAdoptions",
+        json!({}),
+    )
+    .await;
+    for (index, candidate) in pending["adoptions"].as_array().unwrap().iter().enumerate() {
+        let id = 100 + index as u64 * 3;
+        let state = call(
+            &transport,
+            &handle,
+            id,
+            "ydoc.open",
+            json!({
+                "versionId": "main", "path": candidate["filePath"], "contentKind": "richdoc",
+                "expectedObjectId": candidate["objectId"],
+            }),
+        )
+        .await;
+        let doc = Ydoc::wire();
+        doc.rewrite_content_to_markdown_preserving_source(
+            ContentKind::Richdoc,
+            state["seedContent"].as_str().unwrap(),
+        )
+        .expect("sibling importer seed");
+        call(&transport, &handle, id + 1, "ydoc.recordUpdate", json!({
+            "sessionId": state["sessionId"], "seed": true,
+            "updateBase64": base64::engine::general_purpose::STANDARD.encode(doc.encode_full_state()),
+        })).await;
+        call(
+            &transport,
+            &handle,
+            id + 2,
+            "ydoc.evict",
+            json!({ "sessionId": state["sessionId"] }),
+        )
+        .await;
+    }
+    reconcile_capture(&transport, &handle, 200).await;
+    let query = call(
+        &transport,
+        &handle,
+        230,
+        "collections.query",
+        json!({ "collectionPath": "tasks" }),
+    )
+    .await;
+    assert_eq!(query["records"].as_array().unwrap().len(), 3);
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    let adopted: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM collection_records WHERE adoption_state='adopted'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(adopted, 3);
+    for record in query["records"].as_array().unwrap() {
+        let path = record["path"].as_str().unwrap();
+        let source = if path == "tasks/empty.md" {
+            full
+        } else {
+            "Sibling\n"
+        };
+        let expected = dohc_engine_domain::collection_record_markdown_with_id(
+            source,
+            record["id"].as_str().unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(scratch.path().join(path)).unwrap(),
+            expected
+        );
+        let sha: String = conn
+            .query_row(
+                "SELECT blob_sha256 FROM snapshots WHERE path=?1",
+                [path],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            sha,
+            hex_sha256(expected.as_bytes()),
+            "exact durable snapshot for {path}"
+        );
+    }
+    drop(conn);
+    call(&transport, &handle, 240, "workspace.close", json!({})).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1489,6 +1878,8 @@ async fn remote_id_edit_converges_on_both_devices_under_the_original_identity() 
         for (origin_seq, update) in updates.iter().enumerate() {
             let update_sha = store.put_binary_blob(update).expect("store remote update");
             let envelope = ReplicationEnvelope {
+                settlement_admission: None,
+                admitted_author_snapshot: None,
                 workspace_id: WORKSPACE_ID.to_owned(),
                 origin_id: REMOTE_ORIGIN.to_owned(),
                 origin_seq: i64::try_from(origin_seq).expect("remote sequence"),
@@ -2650,6 +3041,8 @@ async fn remote_moment_append_updates_the_collection_index_at_apply_time() {
     assert_eq!(status_of(&baseline), json!("open"));
 
     let envelope = ReplicationEnvelope {
+        settlement_admission: None,
+        admitted_author_snapshot: None,
         workspace_id: WORKSPACE_ID.to_owned(),
         origin_id: "remote-moment-editor".to_owned(),
         origin_seq: 0,
@@ -2829,6 +3222,8 @@ async fn remote_moment_append_without_frontmatter_clears_the_collection_index() 
     );
 
     let envelope = ReplicationEnvelope {
+        settlement_admission: None,
+        admitted_author_snapshot: None,
         workspace_id: WORKSPACE_ID.to_owned(),
         origin_id: "remote-moment-editor".to_owned(),
         origin_seq: 0,
@@ -3058,6 +3453,8 @@ async fn park_remote_status_update() -> ParkedRecordUpdate {
     let mut store = EngineStore::open(&db, 2).expect("open remote apply store");
     let update_sha = store.put_binary_blob(&update).expect("store remote update");
     let envelope = ReplicationEnvelope {
+        settlement_admission: None,
+        admitted_author_snapshot: None,
         workspace_id: WORKSPACE_ID.to_owned(),
         origin_id: PARKED_REMOTE_ORIGIN.to_owned(),
         origin_seq: 0,
@@ -3956,6 +4353,8 @@ automations: []
             })
             .expect("hydrate blob");
         let envelope = ReplicationEnvelope {
+            settlement_admission: None,
+            admitted_author_snapshot: None,
             workspace_id: WORKSPACE_ID.to_owned(),
             origin_id: format!("relay:collection-file:{grant}"),
             origin_seq: 0,
@@ -4076,6 +4475,8 @@ async fn native_public_trip_poll_moment_materializes_adopts_and_dedupes() {
     let sha = hex_sha256(text.as_bytes());
     let author = json!({ "kind": "public", "principalId": PRINCIPAL, "grantId": GRANT });
     let envelope = ReplicationEnvelope {
+        settlement_admission: None,
+        admitted_author_snapshot: None,
         workspace_id: WORKSPACE_ID.to_owned(),
         origin_id: format!("relay:collection-create:{GRANT}"),
         origin_seq: 0,
@@ -4347,8 +4748,9 @@ async fn native_public_trip_poll_moment_materializes_adopts_and_dedupes() {
         adoption["payloadAfterBlobSha256"],
         hex_sha256(settled.as_bytes())
     );
-    assert!(
-        adoption["authors"].is_null(),
+    assert_eq!(
+        adoption["authors"],
+        json!([{"kind":"unattributed"}]),
         "owner settlement must not impersonate the public voter"
     );
     let mut retry = EngineStore::open(&db, 3).expect("retry store");

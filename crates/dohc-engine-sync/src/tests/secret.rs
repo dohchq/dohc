@@ -37,6 +37,8 @@ fn secret_delete_tombstone_blocks_older_put_resurrection() {
     let iv = STANDARD.encode([0u8; SECRET_IV_BYTES]);
     let tag = STANDARD.encode([0u8; SECRET_TAG_BYTES]);
     let put = |seq: i64, at: i64, sha: &str, len: i64| ReplicationEnvelope {
+        settlement_admission: None,
+        admitted_author_snapshot: None,
         workspace_id: "ws".to_owned(),
         origin_id: "peer".to_owned(),
         origin_seq: seq,
@@ -63,6 +65,8 @@ fn secret_delete_tombstone_blocks_older_put_resurrection() {
     ));
     // delete @20 wins and removes the materialized secret_files row.
     let delete = ReplicationEnvelope {
+        settlement_admission: None,
+        admitted_author_snapshot: None,
         workspace_id: "ws".to_owned(),
         origin_id: "peer".to_owned(),
         origin_seq: 1,

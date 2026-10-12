@@ -1,3 +1,5 @@
+import { RESERVED_WORKSPACE_IDS, ReservedWorkspaceIdError } from "./workspaceIds";
+
 import {
   defaultWorkspaceMode,
   WORKSPACE_KINDS,
@@ -5,6 +7,8 @@ import {
   type WorkspaceKind,
   type WorkspaceMode,
 } from "./workspaceMode";
+
+export { RESERVED_WORKSPACE_IDS };
 
 // Mode lives on the workspace manifest and nowhere else: a workspace is
 // local-first, cloud-first, or cloud-only as a whole, never per file.
@@ -20,6 +24,7 @@ export function createWorkspaceManifest(input: {
   kind: WorkspaceKind;
   mode?: WorkspaceMode;
 }): WorkspaceManifest {
+  if (RESERVED_WORKSPACE_IDS.includes(input.workspaceId)) throw new ReservedWorkspaceIdError(input.workspaceId);
   return {
     version: 1,
     workspaceId: input.workspaceId,
@@ -32,6 +37,7 @@ type ManifestCheck =
   | { status: "valid"; manifest: WorkspaceManifest }
   | { status: "absent" }
   | { status: "invalid"; reason: string }
+  | { status: "reserved-id"; workspaceId: string }
   | { status: "newer-version"; version: number };
 
 // Fully validates a parsed manifest before it is trusted. A partial manifest
@@ -53,6 +59,9 @@ export function checkManifest(parsed: unknown): ManifestCheck {
   }
   if (typeof m.workspaceId !== "string" || m.workspaceId.length === 0) {
     return { status: "invalid", reason: "manifest workspaceId is missing" };
+  }
+  if (RESERVED_WORKSPACE_IDS.includes(m.workspaceId)) {
+    return { status: "reserved-id", workspaceId: m.workspaceId };
   }
   if (!WORKSPACE_KINDS.includes(m.kind as WorkspaceKind)) {
     return { status: "invalid", reason: "manifest kind is invalid" };

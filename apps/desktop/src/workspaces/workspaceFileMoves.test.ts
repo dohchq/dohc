@@ -1137,3 +1137,21 @@ it("records a hand-made record as a local file edit under the person main read, 
     await f.engine().stop();
   }
 });
+
+
+describe("empty-folder rollback admission", () => {
+  it.each(["read-only", "share", "stale"] as const)("preserves folders when the workspace is %s", async (refusal) => {
+    const rootPath = await createTestScratch("empty-rollback-admission-");
+    await mkdir(join(rootPath, "app"));
+    const trashItem = vi.fn(async () => undefined);
+    await expect(deleteWorkspacePathByHand({
+      workspace: { rootPath, readOnly: refusal === "read-only",
+        ...(refusal === "share" ? { shareView: {} } : {}) },
+      assertCurrent: () => { if (refusal === "stale") throw new Error("stale workspace"); },
+    }, "app", person, {
+      capture: null, requestId: "rollback", trashItem, markDeleted: vi.fn(), emptyFolderOnly: true,
+    })).rejects.toThrow(refusal === "stale" ? "stale workspace" : "read-only");
+    expect((await lstat(join(rootPath, "app"))).isDirectory()).toBe(true);
+    expect(trashItem).not.toHaveBeenCalled();
+  });
+});

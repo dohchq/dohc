@@ -1197,6 +1197,7 @@ it("retires capture settle bookkeeping after repeated busy-store failures", asyn
       expect.soft([...saveSeq.inFlight.keys()]).toEqual([]);
     }
     expect(reports).toEqual([
+      { state: "saved", token: 0, event: "status" },
       { state: "settling", token: 1, event: "start" }, { state: "settling", token: 1, event: "outcome" },
       { state: "settling", token: 2, event: "start" }, { state: "settling", token: 2, event: "outcome" },
       { state: "settling", token: 3, event: "start" }, { state: "settling", token: 3, event: "outcome" },
@@ -1597,7 +1598,7 @@ it("settles nothing when a fresh document opens", async () => {
   const settlesBeforeOpen = methodCount("ydoc.settle");
   const {opened, states} = await openRecordingStates();
   await releaseWithoutSettling(opened);
-  expect(states).toEqual([]);
+  expect(states).toEqual(["saved"]);
   expect(methodCount("ydoc.settle")).toBe(settlesBeforeOpen);
 });
 
@@ -1613,7 +1614,7 @@ it("settles nothing when a document whose edits reached its file reopens", async
   const {opened, states} = await openRecordingStates();
   expect(opened.doc.getXmlFragment("body").toString()).toContain("Typed and saved.");
   await releaseWithoutSettling(opened);
-  expect(states).toEqual([]);
+  expect(states).toEqual(["saved"]);
   expect(methodCount("ydoc.settle")).toBe(settlesBeforeOpen);
 });
 
@@ -1623,7 +1624,7 @@ it("settles nothing when a reopened document holds only its seed", async () => {
   const {opened, states} = await openRecordingStates();
   expect(opened.doc.getXmlFragment("body").toString()).toContain("Start here.");
   await releaseWithoutSettling(opened);
-  expect(states).toEqual([]);
+  expect(states).toEqual(["saved"]);
   expect(methodCount("ydoc.settle")).toBe(settlesBeforeOpen);
   expect(await readFile(join(root, PATH), "utf8")).toBe(INITIAL_MARKDOWN);
 });

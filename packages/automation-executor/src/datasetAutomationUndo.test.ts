@@ -8,6 +8,7 @@ import type { ReachDatasetGrants, ReachRoster } from "./automationReach";
 import type { RunWrite, StoredRun } from "./automationRunStore";
 import { datasetFieldKey } from "./automationReach";
 import { datasetUndoDeletes } from "./datasetAutomationPlan";
+import { undoAutomationRuns } from "./automationUndo";
 import {
   datasetUndoLostRun,
   datasetUndoRulesChanged,
@@ -55,7 +56,7 @@ const withAna: DatasetUndoReach = { roster: { ...OWNER, grants: [ANA] }, collect
 const anaMayDelete: ReachDatasetGrants = { workspaceId: "workspace", grants: [{ principalKey: datasetPrincipalKey("workspace", ANA.grantId, ANA.recipientUserId), operationIds: [REMOVE] }] };
 
 const run = (operationId: string): StoredRun => ({
-  version: 9, claimId: "claim", automationId: "collection:Budget#close", definitionHash: "h", keySeed: "h-1", startedAtMs: 1, finishedAtMs: 1,
+  durableEffects: 1, version: 13, claimId: "claim", automationId: "collection:Budget#close", definitionHash: "h", keySeed: "h-1", startedAtMs: 1, finishedAtMs: 1,
   steps: [], created: [], replans: [], undoRequests: [], undoCalls: [], undoCovers: [], readableFields: null, collections: [], rules: null, superseded: false, undo: null, undoKept: [], settled: true, outcome: { state: "done" },
   applied: [{ ordinal: 0, writes: [
     { kind: "dataset-edit", rules, operationId, tableId: TABLE, recordId: "a", expectedVersion: 1, version: 2,
@@ -145,6 +146,24 @@ describe("undo of a dataset run", () => {
   const created = (recordId: string, deletes: string[] = [REMOVE], tableId = TABLE): RunWrite =>
     ({ kind: "dataset-created", rules, operationId: CREATE, tableId, recordId, version: 1, deletes });
   const runOf = (keySeed: string, startedAtMs: number, writes: RunWrite[]): StoredRun => ({ ...run(EDIT), keySeed, startedAtMs, applied: [{ ordinal: 0, writes }] });
+
+  it.each(["dataset", "shared"] as const)("%s Undo after replay stops at effect 3 reverts recorded edits only from their last value", async kind => {
+    for (const value of ["3", "10", "someone else"]) {
+      const records = { a: { version: value === "10" ? 11 : 12, values: { [STATUS]: value } } };
+      const { host } = recordsHost(records);
+      const saved = runOf("crash", 1, []);
+      saved.durableEffects = 3;
+      saved.outcome = { state: "failed", error: "deadline", run: 1, step: 3 };
+      saved.applied = Array.from({ length: 10 }, (_, index) => ({ ordinal: index,
+        writes: [edit(EDIT, "a", STATUS, String(index), String(index + 1), index + 2)] }));
+      const undone = kind === "dataset" ? await undo(host, [saved]) : (await undoAutomationRuns({
+        withReads: async () => null, withRecordWrites: async () => { throw Error("unexpected document write"); },
+        trash: async () => { throw Error("unexpected trash"); }, collectionPathOf: () => null,
+      }, host, collection, async () => OWNER, "claim", [saved], async () => {}, new AbortController().signal)).undone;
+      expect(undone.reverted).toBe(value === "10" ? 1 : 0);
+      expect(records.a.values[STATUS]).toBe(value === "10" ? "0" : value);
+    }
+  });
   // The executor's order: the reverses and deletes of the confirmed preview are saved with the newest run before any is sent.
   const confirm = async (host: DatasetUndoHost, runs: StoredRun[], reach = alone, chosen: Array<{ key: string; operationId: string }> = []) => {
     const calls = (await planDatasetUndo(host, reach, "claim", runs, runs, new AbortController().signal)).send(chosen);
@@ -153,7 +172,7 @@ describe("undo of a dataset run", () => {
   };
 
   it("keeps a field someone changed after the runs' last write to it, even where it matches an earlier write", async () => {
-    // The runs wrote Open → Paid → Closed. Someone then set it back to Paid.
+    // The runs wrote Open â†’ Paid â†’ Closed. Someone then set it back to Paid.
     const records = { a: { version: 4, values: { [STATUS]: "Paid" } } };
     const { writes, host } = recordsHost(records);
     const runs = [runOf("h-1", 1, [edit(EDIT, "a", STATUS, "Open", "Paid", 2)]), runOf("h-2", 2, [edit(EDIT, "a", STATUS, "Paid", "Closed", 3)])];
@@ -173,8 +192,30 @@ describe("undo of a dataset run", () => {
     expect(writes).toEqual([]);
   });
 
+  it("trusts a recorded FULL dataset edit even past an engine mark of zero", async () => {
+    const recorded = run(EDIT); recorded.durableEffects = 0; recorded.applied[0]!.writes = [recorded.applied[0]!.writes[0]!];
+    const records = { a: { version: 2, values: { [STATUS]: "Closed" } } };
+    const { host, writes } = recordsHost(records);
+    expect(await undo(host, [recorded])).toEqual({ ...none, reverted: 1 });
+    expect(writes).toEqual([{ [STATUS]: "Open" }]);
+  });
+
+  it("keeps a teammate's intermediate value after a later confirmed edit", async () => {
+    const earlier = runOf("h-1", 1, []);
+    earlier.applied = [];
+    earlier.steps = [{ ordinal: 0, effects: [{ kind: "dataset-edit", rules, operationId: EDIT, tableId: TABLE,
+      target: { recordId: "a", version: 1 }, fields: [{ fieldId: STATUS, field: "Status", before: "Todo", after: "Doing" }] }] }];
+    const later = runOf("h-2", 2, [edit(EDIT, "a", STATUS, "Doing", "Done", 3)]);
+    for (const current of ["Doing", "Done"]) {
+      const records = { a: { version: 4, values: { [STATUS]: current } } };
+      const { host, writes } = recordsHost(records);
+      expect(await undo(host, [structuredClone(earlier), structuredClone(later)])).toEqual({ ...none, ...(current === "Done" ? { reverted: 1 } : { changedSince: 1 }) });
+      expect(writes).toEqual(current === "Done" ? [{ [STATUS]: "Todo" }] : []);
+    }
+  });
+
   it("puts a field written twice back in one write, so it is never left between the runs' writes", async () => {
-    // Someone changed Note after the runs wrote Open → Paid → Closed.
+    // Someone changed Note after the runs wrote Open â†’ Paid â†’ Closed.
     const records = { a: { version: 4, values: { [STATUS]: "Closed", [NOTE]: "mine" } } };
     const { writes, host } = recordsHost(records);
     const runs = [runOf("h-1", 1, [edit(EDIT, "a", STATUS, "Open", "Paid", 2), edit(EDIT, "a", STATUS, "Paid", "Closed", 3)])];
@@ -198,7 +239,7 @@ describe("undo of a dataset run", () => {
   });
 
   it("puts back a person's change made between two of the runs' edits, not what the field held first", async () => {
-    // The run set Open → Paid; someone set Held; the run then set Held → Closed.
+    // The run set Open â†’ Paid; someone set Held; the run then set Held â†’ Closed.
     const records = { a: { version: 4, values: { [STATUS]: "Closed" } } };
     const { writes, host } = recordsHost(records);
     const runs = [runOf("h-1", 1, [edit(EDIT, "a", STATUS, "Open", "Paid", 2), edit(EDIT, "a", STATUS, "Held", "Closed", 4)])];
@@ -210,7 +251,7 @@ describe("undo of a dataset run", () => {
   it("undoes the edit a run may have landed just before it stopped, before recording it, whether or not it landed", async () => {
     const planned = { kind: "dataset-edit" as const, rules, operationId: EDIT, tableId: TABLE, target: { recordId: "a", version: 2 },
       fields: [{ fieldId: STATUS, field: "Status", before: "Paid", after: "Closed" }] };
-    // The run recorded Open → Paid at version 2, saved its next step, and stopped as that edit was sent.
+    // The run recorded Open â†’ Paid at version 2, saved its next step, and stopped as that edit was sent.
     const stopped = (): StoredRun => ({ ...runOf("h-1", 1, [edit(EDIT, "a", STATUS, "Open", "Paid", 2)]), outcome: null,
       steps: [{ ordinal: 0, effects: [{ kind: "dataset-edit", rules, operationId: EDIT, tableId: TABLE, target: { recordId: "a", version: 1 },
         fields: [{ fieldId: STATUS, field: "Status", before: "Open", after: "Paid" }] }] }, { ordinal: 1, effects: [planned] }] });
@@ -229,7 +270,7 @@ describe("undo of a dataset run", () => {
   });
 
   it("reads the record before trusting the version of an edit that may not have landed, so a person's change stays", async () => {
-    // The run set Status Open → Paid at version 2. Someone set Held at version 3. The run's
+    // The run set Status Open â†’ Paid at version 2. Someone set Held at version 3. The run's
     // next edit, replanned at version 3 to change only Note, never landed.
     const noteEdit = { kind: "dataset-edit" as const, rules, operationId: EDIT, tableId: TABLE, target: { recordId: "a", version: 2 },
       fields: [{ fieldId: STATUS, field: "Status", before: "Paid", after: "Paid" }, { fieldId: NOTE, field: "Note", before: "Draft", after: "Sent" }] };
@@ -245,7 +286,7 @@ describe("undo of a dataset run", () => {
   });
 
   it("reads the record before putting back a field whose last edit may not have landed, though a later edit of another field did", async () => {
-    // A stopped run planned Status Open → Paid at version 2 and never landed it. Someone set Held.
+    // A stopped run planned Status Open â†’ Paid at version 2 and never landed it. Someone set Held.
     // The start-over changed only Note, at version 3.
     const statusEdit = { kind: "dataset-edit" as const, rules, operationId: EDIT, tableId: TABLE, target: { recordId: "a", version: 2 },
       fields: [{ fieldId: STATUS, field: "Status", before: "Open", after: "Paid" }] };

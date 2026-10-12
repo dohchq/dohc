@@ -310,6 +310,7 @@ function directWriteReport(value: JsonValue, method: string): DirectWriteReport 
         paths,
         result: "stale",
         stalePath: stringField(write, "stalePath", method),
+        recoveredDraftPath: nullableStringField(write, "recoveredDraftPath", method),
         currentBlobSha256: nullableStringField(write, "currentBlobSha256", method),
       };
     case "refused":
@@ -718,8 +719,13 @@ export class EngineRelayClient {
       target: SharingDeclined[],
       source: readonly SharingDeclined[],
     ): void => {
-      const remaining = MAX_REPORTED_REFUSALS - target.length;
-      if (remaining > 0) target.push(...source.slice(0, remaining));
+      for (const declined of source) {
+        const index = target.findIndex((item) =>
+          item.versionId === declined.versionId && item.objectId === declined.objectId,
+        );
+        if (index >= 0) target[index] = declined;
+        else if (target.length < MAX_REPORTED_REFUSALS) target.push(declined);
+      }
     };
 
     const claimWith = async (
@@ -764,6 +770,7 @@ export class EngineRelayClient {
         );
         return {
           pushed: result.pushed,
+          hasMore: result.hasMore,
           // The daemon owns all origin selection; desktop callers only consume
           // the count, so no origin identifiers cross the process boundary.
           originsPushed: [],

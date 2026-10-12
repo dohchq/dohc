@@ -21,6 +21,7 @@ use dohc_engine_protocol::error::WireError;
 use dohc_engine_protocol::transport::RequestContext;
 use dohc_engine_protocol::wire::WorkspaceHandle;
 use serde::Deserialize;
+use serde::Serialize;
 use serde_json::Value;
 use serde_json::json;
 
@@ -137,74 +138,119 @@ struct ChatDispatchFailParams {
     now_ms: Option<i64>,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DispatchClaimWire<'a> {
+    dispatch: DispatchWire<'a>,
+    run: RunWire<'a>,
+    chain_depth: u32,
+}
+
 fn dispatch_claim_json(claim: &DispatchClaim) -> Value {
-    json!({
-        "dispatch": dispatch_json(&claim.dispatch),
-        "run": run_json(&claim.run),
-        "chainDepth": claim.chain_depth,
+    json!(DispatchClaimWire {
+        dispatch: DispatchWire::from(&claim.dispatch),
+        run: RunWire::from(&claim.run),
+        chain_depth: claim.chain_depth,
     })
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DispatchWire<'a> {
+    workspace_id: &'a str,
+    trigger_message_id: &'a str,
+    thread_id: &'a str,
+    state: &'a str,
+    attempt_count: i64,
+    created_at_ms: i64,
+    updated_at_ms: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    run_id: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    failure_reason: Option<&'a str>,
+}
+
+impl<'a> From<&'a DispatchRecord> for DispatchWire<'a> {
+    fn from(dispatch: &'a DispatchRecord) -> Self {
+        DispatchWire {
+            workspace_id: &dispatch.workspace_id,
+            trigger_message_id: &dispatch.trigger_message_id,
+            thread_id: &dispatch.thread_id,
+            state: &dispatch.state,
+            attempt_count: dispatch.attempt_count,
+            created_at_ms: dispatch.created_at_ms,
+            updated_at_ms: dispatch.updated_at_ms,
+            run_id: dispatch.run_id.as_deref(),
+            failure_reason: dispatch.failure_reason.as_deref(),
+        }
+    }
+}
+
 fn dispatch_json(dispatch: &DispatchRecord) -> Value {
-    let mut value = json!({
-        "workspaceId": dispatch.workspace_id,
-        "triggerMessageId": dispatch.trigger_message_id,
-        "threadId": dispatch.thread_id,
-        "state": dispatch.state,
-        "attemptCount": dispatch.attempt_count,
-        "createdAtMs": dispatch.created_at_ms,
-        "updatedAtMs": dispatch.updated_at_ms,
-    });
-    let object = value.as_object_mut().expect("dispatch is an object");
-    if let Some(run_id) = &dispatch.run_id {
-        object.insert("runId".to_owned(), json!(run_id));
+    json!(DispatchWire::from(dispatch))
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RunWire<'a> {
+    workspace_id: &'a str,
+    run_id: &'a str,
+    thread_id: &'a str,
+    trigger_message_id: &'a str,
+    command: &'a str,
+    started_at_ms: i64,
+    failure_note_posted: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ended_at_ms: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    exit_code: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    failure_reason: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    log_path: Option<&'a str>,
+}
+
+impl<'a> From<&'a AgentRunRecord> for RunWire<'a> {
+    fn from(run: &'a AgentRunRecord) -> Self {
+        RunWire {
+            workspace_id: &run.workspace_id,
+            run_id: &run.run_id,
+            thread_id: &run.thread_id,
+            trigger_message_id: &run.trigger_message_id,
+            command: &run.command,
+            started_at_ms: run.started_at_ms,
+            failure_note_posted: run.failure_note_posted,
+            ended_at_ms: run.ended_at_ms,
+            exit_code: run.exit_code,
+            failure_reason: run.failure_reason.as_deref(),
+            log_path: run.log_path.as_deref(),
+        }
     }
-    if let Some(failure_reason) = &dispatch.failure_reason {
-        object.insert("failureReason".to_owned(), json!(failure_reason));
-    }
-    value
 }
 
 fn run_json(run: &AgentRunRecord) -> Value {
-    let mut value = json!({
-        "workspaceId": run.workspace_id,
-        "runId": run.run_id,
-        "threadId": run.thread_id,
-        "triggerMessageId": run.trigger_message_id,
-        "command": run.command,
-        "startedAtMs": run.started_at_ms,
-        "failureNotePosted": run.failure_note_posted,
-    });
-    let object = value.as_object_mut().expect("run is an object");
-    if let Some(ended_at_ms) = run.ended_at_ms {
-        object.insert("endedAtMs".to_owned(), json!(ended_at_ms));
-    }
-    if let Some(exit_code) = run.exit_code {
-        object.insert("exitCode".to_owned(), json!(exit_code));
-    }
-    if let Some(failure_reason) = &run.failure_reason {
-        object.insert("failureReason".to_owned(), json!(failure_reason));
-    }
-    if let Some(log_path) = &run.log_path {
-        object.insert("logPath".to_owned(), json!(log_path));
-    }
-    value
+    json!(RunWire::from(run))
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PauseWire<'a> {
+    workspace_id: &'a str,
+    thread_id: &'a str,
+    paused: bool,
+    updated_at_ms: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason: Option<&'a str>,
 }
 
 fn pause_json(pause: &ThreadDispatchPause) -> Value {
-    let mut value = json!({
-        "workspaceId": pause.workspace_id,
-        "threadId": pause.thread_id,
-        "paused": pause.paused,
-        "updatedAtMs": pause.updated_at_ms,
-    });
-    if let Some(reason) = &pause.reason {
-        value
-            .as_object_mut()
-            .expect("pause is an object")
-            .insert("reason".to_owned(), json!(reason));
-    }
-    value
+    json!(PauseWire {
+        workspace_id: &pause.workspace_id,
+        thread_id: &pause.thread_id,
+        paused: pause.paused,
+        updated_at_ms: pause.updated_at_ms,
+        reason: pause.reason.as_deref(),
+    })
 }
 
 impl EngineService {
@@ -312,13 +358,9 @@ impl EngineService {
             .map(dispatch_json)
             .collect();
         let included = bounded_chat_page_len(&values)?;
-        let next_cursor = chat_page_cursor(
-            &rows,
-            included,
-            cursor.as_ref().map_or(0, |cursor| cursor.consumed),
-            binding,
-            |row| (row.created_at_ms, row.trigger_message_id.clone()),
-        )?;
+        let next_cursor = chat_page_cursor(&rows, included, binding, |row| {
+            (row.created_at_ms, row.trigger_message_id.clone())
+        })?;
         Ok(json!({
             "dispatches": values[..included].to_vec(),
             "nextCursor": next_cursor,
@@ -354,18 +396,12 @@ impl EngineService {
             .map(dispatch_claim_json)
             .collect();
         let included = bounded_chat_page_len(&values)?;
-        let next_cursor = chat_page_cursor(
-            &rows,
-            included,
-            cursor.as_ref().map_or(0, |cursor| cursor.consumed),
-            binding,
-            |claim| {
-                (
-                    claim.dispatch.updated_at_ms,
-                    claim.dispatch.trigger_message_id.clone(),
-                )
-            },
-        )?;
+        let next_cursor = chat_page_cursor(&rows, included, binding, |claim| {
+            (
+                claim.dispatch.updated_at_ms,
+                claim.dispatch.trigger_message_id.clone(),
+            )
+        })?;
         Ok(json!({
             "claims": values[..included].to_vec(),
             "nextCursor": next_cursor,
@@ -413,7 +449,7 @@ impl EngineService {
             Some(encode_chat_cursor(&ChatKeysetCursor {
                 version: 1,
                 binding,
-                consumed: cursor.as_ref().map_or(0, |cursor| cursor.consumed) + included as i64,
+                consumed: None,
                 first: 0,
                 second: last.clone(),
                 third: None,
@@ -510,7 +546,7 @@ impl EngineService {
             Some(encode_chat_cursor(&ChatKeysetCursor {
                 version: 1,
                 binding,
-                consumed: cursor.as_ref().map_or(0, |cursor| cursor.consumed) + included as i64,
+                consumed: None,
                 first: last.run.started_at_ms,
                 second: last.run.run_id.clone(),
                 third: Some(last.message_id.clone()),
@@ -775,13 +811,9 @@ impl EngineService {
             })
             .collect();
         let included = bounded_chat_page_len(&values)?;
-        let next_cursor = chat_page_cursor(
-            &rows,
-            included,
-            cursor.as_ref().map_or(0, |cursor| cursor.consumed),
-            binding,
-            |recovery| (recovery.run.started_at_ms, recovery.run.run_id.clone()),
-        )?;
+        let next_cursor = chat_page_cursor(&rows, included, binding, |recovery| {
+            (recovery.run.started_at_ms, recovery.run.run_id.clone())
+        })?;
         Ok(json!({
             "recoveries": values[..included].to_vec(),
             "nextCursor": next_cursor,
@@ -835,5 +867,107 @@ impl EngineService {
         )
         .await?;
         Ok(json!({ "failed": true }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn run() -> AgentRunRecord {
+        AgentRunRecord {
+            workspace_id: "workspace".to_owned(),
+            run_id: "run".to_owned(),
+            thread_id: "thread".to_owned(),
+            trigger_message_id: "message".to_owned(),
+            command: String::new(),
+            started_at_ms: 10,
+            ended_at_ms: None,
+            exit_code: None,
+            failure_reason: None,
+            log_path: None,
+            failure_note_posted: false,
+        }
+    }
+
+    #[test]
+    fn dispatch_claim_omits_absent_outcomes_and_keeps_chain_depth() {
+        let claim = DispatchClaim {
+            dispatch: DispatchRecord {
+                workspace_id: "workspace".to_owned(),
+                trigger_message_id: "message".to_owned(),
+                thread_id: "thread".to_owned(),
+                state: "pending".to_owned(),
+                run_id: None,
+                failure_reason: None,
+                attempt_count: 0,
+                created_at_ms: 9,
+                updated_at_ms: 9,
+            },
+            run: run(),
+            chain_depth: 2,
+        };
+        assert_eq!(
+            dispatch_claim_json(&claim),
+            json!({
+                "dispatch": {
+                    "workspaceId": "workspace",
+                    "triggerMessageId": "message",
+                    "threadId": "thread",
+                    "state": "pending",
+                    "attemptCount": 0,
+                    "createdAtMs": 9,
+                    "updatedAtMs": 9,
+                },
+                "run": {
+                    "workspaceId": "workspace",
+                    "runId": "run",
+                    "threadId": "thread",
+                    "triggerMessageId": "message",
+                    "command": "",
+                    "startedAtMs": 10,
+                    "failureNotePosted": false,
+                },
+                "chainDepth": 2,
+            })
+        );
+    }
+
+    #[test]
+    fn ended_run_and_paused_thread_carry_their_outcomes() {
+        let ended = AgentRunRecord {
+            ended_at_ms: Some(12),
+            exit_code: Some(0),
+            failure_reason: Some("app-quit".to_owned()),
+            log_path: Some("logs/run.log".to_owned()),
+            ..run()
+        };
+        let value = run_json(&ended);
+        assert_eq!(value["endedAtMs"], json!(12));
+        assert_eq!(value["exitCode"], json!(0));
+        assert_eq!(value["failureReason"], json!("app-quit"));
+        assert_eq!(value["logPath"], json!("logs/run.log"));
+        let pause = ThreadDispatchPause {
+            workspace_id: "workspace".to_owned(),
+            thread_id: "thread".to_owned(),
+            paused: false,
+            reason: None,
+            updated_at_ms: 13,
+        };
+        assert_eq!(
+            pause_json(&pause),
+            json!({
+                "workspaceId": "workspace",
+                "threadId": "thread",
+                "paused": false,
+                "updatedAtMs": 13,
+            })
+        );
+        let paused = ThreadDispatchPause {
+            paused: true,
+            reason: Some("owner".to_owned()),
+            ..pause
+        };
+        assert_eq!(pause_json(&paused)["reason"], json!("owner"));
     }
 }

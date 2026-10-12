@@ -17,6 +17,7 @@ export interface OwnerCollectionWriteFile {
   momentId: string;
   /** The write created the file. */
   created: boolean;
+  publicPrincipalId?: string;
 }
 
 export interface OwnerCollectionWrite {
@@ -66,11 +67,13 @@ export function readOwnerCollectionWrites(
     const share = grant && storage.getShare(grant.shareId);
     if (!share || share.workspaceId !== input.workspaceId || share.granterUserId !== input.ownerUserId) throw notFound();
     const rows = storage.db.prepare(
-      `SELECT submit_id, grant_generation, author_kind, created_at_ms, origin_id, first_origin_seq, last_origin_seq,
-         paths_json
-       FROM sync_relay_collection_writes
-       WHERE grant_id = ? AND workspace_id = ? AND first_origin_seq > ?
-       ORDER BY first_origin_seq LIMIT ?`,
+      `SELECT w.submit_id, w.grant_generation, w.author_kind, w.created_at_ms, w.origin_id, w.first_origin_seq, w.last_origin_seq,
+         w.paths_json, p.public_principal_id
+       FROM sync_relay_collection_writes w
+       LEFT JOIN sync_relay_app_public_principals p ON w.author_kind = 'link'
+         AND p.workspace_id = w.workspace_id AND p.grant_id = w.grant_id AND p.principal_id = w.principal_id
+       WHERE w.grant_id = ? AND w.workspace_id = ? AND w.first_origin_seq > ?
+       ORDER BY w.first_origin_seq LIMIT ?`,
     ).all(input.grantId, input.workspaceId, input.afterOriginSeq ?? -1, input.limit + 1);
     const moments = storage.db.prepare(
       `SELECT origin_seq, op_kind,
@@ -92,6 +95,7 @@ export function readOwnerCollectionWrites(
       const first = Number(row.first_origin_seq);
       const last = Number(row.last_origin_seq);
       if (row.origin_id !== origin || !identifier(row.submit_id)) damaged();
+      if (row.public_principal_id !== null && !identifier(row.public_principal_id)) damaged();
       let paths: unknown;
       try { paths = JSON.parse(String(row.paths_json)); } catch { damaged(); }
       if (!Array.isArray(paths) || paths.length !== last - first + 1) damaged();
@@ -111,6 +115,7 @@ export function readOwnerCollectionWrites(
           objectId: moment.object_id,
           momentId: moment.moment_id,
           created: moment.before_present === "null",
+          ...(row.public_principal_id === null ? {} : { publicPrincipalId: String(row.public_principal_id) }),
         };
       });
       const write: OwnerCollectionWrite = {

@@ -16,7 +16,7 @@ import { OPEN_EDITORS_DEFAULT_HEIGHT, OPEN_EDITORS_MIN_HEIGHT } from "./workbenc
 import { documentVersionKey } from "./documentVersionKey";
 import { basenameOf } from "./path";
 import { deferred } from "../testing/deferred";
-import { DesktopWorkspaceShell, WORKSPACE, STORED_STATE, storedStateWithTabs, CANONICAL_DM, dmSyncResult, recordDocUpdate, makeBridge, renderShell, holdHistory, shellBootstrapProps, SHARE_VIEW } from "./DesktopWorkspaceShell.testHarness";
+import { DesktopWorkspaceShell, WORKSPACE, STORED_STATE, STORED_CHATS_STATE, storedStateWithTabs, CANONICAL_DM, dmSyncResult, recordDocUpdate, makeBridge, renderShell, holdHistory, shellBootstrapProps, SHARE_VIEW } from "./DesktopWorkspaceShell.testHarness";
 
 // Count inspector and explorer work when the shell renders again.
 vi.mock("./documentVersionKey", { spy: true });
@@ -66,7 +66,7 @@ describe("direct message workspace picker", () => {
 
   it("does not offer shared-view workspaces for acceptance", async () => {
     const user = userEvent.setup();
-    const bridge = makeBridge(Promise.resolve(STORED_STATE));
+    const bridge = makeBridge(Promise.resolve(STORED_CHATS_STATE));
     bridge.syncDms = vi.fn(async () => ({
       available: true,
       dms: [],
@@ -539,7 +539,7 @@ describe("collection folders", () => {
     act(() => {
       const sessionId = sessionsByPath.get("tasks/one.md")!;
       for (const listener of [...saveStateListeners]) {
-        listener({ sessionId, state: "saved", seq: 1 });
+        listener({ sessionId, workspaceId: "ws-1", path: "notes/a.md", state: { kind: "saved-here" }, seq: 1 });
       }
     });
 
@@ -925,11 +925,11 @@ describe("workbench resize commits", () => {
     renderShell(bridge);
 
     const sidebar = await screen.findByTestId("side-panel");
-    const chats = await screen.findByTestId("chats-panel");
+    const about = await screen.findByTestId("about-rail");
     const openEditors = await screen.findByTestId("open-editors-list");
     const editorLayout = await screen.findByTestId("editor-group-layout");
     await screen.findByTestId("editor-group-left");
-    Object.defineProperty(chats, "getBoundingClientRect", {
+    Object.defineProperty(about, "getBoundingClientRect", {
       configurable: true,
       value: () => ({ right: 1_000 }),
     });
@@ -964,24 +964,24 @@ describe("workbench resize commits", () => {
       expect(sidebar.style.width).toBe("440px");
       expect(persistenceArms()).toBe(1);
 
-      const chatsHandle = screen.getByTestId("chats-panel-resize");
+      const aboutHandle = screen.getByTestId("about-rail-resize");
       timeoutSpy.mockClear();
-      fireEvent.pointerDown(chatsHandle, {
+      fireEvent.pointerDown(aboutHandle, {
         button: 0,
         buttons: 1,
         pointerId: 2,
       });
       for (const clientX of [620, 560, 500]) {
-        fireEvent.pointerMove(chatsHandle, {
+        fireEvent.pointerMove(aboutHandle, {
           buttons: 1,
           clientX,
           pointerId: 2,
         });
       }
-      expect(chats.style.width).toBe("500px");
+      expect(about.style.width).toBe("500px");
       expect(persistenceArms()).toBe(0);
-      fireEvent.pointerCancel(chatsHandle, { pointerId: 2 });
-      expect(chats.style.width).toBe("500px");
+      fireEvent.pointerCancel(aboutHandle, { pointerId: 2 });
+      expect(about.style.width).toBe("500px");
       expect(persistenceArms()).toBe(1);
 
       const openEditorsHandle = screen.getByTestId("open-editors-resize");
@@ -1502,8 +1502,8 @@ describe("customize", () => {
       onSwitchWorkspace={() => {}}
     />);
 
-    await user.click(await screen.findByTestId("titlebar-chats-sidebar"));
-    await user.click(await screen.findByRole("button", { name: "Chats actions" }));
+    await user.click(await screen.findByTestId("activity-chats"));
+    await user.click(await screen.findByRole("button", { name: "Sidebar actions" }));
     await user.click(screen.getByRole("menuitem", { name: "Customize…" }));
     const row = await screen.findByTestId("settings-row-your-color");
     expect(row.dataset.highlighted).toBe("true");
@@ -1731,7 +1731,7 @@ describe("workbench render cost", () => {
       expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"),
     );
 
-    await waitFor(() => expect(bridge.workspaceActivitySubscriberCount()).toBe(1));
+    await waitFor(() => expect(bridge.workspaceActivitySubscriberCount()).toBe(2));
 
     vi.useFakeTimers();
     try {
@@ -1769,7 +1769,7 @@ describe("workbench render cost", () => {
       expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"),
     );
 
-    await waitFor(() => expect(bridge.workspaceActivitySubscriberCount()).toBe(1));
+    await waitFor(() => expect(bridge.workspaceActivitySubscriberCount()).toBe(2));
 
     vi.useFakeTimers();
     try {
@@ -1801,7 +1801,7 @@ describe("workbench render cost", () => {
       expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"),
     );
 
-    await waitFor(() => expect(bridge.workspaceActivitySubscriberCount()).toBe(1));
+    await waitFor(() => expect(bridge.workspaceActivitySubscriberCount()).toBe(2));
 
     vi.useFakeTimers();
     try {
@@ -1828,7 +1828,7 @@ describe("workbench render cost", () => {
     await waitFor(() =>
       expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"),
     );
-    await waitFor(() => expect(bridge.workspaceActivitySubscriberCount()).toBe(1));
+    await waitFor(() => expect(bridge.workspaceActivitySubscriberCount()).toBe(2));
 
     vi.useFakeTimers();
     try {
@@ -1864,7 +1864,7 @@ describe("workbench render cost", () => {
     renderShell(bridge);
     await screen.findAllByTestId("tree-row");
 
-    await waitFor(() => expect(bridge.workspaceActivitySubscriberCount()).toBe(1));
+    await waitFor(() => expect(bridge.workspaceActivitySubscriberCount()).toBe(2));
 
     vi.useFakeTimers();
     try {
@@ -1903,7 +1903,7 @@ describe("workbench render cost", () => {
     await waitFor(
       () => {
         expect(bridge.listWorkspaceFiles).toHaveBeenCalledTimes(1);
-        expect(bridge.workspaceActivitySubscriberCount()).toBe(1);
+        expect(bridge.workspaceActivitySubscriberCount()).toBe(2);
       },
     );
 
@@ -1939,7 +1939,7 @@ describe("workbench render cost", () => {
   it("suspends the navigator's polling while a Chats tab is live", async () => {
     const user = userEvent.setup();
     const bridge = makeBridge(
-      Promise.resolve(storedStateWithTabs([], null)),
+      Promise.resolve({ ...storedStateWithTabs([], null), activeView: "chats" }),
     );
     renderShell(bridge);
     await waitFor(() =>
@@ -1969,7 +1969,7 @@ describe("workbench render cost", () => {
   it("does not sync DMs from the suspended navigator when an open channel thread refreshes", async () => {
     const user = userEvent.setup();
     const bridge = Object.assign(
-      makeBridge(Promise.resolve(storedStateWithTabs([], null))),
+      makeBridge(Promise.resolve({ ...storedStateWithTabs([], null), activeView: "chats" })),
       {
         listChatChannels: vi.fn(async () => ({
           channels: [
@@ -2081,7 +2081,7 @@ describe("workbench render cost", () => {
       let unreadCount = 1;
       const markRead = deferred<void>();
       const bridge = Object.assign(
-        makeBridge(Promise.resolve(storedStateWithTabs([], null))),
+        makeBridge(Promise.resolve({ ...storedStateWithTabs([], null), activeView: "chats" })),
         {
           syncDms: vi.fn(async () =>
             dmSyncResult([{ ...CANONICAL_DM, unreadCount }]),

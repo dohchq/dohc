@@ -7,14 +7,21 @@ type Author = GetCollectionRecordHistoryResult["entries"][number]["author"];
 
 /** How main names a record history's authors, in one workspace. */
 export interface RecordHistoryAuthors {
+  /** Prepare account labels together, without waiting on network I/O. */
+  prepare(userIds: readonly string[]): void;
   /** An agent, by the person it acted for: this computer's agent by name, any other as "Agent". */
   agent(onBehalfOf: string | null): string;
-  /** Null for the workspace owner, whose ordinary automation rows need no extra label. */
+  /** Null for the workspace owner and device-local people, whose rows need no extra label. */
   person(userId: string): string | null;
   /** An automation's name in its Collection's automations.yaml now, or null. */
   automationName(automationId: string): string | null;
   /** Whether the person can open the run without asking the server. */
   runAvailable(automationId: string, claimId: string): Promise<boolean>;
+}
+
+/** Device-local identities stay on this computer; the owner's rows need no person label. */
+export function recordHistoryPersonIsNamed(userId: string, ownerId: string | null = null): boolean {
+  return !userId.startsWith("local:") && userId !== ownerId;
 }
 
 /**
@@ -56,12 +63,24 @@ export function createRunLocator(dependencies: {
 /**
  * A page of record history as the record's History shows it. Each automation
  * run is looked up once, however many of the page's changes it made. The
- * page never waits on the server.
+ * Run availability uses the local cache; author labels may need a History lookup.
  */
 export async function recordHistoryForIpc(
   page: Pick<CollectionGetRecordResult, "history" | "nextBeforeHistoryId">,
   authors: RecordHistoryAuthors,
 ): Promise<GetCollectionRecordHistoryResult> {
+  authors.prepare([...new Set(page.history.flatMap(entry => {
+    if (entry.linkAuthor !== null) return [];
+    if (entry.authorOriginId === null) return [];
+    const userId = entry.actorKind === "human" ? entry.authorOriginId : entry.onBehalfOf;
+    return userId !== null && recordHistoryPersonIsNamed(userId) ? [userId] : [];
+  }))]);
+  const people = new Map<string, string | null>();
+  const personOf = (userId: string): string | null => {
+    if (!recordHistoryPersonIsNamed(userId)) return null;
+    if (!people.has(userId)) people.set(userId, authors.person(userId));
+    return people.get(userId)!;
+  };
   const runs = new Map<string, Promise<boolean>>();
   const available = (automationId: string, claimId: string): Promise<boolean> => {
     const key = JSON.stringify([automationId, claimId]);
@@ -70,12 +89,25 @@ export async function recordHistoryForIpc(
     return known;
   };
   const authorOf = async (entry: HistoryEntry): Promise<Author> => {
+    if (entry.linkAuthor !== null) {
+      // The renderer names the role, so the link's ids stay in main.
+      return entry.actorKind === "agent" && entry.authorOriginId !== null && entry.onBehalfOf === entry.linkAuthor.publicPrincipalId
+        ? { kind: "link", agentName: authors.agent(entry.onBehalfOf) }
+        : { kind: "link" };
+    }
     const actor = entry.authorOriginId;
     if (actor === null) return null;
-    if (entry.actorKind === "agent") return { kind: "agent", name: authors.agent(entry.onBehalfOf) };
+    if (entry.actorKind === "human") {
+      const name = personOf(actor);
+      return name === null ? null : { kind: "human", name };
+    }
+    if (entry.actorKind === "agent") {
+      const person = entry.onBehalfOf === null ? null : personOf(entry.onBehalfOf);
+      return { kind: "agent", name: authors.agent(entry.onBehalfOf), ...(person === null ? {} : { person }) };
+    }
     if (entry.actorKind !== "automation") return null;
     const run = entry.automationRun;
-    const person = entry.onBehalfOf === null ? null : authors.person(entry.onBehalfOf);
+    const person = entry.onBehalfOf === null ? null : personOf(entry.onBehalfOf);
     return {
       kind: "automation",
       automationId: actor,

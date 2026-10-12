@@ -196,6 +196,10 @@ export interface CollectionRecord {
   path: string;
   conflicted: boolean;
   values: CollectionIndexedValue[];
+  /** Present for a received share's locally created record. Acceptance is a relay receipt. */
+  creationDelivery?: "pending" | "offline" | "accepted" | "refused";
+  creationRefusal?: string;
+  creationCanDiscard?: boolean;
 }
 
 export interface CollectionRecordGroup {
@@ -278,6 +282,14 @@ export type AutomationRunAttribution = {
   automationName: string;
 };
 
+/** Owner-only live provenance. The public principal is distinct from a direct write's private principal. */
+interface CollectionLiveLinkAuthor {
+  kind: "link";
+  grantId: string;
+  grantGeneration: number;
+  publicPrincipalId: string;
+}
+
 interface CollectionFieldHistoryEntry {
   historyId: number;
   field: string;
@@ -293,6 +305,8 @@ interface CollectionFieldHistoryEntry {
   recordedAtMs: number;
   /** The run an automation's write came from, `null` for any other write and for one recorded without its run. */
   automationRun: AutomationRunAttribution | null;
+  /** Owner-only attribution from an accepted live Edit link frame. */
+  linkAuthor: CollectionLiveLinkAuthor | null;
 }
 
 export interface CollectionGetRecordResult {

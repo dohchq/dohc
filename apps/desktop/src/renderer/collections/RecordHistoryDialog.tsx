@@ -5,6 +5,7 @@ import { bridge } from "../bridge";
 import { Overlay } from "../Overlay";
 import { relativeTime } from "../relativeTime";
 import { SecondaryButton } from "../ui/controls";
+import { SkeletonLines } from "../ui/SkeletonRows";
 import { useRequestSequence } from "../useRequestSequence";
 import { HISTORY_READ_FAILED } from "./useRecordHistory";
 
@@ -68,7 +69,23 @@ export function recordHistoryGroups(entries: readonly RecordHistoryEntry[]): Gro
 function AuthorName(props: { author: Author; id: string }) {
   const { author } = props;
   if (author.kind === "agent") {
-    return <span id={props.id} className="min-w-0 truncate text-[12px] text-agent">{author.name}</span>;
+    return <span id={props.id} className="inline-flex min-w-0 items-center gap-1 text-[12px]">
+      <span className="truncate text-agent">{author.name}</span>
+      {author.person ? <span className="truncate text-muted">{` for ${author.person}`}</span> : null}
+    </span>;
+  }
+  // A link holder has no name dohc can confirm, so the row names the role.
+  if (author.kind === "link") {
+    if (author.agentName !== undefined) {
+      return <span id={props.id} className="inline-flex min-w-0 items-center gap-1 text-[12px]">
+        <span className="truncate text-agent">{author.agentName}</span>
+        <span className="truncate text-muted"> for a link holder</span>
+      </span>;
+    }
+    return <span id={props.id} className="min-w-0 truncate text-[12px] text-muted">Link holder</span>;
+  }
+  if (author.kind === "human") {
+    return <span id={props.id} className="min-w-0 truncate text-[12px] text-muted">{author.name}</span>;
   }
   return (
     <span id={props.id} data-testid="record-history-automation" className="inline-flex min-w-0 items-center gap-1 text-[12px] text-muted">
@@ -256,6 +273,48 @@ export function RecordHistoryDialog(props: {
     load(null);
   }, [load]);
 
+  const [namesRevision, setNamesRevision] = useState<{ workspaceId: string } | null>(null);
+  const namedRevision = useRef<typeof namesRevision>(null);
+  useEffect(() => bridge().onHistoryNamesChanged?.(event => {
+    if (event.workspaceId === workspaceId) setNamesRevision({ workspaceId });
+  }), [workspaceId]);
+  useEffect(() => {
+    if (
+      namesRevision?.workspaceId !== workspaceId || namedRevision.current === namesRevision ||
+      page === null || loading !== null || page.entries.length === 0
+    ) return;
+    let liveRequest = true;
+    const token = request.next();
+    const shown = page;
+    const live = () => liveRequest && request.isCurrent(token);
+    const scan = async () => {
+      const authors = new Map<number, RecordHistoryEntry["author"]>();
+      let before = Math.max(...shown.entries.map(entry => entry.historyId)) + 1;
+      const last = Math.min(...shown.entries.map(entry => entry.historyId));
+      do {
+        const result = await bridge().getCollectionRecordHistory({ workspaceId, collectionPath, recordId, beforeHistoryId: before });
+        if (!live()) return false;
+        for (const entry of result.entries) authors.set(entry.historyId, entry.author);
+        if (result.nextBeforeHistoryId === null || result.nextBeforeHistoryId <= last) break;
+        if (result.nextBeforeHistoryId >= before) return false;
+        before = result.nextBeforeHistoryId;
+      } while (live());
+      if (!live()) return false;
+      const next = { ...shown, entries: shown.entries.map(entry => authors.has(entry.historyId) ? { ...entry, author: authors.get(entry.historyId)! } : entry) };
+      // Older changes keeps the earlier entries. Only an applied scan
+      // completes the event, so pagination cannot lose their names.
+      namedRevision.current = namesRevision;
+      setPage(current => current === shown ? next : current);
+      return true;
+    };
+    void (async () => {
+      for (let attempt = 0; attempt < 2 && live(); attempt++) {
+        try { if (await scan()) return; } catch { /* Retry once while this page is still current. */ }
+      }
+    })();
+    return () => { liveRequest = false; };
+  }, [workspaceId, collectionPath, recordId, page, loading, request, namesRevision]);
+
   // Said once the reads and lookups settle, so Try again reads back to every
   // page shown, and said again only for a run newly left unplaced.
   useEffect(() => {
@@ -271,6 +330,7 @@ export function RecordHistoryDialog(props: {
     reports.current.onRunsUnchecked(oldest.current, lookupError.current, unknown);
   }, [page, located, loading]);
 
+  const firstLoad = failed === null && page === null;
   const status = failed !== null ? HISTORY_READ_FAILED
     : page === null ? "Loading history…"
     : page.entries.length === 0 ? "No field of this record has changed yet." : "";
@@ -313,8 +373,10 @@ export function RecordHistoryDialog(props: {
           ))}
         </ul>
       )}
-      {/* One status line that stays mounted, so a screen reader hears each change of its words. */}
-      <div className={status === "" ? "sr-only" : "flex items-center gap-2"}>
+      {firstLoad ? <SkeletonLines rows={2} /> : null}
+      {/* One status line that stays mounted, so a screen reader hears each change of its words.
+          While the first page loads, the lines above show it and the words are for the screen reader. */}
+      <div className={status === "" || firstLoad ? "sr-only" : "flex items-center gap-2"}>
         <p role="status" className="m-0 text-[12px] text-muted">{status}</p>
         {failed === null ? null : (
           <SecondaryButton

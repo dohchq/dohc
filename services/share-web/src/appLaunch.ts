@@ -93,15 +93,17 @@ export function createAppLaunchHandler(options: { config: AppLaunchConfig; relay
       if (!exact(value, "authorityRevision,files,publicationId") || value.publicationId !== launch.publicationId ||
           !Number.isSafeInteger(value.authorityRevision) || (value.authorityRevision as number) < 1 ||
           (launch.revision !== undefined && launch.revision !== value.authorityRevision) || !Array.isArray(value.files) || value.files.length < 1 || value.files.length > 3) throw new Error("Invalid publication.");
-      let total = 0; const paths = new Set<string>();
+      let total = 0; const paths = new Set<string>(), files: Descriptor["files"] = [];
       for (const file of value.files) {
         if (!exact(file, "byteLength,contentType,path,sha256") || typeof file.path !== "string" || paths.has(file.path) ||
             !Object.hasOwn(APP_BUNDLE_CONTENT_TYPES, file.path) || file.contentType !== APP_BUNDLE_CONTENT_TYPES[file.path] ||
             typeof file.sha256 !== "string" || !/^[a-f0-9]{64}$/.test(file.sha256) || !Number.isSafeInteger(file.byteLength) || (file.byteLength as number) < 0) throw new Error("Invalid bundle.");
-        paths.add(file.path); if ((file.byteLength as number) > APP_PUBLICATION_MAX_BLOB_BYTES) throw new Error("Bundle file exceeds blob limit."); total += file.byteLength as number;
+        const byteLength = file.byteLength as number;
+        paths.add(file.path); if (byteLength > APP_PUBLICATION_MAX_BLOB_BYTES) throw new Error("Bundle file exceeds blob limit."); total += byteLength;
+        files.push({path: file.path, contentType: file.contentType as string, sha256: file.sha256, byteLength});
       }
       if (!paths.has("bundle.js") || total > MAX_BUNDLE) throw new Error("Invalid bundle size.");
-      return value as unknown as Descriptor;
+      return {publicationId: launch.publicationId, authorityRevision: value.authorityRevision as number, files};
     } finally { await response.body?.cancel().catch(() => {}); }
   }
   async function document(launch: Launch, signal: AbortSignal) {

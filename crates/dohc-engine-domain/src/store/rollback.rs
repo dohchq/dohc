@@ -6,6 +6,7 @@ use super::{
 };
 use crate::conflicts::{
     binary_delete_job_id, binary_rename_delete_job_id, binary_rename_write_job_id,
+    binary_write_job_id,
 };
 use crate::error::DomainError;
 use crate::records::{
@@ -108,6 +109,11 @@ impl<'a> VersionedTextStore<'a> {
                     reason: "sync record-only moments cannot be rolled back",
                 });
             }
+            if super::is_capture_recovery_origin(&moment.metadata_origin) {
+                return Err(DomainError::InvalidInput {
+                    reason: "capture recovery is not a file mutation",
+                });
+            }
 
             let before_state = moment_before_state(conn, ws, &input.mutation_moment_id)?;
             let before = resolve_rollback_before(conn, input, &moment, before_state)?;
@@ -154,6 +160,12 @@ impl<'a> VersionedTextStore<'a> {
             // path supersede the compensator before it can restore disk.
             let restore_generation = next_moment_order(tx)?;
             before_remove(tx, &prep.moment)?;
+            tx.execute(
+                "DELETE FROM engine_requests WHERE request_id='sync-ydoc-provisional-author:'||json_array(?1,?2,?3) \
+                 AND payload_hash=?4 AND kind='sync-ydoc-provisional-author'",
+                params![ws, input.version_id, prep.moment.object_id, input.mutation_moment_id],
+            )
+            .map_err(DomainError::sql_persist)?;
             tx.execute(
                 "DELETE FROM moments WHERE workspace_id = ?1 AND moment_id = ?2",
                 params![ws, input.mutation_moment_id],
@@ -282,7 +294,7 @@ impl<'a> VersionedTextStore<'a> {
                 && let Some(written_moment_sha) = prep.moment.after_binary_sha256.as_deref().or(prep.moment.after_blob_sha256.as_deref())
             {
                 let publication_job_id = if prep.moment.after_content_kind == "binary" {
-                    input.mutation_moment_id.clone()
+                    binary_write_job_id(&input.mutation_moment_id)
                 } else { format!("authored-mat_{}", input.mutation_moment_id) };
                 let active = version_is_active(tx, ws, &input.version_id)?;
                 let job: Option<(String, i64, String, String, String)> = tx
@@ -756,7 +768,7 @@ fn select_moment_by_order(
 ) -> Result<Option<MomentRecord>, DomainError> {
     let row = conn
         .query_row(
-            "SELECT moment_order, moment_id, version_id, object_id, path, recorded_at_ms, \
+            concat!("SELECT moment_order, moment_id, version_id, object_id, path, recorded_at_ms, \
              operation, after_blob_sha256, before_present, before_blob_sha256, \
              before_latest_moment_id, metadata_origin, metadata_summary, \
              metadata_correlation_id, author_json, sync_record_only, \
@@ -770,7 +782,8 @@ fn select_moment_by_order(
              LEFT JOIN binary_blobs before_binary ON before_binary.sha256 = m.before_binary_sha256 \n             LEFT JOIN blobs after_text_blob ON after_text_blob.sha256 = m.after_blob_sha256 \n             LEFT JOIN blobs before_text_blob ON before_text_blob.sha256 = m.before_blob_sha256 \
              WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3 \
                AND moment_order <= ?4 AND (sync_record_only IS NULL OR sync_record_only = 0) \
-             ORDER BY moment_order DESC LIMIT 1",
+               AND ", crate::exclude_capture_recovery_sql!("m"), " \
+             ORDER BY moment_order DESC LIMIT 1"),
             params![workspace_id, version_id, object_id, max_order],
             map_moment_row,
         )
@@ -1055,9 +1068,14 @@ fn later_materialized_object_moment_exists(
 ) -> Result<bool, DomainError> {
     let found: Option<i64> = conn
         .query_row(
-            "SELECT 1 FROM moments WHERE workspace_id = ?1 AND version_id = ?2 \
+            concat!(
+                "SELECT 1 FROM moments WHERE workspace_id = ?1 AND version_id = ?2 \
              AND object_id = ?3 AND moment_order > ?4 \
-             AND (sync_record_only IS NULL OR sync_record_only = 0) LIMIT 1",
+             AND (sync_record_only IS NULL OR sync_record_only = 0) \
+             AND ",
+                crate::exclude_capture_recovery_sql!(),
+                " LIMIT 1"
+            ),
             params![
                 workspace_id,
                 moment.version_id,
@@ -1122,8 +1140,13 @@ fn rollback_moment_has_dependents(
     // Fail closed if a concrete preimage has no resolved producer link.
     let unresolved_reference: Option<i64> = conn
         .query_row(
-            "SELECT 1 FROM moments WHERE workspace_id = ?1 AND object_id = ?2 \
-             AND before_present = 2 AND before_latest_moment_id IS NULL LIMIT 1",
+            concat!(
+                "SELECT 1 FROM moments WHERE workspace_id = ?1 AND object_id = ?2 \
+             AND before_present = 2 AND before_latest_moment_id IS NULL \
+             AND ",
+                crate::exclude_capture_recovery_sql!(),
+                " LIMIT 1"
+            ),
             params![workspace_id, moment.object_id],
             |row| row.get(0),
         )
@@ -1170,11 +1193,14 @@ fn rollback_moment_has_dependents(
 
     let mut object_moments = Vec::new();
     let mut object_stmt = conn
-        .prepare_cached(
+        .prepare_cached(concat!(
             "SELECT version_id, moment_order, before_present FROM moments \
              WHERE workspace_id = ?1 AND object_id = ?2 \
-               AND (sync_record_only IS NULL OR sync_record_only = 0) ORDER BY moment_order",
-        )
+               AND (sync_record_only IS NULL OR sync_record_only = 0) \
+               AND ",
+            crate::exclude_capture_recovery_sql!(),
+            " ORDER BY moment_order"
+        ))
         .map_err(DomainError::sql_corrupt)?;
     let object_rows = object_stmt
         .query_map(params![workspace_id, moment.object_id], |row| {

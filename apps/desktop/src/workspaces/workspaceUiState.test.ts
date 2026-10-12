@@ -35,8 +35,8 @@ const STATE: WorkspaceUiState = {
     size: 1,
   }],
   activeEditorGroup: "primary",
-  chatsVisible: false,
-  chatsWidth: 320,
+  aboutVisible: false,
+  aboutWidth: 320,
   openEditorsHeight: 126,
   expandedFolders: [],
   pinned: [],
@@ -81,10 +81,15 @@ describe("ui-state file store", () => {
     renameMock.mockClear();
     renameMock.mockRejectedValueOnce(transient);
 
-    await expect(writeUiStateFile(root, STATE)).resolves.toBeUndefined();
-
-    expect(renameMock).toHaveBeenCalledTimes(2);
-    expect(await readUiStateFile(root)).toEqual(STATE);
+    const descriptor = Object.getOwnPropertyDescriptor(process, "platform")!;
+    Object.defineProperty(process, "platform", { ...descriptor, value: "win32" });
+    try {
+      await expect(writeUiStateFile(root, STATE)).resolves.toBeUndefined();
+      expect(renameMock).toHaveBeenCalledTimes(2);
+      expect(await readUiStateFile(root)).toEqual(STATE);
+    } finally {
+      Object.defineProperty(process, "platform", descriptor);
+    }
   });
 
   it("a missing or corrupt file reads as null, never an error", async () => {

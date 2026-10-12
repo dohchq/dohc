@@ -14,6 +14,24 @@ const context = {kind: "account", accountId: "alice"};
 const snapshot: LiveAuthorSnapshot = [{kind: "human", humanId: "alice", humanName: "Alice"}];
 
 describe("ordinary admitted authorship", () => {
+  it("binds a recipient's logged agent to the recipient and preserves exact replay bytes", async () => {
+    const storage = await testStorage();
+    const payload = {authorContext: {kind: "account", accountId: "recipient",
+      agent: {agentId: "writer", agentName: "Writer", onBehalfOf: "owner", depth: 1}}};
+    const ops = [update(payload)];
+    const expected = [{kind: "human", humanId: "recipient", humanName: "Recipient"},
+      {kind: "agent", ...payload.authorContext.agent, onBehalfOf: "recipient"}];
+    storage.claimWorkspace({workspaceId: "workspace", ownerUserId: "owner", createdAtMs: 1});
+    const admitted = await parseAuthenticatedLogOps(ops, "recipient", () => "Recipient");
+    expect(admitted[0]?.admittedAuthorSnapshot).toEqual(expected);
+    expect(admitted[0]?.payloadJson).toBe(stableJsonStringify(payload));
+    expect(storage.appendLogBatch({workspaceId: "workspace", originId: "recipient-device", ops: admitted}).inserted).toBe(1);
+    const retry = await parseAuthenticatedLogOps(ops, "recipient", () => "Renamed recipient");
+    expect(storage.appendLogBatch({workspaceId: "workspace", originId: "recipient-device", ops: retry})).toMatchObject({inserted: 0, skipped: 1});
+    expect(storage.fetchLogCoordinate({workspaceId: "workspace", originId: "recipient-device", originSeq: 0}))
+      .toMatchObject({payloadJson: stableJsonStringify(payload), admittedAuthorSnapshot: expected});
+  });
+
   it("uses the authenticated account and trusted name while retaining declared agent fields and payload bytes", async () => {
     const payload = {authorContext: {...context, agent: {agentId: "codex", agentName: "Codex", onBehalfOf: "alice", depth: 1}},
       attribution: {humanId: "forged", humanName: "Forged"}};
@@ -109,14 +127,17 @@ describe("ordinary admitted authorship", () => {
     expect(Number(db.prepare("SELECT usage_bytes FROM sync_relay_workspace_usage").get()?.usage_bytes)).toBe(0);
   });
 
-  it("preserves stored public snapshots in authenticated and accountless share serialization", async () => {
+  it("keeps non-moment snapshots out of authenticated and accountless share serialization", async () => {
     const storage = await testStorage();
     const row = {workspaceId: "workspace", originId: "device", originSeq: 0, opKind: "workspace.init",
       payloadJson: "{}", recordedAtMs: 1, relaySeq: 1, admittedAuthorSnapshot: snapshot};
     const queries = createShareReadQueries({...storage, fetchLogPage: () => ({rows: [row], nextCursor: 1, hasMore: false})}, 500);
     for (const audience of ["authenticated", "accountless"] as const) {
-      const page = queries.filteredLogPage("workspace", {paths: ["doc.md"], versionId: null, access: "view"}, 0, 10, audience);
-      expect(page.ops[0]?.admittedAuthorSnapshot).toEqual(snapshot);
+      const page = queries.filteredLogPage("workspace", "share", {paths: ["doc.md"], versionId: null, access: "view"}, 0, 10, audience);
+      expect(page.ops).toHaveLength(1);
+      expect(page.ops[0]).not.toHaveProperty("admittedAuthorSnapshot");
+      expect(page.ops[0]!.payload).not.toHaveProperty("authors");
     }
+    expect(row.admittedAuthorSnapshot).toEqual(snapshot);
   });
 });

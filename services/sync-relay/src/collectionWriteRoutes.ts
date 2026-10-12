@@ -1,3 +1,4 @@
+import { parseLiveUpdateIdentifier } from "@dohc/live-session-contract";
 import { createHash } from "node:crypto";
 import { jsonResponse, TokenBucketLimiter } from "@dohc/service-http";
 import type { PublicEditRelease } from "@dohc/security-contract";
@@ -8,6 +9,7 @@ import { hashLinkProfileSecret, isPublicLinkAccess, type ValidatedLinkCapability
 import { readStreamedBytes } from "./relayBytes";
 import { parseString } from "./requestInputs";
 import { grantEditsCollection, namedCollectionEditGrant } from "./collectionEditGrant";
+import { accountDisplayName } from "./discussionRoutes";
 import { collectionEditSelector, filterCollectionWriteForShare, MAX_COLLECTION_WRITE_BYTES, MAX_NEW_COLLECTION_RECORDS, pathVisibleThroughShare } from "./shareFilter";
 import { CollectionWriteStaleError, type CommitCollectionWriteInput, type SyncRelayStorage } from "./storage";
 
@@ -52,6 +54,7 @@ export function createCollectionWriteRoutes(input: {
   newId: () => string;
   claimPendingShares: (userId: string) => Promise<void>;
   discussionActivity: Pick<DiscussionActivityHub, "wake">;
+  lookupUserDisplayName?: (userId: string) => Promise<string | null> | string | null;
 }) {
   const { storage } = input;
   // Preflights have their own bounded budget and cannot spend write tokens.
@@ -76,7 +79,13 @@ export function createCollectionWriteRoutes(input: {
       return jsonResponse({ ok: true, canSwitch: storage.automationSwitchableFolder(share.workspaceId, collectionPath) }, 200,
         { "cache-control": "private, no-store" });
     }
+    const humanName = accountDisplayName(input.lookupUserDisplayName, actorUserId).then(name => {
+      try { return parseLiveUpdateIdentifier(name); } catch { return "Unnamed"; }
+    });
     const body = await readBody(request);
+    if (Object.keys(body).some((key) => key !== "submitId" && key !== "changes")) {
+      throw relayError("share_op_rejected");
+    }
     const submitId = parseString(body.submitId, "submitId", MAX_SUBMIT_ID_CHARS);
     const decision = filterCollectionWriteForShare(authorized.effectiveSelector, body.changes, {
       channelKind: (wireId) => storage.findChannelCreateKind(share.workspaceId, wireId),
@@ -86,7 +95,8 @@ export function createCollectionWriteRoutes(input: {
       shareId: share.shareId,
       grantId: grant.grantId,
       grantGeneration: grant.generation,
-      writer: { kind: "named", userId: actorUserId },
+      writer: { kind: "named", userId: actorUserId,
+        humanName: await humanName },
       submitId,
       rawChanges: body.changes,
       write: decision.write,

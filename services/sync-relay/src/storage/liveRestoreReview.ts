@@ -64,6 +64,7 @@ export function readRestoreReviewHistory(storage: StorageContext, input: {
   }, budget) : null;
   require(selectedTerminal ? selectedMetadata && isDeepStrictEqual(selectedMetadata.accepted.receipt, selectedTerminal) : receipt.point.journalCursor === 0);
   const selectedPointReceivedAtMs = selectedMetadata?.accepted.receivedAtMs ?? null;
+  const selectedPointAuthority = selectedMetadata?.accepted.authority ?? null;
   const events = readAcceptedHistoryInterval(storage, {document, namespace,
     selected: receipt.selectedHistory, accepted: receipt.acceptedHistory}, budget);
   const acceptedByDelivery = new Map(events.map(event => [event.metadata.accepted.receipt.deliveryId, event.metadata]));
@@ -109,5 +110,5 @@ export function readRestoreReviewHistory(storage: StorageContext, input: {
   }
   for (const source of receipt.nativeSources) add(source, {operationId: receipt.fence.operation.operationId,
     proposalDigest: input.proposalDigest, context: "current-fence"});
-  return {selectedPointReceivedAtMs, acceptedEvents: events, nativeSources: [...sources.values()], priorRestoreCuts};
+  return {selectedPointReceivedAtMs, selectedPointAuthority, acceptedEvents: events, nativeSources: [...sources.values()], priorRestoreCuts};
 }

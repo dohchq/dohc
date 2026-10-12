@@ -6,15 +6,17 @@ import { chosenHue, subscribeChosenColors } from "./chosenColors";
 // One avatar for every chat surface: a person's initials on a tint of their
 // own hue, the agent's sparkle in the olive voice, or an automation's bare
 // lightning mark, the same mark as the Automations button. Sized by the
-// caller; 36px on a post, 28px on a comment, 18px in a strip.
+// caller; 36px in the composer, 32px on a feed row or an opening post, 28px
+// on a comment, 18px in a strip.
 
 const SIZES = {
   post: "size-9 text-[14px]",
+  row: "size-8 text-[13px]",
   comment: "size-7 text-[11px]",
   strip: "size-[18px] text-[9px]",
 } as const;
 
-const ICON = { post: 16, comment: 12, strip: 10 } as const;
+const ICON = { post: 16, row: 14, comment: 12, strip: 10 } as const;
 
 // Spelled out so Tailwind sees every class.
 const HUE_CLASSES: Record<IdentityHue, string> = {

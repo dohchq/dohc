@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join, posix, resolve, win32 } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Event, Request, Response } from "../protocol";
-import type { EngineClientSpawnOptions } from "./engineClient";
+import { EngineRequestDeadlineError, type EngineClientSpawnOptions } from "./engineClient";
 import {
   createRustEngineDaemon,
   defaultEngineBinaryPath,
@@ -1776,7 +1776,7 @@ describe("Rust engine daemon lifecycle", () => {
       });
       await vi.waitFor(() => expect(client.closed).toBe(true), WAIT);
       expect(stopped).toBe(false);
-      // Released, the smoke still runs to completion in the background.
+      // A late reply from the retired request cannot continue the smoke.
       releaseOpen({
         id: openRequest.id,
         result: { workspace: "health-handle" },
@@ -1784,8 +1784,6 @@ describe("Rust engine daemon lifecycle", () => {
       await stop;
       expect(client.requests.map((request) => request.method)).toEqual([
         "workspace.open",
-        "versions.active",
-        "workspace.close",
       ]);
     } finally {
       await lifecycle.stop();
@@ -1904,12 +1902,13 @@ describe("Rust engine daemon lifecycle", () => {
     }
   });
 
-  it("kills an engine that answers probes but never finishes the smoke, at the cap", async () => {
+  it("replaces an engine at the smoke cap even when probes answer", async () => {
     const client = new FakeClient((request) =>
       request.method === "engine.ping"
         ? healthyPing(request)
-        : new Promise<Response>(() => {
-            // Alive on the transport; the open never progresses.
+        : new Promise<Response>((_resolve, reject) => {
+            // Match the real client deadline, which races the lifecycle drain.
+            setTimeout(() => reject(new EngineRequestDeadlineError(request.id, request.method, request.deadlineMs!)), request.deadlineMs!);
           }),
     );
     const failures: Array<{ error: Error; terminal: boolean }> = [];
@@ -1923,14 +1922,13 @@ describe("Rust engine daemon lifecycle", () => {
     });
     try {
       await lifecycle.start();
-      await vi.waitFor(() => expect(failures).toHaveLength(1), WAIT);
-      expect(failures[0]?.error.message).toBe(
-        "Rust engine workspace.open timed out after 200ms.",
-      );
+      await vi.waitFor(() => expect(failures.length).toBeGreaterThan(0), WAIT);
+      expect(failures).toEqual([{ error: expect.objectContaining({ message: "Rust engine workspace.open timed out after 200ms." }), terminal: false }]);
       expect(
         client.requests.filter(({ method }) => method === "engine.ping").length,
       ).toBeGreaterThan(1);
       expect(client.closeCause).toBe("transport-error");
+      expect(client.cancelledRequestIds).toContain(client.requests[0]!.id);
     } finally {
       await lifecycle.stop();
     }
@@ -2244,7 +2242,7 @@ describe("Rust engine daemon lifecycle", () => {
     await lifecycle.stop();
   });
 
-  it("replaces an engine whose attach open cannot open in a whole budget while probes answer", async () => {
+  it("cancels an attach at its whole budget while the engine answers probes", async () => {
     const failures: Error[] = [];
     const exits: EngineClientSpawnOptions["onExit"][] = [];
     const clients: FakeClient[] = [];
@@ -2280,9 +2278,10 @@ describe("Rust engine daemon lifecycle", () => {
         lifecycle.requestWorkspace("C:\\workspace", "workspace", "search.queryChatMessagesGranular", { query: "needle", limit: 1 }),
       ).rejects.toThrow(/^Rust engine workspace\.open timed out after \d+ms\.$/);
       expect(clients[0]!.requests.some(({ method }) => method === "engine.ping")).toBe(true);
-      expect(clients[0]!.closeCause).toBe("transport-error");
-      expect(failures[0]?.message).toMatch(/^Rust engine workspace\.open timed out after \d+ms\.$/);
-      await vi.waitFor(() => expect(lifecycle.currentClient()).toBe(clients[1]), WAIT);
+      expect(clients[0]!.closed).toBe(false);
+      expect(failures).toEqual([]);
+      expect(clients[0]!.cancelledRequestIds).toContain(clients[0]!.requests.find(({ method, params }) => method === "workspace.open" && (params as Record<string, unknown>).workspaceId === "workspace")!.id);
+      stuck = false;
       await expect(
         lifecycle.requestWorkspace("C:\\workspace", "workspace", "search.queryChatMessagesGranular", { query: "needle", limit: 1 }),
       ).resolves.toBeNull();
@@ -2393,7 +2392,7 @@ describe("Rust engine daemon lifecycle", () => {
     }
   });
 
-  it("replaces a stuck engine once when reads of two workspaces time out together", async () => {
+  it("cancels reads of two workspaces without replacing a responding engine", async () => {
     const failures: Error[] = [];
     const exits: EngineClientSpawnOptions["onExit"][] = [];
     const clients: FakeClient[] = [];
@@ -2430,10 +2429,11 @@ describe("Rust engine daemon lifecycle", () => {
         lifecycle.requestWorkspace(root, root, "search.queryChatMessagesGranular", { query: "needle", limit: 1 });
       const results = await Promise.allSettled([read("C:\\one"), read("C:\\two")]);
       expect(results.map(({ status }) => status)).toEqual(["rejected", "rejected"]);
-      expect(clients[0]!.closeCause).toBe("transport-error");
-      await vi.waitFor(() => expect(lifecycle.currentClient()).toBe(clients[1]), WAIT);
-      expect(clients).toHaveLength(2);
-      expect(failures.filter(({ message }) => message.includes("timed out"))).toHaveLength(1);
+      expect(clients[0]!.closed).toBe(false);
+      expect(clients[0]!.cancelledRequestIds).toHaveLength(2);
+      expect(lifecycle.currentClient()).toBe(clients[0]);
+      expect(clients).toHaveLength(1);
+      expect(failures).toEqual([]);
     } finally {
       await lifecycle.stop();
     }
@@ -2545,4 +2545,411 @@ describe("Rust engine daemon lifecycle", () => {
       }
     },
   );
+});
+
+class ProgressClient extends SelfExitingClient {
+  readonly progressCallbacks = new Map<number, () => void>();
+  readonly requestSignals = new Map<number, AbortSignal>();
+  reportsProgress(): boolean { return true; }
+  override async sendRequest(request: Request, signal?: AbortSignal, onProgress?: () => void): Promise<Response> {
+    if (onProgress) this.progressCallbacks.set(request.id, onProgress);
+    if (signal) this.requestSignals.set(request.id, signal);
+    return await super.sendRequest(request);
+  }
+}
+
+async function progressFixture(options: { silent?: boolean; capMs?: number } = {}) {
+  let hold = false;
+  const opens = new Map<number, () => void>();
+  let nextOpened: ReturnType<typeof deferred>;
+  const client = new ProgressClient(request => {
+    if (hold && request.method === "workspace.open") {
+      return new Promise<Response>(resolve => {
+        opens.set(request.id, () => resolve(healthyPing(request)));
+        nextOpened.resolve();
+      });
+    }
+    if (hold && options.silent && request.method === "engine.ping") return new Promise<Response>(() => {});
+    return healthyPing(request);
+  });
+  const failures: Error[] = [];
+  const lifecycle = new EngineDaemonLifecycle({
+    command: fakeBinary(), launch: async () => client,
+    workspaceReadTimeoutMs: options.capMs ?? 200, requestProbeDelayMs: 20, pingExpiryMs: 40,
+    monotonicNowMs: () => Date.now(),
+    onFailure: error => failures.push(error),
+  });
+  await lifecycle.start();
+  await startupSmokeDone(client);
+  vi.useFakeTimers();
+  hold = true;
+  const open = async () => {
+    nextOpened = deferred();
+    const result = lifecycle.requestWorkspace("C:/progress-test", "progress-test", "versions.active", {});
+    const outcome = result.then(value => ({ value }), error => ({ error: error as Error }));
+    await nextOpened.promise;
+    const id = client.requests.at(-1)!.id;
+    expect(opens.has(id)).toBe(true);
+    return { id, outcome };
+  };
+  return { client, lifecycle, failures, opens, open };
+}
+
+describe("lifecycle request progress", () => {
+  it.each(["background", "blocking"] as const)("ends the restart budget when a hung lock holder reaches the %s smoke cap", async mode => {
+    const capMs = 120_000, maxRestarts = 2;
+    const clients: ProgressClient[] = [];
+    const opened = Array.from({ length: maxRestarts + 1 }, () => deferred());
+    const failures: Array<{ error: Error; terminal: boolean }> = [];
+    const capFailures = () => failures.filter(({ error }) => error.message === `Rust engine workspace.open timed out after ${capMs}ms.`).length;
+    const lifecycle = new EngineDaemonLifecycle({
+      command: fakeBinary(), initialBackoffMs: 0, maxRestarts,
+      requestTimeoutMs: capMs, monotonicNowMs: () => Date.now(),
+      launch: async options => {
+        const index = clients.length;
+        const hung = mode === "background" || index > 0;
+        const client = new ProgressClient(request => {
+          if (hung && request.method === "workspace.open") {
+            // Taking the real engine's open lock reports a step before it hangs.
+            client.progressCallbacks.get(request.id)!();
+            opened[index]!.resolve();
+            return new Promise<Response>(() => {});
+          }
+          return healthyPing(request);
+        });
+        client.exit = options.onExit;
+        clients.push(client);
+        return client;
+      },
+      onFailure: (error, terminal) => failures.push({ error, terminal }),
+    });
+    try {
+      if (mode === "background") vi.useFakeTimers();
+      await lifecycle.start();
+      if (mode === "blocking") {
+        await startupSmokeDone(clients[0]!);
+        vi.useFakeTimers();
+        clients[0]!.exit?.(1, null);
+      }
+      const firstHung = mode === "background" ? 0 : 1;
+      for (let index = firstHung; index <= maxRestarts; index++) {
+        await opened[index]!.promise;
+        const client = clients[index]!;
+        expect(client.outstandingRequests(request => request.method === "workspace.open")).toBe(1);
+        const open = client.requests.find(request => request.method === "workspace.open")!;
+        const failuresBefore = capFailures();
+        await vi.advanceTimersByTimeAsync(6_000);
+        expect(client.cancelledRequestIds).not.toContain(open.id);
+        expect(client.closed).toBe(false);
+        expect(capFailures()).toBe(failuresBefore);
+        await vi.advanceTimersByTimeAsync(capMs - 6_000 + 10);
+        await vi.waitFor(() => expect(capFailures()).toBeGreaterThan(failuresBefore), WAIT);
+        expect(capFailures()).toBe(failuresBefore + 1);
+        expect(client.closed).toBe(true);
+        expect(probesSent(client)).toBeGreaterThan(0);
+        expect(open.deadlineMs).toBe(capMs);
+        expect(client.cancelledRequestIds).toContain(open.id);
+      }
+      await vi.waitFor(() => expect(failures.some(({ terminal }) => terminal)).toBe(true), WAIT);
+      expect(clients).toHaveLength(maxRestarts + 1);
+      expect(capFailures()).toBe(mode === "background" ? maxRestarts + 1 : maxRestarts);
+      expect(failures.at(-1)).toEqual({
+        error: expect.objectContaining({ message: `Rust engine restart limit exceeded after ${maxRestarts} attempts.` }), terminal: true,
+      });
+      expect(() => lifecycle.currentClient()).toThrow("Rust engine daemon is not available.");
+    } finally { await lifecycle.stop(); }
+  });
+
+  it.each(["background smoke", "CLI read"] as const)("keeps a queued %s past the progress delay until its cap", async caller => {
+    const capMs = caller === "background smoke" ? 120_000 : 10_000;
+    const queued = deferred(), holder = deferred();
+    let lockHeld = false;
+    let queuedId!: number;
+    const failures: Error[] = [];
+    const client = new ProgressClient(request => {
+      if (request.method === "workspace.open") {
+        const workspaceId = (request.params as Record<string, unknown>).workspaceId;
+        if (workspaceId === "desktop-owner") {
+          lockHeld = true;
+          return holder.promise.then(() => healthyPing(request));
+        }
+        if (lockHeld) {
+          queuedId = request.id;
+          queued.resolve();
+          return new Promise<Response>(() => {});
+        }
+      }
+      return healthyPing(request);
+    });
+    const holdDesktopOpen = () => {
+      void client.sendRequest({ id: 900, method: "workspace.open", params: { rootDir: "C:/desktop-owner", workspaceId: "desktop-owner" } });
+    };
+    const lifecycle = new EngineDaemonLifecycle({
+      command: fakeBinary(), launch: async () => client,
+      requestTimeoutMs: capMs, workspaceReadTimeoutMs: capMs,
+      pingIntervalMs: 600_000, monotonicNowMs: () => Date.now(),
+      onLaunch: () => { if (caller === "background smoke") holdDesktopOpen(); },
+      onFailure: error => failures.push(error),
+    });
+    let read: Promise<unknown> | undefined;
+    try {
+      if (caller === "background smoke") vi.useFakeTimers();
+      await lifecycle.start();
+      if (caller === "CLI read") {
+        await startupSmokeDone(client);
+        vi.useFakeTimers();
+        holdDesktopOpen();
+        read = lifecycle.requestWorkspace("C:/queued-read", "queued-read", "versions.active", {}).catch(error => error as Error);
+      }
+      await queued.promise;
+      expect(client.reportsProgress()).toBe(true);
+      expect(client.outstandingRequests(request => request.method === "workspace.open")).toBe(2);
+      await vi.advanceTimersByTimeAsync(6_000);
+      expect(probesSent(client)).toBeGreaterThan(0);
+      expect(client.cancelledRequestIds).not.toContain(queuedId);
+      expect(client.requestSignals.get(queuedId)!.aborted).toBe(false);
+      expect(client.closed).toBe(false);
+      await vi.advanceTimersByTimeAsync(capMs - 6_000 + 10);
+      if (read) expect(await read).toHaveProperty("message", `Rust engine workspace.open timed out after ${capMs}ms.`);
+      else await vi.waitFor(() => expect(failures.length).toBeGreaterThan(0), WAIT);
+      expect(client.cancelledRequestIds).toContain(queuedId);
+      if (read) {
+        expect(client.closed).toBe(false);
+        expect(lifecycle.currentClient()).toBe(client);
+        expect(failures).toEqual([]);
+      } else {
+        expect(client.closeCause).toBe("transport-error");
+        expect(failures).toEqual([expect.objectContaining({ message: `Rust engine workspace.open timed out after ${capMs}ms.` })]);
+      }
+    } finally { holder.resolve(); await lifecycle.stop(); }
+  });
+
+  it("publishes a replacement when its blocking smoke recovers after a progress stall", async () => {
+    const clients: ProgressClient[] = [];
+    const exits: EngineClientSpawnOptions["onExit"][] = [];
+    const opened = deferred(), launchSettled = deferred();
+    const failures: Error[] = [];
+    let openId!: number, releaseOpen!: () => void;
+    const lifecycle = new EngineDaemonLifecycle({
+      command: fakeBinary(), initialBackoffMs: 0, maxRestarts: 1,
+      requestProbeDelayMs: 20, pingExpiryMs: 40, requestTimeoutMs: 200,
+      launch: async options => {
+        exits.push(options.onExit);
+        const replacement = clients.length > 0;
+        const client = new ProgressClient(request => {
+          if (replacement && request.method === "workspace.open") {
+            openId = request.id;
+            client.progressCallbacks.get(openId)!();
+            return new Promise<Response>(resolve => {
+              releaseOpen = () => resolve(healthyPing(request));
+              opened.resolve();
+            });
+          }
+          return healthyPing(request);
+        });
+        clients.push(client);
+        return client;
+      },
+      onLaunch: () => { if (clients.length > 1) launchSettled.resolve(); },
+      onFailure: error => {
+        failures.push(error);
+        if (clients.length > 1) launchSettled.resolve();
+      },
+    });
+    try {
+      await lifecycle.start();
+      await startupSmokeDone(clients[0]!);
+      vi.useFakeTimers();
+      exits[0]?.(1, null);
+      await opened.promise;
+      await vi.advanceTimersByTimeAsync(45);
+      expect(clients[1]!.cancelledRequestIds).toEqual([]);
+      expect(clients[1]!.requestSignals.get(openId)!.aborted).toBe(false);
+      expect(() => lifecycle.currentClient()).toThrow("Rust engine daemon is not available.");
+      releaseOpen();
+      await launchSettled.promise;
+      expect(lifecycle.currentClient()).toBe(clients[1]);
+      expect(clients).toHaveLength(2);
+      expect(clients[1]!.closed).toBe(false);
+      expect(clients[1]!.cancelledRequestIds).toEqual([]);
+      expect(clients[1]!.requestSignals.get(openId)!.aborted).toBe(true);
+      expect(failures.map(error => error.message)).toEqual(["Rust engine daemon exited unexpectedly with code 1."]);
+    } finally { await lifecycle.stop(); }
+  });
+
+  it("negotiates the existing progress capability", async () => {
+    let capabilities: readonly string[] = [];
+    const client = new ProgressClient(healthyPing);
+    const lifecycle = new EngineDaemonLifecycle({
+      command: fakeBinary(), launch: async options => { capabilities = options.capabilities; return client; },
+    });
+    try { await lifecycle.start(); await startupSmokeDone(client); expect(capabilities).toEqual(["blobs", "progress"]); }
+    finally { await lifecycle.stop(); }
+  });
+
+  it("keeps a slow open while its own progress advances", async () => {
+    const f = await progressFixture();
+    try {
+      const { id, outcome } = await f.open();
+      const before = probesSent(f.client);
+      for (let i = 0; i < 8; i++) { f.client.progressCallbacks.get(id)!(); await vi.advanceTimersByTimeAsync(10); }
+      expect(probesSent(f.client)).toBe(before);
+      expect(f.client.cancelledRequestIds).not.toContain(id);
+      f.opens.get(id)!();
+      expect(await outcome).toHaveProperty("value");
+      expect(f.client.requestSignals.get(id)!.aborted).toBe(true);
+      expect(f.client.closed).toBe(false);
+    } finally { await f.lifecycle.stop(); }
+  });
+
+  it("cancels a stalled open despite unrelated frames and preserves the responding daemon", async () => {
+    const f = await progressFixture({ silent: true });
+    try {
+      const { id, outcome } = await f.open();
+      f.client.progressCallbacks.get(id)!();
+      await vi.advanceTimersByTimeAsync(45);
+      expect(probesSent(f.client)).toBeGreaterThan(0);
+      f.client.inbound += 1;
+      await vi.advanceTimersByTimeAsync(40);
+      expect(await outcome).toHaveProperty("error.message", "Rust engine workspace.open made no progress while the daemon was responding.");
+      expect(f.client.cancelledRequestIds).toContain(id);
+      expect(f.client.closed).toBe(false);
+      expect(f.lifecycle.currentClient()).toBe(f.client);
+    } finally { await f.lifecycle.stop(); }
+  });
+
+  it("preserves the absolute cap while a responding open keeps progressing", async () => {
+    const f = await progressFixture({ capMs: 100 });
+    try {
+      const { id, outcome } = await f.open();
+      for (let i = 0; i < 10; i++) { f.client.progressCallbacks.get(id)!(); await vi.advanceTimersByTimeAsync(10); }
+      await vi.advanceTimersByTimeAsync(1);
+      expect(await outcome).toHaveProperty("error.message", "Rust engine workspace.open timed out after 100ms.");
+      expect(f.client.cancelledRequestIds).toContain(id);
+      expect(f.client.closed).toBe(false);
+    } finally { await f.lifecycle.stop(); }
+  });
+
+  it("replaces a truly silent daemon before the absolute cap", async () => {
+    const f = await progressFixture({ silent: true });
+    try {
+      const { outcome } = await f.open();
+      await vi.advanceTimersByTimeAsync(70);
+      expect(await outcome).toHaveProperty("error.message", "Rust engine workspace.open got no answer: a probe expired after 40ms with no frame of any kind from the engine.");
+      expect(f.client.closeCause).toBe("transport-error");
+    } finally { await f.lifecycle.stop(); }
+  });
+
+  it("condemns true silence even after earlier request progress", async () => {
+    const f = await progressFixture({ silent: true });
+    try {
+      const { id, outcome } = await f.open();
+      f.client.progressCallbacks.get(id)!();
+      await vi.advanceTimersByTimeAsync(90);
+      expect(await outcome).toHaveProperty("error.message", "Rust engine workspace.open got no answer: a probe expired after 40ms with no frame of any kind from the engine.");
+      expect(f.client.closeCause).toBe("transport-error");
+    } finally { await f.lifecycle.stop(); }
+  });
+
+  it("does not let late progress from a completed request extend another open", async () => {
+    const f = await progressFixture();
+    try {
+      const first = await f.open();
+      f.opens.get(first.id)!();
+      expect(await first.outcome).toHaveProperty("value");
+      const second = await f.open();
+      f.client.progressCallbacks.get(second.id)!();
+      await vi.advanceTimersByTimeAsync(25);
+      f.client.progressCallbacks.get(first.id)!();
+      await vi.advanceTimersByTimeAsync(25);
+      expect(await second.outcome).toHaveProperty("error.message", "Rust engine workspace.open made no progress while the daemon was responding.");
+      expect(f.client.cancelledRequestIds).toEqual([second.id]);
+      expect(f.client.requestSignals.get(second.id)!.aborted).toBe(true);
+      const probes = probesSent(f.client);
+      f.client.progressCallbacks.get(second.id)!();
+      await vi.advanceTimersByTimeAsync(100);
+      expect(probesSent(f.client)).toBe(probes);
+      expect(f.client.cancelledRequestIds).toEqual([second.id]);
+    } finally { await f.lifecycle.stop(); }
+  });
+
+  it("accepts progress that arrives while the health probe is pending", async () => {
+    const f = await progressFixture({ silent: true });
+    try {
+      const { id, outcome } = await f.open();
+      await vi.advanceTimersByTimeAsync(25);
+      f.client.progressCallbacks.get(id)!();
+      await vi.advanceTimersByTimeAsync(40);
+      expect(f.client.cancelledRequestIds).not.toContain(id);
+      f.opens.get(id)!();
+      expect(await outcome).toHaveProperty("value");
+      expect(f.client.closed).toBe(false);
+    } finally { await f.lifecycle.stop(); }
+  });
+
+  it("retires old request progress when a replacement generation is published", async () => {
+    const clients: ProgressClient[] = [];
+    const exits: EngineClientSpawnOptions["onExit"][] = [];
+    let releaseOld!: () => void;
+    const oldOpened = deferred(), replacementOpened = deferred();
+    const lifecycle = new EngineDaemonLifecycle({
+      command: fakeBinary(), initialBackoffMs: 0, requestProbeDelayMs: 20, pingExpiryMs: 40,
+      launch: async options => {
+        exits.push(options.onExit);
+        const client = new ProgressClient(request => {
+          if (request.method === "workspace.open" && (request.params as Record<string, unknown>).workspaceId === "generation-test") {
+            return new Promise<Response>(resolve => {
+              if (client === clients[0]) {
+                releaseOld = () => resolve(healthyPing(request));
+                oldOpened.resolve();
+              } else replacementOpened.resolve();
+            });
+          }
+          return healthyPing(request);
+        });
+        clients.push(client);
+        return client;
+      },
+    });
+    try {
+      await lifecycle.start();
+      await startupSmokeDone(clients[0]!);
+      const old = lifecycle.requestWorkspace("C:/generation-test", "generation-test", "versions.active", {}).catch(error => error as Error);
+      await oldOpened.promise;
+      const oldId = clients[0]!.requests.at(-1)!.id;
+      const oldProgress = clients[0]!.progressCallbacks.get(oldId)!;
+      exits[0]?.(1, null);
+      expect(await old).toHaveProperty("message", "Rust engine request generation was retired.");
+      await vi.waitFor(() => expect(lifecycle.currentClient()).toBe(clients[1]), WAIT);
+      expect(clients[0]!.requestSignals.get(oldId)!.aborted).toBe(true);
+      vi.useFakeTimers();
+      const replacement = lifecycle.requestWorkspace("C:/generation-test", "generation-test", "versions.active", {}).catch(error => error as Error);
+      await replacementOpened.promise;
+      const newId = clients[1]!.requests.at(-1)!.id;
+      clients[1]!.progressCallbacks.get(newId)!();
+      oldProgress();
+      releaseOld();
+      await vi.advanceTimersByTimeAsync(45);
+      expect(await replacement).toHaveProperty("message", "Rust engine workspace.open made no progress while the daemon was responding.");
+      expect(clients[1]!.cancelledRequestIds).toEqual([newId]);
+      expect(clients[1]!.closed).toBe(false);
+      expect(lifecycle.currentClient()).toBe(clients[1]);
+      expect(clients[0]!.requests.at(-1)!.id).toBe(oldId);
+    } finally { await lifecycle.stop(); }
+  });
+
+  it("cleans request and probe observers when shutdown retires a pending request", async () => {
+    const f = await progressFixture({ silent: true });
+    const { id, outcome } = await f.open();
+    await vi.advanceTimersByTimeAsync(25);
+    const ping = f.client.requests.find(request => request.method === "engine.ping")!;
+    await f.lifecycle.stop();
+    expect(await outcome).toHaveProperty("error.message", "Rust engine request generation was retired.");
+    expect(f.client.requestSignals.get(id)!.aborted).toBe(true);
+    expect(f.client.requestSignals.get(ping.id)!.aborted).toBe(true);
+    f.client.progressCallbacks.get(id)!();
+    await vi.advanceTimersByTimeAsync(201);
+    expect(vi.getTimerCount()).toBe(0);
+    expect(f.failures).toEqual([]);
+  });
 });

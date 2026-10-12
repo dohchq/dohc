@@ -7,6 +7,8 @@ use dohc_engine_storage::StorageError;
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum RuntimeError {
+    #[error("capture-recovery-refused: {reason}")]
+    RecoveryImportRefused { reason: &'static str },
     /// The engine.db path could not be resolved to a canonical identity
     /// (parent directory missing or not canonicalizable).
     #[error("could not resolve engine.db identity: {reason}")]
@@ -140,10 +142,11 @@ impl RuntimeError {
                     }
                 }
             }
+            RuntimeError::RecoveryImportRefused { .. } => "capture-recovery-refused",
             RuntimeError::Sync(err) => err.code(),
             RuntimeError::Relay(_) => "relay-failed",
             RuntimeError::Search(err) => err.code(),
-            RuntimeError::Materialize(_) => "materialize-failed",
+            RuntimeError::Materialize(error) => error.code(),
             RuntimeError::ActiveVersionMaterializationIncomplete { .. } => "materialize-failed",
             RuntimeError::YdocArtifactAssetsPending => "ydoc-artifact-assets-pending",
             RuntimeError::YdocArtifactAssetsInvalid => "ydoc-artifact-assets-invalid",
@@ -156,6 +159,28 @@ impl RuntimeError {
             RuntimeError::WorkerPanicked => "worker-panicked",
             RuntimeError::Cancelled => "cancelled",
             RuntimeError::OperationCrashed => "operation-crashed",
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::RuntimeError;
+    use dohc_engine_files::MaterializeError;
+
+    #[test]
+    fn conditional_restore_delete_materialization_codes_preserve_reason() {
+        for error in [
+            MaterializeError::SymlinkTarget,
+            MaterializeError::RecoveryUnavailable,
+            MaterializeError::FileLocked,
+            MaterializeError::Io {
+                path: "record.md".into(),
+                kind: std::io::ErrorKind::PermissionDenied,
+            },
+        ] {
+            let code = error.code();
+            assert_eq!(RuntimeError::Materialize(error).code(), code);
         }
     }
 }

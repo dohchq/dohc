@@ -1,3 +1,4 @@
+import { desktopPins, activityPin, settingsNavPin, settingsSectionPin } from "../src/testPins";
 import { expect, test, type Page } from "@playwright/test";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -33,13 +34,13 @@ async function openWorkspace(temp: TempWorkspace): Promise<LaunchedDesktopApp> {
 }
 
 async function openSettings(page: Page) {
-  await page.getByTestId("activity-settings").click();
-  await expect(page.getByTestId("settings-dialog")).toBeVisible();
+  await page.getByTestId(activityPin("settings")).click();
+  await expect(page.getByTestId(desktopPins.settingsDialog)).toBeVisible();
 }
 
 async function closeSettings(page: Page) {
   await page.getByRole("button", { name: "Close settings" }).click();
-  await expect(page.getByTestId("settings-dialog")).toHaveCount(0);
+  await expect(page.getByTestId(desktopPins.settingsDialog)).toHaveCount(0);
 }
 
 test("@settings-smoke opens settings and survives a basic appearance edit", async () => {
@@ -49,14 +50,14 @@ test("@settings-smoke opens settings and survives a basic appearance edit", asyn
   try {
     desktop = await openWorkspace(temp);
     await openSettings(desktop.page);
-    await expect(desktop.page.getByTestId("settings-search")).toBeVisible();
-    await expect(desktop.page.getByTestId("settings-nav-appearance")).toBeVisible();
-    await desktop.page.getByTestId("settings-nav-appearance").click();
-    await expect(desktop.page.getByTestId("settings-section-appearance")).toBeVisible();
+    await expect(desktop.page.getByTestId(desktopPins.settingsSearch)).toBeVisible();
+    await expect(desktop.page.getByTestId(settingsNavPin("appearance"))).toBeVisible();
+    await desktop.page.getByTestId(settingsNavPin("appearance")).click();
+    await expect(desktop.page.getByTestId(settingsSectionPin("appearance"))).toBeVisible();
     await desktop.page.getByRole("radio", { name: "Dark" }).click();
     await closeSettings(desktop.page);
     await openSettings(desktop.page);
-    await expect(desktop.page.getByTestId("settings-dialog")).toBeVisible();
+    await expect(desktop.page.getByTestId(desktopPins.settingsDialog)).toBeVisible();
     expect(fatalLogs(desktop)).toEqual([]);
   } finally {
     await cleanupDesktopWorkspace(desktop, temp);
@@ -71,7 +72,7 @@ test("draws a switch's thumb inside its track, on and off", async () => {
     desktop = await openWorkspace(temp);
     const page = desktop.page;
     await openSettings(page);
-    await page.getByTestId("settings-nav-privacy").click();
+    await page.getByTestId(settingsNavPin("privacy")).click();
     const toggle = page.getByRole("switch", { name: "Confirm external links" });
     // Where the thumb sits: inside the track, at the end for its state.
     const thumbPlace = () =>
@@ -99,21 +100,21 @@ test("settings search, theme persistence, MCP config, and corrupt settings recov
   try {
     desktop = await openWorkspace(temp);
     await openSettings(desktop.page);
-    await desktop.page.getByTestId("settings-search").fill("theme");
-    await expect(desktop.page.getByTestId("settings-section-appearance")).toBeVisible();
-    await desktop.page.getByTestId("settings-search").fill("mcp");
-    await expect(desktop.page.getByTestId("settings-section-agents")).toBeVisible();
-    await desktop.page.getByTestId("settings-search").fill("definitely-no-setting");
-    await expect(desktop.page.getByTestId("settings-empty-search")).toBeVisible();
-    await desktop.page.getByTestId("settings-search").fill("");
+    await desktop.page.getByTestId(desktopPins.settingsSearch).fill("theme");
+    await expect(desktop.page.getByTestId(settingsSectionPin("appearance"))).toBeVisible();
+    await desktop.page.getByTestId(desktopPins.settingsSearch).fill("mcp");
+    await expect(desktop.page.getByTestId(settingsSectionPin("agents"))).toBeVisible();
+    await desktop.page.getByTestId(desktopPins.settingsSearch).fill("definitely-no-setting");
+    await expect(desktop.page.getByTestId(desktopPins.settingsEmptySearch)).toBeVisible();
+    await desktop.page.getByTestId(desktopPins.settingsSearch).fill("");
 
-    await desktop.page.getByTestId("settings-nav-appearance").click();
+    await desktop.page.getByTestId(settingsNavPin("appearance")).click();
     await desktop.page.getByRole("radio", { name: "Dark" }).click();
     await expect
       .poll(() => desktop!.page.evaluate(() => document.documentElement.dataset.theme))
       .toBe("dark");
 
-    await desktop.page.getByTestId("settings-nav-agents").click();
+    await desktop.page.getByTestId(settingsNavPin("agents")).click();
     // The snippet renders the app-canonical forward-slash workspace path.
     const canonicalRootPath = normalizeAbsolutePath(temp.rootPath);
     await expect(desktop.page.getByTestId("mcp-config-snippet")).toContainText(
@@ -136,8 +137,8 @@ test("settings search, theme persistence, MCP config, and corrupt settings recov
     await writeFile(join(temp.homeDir, "dohc-settings.json"), "{not json");
     desktop = await openWorkspace(temp);
     await openSettings(desktop.page);
-    await expect(desktop.page.getByTestId("settings-warning").first()).toBeVisible();
-    await expect(desktop.page.getByTestId("settings-dialog")).toBeVisible();
+    await expect(desktop.page.getByTestId(desktopPins.settingsWarning).first()).toBeVisible();
+    await expect(desktop.page.getByTestId(desktopPins.settingsDialog)).toBeVisible();
     expect(fatalLogs(desktop)).toEqual([]);
   } finally {
     await cleanupDesktopWorkspace(desktop, temp);
@@ -151,8 +152,8 @@ test("attachment location setting persists across reopen", async () => {
   try {
     desktop = await openWorkspace(temp);
     await openSettings(desktop.page);
-    await desktop.page.getByTestId("settings-nav-files").click();
-    await expect(desktop.page.getByTestId("settings-section-files")).toBeVisible();
+    await desktop.page.getByTestId(settingsNavPin("files")).click();
+    await expect(desktop.page.getByTestId(settingsSectionPin("files"))).toBeVisible();
 
     const select = desktop.page.getByTestId("attachment-location-select");
     // The folder-name row is present for the default (per-document) location.
@@ -163,7 +164,7 @@ test("attachment location setting persists across reopen", async () => {
 
     await closeSettings(desktop.page);
     await openSettings(desktop.page);
-    await desktop.page.getByTestId("settings-nav-files").click();
+    await desktop.page.getByTestId(settingsNavPin("files")).click();
     await expect(desktop.page.getByTestId("attachment-location-select")).toHaveValue(
       "same-folder",
     );
@@ -173,45 +174,50 @@ test("attachment location setting persists across reopen", async () => {
   }
 });
 
-test("settings remains usable at desktop minimum size", async () => {
+test("settings remains usable down to the minimum supported renderer viewport", async () => {
   const temp = await createTempWorkspace();
   let desktop: LaunchedDesktopApp | null = null;
 
   try {
     desktop = await openWorkspace(temp);
-    // Cover comfortable desktop sizes down to the minimum supported shell
-    // dimensions so the modal stays usable at responsive breakpoints.
+    // Pin CSS viewport dimensions so native window frame and DPI rounding
+    // do not decide which responsive layout this test covers.
     for (const [width, height] of [
       [1040, 760],
       [920, 700],
       [840, 620],
     ]) {
-      await desktop.app.evaluate(
-        async ({ BrowserWindow }, size) => {
-          BrowserWindow.getAllWindows()[0]?.setSize(size.width, size.height);
-        },
-        { width, height },
-      );
-      // Windows DPI scaling can round the applied size by a pixel; the
-      // responsive breakpoint under test is unaffected by that rounding.
-      // Other platforms keep the exact round-trip pin.
-      const sizeTolerance = process.platform === "win32" ? 1 : 0;
+      await desktop.page.setViewportSize({ width, height });
       await expect
-        .poll(async () => {
-          const size = await desktop!.app.evaluate(({ BrowserWindow }) => {
-            const [currentWidth, currentHeight] =
-              BrowserWindow.getAllWindows()[0]?.getSize() ?? [0, 0];
-            return { height: currentHeight, width: currentWidth };
-          });
-          return (
-            Math.abs(size.width - width) <= sizeTolerance &&
-            Math.abs(size.height - height) <= sizeTolerance
-          );
-        })
-        .toBe(true);
+        .poll(() =>
+          desktop!.page.evaluate(() => ({ width: innerWidth, height: innerHeight })),
+        )
+        .toEqual({ width, height });
       await openSettings(desktop.page);
-      await expect(desktop.page.getByTestId("settings-search")).toBeVisible();
-      await expect(desktop.page.getByRole("button", { name: "Close settings" })).toBeVisible();
+      const dialog = desktop.page.getByTestId(desktopPins.settingsDialog);
+      await expect
+        .poll(() =>
+          dialog.evaluate((element) => {
+            const rect = element.getBoundingClientRect();
+            return (
+              rect.left >= 0 &&
+              rect.top >= 0 &&
+              rect.right <= innerWidth &&
+              rect.bottom <= innerHeight
+            );
+          }),
+        )
+        .toBe(true);
+      const search = desktop.page.getByTestId(desktopPins.settingsSearch);
+      await expect(search).toBeVisible();
+      await expect(search).toBeInViewport({ ratio: 1 });
+      await search.click();
+      await search.fill("theme");
+      await expect(desktop.page.getByTestId(settingsSectionPin("appearance"))).toBeVisible();
+      await search.fill("");
+      const closeButton = desktop.page.getByRole("button", { name: "Close settings" });
+      await expect(closeButton).toBeVisible();
+      await expect(closeButton).toBeInViewport({ ratio: 1 });
       await closeSettings(desktop.page);
     }
   } finally {

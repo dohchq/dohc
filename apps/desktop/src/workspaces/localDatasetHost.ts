@@ -23,6 +23,7 @@ import { createLocalDatasetMigrations, type PrepareLocalDatasetMigration } from 
 import { createLocalDatasetRecovery } from "./localDatasetRecovery";
 import { createLocalDatasetTransfers, type DatasetTransferTarget } from "./localDatasetTransfer";
 import { hasGeneratedDatasetOperations } from "@dohc/security-contract/dataset-operations";
+import { DatasetPermissionsPage } from "@dohc/cli/dataset";
 
 type SourceAdapter = Pick<VersionedLiveAdapter, "captureSourceMetadata" | "hydrateCapturedSources">;
 type OwnerContext = { readonly owner: true };
@@ -41,7 +42,7 @@ export interface LocalDatasetAutomationContext { readonly automationId: string; 
  * authority, attributed to the agent at its run's chain depth, 0 outside a
  * chain. Attribution never grants access.
  */
-export interface LocalDatasetAgent { readonly depth: number }
+export interface LocalDatasetAgent { readonly depth: number; readonly approvalAgent?: import("@dohc/security-contract/approval-provenance").ApprovalAgent }
 type AgentContext = { readonly agent: LocalDatasetAgent };
 type LocalContext = OwnerContext | LocalDatasetAppContext | LocalDatasetAutomationContext | AgentContext;
 type Resources = Pick<DatasetHostOptions<LocalContext>, "operationResources" | "accountCreation" | "accountMigration" | "accountCheckpointStage">;
@@ -214,8 +215,7 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
     const workerStat = await lstat(workerDirectory);
     if (!workerStat.isDirectory() || workerStat.isSymbolicLink() || resolve(await realpath(workerDirectory)) !== resolve(workerDirectory)) throw new Error("dohc cannot use the folder that holds this workspace's Collections. It must be a folder, not a link.");
     let resources:Resources|undefined;
-    // The owner's own datasets: waiting after a failed reopen would protect nobody and lock the owner out.
-    supervisor = await createDatasetSupervisor({ journal, directory: workerDirectory, runtime: options.persistentRuntime, maxWorkers: options.maxWorkers, reopenWaitCapMs: 0,
+    supervisor = await createDatasetSupervisor({ journal, directory: workerDirectory, runtime: options.persistentRuntime, maxWorkers: options.maxWorkers, reopenWaitCapMs: 60_000,
       onMaintenanceError(scope){console.warn("dataset_materialization_deferred",scope);},
       maintenanceStorage:{authorize(){if(!db.isOpen)throw new Error("Collection storage is closed.");},account(allocation){charge(allocation.scope.datasetId,allocation.bytes);return resources?.accountCheckpointStage?.(owner,allocation);}} });
     resources = options.resources?.({ db, transaction });
@@ -413,12 +413,12 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
       discardMigration: migrations.discardMigration,
 
       discard(preparationId: string) { assertCurrent(); pending.delete(preparationId); },
-      approve(input: {preparationId: string; revisionSha256: string; signal?: AbortSignal}) {
+      approve(input: {preparationId: string; revisionSha256: string; approvalAgent?: import("@dohc/security-contract/approval-provenance").ApprovalAgent | null; signal?: AbortSignal}) {
         return tracked(async () => {
           const captured = pending.get(input.preparationId);
           if (!captured || captured.expires < Date.now() || captured.preparation.revision.revisionSha256 !== input.revisionSha256) throw new Error("This Collection approval expired or changed. Prepare it again.");
           const approved = await host.activate(owner, {workspaceId, revision: captured.preparation.revision, schemaSql: captured.schemaSql,
-            operationSource: captured.operationSource, capacityBytes: options.capacityBytes, signal: signal(input.signal)});
+            operationSource: captured.operationSource, approvalAgent:input.approvalAgent, capacityBytes: options.capacityBytes, signal: signal(input.signal)});
           pending.delete(input.preparationId); return changed(approved);
         });
       },
@@ -437,6 +437,10 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
       cancelAttempt(input: { datasetId: string; reference: string; acknowledge: true }) { assertCurrent(); return host.cancelAttempt(owner, { workspaceId, ...input }); },
       historyRevision(input: { datasetId: string; revisionSha256: string }) { assertCurrent(); return host.historyRevision(owner, { workspaceId, ...input }); },
       history(input: { datasetId: string; beforeRevision?: number; limit?: number }) { assertCurrent(); return host.history(owner, { workspaceId, ...input }); },
+      async permissions(input: { datasetId: string; after?: string; limit?: number }) {
+        assertCurrent();
+        return DatasetPermissionsPage.parse(host.permissions(owner, { workspaceId, datasetId: input.datasetId, after: input.after, limit: input.limit }));
+      },
       approvedArtifacts(datasetId: string) { assertCurrent(); return host.approvedArtifacts(owner, {workspaceId, datasetId}); },
       prepareRecovery(input: Parameters<typeof recovery.prepare>[0]) { return tracked(() => recovery.prepare(input)); },
       claimRecovery(input: Parameters<typeof recovery.claim>[0]) { return tracked(() => recovery.claim(input)).then(changed); },

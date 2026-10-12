@@ -1,6 +1,12 @@
+import type { HistoryCursor } from "@dohc/workspace-engine-client";
+import { createTypingCheckpointWriter } from "./typingCheckpointWriter";
+import { DrawingCheckpointUnavailable, registerTypingCheckpoint, typingRecoveryStateVectorSha256, type OutageTypingCheckpoint } from "./outageTypingRecovery";
 import type { RecordEditSession } from "@dohc/automation-executor/collection-record-edits";
+import { isCaptureRecoveryOrigin } from "@dohc/workspace-contracts/engine";
 import { errorMessage } from "./workspaceError";
+import { findRestoreReceipt } from "./restoreWriteIdentity";
 import type {AppResponseUndoSelection,AppResponseUndoResult} from "./ownerAppResponseModeration";
+import type { WorkspacePolicyPath } from "@dohc/security-contract/effective-policy";
 import type { WatcherEvent } from "@dohc/workspace-core";
 import {
   validateUserMaterializePath,
@@ -70,6 +76,7 @@ import {
 } from "@dohc/workspace-engine-client";
 import { MAX_DESKTOP_CAPTURE_TEXT_BYTES } from "@dohc/workspace-engine-client/limits";
 import * as Y from "yjs";
+import { yDocToMarkdown } from "@dohc/ydoc-projection";
 import {
   isTextMediaType,
   mediaTypeForPath,
@@ -85,6 +92,7 @@ import {
   type ActiveAgentRun,
 } from "../agents/activeAgentRun";
 import {
+  historyMomentPathsAdmitted,
   historyPathAdmission,
   readWorkspaceEnginePolicy,
   type WorkspaceEnginePolicySnapshot,
@@ -273,16 +281,13 @@ export interface WorkspaceEngineMomentSummary {
   protected: boolean;
 }
 
-// One page of the active version's timeline (the folder shows the active
-// version, so its history is what the history UI shows). Secret moments are
-// interleaved by recording time; pagination stays keyed on the TEXT
-// timeline's momentOrder (see listMoments for the window rule).
 export interface WorkspaceEngineMomentPage {
   moments: WorkspaceEngineMomentSummary[];
-  nextBeforeMomentOrder: number | null;
+  startCursor: HistoryCursor;
+  nextCursor: HistoryCursor | null;
+  versionMarkers: VersionRecord[];
   latestMomentOrder: number;
   activeVersionId: string;
-  protectedTruncated: boolean;
 }
 
 // The diff page's payload: a text moment carries its full before/after
@@ -470,6 +475,8 @@ type RestartSafeYDocSession = WorkspaceEngineYDocProviderSession & {
 };
 
 export interface WorkspaceEngineCapture {
+  // Cancel convergence waits before producers and live sessions drain.
+  beginShutdown(): void;
   // Starts the daemon capture health poll on the capture chain.
   start(): void;
   // Enqueues a settled watcher batch for engine capture. Synchronous and
@@ -496,7 +503,7 @@ export interface WorkspaceEngineCapture {
     content: string | Uint8Array,
     author: MomentWriteAuthor,
     options?: { createOnly?: boolean; signal?: AbortSignal; expectedContentHash?: string; requestId?: string; correlationId?: string; beforeWrite?: (resolvedAbsolutePath: string) => Promise<void> },
-  ): Promise<{ resolvedAbsolutePath: string; materializeOutcome: string | undefined }>;
+  ): Promise<{ resolvedAbsolutePath: string; materializeOutcome: string | undefined; deduped?: boolean }>;
   // WS-G2-C-2 editor binding: open a live engine Y.Doc session for one rich
   // file through this capture's Rust workspace sessions. The session journals
   // editor edits as ydoc.update ops and, on each debounced settle, projects the
@@ -634,10 +641,13 @@ export interface WorkspaceEngineCapture {
   // version, across its renames.
   listMoments(input?: {
     limit?: number;
-    beforeMomentOrder?: number;
+    cursor?: HistoryCursor;
     objectId?: string;
   }): Promise<WorkspaceEngineMomentPage>;
   readMoment(momentId: string): Promise<WorkspaceEngineMomentDetail | null>;
+  findRestoreReceipt(momentId: string, requestId: string): Promise<WorkspaceEngineRestoreResult | null>;
+  // Whether keyed restore `requestId`, which recorded `momentId`, reached disk.
+  publicationApplied(momentId: string, requestId: string): Promise<boolean>;
   // The ids of a file's moments in the active version after `momentId`,
   // newest first, deletes and renames included. Record-only sync rows never
   // touched the file, so they are passed over.
@@ -655,10 +665,13 @@ export interface WorkspaceEngineCapture {
   // otherwise it throws RestoreFolderInUseError. `person` is who restores, as
   // desktop main read them when the request arrived; the restore moment names
   // them. A protected file's restore names nobody, as its other moments do.
+  // A keyed restore names its expected head, so its delete publishes through
+  // the engine's checked preimage and a retry can confirm it reached disk.
   restoreFileToBeforeMoment(
     momentId: string,
     person: Extract<MomentWriteAuthor, { kind: "human" }>,
-    options?: { expectedHeadMomentId?: string; aloneInFolder?: true },
+    options?: { expectedHeadMomentId?: string; aloneInFolder?: true; requestId?: undefined }
+      | { expectedHeadMomentId: string; aloneInFolder?: true; requestId: string },
   ): Promise<WorkspaceEngineRestoreResult>;
   // `author` names an agent's removal during a run an automation started, so
   // the removed record's claims carry the run's chain depth.
@@ -756,6 +769,14 @@ export interface WorkspaceEngineCaptureOptions {
   settleDebounceMs?: number;
   openSettleGate?: () => Promise<void>;
   onError?: (context: string, error: unknown) => void;
+  preserveUnsentState?: (input: { path: string; objectId: string; contentKind: YdocContentKind; doc: Y.Doc }) => Promise<void>;
+  hasRetainedLiveDraft?: (path: string, objectId: string) => Promise<boolean>;
+  waitForTypingRecovery?: () => Promise<void>;
+  writeTypingCheckpoint?: (checkpoint: OutageTypingCheckpoint) => Promise<void>;
+  writeTypingCheckpointSync?: (checkpoint: OutageTypingCheckpoint) => void;
+  onTypingCheckpointFailure?: (path:string,error:unknown)=>void;
+  onTypingCheckpointRecovered?: (path:string)=>void;
+  retireTypingCheckpoint?: (checkpoint: OutageTypingCheckpoint) => Promise<void>;
   // Outcome of each background HISTORY-CAPTURE task (batch capture and
   // reconciliation passes). With the engine as the workspace's sole
   // recorder, a persistently failing store means history capture fails
@@ -1093,6 +1114,27 @@ export class RestoreFolderInUseError extends Error {
   }
 }
 
+// History's current rules refused a restore. An unreadable rules file's
+// message leads with the files dohc could not read, so the error map names
+// them after IPC turns the error into one string. The parser's text follows,
+// for Copy details only.
+export class RestorePolicyRefusalError extends Error {
+  readonly reason: "path-not-admitted" | "policy-unreadable";
+  readonly unreadable: readonly WorkspacePolicyPath[];
+  constructor(
+    refusal:
+      | { reason: "path-not-admitted" }
+      | { reason: "policy-unreadable"; unreadable: readonly WorkspacePolicyPath[]; detail: string },
+  ) {
+    super(refusal.reason === "policy-unreadable"
+      ? `${refusal.unreadable.join(" and ")}: ${refusal.detail}`
+      : "This history moment is no longer available.");
+    this.name = "RestorePolicyRefusalError";
+    this.reason = refusal.reason;
+    this.unreadable = refusal.reason === "policy-unreadable" ? refusal.unreadable : [];
+  }
+}
+
 export function requirePublishedWrite(path: string, result: { materializeOutcome?: string }): void {
   if (result.materializeOutcome === "conflict" || result.materializeOutcome === "superseded") {
     throw new AuthoredTextChangedError(path);
@@ -1114,6 +1156,13 @@ export class RestoreHeadChangedError extends Error {
   constructor(readonly path: string) {
     super(`${path} changed since dohc checked it.`);
     this.name = "RestoreHeadChangedError";
+  }
+}
+
+export class RestoreLocalChangesError extends Error {
+  constructor(readonly path: string, detail = "Changed on this device since the last saved version") {
+    super(detail);
+    this.name = "RestoreLocalChangesError";
   }
 }
 
@@ -1656,6 +1705,7 @@ export function createWorkspaceEngineCapture(
     liveStores ??= createCaptureLiveStores(
       { workspaceId, rootPath, attachmentId },
       options.rustEngineSessions,
+      captureWaitAbort.signal,
     );
     return liveStores;
   }
@@ -1666,6 +1716,7 @@ export function createWorkspaceEngineCapture(
   let observationDrainUnavailable = false;
   let observationResync: Promise<void> = Promise.resolve();
   let stopped = false;
+  const ydocOpenAbort = new AbortController();
   const captureWaitAbort = new AbortController();
   let daemonCaptureHealthTimer: ReturnType<typeof setTimeout> | null = null;
   let daemonCaptureHealthQueued = false;
@@ -2116,6 +2167,7 @@ export function createWorkspaceEngineCapture(
     contentKind?: YdocContentKind;
     onDead: () => void;
     onAlive: () => void;
+    onTypingUnresolved?: () => void;
     onObjectChanged: () => void;
     onRemoteUpdate: (update: Uint8Array, localAcknowledgement?: boolean) => void;
     onLineageReplaced: (update: Uint8Array, recoveredPaths: string[]) => void;
@@ -2189,10 +2241,83 @@ export function createWorkspaceEngineCapture(
       removePendingRecord(record);
       Y.applyUpdate(doc, record.update);
       Y.applyUpdate(recordedDoc, record.update);
+      retireCheckpointIfDurable();
       if (!record.editorVisible) {
         try { input.onRemoteUpdate(record.update, true); }
         catch (error) { onError(`Y.Doc record update observer of ${input.path}`, error); }
       }
+    };
+    const queuedOriginals = new Set<{update: Uint8Array; options: PendingRecord["options"]}>();
+    let checkpointBase: {claim: string | null; vector: Uint8Array; base: Uint8Array; disk: string | null} | null = null;
+    let diskHeadSha256: string | null = null;
+    let checkpointContentKind: YdocContentKind = input.contentKind ?? "richdoc";
+    let checkpointTimer: ReturnType<typeof setTimeout> | null = null;
+    const checkpointId = randomUUID();
+    let lastCheckpoint: OutageTypingCheckpoint | null = null;
+    const checkpointSnapshot = (): OutageTypingCheckpoint | null => {
+      if (!checkpointBase || !canonicalDoc || !sessionObjectId || !options.writeTypingCheckpoint) return null;
+      if (checkpointContentKind === "scene") return null;
+      const snapshot = new Y.Doc();
+      try {
+        Y.applyUpdate(snapshot, Y.encodeStateAsUpdate(canonicalDoc));
+        for (const original of queuedOriginals) Y.applyUpdate(snapshot, original.update);
+        const text = checkpointContentKind === "plaintext"
+          ? snapshot.getText("plainText").toString() : yDocToMarkdown(snapshot);
+        return {version: 2, checkpointId, workspaceId, versionId: input.versionId, objectId: sessionObjectId, path: input.path,
+          expectedClaimId: checkpointBase.claim, expectedStateVectorSha256: typingRecoveryStateVectorSha256(checkpointBase.vector),
+          expectedDiskSha256: checkpointBase.disk, text, admittedBaseBase64: Buffer.from(checkpointBase.base).toString("base64"), updateBase64: Buffer.from(Y.encodeStateAsUpdate(snapshot)).toString("base64"),
+          updates: [...pendingRecords, ...queuedOriginals].map(r => ({requestId: r.options.idempotencyKey!, updateBase64: Buffer.from(r.update).toString("base64"),
+            ...(r.options.actorOriginId !== undefined ? {actorOriginId: r.options.actorOriginId} : {}),
+            ...(r.options.attribution !== undefined ? {attribution: structuredClone(r.options.attribution)} : {})}))};
+      } finally { snapshot.destroy(); }
+    };
+    const checkpointTypingIsDurable = (): boolean => canonicalDoc !== null &&
+      pendingRecords.size === 0 && queuedOriginals.size === 0 &&
+      Buffer.from(Y.encodeStateAsUpdate(canonicalDoc)).equals(Buffer.from(Y.encodeStateAsUpdate(recordedDoc)));
+    const retireLastCheckpoint = async (): Promise<void> => {
+      const retired = lastCheckpoint;
+      if (retired) await options.retireTypingCheckpoint?.(retired);
+      if (lastCheckpoint === retired) lastCheckpoint = null;
+    };
+    const checkpointWriter = createTypingCheckpointWriter<OutageTypingCheckpoint>({
+      write: snapshot => options.writeTypingCheckpoint!(snapshot),
+      writeSync: options.writeTypingCheckpointSync,
+      retire: retireLastCheckpoint,
+      stored: snapshot => {lastCheckpoint = snapshot;},
+    });
+    const flushCheckpoint = (): Promise<void> => {
+      if (checkpointTimer !== null) { clearTimeout(checkpointTimer); checkpointTimer = null; }
+      if(checkpointBase && checkpointContentKind === "scene" && !checkpointTypingIsDurable()) {const error=new DrawingCheckpointUnavailable(); options.onTypingCheckpointFailure?.(input.path,error); return Promise.reject(error);}
+      const snapshot = checkpointSnapshot();
+      if (!snapshot) return checkpointWriter.wait();
+      return checkpointWriter.flush(checkpointTypingIsDurable() ? null : snapshot);
+    };
+    const checkpointUnresolved = (): void => {
+      if (!options.writeTypingCheckpoint) return;
+      if (!checkpointBase && recordedStateVector) {
+        checkpointBase = {claim: canonicalLineageClaimId, vector: new Uint8Array(recordedStateVector), base: Y.encodeStateAsUpdate(recordedDoc), disk: diskHeadSha256};
+        input.onTypingUnresolved?.();
+      }
+      void flushCheckpoint().catch(error => onError("Typing checkpoint", error));
+    };
+    const checkpointEdited = (): void => {
+      if (!checkpointBase || checkpointTimer !== null) return;
+      checkpointTimer = setTimeout(() => { checkpointTimer = null; void flushCheckpoint().catch(error => onError("Typing checkpoint", error)); }, 100);
+      checkpointTimer.unref();
+    };
+    const flushCheckpointSync=():void=>{
+      if(checkpointTimer !== null){clearTimeout(checkpointTimer);checkpointTimer=null;}
+      if(checkpointBase && checkpointContentKind === "scene" && !checkpointTypingIsDurable()) throw new DrawingCheckpointUnavailable();
+      if(checkpointTypingIsDurable()) return;
+      const snapshot=checkpointSnapshot(); if(snapshot) checkpointWriter.flushSync(snapshot);
+    };
+    const unregisterCheckpoint = registerTypingCheckpoint(workspaceId,flushCheckpoint,()=>checkpointBase !== null && !checkpointTypingIsDurable(),{checkpointId,path:input.path},flushCheckpointSync,()=>checkpointBase !== null);
+    const retireCheckpointIfDurable = (): void => {
+      if (!checkpointBase || !checkpointTypingIsDurable()) return;
+      options.onTypingCheckpointRecovered?.(input.path);
+      if (!dead && current !== null) checkpointBase = null;
+      if (checkpointTimer !== null) {clearTimeout(checkpointTimer); checkpointTimer = null;}
+      void checkpointWriter.flush(null).catch(error => onError("Typing checkpoint retirement", error));
     };
     let queuedUpdateBytes = 0;
     let queuedUpdateCount = 0;
@@ -2293,6 +2418,7 @@ export function createWorkspaceEngineCapture(
     ): void => {
       releaseObligation ??= unreleased;
       current = null;
+      checkpointUnresolved();
       input.onDead();
       if (dead) return;
       dead = true;
@@ -2307,10 +2433,13 @@ export function createWorkspaceEngineCapture(
     // release obligation it left behind is discharged too.
     const markAlive = (): void => {
       releaseObligation = null;
-      if (!dead) return;
-      dead = false;
-      clearDeadYDocSession(deadSessionToken);
-      input.onAlive();
+      if (dead) {
+        dead = false;
+        clearDeadYDocSession(deadSessionToken);
+        retireCheckpointIfDurable();
+        input.onAlive();
+      }
+      retireCheckpointIfDurable();
     };
 
     // `generation` is always the `openEngineYdocProviderSession` ladder
@@ -2387,6 +2516,7 @@ export function createWorkspaceEngineCapture(
             ) {
               return;
             }
+            checkpointUnresolved();
             const failed = opened;
             void append(async () => {
               if (current === failed) await rebind(failed);
@@ -2443,6 +2573,20 @@ export function createWorkspaceEngineCapture(
               }
               retired.destroy();
             },
+            preserveUnsentState: options.preserveUnsentState ? async doc => {
+              try {
+                if (!sessionObjectId || opened === null) throw new Error("Y.Doc recovery has no object identity.");
+                await options.preserveUnsentState!({
+                  path: input.path, objectId: sessionObjectId, contentKind: opened.contentKind, doc,
+                });
+              } catch (error) {
+                const name = input.path.split("/").at(-1) ?? input.path;
+                const message = `Unsent changes to ${name} are not saved. ${errorMessage(error)} Copy them from the open document before you quit dohc.`;
+                onError(`draft preservation of ${input.path}`, error);
+                input.onEditRefused?.("draft-preservation", message);
+                throw error;
+              }
+            } : undefined,
             onLocalEditError: requestReconnect,
             onLocalUpdateAcknowledged: (id) => {
               for (const record of pendingRecords) {
@@ -2490,6 +2634,7 @@ export function createWorkspaceEngineCapture(
                 updatesSettled = Math.max(updatesSettled, covered);
               }
               settleForgiven = false;
+              if (result.materialized) diskHeadSha256 = result.sha256;
               return input.onSettled(result, token, generation);
             },
           });
@@ -2702,6 +2847,7 @@ export function createWorkspaceEngineCapture(
     ): Promise<void> => {
       if (current !== failed || canonicalDoc === null || closed) return;
       const doc = canonicalDoc;
+      checkpointUnresolved();
       if (options?.releaseBeforeOpen) {
         try {
           // Recovery must retain acknowledged originals in the durable lineage.
@@ -2922,12 +3068,15 @@ export function createWorkspaceEngineCapture(
     // inside — no per-run deadline here, or the task would carry two.
     // Rebinds after a daemon death run on the session's own operation chain,
     // outside that budget, and keep the full ladder.
+    await options.waitForTypingRecovery?.();
     current = await openGeneration(true);
+    checkpointContentKind = current.contentKind;
     canonicalDoc = current.doc;
     Y.applyUpdate(recordedDoc, Y.encodeStateAsUpdate(canonicalDoc));
     canonicalLineageClaimId = current.lineageClaimId ?? null;
     sessionObjectId = current.objectId;
     recordedStateVector = Y.encodeStateVector(canonicalDoc);
+    if (options.writeTypingCheckpoint) diskHeadSha256 = await readFile(join(rootPath, input.path)).then(sha256Bytes).catch((error: NodeJS.ErrnoException) => {if (error.code === "ENOENT") return null; throw error;});
     const initialOpening = openingRemoteUpdates.get(current);
     if (initialOpening) {
       initialOpening.installed = true;
@@ -3167,17 +3316,22 @@ export function createWorkspaceEngineCapture(
         queuedUpdateCount += 1;
         const submittedGeneration = localGeneration;
         const capturedUpdate = new Uint8Array(update);
+        const capturedOptions = {...structuredClone(applyOptions ?? {}), idempotencyKey: applyOptions?.idempotencyKey ?? createId()};
+        const original = {update: capturedUpdate, options: capturedOptions};
+        queuedOriginals.add(original);
+        checkpointEdited();
         let queued = true;
         const releaseQueued = (): void => {
           if (!queued) return;
           queued = false;
           queuedUpdateBytes -= capturedUpdate.byteLength;
           queuedUpdateCount -= 1;
+          queuedOriginals.delete(original);
         };
         void journalLocalUpdate(() => {
           releaseQueued();
           return submittedGeneration === localGeneration ? capturedUpdate : null;
-        }, onArmed, applyOptions, false).catch((error: unknown) => {
+        }, onArmed, capturedOptions, false).catch((error: unknown) => {
           onError(`Y.Doc local update of ${input.path}`, error);
         }).finally(releaseQueued);
       },
@@ -3224,13 +3378,16 @@ export function createWorkspaceEngineCapture(
             releaseObligation = null;
           }
           closed = true;
+          unregisterCheckpoint();
           recordedDoc.destroy();
           current = null;
           clearDeadYDocSession(deadSessionToken);
         });
       },
       close(closeOptions) {
-        return append(async () => {
+        const closeCheckpoint = () => flushCheckpoint().then(() => {closed = true; unregisterCheckpoint(); clearDeadYDocSession(deadSessionToken);});
+        if (closeOptions?.shuttingDown && checkpointBase && !sessions.hasAvailableClient()) return closeCheckpoint();
+        const closing = append(async () => {
           if (closed) return;
           // The quit path closes with a settle and nobody types again, so this
           // is the last chance to persist text the canonical doc has been
@@ -3252,6 +3409,7 @@ export function createWorkspaceEngineCapture(
               releaseObligation = null;
             }
             closed = true;
+          unregisterCheckpoint();
             recordedDoc.destroy();
             clearDeadYDocSession(deadSessionToken);
             return;
@@ -3277,6 +3435,7 @@ export function createWorkspaceEngineCapture(
             // layer above would treat the path as still-reserved forever.
             if (error instanceof YdocReleasedWithSettleFailureError) {
               closed = true;
+          unregisterCheckpoint();
               recordedDoc.destroy();
               current = null;
               clearDeadYDocSession(deadSessionToken);
@@ -3284,10 +3443,36 @@ export function createWorkspaceEngineCapture(
             throw error;
           }
           closed = true;
+          unregisterCheckpoint();
+          await checkpointWriter.idle();
           recordedDoc.destroy();
           current = null;
           clearDeadYDocSession(deadSessionToken);
         });
+        if (!options.writeTypingCheckpoint) return closing;
+        // Renderer retirement can start this close before main begins shutdown.
+        // The checkpoint closes it without joining the blocked reconnect chain.
+        let shutdownCheckpointStarted = false;
+        let onShutdown!: () => void;
+        const checkpointShutdown = new Promise<void>((resolve, reject) => {
+          onShutdown = () => {
+            if (!checkpointBase || sessions.hasAvailableClient()) return;
+            shutdownCheckpointStarted = true;
+            void closeCheckpoint().then(resolve, reject);
+          };
+          captureWaitAbort.signal.addEventListener("abort", onShutdown, {once: true});
+          if (captureWaitAbort.signal.aborted) onShutdown();
+        });
+        const ordinaryClose = closing.then(
+          () => shutdownCheckpointStarted ? checkpointShutdown : undefined,
+          (error) => {
+            if (shutdownCheckpointStarted) return checkpointShutdown;
+            throw error;
+          },
+        );
+        return Promise.race([ordinaryClose, checkpointShutdown]).finally(() =>
+          captureWaitAbort.signal.removeEventListener("abort", onShutdown),
+        );
       },
     };
     return {
@@ -3368,7 +3553,7 @@ export function createWorkspaceEngineCapture(
   // on shutdown.
   let chain: Promise<void> = Promise.resolve();
   function enqueue(context: string, task: () => Promise<void>): void {
-    if (stopped) return;
+    if (stopped || captureWaitAbort.signal.aborted) return;
     chain = chain.then(async () => {
       try {
         await task();
@@ -3417,7 +3602,7 @@ export function createWorkspaceEngineCapture(
   // The active version is read PER TASK on the chain — never cached across
   // tasks — so a batch enqueued before a switch and captured after it can
   // never write into the wrong version.
-  async function activeVersionIdOf(engine: VersionedTextStore): Promise<string> {
+  async function activeVersionIdOf(engine: Pick<VersionedTextStore, "getActiveVersion">): Promise<string> {
     const active = await engine.getActiveVersion({ workspaceId });
     return active?.id ?? ENGINE_MAIN_VERSION_ID;
   }
@@ -3458,7 +3643,7 @@ export function createWorkspaceEngineCapture(
   }
 
   async function deleteIfTracked(
-    engine: VersionedTextStore,
+    engine: Pick<VersionedTextStore, "readTextFile" | "deleteTextFile">,
     versionId: string,
     path: string,
     metadata: ActorNeutralWriteMetadata,
@@ -3479,7 +3664,7 @@ export function createWorkspaceEngineCapture(
   }
 
   async function writeIfChanged(
-    engine: VersionedTextStore,
+    engine: Pick<VersionedTextStore, "readTextFile" | "writeTextFile" | "writeBinaryFile">,
     versionId: string,
     path: string,
     disk:
@@ -3654,7 +3839,7 @@ export function createWorkspaceEngineCapture(
   }
 
   async function materializeWriteForSnapshot(
-    engine: VersionedTextStore,
+    engine: Pick<VersionedTextStore, "readBinaryFile">,
     snapshot: { versionId: string; path: string; contentKind?: "text" | "binary"; text: string },
   ): Promise<MaterializeOperation> {
     if (snapshot.contentKind === "binary") {
@@ -3672,7 +3857,7 @@ export function createWorkspaceEngineCapture(
   }
 
   async function versionsSnapshot(
-    engine: VersionedTextStore,
+    engine: Pick<VersionedTextStore, "listVersions" | "getActiveVersion">,
   ): Promise<WorkspaceVersionsSnapshot> {
     const [versions, activeVersionId] = await Promise.all([
       engine.listVersions({ workspaceId }),
@@ -3725,7 +3910,6 @@ export function createWorkspaceEngineCapture(
     const workspace = { workspaceId, rootPath, attachmentId };
     let cursor: CollectionPendingAdoptionCursor | null = null;
     let found = false;
-    let deferred = false;
     let reconcileReady = false;
     const pendingAdoptionKeys = new Set<string>();
     do {
@@ -3749,17 +3933,14 @@ export function createWorkspaceEngineCapture(
               live.publicSession?.objectId !== adoption.objectId ||
               live.publicSession.contentKind !== "richdoc"
             ) {
-              deferred = true;
               continue;
             }
             if (live.closing || live.status === "failing-close" || live.publicSession === null) {
-              deferred = true;
               continue;
             }
             const borrowed = borrowRecordSession(live);
             try {
-              const status = await live.session.adoptCollectionRecord?.();
-              if (status !== "settled") deferred = true;
+              await live.session.adoptCollectionRecord?.();
             } finally {
               await borrowed.close();
             }
@@ -3796,6 +3977,7 @@ export function createWorkspaceEngineCapture(
                   expectedObjectId: adoption.objectId,
                   contentKind: "richdoc",
                   seedAbsentLineage: true,
+                  // File-backed adoption state needs no draft writer; terminal eviction releases its lease.
                   onRemoteUpdate: () => undefined,
                 });
                 retained = { binding, provider };
@@ -3811,16 +3993,14 @@ export function createWorkspaceEngineCapture(
           reconcileReady = true;
         } catch (error) {
           if (error instanceof YdocOwnerDraftPendingError) {
-            deferred = true;
             continue;
           }
           // Every unconfirmed eviction — busy, cancelled while queued, or any
           // other failure — leaves the daemon session live and its lease
           // held. Deleting the only handle here would leak that lease:
-          // reconciliation then fails with collection-reconciliation-lease-
-          // held, and later drains can only open another provider into the
-          // same lease. Retain until eviction is confirmed; a daemon restart
-          // is the one case the handle goes stale, and the binding check
+          // adoption then keeps waiting, and later drains can only open
+          // another provider into the same lease. Retain until eviction is
+          // confirmed. A daemon restart makes the handle stale; the binding check
           // above replaces it then. The not-pending sweep below releases it
           // once the adoption clears.
           if (retained !== undefined) {
@@ -3828,7 +4008,11 @@ export function createWorkspaceEngineCapture(
           } else {
             pendingCollectionAdoptionProviders.delete(adoptionKey);
           }
-          if (isEngineStoreBusyRefusal(error)) continue;
+          // A refusal that clears by itself leaves the adoption pending; a
+          // later drain pass retries it.
+          if (isTransientEngineRefusal(error)) {
+            continue;
+          }
           onError(`collection adoption of ${adoption.filePath}`, error);
         }
       }
@@ -3836,13 +4020,7 @@ export function createWorkspaceEngineCapture(
     } while (cursor !== null);
     await releaseRetainedCollectionAdoptionProviders(pendingAdoptionKeys);
     if (!found || !reconcileReady) return;
-    try {
-      await engine.reconcileCapture?.();
-    } catch (error) {
-      if ((deferred || pendingCollectionAdoptionProviders.size > 0) &&
-          error instanceof DaemonRefusalError && error.wireCode === "COLLECTION_RECONCILIATION_LEASE_HELD") return;
-      throw error;
-    }
+    await engine.reconcileCapture?.();
   }
 
   async function releaseRetainedCollectionAdoptionProviders(
@@ -3919,7 +4097,7 @@ export function createWorkspaceEngineCapture(
         options.rustEngineSessions.withRetryBudget(
           YDOC_OPEN_RETRY_DEADLINE_MS,
           openYDocSessionTask,
-          captureWaitAbort.signal,
+          ydocOpenAbort.signal,
         ),
       );
 
@@ -4261,6 +4439,7 @@ export function createWorkspaceEngineCapture(
           versionId,
           path: input.path,
           ...(input.contentKind ? { contentKind: input.contentKind } : {}),
+          onTypingUnresolved: () => reportSaveState("settling", 0, "status"),
           onDead: () => {
             if (
               entry !== null &&
@@ -4269,6 +4448,7 @@ export function createWorkspaceEngineCapture(
             ) {
               entry.status = "dead-generation";
             }
+            reportSaveState("settling",0,"status");
           },
           onAlive: () => {
             if (
@@ -4278,6 +4458,7 @@ export function createWorkspaceEngineCapture(
             ) {
               entry.status = "live";
             }
+            reportSaveState("settling",0,"status");
           },
           onObjectChanged: () => {
             try {
@@ -4293,6 +4474,10 @@ export function createWorkspaceEngineCapture(
           onLineageReplaced: (update, recoveredPaths) => {
             noteUpdate();
             input.onLineageReplaced?.(update, recoveredPaths);
+            reportSaveState("settling", 0, "status");
+            enqueue(`ydoc replacement settle of ${input.path}`, async () => {
+              if (entry !== null && liveYDocSessions.get(input.path) === entry && entry.status === "live") settleOnOpen();
+            });
           },
           onEditRefused: input.onEditRefused,
           onSettled,
@@ -5247,6 +5432,7 @@ export function createWorkspaceEngineCapture(
         if (head === "present") {
           const openingUpdates = updatesSeen;
           let drifted = false;
+          let checkedClean = false;
           try {
             const snapshot = await engine.readTextFile({ workspaceId, versionId, path: input.path });
             if (snapshot) {
@@ -5254,6 +5440,7 @@ export function createWorkspaceEngineCapture(
               drifted =
                 disk.kind === "changed" ||
                 (disk.kind === "sha256" && disk.sha256 !== snapshot.sha256);
+              checkedClean = disk.kind === "sha256" && disk.sha256 === snapshot.sha256;
             }
           } catch {
             // A failed read does not prove drift. Keep the existing state and
@@ -5268,6 +5455,8 @@ export function createWorkspaceEngineCapture(
             }
           } else if (unsettled) {
             settleOnOpen();
+          } else if (checkedClean && updatesSeen === updatesSettled && updatesSeen === openingUpdates && lastSettledSha === null) {
+            reportSaveState("saved", 0, "status");
           }
         } else if (lineage === "existing") {
           // A crash-kept draft of a file capture never recorded. Its text is
@@ -5279,6 +5468,8 @@ export function createWorkspaceEngineCapture(
           } else {
             reportSaveState("error", 0, "status");
           }
+        } else if (absentHeadDisk === "empty" && updatesSeen === 0) {
+          reportSaveState("saved", 0, "status");
         }
         const publicSession: WorkspaceEngineYDocProviderSession = {
           get nativeOwner() { return session.nativeOwner; },
@@ -5506,7 +5697,7 @@ export function createWorkspaceEngineCapture(
           const result = typeof decoded === "string"
             ? await engine.writeTextFile({ ...input, text: decoded, publish: true })
             : await engine.writeBinaryFile({ ...input, bytes: decoded });
-          return { resolvedAbsolutePath: resolvedAbsolute, materializeOutcome: result.materializeOutcome };
+          return { resolvedAbsolutePath: resolvedAbsolute, materializeOutcome: result.materializeOutcome, ...(result.deduped ? { deduped: true } : {}) };
         } catch (error) {
           if (error instanceof VersionedTextStoreError && error.code === "write-precondition-failed") {
             throw new AuthoredTextChangedError(path);
@@ -5706,7 +5897,13 @@ export function createWorkspaceEngineCapture(
       });
     },
 
+    beginShutdown() {
+      ydocOpenAbort.abort();
+      captureWaitAbort.abort();
+    },
+
     settleAndCloseAllLiveSessions() {
+      ydocOpenAbort.abort();
       return enqueueResult("close live sessions for workspace close", () =>
         settleAndCloseLiveYDocSessions(
           () => true,
@@ -6171,40 +6368,20 @@ export function createWorkspaceEngineCapture(
     async listMoments(input = {}) {
       await chain;
       const engine = await engineStore();
-      if (input.objectId !== undefined) {
-        const activeVersionId = await activeVersionIdOf(engine);
-        const page = await engine.listMoments({
-          workspaceId,
-          versionId: activeVersionId,
-          objectId: input.objectId,
-          ...(input.limit !== undefined ? { limit: input.limit } : {}),
-          ...(input.beforeMomentOrder !== undefined
-            ? { beforeMomentOrder: input.beforeMomentOrder }
-            : {}),
-        });
-        return {
-          moments: page.moments.map((moment) => ({ ...moment, protected: false as const })),
-          nextBeforeMomentOrder: page.nextBeforeMomentOrder,
-          latestMomentOrder: page.latestMomentOrder,
-          activeVersionId,
-          protectedTruncated: false,
-        };
-      }
       const history = await engine.listHistoryPage({
         workspaceId,
+        ...(input.cursor !== undefined ? { versionId: input.cursor.versionId } : {}),
+        ...(input.objectId !== undefined ? { objectId: input.objectId } : {}),
         ...(input.limit !== undefined ? { limit: input.limit } : {}),
-        ...(input.beforeMomentOrder !== undefined
-          ? { beforeMomentOrder: input.beforeMomentOrder }
+        ...(input.cursor !== undefined
+          ? { cursor: input.cursor }
           : {}),
       });
       const activeVersionId = history.activeVersion.id;
-      const page = history.textMomentPage;
-      const textMoments: WorkspaceEngineMomentSummary[] = page.moments.map(
+      const textMoments: WorkspaceEngineMomentSummary[] = history.moments.map(
         (moment) => ({ ...moment, protected: false }),
       );
-      // The daemon already restricted protected moments to this text page's
-      // half-open time window. The desktop owns only the visible merge order.
-      const protectedInWindow: WorkspaceEngineMomentSummary[] =
+      const protectedMoments: WorkspaceEngineMomentSummary[] =
         history.protectedMoments.map((moment) => ({
           id: moment.id,
           versionId: moment.versionId,
@@ -6223,7 +6400,7 @@ export function createWorkspaceEngineCapture(
       // momentOrder (a counter each store keeps for itself, so it ranks only
       // moments of the same kind), then lower id. The renderer shows this
       // order as given, so it is what the user reads.
-      const merged = [...textMoments, ...protectedInWindow].sort((a, b) => {
+      const merged = [...textMoments, ...protectedMoments].sort((a, b) => {
         if (a.recordedAtMs !== b.recordedAtMs) {
           return b.recordedAtMs - a.recordedAtMs;
         }
@@ -6233,10 +6410,11 @@ export function createWorkspaceEngineCapture(
       });
       return {
         moments: merged,
-        nextBeforeMomentOrder: page.nextBeforeMomentOrder,
-        latestMomentOrder: page.latestMomentOrder,
+        startCursor: history.startCursor,
+        nextCursor: history.nextCursor,
+        versionMarkers: history.versionMarkers,
+        latestMomentOrder: history.latestMomentOrder,
         activeVersionId,
-        protectedTruncated: history.protectedTruncated,
       };
     },
 
@@ -6256,6 +6434,18 @@ export function createWorkspaceEngineCapture(
       return null;
     },
 
+    async findRestoreReceipt(momentId, requestId) {
+      await chain;
+      const engine = await engineStore();
+      const original = await engine.getMoment({workspaceId, momentId});
+      return original ? findRestoreReceipt(engine, original, requestId) : null;
+    },
+
+    async publicationApplied(momentId, requestId) {
+      await chain;
+      return (await engineStore()).publicationApplied({workspaceId, requestId, momentId});
+    },
+
     async listObjectMomentsAfter(objectId, momentId) {
       await chain;
       const engine = await engineStore();
@@ -6273,18 +6463,21 @@ export function createWorkspaceEngineCapture(
         });
         for (const moment of page.moments) {
           if (moment.id === momentId) return after;
-          if (!moment.syncRecordOnly) after.push(moment.id);
+          if (!isCaptureRecoveryOrigin(moment.metadata.origin)) after.push(moment.id);
         }
         if (page.nextBeforeMomentOrder === null) return after;
         beforeMomentOrder = page.nextBeforeMomentOrder;
       }
     },
 
-    restoreFileToBeforeMoment(momentId, person, options = {}) {
+    restoreFileToBeforeMoment(momentId, person, restoreOptions = {}) {
       // The person as submitted, before the restore waits for its turn.
       const author = structuredClone(person);
       return enqueueResult("restore file", async () => {
         const policy = await readPolicyForTask();
+        if (policy.errors.length) {
+          throw new RestorePolicyRefusalError({ reason: "policy-unreadable", unreadable: policy.unreadable, detail: policy.errors.join("; ") });
+        }
         const engine = await engineStore();
         const activeVersionId = await activeVersionIdOf(engine);
         await engine.flushCapture?.();
@@ -6298,7 +6491,7 @@ export function createWorkspaceEngineCapture(
           if (!secretMoment) {
             throw new Error("This history moment is no longer available.");
           }
-          if (options.expectedHeadMomentId !== undefined) throw new RestoreHeadChangedError(secretMoment.path);
+          if (restoreOptions.expectedHeadMomentId !== undefined) throw new RestoreHeadChangedError(secretMoment.path);
           if (secretMoment.versionId !== activeVersionId) {
             throw new Error(
               "This moment belongs to a different version. Switch to that version to restore it.",
@@ -6384,6 +6577,9 @@ export function createWorkspaceEngineCapture(
             path: secretPath,
           };
         }
+        if (!historyMomentPathsAdmitted(historyPathAdmission(policy), moment)) {
+          throw new RestorePolicyRefusalError({ reason: "path-not-admitted" });
+        }
         if (moment.versionId !== activeVersionId) {
           throw new Error(
             "This moment belongs to a different version. Switch to that version to restore it.",
@@ -6392,9 +6588,44 @@ export function createWorkspaceEngineCapture(
         if (moment.operation === "rename") {
           throw new Error("A rename can't be restored directly.");
         }
+        if (restoreOptions.requestId) {
+          const receipt = await findRestoreReceipt(engine, moment, restoreOptions.requestId);
+          if (receipt) return receipt;
+        }
         const path = moment.path;
         try {
-          const correlationId = `restore-${createId()}`;
+          let expectedSha256: string | undefined;
+          let expectedAbsent = false;
+          if (restoreOptions.expectedHeadMomentId !== undefined) {
+            const expected = await engine.getMoment({ workspaceId, momentId: restoreOptions.expectedHeadMomentId });
+            if (!expected || expected.objectId !== moment.objectId) {
+              throw new RestoreHeadChangedError(path);
+            }
+            const head = await engine.listMoments({workspaceId, versionId: activeVersionId, objectId: moment.objectId, limit: 1});
+            if (head.moments[0]?.id !== restoreOptions.expectedHeadMomentId) throw new RestoreHeadChangedError(path);
+            expectedAbsent = expected.operation === "delete";
+            if (!expectedAbsent) expectedSha256 = expected.payload.after.sha256 ?? createHash("sha256").update(expected.payload.after.text).digest("hex");
+            const live = liveYDocSessions.get(path);
+            if (live) {
+              // Keep the canonical session and its queued edits intact. Closing it
+              // explicitly lets a later attempt prove that it has settled.
+              throw new RestoreLocalChangesError(path, "Open for live editing. Close this file and try again.");
+            }
+            let retainedDraft: boolean | undefined;
+            try {
+              retainedDraft = await options.hasRetainedLiveDraft?.(path, moment.objectId);
+            } catch {
+              throw new RestoreLocalChangesError(path, "Could not check saved drafts on this device. Try again.");
+            }
+            if (detachedLockedDebts.has(path) || retainedDraft) {
+              throw new RestoreLocalChangesError(path);
+            }
+            const disk = await readDiskTextState(rootPath, path);
+            if (expectedAbsent ? disk.kind !== "absent" : ((disk.kind !== "text" && disk.kind !== "binary") || disk.sha256 !== expectedSha256)) {
+              throw new RestoreLocalChangesError(path);
+            }
+          }
+          const correlationId = restoreOptions.requestId ?? `restore-${createId()}`;
           // Capture the file's latest disk state first so a restore can never
           // destroy an edit the engine has not recorded yet — the pre-restore
           // content stays one moment back in history.
@@ -6438,11 +6669,16 @@ export function createWorkspaceEngineCapture(
             versionId: activeVersionId,
             path,
           });
-          if (
-            options.expectedHeadMomentId !== undefined &&
-            (current?.objectId !== moment.objectId || current.latestMomentId !== options.expectedHeadMomentId)
-          ) {
-            throw new RestoreHeadChangedError(path);
+          if (restoreOptions.expectedHeadMomentId !== undefined) {
+            const history = await engine.listMoments({
+              workspaceId,
+              versionId: activeVersionId,
+              objectId: moment.objectId,
+              limit: 1,
+            });
+            if ((expectedAbsent ? current !== null : current?.objectId !== moment.objectId) || history.moments[0]?.id !== restoreOptions.expectedHeadMomentId) {
+              throw new RestoreHeadChangedError(path);
+            }
           }
           if (target) {
             // Equal bytes are the pre-moment state, whatever their kinds.
@@ -6468,21 +6704,27 @@ export function createWorkspaceEngineCapture(
                       throw new Error(`Binary content for ${path} is no longer available.`);
                     }
                     return engine.writeBinaryFile({
+                      ...(restoreOptions.requestId ? {requestId: restoreOptions.requestId} : {}),
                       workspaceId,
                       versionId: activeVersionId,
                       path,
                       bytes,
+                      ...(expectedSha256 ? { expectedSha256 } : {}),
+                      ...(expectedAbsent ? {createOnly: true} : {}),
                       metadata,
                       author,
                     });
                   })()
                 : await engine.writeTextFile({
+                    ...(restoreOptions.requestId ? {requestId: restoreOptions.requestId} : {}),
                     workspaceId,
                     versionId: activeVersionId,
                     path,
                     text: target.text,
                     publish: true,
                     restoreBeforeMomentId: momentId,
+                    ...(expectedSha256 ? { expectedSha256 } : {}),
+                      ...(expectedAbsent ? {createOnly: true} : {}),
                     metadata,
                     author,
                   });
@@ -6497,26 +6739,37 @@ export function createWorkspaceEngineCapture(
           if (!current) {
             return { restored: "deleted" as const, restoredMomentId: momentId, path };
           }
-          if (options.aloneInFolder) {
+          if (restoreOptions.aloneInFolder) {
             // Checked here, in the queue, so nothing queued before it can add
             // a file between the check and the delete.
             const siblings = await folderEntriesOrNone(join(rootPath, dirname(path)));
             if (siblings.some((name) => name !== basename(path))) throw new RestoreFolderInUseError(path);
           }
           const result = await engine.deleteTextFile({
+            ...(restoreOptions.requestId ? {requestId: restoreOptions.requestId} : {}),
             workspaceId,
             versionId: activeVersionId,
             path,
+            ...(expectedSha256 ? { expectedSha256, expectedObjectId: moment.objectId } : {}),
             metadata,
             author,
           });
-          await materialize([{ kind: "delete", path }], policy);
+          // Conditional deletes publish inside the engine through a checked preimage.
+          if (!expectedSha256) await materialize([{ kind: "delete", path }], policy);
           return {
             restored: "deleted" as const,
             restoredMomentId: result.moment.id,
             path,
           };
         } catch (error) {
+          if (restoreOptions.expectedHeadMomentId !== undefined) {
+            if (error instanceof AuthoredTextChangedError || (error instanceof VersionedTextStoreError && ["write-precondition-failed", "target-path-exists"].includes(error.code))) throw new RestoreLocalChangesError(path);
+            const code = error instanceof DaemonRefusalError ? error.message : error instanceof VersionedTextStoreError ? error.code : undefined;
+            if (code === "symlink-target") throw new RestoreLocalChangesError(path, "dohc could not remove this file because its path contains a link. Check the file's path.");
+            if (code === "recovery-unavailable") throw new RestoreLocalChangesError(path, "dohc could not remove this file. Check folder access, then try again.");
+            if (code === "file-locked") throw new RestoreLocalChangesError(path, "dohc could not remove this file. It may be open in another app.");
+            if (code?.startsWith("materialize-")) throw new RestoreLocalChangesError(path, "dohc could not remove this file.");
+          }
           throw liveDocumentMutationRefusal(error, path, "restore") ?? error;
         }
       });
@@ -7243,6 +7496,9 @@ export function createWorkspaceEngineCapture(
     },
 
     flush() {
+      if (captureWaitAbort.signal.aborted) {
+        return Promise.reject(captureWaitAbort.signal.reason);
+      }
       return enqueueResult("flush capture", async () => {
         const engine = await engineStore();
         await drainPendingCollectionAdoptions(engine);
@@ -7255,7 +7511,7 @@ export function createWorkspaceEngineCapture(
       // Everything already enqueued (including the watcher's final settled
       // batch) still runs; only new work is refused.
       stopped = true;
-      captureWaitAbort.abort();
+      ydocOpenAbort.abort();
       if (daemonCaptureHealthTimer !== null) {
         clearTimeout(daemonCaptureHealthTimer);
         daemonCaptureHealthTimer = null;
@@ -7265,15 +7521,20 @@ export function createWorkspaceEngineCapture(
         if (store) {
           try {
             await drainPendingCollectionAdoptions(store);
-            await store.flushCapture?.();
+            // Normal stop captures the last disk edits. Explicit shutdown
+            // cancels convergence before session retirement and skips this wait.
+            if (!captureWaitAbort.signal.aborted) await store.flushCapture?.();
           } catch (error) {
             // A refused store was never opened, so nothing is pending in
             // it. Failing the stop here would block the move-aside rebuild,
             // which closes the capture first.
-            if (engineStoreRefusalOf(error) === null) throw error;
+            const cancelled = captureWaitAbort.signal.aborted &&
+              error === captureWaitAbort.signal.reason;
+            if (!cancelled && engineStoreRefusalOf(error) === null) throw error;
           }
         }
       } finally {
+        captureWaitAbort.abort();
         await releaseRetainedCollectionAdoptionProviders(new Set());
         // App quit may abandon a dead generation's retained release obligation:
         // the daemon process exits immediately afterward and releases every

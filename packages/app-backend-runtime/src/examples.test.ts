@@ -1,8 +1,11 @@
 import { readFileSync } from "node:fs";
 import { randomBytes, randomUUID } from "node:crypto";
+import { DatabaseSync } from "node:sqlite";
 import { describe, expect, it } from "vitest";
 import { evaluateAppOperation, initializeAppDatabase } from "./index.ts";
 import type { EvaluateAppOperationInput, JsonValue } from "./index.ts";
+import { evaluate } from "./guest.ts";
+import { DEFAULT_LIMITS } from "./protocol.ts";
 
 const participant = {kind: "link", principalId: "participant", grantId: "public"};
 const helper = {kind: "named", userId: "organizer", grantId: "private", access: "edit", helper: true};
@@ -160,17 +163,39 @@ describe("fundraiser app operations", () => {
   });
 
   it("accepts the maximum original roster within operation and SQL limits", async () => {
-    const f = await fixture();
-    const sessions = ["s1", "s2"].map(sessionId => ({...group(sessionId, 36), spectators: Array.from({length: 100}, (_, i) => `Spectator Person${i}`)}));
-    const result = row((await f.call("register", registration(sessions))).result);
-    expect(result.total).toBe(102000);
-    expect(row((await f.call("lookupStatus", {token: result.statusToken}, {readOnly: true})).result).attendees).toHaveLength(272);
-    const first = row((await f.call("attendees", {limit: 200}, {caller: helper, readOnly: true})).result);
-    expect(first.records).toHaveLength(200);
-    expect(first.nextOffset).toBe(200);
-    const second = row((await f.call("attendees", {limit: 200, offset: 200}, {caller: helper, readOnly: true})).result);
-    expect(second.records).toHaveLength(72);
-    expect(second.nextOffset).toBeNull();
+    // This case checks roster capacity, not worker deadlines or the production time budget.
+    const db = new DatabaseSync(":memory:", { allowExtension: false, enableForeignKeyConstraints: true, enableDoubleQuotedStringLiterals: false });
+    const tables = ["sessions", "registrations", "registration_sessions", "attendees"];
+    const source = read("fundraiser", "backend.ts");
+    let sequence = 0;
+    async function call(operation: string, input: JsonValue, options: { caller?: JsonValue; readOnly?: boolean } = {}) {
+      db.exec("BEGIN IMMEDIATE");
+      const result = await evaluate(db, {
+        source, tables, operation, inputJson: JSON.stringify(input), callerJson: JSON.stringify(options.caller ?? participant),
+        nowMs: ++sequence * 1000, requestId: `request-${sequence}`, secret: randomBytes(32).toString("base64url"),
+        readOnly: options.readOnly ?? false, files: [file], limits: { ...DEFAULT_LIMITS, evaluationMs: 10_000 },
+      });
+      db.setAuthorizer(null);
+      db.exec("COMMIT");
+      return JSON.parse(result.resultJson) as JsonValue;
+    }
+    try {
+      db.exec(read("fundraiser", "schema.sql"));
+      const sessions = ["s1", "s2"].map(sessionId => ({...group(sessionId, 36), spectators: Array.from({length: 100}, (_, i) => `Spectator Person${i}`)}));
+      const result = row(await call("register", registration(sessions)));
+      expect(result.total).toBe(102000);
+      expect(row(await call("lookupStatus", {token: result.statusToken}, {readOnly: true})).attendees).toHaveLength(272);
+      const first = row(await call("attendees", {limit: 200}, {caller: helper, readOnly: true}));
+      expect(first.records).toHaveLength(200);
+      expect(first.nextOffset).toBe(200);
+      const second = row(await call("attendees", {limit: 200, offset: 200}, {caller: helper, readOnly: true}));
+      expect(second.records).toHaveLength(72);
+      expect(second.nextOffset).toBeNull();
+    } finally {
+      db.setAuthorizer(null);
+      if (db.isTransaction) db.exec("ROLLBACK");
+      db.close();
+    }
   });
 
   it("accepts the original form's local and international mobile formats", async () => {

@@ -1,13 +1,14 @@
 // @vitest-environment jsdom
-import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from "vitest";
 import {
   ListRelayShareLinksResult,
   type RelayShareDiscussionMessage,
   type RelayShareGrantedRow,
 } from "../ipc/bridgeContract";
 import { RelayShareDialog, type RelayShareTarget } from "./RelayShareDialog";
+import { ShellErrorReporter, type ReportShellFailure } from "./shell/useShellError";
 
 const SHARE_CODE = "dohc-share:share-1:http://relay.test";
 const LINK_URL = "https://relay.test/share/link-secret";
@@ -275,7 +276,6 @@ const bridgeMock = {
   resumeRelayShareDiscussion: vi.fn(),
   promoteRelayShareGrant: vi.fn(),
   revokeRelayShareGrant: vi.fn(),
-  writeClipboardText: vi.fn(),
 };
 
 vi.mock("./bridge", () => ({
@@ -288,6 +288,8 @@ vi.mock("./bridge", () => ({
     }),
   }),
 }));
+
+let writeText: MockInstance<(text: string) => Promise<void>>;
 
 beforeEach(() => {
   vi.resetAllMocks();
@@ -347,7 +349,9 @@ beforeEach(() => {
     parentGrantId: null,
     undo: UNDO,
   });
-  bridgeMock.writeClipboardText.mockResolvedValue(undefined);
+  // user-event's clipboard stub: every setup() in this file reuses it.
+  userEvent.setup();
+  writeText = vi.spyOn(navigator.clipboard, "writeText");
 });
 
 afterEach(() => {
@@ -476,7 +480,7 @@ describe("RelayShareDialog", () => {
     bridgeMock.createRelayShare
       .mockResolvedValueOnce(emailResult("old"))
       .mockResolvedValueOnce(emailResult("current"));
-    bridgeMock.writeClipboardText.mockReturnValueOnce(oldCopy.promise);
+    writeText.mockReturnValueOnce(oldCopy.promise);
     const user = userEvent.setup();
     const onClose = vi.fn();
     const view = render(
@@ -486,7 +490,7 @@ describe("RelayShareDialog", () => {
       await user.type(screen.getByTestId("share-email"), "friend@dohc.test");
       await user.click(screen.getByTestId("share-create"));
       await user.click(await screen.findByTestId("share-code-copy"));
-      expect(bridgeMock.writeClipboardText).toHaveBeenCalledWith({ text: emailResult("old").shareCode });
+      expect(writeText).toHaveBeenCalledWith(emailResult("old").shareCode);
 
       view.rerender(
         <RelayShareDialog workspaceId="ws-1" target={{ kind: "paths", paths: ["docs/b.md"] }} onClose={onClose} />,
@@ -496,10 +500,10 @@ describe("RelayShareDialog", () => {
       await user.click(screen.getByTestId("share-create"));
       expect((await screen.findByTestId("share-code")).textContent).toBe(emailResult("current").shareCode);
       await act(async () => oldCopy.resolve());
-      expect(screen.getByTestId("share-code-copy").textContent).toBe("Copy");
+      expect(screen.getByTestId("share-code-copy").getAttribute("aria-label")).toBe("Copy");
       await user.click(screen.getByTestId("share-code-copy"));
-      expect(bridgeMock.writeClipboardText).toHaveBeenLastCalledWith({ text: emailResult("current").shareCode });
-      expect(screen.getByTestId("share-code-copy").textContent).toBe("Copied");
+      expect(writeText).toHaveBeenLastCalledWith(emailResult("current").shareCode);
+      await waitFor(() => expect(screen.getByTestId("share-code-copy").getAttribute("aria-label")).toBe("Copied"));
     } finally {
       view.unmount();
       await act(async () => {
@@ -524,7 +528,7 @@ describe("RelayShareDialog", () => {
     const create = controllable<ReturnType<typeof emailResult>>();
     const copy = controllable<void>();
     bridgeMock.createRelayShare.mockReturnValueOnce(create.promise);
-    bridgeMock.writeClipboardText.mockReturnValueOnce(copy.promise);
+    writeText.mockReturnValueOnce(copy.promise);
     const user = userEvent.setup();
     const onClose = vi.fn();
     const view = render(<RelayShareDialog workspaceId="ws-1" target={initial} onClose={onClose} />);
@@ -545,12 +549,15 @@ describe("RelayShareDialog", () => {
       await user.click(screen.getByRole("radio", { name: "Invite by email" }));
       expect(screen.getByTestId("share-code").textContent).toBe(emailResult("current").shareCode);
       await user.click(screen.getByTestId("share-code-copy"));
+      expect(writeText).toHaveBeenLastCalledWith(emailResult("current").shareCode);
       view.rerender(<RelayShareDialog workspaceId="ws-1" target={equivalent} onClose={onClose} />);
       await showLinkPane(user);
       await act(async () => copy.resolve());
       await user.click(screen.getByRole("radio", { name: "Invite by email" }));
       expect(screen.getByTestId("share-code").textContent).toBe(emailResult("current").shareCode);
-      expect(screen.getByTestId("share-code-copy").textContent).toBe("Copied");
+      // The copy finished while its pane was hidden. Its answer was a moment
+      // the person did not see, so the control comes back ready to copy.
+      expect(screen.getByTestId("share-code-copy").getAttribute("aria-label")).toBe("Copy");
       expect(bridgeMock.createRelayShare).toHaveBeenCalledOnce();
     } finally {
       view.unmount();
@@ -1027,7 +1034,7 @@ describe("RelayShareDialog", () => {
     await showLinkPane(user);
 
     expect(screen.queryByText(LINK_URL)).toBeNull();
-    expect(bridgeMock.writeClipboardText).not.toHaveBeenCalled();
+    expect(writeText).not.toHaveBeenCalled();
     await user.click(screen.getByRole("button", { name: "Create link" }));
 
     const url = await screen.findByTestId("share-link-url");
@@ -1040,12 +1047,12 @@ describe("RelayShareDialog", () => {
         "To reset or end this link later, open Share on this selection again.",
       ),
     ).toBeTruthy();
-    expect(bridgeMock.writeClipboardText).not.toHaveBeenCalled();
+    expect(writeText).not.toHaveBeenCalled();
 
     await user.click(screen.getByRole("button", { name: "Copy" }));
-    expect(bridgeMock.writeClipboardText).toHaveBeenCalledTimes(1);
-    expect(bridgeMock.writeClipboardText).toHaveBeenCalledWith({ text: LINK_URL });
-    expect(screen.getByRole("button", { name: "Copied" })).toBeTruthy();
+    expect(writeText).toHaveBeenCalledTimes(1);
+    expect(writeText).toHaveBeenCalledWith(LINK_URL);
+    expect(await screen.findByRole("button", { name: "Copied" })).toBeTruthy();
 
     first.unmount();
     render(
@@ -1322,6 +1329,49 @@ describe("RelayShareDialog", () => {
     ).toBe(false);
   });
 
+  // The link is a credential: after Reset link, Try again from a failed copy
+  // of the old link must not put the old link on the clipboard.
+  it("never copies a link that Reset link retired when Try again comes later", async () => {
+    const row = readableLink("grant-link-1", { shareId: "share-link-1", dependents: [] });
+    bridgeMock.listRelayShareLinks.mockResolvedValue({ links: [row] });
+    bridgeMock.rotateRelayShareLink.mockResolvedValueOnce({ outcome: "rotated", url: LINK_URL_B });
+    const report = vi.fn<ReportShellFailure>();
+    const user = userEvent.setup();
+    writeText.mockRejectedValueOnce(new Error("Document is not focused."));
+    render(
+      <ShellErrorReporter.Provider value={report}>
+        <RelayShareDialog workspaceId="ws-1" target={{ kind: "paths", paths: ["docs/plan.md"] }} onClose={() => {}} />
+      </ShellErrorReporter.Provider>,
+    );
+    await showLinkPane(user);
+    await screen.findByTestId("share-link-row-grant-link-1");
+    await user.click(screen.getByRole("button", { name: "Create link" }));
+    expect((await screen.findByTestId("share-link-url")).textContent).toBe(LINK_URL);
+    await user.click(screen.getByRole("button", { name: "Copy" }));
+    await vi.waitFor(() =>
+      expect(report).toHaveBeenCalledWith({
+        message: "dohc could not copy the share link. Document is not focused.",
+        cause: expect.anything(),
+        retry: expect.any(Function),
+      }),
+    );
+    const retry = report.mock.calls[0]![0].retry!;
+
+    const linkRow = screen.getByTestId("share-link-row-grant-link-1");
+    await user.click(within(linkRow).getByRole("button", { name: "Reset link" }));
+    await user.click(within(screen.getByTestId("share-link-confirmation")).getByRole("button", { name: "Reset link" }));
+    expect((await screen.findByTestId("share-link-url")).textContent).toBe(LINK_URL_B);
+
+    writeText.mockClear();
+    await act(async () => retry());
+    expect(writeText).not.toHaveBeenCalled();
+    expect(report).toHaveBeenLastCalledWith({
+      message: "dohc could not copy the share link. Document is not focused. Reset the link in Share to get a new one.",
+      cause: expect.anything(),
+      retry: null,
+    });
+  });
+
   it("resets with the sorted current dependent ids, replaces the URL, and refreshes", async () => {
     const row = readableLink("grant-link-1", {
       shareId: "share-link-1",
@@ -1371,6 +1421,43 @@ describe("RelayShareDialog", () => {
     expect(screen.queryByTestId("share-link-confirmation")).toBeNull();
     await vi.waitFor(() => {
       expect(bridgeMock.listRelayShareLinks).toHaveBeenCalledTimes(3);
+    });
+  });
+
+  it("stands lines in for links not yet shown, and keeps the words while shown links refresh", async () => {
+    const row = readableLink("grant-link-1", { shareId: "share-link-1" });
+    const first = controllable<{ links: LinkRow[] }>();
+    const again = controllable<{ links: LinkRow[] }>();
+    bridgeMock.listRelayShareLinks
+      .mockReturnValueOnce(first.promise)
+      .mockReturnValueOnce(again.promise)
+      .mockResolvedValue({ links: [row] });
+    const user = userEvent.setup();
+    render(
+      <RelayShareDialog
+        workspaceId="ws-1"
+        target={{ kind: "paths", paths: ["docs/plan.md"] }}
+        onClose={() => {}}
+      />,
+    );
+    await showLinkPane(user);
+    const opening = screen.getByText("Loading links…").closest("[role=status]");
+    expect(opening?.classList.contains("dohc-reveal-if-slow")).toBe(true);
+    await act(async () => {
+      first.resolve({ links: [row] });
+    });
+    await screen.findByTestId("share-link-row-grant-link-1");
+
+    await user.click(screen.getByRole("button", { name: "Create link" }));
+    await vi.waitFor(() => {
+      expect(bridgeMock.listRelayShareLinks).toHaveBeenCalledTimes(2);
+    });
+    const words = screen.getByText("Loading links…");
+    expect(words.tagName, "a refresh draws placeholder lines above the links already on screen").toBe("P");
+    expect(words.getAttribute("role"), "a refresh says nothing to a screen reader").toBe("status");
+    expect(screen.getByTestId("share-link-row-grant-link-1")).toBeTruthy();
+    await act(async () => {
+      again.resolve({ links: [row] });
     });
   });
 
@@ -1750,7 +1837,7 @@ describe("RelayShareDialog", () => {
     const pendingCreate = screen.getByRole("button", { name: "Create link" });
     expect(pendingCreate.textContent).toBe("Creating link…");
     expect(pendingCreate.hasAttribute("disabled")).toBe(true);
-    expect(bridgeMock.writeClipboardText).not.toHaveBeenCalled();
+    expect(writeText).not.toHaveBeenCalled();
 
     await act(async () => {
       requestB.resolve(linkResult(LINK_URL_B));
@@ -1792,7 +1879,7 @@ describe("RelayShareDialog", () => {
     const pendingCreate = screen.getByRole("button", { name: "Create link" });
     expect(pendingCreate.textContent).toBe("Creating link…");
     expect(pendingCreate.hasAttribute("disabled")).toBe(true);
-    expect(bridgeMock.writeClipboardText).not.toHaveBeenCalled();
+    expect(writeText).not.toHaveBeenCalled();
 
     await act(async () => {
       requestB.resolve(linkResult(LINK_URL_B));
@@ -1838,7 +1925,7 @@ describe("RelayShareDialog", () => {
 
     expect(screen.queryByText(LINK_URL_A)).toBeNull();
     expect(screen.queryByRole("alert")).toBeNull();
-    expect(bridgeMock.writeClipboardText).not.toHaveBeenCalled();
+    expect(writeText).not.toHaveBeenCalled();
   });
 
   it("recovers a committed Create link after its response is lost", async () => {
@@ -2851,7 +2938,46 @@ describe("RelayShareDialog", () => {
       access: "view",
       paths: ["docs/plan.md"],
     });
-    expect(bridgeMock.writeClipboardText).not.toHaveBeenCalled();
+    expect(writeText).not.toHaveBeenCalled();
+  });
+
+  it("stands lines in for comments not yet read, and says a reread aloud with words", async () => {
+    bridgeMock.listRelayShareLinks.mockResolvedValue({
+      links: [readableLink("link-a", { shareId: "share-a" })],
+    });
+    const first = controllable<DiscussionPage>();
+    const again = controllable<DiscussionPage>();
+    bridgeMock.listRelayShareDiscussion
+      .mockReturnValueOnce(first.promise)
+      .mockReturnValueOnce(again.promise);
+    const user = userEvent.setup();
+    render(
+      <RelayShareDialog
+        workspaceId="ws-1"
+        target={{ kind: "paths", paths: ["docs/plan.md"] }}
+        onClose={() => {}}
+      />,
+    );
+    await showLinkPane(user);
+    const group = await screen.findByTestId("share-link-group-share-a");
+    const comments = within(group).getByRole("button", { name: "Comments" });
+
+    await user.click(comments);
+    const opening = within(group).getByText("Loading comments…").closest("[role=status]");
+    expect(opening?.classList.contains("dohc-reveal-if-slow")).toBe(true);
+    await act(async () => {
+      first.resolve(discussionPage());
+    });
+    await within(group).findByText("No comments yet.");
+
+    await user.click(comments);
+    await user.click(comments);
+    const words = within(group).getByText("Loading comments…");
+    expect(words.tagName, "a reread draws placeholder lines where comments were shown").toBe("P");
+    expect(words.getAttribute("role"), "a reread says nothing to a screen reader").toBe("status");
+    await act(async () => {
+      again.resolve(discussionPage());
+    });
   });
 
   it("keeps one collapsed Comments section per eligible real share", async () => {

@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { createLocalChangeAuthor } from "@dohc/workspace-core";
-import type { RecordEditSession, RecordUpdateOptions } from "@dohc/automation-executor/collection-record-edits";
+import { AutomationCreationCommitted, type RecordEditSession, type RecordUpdateOptions } from "@dohc/automation-executor/collection-record-edits";
 import { createRecordByHand, desktopRecordEditContext, type DesktopRecordEditHost, type LocalPersonAuthor } from "./desktopRecordEdits";
 import { AuthoredTextChangedError } from "./workspaceEngineCapture";
 import { deferred } from "../testing/deferred";
@@ -42,6 +42,20 @@ async function contextFor(materializeOutcome: string) {
 }
 
 describe("desktopRecordEditContext createFile for an automation", () => {
+  it("names creation with the same key across retries and Collection moves", async () => {
+    const inputs: Array<Parameters<DesktopRecordEditHost["capture"]["writeAuthoredFile"]>> = [];
+    const context = desktopRecordEditContext({ capture: {
+      openRecordSession: async () => { throw Error("unused"); },
+      writeAuthoredFile: async (...args) => { inputs.push(args); return { resolvedAbsolutePath: args[0], materializeOutcome: "applied" }; },
+    }, workspaceRoot: await scratchRoot(), person: personNamed("local"), withAdapter: async () => null,
+    onCaptureSettled: () => () => undefined, signal: new AbortController().signal });
+    const text = "---\nid: rec_bbbbbbbbbbbbbbbbbbbbbbbbbb\n---\n";
+    await context.createFile("tasks/a.md", text, automation);
+    await context.createFile("tasks/a.md", text, automation);
+    await context.createFile("moved/a.md", text, automation);
+    expect(inputs.map(input => input[3]?.requestId)).toEqual(Array(3).fill(inputs[0]?.[3]?.requestId));
+    expect(inputs[0]?.[3]?.requestId).toMatch(/^automation-create:[a-f0-9]{64}$/);
+  });
   it("returns the path when the engine published the file", async () => {
     const context = await contextFor("applied");
     await expect(context.createFile("tasks/a.md", "text", automation)).resolves.toBe("tasks/a.md");
@@ -148,4 +162,13 @@ it("a hand-made record keeps the person who asked while it waits for its workspa
   release.resolve();
   await expect(creating).rejects.toThrow("stop after the create");
   expect(writes.map(write => write[2])).toEqual([personNamed("account-alice")]);
+});
+
+it("marks a deduped creation committed before publication checks", async () => {
+  const context = desktopRecordEditContext({ capture: {
+    openRecordSession: async () => { throw Error("unused"); },
+    writeAuthoredFile: async absolutePath => ({ resolvedAbsolutePath: absolutePath, materializeOutcome: "superseded", deduped: true }),
+  }, workspaceRoot: await scratchRoot(), person: personNamed("local"), withAdapter: async () => null,
+  onCaptureSettled: () => () => undefined, signal: new AbortController().signal });
+  await expect(context.createFile("Tasks/made.md", "text", automation)).rejects.toBeInstanceOf(AutomationCreationCommitted);
 });

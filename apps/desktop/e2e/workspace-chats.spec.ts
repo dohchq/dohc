@@ -1,3 +1,4 @@
+import { desktopPins, activityPin, settingsNavPin, editorTabTestId, editorTabPrefixPattern } from "../src/testPins";
 import { expect, test } from "@playwright/test";
 import { seedThroughDaemon } from "./helpers/daemonSeed";
 import { launchDesktopApp } from "./helpers/desktopApp";
@@ -5,6 +6,7 @@ import {
   cleanupDesktopWorkspace,
   createTempWorkspace,
   explorerRow,
+  openChatsView,
   openWorkspaceFromFirstRun,
   seedWorkspaceManifest,
   writeWorkspaceFiles,
@@ -30,7 +32,7 @@ test("general channel, composer-first chats, relaunch persistence, unread, searc
 
     // The Chats view exists on the activity rail; first use auto-creates
     // the default #general channel.
-    await page.getByTestId("titlebar-chats-sidebar").click();
+    await page.getByTestId(activityPin("chats")).click();
     await expect(page.getByTestId("chats-view")).toBeVisible();
     await expect(page.getByTestId("chats-channel-name")).toHaveText("general");
 
@@ -68,18 +70,18 @@ test("general channel, composer-first chats, relaunch persistence, unread, searc
     );
     await expect(page.getByTestId("chats-thread-unread")).toHaveCount(0);
     await expect(
-      page.getByTestId("chats-panel").getByTestId("chats-channel"),
+      page.getByTestId(desktopPins.sidePanel).getByTestId("chats-channel"),
     ).toHaveAttribute("data-thread-count", "1");
 
-    // Close the Chats tab and park the panel closed so the post-relaunch
-    // Chats click is a reveal (the panel's visibility persists in ui-state,
-    // and collapsing fully unmounts the view — no right-edge stub).
+    // Close the Chats tab and park the side panel on Files so the
+    // post-relaunch Chats click is a reveal (the selected view persists in
+    // ui-state, and switching views fully unmounts the list).
     await page
-      .getByTestId(/^tab-dohc:\/\/chats\/channel\//)
+      .getByTestId(editorTabPrefixPattern("tab://chats/channel/", true))
       .getByRole("button", { name: "Close #general" })
       .click();
-    await page.getByTestId("chats-panel-collapse").click();
-    await expect(page.getByTestId("chats-panel")).toHaveCount(0);
+    await page.getByTestId(activityPin("explorer")).click();
+    await expect(page.getByTestId("file-tree")).toBeVisible();
     await expect(page.getByTestId("chats-view")).toHaveCount(0);
 
     // Relaunch: channel chats are durable engine state. Between sessions an
@@ -114,17 +116,14 @@ test("general channel, composer-first chats, relaunch persistence, unread, searc
     desktop = await launchDesktopApp({ workspace: temp });
     await openWorkspaceFromFirstRun(desktop.page, temp);
     page = desktop.page;
-    // Panel visibility is persisted asynchronously, so a slow close can
-    // still restore the Chats panel open; blind-clicking would then TOGGLE
-    // it closed. Reveal it only when it is not already showing — what this
-    // test pins is chat-data durability, not panel-visibility persistence.
-    const panel = page.getByTestId("chats-panel");
-    // The panel is the navigator: every conversation below opens in the
+    // The selected view is persisted asynchronously, so a slow close can
+    // still restore Chats open; blind-clicking would then TOGGLE it closed.
+    // openChatsView reveals it only when it is not already showing — what
+    // this test pins is chat-data durability, not view persistence.
+    // The list is the navigator: every conversation below opens in the
     // Chats tab, inside the editor.
+    const panel = await openChatsView(page);
     const view = page.locator("main");
-    if (!(await panel.isVisible())) {
-      await page.getByTestId("titlebar-chats-sidebar").click();
-    }
     await expect(panel.getByTestId("chats-channel-name")).toHaveText("general");
     await expect(panel.getByTestId("chats-channel")).toHaveAttribute("data-thread-count", "2");
     await panel.getByTestId("chats-channel").click();
@@ -157,7 +156,7 @@ test("general channel, composer-first chats, relaunch persistence, unread, searc
 
     // WS-D integration: engine search finds the channel message and renders
     // it as a Chat result with the snippet title.
-    await page.getByTestId("activity-search").click();
+    await page.getByTestId(activityPin("search")).click();
     await page.getByTestId("search-input").fill("zeppelin-cadence");
     const chatGroup = page
       .locator('[data-testid="search-result-group"]')
@@ -197,15 +196,13 @@ test("a panel click opens the conversation in the Chats tab and the panel keeps 
 
     // A document tab first, so tab switching can be exercised later.
     await explorerRow(page, "notes.md").click();
-    await expect(page.getByTestId("tab-notes.md")).toBeVisible();
+    await expect(page.getByTestId(editorTabTestId("notes.md"))).toBeVisible();
 
     // Selecting a channel opens the Chats tab at that channel. The panel
     // shows no conversation of its own.
-    await page.getByTestId("titlebar-chats-sidebar").click();
-    const panel = page.getByTestId("chats-panel");
-    await expect(panel).toBeVisible();
+    const panel = await openChatsView(page);
     await panel.getByTestId("chats-channel").click();
-    const chatsTab = page.getByTestId(/^tab-dohc:\/\/chats\/channel\//);
+    const chatsTab = page.getByTestId(editorTabPrefixPattern("tab://chats/channel/", true));
     await expect(chatsTab).toBeVisible();
     await expect(chatsTab).toHaveAttribute("data-active", "true");
     const pageChannelView = page.locator(
@@ -253,7 +250,7 @@ test("a panel click opens the conversation in the Chats tab and the panel keeps 
 
     // Switching to another editor tab and back keeps the conversation and
     // the unsent draft in the tab. The panel stays a navigator throughout.
-    await page.getByTestId("tab-notes.md").click();
+    await page.getByTestId(editorTabTestId("notes.md")).click();
     await expect(panel.getByTestId("chats-thread-view")).toHaveCount(0);
     await expect(panel.getByTestId("chats-channel")).toBeVisible();
     await chatsTab.click();
@@ -264,7 +261,7 @@ test("a panel click opens the conversation in the Chats tab and the panel keeps 
 
     // Home has its own tab; returning to General preserves the thread draft.
     await panel.getByTestId("chats-feed-link").click();
-    const homeTab = page.getByTestId("tab-dohc://chats");
+    const homeTab = page.getByTestId(editorTabTestId("tab://chats"));
     await expect(homeTab).toContainText("Home");
     await expect(chatsTab).toContainText("#general");
     await expect(page.getByTestId("chats-personal-feed")).toBeVisible();
@@ -278,8 +275,8 @@ test("a panel click opens the conversation in the Chats tab and the panel keeps 
     await expect(pageChannelView).toBeVisible();
     await page.emulateMedia({ reducedMotion: "reduce" });
     for (const theme of ["Light", "Dark"] as const) {
-      await page.getByTestId("activity-settings").click();
-      await page.getByTestId("settings-nav-appearance").click();
+      await page.getByTestId(activityPin("settings")).click();
+      await page.getByTestId(settingsNavPin("appearance")).click();
       await page.getByRole("radio", { name: theme, exact: true }).click();
       await page.getByRole("button", { name: "Close settings" }).click();
       await expect(page.locator("html")).toHaveAttribute("data-theme", theme.toLowerCase());
@@ -297,9 +294,9 @@ test("a panel click opens the conversation in the Chats tab and the panel keeps 
     desktop = await launchDesktopApp({ workspace: temp });
     page = desktop.page;
     await expect(page.getByTestId("workspace-shell")).toHaveAttribute("data-ready", "true");
-    await expect(page.getByTestId(/^tab-dohc:\/\/chats\/channel\//)).toContainText("#general");
-    await expect(page.getByTestId("tab-dohc://chats")).toContainText("Home");
-    await page.getByTestId("tab-dohc://chats").click();
+    await expect(page.getByTestId(editorTabPrefixPattern("tab://chats/channel/", true))).toContainText("#general");
+    await expect(page.getByTestId(editorTabTestId("tab://chats"))).toContainText("Home");
+    await page.getByTestId(editorTabTestId("tab://chats")).click();
     await expect(page.getByTestId("chats-personal-feed")).toBeVisible();
 
   } finally {
@@ -361,13 +358,13 @@ test("performance: channel-list first paint and composer send latency", async ()
     // Channel-list first paint: click-to-50-painted-rows measured inside the
     // page (rAF-polled), so harness polling/CDP overhead does not count
     // against the budget. Includes the lazy view chunk + the IPC round trip.
-    const firstPaintMs = await page.evaluate(async () => {
-      const layoutToggle = document.querySelector<HTMLButtonElement>(
-        '[data-testid="titlebar-chats-sidebar"]',
+    const firstPaintMs = await page.evaluate(async (railSelector) => {
+      const chatsRailItem = document.querySelector<HTMLButtonElement>(
+        railSelector,
       );
-      if (!layoutToggle) throw new Error("chats layout toggle missing");
+      if (!chatsRailItem) throw new Error("Chats rail item missing");
       const start = performance.now();
-      layoutToggle.click();
+      chatsRailItem.click();
       await new Promise<void>((resolve) => {
         const check = () => {
           const rows = document.querySelectorAll('[data-testid="chats-channel"]');
@@ -377,7 +374,7 @@ test("performance: channel-list first paint and composer send latency", async ()
         check();
       });
       return performance.now() - start;
-    });
+    }, `[data-testid="${activityPin("chats")}"]`);
     await expect(page.getByTestId("chats-channel")).toHaveCount(50);
     console.log(`[perf] chats channel list first paint: ${firstPaintMs.toFixed(1)}ms (50 channels / 500 threads)`);
     expect(firstPaintMs).toBeLessThan(500);

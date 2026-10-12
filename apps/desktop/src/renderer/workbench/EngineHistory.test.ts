@@ -7,7 +7,7 @@ import {
   groupAgentAuthorName,
   groupEngineMoments,
 } from "./EngineHistory";
-import { chatAuthorLabel } from "./LinkedChats";
+import { chatAuthorLabel } from "./chatMessages";
 
 function moment(overrides: Partial<EngineMomentRecord> & { id: string }): EngineMomentRecord {
   return {
@@ -33,6 +33,11 @@ describe("engineMomentSummary", () => {
     ).toBe("Reconciled offline edits");
   });
 
+  it("names only the admitted after path for a rename", () => {
+    expect(engineMomentSummary(moment({ id: "rename", operation: "rename", path: "notes/b.md" })))
+      .toBe("Renamed to b.md");
+  });
+
   it("falls back to calm product copy from the operation", () => {
     expect(engineMomentSummary(moment({ id: "m1" }))).toBe("Edited plan.md");
     expect(
@@ -49,6 +54,11 @@ describe("engineOriginLabel", () => {
     expect(engineOriginLabel("api")).toBe("dohc");
     expect(engineOriginLabel("ydoc")).toBe("Live edit");
     expect(engineOriginLabel("unknown")).toBe("Unknown source");
+  });
+
+  it("names kept typing whether or not its notice is still open", () => {
+    expect(engineOriginLabel("capture-recovery")).toBe("Typing kept");
+    expect(engineOriginLabel("capture-recovery-cleared")).toBe("Typing kept");
   });
 });
 
@@ -71,6 +81,18 @@ describe("engineMomentSourceLabel", () => {
       id: "public", origin: "sync", publicAuthor: {kind: "public", principalId, grantId: "grant-1"},
     }));
     expect(submission).not.toBe(link);
+  });
+  it("names every author of a moment several wrote, and none in place of the rest", () => {
+    expect(engineMomentSourceLabel(moment({ id: "mixed", origin: "local-file",
+      authorLabels: ["trip-agent", "ana@example.com (Edit)"] }))).toBe("trip-agent, ana@example.com (Edit)");
+    expect(engineMomentSourceLabel(moment({ id: "many", origin: "local-file",
+      authorLabels: ["You", "trip-agent", "ana@example.com (Edit)", "ben@example.com (Edit)", "Edit link · holder 3f9a2c1d"] })))
+      .toBe("You, trip-agent, ana@example.com (Edit) and 2 more");
+  });
+  it("names the account or link holder a live edit's author snapshot admitted", () => {
+    expect(engineMomentSourceLabel(moment({ id: "account", origin: "local-file", liveAuthorName: "Owner" }))).toBe("Owner");
+    expect(engineMomentSourceLabel(moment({ id: "link", origin: "local-file", liveAuthorName: "Link holder Anonymous" })))
+      .toBe("Link holder Anonymous");
   });
   it("labels a public principal without inventing an agent identity", () => {
     expect(engineMomentSourceLabel(moment({id: "public", publicAuthor: {kind: "public", principalId: "holder-2", grantId: "grant-1"}}))).toBe("Link holder holder-2");

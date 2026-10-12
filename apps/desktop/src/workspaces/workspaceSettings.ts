@@ -1,53 +1,17 @@
 import { z } from "zod";
-import type { WorkspaceSettings as ContractWorkspaceSettings } from "@dohc/workspace-contracts/workspace-settings";
 import {
   ATTACHMENT_FOLDER_NAME_MAX_LENGTH,
-  ATTACHMENT_LOCATIONS,
-  WORKSPACE_PREVIEW_MODES,
-  WORKSPACE_SETTINGS_DEFAULTS,
-} from "@dohc/workspace-contracts/workspace-settings-values";
+  DEFAULT_WORKSPACE_SETTINGS,
+  WorkspaceSettings,
+} from "@dohc/workspace-contracts/workspace-settings";
 import { IgnoredSettings } from "../settings/settingsFile";
-import {
-  SETTINGS_READ_SOURCES,
-  settingsDeepEqual,
-} from "../settings/userSettings";
+import { SETTINGS_READ_SOURCES } from "../settings/userSettings";
 
-// Preload and renderer keep zod at their existing IPC boundary. The main-only
-// settings file reader validates the on-disk contract with Effect Schema.
 export {
   ATTACHMENT_FOLDER_NAME_MAX_LENGTH,
+  DEFAULT_WORKSPACE_SETTINGS,
+  WorkspaceSettings,
 };
-
-export const DEFAULT_WORKSPACE_SETTINGS: ContractWorkspaceSettings = WORKSPACE_SETTINGS_DEFAULTS;
-
-export const WorkspaceSettings = z
-  .object({
-    version: z.literal(1),
-    agents: z
-      .object({
-        mcpAutoStart: z.boolean(),
-      })
-      .strict(),
-    sites: z
-      .object({
-        defaultPreviewMode: z.enum(WORKSPACE_PREVIEW_MODES),
-      })
-      .strict(),
-    privacy: z
-      .object({
-        confirmExternalLinks: z.boolean(),
-      })
-      .strict(),
-    files: z
-      .object({
-        attachmentLocation: z.enum(ATTACHMENT_LOCATIONS),
-        attachmentFolderName: z.string().max(ATTACHMENT_FOLDER_NAME_MAX_LENGTH),
-      })
-      .strict()
-      .default(WORKSPACE_SETTINGS_DEFAULTS.files),
-  })
-  .strict() satisfies z.ZodType<ContractWorkspaceSettings>;
-export type WorkspaceSettings = z.infer<typeof WorkspaceSettings>;
 
 export const WorkspaceSettingsResult = z.object({
   settings: WorkspaceSettings,
@@ -69,17 +33,11 @@ export type WorkspaceSettingsResult = z.infer<typeof WorkspaceSettingsResult>;
 // before an external edit, or before the user repaired an unreadable file)
 // can no longer write its stale copy back over fields it never touched.
 export const WorkspaceSettingsPatch = z.object({
-  agents: WorkspaceSettings.shape.agents.partial().optional(),
   sites: WorkspaceSettings.shape.sites.partial().optional(),
   privacy: WorkspaceSettings.shape.privacy.partial().optional(),
   files: WorkspaceSettings.shape.files.removeDefault().partial().optional(),
 }).strict();
 export type WorkspaceSettingsPatch = z.infer<typeof WorkspaceSettingsPatch>;
-
-export function parseWorkspaceSettings(raw: unknown): WorkspaceSettings {
-  const parsed = WorkspaceSettings.safeParse(raw);
-  return parsed.success ? parsed.data : DEFAULT_WORKSPACE_SETTINGS;
-}
 
 export function mergeWorkspaceSettings(
   current: WorkspaceSettings,
@@ -88,13 +46,8 @@ export function mergeWorkspaceSettings(
   return WorkspaceSettings.parse({
     ...current,
     ...patch,
-    agents: { ...current.agents, ...patch.agents },
     sites: { ...current.sites, ...patch.sites },
     privacy: { ...current.privacy, ...patch.privacy },
     files: { ...current.files, ...patch.files },
   });
-}
-
-export function workspaceSettingsModified(settings: WorkspaceSettings): boolean {
-  return !settingsDeepEqual(settings, DEFAULT_WORKSPACE_SETTINGS);
 }

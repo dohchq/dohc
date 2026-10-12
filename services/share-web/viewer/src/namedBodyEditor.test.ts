@@ -27,6 +27,14 @@ it("edits the existing body while live, blocks local paste while paused, and sti
     expect(mount.querySelector('[contenteditable="false"]')).not.toBeNull();
   } finally {editor.destroy(); doc.destroy(); mount.remove();}
 });
+it("opens an empty body on the projection's default paragraph", () => {
+  const doc = new Y.Doc(), mount = document.createElement("div"); document.body.append(mount);
+  const editor = mountLiveBodyEditor(mount, {body: getDohcYDocBodyFragment(doc), label: "Shared file editor", canEdit: () => false, edit: () => false});
+  try {
+    expect(mount.querySelector('[role="textbox"] > p')).not.toBeNull();
+    expect(mount.querySelector("[data-dohc-callout]")).toBeNull();
+  } finally {editor.destroy(); doc.destroy(); mount.remove();}
+});
 it("renders remote image references without creating image fetches or navigable editor links", () => {
   const doc = markdownToYDoc("![Photo](https://example.test/tracker.png)\n\n[Leave](https://example.test)");
   const mount = document.createElement("div"); document.body.append(mount);

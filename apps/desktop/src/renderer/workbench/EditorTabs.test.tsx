@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import { editorTabTestId } from "../../testPins";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { useRef, useState } from "react";
@@ -18,9 +19,8 @@ import {
 } from "./workbenchState";
 
 beforeEach(() => {
-  // jsdom doesn't implement scrollIntoView; the strip reveals the active
-  // tab with it. Nor pointer capture, which the scrollbar thumb drag uses.
-  Element.prototype.scrollIntoView = vi.fn();
+  // jsdom doesn't implement pointer capture, which the scrollbar thumb drag
+  // uses.
   Element.prototype.setPointerCapture = vi.fn();
   Element.prototype.hasPointerCapture = vi.fn(() => false);
   Object.defineProperty(document, "elementFromPoint", {
@@ -93,7 +93,9 @@ describe("EditorTabs strip scrolling", () => {
         onCreateGroupRight={noop}
       />,
     );
-    const tab = screen.getByTestId(testId);
+    const sharedId = editorTabTestId(path);
+    expect(sharedId).toBe(testId);
+    const tab = screen.getByTestId(sharedId);
     fireEvent.keyDown(tab, { key: "Enter" });
     expect(onActivate).toHaveBeenCalledWith("left", path);
   });
@@ -162,11 +164,30 @@ describe("EditorTabs strip scrolling", () => {
     expect(strip.className).toContain("dohc-tab-strip");
   });
 
-  it("reveals the active tab when activation changes by any means", () => {
+  // Only the strip scrolls: scrollIntoView would scroll every scrolling
+  // ancestor too, the window included.
+  it("reveals the active tab when activation changes by any means, scrolling only the strip", () => {
+    // jsdom has no layout: each tab is 100px wide at 100px steps, and the
+    // strip shows 150px from its left edge.
+    const geometry = [
+      vi.spyOn(HTMLElement.prototype, "offsetLeft", "get").mockImplementation(function (this: HTMLElement) {
+        return ["a.md", "b.md", "c.md"].indexOf(this.dataset.testid?.slice(4) ?? "") * 100;
+      }),
+      vi.spyOn(HTMLElement.prototype, "offsetWidth", "get").mockReturnValue(100),
+      vi.spyOn(HTMLElement.prototype, "clientWidth", "get").mockReturnValue(150),
+    ];
+    const scrollTo = vi.fn(function (this: HTMLElement, options: ScrollToOptions) {
+      this.scrollLeft = options.left ?? 0;
+    });
+    HTMLElement.prototype.scrollTo = scrollTo as unknown as HTMLElement["scrollTo"];
+    const scrollIntoView = vi.fn();
+    Element.prototype.scrollIntoView = scrollIntoView;
+    const windowScroll = vi.spyOn(window, "scrollTo").mockImplementation(() => undefined);
+    try {
     const { rerender } = renderTabs("a.md");
-    const scroll = Element.prototype.scrollIntoView as ReturnType<typeof vi.fn>;
-    // Mount reveals the initially active tab.
-    expect(scroll).toHaveBeenCalledTimes(1);
+    const strip = screen.getByRole("tablist");
+    // The first tab is already in view, so mounting scrolls nothing.
+    expect(scrollTo).not.toHaveBeenCalled();
 
     rerender(
       <EditorTabs
@@ -184,10 +205,37 @@ describe("EditorTabs strip scrolling", () => {
         onCreateGroupRight={noop}
       />,
     );
-    expect(scroll).toHaveBeenCalledTimes(2);
-    expect(scroll).toHaveBeenLastCalledWith(
-      expect.objectContaining({ block: "nearest", inline: "nearest" }),
+    // c.md ends at 300px, past the strip's 150px view: just enough to show it.
+    expect(scrollTo).toHaveBeenCalledTimes(1);
+    expect(scrollTo).toHaveBeenLastCalledWith(expect.objectContaining({ left: 150 }));
+    expect(scrollTo.mock.contexts[0]).toBe(strip);
+
+    rerender(
+      <EditorTabs
+        groupId="left"
+        groupNumber={1}
+        tabs={tabs}
+        activeTab="a.md"
+        activeTabDirty={false}
+        recoveryPaths={new Set<string>()}
+        onActivate={noop}
+        onClose={noop}
+        onContextMenu={noop}
+        onMove={noop}
+        onMoveToGroup={noop}
+        onCreateGroupRight={noop}
+      />,
     );
+    // a.md starts left of the scrolled view: back to the start.
+    expect(scrollTo).toHaveBeenCalledTimes(2);
+    expect(scrollTo).toHaveBeenLastCalledWith(expect.objectContaining({ left: 0 }));
+    expect(scrollIntoView).not.toHaveBeenCalled();
+    expect(windowScroll).not.toHaveBeenCalled();
+    } finally {
+      for (const spy of geometry) spy.mockRestore();
+      windowScroll.mockRestore();
+      delete (HTMLElement.prototype as { scrollTo?: unknown }).scrollTo;
+    }
   });
 
   it("translates a vertical wheel into horizontal scroll when overflowing", () => {
@@ -836,6 +884,33 @@ describe("EditorTabs overlay scrollbar", () => {
     expect(onCloseGroup).toHaveBeenCalledWith("left");
   });
 
+  // Forced colors remove fills, so the mark is a border, which they keep, in
+  // the system Highlight color. A strip with no tabs carries it too.
+  it.each([
+    ["with tabs", tabs],
+    ["with no tabs", []],
+  ])("draws the active-group mark as a border that forced colors keep, %s", (_label, groupTabs) => {
+    render(
+      <EditorTabs
+        groupId="left"
+        groupNumber={1}
+        tabs={groupTabs}
+        activeTab={groupTabs[0]?.path ?? null}
+        activeTabDirty={false}
+        recoveryPaths={new Set<string>()}
+        onActivate={noop}
+        onClose={noop}
+        onContextMenu={noop}
+        onMove={noop}
+        onMoveToGroup={noop}
+        onCreateGroupRight={noop}
+      />,
+    );
+    const classes = screen.getByTestId("editor-tabs-active-group").className.split(" ");
+    expect(classes).toEqual(expect.arrayContaining(["border-t-2", "border-accent", "forced-colors:border-[Highlight]"]));
+    expect(classes.some((name) => name.startsWith("bg-"))).toBe(false);
+  });
+
   it.each([
     ["Chats", CHATS_TAB_PATH],
     ["a site preview", siteTabPath("client-portal")],
@@ -929,16 +1004,25 @@ it("returns from the tab overflow menu on selection and Escape", async () => {
   await waitFor(() => expect(document.activeElement).toBe(trigger));
 });
 
-it("returns from the tab overflow menu after a pointer click on its backdrop", async () => {
+it("returns from the tab overflow menu after a pointer click on blank space", async () => {
   const user = userEvent.setup();
   render(<KeyboardTabs focusableSurface={false} />);
   const trigger = screen.getByTestId("tabs-overflow");
   await user.click(trigger);
   screen.getByRole("menuitem", { name: "b.md" }).focus();
-  const backdrop = screen.getByTestId("tabs-overflow-menu").previousElementSibling!;
-  await user.pointer({ target: backdrop, keys: "[MouseLeft>]" });
-  expect(document.activeElement).toBe(document.body);
-  await user.pointer({ keys: "[/MouseLeft]" });
+  await user.pointer({ target: document.body, keys: "[MouseLeft>]" });
   expect(screen.queryByTestId("tabs-overflow-menu")).toBeNull();
-  await waitFor(() => expect(document.activeElement).toBe(trigger));
+  // A browser's press on blank space takes focus to the page after the close.
+  trigger.blur();
+  await user.pointer({ keys: "[/MouseLeft]" });
+  expect(document.activeElement).toBe(trigger);
+});
+
+it("closes the tab overflow menu on a press on a tab, which takes focus", async () => {
+  const user = userEvent.setup();
+  render(<KeyboardTabs />);
+  await user.click(screen.getByTestId("tabs-overflow"));
+  await user.click(screen.getByTestId("tab-c.md"));
+  expect(screen.queryByTestId("tabs-overflow-menu")).toBeNull();
+  expect(document.activeElement).toBe(screen.getByTestId("tab-c.md"));
 });

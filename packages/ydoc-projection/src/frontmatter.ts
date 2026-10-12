@@ -27,8 +27,11 @@ import {
   intCoreTag,
   NOT_RESOLVED,
   nullCoreTag,
+  SCALAR_STYLE_DOUBLE_QUOTED,
   SCALAR_STYLE_FOLDED_BLOCK,
   SCALAR_STYLE_LITERAL_BLOCK,
+  SCALAR_STYLE_PLAIN,
+  SCALAR_STYLE_SINGLE_QUOTED,
   type ScalarTagDefinition,
 } from 'js-yaml'
 
@@ -292,7 +295,12 @@ export function orderFrontmatter(
 
 /** Frontmatter values as canonical YAML, one line break after each entry. */
 export function frontmatterYaml(frontmatter: Record<string, unknown>): string {
-  return yaml.dump(orderFrontmatter(frontmatter), {
+  return frontmatterValueYaml(orderFrontmatter(frontmatter))
+}
+
+/** One frontmatter value as canonical YAML, ending with a line break. */
+export function frontmatterValueYaml(value: unknown): string {
+  return yaml.dump(value, {
     schema: losslessFrontmatterSchema,
     lineWidth: -1,
     sortKeys: false,
@@ -396,17 +404,18 @@ export function leadingFrontmatter(markdown: string): { text: string; readable: 
 }
 
 /**
- * Frontmatter values with top-level keys in document order, and the text after
- * the block. `undefined` when the document has no readable block.
+ * Frontmatter values, the top-level keys in document order, and the text after
+ * the block. `undefined` when the document has no readable block. Read the
+ * order from `keys`: enumerating `meta` lists integer-like keys first.
  */
 export function loadMarkdownFrontmatter(
   markdown: string,
-): { meta: Record<string, unknown>; rest: string } | undefined {
+): { meta: Record<string, unknown>; keys: string[]; rest: string } | undefined {
   const block = readFrontmatterBlock(markdown)
   if (!block) return undefined
   const meta = nullPrototypeRecord()
   for (const key of block.keys) meta[key] = block.value[key]
-  return { meta, rest: block.rest }
+  return { meta, keys: block.keys, rest: block.rest }
 }
 
 /**
@@ -562,80 +571,21 @@ function preservesYamlValues(before: FrontmatterBlock, after: FrontmatterBlock, 
 
 /** The Y.Doc meta key that holds the frontmatter text a document keeps. */
 export const FRONTMATTER_SOURCE_META_KEY = 'dohcFrontmatterSource'
-/**
- * The prefix of the Y.Doc meta keys that hold the item a frontmatter key held
- * when its text was kept, as `client:clock`. One entry per key, so edits to
- * different keys on different devices merge. Writing a key creates a new
- * item, so a key written since, by any writer, no longer matches. The engine
- * reads them the same way.
- */
-export const FRONTMATTER_SOURCE_ITEM_META_PREFIX = 'dohcFrontmatterSourceItem:'
-
-function entryItem(map: Y.Map<unknown>, key: string): string | undefined {
-  const item = map._map.get(key)
-  return item === undefined || item.deleted ? undefined : `${item.id.client}:${item.id.clock}`
-}
-
-/** Record the item each frontmatter key holds now, beside the kept text. */
-export function recordFrontmatterSourceItems(frontmatter: Y.Map<unknown>, meta: Y.Map<unknown>): void {
-  for (const key of [...meta.keys()]) {
-    if (key.startsWith(FRONTMATTER_SOURCE_ITEM_META_PREFIX)) meta.delete(key)
-  }
-  for (const key of frontmatter.keys()) {
-    const item = entryItem(frontmatter, key)
-    if (item !== undefined) meta.set(FRONTMATTER_SOURCE_ITEM_META_PREFIX + key, item)
-  }
-}
-
-/** The frontmatter keys still held by the items their kept text was written for. */
-export function writtenFrontmatterKeys(frontmatter: Y.Map<unknown>, meta: Y.Map<unknown>): Set<string> {
-  const written = new Set<string>()
-  for (const [metaKey, item] of meta.entries()) {
-    if (!metaKey.startsWith(FRONTMATTER_SOURCE_ITEM_META_PREFIX)) continue
-    const key = metaKey.slice(FRONTMATTER_SOURCE_ITEM_META_PREFIX.length)
-    if (entryItem(frontmatter, key) === item) written.add(key)
-  }
-  return written
-}
+/** The Y.Doc meta key that is true when the document's file ends lines with CRLF. */
+export const MARKDOWN_CRLF_META_KEY = 'dohcMarkdownCrlf'
 
 /**
- * Set a frontmatter value. When the key held the item its kept text was
- * written for, the text moves to the new item, so an edited value keeps its
- * place and the comments above it. A key that was absent, or written by
- * someone else since, stays unmatched and settles without its old comments.
+ * Refuse a property edit unless the block that `current` settles to holds
+ * each `requested` value as written. `source` and `written` are the kept text
+ * and the keys still written by it, as for frontmatterBlockFor.
  */
-export function setFrontmatterValue(doc: Y.Doc, key: string, value: unknown): void {
-  patchFrontmatter(doc, new Map([[key, value]]))
-}
-
-function frontmatterValues(frontmatter: Y.Map<unknown>): Record<string, unknown> {
-  const values = nullPrototypeRecord()
-  for (const [key, value] of frontmatter) {
-    values[key] = value !== null && typeof value === 'object'
-      && 'toJSON' in value && typeof value.toJSON === 'function' ? value.toJSON() : value
-  }
-  return values
-}
-
-/** Validate a whole property edit before changing any Y.Map item. */
-export function patchFrontmatter(doc: Y.Doc, values: ReadonlyMap<string, unknown>, remove: readonly string[] = []): void {
-  const frontmatter = doc.getMap<unknown>('frontmatter')
-  const meta = doc.getMap<unknown>('meta')
-  const current = frontmatterValues(frontmatter)
-  for (const key of remove) delete current[key]
-  for (const [key, value] of values) current[key] = value
-  const candidate = frontmatterBlockFor(current, meta.get(FRONTMATTER_SOURCE_META_KEY), '', '\n', writtenFrontmatterKeys(frontmatter, meta))
-  assertRequestedValues(candidate, Object.fromEntries(values))
-  doc.transact(() => {
-    for (const key of remove) frontmatter.delete(key)
-    for (const [key, value] of values) {
-      const before = entryItem(frontmatter, key)
-      frontmatter.set(key, value)
-      const after = entryItem(frontmatter, key)
-      const metaKey = FRONTMATTER_SOURCE_ITEM_META_PREFIX + key
-      if (before !== undefined && after !== undefined && meta.get(metaKey) === before) meta.set(metaKey, after)
-    }
-  })
+export function assertFrontmatterEdit(
+  current: Record<string, unknown>,
+  source: unknown,
+  written: ReadonlySet<string>,
+  requested: Record<string, unknown>,
+): void {
+  assertRequestedValues(frontmatterBlockFor(current, source, '', '\n', written), requested)
 }
 
 function assertRequestedValues(candidate: string, requested: Record<string, unknown>): void {
@@ -649,7 +599,8 @@ function assertRequestedValues(candidate: string, requested: Record<string, unkn
   }
 }
 
-function sameFrontmatterValue(left: unknown, right: unknown): boolean {
+/** Whether two frontmatter values read as the same value. */
+export function sameFrontmatterValue(left: unknown, right: unknown): boolean {
   if (Object.is(left, right)) return true
   if (Array.isArray(left) && Array.isArray(right)) {
     if (left.length !== right.length) return false
@@ -670,27 +621,59 @@ function withRenamedEntries(
   current: Record<string, unknown>,
   renamed: ReadonlyMap<string, string>,
 ): string {
-  if (renamed.size === 0) return source
+  let text = source
+  for (const [from, to] of renamed) {
+    if (Object.hasOwn(current, to)) text = keptTextRenamed(text, from, to) ?? text
+  }
+  return text
+}
+
+/** A key as written before `: ` on one line. Undefined when it needs the explicit `? ` form. */
+function inlineKey(key: string): string | undefined {
+  const entry = frontmatterYaml({ [key]: null })
+  const text = entry.slice(0, -': null\n'.length)
+  return entry.startsWith('? ') || !entry.endsWith(': null\n') || text.includes('\n') ? undefined : text
+}
+
+/**
+ * Kept frontmatter text with the entry for `from` written under the name
+ * `to`, keeping its value text and its comments. Text a deleted `to` left
+ * behind goes with the comments above it, as a settle drops them. Undefined
+ * when the text has no entry for `from` or cannot rename it in place.
+ */
+export function keptTextRenamed(source: string, from: string, to: string): string | undefined {
   try {
     const block = readFrontmatterBlock(source)
     const entries = block ? rootKeyEntries(block.yaml) : undefined
-    if (!block || entries === undefined || entries.length !== block.keys.length) return source
-    const indent = mappingIndent(block.yaml, entries)
-    let yaml = block.yaml.slice(0, entries[0]?.line ?? block.yaml.length)
-    block.keys.forEach((key, index) => {
-      const region = block.yaml.slice(entries[index]!.line, entries[index + 1]?.line ?? block.yaml.length)
-      const to = renamed.get(key)
-      if (to === undefined || !Object.hasOwn(current, to)) {
-        yaml += region
-        return
+    if (!block || entries === undefined || entries.length !== block.keys.length) return undefined
+    const key = entries[block.keys.indexOf(from)]?.key
+    const name = inlineKey(to)
+    if (key === undefined || name === undefined) return undefined
+    const edits = [{ ...key, text: name }]
+    const stale = block.keys.indexOf(to)
+    if (stale !== -1) {
+      const indent = mappingIndent(block.yaml, entries).length
+      const textEnd = (index: number): number => {
+        const entry = entries[index]!
+        const region = block.yaml.slice(entry.line, entries[index + 1]?.line ?? block.yaml.length)
+        return entry.line + entryTextEnd(region, entry.keptBlankLines, indent)
       }
-      const split = entryTextEnd(region, entries[index]!.keptBlankLines, indent.length)
-      const entry = frontmatterYaml({ [to]: current[to] })
-      yaml += `${renderEntry(entry, indent, block.open.endsWith('\r\n'))}${region.slice(split)}`
-    })
-    return `${block.open}${yaml}${block.closing}`
+      edits.push({ start: stale === 0 ? 0 : textEnd(stale - 1), end: textEnd(stale), text: '' })
+    }
+    let yaml = block.yaml
+    for (const edit of edits.sort((left, right) => right.start - left.start)) {
+      yaml = `${yaml.slice(0, edit.start)}${edit.text}${yaml.slice(edit.end)}`
+    }
+    const candidate = `${block.open}${yaml}${block.closing}`
+    const reread = readFrontmatterBlock(candidate)
+    const keys = block.keys.filter(key => key !== to).map(key => key === from ? to : key)
+    return reread && reread.keys.length === keys.length
+      && keys.every((key, index) => reread.keys[index] === key
+        && sameFrontmatterValue(block.value[key === to ? from : key], reread.value[key]))
+      ? candidate
+      : undefined
   } catch {
-    return source
+    return undefined
   }
 }
 
@@ -698,7 +681,11 @@ function renderedEntries(values: Record<string, unknown>): Map<string, string> {
   return new Map(Object.keys(values).map(key => [key, frontmatterYaml({ [key]: values[key] })]))
 }
 
-type RootKeyEntry = { line: number; keptBlankLines: number }
+/**
+ * A top-level entry: where its line starts, the blank lines its value keeps,
+ * and the text of a plain or quoted key, quotes included.
+ */
+type RootKeyEntry = { line: number; keptBlankLines: number; key?: { start: number; end: number } }
 
 function mappingIndent(text: string, entries: RootKeyEntry[]): string {
   return entries.length === 0 ? '' : /^ */u.exec(text.slice(entries[0]!.line))![0]
@@ -753,7 +740,12 @@ function rootKeyEntries(text: string): RootKeyEntry[] | undefined {
     if (!Number.isFinite(position) || position < 0) return undefined
     const line = text.lastIndexOf('\n', position - 1) + 1
     if (line <= (entries.at(-1)?.line ?? -1)) return undefined
-    entries.push({ line, keptBlankLines: 0 })
+    const quote = event.type === EVENT_SCALAR
+      && (event.style === SCALAR_STYLE_SINGLE_QUOTED || event.style === SCALAR_STYLE_DOUBLE_QUOTED) ? 1 : 0
+    const key = event.type === EVENT_SCALAR && (quote === 1 || event.style === SCALAR_STYLE_PLAIN)
+      ? { start: event.valueStart - quote, end: event.valueEnd + quote }
+      : undefined
+    entries.push({ line, keptBlankLines: 0, ...(key ? { key } : {}) })
   }
   return entries
 }
@@ -805,25 +797,6 @@ export function frontmatterBlockFor(
 }
 
 /**
- * A live document's frontmatter block as its file holds it. Once a settle has
- * written every edit (`settled`), that is the block the settle wrote. Until
- * then, it is the text recorded from the file, or the canonical block of the
- * values when no text was recorded.
- */
-export function frontmatterAsWritten(doc: Y.Doc, settled: boolean): string {
-  const frontmatter = doc.getMap<unknown>('frontmatter')
-  const meta = doc.getMap<unknown>('meta')
-  const source = meta.get(FRONTMATTER_SOURCE_META_KEY)
-  if (typeof source === 'string' && !settled) return source
-  try {
-    return frontmatterBlockFor(orderFrontmatter(frontmatterValues(frontmatter)), source, '', '\n', writtenFrontmatterKeys(frontmatter, meta))
-  } catch {
-    // A refused settle leaves the file as it was.
-    return typeof source === 'string' ? source : ''
-  }
-}
-
-/**
  * Write frontmatter values into a Markdown document, keeping the text of every
  * entry whose value did not change. `renamed` maps an old key to its new
  * name, so a property renamed in a form keeps its place while a person types.
@@ -841,10 +814,15 @@ export function writeMarkdownFrontmatter(
   const original = readFrontmatterBlock(written)
   const requested = nullPrototypeRecord()
   const unchanged: string[] = []
+  const renamedFrom = new Map([...renamed].map(([from, to]) => [to, from]))
   for (const key of Object.keys(frontmatter)) {
-    if (original && Object.hasOwn(original.value, key)
-      && frontmatterYaml({ [key]: original.value[key] }) === frontmatterYaml({ [key]: frontmatter[key] })
-      && ![...renamed.values()].includes(key)) unchanged.push(key)
+    const from = renamedFrom.get(key)
+    if (from !== undefined) {
+      // A renamed entry keeps its value text, which the candidate's reread checks.
+      if (!original || !Object.hasOwn(original.value, from)
+        || !sameFrontmatterValue(original.value[from], frontmatter[key])) requested[key] = frontmatter[key]
+    } else if (original && Object.hasOwn(original.value, key)
+      && frontmatterYaml({ [key]: original.value[key] }) === frontmatterYaml({ [key]: frontmatter[key] })) unchanged.push(key)
     else requested[key] = frontmatter[key]
   }
   assertRequestedValues(candidate, requested)

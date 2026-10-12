@@ -1,8 +1,9 @@
 import { LegendList } from "@legendapp/list/react";
 import { useEffect, useMemo, useRef, useState, type ReactElement, type ReactNode } from "react";
 
-// Posts and Home share a top-down card list. Keep focused cards and their
+// Posts and Home share a top-down list of rows. Keep focused rows and their
 // neighbors mounted so scrolling cannot discard a control's keyboard focus.
+// The last row is marked `data-feed-last`, so it draws no hairline under it.
 export function PostFeedList<T>({
   items, itemKey, renderItem, header, footer, empty, columnClassName = "",
   testId, bottomPadding = 48, topPadding = 12,
@@ -68,7 +69,7 @@ export function PostFeedList<T>({
       style={{ paddingTop: topPadding, paddingBottom: bottomPadding }}
       data={items}
       keyExtractor={itemKey}
-      estimatedItemSize={220}
+      estimatedItemSize={100}
       drawDistance={400}
       recycleItems={false}
       maintainVisibleContentPosition
@@ -90,8 +91,8 @@ export function PostFeedList<T>({
           role="listitem"
           aria-posinset={index + 1}
           aria-setsize={items.length}
+          data-feed-last={index + 1 === items.length ? "" : undefined}
           className={`px-3 sm:px-4 ${columnClassName}`}
-          style={{ paddingBottom: index + 1 < items.length ? 12 : 0 }}
         >
           {renderItem(item)}
         </div>

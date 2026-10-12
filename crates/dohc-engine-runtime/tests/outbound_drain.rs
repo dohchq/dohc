@@ -76,6 +76,8 @@ struct LoggedOp {
 impl LoggedOp {
     fn envelope(&self, workspace_id: &str) -> ReplicationEnvelope {
         ReplicationEnvelope {
+            settlement_admission: None,
+            admitted_author_snapshot: None,
             workspace_id: workspace_id.to_owned(),
             origin_id: self.origin_id.clone(),
             origin_seq: self.origin_seq,
@@ -1119,26 +1121,26 @@ async fn drive_every_mutation_kind(actor: &ActorHandle, workspace_id: &str, root
         )
         .await
         .expect("capture binary moment");
-    actor
-        .capture_retire(
-            CaptureRetire {
-                workspace_id: workspace_id.to_owned(),
-                version_id: "main".to_owned(),
-                path: "notes/captured.md".to_owned(),
-                metadata_summary: None,
-                metadata_correlation_id: None,
-                now_ms: 80,
-                request_id: None,
-                only_if_text_head: false,
-                only_if_capture_origin: false,
-                allow_ydoc_origin: true,
-            },
-            dohc_engine_collab::LeaseRegistry::new(),
-            Arc::new(NoFaults),
-            CancellationToken::new(),
-        )
-        .await
-        .expect("retire captured text moment");
+    dohc_engine_testkit::capture::retire_captured_path(
+        actor,
+        CaptureRetire {
+            workspace_id: workspace_id.to_owned(),
+            version_id: "main".to_owned(),
+            path: "notes/captured.md".to_owned(),
+            metadata_summary: None,
+            metadata_correlation_id: None,
+            now_ms: 80,
+            request_id: None,
+            only_if_text_head: false,
+            only_if_capture_origin: false,
+            allow_ydoc_origin: true,
+        },
+        root_dir,
+        dohc_engine_collab::LeaseRegistry::new(),
+        Arc::new(NoFaults),
+    )
+    .await
+    .expect("retire captured text moment");
     actor
         .versioned_text_write_indexed(
             write_path_input(
@@ -1469,22 +1471,22 @@ async fn drive_every_mutation_kind(actor: &ActorHandle, workspace_id: &str, root
         )
         .await
         .expect("capture secret put");
-    actor
-        .capture_secret_retire(
-            CaptureSecretRetire {
-                workspace_id: workspace_id.to_owned(),
-                version_id: "main".to_owned(),
-                path: ".capture.env".to_owned(),
-                metadata_origin: "local-file".to_owned(),
-                metadata_correlation_id: None,
-                now_ms: 230,
-                only_if_own_origin: true,
-            },
-            Arc::new(NoFaults),
-            CancellationToken::new(),
-        )
-        .await
-        .expect("capture secret retire");
+    dohc_engine_testkit::capture::retire_captured_secret(
+        actor,
+        CaptureSecretRetire {
+            workspace_id: workspace_id.to_owned(),
+            version_id: "main".to_owned(),
+            path: ".capture.env".to_owned(),
+            metadata_origin: "local-file".to_owned(),
+            metadata_correlation_id: None,
+            now_ms: 230,
+            only_if_own_origin: true,
+        },
+        root_dir,
+        Arc::new(NoFaults),
+    )
+    .await
+    .expect("capture secret retire");
     actor
         .fork_secret_version(
             workspace_id.to_owned(),
@@ -3110,20 +3112,21 @@ async fn rollback_cancels_a_pending_scene_asset_delete_before_restart_replay() {
         .await
         .expect("commit drawing delete rollback");
     assert!(!committed.materialized);
-    let original_restore_job_id: String = EngineStore::open(&db, 7)
-        .expect("inspect original restore job")
-        .read_with(|conn| {
-            conn.query_row(
-                "SELECT j.job_id FROM moments m JOIN materialization_jobs j \
-                 ON j.workspace_id = m.workspace_id AND j.job_id = m.moment_id \
-                 WHERE m.workspace_id = ?1 AND m.version_id = ?2 \
-                 AND m.metadata_correlation_id = ?3 \
-                 AND m.metadata_summary = 'Restored drawing asset'",
-                params![workspace_id, "main", rollback_moment_id],
-                |row| row.get(0),
-            )
-        })
-        .expect("original restore job exists");
+    let (original_restore_moment_id, original_restore_job_id): (String, String) =
+        EngineStore::open(&db, 7)
+            .expect("inspect original restore job")
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT m.moment_id, j.job_id FROM moments m JOIN materialization_jobs j \
+                     ON j.workspace_id = m.workspace_id AND j.job_id = 'binary-mat_' || m.moment_id \
+                     WHERE m.workspace_id = ?1 AND m.version_id = ?2 \
+                     AND m.metadata_correlation_id = ?3 \
+                     AND m.metadata_summary = 'Restored drawing asset'",
+                    params![workspace_id, "main", rollback_moment_id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+            })
+            .expect("original restore job exists");
     let mut inspection = EngineStore::open(&db, 7).expect("open restore summary drift store");
     inspection
         .write_with(&NoFaults, |tx| {
@@ -3131,7 +3134,7 @@ async fn rollback_cancels_a_pending_scene_asset_delete_before_restart_replay() {
                 .execute(
                     "UPDATE moments SET metadata_summary = 'Drawing asset restore copy changed' \
                  WHERE workspace_id = ?1 AND moment_id = ?2",
-                    params![workspace_id, original_restore_job_id],
+                    params![workspace_id, original_restore_moment_id],
                 )
                 .map_err(StorageError::persist_public)?;
             assert_eq!(changed, 1, "one owned asset restore changed copy");
@@ -3216,7 +3219,9 @@ async fn rollback_cancels_a_pending_scene_asset_delete_before_restart_replay() {
     assert_eq!(
         EngineStore::open(&db, 9)
             .expect("inspect later job")
-            .load_materialization_job("moment-scene-asset-rollback-later")
+            .load_materialization_job(&dohc_engine_domain::binary_write_job_id(
+                "moment-scene-asset-rollback-later",
+            ))
             .expect("load later job")
             .expect("later job exists")
             .status,
@@ -3356,14 +3361,13 @@ async fn an_enrolled_share_view_journals_a_file_write_and_no_ydoc_update() {
             && op.payload["momentId"] == "moment-share-view"),
         "an enrolled share view must journal its file writes: {ops:?}",
     );
-    // Deliberately not asserting the absence of a `ydoc.update` here. This
-    // write opens no live session and claims no lineage, so none could be
-    // journaled whatever the Y.Doc gate reads — the assertion would pass with
-    // the gate widened and prove nothing. The lane boundary is pinned where it
-    // can actually fail: `only_the_file_moment_journal_reads_the_share_lane`
-    // (both predicates, behaviourally) and
-    // `the_ydoc_journal_reads_the_owner_lane_predicate` (the call site), both
-    // in `crates/dohc-engine-sync/src/tests/share_view.rs`.
+    // This write opens no live session and claims no lineage, so checking for
+    // absent Y.Doc updates would not distinguish the lanes. The sync tests
+    // `only_the_file_moment_journal_reads_the_share_lane`,
+    // `resolution_fold_journals_a_ydoc_update_only_in_the_owner_lane`,
+    // `origination_and_conflict_outbox_wait_for_owner_contact_not_a_share_cursor`,
+    // and `recovered_share_file_moment_survives_restart_and_submits_within_its_grant`
+    // exercise the lane boundary in `dohc-engine-sync/src/tests/share_view.rs`.
     assert!(
         ops.iter().all(|op| op.op_kind != "version.create"),
         "a share view creates no versions, so none may journal: {ops:?}",

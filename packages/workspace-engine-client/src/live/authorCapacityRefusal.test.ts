@@ -19,6 +19,16 @@ it.each(["INVALID_PARAMS", "LIMIT_EXCEEDED"] as const)("retires unknown %s input
   expect(isYdocUpdateAdmissionRefusal(new DaemonRefusalError({ code, message: "future-refusal", retry: "no" }, null))).toBe(true);
 });
 
+it("keeps an oversized reply ambiguous after execution", () => {
+  const wireError = {
+    code: "INTERNAL", message: "response-wire-limit-exceeded", retry: "afterBackoff",
+  } as const;
+  const refusal = new DaemonRefusalError(wireError, null);
+  expect(refusal.disposition).toBe("afterBackoff");
+  expect(isYdocUpdateAdmissionRefusal(refusal)).toBe(false);
+  expect(isYdocUpdateAdmissionRefusal({ wireError })).toBe(false);
+});
+
 it("retries only the pending settlement discriminator", () => {
   const pending = new DaemonRefusalError({code: "OVERLOADED", message: "settlement-materialization-pending", retry: "afterBackoff"}, null);
   const other = new DaemonRefusalError({code: "OVERLOADED", message: "another failure", retry: "no"}, null);

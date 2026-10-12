@@ -6,6 +6,12 @@ use dohc_engine_testkit::ScratchDir;
 
 const WORKSPACE_ID: &str = "ws-live-session-deferral";
 const NEW_FILE: &str = "notes/new.md";
+const NOTE: &str = "notes/note.md";
+const KEPT: &str = "notes/kept.md";
+const SEED: &str = "Before.\n";
+const TYPING: &str = "Typed while held.\n";
+const OUTSIDE: &str = "Changed outside the editor.\n";
+const FOREIGN: &str = "Another program created this file.\n";
 
 fn apply_context<'a>(
     root: &'a Path,
@@ -176,9 +182,9 @@ fn head_origin(db: &Path, path: &str) -> String {
         .expect("read head origin")
 }
 
+/// Fields drop in order: a failed assertion closes the actor, and with it the
+/// database, before the scratch trees are removed.
 struct Harness {
-    _store_scratch: ScratchDir,
-    _capture_scratch: ScratchDir,
     root: PathBuf,
     db: PathBuf,
     supervisor: WorkspaceSupervisor,
@@ -187,6 +193,8 @@ struct Harness {
     status: Arc<DriverStatus>,
     self_writes: SelfWriteSuppression,
     author_json: Option<String>,
+    _store_scratch: ScratchDir,
+    _capture_scratch: ScratchDir,
 }
 
 impl Harness {
@@ -199,8 +207,6 @@ impl Harness {
         let supervisor = WorkspaceSupervisor::new();
         let actor = supervisor.open(&db, 1).expect("open actor").actor;
         Harness {
-            _store_scratch: store_scratch,
-            _capture_scratch: capture_scratch,
             root,
             db,
             supervisor,
@@ -209,6 +215,8 @@ impl Harness {
             status: Arc::new(DriverStatus::default()),
             self_writes: SelfWriteSuppression::default(),
             author_json: None,
+            _store_scratch: store_scratch,
+            _capture_scratch: capture_scratch,
         }
     }
 
@@ -321,6 +329,607 @@ async fn a_held_recorded_file_changed_on_disk_keeps_capture_unsettled() {
     assert!(harness.status.degraded());
     assert_eq!(files.handle().stats().await.expect("stats").deferred, 0);
 
+    files.close().await;
+    harness.close();
+}
+
+// The held file carried typing the engine admitted but never settled. Once
+// the session lets go, the same capture pass records the outside edit as the
+// file, keeps the typing as an ordinary sibling, and writes that sibling to
+// disk. Its own write must not come back as an outside edit.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unsettled_typing_on_a_held_file_is_kept_beside_the_outside_edit() {
+    let harness = Harness::new();
+    let path = "notes/existing.md";
+    let typed = "Before.\nTyped while held.\n";
+    let outside = "Changed outside the editor.\n";
+    std::fs::write(harness.root.join(path), "Before.\n").expect("existing file");
+    let files = FilesActor::spawn_async(harness.root.clone(), ScanBounds::default())
+        .await
+        .expect("files actor");
+    let files = FilesActorCloseGuard::new(files);
+    assert!(
+        harness.capture(&files.handle()).await,
+        "the file is captured first"
+    );
+
+    let key = seed_unsettled_typing(&harness, path, "Before.\n", "Typed while held.\n");
+
+    let lease = harness
+        .leases
+        .acquire(&key)
+        .expect("a person has the file open");
+    std::fs::write(harness.root.join(path), outside).expect("outside write");
+    files.handle().request_rescan();
+    assert!(
+        !harness.capture(&files.handle()).await,
+        "the held file is not recorded"
+    );
+
+    drop(lease);
+    files.handle().request_rescan();
+    assert!(
+        harness.capture(&files.handle()).await,
+        "the released file is captured"
+    );
+    assert_eq!(head_text(&harness.db, path), outside);
+    let sibling = recovered_sibling_on_disk(&harness.root, "notes", "existing");
+    assert_eq!(
+        std::fs::read_to_string(harness.root.join(&sibling)).expect("sibling on disk"),
+        typed,
+        "the whole typed text is on disk"
+    );
+    assert_eq!(head_origin(&harness.db, &sibling), "ydoc");
+    assert_eq!(moment_count(&harness.db, &sibling), 1);
+
+    // The pass wrote the sibling itself: the next scan leaves it alone.
+    files.handle().request_rescan();
+    assert!(harness.capture(&files.handle()).await);
+    assert_eq!(
+        moment_count(&harness.db, &sibling),
+        1,
+        "the engine's own write is not captured back"
+    );
+    assert_eq!(head_origin(&harness.db, &sibling), "ydoc");
+    assert_eq!(head_text(&harness.db, path), outside);
+
+    files.close().await;
+    harness.close();
+}
+
+fn head_text(db: &Path, path: &str) -> String {
+    rusqlite::Connection::open(db)
+        .expect("open database observer")
+        .query_row(
+            "SELECT b.text FROM snapshots s JOIN blobs b ON b.sha256 = s.blob_sha256 \
+             WHERE s.workspace_id = ?1 AND s.path = ?2",
+            [WORKSPACE_ID, path],
+            |row| row.get(0),
+        )
+        .expect("read head text")
+}
+
+fn moment_count(db: &Path, path: &str) -> i64 {
+    rusqlite::Connection::open(db)
+        .expect("open database observer")
+        .query_row(
+            "SELECT COUNT(*) FROM moments WHERE workspace_id = ?1 AND path = ?2",
+            [WORKSPACE_ID, path],
+            |row| row.get(0),
+        )
+        .expect("count moments")
+}
+
+/// The one `<stem> (recovered …).md` file in `<root>/<dir>`, workspace-relative.
+fn recovered_sibling_on_disk(root: &Path, dir: &str, stem: &str) -> String {
+    let prefix = format!("{stem} (recovered ");
+    let names: Vec<String> = std::fs::read_dir(root.join(dir))
+        .expect("read the directory")
+        .map(|entry| {
+            entry
+                .expect("directory entry")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .filter(|name| name.starts_with(&prefix) && name.ends_with(".md"))
+        .collect();
+    assert_eq!(names.len(), 1, "exactly one recovered sibling: {names:?}");
+    format!("{dir}/{}", names[0])
+}
+
+/// Open `path`'s captured head as a live document the way the editor does,
+/// seed it from the head, then admit `typing` the session never settles.
+/// Returns the document's key.
+fn seed_unsettled_typing(harness: &Harness, path: &str, seed: &str, typing: &str) -> DocKey {
+    use dohc_engine_collab::{
+        ContentKind, LocalAppend, MarkerCreation, Regime, WriterDocCache, Ydoc,
+    };
+    use dohc_engine_domain::VersionedTextStore;
+    use dohc_engine_storage::EngineStore;
+
+    let object_id = derive_capture_object_id(WORKSPACE_ID, "main", path);
+    let key = harness.key(&object_id);
+    let mut store = EngineStore::open(&harness.db, 1).expect("open store");
+    let head = VersionedTextStore::new(&mut store)
+        .read_text(WORKSPACE_ID, "main", path)
+        .expect("read head")
+        .expect("captured head");
+    let mut cache = WriterDocCache::new();
+    let doc = Ydoc::wire();
+    let marker = MarkerCreation {
+        path: Some(path),
+        content_kind: ContentKind::Plaintext,
+        regime: Regime::LocalOnly,
+    };
+    let seed_update = doc.plaintext_insert(0, seed);
+    dohc_engine_collab::record_local_update(
+        &mut store,
+        &mut cache,
+        &key,
+        &seed_update,
+        LocalAppend {
+            marker: Some(marker),
+            is_seed: true,
+            seed_source_sha256: Some(&head.blob_sha256),
+            ..Default::default()
+        },
+        &NoFaults,
+        2,
+        |_tx, _outcome, _sha| Ok(()),
+    )
+    .expect("seed the lineage from the file");
+    let typing_update = doc.plaintext_insert(seed.encode_utf16().count() as u32, typing);
+    dohc_engine_collab::record_local_update(
+        &mut store,
+        &mut cache,
+        &key,
+        &typing_update,
+        LocalAppend {
+            marker: Some(marker),
+            ..Default::default()
+        },
+        &NoFaults,
+        3,
+        |_tx, _outcome, _sha| Ok(()),
+    )
+    .expect("admit typing the session never settles");
+    assert_eq!(doc.plaintext_string(), format!("{seed}{typing}"));
+    key
+}
+
+fn head_correlation(db: &Path, path: &str) -> Option<String> {
+    rusqlite::Connection::open(db)
+        .expect("open database observer")
+        .query_row(
+            "SELECT m.metadata_correlation_id FROM snapshots s \
+             JOIN moments m ON m.workspace_id = s.workspace_id \
+                           AND m.moment_id = s.latest_moment_id \
+             WHERE s.workspace_id = ?1 AND s.path = ?2",
+            [WORKSPACE_ID, path],
+            |row| row.get(0),
+        )
+        .expect("read head correlation")
+}
+
+/// Every `<stem> (recovered …)` head in `main`, by path.
+fn recovered_heads(db: &Path) -> Vec<String> {
+    let conn = rusqlite::Connection::open(db).expect("open database observer");
+    let mut statement = conn
+        .prepare(
+            "SELECT path FROM snapshots WHERE workspace_id = ?1 AND version_id = 'main' \
+             AND path LIKE '% (recovered %' ORDER BY path",
+        )
+        .expect("prepare recovered heads");
+    let rows = statement
+        .query_map([WORKSPACE_ID], |row| row.get(0))
+        .expect("read recovered heads");
+    rows.collect::<Result<Vec<String>, _>>()
+        .expect("recovered heads")
+}
+
+/// The newest write job aimed at `path`, with its status.
+fn write_job(db: &Path, path: &str) -> (String, String) {
+    rusqlite::Connection::open(db)
+        .expect("open database observer")
+        .query_row(
+            "SELECT job_id, status FROM materialization_jobs \
+             WHERE workspace_id = ?1 AND target_path = ?2 AND operation = 'write' \
+             ORDER BY target_generation DESC LIMIT 1",
+            [WORKSPACE_ID, path],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("read the write job")
+}
+
+/// A recovered copy whose chosen name another program took before the copy
+/// reached disk, and the write the materializer refused for it.
+struct Collision {
+    copy: String,
+    job: String,
+}
+
+/// Capture records the file; a session admits typing it never settles; the
+/// file is written outside dohc, and capture folds the lineage, keeping the
+/// typing as a recovered copy with a pending write. Another program then
+/// creates a file at the copy's name, so the materializer refuses that write.
+/// The files manifest has never held the copy's name.
+async fn stage_refused_recovery(harness: &Harness, files: &FilesHandle) -> Collision {
+    use dohc_engine_domain::CaptureIngest;
+
+    std::fs::write(harness.root.join(NOTE), SEED).expect("existing file");
+    assert!(harness.capture(files).await, "the file is captured first");
+    seed_unsettled_typing(harness, NOTE, SEED, TYPING);
+    std::fs::write(harness.root.join(NOTE), OUTSIDE).expect("outside write");
+    harness
+        .actor
+        .capture_ingest(
+            CaptureIngest {
+                workspace_id: WORKSPACE_ID.into(),
+                version_id: "main".into(),
+                path: NOTE.into(),
+                text: OUTSIDE.into(),
+                metadata_origin: "capture".into(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 4,
+                request_id: None,
+                claim_foreign_head: true,
+            },
+            LeaseRegistry::new(),
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("capture the outside write");
+    let mut heads = recovered_heads(&harness.db);
+    assert_eq!(heads.len(), 1, "exactly one copy: {heads:?}");
+    let copy = heads.remove(0);
+    assert_eq!(head_text(&harness.db, &copy), format!("{SEED}{TYPING}"));
+    let (job, status) = write_job(&harness.db, &copy);
+    assert_eq!(status, "pending");
+
+    std::fs::write(harness.root.join(&copy), FOREIGN).expect("foreign file");
+    let placed = harness
+        .actor
+        .materialize_replay_selected_for_fence(
+            harness.root.clone(),
+            WORKSPACE_ID.to_owned(),
+            Arc::new(harness.self_writes.scoped(&harness.root)),
+            vec![job.clone()],
+            5,
+        )
+        .await;
+    assert!(
+        matches!(
+            placed,
+            Err(RuntimeError::ActiveVersionMaterializationIncomplete { failed_jobs: 1 })
+        ),
+        "the write is refused, not forced: {placed:?}"
+    );
+    assert_eq!(write_job(&harness.db, &copy).1, "conflict");
+    assert_eq!(
+        std::fs::read_to_string(harness.root.join(&copy)).expect("occupant"),
+        FOREIGN
+    );
+    Collision { copy, job }
+}
+
+// A recovered copy's chosen name was taken on disk before the copy was
+// placed, so the materializer refused its write. The files manifest has
+// never held that name: the next scan sees the other program's file for the
+// first time, and first sight claims no head another origin wrote. The store
+// knows this head was never placed, so an ordinary pass records the
+// occupant, moves the copy to the next free name and writes it, with no
+// further edit, manual claim or restart.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_first_sight_occupant_of_a_recovered_name_is_recorded_and_the_copy_moves() {
+    let harness = Harness::new();
+    let files = FilesActorCloseGuard::new(
+        FilesActor::spawn_async(harness.root.clone(), ScanBounds::default())
+            .await
+            .expect("files actor"),
+    );
+    let collision = stage_refused_recovery(&harness, &files.handle()).await;
+
+    files.handle().request_rescan();
+    assert!(
+        harness.capture(&files.handle()).await,
+        "the pass records the occupant and moves the copy"
+    );
+    assert!(!harness.status.degraded());
+    let stats = files.handle().stats().await.expect("stats");
+    assert_eq!((stats.deferred, stats.quarantined), (0, 0));
+    assert_eq!(
+        std::fs::read_to_string(harness.root.join(&collision.copy)).expect("occupant"),
+        FOREIGN,
+        "the other program's file stays"
+    );
+    assert_eq!(head_origin(&harness.db, &collision.copy), "capture");
+    assert_eq!(head_text(&harness.db, &collision.copy), FOREIGN);
+    assert_eq!(
+        write_job(&harness.db, &collision.copy),
+        (collision.job.clone(), "cancelled".to_owned()),
+        "the refused write is superseded by the moved copy"
+    );
+    let heads = recovered_heads(&harness.db);
+    assert_eq!(heads.len(), 2, "the occupant and the moved copy: {heads:?}");
+    let moved = heads
+        .iter()
+        .find(|path| **path != collision.copy)
+        .expect("the copy takes the next free name");
+    assert_eq!(
+        std::fs::read_to_string(harness.root.join(moved)).expect("moved copy on disk"),
+        format!("{SEED}{TYPING}"),
+        "the whole typed text is on disk beside the occupant"
+    );
+    assert_eq!(head_text(&harness.db, moved), format!("{SEED}{TYPING}"));
+    assert_eq!(head_origin(&harness.db, moved), "ydoc");
+    assert!(
+        head_correlation(&harness.db, moved)
+            .is_some_and(|correlation| correlation.starts_with("ydoc-local-recovery:v1:")),
+        "the moved copy keeps its local-recovery correlation"
+    );
+    assert_eq!(moment_count(&harness.db, moved), 1);
+    assert_eq!(write_job(&harness.db, moved).1, "complete");
+    assert_eq!(head_text(&harness.db, NOTE), OUTSIDE);
+
+    // Nothing changes on disk: later passes add no copy and record nothing.
+    for _ in 0..2 {
+        files.handle().request_rescan();
+        assert!(harness.capture(&files.handle()).await);
+    }
+    assert!(!harness.status.degraded());
+    assert_eq!(recovered_heads(&harness.db), heads);
+    assert_eq!(moment_count(&harness.db, moved), 1);
+    assert_eq!(
+        moment_count(&harness.db, &collision.copy),
+        2,
+        "the copy's moment and the occupant's, and no more"
+    );
+    assert_eq!(head_origin(&harness.db, moved), "ydoc");
+    assert_eq!(
+        std::fs::read_to_string(harness.root.join(&collision.copy)).expect("occupant"),
+        FOREIGN
+    );
+
+    files.close().await;
+    harness.close();
+}
+
+/// How a person removes the recovered copy before capture sees its occupant.
+#[derive(Clone, Copy)]
+enum Removal {
+    Delete,
+    Rename,
+}
+
+// A person deletes or renames the recovered copy before capture sees the
+// other program's file at its name. That name is then an ordinary new file:
+// the pass records the occupant as its own object and does not rebuild the
+// copy where it was.
+async fn a_removed_copy_leaves_its_occupant_an_ordinary_new_file(removal: Removal) {
+    use dohc_engine_domain::{DeleteTextFile, RenameTextFile};
+
+    let harness = Harness::new();
+    let files = FilesActorCloseGuard::new(
+        FilesActor::spawn_async(harness.root.clone(), ScanBounds::default())
+            .await
+            .expect("files actor"),
+    );
+    let collision = stage_refused_recovery(&harness, &files.handle()).await;
+    match removal {
+        Removal::Delete => {
+            harness
+                .actor
+                .versioned_text_delete(
+                    DeleteTextFile {
+                        workspace_id: WORKSPACE_ID.to_owned(),
+                        version_id: "main".to_owned(),
+                        path: collision.copy.clone(),
+                        moment_id: "moment-removed".to_owned(),
+                        request_id: None,
+                        metadata_origin: "api".to_owned(),
+                        metadata_summary: None,
+                        metadata_correlation_id: None,
+                        author_json: None,
+                        now_ms: 6,
+                    },
+                    harness.root.clone(),
+                    Arc::new(harness.self_writes.scoped(&harness.root)),
+                    Arc::new(NoFaults),
+                    CancellationToken::new(),
+                )
+                .await
+                .expect("the person deletes the copy");
+        }
+        Removal::Rename => {
+            harness
+                .actor
+                .versioned_text_rename(
+                    RenameTextFile {
+                        workspace_id: WORKSPACE_ID.to_owned(),
+                        version_id: "main".to_owned(),
+                        from_path: collision.copy.clone(),
+                        to_path: KEPT.to_owned(),
+                        moment_id: "moment-removed".to_owned(),
+                        request_id: None,
+                        metadata_origin: "api".to_owned(),
+                        metadata_summary: None,
+                        metadata_correlation_id: None,
+                        author_json: None,
+                        now_ms: 6,
+                    },
+                    harness.root.clone(),
+                    Arc::new(harness.self_writes.scoped(&harness.root)),
+                    Arc::new(NoFaults),
+                    CancellationToken::new(),
+                )
+                .await
+                .expect("the person renames the copy");
+        }
+    }
+
+    files.handle().request_rescan();
+    assert!(
+        harness.capture(&files.handle()).await,
+        "the occupant is an ordinary new file"
+    );
+    assert!(!harness.status.degraded());
+    assert_eq!(
+        std::fs::read_to_string(harness.root.join(&collision.copy)).expect("occupant"),
+        FOREIGN,
+        "the other program's file stays"
+    );
+    assert_eq!(head_origin(&harness.db, &collision.copy), "capture");
+    assert_eq!(head_text(&harness.db, &collision.copy), FOREIGN);
+    assert_eq!(
+        recovered_heads(&harness.db),
+        vec![collision.copy.clone()],
+        "the copy is not rebuilt where it was"
+    );
+    assert_eq!(
+        recovered_sibling_on_disk(&harness.root, "notes", "note"),
+        collision.copy
+    );
+    if let Removal::Rename = removal {
+        assert_eq!(head_text(&harness.db, KEPT), format!("{SEED}{TYPING}"));
+        assert_eq!(head_origin(&harness.db, KEPT), "api");
+    }
+
+    files.close().await;
+    harness.close();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_deleted_recovered_copy_leaves_its_occupant_an_ordinary_new_file() {
+    a_removed_copy_leaves_its_occupant_an_ordinary_new_file(Removal::Delete).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_renamed_recovered_copy_leaves_its_occupant_an_ordinary_new_file() {
+    a_removed_copy_leaves_its_occupant_an_ordinary_new_file(Removal::Rename).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_unrepresentable_replicated_record_never_enters_the_deferred_count() {
+    use dohc_engine_collab::{
+        ContentKind, LocalAppend, MarkerCreation, Regime, WriterDocCache, Ydoc,
+    };
+    use dohc_engine_domain::{CaptureIngest, VersionedTextStore};
+    use dohc_engine_storage::EngineStore;
+
+    let harness = Harness::new();
+    let path = "tasks/empty.md";
+    let mut store = EngineStore::open(&harness.db, 1).unwrap();
+    VersionedTextStore::new(&mut store)
+        .ensure_main_version(WORKSPACE_ID, "main", 1, &NoFaults)
+        .unwrap();
+    let mut cache = WriterDocCache::new();
+    std::fs::create_dir_all(harness.root.join("tasks")).unwrap();
+    for (path, text) in [
+        (
+            "tasks/collection.yaml",
+            "fields:\n  Title:\n    type: text\n",
+        ),
+        (path, ""),
+    ] {
+        std::fs::write(harness.root.join(path), text).unwrap();
+        VersionedTextStore::new(&mut store)
+            .capture_ingest(
+                &CaptureIngest {
+                    workspace_id: WORKSPACE_ID.into(),
+                    version_id: "main".into(),
+                    path: path.into(),
+                    text: text.into(),
+                    metadata_origin: "capture".into(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    now_ms: 2,
+                    request_id: None,
+                    claim_foreign_head: false,
+                },
+                &NoFaults,
+            )
+            .unwrap();
+    }
+    let head = VersionedTextStore::new(&mut store)
+        .read_text(WORKSPACE_ID, "main", path)
+        .unwrap()
+        .unwrap();
+    let key = harness.key(&head.object_id);
+    let doc = Ydoc::wire();
+    doc.rewrite_content_to_markdown_preserving_source(ContentKind::Richdoc, "")
+        .unwrap();
+    dohc_engine_collab::record_local_update(
+        &mut store,
+        &mut cache,
+        &key,
+        &doc.encode_full_state(),
+        LocalAppend {
+            marker: Some(MarkerCreation {
+                path: Some(path),
+                content_kind: ContentKind::Richdoc,
+                regime: Regime::LocalOnly,
+            }),
+            seed_source_sha256: Some(&head.blob_sha256),
+            ..Default::default()
+        },
+        &NoFaults,
+        3,
+        |_tx, _outcome, _sha| Ok(()),
+    )
+    .unwrap();
+    store
+        .write_with(&NoFaults, |tx| {
+            dohc_engine_domain::reconcile_collections_in_tx(tx, WORKSPACE_ID, "main").unwrap();
+            tx.execute(
+                "INSERT INTO replication_log \
+                 (workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms,imported) \
+                 VALUES (?1,'seed-origin',0,'ydoc.update',?2,4,0)",
+                rusqlite::params![
+                    WORKSPACE_ID,
+                    serde_json::json!({"versionId":"main","objectId":key.object_id}).to_string()
+                ],
+            )
+            .map_err(dohc_engine_storage::StorageError::persist_public)
+        })
+        .unwrap();
+    drop(store);
+    std::fs::write(harness.root.join(path), "- parent\n  - child\n").unwrap();
+    let files = FilesActorCloseGuard::new(
+        FilesActor::spawn_async(harness.root.clone(), ScanBounds::default())
+            .await
+            .unwrap(),
+    );
+    assert!(!harness.capture(&files.handle()).await);
+    assert!(harness.status.degraded());
+    assert_eq!(files.handle().stats().await.unwrap().deferred, 0);
+    let switch = || {
+        reconcile_full_for_switch(
+            &harness.root,
+            &harness.actor,
+            WORKSPACE_ID,
+            &harness.leases,
+            &harness.status,
+            &harness.self_writes,
+            None,
+            CaptureProvenance::default(),
+            EngineEvents::default(),
+            CancellationToken::new(),
+        )
+    };
+    assert!(matches!(
+        switch().await,
+        Err(SwitchReconcileError::ApplyFailed)
+    ));
+    std::fs::write(harness.root.join(path), "Completed\n").unwrap();
+    assert!(
+        switch().await.is_ok(),
+        "a representable change recovers version reconciliation"
+    );
     files.close().await;
     harness.close();
 }

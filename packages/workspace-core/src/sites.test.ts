@@ -58,6 +58,16 @@ describe("site package derived facts", () => {
 });
 
 describe("discoverSites", () => {
+  it("detects a declared app without other web signals", () => {
+    expect(discoverSites([{ path: "declared/dohc.json", body: '{"version":1,"type":"app"}' }]))
+      .toMatchObject([{ root: "declared", kind: "configured", confidence: "high", diagnostics: [] }]);
+  });
+
+  it.each(["workflow", "site"])("excludes explicit %s types without independent app signals", type => {
+    expect(discoverSites([{ path: "other/dohc.json", body: JSON.stringify({ type, build: { output: "dist" } }) }]))
+      .toEqual([]);
+  });
+
   it("discovers an app declared only by app.publish.json", () => {
     expect(discoverSites(["trip/trip-poll/app.publish.json", "trip/trip-poll/main.tsx", "trip/trip-poll/responses/collection.yaml"])).toEqual([
       { root: "trip/trip-poll", title: "Trip Poll", kind: "configured", confidence: "high", scripts: {}, buildOutputs: [], diagnostics: [] },
@@ -170,7 +180,7 @@ describe("discoverSites", () => {
       {
         path: "research/site/dohc.json",
         body: JSON.stringify({
-          type: "site",
+          type: "app",
           title: "Research Portal",
           preview: { mode: "dev", command: "pnpm dev", entry: "./index.html" },
           build: { command: "pnpm build", output: "public/./dist" },
@@ -209,7 +219,7 @@ describe("discoverSites", () => {
       {
         path: "portal/dohc.json",
         body: JSON.stringify({
-          type: "site",
+          type: "app",
           build: { command: "vite build", output: "dist" },
         }),
       },
@@ -239,7 +249,7 @@ describe("discoverSites", () => {
       {
         path: "portal/dohc.json",
         body: JSON.stringify({
-          type: "site",
+          type: "app",
           build: { command: "vite build", output: "public/dist" },
         }),
       },
@@ -407,7 +417,7 @@ describe("discoverSites", () => {
   it("does not let an over-length configured title escape as the site's own title", () => {
     const longTitle = "x".repeat(250);
     const [site] = discoverSites([
-      { path: "long/dohc.json", body: JSON.stringify({ type: "site", title: longTitle }) },
+      { path: "long/dohc.json", body: JSON.stringify({ type: "app", title: longTitle }) },
       "long/index.html",
     ]);
 
@@ -437,18 +447,18 @@ describe("discoverSites", () => {
 
 describe("parseDohcSiteConfig", () => {
   it.each(["1", 0, -1, 1.5, null])("identifies invalid version %s", (version) => {
-    const parsed = parseDohcSiteConfig(JSON.stringify({ version, title: "Unused" }), "trip/dohc.json");
+    const parsed = parseDohcSiteConfig(JSON.stringify({ version, type: "app", title: "Unused" }), "trip/dohc.json");
     expect(parsed.config).toBeUndefined();
     expect(parsed.diagnostics).toEqual([{ path: "trip/dohc.json", severity: "error", code: "invalid-version",
       message: "trip/dohc.json has an invalid version. Set version to 1." }]);
   });
   it.each([undefined, 1])("reads version %s", (version) => {
-    expect(parseDohcSiteConfig(JSON.stringify({ version, type: "site", title: "Trip" })))
-      .toMatchObject({ config: { type: "site", title: "Trip" }, diagnostics: [] });
+    expect(parseDohcSiteConfig(JSON.stringify({ version, type: "app", title: "Trip" })))
+      .toMatchObject({ config: { type: "app", title: "Trip" }, diagnostics: [] });
   });
 
   it("refuses a newer version before applying configuration", () => {
-    const parsed = parseDohcSiteConfig('{"version":2,"preview":{"command":"run-new-format"}}', "trip/dohc.json");
+    const parsed = parseDohcSiteConfig('{"version":2,"type":"app","preview":{"command":"run-new-format"}}', "trip/dohc.json");
     expect(parsed.config).toBeUndefined();
     expect(parsed.diagnostics).toEqual([{ path: "trip/dohc.json", severity: "error", code: "unsupported-version",
       message: "trip/dohc.json uses a newer version. Update dohc to read this file." }]);
@@ -457,7 +467,7 @@ describe("parseDohcSiteConfig", () => {
     expect(
       parseDohcSiteConfig(
         JSON.stringify({
-          type: "site",
+          type: "app",
           title: "Client Dashboard",
           preview: { mode: "build", command: "pnpm preview", entry: "dist/index.html" },
           build: { command: "pnpm build", output: "dist" },
@@ -466,12 +476,12 @@ describe("parseDohcSiteConfig", () => {
       ),
     ).toEqual({
       config: {
-        type: "site",
+        type: "app",
         title: "Client Dashboard",
         preview: { mode: "build", command: "pnpm preview", entry: "dist/index.html" },
         build: { command: "pnpm build", output: "dist" },
       },
-      declaredType: "site",
+      declaredType: "app",
       diagnostics: [
         expect.objectContaining({
           path: "client-dashboard/dohc.json",
@@ -566,7 +576,7 @@ describe("package helpers", () => {
       inferSiteScripts(
         { scripts: { dev: "vite", start: "vite --host", build: "vite build" } },
         {
-          type: "site",
+          type: "app",
           preview: { mode: "dev", command: "pnpm dev" },
           build: { command: "pnpm build" },
         },

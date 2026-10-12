@@ -1,3 +1,4 @@
+import type { CapabilityId } from "@dohc/workspace-contracts/capabilities";
 import type { z } from "zod";
 
 // One row per renderer-to-main operation: the channel, the payload main
@@ -9,16 +10,24 @@ type OperationRow<Payload extends z.ZodType> = {
   readonly channel: `desktop:${string}`;
   readonly payload: Payload;
   readonly result?: z.ZodType;
-};
+} & (
+  | { readonly capabilityId: CapabilityId; readonly capabilityIdsByAction?: never }
+  | { readonly capabilityId?: never; readonly capabilityIdsByAction: Readonly<Record<string, CapabilityId>> }
+);
 
 export type OperationDefinition =
   // Any trusted window may call it.
-  | (OperationRow<z.ZodType> & { readonly guard: "trusted-sender" })
+  | (OperationRow<z.ZodType> & { readonly guard: "trusted-sender" } & (
+      | { readonly scope: "device" }
+      // Describes existing handler admission without wrapping its lifetime.
+      | { readonly scope: "workspace"; readonly handlerCheck: { readonly check: string; readonly reason: string } }
+    ))
   // The handler runs inside the sending window's workspace operation. It fails
   // with inactiveMessage, before or after the handler, unless the payload's
   // workspace is the one open in that window.
   | (OperationRow<z.ZodType<{ readonly workspaceId: string }>> & {
       readonly guard: "active-workspace";
+      readonly scope: "workspace";
       readonly inactiveMessage: string;
     });
 
@@ -69,6 +78,14 @@ export interface OperationBoundary<Event, WorkspaceOperation> {
   ): Promise<Result>;
 }
 
+export type OperationCompletions<Table extends OperationTable, Event> = {
+  readonly [Name in keyof Table]?: (
+    input: z.output<Table[Name]["payload"]>,
+    result: Reply<Table[Name]>,
+    event: Event,
+  ) => void;
+};
+
 type LooseHandler<Event, WorkspaceOperation> = (
   input: unknown,
   context: { readonly event: Event; readonly operation?: WorkspaceOperation },
@@ -95,25 +112,33 @@ export function registerOperations<
   boundary: OperationBoundary<Event, WorkspaceOperation>,
   table: Table,
   handlers: OperationHandlers<Table, Event, WorkspaceOperation>,
+  completions: OperationCompletions<Table, Event> = {},
 ): void {
   const bodies = handlers as Record<string, LooseHandler<Event, WorkspaceOperation>>;
+  const observers = completions as Record<string, ((input: unknown, result: unknown, event: Event) => void) | undefined>;
   for (const [name, definition] of Object.entries<OperationDefinition>(table)) {
     const handler = bodies[name]!;
     boundary.handle(definition.channel, async (event, payload) => {
       boundary.assertTrustedSender(event);
+      let input: unknown;
       let result: unknown;
       if (definition.guard === "trusted-sender") {
-        result = await handler(definition.payload.parse(payload), { event });
+        input = definition.payload.parse(payload);
+        result = await handler(input, { event });
       } else {
-        const input = definition.payload.parse(payload);
+        const workspaceInput = definition.payload.parse(payload);
+        input = workspaceInput;
         result = await boundary.withActiveWorkspace(
           event,
-          input.workspaceId,
+          workspaceInput.workspaceId,
           definition.inactiveMessage,
           async (operation) => await handler(input, { event, operation }),
         );
       }
-      return definition.result?.parse(result);
+      const reply = definition.result?.parse(result);
+      // Measurement cannot change the reply or bypass admission and validation.
+      try { observers[name]?.(input, reply, event); } catch { /* Keep the operation's result. */ }
+      return reply;
     });
   }
 }

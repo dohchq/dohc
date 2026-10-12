@@ -8,6 +8,9 @@ publish.workspace = true
 description = "Test fixtures for the engine crates: scratch workspaces, path aliases, adversarial databases, and the in-process crash and restart harness."
 
 [dependencies]
+dohc-engine-collab = { path = "../dohc-engine-collab" }
+dohc-engine-domain = { path = "../dohc-engine-domain" }
+tokio = { version = "1", features = ["rt"] }
 dohc-test-scratch = { path = "../dohc-test-scratch" }
 # `EngineDbScan` scans for the base64 form of a secret plaintext, because
 # ciphertext reaches SQLite as base64 TEXT. The encoder must be the one
@@ -30,8 +33,6 @@ dohc-engine-files = { path = "../dohc-engine-files", features = ["fault-injectio
 rusqlite = { version = "0.40", features = ["bundled"] }
 
 [dev-dependencies]
-# The durability traces write through the versioning domain.
-dohc-engine-domain = { path = "../dohc-engine-domain" }
 # Drives the actor traces through the tokio command path.
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "time", "macros"] }
 

@@ -62,10 +62,14 @@ async function harness() {
   const warm = vi.fn(async () => undefined);
   const peek = vi.fn(async () => "not-dm" as const);
   const cache = new Map<string, "dm" | "not-dm">();
-  const write = vi.fn((workspaceId: string, channels: JoinedSharedChannel[]) => {
+  const write = vi.fn(async (
+    workspaceId: string,
+    update: (channels: readonly JoinedSharedChannel[]) => readonly JoinedSharedChannel[],
+  ) => {
     expect(workspaceId).toBe("workspace");
-    workspace.sharedChannels = channels;
+    workspace.sharedChannels = [...update(workspace.sharedChannels ?? [])];
   });
+  const pull = vi.fn(async () => ({ fetched: 0, applied: 0, skipped: 0, nextCursor: 0 }));
   const notify = vi.fn();
   const acknowledge = vi.fn();
   const unmount = vi.fn<() => Promise<{ folderLeft?: true }>>(async () => ({}));
@@ -74,7 +78,7 @@ async function harness() {
   const rotateAfterLookup = { value: false };
   const mount = vi.fn(async () => undefined);
   const sharesChanged = vi.fn<(workspaceId: string) => void>();
-  const reconcileReceivedShares = vi.fn<(listing: unknown) => void>();
+  const reconcileReceivedShares = vi.fn<(listing: unknown) => Promise<void>>(async () => undefined);
   const store = {
     listChannels: vi.fn(async (): Promise<ChatChannelSummary[]> => []),
     getChannelWireId: vi.fn(async (_input: { workspaceId: string; channelId: string }): Promise<string | null> => null),
@@ -103,8 +107,8 @@ async function harness() {
       relayCalls.push({ path, init });
       return await relayListing() as Result;
     },
-    listWorkspaces: () => [workspace, other], setWorkspaceSharedChannels: write,
-    relayClientForWorkspace: () => ({ pullSharedChannel: async () => ({ fetched: 0, applied: 0, skipped: 0, nextCursor: 0 }), push, claim }),
+    listWorkspaces: () => [workspace, other], updateWorkspaceSharedChannels: write,
+    relayClientForWorkspace: () => ({ pullSharedChannel: pull, push, claim }),
     projectPendingChatBookmarksAfterPull: async () => undefined,
     normalizeServerUrl: (url) => url, peekedReceivedGrantKinds: cache,
     peekReceivedGrantKindForShare: peek, acknowledgeWorkspaceShareSkips: acknowledge,
@@ -114,7 +118,7 @@ async function harness() {
   const invoke = async (channel: string, payload: unknown, trusted = true) =>
     handlers.get(channel)!({ sender: "window", trusted }, payload);
   return {
-    handlers, invoke, workspace, other, authorities, helpers, relayListing, warm, peek, cache, write, notify, acknowledge,
+    handlers, invoke, workspace, other, authorities, helpers, relayListing, warm, peek, cache, write, pull, notify, acknowledge,
     mount, unmount, push, claim, rotateAfterLookup, store, relayCalls, sharesChanged, reconcileReceivedShares,
     rotateCredentials: () => { generation += 1; }, retireRenderer: () => { rendererCurrent = false; },
   };
@@ -231,7 +235,7 @@ describe("registered shared-channel handlers", () => {
       removed: [{ shareId: "gone", grantId: "grant", message: "The owner removed your access.", removedAtMs: 5 }],
     };
     h.relayListing.mockResolvedValue(listing);
-    h.reconcileReceivedShares.mockImplementation(() => {
+    h.reconcileReceivedShares.mockImplementation(async () => {
       // What main's reconcile does when the listing says the share is back.
       h.workspace.sharedChannels = h.workspace.sharedChannels!.map((row) =>
         row.shareId === "gone" ? { ...row, ended: false } : row,
@@ -243,6 +247,36 @@ describe("registered shared-channel handlers", () => {
     expect(h.reconcileReceivedShares).toHaveBeenCalledWith(listing);
     expect(result.relay).toMatchObject({ state: "answered", removed: ["gone"] });
     expect(result.joined).toEqual([{ channelWireId: "wire-gone", joined: expect.objectContaining({ ended: false }) }]);
+  });
+
+  it("waits for exact-share reconciliation before reading joined answers", async () => {
+    const h = await harness(), started = deferred(), reconciled = deferred();
+    h.workspace.sharedChannels = [{ ...joined("gone"), ended: true }];
+    h.reconcileReceivedShares.mockImplementation(async () => {
+      started.resolve();
+      await reconciled.promise;
+      h.workspace.sharedChannels = [joined("gone")];
+    });
+    let answered = false;
+    const pending = h.invoke(CHANNELS.listChatChannelShares, {
+      workspaceId: "workspace", channelWireIds: ["wire-gone"],
+    }).then(result => { answered = true; return result; });
+    await started.promise;
+    expect(answered).toBe(false);
+    reconciled.resolve();
+    expect(await pending).toMatchObject({ joined: [{ joined: { ended: false } }] });
+  });
+
+  it("refuses joined answers when credentials change during reconciliation", async () => {
+    const h = await harness(), started = deferred(), reconciled = deferred();
+    h.reconcileReceivedShares.mockImplementation(() => { started.resolve(); return reconciled.promise; });
+    const pending = h.invoke(CHANNELS.listChatChannelShares, {
+      workspaceId: "workspace", channelWireIds: ["wire-shown"],
+    });
+    await started.promise;
+    h.rotateCredentials();
+    reconciled.resolve();
+    await expect(pending).rejects.toThrow("session changed");
   });
 
   it("shares a channel's folder with it, as one group grant", async () => {
@@ -361,6 +395,48 @@ describe("registered shared-channel handlers", () => {
     await expect(h.invoke(CHANNELS.joinSharedChannel, { workspaceId: "workspace", shareId: "share-h" }))
       .rejects.toThrow("Joined the group's chat, but its folder could not be added. disk full");
     expect(h.workspace.sharedChannels?.some((row) => row.shareId === "share-h")).toBe(true);
+  });
+
+  it("keeps a leave that lands while a join's row waits on the folder record", async () => {
+    const h = await harness();
+    vi.mocked(fetchSharedChannelInfo).mockResolvedValueOnce({
+      shareId: "share-c", granterUserId: "owner", granterEmail: "owner@example.test",
+      channelWireId: "wire-c", access: "read-write", createdAtMs: 1, kind: "chat",
+    });
+    const waiting = deferred();
+    const recorded = deferred();
+    h.write.mockImplementationOnce(async (_workspaceId, update) => {
+      waiting.resolve();
+      await recorded.promise;
+      h.workspace.sharedChannels = [...update(h.workspace.sharedChannels ?? [])];
+    });
+    const joining = h.invoke(CHANNELS.joinSharedChannel, { workspaceId: "workspace", shareId: "share-c" });
+    await waiting.promise;
+    await h.invoke(CHANNELS.leaveSharedChannel, { workspaceId: "workspace", shareId: "shown" });
+    expect(h.pull).not.toHaveBeenCalled();
+    recorded.resolve();
+    await joining;
+    expect(h.workspace.sharedChannels).toEqual([
+      { ...joined("shown"), ended: true, left: true },
+      joined("history"),
+      expect.objectContaining({ shareId: "share-c", channelWireId: "wire-c" }),
+    ]);
+    expect(h.pull).toHaveBeenCalledOnce();
+  });
+
+  it("neither joins nor pulls when the folder cannot record the received chat", async () => {
+    const h = await harness();
+    vi.mocked(fetchSharedChannelInfo).mockResolvedValueOnce({
+      shareId: "share-c", granterUserId: "owner", granterEmail: "owner@example.test",
+      channelWireId: "wire-c", access: "read-write", createdAtMs: 1, kind: "group",
+    });
+    const before = h.workspace.sharedChannels;
+    h.write.mockRejectedValueOnce(new Error("EPERM: operation not permitted, rename"));
+    await expect(h.invoke(CHANNELS.joinSharedChannel, { workspaceId: "workspace", shareId: "share-c" }))
+      .rejects.toThrow("EPERM");
+    expect(h.workspace.sharedChannels).toBe(before);
+    expect(h.pull).not.toHaveBeenCalled();
+    expect(h.mount).not.toHaveBeenCalled();
   });
 
   it("keeps the shared DM helpers bound to the same live registry holders", async () => {

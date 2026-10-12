@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
+  DEFAULT_PRIVACY_SETTINGS,
   DEFAULT_RUNNER_SETTINGS,
   DEFAULT_SIDEBAR_SETTINGS,
   DEFAULT_USER_SETTINGS,
@@ -63,7 +64,17 @@ describe("desktop user settings model", () => {
       profile: {},
       runner: DEFAULT_RUNNER_SETTINGS,
       sidebar: DEFAULT_SIDEBAR_SETTINGS,
+      privacy: DEFAULT_PRIVACY_SETTINGS,
     });
+  });
+
+  it("reads report switches a person turned off, each on its own", () => {
+    const parsed = DesktopUserSettings.parse({
+      ...DEFAULT_USER_SETTINGS,
+      privacy: { usageReports: false, errorReports: true },
+    });
+    expect(parsed.privacy).toEqual({ usageReports: false, errorReports: true });
+    expect(DEFAULT_USER_SETTINGS.privacy).toEqual({ usageReports: true, errorReports: true });
   });
 
   it("adds the default zoom level to settings written before zoom support", () => {
@@ -530,6 +541,18 @@ describe("desktop user settings store", () => {
       settings: { sidebar: { order: [], hidden: [], pinnedApps: { "ws-a": ["report"] } } },
       ignored: [{ key: "sidebar.order", reason: "invalid" }],
     });
+  });
+
+  it("keeps Chats in the sidebar order and hidden list", async () => {
+    const root = await createTestScratch("dohc-user-settings-");
+    const withChats: DesktopUserSettings = {
+      ...DEFAULT_USER_SETTINGS,
+      sidebar: { order: ["chats", "explorer", "search", "graph", "sites", "history"], hidden: ["chats"], pinnedApps: {} },
+    };
+    await writeUserSettingsFile(root, withChats, DEFAULT_USER_SETTINGS);
+    const read = await readUserSettingsFile(root);
+    expect(read.settings.sidebar).toEqual(withChats.sidebar);
+    expect(read.ignored ?? []).toEqual([]);
   });
 
   it("refuses to read a symlinked user settings file", async () => {

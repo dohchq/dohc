@@ -14,10 +14,11 @@ import * as Y from "yjs";
 // hold the window open deterministically.
 vi.mock("./editor/MarkdownEditor", () => new Promise(() => {}));
 
-import { markdownToYDoc } from "./editor/import-export";
+import { markdownToYDoc } from "@dohc/ydoc-projection";
 import { FileInspector } from "./FileInspector";
 import { DEFAULT_WORKSPACE_SETTINGS } from "../workspaces/workspaceSettings";
 import { disposeEngineDocLeasesForTests } from "./collab/engineDocLease";
+import { EDGE_MARKDOWN } from "./markdown/frontmatter.edge-fixture";
 
 const DOC_MARKDOWN = "# Plan\n\nBody from the last read.\n";
 
@@ -27,6 +28,7 @@ function engineBridge(
 ) {
   const serverDoc = markdownToYDoc(markdown);
   return {
+    onWorkspaceActivity: vi.fn(() => () => undefined),
     readWorkspaceText: vi.fn(async () => ({ text: markdown, truncated: false })),
     writeWorkspaceText: vi.fn(async () => ({ path: "a.md", recorded: true })),
     listWorkspaceFiles: vi.fn(async () => ({
@@ -95,9 +97,12 @@ afterEach(async () => {
 // Exporting it while the only serializer of the canonical doc is
 // unmounted writes a file that is not the user's document, and says it saved.
 describe("engine-mode export with no mounted serializer", () => {
-  it("refuses the export while the engine document has no serializer", async () => {
+  it.each([
+    ["plain", DOC_MARKDOWN],
+    ["shared-type frontmatter", EDGE_MARKDOWN],
+  ])("refuses the export while the engine document has no serializer (%s)", async (_name, markdown) => {
     const user = userEvent.setup();
-    const bridge = engineBridge(DOC_MARKDOWN);
+    const bridge = engineBridge(markdown);
     vi.stubGlobal("dohcDesktop", bridge);
 
     render(<FileInspector workspaceId="ws-1" path="a.md" />);

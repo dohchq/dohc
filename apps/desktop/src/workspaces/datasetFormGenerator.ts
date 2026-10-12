@@ -78,7 +78,7 @@ export function generateDatasetFormSources(input: DatasetFormInput): { files: Re
   const frontend = generateDatasetFormFrontend({ title, operation: operation.name, fields });
   return { files: {
     ...frontend,
-    "dohc.json": JSON.stringify({ version: 1, type: "site", title }, null, 2) + "\n",
+    "dohc.json": JSON.stringify({ version: 1, type: "app", title }, null, 2) + "\n",
     "app.publish.json": JSON.stringify({ version: 1, entryPath: "frontend.js", inputs: ["frontend.js", "frontend.css"], packageMap: {}, dataset: binding }, null, 2) + "\n",
   } };
 }

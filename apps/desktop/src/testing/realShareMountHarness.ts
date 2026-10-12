@@ -13,6 +13,7 @@ import {
 import {
   assertRealMountRoot,
   shareViewFilesMountProjection,
+  updateShareMountRecords,
 } from "../workspaces/shareMounts";
 import { createShareSkipRecorder } from "../workspaces/shareSkipRecorder";
 import {
@@ -50,7 +51,7 @@ export function createRealShareMountHarness(input: {
     input.daemon.relay.closeWorkspace(workspaceId);
   const commands: ShareMountCommands<typeof workspace> = createShareMountCommands({
     readMounts: () => workspace.shareMounts,
-    writeMounts: (_workspaceId, mounts) => { workspace.shareMounts = mounts; },
+    updateMounts: async (_workspaceId, update) => { workspace.shareMounts = [...update(workspace.shareMounts)]; },
     loadCredentials: async () => ({
       relayUrl: input.relay.baseUrl, token: input.relay.token, email: input.recipientEmail,
     }),
@@ -76,15 +77,13 @@ export function createRealShareMountHarness(input: {
       engineWorkspaceId: target.storeWorkspaceId, rootPath: target.rootPath, relay,
     }).pullShareView({ shareId: target.shareId, ...pull }),
     recordRefusals: async (target, refusals) => {
-      await createShareSkipRecorder({
-        current: () => workspace.shareMounts.find((mount) => mount.shareId === target.shareId),
-        persist: (next) => {
-          workspace.shareMounts = workspace.shareMounts.map((mount) =>
-            mount.shareId === target.shareId ? next : mount,
-          );
+      await createShareSkipRecorder<ShareMountRecord>({
+        update: async (change) => {
+          workspace.shareMounts = [...updateShareMountRecords(workspace.shareMounts, target.shareId, change)];
         },
       })(refusals);
     },
+    updateUnsavedPaths: async () => { throw new Error("Mounted shares have no unsaved paths"); },
     markEnded: async (target) => {
       workspace.shareMounts = workspace.shareMounts.map((mount) =>
         mount.shareId === target.shareId ? { ...mount, ended: true } : mount,

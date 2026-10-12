@@ -74,7 +74,11 @@ export async function resolveDatasetAddress(adapter: Adapter, workspaceId: strin
   signal.throwIfAborted();
   const id = catalog.get(path)?.datasetId;
   if (!id) throw new DatasetAddressUnavailableError(path);
-  if ([...catalog.values()].filter(value => value.datasetId === id).length !== 1) throw Error(`Collection address ambiguous: ${path}. Multiple dataset.json files name this Collection. Remove the duplicate file.`);
+  const conflictingPaths = [...catalog.entries()]
+    .filter(([, value]) => value.datasetId === id)
+    .map(([candidate]) => candidate)
+    .sort();
+  if (conflictingPaths.length !== 1) throw Error(`Collection address ambiguous: ${path}. These dataset.json files name this Collection: ${conflictingPaths.join(", ")}. Choose one file to keep. Remove the other files.`);
   return id;
 }
 

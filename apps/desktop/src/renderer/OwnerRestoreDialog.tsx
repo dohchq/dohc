@@ -2,6 +2,7 @@ import {useEffect, useMemo, useRef, useState} from "react";
 import {bridge} from "./bridge";
 import {Overlay} from "./Overlay";
 import {DangerButton, PrimaryButton, SecondaryButton} from "./ui/controls";
+import { SkeletonLines } from "./ui/SkeletonRows";
 import {useRequestSequence} from "./useRequestSequence";
 import {ipcErrorMessage} from "./ipcError";
 import {ownerRestoreOutcomes} from "./ownerRestoreOutcomes";
@@ -11,10 +12,29 @@ import type {OwnerRestoreOptions, OwnerRestorePlan, OwnerRestoreReview, OwnerRes
 type State = {kind: "loading"} | {kind: "options"; options: OwnerRestoreOptions}
   | {kind: "stop"; plan: OwnerRestorePlan} | {kind: "review"; review: OwnerRestoreReview}
   | {kind: "pending"; message: string} | {kind: "error"; message: string} | {kind: "complete"};
-const recipient = (row: {principalKind: string; email: string | null; userId: string | null}) =>
-  row.principalKind === "link" ? "Anyone using this link" : row.email ?? `Account ${row.userId}`;
+type Authority = OwnerRestoreReview["acceptedEvents"][number]["metadata"]["accepted"]["authority"];
+// Account emails the relay resolved for this file's grants and authors, by account ID.
+type Emails = ReadonlyMap<string, string>;
+const recipient = (row: {principalKind: string; email: string | null; userId: string | null}, emails: Emails) =>
+  row.principalKind === "link" ? "Anyone using this link"
+    : row.email ?? (row.userId === null ? undefined : emails.get(row.userId)) ?? `Account ${row.userId}`;
+// Who the relay accepted a change from. An account the relay could not name keeps its ID.
+const author = (authority: Authority, emails: Emails) => authority.principalKind === "owner" ? "Owner"
+  : authority.principalKind === "link" ? "Link participant" : emails.get(authority.principalId) ?? `Account ${authority.principalId}`;
+const time = (ms: number) => new Date(ms).toLocaleString();
+// One line per restore point: when, and who made the change. Points that read
+// the same gain their order, oldest first, so no two choices look alike.
+function pointLabels(points: OwnerRestoreOptions["points"], emails: Emails): Map<number, string> {
+  const base = new Map(points.map(p => [p.cursor, p.authority === null ? "Before accepted edits" : `${time(p.receivedAtMs!)} · ${author(p.authority, emails)}`]));
+  const labels = new Map<number, string>();
+  for (const label of new Set(base.values())) {
+    const same = [...base].filter(([, other]) => other === label).map(([cursor]) => cursor).sort((a, b) => a - b);
+    same.forEach((cursor, index) => labels.set(cursor, same.length === 1 ? label : `${label} (${index + 1} of ${same.length})`));
+  }
+  return labels;
+}
 
-function ChangeList({label, events}: {label: string; events: OwnerRestoreReview["acceptedEvents"]}) {
+function ChangeList({label, events, emails}: {label: string; events: OwnerRestoreReview["acceptedEvents"]; emails: Emails}) {
   const [page, setPage] = useState(0), start = page * 50;
   if (!events.length) return null;
   return <details className="border-t border-line py-3">
@@ -22,13 +42,13 @@ function ChangeList({label, events}: {label: string; events: OwnerRestoreReview[
     <ol className="space-y-2 pl-5 text-[12px] text-muted" start={start + 1}>
       {events.slice(start, start + 50).map(({metadata}) => {
         const {authority, receipt, receivedAtMs} = metadata.accepted;
-        const agent = metadata.authorSnapshot?.find(author => author.kind === "agent");
+        const agent = metadata.authorSnapshot?.find(entry => entry.kind === "agent");
         return <li key={receipt.deliveryId}>
-          {authority.principalKind === "owner" ? "Owner" : authority.principalKind === "link" ? "Link participant" : `Account ${authority.principalId}`}
+          {author(authority, emails)}
           {agent ? <span className="inline-flex max-w-full items-center gap-1"> · <AgentBadge testIdPrefix="owner-restore-change"
             author={{authorDisplayName: agent.agentName ?? agent.agentId, authorOwnerDisplayName: "Owner"}} />
             <span className="min-w-0 break-all text-agent">{agent.agentName ?? agent.agentId}</span></span> : null}
-          <span> · {new Date(receivedAtMs).toLocaleString()}</span>
+          <span> · {time(receivedAtMs)}</span>
           <details><summary className="cursor-pointer">Change details</summary><pre className="overflow-auto whitespace-pre-wrap break-all font-mono text-[11px]">{JSON.stringify(metadata, null, 2)}</pre></details>
         </li>;
       })}
@@ -45,19 +65,19 @@ function SourceList({label, sources}: {label: string; sources: OwnerRestoreRevie
     {sources.length > 50 && <div className="flex gap-2"><SecondaryButton disabled={page === 0} onClick={() => setPage(page - 1)}>Previous records</SecondaryButton><SecondaryButton disabled={start + 50 >= sources.length} onClick={() => setPage(page + 1)}>More records</SecondaryButton></div>}
   </details>;
 }
-function Review({review}: {review: OwnerRestoreReview}) {
+function Review({review, emails}: {review: OwnerRestoreReview; emails: Emails}) {
   const outcomes = useMemo(() => ownerRestoreOutcomes(review), [review]);
   return <>
-    <p className="text-[12px] text-muted">Restore point: {review.point.journalCursor === 0 ? "Before accepted edits" :
-      <><time dateTime={new Date(review.selectedPointReceivedAtMs!).toISOString()}>{new Date(review.selectedPointReceivedAtMs!).toLocaleString()}</time> · <span className="font-mono">Change {review.point.journalCursor}</span></>}</p>
+    <p className="text-[12px] text-muted" data-journal-cursor={review.point.journalCursor}>Restore point: {review.point.journalCursor === 0 ? "Before accepted edits" :
+      <><time dateTime={new Date(review.selectedPointReceivedAtMs!).toISOString()}>{time(review.selectedPointReceivedAtMs!)}</time> · {author(review.selectedPointAuthority!, emails)}</>}</p>
     <p className="text-[13px] text-muted">Restoring removes the changes listed below from this file.</p>
     <div className="grid gap-3 sm:grid-cols-2">
       <label className="text-[12px] text-muted">Current file<textarea aria-label="Current file before restore" readOnly value={review.content.frozenMarkdown} className="mt-1 h-56 w-full rounded-md border border-line bg-bg p-2 font-mono text-[12px] text-ink" /></label>
       <label className="text-[12px] text-muted">After restoring<textarea aria-label="File after restore" readOnly value={review.content.restoredMarkdown} className="mt-1 h-56 w-full rounded-md border border-line bg-bg p-2 font-mono text-[12px] text-ink" /></label>
     </div>
-    <ChangeList label="Removed by this restore" events={outcomes.removed} />
+    <ChangeList label="Removed by this restore" events={outcomes.removed} emails={emails} />
     <SourceList label="Local owner work removed by this restore" sources={outcomes.local} />
-    <ChangeList label="Already excluded by an earlier restore" events={outcomes.excluded} />
+    <ChangeList label="Already excluded by an earlier restore" events={outcomes.excluded} emails={emails} />
     <SourceList label="Local owner work already excluded" sources={outcomes.earlierLocal} />
     <p className="text-[12px] text-muted">This restore keeps the selected version of the file.</p>
     <SourceList label="Kept at or before the selected point" sources={outcomes.kept} />
@@ -69,6 +89,8 @@ export function OwnerRestoreDialog({workspaceId, path, onClose, onBeforeRestore,
 }) {
   const [state, setState] = useState<State>({kind: "loading"}), [busy, setBusy] = useState(false);
   const [grantId, setGrantId] = useState(""), [point, setPoint] = useState("");
+  // Kept across pages and steps, so the review names the people the choices named.
+  const [emails, setEmails] = useState<Emails>(() => new Map());
   const request = useRequestSequence([workspaceId, path]), running = useRef(false), operation = useRef<OwnerRestoreStatus | null>(null);
   const current = (token: number) => request.isCurrent(token);
   async function perform(work: (token: number) => Promise<void>) {
@@ -80,6 +102,8 @@ export function OwnerRestoreDialog({workspaceId, path, onClose, onBeforeRestore,
   async function load(token: number, beforeCursor?: number, grantCursor?: NonNullable<OwnerRestoreOptions["nextGrantCursor"]>) {
     const options = await bridge().ownerRestore({workspaceId, action: "options", path, ...(beforeCursor === undefined ? {} : {beforeCursor}), ...(grantCursor === undefined ? {} : {grantCursor})});
     if (!current(token)) return;
+    setEmails(known => new Map([...known, ...[...options.grants, ...options.authors]
+      .flatMap(row => row.userId !== null && row.email !== null ? [[row.userId, row.email] as const] : [])]));
     if (options.pendingOperation) {
       const saved = await bridge().ownerRestore({workspaceId, action: "status", operationId: options.pendingOperation.operationId});
       if (!current(token)) return;
@@ -100,7 +124,7 @@ export function OwnerRestoreDialog({workspaceId, path, onClose, onBeforeRestore,
   }
   useEffect(() => {
     const token = request.next();
-    operation.current = null; setGrantId(""); setPoint(""); running.current = true; setBusy(true); setState({kind: "loading"});
+    operation.current = null; setGrantId(""); setPoint(""); setEmails(new Map()); running.current = true; setBusy(true); setState({kind: "loading"});
     void load(token).catch(error => {if (current(token)) setState({kind: "error", message: ipcErrorMessage(error)});})
       .finally(() => {if (current(token)) {running.current = false; setBusy(false);}});
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -142,15 +166,18 @@ export function OwnerRestoreDialog({workspaceId, path, onClose, onBeforeRestore,
         : "The restore has not finished. Retry to continue the same operation."});
     } finally {release();}
   }
+  const labels = useMemo(() => state.kind === "options" ? pointLabels(state.options.points, emails) : new Map<number, string>(), [state, emails]);
   return <Overlay onClose={onClose} panelProps={{role: "dialog", "aria-modal": true, "aria-labelledby": "owner-restore-title", "data-testid": "owner-restore-dialog",
     className: "dohc-elevated dohc-pop-in w-[min(760px,calc(100vw-32px))] rounded-xl border border-line bg-panel p-5"}}>
     <h2 id="owner-restore-title" className="m-0 text-sm font-semibold text-ink">{state.kind === "stop" ? "Stop access before restoring?" : state.kind === "complete" ? "File restored" : "Restore shared file"}</h2>
     <p className="break-all font-mono text-[12px] text-muted">{path}</p>
-    <div role="status" aria-live="polite">{busy ? <p className="text-[12px] text-muted">{state.kind === "loading" ? "Loading restore choices…" : "Preparing the restore…"}</p> : null}</div>
+    {/* While the choices load, the lines show it and the status words are for the screen reader. */}
+    <div role="status" aria-live="polite">{busy ? <p className={state.kind === "loading" ? "sr-only" : "text-[12px] text-muted"}>{state.kind === "loading" ? "Loading restore choices…" : "Preparing the restore…"}</p> : null}</div>
+    {busy && state.kind === "loading" ? <SkeletonLines rows={2} className="my-3" /> : null}
     {state.kind === "options" && <div className="space-y-3">
-      <p className="text-[13px] text-muted">Choose the access to stop and the accepted change to restore to.</p>
-      <label className="block text-[12px] text-muted">Access<select aria-label="Access to stop" disabled={busy} value={grantId} onChange={event => setGrantId(event.target.value)} className="mt-1 w-full rounded-md border border-line bg-bg p-2 text-[13px] text-ink"><option value="">Choose access</option>{state.options.grants.map(grant => <option key={grant.grantId} value={grant.grantId}>{recipient(grant)}</option>)}</select></label>
-      <label className="block text-[12px] text-muted">Restore point<select aria-label="Shared restore point" disabled={busy} value={point} onChange={event => setPoint(event.target.value)} className="mt-1 w-full rounded-md border border-line bg-bg p-2 text-[13px] text-ink"><option value="">Choose a change</option>{state.options.points.map(p => <option key={p.cursor} value={p.cursor}>{p.kind === "baseline" ? "Before accepted edits" : `${new Date(p.receivedAtMs!).toLocaleString()} · Change ${p.cursor}`}</option>)}</select></label>
+      <p className="text-[13px] text-muted">Choose the access to stop and the change to restore to. Restoring keeps the file as it was after that change.</p>
+      <label className="block text-[12px] text-muted">Access<select aria-label="Access to stop" disabled={busy} value={grantId} onChange={event => setGrantId(event.target.value)} className="mt-1 w-full rounded-md border border-line bg-bg p-2 text-[13px] text-ink"><option value="">Choose access</option>{state.options.grants.map(grant => <option key={grant.grantId} value={grant.grantId}>{recipient(grant, emails)}</option>)}</select></label>
+      <label className="block text-[12px] text-muted">Restore point<select aria-label="Shared restore point" disabled={busy} value={point} onChange={event => setPoint(event.target.value)} className="mt-1 w-full rounded-md border border-line bg-bg p-2 text-[13px] text-ink"><option value="">Choose a change</option>{state.options.points.map(p => <option key={p.cursor} value={p.cursor}>{labels.get(p.cursor)}</option>)}</select></label>
       {!state.options.grants.length && state.options.nextGrantCursor === null && <p className="text-[12px] text-muted">No active edit access is available for this file. Close this review.</p>}
       {state.options.nextGrantCursor !== null && <SecondaryButton disabled={busy} onClick={() => void perform(token => load(token, undefined, state.options.nextGrantCursor!))}>More access choices</SecondaryButton>}
       {state.options.nextBeforeCursor !== null && <SecondaryButton disabled={busy} onClick={() => void perform(token => load(token, state.options.nextBeforeCursor!))}>Earlier changes</SecondaryButton>}
@@ -159,10 +186,10 @@ export function OwnerRestoreDialog({workspaceId, path, onClose, onBeforeRestore,
       <p className="text-[13px] text-ink">This access stays stopped, even if you decline the restore.</p>
       {state.plan.recipients.some(row => row.principalKind === "link") && <p className="text-[13px] text-muted">The old link will stop working.</p>}
       <p className="text-[13px] text-muted">Restoring is a separate decision. If you decline, the file stays unchanged. Share again to restore access.</p>
-      <ul className="space-y-1 pl-5 text-[13px] text-muted">{state.plan.recipients.map(row => <li key={row.grantId}>{recipient(row)}</li>)}</ul>
+      <ul className="space-y-1 pl-5 text-[13px] text-muted">{state.plan.recipients.map(row => <li key={row.grantId}>{recipient(row, emails)}</li>)}</ul>
       <p className="text-[13px] text-muted">Next, review the changes to remove before restoring the file.</p>
     </>}
-    {state.kind === "review" && <Review key={state.review.proposalDigest} review={state.review} />}
+    {state.kind === "review" && <Review key={state.review.proposalDigest} review={state.review} emails={emails} />}
     {state.kind === "pending" || state.kind === "error" ? <p role="alert" className="text-[13px] text-muted">{state.message}</p> : null}
     {operation.current && state.kind !== "complete" && <p className="text-[12px] text-muted">Access has stopped. Closing this review does not restore the old access.</p>}
     {state.kind === "complete" && <p className="text-[13px] text-muted">The file has been restored. Share again when you want to give access.</p>}

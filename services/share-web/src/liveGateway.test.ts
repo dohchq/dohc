@@ -10,7 +10,8 @@ import { decodeLiveFrame, encodeLiveFrame } from "@dohc/live-session-contract/li
 import { createLiveGateway, type LiveGatewayHostReceiveOptions, type LiveGatewayHostRoute, type LiveGatewayLimits, type LiveGatewayOptions } from "./liveGateway.js";
 import { createNamedLiveBrowserResolver } from "../../sync-relay/src/namedLiveBrowserAuth.js";
 import { createLiveTickets } from "../../sync-relay/src/liveTickets.js";
-import { createLiveHostBindingReports } from "../../sync-relay/src/liveHostBindingReports.js";
+import { createLiveHostReports } from "../../sync-relay/src/namedLiveHostReports.js";
+import { createNamedFrameChanges, type NamedFrameNativeHost } from "../../sync-relay/src/namedLiveFrameHost.js";
 import { fixture as ticketFixture, scope, binding, host, key, audience } from "../../sync-relay/src/liveTickets.test-helper.js";
 
 const origin = "https://share.example.test";
@@ -503,11 +504,18 @@ describe("private named live gateway", () => {
   it("composes actual named authentication, durable one-use tickets, and current host reports", async () => {
     const stored = await ticketFixture();
     cleanups.push(() => stored.close());
-    const held = { coordinate: host, invalidated: new AbortController().signal, requestBinding: async () => binding };
+    // Native sync is outside this gateway; the capture only reports the authenticated registration.
+    const native: NamedFrameNativeHost = { workspace: "native-handle", registrationId: 1, binding, coordinate: host,
+      invalidated: new AbortController().signal, changes: createNamedFrameChanges(1), deadlineMs: 1000,
+      nextRequestId: () => 1, drain: async () => undefined,
+      client: { openLiveAppliedSync: async () => { throw new Error("Native sync is not part of this test."); },
+        readNextLiveApplied: async () => null, readLiveApplicationAck: async () => null } };
+    const captureNative = vi.fn(async () => native);
     const tickets = createLiveTickets({ storage: stored.storage, audience, key,
-      hostReports: createLiveHostBindingReports({ storage: stored.storage, connections: { current: () => held } }) });
+      hostReports: createLiveHostReports({ storage: stored.storage, captureNative }) });
     const minted = await tickets.mint({ objectId: binding.objectId }, scope);
     expect(minted).not.toBeNull();
+    expect(captureNative).toHaveBeenCalledOnce();
     const resolveNamed = createNamedLiveBrowserResolver({ storage: stored.storage,
       resolveActor: async (request, workspaceId) => ({ workspaceId,
         userId: request.headers.get("cookie") === "account=alice" ? scope.userId : "other-account" }) });

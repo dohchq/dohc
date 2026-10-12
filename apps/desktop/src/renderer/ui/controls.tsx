@@ -1,5 +1,6 @@
 import { forwardRef } from "react";
 import type { ButtonHTMLAttributes, HTMLAttributes, ReactNode } from "react";
+import { TriangleAlert, type LucideIcon } from "lucide-react";
 import { DohcMark } from "@dohc/brand";
 
 // The dohc control primitives — the canonical implementations of the recipes
@@ -139,27 +140,60 @@ export function SectionLabel({
   );
 }
 
-/** Centered empty state: optional ghost mark, one muted line, quiet extras. */
+// The mark is larger and heavier than a 20px glyph, so its ghost is one
+// step fainter: in text-subtle a glyph still reads, and in text-line it
+// all but disappears.
+const emptyGlyphToneClass = {
+  ghost: { glyph: "text-subtle", mark: "text-line" },
+  danger: { glyph: "text-danger", mark: "text-danger" },
+} as const;
+
+/** Centered empty state: a ghost glyph, one muted line that says what is
+ * missing, and the surface's own next action as children. The glyph is the
+ * drop-lobe mark unless the surface names its own; a state that exists
+ * because something failed draws it in the danger tone. Every other
+ * attribute, such as a pinned `data-testid` or `role`, lands on the root. */
 export function EmptyState({
-  icon,
+  icon: Icon,
+  tone = "ghost",
   title,
   hint,
   children,
+  ...rest
 }: {
-  /** Custom icon node; defaults to the ghosted drop-lobe mark. */
-  icon?: ReactNode;
-  title: string;
+  icon?: LucideIcon;
+  tone?: keyof typeof emptyGlyphToneClass;
+  title: ReactNode;
   hint?: string;
   children?: ReactNode;
-}) {
+} & Omit<HTMLAttributes<HTMLDivElement>, "title" | "className" | "children">) {
+  const toneClass = emptyGlyphToneClass[tone];
   return (
-    <div className="flex flex-1 flex-col items-center justify-center gap-4 px-6 text-center">
-      {icon ?? <DohcMark size={30} className="text-line" />}
-      <div className="flex flex-col gap-1">
+    <div {...rest} className="flex flex-1 flex-col items-center justify-center gap-4 px-6 text-center">
+      {Icon ? (
+        <Icon size={20} strokeWidth={1.9} aria-hidden className={toneClass.glyph} />
+      ) : (
+        <DohcMark size={30} className={toneClass.mark} />
+      )}
+      <div className="flex max-w-sm flex-col gap-1 text-balance wrap-anywhere">
         <span className="text-sm text-muted">{title}</span>
         {hint ? <span className="text-[11px] text-subtle">{hint}</span> : null}
       </div>
       {children}
+    </div>
+  );
+}
+
+/** A list or section whose read failed. Its words are in the toast and its
+ * Notices row, reported through the shell's error hook; here the mark says it
+ * failed and Try again reads again. */
+export function RetryRow(props: { testId: string; onRetry: () => void }) {
+  return (
+    <div data-testid={props.testId} className="flex items-center gap-2 px-2 py-1">
+      <TriangleAlert size={12} aria-hidden className="shrink-0 text-danger" />
+      <SecondaryButton size="compact" onClick={props.onRetry}>
+        Try again
+      </SecondaryButton>
     </div>
   );
 }
