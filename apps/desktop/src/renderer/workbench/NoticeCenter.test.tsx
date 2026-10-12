@@ -8,11 +8,17 @@ import type {
   UpdateActionResult,
   UpdateStateEvent,
 } from "../../ipc/bridgeContract";
-import { NoticeCenter, SENT_NOTICE_PAGE, type SentNotice } from "./NoticeCenter";
+import { NoticeCenter, WorkspaceErrorToast, SENT_NOTICE_PAGE, type SentNotice } from "./NoticeCenter";
 import { deferred } from "../../testing/deferred";
 import { useEffect, useRef } from "react";
 import { Overlay } from "../Overlay";
 import { switchModalRegion } from "../modalFocus";
+
+it("offers Discard as a separate toast action without dismissing the Notice",()=>{
+  const action=vi.fn();const hide=vi.fn();render(<WorkspaceErrorToast error={{id:"typing",message:"Kept typing",details:"",atMs:0,canRetry:false,seen:false,actionLabel:"Copy your typing",additionalActionLabels:["Discard your typing"]}} onAction={action} onHide={hide}/>);
+  fireEvent.click(screen.getByRole("button",{name:"Discard your typing"}));
+  expect(action).toHaveBeenCalledExactlyOnceWith("typing",1);expect(hide).not.toHaveBeenCalled();
+});
 
 // Captures the renderer-side update listener exactly as the preload would
 // install it — the auto-updater itself never runs in dev/test (gated on
@@ -403,26 +409,26 @@ describe("notice center", () => {
     expect(screen.queryByTestId("notice-center")).toBeNull();
   });
 
-  // Changes made in dohc stay local in this state. Sync cannot
-  // clear the refusal, so the notice offers the document, never Try again.
-  it("says dohc edits do not reach others and offers to open the document", async () => {
+  // Saved edits still reach others, never live ones. Sync cannot clear the
+  // refusal, so the notice offers the document, never Try again.
+  it("says saved edits reach others when dohc syncs and offers to open the document", async () => {
     const onOpenSharingDeclined = vi.fn();
     const user = userEvent.setup();
     renderNotices({ syncStatus: declinedStatus(declined()), onOpenSharingDeclined });
 
     await user.click(screen.getByTestId("notice-center-toggle"));
     const notice = screen.getByTestId("notice-sharing-declined-main:object-1");
-    expect(notice.textContent).toContain("Too large to share your edits");
+    expect(notice.textContent).toContain("Too large to edit live with others");
     expect(notice.textContent).toContain(
-      "People you share large.md with don't get the edits you make in dohc while it is this large. Make it smaller, then open it again to share your edits.",
+      "People you share large.md with get your saved edits when dohc syncs. If they have it open in dohc, they see your edits after they close it. Close large.md and open it again to fix this.",
     );
     expect(within(notice).queryByRole("button", { name: "Try again" })).toBeNull();
 
     await user.click(within(notice).getByRole("button", { name: "Copy error details" }));
     const copied = await navigator.clipboard.readText();
-    expect(copied).toContain("Notice: Too large to share your edits");
+    expect(copied).toContain("Notice: Too large to edit live with others");
     expect(copied).toContain(
-      "Detail: People you share large.md with don't get the edits you make in dohc while it is this large. Make it smaller, then open it again to share your edits.",
+      "Detail: People you share large.md with get your saved edits when dohc syncs. If they have it open in dohc, they see your edits after they close it. Close large.md and open it again to fix this.",
     );
     expect(copied).toContain("File: notes/large.md");
     expect(copied).toContain("Size: 280001 bytes");
@@ -442,7 +448,7 @@ describe("notice center", () => {
 
     const toast = screen.getByTestId("sharing-declined-toast");
     expect(toast.textContent).toContain(
-      "Too large to share your edits. People you share large.md with don't get the edits you make in dohc while it is this large. Make it smaller, then open it again to share your edits.",
+      "Too large to edit live with others. People you share large.md with get your saved edits when dohc syncs. If they have it open in dohc, they see your edits after they close it. Close large.md and open it again to fix this.",
     );
   });
 

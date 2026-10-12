@@ -208,6 +208,14 @@ impl<'a> VersionedTextStore<'a> {
             )
             .map_err(DomainError::sql_persist)?;
             upsert_snapshot(tx, &after_snapshot)?;
+            // The alias has left `from_path`. A write still pending there
+            // would put a file back under the old name on replay. Same gate
+            // as the delete below: jobs mirror the active working tree only,
+            // so a named version renaming its own copy of the path must not
+            // cancel a job that belongs to `main`'s path of the same name.
+            if version_is_active(tx, ws, &input.version_id)? {
+                cancel_pending_jobs_for_path(tx, ws, &input.from_path, input.now_ms)?;
+            }
 
             let result = RenameResult {
                 object: object.clone(),
@@ -610,6 +618,25 @@ pub fn finish_checked_delete_in_tx(
             result.moment.recorded_at_ms,
         )?;
     } else {
+        let referenced: bool = tx
+            .query_row(
+                "SELECT EXISTS(
+                   SELECT 1 FROM replication_log
+                   WHERE workspace_id=?1 AND op_kind='moment.append'
+                     AND json_extract(payload_json,'$.momentId')=?2
+                 ) OR EXISTS(
+                   SELECT 1 FROM replication_pending_conflict_moments
+                   WHERE workspace_id=?1 AND moment_id=?2
+                 )",
+                params![workspace_id, moment_id],
+                |row| row.get(0),
+            )
+            .map_err(DomainError::sql_corrupt)?;
+        if referenced {
+            return Err(DomainError::InvalidInput {
+                reason: "checked delete moment has replication dependents",
+            });
+        }
         tx.execute(
             "DELETE FROM engine_requests WHERE result_seq=?1 AND kind='versioned'",
             [result.moment.moment_order],

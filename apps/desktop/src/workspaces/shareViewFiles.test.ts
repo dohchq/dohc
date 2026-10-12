@@ -339,7 +339,7 @@ describe("ShareViewFiles", () => {
     const requested = { kind: "standalone" as const, workspaceId: registered.workspaceId };
     await withStaleSensitiveWorkspaceOperation(rootPath, async lease => {
       if (restriction === "end") await files.end(lease, requested, () => undefined);
-      else await files.narrow(lease, requested, () => undefined, (paths, snapshot) => {
+      else await files.narrow(lease, requested, () => undefined, async (paths, snapshot) => {
         registered.grantedSelector.access = "view"; registered.unsavedPaths = paths; registered.unconfirmedChanges = snapshot;
       });
     });
@@ -397,7 +397,7 @@ describe("ShareViewFiles", () => {
     await withStaleSensitiveWorkspaceOperation(rootPath, async lease => {
       const requested = { kind: "standalone" as const, workspaceId: registered.workspaceId };
       if (restriction === "end") await files.end(lease, requested, () => undefined);
-      else await files.narrow(lease, requested, () => undefined, (paths, snapshot) => {
+      else await files.narrow(lease, requested, () => undefined, async (paths, snapshot) => {
         registered.unsavedPaths = paths; registered.unconfirmedChanges = snapshot;
       });
     });
@@ -430,7 +430,7 @@ describe("ShareViewFiles", () => {
     try {
       await withStaleSensitiveWorkspaceOperation(rootPath, async lease => {
         if (restriction === "end") await files.end(lease, requested, () => undefined);
-        else await files.narrow(lease, requested, () => undefined, unsavedPaths => {
+        else await files.narrow(lease, requested, () => undefined, async unsavedPaths => {
           registered.grantedSelector.access = "view"; registered.unsavedPaths = unsavedPaths;
         });
       });
@@ -458,7 +458,7 @@ describe("ShareViewFiles", () => {
     const requested = { kind: "standalone" as const, workspaceId: registered.workspaceId };
     await withStaleSensitiveWorkspaceOperation(rootPath, async lease => {
       if (restriction === "end") await files.end(lease, requested, () => undefined);
-      else await files.narrow(lease, requested, () => undefined, () => { registered.grantedSelector.access = "view"; });
+      else await files.narrow(lease, requested, () => undefined, async () => { registered.grantedSelector.access = "view"; });
     });
     expect(store.writeTextFile).toHaveBeenCalledWith(expect.objectContaining({ path, text: "recipient agent edit\n", metadata: { origin: "local-file" } }));
     await withStaleSensitiveWorkspaceOperation(rootPath, lease => files.reconcile(lease, requested, "settle"));
@@ -496,7 +496,7 @@ describe("ShareViewFiles", () => {
     try {
       await withStaleSensitiveWorkspaceOperation(rootPath, async lease => {
         if (restriction === "end") await files.end(lease, requested, () => undefined);
-        else await files.narrow(lease, requested, () => undefined, unsavedPaths => {
+        else await files.narrow(lease, requested, () => undefined, async unsavedPaths => {
           registered.grantedSelector.access = "view"; registered.unsavedPaths = unsavedPaths;
         });
       });
@@ -599,6 +599,41 @@ describe("ShareViewFiles", () => {
     expect(registered.unsavedPaths).toEqual([]);
     expect(pull).toHaveBeenCalledOnce();
     expect(await readFile(join(rootPath, path), "utf8")).toBe("recipient edit\n");
+  });
+
+  it.each([false, true])("reports the cursor internally only after a successful commit (commit fails: %s)", async commitFails => {
+    const rootPath = await workspaceRoot();
+    const registered = target(rootPath, "view");
+    const committing = deferred();
+    const committed = deferred();
+    const onCursorCommitted = vi.fn();
+    const files = createShareViewFiles({
+      ...unusedReconcilePorts,
+      resolveTarget: () => registered,
+      openStore: () => mutableTextStore(),
+      resolveRelay: async () => ({ baseUrl: "https://relay.example", token: "token" }),
+      pull: async () => ({
+        fetched: 0, applied: 0, skipped: 0, refusals: [], refusalCount: 0,
+        changedPaths: [], nextCursor: 57,
+        commitCursor: async () => { committing.resolve(); await committed.promise; },
+      }),
+    });
+    const result = withStaleSensitiveWorkspaceOperation(rootPath, lease => files.reconcile(
+      lease, { kind: "standalone", workspaceId: registered.workspaceId }, "refresh", onCursorCommitted,
+    ));
+    await committing.promise;
+    expect(onCursorCommitted).not.toHaveBeenCalled();
+    if (commitFails) committed.reject(new Error("cursor commit failed"));
+    else committed.resolve();
+    const reconciled = await result;
+    expect(reconciled).toMatchObject({ kind: "refresh", outcome: { ok: !commitFails } });
+    if (reconciled.kind !== "refresh") throw new Error("Expected a refresh result");
+    expect(reconciled.outcome).not.toHaveProperty("nextCursor");
+    if (commitFails) expect(onCursorCommitted).not.toHaveBeenCalled();
+    else {
+      expect(onCursorCommitted).toHaveBeenCalledOnce();
+      expect(onCursorCommitted).toHaveBeenCalledWith(57);
+    }
   });
 
   it("refuses automation saves on mounted shares", async () => {

@@ -735,3 +735,142 @@ it("never appends an old pagination after a policy refusal hides the page", asyn
   expect(it0.hook().page).toBeNull();
   expect(it0.hook().policyError).toMatchObject({ status: "policy-unreadable" });
 });
+
+
+it("re-reads cached names and ignores a late naming answer after a workspace switch", async () => {
+  let notify!: (event: { workspaceId: string }) => void;
+  window.dohcDesktop!.onHistoryNamesChanged = listener => { notify = listener; return () => {}; };
+  const issue = { current: 0 };
+  const ready = () => {};
+  const view = renderHook(({ workspaceId }) => useHistoryPage(issue, workspaceId, ready), { initialProps: { workspaceId: "ws-1" } });
+  let first!: Promise<void>;
+  act(() => { first = view.result.current.refresh(++issue.current); });
+  await settle(reads[0]!, page("old")); await first;
+  act(() => notify({ workspaceId: "ws-1" }));
+  expect(reads).toHaveLength(2);
+  await settle(reads[1]!, { ...page("old"), moments: [{ ...moment("old"), namedAuthor: { userId: "ben", label: "ben@test.example (via share link)" } }] });
+  expect(view.result.current.page?.moments[0]?.namedAuthor?.label).toContain("via share link");
+  act(() => notify({ workspaceId: "ws-1" }));
+  const late = reads[2]!;
+  view.rerender({ workspaceId: "ws-2" });
+  let next!: Promise<void>;
+  act(() => { next = view.result.current.refresh(++issue.current); });
+  await settle(reads[3]!, page("new")); await next;
+  await settle(late, page("late-old"));
+  expect(view.result.current.page?.moments.map(moment => moment.id)).toEqual(["new"]);
+});
+
+it("re-reads each names revision once, without scanning again on refresh or load-more", async () => {
+  let notify!: (event: { workspaceId: string }) => void;
+  window.dohcDesktop!.onHistoryNamesChanged = listener => { notify = listener; return () => {}; };
+  const it0 = mount();
+  const orderedPage = (id: string, order: number, next: number | null): ListEngineMomentsResult => ({
+    ...page(id, { nextBeforeMomentOrder: next, latestMomentOrder: 3 }),
+    moments: [{ ...moment(id), momentOrder: order }],
+  });
+  await committed(it0, orderedPage("first", 3, 3));
+  act(() => notify({ workspaceId: "ws-1" }));
+  await settle(reads[1]!, orderedPage("first", 3, 3));
+  expect(reads).toHaveLength(2);
+
+  await committed(it0, orderedPage("refreshed", 3, 3));
+  expect(reads).toHaveLength(3);
+  const older = it0.loadMore();
+  await settle(reads[3]!, orderedPage("older", 2, 2));
+  await older;
+  expect(reads).toHaveLength(4);
+  const oldest = it0.loadMore();
+  await settle(reads[4]!, orderedPage("oldest", 1, null));
+  await oldest;
+  expect(reads).toHaveLength(5);
+
+  act(() => notify({ workspaceId: "ws-1" }));
+  expect(reads).toHaveLength(6);
+  await settle(reads[5]!, orderedPage("refreshed", 3, 3));
+  await settle(reads[6]!, orderedPage("older", 2, 2));
+  await settle(reads[7]!, orderedPage("oldest", 1, null));
+  expect(listEngineMoments.mock.calls.map(([payload]) => payload.beforeMomentOrder)).toEqual([undefined, 4, undefined, 3, 2, 4, 3, 2]);
+  expect(reads).toHaveLength(8);
+  expect(it0.ids()).toEqual(["refreshed", "older", "oldest"]);
+});
+
+it("defers a names event until pending load-more settles, then renames kept rows", async () => {
+  let notify!: (event: { workspaceId: string }) => void;
+  window.dohcDesktop!.onHistoryNamesChanged = listener => { notify = listener; return () => {}; };
+  const it0 = mount();
+  const first = { ...moment("first"), momentOrder: 3, namedAuthor: { userId: "ben", label: "Someone you shared with" } };
+  await committed(it0, { ...page("first", { nextBeforeMomentOrder: 3 }), moments: [first] });
+  const older = it0.loadMore();
+  act(() => notify({ workspaceId: "ws-1" }));
+  expect.soft(reads).toHaveLength(2);
+  expect(it0.hook().loadingMore).toBe(true);
+  await settle(reads[1]!, { ...page("older"), moments: [{ ...moment("older"), momentOrder: 2 }] });
+  await older;
+  expect(reads).toHaveLength(3);
+  await settle(reads[2]!, { ...page("first"), moments: [
+    { ...first, namedAuthor: { userId: "ben", label: "ben@test.example (via share link)" } },
+    { ...moment("older"), momentOrder: 2 },
+  ] });
+  expect(it0.hook().page?.moments[0]?.namedAuthor?.label).toContain("ben@test.example");
+  expect(reads).toHaveLength(3);
+});
+
+it("restarts an interrupted timeline scan after load-more commits", async () => {
+  let notify!: (event: { workspaceId: string }) => void;
+  window.dohcDesktop!.onHistoryNamesChanged = listener => { notify = listener; return () => {}; };
+  const it0 = mount();
+  await committed(it0, page("first", { nextBeforeMomentOrder: 1 }));
+  act(() => notify({ workspaceId: "ws-1" }));
+  const interrupted = reads[1]!;
+  const older = it0.loadMore();
+  await settle(reads[2]!, page("older")); await older;
+  await settle(interrupted, page("first"));
+  expect(reads).toHaveLength(4);
+  await settle(reads[3]!, { ...page("first"), moments: [
+    { ...moment("first"), namedAuthor: { userId: "ben", label: "ben@test.example (via share link)" } },
+    moment("older"),
+  ] });
+  expect(it0.hook().page?.moments[0]?.namedAuthor?.label).toContain("ben@test.example");
+  expect(reads).toHaveLength(4);
+});
+
+it("scans a new names event after A to B to A, even when B has no rows", async () => {
+  let notify!: (event: { workspaceId: string }) => void;
+  window.dohcDesktop!.onHistoryNamesChanged = listener => { notify = listener; return () => {}; };
+  const issue = { current: 0 };
+  const ready = () => {};
+  const view = renderHook(({ workspaceId }) => useHistoryPage(issue, workspaceId, ready), { initialProps: { workspaceId: "A" } });
+  const refresh = async (answer: ListEngineMomentsResult) => {
+    let pending!: Promise<void>;
+    act(() => { pending = view.result.current.refresh(++issue.current); });
+    await settle(reads.at(-1)!, answer); await pending;
+  };
+  await refresh(page("A"));
+  act(() => notify({ workspaceId: "A" }));
+  await settle(reads[1]!, page("A"));
+  view.rerender({ workspaceId: "B" });
+  await refresh({ ...page("B"), moments: [] });
+  act(() => notify({ workspaceId: "B" }));
+  expect(reads).toHaveLength(3);
+  view.rerender({ workspaceId: "A" });
+  await refresh(page("A"));
+  act(() => notify({ workspaceId: "A" }));
+  expect(reads).toHaveLength(5);
+  await settle(reads[4]!, { ...page("A"), moments: [{ ...moment("A"), namedAuthor: { userId: "ben", label: "ben@test.example (via share link)" } }] });
+  expect(view.result.current.page?.moments[0]?.namedAuthor?.label).toContain("ben@test.example");
+});
+
+it.each(["failure", "updating"])("retries a %s naming scan once and consumes only its successful answer", async (outcome) => {
+  let notify!: (event: { workspaceId: string }) => void;
+  window.dohcDesktop!.onHistoryNamesChanged = listener => { notify = listener; return () => {}; };
+  const it0 = mount();
+  await committed(it0, page("first"));
+  act(() => notify({ workspaceId: "ws-1" }));
+  if (outcome === "failure") await fail(reads[1]!, "busy");
+  else await settle(reads[1]!, UPDATING);
+  expect(reads).toHaveLength(3);
+  await settle(reads[2]!, { ...page("first"), moments: [{ ...moment("first"), namedAuthor: { userId: "ben", label: "ben@test.example (via share link)" } }] });
+  expect(it0.hook().page?.moments[0]?.namedAuthor?.label).toContain("ben@test.example");
+  await committed(it0, page("refreshed"));
+  expect(reads).toHaveLength(4);
+});

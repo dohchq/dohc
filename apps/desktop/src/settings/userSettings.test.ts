@@ -543,6 +543,18 @@ describe("desktop user settings store", () => {
     });
   });
 
+  it("keeps Chats in the sidebar order and hidden list", async () => {
+    const root = await createTestScratch("dohc-user-settings-");
+    const withChats: DesktopUserSettings = {
+      ...DEFAULT_USER_SETTINGS,
+      sidebar: { order: ["chats", "explorer", "search", "graph", "sites", "history"], hidden: ["chats"], pinnedApps: {} },
+    };
+    await writeUserSettingsFile(root, withChats, DEFAULT_USER_SETTINGS);
+    const read = await readUserSettingsFile(root);
+    expect(read.settings.sidebar).toEqual(withChats.sidebar);
+    expect(read.ignored ?? []).toEqual([]);
+  });
+
   it("refuses to read a symlinked user settings file", async () => {
     const root = await createTestScratch("dohc-user-settings-");
     const outside = await createTestScratch("dohc-user-settings-");

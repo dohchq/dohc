@@ -14,6 +14,7 @@ export const mainBundledWorkspaceDeps = [
   "@dohc/app-browser",
   "@dohc/automation-executor",
   "@dohc/cli",
+  "@dohc/excalidraw-scene",
   "@dohc/live-session-contract",
   "@dohc/security-contract",
   "@dohc/service-http",

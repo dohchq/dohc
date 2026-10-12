@@ -154,7 +154,6 @@ const MUTATION_OPTIONAL_STRINGS = [
   "origin",
   "summary",
   "correlationId",
-  "requestId",
   "expectedSha256",
 ] as const;
 const WRITE_OPTIONAL_STRINGS = [
@@ -208,7 +207,7 @@ const VERSIONED_PARAM_SHAPES = {
   },
   [VERSIONED_METHOD.textRollback]: {
     requiredStrings: ["versionId", "path", "mutationMomentId"],
-    optionalStrings: ["workspaceId", "origin", "requestId"],
+    optionalStrings: ["workspaceId", "origin"],
     optionalJson: ["author"],
   },
   [VERSIONED_METHOD.textList]: {
@@ -327,6 +326,7 @@ const VERSIONED_PARAM_SHAPES = {
     optionalI64: ["limit", "beforeMomentOrder"],
   },
   [VERSIONED_METHOD.momentsGet]: { requiredStrings: ["momentId"] },
+  [VERSIONED_METHOD.publicationApplied]: { requiredStrings: ["requestId", "momentId"] },
   [VERSIONED_METHOD.historyPage]: {
     requiredStrings: ["workspaceId"],
     optionalStrings: ["versionId", "objectId"],
@@ -385,7 +385,7 @@ interface WorkspaceState {
   moments: Map<string, InternalMoment>;
   secretMoments: Map<string, InternalSecretMoment>;
   blobs: Map<string, number[]>;
-  replays: Map<string, { fingerprint: string; result: JsonObject }>;
+  replays: Map<string, { fingerprint: string; result: JsonObject; published: boolean }>;
 }
 
 interface ParsedWriteFields {
@@ -617,6 +617,11 @@ function validatePreWorkspaceSemantics(method: string, params: JsonObject): void
         throw new Error("momentId must not be empty");
       }
       break;
+    case VERSIONED_METHOD.publicationApplied:
+      if (serdeRequiredParamString(params, "requestId") === "" || serdeRequiredParamString(params, "momentId") === "") {
+        throw new Error("requestId and momentId must not be empty");
+      }
+      break;
     case VERSIONED_METHOD.secretsApply:
       if (!isSecretClassifiedPath(serdeRequiredParamString(params, "path"))) {
         throw new Error("not-secret-path");
@@ -651,7 +656,6 @@ function requestIdempotencyKey(request: Request): string | undefined {
 }
 
 function parseWriteFields(params: JsonObject, request: Request): ParsedWriteFields {
-  const idempotencyKey = requestIdempotencyKey(request);
   serdeOptionalParamString(params, "workspaceId");
   serdeOptionalParamString(params, "origin");
   serdeOptionalParamString(params, "summary");
@@ -659,7 +663,7 @@ function parseWriteFields(params: JsonObject, request: Request): ParsedWriteFiel
   return {
     objectId: serdeOptionalParamString(params, "objectId"),
     momentId: serdeOptionalParamString(params, "momentId"),
-    requestId: serdeOptionalParamString(params, "requestId") ?? idempotencyKey,
+    requestId: requestIdempotencyKey(request),
     nowMs: serdeOptionalParamNumber(params, "nowMs"),
   };
 }
@@ -704,7 +708,6 @@ function parseTextRenameFields(
   params: JsonObject,
   request: Request,
 ): ParsedTextRenameFields {
-  const idempotencyKey = requestIdempotencyKey(request);
   serdeOptionalParamString(params, "workspaceId");
   serdeOptionalParamString(params, "origin");
   serdeOptionalParamString(params, "summary");
@@ -713,7 +716,7 @@ function parseTextRenameFields(
     versionId: serdeRequiredParamString(params, "versionId"),
     fromPath: serdeRequiredParamString(params, "fromPath"),
     toPath: serdeRequiredParamString(params, "toPath"),
-    requestId: serdeOptionalParamString(params, "requestId") ?? idempotencyKey,
+    requestId: requestIdempotencyKey(request),
     nowMs: serdeOptionalParamNumber(params, "nowMs"),
   };
 }
@@ -722,7 +725,6 @@ function parseTextDeleteFields(
   params: JsonObject,
   request: Request,
 ): ParsedTextDeleteFields {
-  const idempotencyKey = requestIdempotencyKey(request);
   serdeOptionalParamString(params, "workspaceId");
   serdeOptionalParamString(params, "origin");
   serdeOptionalParamString(params, "summary");
@@ -730,7 +732,7 @@ function parseTextDeleteFields(
   return {
     versionId: serdeRequiredParamString(params, "versionId"),
     path: serdeRequiredParamString(params, "path"),
-    requestId: serdeOptionalParamString(params, "requestId") ?? idempotencyKey,
+    requestId: requestIdempotencyKey(request),
     nowMs: serdeOptionalParamNumber(params, "nowMs"),
   };
 }
@@ -1257,6 +1259,8 @@ export class VersionedLoopbackEngine implements EngineTransport {
         return this.momentsList(state, params);
       case VERSIONED_METHOD.momentsGet:
         return this.momentsGet(state, params);
+      case VERSIONED_METHOD.publicationApplied:
+        return this.publicationApplied(state, params);
       case VERSIONED_METHOD.historyPage:
         return this.historyPage(state, params);
       case VERSIONED_METHOD.searchEnsureIndex:
@@ -1827,8 +1831,7 @@ export class VersionedLoopbackEngine implements EngineTransport {
     );
     const origin = requiredOrigin(params);
     const authorJson = this.writeAuthorFingerprint(params);
-    const requestId =
-      serdeOptionalString(params, "requestId") ?? requestIdempotencyKey(request);
+    const requestId = requestIdempotencyKey(request);
     const fingerprint = JSON.stringify({
       workspaceId: workspace,
       versionId: params.versionId,
@@ -2112,8 +2115,7 @@ export class VersionedLoopbackEngine implements EngineTransport {
     const origin = requiredOrigin(params);
     // Before every replay/dedup/unchanged return — see metadataField.
     const metadata = this.momentMetadataFields(params);
-    const requestId =
-      serdeOptionalString(params, "requestId") ?? requestIdempotencyKey(request);
+    const requestId = requestIdempotencyKey(request);
     const sourceVersionId = requiredString(params, "sourceVersionId", "merge");
     const targetVersionId = requiredString(params, "targetVersionId", "merge");
     const path = requiredString(params, "path", "merge");
@@ -2631,6 +2633,16 @@ export class VersionedLoopbackEngine implements EngineTransport {
     return moment ? this.capMoment(moment.wire) : null;
   }
 
+  // As in the daemon's request ledger, a request binds to the one moment its
+  // recorded result names.
+  private publicationApplied(state: WorkspaceState, params: JsonObject): boolean {
+    const momentId = requiredString(params, "momentId", "publication applied");
+    const recorded = state.replays.get(requiredString(params, "requestId", "publication applied"));
+    const moment = recorded?.result.moment;
+    return recorded?.published === true && state.moments.has(momentId) &&
+      typeof moment === "object" && moment !== null && !Array.isArray(moment) && moment.momentId === momentId;
+  }
+
   private historyPage(state: WorkspaceState, params: JsonObject): JsonValue {
     const versionId = optionalString(params, "versionId") ?? state.activeVersionId;
     if (!state.versioned || versionId === undefined) throw new Error("workspace-not-found");
@@ -2796,6 +2808,11 @@ export class VersionedLoopbackEngine implements EngineTransport {
       state.replays.set(requestId, {
         fingerprint,
         result,
+        // The daemon records a write's publication outcome, and confirms a
+        // checked delete once it reaches disk. This engine publishes as it records.
+        published: result.materializeOutcome === undefined
+          ? typeof params.expectedSha256 === "string"
+          : result.materializeOutcome === "applied",
       });
     }
   }

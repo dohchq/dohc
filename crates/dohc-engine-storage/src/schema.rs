@@ -79,6 +79,7 @@ const REQUIRED_TABLES: &[&str] = &[
     "live_audit_record_chunks",
     "live_audit_events",
     "live_audit_projection_authors",
+    "live_audit_projection_contributions",
     "live_audit_event_publications",
     "live_audit_event_conflicts",
     "live_accepted_updates",
@@ -171,6 +172,7 @@ const REQUIRED_TABLES: &[&str] = &[
     "chat_bookmark_outbox",
     "chat_dispatch_ledger",
     "chat_dispatch_scan_cursor",
+    "chat_dispatch_local_discovery",
     "agent_run_records",
     "run_message_links",
     "chat_dispatch_pause",
@@ -361,6 +363,10 @@ fn apply_session_pragmas(conn: &Connection) -> Result<(), StorageError> {
     .map_err(StorageError::corrupt)?;
     conn.pragma_update(None, "foreign_keys", true)
         .map_err(StorageError::corrupt)?;
+    // A checkpoint must not recycle a durable WAL before its copied pages
+    // reach permanent storage on macOS.
+    conn.pragma_update(None, "checkpoint_fullfsync", cfg!(target_os = "macos"))
+        .map_err(StorageError::corrupt)?;
     Ok(())
 }
 
@@ -512,6 +518,23 @@ mod tests {
     use super::REQUIRED_TABLES;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU64, Ordering};
+
+    #[test]
+    fn checkpoint_fullfsync_is_set_for_the_connection_lifetime() {
+        let directory = dohc_test_scratch::ScratchDir::new_named("checkpoint-sync").unwrap();
+        let path = directory.path().join("store.sqlite");
+        for _ in 0..2 {
+            let store = crate::EngineStore::open(&path, 0).unwrap();
+            store
+                .read_with(|conn| {
+                    let setting: i64 =
+                        conn.pragma_query_value(None, "checkpoint_fullfsync", |row| row.get(0))?;
+                    assert_eq!(setting, i64::from(cfg!(target_os = "macos")));
+                    Ok::<_, rusqlite::Error>(())
+                })
+                .unwrap();
+        }
+    }
 
     #[test]
     fn a_counted_open_counts_its_work_and_nothing_after() {

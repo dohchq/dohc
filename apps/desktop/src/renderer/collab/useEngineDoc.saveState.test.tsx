@@ -1,5 +1,12 @@
 // @vitest-environment jsdom
-import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
+import {
+  act,
+  cleanup,
+  render,
+  renderHook,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import { useRef, useState } from "react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import type * as Y from "yjs";
@@ -14,6 +21,18 @@ import { useEngineDoc } from "./useEngineDoc";
 import { useAuthorCapacityNotice } from "./useAuthorCapacityNotice";
 import { harnessBridge, IMAGE_DESCRIPTOR } from "./engineDocSaveStateTestHarness";
 import { parseExcalidrawDocument } from "../excalidrawDocument";
+
+let projectionFails = false;
+vi.mock("@dohc/ydoc-projection", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@dohc/ydoc-projection")>();
+  return {
+    ...actual,
+    yDocToMarkdown: (doc: Y.Doc) => {
+      if (projectionFails) throw new Error("projection failed");
+      return actual.yDocToMarkdown(doc);
+    },
+  };
+});
 
 let lastBoundDoc: Y.Doc | null = null;
 
@@ -157,6 +176,7 @@ function Harness(props: {
 }
 
 let harness: ReturnType<typeof harnessBridge>;
+let releaseDeferredDelivery: (() => void) | null = null;
 
 beforeEach(() => {
   vi.useFakeTimers({ shouldAdvanceTime: true });
@@ -164,9 +184,14 @@ beforeEach(() => {
   vi.stubGlobal("dohcDesktop", harness.api);
   resetOrphanedDrafts();
   lastBoundDoc = null;
+  projectionFails = false;
 });
 
 afterEach(async () => {
+  // Teardown waits for every acknowledgement, including one a failed test
+  // left in flight.
+  releaseDeferredDelivery?.();
+  releaseDeferredDelivery = null;
   cleanup();
   await disposeEngineDocLeasesForTests();
   vi.useRealTimers();
@@ -199,6 +224,67 @@ it("reports host acceptance only for the current local edit", async () => {
   expect(screen.getByTestId("state").textContent).toBe("pending-share");
   act(() => harness.emitNow("saved-to-host", 2));
   expect(screen.getByTestId("state").textContent).toBe("saved-to-host");
+});
+
+// Main accepts edit 1 and reports it pending, then saved to host, while the
+// bridge response to that edit is still in flight. The host save waits for
+// the response, and no later event follows it.
+async function bufferHostSaveBehindDeferredResponse() {
+  const response = new Promise<void>((resolve) => {
+    releaseDeferredDelivery = resolve;
+  });
+  const apply = harness.api.applyEngineYDocUpdate;
+  harness.api.applyEngineYDocUpdate = async (payload) => {
+    const accepted = await apply(payload);
+    await response;
+    return accepted;
+  };
+  const hook = renderHook(() =>
+    useEngineDoc({ workspaceId: "ws-1", path: "notes/a.md", enabled: true }),
+  );
+  await waitFor(() => expect(hook.result.current.available).toBe(true));
+  let delivered!: Promise<void>;
+  act(() => {
+    const text = hook.result.current.doc!.getText("plainText");
+    text.insert(text.length, "!");
+    delivered = hook.result.current.flushPendingLocalUpdates();
+  });
+  await waitFor(() =>
+    expect(harness.applied).toEqual([{ sessionId: harness.sessionId(), seq: 1 }]),
+  );
+  act(() => harness.emitNow("pending-share", 1));
+  act(() => harness.emitNow("saved-to-host", 1));
+  expect(hook.result.current.saveState.kind).toBe("pending-share");
+  return {
+    hook,
+    finishDelivery: () =>
+      act(async () => {
+        releaseDeferredDelivery!();
+        await delivered;
+      }),
+  };
+}
+
+it.each(["pending-share", "file-locked"] as const)(
+  "keeps a waiting host save when an older %s report arrives",
+  async (olderState) => {
+    const { hook, finishDelivery } = await bufferHostSaveBehindDeferredResponse();
+
+    act(() => harness.emitNow(olderState, 0));
+    expect(hook.result.current.saveState.kind).toBe("pending-share");
+
+    await finishDelivery();
+    expect(hook.result.current.saveState.kind).toBe("saved-to-host");
+  },
+);
+
+it("lets a current pending-share replace a waiting host save", async () => {
+  const { hook, finishDelivery } = await bufferHostSaveBehindDeferredResponse();
+
+  act(() => harness.emitNow("pending-share", 1));
+
+  await finishDelivery();
+  expect(hook.result.current.saveState.kind).toBe("pending-share");
 });
 
 it("keeps a failed lineage handoff visible and read-only", async () => {
@@ -812,6 +898,281 @@ it("sets aside a refused scene, freezes writes, and releases the session", async
       files: {},
     });
   });
+});
+
+// A shared session reports read-only as a status whenever it stops being
+// live, with or without an edit waiting. Saved work is already in the file.
+it("sets nothing aside when a read-only status follows a saved edit", async () => {
+  await mountBound();
+  act(() => screen.getByTestId("type").click());
+  await flushLocalBatch();
+  act(() => harness.emitNow("saved", harness.applied.at(-1)!.seq));
+  await waitFor(() => expect(screen.getByTestId("state").textContent).toBe("saved-here"));
+
+  act(() => harness.emitNow("read-only", 0));
+
+  expect(screen.getByTestId("state").textContent).toBe("unknown");
+  expect(screen.getByTestId("read-only-transition").textContent).toBe("true");
+  await waitFor(() => expect(harness.closed).toHaveLength(1));
+  expect(screen.getByTestId("draft-count").textContent).toBe("0");
+});
+
+it("sets aside a keystroke that races a read-only status after a saved edit", async () => {
+  await mountBound();
+  act(() => screen.getByTestId("type").click());
+  await flushLocalBatch();
+  act(() => harness.emitNow("saved", harness.applied.at(-1)!.seq));
+  await waitFor(() => expect(screen.getByTestId("state").textContent).toBe("saved-here"));
+  const appliedAtStatus = harness.applied.length;
+
+  act(() => {
+    harness.emitNow("read-only", 0);
+    screen.getByTestId("type").click();
+  });
+  await flushLocalBatch();
+
+  await waitFor(() => expect(screen.getByTestId("draft").textContent).toBe("seed!!"));
+  expect(screen.getByTestId("draft-count").textContent).toBe("1");
+  expect(screen.getByTestId("read-only-transition").textContent).toBe("true");
+  expect(harness.applied).toHaveLength(appliedAtStatus);
+});
+
+it("sets aside an unsaved edit when a read-only status arrives", async () => {
+  await mountBound();
+  act(() => screen.getByTestId("type").click());
+  await flushLocalBatch();
+  const appliedAtStatus = harness.applied.length;
+
+  act(() => harness.emitNow("read-only", 0));
+
+  expect(screen.getByTestId("state").textContent).toBe("unknown");
+  expect(screen.getByTestId("draft-count").textContent).toBe("1");
+  await waitFor(() => expect(screen.getByTestId("draft").textContent).toBe("seed!"));
+  await waitFor(() => expect(harness.closed).toHaveLength(1));
+  expect(harness.applied).toHaveLength(appliedAtStatus);
+});
+
+// A winning lineage carries none of this window's edits. An unsaved edit on
+// the retired document keeps its own draft, so a later read-only status sets
+// aside only an edit made on the winner.
+async function replaceAfterDeliveredEdit(options: { saved: boolean }) {
+  await mountBound();
+  const drafts = renderHook(() => useOrphanedDrafts("ws-1", "notes/big.md"));
+  act(() => screen.getByTestId("type").click());
+  await flushLocalBatch();
+  expect(harness.applied).toHaveLength(1);
+  if (options.saved) {
+    act(() => harness.emitNow("saved", harness.applied.at(-1)!.seq));
+    await waitFor(() => expect(screen.getByTestId("state").textContent).toBe("saved-here"));
+  }
+
+  harness.emitLineageReplacement("winner");
+  await waitFor(() => expect(screen.getByTestId("text").textContent).toBe("winner"));
+  expect(screen.getByTestId("state").textContent).toBe("unknown");
+  return drafts;
+}
+
+it("sets nothing aside when read-only follows a winning lineage over a saved edit", async () => {
+  const drafts = await replaceAfterDeliveredEdit({ saved: true });
+  expect(drafts.result.current).toEqual([]);
+
+  act(() => harness.emitNow("read-only", 0));
+
+  expect(screen.getByTestId("read-only-transition").textContent).toBe("true");
+  expect(screen.getByTestId("state").textContent).toBe("unknown");
+  await waitFor(() => expect(harness.closed).toHaveLength(1));
+  expect(drafts.result.current).toEqual([]);
+});
+
+it("keeps only the retired draft when read-only follows an unchanged winning lineage", async () => {
+  const drafts = await replaceAfterDeliveredEdit({ saved: false });
+  await waitFor(() =>
+    expect(drafts.result.current.map((draft) => draft.text)).toEqual(["seed!"]),
+  );
+  const retired = drafts.result.current[0]!;
+
+  act(() => harness.emitNow("read-only", 0));
+
+  expect(screen.getByTestId("read-only-transition").textContent).toBe("true");
+  expect(drafts.result.current).toEqual([retired]);
+  await waitFor(() => expect(harness.closed).toHaveLength(1));
+  expect(drafts.result.current).toEqual([retired]);
+});
+
+it("sets aside a winner edit beside the retired draft when read-only follows it", async () => {
+  const drafts = await replaceAfterDeliveredEdit({ saved: false });
+  await waitFor(() =>
+    expect(drafts.result.current.map((draft) => draft.text)).toEqual(["seed!"]),
+  );
+  const retired = drafts.result.current[0]!;
+  act(() => screen.getByTestId("type").click());
+  await flushLocalBatch();
+  expect(harness.applied).toHaveLength(2);
+
+  act(() => harness.emitNow("read-only", 0));
+
+  expect(screen.getByTestId("read-only-transition").textContent).toBe("true");
+  await waitFor(() =>
+    expect(drafts.result.current.map((draft) => draft.text).sort()).toEqual(["seed!", "winner!"]),
+  );
+  expect(drafts.result.current.find((draft) => draft.id === retired.id)).toEqual(retired);
+  await waitFor(() => expect(harness.closed).toHaveLength(1));
+});
+
+// A received share's live host reports saved-to-host once it has accepted
+// every pending edit, then read-only when access ends.
+async function mountHostAcknowledgedDocument() {
+  const hook = renderHook(() =>
+    useEngineDoc({ workspaceId: "ws-1", path: "notes/a.md", enabled: true }),
+  );
+  const drafts = renderHook(() => useOrphanedDrafts("ws-1", "notes/a.md"));
+  await waitFor(() => expect(hook.result.current.available).toBe(true));
+  const typeAndDeliver = async (delivered: number) => {
+    act(() => {
+      const text = hook.result.current.doc!.getText("plainText");
+      text.insert(text.length, "!");
+    });
+    expect(hook.result.current.saveState.kind).toBe("saving");
+    await act(async () => {
+      await hook.result.current.flushPendingLocalUpdates();
+    });
+    expect(harness.applied).toHaveLength(delivered);
+  };
+  return { hook, drafts, typeAndDeliver };
+}
+
+it("host acknowledgement recovery sets nothing aside for a delivered edit the host saved", async () => {
+  const { hook, drafts, typeAndDeliver } = await mountHostAcknowledgedDocument();
+  await typeAndDeliver(1);
+  act(() => harness.emitNow("saved-to-host", harness.applied.at(-1)!.seq));
+  expect(hook.result.current.saveState.kind).toBe("saved-to-host");
+
+  act(() => harness.emitNow("read-only", 0));
+
+  expect(hook.result.current.readOnlyWhileEditing).toBe(true);
+  expect(hook.result.current.saveState.kind).toBe("unknown");
+  expect(drafts.result.current).toEqual([]);
+  await waitFor(() => expect(harness.closed).toHaveLength(1));
+  expect(drafts.result.current).toEqual([]);
+});
+
+it("host acknowledgement recovery sets aside a newer edit after the host saved an earlier one", async () => {
+  const { hook, drafts, typeAndDeliver } = await mountHostAcknowledgedDocument();
+  await typeAndDeliver(1);
+  act(() => harness.emitNow("saved-to-host", harness.applied.at(-1)!.seq));
+  expect(hook.result.current.saveState.kind).toBe("saved-to-host");
+  await typeAndDeliver(2);
+  expect(hook.result.current.saveState.kind).toBe("saving");
+
+  act(() => harness.emitNow("read-only", 0));
+
+  expect(hook.result.current.readOnlyWhileEditing).toBe(true);
+  await waitFor(() => expect(drafts.result.current).toHaveLength(1));
+  await waitFor(() =>
+    expect(drafts.result.current.map((draft) => draft.text)).toEqual(["seed!!"]),
+  );
+  await waitFor(() => expect(harness.closed).toHaveLength(1));
+  expect(drafts.result.current).toHaveLength(1);
+});
+
+it("host acknowledgement recovery keeps the draft when a stale host save arrives", async () => {
+  const { hook, drafts, typeAndDeliver } = await mountHostAcknowledgedDocument();
+  await typeAndDeliver(1);
+  await typeAndDeliver(2);
+  act(() => harness.emitNow("saved-to-host", 1));
+  expect(hook.result.current.saveState.kind).toBe("saving");
+
+  act(() => harness.emitNow("read-only", 0));
+
+  expect(hook.result.current.readOnlyWhileEditing).toBe(true);
+  await waitFor(() => expect(drafts.result.current).toHaveLength(1));
+  await waitFor(() =>
+    expect(drafts.result.current.map((draft) => draft.text)).toEqual(["seed!!"]),
+  );
+  await waitFor(() => expect(harness.closed).toHaveLength(1));
+  expect(drafts.result.current).toHaveLength(1);
+});
+
+// The host save waits behind the renderer's delivery response. Until that
+// response arrives, the edit is not saved anywhere this window can vouch for.
+it("host acknowledgement recovery keeps a draft when read-only precedes the delivery response", async () => {
+  const { hook, finishDelivery } = await bufferHostSaveBehindDeferredResponse();
+  const drafts = renderHook(() => useOrphanedDrafts("ws-1", "notes/a.md"));
+
+  act(() => harness.emitNow("read-only", 0));
+
+  expect(hook.result.current.readOnlyWhileEditing).toBe(true);
+  expect(hook.result.current.saveState.kind).toBe("unknown");
+  await waitFor(() =>
+    expect(drafts.result.current.map((draft) => draft.text)).toEqual(["seed!"]),
+  );
+  // Close waits for the withheld response.
+  expect(harness.closed).toEqual([]);
+
+  await finishDelivery();
+  await waitFor(() => expect(harness.closed).toHaveLength(1));
+  expect(hook.result.current.saveState.kind).toBe("unknown");
+  expect(drafts.result.current.map((draft) => draft.text)).toEqual(["seed!"]);
+});
+
+it("host acknowledgement recovery sets nothing aside when the delivery response completes a host save", async () => {
+  const { hook, finishDelivery } = await bufferHostSaveBehindDeferredResponse();
+  const drafts = renderHook(() => useOrphanedDrafts("ws-1", "notes/a.md"));
+
+  await finishDelivery();
+  expect(hook.result.current.saveState.kind).toBe("saved-to-host");
+
+  act(() => harness.emitNow("read-only", 0));
+
+  expect(hook.result.current.readOnlyWhileEditing).toBe(true);
+  expect(hook.result.current.saveState.kind).toBe("unknown");
+  await waitFor(() => expect(harness.closed).toHaveLength(1));
+  expect(drafts.result.current).toEqual([]);
+});
+
+// A keystroke after a clean read-only status writes its draft at once. The
+// transition names that draft whether or not the later projection succeeds.
+it.each([
+  ["completes", false],
+  ["fails", true],
+])("names a keystroke's draft after a clean read-only status when projection %s", async (_, fails) => {
+  const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+  const { hook, drafts, typeAndDeliver } = await mountHostAcknowledgedDocument();
+  await typeAndDeliver(1);
+  act(() => harness.emitNow("saved", harness.applied.at(-1)!.seq));
+  expect(hook.result.current.saveState.kind).toBe("saved-here");
+  const doc = hook.result.current.doc!;
+  projectionFails = fails;
+
+  act(() => {
+    harness.emitNow("read-only", 0);
+    const text = doc.getText("plainText");
+    text.insert(text.length, "!");
+  });
+
+  const draftId = hook.result.current.readOnlyDraftId;
+  expect(hook.result.current.readOnlyWhileEditing).toBe(true);
+  expect(draftId).not.toBeNull();
+  await waitFor(() =>
+    expect(drafts.result.current.map(({ id, text }) => ({ id, text }))).toEqual([
+      { id: draftId, text: "seed!!" },
+    ]),
+  );
+  await waitFor(() => expect(harness.closed).toHaveLength(1));
+  const refineFailure = [
+    expect.stringContaining("could not refine the recovery draft"),
+    expect.any(Error),
+  ];
+  if (fails) {
+    await waitFor(() => expect(consoleError).toHaveBeenCalledWith(...refineFailure));
+  } else {
+    expect(consoleError).not.toHaveBeenCalledWith(...refineFailure);
+  }
+  expect(hook.result.current.readOnlyDraftId).toBe(draftId);
+  expect(drafts.result.current.map(({ id, text }) => ({ id, text }))).toEqual([
+    { id: draftId, text: "seed!!" },
+  ]);
+  consoleError.mockRestore();
 });
 
 it("replaces the same deletion's draft when a keystroke lands before read-only commits", async () => {

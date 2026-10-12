@@ -1,5 +1,7 @@
 use crate::EngineService;
 use crate::events::emit_automation_claimed;
+use crate::lock;
+use crate::rpc::error::map_runtime;
 use crate::rpc::request::OperationCancellation;
 use crate::rpc::request::deserialize_optional_non_null;
 use crate::rpc::request::now_ms;
@@ -9,6 +11,7 @@ use dohc_engine_domain::AutomationClaim;
 use dohc_engine_domain::AutomationClaimCursor;
 use dohc_engine_domain::AutomationClaimLookup;
 use dohc_engine_domain::AutomationFailure;
+use dohc_engine_domain::AutomationFieldFact;
 use dohc_engine_domain::AutomationFieldFacts;
 use dohc_engine_domain::AutomationGroupHandover;
 use dohc_engine_domain::AutomationGroupHandoverAutomation;
@@ -24,15 +27,384 @@ use dohc_engine_domain::AutomationSettle;
 use dohc_engine_domain::AutomationSubscription;
 use dohc_engine_domain::AutomationTrigger;
 use dohc_engine_domain::PressActor;
+use dohc_engine_domain::SharedChangeAuthor;
 use dohc_engine_protocol::error::ErrorCode;
 use dohc_engine_protocol::error::WireError;
 use dohc_engine_protocol::transport::RequestContext;
 use dohc_engine_protocol::wire::WorkspaceHandle;
 use dohc_engine_runtime::NoFaults;
+use dohc_engine_runtime::{ActorHandle, CancellationToken};
 use serde::Deserialize;
+use serde::Serialize;
 use serde_json::Value;
 use serde_json::json;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use tokio::sync::oneshot;
+
+struct DurabilityRequest {
+    claim_id: Option<String>,
+    token: CancellationToken,
+    reply: oneshot::Sender<Result<(), WireError>>,
+}
+
+#[derive(Default)]
+struct DurabilityState {
+    running: bool,
+    pending: Vec<DurabilityRequest>,
+}
+
+/// One active barrier and one following batch. A caller arriving during the
+/// active sync waits for the following one, which covers its earlier writes.
+#[derive(Clone, Default)]
+pub(super) struct DurabilityQueue(Arc<Mutex<DurabilityState>>);
+
+struct DurabilityDriver(Option<DurabilityQueue>);
+
+impl DurabilityDriver {
+    fn disarm(&mut self) {
+        self.0 = None;
+    }
+}
+
+impl Drop for DurabilityDriver {
+    fn drop(&mut self) {
+        if let Some(queue) = self.0.take() {
+            let mut state = lock(&queue.0);
+            state.running = false;
+            for request in std::mem::take(&mut state.pending) {
+                let _ = request.reply.send(Err(WireError::new(
+                    ErrorCode::Internal,
+                    "automation durability worker stopped",
+                )));
+            }
+        }
+    }
+}
+
+impl DurabilityQueue {
+    fn submit(
+        &self,
+        actor: ActorHandle,
+        workspace_id: String,
+        claim_id: Option<String>,
+        token: CancellationToken,
+    ) -> oneshot::Receiver<Result<(), WireError>> {
+        self.submit_with(claim_id, token, move |claims| {
+            let actor = actor.clone();
+            let workspace_id = workspace_id.clone();
+            async move {
+                actor
+                    .automation_make_durable_batch(workspace_id, claims, Arc::new(NoFaults))
+                    .await
+                    .map(|results| {
+                        results
+                            .into_iter()
+                            .map(|result| result.map_err(map_runtime))
+                            .collect()
+                    })
+                    .map_err(map_runtime)
+            }
+        })
+    }
+
+    fn submit_with<F, Fut>(
+        &self,
+        claim_id: Option<String>,
+        token: CancellationToken,
+        mut work: F,
+    ) -> oneshot::Receiver<Result<(), WireError>>
+    where
+        F: FnMut(Vec<(Option<String>, CancellationToken)>) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = Result<Vec<Result<(), WireError>>, WireError>> + Send,
+    {
+        let (reply, receiver) = oneshot::channel();
+        let mut state = lock(&self.0);
+        state.pending.push(DurabilityRequest {
+            claim_id,
+            token,
+            reply,
+        });
+        if !state.running {
+            state.running = true;
+            let queue = self.clone();
+            let mut driver = DurabilityDriver(Some(queue.clone()));
+            tokio::spawn(async move {
+                loop {
+                    let requests = std::mem::take(&mut lock(&queue.0).pending);
+                    let claims = requests
+                        .iter()
+                        .map(|request| (request.claim_id.clone(), request.token.clone()))
+                        .collect();
+                    let result = work(claims).await;
+                    match result {
+                        Ok(results) => {
+                            for (request, result) in requests.into_iter().zip(results) {
+                                let _ = request.reply.send(result);
+                            }
+                        }
+                        Err(error) => {
+                            for request in requests {
+                                let _ = request.reply.send(Err(error.clone()));
+                            }
+                        }
+                    }
+                    let mut state = lock(&queue.0);
+                    if state.pending.is_empty() {
+                        state.running = false;
+                        driver.disarm();
+                        break;
+                    }
+                }
+            });
+        }
+        receiver
+    }
+}
+
+#[cfg(test)]
+mod durability_tests {
+    use super::*;
+    type Batch = (
+        Vec<(Option<String>, CancellationToken)>,
+        oneshot::Sender<Result<Vec<Result<(), WireError>>, WireError>>,
+    );
+
+    fn enqueue(
+        queue: &DurabilityQueue,
+        batches: tokio::sync::mpsc::UnboundedSender<Batch>,
+        claim: &str,
+        token: CancellationToken,
+    ) -> oneshot::Receiver<Result<(), WireError>> {
+        queue.submit_with(Some(claim.into()), token, move |claims| {
+            let batches = batches.clone();
+            async move {
+                let (finish, done) = oneshot::channel();
+                batches.send((claims, finish)).unwrap();
+                done.await.unwrap()
+            }
+        })
+    }
+
+    #[tokio::test]
+    async fn durability_queue_late_callers_share_the_following_barrier() {
+        let queue = DurabilityQueue::default();
+        let (send, mut batches) = tokio::sync::mpsc::unbounded_channel();
+        let first = enqueue(&queue, send.clone(), "first", CancellationToken::new());
+        let (claims, finish) = batches.recv().await.unwrap();
+        assert_eq!(claims.len(), 1);
+        let mut second = enqueue(&queue, send.clone(), "second", CancellationToken::new());
+        let third = enqueue(&queue, send.clone(), "third", CancellationToken::new());
+        finish.send(Ok(vec![Ok(())])).unwrap();
+        first.await.unwrap().unwrap();
+        let (claims, finish) = batches.recv().await.unwrap();
+        assert_eq!(
+            claims
+                .iter()
+                .map(|(claim, _)| claim.as_deref().unwrap())
+                .collect::<Vec<_>>(),
+            ["second", "third"]
+        );
+        assert!(matches!(
+            second.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ));
+        finish.send(Ok(vec![Ok(()), Ok(())])).unwrap();
+        second.await.unwrap().unwrap();
+        third.await.unwrap().unwrap();
+        assert!(!lock(&queue.0).running);
+        assert!(batches.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn durability_queue_failure_and_cancelled_caller_do_not_strand_followers() {
+        let queue = DurabilityQueue::default();
+        let (send, mut batches) = tokio::sync::mpsc::unbounded_channel();
+        let first = enqueue(&queue, send.clone(), "first", CancellationToken::new());
+        let (_, finish) = batches.recv().await.unwrap();
+        let cancelled = CancellationToken::new();
+        let abandoned = enqueue(&queue, send.clone(), "cancelled", cancelled.clone());
+        let follower = enqueue(&queue, send, "follower", CancellationToken::new());
+        cancelled.cancel();
+        drop(abandoned);
+        finish
+            .send(Err(WireError::new(ErrorCode::Internal, "sync failed")))
+            .unwrap();
+        assert_eq!(first.await.unwrap().unwrap_err().message, "sync failed");
+        let (claims, finish) = batches.recv().await.unwrap();
+        assert!(claims[0].1.is_cancelled());
+        assert!(!claims[1].1.is_cancelled());
+        finish
+            .send(Ok(vec![
+                Err(WireError::new(ErrorCode::Cancelled, "cancelled")),
+                Ok(()),
+            ]))
+            .unwrap();
+        follower.await.unwrap().unwrap();
+        assert!(!lock(&queue.0).running);
+    }
+
+    #[tokio::test]
+    async fn durability_queue_panic_releases_followers_and_allows_a_new_driver() {
+        let queue = DurabilityQueue::default();
+        let (started, begin) = oneshot::channel();
+        let (finish, done) = oneshot::channel::<()>();
+        let mut started = Some(started);
+        let mut done = Some(done);
+        let first = queue.submit_with(None, CancellationToken::new(), move |_| {
+            let started = started.take().unwrap();
+            let done = done.take().unwrap();
+            async move {
+                started.send(()).unwrap();
+                done.await.unwrap();
+                panic!("injected driver panic");
+            }
+        });
+        begin.await.unwrap();
+        let (send, mut batches) = tokio::sync::mpsc::unbounded_channel();
+        let follower = enqueue(&queue, send.clone(), "follower", CancellationToken::new());
+        finish.send(()).unwrap();
+        assert!(first.await.is_err());
+        assert_eq!(
+            follower.await.unwrap().unwrap_err().code,
+            ErrorCode::Internal
+        );
+        assert!(!lock(&queue.0).running);
+        let next = enqueue(&queue, send, "next", CancellationToken::new());
+        let (_, finish) = batches.recv().await.unwrap();
+        finish.send(Ok(vec![Ok(())])).unwrap();
+        next.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    #[ignore = "machine-local barrier contention measurement"]
+    async fn durability_queue_contention_cost() {
+        use dohc_engine_domain::WriteText;
+        use dohc_engine_storage::FaultPoint;
+        use dohc_engine_testkit::{GateFaults, ScratchDir};
+        use std::future::{Future, poll_fn};
+        use std::pin::Pin;
+        use std::task::Poll;
+        use std::time::Instant;
+
+        let scratch = ScratchDir::new().unwrap();
+        let service = EngineService::new();
+        let ctx = RequestContext::unbounded();
+        let opened = service.workspace_open(&ctx, json!({"rootDir": scratch.path().to_string_lossy(), "workspaceId": "contention", "captureMode": "none"})).await.unwrap();
+        let handle: WorkspaceHandle = serde_json::from_value(opened["workspace"].clone()).unwrap();
+        let open = service.open(Some(&handle)).unwrap();
+        for pair in -1..30_i32 {
+            let arms = if pair % 2 == 0 {
+                ["A", "B"]
+            } else {
+                ["B", "A"]
+            };
+            for arm in arms {
+                // Hold a NORMAL write so every request is queued before timing.
+                let gate = GateFaults::at(FaultPoint::StorageBeforePersist);
+                let actor = open.actor.clone();
+                let held_gate = gate.clone();
+                let held = tokio::spawn(async move {
+                    actor
+                        .versioned_text_write(
+                            WriteText {
+                                workspace_id: "contention".into(),
+                                version_id: "main".into(),
+                                object_id: "held".into(),
+                                path: "held.md".into(),
+                                text: format!("{pair}/{arm}"),
+                                moment_id: format!("{pair}/{arm}"),
+                                metadata_origin: "api".into(),
+                                metadata_summary: None,
+                                metadata_correlation_id: None,
+                                author_json: None,
+                                now_ms: 1,
+                                request_id: None,
+                            },
+                            held_gate,
+                            CancellationToken::new(),
+                        )
+                        .await
+                        .unwrap();
+                });
+                let wait = gate.clone();
+                tokio::task::spawn_blocking(move || wait.wait_until_reached())
+                    .await
+                    .unwrap();
+                type Reply = Pin<Box<dyn Future<Output = Result<(), WireError>>>>;
+                let mut replies: Vec<Reply> = Vec::new();
+                if arm == "A" {
+                    for _ in 0..16 {
+                        let actor = open.actor.clone();
+                        let mut reply: Reply = Box::pin(async move {
+                            actor
+                                .automation_make_durable_batch(
+                                    "contention".into(),
+                                    vec![(None, CancellationToken::new())],
+                                    Arc::new(NoFaults),
+                                )
+                                .await
+                                .map_err(map_runtime)?
+                                .pop()
+                                .unwrap()
+                                .map_err(map_runtime)
+                        });
+                        poll_fn(|cx| {
+                            assert!(reply.as_mut().poll(cx).is_pending());
+                            Poll::Ready(())
+                        })
+                        .await;
+                        replies.push(reply);
+                    }
+                } else {
+                    let first = open.durability.submit(
+                        open.actor.clone(),
+                        "contention".into(),
+                        None,
+                        CancellationToken::new(),
+                    );
+                    tokio::task::yield_now().await;
+                    assert!(lock(&open.durability.0).pending.is_empty());
+                    replies.push(Box::pin(async move { first.await.unwrap() }));
+                    for _ in 1..16 {
+                        let reply = open.durability.submit(
+                            open.actor.clone(),
+                            "contention".into(),
+                            None,
+                            CancellationToken::new(),
+                        );
+                        replies.push(Box::pin(async move { reply.await.unwrap() }));
+                    }
+                }
+                let mut read = Box::pin(open.actor.automation_claims(
+                    "contention".into(),
+                    "unrelated".into(),
+                    None,
+                    20,
+                ));
+                poll_fn(|cx| {
+                    assert!(read.as_mut().poll(cx).is_pending());
+                    Poll::Ready(())
+                })
+                .await;
+                println!("contention_start={}", json!({"pair":pair,"arm":arm}));
+                let start = Instant::now();
+                gate.release();
+                read.await.unwrap();
+                let read_ms = start.elapsed().as_secs_f64() * 1000.0;
+                for reply in replies {
+                    reply.await.unwrap();
+                }
+                held.await.unwrap();
+                println!(
+                    "contention_sample={}",
+                    json!({"pair":pair,"arm":arm,"readMs":read_ms,"allBarriersMs":start.elapsed().as_secs_f64()*1000.0,"barriers":if arm=="A"{16}else{2}})
+                );
+            }
+        }
+        drop(open);
+        service.workspace_close(Some(handle)).await.unwrap();
+    }
+}
 
 pub(crate) const AUTOMATION_CLAIM_MAX_ATTEMPTS: i64 = 2;
 
@@ -159,6 +531,13 @@ fn automation_group_handover_json(handover: &AutomationGroupHandover) -> Value {
 struct AutomationClaimNextParams {
     now_ms: Option<i64>,
     automation_id_prefix: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct AutomationMakeDurableParams {
+    #[serde(default, deserialize_with = "deserialize_optional_non_null")]
+    claim_id: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -307,64 +686,143 @@ fn automation_failure_json(failure: &AutomationFailure) -> Value {
     })
 }
 
-/// A claim without its field facts: what `automation.claimed`, settle,
-/// retry, and the claim history carry.
-pub(crate) fn automation_claim_json(claim: &AutomationClaim) -> Value {
-    let trigger = match &claim.trigger {
-        AutomationTrigger::Coordinate {
-            origin_id,
-            origin_seq,
-        } => json!({ "originId": origin_id, "originSeq": origin_seq }),
-        AutomationTrigger::History { history_id } => json!({ "historyId": history_id }),
-        AutomationTrigger::Moment { moment_order } => json!({ "momentOrder": moment_order }),
-        AutomationTrigger::Key { key } => json!({ "key": key }),
-    };
-    let mut value = json!({
-        "claimId": claim.claim_id,
-        "automationId": claim.automation_id,
-        "trigger": trigger,
-        "recordId": claim.record_id,
-        "collectionPath": claim.collection_path,
-        "depth": claim.depth,
-        "change": {
-            "kind": claim.change.kind.as_str(),
-            "authorOriginId": claim.change.author_origin_id,
-            "actorKind": claim.change.actor_kind.map(|kind| kind.as_str()),
-            "onBehalfOf": claim.change.on_behalf_of,
-            "sharedAuthor": claim.change.shared_author,
-            "liveCursor": claim.change.live_cursor,
-        },
-        "state": claim.state.as_str(),
-        "attempts": claim.attempts,
-        "run": claim.run,
-        "createdAtMs": claim.created_at_ms,
-        "updatedAtMs": claim.updated_at_ms,
-    });
-    if let Some(parent) = &claim.parent_claim_id {
-        value
-            .as_object_mut()
-            .expect("claim is an object")
-            .insert("parentClaimId".to_owned(), json!(parent));
+/// The trigger's own key fields, untagged: the field names tell them apart.
+#[derive(Serialize)]
+#[serde(untagged, rename_all_fields = "camelCase")]
+enum AutomationTriggerWire<'a> {
+    Coordinate { origin_id: &'a str, origin_seq: i64 },
+    History { history_id: i64 },
+    Moment { moment_order: i64 },
+    Key { key: &'a str },
+}
+
+impl<'a> From<&'a AutomationTrigger> for AutomationTriggerWire<'a> {
+    fn from(trigger: &'a AutomationTrigger) -> Self {
+        match trigger {
+            AutomationTrigger::Coordinate {
+                origin_id,
+                origin_seq,
+            } => AutomationTriggerWire::Coordinate {
+                origin_id,
+                origin_seq: *origin_seq,
+            },
+            AutomationTrigger::History { history_id } => AutomationTriggerWire::History {
+                history_id: *history_id,
+            },
+            AutomationTrigger::Moment { moment_order } => AutomationTriggerWire::Moment {
+                moment_order: *moment_order,
+            },
+            AutomationTrigger::Key { key } => AutomationTriggerWire::Key { key },
+        }
     }
-    if let Some(error) = &claim.error {
-        let object = value.as_object_mut().expect("claim is an object");
-        object.insert("error".to_owned(), json!(error));
+}
+
+/// Field facts only a served claim carries. `message` is the stored message
+/// JSON, present only on a message claim.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AutomationFactsWire<'a> {
+    fields: &'a [AutomationFieldFact],
+    fields_omitted: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    message: Option<&'a Value>,
+}
+
+/// An undeclared change attribute is null, not omitted.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AutomationChangeWire<'a> {
+    kind: &'static str,
+    author_origin_id: Option<&'a str>,
+    actor_kind: Option<&'static str>,
+    on_behalf_of: Option<&'a str>,
+    shared_author: Option<&'a SharedChangeAuthor>,
+    live_cursor: Option<i64>,
+    #[serde(flatten)]
+    facts: Option<AutomationFactsWire<'a>>,
+}
+
+/// An absent record or Collection is null; an absent parent claim or error
+/// is omitted.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AutomationClaimWire<'a> {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    parent_claim_id: Option<&'a str>,
+    claim_id: &'a str,
+    automation_id: &'a str,
+    trigger: AutomationTriggerWire<'a>,
+    record_id: Option<&'a str>,
+    collection_path: Option<&'a str>,
+    depth: u32,
+    change: AutomationChangeWire<'a>,
+    state: &'static str,
+    attempts: i64,
+    run: i64,
+    created_at_ms: i64,
+    updated_at_ms: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<&'a str>,
+}
+
+impl<'a> AutomationClaimWire<'a> {
+    fn new(claim: &'a AutomationClaim, facts: Option<&'a AutomationFieldFacts>) -> Self {
+        AutomationClaimWire {
+            parent_claim_id: claim.parent_claim_id.as_deref(),
+            claim_id: &claim.claim_id,
+            automation_id: &claim.automation_id,
+            trigger: AutomationTriggerWire::from(&claim.trigger),
+            record_id: claim.record_id.as_deref(),
+            collection_path: claim.collection_path.as_deref(),
+            depth: claim.depth,
+            change: AutomationChangeWire {
+                kind: claim.change.kind.as_str(),
+                author_origin_id: claim.change.author_origin_id.as_deref(),
+                actor_kind: claim.change.actor_kind.map(|kind| kind.as_str()),
+                on_behalf_of: claim.change.on_behalf_of.as_deref(),
+                shared_author: claim.change.shared_author.as_ref(),
+                live_cursor: claim.change.live_cursor,
+                facts: facts.map(|facts| AutomationFactsWire {
+                    fields: &facts.fields,
+                    fields_omitted: facts.omitted,
+                    message: facts.message.as_ref(),
+                }),
+            },
+            state: claim.state.as_str(),
+            attempts: claim.attempts,
+            run: claim.run,
+            created_at_ms: claim.created_at_ms,
+            updated_at_ms: claim.updated_at_ms,
+            error: claim.error.as_deref(),
+        }
     }
-    value
+}
+
+/// `automation.claimed`: the claim without its field facts, plus its workspace.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AutomationClaimedEventWire<'a> {
+    workspace_id: &'a str,
+    #[serde(flatten)]
+    claim: AutomationClaimWire<'a>,
+}
+
+/// A claim without its field facts: what settle, retry, and the claim
+/// history carry.
+fn automation_claim_json(claim: &AutomationClaim) -> Value {
+    json!(AutomationClaimWire::new(claim, None))
+}
+
+pub(crate) fn automation_claimed_event_json(workspace_id: &str, claim: &AutomationClaim) -> Value {
+    json!(AutomationClaimedEventWire {
+        workspace_id,
+        claim: AutomationClaimWire::new(claim, None),
+    })
 }
 
 /// A claim `claimNext` serves: the claim plus its change's field facts.
 fn served_automation_claim_json(claim: &AutomationClaim, facts: &AutomationFieldFacts) -> Value {
-    let mut value = automation_claim_json(claim);
-    let change = value["change"]
-        .as_object_mut()
-        .expect("claim change is an object");
-    change.insert("fields".to_owned(), json!(facts.fields));
-    change.insert("fieldsOmitted".to_owned(), json!(facts.omitted));
-    if let Some(message) = &facts.message {
-        change.insert("message".to_owned(), message.clone());
-    }
-    value
+    json!(AutomationClaimWire::new(claim, Some(facts)))
 }
 
 impl EngineService {
@@ -654,6 +1112,30 @@ impl EngineService {
         Ok(json!({ "pruned": pruned.pruned, "more": pruned.more }))
     }
 
+    pub(super) async fn automations_make_durable(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: AutomationMakeDurableParams = parse(params)?;
+        let open = self.open(handle.as_ref())?;
+        let cancellation = OperationCancellation::new(ctx);
+        let reply = open.durability.submit(
+            open.actor.clone(),
+            open.workspace_id.clone(),
+            params.claim_id,
+            cancellation.token(),
+        );
+        let token = cancellation.token();
+        tokio::select! {
+            biased;
+            () = token.cancelled() => return Err(cancellation.interruption("automations.makeDurable")),
+            result = reply => result.map_err(|_| WireError::new(ErrorCode::WorkspaceUnavailable, "workspace actor is unavailable"))??,
+        }
+        Ok(json!({}))
+    }
+
     pub(super) async fn automations_settle(
         &self,
         ctx: &RequestContext,
@@ -910,5 +1392,238 @@ impl EngineService {
         Ok(json!({
             "marks": marks.iter().map(automation_schedule_mark_json).collect::<Vec<_>>(),
         }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dohc_engine_domain::AutomationChange;
+    use dohc_engine_domain::AutomationClaimState;
+    use dohc_engine_domain::AutomationFactValue;
+    use dohc_engine_domain::ChangeActorKind;
+
+    fn claim(trigger: AutomationTrigger) -> AutomationClaim {
+        AutomationClaim {
+            parent_claim_id: None,
+            claim_id: "atc_1".to_owned(),
+            automation_id: "collection:tasks#stamp".to_owned(),
+            trigger,
+            record_id: None,
+            collection_path: None,
+            depth: 2,
+            change: AutomationChange {
+                kind: AutomationChangeKind::Message,
+                author_origin_id: None,
+                actor_kind: None,
+                on_behalf_of: None,
+                shared_author: None,
+                live_cursor: None,
+            },
+            state: AutomationClaimState::Pending,
+            attempts: 0,
+            run: 1,
+            error: None,
+            created_at_ms: 10,
+            updated_at_ms: 11,
+        }
+    }
+
+    #[test]
+    fn claim_projection_keeps_untagged_triggers_nulls_and_an_omitted_error() {
+        assert_eq!(
+            automation_claim_json(&claim(AutomationTrigger::Key {
+                key: "message:m1".to_owned(),
+            })),
+            json!({
+                "claimId": "atc_1",
+                "automationId": "collection:tasks#stamp",
+                "trigger": { "key": "message:m1" },
+                "recordId": null,
+                "collectionPath": null,
+                "depth": 2,
+                "change": {
+                    "kind": "message",
+                    "authorOriginId": null,
+                    "actorKind": null,
+                    "onBehalfOf": null,
+                    "sharedAuthor": null,
+                    "liveCursor": null,
+                },
+                "state": "pending",
+                "attempts": 0,
+                "run": 1,
+                "createdAtMs": 10,
+                "updatedAtMs": 11,
+            })
+        );
+        for (trigger, expected) in [
+            (
+                AutomationTrigger::Coordinate {
+                    origin_id: "origin".to_owned(),
+                    origin_seq: 4,
+                },
+                json!({ "originId": "origin", "originSeq": 4 }),
+            ),
+            (
+                AutomationTrigger::History { history_id: 5 },
+                json!({ "historyId": 5 }),
+            ),
+            (
+                AutomationTrigger::Moment { moment_order: 6 },
+                json!({ "momentOrder": 6 }),
+            ),
+        ] {
+            assert_eq!(automation_claim_json(&claim(trigger))["trigger"], expected);
+        }
+
+        let attributed = AutomationClaim {
+            parent_claim_id: Some("atc_0".to_owned()),
+            record_id: Some("record".to_owned()),
+            collection_path: Some("tasks".to_owned()),
+            change: AutomationChange {
+                kind: AutomationChangeKind::Changed,
+                author_origin_id: Some("origin".to_owned()),
+                actor_kind: Some(ChangeActorKind::Agent),
+                on_behalf_of: Some("user".to_owned()),
+                shared_author: Some(SharedChangeAuthor::Named {
+                    user_id: "friend".to_owned(),
+                    grant_id: "grant".to_owned(),
+                    grant_generation: 3,
+                }),
+                live_cursor: Some(9),
+            },
+            state: AutomationClaimState::Failed,
+            error: Some("handler failed".to_owned()),
+            ..claim(AutomationTrigger::History { history_id: 5 })
+        };
+        let value = automation_claim_json(&attributed);
+        assert_eq!(value["recordId"], json!("record"));
+        assert_eq!(value["collectionPath"], json!("tasks"));
+        assert_eq!(value["state"], json!("failed"));
+        assert_eq!(value["error"], json!("handler failed"));
+        assert_eq!(value["parentClaimId"], json!("atc_0"));
+        assert_eq!(
+            value["change"],
+            json!({
+                "kind": "changed",
+                "authorOriginId": "origin",
+                "actorKind": "agent",
+                "onBehalfOf": "user",
+                "sharedAuthor": {
+                    "kind": "named",
+                    "userId": "friend",
+                    "grantId": "grant",
+                    "grantGeneration": 3,
+                },
+                "liveCursor": 9,
+            })
+        );
+    }
+
+    #[test]
+    fn claimed_event_flattens_the_unserved_claim_beside_its_workspace() {
+        let absent = claim(AutomationTrigger::History { history_id: 5 });
+        let unattributed = automation_claimed_event_json("ws-1", &absent);
+        let mut expected = automation_claim_json(&absent);
+        expected["workspaceId"] = json!("ws-1");
+        assert_eq!(unattributed, expected);
+        assert_eq!(unattributed["recordId"], Value::Null);
+        assert_eq!(unattributed["collectionPath"], Value::Null);
+        assert!(unattributed.get("error").is_none());
+
+        let empty = AutomationClaim {
+            record_id: Some(String::new()),
+            collection_path: Some(String::new()),
+            depth: 0,
+            change: AutomationChange {
+                kind: AutomationChangeKind::Changed,
+                author_origin_id: Some(String::new()),
+                actor_kind: Some(ChangeActorKind::Human),
+                on_behalf_of: Some(String::new()),
+                shared_author: Some(SharedChangeAuthor::Link {
+                    grant_id: "grant".to_owned(),
+                    grant_generation: 3,
+                    principal_id: "principal".to_owned(),
+                }),
+                live_cursor: Some(0),
+            },
+            state: AutomationClaimState::Failed,
+            run: 0,
+            error: Some(String::new()),
+            created_at_ms: 0,
+            updated_at_ms: 0,
+            ..claim(AutomationTrigger::Key { key: String::new() })
+        };
+        assert_eq!(
+            automation_claimed_event_json("", &empty),
+            json!({
+                "workspaceId": "",
+                "claimId": "atc_1",
+                "automationId": "collection:tasks#stamp",
+                "trigger": { "key": "" },
+                "recordId": "",
+                "collectionPath": "",
+                "depth": 0,
+                "change": {
+                    "kind": "changed",
+                    "authorOriginId": "",
+                    "actorKind": "human",
+                    "onBehalfOf": "",
+                    "sharedAuthor": {
+                        "kind": "link",
+                        "grantId": "grant",
+                        "grantGeneration": 3,
+                        "principalId": "principal",
+                    },
+                    "liveCursor": 0,
+                },
+                "state": "failed",
+                "attempts": 0,
+                "run": 0,
+                "createdAtMs": 0,
+                "updatedAtMs": 0,
+                "error": "",
+            }),
+            "present empty strings and zeros stay present"
+        );
+    }
+
+    #[test]
+    fn only_a_served_claim_carries_field_facts() {
+        let claim = claim(AutomationTrigger::History { history_id: 5 });
+        assert!(
+            automation_claim_json(&claim)["change"]
+                .get("fieldsOmitted")
+                .is_none()
+        );
+
+        let record_facts = AutomationFieldFacts {
+            fields: vec![AutomationFieldFact {
+                field_name: "Status".to_owned(),
+                history_id: Some(5),
+                previous: None,
+                next: Some(AutomationFactValue::Whole {
+                    value: json!("done"),
+                }),
+            }],
+            omitted: 1,
+            message: None,
+        };
+        let served = served_automation_claim_json(&claim, &record_facts);
+        assert_eq!(served["change"]["fields"], json!(record_facts.fields));
+        assert_eq!(served["change"]["fieldsOmitted"], json!(1));
+        assert!(served["change"].get("message").is_none());
+
+        let message = json!({ "body": { "truncated": true, "bytes": 9 } });
+        let message_facts = AutomationFieldFacts {
+            fields: Vec::new(),
+            omitted: 0,
+            message: Some(message.clone()),
+        };
+        let served = served_automation_claim_json(&claim, &message_facts);
+        assert_eq!(served["change"]["fields"], json!([]));
+        assert_eq!(served["change"]["fieldsOmitted"], json!(0));
+        assert_eq!(served["change"]["message"], message);
     }
 }

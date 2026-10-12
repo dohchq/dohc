@@ -6,7 +6,6 @@ import {
   findMentions,
   matchMentionCandidates,
   scanMentionTokens,
-  toMentionSegments,
   type MentionCandidate,
 } from "./chatMentions";
 
@@ -60,18 +59,12 @@ describe("shared mention scanning", () => {
     expect(codeRanges(body)).toHaveLength(3);
   });
 
-  it("preserves exact offsets and surrounding text when segmenting", () => {
+  it("reports exact offsets for resolved mentions", () => {
     const body = "ask @agent.ops_v2, then @you";
     const mentions = findMentions(body, candidates, { ignoreCode: true });
     expect(mentions.map((mention) => body.slice(mention.start, mention.end))).toEqual([
       "@agent.ops_v2",
       "@you",
-    ]);
-    expect(toMentionSegments(body, candidates, { ignoreCode: true })).toEqual([
-      { type: "text", text: "ask " },
-      { type: "mention", text: "@agent.ops_v2", candidate: agent },
-      { type: "text", text: ", then " },
-      { type: "mention", text: "@you", candidate: you },
     ]);
   });
 
@@ -98,19 +91,12 @@ describe("shared mention scanning", () => {
     expect(
       findMentions(body, punctuationCandidates).map((mention) => mention.candidate.handle),
     ).toEqual(["agent", "agent", "agent", "a.b"]);
-    expect(toMentionSegments("@agent.", punctuationCandidates)).toEqual([
-      { type: "mention", text: "@agent", candidate: punctuationCandidates[0] },
-      { type: "text", text: "." },
-    ]);
   });
 
   it("drops tokens whose handle trims to nothing", () => {
     for (const body of ["@...", "@___", "wait @... what"]) {
       expect(scanMentionTokens(body)).toEqual([]);
       expect(findMentions(body, candidates)).toEqual([]);
-      expect(toMentionSegments(body, candidates)).toEqual([
-        { type: "text", text: body },
-      ]);
     }
   });
 });

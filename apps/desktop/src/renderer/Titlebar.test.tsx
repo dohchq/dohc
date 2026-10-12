@@ -25,9 +25,9 @@ describe("workspaceName", () => {
 });
 
 describe("Titlebar", () => {
-  it("describes agent activity without nesting the status inside the chats button", () => {
-    render(<Titlebar agentActive chatsSidebar={{ visible: true, onToggle: vi.fn() }} />);
-    const toggle = screen.getByRole("button", { name: "Toggle chats sidebar" });
+  it("describes agent activity without nesting the status inside the About button", () => {
+    render(<Titlebar agentActive aboutSidebar={{ visible: true, onToggle: vi.fn() }} />);
+    const toggle = screen.getByRole("button", { name: "Toggle About" });
     const status = screen.getByRole("status", { name: "Agent running" });
     expect(toggle.contains(status)).toBe(false);
     expect(toggle.getAttribute("aria-describedby")).toBe(status.id);
@@ -50,28 +50,28 @@ describe("Titlebar", () => {
     expect(screen.getByTestId("titlebar-quick-open").textContent).toContain("Ctrl P");
   });
 
-  it("toggles the primary and chats sidebars from VS Code-style layout controls", () => {
+  it("toggles the primary sidebar and the About rail from VS Code-style layout controls", () => {
     const onTogglePrimary = vi.fn();
-    const onToggleChats = vi.fn();
+    const onToggleAbout = vi.fn();
 
     render(
       <Titlebar
         workspace={workspace}
         workspaces={[workspace]}
         primarySidebar={{ visible: true, onToggle: onTogglePrimary }}
-        chatsSidebar={{ visible: false, onToggle: onToggleChats }}
+        aboutSidebar={{ visible: false, onToggle: onToggleAbout }}
       />,
     );
 
     const primary = screen.getByRole("button", { name: "Toggle primary sidebar" });
-    const chats = screen.getByRole("button", { name: "Toggle chats sidebar" });
+    const about = screen.getByRole("button", { name: "Toggle About" });
     expect(primary.getAttribute("aria-pressed")).toBe("true");
-    expect(chats.getAttribute("aria-pressed")).toBe("false");
+    expect(about.getAttribute("aria-pressed")).toBe("false");
 
     fireEvent.click(primary);
-    fireEvent.click(chats);
+    fireEvent.click(about);
     expect(onTogglePrimary).toHaveBeenCalledOnce();
-    expect(onToggleChats).toHaveBeenCalledOnce();
+    expect(onToggleAbout).toHaveBeenCalledOnce();
   });
 
   // The quick-open button is centered on the window, so a long workspace name
@@ -167,7 +167,7 @@ describe("Titlebar", () => {
     expect(document.documentElement.dataset.menuOpen).toBeUndefined();
   });
 
-  it("omits the chats layout control when the workspace has no chats sidebar", () => {
+  it("omits the About layout control when the workspace has no About rail", () => {
     render(
       <Titlebar
         workspace={workspace}
@@ -177,7 +177,7 @@ describe("Titlebar", () => {
     );
 
     expect(screen.getByTestId("titlebar-primary-sidebar")).toBeTruthy();
-    expect(screen.queryByTestId("titlebar-chats-sidebar")).toBeNull();
+    expect(screen.queryByTestId("titlebar-about-sidebar")).toBeNull();
   });
 });
 

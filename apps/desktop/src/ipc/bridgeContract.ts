@@ -1,7 +1,10 @@
 import { SharedDocumentOpenState } from "./sharedDocumentOpenState";
+import { shareCopyOperations } from "./shareCopyOperations";
+export type { ShareCopyInput, ShareCopyResult } from "@dohc/workspace-contracts/share-copy";
 import { accessOperations } from "./accessOperations";
 import { SaveStateSchema } from "@dohc/workspace-contracts/save-state-schema";
 import { nameByteLength } from "@dohc/workspace-contracts/names";
+import { LIVE_UPDATE_IDENTIFIER_MAX_BYTES } from "@dohc/live-session-contract/live-update-admission";
 import { MAX_SHARE_PROPOSAL_OPS } from "@dohc/security-contract/share-proposal-bound";
 import { WORKSPACE_POLICY_PATHS } from "@dohc/security-contract/effective-policy";
 import type {OwnerRestoreRequest, OwnerRestoreAction, OwnerRestoreResult} from "./ownerRestoreContract";
@@ -82,14 +85,15 @@ import {
   MAX_OPEN_TABS,
   MAX_PINNED_PATHS,
   MAX_RECENT_FILES,
-  CHATS_MAX_WIDTH,
-  CHATS_MIN_WIDTH,
+  ABOUT_MAX_WIDTH,
+  ABOUT_MIN_WIDTH,
   OPEN_EDITORS_MAX_HEIGHT,
   OPEN_EDITORS_MIN_HEIGHT,
   SIDEBAR_MAX_WIDTH,
   SIDEBAR_MIN_WIDTH,
   APP_VIEW_ID_PREFIX,
   parseAppViewId,
+  SHARING_VIEW_ID,
   VIEW_IDS,
 } from "../renderer/workbench/workbenchState";
 import {
@@ -707,7 +711,9 @@ const RecordHistoryValue = z.object({ present: z.boolean(), value: CollectionVal
 // "unchecked" when History must ask with locateRecordHistoryRun.
 const RecordHistoryRunLocation = z.enum(["available", "unchecked"]);
 const RecordHistoryAuthor = z.discriminatedUnion("kind", [
-  z.object({ kind: z.literal("agent"), name: z.string().min(1).max(4096) }),
+  z.object({ kind: z.literal("link"), agentName: z.string().min(1).max(4096).optional() }).strict(),
+  z.object({ kind: z.literal("human"), name: z.string().min(1).max(4096) }),
+  z.object({ kind: z.literal("agent"), name: z.string().min(1).max(4096), person: z.string().min(1).max(4096).optional() }),
   z.object({
     kind: z.literal("automation"),
     automationId: z.string().min(1).max(4096),
@@ -1323,6 +1329,9 @@ const SYNC_STATUS_BASE_FIELDS = {
   // an omitted boolean reads as false, and a producer that cannot say which
   // cause it means must not compile.
   historyRecordingUnavailable: z.boolean(),
+  // A failed feed read or unavailable watcher does not establish that the
+  // history recorder stopped. Omitted once observation recovers.
+  fileObservationFailure: z.enum(["read-failed", "unavailable"]).optional(),
   // True when this workspace is a shared view, fed by the share's pull
   // and never a recorder of its own. A capability, not a failure. Required
   // for the same reason as its neighbour.
@@ -1422,7 +1431,7 @@ export type SyncStatusResult = z.infer<typeof SyncStatusResult>;
 
 export const CaptureRecoveryStatusResult = z.object({
   captureRecoveries: z.array(z.object({
-    momentId: z.string(), versionId: z.string(), objectId: z.string(), path: z.string(), captureMomentId: z.string(),
+    momentId: z.string(), versionId: z.string(), objectId: z.string(), path: z.string(), captureMomentId: z.string(), deleted: z.boolean(),
   })),
 });
 export type CaptureRecoveryStatusResult = z.infer<typeof CaptureRecoveryStatusResult>;
@@ -1446,6 +1455,18 @@ export const captureRecoveryOperations = {
     guard: "trusted-sender",
     scope: "workspace",
     handlerCheck: { check: "withRendererWorkspaceOperation", reason: "The handler clears recovery only in the sending window's active workspace." },
+  },
+} satisfies OperationTable;
+
+export const fileObservationOperations = {
+  retryFileObservation: {
+    capabilityId: "file.observation.retry",
+    channel: "desktop:retry-file-observation",
+    payload: WorkspaceIdPayload,
+    result: SyncStatusResult,
+    guard: "trusted-sender",
+    scope: "workspace",
+    handlerCheck: { check: "withRendererWorkspaceOperation", reason: "The read starts only for the sending window's active workspace." },
   },
 } satisfies OperationTable;
 
@@ -1511,11 +1532,24 @@ export type RebuildEngineStoreResult = z.infer<typeof RebuildEngineStoreResult>;
 
 const MOMENT_TEXT = engineStoredText("moment body");
 
+// An identifier the relay accepted a shared change under: a live document's
+// collaborator or Edit link, or a direct write's. A live author snapshot's
+// names have the same bound.
+const SHARED_AUTHOR_ID = z.string().min(1).refine(
+  (value) => new TextEncoder().encode(value).byteLength <= LIVE_UPDATE_IDENTIFIER_MAX_BYTES,
+  "Shared author identifiers are at most 512 UTF-8 bytes.",
+);
+
+// A Collection automation's name or its Collection's, as History reads it.
+export const AUTOMATION_AUTHOR_TEXT_MAX = 4096;
+const AUTOMATION_AUTHOR_TEXT = z.string().min(1).max(AUTOMATION_AUTHOR_TEXT_MAX);
+
 const EngineMomentAuthor = z.union([
   z.object({ kind: z.literal("unattributed") }).strict(),
   z.object({
     kind: z.literal("agent"),
     agentId: z.string().min(1),
+    agentName: SHARED_AUTHOR_ID.optional(),
     onBehalfOf: z.string().min(1).optional(),
     agentRunId: z.string().min(1).optional(),
     depth: z.number().int().positive().optional(),
@@ -1523,8 +1557,14 @@ const EngineMomentAuthor = z.union([
   z.object({
     kind: z.literal("human"),
     humanId: z.string().min(1),
-    humanName: z.string().min(1).max(500).optional(),
+    relayConfirmed: z.literal(true).optional(),
     onBehalfOf: z.string().min(1).optional(),
+  }).strict(),
+  z.object({
+    kind: z.literal("human"),
+    humanId: SHARED_AUTHOR_ID,
+    humanName: SHARED_AUTHOR_ID,
+    relayConfirmed: z.literal(true).optional(),
   }).strict(),
   z.object({
     kind: z.literal("public"),
@@ -1545,8 +1585,8 @@ const EngineMomentAuthor = z.union([
   }).strict(),
   z.object({
     kind: z.literal("link"),
-    publicPrincipalId: z.string().min(1).max(500),
-    label: z.string().min(1).max(500),
+    publicPrincipalId: SHARED_AUTHOR_ID,
+    label: SHARED_AUTHOR_ID,
   }).strict(),
   z.object({
     kind: z.literal("automation"),
@@ -1565,21 +1605,25 @@ export const EngineMomentRecord = z.object({
   origin: z.enum(["api", "local-file", "restore", "sync", "unknown", "ydoc", "capture-recovery", "capture-recovery-cleared"]),
   authors: z.array(EngineMomentAuthor).min(1).optional(),
   // Present only when a dohc-tracked agent run authored the moment; main
-  // resolves the configured agent name for local runs.
-  agentAuthorName: z.string().min(1).max(500).optional(),
+  // resolves the configured agent name for local runs. A live author
+  // snapshot's agent reads as the name it declared.
+  agentAuthorName: z.string().min(1).max(LIVE_UPDATE_IDENTIFIER_MAX_BYTES).optional(),
   // Present when this computer's person authored the moment: main names them
   // as the account settled here now, or this installation when signed out.
   personAuthorName: z.string().min(1).max(500).optional(),
+  // Present when a live edit's relay-admitted author snapshot names its one
+  // author: the account holder's name, or the link holder's label.
+  liveAuthorName: z.string().min(1).max(4096).optional(),
   publicAuthor: z.object({kind: z.literal("public"), principalId: z.string().min(1).max(500), grantId: z.string().min(1).max(500)}).strict().optional(),
   // Present when a Collection automation authored the moment: its name as
   // this computer's automations.yaml has it, and the Collection it belongs to.
   // `collection` is left out once this computer no longer has the automation's Collection.
-  automationAuthor: z.object({ name: z.string().min(1).max(4096), collection: z.string().min(1).max(4096).optional() }).strict().optional(),
+  automationAuthor: z.object({ name: AUTOMATION_AUTHOR_TEXT, collection: AUTOMATION_AUTHOR_TEXT.optional() }).strict().optional(),
   // Present when a person the owner shared with wrote the moment directly
   // (ADR 0013): main names them from the owner's share roster. The user id
   // picks them for Stop and restore.
   namedAuthor: z.object({
-    userId: z.string().min(1).max(256),
+    userId: SHARED_AUTHOR_ID,
     label: z.string().min(1).max(400),
   }).strict().optional(),
   // Present when an Edit share link wrote the moment directly (ADR 0013).
@@ -1587,10 +1631,14 @@ export const EngineMomentRecord = z.object({
   // used it; neither names a person.
   linkAuthor: z.object({
     kind: z.literal("link"),
-    grantId: z.string().min(1).max(500),
+    grantId: SHARED_AUTHOR_ID,
     grantGeneration: z.number().int().positive(),
-    principalId: z.string().min(1).max(500),
+    principalId: SHARED_AUTHOR_ID,
   }).strict().optional(),
+  // Present when more than one author wrote the moment: how each reads, in
+  // the order of `authors`. The singleton author fields stay absent then.
+  // The longest reads as an automation's name in its Collection.
+  authorLabels: z.array(z.string().min(1).max(2 * AUTOMATION_AUTHOR_TEXT_MAX + " in ".length)).min(2).optional(),
   summary: z.string().max(500).optional(),
   correlationId: z.string().max(200).optional(),
   // Workspace-global recording order: the pagination cursor and a monotonic
@@ -3143,6 +3191,27 @@ const SitePackageInfo = z
     }
   });
 export type SitePackageInfo = z.infer<typeof SitePackageInfo>;
+
+export const FolderAppPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  folder: z.union([z.literal("."), PATH_STRING.refine(isNormalizedRelativePath)]),
+}).strict();
+export type FolderAppPayload = z.infer<typeof FolderAppPayload>;
+export const FolderAppAnswer = z.object({
+  workspaceId: WORKSPACE_ID,
+  folder: PATH_STRING,
+  isApp: z.boolean(),
+  run: z.object({ path: PATH_STRING, entryPath: PATH_STRING.nullable(), previewMode: z.enum(["static", "dev", "build"]).nullable() }).nullable(),
+});
+export type FolderAppAnswer = z.infer<typeof FolderAppAnswer>;
+export const folderAppOfferOperations = {
+  getFolderApp: {
+    capabilityId: "app.recognition.read", channel: "desktop:get-folder-app",
+    payload: FolderAppPayload, result: FolderAppAnswer,
+    guard: "active-workspace", scope: "workspace",
+    inactiveMessage: "Open this workspace to inspect its apps.",
+  },
+} as const satisfies OperationTable;
 
 export const ListSitesPayload = z.object({
   workspaceId: WORKSPACE_ID,
@@ -4789,6 +4858,7 @@ export type OpenSharedViewResult = z.infer<typeof OpenSharedViewResult>;
 
 export const RefreshSharedViewPayload = z.object({
   workspaceId: WORKSPACE_ID,
+  trigger: z.enum(["manual", "background", "press-burst"]).optional(),
 });
 export type RefreshSharedViewPayload = z.infer<typeof RefreshSharedViewPayload>;
 
@@ -4973,15 +5043,48 @@ export type StopAndRestoreTarget = z.infer<typeof StopAndRestoreTarget>;
 export const StopAndRestorePayload = z.object({
   workspaceId: WORKSPACE_ID,
   target: StopAndRestoreTarget,
+  label: z.string().max(2_000).optional(),
   reviewPaths: z.array(PATH_STRING.refine(isNormalizedRelativePath)).max(4096).optional(),
 }).strict();
 export type StopAndRestorePayload = z.infer<typeof StopAndRestorePayload>;
-export const DiscardLiveDraftRecoveryPayload = z.object({workspaceId: WORKSPACE_ID, path: PATH_STRING.refine(isNormalizedRelativePath), objectId: z.string().min(1).max(512), snapshotSha256: z.string().regex(/^[a-f0-9]{64}$/), discardedAtMs: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER)}).strict();
+export const LiveDraftRecoveryRecord = z.object({
+  recordId: z.string().regex(/^[a-f0-9]{64}$/),
+  path: PATH_STRING.refine(isNormalizedRelativePath),
+  objectId: z.string().min(1).max(512),
+  text: z.string(),
+  updateBase64: z.string(),
+}).strict();
+export type LiveDraftRecoveryRecord = z.infer<typeof LiveDraftRecoveryRecord>;
+export const DiscardLiveDraftRecoveryPayload = z.object({workspaceId: WORKSPACE_ID, path: PATH_STRING.refine(isNormalizedRelativePath), objectId: z.string().min(1).max(512), snapshotSha256: z.string().regex(/^[a-f0-9]{64}$/), discardedAtMs: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER), recordId: LiveDraftRecoveryRecord.shape.recordId.optional()}).strict();
+export const TypingRecoveryFailureSchema = z.object({kind: z.enum(["checkpoint", "import"]), path: z.string(), detail: z.string(), checkpointId: z.string().min(1).optional(), reason: z.enum(["author-refused","invalid-author","history-missing","drawing-unavailable"]).optional(), retryable: z.boolean().optional()}).strict();
 export const liveDraftRecoveryOperations = {
+  typingRecovery: {
+    capabilityId: "document.typing.recovery",
+    channel: "desktop:typing-recovery",
+    payload: z.discriminatedUnion("action", [z.object({workspaceId: WORKSPACE_ID, action: z.enum(["read", "flush", "retry"])}).strict(), z.object({workspaceId: WORKSPACE_ID, action: z.enum(["copy", "discard", "dismiss"]), checkpointId: z.string().min(1).max(512)}).strict()]),
+    result: z.union([
+      z.object({failures: z.array(TypingRecoveryFailureSchema), outcome: z.enum(["copied", "discarded", "missing"]).optional()}).strict(),
+      z.object({failures: z.array(TypingRecoveryFailureSchema), outcome: z.enum(["replayed", "covered"]), momentId: z.null()}).strict(),
+      z.object({failures: z.array(TypingRecoveryFailureSchema), outcome: z.literal("imported"), momentId: OPAQUE_ID}).strict(),
+    ]),
+    guard: "active-workspace",
+    scope: "workspace",
+    inactiveMessage: "This window changed workspaces.",
+  },
+  listLiveDraftRecovery: {
+    capabilityId: "document.draft.list",
+    channel: "desktop:list-live-draft-recovery",
+    payload: z.object({workspaceId: WORKSPACE_ID}).strict(),
+    result: z.array(LiveDraftRecoveryRecord),
+    guard: "active-workspace",
+    scope: "workspace",
+    inactiveMessage: "This window changed workspaces.",
+  },
   discardLiveDraftRecovery: {
     capabilityId: "document.draft.discard",
     channel: "desktop:discard-live-draft-recovery",
     payload: DiscardLiveDraftRecoveryPayload,
+    result: z.array(LiveDraftRecoveryRecord),
     guard: "active-workspace",
     scope: "workspace",
     inactiveMessage: "This window changed workspaces.",
@@ -5023,20 +5126,51 @@ export const StopAndRestoreResult = z.discriminatedUnion("status", [
     // The step a failure stopped, with why; what the fields above count happened.
     // At files, this try undid no run.
     unfinished: z.object({ step: z.enum(["files", "runs"]), message: z.string() }).strict().nullable(),
+    canUndoFiles: z.boolean().optional(),
   }).strict(),
   // Access stopped, but this computer has not received every change the
   // person wrote yet. Nothing was restored; trying again continues.
   z.object({ status: z.literal("waiting") }).strict(),
 ]);
 export type StopAndRestoreResult = z.infer<typeof StopAndRestoreResult>;
+export const PendingStopAndRestoresPayload = z.object({workspaceId: WORKSPACE_ID}).strict();
+export type PendingStopAndRestoresPayload = z.infer<typeof PendingStopAndRestoresPayload>;
+export const PendingStopAndRestoresResult = z.array(z.object({
+  target: StopAndRestoreTarget, label: z.string(), filesUndone: z.boolean(),
+  undoingFiles: z.boolean().optional(),
+  receipts: z.array(z.object({path: PATH_STRING, restoredMomentId: OPAQUE_ID, removed: z.boolean().optional()})),
+  result: StopAndRestoreResult,
+}));
+export type PendingStopAndRestoresResult = z.infer<typeof PendingStopAndRestoresResult>;
+export const stopAndRestoreRecoveryOperations = {
+  dismissStopAndRestore: {
+    capabilityId: "share.restore.pending.dismiss",
+    channel: "desktop:dismiss-stop-and-restore",
+    payload: z.object({workspaceId: WORKSPACE_ID, target: StopAndRestoreTarget}).strict(),
+    guard: "active-workspace",
+    scope: "workspace",
+    inactiveMessage: "This window changed workspaces.",
+  },
+  pendingStopAndRestores: {
+    capabilityId: "share.restore.pending.read",
+    channel: "desktop:pending-stop-and-restores",
+    payload: PendingStopAndRestoresPayload,
+    result: PendingStopAndRestoresResult,
+    guard: "active-workspace",
+    scope: "workspace",
+    inactiveMessage: "dohc could not read unfinished Stop and restore progress because this window changed workspaces.",
+  },
+} satisfies OperationTable;
 export const UndoStopAndRestorePayload = z.object({
   workspaceId: WORKSPACE_ID,
-  restoredMomentIds: z.array(OPAQUE_ID).min(1).max(20_000),
+  target: StopAndRestoreTarget.optional(),
+  restoredMomentIds: z.array(OPAQUE_ID).max(20_000),
   reviewPaths: z.array(PATH_STRING.refine(isNormalizedRelativePath)).max(4096).optional(),
-}).strict();
+}).strict().refine(input => input.restoredMomentIds.length > 0 || input.target !== undefined);
 export type UndoStopAndRestorePayload = z.infer<typeof UndoStopAndRestorePayload>;
 export const UndoStopAndRestoreResult = z.object({
   errorMessage: z.string().max(2_000).nullable(),
+  recovered: z.array(z.object({path: PATH_STRING, restoredMomentId: OPAQUE_ID, removed: z.boolean().optional()})).optional(),
   // Outcomes identify the submitted restore moment, newest first.
   files: z.array(z.discriminatedUnion("kind", [
     z.object({ momentId: OPAQUE_ID, kind: z.literal("restored"),
@@ -5227,6 +5361,7 @@ export type AutomationRunWaitingEvent = { workspaceId: string; claimId: string; 
 
 const RefreshSharedViewSuccessResult = z.object({
   ok: z.literal(true),
+  probed: z.literal(true).optional(),
   // "ended" means the granter revoked the share: the local view stays
   // readable but stops refreshing, and the UI says so honestly.
   status: z.enum(["updated", "unchanged", "ended"]),
@@ -5256,6 +5391,8 @@ const RefreshSharedViewSuccessResult = z.object({
 
 const RefreshSharedViewFailureResult = z.object({
   ok: z.literal(false),
+  probed: z.literal(true).optional(),
+  errorKind: z.enum(["unauthorized", "transient"]).optional(),
   // Capture runs before the pull. A failed pull can still leave repaired
   // projection files that the renderer must repaint.
   changedPaths: z.number().int().nonnegative(),
@@ -5278,6 +5415,13 @@ export type CheckSharedViewAccessResult = z.infer<typeof CheckSharedViewAccessRe
 
 // The handler owns its workspace operation so a stale check replies unverified.
 export const sharedViewAccessOperations = {
+  refreshSharedView: {
+    capabilityId: "share.view.refresh",
+    scope: "workspace",
+    handlerCheck: { check: "sharedViewsIpc.currentRendererSession/withRendererWorkspaceOperation", reason: "An unchanged probe checks the active session without opening the store. Full refreshes hold the workspace operation." },
+    channel: "desktop:refresh-shared-view",
+    payload: RefreshSharedViewPayload, result: RefreshSharedViewResult, guard: "trusted-sender",
+  },
   dismissShareCaptureNotice: {
     capabilityId: "share.capture.notice.dismiss",
     scope: "workspace",
@@ -5354,8 +5498,7 @@ export const UnmountShareResult = z.object({
 export type UnmountShareResult = z.infer<typeof UnmountShareResult>;
 
 // Local agent integration. An agent run is a LOCAL concept: a small
-// record persisted to .dohc/agent-runs.json. Enabling a run (optionally) spawns
-// the managed MCP stdio child for the workspace and sets the watcher's
+// record persisted to .dohc/agent-runs.json. Starting a run sets the watcher's
 // active-run slot, so the run's writes are attributed to the agent.
 export const AgentRunPayload = z.object({
   workspaceId: WORKSPACE_ID,
@@ -5382,7 +5525,6 @@ export const StartAgentRunResult = AgentRunRecordSchema;
 export type StartAgentRunResult = z.infer<typeof StartAgentRunResult>;
 
 export const AgentRunStatusResult = z.object({
-  mcpEnabled: z.boolean(),
   activeRun: AgentRunRecordSchema.nullable(),
   lastRun: AgentRunRecordSchema.nullable(),
 });
@@ -5614,17 +5756,17 @@ const APP_VIEW_ID = z
 
 export const WorkspaceUiState = z.object({
   version: z.literal(3),
-  // dohc's own views or a pinned app. The catch keeps a stored id that names
-  // neither from failing the file.
-  activeView: z.union([z.enum(VIEW_IDS), APP_VIEW_ID]).catch("explorer"),
+  // dohc's own views, Sharing, or a pinned app. The catch keeps a stored id
+  // that names none of them from failing the file.
+  activeView: z.union([z.enum(VIEW_IDS), z.literal(SHARING_VIEW_ID), APP_VIEW_ID]).catch("explorer"),
   sidebarVisible: z.boolean(),
   sidebarWidth: z.number().int().min(SIDEBAR_MIN_WIDTH).max(SIDEBAR_MAX_WIDTH),
   editorGroups: WorkspaceEditorGroups,
   activeEditorGroup: z.string().min(1).max(MAX_EDITOR_GROUP_ID_CHARS),
-  // The right-hand Chats panel. Optional fields degrade independently when a
+  // The right-hand About rail. Optional fields degrade independently when a
   // version-3 file is hand-edited or lacks a newer cosmetic setting.
-  chatsVisible: z.boolean().optional(),
-  chatsWidth: z.number().int().min(CHATS_MIN_WIDTH).max(CHATS_MAX_WIDTH).optional(),
+  aboutVisible: z.boolean().optional(),
+  aboutWidth: z.number().int().min(ABOUT_MIN_WIDTH).max(ABOUT_MAX_WIDTH).optional(),
   // The catch keeps a foreign height from nulling an otherwise valid file.
   openEditorsHeight: z
     .number()
@@ -5940,6 +6082,53 @@ export const reportingOperations = {
     scope: "device",
     channel: "desktop:report-renderer-error",
     payload: RendererErrorPayload, guard: "trusted-sender",
+  },
+} satisfies OperationTable;
+
+// The usage record: counts dohc keeps on this computer and never sends. Only
+// Privacy reads or changes it; no CLI, MCP or share-link door does. `counted`
+// is false where this build does not count that door, so a zero there means
+// nothing. `file` is for this computer's screen only, never for a copy.
+const UsageRecordCell = z.strictObject({ count: z.number().int().nonnegative(), counted: z.boolean() });
+export const UsageRecordRow = z.strictObject({
+  capabilityId: z.string().max(128),
+  label: z.string().max(200),
+  doors: z.strictObject({ renderer: UsageRecordCell, cli: UsageRecordCell, mcp: UsageRecordCell, automation: UsageRecordCell }),
+  lastUsed: z.iso.date().nullable(),
+});
+export type UsageRecordRow = z.infer<typeof UsageRecordRow>;
+export const UsageRecordResult = z.discriminatedUnion("status", [
+  z.strictObject({
+    status: z.literal("readable"),
+    enabled: z.boolean(),
+    file: z.string().max(4096),
+    since: z.iso.date().nullable(),
+    incompleteDays: z.number().int().nonnegative(),
+    rows: z.array(UsageRecordRow).max(500),
+  }),
+  // dohc leaves a record it cannot read as it is, and counts nothing.
+  z.strictObject({ status: z.literal("unreadable"), file: z.string().max(4096), code: z.string().max(64) }),
+]);
+export type UsageRecordResult = z.infer<typeof UsageRecordResult>;
+
+export const usageRecordOperations = {
+  readUsageRecord: {
+    capabilityId: "usage.read",
+    scope: "device",
+    channel: "desktop:read-usage-record",
+    payload: z.strictObject({}), result: UsageRecordResult, guard: "trusted-sender",
+  },
+  clearUsageRecord: {
+    capabilityId: "usage.clear",
+    scope: "device",
+    channel: "desktop:clear-usage-record",
+    payload: z.strictObject({}), guard: "trusted-sender",
+  },
+  setUsageRecordEnabled: {
+    capabilityId: "usage.switch",
+    scope: "device",
+    channel: "desktop:set-usage-record-enabled",
+    payload: z.strictObject({ enabled: z.boolean() }), guard: "trusted-sender",
   },
 } satisfies OperationTable;
 
@@ -6468,6 +6657,7 @@ export const ReadOnlyTransitionCause = z.enum(["access-ended", "reconnecting", "
 export type ReadOnlyTransitionCause = z.infer<typeof ReadOnlyTransitionCause>;
 
 export const EngineYDocSaveStateEvent = z.object({
+  typingUnresolved: z.boolean().optional(),
   readOnlyCause: ReadOnlyTransitionCause.optional(),
   authorCapacity: z.boolean().optional(),
   editRefusal: z.object({
@@ -6520,12 +6710,16 @@ export const LaunchMarksResult = z.object({
 export type LaunchMarksResult = z.infer<typeof LaunchMarksResult>;
 
 export interface DohcDesktopBridge
-  extends OperationBridge<typeof accessOperations>,
+  extends OperationBridge<typeof shareCopyOperations>,
+    OperationBridge<typeof accessOperations>,
     OperationBridge<typeof workspaceVersionOperations>,
     OperationBridge<typeof captureRecoveryOperations>,
+    OperationBridge<typeof fileObservationOperations>,
     OperationBridge<typeof workspaceSearchOperations>,
+    OperationBridge<typeof folderAppOfferOperations>,
     OperationBridge<typeof crashReportOperations>,
     OperationBridge<typeof reportingOperations>,
+    OperationBridge<typeof usageRecordOperations>,
     OperationBridge<typeof noticeOperations>,
     OperationBridge<typeof scheduleHostOperations>,
     OperationBridge<typeof chatDispatchNoticeOperations>,
@@ -6533,6 +6727,7 @@ export interface DohcDesktopBridge
     OperationBridge<typeof shareDirectWriteDeliveryOperations>,
     OperationBridge<typeof engineYDocAdmissionOperations>,
     OperationBridge<typeof liveDraftRecoveryOperations>,
+    OperationBridge<typeof stopAndRestoreRecoveryOperations>,
     OperationBridge<typeof engineYDocSaveOperations> {
   listOwnerLiveDocuments(payload: ListOwnerLiveDocumentsPayload): Promise<OwnerLiveDocumentsResult>;
   listOwnerLiveRefusals(payload: ListOwnerLiveRefusalsPayload): Promise<OwnerLiveRefusalsResult>;
@@ -6762,7 +6957,6 @@ export interface DohcDesktopBridge
   leaveSharedChannel(payload: LeaveSharedChannelPayload): Promise<void>;
   // Relay shares: receive side — read-only shared views.
   openSharedView(payload: OpenSharedViewPayload): Promise<OpenSharedViewResult>;
-  refreshSharedView(payload: RefreshSharedViewPayload): Promise<RefreshSharedViewResult>;
   dismissShareSkips(payload: DismissShareSkipsPayload): Promise<void>;
   // Collection automations, for the ⚡ panel.
   listCollectionAutomations(payload: ListCollectionAutomationsPayload): Promise<ListCollectionAutomationsResult>;
@@ -6958,6 +7152,8 @@ export interface DohcDesktopBridge
     payload: WorkspaceIdPayload,
   ): Promise<GetWorkspaceUiStateResult>;
   setWorkspaceUiState(payload: SetWorkspaceUiStatePayload): Promise<void>;
+  // Cached History names changed. Subscribers re-read with workspace/request guards.
+  onHistoryNamesChanged(listener: (event: WorkspaceIdPayload) => void): () => void;
   // Live push: main signals the renderer when the active workspace's files
   // or history changed (settled filesystem batch recorded). Main filters by
   // each window's active workspace, so a window only hears about its own
@@ -7045,6 +7241,7 @@ export interface DohcDesktopBridge
   // Streamed result batches, validated batch-by-batch in the preload. Returns
   // an unsubscribe function. The searchId round-trips so the renderer drops
   // batches that belong to a superseded search.
+  onFolderAppChanged(listener: (answer: FolderAppAnswer) => void): () => void;
   onSearchResults(listener: (batch: SearchResultsEvent) => void): () => void;
   // WS-G2-C-2 engine Y.Doc editor binding. The renderer mints a sessionId and
   // opens a live engine Y.Doc session for a supported live file; main constructs the

@@ -48,17 +48,17 @@ async fn write(
     path: &str,
     text: &str,
 ) {
-    call(
+    call_keyed(
         transport,
         handle,
         id,
         "versionedText.write",
+        &format!("write-{id}"),
         json!({
             "versionId": version_id,
             "path": path,
             "text": text,
             "origin": "api",
-            "requestId": format!("write-{id}"),
         }),
     )
     .await;

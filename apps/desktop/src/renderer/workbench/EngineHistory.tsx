@@ -72,11 +72,18 @@ export function engineOriginLabel(origin: EngineMomentRecord["origin"]): string 
 // names the link and a short form of the browser session that used it, so
 // it never reads like an app submission from a link holder. A restore names
 // this computer's person who made it; their other edits read as a local file
-// edit or a live edit. Everything else keeps its actor-neutral origin label.
+// edit or a live edit. A live edit the relay admitted from an account or link
+// holder names them. Everything else keeps its actor-neutral origin label.
 export function engineMomentSourceLabel(
-  moment: Pick<EngineMomentRecord, "origin" | "agentAuthorName" | "personAuthorName" | "publicAuthor" | "linkAuthor" | "automationAuthor" | "namedAuthor">,
+  moment: Pick<EngineMomentRecord, "origin" | "agentAuthorName" | "personAuthorName" | "liveAuthorName" | "publicAuthor" | "linkAuthor" | "automationAuthor" | "namedAuthor" | "authorLabels">,
 ): string {
   if (moment.origin === "restore" && moment.personAuthorName !== undefined) return moment.personAuthorName;
+  if (moment.authorLabels) {
+    const [first, second, third, ...rest] = moment.authorLabels;
+    const shown = [first, second, third].filter((label): label is string => label !== undefined).join(", ");
+    return rest.length ? `${shown} and ${rest.length} more` : shown;
+  }
+  if (moment.liveAuthorName) return moment.liveAuthorName;
   if (moment.publicAuthor) return `Link holder ${moment.publicAuthor.principalId}`;
   if (moment.linkAuthor) return `Edit link · holder ${moment.linkAuthor.principalId.slice(0, 8)}`;
   if (moment.automationAuthor) {
@@ -92,7 +99,7 @@ export function engineMomentSourceLabel(
 // Where a moment came from, as one line of History. An automation's name
 // and Collection follow the ⚡ mark, in words, so nothing waits behind hover.
 export function EngineMomentSource(props: {
-  moment: Pick<EngineMomentRecord, "origin" | "agentAuthorName" | "personAuthorName" | "publicAuthor" | "linkAuthor" | "automationAuthor" | "namedAuthor">;
+  moment: Pick<EngineMomentRecord, "origin" | "agentAuthorName" | "personAuthorName" | "liveAuthorName" | "publicAuthor" | "linkAuthor" | "automationAuthor" | "namedAuthor" | "authorLabels">;
   testId: string;
   id?: string;
 }) {
@@ -168,6 +175,7 @@ function engineHistorySearchText(group: EngineHistoryGroup): string {
       moment.path,
       engineMomentSummary(moment),
       engineMomentSourceLabel(moment),
+      ...(moment.authorLabels ?? []),
     ]),
   ]
     .join("\n")
@@ -451,7 +459,9 @@ export function EngineHistoryView(props: {
       <LegendList
         role="list"
         data-testid="engine-history-list"
-        className="m-0 min-h-0 flex-1 list-none p-0"
+        // `isolate` keeps the sticky day headings' z-index inside History,
+        // under any overlay.
+        className="isolate m-0 min-h-0 flex-1 list-none p-0"
         data={rows}
         keyExtractor={(row) => row.key}
         estimatedItemSize={56}

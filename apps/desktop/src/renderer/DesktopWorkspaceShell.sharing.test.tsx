@@ -7,13 +7,40 @@ import { describe, expect, it, vi } from "vitest";
 import type { Workspace } from "./DesktopWorkspaceShell";
 import { CHATS_TAB_PATH } from "./workbench/workbenchState";
 import { deferred } from "../testing/deferred";
-import { DesktopWorkspaceShell, WORKSPACE, SYNC_STATUS, STORED_STATE, storedStateWithTabs, makeBridge, renderShell, shellBootstrapProps, SHARE_STATUS, SHARE_VIEW, makeShareBridge, settleShareView } from "./DesktopWorkspaceShell.testHarness";
+import { createAutomationButtons } from "./collections/useAutomationButtons";
+import { DesktopWorkspaceShell, WORKSPACE, SYNC_STATUS, STORED_STATE, STORED_CHATS_STATE, storedStateWithTabs, makeBridge, renderShell, shellBootstrapProps, SHARE_STATUS, SHARE_VIEW, makeShareBridge, settleShareView } from "./DesktopWorkspaceShell.testHarness";
 
 describe("share background work readiness", () => {
   const EDIT_SHARE: Workspace = {
     ...SHARE_VIEW,
     shareView: { ...SHARE_VIEW.shareView!, access: "edit" },
   };
+
+  it("preserves an overdue burst's Notices intent after the opening refresh", async () => {
+    const bridge = makeShareBridge();
+    Object.assign(bridge, {
+      pressAutomationButton: async () => ({ busy: false, relayed: true }),
+      onAutomationRunSettled: () => () => undefined,
+      onAutomationRunWaiting: () => () => undefined,
+      onCollectionAutomationsChanged: () => () => undefined,
+    });
+    const opening = deferred<Awaited<ReturnType<typeof bridge.refreshSharedView>>>();
+    bridge.refreshSharedView.mockImplementationOnce(() => opening.promise);
+    renderShell(bridge, EDIT_SHARE);
+    await waitFor(() => expect(bridge.refreshSharedView).toHaveBeenCalledOnce());
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+    const buttons = createAutomationButtons({ workspaceId: EDIT_SHARE.workspaceId, of: { collectionPath: "tasks" } });
+    try {
+      await act(async () => buttons.press("Finish", { id: "task", label: "task" }));
+      await act(async () => vi.advanceTimersByTimeAsync(2_000));
+      expect(bridge.refreshSharedView).toHaveBeenCalledOnce();
+      await act(async () => opening.resolve({ ok: true, status: "unchanged", probed: true, changedPaths: 0,
+        excludedPaths: [], unjournalablePaths: [], refusedOps: 0, refusedDetail: null }));
+      await act(async () => vi.advanceTimersByTimeAsync(0));
+      expect(bridge.refreshSharedView).toHaveBeenCalledTimes(2);
+      expect(bridge.refreshSharedView).toHaveBeenLastCalledWith({ workspaceId: EDIT_SHARE.workspaceId, trigger: "press-burst" });
+    } finally { buttons.close(); vi.useRealTimers(); }
+  });
 
   it("waits for readiness before pushing, then reports one real failure with Try again", async () => {
     const admission = deferred<typeof SHARE_STATUS>();
@@ -608,6 +635,11 @@ describe("shared view send changes", () => {
       access: "edit",
     },
   };
+  // Send waits for main to open the view in this window.
+  const readySend = async () => {
+    await waitFor(() => expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"));
+    return screen.getByTestId("share-changes-send");
+  };
 
   for (const shareView of [
     { shareId: "share-1", granterEmail: "sam@dohc.test", access: "view" as const },
@@ -693,6 +725,31 @@ describe("shared view send changes", () => {
     await waitFor(() => expect(bridge.submitShareChanges).toHaveBeenCalledWith({ workspaceId: SHARE_VIEW.workspaceId }));
   });
 
+  // Main refuses the window's calls until it has opened the view there. A
+  // read sent before that would leave changes already sent unseen.
+  it("reads changes already sent once main has opened the view in this window", async () => {
+    const status = deferred<typeof SHARE_STATUS>();
+    const bridge = makeShareBridge();
+    let admitted = false;
+    bridge.openWorkspace = vi.fn(async () => {
+      const opened = await status.promise;
+      admitted = true;
+      return opened;
+    });
+    bridge.getSyncStatus = vi.fn(() => status.promise);
+    bridge.listMyShareChanges.mockImplementation(async () => {
+      if (!admitted) throw new Error("Share changes stopped because this window changed workspaces.");
+      return { proposals: [{ proposalId: "proposal-1", state: "open", createdAtMs: 10, files: 1 }] };
+    });
+    renderShell(bridge, EDIT_SHARE);
+    await screen.findByTestId("shared-view-banner");
+    expect(bridge.listMyShareChanges).not.toHaveBeenCalled();
+
+    await act(async () => status.resolve(SHARE_STATUS));
+    expect(await screen.findByTestId("share-changes-state")).toHaveProperty("dataset.state", "open");
+    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+  });
+
   it("listens without pushing from a share view that cannot write", async () => {
     const bridge = makeShareBridge();
     renderShell(bridge, { ...SHARE_VIEW, shareView: { shareId: "share-1", granterEmail: "sam@dohc.test", access: "comment" } });
@@ -716,7 +773,7 @@ describe("shared view send changes", () => {
     });
     renderShell(bridge, EDIT_SHARE);
 
-    await user.click(await screen.findByTestId("share-changes-send"));
+    await user.click(await readySend());
     const line = await screen.findByTestId("share-changes-skipped");
     expect(
       line.textContent,
@@ -733,7 +790,7 @@ describe("shared view send changes", () => {
     const bridge = makeShareBridge();
     renderShell(bridge, EDIT_SHARE);
 
-    const send = await screen.findByTestId("share-changes-send");
+    const send = await readySend();
     await user.click(send);
     await waitFor(() => expect(bridge.submitShareChanges).toHaveBeenCalled());
     await waitFor(() =>
@@ -741,6 +798,48 @@ describe("shared view send changes", () => {
         screen.getByTestId("share-changes-send").hasAttribute("disabled"),
         "comparing the pre-reload token leaves Send stuck on Sending…",
       ).toBe(false),
+    );
+    expect(screen.getByTestId("share-changes-send").textContent).toContain("Send changes");
+  });
+
+  // Readiness re-reads the sent changes under a fresh token. A submit started
+  // before it would outlive that token and read "Sending…" for ever.
+  it("sends only after admission, including from a notice shown before it", async () => {
+    const admission = deferred<typeof SHARE_STATUS>();
+    const bridge = makeShareBridge();
+    const submit = deferred<Awaited<ReturnType<typeof bridge.submitShareChanges>>>();
+    bridge.openWorkspace.mockImplementation(() => admission.promise);
+    bridge.submitShareChanges.mockImplementationOnce(() => submit.promise);
+    renderShell(bridge, EDIT_SHARE);
+    await waitFor(() => expect(bridge.openWorkspace).toHaveBeenCalledOnce());
+    act(() => bridge.emitShareDirectWritesPushed({
+      workspaceId: EDIT_SHARE.workspaceId,
+      result: { status: "pushed", writes: [{ result: "refused", paths: ["trip/packing/automations.yaml"], reason: "" }] },
+    }));
+
+    expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("false");
+    const early = screen.getByTestId("share-changes-send") as HTMLButtonElement;
+    expect(early.disabled).toBe(true);
+    fireEvent.click(early);
+    expect(bridge.submitShareChanges).not.toHaveBeenCalled();
+
+    await act(async () => { admission.resolve(SHARE_STATUS); });
+    await waitFor(() => expect(bridge.listMyShareChanges).toHaveBeenCalled());
+    await userEvent.setup().click(await screen.findByTestId("workspace-shell-error-action"));
+    await waitFor(() => {
+      expect(bridge.submitShareChanges).toHaveBeenCalledOnce();
+      expect(screen.getByTestId("share-changes-send").textContent).toContain("Sending…");
+    });
+
+    await act(async () => submit.resolve({
+      ok: true,
+      submitted: 1,
+      capturedLocalChanges: 0,
+      skippedOutsideShare: 0,
+      morePending: false,
+    }));
+    await waitFor(() =>
+      expect((screen.getByTestId("share-changes-send") as HTMLButtonElement).disabled).toBe(false),
     );
     expect(screen.getByTestId("share-changes-send").textContent).toContain("Send changes");
   });
@@ -764,7 +863,7 @@ describe("shared view send changes", () => {
     const listCallsBeforeSubmit = bridge.listWorkspaceFiles.mock.calls.length;
     const readCallsBeforeSubmit = bridge.readWorkspaceText.mock.calls.length;
 
-    await user.click(await screen.findByTestId("share-changes-send"));
+    await user.click(await readySend());
 
     await waitFor(() =>
       expect(bridge.listWorkspaceFiles.mock.calls.length).toBeGreaterThan(
@@ -800,7 +899,7 @@ describe("shared view send changes", () => {
     });
     bridge.listWorkspaceFiles.mockRejectedValueOnce(new Error("listing failed"));
 
-    await user.click(screen.getByTestId("share-changes-send"));
+    await user.click(await readySend());
 
     await waitFor(() =>
       expect(bridge.listMyShareChanges.mock.calls.length).toBeGreaterThan(
@@ -827,7 +926,7 @@ describe("shared view send changes", () => {
     const listCallsBeforeSubmit = bridge.listWorkspaceFiles.mock.calls.length;
     bridge.listWorkspaceFiles.mockRejectedValueOnce(new Error("listing failed"));
 
-    await user.click(screen.getByTestId("share-changes-send"));
+    await user.click(await readySend());
 
     await waitFor(() =>
       expect(bridge.listWorkspaceFiles.mock.calls.length).toBeGreaterThan(
@@ -857,7 +956,7 @@ describe("shared view send changes", () => {
     });
     renderShell(bridge, EDIT_SHARE);
 
-    await user.click(await screen.findByTestId("share-changes-send"));
+    await user.click(await readySend());
     await screen.findByTestId("share-changes-skipped");
 
     await user.click(await screen.findByTestId("share-changes-withdraw"));
@@ -885,7 +984,7 @@ describe("shared view send changes", () => {
     });
     renderShell(bridge, EDIT_SHARE);
 
-    await user.click(await screen.findByTestId("share-changes-send"));
+    await user.click(await readySend());
     const line = await screen.findByTestId("share-changes-skipped");
     expect(
       line.textContent,
@@ -908,7 +1007,7 @@ describe("shared view send changes", () => {
     });
     renderShell(bridge, EDIT_SHARE);
 
-    await user.click(await screen.findByTestId("share-changes-send"));
+    await user.click(await readySend());
     expect((await screen.findByTestId("share-changes-skipped")).textContent).toBe(
       "More changes are waiting. Send again to send the rest.",
     );
@@ -919,7 +1018,7 @@ describe("shared view send changes", () => {
     const bridge = makeShareBridge();
     renderShell(bridge, EDIT_SHARE);
 
-    await user.click(await screen.findByTestId("share-changes-send"));
+    await user.click(await readySend());
     await waitFor(() => expect(bridge.submitShareChanges).toHaveBeenCalled());
     expect(
       screen.queryByTestId("share-changes-skipped"),
@@ -939,7 +1038,7 @@ describe("shared view send changes", () => {
       });
     renderShell(bridge, EDIT_SHARE);
 
-    await user.click(await screen.findByTestId("share-changes-send"));
+    await user.click(await readySend());
     await waitFor(() =>
       expect(bridge.submitShareChanges).toHaveBeenCalledWith({
         workspaceId: EDIT_SHARE.workspaceId,
@@ -963,7 +1062,7 @@ describe("shared view send changes", () => {
     });
     renderShell(bridge, EDIT_SHARE);
 
-    await user.click(await screen.findByTestId("share-changes-send"));
+    await user.click(await readySend());
     expect((await screen.findByTestId("share-changes-empty")).textContent).toBe(
       "You have no changes to send yet.",
     );
@@ -1139,7 +1238,7 @@ describe("shared view with an unreadable grant", () => {
     renderShell(bridge, damaged);
 
     await settleShareView();
-    await screen.findByTestId("chats-panel");
+    await screen.findByTestId("about-rail");
     expect(
       (await screen.findByTestId("linked-chat-readonly-note")).textContent,
       "an unreadable level must not open the composer",
@@ -1171,20 +1270,20 @@ describe("shared view with an unreadable grant", () => {
 // fact only; the failed capture build on a normal workspace is the describe
 // below.
 describe("shared view chats surface", () => {
-  it("opens the per-file chat panel on a shared view and never asks for the workspace-wide listing", async () => {
-    // The stored state opens with the Chats panel visible and b.md focused.
+  it("opens About's per-file chat on a shared view and never asks for the workspace-wide listing", async () => {
+    // The stored state opens with the About rail visible and b.md focused.
     const bridge = makeShareBridge(Promise.resolve(STORED_STATE));
     renderShell(bridge, SHARE_VIEW);
 
     await settleShareView();
-    expect(await screen.findByTestId("chats-panel")).toBeTruthy();
-    expect(screen.getByTestId("titlebar-chats-sidebar")).toBeTruthy();
+    expect(await screen.findByTestId("about-rail")).toBeTruthy();
+    expect(screen.getByTestId("titlebar-about-sidebar")).toBeTruthy();
 
-    // About is the only tab. A workspace-wide listing would be a
+    // The rail offers no Chats view. A workspace-wide listing would be a
     // superset to filter, which is the shape #627 came from.
-    expect(screen.getByTestId("chats-panel-tab-about")).toBeTruthy();
-    expect(screen.queryByTestId("chats-panel-tab-all")).toBeNull();
-    expect(screen.queryByTestId("chats-panel-off")).toBeNull();
+    expect(screen.queryByTestId("activity-chats")).toBeNull();
+    expect(screen.queryByTestId("chats-view")).toBeNull();
+    expect(screen.queryByTestId("about-rail-off")).toBeNull();
 
     await waitFor(() =>
       expect(bridge.listFileChats).toHaveBeenCalledWith({
@@ -1215,15 +1314,86 @@ describe("shared view chats surface", () => {
     renderShell(bridge, SHARE_VIEW);
 
     await settleShareView();
-    await screen.findByTestId("chats-panel");
+    await screen.findByTestId("about-rail");
 
     await user.keyboard("{Control>}{Alt>}b{/Alt}{/Control}");
-    await waitFor(() => expect(screen.queryByTestId("chats-panel")).toBeNull());
+    await waitFor(() => expect(screen.queryByTestId("about-rail")).toBeNull());
 
     await user.keyboard("{Control>}k{/Control}");
     const palette = await screen.findByTestId("command-palette");
-    expect(within(palette).getByText("Toggle chats panel")).toBeTruthy();
+    expect(within(palette).getByText("Toggle About")).toBeTruthy();
     expect(bridge.listChatChannels).not.toHaveBeenCalled();
+  });
+
+  // A shared view has no Chats view, so no command reaches one: the palette
+  // offers none and View > Chats does nothing.
+  it("offers no way into Chats on a shared view", async () => {
+    const bridge = makeShareBridge(Promise.resolve(STORED_STATE));
+    const user = userEvent.setup();
+    renderShell(bridge, SHARE_VIEW);
+
+    await settleShareView();
+    expect(screen.queryByTestId("activity-chats")).toBeNull();
+    await user.keyboard("{Control>}k{/Control}");
+    const palette = await screen.findByTestId("command-palette");
+    expect(within(palette).getByText("View: Search")).toBeTruthy();
+    expect(within(palette).queryByText("View: Chats")).toBeNull();
+    await user.keyboard("{Escape}");
+
+    act(() => bridge.emitMenuCommand("show-chats"));
+    await act(async () => {});
+    expect(screen.getByTestId("activity-explorer").getAttribute("aria-current")).toBe("page");
+    expect(screen.queryByTestId("chats-view")).toBeNull();
+    expect(screen.queryByTestId("chats-off")).toBeNull();
+    expect(bridge.listChatChannels).not.toHaveBeenCalled();
+    expect(bridge.syncDms).not.toHaveBeenCalled();
+  });
+
+  it("shows the Explorer, never Chats, when a shared view's saved layout selected Chats", async () => {
+    // Every node the shell adds, from its first commit: Chats must never
+    // render, not even for the frame before the saved state is corrected.
+    const chatsRendered: string[] = [];
+    const sidePanelTitle = (node: Node) =>
+      node.parentElement?.closest('[data-testid="side-panel"] header') ? node.textContent : null;
+    const observer = new MutationObserver((records) => {
+      for (const record of records) {
+        if (record.type === "characterData" && sidePanelTitle(record.target) === "Chats") {
+          chatsRendered.push("title");
+        }
+        for (const node of record.addedNodes) {
+          if (!(node instanceof Element)) {
+            if (sidePanelTitle(node) === "Chats") chatsRendered.push("title");
+            continue;
+          }
+          if (node.matches('[data-testid="chats-view"], [data-testid="chats-off"]') ||
+            node.querySelector('[data-testid="chats-view"], [data-testid="chats-off"]')) {
+            chatsRendered.push("view");
+          }
+          const headers = [
+            ...(node.matches('[data-testid="side-panel"] header') ? [node] : []),
+            ...node.querySelectorAll('[data-testid="side-panel"] header'),
+          ];
+          if (headers.some((header) => header.textContent?.startsWith("Chats"))) chatsRendered.push("title");
+        }
+      }
+    });
+    observer.observe(document.body, { childList: true, subtree: true, characterData: true });
+    try {
+      const bridge = makeShareBridge(Promise.resolve(STORED_CHATS_STATE));
+      renderShell(bridge, SHARE_VIEW);
+
+      await settleShareView();
+      await waitFor(() =>
+        expect(screen.getByTestId("activity-explorer").getAttribute("aria-current")).toBe("page"),
+      );
+      expect(await within(screen.getByTestId("side-panel")).findByTestId("file-tree")).toBeTruthy();
+      await act(async () => {});
+      expect(chatsRendered).toEqual([]);
+      expect(bridge.listChatChannels).not.toHaveBeenCalled();
+      expect(bridge.syncDms).not.toHaveBeenCalled();
+    } finally {
+      observer.disconnect();
+    }
   });
 
   it("states the capability for a persisted Chats tab instead of a page that can only fail", async () => {
@@ -1253,17 +1423,17 @@ describe("shared view chats surface", () => {
   // panel with the failed-capture placeholder on every one — keeps the share
   // pins above and the pins below green.
   it("keeps Chats for a workspace that is not a shared view", async () => {
-    const bridge = makeBridge(Promise.resolve(STORED_STATE));
+    const bridge = makeBridge(Promise.resolve(STORED_CHATS_STATE));
     renderShell(bridge);
 
-    expect(await screen.findByTestId("chats-panel")).toBeTruthy();
-    expect(screen.getByTestId("titlebar-chats-sidebar")).toBeTruthy();
-    // Both tabs. Collapsing every workspace to the share's About-only strip
+    expect(await screen.findByTestId("about-rail")).toBeTruthy();
+    expect(screen.getByTestId("titlebar-about-sidebar")).toBeTruthy();
+    // The Chats view. Dropping it from every workspace, as a share does,
     // would keep the share pin above green.
-    expect(screen.getByTestId("chats-panel-tab-all")).toBeTruthy();
-    expect(screen.getByTestId("chats-panel-tab-about")).toBeTruthy();
+    expect(screen.getByTestId("activity-chats")).toBeTruthy();
+    expect(await within(screen.getByTestId("side-panel")).findByTestId("chats-view")).toBeTruthy();
     await waitFor(() => expect(bridge.listChatChannels).toHaveBeenCalled());
-    expect(screen.queryByTestId("chats-panel-off")).toBeNull();
+    expect(screen.queryByTestId("chats-off")).toBeNull();
   });
 
   // The graph's chat-mentions toggle, on its own. The test above proves the
@@ -1293,7 +1463,7 @@ describe("shared view chats surface", () => {
   });
 
   // Ctrl+Alt+B, on its own: whether the shell claims the chord from whatever
-  // else would handle it. A shared view has a Chats panel to toggle now,
+  // else would handle it. A shared view has an About rail to toggle,
   // so it claims the chord — the same rule as any other
   // workspace, and the pin below is the one that still separates the two.
   it("claims Ctrl+Alt+B on a shared view", async () => {
@@ -1324,7 +1494,7 @@ describe("shared view chats surface", () => {
     async (_name, modifier) => {
       const bridge = makeBridge(Promise.resolve(STORED_STATE));
       renderShell(bridge);
-      await screen.findByTestId("chats-panel");
+      await screen.findByTestId("about-rail");
 
       // The handler re-registers in a passive effect whenever `chatsEnabled`
       // changes, so a single dispatch can land in the commit before that effect
@@ -1347,7 +1517,7 @@ describe("shared view chats surface", () => {
   it("claims Command+Option+B when macOS reports the Option glyph", async () => {
     const bridge = makeBridge(Promise.resolve(STORED_STATE));
     renderShell(bridge);
-    await screen.findByTestId("chats-panel");
+    await screen.findByTestId("about-rail");
 
     await waitFor(() => {
       const event = new KeyboardEvent("keydown", {
@@ -1366,7 +1536,7 @@ describe("shared view chats surface", () => {
   it("leaves AltGr characters on physical KeyB unclaimed", async () => {
     const bridge = makeBridge(Promise.resolve(STORED_STATE));
     renderShell(bridge);
-    await screen.findByTestId("chats-panel");
+    await screen.findByTestId("about-rail");
 
     const event = new KeyboardEvent("keydown", {
       key: "∫",
@@ -1379,7 +1549,7 @@ describe("shared view chats surface", () => {
     window.dispatchEvent(event);
 
     expect(event.defaultPrevented).toBe(false);
-    expect(screen.getByTestId("chats-panel")).toBeTruthy();
+    expect(screen.getByTestId("about-rail")).toBeTruthy();
   });
 
   // The last ungated chat call. Linked mentions ride on every markdown open
@@ -1439,9 +1609,10 @@ describe("shared view chats surface", () => {
 // — and the shell offered the panel, the tab and the mention surfaces anyway,
 // because they read the renderer's own engine flag and nothing else.
 //
-// Chats is a persistent sidebar rather than a tab, so the copy decision is
-// not the one #615 made: hiding it would remove a fixture of the window from
-// a workspace that has chats on disk. The panel stays and states the fact.
+// The Chats view and About are persistent sidebars rather than tabs, so the
+// copy decision is not the one #615 made: hiding them would remove a fixture
+// of the window from a workspace that has chats on disk. Each stays and
+// states the fact.
 describe("chats surface after a failed capture build", () => {
   const FAILED_STATUS = {
     ...SYNC_STATUS,
@@ -1449,9 +1620,10 @@ describe("chats surface after a failed capture build", () => {
   };
 
   // Main's real answers once the capture build failed: every Chats call goes
-  // through requireEngineCapture, which has no capture to hand it.
+  // through requireEngineCapture, which has no capture to hand it. The stored
+  // layout shows the Chats view on the left and About on the right.
   function makeFailedCaptureBridge() {
-    const bridge = makeBridge(Promise.resolve(STORED_STATE));
+    const bridge = makeBridge(Promise.resolve(STORED_CHATS_STATE));
     bridge.openWorkspace = vi.fn(async () => FAILED_STATUS);
     bridge.getSyncStatus = vi.fn(async () => FAILED_STATUS);
     for (const call of [
@@ -1468,32 +1640,38 @@ describe("chats surface after a failed capture build", () => {
     return bridge;
   }
 
-  it("states the fact in the Chats sidebar and asks main for no chats", async () => {
+  it("states the fact in the Chats view and About, and asks main for no chats", async () => {
     const bridge = makeFailedCaptureBridge();
     renderShell(bridge);
 
     // Both halves of the premise: the renderer's own read said engine-ON —
     // the titlebar button renders on that read alone — and main's status has
     // landed carrying the failure.
-    await screen.findByTestId("titlebar-chats-sidebar");
+    await screen.findByTestId("titlebar-about-sidebar");
     await waitFor(() =>
       expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"),
     );
 
-    // The sidebar is still there. It is the fixture the user left open, and
-    // the workspace's chats are on disk — the capture build is what failed.
-    expect(screen.getByTestId("chats-panel")).toBeTruthy();
-    const placeholder = await screen.findByTestId("chats-panel-off");
-    // One line, per the empty-state recipe (copy.md), chosen by the cause main
-    // established: a build failure, so it says what dohc could not do and the
-    // one next step that can change it. It must never say the workspace has
-    // no chats — those outlive a session whose capture failed to build.
-    expect(placeholder.textContent).toContain(
-      "dohc could not open chats for this workspace. Your files still save normally. Restart dohc to try again.",
-    );
-    expect(placeholder.textContent).not.toContain("no chats");
-    expect(placeholder.className).toContain("text-sm");
-    expect(placeholder.className).toContain("text-muted");
+    // Both sidebars are still there. They are the fixtures the user left
+    // open, and the workspace's chats are on disk — the capture build is what
+    // failed.
+    const placeholders = [
+      await within(screen.getByTestId("side-panel")).findByTestId("chats-off"),
+      await within(screen.getByTestId("about-rail")).findByTestId("about-rail-off"),
+    ];
+    for (const placeholder of placeholders) {
+      // One line, per the empty-state recipe (copy.md), chosen by the cause
+      // main established: a build failure, so it says what dohc could not do
+      // and the one next step that can change it. It must never say the
+      // workspace has no chats — those outlive a session whose capture failed
+      // to build.
+      expect(placeholder.textContent).toContain(
+        "dohc could not open chats for this workspace. Your files still save normally. Restart dohc to try again.",
+      );
+      expect(placeholder.textContent).not.toContain("no chats");
+      expect(placeholder.className).toContain("text-sm");
+      expect(placeholder.className).toContain("text-muted");
+    }
 
     expect(bridge.listChatChannels).not.toHaveBeenCalled();
     expect(bridge.listFileChats).not.toHaveBeenCalled();
@@ -1547,20 +1725,23 @@ describe("chats surface after a failed capture build", () => {
     bridge.getSyncStatus = vi.fn(async () => (decided ? FAILED_STATUS : SYNC_STATUS));
     renderShell(bridge);
 
-    await screen.findByTestId("titlebar-chats-sidebar");
+    await screen.findByTestId("titlebar-about-sidebar");
     expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("false");
     expect(bridge.listChatChannels).not.toHaveBeenCalled();
-    // The panel is mounted and states nothing: neither read the shell has
+    // Both sidebars are mounted and state nothing: neither read the shell has
     // done proves anything about what main decided.
-    expect(screen.getByTestId("chats-panel")).toBeTruthy();
-    expect(screen.queryByTestId("chats-panel-off")).toBeNull();
+    expect(screen.getByTestId("about-rail")).toBeTruthy();
+    expect(screen.getByTestId("activity-chats").getAttribute("aria-current")).toBe("page");
+    expect(screen.queryByTestId("chats-off")).toBeNull();
+    expect(screen.queryByTestId("about-rail-off")).toBeNull();
 
     await act(async () => {
       decided = true;
       decision.resolve(FAILED_STATUS);
       await decision.promise;
     });
-    expect(await screen.findByTestId("chats-panel-off")).toBeTruthy();
+    expect(await screen.findByTestId("chats-off")).toBeTruthy();
+    expect(await screen.findByTestId("about-rail-off")).toBeTruthy();
     expect(bridge.listChatChannels).not.toHaveBeenCalled();
     expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
   });
@@ -1574,7 +1755,7 @@ describe("chats surface after a failed capture build", () => {
 // DesktopWorkspaceShell's wiring (for example, replacing the syncStatus ->
 // sessionRecorderOn derivation with `undefined`, or dropping sharedView)
 // would leave every other suite green. This test drives the real command
-// palette -> Settings -> Agents & MCP path through the shell itself.
+// palette -> Settings -> Agents path through the shell itself.
 describe("runner note reaches the card through the shell's own wiring", () => {
   it("carries a recorder-less status into the restart note", async () => {
     const bridge = makeBridge(Promise.resolve(null));
@@ -1584,12 +1765,10 @@ describe("runner note reaches the card through the shell's own wiring", () => {
     const user = userEvent.setup();
     renderShell(bridge);
 
+    // The docs send people to Agents to turn on MCP, so the palette finds it by "mcp".
     await user.keyboard("{Control>}k{/Control}");
-    await user.click(
-      await within(await screen.findByTestId("command-palette")).findByText(
-        "Settings: Open Agents & MCP",
-      ),
-    );
+    await screen.findByTestId("command-palette");
+    await user.keyboard("mcp{Enter}");
 
     const note = await screen.findByTestId("runner-self-test-engine-note");
     await waitFor(() =>
@@ -1606,7 +1785,7 @@ describe("runner note reaches the card through the shell's own wiring", () => {
     await user.keyboard("{Control>}k{/Control}");
     await user.click(
       await within(await screen.findByTestId("command-palette")).findByText(
-        "Settings: Open Agents & MCP",
+        "Settings: Open Agents (MCP)",
       ),
     );
 

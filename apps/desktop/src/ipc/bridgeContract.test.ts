@@ -2,6 +2,26 @@ import { historyCursor, historyPageFields } from "../testing/historyPageFixture"
 import { MAX_SHARE_PROPOSAL_OPS } from "@dohc/security-contract/share-proposal-bound";
 import { describe, expect, it } from "vitest";
 import { activityPathsAffectWorkspaceListing, WorkspacePathOpenFailure } from "./bridgeContract";
+import { DiscardLiveDraftRecoveryPayload, liveDraftRecoveryOperations } from "./bridgeContract";
+
+describe("live draft recovery replies", () => {
+  const record = {recordId: "a".repeat(64), path: "notes/a.md", objectId: "object", text: "Unseen copy", updateBase64: "AAA="};
+  it("declares all remaining recovery records on both list and dismiss", () => {
+    for (const operation of [liveDraftRecoveryOperations.listLiveDraftRecovery, liveDraftRecoveryOperations.discardLiveDraftRecovery]) {
+      expect(operation.result.parse([record])).toEqual([record]);
+      expect(operation.result.safeParse([{...record, recordId: "../draft"}]).success).toBe(false);
+      expect(operation.result.safeParse([{...record, path: "../outside.md"}]).success).toBe(false);
+      expect(operation.result.safeParse([{...record, text: undefined}]).success).toBe(false);
+      expect(operation.guard).toBe("active-workspace");
+    }
+  });
+  it("requires the reviewed snapshot even when naming an exact recovery record", () => {
+    const input = {workspaceId: "workspace", path: record.path, objectId: record.objectId, snapshotSha256: "b".repeat(64), discardedAtMs: 1, recordId: record.recordId};
+    expect(DiscardLiveDraftRecoveryPayload.parse(input)).toEqual(input);
+    expect(DiscardLiveDraftRecoveryPayload.safeParse({...input, snapshotSha256: undefined}).success).toBe(false);
+    expect(DiscardLiveDraftRecoveryPayload.safeParse({...input, recordId: "../draft"}).success).toBe(false);
+  });
+});
 
 import {
   ENGINE_YDOC_UPDATE_MAX_BYTES,
@@ -2130,25 +2150,25 @@ describe("settings IPC contract", () => {
     expect(
       SetWorkspaceSettingsPayload.safeParse({
         workspaceId: "WS-settings",
-        settings: DEFAULT_WORKSPACE_SETTINGS,
+        patch: {},
       }).success,
     ).toBe(false);
     expect(
       SetWorkspaceSettingsPayload.safeParse({
         workspaceId: "",
-        settings: DEFAULT_WORKSPACE_SETTINGS,
+        patch: {},
       }).success,
     ).toBe(false);
     expect(
       SetWorkspaceSettingsPayload.safeParse({
         workspaceId: "ws-settings",
-        settings: {
-          ...DEFAULT_WORKSPACE_SETTINGS,
-          agents: {
-            ...DEFAULT_WORKSPACE_SETTINGS.agents,
-            mcpAutoStart: "yes",
-          },
-        },
+        patch: { privacy: { confirmExternalLinks: "yes" } },
+      }).success,
+    ).toBe(false);
+    expect(
+      SetWorkspaceSettingsPayload.safeParse({
+        workspaceId: "ws-settings",
+        patch: { agents: { mcpAutoStart: false } },
       }).success,
     ).toBe(false);
   });
@@ -2242,7 +2262,7 @@ describe("workspace UI state IPC contract", () => {
       },
     ],
     activeEditorGroup: "primary",
-    chatsVisible: true,
+    aboutVisible: true,
   };
 
   it("drops invalid open editor heights without rejecting the saved state", () => {
@@ -3393,6 +3413,16 @@ describe("try-in-version IPC contract", () => {
 });
 
 describe("sync status IPC contract", () => {
+  it("preserves file-read failure separately from history availability", () => {
+    const status = { state: "synced", pendingChangeCount: 0, lastSyncedAtMs: null,
+      historyRecordingUnavailable: false, historyShareView: false, liveSessionsGeneration: 0 };
+    for (const reason of ["read-failed", "unavailable"] as const) {
+      expect(SyncStatusResult.parse({ ...status, fileObservationFailure: reason })).toMatchObject({
+        historyRecordingUnavailable: false, fileObservationFailure: reason,
+      });
+    }
+    expect(SyncStatusResult.safeParse({ ...status, fileObservationFailure: "history-off" }).success).toBe(false);
+  });
   it("refuses a status that cannot say why history is off", () => {
     const status = {
       state: "synced",

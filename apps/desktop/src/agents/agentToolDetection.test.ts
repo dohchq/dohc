@@ -1,27 +1,33 @@
 // @vitest-environment node
 import { EventEmitter, getEventListeners } from "node:events";
-import { homedir } from "node:os";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { deferred, type Deferred } from "../testing/deferred";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
+import { dirname, join } from "node:path";
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { runProbe } from "./agentToolDetection";
 import type { ProbeOutput } from "./agentToolProbe";
 
-const mocks = vi.hoisted(() => ({ spawn: vi.fn(), killChildTreeWin32: vi.fn(), resolveSpawnCommand: vi.fn() }));
+const mocks = vi.hoisted(() => ({ spawn: vi.fn(), resolveSpawnCommand: vi.fn() }));
 vi.mock("node:child_process", () => ({ spawn: mocks.spawn }));
-vi.mock("../process/windowsSpawn", () => ({
-  killChildTreeWin32: mocks.killChildTreeWin32, resolveSpawnCommand: mocks.resolveSpawnCommand,
-}));
+// Detection has no tree-kill dependency: a Windows probe never kills by PID.
+vi.mock("../process/windowsSpawn", () => ({ resolveSpawnCommand: mocks.resolveSpawnCommand }));
 
 class FakeStream extends EventEmitter {
   readonly setEncoding = vi.fn((_encoding: BufferEncoding): FakeStream => this);
   readonly destroy = vi.fn();
 }
 
+class FakeStdin extends EventEmitter {
+  readonly write = vi.fn((_chunk: Buffer): boolean => true);
+  readonly destroy = vi.fn();
+}
+
 // Like Node's ChildProcess, this closes only after the process exits and both
-// pipes reach EOF. A descendant that inherited the pipes holds them open after
-// the process itself exits.
+// output pipes reach EOF. On Windows the process is the probe owner; anything
+// in its job holds the pipes until the owner ends the job.
 class FakeChild extends EventEmitter {
   exitCode: number | null = null;
+  readonly stdin: FakeStdin | null;
   readonly stdout: FakeStream | null;
   readonly stderr: FakeStream | null;
   private exited = false;
@@ -30,6 +36,7 @@ class FakeChild extends EventEmitter {
 
   constructor(readonly pid: number | undefined, { pipes = true } = {}) {
     super();
+    this.stdin = pipes ? new FakeStdin() : null;
     this.stdout = pipes ? new FakeStream() : null;
     this.stderr = pipes ? new FakeStream() : null;
     this.pipesOpen = pipes;
@@ -61,36 +68,45 @@ class FakeChild extends EventEmitter {
   }
 }
 
+const resources = mkdtempSync(join(tmpdir(), "dohc-agent-probe-resources-"));
+const NODE = join(resources, "app-compiler", "node.exe");
+const OWNER_ROOT = join(resources, "agent-probe");
+const OWNER = join(OWNER_ROOT, "agentProbeOwner.exe");
+const RELAY = join(OWNER_ROOT, "agentProbeRelay.mjs");
+for (const path of [NODE, OWNER, RELAY]) {
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, "");
+}
 const EXECUTABLE = "C:\\Tools\\claude.EXE";
 const reason = new Error("Agent detection was cancelled.");
 const realPlatform = process.platform;
+const realArch = process.arch;
 let child = new FakeChild(4321);
 
-function setPlatform(platform: NodeJS.Platform): void {
+function setPlatform(platform: NodeJS.Platform, arch: NodeJS.Architecture = "x64"): void {
   Object.defineProperty(process, "platform", { value: platform });
+  Object.defineProperty(process, "arch", { value: arch });
 }
 
 const turn = () => new Promise<void>((resolve) => { setImmediate(resolve); });
 
-function start(signal: AbortSignal) {
+function start(signal: AbortSignal, resourcesRoot = resources) {
   const seen: { outcome?: { value: ProbeOutput } | { error: unknown } } = {};
-  const done = runProbe(EXECUTABLE, ["--version"], signal).then(
+  const done = runProbe(EXECUTABLE, ["--version"], signal, resourcesRoot).then(
     (value) => { seen.outcome = { value }; },
     (error: unknown) => { seen.outcome = { error }; },
   );
   return { seen, done };
 }
 
-function gatedKill(): Deferred<boolean> {
-  const killed = deferred<boolean>();
-  mocks.killChildTreeWin32.mockReturnValue(killed.promise);
-  return killed;
+function admitted(): unknown {
+  return JSON.parse(child.stdin!.write.mock.calls[0]![0].toString("utf8"));
 }
 
 function expectReleased(signal: AbortSignal): void {
   expect(getEventListeners(signal, "abort")).toHaveLength(0);
   expect(vi.getTimerCount()).toBe(0);
-  for (const emitter of [child, child.stdout, child.stderr]) expect(emitter?.eventNames() ?? []).toEqual([]);
+  for (const emitter of [child, child.stdin, child.stdout, child.stderr]) expect(emitter?.eventNames() ?? []).toEqual([]);
 }
 
 beforeEach(() => {
@@ -99,18 +115,21 @@ beforeEach(() => {
   child = new FakeChild(4321);
   mocks.resolveSpawnCommand.mockImplementation((command: string, args: string[]) => ({ command, args }));
   mocks.spawn.mockImplementation(() => child);
-  mocks.killChildTreeWin32.mockResolvedValue(true);
+  vi.spyOn(process, "kill").mockImplementation(() => true);
 });
 
 afterEach(() => {
-  setPlatform(realPlatform);
+  setPlatform(realPlatform, realArch);
   vi.useRealTimers();
   vi.restoreAllMocks();
   for (const mock of Object.values(mocks)) mock.mockReset();
 });
 
-describe("agent probe subprocess", () => {
-  it("resolves a closed probe's output from the home directory without terminating it", async () => {
+afterAll(() => { rmSync(resources, { recursive: true, force: true }); });
+
+describe("Windows agent probe owner", () => {
+  it("starts the installed owner without credentials and admits the exact command over stdin", async () => {
+    process.env.DOHC_SYNTHETIC_SECRET = "credential";
     const controller = new AbortController();
     const probe = start(controller.signal);
     try {
@@ -119,23 +138,42 @@ describe("agent probe subprocess", () => {
       child.drain(0);
       await probe.done;
     } finally {
+      delete process.env.DOHC_SYNTHETIC_SECRET;
       child.drain();
       await probe.done;
     }
     expect(probe.seen.outcome).toEqual({ value: { exitCode: 0, stdout: "claude 2.1.300", stderr: "note" } });
     expect(mocks.resolveSpawnCommand).toHaveBeenCalledWith(EXECUTABLE, ["--version"], { cwd: homedir() });
-    expect(mocks.spawn).toHaveBeenCalledWith(EXECUTABLE, ["--version"], expect.objectContaining({
-      cwd: homedir(), windowsHide: true, detached: false, stdio: ["ignore", "pipe", "pipe"],
-    }));
-    expect(child.stdout!.setEncoding).toHaveBeenCalledWith("utf8");
-    expect(mocks.killChildTreeWin32).not.toHaveBeenCalled();
+    const admission = child.stdin!.write.mock.calls[0]![0];
+    expect(mocks.spawn).toHaveBeenCalledWith(OWNER, [NODE, RELAY, String(admission.byteLength)], {
+      cwd: OWNER_ROOT, env: expect.any(Object), windowsHide: true, stdio: ["pipe", "pipe", "pipe"],
+    });
+    const ownerEnvironment = mocks.spawn.mock.calls[0]![2].env as Record<string, string>;
+    expect(Object.keys(ownerEnvironment).filter((name) => !["SystemRoot", "WINDIR", "TEMP", "TMP"].includes(name))).toEqual([]);
+    expect(admitted()).toEqual({
+      command: EXECUTABLE, args: ["--version"], windowsVerbatimArguments: false, cwd: homedir(),
+      env: { ...process.env, DOHC_SYNTHETIC_SECRET: "credential" },
+    });
+    expect(child.stdin!.write).toHaveBeenCalledOnce();
+    expect(child.stdin!.destroy).not.toHaveBeenCalled();
+    expect(process.kill).not.toHaveBeenCalled();
+    expectReleased(controller.signal);
+  });
+
+  it("admits a cmd wrapper's resolved verbatim arguments unchanged", async () => {
+    const wrapper = { command: "C:\\Windows\\System32\\cmd.exe", args: ["/d", "/s", "/c", "\"\"C:\\Tools\\codex.cmd\" \"--version\"\""], windowsVerbatimArguments: true };
+    mocks.resolveSpawnCommand.mockReturnValue(wrapper);
+    const controller = new AbortController();
+    const probe = start(controller.signal);
+    try { child.drain(0); await probe.done; } finally { child.drain(); await probe.done; }
+    expect(admitted()).toMatchObject({ ...wrapper, cwd: homedir() });
     expectReleased(controller.signal);
   });
 
   it("rejects an already cancelled probe before resolving or spawning a command", async () => {
     const controller = new AbortController();
     controller.abort(reason);
-    await expect(runProbe(EXECUTABLE, ["--version"], controller.signal)).rejects.toBe(reason);
+    await expect(runProbe(EXECUTABLE, ["--version"], controller.signal, resources)).rejects.toBe(reason);
     expect(mocks.resolveSpawnCommand).not.toHaveBeenCalled();
     expect(mocks.spawn).not.toHaveBeenCalled();
     expectReleased(controller.signal);
@@ -145,55 +183,60 @@ describe("agent probe subprocess", () => {
     const failure = new Error(`${step} failed`);
     mocks[step].mockImplementation(() => { throw failure; });
     const controller = new AbortController();
-    await expect(runProbe(EXECUTABLE, ["--version"], controller.signal)).rejects.toBe(failure);
+    await expect(runProbe(EXECUTABLE, ["--version"], controller.signal, resources)).rejects.toBe(failure);
     expectReleased(controller.signal);
   });
 
-  it("cancels once and settles only after the tree kill finishes and every pipe closes", async () => {
+  it.each([
+    { name: "a missing installed asset", root: () => join(resources, "missing"), arch: "x64" as const, message: /missing/ },
+    { name: "a relative resources path", root: () => "resources", arch: "x64" as const, message: /absolute/ },
+    { name: "Windows on arm64", root: () => resources, arch: "arm64" as const, message: /x64/ },
+  ])("fails closed without spawning for $name", async ({ root, arch, message }) => {
+    setPlatform("win32", arch);
     const controller = new AbortController();
-    const killed = gatedKill();
+    await expect(runProbe(EXECUTABLE, ["--version"], controller.signal, root())).rejects.toThrow(message);
+    expect(mocks.spawn).not.toHaveBeenCalled();
+    expectReleased(controller.signal);
+  });
+
+  it("stops a cancelled probe by closing the owner's stdin and settles only after every pipe closes", async () => {
+    const controller = new AbortController();
     const probe = start(controller.signal);
     try {
       controller.abort(reason);
-      expect(mocks.killChildTreeWin32).toHaveBeenCalledOnce();
-      expect(mocks.killChildTreeWin32).toHaveBeenCalledWith(child);
-      killed.resolve(true);
-      await turn();
-      expect(probe.seen.outcome).toBeUndefined();
+      expect(child.stdin!.destroy).toHaveBeenCalledOnce();
       child.exit(null);
+      vi.advanceTimersByTime(60_000);
       await turn();
       expect(probe.seen.outcome).toBeUndefined();
       child.closePipes();
       await probe.done;
     } finally {
-      killed.resolve(false);
       child.drain();
       await probe.done;
     }
     expect(probe.seen.outcome).toEqual({ error: reason });
-    expect(mocks.killChildTreeWin32).toHaveBeenCalledOnce();
+    expect(child.stdin!.destroy).toHaveBeenCalledOnce();
     expect(child.stdout!.destroy).not.toHaveBeenCalled();
     expect(child.stderr!.destroy).not.toHaveBeenCalled();
+    expect(process.kill).not.toHaveBeenCalled();
     expectReleased(controller.signal);
   });
 
-  it("times out once and stays pending after close until the tree kill finishes", async () => {
+  it("times out five seconds after spawn and keeps the partial output", async () => {
     const controller = new AbortController();
-    const killed = gatedKill();
     const probe = start(controller.signal);
     try {
       child.stdout!.emit("data", "partial");
       vi.advanceTimersByTime(4_999);
-      expect(mocks.killChildTreeWin32).not.toHaveBeenCalled();
+      expect(child.stdin!.destroy).not.toHaveBeenCalled();
       vi.advanceTimersByTime(1);
-      expect(mocks.killChildTreeWin32).toHaveBeenCalledOnce();
-      child.drain();
+      expect(child.stdin!.destroy).toHaveBeenCalledOnce();
       await turn();
       expect(probe.seen.outcome).toBeUndefined();
-      killed.resolve(true);
+      child.drain(1);
       await probe.done;
     } finally {
-      killed.resolve(false);
       child.drain();
       await probe.done;
     }
@@ -201,15 +244,15 @@ describe("agent probe subprocess", () => {
     expectReleased(controller.signal);
   });
 
-  it("stops collecting and terminates once when output exceeds the limit", async () => {
+  it("stops collecting and stops the owner once when output exceeds the limit", async () => {
     const controller = new AbortController();
     const chunk = "x".repeat(64 * 1024);
     const probe = start(controller.signal);
     try {
       child.stdout!.emit("data", chunk);
-      expect(mocks.killChildTreeWin32).not.toHaveBeenCalled();
+      expect(child.stdin!.destroy).not.toHaveBeenCalled();
       child.stderr!.emit("data", "y");
-      expect(mocks.killChildTreeWin32).toHaveBeenCalledOnce();
+      expect(child.stdin!.destroy).toHaveBeenCalledOnce();
       child.stdout!.emit("data", "late");
       child.stderr!.emit("data", "late");
       child.drain();
@@ -219,65 +262,16 @@ describe("agent probe subprocess", () => {
       await probe.done;
     }
     expect(probe.seen.outcome).toEqual({ value: { exitCode: null, stdout: chunk, stderr: "y" } });
-    expect(mocks.killChildTreeWin32).toHaveBeenCalledOnce();
-    expect(child.stdout!.destroy).not.toHaveBeenCalled();
-    expect(child.stderr!.destroy).not.toHaveBeenCalled();
+    expect(child.stdin!.destroy).toHaveBeenCalledOnce();
     expectReleased(controller.signal);
   });
 
-  it.each([
-    { result: "reports failure", finishKill: (killed: Deferred<boolean>) => { killed.resolve(false); } },
-    { result: "rejects", finishKill: (killed: Deferred<boolean>) => { killed.reject(new Error("taskkill failed")); } },
-  ])("keeps a cancelled probe pending after its tree kill $result until the child closes", async ({ finishKill }) => {
-    const controller = new AbortController();
-    const killed = gatedKill();
-    const probe = start(controller.signal);
-    try {
-      controller.abort(reason);
-      finishKill(killed);
-      await turn();
-      expect(probe.seen.outcome).toBeUndefined();
-      child.drain();
-      await probe.done;
-    } finally {
-      killed.resolve(false);
-      child.drain();
-      await probe.done;
-    }
-    expect(probe.seen.outcome).toEqual({ error: reason });
-    expect(mocks.killChildTreeWin32).toHaveBeenCalledOnce();
-    expectReleased(controller.signal);
-  });
-
-  it("reports cancellation that arrives while a timed-out probe drains", async () => {
-    const controller = new AbortController();
-    const killed = gatedKill();
-    const probe = start(controller.signal);
-    try {
-      vi.advanceTimersByTime(5_000);
-      controller.abort(reason);
-      expect(mocks.killChildTreeWin32).toHaveBeenCalledOnce();
-      child.drain();
-      killed.resolve(true);
-      await probe.done;
-    } finally {
-      killed.resolve(false);
-      child.drain();
-      await probe.done;
-    }
-    expect(probe.seen.outcome).toEqual({ error: reason });
-    expectReleased(controller.signal);
-  });
-
-  it.each([
-    { source: "child", emitter: (): EventEmitter => child },
-    { source: "stdout", emitter: (): EventEmitter => child.stdout! },
-  ])("terminates a started child after a $source error and waits for it to close", async ({ emitter }) => {
+  it("treats a stdin failure as a stop and waits for the owner to close", async () => {
     const controller = new AbortController();
     const probe = start(controller.signal);
     try {
-      emitter().emit("error", new Error("pipe failed"));
-      expect(mocks.killChildTreeWin32).toHaveBeenCalledOnce();
+      child.stdin!.emit("error", Object.assign(new Error("write EPIPE"), { code: "EPIPE" }));
+      expect(child.stdin!.destroy).toHaveBeenCalledOnce();
       await turn();
       expect(probe.seen.outcome).toBeUndefined();
       child.drain(1);
@@ -290,7 +284,45 @@ describe("agent probe subprocess", () => {
     expectReleased(controller.signal);
   });
 
-  it("waits for Node to close a child that never started without terminating it", async () => {
+  it("reports cancellation that arrives while a timed-out probe drains", async () => {
+    const controller = new AbortController();
+    const probe = start(controller.signal);
+    try {
+      vi.advanceTimersByTime(5_000);
+      controller.abort(reason);
+      expect(child.stdin!.destroy).toHaveBeenCalledOnce();
+      child.drain();
+      await probe.done;
+    } finally {
+      child.drain();
+      await probe.done;
+    }
+    expect(probe.seen.outcome).toEqual({ error: reason });
+    expectReleased(controller.signal);
+  });
+
+  it.each([
+    { source: "child", emitter: (): EventEmitter => child },
+    { source: "stdout", emitter: (): EventEmitter => child.stdout! },
+  ])("stops a started owner after a $source error and waits for it to close", async ({ emitter }) => {
+    const controller = new AbortController();
+    const probe = start(controller.signal);
+    try {
+      emitter().emit("error", new Error("pipe failed"));
+      expect(child.stdin!.destroy).toHaveBeenCalledOnce();
+      await turn();
+      expect(probe.seen.outcome).toBeUndefined();
+      child.drain(1);
+      await probe.done;
+    } finally {
+      child.drain();
+      await probe.done;
+    }
+    expect(probe.seen.outcome).toEqual({ value: { exitCode: null, stdout: "", stderr: "" } });
+    expectReleased(controller.signal);
+  });
+
+  it("waits for Node to close an owner that never started", async () => {
     child = new FakeChild(undefined);
     const controller = new AbortController();
     const probe = start(controller.signal);
@@ -306,11 +338,11 @@ describe("agent probe subprocess", () => {
       await probe.done;
     }
     expect(probe.seen.outcome).toEqual({ value: { exitCode: null, stdout: "", stderr: "" } });
-    expect(mocks.killChildTreeWin32).not.toHaveBeenCalled();
+    expect(process.kill).not.toHaveBeenCalled();
     expectReleased(controller.signal);
   });
 
-  it("handles a later spawn error from a child that has no pipes", async () => {
+  it("handles a later spawn error from an owner that has no pipes", async () => {
     child = new FakeChild(undefined, { pipes: false });
     const controller = new AbortController();
     const probe = start(controller.signal);
@@ -325,25 +357,22 @@ describe("agent probe subprocess", () => {
       await probe.done;
     }
     expect(probe.seen.outcome).toEqual({ value: { exitCode: null, stdout: "", stderr: "" } });
-    expect(mocks.killChildTreeWin32).not.toHaveBeenCalled();
     expectReleased(controller.signal);
   });
 
-  it("keeps a child whose output setup fails until it is terminated and closed", async () => {
+  it("admits nothing when output setup fails and rejects once the owner closes", async () => {
     const failure = new Error("setEncoding failed");
     child.stdout!.setEncoding.mockImplementation(() => { throw failure; });
     const controller = new AbortController();
-    const killed = gatedKill();
     const probe = start(controller.signal);
     try {
-      expect(mocks.killChildTreeWin32).toHaveBeenCalledOnce();
-      child.drain();
+      expect(child.stdin!.write).not.toHaveBeenCalled();
+      expect(child.stdin!.destroy).toHaveBeenCalledOnce();
       await turn();
       expect(probe.seen.outcome).toBeUndefined();
-      killed.resolve(true);
+      child.drain(1);
       await probe.done;
     } finally {
-      killed.resolve(false);
       child.drain();
       await probe.done;
     }
@@ -351,15 +380,16 @@ describe("agent probe subprocess", () => {
     expectReleased(controller.signal);
   });
 
-  it("terminates a child when cancellation arrives during spawn", async () => {
+  it("admits nothing when cancellation arrives during spawn", async () => {
     const controller = new AbortController();
     mocks.spawn.mockImplementation(() => { controller.abort(reason); return child; });
     const probe = start(controller.signal);
     try {
-      expect(mocks.killChildTreeWin32).toHaveBeenCalledOnce();
+      expect(child.stdin!.write).not.toHaveBeenCalled();
+      expect(child.stdin!.destroy).toHaveBeenCalledOnce();
       await turn();
       expect(probe.seen.outcome).toBeUndefined();
-      child.drain();
+      child.drain(1);
       await probe.done;
     } finally {
       child.drain();
@@ -368,18 +398,21 @@ describe("agent probe subprocess", () => {
     expect(probe.seen.outcome).toEqual({ error: reason });
     expectReleased(controller.signal);
   });
+});
 
-  it("kills the POSIX process group once on cancellation and waits for it to close", async () => {
+describe("POSIX agent probe", () => {
+  it("kills the process group once on cancellation and waits for it to close", async () => {
     setPlatform("linux");
-    const kill = vi.spyOn(process, "kill").mockImplementation(() => true);
     const controller = new AbortController();
-    const probe = start(controller.signal);
+    const probe = start(controller.signal, join(resources, "missing"));
     try {
-      expect(mocks.spawn).toHaveBeenCalledWith(EXECUTABLE, ["--version"], expect.objectContaining({ detached: true }));
+      expect(mocks.spawn).toHaveBeenCalledWith(EXECUTABLE, ["--version"], expect.objectContaining({
+        cwd: homedir(), windowsHide: true, detached: true, stdio: ["ignore", "pipe", "pipe"],
+      }));
       controller.abort(reason);
       vi.advanceTimersByTime(5_000);
-      expect(kill).toHaveBeenCalledOnce();
-      expect(kill).toHaveBeenCalledWith(-4321, "SIGKILL");
+      expect(process.kill).toHaveBeenCalledOnce();
+      expect(process.kill).toHaveBeenCalledWith(-4321, "SIGKILL");
       await turn();
       expect(probe.seen.outcome).toBeUndefined();
       child.drain();
@@ -389,7 +422,8 @@ describe("agent probe subprocess", () => {
       await probe.done;
     }
     expect(probe.seen.outcome).toEqual({ error: reason });
-    expect(mocks.killChildTreeWin32).not.toHaveBeenCalled();
+    expect(child.stdin!.write).not.toHaveBeenCalled();
+    expect(child.stdin!.destroy).not.toHaveBeenCalled();
     expectReleased(controller.signal);
   });
 });

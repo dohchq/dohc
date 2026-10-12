@@ -1575,6 +1575,7 @@ describe("CLI socket server", () => {
               depth: 0,
               recordedAtMs: SERVER_NOW_MS,
               automationRun: null,
+              linkAuthor: null,
             },
           ],
           nextBeforeHistoryId: null,
@@ -1651,7 +1652,7 @@ describe("CLI socket server", () => {
     const field = { kind: "field" as const, recordId: "rec_1", path: "tasks/one.md", field: "Done", before: null, after: "2026-09-27" };
     const run = {
       claimId: "atc_1", state: "failed" as const, error: "The record is open elsewhere.", createdAtMs: 1, updatedAtMs: 2,
-      trigger, definitionChanged: true, neverStarted: false, chainStopped: false, undone: false,
+      trigger, definitionChanged: true, neverStarted: false, chainStopped: false, undoUnfinished: false, undone: false,
     };
     const retries: unknown[] = [];
     const answers: Array<Awaited<ReturnType<NonNullable<CliWorkspaceContext["automations"]>["retry"]>>> = [
@@ -2131,7 +2132,7 @@ describe("CLI socket server", () => {
       automationIdAt: vi.fn(async () => "collection:app-tasks#stamp"),
       runs: vi.fn(),
       retry: vi.fn(),
-      run: vi.fn(async () => ({ claimId: "atc_1", state: "done" as const, error: null, createdAtMs: 1, updatedAtMs: 2, trigger: { kind: "changed" as const, recordId: "rec_1", by: "agent" as const, sharedAuthor: null, depth: 1 }, definitionChanged: false, neverStarted: false, chainStopped: false, undone: false, steps: [{ step: 1, writes: [kept, action] }], failedStep: null, startsOver: false })),
+      run: vi.fn(async () => ({ claimId: "atc_1", state: "done" as const, error: null, createdAtMs: 1, updatedAtMs: 2, trigger: { kind: "changed" as const, recordId: "rec_1", by: "agent" as const, sharedAuthor: null, depth: 1 }, definitionChanged: false, neverStarted: false, chainStopped: false, undoUnfinished: false, undone: false, steps: [{ step: 1, writes: [kept, action] }], failedStep: null, startsOver: false })),
     };
     await expect(invoke("automationRun", { cwd, actor: "agent", collectionPath: "tasks", automation: "stamp", run: "atc_1" })).resolves.toMatchObject({ ok: true, run: { steps: [{ changes: [{ ...kept, path: "tasks/a.md" }, action] }] } });
     expect(context.automations.automationIdAt).toHaveBeenLastCalledWith("app/tasks", "stamp");

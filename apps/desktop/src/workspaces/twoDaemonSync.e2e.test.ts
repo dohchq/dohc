@@ -13,10 +13,10 @@ import { afterAll, beforeAll, expect, it, vi } from "vitest";
 import { buildRelay } from "../../../../services/sync-relay/scripts/build.mjs";
 import { stableJsonStringify } from "../../../../services/sync-relay/src/canonicalJson";
 import * as Y from "yjs";
-import { patchFrontmatter } from "@dohc/ydoc-projection/frontmatter";
+import { patchFrontmatter } from "@dohc/ydoc-projection/frontmatter-map";
 import { markdownToYDoc, yDocToMarkdown } from "@dohc/ydoc-projection";
 import { createLocalChangeAuthor } from "@dohc/workspace-core";
-import { DaemonRefusalError, VersionedLiveAdapter, WorkspaceDaemonRequester, type AutomationClaim } from "@dohc/workspace-engine-client";
+import { DaemonRefusalError, openEngineYdocProviderSession, YdocAdapterError, YdocOwnerDraftPendingError, VersionedLiveAdapter, WorkspaceDaemonRequester, type AutomationClaim } from "@dohc/workspace-engine-client";
 import { parseAutomationsFile } from "@dohc/workspace-contracts/automations";
 import { collectionRecordWrites } from "@dohc/automation-executor/collection-record-edits";
 import { createAutomationRunStore } from "@dohc/automation-executor/automation-run-store";
@@ -412,6 +412,14 @@ it.skipIf(engine.missing).each([
   let delivery: ReturnType<typeof startServerOwnerDelivery> | undefined;
   let peer: LiveDaemonCapture | undefined;
   const errors: string[] = [];
+  let resyncSignals = 0;
+  const recordError = (context: string, error: unknown) => {
+    if (error instanceof YdocAdapterError && error.code === "resync-needed") {
+      resyncSignals++;
+      return;
+    }
+    errors.push(`${context}: ${String(error)}`);
+  };
   const path = "tasks/pending.md", recordId = "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa";
   try {
     relayServer = await spawnSyncRelay({ dbPath: join(relayRoot, "relay", "relay.sqlite"), compiledMain: compiledRelayMain,
@@ -435,7 +443,9 @@ it.skipIf(engine.missing).each([
     await adapter.writeTextFile({workspaceId, versionId: "main", path, text: hasId ? `---\nid: ${recordId}\n---\n\n${body}` : body,
       publish: true, metadata: {origin: "api"}, author: {kind: "human", humanId: "local-person"}});
     capture = createWorkspaceEngineCapture({...source.workspace, rustEngineSessions: source.sessions, settleDebounceMs: 60_000,
-      onError: (context, error) => errors.push(`${context}: ${String(error)}`)});
+      openRustYDocProviderSession: options => openEngineYdocProviderSession({...options,
+        onResyncNeeded: error => { recordError("session resync", error); options.onResyncNeeded?.(error); }}),
+      onError: recordError});
     const seeded = await capture.openYDocSession({path, contentKind: "richdoc", onRemoteUpdate: () => undefined});
     if (hasId) await seeded.applyDecidedLocalUpdate(doc => {
       const scratch = new Y.Doc();
@@ -470,9 +480,11 @@ it.skipIf(engine.missing).each([
     const document = (await discovery())[0]!;
     const config = {...profile.owner, nativeConfigPath, nativeClient: profile.nativeClient, relayUrl: proxy.origin, documents: [document]};
     const pass = (signal: AbortSignal) => source.sessions.run(source.workspace, async ({client, workspace}) =>
-      runNativeOwnerDeliveryPass({client: source.nativeClient(), workspaceHandle: workspace, document, config, signal, bearer: relayConnection.token, accountId: undefined, assertCurrent() {}}));
+      runNativeOwnerDeliveryPass({client: source.nativeClient(), workspaceHandle: workspace, document, config, signal, bearer: relayConnection.token, accountId: workspaceId, assertCurrent() {}}));
     expect(["empty", "acknowledged"]).toContain(await pass(AbortSignal.timeout(60_000)));
-    const session = await capture.openYDocSession({path, contentKind: "richdoc", onRemoteUpdate: () => undefined});
+    let saveState: string | undefined;
+    const session = await capture.openYDocSession({path, contentKind: "richdoc", onRemoteUpdate: () => undefined,
+      onSaveState: state => { saveState = state; }});
     const beforeAdoption = await readFile(join(rootA, path), "utf8");
     if (!hasId) expect(session.doc.getMap("meta").has("dohcMarkdownSource")).toBe(name === "id-less non-canonical");
     await adapter.writeTextFile({workspaceId, versionId: "main", path: "tasks/collection.yaml", text: "fields:\n  Name:\n    type: text\n",
@@ -493,49 +505,76 @@ it.skipIf(engine.missing).each([
         } finally {scratch.destroy();}
       }, undefined, {actorOriginId: "local-person", attribution: {actorKind: "human"}, idempotencyKey: "native-name"});
     } else {
-      await expect(capture.flush()).rejects.toThrow("did not settle");
+      await capture.flush();
       expect(session.doc.getMap("frontmatter").get("id")).toBe(pending.recordId);
       expect((await adapter.listPendingCollectionAdoptions()).adoptions).toEqual([pending]);
-      await expect(capture.flush()).rejects.toThrow("did not settle");
+      await capture.flush();
       expect((await adapter.listPendingCollectionAdoptions()).adoptions).toEqual([pending]);
     }
     await expect(session.settleNow()).rejects.toMatchObject({name: "YdocOwnerDraftPendingError"});
     expect((await adapter.listPendingCollectionAdoptions()).adoptions).toHaveLength(1);
+    await capture.flush();
+    expect(await adapter.flushCapture()).toMatchObject({settled: true});
+    expect(saveState).toBe("pending-share");
     capture.start();
+    const beforeDeliveryResyncSignals = resyncSignals;
     delivery = startServerOwnerDelivery({workspaceIds: () => [workspaceId], attemptTimeoutMs: 60_000, retryDelayMs: 250,
       async runPass(_workspaceId, _index, signal) {
         const result = await pass(signal);
         await capture!.runRelaySync(materializePage => relay.pull(materializePage));
         return {documentCount: 1, acknowledged: result === "acknowledged"};
       },
-      onError: error => { errors.push(String(error)); }});
+      onError: error => recordError("owner delivery", error)});
+    // Keep the original session while the adapter resyncs it after delivery.
+    // A recorded failure ends each poll; the assertion outside reports it.
     await expect.poll(async () => {
-      expect(errors).toEqual([]);
-      return { pending: (await adapter.listPendingCollectionAdoptions()).adoptions.length,
-        settled: (await adapter.flushCapture()).settled, errors };
-    }, {timeout: 120_000})
-      .toEqual({pending: 0, settled: true, errors: []});
+      if (errors.length) return true;
+      const pending = (await adapter.listPendingCollectionAdoptions()).adoptions.length;
+      const {settled} = await adapter.flushCapture();
+      return pending === 0 && settled;
+    }, {timeout: 120_000}).toBe(true);
+    expect(errors).toEqual([]);
     await capture.flush();
     // Adoption can finish before the owner's field edit is accepted and materialized.
     if (hasId) await expect.poll(async () => {
-      await adapter.flushCapture();
-      return readFile(join(rootA, path), "utf8");
-    }, {timeout: 120_000}).toContain("Name: Manual");
+      if (errors.length) return true;
+      const pending = (await adapter.listPendingCollectionAdoptions()).adoptions.length;
+      const {settled} = await adapter.flushCapture();
+      return pending === 0 && settled && (await readFile(join(rootA, path), "utf8")).includes("Name: Manual");
+    }, {timeout: 120_000}).toBe(true);
+    expect(errors).toEqual([]);
+    // Adoption can settle before the original session's final owner receipt arrives.
+    await expect.poll(async () => {
+      if (errors.length) return true;
+      try { await session.settleNow(); }
+      catch (error) {
+        if (!(error instanceof YdocOwnerDraftPendingError)) {
+          recordError("original session settle", error);
+          throw error;
+        }
+      }
+      return saveState === "saved-to-host";
+    }, {timeout: 120_000}).toBe(true);
+    expect(errors).toEqual([]);
+    expect(resyncSignals, "delivery must resync the original pending-share session").toBeGreaterThan(beforeDeliveryResyncSignals);
     const markdown = await readFile(join(rootA, path), "utf8");
     if (hasId) expect(markdown).toContain("Name: Manual");
+    if (hasId) expect(markdown).toContain("beforeActivation: ordinary-owner");
     expect(markdown).toContain(`id: ${pending.recordId}`);
     if (hasId) expect(markdown).toContain(body.trimEnd());
     else expect(markdown).toBe(`---\nid: ${pending.recordId}\n---\n\n${beforeAdoption}`);
     await capture.flush();
     expect((await adapter.listPendingCollectionAdoptions()).adoptions).toEqual([]);
+    console.log(`native owner delivery ${name}: ${resyncSignals} resync signals recovered on the original session`);
     const ownerSettlement = (await capture.listMoments({limit: 100})).moments.find(moment => moment.path === path);
     expect(ownerSettlement).toBeDefined();
-    expect(ownerSettlement!.authors).toBeUndefined();
+    // Native owner delivery sends no recording context for an undeclared edit, so no author is verified.
+    expect(ownerSettlement!.authors).toEqual([{kind: "unattributed"}]);
     const publicationDb = new DatabaseSync(join(rootA, SECRET_FILE_STORE_RELATIVE_PATH), {readOnly: true});
     try {
       expect(publicationDb.prepare("SELECT admission_json,authors_json FROM live_settlement_publication_admissions WHERE workspace_id=? AND moment_id=?")
         .get(workspaceId, ownerSettlement!.id)).toMatchObject({
-          admission_json: expect.stringContaining('"status":"accepted"'), authors_json: "[]",
+          admission_json: expect.stringContaining('"status":"accepted"'), authors_json: '[{"kind":"unattributed"}]',
         });
     } finally {publicationDb.close();}
     // Publish owner operations before the peer imports settlement coverage.
@@ -564,7 +603,7 @@ it.skipIf(engine.missing).each([
     await pullAndExpect(peer, rootB, path, markdown);
     const imported = (await peer.capture.listMoments({limit: 100})).moments.find(moment => moment.id === ownerSettlement?.id);
     expect(imported).toBeDefined();
-    expect(imported!.authors).toBeUndefined();
+    expect(imported!.authors).toEqual([{kind: "unattributed"}]);
     if (hasId) {
       await delivery.stop();
       delivery = undefined;
@@ -588,13 +627,15 @@ it.skipIf(engine.missing).each([
           onCaptureSettled: () => () => undefined,
         }));
         const dependencies = {
+          isButtonField: async () => true,
           withReads: async <T,>(work: (engine: VersionedLiveAdapter) => Promise<T>) => work(adapter),
           withRecordWrites: async <T,>(signal: AbortSignal, work: (writes: ReturnType<typeof edits>) => Promise<T>) => work(edits(signal)),
           collectionIdOf: () => collectionId, collectionPathOf: () => "tasks",
           targets: createAutomationTargets({ isCollection: path => path === "tasks", readText: async () => null,
             readSchemaFields: async () => new Set(["Name"]), withHost: async () => null }),
           readCode: async () => null, personName: () => "Owner", evaluator: formula.forWorkspace(workspaceId), store, nowMs: Date.now,
-          chat: { directory: async () => null, write: async () => { throw new Error("No chat in this test"); } },
+          chat: { hasMessage: async () => false, directory: async () => null, write: async () => { throw new Error("No chat in this test"); } },
+          makeDurable: async () => { await adapter.makeAutomationWritesDurable(); },
           postNotice: async () => { throw new Error("No notices in this test"); }, readMessageBody: async () => null, recipientVerdicts: async () => [],
         };
         await expect(runCollectionAutomation(dependencies, { claim, automation, collection: {path: "tasks", name: "Tasks"},

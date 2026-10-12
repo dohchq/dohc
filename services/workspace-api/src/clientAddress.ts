@@ -1,23 +1,11 @@
 import type { IncomingHttpHeaders } from "node:http";
-import { isIP } from "node:net";
-
-function address(value: string): string | null {
-  const version = isIP(value);
-  if (!version || value.includes("%")) return null;
-  if (version === 4) return value;
-  const normalized = new URL(`http://[${value}]`).hostname.slice(1, -1);
-  const mapped = /^::ffff:([0-9a-f]+):([0-9a-f]+)$/.exec(normalized);
-  if (!mapped) return normalized;
-  const high = Number.parseInt(mapped[1]!, 16);
-  const low = Number.parseInt(mapped[2]!, 16);
-  return [high >> 8, high & 255, low >> 8, low & 255].join(".");
-}
+import { canonicalIpAddress } from "@dohc/service-http";
 
 export function trustedAuthProxies(value: string | undefined): Set<string> {
   const result = new Set<string>();
   if (!value?.trim()) return result;
   for (const entry of value.split(",")) {
-    const parsed = address(entry.trim());
+    const parsed = canonicalIpAddress(entry.trim());
     if (!parsed) throw new Error("DOHC_AUTH_TRUSTED_PROXIES must contain exact proxy IP addresses.");
     result.add(parsed);
   }
@@ -26,10 +14,10 @@ export function trustedAuthProxies(value: string | undefined): Set<string> {
 
 /** Derive the limiter address from the socket before Better Auth sees headers. */
 export function authClientAddress(peer: string | undefined, forwarded: string | string[] | undefined, trusted: ReadonlySet<string>): string {
-  const direct = address(peer ?? "");
+  const direct = canonicalIpAddress(peer ?? "");
   if (!direct) throw new Error("The auth connection has no IP address.");
   if (!trusted.has(direct) || typeof forwarded !== "string" || forwarded.length > 4096) return direct;
-  const chain = forwarded.split(",").map(value => address(value.trim()));
+  const chain = forwarded.split(",").map(value => canonicalIpAddress(value.trim()));
   if (!chain.length || chain.length > 32 || chain.some(value => value === null)) return direct;
   for (let index = chain.length - 1; index >= 0; index--) {
     const candidate = chain[index]!;

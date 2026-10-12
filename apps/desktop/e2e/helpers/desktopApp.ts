@@ -1,3 +1,4 @@
+import { mainProcessLogLines } from "./mainProcessCrashText";
 import { test, type Page } from "@playwright/test";
 import {
   _electron as electron,
@@ -117,12 +118,10 @@ export async function launchDesktopApp(input: {
     try { appendFileSync(logPath, JSON.stringify(timed) + "\n"); }
     catch (error) { logFailure ??= error; }
   };
-  const onStdoutData = (chunk: string) => {
-    record({ source: "main", level: "stdout", text: chunk });
-  };
-  const onStderrData = (chunk: string) => {
-    record({ source: "main", level: "stderr", text: chunk });
-  };
+  const stdoutLines = mainProcessLogLines(text => record({source: "main", level: "stdout", text}));
+  const stderrLines = mainProcessLogLines(text => record({source: "main", level: "stderr", text}));
+  const onStdoutData = (chunk: string) => stdoutLines.chunk(chunk);
+  const onStderrData = (chunk: string) => stderrLines.chunk(chunk);
 
   let app: ElectronApplication | null = null;
   let processHandle: ElectronProcess | null = null;
@@ -177,6 +176,7 @@ export async function launchDesktopApp(input: {
           try {
             await closeElectronApplication(launchedApp, launchedProcess, DESKTOP_CLOSE_GRACE_MS);
           } finally {
+            stdoutLines.end(); stderrLines.end();
             launchedProcess.stdout?.off("data", onStdoutData);
             launchedProcess.stderr?.off("data", onStderrData);
             await test.info().attach("desktop logs", { path: logPath, contentType: "application/x-ndjson" });
@@ -194,6 +194,7 @@ export async function launchDesktopApp(input: {
       } catch (cleanupError) {
         console.error("Failed-launch cleanup:", cleanupError);
       } finally {
+        stdoutLines.end(); stderrLines.end();
         processHandle?.stdout?.off("data", onStdoutData);
         processHandle?.stderr?.off("data", onStderrData);
       }

@@ -36,6 +36,27 @@ use std::{fmt::Write as _, sync::Arc};
 const WORKSPACE_ID: &str = "ws-rpc-collections";
 const RECORD_ID: &str = "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa";
 
+async fn expect_projection_commit(
+    notices: &mut tokio::sync::mpsc::Receiver<EngineEventNotice>,
+    path: &str,
+) {
+    tokio::time::timeout(std::time::Duration::from_secs(120), async {
+        loop {
+            let notice = notices.recv().await.unwrap();
+            assert_ne!(notice.name, AUTOMATION_CLAIMED_EVENT);
+            if notice.name == dohc_workspace_engine::COLLECTIONS_PROJECTED_EVENT
+                && notice.payload["paths"]
+                    .as_array()
+                    .is_some_and(|paths| paths.contains(&json!(path)))
+            {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("projection commit event");
+}
+
 #[tokio::test]
 async fn fresh_received_projection_has_no_index_until_its_first_pull() {
     let scratch = ScratchDir::new().unwrap();
@@ -133,21 +154,7 @@ async fn received_collection_projection_follows_local_definition_writes_and_anno
             "versionId": "main", "path": path, "text": text, "origin": "local-file" }),
         )
         .await;
-        tokio::time::timeout(std::time::Duration::from_secs(120), async {
-            loop {
-                let notice = notices.recv().await.unwrap();
-                assert_ne!(notice.name, AUTOMATION_CLAIMED_EVENT);
-                if notice.name == dohc_workspace_engine::COLLECTIONS_PROJECTED_EVENT
-                    && notice.payload["paths"]
-                        .as_array()
-                        .is_some_and(|paths| paths.contains(&json!(path)))
-                {
-                    break;
-                }
-            }
-        })
-        .await
-        .expect("projection commit event");
+        expect_projection_commit(&mut notices, path).await;
     }
     let listed = call(&transport, &handle, 7, "collections.list", json!({})).await;
     assert_eq!(listed["collections"][0]["path"], json!("tasks"));
@@ -169,16 +176,9 @@ async fn received_collection_projection_follows_local_definition_writes_and_anno
     )
     .await;
     assert_eq!(queried["records"].as_array().unwrap().len(), 1);
-    // local-file writes report bytes already on disk. Give settlement the
-    // same real artifact, so its stale-target fence can check that head.
     let record_path = scratch.path().join("tasks/a.md");
     std::fs::create_dir_all(record_path.parent().unwrap()).unwrap();
-    std::fs::write(
-        &record_path,
-        format!("---\nid: {RECORD_ID}\nTitle: Second\n---\n"),
-    )
-    .unwrap();
-    let opened = call(
+    let refusal = call_error(
         &transport,
         &handle,
         10,
@@ -188,30 +188,12 @@ async fn received_collection_projection_follows_local_definition_writes_and_anno
         }),
     )
     .await;
-    let doc = Ydoc::wire();
-    doc.rewrite_content_to_markdown(
-        ContentKind::Richdoc,
-        &format!("---\nid: {RECORD_ID}\nTitle: Second\n---\n"),
-    )
-    .unwrap();
-    call(&transport, &handle, 11, "ydoc.recordUpdate", json!({
-        "sessionId": opened["sessionId"], "seed": true,
-        "updateBase64": base64::engine::general_purpose::STANDARD.encode(doc.encode_full_state()),
-    })).await;
-    call(&transport, &handle, 12, "ydoc.recordUpdate", json!({
-        "sessionId": opened["sessionId"],
-        "updateBase64": base64::engine::general_purpose::STANDARD.encode(doc.frontmatter_set("Title", "Third").unwrap()),
-    })).await;
-    call(
-        &transport,
-        &handle,
-        13,
-        "ydoc.evict",
-        json!({"sessionId": opened["sessionId"]}),
-    )
-    .await;
-    // A later file write still maintains the closed lineage in a received
-    // store. The old broad early return left this Y.Doc at Third.
+    assert_eq!(refusal.code, ErrorCode::Forbidden);
+    assert_eq!(
+        refusal.message,
+        "received shares do not open live document sessions"
+    );
+    // Received writes still update the table after the live-session refusal.
     std::fs::write(
         &record_path,
         format!("---\nid: {RECORD_ID}\nTitle: Fourth\n---\n"),
@@ -228,6 +210,22 @@ async fn received_collection_projection_follows_local_definition_writes_and_anno
         }),
     )
     .await;
+    expect_projection_commit(&mut notices, "tasks/a.md").await;
+    let queried = call(
+        &transport,
+        &handle,
+        15,
+        "collections.query",
+        json!({ "collectionPath": "tasks" }),
+    )
+    .await;
+    let title = queried["records"][0]["values"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|value| value["field"] == "Title")
+        .unwrap();
+    assert_eq!(title["value"], json!("Fourth"));
     let connection = rusqlite::Connection::open(&db).unwrap();
     for table in ["automation_claims", "collection_field_history"] {
         assert_eq!(
@@ -236,17 +234,11 @@ async fn received_collection_projection_follows_local_definition_writes_and_anno
                     .get::<_, i64>(0))
                 .unwrap(),
             0,
-            "recipient Y.Doc append created {table}"
+            "recipient writes created {table}"
         );
     }
-    let object_id: String = connection.query_row(
-        "SELECT object_id FROM snapshots WHERE workspace_id=?1 AND version_id='main' AND path='tasks/a.md'",
-        [WORKSPACE_ID], |row| row.get(0)).unwrap();
-    let key = DocKey::new(WORKSPACE_ID, "main", object_id).unwrap();
-    let lineage = dohc_engine_collab::load_doc_in(&connection, &key).unwrap();
-    assert_eq!(lineage.frontmatter_json()["Title"], json!("Fourth"));
     drop(connection);
-    call(&transport, &handle, 15, "workspace.close", json!({})).await;
+    call(&transport, &handle, 16, "workspace.close", json!({})).await;
     let connection = rusqlite::Connection::open(&db).unwrap();
     for table in ["automation_claims", "collection_field_history"] {
         let count: i64 = connection
@@ -4756,8 +4748,9 @@ async fn native_public_trip_poll_moment_materializes_adopts_and_dedupes() {
         adoption["payloadAfterBlobSha256"],
         hex_sha256(settled.as_bytes())
     );
-    assert!(
-        adoption["authors"].is_null(),
+    assert_eq!(
+        adoption["authors"],
+        json!([{"kind":"unattributed"}]),
         "owner settlement must not impersonate the public voter"
     );
     let mut retry = EngineStore::open(&db, 3).expect("retry store");

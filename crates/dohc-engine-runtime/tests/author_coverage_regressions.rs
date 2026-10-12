@@ -441,7 +441,7 @@ async fn sync_projection_cannot_replace_an_unresolved_local_attempt_marker() {
             )
         })
         .expect("sync after local completion");
-    assert!(matches!(projected, TxnOutcome::Committed(())));
+    assert!(matches!(projected, TxnOutcome::Committed(_)));
     assert!(
         coverage(&store, &state.key).0 > pending.0,
         "sync can advance its own marker after local completion"
@@ -566,8 +566,8 @@ async fn terminal_status_distinguishes_success_from_supersession_including_equal
             store.write_with(&NoFaults,|tx| {
                 tx.execute("UPDATE materialization_jobs SET status=?1,completed_at_ms=10 WHERE status='pending'",[if newer_completed_at == 9 { "cancelled" } else { "complete" }])
                     .map_err(StorageError::persist_public)?;
-                tx.execute("INSERT INTO materialization_jobs (job_id,workspace_id,target_path,content_sha256,preimage_present,target_generation,status,created_at_ms,completed_at_ms) \
-                    SELECT 'newer',?1,target_path,content_sha256,preimage_present,target_generation+1,'complete',created_at_ms,?2 FROM materialization_jobs LIMIT 1",
+                tx.execute("INSERT INTO materialization_jobs (job_id,workspace_id,target_path,content_sha256,preimage_present,preimage_sha256,target_generation,status,created_at_ms,completed_at_ms) \
+                    SELECT 'newer',?1,target_path,content_sha256,preimage_present,preimage_sha256,target_generation+1,'complete',created_at_ms,?2 FROM materialization_jobs LIMIT 1",
                     rusqlite::params![newer_workspace,newer_completed_at]).map_err(StorageError::persist_public)?;
                 author_coverage::reconcile_in(tx,&state.key,12)
                     .map_err(StorageError::persist_public)

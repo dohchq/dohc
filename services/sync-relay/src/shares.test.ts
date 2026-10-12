@@ -868,7 +868,7 @@ describe("share grants", () => {
     expect(await denialBytes(await h(request(STRANGER, `/sync/shares/share-0/blobs/${sharedSha}`)))).toBe(unknown);
   });
 
-  it("serves only selected declared-agent provenance to the current authenticated recipient", async () => {
+  it("keeps selected ordinary declarations unattributed for the current authenticated recipient", async () => {
     const storage = await testStorage();
     const h = handler(storage);
     await createWorkspace(h);
@@ -889,8 +889,8 @@ describe("share grants", () => {
     const page = await json(response);
     const ops = page.ops as Array<{ payload: Record<string, unknown> }>;
     expect(ops).toHaveLength(1);
-    expect(ops[0]!.payload.authors).toEqual([{ kind: "agent", agentId: "trip-agent-hosted", onBehalfOf: "opaque-owner" }]);
-    for (const excluded of ["private-", "fabricated-authority", "hidden-agent", "other-version-agent", "agentRunId", "principalId"]) {
+    expect(ops[0]!.payload.authors).toEqual([{kind: "unattributed"}]);
+    for (const excluded of ["private-", "fabricated-authority", "hidden-agent", "other-version-agent", "agentRunId", "principalId", "onBehalfOf", "opaque-owner", "trip-agent-hosted"]) {
       expect(JSON.stringify(page)).not.toContain(excluded);
     }
     expect((await h(request(STRANGER, `/sync/shares/${shareId}/log?since=0`))).status).toBe(404);

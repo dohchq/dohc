@@ -5295,3 +5295,68 @@ fn imported_agent_message_keeps_its_owner_display_name() {
     }).expect("owner");
     assert_eq!(stored, "Ada");
 }
+
+#[test]
+fn old_received_and_parked_messages_do_not_enter_local_backward_clock_discovery() {
+    let (_scratch, _path, mut engine) = open_store();
+    imported_chat_fixture(&mut engine, "peer");
+    engine.write_with(&NoFaults, |tx| {
+        tx.execute("INSERT INTO chat_dispatch_scan_cursor (workspace_id,max_created_at_ms,updated_at_ms) VALUES ('ws',100,101)", [])
+            .map_err(SyncError::persist)?;
+        Ok::<_, SyncError>(())
+    }).unwrap();
+    applied_claims(apply_chat_envelope(
+        &mut engine,
+        &group_message(
+            "peer",
+            3,
+            "received-old",
+            "thread-imported",
+            "human",
+            "@agent",
+        ),
+        &NoFaults,
+    ));
+    applied_claims(apply_chat_envelope(
+        &mut engine,
+        &group_message(
+            "parked-peer",
+            0,
+            "parked-old",
+            "late-thread",
+            "human",
+            "@agent",
+        ),
+        &NoFaults,
+    ));
+    assert_eq!(pending_chat_coordinate_count(&engine), 1);
+    applied_claims(apply_chat_envelope(
+        &mut engine,
+        &envelope(
+            "late-thread-peer",
+            0,
+            "chat.thread.create",
+            json!({
+                "threadId": "late-thread", "title": "Late thread", "createdAtMs": 25,
+                "channelSlug": "imported", "channelWireId": "channel-imported",
+            }),
+        ),
+        &NoFaults,
+    ));
+    assert_eq!(pending_chat_coordinate_count(&engine), 0);
+    let counts: (i64, i64) = engine.read_with(|conn| {
+        Ok::<_, dohc_engine_storage::StorageError>((
+            conn.query_row("SELECT COUNT(*) FROM chat_messages WHERE workspace_id='ws' AND message_id IN ('received-old','parked-old')", [], |row| row.get(0))
+                .map_err(dohc_engine_storage::StorageError::corrupt_public)?,
+            conn.query_row("SELECT COUNT(*) FROM chat_dispatch_local_discovery WHERE workspace_id='ws'", [], |row| row.get(0))
+                .map_err(dohc_engine_storage::StorageError::corrupt_public)?,
+        ))
+    }).unwrap();
+    assert_eq!(counts, (2, 0));
+    assert_eq!(
+        LinkedChatStore::new(&mut engine)
+            .record_eligible_triggers("ws", Some("ana"), 110, &NoFaults)
+            .unwrap(),
+        0
+    );
+}

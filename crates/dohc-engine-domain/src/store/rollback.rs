@@ -6,6 +6,7 @@ use super::{
 };
 use crate::conflicts::{
     binary_delete_job_id, binary_rename_delete_job_id, binary_rename_write_job_id,
+    binary_write_job_id,
 };
 use crate::error::DomainError;
 use crate::records::{
@@ -160,6 +161,12 @@ impl<'a> VersionedTextStore<'a> {
             let restore_generation = next_moment_order(tx)?;
             before_remove(tx, &prep.moment)?;
             tx.execute(
+                "DELETE FROM engine_requests WHERE request_id='sync-ydoc-provisional-author:'||json_array(?1,?2,?3) \
+                 AND payload_hash=?4 AND kind='sync-ydoc-provisional-author'",
+                params![ws, input.version_id, prep.moment.object_id, input.mutation_moment_id],
+            )
+            .map_err(DomainError::sql_persist)?;
+            tx.execute(
                 "DELETE FROM moments WHERE workspace_id = ?1 AND moment_id = ?2",
                 params![ws, input.mutation_moment_id],
             )
@@ -287,7 +294,7 @@ impl<'a> VersionedTextStore<'a> {
                 && let Some(written_moment_sha) = prep.moment.after_binary_sha256.as_deref().or(prep.moment.after_blob_sha256.as_deref())
             {
                 let publication_job_id = if prep.moment.after_content_kind == "binary" {
-                    input.mutation_moment_id.clone()
+                    binary_write_job_id(&input.mutation_moment_id)
                 } else { format!("authored-mat_{}", input.mutation_moment_id) };
                 let active = version_is_active(tx, ws, &input.version_id)?;
                 let job: Option<(String, i64, String, String, String)> = tx

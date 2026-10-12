@@ -7,7 +7,7 @@ Agents and developers use this page to work with dohc from outside the app. It l
 
 ## Connect
 
-- **MCP.** In dohc, open **Settings**, then **Agents & MCP**. Choose **Enable MCP**, then copy the **MCP config** into your agent's MCP settings. The server works on one workspace.
+- **MCP.** In dohc, open **Settings**, then **Agents**. Copy the **MCP config** into your agent's MCP settings. The server works on one workspace.
 - **CLI.** The `dohc` command talks to the running dohc app, so keep dohc open. Run it inside the workspace folder. Agents that dohc starts have it on their `PATH`.
 - **Share links.** A share link has its own MCP server, `dohc-share`, with other tools. This page does not list them. The [share-web README](../../services/share-web/README.md) says how an agent connects to it.
 
@@ -368,7 +368,7 @@ Read one collection record by id: current field values plus per-field history wi
 - `historyLimit`: `integer`
 - `beforeHistoryId`: `integer`
 
-Returns `{ ok: true, collection: { path, status, reasons }, record: { id, path, conflicted, values }, history: { historyId, field, previous, next, authorOriginId, actorKind, onBehalfOf, depth, recordedAtMs, automationRun }[] } | { ok: false, reason }`.
+Returns `{ ok: true, collection: { path, status, reasons }, record: { id, path, conflicted, values }, history: { historyId, field, previous, next, authorOriginId, actorKind, onBehalfOf, depth, recordedAtMs, linkAuthor, automationRun }[] } | { ok: false, reason }`.
 
 ### `dohc_set_record_fields`
 
@@ -509,7 +509,7 @@ Read the grants covering an object.
 
 - `--cursor <cursor>`: Continue the previous answer.
 
-With `--json`, prints `{ schemaVersion, ref: { kind: "path", path, versionId } | { kind: "file", objectId } | { kind: "chat", channelWireId } | { kind: "collection", datasetId } | null, rows: ({ kind: "share", shareId, grantId, via, granterUserId, granterEmail, recipientUserId, recipientEmail, subjectName, sharerName, selector, access, status, generation, fileScope? } | { kind: "collection", datasetId, principal, appId, operationIds, revision, revisionSha256, compatible })[], visibility, coverage: { kind, complete, observation: "interval" }, checkedAtMs, freshness, nextCursor }`. Uses socket verb `accessObject`.
+With `--json`, prints `{ schemaVersion, ref: { kind: "path", path, versionId } | { kind: "file", objectId } | { kind: "chat", channelWireId } | { kind: "collection", datasetId } | null, rows: ({ kind: "share", shareId, grantId, via, granterUserId, granterEmail, recipientUserId, recipientEmail, subjectName, sharerName, selector, access, status, generation, fileScope?, removalMessage? } | { kind: "collection", datasetId, principal, appId, operationIds, revision, revisionSha256, compatible })[], visibility, coverage: { kind, complete, observation: "interval" }, checkedAtMs, freshness, nextCursor }`. Uses socket verb `accessObject`.
 
 #### `dohc access sharing`
 
@@ -521,7 +521,7 @@ Page this workspace's granted shares or this account's received shares.
 
 - `--cursor <cursor>`: Continue the previous answer.
 
-With `--json`, prints `{ schemaVersion, ref: { kind: "path", path, versionId } | { kind: "file", objectId } | { kind: "chat", channelWireId } | { kind: "collection", datasetId } | null, rows: ({ kind: "share", shareId, grantId, via, granterUserId, granterEmail, recipientUserId, recipientEmail, subjectName, sharerName, selector, access, status, generation, fileScope? } | { kind: "collection", datasetId, principal, appId, operationIds, revision, revisionSha256, compatible })[], visibility, coverage: { kind, complete, observation: "interval" }, checkedAtMs, freshness, nextCursor }`. Uses socket verb `accessSharing`.
+With `--json`, prints `{ schemaVersion, ref: { kind: "path", path, versionId } | { kind: "file", objectId } | { kind: "chat", channelWireId } | { kind: "collection", datasetId } | null, rows: ({ kind: "share", shareId, grantId, via, granterUserId, granterEmail, recipientUserId, recipientEmail, subjectName, sharerName, selector, access, status, generation, fileScope?, removalMessage? } | { kind: "collection", datasetId, principal, appId, operationIds, revision, revisionSha256, compatible })[], visibility, coverage: { kind, complete, observation: "interval" }, checkedAtMs, freshness, nextCursor }`. Uses socket verb `accessSharing`.
 
 ### `dohc document`
 

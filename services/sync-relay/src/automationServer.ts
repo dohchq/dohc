@@ -116,7 +116,7 @@ export type ServerExecutor = Pick<
   | "open" | "dispose" | "notifyClaimed" | "handlePulledPaths" | "relayAnswered" | "groupMessagesArrived" | "hostChanged"
   | "releaseGroupSubscriptions" | "reachHandover" | "relayedClaim" | "pressRelayed" | "automationName"
   | "schedules" | "scheduleMarks" | "claimSchedule" | "failuresChanged" | "datasetsChanged" | "pressDataset" | "holds"
-  | "runs" | "listedRun" | "retry" | "undo" | "undoRunsOf" | "confirmReach"
+  | "runs" | "listedRun" | "retry" | "undo" | "undoRunsOf" | "removePendingRestore" | "confirmReach"
   | "inspectRelayedBatch"
 >;
 
@@ -656,6 +656,7 @@ export async function startAutomationServer(options: AutomationServerOptions) {
       evaluator: evaluator.forWorkspace(workspaceId),
       store: runStore,
       chat: {
+        hasMessage: chat.hasMessage,
         directory: chat.directory,
         write: async (signal, message, run) => {
           try {
@@ -1077,7 +1078,7 @@ export async function startAutomationServer(options: AutomationServerOptions) {
         : { incarnation: kept.incarnation, unwantedSinceMs: kept.unwantedSinceMs, leftAtMs: kept.leftAtMs },
     });
     try {
-      replicas.reconcile();
+      replicas.reconcile(workspaceId);
       await copyOpened(workspaceId);
       return await work(ownedCopy(scope));
     } finally {
@@ -1147,9 +1148,14 @@ export async function startAutomationServer(options: AutomationServerOptions) {
       await ws.replica.sync();
       return result;
     }),
-    restore: (scope, definitions, again) => withCopy(scope, async (copy) => {
+    restore: (scope, definitions, again, retentionId) => withCopy(scope, async (copy) => {
       const ws = await currentCopy(scope, copy);
-      const result = await ws.executor.undoRunsOf(definitions, trashIn(ws), again);
+      const id = `desktop:${retentionId}`;
+      if (definitions.length === 0) {
+        await ws.executor.removePendingRestore(id);
+        return {undone: 0, left: 0, reverted: 0, missing: 0, keptFields: [], otherKept: 0, errorMessage: null};
+      }
+      const result = await ws.executor.undoRunsOf(definitions, trashIn(ws), again, id);
       // What it put back reaches the relay before the owner's computer takes its turn.
       await ws.replica.sync();
       return result;

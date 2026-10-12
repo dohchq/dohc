@@ -345,5 +345,49 @@ export function useHistoryPage(
     [issue],
   );
 
+  const [namesRevision, setNamesRevision] = useState<{ workspaceId: string } | null>(null);
+  const namedRevision = useRef<typeof namesRevision>(null);
+  useEffect(() => bridge().onHistoryNamesChanged?.(event => {
+    if (event.workspaceId === workspaceId) setNamesRevision({ workspaceId });
+  }), [workspaceId]);
+  useEffect(() => {
+    const shown = latestPage.current;
+    if (
+      namesRevision?.workspaceId !== workspaceId || namedRevision.current === namesRevision ||
+      loadingMore || shown === null || shown.moments.length === 0
+    ) return;
+    let liveRequest = true;
+    const watermark = committed.current;
+    const version = committedVersionId.current;
+    const live = () => liveRequest && !loadingMoreNow.current && latestPage.current === shown && committed.current === watermark && committedVersionId.current === version;
+    const scan = async () => {
+      const named = new Map<string, EngineMomentRecord>();
+      let before = Math.max(...shown.moments.map(moment => moment.momentOrder)) + 1;
+      const last = Math.min(...shown.moments.map(moment => moment.momentOrder));
+      do {
+        const response = await bridge().listEngineMoments({ workspaceId, beforeMomentOrder: before, limit: HISTORY_PAGE_LIMIT });
+        if (!live() || "status" in response || response.activeVersionId !== version) return false;
+        for (const moment of response.moments) named.set(moment.id, moment);
+        if (response.nextBeforeMomentOrder === null || response.nextBeforeMomentOrder <= last) break;
+        if (response.nextBeforeMomentOrder >= before) return false;
+        before = response.nextBeforeMomentOrder;
+      } while (live());
+      if (!live()) return false;
+      const next = { ...shown, moments: shown.moments.map(moment => named.get(moment.id) ?? moment) };
+      latestPage.current = next;
+      // An append keeps earlier rows. Consume the event only once their
+      // names reach the page; an interrupted scan runs on the new page.
+      namedRevision.current = namesRevision;
+      setPageState(next);
+      return true;
+    };
+    void (async () => {
+      for (let attempt = 0; attempt < 2 && live(); attempt++) {
+        try { if (await scan()) return; } catch { /* Retry once while this page is still current. */ }
+      }
+    })();
+    return () => { liveRequest = false; };
+  }, [workspaceId, owner, page, loadingMore, namesRevision]);
+
   return { page, loadingMore, readState, policyError, ...owner };
 }

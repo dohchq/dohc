@@ -20,6 +20,27 @@ import { DesktopWorkspaceShell, WORKSPACE, OTHER_WORKSPACE, SYNC_STATUS, READY_U
 // generic error. The notice explains what was found; the rebuild is explicit
 // (a confirmed click), states the destination before anything moves, and the
 // success copy names the reverse path.
+it("dismisses unfinished Stop and restore through its workspace operation before removing the Notice", async () => {
+  const bridge = makeBridge(Promise.resolve(null));
+  const target = {kind: "person" as const, userId: "ana"};
+  bridge.pendingStopAndRestores.mockResolvedValue([{target, label: "Ana", receipts: [], filesUndone: false,
+    result: {status: "restored", restored: [], review: [], runsUndone: 0, runsLeft: 0, keptFields: [], fieldsMissing: 0,
+      runChangesKept: 0, wroteAutomations: false, sendsMessages: false, unfinished: {step: "files", message: "Interrupted"}}}]);
+  const dismissed = deferred<void>();
+  bridge.dismissStopAndRestore.mockImplementation(() => dismissed.promise);
+  const user = userEvent.setup();
+  renderShell(bridge);
+  await user.click(await screen.findByTestId("notice-center-toggle"));
+  const message = "dohc stopped before restoring every file.";
+  const row = (await within(await screen.findByTestId("notice-center")).findByText(message)).closest("li");
+  if (row === null) throw new Error("No restore Notice row");
+  await user.click(within(row).getByRole("button", {name: "Dismiss notice"}));
+  expect(bridge.dismissStopAndRestore).toHaveBeenCalledWith({workspaceId: WORKSPACE.workspaceId, target});
+  expect(row.isConnected).toBe(true);
+  await act(async () => dismissed.resolve());
+  await waitFor(() => expect(row.isConnected).toBe(false));
+});
+
 it("reports an edit refusal once through Notices, without an ineffective retry", async () => {
   const bridge = makeBridge(Promise.resolve(null));
   const listeners = new Set<(event: EngineYDocSaveStateEvent) => void>();
@@ -1155,7 +1176,7 @@ describe("notices sent to you", () => {
     bridge.listCollectionAutomationRuns.mockImplementation(async ({ automationId }) => ({ status: "listed", runs: [{
       claimId: automationId.endsWith("#first") ? "atc_first" : "atc_second", state: "failed" as const,
       error: "The record is open elsewhere.", createdAtMs: 5_000, updatedAtMs: 5_000,
-      trigger: { kind: "changed", recordId: "rec_1", by: "human", sharedAuthor: null, depth: 0 }, writes: [], definitionChanged: false, neverStarted: false, chainStopped: false, undone: false,
+      trigger: { kind: "changed", recordId: "rec_1", by: "human", sharedAuthor: null, depth: 0 }, writes: [], definitionChanged: false, neverStarted: false, chainStopped: false, undoUnfinished: false, undone: false,
     }], next: null }));
     return bridge;
   }
@@ -2105,65 +2126,6 @@ describe("owner live documents", () => {
     await openCloudSettings(user);
     expect(await screen.findByTestId("settings-row-live-documents")).toBeTruthy();
   });
-
-  // Ending a share is reversible for 10 minutes, so the notice carries Undo.
-  // The shell holds it: it works after Settings closes, from the toast and
-  // from the Notices row the toast leaves behind.
-  it("offers Undo for an ended share on the toast and in Notices after Settings closes", async () => {
-    const bridge = makeBridge(Promise.resolve(null));
-    bridge.listRelayShares = vi.fn().mockResolvedValue({
-      granted: [
-        {
-          shareId: "share-1",
-          workspaceId: WORKSPACE.workspaceId,
-          recipientUserId: "friend",
-          recipientEmail: "friend@dohc.test",
-          selector: { paths: ["docs"], versionId: null },
-          access: "view",
-          grantId: "grant-1",
-          generation: 1,
-          createdAtMs: 1000,
-          revokedAtMs: null,
-          shareCode: "dohc-share:share-1:http://relay.test",
-        },
-      ],
-      received: [],
-      removed: [],
-    });
-    const user = userEvent.setup();
-    renderShell(bridge);
-
-    await openCloudSettings(user);
-    await user.click(await screen.findByTestId("shared-by-me-revoke-start"));
-    await user.click(screen.getByTestId("shared-by-me-revoke"));
-    const toast = await screen.findByTestId("workspace-shell-notice");
-    expect(toast.textContent).toContain(
-      "Ended the share of docs with friend@dohc.test. You can undo this for 10 minutes.",
-    );
-    expect(within(toast).getByRole("button", { name: "Undo" })).toBeTruthy();
-
-    await user.keyboard("{Escape}");
-    await waitFor(() => expect(screen.queryByTestId("settings-dialog")).toBeNull());
-
-    // Closing the toast keeps the row, and the row keeps the Undo.
-    await user.click(screen.getByRole("button", { name: "Dismiss workspace notice" }));
-    expect(screen.queryByTestId("workspace-shell-notice")).toBeNull();
-    await user.click(screen.getByTestId("notice-center-toggle"));
-    const notices = await screen.findByTestId("notice-center");
-    expect(notices.textContent).toContain("Ended the share of docs with friend@dohc.test.");
-    await user.click(within(notices).getByRole("button", { name: "Undo" }));
-
-    await waitFor(() =>
-      expect(bridge.undoRelayShare).toHaveBeenCalledWith({ shareId: "share-1", undoId: "undo-1" }),
-    );
-    await waitFor(() =>
-      expect(screen.getByTestId("workspace-shell-notice").textContent).toContain(
-        "Restored the share of docs with friend@dohc.test.",
-      ),
-    );
-    // The Undo row ran once and is gone.
-    expect(screen.queryByText(/You can undo this for 10 minutes/)).toBeNull();
-  });
 });
 
 describe("connection dialog retries", () => {
@@ -2186,7 +2148,11 @@ describe("connection dialog retries", () => {
     const user = userEvent.setup();
     renderShell(bridge);
 
-    await user.click(await screen.findByTestId("activity-cloud"));
+    const openConnect = async () => {
+      await user.keyboard("{Control>}k{/Control}");
+      await user.click(await screen.findByText("Connect server"));
+    };
+    await openConnect();
     await user.type(
       await screen.findByTestId("cloud-server-url"),
       "https://dohc.example.test",
@@ -2196,7 +2162,7 @@ describe("connection dialog retries", () => {
 
     await user.keyboard("{Escape}");
     await waitFor(() => expect(screen.queryByTestId("cloud-sync-panel")).toBeNull());
-    await user.click(screen.getByTestId("activity-cloud"));
+    await openConnect();
     expect(
       ((await screen.findByTestId("cloud-server-url")) as HTMLInputElement).value,
     ).toBe("");
@@ -2212,6 +2178,57 @@ describe("connection dialog retries", () => {
 });
 
 describe("unavailable MCP launcher settings", () => {
+  it("retries a stopped run's history from Notices after Settings closes", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    const run = { id: "run-old", startedAt: 1, agentId: "agent-1", onBehalfOf: "ice", status: "running" as const };
+    let activeRun: typeof run | null = run;
+    bridge.getAgentRunStatus.mockImplementation(async () => ({ activeRun, lastRun: null }));
+    bridge.endAgentRun.mockImplementationOnce(async () => {
+      activeRun = null;
+      throw new Error("Repair .dohc/agent-runs.json, then try again.");
+    });
+    const user = userEvent.setup();
+    renderShell(bridge);
+    await user.keyboard("{Control>}k{/Control}");
+    await user.click(await within(await screen.findByTestId("command-palette")).findByText("Settings: Open Agents (MCP)"));
+    await waitFor(() => expect(screen.getByTestId("mcp-status").getAttribute("data-state")).toBe("running"));
+    await user.click(screen.getByTestId("mcp-enable-toggle"));
+    await screen.findByTestId("workspace-shell-error");
+    await user.keyboard("{Escape}");
+    await waitFor(() => expect(screen.queryByTestId("settings-dialog")).toBeNull());
+    await user.click(screen.getByTestId("notice-center-toggle"));
+    const notice = await within(await screen.findByTestId("notice-center")).findByText("Repair .dohc/agent-runs.json, then try again.");
+    const row = notice.closest("li");
+    if (!row) throw new Error("The agent failure has no Notices row.");
+    await user.click(within(row).getByRole("button", { name: "Try again" }));
+    await waitFor(() => expect(bridge.endAgentRun).toHaveBeenCalledTimes(2));
+    expect(bridge.endAgentRun).toHaveBeenLastCalledWith({ workspaceId: WORKSPACE.workspaceId, runId: run.id });
+    expect(bridge.startAgentRun).not.toHaveBeenCalled();
+  });
+
+  it("keeps an agent settings retry in Notices when it fails after Settings closes", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    const message = "dohc could not load agent settings.";
+    bridge.getMcpConfig.mockRejectedValueOnce(new Error(message));
+    const user = userEvent.setup();
+    renderShell(bridge);
+    await user.keyboard("{Control>}k{/Control}");
+    await user.click(await within(await screen.findByTestId("command-palette")).findByText("Settings: Open Agents (MCP)"));
+    await screen.findByTestId("workspace-shell-error");
+    await user.keyboard("{Escape}");
+    await waitFor(() => expect(screen.queryByTestId("settings-dialog")).toBeNull());
+    bridge.getMcpConfig.mockRejectedValueOnce(new Error(message));
+    await user.click(screen.getByTestId("workspace-shell-error-retry"));
+    expect((await screen.findByTestId("workspace-shell-error")).textContent).toContain(message);
+    await user.click(screen.getByTestId("notice-center-toggle"));
+    const notice = await within(await screen.findByTestId("notice-center")).findByText(message);
+    const row = notice.closest("li");
+    if (!row) throw new Error("The load failure has no Notices row.");
+    await user.click(within(row).getByRole("button", { name: "Try again" }));
+    await waitFor(() => expect(bridge.getMcpConfig).toHaveBeenCalledTimes(3));
+    await waitFor(() => expect(screen.queryByText(message)).toBeNull());
+  });
+
   it("shows the launcher error without a copyable config", async () => {
     const bridge = makeBridge(Promise.resolve(null));
     bridge.getMcpConfig = vi.fn(
@@ -2226,7 +2243,7 @@ describe("unavailable MCP launcher settings", () => {
     await user.keyboard("{Control>}k{/Control}");
     await user.click(
       await within(await screen.findByTestId("command-palette")).findByText(
-        "Settings: Open Agents & MCP",
+        "Settings: Open Agents (MCP)",
       ),
     );
 

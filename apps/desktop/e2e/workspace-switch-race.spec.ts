@@ -17,10 +17,12 @@ import {
   writeWorkspaceFiles,
 } from "./helpers/workspace";
 
-// PR 0M arc requirement: switching workspaces while history/chat panels are
-// loading must never paint workspace A's data inside workspace B. Workspace
-// A is deliberately HEAVY (1,000 engine moments + a 200-message chat, the
-// perf-budget corpus) so its loads are the slow ones; B is tiny.
+// Integration smoke for switching workspaces with heavy history and chat
+// panels open: workspace A is deliberately HEAVY (1,000 engine moments + a
+// 200-message chat, the perf-budget corpus) and B is tiny, and B must show
+// only B's history and chats once it is ready. A response held until after B
+// paints is the controlled regression in DesktopWorkspaceShell.history.test.tsx
+// ("keeps a history answer workspace A asked for out of workspace B").
 //
 // This spec doubles as the PR 0M-5 performance evidence: it records history
 // first-useful-content with 1,000 moments and the chat rail with 200
@@ -42,7 +44,7 @@ const EDITS_PER_FILE = 4; // 250 x 4 = 1,000 moments
 const CHAT_MESSAGES = 200;
 type EngineMomentsBridge = Pick<DohcDesktopBridge, "listEngineMoments">;
 
-test("switching A->B while panels load never shows A's history or chats in B", async () => {
+test("switching A->B with A's heavy panels open shows only B's history and chats", async () => {
   test.setTimeout(240_000);
   const temp = await createTempWorkspace();
   const workspaceB = await createSiblingWorkspaceDir(temp, "workspace-b");
@@ -182,9 +184,9 @@ test("switching A->B while panels load never shows A's history or chats in B", a
       `[perf] chats panel open with ${CHAT_MESSAGES} messages: ${chatOpenMs}ms to latest message visible`,
     );
 
-    // --- The race: switch to B while A's heavy surfaces are (re)loading ---
-    // Kick a fresh paint of A's big history view (the chats panel is already
-    // live), then switch immediately without awaiting it.
+    // --- Switch to B right after asking A's heavy history view to paint ---
+    // The chats panel is already live. Nothing here controls when A's answers
+    // land; the shell regression named at the top of this file owns that ordering.
     await openHistoryView(page);
     await page.getByTestId("workspace-switcher").click();
     await switcherOption(page, WORKSPACE_B_ID).click();
@@ -197,14 +199,7 @@ test("switching A->B while panels load never shows A's history or chats in B", a
         '[data-testid="engine-moment-open"][data-moment-path="b-note.md"]',
       ),
     ).toBeVisible();
-    // ...and never any of A's moments or chats.
-    await expect(
-      page.locator('[data-testid="engine-moment-open"][data-moment-path^="files/doc-"]'),
-    ).toHaveCount(0);
-    // An instantaneous empty check alone could pass while a stale A response
-    // is still in flight; give any straggler time to land, then re-assert
-    // the shell stayed clean.
-    await page.waitForTimeout(750);
+    // ...and none of A's moments or chats.
     await expect(
       page.locator('[data-testid="engine-moment-open"][data-moment-path^="files/doc-"]'),
     ).toHaveCount(0);

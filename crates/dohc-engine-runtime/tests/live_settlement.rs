@@ -787,6 +787,24 @@ impl Fixture {
         received_at_ms: i64,
         agent_declaration: Option<AgentDeclaration>,
     ) -> (LiveUpdateReceipt, ApplicationResult) {
+        self.apply_declared_with_content(
+            cursor,
+            bytes,
+            authority,
+            received_at_ms,
+            (agent_declaration, vec![]),
+        )
+        .await
+    }
+    async fn apply_declared_with_content(
+        &self,
+        cursor: i64,
+        bytes: Vec<u8>,
+        authority: ServerDerivedLiveUpdateAuthority,
+        received_at_ms: i64,
+        authorship: (Option<AgentDeclaration>, Vec<LiveUpdateStructRange>),
+    ) -> (LiveUpdateReceipt, ApplicationResult) {
+        let (agent_declaration, first_seen) = authorship;
         self.doc.apply(&bytes).unwrap();
         let receipt = LiveUpdateReceipt {
             delivery_id: format!("delivery-{cursor}"),
@@ -802,7 +820,7 @@ impl Fixture {
                     authority,
                     received_at_ms,
                 },
-                first_seen: vec![],
+                first_seen,
                 canonical_version: Some(2),
                 author_snapshot: Some(
                     (agent_declaration)
@@ -940,6 +958,59 @@ fn latest_authors(f: &Fixture) -> serde_json::Value {
     })
 }
 
+async fn named_delivery_settles_without_marker(author: serde_json::Value) {
+    let f = Fixture::new().await;
+    f.settle(None, 100, Arc::new(NoFaults)).await.unwrap();
+    let bytes = f.doc.richdoc_append_paragraph("Named contribution");
+    let receipt = LiveUpdateReceipt {
+        delivery_id: "named-delivery".into(),
+        update_digest: hex_sha256(&bytes),
+        journal_cursor: 3,
+        accepting_host_epoch: 1,
+    };
+    let event = AdmittedLiveUpdate {
+        metadata: AdmittedLiveUpdateMetadata {
+            accepted: RelayAcceptedLiveUpdate {
+                receipt: receipt.clone(),
+                binding: f.binding.clone(),
+                authority: owner_authority(),
+                received_at_ms: 2,
+            },
+            first_seen: vec![],
+            canonical_version: Some(2),
+            author_snapshot: Some(vec![serde_json::from_value(author.clone()).unwrap()]),
+            first_seen_deletes: Some(vec![]),
+            checkpoint_coverage: None,
+        },
+        update_bytes: bytes,
+    };
+    assert!(matches!(
+        f.handle
+            .apply(event, Arc::new(NoFaults), 100_000_000)
+            .await
+            .unwrap(),
+        ApplicationResult::Applied(..)
+    ));
+    f.settle(Some(receipt), 100, Arc::new(NoFaults))
+        .await
+        .unwrap();
+    assert_eq!(latest_authors(&f), serde_json::json!([author]));
+    f.assert_projection();
+}
+
+#[tokio::test]
+async fn accepted_agent_delivery_settles_without_an_unattributed_marker() {
+    named_delivery_settles_without_marker(serde_json::json!({"kind":"agent","agentId":"cleanup-agent","onBehalfOf":"owner","depth":1})).await;
+}
+
+#[tokio::test]
+async fn accepted_human_delivery_settles_without_an_unattributed_marker() {
+    named_delivery_settles_without_marker(
+        serde_json::json!({"kind":"human","humanId":"owner","humanName":"Owner"}),
+    )
+    .await;
+}
+
 /// An update that only removes the body's last block: no new structs.
 fn delete_last_block(doc: &Ydoc) -> Vec<u8> {
     use yrs::updates::decoder::Decode;
@@ -960,10 +1031,31 @@ fn delete_last_block(doc: &Ydoc) -> Vec<u8> {
 }
 
 /// A live settlement names the agents the owner declared for the deliveries
-/// it covers, beside undeclared and shared deliveries, including a delete-only
-/// edit with no new structs. The next interval names only its own.
+/// it covers and the collaborator the relay accepted a delivery from. The
+/// owner's undeclared delivery names no author, so the interval keeps an
+/// unattributed gap. A delete-only edit with no new structs counts too. The
+/// next interval names only its own.
 #[tokio::test]
 async fn live_settlement_names_declared_agents_of_its_exact_interval() {
+    fn paragraph(doc: &Ydoc, text: &str) -> (Vec<u8>, Vec<LiveUpdateStructRange>) {
+        use yrs::updates::decoder::Decode;
+        let before = yrs::StateVector::decode_v1(&doc.encode_state_vector()).unwrap();
+        let bytes = doc.richdoc_append_paragraph(text);
+        let after = yrs::StateVector::decode_v1(&doc.encode_state_vector()).unwrap();
+        let mut ranges: Vec<_> = after
+            .iter()
+            .filter_map(|(client, clock)| {
+                let start = before.get(client);
+                (*clock > start).then_some(LiveUpdateStructRange {
+                    client_id: client.get() as i64,
+                    start_clock: i64::from(start),
+                    end_clock: i64::from(*clock),
+                })
+            })
+            .collect();
+        ranges.sort_by_key(|range| range.client_id);
+        (bytes, ranges)
+    }
     let f = Fixture::new().await;
     f.settle(None, 100, Arc::new(NoFaults)).await.unwrap();
     let added = f.doc.richdoc_append_paragraph("Agent paragraph");
@@ -977,26 +1069,36 @@ async fn live_settlement_names_declared_agents_of_its_exact_interval() {
         )
         .await;
     assert!(matches!(result, ApplicationResult::Applied(..)));
-    f.apply(4, f.doc.richdoc_append_paragraph("Owner paragraph"))
+    let (bytes, ranges) = paragraph(&f.doc, "Owner paragraph");
+    let (_, result) = f
+        .apply_declared_with_content(4, bytes, owner_authority(), 2, (None, ranges))
         .await;
-    let terminal = f
-        .apply_as(
+    assert!(matches!(result, ApplicationResult::Applied(..)));
+    let (bytes, ranges) = paragraph(&f.doc, "Friend paragraph");
+    let (terminal, result) = f
+        .apply_declared_with_content(
             5,
-            f.doc.richdoc_append_paragraph("Friend paragraph"),
+            bytes,
             ServerDerivedLiveUpdateAuthority::Named {
                 principal_id: "friend".into(),
                 grant_id: "grant".into(),
                 grant_generation: 1,
             },
             2,
+            (None, ranges),
         )
         .await;
+    assert!(matches!(result, ApplicationResult::Applied(..)));
     f.settle(Some(terminal), 100, Arc::new(NoFaults))
         .await
         .unwrap();
     assert_eq!(
         latest_authors(&f),
-        serde_json::json!([{"kind":"agent","agentId":"trip-agent ✈","onBehalfOf":"owner","depth":1}, {"kind":"unattributed"}])
+        serde_json::json!([
+            {"kind":"agent","agentId":"trip-agent ✈","onBehalfOf":"owner","depth":1},
+            {"kind":"named","userId":"friend","grantId":"grant","grantGeneration":1},
+            {"kind":"unattributed"},
+        ])
     );
     let vector = f.doc.encode_state_vector();
     let removed = delete_last_block(&f.doc);
@@ -3857,4 +3959,96 @@ async fn resumed_binding_publication(refused: bool, unchanged_tail: bool) {
         assert_eq!(payload["beforeLatestMomentId"],restored.moment_id);
         assert_ne!(settled.settlement_id,first.settlement_id);
     });
+}
+
+#[tokio::test]
+async fn recovery_request_ledger_uses_the_resumed_restore_generation() {
+    let f = Fixture::new().await;
+    f.settle(None, 100, Arc::new(NoFaults)).await.unwrap();
+    let input = applied_restore(&f, None, 0).await;
+    let restored = settle_restore(&f, input.clone(), Arc::new(NoFaults))
+        .await
+        .unwrap();
+    f.owner
+        .resume_restore(
+            NativeRestoreResume {
+                application: input,
+                settlement_id: restored.settlement_id,
+            },
+            restore_coordinate(),
+            2_000_000,
+            100,
+            f.root.path().to_owned(),
+            31,
+            Arc::new(NoFaults),
+            tokio_util::sync::CancellationToken::new(),
+            Arc::new(()),
+        )
+        .await
+        .unwrap();
+    let key = dohc_engine_collab::DocKey::new("workspace", "main", "object").unwrap();
+    let doc = f.read(|db| dohc_engine_collab::load_doc_in(db, &key).unwrap());
+    let update = doc
+        .rewrite_content_to_markdown_preserving_source(ContentKind::Richdoc, "# After restore\n")
+        .unwrap();
+    let mut store = EngineStore::open(&f.db, 32).unwrap();
+    let mut cache = dohc_engine_collab::WriterDocCache::new();
+    let outcome = dohc_engine_collab::durable::record_local_update(
+        &mut store,
+        &mut cache,
+        &key,
+        &update,
+        dohc_engine_collab::durable::LocalAppend {
+            marker: Some(dohc_engine_collab::durable::MarkerCreation {
+                path: Some(&f.binding.current_path),
+                content_kind: ContentKind::Richdoc,
+                regime: dohc_engine_collab::Regime::Replicated,
+            }),
+            restore_generation: Some(1),
+            request_id: Some("generation-one-original"),
+            ..Default::default()
+        },
+        &NoFaults,
+        33,
+        |_, _, _| Ok(()),
+    )
+    .unwrap();
+    assert!(matches!(
+        outcome,
+        dohc_engine_storage::TxnOutcome::Committed(_)
+    ));
+    store
+        .write_with(
+            &NoFaults,
+            |tx| -> Result<(), dohc_engine_collab::CollabError> {
+                assert_eq!(
+                    dohc_engine_collab::live_update_application::restore_generation(tx, &key)?,
+                    Some(1)
+                );
+                assert!(dohc_engine_collab::durable::recovery_update_is_recorded_in(
+                    tx,
+                    &key,
+                    &f.binding.current_path,
+                    "generation-one-original",
+                    &update,
+                    None,
+                    None
+                )?);
+                assert!(
+                    dohc_engine_collab::durable::record_recovery_update_in_tx(
+                        tx,
+                        &key,
+                        &f.binding.current_path,
+                        "generation-one-original",
+                        &update,
+                        None,
+                        None,
+                        34
+                    )?
+                    .deduped
+                );
+                Ok(())
+            },
+        )
+        .unwrap();
 }

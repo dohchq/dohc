@@ -95,7 +95,8 @@ const claim: DatasetAutomationClaim = {
 const fromLedger = (claimed: DatasetAutomationClaim): DatasetRunClaim => ({ source: "dataset", claim: claimed });
 // A run with no chat step reads no chat and sends nothing.
 const sendsNothing = {
-  chat: {
+  makeDurable: async () => {},
+  chat: { hasMessage: async () => false,
     directory: async () => { throw new Error("This automation sends no messages."); },
     write: async () => { throw new Error("This automation sends no messages."); },
   },
@@ -136,7 +137,8 @@ function chatSpy(script: { write?: (message: AutomationChatMessage) => void; not
   const messages: AutomationChatMessage[] = [];
   const notices: AutomationNotice[] = [];
   const dependencies = {
-    chat: {
+    makeDurable: async () => {},
+    chat: { hasMessage: async () => false,
       directory: async (roster: Exclude<ReachRoster, { kind: "unknown" }>) => chatDirectoryOf([TEAM, DM_ANA], roster),
       write: async (_signal: AbortSignal, message: AutomationChatMessage) => { messages.push(message); script.write?.(message); },
     },

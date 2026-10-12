@@ -32,6 +32,8 @@ export interface CaptureRecoveryNotice {
 
 export type SettingsFileKind = "user-settings-file" | "workspace-settings-file";
 export type ShellErrorKind =
+  | "typing-checkpoint"
+  | "typing-import"
   | "capture-recovery"
   | "live-edit-refused"
   | "chat-no-runner"
@@ -80,7 +82,7 @@ export interface ShellError {
   // A step offered beside Try again: one that fixes the cause, such as
   // opening the file it names, or a success notice's Undo. A step that
   // `ends` the notice removes its row when it runs.
-  action?: { label: string; run: () => void; ends?: boolean };
+  action?: { label: string; run: () => void; ends?: boolean; additional?: {label: string; run: () => void}[] };
   onDismiss?: () => void;
   kind?: ShellErrorKind;
   // A kept copy's row: it stays while the engine lists that copy.
@@ -123,8 +125,8 @@ export function useShellError(workspaceId: string) {
   // the same kind, so a read that keeps failing is one row, not a pile.
   // `seen` files the row without a toast; "keep" gives it the seen state of
   // the row of its kind it replaces, so an open toast stays open, and files
-  // it quietly when there is none. "repeat" keeps the replaced row's toast
-  // state too, but with no row to replace it is a new failure and toasts.
+  // it quietly when there is none.
+  // "repeat" keeps an unchanged message's toast, and toasts a new message.
   const push = useCallback(
     (error: Omit<ShellError, "id" | "atMs" | "seen">, seen: boolean | "keep" | "repeat" = false) => {
       nextId.current += 1;
@@ -140,12 +142,13 @@ export function useShellError(workspaceId: string) {
             ? error.identity === existing.identity
             : existing.message === message || (error.kind !== undefined && existing.kind === error.kind);
         const replaced = current.find(matches);
+        const repeated = seen === "repeat" && replaced?.message === message ? replaced : undefined;
         const next: ShellError = {
           ...error,
           message,
-          id,
-          atMs,
-          seen: seen === "keep" ? (replaced?.seen ?? true) : seen === "repeat" ? (replaced?.seen ?? false) : seen,
+          id: repeated?.id ?? id,
+          atMs: repeated?.atMs ?? atMs,
+          seen: seen === "repeat" ? (repeated?.seen ?? false) : seen === "keep" ? (replaced?.seen ?? true) : seen,
         };
         return [
           ...current.filter((existing) => !matches(existing)),
@@ -273,20 +276,20 @@ export function useShellError(workspaceId: string) {
   // the words. Text that arrives raw is read into words the same way. A kind
   // makes a newer message replace the row of an older one, such as one
   // import's result replacing the last; an identity does the same for one
-  // thing, such as one folder. `repeat` is a read that may fail again: a row
-  // still there is replaced and keeps its toast, open or closed. With no row,
-  // because Try again or Dismiss removed it, the failure toasts again.
+  // thing, such as one folder. `repeat` keeps an unchanged message's row
+  // and toast state. A changed message, or a missing row, toasts again.
   const reportShellFailure = useCallback(
     (failure: {
       title?: string;
+      repeat?: boolean;
       message: string;
       cause?: unknown;
       details?: ReadonlyArray<ErrorDetailField>;
       retry?: (() => void) | null;
       onDismiss?: () => void;
+      action?: ShellError["action"];
       kind?: ShellErrorKind;
       identity?: string;
-      repeat?: boolean;
     }) => {
       const shown = readError(failure.message);
       const cause = failure.cause === undefined ? shown.cause : readError(failure.cause).cause;
@@ -300,6 +303,7 @@ export function useShellError(workspaceId: string) {
         retry: failure.retry ?? null,
         ...(details.length ? { details } : {}),
         ...(failure.onDismiss ? { onDismiss: failure.onDismiss } : {}),
+        ...(failure.action ? { action: failure.action } : {}),
         ...(failure.kind ? { kind: failure.kind } : {}),
         ...(failure.identity !== undefined ? { identity: failure.identity } : {}),
       }, failure.repeat ? "repeat" : false);
@@ -452,25 +456,29 @@ export function useShellError(workspaceId: string) {
   );
   // A settings file's row stays: the file is still wrong until the person
   // saves it. An Undo's row goes, so it runs once.
-  const runShellErrorAction = useCallback((id: string) => {
+  const runShellErrorAction = useCallback((id: string, index = 0) => {
     const target = shellErrorsRef.current.find((error) => error.id === id);
+    if (index > 0) {target?.action?.additional?.[index - 1]?.run(); return;}
     if (target?.action?.ends) setShellErrors((current) => current.filter((error) => error.id !== id));
     target?.action?.run();
   }, []);
   // A kind makes a newer message replace the row of an older one, such as
   // one import's result replacing the last import's.
   const showSuccessNotice = useCallback(
-    (message: string, undo?: () => void, kind?: ShellErrorKind) => {
+    (message: string, undo?: () => void, kind?: ShellErrorKind, action?: ShellError["action"]) => {
       push({
         message,
         retry: null,
         tone: "success",
         ...(kind ? { kind } : {}),
-        ...(undo ? { action: { label: "Undo", run: undo, ends: true } } : {}),
+        ...(action ? { action } : undo ? { action: { label: "Undo", run: undo, ends: true } } : {}),
       });
     },
     [push],
   );
+  const showWarningNotice = useCallback((message: string) => {
+    push({message, retry: null, tone: "warning"});
+  }, [push]);
   // The one-time notice about the reports this launch sends, with the way
   // to turn them off. It stays until the person closes it.
   const showReportsNotice = useCallback((reports: ReportKinds, openPrivacy: () => void) => {
@@ -625,6 +633,7 @@ export function useShellError(workspaceId: string) {
     showSettingsFileNotice,
     showDirectWriteNotice,
     showSuccessNotice,
+    showWarningNotice,
     showReportsNotice,
     showKeptCopies,
     showKeptCopySaved,

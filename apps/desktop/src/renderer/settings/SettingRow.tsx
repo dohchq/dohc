@@ -1,17 +1,18 @@
-import { useEffect, useRef, type KeyboardEvent, type ReactNode } from "react";
-import { Check } from "lucide-react";
-import { IDENTITY_HUES, type IdentityHue } from "../tokens";
+import { useEffect, useId, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
+import { Check, Minus, Plus, RotateCcw } from "lucide-react";
+import { IDENTITY_HUES, palette, type IdentityHue } from "../tokens";
+import { useRadioGroup } from "../ui/SegmentedControl";
 
 export function SettingRow(props: {
   title: string;
-  description?: string;
+  description?: ReactNode;
   children: ReactNode;
   modified?: boolean;
   onReset?: () => void;
   testId?: string;
   // The row a Customize… command opened Settings for. Settings focuses it.
   highlighted?: boolean;
-  // Under the description, such as the way to ask your agent.
+  // Under the title, such as the way to ask your agent.
   aside?: ReactNode;
 }) {
   return (
@@ -20,38 +21,207 @@ export function SettingRow(props: {
       {...(props.highlighted
         ? { "data-highlighted": true, role: "group", "aria-label": props.title, tabIndex: -1 }
         : {})}
-      className={`grid min-h-16 grid-cols-[minmax(0,1fr)_minmax(220px,auto)] gap-4 border-b border-line py-3 last:border-b-0 max-[720px]:grid-cols-1 ${
+      className={`flex min-h-14 items-center justify-between gap-6 border-b border-line py-2.5 last:border-b-0 max-[720px]:flex-col max-[720px]:items-start max-[720px]:gap-2 ${
         props.highlighted ? "-mx-3 rounded-lg bg-selected px-3" : ""
       }`}
     >
       <div className="min-w-0">
-        <div className="flex items-center gap-2">
-          <span className="text-[13px] font-medium text-ink">{props.title}</span>
+        {/* The dot hangs left of the title, so marking a row moves nothing in it. */}
+        <div className="relative flex items-center">
           {props.modified ? (
-            <span className="rounded bg-panel-2 px-1.5 py-0.5 text-[10px] uppercase text-subtle">
-              Modified
+            <span title="Modified" className="absolute right-full top-1/2 mr-1 size-1.5 -translate-y-1/2 rounded-full bg-accent">
+              <span className="sr-only">Modified</span>
             </span>
           ) : null}
+          <span className="text-[13px] font-medium text-ink">{props.title}</span>
         </div>
         {props.description ? (
-          <p className="m-0 mt-1 max-w-2xl text-[11px] leading-relaxed text-muted">
-            {props.description}
-          </p>
+          <p className="m-0 mt-0.5 text-[11px] text-muted">{props.description}</p>
         ) : null}
         {props.aside ? <div className="mt-2">{props.aside}</div> : null}
       </div>
       <div className="flex min-w-0 items-center justify-end gap-2 max-[720px]:justify-start">
         {props.children}
+        {/* Every row keeps the reset's place, so controls share a right edge
+            and stay under the pointer when a reset appears. */}
         {props.modified && props.onReset ? (
           <button
             type="button"
+            aria-label="Reset"
+            title="Reset"
             onClick={props.onReset}
-            className="rounded border border-line px-2 py-1 text-[11px] text-muted hover:bg-hover hover:text-ink"
+            className="grid size-6 shrink-0 place-items-center rounded-md text-subtle transition-colors hover:bg-hover hover:text-ink"
           >
-            Reset
+            <RotateCcw size={14} strokeWidth={1.9} aria-hidden />
           </button>
-        ) : null}
+        ) : (
+          <span aria-hidden className="size-6 shrink-0" />
+        )}
       </div>
+    </div>
+  );
+}
+
+type ThemeMode = "system" | "light" | "dark";
+
+const THEME_OPTIONS = [
+  { value: "system", label: "System" },
+  { value: "light", label: "Light" },
+  { value: "dark", label: "Dark" },
+] as const satisfies ReadonlyArray<{ value: ThemeMode; label: string }>;
+
+// A window in one theme, drawn from that theme's tokens whatever the current
+// theme is. `half` keeps only the lower right triangle, for System.
+function ThemeWindow(props: { theme: "light" | "dark"; half?: boolean }) {
+  const tokens = palette[props.theme];
+  return (
+    <span
+      className="absolute inset-0"
+      style={{ background: tokens.bg, clipPath: props.half ? "polygon(100% 0, 100% 100%, 0 100%)" : undefined }}
+    >
+      <span
+        className="absolute inset-y-0 left-0 w-[18px]"
+        style={{ background: props.theme === "dark" ? tokens.panel2 : tokens.panel }}
+      />
+      <span className="absolute left-[26px] top-3.5 h-1 w-9 rounded-sm opacity-40" style={{ background: tokens.ink }} />
+      <span className="absolute left-[26px] top-6 h-1 w-6 rounded-sm opacity-20" style={{ background: tokens.ink }} />
+    </span>
+  );
+}
+
+/** The theme as three windows, one per choice, in a radiogroup. */
+export function ThemeControl(props: { value: ThemeMode; onChange: (value: ThemeMode) => void }) {
+  const group = useRadioGroup({ value: props.value, options: THEME_OPTIONS, onChange: props.onChange });
+  return (
+    <div role="radiogroup" aria-label="Theme" onKeyDown={group.onKeyDown} className="flex items-start gap-3.5">
+      {THEME_OPTIONS.map((option, index) => {
+        const checked = props.value === option.value;
+        return (
+          <button
+            key={option.value}
+            {...group.radio(index)}
+            className={`group flex flex-col items-center gap-1.5 rounded-lg text-[11px] transition-colors focus-visible:outline-offset-4 ${
+              checked ? "text-ink" : "text-muted hover:text-ink"
+            }`}
+          >
+            <span
+              aria-hidden
+              className={`relative h-[50px] w-[76px] overflow-hidden rounded-lg border border-line ${
+                checked ? "outline-2 outline-offset-2 outline-accent" : ""
+              }`}
+            >
+              {option.value === "system" ? (
+                <>
+                  <ThemeWindow theme="light" />
+                  <ThemeWindow theme="dark" half />
+                </>
+              ) : (
+                <ThemeWindow theme={option.value} />
+              )}
+            </span>
+            {option.label}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+type StepperPart = {
+  // The tooltip's words. For − and + it is also the button's name.
+  label: string;
+  // The keys that do the same, shown as chips in the tooltip.
+  keys?: readonly string[];
+  disabled?: boolean;
+  onClick: () => void;
+};
+
+type StepperPartName = "decrease" | "reset" | "increase";
+
+/**
+ * One bordered stepper: −, the value, +. Clicking the value resets it. Each
+ * part's tooltip names it and its keys while the pointer is over it or the
+ * keyboard focused it. A click does not open one.
+ */
+export function StepperControl(props: {
+  // The setting's name in a sentence, such as "zoom".
+  setting: string;
+  value: string;
+  decrease: StepperPart;
+  reset: StepperPart & { to: string };
+  increase: StepperPart;
+}) {
+  const [hovered, setHovered] = useState<StepperPartName | null>(null);
+  const [focused, setFocused] = useState<StepperPartName | null>(null);
+  // The part whose tooltip Escape put away, until the pointer or focus moves.
+  const [dismissed, setDismissed] = useState<StepperPartName | null>(null);
+  const shown = hovered ?? focused;
+  const tip = shown === dismissed ? null : shown;
+  const tipId = useId();
+  const part = (name: StepperPartName, className: string, content: ReactNode) => {
+    const spec = props[name];
+    const open = tip === name;
+    return (
+      <span
+        className="relative flex"
+        onMouseEnter={() => {
+          setHovered(name);
+          setDismissed(null);
+        }}
+        onMouseLeave={() => {
+          setHovered(null);
+          setDismissed(null);
+        }}
+      >
+        <button
+          type="button"
+          aria-label={name === "reset" ? `Reset ${props.setting} to ${props.reset.to}, now ${props.value}` : spec.label}
+          aria-describedby={open ? `${tipId}-${name}` : undefined}
+          // Overlay leaves this Escape to the control: it closes the tooltip.
+          data-tooltip-open={open ? "" : undefined}
+          disabled={spec.disabled}
+          onClick={spec.onClick}
+          // A click is the pointer's, even on a part the keyboard focused
+          // before, so it leaves no keyboard tooltip behind.
+          onPointerDown={() => setFocused((current) => (current === name ? null : current))}
+          onFocus={(event) => {
+            if (!event.currentTarget.matches(":focus-visible")) return;
+            setFocused(name);
+            setDismissed(null);
+          }}
+          onBlur={() => setFocused((current) => (current === name ? null : current))}
+          onKeyDown={(event) => {
+            if (event.key === "Escape" && open) {
+              event.stopPropagation();
+              setDismissed(name);
+            }
+          }}
+          className={`grid h-[26px] place-items-center transition-colors focus-visible:-outline-offset-2 enabled:hover:bg-hover enabled:hover:text-ink disabled:opacity-50 ${className}`}
+        >
+          {content}
+        </button>
+        {open ? (
+          <span
+            id={`${tipId}-${name}`}
+            role="tooltip"
+            className="dohc-popover dohc-pop-in pointer-events-none absolute right-0 top-full z-50 mt-2 flex w-max items-center gap-1.5 rounded-md border border-line bg-panel px-2 py-1 text-[11px] text-ink"
+          >
+            {spec.label}
+            {spec.keys?.map((key) => (
+              <kbd key={key} className="rounded border border-line bg-bg px-1 font-mono text-[10px] text-subtle">
+                {key}
+              </kbd>
+            ))}
+          </span>
+        ) : null}
+      </span>
+    );
+  };
+  return (
+    <div className="flex h-7 items-center rounded-md border border-line">
+      {part("decrease", "w-7 rounded-l-[5px] text-subtle", <Minus size={14} strokeWidth={1.9} aria-hidden />)}
+      {part("reset", "w-[52px] border-x border-line font-mono text-[12px] text-ink", props.value)}
+      {part("increase", "w-7 rounded-r-[5px] text-subtle", <Plus size={14} strokeWidth={1.9} aria-hidden />)}
     </div>
   );
 }

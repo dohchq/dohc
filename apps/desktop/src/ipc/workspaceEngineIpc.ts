@@ -3,7 +3,7 @@ import { WorkspaceDaemonRequester, type VersionedLiveAdapter } from "@dohc/works
 import { z } from "zod";
 import type { EngineWorkspace, EngineWorkspaceSessions } from "@dohc/workspace-engine-client/daemon";
 import {
-  CaptureRecoveryStatusResult, captureRecoveryOperations,
+  CaptureRecoveryStatusResult, captureRecoveryOperations, fileObservationOperations,
   ListCollectionsPayload, ListCollectionsResult, GetCollectionPayload, GetCollectionResult,
   QueryCollectionRecordsPayload, QueryCollectionRecordsResult, ListEngineMomentsPayload,
   ReadEngineMomentPayload, ReadEngineMomentResult, HistoryPolicyUnreadableResult, RestoreEngineMomentFilePayload,
@@ -66,14 +66,15 @@ export function createWorkspaceEngineIpc<
   localPersonId(): string;
   /** This computer's person as History names them. */
   localPersonName(): string;
-  automationPersonName(workspaceId: string, userId: string): string | null;
+  recordHistoryPersonName(workspaceId: string, userId: string, sender: Sender): string | null;
+  prepareRecordHistoryPeople(workspaceId: string, userIds: readonly string[], sender: Sender): void;
   /** The person a request is made by, read from main's own account when it arrives. */
   localPerson(): Promise<LocalPersonAuthor>;
   /** An automation author as History shows it, in one workspace. */
   automationAuthor(workspaceId: string, automationId: string): ReturnType<EngineMomentAuthorNames["automation"]>;
   /** A person the owner shared with, as History names their direct write. */
   /** How one History read names the people the owner shared with, reading the roster once. */
-  namedAuthorLabels(workspaceId: string): EngineMomentAuthorNames["named"];
+  namedAuthorLabels(workspaceId: string, sender: Sender): Pick<EngineMomentAuthorNames, "named" | "prepare">;
   /** Whether this computer keeps an automation's run, so a record's history can open it. */
   automationRunOnThisComputer(workspaceId: string, automationId: string, claimId: string): Promise<boolean>;
   /** The owner's server's runs; the relay answers only the workspace's owner. */
@@ -84,6 +85,7 @@ export function createWorkspaceEngineIpc<
   notifyRenderer(target: { workspaceId: string }): void;
   retryOwnerLiveDelivery?(workspaceId: string): void;
   retryCloudSync(workspaceId: string, reason: RetryCloudSyncPayload["reason"]): Promise<void>;
+  retryFileObservation(workspaceId: string): Promise<void>;
   requireWorkspace(workspaceId: string): Workspace;
   assertWritableWorkspace(workspace: Workspace): void;
   syncStatusWithOwnedProjection(workspace: Workspace, status: SyncStatusResult): Promise<SyncStatusResult>;
@@ -239,7 +241,8 @@ export function createWorkspaceEngineIpc<
           result.record.path = source.prefix + result.record.path;
           const { workspaceId } = operation.workspace;
           const authors: RecordHistoryAuthors = {
-            person: userId => dependencies.automationPersonName(workspaceId, userId),
+            prepare: userIds => dependencies.prepareRecordHistoryPeople(workspaceId, userIds, event.sender),
+            person: userId => dependencies.recordHistoryPersonName(workspaceId, userId, event.sender),
             agent: (onBehalfOf) => onBehalfOf === localPersonId() ? localAgentDisplayName() : "Agent",
             automationName: (automationId) => automationAuthor(workspaceId, automationId)?.name ?? null,
             runAvailable: (automationId, claimId) => runLocator.available(workspaceId, automationId, claimId),
@@ -270,12 +273,12 @@ export function createWorkspaceEngineIpc<
     // timeline from engine moments; every handler resolves the workspace via
     // requireWorkspace and rejects when the engine capture is not attached.
     // Runs dohc started use the Settings name. Other agents use their handshake label.
-    function authorNames(workspaceId: string): EngineMomentAuthorNames {
+    function authorNames(workspaceId: string, sender: Sender): EngineMomentAuthorNames {
       return {
         agent: (author) => author.agentRunId ? (author.onBehalfOf === localPersonId() ? localAgentDisplayName() : "Agent") : author.agentId === "dohc-mcp" ? "Agent" : author.agentId,
         person: (author) => author.humanId === localPersonId() ? localPersonName() : undefined,
         automation: (automationId) => automationAuthor(workspaceId, automationId),
-        named: namedAuthorLabels(workspaceId),
+        ...namedAuthorLabels(workspaceId, sender),
       };
     }
 
@@ -341,7 +344,7 @@ export function createWorkspaceEngineIpc<
               cursor = page.nextCursor;
             }
           },
-          authorNames(input.workspaceId),
+          authorNames(input.workspaceId, event.sender),
         );
       });
     });
@@ -356,8 +359,10 @@ export function createWorkspaceEngineIpc<
         if (moment && !moment.protected && policy && !historyMomentPathsAdmitted(historyPathAdmission(policy), moment.moment)) {
           return ReadEngineMomentResult.parse({ status: "untracked", moment: null });
         }
+        const names = authorNames(input.workspaceId, event.sender);
+        if (moment && !moment.protected && moment.moment.authors) names.prepare?.(moment.moment.authors);
         return ReadEngineMomentResult.parse({
-          moment: moment ? engineMomentDetailForIpc(moment, authorNames(input.workspaceId)) : null,
+          moment: moment ? engineMomentDetailForIpc(moment, names) : null,
         });
       });
     });
@@ -409,6 +414,22 @@ export function createWorkspaceEngineIpc<
           });
           if (result === null) throw new Error("The workspace engine is not running.");
         });
+      },
+    });
+    registerOperations<typeof fileObservationOperations, Event, Operation>({
+      handle: registerHandler, assertTrustedSender,
+      withActiveWorkspace: (event, workspaceId, message, work) => withRendererWorkspaceOperation(event.sender, workspaceId, message, work),
+    }, fileObservationOperations, {
+      retryFileObservation: async (input, { event }) => {
+        const started = await withRendererWorkspaceOperation(event.sender, input.workspaceId, "This workspace is no longer active.", async operation => {
+          const read = dependencies.retryFileObservation(operation.workspace.workspaceId);
+          // Observe rejection while the workspace operation is still completing.
+          void read.catch(() => {});
+          return { workspaceId: operation.workspace.workspaceId, read };
+        });
+        // A stalled read must not hold the workspace operation open.
+        await started.read;
+        return activity.getStatus(started.workspaceId);
       },
     });
     registerHandler(CHANNELS.retryFileRecovery, async (event, payload) => {

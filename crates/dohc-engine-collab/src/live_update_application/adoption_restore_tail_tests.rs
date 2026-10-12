@@ -56,7 +56,22 @@ fn adopted_settlement_preserves_unattributed_owner_and_recipient_contributions()
             } else {
                 contributor
             };
+            let before = f.doc.state_vector();
             let bytes = f.doc.richdoc_append_paragraph(text);
+            let mut first_seen: Vec<_> = f
+                .doc
+                .state_vector()
+                .iter()
+                .filter_map(|(client, clock)| {
+                    let start = before.get(client);
+                    (*clock > start).then_some(LiveUpdateStructRange {
+                        client_id: client.get() as i64,
+                        start_clock: i64::from(start),
+                        end_clock: i64::from(*clock),
+                    })
+                })
+                .collect();
+            first_seen.sort_by_key(|range| range.client_id);
             let event = AdmittedLiveUpdate {
                 metadata: AdmittedLiveUpdateMetadata {
                     accepted: RelayAcceptedLiveUpdate {
@@ -80,7 +95,7 @@ fn adopted_settlement_preserves_unattributed_owner_and_recipient_contributions()
                         },
                         received_at_ms: cursor,
                     },
-                    first_seen: vec![],
+                    first_seen,
                     canonical_version: Some(2),
                     author_snapshot: Some(if cursor == 1 {
                         vec![LiveAuthorEntry::Human {
@@ -166,19 +181,17 @@ fn adopted_settlement_preserves_unattributed_owner_and_recipient_contributions()
         .unwrap();
         let (authors, text): (String, String) = f.store.read_with(|conn| conn.query_row("SELECT m.author_json,b.text FROM moments m JOIN blobs b ON b.sha256=m.after_blob_sha256 WHERE m.moment_id=?1", [&settlement.moment_id], |row| Ok((row.get(0)?, row.get(1)?)))).unwrap();
         let authors: Value = serde_json::from_str(&authors).unwrap();
-        assert_eq!(authors[0]["humanId"], "recipient");
-        assert_eq!(
-            authors.as_array().unwrap().len(),
-            if contributor == "recipient-only" {
-                1
-            } else {
-                2
-            }
-        );
+        // The relay's authority names the recipient once, in place of their
+        // snapshot.
+        let mut expected = vec![
+            serde_json::json!({"kind":"named","userId":"recipient","grantId":"grant","grantGeneration":1}),
+        ];
         if contributor != "recipient-only" {
-            assert_eq!(authors[1], serde_json::json!({"kind":"unattributed"}));
+            // The second edit carried no recording context, so its gap stays.
+            expected.push(serde_json::json!({"kind":"unattributed"}));
             assert!(text.contains(contributor));
         }
+        assert_eq!(authors, Value::Array(expected));
         assert!(text.contains("Recipient text"));
         assert!(
             f.store
@@ -1383,7 +1396,9 @@ fn native_restore_keeps_enrolled_owner_drafts_as_truthful_sources() {
             let key = f.key.clone();
             f.store
                 .write_with(&NoFaults, |tx| {
-                    durable::record_authorized_update_in_tx(tx, &key, &update, true, None, None, 11)
+                    durable::record_authorized_update_in_tx(
+                        tx, &key, &update, true, None, None, false, 11,
+                    )
                 })
                 .unwrap();
             (None, 0)
@@ -1535,8 +1550,9 @@ fn native_restore_tail_accepts_trusted_deduped_pre_adoption_source_as_overlappin
     let appended = f
         .store
         .write_with(&NoFaults, |tx| {
-            let outcome =
-                durable::record_authorized_update_in_tx(tx, &key, &original, true, None, None, 11)?;
+            let outcome = durable::record_authorized_update_in_tx(
+                tx, &key, &original, true, None, None, false, 11,
+            )?;
             owner_outbox::append_adopted_local_update_in_tx(
                 tx,
                 &key,

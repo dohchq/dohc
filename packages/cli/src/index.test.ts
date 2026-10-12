@@ -517,4 +517,26 @@ describe("executeCli", () => {
     });
     expect(result.stderr).toBe("dohc: desktop app returned an invalid response\n");
   });
+
+  it("refuses malformed desktop transport results without exposing validation details", async () => {
+    const stateDir = await tempStateDir();
+    const result = await executeCli({
+      argv: ["chat", "groups"],
+      env: {},
+      client: {
+        stateDir,
+        platform: "linux",
+        transport: async () => ({
+          protocolVersion: CLI_PROTOCOL_VERSION,
+          ok: true,
+          result: { groups: [{ id: 7 }] },
+        }),
+      },
+    });
+    expect(result).toEqual({
+      exitCode: 1,
+      stdout: "",
+      stderr: "dohc: desktop app returned an invalid response\n",
+    });
+  });
 });

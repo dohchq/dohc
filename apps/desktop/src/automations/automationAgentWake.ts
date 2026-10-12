@@ -10,7 +10,7 @@ import type { AutomationChatMessage } from "@dohc/automation-executor/automation
 // so an automation and the agent it wakes stop each other at the cap.
 
 export const AUTOMATION_NO_RUNNER =
-  "No agent runner is set up. Set one up in Settings → Agents & MCP, then try again.";
+  "No agent runner is set up. Set one up in Settings → Agents, then try again.";
 
 // The engine's answer when a key was already used for another request: the
 // thread's first message went out under this effect's key before a stop.

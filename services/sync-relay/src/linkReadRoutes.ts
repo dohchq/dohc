@@ -147,6 +147,7 @@ export function createLinkReadRoutes(
       const hold = parseLinkLogHold(url.searchParams.get("hold"));
       let page = filteredLogPage(
         share.workspaceId,
+        share.shareId,
         capability.effectiveSelector,
         since,
         limit,
@@ -183,6 +184,7 @@ export function createLinkReadRoutes(
                     if (currentEpochLogFloor !== epochLogFloor) return false;
                     const checked = filteredLogPage(
                       share.workspaceId,
+                      share.shareId,
                       fresh.effectiveSelector,
                       scanSince,
                       limit,
@@ -210,6 +212,7 @@ export function createLinkReadRoutes(
           );
           page = filteredLogPage(
             share.workspaceId,
+            share.shareId,
             fresh.effectiveSelector,
             Math.max(scanSince, currentEpochLogFloor),
             limit,
@@ -237,6 +240,7 @@ export function createLinkReadRoutes(
         );
         page = filteredLogPage(
           share.workspaceId,
+          share.shareId,
           fresh.effectiveSelector,
           Math.max(scanSince, currentEpochLogFloor),
           limit,

@@ -8,7 +8,6 @@ import {
 } from "@testing-library/react";
 import {
   afterEach,
-  beforeAll,
   beforeEach,
   describe,
   expect,
@@ -19,16 +18,10 @@ import type { GetBacklinksResult } from "../ipc/bridgeContract";
 import type { UseEngineDoc } from "./collab/useEngineDoc";
 import { FileInspector } from "./FileInspector";
 
-// Keep Vite transforms out of Testing Library's one-second assertion window.
-// Read mode also preloads MarkdownEditor, while a truncated read lazy-loads
-// SourceCodeEditor, so await all three imports before render.
-beforeAll(async () => {
-  await Promise.all([
-    import("./markdown/IncrementalMarkdownDocument"),
-    import("./editor/MarkdownEditor"),
-    import("./SourceCodeEditor"),
-  ]);
-});
+// Collect the real lazy modules before hook and renderer assertion timers start.
+import "./markdown/IncrementalMarkdownDocument";
+import "./editor/MarkdownEditor";
+import "./SourceCodeEditor";
 
 // The file reader renders through the shared markdown component map, so a
 // document reads the same wherever dohc shows it. The map itself is pinned
@@ -60,6 +53,7 @@ const engineDocState: UseEngineDoc = {
   recoveryAssets: null,
   permanentFailureWhileEditing: false,
   readOnlyWhileEditing: false,
+  readOnlyDraftId: null,
   readOnlyCause: null,
   removalInProgress: null,
   artifactAssets: [],

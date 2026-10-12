@@ -53,7 +53,9 @@ impl HistoryEnd {
             }
             return Ok(());
         };
-        receipt.validate().map_err(SyncError::corrupt)?;
+        receipt
+            .validate()
+            .map_err(|_| invalid("invalid restore history receipt"))?;
         let p = scope(namespace, binding);
         let actual:Option<(i64,String,String,i64)>=conn.query_row(&format!("SELECT e.journal_cursor,e.evidence_digest,m.update_sha256,e.accepting_host_epoch FROM live_audit_events e JOIN live_audit_record_manifests m ON m.record_digest=e.record_digest WHERE {SCOPE} AND e.event_count=?6 AND e.delivery_id=?7"),params![p[0],p[1],p[2],p[3],p[4],self.event_count,receipt.delivery_id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional().map_err(SyncError::corrupt)?;
         let actual = actual.ok_or(SyncError::RetryableState {

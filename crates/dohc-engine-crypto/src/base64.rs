@@ -126,20 +126,6 @@ pub fn strict_decode_exact(input: &str, expected_len: usize) -> Result<Vec<u8>, 
     Ok(bytes)
 }
 
-/// Strict, canonical decode with no length constraint — the TS `parseBase64`
-/// guard used by the key envelope: the string must be canonical shape and
-/// re-encode to itself. Rejects non-canonical or non-alphabet input.
-pub fn strict_decode(input: &str) -> Result<Vec<u8>, CryptoError> {
-    if !is_canonical_shape(input) {
-        return Err(CryptoError::InvalidBase64);
-    }
-    let bytes = forgiving_decode(input);
-    if encode_standard(&bytes) != input {
-        return Err(CryptoError::InvalidBase64);
-    }
-    Ok(bytes)
-}
-
 /// Matches the TS `^[A-Za-z0-9+/]*={0,2}$` shape: alphabet run then 0–2 `=`.
 fn is_canonical_shape(input: &str) -> bool {
     let bytes = input.as_bytes();
@@ -221,13 +207,5 @@ mod tests {
         assert!(strict_decode_exact(&format!(" {encoded}"), 4).is_err());
         // Invalid alphabet rejected.
         assert!(strict_decode_exact("!!!!", 3).is_err());
-    }
-
-    #[test]
-    fn strict_decode_variable_length() {
-        let bytes = [1u8, 2, 3, 4, 5];
-        let encoded = encode_standard(&bytes);
-        assert_eq!(strict_decode(&encoded).unwrap(), bytes);
-        assert!(strict_decode("not base64!!").is_err());
     }
 }

@@ -18,6 +18,22 @@ _Avoid_: self-hosted Drive
 A device's authenticated connection to a dohc server. Workspace permissions determine which work the connection can access.
 _Avoid_: Drive connection (for a self-hosted server)
 
+### Privacy
+
+**Usage record**:
+Counts of finished actions per capability, way in, and day, kept on one computer. dohc never sends it. A person can see, copy, clear, or turn it off in Privacy.
+_Avoid_: usage report, telemetry, analytics
+
+**Usage report**:
+A small count of events that a packaged build sends to its report service while the person's switch in Privacy allows it.
+_Avoid_: usage record (that stays on the computer)
+
+### Offers
+
+**Offer**:
+A suggestion for a person at a relevant point in their work. Detection changes nothing; the person chooses whether to act.
+_Avoid_: Offering (what dohc sells), moment (a History term)
+
 ### Collections
 
 **Collection**:
