@@ -2638,7 +2638,17 @@ async fn measure_initial_capture(measure_typing: bool) {
         }
         let deadline = std::time::Instant::now() + Duration::from_secs(120);
         let mut drain_poll = tokio::time::interval(Duration::from_millis(10));
-        while observer.table_row_count("link_pending").unwrap() != 0 || observer.read_with(|c| c.query_row("SELECT EXISTS(SELECT 1 FROM link_index_state WHERE seed_phase<>'ready')", [], |r| r.get::<_,bool>(0))).unwrap() {
+        while observer.table_row_count("link_pending").unwrap() != 0
+            || observer
+                .read_with(|c| {
+                    c.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM link_index_state WHERE seed_phase<>'ready')",
+                        [],
+                        |r| r.get::<_, bool>(0),
+                    )
+                })
+                .unwrap()
+        {
             assert!(std::time::Instant::now() < deadline);
             drain_poll.tick().await;
         }

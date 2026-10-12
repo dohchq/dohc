@@ -6110,8 +6110,18 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM link_pending", [], |r| r.get(0))
             .expect("persisted queue must exist");
         assert_eq!(pending, 0);
-        assert_eq!(conn.query_row("SELECT seed_phase FROM link_index_state", [], |r| r.get::<_, String>(0)).unwrap(), "deferred");
-        assert_eq!(conn.query_row("SELECT COUNT(*) FROM link_aliases", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
+        assert_eq!(
+            conn.query_row("SELECT seed_phase FROM link_index_state", [], |r| r
+                .get::<_, String>(0))
+                .unwrap(),
+            "deferred"
+        );
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM link_aliases", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
         conn.execute("DELETE FROM file_objects WHERE object_id='a'", [])
             .unwrap();
         assert_eq!(

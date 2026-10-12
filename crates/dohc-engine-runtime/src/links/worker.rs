@@ -89,7 +89,8 @@ impl DrainWorker {
     // idle and transient failures wait without monopolizing the actor.
     pub fn tick(&mut self, store: &mut EngineStore) -> Duration {
         #[cfg(feature = "fault-injection")]
-        let mut phase = dohc_engine_storage::capture_phase::Phase::new("link_drain_tick", None, 0, true);
+        let mut phase =
+            dohc_engine_storage::capture_phase::Phase::new("link_drain_tick", None, 0, true);
         #[cfg(test)]
         {
             if !self.measurement_initialized {
@@ -113,7 +114,10 @@ impl DrainWorker {
         #[cfg(test)]
         super::tests::report_slow_tick(Duration::from_micros(us), self.phase);
         #[cfg(feature = "fault-injection")]
-        { phase.field("actor_us", us); phase.finish("completed"); }
+        {
+            phase.field("actor_us", us);
+            phase.finish("completed");
+        }
         delay
     }
     fn tick_inner(&mut self, store: &mut EngineStore) -> Duration {

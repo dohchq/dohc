@@ -1629,7 +1629,8 @@ fn write_normalized_text_in_tx(
     drop(blob_phase);
     if bind_alias {
         #[cfg(feature = "fault-injection")]
-        let _alias_phase = dohc_engine_storage::capture_phase::Measure::new("alias_SQL_including_triggers");
+        let _alias_phase =
+            dohc_engine_storage::capture_phase::Measure::new("alias_SQL_including_triggers");
         tx.execute(
             "INSERT OR IGNORE INTO path_aliases (workspace_id, version_id, path, object_id) \
              VALUES (?1, ?2, ?3, ?4)",
@@ -1683,7 +1684,8 @@ fn write_normalized_text_in_tx(
     drop(moment_phase);
     crate::collections::index_historical_record_owner_moment_in_tx(tx, ws, moment_order)?;
     #[cfg(feature = "fault-injection")]
-    let snapshot_phase = dohc_engine_storage::capture_phase::Measure::new("snapshot_SQL_including_triggers");
+    let snapshot_phase =
+        dohc_engine_storage::capture_phase::Measure::new("snapshot_SQL_including_triggers");
     tx.prepare_cached(
         "INSERT INTO snapshots \
          (workspace_id, version_id, object_id, path, blob_sha256, updated_at_ms, \
@@ -1948,7 +1950,8 @@ fn resolve_capture_object(
                 disambiguated_object_id
             };
             #[cfg(feature = "fault-injection")]
-            let _alias_phase = dohc_engine_storage::capture_phase::Measure::new("alias_SQL_including_triggers");
+            let _alias_phase =
+                dohc_engine_storage::capture_phase::Measure::new("alias_SQL_including_triggers");
             tx.prepare_cached(
                 "INSERT INTO path_aliases (workspace_id, version_id, path, object_id) \
                  VALUES (?1, ?2, ?3, ?4)",

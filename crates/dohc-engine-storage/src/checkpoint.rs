@@ -50,9 +50,15 @@ impl Checkpoints {
             .spawn(move || {
                 while rx.recv().is_ok() {
                     #[cfg(feature = "fault-injection")]
-                    let mut phase = crate::capture_phase::Phase::new("checkpoint_request_cycle", None, 0, true);
+                    let mut phase =
+                        crate::capture_phase::Phase::new("checkpoint_request_cycle", None, 0, true);
                     #[cfg(feature = "fault-injection")]
-                    if phase.active() && let Ok((log, backfilled)) = frames(&conn) { phase.field("starting_log",log); phase.field("starting_backfilled",backfilled); }
+                    if phase.active()
+                        && let Ok((log, backfilled)) = frames(&conn)
+                    {
+                        phase.field("starting_log", log);
+                        phase.field("starting_backfilled", backfilled);
+                    }
                     if frames(&conn).is_ok_and(|(log, backfilled)| {
                         log - backfilled >= BACKGROUND_CHECKPOINT_FRAMES
                     }) {
@@ -64,7 +70,12 @@ impl Checkpoints {
                     #[cfg(feature = "fault-injection")]
                     {
                         phase.field("completed", *sequence.lock().unwrap());
-                        if phase.active() && let Ok((log, backfilled)) = frames(&conn) { phase.field("ending_log",log); phase.field("ending_backfilled",backfilled); }
+                        if phase.active()
+                            && let Ok((log, backfilled)) = frames(&conn)
+                        {
+                            phase.field("ending_log", log);
+                            phase.field("ending_backfilled", backfilled);
+                        }
                         phase.finish("completed");
                     }
                 }
@@ -91,7 +102,10 @@ impl Checkpoints {
         loop {
             let (log, backfilled) = frames(conn).map_err(crate::StorageError::persist)?;
             #[cfg(feature = "fault-injection")]
-            { phase.field("log", log); phase.field("backfilled", backfilled); }
+            {
+                phase.field("log", log);
+                phase.field("backfilled", backfilled);
+            }
             if (0..MAX_PENDING_WAL_FRAMES).contains(&log) {
                 #[cfg(feature = "fault-injection")]
                 phase.finish("admitted");
@@ -114,7 +128,11 @@ impl Checkpoints {
                     conn.busy_timeout(std::time::Duration::from_millis(u64::from(timeout)))
                         .map_err(crate::StorageError::persist)?;
                     #[cfg(feature = "fault-injection")]
-                    phase.finish(if matches!(&restart, Ok(0)) { "admitted-after-restart" } else { "refused-restart" });
+                    phase.finish(if matches!(&restart, Ok(0)) {
+                        "admitted-after-restart"
+                    } else {
+                        "refused-restart"
+                    });
                     return match restart {
                         Ok(0) => Ok(()),
                         Ok(_) => Err(crate::StorageError::FileLocked),

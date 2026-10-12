@@ -117,7 +117,14 @@ impl ActorHandle {
     ) -> Result<Vec<Result<WriteResult, RuntimeError>>, RuntimeError> {
         let inputs = inputs.into();
         #[cfg(feature = "fault-injection")]
-        let mut roundtrip = dohc_engine_storage::capture_phase::Phase::new("queued_capture_batch", inputs.first().and_then(|i| i.metadata_correlation_id.as_deref()), inputs.len(), false);
+        let mut roundtrip = dohc_engine_storage::capture_phase::Phase::new(
+            "queued_capture_batch",
+            inputs
+                .first()
+                .and_then(|i| i.metadata_correlation_id.as_deref()),
+            inputs.len(),
+            false,
+        );
         let token: CancellationToken = CancellationToken::new();
         let result = self.run_blocking(move |store, cache| {
             with_local_file_mutation_cache_reset(cache, || {
@@ -459,7 +466,8 @@ fn capture_ingest_in_tx(
         .as_ref()
         .is_none_or(|batch| batch.has_ydoc_state != Some(false));
     #[cfg(feature = "fault-injection")]
-    let domain_phase = dohc_engine_storage::capture_phase::Measure::new("domain_and_lease_recovery");
+    let domain_phase =
+        dohc_engine_storage::capture_phase::Measure::new("domain_and_lease_recovery");
     let mut result = match batch.as_deref_mut() {
         Some(batch) => capture_ingest_in_batch_with_admission_in_tx(
             tx,
@@ -516,7 +524,8 @@ fn capture_ingest_in_tx(
     }
     if admitted {
         #[cfg(feature = "fault-injection")]
-        let _collection_phase = dohc_engine_storage::capture_phase::Measure::new("collection_and_lineage");
+        let _collection_phase =
+            dohc_engine_storage::capture_phase::Measure::new("collection_and_lineage");
         let has_ydoc_state = match batch.as_deref_mut() {
             Some(batch) => match batch.has_ydoc_state {
                 Some(has_ydoc_state) => has_ydoc_state,
@@ -649,7 +658,14 @@ fn capture_ingest_batch_on_store(
     workspace_root: (&std::path::Path, &dyn WorkspaceRootGuard),
 ) -> Result<Vec<Result<WriteResult, RuntimeError>>, RuntimeError> {
     #[cfg(feature = "fault-injection")]
-    let mut phase = dohc_engine_storage::capture_phase::Phase::new("actor_capture_batch", inputs.first().and_then(|i| i.metadata_correlation_id.as_deref()), inputs.len(), true);
+    let mut phase = dohc_engine_storage::capture_phase::Phase::new(
+        "actor_capture_batch",
+        inputs
+            .first()
+            .and_then(|i| i.metadata_correlation_id.as_deref()),
+        inputs.len(),
+        true,
+    );
     let (root_dir, root_guard) = workspace_root;
     let Some(first) = inputs.first() else {
         return Ok(Vec::new());
@@ -724,9 +740,15 @@ fn capture_ingest_batch_on_store(
     match outcome {
         TxnOutcome::Committed(results) => {
             #[cfg(feature = "fault-injection")]
-            { phase.field("failed_items", results.iter().filter(|r| r.is_err()).count() as u64); phase.finish("committed"); }
+            {
+                phase.field(
+                    "failed_items",
+                    results.iter().filter(|r| r.is_err()).count() as u64,
+                );
+                phase.finish("committed");
+            }
             Ok(results)
-        },
+        }
         TxnOutcome::Crashed { .. } => Err(RuntimeError::OperationCrashed),
     }
 }

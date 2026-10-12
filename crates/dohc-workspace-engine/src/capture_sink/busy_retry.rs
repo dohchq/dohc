@@ -57,7 +57,8 @@ impl CaptureBatchRetry {
         mut wait: impl FnMut(Duration),
     ) -> Result<T, RuntimeError> {
         #[cfg(feature = "harness")]
-        let mut phase = dohc_engine_storage::capture_phase::Phase::new("capture_busy_retry", None, 0, true);
+        let mut phase =
+            dohc_engine_storage::capture_phase::Phase::new("capture_busy_retry", None, 0, true);
         loop {
             if self.cancel.is_cancelled() {
                 #[cfg(feature = "harness")]
@@ -91,14 +92,19 @@ impl CaptureBatchRetry {
                         return Err(error);
                     }
                     #[cfg(feature = "harness")]
-                    let _wait_phase = dohc_engine_storage::capture_phase::Measure::new("retry_wait");
+                    let _wait_phase =
+                        dohc_engine_storage::capture_phase::Measure::new("retry_wait");
                     wait(remaining.min(BUSY_RETRY_INTERVAL));
                 }
                 result => {
                     #[cfg(feature = "harness")]
-                    phase.finish(if result.is_ok() { "success" } else { "non-busy-error" });
+                    phase.finish(if result.is_ok() {
+                        "success"
+                    } else {
+                        "non-busy-error"
+                    });
                     return self.observe(result);
-                },
+                }
             }
         }
     }

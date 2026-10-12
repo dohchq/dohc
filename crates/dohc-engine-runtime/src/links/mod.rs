@@ -537,11 +537,20 @@ pub fn reseed_step(store: &mut EngineStore) -> Result<bool, StorageError> {
 fn seed_step(store: &mut EngineStore) -> Result<bool, StorageError> {
     seed_step_with(store, &NoFaults)
 }
-fn seed_step_with(store: &mut EngineStore, faults: &dyn FaultInjector) -> Result<bool, StorageError> {
-    let needed = store.read_with(|c| c.query_row(
+fn seed_step_with(
+    store: &mut EngineStore,
+    faults: &dyn FaultInjector,
+) -> Result<bool, StorageError> {
+    let needed = store
+        .read_with(|c| {
+            c.query_row(
         "SELECT EXISTS(SELECT 1 FROM link_index_state WHERE seed_phase IN ('deferred','aliases'))",
-        [], |r| r.get::<_, bool>(0))).map_err(sql)?;
-    if !needed { return Ok(false); }
+        [], |r| r.get::<_, bool>(0))
+        })
+        .map_err(sql)?;
+    if !needed {
+        return Ok(false);
+    }
     #[cfg(feature = "fault-injection")]
     let mut phase = dohc_engine_storage::capture_phase::Phase::new("link_seed", None, 0, true);
     let outcome = store.write_with(faults, |tx| {
@@ -568,6 +577,10 @@ fn seed_step_with(store: &mut EngineStore, faults: &dyn FaultInjector) -> Result
         Ok::<_, StorageError>(true)
     })?;
     #[cfg(feature = "fault-injection")]
-    phase.finish(if matches!(outcome, TxnOutcome::Committed(true)) { "committed" } else { "interrupted" });
+    phase.finish(if matches!(outcome, TxnOutcome::Committed(true)) {
+        "committed"
+    } else {
+        "interrupted"
+    });
     Ok(matches!(outcome, TxnOutcome::Committed(true)))
 }

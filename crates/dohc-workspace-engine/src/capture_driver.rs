@@ -2056,7 +2056,8 @@ impl DriverEnv for RealEnv {
 
     async fn start_layer(&mut self, cancel: &CancellationToken) -> Result<FilesLayer, ()> {
         #[cfg(feature = "harness")]
-        let mut fence_phase = dohc_engine_storage::capture_phase::Phase::new("fenced_capture", None, 0, false);
+        let mut fence_phase =
+            dohc_engine_storage::capture_phase::Phase::new("fenced_capture", None, 0, false);
         let _links_hold = self.actor.defer_link_drain_for_capture();
         let initial_start = matches!(
             self.status.snapshot().phase,
@@ -2086,7 +2087,8 @@ impl DriverEnv for RealEnv {
         // layer claims to be current).
         let fingerprint_before_seed = policy_fingerprint(&self.root);
         #[cfg(feature = "harness")]
-        let mut manifest_phase = dohc_engine_storage::capture_phase::Phase::new("manifest_seed", None, 0, false);
+        let mut manifest_phase =
+            dohc_engine_storage::capture_phase::Phase::new("manifest_seed", None, 0, false);
         let (seed, seed_loaded) =
             match manifest_seed(&self.root, &self.actor, &self.workspace_id).await {
                 Ok(seed) => (seed, true),
@@ -2098,11 +2100,15 @@ impl DriverEnv for RealEnv {
                 }
             };
         #[cfg(feature = "harness")]
-        { manifest_phase.finish(if seed_loaded { "loaded" } else { "failed" }); drop(manifest_phase); }
+        {
+            manifest_phase.finish(if seed_loaded { "loaded" } else { "failed" });
+            drop(manifest_phase);
+        }
         let workspace_missing = seed.is_workspace_missing();
         let refresh_epoch = self.refresh_epoch.load(Ordering::Acquire);
         #[cfg(feature = "harness")]
-        let mut scan_phase = dohc_engine_storage::capture_phase::Phase::new("initial_scan", None, 0, false);
+        let mut scan_phase =
+            dohc_engine_storage::capture_phase::Phase::new("initial_scan", None, 0, false);
         let (fresh, initial) = FilesLayer::start_with_fingerprint(
             &self.root,
             cancel,
@@ -2120,8 +2126,11 @@ impl DriverEnv for RealEnv {
 
         #[cfg(feature = "harness")]
         {
-            scan_phase.finish("completed"); drop(scan_phase);
-            if let ReconcileRun::Completed(plan) = &initial.run { fence_phase.field("files", plan.ops.len() as u64); }
+            scan_phase.finish("completed");
+            drop(scan_phase);
+            if let ReconcileRun::Completed(plan) = &initial.run {
+                fence_phase.field("files", plan.ops.len() as u64);
+            }
         }
         // EARLY-OPEN PROOF. The binding watcher is attached before the
         // initial capture plan is prepared. Re-read every mutable prerequisite after
@@ -2162,7 +2171,10 @@ impl DriverEnv for RealEnv {
         self.status.request_collection_reconcile();
         let provenance = reconcile_provenance();
         #[cfg(feature = "harness")]
-        fence_phase.field("correlation", serde_json::json!(provenance.correlation_id.as_deref()));
+        fence_phase.field(
+            "correlation",
+            serde_json::json!(provenance.correlation_id.as_deref()),
+        );
         let (mut settled, initial_settle_timed_out) = {
             let initial_cancel = cancel.child_token();
             let initial_settle = async {
@@ -2184,14 +2196,23 @@ impl DriverEnv for RealEnv {
                 while !settled && attempts < BASELINE_SETTLE_ATTEMPTS {
                     attempts += 1;
                     #[cfg(feature = "harness")]
-                    let mut rescan_phase = dohc_engine_storage::capture_phase::Phase::new("baseline_500ms_rescan", provenance.correlation_id.as_deref(), 0, false);
+                    let mut rescan_phase = dohc_engine_storage::capture_phase::Phase::new(
+                        "baseline_500ms_rescan",
+                        provenance.correlation_id.as_deref(),
+                        0,
+                        false,
+                    );
                     tokio::select! {
                         biased;
                         () = initial_cancel.cancelled() => break,
                         () = tokio::time::sleep(DRIVE_INTERVAL) => {}
                     }
                     #[cfg(feature = "harness")]
-                    { rescan_phase.field("attempt", attempts as u64); rescan_phase.finish("waited"); drop(rescan_phase); }
+                    {
+                        rescan_phase.field("attempt", attempts as u64);
+                        rescan_phase.finish("waited");
+                        drop(rescan_phase);
+                    }
                     settled = match reconcile_if_dirty_bound(
                         &self.root,
                         &fresh.files.handle(),
@@ -2249,7 +2270,10 @@ impl DriverEnv for RealEnv {
             && !fresh.watcher.is_unavailable()
             && fresh.watcher.disruption_count() == 0;
         #[cfg(feature = "harness")]
-        { fence_phase.field("initial_ready", initial_ready); fence_phase.finish(if initial_ready { "settled" } else { "degraded" }); }
+        {
+            fence_phase.field("initial_ready", initial_ready);
+            fence_phase.finish(if initial_ready { "settled" } else { "degraded" });
+        }
         if initial_ready {
             self.status.mark_initial_ready();
         } else {
@@ -2855,11 +2879,24 @@ async fn apply_bound_run_with_handle(
                 sink.set_batch_wait_for_test(move |duration| wait(duration));
             }
             #[cfg(feature = "harness")]
-            let mut apply_phase = dohc_engine_storage::capture_phase::Phase::new("capture_apply_pass", apply_correlation.as_deref(), apply_plan.ops.len(), true);
+            let mut apply_phase = dohc_engine_storage::capture_phase::Phase::new(
+                "capture_apply_pass",
+                apply_correlation.as_deref(),
+                apply_plan.ops.len(),
+                true,
+            );
             let result =
                 apply_reconcile_plan_cancellable(&apply_plan, &mut sink, &NoFaults, &apply_cancel);
             #[cfg(feature = "harness")]
-            { apply_phase.field("failed_receipts", result.failed_applies.len() as u64); apply_phase.finish(if result.degraded { "degraded" } else { "completed" }); drop(apply_phase); }
+            {
+                apply_phase.field("failed_receipts", result.failed_applies.len() as u64);
+                apply_phase.finish(if result.degraded {
+                    "degraded"
+                } else {
+                    "completed"
+                });
+                drop(apply_phase);
+            }
             let mut collection_release_generation = 0;
             let collections =
                 if result.failed_applies.is_empty() && !result.degraded && result.completed() {

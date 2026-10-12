@@ -26,10 +26,10 @@
 
 #![forbid(unsafe_code)]
 
-#[cfg(feature = "fault-injection")]
-pub mod capture_phase;
 pub mod backup;
 pub mod blob;
+#[cfg(feature = "fault-injection")]
+pub mod capture_phase;
 pub mod diagnostics;
 mod durability;
 pub mod error;

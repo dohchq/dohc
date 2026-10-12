@@ -15,7 +15,9 @@ pub(crate) fn install(conn: &Connection) -> rusqlite::Result<()> {
             match table {
                 "link_pending" => crate::capture_phase::count("link_pending_row_writes", 1),
                 "link_aliases" => crate::capture_phase::count("link_alias_row_writes", 1),
-                "links" | "link_sources" | "link_target_keys" | "link_occurrence_keys" => crate::capture_phase::count("link_index_row_writes", 1),
+                "links" | "link_sources" | "link_target_keys" | "link_occurrence_keys" => {
+                    crate::capture_phase::count("link_index_row_writes", 1)
+                }
                 _ => {}
             }
         }

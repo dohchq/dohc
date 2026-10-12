@@ -358,8 +358,15 @@ impl EngineStore {
         #[cfg(feature = "fault-injection")]
         {
             crate::capture_phase::wal(&self.conn, &mut phase, false);
-            phase.field("total_changes_delta", self.conn.total_changes().saturating_sub(changes));
-            phase.finish(match &outcome { TxnOutcome::Committed(_) => "committed", TxnOutcome::Crashed { committed: true } => "committed-before-crash", _ => "rolled-back" });
+            phase.field(
+                "total_changes_delta",
+                self.conn.total_changes().saturating_sub(changes),
+            );
+            phase.finish(match &outcome {
+                TxnOutcome::Committed(_) => "committed",
+                TxnOutcome::Crashed { committed: true } => "committed-before-crash",
+                _ => "rolled-back",
+            });
         }
         Ok(outcome)
     }

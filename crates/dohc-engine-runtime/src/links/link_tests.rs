@@ -64,7 +64,14 @@ fn write(s: &mut EngineStore, object: &str, path: &str, text: &str, n: i64) {
 fn write_deferred(s: &mut EngineStore, object: &str, path: &str, text: &str, n: i64) {
     write_fixture(s, object, path, text, n, false);
 }
-fn write_fixture(s: &mut EngineStore, object: &str, path: &str, text: &str, n: i64, seed_empty: bool) {
+fn write_fixture(
+    s: &mut EngineStore,
+    object: &str,
+    path: &str,
+    text: &str,
+    n: i64,
+    seed_empty: bool,
+) {
     // Ordinary invalidation fixtures begin with a completed empty seed. Tests
     // for startup use write_deferred and exercise the production obligation.
     let input = WriteText {
@@ -86,7 +93,9 @@ fn write_fixture(s: &mut EngineStore, object: &str, path: &str, text: &str, n: i
     loop {
         let result = (|| {
             VersionedTextStore::new(s).ensure_main_version("ws", "main", 1, &NoFaults)?;
-            if seed_empty { while seed_step(s)? {} }
+            if seed_empty {
+                while seed_step(s)? {}
+            }
             VersionedTextStore::new(s).write_text(&input, &NoFaults)
         })();
         match result {
@@ -121,7 +130,9 @@ fn parsed(s: &EngineStore) -> Staged {
 }
 fn drain(s: &mut EngineStore) {
     for _ in 0..10000 {
-        if seed_step(s).unwrap() { continue; }
+        if seed_step(s).unwrap() {
+            continue;
+        }
         let jobs = prepare_batch(s, SOURCE_SLICE).unwrap();
         if jobs.is_empty() {
             if gc_step(s).unwrap() || reseed_step(s).unwrap() {
@@ -1191,7 +1202,10 @@ fn maximal_writes_checkpoint_within_the_client_busy_budget() {
         write(&mut store, "maximum", "maximum.md", &maximum_text, n);
         maximum_writes += 1;
     }
-    assert!(maximum_writes > 0, "the fixture must commit a maximal document");
+    assert!(
+        maximum_writes > 0,
+        "the fixture must commit a maximal document"
+    );
     let frames: i64 = store
         .read_with(|c| c.query_row("PRAGMA wal_checkpoint(NOOP)", [], |r| r.get(1)))
         .unwrap();
@@ -1285,7 +1299,14 @@ fn maximal_writes_checkpoint_within_the_client_busy_budget() {
 }
 
 fn seed_phase(s: &EngineStore) -> String {
-    s.read_with(|c| c.query_row("SELECT seed_phase FROM link_index_state WHERE workspace_id='ws' AND version_id='main'", [], |r| r.get(0))).unwrap()
+    s.read_with(|c| {
+        c.query_row(
+            "SELECT seed_phase FROM link_index_state WHERE workspace_id='ws' AND version_id='main'",
+            [],
+            |r| r.get(0),
+        )
+    })
+    .unwrap()
 }
 #[test]
 fn initial_capture_defers_all_link_rows_and_restart_reseeds() {
@@ -1293,14 +1314,28 @@ fn initial_capture_defers_all_link_rows_and_restart_reseeds() {
     let db = engine_db_path(&scratch).unwrap();
     let mut s = open(&db);
     for n in 0..65 {
-        write_deferred(&mut s, &format!("note-{n}"), &format!("note-{n:03}.md"), "[[target]]", n+2);
+        write_deferred(
+            &mut s,
+            &format!("note-{n}"),
+            &format!("note-{n:03}.md"),
+            "[[target]]",
+            n + 2,
+        );
     }
     write_deferred(&mut s, "target", "target.md", "target", 100);
     assert_eq!(seed_phase(&s), "deferred");
     assert_eq!(count(&s, "link_pending"), 0);
     assert_eq!(count(&s, "link_aliases"), 0);
     assert!(prepare_batch(&s, SOURCE_SLICE).unwrap().is_empty());
-    let old_index: i64 = s.read_with(|c| c.query_row("SELECT count(*) FROM sqlite_schema WHERE name='link_alias_object'", [], |r| r.get(0))).unwrap();
+    let old_index: i64 = s
+        .read_with(|c| {
+            c.query_row(
+                "SELECT count(*) FROM sqlite_schema WHERE name='link_alias_object'",
+                [],
+                |r| r.get(0),
+            )
+        })
+        .unwrap();
     assert_eq!(old_index, 0);
     drop(s);
     let mut s = open(&db);
@@ -1312,7 +1347,9 @@ fn initial_capture_defers_all_link_rows_and_restart_reseeds() {
     assert_eq!(seed_phase(&s), "ready");
     assert_eq!(count(&s, "link_sources"), 66);
     let pairs: Vec<(String,String)> = s.read_with(|c| c.prepare("SELECT source.object_id,target.object_id FROM link_sources target JOIN link_target_keys t USING(workspace_id,version_id,object_id,index_key) JOIN link_occurrence_keys k ON k.workspace_id=t.workspace_id AND k.version_id=t.version_id AND k.key_kind=t.key_kind AND k.key=t.key JOIN link_sources source ON source.workspace_id=k.workspace_id AND source.version_id=k.version_id AND source.object_id=k.object_id AND source.index_key=k.index_key WHERE t.key_kind='stem' ORDER BY source.object_id,target.object_id")?.query_map([], |r| Ok((r.get(0)?,r.get(1)?)))?.collect::<rusqlite::Result<_>>()).unwrap();
-    let mut expected = (0..65).map(|n| (format!("note-{n}"), "target".to_owned())).collect::<Vec<_>>();
+    let mut expected = (0..65)
+        .map(|n| (format!("note-{n}"), "target".to_owned()))
+        .collect::<Vec<_>>();
     expected.sort();
     assert_eq!(pairs, expected);
 }
@@ -1322,19 +1359,37 @@ fn outside_edits_behind_and_ahead_of_the_seed_cursor_are_captured() {
     let db = engine_db_path(&scratch).unwrap();
     let mut s = open(&db);
     for n in 0..65 {
-        write_deferred(&mut s, &format!("note-{n}"), &format!("note-{n:03}.md"), "[[old]]", n+2);
+        write_deferred(
+            &mut s,
+            &format!("note-{n}"),
+            &format!("note-{n:03}.md"),
+            "[[old]]",
+            n + 2,
+        );
     }
     assert!(seed_step(&mut s).unwrap());
     // Capture newer disk bytes while the cursor is between these paths.
     for (path, now_ms) in [("note-000.md", 100), ("note-064.md", 101)] {
         let disk = scratch.path().join(path);
         std::fs::write(&disk, "[[new]]").unwrap();
-        VersionedTextStore::new(&mut s).capture_ingest(&dohc_engine_domain::CaptureIngest {
-            workspace_id: "ws".into(), version_id: "main".into(), path: path.into(),
-            text: std::fs::read_to_string(disk).unwrap(), metadata_origin: "test".into(),
-            metadata_summary: None, metadata_correlation_id: None, author_json: None,
-            now_ms, request_id: None, claim_foreign_head: false,
-        }, &NoFaults).unwrap();
+        VersionedTextStore::new(&mut s)
+            .capture_ingest(
+                &dohc_engine_domain::CaptureIngest {
+                    workspace_id: "ws".into(),
+                    version_id: "main".into(),
+                    path: path.into(),
+                    text: std::fs::read_to_string(disk).unwrap(),
+                    metadata_origin: "test".into(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    now_ms,
+                    request_id: None,
+                    claim_foreign_head: false,
+                },
+                &NoFaults,
+            )
+            .unwrap();
     }
     write_deferred(&mut s, "added", "aaa.md", "[[added]]", 102);
     s.write_with(&NoFaults, |tx| {
@@ -1344,29 +1399,53 @@ fn outside_edits_behind_and_ahead_of_the_seed_cursor_are_captured() {
     }).unwrap();
     drain(&mut s);
     assert_eq!(seed_phase(&s), "ready");
-    assert_eq!(count(&s,"link_sources"), 65);
+    assert_eq!(count(&s, "link_sources"), 65);
     let rows: Vec<(String,String)> = s.read_with(|c| c.prepare("SELECT s.path,l.literal FROM link_sources s JOIN links l USING(workspace_id,version_id,object_id,index_key) WHERE s.object_id IN ('note-0','note-64','added','note-2') ORDER BY s.path")?.query_map([], |r| Ok((r.get(0)?,r.get(1)?)))?.collect::<rusqlite::Result<_>>()).unwrap();
-    assert_eq!(rows, vec![("aaa.md".into(),"added".into()),("note-000.md".into(),"new".into()),("note-064.md".into(),"new".into()),("renamed.md".into(),"old".into())]);
+    assert_eq!(
+        rows,
+        vec![
+            ("aaa.md".into(), "added".into()),
+            ("note-000.md".into(), "new".into()),
+            ("note-064.md".into(), "new".into()),
+            ("renamed.md".into(), "old".into())
+        ]
+    );
 }
 #[test]
 fn seed_cursor_and_last_certification_obligation_commit_atomically() {
-    for point in [FaultPoint::StorageBeforePersist, FaultPoint::StorageAfterCommitBeforeAck] {
+    for point in [
+        FaultPoint::StorageBeforePersist,
+        FaultPoint::StorageAfterCommitBeforeAck,
+    ] {
         let scratch = ScratchDir::new().unwrap();
         let db = engine_db_path(&scratch).unwrap();
         let mut s = open(&db);
         write_deferred(&mut s, "a", "a.md", "[[b]]", 2);
         assert!(!seed_step_with(&mut s, &*ScriptedFaults::crash_at(point)).unwrap());
-        assert_eq!(count(&s,"link_aliases"), i64::from(point == FaultPoint::StorageAfterCommitBeforeAck));
+        assert_eq!(
+            count(&s, "link_aliases"),
+            i64::from(point == FaultPoint::StorageAfterCommitBeforeAck)
+        );
         drop(s);
         let mut s = open(&db);
         while seed_step(&mut s).unwrap() {}
         assert_eq!(seed_phase(&s), "draining");
         let staged = parsed(&s);
         // Keep the publication boundary independent of the host's slice clock.
-        s.write_with(&*ScriptedFaults::crash_at(point), |tx| staged.step_in_tx(tx, Instant::now() + Duration::from_secs(60))).unwrap();
+        s.write_with(&*ScriptedFaults::crash_at(point), |tx| {
+            staged.step_in_tx(tx, Instant::now() + Duration::from_secs(60))
+        })
+        .unwrap();
         drop(s);
         let mut s = open(&db);
-        assert_eq!(seed_phase(&s), if point == FaultPoint::StorageBeforePersist { "draining" } else { "ready" });
+        assert_eq!(
+            seed_phase(&s),
+            if point == FaultPoint::StorageBeforePersist {
+                "draining"
+            } else {
+                "ready"
+            }
+        );
         drain(&mut s);
         assert_eq!(seed_phase(&s), "ready");
         assert_eq!(certified_literals(&s), vec!["b"]);
@@ -1379,24 +1458,36 @@ fn alias_seeding_resumes_after_abrupt_process_exit() {
         let db = Path::new(&root).join("engine.db");
         let mut s = open(&db);
         for n in 0..65 {
-            write_deferred(&mut s, &format!("note-{n}"), &format!("note-{n:03}.md"), "[[target]]", n+2);
+            write_deferred(
+                &mut s,
+                &format!("note-{n}"),
+                &format!("note-{n:03}.md"),
+                "[[target]]",
+                n + 2,
+            );
         }
         assert!(seed_step(&mut s).unwrap());
-        assert_eq!(count(&s,"link_aliases"),32);
+        assert_eq!(count(&s, "link_aliases"), 32);
         std::process::exit(73);
     }
     let scratch = ScratchDir::new().unwrap();
     let status = std::process::Command::new(std::env::current_exe().unwrap())
-        .args(["--exact", "links::tests::alias_seeding_resumes_after_abrupt_process_exit", "--nocapture"])
-        .env(CHILD,scratch.path()).status().unwrap();
-    assert_eq!(status.code(),Some(73));
+        .args([
+            "--exact",
+            "links::tests::alias_seeding_resumes_after_abrupt_process_exit",
+            "--nocapture",
+        ])
+        .env(CHILD, scratch.path())
+        .status()
+        .unwrap();
+    assert_eq!(status.code(), Some(73));
     let mut s = open(&scratch.path().join("engine.db"));
-    assert_eq!(seed_phase(&s),"aliases");
-    assert_eq!(count(&s,"link_aliases"),32);
+    assert_eq!(seed_phase(&s), "aliases");
+    assert_eq!(count(&s, "link_aliases"), 32);
     drain(&mut s);
-    assert_eq!(seed_phase(&s),"ready");
-    assert_eq!(count(&s,"link_sources"),65);
-    assert_eq!(count(&s,"links"),65);
+    assert_eq!(seed_phase(&s), "ready");
+    assert_eq!(count(&s, "link_sources"), 65);
+    assert_eq!(count(&s, "links"), 65);
 }
 
 #[test]
@@ -1404,15 +1495,16 @@ fn restored_snapshot_retains_the_deferred_seed_obligation() {
     let scratch = ScratchDir::new().unwrap();
     let db = engine_db_path(&scratch).unwrap();
     let mut s = open(&db);
-    write_deferred(&mut s,"a","a.md","[[b]]",2);
+    write_deferred(&mut s, "a", "a.md", "[[b]]", 2);
     let restored = scratch.path().join("restored.db");
-    s.read_with(|c| c.execute("VACUUM INTO ?1", [restored.to_str().unwrap()])).unwrap();
+    s.read_with(|c| c.execute("VACUUM INTO ?1", [restored.to_str().unwrap()]))
+        .unwrap();
     drop(s);
     let mut s = open(&restored);
-    assert_eq!(seed_phase(&s),"deferred");
+    assert_eq!(seed_phase(&s), "deferred");
     drain(&mut s);
-    assert_eq!(seed_phase(&s),"ready");
-    assert_eq!(certified_literals(&s),vec!["b"]);
+    assert_eq!(seed_phase(&s), "ready");
+    assert_eq!(certified_literals(&s), vec!["b"]);
 }
 #[test]
 fn fork_of_a_partial_seed_preserves_its_cursor_and_obligation() {
@@ -1420,16 +1512,40 @@ fn fork_of_a_partial_seed_preserves_its_cursor_and_obligation() {
     let db = engine_db_path(&scratch).unwrap();
     let mut s = open(&db);
     for n in 0..65 {
-        write_deferred(&mut s,&format!("note-{n}"),&format!("note-{n:03}.md"),"[[target]]",n+2);
+        write_deferred(
+            &mut s,
+            &format!("note-{n}"),
+            &format!("note-{n:03}.md"),
+            "[[target]]",
+            n + 2,
+        );
     }
     seed_step(&mut s).unwrap();
-    VersionedTextStore::new(&mut s).create_named_version(&CreateNamedVersion {
-        workspace_id:"ws".into(),new_version_id:"fork".into(),name:"fork".into(),from_version_id:"main".into(),now_ms:100,request_id:None,
-    }, &NoFaults).unwrap();
-    assert_eq!(count(&s,"link_aliases"),64);
+    VersionedTextStore::new(&mut s)
+        .create_named_version(
+            &CreateNamedVersion {
+                workspace_id: "ws".into(),
+                new_version_id: "fork".into(),
+                name: "fork".into(),
+                from_version_id: "main".into(),
+                now_ms: 100,
+                request_id: None,
+            },
+            &NoFaults,
+        )
+        .unwrap();
+    assert_eq!(count(&s, "link_aliases"), 64);
     drain(&mut s);
-    assert_eq!(count(&s,"link_sources"),130);
-    assert_eq!(count(&s,"links"),130);
-    let obligations:i64=s.read_with(|c|c.query_row("SELECT count(*) FROM link_index_state WHERE seed_phase<>'ready'",[],|r|r.get(0))).unwrap();
-    assert_eq!(obligations,0);
+    assert_eq!(count(&s, "link_sources"), 130);
+    assert_eq!(count(&s, "links"), 130);
+    let obligations: i64 = s
+        .read_with(|c| {
+            c.query_row(
+                "SELECT count(*) FROM link_index_state WHERE seed_phase<>'ready'",
+                [],
+                |r| r.get(0),
+            )
+        })
+        .unwrap();
+    assert_eq!(obligations, 0);
 }

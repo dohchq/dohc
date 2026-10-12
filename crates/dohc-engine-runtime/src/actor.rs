@@ -680,12 +680,20 @@ fn worker_main(
             Err(mpsc::error::TryRecvError::Empty) => match (&mut links, &timer) {
                 (Some(worker), Some(timer)) if capture_holds.load(Ordering::Acquire) == 0 => {
                     #[cfg(feature = "fault-injection")]
-                    let mut phase = dohc_engine_storage::capture_phase::Phase::new("actor_background_slice", None, 0, true);
+                    let mut phase = dohc_engine_storage::capture_phase::Phase::new(
+                        "actor_background_slice",
+                        None,
+                        0,
+                        true,
+                    );
                     #[cfg(feature = "fault-injection")]
                     phase.field("capture_holds", capture_holds.load(Ordering::Acquire));
                     let delay = worker.tick(&mut store);
                     #[cfg(feature = "fault-injection")]
-                    { phase.finish("completed"); drop(phase); }
+                    {
+                        phase.finish("completed");
+                        drop(phase);
+                    }
                     let parser_pending = worker.waiting_for_parser();
                     if delay == std::time::Duration::MAX && !parser_pending {
                         rx.blocking_recv()
