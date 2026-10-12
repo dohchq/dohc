@@ -733,6 +733,65 @@ fn materialization_job_lifecycle_transitions() {
 }
 
 #[test]
+fn corrupt_materialization_rows_refuse_loading_without_rewriting_the_ledger() {
+    for mutation in [
+        "preimage_present = 1, preimage_sha256 = NULL",
+        "preimage_present = 1, preimage_sha256 = ''",
+        "preimage_present = 0, preimage_sha256 = 'unexpected'",
+        "preimage_present = 2, preimage_sha256 = NULL",
+        "status = 'unknown'",
+        "operation = 'unknown'",
+    ] {
+        let scratch = Scratch::new("corrupt-materialization-job");
+        let mut store = EngineStore::open(&scratch.db_path(), 1).expect("open");
+        let sha = store.put_binary_blob(b"content").expect("blob");
+        store
+            .write_with(&NoFaults, |tx| {
+                enqueue_job(tx, &job_spec("j1", "notes/a.md", &sha, 10))
+            })
+            .expect("enqueue");
+        assert_eq!(
+            store
+                .load_materialization_job("j1")
+                .unwrap()
+                .unwrap()
+                .preimage,
+            Preimage::Absent
+        );
+        let db = Connection::open(scratch.db_path()).expect("open ledger");
+        db.execute_batch(&format!(
+            "UPDATE materialization_jobs SET {mutation} WHERE job_id = 'j1'"
+        ))
+        .expect("inject malformed row");
+        let row_json = || {
+            db.query_row(
+                "SELECT json_array(preimage_present, preimage_sha256, status, operation) \
+                 FROM materialization_jobs WHERE job_id = 'j1'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .expect("read evidence")
+        };
+        let before = row_json();
+        assert!(
+            matches!(
+                store.load_materialization_job("j1"),
+                Err(StorageError::StateCorrupt { .. })
+            ),
+            "loading {mutation} must report corruption"
+        );
+        assert!(
+            matches!(
+                store.list_materialization_jobs(),
+                Err(StorageError::StateCorrupt { .. })
+            ),
+            "listing {mutation} must report corruption"
+        );
+        assert_eq!(row_json(), before, "refusal must preserve {mutation}");
+    }
+}
+
+#[test]
 fn completed_generation_watermarks_are_workspace_scoped() {
     let scratch = Scratch::new("job-workspace-watermark");
     let mut store = EngineStore::open(&scratch.db_path(), 1).expect("open");

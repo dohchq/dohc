@@ -1,3 +1,4 @@
+import type { HistoryCursor } from "@dohc/workspace-engine-client";
 import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { parseAutomationsFile, type AutomationEntry } from "@dohc/workspace-contracts/automations";
@@ -12,9 +13,9 @@ export interface AutomationsFileHistory {
   flush(): Promise<void>;
   fileObjectIdForPath(path: string): Promise<string | null>;
   /** One page of the file's moments, newest first, and where the next page starts. */
-  listMoments(input: { objectId: string; limit: number; beforeMomentOrder?: number }): Promise<{
+  listMoments(input: { objectId: string; limit: number; cursor?: HistoryCursor }): Promise<{
     moments: ReadonlyArray<{ id: string; protected: boolean }>;
-    nextBeforeMomentOrder: number | null;
+    nextCursor: HistoryCursor | null;
   }>;
   readMoment(momentId: string): Promise<{ protected: false; moment: AutomationHistoryMoment } | { protected: true } | null>;
 }
@@ -60,6 +61,7 @@ function entryAuthorOf(author: MomentAuthor | undefined, ownerUserId: string): C
     case "link":
       return { kind: "link" };
     case "public":
+    case "unattributed":
       return { kind: "nobody" };
   }
 }
@@ -80,10 +82,10 @@ async function* entryChanges(
   await history.flush();
   const objectId = await history.fileObjectIdForPath(input.path);
   if (objectId === null) return;
-  let beforeMomentOrder: number | undefined;
+  let cursor: HistoryCursor | undefined;
   for (let read = 0; read < HISTORY_MOMENTS;) {
     const page = await history.listMoments({
-      objectId, limit: HISTORY_PAGE, ...(beforeMomentOrder === undefined ? {} : { beforeMomentOrder }),
+      objectId, limit: HISTORY_PAGE, ...(cursor === undefined ? {} : { cursor }),
     });
     for (const summary of page.moments) {
       read += 1;
@@ -97,8 +99,8 @@ async function* entryChanges(
       if (isDeepStrictEqual(before, after)) continue;
       yield { before, after, author: authorOf(moment.authors, input.ownerUserId), text };
     }
-    if (page.nextBeforeMomentOrder === null) return;
-    beforeMomentOrder = page.nextBeforeMomentOrder;
+    if (page.nextCursor === null) return;
+    cursor = page.nextCursor;
   }
 }
 

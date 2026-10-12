@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { vi } from "vitest";
 import type { LinkedChatStore } from "@dohc/workspace-contracts/engine";
-import { chatDirectoryOf, readChatDirectory, type ChatDirectoryChannel } from "./automationChat";
+import { chatDirectoryOf, readChatDirectory, hasChatMessage, type ChatDirectoryChannel } from "./automationChat";
 import type { RosterGrant } from "./automationReach";
 
 const dm = (id: string, wireId = id, runningThreadId: string | null = `thread-${id}`): ChatDirectoryChannel => ({
@@ -101,4 +101,13 @@ describe("reading where automations write", () => {
     expect(directory.group("Trip")).toMatchObject({ channelId: "trip" });
     expect(directory.directMessage("user-ana")).toMatchObject({ threadId: "thread-dm-ana" });
   });
+});
+
+it("distinguishes an absent saved message from an unavailable engine", async () => {
+  const getMessage = vi.fn<LinkedChatStore["getMessage"]>();
+  getMessage.mockRejectedValueOnce(new Error("message-not-found"));
+  expect(await hasChatMessage({ getMessage }, "workspace", "message")).toBe(false);
+  getMessage.mockRejectedValueOnce(new Error("engine disconnected"));
+  await expect(hasChatMessage({ getMessage }, "workspace", "message")).rejects.toThrow("engine disconnected");
+  expect(getMessage).toHaveBeenCalledWith({ workspaceId: "workspace", messageId: "message" });
 });

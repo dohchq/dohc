@@ -4,6 +4,7 @@ use serde_json::Value;
 
 use crate::apply::apply_envelope_with;
 use crate::cursor::advance_shared_peer_tx;
+use crate::references::{MomentRefs, VersionCreateRefs};
 use crate::{
     ApplyDisposition, ApplyOutcome, PathClass, ReplicationEnvelope, SyncError, classify_share_path,
     read_shared_peer_position,
@@ -316,17 +317,6 @@ pub(crate) fn is_share_view_chat_kind(op_kind: &str) -> bool {
     SHARE_VIEW_CHAT_KINDS.contains(&op_kind)
 }
 
-/// The four fields a `moment.append` payload can name a path in. Every surface
-/// that decides whether a moment is inside a grant reads all four, so a rename
-/// crossing the boundary cannot leak the outside path through the one field a
-/// reader forgot.
-pub(crate) const MOMENT_PATH_FIELDS: [&str; 4] = [
-    "path",
-    "payloadBeforePath",
-    "payloadAfterPath",
-    "beforePath",
-];
-
 /// Whether `path` is one a share may place at all and inside the pinned grant.
 ///
 /// The containment rule, in one place, so the inbound boundary and the
@@ -556,6 +546,10 @@ fn enforce_share_view_boundary(
             SyncError::UnsupportedOperation
         });
     }
+    // A create's moment path fields are read too, so no field a relay adds to
+    // it carries an outside path past the containment check below.
+    let moment = MomentRefs::read(&op.payload);
+    let create = VersionCreateRefs::read(&op.payload);
     // The version dimension, mirroring the relay's `targetVersionId`: a served
     // op names exactly the version this share granted. A `version.create` is
     // entitled only to a VERSION share, and only to the version it granted.
@@ -569,10 +563,7 @@ fn enforce_share_view_boundary(
         // version this share failed to grant — it is one the relay could
         // never have issued, and comparing it first would report the malformed
         // field as a scope decision and throw its measurements away.
-        let claimed = usable_version_id(
-            op.payload.get("versionId").and_then(Value::as_str),
-            &op.op_kind,
-        )?;
+        let claimed = usable_version_id(create.version_id, &op.op_kind)?;
         match granted.version_id.as_deref() {
             Some(entitled) if entitled == claimed => {}
             // Both versions named, like the moment path: the reader has to see
@@ -594,35 +585,24 @@ fn enforce_share_view_boundary(
         }
     }
     if op.op_kind == "moment.append" {
-        enforce_granted_version(granted, op)?;
+        enforce_granted_version(granted, &op.op_kind, moment.version_id)?;
     }
-    let mut paths = Vec::new();
-    for field in MOMENT_PATH_FIELDS {
-        if let Some(path) = op.payload.get(field).and_then(Value::as_str) {
-            paths.push(path);
-        }
-    }
+    let mut paths: Vec<&str> = moment.paths().collect();
     if op.op_kind == "version.create" {
         // The list must BE a list. An explicit `[]` is a healthy served op
         // (see the empty-list note below); a missing, null, or non-array
         // field is a payload this boundary cannot read, and admitting it
         // would replay a version with no files and commit the cursor past it
         // — the same silent loss, with no refusal recorded.
-        let snapshots = op
-            .payload
-            .get("forkSnapshots")
-            .and_then(Value::as_array)
-            .ok_or(SyncError::InvalidInput {
+        if create.fork_snapshots.is_none() {
+            return Err(SyncError::InvalidInput {
                 reason: "share-view version.create forkSnapshots must be an array",
+            });
+        }
+        for snapshot in create.snapshots() {
+            let path = snapshot.content.path.ok_or(SyncError::InvalidInput {
+                reason: "share-view version.create fork snapshot must carry a path string",
             })?;
-        for snapshot in snapshots {
-            let path =
-                snapshot
-                    .get("path")
-                    .and_then(Value::as_str)
-                    .ok_or(SyncError::InvalidInput {
-                        reason: "share-view version.create fork snapshot must carry a path string",
-                    })?;
             paths.push(path);
         }
     }
@@ -707,12 +687,10 @@ fn usable_version_id<'a>(claimed: Option<&'a str>, op_kind: &str) -> Result<&'a 
 /// the selector rule the relay applies at creation — one rule, one place.
 fn enforce_granted_version(
     granted: &ShareGrant,
-    op: &ReplicationEnvelope,
+    op_kind: &str,
+    offered: Option<&str>,
 ) -> Result<(), SyncError> {
-    let offered = usable_version_id(
-        op.payload.get("versionId").and_then(Value::as_str),
-        &op.op_kind,
-    )?;
+    let offered = usable_version_id(offered, op_kind)?;
     // A grant with no version follows the workspace's main version, which is
     // the version the relay serves moments from for that share — not "compare
     // nothing". `version.create` above reads the same field raw, because only
@@ -720,7 +698,7 @@ fn enforce_granted_version(
     let entitled = granted.version_id.as_deref().unwrap_or(MAIN_VERSION_ID);
     if entitled != offered {
         return Err(SyncError::ShareVersionMismatch {
-            op_kind: op.op_kind.clone(),
+            op_kind: op_kind.to_owned(),
             granted: entitled.to_owned(),
             offered: offered.to_owned(),
         });
@@ -763,5 +741,153 @@ mod granted_path_tests {
         assert!(path_within_grant("notes/plan.md", &granted));
         assert!(!path_within_grant("notes-private/plan.md", &granted));
         assert!(!path_within_grant("other/plan.md", &granted));
+    }
+}
+
+/// The checks `apply_shared_envelope` runs on a share-view file op before it
+/// touches the store.
+#[cfg(test)]
+mod share_view_boundary_tests {
+    use serde_json::{Value, json};
+
+    use super::{
+        ShareAccess, ShareBoundary, ShareGrant, ShareSurface, enforce_share_view_boundary,
+    };
+    use crate::{ReplicationEnvelope, SyncError};
+
+    const GRANTED: &str = "version-granted";
+
+    fn boundary(version_id: Option<&str>) -> ShareBoundary {
+        ShareBoundary {
+            share_id: "share".to_owned(),
+            surface: ShareSurface::ShareView,
+            channel_wire_id: None,
+            granted: Some(ShareGrant {
+                paths: vec!["shared/docs".to_owned()],
+                version_id: version_id.map(str::to_owned),
+                access: ShareAccess::View,
+            }),
+        }
+    }
+
+    fn check(boundary: &ShareBoundary, op_kind: &str, payload: Value) -> Result<(), SyncError> {
+        enforce_share_view_boundary(
+            boundary,
+            &ReplicationEnvelope {
+                settlement_admission: None,
+                admitted_author_snapshot: None,
+                workspace_id: "ws".to_owned(),
+                origin_id: "peer".to_owned(),
+                origin_seq: 0,
+                relay_seq: None,
+                op_kind: op_kind.to_owned(),
+                payload,
+                recorded_at_ms: 10,
+            },
+        )
+    }
+
+    fn create(snapshots: Value) -> Result<(), SyncError> {
+        check(
+            &boundary(Some(GRANTED)),
+            "version.create",
+            json!({"versionId": GRANTED, "forkSnapshots": snapshots}),
+        )
+    }
+
+    #[test]
+    fn every_moment_path_field_is_held_to_the_grant() {
+        let main = boundary(None);
+        // A sparse served moment carries only what the relay filters on.
+        let sparse = json!({"versionId": "main", "path": "shared/docs/a.md"});
+        assert!(check(&main, "moment.append", sparse.clone()).is_ok());
+        for field in [
+            "path",
+            "payloadBeforePath",
+            "payloadAfterPath",
+            "beforePath",
+        ] {
+            let mut inside = json!({"versionId": "main"});
+            inside[field] = json!("shared/docs/a.md");
+            assert!(
+                check(&main, "moment.append", inside).is_ok(),
+                "{field} alone places the moment"
+            );
+            let mut crossing = sparse.clone();
+            crossing[field] = json!("outside/a.md");
+            assert!(
+                matches!(
+                    check(&main, "moment.append", crossing),
+                    Err(SyncError::ShareBoundaryViolation)
+                ),
+                "{field} outside the grant"
+            );
+        }
+        assert!(matches!(
+            check(&main, "moment.append", json!({"versionId": "main"})),
+            Err(SyncError::InvalidInput {
+                reason: "share-view moment.append must reference at least one path"
+            })
+        ));
+    }
+
+    #[test]
+    fn a_version_share_refuses_unreadable_snapshot_lists_and_rows() {
+        let version = boundary(Some(GRANTED));
+        let missing = check(&version, "version.create", json!({"versionId": GRANTED}));
+        for refused in [
+            missing,
+            create(Value::Null),
+            create(json!({"path": "shared/docs/a.md"})),
+        ] {
+            assert!(matches!(
+                refused,
+                Err(SyncError::InvalidInput {
+                    reason: "share-view version.create forkSnapshots must be an array"
+                })
+            ));
+        }
+        for row in [
+            json!({"blobSha256": "a"}),
+            json!({"path": 7}),
+            json!("shared/docs/a.md"),
+        ] {
+            assert!(matches!(
+                create(json!([{"path": "shared/docs/a.md"}, row])),
+                Err(SyncError::InvalidInput {
+                    reason: "share-view version.create fork snapshot must carry a path string"
+                })
+            ));
+        }
+        // An empty list is a healthy served create; a row outside the grant
+        // is out of scope.
+        assert!(create(json!([])).is_ok());
+        assert!(matches!(
+            create(json!([{"path": "outside/a.md"}])),
+            Err(SyncError::ShareBoundaryViolation)
+        ));
+        // The version decides before the snapshot list is read.
+        assert!(matches!(
+            check(
+                &version,
+                "version.create",
+                json!({"versionId": "version-other", "forkSnapshots": {}}),
+            ),
+            Err(SyncError::ShareVersionMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn a_known_kind_is_out_of_scope_and_an_unknown_kind_is_unsupported() {
+        let main = boundary(None);
+        let payload = json!({"versionId": "main", "path": "shared/docs/a.md"});
+        assert!(matches!(
+            check(&main, "future.kind", payload.clone()),
+            Err(SyncError::UnsupportedOperation)
+        ));
+        assert!(matches!(
+            check(&main, "secret.file.put", payload),
+            Err(SyncError::ShareBoundaryViolation)
+        ));
     }
 }

@@ -1,4 +1,13 @@
 import { credentialScopedOperation } from "../workspaces/credentialScopedOperation";
+import { shareViewIsPresent } from "../workspaces/shareViewMarker";
+
+export const OWNER_RELAY_SHARE_INACTIVE_MESSAGE = "Sharing stopped because this window changed workspaces.";
+
+export function assertOriginalWorkspace(workspace: { shareView?: unknown }): void {
+  if (shareViewIsPresent(workspace.shareView)) {
+    throw new Error("This is a shared view — only the original workspace can be shared.");
+  }
+}
 
 export function createOwnerRelayShareHandler<
   Sender,
@@ -31,7 +40,7 @@ export function createOwnerRelayShareHandler<
     return dependencies.withWorkspaceOperation(
       sender,
       workspaceId,
-      "Sharing stopped because this window changed workspaces.",
+      OWNER_RELAY_SHARE_INACTIVE_MESSAGE,
       async (operation) => {
         operation.assertCurrent();
         assertWorkspace?.(operation.workspace);

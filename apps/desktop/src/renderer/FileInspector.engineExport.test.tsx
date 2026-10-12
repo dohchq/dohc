@@ -6,6 +6,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
 import type { UseEngineDoc } from "./collab/useEngineDoc";
 import { FileInspector } from "./FileInspector";
+import {
+  EDGE_FRONTMATTER,
+  EDGE_MARKDOWN,
+  receivedYDoc,
+} from "./markdown/frontmatter.edge-fixture";
 
 // Finding: in engine mode the DocumentMenu export must serialize the live
 // editor (collab-bound to the engine Y.Doc), not the stale props.body that
@@ -24,7 +29,7 @@ const engineDocState: UseEngineDoc = {
   doc: null,
   objectId: null,
   versionId: null,
-  saveState: "saved",
+  saveState: { kind: "saved-here" },
   saveError: null,
     authorCapacity: false,
   notInVersion: false,
@@ -38,6 +43,8 @@ const engineDocState: UseEngineDoc = {
   recoveryAssets: null,
   permanentFailureWhileEditing: false,
   readOnlyWhileEditing: false,
+  readOnlyDraftId: null,
+  readOnlyCause: null,
   removalInProgress: null,
   artifactAssets: [],
   readArtifactAsset: async () => {
@@ -77,6 +84,7 @@ const writeText = vi.fn(async () => {});
 
 describe("engine-mode DocumentMenu exports the live editor body, not stale props.body", () => {
   const bridgeMock = {
+    onWorkspaceActivity: vi.fn(() => () => undefined),
     readWorkspaceText: vi.fn(async () => ({
       text: "# Stale disk body\n",
       truncated: false,
@@ -87,12 +95,13 @@ describe("engine-mode DocumentMenu exports the live editor body, not stale props
       folders: [],
     })),
     readWorkspaceDatabase: vi.fn(async () => ({ tables: [] })),
+    exportDocumentFile: vi.fn(async () => ({ saved: true })),
   };
 
   beforeEach(() => {
     engineDocState.available = true;
     engineDocState.doc = new Y.Doc();
-    engineDocState.saveState = "saved";
+    engineDocState.saveState = { kind: "saved-here" };
     vi.stubGlobal(
       "ResizeObserver",
       class {
@@ -176,6 +185,48 @@ describe("engine-mode DocumentMenu exports the live editor body, not stale props
     await waitFor(() =>
       expect(writeText).toHaveBeenCalledWith(
         `---\ntitle: Live Title\nicon: 🚀\n---\n\n${LIVE_BODY}`,
+      ),
+    );
+  });
+
+  // The canonical TypeScript writer keeps a `__proto__` or `constructor` key,
+  // and an exact integer beside one, in shared Y types. A copy writes the
+  // values, as the file holds them.
+  it("copies shared-type frontmatter over the live body", async () => {
+    const user = userEvent.setup();
+    Object.defineProperty(navigator, "clipboard", {
+      value: { writeText },
+      configurable: true,
+    });
+    engineDocState.doc = receivedYDoc(EDGE_MARKDOWN);
+
+    render(<FileInspector workspaceId="ws-1" path="a.md" />);
+    await screen.findByTestId("editor-stub");
+
+    await user.click(screen.getByTestId("document-menu-trigger"));
+    await user.click(screen.getByTestId("document-menu-item-copy-markdown"));
+
+    await waitFor(() =>
+      expect(writeText).toHaveBeenCalledWith(`${EDGE_FRONTMATTER}${LIVE_BODY}`),
+    );
+  });
+
+  it("exports shared-type frontmatter over the live body", async () => {
+    const user = userEvent.setup();
+    engineDocState.doc = receivedYDoc(EDGE_MARKDOWN);
+
+    render(<FileInspector workspaceId="ws-1" path="a.md" />);
+    await screen.findByTestId("editor-stub");
+
+    await user.click(screen.getByTestId("document-menu-trigger"));
+    await user.click(screen.getByTestId("document-menu-item-export-markdown"));
+
+    await waitFor(() =>
+      expect(bridgeMock.exportDocumentFile).toHaveBeenCalledWith(
+        expect.objectContaining({
+          kind: "markdown",
+          content: `${EDGE_FRONTMATTER}${LIVE_BODY}`,
+        }),
       ),
     );
   });

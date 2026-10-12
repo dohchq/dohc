@@ -1,10 +1,12 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createWorkspaceFilesIpc } from "./workspaceFilesIpc";
 import { registerWorkspaceGraphIpcHandlers } from "./workspaceGraphIpc";
 import { registerNativeMenusIpcHandlers } from "./nativeMenusIpc";
 import { CHANNELS } from "./channels";
+import { CreateWorkspaceFileResult, DeleteWorkspacePathResult } from "./bridgeContract";
+import { createFirstAppFiles } from "../renderer/workbench/createFirstApp";
 import type { RegistryEntry } from "../workspaces/registryStore";
 import type { ShareViewFiles } from "../workspaces/shareViewFiles";
 import { WorkspaceGraphIndex } from "../workspaces/workspaceGraph";
@@ -151,6 +153,69 @@ async function harness() {
 }
 
 describe("registered workspace file handlers", () => {
+  it.each(["root", "file", "subfolder"] as const)("refuses a raced %s without rolling back another writer's work", async (collision) => {
+    const h = await harness();
+    const root = h.workspace.rootPath;
+    const foreignPath = collision === "root" ? "app/notes.txt"
+      : collision === "file" ? "app/index.html" : "app/scripts/notes.txt";
+    const deleted: string[] = [];
+    let injected = false;
+    const inject = async () => {
+      await mkdir(join(root, foreignPath, ".."), { recursive: true });
+      await writeFile(join(root, foreignPath), "agent work");
+      injected = true;
+    };
+    const result = createFirstAppFiles({
+      workspaceId: "workspace", files: [], folders: [],
+      mutations: {
+        createWorkspaceFolder: async (payload) => {
+          if (!injected && (collision === "root" ||
+            collision === "subfolder" && payload.relativePath === "app/scripts")) await inject();
+          return CreateWorkspaceFileResult.parse(await h.invoke(CHANNELS.createWorkspaceFolder, payload));
+        },
+        createWorkspaceFile: async (payload) => {
+          if (!injected && collision === "file") await inject();
+          if (payload.relativePath === "app/package.json") throw new Error("later write failed");
+          return CreateWorkspaceFileResult.parse(await h.invoke(CHANNELS.createWorkspaceFile, payload));
+        },
+        deleteWorkspacePath: async (payload) => {
+          deleted.push(payload.relativePath);
+          return DeleteWorkspacePathResult.parse(await h.invoke(CHANNELS.deleteWorkspacePath, payload));
+        },
+      },
+    });
+    await expect(result).rejects.toMatchObject({ code: "EEXIST" });
+    expect(await readFile(join(root, foreignPath), "utf8")).toBe("agent work");
+    expect(deleted).not.toContain(foreignPath);
+    if (collision === "root") expect(deleted).toEqual([]);
+    if (collision === "subfolder") expect(deleted).not.toContain("app/scripts");
+    expect(await h.invoke(CHANNELS.listWorkspaceFiles)).toMatchObject({
+      files: [{ path: foreignPath, kind: "file" }],
+    });
+  });
+
+  it("keeps foreign descendants added to a created folder before rollback", async () => {
+    const h = await harness();
+    await expect(createFirstAppFiles({
+      workspaceId: "workspace", files: [], folders: [],
+      mutations: {
+        createWorkspaceFolder: async (payload) => CreateWorkspaceFileResult.parse(
+          await h.invoke(CHANNELS.createWorkspaceFolder, payload)),
+        createWorkspaceFile: async (payload) => {
+          if (payload.relativePath === "app/package.json") {
+            await writeFile(join(h.workspace.rootPath, "app/scripts/agent.txt"), "agent work");
+            throw new Error("later write failed");
+          }
+          return CreateWorkspaceFileResult.parse(await h.invoke(CHANNELS.createWorkspaceFile, payload));
+        },
+        deleteWorkspacePath: async (payload) => DeleteWorkspacePathResult.parse(
+          await h.invoke(CHANNELS.deleteWorkspacePath, payload)),
+      },
+    })).rejects.toThrow("later write failed");
+    expect(await readFile(join(h.workspace.rootPath, "app/scripts/agent.txt"), "utf8")).toBe("agent work");
+    expect(await readdir(join(h.workspace.rootPath, "app"))).toEqual(["scripts"]);
+  });
+
   it("registers all file, graph, and menu channels with their trust and parser order", async () => {
     const h = await harness();
     expect([...h.handlers.keys()]).toEqual([

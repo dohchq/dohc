@@ -8,7 +8,7 @@ It does not rebuild the package, change Electron fuses, or enable a product test
 
 1. Install the checkout's pinned dependencies before the measurement slot.
 2. Prepare baseline and candidate packages with their build receipts.
-3. Reserve an idle Windows host and exclusive access to its desktop. Use Node 24.14 or newer and PowerShell 7.
+3. Reserve an idle Windows host and exclusive access to its desktop. Use Node 24.16 or newer and PowerShell 7.
 4. Run `node tools/perf-profiling/packaged-benchmark.mjs --help` for the options.
 5. Run each package with a new output directory and its full build commit:
 
@@ -66,6 +66,14 @@ wall time sits beside each timing in the receipt.
 - `--scenario chat-history [--chat-messages 200]`: seeds one #general post and its replies through `packages/cli/bin/dohc.js` against the running package, restarts, then opens the channel to its post card and the thread to its first and to all comment rows. One observer carries both comment milestones from the same click.
 - `--scenario collection [--records 500] [--find-cap 50] [--write-cap 200]`: seeds `records/collection.yaml` and Markdown records with pre-minted ids, waits for the Explorer to mark the folder as a Collection, then opens it to the first table rows. It then runs the typing workload in `small.md`, then the automation phase described below.
 - `--scenario soak [--soak-minutes 10]`: repeats a mixed cycle (open both documents, Go to typing `small`, command palette, search for `Performance`, two switches) until the time is up and records working set and private bytes per process kind after each cycle. Each cycle records its search query. The document-open and switch timings are the existing harness wall-clock observations.
+- `--scenario soak --soak-minutes 60 --heap-snapshot-minutes 10,60`: also captures renderer heaps at the first completed cycle boundary at or after each requested minute. Minutes must be distinct positive integers within the soak duration. Capture is off by default.
+
+Heap capture waits until both workspace switches finish, leaving workspace 0 selected with no workload step running.
+The renderer pauses while HeapProfiler collects and streams the snapshot. The next cycle starts after the file closes.
+Each run directory holds `renderer-heap-10m.heapsnapshot` and `renderer-heap-60m.heapsnapshot` for this example.
+Incomplete files keep a `.partial` suffix.
+Each capture receipt records its boundary `cycle`, requested and actual elapsed times, byte count, status, and `pauseMs`.
+The soak receipt and summary also report total `heapSnapshotPauseMs`. Capture pauses are outside measured cycle durations.
 
 `go-to` and `search` reject `--files` below 4243, because their queries name `fixture-004242`.
 Search waits for the Explorer to list every fixture file before it submits. A sample whose search id changed before Enter is flagged `debounceFiredBeforeSubmit`.
@@ -127,8 +135,9 @@ Only the controlled loopback `DOHC_UPDATE_URL` is added.
 
 `--profile-renderer true` records diagnostic switch CPU profiles.
 `--profile-main true --scenario startup` requests V8 startup logs and requires an output path without whitespace.
-Main profiling must produce a log matching the recorded main PID. Profiled runs are marked diagnostic in summaries.
-Keep them separate from unprofiled comparisons.
+Main profiling must produce a log matching the recorded main PID.
+CPU-profiled runs and `--heap-snapshot-minutes` runs are marked diagnostic in summaries.
+The comparison command refuses diagnostic runs. Use separate uninstrumented soaks for the memory budgets.
 
 Run `node --test tools/perf-profiling/packaged-benchmark.test.mjs` for CLI, lifecycle, fixture, and summary checks. The fixture contract check imports the automation executor, so build `@dohc/app-backend-runtime` first, as the JS gate does.
 These tests also run through the canonical root test command. They do not launch the GUI workload.
@@ -149,7 +158,7 @@ The reader is the next agent preparing a scheduled profiling run.
 
 ## Run the full profiles
 
-Use Node 24.14 or newer and pnpm 11.20.0.
+Use Node 24.16 or newer and pnpm 11.20.0.
 
 1. Schedule an otherwise idle machine and exclusive access to the desktop display.
 2. Run `node tools/perf-profiling/run-profiles.mjs --output test-results/perf-profiling`.
@@ -229,3 +238,51 @@ A missing scenario is `null`, never a pass. `complete` is true only when every
 scenario produced an artifact.
 
 React commit counts are currently `null`. The app has no production React Profiler or commit mark.
+
+
+## Measure engine History queries
+
+The ignored Rust test `history_page_benchmark` measures first pages, later pages, and a three-edit object in a 100,000-moment version.
+The fixture also contains 1,000 protected rows and 100 version markers.
+The candidate drains those streams before timing a later text cursor, so the benchmark exercises a text position as well as marker positions.
+It reports capture-inclusive reads and the first reopen after removing the candidate's History index migration.
+The reopen builds both History indexes.
+After the reads, it times 100 saves through `versionedText.write`, following ten warmup saves.
+It then imports ten batches of 100 moments through `apply_moment_envelope`, following one warmup batch.
+Each imported moment uses its own production sync transaction. Envelope preparation stays outside timing.
+`save` reports milliseconds per save. `importPerMoment` reports milliseconds per moment, averaged within each batch.
+Both paths append to the same 100,000-moment fixture. Compare their baseline and candidate values to measure the indexes' write cost.
+
+Prepare separate base and candidate checkouts before the admitted measurement window.
+Copy `crates/dohc-workspace-engine/tests/history_page_benchmark.rs` from the candidate into the base checkout.
+The harness chooses the old page cursor when `HISTORY_BENCH_MODE=baseline`.
+Keep both checkouts and build outputs within their registered task worktrees.
+
+Read the repository's `rust-gate` skill and build each executable through its build budget with these arguments:
+
+```text
+cargo test --locked --release -p dohc-workspace-engine --test history_page_benchmark --no-run -j 8
+```
+
+Use the test executable path printed by Cargo. It is platform-specific and includes a content hash.
+Record its SHA256, checkout commit, profile, fixture size, and concurrent host context.
+Both arms must use the release profile and the same fixture.
+
+Run both arms from the candidate checkout with the repository runner:
+
+```text
+node tools/perf-profiling/history-query-benchmark.mjs --exe <base-release-test-executable> --mode baseline
+node tools/perf-profiling/history-query-benchmark.mjs --exe <candidate-release-test-executable> --mode candidate
+```
+
+Use absolute executable paths for the base and candidate builds. The runner fixes the fixture size at 100,000 moments.
+The runner acquires profiling admission, monitors the owned child, and releases admission after the child exits.
+Admission refusal ends the command without launching the executable. Rerun during the scheduled window.
+Do not run the test through Cargo while holding profiling admission: its build slot conflicts with profiling admission.
+Do not bypass an admission refusal.
+
+The runner prints `HISTORY_BENCH` numbers after successful completion and a final admission check.
+After the run, it rejects results from a debug-profile build.
+It records the executable SHA256, process ownership, raw log, numbers, and admission observations under `.agent-artifacts/history-page/measurement-*`.
+TEMP, TMP, and DOHC_TEST_SCRATCH_ROOT stay inside that run's checkout.
+Preserve the printed evidence path with the comparison.

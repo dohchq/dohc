@@ -34,7 +34,7 @@ async function fixture(large = false, mutable = false){
     seed.exec("COMMIT");
   }
   const transaction=<T>(fn:()=>T)=>{db.exec("BEGIN IMMEDIATE");try{const result=fn();db.exec("COMMIT");return result;}catch(error){db.exec("ROLLBACK");throw error;}};
-  const journal=createDatasetJournal({db,transaction}), scope={workspaceId:"workspace",datasetId:id(1)}, revision=describeDatasetRevision({definition: mutable ? {...definition, operations: definition.operations.map(operation => ({...operation, readOnly: false, kind: "action" as const}))} : definition,revision:1,schemaSql,operationSource:source});
+  const journal=createDatasetJournal({db,transaction,nowMs:()=>1234}), scope={workspaceId:"workspace",datasetId:id(1)}, revision=describeDatasetRevision({definition: mutable ? {...definition, operations: definition.operations.map(operation => ({...operation, readOnly: false, kind: "action" as const}))} : definition,revision:1,schemaSql,operationSource:source});
   db.exec("CREATE TABLE dohc_dataset_lifecycle(workspace_id,dataset_id,archived,generation,reason,archived_at_ms); CREATE TABLE dohc_dataset_catalog(workspace_id,dataset_id,revision_json,artifacts_json); CREATE TABLE dohc_dataset_catalog_history(workspace_id,dataset_id,revision,revision_json,artifacts_json); CREATE TABLE dohc_dataset_bindings(workspace_id,dataset_id,app_id,binding_json,token); CREATE TABLE dohc_dataset_data_grants(workspace_id,dataset_id,principal_key,grant_json,token);");
   db.prepare("INSERT INTO dohc_dataset_catalog VALUES(?,?,?,?)").run(scope.workspaceId,scope.datasetId,JSON.stringify(revision),JSON.stringify({schemaSql,operationSource:source}));
   const authorize=()=>{}, checkpoint=await readFile(seedPath);
@@ -45,9 +45,9 @@ async function fixture(large = false, mutable = false){
     const result=journal.commitOperation({expected:head,proposalId:value,operation:"read",callerKey:retry?.callerKey ?? "owner",idempotencyKey:value,payloadSha256:retry?.payloadSha256 ?? hash(value),resultJson:JSON.stringify({value}),changeset,changesetSha256:hash(changeset),attachedFileIds:attached,authorize,accountAndAttach(){}});
     if(result.kind!=="committed")throw Error("unexpected replay");head=result.event.cursor;return result.event;
   }
-  async function migrate(){
+  async function migrate(approvalAgent?:import("@dohc/security-contract/approval-provenance").ApprovalAgent){
     const operationSource=source+"\n// revision two", next=describeDatasetRevision({definition,revision:2,schemaSql,operationSource});
-    head=journal.transitionCheckpoint({expected:head,hostEpoch:"host",approvedRevisionHash:next.revisionSha256,source:operationSource,schemaSql,definitionJson:JSON.stringify(next),checkpoint:await readFile(seedPath),authorize,account(){
+    head=journal.transitionCheckpoint({approvalAgent,expected:head,hostEpoch:"host",approvedRevisionHash:next.revisionSha256,source:operationSource,schemaSql,definitionJson:JSON.stringify(next),checkpoint:await readFile(seedPath),authorize,account(){
       db.prepare("INSERT INTO dohc_dataset_catalog_history VALUES(?,?,?,?,?)").run(scope.workspaceId,scope.datasetId,1,JSON.stringify(revision),JSON.stringify({schemaSql,operationSource:source}));
       db.prepare("UPDATE dohc_dataset_catalog SET revision_json=?,artifacts_json=?").run(JSON.stringify(next),JSON.stringify({schemaSql,operationSource}));
     }}); return head;
@@ -259,4 +259,43 @@ it("preserves cancelled retry tombstones through recovery and rejects their reus
     expect(restored.request(selected, {action: "save", idempotencyKey: "new", input: {}}, f.authorize).attempt).not.toBeNull();
     expect(t.transaction(() => cancelDatasetAttempt(t.db, f.scope, reference))).toBe(0);
   } finally { await valid.dispose(); }
+});
+
+
+it("preserves agent-declared approval history through export and recovery installation",async()=>{
+  const f=await fixture(),agent={kind:"agent" as const,label:"Builder",labelSource:"agent-declared" as const};
+  await f.migrate(agent);
+  const valid=await validateDatasetRecovery({staged:await f.stage(),authorize:f.authorize}),t=target(f);
+  try {
+    await t.installer.install({},{transferId:"provenance-transfer",manifestSha256:recoveryManifestSha256(valid.manifest,limits),recovery:valid,authorize:f.authorize});
+    const exported=t.journal.exportPage({scope:f.scope,through:f.head(),afterRevision:-1,authorize:f.authorize});
+    expect(exported[1]).toMatchObject({kind:"checkpoint",approvalAgent:agent});
+  }finally{await valid.dispose();}
+});
+
+it.each([false,true])("preserves checkpoint dates through recovery installation and claim (older journal: %s)",async legacy=>{
+  const f=await fixture();f.add("before");await f.migrate();f.add("after");
+  if(legacy){
+    f.db.exec("DROP TABLE IF EXISTS dohc_dataset_checkpoint_times");
+    createDatasetJournal({db:f.db,transaction:f.transaction});
+  }
+  f.journal.fence({expected:f.head(),authorize:f.authorize});
+  const valid=await validateDatasetRecovery({staged:await f.stage(),authorize:f.authorize}),t=target(f);
+  try{
+    const cp=[...valid.records()].map(item=>item.record).filter(record=>record.kind==="checkpoint");
+    expect(cp).toMatchObject(legacy?[{cursor:{revision:0}},{cursor:{revision:2}}]:[{cursor:{revision:0},recordedAtMs:1234},{cursor:{revision:2},recordedAtMs:1234}]);
+    if(legacy)expect(cp.every(record=>!Object.hasOwn(record,"recordedAtMs"))).toBe(true);
+    const input={transferId:"dated-transfer",manifestSha256:recoveryManifestSha256(valid.manifest,limits),recovery:valid,authorize:f.authorize};
+    await t.installer.install({},input);
+    const before=t.journal.exportPage({scope:f.scope,through:f.head(),afterRevision:-1,authorize:f.authorize});
+    expect(before).toEqual(f.journal.exportPage({scope:f.scope,through:f.head(),afterRevision:-1,authorize:f.authorize}));
+    expect(t.db.prepare("SELECT revision,recorded_at_ms FROM dohc_dataset_checkpoint_times ORDER BY revision").all()).toEqual(legacy?[]:[{revision:0,recorded_at_ms:1234},{revision:2,recorded_at_ms:1234}]);
+    const claimed=t.installer.claim({},{...f.scope,transferId:input.transferId,manifestSha256:input.manifestSha256,sourceCursor:f.head(),authorize:f.authorize});
+    expect(t.journal.exportPage({scope:f.scope,through:claimed.targetCursor!,afterRevision:-1,authorize:f.authorize}).slice(0,before.length)).toEqual(before);
+    expect(t.db.prepare("SELECT recorded_at_ms FROM dohc_dataset_checkpoint_times WHERE revision=?").get(claimed.targetCursor!.revision)).toBeTruthy();
+  }finally{await valid.dispose();}
+});
+it.each([null,-1,1.5,"123",Number.MAX_SAFE_INTEGER+1])("rejects an invalid checkpoint date %s without changing hash validation",async recordedAtMs=>{
+  const f=await fixture(),record=f.journal.exportPage({scope:f.scope,through:f.head(),afterRevision:-1,authorize:f.authorize})[0]!;
+  expect(()=>parseRecoveryJournalRecord({...record,recordedAtMs})).toThrow("invalid number");
 });

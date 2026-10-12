@@ -1,3 +1,4 @@
+import { editorTabTestId } from "../src/testPins";
 import { expect, test } from "@playwright/test";
 import { access, readFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -33,7 +34,7 @@ test("Explorer creates, renames, cancels, and confirms recoverable deletion", as
     await page.getByRole("button", { name: "Create file" }).click();
     await expect(explorerRow(page, "Welcome.md")).toBeVisible();
     await expect.poll(() => pathExists(join(temp.rootPath, "Welcome.md"))).toBe(true);
-    const welcomeTab = page.getByTestId("tab-Welcome.md");
+    const welcomeTab = page.getByTestId(editorTabTestId("Welcome.md"));
     await expect(welcomeTab).toBeVisible({ timeout: 15_000 });
     await expect(welcomeTab).toHaveAttribute("data-active", "true");
     await expect(page.getByTestId("markdown-editor")).toBeVisible({ timeout: 15_000 });
@@ -84,6 +85,40 @@ test("Explorer creates, renames, cancels, and confirms recoverable deletion", as
     await expect
       .poll(() => pathExists(join(temp.rootPath, "Research", "plan.txt")))
       .toBe(false);
+  } finally {
+    await cleanupDesktopWorkspace(desktop, temp);
+  }
+});
+
+test("renaming a file without an extension keeps it without one", async () => {
+  const temp = await createTempWorkspace();
+  let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
+
+  try {
+    await writeWorkspaceFiles(temp, [{ path: "LICENSE", contents: "MIT\n" }]);
+    desktop = await launchDesktopApp({ workspace: temp });
+    const page = desktop.page;
+    const workspace = await openWorkspaceFromFirstRun(page, temp);
+    await waitForWorkspaceFile(page, workspace.workspaceId, "LICENSE");
+
+    const license = explorerRow(page, "LICENSE");
+    await license.click();
+    await license.press("F2");
+    const rename = page.getByRole("textbox", { name: "New name" });
+    await expect(rename).toHaveValue("LICENSE");
+    await rename.press("Enter");
+    await expect(rename).toHaveCount(0);
+    await expect(license).toBeVisible();
+
+    await license.press("F2");
+    await rename.fill("NOTICE");
+    await rename.press("Enter");
+    await expect(explorerRow(page, "NOTICE")).toBeVisible();
+    await expect.poll(() => pathExists(join(temp.rootPath, "NOTICE"))).toBe(true);
+    await expect.poll(() => pathExists(join(temp.rootPath, "LICENSE"))).toBe(false);
+    expect(await pathExists(join(temp.rootPath, "LICENSE.md"))).toBe(false);
+    expect(await pathExists(join(temp.rootPath, "NOTICE.md"))).toBe(false);
+    await expect(page.getByTestId("workspace-shell-error")).toHaveCount(0);
   } finally {
     await cleanupDesktopWorkspace(desktop, temp);
   }

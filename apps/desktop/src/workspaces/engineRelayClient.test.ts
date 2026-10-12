@@ -344,12 +344,23 @@ describe("EngineRelayClient", () => {
   });
 
 
+  it("preserves push continuation for the sync coordinator", async () => {
+    const daemon = new MockDaemon((request) => request.method === "sync.push" ? {
+      status: "complete", pushed: 64, fetched: 0, applied: 0, refused: 0, skipped: 0,
+      conflictsOpened: 0, hasMore: true, pendingCursor: null, changedPaths: [],
+      sharingDeclined: [], ownerAdmissionPending: [], refusals: [], recordFacts: [],
+    } : undefined);
+    const { client, sessions } = await harness(daemon);
+    await expect(client.push()).resolves.toMatchObject({ pushed: 64, hasMore: true });
+    await sessions.closeAll();
+  });
+
   it("routes push, pull, cursor commit, recover, claim, and probe through one daemon session", async () => {
     const { daemon, sessions, client } = await harness();
 
     await expect(client.push()).resolves.toEqual({
       pushed: 3, ownerAdmissionPending: [],
-      originsPushed: [],
+      hasMore: false, originsPushed: [],
       sharingDeclined: [],
     });
     const materializePage = vi.fn(async () => undefined);
@@ -450,6 +461,9 @@ describe("EngineRelayClient", () => {
         sharingDeclined: [
           {
             path: pulls === 1 ? "notes/first.md" : "notes/second.md",
+            objectId: pulls === 1 ? "notes/first.md" : "notes/second.md",
+            versionId: "main",
+            lineagePruned: false, headBlobSha256: null,
             constraint: "MAX_YDOC_UPDATE_BYTES",
             limitBytes: 20,
             observedBytes: 20 + pulls,
@@ -467,12 +481,78 @@ describe("EngineRelayClient", () => {
     ).toEqual([
       {
         path: "notes/first.md",
+        objectId: "notes/first.md",
+        versionId: "main",
+        lineagePruned: false, headBlobSha256: null,
         constraint: "MAX_YDOC_UPDATE_BYTES",
         limitBytes: 20,
         observedBytes: 21,
       },
       {
         path: "notes/second.md",
+        objectId: "notes/second.md",
+        versionId: "main",
+        lineagePruned: false, headBlobSha256: null,
+        constraint: "MAX_YDOC_UPDATE_BYTES",
+        limitBytes: 20,
+        observedBytes: 22,
+      },
+    ]);
+    await sessions.closeAll();
+  });
+
+  it("keeps the same object in distinct versions across pull pages", async () => {
+    let pulls = 0;
+    const daemon = new MockDaemon((request) => {
+      if (request.method !== "sync.pull") return undefined;
+      pulls += 1;
+      return {
+        status: "complete", refused: 0,
+        pushed: 0, ownerAdmissionPending: [],
+        fetched: 1,
+        applied: 1,
+        skipped: 0,
+        conflictsOpened: 0,
+        hasMore: pulls === 1,
+        nextCursor: pulls,
+        pendingCursor: { kind: "relay", token: `cursor-${pulls}` },
+        changedPaths: [],
+        refusals: [],
+        sharingDeclined: [
+          {
+            path: pulls === 1 ? "notes/first.md" : "notes/second.md",
+            objectId: "same-object",
+            versionId: pulls === 1 ? "main" : "draft",
+            lineagePruned: false, headBlobSha256: null,
+            constraint: "MAX_YDOC_UPDATE_BYTES",
+            limitBytes: 20,
+            observedBytes: 20 + pulls,
+          },
+        ],
+      };
+    });
+    const { sessions, client } = await harness(daemon);
+
+    const pull = await client.pull(async () => undefined);
+
+    expect(
+      pull.sharingDeclined,
+      "the desktop client must not discard the engine's actionable declines",
+    ).toEqual([
+      {
+        path: "notes/first.md",
+        objectId: "same-object",
+        versionId: "main",
+        lineagePruned: false, headBlobSha256: null,
+        constraint: "MAX_YDOC_UPDATE_BYTES",
+        limitBytes: 20,
+        observedBytes: 21,
+      },
+      {
+        path: "notes/second.md",
+        objectId: "same-object",
+        versionId: "draft",
+        lineagePruned: false, headBlobSha256: null,
         constraint: "MAX_YDOC_UPDATE_BYTES",
         limitBytes: 20,
         observedBytes: 22,
@@ -602,6 +682,9 @@ describe("EngineRelayClient", () => {
         sharingDeclined: [
           {
             path: "notes/oversized.md",
+            objectId: "notes/oversized.md",
+            versionId: "main",
+            lineagePruned: false, headBlobSha256: null,
             constraint: "MAX_YDOC_UPDATE_BYTES",
             limitBytes: 20,
             observedBytes: 21,
@@ -613,10 +696,13 @@ describe("EngineRelayClient", () => {
 
     await expect(client.push()).resolves.toEqual({
       pushed: 0, ownerAdmissionPending: [],
-      originsPushed: [],
+      hasMore: false, originsPushed: [],
       sharingDeclined: [
         {
           path: "notes/oversized.md",
+          objectId: "notes/oversized.md",
+          versionId: "main",
+          lineagePruned: false, headBlobSha256: null,
           constraint: "MAX_YDOC_UPDATE_BYTES",
           limitBytes: 20,
           observedBytes: 21,
@@ -634,6 +720,10 @@ describe("EngineRelayClient", () => {
         pushed: 0, ownerAdmissionPending: [], hasMore: false,
         sharingDeclined: [
           {
+            objectId: "missing-path",
+            versionId: "main",
+            lineagePruned: false,
+            headBlobSha256: null,
             constraint: "MAX_YDOC_UPDATE_BYTES",
             limitBytes: 20,
             observedBytes: 21,
@@ -672,6 +762,9 @@ describe("EngineRelayClient", () => {
           sharingDeclined: [
             {
               path: "notes/commit.md",
+              objectId: "notes/commit.md",
+              versionId: "main",
+              lineagePruned: false, headBlobSha256: null,
               constraint: "MAX_YDOC_UPDATE_BYTES",
               limitBytes: 20,
               observedBytes: 22,
@@ -688,6 +781,9 @@ describe("EngineRelayClient", () => {
     expect(pull.sharingDeclined).toEqual([
       {
         path: "notes/commit.md",
+        objectId: "notes/commit.md",
+        versionId: "main",
+        lineagePruned: false, headBlobSha256: null,
         constraint: "MAX_YDOC_UPDATE_BYTES",
         limitBytes: 20,
         observedBytes: 22,
@@ -791,7 +887,7 @@ describe("EngineRelayClient", () => {
               {
                 paths: ["docs/ideas/collection.yaml", "docs/ideas/a.md"],
                 result: "stale",
-                stalePath: "docs/ideas",
+                stalePath: "docs/ideas", recoveredDraftPath: null,
                 currentBlobSha256: null,
               },
               { paths: ["docs/packing/automations.yaml"], result: "refused", reason: "" },
@@ -810,7 +906,7 @@ describe("EngineRelayClient", () => {
         {
           paths: ["docs/ideas/collection.yaml", "docs/ideas/a.md"],
           result: "stale",
-          stalePath: "docs/ideas",
+          stalePath: "docs/ideas", recoveredDraftPath: null,
           currentBlobSha256: null,
         },
         { paths: ["docs/packing/automations.yaml"], result: "refused", reason: "" },
@@ -1108,11 +1204,14 @@ describe("EngineRelayClient", () => {
       store,
       pinnedSelector: PINNED_SELECTOR,
       recordRefusals: async () => undefined,
-      pull: async (input) =>
-        await client.pullShareView({
+      pull: async (input) => {
+        const pull = await client.pullShareView({
           shareId: input.shareId,
           grantedSelector: input.grantedSelector,
-        }),
+        });
+        expect(pull.nextCursor).toBe(13);
+        return pull;
+      },
     });
 
     expect(outcome).toEqual({
@@ -1495,11 +1594,14 @@ describe("EngineRelayClient", () => {
         store,
         pinnedSelector: PINNED_SELECTOR,
         recordRefusals: async () => undefined,
-        pull: async (input) =>
-          await client.pullShareView({
+        pull: async (input) => {
+          const pull = await client.pullShareView({
             shareId: input.shareId,
             grantedSelector: input.grantedSelector,
-          }),
+          });
+          expect(pull.nextCursor).toBe(14);
+          return pull;
+        },
       }),
     ).resolves.toEqual({
       status: "updated",
@@ -1541,11 +1643,14 @@ describe("EngineRelayClient", () => {
           createCaptureLiveStores(workspace, sessions).store,
         pinnedSelector: PINNED_SELECTOR,
         recordRefusals: async () => undefined,
-        pull: async (input) =>
-          await mountRelay.pullShareView({
+        pull: async (input) => {
+          const pull = await mountRelay.pullShareView({
             shareId: input.shareId,
             grantedSelector: input.grantedSelector,
-          }),
+          });
+          expect(pull.nextCursor).toBe(13);
+          return pull;
+        },
       }),
     ).resolves.toEqual({
       status: "unchanged",

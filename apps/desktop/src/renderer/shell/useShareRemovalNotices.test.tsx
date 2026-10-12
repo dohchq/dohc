@@ -20,6 +20,8 @@ const removal = (overrides: Partial<ShareRemoval> = {}): ShareRemoval => ({
   ...overrides,
 });
 
+const sharesChanged = vi.fn();
+
 function renderNotices(workspaceId = "ws-a") {
   return renderHook(
     ({ id }) => {
@@ -28,6 +30,7 @@ function renderNotices(workspaceId = "ws-a") {
         workspaceId: id,
         showSuccessNotice: shell.showSuccessNotice,
         reportShellFailure: shell.reportShellFailure,
+        onSharesChanged: sharesChanged,
       });
       return { shell, notices };
     },
@@ -70,9 +73,12 @@ describe("useShareRemovalNotices", () => {
     act(() => result.current.shell.hideShellError(notice!.id));
     expect(result.current.shell.shellErrors[0]).toMatchObject({ id: notice!.id, seen: true });
 
+    // The removal counts as a change to the shares, and so does its Undo.
+    expect(sharesChanged).toHaveBeenCalledTimes(1);
     await act(async () => result.current.shell.runShellErrorAction(notice!.id));
     expect(bridgeMock.undoRelayShare).toHaveBeenCalledWith({ shareId: "share-1", undoId: "undo-1" });
     expect(restored).toHaveBeenCalledTimes(1);
+    expect(sharesChanged).toHaveBeenCalledTimes(2);
     expect(result.current.shell.shellErrors.map((error) => [error.tone, error.message])).toEqual([
       ["success", "Restored ana@example.com to team."],
     ]);
@@ -122,6 +128,7 @@ describe("useShareRemovalNotices", () => {
     const { result, rerender } = renderNotices();
     act(() => result.current.notices.removed(removal({ workspaceId: "ws-other" })));
     expect(result.current.shell.shellErrors).toEqual([]);
+    expect(sharesChanged).not.toHaveBeenCalled();
 
     act(() => result.current.notices.removed(removal()));
     act(() => result.current.shell.runShellErrorAction(result.current.shell.shellErrors[0]!.id));

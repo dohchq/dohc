@@ -1,9 +1,26 @@
+import { ReservedWorkspaceIdError } from "@dohc/workspace-core";
+import { RelayUnauthorizedError, RelayUnreachableError, SharedFileReadOnlyError, ShareUnavailableError } from "@dohc/workspace-contracts/relay";
 import { readFileSync } from "node:fs";
 import { PersistentRuntimeError } from "@dohc/app-backend-runtime/persistent";
+import { DatasetReopenWaitError } from "@dohc/app-backend-runtime/supervisor";
 import { DaemonRefusalError, type DaemonErrorCode } from "@dohc/workspace-engine-client";
 import { describe, expect, it } from "vitest";
 import { CompilerProcessError } from "../workspaces/compilerProcessSupervisor";
-import { ERROR_WORDS, ipcWireError, isWorkspaceUpdatingError, readError, withErrorWords } from "./errorWords";
+import { WorkspaceManifestError } from "../workspaces/createWorkspaceFolder";
+import { LiveDocumentMutationError, RestorePolicyRefusalError } from "../workspaces/workspaceEngineCapture";
+import type { WorkspacePolicyPath } from "./bridgeContract";
+import {
+  ERROR_WORDS,
+  ipcWireError,
+  isShareReadOnlyRefusal,
+  isSharedLiveFileRefusal,
+  isWorkspaceUpdatingError,
+  needsNewerDohc,
+  readCollectionReopenWait,
+  readError,
+  shouldRecheckShareAccess,
+  withErrorWords,
+} from "./errorWords";
 
 // What the renderer receives when a main-process handler rejects: Electron
 // sends `error.toString()` and prefixes the channel.
@@ -22,6 +39,83 @@ const engineCodes = [
 ].map((match) => match[1]!);
 
 describe("error words", () => {
+  it.each([
+    new RelayUnauthorizedError(),
+    new SharedFileReadOnlyError(),
+    new ShareUnavailableError(),
+    new RelayUnreachableError(),
+    new DOMException("The request timed out.", "TimeoutError"),
+    new TypeError("Failed to fetch"),
+    new Error("Share request failed (403)"),
+    new Error("This Collection does not have Edit access."),
+    new Error("Your access to this share ended."),
+    new Error("connect ECONNREFUSED 127.0.0.1:3000"),
+  ])("rechecks share access for %s across IPC", error => {
+    expect(shouldRecheckShareAccess(acrossIpc(error))).toBe(true);
+  });
+
+  it.each(["FORBIDDEN", "AUTH_FAILED", "SHARE_UNAVAILABLE", "SHARE_READ_ONLY"] as const)(
+    "rechecks share access for engine %s across IPC", code => {
+      expect(shouldRecheckShareAccess(acrossIpc(refusal(code, "The request was rejected.")))).toBe(true);
+    },
+  );
+
+  it.each([
+    "The shared file session changed.",
+    "The shared file session changed. Open the Collection again.",
+    "The shared file session changed. Read the automations again.",
+  ])("rechecks share access for %s across IPC", message => {
+    expect(shouldRecheckShareAccess(acrossIpc(new Error(message)))).toBe(true);
+  });
+
+  it.each([
+    new Error("tasks/Untitled.md already exists. Choose another record name."),
+    new Error("network/Untitled.md already exists. Choose another record name."),
+    new Error("This Collection does not have a current document schema."),
+    new TypeError("Cannot read properties of undefined"),
+    refusal("CONFLICT", "The record changed."),
+  ])("does not recheck share access for %s", error => {
+    expect(shouldRecheckShareAccess(acrossIpc(error))).toBe(false);
+  });
+
+  it.each([
+    [new SharedFileReadOnlyError(), true],
+    [refusal("SHARE_READ_ONLY", "The share is read-only."), true],
+    [Object.assign(new Error("EPERM: operation not permitted, rename 'a' -> 'b'"), { code: "EPERM" }), false],
+    [refusal("FORBIDDEN", "The request was rejected."), false],
+  ] as const)("reads %s as a share's write refusal across IPC: %s", (error, refused) => {
+    expect(isShareReadOnlyRefusal(acrossIpc(error, "desktop:write-workspace-text"))).toBe(refused);
+  });
+
+  it.each(["link", "shares", "notices"])("keeps the reserved-ID refusal title and body across IPC for %s", (workspaceId) => {
+    const error = new ReservedWorkspaceIdError(workspaceId);
+    const expected = {
+      title: "dohc can't open this folder",
+      words: `Its workspace ID, ${workspaceId}, is reserved. Change workspaceId in .dohc/manifest.json, then open the folder again.`,
+      mapped: false,
+      cause: error.toString(),
+    };
+    expect(readError(error)).toEqual(expected);
+    expect(readError(acrossIpc(error, "desktop:attach-workspace-folder"))).toEqual(expected);
+  });
+
+  it("says why a folder's manifest stops it opening, and keeps the parser's reason for Copy", () => {
+    const unreadable = new WorkspaceManifestError("unreadable", "this folder has an invalid .dohc/manifest.json: manifest kind is invalid");
+    expect(readError(acrossIpc(unreadable, "desktop:attach-workspace-folder"))).toEqual({
+      words: "dohc can't read its .dohc/manifest.json. Fix the file, then try again.",
+      mapped: true,
+      cause: "WorkspaceManifestError [unreadable]: this folder has an invalid .dohc/manifest.json: manifest kind is invalid",
+    });
+    const newer = new WorkspaceManifestError("newer-version", "this workspace was created by a newer version of dohc (manifest v2)");
+    // Main sends a failed launch open's cause as this one string.
+    expect(withErrorWords("dohc could not open Trips.", String(ipcWireError(newer))))
+      .toBe("dohc could not open Trips. It needs a newer version of dohc. Update dohc to open it.");
+    expect(needsNewerDohc(String(ipcWireError(newer)))).toBe(true);
+    expect(needsNewerDohc(acrossIpc(newer))).toBe(true);
+    expect(needsNewerDohc(acrossIpc(unreadable))).toBe(false);
+    expect(needsNewerDohc(new ReservedWorkspaceIdError("link"))).toBe(false);
+  });
+
   it("has words, or the caller's words by decision, for every code the engine refuses with", () => {
     expect(engineCodes.length).toBeGreaterThan(30);
     const refusals = ERROR_WORDS.DaemonRefusalError!;
@@ -54,6 +148,17 @@ describe("error words", () => {
     expect(isWorkspaceUpdatingError(received)).toBe(true);
     expect(isWorkspaceUpdatingError(acrossIpc(refusal("OVERLOADED", "engine-store-busy")))).toBe(false);
     expect(isWorkspaceUpdatingError(acrossIpc(new Error("Workspace is still updating. Try again.")))).toBe(false);
+  });
+
+  it("knows a shared live file's restore refusal across IPC, and keeps its words", () => {
+    const refused = new LiveDocumentMutationError(
+      "dohc could not restore notes/plan.md. This action is unavailable for shared live files. Continue editing at the current location.",
+    );
+    const received = acrossIpc(refused, "desktop:restore-engine-moment-file");
+    expect(isSharedLiveFileRefusal(received)).toBe(true);
+    expect(readError(received).words).toBe(refused.message);
+    expect(isSharedLiveFileRefusal(acrossIpc(new Error(refused.message), "desktop:restore-engine-moment-file"))).toBe(false);
+    expect(isSharedLiveFileRefusal(acrossIpc(refusal("INVALID_PARAMS", "live-document-binding-active")))).toBe(false);
   });
 
   it("leaves the caller's words for a refusal that names nothing a person can act on", () => {
@@ -136,6 +241,22 @@ describe("error words", () => {
     ))).toBe("dohc could not prepare this review. The Collection changed after this preview. Preview the change again.");
   });
 
+  it("carries a Collection's reopen wait across IPC as a number beside its code", () => {
+    for (const [retryAfterMs, words] of [[1, "1 second"], [4_200, "5 seconds"], [60_000, "1 minute"]] as const) {
+      const wait = new DatasetReopenWaitError(retryAfterMs);
+      expect(String(ipcWireError(wait))).toBe(`DatasetReopenWaitError [dataset_reopen_wait] [retryAfterMs=${retryAfterMs}]: ${wait.message}`);
+      expect(readCollectionReopenWait(acrossIpc(wait, "desktop:dataset")))
+        .toEqual({ words: `This Collection is waiting to reopen. Try again in ${words}.`, waitMs: retryAfterMs });
+      expect(readCollectionReopenWait(wait)).toEqual({ words: wait.message, waitMs: retryAfterMs });
+    }
+    // A worker failure that starts a wait carries it too, and keeps its own words.
+    const stopped = Object.assign(new PersistentRuntimeError("worker_stopped", "stopped"), { retryAfterMs: 5000 });
+    expect(String(ipcWireError(stopped))).toBe("PersistentRuntimeError [worker_stopped] [retryAfterMs=5000]: stopped");
+    expect(readError(acrossIpc(stopped, "desktop:dataset")).words).toBe(readError(acrossIpc(new PersistentRuntimeError("worker_stopped", "stopped"), "desktop:dataset")).words);
+    expect(readCollectionReopenWait(acrossIpc(stopped, "desktop:dataset"))).toBeNull();
+    expect(readCollectionReopenWait(new Error("This Collection is waiting to reopen. Try again in 5 seconds."))).toBeNull();
+  });
+
   it("tells a person what to do for each way the engine can be unavailable", () => {
     const unavailable = (message: string) =>
       readError(acrossIpc(Object.assign(new Error(message), { name: "EngineDaemonUnavailableError" }))).words;
@@ -147,6 +268,29 @@ describe("error words", () => {
       .toBe("This copy of dohc is missing a file it needs. Reinstall dohc.");
     expect(unavailable("Electron resources path is unavailable for the packaged Rust engine."))
       .toBe("This copy of dohc is missing a file it needs. Reinstall dohc.");
+  });
+
+  it("names the rules file a refused restore could not read, and keeps the parser's text for Copy only", () => {
+    const parser = "visibility.toml: TOML parse error at line 3, column 9";
+    const refused = (unreadable: WorkspacePolicyPath[]) => acrossIpc(
+      new RestorePolicyRefusalError({ reason: "policy-unreadable", unreadable, detail: parser }),
+      "desktop:restore-engine-moment-file",
+    );
+    expect(readError(refused([".dohc/visibility.toml"]))).toEqual({
+      words: "It can't read .dohc/visibility.toml. Fix the file, then try again.",
+      mapped: true,
+      cause: `RestorePolicyRefusalError [policy-unreadable]: .dohc/visibility.toml: ${parser}`,
+    });
+    expect(withErrorWords("dohc could not restore notes/plan.md.", refused([".dohc/visibility.toml"]))).toBe(
+      "dohc could not restore notes/plan.md. It can't read .dohc/visibility.toml. Fix the file, then try again.",
+    );
+    expect(readError(refused([".dohc/files.toml"])).words).toBe("It can't read .dohc/files.toml. Fix the file, then try again.");
+    expect(readError(refused([".dohc/files.toml", ".dohc/visibility.toml"])).words)
+      .toBe("It can't read .dohc/files.toml and .dohc/visibility.toml. Fix the files, then try again.");
+    expect(readError(refused([".dohc"])).words).toBe("It can't read this workspace's .dohc folder. Fix the folder, then try again.");
+    // Main reads the class itself for Stop and restore's review rows.
+    expect(readError(new RestorePolicyRefusalError({ reason: "path-not-admitted" })).words)
+      .toBe("History no longer tracks this file. Track it in .dohc/files.toml, then try again.");
   });
 
   it("puts the caller's sentence before the words the map adds", () => {

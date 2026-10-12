@@ -379,12 +379,17 @@ impl FilesHandle {
     /// cancelled (stopping the scan at its next between-unit boundary) and
     /// [`FilesError::DeadlineExceeded`] is returned. A reconcile that already
     /// prepared before the deadline is returned, but no generation advances
-    /// until its capture receipt is acknowledged.
+    /// until its capture receipt is acknowledged. A zero deadline cancels the
+    /// token and returns without enqueueing work.
     pub async fn reconcile_with_deadline(
         &self,
         token: CancellationToken,
         deadline: std::time::Duration,
     ) -> Result<ReconcileRun, FilesError> {
+        if deadline.is_zero() {
+            token.cancel();
+            return Err(FilesError::DeadlineExceeded);
+        }
         let deadline_at = tokio::time::Instant::now() + deadline;
         let (reply, reply_rx) = oneshot::channel();
 
@@ -515,6 +520,57 @@ fn worker_main(
 mod saturation_tests {
     use super::*;
     use dohc_test_scratch::ScratchDir;
+
+    #[tokio::test]
+    async fn expired_deadline_never_enters_a_ready_queue() {
+        let (tx, mut rx) = mpsc::channel(1);
+        let handle = FilesHandle {
+            tx,
+            state: Arc::new(AtomicU8::new(LifecycleState::Ready.as_u8())),
+            pending_overflow: Arc::new(AtomicBool::new(false)),
+        };
+        let token = CancellationToken::new();
+
+        let err = handle
+            .reconcile_with_deadline(token.clone(), std::time::Duration::ZERO)
+            .await
+            .expect_err("deadline must trip");
+
+        assert_eq!(err.code(), "deadline-exceeded");
+        assert!(token.is_cancelled());
+        assert!(matches!(
+            rx.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+    }
+
+    #[tokio::test]
+    async fn queued_reconcile_deadline_cancels_the_request() {
+        let (tx, mut rx) = mpsc::channel(1);
+        let handle = FilesHandle {
+            tx,
+            state: Arc::new(AtomicU8::new(LifecycleState::Ready.as_u8())),
+            pending_overflow: Arc::new(AtomicBool::new(false)),
+        };
+        let token = CancellationToken::new();
+
+        // The queued command keeps its reply sender alive, but never replies.
+        let err = handle
+            .reconcile_with_deadline(token.clone(), std::time::Duration::from_millis(10))
+            .await
+            .expect_err("queued request must reach its deadline");
+
+        assert_eq!(err.code(), "deadline-exceeded");
+        assert!(token.is_cancelled());
+        let Command::Reconcile {
+            token: queued_token,
+            ..
+        } = rx.try_recv().expect("queued reconcile")
+        else {
+            panic!("expected a queued reconcile");
+        };
+        assert!(queued_token.is_cancelled());
+    }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn overflow_is_never_lost_even_when_the_queue_is_saturated() {

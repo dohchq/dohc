@@ -215,38 +215,38 @@ async fn concurrent_cancel_leaves_a_consistent_actor_state() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn deadline_trips_to_typed_error_committing_nothing() {
+async fn expired_deadline_leaves_work_resumable() {
     let ws = Scratch::new();
-    // A single hash worker over enough content that the scan reliably outlasts
-    // a 1ms deadline (16 MiB single-threaded SHA-256 ≫ 1ms on any host). This
-    // makes the deadline path deterministic without a fault seam.
-    let one_mib = vec![b'x'; 1024 * 1024];
-    for i in 0..16 {
-        ws.write(&format!("big/f{i:02}.bin"), &one_mib);
-    }
-    let bounds = ScanBounds::builder()
-        .hash_workers(std::num::NonZeroUsize::new(1).unwrap())
-        .build();
-    let actor = FilesActor::spawn_async(ws.path().to_path_buf(), bounds)
+    ws.write("a.md", b"alpha\n");
+    let actor = FilesActor::spawn_async(ws.path().to_path_buf(), ScanBounds::default())
         .await
         .expect("spawn");
     let handle = actor.handle();
 
     let token = CancellationToken::new();
     let err = handle
-        .reconcile_with_deadline(token, Duration::from_millis(1))
+        .reconcile_with_deadline(token.clone(), Duration::ZERO)
         .await
         .expect_err("deadline must trip");
     assert_eq!(err.code(), "deadline-exceeded");
+    assert!(token.is_cancelled());
 
-    // Nothing committed: the deadline cancelled the scan at a between-unit
-    // boundary, so the generation never advanced and dirty stays set. (stats()
-    // is FIFO-ordered behind the cancelled reconcile, so it observes the
-    // settled state.)
+    // An expired deadline leaves the work unchanged and dirty; the retry completes.
     let stats = handle.stats().await.expect("stats");
-    assert_eq!(stats.generation.0, 0, "no commit on a deadline trip");
+    assert_eq!(stats.generation.0, 0, "no commit on an expired deadline");
     assert!(stats.dirty);
     assert_eq!(stats.tracked, 0);
+    assert_eq!(stats.hashed, 0, "no scan on an expired deadline");
+
+    let retry = handle
+        .reconcile_if_dirty(CancellationToken::new())
+        .await
+        .expect("retry");
+    let ReconcileRun::Completed(plan) = retry else {
+        panic!("deadline leaves the work resumable");
+    };
+    assert_eq!(plan.ops.len(), 1);
+    assert_eq!(plan.ops[0].path(), "a.md");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -218,7 +218,7 @@ describe("registered share proposal handlers", () => {
       .mockResolvedValueOnce({
         writes: [
           { paths: ["docs/packing/collection.yaml"], result: "written" },
-          { paths: ["docs/ideas/collection.yaml"], result: "stale", stalePath: "docs/ideas", currentBlobSha256: null },
+          { paths: ["docs/ideas/collection.yaml"], result: "stale", stalePath: "docs/ideas", recoveredDraftPath: null, currentBlobSha256: null },
         ],
         morePending: true,
       })
@@ -226,11 +226,12 @@ describe("registered share proposal handlers", () => {
         writes: [{ paths: ["docs/packing/automations.yaml"], result: "refused", reason: "not valid" }],
         morePending: false,
       });
-    await expect(h.invoke(CHANNELS.pushShareDirectWrites, { workspaceId: "workspace", shareId: "forged" })).resolves.toEqual({
+    await expect(h.invoke(CHANNELS.pushShareDirectWrites, { workspaceId: "workspace", shareId: "forged" })).resolves.toBeUndefined();
+    expect(h.reported).toHaveBeenLastCalledWith("workspace", {
       status: "pushed",
       writes: [
         { paths: ["docs/packing/collection.yaml"], result: "written" },
-        { paths: ["docs/ideas/collection.yaml"], result: "stale", stalePath: "docs/ideas" },
+        { paths: ["docs/ideas/collection.yaml"], result: "stale", stalePath: "docs/ideas", recoveredDraftPath: null },
         { paths: ["docs/packing/automations.yaml"], result: "refused", reason: "not valid" },
       ],
     });
@@ -249,27 +250,34 @@ describe("registered share proposal handlers", () => {
         morePending: true,
       })
       .mockRejectedValueOnce(new Error("offline"));
-    await expect(h.invoke(CHANNELS.pushShareDirectWrites)).resolves.toEqual({
+    await expect(h.invoke(CHANNELS.pushShareDirectWrites)).resolves.toBeUndefined();
+    expect(h.reported).toHaveBeenLastCalledWith("workspace", {
       status: "failed",
       writes: [{ paths: ["docs/packing/automations.yaml"], result: "refused", reason: "not valid" }],
       errorMessage: "offline",
       lasting: false,
     });
     h.pushDirect.mockRejectedValueOnce(new SharedFileReadOnlyError());
-    await expect(h.invoke(CHANNELS.pushShareDirectWrites)).resolves.toMatchObject({ status: "failed", lasting: true });
+    await expect(h.invoke(CHANNELS.pushShareDirectWrites)).resolves.toBeUndefined();
+    expect(h.reported.mock.calls.at(-1)?.[1]).toMatchObject({ status: "failed", lasting: true });
     h.pushDirect.mockRejectedValueOnce(Object.assign(new Error("too large"), { wireCode: "PAYLOAD_TOO_LARGE" }));
-    await expect(h.invoke(CHANNELS.pushShareDirectWrites)).resolves.toMatchObject({ status: "failed", lasting: true });
+    await expect(h.invoke(CHANNELS.pushShareDirectWrites)).resolves.toBeUndefined();
+    expect(h.reported.mock.calls.at(-1)?.[1]).toMatchObject({ status: "failed", lasting: true });
     h.pushDirect.mockRejectedValueOnce(new RelayConflictError());
-    await expect(h.invoke(CHANNELS.pushShareDirectWrites)).resolves.toMatchObject({ status: "failed", lasting: true });
+    await expect(h.invoke(CHANNELS.pushShareDirectWrites)).resolves.toBeUndefined();
+    expect(h.reported.mock.calls.at(-1)?.[1]).toMatchObject({ status: "failed", lasting: true });
     h.pushDirect.mockRejectedValueOnce(Object.assign(new Error("busy"), { wireCode: "OVERLOADED" }));
-    await expect(h.invoke(CHANNELS.pushShareDirectWrites)).resolves.toMatchObject({ status: "failed", lasting: false });
+    await expect(h.invoke(CHANNELS.pushShareDirectWrites)).resolves.toBeUndefined();
+    expect(h.reported.mock.calls.at(-1)?.[1]).toMatchObject({ status: "failed", lasting: false });
   });
 
   it("says when the share is unavailable, and asks the relay again on the next push", async () => {
     const h = await harness(); h.recipient();
     h.pushDirect.mockRejectedValueOnce(new ShareUnavailableError());
-    await expect(h.invoke(CHANNELS.pushShareDirectWrites)).resolves.toEqual({ status: "unavailable" });
-    await expect(h.invoke(CHANNELS.pushShareDirectWrites)).resolves.toEqual({ status: "pushed", writes: [] });
+    await expect(h.invoke(CHANNELS.pushShareDirectWrites)).resolves.toBeUndefined();
+    expect(h.reported).toHaveBeenLastCalledWith("workspace", { status: "unavailable" });
+    await expect(h.invoke(CHANNELS.pushShareDirectWrites)).resolves.toBeUndefined();
+    expect(h.reported).toHaveBeenCalledTimes(1);
     expect(h.pushDirect).toHaveBeenCalledTimes(2);
   });
 
@@ -318,9 +326,10 @@ describe("registered share proposal handlers", () => {
       morePending,
     });
     h.pushDirect.mockResolvedValueOnce(page(2_000)).mockResolvedValueOnce(page(501)).mockResolvedValueOnce(page(1, false));
-    const result = await h.invoke(CHANNELS.pushShareDirectWrites) as { status: string; writes: unknown[] };
+    await expect(h.invoke(CHANNELS.pushShareDirectWrites)).resolves.toBeUndefined();
+    const result = h.reported.mock.calls.at(-1)![1] as { status: string; writes: unknown[] };
     expect(h.pushDirect).toHaveBeenCalledTimes(3);
-    expect(h.reported).toHaveBeenCalledTimes(1);
+    expect(h.reported).toHaveBeenCalledTimes(2);
     const [workspaceId, first] = h.reported.mock.calls[0]!;
     expect(workspaceId).toBe("workspace");
     expect(first.status === "pushed" && first.writes).toHaveLength(2_500);

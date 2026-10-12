@@ -31,9 +31,9 @@ afterEach(() => {
 describe("sidebar views", () => {
   it("shows dohc's views in the person's order, then the rest, without the hidden ones", () => {
     expect(sidebarViews({ order: ["sites", "search"], hidden: ["graph"] }))
-      .toEqual(["sites", "search", "explorer", "history"]);
+      .toEqual(["sites", "search", "explorer", "chats", "history"]);
     expect(sidebarViews({ order: [], hidden: [] }))
-      .toEqual(["explorer", "search", "graph", "sites", "history"]);
+      .toEqual(["explorer", "chats", "search", "graph", "sites", "history"]);
   });
 
   it("moves the selection to the first view on the rail when its view is hidden or its app unpinned", () => {

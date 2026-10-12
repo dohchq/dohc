@@ -56,6 +56,7 @@ pub(crate) struct OpenWorkspace {
     pub(super) db_path: PathBuf,
     pub(crate) workspace_id: String,
     pub(super) actor: ActorHandle,
+    pub(super) durability: super::automations::DurabilityQueue,
     pub(super) mode: WorkspaceOpenMode,
     handle_kind: WorkspaceHandleKind,
     pub(super) relay: Option<RelayConfiguration>,
@@ -122,6 +123,7 @@ impl OpenWorkspace {
             db_path: self.db_path.clone(),
             workspace_id: self.workspace_id.clone(),
             actor: self.actor.clone(),
+            durability: self.durability.clone(),
             mode: WorkspaceOpenMode::ReadOnly,
             handle_kind: WorkspaceHandleKind::ReadOnlyAttach { owner },
             relay: self.relay.clone(),
@@ -376,6 +378,13 @@ pub(super) fn validate_workspace_param(
     Ok(())
 }
 
+fn bound_to_another_workspace() -> WireError {
+    WireError::new(
+        ErrorCode::InvalidParams,
+        "workspace root is already bound to another workspace",
+    )
+}
+
 pub(super) fn enforce_workspace(open: &OpenWorkspace, workspace_id: &str) -> Result<(), WireError> {
     if open.workspace_id == workspace_id {
         Ok(())
@@ -475,8 +484,8 @@ impl EngineService {
     /// workspace with capture asks its driver, whose next pass reconciles
     /// after it applies what it scanned. One that keeps its Collections itself
     /// reconciles now, under the gate a capture pass holds, and wakes the
-    /// executors for the claims an adoption made. It fails when the
-    /// reconcile fails, so the caller's retry reconciles again.
+    /// executors for committed claims. Workspaces that reconcile here have no
+    /// capture driver. A held lease fails the request so the caller retries.
     pub(super) async fn collections_changed(
         &self,
         ctx: &RequestContext,
@@ -523,6 +532,12 @@ impl EngineService {
             &open.workspace_id,
             &reconciliation.automation_claims,
         );
+        if reconciliation.lease_held {
+            return Err(WireError::new(
+                ErrorCode::Overloaded,
+                "collection reconciliation waits for a document lease",
+            ));
+        }
         Ok(())
     }
 
@@ -618,10 +633,7 @@ impl EngineService {
             // The root's logical binding to a workspace id holds regardless of
             // actor liveness: a different workspace id is always rejected.
             if open.workspace_id != params.workspace_id {
-                return Err(WireError::new(
-                    ErrorCode::InvalidParams,
-                    "workspace root is already bound to another workspace",
-                ));
+                return Err(bound_to_another_workspace());
             }
             // A maintenance-free open is read intent, not a request for
             // ownership. Mint a non-owning token over the live binding so its
@@ -869,6 +881,17 @@ impl EngineService {
             }
             return Err(map_root_binding(error));
         }
+        // Versioned state belongs to one workspace. Refuse any other before
+        // recovery or capture can write to the store.
+        if Self::read_under_ctx(
+            &cancellation,
+            "workspace.open (workspace identity)",
+            actor.holds_other_workspace(params.workspace_id.clone()),
+        )
+        .await?
+        {
+            return Err(bound_to_another_workspace());
+        }
         let open_guard = if requested_mode == WorkspaceOpenMode::Full
             && let Some(config) = self.ordinary_live_host.get()
         {
@@ -950,6 +973,13 @@ impl EngineService {
                 ),
             )
             .await?;
+            actor
+                .recover_open_document_artifacts(
+                    params.workspace_id.clone(),
+                    self.leases.scoped(&root),
+                )
+                .await
+                .map_err(map_runtime)?;
             // Startup replay before the files layer exists: jobs left pending by
             // a crash, a transient settle failure, or a pulled replication apply
             // land on disk while nothing is watching (no suppression window),
@@ -1077,6 +1107,7 @@ impl EngineService {
                 db_path,
                 workspace_id: params.workspace_id,
                 actor,
+                durability: super::automations::DurabilityQueue::default(),
                 mode: requested_mode,
                 handle_kind: WorkspaceHandleKind::Owner,
                 relay: params
@@ -1968,6 +1999,172 @@ mod tests {
         service.workspace_close(Some(handle)).await.unwrap();
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn automation_replica_retries_lease_deferred_relation_cleanup() {
+        use dohc_engine_collab::{ContentKind, DocKey, Ydoc};
+        use dohc_engine_runtime::CancellationToken;
+        const WS: &str = "replica-reconcile-retry";
+        const SOURCE: &str = "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa";
+        const TARGET: &str = "rec_bbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let scratch = ScratchDir::new().unwrap();
+        let service = EngineService::new();
+        let ctx = RequestContext::unbounded();
+        let opened = service
+            .workspace_open(
+                &ctx,
+                json!({
+                    "rootDir": scratch.path(), "workspaceId": WS,
+                    "captureMode": "none", "reconcileCollections": true,
+                }),
+            )
+            .await
+            .unwrap();
+        let handle: WorkspaceHandle = serde_json::from_value(opened["workspace"].clone()).unwrap();
+        service
+            .versions_ensure_main(&ctx, Some(handle.clone()), json!({"workspaceId": WS}))
+            .await
+            .unwrap();
+        let open = service.open(Some(&handle)).unwrap();
+        assert!(lock(&open.capture).is_none());
+        assert!(lock(&open.collection_projection).is_none());
+        let target_markdown = format!("---\nid: {TARGET}\n---\n\nTarget\n");
+        let markdown = format!("---\nid: {SOURCE}\nrelated: {TARGET}\n---\n\nSource\n");
+        for (object, path, text) in [
+            (
+                "schema",
+                "tasks/collection.yaml",
+                "fields:\n  related:\n    type: relation\n    collection: tasks\n    many: false\n",
+            ),
+            ("source", "tasks/source.md", markdown.as_str()),
+            ("target", "tasks/target.md", target_markdown.as_str()),
+        ] {
+            open.actor
+                .versioned_text_write(
+                    WriteText {
+                        workspace_id: WS.into(),
+                        version_id: "main".into(),
+                        object_id: object.into(),
+                        path: path.into(),
+                        text: text.into(),
+                        moment_id: object.into(),
+                        metadata_origin: "test".into(),
+                        metadata_summary: None,
+                        metadata_correlation_id: None,
+                        author_json: None,
+                        now_ms: 2,
+                        request_id: None,
+                    },
+                    Arc::new(NoFaults),
+                    CancellationToken::new(),
+                )
+                .await
+                .unwrap();
+        }
+        std::fs::create_dir_all(scratch.path().join("tasks")).unwrap();
+        std::fs::write(scratch.path().join("tasks/source.md"), &markdown).unwrap();
+        std::fs::write(scratch.path().join("tasks/target.md"), &target_markdown).unwrap();
+        let state = open
+            .actor
+            .ydoc_open_state(
+                WS.into(),
+                3,
+                false,
+                None,
+                "main".into(),
+                "tasks/source.md".into(),
+                Some(ContentKind::Richdoc),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        let doc = Ydoc::wire();
+        doc.apply(&state.initial_update).unwrap();
+        doc.rewrite_content_to_markdown(ContentKind::Richdoc, &markdown)
+            .unwrap();
+        open.actor
+            .ydoc_record_update(
+                state.key,
+                "tasks/source.md".into(),
+                ContentKind::Richdoc,
+                state.regime,
+                doc.encode_full_state(),
+                None,
+                None,
+                state.lineage_claim_id,
+                true,
+                state.owner_seed_source,
+                None,
+                4,
+                Arc::new(NoFaults),
+                CancellationToken::new(),
+                None,
+            )
+            .await
+            .unwrap();
+        service.collections_changed(&ctx, &open).await.unwrap();
+        // A pull deletes the target while automation retains the source's session lease.
+        let observer = rusqlite::Connection::open(&open.db_path).unwrap();
+        let count = || {
+            observer
+                .query_row(
+                    "SELECT COUNT(*) FROM collection_relation_edges",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap()
+        };
+        let leases = service.leases.scoped(&open.root);
+        let lease = leases
+            .acquire(&DocKey::new(WS, "main", "source").unwrap())
+            .unwrap();
+        open.actor
+            .versioned_text_delete(
+                dohc_engine_domain::DeleteTextFile {
+                    workspace_id: WS.into(),
+                    version_id: "main".into(),
+                    path: "tasks/target.md".into(),
+                    moment_id: "delete-target".into(),
+                    request_id: None,
+                    metadata_origin: "sync".into(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    now_ms: 5,
+                },
+                open.root.clone(),
+                Arc::new(service.self_writes.scoped(&open.root)),
+                Arc::new(NoFaults),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        let result = service.collections_changed(&ctx, &open).await;
+        assert_eq!(count(), 1, "the held source keeps its stale relation");
+        let error =
+            result.expect_err("a replica must leave the pull retryable until cleanup completes");
+        assert_eq!(error.code, ErrorCode::Overloaded);
+        assert_eq!(
+            error.retry,
+            dohc_engine_protocol::error::Retryability::AfterBackoff
+        );
+        drop(lease);
+        service
+            .collections_changed(&ctx, &open)
+            .await
+            .expect("retry after release");
+        assert_eq!(
+            count(),
+            0,
+            "the retry cleans the relation without another relay change"
+        );
+        assert!(
+            !std::fs::read_to_string(scratch.path().join("tasks/source.md"))
+                .unwrap()
+                .contains("related:")
+        );
+        service.workspace_close(Some(handle)).await.unwrap();
+    }
+
     #[tokio::test]
     async fn projection_parameter_errors_name_project_collections() {
         let scratch = ScratchDir::new().unwrap();
@@ -2231,6 +2428,133 @@ mod tests {
             );
             supervisor.close(&db_path).unwrap();
         }
+    }
+
+    fn open_params(root: &std::path::Path, workspace_id: &str, options: Value) -> Value {
+        let mut params = json!({
+            "rootDir": root.to_string_lossy(),
+            "workspaceId": workspace_id,
+        });
+        let options = options.as_object().cloned().unwrap_or_default();
+        params.as_object_mut().expect("params").extend(options);
+        params
+    }
+
+    /// A root with versioned state keeps its workspace across close and
+    /// restart. Another id is refused before recovery or capture writes, and
+    /// the owner reopens.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_closed_root_refuses_another_workspace_before_it_writes() {
+        let scratch = ScratchDir::new().expect("scratch");
+        let root = scratch.path();
+        let db_path = root.join(".dohc/engine/engine.db");
+        let none = json!({ "captureMode": "none" });
+        let read_only = json!({ "captureMode": "none", "skipStartupMaintenance": true });
+        let persisted = || {
+            dohc_engine_storage::EngineStore::open_read_only(&db_path)
+                .expect("store")
+                .read_with(|conn| {
+                    let mut select = conn.prepare(
+                        "SELECT workspace_id FROM versioned_workspaces ORDER BY workspace_id",
+                    )?;
+                    let ids = select
+                        .query_map([], |row| row.get::<_, String>(0))?
+                        .collect::<rusqlite::Result<Vec<_>>>()?;
+                    let moments: i64 =
+                        conn.query_row("SELECT COUNT(*) FROM moments", [], |row| row.get(0))?;
+                    Ok::<_, rusqlite::Error>((ids, moments))
+                })
+                .expect("persisted workspace")
+        };
+        // An empty open with capture off leaves no versioned state, so a
+        // later capture can still prove a fresh import.
+        let first: &'static WorkspaceSupervisor = Box::leak(Box::new(WorkspaceSupervisor::new()));
+        let service = EngineService::with_supervisor(first);
+        let opened = service
+            .workspace_open(
+                &RequestContext::unbounded(),
+                open_params(root, "owner", none.clone()),
+            )
+            .await
+            .expect("first open");
+        let handle: WorkspaceHandle =
+            serde_json::from_value(opened["workspace"].clone()).expect("handle");
+        service.workspace_close(Some(handle)).await.expect("close");
+        assert_eq!(persisted(), (Vec::new(), 0));
+
+        // Once the owner has versioned state, the store belongs to it.
+        let opened = service
+            .workspace_open(
+                &RequestContext::unbounded(),
+                open_params(root, "owner", none.clone()),
+            )
+            .await
+            .expect("owner reopens");
+        let workspace = opened["workspace"].clone();
+        service
+            .versions_ensure_main(
+                &RequestContext::unbounded(),
+                Some(serde_json::from_value(workspace.clone()).expect("handle")),
+                json!({}),
+            )
+            .await
+            .expect("main version");
+        service
+            .workspace_close(Some(serde_json::from_value(workspace).expect("handle")))
+            .await
+            .expect("close");
+        let owner_only = persisted();
+        assert_eq!(owner_only.0, vec!["owner".to_owned()]);
+        let refused = service
+            .workspace_open(
+                &RequestContext::unbounded(),
+                open_params(root, "other", none.clone()),
+            )
+            .await
+            .expect_err("a closed root keeps its workspace");
+        assert_eq!(refused.code, ErrorCode::InvalidParams);
+        let opened = service
+            .workspace_open(
+                &RequestContext::unbounded(),
+                open_params(root, "owner", none.clone()),
+            )
+            .await
+            .expect("the refusal does not strand the actor");
+        let handle: WorkspaceHandle =
+            serde_json::from_value(opened["workspace"].clone()).expect("handle");
+        service.workspace_close(Some(handle)).await.expect("close");
+        assert_eq!(first.actor_count(), 0);
+
+        // After a restart, capture and read-only opens are refused before they write.
+        std::fs::write(root.join("note.md"), "captured only by its owner").expect("note");
+        let restarted: &'static WorkspaceSupervisor =
+            Box::leak(Box::new(WorkspaceSupervisor::new()));
+        let service = EngineService::with_supervisor(restarted);
+        for options in [json!({}), read_only.clone()] {
+            let refused = service
+                .workspace_open(
+                    &RequestContext::unbounded(),
+                    open_params(root, "other", options),
+                )
+                .await
+                .expect_err("a restarted service keeps the root's workspace");
+            assert_eq!(refused.code, ErrorCode::InvalidParams);
+            assert_eq!(persisted(), owner_only);
+        }
+        for options in [read_only, none] {
+            let opened = service
+                .workspace_open(
+                    &RequestContext::unbounded(),
+                    open_params(root, "owner", options),
+                )
+                .await
+                .expect("the owner reopens");
+            let handle: WorkspaceHandle =
+                serde_json::from_value(opened["workspace"].clone()).expect("handle");
+            service.workspace_close(Some(handle)).await.expect("close");
+        }
+        assert_eq!(persisted(), owner_only);
+        assert_eq!(restarted.actor_count(), 0);
     }
 
     /// A fresh store whose root-binding stamp fails is deleted with the

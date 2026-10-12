@@ -22,6 +22,10 @@ export type MaterializeRelayPullPage = (
 ) => Promise<void>;
 
 export interface SharingDeclined {
+  objectId: string;
+  versionId: string;
+  lineagePruned: boolean;
+  headBlobSha256: string | null;
   path: string;
   constraint: string;
   limitBytes: number;
@@ -50,6 +54,7 @@ export interface OwnerAdmissionPending {
 }
 
 export interface PushWorkspaceToRelayResult {
+  hasMore: boolean;
   ownerAdmissionPending: OwnerAdmissionPending[];
   pushed: number;
   originsPushed: string[];
@@ -351,7 +356,7 @@ export interface SubmitShareProposalResult {
 // changes still offers it.
 export type DirectWriteReport =
   | { paths: string[]; result: "written" }
-  | { paths: string[]; result: "stale"; stalePath: string; currentBlobSha256: string | null }
+  | { paths: string[]; result: "stale"; stalePath: string; currentBlobSha256: string | null; recoveredDraftPath: string | null }
   | { paths: string[]; result: "refused"; reason: string };
 
 // What one direct push wrote. Empty when nothing was eligible, or the share

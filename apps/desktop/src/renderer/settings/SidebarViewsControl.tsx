@@ -1,7 +1,7 @@
 import { ChevronDown, ChevronUp } from "lucide-react";
 import type { SidebarSettings } from "../../settings/userSettings";
 import { IconButton } from "../ui/controls";
-import { activityViewLabel } from "../workbench/ActivityBar";
+import { VIEW_IDENTITY } from "../workbench/viewIdentity";
 import { VIEW_IDS, type ViewId } from "../workbench/workbenchState";
 import { SwitchControl } from "./SettingRow";
 
@@ -39,7 +39,7 @@ export function SidebarViewsControl(props: {
       className="m-0 flex w-64 list-none flex-col gap-0.5 p-0"
     >
       {order.map((view, index) => {
-        const label = activityViewLabel(view);
+        const label = VIEW_IDENTITY[view].label;
         return (
           <li
             key={view}

@@ -24,6 +24,8 @@ directories:
 files:
   - dist/**
   - "!**/*.tsbuildinfo"
+  # Source maps go to the error report service, not into the installer.
+  - "!dist/**/*.map"
   - "!node_modules/@dohc/*/src/**/*.test.ts"
   - "!node_modules/@dohc/sync-relay/dist/**"
   # Main bundles the Effect runtime; the CLI owns its dependencies.
@@ -49,6 +51,12 @@ extraResources:
   # electron-builder skips node_modules at each resource's root.
   - from: resources/app-compiler/node_modules
     to: app-compiler/node_modules
+    filter:
+      - "**/*"
+  # The probe owner and relay run outside app.asar. The relay uses
+  # app-compiler/node.exe; stage-agent-probe.mjs checks that closure.
+  - from: resources/agent-probe
+    to: agent-probe
     filter:
       - "**/*"
   - from: build/icon.png
@@ -94,8 +102,8 @@ electronFuses:
   # MUST stay true while the renderer loads via window.loadFile: Vite emits
   # crossorigin module scripts/stylesheets, and those are CORS-mode fetches
   # over file:// — exactly the privilege this fuse grants. Disabling it
-  # blanks every packaged window (scripts/fuse-smoke.mjs boots a
-  # fuse-flipped binary to gate this). Workspace bytes still flow through
+  # blanks every packaged window (scripts/fuse-smoke.mjs checks and boots
+  # the packaged binary). Workspace bytes still flow through
   # dohc-file://, never raw file://.
   grantFileProtocolExtraPrivileges: true
 

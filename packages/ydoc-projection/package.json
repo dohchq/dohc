@@ -8,8 +8,10 @@
     "./body-fragment": "./src/body-fragment.ts",
     "./browser-editor": "./src/browser-editor.ts",
     "./frontmatter": "./src/frontmatter.ts",
+    "./frontmatter-map": "./src/frontmatter-map.ts",
     "./live-journal-validation": "./src/live-journal-validation.ts",
     "./image-src": "./src/image-src.ts",
+    "./markdown-extensions": "./src/dohc-markdown-extensions.ts",
     "./restore-proof": "./src/liveRestoreProof.ts",
     "./named-live-provider": "./src/namedLiveProvider.ts",
     "./named-live-browser-transport": "./src/namedLiveBrowserTransport.ts"
@@ -24,6 +26,7 @@
     "@dohc/workspace-core": "workspace:*",
     "@tiptap/core": "^3.30.5",
     "@tiptap/extension-list": "3.30.5",
+    "@tiptap/extension-paragraph": "3.30.5",
     "@tiptap/extension-table": "^3.30.5",
     "@tiptap/markdown": "^3.30.5",
     "@tiptap/pm": "^3.30.5",

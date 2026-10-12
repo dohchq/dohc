@@ -156,7 +156,7 @@ it("tells callers when to retry a dataset that waits to reopen", async () => {
   const waiting = await f.invoke();
   expect(waiting.status).toBe(503);
   expect(waiting.headers.get("retry-after")).toBe("10");
-  expect(await waiting.json()).toEqual({code: "dataset_reopen_wait", message: "dohc's work on this Collection stopped before it finished. Try again in 10 s."});
+  expect(await waiting.json()).toEqual({code: "dataset_reopen_wait", message: "This Collection is waiting to reopen. Try again in 10 seconds."});
   // The failure that starts a wait says why, and when to retry.
   const message = "The app's code ran too long: it used more than 5 s of CPU time while reapplying saved change 3 of 64. Try again.";
   f.host.invoke = async () => { throw Object.assign(new PersistentRuntimeError("worker_budget", message), {retryAfterMs: 5_000}); };
@@ -689,4 +689,48 @@ it("exposes immutable approved rule history only through the owner route", async
   expect((await f.http(`${f.path}/history-revision?revisionSha256=invalid`)).status).toBe(400);
   expect((await f.http(`${path}&revisionSha256=${revision.revisionSha256}`)).status).toBe(400);
 
+});
+
+it("records owner-only agent approvals through activation and migration routes", async () => {
+  const f=await httpFixture(), approvalAgent={kind:"agent",label:"Builder",labelSource:"agent-declared"};
+  const activation={revision,schemaSql,operationSource,approvalAgent};
+  for(const user of ["helper","stranger"]) expect((await f.http(`${f.path}/activate`,activation,{authorization:`Bearer ${user}`})).status).toBe(404);
+  expect((await f.http(`${f.path}/activate`,{...activation,approvalAgent:{kind:"person",label:"Owner"}})).status).toBe(400);
+  expect((await f.http(`${f.path}/activate`,activation)).status).toBe(200);
+  const artifacts=await (await f.http(`${f.path}/artifacts`)).json();
+  const next=describeDatasetRevision({definition,revision:2,schemaSql,operationSource});
+  const prepared=await f.http(`${f.path}/prepare-migration`,{revision:next,schemaSql,operationSource,expected:artifacts.cursor,migrationSql:"SELECT 1;"});
+  expect(prepared.status).toBe(200);const candidate=await prepared.json();
+  const approval={candidateId:candidate.candidateId,checkpointSha256:candidate.checkpointSha256,approvalAgent};
+  for(const user of ["helper","stranger"]) expect((await f.http(`${f.path}/approve-migration`,approval,{authorization:`Bearer ${user}`})).status).toBe(404);
+  expect((await f.http(`${f.path}/approve-migration`,approval)).status).toBe(200);
+  const history=await (await f.http(`${f.path}/history`)).json();
+  expect(history.entries[0].approvalAgent).toEqual(approvalAgent);
+  expect(f.storage.db.prepare("SELECT COUNT(*) n FROM dohc_dataset_approval_provenance").get()!.n).toBe(2);
+});
+
+it("preserves schema dates in a Collection transfer over HTTP across historical and current checkpoints",async()=>{
+  const source=await httpFixture(),target=await httpFixture();await source.activate();
+  const owner={kind:"named" as const,workspaceId:"w",userId:"owner"},scope={workspaceId:"w",datasetId:id(1)};
+  for(const ordinal of [2,3]){
+    source.advance(100);
+    const next=structuredClone(definition);next.name="Requests "+ordinal;
+    const approved=describeDatasetRevision({definition:next,revision:ordinal,schemaSql,operationSource});
+    const preview=await source.host.prepareMigration(owner,{workspaceId:"w",revision:approved,schemaSql,operationSource,expected:source.host.approvedArtifacts(owner,scope).cursor,migrationSql:"SELECT 1;"});
+    await source.host.approveMigration(owner,{...scope,candidateId:preview.candidateId,checkpointSha256:preview.checkpointSha256});
+  }
+  const original=source.host.history(owner,scope).entries;
+  expect(original).toMatchObject([{recordedAtMs:210},{recordedAtMs:110}]);
+  const journal=createDatasetJournal({db:source.storage.db,transaction:run=>source.storage.tx(run)}),cursor=journal.head(scope,()=>{}).cursor;
+  journal.fence({expected:cursor,authorize(){}});
+  const archive=await source.host.exportRecovery(owner,scope);
+  try{
+    const chunks=[];for await(const bytes of archive.stream())chunks.push(bytes);
+    const manifestSha256=createHash("sha256").update(encodeRecoveryManifest(archive.manifest,{maxTotalBytes:source.storage.options.workspaceQuotaBytes})).digest("hex");
+    const response=await target.handler(new Request("https://relay/sync/w/datasets/"+id(1)+"/imports/dated-transfer",{method:"POST",headers:{authorization:"Bearer owner","content-type":"application/octet-stream","x-dohc-dataset-manifest-sha256":manifestSha256,"x-dohc-dataset-source-cursor":JSON.stringify(cursor)},body:Buffer.concat(chunks)}));
+    expect(response.status).toBe(200);
+    expect(target.host.history(owner,scope).entries).toEqual(original);
+    target.storage.tx(()=>target.storage.db.prepare("DELETE FROM sync_relay_dataset_usage WHERE workspace_id=? AND dataset_id=?").run(scope.workspaceId,scope.datasetId));
+    expect(target.storage.db.prepare("SELECT COUNT(*) n FROM dohc_dataset_checkpoint_times").get()!.n).toBe(0);
+  }finally{await archive.dispose();}
 });

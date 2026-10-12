@@ -382,3 +382,15 @@ it("keeps app summaries available without inventing a sender when account lookup
   const response = await route(new Request("https://relay.test/summary"), {route: "app-backend", action: "summary", publicationId, workspaceId: "w"}, helper);
   expect(await response.json()).toMatchObject({sharerName: null, access: "view"});
 });
+
+it("records schema checkpoint time through the relay host and retains it after restart",async()=>{
+  const f=await fixture();await f.activate();
+  const next=structuredClone(definition);next.tables[0].fields[1].name="Full name";
+  const approved=describeDatasetRevision({definition:next,revision:2,schemaSql,operationSource});
+  const preview=await f.host.prepareMigration(owner,{workspaceId:"w",revision:approved,schemaSql,operationSource,expected:f.host.approvedArtifacts(owner,scope).cursor,migrationSql:"SELECT 1;"});
+  await f.host.approveMigration(owner,{...scope,candidateId:preview.candidateId,checkpointSha256:preview.checkpointSha256});
+  expect(f.host.history(owner,scope).entries).toMatchObject([{recordedAtMs:10,schema:{revisionHash:approved.revisionSha256}}]);
+  await f.reopen();
+  expect(f.host.history(owner,scope).entries).toMatchObject([{recordedAtMs:10}]);
+  expect(f.storage.db.prepare("SELECT recorded_at_ms FROM dohc_dataset_checkpoint_times WHERE workspace_id=? AND dataset_id=? AND revision=1").get(scope.workspaceId,scope.datasetId)).toMatchObject({recorded_at_ms:10});
+});

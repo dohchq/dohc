@@ -1,52 +1,134 @@
+import type { SaveState } from "@dohc/workspace-contracts/save-state";
+import { createPortal } from "react-dom";
 import { CopyButton } from "./ui/CopyButton";
 import { restoreRecoveryDraftText } from "./collab/recoverySnapshot";
 import { dismissOrphanedDraft, useOrphanedDrafts } from "./orphanedDrafts";
 import { DismissDraftControls } from "./RecoveryList";
 import { Share2 } from "lucide-react";
+import type { ComponentProps, ReactNode } from "react";
 import { bridge } from "./bridge";
 import type { EngineRemovalInProgress } from "./collab/useEngineDoc";
-import { IconButton, SectionLabel } from "./ui/controls";
-import type { SaveState } from "./useAutosavedTextDraft";
+import { DocumentMenu } from "./DocumentMenu";
+import { IconButton, SecondaryButton } from "./ui/controls";
+import { useTabRowActionsSlot } from "./workbench/tabRowActions";
+import { useShownAfter } from "./ui/useShownAfter";
 
-// `actions` puts a view's controls (edit toggle, save state, presence) in the
-// one document header — views never stack a second near-empty toolbar.
-export function ViewHeader(props: {
-  icon: React.ReactNode;
-  path: string;
-  label: string;
+// A file view's actions, at the right end of its editor group's tab row: the
+// tab already names the file, so no header repeats it above the page. They
+// are final on the click frame, so loading, ready and failed views of one
+// file draw the same actions. `actions` are the view's controls, right of
+// Share; a view that has controls draws them, disabled, while it loads or
+// when it cannot open (DocumentControls). Share and the controls never
+// shrink. `status` (a save state that needs the person, a slow open's
+// "Opening…") sits left of them and gives way first, before the tab names:
+// its words can change width without moving a control, and in a narrow pane
+// it ends in an ellipsis. A status with nothing visible, such as a calm save
+// state or a quick open kept for screen readers, draws no box, so loading,
+// ready and failed views take the same width. Outside an editor group, as on the states page, they draw
+// in a row of their own.
+export function ViewActions(props: {
   onShare?: () => void;
-  actions?: React.ReactNode;
+  status?: ReactNode;
+  actions?: ReactNode;
 }) {
-  // Breadcrumb weighting: the folder path recedes, the file name carries ink.
-  const slash = props.path.lastIndexOf("/");
-  const dir = slash >= 0 ? props.path.slice(0, slash + 1) : "";
-  const leaf = slash >= 0 ? props.path.slice(slash + 1) : props.path;
-  return (
-    <header className="flex items-center gap-2 border-b border-line px-4 py-1.5 text-[13px]">
-      {props.icon}
-      <span className="min-w-0 truncate font-mono">
-        {dir ? <span className="text-subtle">{dir}</span> : null}
-        <span className="font-medium text-ink">{leaf}</span>
-      </span>
-      <SectionLabel className="ml-auto shrink-0">
-        {props.label}
-      </SectionLabel>
+  const slot = useTabRowActionsSlot();
+  const content = (
+    <>
+      {/* 25px: the widest mark (12px), its gap and an ellipsis. A grid of
+          minmax(0, max-content) columns, so its words set how wide it can
+          grow but not how narrow it can get: the row shrinks it to 25px
+          before any tab name gives way. */}
+      {props.status ? (
+        <div
+          data-view-status=""
+          className="contents [&:has(>:not(.sr-only))]:grid [&:has(>:not(.sr-only))]:min-w-[25px] auto-cols-[minmax(0,max-content)] grid-flow-col items-center justify-end gap-2"
+        >
+          {props.status}
+        </div>
+      ) : null}
       {props.onShare ? (
         <IconButton
           data-testid="file-share"
           aria-label="Share file"
           title="Share file"
           onClick={props.onShare}
+          className="shrink-0"
         >
-          <Share2 size={13} aria-hidden />
+          <Share2 size={14} aria-hidden />
         </IconButton>
       ) : null}
       {props.actions}
-    </header>
+    </>
+  );
+  if (slot === undefined) {
+    return <div data-testid="view-actions" className="flex h-9 items-center justify-end gap-1 border-b border-line bg-panel pl-2 pr-1">{content}</div>;
+  }
+  return slot ? createPortal(content, slot) : null;
+}
+
+export const OPENING_TITLE = "You can edit this document when it finishes opening.";
+
+// The wait before a slow open says so, the same wait as the loading lines'
+// (styles.css, dohc-reveal-if-slow).
+export const OPENING_WORDS_DELAY_MS = 150;
+
+// A document still opening, as its save state slot says it. An open can last
+// (until the engine's retry deadline, or while a guest waits for the host),
+// and meanwhile the page shows the disk copy read-only, so a slow open says
+// "Opening…" in words. A quick one keeps them for screen readers only: it
+// draws nothing, and the actions stay where the ready document draws them.
+export function OpeningState() {
+  const slow = useShownAfter(true, OPENING_WORDS_DELAY_MS);
+  return (
+    <span
+      data-testid="markdown-open-state"
+      data-state="opening"
+      role="status"
+      title={OPENING_TITLE}
+      className={slow ? "min-w-0 truncate font-mono text-[11px] text-subtle" : "sr-only"}
+    >
+      Opening…
+    </span>
   );
 }
 
-export type FileSaveState = SaveState | "deleted";
+// A document's controls, the same pair in every phase of an open: the mode
+// toggle and the document menu. The toggle's box holds "Edit", "Source" and
+// "Editor", so the words it says on its own never move the menu or Share;
+// only a person's own click to "WYSIWYG" widens it. A truncated read never
+// has the whole document to copy, so it has no menu, and the menu's place
+// stays empty instead of closing up.
+export function DocumentControls(props: {
+  toggle: {
+    label: string;
+    testId?: string;
+    pressed?: boolean;
+    disabled?: boolean;
+    title?: string;
+    onClick?: () => void;
+  };
+  menu: ComponentProps<typeof DocumentMenu> | null;
+}) {
+  const { toggle } = props;
+  return (
+    <>
+      <button
+        type="button"
+        data-testid={toggle.testId}
+        aria-pressed={toggle.pressed}
+        disabled={toggle.disabled}
+        title={toggle.title}
+        onClick={toggle.onClick}
+        className="min-w-14 shrink-0 rounded-md border border-line px-2 py-0.5 text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink disabled:cursor-not-allowed disabled:opacity-50"
+      >
+        {toggle.label}
+      </button>
+      {props.menu ? <DocumentMenu {...props.menu} /> : <span aria-hidden className="size-6 shrink-0" />}
+    </>
+  );
+}
+
+
 
 // What each save state says and how it is marked lives in ui/StateMark.tsx,
 // one map over every union a chip can show.
@@ -60,6 +142,7 @@ export function EngineMayHoldDocumentNotice(props: {
   // not — and "It is read-only for now" would promise read access to
   // content the user cannot see.
   contentShown: boolean;
+  message?: string;
 }) {
   return (
     <div
@@ -76,8 +159,8 @@ export function EngineMayHoldDocumentNotice(props: {
           codex r20). What is true of all of them is the sentence below, and
           the retry is the same either way. */}
       <span>
-        dohc could not open this document for editing.
-        {props.contentShown ? " It is read-only for now." : ""}
+        {props.message ?? "dohc could not open this document for editing."}
+        {!props.message && props.contentShown ? " It is read-only for now." : ""}
       </span>
       <button
         type="button"
@@ -118,34 +201,20 @@ export function EngineArtifactAssetsInvalidNotice(props: {
   );
 }
 
-export function AffordanceCard(props: {
-  testId: string;
-  title: string;
-  body: string;
-  openExternally?: { workspaceId: string; path: string };
-}) {
+// The next step in a file view that cannot show its file: the system's app
+// for it.
+export function OpenExternallyButton(props: { workspaceId: string; path: string }) {
   return (
-    <div
-      data-testid={props.testId}
-      className="flex flex-1 flex-col items-center justify-center gap-2 px-6 text-center"
+    <SecondaryButton
+      onClick={() =>
+        void bridge().openFileExternally({
+          workspaceId: props.workspaceId,
+          relativePath: props.path,
+        })
+      }
     >
-      <span className="text-sm text-ink">{props.title}</span>
-      <span className="max-w-md text-xs text-muted">{props.body}</span>
-      {props.openExternally ? (
-        <button
-          type="button"
-          onClick={() =>
-            void bridge().openFileExternally({
-              workspaceId: props.openExternally!.workspaceId,
-              relativePath: props.openExternally!.path,
-            })
-          }
-          className="rounded border border-line bg-panel-2 px-2.5 py-1 text-xs text-muted hover:text-ink"
-        >
-          Open externally
-        </button>
-      ) : null}
-    </div>
+      Open externally
+    </SecondaryButton>
   );
 }
 
@@ -153,6 +222,8 @@ export function OrphanedDraftNotices(props: {
   workspaceId: string;
   path: string;
   message?: string;
+  // When set, the message explains only this draft; older drafts keep theirs.
+  messageDraftId?: number | null;
 }) {
   const drafts = useOrphanedDrafts(props.workspaceId, props.path);
   if (drafts.length === 0) return null;
@@ -165,7 +236,7 @@ export function OrphanedDraftNotices(props: {
           className="flex items-center justify-between gap-2 border-b border-line bg-panel px-4 py-1 text-[11px]"
         >
           <span className="text-danger">
-            {props.message ??
+            {(props.messageDraftId === undefined || props.messageDraftId === draft.id ? props.message : undefined) ??
               "This document reopened before your last edit saved. Copy your text to keep it."}
           </span>
           <div className="flex items-center gap-2">

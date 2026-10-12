@@ -1,6 +1,6 @@
 import { parseDatasetPath } from "@dohc/security-contract/dataset";
 // Pure workbench model: activity-bar view, side-panel visibility
-// and width, open editor tabs, and the right-hand Chats panel. Pure like
+// and width, open editor tabs, and the right-hand About rail. Pure like
 // window/windowState.ts so every transition and the persistence round-trip
 // are unit-tested without Electron. `dirty` is runtime-only (derived from the
 // editor's save state) and never lives here or on disk.
@@ -10,6 +10,7 @@ import type { SidebarSettings } from "../../settings/userSettings";
 
 export const VIEW_IDS = [
   "explorer",
+  "chats",
   "search",
   "graph",
   "sites",
@@ -21,7 +22,9 @@ export type ViewId = (typeof VIEW_IDS)[number];
 // every path in a view or tab id.
 export const APP_VIEW_ID_PREFIX = "app-view:";
 export type AppViewId = `${typeof APP_VIEW_ID_PREFIX}${string}`;
-export type ActivityViewId = ViewId | AppViewId;
+// Sharing sits at the foot of the rail, so the person cannot hide or reorder it.
+export const SHARING_VIEW_ID = "sharing";
+export type ActivityViewId = ViewId | AppViewId | typeof SHARING_VIEW_ID;
 
 export function appViewId(appRoot: string): AppViewId {
   return `${APP_VIEW_ID_PREFIX}${encodeURIComponent(appRoot)}`;
@@ -54,6 +57,7 @@ function isActivityViewId(value: unknown): value is ActivityViewId {
   if (typeof value !== "string") return false;
   return (
     isViewId(value) ||
+    value === SHARING_VIEW_ID ||
     parseAppViewId(value) !== null
   );
 }
@@ -308,13 +312,6 @@ export function isVirtualTabPath(path: string | null): boolean {
   );
 }
 
-// Selectors are a public UI contract, independent of persisted tab identities.
-export function editorTabTestId(path: string): string {
-  return isVirtualTabPath(path)
-    ? `tab-dohc://${path.slice(INTERNAL_TAB_SCHEME.length)}`
-    : `tab-${path}`;
-}
-
 export interface WorkbenchTab {
   path: string;
 }
@@ -335,10 +332,10 @@ export interface WorkbenchState {
   // in each group, while each group owns its own active tab.
   editorGroups: EditorGroup[];
   activeEditorGroup: string;
-  // The right-hand Chats panel (VS Code's secondary sidebar: toggleable,
+  // The right-hand About rail (VS Code's secondary sidebar: toggleable,
   // resizable, hidden by default). Independent of the left panel entirely.
-  chatsVisible: boolean;
-  chatsWidth: number;
+  aboutVisible: boolean;
+  aboutWidth: number;
   // Max height of the explorer's Open Editors list (VS Code-style resizable
   // section): the list caps here and scrolls internally; shorter lists shrink
   // to fit.
@@ -361,9 +358,9 @@ type EditorTransitionActivation = "target" | "preserve";
 export const SIDEBAR_MIN_WIDTH = 160;
 export const SIDEBAR_MAX_WIDTH = 2400;
 export const SIDEBAR_DEFAULT_WIDTH = 240;
-export const CHATS_MIN_WIDTH = 240;
-export const CHATS_MAX_WIDTH = 2400;
-export const CHATS_DEFAULT_WIDTH = 320;
+export const ABOUT_MIN_WIDTH = 240;
+export const ABOUT_MAX_WIDTH = 2400;
+export const ABOUT_DEFAULT_WIDTH = 320;
 // Open-editors rows are 28px (h-7). The default shows 4.5 rows — the half row
 // at the cutoff signals there is more to scroll; the min keeps two rows
 // grabbable and the max is generous (tall portrait monitors) like the rails.
@@ -395,8 +392,8 @@ export function defaultWorkbenchState(): WorkbenchState {
       { id: DEFAULT_EDITOR_GROUP_ID, tabs: [], activeTab: null, size: 1 },
     ],
     activeEditorGroup: DEFAULT_EDITOR_GROUP_ID,
-    chatsVisible: false,
-    chatsWidth: CHATS_DEFAULT_WIDTH,
+    aboutVisible: false,
+    aboutWidth: ABOUT_DEFAULT_WIDTH,
     openEditorsHeight: OPEN_EDITORS_DEFAULT_HEIGHT,
     expandedFolders: [],
     pinned: [],
@@ -410,9 +407,9 @@ export function clampSidebarWidth(width: number): number {
   return Math.min(SIDEBAR_MAX_WIDTH, Math.max(SIDEBAR_MIN_WIDTH, Math.round(width)));
 }
 
-export function clampChatsWidth(width: number): number {
-  if (!Number.isFinite(width)) return CHATS_DEFAULT_WIDTH;
-  return Math.min(CHATS_MAX_WIDTH, Math.max(CHATS_MIN_WIDTH, Math.round(width)));
+export function clampAboutWidth(width: number): number {
+  if (!Number.isFinite(width)) return ABOUT_DEFAULT_WIDTH;
+  return Math.min(ABOUT_MAX_WIDTH, Math.max(ABOUT_MIN_WIDTH, Math.round(width)));
 }
 
 export function clampOpenEditorsHeight(height: number): number {
@@ -862,12 +859,23 @@ export function setView(
   return { ...state, activeView: view, sidebarVisible: true };
 }
 
+// A command that names a view shows it and never hides it; only the rail's
+// own button toggles.
+export function showView(
+  state: WorkbenchState,
+  view: ActivityViewId,
+): WorkbenchState {
+  return state.activeView === view && state.sidebarVisible
+    ? state
+    : { ...state, activeView: view, sidebarVisible: true };
+}
+
 export function toggleSidebar(state: WorkbenchState): WorkbenchState {
   return { ...state, sidebarVisible: !state.sidebarVisible };
 }
 
-export function toggleChats(state: WorkbenchState): WorkbenchState {
-  return { ...state, chatsVisible: !state.chatsVisible };
+export function toggleAbout(state: WorkbenchState): WorkbenchState {
+  return { ...state, aboutVisible: !state.aboutVisible };
 }
 
 export function setSidebarWidth(state: WorkbenchState, width: number): WorkbenchState {
@@ -875,9 +883,9 @@ export function setSidebarWidth(state: WorkbenchState, width: number): Workbench
   return clamped === state.sidebarWidth ? state : { ...state, sidebarWidth: clamped };
 }
 
-export function setChatsWidth(state: WorkbenchState, width: number): WorkbenchState {
-  const clamped = clampChatsWidth(width);
-  return clamped === state.chatsWidth ? state : { ...state, chatsWidth: clamped };
+export function setAboutWidth(state: WorkbenchState, width: number): WorkbenchState {
+  const clamped = clampAboutWidth(width);
+  return clamped === state.aboutWidth ? state : { ...state, aboutWidth: clamped };
 }
 
 export function setOpenEditorsHeight(
@@ -1085,8 +1093,8 @@ export function serializeUiState(state: WorkbenchState): WorkspaceUiState {
       size: group.size,
     })),
     activeEditorGroup: state.activeEditorGroup,
-    chatsVisible: state.chatsVisible,
-    chatsWidth: clampChatsWidth(state.chatsWidth),
+    aboutVisible: state.aboutVisible,
+    aboutWidth: clampAboutWidth(state.aboutWidth),
     openEditorsHeight: clampOpenEditorsHeight(state.openEditorsHeight),
     expandedFolders: state.expandedFolders,
     pinned: state.pinned,
@@ -1239,8 +1247,11 @@ export function parseUiState(raw: unknown): WorkbenchState {
   const rawView = own("activeView");
   const rawSidebarVisible = own("sidebarVisible");
   const rawSidebarWidth = own("sidebarWidth");
-  const rawChatsVisible = own("chatsVisible");
-  const rawChatsWidth = own("chatsWidth");
+  // A file saved before the About rail names its fields chatsVisible and
+  // chatsWidth. Nothing reads them, so the rail opens closed at its default
+  // width and the rest of the file restores as saved.
+  const rawAboutVisible = own("aboutVisible");
+  const rawAboutWidth = own("aboutWidth");
   const rawOpenEditorsHeight = own("openEditorsHeight");
   return {
     activeView: isActivityViewId(rawView) ? rawView : defaults.activeView,
@@ -1254,14 +1265,14 @@ export function parseUiState(raw: unknown): WorkbenchState {
         : defaults.sidebarWidth,
     editorGroups: normalizedGroups,
     activeEditorGroup,
-    chatsVisible:
-      typeof rawChatsVisible === "boolean"
-        ? rawChatsVisible
-        : defaults.chatsVisible,
-    chatsWidth:
-      typeof rawChatsWidth === "number"
-        ? clampChatsWidth(rawChatsWidth)
-        : defaults.chatsWidth,
+    aboutVisible:
+      typeof rawAboutVisible === "boolean"
+        ? rawAboutVisible
+        : defaults.aboutVisible,
+    aboutWidth:
+      typeof rawAboutWidth === "number"
+        ? clampAboutWidth(rawAboutWidth)
+        : defaults.aboutWidth,
     openEditorsHeight:
       typeof rawOpenEditorsHeight === "number"
         ? clampOpenEditorsHeight(rawOpenEditorsHeight)

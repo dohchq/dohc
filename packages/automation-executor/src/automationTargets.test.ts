@@ -149,3 +149,14 @@ it("reuses descriptors until the indexed metadata revision changes", async () =>
   generation += 1;
   await expect(targets.validate!(target)).rejects.toThrow("No approval");
 });
+
+it.each([2, 3])("keeps the base target after approval of revision %s", async number => {
+  const w = workspace();
+  const approved = revision("Budget");
+  approved.revision = number;
+  approved.definition.schemaPath = `Budget/revisions/${number}-00000000-0000-4000-8000-000000000099/schema.sql`;
+  w.approved.set("Budget", approved);
+  expect(await w.targets.resolve("Budget")).toMatchObject({ kind: "dataset", approved: { revision: number } });
+  w.files.set(`Budget/revisions/${number}-00000000-0000-4000-8000-000000000099/dataset.json`, JSON.stringify(approved.definition));
+  expect(await w.targets.resolve(`Budget/revisions/${number}-00000000-0000-4000-8000-000000000099`)).toMatchObject({ kind: "problem", code: "descriptor-mismatch" });
+});

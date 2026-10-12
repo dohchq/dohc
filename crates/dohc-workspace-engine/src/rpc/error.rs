@@ -98,17 +98,6 @@ pub(super) fn map_runtime(error: RuntimeError) -> WireError {
     if matches!(
         &error,
         RuntimeError::Sync(SyncError::RetryableState {
-            reason: "collection-reconciliation-lease-held"
-        })
-    ) {
-        return WireError::new(
-            ErrorCode::CollectionReconciliationLeaseHeld,
-            "collection-reconciliation-lease-held",
-        );
-    }
-    if matches!(
-        &error,
-        RuntimeError::Sync(SyncError::RetryableState {
             reason: "settlement-materialization-pending"
         })
     ) {
@@ -179,6 +168,12 @@ pub(super) fn map_runtime(error: RuntimeError) -> WireError {
         return WireError::new(ErrorCode::Internal, message);
     }
     match &error {
+        RuntimeError::RecoveryImportRefused { reason } => {
+            return WireError::new(
+                ErrorCode::InvalidParams,
+                format!("capture-recovery-refused:{reason}"),
+            );
+        }
         RuntimeError::Collab(CollabError::AuthorCapacity) => {
             return WireError::new(ErrorCode::LimitExceeded, "ydoc-author-capacity");
         }
@@ -217,6 +212,9 @@ pub(super) fn map_runtime(error: RuntimeError) -> WireError {
                 ErrorCode::ProtocolVersionUnsupported,
                 "relay-api-version-too-new",
             );
+        }
+        RuntimeError::Relay(RelayError::SettlementProofBudget) => {
+            return WireError::new(ErrorCode::Overloaded, "settlement-proof-budget");
         }
         RuntimeError::Relay(RelayError::OriginDiverged) => {
             return WireError::new(ErrorCode::InvalidParams, "relay-origin-diverged");
@@ -287,6 +285,13 @@ pub(super) fn map_runtime(error: RuntimeError) -> WireError {
         RuntimeError::Sync(error) => map_sync_code(error),
         RuntimeError::Relay(error) => map_relay_code(error),
         RuntimeError::Search(error) => map_search_code(error),
+        materialize @ RuntimeError::Materialize(_) => {
+            eprintln!(
+                "engine: materialization refusal: {}",
+                error_chain(&materialize)
+            );
+            return WireError::new(ErrorCode::Internal, materialize.code());
+        }
         other => {
             // The wire carries a constant message. The cause goes to stderr,
             // which the desktop copies into its log.
@@ -331,9 +336,10 @@ fn map_relay_code(error: RelayError) -> ErrorCode {
         // A 429 asks the caller to back off and retry, which is exactly
         // Overloaded's wire contract (Retryability::AfterBackoff) — unlike
         // QuotaExceeded, which reads as a persistent ceiling.
-        RelayError::DiscussionRateLimited | RelayError::LinkReadRateLimited => {
-            ErrorCode::Overloaded
-        }
+        RelayError::DiscussionRateLimited
+        | RelayError::LinkReadRateLimited
+        | RelayError::ShareAccessRateLimited
+        | RelayError::SettlementProofBudget => ErrorCode::Overloaded,
         RelayError::NoProgress => ErrorCode::RelayNoProgress,
         RelayError::BlobMissing => ErrorCode::BlobMissing,
         RelayError::BlobReferenceMissing => ErrorCode::BlobReferenceMissing,
@@ -453,6 +459,7 @@ fn map_collab_code(error: CollabError) -> ErrorCode {
         | CollabError::ContentKindMismatch
         | CollabError::UnsupportedContentKind { .. }
         | CollabError::MarkdownRewriteUnsupported { .. }
+        | CollabError::MarkdownQuoteDepthExceeded
         | CollabError::BaseAlreadyClaimed
         | CollabError::BaseStateDiverged
         | CollabError::BaseRelaySequencePending
@@ -533,20 +540,34 @@ pub(super) fn workspace_unavailable() -> WireError {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn collection_lease_refusal_has_its_own_retryable_wire_code() {
-        let error = super::map_runtime(dohc_engine_runtime::RuntimeError::Sync(
-            dohc_engine_sync::SyncError::RetryableState {
-                reason: "collection-reconciliation-lease-held",
+    fn conditional_restore_delete_materialization_reason_reaches_rpc() {
+        for error in [
+            dohc_engine_files::MaterializeError::SymlinkTarget,
+            dohc_engine_files::MaterializeError::RecoveryUnavailable,
+            dohc_engine_files::MaterializeError::Io {
+                path: "record.md".into(),
+                kind: std::io::ErrorKind::PermissionDenied,
             },
+        ] {
+            let code = error.code();
+            let wire = super::map_runtime(dohc_engine_runtime::RuntimeError::Materialize(error));
+            assert_eq!(wire.code, dohc_engine_protocol::ErrorCode::Internal);
+            assert_eq!(wire.message, code);
+            assert!(!wire.message.contains("record.md"));
+        }
+    }
+
+    #[test]
+    fn settlement_proof_budget_has_a_retryable_rpc_error() {
+        let error = super::map_runtime(dohc_engine_runtime::RuntimeError::Relay(
+            dohc_engine_sync::RelayError::SettlementProofBudget,
         ));
-        assert_eq!(
-            error.code,
-            dohc_engine_protocol::ErrorCode::CollectionReconciliationLeaseHeld
-        );
+        assert_eq!(error.code, dohc_engine_protocol::ErrorCode::Overloaded);
         assert_eq!(
             error.retry,
             dohc_engine_protocol::Retryability::AfterBackoff
         );
+        assert_eq!(error.message, "settlement-proof-budget");
     }
 
     #[test]
@@ -989,6 +1010,7 @@ mod tests {
             (RelayError::QuotaExceeded, ErrorCode::QuotaExceeded),
             (RelayError::DiscussionRateLimited, ErrorCode::Overloaded),
             (RelayError::LinkReadRateLimited, ErrorCode::Overloaded),
+            (RelayError::ShareAccessRateLimited, ErrorCode::Overloaded),
             (RelayError::PayloadTooLarge, ErrorCode::PayloadTooLarge),
             (RelayError::Forbidden, ErrorCode::Forbidden),
             (RelayError::ShareReadOnly, ErrorCode::ShareReadOnly),
@@ -1017,6 +1039,7 @@ mod tests {
                 ErrorCode::UnknownChatOperation,
             ),
             (RelayError::LinkReadRateLimited, ErrorCode::Overloaded),
+            (RelayError::ShareAccessRateLimited, ErrorCode::Overloaded),
             (RelayError::PresenceCapacity, ErrorCode::PresenceCapacity),
             (RelayError::SelfShare, ErrorCode::SelfShare),
             (RelayError::AmbiguousSelector, ErrorCode::AmbiguousSelector),
@@ -1054,6 +1077,7 @@ mod tests {
         for relay in [
             RelayError::DiscussionRateLimited,
             RelayError::LinkReadRateLimited,
+            RelayError::ShareAccessRateLimited,
         ] {
             let wire = map_runtime(RuntimeError::Relay(relay));
             assert_eq!(wire.code, ErrorCode::Overloaded);

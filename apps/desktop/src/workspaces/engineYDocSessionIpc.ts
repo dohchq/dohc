@@ -1,4 +1,9 @@
+import { isTypingSessionUnresolved } from "./outageTypingRecovery";
+import { SharedDocumentWaitingError } from "../ipc/sharedDocumentOpenState";
+import { engineSaveState } from "./engineYDocSaveState";
 import { createHash } from "node:crypto";
+import { accessSync, constants as fsConstants } from "node:fs";
+import { join } from "node:path";
 import { validateUserWritePath } from "@dohc/workspace-core";
 import { liveDocumentKindForPath } from "@dohc/workspace-contracts/live-documents";
 import {
@@ -25,6 +30,7 @@ import {
   OpenEngineYDocSessionResult,
   ReadEngineYDocArtifactAssetPayload,
   ReadEngineYDocArtifactAssetResult,
+  RetryEngineYDocSavePayload,
   type AcknowledgeEngineYDocLineageReplacementPayload as AcknowledgePayload,
   type AcknowledgeEngineYDocLineageReplacementResult as AcknowledgeResult,
   type ApplyEngineYDocUpdatePayload as ApplyUpdatePayload,
@@ -34,6 +40,9 @@ import {
   type OpenEngineYDocSessionResult as OpenResult,
   type ReadEngineYDocArtifactAssetPayload as ReadArtifactPayload,
   type ReadEngineYDocArtifactAssetResult as ReadArtifactResult,
+  type RetryEngineYDocSavePayload as RetrySavePayload,
+  type RetryEngineYDocSaveResult as RetrySaveResult,
+  type ReadOnlyTransitionCause,
 } from "../ipc/bridgeContract";
 import { CHANNELS, type EngineYDocSaveStateName } from "../ipc/channels";
 import {
@@ -81,8 +90,11 @@ export type EngineYDocSessionProvider = Omit<WorkspaceEngineYDocProviderSession,
   settleNow?: WorkspaceEngineYDocProviderSession["settleNow"];
 };
 export interface EngineYDocSessionCapture {
-  openYDocSession(input: Omit<Parameters<WorkspaceEngineCapture["openYDocSession"]>[0], "onSaveState"> & {onSaveState?: (state: EngineYDocSaveStateName, token: number, event: EngineYDocSaveEvent, authorCapacity?: boolean) => void}): Promise<EngineYDocSessionProvider>;
+  waitForAdmission?(path: string, signal: AbortSignal): Promise<boolean>;
+  openYDocSession(input: Omit<Parameters<WorkspaceEngineCapture["openYDocSession"]>[0], "onSaveState"> & {onSaveState?: (state: EngineYDocSaveStateName, token: number, event: EngineYDocSaveEvent, authorCapacity?: boolean, readOnlyCause?: ReadOnlyTransitionCause) => void}): Promise<EngineYDocSessionProvider>;
 }
+
+type SharedAdmissionWait = {cancel: AbortController; authorityId: symbol; generation: number};
 
 interface EngineYDocWorkspace {
   workspaceId: string;
@@ -120,8 +132,22 @@ interface EngineYDocSessionIpcOptions {
   localPersonId: () => string;
 }
 
+// Whether the file refuses writes. A missing file, or one that cannot be
+// checked, is not read-only.
+function fileIsReadOnly(absolutePath: string): boolean {
+  try {
+    accessSync(absolutePath, fsConstants.W_OK);
+    return false;
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    return code === "EACCES" || code === "EPERM";
+  }
+}
+
 interface SessionEvent {
+  readOnlyCause?: ReadOnlyTransitionCause;
   authorCapacity?: boolean;
+  saveFailure?: { readOnly: boolean };
   editRefusal?: import("../ipc/bridgeContract").EngineYDocSaveStateEvent["editRefusal"];
   state: EngineYDocSaveStateName;
   seq: number;
@@ -134,6 +160,7 @@ interface LineageReplacement {
 }
 
 interface EngineYDocIpcOwnedSession {
+  readonly readOnlyCause: ReadOnlyTransitionCause;
   ownerHandoff?: { ready(): void; fail(error: unknown): void; done: Promise<void>; finish(): void };
   workspace: EngineYDocWorkspace;
   provider: EngineYDocSessionProvider;
@@ -418,6 +445,8 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
   readonly #onError: EngineYDocSessionIpcOptions["onError"];
   readonly #localPersonId: EngineYDocSessionIpcOptions["localPersonId"];
   readonly #arrivals = new EngineYDocArrivals();
+  readonly #admissionWaits = new Map<EngineYDocIpcSender, Map<string, SharedAdmissionWait>>();
+  readonly #admissionSenders = new WeakSet<EngineYDocIpcSender>();
   readonly #owner: EngineYDocIpcSessionOwner;
   readonly #documentReservations: DocumentMutationReservations;
   // One main-side edit at a time per document. Each edit reads the document's
@@ -577,7 +606,7 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
     let capture: EngineYDocSessionCapture | null;
     if (shared && this.#sharedCaptureFor) {
       try { capture = await this.#sharedCaptureFor?.(workspace) ?? null; }
-      catch { return unavailableOpen({ liveHostUnavailable: true }); }
+      catch (error) { return unavailableOpen(error instanceof SharedDocumentWaitingError ? { sharedWaiting: error.waiting } : { liveHostUnavailable: true }); }
       authority.assertCurrent();
       if (!capture || !rendererSession.isCurrent()) return unavailableOpen({ liveHostUnavailable: true });
     } else capture = this.#captureFor(workspace);
@@ -632,6 +661,19 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
       path: canonicalPath,
       openSession: async (signals) => {
         const saveSeq = createEngineYDocSaveSeqState();
+        let lastEvent: SessionEvent | null = null;
+        let currentReadOnlyCause: ReadOnlyTransitionCause = "reconnecting";
+        const emit = (event: SessionEvent): void => {
+          if (lastEvent?.state === event.state &&
+            (event.state === "settling" || lastEvent.seq === event.seq) &&
+            lastEvent.saveFailure?.readOnly === event.saveFailure?.readOnly &&
+            lastEvent.authorCapacity === event.authorCapacity &&
+            lastEvent.readOnlyCause === event.readOnlyCause &&
+            lastEvent.editRefusal?.requestId === event.editRefusal?.requestId &&
+            lastEvent.editRefusal?.message === event.editRefusal?.message) return;
+          signals.emit(event);
+          lastEvent = event;
+        };
         let delivery: "pending" | "active" | "discarded" = "pending";
         const pending: Array<() => void> = [];
         const publish = (send: () => void): void => {
@@ -649,24 +691,34 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
               if (recordWriteHeld()) throw new Error(`dohc is handing ${canonicalPath} to its live session, and nothing changed. Try again.`);
             },
             onEditRefused: (requestId, message) => {
-              publish(() => signals.emit({
+              publish(() => emit({
                 state: "error", seq: saveSeq.dirtySeq,
                 editRefusal: { workspaceId: workspace.workspaceId, path: canonicalPath, requestId, message },
               }));
             },
-            onSaveState: (state, token, event, authorCapacity) => {
+            onSaveState: (state, token, event, authorCapacity, readOnlyCause) => {
+              if (state === "read-only") currentReadOnlyCause = readOnlyCause ?? "reconnecting";
               const seq =
                 event === "start"
                   ? noteSettleStart(saveSeq, token)
                   : event === "outcome"
                     ? noteSettleOutcome(saveSeq, token)
                     : 0;
-              publish(() => signals.emit({ state, seq, ...(authorCapacity ? { authorCapacity: true } : {}) }));
+              // A settle that could not write the file. The read-only check is
+              // one stat, made only on a failure, so the notice can name it.
+              const saveFailure = state === "error" && event === "outcome" && !authorCapacity
+                ? { readOnly: fileIsReadOnly(join(workspace.rootPath, canonicalPath)) }
+                : undefined;
+              publish(() => emit({
+                state, seq, ...(authorCapacity ? { authorCapacity: true } : {}),
+                ...(readOnlyCause ? { readOnlyCause } : {}), ...(saveFailure ? { saveFailure } : {}),
+              }));
             },
             onRemoteUpdate: (update) => {
               publish(() => signals.remoteUpdate(update));
             },
             onLineageReplaced: (update, recoveredPaths) => {
+              lastEvent = null;
               publish(() =>
                 signals.replaceLineage({
                   update,
@@ -686,6 +738,7 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
         }
 
         const owned: EngineYDocIpcOwnedSession = {
+          get readOnlyCause() { return currentReadOnlyCause; },
           workspace,
           provider,
           saveSeq,
@@ -699,7 +752,7 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
           path: canonicalPath,
           deleted: false,
           objectChanged: false,
-          emit: signals.emit,
+          emit,
           show: (update) => publish(() => signals.remoteUpdate(update)),
           markDeleted() {
             owned.deleted = true;
@@ -774,7 +827,8 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
       `[desktop] engine Y.Doc open refused for ${canonicalPath}:`,
       opened.error,
     );
-    return shared ? unavailableOpen({ liveHostUnavailable: true }) : this.#openRefusal(opened.error);
+    return shared ? unavailableOpen(opened.error instanceof SharedDocumentWaitingError
+      ? { sharedWaiting: opened.error.waiting } : { liveHostUnavailable: true }) : this.#openRefusal(opened.error);
   }
 
   async readArtifactAsset(
@@ -809,6 +863,33 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
     return ReadEngineYDocArtifactAssetResult.parse(await access.value);
   }
 
+  // Try again on a document that couldn't save: settle the session this
+  // window has open for it now, whichever of its editors opened it. The settle reports its outcome
+  // as a save state. A settle that cannot start, or that fails, rejects
+  // here, so the caller can say so instead of waiting.
+  async retrySave(sender: EngineYDocIpcSender, payload: RetrySavePayload): Promise<RetrySaveResult> {
+    const input = RetryEngineYDocSavePayload.parse(payload);
+    const renderer = this.#sessionFor(sender);
+    if (!renderer?.isCurrent() || renderer.workspaceId !== input.workspaceId) {
+      throw new Error("This document belongs to another workspace.");
+    }
+    const authority = this.#acquireWorkspace(input.workspaceId);
+    let settle: Promise<unknown>;
+    try {
+      authority.assertCurrent();
+      const held = this.#owner.documentSession(
+        authority.workspace.attachmentId, input.path, { sender, generation: renderer.generation },
+      );
+      if (!held || held.session.deleted) return "closed";
+      if (!held.session.provider.settleNow) throw new Error("dohc could not start a save for this document.");
+      settle = held.session.provider.settleNow();
+    } finally {
+      authority.release();
+    }
+    await settle;
+    return "settled";
+  }
+
   applyUpdate(
     sender: EngineYDocIpcSender,
     payload: ApplyUpdatePayload,
@@ -829,7 +910,7 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
           return { accepted: false, reason: "deleted" };
         }
         if (this.#isSharedView(owned.workspace) && !owned.provider.liveWritable?.()) {
-          owned.emit({ state: "read-only", seq: input.seq });
+          owned.emit({ state: "read-only", seq: input.seq, readOnlyCause: owned.readOnlyCause });
           return { accepted: false, reason: "read-only" };
         }
         // A renderer editor update is this computer's person typing: agent
@@ -1153,17 +1234,53 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
 
   async close(sender: EngineYDocIpcSender, payload: ClosePayload): Promise<void> {
     const input = CloseEngineYDocSessionPayload.parse(payload);
+    this.#admissionWaits.get(sender)?.get(input.sessionId)?.cancel.abort();
     await this.#owner.release(this.#caller(sender, input.sessionId));
+  }
+
+  async waitForAdmission(sender: EngineYDocIpcSender, payload: OpenPayload): Promise<boolean> {
+    const input = OpenEngineYDocSessionPayload.parse(payload);
+    const renderer = this.#sessionFor(sender);
+    if (!renderer?.isCurrent() || renderer.workspaceId !== input.workspaceId || sender.isDestroyed()) return false;
+    const authority = this.#acquireWorkspace(input.workspaceId);
+    const waits = this.#admissionWaits.get(sender) ?? new Map<string, SharedAdmissionWait>();
+    // Bound IPC waits too, including requests that have not reached relay authentication.
+    if (waits.size >= 4 || waits.has(input.sessionId)) { authority.release(); return false; }
+    this.#admissionWaits.set(sender, waits);
+    if (!this.#admissionSenders.has(sender)) {
+      this.#admissionSenders.add(sender);
+      sender.once("destroyed", () => {
+        for (const wait of this.#admissionWaits.get(sender)?.values() ?? []) wait.cancel.abort();
+      });
+    }
+    const cancel = new AbortController();
+    waits.set(input.sessionId, {cancel, authorityId: authority.workspace.attachmentId, generation: renderer.generation});
+    try {
+      if (!this.#isSharedView(authority.workspace)) return false;
+      const capture = await this.#sharedCaptureFor?.(authority.workspace);
+      authority.assertCurrent(); cancel.signal.throwIfAborted();
+      if (!renderer.isCurrent()) return false;
+      const ready = await capture?.waitForAdmission?.(input.path, AbortSignal.any([cancel.signal, AbortSignal.timeout(45_000)]));
+      authority.assertCurrent(); cancel.signal.throwIfAborted();
+      return ready === true && renderer.isCurrent();
+    } catch { return false; }
+    finally {
+      waits.delete(input.sessionId);
+      if (waits.size === 0) this.#admissionWaits.delete(sender);
+      authority.release();
+    }
   }
 
   retireSender(
     sender: EngineYDocIpcSender,
     generation: number,
   ): Promise<EngineYDocSessionReleaseOutcome[]> {
+    for (const wait of this.#admissionWaits.get(sender)?.values() ?? []) if (wait.generation === generation) wait.cancel.abort();
     return this.#owner.retireSender({ sender, generation });
   }
 
   shutdown(): Promise<EngineYDocSessionReleaseOutcome[]> {
+    for (const waits of this.#admissionWaits.values()) for (const wait of waits.values()) wait.cancel.abort();
     this.#arrivals.clear();
     return this.#owner.shutdown();
   }
@@ -1175,6 +1292,7 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
   retireAuthority(
     authorityId: symbol,
   ): Promise<EngineYDocSessionReleaseOutcome[]> {
+    for (const waits of this.#admissionWaits.values()) for (const wait of waits.values()) if (wait.authorityId === authorityId) wait.cancel.abort();
     // The attachment's documents and their pending updates go with it.
     this.#arrivals.retireAuthority(authorityId);
     return this.#owner.retireAuthority(authorityId);
@@ -1203,7 +1321,12 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
           CHANNELS.engineYDocSaveState,
           EngineYDocSaveStateEvent.parse({
             sessionId: outbound.sessionId,
+            workspaceId: outbound.workspaceId,
+            path: outbound.path,
             ...message.event,
+            typingUnresolved: isTypingSessionUnresolved(outbound.workspaceId,outbound.path),
+            ...(message.closing ? { closing: true } : {}),
+            ...engineSaveState(message.event.state, message.event.editRefusal),
           }),
         );
         return;

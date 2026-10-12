@@ -9,14 +9,19 @@ function startFor(name: string): (source: string) => number {
 }
 
 describe('block start searches', () => {
+  // marked uses a start only to cut the paragraph it is about to read, which
+  // ends at the first line holding only spaces. A marker past that line cuts
+  // nothing, so the search stops there.
   it.each([
     ['callout', /(?:^|\n)( {0,3}>\s?\[!)/],
     ['mathBlock', /(?:^|\n)(\$\$)/],
-  ] as const)('preserves %s marker positions', (name, pattern) => {
+  ] as const)('finds %s markers in the paragraph marked reads', (name, pattern) => {
     const start = startFor(name)
     const check = (source: string) => {
       const match = pattern.exec(source)
-      const expected = match ? (match.index === 0 ? 0 : match.index + 1) : -1
+      const marker = match ? (match.index === 0 ? 0 : match.index + 1) : -1
+      const paragraphEnd = /\n *(?:\n|$)/.exec(source)?.index ?? source.length
+      const expected = marker < paragraphEnd ? marker : -1
       expect(start(source), JSON.stringify(source)).toBe(expected)
     }
     for (const prefix of ['', '\n', '\n\n', 'paragraph\n', 'paragraph\n\n', 'escaped\\', 'x']) {

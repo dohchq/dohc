@@ -1,4 +1,5 @@
 import {LIVE_FRAME_DECLARED_SUBMIT_MAX_BYTES} from "@dohc/live-session-contract/live-frame";
+import {resolve} from "node:path";
 import {afterEach, expect, it, vi} from "vitest";
 import {parseDesktopOwnerDeliveryConfig, startDesktopOwnerDelivery} from "./desktopOwnerDelivery";
 import type {OwnerYDocDrainResult} from "./ownerYDocOutbox";
@@ -6,7 +7,7 @@ const binding = {workspaceId: "workspace", mainVersionId: "main", objectId: "obj
   currentPath: "a.md", selectorPaths: ["a.md"], restoreFenceGeneration: 1};
 const frames = {receive: {maxFrameBytes: LIVE_FRAME_DECLARED_SUBMIT_MAX_BYTES, maxStateVectorBytes: 1024, maxUpdateBytes: 4096, maxSyncBytes: 4096},
   maxQueuedBytes: 4096, maxQueuedFrames: 32, maxControlBytes: 4096, maxControlFrames: 8, maxAssemblyBytes: 4096};
-const config = {version: 1, nativeConfigPath: "C:/test/native-owner.json", nativeClient: {aggregateBytes: 100_000_000, maxUploads: 2}, relayUrl: "https://relay.example.test", frames, attemptTimeoutMs: 10_000, retryDelayMs: 2500,
+const config = {version: 1, nativeConfigPath: resolve("test", "native-owner.json"), nativeClient: {aggregateBytes: 100_000_000, maxUploads: 2}, relayUrl: "https://relay.example.test", frames, attemptTimeoutMs: 10_000, retryDelayMs: 2500,
   documents: [{binding, relayDatabaseNamespace: "namespace", shareId: "share"}]};
 function deferred<T>() {let resolve!: (value: T) => void; const promise = new Promise<T>(done => {resolve = done;}); return {promise, resolve};}
 afterEach(() => vi.useRealTimers());
@@ -16,7 +17,7 @@ it("accepts only explicit owner document targets and unchanged frame budgets", (
   expect(parsed.documents).toEqual(config.documents); expect(parsed.frames).toEqual(frames);
   for (const changed of [{...config, version: 2}, {...config, documents: []}, {...config, bearer: "forbidden"},
     {...config, documents: [config.documents[0], config.documents[0]]}, {...config, retryDelayMs: 0},
-    {...config, relayUrl: "https://user:password@relay.example.test"}]) expect(() => parseDesktopOwnerDeliveryConfig(changed)).toThrow();
+    {...config, relayUrl: "https://user:password@relay.example.test"}, {...config, nativeConfigPath: "native-owner.json"}]) expect(() => parseDesktopOwnerDeliveryConfig(changed)).toThrow();
 });
 
 it("requires frame and control budgets that carry the largest declared submission", () => {

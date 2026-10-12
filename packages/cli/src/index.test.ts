@@ -328,6 +328,16 @@ describe("executeCli", () => {
       stdout: "",
       stderr: "dohc: change not found: moment-9\n",
     });
+    // Unreadable History rules: the list refuses instead of saying there is no History.
+    const hidden = { ok: false, status: "policy-unreadable", unreadable: [".dohc/visibility.toml"],
+      reason: "History is hidden because dohc can't read .dohc/visibility.toml" };
+    for (const argv of [["history", "list"], ["history", "list", "--json"]]) {
+      expect(await executeCli({ argv, env: {}, request: async () => hidden })).toEqual({
+        exitCode: 1,
+        stdout: "",
+        stderr: "dohc: History is hidden because dohc can't read .dohc/visibility.toml\n",
+      });
+    }
   });
 
   it("lists an automation's runs and shows what one run's steps changed", async () => {
@@ -506,5 +516,27 @@ describe("executeCli", () => {
       request: async () => ({ groups: [{ id: 7 }] }),
     });
     expect(result.stderr).toBe("dohc: desktop app returned an invalid response\n");
+  });
+
+  it("refuses malformed desktop transport results without exposing validation details", async () => {
+    const stateDir = await tempStateDir();
+    const result = await executeCli({
+      argv: ["chat", "groups"],
+      env: {},
+      client: {
+        stateDir,
+        platform: "linux",
+        transport: async () => ({
+          protocolVersion: CLI_PROTOCOL_VERSION,
+          ok: true,
+          result: { groups: [{ id: 7 }] },
+        }),
+      },
+    });
+    expect(result).toEqual({
+      exitCode: 1,
+      stdout: "",
+      stderr: "dohc: desktop app returned an invalid response\n",
+    });
   });
 });

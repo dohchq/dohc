@@ -2,8 +2,9 @@ import {
   isChatShareAccessValue,
   isShareAccessValue,
 } from "@dohc/security-contract";
-import { effectiveShareSelector, isLiveEditShareSelector, parseStoredAnyShareSelectorJson, type StoredAnyShareSelector } from "./shareFilter";
+import { groupChannelIsOrdinary, isGroupSelector, effectiveShareSelector, isLiveEditShareSelector, parseStoredAnyShareSelectorJson, type StoredAnyShareSelector } from "./shareFilter";
 import type {
+  SyncRelayStorage,
   SyncRelayGrantedShareRow,
   SyncRelayShareWithGrantRow,
   SyncRelayShareGrantRow,
@@ -29,6 +30,7 @@ function storedSelectorKind(
 }
 
 export function createShareSummaries(
+  storage: Pick<SyncRelayStorage, "findChannelCreateKind">,
   labels: (shareId: string) => import("@dohc/security-contract/share-labels").ShareLabels,
   lookupUserEmail?: (userId: string) => Promise<string | null> | string | null,
   namedBrowserOrigin?: string,
@@ -37,6 +39,14 @@ export function createShareSummaries(
     const effective = effectiveShareSelector(selector, access);
     return namedBrowserOrigin && effective && isLiveEditShareSelector(effective)
       ? { browserInvitationUrl: `${namedBrowserOrigin}/s/edit/${encodeURIComponent(grantId)}` }
+      : {};
+  };
+  const groupFileScope = (workspaceId: string, selector: StoredAnyShareSelector | null, access: string) => {
+    const effective = selector && effectiveShareSelector(selector, access);
+    return effective && isGroupSelector(effective)
+      ? {fileScope: groupChannelIsOrdinary(effective, {
+          channelKind: (wireId) => storage.findChannelCreateKind(workspaceId, wireId),
+        }) ? "served" as const : "not-served" as const}
       : {};
   };
   const shareSummaryBase = (
@@ -65,6 +75,7 @@ export function createShareSummaries(
       // path is the invariant here, and listing it reveals nothing the
       // caller did not already have.
       selector,
+      ...groupFileScope(share.workspaceId, selector, grant.access),
       access: grant.access,
       grantId: grant.grantId,
       principalKind: grant.principalKind,
@@ -82,6 +93,7 @@ export function createShareSummaries(
 
   const grantedShareSummary = async (
     row: SyncRelayGrantedShareRow,
+    roster?: { granterEmail: string | null },
   ): Promise<Record<string, unknown>> => {
     const { share, grant } = row;
     // A pending invite has no recipient user id yet; surface the addressed
@@ -95,6 +107,7 @@ export function createShareSummaries(
     const selector = parseStoredAnyShareSelectorJson(share.selectorJson);
     return {
       ...shareSummaryBase(row, selector),
+      ...(roster ? { granterUserId: share.granterUserId, granterEmail: roster.granterEmail, status: grant.status } : {}),
       workspaceId: share.workspaceId,
       recipientUserId: grant.principalUserId,
       recipientEmail,
@@ -230,6 +243,7 @@ export function createShareSummaries(
       revokedAtMs: grant.revokedAtMs,
       lastUsedAtMs: row.lastUsedAtMs,
       urlIssuedAtMs: row.urlIssuedAtMs,
+      ...(share.creationProvenance ? {creationProvenance: share.creationProvenance} : {}),
       automationsGeneration: row.automationsGeneration,
       dependents: await Promise.all(row.dependents.map(dependentGrantSummary)),
     };

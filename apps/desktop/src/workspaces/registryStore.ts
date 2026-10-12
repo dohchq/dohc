@@ -4,17 +4,17 @@ import {
   mkdirSync,
   openSync,
   readFileSync,
-  renameSync,
-  unlinkSync,
   writeFileSync,
 } from "node:fs";
-import { dirname } from "node:path";
+import { dirname, join } from "node:path";
+import { atomicReplaceFileSync } from "../atomicReplaceFile";
 import type { RelayAutomationHost } from "@dohc/workspace-contracts/relay";
+import { createShareRosterStore } from "./shareRosterStore";
 import type { ShareRoster } from "../automations/shareRoster";
 import type { RosterListing } from "@dohc/automation-executor/roster-listing";
 import type { CreatedWorkspace } from "./createWorkspaceFolder";
 import type { ConfirmedShareRemoval } from "./recipientShareReconciliation";
-import type { ShareViewSelector } from "./shareViewInfo";
+import type { ShareUnconfirmedChanges, ShareViewSelector } from "./shareViewInfo";
 
 // Pure registry persistence: a JSON file of known local workspaces. The
 // electron wiring (userData path, test-home seam) lives in
@@ -221,6 +221,8 @@ export interface ShareViewIdentity {
   subjectName?: string | null;
   sharerName?: string | null;
   shareId: string;
+  // The relay's workspace owner id; older views learn it on refresh.
+  granterUserId?: string;
   granterEmail: string | null;
   genericChatWritable: boolean;
   // The selector the relay stated for this share, pinned here when the record
@@ -246,6 +248,12 @@ export interface ShareViewIdentity {
   // rather than misreading a 404 as "the share ended".
   // Optional for views registered before this field existed.
   relayUrl?: string;
+  // The account that opened this copy. A missing pin cannot verify revocation.
+  recipientUserId?: string;
+  // Paths capture could not save before a restriction. Null protects the whole
+  // copy when capture failed before it could enumerate paths. Reopen to resume.
+  unsavedPaths?: string[] | null;
+  unconfirmedChanges?: ShareUnconfirmedChanges;
 }
 
 // A shared CHANNEL this workspace joined through a chat grant
@@ -318,6 +326,7 @@ export interface RegistryEntry extends CreatedWorkspace {
   confirmedRemovedShares?: ConfirmedShareRemoval[];
   // The grants the owner gave on this workspace, as the relay last listed
   // them. Absent until the first listing. See automations/shareRoster.ts.
+  // Hydrated in memory from stateDir/share-rosters. Never serialized into the registry.
   shareRoster?: ShareRoster;
   // The computer that runs this synced workspace's schedules, as the relay
   // last said; null when it recorded none. See automations/automationHost.ts.
@@ -370,6 +379,15 @@ export function createRegistryStore(registryFile: string) {
   // The process exclusively owns this file (single-instance lock), so the
   // parsed registry is cached after first read and refreshed on write.
   let cache: RegistryFile | null = null;
+  const rosters = createShareRosterStore(join(dirname(registryFile), "share-rosters"));
+
+  // A non-enumerable projection keeps existing roster consumers on one store,
+  // without reading every workspace's grants during registry startup or writes.
+  function withRoster(entry: RegistryEntry): RegistryEntry {
+    const registered = Object.fromEntries(Object.entries(entry).filter(([key]) => key !== "shareRoster")) as RegistryEntry;
+    Object.defineProperty(registered, "shareRoster", { get: () => rosters.read(registered), enumerable: false });
+    return registered;
+  }
 
   function read(): RegistryFile {
     if (cache) return cache;
@@ -411,7 +429,7 @@ export function createRegistryStore(registryFile: string) {
     if (!Array.isArray(obj.workspaces)) {
       throw new Error(`Workspace registry "workspaces" is not an array (${registryFile}).`);
     }
-    cache = { version: 1, workspaces: obj.workspaces as RegistryEntry[] };
+    cache = { version: 1, workspaces: (obj.workspaces as RegistryEntry[]).map(withRoster) };
     return cache;
   }
 
@@ -422,14 +440,12 @@ export function createRegistryStore(registryFile: string) {
     // flush the directory entry too before publishing the new cache value.
     // Node/libuv cannot fsync directory handles on Windows, where it returns
     // EPERM, so the flushed file plus atomic rename is the strongest Node API.
-    const tmp = `${registryFile}.tmp-${process.pid}`;
     let replaced = false;
     try {
-      writeAndSync(
+      atomicReplaceFileSync(registryFile, (tmp) => writeAndSync(
         tmp,
         Buffer.from(`${JSON.stringify(registry, null, 2)}\n`),
-      );
-      renameSync(tmp, registryFile);
+      ));
       replaced = true;
       if (process.platform !== "win32") {
         fsyncAndClose(openSync(directory, "r"));
@@ -438,14 +454,6 @@ export function createRegistryStore(registryFile: string) {
       // A failed directory sync happens after replacement. Drop the old cache
       // so the next read observes the file that rename made visible.
       if (replaced) cache = null;
-      // A failed write or rename must not leave this process's temp file
-      // behind. Cleanup is best-effort because the persistence error is the
-      // one the caller must receive.
-      try {
-        unlinkSync(tmp);
-      } catch {
-        // Keep the original persistence error.
-      }
       throw error;
     }
     cache = registry;
@@ -470,7 +478,7 @@ export function createRegistryStore(registryFile: string) {
     write({
       ...registry,
       workspaces: registry.workspaces.map((entry, entryIndex) =>
-        entryIndex === index ? updated : entry,
+        entryIndex === index ? withRoster(updated) : entry,
       ),
     });
   }
@@ -503,11 +511,15 @@ export function createRegistryStore(registryFile: string) {
             `If this is a copy, remove its .dohc folder to attach it as a new workspace.`,
         );
       }
-      write({ ...registry, workspaces: [...registry.workspaces, workspace] });
+      write({ ...registry, workspaces: [...registry.workspaces, withRoster(workspace)] });
     },
 
     setRemote(workspaceId: string, remote: RemoteIdentity): void {
-      updateWorkspaceEntry(workspaceId, (entry) => ({ ...entry, remote }));
+      const entry = read().workspaces.find(entry => entry.workspaceId === workspaceId);
+      if (!entry) throw new Error(`Unknown workspace: ${workspaceId}`);
+      const next = { ...entry, remote };
+      updateWorkspaceEntry(workspaceId, () => next);
+      if (entry.remote?.serverUrl !== remote.serverUrl || entry.remote?.ownerUserId !== remote.ownerUserId) rosters.remove(entry);
     },
 
     // Unknown ids are ignored: an open racing a forget must not fail on the
@@ -584,25 +596,19 @@ export function createRegistryStore(registryFile: string) {
      * Store a new listing of the workspace's grants. It replaces the last
      * listing's pull mark. The version rises only when the listing differs.
      */
-    setShareRoster(workspaceId: string, listing: RosterListing, pulledAfter: boolean): void {
-      updateWorkspaceEntry(workspaceId, (entry) => {
-        const stored = entry.shareRoster;
-        // JSON drops the undefined fields, leaving only the listing to compare.
-        const unchanged = stored !== undefined &&
-          JSON.stringify({ ...stored, version: undefined, pulledAfter: undefined }) === JSON.stringify(listing);
-        if (unchanged && (stored.pulledAfter === true) === pulledAfter) return undefined;
-        const version = (stored?.version ?? 0) + (unchanged ? 0 : 1);
-        return { ...entry, shareRoster: { ...listing, version, ...(pulledAfter ? { pulledAfter: true } : {}) } };
-      });
+    setShareRoster(workspaceId: string, listing: RosterListing, pulledAfter: boolean, listedAtMs = Date.now()): void {
+      const registry = read();
+      const entry = registry.workspaces.find(entry => entry.workspaceId === workspaceId);
+      if (!entry) throw new Error(`Unknown workspace: ${workspaceId}`);
+      rosters.save(entry, listing, pulledAfter, listedAtMs);
     },
 
-    /** Record that a pull from the relay started after the stored listing. */
+    /** The pull mark remains durable for automation reach, independently of Access freshness. */
     markShareRosterPulled(workspaceId: string): void {
-      updateWorkspaceEntry(workspaceId, (entry) => {
-        const stored = entry.shareRoster;
-        if (!stored || stored.pulledAfter) return undefined;
-        return { ...entry, shareRoster: { ...stored, pulledAfter: true } };
-      });
+      const registry = read();
+      const entry = registry.workspaces.find(entry => entry.workspaceId === workspaceId);
+      if (!entry) throw new Error(`Unknown workspace: ${workspaceId}`);
+      rosters.markPulled(entry);
     },
 
     /**
@@ -681,6 +687,8 @@ export function createRegistryStore(registryFile: string) {
       const registry = read();
       const remaining = registry.workspaces.filter((w) => w.workspaceId !== workspaceId);
       if (remaining.length === registry.workspaces.length) return;
+      const removed = registry.workspaces.find(entry => entry.workspaceId === workspaceId);
+      if (removed) rosters.remove(removed);
       write({ ...registry, workspaces: remaining });
     },
   };

@@ -2,6 +2,8 @@
 
 #![forbid(unsafe_code)]
 
+pub mod projection_stdio;
+
 mod automation_recovery;
 pub(crate) mod capture_driver;
 pub mod capture_sink;

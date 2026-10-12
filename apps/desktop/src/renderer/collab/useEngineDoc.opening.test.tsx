@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import * as Y from "yjs";
 import { disposeEngineDocLeasesForTests } from "./engineDocLease";
@@ -303,4 +303,52 @@ it("re-enters opening when the document switches", async () => {
     expect(screen.getByTestId("opening").textContent).toBe("true"),
   );
   expect(screen.getByTestId("available").textContent).toBe("false");
+});
+
+it("reopens a newly created shared record on delivery notification without a manual retry", async () => {
+  const f = deferredBridge();
+  const listeners = new Set<(event: { workspaceId?: string; paths?: string[] }) => void>();
+  const doc = new Y.Doc();
+  const api = { ...f.api, onWorkspaceActivity: (listener: (event: { workspaceId?: string; paths?: string[] }) => void) => {
+    listeners.add(listener); return () => listeners.delete(listener);
+  }, openEngineYDocSession: vi.fn()
+    .mockResolvedValueOnce({ available: false, sharedWaiting: { state: "pending", message: "Record saved on this device. Waiting to send." } })
+    .mockResolvedValue({ available: true, initialUpdate: Y.encodeStateAsUpdate(doc), lineageGeneration: 1 }) };
+  vi.stubGlobal("dohcDesktop", api);
+  render(<Harness path="tasks/Untitled.md" />);
+  await waitFor(() => expect(screen.getByTestId("live-host-unavailable").textContent).toBe("true"));
+  act(() => { for (const listener of listeners) listener({ workspaceId: "other" }); });
+  expect(api.openEngineYDocSession).toHaveBeenCalledTimes(1);
+  act(() => { for (const listener of listeners) listener({ workspaceId: "ws-1", paths: ["tasks/Untitled.md"] }); });
+  await waitFor(() => expect(screen.getByTestId("available").textContent).toBe("true"));
+  expect(api.openEngineYDocSession).toHaveBeenCalledTimes(2);
+  doc.destroy();
+});
+
+it("holds readiness only while the waiting editor is visible and ignores late answers after unmount", async () => {
+  const f = deferredBridge();
+  const pending: Array<(ready: boolean) => void> = [];
+  const waitForEngineYDocAdmission = vi.fn<(_input: {workspaceId: string; path: string; sessionId: string}) => Promise<boolean>>(
+    () => new Promise<boolean>(resolve => pending.push(resolve)));
+  const api = {...f.api, waitForEngineYDocAdmission,
+    openEngineYDocSession: vi.fn().mockResolvedValue({available: false, sharedWaiting: {state: "failed", message: "Waiting for editing."}})};
+  const visibility = vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");
+  vi.stubGlobal("dohcDesktop", api);
+  const view = render(<Harness path="tasks/One.md" />);
+  try {
+    await waitFor(() => expect(waitForEngineYDocAdmission).toHaveBeenCalledOnce());
+    visibility.mockReturnValue("hidden");
+    act(() => document.dispatchEvent(new Event("visibilitychange")));
+    const firstId = waitForEngineYDocAdmission.mock.calls[0]![0].sessionId;
+    expect(api.closeEngineYDocSession).toHaveBeenCalledWith({sessionId: firstId});
+    await act(async () => pending[0]!(true));
+    expect(api.openEngineYDocSession).toHaveBeenCalledOnce();
+    expect(waitForEngineYDocAdmission).toHaveBeenCalledOnce();
+    visibility.mockReturnValue("visible");
+    act(() => document.dispatchEvent(new Event("visibilitychange")));
+    await waitFor(() => expect(waitForEngineYDocAdmission).toHaveBeenCalledTimes(2));
+    view.unmount();
+    await act(async () => pending[1]!(true));
+    expect(api.openEngineYDocSession).toHaveBeenCalledOnce();
+  } finally { visibility.mockRestore(); view.unmount(); }
 });

@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import "./DesktopWorkspaceShell.testSupport";
-import { act, fireEvent, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import { SetWorkspaceUiStatePayload } from "../ipc/bridgeContract";
@@ -9,9 +9,37 @@ import { DEFAULT_WORKSPACE_SETTINGS, type WorkspaceSettingsResult } from "../wor
 import { rendererMarks } from "../performance/rendererMarks";
 import { momentDiffTabPath, versionCompareTabPath } from "./workbench/workbenchState";
 import { deferred } from "../testing/deferred";
-import { WORKSPACE, SYNC_STATUS, STORED_STATE, storedStateWithTabs, storedTabs, makeBridge, renderShell, SHARE_STATUS, SHARE_VIEW, makeShareBridge, settleShareView } from "./DesktopWorkspaceShell.testHarness";
+import { historyCursor, historyPageFields } from "../testing/historyPageFixture";
+import type { Workspace } from "./DesktopWorkspaceShell";
+import { textEditorContent } from "./FileInspector.editor-fixture";
+import { DesktopWorkspaceShell, WORKSPACE, OTHER_WORKSPACE, SYNC_STATUS, STORED_STATE, storedStateWithTabs, storedTabs, makeBridge, renderShell, shellBootstrapProps, SHARE_STATUS, SHARE_VIEW, makeShareBridge, settleShareView } from "./DesktopWorkspaceShell.testHarness";
 
 describe("history page", () => {
+  it("shows a failed file read in a toast and Notices while history stays available", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    const failedStatus = { ...SYNC_STATUS, fileObservationFailure: "read-failed" as const };
+    bridge.openWorkspace = vi.fn(async () => failedStatus);
+    bridge.getSyncStatus = vi.fn(async () => failedStatus);
+    renderShell(bridge);
+    const message = "dohc could not read file changes for this workspace.";
+    const toast = await screen.findByTestId("workspace-shell-error");
+    expect(toast.textContent).toContain(message);
+    expect(within(toast).getByRole("button", { name: /Copy/ })).toBeTruthy();
+    expect(toast.textContent).not.toContain("Restart");
+    await userEvent.click(screen.getByTestId("notice-center-toggle"));
+    expect(screen.getByRole("dialog", { name: "Notices" }).textContent).toContain(message);
+    await userEvent.click(within(screen.getByRole("dialog", { name: "Notices" })).getByRole("button", { name: "Try again" }));
+    expect(bridge.retryFileObservation).toHaveBeenCalledWith({ workspaceId: WORKSPACE.workspaceId });
+    expect(screen.queryByTestId("notice-history-recording-unavailable")).toBeNull();
+    await userEvent.click(screen.getByTestId("notice-center-toggle"));
+    await userEvent.click(screen.getByTestId("activity-history"));
+    await waitFor(() => expect(bridge.listEngineMoments).toHaveBeenCalled());
+    expect(screen.queryByTestId("history-off-placeholder")).toBeNull();
+    bridge.getSyncStatus.mockResolvedValue(SYNC_STATUS);
+    act(() => bridge.emitWorkspaceActivity());
+    await userEvent.click(screen.getByTestId("notice-center-toggle"));
+    await waitFor(() => expect(screen.getByRole("dialog", { name: "Notices" }).textContent).not.toContain(message));
+  });
   // The recorder failed to build. Without the status override the shell
   // mounts the engine timeline, whose every listEngineMoments call can only
   // error. Main's status gates the surface, and the engine fetch must never
@@ -29,7 +57,7 @@ describe("history page", () => {
 
     // Wait for the shell's engine surfaces to mount before anything is
     // asserted, so the pins below cannot pass vacuously.
-    await screen.findByTestId("titlebar-chats-sidebar");
+    await screen.findByTestId("titlebar-about-sidebar");
 
     await user.click(screen.getByTestId("activity-history"));
     const placeholder = await screen.findByTestId("history-off-placeholder");
@@ -63,7 +91,7 @@ describe("history page", () => {
     const user = userEvent.setup();
     renderShell(bridge);
 
-    await screen.findByTestId("titlebar-chats-sidebar");
+    await screen.findByTestId("titlebar-about-sidebar");
     await user.click(screen.getByTestId("activity-history"));
     act(() => {
       bridge.emitWorkspaceActivity();
@@ -101,7 +129,7 @@ describe("history page", () => {
 
     // The premise: the renderer's own read said engine-ON, and the decision
     // has not landed.
-    await screen.findByTestId("titlebar-chats-sidebar");
+    await screen.findByTestId("titlebar-about-sidebar");
     expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("false");
     await user.click(screen.getByTestId("activity-history"));
 
@@ -239,12 +267,287 @@ describe("history page", () => {
   ): ListEngineMomentsResult {
     return {
       moments,
-      nextBeforeMomentOrder: null,
+      nextCursor: null,
       latestMomentOrder: 1,
-      activeVersionId,
-      protectedTruncated: false,
+      activeVersionId, ...historyPageFields,
+
     };
   }
+
+  // DesktopRoot keys the shell by workspace, so a switch remounts it. A history
+  // answer A asked for before the switch can land after B is on screen, and it
+  // must never paint there. The E2E switch spec covers this only as a smoke
+  // test against the real app; here A's answer is held until B has painted.
+  it("keeps a history answer workspace A asked for out of workspace B", async () => {
+    const A_CONTROL = "A_CONTROL wrote the A plan";
+    const A_STALE = "A_STALE answered after the switch";
+    const B_ONLY = "B_ONLY wrote the B note";
+    const heldA = deferred<ListEngineMomentsResult>();
+    let selected = WORKSPACE.workspaceId;
+    let holdA = false;
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.listEngineMoments = vi.fn(async () => {
+      if (selected === OTHER_WORKSPACE.workspaceId) {
+        return historyPage([historyMoment("m-b", B_ONLY)]);
+      }
+      return holdA ? heldA.promise : historyPage([historyMoment("m-a", A_CONTROL)]);
+    });
+    const shell = (workspace: Workspace) => (
+      <DesktopWorkspaceShell
+        key={workspace.workspaceId}
+        workspace={workspace}
+        workspaces={[WORKSPACE, OTHER_WORKSPACE]}
+        {...shellBootstrapProps(bridge)}
+        onSwitchWorkspace={() => {}}
+      />
+    );
+    vi.stubGlobal("dohcDesktop", bridge);
+    const user = userEvent.setup();
+    const view = render(shell(WORKSPACE));
+
+    // A's answers paint in A: the control that makes the absence below mean
+    // something.
+    await user.click(screen.getByTestId("activity-history"));
+    expect(await screen.findByText(A_CONTROL)).toBeTruthy();
+
+    // A asks again, and that answer is held.
+    holdA = true;
+    const readsBeforeHold = bridge.listEngineMoments.mock.calls.length;
+    act(() => {
+      bridge.emitWorkspaceActivity();
+    });
+    await waitFor(() =>
+      expect(bridge.listEngineMoments.mock.calls.length).toBeGreaterThan(readsBeforeHold),
+    );
+    const heldRead = bridge.listEngineMoments.mock.calls.length;
+    expect(bridge.listEngineMoments).toHaveBeenNthCalledWith(
+      heldRead,
+      expect.objectContaining({ workspaceId: WORKSPACE.workspaceId }),
+    );
+
+    // Switch to B the way DesktopRoot does, and wait for B's own history.
+    selected = OTHER_WORKSPACE.workspaceId;
+    view.rerender(shell(OTHER_WORKSPACE));
+    await waitFor(() =>
+      expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"),
+    );
+    await user.click(screen.getByTestId("activity-history"));
+    expect(await screen.findByText(B_ONLY)).toBeTruthy();
+    expect(screen.queryByText(A_CONTROL)).toBeNull();
+
+    // Only now does A's held answer land, and the renderer consumes it.
+    await act(async () => {
+      heldA.resolve(historyPage([historyMoment("m-a-stale", A_STALE)]));
+      await heldA.promise;
+    });
+    await act(async () => {});
+
+    expect(screen.queryByText(A_STALE)).toBeNull();
+    expect(screen.queryByText(A_CONTROL)).toBeNull();
+    expect(screen.getByText(B_ONLY)).toBeTruthy();
+    expect(screen.getAllByTestId("engine-moment-open")).toHaveLength(1);
+  });
+
+  it("uses the admitted rename label in the row, search and diff header", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    const renamed: EngineMomentRecord = { id: "rename", versionId: "main", path: "notes/b.md", recordedAtMs: 100,
+      operation: "rename", origin: "local-file", momentOrder: 1 };
+    bridge.listEngineMoments = vi.fn(async () => historyPage([renamed]));
+    bridge.readEngineMoment = vi.fn(async () => ({ moment: { ...renamed, beforeText: "body", afterText: "body" } }));
+    const user = userEvent.setup();
+    renderShell(bridge);
+    await screen.findByTestId("titlebar-about-sidebar");
+    await user.click(screen.getByTestId("activity-history"));
+    expect(await screen.findByText("Renamed to b.md")).toBeTruthy();
+    await user.type(screen.getByTestId("engine-history-search"), "Renamed to");
+    await user.click(screen.getByTestId("engine-moment-open"));
+    expect((await screen.findByTestId("engine-diff-summary")).textContent).toBe("Renamed to b.md");
+  });
+
+  it("finds a moment by an author its shortened source label leaves out", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.listEngineMoments = vi.fn(async () => historyPage([
+      {...historyMoment("many", "Revised the plan"), authorLabels: ["You", "trip-agent", "ana@example.com", "ben@example.com"]},
+      historyMoment("other", "Wrote the outline"),
+    ]));
+    const user = userEvent.setup();
+    renderShell(bridge);
+    await screen.findByTestId("titlebar-about-sidebar");
+    await user.click(screen.getByTestId("activity-history"));
+    expect(await screen.findByText("Wrote the outline")).toBeTruthy();
+    expect(screen.getByText("You, trip-agent, ana@example.com and 1 more")).toBeTruthy();
+    await user.type(screen.getByTestId("engine-history-search"), "ben@example.com");
+    await waitFor(() => expect(screen.queryByText("Wrote the outline")).toBeNull());
+    expect(screen.getByText("Revised the plan")).toBeTruthy();
+  });
+
+  it("keeps earlier History reachable when the bounded policy scan returns no rows", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.listEngineMoments = vi.fn()
+      .mockResolvedValueOnce({ ...historyPage([]), nextCursor: historyCursor(80) })
+      .mockResolvedValue(historyPage([historyMoment("older", "Older admitted edit")]));
+    const user = userEvent.setup();
+    renderShell(bridge);
+    await screen.findByTestId("titlebar-about-sidebar");
+    await user.click(screen.getByTestId("activity-history"));
+    await user.click(await screen.findByTestId("engine-history-load-more"));
+    expect(await screen.findByText("Older admitted edit")).toBeTruthy();
+    expect(screen.queryByText("No changes yet")).toBeNull();
+    expect(bridge.listEngineMoments).toHaveBeenLastCalledWith(expect.objectContaining({ cursor: historyCursor(80) }));
+  });
+
+  it("says History is hidden while its rules can't be read, and shows it again once they can", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.listEngineMoments = vi.fn()
+      .mockResolvedValueOnce({
+        status: "policy-unreadable",
+        unreadable: [".dohc/visibility.toml"],
+        policyErrors: ["visibility.toml: TOML parse error at line 3, column 9"],
+      } satisfies ListEngineMomentsResponse)
+      .mockResolvedValue(historyPage([historyMoment("m-1", "Wrote the plan")]));
+    const user = userEvent.setup();
+    renderShell(bridge);
+    await screen.findByTestId("titlebar-about-sidebar");
+    await user.click(screen.getByTestId("activity-history"));
+
+    const hidden = await screen.findByTestId("history-policy-hidden");
+    expect(hidden.textContent).toContain(
+      "dohc can't read .dohc/visibility.toml, so History is hidden. Fix the file, then try again.",
+    );
+    expect(hidden.textContent).not.toContain("TOML parse error");
+    expect(screen.queryByTestId("history-load-failed")).toBeNull();
+    expect(screen.queryByText("No changes yet")).toBeNull();
+
+    await user.click(within(hidden).getByRole("button", { name: "Try again" }));
+    expect(await screen.findByText("Wrote the plan")).toBeTruthy();
+    expect(screen.queryByTestId("history-policy-hidden")).toBeNull();
+  });
+
+  it("reports a refused restore in dohc's words, and Try again asks before it restores", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    const moment = historyMoment("m-1", "Wrote the plan");
+    bridge.listEngineMoments = vi.fn(async () => historyPage([moment]));
+    bridge.readEngineMoment = vi.fn(async () => ({ moment: { ...moment, beforeText: "one\n", afterText: "two\n" } }));
+    const restoreEngineMomentFile = vi.fn()
+      .mockRejectedValueOnce(new Error(
+        "Error invoking remote method 'desktop:restore-engine-moment-file': RestorePolicyRefusalError [policy-unreadable]: .dohc/visibility.toml: visibility.toml: TOML parse error at line 3, column 9",
+      ))
+      .mockResolvedValue({ restored: "text", restoredMomentId: "restore-1" });
+    Object.assign(bridge, { restoreEngineMomentFile });
+    const user = userEvent.setup();
+    renderShell(bridge);
+    await screen.findByTestId("titlebar-about-sidebar");
+    await user.click(screen.getByTestId("activity-history"));
+    await user.click(await screen.findByTestId("engine-moment-open"));
+    await user.click(await screen.findByTestId("engine-diff-restore-file"));
+    await user.click(await screen.findByTestId("engine-diff-confirm-restore"));
+
+    const toast = await screen.findByTestId("workspace-shell-error");
+    expect(toast.textContent).toContain(
+      "dohc could not restore notes/plan.md. It can't read .dohc/visibility.toml. Fix the file, then try again.",
+    );
+    expect(toast.textContent).not.toContain("TOML parse error");
+    expect(screen.queryByTestId("engine-diff-restore-status")).toBeNull();
+
+    // Try again reads the change again, then opens its confirm dialog
+    // instead of restoring.
+    const readsBefore = bridge.readEngineMoment.mock.calls.length;
+    await user.click(within(toast).getByTestId("workspace-shell-error-retry"));
+    expect(await screen.findByTestId("engine-diff-restore-confirm")).toBeTruthy();
+    expect(bridge.readEngineMoment.mock.calls.length).toBeGreaterThan(readsBefore);
+    await user.click(screen.getByTestId("engine-diff-confirm-restore"));
+    await waitFor(() => expect(restoreEngineMomentFile).toHaveBeenCalledTimes(2));
+    expect((await screen.findByTestId("engine-diff-restore-status")).textContent).toBe(
+      "Restored the earlier state. Undo restore is available here.",
+    );
+    expect(screen.getByTestId("engine-diff-undo-restore")).toBeTruthy();
+    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+  });
+
+  it("keeps a hidden change's tab nameless and asks nothing when Try again finds it hidden", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    const moment = historyMoment("m-1", "Wrote the plan");
+    const blocked = {
+      status: "policy-unreadable" as const,
+      unreadable: [".dohc/visibility.toml" as const],
+      policyErrors: ["visibility.toml: TOML parse error at line 3, column 9"],
+    };
+    let broken = false;
+    bridge.listEngineMoments = vi.fn(async (): Promise<ListEngineMomentsResponse> => broken ? blocked : historyPage([moment]));
+    bridge.readEngineMoment = vi.fn(async (): Promise<ReadEngineMomentResult> => broken
+      ? { ...blocked, moment: null }
+      : { moment: { ...moment, beforeText: "one\n", afterText: "two\n" } });
+    const restoreEngineMomentFile = vi.fn(async (): Promise<never> => {
+      throw new Error(
+        "Error invoking remote method 'desktop:restore-engine-moment-file': RestorePolicyRefusalError [policy-unreadable]: .dohc/visibility.toml: visibility.toml: TOML parse error at line 3, column 9",
+      );
+    });
+    Object.assign(bridge, { restoreEngineMomentFile });
+    const user = userEvent.setup();
+    renderShell(bridge);
+    await screen.findByTestId("titlebar-about-sidebar");
+    await user.click(screen.getByTestId("activity-history"));
+    await user.click(await screen.findByTestId("engine-moment-open"));
+    await user.click(await screen.findByTestId("engine-diff-restore-file"));
+    await user.click(await screen.findByTestId("engine-diff-confirm-restore"));
+    const toast = await screen.findByTestId("workspace-shell-error");
+    const tab = screen.getByTestId("tab-dohc://moment-diff/m-1");
+    expect(tab.textContent).toContain("Diff: plan.md");
+
+    // A committed refresh hides the change while its tab is open.
+    broken = true;
+    act(() => {
+      bridge.emitWorkspaceActivity();
+    });
+    expect(await screen.findByTestId("engine-diff-hidden")).toBeTruthy();
+    await waitFor(() => expect(tab.textContent).toContain("History change"));
+
+    // Try again reopens the tab, which reads the change again and finds it hidden.
+    const readsBefore = bridge.readEngineMoment.mock.calls.length;
+    await user.click(within(toast).getByTestId("workspace-shell-error-retry"));
+    await waitFor(() => expect(bridge.readEngineMoment.mock.calls.length).toBeGreaterThan(readsBefore));
+    await act(async () => {});
+    expect(screen.getByTestId("engine-diff-hidden")).toBeTruthy();
+    expect(screen.queryByTestId("engine-diff-restore-confirm")).toBeNull();
+    expect(tab.textContent).toContain("History change");
+    expect(tab.textContent).not.toContain("plan.md");
+    expect(restoreEngineMomentFile).toHaveBeenCalledOnce();
+  });
+
+  it("hides an open diff when a History refresh finds the rules unreadable", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    const moment = historyMoment("m-1", "Wrote the plan");
+    const blocked = {
+      status: "policy-unreadable" as const,
+      unreadable: [".dohc/visibility.toml" as const],
+      policyErrors: ["visibility.toml: TOML parse error at line 3, column 9"],
+    };
+    let broken = false;
+    bridge.listEngineMoments = vi.fn(async (): Promise<ListEngineMomentsResponse> => broken ? blocked : historyPage([moment]));
+    bridge.readEngineMoment = vi.fn(async (): Promise<ReadEngineMomentResult> => broken
+      ? { ...blocked, moment: null }
+      : { moment: { ...moment, beforeText: "one\n", afterText: "two\n" } });
+    const user = userEvent.setup();
+    renderShell(bridge);
+    await screen.findByTestId("titlebar-about-sidebar");
+    await user.click(screen.getByTestId("activity-history"));
+    await user.click(await screen.findByTestId("engine-moment-open"));
+    await screen.findByTestId("engine-diff-lines");
+    const tab = screen.getByTestId("tab-dohc://moment-diff/m-1");
+    expect(tab.textContent).toContain("Diff: plan.md");
+
+    broken = true;
+    act(() => {
+      bridge.emitWorkspaceActivity();
+    });
+    expect(await screen.findByTestId("history-policy-hidden")).toBeTruthy();
+    expect(await screen.findByTestId("engine-diff-hidden")).toBeTruthy();
+    expect(screen.queryByTestId("engine-diff-lines")).toBeNull();
+    expect(screen.queryByTestId("engine-diff-restore-file")).toBeNull();
+    // The tab shows that a change is open, not which file it changed.
+    await waitFor(() => expect(tab.textContent).not.toContain("plan.md"));
+    expect(tab.textContent).toContain("History change");
+  });
 
   it("persists a moment diff opened for a valid multibyte file path", async () => {
     const filePath = `目录/${"界".repeat(500)}.md`;
@@ -303,11 +606,11 @@ describe("history page", () => {
     }
   });
 
-  it("shows the protected truncation marker from the history page", async () => {
+  it("shows complete protected paging without a truncation banner", async () => {
     const bridge = makeBridge(Promise.resolve(null));
     bridge.listEngineMoments = vi.fn(async () => ({
       ...historyPage([historyMoment("m-1", "Wrote the plan")]),
-      protectedTruncated: true,
+
     }));
     const user = userEvent.setup();
     renderShell(bridge);
@@ -315,9 +618,8 @@ describe("history page", () => {
 
     await user.click(screen.getByTestId("activity-history"));
 
-    expect(
-      await screen.findAllByText("Some protected activity in this range is not shown."),
-    ).toHaveLength(1);
+    expect(await screen.findByText("Wrote the plan")).toBeTruthy();
+    expect(screen.queryByText("Some protected activity in this range is not shown.")).toBeNull();
   });
 
   it("keeps a moment diff selected when an older duplicate-file open finishes flushing", async () => {
@@ -354,8 +656,7 @@ describe("history page", () => {
 
     const left = await screen.findByRole("region", { name: "Editor group 1" });
     const right = screen.getByRole("region", { name: "Editor group 2" });
-    const content = (await within(right).findByTestId("view-text-editor"))
-      .querySelector(".cm-content") as HTMLElement;
+    const content = await textEditorContent(await within(right).findByTestId("view-text-editor"));
     await user.click(content);
     await user.keyboard("{End} changed");
     await waitFor(() => expect(within(right).getByTestId("tab-dirty")).toBeTruthy());
@@ -416,8 +717,7 @@ describe("history page", () => {
     await settleShareView();
 
     const group = await screen.findByRole("region", { name: "Editor group 1" });
-    const content = (await within(group).findByTestId("view-text-editor"))
-      .querySelector(".cm-content") as HTMLElement;
+    const content = await textEditorContent(await within(group).findByTestId("view-text-editor"));
     await user.click(content);
     await user.keyboard("{End} changed");
     await waitFor(() => expect(within(group).getByTestId("tab-dirty")).toBeTruthy());
@@ -478,8 +778,7 @@ describe("history page", () => {
 
     const left = await screen.findByRole("region", { name: "Editor group 1" });
     const right = screen.getByRole("region", { name: "Editor group 2" });
-    const content = (await within(right).findByTestId("view-text-editor"))
-      .querySelector(".cm-content") as HTMLElement;
+    const content = await textEditorContent(await within(right).findByTestId("view-text-editor"));
     await user.click(content);
     await user.keyboard("{End} changed");
     await waitFor(() => expect(within(right).getByTestId("tab-dirty")).toBeTruthy());
@@ -525,7 +824,7 @@ describe("history page", () => {
     await act(async () => {
       first.resolve({
         ...historyPage([historyMoment("m-first", "Added the launch checklist")]),
-        nextBeforeMomentOrder: 1,
+        nextCursor: historyCursor(1),
       });
       await first.promise;
     });
@@ -541,15 +840,15 @@ describe("history page", () => {
     await waitFor(() => expect(bridge.listEngineMoments).toHaveBeenCalledTimes(2));
     expect(bridge.listEngineMoments).toHaveBeenLastCalledWith({
       workspaceId: WORKSPACE.workspaceId,
-      limit: 200,
-      beforeMomentOrder: 1,
+      limit: 50,
+      cursor: historyCursor(1),
     });
     // The earlier page still has a cursor, so the control stays and is
     // usable again once the page lands.
     await act(async () => {
       earlier.resolve({
         ...historyPage([historyMoment("m-earlier", "Started the plan")]),
-        nextBeforeMomentOrder: 0,
+        nextCursor: historyCursor(0),
       });
       await earlier.promise;
     });
@@ -579,7 +878,7 @@ describe("history page", () => {
     await act(async () => {
       first.resolve({
         ...historyPage([historyMoment("m-first", "Added the launch checklist")]),
-        nextBeforeMomentOrder: 1,
+        nextCursor: historyCursor(1),
       });
       await first.promise;
     });
@@ -640,7 +939,7 @@ describe("history page", () => {
     await act(async () => {
       first.resolve({
         ...historyPage([historyMoment("m-first", "Added the launch checklist")]),
-        nextBeforeMomentOrder: 1,
+        nextCursor: historyCursor(1),
       });
       await first.promise;
     });
@@ -704,7 +1003,7 @@ describe("history page", () => {
     await act(async () => {
       first.resolve({
         ...historyPage([historyMoment("m-first", "Added the launch checklist")]),
-        nextBeforeMomentOrder: 1,
+        nextCursor: historyCursor(1),
       });
       await first.promise;
     });
@@ -774,11 +1073,11 @@ describe("history page", () => {
           canMergeIntoMain: false,
         },
       ],
-      activeVersionId: switched ? "main" : "try-1",
+      activeVersionId: switched ? "main" : "try-1", ...historyPageFields,
     }));
     bridge.switchWorkspaceVersion = vi.fn(async () => {
       switched = true;
-      return { activeVersionId: "main", changedFileCount: 0 };
+      return { activeVersionId: "main", ...historyPageFields, changedFileCount: 0 };
     });
     const user = userEvent.setup();
     renderShell(bridge);
@@ -791,7 +1090,7 @@ describe("history page", () => {
           [historyMoment("m-first", "Wrote the note in the try version")],
           "try-1",
         ),
-        nextBeforeMomentOrder: 1,
+        nextCursor: historyCursor(1),
       });
       await first.promise;
     });
@@ -871,7 +1170,7 @@ describe("history page", () => {
           canMergeIntoMain: false,
         },
       ],
-      activeVersionId: switched ? "main" : "try-1",
+      activeVersionId: switched ? "main" : "try-1", ...historyPageFields,
     }));
     // The switch lands in the daemon and notifies the renderer before the
     // invoke resolves, which is the ordering this test exists for.
@@ -880,7 +1179,7 @@ describe("history page", () => {
       switched = true;
       bridge.emitWorkspaceActivity();
       await switchInvoke.promise;
-      return { activeVersionId: "main", changedFileCount: 0 };
+      return { activeVersionId: "main", ...historyPageFields, changedFileCount: 0 };
     });
     const user = userEvent.setup();
     renderShell(bridge);
@@ -961,11 +1260,11 @@ describe("history page", () => {
           canMergeIntoMain: true,
         },
       ],
-      activeVersionId: switched ? "main" : "try-1",
+      activeVersionId: switched ? "main" : "try-1", ...historyPageFields,
     }));
     bridge.switchWorkspaceVersion = vi.fn(async () => {
       switched = true;
-      return { activeVersionId: "main", changedFileCount: 0 };
+      return { activeVersionId: "main", ...historyPageFields, changedFileCount: 0 };
     });
     const user = userEvent.setup();
     renderShell(bridge);
@@ -1049,12 +1348,12 @@ describe("history page", () => {
             canMergeIntoMain: true,
           },
         ],
-        activeVersionId: switched ? "main" : "try-1",
+        activeVersionId: switched ? "main" : "try-1", ...historyPageFields,
       });
     });
     bridge.switchWorkspaceVersion = vi.fn(async () => {
       switched = true;
-      return { activeVersionId: "main", changedFileCount: 0 };
+      return { activeVersionId: "main", ...historyPageFields, changedFileCount: 0 };
     });
     const user = userEvent.setup();
     renderShell(bridge);
@@ -1750,11 +2049,11 @@ describe("history page", () => {
       versionReads += 1;
       return {
         versions: versionList,
-        activeVersionId: versionReads === 1 ? "try-1" : "main",
+        activeVersionId: versionReads === 1 ? "try-1" : "main", ...historyPageFields,
       };
     });
     bridge.switchWorkspaceVersion = vi.fn(async () => ({
-      activeVersionId: "main",
+      activeVersionId: "main", ...historyPageFields,
       changedFileCount: 0,
     }));
     const user = userEvent.setup();
@@ -1825,11 +2124,11 @@ describe("history page", () => {
       versionReads += 1;
       return {
         versions: versionList,
-        activeVersionId: versionReads === 1 ? "try-1" : "main",
+        activeVersionId: versionReads === 1 ? "try-1" : "main", ...historyPageFields,
       };
     });
     bridge.switchWorkspaceVersion = vi.fn(async () => ({
-      activeVersionId: "main",
+      activeVersionId: "main", ...historyPageFields,
       changedFileCount: 0,
     }));
     const user = userEvent.setup();
@@ -1880,7 +2179,7 @@ describe("history page", () => {
             canMergeIntoMain: true,
           },
         ],
-        activeVersionId: switched ? "main" : "try-1",
+        activeVersionId: switched ? "main" : "try-1", ...historyPageFields,
       });
       versionReads += 1;
       if (versionReads === 1) return Promise.resolve(answer());
@@ -1890,7 +2189,7 @@ describe("history page", () => {
     });
     bridge.switchWorkspaceVersion = vi.fn(async () => {
       switched = true;
-      return { activeVersionId: "main", changedFileCount: 0 };
+      return { activeVersionId: "main", ...historyPageFields, changedFileCount: 0 };
     });
     const user = userEvent.setup();
     renderShell(bridge);
@@ -1958,11 +2257,11 @@ describe("history page", () => {
           canMergeIntoMain: true,
         },
       ],
-      activeVersionId: switched ? "main" : "try-1",
+      activeVersionId: switched ? "main" : "try-1", ...historyPageFields,
     }));
     bridge.switchWorkspaceVersion = vi.fn(async () => {
       switched = true;
-      return { activeVersionId: "main", changedFileCount: 0 };
+      return { activeVersionId: "main", ...historyPageFields, changedFileCount: 0 };
     });
     // The switch lands; the dismissal that follows it never does.
     bridge.dismissTryInVersionReview = vi.fn(() => new Promise<never>(() => {}));
@@ -2054,11 +2353,11 @@ describe("history page", () => {
           canMergeIntoMain: true,
         },
       ],
-      activeVersionId: switched ? "main" : "try-1",
+      activeVersionId: switched ? "main" : "try-1", ...historyPageFields,
     }));
     bridge.switchWorkspaceVersion = vi.fn(async () => {
       switched = true;
-      return { activeVersionId: "main", changedFileCount: 0 };
+      return { activeVersionId: "main", ...historyPageFields, changedFileCount: 0 };
     });
     const user = userEvent.setup();
     renderShell(bridge);
@@ -2160,7 +2459,7 @@ describe("history page", () => {
     await act(async () => {
       first.resolve({
         ...historyPage([historyMoment("m-first", "Added the launch checklist")]),
-        nextBeforeMomentOrder: 1,
+        nextCursor: historyCursor(1),
       });
       await first.promise;
     });
@@ -2237,11 +2536,11 @@ describe("history page", () => {
           canMergeIntoMain: true,
         },
       ],
-      activeVersionId: switched ? "main" : "try-1",
+      activeVersionId: switched ? "main" : "try-1", ...historyPageFields,
     }));
     bridge.switchWorkspaceVersion = vi.fn(async () => {
       switched = true;
-      return { activeVersionId: "main", changedFileCount: 0 };
+      return { activeVersionId: "main", ...historyPageFields, changedFileCount: 0 };
     });
     const user = userEvent.setup();
     renderShell(bridge);
@@ -2254,7 +2553,7 @@ describe("history page", () => {
           [historyMoment("m-first", "Wrote the note in the try version")],
           "try-1",
         ),
-        nextBeforeMomentOrder: 1,
+        nextCursor: historyCursor(1),
       });
       await first.promise;
     });
@@ -2308,7 +2607,6 @@ describe("history page", () => {
     bridge.listEngineMoments = vi.fn(() => responses[issued++]!);
     let activeRunId: string | null = null;
     bridge.getAgentRunStatus = vi.fn(async () => ({
-      mcpEnabled: true,
       activeRun: activeRunId
         ? {
             id: activeRunId,
@@ -2352,10 +2650,21 @@ describe("history page", () => {
     await user.keyboard("{Control>}k{/Control}");
     await user.click(
       await within(await screen.findByTestId("command-palette")).findByText(
-        "Settings: Open Agents & MCP",
+        "Settings: Open Agents (MCP)",
       ),
     );
     await screen.findByTestId("mcp-enable-toggle");
+
+    // Wait for the panel's initial read to commit before starting the run.
+    // "Stopped" cannot show it: the panel renders that before any read lands.
+    // The config snippet commits in the same render as the status it read.
+    await waitFor(() =>
+      expect(screen.getByTestId("mcp-config-snippet").textContent).toContain(
+        '"command": "dohc-mcp"',
+      ),
+    );
+    expect(screen.getByTestId("mcp-status").getAttribute("data-state")).toBe("stopped");
+    expect(bridge.getMcpConfig).toHaveBeenCalledTimes(1);
 
     // A run starts, and the toggle's reread catches it alive — but the reread
     // is still in flight.
@@ -2376,6 +2685,10 @@ describe("history page", () => {
       for (const answerRead of heldPanelReads) answerRead();
       await Promise.resolve();
     });
+    // The panel committed the run it saw, so the shell was handed an observation.
+    await waitFor(() =>
+      expect(screen.getByTestId("mcp-status").getAttribute("data-state")).toBe("running"),
+    );
     expect(bridge.startAgentRun).not.toHaveBeenCalled();
     expect(bridge.endAgentRun).not.toHaveBeenCalled();
 
@@ -2648,7 +2961,6 @@ describe("history page", () => {
         });
       }
       return Promise.resolve({
-        mcpEnabled: true,
         activeRun: runIsAlive
           ? {
               id: "run-1",
@@ -2689,7 +3001,7 @@ describe("history page", () => {
     await user.keyboard("{Control>}k{/Control}");
     await user.click(
       await within(await screen.findByTestId("command-palette")).findByText(
-        "Settings: Open Agents & MCP",
+        "Settings: Open Agents (MCP)",
       ),
     );
     await screen.findByTestId("mcp-enable-toggle");
@@ -2752,7 +3064,6 @@ describe("history page", () => {
       movedOn ? { ...SYNC_STATUS, state: "syncing" as const } : SYNC_STATUS,
     );
     bridge.getAgentRunStatus = vi.fn(async () => ({
-      mcpEnabled: false,
       activeRun: movedOn
         ? {
             id: "run-1",
@@ -2808,12 +3119,10 @@ describe("history page", () => {
   // believed nothing had answered.
   it("keeps an older no-history refresh from undoing a newer agent answer", async () => {
     const idle: AgentRunStatusResult = {
-      mcpEnabled: false,
       activeRun: null,
       lastRun: null,
     };
     const running: AgentRunStatusResult = {
-      mcpEnabled: false,
       activeRun: {
         id: "run-1",
         startedAt: 1,
@@ -2877,7 +3186,6 @@ describe("history page", () => {
         throw new Error("agent status failed");
       }
       return {
-        mcpEnabled: false,
         activeRun: null,
         lastRun: null,
       };
@@ -3144,7 +3452,7 @@ describe("versions surface after a failed capture build", () => {
     // own read said engine-ON (this control renders on that read alone), and
     // main's status has landed carrying the failure. Without them the no-call
     // below passes vacuously in the pre-read window.
-    await screen.findByTestId("titlebar-chats-sidebar");
+    await screen.findByTestId("titlebar-about-sidebar");
     await waitFor(() =>
       expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"),
     );
@@ -3191,7 +3499,7 @@ describe("versions surface after a failed capture build", () => {
     // Both halves of the premise. The titlebar Chats button renders on the
     // renderer's own read alone, so it proves that read answered engine-ON;
     // `data-ready` proves the open has not resolved.
-    await screen.findByTestId("titlebar-chats-sidebar");
+    await screen.findByTestId("titlebar-about-sidebar");
     expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("false");
 
     expect(screen.queryByTestId("version-menu-button")).toBeNull();
@@ -3269,7 +3577,7 @@ describe("versions surface after a failed capture build", () => {
       });
       await settings.promise;
     });
-    await screen.findByTestId("titlebar-chats-sidebar");
+    await screen.findByTestId("titlebar-about-sidebar");
 
     expect(screen.queryByTestId("version-menu-button")).toBeNull();
     expect(bridge.listWorkspaceVersions).not.toHaveBeenCalled();
@@ -3303,7 +3611,7 @@ describe("versions surface after a failed capture build", () => {
 
     // Before the decision lands, the tab mounts no page and claims nothing:
     // the renderer's own read proves nothing about what main recorded.
-    await screen.findByTestId("titlebar-chats-sidebar");
+    await screen.findByTestId("titlebar-about-sidebar");
     expect(screen.queryByTestId("version-compare-page")).toBeNull();
     expect(screen.queryByTestId("version-compare-off")).toBeNull();
     expect(bridge.listWorkspaceVersions).not.toHaveBeenCalled();
@@ -3431,7 +3739,7 @@ describe("moment-diff tab after a failed capture build", () => {
 
     // Before the decision lands the tab mounts no page and claims nothing:
     // the renderer's own read proves nothing about what main recorded.
-    await screen.findByTestId("titlebar-chats-sidebar");
+    await screen.findByTestId("titlebar-about-sidebar");
     expect(screen.queryByTestId("engine-moment-diff-page")).toBeNull();
     expect(screen.queryByTestId("moment-diff-off")).toBeNull();
     expect(bridge.readEngineMoment).not.toHaveBeenCalled();

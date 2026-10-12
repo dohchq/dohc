@@ -12,6 +12,42 @@ beforeEach(async () => {
 });
 
 describe("createWorkspaceFolder", () => {
+  it.each(["link", "shares", "notices"])("refuses a manifest with reserved id %s without changing it", async (workspaceId) => {
+    const root = join(base, workspaceId);
+    await mkdir(join(root, ".dohc"), { recursive: true });
+    const manifestPath = join(root, ".dohc", "manifest.json");
+    const manifest = JSON.stringify({ version: 1, workspaceId, kind: "personal", mode: "local-first" });
+    await writeFile(manifestPath, manifest);
+
+    await expect(createWorkspaceFolder({ rootPath: root, kind: "personal" })).rejects.toMatchObject({
+      name: "ReservedWorkspaceIdError",
+      message: `Its workspace ID, ${workspaceId}, is reserved. Change workspaceId in .dohc/manifest.json, then open the folder again.`,
+    });
+    expect(await readFile(manifestPath, "utf8")).toBe(manifest);
+    expect(await readdir(join(root, ".dohc"))).toEqual(["manifest.json"]);
+  });
+
+  it.each([
+    ["not JSON", "{ version: 1", "unreadable", "this folder has a corrupt .dohc/manifest.json"],
+    ["missing its kind", JSON.stringify({ version: 1, workspaceId: "ws-1", mode: "local-first" }), "unreadable",
+      "this folder has an invalid .dohc/manifest.json: manifest kind is invalid"],
+    ["from a newer dohc", JSON.stringify({ version: 2, workspaceId: "ws-1" }), "newer-version",
+      "this workspace was created by a newer version of dohc (manifest v2)"],
+  ])("refuses a manifest %s by its code, without changing it", async (_case, manifest, code, message) => {
+    const root = join(base, "refused");
+    await mkdir(join(root, ".dohc"), { recursive: true });
+    const manifestPath = join(root, ".dohc", "manifest.json");
+    await writeFile(manifestPath, manifest);
+
+    await expect(createWorkspaceFolder({ rootPath: root, kind: "personal" })).rejects.toMatchObject({
+      name: "WorkspaceManifestError",
+      code,
+      message,
+    });
+    expect(await readFile(manifestPath, "utf8")).toBe(manifest);
+    expect(await readdir(join(root, ".dohc"))).toEqual(["manifest.json"]);
+  });
+
   it.each([false, true])("refuses linked metadata before creating or adopting a manifest (manifest present: %s)", async (hasManifest) => {
     const root = join(base, "linked-workspace");
     const outside = join(base, "outside");
@@ -52,7 +88,7 @@ describe("createWorkspaceFolder", () => {
   it("keeps a workspace's sync history in its folder, so a reattach still knows it synced", async () => {
     const root = join(base, "reattached");
     await createWorkspaceFolder({ rootPath: root, kind: "personal" });
-    recordSynced(root);
+    await recordSynced(root);
     // Forgetting drops only the registry entry; attaching the folder again
     // adopts its manifest and leaves the record.
     await createWorkspaceFolder({ rootPath: root, kind: "personal" });

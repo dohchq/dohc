@@ -9,9 +9,6 @@ export const ATTACHMENT_LOCATIONS = [
 
 export const WORKSPACE_SETTINGS_DEFAULTS = {
   version: 1,
-  agents: {
-    mcpAutoStart: false,
-  },
   sites: {
     defaultPreviewMode: "auto",
   },

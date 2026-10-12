@@ -1,3 +1,4 @@
+import { datasetBaseFolder } from "@dohc/security-contract/dataset";
 import type { CreationStage, CreationPartial } from "@dohc/cli/creation";
 import { CreatedFileWriteError } from "../workspaces/workspaceFiles";
 import { SourceCreationConflict, type SourceCreationProgress } from "../workspaces/datasetSourceCreation";
@@ -117,6 +118,8 @@ export function createDatasetHandler<Caller, W extends Workspace, O extends Oper
         }
         throw new Error("This Collection action is unavailable.");
       }
+      if (agent && agent.depth > 0 && (input.action === "approve" || input.action === "approveMigration")) throw new Error("Automations cannot approve Collection rules.");
+      const approvalAgent = agent ? agent.approvalAgent ?? {kind:"agent" as const,label:null,labelSource:"agent-declared" as const} : undefined;
       const host = await dependencies.hostForWorkspace(operation.workspace, operation.signal);
       current();
       if (input.action === "prepareRecovery") {
@@ -146,7 +149,8 @@ export function createDatasetHandler<Caller, W extends Workspace, O extends Oper
           current();
           if (!datasetPath) {
             const definition = approved.revision.definition;
-            datasetPath = definition.schemaPath.slice(0, definition.schemaPath.lastIndexOf("/") + 1) + "dataset.json";
+            const folder = datasetBaseFolder(definition);
+            datasetPath = folder === "." ? "dataset.json" : `${folder}/dataset.json`;
             const files = { [definition.schemaPath]: approved.schemaSql, [definition.operationsPath]: approved.operationSource,
               [datasetPath]: JSON.stringify(definition, null, 2) + "\n" };
             const paths = Object.keys(files);
@@ -185,7 +189,7 @@ export function createDatasetHandler<Caller, W extends Workspace, O extends Oper
         approveMigrationCandidate: (value: Parameters<NonNullable<OwnerDatasetData["approveMigrationCandidate"]>>[0]) => {
           migrationAuthority.assertCurrent();
           if (!data.approveMigrationCandidate) throw new Error("Collection rule changes are unavailable on this host.");
-          return data.approveMigrationCandidate(value);
+          return data.approveMigrationCandidate({...value,approvalAgent});
         },
         discardMigrationCandidate: (value: Parameters<NonNullable<OwnerDatasetData["discardMigrationCandidate"]>>[0]) => {
           migrationAuthority.assertCurrent();
@@ -398,7 +402,7 @@ export function createDatasetHandler<Caller, W extends Workspace, O extends Oper
         }
       }
       if (input.action === "approve") {
-        const revision = await host.approve({ ...input, signal: operation.signal });
+        const revision = await host.approve({ ...input, approvalAgent, signal: operation.signal });
         current();
         return { kind: "approved" as const, revision };
       }
@@ -424,7 +428,7 @@ export function createDatasetHandler<Caller, W extends Workspace, O extends Oper
         throw new Error("Collection source differs from these fields. Choose another folder or review the saved source.");
       }
       // The creation control approves the generated fields and actions it just displayed.
-      const revision = await host.approve({ preparationId: prepared.preparationId, revisionSha256: prepared.revision.revisionSha256, signal: operation.signal });
+      const revision = await host.approve({ preparationId: prepared.preparationId, revisionSha256: prepared.revision.revisionSha256, approvalAgent, signal: operation.signal });
       current();
       return { kind: "approved" as const, revision };
       });

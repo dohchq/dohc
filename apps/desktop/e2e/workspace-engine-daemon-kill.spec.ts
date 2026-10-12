@@ -2,6 +2,7 @@ import { expect, test, type Page } from "@playwright/test";
 import { readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { launchDesktopApp } from "./helpers/desktopApp";
+import { mainProcessCrashText } from "./helpers/mainProcessCrashText";
 import {
   engineDaemonPids,
   hardKillAppTree,
@@ -45,20 +46,6 @@ async function openEngineDoc(page: Page, path: string): Promise<void> {
     timeout: 15_000,
   });
   await expect(page.getByTestId("markdown-editor")).toBeVisible();
-}
-
-function mainProcessCrashText(
-  logs: ReadonlyArray<{ source: string; level: string; text: string }>,
-): string[] {
-  return logs
-    .filter((entry) => entry.source === "main")
-    .map((entry) => entry.text)
-    .filter(
-      (text) =>
-        /Uncaught Exception/i.test(text) ||
-        /A JavaScript error occurred in the main process/i.test(text) ||
-        /EPIPE/.test(text),
-    );
 }
 
 interface KilledSession {
@@ -133,6 +120,14 @@ async function killDaemonMidTyping(
     (input.restartBackoffMs ?? 0) + 30_000,
   );
   expect(victims).not.toContain(replacement);
+
+  // PID creation precedes the handshake and blocking restart smoke. A real
+  // workspace request proves the replacement can serve the quit-time recovery.
+  await expect.poll(async () => page.evaluate(async workspaceId => {
+    try {
+      return (await window.dohcDesktop!.listWorkspaceVersions({ workspaceId })).activeVersionId;
+    } catch { return null; }
+  }, workspace.workspaceId), { timeout: 30_000 }).toBe("main");
 
   // A daemon death must never become a user-facing main-process crash. This
   // cannot observe the journey's EPIPE class — Playwright keeps a reader on the
@@ -222,8 +217,9 @@ test("a hard daemon kill leaves the editor writable and lands the outage text", 
           await readFile(join(temp.rootPath, docPath), "utf8").catch(() => ""),
         { timeout: 30_000 },
       )
-      .toContain(preKill);
+      .toContain("KILLREC_AFTER_RESTART");
     const onDisk = await readFile(join(temp.rootPath, docPath), "utf8");
+    expect(onDisk).toContain(preKill);
     expect(onDisk).toContain(postKill);
     expect(onDisk).toContain("KILLREC_AFTER_RESTART");
     expect(onDisk.match(/Anchor paragraph\./g)).toHaveLength(1);
@@ -263,18 +259,17 @@ test("an outage longer than the retry window still persists the text at quit", a
 
     // The session went dead during the outage: main reported the refused edits.
     // Precondition, not decoration: the outage really did outlive the retry
-    // ladder, so the rebind was EXHAUSTED and the session marked dead. Without
+    // ladder, so update delivery failed and the session went dead. Without
     // this the spec could silently degrade into the fast-restart case it exists
-    // to go beyond. Deliberately keyed on the rebind's own error type rather
-    // than on how many failures recovery goes on to log, so the precondition
-    // cannot shift meaning under a mutation of the recovery code.
+    // to go beyond. The exhausted transport can report either an unavailable
+    // daemon or a failed workspace rebind, depending on where delivery stopped.
     const refusedEdits = desktop.logs.filter(
       (entry) =>
         entry.source === "main" &&
         /Y\.Doc local update of .* failed/.test(entry.text),
     );
     expect(refusedEdits.length).toBeGreaterThan(0);
-    expect(refusedEdits[0]?.text).toContain("EngineWorkspaceRebindError");
+    expect(refusedEdits.some(entry => /Engine(?:WorkspaceRebind|DaemonUnavailable)Error/.test(entry.text))).toBe(true);
 
     // Quit with no further typing. Only the settling close can save this text.
     await desktop.close();

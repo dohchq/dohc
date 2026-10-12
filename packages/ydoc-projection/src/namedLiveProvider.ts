@@ -6,6 +6,7 @@ import {
 } from "@dohc/live-session-contract/live-frame";
 import { parseLiveObjectBinding, type LiveObjectBinding } from "@dohc/live-session-contract/live-object-binding";
 import type { LiveUpdateHostApplicationAck } from "@dohc/live-session-contract/live-update-admission";
+import { parseLiveAuthorContext, type LiveAuthorContext } from "@dohc/live-session-contract";
 
 export interface NamedLiveProviderLimits {
   readonly frames: LiveFrameSessionPolicy;
@@ -39,6 +40,7 @@ interface PendingUpdate {
   readonly bytes: Uint8Array;
   digest?: string;
   readonly epochs: number[];
+  readonly authorContext?: LiveAuthorContext;
 }
 interface Transfer {
   readonly begin: LiveFrameBegin;
@@ -79,7 +81,8 @@ const REMOTE = Symbol("named-live-remote");
  * an in-memory draft; reconnecting a quarantined provider is deliberately forbidden.
  */
 export function createNamedLiveProvider(input: NamedLiveProviderLimits,
-  expectedDocument?: Pick<LiveObjectBinding, "objectId"> & Partial<Pick<LiveObjectBinding, "workspaceId">>) {
+  expectedDocument?: Pick<LiveObjectBinding, "objectId"> & Partial<Pick<LiveObjectBinding, "workspaceId">>,
+  recordingContext?: LiveAuthorContext | (() => LiveAuthorContext)) {
   const expected = expectedDocument && { ...expectedDocument };
   const limits: NamedLiveProviderLimits = {
     frames: { ...input.frames, receive: { ...input.frames.receive } },
@@ -157,7 +160,8 @@ export function createNamedLiveProvider(input: NamedLiveProviderLimits,
             update.digest ??= await digest(update.bytes);
             if (!current(held)) return;
             update.epochs.push(held.epoch);
-            held.transfer = { begin: { kind: "begin", purpose: "submit-update", deliveryId: update.id, transferId: held.nextTransfer++, totalBytes: update.bytes.length, digest: update.digest }, bytes: update.bytes, begun: false, offset: 0 };
+            held.transfer = { begin: { kind: "begin", purpose: "submit-update", deliveryId: update.id, transferId: held.nextTransfer++, totalBytes: update.bytes.length, digest: update.digest,
+              ...(update.authorContext ? { authorContext: update.authorContext } : {}) }, bytes: update.bytes, begun: false, offset: 0 };
           } else return;
           control = held.controls[0];
         }
@@ -293,7 +297,13 @@ export function createNamedLiveProvider(input: NamedLiveProviderLimits,
     if (status !== "live") { quarantine("edit-while-unavailable"); return; }
     if (bytes.length > limits.frames.receive.maxUpdateBytes || bytes.length > limits.maxPendingUpdateBytes - pendingBytes ||
         pending.length >= limits.maxPendingUpdates) { quarantine("pending-update-limit"); return; }
-    pending.push({ id: crypto.randomUUID(), bytes: bytes.slice(), epochs: [] });
+    let authorContext: LiveAuthorContext | undefined;
+    try {
+      authorContext = recordingContext === undefined ? undefined
+        : parseLiveAuthorContext(typeof recordingContext === "function" ? recordingContext() : recordingContext);
+    } catch { quarantine("invalid-recording-context"); return; }
+    pending.push({ id: crypto.randomUUID(), bytes: bytes.slice(), epochs: [],
+      ...(authorContext ? { authorContext } : {}) });
     pendingBytes += bytes.length;
     notify();
     if (route) void pump(route);

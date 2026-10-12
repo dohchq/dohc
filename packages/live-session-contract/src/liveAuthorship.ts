@@ -1,6 +1,6 @@
 import { parseLiveUpdateIdentifier } from "./liveUpdateAdmission.js";
 
-export const MAX_LIVE_AUTHOR_ENTRY_BYTES = 2114;
+export const MAX_LIVE_AUTHOR_ENTRY_BYTES = 4096;
 export const MAX_LIVE_AUTHOR_IDENTITIES = 1024;
 export const MAX_LIVE_AUTHOR_BYTES = 128 * 1024;
 export const LIVE_AUTHOR_CHECKPOINT_IDENTITIES = 960;
@@ -17,7 +17,24 @@ export type LiveAuthorContext = (
   | { readonly kind: "link"; readonly publicPrincipalId: string }
   | { readonly kind: "signed-out" }
 ) & { readonly agent?: LiveDeclaredAgent };
+export interface AutomationDeclaration {
+  readonly automationId: string;
+  readonly attribution: {readonly actorKind: "automation"; readonly onBehalfOf?: string; readonly depth: number; readonly run?: {readonly claimId: string; readonly automationName: string}};
+}
+export function parseAutomationDeclaration(value: unknown): AutomationDeclaration {
+  const entry = record(value, ["automationId", "attribution"]);
+  const attribution = record(entry.attribution, ["actorKind", "depth"], ["onBehalfOf", "run"]);
+  if (attribution.actorKind !== "automation" || !Number.isSafeInteger(attribution.depth) || (attribution.depth as number) < 0 || (attribution.depth as number) > 64) throw new TypeError("Invalid automation attribution.");
+  const run = attribution.run === undefined ? undefined : record(attribution.run, ["claimId", "automationName"]);
+  if (run && (typeof run.automationName !== "string" || !run.automationName.trim() || new TextEncoder().encode(run.automationName).byteLength > 1024 || /[\u0000-\u001f\u007f]/.test(run.automationName))) throw new TypeError("Invalid automation name.");
+  return {automationId: parseLiveUpdateIdentifier(entry.automationId), attribution: {actorKind: "automation",
+    ...(attribution.onBehalfOf === undefined ? {} : {onBehalfOf: parseLiveUpdateIdentifier(attribution.onBehalfOf)}),
+    depth: attribution.depth as number,
+    ...(run ? {run: {claimId: parseLiveUpdateIdentifier(run.claimId), automationName: run.automationName as string}} : {})}};
+}
 export type LiveAuthorEntry =
+  | { readonly kind: "unattributed" }
+  | ({readonly kind: "automation"} & AutomationDeclaration)
   | { readonly kind: "human"; readonly humanId: string; readonly humanName: string }
   | { readonly kind: "link"; readonly publicPrincipalId: string; readonly label: string }
   | ({ readonly kind: "agent" } & LiveDeclaredAgent);
@@ -59,9 +76,15 @@ export function parseLiveAuthorContext(value: unknown): LiveAuthorContext {
 export function parseLiveAuthorSnapshot(value: unknown): LiveAuthorSnapshot {
   if (!Array.isArray(value) || value.length > 2) throw new TypeError("Invalid live author snapshot.");
   const result = Array.from(value, item => {
-    const entry = record(item, ["kind"], ["humanId", "humanName", "publicPrincipalId", "label", "agentId", "agentName", "onBehalfOf", "depth"]);
+    const entry = record(item, ["kind"], ["humanId", "humanName", "publicPrincipalId", "label", "agentId", "agentName", "onBehalfOf", "depth", "automationId", "attribution"]);
     let author: LiveAuthorEntry;
-    if (entry.kind === "human") {
+    if (entry.kind === "unattributed") {
+      record(item, ["kind"]);
+      author = {kind: "unattributed"};
+    } else if (entry.kind === "automation") {
+      const {kind: _kind, ...fields} = entry;
+      author = {kind: "automation", ...parseAutomationDeclaration(fields)};
+    } else if (entry.kind === "human") {
       record(item, ["kind", "humanId", "humanName"]);
       author = {kind: "human", humanId: parseLiveUpdateIdentifier(entry.humanId), humanName: parseLiveUpdateIdentifier(entry.humanName)};
     } else if (entry.kind === "link") {
@@ -74,9 +97,11 @@ export function parseLiveAuthorSnapshot(value: unknown): LiveAuthorSnapshot {
     if (new TextEncoder().encode(JSON.stringify(author)).byteLength > MAX_LIVE_AUTHOR_ENTRY_BYTES) throw new TypeError("Live author entry is too large.");
     return author;
   });
-  if (result.length === 2 && (result[0]?.kind === "agent" || result[1]?.kind !== "agent")) throw new TypeError("Noncanonical author snapshot.");
+  if (result.length === 2 && ((result[0]?.kind === "agent" || result[0]?.kind === "automation") || result[1]?.kind !== "agent")) throw new TypeError("Noncanonical author snapshot.");
   return result;
 }
 export function liveAuthorIdentity(entry: LiveAuthorEntry): string {
+  if (entry.kind === "unattributed") return JSON.stringify([entry.kind, null, ""]);
+  if (entry.kind === "automation") return JSON.stringify([entry.kind, entry.attribution.run?.claimId ?? null, entry.automationId]);
   return JSON.stringify([entry.kind, entry.kind === "agent" ? entry.onBehalfOf ?? null : null, entry.kind === "human" ? entry.humanId : entry.kind === "link" ? entry.publicPrincipalId : entry.agentId]);
 }

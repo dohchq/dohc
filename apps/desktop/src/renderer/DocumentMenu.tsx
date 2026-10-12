@@ -5,7 +5,7 @@ import { bridge } from "./bridge";
 import { CustomizeContext } from "./settings/customize";
 import type { ReportButtonError } from "./collections/useAutomationButtons";
 
-// The document header's "…" menu (ViewHeader): copy the raw markdown, export
+// The document's "…" menu in its tab row (ViewActions): copy the raw markdown, export
 // it as a .md file, or export a self-contained HTML/PDF render. The Menu part
 // owns the trigger, the list, and dismissal; this file owns what each row
 // does and what the menu says about it afterwards.
@@ -56,6 +56,9 @@ export function DocumentMenu(props: {
   // The shell's error hook. A copy that fails after the menu has closed has
   // no row left to say so, and reaches the person through this instead.
   reportError?: ReportButtonError;
+  // The document will not open here, such as after a failed read: the
+  // trigger keeps its place and does nothing.
+  disabled?: boolean;
 }) {
   const customize = useContext(CustomizeContext)?.customize;
   const items = customize ? [...ITEMS, CUSTOMIZE_ITEM] : ITEMS;
@@ -291,6 +294,7 @@ export function DocumentMenu(props: {
     <Menu
       label="Document actions"
       testId="document-menu-trigger"
+      disabled={props.disabled}
       open={open}
       onOpenChange={setOpen}
       closeOnPick={false}

@@ -1,3 +1,4 @@
+import { registerTypingCheckpoint } from "./workspaces/outageTypingRecovery";
 import { EventEmitter } from "node:events";
 import type { ChildProcess } from "node:child_process";
 import { resolve } from "node:path";
@@ -55,6 +56,10 @@ function fixture(configure?: (dependencies: Dependencies) => void) {
         return current;
       }),
       whenLoaded: vi.fn(() => { log.push("load-listener"); return loaded.promise; }),
+      openFailureTarget: (window) => ({
+        whenReady: () => loaded.promise,
+        isCurrent: () => current === window,
+      }),
       current: () => current,
       hasWorkspace: () => current !== undefined,
       hasAny: () => current !== undefined,
@@ -66,6 +71,8 @@ function fixture(configure?: (dependencies: Dependencies) => void) {
     },
     workspaces: {
       openPath: vi.fn(async (path) => { log.push(`open:${path}`); return path; }),
+      recordOpenFailure: vi.fn(),
+      reportOpenFailure: vi.fn(),
       refreshNativeSurfaces: vi.fn(() => { log.push("native"); }),
     },
     bootstrap: {
@@ -110,6 +117,7 @@ function fixture(configure?: (dependencies: Dependencies) => void) {
       stopSitePreviews: vi.fn(async () => { log.push("site-previews-stop"); }),
       settleYDocs: vi.fn(async () => { log.push("ydoc-settle"); }),
       stopAgentIntegration: vi.fn(async () => { log.push("integration-stop"); }),
+      flushReports: vi.fn(async () => { log.push("reports-flush"); }),
       closeWorkspaces: vi.fn(async () => { log.push("workspaces-close"); }),
       disposeDatabase: vi.fn(async () => { log.push("database-stop"); }),
       closeRelay: vi.fn(async () => { log.push("relay-close"); }),
@@ -372,6 +380,16 @@ describe("desktop bootstrap", () => {
     // A quit vetoed at before-quit never reaches will-quit, so it counts nothing.
   });
 
+  it("flushes outage typing at OS session end without cancelling the end", async () => {
+    const f = fixture(); await boot(f); const window = new EventEmitter();
+    const flush = vi.fn(() => undefined); const unregister = registerTypingCheckpoint("workspace", async()=>{},()=>true,undefined,flush);
+    try {
+      f.app.emit("browser-window-created", {}, window); const preventDefault = vi.fn();
+      window.emit("session-end", {preventDefault});
+      expect(flush).toHaveBeenCalledOnce(); expect(preventDefault).not.toHaveBeenCalled();
+    } finally {unregister();}
+  });
+
   it("finishes the launch when Windows ends the session, which emits no quit event", async () => {
     const f = fixture();
     await boot(f);
@@ -490,6 +508,138 @@ describe("desktop open intents", () => {
     expect(f.dependencies.workspaces.openPath).toHaveBeenCalledWith("next", { id: 1, zoom: 1.5 });
   });
 
+  it.each(["argv", "open-file", "second-instance"])("retains %s failures and reports each once after renderer readiness", async (source) => {
+    const first = new Error("registration refused");
+    const second = new Error("activation refused");
+    const f = fixture((d) => {
+      if (source === "argv") d.runtime.argv.push("--open-workspace=bad", "--open-workspace=good", "--open-workspace=also-bad", "--open-workspace=missing");
+      d.workspaces.openPath = vi.fn(async (path) => {
+        if (path === "bad") throw first;
+        if (path === "also-bad") throw second;
+        return path === "missing" ? null : path;
+      });
+    });
+    const ready = f.lifecycle.start();
+    if (source === "open-file") {
+      for (const path of ["bad", "good", "also-bad", "missing"]) f.app.emit("open-file", event(), path);
+    } else if (source === "second-instance") {
+      f.app.emit("second-instance", {}, [process.execPath, "--open-workspace=bad", "--open-workspace=good", "--open-workspace=also-bad", "--open-workspace=missing"]);
+    }
+    f.appReady.resolve();
+    f.settings.resolve({ zoom: 1.5 });
+    f.engine.resolve(true);
+    await ready;
+    expect(f.dependencies.workspaces.openPath).toHaveBeenCalledTimes(4);
+    expect(f.dependencies.workspaces.recordOpenFailure).toHaveBeenCalledTimes(2);
+    expect(f.dependencies.workspaces.recordOpenFailure).toHaveBeenNthCalledWith(1, "bad", first);
+    expect(f.dependencies.workspaces.recordOpenFailure).toHaveBeenNthCalledWith(2, "also-bad", second);
+    expect(f.dependencies.workspaces.reportOpenFailure).not.toHaveBeenCalled();
+    f.loaded.resolve(true);
+    expect(await f.activated.promise).toBe("good");
+    await Promise.resolve();
+    expect(f.dependencies.workspaces.reportOpenFailure).toHaveBeenCalledTimes(2);
+    expect(f.dependencies.workspaces.reportOpenFailure).toHaveBeenNthCalledWith(1, "bad", first, { id: 1, zoom: 1.5 });
+    expect(f.dependencies.workspaces.reportOpenFailure).toHaveBeenNthCalledWith(2, "also-bad", second, { id: 1, zoom: 1.5 });
+    f.app.emit("activate");
+    await Promise.resolve();
+    expect(f.dependencies.workspaces.reportOpenFailure).toHaveBeenCalledTimes(2);
+    expect(f.dependencies.bootstrap.reportFailure).not.toHaveBeenCalled();
+    expect(f.app.quit).not.toHaveBeenCalled();
+  });
+
+  it.each(["open-file", "second-instance"])("reports post-bootstrap %s failures without waiting to open the next path", async (source) => {
+    const failure = new Error("unavailable");
+    const nextOpened = deferred();
+    const reported = deferred();
+    const f = fixture((d) => {
+      d.workspaces.openPath = vi.fn(async (path) => {
+        if (path === "bad") throw failure;
+        nextOpened.resolve();
+        return path;
+      });
+      d.workspaces.reportOpenFailure = vi.fn(() => reported.resolve());
+    });
+    await boot(f);
+    if (source === "open-file") {
+      f.app.emit("open-file", event(), "bad");
+      f.app.emit("open-file", event(), "good");
+    } else {
+      f.app.emit("second-instance", {}, [process.execPath, "--open-workspace=bad", "--open-workspace=good"]);
+    }
+    await nextOpened.promise;
+    expect(f.dependencies.workspaces.reportOpenFailure).not.toHaveBeenCalled();
+    f.loaded.resolve(true);
+    await reported.promise;
+    expect(f.dependencies.workspaces.reportOpenFailure).toHaveBeenCalledExactlyOnceWith("bad", failure, { id: 1, zoom: 1.5 });
+  });
+
+  it("keeps pending-intent priority after launch and queued failures", async () => {
+    const pending = deferred<string | null>();
+    const pendingStarted = deferred();
+    const lateOpened = deferred();
+    const failure = new Error("cannot register");
+    const f = fixture((d) => {
+      d.runtime.argv.push("--open-workspace=launch", "--open-workspace=bad");
+      d.workspaces.openPath = vi.fn(async (path) => {
+        if (path === "bad") throw failure;
+        if (path === "pending") { pendingStarted.resolve(); return pending.promise; }
+        if (path === "late") lateOpened.resolve();
+        return path;
+      });
+    });
+    const ready = f.lifecycle.start();
+    f.app.emit("open-file", event(), "bad");
+    f.app.emit("open-file", event(), "pending");
+    f.appReady.resolve();
+    f.settings.resolve({ zoom: 1.5 });
+    f.engine.resolve(true);
+    await pendingStarted.promise;
+    f.app.emit("open-file", event(), "late");
+    pending.resolve("pending");
+    await ready;
+    f.loaded.resolve(true);
+    expect(await f.activated.promise).toBe("pending");
+    await lateOpened.promise;
+    expect(f.dependencies.workspaces.openPath).toHaveBeenLastCalledWith("late", { id: 1, zoom: 1.5 });
+    expect(f.dependencies.workspaces.reportOpenFailure).toHaveBeenCalledTimes(2);
+  });
+
+  it.each(["failed-load", "closed", "replaced", "workspace-changed"])("does not deliver delayed failures to a %s target", async (change) => {
+    let current = true;
+    const failure = new Error("refused");
+    const f = fixture((d) => {
+      d.runtime.argv.push("--open-workspace=bad");
+      d.workspaces.openPath = vi.fn(async () => { throw failure; });
+      d.windows.openFailureTarget = () => ({ whenReady: () => f.loaded.promise, isCurrent: () => current });
+    });
+    await boot(f);
+    expect(f.dependencies.workspaces.recordOpenFailure).toHaveBeenCalledExactlyOnceWith("bad", failure);
+    if (change !== "failed-load") current = false;
+    f.loaded.resolve(change !== "failed-load");
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(f.dependencies.workspaces.reportOpenFailure).not.toHaveBeenCalled();
+  });
+
+  it("reports into a replacement created for its own OS request", async () => {
+    const replacement = { id: 2, zoom: 1.5 };
+    const failure = new Error("refused");
+    const reported = deferred();
+    const opened = deferred();
+    const f = fixture((d) => {
+      d.windows.current = () => undefined;
+      d.windows.showOrCreate = vi.fn(async () => replacement);
+      d.windows.openFailureTarget = () => ({ whenReady: () => f.loaded.promise, isCurrent: () => true });
+      d.workspaces.openPath = vi.fn(async () => { opened.resolve(); throw failure; });
+      d.workspaces.reportOpenFailure = vi.fn(() => reported.resolve());
+    });
+    await boot(f);
+    f.app.emit("open-file", event(), "bad");
+    await opened.promise;
+    f.loaded.resolve(true);
+    await reported.promise;
+    expect(f.dependencies.workspaces.reportOpenFailure).toHaveBeenCalledExactlyOnceWith("bad", failure, replacement);
+  });
   it("deduplicates launch arguments, skips the executable, and continues after an unopenable path", async () => {
     const absolute = resolve("workspace");
     const f = fixture((d) => {
@@ -737,6 +887,52 @@ describe("desktop shutdown", () => {
     expect(f.app.exit).toHaveBeenCalledOnce();
   });
 
+  it("sends reports alongside teardown and exits only once both finish", async () => {
+    vi.useFakeTimers();
+    const ydoc = deferred();
+    const reports = deferred();
+    const f = fixture((d) => {
+      d.shutdown.settleYDocs = () => ydoc.promise;
+      d.shutdown.flushReports = vi.fn(() => reports.promise);
+    });
+    await boot(f);
+    f.app.emit("will-quit", event());
+    // Reports start while producers still drain, and teardown does not wait for them.
+    expect(f.dependencies.shutdown.flushReports).toHaveBeenCalledOnce();
+    ydoc.resolve();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(f.dependencies.shutdown.stopEngine).toHaveBeenCalledOnce();
+    expect(f.app.exit).not.toHaveBeenCalled();
+    reports.resolve();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(f.app.exit).toHaveBeenCalledExactlyOnceWith(0);
+  });
+
+  it("exits at the shutdown budget when reports never finish", async () => {
+    vi.useFakeTimers();
+    const f = fixture((d) => {
+      d.shutdown.budgetMs = WILL_QUIT_BUDGET_MS;
+      d.shutdown.deadlineExitCode = 1;
+      d.shutdown.flushReports = () => new Promise<void>(() => undefined);
+    });
+    await boot(f);
+    f.app.emit("will-quit", event());
+    await vi.advanceTimersByTimeAsync(WILL_QUIT_BUDGET_MS - 1);
+    expect(f.dependencies.shutdown.stopEngine).toHaveBeenCalledOnce();
+    expect(f.app.exit).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(f.app.exit).toHaveBeenCalledExactlyOnceWith(1);
+  });
+
+  it("exits normally when sending reports fails", async () => {
+    vi.useFakeTimers();
+    const f = fixture((d) => { d.shutdown.flushReports = async () => { throw new Error("reports"); }; });
+    await boot(f);
+    f.app.emit("will-quit", event());
+    await vi.advanceTimersByTimeAsync(0);
+    expect(f.app.exit).toHaveBeenCalledExactlyOnceWith(0);
+  });
+
   it("keeps producer failure contained and preserves database-failure skipping of relay teardown", async () => {
     vi.useFakeTimers();
     const f = fixture((d) => {
@@ -761,6 +957,13 @@ describe("desktop shutdown", () => {
     f.app.emit("before-quit", quit);
     expect(f.dependencies.beforeQuit).toHaveBeenCalledWith(quit);
     expect(f.dependencies.shutdown.beginEngineShutdown).not.toHaveBeenCalled();
+  });
+
+  it("runs the checkpoint boundary when ordinary quit has no workspace window", async () => {
+    const checkpoint = vi.fn((quit: {preventDefault(): void}) => quit.preventDefault());
+    const f = fixture(d => {d.windows.hasWorkspace = () => false; d.beforeQuitWithoutWindows = checkpoint;});
+    await boot(f); const quit = event(); f.app.emit("before-quit", quit);
+    expect(checkpoint).toHaveBeenCalledWith(quit); expect(f.dependencies.beforeQuit).not.toHaveBeenCalled();
   });
 
   it.each([false, true])("keeps the process after the last window only when dispatch is enabled: %s", async (enabled) => {

@@ -143,6 +143,43 @@ async fn settle_restore(
 }
 
 #[tokio::test]
+async fn uncaptured_historical_settlement_replay_keeps_saved_work_without_recapturing() {
+    let f = Fixture::new().await;
+    let update = f
+        .doc
+        .rewrite_content_to_markdown_preserving_source(ContentKind::Richdoc, "# Saved work\n")
+        .unwrap();
+    let terminal = f.apply(7, update).await;
+    let first = f
+        .settle(Some(terminal.clone()), 100, Arc::new(NoFaults))
+        .await
+        .unwrap();
+    let before = f.counts();
+    let text = std::fs::read(f.root.path().join(&f.binding.current_path)).unwrap();
+    {
+        let db = rusqlite::Connection::open(&f.db).unwrap();
+        db.execute(
+            "DELETE FROM live_settlement_publication_states WHERE settlement_id=?1",
+            [&first.settlement_id],
+        )
+        .unwrap();
+    }
+    for _ in 0..2 {
+        let replay = f
+            .settle(Some(terminal.clone()), 100, Arc::new(NoFaults))
+            .await
+            .unwrap();
+        assert_eq!(replay.settlement_id, first.settlement_id);
+        assert_eq!(f.counts(), before);
+        assert_eq!(
+            std::fs::read(f.root.path().join(&f.binding.current_path)).unwrap(),
+            text
+        );
+        assert_eq!(f.read(|db|db.query_row("SELECT count(*) FROM live_settlement_publication_states WHERE settlement_id=?1",[&first.settlement_id],|r|r.get::<_,i64>(0)).unwrap()),0);
+    }
+}
+
+#[tokio::test]
 async fn restore_settlement_materializes_selected_point_and_preserves_old_anchor() {
     let f = Fixture::new().await;
     f.settle(None, 100, Arc::new(NoFaults)).await.unwrap();
@@ -750,6 +787,24 @@ impl Fixture {
         received_at_ms: i64,
         agent_declaration: Option<AgentDeclaration>,
     ) -> (LiveUpdateReceipt, ApplicationResult) {
+        self.apply_declared_with_content(
+            cursor,
+            bytes,
+            authority,
+            received_at_ms,
+            (agent_declaration, vec![]),
+        )
+        .await
+    }
+    async fn apply_declared_with_content(
+        &self,
+        cursor: i64,
+        bytes: Vec<u8>,
+        authority: ServerDerivedLiveUpdateAuthority,
+        received_at_ms: i64,
+        authorship: (Option<AgentDeclaration>, Vec<LiveUpdateStructRange>),
+    ) -> (LiveUpdateReceipt, ApplicationResult) {
+        let (agent_declaration, first_seen) = authorship;
         self.doc.apply(&bytes).unwrap();
         let receipt = LiveUpdateReceipt {
             delivery_id: format!("delivery-{cursor}"),
@@ -765,7 +820,7 @@ impl Fixture {
                     authority,
                     received_at_ms,
                 },
-                first_seen: vec![],
+                first_seen,
                 canonical_version: Some(2),
                 author_snapshot: Some(
                     (agent_declaration)
@@ -903,6 +958,59 @@ fn latest_authors(f: &Fixture) -> serde_json::Value {
     })
 }
 
+async fn named_delivery_settles_without_marker(author: serde_json::Value) {
+    let f = Fixture::new().await;
+    f.settle(None, 100, Arc::new(NoFaults)).await.unwrap();
+    let bytes = f.doc.richdoc_append_paragraph("Named contribution");
+    let receipt = LiveUpdateReceipt {
+        delivery_id: "named-delivery".into(),
+        update_digest: hex_sha256(&bytes),
+        journal_cursor: 3,
+        accepting_host_epoch: 1,
+    };
+    let event = AdmittedLiveUpdate {
+        metadata: AdmittedLiveUpdateMetadata {
+            accepted: RelayAcceptedLiveUpdate {
+                receipt: receipt.clone(),
+                binding: f.binding.clone(),
+                authority: owner_authority(),
+                received_at_ms: 2,
+            },
+            first_seen: vec![],
+            canonical_version: Some(2),
+            author_snapshot: Some(vec![serde_json::from_value(author.clone()).unwrap()]),
+            first_seen_deletes: Some(vec![]),
+            checkpoint_coverage: None,
+        },
+        update_bytes: bytes,
+    };
+    assert!(matches!(
+        f.handle
+            .apply(event, Arc::new(NoFaults), 100_000_000)
+            .await
+            .unwrap(),
+        ApplicationResult::Applied(..)
+    ));
+    f.settle(Some(receipt), 100, Arc::new(NoFaults))
+        .await
+        .unwrap();
+    assert_eq!(latest_authors(&f), serde_json::json!([author]));
+    f.assert_projection();
+}
+
+#[tokio::test]
+async fn accepted_agent_delivery_settles_without_an_unattributed_marker() {
+    named_delivery_settles_without_marker(serde_json::json!({"kind":"agent","agentId":"cleanup-agent","onBehalfOf":"owner","depth":1})).await;
+}
+
+#[tokio::test]
+async fn accepted_human_delivery_settles_without_an_unattributed_marker() {
+    named_delivery_settles_without_marker(
+        serde_json::json!({"kind":"human","humanId":"owner","humanName":"Owner"}),
+    )
+    .await;
+}
+
 /// An update that only removes the body's last block: no new structs.
 fn delete_last_block(doc: &Ydoc) -> Vec<u8> {
     use yrs::updates::decoder::Decode;
@@ -923,10 +1031,31 @@ fn delete_last_block(doc: &Ydoc) -> Vec<u8> {
 }
 
 /// A live settlement names the agents the owner declared for the deliveries
-/// it covers, beside undeclared and shared deliveries, including a delete-only
-/// edit with no new structs. The next interval names only its own.
+/// it covers and the collaborator the relay accepted a delivery from. The
+/// owner's undeclared delivery names no author, so the interval keeps an
+/// unattributed gap. A delete-only edit with no new structs counts too. The
+/// next interval names only its own.
 #[tokio::test]
 async fn live_settlement_names_declared_agents_of_its_exact_interval() {
+    fn paragraph(doc: &Ydoc, text: &str) -> (Vec<u8>, Vec<LiveUpdateStructRange>) {
+        use yrs::updates::decoder::Decode;
+        let before = yrs::StateVector::decode_v1(&doc.encode_state_vector()).unwrap();
+        let bytes = doc.richdoc_append_paragraph(text);
+        let after = yrs::StateVector::decode_v1(&doc.encode_state_vector()).unwrap();
+        let mut ranges: Vec<_> = after
+            .iter()
+            .filter_map(|(client, clock)| {
+                let start = before.get(client);
+                (*clock > start).then_some(LiveUpdateStructRange {
+                    client_id: client.get() as i64,
+                    start_clock: i64::from(start),
+                    end_clock: i64::from(*clock),
+                })
+            })
+            .collect();
+        ranges.sort_by_key(|range| range.client_id);
+        (bytes, ranges)
+    }
     let f = Fixture::new().await;
     f.settle(None, 100, Arc::new(NoFaults)).await.unwrap();
     let added = f.doc.richdoc_append_paragraph("Agent paragraph");
@@ -940,26 +1069,36 @@ async fn live_settlement_names_declared_agents_of_its_exact_interval() {
         )
         .await;
     assert!(matches!(result, ApplicationResult::Applied(..)));
-    f.apply(4, f.doc.richdoc_append_paragraph("Owner paragraph"))
+    let (bytes, ranges) = paragraph(&f.doc, "Owner paragraph");
+    let (_, result) = f
+        .apply_declared_with_content(4, bytes, owner_authority(), 2, (None, ranges))
         .await;
-    let terminal = f
-        .apply_as(
+    assert!(matches!(result, ApplicationResult::Applied(..)));
+    let (bytes, ranges) = paragraph(&f.doc, "Friend paragraph");
+    let (terminal, result) = f
+        .apply_declared_with_content(
             5,
-            f.doc.richdoc_append_paragraph("Friend paragraph"),
+            bytes,
             ServerDerivedLiveUpdateAuthority::Named {
                 principal_id: "friend".into(),
                 grant_id: "grant".into(),
                 grant_generation: 1,
             },
             2,
+            (None, ranges),
         )
         .await;
+    assert!(matches!(result, ApplicationResult::Applied(..)));
     f.settle(Some(terminal), 100, Arc::new(NoFaults))
         .await
         .unwrap();
     assert_eq!(
         latest_authors(&f),
-        serde_json::json!([{"kind":"agent","agentId":"trip-agent ✈","onBehalfOf":"owner","depth":1}])
+        serde_json::json!([
+            {"kind":"agent","agentId":"trip-agent ✈","onBehalfOf":"owner","depth":1},
+            {"kind":"named","userId":"friend","grantId":"grant","grantGeneration":1},
+            {"kind":"unattributed"},
+        ])
     );
     let vector = f.doc.encode_state_vector();
     let removed = delete_last_block(&f.doc);
@@ -3498,6 +3637,8 @@ async fn live_history_publication_and_settlement_benchmark() {
                 [&settled.moment_id],
                 |r| {
                     Ok(ReplicationEnvelope {
+                        settlement_admission: None,
+                        admitted_author_snapshot: None,
                         workspace_id: "workspace".into(),
                         origin_id: r.get(0)?,
                         origin_seq: r.get(1)?,
@@ -3678,4 +3819,236 @@ async fn live_history_publication_and_settlement_benchmark() {
             "{name}: latest checkpoint event and suffix events"
         );
     }
+}
+
+#[tokio::test]
+async fn resumed_binding_publication_starts_at_authenticated_restore_cut() {
+    resumed_binding_publication(false, false).await;
+}
+
+#[tokio::test]
+async fn refused_restore_publication_keeps_new_binding_at_authenticated_restore_cut() {
+    resumed_binding_publication(true, false).await;
+}
+
+#[tokio::test]
+async fn unchanged_restore_tail_keeps_next_proof_at_the_last_settled_cut() {
+    resumed_binding_publication(false, true).await;
+}
+
+#[tokio::test]
+async fn refused_restore_publication_recovers_after_an_unchanged_tail() {
+    resumed_binding_publication(true, true).await;
+}
+
+async fn resumed_binding_publication(refused: bool, unchanged_tail: bool) {
+    let mut f = Fixture::with_relay(true).await;
+    let first = f.settle(None, 100, Arc::new(NoFaults)).await.unwrap();
+    // Finish publication before the authenticated stop/restore transition.
+    rusqlite::Connection::open(&f.db).unwrap().execute("INSERT INTO sync_relay_push_state(workspace_id,origin_id,pushed_seq) SELECT workspace_id,origin_id,max(origin_seq) FROM replication_log WHERE workspace_id='workspace' GROUP BY workspace_id,origin_id",[]).unwrap();
+    let input = applied_restore(&f, None, 0).await;
+    let restored = settle_restore(&f, input.clone(), Arc::new(NoFaults))
+        .await
+        .unwrap();
+    if refused {
+        let mut store = EngineStore::open(&f.db, 30).unwrap();
+        let mut cache = dohc_engine_collab::WriterDocCache::new();
+        let mut echoes =
+            dohc_engine_sync::list_replication_ops(&store, "workspace", "owner-origin", -1, 500)
+                .unwrap();
+        let last = echoes
+            .iter()
+            .find(|op| {
+                op.op_kind == "moment.append" && op.payload["momentId"] == restored.moment_id
+            })
+            .unwrap()
+            .origin_seq;
+        for op in &mut echoes {
+            if op.origin_seq > last {
+                break;
+            }
+            op.relay_seq = Some(op.origin_seq + 1);
+            if op.op_kind == "moment.append" && op.payload["momentId"] == restored.moment_id {
+                op.settlement_admission = Some(dohc_engine_sync::SettlementAdmission::Refused {
+                    settlement_id: restored.settlement_id.clone(),
+                    reason: "authorship-mismatch".into(),
+                });
+            }
+            dohc_engine_sync::apply_replication_envelope(
+                &mut store,
+                &mut cache,
+                op,
+                &NoFaults,
+                &dohc_engine_sync::NoLiveLeases,
+            )
+            .unwrap();
+        }
+        assert_eq!(
+            store
+                .table_row_count("live_settlement_attribution_unavailable")
+                .unwrap(),
+            1
+        );
+    }
+    let resumed = f
+        .owner
+        .resume_restore(
+            NativeRestoreResume {
+                application: input.clone(),
+                settlement_id: restored.settlement_id.clone(),
+            },
+            restore_coordinate(),
+            2_000_000,
+            100,
+            f.root.path().to_owned(),
+            31,
+            Arc::new(NoFaults),
+            tokio_util::sync::CancellationToken::new(),
+            Arc::new(()),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resumed.application_receipt.journal_cursor, 71);
+    f.binding = input.admitted.accepted.binding;
+    f.handle = f
+        .owner
+        .register("relay".into(), restore_coordinate(), f.binding.clone())
+        .await
+        .unwrap();
+    // The selected checkpoint is the resumed document; private old-head bytes
+    // cannot supply the publication base.
+    f.doc = f.read(|db| {
+        dohc_engine_collab::load_doc_in(
+            db,
+            &dohc_engine_collab::DocKey::new("workspace", "main", "object").unwrap(),
+        )
+        .unwrap()
+    });
+    if unchanged_tail {
+        let no_change = f.apply(72, vec![0, 0]).await;
+        let unchanged = f
+            .settle(Some(no_change), 100, Arc::new(NoFaults))
+            .await
+            .unwrap();
+        assert_eq!(unchanged.moment_id, restored.moment_id);
+    }
+    let cursor = if unchanged_tail { 73 } else { 72 };
+    let receipt = f
+        .apply(
+            cursor,
+            f.doc.richdoc_append_paragraph("After recovered binding"),
+        )
+        .await;
+    let settled = f
+        .settle(Some(receipt), 100, Arc::new(NoFaults))
+        .await
+        .unwrap();
+    let previous_cursor = if unchanged_tail && !refused { 72 } else { 71 };
+    assert_eq!(settled.previous_cursor, previous_cursor);
+    assert_eq!(
+        settled.application_count,
+        (cursor - previous_cursor) as usize
+    );
+    assert_eq!(settled.terminal_cursor, cursor);
+    f.read(|db| {
+        let payload:String=db.query_row("SELECT payload_json FROM replication_log WHERE op_kind='moment.append' AND json_extract(payload_json,'$.momentId')=?1",[&settled.moment_id],|r|r.get(0)).unwrap();
+        let payload:serde_json::Value=serde_json::from_str(&payload).unwrap();
+        assert_eq!(payload["settlementReference"]["record"]["previousCursor"],previous_cursor);
+        assert_eq!(payload["settlementReference"]["record"]["binding"]["restoreFenceGeneration"],1);
+        assert_eq!(payload["payloadBeforeBlobSha256"],restored.markdown_digest);
+        assert_eq!(payload["beforeLatestMomentId"],restored.moment_id);
+        assert_ne!(settled.settlement_id,first.settlement_id);
+    });
+}
+
+#[tokio::test]
+async fn recovery_request_ledger_uses_the_resumed_restore_generation() {
+    let f = Fixture::new().await;
+    f.settle(None, 100, Arc::new(NoFaults)).await.unwrap();
+    let input = applied_restore(&f, None, 0).await;
+    let restored = settle_restore(&f, input.clone(), Arc::new(NoFaults))
+        .await
+        .unwrap();
+    f.owner
+        .resume_restore(
+            NativeRestoreResume {
+                application: input,
+                settlement_id: restored.settlement_id,
+            },
+            restore_coordinate(),
+            2_000_000,
+            100,
+            f.root.path().to_owned(),
+            31,
+            Arc::new(NoFaults),
+            tokio_util::sync::CancellationToken::new(),
+            Arc::new(()),
+        )
+        .await
+        .unwrap();
+    let key = dohc_engine_collab::DocKey::new("workspace", "main", "object").unwrap();
+    let doc = f.read(|db| dohc_engine_collab::load_doc_in(db, &key).unwrap());
+    let update = doc
+        .rewrite_content_to_markdown_preserving_source(ContentKind::Richdoc, "# After restore\n")
+        .unwrap();
+    let mut store = EngineStore::open(&f.db, 32).unwrap();
+    let mut cache = dohc_engine_collab::WriterDocCache::new();
+    let outcome = dohc_engine_collab::durable::record_local_update(
+        &mut store,
+        &mut cache,
+        &key,
+        &update,
+        dohc_engine_collab::durable::LocalAppend {
+            marker: Some(dohc_engine_collab::durable::MarkerCreation {
+                path: Some(&f.binding.current_path),
+                content_kind: ContentKind::Richdoc,
+                regime: dohc_engine_collab::Regime::Replicated,
+            }),
+            restore_generation: Some(1),
+            request_id: Some("generation-one-original"),
+            ..Default::default()
+        },
+        &NoFaults,
+        33,
+        |_, _, _| Ok(()),
+    )
+    .unwrap();
+    assert!(matches!(
+        outcome,
+        dohc_engine_storage::TxnOutcome::Committed(_)
+    ));
+    store
+        .write_with(
+            &NoFaults,
+            |tx| -> Result<(), dohc_engine_collab::CollabError> {
+                assert_eq!(
+                    dohc_engine_collab::live_update_application::restore_generation(tx, &key)?,
+                    Some(1)
+                );
+                assert!(dohc_engine_collab::durable::recovery_update_is_recorded_in(
+                    tx,
+                    &key,
+                    &f.binding.current_path,
+                    "generation-one-original",
+                    &update,
+                    None,
+                    None
+                )?);
+                assert!(
+                    dohc_engine_collab::durable::record_recovery_update_in_tx(
+                        tx,
+                        &key,
+                        &f.binding.current_path,
+                        "generation-one-original",
+                        &update,
+                        None,
+                        None,
+                        34
+                    )?
+                    .deduped
+                );
+                Ok(())
+            },
+        )
+        .unwrap();
 }

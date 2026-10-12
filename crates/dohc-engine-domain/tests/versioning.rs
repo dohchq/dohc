@@ -8,9 +8,9 @@ use dohc_engine_domain::store::SourceCaptureBounds;
 use dohc_engine_domain::{
     CreateNamedVersion, DeleteTextFile, ListMomentsQuery, MergeTextFileFromVersion,
     MergeTextFileResult, MomentOp, NoFaults, RenameTextFile, RollbackTextFileMutation, VersionKind,
-    VersionedTextStore, WriteText,
+    VersionedTextStore, WriteText, enqueue_write, write_text_in_tx,
 };
-use dohc_engine_storage::{EngineStore, StorageError, hex_sha256};
+use dohc_engine_storage::{EngineStore, Preimage, StorageError, TxnOutcome, hex_sha256};
 use dohc_engine_testkit::{ScratchDir, engine_db_path};
 
 const NO_FAULTS: NoFaults = NoFaults;
@@ -1178,6 +1178,69 @@ fn rename_text_file_moves_alias_and_preserves_identity() {
     let after = vt.read_text(WS, "main", "b.md").unwrap().unwrap();
     assert_eq!(after.object_id, "o1");
     assert_eq!(after.text, "one");
+}
+
+// oracle: a rename moves the alias off `from`, so a pending write aimed there
+// would put the file back under its old name on replay. The rename cancels
+// it, as the delete does, and only for the active version: jobs mirror the
+// active working tree, so a named version renaming its own copy of the path
+// leaves main's intent alone.
+#[test]
+fn rename_text_file_cancels_only_the_active_versions_pending_write() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = engine_db_path(&scratch).expect("db");
+    let mut store = EngineStore::open(&db, 1).expect("open");
+    bootstrap(&mut store);
+    let outcome = store
+        .write_with(&NO_FAULTS, |tx| {
+            let written = write_text_in_tx(tx, &write("main", "a.md", "v1", "m1", "o1", 10))?;
+            enqueue_write(tx, &written, Preimage::Absent, "sync")
+        })
+        .expect("write with a pending disk intent");
+    assert!(matches!(outcome, TxnOutcome::Committed(())));
+    let job_status = |store: &EngineStore| -> String {
+        store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT status FROM materialization_jobs WHERE job_id='sync-mat_m1'",
+                    [],
+                    |row| row.get(0),
+                )
+            })
+            .expect("job status")
+    };
+    assert_eq!(job_status(&store), "pending");
+
+    let mut vt = VersionedTextStore::new(&mut store);
+    vt.create_named_version(
+        &CreateNamedVersion {
+            workspace_id: WS.to_owned(),
+            new_version_id: "feat".to_owned(),
+            name: "feature".to_owned(),
+            from_version_id: "main".to_owned(),
+            now_ms: 20,
+            request_id: None,
+        },
+        &NO_FAULTS,
+    )
+    .expect("fork");
+    vt.rename_text_file(&rename("feat", "a.md", "b.md", "m2", 30), &NO_FAULTS)
+        .expect("rename in the named version");
+    let _ = vt;
+    assert_eq!(
+        job_status(&store),
+        "pending",
+        "a named version's rename leaves main's intent alone"
+    );
+
+    VersionedTextStore::new(&mut store)
+        .rename_text_file(&rename("main", "a.md", "c.md", "m3", 40), &NO_FAULTS)
+        .expect("rename in main");
+    assert_eq!(
+        job_status(&store),
+        "cancelled",
+        "main's rename takes the write aimed at a.md with it"
+    );
 }
 
 // oracle: versions-rename-text-file rejects identical source/destination.

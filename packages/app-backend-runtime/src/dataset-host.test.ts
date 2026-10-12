@@ -691,7 +691,7 @@ it("connects schema history to immutable source and reverses rules forward witho
   expect(f.db.prepare("SELECT * FROM dohc_dataset_data_grants").all()).toEqual(grants);
   const page = f.host.history("owner", { ...scope, limit: 2 });
   expect(page.entries.map(row => row.revision)).toEqual([4, 3]);
-  expect(page.entries[0]).toMatchObject({ operation: "Fields and rules", callerReference: null, recordedAtMs: null,
+  expect(page.entries[0]).toMatchObject({ operation: "Fields and rules", callerReference: null, recordedAtMs: expect.any(Number),
     schema: { previousRevisionHash: revision2.revisionSha256, revisionHash: revision3.revisionSha256 } });
   const older = f.host.history("owner", { ...scope, beforeRevision: page.nextBeforeRevision!, limit: 2 });
   expect(older.entries.map(row => row.revision)).toEqual([2, 1]);
@@ -971,4 +971,19 @@ it("names the person a commit is made for from the host's context, never the own
     caller = refused; person = "user-ice";
     await expect(commit(`claimed-${refused}`)).rejects.toThrow("You do not have access to this Collection.");
   }
+});
+
+
+it("pins owner-local agent approvals to initial and migrated rule history", async () => {
+  const f=await fixture(),agent={kind:"agent" as const,label:"Builder",labelSource:"agent-declared" as const};
+  for(const context of ["helper","friend"] as const) await expect(f.host.activate(context,{workspaceId:scope.workspaceId,...prepared,approvalAgent:agent})).rejects.toThrow();
+  await f.host.activate("owner",{workspaceId:scope.workspaceId,...prepared,approvalAgent:agent});
+  expect(f.host.historyRevision("owner",{...scope,revisionSha256:prepared.revision.revisionSha256})).toMatchObject({approvalAgent:agent});
+  const expected=f.host.approvedArtifacts("owner",scope).cursor,revision=describeDatasetRevision({definition,revision:2,schemaSql,operationSource});
+  const candidate=await f.host.prepareMigration("owner",{workspaceId:scope.workspaceId,revision,schemaSql,operationSource,expected,migrationSql:"UPDATE items SET value=value;"});
+  const approval={...scope,candidateId:candidate.candidateId,checkpointSha256:candidate.checkpointSha256,approvalAgent:agent};
+  for(const context of ["helper","friend"] as const) await expect(f.host.approveMigration(context,approval)).rejects.toThrow();
+  await f.host.approveMigration("owner",approval);
+  expect(f.host.history("owner",scope).entries[0]).toMatchObject({approvalAgent:agent,schema:{revisionHash:revision.revisionSha256}});
+  expect(f.host.historyRevision("owner",{...scope,revisionSha256:revision.revisionSha256})).toMatchObject({approvalAgent:agent});
 });

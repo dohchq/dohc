@@ -19,6 +19,10 @@ interface AuthorCoverage {
   deletionRanges: LiveUpdateStructRange[];
 }
 
+export function liveContentAuthors(snapshot: LiveAuthorSnapshot = []): LiveAuthorSnapshot {
+  return snapshot.length === 0 ? [{kind: "unattributed"}] : snapshot;
+}
+
 function unionRanges(ranges: readonly LiveUpdateStructRange[]): LiveUpdateStructRange[] {
   const sorted = [...ranges].sort((a, b) => a.clientId - b.clientId || a.startClock - b.startClock || a.endClock - b.endClock);
   const result: LiveUpdateStructRange[] = [];
@@ -50,7 +54,7 @@ export function liveAuthorCheckpointAnticipated(suffix: readonly AdmittedLiveUpd
   const authors = new Map<string, LiveAuthorEntry>();
   for (const metadata of suffix) {
     if (metadata.firstSeen.length === 0 && (metadata.firstSeenDeletes?.length ?? 0) === 0) continue;
-    for (const author of metadata.authorSnapshot ?? []) {
+    for (const author of liveContentAuthors(metadata.authorSnapshot)) {
       const identity = liveAuthorIdentity(author), prior = authors.get(identity);
       if (!prior || (prior.kind === "agent" && author.kind === "agent" && (author.depth ?? 0) > (prior.depth ?? 0))) {
         authors.set(identity, prior?.kind === "agent" && author.kind === "agent" ? {...prior, depth: author.depth} : author);
@@ -59,7 +63,7 @@ export function liveAuthorCheckpointAnticipated(suffix: readonly AdmittedLiveUpd
   }
   const bytes = admissionBytes([...authors.values()]);
   if (authors.size >= LIVE_AUTHOR_CHECKPOINT_IDENTITIES || bytes >= LIVE_AUTHOR_CHECKPOINT_BYTES) return true;
-  return snapshot.some(author => !authors.has(liveAuthorIdentity(author))) &&
+  return liveContentAuthors(snapshot).some(author => !authors.has(liveAuthorIdentity(author))) &&
     (authors.size >= LIVE_AUTHOR_CHECKPOINT_IDENTITIES - 2 ||
       bytes >= LIVE_AUTHOR_CHECKPOINT_BYTES - 2 * (MAX_LIVE_AUTHOR_ENTRY_BYTES + 12));
 }
@@ -112,7 +116,7 @@ export function assessLiveAuthorWindow(
   function add(snapshot: LiveAuthorSnapshot, structs: readonly LiveUpdateStructRange[], deletes: readonly LiveUpdateStructRange[]): boolean {
     if (structs.length === 0 && deletes.length === 0) return false;
     let introduced = false;
-    for (const author of snapshot) {
+    for (const author of liveContentAuthors(snapshot)) {
       const identity = liveAuthorIdentity(author);
       const existing = authors.get(identity);
       if (existing) {

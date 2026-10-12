@@ -72,7 +72,7 @@ export type PersistentCommand = {kind:"open";input:OpenRequest}
   | {kind:"finalize";input:FinalizeOperation}
   | {kind:"discard";proposalId:string}
   | {kind:"apply";input:CommittedChangeset}
-  | {kind:"applyBatch";input:CommittedChangeset[]}
+  | {kind:"applyBatch";input:CommittedChangeset[]; chunkMs?:number}
   | {kind:"snapshot";path:string}
   | {kind:"migrateCheckpoint";input:MigrateCheckpointInput}
   | {kind:"close"};
@@ -84,10 +84,6 @@ export type PersistentReply = {id:number;ok:true;result:PersistentResult}
 // its own and reports nothing inside, such as the integrity check, names that
 // budget, and the host lets the step stay quiet long enough to use it.
 export type PersistentProgress = {id:number;progress:string;cpuBudgetMs?:number};
-// Written into the dataset directory by the worker's CPU budget watch just
-// before it ends the worker, so the host can say why the worker stopped. It
-// holds the budget that ran out and its size: "app 5000" or "checks 9000".
-export const CPU_BUDGET_MARKER="cpu-budget-exceeded";
 // Runs a step of the dataset worker under one of its CPU budgets: the app's
 // code, or a check over `bytes` of data.
 export interface CpuBudgets {

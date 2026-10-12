@@ -1,3 +1,4 @@
+import { engineSaveState } from "../workspaces/engineYDocSaveState";
 // @vitest-environment jsdom
 import { useEffect } from "react";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
@@ -67,7 +68,7 @@ vi.mock("./ExcalidrawCanvas", () => ({
 }));
 
 import { FileInspector } from "./FileInspector";
-import { classifyForView } from "./fileViewKind";
+import { fileKindForPath } from "@dohc/workspace-contracts/kinds";
 import {
   EMPTY_EXCALIDRAW_DOCUMENT,
   parseExcalidrawDocument,
@@ -170,6 +171,7 @@ function bridgeFor(
   let sessionId: string | null = null;
   return {
     platform: "linux" as const,
+    onWorkspaceActivity: vi.fn(() => () => undefined),
     readWorkspaceText: vi.fn<DohcDesktopBridge["readWorkspaceText"]>(async () => ({
       text,
       truncated: false,
@@ -215,10 +217,10 @@ function bridgeFor(
         return () => saveStateListeners.delete(listener);
       },
     ),
-    emitSaveState(state: EngineYDocSaveStateEvent["state"], seq: number) {
+    emitSaveState(state: import("../ipc/channels").EngineYDocSaveStateName, seq: number) {
       if (!sessionId) throw new Error("The scene session is not open.");
       for (const listener of saveStateListeners) {
-        listener({ sessionId, state, seq });
+        listener({ sessionId, workspaceId: "ws-1", path: "notes/a.md", ...engineSaveState(state), seq });
       }
     },
     emitLineageReplacement(
@@ -268,7 +270,7 @@ describe("FileInspector Excalidraw view", () => {
   });
 
   it("classifies .excalidraw files as drawings", () => {
-    expect(classifyForView("plans/architecture.EXCALIDRAW")).toBe("drawing");
+    expect(fileKindForPath("plans/architecture.EXCALIDRAW").displayKind).toBe("drawing");
   });
 
   it("does not let an inactive editor-group drawing claim focus", async () => {
@@ -817,10 +819,16 @@ describe("FileInspector Excalidraw view", () => {
     vi.stubGlobal("dohcDesktop", bridge);
     render(<FileInspector workspaceId="ws-1" path="drawing.excalidraw" />);
 
-    const chip = await screen.findByTestId("drawing-save-state");
-    await waitFor(() => expect(chip.textContent).toBe("Saved"));
+    await screen.findByTestId("mock-excalidraw-canvas");
+    act(() => bridge.emitSaveState("saved", 0));
+    // Saved says so only to screen readers; the titlebar's dot shows it.
+    const saved = await screen.findByTestId("drawing-save-state");
+    expect(saved.textContent).toBe("Saved");
+    expect(saved.classList.contains("sr-only")).toBe(true);
     act(() => bridge.emitSaveState("file-locked", 1));
 
+    const chip = screen.getByTestId("drawing-save-state");
+    expect(chip.classList.contains("sr-only")).toBe(false);
     expect(chip.dataset.state).toBe("file-locked");
     expect(chip.textContent).toBe("File in use");
     expect(chip.title).toContain("retries until the file is free");

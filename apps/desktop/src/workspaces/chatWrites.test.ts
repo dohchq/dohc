@@ -43,6 +43,8 @@ function fixture() {
     })),
   });
   const store = {
+    getMessage: vi.fn<ChatWriteStore["getMessage"]>(async () => { throw Error("missing message"); }),
+    listChannelThreads: vi.fn<ChatWriteStore["listChannelThreads"]>(async () => []),
     findThreadChannelId: vi.fn(async () => {
       await reach("channel");
       return "channel";
@@ -86,6 +88,7 @@ function fixture() {
   let credentials: CloudCredentials | null = signedIn("user-1");
   // The credential cache bumps its generation whenever it replaces a session.
   let generation = 1;
+  let displayName = "Sam";
   const warmCredentials = vi.fn(async () => {
     await reach("warm");
   });
@@ -101,7 +104,7 @@ function fixture() {
     warmCredentials,
     currentCredentials: () => credentials,
     currentCredentialGeneration: () => generation,
-    localUserDisplayName: () => "Sam",
+    localUserDisplayName: () => displayName,
     agentDisplayName: async () => "Nova",
     localInstallationId: () => "local-id",
     ...effects,
@@ -113,6 +116,7 @@ function fixture() {
   });
   return {
     events, row, reactions, store, warmCredentials, effects, writes, place, attachments,
+    setDisplayName: (name: string) => { displayName = name; },
     setCredentials: (value: CloudCredentials | null) => {
       credentials = value;
       generation += 1;
@@ -141,6 +145,73 @@ function expectNothingWritten(test: ReturnType<typeof fixture>) {
 }
 
 describe("chat writes", () => {
+  const automationWriter: ChatWriter = { via: "automation", automationId: "collection:Tasks#post", name: "Post", depth: 1 };
+  const retained: ChatMessage = { id: "stable-message", workspaceId: "workspace", threadId: "thread", body: "Hello", createdAtMs: 1,
+    author: { kind: "automation", displayName: "Post" }, authorOwnerDisplayName: "Sam", authorUserId: "user-1",
+    automation: { automationId: "collection:Tasks#post" }, attachments: [] };
+
+  it.each(["name", "account", "signed-out"])("finds an automation's existing message after its owner's %s changes", async change => {
+    const test = fixture();
+    if (change === "name") test.setDisplayName("Renamed");
+    else test.setCredentials(change === "account" ? signedIn("user-2") : null);
+    test.store.sendMessage.mockRejectedValue(new Error("payload mismatch"));
+    test.store.getMessage.mockResolvedValue(retained);
+    await expect(test.writes.sendMessage(test.place, { writer: automationWriter, threadId: "thread", body: "Hello", messageId: retained.id,
+      idempotencyKey: "effect", resolveAttachments: async () => [] })).resolves.toEqual(retained);
+    if (change === "name") expect(test.store.sendMessage.mock.calls[0]?.[0].authorOwnerDisplayName).toBe("Renamed");
+    expect(test.store.sendMessage).toHaveBeenCalledTimes(change === "name" ? 1 : 0);
+  });
+
+  it("finds the existing automation post's thread after a name change", async () => {
+    const test = fixture();
+    test.setDisplayName("Renamed");
+    test.store.startChannelThread.mockRejectedValue(new Error("payload mismatch"));
+    test.store.getMessage.mockResolvedValue(retained);
+    const thread = { id: "thread", workspaceId: "workspace", title: "", createdAtMs: 1, updatedAtMs: 1 };
+    test.store.listChannelThreads.mockResolvedValue([{ thread } as Awaited<ReturnType<ChatWriteStore["listChannelThreads"]>>[number]]);
+    await expect(test.writes.startThread(test.place, { writer: automationWriter, channelId: "channel", body: "Hello", messageId: retained.id,
+      threadId: "thread", idempotencyKey: "effect", resolveAttachments: async () => [] })).resolves.toEqual({ thread, message: retained });
+  });
+
+  it.each(["missing", "author", "automation", "body", "target"])("refuses a failed automation send whose stored receipt has the wrong %s", async mismatch => {
+    const test = fixture();
+    test.store.sendMessage.mockRejectedValue(new Error("payload mismatch"));
+    const sent = structuredClone(retained);
+    if (mismatch === "author") sent.author.kind = "human";
+    if (mismatch === "automation") sent.automation!.automationId = "other";
+    if (mismatch === "body") sent.body = "other";
+    if (mismatch === "target") sent.threadId = "other";
+    if (mismatch !== "missing") test.store.getMessage.mockResolvedValue(sent);
+    await expect(test.writes.sendMessage(test.place, { writer: automationWriter, threadId: "thread", body: "Hello", messageId: retained.id,
+      idempotencyKey: "effect", resolveAttachments: async () => [] })).rejects.toThrow("payload mismatch");
+    expect(test.effects.notifyRenderer).not.toHaveBeenCalled();
+  });
+  it.each([PERSON, AGENT])("refuses invalid message bodies before any write for %j", async writer => {
+    for (const [body, reason] of [
+      ["界".repeat(30_000), "The message is longer than 64 KiB. Shorten it."],
+      [" \r\n\uFEFF", "The message is empty. Enter a message."],
+    ] as const) {
+      const test = fixture();
+      await expect(test.writes.sendMessage(test.place, { writer, threadId: "thread", body, resolveAttachments: test.attachments }))
+        .rejects.toThrow(reason);
+      await expect(test.writes.startThread(test.place, { writer, channelId: "channel", body, resolveAttachments: test.attachments }))
+        .rejects.toThrow(reason);
+      expect(test.attachments).not.toHaveBeenCalled();
+      expectNothingWritten(test);
+    }
+  });
+
+  it("normalizes exactly 64 KiB as UTF-8 before sending and starting a thread", async () => {
+    const test = fixture();
+    const body = "界".repeat(21_844) + "\r\nx\r\ny\uFEFF ";
+    const normalized = "界".repeat(21_844) + "\nx\ny";
+    expect(new TextEncoder().encode(normalized)).toHaveLength(65_536);
+    await test.writes.sendMessage(test.place, { writer: PERSON, threadId: "thread", body, resolveAttachments: test.attachments });
+    await test.writes.startThread(test.place, { writer: AGENT, channelId: "channel", body, resolveAttachments: test.attachments });
+    expect(test.store.sendMessage.mock.calls[0]?.[0].body).toBe(normalized);
+    expect(test.store.startChannelThread.mock.calls[0]?.[0].body).toBe(normalized);
+  });
+
   it("writes a person's message under the verified identity and runs every message effect", async () => {
     const test = fixture();
     const sent = await test.writes.sendMessage(test.place, {

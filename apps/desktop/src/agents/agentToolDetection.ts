@@ -1,49 +1,20 @@
-import { spawn } from "node:child_process";
 import { accessSync, constants, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { killChildTreeWin32, resolveSpawnCommand } from "../process/windowsSpawn";
+import { resolveSpawnCommand } from "../process/windowsSpawn";
+import { runProbeProcess, windowsProbeOwner } from "./agentProbeProcess";
 import { probeAgentTools, type ProbeOutput } from "./agentToolProbe";
 
-const PROBE_TIMEOUT_MS = 5_000;
-const PROBE_OUTPUT_LIMIT = 64 * 1024;
-
-function runProbe(executable: string, args: readonly string[]): Promise<ProbeOutput> {
-  return new Promise((resolve) => {
-    const command = resolveSpawnCommand(executable, [...args], { cwd: homedir() });
-    const child = spawn(command.command, command.args, {
-      cwd: homedir(), env: process.env, windowsHide: true,
-      windowsVerbatimArguments: command.windowsVerbatimArguments,
-      detached: process.platform !== "win32", stdio: ["ignore", "pipe", "pipe"],
-    });
-    let stdout = "";
-    let stderr = "";
-    let settled = false;
-    const finish = (exitCode: number | null) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      resolve({ exitCode, stdout, stderr });
-    };
-    const stop = () => {
-      if (process.platform === "win32") void killChildTreeWin32(child);
-      else if (child.pid) {
-        try { process.kill(-child.pid, "SIGKILL"); } catch { /* Already exited. */ }
-      }
-      finish(null);
-    };
-    const timer = setTimeout(stop, PROBE_TIMEOUT_MS);
-    child.stdout.setEncoding("utf8");
-    child.stderr.setEncoding("utf8");
-    child.stdout.on("data", (text: string) => { if (settled) return; stdout += text; if (stdout.length + stderr.length > PROBE_OUTPUT_LIMIT) stop(); });
-    child.stderr.on("data", (text: string) => { if (settled) return; stderr += text; if (stdout.length + stderr.length > PROBE_OUTPUT_LIMIT) stop(); });
-    child.on("error", () => finish(null));
-    child.on("close", (code) => finish(code));
-  });
+// resourcesRoot is chosen by Electron main, never by a workspace or renderer.
+export async function runProbe(executable: string, args: readonly string[], signal: AbortSignal, resourcesRoot: string): Promise<ProbeOutput> {
+  signal.throwIfAborted();
+  const command = resolveSpawnCommand(executable, [...args], { cwd: homedir() });
+  return runProbeProcess(command, signal, process.platform === "win32" ? windowsProbeOwner(resourcesRoot) : undefined);
 }
 
-export function detectAgentTools(workspaceRoot: string) {
+export function detectAgentTools(workspaceRoot: string, signal: AbortSignal, resourcesRoot: string) {
   return probeAgentTools({
-    platform: process.platform, env: process.env, home: homedir(), workspaceRoot, run: runProbe,
+    platform: process.platform, env: process.env, home: homedir(), workspaceRoot, signal,
+    run: (executable, args, probeSignal) => runProbe(executable, args, probeSignal, resourcesRoot),
     realPath: (path) => {
       try { return realpathSync(path); } catch { return null; }
     },

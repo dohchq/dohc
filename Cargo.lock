@@ -443,10 +443,12 @@ dependencies = [
  "dohc-engine-files",
  "dohc-engine-storage",
  "dohc-engine-testkit",
+ "quote",
  "rusqlite",
  "serde",
  "serde_json",
  "sha2",
+ "syn 2.0.119",
  "thiserror",
 ]
 
@@ -469,6 +471,7 @@ dependencies = [
 name = "dohc-engine-testkit"
 version = "0.1.0"
 dependencies = [
+ "dohc-engine-collab",
  "dohc-engine-crypto",
  "dohc-engine-domain",
  "dohc-engine-files",
@@ -483,7 +486,9 @@ dependencies = [
 name = "dohc-proptest-targets"
 version = "0.1.0"
 dependencies = [
+ "base64 0.23.1",
  "dohc-engine-collab",
+ "dohc-engine-domain",
  "dohc-engine-protocol",
  "dohc-engine-runtime",
  "dohc-engine-storage",

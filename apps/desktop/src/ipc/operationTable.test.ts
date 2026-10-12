@@ -10,17 +10,20 @@ import {
 
 const table = {
   rename: {
+    capabilityId: "file.move", scope: "device",
     channel: "desktop:test-rename",
     payload: z.object({ name: z.string().min(1) }),
     result: z.object({ renamed: z.string() }),
     guard: "trusted-sender",
   },
   forget: {
+    capabilityId: "notice.mark", scope: "device",
     channel: "desktop:test-forget",
     payload: z.object({ name: z.string() }),
     guard: "trusted-sender",
   },
   readNote: {
+    capabilityId: "file.read", scope: "workspace",
     channel: "desktop:test-read-note",
     payload: z.object({ workspaceId: z.string(), path: z.string() }),
     result: z.object({ text: z.string() }),

@@ -1,3 +1,4 @@
+import { desktopPins, activityPin } from "../src/testPins";
 import { expect, test } from "@playwright/test";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -271,7 +272,7 @@ test("@ui-audit capture baseline screenshots", async () => {
     await page.keyboard.press("Backspace");
 
     // 07 — search view with results
-    await page.getByTestId("activity-search").click();
+    await page.getByTestId(activityPin("search")).click();
     const searchInput = page
       .locator('input[type="search"], input[placeholder*="earch"]')
       .first();
@@ -280,23 +281,23 @@ test("@ui-audit capture baseline screenshots", async () => {
     await page.waitForTimeout(1_200);
     await shot(page, "07-search-light");
 
-    // 08 — chats panel (right-hand secondary sidebar)
-    await page.getByTestId("titlebar-chats-sidebar").click();
+    // 08 — Chats view (left side panel)
+    await page.getByTestId(activityPin("chats")).click();
     await page.waitForTimeout(800);
     await shot(page, "08-chats-light");
     await setTheme(page, "dark");
     await shot(page, "08-chats-dark");
     await setTheme(page, "light");
-    // Close the panel so later shots keep their pre-panel composition.
-    await page.getByTestId("chats-panel-collapse").click();
+    // Back to Search so later shots keep their earlier composition.
+    await page.getByTestId(activityPin("search")).click();
 
     // 09 — graph view
-    await page.getByTestId("activity-graph").click();
+    await page.getByTestId(activityPin("graph")).click();
     await page.waitForTimeout(1_000);
     await shot(page, "09-graph-light");
 
     // 10 — history view
-    await page.getByTestId("activity-history").click();
+    await page.getByTestId(activityPin("history")).click();
     await page.waitForTimeout(800);
     await shot(page, "10-history-light");
 
@@ -316,7 +317,7 @@ test("@ui-audit capture baseline screenshots", async () => {
     await page.keyboard.press("Escape");
 
     // 15 — settings dialog
-    await page.getByTestId("activity-settings").click();
+    await page.getByTestId(activityPin("settings")).click();
     await page.waitForTimeout(600);
     await shot(page, "15-settings-light");
     await setTheme(page, "dark");
@@ -325,7 +326,7 @@ test("@ui-audit capture baseline screenshots", async () => {
     await page.keyboard.press("Escape");
 
     // 16 — CSV table view
-    await page.getByTestId("activity-explorer").click();
+    await page.getByTestId(activityPin("explorer")).click();
     await explorerRow(page, "data").click();
     await explorerRow(page, "data/funnel.csv").click();
     await page.waitForTimeout(1_000);
@@ -348,7 +349,7 @@ test("@ui-audit capture baseline screenshots", async () => {
     await page.keyboard.press("Escape");
 
     // 19 — settings: appearance section
-    await page.getByTestId("activity-settings").click();
+    await page.getByTestId(activityPin("settings")).click();
     await page.waitForTimeout(500);
     const appearanceNav = page.getByRole("button", { name: /appearance/i }).first();
     await appearanceNav.waitFor({ state: "visible", timeout: 3_000 });
@@ -360,7 +361,7 @@ test("@ui-audit capture baseline screenshots", async () => {
     // 20 — inline properties under the title. They render in the document
     // flow now (no toggle), so just open the doc and capture.
     if (!(await explorerRow(page, "notes").isVisible().catch(() => false))) {
-      await page.getByTestId("activity-explorer").click();
+      await page.getByTestId(activityPin("explorer")).click();
     }
     await revealExplorerPath(page, "notes/product-plan.md");
     await explorerRow(page, "notes/product-plan.md").click();

@@ -1,11 +1,11 @@
 // @vitest-environment jsdom
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { StrictMode, useRef, useState } from "react";
+import { StrictMode, useCallback, useRef, useState } from "react";
 import { afterEach, expect, it, vi } from "vitest";
 import { useFocusReturn, useFocusSurface } from "./focusReturn";
 import { SidePanel } from "../workbench/SidePanel";
-import { ChatsPanel } from "../workbench/ChatsPanel";
+import { AboutRail } from "../workbench/AboutRail";
 
 afterEach(() => {
   cleanup();
@@ -68,20 +68,21 @@ it("lands in the new workspace when the focused workspace is replaced", async ()
   view.rerender(<Workspace key="B" name="B" />);
   await waitFor(() => expect(document.activeElement).toBe(screen.getByTestId("B")));
 });
-it.each(["side", "chats"])("returns focus when the %s panel closes", async (kind) => {
+it.each(["side", "about"])("returns focus when the %s panel closes", async (kind) => {
   function Panels() {
     const [open, setOpen] = useState(false);
-    return <><button data-testid={kind === "side" ? "titlebar-primary-sidebar" : "titlebar-chats-sidebar"} onClick={() => setOpen(true)}>Open panel</button>
+    const close = <button onClick={() => setOpen(false)}>Close panel</button>;
+    return <><button data-testid={kind === "side" ? "titlebar-primary-sidebar" : "titlebar-about-sidebar"} onClick={() => setOpen(true)}>Open panel</button>
       {open && (kind === "side"
-        ? <SidePanel width={240} title="Files" onWidthChange={() => {}}><button onClick={() => setOpen(false)}>Close panel</button></SidePanel>
-        : <ChatsPanel width={240} tabs={["all"]} tab="all" onTabChange={() => {}} onWidthChange={() => {}} onCollapse={() => setOpen(false)}>Chats</ChatsPanel>)}
+        ? <SidePanel width={240} title="Files" onWidthChange={() => {}}>{close}</SidePanel>
+        : <AboutRail width={240} onWidthChange={() => {}}>{close}</AboutRail>)}
     </>;
   }
   render(<Panels />);
   const opener = screen.getByText("Open panel");
   opener.focus();
   fireEvent.click(opener);
-  const close = screen.getByRole("button", { name: kind === "side" ? "Close panel" : "Hide chats" });
+  const close = screen.getByRole("button", { name: "Close panel" });
   close.focus();
   fireEvent.click(close);
   await waitFor(() => expect(document.activeElement).toBe(opener));
@@ -139,8 +140,58 @@ it("keeps a deliberate blur when the previously focused child is later removed",
   const child = screen.getByText("Transient");
   child.focus();
   child.blur();
+  // A removal in the same script would be Chromium's blur before a detach.
+  await act(async () => {});
   expect(document.activeElement).toBe(document.body);
   view.rerender(<Surface show={false} />);
+  await act(async () => {});
+  expect(document.activeElement).toBe(document.body);
+});
+
+it.each(["click", "Enter"])("recovers when Chromium blurs a child before a %s removes it", async (action) => {
+  const user = userEvent.setup();
+  function Surface() {
+    const root = useRef<HTMLElement>(null);
+    const [show, setShow] = useState(true);
+    useFocusSurface(root, () => root.current);
+    // React detaches the ref before it removes the node, where Chromium blurs it.
+    const blurBeforeDetach = useCallback((node: HTMLButtonElement | null) => node ? () => node.blur() : undefined, []);
+    return <section ref={root} tabIndex={-1} data-testid="surface">
+      {show && <button ref={blurBeforeDetach} onClick={() => setShow(false)}>Remove</button>}
+    </section>;
+  }
+  const blurs: string[] = [];
+  const record = (event: FocusEvent) => {
+    if (event.target instanceof HTMLButtonElement) blurs.push(`connected ${event.target.isConnected}, body active ${document.activeElement === document.body}`);
+  };
+  document.addEventListener("focusout", record);
+  try {
+    render(<Surface />);
+    const button = screen.getByText("Remove");
+    if (action === "click") await user.click(button);
+    else {
+      button.focus();
+      await user.keyboard("{Enter}");
+    }
+    expect(blurs).toEqual(["connected true, body active true"]);
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByTestId("surface")));
+  } finally {
+    document.removeEventListener("focusout", record);
+  }
+});
+
+it("keeps a deliberate blur that follows a sibling change in the same script", async () => {
+  function Surface() {
+    const root = useRef<HTMLElement>(null);
+    useFocusSurface(root, () => root.current);
+    return <section ref={root} tabIndex={-1}><button>Row</button></section>;
+  }
+  render(<Surface />);
+  const row = screen.getByText("Row");
+  row.focus();
+  vi.spyOn(document, "hasFocus").mockReturnValue(true);
+  row.parentElement!.append(document.createElement("div"));
+  row.blur();
   await act(async () => {});
   expect(document.activeElement).toBe(document.body);
 });

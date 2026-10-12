@@ -355,7 +355,7 @@ export function createWorkspaceFilesIpc<
       );
     });
 
-    // "Copy as Markdown" / "Export as HTML" / "Export as PDF" (ViewHeader's
+    // "Copy as Markdown" / "Export as HTML" / "Export as PDF" (the
     // document menu). The renderer always sends the same self-contained HTML
     // (documentExport.ts); this handler only decides where the bytes land
     // (.html verbatim, .pdf via the hidden offscreen window) — see

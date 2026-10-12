@@ -14,7 +14,7 @@ The discipline behind the words is the `dohc-writing` skill: Orwell plus ASD-STE
 
 ## Identity
 
-- **Mark:** the drop-lobe. A single stroked lobe contour with a central datum dot. SVG only, `currentColor` for both stroke and dot, no gradient, no shadow, no automotive badge. Source of truth: `packages/brand/src/DohcLogo.tsx` (`DohcMark`, `DohcWordmark`, `DohcLockup`, `DohcBrandBlock`).
+- **Mark:** the drop-lobe. A single stroked lobe contour with a central datum dot. SVG only, `currentColor` for both stroke and dot, no gradient, no shadow, no automotive badge. Source of truth: `packages/brand/src/DohcLogo.tsx` (`DohcMark`, `DohcWordmark`, `DohcLockup`).
 
 ## Show, don't tell
 
@@ -266,7 +266,9 @@ Ghost icon button (toolbars, row affordances): `grid size-6 place-items-center r
 
 Text input: `w-full rounded-md border border-line bg-bg px-2.5 py-1.5 text-[13px] text-ink placeholder:text-subtle focus:border-ink` (mono content → add `font-mono`). No `outline-none`: the global `:focus-visible` accent ring must stay for keyboard users. `focus:border-ink` alone is too subtle. Only opt out where a ring would clip (rounded overflow-hidden popovers) AND the frame provides an equivalent (e.g. the command palette's `focus-within:border-ink` row).
 
-List row (menus, trees, results): `flex h-7 w-full items-center gap-1.5 rounded-md px-2 text-left text-[13px] transition-colors duration-75` + state: active and selected-not-active share `bg-selected text-ink`; the active row adds `font-medium`; the focused row adds the ring it uses (`ring-1 ring-inset ring-ink/30`) · rest `text-muted hover:bg-hover hover:text-ink`. Never attenuate a state fill (`bg-selected/85`): it lands between hover and selected, and tokens.test.ts rejects it (inset rows in panels: parent gets `px-1`, row keeps `rounded-md`)
+List row (menus, trees, results): `flex h-7 w-full items-center gap-1.5 rounded-md px-2 text-left text-[13px] transition-colors duration-75` + state: active and selected-not-active share `bg-selected text-ink`; the active row adds `font-medium`; the keyboard-focused row keeps the global accent `:focus-visible` outline and never takes `outline-none` or an ink ring in its place (a 30% ink ring measures under 3:1 against the selected fill). A row inside a scroller draws that outline inset with the row's radius (`rounded-md focus-visible:-outline-offset-2`), so the scroller cannot clip it; a row outside a scroller keeps the global outline · rest `text-muted hover:bg-hover hover:text-ink`. Never attenuate a state fill (`bg-selected/85`): it lands between hover and selected, and tokens.test.ts rejects it (inset rows in panels: parent gets `px-1`, row keeps `rounded-md`)
+
+Active option (a list whose focus stays on its frame or input, with `aria-activedescendant` naming the option: menus the editor builds, pickers, listboxes): the active option draws the accent outline inside the row whenever it is active, whether the keyboard or the pointer moved it, because it is where Enter acts. Compose `MENU_ACTIVE_OPTION` from `ui/Menu.tsx` (`data-active:bg-selected` plus `outline-2 outline-accent -outline-offset-2`). The fill alone measures about 1.2:1.
 
 Card / grouped section: `rounded-lg border border-line bg-panel p-3` (modal cards: `rounded-xl p-5` + `dohc-elevated`)
 

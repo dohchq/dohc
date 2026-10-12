@@ -1,0 +1,9 @@
+{
+  "nameAdditions": [
+    "desktop:acknowledge-reports-notice",
+    "desktop:read-diagnostics",
+    "desktop:read-reports-notice",
+    "desktop:report-renderer-error",
+    "desktop:save-diagnostics"
+  ]
+}

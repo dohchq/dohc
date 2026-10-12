@@ -54,6 +54,7 @@ const Run = z.object({
   chainStopped: z.boolean(),
   neverStarted: z.boolean(),
   undone: z.boolean(),
+  undoUnfinished: z.boolean(),
 });
 const Retry = z.discriminatedUnion("status", [
   z.object({ status: z.literal("queued"), press: z.boolean() }),
@@ -112,6 +113,14 @@ export function createServerRuns(send: (workspaceId: string, request: ServerRequ
   }
 
   return {
+    /** False means the workspace's owner cannot ask yet; keep the durable release queued. */
+    async releaseRestore(workspaceId: string, retentionId: string): Promise<boolean> {
+      const answer = await send(workspaceId, {method: "POST", action: "restore", body: {definitions: [], again: false, retentionId}});
+      if (answer === null || !answer.asker.current()) return false;
+      const result = read(answer, z.object({errorMessage: z.string().nullable()}));
+      if (result?.errorMessage) throw new Error(result.errorMessage);
+      return true;
+    },
     /** One automation's newest runs on the server, or null when it has no copy of the workspace. */
     async runs(workspaceId: string, automationId: string, before?: string): Promise<{ runs: CollectionAutomationRun[]; next: string | null } | null> {
       return ask(workspaceId, { method: "GET", action: "runs", query: { automationId, ...(before === undefined ? {} : { before }) } }, z.object({ runs: z.array(Run), next: z.string().nullable() }));
@@ -144,8 +153,9 @@ export function createServerRuns(send: (workspaceId: string, request: ServerRequ
       workspaceId: string,
       definitions: ReadonlyArray<{ collectionPath: string; id: string; definitionHash: string }>,
       again: boolean,
+      retentionId: string,
     ): Promise<{ undone: number; left: number; reverted: number; missing: number; keptFields: KeptAutomationField[]; otherKept: number; sharedReversals?: z.infer<typeof SharedReversalsSchema>; errorMessage: string | null }> {
-      const answer = await ask(workspaceId, { method: "POST", action: "restore", body: { definitions, again } },
+      const answer = await ask(workspaceId, { method: "POST", action: "restore", body: { definitions, again, retentionId } },
         z.object({ undone: Count, left: Count, reverted: Count, missing: Count, keptFields: z.array(KeptAutomationFieldShape), otherKept: Count, sharedReversals: SharedReversalsSchema.optional(), errorMessage: z.string().nullable() }));
       return answer ?? { undone: 0, left: 0, reverted: 0, missing: 0, keptFields: [], otherKept: 0, errorMessage: null };
     },

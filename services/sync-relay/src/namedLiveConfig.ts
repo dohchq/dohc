@@ -13,7 +13,7 @@ function positive(value: unknown): number {
   return value;
 }
 
-export function parseNamedLiveConfig(value: unknown) {
+export function parseNamedLiveConfig(value: unknown, desktopLimits?: {maxPendingAdmissionRequests: number; maxPendingReadinessRequests: number}) {
   const config = record(value, ["version", "tickets", "transport", "frames", "host", "validation", "maxListeners"]);
   if (config.version !== 1) throw new TypeError("Invalid named live configuration version.");
   const ticket = record(config.tickets, ["retainedTicketsPerPrincipalGrant", "expiredTicketCleanupBatchSize"]);
@@ -33,5 +33,8 @@ export function parseNamedLiveConfig(value: unknown) {
   const validate = liveValidation.validator(validation);
   const maxListeners = positive(config.maxListeners);
   if (maxListeners < 2 * transport.maxConnections || transport.maxPendingBytes < frames.receive.maxFrameBytes) throw new TypeError("Named transport budgets cannot cover configured connections and frames.");
+  if (desktopLimits && maxListeners < positive(desktopLimits.maxPendingAdmissionRequests) + positive(desktopLimits.maxPendingReadinessRequests)) {
+    throw new TypeError("Frame listener capacity cannot cover desktop admission and readiness requests.");
+  }
   return { tickets, transport, frames, host, validate, maxListeners };
 }

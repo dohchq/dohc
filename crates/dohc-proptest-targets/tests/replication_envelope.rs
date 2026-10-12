@@ -23,19 +23,18 @@
 //!   (non-empty/bounded `workspace_id`/`origin_id`/`op_kind`, `origin_seq`
 //!   in the wire-integer range, payload under the byte cap) must be
 //!   rejected WITHOUT the caller's `mutation` closure ever running.
-//! - **No untrusted secret applies**: against a fresh store with no prior
-//!   version state, no random secret envelope may reach
-//!   `ApplyDisposition::Applied` (an `Err` or a no-op `Skipped` is fine -- both
-//!   mean nothing was durably written).
-//! - **No unbounded growth**: the payload byte cap
-//!   (`model::MAX_PAYLOAD_BYTES`, 10 MiB) and identifier byte cap
-//!   (`MAX_IDENTIFIER_BYTES`, 512) are enforced against generated input, not
-//!   merely assumed.
+//! - Valid secret puts reach storage; single-field mutations fail at the
+//!   intended metadata/blob check without writing secret tips or moments.
+//! - Serialized payloads at the relay byte cap apply; one byte over is
+//!   refused before the mutation callback, including escaped JSON strings.
 
-use dohc_engine_storage::{EngineStore, NoFaults};
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD;
+use dohc_engine_domain::{MAX_SECRET_FILE_BYTES, SECRET_IV_BYTES, SECRET_TAG_BYTES};
+use dohc_engine_storage::{EngineStore, NoFaults, StorageError, TxnOutcome};
 use dohc_engine_sync::{
-    ApplyDisposition, ApplyOutcome, ReplicationEnvelope, SyncError, apply_envelope_with,
-    apply_secret_envelope,
+    ApplyDisposition, ApplyOutcome, MAX_PAYLOAD_JSON_BYTES, MAX_WIRE_INTEGER, ReplicationEnvelope,
+    SyncError, apply_envelope_with, apply_secret_envelope,
 };
 use dohc_engine_testkit::{ScratchDir, engine_db_path};
 use proptest::prelude::*;
@@ -77,8 +76,6 @@ fn looks_structurally_valid(envelope: &ReplicationEnvelope) -> bool {
     fn bounded(value: &str) -> bool {
         !value.is_empty() && value.len() <= 512 && !value.bytes().any(|b| b.is_ascii_control())
     }
-    const MAX_WIRE_INTEGER: i64 = (1_i64 << 53) - 1;
-    const MAX_PAYLOAD_BYTES: usize = 10 * 1024 * 1024;
     bounded(&envelope.workspace_id)
         && bounded(&envelope.origin_id)
         && !envelope.op_kind.is_empty()
@@ -88,7 +85,7 @@ fn looks_structurally_valid(envelope: &ReplicationEnvelope) -> bool {
             .relay_seq
             .is_none_or(|value| (0..=MAX_WIRE_INTEGER).contains(&value))
         && serde_json::to_vec(&envelope.payload)
-            .map(|bytes| bytes.len() <= MAX_PAYLOAD_BYTES)
+            .map(|bytes| bytes.len() <= MAX_PAYLOAD_JSON_BYTES)
             .unwrap_or(false)
 }
 
@@ -110,7 +107,7 @@ fn arbitrary_envelope() -> impl Strategy<Value = ReplicationEnvelope> {
     (
         arbitrary_string(),
         arbitrary_string(),
-        any::<i64>(),
+        prop_oneof![Just(0i64), 1i64..=MAX_WIRE_INTEGER, any::<i64>()],
         prop::option::of(any::<i64>()),
         arbitrary_string(),
         prop_oneof![
@@ -123,6 +120,8 @@ fn arbitrary_envelope() -> impl Strategy<Value = ReplicationEnvelope> {
         .prop_map(
             |(workspace_id, origin_id, origin_seq, relay_seq, op_kind, payload, recorded_at_ms)| {
                 ReplicationEnvelope {
+                    settlement_admission: None,
+                    admitted_author_snapshot: None,
                     workspace_id,
                     origin_id,
                     origin_seq,
@@ -189,6 +188,8 @@ fn arbitrary_secret_envelope() -> impl Strategy<Value = ReplicationEnvelope> {
         .prop_map(
             |(workspace_id, origin_id, origin_seq, relay_seq, op_kind, payload, recorded_at_ms)| {
                 ReplicationEnvelope {
+                    settlement_admission: None,
+                    admitted_author_snapshot: None,
                     workspace_id,
                     origin_id,
                     origin_seq,
@@ -201,11 +202,302 @@ fn arbitrary_secret_envelope() -> impl Strategy<Value = ReplicationEnvelope> {
         )
 }
 
+fn valid_envelope(payload: serde_json::Value) -> ReplicationEnvelope {
+    ReplicationEnvelope {
+        settlement_admission: None,
+        admitted_author_snapshot: None,
+        workspace_id: "ws".to_owned(),
+        origin_id: "peer-a".to_owned(),
+        origin_seq: 0,
+        relay_seq: None,
+        op_kind: "fuzz.seed".to_owned(),
+        payload,
+        recorded_at_ms: 1_000,
+    }
+}
+
+fn secret_fixture(
+    ciphertext: &[u8],
+    iv: &[u8; SECRET_IV_BYTES],
+    tag: &[u8; SECRET_TAG_BYTES],
+) -> (ScratchDir, EngineStore, ReplicationEnvelope) {
+    let (scratch, mut engine) = copied_empty_store();
+    let seeded = engine
+        .write_with(&NoFaults, |tx| -> Result<(), StorageError> {
+            tx.execute(
+                "INSERT INTO versioned_workspaces (workspace_id, main_version_id) VALUES ('ws','v1')",
+                [],
+            )
+            .map_err(StorageError::persist_public)?;
+            tx.execute(
+                "INSERT INTO versions (workspace_id, version_id, kind, name, created_at_ms) VALUES ('ws','v1','main','Main',1)",
+                [],
+            )
+            .map_err(StorageError::persist_public)?;
+            Ok(())
+        })
+        .expect("seed target version");
+    assert_eq!(seeded, TxnOutcome::Committed(()));
+    let sha = engine
+        .put_binary_blob(ciphertext)
+        .expect("hydrate ciphertext");
+    let mut envelope = valid_envelope(serde_json::json!({
+        "versionId": "v1",
+        "path": "app/.env",
+        "metadata": { "origin": "sync" },
+        "ivBase64": STANDARD.encode(iv),
+        "authTagBase64": STANDARD.encode(tag),
+        "ciphertextSha256": sha,
+        "byteLength": ciphertext.len(),
+    }));
+    envelope.op_kind = "secret.file.put".to_owned();
+    (scratch, engine, envelope)
+}
+
+fn assert_secret_applies(
+    engine: &mut EngineStore,
+    envelope: &ReplicationEnvelope,
+    ciphertext: &[u8],
+) {
+    let outcome = apply_secret_envelope(engine, envelope, &NoFaults).expect("valid secret put");
+    assert_eq!(outcome, ApplyOutcome::new(ApplyDisposition::Applied(())));
+    let tip: (String, String, String, i64) = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT iv_base64,auth_tag_base64,ciphertext_base64,byte_length FROM secret_files \
+                 WHERE workspace_id='ws' AND version_id='v1' AND path='app/.env'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+        })
+        .expect("read applied tip");
+    assert_eq!(tip.0, envelope.payload["ivBase64"].as_str().unwrap());
+    assert_eq!(tip.1, envelope.payload["authTagBase64"].as_str().unwrap());
+    assert_eq!(tip.2, STANDARD.encode(ciphertext));
+    assert_eq!(tip.3, ciphertext.len() as i64);
+    assert_eq!(
+        apply_secret_envelope(engine, envelope, &NoFaults)
+            .unwrap()
+            .primary,
+        ApplyDisposition::Skipped,
+        "redelivery must preserve the applied tip"
+    );
+}
+
+#[derive(Clone, Copy, Debug)]
+enum SecretMutation {
+    IvEncoding,
+    IvLength,
+    TagEncoding,
+    TagLength,
+    MissingHash,
+    BlobIntegrity,
+    DeclaredLength,
+    NegativeLength,
+    OversizedLength,
+}
+
+const SECRET_MUTATIONS: [SecretMutation; 9] = [
+    SecretMutation::IvEncoding,
+    SecretMutation::IvLength,
+    SecretMutation::TagEncoding,
+    SecretMutation::TagLength,
+    SecretMutation::MissingHash,
+    SecretMutation::BlobIntegrity,
+    SecretMutation::DeclaredLength,
+    SecretMutation::NegativeLength,
+    SecretMutation::OversizedLength,
+];
+
+fn assert_secret_mutation_refused(
+    ciphertext: &[u8],
+    iv: &[u8; SECRET_IV_BYTES],
+    tag: &[u8; SECRET_TAG_BYTES],
+    mutation: SecretMutation,
+) {
+    let (_scratch, mut engine, mut envelope) = secret_fixture(ciphertext, iv, tag);
+    let expected_reason = match mutation {
+        SecretMutation::IvEncoding => {
+            envelope.payload["ivBase64"] = serde_json::json!("!");
+            Some("secret iv is invalid")
+        }
+        SecretMutation::IvLength => {
+            envelope.payload["ivBase64"] = serde_json::json!(STANDARD.encode(&iv[..iv.len() - 1]));
+            Some("secret ciphertext metadata is invalid")
+        }
+        SecretMutation::TagEncoding => {
+            envelope.payload["authTagBase64"] = serde_json::json!("!");
+            Some("secret auth tag is invalid")
+        }
+        SecretMutation::TagLength => {
+            envelope.payload["authTagBase64"] =
+                serde_json::json!(STANDARD.encode(&tag[..tag.len() - 1]));
+            Some("secret ciphertext metadata is invalid")
+        }
+        SecretMutation::MissingHash => {
+            let mut sha = envelope.payload["ciphertextSha256"]
+                .as_str()
+                .unwrap()
+                .to_owned();
+            sha.replace_range(..1, if sha.starts_with('0') { "1" } else { "0" });
+            envelope.payload["ciphertextSha256"] = serde_json::json!(sha);
+            None
+        }
+        SecretMutation::BlobIntegrity => {
+            // Keep the valid address and byte count; only stored bytes change.
+            let sha = envelope.payload["ciphertextSha256"].as_str().unwrap();
+            let mut corrupted = ciphertext.to_vec();
+            corrupted[0] ^= 1;
+            assert_eq!(
+                engine
+                    .write_with(&NoFaults, |tx| -> Result<(), StorageError> {
+                        tx.execute(
+                            "UPDATE binary_blobs SET bytes=?1 WHERE sha256=?2",
+                            (&corrupted, sha),
+                        )
+                        .map_err(StorageError::persist_public)?;
+                        Ok(())
+                    })
+                    .unwrap(),
+                TxnOutcome::Committed(())
+            );
+            None
+        }
+        SecretMutation::DeclaredLength => {
+            envelope.payload["byteLength"] = serde_json::json!(ciphertext.len() + 1);
+            Some("secret ciphertext blob does not match declared metadata")
+        }
+        SecretMutation::NegativeLength => {
+            envelope.payload["byteLength"] = serde_json::json!(-1);
+            Some("secret ciphertext metadata is invalid")
+        }
+        SecretMutation::OversizedLength => {
+            envelope.payload["byteLength"] = serde_json::json!(MAX_SECRET_FILE_BYTES + 1);
+            Some("secret ciphertext metadata is invalid")
+        }
+    };
+    let result = apply_secret_envelope(&mut engine, &envelope, &NoFaults);
+    if let Some(reason) = expected_reason {
+        let outcome = result.expect("invalid metadata is recorded as a refusal");
+        let ApplyDisposition::Refused(refusal) = outcome.primary else {
+            panic!("{mutation:?} did not reach its intended refusal: {outcome:?}");
+        };
+        assert_eq!(refusal.reason.message(), reason, "{mutation:?}");
+    } else {
+        match mutation {
+            SecretMutation::MissingHash => assert!(matches!(result, Err(SyncError::BlobInvalid))),
+            SecretMutation::BlobIntegrity => assert!(matches!(
+                result,
+                Err(SyncError::Storage(StorageError::BlobIntegrity { .. }))
+            )),
+            _ => unreachable!(),
+        }
+    }
+    let counts: (i64, i64) = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT (SELECT COUNT(*) FROM secret_files), (SELECT COUNT(*) FROM secret_moments)",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+        })
+        .unwrap();
+    assert_eq!(counts, (0, 0), "{mutation:?} must not write secret state");
+}
+
+#[test]
+fn secret_mutations_reach_their_intended_validation() {
+    let (_scratch, mut engine, envelope) =
+        secret_fixture(b"ciphertext", &[1; SECRET_IV_BYTES], &[2; SECRET_TAG_BYTES]);
+    assert_secret_applies(&mut engine, &envelope, b"ciphertext");
+    for mutation in SECRET_MUTATIONS {
+        assert_secret_mutation_refused(
+            b"ciphertext",
+            &[1; SECRET_IV_BYTES],
+            &[2; SECRET_TAG_BYTES],
+            mutation,
+        );
+    }
+}
+
+#[test]
+fn serialized_payload_boundary_is_enforced_before_mutation() {
+    // Both ordinary and escape-heavy strings have exact serialized sizes.
+    for unit in ["x", "\u{0000}", "界"] {
+        for bytes in [
+            MAX_PAYLOAD_JSON_BYTES - 1,
+            MAX_PAYLOAD_JSON_BYTES,
+            MAX_PAYLOAD_JSON_BYTES + 1,
+        ] {
+            let unit_bytes = serde_json::to_vec(unit).unwrap().len() - 2;
+            let body_bytes = bytes - 2;
+            let text = format!(
+                "{}{}",
+                unit.repeat(body_bytes / unit_bytes),
+                "x".repeat(body_bytes % unit_bytes)
+            );
+            let envelope = valid_envelope(serde_json::json!(text));
+            assert_eq!(serde_json::to_vec(&envelope.payload).unwrap().len(), bytes);
+            let (_scratch, mut engine) = copied_empty_store();
+            let calls = AtomicUsize::new(0);
+            let result = apply_envelope_with(&mut engine, &envelope, &NoFaults, |_, _| {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Ok::<(), SyncError>(())
+            });
+            if bytes <= MAX_PAYLOAD_JSON_BYTES {
+                assert_eq!(result.unwrap().primary, ApplyDisposition::Applied(()));
+                assert_eq!(calls.load(Ordering::SeqCst), 1);
+            } else {
+                assert!(matches!(
+                    result,
+                    Err(SyncError::InvalidInput {
+                        reason: "payload exceeds the relay limit"
+                    })
+                ));
+                assert_eq!(calls.load(Ordering::SeqCst), 0);
+            }
+        }
+    }
+}
+
 proptest! {
     // `ProptestConfig::default()` is 256 cases and honors the standard
     // `PROPTEST_CASES` env var; `with_cases(256)` pinned it and silently
     // ignored the env var, so evidence runs asking for a large corpus got 256.
     #![proptest_config(ProptestConfig::default())]
+
+    #[test]
+    fn valid_envelopes_invoke_mutation_once_and_redelivery_skips(
+        workspace_id in "[a-zA-Z0-9_-]{1,64}",
+        origin_id in "[a-zA-Z0-9_-]{1,64}",
+        payload in prop::collection::vec(any::<char>(), 0..256),
+    ) {
+        let mut envelope = valid_envelope(serde_json::json!(payload.into_iter().collect::<String>()));
+        envelope.workspace_id = workspace_id;
+        envelope.origin_id = origin_id;
+        let (_scratch, mut engine) = copied_empty_store();
+        let calls = AtomicUsize::new(0);
+        for expected in [ApplyDisposition::Applied(()), ApplyDisposition::Skipped] {
+            let outcome = apply_envelope_with(&mut engine, &envelope, &NoFaults, |_, _| {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Ok::<(), SyncError>(())
+            }).unwrap();
+            prop_assert_eq!(outcome.primary, expected);
+            prop_assert_eq!(calls.load(Ordering::SeqCst), 1);
+        }
+    }
+
+    #[test]
+    fn valid_secret_puts_apply_and_single_mutations_refuse(
+        ciphertext in prop::collection::vec(any::<u8>(), 1..128),
+        iv in any::<[u8; SECRET_IV_BYTES]>(),
+        tag in any::<[u8; SECRET_TAG_BYTES]>(),
+        mutation in prop::sample::select(SECRET_MUTATIONS.to_vec()),
+    ) {
+        let (_scratch, mut engine, envelope) = secret_fixture(&ciphertext, &iv, &tag);
+        assert_secret_applies(&mut engine, &envelope, &ciphertext);
+        assert_secret_mutation_refused(&ciphertext, &iv, &tag, mutation);
+    }
 
     /// Arbitrary bytes as purported wire JSON: deserialization never panics,
     /// and any successfully-decoded envelope is a COMPLETE value that
@@ -252,11 +544,13 @@ proptest! {
                 "validate() must reject BEFORE the mutation closure ever runs"
             );
         }
-        // A structurally-valid envelope is expected to succeed on a fresh
-        // store (origin_seq starts the sequence at 0); this branch is not
-        // asserted further here -- sequence-continuity business logic
-        // (SequenceGap/CoordinateDiverged) is covered by
-        // `dohc-engine-sync`'s own unit tests, not this fuzz target.
+        else if envelope.origin_seq == 0 {
+            prop_assert_eq!(result.unwrap().primary, ApplyDisposition::Applied(()));
+            prop_assert_eq!(mutation_ran.load(Ordering::SeqCst), 1);
+        } else {
+            prop_assert!(matches!(result, Err(SyncError::SequenceGap)));
+            prop_assert_eq!(mutation_ran.load(Ordering::SeqCst), 0);
+        }
     }
 
     /// 4th untrusted surface: encrypted secret replication envelopes through
@@ -282,6 +576,8 @@ fn copied_stores_apply_independently_and_keep_commits_after_reopen() {
     let (_first_scratch, mut first) = copied_empty_store();
     let (_second_scratch, mut second) = copied_empty_store();
     let envelope = ReplicationEnvelope {
+        settlement_admission: None,
+        admitted_author_snapshot: None,
         workspace_id: "ws".to_owned(),
         origin_id: "peer-a".to_owned(),
         origin_seq: 0,
@@ -313,6 +609,8 @@ fn copied_stores_apply_independently_and_keep_commits_after_reopen() {
 fn seed_valid_envelope_applies() {
     let (_scratch, mut engine) = store();
     let envelope = ReplicationEnvelope {
+        settlement_admission: None,
+        admitted_author_snapshot: None,
         workspace_id: "ws".to_owned(),
         origin_id: "peer-a".to_owned(),
         origin_seq: 0,
@@ -333,6 +631,8 @@ fn seed_valid_envelope_applies() {
 fn seed_non_secret_op_kind_is_rejected_by_secret_applier() {
     let (_scratch, mut engine) = store();
     let envelope = ReplicationEnvelope {
+        settlement_admission: None,
+        admitted_author_snapshot: None,
         workspace_id: "ws".to_owned(),
         origin_id: "peer-a".to_owned(),
         origin_seq: 1,
@@ -351,6 +651,8 @@ fn seed_non_secret_op_kind_is_rejected_by_secret_applier() {
 fn seed_empty_workspace_id_is_refused_before_mutation() {
     let (_scratch, mut engine) = store();
     let envelope = ReplicationEnvelope {
+        settlement_admission: None,
+        admitted_author_snapshot: None,
         workspace_id: String::new(),
         origin_id: "peer-a".to_owned(),
         origin_seq: 0,
