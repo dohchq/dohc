@@ -3885,6 +3885,48 @@ mod doc_cache_reset_tests {
         assert!(!root.join("record.md").exists());
     }
 
+    #[cfg(unix)]
+    fn assert_retained_checked_delete_source(
+        store: &EngineStore,
+        root: &std::path::Path,
+        row: &dohc_engine_storage::RetainedDisplacement,
+    ) {
+        use std::os::unix::fs::MetadataExt;
+        // Membership in this table is the retained state; neither replay ends it.
+        assert_eq!(
+            store.retained_displacements_after(0).unwrap(),
+            vec![row.clone()]
+        );
+        assert!(
+            store
+                .list_kept_displacements("workspace")
+                .unwrap()
+                .is_empty()
+        );
+        let staged = root.join(&row.source_path);
+        let metadata = std::fs::metadata(&staged).unwrap();
+        assert!(metadata.is_file());
+        assert_eq!(metadata.dev().to_string(), row.device);
+        assert_eq!(metadata.ino().to_string(), row.inode);
+        assert_eq!(hex_sha256(&std::fs::read(staged).unwrap()), row.digest);
+    }
+
+    #[cfg(unix)]
+    fn checked_delete_projection_identity(
+        root: &std::path::Path,
+        row: &dohc_engine_storage::RetainedDisplacement,
+    ) -> (u64, u64) {
+        use std::os::unix::fs::MetadataExt;
+        let target = std::fs::metadata(root.join("record.md")).unwrap();
+        let identity = (target.dev(), target.ino());
+        assert_ne!(
+            (identity.0.to_string(), identity.1.to_string()),
+            (row.device.clone(), row.inode.clone()),
+            "the retained original must not become the replacement projection"
+        );
+        identity
+    }
+
     fn checked_delete_version_switch_discards_publication(complete: bool) {
         for binary in [false, true] {
             let (root, mut store, input, expected) = checked_delete_fixture(binary);
@@ -3901,6 +3943,9 @@ mod doc_cache_reset_tests {
                 #[cfg(unix)]
                 assert_pending_retained_checked_delete(&store, &root);
             }
+            #[cfg(unix)]
+            let retained =
+                (!complete).then(|| store.retained_displacements_after(0).unwrap().remove(0));
             create_checked_delete_version(&mut store);
             let switched = super::super::versions::switch_active_version_on_store(
                 &mut store,
@@ -3931,6 +3976,19 @@ mod doc_cache_reset_tests {
                 expected
             );
             assert_eq!(checked_delete_count(&store), 0);
+            #[cfg(unix)]
+            if let Some(row) = retained {
+                assert_retained_checked_delete_source(&store, &root, &row);
+                let identity = checked_delete_projection_identity(&root, &row);
+                checked_delete_replay(&mut store, &root);
+                assert_retained_checked_delete_source(&store, &root, &row);
+                assert_eq!(checked_delete_projection_identity(&root, &row), identity);
+                assert_eq!(
+                    hex_sha256(&std::fs::read(root.join("record.md")).unwrap()),
+                    expected
+                );
+                assert_eq!(checked_delete_count(&store), 0);
+            }
         }
     }
 
@@ -3980,6 +4038,10 @@ mod doc_cache_reset_tests {
                     #[cfg(unix)]
                     assert_pending_retained_checked_delete(&store, &root);
                 }
+                #[cfg(unix)]
+                let retained = (!complete
+                    && point == FaultPoint::MaterializeAfterKnownCopyDeletion)
+                    .then(|| store.retained_displacements_after(0).unwrap().remove(0));
                 change_checked_delete_content(&mut store, &root, binary);
                 dohc_engine_files::recover_displacements(
                     &store,
@@ -4066,6 +4128,19 @@ mod doc_cache_reset_tests {
                         .unwrap()
                         .contains(&hex_sha256(b"Owner bytes KEEP"))
                 );
+                #[cfg(unix)]
+                if let Some(row) = retained {
+                    assert_retained_checked_delete_source(&store, &root, &row);
+                    let identity = checked_delete_projection_identity(&root, &row);
+                    checked_delete_replay(&mut store, &root);
+                    assert_retained_checked_delete_source(&store, &root, &row);
+                    assert_eq!(checked_delete_projection_identity(&root, &row), identity);
+                    assert_eq!(
+                        std::fs::read(root.join("record.md")).unwrap(),
+                        b"Owner bytes KEEP"
+                    );
+                    assert_checked_delete_capture_keeps_file(&mut store, &root);
+                }
             }
         }
     }

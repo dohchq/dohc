@@ -1616,7 +1616,13 @@ fn materialize_delete(
         #[cfg(not(unix))]
         let retention_release_failed = false;
         if published.is_err()
-            && entry_exists(&staged)?
+            && match entry_exists(&staged) {
+                Ok(exists) => exists,
+                Err(error) => {
+                    eprintln!("materialization rollback source stat: {error}");
+                    return published;
+                }
+            }
             && !return_displaced(target, &staged, options)?
         {
             // A failed return leaves retention as the only owner of this source.

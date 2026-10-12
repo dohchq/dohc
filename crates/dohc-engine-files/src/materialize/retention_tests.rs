@@ -1177,3 +1177,90 @@ fn checked_delete_retry_reserves_missing_retained_name_after_recovering_another_
     assert!(store.retained_displacements_after(0).unwrap().is_empty());
     assert!(!root.join("notes.md").exists());
 }
+
+#[cfg(unix)]
+#[test]
+fn checked_delete_rollback_stat_failure_preserves_receipt_error() {
+    use std::sync::Arc;
+    let scratch = ScratchDir::new_named("checked-delete-rollback-stat").unwrap();
+    let root = scratch.path();
+    let mut store = EngineStore::open(&root.join("engine.db"), 0).unwrap();
+    let target = root.join("notes.md");
+    std::fs::write(&target, b"before").unwrap();
+    let j = checked_delete_job(&mut store);
+    store
+        .read_with(|conn| {
+            conn.execute_batch(
+                "CREATE TRIGGER fail_receipt BEFORE UPDATE OF status ON materialization_jobs
+         WHEN NEW.status='complete' BEGIN SELECT RAISE(FAIL, 'receipt failure'); END;",
+            )
+        })
+        .unwrap();
+    let commits = Arc::new(AtomicUsize::new(0));
+    let hook = commits.clone();
+    let staging = root.join(STAGING_DIR);
+    let displaced_directory = root.join("saved-staging");
+    let hook_staging = staging.clone();
+    let hook_saved = displaced_directory.clone();
+    store
+        .read_with(|conn| {
+            conn.commit_hook(Some(move || {
+                // Register succeeds; the receipt trigger refuses; release then fails.
+                if hook.fetch_add(1, Ordering::SeqCst) == 2 {
+                    std::fs::rename(&hook_staging, &hook_saved).unwrap();
+                    std::fs::write(&hook_staging, b"not a directory").unwrap();
+                    true
+                } else {
+                    false
+                }
+            }))
+            .unwrap();
+            Ok::<_, dohc_engine_storage::StorageError>(())
+        })
+        .unwrap();
+    let error = materialize_one_ordinary(&store, root, &j, &options(0, &StdReplacer)).unwrap_err();
+    assert!(
+        format!("{error:?}").contains("receipt failure"),
+        "{error:?}"
+    );
+    assert_eq!(commits.load(Ordering::SeqCst), 3);
+    let rows = store.retained_displacements_after(0).unwrap();
+    assert_eq!(rows.len(), 1);
+    let row = &rows[0];
+    assert!(matches!(
+        entry_exists(&root.join(&row.source_path)),
+        Err(MaterializeError::Io {
+            kind: ErrorKind::NotADirectory,
+            ..
+        })
+    ));
+    assert_eq!(
+        store
+            .load_materialization_job(&j.job_id)
+            .unwrap()
+            .unwrap()
+            .status,
+        JobStatus::Pending
+    );
+    assert!(!target.exists());
+    assert_eq!(
+        std::fs::read(displaced_directory.join(Path::new(&row.source_path).file_name().unwrap()))
+            .unwrap(),
+        b"before"
+    );
+    store
+        .read_with(|conn| {
+            conn.commit_hook(None::<fn() -> bool>).unwrap();
+            conn.execute_batch("DROP TRIGGER fail_receipt")
+        })
+        .unwrap();
+    std::fs::remove_file(&staging).unwrap();
+    std::fs::rename(displaced_directory, staging).unwrap();
+    recover_displacements(&store, root, Some("ws"), &options(1000, &StdReplacer)).unwrap();
+    assert_eq!(store.retained_displacements_after(0).unwrap(), rows);
+    assert_eq!(
+        std::fs::read(root.join(&row.source_path)).unwrap(),
+        b"before"
+    );
+    assert!(!target.exists());
+}
