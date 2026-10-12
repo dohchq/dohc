@@ -708,3 +708,92 @@ fn kept_copy_save_succeeds_when_staging_cleanup_sync_fails() {
         assert!(store.staging_location("kept").unwrap().is_none());
     }
 }
+
+#[cfg(unix)]
+#[test]
+fn checked_delete_retains_late_descriptor_writes_after_publication() {
+    use std::io::Write;
+    let scratch = ScratchDir::new_named("checked-delete-retention").unwrap();
+    let root = scratch.path();
+    let mut store = EngineStore::open(&root.join("engine.db"), 0).unwrap();
+    let target = root.join("notes.md");
+    std::fs::write(&target, b"before").unwrap();
+    let mut writer = std::fs::OpenOptions::new()
+        .write(true)
+        .open(&target)
+        .unwrap();
+    let before = store.put_binary_blob(b"before").unwrap();
+    store
+        .write_with(&NoFaults, |tx| {
+            dohc_engine_storage::enqueue_delete_job(
+                tx,
+                &MaterializationJobSpec {
+                    job_id: "restore-delete-mat_retention".into(),
+                    workspace_id: "ws".into(),
+                    target_path: "notes.md".into(),
+                    content_sha256: before.clone(),
+                    preimage: Preimage::Present(before),
+                    target_generation: 1,
+                    now_ms: 0,
+                },
+            )
+        })
+        .unwrap();
+    let j = store
+        .load_materialization_job("restore-delete-mat_retention")
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        materialize_one_ordinary(&store, root, &j, &options(0, &StdReplacer)).unwrap(),
+        JobOutcome::Completed
+    );
+    assert!(!target.exists());
+    assert_eq!(
+        store
+            .load_materialization_job(&j.job_id)
+            .unwrap()
+            .unwrap()
+            .status,
+        dohc_engine_storage::JobStatus::Complete
+    );
+    writer.write_all(b"late outside write").unwrap();
+    drop(writer);
+    sweep(&store, root, 1000);
+    let bytes: Vec<u8> = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT bytes FROM materialization_displacement_reads",
+                [],
+                |r| r.get(0),
+            )
+        })
+        .unwrap();
+    assert_eq!(bytes, b"late outside write");
+}
+
+#[test]
+fn ordinary_entry_point_cleans_empty_sibling_staging() {
+    let scratch = ScratchDir::new_named("ordinary-entry-cleanup").unwrap();
+    let root = scratch.path();
+    let mut store = EngineStore::open(&root.join("engine.db"), 0).unwrap();
+    let j = job(
+        &mut store,
+        "ordinary-cleanup",
+        "notes.md",
+        b"before",
+        b"after",
+        1,
+    );
+    std::fs::write(root.join("notes.md"), b"after").unwrap();
+    let sibling = root.join(".dohc-write-displaced");
+    std::fs::create_dir(&sibling).unwrap();
+    store
+        .remember_staging(&j.job_id, ".dohc-write-displaced")
+        .unwrap();
+    assert_eq!(
+        materialize_one_ordinary(&store, root, &j, &options(0, &StdReplacer)).unwrap(),
+        JobOutcome::AlreadyMaterialized
+    );
+    assert!(!sibling.exists());
+    assert!(store.staging_location(&j.job_id).unwrap().is_none());
+}

@@ -4100,7 +4100,7 @@ mod doc_cache_reset_tests {
                             .unwrap()
                             .is_empty()
                     );
-                    assert_eq!(std::fs::read_dir(&staging).unwrap().count(), 0);
+                    assert_only_retained_staged_originals(&store, &root);
                     assert!(!dohc_engine_files::workspace_recovery_unavailable(&root));
                     if change == "unchanged" {
                         assert!(!root.join("record.md").exists());
@@ -4218,6 +4218,31 @@ mod doc_cache_reset_tests {
         }
     }
 
+    fn assert_only_retained_staged_originals(store: &EngineStore, root: &std::path::Path) {
+        let staging = root.join(".dohc/engine/displaced");
+        let files = std::fs::read_dir(&staging).unwrap().count();
+        let retained = store.retained_displacements_after(0).unwrap();
+        let rows: Vec<_> = retained
+            .iter()
+            .filter(|row| root.join(&row.source_path).parent() == Some(staging.as_path()))
+            .collect();
+        assert_eq!(
+            files,
+            rows.len(),
+            "every staged original must have a retained row"
+        );
+        #[cfg(windows)]
+        assert!(
+            rows.is_empty(),
+            "Windows releases known originals immediately"
+        );
+        for row in rows {
+            let bytes = std::fs::read(root.join(&row.source_path)).unwrap();
+            assert_eq!(hex_sha256(&bytes), row.digest);
+            assert_eq!(bytes.len() as i64, row.size);
+        }
+    }
+
     #[test]
     fn conditional_restore_delete_finish_storage_error_rechecks_snapshot() {
         use std::sync::{
@@ -4236,12 +4261,13 @@ mod doc_cache_reset_tests {
                 let (root, mut store, input, expected) = checked_delete_fixture(binary);
                 let commits = Arc::new(AtomicUsize::new(0));
                 let hook_commits = commits.clone();
+                let final_commit = if cfg!(unix) { 4 } else { 3 };
                 store
                     .read_with(|conn| {
-                        // Preparation, finish preview and disk receipt commit first.
-                        // Fail the final transaction after the staged copy is unlinked.
+                        // Preparation, finish preview, disk receipt, and POSIX retention commit first.
+                        // Fail the final transaction after disposing of the staged source.
                         conn.commit_hook(Some(move || {
-                            hook_commits.fetch_add(1, Ordering::SeqCst) == 3
+                            hook_commits.fetch_add(1, Ordering::SeqCst) == final_commit
                         }))
                         .unwrap();
                         Ok::<_, StorageError>(())
@@ -4260,7 +4286,7 @@ mod doc_cache_reset_tests {
                     matches!(result, Err(RuntimeError::Storage(_))),
                     "{result:?}"
                 );
-                assert_eq!(commits.load(Ordering::SeqCst), 4);
+                assert_eq!(commits.load(Ordering::SeqCst), final_commit + 1);
                 store
                     .read_with(|conn| {
                         conn.commit_hook(None::<fn() -> bool>).unwrap();
@@ -4276,12 +4302,7 @@ mod doc_cache_reset_tests {
                         .status,
                     JobStatus::Complete
                 );
-                assert_eq!(
-                    std::fs::read_dir(root.join(".dohc/engine/displaced"))
-                        .unwrap()
-                        .count(),
-                    0
-                );
+                assert_only_retained_staged_originals(&store, &root);
                 store.write_with(&NoFaults, |tx| {
                     if state == "captured" {
                         let retired = dohc_engine_domain::capture_retire_in_tx(tx, &dohc_engine_domain::CaptureRetire {

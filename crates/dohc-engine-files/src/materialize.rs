@@ -809,26 +809,39 @@ pub fn materialize_one(
     job: &MaterializationJob,
     options: &MaterializeOptions<'_>,
 ) -> Result<JobOutcome, MaterializeError> {
-    let result = match materialize_one_ordinary(store, root, job, options) {
+    match materialize_one_ordinary(store, root, job, options) {
         Err(MaterializeError::SymlinkTarget | MaterializeError::RecoveryUnavailable) => {
             Ok(JobOutcome::Blocked)
         }
         outcome => outcome,
-    };
-    if let Ok(outcome) = &result
-        && !matches!(outcome, JobOutcome::Crashed(_))
-        && let Some(relative) = store.staging_location(&job.job_id)?
-        && let Err(error) = cleanup_staging_directory(store, root, &root.join(relative))
-    {
-        eprintln!("materialization staging cleanup: {error}");
     }
-    result
 }
 
 /// Execute an ordinary job, retaining the error that explains a blocked path.
 /// Callers that manage a staged publication need that reason before deciding
 /// whether to retain or discard it.
 pub fn materialize_one_ordinary(
+    store: &EngineStore,
+    root: &Path,
+    job: &MaterializationJob,
+    options: &MaterializeOptions<'_>,
+) -> Result<JobOutcome, MaterializeError> {
+    let result = materialize_one_inner(store, root, job, options);
+    if matches!(&result, Ok(outcome) if !matches!(outcome, JobOutcome::Crashed(_))) {
+        let cleanup = (|| {
+            if let Some(relative) = store.staging_location(&job.job_id)? {
+                cleanup_staging_directory(store, root, &root.join(relative))?;
+            }
+            Ok::<_, MaterializeError>(())
+        })();
+        if let Err(error) = cleanup {
+            eprintln!("materialization staging cleanup: {error}");
+        }
+    }
+    result
+}
+
+fn materialize_one_inner(
     store: &EngineStore,
     root: &Path,
     job: &MaterializationJob,
@@ -1544,7 +1557,9 @@ fn materialize_delete(
             sync_parent_dir(target.parent(), policy)?;
             store.mark_materialization_complete(&job.job_id, now_ms)?;
             // Cleanup cannot turn an applied publication into a refusal.
-            let _ = std::fs::remove_file(&staged);
+            if let Err(error) = dispose_known(store, root, &staged, &spec, &inspected, now_ms) {
+                eprintln!("materialization staged original retention: {error}");
+            }
             if should_crash(faults, FaultPoint::MaterializeAfterKnownCopyDeletion) {
                 return Ok(JobOutcome::Crashed(
                     FaultPoint::MaterializeAfterKnownCopyDeletion,
