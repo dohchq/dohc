@@ -512,6 +512,7 @@ pub(crate) enum SwitchReconcileError {
     Unavailable,
     Degraded(Vec<String>),
     ApplyFailed,
+    HeldFiles(Vec<String>),
 }
 
 /// How often the driver polls the dirty flag. Cheap when converged (one
@@ -2399,10 +2400,16 @@ pub(crate) async fn reconcile_full_for_switch(
                 Ok(stats) => stats.deferred > 0,
                 Err(_) => true,
             };
-            if applied && !deferred {
-                Ok(manifest_changed)
-            } else {
+            if !applied || deferred {
                 Err(SwitchReconcileError::ApplyFailed)
+            } else {
+                match actor.capture_file_holds(workspace_id.to_owned()).await {
+                    Ok(holds) if holds.is_empty() => Ok(manifest_changed),
+                    Ok(holds) => Err(SwitchReconcileError::HeldFiles(
+                        holds.into_iter().map(|hold| hold.path).collect(),
+                    )),
+                    Err(_) => Err(SwitchReconcileError::Unavailable),
+                }
             }
         }
     };
@@ -3016,8 +3023,15 @@ async fn materialize_ydoc_recoveries(
             now_ms,
         )
         .await?;
+    let held: std::collections::HashSet<_> = actor
+        .capture_file_holds(workspace_id.to_owned())
+        .await?
+        .into_iter()
+        .map(|hold| hold.path)
+        .collect();
     Ok(recoveries
         .into_iter()
+        .filter(|recovery| !held.contains(&recovery.path))
         .map(|recovery| recovery.path)
         .collect())
 }
@@ -3055,6 +3069,7 @@ async fn ack_all_failed(files: &FilesHandle, plan: ReconcilePlan, status: &Arc<D
         not_owned_paths: Vec::new(),
         failed_applies: failed,
         deferred_paths: Vec::new(),
+        held_observations: Vec::new(),
         crashed_after_durable_boundary: None,
         degraded: true,
     };

@@ -626,6 +626,7 @@ impl StoreCaptureSink {
                 Ok(DomainIngest::ForeignHead)
             }
             Err(error) if held_as_new_file(&error) => Ok(DomainIngest::HeldAsNewFile),
+            Err(RuntimeError::CaptureFileHeld { .. }) => Ok(DomainIngest::Held),
             Err(_) => Err(INGEST_FAILED),
         }
     }
@@ -664,6 +665,7 @@ impl StoreCaptureSink {
                 Ok(DomainIngest::ForeignHead)
             }
             Err(error) if held_as_new_file(&error) => Ok(DomainIngest::HeldAsNewFile),
+            Err(RuntimeError::CaptureFileHeld { .. }) => Ok(DomainIngest::Held),
             Err(_) => Err(BINARY_INGEST_FAILED),
         }
     }
@@ -891,6 +893,7 @@ enum DomainIngest {
     /// A live session holds a file the store has no head for. See
     /// [`held_new_file_outcome`] for when that defers.
     HeldAsNewFile,
+    Held,
 }
 
 /// A live session holds a file the store has no head for yet. Capture defers
@@ -1175,6 +1178,9 @@ impl StoreCaptureSink {
                             Ok(IngestOutcome::NotOwned)
                         }
                         Err(error) if held_as_new_file(&error) => held_new_file_outcome(size),
+                        Err(RuntimeError::CaptureFileHeld { .. }) => {
+                            Ok(IngestOutcome::Held { size, sha256 })
+                        }
                         Err(_) => Err(INGEST_FAILED),
                     });
                 }
@@ -1355,6 +1361,10 @@ impl CaptureSink for StoreCaptureSink {
                     // next genuine edit arrives as `Changed` and is captured.
                     DomainIngest::ForeignHead => Ok(IngestOutcome::Captured { size, sha256 }),
                     DomainIngest::HeldAsNewFile => held_new_file_outcome(size),
+                    DomainIngest::Held => {
+                        self.self_writes.clear_path(&self.workspace_id, path);
+                        Ok(IngestOutcome::Held { size, sha256 })
+                    }
                 }
             }
             CurrentContent::Absent => {
@@ -1420,6 +1430,7 @@ impl CaptureSink for StoreCaptureSink {
                     DomainIngest::NameRefused => Ok(IngestOutcome::NotOwned),
                     DomainIngest::ForeignHead => Ok(IngestOutcome::Captured { size, sha256 }),
                     DomainIngest::HeldAsNewFile => held_new_file_outcome(size),
+                    DomainIngest::Held => Ok(IngestOutcome::Held { size, sha256 }),
                 }
             }
         }

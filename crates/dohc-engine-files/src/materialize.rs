@@ -517,6 +517,9 @@ impl SecretTempRemover for StdSecretTempRemover {
 /// The terminal outcome of one job.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JobOutcome {
+    /// A capture hold protects this target. The intent stays pending without
+    /// placement or conflict compensation until the hold is resolved.
+    Parked,
     /// Written and marked complete.
     Completed,
     /// The target already equalled the desired content (idempotent replay); no
@@ -820,6 +823,16 @@ pub fn materialize_one_ordinary(
         std::fs::canonicalize(root).map_err(|err| MaterializeError::io(root, &err))?;
     let target = resolve_target(&canonical_root, &job.target_path)?;
 
+    if placement_is_held(
+        store,
+        &canonical_root,
+        &job.workspace_id,
+        &job.target_path,
+        Some(&target),
+    )? {
+        return Ok(JobOutcome::Parked);
+    }
+
     // `materialize.after-job-commit`: the job row is durable but nothing is on
     // disk yet. A crash here leaves the job pending for startup replay.
     if should_crash(faults, FaultPoint::MaterializeAfterJobCommit) {
@@ -909,6 +922,15 @@ fn materialize_secret_one_with_remover(
     let canonical_root =
         std::fs::canonicalize(root).map_err(|err| MaterializeError::io(root, &err))?;
     let target = resolve_target(&canonical_root, &job.target_path)?;
+    if placement_is_held(
+        store,
+        &canonical_root,
+        &job.workspace_id,
+        &job.target_path,
+        Some(&target),
+    )? {
+        return Ok(JobOutcome::Parked);
+    }
     ensure_target_symlink_free(&canonical_root, &target)?;
     if should_crash(faults, FaultPoint::MaterializeAfterJobCommit) {
         return Ok(JobOutcome::Crashed(FaultPoint::MaterializeAfterJobCommit));
@@ -971,6 +993,15 @@ pub fn materialize_secret_delete_one(
     let canonical_root =
         std::fs::canonicalize(root).map_err(|err| MaterializeError::io(root, &err))?;
     let target = resolve_target(&canonical_root, &job.target_path)?;
+    if placement_is_held(
+        store,
+        &canonical_root,
+        &job.workspace_id,
+        &job.target_path,
+        Some(&target),
+    )? {
+        return Ok(JobOutcome::Parked);
+    }
     ensure_target_symlink_free(&canonical_root, &target)?;
     if should_crash(faults, FaultPoint::MaterializeAfterJobCommit) {
         return Ok(JobOutcome::Crashed(FaultPoint::MaterializeAfterJobCommit));
@@ -2470,6 +2501,15 @@ impl RecoveryEntry {
         workspace_id: &str,
         options: &MaterializeOptions<'_>,
     ) -> Result<bool, MaterializeError> {
+        let path = match self {
+            Self::Journaled(row) => Some(row.target_path.as_str()),
+            Self::Rowless(staged) => staged.job.as_ref().map(|job| job.target_path.as_str()),
+        };
+        if let Some(path) = path
+            && placement_is_held(store, root, self.workspace_id(), path, None)?
+        {
+            return Ok(false);
+        }
         match self {
             Self::Journaled(row) => recover_displacement(store, root, staging, row, options),
             Self::Rowless(staged) => match &staged.job {
@@ -3327,6 +3367,40 @@ fn preimage_matches(preimage: &Preimage, current: &CurrentTarget) -> bool {
         }
         _ => false,
     }
+}
+
+/// Check both the stored spelling and the filesystem-resolved Windows alias.
+fn placement_is_held(
+    store: &EngineStore,
+    root: &Path,
+    workspace: &str,
+    path: &str,
+    target: Option<&Path>,
+) -> Result<bool, MaterializeError> {
+    if store.placement_is_held(workspace, path)? {
+        return Ok(true);
+    }
+    #[cfg(windows)]
+    {
+        let resolved_target;
+        let target: &Path = if let Some(target) = target {
+            target
+        } else {
+            resolved_target = resolve_target(root, path)?;
+            &resolved_target
+        };
+        let resolved = target
+            .strip_prefix(root)
+            .map_err(|_| MaterializeError::UnsafeTargetPath)?
+            .to_string_lossy()
+            .replace('\\', "/");
+        if resolved != path {
+            return Ok(store.placement_is_held(workspace, &resolved)?);
+        }
+    }
+    #[cfg(not(windows))]
+    let _ = (root, target);
+    Ok(false)
 }
 
 /// Resolve a workspace-relative forward-slash path to an absolute target under
@@ -5516,6 +5590,163 @@ mod tests {
                 Ok::<_, StorageError>(())
             })
             .expect("enqueue materialization job");
+    }
+
+    fn capture_file_hold_fixture(store: &mut EngineStore, outside: &[u8]) {
+        store.write_with(&NoFaults, |tx| {
+            // The fixture supplies the durable hold contract on the old build
+            // too, so the base failure exercises placement, not missing DDL.
+            tx.execute_batch("CREATE TABLE IF NOT EXISTS capture_file_holds (workspace_id TEXT NOT NULL, source_version_id TEXT NOT NULL, object_id TEXT NOT NULL, path TEXT NOT NULL, observed_sha256 TEXT NOT NULL, observed_size INTEGER NOT NULL, reason TEXT NOT NULL, observed_at_ms INTEGER NOT NULL, attempt_count INTEGER NOT NULL, retry_requested INTEGER NOT NULL, PRIMARY KEY(workspace_id,path)); INSERT OR IGNORE INTO versioned_workspaces VALUES ('ws','main'); INSERT OR IGNORE INTO versions(workspace_id,version_id,kind,name,created_at_ms) VALUES ('ws','main','main','Main',1); INSERT OR IGNORE INTO file_objects VALUES ('ws','held-object',1);").map_err(StorageError::persist_public)?;
+            tx.execute("INSERT INTO capture_file_holds VALUES ('ws','main','held-object','held.md',?1,?2,'ydoc-resolution-not-representable',1,1,0)", (hex_sha256(outside), outside.len() as i64)).map_err(StorageError::persist_public)?;
+            Ok::<_, StorageError>(())
+        }).unwrap();
+    }
+
+    fn capture_hold_parks_job(operation: MaterializationOperation, path: &str, secret: bool) {
+        let scratch = Scratch::new("capture-hold-job");
+        let root = scratch.root.path().to_path_buf();
+        let outside = format!("{} too deep\n", "> ".repeat(121));
+        std::fs::write(root.join("held.md"), &outside).unwrap();
+        let mut store = EngineStore::open(&scratch.db(), 1).unwrap();
+        capture_file_hold_fixture(&mut store, outside.as_bytes());
+        let sha = store.put_binary_blob(b"Canonical.\n").unwrap();
+        // A known preimage would normally authorize replacement, including a
+        // remote job whose blob happens to equal the outside observation.
+        store.put_binary_blob(outside.as_bytes()).unwrap();
+        store
+            .write_with(&NoFaults, |tx| {
+                let spec = MaterializationJobSpec {
+                    job_id: "held-job".into(),
+                    workspace_id: "ws".into(),
+                    target_path: path.into(),
+                    content_sha256: sha,
+                    preimage: Preimage::Present(hex_sha256(outside.as_bytes())),
+                    target_generation: 1,
+                    now_ms: 1,
+                };
+                match operation {
+                    MaterializationOperation::Write => enqueue_job(tx, &spec),
+                    MaterializationOperation::Delete => {
+                        dohc_engine_storage::enqueue_delete_job(tx, &spec)
+                    }
+                }
+            })
+            .unwrap();
+        let job = store.load_materialization_job("held-job").unwrap().unwrap();
+        let result = if secret {
+            match operation {
+                MaterializationOperation::Write => materialize_secret_one(
+                    &store,
+                    &root,
+                    &job,
+                    b"Canonical.\n",
+                    &options_with(&StdReplacer),
+                ),
+                MaterializationOperation::Delete => {
+                    materialize_secret_delete_one(&store, &root, &job, &options_with(&StdReplacer))
+                }
+            }
+        } else {
+            materialize_one(&store, &root, &job, &options_with(&StdReplacer))
+        }
+        .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(root.join("held.md")).unwrap(),
+            outside
+        );
+        assert_eq!(format!("{result:?}"), "Parked");
+        assert_eq!(
+            store
+                .load_materialization_job("held-job")
+                .unwrap()
+                .unwrap()
+                .status,
+            JobStatus::Pending
+        );
+    }
+
+    #[test]
+    fn capture_file_hold_parks_sync_and_settlement_writes() {
+        capture_hold_parks_job(MaterializationOperation::Write, "held.md", false);
+    }
+
+    #[test]
+    fn capture_file_hold_parks_rollback_deletes() {
+        capture_hold_parks_job(MaterializationOperation::Delete, "held.md", false);
+    }
+
+    #[test]
+    fn capture_file_hold_parks_secret_writes_and_deletes() {
+        for operation in [
+            MaterializationOperation::Write,
+            MaterializationOperation::Delete,
+        ] {
+            capture_hold_parks_job(operation, "held.md", true);
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn capture_file_hold_parks_case_alias_placements() {
+        capture_hold_parks_job(MaterializationOperation::Write, "HELD.MD", false);
+    }
+
+    fn capture_hold_parks_displacement(journaled: bool, path: &str) {
+        let scratch = Scratch::new("capture-hold-recovery");
+        let root = scratch.root.path().to_path_buf();
+        let outside = format!("{} too deep\n", "> ".repeat(121));
+        let previous = b"Unknown bytes from before a crash.\n";
+        std::fs::write(root.join("held.md"), &outside).unwrap();
+        let mut store = EngineStore::open(&scratch.db(), 1).unwrap();
+        capture_file_hold_fixture(&mut store, outside.as_bytes());
+        enqueue_write_job(&mut store, "held-recovery", path, outside.as_bytes(), 1);
+        let staging = staging_dir(&root, true).unwrap();
+        let name = staged_name("held-recovery", 0);
+        std::fs::write(staging.join(&name), previous).unwrap();
+        if journaled {
+            store
+                .open_displacement(&DisplacementSpec {
+                    job_id: "held-recovery".into(),
+                    workspace_id: "ws".into(),
+                    target_path: path.into(),
+                    displaced_name: name.clone(),
+                    expected_sha256: hex_sha256(previous),
+                    content_sha256: Some(hex_sha256(outside.as_bytes())),
+                    now_ms: 1,
+                })
+                .unwrap();
+        }
+        recover_displacements(&store, &root, Some("ws"), &options_with(&StdReplacer)).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(root.join("held.md")).unwrap(),
+            outside
+        );
+        assert_eq!(std::fs::read(staging.join(name)).unwrap(), previous);
+        assert_eq!(
+            store
+                .load_materialization_job("held-recovery")
+                .unwrap()
+                .unwrap()
+                .status,
+            JobStatus::Pending
+        );
+    }
+
+    #[test]
+    fn capture_file_hold_parks_journaled_displacement_sweep() {
+        capture_hold_parks_displacement(true, "held.md");
+    }
+
+    #[test]
+    fn capture_file_hold_parks_rowless_recovery_materialization() {
+        capture_hold_parks_displacement(false, "held.md");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn capture_file_hold_parks_case_alias_recovery_sweep() {
+        capture_hold_parks_displacement(true, "HELD.MD");
+        capture_hold_parks_displacement(false, "HELD.MD");
     }
 
     struct ContendedOnce(AtomicUsize);

@@ -23,6 +23,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PostCommitMaterializeOutcome {
+    Parked,
     Applied,
     Skipped,
     Conflict,
@@ -414,6 +415,7 @@ fn switch_projection_matches_active(
 }
 
 pub(super) struct MaterializationReplaySummary {
+    pub(super) parked: usize,
     pub(super) completed: usize,
     pub(super) failed: usize,
     pub(super) selected_seen: usize,
@@ -625,6 +627,7 @@ pub(super) fn replay_pending_materializations(
         ) {
             Ok(()) => {}
             Err(RuntimeError::OperationCrashed) => return Err(RuntimeError::OperationCrashed),
+            Err(RuntimeError::CaptureFileHeld { .. }) => {}
             Err(error) => {
                 let disposition = if matches!(store.load_materialization_job(&job_id), Ok(Some(_)))
                 {
@@ -639,6 +642,7 @@ pub(super) fn replay_pending_materializations(
     let jobs = store.list_pending_materialization_jobs()?;
     (|| -> Result<MaterializationReplaySummary, RuntimeError> {
         let mut summary = MaterializationReplaySummary {
+            parked: 0,
             completed: 0,
             failed: 0,
             selected_seen: 0,
@@ -655,6 +659,10 @@ pub(super) fn replay_pending_materializations(
                 continue;
             }
             summary.selected_seen += usize::from(selected.is_some());
+            if store.placement_is_held(&job.workspace_id, &job.target_path)? {
+                summary.parked += 1;
+                continue;
+            }
             if let Some(progress) = scope.progress {
                 progress.fetch_add(1, Ordering::Relaxed);
             }
@@ -718,6 +726,7 @@ pub(super) fn replay_pending_materializations(
                             | JobOutcome::Crashed(_),
                         )
                         | Err(_) => summary.failed += 1,
+                        Ok(JobOutcome::Parked) => summary.parked += 1,
                     }
                     continue;
                 }
@@ -761,6 +770,16 @@ pub(super) fn replay_pending_materializations(
                     },
                 );
                 match outcome {
+                    Ok(JobOutcome::Parked) => {
+                        if let Some(self_writes) = scope.self_writes {
+                            self_writes.retract(
+                                scope.workspace_id,
+                                &job.target_path,
+                                &plaintext_sha,
+                            );
+                        }
+                        summary.parked += 1;
+                    }
                     Ok(JobOutcome::Completed | JobOutcome::AlreadyMaterialized) => {
                         summary.completed += 1;
                     }
@@ -839,6 +858,7 @@ pub(super) fn replay_pending_materializations(
                 } else {
                     Ok(match reported {
                         PostCommitMaterializeOutcome::Conflict => JobOutcome::Conflict,
+                        PostCommitMaterializeOutcome::Parked => JobOutcome::Parked,
                         PostCommitMaterializeOutcome::Superseded => JobOutcome::Superseded,
                         PostCommitMaterializeOutcome::Applied
                         | PostCommitMaterializeOutcome::Skipped
@@ -863,6 +883,7 @@ pub(super) fn replay_pending_materializations(
                 .map_err(RuntimeError::from)
             };
             match outcome {
+                Ok(JobOutcome::Parked) => summary.parked += 1,
                 Ok(JobOutcome::Completed | JobOutcome::AlreadyMaterialized) => {
                     summary.completed += 1;
                 }
@@ -944,6 +965,10 @@ pub(super) fn materialize_pending_job(
         },
     );
     let (materialized, reported) = match outcome {
+        Ok(JobOutcome::Parked) => {
+            self_writes.retract(workspace_id, &job.target_path, &job.content_sha256);
+            (false, PostCommitMaterializeOutcome::Parked)
+        }
         Ok(JobOutcome::Completed | JobOutcome::AlreadyMaterialized) => {
             (true, PostCommitMaterializeOutcome::Applied)
         }
@@ -1016,8 +1041,9 @@ const fn materialize_outcome_severity(outcome: PostCommitMaterializeOutcome) -> 
         PostCommitMaterializeOutcome::Applied => 0,
         PostCommitMaterializeOutcome::Superseded => 1,
         PostCommitMaterializeOutcome::Skipped => 2,
-        PostCommitMaterializeOutcome::Conflict => 3,
-        PostCommitMaterializeOutcome::Error => 4,
+        PostCommitMaterializeOutcome::Parked => 3,
+        PostCommitMaterializeOutcome::Conflict => 4,
+        PostCommitMaterializeOutcome::Error => 5,
     }
 }
 

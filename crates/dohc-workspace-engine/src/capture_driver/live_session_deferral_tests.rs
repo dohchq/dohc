@@ -898,14 +898,18 @@ async fn an_unrepresentable_replicated_record_never_enters_the_deferred_count() 
         })
         .unwrap();
     drop(store);
-    std::fs::write(harness.root.join(path), "- parent\n  - child\n").unwrap();
+    std::fs::write(
+        harness.root.join(path),
+        format!("{} too deep\n", "> ".repeat(121)),
+    )
+    .unwrap();
     let files = FilesActorCloseGuard::new(
         FilesActor::spawn_async(harness.root.clone(), ScanBounds::default())
             .await
             .unwrap(),
     );
-    assert!(!harness.capture(&files.handle()).await);
-    assert!(harness.status.degraded());
+    assert!(harness.capture(&files.handle()).await);
+    assert!(!harness.status.degraded());
     assert_eq!(files.handle().stats().await.unwrap().deferred, 0);
     let switch = || {
         reconcile_full_for_switch(
@@ -921,10 +925,10 @@ async fn an_unrepresentable_replicated_record_never_enters_the_deferred_count() 
             CancellationToken::new(),
         )
     };
-    assert!(matches!(
-        switch().await,
-        Err(SwitchReconcileError::ApplyFailed)
-    ));
+    assert_eq!(
+        format!("{:?}", switch().await.unwrap_err()),
+        format!("HeldFiles({:?})", vec![path])
+    );
     std::fs::write(harness.root.join(path), "Completed\n").unwrap();
     assert!(
         switch().await.is_ok(),
@@ -932,6 +936,124 @@ async fn an_unrepresentable_replicated_record_never_enters_the_deferred_count() 
     );
     files.close().await;
     harness.close();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "manual capture cost measurement"]
+async fn capture_file_hold_capture_and_idle_cost() {
+    for count in [0, 100] {
+        let harness = Harness::new();
+        let outside = format!("{} too deep\n", "> ".repeat(121));
+        let mut store = dohc_engine_storage::EngineStore::open(&harness.db, 1).unwrap();
+        dohc_engine_domain::VersionedTextStore::new(&mut store)
+            .ensure_main_version(WORKSPACE_ID, "main", 1, &NoFaults)
+            .unwrap();
+        for index in 0..100 {
+            let path = format!("notes/held-{index:03}.md");
+            let input = dohc_engine_domain::CaptureIngest {
+                workspace_id: WORKSPACE_ID.into(),
+                version_id: "main".into(),
+                path: path.clone(),
+                text: SEED.into(),
+                metadata_origin: "capture".into(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 2,
+                request_id: None,
+                claim_foreign_head: false,
+            };
+            let head = dohc_engine_domain::VersionedTextStore::new(&mut store)
+                .capture_ingest(&input, &NoFaults)
+                .unwrap()
+                .snapshot;
+            let key = harness.key(&head.object_id);
+            let doc = dohc_engine_collab::Ydoc::wire();
+            doc.rewrite_content_to_markdown_preserving_source(
+                dohc_engine_collab::ContentKind::Richdoc,
+                SEED,
+            )
+            .unwrap();
+            dohc_engine_collab::record_local_update(
+                &mut store,
+                &mut dohc_engine_collab::WriterDocCache::new(),
+                &key,
+                &doc.encode_full_state(),
+                dohc_engine_collab::LocalAppend {
+                    marker: Some(dohc_engine_collab::MarkerCreation {
+                        path: Some(&path),
+                        content_kind: dohc_engine_collab::ContentKind::Richdoc,
+                        regime: dohc_engine_collab::Regime::LocalOnly,
+                    }),
+                    is_seed: true,
+                    seed_source_sha256: Some(&head.blob_sha256),
+                    ..Default::default()
+                },
+                &NoFaults,
+                3,
+                |_tx, _outcome, _sha| Ok(()),
+            )
+            .unwrap();
+            std::fs::write(
+                harness.root.join(&path),
+                if count == 0 { SEED } else { &outside },
+            )
+            .unwrap();
+        }
+        drop(store);
+        let seed = manifest_seed(&harness.root, &harness.actor, WORKSPACE_ID)
+            .await
+            .unwrap();
+        let files = FilesActorCloseGuard::new(
+            FilesActor::spawn_async_with_manifest(
+                harness.root.clone(),
+                ScanBounds::default(),
+                seed.into_scan_seed(),
+            )
+            .await
+            .unwrap(),
+        );
+        assert!(harness.capture(&files.handle()).await);
+        let held_count: i64 = rusqlite::Connection::open(&harness.db)
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM capture_file_holds WHERE workspace_id=?1",
+                [WORKSPACE_ID],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(held_count, count as i64);
+        let mut capture = Vec::new();
+        let mut idle = Vec::new();
+        for sample in 0..33 {
+            std::fs::write(
+                harness.root.join("notes/sibling.txt"),
+                format!("Sibling {sample}.\n"),
+            )
+            .unwrap();
+            files.handle().request_rescan();
+            let start = std::time::Instant::now();
+            assert!(harness.capture(&files.handle()).await);
+            let elapsed = start.elapsed().as_secs_f64() * 1000.0;
+            let start = std::time::Instant::now();
+            assert!(harness.capture(&files.handle()).await);
+            let idle_elapsed = start.elapsed().as_secs_f64() * 1000.0;
+            if sample >= 3 {
+                capture.push(elapsed);
+                idle.push(idle_elapsed);
+            }
+        }
+        for (name, mut samples) in [("capture_pass", capture), ("idle_capture_tick", idle)] {
+            samples.sort_by(f64::total_cmp);
+            println!(
+                "{name} held_files={count} files=101 warmups=3 samples=30 median_ms={:.6} p95_ms={:.6}",
+                (samples[14] + samples[15]) / 2.0,
+                samples[28]
+            );
+        }
+        files.close().await;
+        harness.close();
+    }
 }
 
 // A version switch or fork captures the whole workspace first. A new file an
