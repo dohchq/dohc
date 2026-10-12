@@ -249,6 +249,67 @@ describe("CSV view actions", () => {
     await waitFor(() => expect(onOpenPath).toHaveBeenCalledExactlyOnceWith("data.sqlite"));
   });
 
+  it("runs no second import when an old row's Try again is pressed while an import runs", async () => {
+    const user = userEvent.setup();
+    const running = deferred<ImportResult>();
+    importToDatabase.mockRejectedValueOnce(importRejected("Database already exists: data.sqlite"));
+    importToDatabase.mockReturnValueOnce(running.promise);
+    importToDatabase.mockResolvedValue(importResult("data.sqlite"));
+    const onOpenPath = vi.fn();
+    render(
+      <Shell>
+        {(onError) => <CsvView {...csvFile("ws-1", "data.csv", "name\nAda")} onOpenPath={onOpenPath} onError={onError} />}
+      </Shell>,
+    );
+
+    const button = screen.getByTestId("csv-import-sqlite");
+    await user.click(button);
+    await screen.findByTestId("workspace-shell-error");
+    await user.click(button);
+    expect(button.getAttribute("aria-busy")).toBe("true");
+
+    await user.click(screen.getByTestId("notice-center-toggle"));
+    await user.click(within(screen.getByRole("dialog", { name: "Notices" })).getByRole("button", { name: "Try again" }));
+    expect(importToDatabase).toHaveBeenCalledTimes(2);
+    expect(button.getAttribute("aria-busy")).toBe("true");
+
+    await act(async () => running.resolve(importResult("data.sqlite")));
+    expect(onOpenPath).toHaveBeenCalledExactlyOnceWith("data.sqlite");
+    expect(button.hasAttribute("aria-busy")).toBe(false);
+  });
+
+  it("answers a Try again pressed after the CSV closed: a failure files a new row, a success opens the database", async () => {
+    const user = userEvent.setup();
+    importToDatabase.mockRejectedValueOnce(importRejected("Database already exists: data.sqlite"));
+    importToDatabase.mockRejectedValueOnce(importRejected("Database already exists: data.sqlite"));
+    importToDatabase.mockResolvedValueOnce(importResult("data.sqlite"));
+    const onOpenPath = vi.fn();
+    const file = csvFile("ws-1", "data.csv", "name\nAda");
+    const shell = (open: boolean) => (
+      <Shell>{(onError) => (open ? <CsvView {...file} onOpenPath={onOpenPath} onError={onError} /> : null)}</Shell>
+    );
+    const view = render(shell(true));
+
+    await user.click(screen.getByTestId("csv-import-sqlite"));
+    await screen.findByTestId("workspace-shell-error");
+    view.rerender(shell(false));
+    expect(screen.queryByTestId("view-csv")).toBeNull();
+
+    const tryAgainInNotices = async () => {
+      await user.click(screen.getByTestId("notice-center-toggle"));
+      await user.click(within(screen.getByRole("dialog", { name: "Notices" })).getByRole("button", { name: "Try again" }));
+      await user.keyboard("{Escape}");
+    };
+    await tryAgainInNotices();
+    expect(importToDatabase).toHaveBeenCalledTimes(2);
+    const toast = await screen.findByTestId("workspace-shell-error");
+    expect(toast.textContent).toContain("dohc could not import this file to SQLite.");
+
+    await tryAgainInNotices();
+    expect(importToDatabase).toHaveBeenLastCalledWith(expect.objectContaining({ workspaceId: "ws-1", sourceRelativePath: "data.csv" }));
+    await waitFor(() => expect(onOpenPath).toHaveBeenCalledExactlyOnceWith("data.sqlite"));
+  });
+
   it("drops an import answer that arrives after the view closed", async () => {
     const user = userEvent.setup();
     const answer = deferred<ImportResult>();

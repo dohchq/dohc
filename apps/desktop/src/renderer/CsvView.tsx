@@ -1,7 +1,8 @@
 import type { SaveState } from "@dohc/workspace-contracts/save-state";
 import { Code, Database, LoaderCircle, Plus, Table, Trash2 } from "lucide-react";
 import { EmptyState, IconButton, SecondaryButton } from "./ui/controls";
-import { memo, useCallback, useEffect, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
+import type { ImportToDatabaseResult } from "../ipc/bridgeContract";
 import { bridge } from "./bridge";
 import type { ReportButtonError } from "./collections/useAutomationButtons";
 import { ViewActions } from "./fileInspectorUi";
@@ -25,6 +26,74 @@ function deriveImportTarget(sourcePath: string): { dbPath: string; tableName: st
 }
 
 import { MAX_CSV_PREVIEW_ROWS, detectCsvBound, type CsvBoundOffer } from "./offers/csvBound";
+
+// Imports running now, by workspace and file, so a header click and a stored
+// Try again never import one file twice at once, and every view of the file
+// shows the import until it ends.
+const runningImports = new Set<string>();
+const importListeners = new Set<() => void>();
+const importKey = (workspaceId: string, path: string) => `${workspaceId}\u0000${path}`;
+const subscribeImports = (listener: () => void) => {
+  importListeners.add(listener);
+  return () => {
+    importListeners.delete(listener);
+  };
+};
+
+function useImportRunning(workspaceId: string, path: string): boolean {
+  const key = importKey(workspaceId, path);
+  return useSyncExternalStore(subscribeImports, () => runningImports.has(key));
+}
+
+function setImportRunning(key: string, running: boolean) {
+  if (running) runningImports.add(key);
+  else runningImports.delete(key);
+  for (const listener of importListeners) listener();
+}
+
+// Imports a CSV into a SQLite file beside it. Answers null, and imports
+// nothing, while an import of the same file is still running.
+async function importCsv(workspaceId: string, path: string): Promise<ImportToDatabaseResult | null> {
+  const key = importKey(workspaceId, path);
+  if (runningImports.has(key)) return null;
+  setImportRunning(key, true);
+  try {
+    const { dbPath, tableName } = deriveImportTarget(path);
+    return await bridge().importToDatabase({
+      workspaceId,
+      sourceRelativePath: path,
+      databaseRelativePath: dbPath,
+      tableName,
+    });
+  } finally {
+    setImportRunning(key, false);
+  }
+}
+
+// Import never overwrites a file, so the most common cause is a database
+// already at the target; the error's words name it.
+const IMPORT_FAILED = "dohc could not import this file to SQLite.";
+
+// Try again on a failed import's Notices row. The person asked for it, so it
+// answers through the shell's own hooks whether or not the CSV is still open:
+// success opens the database, and a failure files a new row. The shell
+// remounts for each workspace (DesktopRoot), so its hooks never reach another.
+function retryImport(
+  workspaceId: string,
+  path: string,
+  onOpenPath: ((path: string) => void) | undefined,
+  onError: ReportButtonError | undefined,
+): () => void {
+  const run = async () => {
+    try {
+      const result = await importCsv(workspaceId, path);
+      if (result) onOpenPath?.(result.path);
+    } catch (cause) {
+      onError?.(IMPORT_FAILED, cause, () => void run());
+    }
+  };
+  return () => void run();
+}
 
 export type CsvMode = "table" | "raw";
 
@@ -314,7 +383,7 @@ export function CsvView({
 }) {
   const locked = Boolean(truncated || readOnly);
   const [raw, setRaw] = useState(false);
-  const [importing, setImporting] = useState(false);
+  const importing = useImportRunning(workspaceId, path);
   // The file the view shows, or null once it closes, so a late import answer
   // never opens or reports into a workspace or file the view has left.
   const target = useRef<{ workspaceId: string; path: string } | null>(null);
@@ -517,25 +586,14 @@ export function CsvView({
   }, [delimiter, raw]);
 
   async function importToSqlite() {
-    if (importing || locked) return;
+    if (locked) return;
     const current = () =>
       target.current?.workspaceId === workspaceId && target.current.path === path;
-    setImporting(true);
     try {
-      const { dbPath, tableName } = deriveImportTarget(path);
-      const result = await bridge().importToDatabase({
-        workspaceId,
-        sourceRelativePath: path,
-        databaseRelativePath: dbPath,
-        tableName,
-      });
-      if (current()) onOpenPath?.(result.path);
+      const result = await importCsv(workspaceId, path);
+      if (result && current()) onOpenPath?.(result.path);
     } catch (cause) {
-      // Import never overwrites a file, so the most common cause is a
-      // database already at the target; the error's words name it.
-      if (current()) onError?.("dohc could not import this file to SQLite.", cause, () => void importToSqlite());
-    } finally {
-      setImporting(false);
+      if (current()) onError?.(IMPORT_FAILED, cause, retryImport(workspaceId, path, onOpenPath, onError));
     }
   }
 
