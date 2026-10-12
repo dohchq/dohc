@@ -816,6 +816,16 @@ pub fn materialize_one_ordinary(
     job: &MaterializationJob,
     options: &MaterializeOptions<'_>,
 ) -> Result<JobOutcome, MaterializeError> {
+    materialize_one_ordinary_with(store, root, job, options, false)
+}
+
+fn materialize_one_ordinary_with(
+    store: &EngineStore,
+    root: &Path,
+    job: &MaterializationJob,
+    options: &MaterializeOptions<'_>,
+    conflict_only: bool,
+) -> Result<JobOutcome, MaterializeError> {
     let MaterializeOptions { now_ms, faults, .. } = *options;
     // Canonicalizing the root deliberately accepts aliases above (or at) the
     // workspace boundary. The component walk below owns only descendants.
@@ -854,7 +864,8 @@ pub fn materialize_one_ordinary(
     // to older content (concurrent / out-of-order jobs). No-op; mark complete.
     // A keyed write's request records the supersession first, so a complete
     // job with no recorded outcome always reached disk.
-    if !job.job_id.starts_with("version-switch-")
+    if !conflict_only
+        && !job.job_id.starts_with("version-switch-")
         && let Some(done_gen) =
             store.max_completed_generation_for_path(&job.workspace_id, &job.target_path)?
         && done_gen > job.target_generation
@@ -887,12 +898,33 @@ pub fn materialize_one_ordinary(
     materialize_ordinary_write(
         store,
         &canonical_root,
-        &staging,
+        if conflict_only {
+            OrdinaryWritePlacement::ConflictSibling
+        } else {
+            OrdinaryWritePlacement::Target(&staging)
+        },
         &target,
         job,
         &content,
         options,
     )
+}
+
+/// Preserve a stale write as the ordinary conflict sibling, without placing
+/// its content at the target. The capture drain uses this after an outside
+/// repair has already become the head.
+pub fn materialize_write_conflict(
+    store: &EngineStore,
+    root: &Path,
+    job: &MaterializationJob,
+    options: &MaterializeOptions<'_>,
+) -> Result<JobOutcome, MaterializeError> {
+    match materialize_one_ordinary_with(store, root, job, options, true) {
+        Err(MaterializeError::SymlinkTarget | MaterializeError::RecoveryUnavailable) => {
+            Ok(JobOutcome::Blocked)
+        }
+        outcome => outcome,
+    }
 }
 
 /// Execute a secret write through the same atomic-replace pipeline without
@@ -1240,12 +1272,17 @@ fn materialize_secret_write(
     Ok(JobOutcome::Completed)
 }
 
+enum OrdinaryWritePlacement<'a> {
+    Target(&'a Staging),
+    ConflictSibling,
+}
+
 /// Write an ordinary job's content without overwriting bytes the preimage
 /// check did not see (module docs, "Stage, then place").
 fn materialize_ordinary_write(
     store: &EngineStore,
     root: &Path,
-    staging: &Staging,
+    placement: OrdinaryWritePlacement<'_>,
     target: &Path,
     job: &MaterializationJob,
     content: &[u8],
@@ -1268,7 +1305,8 @@ fn materialize_ordinary_write(
     // The staging recheck reuses this read while the target's size and time
     // stay the same.
     let mut reads = TargetReads::default();
-    if let TargetHash::Sha(sha) = reads.read(target)?
+    if matches!(placement, OrdinaryWritePlacement::Target(_))
+        && let TargetHash::Sha(sha) = reads.read(target)?
         && sha == job.content_sha256
     {
         store.mark_materialization_complete(&job.job_id, now_ms)?;
@@ -1304,7 +1342,14 @@ fn materialize_ordinary_write(
             FaultPoint::MaterializeBeforePreimageRevalidate,
         ));
     }
-    let outcome = swap_in_temp(store, staging, target, &tmp, job, &mut reads, options);
+    let outcome = match placement {
+        OrdinaryWritePlacement::Target(staging) => {
+            swap_in_temp(store, staging, target, &tmp, job, &mut reads, options)
+        }
+        OrdinaryWritePlacement::ConflictSibling => {
+            record_write_conflict(store, target, &tmp, job, now_ms)
+        }
+    };
     if outcome.is_err() {
         let _ = std::fs::remove_file(&tmp); // best-effort cleanup
     }

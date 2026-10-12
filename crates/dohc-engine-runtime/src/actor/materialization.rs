@@ -819,11 +819,30 @@ pub(super) fn replay_pending_materializations(
             if job.job_id.starts_with("version-switch-mat_")
                 && switch_projection_matches_active(store, &job, false)?.is_none()
             {
-                store.mark_materialization_complete(&job.job_id, now_ms)?;
-                if scope.file_outcomes_settled {
-                    summary.completed += 1;
-                } else if selected.is_some() {
-                    summary.failed += 1;
+                if scope.file_outcomes_settled && job.operation == MaterializationOperation::Write {
+                    match dohc_engine_files::materialize_write_conflict(
+                        store,
+                        root_dir,
+                        &job,
+                        &MaterializeOptions {
+                            policy: DurabilityPolicy::per_os(),
+                            replacer: &StdReplacer,
+                            backoff: &StdBackoff,
+                            now_ms,
+                            faults,
+                        },
+                    ) {
+                        Ok(JobOutcome::Conflict) => summary.completed += 1,
+                        Ok(JobOutcome::Parked) => summary.parked += 1,
+                        _ => summary.failed += 1,
+                    }
+                } else {
+                    store.mark_materialization_complete(&job.job_id, now_ms)?;
+                    if scope.file_outcomes_settled {
+                        summary.completed += 1;
+                    } else if selected.is_some() {
+                        summary.failed += 1;
+                    }
                 }
                 continue;
             }

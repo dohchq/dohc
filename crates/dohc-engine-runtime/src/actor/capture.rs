@@ -111,11 +111,22 @@ mod capture_file_hold_tests {
     #[test]
     fn fix2_recreated_unrepresentable_file_is_durably_held() {
         let (scratch, mut store, refused) = seeded();
-        store
-            .write_with(&NoFaults, |tx| {
-                tx.execute("DELETE FROM path_aliases WHERE path='held.md'", [])
-                    .map_err(StorageError::persist_public)
-            })
+        VersionedTextStore::new(&mut store)
+            .delete_text_file(
+                &dohc_engine_domain::DeleteTextFile {
+                    workspace_id: "hold-proof".into(),
+                    version_id: "main".into(),
+                    path: "held.md".into(),
+                    moment_id: "delete-before-recreate".into(),
+                    request_id: None,
+                    metadata_origin: "api".into(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    now_ms: 4,
+                },
+                &NoFaults,
+            )
             .unwrap();
         let error = offer(&mut store, &refused).unwrap_err();
         drop(store);
@@ -127,6 +138,76 @@ mod capture_file_hold_tests {
         assert_eq!(
             held.unwrap().observed_sha256,
             dohc_engine_storage::hex_sha256(refused.text.as_bytes())
+        );
+    }
+
+    #[test]
+    fn fix3_recreated_hold_retires_atomically_without_a_snapshot() {
+        let (scratch, mut store, refused) = seeded();
+        VersionedTextStore::new(&mut store)
+            .delete_text_file(
+                &dohc_engine_domain::DeleteTextFile {
+                    workspace_id: "hold-proof".into(),
+                    version_id: "main".into(),
+                    path: "held.md".into(),
+                    moment_id: "delete-before-recreate".into(),
+                    request_id: None,
+                    metadata_origin: "api".into(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    now_ms: 4,
+                },
+                &NoFaults,
+            )
+            .unwrap();
+        assert_eq!(
+            offer(&mut store, &refused).unwrap_err().code(),
+            "capture-file-held"
+        );
+        let retire = CaptureRetire {
+            workspace_id: "hold-proof".into(),
+            version_id: "main".into(),
+            path: "held.md".into(),
+            metadata_summary: None,
+            metadata_correlation_id: None,
+            now_ms: 6,
+            request_id: None,
+            only_if_text_head: true,
+            only_if_capture_origin: true,
+            allow_ydoc_origin: true,
+        };
+        let result = capture_retire_on_store(
+            &mut store,
+            &retire,
+            scratch.path(),
+            &Root,
+            true,
+            &(),
+            &LeaseRegistry::new(),
+            &NoFaults,
+        );
+        assert!(
+            result.is_ok(),
+            "snapshotless held alias must retire: {result:?}"
+        );
+        assert_unheld(&store);
+        let aliases: i64 = store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT count(*) FROM path_aliases WHERE path='held.md'",
+                    [],
+                    |r| r.get(0),
+                )
+            })
+            .unwrap();
+        assert_eq!(aliases, 0);
+        assert_eq!(
+            offer(&mut store, &input("held.md", "Recreated normally.\n"))
+                .unwrap()
+                .snapshot
+                .text,
+            "Recreated normally.\n"
         );
     }
 
@@ -2062,6 +2143,24 @@ fn capture_retire_on_store(
                 .clone_from(&hold.source_version_id);
         }
         let input = pinned.as_ref();
+        if let Some(hold) = &hold {
+            // A refused recreation has an alias but has never recorded a head.
+            // Remove only that held identity; the domain retire then sees absence.
+            tx.prepare_cached(
+                "DELETE FROM path_aliases WHERE workspace_id=?1 AND version_id=?2 \
+                 AND path=?3 AND object_id=?4 AND NOT EXISTS (\
+                     SELECT 1 FROM snapshots WHERE workspace_id=?1 AND version_id=?2 \
+                     AND object_id=?4)",
+            )
+            .map_err(StorageError::corrupt_public)?
+            .execute(params![
+                input.workspace_id,
+                input.version_id,
+                input.path,
+                hold.object_id,
+            ])
+            .map_err(StorageError::persist_public)?;
+        }
         let mut result = capture_retire_in_tx(tx, input).map_err(RuntimeError::from)?;
         let mut asset_jobs = Vec::new();
         if !result.deduped

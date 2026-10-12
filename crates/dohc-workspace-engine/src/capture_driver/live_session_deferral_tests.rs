@@ -197,12 +197,10 @@ struct Harness {
     _capture_scratch: ScratchDir,
 }
 
-async fn fix2_repaired_hold_with_relay_job(first_sight: bool) {
+fn seed_held_richdoc(harness: &Harness) -> String {
     use dohc_engine_collab::{
         ContentKind, LocalAppend, MarkerCreation, Regime, WriterDocCache, Ydoc,
     };
-    let harness = Harness::new();
-    let outside = format!("{} too deep\n", "> ".repeat(121));
     let mut store = dohc_engine_storage::EngineStore::open(&harness.db, 1).unwrap();
     let input = dohc_engine_domain::CaptureIngest {
         workspace_id: WORKSPACE_ID.into(),
@@ -249,6 +247,13 @@ async fn fix2_repaired_hold_with_relay_job(first_sight: bool) {
     )
     .unwrap();
     drop(store);
+    head.object_id
+}
+
+async fn fix2_repaired_hold_with_relay_job(first_sight: bool) {
+    let harness = Harness::new();
+    let outside = format!("{} too deep\n", "> ".repeat(121));
+    let object_id = seed_held_richdoc(&harness);
     std::fs::write(harness.root.join(NEW_FILE), &outside).unwrap();
     let files = FilesActorCloseGuard::new(
         FilesActor::spawn_async(harness.root.clone(), ScanBounds::default())
@@ -271,7 +276,7 @@ async fn fix2_repaired_hold_with_relay_job(first_sight: bool) {
             dohc_engine_domain::WriteText {
                 workspace_id: WORKSPACE_ID.into(),
                 version_id: "main".into(),
-                object_id: head.object_id,
+                object_id,
                 path: NEW_FILE.into(),
                 text: "Remote edit.\n".into(),
                 moment_id: "fix2-remote-edit".into(),
@@ -363,6 +368,13 @@ async fn fix2_repaired_hold_with_relay_job(first_sight: bool) {
             .unwrap()
             .is_empty()
     );
+    let history_shas: Vec<String> = observer
+        .prepare("SELECT after_blob_sha256 FROM moments WHERE workspace_id=?1 AND path=?2 AND operation='write'")
+        .unwrap()
+        .query_map([WORKSPACE_ID, NEW_FILE], |r| r.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
     drop(observer);
     let notice_bytes = notices
         .iter()
@@ -391,22 +403,123 @@ async fn fix2_repaired_hold_with_relay_job(first_sight: bool) {
             recorded_sha,
             dohc_engine_storage::hex_sha256(b"Repaired outside.\n")
         );
-        assert_eq!(job_status, "complete");
-        assert!(
-            notices.is_empty(),
-            "a stale projection needs no conflict artifact"
-        );
+        assert_eq!(job_status, "conflict");
+        assert_eq!(notices.len(), 1, "parked remote edit stays visible");
+        assert_eq!(notice_bytes[0], "Remote edit.\n");
+        for text in ["Remote edit.\n", "Repaired outside.\n"] {
+            assert!(
+                history_shas.contains(&dohc_engine_storage::hex_sha256(text.as_bytes())),
+                "History must retain {text:?}"
+            );
+        }
     }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn fix2_repaired_hold_drains_stale_real_relay_without_degrading() {
+async fn fix3_repaired_hold_keeps_stale_relay_as_visible_conflict() {
     fix2_repaired_hold_with_relay_job(false).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn fix2_first_sight_hold_drains_real_relay_conflict_without_degrading() {
     fix2_repaired_hold_with_relay_job(true).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fix3_real_delete_recreate_hold_delete_and_recreate_normally() {
+    let harness = Harness::new();
+    seed_held_richdoc(&harness);
+    std::fs::write(harness.root.join(NEW_FILE), SEED).unwrap();
+    let files = FilesActorCloseGuard::new(
+        FilesActor::spawn_async(harness.root.clone(), ScanBounds::default())
+            .await
+            .unwrap(),
+    );
+    assert!(harness.capture(&files.handle()).await);
+    let mut store = dohc_engine_storage::EngineStore::open(&harness.db, 4).unwrap();
+    dohc_engine_domain::VersionedTextStore::new(&mut store)
+        .delete_text_file(
+            &dohc_engine_domain::DeleteTextFile {
+                workspace_id: WORKSPACE_ID.into(),
+                version_id: "main".into(),
+                path: NEW_FILE.into(),
+                moment_id: "fix3-real-delete".into(),
+                request_id: None,
+                metadata_origin: "api".into(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 4,
+            },
+            &NoFaults,
+        )
+        .unwrap();
+    drop(store);
+    std::fs::remove_file(harness.root.join(NEW_FILE)).unwrap();
+    assert!(!harness.root.join(NEW_FILE).exists());
+    assert_eq!(head_count(&harness.db, NEW_FILE), 0);
+    files.handle().request_rescan();
+    assert!(harness.capture(&files.handle()).await);
+    std::fs::write(
+        harness.root.join(NEW_FILE),
+        format!("{} too deep\n", "> ".repeat(121)),
+    )
+    .unwrap();
+    files.handle().request_rescan();
+    assert!(harness.capture(&files.handle()).await);
+    assert_eq!(
+        harness
+            .actor
+            .capture_file_holds(WORKSPACE_ID.into())
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(head_count(&harness.db, NEW_FILE), 0);
+    std::fs::remove_file(harness.root.join(NEW_FILE)).unwrap();
+    files.handle().request_rescan();
+    let clean = harness.capture(&files.handle()).await;
+    let degraded = harness.status.degraded();
+    let holds = harness
+        .actor
+        .capture_file_holds(WORKSPACE_ID.into())
+        .await
+        .unwrap();
+    let quarantined = files.handle().stats().await.unwrap().quarantined;
+    // Close even on the baseline failure, before asserting the expected result.
+    if !clean || degraded || !holds.is_empty() || quarantined != 0 {
+        files.close().await;
+        harness.close();
+        panic!(
+            "delete of recreated hold failed: clean={clean}, degraded={degraded}, holds={holds:?}, quarantined={quarantined}"
+        );
+    }
+    std::fs::write(harness.root.join(NEW_FILE), "Recreated normally.\n").unwrap();
+    files.handle().request_rescan();
+    let clean = harness.capture(&files.handle()).await;
+    let degraded = harness.status.degraded();
+    let recorded = harness
+        .actor
+        .versioned_text_read(
+            WORKSPACE_ID.into(),
+            "main".into(),
+            NEW_FILE.into(),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    let holds = harness
+        .actor
+        .capture_file_holds(WORKSPACE_ID.into())
+        .await
+        .unwrap();
+    files.close().await;
+    harness.close();
+    assert!(clean && !degraded);
+    assert!(holds.is_empty());
+    assert_eq!(recorded.text, "Recreated normally.\n");
 }
 
 impl Harness {
