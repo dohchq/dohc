@@ -1,99 +1,25 @@
-import type { AnyExtension, JSONContent } from '@tiptap/core'
-import { getHTMLFromFragment, getSchema } from '@tiptap/core'
-import { codeBlockFence, DohcMarkdownTable, serializeRichdocBody } from '@dohc/ydoc-projection'
-import { CodeBlock } from '@tiptap/extension-code-block'
+import type { JSONContent } from '@tiptap/core'
+import { getHTMLFromFragment } from '@tiptap/core'
+import {
+  getDohcProseMirrorSchema,
+  getDohcYDocFrontmatter,
+  getDohcYDocPlainText,
+  parseRichdocMarkdown,
+  serializeRichdocBody,
+} from '@dohc/ydoc-projection'
+import { escapeHighlightMarkdown } from '@dohc/ydoc-projection/markdown-extensions'
 import { Node as ProseMirrorNode } from '@tiptap/pm/model'
-import { MarkdownManager } from '@tiptap/markdown'
-import { Marked, type marked } from 'marked'
-import { StarterKit } from '@tiptap/starter-kit'
-import { TableKit } from '@tiptap/extension-table'
-import { TaskList } from '@tiptap/extension-list'
-import {
-  prosemirrorJSONToYXmlFragment,
-  yXmlFragmentToProseMirrorRootNode,
-} from 'y-prosemirror'
+import { yXmlFragmentToProseMirrorRootNode } from 'y-prosemirror'
 import * as Y from 'yjs'
-import { frontmatterBlockFor, writtenFrontmatterKeys } from '@dohc/ydoc-projection/frontmatter'
-import {
-  orderFrontmatter,
-  parseFrontmatter,
-} from '../markdown/frontmatter'
-import {
-  DohcTaskItem,
-  dohcMarkdownExtensions,
-  escapeHighlightMarkdown,
-} from './extensions'
+import { frontmatterBlockFor } from '@dohc/ydoc-projection/frontmatter'
+import { writtenFrontmatterKeys } from '@dohc/ydoc-projection/frontmatter-map'
+import { orderFrontmatter } from '../markdown/frontmatter'
 
 const BODY_FIELD = 'body'
-const PLAIN_TEXT_FIELD = 'plainText'
 const FRONTMATTER_FIELD = 'frontmatter'
 const META_FIELD = 'meta'
-const DOHC_SCHEMA_VERSION = 1
-const PLAIN_TEXT_CONTENT_KIND = 'plain-text'
 
-// Match packages/ydoc-projection's code-block fence rule.
-// This prevents content from closing its own fence. Exported so every
-// markdown-serializing editor surface (this module and MarkdownEditor.tsx's
-// live editor) registers the same widened fence instead of drifting again.
-// Named distinctly from extensions.ts's DohcCodeBlock, which parses the
-// `code` markdown token on import — this one only overrides export.
-export const FenceWideningCodeBlock = CodeBlock.extend({
-  renderMarkdown: (node, helpers) => {
-    const language = node.attrs?.language || ''
-    const content = helpers.renderChildren(node.content ?? [])
-    const fence = codeBlockFence(content, language)
-    const info = language.startsWith(fence[0]) ? ` ${language}` : language
-    return [`${fence}${info}`, content, fence].join('\n')
-  },
-})
-
-const extensions: AnyExtension[] = [
-  ...dohcMarkdownExtensions,
-  StarterKit.configure({ codeBlock: false }),
-  FenceWideningCodeBlock,
-  TaskList,
-  DohcTaskItem,
-  // The projection's table parses and writes the row-height annotation. The
-  // kit's own table would hand that comment to the HTML parser instead.
-  TableKit.configure({ table: false }),
-  DohcMarkdownTable,
-]
-const markdownManager = new MarkdownManager({
-  marked: new Marked() as unknown as typeof marked,
-  extensions,
-  indentation: { style: 'space', size: 2 },
-})
-const schema = getSchema(extensions)
-
-type DohcMeta = { schemaVersion: number; contentKind?: 'plain-text' }
-
-export function markdownToYDoc(markdown: string): Y.Doc {
-  const { meta, body } = parseFrontmatter(markdown)
-  const doc = new Y.Doc()
-
-  replaceMap(doc.getMap(FRONTMATTER_FIELD), meta)
-  replaceMap(doc.getMap(META_FIELD), { schemaVersion: DOHC_SCHEMA_VERSION })
-
-  const bodyFragment = doc.getXmlFragment(BODY_FIELD)
-  const tiptapJson = markdownManager.parse(body)
-  prosemirrorJSONToYXmlFragment(schema, tiptapJson, bodyFragment)
-
-  return doc
-}
-
-export function plainTextToYDoc(markdown: string): Y.Doc {
-  const { meta, body } = parseFrontmatter(markdown)
-  const doc = new Y.Doc()
-
-  replaceMap(doc.getMap(FRONTMATTER_FIELD), meta)
-  replaceMap(doc.getMap(META_FIELD), {
-    schemaVersion: DOHC_SCHEMA_VERSION,
-    contentKind: PLAIN_TEXT_CONTENT_KIND,
-  })
-  doc.getText(PLAIN_TEXT_FIELD).insert(0, body)
-
-  return doc
-}
+const schema = getDohcProseMirrorSchema()
 
 export function yDocToMarkdown(doc: Y.Doc): string {
   const body = yDocBodyToMarkdown(doc).trimEnd()
@@ -104,61 +30,15 @@ export function yDocToMarkdown(doc: Y.Doc): string {
   return `${frontmatterBlockFor(frontmatter, meta.get('dohcFrontmatterSource'), body, '\n', written)}${body}`
 }
 
-export function replaceYDocWithMarkdown(doc: Y.Doc, markdown: string): void {
-  const { meta, body } = parseFrontmatter(markdown)
-  doc.transact(() => {
-    replaceMap(doc.getMap(FRONTMATTER_FIELD), meta)
-    replaceMap(doc.getMap(META_FIELD), { schemaVersion: DOHC_SCHEMA_VERSION })
-
-    const bodyFragment = doc.getXmlFragment(BODY_FIELD)
-    if (bodyFragment.length > 0) bodyFragment.delete(0, bodyFragment.length)
-    const tiptapJson = markdownManager.parse(body)
-    prosemirrorJSONToYXmlFragment(schema, tiptapJson, bodyFragment)
-  })
-}
-
-export function getDohcYDocFrontmatter(doc: Y.Doc): Record<string, unknown> {
-  return mapToObject(doc.getMap(FRONTMATTER_FIELD))
-}
-
-export function getDohcYDocMeta(doc: Y.Doc): DohcMeta {
-  const meta = mapToObject(doc.getMap(META_FIELD))
-  return {
-    schemaVersion:
-      typeof meta.schemaVersion === 'number'
-        ? meta.schemaVersion
-        : DOHC_SCHEMA_VERSION,
-    contentKind:
-      meta.contentKind === PLAIN_TEXT_CONTENT_KIND
-        ? PLAIN_TEXT_CONTENT_KIND
-        : undefined,
-  }
-}
-
-export function getDohcYDocBodyFragment(doc: Y.Doc): Y.XmlFragment {
-  return doc.getXmlFragment(BODY_FIELD)
-}
-
-export function getDohcYDocPlainText(doc: Y.Doc): Y.Text | null {
-  return getDohcYDocMeta(doc).contentKind === PLAIN_TEXT_CONTENT_KIND
-    ? doc.getText(PLAIN_TEXT_FIELD)
-    : null
-}
-
-export function getDohcProseMirrorSchema() {
-  return schema
-}
-
 // Renders BODY markdown (post-frontmatter — split a full document string
-// with parseFrontmatter first) to HTML through the same schema/extensions
-// the editor and Y.Doc conversions use, so custom nodes (wikilinks,
-// callouts, highlight marks, task lists) render via their own renderHTML —
-// never a generic/lossy fallback. Used by the document export menu
-// (documentExport.ts). Needs a DOM (`document` global): true in the
+// with parseFrontmatter first) to HTML through the projection's parser and
+// schema, the same ones the editor and Y.Doc conversions use, so custom nodes
+// (wikilinks, callouts, highlight marks, task lists) render via their own
+// renderHTML — never a generic/lossy fallback. Used by the document export
+// menu (documentExport.ts). Needs a DOM (`document` global): true in the
 // renderer and under vitest's jsdom environment, never in the main process.
 export function markdownBodyToHtml(body: string): string {
-  const json = markdownManager.parse(body)
-  const node = ProseMirrorNode.fromJSON(schema, json)
+  const node = ProseMirrorNode.fromJSON(schema, parseRichdocMarkdown(body))
   return getHTMLFromFragment(node.content, schema)
 }
 
@@ -211,17 +91,4 @@ function xmlElementToSelectionSeed(element: Y.XmlElement): JSONContent {
     ...(Object.keys(attrs).length ? { attrs } : {}),
     ...(child ? { content: [xmlElementToSelectionSeed(child)] } : {}),
   }
-}
-
-function replaceMap(map: Y.Map<unknown>, values: Record<string, unknown>): void {
-  for (const key of Array.from(map.keys())) {
-    map.delete(key)
-  }
-  for (const [key, value] of Object.entries(values)) {
-    map.set(key, value)
-  }
-}
-
-function mapToObject(map: Y.Map<unknown>): Record<string, unknown> {
-  return Object.fromEntries(map.entries())
 }

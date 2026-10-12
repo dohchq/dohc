@@ -60,7 +60,10 @@ export function createDesktopSharedChannelSync<
       input: Parameters<ReturnType<typeof createReceivedShareEngineAccess>["relayForRegistered"]>[0],
     ): Pick<EngineRelayWorkspaceClient, "pullSharedChannel" | "pushSharedChannel">;
   };
-  setWorkspaceSharedChannels(workspaceId: string, channels: JoinedSharedChannel[]): unknown;
+  updateWorkspaceSharedChannels(
+    workspaceId: string,
+    update: (channels: readonly JoinedSharedChannel[]) => readonly JoinedSharedChannel[],
+  ): Promise<void>;
   notifyRenderer(input: { workspaceId: string }): void;
   projectPendingChatBookmarksAfterPull(workspaceId: string): Promise<void>;
   linkedChatStoreFor(
@@ -81,7 +84,7 @@ export function createDesktopSharedChannelSync<
     currentCredentials,
     normalizeServerUrl,
     receivedShareEngine,
-    setWorkspaceSharedChannels,
+    updateWorkspaceSharedChannels,
     notifyRenderer,
     projectPendingChatBookmarksAfterPull,
     linkedChatStoreFor,
@@ -344,16 +347,14 @@ export function createDesktopSharedChannelSync<
         // composer honesty keys off `joined.access`, and a corrected row stops
         // every future pass from re-attempting the same doomed push.
         const readOnly = new Set(result.readOnlyShareIds);
-        assertRequestCurrent();
-        setWorkspaceSharedChannels(
-          workspaceId,
-          ((operation ? operation.workspace : findWorkspace(workspaceId))
-            ?.sharedChannels ?? []).map((channel) => {
+        await updateWorkspaceSharedChannels(workspaceId, (channels) => {
+          assertRequestCurrent();
+          return channels.map((channel) => {
             if (ended.has(channel.shareId)) return { ...channel, ended: true };
             if (readOnly.has(channel.shareId)) return { ...channel, access: "read-only" as const };
             return channel;
-          }),
-        );
+          });
+        });
         assertRequestCurrent();
       }
       if (result.changed || result.endedShareIds.length > 0 || result.readOnlyShareIds.length > 0) {

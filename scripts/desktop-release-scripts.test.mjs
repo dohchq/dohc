@@ -15,6 +15,7 @@ import { join } from "node:path";
 import { after, test } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
+import { load } from "js-yaml";
 import { verifyDesktopReleaseArtifacts } from "./verify-desktop-release-artifacts.mjs";
 
 const temporaryDirectories = [];
@@ -466,228 +467,137 @@ test("mock-update-server serves its root when run as a command", async () => {
   }
 });
 
-function escapeRegex(value) {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
+const releaseWorkflowSource = await readFile(new URL("../.github/workflows/desktop-release.yml", import.meta.url), "utf8");
+const releaseWorkflow = load(releaseWorkflowSource);
 
-function topLevelSection(source, name) {
-  const pattern = new RegExp(
-    `^${escapeRegex(name)}:\\r?\\n([\\s\\S]*?)(?=^[^\\s].*:|(?![\\s\\S]))`,
-    "m",
-  );
-  const match = source.match(pattern);
-  assert.ok(match, `workflow section exists: ${name}`);
-  return match[1];
-}
-
-function indentedSection(source, indent, name) {
-  const pattern = new RegExp(
-    `^ {${indent}}${escapeRegex(name)}:\\r?\\n([\\s\\S]*?)(?=^ {${indent}}\\S|^[^\\s]|(?![\\s\\S]))`,
-    "m",
-  );
-  const match = source.match(pattern);
-  assert.ok(match, `workflow subsection exists: ${name}`);
-  return match[1];
-}
-
-function stepBlocks(source) {
-  return source.replaceAll("\r\n", "\n").match(/^ {6}- name: .*(?:\n(?! {6}- name: ).*)*/gm) ?? [];
-}
-
-function stepBlock(source, name) {
-  const prefix = `      - name: ${name}`;
-  const block = stepBlocks(source).find((candidate) => candidate.startsWith(prefix));
-  assert.ok(block, `workflow step exists: ${name}`);
-  return block;
-}
-
-test("workflow section helpers support sections at end of file", () => {
-  const source = [
-    "on:",
-    "  pull_request:",
-    "    branches:",
-    "      - main",
-  ].join("\n");
-
-  const onSection = topLevelSection(source, "on");
-  assert.equal(onSection, "  pull_request:\n    branches:\n      - main");
-  assert.equal(indentedSection(onSection, 2, "pull_request"), "    branches:\n      - main");
+// A Windows checkout can have CRLF line endings, and an edit can drop the final newline.
+test("the release workflow contract reads the same with CRLF line endings and no final newline", () => {
+  const lf = releaseWorkflowSource.replaceAll("\r\n", "\n");
+  const crlf = lf.replaceAll("\n", "\r\n");
+  for (const source of [lf, crlf, lf.trimEnd(), crlf.trimEnd()]) assert.deepEqual(load(source), releaseWorkflow);
 });
 
-test("workflow section helpers support CRLF line endings", () => {
-  const source = [
-    "on:",
-    "  pull_request:",
-    "    branches:",
-    "      - main",
-    "jobs:",
-    "  build:",
-    "    runs-on: ubuntu-latest",
-  ].join("\r\n");
+function releaseStep(job, command) {
+  const step = job.steps.find(candidate => candidate.run?.includes(command) || candidate.uses?.startsWith(command));
+  assert.ok(step, `release job runs ${command}`);
+  return step;
+}
 
-  const onSection = topLevelSection(source, "on");
-  assert.equal(onSection, "  pull_request:\r\n    branches:\r\n      - main\r\n");
-  assert.equal(
-    indentedSection(onSection, 2, "pull_request"),
-    "    branches:\r\n      - main\r\n",
-  );
-});
+function workflowValues(value) {
+  if (Array.isArray(value)) return value.flatMap(workflowValues);
+  if (value && typeof value === "object") return Object.values(value).flatMap(workflowValues);
+  return [value];
+}
 
-test("desktop releases start only by dispatch, run on self-hosted runners, and preserve unsigned package smoke", async () => {
-  const workflow = await readFile(
-    join(process.cwd(), ".github/workflows/desktop-release.yml"),
-    "utf8",
-  );
-  const onSection = topLevelSection(workflow, "on");
-  const packageDesktop = stepBlock(workflow, "Package desktop");
-  const fuseSmoke = stepBlock(workflow, "Fuse smoke");
-  const windowsSmoke = stepBlock(workflow, "Windows packaged smoke");
-  assert.match(windowsSmoke, /if: runner\.os == 'Windows'/);
-  assert.match(windowsSmoke, /--binary apps\/desktop\/release\/win-unpacked\/dohc\.exe/);
-  assert.match(windowsSmoke, /--package-commit '\$\{\{ github\.sha \}\}'/);
-  assert.ok(workflow.indexOf(windowsSmoke) < workflow.indexOf(stepBlock(workflow, "Upload packaged artifacts")));
-  const packageSteps = stepBlocks(workflow).filter((step) =>
-    step.includes("electron-builder")
-  );
+function releaseExpression(expression, needs, secrets = {}, inputs = {}) {
+  // These release guards use string comparisons and operators shared by Actions and JavaScript.
+  assert.match(expression, /^\$\{\{[\s\S]*\}\}$/u);
+  return Function("needs", "secrets", "inputs", "fromJSON", `return (${expression.slice(3, -2)});`)(needs, secrets, inputs, JSON.parse);
+}
 
-  // A key can carry its value on the same line, as in `  push: {branches: [main]}`.
-  assert.deepEqual(
-    [...onSection.matchAll(/^ {2}([\w-]+):/gm)].map((match) => match[1]),
-    ["workflow_dispatch"],
-    "a desktop release starts only when someone dispatches it",
-  );
-  assert.match(
-    topLevelSection(workflow, "concurrency"),
-    /^ {2}cancel-in-progress: false\r?$/m,
-    "a second dispatch waits instead of cancelling a publish in progress",
-  );
-  assert.match(stepBlock(workflow, "Verify release artifacts"), /verify-desktop-release-artifacts\.mjs/);
-  const jobs = topLevelSection(workflow, "jobs");
-  const preflight = indentedSection(jobs, 2, "preflight");
-  const runtime = stepBlock(preflight, "Prepare desktop test runtime");
-  const engine = stepBlock(preflight, "Prepare native test engine");
-  const desktopTests = stepBlock(preflight, "Desktop tests");
-  assert.match(runtime, /pnpm --filter @dohc\/app-backend-runtime build/);
-  assert.match(engine, /pnpm qa:prepare -- --engine-only/);
-  assert.ok(preflight.indexOf(runtime) < preflight.indexOf(desktopTests), "desktop tests need built runtime exports");
-  assert.ok(preflight.indexOf(engine) < preflight.indexOf(desktopTests), "desktop tests need the native engine");
-  assert.match(desktopTests, /DOHC_REQUIRE_ENGINE_E2E: "1"/);
-  assert.match(desktopTests, /test:unit --maxWorkers=4/);
-  assert.match(stepBlock(preflight, "Desktop script tests"), /pnpm --filter @dohc\/desktop test:scripts/);
+test("desktop releases start only by dispatch, run on self-hosted runners, and preserve unsigned package smoke", () => {
+  const { jobs } = releaseWorkflow;
+  assert.deepEqual(Object.keys(releaseWorkflow.on), ["workflow_dispatch"], "only a dispatch can start a release");
+  assert.equal(releaseWorkflow.concurrency["cancel-in-progress"], false, "a publish in progress must finish");
+  assert.equal(releaseWorkflow.permissions.contents, "read");
+  assert.equal(jobs.preflight.if, "github.ref == 'refs/heads/main'");
+  for (const job of [jobs.build, jobs.publish]) assert.equal(job.environment, "desktop-release");
 
-  // The release action reuses a release that has the same tag and turns it
-  // back into a draft. Nothing is packaged for a version that already has a
-  // tag or a release, published or draft.
-  const unusedVersion = indentedSection(jobs, 2, "unused-version");
-  assert.match(unusedVersion, /^ {4}needs: preflight$/m);
-  assert.match(unusedVersion, /^ {6}contents: write$/m, "only push access lists draft releases");
-  const refuseUsedVersion = stepBlock(unusedVersion, "Refuse a version that has a tag or release");
-  const keepPlatforms = stepBlock(unusedVersion, "Keep published update platforms");
-  assert.match(keepPlatforms, /if: needs\.preflight\.outputs\.dry_run != 'true'/);
-  assert.match(keepPlatforms, /set -euo pipefail/);
-  assert.match(keepPlatforms, /gh api --paginate/);
-  assert.match(keepPlatforms, /RELEASE_CHANNEL: \$\{\{ needs\.preflight\.outputs\.release_channel \}\}/);
-  assert.match(keepPlatforms, /RELEASE_PLATFORMS: \$\{\{ inputs\.platforms \}\}/);
-  assert.match(keepPlatforms, /node scripts\/check-desktop-release-platforms\.mjs/);
-  assert.match(keepPlatforms, /--releases release-history\.jsonl/);
+  // Cloud runners stay off (AGENTS.md). Packaging runs on the matrix preflight
+  // selects from the release targets. Every other job runs on the Linux runner
+  // for a Linux dispatch and on the Windows runner otherwise.
+  assert.equal(jobs.build["runs-on"], "${{ matrix.runner }}");
+  assert.equal(jobs.build.strategy.matrix.include, "${{ fromJSON(needs.preflight.outputs.matrix) }}");
+  // Windows and WSL share one PC, so a combined dispatch packages one platform at a time.
+  assert.equal(jobs.build.strategy["max-parallel"], "${{ inputs.platforms == 'windows-linux' && 1 || 4 }}");
+  assert.match(releaseStep(jobs.preflight, '--platforms "$DISPATCH_PLATFORMS"').run, /--platforms "\$DISPATCH_PLATFORMS"/);
+  const dispatchPlatforms = releaseWorkflow.on.workflow_dispatch.inputs.platforms.options;
+  for (const [name, job] of Object.entries(jobs)) {
+    const runners = name === "build"
+      ? desktopReleaseTargets("all").map(target => target.runner)
+      : dispatchPlatforms.map(platforms => releaseExpression(job["runs-on"], {}, {}, { platforms }));
+    if (name !== "build") {
+      assert.deepEqual(runners, dispatchPlatforms.map(platforms => ["self-hosted", platforms === "linux" ? "linux" : "windows", "x64"]),
+        `${name} runs on the Linux runner only for a Linux dispatch`);
+    }
+    assert.ok(runners.length > 0, `${name} has a runner`);
+    for (const runner of runners) {
+      assert.ok(Array.isArray(runner), `${name} has explicit runner labels`);
+      assert.ok(runner.includes("self-hosted"));
+      assert.ok(runner.some(label => ["linux", "windows", "macos"].includes(label)));
+      assert.ok(runner.some(label => ["x64", "arm64"].includes(label)));
+    }
+  }
+
+  // Desktop tests need the built runtime exports and the native engine.
+  const preflightOrder = step => jobs.preflight.steps.indexOf(step);
+  const desktopTests = releaseStep(jobs.preflight, "test:unit --maxWorkers=4");
+  for (const prepare of ["pnpm --filter @dohc/app-backend-runtime build", "pnpm qa:prepare -- --engine-only"]) {
+    assert.ok(preflightOrder(releaseStep(jobs.preflight, prepare)) < preflightOrder(desktopTests), `desktop tests run after ${prepare}`);
+  }
+  assert.equal(desktopTests.env.DOHC_REQUIRE_ENGINE_E2E, "1");
+  releaseStep(jobs.preflight, "pnpm --filter @dohc/desktop test:scripts");
+
+  // Draft and published versions must both be refused before packaging.
+  assert.ok([jobs["unused-version"].needs].flat().includes("preflight"));
+  assert.equal(jobs["unused-version"].permissions.contents, "write");
+  // A channel keeps every platform it has published, unless the dispatch selects them all.
+  const keepPlatforms = releaseStep(jobs["unused-version"], "check-desktop-release-platforms.mjs");
+  assert.equal(keepPlatforms.if, "needs.preflight.outputs.dry_run != 'true'");
+  assert.match(keepPlatforms.run, /set -euo pipefail/);
+  assert.match(keepPlatforms.run, /gh api --paginate/);
+  assert.match(keepPlatforms.run, /--releases release-history\.jsonl/);
+  assert.equal(keepPlatforms.env.RELEASE_CHANNEL, "${{ needs.preflight.outputs.release_channel }}");
+  assert.equal(keepPlatforms.env.RELEASE_PLATFORMS, "${{ inputs.platforms }}");
+  // Both steps list releases, so the refusal is found by its tag lookup.
+  const refuseUsedVersion = releaseStep(jobs["unused-version"], "git/matching-refs/tags/").run;
   assert.match(refuseUsedVersion, /repos\/\$\{GITHUB_REPOSITORY\}\/releases\?per_page=100/);
   assert.match(refuseUsedVersion, /select\(\.tag_name == env\.TAG\)/);
   assert.match(refuseUsedVersion, /git\/matching-refs\/tags\/\$\{TAG\}/);
-  for (const found of [/== \*published\*/, /== \*draft\*/, /-n "\$tag"/]) {
-    assert.match(refuseUsedVersion, found);
-  }
-  assert.match(
-    indentedSection(jobs, 2, "build"),
-    /^ {6}- unused-version$/m,
-    "packaging waits for the version check",
-  );
+  for (const found of [/== \*published\*/, /== \*draft\*/, /-n "\$tag"/]) assert.match(refuseUsedVersion, found);
+  assert.ok([jobs.build.needs].flat().includes("unused-version"), "packaging waits for the version check");
 
-  // A cancelled or failed publish must leave only a draft, which updaters
-  // never read. The release becomes visible in the job's last step.
-  const publishSteps = stepBlocks(indentedSection(jobs, 2, "publish"));
-  const createRelease = publishSteps.find((step) => step.includes("softprops/action-gh-release"));
-  assert.ok(createRelease, "the publish job creates the release");
-  assert.match(createRelease, /^ {8}id: draft$/m);
-  assert.match(createRelease, /^ {10}draft: true$/m);
-  assert.match(createRelease, /^ {10}target_commitish: \$\{\{ github\.sha \}\}$/m);
-  const lastPublishStep = publishSteps.at(-1);
-  assert.match(lastPublishStep, /^ {6}- name: Publish draft release$/m);
-  assert.match(lastPublishStep, /RELEASE_ID: \$\{\{ steps\.draft\.outputs\.id \}\}/);
-  assert.match(lastPublishStep, /-F draft=false/);
+  // Updaters cannot see the release until the publish job's final step.
+  const createRelease = releaseStep(jobs.publish, "softprops/action-gh-release@");
+  assert.ok([jobs.publish.needs].flat().includes("build"), "publishing waits for packaging");
+  assert.equal(createRelease.id, "draft");
+  assert.equal(createRelease.with.draft, true);
+  assert.equal(createRelease.with.target_commitish, "${{ github.sha }}");
+  const lastPublishStep = jobs.publish.steps.at(-1);
+  assert.equal(lastPublishStep.env.RELEASE_ID, "${{ steps.draft.outputs.id }}");
+  assert.match(lastPublishStep.run, /-F draft=false/);
+  for (const dryRun of ["true", "false"]) {
+    assert.equal(releaseExpression(jobs.publish.if, { preflight: { outputs: { dry_run: dryRun } } }), dryRun === "false");
+  }
 
-  // Cloud runners stay off (AGENTS.md). The package matrix names each
-  // platform's runner labels.
-  const jobNames = [...jobs.matchAll(/^ {2}([\w-]+):/gm)].map((match) => match[1]);
-  const runsOn = [...jobs.matchAll(/^ {4}runs-on: (.+)$/gm)].map((match) => match[1].trim());
-  assert.equal(runsOn.length, jobNames.length, "every job names its runner");
-  assert.match(jobs, /include: \$\{\{ fromJSON\(needs\.preflight\.outputs\.matrix\) \}\}/);
-  assert.match(indentedSection(jobs, 2, "preflight"), /--platforms "\$DISPATCH_PLATFORMS"/);
-  const coordinatorRunner = "${{ fromJSON(inputs.platforms == 'linux' && '[\"self-hosted\",\"linux\",\"x64\"]' || '[\"self-hosted\",\"windows\",\"x64\"]') }}";
-  for (const name of ["preflight", "unused-version", "publish"]) {
-    assert.ok(indentedSection(jobs, 2, name).includes(`runs-on: ${coordinatorRunner}`));
-  }
-  assert.match(indentedSection(jobs, 2, "build"), /max-parallel: \$\{\{ inputs\.platforms == 'windows-linux' && 1 \|\| 4 \}\}/);
-  const matrixRunners = desktopReleaseTargets("all").map((target) => `[${target.runner.join(", ")}]`);
-  const coordinatorRunners = [...coordinatorRunner.matchAll(/'(\[[^']+\])'/g)]
-    .map((match) => `[${JSON.parse(match[1]).join(", ")}]`);
-  for (const runner of [
-    ...runsOn.filter((value) => value !== "${{ matrix.runner }}" && value !== coordinatorRunner),
-    ...coordinatorRunners,
-    ...matrixRunners,
-  ]) {
-    assert.match(
-      runner,
-      /^\[self-hosted, (linux|windows|macos), (x64|arm64)\]$/,
-      `release jobs run only on self-hosted runners: ${runner}`,
-    );
-  }
-  assert.match(indentedSection(jobs, 2, "preflight"), /if: github\.ref == 'refs\/heads\/main'/);
-  for (const job of ["build", "publish"]) {
-    assert.match(indentedSection(jobs, 2, job), /^ {4}environment: desktop-release$/m);
-  }
-  assert.match(workflow, /if:\s*\$\{\{\s*needs\.preflight\.outputs\.dry_run != 'true'\s*\}\}/);
-  assert.equal(packageSteps.length, 1, "all electron-builder package paths are explicitly covered");
+  const packageSteps = Object.values(jobs).flatMap(job => job.steps).filter(step => step.run?.includes("electron-builder"));
+  assert.equal(packageSteps.length, 1, "every electron-builder path is covered");
+  const packageDesktop = releaseStep(jobs.build, "electron-builder");
   assert.equal(packageSteps[0], packageDesktop);
-  for (const step of packageSteps) {
-    assert.match(
-      step,
-      /builder_args=\(--publish never/,
-      "package step must never publish directly",
-    );
-  }
-  assert.match(
-    packageDesktop,
-    /builder_args\+=\(-c\.forceCodeSigning=true\)/,
-    "stable/signing-required jobs must still hard-fail without a signing identity",
-  );
-  assert.match(
-    packageDesktop,
-    /CSC_IDENTITY_AUTO_DISCOVERY=false/,
-    "unsigned macOS dry runs must not try the GitHub runner's signing autodiscovery path",
-  );
-  assert.match(
-    packageDesktop,
-    /builder_args\+=\(-c\.mac\.identity=null\)/,
-    "unsigned macOS package jobs must explicitly disable signing in electron-builder",
-  );
-  assert.match(fuseSmoke, /^ {8}if: runner\.os == 'Linux'$/m);
-  assert.match(fuseSmoke, /^ {10}DOHC_E2E_NO_CHROMIUM_SANDBOX: "1"$/m);
-  assert.match(fuseSmoke, /^ {8}run: xvfb-run -a pnpm smoke:fuses:desktop$/m);
-  assert.ok(workflow.indexOf(packageDesktop) < workflow.indexOf(fuseSmoke),
-    "Linux fuse smoke reads the actual package after electron-builder finishes");
-  assert.ok(workflow.indexOf(fuseSmoke) < workflow.indexOf(stepBlock(workflow, "Upload packaged artifacts")),
-    "a failed packaged boot must prevent artifact upload");
+  assert.match(packageDesktop.run, /builder_args=\(--publish never/, "packaging cannot publish directly");
+  assert.match(packageDesktop.run, /builder_args\+=\(-c\.forceCodeSigning=true\)/, "required signing must fail without an identity");
+  assert.match(packageDesktop.run, /CSC_IDENTITY_AUTO_DISCOVERY=false/, "unsigned macOS runs disable signing discovery");
+  assert.match(packageDesktop.run, /builder_args\+=\(-c\.mac\.identity=null\)/, "unsigned macOS runs disable electron-builder signing");
+  releaseStep(jobs.build, "verify-desktop-release-artifacts.mjs");
+  const fuseSmoke = releaseStep(jobs.build, "smoke:fuses:desktop");
+  assert.equal(fuseSmoke.if, "runner.os == 'Linux'");
+  assert.equal(fuseSmoke.env.DOHC_E2E_NO_CHROMIUM_SANDBOX, "1");
+  assert.equal(fuseSmoke.run, "xvfb-run -a pnpm smoke:fuses:desktop");
+  // Each packaged app runs once before anything uploads it.
+  const windowsSmoke = releaseStep(jobs.build, "--binary apps/desktop/release/win-unpacked/dohc.exe");
+  assert.equal(windowsSmoke.if, "runner.os == 'Windows'");
+  assert.match(windowsSmoke.run, /--package-commit '\$\{\{ github\.sha \}\}'/);
+  const upload = releaseStep(jobs.build, "actions/upload-artifact@");
+  const order = step => jobs.build.steps.indexOf(step);
+  assert.ok(order(packageDesktop) < order(fuseSmoke), "the Linux fuse smoke boots the package electron-builder wrote");
+  for (const smoke of [fuseSmoke, windowsSmoke]) assert.ok(order(smoke) < order(upload), "the packaged smoke runs before the upload");
 
-  const secretLines = workflow
-    .split(/\r?\n/)
-    .filter((line) => line.includes("secrets."));
-  assert.ok(secretLines.length > 0, "the workflow still declares release secrets");
-  for (const line of secretLines) {
-    assert.match(
-      line,
-      /needs\.preflight\.outputs\.dry_run != 'true'/,
-      `release secret must be empty for dry runs: ${line.trim()}`,
-    );
+  const secretExpressions = workflowValues(releaseWorkflow).filter(value => typeof value === "string" && value.includes("secrets."));
+  assert.ok(secretExpressions.length > 0, "the workflow still declares release secrets");
+  for (const expression of secretExpressions) {
+    const secrets = Object.fromEntries([...expression.matchAll(/secrets\.(\w+)/gu)].map(([, name]) => [name, `configured-${name}`]));
+    assert.equal(releaseExpression(expression, { preflight: { outputs: { dry_run: "true" } } }, secrets), "", "dry runs receive no release secrets");
+    assert.ok(releaseExpression(expression, { preflight: { outputs: { dry_run: "false" } } }, secrets), "publishing can use configured secrets");
   }
 });
 
@@ -796,11 +706,15 @@ test("desktop release stages the Rust engine built for the packaged architecture
     false,
   );
 
-  const workflow = await readFile(
-    join(process.cwd(), ".github/workflows/desktop-release.yml"),
-    "utf8",
-  );
-  const engineCommand = stepBlock(workflow, "Build workspace engine").match(
+  const build = releaseWorkflow.jobs.build;
+  assert.equal(build.strategy.matrix.include, "${{ fromJSON(needs.preflight.outputs.matrix) }}", "preflight selects the package matrix");
+  assert.deepEqual(desktopReleaseTargets("all").map(({ artifact_platform, arch, target }) => [artifact_platform, arch, target]).sort(), [
+    ["mac", "x64", "x86_64-apple-darwin"],
+    ["mac", "arm64", "aarch64-apple-darwin"],
+    ["win", "x64", "x86_64-pc-windows-msvc"],
+    ["linux", "x64", "x86_64-unknown-linux-gnu"],
+  ].sort());
+  const engineCommand = releaseStep(build, "build:engine").run.match(
     /^\s*pnpm --filter @dohc\/desktop run build:engine (.+)$/m,
   );
   assert.ok(engineCommand, "the workflow builds the selected Rust target");
@@ -810,12 +724,8 @@ test("desktop release stages the Rust engine built for the packaged architecture
   assert.equal(buildModule.parseTargetArgument(engineArgs), target);
 });
 
-test("desktop release workflow uploads only distributable release assets", async () => {
-  const workflow = await readFile(
-    join(process.cwd(), ".github/workflows/desktop-release.yml"),
-    "utf8",
-  );
-  const prepareReleaseUpload = stepBlock(workflow, "Prepare release upload");
+test("desktop release workflow uploads only distributable release assets", () => {
+  const prepareReleaseUpload = releaseStep(releaseWorkflow.jobs.publish, "is_release_upload_file").run;
 
   assert.match(
     prepareReleaseUpload,
@@ -908,24 +818,20 @@ test("upload-desktop-source-maps skips without a DSN and fails without a token w
   );
 });
 
-test("the release uploads source maps for every build that names Sentry, and never in a dry run", async () => {
-  const workflow = await readFile(join(process.cwd(), ".github/workflows/desktop-release.yml"), "utf8");
-  const build = stepBlock(workflow, "Build desktop");
-  const upload = stepBlock(workflow, "Upload source maps");
-  assert.match(upload, /^ {8}if: needs\.preflight\.outputs\.dry_run != 'true'$/m);
-  assert.match(upload, /^ {8}run: node scripts\/upload-desktop-source-maps\.mjs$/m);
+test("the release uploads source maps for every build that names Sentry, and never in a dry run", () => {
+  const job = releaseWorkflow.jobs.build;
+  const build = releaseStep(job, "pnpm build:desktop");
+  const upload = releaseStep(job, "upload-desktop-source-maps.mjs");
+  assert.equal(upload.if, "needs.preflight.outputs.dry_run != 'true'");
+  assert.equal(upload.run, "node scripts/upload-desktop-source-maps.mjs");
   // The upload sees the DSN and dist the build compiled in.
-  const envLine = (step, name) => step.match(new RegExp(`^ {10}${name}: (.+)$`, "m"))?.[1];
   for (const name of ["DOHC_SENTRY_DSN", "DOHC_SENTRY_DIST"]) {
-    assert.ok(envLine(build, name), `the build sets ${name}`);
-    assert.equal(envLine(upload, name), envLine(build, name), `the upload reads the build's ${name}`);
+    assert.ok(build.env[name], `the build sets ${name}`);
+    assert.equal(upload.env[name], build.env[name], `the upload reads the build's ${name}`);
   }
-  assert.equal(envLine(upload, "DESKTOP_VERSION"), "${{ needs.preflight.outputs.version }}");
-  assert.match(envLine(upload, "SENTRY_AUTH_TOKEN"), /needs\.preflight\.outputs\.dry_run != 'true' && secrets\.SENTRY_AUTH_TOKEN/);
-  assert.ok(
-    stepBlocks(workflow).indexOf(upload) > stepBlocks(workflow).indexOf(build),
-    "the upload runs after the build writes the source maps",
-  );
+  assert.equal(upload.env.DESKTOP_VERSION, "${{ needs.preflight.outputs.version }}");
+  assert.match(upload.env.SENTRY_AUTH_TOKEN, /needs\.preflight\.outputs\.dry_run != 'true' && secrets\.SENTRY_AUTH_TOKEN/);
+  assert.ok(job.steps.indexOf(upload) > job.steps.indexOf(build), "the upload runs after the build writes the source maps");
 });
 
 async function artifactFixture(platform = "win", arch = "x64") {

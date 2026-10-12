@@ -419,10 +419,9 @@ impl EngineService {
     pub(super) async fn versions_create_named(
         &self,
         ctx: &RequestContext,
-        request: &Request,
-        params: Value,
+        request: Request,
     ) -> Result<Value, WireError> {
-        let params: VersionsCreateNamedParams = parse(params)?;
+        let params: VersionsCreateNamedParams = parse(request.params)?;
         let handle = request
             .workspace
             .as_ref()
@@ -442,7 +441,7 @@ impl EngineService {
             name: params.name,
             from_version_id: params.from_version_id,
             now_ms: now_ms()?,
-            request_id: request.idempotency_key.clone(),
+            request_id: request.idempotency_key,
         };
         // Reject missing sources, bad/taken names, duplicate ids, and
         // idempotency mismatches before the destructive session sweep and full
@@ -1025,19 +1024,16 @@ mod tests {
                 method: "versionedText.write".to_owned(),
                 workspace: Some(writing_handle),
                 deadline_ms: None,
-                idempotency_key: None,
+                idempotency_key: Some("mutation-session-serial-write".to_owned()),
                 progress: false,
                 params: json!({
                     "versionId": "main",
                     "path": "serialized.md",
                     "text": "must wait",
-                    "origin": "api",
-                    "requestId": "mutation-session-serial-write"
+                    "origin": "api"
                 }),
             };
-            writing_service
-                .versioned_text_write(&ctx, &request, request.params.clone())
-                .await
+            writing_service.versioned_text_write(&ctx, request).await
         });
         assert!(
             tokio::time::timeout(Duration::from_millis(100), &mut writing)

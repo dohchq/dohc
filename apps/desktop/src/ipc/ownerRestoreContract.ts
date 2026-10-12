@@ -1,5 +1,5 @@
 import {z} from "zod";
-import {parseCanonicalAdmittedLiveUpdateMetadata, parseLiveDocumentKey, parseLiveUpdateReceipt} from "@dohc/live-session-contract/live-update-admission";
+import {parseCanonicalAdmittedLiveUpdateMetadata, parseLiveDocumentKey, parseLiveUpdateReceipt, parseServerDerivedLiveUpdateAuthority} from "@dohc/live-session-contract/live-update-admission";
 import {parseLiveObjectBinding} from "@dohc/live-session-contract/live-object-binding";
 
 const id = z.string().min(1).max(512), digest = z.string().regex(/^[a-f0-9]{64}$/), integer = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
@@ -9,6 +9,7 @@ function parsed<T>(parse: (input: unknown) => T) {
   });
 }
 const document = parsed(parseLiveDocumentKey), binding = parsed(parseLiveObjectBinding), receipt = parsed(parseLiveUpdateReceipt);
+const authority = parsed(parseServerDerivedLiveUpdateAuthority);
 export const OwnerRestorePhase = z.enum(["authority-invalidated", "fenced", "old-cut-applied", "native-fenced", "relay-admitted", "native-applied", "settled", "resumed"]);
 export const OwnerRestoreIntent = z.object({
   deliveryKind: z.enum(["bootstrap", "owner"]), operationId: id, document, shareId: id, grantId: id,
@@ -29,7 +30,9 @@ export const OwnerRestoreGrantCursor = z.object({shareCreatedAtMs: integer, shar
     cursor => (cursor.grantCreatedAtMs === null) === (cursor.grantId === null), "Invalid restore grant cursor.");
 export const OwnerRestoreOptions = z.object({document, path: z.string(),
   grants: z.array(OwnerRestoreRecipient.extend({shareId: id, generation: integer.min(1)})),
-  points: z.array(z.object({cursor: integer, receivedAtMs: integer.nullable(), kind: z.enum(["baseline", "accepted"]), receiptDigest: digest})),
+  points: z.array(z.object({cursor: integer, receivedAtMs: integer.nullable(), kind: z.enum(["baseline", "accepted"]), receiptDigest: digest,
+    authority: authority.nullable()}).refine(point => (point.kind === "baseline") === (point.authority === null), "Invalid restore point author.")),
+  authors: z.array(OwnerRestoreRecipient),
   nextBeforeCursor: integer.nullable(), nextGrantCursor: OwnerRestoreGrantCursor.nullable(), pendingOperation: z.object({operationId: id, phase: OwnerRestorePhase, proposalDigest: digest.nullable()}).nullable(),
 });
 export const OwnerRestorePlan = z.object({intent: OwnerRestoreIntent, path: z.string(), recipients: z.array(OwnerRestoreRecipient)});
@@ -38,7 +41,8 @@ const priorCut = z.object({operationId: id, proposalDigest: digest, restoreJourn
 export const OwnerRestoreReview = z.object({
   operationId: id, workspaceId: id, binding, proposalDigest: digest, candidateDigest: digest, recordedAtMs: integer,
   point: z.object({journalCursor: integer, receiptDigest: digest, markdownDigest: digest}).passthrough(),
-  selectedPointReceivedAtMs: integer.max(8_640_000_000_000_000).nullable(), frozenTerminal: receipt.nullable(), selectedEventCount: integer, acceptedEventCount: integer,
+  selectedPointReceivedAtMs: integer.max(8_640_000_000_000_000).nullable(), selectedPointAuthority: authority.nullable(),
+  frozenTerminal: receipt.nullable(), selectedEventCount: integer, acceptedEventCount: integer,
   selectedHistoryDigest: digest, acceptedHistoryDigest: digest, nativeSourceManifestDigest: digest,
   content: z.object({frozenMarkdown: z.string(), restoredMarkdown: z.string(), frozenMarkdownDigest: digest,
     restoredMarkdownDigest: digest, frozenMarkdownByteLength: integer, restoredMarkdownByteLength: integer}),
@@ -49,7 +53,8 @@ export const OwnerRestoreReview = z.object({
     acceptedRelation: z.enum(["at-or-before-selected", "after-selected", "not-relay-accepted"]),
     occurrences: z.array(z.object({operationId: id, proposalDigest: digest, context: z.enum(["current-fence", "prior-restore"]), acceptedReceipt: receipt.nullable()})),
   })),
-}).refine(review => (review.point.journalCursor === 0) === (review.selectedPointReceivedAtMs === null), "Invalid restore point time.");
+}).refine(review => (review.point.journalCursor === 0) === (review.selectedPointReceivedAtMs === null), "Invalid restore point time.")
+  .refine(review => (review.point.journalCursor === 0) === (review.selectedPointAuthority === null), "Invalid restore point author.");
 export type OwnerRestoreReview = z.infer<typeof OwnerRestoreReview>;
 export type OwnerRestoreOptions = z.infer<typeof OwnerRestoreOptions>;
 export type OwnerRestorePlan = z.infer<typeof OwnerRestorePlan>;

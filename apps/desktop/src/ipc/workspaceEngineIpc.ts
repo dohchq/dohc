@@ -352,7 +352,7 @@ export function createWorkspaceEngineIpc<
           return ReadEngineMomentResult.parse({ status: "untracked", moment: null });
         }
         const names = authorNames(input.workspaceId, event.sender);
-        if (moment && !moment.protected && moment.moment.authors?.length === 1) names.prepare?.(moment.moment.authors);
+        if (moment && !moment.protected && moment.moment.authors) names.prepare?.(moment.moment.authors);
         return ReadEngineMomentResult.parse({
           moment: moment ? engineMomentDetailForIpc(moment, names) : null,
         });

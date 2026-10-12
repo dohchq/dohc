@@ -970,7 +970,7 @@ export function DesktopWorkspaceShell(props: {
   // the same fallback main uses for local authorship.
   const LOCAL_USER_LABEL = "You";
   const localAgentName = props.userSettings?.settings.profile.agentName ?? "Your agent";
-  const localAgentEnabled = Boolean(agentSetup?.runnerEnabled || agentSetup?.mcpEnabled);
+  const localAgentEnabled = Boolean(agentSetup?.runnerEnabled || agentSetup?.agentRunActive);
   const mentionCandidates = useMemo<MentionCandidate[]>(
     () => [
       ...(localAgentEnabled
@@ -1685,6 +1685,18 @@ export function DesktopWorkspaceShell(props: {
       agentActiveLane.set(active);
     },
     [agentActiveLane, refreshAgentLane],
+  );
+  const reportSettingsFailure = useCallback(
+    (message: string, cause?: unknown, retry?: () => Promise<void>) => {
+      if (workspaceAdmission.superseded || workspaceIdRef.current !== workspaceId) return;
+      reportShellFailure({ message, cause, retry: retry ? () => {
+        if (workspaceAdmission.superseded || workspaceIdRef.current !== workspaceId) return;
+        void retry().then(() => {
+          if (!workspaceAdmission.superseded && workspaceIdRef.current === workspaceId) refreshAgentLane();
+        });
+      } : null });
+    },
+    [workspaceAdmission, workspaceId, reportShellFailure, refreshAgentLane],
   );
 
   const refreshHistory = useCallback(async () => {
@@ -4143,6 +4155,7 @@ export function DesktopWorkspaceShell(props: {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [shareView, shareViewEnded, shareViewDamaged, workspaceId, workspaceIsReady, workspaceAdmission, reloadShareSkipped]);
   refreshShareViewRef.current = refreshShareView;
+  const refreshAfterLiveReadOnly = useCallback(() => void refreshShareViewRef.current(), []);
 
   // ---- The recipient's own submitted changes ----
   // A submission exists only from Send changes: there is no draft at the
@@ -4190,9 +4203,14 @@ export function DesktopWorkspaceShell(props: {
     // Read for any share view, not only one that can still send: changes
     // already sent stay withdrawable after a downgrade, and a surface that
     // stopped reading them would hide the only way back.
-    if (!shareView) return;
+    // Main refuses the read until it has opened the view in this window.
+    if (!shareView || !workspaceIsReady) return;
     void reloadMyShareChanges().catch(() => undefined);
-  }, [!!shareView, reloadMyShareChanges]);
+  }, [!!shareView, workspaceIsReady, reloadMyShareChanges]);
+  // Read at call time: a direct-write notice keeps the callback it was shown
+  // with, and one shown before readiness must still send after it.
+  const workspaceIsReadyRef = useRef(workspaceIsReady);
+  workspaceIsReadyRef.current = workspaceIsReady;
   const sendShareChanges = useCallback(async () => {
     if (workspaceAdmission.superseded) return;
     if (!shareViewWritableRef.current) {
@@ -4200,6 +4218,9 @@ export function DesktopWorkspaceShell(props: {
       reportShellError(message, new Error(message));
       return;
     }
+    // Readiness takes a fresh list token, so a submit started before it could
+    // never clear its own Sending state.
+    if (!workspaceIsReadyRef.current) return;
     const token = myShareChangeToken.current;
     // The newest token this call owns. The reload below takes a fresh one, and
     // the cleanup has to compare against that — comparing against the token
@@ -5073,7 +5094,7 @@ export function DesktopWorkspaceShell(props: {
               <button
                 type="button"
                 data-testid="share-changes-send"
-                disabled={shareChangesSubmitting}
+                disabled={shareChangesSubmitting || !workspaceIsReady}
                 onClick={() => void sendShareChanges()}
                 className="flex shrink-0 items-center gap-1.5 rounded border border-line bg-panel px-2 py-0.5 text-[11px] text-muted hover:text-ink disabled:opacity-50"
               >
@@ -5606,6 +5627,10 @@ export function DesktopWorkspaceShell(props: {
                 }
                 onScrollConsumed={consumeSearchScrollTarget}
                 onSaveStateChange={editorCallbacks.onSaveStateChange}
+                // A document in an Edit share view that turns read-only may
+                // mean the owner ended access. The refresh asks the relay, and
+                // only the relay says so.
+                onLiveReadOnly={shareViewWritable ? refreshAfterLiveReadOnly : undefined}
                 surfaceKey={editorGroup.id}
                 onSurfaceReady={onRestoredFileSurfaceReady}
                 registerDraftFlush={editorCallbacks.registerDraftFlush}
@@ -6183,7 +6208,7 @@ export function DesktopWorkspaceShell(props: {
       {settingsSection ? (
         <Overlay onClose={closeSettings}>
           <LazyDesktopSettings
-            onError={reportFailureMessage}
+            onError={reportSettingsFailure}
             onWorkspaceSettingsRead={onWorkspaceSettingsRead}
             workspaceId={workspaceId}
             workspacePath={props.workspace.rootPath}

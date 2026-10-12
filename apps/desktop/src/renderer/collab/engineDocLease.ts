@@ -314,7 +314,8 @@ export type EngineDocLeaseSnapshot = {
     draftId: number | null;
     cause: DocumentGoneCause;
   } | null;
-  readOnlyTransition: { token: number; cause: ReadOnlyTransitionCause } | null;
+  // The draft this transition set aside, when it set one aside.
+  readOnlyTransition: { token: number; cause: ReadOnlyTransitionCause; draftId: number | null } | null;
   permanentFailure: { token: number } | null;
   sceneRecoveryAssets: {
     token: number;
@@ -674,6 +675,21 @@ function createEngineDocSession(
             deletion: { token, draftId: slot.draftId, cause: deletionCause },
           }));
         }
+        // An edit after a read-only status that set nothing aside.
+        if (
+          transition === "read-only" &&
+          slot === recovery &&
+          snapshot.readOnlyTransition &&
+          snapshot.readOnlyTransition.draftId !== slot.draftId
+        ) {
+          publish((current) => ({
+            ...current,
+            readOnlyTransition: current.readOnlyTransition && {
+              ...current.readOnlyTransition,
+              draftId: slot.draftId,
+            },
+          }));
+        }
         if (!sceneRecovery) return;
         // Asset I/O must not hold the recovery queue. A later scene update
         // must replace the immediate draft now, even if this older image
@@ -762,6 +778,9 @@ function createEngineDocSession(
     );
   };
 
+  // A refused update always leaves work behind. A read-only status can also
+  // arrive after every edit saved; then `recoverEdits` is false, nothing is
+  // set aside, and a later edit still starts a draft through the snapshot.
   const captureReadOnlyTransition = (doc: Y.Doc, recoverEdits = true, cause: ReadOnlyTransitionCause = "access-ended"): void => {
     writesRefused.current = true;
     recovery.transition = "read-only";
@@ -772,7 +791,7 @@ function createEngineDocSession(
         ? prepareSceneRecovery(bytes, binding)
         : null;
     if (recoverEdits) {
-      // Persist the rejected document synchronously before the session closes.
+      // Persist the waiting document synchronously before the session closes.
       recovery.draftId = captureOrphanedDraft(
         workspaceId,
         path,
@@ -782,7 +801,7 @@ function createEngineDocSession(
     }
     publish((current) => ({
       ...current,
-      readOnlyTransition: { token, cause },
+      readOnlyTransition: { token, cause, draftId: recovery.draftId },
     }));
     reportSaveState(UNKNOWN_SAVE_STATE);
     if (recoverEdits) {
@@ -811,11 +830,23 @@ function createEngineDocSession(
         recoveryIdentity(bytes),
       );
     } else {
-      recovery.draftId = captureOrphanedDraft(
+      const draftId = captureOrphanedDraft(
         workspaceId,
         path,
         sceneRecovery?.immediateText ?? crudeRecoveryText(documentKind, doc, bytes),
       );
+      recovery.draftId = draftId;
+      // An edit after a read-only status that set nothing aside. Name its
+      // draft now: the projection below can fail, and disposal stops publishing.
+      if (recovery.transition === "read-only") {
+        publish((current) => ({
+          ...current,
+          readOnlyTransition: current.readOnlyTransition && {
+            ...current.readOnlyTransition,
+            draftId,
+          },
+        }));
+      }
     }
     enqueueRecoverySnapshot(
       bytes,
@@ -907,7 +938,7 @@ function createEngineDocSession(
     if (disposed) return;
     publish((current) => ({
       ...current,
-      readOnlyTransition: { token, cause: "lineage-failure" },
+      readOnlyTransition: { token, cause: "lineage-failure", draftId: null },
     }));
     const bound = retiredBinding ?? binding;
     if (bound) {
@@ -984,11 +1015,15 @@ function createEngineDocSession(
       }
       return;
     }
-    pendingSavedSeq = null;
     if (event.state.kind === "file-locked" || event.state.kind === "pending-share") {
-      if (event.seq >= localSeq.current) reportSaveState(event.state);
+      // An older report covers no staged edit, so it must not drop a current
+      // save that is waiting for delivery to finish.
+      if (event.seq < localSeq.current) return;
+      pendingSavedSeq = null;
+      reportSaveState(event.state);
       return;
     }
+    pendingSavedSeq = null;
     if (event.state.kind === "error" || event.state.kind === "changed-on-disk") {
       reportSaveState(event.state, event.editRefusal?.message ?? (event.authorCapacity ? authorCapacityMessage(input.path) : null), event.authorCapacity);
       return;

@@ -82,6 +82,24 @@ it.each(["before barrier", "before receipts"])("recovers every restored file aft
   expect(e.all.at(-1)?.payload.after.text).toBe("teammate");
 });
 
+it("reports a keyed restore as restored only once its publication is confirmed", async () => {
+  const original = moment("theirs", "object", "notes/file.txt", "old", "new");
+  const key = restoreRequestId("saved-session", original.id);
+  const e = engine([original]);
+  // The restore committed its moment; its publication did not reach disk.
+  e.all.push({...moment("back", "object", "notes/file.txt", "new", "old"), metadata: {origin: "restore", correlationId: key}});
+  const files = [file(original.id, original.objectId, original.path)];
+  e.dependencies.publicationApplied.mockResolvedValue(false);
+  const refused = await restoreDirectWrites({...e.dependencies, replayRequestId: () => key}, files);
+  expect(refused.status === "restored" && refused.restored).toEqual([]);
+  expect(e.dependencies.publicationApplied).toHaveBeenCalledWith("back", key);
+  expect(e.restored).toEqual([]);
+  e.dependencies.publicationApplied.mockResolvedValue(true);
+  expect(await restoreDirectWrites({...e.dependencies, replayRequestId: () => key}, files))
+    .toMatchObject({restored: [{path: "notes/file.txt", restoredMomentId: "back"}], review: []});
+  expect(e.restored).toEqual([]);
+});
+
 it("flushes earlier restore successes before reporting a later file error", async () => {
   const originals = Array.from({length: 3}, (_, i) => moment(`m-${i}`, `o-${i}`, `notes/${i}.txt`, "old", "new"));
   const e = engine(originals); e.failing.set("m-2", Error("disk error"));
@@ -127,6 +145,7 @@ function engine(moments: VersionedTextMoment[], folders: Record<string, string[]
       return mine.slice(mine.findIndex((item) => item.id === id) + 1).map((item) => item.id).reverse();
     }),
     assertCurrent: vi.fn(),
+    publicationApplied: vi.fn(async (_momentId: string, _requestId: string) => true),
     restore: vi.fn<StopAndRestoreDependencies["restore"]>(async (id, expectedHead, aloneInFolder) => {
       const target = all.find((item) => item.id === id)!;
       if (failing.has(id)) throw failing.get(id)!;

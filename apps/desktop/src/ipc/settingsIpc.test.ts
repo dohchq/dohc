@@ -24,7 +24,7 @@ const state = WorkspaceUiState.parse({
 });
 const settingsPayload = { settings: DEFAULT_USER_SETTINGS, base: DEFAULT_USER_SETTINGS };
 const workspacePayload = { workspaceId: "workspace-a" };
-const patchPayload = { ...workspacePayload, patch: { agents: { mcpAutoStart: false } } };
+const patchPayload = { ...workspacePayload, patch: { privacy: { confirmExternalLinks: false } } };
 const uiPayload = { ...workspacePayload, state };
 const settingsRequests = [
   [CHANNELS.getUserSettings, undefined],
@@ -470,7 +470,7 @@ describe("registered workspace settings and UI state", () => {
     await workspaceSettingsFile.saveWorkspaceSettingsFile(h.root, { sites: { defaultPreviewMode: "static" } });
     await workspaceSettingsFile.saveWorkspaceSettingsFile(h.otherRoot, { sites: { defaultPreviewMode: "build" } });
     const saved = await h.invoke(CHANNELS.setWorkspaceSettings, patchPayload);
-    expect(saved).toMatchObject({ settings: { agents: { mcpAutoStart: false }, sites: { defaultPreviewMode: "static" } }, source: "stored" });
+    expect(saved).toMatchObject({ settings: { privacy: { confirmExternalLinks: false }, sites: { defaultPreviewMode: "static" } }, source: "stored" });
     await expect(h.invoke(CHANNELS.getWorkspaceSettings, workspacePayload)).resolves.toEqual(saved);
     await expect(h.invoke(CHANNELS.resetWorkspaceSettings, workspacePayload)).resolves.toEqual({ settings: DEFAULT_WORKSPACE_SETTINGS, source: "stored" });
     await expect(workspaceSettingsFile.readWorkspaceSettingsFile(h.otherRoot)).resolves.toMatchObject({ settings: { sites: { defaultPreviewMode: "build" } } });
@@ -524,7 +524,7 @@ describe("registered workspace settings and UI state", () => {
       release.resolve();
       await rejection;
     }
-    await expect(workspaceSettingsFile.readWorkspaceSettingsFile(h.root)).resolves.toMatchObject({ settings: { agents: { mcpAutoStart: false } } });
+    await expect(workspaceSettingsFile.readWorkspaceSettingsFile(h.root)).resolves.toMatchObject({ settings: { privacy: { confirmExternalLinks: false } } });
   });
 
   it("round-trips parsed UI state through the admitted workspace and strips unknown write fields", async () => {

@@ -405,3 +405,24 @@ it("keeps the prepared diff across name events and unrelated History answers", a
   expect(compute).toHaveBeenCalledOnce();
   expect(lines).toHaveBeenCalledOnce();
 });
+
+it("refreshes every author's name on a change several people wrote, keeping its diff", async () => {
+  const compute = vi.spyOn(unifiedDiff, "computeTextDiff");
+  let notify!: (event: { workspaceId: string }) => void;
+  let authorLabels = ["ann@test.example", "Someone you shared with"];
+  const read = vi.fn(async (): Promise<{ moment: EngineMomentDetailRecord }> => ({ moment: { ...moment(), authorLabels } }));
+  const page = renderPage(read);
+  window.dohcDesktop!.onHistoryNamesChanged = listener => { notify = listener; return () => {}; };
+  page.update({ workspaceId: "ws-names" });
+  expect((await screen.findAllByText(/Someone you shared with/)).length).toBeGreaterThan(0);
+  const diffLines = screen.getByTestId("engine-diff-lines");
+  expect(compute).toHaveBeenCalledOnce();
+
+  authorLabels = ["ann@test.example", "ben@test.example (via share link)"];
+  act(() => notify({ workspaceId: "ws-names" }));
+  await waitFor(() => expect(screen.queryAllByText(/Someone you shared with/)).toHaveLength(0));
+  expect(screen.getAllByText(/ben@test\.example/).length).toBeGreaterThan(0);
+  expect(read).toHaveBeenCalledTimes(3);
+  expect(compute).toHaveBeenCalledOnce();
+  expect(screen.getByTestId("engine-diff-lines")).toBe(diffLines);
+});

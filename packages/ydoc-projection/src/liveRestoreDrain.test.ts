@@ -1517,23 +1517,34 @@ it("parses the complete leased storage review through the desktop owner restore 
   } finally {f.close();}
 });
 
-it("reads the selected accepted edit time from authenticated storage into the desktop review", () => {
+it("reads the selected accepted edit time and author from authenticated storage into the desktop review", () => {
   const f = contentProposalFixture("owner", "device", false, false, true);
   try {
     f.store.recordStopRestoreProposal(f.input, f.encoded, policy, 200);
     const input = {...f.input, maxOutputBytes: 1_000_000}, before = lifecycleRows(f);
     const review = OwnerRestoreReview.parse(f.store.readStopRestoreReview(input, policy));
-    const selected = f.raw.prepare("SELECT received_at_ms FROM sync_relay_live_update_journal WHERE journal_cursor=?")
-      .get(f.intent.restorePointCursor)!;
+    const selected = f.raw.prepare(`SELECT received_at_ms,principal_kind,principal_id,grant_id,grant_generation
+      FROM sync_relay_live_update_journal WHERE journal_cursor=?`).get(f.intent.restorePointCursor)!;
+    expect(review.point).toMatchObject({journalCursor: f.intent.restorePointCursor, receiptDigest: f.intent.restorePointReceiptDigest});
     expect(review.point.journalCursor).toBe(1);
     expect(review.selectedPointReceivedAtMs).toBe(selected.received_at_ms);
     expect(review.selectedPointReceivedAtMs).toBe(30);
+    // The selected point's author is the authority the relay accepted that exact delivery from.
+    expect(review.selectedPointAuthority).toEqual({principalKind: selected.principal_kind, principalId: selected.principal_id,
+      grantId: selected.grant_id, grantGeneration: selected.grant_generation});
     expect(review.recordedAtMs).toBe(200);
     expect(review.acceptedEvents.map(event => event.metadata.accepted.receipt.journalCursor)).toEqual([2]);
     expect(lifecycleRows(f)).toEqual(before);
-    f.raw.prepare("UPDATE sync_relay_live_update_journal SET received_at_ms=received_at_ms+1 WHERE journal_cursor=?")
-      .run(f.intent.restorePointCursor);
-    expect(() => f.store.readStopRestoreReview(input, policy)).toThrow();
+    for (const damage of ["UPDATE sync_relay_live_update_journal SET received_at_ms=received_at_ms+1 WHERE journal_cursor=?",
+      "UPDATE sync_relay_live_update_journal SET principal_id='another-principal' WHERE journal_cursor=?"]) {
+      const saved = f.raw.prepare("SELECT received_at_ms,principal_id FROM sync_relay_live_update_journal WHERE journal_cursor=?")
+        .get(f.intent.restorePointCursor)!;
+      f.raw.prepare(damage).run(f.intent.restorePointCursor);
+      expect(() => f.store.readStopRestoreReview(input, policy)).toThrow();
+      f.raw.prepare("UPDATE sync_relay_live_update_journal SET received_at_ms=?,principal_id=? WHERE journal_cursor=?")
+        .run(saved.received_at_ms, saved.principal_id, f.intent.restorePointCursor);
+      expect(OwnerRestoreReview.parse(f.store.readStopRestoreReview(input, policy))).toEqual(review);
+    }
   } finally {f.close();}
 });
 

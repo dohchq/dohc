@@ -107,7 +107,7 @@ pub struct GranularChatMessageSearchBatch {
 /// How a raw query classifies against the trigram/length bounds.
 enum QueryTerm {
     /// Under [`MIN_TRIGRAM_QUERY_CHARS`]: the trigram index cannot serve it. The
-    /// caller may fall back to a linear scan (`None` at the public boundary).
+    /// candidate query uses a bounded linear scan under a healthy file policy.
     TooShort,
     /// Over [`MAX_QUERY_CHARS`]: a Rust-added DoS bound. This fails closed (empty
     /// results, never a linear-scan fallback) so a pathological query cannot turn
@@ -117,11 +117,9 @@ enum QueryTerm {
     Match(String),
 }
 
-/// Classify a substring query. Ports `ftsQueryForSubstring` for the phrase
-/// construction, but distinguishes too-short (fallback-eligible) from too-long
-/// (fail-closed) so the two never share the ambiguous `None` sentinel. The
-/// length bound is set far above any real query, so normal search is
-/// byte-identical to TS.
+/// Classify a substring query. Short queries use a bounded scan; over-long
+/// queries return no results. MATCH phrase construction follows
+/// `ftsQueryForSubstring` for queries within the length bounds.
 fn classify_query(query: &str) -> QueryTerm {
     let normalized = query.trim_matches(is_js_trim_ws);
     let char_count = normalized.chars().count();
@@ -156,11 +154,9 @@ fn fetch_size(limit: usize, multiplier: usize) -> i64 {
 /// Queries under the trigram minimum are served by a bounded linear scan over
 /// the stored FTS content: candidate byte lengths are inspected before text is
 /// materialized, and the scan stops at both a per-row and a per-page budget.
-/// Under a broken FILE policy a too-short query answers `Some(empty)` instead,
-/// so the scan cannot fail open. An over-long query always answers
-/// `Some(empty)`. A well-formed query answers `Some`, with the file half empty
-/// while the policy is degraded and the chat half unaffected. `None` is only
-/// the non-positive-limit answer under a healthy policy.
+/// A broken FILE policy closes the file half while leaving chat search available.
+/// Too-short queries under a broken policy, over-long queries, and non-positive
+/// limits return an empty batch.
 #[allow(clippy::too_many_arguments)]
 pub fn query_search_index_keyset(
     conn: &Connection,
@@ -173,40 +169,29 @@ pub fn query_search_index_keyset(
     row_byte_budget: usize,
     page_byte_budget: usize,
     short_query_page_row_budget: usize,
-) -> Result<Option<SearchCandidateBatch>, SearchError> {
+) -> Result<SearchCandidateBatch, SearchError> {
     let policy = read_engine_search_policy(root_dir);
-    // A too-short query is the only case that may fall back to a linear scan (and
-    // only under a healthy policy). Everything else that yields no FTS term
-    // (over-long, non-positive limit) fails closed with an empty, non-`None`
-    // result so no unfiltered fallback runs.
-    let fallback_or_empty = || {
-        if policy.is_degraded() {
-            Some(Vec::new())
-        } else {
-            None
-        }
-    };
     let Some(limit) = clamp_limit(limit, MAX_RESULT_LIMIT) else {
-        return Ok(fallback_or_empty().map(|candidates| SearchCandidateBatch {
-            candidates,
+        return Ok(SearchCandidateBatch {
+            candidates: Vec::new(),
             has_more: false,
             resume_after: None,
-        }));
+        });
     };
     let query_term = classify_query(query);
     if matches!(query_term, QueryTerm::TooShort) && policy.is_degraded() {
-        return Ok(Some(SearchCandidateBatch {
+        return Ok(SearchCandidateBatch {
             candidates: Vec::new(),
             has_more: false,
             resume_after: None,
-        }));
+        });
     }
     if matches!(query_term, QueryTerm::TooLong) {
-        return Ok(Some(SearchCandidateBatch {
+        return Ok(SearchCandidateBatch {
             candidates: Vec::new(),
             has_more: false,
             resume_after: None,
-        }));
+        });
     }
     let normalized = query.trim_matches(is_js_trim_ws).to_lowercase();
     let after_surface = after.map(|value| value.surface);
@@ -339,11 +324,11 @@ pub fn query_search_index_keyset(
             if source_text_bytes > 0
                 && text_bytes > page_byte_budget.saturating_sub(source_text_bytes)
             {
-                return Ok(Some(SearchCandidateBatch {
+                return Ok(SearchCandidateBatch {
                     candidates,
                     has_more: true,
                     resume_after,
-                }));
+                });
             }
             let text: String = row.get(text_column)?;
             source_text_bytes = source_text_bytes.saturating_add(text_bytes);
@@ -358,21 +343,21 @@ pub fn query_search_index_keyset(
                 text,
             });
             if candidates.len() >= probe_limit {
-                return Ok(Some(SearchCandidateBatch {
+                return Ok(SearchCandidateBatch {
                     candidates,
                     has_more: true,
                     resume_after,
-                }));
+                });
             }
         }
         if raw_rows == raw_limit
             || (is_short && short_query_rows_examined >= short_query_page_row_budget)
         {
-            return Ok(Some(SearchCandidateBatch {
+            return Ok(SearchCandidateBatch {
                 candidates,
                 has_more: true,
                 resume_after,
-            }));
+            });
         }
     }
 
@@ -416,11 +401,11 @@ pub fn query_search_index_keyset(
             .unwrap_or(usize::MAX)
         };
         if raw_limit == 0 {
-            return Ok(Some(SearchCandidateBatch {
+            return Ok(SearchCandidateBatch {
                 candidates,
                 has_more: true,
                 resume_after,
-            }));
+            });
         }
         let mut stmt = conn.prepare(&sql)?;
         let mut rows = if is_short {
@@ -466,11 +451,11 @@ pub fn query_search_index_keyset(
                 if source_text_bytes > 0
                     && text_bytes > page_byte_budget.saturating_sub(source_text_bytes)
                 {
-                    return Ok(Some(SearchCandidateBatch {
+                    return Ok(SearchCandidateBatch {
                         candidates,
                         has_more: true,
                         resume_after,
-                    }));
+                    });
                 }
                 let text: String = row.get(3)?;
                 source_text_bytes = source_text_bytes.saturating_add(text_bytes);
@@ -492,26 +477,26 @@ pub fn query_search_index_keyset(
                 });
             }
             if candidates.len() >= probe_limit {
-                return Ok(Some(SearchCandidateBatch {
+                return Ok(SearchCandidateBatch {
                     candidates,
                     has_more: true,
                     resume_after,
-                }));
+                });
             }
         }
         if raw_rows == raw_limit {
-            return Ok(Some(SearchCandidateBatch {
+            return Ok(SearchCandidateBatch {
                 candidates,
                 has_more: true,
                 resume_after,
-            }));
+            });
         }
     }
-    Ok(Some(SearchCandidateBatch {
+    Ok(SearchCandidateBatch {
         candidates,
         has_more: false,
         resume_after,
-    }))
+    })
 }
 
 /// Query chat-message rows granularly (`queryChatMessagesGranular`). Returns
@@ -621,8 +606,6 @@ mod tests {
 
     #[test]
     fn over_long_query_is_too_long_not_short() {
-        // Over-long must classify distinctly from too-short so it can fail closed
-        // rather than share the fallback sentinel.
         let long = "a".repeat(MAX_QUERY_CHARS + 1);
         assert!(matches!(classify_query(&long), QueryTerm::TooLong));
     }

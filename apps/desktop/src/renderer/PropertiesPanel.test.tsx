@@ -2,12 +2,81 @@
 import { act, render, screen } from "@testing-library/react";
 import { cleanup } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { useState } from "react";
+import { useLayoutEffect, useState } from "react";
 import * as Y from "yjs";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { markdownToYDoc, yDocToMarkdown } from "@dohc/ydoc-projection";
-import { patchFrontmatter, setFrontmatterValue } from "@dohc/ydoc-projection/frontmatter";
+import {
+  frontmatterAsWritten,
+  frontmatterMapValues,
+  patchFrontmatter,
+  setFrontmatterValue,
+} from "@dohc/ydoc-projection/frontmatter-map";
 import { PropertiesPanel } from "./PropertiesPanel";
+import {
+  EDGE_DISPLAY,
+  EDGE_FRONTMATTER,
+  EDGE_MARKDOWN,
+  receivedYDoc,
+  recordedYDoc,
+} from "./markdown/frontmatter.edge-fixture";
+
+// A text input shows its value on one line.
+function propertyValue(key: string): string {
+  return (screen.getByLabelText(`Property ${key} value`) as HTMLInputElement).value;
+}
+
+function oneLine(text: string): string {
+  return text.replaceAll("\n", "");
+}
+
+// The properties each change touches. A change inside a shared value reports
+// the property that holds it.
+function trackChangedProperties(frontmatter: Y.Map<unknown>): Set<string> {
+  const changed = new Set<string>();
+  frontmatter.observeDeep((events) => {
+    for (const event of events) {
+      if (event.target !== frontmatter) changed.add(String(event.path[0]));
+      else if (event instanceof Y.YMapEvent) for (const key of event.keysChanged) changed.add(key);
+    }
+  });
+  return changed;
+}
+
+// A value the canonical writer keeps in shared Y types: keys Yjs Any loses,
+// exact integers, and a literal key spelled like the integer's marker. It is
+// the last entry, so its row keeps its place while a rename moves its key to
+// the end of the map.
+const ZONE_ENTRY = [
+  "zone:",
+  "  __proto__: nested-value",
+  "  constructor: own",
+  "  inner:",
+  "    __proto__: nested-proto",
+  "    exact: 9007199254740993",
+  "  list:",
+  "    - $dohcBigInt: 9007199254740993",
+  "    - 9007199254740993",
+  "",
+].join("\n");
+// A computed `__proto__` key is an own property, as the file holds it.
+const ZONE = {
+  ["__proto__"]: "nested-value",
+  constructor: "own",
+  inner: { ["__proto__"]: "nested-proto", exact: 9007199254740993n },
+  list: [{ $dohcBigInt: 9007199254740993n }, 9007199254740993n],
+};
+const OPTIONS_ENTRY = ZONE_ENTRY.replace("zone:", "options:");
+
+// The panel's rows read the document in an effect after its render decoded
+// the source snapshot. A layout effect lands between the two, where a device's
+// update arrives after a render and before the effects it schedules.
+function ForwardsOnCommit(props: { from: Y.Doc; to: Y.Doc }) {
+  useLayoutEffect(() => {
+    Y.applyUpdate(props.to, Y.encodeStateAsUpdate(props.from, Y.encodeStateVector(props.to)));
+  }, [props.from, props.to]);
+  return null;
+}
 
 function ControlledPropertiesPanel(props: { initialBody: string }) {
   const [body, setBody] = useState(props.initialBody);
@@ -520,6 +589,182 @@ describe("PropertiesPanel", () => {
 
     expect(frontmatter.get("status")).toBe("ready");
     expect(frontmatter.get("settings")).toEqual({ pinned: true });
+  });
+
+  // `settings` is the last entry, so its row keeps its place while a rename
+  // moves its key to the end of the map.
+  it("renames a shared map property without losing it", async () => {
+    const user = userEvent.setup();
+    const doc = markdownToYDoc("---\nid: note-1\ntitle: Plan\ndue: friday\nsettings:\n  pinned: true\n---\n\nBody\n");
+    const frontmatter = doc.getMap<unknown>("frontmatter");
+    const changed = trackChangedProperties(frontmatter);
+    const replica = new Y.Doc();
+    try {
+      expect(doc.getMap("meta").get("dohcFrontmatterSource")).toBeUndefined();
+      render(<PropertiesPanel ydoc={doc} />);
+      await user.clear(screen.getByDisplayValue("settings"));
+      await user.type(screen.getByLabelText("Property 2 name"), "options");
+
+      expect(screen.queryByTestId("properties-locked")).toBeNull();
+      expect([...frontmatter.keys()]).toEqual(["due", "id", "title", "options"]);
+      expect([...changed].filter((key) => !"options".startsWith(key))).toEqual(["settings"]);
+      // An ordinary map stays a Yjs Any value.
+      expect(frontmatter.get("options")).not.toBeInstanceOf(Y.AbstractType);
+
+      Y.applyUpdate(replica, Y.encodeStateAsUpdate(doc));
+      expect(frontmatterMapValues(replica.getMap("frontmatter"))).toEqual({
+        due: "friday",
+        id: "note-1",
+        options: { pinned: true },
+        title: "Plan",
+      });
+      expect(yDocToMarkdown(replica)).toBe("---\nid: note-1\ntitle: Plan\ndue: friday\noptions:\n  pinned: true\n---\n\nBody");
+    } finally {
+      replica.destroy();
+      doc.destroy();
+    }
+  });
+
+  // A rename keeps the property in its place: canonical frontmatter keeps the
+  // text its first rename starts from, so the file no longer settles sorted.
+  it.each([
+    ["canonical", `---\nstatus: draft\n${ZONE_ENTRY}---\n\nBody\n`, `---\nstatus: draft\n${OPTIONS_ENTRY}---\n\n`],
+    [
+      "kept",
+      `---\n# Keep this note\nstatus: draft\n${ZONE_ENTRY}---\n\nBody\n`,
+      `---\n# Keep this note\nstatus: draft\n${OPTIONS_ENTRY}---\n\n`,
+    ],
+  ])("renames a shared-type property that another replica reads back (%s text)", async (_name, markdown, settled) => {
+    const user = userEvent.setup();
+    const doc = receivedYDoc(markdown);
+    const frontmatter = doc.getMap<unknown>("frontmatter");
+    const changed = trackChangedProperties(frontmatter);
+    const replica = new Y.Doc();
+    try {
+      expect(frontmatter.get("zone")).toBeInstanceOf(Y.Map);
+      expect(frontmatterMapValues(frontmatter).zone).toEqual(ZONE);
+      render(<PropertiesPanel ydoc={doc} />);
+      await user.clear(screen.getByDisplayValue("zone"));
+      await user.type(screen.getByLabelText("Property 2 name"), "options");
+
+      expect(screen.queryByTestId("properties-locked")).toBeNull();
+      expect(changed.has("status")).toBe(false);
+      expect(frontmatterAsWritten(doc, true)).toBe(settled);
+
+      Y.applyUpdate(replica, Y.encodeStateAsUpdate(doc));
+      const values = frontmatterMapValues(replica.getMap("frontmatter"));
+      expect(Object.keys(values)).toEqual(["options", "status"]);
+      expect(values.options).toEqual(ZONE);
+      expect(yDocToMarkdown(replica)).toBe(`${settled}Body`);
+    } finally {
+      replica.destroy();
+      doc.destroy();
+    }
+  });
+
+  it("shows shared-type frontmatter as YAML and edits only the changed property", async () => {
+    const user = userEvent.setup();
+    const doc = receivedYDoc(EDGE_MARKDOWN);
+    const frontmatter = doc.getMap("frontmatter");
+    const changed: string[] = [];
+    frontmatter.observeDeep((events) => {
+      for (const event of events) {
+        // A change inside a shared value reports the property that holds it.
+        if (event.target !== frontmatter) changed.push(String(event.path[0]));
+        else if (event instanceof Y.YMapEvent) changed.push(...event.keysChanged);
+      }
+    });
+    try {
+      render(<PropertiesPanel ydoc={doc} />);
+      for (const [key, text] of Object.entries(EDGE_DISPLAY)) {
+        expect(propertyValue(key), key).toBe(oneLine(text));
+      }
+
+      await user.clear(screen.getByLabelText("Property status value"));
+      await user.type(screen.getByLabelText("Property status value"), "ready");
+
+      expect(new Set(changed)).toEqual(new Set(["status"]));
+      expect(yDocToMarkdown(doc)).toBe(
+        `${EDGE_FRONTMATTER.replace("status: draft", "status: ready")}Body`,
+      );
+    } finally {
+      doc.destroy();
+    }
+  });
+
+  // The root map's observer does not report a change inside a shared value,
+  // so the rows can hold a device's newer value while the panel's source
+  // snapshot holds the older one. Editing status must not write settings.
+  it("keeps a shared value another device changes before the rows read it, while only status changes", async () => {
+    const user = userEvent.setup();
+    const doc = receivedYDoc("---\nsettings:\n  constructor: kept\n  pinned: false\nstatus: draft\n---\n\nBody\n");
+    const frontmatter = doc.getMap<unknown>("frontmatter");
+    const settings = frontmatter.get("settings") as Y.Map<unknown>;
+    const replica = new Y.Doc();
+    try {
+      expect(settings).toBeInstanceOf(Y.Map);
+      Y.applyUpdate(replica, Y.encodeStateAsUpdate(doc));
+      const replicaSettings = replica.getMap<unknown>("frontmatter").get("settings") as Y.Map<unknown>;
+      replicaSettings.set("pinned", true);
+      render(
+        <>
+          <PropertiesPanel ydoc={doc} />
+          <ForwardsOnCommit from={replica} to={doc} />
+        </>,
+      );
+      expect(propertyValue("settings")).toBe(oneLine("constructor: kept\npinned: true"));
+
+      replicaSettings.set("note", "later");
+      act(() => Y.applyUpdate(doc, Y.encodeStateAsUpdate(replica, Y.encodeStateVector(doc))));
+      const changed = trackChangedProperties(frontmatter);
+      await user.clear(screen.getByLabelText("Property status value"));
+      await user.type(screen.getByLabelText("Property status value"), "ready");
+
+      expect(frontmatter.get("status")).toBe("ready");
+      expect(frontmatter.get("settings")).toBe(settings);
+      expect(changed).toEqual(new Set(["status"]));
+      expect(frontmatterMapValues(frontmatter).settings).toEqual({ constructor: "kept", note: "later", pinned: true });
+    } finally {
+      replica.destroy();
+      doc.destroy();
+    }
+  });
+
+  it("shows a direct Any bigint and leaves it alone while a neighbour changes", async () => {
+    const user = userEvent.setup();
+    const { doc } = recordedYDoc("numbers");
+    const frontmatter = doc.getMap("frontmatter");
+    try {
+      render(<PropertiesPanel ydoc={doc} />);
+      expect(propertyValue("c")).toBe("9007199254740993");
+
+      await user.clear(screen.getByLabelText("Property d value"));
+      await user.type(screen.getByLabelText("Property d value"), "2");
+
+      expect(frontmatter.get("d")).toBe("2");
+      expect(frontmatter.get("c")).toBe(9007199254740993n);
+    } finally {
+      doc.destroy();
+    }
+  });
+
+  it("keeps hostile keys and exact integers beside an edited local property", async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    const body = EDGE_MARKDOWN.replace(
+      "---\n",
+      "---\n__proto__: top-proto\nconstructor: top-constructor\n",
+    );
+    render(<PropertiesPanel body={body} onChange={onChange} />);
+    expect(propertyValue("__proto__")).toBe("top-proto");
+    for (const [key, text] of Object.entries(EDGE_DISPLAY)) {
+      expect(propertyValue(key), key).toBe(oneLine(text));
+    }
+
+    await user.clear(screen.getByLabelText("Property status value"));
+    await user.type(screen.getByLabelText("Property status value"), "ready");
+
+    expect(onChange).toHaveBeenLastCalledWith(body.replace("status: draft", "status: ready"));
   });
 
   it("does not collapse duplicate shared frontmatter keys", async () => {

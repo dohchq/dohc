@@ -109,6 +109,19 @@ The readiness check tests that connection and reports DNS, TLS, or routing failu
 If you add your own proxy in front of the relay, do not let it log the `Authorization` header.
 That header carries sign-in credentials and the credential your server syncs with to run your automations.
 
+`DOHC_GATEWAY_ADDRESS` and `DOHC_SHARE_WEB_ADDRESS` in `.env.self-host` are the Docker network addresses of the gateway and `share-web`.
+If you change them, keep each one a single IPv4 address inside `DOHC_NETWORK_SUBNET`, with no hostname, CIDR range, or port.
+The bundle passes them to `DOHC_AUTH_TRUSTED_PROXIES` and `DOHC_SHARE_WEB_TRUSTED_PROXIES`.
+The sign-in service, `workspace-api`, trusts `X-Forwarded-For` from both addresses, and `share-web` trusts it only from the gateway.
+Each service refuses to start when a trusted proxy entry is not an IP address.
+
+`workspace-api` compares addresses in the same canonical form as `share-web`.
+It uses the connection's peer address unless that peer is a trusted proxy.
+For a trusted peer, it reads `X-Forwarded-For` from right to left and uses the first address that is not a trusted proxy.
+It uses the peer address instead when the header is missing, is longer than 4,096 characters, has more than 32 entries, has an empty entry or any entry that is not an IP address, or names only trusted proxies.
+It answers 400 to a connection without an IP address.
+The [proxy section of the share-web operations reference](../../services/share-web/README.md#public-origin-and-proxy) describes the `share-web` rules.
+
 ## Start and check the server
 
 ```sh

@@ -11,7 +11,8 @@ import { testWorkspace } from "./js-tests.mjs";
 import { readWorkspacePackages, selectJavaScript, selectedGates, workflowFilters } from "./selection.mjs";
 import { readFocusedRendererSelection } from "./renderer-selection.mjs";
 import { classifyTreeProvenance, readTreeState } from "../../tools/rust-engine-program/tree-provenance.mjs";
-import { acquireExclusiveSlot, acquireVerificationSlot } from "../../tools/rust-engine-program/build-slot.mjs";
+import { acquireExclusiveSlot, acquireVerificationSlot, resolveBuildBudget } from "../../tools/rust-engine-program/build-slot.mjs";
+import { processIdentity, ticketEvidence } from "./ticket-evidence.mjs";
 import { admissionPreflight, installedDependenciesMatch, verificationAdmission } from "./admission.mjs";
 import { readGit } from "../../tools/rust-engine-program/git-read.mjs";
 import { finishRustEvidence, refreshRustReuse, rustIdentity } from "./rust-reuse.mjs";
@@ -254,10 +255,22 @@ export async function verify(args) {
       const preflight = () => admissionPreflight({rust: gates.rust, native, root: repoRoot, pins: require("js-yaml").load(workflow).env});
       await measure("preflight", preflight);
       report.admission = verificationAdmission({gates, javascript}, readWorkspacePackages(repoRoot), installedDependenciesMatch(repoRoot));
-      lane = await measure("queue", () => acquireVerificationSlot(process.env, {
-        lightweight: report.admission.lightweight,
-        metadata: {purpose: report.admission.lightweight ? "light PR verification" : "full PR verification", checkout: repoRoot, commit: report.commit, phase: "admission"},
-      }));
+      // Identify this process before publishing a ticket; no lookup may delay admission.
+      const tickets = resolveBuildBudget() ? ticketEvidence({output, checkout: repoRoot, commit: report.commit,
+        producer: await measure("producer-identity", () => processIdentity()), persist: save}) : null;
+      report.ticketEvidence = tickets?.record;
+      let ticketCleanup;
+      try {
+        lane = await measure("queue", () => acquireVerificationSlot(process.env, {
+          lightweight: report.admission.lightweight,
+          metadata: {purpose: report.admission.lightweight ? "light PR verification" : "full PR verification", checkout: repoRoot, commit: report.commit, phase: "admission"},
+          observeTicket: tickets?.observe,
+        }));
+      } finally {
+        ticketCleanup = tickets?.settle();
+        save();
+      }
+      if (ticketCleanup) throw new Error(ticketCleanup);
       await checkTree("admission");
       await measure("preflight:admission", preflight);
     }

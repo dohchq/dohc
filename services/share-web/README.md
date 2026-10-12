@@ -108,14 +108,25 @@ Give the viewer one public HTTPS base origin, such as
 rejects every other Host. Terminate TLS at the reverse proxy and forward the
 original Host unchanged. Do not put a caching proxy in front of `share-web`.
 
-Set `DOHC_SHARE_WEB_TRUSTED_PROXIES` to the exact network peer addresses of
-proxies that may supply `X-Forwarded-For`. Leave it empty when no trusted proxy
-connects to `share-web`. The service ignores `X-Forwarded-For` from an
-untrusted peer. For a trusted peer, it scans the list from right to left and
-uses the first address that is not a trusted proxy. The service sends that
-derived address to its internal handler as `x-dohc-share-web-client-ip` for
-pre-authentication rate limiting. The public proxy must not accept that
-internal header from clients.
+Set `DOHC_SHARE_WEB_TRUSTED_PROXIES` to the network peer addresses of proxies
+that may supply `X-Forwarded-For`. Separate entries with commas and no spaces.
+Each entry must be one IPv4 or IPv6 address. The service refuses to start on a
+hostname, CIDR range, port, bracketed address, or IPv6 zone such as `%eth0`.
+Leave the value empty when no trusted proxy connects to `share-web`.
+
+The service compares addresses in one canonical form. IPv6 addresses match
+regardless of letter case or zero compression, and an IPv4-mapped IPv6 address
+such as `::ffff:10.0.0.2` matches `10.0.0.2`.
+
+The service ignores `X-Forwarded-For` from an untrusted peer and uses the peer
+address. For a trusted peer, it scans the list from right to left, skips empty
+entries, and uses the first address that is not a trusted proxy. If it reaches
+an entry that is not an IP address first, it uses the peer address. If the
+header is missing or names only trusted proxies, it uses `unknown`. A peer
+without an IP address also uses `unknown`, and all `unknown` requests share
+one per-address allowance. The service sends the derived address to its
+internal handler as `x-dohc-share-web-client-ip` for pre-authentication rate
+limiting. The public proxy must not accept that internal header from clients.
 
 Link exchange admits valid credentials per share grant, so people on one network
 do not share the invalid-credential allowance. The relay allows a burst of 960

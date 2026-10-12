@@ -387,7 +387,6 @@ function makeBaseBridge(
     // a real running agent through it.
     getAgentRunStatus: vi.fn(
       async (): Promise<AgentRunStatusResult> => ({
-        mcpEnabled: false,
         activeRun: null,
         lastRun: null,
       }),

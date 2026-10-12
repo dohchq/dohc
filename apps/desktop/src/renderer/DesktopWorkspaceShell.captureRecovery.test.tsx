@@ -189,7 +189,7 @@ describe("typing kept in History", () => {
     const status = () => ({ operationId: "restore", document: documentKey, path: PATH, phase, intent, proposalDigest });
     const ownerRestore = vi.fn(async (input: OwnerRestoreRequest): Promise<unknown> => {
       if (input.action === "options") {
-        return { document: documentKey, path: PATH, grants: [], points: [], nextBeforeCursor: null, nextGrantCursor: null,
+        return { document: documentKey, path: PATH, grants: [], authors: [], points: [], nextBeforeCursor: null, nextGrantCursor: null,
           pendingOperation: { operationId: "restore", phase, proposalDigest } };
       }
       if (input.action === "status") return status();

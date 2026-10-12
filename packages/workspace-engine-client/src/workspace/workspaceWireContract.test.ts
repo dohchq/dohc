@@ -33,6 +33,23 @@ const snapshot = {
   metadataCorrelationId: null,
 };
 
+it("preserves the owner-only link author through the collection history wire contract", () => {
+  const linkAuthor = { kind: "link", grantId: "ended-link", grantGeneration: 2, publicPrincipalId: "public-holder" };
+  const raw = {
+    collection: { path: "tasks", objectId: "schema", status: "valid", reasons: [] },
+    record: { id: "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa", path: "tasks/a.md", conflicted: false, values: [] },
+    history: [{ historyId: 1, field: "Status", previous: { present: false, value: null }, next: { present: true, value: "Done" },
+      authorOriginId: null, actorKind: null, onBehalfOf: null, depth: null, recordedAtMs: 1, automationRun: null, linkAuthor }],
+    nextBeforeHistoryId: null,
+  };
+  const fetched = decodeWorkspaceResult(WORKSPACE_METHOD.collectionsGetRecord, raw);
+  expect(fetched.history[0]?.linkAuthor).toEqual(linkAuthor);
+  expect(() => decodeWorkspaceResult(WORKSPACE_METHOD.collectionsGetRecord, {
+    ...raw,
+    history: [{ ...raw.history[0], linkAuthor: { kind: "link", grantId: "ended-link", grantGeneration: 2, principalId: "private-holder" } }],
+  })).toThrow(ProtocolShapeError);
+});
+
 const state = {
   path: "note.md",
   contentKind: "text",
@@ -346,6 +363,7 @@ describe("workspace wire schemas", () => {
             depth: 0,
             recordedAtMs: 1,
             automationRun: { claimId: "atc_1", automationName: "Stamp the finish date" },
+            linkAuthor: null,
           },
         ],
         nextBeforeHistoryId: null,

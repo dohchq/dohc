@@ -1,14 +1,11 @@
 // Client for the yrs stdio harness (crates/yrs-interop/src/main.rs).
 // One long-lived child process; line-delimited JSON; bytes as base64.
 
-import { spawn, spawnSync, type ChildProcessByStdio } from "node:child_process";
+import { spawn, type ChildProcessByStdio } from "node:child_process";
 import type { Readable, Writable } from "node:stream";
-import { existsSync } from "node:fs";
-import { dirname, isAbsolute, join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
 import * as readline from "node:readline";
-
-const CRATE_DIR = join(dirname(fileURLToPath(import.meta.url)), "..");
+import { assertInteropPrepared } from "../../../scripts/verification/yrs-interop.mjs";
+import { engineArtifactMatches } from "../../../scripts/verification/build.mjs";
 
 // A request that takes longer than this has hit a harness bug (a lost
 // response desyncing the queue, a deadlocked child) — fail loudly, never hang.
@@ -35,24 +32,7 @@ interface ErrResponse {
 }
 type Response = OkResponse | ErrResponse;
 
-function binaryPath(): string {
-  const exe = process.platform === "win32" ? "dohc-yrs-interop.exe" : "dohc-yrs-interop";
-  // A relative CARGO_TARGET_DIR is interpreted by cargo relative to the
-  // build cwd (the crate dir) — resolve the spawn path the same way, never
-  // against the Node process cwd.
-  const env = process.env.CARGO_TARGET_DIR;
-  const targetDir =
-    env === undefined ? join(CRATE_DIR, "target") : isAbsolute(env) ? env : resolve(CRATE_DIR, env);
-  return join(targetDir, "debug", exe);
-}
-
-let builtThisProcess = false;
-
-export function buildRustHarness(): void {
-  const result = spawnSync("cargo", ["build"], { cwd: CRATE_DIR, stdio: "inherit", shell: false });
-  if (result.status !== 0) throw new Error("cargo build failed");
-  builtThisProcess = true;
-}
+let preparedPeer: { path: string; artifact: string } | undefined;
 
 export class RustPeer {
   private child: ChildProcessByStdio<Writable, Readable, null>;
@@ -60,13 +40,12 @@ export class RustPeer {
   private dead: Error | null = null;
 
   constructor() {
-    // Always build (a fresh cargo no-op is sub-second): a stale binary must
-    // never certify changed harness sources. Once per driver process is
-    // enough — every RustPeer in one run uses the same sources.
-    if (!builtThisProcess) buildRustHarness();
-    const bin = binaryPath();
-    if (!existsSync(bin)) throw new Error(`rust harness binary missing after build: ${bin}`);
-    this.child = spawn(bin, [], { stdio: ["pipe", "pipe", "inherit"] });
+    // Every peer in one driver uses the same validated source and binary.
+    const receipt = preparedPeer ??= assertInteropPrepared();
+    if (!engineArtifactMatches(receipt.path, receipt.artifact)) {
+      throw new Error("The prepared yrs interop executable changed during this driver run.");
+    }
+    this.child = spawn(receipt.path, [], { stdio: ["pipe", "pipe", "inherit"] });
     const rl = readline.createInterface({ input: this.child.stdout });
     rl.on("line", (line) => {
       const pending = this.queue.shift();

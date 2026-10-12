@@ -1031,8 +1031,10 @@ fn delete_last_block(doc: &Ydoc) -> Vec<u8> {
 }
 
 /// A live settlement names the agents the owner declared for the deliveries
-/// it covers, beside undeclared and shared deliveries, including a delete-only
-/// edit with no new structs. The next interval names only its own.
+/// it covers and the collaborator the relay accepted a delivery from. The
+/// owner's undeclared delivery names no author, so the interval keeps an
+/// unattributed gap. A delete-only edit with no new structs counts too. The
+/// next interval names only its own.
 #[tokio::test]
 async fn live_settlement_names_declared_agents_of_its_exact_interval() {
     fn paragraph(doc: &Ydoc, text: &str) -> (Vec<u8>, Vec<LiveUpdateStructRange>) {
@@ -1092,7 +1094,11 @@ async fn live_settlement_names_declared_agents_of_its_exact_interval() {
         .unwrap();
     assert_eq!(
         latest_authors(&f),
-        serde_json::json!([{"kind":"agent","agentId":"trip-agent ✈","onBehalfOf":"owner","depth":1}, {"kind":"unattributed"}])
+        serde_json::json!([
+            {"kind":"agent","agentId":"trip-agent ✈","onBehalfOf":"owner","depth":1},
+            {"kind":"named","userId":"friend","grantId":"grant","grantGeneration":1},
+            {"kind":"unattributed"},
+        ])
     );
     let vector = f.doc.encode_state_vector();
     let removed = delete_last_block(&f.doc);

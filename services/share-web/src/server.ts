@@ -106,7 +106,7 @@ interface RelayCall {
   /** Refuses when the session changed before the call answered. */
   ifSessionChanged?: boolean;
   /** Answers a relay 200. `holdSlot` keeps the limiter slot until its release runs. */
-  ok?(relayResponse: Response, holdSlot: () => () => void): Response | Promise<Response>;
+  ok?(relayResponse: Response, holdSlot: () => () => void, signal: AbortSignal): Response | Promise<Response>;
   /** Translates a relay refusal, or returns null for the generic refusal. */
   refusal?(relayResponse: Response): Promise<Response | null>;
 }
@@ -1003,12 +1003,13 @@ export function createShareWebApplication({
           },
           relayTimeoutMs,
         );
+        let relayResponse: Response | undefined;
         try {
-          const relayResponse = await fetchRelay(boundedRelay.request);
+          relayResponse = await fetchRelay(boundedRelay.request);
           if (relayResponse.status === 404) return { status: "invalid" };
           if (relayResponse.status !== 200) return { status: "unavailable" };
           const refreshed = parsedRelaySession(
-            await relayResponse.json(),
+            await readBoundedJson(relayResponse, MAX_RELAY_RESPONSE_BYTES, boundedRelay.request.signal),
             nowMs(),
             publicEditRelease,
           );
@@ -1028,6 +1029,7 @@ export function createShareWebApplication({
         } catch {
           return { status: "unavailable" };
         } finally {
+          await relayResponse?.body?.cancel().catch(() => undefined);
           boundedRelay.dispose();
         }
       })();
@@ -1167,7 +1169,7 @@ export function createShareWebApplication({
         return stale;
       }
       if (relayResponse.status === 200) {
-        return answer(await (call.ok ?? relayJson)(relayResponse, holdSlot));
+        return answer(await (call.ok ?? relayJson)(relayResponse, holdSlot, bounded.request.signal));
       }
       if ([400, 403, 409, 413, 429].includes(relayResponse.status) && relayResponse.headers.get("content-type")?.split(";", 1)[0] === "application/json") {
         const value = await readBoundedJson(relayResponse, 4096, bounded.request.signal).catch(() => null);
@@ -1319,14 +1321,17 @@ export function createShareWebApplication({
               body: JSON.stringify({ secret }),
             }, relayTimeoutMs);
           let exchanged: ReturnType<typeof parsedRelaySession>;
+          let relayResponse: Response | undefined;
           try {
-            const relayResponse = await fetchRelay(bounded.request);
+            relayResponse = await fetchRelay(bounded.request);
             if (relayResponse.status !== 200) {
-              await relayResponse.body?.cancel().catch(() => undefined);
               return relayResponse.status === 429 ? jsonResponse(REFUSAL_VALUE, {status: 429}) : refused();
             }
             exchanged = parsedRelaySession(await readBoundedJson(relayResponse, MAX_RELAY_RESPONSE_BYTES, bounded.request.signal), nowMs(), publicEditRelease);
-          } finally {bounded.dispose();}
+          } finally {
+            await relayResponse?.body?.cancel().catch(() => undefined);
+            bounded.dispose();
+          }
           if (!exchanged) return refused();
           const discriminator = linkDiscriminator(exchanged.grantId);
           const token = newSessionToken();
@@ -1382,15 +1387,19 @@ export function createShareWebApplication({
         path: "/sync/link-handoff",
         method: "POST",
         exchangeKey: true,
-        ok: async (relayResponse) => {
-          const handoff = parsedRelayHandoff(await relayResponse.json(), nowMs());
-          if (!handoff) return refused();
-          return jsonResponse({
-            ok: true,
-            code: handoff.code,
-            relayUrl: publicRelayUrl,
-            expiresAtMs: handoff.expiresAtMs,
-          });
+        ok: async (relayResponse, _holdSlot, signal) => {
+          try {
+            const handoff = parsedRelayHandoff(await readBoundedJson(relayResponse, MAX_RELAY_RESPONSE_BYTES, signal), nowMs());
+            if (!handoff) return refused();
+            return jsonResponse({
+              ok: true,
+              code: handoff.code,
+              relayUrl: publicRelayUrl,
+              expiresAtMs: handoff.expiresAtMs,
+            });
+          } finally {
+            await relayResponse.body?.cancel().catch(() => undefined);
+          }
         },
       });
     }

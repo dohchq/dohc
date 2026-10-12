@@ -213,6 +213,11 @@ it("reports a record name race once and tells where the losing draft is kept", a
 
 it("counts several refused writes and gives the first reason", async () => {
   const { notices } = await setup();
+  const shownAtAcknowledge: number[] = [];
+  delivery.acknowledge.mockImplementation(async () => {
+    shownAtAcknowledge.push(notices.length);
+    return true;
+  });
   await answer({
     status: "pushed",
     writes: [
@@ -223,6 +228,12 @@ it("counts several refused writes and gives the first reason", async () => {
   expect(notices[0]!.message).toBe(
     "The sync relay did not accept 2 of your changes: trip/a/collection.yaml is not a valid collection.yaml. Send them as a proposal.",
   );
+  // Main forgets the answer only once its Notice is shown.
+  await vi.waitFor(() => expect(delivery.acknowledge).toHaveBeenCalledOnce());
+  expect(delivery.claim).toHaveBeenCalledOnce();
+  expect(delivery.claim.mock.invocationCallOrder[0]!).toBeLessThan(delivery.acknowledge.mock.invocationCallOrder[0]!);
+  expect(shownAtAcknowledge).toEqual([1]);
+  expect(delivery.release).not.toHaveBeenCalled();
 });
 
 it("offers Try again for a failure that may pass, and keeps the writes answered before it", async () => {

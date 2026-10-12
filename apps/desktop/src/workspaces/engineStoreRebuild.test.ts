@@ -23,9 +23,7 @@ import {
   EngineStoreRebuildRequestError,
   EngineStoreRecoveryFailedError,
   moveEngineStoreAside,
-  rebuildEngineStore,
   rebuildEngineStoreRequest,
-  withEngineStoreRecovered,
   withEngineStoreRecoveredUnderEngineStoreLock,
 } from "./engineStoreRebuild";
 import { runInKeyedLane } from "../keyedLane";
@@ -368,11 +366,7 @@ describe("moveEngineStoreAside", () => {
       }),
     ).resolves.toBeUndefined();
     await expect(
-      withEngineStoreRecovered(
-        new Map(),
-        { workspaceId: "workspace", rootPath: root },
-        openActivity,
-      ),
+      withEngineStoreRecoveredUnderEngineStoreLock({ rootPath: root }, openActivity),
     ).resolves.toBe("opened");
 
     expect(openActivity).toHaveBeenCalledOnce();
@@ -1053,11 +1047,7 @@ describe("moveEngineStoreAside", () => {
     ]);
 
     await expect(
-      withEngineStoreRecovered(
-        new Map(),
-        workspace,
-        openActivity,
-      ),
+      withEngineStoreRecoveredUnderEngineStoreLock(workspace, openActivity),
     ).rejects.toMatchObject({
       message: expect.stringContaining("engine.db-wal"),
     });
@@ -1083,8 +1073,7 @@ describe("moveEngineStoreAside", () => {
     const openActivity = vi.fn(() => activity.open(workspace));
     const renameError = new Error("rename denied");
 
-    const opening = withEngineStoreRecovered(
-      new Map(),
+    const opening = withEngineStoreRecoveredUnderEngineStoreLock(
       workspace,
       openActivity,
       (rootPath) =>
@@ -1183,11 +1172,7 @@ describe("moveEngineStoreAside", () => {
     });
 
     await expect(
-      withEngineStoreRecovered(
-        new Map(),
-        workspace,
-        openScopedCapture,
-      ),
+      withEngineStoreRecoveredUnderEngineStoreLock(workspace, openScopedCapture),
     ).resolves.toBe(true);
 
     expect(openScopedCapture).toHaveBeenCalledOnce();
@@ -1228,7 +1213,11 @@ describe("moveEngineStoreAside", () => {
       locks,
       workspace.workspaceId,
       () =>
-        rebuildEngineStore(root, {
+        rebuildEngineStoreRequest(root, {
+          isStoreRefused: () => true,
+          hasActiveAgentRun: () => false,
+          previousResult: () => undefined,
+          rememberResult: vi.fn(),
           closeActivity: async () => undefined,
           probeStoreRefusal: async () => "foreign-database",
           moveStoreAside: (rootPath) =>
@@ -1297,14 +1286,12 @@ describe("moveEngineStoreAside", () => {
         return { capture: null, shareView: false };
       },
     });
-    const ordinaryOpen = withEngineStoreRecovered(
-      locks,
-      workspace,
-      async () => {
+    const ordinaryOpen = runInKeyedLane(locks, workspace.workspaceId, () =>
+      withEngineStoreRecoveredUnderEngineStoreLock(workspace, async () => {
         const result = await activity.open(workspace);
         order.push("ordinary-open-finished");
         return result;
-      },
+      }),
     );
     await openReachedCapture.promise;
 
@@ -1313,7 +1300,11 @@ describe("moveEngineStoreAside", () => {
       await activity.close(workspace.workspaceId);
     });
     const rebuild = runInKeyedLane(locks, workspace.workspaceId, () =>
-      rebuildEngineStore(root, {
+      rebuildEngineStoreRequest(root, {
+        isStoreRefused: () => true,
+        hasActiveAgentRun: () => activity.hasAgentRun(workspace.workspaceId),
+        previousResult: () => undefined,
+        rememberResult: vi.fn(),
         closeActivity,
         probeStoreRefusal: async () => "foreign-database",
         moveStoreAside: async () => {
@@ -1370,10 +1361,8 @@ describe("moveEngineStoreAside", () => {
     const reopenActivity = vi.fn(async () => {
       await activity.open(currentWorkspace);
     });
-    const starting = withEngineStoreRecovered(
-      locks,
-      currentWorkspace,
-      async () => {
+    const starting = runInKeyedLane(locks, currentWorkspace.workspaceId, () =>
+      withEngineStoreRecoveredUnderEngineStoreLock(currentWorkspace, async () => {
         await activity.open(currentWorkspace);
         openFinished.resolve();
         await finishClaim.promise;
@@ -1385,7 +1374,7 @@ describe("moveEngineStoreAside", () => {
             depth: 0,
           }),
         ).toBe(true);
-      },
+      }),
     );
     await openFinished.promise;
 
@@ -1426,9 +1415,15 @@ describe("moveEngineStoreAside", () => {
   });
 });
 
-describe("rebuildEngineStore", () => {
-  function deps(overrides: Partial<Parameters<typeof rebuildEngineStore>[1]> = {}) {
+describe("rebuildEngineStoreRequest", () => {
+  // An admitted request: the cached status says refused, no agent is running,
+  // and no earlier rebuild answered for this workspace.
+  function deps(overrides: Partial<Parameters<typeof rebuildEngineStoreRequest>[1]> = {}) {
     return {
+      isStoreRefused: () => true,
+      hasActiveAgentRun: () => false,
+      previousResult: () => undefined,
+      rememberResult: vi.fn(),
       probeStoreRefusal: vi.fn(async () => "foreign-database" as const),
       closeActivity: vi.fn(async () => undefined),
       reopenActivity: vi.fn(async () => undefined),
@@ -1443,7 +1438,7 @@ describe("rebuildEngineStore", () => {
     await writeFile(join(backupDir, "MOVE_COMPLETE"), "");
     const d = deps({ probeStoreRefusal: vi.fn(async () => null) });
 
-    await expect(rebuildEngineStore(root, d)).rejects.toMatchObject({
+    await expect(rebuildEngineStoreRequest(root, d)).rejects.toMatchObject({
       name: "EngineStoreRebuildRequestError",
       reason: "not-refused",
     });
@@ -1462,7 +1457,7 @@ describe("rebuildEngineStore", () => {
     async (refusal) => {
       const d = deps({ probeStoreRefusal: vi.fn(async () => refusal) });
 
-      await expect(rebuildEngineStore(root, d)).rejects.toMatchObject({
+      await expect(rebuildEngineStoreRequest(root, d)).rejects.toMatchObject({
         name: "EngineStoreRebuildRequestError",
         reason: "update-required",
       });
@@ -1486,7 +1481,7 @@ describe("rebuildEngineStore", () => {
       }),
     });
 
-    await expect(rebuildEngineStore(root, d)).rejects.toBe(probeError);
+    await expect(rebuildEngineStoreRequest(root, d)).rejects.toBe(probeError);
 
     expect(d.moveStoreAside).not.toHaveBeenCalled();
     expect(d.reopenActivity).toHaveBeenCalledOnce();
@@ -1507,7 +1502,7 @@ describe("rebuildEngineStore", () => {
       reopenActivity: vi.fn(async () => void order.push("reopen")),
     });
 
-    await expect(rebuildEngineStore(root, d)).resolves.toEqual({
+    await expect(rebuildEngineStoreRequest(root, d)).resolves.toEqual({
       outcome: "moved",
     });
     expect(order).toEqual(["close", "probe", "move", "reopen"]);
@@ -1577,7 +1572,7 @@ describe("rebuildEngineStore", () => {
     });
 
     // Mirrors main.ts's actual rebuild-reopen wiring: the outer
-    // request gate is already raised — rebuildEngineStore raises it before
+    // request gate is already raised — the rebuild request raises it before
     // moveStoreAside — and the reopen's completePendingMove wrapper releases
     // it right after recovery settles, before the activity-open body below
     // starts the daemon-owned capture. A stub reopenActivity (like the
@@ -1850,7 +1845,7 @@ describe("rebuildEngineStore", () => {
       }),
     });
 
-    const rebuilding = rebuildEngineStore(root, d);
+    const rebuilding = rebuildEngineStoreRequest(root, d);
     await expect(rebuilding).rejects.toBeInstanceOf(
       EngineStoreRebuildRequestError,
     );
@@ -1876,7 +1871,7 @@ describe("rebuildEngineStore", () => {
       }),
     });
 
-    await expect(rebuildEngineStore(root, d)).resolves.toEqual({
+    await expect(rebuildEngineStoreRequest(root, d)).resolves.toEqual({
       outcome: "moved",
       reopenFailed:
         "dohc could not finish rebuilding this workspace's data store.",
@@ -1898,7 +1893,7 @@ describe("rebuildEngineStore", () => {
       }),
     });
 
-    await expect(rebuildEngineStore(root, d)).resolves.toEqual({
+    await expect(rebuildEngineStoreRequest(root, d)).resolves.toEqual({
       outcome: "moved",
       reopenFailed: recoveryError.message,
     });
@@ -1920,7 +1915,7 @@ describe("rebuildEngineStore", () => {
       }),
     });
 
-    await expect(rebuildEngineStore(root, d)).resolves.toEqual({
+    await expect(rebuildEngineStoreRequest(root, d)).resolves.toEqual({
       outcome: "moved",
       reopenFailed:
         "dohc could not finish rebuilding this workspace's data store.",
@@ -1940,7 +1935,7 @@ describe("rebuildEngineStore", () => {
       }),
     });
 
-    await expect(rebuildEngineStore(root, d)).resolves.toEqual({
+    await expect(rebuildEngineStoreRequest(root, d)).resolves.toEqual({
       outcome: "backup-exists",
       reopenFailed:
         "dohc could not finish rebuilding this workspace's data store.",
@@ -1958,7 +1953,7 @@ describe("rebuildEngineStore", () => {
       }),
     });
 
-    await expect(rebuildEngineStore(root, d)).rejects.toBe(moveError);
+    await expect(rebuildEngineStoreRequest(root, d)).rejects.toBe(moveError);
     expect(d.reopenActivity).toHaveBeenCalledOnce();
   });
 
@@ -1968,7 +1963,7 @@ describe("rebuildEngineStore", () => {
     const order: string[] = [];
 
     await expect(
-      rebuildEngineStore(
+      rebuildEngineStoreRequest(
         root,
         deps({
           closeActivity: () =>
@@ -2010,7 +2005,7 @@ describe("rebuildEngineStore", () => {
   it("moves once and shares the result between concurrent rebuild requests", async () => {
     await seedStore({ "engine.db": "refused-store" });
     const locks = new Map<string, Promise<void>>();
-    const results = new Map<string, Awaited<ReturnType<typeof rebuildEngineStore>>>();
+    const results = new Map<string, Awaited<ReturnType<typeof rebuildEngineStoreRequest>>>();
     let refused = true;
     const probeStoreRefusal = vi.fn(async () => "foreign-database" as const);
     const moveStoreAside = vi.fn(moveEngineStoreAside);

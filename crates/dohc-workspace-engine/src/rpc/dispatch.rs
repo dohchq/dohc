@@ -37,6 +37,7 @@ fn method_requires_initial_capture_ready(method: &str) -> bool {
                 | "versionedText.delete"
                 | "versionedText.rollback"
                 | "versionedText.merge"
+                | "versionedText.publicationApplied"
                 | "versionedBinary.read"
                 | "versionedBinary.readBlob"
                 | "moments.list"
@@ -373,42 +374,15 @@ impl EngineService {
                 self.share_record_creation_statuses(&ctx, request.workspace, request.params)
                     .await?
             }
-            "versionedText.writeBlob" => {
-                self.versioned_text_write_blob(&ctx, &request, request.params.clone())
-                    .await?
-            }
-            "versionedText.write" => {
-                self.versioned_text_write(&ctx, &request, request.params.clone())
-                    .await?
-            }
-            "versionedBinary.write" => {
-                self.versioned_binary_write(&ctx, &request, request.params.clone())
-                    .await?
-            }
-            "versionedBinary.writeBlob" => {
-                self.versioned_binary_write_blob(&ctx, &request, request.params.clone())
-                    .await?
-            }
-            "versionedText.rename" => {
-                self.versioned_text_rename(&ctx, &request, request.params.clone())
-                    .await?
-            }
-            "versionedText.checkMove" => {
-                self.versioned_text_check_move(&ctx, &request, request.params.clone())
-                    .await?
-            }
-            "versionedText.delete" => {
-                self.versioned_text_delete(&ctx, &request, request.params.clone())
-                    .await?
-            }
-            "versionedText.rollback" => {
-                self.versioned_text_rollback(&ctx, &request, request.params.clone())
-                    .await?
-            }
-            "versionedText.merge" => {
-                self.versioned_text_merge(&ctx, &request, request.params.clone())
-                    .await?
-            }
+            "versionedText.writeBlob" => self.versioned_text_write_blob(&ctx, request).await?,
+            "versionedText.write" => self.versioned_text_write(&ctx, request).await?,
+            "versionedBinary.write" => self.versioned_binary_write(&ctx, request).await?,
+            "versionedBinary.writeBlob" => self.versioned_binary_write_blob(&ctx, request).await?,
+            "versionedText.rename" => self.versioned_text_rename(&ctx, request).await?,
+            "versionedText.checkMove" => self.versioned_text_check_move(&ctx, request).await?,
+            "versionedText.delete" => self.versioned_text_delete(&ctx, request).await?,
+            "versionedText.rollback" => self.versioned_text_rollback(&ctx, request).await?,
+            "versionedText.merge" => self.versioned_text_merge(&ctx, request).await?,
             "versionedText.compare" => {
                 self.versioned_text_compare(&ctx, request.workspace, request.params)
                     .await?
@@ -417,10 +391,7 @@ impl EngineService {
                 self.versions_compare_files(&ctx, request.workspace, request.params)
                     .await?
             }
-            "versions.createNamed" => {
-                self.versions_create_named(&ctx, &request, request.params.clone())
-                    .await?
-            }
+            "versions.createNamed" => self.versions_create_named(&ctx, request).await?,
             "versionedText.read" => {
                 self.versioned_text_read(&ctx, request.workspace, request.params)
                     .await?
@@ -429,8 +400,8 @@ impl EngineService {
                 self.ydoc_record_update(
                     &ctx,
                     request.workspace,
-                    request.idempotency_key.clone(),
-                    request.params.clone(),
+                    request.idempotency_key,
+                    request.params,
                 )
                 .await?
             }
@@ -575,6 +546,10 @@ impl EngineService {
             }
             "moments.get" => {
                 self.moments_get(&ctx, request.workspace, request.params)
+                    .await?
+            }
+            "versionedText.publicationApplied" => {
+                self.publication_applied(&ctx, request.workspace, request.params)
                     .await?
             }
             "secrets.list" => {
@@ -1482,6 +1457,7 @@ mod tests {
             "versionedText.list",
             "versionedText.captureSources",
             "versionedText.merge",
+            "versionedText.publicationApplied",
             "versionedText.read",
             "versionedText.readBlob",
             "versionedText.rename",

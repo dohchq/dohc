@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import "./DesktopWorkspaceShell.testSupport";
-import { act, fireEvent, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import { SetWorkspaceUiStatePayload } from "../ipc/bridgeContract";
@@ -9,8 +9,9 @@ import { DEFAULT_WORKSPACE_SETTINGS, type WorkspaceSettingsResult } from "../wor
 import { rendererMarks } from "../performance/rendererMarks";
 import { momentDiffTabPath, versionCompareTabPath } from "./workbench/workbenchState";
 import { deferred } from "../testing/deferred";
+import type { Workspace } from "./DesktopWorkspaceShell";
 import { textEditorContent } from "./FileInspector.editor-fixture";
-import { WORKSPACE, SYNC_STATUS, STORED_STATE, storedStateWithTabs, storedTabs, makeBridge, renderShell, SHARE_STATUS, SHARE_VIEW, makeShareBridge, settleShareView } from "./DesktopWorkspaceShell.testHarness";
+import { DesktopWorkspaceShell, WORKSPACE, OTHER_WORKSPACE, SYNC_STATUS, STORED_STATE, storedStateWithTabs, storedTabs, makeBridge, renderShell, shellBootstrapProps, SHARE_STATUS, SHARE_VIEW, makeShareBridge, settleShareView } from "./DesktopWorkspaceShell.testHarness";
 
 describe("history page", () => {
   it("shows a failed file read in a toast and Notices while history stays available", async () => {
@@ -272,6 +273,80 @@ describe("history page", () => {
     };
   }
 
+  // DesktopRoot keys the shell by workspace, so a switch remounts it. A history
+  // answer A asked for before the switch can land after B is on screen, and it
+  // must never paint there. The E2E switch spec covers this only as a smoke
+  // test against the real app; here A's answer is held until B has painted.
+  it("keeps a history answer workspace A asked for out of workspace B", async () => {
+    const A_CONTROL = "A_CONTROL wrote the A plan";
+    const A_STALE = "A_STALE answered after the switch";
+    const B_ONLY = "B_ONLY wrote the B note";
+    const heldA = deferred<ListEngineMomentsResult>();
+    let selected = WORKSPACE.workspaceId;
+    let holdA = false;
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.listEngineMoments = vi.fn(async () => {
+      if (selected === OTHER_WORKSPACE.workspaceId) {
+        return historyPage([historyMoment("m-b", B_ONLY)]);
+      }
+      return holdA ? heldA.promise : historyPage([historyMoment("m-a", A_CONTROL)]);
+    });
+    const shell = (workspace: Workspace) => (
+      <DesktopWorkspaceShell
+        key={workspace.workspaceId}
+        workspace={workspace}
+        workspaces={[WORKSPACE, OTHER_WORKSPACE]}
+        {...shellBootstrapProps(bridge)}
+        onSwitchWorkspace={() => {}}
+      />
+    );
+    vi.stubGlobal("dohcDesktop", bridge);
+    const user = userEvent.setup();
+    const view = render(shell(WORKSPACE));
+
+    // A's answers paint in A: the control that makes the absence below mean
+    // something.
+    await user.click(screen.getByTestId("activity-history"));
+    expect(await screen.findByText(A_CONTROL)).toBeTruthy();
+
+    // A asks again, and that answer is held.
+    holdA = true;
+    const readsBeforeHold = bridge.listEngineMoments.mock.calls.length;
+    act(() => {
+      bridge.emitWorkspaceActivity();
+    });
+    await waitFor(() =>
+      expect(bridge.listEngineMoments.mock.calls.length).toBeGreaterThan(readsBeforeHold),
+    );
+    const heldRead = bridge.listEngineMoments.mock.calls.length;
+    expect(bridge.listEngineMoments).toHaveBeenNthCalledWith(
+      heldRead,
+      expect.objectContaining({ workspaceId: WORKSPACE.workspaceId }),
+    );
+
+    // Switch to B the way DesktopRoot does, and wait for B's own history.
+    selected = OTHER_WORKSPACE.workspaceId;
+    view.rerender(shell(OTHER_WORKSPACE));
+    await waitFor(() =>
+      expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"),
+    );
+    await user.click(screen.getByTestId("activity-history"));
+    expect(await screen.findByText(B_ONLY)).toBeTruthy();
+    expect(screen.queryByText(A_CONTROL)).toBeNull();
+
+    // Only now does A's held answer land, and the renderer consumes it.
+    await act(async () => {
+      heldA.resolve(historyPage([historyMoment("m-a-stale", A_STALE)]));
+      await heldA.promise;
+    });
+    await act(async () => {});
+
+    expect(screen.queryByText(A_STALE)).toBeNull();
+    expect(screen.queryByText(A_CONTROL)).toBeNull();
+    expect(screen.getByText(B_ONLY)).toBeTruthy();
+    expect(screen.getAllByTestId("engine-moment-open")).toHaveLength(1);
+  });
+
   it("uses the admitted rename label in the row, search and diff header", async () => {
     const bridge = makeBridge(Promise.resolve(null));
     const renamed: EngineMomentRecord = { id: "rename", versionId: "main", path: "notes/b.md", recordedAtMs: 100,
@@ -286,6 +361,23 @@ describe("history page", () => {
     await user.type(screen.getByTestId("engine-history-search"), "Renamed to");
     await user.click(screen.getByTestId("engine-moment-open"));
     expect((await screen.findByTestId("engine-diff-summary")).textContent).toBe("Renamed to b.md");
+  });
+
+  it("finds a moment by an author its shortened source label leaves out", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.listEngineMoments = vi.fn(async () => historyPage([
+      {...historyMoment("many", "Revised the plan"), authorLabels: ["You", "trip-agent", "ana@example.com", "ben@example.com"]},
+      historyMoment("other", "Wrote the outline"),
+    ]));
+    const user = userEvent.setup();
+    renderShell(bridge);
+    await screen.findByTestId("titlebar-about-sidebar");
+    await user.click(screen.getByTestId("activity-history"));
+    expect(await screen.findByText("Wrote the outline")).toBeTruthy();
+    expect(screen.getByText("You, trip-agent, ana@example.com and 1 more")).toBeTruthy();
+    await user.type(screen.getByTestId("engine-history-search"), "ben@example.com");
+    await waitFor(() => expect(screen.queryByText("Wrote the outline")).toBeNull());
+    expect(screen.getByText("Revised the plan")).toBeTruthy();
   });
 
   it("keeps earlier History reachable when the bounded policy scan returns no rows", async () => {
@@ -2515,7 +2607,6 @@ describe("history page", () => {
     bridge.listEngineMoments = vi.fn(() => responses[issued++]!);
     let activeRunId: string | null = null;
     bridge.getAgentRunStatus = vi.fn(async () => ({
-      mcpEnabled: true,
       activeRun: activeRunId
         ? {
             id: activeRunId,
@@ -2564,10 +2655,16 @@ describe("history page", () => {
     );
     await screen.findByTestId("mcp-enable-toggle");
 
-    // Wait for the panel's initial read before starting the run.
+    // Wait for the panel's initial read to commit before starting the run.
+    // "Stopped" cannot show it: the panel renders that before any read lands.
+    // The config snippet commits in the same render as the status it read.
     await waitFor(() =>
-      expect(screen.getByTestId("mcp-status").getAttribute("data-state")).toBe("running"),
+      expect(screen.getByTestId("mcp-config-snippet").textContent).toContain(
+        '"command": "dohc-mcp"',
+      ),
     );
+    expect(screen.getByTestId("mcp-status").getAttribute("data-state")).toBe("stopped");
+    expect(bridge.getMcpConfig).toHaveBeenCalledTimes(1);
 
     // A run starts, and the toggle's reread catches it alive — but the reread
     // is still in flight.
@@ -2588,6 +2685,10 @@ describe("history page", () => {
       for (const answerRead of heldPanelReads) answerRead();
       await Promise.resolve();
     });
+    // The panel committed the run it saw, so the shell was handed an observation.
+    await waitFor(() =>
+      expect(screen.getByTestId("mcp-status").getAttribute("data-state")).toBe("running"),
+    );
     expect(bridge.startAgentRun).not.toHaveBeenCalled();
     expect(bridge.endAgentRun).not.toHaveBeenCalled();
 
@@ -2860,7 +2961,6 @@ describe("history page", () => {
         });
       }
       return Promise.resolve({
-        mcpEnabled: true,
         activeRun: runIsAlive
           ? {
               id: "run-1",
@@ -2964,7 +3064,6 @@ describe("history page", () => {
       movedOn ? { ...SYNC_STATUS, state: "syncing" as const } : SYNC_STATUS,
     );
     bridge.getAgentRunStatus = vi.fn(async () => ({
-      mcpEnabled: false,
       activeRun: movedOn
         ? {
             id: "run-1",
@@ -3020,12 +3119,10 @@ describe("history page", () => {
   // believed nothing had answered.
   it("keeps an older no-history refresh from undoing a newer agent answer", async () => {
     const idle: AgentRunStatusResult = {
-      mcpEnabled: false,
       activeRun: null,
       lastRun: null,
     };
     const running: AgentRunStatusResult = {
-      mcpEnabled: false,
       activeRun: {
         id: "run-1",
         startedAt: 1,
@@ -3089,7 +3186,6 @@ describe("history page", () => {
         throw new Error("agent status failed");
       }
       return {
-        mcpEnabled: false,
         activeRun: null,
         lastRun: null,
       };
