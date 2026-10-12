@@ -15,11 +15,16 @@ import { act, cleanup, fireEvent, screen, waitFor, within } from "@testing-libra
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import { CHATS_TAB_PATH, chatTabPath } from "../workbench/workbenchState";
+import { deferred } from "../../testing/deferred";
 import {
   WORKSPACE,
   STORED_STATE,
+  SHARE_VIEW,
+  SYNC_STATUS,
   makeBridge,
+  makeShareBridge,
   renderShell,
+  storedStateWithTabs,
 } from "../DesktopWorkspaceShell.testHarness";
 
 describe("About rail (right side)", () => {
@@ -214,6 +219,59 @@ describe("About rail (right side)", () => {
     const reopened = await screen.findByTestId("about-rail");
     expect((await within(reopened).findByTestId("about-header")).textContent).toBe("b.md");
     expect(within(reopened).queryByTestId("linked-chat-thread")).toBeNull();
+  });
+
+  it("drops a hit not yet read when focus moves while About is closed", async () => {
+    const bridge = makeBridge(Promise.resolve({ ...storedStateWithTabs(["a.md", "b.md"], "a.md"), aboutVisible: false }));
+    bridge.listFileChats.mockResolvedValue({ fileObjectId: "object-a", threads: [] });
+    // Main has not decided capture, so About cannot read the hit yet.
+    const admission = deferred<typeof SYNC_STATUS>();
+    bridge.openWorkspace.mockImplementation(() => admission.promise);
+    const user = userEvent.setup();
+    renderShell(bridge);
+    await screen.findByTestId("tab-a.md");
+
+    await user.click(screen.getByTestId("activity-search"));
+    await user.type(screen.getByTestId("search-input"), "pricing");
+    await waitFor(() => expect(bridge.searchWorkspace).toHaveBeenCalled());
+    const { searchId } = bridge.searchWorkspace.mock.calls.at(-1)![0];
+    act(() => {
+      bridge.emitSearchResults({
+        searchId,
+        entries: [{
+          path: "other.md", line: 1, column: 1, preview: "pricing questions", matchStart: 0, matchEnd: 7,
+          surface: "chat", threadId: "thread-pricing", title: "Pricing questions",
+        }],
+        done: true,
+        limitHit: false,
+      });
+    });
+    await user.click(await screen.findByTestId("search-result-row"));
+    expect(within(await screen.findByTestId("about-rail")).getByText("Loading About...")).toBeTruthy();
+
+    // Close About, move to b.md, open About again, and let main decide.
+    await user.click(screen.getByTestId("titlebar-about-sidebar"));
+    await user.click(screen.getByTestId("tab-b.md"));
+    await user.click(screen.getByTestId("titlebar-about-sidebar"));
+    await act(async () => admission.resolve(SYNC_STATUS));
+    const rail = await screen.findByTestId("about-rail");
+    expect((await within(rail).findByTestId("about-header")).textContent).toBe("b.md");
+    expect(within(rail).queryByTestId("linked-chat-thread")).toBeNull();
+    // Nor does it wait on a.md: the hit ended when focus left it.
+    await user.click(screen.getByTestId("tab-a.md"));
+    await waitFor(() => expect(within(rail).getByTestId("about-header").textContent).toBe("a.md"));
+    expect(within(rail).queryByTestId("linked-chat-thread")).toBeNull();
+  });
+
+  it("points a shared view at its files only, whatever chat tabs it kept", async () => {
+    const bridge = makeShareBridge(Promise.resolve({
+      ...storedStateWithTabs([chatTabPath({ kind: "channel", id: "general" }), CHATS_TAB_PATH], CHATS_TAB_PATH),
+      aboutVisible: true,
+    }));
+    renderShell(bridge, SHARE_VIEW);
+    expect((await within(await screen.findByTestId("about-rail")).findByTestId("linked-chats-empty")).textContent).toBe(
+      "Open a file to see its chats and access.",
+    );
   });
 
   it("restores a layout saved with the old right-panel fields with About closed", async () => {

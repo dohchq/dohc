@@ -10,8 +10,8 @@ import { DEFAULT_USER_SETTINGS } from "../../settings/userSettings";
 import { publishAboutConversation, type AboutConversation } from "../workbench/aboutConversation";
 import { setChosenColors } from "../workbench/chosenColors";
 import { ReactionStoreProvider } from "../workbench/reactionStore";
-import { chatTabPath, defaultWorkbenchState } from "../workbench/workbenchState";
-import { ShellAboutRail } from "./ShellAboutRail";
+import { CHATS_TAB_PATH, GRAPH_TAB_PATH, chatTabPath, defaultWorkbenchState } from "../workbench/workbenchState";
+import { ShellAboutRail, type AboutSearchHit } from "./ShellAboutRail";
 
 const bridgeMock = {
   getObjectAccess: vi.fn<(input: { workspaceId: string; ref: unknown }) => Promise<AccessAnswer>>(),
@@ -49,6 +49,11 @@ function answer(rows: AccessAnswer["rows"] = []): AccessAnswer {
   };
 }
 
+// A hit as the shell mints it, for the tab it belongs to.
+const searchHit = (tab: string, id: string, title: string): AboutSearchHit => ({
+  thread: { id, title, createdAtMs: 1, updatedAtMs: 1 }, tab, read: false,
+});
+
 const withdrawals: Array<() => void> = [];
 function publish(workspaceId: string, tabPath: string, entry: AboutConversation | "none") {
   let withdraw = () => {};
@@ -75,7 +80,7 @@ function Rail(props: Partial<ComponentProps<typeof ShellAboutRail>>) {
         aboutTabOpen={false}
         shareView={null}
         searchChatTarget={null}
-        setSearchChatTarget={() => undefined}
+        onSearchHitRead={() => undefined}
         openPathWithHeading={() => undefined}
         onChatsThreadRead={() => undefined}
         reportFailureMessage={() => undefined}
@@ -191,55 +196,74 @@ describe("About for an open conversation", () => {
     bridgeMock.listFileChats.mockResolvedValue({ fileObjectId: "object-b", threads: [] });
     publish("workspace-a", GENERAL, conversation({}));
     publish("workspace-a", LAUNCH, conversation({ name: "launch", channelWireId: "wire-launch" }));
-    const hit = { thread: { id: "thread-pricing", title: "Pricing questions", createdAtMs: 1, updatedAtMs: 1 } };
-    // The shell clears the hit only once About's file panel reads it. Here
-    // it never does, so the hit stays set across every focus change.
-    const { rerender } = render(<Rail focusedTabPath="b.md" activeDocumentPath="b.md" searchChatTarget={hit} />);
+    const hit = searchHit("b.md", "thread-pricing", "Pricing questions");
+    const onSearchHitRead = vi.fn();
+    const { rerender } = render(
+      <Rail focusedTabPath="b.md" activeDocumentPath="b.md" searchChatTarget={hit} onSearchHitRead={onSearchHitRead} />,
+    );
     expect((await screen.findByTestId("linked-chat-title")).textContent).toBe("Pricing questions");
+    expect(onSearchHitRead).toHaveBeenCalledTimes(1);
+    const read = { ...hit, read: true };
 
-    rerender(<Rail focusedTabPath={GENERAL} searchChatTarget={hit} />);
+    // A hit still set for another tab shows nowhere else.
+    rerender(<Rail focusedTabPath={GENERAL} searchChatTarget={read} />);
     expect((await screen.findByTestId("about-header")).textContent).toBe("general");
     expect(screen.queryByTestId("linked-chat-thread")).toBeNull();
-    rerender(<Rail focusedTabPath={LAUNCH} searchChatTarget={hit} />);
+    rerender(<Rail focusedTabPath={LAUNCH} searchChatTarget={read} />);
     expect(screen.getByTestId("about-header").textContent).toBe("launch");
 
     // A new hit on a conversation tab shows its chat there.
-    const next = { thread: { ...hit.thread, id: "thread-launch", title: "Launch date" } };
+    const next = searchHit(LAUNCH, "thread-launch", "Launch date");
     rerender(<Rail focusedTabPath={LAUNCH} searchChatTarget={next} />);
     expect((await screen.findByTestId("linked-chat-title")).textContent).toBe("Launch date");
-    rerender(<Rail focusedTabPath={GENERAL} searchChatTarget={next} />);
+    // Read, it stays while its tab has focus.
+    rerender(<Rail focusedTabPath={LAUNCH} searchChatTarget={{ ...next, read: true }} />);
+    expect(screen.getByTestId("linked-chat-title").textContent).toBe("Launch date");
+    // The shell drops it when focus leaves; back on its tab, the tab shows
+    // its own conversation.
+    rerender(<Rail focusedTabPath={GENERAL} searchChatTarget={null} />);
     expect((await screen.findByTestId("about-header")).textContent).toBe("general");
-    // Back on the tab the hit arrived on, after it was read: the hit is over,
-    // and the tab shows its own conversation.
-    rerender(<Rail focusedTabPath={LAUNCH} searchChatTarget={next} />);
+    rerender(<Rail focusedTabPath={LAUNCH} searchChatTarget={null} />);
     expect((await screen.findByTestId("about-header")).textContent).toBe("launch");
     expect(screen.queryByTestId("linked-chat-thread")).toBeNull();
   });
 
-  it("never opens a hit not yet read under the next file focused", async () => {
+  it("never opens a hit under any tab but its own, even on a rail that mounts after it", async () => {
     bridgeMock.listFileChats.mockResolvedValue({ fileObjectId: "object-b", threads: [] });
     bridgeMock.listEngineMoments.mockResolvedValue({
       moments: [], nextBeforeMomentOrder: null, latestMomentOrder: 0, activeVersionId: "main", protectedTruncated: false,
     });
-    const setSearchChatTarget = vi.fn();
-    const hit = { thread: { id: "thread-pricing", title: "Pricing questions", createdAtMs: 1, updatedAtMs: 1 } };
-    // The hit arrives on a.md while main has not decided capture, so About's
-    // file panel is not there to read it.
-    const { rerender } = render(
-      <Rail focusedTabPath="a.md" activeDocumentPath="a.md" searchChatTarget={hit}
-        setSearchChatTarget={setSearchChatTarget} captureAvailable={false} captureDecided={false} />,
-    );
-    expect(screen.getByText("Loading About...")).toBeTruthy();
-
-    rerender(
-      <Rail focusedTabPath="b.md" activeDocumentPath="b.md" searchChatTarget={hit}
-        setSearchChatTarget={setSearchChatTarget} />,
+    const onSearchHitRead = vi.fn();
+    // A hit for a.md, not yet read, reaches a rail opened on b.md: About was
+    // collapsed while focus moved.
+    render(
+      <Rail focusedTabPath="b.md" activeDocumentPath="b.md"
+        searchChatTarget={searchHit("a.md", "thread-pricing", "Pricing questions")} onSearchHitRead={onSearchHitRead} />,
     );
     expect((await screen.findByTestId("about-header")).textContent).toBe("b.md");
     await act(async () => undefined);
     expect(screen.queryByTestId("linked-chat-thread")).toBeNull();
-    // The shell drops the hit, so reopening About cannot bring it back.
-    expect(setSearchChatTarget).toHaveBeenCalledWith(null);
+    expect(onSearchHitRead).not.toHaveBeenCalled();
+  });
+
+  it("drops a read hit's chat when focus moves between two tabs that are not files", async () => {
+    bridgeMock.listChatMessages.mockResolvedValue({ messages: [] });
+    bridgeMock.listChatReactions.mockResolvedValue({ reactions: [], viewerAuthorId: "you" });
+    bridgeMock.markChatThreadRead.mockResolvedValue({ lastReadSequence: 0, revision: 1 });
+    publish("workspace-a", GENERAL, conversation({}));
+    const hit = searchHit(GENERAL, "thread-pricing", "Pricing questions");
+    const { rerender } = render(<Rail focusedTabPath={GENERAL} searchChatTarget={hit} />);
+    expect((await screen.findByTestId("linked-chat-title")).textContent).toBe("Pricing questions");
+
+    // Chats Home, then Graph: About's file panel stays mounted with no file
+    // for both, and still shows nothing of the hit.
+    rerender(<Rail focusedTabPath={CHATS_TAB_PATH} searchChatTarget={null} />);
+    expect((await screen.findByTestId("linked-chats-empty")).textContent).toBe(
+      "Open a file or a conversation to see who has access.",
+    );
+    expect(screen.queryByTestId("linked-chat-thread")).toBeNull();
+    rerender(<Rail focusedTabPath={GRAPH_TAB_PATH} searchChatTarget={null} />);
+    expect(screen.getByTestId("linked-chats-empty")).toBeTruthy();
   });
 
   it("never shows the last conversation's name or access after a fast tab switch", async () => {

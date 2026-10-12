@@ -89,6 +89,8 @@ function isWorkspaceUpdatingResponse(
 export function LinkedChatsPanel(props: {
   workspaceId: string;
   filePath: string | null;
+  // The focused tab, which About is about.
+  tabPath?: string | null;
   // With no file or conversation focused: whether another tab holds a file
   // or a conversation. The empty state then says to switch instead of to open.
   aboutTabOpen?: boolean;
@@ -196,8 +198,11 @@ export function LinkedChatsPanel(props: {
     }
   }, [filePath, notices, threadsKey, workspaceId]);
 
-  // File (or workspace) switch: drop everything stale and reload. The file
-  // that leaves About takes its Notices row with it.
+  // File, tab or workspace switch: drop everything stale and reload. The file
+  // that leaves About takes its Notices row with it. A tab switch counts even
+  // between two tabs that are not files, so a chat opened under one never
+  // stays under the next. A file's tab is the file, so it reads no more often.
+  const { tabPath } = props;
   useEffect(() => {
     liveToken.current += 1;
     setActiveThread(null);
@@ -214,7 +219,7 @@ export function LinkedChatsPanel(props: {
       threadsToken.current += 1;
       notices.clear(`about-chats:${filePath}`);
     };
-  }, [filePath, notices, refreshThreads]);
+  }, [filePath, notices, refreshThreads, tabPath]);
 
   const openThread = useCallback(
     async (thread: ChatThreadRecord, focusMessageId?: string) => {
