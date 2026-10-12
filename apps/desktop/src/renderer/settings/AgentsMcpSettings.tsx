@@ -36,7 +36,7 @@ const USAGE_EXAMPLES = [
 
 export function AgentsMcpSettings(props: {
   workspaceId: string;
-  onError?: (message: string, cause?: unknown) => void;
+  onError?: (message: string, cause?: unknown, retry?: () => Promise<void>) => void;
   workspacePath: string;
   preferredName?: string;
   agentName?: string;
@@ -71,7 +71,7 @@ export function AgentsMcpSettings(props: {
   const [status, setStatus] = useState<AgentRunStatusResult | null>(null);
   const [config, setConfig] = useState<McpConfigResult | null>(null);
   const [busy, setBusy] = useState(false);
-  const [loadError, setLoadError] = useState<string | null>(null);
+  const [retry, setRetry] = useState<(() => Promise<void>) | null>(null);
   // Workspace async safety invariant: IPC responses are allowed to update this
   // panel only if they belong to the latest workspace/request version.
   const requestVersionRef = useRequestSequence();
@@ -89,44 +89,45 @@ export function AgentsMcpSettings(props: {
     if (isCurrentRequest(version)) {
       setStatus(nextStatus);
       setConfig(nextConfig);
-      setLoadError(null);
     }
     return nextStatus;
   }, [isCurrentRequest, workspaceId]);
 
-  const retryRefresh = useCallback(() => {
-    const version = requestVersionRef.current();
-    setLoadError(null);
-    // Busy keeps a toggle from starting while this older read can still paint.
-    setBusy(true);
-    void refresh(version)
-      .catch((cause: unknown) => {
-        if (isCurrentRequest(version)) {
-          setLoadError("Could not load agent settings.");
-          onError?.(ipcErrorMessage(cause, "dohc could not load agent settings."), cause);
-        }
-      })
-      .finally(() => {
+  const loadSettings = useCallback((version: number) => {
+    let inFlight: Promise<void> | null = null;
+    const attempt = async (retrying: boolean) => {
+      if (isCurrentRequest(version)) setBusy(true);
+      try {
+        await refresh(version);
+        if (isCurrentRequest(version)) setRetry(null);
+      } catch (cause) {
+        if (!retrying && !isCurrentRequest(version)) return;
+        const askAgain = () => execute(true);
+        if (isCurrentRequest(version)) setRetry(() => askAgain);
+        onError?.(ipcErrorMessage(cause, "dohc could not load agent settings."), cause, askAgain);
+      } finally {
         if (isCurrentRequest(version)) setBusy(false);
-      });
+      }
+    };
+    const execute = (retrying = false): Promise<void> => {
+      if (inFlight) return retrying ? inFlight.then(() => execute(true)) : inFlight;
+      inFlight = attempt(retrying).finally(() => { inFlight = null; });
+      return inFlight;
+    };
+    void execute();
   }, [isCurrentRequest, onError, refresh]);
 
   useEffect(() => {
     const version = requestVersionRef.next();
     setStatus(null);
     setConfig(null);
-    setLoadError(null);
+    setRetry(null);
     setBusy(false);
-    void refresh(version).catch((cause: unknown) => {
-      if (isCurrentRequest(version)) {
-        setLoadError("Could not load agent settings.");
-        onError?.(ipcErrorMessage(cause, "dohc could not load agent settings."), cause);
-      }
-    });
+    loadSettings(version);
     return () => {
       requestVersionRef.next();
     };
-  }, [isCurrentRequest, onError, refresh, workspaceId]);
+  }, [loadSettings, workspaceId]);
 
   const runActive = Boolean(status?.activeRun);
   const runnerConfigured = configuredRunnerCommand(runner).length > 0;
@@ -144,65 +145,78 @@ export function AgentsMcpSettings(props: {
       : { state: "missing", label: "No runner command" };
 
   const toggle = useCallback(async () => {
-    const version = requestVersionRef.current();
+    const version = requestVersionRef.next();
     const renderedRunId = status?.activeRun?.id ?? null;
     const starting = renderedRunId === null;
     let attempted = false;
     let changed = false;
-    setBusy(true);
-    try {
-      const latestStatus = await refresh(version);
-      if (!isCurrentRequest(version)) return;
-      const latestRun = latestStatus.activeRun;
-      if ((latestRun?.id ?? null) !== renderedRunId) {
-        // The run changed under the rendered label, so this click only
-        // reports what the reread saw. Nothing was started or ended.
-        onAgentActiveChange?.({ active: latestRun !== null, mutated: false });
-        return;
-      }
-      attempted = true;
-      if (latestRun) {
-        await bridge().endAgentRun({ workspaceId, runId: latestRun.id });
-      } else {
-        await bridge().startAgentRun({ workspaceId });
-      }
-      changed = true;
-      const finalStatus = await refresh(version);
-      if (isCurrentRequest(version)) {
-        onAgentActiveChange?.({ active: finalStatus.activeRun !== null, mutated: true });
-      }
-    } catch (cause) {
-      if (!isCurrentRequest(version)) return;
-      if (changed || !attempted) {
-        // Only a read failed: the one before the start or end, or the one after it.
-        setLoadError("Could not load agent settings.");
-        onError?.(ipcErrorMessage(cause, "dohc could not load agent settings."), cause);
-      } else if (starting) {
-        setLoadError("Could not start the agent run.");
-        onError?.(ipcErrorMessage(cause, "dohc could not start an agent run in this workspace. Try again."), cause);
-      } else {
-        setLoadError("Could not stop the agent run.");
-        onError?.(ipcErrorMessage(cause, "dohc could not stop this workspace's agent run. Try again."), cause);
-      }
-      if (!attempted) return;
-      // Reread live status alone: the config did not change. After a refusal
-      // it is only an observation, since a refusal does not say whether the
-      // run changed.
+    let inFlight: Promise<void> | null = null;
+    const attempt = async (retrying: boolean) => {
+      if (isCurrentRequest(version)) setBusy(true);
       try {
-        const observed = await bridge().getAgentRunStatus({ workspaceId });
-        if (!isCurrentRequest(version)) return;
-        setStatus(observed);
-        onAgentActiveChange?.({ active: observed.activeRun !== null, mutated: changed });
-      } catch {
-        // The failure above is already this click's notice. A run that did
-        // change still needs the shell to reread it, so report an observation.
-        if (changed && isCurrentRequest(version)) {
-          onAgentActiveChange?.({ active: starting, mutated: false });
+        if (!attempted || (starting && !changed)) {
+          const latestStatus = await refresh(version);
+          if (!retrying && !isCurrentRequest(version)) return;
+          const latestRun = latestStatus.activeRun;
+          if ((latestRun?.id ?? null) !== renderedRunId) {
+            // The run changed under the rendered label, so this click only
+            // reports what the reread saw. Nothing was started or ended.
+            if (isCurrentRequest(version)) {
+              setRetry(null);
+              onAgentActiveChange?.({ active: latestRun !== null, mutated: false });
+            }
+            return;
+          }
         }
+        if (!changed) {
+          attempted = true;
+          if (renderedRunId !== null) {
+            await bridge().endAgentRun({ workspaceId, runId: renderedRunId });
+          } else {
+            await bridge().startAgentRun({ workspaceId });
+          }
+          changed = true;
+        }
+        const finalStatus = await refresh(version);
+        if (isCurrentRequest(version)) {
+          setRetry(null);
+          onAgentActiveChange?.({ active: finalStatus.activeRun !== null, mutated: !retrying });
+        }
+      } catch (cause) {
+        if (!retrying && !isCurrentRequest(version)) return;
+        const askAgain = () => execute(true);
+        if (isCurrentRequest(version)) setRetry(() => askAgain);
+        const fallback = changed || !attempted
+          ? "dohc could not load agent settings."
+          : starting ? "dohc could not start an agent run in this workspace. Try again."
+            : "dohc could not stop this workspace's agent run. Try again.";
+        onError?.(ipcErrorMessage(cause, fallback), cause, askAgain);
+        if (!attempted) return;
+        // Reread live status alone: the config did not change. After a refusal
+        // it is only an observation, since a refusal does not say whether the
+        // run changed.
+        try {
+          const observed = await bridge().getAgentRunStatus({ workspaceId });
+          if (!isCurrentRequest(version)) return;
+          setStatus(observed);
+          onAgentActiveChange?.({ active: observed.activeRun !== null, mutated: changed && !retrying });
+        } catch {
+          // The failure above is already this click's notice. A run that did
+          // change still needs the shell to reread it, so report an observation.
+          if (changed && isCurrentRequest(version)) {
+            onAgentActiveChange?.({ active: starting, mutated: false });
+          }
+        }
+      } finally {
+        if (isCurrentRequest(version)) setBusy(false);
       }
-    } finally {
-      if (isCurrentRequest(version)) setBusy(false);
-    }
+    };
+    const execute = (retrying = false): Promise<void> => {
+      if (inFlight) return retrying ? inFlight.then(() => execute(true)) : inFlight;
+      inFlight = attempt(retrying).finally(() => { inFlight = null; });
+      return inFlight;
+    };
+    await execute();
   }, [workspaceId, refresh, isCurrentRequest, status?.activeRun?.id, onAgentActiveChange, onError]);
 
   return (
@@ -310,16 +324,15 @@ export function AgentsMcpSettings(props: {
         </button>
       </SettingRow>
 
-      {loadError ? (
+      {retry ? (
         <div
           data-testid="mcp-load-error"
-          className="flex items-center justify-between gap-3 border-b border-line py-3 text-[11px] text-danger"
+          className="flex justify-end border-b border-line py-3 text-[11px]"
         >
-          <span>{loadError}</span>
           <button
             type="button"
             disabled={busy}
-            onClick={retryRefresh}
+            onClick={retry}
             className="rounded-md border border-line px-2 py-1 text-muted transition-colors hover:bg-hover hover:text-ink disabled:opacity-50"
           >
             Retry

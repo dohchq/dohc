@@ -1686,6 +1686,18 @@ export function DesktopWorkspaceShell(props: {
     },
     [agentActiveLane, refreshAgentLane],
   );
+  const reportSettingsFailure = useCallback(
+    (message: string, cause?: unknown, retry?: () => Promise<void>) => {
+      if (workspaceAdmission.superseded || workspaceIdRef.current !== workspaceId) return;
+      reportShellFailure({ message, cause, retry: retry ? () => {
+        if (workspaceAdmission.superseded || workspaceIdRef.current !== workspaceId) return;
+        void retry().then(() => {
+          if (!workspaceAdmission.superseded && workspaceIdRef.current === workspaceId) refreshAgentLane();
+        });
+      } : null });
+    },
+    [workspaceAdmission, workspaceId, reportShellFailure, refreshAgentLane],
+  );
 
   const refreshHistory = useCallback(async () => {
     // Nothing to refresh before main's capture decision lands. Any
@@ -6196,7 +6208,7 @@ export function DesktopWorkspaceShell(props: {
       {settingsSection ? (
         <Overlay onClose={closeSettings}>
           <LazyDesktopSettings
-            onError={reportFailureMessage}
+            onError={reportSettingsFailure}
             onWorkspaceSettingsRead={onWorkspaceSettingsRead}
             workspaceId={workspaceId}
             workspacePath={props.workspace.rootPath}

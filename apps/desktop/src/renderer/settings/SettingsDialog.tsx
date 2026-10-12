@@ -102,7 +102,7 @@ function StatusPill(props: { state: SettingsSaveState }) {
 }
 
 export function SettingsDialog(props: {
-  onError?: (message: string, cause?: unknown) => void;
+  onError?: (message: string, cause?: unknown, retry?: () => Promise<void>) => void;
   /** Each workspace settings answer, so the shell can say what the file ignored. */
   onWorkspaceSettingsRead?: (read: WorkspaceSettingsResult) => void;
   workspaceId: string;
