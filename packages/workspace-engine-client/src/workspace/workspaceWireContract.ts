@@ -985,6 +985,12 @@ const CollectionGetRecordResultSchema = mutableStruct({
             automationName: Schema.String,
           }),
         ),
+        linkAuthor: Schema.NullOr(mutableStruct({
+          kind: Schema.Literal("link"),
+          grantId: Schema.String,
+          grantGeneration: Schema.Int,
+          publicPrincipalId: Schema.String,
+        })),
       }),
     ),
   ),

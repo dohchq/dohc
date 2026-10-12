@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { Node as PMNode } from '@tiptap/pm/model'
 import { EditorState } from '@tiptap/pm/state'
 import type { DecorationSet } from '@tiptap/pm/view'
-import { getDohcProseMirrorSchema } from './import-export'
+import { getDohcProseMirrorSchema } from '@dohc/ydoc-projection'
 import { codeBlock, doc, paragraph } from './testDocs'
 import {
   codeHighlightKey,

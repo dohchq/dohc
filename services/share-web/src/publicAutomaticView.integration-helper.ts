@@ -65,8 +65,9 @@ export async function runPublicAutomaticView(options: Options) {
     const opened = await owner.sendRequest({id: requestId++, method: "workspace.open", params: {rootDir: ownerRoot, workspaceId, captureMode: "none",
       relay: {baseUrl: options.relayUrl, bearerToken: options.ownerToken, allowInsecureLoopbackForTests: true}}, deadlineMs: h.timeoutMs});
     const handle = (opened.result as {workspace: string}).workspace;
-    const rpc = async <T = unknown>(method: string, params: Parameters<typeof owner.sendRequest>[0]["params"]) => {
-      const response = await owner.sendRequest({id: requestId++, workspace: handle, method, params, deadlineMs: h.timeoutMs});
+    const rpc = async <T = unknown>(method: string, params: Parameters<typeof owner.sendRequest>[0]["params"], idempotencyKey?: string) => {
+      const response = await owner.sendRequest({id: requestId++, workspace: handle, method, params, deadlineMs: h.timeoutMs,
+        ...(idempotencyKey === undefined ? {} : {idempotencyKey})});
       return response.result as T;
     };
     await rpc("sync.claim", {workspaceId});
@@ -82,7 +83,7 @@ export async function runPublicAutomaticView(options: Options) {
     }
     // Establish ordinary enrollment before the owner creates a replicated live lineage.
     await pushAll();
-    const written = await rpc<{object: {id: string}}>("versionedText.write", {workspaceId, versionId: mainVersionId, path, text: selected.baseline.markdown.toString(), origin: "api", requestId: randomUUID()});
+    const written = await rpc<{object: {id: string}}>("versionedText.write", {workspaceId, versionId: mainVersionId, path, text: selected.baseline.markdown.toString(), origin: "api"}, randomUUID());
     const objectId = written.object.id as string;
     const editor = await rpc<{sessionId: string}>("ydoc.open", {versionId: mainVersionId, path, expectedObjectId: objectId, contentKind: "richdoc"});
     await rpc("ydoc.recordUpdate", {sessionId: editor.sessionId, updateBase64: selected.baseline.checkpoint.toString("base64"), seed: true});

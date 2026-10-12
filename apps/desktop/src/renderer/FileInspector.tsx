@@ -292,6 +292,8 @@ type FileInspectorProps = {
   // Editor save-state seam for the tab strip's dirty indicator. Editable
   // source/table/document views all report through the same small contract.
   onSaveStateChange?: (state: SaveState) => void;
+  // A live document became read-only while it was open.
+  onLiveReadOnly?: () => void;
   // Registers the active editor's draft flush with the shell: explorer ops
   // await it before re-pathing files.
   registerDraftFlush?: (flush: DraftFlush | null) => void;
@@ -741,6 +743,7 @@ export const FileInspector = memo(function FileInspector(
             chatMentionsAvailable={props.chatMentionsAvailable}
             onSharePath={props.onSharePath}
             onSaveStateChange={props.onSaveStateChange}
+            onLiveReadOnly={props.onLiveReadOnly}
             registerDraftFlush={props.registerDraftFlush}
             knownFiles={props.knownMarkdownFiles}
             pendingUndo={pendingTextUndo}

@@ -174,45 +174,50 @@ test("attachment location setting persists across reopen", async () => {
   }
 });
 
-test("settings remains usable at desktop minimum size", async () => {
+test("settings remains usable down to the minimum supported renderer viewport", async () => {
   const temp = await createTempWorkspace();
   let desktop: LaunchedDesktopApp | null = null;
 
   try {
     desktop = await openWorkspace(temp);
-    // Cover comfortable desktop sizes down to the minimum supported shell
-    // dimensions so the modal stays usable at responsive breakpoints.
+    // Pin CSS viewport dimensions so native window frame and DPI rounding
+    // do not decide which responsive layout this test covers.
     for (const [width, height] of [
       [1040, 760],
       [920, 700],
       [840, 620],
     ]) {
-      await desktop.app.evaluate(
-        async ({ BrowserWindow }, size) => {
-          BrowserWindow.getAllWindows()[0]?.setSize(size.width, size.height);
-        },
-        { width, height },
-      );
-      // Windows DPI scaling can round the applied size by a pixel; the
-      // responsive breakpoint under test is unaffected by that rounding.
-      // Other platforms keep the exact round-trip pin.
-      const sizeTolerance = process.platform === "win32" ? 1 : 0;
+      await desktop.page.setViewportSize({ width, height });
       await expect
-        .poll(async () => {
-          const size = await desktop!.app.evaluate(({ BrowserWindow }) => {
-            const [currentWidth, currentHeight] =
-              BrowserWindow.getAllWindows()[0]?.getSize() ?? [0, 0];
-            return { height: currentHeight, width: currentWidth };
-          });
-          return (
-            Math.abs(size.width - width) <= sizeTolerance &&
-            Math.abs(size.height - height) <= sizeTolerance
-          );
-        })
-        .toBe(true);
+        .poll(() =>
+          desktop!.page.evaluate(() => ({ width: innerWidth, height: innerHeight })),
+        )
+        .toEqual({ width, height });
       await openSettings(desktop.page);
-      await expect(desktop.page.getByTestId(desktopPins.settingsSearch)).toBeVisible();
-      await expect(desktop.page.getByRole("button", { name: "Close settings" })).toBeVisible();
+      const dialog = desktop.page.getByTestId(desktopPins.settingsDialog);
+      await expect
+        .poll(() =>
+          dialog.evaluate((element) => {
+            const rect = element.getBoundingClientRect();
+            return (
+              rect.left >= 0 &&
+              rect.top >= 0 &&
+              rect.right <= innerWidth &&
+              rect.bottom <= innerHeight
+            );
+          }),
+        )
+        .toBe(true);
+      const search = desktop.page.getByTestId(desktopPins.settingsSearch);
+      await expect(search).toBeVisible();
+      await expect(search).toBeInViewport({ ratio: 1 });
+      await search.click();
+      await search.fill("theme");
+      await expect(desktop.page.getByTestId(settingsSectionPin("appearance"))).toBeVisible();
+      await search.fill("");
+      const closeButton = desktop.page.getByRole("button", { name: "Close settings" });
+      await expect(closeButton).toBeVisible();
+      await expect(closeButton).toBeInViewport({ ratio: 1 });
       await closeSettings(desktop.page);
     }
   } finally {

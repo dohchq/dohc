@@ -8,7 +8,7 @@ import {
   resolveTableDropDestination,
   resolveTableMenuPosition,
 } from "./tableControls";
-import { DohcTableRowHeight } from "./extensions";
+import { DohcTableRowHeight } from "@dohc/ydoc-projection/markdown-extensions";
 
 // ProseMirror's resize/drop plugins ask the browser for a hit-test while these
 // tests dispatch synthetic pointer/drag events. jsdom has no layout engine, so

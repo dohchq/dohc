@@ -1246,6 +1246,243 @@ fn eligible_scan_rolls_back_ledger_and_cursor_together() {
     );
 }
 
+fn local_discovery_state(store: &EngineStore) -> (i64, i64, i64) {
+    store
+        .read_with(|conn| {
+            Ok::<_, StorageError>((
+                conn.query_row(
+                    "SELECT COUNT(*) FROM chat_dispatch_ledger WHERE workspace_id=?1",
+                    [WS],
+                    |row| row.get(0),
+                )
+                .map_err(StorageError::corrupt_public)?,
+                conn.query_row(
+                    "SELECT max_created_at_ms FROM chat_dispatch_scan_cursor WHERE workspace_id=?1",
+                    [WS],
+                    |row| row.get(0),
+                )
+                .map_err(StorageError::corrupt_public)?,
+                conn.query_row(
+                    "SELECT COUNT(*) FROM chat_dispatch_local_discovery WHERE workspace_id=?1",
+                    [WS],
+                    |row| row.get(0),
+                )
+                .map_err(StorageError::corrupt_public)?,
+            ))
+        })
+        .expect("discovery state")
+}
+
+#[test]
+fn backward_clock_local_triggers_survive_scan_rollback_and_restart_and_dispatch_once() {
+    let (scratch, mut store) = store();
+    seed_channel(&mut store);
+    start_message(
+        &mut store,
+        "channel",
+        "initial-thread",
+        "initial",
+        ChatActorKind::Human,
+        None,
+        None,
+        "@agent",
+        100,
+    );
+    assert_eq!(
+        LinkedChatStore::new(&mut store)
+            .record_eligible_triggers(WS, None, 101, &NO_FAULTS)
+            .unwrap(),
+        1
+    );
+    start_message(
+        &mut store,
+        "channel",
+        "low-thread",
+        "low-first",
+        ChatActorKind::Human,
+        None,
+        None,
+        "@agent",
+        20,
+    );
+    send_text(
+        &mut store,
+        "initial-thread",
+        "low-reply",
+        ChatActorKind::Human,
+        None,
+        None,
+        "@agent",
+        15,
+    );
+    assert_eq!(local_discovery_state(&store), (1, 100, 2));
+    let failed = LinkedChatStore::new(&mut store).record_eligible_triggers(
+        WS,
+        None,
+        80,
+        ScriptedFaults::crash_at(FaultPoint::StorageBeforePersist).as_ref(),
+    );
+    assert!(failed.is_err());
+    assert_eq!(local_discovery_state(&store), (1, 100, 2));
+    drop(store);
+    let mut store = EngineStore::open(&engine_db_path(&scratch).unwrap(), 80).unwrap();
+    assert_eq!(
+        LinkedChatStore::new(&mut store)
+            .record_eligible_triggers(WS, None, 80, &NO_FAULTS)
+            .unwrap(),
+        2
+    );
+    assert_eq!(local_discovery_state(&store), (3, 100, 0));
+    assert_eq!(
+        LinkedChatStore::new(&mut store)
+            .record_eligible_triggers(WS, None, 81, &NO_FAULTS)
+            .unwrap(),
+        0
+    );
+    let times: Vec<(String, i64, i64)> = store.read_with(|conn| {
+        let mut stmt = conn.prepare("SELECT trigger_message_id, created_at_ms, updated_at_ms FROM chat_dispatch_ledger WHERE workspace_id=?1 AND trigger_message_id <> 'initial' ORDER BY trigger_message_id")
+            .map_err(StorageError::corrupt_public)?;
+        stmt.query_map([WS], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .map_err(StorageError::corrupt_public)?.collect::<Result<_, _>>().map_err(StorageError::corrupt_public)
+    }).unwrap();
+    assert_eq!(
+        times,
+        vec![
+            ("low-first".to_owned(), 20, 80),
+            ("low-reply".to_owned(), 15, 80)
+        ]
+    );
+}
+
+#[test]
+fn backward_clock_discovery_consumes_ineligible_local_rows_without_widening_old_row_eligibility() {
+    let (_scratch, mut store) = store();
+    seed_channel(&mut store);
+    start_message(
+        &mut store,
+        "channel",
+        "initial-thread",
+        "initial",
+        ChatActorKind::Human,
+        None,
+        None,
+        "@agent",
+        100,
+    );
+    assert_eq!(
+        LinkedChatStore::new(&mut store)
+            .record_eligible_triggers(WS, Some("alice"), 101, &NO_FAULTS)
+            .unwrap(),
+        1
+    );
+    for (id, kind, author, origin, body) in [
+        ("owned", ChatActorKind::Human, Some("alice"), None, "@agent"),
+        (
+            "other-owner",
+            ChatActorKind::Human,
+            Some("bob"),
+            None,
+            "@agent",
+        ),
+        ("cli", ChatActorKind::Human, None, Some("cli"), "@agent"),
+        ("agent", ChatActorKind::Agent, None, None, "@agent"),
+        ("ordinary", ChatActorKind::Human, None, None, "ordinary"),
+    ] {
+        start_message(
+            &mut store, "channel", id, id, kind, author, origin, body, 20,
+        );
+    }
+    // Received or pre-existing rows never pass through the local write queue.
+    store.write_with(&NO_FAULTS, |tx| {
+        tx.execute("INSERT INTO chat_messages (workspace_id,thread_id,message_order,message_id,author_kind,author_display_name,body,created_at_ms) VALUES (?1,'initial-thread',1,'old-unqueued','human','Ada','@agent',20)", [WS])
+            .map_err(StorageError::persist_public)?;
+        tx.execute("INSERT INTO chat_mentions (workspace_id,thread_id,message_id,handle,author_kind,created_at_ms) VALUES (?1,'initial-thread','old-unqueued','agent','human',20)", [WS])
+            .map_err(StorageError::persist_public)?;
+        Ok::<_, StorageError>(())
+    }).unwrap();
+    assert_eq!(local_discovery_state(&store), (1, 100, 5));
+    assert_eq!(
+        LinkedChatStore::new(&mut store)
+            .record_eligible_triggers(WS, Some("alice"), 110, &NO_FAULTS)
+            .unwrap(),
+        1
+    );
+    assert_eq!(local_discovery_state(&store), (2, 100, 0));
+    assert_eq!(
+        LinkedChatStore::new(&mut store)
+            .record_eligible_triggers(WS, Some("bob"), 120, &NO_FAULTS)
+            .unwrap(),
+        0
+    );
+    store.write_with(&NO_FAULTS, |tx| {
+        tx.execute("UPDATE chat_channels SET kind='agent' WHERE workspace_id=?1 AND channel_id='channel'", [WS])
+            .map_err(StorageError::persist_public)?;
+        Ok::<_, StorageError>(())
+    }).unwrap();
+    assert_eq!(
+        LinkedChatStore::new(&mut store)
+            .record_eligible_triggers(WS, Some("bob"), 130, &NO_FAULTS)
+            .unwrap(),
+        0
+    );
+}
+
+#[test]
+fn backward_clock_discovery_bounds_each_queue_page_and_continues_the_backlog() {
+    let (_scratch, mut store) = store();
+    seed_channel(&mut store);
+    start_message(
+        &mut store,
+        "channel",
+        "thread",
+        "initial",
+        ChatActorKind::Human,
+        None,
+        None,
+        "@agent",
+        100,
+    );
+    assert_eq!(
+        LinkedChatStore::new(&mut store)
+            .record_eligible_triggers(WS, None, 101, &NO_FAULTS)
+            .unwrap(),
+        1
+    );
+    for index in 0..501 {
+        send_text(
+            &mut store,
+            "thread",
+            &format!("low-{index:03}"),
+            ChatActorKind::Human,
+            None,
+            None,
+            "@agent",
+            20,
+        );
+    }
+    assert_eq!(local_discovery_state(&store), (1, 100, 501));
+    assert_eq!(
+        LinkedChatStore::new(&mut store)
+            .record_eligible_triggers(WS, None, 110, &NO_FAULTS)
+            .unwrap(),
+        500
+    );
+    assert_eq!(local_discovery_state(&store), (501, 100, 1));
+    assert_eq!(
+        LinkedChatStore::new(&mut store)
+            .record_eligible_triggers(WS, None, 120, &NO_FAULTS)
+            .unwrap(),
+        1
+    );
+    assert_eq!(local_discovery_state(&store), (502, 100, 0));
+    assert_eq!(
+        LinkedChatStore::new(&mut store)
+            .record_eligible_triggers(WS, None, 130, &NO_FAULTS)
+            .unwrap(),
+        0
+    );
+}
+
 #[test]
 fn windows_reserved_names_are_mention_lookup_keys() {
     let (_scratch, mut store) = store();

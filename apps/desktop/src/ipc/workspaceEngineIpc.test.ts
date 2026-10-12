@@ -10,6 +10,7 @@ import { EngineWorkspaceSessions } from "@dohc/workspace-engine-client/daemon";
 import { createWorkspaceEngineIpc } from "./workspaceEngineIpc";
 import { CHANNELS } from "./channels";
 import type { EngineMomentRecord, RebuildEngineStoreResult, SyncStatusResult } from "./bridgeContract";
+import type { EngineMomentAuthorNames } from "./engineHistoryIpc";
 import { GetCollectionRecordHistoryResult, captureRecoveryOperations, fileObservationOperations, engineYDocAdmissionOperations, engineYDocSaveOperations } from "./bridgeContract";
 import { operationBridge } from "./operationTable";
 import { engineMomentSourceLabel } from "../renderer/workbench/EngineHistory";
@@ -191,6 +192,7 @@ async function harness(sharedStore?: SharedHistoryStore, policyRoot?: string, re
   if (policyRoot) readPolicy.mockImplementation(readWorkspaceEnginePolicy);
   const recordHistoryPersonName = vi.fn((_workspaceId: string, userId: string, _sender: Sender): string | null => userId === "person-local" ? null : userId);
   const prepareRecordHistoryPeople = vi.fn<(_workspaceId: string, userIds: readonly string[], _sender: Sender) => void>();
+  const prepareNamed = vi.fn<NonNullable<EngineMomentAuthorNames["prepare"]>>();
   const registrations = createWorkspaceEngineIpc({
     readWorkspaceEnginePolicy: readPolicy,
     localPersonId: () => "person-local",
@@ -208,7 +210,7 @@ async function harness(sharedStore?: SharedHistoryStore, policyRoot?: string, re
     automationAuthor: (_workspaceId, automationId) => ({ name: automationId, collection: "Tasks" }),
     automationRunOnThisComputer, serverRuns, signedInAccount: () => session.account,
     notifyRenderer: notify,
-    namedAuthorLabels: () => ({ named: () => "Someone you shared with" }),
+    namedAuthorLabels: () => ({ prepare: prepareNamed, named: () => "Someone you shared with" }),
     recordHistoryPersonName,
     prepareRecordHistoryPeople,
     retryOwnerLiveDelivery, retryCloudSync,
@@ -229,7 +231,7 @@ async function harness(sharedStore?: SharedHistoryStore, policyRoot?: string, re
     return handler({ sender: value }, payload);
   };
   return {
-    workspace, sender, physical, authority, renderers, sessions, ydoc, provider, openYDocSession,
+    workspace, sender, physical, authority, renderers, sessions, ydoc, provider, openYDocSession, prepareNamed,
     adapter, capture, requireEngineCapture, getStatus, hasAgentRun, closeActivity, probe, move, reopen,
     notify, writable, requireWorkspace, displayName, syncProjection, canonicalWorkspaceFor, requireSessions,
     events, handlers, invoke, routed, retryOwnerLiveDelivery, retryCloudSync, retryFileObservation, automationRunOnThisComputer, relay, setMissingAdapter: () => { missingAdapter = true; },
@@ -301,7 +303,7 @@ describe("workspace engine IPC registrations", () => {
       collection: { path: "tasks", objectId: "tasks", status: "valid", reasons: [] },
       record: { id: "a", path: "tasks/a.md", conflicted: false, values: [] }, nextBeforeHistoryId: null,
       history: [{ historyId: 1, field: "Status", previous: { present: false, value: null }, next: { present: true, value: "Done" },
-        authorOriginId: "automation", actorKind: "automation", onBehalfOf: "ben", depth: 1, recordedAtMs: 1, automationRun: null }],
+        authorOriginId: "automation", actorKind: "automation", onBehalfOf: "ben", depth: 1, recordedAtMs: 1, automationRun: null, linkAuthor: null }],
     });
     await h.invoke(CHANNELS.getCollectionRecordHistory, { workspaceId: "workspace", collectionPath: "tasks", recordId: "a" });
     await new Promise<void>(resolve => setImmediate(resolve));
@@ -322,7 +324,7 @@ describe("workspace engine IPC registrations", () => {
       collection: { path: "tasks", objectId: "tasks", status: "valid", reasons: [] },
       record: { id: "a", path: "tasks/a.md", conflicted: false, values: [] }, nextBeforeHistoryId: null,
       history: [{ historyId: 1, field: "Status", previous: { present: false, value: null }, next: { present: true, value: "Done" },
-        authorOriginId: actorKind === "human" ? "local:installation-1" : "helper", actorKind, onBehalfOf: "local:installation-1", depth: 0, recordedAtMs: 1, automationRun: null }],
+        authorOriginId: actorKind === "human" ? "local:installation-1" : "helper", actorKind, onBehalfOf: "local:installation-1", depth: 0, recordedAtMs: 1, automationRun: null, linkAuthor: null }],
     });
     const page = await h.invoke(CHANNELS.getCollectionRecordHistory, { workspaceId: "workspace", collectionPath: "tasks", recordId: "a" });
     await new Promise<void>(resolve => setImmediate(resolve));
@@ -516,7 +518,7 @@ describe("workspace engine IPC registrations", () => {
     const side = (value: string | null) => ({ present: value !== null, value });
     const entry = (historyId: number, overrides: Partial<CollectionGetRecordResult["history"][number]>) => ({
       historyId, field: "Status", previous: side("Open"), next: side("Done"), authorOriginId: null, actorKind: null,
-      onBehalfOf: null, depth: null, recordedAtMs: 1_000 - historyId, automationRun: null, ...overrides,
+      onBehalfOf: null, depth: null, recordedAtMs: 1_000 - historyId, automationRun: null, linkAuthor: null, ...overrides,
     });
     const automation = { authorOriginId: stamp, actorKind: "automation" as const, onBehalfOf: "person-local", depth: 1 };
     h.adapter.getCollectionRecord.mockResolvedValue({
@@ -596,7 +598,7 @@ describe("workspace engine IPC registrations", () => {
     const change = (historyId: number, claimId: string) => ({
       historyId, field: "Status", previous: { present: true, value: "Open" }, next: { present: true, value: "Done" },
       authorOriginId: stamp, actorKind: "automation" as const, onBehalfOf: "person-local", depth: 1,
-      recordedAtMs: 1_000 - historyId, automationRun: { claimId, automationName: "Stamp" },
+      recordedAtMs: 1_000 - historyId, automationRun: { claimId, automationName: "Stamp" }, linkAuthor: null,
     });
     h.adapter.getCollectionRecord.mockResolvedValue({
       collection: { path: "tasks", objectId: "tasks-id", status: "valid", reasons: [] },
@@ -714,6 +716,22 @@ describe("workspace engine IPC registrations", () => {
     expect(h.capture.listMoments).toHaveBeenLastCalledWith({ objectId: "object-1", limit: 7, beforeMomentOrder: 19 });
     await expect(h.invoke(CHANNELS.listEngineMoments, { workspaceId: "workspace", objectId: "" })).rejects.toThrow();
     await expect(h.invoke(CHANNELS.readEngineMoment, { workspaceId: "workspace", momentId: "moment" })).resolves.toEqual({ moment: null });
+  });
+
+  it("prepares every author of a History detail several people wrote", async () => {
+    const h = await harness();
+    const authors = [
+      { kind: "named", userId: "u-ana", grantId: "g-1", grantGeneration: 1 },
+      { kind: "named", userId: "u-ben", grantId: "g-dep", grantGeneration: 1 },
+    ] as const;
+    h.capture.readMoment.mockResolvedValueOnce({ protected: false, moment: {
+      id: "m-both", workspaceId: "workspace", versionId: "main", objectId: "o-1", path: "notes/a.md", recordedAtMs: 1,
+      operation: "write", metadata: { origin: "sync" }, authors: [...authors],
+      payload: { before: null, after: { path: "notes/a.md", contentKind: "text", sha256: "a".repeat(64), byteLength: 3, text: "new" } },
+    } });
+    const result = await h.invoke(CHANNELS.readEngineMoment, { workspaceId: "workspace", momentId: "m-both" });
+    expect(h.prepareNamed).toHaveBeenCalledWith([...authors]);
+    expect(result).toMatchObject({ moment: { authorLabels: ["Someone you shared with", "Someone you shared with"] } });
   });
 
   it("reads a shared view's imported history from its registered share mount without a capture", async () => {
@@ -841,6 +859,29 @@ describe("workspace engine IPC registrations", () => {
     const listed = (await h.invoke(CHANNELS.listEngineMoments)) as { moments: EngineMomentRecord[] };
     expect(listed.moments.map((moment) => moment.personAuthorName)).toEqual(["Ice", undefined]);
     expect(listed.moments.map(engineMomentSourceLabel)).toEqual(["Ice", "Restore"]);
+  });
+
+  it("names a hosted agent's live edit by the account holder and agent its author snapshot admitted", async () => {
+    const h = await harness();
+    const settled = (id: string, authors: NonNullable<Awaited<ReturnType<WorkspaceEngineCapture["listMoments"]>>["moments"][number]["authors"]>) => ({
+      id, versionId: "main", path: "notes/a.md", recordedAtMs: 1, operation: "write" as const,
+      metadata: { origin: "local-file" as const }, protected: false as const, momentOrder: 0, authors,
+    });
+    const owner = { kind: "human" as const, humanId: "person-local", humanName: "Owner Account" };
+    h.capture.listMoments.mockResolvedValue({
+      moments: [
+        settled("hosted", [owner, { kind: "agent", agentId: "writer", onBehalfOf: "person-local" }]),
+        settled("named", [owner, { kind: "agent", agentId: "writer", agentName: "Trip helper", onBehalfOf: "person-local" }]),
+        settled("account", [owner]),
+        settled("link", [{ kind: "link", publicPrincipalId: "public_1", label: "Anonymous" }]),
+      ],
+      nextBeforeMomentOrder: null, latestMomentOrder: 1, activeVersionId: "main", protectedTruncated: false,
+    });
+    const listed = (await h.invoke(CHANNELS.listEngineMoments)) as { moments: EngineMomentRecord[] };
+    expect(listed.moments.map(engineMomentSourceLabel)).toEqual([
+      "Owner Account, writer", "Owner Account, Trip helper", "Owner Account", "Link holder Anonymous",
+    ]);
+    expect(listed.moments.map((moment) => moment.authors?.length)).toEqual([2, 2, 1, 1]);
   });
 
   it("notifies after a restore and before parsing its result", async () => {

@@ -66,6 +66,7 @@ import { createInstalledAppCompiler } from "./workspaces/installedAppCompiler";
 import { createPresenceIpc } from "./ipc/presenceIpc";
 import { readWorkspaceEnginePolicy } from "./workspaces/workspaceEnginePolicyFile";
 import { createWorkspaceEngineIpc } from "./ipc/workspaceEngineIpc";
+import { collectionAutomationAuthor } from "./ipc/engineHistoryIpc";
 import { createSettingsIpc } from "./ipc/settingsIpc";
 import { registerDirectMessagesIpcHandlers, peekReceivedGrantKindForShare } from "./ipc/directMessagesIpc";
 import { createChatScopeCapability } from "./ipc/chatScope";
@@ -128,7 +129,7 @@ import {
 import { watch, existsSync, realpathSync, statSync } from "node:fs";
 import { lstat, mkdir, readdir, writeFile } from "node:fs/promises";
 import { hostname, release as osRelease, type as osType } from "node:os";
-import { dirname, join, posix } from "node:path";
+import { dirname, join } from "node:path";
 import {
   SitePreviewReplacedEvent,
   McpConfigResult,
@@ -227,12 +228,12 @@ import {
   removeWorkspace as removeRegisteredWorkspace,
   setWorkspaceRemote,
   acknowledgeWorkspaceShareSkips,
-  setWorkspaceShareMounts,
+  updateWorkspaceShareMounts,
   markWorkspaceShareRosterPulled,
   setWorkspaceShareRoster,
   setWorkspaceAutomationHost,
   setWorkspaceShareView,
-  setWorkspaceSharedChannels,
+  updateWorkspaceSharedChannels,
   reconcileWorkspaceRecipientShares,
   stateDir,
 } from "./workspaces/WorkspaceRegistry";
@@ -251,7 +252,6 @@ import {
   type CollectionAutomationRetry,
   type PressWaitReason,
 } from "@dohc/automation-executor/collection-automations";
-import { parseCollectionAutomationId } from "@dohc/automation-executor/automation-plan";
 import { AutomationScheduler } from "@dohc/automation-executor/automation-scheduler";
 import { parseReachHandover, type ReachRelayRecord } from "@dohc/automation-executor/reach-verdicts";
 import {
@@ -305,6 +305,8 @@ import {
 } from "./workspaces/workspaceAuthorityOwner";
 import {
   type RegistryEntry,
+  type ShareMountRecord,
+  type ShareViewIdentity,
 } from "./workspaces/registryStore";
 import {
   readableShareLevel,
@@ -348,7 +350,7 @@ import {
   assertRealMountRoot,
   mountStoreWorkspaceIdFor,
   shareViewFilesMountProjection,
-  shareMountRecordsForId,
+  updateShareMountRecords,
   usableShareMountRecord,
 } from "./workspaces/shareMounts";
 import { createShareMountCommands } from "./workspaces/shareMountCommands";
@@ -1143,7 +1145,7 @@ const syncRecorded = new Set<string>();
 async function recordSyncedIfNeeded(workspace: RegistryEntry): Promise<void> {
   if (syncRecorded.has(workspace.workspaceId)) return;
   if (!existsSync(join(workspace.rootPath, ".dohc", "manifest.json"))) return;
-  if ((await readSyncHistory(workspace.rootPath)) !== "synced") recordSynced(workspace.rootPath);
+  if ((await readSyncHistory(workspace.rootPath)) !== "synced") await recordSynced(workspace.rootPath);
   syncRecorded.add(workspace.workspaceId);
 }
 
@@ -1634,18 +1636,9 @@ function collectionAutomationsOf(workspaceId: string): CollectionAutomations | u
   return withWorkspaceAttachment({ workspaceId }, (lease) => lease.state.collectionAutomations);
 }
 
-// A Collection automation that wrote a moment, as History shows it: its
-// name from the workspace's automations.yaml as this computer read it, or
-// its id when the file no longer has it, and the Collection it belongs to
-// now. Any other automation keeps the moment's origin label.
-function automationAuthor(workspaceId: string, automationId: string): { name: string; collection?: string } | null {
-  const parsed = parseCollectionAutomationId(automationId);
-  if (parsed === null) return null;
-  const located = collectionAutomationsOf(workspaceId)?.locate(automationId) ?? null;
-  return {
-    name: collectionAutomationsOf(workspaceId)?.automationName(automationId) ?? parsed.id,
-    ...(located === null ? {} : { collection: posix.basename(located.collectionPath) }),
-  };
+// A Collection automation that wrote a moment, as History shows it.
+function automationAuthor(workspaceId: string, automationId: string): ReturnType<typeof collectionAutomationAuthor> {
+  return collectionAutomationAuthor(collectionAutomationsOf(workspaceId), automationId);
 }
 
 // MU-C4 shared channels: one best-effort refresh pass over every shared
@@ -2071,7 +2064,7 @@ const {
   receivedShareEngine: {
     relayForRegistered: (workspace) => receivedShareEngine.relayForRegistered(workspace),
   },
-  setWorkspaceSharedChannels,
+  updateWorkspaceSharedChannels,
   notifyRenderer,
   projectPendingChatBookmarksAfterPull: projectPendingChatBookmarks,
   linkedChatStoreFor,
@@ -2643,12 +2636,11 @@ const activity = {
       ),
     ),
 };
-// Local agent integration: owns the per-workspace MCP child + active-run slot
-// and persists agent-run records. The run slot is wired into the watcher
+// Local agent integration: owns the per-workspace active-run slot and
+// persists agent-run records. The run slot is wired into the watcher
 // (workspaceActivity.setAgentRun) so a run's writes are attributed to the
-// agent. The MCP child is spawned only in a packaged/dev runtime where a server
-// entry resolves; otherwise the toggle still flips and the user's AI tool
-// launches its own copy via the Settings config snippet.
+// agent. The user's AI tool launches its own MCP server from the Settings
+// config snippet.
 const agentIntegration = createAgentIntegration({
   workspaceIds: () => workspaceAuthorities.workspaceIds(),
   localPersonId: localUserId,
@@ -2699,7 +2691,6 @@ const agentIntegration = createAgentIntegration({
       release: () => lease.release(),
     };
   },
-  home: stateDir(),
   // Every terminal run path funnels through endAgentRun (a Settings stop or
   // the endAgentRun IPC) — the try-in-version review card listens on that
   // single seam.
@@ -4939,11 +4930,11 @@ function createShareMountCommandsFor(
   return createShareMountCommands({
     readMounts: (workspaceId) =>
       storedShareMounts(findWorkspace(workspaceId) ?? {}),
-    writeMounts: (workspaceId, mounts) => {
+    updateMounts: async (workspaceId, update) => {
       if (workspaceId !== binding.workspaceId) {
         throw new Error("Share mount write targeted a different workspace.");
       }
-      setWorkspaceShareMounts(workspaceId, mounts);
+      await updateWorkspaceShareMounts(workspaceId, update);
     },
     loadCredentials: () => loadAndCacheCurrentCredentials(),
     fetchInfo: (relay, shareId) => fetchShareViewInfo({ relay, shareId }),
@@ -5074,29 +5065,19 @@ function createShareViewFilesForOperation(
     recordRefusals: async (target, refusals) => {
       const recorder =
         target.kind === "standalone"
-          ? createShareSkipRecorder({
-              current: () => currentWorkspace().shareView,
-              persist: (next) => {
-                assertCurrent();
-                setWorkspaceShareView(target.workspaceId, next);
+          ? createShareSkipRecorder<ShareViewIdentity>({
+              update: async (change) => {
+                const view = currentWorkspace().shareView;
+                if (!view) return;
+                await setWorkspaceShareView(target.workspaceId, change(view));
               },
             })
-          : createShareSkipRecorder({
-              current: () => {
-                const mounts = storedShareMounts(currentWorkspace());
-                return shareMountRecordsForId(mounts, target.shareId)[0];
-              },
-              persist: (next) => {
-                const mounts = storedShareMounts(currentWorkspace());
-                const matches = new Set(
-                  shareMountRecordsForId(mounts, target.shareId),
-                );
-                assertCurrent();
-                setWorkspaceShareMounts(
-                  target.workspaceId,
-                  mounts.map((mount) => (matches.has(mount) ? next : mount)),
-                );
-              },
+          : createShareSkipRecorder<ShareMountRecord>({
+              update: (change) =>
+                updateWorkspaceShareMounts(target.workspaceId, (mounts) => {
+                  assertCurrent();
+                  return updateShareMountRecords(mounts, target.shareId, change);
+                }),
             });
       await recorder([...refusals]);
     },
@@ -5104,7 +5085,7 @@ function createShareViewFilesForOperation(
       assertCurrent();
       const view = currentWorkspace().shareView;
       if (target.kind !== "standalone" || !view) throw new Error("This shared view is no longer registered.");
-      setWorkspaceShareView(target.workspaceId, { ...view, unsavedPaths: paths });
+      await setWorkspaceShareView(target.workspaceId, { ...view, unsavedPaths: paths });
       notifyRenderer({ workspaceId: target.workspaceId, summaryChanged: true });
     },
     markEnded: async (target, unsavedPaths, unconfirmedChanges) => {
@@ -5112,21 +5093,16 @@ function createShareViewFilesForOperation(
       if (target.kind === "standalone") {
         const view = currentWorkspace().shareView;
         if (!view) throw new Error("This shared view is no longer registered.");
-        setWorkspaceShareView(target.workspaceId, { ...view, ended: true,
+        await setWorkspaceShareView(target.workspaceId, { ...view, ended: true,
           ...(unsavedPaths !== undefined ? { unsavedPaths } : {}),
           ...(unconfirmedChanges !== undefined ? { unconfirmedChanges } : {}) });
         notifyRenderer({ workspaceId: target.workspaceId, summaryChanged: true });
         return;
       }
-      const mounts = storedShareMounts(currentWorkspace());
-      const matches = new Set(shareMountRecordsForId(mounts, target.shareId));
-      assertCurrent();
-      setWorkspaceShareMounts(
-        target.workspaceId,
-        mounts.map((mount) =>
-          matches.has(mount) ? { ...mount, ended: true } : mount,
-        ),
-      );
+      await updateWorkspaceShareMounts(target.workspaceId, (mounts) => {
+        assertCurrent();
+        return updateShareMountRecords(mounts, target.shareId, (mount) => ({ ...mount, ended: true }));
+      });
     },
     retireTarget: async (target) => {
       const retireTarget = workspaceSessionTargetForPhysicalWorkspace(
@@ -6012,8 +5988,8 @@ function registerIpcHandlers(): void {
     withPhysicalWorkspaceOperation, withRendererWorkspaceOperation, receivedShareEngine,
     readWorkspaceSecretState, readWorkspaceDataKeyForEnrollment, assertWritableWorkspace,
     relayClientForWorkspace, enrollWorkspaceKeyEnvelope, installWorkspaceDataKey,
-    setWorkspaceRemote: (workspaceId, remote) => {
-      setWorkspaceRemote(workspaceId, remote);
+    setWorkspaceRemote: async (workspaceId, remote) => {
+      await setWorkspaceRemote(workspaceId, remote);
       retryStopAndRestoreReleases?.();
     }, usableRoot, readdir, mkdir, probeRelayWorkspace,
     createJoinedWorkspace, bootstrapJoinedWorkspace, refreshNativeWorkspaceSurfaces,
@@ -6372,7 +6348,7 @@ function registerIpcHandlers(): void {
     warmCredentialCache,
     relayShareJsonWithCredentials,
     listWorkspaces,
-    setWorkspaceSharedChannels,
+    updateWorkspaceSharedChannels,
     relayClientForWorkspace,
     projectPendingChatBookmarksAfterPull: projectPendingChatBookmarks,
     normalizeServerUrl,
@@ -6394,7 +6370,8 @@ function registerIpcHandlers(): void {
   });
 
   const agentRunsIpc = createAgentRunsIpc<WebContents, IpcMainInvokeEvent, RegistryEntry, DesktopRendererWorkspaceOperation>({
-    detectAgentTools,
+    detectAgentTools: (workspaceRoot: string, signal: AbortSignal) =>
+      detectAgentTools(workspaceRoot, signal, resourcesBasePath()),
     registerHandler: handleIpc,
     assertTrustedSender, withRendererWorkspaceOperation, requireEngineCapture,
     linkedChatStoreFor, agentDispatchStoreHandleFor, requireWorkspace, assertAgentRunnableWorkspace,

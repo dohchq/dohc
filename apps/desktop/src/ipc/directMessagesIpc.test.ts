@@ -35,24 +35,29 @@ async function harness() {
     workspaceId: "workspace", rootPath: "/workspace", kind: "personal", mode: "local-first",
     remote: { serverUrl: credentials.serverUrl, ownerUserId: credentials.userId }, sharedChannels: [],
   };
+  // Another workspace open in a second window of the same account.
+  const second: RegistryEntry = { ...workspace, workspaceId: "second", rootPath: "/second", sharedChannels: [] };
+  const entries = new Map([[workspace.workspaceId, workspace], [second.workspaceId, second]]);
   const state = {
     operationLanes: new Map<string, Promise<void>>(),
     lastKnownDmRequestLanes: createLastKnownDmRequestLanesCache(),
   };
   const authorities = createWorkspaceAuthorityOwner({
-    findWorkspace: id => id === workspace.workspaceId ? workspace : null,
+    findWorkspace: id => entries.get(id) ?? null,
     canonicalizeRoot: root => root, createState: () => state,
   });
   const attachmentId = await authorities.withOperation("workspace", op => op.workspace.attachmentId);
+  const secondAttachmentId = await authorities.withOperation("second", op => op.workspace.attachmentId);
   let rendererCurrent = true;
   let generation = 1;
   let current: CloudCredentials | null = credentials;
   const session = { workspaceId: "workspace", attachmentId, generation: 1, isCurrent: () => rendererCurrent };
+  const secondSession = { workspaceId: "second", attachmentId: secondAttachmentId, generation: 1, isCurrent: () => true };
   type Workspace = PhysicalWorkspace<RegistryEntry>;
   type Operation = ExactRendererWorkspaceOperation<Workspace, typeof state, typeof session>;
   type Event = { sender: string; trusted: boolean };
   const withRendererWorkspaceOperation = createRendererWorkspaceOperationRunner<string, Workspace, typeof state, typeof session>({
-    currentSession: () => session,
+    currentSession: sender => sender === "second-window" ? secondSession : session,
     withPhysicalOperation: (id, run) => authorities.withOperation(id, run),
   });
   const events: string[] = [];
@@ -103,8 +108,13 @@ async function harness() {
     selector: { kind: "chat", channelWireId: "channel" }, access: "read-write", createdAtMs: 1,
   }));
   vi.stubGlobal("fetch", info);
-  const writeChannels = vi.fn((_id: string, next: JoinedSharedChannel[]) => {
-    events.push("reserve"); workspace.sharedChannels = next;
+  const writeChannels = vi.fn(async (
+    id: string,
+    update: (channels: readonly JoinedSharedChannel[]) => readonly JoinedSharedChannel[],
+  ) => {
+    const entry = entries.get(id)!;
+    const next = [...update(entry.sharedChannels ?? [])];
+    events.push("reserve"); entry.sharedChannels = next;
   });
   const pull = vi.fn(async () => {
     events.push("pull"); channels = [channel]; threads = [thread];
@@ -131,7 +141,7 @@ async function harness() {
     remoteForWorkspace: remote, currentCredentialGeneration: () => generation, currentCredentials: () => current,
     warmCredentialCache: warm, mountShareFolder: async () => undefined, unmountShareFolder: async () => ({}),
     relayShareJsonWithCredentials: async <Result>(auth: CloudCredentials, path: string, init?: RequestInit) => await relayJson(auth, path, init) as Result,
-    listWorkspaces: () => [workspace], setWorkspaceSharedChannels: writeChannels,
+    listWorkspaces: () => [...entries.values()], updateWorkspaceSharedChannels: writeChannels,
     relayClientForWorkspace: () => ({ pullSharedChannel: pull, push: async () => undefined, claim: async () => undefined }), projectPendingChatBookmarksAfterPull: project,
     normalizeServerUrl: url => url, peekedReceivedGrantKinds: kinds, peekReceivedGrantKindForShare,
     acknowledgeWorkspaceShareSkips: () => undefined, notifyRenderer: () => undefined,
@@ -153,17 +163,17 @@ async function harness() {
     linkedChatStoreFor, warmCredentialCache: warm, currentCredentials: () => current,
     currentCredentialGeneration: () => generation, remoteForWorkspace: remote,
     relayShareJsonWithCredentials: async <Result>(auth: CloudCredentials, path: string, init?: RequestInit) => await relayJson(auth, path, init) as Result,
-    normalizeServerUrl: url => url, listWorkspaces: () => [workspace], stateDir: () => stateDirectory,
+    normalizeServerUrl: url => url, listWorkspaces: () => [...entries.values()], stateDir: () => stateDirectory,
     peekedReceivedGrantKinds: kinds, syncRendererSharedChannelsForChatTarget: sync,
     ...sharedCommands, chatScope, localUserDisplayName: () => "Sam", activity, chatDispatchService: dispatch,
   });
-  const invoke = async (channel: string, payload: unknown, trusted = true) => {
+  const invoke = async (channel: string, payload: unknown, trusted = true, sender = "window") => {
     const handler = handlers.get(channel);
     if (!handler) throw new Error(`Missing handler: ${channel}`);
-    return await handler({ sender: "window", trusted }, payload);
+    return await handler({ sender, trusted }, payload);
   };
   return {
-    handlers, invoke, workspace, state, authorities, events, storeMethods, fileObjectIdForPath,
+    handlers, invoke, workspace, second, state, authorities, events, storeMethods, fileObjectIdForPath,
     requireEngineCapture, linkedChatStoreFor, warm, relayJson, info, writeChannels, pull, project, sync, activity, dispatch,
     requestFile: () => join(stateDirectory, "dohc-dm-requests.json"),
     setStateDirectory: (value: string) => { stateDirectory = value; },
@@ -378,6 +388,34 @@ describe("registered direct message boundaries", () => {
     await expect(accepted).resolves.toMatchObject({ dm: { shareId: "request", role: "participant", threadId: "thread" } });
     expect(h.events).toEqual(["reserve", "pull", "project"]);
     expect(readDeclinedDms(h.requestFile())).toEqual(new Set());
+  });
+
+  it("lets one of two workspaces accept a request when both rows wait on their folder records", async () => {
+    const h = await harness();
+    const store = h.writeChannels.getMockImplementation()!;
+    // Like the registry: the update runs once before the folder's history
+    // wait and again, on the channels as they stand, when the row lands.
+    const landings = new Map<string, () => void>();
+    const bothWaiting = deferred();
+    h.writeChannels.mockImplementation(async (id, update) => {
+      update((id === "second" ? h.second : h.workspace).sharedChannels ?? []);
+      await new Promise<void>(resolve => {
+        landings.set(id, resolve);
+        if (landings.size === 2) bothWaiting.resolve();
+      });
+      await store(id, update);
+    });
+    const first = h.invoke(CHANNELS.acceptDm, { workspaceId: "workspace", shareId: "request" });
+    const second = h.invoke(CHANNELS.acceptDm, { workspaceId: "second", shareId: "request" }, true, "second-window");
+    await bothWaiting.promise;
+    expect(h.pull).not.toHaveBeenCalled();
+    landings.get("workspace")!();
+    await expect(first).resolves.toMatchObject({ dm: { shareId: "request" } });
+    landings.get("second")!();
+    await expect(second).rejects.toThrow("already lives in workspace");
+    expect(h.second.sharedChannels).toEqual([]);
+    expect(h.workspace.sharedChannels).toEqual([expect.objectContaining({ shareId: "request" })]);
+    expect(h.pull).toHaveBeenCalledOnce();
   });
 
   it.each(["revoked", "stale"] as const)("does not reserve or clear a %s request", async reason => {

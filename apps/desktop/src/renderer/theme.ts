@@ -19,6 +19,8 @@ type LookSettings = Pick<DesktopUserSettings, "appearance" | "editor">;
 
 let media: MediaQueryList | null = null;
 let currentLook: LookSettings = DEFAULT_USER_SETTINGS;
+// Counts applied settings, so a late startup read cannot undo newer ones.
+let lookRevision = 0;
 
 // The OS-drawn window controls (titleBarOverlay) can't read CSS — mirror
 // every theme flip to main. Best-effort: a platform without an overlay (or a
@@ -59,6 +61,7 @@ function applyLook(look: LookSettings): void {
 
 /** Applies what the settings say about the window's look. */
 export function applyLookSettings(settings: DesktopUserSettings): void {
+  lookRevision += 1;
   applyLook(settings);
   setChosenColors(settings.appearance);
 }
@@ -91,10 +94,11 @@ export function initTheme(): void {
 
   applyLook(currentLook);
 
+  const revision = lookRevision;
   void window.dohcDesktop
     ?.getUserSettings?.()
     .then((result: DesktopUserSettingsResult) => {
-      applyLookSettings(result.settings);
+      if (lookRevision === revision) applyLookSettings(result.settings);
     })
     .catch(() => undefined);
 }

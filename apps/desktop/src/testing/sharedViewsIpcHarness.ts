@@ -88,7 +88,7 @@ export async function createSharedViewsIpcHarness(options: { rootPath?: string; 
     release: (reservation, finalize) => authorities.releaseReservation(reservation, finalize),
     closeRelay: cleanup, rollbackComplete: () => { surfaces(); notify(); }, logError: vi.fn(),
   });
-  const setView = vi.fn<Dependencies["setWorkspaceShareView"]>((id, shareView) => { steps.push("pin"); registry.get(id)!.shareView = shareView; });
+  const setView = vi.fn<Dependencies["setWorkspaceShareView"]>(async (id, shareView) => { steps.push("pin"); registry.get(id)!.shareView = shareView; });
   const recordIdentity = vi.fn<EngineRelayWorkspaceClient["recordShareViewIdentity"]>(async () => { steps.push("identity"); return { identity: "recorded" }; });
   const relayFor = vi.fn<Dependencies["receivedShareEngine"]["relayFor"]>(() => ({ recordShareViewIdentity: recordIdentity } as unknown as EngineRelayWorkspaceClient));
   const status = vi.fn<() => Promise<WatcherStatusResult>>(async () => { steps.push("capture-ready"); return ready; });
@@ -100,7 +100,7 @@ export async function createSharedViewsIpcHarness(options: { rootPath?: string; 
     assertCurrent();
     registry.get(target.workspaceId)!.shareView!.ended = true;
   });
-  const narrow = vi.fn<Dependencies["shareViewFiles"]["narrow"]>(async (_lease, _target, assertCurrent, commit) => { assertCurrent(); commit([], { paths: [], unchecked: false, checked: 0 }); });
+  const narrow = vi.fn<Dependencies["shareViewFiles"]["narrow"]>(async (_lease, _target, assertCurrent, commit) => { assertCurrent(); await commit([], { paths: [], unchecked: false, checked: 0 }); });
   const closed = new Set<() => void>();
   const open = vi.fn<Dependencies["openWorkspaceActivity"]>(async () => { steps.push("open"); });
   const recordRefusal = vi.fn<Dependencies["recordShareViewStoreRefusal"]>();

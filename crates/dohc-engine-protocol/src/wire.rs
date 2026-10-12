@@ -74,9 +74,11 @@ pub struct Hello {
     pub last_session_generation: Option<u64>,
     /// The largest control frame the client will accept. The engine clamps it
     /// into `[MIN_NEGOTIABLE_FRAME_BYTES, engine default]` and echoes the
-    /// effective value in `helloAck.limits`. Collection responses size
-    /// themselves to it; other families keep their own fixed bounds, and a
-    /// secret read can still exceed a lowered limit.
+    /// effective value in `helloAck.limits`. Every outbound control frame
+    /// respects it. A reply that cannot fit returns `INTERNAL` with message
+    /// `response-wire-limit-exceeded` and retry `afterBackoff`, keeping the
+    /// connection open. The request may have committed; retry mutations with
+    /// the same idempotency key. Oversized events are dropped.
     #[serde(default)]
     #[cfg_attr(feature = "bindings", ts(type = "number | null", optional))]
     pub max_frame_bytes: Option<u32>,

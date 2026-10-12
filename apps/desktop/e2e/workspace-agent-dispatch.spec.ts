@@ -1,5 +1,5 @@
 import { desktopPins, activityPin, settingsNavPin } from "../src/testPins";
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test, type Locator, type Page } from "@playwright/test";
 import { mkdir, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { DEFAULT_USER_SETTINGS } from "../src/settings/userSettings";
@@ -232,6 +232,23 @@ test("My agent posts a durable failure note when the runner exits silently", asy
   }
 });
 
+// What the pointer reaches at a toast's center: the toast, a workbench
+// modal (`data-dohc-modal` on its backdrop), something else, or nothing.
+function hitAtCenter(toast: Locator): Promise<string> {
+  return toast.evaluate((element) => {
+    const bounds = element.getBoundingClientRect();
+    const hit = document.elementFromPoint(bounds.x + bounds.width / 2, bounds.y + bounds.height / 2);
+    if (hit === null) return "none";
+    if (element.contains(hit)) return "toast";
+    if (hit.closest("[data-dohc-modal]")) return "modal";
+    return `other:${hit.tagName.toLowerCase()}`;
+  });
+}
+
+// Toasts sit above every dialog and its scrim (NoticeCenter), so a failed
+// test says so inside Settings and its reason is reachable in the toast while
+// Settings stays open. Copy and Dismiss leave Settings in place. The row stays
+// in Notices after the toast is gone.
 test("failed runner tests stay readable above Settings and remain in Notices", async () => {
   const temp = await createTempWorkspace();
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
@@ -249,27 +266,30 @@ test("failed runner tests stay readable above Settings and remain in Notices", a
     const reason = "Runner exited before reporting self-test success.";
     const toast = page.getByTestId("workspace-shell-error");
     await expect(toast).toContainText(reason);
+    const settings = page.getByTestId(desktopPins.settingsDialog);
     for (const theme of ["light", "dark"]) {
       await page.evaluate((value) => document.documentElement.setAttribute("data-theme", value), theme);
-      await expect.poll(() => toast.evaluate((element) => {
-        const bounds = element.getBoundingClientRect();
-        return element.contains(document.elementFromPoint(bounds.x + bounds.width / 2, bounds.y + bounds.height / 2));
-      })).toBe(true);
+      await expect.poll(() => hitAtCenter(toast)).toBe("toast");
+      await expect(settings).toBeVisible();
       if (process.env.UI_AUDIT_SHOT_DIR) {
         await mkdir(process.env.UI_AUDIT_SHOT_DIR, { recursive: true });
         await page.screenshot({ path: join(process.env.UI_AUDIT_SHOT_DIR, `runner-test-error-${theme}.png`) });
       }
     }
+    // Only what Copy writes here is read; the clipboard is cleared again in finally.
+    await desktop.app.evaluate(({ clipboard }) => clipboard.clear());
     await page.getByTestId("workspace-shell-error-copy").click();
     await expect.poll(() => desktop!.app.evaluate(({ clipboard }) => clipboard.readText())).toContain(reason);
-    await expect(page.getByTestId(desktopPins.settingsDialog)).toBeVisible();
+    await expect(settings).toBeVisible();
     await page.getByRole("button", { name: "Dismiss workspace error" }).click();
     await expect(toast).toHaveCount(0);
-    await expect(page.getByTestId(desktopPins.settingsDialog)).toBeVisible();
+    await expect(settings).toBeVisible();
     await page.getByRole("button", { name: "Close settings" }).click();
+    await expect(settings).toHaveCount(0);
     await page.getByTestId("notice-center-toggle").click();
     await expect(page.getByTestId("notice-center")).toContainText(reason);
   } finally {
+    await desktop?.app.evaluate(({ clipboard }) => clipboard.clear()).catch(() => undefined);
     await cleanupDesktopWorkspace(desktop, temp);
   }
 });

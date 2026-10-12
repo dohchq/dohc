@@ -95,7 +95,7 @@ export function registerDirectMessagesIpcHandlers<
     shareId: string; recipientUserId: string; relayUrl: string;
     preWrite?: (info: { channelWireId: string }) => void;
   }): Promise<JoinedSharedChannel>;
-  endWorkspaceJoinedChannel(operation: Operation, shareId: string): void;
+  endWorkspaceJoinedChannel(operation: Operation, shareId: string): Promise<void>;
   chatScope: Pick<ReturnType<typeof createChatScopeCapability>, "resolveChatFileReferences">;
   localUserDisplayName(): string;
   activity: {
@@ -450,12 +450,12 @@ export function registerDirectMessagesIpcHandlers<
       event.sender,
       input.workspaceId,
       "Leaving stopped because this window changed workspaces.",
-      (operation) => {
+      async (operation) => {
         const workspace = operation.workspace;
         const leftRow = (workspace.sharedChannels ?? []).find(
           (channel) => channel.shareId === input.shareId,
         );
-        endWorkspaceJoinedChannel(operation, input.shareId);
+        await endWorkspaceJoinedChannel(operation, input.shareId);
         operation.assertCurrent();
         // The leave is locally knowable without the relay. Keep this physical
         // attachment's fallback lanes consistent with the registry write.

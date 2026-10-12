@@ -57,6 +57,8 @@ export interface StopAndRestoreDependencies {
   recordRestores?(receipts: readonly RestoreReceipt[], originalMomentIds: readonly string[]): Promise<void>;
   recordedRestores?: readonly RestoreReceipt[];
   findRestoreReceipt?(momentId: string, requestId: string): Promise<RestoreReceipt | null>;
+  /** Whether the keyed restore that recorded `restoredMomentId` reached disk. */
+  publicationApplied?(restoredMomentId: string, requestId: string): Promise<boolean>;
   /** The saved session's stable request key, when retrying unjournaled writes. */
   replayRequestId?(momentId: string): string;
   /** A moment, `protected` when its contents are protected here, or null while it has not arrived. */
@@ -265,7 +267,9 @@ export async function restoreDirectWrites(
         if (later !== "protected") receipt = restoreReceiptOf(later, entry.moments.get(entry.first.momentId)!, requestId);
         if (receipt) break;
       }
-      if (!receipt && entry.moments.get(entry.first.momentId)!.payload.before?.contentKind === "binary") {
+      // History shows the restore committed; only a confirmed publication completes it.
+      if (receipt && !await dependencies.publicationApplied?.(receipt.restoredMomentId, requestId)) receipt = null;
+      else if (!receipt && entry.moments.get(entry.first.momentId)!.payload.before?.contentKind === "binary") {
         receipt = await dependencies.findRestoreReceipt?.(entry.first.momentId, requestId) ?? null;
       }
       if (receipt) {

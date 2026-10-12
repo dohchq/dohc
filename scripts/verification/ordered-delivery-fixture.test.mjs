@@ -27,6 +27,7 @@ test("ordered delivery fixture rejects stale source and artifacts and closes pre
     createPrepareFixture(root, new URL("./build.mjs", import.meta.url));
     put("scripts/verification/ordered-delivery-fixture.mjs", readFileSync(new URL("./ordered-delivery-fixture.mjs", import.meta.url)));
     put("vendor/fixture/lib.rs", "original vendor input");
+    put("crates/dohc-workspace-engine/src/proof_test.rs", "original harness input");
     put("scripts/verification/process.mjs", readFileSync(join(root,"scripts/verification/process.mjs"),"utf8")
       .replace("export async function run(","async function originalRun(") + `
       export async function run(command,args,options) {
@@ -60,6 +61,15 @@ test("ordered delivery fixture rejects stale source and artifacts and closes pre
       await prepareOrderedDeliveryFixture();
       writeFileSync('vendor/fixture/lib.rs','vendor change after preparation');
       assert.throws(()=>assertOrderedDeliveryFixture(first.path),/missing or differs/);
+      await prepareOrderedDeliveryFixture();
+      writeFileSync('vendor/fixture/added.rs','new vendor input');
+      assert.throws(()=>assertOrderedDeliveryFixture(first.path),/missing or differs/);
+      await prepareOrderedDeliveryFixture();
+      rmSync('vendor/fixture/added.rs');
+      assert.throws(()=>assertOrderedDeliveryFixture(first.path),/missing or differs/);
+      await prepareOrderedDeliveryFixture();
+      writeFileSync('crates/dohc-workspace-engine/src/proof_test.rs','changed harness input');
+      assert.throws(()=>assertOrderedDeliveryFixture(first.path),/missing or differs/);
       for(const fault of ['source','cancel']) {
         rmSync(receiptPath,{force:true});
         process.env.FIXTURE_FAULT=fault;
@@ -76,4 +86,3 @@ test("ordered delivery fixture rejects stale source and artifacts and closes pre
     assert.equal(result.status,0,result.stderr);
   } finally { rmSync(root,{recursive:true,force:true}); }
 });
-

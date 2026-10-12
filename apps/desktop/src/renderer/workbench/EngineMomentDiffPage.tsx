@@ -54,6 +54,13 @@ export type ActiveUndoHandler = {
   acceptsEvent: (event: KeyboardEvent) => boolean;
 };
 
+// Who a change credits. Account names can arrive after the change is read,
+// so the page refreshes these without building the change's diff again.
+type MomentCredit = {
+  namedAuthor: EngineMomentDetailRecord["namedAuthor"];
+  authorLabels: EngineMomentDetailRecord["authorLabels"];
+};
+
 // Engine history diff page: one MOMENT's
 // before/after through the shared unified-diff rendering, with engine-routed
 // restore. Restore returns the file to its state before this moment and
@@ -109,7 +116,7 @@ export function EngineMomentDiffPage({
   const momentId = useMemo(() => parseMomentDiffTabPath(tabPath), [tabPath]);
   const [state, setState] = useState<
     | { status: "loading" }
-    | { status: "ready"; moment: EngineMomentDetailRecord | null; namedAuthor: EngineMomentDetailRecord["namedAuthor"] }
+    | { status: "ready"; moment: EngineMomentDetailRecord | null; credit: MomentCredit }
     | { status: "hidden"; result: HistoryPolicyUnreadableResult }
     | { status: "untracked" }
     | { status: "error" }
@@ -175,13 +182,14 @@ export function EngineMomentDiffPage({
         if (result.moment) onPathResolved(momentId, result.moment.path);
         const next = result.moment;
         // A change never changes, so reading the same one again keeps the
-        // diff already built for it.
+        // diff already built for it. Only its authors' names can change.
+        const credit: MomentCredit = { namedAuthor: next?.namedAuthor, authorLabels: next?.authorLabels };
         setState((current) => {
           if (current.status === "ready" && next !== null && current.moment?.id === next.id) {
-            if (current.namedAuthor?.userId === next.namedAuthor?.userId && current.namedAuthor?.label === next.namedAuthor?.label) return current;
-            return { ...current, namedAuthor: next.namedAuthor };
+            if (JSON.stringify(current.credit) === JSON.stringify(credit)) return current;
+            return { ...current, credit };
           }
-          return { status: "ready", moment: next, namedAuthor: next?.namedAuthor };
+          return { status: "ready", moment: next, credit };
         });
       })
       .catch(() => {
@@ -209,7 +217,7 @@ export function EngineMomentDiffPage({
 
   const diffMoment = state.status === "ready" ? state.moment : null;
   const moment = useMemo(() => state.status === "ready" && state.moment
-    ? { ...state.moment, namedAuthor: state.namedAuthor }
+    ? { ...state.moment, ...state.credit }
     : null, [state]);
   // The diff is the expensive part of this page, and a moment's bodies never
   // change while its tab is open. Build it once per moment: it used to run
@@ -383,10 +391,14 @@ export function EngineMomentDiffPage({
   // rides the encrypted path end to end).
   const isProtected = moment.protected === true;
   // Who wrote this change directly, when the owner can stop them and restore
-  // what they wrote: a person they shared with, or an Edit share link.
-  const stopTarget: StopTarget | null = moment.namedAuthor
+  // what they wrote: a person they shared with, or an Edit share link. Only
+  // the relay's direct-write lane carries such a change in, as "sync"; that
+  // lane's ledger is what Stop and restore reverts. A live document's change
+  // names its collaborator too, and restores through Restore shared file.
+  const directWrite = moment.origin === "sync";
+  const stopTarget: StopTarget | null = directWrite && moment.namedAuthor
     ? { target: { kind: "person", userId: moment.namedAuthor.userId }, label: moment.namedAuthor.label }
-    : moment.linkAuthor
+    : directWrite && moment.linkAuthor
       ? { target: { kind: "link", grantId: moment.linkAuthor.grantId }, label: "Edit link" }
       : null;
   // Each side presents by its own kind (see momentDiffSides).

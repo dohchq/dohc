@@ -14,7 +14,7 @@ The discipline behind the words is the `dohc-writing` skill: Orwell plus ASD-STE
 
 ## Identity
 
-- **Mark:** the drop-lobe. A single stroked lobe contour with a central datum dot. SVG only, `currentColor` for both stroke and dot, no gradient, no shadow, no automotive badge. Source of truth: `packages/brand/src/DohcLogo.tsx` (`DohcMark`, `DohcWordmark`, `DohcLockup`, `DohcBrandBlock`).
+- **Mark:** the drop-lobe. A single stroked lobe contour with a central datum dot. SVG only, `currentColor` for both stroke and dot, no gradient, no shadow, no automotive badge. Source of truth: `packages/brand/src/DohcLogo.tsx` (`DohcMark`, `DohcWordmark`, `DohcLockup`).
 
 ## Show, don't tell
 

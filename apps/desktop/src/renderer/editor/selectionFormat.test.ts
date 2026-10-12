@@ -5,12 +5,13 @@ import { StarterKit } from "@tiptap/starter-kit";
 import { Markdown } from "@tiptap/markdown";
 import { TaskList } from "@tiptap/extension-list";
 import { EditorState, TextSelection } from "@tiptap/pm/state";
-import { DohcTaskItem, dohcMarkdownExtensions } from "./extensions";
+import { DohcTaskItem } from "@dohc/ydoc-projection/markdown-extensions";
+import { desktopMarkdownExtensions } from "./extensions";
 import { NO_SELECTION_FORMAT, selectionFormat } from "./selectionFormat";
 
 const extensions = [
   StarterKit.configure({ trailingNode: false }),
-  ...dohcMarkdownExtensions,
+  ...desktopMarkdownExtensions,
   TaskList,
   DohcTaskItem,
   Markdown.configure({ indentation: { style: "space", size: 2 } }),

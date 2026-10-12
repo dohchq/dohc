@@ -28,6 +28,7 @@ import {
   planShareMountRemoval,
   usableShareMountRecord,
   validMountLabel,
+  withoutShareMountRecords,
 } from "./shareMounts";
 import {
   createShareMountDirectoryThroughOwnerForTest,
@@ -438,21 +439,17 @@ describe("mount labels", () => {
     const healthy = { shareId: "healthy", label: "healthy" };
     const duplicateOne = { shareId: SHARE_ID, label: "alex" };
     const duplicateTwo = { shareId: SHARE_ID, label: "sam" };
-    expect(
-      planShareMountRemoval(
-        [healthy, duplicateOne, duplicateTwo],
-        SHARE_ID,
-      ),
-    ).toEqual({ kind: "registry-only", remaining: [healthy] });
-    expect(
-      planShareMountRemoval(
-        [healthy, { shareId: "damaged", label: ".env" }],
-        "damaged",
-      ),
-    ).toEqual({ kind: "registry-only", remaining: [healthy] });
+    const duplicated = [healthy, duplicateOne, duplicateTwo];
+    expect(planShareMountRemoval(duplicated, SHARE_ID)).toEqual({ kind: "registry-only" });
+    expect(withoutShareMountRecords(duplicated, SHARE_ID)).toEqual([healthy]);
+    const damaged = [healthy, { shareId: "damaged", label: ".env" }];
+    expect(planShareMountRemoval(damaged, "damaged")).toEqual({ kind: "registry-only" });
+    expect(withoutShareMountRecords(damaged, "damaged")).toEqual([healthy]);
     expect(planShareMountRemoval([healthy], "missing")).toEqual({
       kind: "missing",
     });
+    const unchanged = [healthy];
+    expect(withoutShareMountRecords(unchanged, "missing")).toBe(unchanged);
   });
 
   it("refuses a move when either resolved endpoint belongs to a mount", async () => {

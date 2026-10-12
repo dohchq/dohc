@@ -517,7 +517,7 @@ describe("the automation host", () => {
     expect(await isAutomationHost(null, () => true)).toBe(false);
     expect(await automationHostGeneration({ rootPath: root }, () => 7), "its only computer runs at 0").toBe(0);
     expect(await automationHostGeneration({ rootPath: root, remote: {} }, () => 7)).toBe(7);
-    recordSynced(root);
+    await recordSynced(root);
     expect(await isAutomationHost({ rootPath: root }, () => true), "synced before, so another computer may be the host").toBe(false);
     expect(await automationHostGeneration({ rootPath: root }, () => 7)).toBeNull();
   });

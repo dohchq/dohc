@@ -345,8 +345,8 @@ async fn terminal_job_commit_before_compensation_recovers_with_concurrent_arriva
                 store.write_with(&NoFaults, |tx| {
                 tx.execute("UPDATE materialization_jobs SET status=?1,completed_at_ms=6 WHERE status='pending'",[if status == "superseded" { "cancelled" } else { status }]).map_err(StorageError::persist_public)?;
                 if status=="superseded" {
-                    tx.execute("INSERT INTO materialization_jobs (job_id,workspace_id,target_path,content_sha256,preimage_present,target_generation,status,created_at_ms,completed_at_ms) \
-                        SELECT 'newer',workspace_id,target_path,content_sha256,preimage_present,target_generation+1,'complete',created_at_ms,5 FROM materialization_jobs ORDER BY target_generation DESC LIMIT 1",[]).map_err(StorageError::persist_public)?;
+                    tx.execute("INSERT INTO materialization_jobs (job_id,workspace_id,target_path,content_sha256,preimage_present,preimage_sha256,target_generation,status,created_at_ms,completed_at_ms) \
+                        SELECT 'newer',workspace_id,target_path,content_sha256,preimage_present,preimage_sha256,target_generation+1,'complete',created_at_ms,5 FROM materialization_jobs ORDER BY target_generation DESC LIMIT 1",[]).map_err(StorageError::persist_public)?;
                 }
                 Ok::<_,StorageError>(())
             }).expect("terminal job commits before compensation");
