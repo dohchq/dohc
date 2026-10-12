@@ -18,6 +18,14 @@ _Avoid_: self-hosted Drive
 A device's authenticated connection to a dohc server. Workspace permissions determine which work the connection can access.
 _Avoid_: Drive connection (for a self-hosted server)
 
+**Server account**:
+A person's identity on one dohc server. A dohc Drive account is a server account on Drive and carries no authority on any other server.
+_Avoid_: dohc account, global account
+
+**Cell**:
+One deployment of the dohc release behind dohc Drive, holding a set of workspaces. Each workspace lives on exactly one cell. People never see cells; to them Drive is one server.
+_Avoid_: shard, node, tenant
+
 ### Privacy
 
 **Usage record**:
@@ -115,7 +123,7 @@ The server-minted identity for one browser holding one share link. It carries pr
 _Avoid_: anonymous id, device id
 
 **Received share**:
-The recipient-side materialization of a share: either its own workspace or a mount inside a host workspace under `shared-with-me/`, constrained by the grant's access.
+The recipient-side materialization of a share: either its own workspace or a mount inside a host workspace under `shared-with-me/`, constrained by the grant's access. A mount syncs only with the share's server. The host workspace's server records only that the mount exists.
 _Avoid_: shared folder, remote workspace
 
 **Pending invite**:
@@ -133,6 +141,10 @@ _Avoid_: site, dashboard, artifact
 **Publication**:
 An immutable, owner-approved bundle of one app revision. Authority comes from the publication, never from the app's source or manifest alone.
 _Avoid_: deploy, build (for the approved object)
+
+**App domain**:
+The domain that serves app launches, kept apart from the server's own domains. Each launch gets a random subdomain. With the domain on the Public Suffix List, browsers treat every subdomain as its own site, so one app cannot set cookies another app reads.
+_Avoid_: publish domain, user content domain
 
 **Dataset**:
 A workspace-owned transactional data domain with its schema, operations, records, and file associations. Apps receive permission to use approved operations; they do not own a separate backend.
