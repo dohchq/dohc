@@ -79,18 +79,6 @@ pub(crate) fn install_passive_guards(conn: &Connection) -> Result<(), StorageErr
 }
 
 impl EngineStore {
-    /// Install connection guards only for a store with the durable passive role.
-    pub fn make_passive(&mut self) -> Result<(), StorageError> {
-        if !crate::schema::store_is_passive(&self.conn)? {
-            return Err(StorageError::InvalidInput {
-                reason: "engine store role mismatch",
-            });
-        }
-        install_passive_guards(&self.conn)?;
-        self.passive = true;
-        Ok(())
-    }
-
     /// Open a passive store; existing owner stores are refused.
     pub fn open_passive(
         path: &Path,
