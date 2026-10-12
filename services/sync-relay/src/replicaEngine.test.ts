@@ -5,7 +5,7 @@ import { createReplicaEngineStarter } from "./replicaEngine";
 
 const mocks = vi.hoisted(() => ({ spawn: vi.fn() }));
 vi.mock("node:child_process", () => ({ spawn: mocks.spawn }));
-afterEach(() => { vi.useRealTimers(); mocks.spawn.mockReset(); });
+afterEach(() => { vi.useRealTimers(); mocks.spawn.mockReset(); vi.unstubAllGlobals(); vi.unstubAllEnvs(); });
 
 const frame = (row: unknown) => {
   const bytes = Buffer.from(JSON.stringify(row)), header = Buffer.alloc(12);
@@ -59,7 +59,8 @@ it("gives the child only its private directory, fresh RPC token, and GET lease",
     expect(child.requests[5]!.params.pendingCursor).toEqual({ kind: "relay", token: "issued-3" });
     const [command, args, options] = mocks.spawn.mock.calls[0]!;
     expect(command).toBe(process.execPath); expect(args).toEqual([]); expect(options.cwd).toBe(input().storeDir);
-    expect(Object.keys(options.env)).toEqual(["DOHC_ENGINE_AUTH_TOKEN"]); expect(options.env.DOHC_ENGINE_AUTH_TOKEN).toMatch(/^[a-f0-9]{64}$/);
+    expect(Object.keys(options.env).sort()).toEqual(process.platform === "win32" ? ["DOHC_ENGINE_AUTH_TOKEN", "SystemRoot"] : ["DOHC_ENGINE_AUTH_TOKEN"]);
+    expect(options.env.DOHC_ENGINE_AUTH_TOKEN).toMatch(/^[a-f0-9]{64}$/);
     expect(JSON.stringify(child.requests)).not.toContain("serviceHost"); expect(JSON.stringify(child.requests)).not.toContain("ownerSecret");
   } finally { await replica.close(); }
 });
@@ -78,4 +79,29 @@ it("waits for actual child termination before closing", async () => {
   let closed = false; const closing = replica.close().then(() => { closed = true; });
   await Promise.resolve(); expect(closed).toBe(false); expect(child.kill).toHaveBeenCalled();
   child.finish(); await closing; expect(closed).toBe(true);
+});
+
+it("requires development opt-in even on Linux until isolation exists", () => {
+  vi.stubGlobal("process", { ...process, platform: "linux" });
+  expect(() => createReplicaEngineStarter({ engineExecutable: process.execPath, baseUrl: "https://relay.test" })).toThrow(/development/i);
+});
+
+it("gives a Windows development child SystemRoot without inheriting other environment", async () => {
+  vi.stubGlobal("process", { ...process, platform: "win32" });
+  vi.stubEnv("SystemRoot", "C:\\Windows");
+  const { replica } = await fixture();
+  try {
+    const env = mocks.spawn.mock.calls[0]![2].env;
+    expect(env.SystemRoot).toBe("C:\\Windows");
+    expect(Object.keys(env).sort()).toEqual(["DOHC_ENGINE_AUTH_TOKEN", "SystemRoot"]);
+  } finally { await replica.close(); }
+});
+
+it("exposes child exit while idle so the supervisor can retire it", async () => {
+  const { child, replica } = await fixture();
+  try {
+    const exited = (replica as { exited?: Promise<void> }).exited;
+    expect(exited).toBeInstanceOf(Promise);
+    child.finish(); await exited;
+  } finally { await replica.close(); }
 });

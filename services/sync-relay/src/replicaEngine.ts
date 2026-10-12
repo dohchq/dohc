@@ -16,8 +16,9 @@ export interface ReplicaEngineOptions {
 
 /** The child receives only private paths, an RPC token, and its GET credential. PR 4 adds Linux isolation. */
 export function createReplicaEngineStarter(options: ReplicaEngineOptions) {
-  if (process.platform !== "linux" && !options.allowUnisolatedDevelopment) {
-    throw new Error("Relay replicas require Linux; development must explicitly allow an unisolated child.");
+  // PR 4 must replace this all-platform opt-in with Linux isolation.
+  if (!options.allowUnisolatedDevelopment) {
+    throw new Error("Relay replicas require explicit development permission until Linux isolation is available.");
   }
   if (!isAbsolute(options.engineExecutable)) throw new TypeError("Replica engine executable must be absolute.");
   const deadlineMs = options.deadlineMs ?? 120_000;
@@ -25,7 +26,8 @@ export function createReplicaEngineStarter(options: ReplicaEngineOptions) {
   return async ({ storeDir, lease }: ReplicaChildInput): Promise<ReplicaChild> => {
     if (!(await stat(options.engineExecutable)).isFile()) throw new TypeError("Replica engine executable must be a file.");
     const authToken = randomBytes(32).toString("hex");
-    const child = spawn(options.engineExecutable, [], { cwd: storeDir, env: { DOHC_ENGINE_AUTH_TOKEN: authToken },
+    const child = spawn(options.engineExecutable, [], { cwd: storeDir, env: { DOHC_ENGINE_AUTH_TOKEN: authToken,
+      ...(process.platform === "win32" ? { SystemRoot: process.env.SystemRoot } : {}) },
       windowsHide: true, stdio: ["pipe", "pipe", "pipe"] });
     const termination = new Promise<void>(resolve => child.once("close", () => resolve()));
     const stream = Duplex.from({ readable: child.stdout, writable: child.stdin });
@@ -54,7 +56,7 @@ export function createReplicaEngineStarter(options: ReplicaEngineOptions) {
       workspace = String(opened.workspace);
       await request("sync.adoptJoinIdentity", { workspaceId: lease.workspaceId,
         replicationEpoch: lease.replicationEpoch, streamIdentity: lease.streamIdentity });
-      return { pid: child.pid, close, async pull() {
+      return { pid: child.pid, exited: termination, close, async pull() {
         let page: Record<string, unknown>;
         let previous: number | undefined;
         do {

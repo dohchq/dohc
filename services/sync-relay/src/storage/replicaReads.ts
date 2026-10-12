@@ -1,6 +1,5 @@
 import type { StorageContext } from "./context";
 import { currentShareGrantSql } from "./currentShareGrant";
-import { referencedBlobShas } from "./blobReferences";
 
 export function readReplicaStanding(storage: StorageContext, workspaceId: string, shareGrantBindings?: string) {
   storage.captureStanding();
@@ -17,17 +16,4 @@ export function readReplicaStanding(storage: StorageContext, workspaceId: string
       typeof row.stream_identity !== "string") return null;
   return { workspaceId, ownerUserId: row.owner_user_id, replicationEpoch: row.replication_epoch,
     streamIdentity: row.stream_identity, logSeq: Number(row.log_seq), shareGrantBindings: String(row.share_grants) };
-}
-
-export function replicaBlobIsReferenced(storage: StorageContext, workspaceId: string, sha256: string): boolean {
-  storage.captureStanding();
-  // Coordinate reads can refer to rows below the epoch floor.
-  const rows = storage.db.prepare(`SELECT op_kind,payload_json,recorded_at_ms FROM sync_relay_log
-    WHERE workspace_id=? AND payload_json LIKE '%' || ? || '%'`).iterate(workspaceId, sha256);
-  for (const row of rows) {
-    if (referencedBlobShas(String(row.op_kind), String(row.payload_json), {
-      workspaceId, recordedAtMs: Number(row.recorded_at_ms),
-    }).includes(sha256)) return true;
-  }
-  return false;
 }

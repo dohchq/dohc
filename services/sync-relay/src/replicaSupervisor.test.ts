@@ -1,12 +1,22 @@
 import { afterEach, expect, it, vi } from "vitest";
 import { createHash } from "node:crypto";
-import { existsSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { hasRelayWriteObservers, notifyRelayWrite } from "./relayWriteChanges";
 import { closeTestStorages, inspectDatabase, storagePath, tempRoot, testStorage } from "./testing";
 import { createReplicaReadPrincipal } from "./replicaReadPrincipal";
 import { createReplicaSupervisor, type ReplicaChild, type ReplicaChildInput } from "./replicaSupervisor";
 import { createReplicaEngineStarter } from "./replicaEngine";
 
-afterEach(async () => { vi.useRealTimers(); await closeTestStorages(); });
+const fsFailure = vi.hoisted(() => ({ path: "" }));
+vi.mock("node:fs/promises", async original => {
+  const fs = await original<typeof import("node:fs/promises")>();
+  return { ...fs, rm: (...args: Parameters<typeof fs.rm>) => {
+    if (args[0] === fsFailure.path) return Promise.reject(new Error("EPERM private store"));
+    return fs.rm(...args);
+  } };
+});
+afterEach(async () => { fsFailure.path = ""; vi.restoreAllMocks(); vi.useRealTimers(); await closeTestStorages(); });
 
 async function fixture(workspaceId = "w") {
   const storage = await testStorage();
@@ -157,7 +167,7 @@ it("rebuilds a failed fresh store once before completing activation", async () =
   } finally { await supervisor.close(); }
 });
 
-it("marks a replica failed after two fresh attempts and stops retrying without holding capacity", async () => {
+it("reports failure after two fresh attempts and stops background retrying without holding capacity", async () => {
   const { storage, seed } = await fixture(); seed("second");
   const errors: unknown[] = [], paths: string[] = [];
   const startChild = vi.fn(async (input: ReplicaChildInput) => {
@@ -173,10 +183,13 @@ it("marks a replica failed after two fresh attempts and stops retrying without h
     expect(paths.every(path => !existsSync(path))).toBe(true);
     storage.appendLogBatch({ workspaceId: "w", originId: "o", ops: [{ originSeq: 0, opKind: "moment.append", payloadJson: "{}", recordedAtMs: 1 }] });
     await supervisor.settled("w");
-    await expect(supervisor.activate("w")).rejects.toThrow("unrecoverable");
     expect(paths).toHaveLength(2);
     expect(errors).toHaveLength(1);
     await supervisor.activate("second");
+    await supervisor.evict("second");
+    startChild.mockImplementationOnce(async () => ({ pull: async () => {}, close: async () => {} }));
+    await supervisor.activate("w");
+    expect(errors).toHaveLength(1);
   } finally { await supervisor.close(); }
 });
 
@@ -211,4 +224,125 @@ it("refuses unsupported production hosts and invalid limits before starting anyt
   expect(() => createReplicaSupervisor({ storage, storeRoot: "relative", startChild: async () => { throw Error(); } })).toThrow("absolute");
   expect(() => createReplicaSupervisor({ storage, storeRoot: "C:/private", maxRunning: 0, startChild: async () => { throw Error(); } })).toThrow("budget");
   if (process.platform !== "linux") expect(() => createReplicaEngineStarter({ engineExecutable: "C:/daemon.exe", baseUrl: "https://relay.test" })).toThrow("Linux");
+});
+
+it("sweeps stores from a prior process before admitting a child", async () => {
+  const { storage } = await fixture(), root = await tempRoot("sweep");
+  const stale = join(root, "replica-crashed"); mkdirSync(stale);
+  writeFileSync(join(stale, "deleted-text-and-ciphertext"), "private bytes");
+  const supervisor = createReplicaSupervisor({ storage, storeRoot: root, startChild: async input => {
+    expect(existsSync(stale)).toBe(false);
+    return { pull: async () => {}, close: async () => {} };
+  } });
+  try { await supervisor.activate("w"); }
+  finally { await supervisor.close().catch(() => {}); }
+});
+
+it.each(["close", "remove"])("releases capacity and reports a %s error during retirement", async stage => {
+  const { storage, seed } = await fixture(); seed("second");
+  let path = ""; const errors: unknown[] = [];
+  const supervisor = createReplicaSupervisor({ storage, storeRoot: await tempRoot("retire-failure"), maxRunning: 1,
+    onError: (_, error) => errors.push(error), startChild: async input => {
+      path = input.storeDir;
+      return { pull: async () => {}, close: async () => { if (stage === "close") throw Error("close failed"); } };
+    } });
+  try {
+    await supervisor.activate("w");
+    if (stage === "remove") fsFailure.path = path;
+    await supervisor.evict("w");
+    expect(errors.map(String)).toContain(stage === "close" ? "Error: close failed" : "Error: EPERM private store");
+    expect(hasRelayWriteObservers(storage)).toBe(false);
+    fsFailure.path = "";
+    await supervisor.activate("second");
+    await supervisor.evict("second");
+    await supervisor.activate("w");
+  } finally { fsFailure.path = ""; await supervisor.close().catch(() => {}); }
+});
+
+it("retires an idle dead child immediately and permits a new activation", async () => {
+  const { storage } = await fixture(); const exited = deferred(); let path = "";
+  const startChild = vi.fn(async (input: ReplicaChildInput) => {
+    path = input.storeDir; return { exited: exited.promise, pull: async () => {}, close: async () => {} };
+  });
+  const supervisor = createReplicaSupervisor({ storage, storeRoot: await tempRoot("dead"), startChild });
+  try {
+    await supervisor.activate("w"); const first = path; exited.resolve();
+    await expect.poll(() => existsSync(first)).toBe(false);
+    await supervisor.settled("w");
+    startChild.mockImplementation(async input => { path = input.storeDir; return { exited: new Promise<void>(() => {}), pull: async () => {}, close: async () => {} }; });
+    await supervisor.activate("w"); expect(startChild).toHaveBeenCalledTimes(2);
+  } finally { await supervisor.close(); }
+});
+
+it("permits reactivation after a transient pull failure in a converged replica", async () => {
+  const { storage } = await fixture(); let pulls = 0;
+  const startChild = vi.fn(async () => ({ close: async () => {}, pull: async () => { if (++pulls === 2) throw Error("deadline exceeded"); } }));
+  const supervisor = createReplicaSupervisor({ storage, storeRoot: await tempRoot("transient"), startChild });
+  try {
+    await supervisor.activate("w");
+    storage.appendLogBatch({ workspaceId: "w", originId: "o", ops: [{ originSeq: 0, opKind: "moment.append", payloadJson: "{}", recordedAtMs: 1 }] });
+    await supervisor.settled("w").catch(() => {});
+    await supervisor.activate("w"); expect(startChild).toHaveBeenCalledTimes(2);
+  } finally { await supervisor.close(); }
+});
+
+it("observes owner writes only while an entry is running", async () => {
+  const { storage } = await fixture();
+  const supervisor = createReplicaSupervisor({ storage, storeRoot: await tempRoot("subscribe"), startChild: async () => ({ pull: async () => {}, close: async () => {} }) });
+  try {
+    expect(hasRelayWriteObservers(storage)).toBe(false);
+    await supervisor.activate("w"); expect(hasRelayWriteObservers(storage)).toBe(true);
+    await supervisor.evict("w"); expect(hasRelayWriteObservers(storage)).toBe(false);
+    await supervisor.activate("w"); expect(hasRelayWriteObservers(storage)).toBe(true);
+  } finally { await supervisor.close(); }
+});
+
+it("reads standing once per idle entry in an owner-write batch", async () => {
+  const { storage } = await fixture();
+  const supervisor = createReplicaSupervisor({ storage, storeRoot: await tempRoot("standing"), startChild: async () => ({ pull: async () => {}, close: async () => {} }) });
+  try {
+    await supervisor.activate("w");
+    const read = vi.spyOn(storage, "readReplicaStanding");
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    notifyRelayWrite(storage); await new Promise<void>(queueMicrotask); await vi.advanceTimersByTimeAsync(20);
+    expect(read).toHaveBeenCalledTimes(1);
+  } finally { vi.useRealTimers(); await supervisor.close(); }
+});
+
+async function blobFixture() {
+  const { storage } = await fixture();
+  const shas = ["served", "not-served"].map(text => {
+    const bytes = Buffer.from(text), sha256 = createHash("sha256").update(bytes).digest("hex");
+    storage.putBlob({ workspaceId: "w", sha256, content: bytes, createdAtMs: 1 }); return sha256;
+  });
+  storage.appendLogBatch({ workspaceId: "w", originId: "o", ops: shas.map((sha, originSeq) => ({ originSeq,
+    opKind: "moment.append", payloadJson: JSON.stringify({ payloadAfterBlobSha256: sha }), recordedAtMs: 1 })) });
+  const principal = createReplicaReadPrincipal(storage), lease = principal.issue("w", "first");
+  const read = (path: string, bearer = lease.bearer) => principal.handle(new Request(`https://relay.test/sync/w/${path}`, { headers: { authorization: `Bearer ${bearer}` } }));
+  return { principal, lease, shas, read };
+}
+
+it("authorizes only blobs referenced by log rows served to this lease", async () => {
+  const { shas, read } = await blobFixture();
+  expect((await read(`blobs/${shas[0]}`)).status).toBe(404);
+  expect((await read("log?replicationEpoch=epoch&streamIdentity=stream&limit=1")).status).toBe(200);
+  expect((await read(`blobs/${shas[0]}`)).status).toBe(200);
+  expect((await read(`blobs/${shas[1]}`)).status).toBe(404);
+  expect((await read("log/o/1?replicationEpoch=epoch&streamIdentity=stream")).status).toBe(200);
+  expect((await read(`blobs/${shas[1]}`)).status).toBe(200);
+});
+
+it("checks a served blob by set membership once per request", async () => {
+  const { shas, read } = await blobFixture();
+  await read("log?replicationEpoch=epoch&streamIdentity=stream");
+  const has = vi.spyOn(Set.prototype, "has");
+  expect((await read(`blobs/${shas[0]}`)).status).toBe(200);
+  expect(has.mock.calls.filter(([value]) => value === shas[0])).toHaveLength(1);
+});
+
+it("does not transfer served blob authority to a replacement incarnation", async () => {
+  const { principal, shas, read } = await blobFixture();
+  await read("log?replicationEpoch=epoch&streamIdentity=stream");
+  const replacement = principal.issue("w", "replacement");
+  expect((await read(`blobs/${shas[0]}`, replacement.bearer)).status).toBe(404);
 });

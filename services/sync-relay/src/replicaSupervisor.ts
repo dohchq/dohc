@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
-import { isAbsolute, join } from "node:path";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import type { SyncRelayStorage } from "./storage";
 import { observeRelayWrites } from "./relayWriteChanges";
 import { createReplicaReadPrincipal, type ReplicaReadLease } from "./replicaReadPrincipal";
@@ -9,6 +9,7 @@ import { createReplicaReadPrincipal, type ReplicaReadLease } from "./replicaRead
 export const REPLICA_SUPERVISOR_LIMITS = Object.freeze({ maxRunning: 4, idleMs: 5 * 60_000 });
 export interface ReplicaChild {
   readonly pid?: number;
+  readonly exited?: Promise<void>;
   pull(): Promise<void>;
   close(): Promise<void>;
 }
@@ -40,13 +41,18 @@ interface Entry {
 export function createReplicaSupervisor(options: ReplicaSupervisorOptions) {
   const limits = { ...REPLICA_SUPERVISOR_LIMITS, ...options };
   if (!isAbsolute(options.storeRoot)) throw new TypeError("Replica store root must be absolute.");
+  if (dirname(resolve(options.storeRoot)) === resolve(options.storeRoot)) throw new TypeError("Replica store root must be a private directory.");
   for (const value of [limits.maxRunning, limits.idleMs]) {
     if (!Number.isSafeInteger(value) || value < 1) throw new TypeError("Invalid replica budget.");
   }
   const principal = createReplicaReadPrincipal(options.storage);
   const entries = new Map<string, Entry>();
-  const failures = new Map<string, { lease: ReplicaReadLease; error: unknown }>();
+  // Leases and stores belong to this process. Finish the crash sweep before activation.
+  const ready = rm(options.storeRoot, { recursive: true, force: true })
+    .then(() => mkdir(options.storeRoot, { recursive: true, mode: 0o700 }));
+  void ready.catch(() => {});
   let closed = false;
+  let unsubscribe: (() => void) | undefined;
   let notification: ReturnType<typeof setTimeout> | undefined;
   let notificationDone = Promise.resolve();
   let finishNotification = () => {};
@@ -54,8 +60,14 @@ export function createReplicaSupervisor(options: ReplicaSupervisorOptions) {
   const standingCurrent = (lease: ReplicaReadLease) => {
     const standing = options.storage.readReplicaStanding(lease.workspaceId, lease.shareGrantBindings);
     return standing && standing.ownerUserId === lease.ownerUserId &&
-      standing.replicationEpoch === lease.replicationEpoch && standing.streamIdentity === lease.streamIdentity;
+      standing.replicationEpoch === lease.replicationEpoch && standing.streamIdentity === lease.streamIdentity ? standing : null;
   };
+  function stopObserving() {
+    unsubscribe?.(); unsubscribe = undefined;
+    if (notification) clearTimeout(notification);
+    notification = undefined;
+    finishNotification();
+  }
 
   async function retire(entry: Entry): Promise<void> {
     if (entry.retirement) return entry.retirement;
@@ -64,10 +76,17 @@ export function createReplicaSupervisor(options: ReplicaSupervisorOptions) {
     clearTimeout(entry.idle);
     entry.retirement = (async () => {
       // Startup may still own the directory and child. Wait before disposing either.
-      await entry.run?.catch(() => {});
-      await entry.child?.close();
-      if (entry.storeDir) await rm(entry.storeDir, { recursive: true, force: true });
-      entries.delete(entry.lease.workspaceId);
+      try {
+        await entry.run?.catch(() => {});
+        try { await entry.child?.close(); } catch (error) { report(entry, error); }
+        finally {
+          try { if (entry.storeDir) await rm(entry.storeDir, { recursive: true, force: true }); }
+          catch (error) { report(entry, error); }
+        }
+      } finally {
+        if (entries.get(entry.lease.workspaceId) === entry) entries.delete(entry.lease.workspaceId);
+        if (entries.size === 0) stopObserving();
+      }
     })();
     return entry.retirement;
   }
@@ -86,6 +105,14 @@ export function createReplicaSupervisor(options: ReplicaSupervisorOptions) {
         try {
           if (!entry.child && !entry.stopping && principal.current(entry.lease)) {
             entry.child = await options.startChild({ storeDir: entry.storeDir!, lease: entry.lease });
+            const child = entry.child;
+            void child.exited?.then(() => {
+              // A first-pull crash belongs to the one-time fresh-store rebuild below.
+              if (entry.child === child && !entry.stopping && entry.frontier >= 0) {
+                report(entry, new Error("Replica child exited."));
+                void retire(entry).catch(error => report(entry, error));
+              }
+            });
           }
           while (entry.dirty && !entry.stopping) {
             if (!principal.current(entry.lease)) break;
@@ -119,7 +146,6 @@ export function createReplicaSupervisor(options: ReplicaSupervisorOptions) {
         entry.idle.unref();
       }
     }, error => {
-      if (!entry.stopping && standingCurrent(entry.lease)) failures.set(entry.lease.workspaceId, { lease: entry.lease, error });
       report(entry, error);
       void retire(entry).catch(failure => report(entry, failure));
     });
@@ -127,29 +153,26 @@ export function createReplicaSupervisor(options: ReplicaSupervisorOptions) {
   }
 
   // Batch append notifications briefly so owner responses leave before replica reads re-enter.
-  const unsubscribe = observeRelayWrites(options.storage, () => {
-    if (closed || notification) return;
+  function observeWrite() {
+    if (closed || entries.size === 0 || notification) return;
     notificationDone = new Promise<void>(resolve => { finishNotification = resolve; });
     notification = setTimeout(() => {
       notification = undefined;
       for (const entry of entries.values()) {
         if (entry.stopping) continue;
-        if (!standingCurrent(entry.lease)) void retire(entry).catch(error => report(entry, error));
-        else if (options.storage.readReplicaStanding(entry.lease.workspaceId)!.logSeq !== entry.frontier) {
+        const standing = standingCurrent(entry.lease);
+        if (!standing) void retire(entry).catch(error => report(entry, error));
+        else if (standing.logSeq !== entry.frontier) {
           void schedule(entry).catch(() => {});
         }
       }
       finishNotification();
     }, 20);
-  });
+  }
 
   async function activate(workspaceId: string): Promise<void> {
+    await ready;
     if (closed) throw new Error("Replica supervisor is closed.");
-    const failure = failures.get(workspaceId);
-    if (failure) {
-      if (standingCurrent(failure.lease)) throw failure.error;
-      failures.delete(workspaceId);
-    }
     let entry = entries.get(workspaceId);
     if (entry && (entry.stopping || !standingCurrent(entry.lease))) {
       await retire(entry);
@@ -160,6 +183,7 @@ export function createReplicaSupervisor(options: ReplicaSupervisorOptions) {
       const lease = principal.issue(workspaceId, randomUUID());
       entry = { lease, frontier: -1, dirty: true, stopping: false };
       entries.set(workspaceId, entry);
+      unsubscribe ??= observeRelayWrites(options.storage, observeWrite);
     }
     await schedule(entry);
     if (entry.stopping || !principal.current(entry.lease)) throw new Error("Replica standing ended during activation.");
@@ -169,6 +193,7 @@ export function createReplicaSupervisor(options: ReplicaSupervisorOptions) {
     handle: principal.handle,
     activate,
     async settled(workspaceId: string): Promise<void> {
+      await ready;
       await Promise.resolve();
       await notificationDone;
       const entry = entries.get(workspaceId);
@@ -178,10 +203,8 @@ export function createReplicaSupervisor(options: ReplicaSupervisorOptions) {
     async evict(workspaceId: string): Promise<void> { const entry = entries.get(workspaceId); if (entry) await retire(entry); },
     async close(): Promise<void> {
       closed = true;
-      unsubscribe();
-      if (notification) clearTimeout(notification);
-      notification = undefined;
-      finishNotification();
+      stopObserving();
+      await ready;
       await Promise.all([...entries.values()].map(retire));
     },
   };

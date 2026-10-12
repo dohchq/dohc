@@ -7,7 +7,7 @@ import {
 import { badRequest, notFound, relayError } from "./errors";
 import { assertChatAuthorship, assertClientLogProvenance, parseAuthenticatedLogOps, type LogAuthorNameLookup } from "./relayLogInputs";
 import { parseCursor, parseLimit, parseString, parseWorkspaceId, readJsonObject } from "./requestInputs";
-import type { EnforceWorkspaceIdentityResult, SyncRelayStorage } from "./storage";
+import type { EnforceWorkspaceIdentityResult, SyncRelayLogRow, SyncRelayStorage } from "./storage";
 import { MAX_DISCUSSION_ACTIVITY_HOLD_MS, MAX_OPS_PER_REQUEST, MAX_ORIGIN_ID_CHARS } from "./wireLimits";
 
 export type WorkspaceReplicationRoute =
@@ -36,6 +36,7 @@ export function createWorkspaceReplicationRoutes(
   nowMs: () => number,
   discussionActivity: Pick<DiscussionActivityHub, "wakeLog" | "wait">,
   lookupUserDisplayName?: LogAuthorNameLookup,
+  onLogRead?: (request: Request, workspaceId: string, rows: readonly SyncRelayLogRow[]) => void,
 ) {
   async function respondToWorkspaceRegistration(
     request: Request,
@@ -188,7 +189,7 @@ export function createWorkspaceReplicationRoutes(
         sinceRelaySeq: since,
         limit,
       });
-      return jsonResponse({
+      const response = jsonResponse({
         ok: true,
         ops: page.rows.map((row) => ({
           relaySeq: row.relaySeq,
@@ -208,6 +209,8 @@ export function createWorkspaceReplicationRoutes(
         nextCursor: page.rows.length === 0 ? requestedSince : page.nextCursor,
         hasMore: page.hasMore,
       });
+      onLogRead?.(request, route.workspaceId, page.rows);
+      return response;
     }
 
     if (route.route === "log-coordinate" && request.method === "GET") {
@@ -235,18 +238,13 @@ export function createWorkspaceReplicationRoutes(
         ...(row.admittedAuthorSnapshot === undefined ? {} : {admittedAuthorSnapshot: row.admittedAuthorSnapshot}),
           ...(row.settlementAdmission === undefined ? {} : {settlementAdmission:row.settlementAdmission}),
       };
-      if (row.relaySeq <= epochLogFloor) {
-        return jsonResponse({
-          ok: true,
-          status: "presentBelowEpochFloor",
-          op,
-        });
-      }
-      return jsonResponse({
+      const response = jsonResponse({
         ok: true,
-        status: "present",
+        status: row.relaySeq <= epochLogFloor ? "presentBelowEpochFloor" : "present",
         op,
       });
+      onLogRead?.(request, route.workspaceId, [row]);
+      return response;
     }
 
     throw relayError("method_not_allowed");

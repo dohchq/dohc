@@ -570,7 +570,6 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
   }
 
   readReplicaStanding(workspaceId: string, shareGrantBindings?: string) { return replicaReads.readReplicaStanding(this, workspaceId, shareGrantBindings); }
-  replicaBlobIsReferenced(workspaceId: string, sha256: string) { return replicaReads.replicaBlobIsReferenced(this, workspaceId, sha256); }
 
   postAutomationWake(input: noticeStorage.PostAutomationWakeInput): noticeStorage.PostedAutomationWake {
     return noticeStorage.postAutomationWake(this, input);
