@@ -260,7 +260,7 @@ describe("local usage store", () => {
     expect(store.recordSuccess(pair)).toBe(action === "on");
   });
   it.each([
-    ["bad JSON", '{"version":1,"enabled":false,"counts":['],
+    ["bad JSON", '{"version":1,"enabled":true,"counts":['],
     ["schema mismatch", JSON.stringify({ version: 1, enabled: false, cleanExit: true, days: [], counts: "invalid", coverage: [] })],
     ["newer schema", JSON.stringify({ version: 2, enabled: false, cleanExit: true, days: [], counts: [], coverage: [] })],
   ])("preserves %s across launch, controls, midnight, close and restart", async (_reason, raw) => {
@@ -297,9 +297,12 @@ describe("local usage store", () => {
     disk.set(path, "not JSON");
     store.recordSuccess(pair);
     await store.load();
-    disk.set(path, JSON.stringify(seed(false)));
+    const repaired = seed(false);
+    repaired.counts.push({ ...pair, day: today(), count: 3 });
+    disk.set(path, JSON.stringify(repaired));
     await store.setEnabled(true);
-    expect(saved()).toMatchObject({ enabled: true, counts: [] });
+    expect(saved()).toMatchObject({ enabled: true, counts: repaired.counts });
+    expect((await store.read()).counts).toEqual(repaired.counts);
     expect(store.recordSuccess(pair)).toBe(true);
   });
   it("ignores interrupted temporary snapshots and can retry a failed Clear", async () => {

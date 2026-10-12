@@ -118,7 +118,7 @@ describe("usage record bridge", () => {
   });
 
   it.each([
-    ["bad JSON", "not JSON"],
+    ["bad JSON", '{"version":1,"enabled":true,"counts":['],
     ["schema mismatch", '{"version":1,"enabled":false}'],
     ["newer schema", '{"version":2,"enabled":false,"cleanExit":true,"days":[],"counts":[],"coverage":[]}'],
   ])("exposes %s to Privacy as unreadable without replacing it", async (_reason, raw) => {
