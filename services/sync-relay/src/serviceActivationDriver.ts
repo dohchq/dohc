@@ -31,7 +31,7 @@ const targetKey=(target:ServiceActivationTarget)=>JSON.stringify([target.workspa
 /** A host can start with no targets; the self-hosted supervisor adds them as documents are shared. */
 export function parseServiceActivationConfig(value:unknown){
   if(value===undefined)return undefined;
-  const row=configRecord(value,["targets","validation","maxCaptureBytes","maxEntriesPerDrain","maxBytesPerDrain","maxDocumentsPerPass","pollIntervalMs","passDeadlineMs"]);
+  const row=configRecord(value,["targets","validation","maxCaptureBytes","maxEntriesPerDrain","maxBytesPerDrain","maxDocumentsPerPass","pollIntervalMs","passDeadlineMs","idleUnloadMs","idleRetryMs"]);
   if(!Array.isArray(row.targets) || row.targets.length>64)throw new Error("Invalid service activation targets.");
   const targets=row.targets.map(parseServiceActivationTarget);
   if(new Set(targets.map(targetKey)).size!==targets.length)throw new Error("Duplicate service activation target.");
@@ -41,7 +41,8 @@ export function parseServiceActivationConfig(value:unknown){
   return Object.freeze({targets:Object.freeze(targets),validateBaseline:createLiveMarkdownRegistrationValidator(validation),
     validateJournal:createLiveMarkdownJournalValidator(validation),validateAdmission:liveValidation.validator(validation),maxCaptureBytes:positive(row.maxCaptureBytes),
     maxEntriesPerDrain:positive(row.maxEntriesPerDrain),maxBytesPerDrain:positive(row.maxBytesPerDrain),
-    maxDocumentsPerPass:positive(row.maxDocumentsPerPass),pollIntervalMs:positive(row.pollIntervalMs),passDeadlineMs:positive(row.passDeadlineMs)});
+    maxDocumentsPerPass:positive(row.maxDocumentsPerPass),pollIntervalMs:positive(row.pollIntervalMs),passDeadlineMs:positive(row.passDeadlineMs),
+    idleUnloadMs:positive(row.idleUnloadMs),idleRetryMs:positive(row.idleRetryMs)});
 }
 export type ServiceActivationConfig=NonNullable<ReturnType<typeof parseServiceActivationConfig>>;
 type Owner={consumer:OwnerCommittedDelivery;transport:ReturnType<typeof serviceOwnerTransport>;completed:boolean;activationPending:boolean;
@@ -57,6 +58,8 @@ export class ServiceActivationDriver {
   readonly #owners=new Map<string,Owner>();
   // Targets this driver may have loaded into the engine since it started.
   readonly #loaded=new Set<string>();
+  // Hosted targets the engine unloaded while idle, with their documents. Passes skip them until they wake.
+  readonly #dormant=new Map<string,string>();
   constructor(readonly options:{storage:SyncRelayStorage;history:LiveJournalHistoryAuthority;client:EngineClient;host:LiveHostConnectionCoordinate;
     workspaces:ReadonlyMap<string,{handle:string;ordinary:ServiceOrdinaryReplication}>;config:ServiceActivationConfig;
     adoption:{maxBytes:number;maxEvents:number};restore?:LiveRestorePreparation;nextRequestId():number;deadlineMs:number;
@@ -84,13 +87,28 @@ export class ServiceActivationDriver {
   removeTarget(target:ServiceActivationTarget,objectId:string){
     const key=targetKey(target);
     this.#targets=this.#targets.filter(row=>targetKey(row)!==key);
-    this.#completedTargets.delete(key);this.#staleLeases.delete(key);this.#loaded.delete(key);
+    this.#completedTargets.delete(key);this.#staleLeases.delete(key);this.#loaded.delete(key);this.#dormant.delete(key);
     for(const [document,owner] of this.#owners)if(owner.target===key)this.#owners.delete(document);
     for(const document of this.#restoreConsumers.keys()){
       const restored=parseLiveDocumentKey(JSON.parse(document));
       if(restored.workspaceId===target.workspaceId && restored.objectId===objectId)this.#restoreConsumers.delete(document);
     }
   }
+  /**
+   * Forgets a document the engine unloaded while it stays a target, and ends
+   * its registration. Passes skip it until it wakes, then activate it again
+   * from its retained source.
+   */
+  sleep(target:ServiceActivationTarget,document:LiveDocumentKey){
+    const key=JSON.stringify(parseLiveDocumentKey(document));
+    this.#owners.get(key)?.consumer.release(document);
+    this.removeTarget(target,document.objectId);
+    this.#targets=[...this.#targets,target];this.#dormant.set(targetKey(target),key);
+  }
+  dormant(target:ServiceActivationTarget){return this.#dormant.has(targetKey(target));}
+  /** Whether the document belongs to a dormant target, which wakes when it is opened. */
+  asleep(document:LiveDocumentKey){return [...this.#dormant.values()].includes(JSON.stringify(parseLiveDocumentKey(document)));}
+  wake(target:ServiceActivationTarget){this.#dormant.delete(targetKey(target));}
   hasRetained(){
     return this.#targets.some(target=>this.#store.read(target.workspaceId,target.path,this.options.config.maxCaptureBytes)!==null);
   }
@@ -118,7 +136,7 @@ export class ServiceActivationDriver {
     this.#restoreConsumers.set(key,consumer);this.#loaded.add(targetKey(target));return consumer;
   }
   workspaceReady(workspaceId:string){
-    return this.#targets.filter(target=>target.workspaceId===workspaceId).every(target=>this.#completedTargets.has(targetKey(target)));
+    return this.#targets.filter(target=>target.workspaceId===workspaceId && !this.dormant(target)).every(target=>this.#completedTargets.has(targetKey(target)));
   }
   consumer(value:LiveDocumentKey){
     const document=parseLiveDocumentKey(value),owner=this.#owners.get(JSON.stringify(document));

@@ -3,6 +3,7 @@ import {liveHostSignal, withLiveHostSignal} from "./liveHostSignal.js";
 import {observeRelayWrites, type LiveHostChanges} from "./relayWriteChanges.js";
 import {parseNativeLiveSyncConfig} from "./liveSyncConfig.js";
 import {LiveDocumentWork} from "./liveDocumentWork.js";
+import {liveEditors} from "./liveEditors.js";
 import {queueLiveHostRequests} from "./liveHostRequests.js";
 import {parseLiveObjectBinding, type LiveObjectBinding} from "@dohc/live-session-contract/live-object-binding";
 import { randomBytes, randomUUID } from "node:crypto";
@@ -151,8 +152,19 @@ export async function startServiceLiveHost(options: {
   // Attached workspaces and hosted documents, as `update` last left them.
   const members = new Map<string, {handle: string; workspace: ServiceWorkspace}>();
   const hosted = new Map<string, {target: ServiceActivationTarget; objectId: string}>();
-  // Activation passes and membership changes take turns, so a pass never
-  // activates a document while an update unloads it.
+  // When each hosted document is due to unload with no live connection, and
+  // the count of connection changes it last saw. An idle unload that started
+  // under an older count was overtaken by a connection.
+  const editors = liveEditors(storage), idle = new Map<string, {due: number; generation: number}>();
+  const unloading = new Set<string>();
+  let generation = 0;
+  const hostedKey = (document: {workspaceId: string; objectId: string}) => {
+    for (const [key, row] of hosted) if (row.target.workspaceId === document.workspaceId && row.objectId === document.objectId) return key;
+    return undefined;
+  };
+  const touch = (key: string) => {idle.set(key, {due: Date.now() + config.activation!.idleUnloadMs, generation: ++generation});};
+  // Activation passes, idle unloads, wakes, and membership changes take turns,
+  // so a pass never activates a document while it unloads.
   let turn: Promise<unknown> = Promise.resolve();
   const exclusive = <T>(work: () => Promise<T>): Promise<T> => {
     const run = turn.then(work);
@@ -242,6 +254,11 @@ export async function startServiceLiveHost(options: {
       signal.addEventListener("abort",stop,{once: true});
       return stop;
     }),stop => Effect.sync(() => signal.removeEventListener("abort",stop)));
+    // Every connection change restarts the document's idle period.
+    yield* Effect.acquireRelease(Effect.sync(() => editors.subscribe(document => {
+      const key = hostedKey(document);
+      if (key) touch(key);
+    })),stop => Effect.sync(stop));
     const temporary = yield* Effect.acquireRelease(
       Effect.promise(() => mkdtemp(join(tmpdir(), "dohc-service-live-host-"))),
       directory => Effect.promise(() => rm(directory,{recursive: true,force: true})),
@@ -336,33 +353,73 @@ export async function startServiceLiveHost(options: {
       members.delete(workspaceId); consumers.delete(workspaceId); ordinary.delete(workspaceId);
       attachments.delete(workspaceId); ledgers.delete(workspaceId);
       for (const [key, document] of hosted) {
-        if (document.target.workspaceId === workspaceId) {activation!.removeTarget(document.target, document.objectId); hosted.delete(key);}
+        if (document.target.workspaceId === workspaceId) {activation!.removeTarget(document.target, document.objectId); hosted.delete(key); idle.delete(key);}
       }
       changes?.notifyHost([workspaceId]);
+    };
+    // The engine's reason while it holds unfinished work for the document, or undefined once nothing of it is loaded.
+    const requestUnload = async (document: {target: ServiceActivationTarget; objectId: string}, joined: AbortSignal) => {
+      try {
+        const result = await membershipRequest("liveApplication.unloadDocument", members.get(document.target.workspaceId)!.handle,
+          {objectId: document.objectId}, joined);
+        const reply = result && typeof result === "object" ? result as Record<string, unknown> : {};
+        if (reply.status === "pending") return typeof reply.reason === "string" ? reply.reason : "unload-pending";
+        if (reply.status !== "unloaded") throw new Error("Invalid live document unload response.");
+      } catch (error) {
+        // Nothing of the document is loaded, as after an unload whose reply was lost.
+        if (engineCode(error) !== "WORKSPACE_UNAVAILABLE") throw error;
+      }
+      return undefined;
     };
     // False while the engine holds unsettled work for the document. It stays in
     // activation passes, which settle it, until a later update unloads it.
     const unload = async (document: {target: ServiceActivationTarget; objectId: string}, joined: AbortSignal) => {
       if (activation!.loaded(document.target)) {
-        const send = async () => {
-          try {
-            const result = await membershipRequest("liveApplication.unloadDocument", members.get(document.target.workspaceId)!.handle,
-              {objectId: document.objectId}, joined);
-            const status = result && typeof result === "object" ? (result as Record<string, unknown>).status : undefined;
-            if (status === "pending") return false;
-            if (status !== "unloaded") throw new Error("Invalid live document unload response.");
-          } catch (error) {
-            // Nothing of the document is loaded, as after an unload whose reply was lost.
-            if (engineCode(error) !== "WORKSPACE_UNAVAILABLE") throw error;
-          }
-          return true;
-        };
+        const send = async () => await requestUnload(document, joined) === undefined;
         // Unload waits for delivery and settlement already running on the document.
         const owned = activation!.ownerDocument(document.target);
         if (!(owned ? await runDocument(owned, joined, send) : await send())) return false;
       }
       activation!.removeTarget(document.target, document.objectId);
       return true;
+    };
+    const settleTarget: Parameters<ServiceActivationDriver["activate"]>[2] = config.settlement
+      ? (consumer, document, joined) => consumer.settle(document, joined) : undefined;
+    // Unloads one idle hosted document and keeps it hosted. Resolves to why it
+    // stays loaded, or undefined once it unloaded or a connection overtook it.
+    // Runs in its document work, so no delivery reaches it between settlement
+    // and the unload, and it gives way to any connection change until it sends the unload.
+    const sleep = async (key: string, row: {target: ServiceActivationTarget; objectId: string}, seen: number, joined: AbortSignal) => {
+      const document = activation!.ownerDocument(row.target);
+      if (!document || !activation!.completed(row.target)) return "Service document activation is incomplete.";
+      const quiet = () => !editors.connected({workspaceId: row.target.workspaceId, objectId: row.objectId}) && idle.get(key)?.generation === seen;
+      unloading.add(key);
+      try {
+        return await runDocument(document, joined, async operation => {
+          if (!quiet()) return undefined;
+          const {consumer} = activation!.consumer(document);
+          if (settleTarget && !(await consumer.settle(document, operation)).materialized) return "Settlement has not reached the file.";
+          // Publish settled output now: passes skip a dormant document, so they may not push its workspace again.
+          if ((await attachments.get(row.target.workspaceId)!.ordinary.publish(operation)).hasMore) return "Ordinary publication has more pages.";
+          if (!quiet()) return undefined;
+          const pending = await requestUnload(row, operation);
+          if (pending === undefined) activation!.sleep(row.target, document);
+          return pending;
+        });
+      } finally {unloading.delete(key);}
+    };
+    // Opening a dormant document, or one whose idle unload is running, reloads it from its retained source.
+    const wake = async (document: {workspaceId: string; objectId: string}, callerSignal?: AbortSignal) => {
+      const key = hostedKey(document);
+      if (!key) return;
+      touch(key);
+      if (!activation!.dormant(hosted.get(key)!.target) && !unloading.has(key)) return;
+      await exclusive(() => withLiveHostSignal(signal, callerSignal, async joined => {
+        const row = hosted.get(key);
+        if (!row || !activation!.dormant(row.target)) return;
+        activation!.wake(row.target); touch(key);
+        await activation!.activate(row.target, joined, settleTarget);
+      }));
     };
     const update = (value: ServiceHostedSet, callerSignal?: AbortSignal) => exclusive(() => withLiveHostSignal(signal, callerSignal, async joined => {
       if (!activation || config.workspaces.length || config.activation!.targets.length) throw new Error("Only an activation host that starts empty takes membership updates.");
@@ -388,7 +445,7 @@ export async function startServiceLiveHost(options: {
       const retiring: {workspaceId: string; objectId: string}[] = [];
       for (const [key, document] of hosted) {
         if (changed.includes(document.target.workspaceId) || isDeepStrictEqual(wanted.get(key), document)) continue;
-        if (await unload(document, joined)) hosted.delete(key);
+        if (await unload(document, joined)) {hosted.delete(key); idle.delete(key);}
         else retiring.push({workspaceId: document.target.workspaceId, objectId: document.objectId});
       }
       // Any other workspace detaches only once its last document unloads, so
@@ -398,7 +455,7 @@ export async function startServiceLiveHost(options: {
       for (const workspaceId of leaving) await detach(workspaceId, joined);
       for (const workspace of workspaces) if (!members.has(workspace.workspaceId)) await attach(workspace, joined);
       for (const [key, document] of wanted) {
-        if (!hosted.has(key)) {activation.addTarget(document.target); hosted.set(key, document);}
+        if (!hosted.has(key)) {activation.addTarget(document.target); hosted.set(key, document); touch(key);}
       }
       registerRetained();
       return retiring;
@@ -408,9 +465,10 @@ export async function startServiceLiveHost(options: {
         adoption:config.adoption!,restore,nextRequestId,deadlineMs:config.client.requestDeadlineMs,assertCurrent:checkPreparing,
         registered(){registered=true;},runDocument:(document,signal,operation)=>runDocument(document,signal,operation)});
       registerRetained();
-      let index=0,lastError:string|undefined;
+      let index=0,lastError:string|undefined,lastIdleError:string|undefined;
       const pass=async()=>{
-        const bounds=config.activation!,targets=activation!.targets;
+        // A dormant document stays out of memory until someone opens it.
+        const bounds=config.activation!,targets=activation!.targets.filter(target=>!activation!.dormant(target));
         const passSignal=AbortSignal.any([signal,AbortSignal.timeout(bounds.passDeadlineMs)]);
         try{
           for(let visited=0;visited<Math.min(bounds.maxDocumentsPerPass,targets.length);visited++){
@@ -418,8 +476,7 @@ export async function startServiceLiveHost(options: {
             const target=targets[index]!;index=(index+1)%targets.length;
             // Settlement runs in the activation's own document work. A restore
             // fence during it leaves the pass pending rather than ready.
-            const result=await activation!.activate(target,passSignal,
-              config.settlement?(consumer,document,joined)=>consumer.settle(document,joined):undefined);
+            const result=await activation!.activate(target,passSignal,settleTarget);
             if(result.kind==="done"){
               await attachments.get(target.workspaceId)!.ordinary.push(passSignal);
               if(activation!.workspaceReady(target.workspaceId))await attachments.get(target.workspaceId)!.ordinary.pull(passSignal);
@@ -434,6 +491,28 @@ export async function startServiceLiveHost(options: {
           }
         }
       };
+      // Unloads hosted documents with no live connection for the idle period.
+      // Unfinished delivery, settlement, publication, or engine work keeps a
+      // document loaded until a later sweep retries it.
+      const sweep=async()=>{
+        const bounds=config.activation!;let visited=0;
+        for(const [key,row] of hosted){
+          const state=idle.get(key);
+          if(visited>=bounds.maxDocumentsPerPass || signal.aborted)break;
+          if(!state || Date.now()<state.due || activation!.dormant(row.target) ||
+            editors.connected({workspaceId:row.target.workspaceId,objectId:row.objectId}))continue;
+          visited++;
+          let waiting:string|undefined;
+          try{waiting=await sleep(key,row,state.generation,AbortSignal.any([signal,AbortSignal.timeout(bounds.passDeadlineMs)]));}
+          catch(error){waiting=error instanceof Error?error.message:String(error);}
+          if(waiting===undefined || idle.get(key)?.generation!==state.generation)continue;
+          idle.set(key,{due:Date.now()+bounds.idleRetryMs,generation:state.generation});
+          if(!signal.aborted && waiting!==lastIdleError){
+            lastIdleError=waiting;
+            try{console.error("Idle live document unload is waiting.",waiting);}catch{ /* Reporting must not stop activation. */ }
+          }
+        }
+      };
       const pause = Effect.callback<void>(resume => {
         const timer = setTimeout(() => resume(Effect.void),config.activation!.pollIntervalMs);
         timer.unref();
@@ -442,7 +521,7 @@ export async function startServiceLiveHost(options: {
       yield* Effect.forkScoped(Effect.gen(function* () {
         while (!signal.aborted) {
           // Native passes retain ownership until their actual work settles.
-          yield* Effect.uninterruptible(Effect.promise(() => exclusive(pass)));
+          yield* Effect.uninterruptible(Effect.promise(() => exclusive(async () => {await pass(); await sweep();})));
           yield* pause;
         }
       }));
@@ -461,14 +540,18 @@ export async function startServiceLiveHost(options: {
       holds(document: {workspaceId: string; objectId: string}): boolean {
         return [...hosted.values()].some(row => row.target.workspaceId === document.workspaceId && row.objectId === document.objectId);
       },
-      /** Whether an activation pass on this daemon has delivered and settled the hosted document. */
+      /** Whether this daemon has delivered and settled the hosted document, in an activation pass or before it unloaded idle. */
       settled(document: {workspaceId: string; objectId: string}): boolean {
         const row = [...hosted.values()].find(row => row.target.workspaceId === document.workspaceId && row.objectId === document.objectId);
-        return !!row && activation!.completed(row.target);
+        return !!row && (activation!.completed(row.target) || activation!.dormant(row.target));
       },
+      /** Whether the document can be opened now. A dormant document reloads when it is opened. */
       isDocumentReady(document: LiveDocumentKey): boolean {
-        try { check(); return consumerFor(parseLiveDocumentKey(document)) !== undefined; }
-        catch { return false; }
+        try {
+          check();
+          const parsed = parseLiveDocumentKey(document);
+          return activation?.asleep(parsed) === true || consumerFor(parsed) !== undefined;
+        } catch { return false; }
       },
       /**
        * The claim ledger of a workspace this host replicates as its owner,
@@ -499,6 +582,7 @@ export async function startServiceLiveHost(options: {
         if (!changes || !config.sync) throw new Error("Named frame sync is not configured on this service host.");
         const binding = parseLiveObjectBinding(value);
         const document = parseLiveDocumentKey({workspaceId: binding.workspaceId, mainVersionId: binding.mainVersionId, objectId: binding.objectId, lineageClaimId: binding.lineageClaimId});
+        await wake(document, callerSignal);
         await drain(document, callerSignal);
         check();
         const consumer = consumerFor(document)!;

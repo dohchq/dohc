@@ -12,6 +12,7 @@ import { EngineRequestError } from "@dohc/workspace-engine-client/daemon";
 import {hasRelayWriteObservers, notifyRelayWrite, observeRelayWrites} from "./relayWriteChanges.js";
 import {createNamedFrameChanges} from "./liveHostChanges.js";
 import {ServiceActivationDriver} from "./serviceActivationDriver.js";
+import {liveEditors} from "./liveEditors.js";
 import { OwnerCommittedDelivery } from "./ownerCommittedDelivery.js";
 import type { NativeOwnerActivation } from "@dohc/workspace-engine-client/daemon";
 import { markdownToYDoc } from "../../../packages/ydoc-projection/src/import-export.js";
@@ -364,6 +365,7 @@ async function configureActivation(f: Awaited<ReturnType<typeof fixture>>,limits
     sync:{policy:{maxReadBytes:1_000_000,maxOutputBytes:1_000_000,maxClientVectorBytes:1000,maxHostVectorBytes:1000},workingReserveBytes:1_000_000},
     activation:{targets:[{workspaceId:"workspace",path:"file.md",shareId:"share"}],maxCaptureBytes:1_000_000,
       maxEntriesPerDrain:10,maxBytesPerDrain:1_000_000,maxDocumentsPerPass:1,pollIntervalMs:60_000,passDeadlineMs:1000,
+      idleUnloadMs:600_000,idleRetryMs:30_000,
       validation:{maxStructVisits:1000,maxValueNodeVisits:1000,maxDecodedPayloadByteVisits:1000,maxStructClientGroupVisits:1000,
         maxDeleteClientGroupVisits:1000,maxDeleteIntervalVisits:1000,maxIndexOperations:1000},...limits}});
   await f.save();
@@ -451,7 +453,7 @@ const sha256 = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest(
 // A service owner whose activation completed under an earlier connection, as
 // after a restart. The started host resumes it from real relay storage; only
 // the engine is mocked. `park` holds the next engine request for one method.
-async function completedServiceOwner(options: {empty?: boolean} = {}) {
+async function completedServiceOwner(options: {empty?: boolean; frameChanges?: boolean} = {}) {
   const f = await fixture(), raw = new DatabaseSync(join(f.root, "relay", "relay.sqlite"));
   cleanup.push(async () => raw.close());
   const policy = {maxStructVisits: 1_000_000, maxValueNodeVisits: 5_000_000, maxDecodedPayloadByteVisits: 100_000_000,
@@ -555,7 +557,7 @@ async function completedServiceOwner(options: {empty?: boolean} = {}) {
     });
     return client;
   });
-  const host = await startServiceLiveHost(f);
+  const host = await startServiceLiveHost({...f, ...(options.frameChanges ? {frameChanges: createNamedFrameChanges(16)} : {})});
   cleanup.push(() => host.close());
   // The activation pass publishes readiness before it pushes ordinary changes.
   if (!options.empty) await pushed.promise;
@@ -621,8 +623,8 @@ it("keeps damaged evidence and caller cancellation visible for public delivery",
 
 // An empty host whose sibling document activates for real. The other document
 // counts as loaded but never activates, so only its unload reaches the engine.
-async function emptyServiceHost() {
-  const o = await completedServiceOwner({empty: true});
+async function emptyServiceHost(options: {frameChanges?: boolean} = {}) {
+  const o = await completedServiceOwner({empty: true, ...options});
   const sibling = {workspaceId: "workspace", objectId: "object", path: "docs/a.md", shareId: "share"};
   const other = {workspaceId: "workspace", objectId: "object-b", path: "docs/b.md", shareId: "share"};
   const activate = ServiceActivationDriver.prototype.activate, loaded = ServiceActivationDriver.prototype.loaded;
@@ -739,4 +741,144 @@ it("keeps the daemon after a refused attach and retires it when the engine expir
   refuse("SESSION_EXPIRED");
   await expect(o.host.update({workspaces, documents: [o.sibling]})).rejects.toThrow("SESSION_EXPIRED");
   expect(o.host.invalidated.aborted).toBe(true);
+});
+
+// An empty host holding the real document and a held one, on a manual clock.
+// Only Date.now is fake: passes run on real timers, and visits to the held
+// document count them. `hold` keeps passes from activating the real document.
+async function idleHost() {
+  let now = 1_000_000;
+  vi.spyOn(Date, "now").mockImplementation(() => now);
+  const o = await emptyServiceHost({frameChanges: true}), workspaces = [o.workspace];
+  const activate = vi.mocked(ServiceActivationDriver.prototype.activate), through = activate.getMockImplementation()!;
+  let held = false;
+  activate.mockImplementation(function (this: ServiceActivationDriver, ...args) {
+    return held && args[0].path === o.sibling.path ? Promise.resolve({kind: "pending" as const, reason: "held"}) : through.apply(this, args);
+  });
+  await o.host.update({workspaces, documents: [o.sibling, o.other]});
+  await vi.waitFor(() => expect(o.host.isDocumentReady(o.document)).toBe(true));
+  const visits = (path: string) => activate.mock.calls.filter(([target]) => target.path === path).length;
+  const requests = () => o.client().sendRequest.mock.calls.map(call => (call as unknown[])[0] as {method: string; params: Record<string, unknown>});
+  const methods = () => requests().map(request => request.method);
+  return {...o, workspaces, editors: liveEditors(o.f.storage), methods, visits,
+    hold(value: boolean) {held = value;},
+    advance(ms: number) {now += ms;},
+    async passes(count = 2) {
+      const start = visits(o.other.path);
+      await vi.waitFor(() => expect(visits(o.other.path)).toBeGreaterThanOrEqual(start + count));
+    },
+    unloaded: () => o.membership.filter(row => row.method === "liveApplication.unloadDocument" && (row.params as {objectId: string}).objectId === "object").length,
+    settles: () => requests().filter(request => request.method === "liveApplication.settle").map(request => request.params.terminalReceipt),
+    binding() {
+      const current = o.f.storage.resolveCurrentLiveDocumentBinding({document: o.document, actor: {kind: "owner", userId: "owner", shareId: "share"}});
+      if (current.kind !== "current") throw new Error("Missing live binding.");
+      return current.binding;
+    }};
+}
+
+it("unloads a hosted document after ten minutes with no live connection, not before, and keeps it hosted", async () => {
+  const o = await idleHost();
+  o.advance(600_000 - 1); await o.passes();
+  expect(o.unloaded()).toBe(0);
+  o.advance(1);
+  await vi.waitFor(() => expect(o.unloaded()).toBe(1));
+  // The settled output was published right before the engine unloaded the document.
+  const methods = o.methods();
+  expect(methods[methods.lastIndexOf("liveApplication.unloadDocument") - 1]).toBe("sync.push");
+  expect(o.host.holds(o.sibling)).toBe(true); expect(o.host.settled(o.sibling)).toBe(true);
+  expect(o.host.isDocumentReady(o.document)).toBe(true);
+  expect(o.spawned()).toBe(1); expect(o.client().close).not.toHaveBeenCalled();
+});
+
+it("keeps a document loaded while any live connection is open and restarts the idle period when the last one closes", async () => {
+  const o = await idleHost(), first = o.editors.acquire(o.sibling), second = o.editors.acquire(o.sibling);
+  o.advance(1_200_000); await o.passes();
+  first();
+  o.advance(600_000); await o.passes();
+  expect(o.unloaded()).toBe(0);
+  second();
+  o.advance(600_000 - 1); await o.passes();
+  expect(o.unloaded()).toBe(0);
+  o.advance(1);
+  await vi.waitFor(() => expect(o.unloaded()).toBe(1));
+});
+
+it("cancels an idle unload when a connection opens before the unload reaches the engine", async () => {
+  const o = await idleHost();
+  // Held passes publish nothing, so the next push is the idle unload's own publication.
+  o.hold(true);
+  const parked = o.park("sync.push");
+  o.advance(600_000);
+  await parked.entered.promise;
+  const release = o.editors.acquire(o.sibling);
+  parked.release.resolve();
+  await o.passes();
+  expect(o.unloaded()).toBe(0);
+  o.hold(false);
+  await expect(o.host.drain(o.document)).resolves.toMatchObject({kind: "done"});
+  release();
+});
+
+it("reloads a document opened while its unload is in the engine, once that unload finishes", async () => {
+  const o = await idleHost(), captures = o.client().captureOwnerActivation.mock.calls.length;
+  o.hold(true);
+  const parked = o.park("liveApplication.unloadDocument");
+  o.advance(600_000);
+  await parked.entered.promise;
+  o.hold(false);
+  const release = o.editors.acquire(o.sibling), opening = o.host.captureNative(o.binding());
+  parked.release.resolve();
+  const native = await opening;
+  expect(o.unloaded()).toBe(1);
+  expect(native.invalidated.aborted).toBe(false);
+  expect(o.client().captureOwnerActivation.mock.calls.length).toBe(captures + 1);
+  await expect(o.host.drain(o.document)).resolves.toMatchObject({kind: "done"});
+  release();
+});
+
+it("reopens a dormant document from its retained activation through the same accepted edits and unloads it again when idle", async () => {
+  const o = await idleHost(), earlier = await o.host.captureNative(o.binding());
+  o.advance(600_000);
+  await vi.waitFor(() => expect(o.unloaded()).toBe(1));
+  // The unload ended the earlier registration.
+  await vi.waitFor(() => expect(earlier.invalidated.aborted).toBe(true));
+  const before = o.settles().at(-1), sent = o.methods().length;
+  const native = await o.host.captureNative(o.binding());
+  expect(native.invalidated.aborted).toBe(false);
+  // The engine resumes the retained activation, and its owner state proves the
+  // retained adoption, so the document is not adopted again.
+  expect(o.client().captureOwnerActivation).toHaveBeenLastCalledWith(expect.anything(), "docs/a.md", 1_000_000, expect.any(AbortSignal), `ordinary-activation-${"a".repeat(64)}`);
+  expect(o.methods().slice(sent)).toEqual(expect.arrayContaining(["liveApplication.register", "liveApplication.ownerState"]));
+  expect(o.settles().at(-1)).toEqual(before);
+  await expect(o.host.drain(o.document)).resolves.toMatchObject({kind: "done"});
+  o.advance(600_000 - 1); await o.passes();
+  expect(o.unloaded()).toBe(1);
+  o.advance(1);
+  await vi.waitFor(() => expect(o.unloaded()).toBe(2));
+});
+
+it("keeps a document loaded while the engine reports unfinished work and retries its unload", async () => {
+  const o = await idleHost(), log = vi.spyOn(console, "error").mockImplementation(() => {});
+  o.unloads.push({status: "pending", reason: "settlement-pending"});
+  o.advance(600_000);
+  await vi.waitFor(() => expect(o.unloaded()).toBe(1));
+  expect(log).toHaveBeenCalledWith("Idle live document unload is waiting.", "settlement-pending");
+  await expect(o.host.drain(o.document)).resolves.toMatchObject({kind: "done"});
+  o.advance(30_000 - 1); await o.passes();
+  expect(o.unloaded()).toBe(1);
+  o.advance(1);
+  await vi.waitFor(() => expect(o.unloaded()).toBe(2));
+  await vi.waitFor(() => expect(o.host.drain(o.document)).rejects.toThrow("Service document activation is incomplete."));
+});
+
+it("keeps background activation from reloading a dormant document, which leaves hosting without another unload", async () => {
+  const o = await idleHost();
+  o.advance(600_000);
+  await vi.waitFor(() => expect(o.unloaded()).toBe(1));
+  const captures = o.client().captureOwnerActivation.mock.calls.length, visits = o.visits(o.sibling.path);
+  await o.passes(4);
+  expect(o.client().captureOwnerActivation.mock.calls.length).toBe(captures);
+  expect(o.visits(o.sibling.path)).toBe(visits);
+  expect(await o.host.update({workspaces: o.workspaces, documents: [o.other]})).toEqual([]);
+  expect(o.unloaded()).toBe(1); expect(o.host.holds(o.sibling)).toBe(false);
 });

@@ -453,7 +453,7 @@ function activationDriver(f:ReturnType<typeof fixture>,captureOwnerActivation:Re
     client:{...native,captureOwnerActivation,sendRequest} as never,
     workspaces:new Map([['workspace',{handle:'native-workspace',ordinary:{pull} as never}]]),
     config:{targets:[target],validateBaseline,validateJournal,validateAdmission:validateJournal,maxCaptureBytes:1_000_000,maxEntriesPerDrain:10,maxBytesPerDrain:1_000_000,
-      maxDocumentsPerPass:1,pollIntervalMs:1000,passDeadlineMs:10_000},
+      maxDocumentsPerPass:1,pollIntervalMs:1000,passDeadlineMs:10_000,idleUnloadMs:600_000,idleRetryMs:30_000},
     adoption:{maxBytes:1_000_000,maxEvents:10},nextRequestId:()=>1,deadlineMs:1000,assertCurrent(){},registered(){},
     runDocument,
   })
