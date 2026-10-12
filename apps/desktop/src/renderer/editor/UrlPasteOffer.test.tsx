@@ -8,7 +8,10 @@ import type { UrlPasteOfferState } from "./urlPaste";
 
 afterEach(cleanup);
 
-const OFFER: UrlPasteOfferState = { from: 1, to: 25, url: "https://example.com/trip", text: "https://example.com/trip", form: "link", chosen: false };
+const OFFER: UrlPasteOfferState = {
+  from: 1, to: 25, url: "https://example.com/trip", text: "https://example.com/trip",
+  line: "https://example.com/trip", offset: 0, form: "link", chosen: false,
+};
 
 function renderOffer(offer: UrlPasteOfferState | null = OFFER) {
   const view = { coordsAtPos: () => ({ left: 40, top: 100, bottom: 118 }), focus: vi.fn() } as unknown as EditorView;

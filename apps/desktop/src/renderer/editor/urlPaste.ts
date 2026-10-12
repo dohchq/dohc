@@ -1,4 +1,5 @@
 import { closeHistory } from "@tiptap/pm/history";
+import type { Node as ProseMirrorNode } from "@tiptap/pm/model";
 import { Plugin, PluginKey, type EditorState, type Transaction } from "@tiptap/pm/state";
 import type { EditorView } from "@tiptap/pm/view";
 export interface UrlPasteOffer { kind: "url-paste"; text: string; url: string; from: number; to: number }
@@ -27,8 +28,12 @@ export function handleUrlPaste(view: EditorView, event: ClipboardEvent, offer?: 
 
 export type UrlForm = "link" | "plain";
 // The pasted URL's span in the document, mapped through every later
-// transaction. `chosen` is set once the person picks a form, so the row shows Undo.
-export interface UrlPasteOfferState { from: number; to: number; url: string; text: string; form: UrlForm; chosen: boolean }
+// transaction. `line` and `offset` identify it: the text of its line, and
+// where in that line it starts. `chosen` is set once the person picks a form,
+// so the row shows Undo.
+export interface UrlPasteOfferState {
+  from: number; to: number; url: string; text: string; line: string; offset: number; form: UrlForm; chosen: boolean;
+}
 type OfferMeta = { type: "dismiss" } | { type: "chosen" };
 
 export const urlPasteOfferKey = new PluginKey<UrlPasteOfferState | null>("dohc-url-paste-offer");
@@ -43,26 +48,34 @@ function spanOf(offer: UrlPasteOffer, tr: Transaction, state: EditorState): UrlP
   const to = tr.mapping.map(offer.from, 1);
   if (to - from !== offer.text.length || !state.doc.resolve(from).sameParent(state.doc.resolve(to))) return null;
   if (state.doc.textBetween(from, to) !== offer.text) return null;
-  return { from, to, url: offer.url, text: offer.text, form: formAt(state, from, to), chosen: false };
+  return { from, to, url: offer.url, text: offer.text, ...lineOf(state, from), form: formAt(state, from, to), chosen: false };
+}
+
+// One character for each inline leaf, so offsets in the line are positions.
+function lineText(block: ProseMirrorNode): string {
+  return block.textBetween(0, block.content.size, undefined, "￼");
+}
+
+function lineOf(state: EditorState, from: number): { line: string; offset: number } {
+  const $from = state.doc.resolve(from);
+  return { line: lineText($from.parent), offset: from - $from.start() };
 }
 
 // Y.js applies a remote edit, or an undo, by replacing the whole document,
-// which maps the span away. The URL is still on the caret's line when the
-// edit was elsewhere: take the copy there nearest the mapped position. A copy
-// inside a longer word is a changed URL, not this one.
-function refind(state: EditorState, text: string, near: number): number | null {
+// which maps the span away. The span survives only where nothing can be
+// mistaken for it: the caret's line is its line, unchanged and the only line
+// with that text in the document, and the URL is at its offset. Anything less
+// dismisses the offer, so a choice never touches text the person didn't paste.
+function refind(state: EditorState, offer: UrlPasteOfferState): number | null {
   const { $head } = state.selection;
-  if (!$head.parent.isTextblock) return null;
-  // One character for each inline leaf, so offsets in the line are positions.
-  const line = $head.parent.textBetween(0, $head.parent.content.size, undefined, "￼");
-  const bounded = (at: number) => !/\S/.test(line[at - 1] ?? " ") && !/\S/.test(line[at + text.length] ?? " ");
-  let found: number | null = null;
-  for (let at = line.indexOf(text); at >= 0; at = line.indexOf(text, at + 1)) {
-    if (!bounded(at)) continue;
-    const from = $head.start() + at;
-    if (found === null || Math.abs(from - near) < Math.abs(found - near)) found = from;
-  }
-  return found;
+  if (!$head.parent.isTextblock || lineText($head.parent) !== offer.line) return null;
+  let copies = 0;
+  state.doc.descendants((node) => {
+    if (!node.isTextblock) return copies < 2;
+    if (lineText(node) === offer.line) copies += 1;
+    return false;
+  });
+  return copies === 1 ? $head.start() + offer.offset : null;
 }
 
 // The offer a URL paste raises. It leaves when its text changes or the caret
@@ -86,17 +99,20 @@ export function makeUrlPasteOfferPlugin(onChange: (offer: UrlPasteOfferState | n
         let from = tr.mapping.map(value.from, 1);
         let to = tr.mapping.map(value.to, -1);
         if (tr.docChanged && (to - from !== value.text.length || state.doc.textBetween(from, to) !== value.text)) {
-          const found = refind(state, value.text, from);
+          const found = refind(state, value);
           if (found === null) return null;
           from = found;
           to = found + value.text.length;
         }
         if (!state.selection.$head.sameParent(state.doc.resolve(from))) return null;
-        const form = tr.docChanged ? formAt(state, from, to) : value.form;
+        if (!tr.docChanged && meta?.type !== "chosen") return value;
+        const { line, offset } = lineOf(state, from);
+        const form = formAt(state, from, to);
         const chosen = value.chosen || meta?.type === "chosen";
-        return from === value.from && to === value.to && form === value.form && chosen === value.chosen
+        return from === value.from && to === value.to && line === value.line && offset === value.offset
+          && form === value.form && chosen === value.chosen
           ? value
-          : { ...value, from, to, form, chosen };
+          : { ...value, from, to, line, offset, form, chosen };
       },
     },
     props: {

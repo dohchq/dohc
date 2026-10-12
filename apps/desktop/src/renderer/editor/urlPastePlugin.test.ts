@@ -49,12 +49,24 @@ function paste(target: Editor, text = URL_TEXT) {
 }
 
 // A remote Y.js update as the editor receives it: the whole document
-// replaced in one step, and the caret restored where its text moved.
-function remoteReplace(target: Editor, edit: (json: string) => string, caretShift: number) {
-  const next = target.schema.nodeFromJSON(JSON.parse(edit(JSON.stringify(target.state.doc.toJSON()))));
-  const caret = target.state.selection.head + caretShift;
+// replaced in one step, and the caret restored to `caret`, where its text
+// moved. `edit` changes the document's JSON: paragraphs, then their nodes.
+type Json = { type: string; text?: string; content?: Json[] };
+function remoteReplace(target: Editor, edit: (paragraphs: Json[]) => void, caret: number) {
+  const json = structuredClone(target.state.doc.toJSON()) as Json;
+  edit(json.content!);
+  const next = target.schema.nodeFromJSON(json);
   const tr = target.state.tr.replaceWith(0, target.state.doc.content.size, next.content).setMeta("addToHistory", false);
   target.view.dispatch(tr.setSelection(TextSelection.create(tr.doc, caret)));
+}
+
+// Each linked text in the document, in order.
+function linkedTexts(target: Editor): string[] {
+  const texts: string[] = [];
+  target.state.doc.descendants((node) => {
+    if (node.isText && node.marks.some((mark) => mark.type.name === "link")) texts.push(node.text!);
+  });
+  return texts;
 }
 
 function key(target: Editor, init: KeyboardEventInit) {
@@ -69,7 +81,9 @@ describe("URL paste offer", () => {
   it("appears under a URL pasted on its own line, with the current form marked", () => {
     const { editor, changes } = setup();
     paste(editor);
-    expect(offer(editor)).toEqual({ from: 9, to: 9 + URL_TEXT.length, url: URL_TEXT, text: URL_TEXT, form: "link", chosen: false });
+    expect(offer(editor)).toEqual({
+      from: 9, to: 9 + URL_TEXT.length, url: URL_TEXT, text: URL_TEXT, line: URL_TEXT, offset: 0, form: "link", chosen: false,
+    });
     expect(changes.at(-1)).toBe(offer(editor));
   });
 
@@ -149,10 +163,10 @@ describe("URL paste offer", () => {
   it("stays through a remote edit that replaces the whole document", () => {
     const { editor } = setup();
     paste(editor);
-    // Another paragraph grows by eight characters.
-    remoteReplace(editor, (json) => json.replace('"text":"Before"', '"text":"Before, edited"'), 8);
+    // Another paragraph grows by eight characters; the caret, after the URL,
+    // moves with it from 33 to 41.
+    remoteReplace(editor, ([before]) => { before!.content![0]!.text = "Before, edited"; }, 41);
     expect(offer(editor)).toMatchObject({ from: 17, to: 17 + URL_TEXT.length, form: "link" });
-    // The remote edit is outside this editor's history, so a choice still undoes alone.
     chooseUrlForm(editor.view, "plain");
     expect(offer(editor)).toMatchObject({ form: "plain", chosen: true });
   });
@@ -160,8 +174,33 @@ describe("URL paste offer", () => {
   it("leaves when a remote edit changes its text", () => {
     const { editor } = setup();
     paste(editor);
-    remoteReplace(editor, (json) => json.replace(`"text":"${URL_TEXT}"`, `"text":"${URL_TEXT}/other"`), 0);
+    remoteReplace(editor, ([, line]) => { line!.content![0]!.text = `${URL_TEXT}/other`; }, 33);
     expect(offer(editor)).toBeNull();
+  });
+
+  // Never act on text the person didn't paste: when a remote edit leaves
+  // another copy of the URL where the pasted one might be, the offer leaves.
+  it("leaves when a remote edit puts a second copy of the URL on its line", () => {
+    const { editor } = setup();
+    paste(editor);
+    remoteReplace(editor, ([, line]) => {
+      line!.content!.push({ type: "text", text: " " }, structuredClone(line!.content![0]!));
+    }, 33);
+    expect(offer(editor)).toBeNull();
+    chooseUrlForm(editor.view, "plain");
+    expect(linkedTexts(editor)).toEqual([URL_TEXT, URL_TEXT]);
+  });
+
+  it("leaves when a remote edit puts the caret in another paragraph with the URL", () => {
+    const { editor } = setup();
+    paste(editor);
+    // "After" becomes "See " and a linked copy; the caret lands at its end.
+    remoteReplace(editor, ([, line, after]) => {
+      after!.content = [{ type: "text", text: "See " }, structuredClone(line!.content![0]!)];
+    }, 35 + 4 + URL_TEXT.length);
+    expect(offer(editor)).toBeNull();
+    chooseUrlForm(editor.view, "plain");
+    expect(linkedTexts(editor)).toEqual([URL_TEXT, URL_TEXT]);
   });
 
   it("is dismissed when an IME starts composing, which the key handler never sees", () => {
