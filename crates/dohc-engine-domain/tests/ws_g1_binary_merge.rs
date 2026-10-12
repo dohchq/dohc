@@ -10,7 +10,7 @@ use dohc_engine_domain::{
     CompareTextFileVersions, ComparisonStatus, ConflictChoice, ConflictContentKind, ConflictStatus,
     CreateNamedVersion, DomainError, MergeTextFileFromVersion, MergeTextFileResult,
     MergeUnchangedReason, NoFaults, ResolveConflictKind, ResolveTextConflict, VersionedTextStore,
-    WriteBinaryFile, WriteText, binary_delete_job_id, write_binary_file_in_tx,
+    WriteBinaryFile, WriteText, binary_delete_job_id, binary_write_job_id, write_binary_file_in_tx,
 };
 use dohc_engine_storage::{
     EngineStore, MaterializationOperation, Preimage, hex_sha256, put_binary_blob,
@@ -380,7 +380,7 @@ fn applying_a_binary_side_into_the_active_version_enqueues_its_materialization()
         .expect("apply the incoming binary side");
 
     let job = store
-        .load_materialization_job("resolve-write-active")
+        .load_materialization_job(&binary_write_job_id("resolve-write-active"))
         .expect("load the resolve materialization job")
         .expect("main is active, so the resolved bytes must reach disk");
     assert_eq!(job.content_sha256, feat_sha);
@@ -429,9 +429,9 @@ fn a_new_source_only_binary_file_fast_forwards() {
     assert_eq!(binary_head_sha(&store, "main", "logo.png"), feat_sha);
 
     // The folder follows: main is active, and a binary write keys its job on
-    // the moment id it shares a generation with.
+    // the moment it shares a generation with.
     let job = store
-        .load_materialization_job("merge-1")
+        .load_materialization_job(&binary_write_job_id("merge-1"))
         .expect("load the merge materialization job")
         .expect("main is active, so the merged bytes must reach disk");
     assert_eq!(job.content_sha256, feat_sha);
@@ -485,7 +485,7 @@ fn a_source_only_binary_replacement_fast_forwards_over_the_unchanged_head() {
     }
     assert_eq!(binary_head_sha(&store, "main", "logo.png"), feat_sha);
     let job = store
-        .load_materialization_job("merge-1")
+        .load_materialization_job(&binary_write_job_id("merge-1"))
         .expect("load the merge materialization job")
         .expect("main is active, so the merged bytes must reach disk");
     assert_eq!(
@@ -526,7 +526,7 @@ fn a_source_only_binary_change_fast_forwards_over_an_unchanged_text_head() {
     }
     assert_eq!(head_content_kind(&store, "main", "notes.md"), "binary");
     let job = store
-        .load_materialization_job("merge-1")
+        .load_materialization_job(&binary_write_job_id("merge-1"))
         .expect("load the merge materialization job")
         .expect("main is active, so the merged bytes must reach disk");
     assert_eq!(

@@ -1,10 +1,10 @@
 // Test-only builders for real ProseMirror documents. Editor test suites
-// build actual `Node` trees through the shared dohc schema (the same schema
-// the live editor and the Y.Doc conversions use), so position math,
+// build actual `Node` trees through the projection's dohc schema (the one the
+// live editor mirrors and the Y.Doc conversions use), so position math,
 // traversal order, and code-mark/code-block exclusions run against the real
 // document model instead of duck-typed fakes.
 import type { Node as ProseMirrorNode } from "@tiptap/pm/model";
-import { getDohcProseMirrorSchema } from "./import-export";
+import { getDohcProseMirrorSchema } from "@dohc/ydoc-projection";
 
 export const schema = getDohcProseMirrorSchema();
 

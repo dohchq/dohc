@@ -5,7 +5,7 @@ import type { Editor } from "@tiptap/core";
 import { serializeRichdocBody } from "@dohc/ydoc-projection";
 import { NodeSelection, Plugin, PluginKey, TextSelection, type Transaction } from "@tiptap/pm/state";
 import { ReplaceStep } from "@tiptap/pm/transform";
-import type { Node as ProseMirrorNode, ResolvedPos, Slice } from "@tiptap/pm/model";
+import type { Node as ProseMirrorNode, ResolvedPos } from "@tiptap/pm/model";
 import { Decoration, DecorationSet, type EditorView } from "@tiptap/pm/view";
 import {
   ChevronDown,
@@ -44,23 +44,11 @@ import {
   resolveFloatingMenuPosition,
   type FloatingMenuPlacement,
 } from "./floatingMenuPosition";
-import { escapeHighlightMarkdown } from "./extensions";
+import { escapeHighlightMarkdown } from "@dohc/ydoc-projection/markdown-extensions";
 
 const blockControlsKey = new PluginKey("dohc-block-controls");
 
 // ── drag payload ──────────────────────────────────────────────────────────
-
-/**
- * The slice that a top-level block at `pos` contributes to a drag. Mirrors what
- * ProseMirror's own draggable-node dragstart uses: `NodeSelection.content()`,
- * i.e. a slice whose single child is the block node (openStart/openEnd 0).
- * Factored out so the drag payload can be unit-tested without a real DnD event.
- */
-export function blockDragSlice(view: EditorView, pos: number): Slice | null {
-  const node = view.state.doc.nodeAt(pos);
-  if (!node) return null;
-  return NodeSelection.create(view.state.doc, pos).content();
-}
 
 /** The ghost a plugin instance currently has parked on the document. One slot,
  * because it tracks a lifetime rather than a drag: every path that ends a
@@ -399,19 +387,6 @@ export function insertBlockAfter(
   view.dispatch(tr);
   view.focus();
   openSlashMenuAtPosition(selectionPos);
-}
-
-export function selectBlock(editor: Editor | null, pos: number): void {
-  const view = editor?.view;
-  if (!view) return;
-  const node = view.state.doc.nodeAt(pos);
-  if (!node) return;
-  view.dispatch(
-    view.state.tr
-      .setSelection(NodeSelection.create(view.state.doc, pos))
-      .scrollIntoView(),
-  );
-  view.focus();
 }
 
 // ── block context menu ─────────────────────────────────────────────────────

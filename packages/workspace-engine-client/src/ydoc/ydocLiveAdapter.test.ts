@@ -5596,7 +5596,11 @@ it("notifies durable owner observers only after commit and preserves lost-respon
 
 
 describe("immutable original-record recovery", () => {
-  it.each(["CANCELLED", "INTERNAL"] as const)("keeps a committed %s record pending until its keyed retry dedupes", async code => {
+  it.each([
+    { code: "CANCELLED", retry: "no", message: "answer lost after commit" },
+    { code: "INTERNAL", retry: "no", message: "answer lost after commit" },
+    { code: "INTERNAL", retry: "afterBackoff", message: "response-wire-limit-exceeded" },
+  ] as const)("keeps a committed $code / $message record pending until its keyed retry dedupes", async wireError => {
     const engine = seedPlaintextEngine("abc");
     const resyncEntered = Promise.withResolvers<void>();
     const releaseResync = Promise.withResolvers<void>();
@@ -5615,7 +5619,7 @@ describe("immutable original-record recovery", () => {
           const response = await engine.sendRequest(request);
           if (fail) {
             fail = false;
-            throw new DaemonRefusalError({ code, retry: "no", message: "answer lost after commit" }, undefined);
+            throw new DaemonRefusalError(wireError, undefined);
           }
           return response;
         }

@@ -668,7 +668,7 @@ describe("private owner peer lifecycle", () => {
     const config = {nativeConfigPath: "native-config", nativeClient: {aggregateBytes: 100_000_000, maxUploads: 2},
       relayUrl: "https://relay.example.test", documents: [document]};
     f.dependencies.process.env.DOHC_DESKTOP_OWNER_DELIVERY_CONFIG = "peer-config";
-    f.dependencies.ownerDeliveryCredentials = () => ({bearer: "actual-token", accountId: "credential-owner", relayUrl: config.relayUrl, signal: credentials.signal});
+    f.dependencies.ownerDeliveryCredentials = () => ({bearer: "actual-token", accountId: "owner-account", relayUrl: config.relayUrl, signal: credentials.signal});
     ownerDeliveryMock.read.mockReturnValue(config);
     let active: Promise<unknown> | undefined, lifetime!: AbortController;
     ownerDeliveryMock.start.mockImplementation(options => {
@@ -684,7 +684,7 @@ describe("private owner peer lifecycle", () => {
       active = run(document, lifetime.signal);
       await entered.promise;
       expect(passOptions.bearer).toBe("actual-token");
-      expect(passOptions.accountId).toBe("credential-owner");
+      expect(passOptions.accountId).toBe("owner-account");
       if (mode === "credentials") credentials.abort();
       let closed = false;
       const closing = Promise.resolve(mode === "daemon" ? f.options().beforePublish!(new AbortController().signal) : f.engine.closeRelayTransportWorkspace("owner")).then(() => {closed = true;});
@@ -737,7 +737,7 @@ describe("server owner peer lifecycle", () => {
     const changed = vi.fn();
     f.dependencies.notifyOwnerDeliveryChanged = changed;
     f.dependencies.serverOwnerDelivery = {prepare: async () => config, workspaceIds: () => credentials.signal.aborted ? [] : ["owner"], hasRefusals: () => undefined,
-      connect: async () => ({bearer: "token", accountId: "credential-owner", relayUrl: "https://relay.test", signal: credentials.signal, assertCurrent() {},
+      connect: async () => ({bearer: "token", accountId: "owner-account", relayUrl: "https://relay.test", signal: credentials.signal, assertCurrent() {},
         refusals: async () => {},
         documents: async () => ({ok: true, documents: [{path: "a.md", status, document}]})})};
     ownerDeliveryMock.pass.mockResolvedValue("retry");
@@ -770,7 +770,7 @@ describe("server owner peer lifecycle", () => {
       attemptTimeoutMs: 30_000, retryDelayMs: 10_000};
     const documents = vi.fn(async () => ({ok: true, documents: [{path: "a.md", status: "ready", document}]}));
     f.dependencies.serverOwnerDelivery = {prepare: vi.fn(async () => config), workspaceIds: () => ["owner"], hasRefusals: () => undefined,
-      connect: async () => ({bearer: "actual-token", accountId: "credential-owner", relayUrl: "https://relay.test", signal: credentials.signal,
+      connect: async () => ({bearer: "actual-token", accountId: "owner-account", relayUrl: "https://relay.test", signal: credentials.signal,
         assertCurrent: () => credentials.signal.throwIfAborted(), documents, refusals: async () => {}})};
     let passOptions!: Parameters<typeof import("./nativeOwnerDelivery")["runNativeOwnerDeliveryPass"]>[0];
     ownerDeliveryMock.pass.mockImplementation(async options => {passOptions = options; entered.resolve(); await settled.promise; options.assertCurrent(); return "empty";});
@@ -780,7 +780,7 @@ describe("server owner peer lifecycle", () => {
       await entered.promise;
       expect(passOptions.document).toEqual(document);
       expect(passOptions.bearer).toBe("actual-token");
-      expect(passOptions.accountId).toBe("credential-owner");
+      expect(passOptions.accountId).toBe("owner-account");
       if (mode === "credentials") credentials.abort();
       let closed = false;
       const closing = Promise.resolve(mode === "daemon" ? f.options().beforePublish!(new AbortController().signal) : f.engine.closeRelayTransportWorkspace("owner")).then(() => {closed = true;});

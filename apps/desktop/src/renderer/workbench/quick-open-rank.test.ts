@@ -1,45 +1,49 @@
 import { describe, expect, it } from "vitest";
 import {
   prepareQuickOpenPaths,
-  quickOpenMatchTier,
   rankPreparedQuickOpenPaths,
-  rankQuickOpenPaths,
   type QuickOpenContext,
 } from "./quick-open-rank";
 
 const noContext = { recent: [], pinned: [] };
+// QuickOpenPalette ranks with MAX_COMMAND_PALETTE_MATCHES.
+const PALETTE_LIMIT = 50;
 
-describe("quickOpenMatchTier", () => {
-  it("orders the tiers: basename prefix < word boundary < substring < fuzzy", () => {
-    const prefix = quickOpenMatchTier("note", "docs/notes.md")!;
-    const boundary = quickOpenMatchTier("note", "docs/meeting-notes.md")!;
-    const substring = quickOpenMatchTier("note", "docs/keynotes.md")!;
-    const fuzzy = quickOpenMatchTier("nte", "docs/notes.md")!;
-    expect(prefix).toBeLessThan(boundary);
-    expect(boundary).toBeLessThan(substring);
-    expect(substring).toBeLessThan(fuzzy);
-  });
+function rank(
+  query: string,
+  paths: readonly string[],
+  context: QuickOpenContext = noContext,
+): string[] {
+  return rankPreparedQuickOpenPaths(query, prepareQuickOpenPaths(paths, context), PALETTE_LIMIT);
+}
 
+describe("quick-open match tiers", () => {
   it("matches case-insensitively and treats /-_. and space as word boundaries", () => {
-    expect(quickOpenMatchTier("NOTE", "docs/Notes.md")).toBe(
-      quickOpenMatchTier("note", "docs/notes.md"),
-    );
+    // A basename prefix outranks a shorter substring match.
+    expect(rank("NOTE", ["x/keynotes.md", "docs/Notes-and-more.md"])).toEqual([
+      "docs/Notes-and-more.md",
+      "x/keynotes.md",
+    ]);
     for (const path of ["a/x-note.md", "a/x_note.md", "a/x.note.md", "a/x note.md", "a/note/y.md"]) {
-      expect(quickOpenMatchTier("note", path), path).toBe(1);
+      // A word-boundary match sits between a basename prefix and a substring.
+      expect(rank("note", ["a/xnote.md", path, "long/dir/note.md"]), path).toEqual([
+        "long/dir/note.md",
+        path,
+        "a/xnote.md",
+      ]);
     }
   });
 
-  it("returns null for a non-match (not even a subsequence)", () => {
-    expect(quickOpenMatchTier("zzz", "docs/notes.md")).toBeNull();
+  it("drops a non-match (not even a subsequence)", () => {
+    expect(rank("zzz", ["docs/notes.md"])).toEqual([]);
   });
 });
 
-describe("rankQuickOpenPaths", () => {
+describe("rankPreparedQuickOpenPaths", () => {
   it("ranks prefix over word-boundary over substring over fuzzy", () => {
-    const ranked = rankQuickOpenPaths(
+    const ranked = rank(
       "note",
       ["docs/keynotes.md", "docs/meeting-notes.md", "docs/notes.md", "nat/omega-thing-e.md"],
-      noContext,
     );
     expect(ranked).toEqual([
       "docs/notes.md",
@@ -50,7 +54,7 @@ describe("rankQuickOpenPaths", () => {
   });
 
   it("puts pinned paths first regardless of tier", () => {
-    const ranked = rankQuickOpenPaths("note", ["notes.md", "old/keynotes.md"], {
+    const ranked = rank("note", ["notes.md", "old/keynotes.md"], {
       recent: [],
       pinned: ["old/keynotes.md"],
     });
@@ -59,7 +63,7 @@ describe("rankQuickOpenPaths", () => {
 
   it("boosts recent files within a tier, most recent first", () => {
     const paths = ["a/note-c.md", "a/note-b.md", "a/note-a.md"];
-    const ranked = rankQuickOpenPaths("note", paths, {
+    const ranked = rank("note", paths, {
       recent: ["a/note-b.md", "a/note-c.md"],
       pinned: [],
     });
@@ -67,7 +71,7 @@ describe("rankQuickOpenPaths", () => {
   });
 
   it("recency never beats a better tier", () => {
-    const ranked = rankQuickOpenPaths("note", ["notes.md", "docs/keynotes.md"], {
+    const ranked = rank("note", ["notes.md", "docs/keynotes.md"], {
       recent: ["docs/keynotes.md"],
       pinned: [],
     });
@@ -77,16 +81,15 @@ describe("rankQuickOpenPaths", () => {
   it("ties break by shorter path then alphabetical; non-matches drop", () => {
     // Both notes.md basenames are tier 0 (basename prefix) — shorter path
     // first; the boundary matches (a-/b-notes.md) follow alphabetically.
-    const ranked = rankQuickOpenPaths(
+    const ranked = rank(
       "note",
       ["deep/dir/notes.md", "notes.md", "b-notes.md", "a-notes.md", "zzz.md"],
-      noContext,
     );
     expect(ranked).toEqual(["notes.md", "deep/dir/notes.md", "a-notes.md", "b-notes.md"]);
   });
 
   it("empty query keeps everything (pinned, then recent, then the rest)", () => {
-    const ranked = rankQuickOpenPaths("", ["c.md", "b.md", "a.md"], {
+    const ranked = rank("", ["c.md", "b.md", "a.md"], {
       recent: ["b.md"],
       pinned: ["c.md"],
     });
@@ -220,12 +223,13 @@ describe("incremental quick-open ranking", () => {
       const prepared = prepareQuickOpenPaths(paths, context);
 
       for (const query of queries) {
-        const message = `workspace ${workspaceIndex}, query ${JSON.stringify(query)}`;
         const legacy = legacyRankQuickOpenPaths(query, paths, context);
-        expect(rankQuickOpenPaths(query, paths, context), message).toEqual(legacy);
-        expect(rankPreparedQuickOpenPaths(query, prepared, 50), message).toEqual(
-          legacy.slice(0, 50),
-        );
+        for (const limit of [1, 7, PALETTE_LIMIT, paths.length]) {
+          const message = `workspace ${workspaceIndex}, query ${JSON.stringify(query)}, limit ${limit}`;
+          expect(rankPreparedQuickOpenPaths(query, prepared, limit), message).toEqual(
+            legacy.slice(0, limit),
+          );
+        }
       }
     }
   });

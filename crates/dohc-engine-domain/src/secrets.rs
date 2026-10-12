@@ -680,31 +680,6 @@ impl<'a> SecretFileStore<'a> {
     ) -> Result<Option<SecretMomentRecord>, DomainError> {
         get_secret_moment_keyless(self.store, workspace_id, moment_id)
     }
-
-    /// Compare secret tips across two versions. Ciphertext-equal rows skip the
-    /// key entirely; ciphertext-different rows decrypt only inside the domain
-    /// to distinguish re-encryption from a real plaintext modification.
-    pub fn compare_secret_files_page(
-        &self,
-        workspace_id: &str,
-        source_version_id: &str,
-        target_version_id: &str,
-        after_path: Option<&str>,
-        limit: usize,
-    ) -> Result<Vec<SecretCompareEntry>, DomainError> {
-        Ok(compare_secret_files_page_keyless(
-            self.store,
-            Some(self.key),
-            workspace_id,
-            source_version_id,
-            target_version_id,
-            after_path,
-            limit,
-        )?
-        .entries)
-    }
-
-    // ------------------------------------------------------------- internals
 }
 
 /// Copy a version's secret tips and fork bases inside a caller-owned

@@ -1,5 +1,4 @@
 import { isDohcMetadataPath } from "./paths";
-import type { ChangeAuthor } from "@dohc/workspace-contracts/engine";
 
 // Local-first database rules. The on-disk .sqlite IS the user's canonical
 // artifact — visible and inspectable. Its raw bytes never travel through CRDT
@@ -59,85 +58,6 @@ export function databaseSyncStrategy(path: string): DatabaseSyncStrategy {
     case "not-a-database":
       return "file-content";
   }
-}
-
-// True only for ordinary files. A database's raw bytes never sync as a file
-// (they sync via the op-log), and sidecars are never synced at all.
-export function shouldSyncAsStandaloneFile(path: string): boolean {
-  return databaseSyncStrategy(path) === "file-content";
-}
-
-// A safe point at which a visible .sqlite is (re)materialized on disk and
-// surfaced to sync — never mid-write or while the WAL is still active.
-type MaterializationTrigger =
-  | "import-complete"
-  | "explicit-save"
-  | "close"
-  | "mid-write"
-  | "wal-active";
-
-export function isDatabaseMaterializationPoint(trigger: MaterializationTrigger): boolean {
-  return trigger === "import-complete" || trigger === "explicit-save" || trigger === "close";
-}
-
-type DatabaseRowOp = "insert" | "update" | "upsert" | "delete";
-
-// One structured row edit. The append-only log of these IS what syncs for a
-// database — not the raw bytes. Stored as inspectable JSONL under .dohc.
-interface DatabaseOperation {
-  operationId: string;
-  databasePath: string;
-  table: string;
-  op: DatabaseRowOp;
-  rowId: string;
-  payload: Record<string, unknown>;
-  version: number;
-  appliedAt: number;
-  author: ChangeAuthor;
-}
-
-function assertNonEmptyString(value: string, field: string): void {
-  if (typeof value !== "string" || value.trim().length === 0) {
-    throw new Error(`Database operation ${field} must be a non-empty string`);
-  }
-}
-
-export function createDatabaseOperation(input: {
-  operationId: string;
-  databasePath: string;
-  table: string;
-  op: DatabaseRowOp;
-  rowId: string;
-  payload?: Record<string, unknown>;
-  version: number;
-  appliedAt: number;
-  author: ChangeAuthor;
-}): DatabaseOperation {
-  assertNonEmptyString(input.operationId, "operationId");
-  assertNonEmptyString(input.databasePath, "databasePath");
-  assertNonEmptyString(input.table, "table");
-  assertNonEmptyString(input.rowId, "rowId");
-  if (!Number.isInteger(input.version) || input.version < 0) {
-    throw new Error("Database operation version must be a non-negative integer");
-  }
-  if (!Number.isFinite(input.appliedAt) || input.appliedAt < 0) {
-    throw new Error("Database operation appliedAt must be a valid timestamp");
-  }
-  return {
-    operationId: input.operationId,
-    databasePath: input.databasePath,
-    table: input.table,
-    op: input.op,
-    rowId: input.rowId,
-    payload: input.payload ?? {},
-    version: input.version,
-    appliedAt: input.appliedAt,
-    author: input.author,
-  };
-}
-
-export function serializeDatabaseOperation(op: DatabaseOperation): string {
-  return `${JSON.stringify(op)}\n`;
 }
 
 // 32-bit FNV-1a over the exact path (pure JS — workspace-core must stay

@@ -2038,12 +2038,14 @@ async fn make_durable_record_creation_replay_does_not_resurrect_a_deleted_record
         serde_json::from_value(opened.result["workspace"].clone()).unwrap();
     let mut id = 1;
     let create = json!({"versionId": "main", "path": "record.md", "text": "---\nid: rec_bbbbbbbbbbbbbbbbbbbbbbbbbb\n---\n",
-        "origin": "api", "publish": true, "createOnly": true, "requestId": "automation-create:stable"});
-    call(
+        "origin": "api", "publish": true, "createOnly": true});
+    id += 1;
+    common::call_keyed(
         &transport,
         &handle,
-        &mut id,
+        id,
         "versionedText.write",
+        "automation-create:stable",
         create.clone(),
     )
     .await;
@@ -2059,7 +2061,16 @@ async fn make_durable_record_creation_replay_does_not_resurrect_a_deleted_record
     // The desktop removes the file after committing its canonical deletion.
     std::fs::remove_file(scratch.path().join("record.md")).unwrap();
     assert!(!scratch.path().join("record.md").exists());
-    let replay = call(&transport, &handle, &mut id, "versionedText.write", create).await;
+    id += 1;
+    let replay = common::call_keyed(
+        &transport,
+        &handle,
+        id,
+        "versionedText.write",
+        "automation-create:stable",
+        create,
+    )
+    .await;
     assert_eq!(replay["deduped"], true);
     assert!(!scratch.path().join("record.md").exists());
     call(&transport, &handle, &mut id, "workspace.close", json!({})).await;

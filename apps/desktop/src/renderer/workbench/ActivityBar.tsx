@@ -117,6 +117,7 @@ export function ActivityBar(props: {
   onOpenSettings?: () => void;
   notices?: ReactNode;
   viewsDisabled?: boolean;
+  showSharing?: boolean;
 }) {
   return (
     <nav
@@ -170,16 +171,18 @@ export function ActivityBar(props: {
       </div>
       <div className="mt-auto flex flex-col items-center gap-1 border-t border-line pt-2">
         {/* Sharing opens a view like the ones above, so it goes inert with them. */}
-        <div inert={props.viewsDisabled || undefined} className="flex w-full justify-center">
-          <RailButton
-            testId={activityPin(SHARING_VIEW_ID)}
-            label="Sharing"
-            active={props.sidebarVisible && props.activeView === SHARING_VIEW_ID}
-            badge={props.hasConflict ? "danger" : undefined}
-            onClick={() => props.onSelectView(SHARING_VIEW_ID)}
-            icon={<RailGlyph Icon={Cloud} />}
-          />
-        </div>
+        {props.showSharing !== false ? (
+          <div inert={props.viewsDisabled || undefined} className="flex w-full justify-center">
+            <RailButton
+              testId={activityPin(SHARING_VIEW_ID)}
+              label="Sharing"
+              active={props.sidebarVisible && props.activeView === SHARING_VIEW_ID}
+              badge={props.hasConflict ? "danger" : undefined}
+              onClick={() => props.onSelectView(SHARING_VIEW_ID)}
+              icon={<RailGlyph Icon={Cloud} />}
+            />
+          </div>
+        ) : null}
         {props.notices}
         <RailButton
           testId={activityPin("settings")}

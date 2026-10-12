@@ -359,7 +359,14 @@ mod tests {
                 })
                 .unwrap();
             assert_eq!(unchanged, fingerprint);
+            if status == "failed" {
+                assert!(matches!(
+                    store.list_pending_materialization_jobs(),
+                    Err(StorageError::StateCorrupt { .. })
+                ));
+            }
             store.write_with(&dohc_engine_storage::NoFaults, |tx| {
+                tx.execute("UPDATE materialization_jobs SET status='cancelled' WHERE workspace_id='ws' AND target_path='head.md' AND status='failed'", []).unwrap();
                 tx.execute("UPDATE materialization_jobs SET status='pending',preimage_present=0,preimage_sha256=NULL WHERE job_id='ydoc-mat_recovery-write'", []).unwrap();
                 Ok::<_, SyncError>(())
             }).unwrap();

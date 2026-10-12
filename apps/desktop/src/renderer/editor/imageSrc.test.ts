@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 // jsdom: makeImageNodeView builds a real <img> element.
 import type { Node as ProseMirrorNode } from "@tiptap/pm/model";
+import { DecorationSet } from "@tiptap/pm/view";
 import { describe, expect, it } from "vitest";
 import {
   BLOCKED_IMAGE_SRC,
@@ -163,7 +164,7 @@ describe("resolveWorkspaceImageSrc", () => {
 
 describe("makeImageNodeView", () => {
   const node = (src: string): ProseMirrorNode =>
-    ({ attrs: { src, alt: "alt text", title: null } }) as unknown as ProseMirrorNode;
+    ({ type: { name: "image" }, attrs: { src, alt: "alt text", title: null } }) as unknown as ProseMirrorNode;
 
   it("renders a servable src as a dohc-file URL", () => {
     const view = makeImageNodeView(() => ({
@@ -184,6 +185,22 @@ describe("makeImageNodeView", () => {
       docPath: "notes/plan.md",
     }))(node("../../outside.png"));
     const img = view.dom as HTMLImageElement;
+    expect(img.hasAttribute("src")).toBe(false);
+    expect(img.getAttribute("alt")).toBe("alt text");
+  });
+
+  // The editor reuses a node view when its document moves. The same link can
+  // be inside the workspace from one folder and escape it from another, so an
+  // update must judge the current context and drop the src it served before.
+  it("drops a served src when an update's context makes the link escape", () => {
+    let context = { workspaceId: "ws1", docPath: "notes/deep/plan.md" };
+    const view = makeImageNodeView(() => context)(node("../../outside.png"));
+    const img = view.dom as HTMLImageElement;
+    expect(img.getAttribute("src")).toBe("dohc-file://ws1/outside.png");
+
+    context = { workspaceId: "ws1", docPath: "notes/plan.md" };
+    expect(view.update?.(node("../../outside.png"), [], DecorationSet.empty)).toBe(true);
+
     expect(img.hasAttribute("src")).toBe(false);
     expect(img.getAttribute("alt")).toBe("alt text");
   });

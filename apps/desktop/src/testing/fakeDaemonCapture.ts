@@ -321,7 +321,7 @@ export function createFakeDaemonCapture(input: {
         case VERSIONED_METHOD.binaryWriteBlob: {
           const response = await loopback.sendRequest(request);
           const result = response.result as { materializeOutcome?: string };
-          const key = typeof params.requestId === "string" ? params.requestId : null;
+          const key = request.idempotencyKey ?? null;
           if (result.materializeOutcome === "applied" &&
               (!key || !publishedRequests.has(key)) &&
               String(params.versionId) === await activeVersionId()) {

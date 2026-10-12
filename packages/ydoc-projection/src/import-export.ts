@@ -1,30 +1,23 @@
-import type {
-  AnyExtension,
-  JSONContent,
-  MarkdownRendererHelpers,
-} from '@tiptap/core'
+import type { AnyExtension, JSONContent } from '@tiptap/core'
 import { Extension, getSchema } from '@tiptap/core'
 import { MarkdownManager } from '@tiptap/markdown'
-import { getDefaults, Lexer, Marked, Tokenizer, type marked, type Tokens } from 'marked'
+import { getDefaults, Lexer, Marked, Tokenizer, type marked, type Token, type Tokens } from 'marked'
 import { StarterKit } from '@tiptap/starter-kit'
-import {
-  preprocessTablePipes,
-  renderTableToMarkdown,
-  Table,
-  TableCell,
-  TableHeader,
-  TableRow,
-} from '@tiptap/extension-table'
-import { OrderedList, ORDERED_LIST_MARKER_PATTERN, TaskList } from '@tiptap/extension-list'
+import { TableCell, TableHeader, TableRow } from '@tiptap/extension-table'
 import {
   prosemirrorJSONToYXmlFragment,
   yXmlFragmentToProseMirrorRootNode,
 } from 'y-prosemirror'
 import * as Y from 'yjs'
 import {
+  DohcMarkdownTable,
   DohcTaskItem,
   dohcMarkdownExtensions,
   escapeHighlightMarkdown,
+  GFM_TABLE_CELL_BLOCK_SEPARATOR,
+  MarkdownOrderedList,
+  MarkdownParagraph,
+  MarkdownTaskList,
 } from './dohc-markdown-extensions.js'
 import { sanitizeImageSrc } from './image-src.js'
 import { backtickFence, codeBlockFence } from './markdown-fence.js'
@@ -33,273 +26,303 @@ import {
   FRONTMATTER_SOURCE_META_KEY,
   frontmatterBlockFor,
   MARKDOWN_CRLF_META_KEY,
-  recordFrontmatterSourceItems,
-  writtenFrontmatterKeys,
-  isFrontmatterMap,
-  normalizeFrontmatterValue,
   orderFrontmatter,
   parseFrontmatter,
 } from './frontmatter.js'
+import {
+  frontmatterMapValues,
+  recordFrontmatterSourceItems,
+  writeFrontmatterMap,
+  writtenFrontmatterKeys,
+} from './frontmatter-map.js'
 
 const PLAIN_TEXT_FIELD = 'plainText'
 const FRONTMATTER_FIELD = 'frontmatter'
 const META_FIELD = 'meta'
 const DOHC_SCHEMA_VERSION = 1
 const PLAIN_TEXT_CONTENT_KIND = 'plain-text'
-// GFM forbids block nodes inside table cells but permits inline raw HTML, so a
-// multi-block ProseMirror cell uses a visible hard break instead of U+001F.
-const GFM_TABLE_CELL_BLOCK_SEPARATOR = '<br>'
 const PARSE_SENTINEL_RE = /\uE000DOHC_PARSE_\d+\uE001/gu
-function prepareRenderedTableCell(markdown: string): string {
-  // Raw inline HTML is the canonical representation of cell block boundaries.
-  // The importer represents those tags as text, so normalize them before the
-  // table renderer measures the cell again.
-  markdown = markdown
-    .replaceAll('&amp;lt;br&amp;gt;', GFM_TABLE_CELL_BLOCK_SEPARATOR)
-    .replaceAll('&lt;br&gt;', GFM_TABLE_CELL_BLOCK_SEPARATOR)
-  let output = ''
-  let precedingBackslashes = 0
+// The block escapes the serializer writes anywhere: references the parser
+// reads as their character wherever they appear.
+const BLOCK_ESCAPE_CODES = new Set([13, 35, 36, 41, 42, 43, 45, 46, 61, 91, 95, 96, 126, 160])
+// A block escape, its once-encoded spelling, or a decimal reference to ASCII
+// punctuation, a space, a tab, or a newline, which the serializer writes
+// inside a tag.
+const PARSE_REFERENCE_RE = new RegExp(
+  `(?:&amp;|&AMP;|&#0{0,5}38;|&#[xX]0{0,4}26;)#(?:${[...BLOCK_ESCAPE_CODES].join('|')});`
+    + '|&#(9|10|13|3[2-9]|4[0-7]|5[89]|6[0-4]|9[1-6]|12[3-6]|160);',
+  'gu',
+)
+// The parse in progress: the references it set aside, by sentinel, and the
+// sentinels that stand for the file's own `<` and `>`, in raw HTML or text,
+// until its tag spans are read, so only the serializer's `&lt;` and `&gt;`
+// open and close one.
+let parseReferences: ReadonlyMap<string, string> = new Map()
+let rawHtmlMarkup: { lt: string; gt: string } = { lt: '<', gt: '>' }
 
-  for (const character of markdown) {
-    if (character === '|' && precedingBackslashes % 2 === 0) {
-      output += '\\'
-    }
-    output += character
-    precedingBackslashes = character === '\\' ? precedingBackslashes + 1 : 0
-  }
-
-  return output
-}
-
-function firstLine(source: string): string {
-  const newline = source.indexOf('\n')
-  return newline < 0 ? source : source.slice(0, newline)
-}
-
-const orderedListTokenizer = OrderedList.config.markdownTokenizer!
-const taskListTokenizer = TaskList.config.markdownTokenizer!
-const tableTokenizer = Table.config.markdownTokenizer!
-const orderedListStart = new RegExp(`^(\\s*)(${ORDERED_LIST_MARKER_PATTERN})([.)])\\s+(.*)$`)
-
-// Tiptap 3.29.2 splits the remaining document before rejecting unrelated
-// blocks. Check only the first line, then leave eligible blocks to Tiptap.
-const MarkdownOrderedList = OrderedList.extend({
-  markdownTokenizer: {
-    ...orderedListTokenizer,
-    tokenize: (src, tokens, helpers) => {
-      if (!orderedListStart.test(firstLine(src))) return undefined
-      return orderedListTokenizer.tokenize(src, tokens, helpers)
-    },
-  },
-})
-const MarkdownTaskList = TaskList.extend({
-  markdownTokenizer: {
-    ...taskListTokenizer,
-    tokenize: (src, tokens, helpers) => {
-      // parseIndentedBlocks also accepts leading blank lines.
-      const firstContent = src.search(/\S/)
-      if (firstContent < 0) return undefined
-      const line = firstLine(src.slice(firstContent))
-      if (!/^([-+*])\s+\[([ xX])\]\s+(.*)$/.test(line)) return undefined
-      return taskListTokenizer.tokenize(src, tokens, helpers)
-    },
-  },
-})
-
-// A resized row keeps its height in an HTML comment on the line above its
-// table: `<!-- dohc:table row-heights=1:84,2:120 -->`. Row indexes count from
-// the header row. GFM has no row-height syntax, Markdown renderers hide the
-// comment, and the Rust projector writes the same bytes, so a local close
-// that prunes the Y.Doc and reseeds from the file keeps the height.
-const TABLE_ROW_HEIGHTS_RE =
-  /^<!-- dohc:table row-heights=(\d+:\d+(?:,\d+:\d+)*) -->[ \t]*(?:\n+|$)/u
-const tableParseMarkdown = Table.config.parseMarkdown!
-type TableRowHeightsToken = Parameters<typeof tableParseMarkdown>[0] & {
-  rowHeights?: [number, number][]
-}
-
-// The Rust projector reads the attribute through `attr_i64`, which accepts
-// an integer or a trimmed integer string. Keep the same rule here so both
-// projectors write the same annotation for the same Y.Doc.
-function tableRowHeight(value: unknown): number | null {
-  const height = typeof value === 'number'
-    ? value
-    : typeof value === 'string' && /^\s*[+-]?\d+\s*$/u.test(value)
-      ? Number(value)
-      : Number.NaN
-  return Number.isSafeInteger(height) && height > 0 ? height : null
-}
-
-function tableRowHeightsAnnotation(rows: JSONContent[]): string {
-  const pairs: string[] = []
-  rows.forEach((row, index) => {
-    const height = tableRowHeight(row.attrs?.height)
-    if (height !== null) pairs.push(`${index}:${height}`)
-  })
-  return pairs.length ? `<!-- dohc:table row-heights=${pairs.join(',')} -->` : ''
-}
-
-// Table.start only inspects the first two lines. Avoid splitting the full
-// remaining document while probing ordinary blocks.
-function tableStart(src: string): number {
-  const newline = src.indexOf('\n')
-  if (newline < 0) return -1
-  const second = src.indexOf('\n', newline + 1)
-  const prefix = second < 0 ? src : src.slice(0, second)
-  return (tableTokenizer.start as (source: string) => number)(prefix)
-}
-
-// Finds the table at the start of `rest` with marked's table rule and nothing
-// else, and returns its lines as that rule read them. Lexing the rest of the
-// document would re-enter this tokenizer for every later table, and even a
-// plain lexer would parse every block after the table, so a run of tables
-// would cost quadratic time. GFM rows are one line each, which Tiptap's raw
-// reconstruction gets wrong when a cell holds a pipe inside inline code.
-//
-// The importer reads a table the way Tiptap's tokenizer does: first with the
-// pipes inside code spans escaped, up to the first blank line, and only when
-// that is no table, from the raw text with marked's own rule. The two can
-// count a row's cells differently, so this reads the same text.
-function leadingTable(rest: string): { table: Tokens.Table; lines: string[] } | undefined {
-  const tokenizer = new Tokenizer()
-  // The lexer gives the tokenizer its GFM rules and the inline queue the
-  // table rule fills.
-  tokenizer.lexer = new Lexer({ ...getDefaults(), tokenizer })
-  const blank = rest.indexOf('\n\n')
-  const candidate = blank < 0 ? rest : rest.slice(0, blank)
-  const escaped = preprocessTablePipes(candidate)
-  for (const text of escaped === candidate ? [rest] : [escaped, rest]) {
-    const table = tokenizer.table(text)
-    // The header, the delimiter, and each row take one line.
-    if (table) return { table, lines: text.split('\n', 2 + table.rows.length) }
-  }
-  return undefined
-}
-
-// A table row's cells as marked splits them: at each unescaped pipe, without
-// the empty cells outside a leading or trailing pipe.
-function tableRowCells(row: string): string[] {
-  const cells: string[] = []
-  let start = 0
-  let backslashes = 0
-  for (let index = 0; index < row.length; index += 1) {
-    if (row[index] === '|' && backslashes % 2 === 0) {
-      cells.push(row.slice(start, index))
-      start = index + 1
-    }
-    backslashes = row[index] === '\\' ? backslashes + 1 : 0
-  }
-  cells.push(row.slice(start))
-  if (!cells[0]?.trim()) cells.shift()
-  if (cells.length > 0 && !cells.at(-1)?.trim()) cells.pop()
-  return cells
-}
-
-// The lines of the table at the start of `rest`, joined. marked drops the
-// cells of a row past its header's count, so a row whose extra cells hold
-// text ends the table instead, and that text stays in the document.
-// Otherwise a file, or a preserved source, could hold text its document
-// lacks.
-function leadingTableText(rest: string): { text: string; cut: boolean } | undefined {
-  const read = leadingTable(rest)
-  if (!read) return undefined
-  const { table, lines } = read
-  const raw = rest.split('\n', lines.length)
-  for (let row = 2; row < lines.length; row += 1) {
-    const extra = tableRowCells(lines[row]).slice(table.header.length)
-    if (extra.some(cell => cell.trim())) return { text: raw.slice(0, row).join('\n'), cut: true }
-  }
-  return { text: raw.join('\n'), cut: false }
-}
-
-// Only a line after the first that could be a delimiter row can start a
-// table, so ordinary blocks skip the table probe.
-const TABLE_DELIMITER_RE = /^[ \t|:]*-[ \t|:-]*$/u
-function secondLine(src: string): string {
-  const first = src.indexOf('\n')
-  if (first < 0) return ''
-  const second = src.indexOf('\n', first + 1)
-  return src.slice(first + 1, second < 0 ? undefined : second)
-}
-
-export const DohcMarkdownTable = Table.extend({
-  markdownTokenizer: {
-    ...tableTokenizer,
-    start: (src: string) => (TABLE_ROW_HEIGHTS_RE.test(src) ? 0 : tableStart(src)),
-    tokenize: (src, tokens, helpers) => {
-      const annotation = TABLE_ROW_HEIGHTS_RE.exec(src)
-      const prefix = annotation?.[0] ?? ''
-      const rest = src.slice(prefix.length)
-      const extent = annotation || TABLE_DELIMITER_RE.test(secondLine(rest))
-        ? leadingTableText(rest)
-        : undefined
-      if (!annotation && !extent?.cut) return tableTokenizer.tokenize(src, tokens, helpers)
-      // An annotation belongs to the table that starts right after it. With
-      // no table there it stays an ordinary HTML comment for marked.
-      if (!extent) return undefined
-      const table = helpers.blockTokens(extent.text)[0]
-      if (table?.type !== 'table') return undefined
-      // The newline after the last row belongs to the table, as in marked.
-      const raw = prefix + extent.text + (extent.text.length < rest.length ? '\n' : '')
-      const rowHeights: [number, number][] = []
-      for (const pair of annotation?.[1].split(',') ?? []) {
-        const [index, height] = pair.split(':').map(Number)
-        if (Number.isSafeInteger(index) && tableRowHeight(height) !== null) {
-          rowHeights.push([index, height])
-        }
-      }
-      return { ...table, raw, rowHeights }
-    },
-  },
-  parseMarkdown: (token: TableRowHeightsToken, helpers) => {
-    const table = tableParseMarkdown(token, helpers) as JSONContent
-    const rows = table.content ?? []
-    for (const [index, height] of token.rowHeights ?? []) {
-      const row = rows[index]
-      if (row) row.attrs = { ...row.attrs, height }
-    }
-    return table
-  },
-  renderMarkdown: (node, helpers) => {
-    const tableHelpers: MarkdownRendererHelpers = {
-      ...helpers,
-      renderChildren: (nodes, separator) =>
-        prepareRenderedTableCell(helpers.renderChildren(nodes, separator)),
-    }
-    // Tiptap's table renderer includes its own trailing newline, while the
-    // document renderer also joins sibling blocks with `\n\n`. Returning both
-    // would put two blank lines between a table and its next sibling.
-    const table = renderTableToMarkdown(
-      node,
-      tableHelpers,
-      { cellLineSeparator: GFM_TABLE_CELL_BLOCK_SEPARATOR },
-    ).replace(/\n$/u, '')
-    return table ? tableRowHeightsAnnotation(node.content ?? []) + table : table
+// Raw HTML stays the text the file holds, references and all. Tiptap keeps it
+// as text where there is no DOM, as in the engine, but reads it through the DOM
+// in a browser, which drops a comment and turns tags into marks. A block of
+// HTML becomes a paragraph of its source here, and an inline tag an `escape`
+// token below.
+const MarkdownHtml = Extension.create({
+  name: 'markdownHtml',
+  markdownTokenName: 'html',
+  parseMarkdown: (token) => {
+    const text = rawHtmlText(token.text || token.raw || '')
+    return text ? { type: 'paragraph', content: [{ type: 'text', text }] } : []
   },
 })
 
 // marked reads a link reference definition as a `def` token, which Tiptap
 // drops. The engine's fold keeps the line as paragraph text, and so does
-// this, so the person's line stays in the document and in the file. A link
-// that uses the definition still resolves, because marked collects it while
-// lexing.
+// this, so the person's line stays in the document and in the file, as it
+// holds it. A link that uses the definition still resolves, because marked
+// collects it while lexing.
 const MarkdownDefinition = Extension.create({
   name: 'markdownDefinition',
   markdownTokenName: 'def',
   parseMarkdown: (token) => {
-    const text = (token.raw ?? '')
-      .replace(/\s+$/u, '')
-      .split('\n')
-      .map(line => line.trimStart())
-      .join('\n')
+    const text = typeof token.dohcText === 'string'
+      ? token.dohcText
+      : sourceText(definitionText(token.raw ?? ''))
     return text ? { type: 'paragraph', content: [{ type: 'text', text }] } : []
   },
 })
 
+function definitionText(raw: string): string {
+  return raw.replace(/\s+$/u, '').split('\n').map(line => line.trimStart()).join('\n')
+}
+
+// The serializer writes a definition the document holds as text as one tag
+// span: each character that could read as syntax is a reference, and `&`,
+// `<`, and `>` are Tiptap's entities, so no renderer reads syntax in it. A
+// block that holds exactly those bytes for a text that reads as one whole
+// definition is that text again. Any other block reads as it did, so a
+// definition a person writes with `&#91;` keeps its link, and an escaped `\[`
+// stays an escape.
+//
+// The block runs to its first blank line. A line holding a character the
+// serializer writes as a reference ends the search. Each line that could end
+// a paragraph holds one, so a block that is no definition costs no more than
+// the paragraph marked reads in its place.
+function escapedDefinition(src: string): (Tokens.Def & { dohcText: string }) | undefined {
+  const opener = /^\uE000DOHC_PARSE_\d+\uE001/u.exec(src)
+  if (!opener || parseReferences.get(opener[0]) !== '&#91;') return undefined
+  let start = 0
+  let end = lineEnd(src, 0)
+  for (;;) {
+    const line = src.slice(start, end).replace(/\uE000DOHC_PARSE_\d+\uE001|&(?:amp|lt|gt);/gu, '')
+    if (DEFINITION_REFERENCE_RE.test(line)) return undefined
+    if (end === src.length) break
+    const next = lineEnd(src, end + 1)
+    if (/^[ \t]*$/.test(src.slice(end + 1, next))) break
+    start = end + 1
+    end = next
+  }
+  const raw = src.slice(0, end)
+  const written = restoreParseSentinels(raw, parseReferences)
+  const text = written.replace(/&(?:#(\d+)|(amp|lt|gt));/g, (_entity, code: string | undefined, name: string) => (
+    code ? String.fromCodePoint(Number(code)) : { amp: '&', lt: '<', gt: '>' }[name] ?? ''
+  ))
+  if (writtenDefinition(text) !== written) return undefined
+  const definition = literalProbe.def(text)
+  if (!definition || definitionText(definition.raw) !== text) return undefined
+  return { ...definition, raw, dohcText: text }
+}
+
+// The characters a definition's text writes as references: the ASCII
+// punctuation a tag span writes so, `&`, `<`, and `>`, and the paragraph's
+// `\r` and NBSP.
+const DEFINITION_REFERENCE_RE = /["-.:->@[-`{-~\r ]/
+
+// The bytes the serializer writes for text it writes as references, a
+// definition's or a link's, as a tag span whose last line ends the
+// paragraph: a space that ends a line and a newline that ends an empty one
+// are references too.
+function writtenDefinition(text: string): string {
+  return text.replace(/["-.:->@[-`{-~\r ]| (?=\n)|(?<=\n)\n/g, character => (
+    { '&': '&amp;', '<': '&lt;', '>': '&gt;' }[character] ?? `&#${character.codePointAt(0)};`
+  ))
+}
+
+function lineEnd(text: string, from: number): number {
+  const at = text.indexOf('\n', from)
+  return at < 0 ? text.length : at
+}
+
+// A link with no text that holds a line that would end its paragraph cannot
+// be held as it is, so the serializer writes it as references, the way it
+// writes a definition. A run of text that holds exactly those bytes, for a
+// link marked reads with such a line, is that link's text again. Any other
+// text, references and all, reads as it did.
+//
+// Each run is read once, from its first `&#91;&#93;&#40;`: its text, where
+// each character sits in the source, the first character from each one on
+// that the serializer would write otherwise, the first line or `\r` from each
+// one on that `opensBlock` counts, and the reader for its links. So its
+// candidates cost no more than the run.
+type WrittenRun = {
+  text: string
+  at: number[]
+  bad: number[]
+  opens: number[]
+  read: (link: number) => number
+}
+let writtenLinks: {
+  openers: ReadonlySet<string>
+  runs: Map<string, { run: WrittenRun; link: number; end?: number }>
+  // The text marked last gave the tokenizer, as the tokens it lexes into
+  // and its length, and for each such tokens how far from the text's end
+  // the next sentinel starts, or 0 for none.
+  tokens?: object
+  length: number
+  sentinels: WeakMap<object, number>
+} = { openers: new Set(), runs: new Map(), length: -1, sentinels: new WeakMap() }
+// What the serializer writes as a reference: the ASCII punctuation a tag
+// span writes so, but `&`, `<`, and `>`, which are entities, and `\r` and
+// NBSP.
+const WRITTEN_REFERENCE_RE = /["-%'-.:;=@[-`{-~\r\u00a0]/
+const WRITTEN_SENTINEL_AT = /\uE000DOHC_PARSE_\d+\uE001/uy
+const WRITTEN_ENTITY_AT = /&(?:amp|lt|gt);/y
+
+// The `&#91;` references that open a `&#91;&#93;&#40;` in the prepared file.
+function writtenOpeners(prepared: string, references: ReadonlyMap<string, string>): Set<string> {
+  const openers = new Set<string>()
+  const sentinels = [...prepared.matchAll(PARSE_SENTINEL_RE)]
+  for (let index = 0; index + 2 < sentinels.length; index += 1) {
+    const run = sentinels.slice(index, index + 3)
+    const adjacent = run.every((sentinel, at) => (
+      at === 0 || run[at - 1].index + run[at - 1][0].length === sentinel.index
+    ))
+    const spelled = run.map(sentinel => references.get(sentinel[0])).join('')
+    if (adjacent && spelled === '&#91;&#93;&#40;') openers.add(run[0][0])
+  }
+  return openers
+}
+
+function readWrittenRun(src: string): void {
+  let text = ''
+  const at: number[] = []
+  const written: boolean[] = []
+  const openers: Array<[number, string]> = []
+  let index = 0
+  while (index < src.length) {
+    WRITTEN_SENTINEL_AT.lastIndex = index
+    const sentinel = WRITTEN_SENTINEL_AT.exec(src)?.[0]
+    WRITTEN_ENTITY_AT.lastIndex = index
+    const entity = sentinel ? undefined : WRITTEN_ENTITY_AT.exec(src)?.[0]
+    let character = src[index]
+    if (sentinel) {
+      const code = /^&#([1-9]\d*);$/.exec(parseReferences.get(sentinel) ?? '')?.[1]
+      character = code ? String.fromCodePoint(Number(code)) : ''
+      if (!WRITTEN_REFERENCE_RE.test(character) && character !== ' ' && character !== '\n') break
+      if (character === '[') openers.push([text.length, sentinel])
+    } else if (entity) {
+      character = { '&amp;': '&', '&lt;': '<', '&gt;': '>' }[entity] ?? ''
+    } else if (WRITTEN_REFERENCE_RE.test(character) || /[&<>]/.test(character)) {
+      break
+    }
+    at.push(index)
+    written.push(Boolean(sentinel ?? entity))
+    text += character
+    index += (sentinel ?? entity ?? character).length
+  }
+  at.push(index)
+  const n = text.length
+  const bad = new Array<number>(n + 1)
+  const opens = new Array<number>(n + 1)
+  bad[n] = n
+  opens[n] = n
+  for (let at = n - 1; at >= 0; at -= 1) {
+    const character = text[at]
+    const reference = WRITTEN_REFERENCE_RE.test(character)
+      || /[&<>]/.test(character)
+      || (character === ' ' && text[at + 1] === '\n')
+      || (character === '\n' && text[at - 1] === '\n')
+    bad[at] = reference === written[at] ? bad[at + 1] : at
+    OPENS_LINE_RE.lastIndex = at
+    opens[at] = (character === '\n' || character === '\r') && OPENS_LINE_RE.test(text)
+      ? at
+      : opens[at + 1]
+  }
+  const run = { text, at, bad, opens, read: emptyLinkReader(text) }
+  for (const [link, sentinel] of openers) {
+    if (text.startsWith('[](', link)) writtenLinks.runs.set(sentinel, { run, link })
+  }
+}
+
+// Where the first sentinel in `src` starts. marked gives `start` the text it
+// last gave the tokenizer, less its first character, and each later text it
+// lexes into the same tokens ends that text. So one search holds for each
+// until the text passes the sentinel it found.
+function nextSentinel(src: string): number {
+  const tokens = writtenLinks.length === src.length + 1 ? writtenLinks.tokens : undefined
+  const rest = tokens && writtenLinks.sentinels.get(tokens)
+  if (rest === 0) return -1
+  const found = rest === undefined ? -1 : src.length - rest
+  if (found >= 0 && src.startsWith('\uE000DOHC_', found)) return found
+  const at = src.indexOf('\uE000DOHC_')
+  if (tokens) writtenLinks.sentinels.set(tokens, at < 0 ? 0 : src.length - at)
+  return at
+}
+
+// The link with no text the serializer wrote as references at the start of
+// `src`, as the text it holds.
+function writtenLink(
+  src: string,
+  tokens: object,
+): { type: 'escape'; raw: string; text: string } | undefined {
+  writtenLinks.tokens = tokens
+  writtenLinks.length = src.length
+  WRITTEN_SENTINEL_AT.lastIndex = 0
+  const opener = WRITTEN_SENTINEL_AT.exec(src)?.[0]
+  if (!opener || !writtenLinks.openers.has(opener)) return undefined
+  if (!writtenLinks.runs.has(opener)) readWrittenRun(src)
+  const found = writtenLinks.runs.get(opener)
+  if (!found) return undefined
+  const { run, link } = found
+  found.end ??= run.read(link)
+  const end = found.end
+  if (end < 0 || run.bad[link] < end || run.opens[link] >= end) return undefined
+  return {
+    type: 'escape',
+    raw: src.slice(0, run.at[end] - run.at[link]),
+    text: fileAngles(run.text.slice(link, end)),
+  }
+}
+
+// Tiptap trims a literal fragment's trailing whitespace.
+function rawHtmlText(source: string): string {
+  return sourceText(source.replace(/\s+$/u, ''))
+}
+
+// Source the document keeps as the text the file holds, with each reference
+// as the file spells it.
+function sourceText(source: string): string {
+  return fileAngles(restoreParseSentinels(source, parseReferences))
+}
+
+// A `<` or `>` the file holds, in raw HTML or text, is no tag the serializer
+// wrote, so it opens and closes no tag span. Tiptap reads `&lt;` and `&gt;`
+// as the only `<` and `>` left, and those are the ones that do.
+function fileAngles(text: string): string {
+  return text.replaceAll('<', rawHtmlMarkup.lt).replaceAll('>', rawHtmlMarkup.gt)
+}
+
+// A token's source in a gathered HTML run. A gathered run keeps its whole
+// source as text, and its raw holds only the closing tag the lexer consumed.
+function htmlRunSource(token: Token): string {
+  const generic = token as Tokens.Generic
+  return generic.dohcHtmlRun === true ? String(generic.text) : token.raw
+}
+
 const extensions: AnyExtension[] = [
+  MarkdownHtml,
   MarkdownDefinition,
   ...dohcMarkdownExtensions,
-  StarterKit.configure({ orderedList: false }),
+  StarterKit.configure({ orderedList: false, paragraph: false }),
+  MarkdownParagraph,
   MarkdownOrderedList,
   MarkdownTaskList,
   DohcTaskItem,
@@ -318,9 +341,10 @@ const repeatedDefinitions = new WeakMap<object, number>()
 // Tiptap applies a link's destination and title to the link's text, so a
 // link with no text, as in `[](https://example.com "title")`, vanishes. The
 // engine's fold keeps it as text, and so does this: the link becomes an
-// `escape` token, which Tiptap keeps as literal text without decoding it.
-const emptyLinkProbe = new Tokenizer()
-emptyLinkProbe.lexer = new Lexer({ ...getDefaults(), tokenizer: emptyLinkProbe })
+// `escape` token, which Tiptap keeps as the text the file holds. The
+// serializer reads definitions with the same probe.
+const literalProbe = new Tokenizer()
+literalProbe.lexer = new Lexer({ ...getDefaults(), tokenizer: literalProbe })
 const markdownParser = new Marked({
   extensions: [{
     name: 'dohcEmptyLink',
@@ -331,17 +355,69 @@ const markdownParser = new Marked({
     },
     tokenizer: (src) => {
       if (!src.startsWith('[](')) return undefined
-      const link = emptyLinkProbe.link(src)
-      return link && link.type === 'link' ? { type: 'escape', raw: link.raw, text: link.raw } : undefined
+      const link = literalProbe.link(src)
+      return link?.type === 'link'
+        ? { type: 'escape', raw: link.raw, text: sourceText(link.raw) }
+        : undefined
+    },
+  }, {
+    // A link with no text the serializer wrote as references. marked's text
+    // rule stops at the `_` each sentinel holds, so only the first sentinel
+    // can start this text, and a later one is found when the text reaches it.
+    name: 'dohcWrittenLink',
+    level: 'inline',
+    start: (src) => {
+      if (writtenLinks.openers.size === 0) return undefined
+      const at = nextSentinel(src)
+      if (at < 0) return undefined
+      WRITTEN_SENTINEL_AT.lastIndex = at
+      const sentinel = WRITTEN_SENTINEL_AT.exec(src)?.[0]
+      return sentinel && writtenLinks.openers.has(sentinel) ? at : undefined
+    },
+    tokenizer: writtenLink,
+  }, {
+    // The lexer's own tag rule reads the tag, so a raw `<a>` or `<pre>` still
+    // changes how marked reads the text after it. Tiptap reads an opening tag
+    // through its closing tag as one fragment, so the Markdown between them
+    // stays text. A closing tag gathers that run back from the earliest open
+    // tag it closes, the way Tiptap matches them.
+    name: 'dohcHtmlTag',
+    level: 'inline',
+    tokenizer(src, tokens) {
+      if (!src.startsWith('<')) return undefined
+      const tag = this.lexer.options.tokenizer?.tag(src)
+      if (!tag) return undefined
+      const { raw } = tag
+      const text = rawHtmlText(raw)
+      // The tag patterns are Tiptap's own.
+      if (/^<\/[\s]*[\w-]+/i.test(raw)) {
+        const opened = tokens.findIndex((token) => {
+          const name: unknown = (token as Tokens.Generic).dohcOpenTag
+          return typeof name === 'string' && new RegExp(`^<\\/\\s*${name}\\b`, 'i').test(raw)
+        })
+        if (opened < 0) return { type: 'escape', raw, text }
+        const run = rawHtmlText(tokens.splice(opened).map(htmlRunSource).join('') + raw)
+        return { type: 'escape', raw, text: run, dohcHtmlRun: true }
+      }
+      const open = /^<[\s]*([\w-]+)(\s|>|\/|$)/i.exec(raw)
+      return open && !raw.endsWith('/>')
+        ? { type: 'escape', raw, text, dohcOpenTag: open[1] }
+        : { type: 'escape', raw, text }
     },
   }],
   tokenizer: {
     def(src) {
-      const token = Tokenizer.prototype.def.call(this, src)
-      if (!token || !Object.hasOwn(this.lexer.tokens.links, token.tag)) return token
+      const escaped = escapedDefinition(src)
+      const token = escaped ?? Tokenizer.prototype.def.call(this, src)
+      if (!token || (!escaped && !Object.hasOwn(this.lexer.tokens.links, token.tag))) return token
       const count = (repeatedDefinitions.get(this.lexer) ?? 0) + 1
       repeatedDefinitions.set(this.lexer, count)
       token.tag = `]${count}`
+      return token
+    },
+    inlineText(src) {
+      const token = Tokenizer.prototype.inlineText.call(this, src)
+      if (token) token.text = fileAngles(token.text)
       return token
     },
   },
@@ -365,8 +441,8 @@ export function markdownToYDoc(
   const doc = new Y.Doc()
   if (options.clientID !== undefined) doc.clientID = options.clientID
 
-  writeMap(doc.getMap(FRONTMATTER_FIELD), meta)
-  writeMap(doc.getMap(META_FIELD), {
+  writeFrontmatterMap(doc.getMap(FRONTMATTER_FIELD), meta)
+  writeFrontmatterMap(doc.getMap(META_FIELD), {
     schemaVersion: DOHC_SCHEMA_VERSION,
     ...(usesCrlf ? { [MARKDOWN_CRLF_META_KEY]: true } : {}),
     ...(frontmatterSource === undefined
@@ -407,29 +483,56 @@ export function parseRichdocMarkdown(markdown: string): JSONContent {
     return sentinel
   }
 
-  const prepared = markdown
-    .replace(
-      /(?:(?:&amp;|&AMP;|&#0{0,5}38;|&#[xX]0{0,4}26;)#(?:13|35|36|41|42|43|45|46|61|91|95|96|126|160);|&#(?:13|35|36|41|42|43|45|46|61|91|95|96|126|160);)/gu,
-      (entity, offset: number, source: string) => (
-        markdownCharacterIsEscaped(source, offset)
-          ? entity
-          : sentinelFor(entity)
-      ),
-    )
-    .replace(
-      /^&#(?:32|9);/gmu,
-      entity => sentinelFor(entity),
-    )
-  const parsed = markdownManager.parse(prepared)
-  const encodedEntities = entitySentinels
-  const decodedEntities = new Map(
-    Array.from(
-      encodedEntities,
+  // A block escape reads as its character anywhere, as does a leading space or
+  // tab. Any other reference reads so only inside a tag the text holds.
+  const tagReferences = new Set<string>()
+  const prepared = markdown.replace(
+    PARSE_REFERENCE_RE,
+    (entity, code: string | undefined, offset: number, source: string) => {
+      if (markdownCharacterIsEscaped(source, offset)) return entity
+      const sentinel = sentinelFor(entity)
+      const leading = (code === '9' || code === '32')
+        && (offset === 0 || source[offset - 1] === '\n')
+      if (code && !BLOCK_ESCAPE_CODES.has(Number(code)) && !leading) {
+        tagReferences.add(sentinel)
+      }
+      return sentinel
+    },
+  )
+  const markup = { lt: reserveSentinel(), gt: reserveSentinel() }
+  const markupEntities = [[markup.lt, '<'], [markup.gt, '>']] as const
+  const encodedEntities = new Map([...entitySentinels, ...markupEntities])
+  const tagEntities = new Map([
+    ...Array.from(
+      entitySentinels,
       ([sentinel, entity]) => [sentinel, decodeBlockEntity(entity)] as const,
     ),
+    ...markupEntities,
+  ])
+  const decodedEntities = new Map(
+    Array.from(tagEntities, ([sentinel, value]) => [
+      sentinel,
+      tagReferences.has(sentinel) ? encodedEntities.get(sentinel) ?? value : value,
+    ] as const),
   )
+  parseReferences = entitySentinels
+  rawHtmlMarkup = markup
+  writtenLinks = {
+    openers: writtenOpeners(prepared, entitySentinels),
+    runs: new Map(),
+    length: -1,
+    sentinels: new WeakMap(),
+  }
+  let parsed: JSONContent
+  try {
+    parsed = markdownManager.parse(prepared)
+  } finally {
+    parseReferences = new Map()
+    rawHtmlMarkup = { lt: '<', gt: '>' }
+    writtenLinks = { openers: new Set(), runs: new Map(), length: -1, sentinels: new WeakMap() }
+  }
   return ensureListItemParagraphs(
-    restoreBlockEntityParseSentinels(parsed, decodedEntities, encodedEntities),
+    restoreBlockEntityParseSentinels(parsed, { decodedEntities, encodedEntities, tagEntities }),
   )
 }
 
@@ -464,12 +567,25 @@ function decodeBlockEntity(entity: string): string {
   )
 }
 
+type ParseReferences = {
+  // Each reference's spelling, for code, links, and literal attributes.
+  encodedEntities: Map<string, string>
+  // Each reference read where the text holds no tag.
+  decodedEntities: Map<string, string>
+  // Each reference read as its character, inside a tag the text holds.
+  tagEntities: Map<string, string>
+}
+
+// Where a text node sits in its block's tag span, if the block has one.
+type TextSpan = { start: number; end: number; from: number }
+
 function restoreBlockEntityParseSentinels(
   node: JSONContent,
-  decodedEntities: Map<string, string>,
-  encodedEntities: Map<string, string>,
+  references: ParseReferences,
   insideCodeBlock = false,
+  span?: TextSpan,
 ): JSONContent {
+  const { decodedEntities, encodedEntities, tagEntities } = references
   const restored: JSONContent = { ...node }
   const insideCode = insideCodeBlock
     || node.type === 'codeBlock'
@@ -488,10 +604,14 @@ function restoreBlockEntityParseSentinels(
       return textSentinels.some(sentinel => hrefSentinels.has(sentinel))
     })
   if (typeof node.text === 'string') {
-    restored.text = restoreParseSentinels(
-      node.text,
-      insideCode || autolink ? encodedEntities : decodedEntities,
-    )
+    restored.text = insideCode || autolink
+      ? restoreParseSentinels(node.text, encodedEntities)
+      : node.text.replace(PARSE_SENTINEL_RE, (sentinel, at: number) => {
+          const inTag = span !== undefined
+            && span.from + at >= span.start
+            && span.from + at < span.end
+          return (inTag ? tagEntities : decodedEntities).get(sentinel) ?? sentinel
+        })
   }
   if (node.attrs) {
     const preservesLiteralAttributes = node.type === 'codeBlock'
@@ -525,14 +645,13 @@ function restoreBlockEntityParseSentinels(
     }))
   }
   if (node.content) {
-    restored.content = node.content.map(child =>
-      restoreBlockEntityParseSentinels(
-        child,
-        decodedEntities,
-        encodedEntities,
-        insideCode,
-      ),
-    )
+    const tag = rawHtmlSpan(node.content)
+    let from = 0
+    restored.content = node.content.map((child, index) => {
+      const childSpan = tag && { start: tag.start, end: tag.end, from }
+      from += tag?.texts[index]?.length ?? 0
+      return restoreBlockEntityParseSentinels(child, references, insideCode, childSpan)
+    })
   }
   return restored
 }
@@ -570,7 +689,7 @@ function restoreAttributeValueSentinels(
 
 function restoreParseSentinels(
   value: string,
-  replacements: Map<string, string>,
+  replacements: ReadonlyMap<string, string>,
 ): string {
   return value.replace(
     PARSE_SENTINEL_RE,
@@ -582,8 +701,8 @@ export function plainTextToYDoc(markdown: string): Y.Doc {
   const { meta, body, frontmatterSource } = parseFrontmatter(markdown, false)
   const doc = new Y.Doc()
 
-  writeMap(doc.getMap(FRONTMATTER_FIELD), meta)
-  writeMap(doc.getMap(META_FIELD), {
+  writeFrontmatterMap(doc.getMap(FRONTMATTER_FIELD), meta)
+  writeFrontmatterMap(doc.getMap(META_FIELD), {
     schemaVersion: DOHC_SCHEMA_VERSION,
     contentKind: PLAIN_TEXT_CONTENT_KIND,
     ...(frontmatterSource === undefined
@@ -618,11 +737,11 @@ export function yDocToMarkdown(doc: Y.Doc): string {
 }
 
 export function getDohcYDocFrontmatter(doc: Y.Doc): Record<string, unknown> {
-  return mapToObject(doc.getMap(FRONTMATTER_FIELD))
+  return frontmatterMapValues(doc.getMap(FRONTMATTER_FIELD))
 }
 
 export function getDohcYDocMeta(doc: Y.Doc): DohcMeta {
-  const meta = mapToObject(doc.getMap(META_FIELD))
+  const meta = frontmatterMapValues(doc.getMap(META_FIELD))
   return {
     schemaVersion:
       typeof meta.schemaVersion === 'number'
@@ -696,6 +815,33 @@ export function serializeRichdocBody(root: JSONContent): string {
     blockEscapeSentinels.set(value, token)
     return token
   }
+  // An empty link the parser keeps as the file holds it reads back only from
+  // the same bytes, so its `&`, `<`, `>`, and NBSP are written as they are,
+  // and so is each line it starts, which no block opener or indent escape
+  // then reads. A link with a line that would end the paragraph cannot be
+  // written as it is, so it is written as references, the way a definition
+  // is, which the parser reads back as the same link text. A highlight's own
+  // `\=` stays as it is, for the highlight to read. Each of its lines is
+  // written whole, so no later escape reads it.
+  const asWritten = (text: string, highlighted: boolean): string => {
+    if (!opensBlock(text)) {
+      return replaceCharacters(
+        text,
+        characterSentinels,
+        () => reserveToken('CHARACTER'),
+        /[&<>\u00a0]|(?<=\n)[^\n\r]/g,
+      )
+    }
+    const written = highlighted
+      ? text.split('\\=').map(writtenDefinition).join('\\=')
+      : writtenDefinition(text)
+    return replaceCharacters(
+      written,
+      characterSentinels,
+      () => reserveToken('CHARACTER'),
+      /[^\n]+/g,
+    )
+  }
 
   function visit(node: JSONContent, insideTableCell = false): JSONContent {
     if (node.type === 'table' && node.content?.length) {
@@ -722,11 +868,22 @@ export function serializeRichdocBody(root: JSONContent): string {
       ? node.content?.flatMap(prepareTableCellBlock)
       : node.content?.map(child => visit(child))
     if (content?.length) {
+      const definition = node.type === 'paragraph' && isDefinitionParagraph(content)
+      // A definition reads back as plain text, so an empty link in it is
+      // written as other text is. A block definition is one tag span.
+      content = escapeRawHtmlPunctuation(
+        content,
+        encodeBlockEscape,
+        insideTableCell,
+        definition ? undefined : asWritten,
+        definition && !insideTableCell,
+      )
       if (node.type === 'paragraph') {
         content = escapeLeadingMarkdownBlockSyntax(
           content,
           encodeLeadingWhitespace,
           encodeBlockEscape,
+          definition,
         )
       }
       content = renderInlineCodeRuns(
@@ -894,8 +1051,9 @@ function escapePostNewlineMarkdownBlockOpeners(
   const finishLine = (): void => {
     if (capturesLine) {
       const escapeIndexes = leadingMarkdownBlockEscapeIndexes(line)
+      // The line break keeps its marks, so a mark across it stays one.
       if (escapeIndexes.length > 0 && lineBreakPosition) {
-        addReplacement(lineBreakPosition, { text: '\n', preserveMarks: false })
+        addReplacement(lineBreakPosition, { text: '\n', preserveMarks: true })
       }
       for (const escapeIndex of escapeIndexes) {
         const position = positions[escapeIndex]
@@ -962,6 +1120,7 @@ function escapeLeadingMarkdownBlockSyntax(
   content: JSONContent[],
   encodeLeadingWhitespace: (value: ' ' | '\t') => string,
   encodeBlockEscape: (value: string) => string,
+  definition: boolean,
 ): JSONContent[] {
   const output: JSONContent[] = []
   let lineStart = true
@@ -990,6 +1149,8 @@ function escapeLeadingMarkdownBlockSyntax(
         run,
         lineStart,
         encodeLeadingWhitespace,
+        encodeBlockEscape,
+        definition && output.length === 0,
       ))
       lineStart = run.at(-1)?.text?.endsWith('\n') === true
       continue
@@ -1000,6 +1161,16 @@ function escapeLeadingMarkdownBlockSyntax(
     index += 1
   }
   return output
+}
+
+// Whether a paragraph is plain text that marked reads back as the one link
+// reference definition it holds, as the parser keeps a definition.
+function isDefinitionParagraph(content: JSONContent[]): boolean {
+  const [node] = content
+  if (content.length !== 1 || typeof node.text !== 'string' || node.marks?.length) return false
+  if (!node.text.startsWith('[')) return false
+  const raw = literalProbe.def(node.text)?.raw
+  return raw !== undefined && definitionText(raw) === node.text
 }
 
 function escapeParagraphWhitespace(
@@ -1016,10 +1187,16 @@ function escapeParagraphWhitespace(
   ))
 }
 
+// With `definition`, the `[` that starts the run is written as `&#91;`, the
+// reference later lines already use, which the parser reads back as text,
+// not as an escape node. So a definition the parser keeps as text reopens as
+// the same text.
 function escapeTextRunBlockOpeners(
   run: JSONContent[],
   startsLine: boolean,
   encodeLeadingWhitespace: (value: ' ' | '\t') => string,
+  encodeBlockEscape: (value: string) => string,
+  definition: boolean,
 ): JSONContent[] {
   const text = run.map(node => node.text ?? '').join('')
   const escapeOffsets = new Set<number>()
@@ -1059,10 +1236,12 @@ function escapeTextRunBlockOpeners(
       }
       output.push(whitespaceReplacement
         ? { ...node, text: whitespaceReplacement }
-        : {
-            type: 'escapedPunctuation',
-            attrs: { value: nodeText[index] },
-          })
+        : definition && absoluteIndex === 0
+          ? { ...node, text: encodeBlockEscape('[') }
+          : {
+              type: 'escapedPunctuation',
+              attrs: { value: nodeText[index] },
+            })
       chunkStart = index + 1
     }
     if (chunkStart < nodeText.length) {
@@ -1099,10 +1278,434 @@ function leadingMarkdownBlockEscapeIndexes(text: string): number[] {
   }
   if (/^(?:=+|-+)[\t ]*$/.test(rest)) return [indent]
   if (/^!\[/.test(rest)) return [indent + 1]
-  if (/^\[/.test(rest)) return [indent]
+  // A link with no text starts no definition, and the parser reads it as text.
+  if (/^\[(?!\]\()/.test(rest)) return [indent]
   const ordered = /^(\d{1,9})([.)])(?:[\t ]|$)/.exec(rest)
   if (ordered) return [indent + ordered[1].length]
   return []
+}
+
+// The tag span of a block's inline content: from its first tag to its last
+// `>`, across marks, with each node's share of the text. Code is not part of
+// it. The serializer writes references inside it and the parser reads them,
+// where only the serializer's `&lt;` and `&gt;` open and close one. So a tag
+// the serializer writes as a real one, a table cell's `<br>`, is not a bound.
+// Nor is a `<` or `>` in an empty link the serializer writes as it is.
+function rawHtmlSpan(
+  content: JSONContent[],
+  realTag?: string,
+  emptyLinks?: Array<Array<[number, number]>>,
+): { texts: string[]; start: number; end: number } | undefined {
+  const texts = content.map(node => (
+    typeof node.text === 'string' && !node.marks?.some(mark => mark.type === 'code')
+      ? node.text
+      : ''
+  ))
+  const joined = emptyLinks
+    ? texts.map((text, index) => mapRanges(text, emptyLinks[index], 0, part => part.replace(/[<>]/g, '\0'))).join('')
+    : texts.join('')
+  const bounds = realTag ? joined.replaceAll(realTag, '\0'.repeat(realTag.length)) : joined
+  const start = bounds.search(/<[!/?A-Za-z]/)
+  const end = bounds.lastIndexOf('>') + 1
+  return start < 0 || end <= start ? undefined : { texts, start, end }
+}
+
+// Tiptap writes a text's `<`, `>`, and `&` as `&lt;`, `&gt;`, and `&amp;`, so
+// raw HTML kept as text no longer reads as HTML when the file reopens, and the
+// syntax it kept literal, from emphasis to atoms, links, and escapes, would
+// read again. In the tag span, every other ASCII punctuation character but the
+// `!`, `/`, and `?` that open a tag is written as a reference the parser reads
+// back as that character, and so is a space that ends a line, which would make
+// a line break. An empty line would end the paragraph, so its newline is one
+// too. A line of spaces or tabs already starts or ends with one. A highlight's
+// own `\=` stays as written.
+//
+// The parser keeps a link with no text as the text the file holds, so outside
+// the span the serializer writes one as it is, through `asWritten`. Inside the
+// span its `[` is a reference, so it reads back as the span's other text does.
+//
+// With `whole`, all of the text is the span, as for a definition the parser
+// keeps as text.
+function escapeRawHtmlPunctuation(
+  content: JSONContent[],
+  encodeBlockEscape: (value: string) => string,
+  insideTableCell: boolean,
+  asWritten: ((text: string, highlighted: boolean) => string) | undefined,
+  whole = false,
+): JSONContent[] {
+  const linkRanges = (node: JSONContent): Array<[number, number]> => (
+    asWritten && typeof node.text === 'string' && !node.marks?.some(mark => mark.type === 'code')
+      ? emptyLinkRanges(node.text)
+      : []
+  )
+  const write = (node: JSONContent) => (part: string): string => (
+    asWritten
+      ? asWritten(part, node.marks?.some(mark => mark.type === 'highlight') === true)
+      : part
+  )
+  // A link written as references holds no `[` once written, so it is no
+  // link here either, and its references bound no span.
+  let emptyLinks = content.map(linkRanges)
+  if (emptyLinks.some((ranges, index) => ranges.some(
+    ([from, to]) => opensBlock((content[index].text ?? '').slice(from, to)),
+  ))) {
+    content = content.map((node, index) => {
+      const text = node.text ?? ''
+      const ranges = emptyLinks[index].filter(([from, to]) => opensBlock(text.slice(from, to)))
+      return ranges.length ? { ...node, text: mapRanges(text, ranges, 0, write(node)) } : node
+    })
+    emptyLinks = content.map(linkRanges)
+  }
+  const writeEmptyLinks = (node: JSONContent, index: number): JSONContent => (
+    emptyLinks[index].length
+      ? { ...node, text: mapRanges(node.text ?? '', emptyLinks[index], 0, write(node)) }
+      : node
+  )
+  const tag = whole
+    ? { texts: content.map(node => node.text ?? ''), start: 0, end: Infinity }
+    : rawHtmlSpan(
+        content,
+        insideTableCell ? GFM_TABLE_CELL_BLOCK_SEPARATOR : undefined,
+        emptyLinks,
+      )
+  if (!tag) return content.map(writeEmptyLinks)
+  const { texts, start, end } = tag
+  const joined = texts.join('')
+  let offset = 0
+  return content.map((node, index) => {
+    const text = texts[index]
+    const from = Math.max(start - offset, 0)
+    const to = Math.min(end - offset, text.length)
+    const at = offset + from
+    offset += text.length
+    if (from >= to) return writeEmptyLinks(node, index)
+    const punctuation = node.marks?.some(mark => mark.type === 'highlight')
+      ? /\\=|["-%'-.:;=@[-`{-~]| |\n/g
+      : /["-%'-.:;=@[-`{-~]| |\n/g
+    const html = text.slice(from, to).replace(punctuation, (character, position: number) => {
+      if (character.length > 1) return character
+      // The space's newline, or the newline's line, can sit in the next or
+      // previous node.
+      if (character === ' ' && (at + position + 1 >= end || joined[at + position + 1] !== '\n')) {
+        return character
+      }
+      if (character === '\n' && joined[at + position - 1] !== '\n') return character
+      return encodeBlockEscape(character)
+    })
+    const ranges = emptyLinks[index]
+    return {
+      ...node,
+      text: mapRanges(text.slice(0, from), ranges, 0, write(node)) + html
+        + mapRanges(text.slice(to), ranges, to, write(node)),
+    }
+  })
+}
+
+// Whether a link with no text holds a line that would end the paragraph it
+// is in, written as it is: after at most three spaces, a character that can
+// open a block or a table's delimiter row, `1.` or `1)`, or nothing but
+// spaces. A `\r` counts too: marked reads it as a newline, and the `&#13;`
+// that keeps it one would stay a reference in a link written as it is. It
+// errs toward yes, since such a link is written as references, which read
+// back the same. The engine's projector decides the same way.
+export function opensBlock(link: string): boolean {
+  return OPENS_BLOCK_RE.test(link)
+}
+const OPENS_BLOCK_RE = /\r|\n(?: {0,3}(?:[#$>*+\-_=`~<|:]|1[.)])| *(?:\n|$))/
+const OPENS_LINE_RE = new RegExp(OPENS_BLOCK_RE.source, 'y')
+
+// Where `text` holds a link with no text, as the parser reads one: marked's
+// inline `link` rule and `Tokenizer.link` checks, from `[](`. The parser asks
+// marked at each `[](`, which reads the rest of the text each time. This
+// reads the same rule once across the text, so a run of candidates that fail
+// costs no more than the text it spans. The importer's tests compare the two
+// readings.
+export function emptyLinkRanges(text: string): Array<[number, number]> {
+  let at = text.indexOf('[](')
+  if (at < 0) return []
+  const read = emptyLinkReader(text)
+  const ranges: Array<[number, number]> = []
+  while (at >= 0) {
+    const end = read(at)
+    if (end < 0) {
+      at = text.indexOf('[](', at + 1)
+    } else {
+      ranges.push([at, end])
+      at = text.indexOf('[](', end)
+    }
+  }
+  return ranges
+}
+
+const TITLE_CLOSE: Record<string, string> = { '"': '"', "'": "'", '(': ')' }
+
+// A run of bare destination text, which every candidate whose destination
+// starts in it shares: where it stops, its last two `)`, and what the rule
+// reads after it, each found once.
+type BareRun = {
+  start: number
+  stop: number
+  close: number
+  previousClose: number
+  tail?: number
+  shapes: Map<number, [number, number]>
+  walk?: ParenthesisWalk
+}
+
+// marked's `findClosingBracket` for each candidate whose destination starts
+// in a run: its first unmatched `)` and its depth, in candidate order, and the
+// depth at the run's stop and at its last `)`.
+type ParenthesisWalk = {
+  solids: number[]
+  lowers: number[]
+  depths: number[]
+  stopDepth: number
+  closeDepth: number
+  next: number
+}
+
+// A title's scan from a start: the first delimiter no backslash escapes, the
+// close after it, and the last escaped delimiter whose close succeeds.
+type TitleScan = { start: number; end: number; close: number; escaped: number; escapedClose: number }
+
+// The end of the link with no text at each `[](` in `text`, or -1, read in
+// order. marked's rule, after `[](`, is `\s*`, a destination
+// `<(?:\\.|[^\n<>\\])+>` or `[^ \t\n\x00-\x1f]*`, an optional title after
+// `[ \t]+(?:\n[ \t]*)?|\n[ \t]*`, then `\s*\)`. Its regex tries the longest
+// choices first, so each step names the first choice that succeeds.
+//
+// The reader keeps no table of the text. Each candidate scans its own
+// leading whitespace, and an angle destination stops at the next `<`. Work
+// that candidates share sits in memos that only move forward: the bare run,
+// and each delimiter's title scan for each of three streams of title starts
+// that only grow. A run whose destinations hold `)` is walked once. So the
+// work is linear in the text, and the storage is linear in the candidates
+// of one run. Every character it reads goes through `charAt` or
+// `charCodeAt`, which the tests count.
+function emptyLinkReader(text: string): (link: number) => number {
+  const n = text.length
+  const char = (index: number) => text.charAt(index)
+  const space = (index: number) => index < n && /\s/.test(char(index))
+  const stops = (index: number) => {
+    const code = text.charCodeAt(index)
+    return code === 32 || code <= 31
+  }
+  const tabEnd = (index: number) => {
+    let at = index
+    while (char(at) === ' ' || char(at) === '\t') at += 1
+    return at
+  }
+  // `\s*\)` from an index: the end of the `)`, or -1.
+  const closeAt = (index: number) => {
+    let at = index
+    while (space(at)) at += 1
+    return char(at) === ')' ? at + 1 : -1
+  }
+  const trimEnd = (index: number) => {
+    let at = index
+    while (at > 0 && space(at - 1)) at -= 1
+    return at
+  }
+
+  const titles = new Map<number, TitleScan>()
+  const title = (at: number, stream: number): number => {
+    const opener = char(at)
+    const delimiter = TITLE_CLOSE[opener]
+    if (!delimiter) return -1
+    const key = stream * 3 + '"\'('.indexOf(opener)
+    const from = at + 1
+    let scan = titles.get(key)
+    if (!scan || from < scan.start || from > scan.end) {
+      scan = { start: from, end: n, close: -1, escaped: -1, escapedClose: -1 }
+      for (let index = from; index < n;) {
+        const character = char(index)
+        if (character === '\\' && char(index + 1) === delimiter) {
+          const close = closeAt(index + 2)
+          if (close >= 0) {
+            scan.escaped = index + 1
+            scan.escapedClose = close
+          }
+          index += 2
+        } else if (character === delimiter) {
+          scan.end = index
+          scan.close = closeAt(index + 1)
+          break
+        } else {
+          index += 1
+        }
+      }
+      titles.set(key, scan)
+    }
+    if (scan.close >= 0) return scan.close
+    return scan.escaped > from ? scan.escapedClose : -1
+  }
+  // After a destination: the end of the title and `)`, or of `)` alone.
+  const tail = (end: number, stream: number): number => {
+    const spaced = tabEnd(end)
+    const at = char(spaced) === '\n' ? tabEnd(spaced + 1) : spaced > end ? spaced : -1
+    const titled = at >= 0 ? title(at, stream) : -1
+    return titled >= 0 ? titled : closeAt(end)
+  }
+  // Where an angle destination's characters stop.
+  const angled = (index: number) => {
+    let at = index
+    while (at < n) {
+      const character = char(at)
+      if (character === '\\') {
+        if (at + 1 >= n || /[\n\r\u2028\u2029]/.test(char(at + 1))) return at
+        at += 2
+      } else if (character === '\n' || character === '<' || character === '>') {
+        return at
+      } else {
+        at += 1
+      }
+    }
+    return at
+  }
+
+  let run: BareRun | undefined
+  const bareRun = (solid: number): BareRun => {
+    if (run && run.start <= solid && solid <= run.stop) return run
+    let stop = solid
+    let close = -1
+    let previousClose = -1
+    for (; stop < n && !stops(stop); stop += 1) {
+      if (char(stop) === ')') {
+        previousClose = close
+        close = stop
+      }
+    }
+    run = { start: solid, stop, close, previousClose, shapes: new Map() }
+    return run
+  }
+  const walk = (bare: BareRun): ParenthesisWalk => {
+    const solids = [bare.start]
+    const lowers = [n]
+    const depths = [0]
+    const open = [0]
+    let depth = 0
+    let closeDepth = 0
+    for (let index = bare.start; index < bare.stop;) {
+      const character = char(index)
+      const step = character === '\\' ? 2 : 1
+      if (index <= bare.close && bare.close < index + step) closeDepth = depth
+      if (character === '(') {
+        depth += 1
+        if (char(index - 1) === ']' && char(index - 2) === '[') {
+          let solid = index + 1
+          while (space(solid)) solid += 1
+          if (solid < bare.stop) {
+            solids.push(solid)
+            lowers.push(n)
+            depths.push(depth)
+            open.push(solids.length - 1)
+          }
+        }
+      } else if (character === ')') {
+        depth -= 1
+        while (open.length > 0 && depths[open[open.length - 1]] > depth) {
+          lowers[open.pop() as number] = index
+        }
+      }
+      index += step
+    }
+    return { solids, lowers, depths, stopDepth: depth, closeDepth, next: 0 }
+  }
+
+  // marked's checks on the destination from `from` to `to`: in angles it ends
+  // with an unescaped `>`, and with unbalanced parentheses the link ends at
+  // the first unmatched `)`, cut `4 + index` from the link's start even after
+  // leading whitespace, then trimmed.
+  const checked = (link: number, solid: number, from: number, to: number, end: number): number => {
+    if (to <= solid) return end
+    let shape = run?.shapes.get(to)
+    if (!shape) {
+      const stop = trimEnd(to)
+      let slashes = 0
+      while (char(stop - 2 - slashes) === '\\') slashes += 1
+      shape = [stop, slashes]
+      if (run && (to === run.stop || to === run.close)) run.shapes.set(to, shape)
+    }
+    const [stop, slashes] = shape
+    if (char(solid) === '<') {
+      return char(stop - 1) === '>' && Math.min(slashes, stop - 1 - solid) % 2 === 0 ? end : -1
+    }
+    // A bare destination ends at its run's stop or last `)`.
+    const bare = run as BareRun
+    const close = to === bare.stop ? bare.close : bare.previousClose
+    if (close < from) return end
+    const walked = bare.walk ??= walk(bare)
+    while (walked.solids[walked.next] < solid) walked.next += 1
+    const at = walked.next
+    if (walked.lowers[at] < to) return trimEnd(link + 4 + walked.lowers[at] - from)
+    const depth = to === bare.stop ? walked.stopDepth : walked.closeDepth
+    return depth > walked.depths[at] ? -1 : end
+  }
+
+  return (link) => {
+    const after = link + 3
+    let solid = after
+    while (space(solid)) solid += 1
+    // Carried back from the position after each whitespace one: where its
+    // bare destination stops and what follows, where spaces and tabs end,
+    // and where they end after the nearest newline.
+    let stop = -1
+    let tailed = -1
+    let tabs = solid
+    let newline = -1
+    for (let from = solid; from >= after; from -= 1) {
+      if (from === solid) {
+        if (char(from) === '<') {
+          const close = angled(from + 1)
+          if (close > from + 1 && char(close) === '>') {
+            const end = tail(close + 1, 2)
+            if (end >= 0) return checked(link, solid, from, close + 1, end)
+          }
+        }
+        const bare = bareRun(solid)
+        stop = bare.stop
+        tailed = bare.tail ??= tail(stop, 0)
+      } else {
+        const following = tabs
+        const character = char(from)
+        if (character !== ' ' && character !== '\t') tabs = from
+        if (character === '\n') newline = following
+        if (stops(from)) {
+          stop = from
+          const at = char(tabs) === '\n' ? newline : tabs > from ? tabs : -1
+          const titled = at >= 0 ? title(at, 1) : -1
+          tailed = titled >= 0 ? titled : char(solid) === ')' ? solid + 1 : -1
+        }
+      }
+      if (tailed >= 0) return checked(link, solid, from, stop, tailed)
+      // A shorter bare destination can end where `\s*\)` succeeds. Whitespace
+      // that reaches a `)` would already have closed the link at the stop, so
+      // that is the run's last `)`.
+      const close = stop >= solid ? (run as BareRun).close : -1
+      if (close >= from) return checked(link, solid, from, close, close + 1)
+    }
+    return -1
+  }
+}
+
+// `text`, which starts at `base` in its node, with each part a sorted range
+// covers passed through `map`.
+function mapRanges(
+  text: string,
+  ranges: Array<[number, number]>,
+  base: number,
+  map: (part: string) => string,
+): string {
+  let output = ''
+  let cursor = 0
+  for (const [rangeFrom, rangeTo] of ranges) {
+    const from = Math.max(rangeFrom - base, cursor)
+    const to = Math.min(rangeTo - base, text.length)
+    if (from >= to) continue
+    output += text.slice(cursor, from) + map(text.slice(from, to))
+    cursor = to
+  }
+  return output + text.slice(cursor)
 }
 
 function protectMarkdownSyntax(
@@ -1271,119 +1874,15 @@ function restoreCharacterSentinels(
   replacements: Map<string, string>,
 ): string {
   if (replacements.size === 0) return markdown
-  const matcher = new RegExp(
-    Array.from(replacements.keys(), escapeRegExp).join('|'),
-    'gu',
+  // Every sentinel the serializer reserves has this shape, so one pass finds
+  // them all, however many there are.
+  return markdown.replace(
+    /\uE000DOHC(?:[A-Z_]+_\d+|CHARACTER\d+)\uE001/gu,
+    sentinel => replacements.get(sentinel) ?? sentinel,
   )
-  return markdown.replace(matcher, sentinel => replacements.get(sentinel) ?? sentinel)
-}
-
-function escapeRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 }
 
 /** Whether a Markdown file's reader takes the start of `markdown` as frontmatter, even an empty one. */
 export function startsWithFrontmatter(markdown: string): boolean {
   return parseFrontmatter(markdown, false).body !== markdown
-}
-
-function writeMap(
-  map: Y.Map<unknown>,
-  values: Record<string, unknown>,
-  escapeSharedBigIntKeys = false,
-): void {
-  for (const [key, value] of Object.entries(values)) {
-    map.set(
-      escapeSharedBigIntKeys ? escapeSharedBigIntKey(key) : key,
-      frontmatterValueNeedsSharedType(value)
-        ? frontmatterValueToY(value)
-        : frontmatterValueToAny(value),
-    )
-  }
-}
-
-function frontmatterValueNeedsSharedType(value: unknown): boolean {
-  if (Array.isArray(value)) return value.some(frontmatterValueNeedsSharedType)
-  if (!isFrontmatterMap(value)) return false
-  // Yjs dispatches plain values through `value.constructor`; lib0's plain-map
-  // decoder assigns `__proto__` through its setter. Shared types preserve both keys.
-  return Object.hasOwn(value, 'constructor')
-    || Object.hasOwn(value, '__proto__')
-    || Object.values(value).some(frontmatterValueNeedsSharedType)
-}
-
-function frontmatterValueToAny(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(frontmatterValueToAny)
-  if (!isFrontmatterMap(value)) return value
-  return Object.fromEntries(
-    Object.entries(value).map(([key, child]) => [key, frontmatterValueToAny(child)]),
-  )
-}
-
-const FRONTMATTER_SHARED_BIGINT_KEY = '$dohcBigInt'
-// The sentinel spelling and every extra-`$` escape depth of it. Literal keys
-// spelled this way gain one `$` when a shared map is built and lose one when
-// it is read, so only a real sentinel ever carries the unescaped key.
-const SHARED_BIGINT_KEY_SPELLING = /^\$+dohcBigInt$/
-
-function escapeSharedBigIntKey(key: string): string {
-  return SHARED_BIGINT_KEY_SPELLING.test(key) ? `$${key}` : key
-}
-
-function unescapeSharedBigIntKey(key: string): string {
-  return key.startsWith('$$') && SHARED_BIGINT_KEY_SPELLING.test(key)
-    ? key.slice(1)
-    : key
-}
-
-function frontmatterValueToY(value: unknown): unknown {
-  if (typeof value === 'bigint') {
-    // Y.Map stores bigint through ContentAny, while Y.Array rejects bigint as
-    // a direct item in Yjs 13. Keep the exact value in Any instead of changing
-    // its scalar kind to a collaborative text node.
-    const integer = new Y.Map<unknown>()
-    integer.set(FRONTMATTER_SHARED_BIGINT_KEY, value)
-    return integer
-  }
-  if (Array.isArray(value)) {
-    const array = new Y.Array<unknown>()
-    array.insert(0, value.map(frontmatterValueToY))
-    return array
-  }
-  if (isFrontmatterMap(value)) {
-    const map = new Y.Map<unknown>()
-    writeMap(map, value, true)
-    return map
-  }
-  return value
-}
-
-function yFrontmatterValueToPlain(value: unknown): unknown {
-  if (
-    value instanceof Y.Map
-    && value.size === 1
-    && typeof value.get(FRONTMATTER_SHARED_BIGINT_KEY) === 'bigint'
-  ) {
-    return value.get(FRONTMATTER_SHARED_BIGINT_KEY)
-  }
-  if (value instanceof Y.Map) return mapToObject(value, true)
-  if (value instanceof Y.Array) {
-    return value.toArray().map(yFrontmatterValueToPlain)
-  }
-  // No writer puts Y.Text in frontmatter (bigints ride the shared singleton
-  // map); a foreign one degrades to its visible string instead of throwing.
-  if (value instanceof Y.Text) return value.toString()
-  return normalizeFrontmatterValue(value)
-}
-
-function mapToObject(
-  map: Y.Map<unknown>,
-  unescapeSharedBigIntKeys = false,
-): Record<string, unknown> {
-  return Object.fromEntries(
-    Array.from(map.entries(), ([key, child]) => [
-      unescapeSharedBigIntKeys ? unescapeSharedBigIntKey(key) : key,
-      yFrontmatterValueToPlain(child),
-    ] as const).sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0),
-  )
 }

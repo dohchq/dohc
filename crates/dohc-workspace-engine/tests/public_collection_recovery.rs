@@ -422,31 +422,38 @@ async fn accepted_response_native_owner_undo_syncs_and_history_restores() {
     let adopted =
         std::fs::read_to_string(owner_scratch.path().join(path)).expect("adopted owner Markdown");
     assert!(adopted.contains(&record_id));
-    let mismatch = call_error(&transport, &handle, 40, "versionedText.delete", json!({
-        "versionId": "main", "path": path, "origin": "api", "expectedObjectId": "foreign-object",
-        "requestId": "wrong-object-proof",
-    })).await;
+    let mismatch = transport
+        .call(
+            RequestContext::unbounded(),
+            keyed_request(40, "versionedText.delete", Some(handle.clone()), "wrong-object-proof", json!({
+                "versionId": "main", "path": path, "origin": "api", "expectedObjectId": "foreign-object",
+            })),
+        )
+        .await
+        .unwrap_err();
     assert_eq!(mismatch.message, "object-identity-mismatch");
     assert_eq!(
         std::fs::read_to_string(owner_scratch.path().join(path)).unwrap(),
         adopted
     );
     let delete_params = json!({"versionId": "main", "path": path, "origin": "api", "expectedObjectId": object_id,
-        "requestId": request_id, "correlationId": request_id, "summary": "Removed app response"});
-    let deleted = call(
+        "correlationId": request_id, "summary": "Removed app response"});
+    let deleted = call_keyed(
         &transport,
         &handle,
         41,
         "versionedText.delete",
+        &request_id,
         delete_params.clone(),
     )
     .await;
     assert_eq!(deleted["moment"]["operation"], "delete");
-    let retry = call(
+    let retry = call_keyed(
         &transport,
         &handle,
         42,
         "versionedText.delete",
+        &request_id,
         delete_params.clone(),
     )
     .await;
@@ -482,11 +489,11 @@ async fn accepted_response_native_owner_undo_syncs_and_history_restores() {
         let refused = call_error(&transport, &handle, id, "versionedText.write", params).await;
         assert_eq!(refused.message, "invalid-input");
     }
-    let restored = call(&transport, &handle, 61, "versionedText.write", json!({"versionId": "main", "path": path,
-        "text": adopted, "restoreBeforeMomentId": deleted["moment"]["momentId"], "origin": "restore", "requestId": "restore-owner-undo"})).await;
+    let restored = call_keyed(&transport, &handle, 61, "versionedText.write", "restore-owner-undo", json!({"versionId": "main", "path": path,
+        "text": adopted, "restoreBeforeMomentId": deleted["moment"]["momentId"], "origin": "restore"})).await;
     assert_eq!(restored["snapshot"]["objectId"], object_id);
-    let restore_retry = call(&transport, &handle, 610, "versionedText.write", json!({"versionId": "main", "path": path,
-        "text": adopted, "restoreBeforeMomentId": deleted["moment"]["momentId"], "origin": "restore", "requestId": "restore-owner-undo"})).await;
+    let restore_retry = call_keyed(&transport, &handle, 610, "versionedText.write", "restore-owner-undo", json!({"versionId": "main", "path": path,
+        "text": adopted, "restoreBeforeMomentId": deleted["moment"]["momentId"], "origin": "restore"})).await;
     assert_eq!(restore_retry["deduped"], true);
     assert_eq!(
         restore_retry["moment"]["momentId"],
@@ -523,15 +530,17 @@ async fn accepted_response_native_owner_undo_syncs_and_history_restores() {
     assert_eq!(query["records"].as_array().unwrap().len(), 1);
     assert_eq!(query["records"][0]["id"], record_id);
     // Retrying the completed delete must preserve the owner's history restore.
-    let retry = call(
+    let retry = call_keyed(
         &transport,
         &handle,
         81,
         "versionedText.delete",
+        &request_id,
         delete_params,
     )
     .await;
     assert_eq!(retry["deduped"], true);
+    assert_eq!(retry["moment"]["momentId"], deleted["moment"]["momentId"]);
     assert_eq!(
         std::fs::read_to_string(owner_scratch.path().join(path)).unwrap(),
         adopted

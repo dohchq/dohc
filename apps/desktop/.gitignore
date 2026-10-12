@@ -9,5 +9,7 @@ resources/workspace-engine/
 resources/cli-bin/
 resources/app-compiler/
 resources/app-compiler.staging-*/
+resources/agent-probe/
+resources/agent-probe.staging-*/
 resources/app-backend-runtime/
 resources/app-backend-runtime.staging-*/

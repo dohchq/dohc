@@ -105,17 +105,17 @@ async fn write(
     text: &str,
     request_id: &str,
 ) -> Value {
-    call(
+    call_keyed(
         transport,
         handle,
         id,
         "versionedText.write",
+        request_id,
         json!({
             "versionId": "main",
             "path": path,
             "text": text,
             "origin": "api",
-            "requestId": request_id,
         }),
     )
     .await
@@ -356,11 +356,12 @@ async fn an_over_long_write_identifier_is_refused_by_name() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn text_mutations_persist_summary_and_correlation_metadata() {
     let (_scratch, transport, handle) = fixture("mutation-provenance").await;
-    let result = call(
+    let result = call_keyed(
         &transport,
         &handle,
         2,
         "versionedText.write",
+        "provenance-write-1",
         json!({
             "versionId": "main",
             "path": "provenance.md",
@@ -368,7 +369,6 @@ async fn text_mutations_persist_summary_and_correlation_metadata() {
             "origin": "local-file",
             "summary": "Updated provenance.md",
             "correlationId": "capture-pass-1",
-            "requestId": "provenance-write-1",
         }),
     )
     .await;
@@ -485,8 +485,8 @@ async fn text_write_enqueues_no_materialization_and_binary_write_enqueues_one() 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn published_text_write_materializes_to_disk() {
     let (scratch, transport, handle) = fixture("text-publish").await;
-    let text = call(&transport, &handle, 2, "versionedText.write", json!({
-        "versionId": "main", "path": "plain.md", "text": "published", "origin": "api", "publish": true, "requestId": "plain-1",
+    let text = call_keyed(&transport, &handle, 2, "versionedText.write", "plain-1", json!({
+        "versionId": "main", "path": "plain.md", "text": "published", "origin": "api", "publish": true,
     })).await;
     assert_eq!(text["materializeOutcome"], "applied");
     assert_eq!(
@@ -549,18 +549,31 @@ async fn binary_write_request_id_replays_once_and_rejects_mismatch() {
         "path": "ledger.bin",
         "bytes": [1, 2, 3],
         "origin": "api",
-        "requestId": "binary-ledger-request",
     });
-    let first = call(
+    let first = call_keyed(
         &transport,
         &handle,
         2,
         "versionedBinary.write",
+        "binary-ledger-request",
         params.clone(),
     )
     .await;
     assert_eq!(first["deduped"], false);
-    let replay = call(&transport, &handle, 3, "versionedBinary.write", params).await;
+    assert_eq!(
+        first["moment"]["momentId"],
+        "moment-b4bc81a538196a3ef18d08c4f62c44cb9e8ee79d9b2a72756274284e023194a4",
+        "the envelope key seeds the moment id"
+    );
+    let replay = call_keyed(
+        &transport,
+        &handle,
+        3,
+        "versionedBinary.write",
+        "binary-ledger-request",
+        params,
+    )
+    .await;
     assert_eq!(replay["deduped"], true);
     assert_eq!(replay["moment"]["momentId"], first["moment"]["momentId"]);
     assert_eq!(moments(&transport, &handle, 4).await.len(), 1);
@@ -568,17 +581,17 @@ async fn binary_write_request_id_replays_once_and_rejects_mismatch() {
     let mismatch = transport
         .call(
             RequestContext::unbounded(),
-            request(
+            keyed_request(
                 5,
                 "versionedBinary.write",
                 Some(handle.clone()),
+                "binary-ledger-request",
                 json!({
                     "versionId": "main",
                     "path": "ledger.bin",
                     "bytes": [9, 9, 9],
                     "origin": "api",
                     "momentId": "binary-ledger-moment",
-                    "requestId": "binary-ledger-request",
                 }),
             ),
         )
@@ -588,17 +601,17 @@ async fn binary_write_request_id_replays_once_and_rejects_mismatch() {
     let object_mismatch = transport
         .call(
             RequestContext::unbounded(),
-            request(
+            keyed_request(
                 6,
                 "versionedBinary.write",
                 Some(handle.clone()),
+                "binary-ledger-request",
                 json!({
                     "versionId": "main",
                     "objectId": "binary-ledger-object-flipped",
                     "path": "ledger.bin",
                     "bytes": [1, 2, 3],
                     "origin": "api",
-                    "requestId": "binary-ledger-request",
                 }),
             ),
         )
@@ -626,16 +639,16 @@ async fn capture_sized_text_write_succeeds_and_over_cap_refuses_before_commit() 
     let refused = transport
         .call(
             RequestContext::unbounded(),
-            request(
+            keyed_request(
                 6,
                 "versionedText.write",
                 Some(handle.clone()),
+                "too-big",
                 json!({
                     "versionId": "main",
                     "path": "too-big.md",
                     "text": "x".repeat(128 * 1024 + 1),
                     "origin": "api",
-                    "requestId": "too-big",
                 }),
             ),
         )
@@ -3881,11 +3894,12 @@ async fn request_id_replay_is_deduped_and_reuse_mismatch_is_refused() {
     let origin_flip = transport
         .call(
             RequestContext::unbounded(),
-            request(
+            keyed_request(
                 40,
                 "versionedText.write",
                 Some(handle.clone()),
-                json!({ "versionId": "main", "path": "id.md", "text": "same", "origin": "sync", "requestId": "stable-id" }),
+                "stable-id",
+                json!({ "versionId": "main", "path": "id.md", "text": "same", "origin": "sync" }),
             ),
         )
         .await
@@ -3894,16 +3908,94 @@ async fn request_id_replay_is_deduped_and_reuse_mismatch_is_refused() {
     let mismatch = transport
         .call(
             RequestContext::unbounded(),
-            request(
+            keyed_request(
                 5,
                 "versionedText.write",
                 Some(handle.clone()),
-                json!({ "versionId": "main", "path": "id.md", "text": "different", "origin": "api", "requestId": "stable-id" }),
+                "stable-id",
+                json!({ "versionId": "main", "path": "id.md", "text": "different", "origin": "api" }),
             ),
         )
         .await
         .expect_err("reuse mismatch");
     assert_eq!(mismatch.message, "idempotency-key-reuse-mismatch");
+}
+
+/// The envelope key is a mutation's only identity: a body `requestId`, equal
+/// to the key or not, is an unknown parameter on every versioned mutation.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn versioned_mutations_refuse_a_body_request_id_beside_the_envelope_key() {
+    let (_scratch, transport, handle) = fixture("body-request-id").await;
+    let seeded = write(&transport, &handle, 2, "seed.md", "seed", "body-seed").await;
+    let before = moments(&transport, &handle, 3).await.len();
+    let text = "body";
+    let sha256 = dohc_engine_storage::hex_sha256(text.as_bytes());
+    let encoded = base64::engine::general_purpose::STANDARD.encode(text.as_bytes());
+    let cases = [
+        (
+            "versionedText.write",
+            json!({ "versionId": "main", "path": "body.md", "text": text, "origin": "api" }),
+        ),
+        (
+            "versionedText.writeBlob",
+            json!({ "versionId": "main", "path": "body.md", "sha256": sha256, "bytesBase64": encoded, "origin": "api" }),
+        ),
+        (
+            "versionedBinary.write",
+            json!({ "versionId": "main", "path": "body.bin", "bytes": [1, 2], "origin": "api" }),
+        ),
+        (
+            "versionedBinary.writeBlob",
+            json!({ "versionId": "main", "path": "body.bin", "sha256": sha256, "bytesBase64": encoded, "origin": "api" }),
+        ),
+        (
+            "versionedText.rename",
+            json!({ "versionId": "main", "fromPath": "seed.md", "toPath": "moved.md", "origin": "api" }),
+        ),
+        (
+            "versionedText.delete",
+            json!({ "versionId": "main", "path": "seed.md", "origin": "api" }),
+        ),
+        (
+            "versionedText.rollback",
+            json!({ "versionId": "main", "path": "seed.md", "mutationMomentId": seeded["moment"]["momentId"], "origin": "restore" }),
+        ),
+        (
+            "versionedText.merge",
+            json!({ "path": "seed.md", "sourceVersionId": "main", "targetVersionId": "main", "origin": "api" }),
+        ),
+    ];
+    let accepted = cases[0].1.clone();
+    let mut id = 10;
+    for (method, params) in cases {
+        for body_key in ["body-key", "other-key"] {
+            id += 1;
+            let mut obsolete = params.clone();
+            obsolete["requestId"] = json!(body_key);
+            let refused = transport
+                .call(
+                    RequestContext::unbounded(),
+                    keyed_request(id, method, Some(handle.clone()), "body-key", obsolete),
+                )
+                .await
+                .expect_err("a body requestId is refused");
+            assert_eq!(refused.code, ErrorCode::InvalidParams, "{method}");
+            assert_eq!(refused.message, "invalid parameters", "{method}");
+        }
+    }
+    assert_eq!(moments(&transport, &handle, 100).await.len(), before);
+    // The refusals recorded nothing under the key it names.
+    let written = call_keyed(
+        &transport,
+        &handle,
+        101,
+        "versionedText.write",
+        "body-key",
+        accepted,
+    )
+    .await;
+    assert_eq!(written["deduped"], false);
+    assert_eq!(moments(&transport, &handle, 102).await.len(), before + 1);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -4025,17 +4117,17 @@ async fn origin_closed_set_rejects_capture_and_ydoc() {
         .into_iter()
         .enumerate()
     {
-        call(
+        call_keyed(
             &transport,
             &handle,
             2 + offset as u64,
             "versionedText.write",
+            &format!("accepted-{origin}"),
             json!({
                 "versionId": "main",
                 "path": format!("accepted-{origin}.md"),
                 "text": "x",
                 "origin": origin,
-                "requestId": format!("accepted-{origin}"),
             }),
         )
         .await;
@@ -4044,7 +4136,7 @@ async fn origin_closed_set_rejects_capture_and_ydoc() {
         let error = transport
             .call(
                 RequestContext::unbounded(),
-                request(id, "versionedText.write", Some(handle.clone()), json!({ "versionId": "main", "path": format!("{origin}.md"), "text": "x", "origin": origin, "requestId": format!("origin-{origin}") })),
+                keyed_request(id, "versionedText.write", Some(handle.clone()), &format!("origin-{origin}"), json!({ "versionId": "main", "path": format!("{origin}.md"), "text": "x", "origin": origin })),
             )
             .await
             .expect_err("reserved origin");
@@ -4201,11 +4293,13 @@ async fn empty_metadata_is_distinct_from_absent_in_mutation_fingerprints() {
     let mut initial = vec![
         (
             "versionedText.write",
-            json!({ "versionId": "main", "path": "write.md", "text": "x", "origin": "api", "requestId": "presence-write" }),
+            "presence-write",
+            json!({ "versionId": "main", "path": "write.md", "text": "x", "origin": "api" }),
         ),
         (
             "versionedBinary.write",
-            json!({ "versionId": "main", "path": "write.bin", "bytes": [1, 2], "origin": "api", "requestId": "presence-binary" }),
+            "presence-binary",
+            json!({ "versionId": "main", "path": "write.bin", "bytes": [1, 2], "origin": "api" }),
         ),
     ];
     write(
@@ -4228,19 +4322,22 @@ async fn empty_metadata_is_distinct_from_absent_in_mutation_fingerprints() {
     .await;
     initial.push((
         "versionedText.rename",
-        json!({ "versionId": "main", "fromPath": "rename.md", "toPath": "renamed.md", "origin": "api", "requestId": "presence-rename" }),
+        "presence-rename",
+        json!({ "versionId": "main", "fromPath": "rename.md", "toPath": "renamed.md", "origin": "api" }),
     ));
     initial.push((
         "versionedText.delete",
-        json!({ "versionId": "main", "path": "delete.md", "origin": "api", "requestId": "presence-delete" }),
+        "presence-delete",
+        json!({ "versionId": "main", "path": "delete.md", "origin": "api" }),
     ));
 
-    for (index, (method, params)) in initial.into_iter().enumerate() {
-        call(
+    for (index, (method, key, params)) in initial.into_iter().enumerate() {
+        call_keyed(
             &transport,
             &handle,
             10 + index as u64,
             method,
+            key,
             params.clone(),
         )
         .await;
@@ -4249,7 +4346,13 @@ async fn empty_metadata_is_distinct_from_absent_in_mutation_fingerprints() {
         let outcome = transport
             .call(
                 RequestContext::unbounded(),
-                request(30 + index as u64, method, Some(handle.clone()), changed),
+                keyed_request(
+                    30 + index as u64,
+                    method,
+                    Some(handle.clone()),
+                    key,
+                    changed,
+                ),
             )
             .await;
         assert!(
@@ -4264,7 +4367,13 @@ async fn empty_metadata_is_distinct_from_absent_in_mutation_fingerprints() {
         let outcome = transport
             .call(
                 RequestContext::unbounded(),
-                request(40 + index as u64, method, Some(handle.clone()), changed),
+                keyed_request(
+                    40 + index as u64,
+                    method,
+                    Some(handle.clone()),
+                    key,
+                    changed,
+                ),
             )
             .await;
         assert!(
@@ -4335,7 +4444,15 @@ async fn rename_is_one_moment_atomic_and_secret_floor_is_enforced() {
         "rename-seed",
     )
     .await;
-    let renamed = call(&transport, &handle, 3, "versionedText.rename", json!({ "versionId": "main", "fromPath": "old.md", "toPath": "new.md", "origin": "api", "requestId": "rename-1" })).await;
+    let renamed = call_keyed(
+        &transport,
+        &handle,
+        3,
+        "versionedText.rename",
+        "rename-1",
+        json!({ "versionId": "main", "fromPath": "old.md", "toPath": "new.md", "origin": "api" }),
+    )
+    .await;
     assert_eq!(renamed["moment"]["operation"], "rename");
     assert_eq!(renamed["moment"]["beforePath"], "old.md");
     assert!(renamed["before"].get("text").is_none());
@@ -4363,7 +4480,7 @@ async fn rename_is_one_moment_atomic_and_secret_floor_is_enforced() {
         "searchable"
     );
     assert_eq!(moments(&transport, &handle, 6).await.len(), 2);
-    let secret = transport.call(RequestContext::unbounded(), request(7, "versionedText.rename", Some(handle.clone()), json!({ "versionId": "main", "fromPath": "new.md", "toPath": ".env", "origin": "api", "requestId": "rename-secret" }))).await.expect_err("secret floor");
+    let secret = transport.call(RequestContext::unbounded(), keyed_request(7, "versionedText.rename", Some(handle.clone()), "rename-secret", json!({ "versionId": "main", "fromPath": "new.md", "toPath": ".env", "origin": "api" }))).await.expect_err("secret floor");
     assert_eq!(secret.message, "invalid-path");
 }
 
@@ -4371,20 +4488,23 @@ async fn rename_is_one_moment_atomic_and_secret_floor_is_enforced() {
 async fn rename_request_id_replay_is_deduped_and_reuse_mismatch_is_refused() {
     let (_scratch, transport, handle) = fixture("rename-request-id").await;
     write(&transport, &handle, 2, "old.md", "body", "rename-id-seed").await;
-    let params = json!({ "versionId": "main", "fromPath": "old.md", "toPath": "new.md", "origin": "api", "requestId": "rename-stable" });
-    let first = call(
+    let params =
+        json!({ "versionId": "main", "fromPath": "old.md", "toPath": "new.md", "origin": "api" });
+    let first = call_keyed(
         &transport,
         &handle,
         3,
         "versionedText.rename",
+        "rename-stable",
         params.clone(),
     )
     .await;
-    let replay = call(
+    let replay = call_keyed(
         &transport,
         &handle,
         4,
         "versionedText.rename",
+        "rename-stable",
         params.clone(),
     )
     .await;
@@ -4397,7 +4517,13 @@ async fn rename_request_id_replay_is_deduped_and_reuse_mismatch_is_refused() {
     let origin_flip = transport
         .call(
             RequestContext::unbounded(),
-            request(40, "versionedText.rename", Some(handle.clone()), flipped),
+            keyed_request(
+                40,
+                "versionedText.rename",
+                Some(handle.clone()),
+                "rename-stable",
+                flipped,
+            ),
         )
         .await
         .expect_err("rename provenance mismatch");
@@ -4406,7 +4532,7 @@ async fn rename_request_id_replay_is_deduped_and_reuse_mismatch_is_refused() {
     let mismatch = transport
         .call(
             RequestContext::unbounded(),
-            request(6, "versionedText.rename", Some(handle.clone()), json!({ "versionId": "main", "fromPath": "old.md", "toPath": "other.md", "origin": "api", "requestId": "rename-stable" })),
+            keyed_request(6, "versionedText.rename", Some(handle.clone()), "rename-stable", json!({ "versionId": "main", "fromPath": "old.md", "toPath": "other.md", "origin": "api" })),
         )
         .await
         .expect_err("rename reuse mismatch");
@@ -4430,12 +4556,13 @@ async fn delete_commits_without_a_disk_confirmation_gate() {
     // ANTI-REGRESSION: importing a desktop disk-confirm gate would make this DB-only delete block.
     let (_scratch, transport, handle) = fixture("delete").await;
     write(&transport, &handle, 2, "gone.md", "gone", "delete-seed").await;
-    let deleted = call(
+    let deleted = call_keyed(
         &transport,
         &handle,
         3,
         "versionedText.delete",
-        json!({ "versionId": "main", "path": "gone.md", "origin": "api", "requestId": "delete-1" }),
+        "delete-1",
+        json!({ "versionId": "main", "path": "gone.md", "origin": "api" }),
     )
     .await;
     assert_eq!(deleted["moment"]["operation"], "delete");
@@ -4458,20 +4585,22 @@ async fn delete_request_id_replay_is_deduped_and_reuse_mismatch_is_refused() {
     let (_scratch, transport, handle) = fixture("delete-request-id").await;
     write(&transport, &handle, 2, "gone.md", "gone", "delete-id-seed").await;
     write(&transport, &handle, 3, "keep.md", "keep", "delete-id-keep").await;
-    let params = json!({ "versionId": "main", "path": "gone.md", "origin": "api", "requestId": "delete-stable" });
-    let first = call(
+    let params = json!({ "versionId": "main", "path": "gone.md", "origin": "api" });
+    let first = call_keyed(
         &transport,
         &handle,
         4,
         "versionedText.delete",
+        "delete-stable",
         params.clone(),
     )
     .await;
-    let replay = call(
+    let replay = call_keyed(
         &transport,
         &handle,
         5,
         "versionedText.delete",
+        "delete-stable",
         params.clone(),
     )
     .await;
@@ -4484,7 +4613,13 @@ async fn delete_request_id_replay_is_deduped_and_reuse_mismatch_is_refused() {
     let origin_flip = transport
         .call(
             RequestContext::unbounded(),
-            request(40, "versionedText.delete", Some(handle.clone()), flipped),
+            keyed_request(
+                40,
+                "versionedText.delete",
+                Some(handle.clone()),
+                "delete-stable",
+                flipped,
+            ),
         )
         .await
         .expect_err("delete provenance mismatch");
@@ -4493,7 +4628,13 @@ async fn delete_request_id_replay_is_deduped_and_reuse_mismatch_is_refused() {
     let mismatch = transport
         .call(
             RequestContext::unbounded(),
-            request(7, "versionedText.delete", Some(handle.clone()), json!({ "versionId": "main", "path": "keep.md", "origin": "api", "requestId": "delete-stable" })),
+            keyed_request(
+                7,
+                "versionedText.delete",
+                Some(handle.clone()),
+                "delete-stable",
+                json!({ "versionId": "main", "path": "keep.md", "origin": "api" }),
+            ),
         )
         .await
         .expect_err("delete reuse mismatch");
@@ -4525,21 +4666,23 @@ async fn rollback_request_id_replay_is_a_no_op_and_reuse_mismatch_is_refused() {
     )
     .await;
     let mutation = write(&transport, &handle, 3, "doc.md", "after", "rollback-after").await;
-    let params = json!({ "versionId": "main", "path": "doc.md", "mutationMomentId": mutation["moment"]["momentId"], "origin": "restore", "requestId": "rollback-stable" });
-    let first = call(
+    let params = json!({ "versionId": "main", "path": "doc.md", "mutationMomentId": mutation["moment"]["momentId"], "origin": "restore" });
+    let first = call_keyed(
         &transport,
         &handle,
         4,
         "versionedText.rollback",
+        "rollback-stable",
         params.clone(),
     )
     .await;
     assert_eq!(first["deduped"], false);
-    let replay = call(
+    let replay = call_keyed(
         &transport,
         &handle,
         5,
         "versionedText.rollback",
+        "rollback-stable",
         params.clone(),
     )
     .await;
@@ -4552,7 +4695,13 @@ async fn rollback_request_id_replay_is_a_no_op_and_reuse_mismatch_is_refused() {
     let origin_flip = transport
         .call(
             RequestContext::unbounded(),
-            request(40, "versionedText.rollback", Some(handle.clone()), flipped),
+            keyed_request(
+                40,
+                "versionedText.rollback",
+                Some(handle.clone()),
+                "rollback-stable",
+                flipped,
+            ),
         )
         .await
         .expect_err("rollback provenance mismatch");
@@ -4561,7 +4710,7 @@ async fn rollback_request_id_replay_is_a_no_op_and_reuse_mismatch_is_refused() {
     let mismatch = transport
         .call(
             RequestContext::unbounded(),
-            request(7, "versionedText.rollback", Some(handle.clone()), json!({ "versionId": "main", "path": "doc.md", "mutationMomentId": before["moment"]["momentId"], "origin": "restore", "requestId": "rollback-stable" })),
+            keyed_request(7, "versionedText.rollback", Some(handle.clone()), "rollback-stable", json!({ "versionId": "main", "path": "doc.md", "mutationMomentId": before["moment"]["momentId"], "origin": "restore" })),
         )
         .await
         .expect_err("rollback reuse mismatch");
@@ -4701,30 +4850,33 @@ async fn leased_doc_rejects_write_rename_delete_and_rollback() {
         (
             4,
             "versionedText.write",
-            json!({ "versionId": "main", "path": "leased.md", "text": "blocked", "origin": "api", "requestId": "lease-write" }),
+            Some("lease-write"),
+            json!({ "versionId": "main", "path": "leased.md", "text": "blocked", "origin": "api" }),
         ),
         (
             5,
             "versionedText.rename",
-            json!({ "versionId": "main", "fromPath": "leased.md", "toPath": "other.md", "origin": "api", "requestId": "lease-rename" }),
+            Some("lease-rename"),
+            json!({ "versionId": "main", "fromPath": "leased.md", "toPath": "other.md", "origin": "api" }),
         ),
         (
             6,
             "versionedText.delete",
-            json!({ "versionId": "main", "path": "leased.md", "origin": "api", "requestId": "lease-delete" }),
+            Some("lease-delete"),
+            json!({ "versionId": "main", "path": "leased.md", "origin": "api" }),
         ),
         (
             7,
             "versionedText.rollback",
+            None,
             json!({ "versionId": "main", "path": "leased.md", "mutationMomentId": seed["moment"]["momentId"], "origin": "restore" }),
         ),
     ];
-    for (id, method, params) in calls {
+    for (id, method, key, params) in calls {
+        let mut leased = request(id, method, Some(handle.clone()), params);
+        leased.idempotency_key = key.map(str::to_owned);
         let error = transport
-            .call(
-                RequestContext::unbounded(),
-                request(id, method, Some(handle.clone()), params),
-            )
+            .call(RequestContext::unbounded(), leased)
             .await
             .expect_err("leased mutation");
         assert_eq!(error.message, "ydoc-session-busy", "{method}");
@@ -4754,16 +4906,16 @@ async fn absent_path_lease_uses_the_domain_canonical_path() {
     let error = transport
         .call(
             RequestContext::unbounded(),
-            request(
+            keyed_request(
                 3,
                 "versionedText.write",
                 Some(handle.clone()),
+                "canonical-lease-write",
                 json!({
                     "versionId": "main",
                     "path": "notes//draft.md",
                     "text": "must remain in the live editor",
                     "origin": "api",
-                    "requestId": "canonical-lease-write",
                 }),
             ),
         )
@@ -4793,17 +4945,17 @@ async fn rollback_rename_rejects_a_lease_on_the_restore_path() {
         "rollback-rename-seed",
     )
     .await;
-    let renamed = call(
+    let renamed = call_keyed(
         &transport,
         &handle,
         3,
         "versionedText.rename",
+        "rollback-rename-move",
         json!({
             "versionId": "main",
             "fromPath": "a.md",
             "toPath": "b.md",
             "origin": "api",
-            "requestId": "rollback-rename-move",
         }),
     )
     .await;
@@ -4870,10 +5022,18 @@ async fn fts_is_maintained_in_each_mutation_transaction() {
     .await;
     let hit = search(&transport, &handle, 3, "uniqueterm").await;
     assert!(!hit.as_array().expect("results").is_empty());
-    call(&transport, &handle, 4, "versionedText.rename", json!({ "versionId": "main", "fromPath": "alpha.md", "toPath": "beta.md", "origin": "api", "requestId": "fts-rename" })).await;
+    call_keyed(&transport, &handle, 4, "versionedText.rename", "fts-rename", json!({ "versionId": "main", "fromPath": "alpha.md", "toPath": "beta.md", "origin": "api" })).await;
     let renamed = search(&transport, &handle, 5, "uniqueterm").await;
     assert_eq!(renamed[0]["path"], "beta.md");
-    let deleted = call(&transport, &handle, 6, "versionedText.delete", json!({ "versionId": "main", "path": "beta.md", "origin": "api", "requestId": "fts-delete" })).await;
+    let deleted = call_keyed(
+        &transport,
+        &handle,
+        6,
+        "versionedText.delete",
+        "fts-delete",
+        json!({ "versionId": "main", "path": "beta.md", "origin": "api" }),
+    )
+    .await;
     let gone = search(&transport, &handle, 7, "uniqueterm").await;
     assert!(gone.as_array().expect("results").is_empty());
     call(&transport, &handle, 8, "versionedText.rollback", json!({ "versionId": "main", "path": "beta.md", "mutationMomentId": deleted["moment"]["momentId"], "origin": "restore" })).await;
@@ -4955,17 +5115,17 @@ async fn binary_rename_does_not_create_an_empty_fts_row() {
         json!({ "versionId": "main", "path": "old.bin", "bytes": [1], "origin": "api" }),
     )
     .await;
-    call(
+    call_keyed(
         &transport,
         &handle,
         3,
         "versionedText.rename",
+        "binary-rename-fts",
         json!({
             "versionId": "main",
             "fromPath": "old.bin",
             "toPath": "new.bin",
             "origin": "api",
-            "requestId": "binary-rename-fts",
         }),
     )
     .await;
@@ -4997,17 +5157,17 @@ async fn active_version_binary_rename_moves_the_materialized_disk_file() {
         json!({ "versionId": "main", "path": "old.bin", "bytes": bytes, "origin": "api" }),
     )
     .await;
-    call(
+    call_keyed(
         &transport,
         &handle,
         3,
         "versionedText.rename",
+        "binary-rename-disk",
         json!({
             "versionId": "main",
             "fromPath": "old.bin",
             "toPath": "new.bin",
             "origin": "api",
-            "requestId": "binary-rename-disk",
         }),
     )
     .await;
@@ -5030,16 +5190,16 @@ async fn active_version_binary_delete_removes_the_materialized_disk_file() {
     )
     .await;
     assert!(scratch.path().join("deleted.bin").exists());
-    call(
+    call_keyed(
         &transport,
         &handle,
         3,
         "versionedText.delete",
+        "binary-delete-disk",
         json!({
             "versionId": "main",
             "path": "deleted.bin",
             "origin": "api",
-            "requestId": "binary-delete-disk",
         }),
     )
     .await;
@@ -5072,17 +5232,17 @@ async fn inactive_version_binary_rename_and_delete_leave_the_working_tree_untouc
     )
     .await;
     let feature = named["id"].as_str().expect("feature id");
-    call(
+    call_keyed(
         &transport,
         &handle,
         4,
         "versionedText.rename",
+        "inactive-binary-rename",
         json!({
             "versionId": feature,
             "fromPath": "old.bin",
             "toPath": "new.bin",
             "origin": "api",
-            "requestId": "inactive-binary-rename",
         }),
     )
     .await;
@@ -5091,16 +5251,16 @@ async fn inactive_version_binary_rename_and_delete_leave_the_working_tree_untouc
         bytes
     );
     assert!(!scratch.path().join("new.bin").exists());
-    call(
+    call_keyed(
         &transport,
         &handle,
         5,
         "versionedText.delete",
+        "inactive-binary-delete",
         json!({
             "versionId": feature,
             "path": "new.bin",
             "origin": "api",
-            "requestId": "inactive-binary-delete",
         }),
     )
     .await;
@@ -5119,31 +5279,39 @@ async fn deduped_text_write_does_not_resurrect_a_moved_fts_row() {
         "path": "stale.md",
         "text": "unique-replay-term",
         "origin": "api",
-        "requestId": "fts-write-replay",
     });
-    call(
+    call_keyed(
         &transport,
         &handle,
         2,
         "versionedText.write",
+        "fts-write-replay",
         params.clone(),
     )
     .await;
-    call(
+    call_keyed(
         &transport,
         &handle,
         3,
         "versionedText.rename",
+        "fts-move",
         json!({
             "versionId": "main",
             "fromPath": "stale.md",
             "toPath": "current.md",
             "origin": "api",
-            "requestId": "fts-move",
         }),
     )
     .await;
-    let replay = call(&transport, &handle, 4, "versionedText.write", params).await;
+    let replay = call_keyed(
+        &transport,
+        &handle,
+        4,
+        "versionedText.write",
+        "fts-write-replay",
+        params,
+    )
+    .await;
     assert_eq!(replay["deduped"], true);
     let results = search(&transport, &handle, 5, "unique-replay-term").await;
     let paths: Vec<&str> = results
@@ -5164,39 +5332,40 @@ async fn replayed_binary_write_does_not_delete_live_text_fts_row() {
         "path": "replayed.md",
         "bytes": [1, 2, 3],
         "origin": "api",
-        "requestId": "earlier-binary-request",
     });
-    call(
+    call_keyed(
         &transport,
         &handle,
         2,
         "versionedBinary.write",
+        "earlier-binary-request",
         binary_params.clone(),
     )
     .await;
-    call(
+    call_keyed(
         &transport,
         &handle,
         3,
         "versionedText.write",
+        "newer-text-request",
         json!({
             "versionId": "main",
             "objectId": "replayed-object",
             "path": "replayed.md",
             "text": "live-text-search-needle",
             "origin": "api",
-            "requestId": "newer-text-request",
         }),
     )
     .await;
     let before = search(&transport, &handle, 4, "live-text-search-needle").await;
     assert_eq!(before[0]["path"], "replayed.md");
 
-    let replay = call(
+    let replay = call_keyed(
         &transport,
         &handle,
         5,
         "versionedBinary.write",
+        "earlier-binary-request",
         binary_params,
     )
     .await;
@@ -5381,7 +5550,7 @@ async fn merge_classifies_and_never_inlines_the_merged_body() {
     assert_eq!(compared["sourceVersionId"], "feature");
     assert_eq!(compared["current"]["text"], "base");
     assert_eq!(compared["incoming"]["text"], "incoming");
-    let merged = call(&transport, &handle, 3, "versionedText.merge", json!({ "path": "merge.md", "sourceVersionId": "feature", "targetVersionId": "main", "origin": "api", "requestId": "merge-1" })).await;
+    let merged = call_keyed(&transport, &handle, 3, "versionedText.merge", "merge-1", json!({ "path": "merge.md", "sourceVersionId": "feature", "targetVersionId": "main", "origin": "api" })).await;
     assert_eq!(merged["status"], "merged");
     assert!(merged["snapshot"].get("text").is_none());
     assert!(merged["moment"]["momentId"].is_string());
@@ -5411,41 +5580,41 @@ async fn merge_conflict_returns_the_exact_created_conflict_id() {
         .await
         .expect("open");
     let handle = serde_json::from_value(opened.result["workspace"].clone()).expect("handle");
-    call(
+    call_keyed(
         &transport,
         &handle,
         2,
         "versionedText.write",
+        "move-main",
         json!({
             "versionId": "main",
             "path": "merge.md",
             "text": "current",
-            "origin": "api",
-            "requestId": "move-main"
+            "origin": "api"
         }),
     )
     .await;
 
-    let merged = call(
+    let merged = call_keyed(
         &transport,
         &handle,
         3,
         "versionedText.merge",
+        "merge-conflict",
         json!({
             "path": "merge.md",
             "sourceVersionId": "feature",
             "targetVersionId": "main",
-            "origin": "api",
-            "requestId": "merge-conflict"
+            "origin": "api"
         }),
     )
     .await;
     assert_eq!(merged["status"], "conflict");
-    assert!(
-        merged["conflictId"].is_string(),
-        "merge returns its conflict id"
-    );
     let conflict_id = merged["conflictId"].as_str().unwrap();
+    assert_eq!(
+        conflict_id, "conflict-fa341f8985c16ecc102c610cc553a9eb0996d460bc9642f5a4587c00e9aac2cd",
+        "the envelope key seeds the conflict id"
+    );
     let conflicts = call(
         &transport,
         &handle,
@@ -5515,17 +5684,17 @@ async fn compare_and_merge_carry_a_binary_head_through_the_wire() {
     assert_eq!(compared["incoming"]["blobSha256"], sha256);
     assert_eq!(compared["incoming"]["byteLength"], 3);
 
-    let merged = call(
+    let merged = call_keyed(
         &transport,
         &handle,
         3,
         "versionedText.merge",
+        "binary-merge-wire",
         json!({
             "path": "asset.bin",
             "sourceVersionId": "feature",
             "targetVersionId": "main",
-            "origin": "api",
-            "requestId": "binary-merge-wire"
+            "origin": "api"
         }),
     )
     .await;
@@ -5556,17 +5725,17 @@ async fn compare_and_merge_carry_a_binary_head_through_the_wire() {
         }),
     )
     .await;
-    let conflicted = call(
+    let conflicted = call_keyed(
         &transport,
         &handle,
         5,
         "versionedText.merge",
+        "binary-merge-wire-conflict",
         json!({
             "path": "asset.bin",
             "sourceVersionId": "feature",
             "targetVersionId": "main",
-            "origin": "api",
-            "requestId": "binary-merge-wire-conflict"
+            "origin": "api"
         }),
     )
     .await;
@@ -5609,12 +5778,13 @@ async fn merge_request_id_replay_after_target_moves_returns_recorded_outcome() {
     let opened = transport.call(RequestContext::unbounded(), request(1, "workspace.open", None, json!({ "rootDir": scratch.path().to_string_lossy(), "workspaceId": "ws-rpcd-merge-request-id" }))).await.expect("open");
     let handle = serde_json::from_value(opened.result["workspace"].clone()).expect("handle");
     let before = moments(&transport, &handle, 2).await.len();
-    let params = json!({ "path": "merge.md", "sourceVersionId": "feature", "targetVersionId": "main", "origin": "api", "requestId": "merge-stable" });
-    let first = call(
+    let params = json!({ "path": "merge.md", "sourceVersionId": "feature", "targetVersionId": "main", "origin": "api" });
+    let first = call_keyed(
         &transport,
         &handle,
         3,
         "versionedText.merge",
+        "merge-stable",
         params.clone(),
     )
     .await;
@@ -5627,7 +5797,15 @@ async fn merge_request_id_replay_after_target_moves_returns_recorded_outcome() {
         "move-after-merge",
     )
     .await;
-    let replay = call(&transport, &handle, 5, "versionedText.merge", params).await;
+    let replay = call_keyed(
+        &transport,
+        &handle,
+        5,
+        "versionedText.merge",
+        "merge-stable",
+        params,
+    )
+    .await;
     assert_eq!(replay["deduped"], true);
     assert_eq!(replay["status"], first["status"]);
     assert_eq!(replay["moment"]["momentId"], first["moment"]["momentId"]);
@@ -5637,7 +5815,7 @@ async fn merge_request_id_replay_after_target_moves_returns_recorded_outcome() {
     let mismatch = transport
         .call(
             RequestContext::unbounded(),
-            request(7, "versionedText.merge", Some(handle.clone()), json!({ "path": "other.md", "sourceVersionId": "feature", "targetVersionId": "main", "origin": "api", "requestId": "merge-stable" })),
+            keyed_request(7, "versionedText.merge", Some(handle.clone()), "merge-stable", json!({ "path": "other.md", "sourceVersionId": "feature", "targetVersionId": "main", "origin": "api" })),
         )
         .await
         .expect_err("merge reuse mismatch");
@@ -5679,16 +5857,16 @@ async fn merge_rejects_a_request_id_recorded_by_a_text_write() {
     let error = transport
         .call(
             RequestContext::unbounded(),
-            request(
+            keyed_request(
                 3,
                 "versionedText.merge",
                 Some(handle),
+                "cross-kind-request",
                 json!({
                     "path": "merge.md",
                     "sourceVersionId": "feature",
                     "targetVersionId": "main",
                     "origin": "api",
-                    "requestId": "cross-kind-request",
                 }),
             ),
         )
@@ -5730,16 +5908,16 @@ async fn merge_on_a_leased_target_is_refused() {
     let error = transport
         .call(
             RequestContext::unbounded(),
-            request(
+            keyed_request(
                 3,
                 "versionedText.merge",
                 Some(handle.clone()),
+                "merge-leased",
                 json!({
                     "path": "merge.md",
                     "sourceVersionId": "feature",
                     "targetVersionId": "main",
                     "origin": "api",
-                    "requestId": "merge-leased",
                 }),
             ),
         )
@@ -5905,19 +6083,23 @@ async fn compare_files_pages_via_db_keyset_not_full_vector() {
                 )
                 .expect("one-sided write");
         }
-        versioned
-            .compare_version_files("ws-rpcd-keyset-compare", "feature", "main")
-            .expect("full oracle")
-            .into_iter()
-            .map(|change| {
-                let status = match change.status {
-                    VersionFileChangeStatus::Added => "added",
-                    VersionFileChangeStatus::Modified => "modified",
-                    VersionFileChangeStatus::Deleted => "deleted",
-                };
-                (change.path, status.to_owned())
-            })
-            .collect::<BTreeMap<_, _>>()
+        dohc_engine_testkit::version_comparison::compare_version_files(
+            &versioned,
+            "ws-rpcd-keyset-compare",
+            "feature",
+            "main",
+        )
+        .expect("full oracle")
+        .into_iter()
+        .map(|change| {
+            let status = match change.status {
+                VersionFileChangeStatus::Added => "added",
+                VersionFileChangeStatus::Modified => "modified",
+                VersionFileChangeStatus::Deleted => "deleted",
+            };
+            (change.path, status.to_owned())
+        })
+        .collect::<BTreeMap<_, _>>()
     };
 
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));
@@ -6072,8 +6254,12 @@ async fn over_cap_text_read_blob_hydrates_a_workspace_referenced_store_write() {
     write_root_binding(scratch.path(), TOKEN).expect("root binding");
     let workspace = "ws-rpcd-text-blob";
     let other_workspace = "ws-rpcd-text-blob-other";
+    let other_scratch = ScratchDir::new().expect("other workspace scratch");
     let db_path = scratch.path().join(".dohc/engine/engine.db");
-    std::fs::create_dir_all(db_path.parent().expect("engine dir")).expect("engine dir");
+    let other_db_path = other_scratch.path().join(".dohc/engine/engine.db");
+    for path in [&db_path, &other_db_path] {
+        std::fs::create_dir_all(path.parent().expect("engine dir")).expect("engine dir");
+    }
     let text = "x".repeat(128 * 1024 + 1);
     let sha256 = dohc_engine_storage::hex_sha256(text.as_bytes());
     let other_text = "referenced only by the other workspace";
@@ -6105,6 +6291,12 @@ async fn over_cap_text_read_blob_hydrates_a_workspace_referenced_store_write() {
                 &faults,
             )
             .expect("normal text write");
+    }
+    {
+        let mut store = EngineStore::open(&other_db_path, 1).expect("other store");
+        store.bind_root_token(TOKEN, &NoFaults).expect("bind token");
+        let faults = NoFaults;
+        let mut versioned = VersionedTextStore::new(&mut store);
         versioned
             .ensure_main_version(other_workspace, "main", 3, &faults)
             .expect("other main");
@@ -6127,6 +6319,24 @@ async fn over_cap_text_read_blob_hydrates_a_workspace_referenced_store_write() {
                 &faults,
             )
             .expect("other workspace text write");
+    }
+    // The other workspace's text reaches this root only as a raw payload:
+    // nothing versioned here references it.
+    {
+        let connection = rusqlite::Connection::open(&db_path).expect("sqlite");
+        connection
+            .execute(
+                "ATTACH DATABASE ?1 AS other_root",
+                [other_db_path.to_string_lossy().into_owned()],
+            )
+            .expect("attach other root");
+        let copied = connection
+            .execute(
+                "INSERT INTO blobs SELECT * FROM other_root.blobs WHERE sha256 = ?1",
+                [&other_sha],
+            )
+            .expect("copy unreferenced text payload");
+        assert_eq!(copied, 1);
     }
 
     let service = Arc::new(EngineService::new());
@@ -6214,7 +6424,7 @@ async fn over_cap_text_read_blob_hydrates_a_workspace_referenced_store_write() {
         request(
             6,
             "versionedText.readBlob",
-            Some(handle),
+            Some(handle.clone()),
             json!({ "workspaceId": workspace, "sha256": sha256 }),
         ),
     )
@@ -6222,6 +6432,28 @@ async fn over_cap_text_read_blob_hydrates_a_workspace_referenced_store_write() {
     .expect("historical over-cap text stays readable");
     let historical_egress = historical.blob_egress.expect("history egress");
     assert_eq!(historical_egress.bytes, text.as_bytes());
+
+    call(&transport, &handle, 7, "workspace.close", json!({})).await;
+    let connection = rusqlite::Connection::open(&db_path).expect("sqlite");
+    let (payloads, references): (i64, i64) = connection
+        .query_row(
+            "SELECT (SELECT COUNT(*) FROM blobs WHERE sha256 = ?1), \
+                    (SELECT COUNT(*) FROM snapshots WHERE blob_sha256 = ?1) + \
+                    (SELECT COUNT(*) FROM fork_base_snapshots WHERE blob_sha256 = ?1) + \
+                    (SELECT COUNT(*) FROM moments \
+                     WHERE after_blob_sha256 = ?1 OR before_blob_sha256 = ?1) + \
+                    (SELECT COUNT(*) FROM conflicts \
+                     WHERE base_blob_sha256 = ?1 OR current_blob_sha256 = ?1 \
+                        OR incoming_blob_sha256 = ?1)",
+            [&other_sha],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("count the refused payload and its references");
+    assert_eq!(
+        (payloads, references),
+        (1, 0),
+        "the refused text payload exists in this root without a reference"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -6502,17 +6734,17 @@ async fn read_blob_requires_a_reference_from_the_handle_workspace() {
         }),
     )
     .await;
-    let written = call(
+    let written = call_keyed(
         &transport,
         &handle_a,
         4,
         "versionedBinary.write",
+        "private-binary-write",
         json!({
             "versionId": named["id"],
             "path": "private.bin",
             "bytes": [4, 3, 2, 1],
             "origin": "api",
-            "requestId": "private-binary-write",
         }),
     )
     .await;
@@ -6593,18 +6825,38 @@ async fn read_blob_requires_a_reference_from_the_handle_workspace() {
     assert_eq!(conflict_happy["bytesBase64"], "CAYHBQMACQ==");
     call(&transport, &handle_a, 9, "workspace.close", json!({})).await;
 
+    // Workspace B owns its own root. A's snapshot and conflict payload bytes
+    // exist in B's blob table, but nothing versioned in B references them.
+    let scratch_b = ScratchDir::new().expect("workspace B scratch");
+    write_root_binding(scratch_b.path(), TOKEN).expect("workspace B root binding");
+    let db_path_b = scratch_b.path().join(".dohc/engine/engine.db");
+    let open_b = json!({
+        "rootDir": scratch_b.path().to_string_lossy(),
+        "workspaceId": "ws-rpcd-blob-scope-b",
+    });
+    let created_b = transport
+        .call(
+            RequestContext::unbounded(),
+            request(10, "workspace.open", None, open_b.clone()),
+        )
+        .await
+        .expect("create workspace B");
+    let created_b: WorkspaceHandle =
+        serde_json::from_value(created_b.result["workspace"].clone()).expect("workspace B handle");
+    call(&transport, &created_b, 11, "workspace.close", json!({})).await;
+    let connection = rusqlite::Connection::open(&db_path_b).expect("sqlite");
+    let snapshot_payload =
+        dohc_engine_storage::put_binary_blob(&connection, &[4, 3, 2, 1]).expect("snapshot payload");
+    assert_eq!(snapshot_payload, sha256.as_str().expect("snapshot sha"));
+    let conflict_payload = dohc_engine_storage::put_binary_blob(&connection, &conflict_bytes)
+        .expect("conflict payload");
+    assert_eq!(conflict_payload, conflict_sha);
+    drop(connection);
+
     let opened_b = transport
         .call(
             RequestContext::unbounded(),
-            request(
-                10,
-                "workspace.open",
-                None,
-                json!({
-                    "rootDir": scratch.path().to_string_lossy(),
-                    "workspaceId": "ws-rpcd-blob-scope-b",
-                }),
-            ),
+            request(12, "workspace.open", None, open_b),
         )
         .await
         .expect("open workspace B");
@@ -6614,7 +6866,7 @@ async fn read_blob_requires_a_reference_from_the_handle_workspace() {
         .call(
             RequestContext::unbounded(),
             request(
-                11,
+                13,
                 "versionedBinary.readBlob",
                 Some(handle_b.clone()),
                 json!({
@@ -6630,9 +6882,9 @@ async fn read_blob_requires_a_reference_from_the_handle_workspace() {
         .call(
             RequestContext::unbounded(),
             request(
-                12,
+                14,
                 "versionedBinary.readBlob",
-                Some(handle_b),
+                Some(handle_b.clone()),
                 json!({
                     "workspaceId": "ws-rpcd-blob-scope-b",
                     "sha256": conflict_sha,
@@ -6642,6 +6894,29 @@ async fn read_blob_requires_a_reference_from_the_handle_workspace() {
         .await
         .expect_err("workspace B must not read workspace A's conflict-only blob");
     assert_eq!(conflict_refused.message, "file-not-found");
+
+    call(&transport, &handle_b, 15, "workspace.close", json!({})).await;
+    let connection = rusqlite::Connection::open(&db_path_b).expect("sqlite");
+    let (payloads, references): (i64, i64) = connection
+        .query_row(
+            "SELECT (SELECT COUNT(*) FROM binary_blobs WHERE sha256 IN (?1, ?2)), \
+                    (SELECT COUNT(*) FROM snapshots WHERE binary_sha256 IN (?1, ?2)) + \
+                    (SELECT COUNT(*) FROM moments \
+                     WHERE after_binary_sha256 IN (?1, ?2) \
+                        OR before_binary_sha256 IN (?1, ?2)) + \
+                    (SELECT COUNT(*) FROM conflicts \
+                     WHERE base_binary_sha256 IN (?1, ?2) \
+                        OR current_binary_sha256 IN (?1, ?2) \
+                        OR incoming_binary_sha256 IN (?1, ?2))",
+            rusqlite::params![sha256.as_str().expect("snapshot sha"), conflict_sha],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("count B's payloads and references");
+    assert_eq!(
+        (payloads, references),
+        (2, 0),
+        "B holds both payloads without a reference to either"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -6934,17 +7209,17 @@ async fn a_resolved_binary_removal_reports_its_preimage_as_bytes() {
     )
     .await;
 
-    let merged = call(
+    let merged = call_keyed(
         &transport,
         &handle,
         3,
         "versionedText.merge",
+        "binary-removal-merge",
         json!({
             "path": "logo.png",
             "sourceVersionId": "feature",
             "targetVersionId": "main",
             "origin": "api",
-            "requestId": "binary-removal-merge",
         }),
     )
     .await;

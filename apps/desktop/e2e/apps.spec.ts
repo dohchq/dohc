@@ -154,7 +154,7 @@ test("@apps closes Preview options when a click lands in the preview", async () 
   }
 });
 
-test("@apps creates and opens the first app inside an existing app folder", async () => {
+test("@apps creates and opens the first app beside an existing app folder", async () => {
   const temp = await createTempWorkspace();
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
 
@@ -180,9 +180,11 @@ test("@apps creates and opens the first app inside an existing app folder", asyn
         .frameLocator('[data-testid="site-preview-frame"]')
         .getByRole("heading", { name: "My app" }),
     ).toBeVisible();
+    // A non-empty app/ stays as it was; the new app takes the next free name.
     await expect
-      .poll(() => readFile(path.join(temp.rootPath, "app", "index.html"), "utf8"))
+      .poll(() => readFile(path.join(temp.rootPath, "app-2", "index.html"), "utf8"))
       .toContain("<h1>My app</h1>");
+    expect(await readFile(path.join(temp.rootPath, "app", "notes.txt"), "utf8")).toBe("Keep this file.\n");
   } finally {
     await cleanupDesktopWorkspace(desktop, temp);
   }

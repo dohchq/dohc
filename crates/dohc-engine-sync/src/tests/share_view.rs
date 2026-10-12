@@ -4969,67 +4969,787 @@ fn only_the_file_moment_journal_reads_the_share_lane() {
     }
 }
 
-/// Which predicate each journal site reads.
-///
-/// This is a POSITION pin, and its limits are worth stating: it greps source
-/// TEXT, so it cannot see a call reached through an alias or a helper, and it
-/// says nothing about a site in a file it does not name. It is here because
-/// the behavioural version is not cheap — journaling a `ydoc.update` needs a
-/// live session settling with an exact lineage claim, which no share-view
-/// fixture in this repo builds. Its sibling above proves the two predicates
-/// genuinely disagree for a share view; this proves each site asks the one it
-/// should.
-///
-/// What it protects: a share carries the ops the share covers, so a
-/// `ydoc.update` journaled in a share view is a row nothing ever drains. The
-/// same holds for the conflict outbox and cursor advancement. A recovered
-/// FILE moment is the opposite case — an edit share can drain it through the
-/// proposal submit — so `ydoc_recovery` is pinned to the other predicate.
-#[test]
-fn the_ydoc_journal_reads_the_owner_lane_predicate() {
-    for (label, source, predicate) in [
-        (
-            "ydoc_apply",
-            include_str!("../ydoc_apply.rs"),
-            "workspace_replicates_with_relay_in_tx",
-        ),
-        (
-            "ydoc_origination",
-            include_str!("../ydoc_origination.rs"),
-            "can_originate_local_bases_in_tx",
-        ),
-        (
-            "conflict_outbox",
-            include_str!("../conflict_outbox.rs"),
-            "workspace_replicates_with_relay_in_tx",
-        ),
-        (
-            "cursor",
-            include_str!("../cursor.rs"),
-            "workspace_replicates_with_relay_in_tx",
-        ),
-    ] {
-        assert!(
-            source.contains(predicate),
-            "{label} must ask the OWNER-lane predicate",
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum JournalLane {
+    Owner,
+    EditShare,
+    Local,
+}
+
+fn journal_lane_store(lane: JournalLane) -> (ScratchDir, std::path::PathBuf, EngineStore) {
+    let (scratch, path, mut engine) = open_store();
+    VersionedTextStore::new(&mut engine)
+        .ensure_main_version("ws", "main", 1_000, &NoFaults)
+        .expect("main version");
+    if lane == JournalLane::EditShare {
+        seed_share_view_cursor(&mut engine, "share-journal");
+        assert_eq!(
+            record(&mut engine, "local"),
+            ShareViewIdentityOutcome::Recorded
         );
-        assert!(
-            !source.contains("workspace_journals_file_moments_in_tx"),
-            "{label} must NOT read the share lane — a share cannot \
-             carry what it journals, so the rows would never drain",
-        );
+    } else {
+        adopt_join_identity(
+            &mut engine,
+            "ws",
+            "local",
+            "epoch-share",
+            "stream-share",
+            1_000,
+            &NoFaults,
+        )
+        .expect("identity");
+        if lane == JournalLane::Owner {
+            crate::cursor::write_pushed_seq(
+                &mut engine,
+                "ws",
+                "local",
+                -1,
+                &NoFaults,
+                &NoLiveLeases,
+                1_001,
+            )
+            .expect("owner relay position");
+        }
     }
-    // The other direction. A recovered FILE moment is drainable by an edit
-    // share, so this site must ask the same question the ordinary moment
-    // journal asks. The two disagreeing would strand a recovered change the
-    // recipient can see and never send.
-    let recovery = include_str!("../ydoc_recovery.rs");
-    assert!(
-        recovery.contains("workspace_journals_file_moments_in_tx"),
-        "the recovery moment journal must read the share lane",
+    (scratch, path, engine)
+}
+
+fn local_lane_ops(engine: &EngineStore, kind: &str) -> Vec<ReplicationEnvelope> {
+    list_replication_ops(engine, "ws", "local", -1, MAX_PULL_OPS)
+        .expect("local operations")
+        .into_iter()
+        .filter(|op| op.op_kind == kind)
+        .collect()
+}
+
+/// A real fold must save the choice in every lane. Only an owner can send its Y.Doc update.
+#[test]
+fn resolution_fold_journals_a_ydoc_update_only_in_the_owner_lane() {
+    use dohc_engine_collab::{ContentKind, DocKey, Ydoc};
+
+    for lane in [
+        JournalLane::Owner,
+        JournalLane::EditShare,
+        JournalLane::Local,
+    ] {
+        for (point, committed) in [
+            (FaultPoint::StorageBeforePersist, false),
+            (FaultPoint::StorageAfterCommitBeforeAck, true),
+        ] {
+            let (_scratch, database, mut engine) = journal_lane_store(lane);
+            let path = "shared/docs/fold.md";
+            seed_text_head(&mut engine, "object-fold", path, "original");
+            let key = DocKey::new("ws", "main", "object-fold").unwrap();
+            let doc = Ydoc::wire();
+            doc.plaintext_insert(0, "original");
+            let claim = dohc_engine_storage::hex_sha256(&doc.encode_full_state());
+            dohc_engine_collab::claim_base(
+                &mut engine,
+                &key,
+                ContentKind::Plaintext,
+                &doc.encode_full_state(),
+                &NoFaults,
+                1_100,
+            )
+            .expect("exact lineage");
+            let fold = |engine: &mut EngineStore,
+                        faults: &dyn dohc_engine_storage::FaultInjector| {
+                engine.write_with(faults, |tx| {
+                    crate::ydoc_apply::fold_resolution_into_ydoc_in_tx(
+                        tx,
+                        "ws",
+                        "main",
+                        "object-fold",
+                        path,
+                        "chosen",
+                        1_200,
+                    )
+                })
+            };
+            let fault = ScriptedFaults::crash_at(point);
+            assert!(matches!(fold(&mut engine, fault.as_ref()).unwrap(),
+                TxnOutcome::Crashed { committed: actual } if actual == committed));
+            assert!(fault.fired());
+            drop(engine);
+            let mut engine = EngineStore::open(&database, 1_300).unwrap();
+            let projected = |engine: &EngineStore| {
+                dohc_engine_collab::load_persisted(engine, &key)
+                    .unwrap()
+                    .unwrap()
+                    .doc
+                    .project(ContentKind::Plaintext)
+                    .unwrap()
+                    .content
+            };
+            assert_eq!(
+                projected(&engine),
+                if committed { "chosen" } else { "original" }
+            );
+            assert_eq!(
+                local_lane_ops(&engine, "ydoc.update").len(),
+                usize::from(committed && lane == JournalLane::Owner)
+            );
+            assert!(matches!(
+                fold(&mut engine, &NoFaults).unwrap(),
+                TxnOutcome::Committed(())
+            ));
+            assert_eq!(projected(&engine), "chosen");
+            let ops = local_lane_ops(&engine, "ydoc.update");
+            assert_eq!(
+                ops.len(),
+                usize::from(lane == JournalLane::Owner),
+                "{lane:?}"
+            );
+            if let Some(op) = ops.first() {
+                assert_eq!(op.payload["lineageClaimId"], claim);
+                assert_eq!(op.payload["isBaseState"], false);
+                assert_eq!(op.payload["path"], path);
+                let bytes = engine
+                    .get_binary_blob(op.payload["updateBlobSha256"].as_str().unwrap())
+                    .unwrap()
+                    .unwrap();
+                doc.apply(&bytes).unwrap();
+                assert_eq!(
+                    doc.project(ContentKind::Plaintext).unwrap().content,
+                    "chosen"
+                );
+            }
+        }
+    }
+}
+
+fn journal_lane_conflict(
+    engine: &mut EngineStore,
+) -> crate::conflict_resolve_v1::BuiltConflictResolveV1 {
+    use crate::conflict_resolve_v1::*;
+
+    let current = "current";
+    let result = "result";
+    let current_sha = dohc_engine_storage::hex_sha256(current.as_bytes());
+    let result_sha = dohc_engine_storage::hex_sha256(result.as_bytes());
+    engine
+        .write_with(&NoFaults, |tx| {
+            for (sha, text) in [(&current_sha, current), (&result_sha, result)] {
+                tx.execute(
+                    "INSERT INTO blobs (sha256,byte_length,text) VALUES (?1,?2,?3)",
+                    params![sha, text.len() as i64, text],
+                )
+                .map_err(SyncError::persist)?;
+            }
+            Ok::<_, SyncError>(())
+        })
+        .unwrap();
+    let head = |moment: &str, sha: &str, text: &str, at_ms| {
+        HeadV1::Present(PresentHeadV1 {
+            path_ref: 0,
+            object_id: "object-conflict".to_owned(),
+            latest_moment_id: moment.to_owned(),
+            content_kind: HeadContentKindV1::Text,
+            blob_sha256: sha.to_owned(),
+            byte_length: text.len() as i64,
+            updated_at_ms: at_ms,
+        })
+    };
+    build_conflict_resolve_v1(ConflictResolveV1 {
+        workspace_id: "ws".to_owned(),
+        conflict_id: "conflict-journal".to_owned(),
+        chosen_from: ResolveChoiceV1::Incoming,
+        resolution: ResolutionV1::AppliedIncoming,
+        target_version_id: "main".to_owned(),
+        source_version_id: "peer-main".to_owned(),
+        paths: vec!["shared/docs/conflict.md".to_owned()],
+        current: head("moment-current", &current_sha, current, 10),
+        incoming: head("moment-incoming", &result_sha, result, 20),
+        result: head("moment-result", &result_sha, result, 30),
+        effect_context: EffectContextV1 {
+            recorded_at_ms: 30,
+            metadata: MetadataV1 {
+                origin: "api".to_owned(),
+                summary: None,
+                correlation_id: None,
+            },
+            author: None,
+            current_object_created_at_ms: Some(1),
+            result_object_created_at_ms: Some(1),
+        },
+        effects: vec![EffectV1 {
+            kind: EffectKindV1::Write,
+            moment_id: "moment-result".to_owned(),
+            payload_sha256: String::new(),
+        }],
+        lineage_transition: None,
+        exported_before: None,
+    })
+    .expect("validated conflict carrier")
+}
+
+/// Share cursors never enroll owner work. First owner contact must backfill a former share store.
+#[test]
+fn origination_and_conflict_outbox_wait_for_owner_contact_not_a_share_cursor() {
+    use dohc_engine_collab::{
+        ContentKind, DocKey, LocalAppend, MarkerCreation, Regime, WriterDocCache, Ydoc,
+    };
+
+    for lane in [
+        JournalLane::Owner,
+        JournalLane::EditShare,
+        JournalLane::Local,
+    ] {
+        for first_contact_is_push in [false, true] {
+            let (_scratch, database, mut engine) = journal_lane_store(lane);
+            let path = "shared/docs/unclaimed.md";
+            seed_text_head(&mut engine, "object-unclaimed", path, "draft");
+            let key = DocKey::new("ws", "main", "object-unclaimed").unwrap();
+            let doc = Ydoc::wire();
+            let update = doc.plaintext_insert(0, "draft");
+            dohc_engine_collab::record_local_update(
+                &mut engine,
+                &mut WriterDocCache::new(),
+                &key,
+                &update,
+                LocalAppend {
+                    marker: Some(MarkerCreation {
+                        path: Some(path),
+                        content_kind: ContentKind::Plaintext,
+                        regime: Regime::LocalOnly,
+                    }),
+                    ..Default::default()
+                },
+                &NoFaults,
+                1_100,
+                |_, _, _| Ok(()),
+            )
+            .unwrap();
+            let outcome = engine
+                .write_with(&NoFaults, |tx| {
+                    originate_ydoc_base_in_tx(tx, &key, path, None, None, 1_200)
+                })
+                .unwrap();
+            assert!(
+                matches!(
+                    outcome,
+                    TxnOutcome::Committed(BaseOrigination::Originated { .. })
+                ) == (lane == JournalLane::Owner)
+            );
+            if lane != JournalLane::Owner {
+                assert_eq!(outcome, TxnOutcome::Committed(BaseOrigination::NothingToDo));
+            }
+            let built = journal_lane_conflict(&mut engine);
+            let fault = ScriptedFaults::crash_at(FaultPoint::StorageAfterCommitBeforeAck);
+            assert!(matches!(
+                engine
+                    .write_with(fault.as_ref(), |tx| {
+                        crate::conflict_outbox::persist_local_conflict_resolve_v1_in_tx(
+                            tx, &built, 0,
+                        )
+                    })
+                    .unwrap(),
+                TxnOutcome::Crashed { committed: true }
+            ));
+            drop(engine);
+            let mut engine = EngineStore::open(&database, 1_300).unwrap();
+            let pending = |engine: &EngineStore| {
+                engine
+                .read_with(|conn| {
+                    conn.query_row(
+                        "SELECT COUNT(*) FROM replication_pending_conflict_bundles WHERE workspace_id='ws'",
+                        [],
+                        |row| row.get::<_, i64>(0),
+                    )
+                })
+                .unwrap()
+            };
+            assert_eq!(pending(&engine), i64::from(lane != JournalLane::Owner));
+            assert_eq!(
+                local_lane_ops(&engine, "conflict.resolve").len(),
+                usize::from(lane == JournalLane::Owner)
+            );
+            commit_share_cursor(
+                &mut engine,
+                "ws",
+                &ShareCursor {
+                    kind: CursorKind::ShareView,
+                    share_id: "share-journal".to_owned(),
+                    cursor: 7,
+                },
+                &NoFaults,
+            )
+            .unwrap();
+            assert_eq!(pending(&engine), i64::from(lane != JournalLane::Owner));
+            assert_eq!(
+                local_lane_ops(&engine, "ydoc.update").len(),
+                usize::from(lane == JournalLane::Owner)
+            );
+            assert_eq!(
+                local_lane_ops(&engine, "conflict.resolve").len(),
+                usize::from(lane == JournalLane::Owner)
+            );
+            if lane != JournalLane::Owner {
+                assert!(local_lane_ops(&engine, "moment.append").is_empty());
+                let marker = engine
+                    .read_with(|conn| dohc_engine_collab::read_marker_in(conn, &key))
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(
+                    marker.lineage_claim_status,
+                    dohc_engine_collab::LineageClaimStatus::Unclaimed
+                );
+            }
+            let owner_cursor = RelayCursor {
+                cursor: 5,
+                replication_epoch: "epoch-share".to_owned(),
+                stream_identity: "stream-share".to_owned(),
+                bootstrap_complete: true,
+                settlement_report_id: None,
+            };
+            let fault = ScriptedFaults::crash_at(FaultPoint::StorageAfterCommitBeforeAck);
+            let contact = if first_contact_is_push {
+                crate::cursor::write_pushed_seq(
+                    &mut engine,
+                    "ws",
+                    "local",
+                    -1,
+                    fault.as_ref(),
+                    &NoLiveLeases,
+                    1_400,
+                )
+            } else {
+                commit_relay_cursor(
+                    &mut engine,
+                    "ws",
+                    &owner_cursor,
+                    fault.as_ref(),
+                    &NoLiveLeases,
+                    1_400,
+                )
+            };
+            assert!(matches!(
+                contact.expect("owner contact"),
+                TxnOutcome::Crashed { committed: true }
+            ));
+            drop(engine);
+            let mut engine = EngineStore::open(&database, 1_500).unwrap();
+            if first_contact_is_push {
+                assert!(read_relay_cursor(&engine, "ws").unwrap().is_none());
+            } else {
+                assert_eq!(read_relay_cursor(&engine, "ws").unwrap().unwrap().cursor, 5);
+            }
+            assert_eq!(
+                read_share_cursor(&engine, "ws", "share-journal", CursorKind::ShareView).unwrap(),
+                7
+            );
+            assert_eq!(pending(&engine), 0);
+            let bases = local_lane_ops(&engine, "ydoc.update");
+            assert_eq!(bases.len(), 1);
+            let resolves = local_lane_ops(&engine, "conflict.resolve");
+            let shadows = local_lane_ops(&engine, "moment.append");
+            assert_eq!(resolves.len(), 1);
+            assert_eq!(shadows.len(), 1);
+            assert_eq!(shadows[0].origin_seq, resolves[0].origin_seq + 1);
+            assert_eq!(bases[0].payload["isBaseState"], true);
+            assert_eq!(resolves[0].payload, built.value);
+            assert_eq!(shadows[0].payload, built.validated.shadows[0]);
+            let before = list_replication_ops(&engine, "ws", "local", -1, MAX_PULL_OPS).unwrap();
+            commit_relay_cursor(
+                &mut engine,
+                "ws",
+                &owner_cursor,
+                &NoFaults,
+                &NoLiveLeases,
+                1_600,
+            )
+            .unwrap();
+            assert_eq!(
+                list_replication_ops(&engine, "ws", "local", -1, MAX_PULL_OPS).unwrap(),
+                before
+            );
+        }
+    }
+}
+
+#[test]
+fn inactive_recovery_update_journals_a_new_share_moment_after_initial_submission() {
+    use crate::ydoc_recovery::recover_inactive_projection_in_tx;
+    use dohc_engine_collab::{DocKey, Ydoc};
+
+    let (_scratch, _database, mut engine) = journal_lane_store(JournalLane::EditShare);
+    let key = DocKey::new("ws", "main", "object-inactive").unwrap();
+    let doc = Ydoc::wire();
+    doc.plaintext_insert(0, "saved draft");
+    let claim = engine.put_binary_blob(&doc.encode_full_state()).unwrap();
+    let initial_sha = dohc_engine_storage::hex_sha256(b"saved draft");
+    let TxnOutcome::Committed(()) = engine
+        .write_with(&NoFaults, |tx| {
+            recover_inactive_projection_in_tx(
+                tx,
+                &key,
+                "shared/docs/draft.md",
+                &claim,
+                "saved draft",
+                &dohc_engine_storage::hex_sha256(b""),
+                &claim,
+                None,
+                1_200,
+                None,
+            )
+        })
+        .unwrap()
+    else {
+        panic!("initial recovery crashed");
+    };
+    let (object_id, path): (String, String) = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT object_id, path FROM snapshots WHERE workspace_id='ws' \
+                 AND version_id='main' AND metadata_correlation_id LIKE 'ydoc-inactive-recovery:%'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+        })
+        .unwrap();
+    let initial = VersionedTextStore::new(&mut engine)
+        .read_text("ws", "main", &path)
+        .unwrap()
+        .unwrap();
+    assert_eq!(initial.blob_sha256, initial_sha);
+    let initial_moments = local_lane_ops(&engine, "moment.append");
+    assert_eq!(initial_moments.len(), 1);
+    assert_eq!(
+        initial_moments[0].payload["momentId"],
+        initial.latest_moment_id
     );
-    assert!(
-        !recovery.contains("workspace_replicates_with_relay_in_tx"),
-        "the recovery moment journal must not fall back to the owner lane",
+
+    // Advance the proposal cursor before updating so the first moment cannot carry the update.
+    let client = RelaySyncClient::new(PagedShareRelay::new([], []));
+    let grant = share_proposal::proposal_grant(ShareAccess::Edit);
+    let submitted = client
+        .submit_share_proposal(
+            &mut engine,
+            "ws",
+            "share-journal",
+            &grant,
+            "inactive-initial",
+            &NoFaults,
+            0,
+        )
+        .unwrap();
+    assert_eq!(submitted.submitted, 1);
+    assert!(submitted.proposal_id.is_some());
+    assert_eq!(client.transport().proposal_submits.lock().unwrap().len(), 1);
+    assert_eq!(
+        client.transport().blob_uploads.lock().unwrap()[0].bytes,
+        b"saved draft"
     );
+    let scanned_seq = |engine: &EngineStore| {
+        engine
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT scanned_seq FROM share_proposal_push_state \
+                     WHERE workspace_id='ws' AND share_id='share-journal'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+            })
+            .unwrap()
+    };
+    assert_eq!(scanned_seq(&engine), initial_moments[0].origin_seq);
+
+    let updated_text = "saved draft updated";
+    doc.plaintext_insert(11, " updated");
+    let state_sha = engine.put_binary_blob(&doc.encode_full_state()).unwrap();
+    assert_ne!(state_sha, claim);
+    let TxnOutcome::Committed(()) = engine
+        .write_with(&NoFaults, |tx| {
+            recover_inactive_projection_in_tx(
+                tx,
+                &key,
+                "shared/docs/draft.md",
+                &claim,
+                updated_text,
+                &initial_sha,
+                &state_sha,
+                None,
+                1_300,
+                None,
+            )
+        })
+        .unwrap()
+    else {
+        panic!("recovery update crashed");
+    };
+    let updated = VersionedTextStore::new(&mut engine)
+        .read_text("ws", "main", &path)
+        .unwrap()
+        .unwrap();
+    assert_eq!(updated.object_id, object_id);
+    assert_eq!(updated.path, path);
+    assert_eq!(updated.text, updated_text);
+    assert_ne!(updated.latest_moment_id, initial.latest_moment_id);
+    let recovery_count: i64 = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT COUNT(*) FROM snapshots WHERE workspace_id='ws' AND version_id='main' \
+                 AND metadata_correlation_id LIKE 'ydoc-inactive-recovery:%'",
+                [],
+                |row| row.get(0),
+            )
+        })
+        .unwrap();
+    assert_eq!(recovery_count, 1);
+    let moments = local_lane_ops(&engine, "moment.append");
+    assert_eq!(moments.len(), 2);
+    assert_eq!(moments[1].payload["momentId"], updated.latest_moment_id);
+    assert_eq!(moments[1].payload["objectId"], object_id);
+    assert!(moments[1].origin_seq > initial_moments[0].origin_seq);
+    assert!(local_lane_ops(&engine, "ydoc.update").is_empty());
+
+    let submitted = client
+        .submit_share_proposal(
+            &mut engine,
+            "ws",
+            "share-journal",
+            &grant,
+            "inactive-updated",
+            &NoFaults,
+            0,
+        )
+        .unwrap();
+    assert_eq!(submitted.submitted, 1);
+    assert!(submitted.proposal_id.is_some());
+    assert_eq!(scanned_seq(&engine), moments[1].origin_seq);
+    let submits = client.transport().proposal_submits.lock().unwrap();
+    assert_eq!(submits.len(), 2);
+    assert_eq!(submits[1].ops.len(), 1);
+    let change = &submits[1].ops[0];
+    assert_eq!(change.operation, "write");
+    assert_eq!(change.based_on_path.as_deref(), Some(path.as_str()));
+    assert_eq!(
+        change.based_on_blob_sha256.as_deref(),
+        Some(initial_sha.as_str())
+    );
+    assert_eq!(change.after_path.as_deref(), Some(path.as_str()));
+    assert_eq!(
+        change.after_blob_sha256.as_deref(),
+        Some(updated.blob_sha256.as_str())
+    );
+    assert_eq!(change.after_content_kind.as_deref(), Some("text"));
+    assert_eq!(change.after_byte_length, Some(updated_text.len() as i64));
+    let uploads = client.transport().blob_uploads.lock().unwrap();
+    assert_eq!(uploads.len(), 2);
+    assert_eq!(uploads[1].bytes, updated_text.as_bytes());
+}
+
+#[test]
+fn recovered_share_file_moment_survives_restart_and_submits_within_its_grant() {
+    use crate::ydoc_recovery::{RecoveryEnvelopeBinding, recover_lineage_in_tx};
+    use dohc_engine_collab::{DocKey, Ydoc};
+
+    for lane in [
+        JournalLane::Owner,
+        JournalLane::EditShare,
+        JournalLane::Local,
+    ] {
+        for (point, committed) in [
+            (FaultPoint::StorageBeforePersist, false),
+            (FaultPoint::StorageAfterCommitBeforeAck, true),
+        ] {
+            let (_scratch, database, mut engine) = journal_lane_store(lane);
+            let key = DocKey::new("ws", "main", "object-recovery").unwrap();
+            let losing_doc = Ydoc::wire();
+            losing_doc.plaintext_insert(0, "saved draft");
+            let losing = engine
+                .put_binary_blob(&losing_doc.encode_full_state())
+                .unwrap();
+            let incoming_doc = Ydoc::wire();
+            incoming_doc.plaintext_insert(0, "remote winner");
+            let incoming = engine
+                .put_binary_blob(&incoming_doc.encode_full_state())
+                .unwrap();
+            let binding = RecoveryEnvelopeBinding {
+                content_kind: "plaintext",
+                update_blob_sha256: &incoming,
+                lineage_claim_id: &incoming,
+                is_base_state: true,
+            };
+            let recover =
+                |engine: &mut EngineStore, faults: &dyn dohc_engine_storage::FaultInjector| {
+                    engine.write_with(faults, |tx| {
+                        recover_lineage_in_tx(
+                            tx,
+                            &key,
+                            "shared/docs/draft.md",
+                            binding.clone(),
+                            &losing,
+                            "saved draft",
+                            None,
+                            "remote",
+                            0,
+                            1_200,
+                            None,
+                        )
+                    })
+                };
+            let fault = ScriptedFaults::crash_at(point);
+            assert!(matches!(recover(&mut engine, fault.as_ref()).unwrap(),
+                TxnOutcome::Crashed { committed: actual } if actual == committed));
+            drop(engine);
+            let mut engine = EngineStore::open(&database, 1_300).unwrap();
+            assert_eq!(
+                local_lane_ops(&engine, "moment.append").len(),
+                usize::from(committed && lane != JournalLane::Local)
+            );
+            let TxnOutcome::Committed(created) = recover(&mut engine, &NoFaults).unwrap() else {
+                panic!("recovery retry crashed");
+            };
+            assert_eq!(
+                recover(&mut engine, &NoFaults).unwrap(),
+                TxnOutcome::Committed(created.clone())
+            );
+            let moments = local_lane_ops(&engine, "moment.append");
+            assert_eq!(moments.len(), usize::from(lane != JournalLane::Local));
+            assert!(local_lane_ops(&engine, "ydoc.update").is_empty());
+            let counts: (i64, i64, i64) = engine
+                .read_with(|conn| {
+                    Ok::<_, rusqlite::Error>((
+                        conn.query_row("SELECT COUNT(*) FROM ydoc_recovery_decisions", [], |r| {
+                            r.get(0)
+                        })?,
+                        conn.query_row(
+                            "SELECT COUNT(*) FROM moments WHERE moment_id=?1",
+                            [&created.moment_id],
+                            |r| r.get(0),
+                        )?,
+                        conn.query_row(
+                            "SELECT COUNT(*) FROM materialization_jobs WHERE target_path=?1",
+                            [&created.path],
+                            |r| r.get(0),
+                        )?,
+                    ))
+                })
+                .unwrap();
+            assert_eq!(counts, (1, 1, 1));
+            let forged = engine.write_with(&NoFaults, |tx| {
+                recover_lineage_in_tx(
+                    tx,
+                    &key,
+                    "shared/docs/draft.md",
+                    RecoveryEnvelopeBinding {
+                        lineage_claim_id: &losing,
+                        ..binding.clone()
+                    },
+                    &losing,
+                    "saved draft",
+                    None,
+                    "remote",
+                    0,
+                    1_200,
+                    None,
+                )
+            });
+            assert!(matches!(forged, Err(SyncError::CoordinateDiverged)));
+            if lane != JournalLane::EditShare {
+                continue;
+            }
+            assert_eq!(moments[0].payload["momentId"], created.moment_id);
+            let client = RelaySyncClient::new(PagedShareRelay::new([], []));
+            for (share, grant) in [
+                (
+                    "outside",
+                    ShareGrant {
+                        paths: vec!["private".to_owned()],
+                        version_id: None,
+                        access: ShareAccess::Edit,
+                    },
+                ),
+                (
+                    "version",
+                    ShareGrant {
+                        paths: vec![],
+                        version_id: Some("other".to_owned()),
+                        access: ShareAccess::Edit,
+                    },
+                ),
+            ] {
+                assert_eq!(
+                    client
+                        .submit_share_proposal(
+                            &mut engine,
+                            "ws",
+                            share,
+                            &grant,
+                            "excluded",
+                            &NoFaults,
+                            0
+                        )
+                        .unwrap()
+                        .submitted,
+                    0
+                );
+            }
+            assert!(client.transport().proposal_calls.lock().unwrap().is_empty());
+            let grant = share_proposal::proposal_grant(ShareAccess::Edit);
+            let outcome = client
+                .submit_share_proposal(
+                    &mut engine,
+                    "ws",
+                    "share-journal",
+                    &grant,
+                    "recovered-submit",
+                    &NoFaults,
+                    0,
+                )
+                .unwrap();
+            assert_eq!(outcome.submitted, 1);
+            assert!(outcome.proposal_id.is_some());
+            let submits = client.transport().proposal_submits.lock().unwrap();
+            assert_eq!(submits.len(), 1);
+            assert_eq!(submits[0].ops.len(), 1);
+            let change = &submits[0].ops[0];
+            assert_eq!(change.operation, "write");
+            assert_eq!(change.based_on_path, None);
+            assert_eq!(change.based_on_blob_sha256, None);
+            assert_eq!(change.after_path.as_deref(), Some(created.path.as_str()));
+            let sha = dohc_engine_storage::hex_sha256(b"saved draft");
+            assert_eq!(change.after_blob_sha256.as_deref(), Some(sha.as_str()));
+            assert_eq!(change.after_content_kind.as_deref(), Some("text"));
+            assert_eq!(change.after_byte_length, Some(11));
+            assert_eq!(
+                client.transport().proposal_calls.lock().unwrap().as_slice(),
+                [format!("blob:{sha}"), "submit".to_owned()]
+            );
+            assert_eq!(
+                client.transport().blob_uploads.lock().unwrap()[0]
+                    .bytes
+                    .as_slice(),
+                b"saved draft"
+            );
+            let scanned: i64 = engine.read_with(|conn| {
+                conn.query_row(
+                    "SELECT scanned_seq FROM share_proposal_push_state WHERE workspace_id='ws' AND share_id='share-journal'",
+                    [], |row| row.get(0),
+                )
+            }).unwrap();
+            assert_eq!(scanned, moments[0].origin_seq);
+            drop(submits);
+            drop(engine);
+            let mut engine = EngineStore::open(&database, 1_400).unwrap();
+            assert_eq!(
+                client
+                    .submit_share_proposal(
+                        &mut engine,
+                        "ws",
+                        "share-journal",
+                        &grant,
+                        "recovered-again",
+                        &NoFaults,
+                        0
+                    )
+                    .unwrap()
+                    .submitted,
+                0
+            );
+            assert_eq!(client.transport().proposal_submits.lock().unwrap().len(), 1);
+            assert!(local_lane_ops(&engine, "ydoc.update").is_empty());
+        }
+    }
 }
