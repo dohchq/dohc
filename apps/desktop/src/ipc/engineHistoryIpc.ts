@@ -72,7 +72,7 @@ function authorLabel(author: MomentAuthor, names: EngineMomentAuthorNames): stri
     case "human": return author.humanName ?? names.person(author) ?? "Another person";
     case "named": return names.named(author);
     case "link": return "publicPrincipalId" in author ? `Link holder ${author.label}` : `Edit link · holder ${author.principalId.slice(0, 8)}`;
-    case "public": return `Link holder ${author.principalId}`;
+    case "public": return `Edit link · holder ${author.principalId.replace(/^public_/, "").slice(0, 8)}`;
     case "automation": {
       const automation = names.automation(author.automationId);
       if (!automation) return "Automation";
