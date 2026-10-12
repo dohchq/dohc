@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { EngineDaemonUnavailableError } from "@dohc/workspace-engine-client/daemon";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { createCodeLocations } from "../crashReports/crashReport";
 import type { Reporting } from "./reportingConfig";
 import { CHANNELS } from "../ipc/channels";
@@ -12,13 +12,27 @@ import { createTelemetry, privacyInEffect, rateLimitMs, REPORT_LIMITS, usageEven
 const INSTALL = resolve("dohc-install", "Programs", "dohc");
 const BUNDLE = join(INSTALL, "resources", "app.asar", "dist", "main", "App-Ab12.js");
 const SECRET = "Secret Trip Plans";
+const KEY = "phc_abcdefghij0123";
 const REPORTING: Reporting = {
-  usage: { url: new URL("https://ph.example.test/batch/"), key: "phc_abcdefghij0123" },
-  errors: { url: new URL("https://sentry.example.test/api/42/envelope/"), publicKey: "abcdef0123456789abcdef0123456789" },
-  release: "dohc-desktop@1.2.3",
+  usage: { url: new URL("https://ph.example.test/batch/"), key: KEY },
+  errors: { host: "https://ph.example.test", key: KEY },
   dist: "win-x64",
-  environment: "latest",
 };
+// The chunk IDs `posthog-cli sourcemap inject` 0.18.10 wrote into a main and
+// a renderer file: its snippet first, its trailer last.
+const MAIN_CHUNK = "0192f5b8-7c3a-5e1d-9a2b-3c4d5e6f7a8b";
+const RENDERER_CHUNK = "1a2b3c4d-5e6f-5a7b-8c9d-0e1f2a3b4c5d";
+const injected = (chunkId: string) =>
+  `!function(){try{var e="undefined"!=typeof window?window:"undefined"!=typeof global?global:"undefined"!=typeof globalThis?globalThis:"undefined"!=typeof self?self:{},n=(new e.Error).stack;n&&(e._posthogChunkIds=e._posthogChunkIds||{},e._posthogChunkIds[n]="${chunkId}")}catch(e){}}();export const x=1;\n\n//# chunkId=${chunkId}`;
+const CODE: Record<string, string> = {
+  "/resources/app.asar/dist/main/App-Ab12.js": injected(MAIN_CHUNK),
+  "/resources/app.asar/dist/renderer/assets/Index-AbC9.js": injected(RENDERER_CHUNK),
+};
+const readCode = vi.fn(async (path: string) => {
+  const text = CODE[path.replaceAll("\\", "/")];
+  if (text === undefined) throw new Error(`ENOENT ${path}`);
+  return text;
+});
 const ON = { usageReports: true, errorReports: true };
 const OFF = { usageReports: false, errorReports: false };
 
@@ -29,8 +43,15 @@ let calls: Call[];
 let nowMs: number;
 let respond: (call: Call) => Promise<Response>;
 
+// The SDK loads with the first error report; loading it here keeps that
+// from waiting on disk while the tests run fake timers.
+beforeAll(async () => {
+  await import("./posthogErrors");
+});
+
 beforeEach(() => {
   vi.useFakeTimers();
+  readCode.mockClear();
   dir = mkdtempSync(join(tmpdir(), "dohc-reports-"));
   calls = [];
   nowMs = Date.UTC(2026, 9, 7);
@@ -46,6 +67,7 @@ const FACTS = () => ({
   atMs: nowMs, version: "1.2.3", channel: "latest", os: "Windows_NT", osVersion: "10.0.22631",
   arch: "x64", electron: "43.3.0",
 });
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 const statePath = () => join(dir, "reporting.json");
 const savedState = () => JSON.parse(readFileSync(statePath(), "utf8")) as Record<string, unknown>;
@@ -60,6 +82,7 @@ function telemetry(
     statePath: statePath(),
     facts: FACTS,
     locate: createCodeLocations([INSTALL], process.platform),
+    readCode,
     ...overrides,
     fetch: (async (url: URL | RequestInfo, init?: RequestInit) => {
       const call = { url: String(url), init: init ?? {} };
@@ -81,9 +104,34 @@ const settle = () => vi.advanceTimersByTimeAsync(REPORT_LIMITS.usageFlushMs);
 const anError = (name = "TypeError") =>
   ({ kind: "renderer", origin: "uncaught", error: { name, stack: "" } }) as const;
 
-const usageCalls = () => calls.filter((call) => call.url.startsWith("https://ph.example.test/"));
-const errorCalls = () => calls.filter((call) => call.url.startsWith("https://sentry.example.test/"));
-const envelopeEvent = (call: Call) => JSON.parse(String(call.init.body).split("\n")[2]!) as Record<string, unknown>;
+interface SentEvent {
+  event: string;
+  distinct_id: string;
+  properties: Record<string, unknown>;
+  timestamp: string;
+  uuid?: string;
+}
+interface SentFrame {
+  filename: string;
+  function: string;
+  lineno?: number;
+  colno?: number;
+  in_app: boolean;
+  chunk_id?: string;
+  platform: string;
+}
+interface SentException {
+  type: string;
+  value: string;
+  mechanism: Record<string, unknown>;
+  stacktrace?: { type: string; frames: SentFrame[] };
+}
+const sentBody = (call: Call) => JSON.parse(String(call.init.body)) as { api_key: string; batch: SentEvent[] } & Record<string, unknown>;
+const isErrorCall = (call: Call) => sentBody(call).batch.some((event) => event.event === "$exception");
+const usageCalls = () => calls.filter((call) => !isErrorCall(call));
+const errorCalls = () => calls.filter(isErrorCall);
+const exceptionEvent = (call: Call) => sentBody(call).batch[0]!;
+const exceptions = (call: Call) => exceptionEvent(call).properties.$exception_list as SentException[];
 
 function privateError(): Error {
   const cause = Object.assign(new Error(`could not read C:\\Users\\sam\\${SECRET}.md`), { code: "ENOENT", path: SECRET });
@@ -516,7 +564,14 @@ describe("reports at quit", () => {
 });
 
 describe("what an error report holds", () => {
-  it("leaves out messages, private paths, and frames outside dohc", async () => {
+  const { _posthogReleaseId: releaseBefore } = globalThis as { _posthogReleaseId?: unknown };
+  afterEach(() => {
+    (globalThis as { _posthogReleaseId?: unknown })._posthogReleaseId = releaseBefore;
+    vi.unstubAllEnvs();
+  });
+
+  it("sends PostHog only allowlisted facts, through one request per problem", async () => {
+    const listeners = ["uncaughtException", "unhandledRejection"].map((name) => process.listenerCount(name));
     const reports = shown();
     reports.setPrivacy(ON);
     reports.reportError({ kind: "crash", event: { kind: "main-exception", error: privateError(), origin: "uncaughtException" } });
@@ -531,29 +586,81 @@ describe("what an error report holds", () => {
       expect(body).not.toContain(SECRET);
       expect(body).not.toContain("sam");
       expect(body).not.toMatch(/Users/i);
-      expect(new Headers(call.init.headers).get("x-sentry-auth"))
-        .toBe("Sentry sentry_version=7, sentry_key=abcdef0123456789abcdef0123456789, sentry_client=dohc-desktop/1");
+      expect(body).not.toContain(INSTALL_ID);
+      expect(call.url).toBe("https://ph.example.test/batch/");
+      expect(call.init.method).toBe("POST");
       expect(call.init.redirect).toBe("error");
+      expect(new Headers(call.init.headers).get("content-encoding")).toBeNull();
+      expect(Object.keys(sentBody(call)).sort()).toEqual(["api_key", "batch", "sent_at"]);
+      expect(sentBody(call).api_key).toBe(KEY);
+      expect(sentBody(call).batch).toHaveLength(1);
+      const event = exceptionEvent(call);
+      expect(Object.keys(event).sort()).toEqual(["distinct_id", "event", "properties", "timestamp", "uuid"]);
+      // A new random ID for each problem, never the installation's.
+      expect(event.distinct_id).toMatch(UUID);
+      expect(event.timestamp).toBe(new Date(nowMs).toISOString());
+      expect(event.properties).toMatchObject({
+        $process_person_profile: false, $geoip_disable: true, $exception_level: "error", $lib: "posthog-node",
+        app_version: "1.2.3", channel: "latest", dist: "win-x64", os: "Windows_NT", os_version: "10.0.22631",
+        arch: "x64", electron: "43.3.0",
+      });
     }
-    const event = envelopeEvent(errorCalls()[0]!);
-    expect(Object.keys(event).sort()).toEqual([
-      "contexts", "dist", "environment", "event_id", "exception", "level", "platform", "release", "tags", "timestamp",
+    expect(exceptionEvent(errorCalls()[0]!).distinct_id).not.toBe(exceptionEvent(errorCalls()[1]!).distinct_id);
+    // Nothing installed a handler of its own.
+    expect(["uncaughtException", "unhandledRejection"].map((name) => process.listenerCount(name))).toEqual(listeners);
+
+    const main = exceptionEvent(errorCalls()[0]!);
+    expect(Object.keys(main.properties).sort()).toEqual([
+      "$exception_level", "$exception_list", "$geoip_disable", "$is_server", "$lib", "$lib_version",
+      "$process_person_profile", "app_version", "arch", "channel", "dist", "electron", "origin", "os", "os_version", "process",
     ]);
-    expect(event).toMatchObject({ platform: "node", release: "dohc-desktop@1.2.3", dist: "win-x64", tags: { process: "main", origin: "uncaughtException" } });
-    const values = (event.exception as { values: Array<{ type: string; value: string; stacktrace?: { frames: unknown[] } }> }).values;
-    // The cause comes first, then the error, and its oldest call first.
-    expect(values.map(({ type, value }) => [type, value])).toEqual([
-      ["Error", "<message withheld> (code ENOENT)"],
-      ["TypeError", "<message withheld>"],
+    expect(main.properties).toMatchObject({ process: "main", origin: "uncaughtException" });
+    // The error comes first, then its cause; each stack runs oldest call first.
+    const app = (lineno: number, colno: number) => ({
+      filename: "app:///dist/main/App-Ab12.js", function: "?", lineno, colno, in_app: true, chunk_id: MAIN_CHUNK, platform: "node:javascript",
+    });
+    const withheld = { filename: "<withheld>", function: "?", in_app: false, platform: "node:javascript" };
+    expect(exceptions(errorCalls()[0]!)).toEqual([
+      {
+        type: "TypeError", value: "<message withheld>",
+        mechanism: { type: "generic", handled: true, synthetic: false, exception_id: 0 },
+        stacktrace: { type: "raw", frames: [app(3, 4), withheld, app(10, 20)] },
+      },
+      {
+        type: "Error", value: "<message withheld> (code ENOENT)",
+        mechanism: { type: "chained", source: "cause", synthetic: false, exception_id: 1, parent_id: 0 },
+        stacktrace: { type: "raw", frames: [withheld] },
+      },
     ]);
-    expect(values[1]!.stacktrace!.frames).toEqual([
-      { filename: "app:///dist/main/App-Ab12.js", abs_path: "app:///dist/main/App-Ab12.js", lineno: 3, colno: 4, in_app: true },
-      { filename: "<withheld>", in_app: false },
-      { filename: "app:///dist/main/App-Ab12.js", abs_path: "app:///dist/main/App-Ab12.js", lineno: 10, colno: 20, in_app: true },
-    ]);
-    const renderer = envelopeEvent(errorCalls()[1]!);
-    expect(renderer).toMatchObject({ tags: { process: "renderer", origin: "boundary" } });
-    expect((renderer.exception as { values: Array<{ type: string }> }).values[0]!.type).toBe("<withheld>");
+    const renderer = errorCalls()[1]!;
+    expect(exceptionEvent(renderer).properties).toMatchObject({ process: "renderer", origin: "boundary" });
+    expect(exceptions(renderer)).toEqual([{
+      type: "<withheld>", value: "<message withheld>",
+      mechanism: { type: "generic", handled: true, synthetic: false, exception_id: 0 },
+      stacktrace: { type: "raw", frames: [app(5, 6), withheld] },
+    }]);
+    // Each file's chunk ID is read once.
+    expect(readCode).toHaveBeenCalledTimes(1);
+  });
+
+  it("names the release the build's injected files name, and nothing else", async () => {
+    const release = "0192f5b8-0000-7000-8000-000000000001";
+    (globalThis as { _posthogReleaseId?: unknown })._posthogReleaseId = release;
+    const reports = shown();
+    reports.setPrivacy(ON);
+    reports.reportError(anError());
+    await reports.flush();
+    expect(exceptionEvent(errorCalls()[0]!).properties.$release_id).toBe(release);
+
+    // The SDK prefers this variable to the injected release.
+    vi.stubEnv("POSTHOG_RELEASE_ID", SECRET);
+    calls.length = 0;
+    const next = shown();
+    next.setPrivacy(ON);
+    next.reportError(anError());
+    await next.flush();
+    expect(exceptionEvent(errorCalls()[0]!).properties).not.toHaveProperty("$release_id");
+    expect(String(errorCalls()[0]!.init.body)).not.toContain(SECRET);
   });
 
   it("keeps an engine message only when it matches a known template", async () => {
@@ -565,9 +672,13 @@ describe("what an error report holds", () => {
     });
     reports.reportError({ kind: "crash", event: { kind: "process-gone", source: "gpu", name: null, reason: "crashed", exitCode: 5 } });
     await reports.flush();
-    expect(errorCalls().map((call) => (envelopeEvent(call).exception as { values: unknown[] }).values)).toEqual([
-      [{ type: "EngineDaemonUnavailableError", value: "Rust engine daemon exited unexpectedly with code 3." }],
-      [{ type: "ProcessGone", value: "gpu crashed (exit code 5)" }],
+    expect(errorCalls().map((call) => exceptions(call).map(({ type, value, stacktrace }) => ({ type, value, stacktrace })))).toEqual([
+      [{ type: "EngineDaemonUnavailableError", value: "Rust engine daemon exited unexpectedly with code 3.", stacktrace: undefined }],
+      [{ type: "ProcessGone", value: "gpu crashed (exit code 5)", stacktrace: undefined }],
+    ]);
+    expect(errorCalls().map((call) => exceptionEvent(call).properties)).toMatchObject([
+      { process: "engine", stage: "restarting" },
+      { process: "gpu", reason: "crashed" },
     ]);
   });
 
@@ -585,15 +696,21 @@ describe("what an error report holds", () => {
         error: Object.assign(new EngineDaemonUnavailableError("Rust engine daemon exited unexpectedly with code 3."), { stack: 42 }),
       },
     });
+    reports.reportError({ kind: "crash", event: { kind: "engine", stage: "startup", error: undefined } });
     await reports.flush();
-    expect(errorCalls().map((call) => (envelopeEvent(call).exception as { values: unknown[] }).values)).toEqual([
+    expect(errorCalls().map((call) => exceptions(call).map(({ type, value, stacktrace }) => ({ type, value, stacktrace })))).toEqual([
       [
-        { type: "Error", value: "<message withheld> (code ENOENT)", stacktrace: { frames: [] } },
-        { type: "TypeError", value: "<message withheld>", stacktrace: { frames: [] } },
+        { type: "TypeError", value: "<message withheld>", stacktrace: undefined },
+        { type: "Error", value: "<message withheld> (code ENOENT)", stacktrace: undefined },
       ],
-      [{ type: "EngineDaemonUnavailableError", value: "Rust engine daemon exited unexpectedly with code 3." }],
+      [{ type: "EngineDaemonUnavailableError", value: "Rust engine daemon exited unexpectedly with code 3.", stacktrace: undefined }],
+      [{ type: "ThrownValue", value: "a value of type undefined", stacktrace: undefined }],
     ]);
-    for (const call of errorCalls()) expect(String(call.init.body)).not.toContain(SECRET);
+    for (const call of errorCalls()) {
+      expect(String(call.init.body)).not.toContain(SECRET);
+      // The SDK put none of its own frames in place of a missing stack.
+      for (const exception of exceptions(call)) expect(exception.mechanism.synthetic).toBe(false);
+    }
   });
 
   it("names a window's file the way the uploaded source maps do, from an installation path with spaces", async () => {
@@ -605,17 +722,72 @@ describe("what an error report holds", () => {
     expect(url).toContain("%20");
     reports.reportError({ kind: "renderer", origin: "uncaught", error: { name: "TypeError", stack: `    at render (${url}:7:8)` } });
     await reports.flush();
-    const values = (envelopeEvent(errorCalls()[0]!).exception as { values: Array<{ stacktrace: { frames: unknown[] } }> }).values;
-    expect(values[0]!.stacktrace.frames).toEqual([{
+    expect(exceptions(errorCalls()[0]!)[0]!.stacktrace!.frames).toEqual([{
       filename: "app:///dist/renderer/assets/Index-AbC9.js",
-      abs_path: "app:///dist/renderer/assets/Index-AbC9.js",
+      function: "?",
       lineno: 7,
       colno: 8,
       in_app: true,
+      chunk_id: RENDERER_CHUNK,
+      platform: "node:javascript",
+    }]);
+  });
+
+  it("sends a frame without a chunk ID when its file carries none", async () => {
+    const reports = shown();
+    reports.setPrivacy(ON);
+    const other = join(INSTALL, "resources", "app.asar", "node_modules", "ws", "lib", "websocket.js");
+    reports.reportError({ kind: "renderer", origin: "uncaught", error: { name: "TypeError", stack: `    at send (${other}:1:2)` } });
+    await reports.flush();
+    expect(exceptions(errorCalls()[0]!)[0]!.stacktrace!.frames).toEqual([{
+      filename: "app:///node_modules/ws/lib/websocket.js", function: "?", lineno: 1, colno: 2, in_app: false, platform: "node:javascript",
     }]);
   });
 });
 
+describe("how PostHog groups problems", () => {
+  const atLine = (line: number) =>
+    ({ kind: "renderer", origin: "uncaught", error: { name: "TypeError", stack: `    at x (${BUNDLE}:${line}:2)` } }) as const;
+  const engine = (stage: "restarting" | "stopped") => ({
+    kind: "crash",
+    event: { kind: "engine", stage, error: new EngineDaemonUnavailableError("Rust engine daemon exited unexpectedly with code 3.") },
+  }) as const;
+  const thrown = (origin: "boundary" | "uncaught") => ({ kind: "renderer", origin, error: { type: "string" } }) as const;
+
+  async function launch(...problems: Parameters<ReturnType<typeof telemetry>["reportError"]>[0][]) {
+    calls.length = 0;
+    const reports = shown();
+    reports.setPrivacy(ON);
+    for (const problem of problems) reports.reportError(problem);
+    await reports.flush();
+    return errorCalls().map((call) => ({
+      exceptions: exceptions(call),
+      fingerprint: exceptionEvent(call).properties.$exception_fingerprint,
+    }));
+  }
+
+  it("keeps a problem in one group across launches", async () => {
+    const first = await launch(atLine(3), engine("restarting"), thrown("boundary"));
+    const second = await launch(atLine(3), engine("restarting"), thrown("boundary"));
+    expect(second).toEqual(first);
+    // Frames in dohc's code group the first once source maps resolve them;
+    // the others carry the group they name.
+    expect(first[0]!.fingerprint).toBeUndefined();
+    expect(first[1]!.fingerprint).toMatch(/^[0-9a-f]{64}$/);
+    expect(first[2]!.fingerprint).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  it("tells apart problems with the same message", async () => {
+    const [here, there, restarting, stopped, boundary, uncaught] =
+      await launch(atLine(3), atLine(9), engine("restarting"), engine("stopped"), thrown("boundary"), thrown("uncaught"));
+    expect(here!.exceptions[0]!.value).toBe(there!.exceptions[0]!.value);
+    expect(here!.exceptions[0]!.stacktrace).not.toEqual(there!.exceptions[0]!.stacktrace);
+    expect(restarting!.exceptions).toEqual(stopped!.exceptions);
+    expect(restarting!.fingerprint).not.toBe(stopped!.fingerprint);
+    expect(boundary!.exceptions).toEqual(uncaught!.exceptions);
+    expect(boundary!.fingerprint).not.toBe(uncaught!.fingerprint);
+  });
+});
 describe("limits", () => {
   it("sends a repeated error once", async () => {
     const reports = shown();
@@ -704,13 +876,25 @@ describe("limits", () => {
     expect(errorCalls()).toHaveLength(1);
   });
 
-  it("reads Sentry's rate limit headers", () => {
+  it("reads PostHog's rate limit", () => {
     const response = (status: number, headers: Record<string, string>) => ({ status, headers: new Headers(headers) });
     expect(rateLimitMs(response(200, {}))).toBe(0);
+    expect(rateLimitMs(response(200, { "retry-after": "120" }))).toBe(0);
     expect(rateLimitMs(response(429, {}))).toBe(60_000);
-    expect(rateLimitMs(response(200, { "x-sentry-rate-limits": "60:transaction:key, 2700:default;error;security:organization" }))).toBe(2_700_000);
-    expect(rateLimitMs(response(200, { "x-sentry-rate-limits": "30::key" }))).toBe(30_000);
+    expect(rateLimitMs(response(429, { "retry-after": "120" }))).toBe(120_000);
     expect(rateLimitMs(response(429, { "retry-after": "999999" }))).toBe(REPORT_LIMITS.maxPauseMs);
+  });
+
+  it("makes no request the reports did not ask for", async () => {
+    const reports = shown();
+    reports.setPrivacy(ON);
+    reports.reportError(anError());
+    reports.track({ name: "app_launched" });
+    await vi.advanceTimersByTimeAsync(REPORT_LIMITS.maxPauseMs);
+    expect(calls.map((call) => [call.url, isErrorCall(call)])).toEqual([
+      ["https://ph.example.test/batch/", true],
+      ["https://ph.example.test/batch/", false],
+    ]);
   });
 });
 

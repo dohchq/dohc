@@ -236,29 +236,29 @@ jobs:
           DESKTOP_VERSION: ${{ needs.preflight.outputs.version }}
         run: node scripts/update-desktop-package-version.mjs
 
-      # Report services are repository variables, not secrets: the key and
-      # DSN ship inside the app. A dry run builds an app that sends nothing.
+      # The PostHog project is a repository variable, not a secret: the key
+      # ships inside the app. A dry run builds an app that sends nothing.
       - name: Build desktop
         env:
           DOHC_POSTHOG_KEY: ${{ needs.preflight.outputs.dry_run != 'true' && vars.DOHC_POSTHOG_KEY || '' }}
           DOHC_POSTHOG_HOST: ${{ needs.preflight.outputs.dry_run != 'true' && vars.DOHC_POSTHOG_HOST || '' }}
-          DOHC_SENTRY_DSN: ${{ needs.preflight.outputs.dry_run != 'true' && vars.DOHC_SENTRY_DSN || '' }}
-          DOHC_SENTRY_DIST: ${{ matrix.artifact_platform }}-${{ matrix.arch }}
+          DOHC_DESKTOP_DIST: ${{ matrix.artifact_platform }}-${{ matrix.arch }}
         run: pnpm build:desktop
 
-      # Error reports name frames in the minified files. These source maps,
-      # which the installer leaves out, let Sentry show the original lines.
-      # A build with a DSN fails here if the upload cannot run.
+      # Error reports name frames in the minified files. This step writes a
+      # chunk ID into each file and uploads its source map, which the
+      # installer leaves out, so PostHog can show the original lines. The
+      # package ships the files with those IDs. A build with a PostHog key
+      # fails here if the upload cannot run.
       - name: Upload source maps
         if: needs.preflight.outputs.dry_run != 'true'
         env:
-          DOHC_SENTRY_DSN: ${{ needs.preflight.outputs.dry_run != 'true' && vars.DOHC_SENTRY_DSN || '' }}
-          DOHC_SENTRY_DIST: ${{ matrix.artifact_platform }}-${{ matrix.arch }}
+          DOHC_POSTHOG_KEY: ${{ needs.preflight.outputs.dry_run != 'true' && vars.DOHC_POSTHOG_KEY || '' }}
+          DOHC_DESKTOP_DIST: ${{ matrix.artifact_platform }}-${{ matrix.arch }}
           DESKTOP_VERSION: ${{ needs.preflight.outputs.version }}
-          SENTRY_AUTH_TOKEN: ${{ needs.preflight.outputs.dry_run != 'true' && secrets.SENTRY_AUTH_TOKEN || '' }}
-          SENTRY_URL: ${{ vars.SENTRY_URL }}
-          SENTRY_ORG: ${{ vars.SENTRY_ORG }}
-          SENTRY_PROJECT: ${{ vars.SENTRY_PROJECT }}
+          POSTHOG_CLI_API_KEY: ${{ needs.preflight.outputs.dry_run != 'true' && secrets.POSTHOG_CLI_API_KEY || '' }}
+          POSTHOG_CLI_PROJECT_ID: ${{ vars.POSTHOG_CLI_PROJECT_ID }}
+          POSTHOG_CLI_HOST: ${{ vars.POSTHOG_CLI_HOST }}
         run: node scripts/upload-desktop-source-maps.mjs
 
       - name: Build workspace engine

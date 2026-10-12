@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash } from "node:crypto";
 import type { RendererThrown } from "../ipc/bridgeContract";
 import {
   crashEventSource,
@@ -18,6 +18,7 @@ export type RendererErrorOrigin = "boundary" | "uncaught" | "rejection";
 export interface ErrorFacts {
   atMs: number;
   version: string;
+  channel: string;
   // Operating system name and release, such as "Windows_NT" and "10.0.22631".
   os: string;
   osVersion: string;
@@ -28,72 +29,73 @@ export interface ErrorFacts {
 const FRAMES_PER_ERROR = 25;
 const WITHHELD_FILE = "<withheld>";
 
-interface SentryFrame {
-  filename: string;
-  abs_path?: string;
-  lineno?: number;
-  colno?: number;
-  in_app: boolean;
+// A place in dohc's own code, by the name the report gives its file and the
+// path under dohc's folder that holds it, or a run of frames outside dohc.
+type Frame = { file: string; path: string; line: number; column: number } | { file: typeof WITHHELD_FILE };
+
+// One error of a chain. The class and message come from errorChain's fixed
+// lists; the frames run newest first.
+interface Link {
+  type: string;
+  value: string;
+  frames?: Frame[];
 }
 
-// The Sentry event an error report sends. It carries no user, request,
-// breadcrumbs, server name, or free text: the error classes and messages
-// come from errorChain's fixed lists, and a frame names a file only inside
-// dohc's own code.
-export interface SentryEvent {
-  event_id: string;
-  timestamp: number;
-  platform: "node";
-  level: "error";
-  release: string;
-  dist: string;
-  environment: string;
-  tags: Record<string, string>;
-  contexts: {
-    os: { name: string; version: string };
-    runtime: { name: "electron"; version: string };
-    device: { arch: string };
-  };
-  exception: { values: Array<{ type: string; value: string; stacktrace?: { frames: SentryFrame[] } }> };
+// What one error report sends. PostHog's SDK reads `error`, which holds only
+// the values above, and sends `properties` beside it. Nothing else of the
+// problem reaches the SDK.
+export interface ErrorReport {
+  error: Error;
+  properties: Record<string, string>;
+  atMs: number;
+  // Each dohc file the frames name, by the path under dohc's folder.
+  files: ReadonlyMap<string, string>;
 }
 
 /**
- * The event for one problem, and the key that says whether it repeats an
+ * The report for one problem, and the key that says whether it repeats an
  * earlier one. Engine and process problems carry no frames: their stacks
  * name only dohc's restart code.
  */
-export function sentryEvent(
+export function errorReport(
   reported: ReportedError,
   facts: ErrorFacts,
-  names: { release: string; dist: string; environment: string },
+  dist: string,
   locate: (frame: string) => CodeLocation | null,
-): { event: SentryEvent; key: string } {
-  const { tags, values } = describe(reported, (stack) => sentryFrames(stack, locate).reverse());
-  const event: SentryEvent = {
-    event_id: randomUUID().replace(/-/g, ""),
-    timestamp: facts.atMs / 1000,
-    platform: "node",
-    level: "error",
-    release: names.release,
-    dist: names.dist,
-    environment: names.environment,
-    tags,
-    contexts: {
-      os: { name: facts.os, version: facts.osVersion },
-      runtime: { name: "electron", version: facts.electron },
-      device: { arch: facts.arch },
-    },
-    exception: { values },
+): { report: ErrorReport; key: string } {
+  const { tags, links } = describe(reported, (stack) => codeFrames(stack, locate));
+  const files = new Map<string, string>();
+  for (const frame of links.flatMap((link) => link.frames ?? [])) {
+    if ("path" in frame) files.set(frame.file, frame.path);
+  }
+  const properties: Record<string, string> = {
+    ...tags,
+    app_version: facts.version,
+    channel: facts.channel,
+    dist,
+    os: facts.os,
+    os_version: facts.osVersion,
+    arch: facts.arch,
+    electron: facts.electron,
   };
-  return { event, key: JSON.stringify([tags, values]) };
+  // PostHog groups a problem by its frames in dohc's code once source maps
+  // resolve them, so a problem keeps its group across releases. Without such
+  // a frame it would group by class and message alone, so the report names
+  // its group from what failed and how.
+  if (files.size === 0) {
+    const group = JSON.stringify([tags, links.map(({ type, value }) => [type, value])]);
+    properties.$exception_fingerprint = createHash("sha256").update(group).digest("hex");
+  }
+  return {
+    report: { error: chainError(links), properties, atMs: facts.atMs, files },
+    key: JSON.stringify([tags, links]),
+  };
 }
-
-type Values = SentryEvent["exception"]["values"];
 
 function describe(
   reported: ReportedError,
-  frames: (stack: readonly string[]) => SentryFrame[],
-): { tags: Record<string, string>; values: Values } {
+  frames: (stack: readonly string[]) => Frame[],
+): { tags: Record<string, string>; links: Link[] } {
   if (reported.kind === "crash") {
     const event = reported.event;
     if (event.kind === "process-gone") {
@@ -101,28 +103,25 @@ function describe(
       const process = crashEventSource(event);
       return {
         tags: { process, reason },
-        values: [{ type: "ProcessGone", value: `${process} ${reason} (exit code ${event.exitCode})` }],
+        links: [{ type: "ProcessGone", value: `${process} ${reason} (exit code ${event.exitCode})` }],
       };
     }
-    if (event.kind === "engine") return { tags: { process: "engine", stage: event.stage }, values: chain(event.error, null) };
-    return { tags: { process: "main", origin: event.origin }, values: chain(event.error, frames) };
+    if (event.kind === "engine") return { tags: { process: "engine", stage: event.stage }, links: chain(event.error, null) };
+    return { tags: { process: "main", origin: event.origin }, links: chain(event.error, frames) };
   }
   const tags = { process: "renderer", origin: reported.origin };
   if ("type" in reported.error) {
-    return { tags, values: [{ type: "ThrownValue", value: `a value of type ${reported.error.type}` }] };
+    return { tags, links: [{ type: "ThrownValue", value: `a value of type ${reported.error.type}` }] };
   }
-  return { tags, values: chain(rendererError(reported.error), frames) };
+  return { tags, links: chain(rendererError(reported.error), frames) };
 }
 
-// Sentry lists a chain's cause first and a stack's oldest call first.
-function chain(error: unknown, frames: ((stack: readonly string[]) => SentryFrame[]) | null): Values {
-  return errorChain(error).reverse().map((link) => link.kind === "value"
+function chain(error: unknown, frames: ((stack: readonly string[]) => Frame[]) | null): Link[] {
+  // errorChain reads nothing from undefined.
+  if (error === undefined) return [{ type: "ThrownValue", value: "a value of type undefined" }];
+  return errorChain(error).map((link) => link.kind === "value"
     ? { type: "ThrownValue", value: `a value of type ${link.type}` }
-    : {
-        type: link.name,
-        value: link.message,
-        ...(frames ? { stacktrace: { frames: frames(link.stack) } } : {}),
-      });
+    : { type: link.name, value: link.message, ...(frames ? { frames: frames(link.stack) } : {}) });
 }
 
 // The window's error, rebuilt from its class and stack. errorChain keeps the
@@ -134,36 +133,39 @@ function rendererError(thrown: { name: string; stack: string }): Error {
   return error;
 }
 
-function sentryFrames(stack: readonly string[], locate: (frame: string) => CodeLocation | null): SentryFrame[] {
-  const frames: SentryFrame[] = [];
+function codeFrames(stack: readonly string[], locate: (frame: string) => CodeLocation | null): Frame[] {
+  const frames: Frame[] = [];
   for (const line of stack) {
     const location = locate(line);
     if (location) {
-      const file = frameFile(location.path);
-      frames.push({ filename: file, abs_path: file, lineno: location.line, colno: location.column, in_app: true });
-    } else if (frames.at(-1)?.filename !== WITHHELD_FILE) {
+      frames.push({ file: frameFile(location.path), path: location.path, line: location.line, column: location.column });
+    } else if (frames.at(-1)?.file !== WITHHELD_FILE) {
       // Runs of frames outside dohc read as one.
-      frames.push({ filename: WITHHELD_FILE, in_app: false });
+      frames.push({ file: WITHHELD_FILE });
     }
     if (frames.length === FRAMES_PER_ERROR) break;
   }
   return frames;
 }
 
-// Packaged code sits in app.asar, so its files are app:///dist/…, the names
-// the release's uploaded source maps carry. Any other dohc file keeps its
-// path under dohc's folder.
+// Packaged code sits in app.asar, so its files are app:///dist/…. Any other
+// dohc file keeps its path under dohc's folder.
 function frameFile(path: string): string {
   const inArchive = /\/app\.asar(\/.*)$/i.exec(path);
   return `app://${inArchive ? inArchive[1] : path}`;
 }
 
-/** One Sentry envelope holding one event. */
-export function sentryEnvelope(event: SentryEvent, sentAtMs: number): string {
-  return [
-    JSON.stringify({ event_id: event.event_id, sent_at: new Date(sentAtMs).toISOString() }),
-    JSON.stringify({ type: "event", content_type: "application/json" }),
-    JSON.stringify(event),
-    "",
-  ].join("\n");
+// The chain as errors the SDK reads, each with a V8 stack of only the
+// frames above. The first line stands where V8 writes the error's own line,
+// so no stack is empty: the SDK would fill an empty one with its own frames.
+function chainError(links: readonly Link[]): Error {
+  let cause: Error | undefined;
+  for (const link of [...links].reverse()) {
+    const error = new Error(link.value, cause ? { cause } : undefined);
+    error.name = link.type;
+    error.stack = ["Error", ...(link.frames ?? []).map((frame) =>
+      `    at ${"path" in frame ? `${frame.file}:${frame.line}:${frame.column}` : frame.file}`)].join("\n");
+    cause = error;
+  }
+  return cause!;
 }
