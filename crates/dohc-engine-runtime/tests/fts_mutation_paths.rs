@@ -103,26 +103,26 @@ async fn capture_text_ingest_and_retire_update_certified_search_index() {
         "capture ingest must become visible without relying on an index rebuild"
     );
 
-    actor
-        .capture_retire(
-            CaptureRetire {
-                workspace_id: WS.to_owned(),
-                version_id: VERSION.to_owned(),
-                path: PATH.to_owned(),
-                metadata_summary: None,
-                metadata_correlation_id: None,
-                now_ms: 50,
-                request_id: None,
-                only_if_text_head: false,
-                only_if_capture_origin: true,
-                allow_ydoc_origin: true,
-            },
-            dohc_engine_collab::LeaseRegistry::new(),
-            Arc::new(NoFaults),
-            CancellationToken::new(),
-        )
-        .await
-        .expect("retire captured text");
+    dohc_engine_testkit::capture::retire_captured_path(
+        &actor,
+        CaptureRetire {
+            workspace_id: WS.to_owned(),
+            version_id: VERSION.to_owned(),
+            path: PATH.to_owned(),
+            metadata_summary: None,
+            metadata_correlation_id: None,
+            now_ms: 50,
+            request_id: None,
+            only_if_text_head: false,
+            only_if_capture_origin: true,
+            allow_ydoc_origin: true,
+        },
+        scratch.path(),
+        dohc_engine_collab::LeaseRegistry::new(),
+        Arc::new(NoFaults),
+    )
+    .await
+    .expect("retire captured text");
     let retired = search(&actor, scratch.path(), WS, NEEDLE, 60).await;
     assert!(
         retired.is_empty(),

@@ -24,6 +24,7 @@ pub mod faults;
 pub mod fixtures;
 pub mod harness;
 pub mod scratch;
+pub mod version_comparison;
 
 pub use db_scan::{EngineDbScan, bytes_contain};
 pub use faults::{GateFaults, PanicFaults, ScriptedFaults};

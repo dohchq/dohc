@@ -7,8 +7,8 @@ use crate::conflicts::{
 };
 use crate::error::DomainError;
 use crate::records::{
-    DeleteResult, DeleteTextFile, FileObjectRecord, MomentOp, MomentRecord, SnapshotContent,
-    TextSnapshot, VersionKind, WriteResult, WriteText,
+    DeleteResult, DeleteTextFile, FileObjectRecord, MomentOp, MomentRecord, TextSnapshot,
+    VersionKind, WriteResult, WriteText,
 };
 use crate::store::{
     VersionedTextStore, delete_result_from_moment, delete_text_in_tx, get_file_object, get_moment,
@@ -18,7 +18,6 @@ use crate::store::{
 use dohc_engine_storage::{FaultInjector, Preimage, StorageError, TxnOutcome};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet};
 
 pub const MAX_MERGE_LINES: usize = 2_000;
 
@@ -168,14 +167,6 @@ pub enum VersionFileChangeStatus {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct VersionFileChange {
-    pub path: String,
-    pub status: VersionFileChangeStatus,
-    pub current: Option<SnapshotContent>,
-    pub incoming: Option<SnapshotContent>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VersionFileChangeEntry {
     pub path: String,
     pub status: VersionFileChangeStatus,
@@ -246,14 +237,6 @@ pub fn merge_markdown(base: &str, local: &str, remote: &str) -> MarkdownMergeRes
     }
     output.extend(base_lines[cursor..].iter().map(|line| (*line).to_owned()));
     MarkdownMergeResult::Merged(output.join("\n"))
-}
-
-pub fn file_states_equal(left: &Option<TextSnapshot>, right: &Option<TextSnapshot>) -> bool {
-    match (left, right) {
-        (None, None) => true,
-        (Some(left), Some(right)) => left.text == right.text,
-        _ => false,
-    }
 }
 
 /// Content equality for two comparison sides. A binary side compares by its
@@ -498,59 +481,6 @@ impl VersionedTextStore<'_> {
             finish_merge(tx, input, &payload_hash, result, &after)
         })?;
         committed(outcome)
-    }
-
-    pub fn compare_version_files(
-        &self,
-        workspace_id: &str,
-        source_version_id: &str,
-        target_version_id: &str,
-    ) -> Result<Vec<VersionFileChange>, DomainError> {
-        self.store.read_with(|conn| {
-            validate_compare_versions(conn, workspace_id, source_version_id, target_version_id)
-        })?;
-        let target = self.list_snapshots(workspace_id, target_version_id)?;
-        let source = self.list_snapshots(workspace_id, source_version_id)?;
-        let target_by_path: BTreeMap<_, _> = target
-            .into_iter()
-            .map(|snapshot| (snapshot.path.clone(), snapshot))
-            .collect();
-        let source_by_path: BTreeMap<_, _> = source
-            .into_iter()
-            .map(|snapshot| (snapshot.path.clone(), snapshot))
-            .collect();
-        let paths: BTreeSet<_> = target_by_path
-            .keys()
-            .chain(source_by_path.keys())
-            .cloned()
-            .collect();
-        let mut changes = Vec::new();
-        for path in paths {
-            match (target_by_path.get(&path), source_by_path.get(&path)) {
-                (Some(current), Some(incoming)) if current.content != incoming.content => {
-                    changes.push(VersionFileChange {
-                        path,
-                        status: VersionFileChangeStatus::Modified,
-                        current: Some(current.content.clone()),
-                        incoming: Some(incoming.content.clone()),
-                    });
-                }
-                (None, Some(incoming)) => changes.push(VersionFileChange {
-                    path,
-                    status: VersionFileChangeStatus::Added,
-                    current: None,
-                    incoming: Some(incoming.content.clone()),
-                }),
-                (Some(current), None) => changes.push(VersionFileChange {
-                    path,
-                    status: VersionFileChangeStatus::Deleted,
-                    current: Some(current.content.clone()),
-                    incoming: None,
-                }),
-                _ => {}
-            }
-        }
-        Ok(changes)
     }
 
     /// Metadata-only keyset page for the compareFiles RPC. Content equality is

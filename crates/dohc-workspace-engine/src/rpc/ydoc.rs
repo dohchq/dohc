@@ -2657,25 +2657,25 @@ mod tests {
 
         std::fs::rename(root.join("notes/owner.md"), root.join("moved.md")).unwrap();
         let actor = service.open(Some(handle)).unwrap().actor.clone();
-        let retire = actor
-            .capture_retire(
-                dohc_engine_runtime::CaptureRetire {
-                    workspace_id: "owner-source".into(),
-                    version_id: "main".into(),
-                    path: "notes/owner.md".into(),
-                    metadata_summary: None,
-                    metadata_correlation_id: None,
-                    now_ms: 10,
-                    request_id: None,
-                    only_if_text_head: true,
-                    only_if_capture_origin: true,
-                    allow_ydoc_origin: true,
-                },
-                LeaseRegistry::new(),
-                Arc::new(NoFaults),
-                CancellationToken::new(),
-            )
-            .await;
+        let retire = dohc_engine_testkit::capture::retire_captured_path(
+            &actor,
+            dohc_engine_runtime::CaptureRetire {
+                workspace_id: "owner-source".into(),
+                version_id: "main".into(),
+                path: "notes/owner.md".into(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                now_ms: 10,
+                request_id: None,
+                only_if_text_head: true,
+                only_if_capture_origin: true,
+                allow_ydoc_origin: true,
+            },
+            root,
+            LeaseRegistry::new(),
+            Arc::new(NoFaults),
+        )
+        .await;
         assert_eq!(
             map_runtime(retire.unwrap_err()).message,
             "live-document-binding-active"

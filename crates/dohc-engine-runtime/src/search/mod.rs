@@ -407,7 +407,7 @@ pub fn search_workspace_page(
         rowid: key.rowid,
         inclusive: key.line > 0,
     });
-    let Some(candidate_batch) = query::query_search_index_keyset(
+    let candidate_batch = query::query_search_index_keyset(
         conn,
         root_dir,
         workspace_id,
@@ -418,16 +418,7 @@ pub fn search_workspace_page(
         FILE_SEARCH_RESULT_SOURCE_BYTE_BUDGET,
         FILE_SEARCH_PAGE_SOURCE_BYTE_BUDGET,
         SHORT_QUERY_PAGE_ROW_BUDGET,
-    )?
-    else {
-        return Ok(SearchPageBatch {
-            disposition: SearchPageDisposition::Results,
-            generation,
-            results: Vec::new(),
-            has_more: false,
-            continuation: None,
-        });
-    };
+    )?;
 
     let batch_has_more = candidate_batch.has_more;
     let batch_resume_after = candidate_batch.resume_after;

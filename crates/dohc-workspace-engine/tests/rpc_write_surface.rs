@@ -5905,19 +5905,23 @@ async fn compare_files_pages_via_db_keyset_not_full_vector() {
                 )
                 .expect("one-sided write");
         }
-        versioned
-            .compare_version_files("ws-rpcd-keyset-compare", "feature", "main")
-            .expect("full oracle")
-            .into_iter()
-            .map(|change| {
-                let status = match change.status {
-                    VersionFileChangeStatus::Added => "added",
-                    VersionFileChangeStatus::Modified => "modified",
-                    VersionFileChangeStatus::Deleted => "deleted",
-                };
-                (change.path, status.to_owned())
-            })
-            .collect::<BTreeMap<_, _>>()
+        dohc_engine_testkit::version_comparison::compare_version_files(
+            &versioned,
+            "ws-rpcd-keyset-compare",
+            "feature",
+            "main",
+        )
+        .expect("full oracle")
+        .into_iter()
+        .map(|change| {
+            let status = match change.status {
+                VersionFileChangeStatus::Added => "added",
+                VersionFileChangeStatus::Modified => "modified",
+                VersionFileChangeStatus::Deleted => "deleted",
+            };
+            (change.path, status.to_owned())
+        })
+        .collect::<BTreeMap<_, _>>()
     };
 
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));

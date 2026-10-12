@@ -1233,7 +1233,7 @@ fn versioned_text_delete_on_store(
     if confirm_absent {
         super::capture::confirm_absent_on_disk(
             store,
-            Some(root_dir),
+            root_dir,
             &input.workspace_id,
             &input.path,
             input.now_ms,
@@ -3697,13 +3697,8 @@ mod doc_cache_reset_tests {
     }
 
     fn assert_checked_delete_capture_keeps_file(store: &mut EngineStore, root: &std::path::Path) {
-        let absent = super::super::capture::confirm_absent_on_disk(
-            store,
-            Some(root),
-            "workspace",
-            "record.md",
-            6,
-        );
+        let absent =
+            super::super::capture::confirm_absent_on_disk(store, root, "workspace", "record.md", 6);
         if absent.is_ok() {
             let version = VersionedTextStore::new(store)
                 .get_active_version("workspace")
