@@ -5154,6 +5154,7 @@ mod tests {
         result.conflict.chosen_from = ConflictChoice::Incoming;
         result.conflict.resolution = Some(ConflictResolution::AppliedIncoming);
         result.write = Some(WriteResult {
+            pending_placement: false,
             object: FileObjectRecord {
                 workspace_id: "ws".to_owned(),
                 object_id: "object-a".to_owned(),

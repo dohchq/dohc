@@ -139,6 +139,7 @@ impl ActorHandle {
                     workspace_id: &workspace_id,
                     self_writes: None,
                     progress: progress.as_deref(),
+                    file_outcomes_settled: false,
                 },
                 now_ms,
                 &NoFaults,
@@ -169,6 +170,7 @@ impl ActorHandle {
                     workspace_id: &workspace_id,
                     self_writes: Some(self_writes.as_ref()),
                     progress: None,
+                    file_outcomes_settled: false,
                 },
                 now_ms,
                 &NoFaults,
@@ -207,6 +209,7 @@ impl ActorHandle {
                     workspace_id: &workspace_id,
                     self_writes: Some(self_writes.as_ref()),
                     progress: None,
+                    file_outcomes_settled: false,
                 },
                 now_ms,
                 &NoFaults,
@@ -428,6 +431,8 @@ pub(super) struct MaterializationReplayScope<'a> {
     /// Counts each job this replay takes on, so a caller waiting on a long
     /// replay can tell it from a stuck one.
     pub(super) progress: Option<&'a AtomicU64>,
+    /// Capture drains settle file conflicts without failing the workspace.
+    pub(super) file_outcomes_settled: bool,
 }
 
 const ROLLBACK_RESTORE_PREFIX: &str = "rollback-restore_\u{1f}";
@@ -670,7 +675,9 @@ pub(super) fn replay_pending_materializations(
                         Some(coordinates) => coordinates,
                         None => {
                             store.mark_materialization_complete(&job.job_id, now_ms)?;
-                            if selected.is_some() {
+                            if scope.file_outcomes_settled {
+                                summary.completed += 1;
+                            } else if selected.is_some() {
                                 summary.failed += 1;
                             }
                             continue;
@@ -714,6 +721,11 @@ pub(super) fn replay_pending_materializations(
                     ) {
                         Ok(JobOutcome::Completed | JobOutcome::AlreadyMaterialized) => {
                             summary.completed += 1;
+                        }
+                        Ok(JobOutcome::Conflict | JobOutcome::Superseded)
+                            if scope.file_outcomes_settled =>
+                        {
+                            summary.completed += 1
                         }
                         Ok(
                             JobOutcome::Conflict
@@ -779,13 +791,13 @@ pub(super) fn replay_pending_materializations(
                     Ok(JobOutcome::Completed | JobOutcome::AlreadyMaterialized) => {
                         summary.completed += 1;
                     }
-                    Ok(
+                    outcome @ Ok(
                         JobOutcome::Conflict
                         | JobOutcome::Superseded
                         | JobOutcome::Blocked
                         | JobOutcome::Crashed(_),
                     )
-                    | Err(_) => {
+                    | outcome @ Err(_) => {
                         if let Some(self_writes) = scope.self_writes {
                             self_writes.retract(
                                 scope.workspace_id,
@@ -793,7 +805,13 @@ pub(super) fn replay_pending_materializations(
                                 &plaintext_sha,
                             );
                         }
-                        summary.failed += 1;
+                        if scope.file_outcomes_settled
+                            && matches!(outcome, Ok(JobOutcome::Conflict | JobOutcome::Superseded))
+                        {
+                            summary.completed += 1;
+                        } else {
+                            summary.failed += 1;
+                        }
                     }
                 }
                 continue;
@@ -802,7 +820,9 @@ pub(super) fn replay_pending_materializations(
                 && switch_projection_matches_active(store, &job, false)?.is_none()
             {
                 store.mark_materialization_complete(&job.job_id, now_ms)?;
-                if selected.is_some() {
+                if scope.file_outcomes_settled {
+                    summary.completed += 1;
+                } else if selected.is_some() {
                     summary.failed += 1;
                 }
                 continue;
@@ -828,7 +848,11 @@ pub(super) fn replay_pending_materializations(
                     Some(JobStatus::Complete) | Some(JobStatus::Cancelled) => {}
                     Some(JobStatus::Conflict) => {
                         store.mark_materialization_conflict(&job.job_id, now_ms)?;
-                        summary.failed += 1;
+                        if scope.file_outcomes_settled {
+                            summary.completed += 1;
+                        } else {
+                            summary.failed += 1;
+                        }
                         continue;
                     }
                     Some(JobStatus::Pending) | None => {
@@ -888,7 +912,11 @@ pub(super) fn replay_pending_materializations(
                     summary.completed += 1;
                 }
                 Ok(JobOutcome::Conflict | JobOutcome::Superseded) => {
-                    summary.failed += 1;
+                    if scope.file_outcomes_settled {
+                        summary.completed += 1;
+                    } else {
+                        summary.failed += 1;
+                    }
                     if let Some(moment_id) = job.job_id.strip_prefix("ydoc-mat_") {
                         let coords: Option<(String, String, String)> =
                             store.read_with(|connection| {

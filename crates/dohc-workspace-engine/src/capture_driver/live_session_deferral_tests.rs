@@ -197,6 +197,218 @@ struct Harness {
     _capture_scratch: ScratchDir,
 }
 
+async fn fix2_repaired_hold_with_relay_job(first_sight: bool) {
+    use dohc_engine_collab::{
+        ContentKind, LocalAppend, MarkerCreation, Regime, WriterDocCache, Ydoc,
+    };
+    let harness = Harness::new();
+    let outside = format!("{} too deep\n", "> ".repeat(121));
+    let mut store = dohc_engine_storage::EngineStore::open(&harness.db, 1).unwrap();
+    let input = dohc_engine_domain::CaptureIngest {
+        workspace_id: WORKSPACE_ID.into(),
+        version_id: "main".into(),
+        path: NEW_FILE.into(),
+        text: "Before.\n".into(),
+        metadata_origin: "capture".into(),
+        metadata_summary: None,
+        metadata_correlation_id: None,
+        author_json: None,
+        now_ms: 2,
+        request_id: None,
+        claim_foreign_head: false,
+    };
+    dohc_engine_domain::VersionedTextStore::new(&mut store)
+        .ensure_main_version(WORKSPACE_ID, "main", 1, &NoFaults)
+        .unwrap();
+    let head = dohc_engine_domain::VersionedTextStore::new(&mut store)
+        .capture_ingest(&input, &NoFaults)
+        .unwrap()
+        .snapshot;
+    let key = harness.key(&head.object_id);
+    let doc = Ydoc::wire();
+    doc.rewrite_content_to_markdown_preserving_source(ContentKind::Richdoc, &input.text)
+        .unwrap();
+    dohc_engine_collab::record_local_update(
+        &mut store,
+        &mut WriterDocCache::new(),
+        &key,
+        &doc.encode_full_state(),
+        LocalAppend {
+            marker: Some(MarkerCreation {
+                path: Some(NEW_FILE),
+                content_kind: ContentKind::Richdoc,
+                regime: Regime::LocalOnly,
+            }),
+            is_seed: true,
+            seed_source_sha256: Some(&head.blob_sha256),
+            ..Default::default()
+        },
+        &NoFaults,
+        3,
+        |_tx, _outcome, _sha| Ok(()),
+    )
+    .unwrap();
+    drop(store);
+    std::fs::write(harness.root.join(NEW_FILE), &outside).unwrap();
+    let files = FilesActorCloseGuard::new(
+        FilesActor::spawn_async(harness.root.clone(), ScanBounds::default())
+            .await
+            .unwrap(),
+    );
+    assert!(harness.capture(&files.handle()).await);
+    assert_eq!(
+        harness
+            .actor
+            .capture_file_holds(WORKSPACE_ID.into())
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    harness
+        .actor
+        .versioned_text_write(
+            dohc_engine_domain::WriteText {
+                workspace_id: WORKSPACE_ID.into(),
+                version_id: "main".into(),
+                object_id: head.object_id,
+                path: NEW_FILE.into(),
+                text: "Remote edit.\n".into(),
+                moment_id: "fix2-remote-edit".into(),
+                metadata_origin: "sync".into(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 4,
+                request_id: None,
+            },
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    harness
+        .actor
+        .materialize_relay_page(
+            WORKSPACE_ID.into(),
+            harness.root.clone(),
+            vec![dohc_engine_sync::MomentMaterializationChange {
+                version_id: "main".into(),
+                path: NEW_FILE.into(),
+                operation: "write",
+                content_kind: "text",
+            }],
+            Arc::new(harness.self_writes.clone()),
+            5,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    let observer = rusqlite::Connection::open(&harness.db).unwrap();
+    let job_id: String = observer
+        .query_row(
+            "SELECT job_id FROM materialization_jobs WHERE status='pending' AND target_path=?1",
+            [NEW_FILE],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(job_id.starts_with("version-switch-mat_"));
+    assert_eq!(
+        std::fs::read_to_string(harness.root.join(NEW_FILE)).unwrap(),
+        outside
+    );
+    std::fs::write(harness.root.join(NEW_FILE), "Repaired outside.\n").unwrap();
+    let fresh = if first_sight {
+        Some(FilesActorCloseGuard::new(
+            FilesActor::spawn_async(harness.root.clone(), ScanBounds::default())
+                .await
+                .unwrap(),
+        ))
+    } else {
+        None
+    };
+    let active_files = if let Some(fresh) = &fresh {
+        fresh.handle()
+    } else {
+        files.handle().request_rescan();
+        files.handle()
+    };
+    let clean = harness.capture(&active_files).await;
+    let degraded = harness.status.degraded();
+    let job_status: String = observer
+        .query_row(
+            "SELECT status FROM materialization_jobs WHERE job_id=?1",
+            [&job_id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let disk = std::fs::read_to_string(harness.root.join(NEW_FILE)).unwrap();
+    let recorded_sha: String = observer
+        .query_row(
+            "SELECT blob_sha256 FROM snapshots WHERE workspace_id=?1 AND path=?2",
+            [WORKSPACE_ID, NEW_FILE],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let notices = std::fs::read_dir(harness.root.join("notes"))
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .filter(|p| p.to_string_lossy().ends_with(".conflict"))
+        .collect::<Vec<_>>();
+    assert!(
+        harness
+            .actor
+            .capture_file_holds(WORKSPACE_ID.into())
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    drop(observer);
+    let notice_bytes = notices
+        .iter()
+        .map(|p| std::fs::read_to_string(p).unwrap())
+        .collect::<Vec<_>>();
+    if let Some(fresh) = fresh {
+        fresh.close().await;
+    }
+    files.close().await;
+    harness.close();
+    assert!(
+        clean && !degraded,
+        "a file outcome degraded capture: clean={clean}, degraded={degraded}, status={job_status}"
+    );
+    assert_eq!(disk, "Repaired outside.\n");
+    if first_sight {
+        assert_eq!(
+            recorded_sha,
+            dohc_engine_storage::hex_sha256(b"Remote edit.\n")
+        );
+        assert_eq!(job_status, "conflict");
+        assert_eq!(notices.len(), 1, "ordinary file conflict notice artifact");
+        assert_eq!(notice_bytes[0], "Remote edit.\n");
+    } else {
+        assert_eq!(
+            recorded_sha,
+            dohc_engine_storage::hex_sha256(b"Repaired outside.\n")
+        );
+        assert_eq!(job_status, "complete");
+        assert!(
+            notices.is_empty(),
+            "a stale projection needs no conflict artifact"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fix2_repaired_hold_drains_stale_real_relay_without_degrading() {
+    fix2_repaired_hold_with_relay_job(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fix2_first_sight_hold_drains_real_relay_conflict_without_degrading() {
+    fix2_repaired_hold_with_relay_job(true).await;
+}
+
 impl Harness {
     fn new() -> Self {
         let store_scratch = ScratchDir::new().expect("store scratch");

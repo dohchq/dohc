@@ -382,6 +382,8 @@ pub struct CaptureIngestBinary {
 /// Result of [`crate::VersionedTextStore::capture_ingest_binary`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CaptureIngestBinaryResult {
+    /// Capture observed an outstanding placement or released a file hold.
+    pub pending_placement: bool,
     pub object_id: String,
     pub moment_id: String,
     pub moment_order: i64,
@@ -492,6 +494,8 @@ pub struct CreateNamedVersion {
 /// The result of a successful [`crate::VersionedTextStore::write_text`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WriteResult {
+    /// Capture observed an outstanding placement or released a file hold.
+    pub pending_placement: bool,
     pub object: FileObjectRecord,
     pub snapshot: TextSnapshot,
     pub moment: MomentRecord,
@@ -535,6 +539,8 @@ pub struct DeleteResult {
 /// The result of [`crate::VersionedTextStore::capture_retire`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CaptureRetireResult {
+    /// Capture observed an outstanding placement or released a file hold.
+    pub pending_placement: bool,
     /// The canonical delete result, or `None` when the path was not present.
     pub retired: Option<DeleteResult>,
     /// True when a committed request or an already-absent path was replayed.

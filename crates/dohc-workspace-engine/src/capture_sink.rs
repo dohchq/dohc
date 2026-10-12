@@ -300,6 +300,7 @@ pub struct StoreCaptureSink {
     /// Automation claims this run's captures and reconciliations inserted.
     /// The driver announces them after the run.
     automation_claims: std::cell::RefCell<Vec<AutomationClaim>>,
+    pending_placement_paths: std::cell::RefCell<Vec<String>>,
     /// Lazily loaded-or-created on the first secret capture (TS parity:
     /// `loadSecretDataKey` create branch) so workspaces without secrets never
     /// mint a key file.
@@ -399,6 +400,7 @@ impl StoreCaptureSink {
             files_policy,
             policy_held: std::cell::Cell::new(false),
             automation_claims: std::cell::RefCell::new(Vec::new()),
+            pending_placement_paths: std::cell::RefCell::new(Vec::new()),
             secret_key: None,
             self_writes,
             provenance,
@@ -483,6 +485,11 @@ impl StoreCaptureSink {
     /// Whether any op this run was held on an unavailable policy.
     pub fn policy_held(&self) -> bool {
         self.policy_held.get()
+    }
+
+    /// Take paths whose committed observations need a placement drain.
+    pub(crate) fn take_pending_placement_paths(&self) -> Vec<String> {
+        self.pending_placement_paths.take()
     }
 
     /// Take the automation claims this run inserted so far.
@@ -607,6 +614,11 @@ impl StoreCaptureSink {
             Arc::new(NoFaults),
         ) {
             Ok(result) => {
+                if result.pending_placement {
+                    self.pending_placement_paths
+                        .borrow_mut()
+                        .push(path.to_owned());
+                }
                 self.automation_claims
                     .borrow_mut()
                     .extend(result.automation_claims);
@@ -622,6 +634,10 @@ impl StoreCaptureSink {
             // The head belongs to another writer (RPC/replication): capture
             // does not own it, so it stops tracking the path rather than
             // overwriting content that may have no disk counterpart.
+            Err(RuntimeError::CaptureNotOwnedAfterHold { path }) => {
+                self.pending_placement_paths.borrow_mut().push(path);
+                Ok(DomainIngest::ForeignHead)
+            }
             Err(RuntimeError::Domain(DomainError::CaptureNotOwned)) => {
                 Ok(DomainIngest::ForeignHead)
             }
@@ -654,12 +670,23 @@ impl StoreCaptureSink {
             self.leases.clone(),
             Arc::new(NoFaults),
         ) {
-            Ok(_) => Ok(DomainIngest::Persisted),
+            Ok(result) => {
+                if result.pending_placement {
+                    self.pending_placement_paths
+                        .borrow_mut()
+                        .push(path.to_owned());
+                }
+                Ok(DomainIngest::Persisted)
+            }
             // Same settled-refusal rule as text: the store's admission gate is
             // stricter than the scan floor, and a refused name can never
             // succeed on retry.
             Err(RuntimeError::Domain(DomainError::InvalidPath { .. })) => {
                 Ok(DomainIngest::NameRefused)
+            }
+            Err(RuntimeError::CaptureNotOwnedAfterHold { path }) => {
+                self.pending_placement_paths.borrow_mut().push(path);
+                Ok(DomainIngest::ForeignHead)
             }
             Err(RuntimeError::Domain(DomainError::CaptureNotOwned)) => {
                 Ok(DomainIngest::ForeignHead)
@@ -873,7 +900,14 @@ impl StoreCaptureSink {
             Arc::new(NoFaults),
             root_guard,
         ) {
-            Ok(_) => Ok(()),
+            Ok(result) => {
+                if result.pending_placement {
+                    self.pending_placement_paths
+                        .borrow_mut()
+                        .push(path.to_owned());
+                }
+                Ok(())
+            }
             // A name the store refuses to address can never hold a head;
             // there is nothing to retire.
             Err(RuntimeError::Domain(DomainError::InvalidPath { .. })) => Ok(()),
@@ -1166,9 +1200,18 @@ impl StoreCaptureSink {
                 for (result, (size, sha256)) in results.into_iter().zip(identities) {
                     outcomes.push(match result {
                         Ok(result) => {
+                            if result.pending_placement {
+                                self.pending_placement_paths
+                                    .borrow_mut()
+                                    .push(result.snapshot.path.clone());
+                            }
                             self.automation_claims
                                 .borrow_mut()
                                 .extend(result.automation_claims);
+                            Ok(IngestOutcome::Captured { size, sha256 })
+                        }
+                        Err(RuntimeError::CaptureNotOwnedAfterHold { path }) => {
+                            self.pending_placement_paths.borrow_mut().push(path);
                             Ok(IngestOutcome::Captured { size, sha256 })
                         }
                         Err(RuntimeError::Domain(DomainError::CaptureNotOwned)) => {

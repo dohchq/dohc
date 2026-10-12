@@ -9,6 +9,8 @@ use dohc_engine_storage::StorageError;
 pub enum RuntimeError {
     #[error("capture-file-held: {path}")]
     CaptureFileHeld { path: String },
+    #[error("capture-not-owned: {path}")]
+    CaptureNotOwnedAfterHold { path: String },
     #[error("capture-recovery-refused: {reason}")]
     RecoveryImportRefused { reason: &'static str },
     /// The engine.db path could not be resolved to a canonical identity
@@ -116,6 +118,7 @@ impl RuntimeError {
     pub fn code(&self) -> &'static str {
         match self {
             RuntimeError::CaptureFileHeld { .. } => "capture-file-held",
+            RuntimeError::CaptureNotOwnedAfterHold { .. } => "capture-not-owned",
             RuntimeError::Identity { .. } => "identity-unresolved",
             RuntimeError::Storage(err) => err.code(),
             RuntimeError::Domain(err) => err.code(),

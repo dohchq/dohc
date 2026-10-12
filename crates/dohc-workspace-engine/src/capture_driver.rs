@@ -2487,6 +2487,7 @@ struct CaptureThreadOutcome {
     collection_release_generation: u64,
     /// Automation claims the captures and the reconciliation committed.
     automation_claims: Vec<dohc_engine_domain::AutomationClaim>,
+    pending_placement_paths: Vec<String>,
 }
 
 /// TS parity (`reconcile-${createId()}` + "Reconciled offline edits"): one
@@ -2791,6 +2792,7 @@ async fn apply_bound_run_with_handle(
                 collections,
                 collection_release_generation,
                 automation_claims: sink.take_automation_claims(),
+                pending_placement_paths: sink.take_pending_placement_paths(),
             });
         });
     let applied: Option<CaptureThreadOutcome> = match apply_thread {
@@ -2808,6 +2810,7 @@ async fn apply_bound_run_with_handle(
         collections: collection_result,
         collection_release_generation,
         automation_claims,
+        mut pending_placement_paths,
     }) = applied
     else {
         // Spawn failure or apply-thread panic: the plan must still resolve.
@@ -2905,7 +2908,10 @@ async fn apply_bound_run_with_handle(
                         self_writes: retire_self_writes,
                         provenance: retire_pass_provenance,
                     });
-                    let _ = retire_tx.send(sink.retire_policy_excluded(&retire_path));
+                    let outcome = sink
+                        .retire_policy_excluded(&retire_path)
+                        .map(|()| sink.take_pending_placement_paths());
+                    let _ = retire_tx.send(outcome);
                 });
             let retired = match retire_thread {
                 Ok(joiner) => {
@@ -2924,7 +2930,10 @@ async fn apply_bound_run_with_handle(
                 // Report it in the receipt: the manifest must forget a path
                 // whose head this loop just deleted, or a later policy widen
                 // would diff clean and never re-ingest it.
-                Some(Ok(())) => result.not_owned_paths.push(path.clone()),
+                Some(Ok(paths)) => {
+                    result.not_owned_paths.push(path.clone());
+                    pending_placement_paths.extend(paths);
+                }
                 // A failed over-cap retire must fail the receipt too: this
                 // loop is the only thing that can retire such a head, so it
                 // must stay dirty and retry. Setting only the sticky status
@@ -2940,12 +2949,19 @@ async fn apply_bound_run_with_handle(
         }
     }
     if result.completed() {
-        let settled_paths = result
-            .applied_paths
-            .iter()
-            .chain(&result.not_owned_paths)
-            .cloned()
-            .collect();
+        let settled_paths = if pending_placement_paths.is_empty() {
+            Vec::new()
+        } else {
+            let settled: std::collections::HashSet<_> = result
+                .applied_paths
+                .iter()
+                .chain(&result.not_owned_paths)
+                .collect();
+            pending_placement_paths
+                .into_iter()
+                .filter(|path| settled.contains(path))
+                .collect()
+        };
         match repair_and_materialize_ydoc_recoveries(
             root,
             actor,
