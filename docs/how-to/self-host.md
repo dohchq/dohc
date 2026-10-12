@@ -145,6 +145,7 @@ An existing account that never verified its address works the same way: select *
 When the server starts with a list, it signs out everyone whose email is not verified.
 To sign in again, they choose a password from an emailed link.
 People with a verified email stay signed in.
+Run one account service per database: an instance still running with open sign-up could issue new unverified sessions after this sign-out.
 
 Any other address gets a message that the server creates accounts only for approved or invited addresses.
 Share links need no account, so closed sign-up does not change them.
