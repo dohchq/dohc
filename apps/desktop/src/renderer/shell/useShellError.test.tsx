@@ -310,6 +310,29 @@ describe("useShellError", () => {
     expect(result.current.shellErrors.map((error) => error.seen)).toEqual([false]);
   });
 
+  // The toast is the newest unseen row, by time, then by place in the list.
+  it("updates a quiet repeat in place, so another failure's newer toast stays the one shown", () => {
+    const now = vi.spyOn(Date, "now");
+    try {
+      const { result } = renderHook(() => useShellError("ws-a"));
+      now.mockReturnValue(1_000);
+      act(() => result.current.reportShellFailure({ message: "Could not read site.", identity: "folder-app:site", retry: vi.fn() }));
+      now.mockReturnValue(2_000);
+      act(() => result.current.reportShellFailure({ message: "Could not read docs.", identity: "folder-app:docs" }));
+      const [siteBefore] = result.current.shellErrors;
+
+      now.mockReturnValue(3_000);
+      const retry = vi.fn();
+      act(() => result.current.reportShellFailure({ message: "Could not read site again.", identity: "folder-app:site", retry, quiet: true }));
+      const [site, docs] = result.current.shellErrors;
+      expect(result.current.shellErrors).toHaveLength(2);
+      expect(site).toMatchObject({ id: siteBefore!.id, atMs: 1_000, seen: false, message: "Could not read site again.", retry });
+      expect(docs).toMatchObject({ identity: "folder-app:docs", atMs: 2_000, seen: false });
+    } finally {
+      now.mockRestore();
+    }
+  });
+
   it("replaces a repeated failure's row and keeps that row's toast, open or closed", () => {
     const { result } = renderHook(() => useShellError("ws-a"));
     act(() => result.current.reportShellFailure({ message: "Could not load History.", identity: "about-history:a.md" }));
