@@ -523,9 +523,11 @@ async function completedServiceOwner(options: {empty?: boolean; frameChanges?: b
   const pushed = deferred<void>(), unloads: unknown[] = [], pulls: Record<string, unknown>[] = [];
   const membership: {method: string; workspace?: string; params: unknown}[] = [];
   let ownerRequests = 0, client!: ReturnType<typeof clientFrom>["client"] & {captureOwnerActivation: ReturnType<typeof vi.fn>};
+  // The engine's reason for refusing native capture, as for a document with an open sync conflict.
+  let refusal: Error | undefined;
   spawn.mockImplementation(async options => {
     const captured = clientFrom(options), discovery = captured.client.sendRequest.getMockImplementation()!;
-    client = Object.assign(captured.client, {captureOwnerActivation: vi.fn(async () => capture)});
+    client = Object.assign(captured.client, {captureOwnerActivation: vi.fn(async () => {if (refusal) throw refusal; return capture;})});
     client.sendRequest.mockImplementation(async (...args: unknown[]) => {
       const request = args[0] as {id: number; method: string; workspace?: string; params: Record<string, unknown>}, held = parked;
       if (request.method.startsWith("liveApplication.")) ownerRequests++;
@@ -573,6 +575,19 @@ async function completedServiceOwner(options: {empty?: boolean; frameChanges?: b
   if (!options.empty) await pushed.promise;
   return {f, raw, host, document, workspace, target, pushed, unloads, pulls, membership, spawned: () => spawn.mock.calls.length, client: () => client,
     ownerRequests: () => ownerRequests,
+    ownerCalls: () => client.sendRequest.mock.calls.map(call => (call as unknown[])[0] as {method: string; params: unknown})
+      .filter(request => request.method.startsWith("liveApplication.")).map(request => [request.method, request.params]),
+    refuseCapture(error: Error | undefined) {refusal = error;},
+    // Starts a new host on the same relay. Its first pass captures and, while capture is refused, leaves no owner.
+    async restart() {
+      await host.close();
+      const log = vi.spyOn(console, "error").mockImplementation(() => {});
+      cleanup.push(async () => log.mockRestore());
+      const restarted = await startServiceLiveHost(f);
+      cleanup.push(() => restarted.close());
+      await vi.waitFor(() => expect(client.captureOwnerActivation).toHaveBeenCalled());
+      return restarted;
+    },
     park(method: string) { parked = {method, entered: deferred<void>(), release: deferred<void>()}; return parked; },
     restore() {
       const plan = f.storage.readStopRestorePlan({document, ownerUserId: "owner", operationId: "restore", shareId: "share", grantId: "grant",
@@ -629,6 +644,54 @@ it("keeps damaged evidence and caller cancellation visible for public delivery",
   o.restore(); abort.abort(reason);
   parked.release.resolve();
   await expect(cancelled).rejects.toBe(reason);
+});
+
+const stopLookup = {operationId: "restore", workspaceId: "workspace", ownerUserId: "owner"};
+const conflictOpen = () => new EngineRequestError(1, {code: "INVALID_PARAMS", message: "ydoc-conflict-open", retry: "no"} as never);
+
+// Proves: after a restart, restore steps that send no registration never load
+// the native session, so an open sync conflict cannot block them.
+it("continues an applied stop cut and reviews its proposal after a restart while the document has an open sync conflict", async () => {
+  const o = await completedServiceOwner();
+  o.restore();
+  // The activated owner registers and applies the old cut; this engine leaves the native fence pending.
+  await expect(o.host.stopRestore(stopLookup)).resolves.toEqual({kind: "pending", reason: "native-fence-pending"});
+  o.refuseCapture(conflictOpen());
+  const host = await o.restart(), captures = o.client().captureOwnerActivation.mock.calls.length, sent = o.ownerCalls().length;
+  await expect(host.stopRestore(stopLookup)).resolves.toEqual({kind: "pending", reason: "native-fence-pending"});
+  expect(o.ownerCalls().slice(sent).map(([method]) => method)).toEqual(["liveApplication.fenceRestore", "liveApplication.fenceRestore"]);
+  const review = {review: "retained proposal"} as never;
+  const reviewed = vi.spyOn(OwnerCommittedDelivery.prototype, "reviewRestore").mockResolvedValue(review);
+  try {
+    await expect(host.reviewRestore(stopLookup)).resolves.toBe(review);
+    expect(reviewed).toHaveBeenCalledOnce();
+  } finally {reviewed.mockRestore();}
+  expect(o.client().captureOwnerActivation.mock.calls.length).toBe(captures);
+});
+
+// Proves: after a restart, a stop that registers its old cut reloads the
+// retained activation first, fails with the engine's reason when capture is
+// refused, and otherwise registers native with the stop's binding alone.
+it("reloads the retained activation after a restart only for a stop that registers", async () => {
+  const o = await completedServiceOwner();
+  const current = o.f.storage.resolveCurrentLiveDocumentBinding({document: o.document, actor: {kind: "owner", userId: "owner", shareId: "share"}});
+  if (current.kind !== "current") throw new Error("Missing live binding.");
+  o.refuseCapture(conflictOpen());
+  const host = await o.restart(), captures = o.client().captureOwnerActivation.mock.calls.length, sent = o.ownerCalls().length;
+  o.restore();
+  await expect(host.stopRestore(stopLookup)).rejects.toThrow("ydoc-conflict-open");
+  expect(o.client().captureOwnerActivation.mock.calls.length).toBe(captures + 1);
+  expect(o.ownerCalls().slice(sent)).toEqual([]);
+  o.refuseCapture(undefined);
+  await expect(host.stopRestore(stopLookup)).resolves.toEqual({kind: "pending", reason: "native-fence-pending"});
+  expect(o.client().captureOwnerActivation).toHaveBeenCalledTimes(captures + 2);
+  expect(o.client().captureOwnerActivation).toHaveBeenLastCalledWith(expect.anything(), "docs/a.md", 1_000_000, expect.any(AbortSignal), `ordinary-activation-${"a".repeat(64)}`);
+  expect(o.ownerCalls().slice(sent)).toEqual([
+    ["liveApplication.register", {binding: current.binding}],
+    ["liveApplication.ownerState", {registrationId: 7, sessionId: "native-session"}],
+    ["liveApplication.fenceRestore", expect.anything()],
+    ["liveApplication.fenceRestore", expect.anything()],
+  ]);
 });
 
 // An empty host whose sibling document activates for real. The other document
@@ -899,19 +962,24 @@ it("keeps background activation from reloading a dormant document, which leaves 
   expect(o.unloaded()).toBe(1); expect(o.host.holds(o.sibling)).toBe(false);
 });
 
-it("brings a dormant document back into passes for stop-access work, which settle it before it unloads again", async () => {
+it("brings a dormant document back into passes for stop-access work that reloads it, which settle it before it unloads again", async () => {
   const o = await idleHost();
   o.advance(600_000);
   await vi.waitFor(() => expect(o.unloaded()).toBe(1));
   expect(o.host.settled(o.sibling)).toBe(true);
-  const stopped = vi.spyOn(OwnerCommittedDelivery.prototype, "stopRestore").mockResolvedValue({kind: "pending", reason: "stopping"});
   o.restore();
   o.hold(true);
-  await expect(o.host.stopRestore({operationId: "restore", workspaceId: "workspace", ownerUserId: "owner"}))
-    .resolves.toEqual({kind: "pending", reason: "stopping"});
-  expect(stopped).toHaveBeenCalledOnce();
+  // Work that never registers leaves the document dormant.
+  const stopped = vi.spyOn(OwnerCommittedDelivery.prototype, "stopRestore").mockResolvedValueOnce({kind: "pending", reason: "stopping"});
+  await expect(o.host.stopRestore(stopLookup)).resolves.toEqual({kind: "pending", reason: "stopping"});
+  let visits = o.visits(o.sibling.path);
+  await o.passes();
+  expect(o.visits(o.sibling.path)).toBe(visits);
+  // The stop that registers its old cut reloads it.
+  await expect(o.host.stopRestore(stopLookup)).resolves.toEqual({kind: "pending", reason: "native-fence-pending"});
+  expect(stopped).toHaveBeenCalledTimes(2);
   // Passes visit it again, and until one settles it a revoke cannot be released over its restore work.
-  const visits = o.visits(o.sibling.path);
+  visits = o.visits(o.sibling.path);
   await o.passes();
   expect(o.visits(o.sibling.path)).toBeGreaterThan(visits);
   expect(o.host.settled(o.sibling)).toBe(false);

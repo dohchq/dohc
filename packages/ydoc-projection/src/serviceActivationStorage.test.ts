@@ -410,14 +410,14 @@ it('requires exact seed application ACK and supports lost completion responses',
     try{
       const active=activationDriver(f,vi.fn(async()=>f.capture))
       expect(await active.driver.activate(active.target,new AbortController().signal)).toMatchObject({kind:'done'})
-      expect(await active.driver.restoreConsumer(f.document,stop,new AbortController().signal)).toBe(active.driver.consumer(f.document).consumer)
+      expect(active.driver.restoreConsumer(f.document,stop)).toBe(active.driver.consumer(f.document).consumer)
     }finally{drain.mockRestore()}
     f.raw.exec("UPDATE sync_relay_live_documents SET restore_fence_generation=2")
     expect(()=>f.store.resume({document:f.document,activationId:f.capture.activationId,host,registeredAtMs:5,guard(){}})).toThrow()
     f.raw.exec("UPDATE sync_relay_live_documents SET admission_state='closed'")
     // Without that session, a restore needs its operation to name the retained adoption, and refuses without one.
     const capture=vi.fn()
-    await expect(activationDriver(f,capture).driver.restoreConsumer(f.document,stop,new AbortController().signal)).rejects.toThrow('Service restore owner adoption is unavailable.')
+    expect(()=>activationDriver(f,capture).driver.restoreConsumer(f.document,stop)).toThrow('Service restore owner adoption is unavailable.')
     expect(capture).not.toHaveBeenCalled()
   }finally{f.close()}
 })
@@ -662,7 +662,7 @@ it('clears readiness when a restore fence is visible before the next activation'
     expect(native.client.sendRequest).toHaveBeenCalledTimes(calls)
     expect(()=>d.driver.consumer(f.document)).toThrow('incomplete')
     expect(d.driver.workspaceReady('workspace')).toBe(false)
-    expect(await d.driver.restoreConsumer(f.document,stop,signal)).toBe(active)
+    expect(d.driver.restoreConsumer(f.document,stop)).toBe(active)
     reopen(f,fence)
     expect(await d.driver.activate(d.target,signal)).toMatchObject({kind:'done'})
     expect(d.driver.consumer(f.document).consumer).toBe(active)

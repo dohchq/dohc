@@ -217,9 +217,9 @@ export async function startServiceLiveHost(options: {
   const consumerFor=(document:LiveDocumentKey)=>ordinary.has(document.workspaceId)
     ? activation?.consumer(document).consumer
     : consumers.get(document.workspaceId);
-  const consumerForRestore=async(lookup:StopRestoreLookup,joined:AbortSignal)=>{
+  const consumerForRestore=(lookup:StopRestoreLookup)=>{
     const document=consumers.get(lookup.workspaceId)?.documentForRestore(lookup);
-    return document?(ordinary.has(document.workspaceId)?await activation?.restoreConsumer(document,lookup,joined):consumerFor(document)):undefined;
+    return document?(ordinary.has(document.workspaceId)?activation?.restoreConsumer(document,lookup):consumerFor(document)):undefined;
   };
   const configuredConsumer = (document: LiveDocumentKey) => {
     const consumer = consumerFor(document);
@@ -455,16 +455,16 @@ export async function startServiceLiveHost(options: {
         await activation!.activate(row.target, joined, settleTarget);
       }));
     };
-    // Restore work takes a turn, so no idle unload runs beside it. On a dormant
-    // document it reloads the document, which passes then settle.
+    // Restore work takes a turn, so no idle unload runs beside it. A step that
+    // registers on a dormant document reloads it, and passes then settle it.
     const restoring = <T>(value: StopRestoreLookup, callerSignal: AbortSignal | undefined,
-      operation: (consumer: NonNullable<Awaited<ReturnType<typeof consumerForRestore>>>, lookup: StopRestoreLookup, joined: AbortSignal) => Promise<T>) => {
+      operation: (consumer: NonNullable<ReturnType<typeof consumerForRestore>>, lookup: StopRestoreLookup, joined: AbortSignal) => Promise<T>) => {
       check();
       const lookup = snapshotStopRestoreLookup(value);
       return exclusive(() => withLiveHostSignal(signal, callerSignal, async joined => {
         const document = consumers.get(lookup.workspaceId)?.documentForRestore(lookup), key = document && hostedKey(document);
         if (key) {await resolveUnload(key, joined); touch(key);}
-        const consumer = await consumerForRestore(lookup, joined);
+        const consumer = consumerForRestore(lookup);
         if (!consumer) throw new Error("Workspace is not configured on this service host.");
         return runDocument(consumer.documentForRestore(lookup), joined, work => operation(consumer, lookup, work));
       }));
