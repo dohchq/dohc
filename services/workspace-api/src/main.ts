@@ -1,4 +1,5 @@
 import { createWorkspaceAuth } from "@dohc/workspace-auth/betterAuth";
+import { signUpInviteKey } from "@dohc/workspace-auth/signUp";
 import {
   createSmtpSender,
   refuseEmail,
@@ -14,6 +15,7 @@ import { ConfigError, readConfig, type WorkspaceApiConfig } from "./config";
 import { createCrashReportIntake, createPostgresCrashReportStore } from "./crashReports";
 import { createReadinessProbe } from "./readiness";
 import { createRouter, type AuthGateway } from "./routes";
+import { createSignUpAdmission } from "./signUpAdmission";
 
 // The auth host: one Postgres, Better Auth on /api/auth/*, and the browser
 // account pages that drive it. This file owns the process — env, database,
@@ -49,6 +51,7 @@ const auth = createWorkspaceAuth({
   secret: config.secret,
   sendEmail: email.sendEmail,
   ...(config.trustedOrigins.length > 0 ? { trustedOrigins: config.trustedOrigins } : {}),
+  ...(config.signUp ? { admitAccount: createSignUpAdmission({ ...config.signUp, key: signUpInviteKey(config.secret) }) } : {}),
 });
 
 const gateway: AuthGateway = {
@@ -132,6 +135,7 @@ server.listen(config.port, config.bindHost, () => {
   console.log(`[workspace-api] email transport: ${config.emailTransport}`);
   if (config.testAuthSeam) console.log("[workspace-api] DOHC_TEST_AUTH seam ENABLED (dev/test only)");
   if (config.crashReports) console.log("[workspace-api] crash reports: on");
+  if (config.signUp) console.log(`[workspace-api] sign-up: closed, ${config.signUp.emails.size} approved addresses and pending invites`);
 });
 
 for (const signal of ["SIGINT", "SIGTERM"] as const) {

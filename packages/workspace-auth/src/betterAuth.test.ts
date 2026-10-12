@@ -2,6 +2,7 @@ import { Client, Pool } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createWorkspaceAuth, type WorkspaceAuth } from "./betterAuth";
 import { actorFromSession, createSessionActorResolver, UnauthorizedError, type ResolveActor } from "./session";
+import type { SignUpAdmission } from "./signUp";
 import type { EmailMessage } from "./smtp";
 
 // Runs against the live dev Postgres (same requirement as workspace-postgres
@@ -136,6 +137,67 @@ describeWithPostgres("email/password against Postgres", () => {
     await expect(
       auth.api.signInEmail({ body: { email, password: "wrong-password-1" } }),
     ).rejects.toMatchObject({ statusCode: 401 });
+  });
+});
+
+describeWithPostgres("closed sign-up", () => {
+  function closedAuth(admission: SignUpAdmission, asked: string[] = []): WorkspaceAuth {
+    return createWorkspaceAuth({
+      pool,
+      baseURL: "http://localhost:1786",
+      secret: "test-secret-0123456789abcdef0123456789abcdef",
+      sendEmail: async (message) => {
+        sent.push(message);
+      },
+      admitAccount: async (email) => {
+        asked.push(email);
+        return admission;
+      },
+    });
+  }
+
+  async function accountExists(email: string): Promise<boolean> {
+    return ((await pool.query('SELECT 1 FROM "user" WHERE email = $1', [email])).rowCount ?? 0) > 0;
+  }
+
+  it("refuses an address the server did not admit and creates no account", async () => {
+    const email = `${unique()}@dohc.test`;
+    const asked: string[] = [];
+    await expect(
+      closedAuth("refused", asked).api.signUpEmail({ body: { email, password: PASSWORD, name: "Test User" } }),
+    ).rejects.toMatchObject({ statusCode: 403, body: { code: "SIGN_UP_CLOSED" } });
+    expect(asked).toEqual([email]);
+    expect(await accountExists(email)).toBe(false);
+    expect(sent.some((message) => message.to === email)).toBe(false);
+  });
+
+  it("creates an account the server admitted", async () => {
+    const email = `${unique()}@dohc.test`;
+    const signup = await closedAuth("admitted").api.signUpEmail({ body: { email, password: PASSWORD, name: "Test User" } });
+    expect(signup.user.email).toBe(email);
+    expect(await accountExists(email)).toBe(true);
+  });
+
+  it("asks the person to try again when the server cannot check invites", async () => {
+    const email = `${unique()}@dohc.test`;
+    await expect(
+      closedAuth("unavailable").api.signUpEmail({ body: { email, password: PASSWORD, name: "Test User" } }),
+    ).rejects.toMatchObject({ statusCode: 503, body: { code: "SIGN_UP_CHECK_UNAVAILABLE" } });
+    expect(await accountExists(email)).toBe(false);
+  });
+
+  it("answers the sign-up page with the refusal it shows", async () => {
+    const response = await closedAuth("refused").handler(
+      new Request("http://localhost:1786/api/auth/sign-up/email", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ email: `${unique()}@dohc.test`, password: PASSWORD, name: "Test User" }),
+      }),
+    );
+    expect(response.status).toBe(403);
+    const body = (await response.json()) as { code: string; message: string };
+    expect(body.code).toBe("SIGN_UP_CLOSED");
+    expect(body.message).toMatch(/^This server creates accounts only for approved or invited email addresses\./);
   });
 });
 

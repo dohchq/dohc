@@ -1,6 +1,8 @@
 import { betterAuth } from "better-auth";
+import { APIError } from "better-auth/api";
 import { bearer, deviceAuthorization, organization } from "better-auth/plugins";
 import type { Pool } from "pg";
+import type { SignUpAdmission } from "./signUp";
 import type { SendEmail } from "./smtp";
 
 // dohc server auth: Better Auth mounted on the same Postgres the workspace
@@ -9,7 +11,8 @@ import type { SendEmail } from "./smtp";
 // device-authorization grant for desktop login (the desktop shows a code, the
 // browser approves, and the desktop polls).
 //
-// This package owns only the auth surface and has no application callbacks.
+// This package owns the auth surface. Its only application callbacks deliver
+// email and decide whether a new account may exist.
 
 /** Verification and reset links expire one hour after dohc sends them. */
 export const EMAIL_LINK_TTL_SECONDS = 3600;
@@ -30,13 +33,30 @@ interface WorkspaceAuthOptions {
   // transport must refuse the request that would send mail (workspace-api
   // answers 503) rather than report a send that never happened.
   sendEmail?: SendEmail;
+  // Closed sign-up. Without it, anyone who reaches the server can create an
+  // account. The hook runs on every user insert, so no route can skip it.
+  admitAccount?: (email: string) => Promise<SignUpAdmission>;
 }
 
 export function createWorkspaceAuth(options: WorkspaceAuthOptions) {
   // The browser account pages live at the auth origin, so every emailed link
   // points at a dohc page that then calls /api/auth itself.
   const page = (path: string): string => new URL(path, options.baseURL).toString();
+  const admitAccount = options.admitAccount;
   return betterAuth({
+    ...(admitAccount
+      ? {
+          databaseHooks: {
+            user: {
+              create: {
+                before: async (user: { email: string }) => {
+                  refuseUnadmitted(await admitAccount(user.email));
+                },
+              },
+            },
+          },
+        }
+      : {}),
     baseURL: options.baseURL,
     secret: options.secret,
     basePath: "/api/auth",
@@ -121,6 +141,22 @@ export function createWorkspaceAuth(options: WorkspaceAuthOptions) {
       }),
     ],
   });
+}
+
+function refuseUnadmitted(admission: SignUpAdmission): void {
+  if (admission === "refused") {
+    throw new APIError("FORBIDDEN", {
+      code: "SIGN_UP_CLOSED",
+      message:
+        "This server creates accounts only for approved or invited email addresses. Ask the server owner to approve this address, or ask someone here to share work with it.",
+    });
+  }
+  if (admission === "unavailable") {
+    throw new APIError("SERVICE_UNAVAILABLE", {
+      code: "SIGN_UP_CHECK_UNAVAILABLE",
+      message: "dohc could not check whether this address is invited. Try again in a minute.",
+    });
+  }
 }
 
 async function unavailableEmail(_message: Parameters<SendEmail>[0]): Promise<void> {

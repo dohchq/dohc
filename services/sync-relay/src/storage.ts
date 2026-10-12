@@ -1076,6 +1076,10 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     return sharesStorage.claimPendingSharesForEmail(this, email, userId);
   }
 
+  hasPendingInvite(email: string): boolean {
+    return sharesStorage.hasPendingInvite(this, email);
+  }
+
   shareHasActiveGrants(shareId: string): boolean {
     return !!this.db.prepare("SELECT 1 FROM sync_relay_share_grants WHERE share_id = ? AND status = 'active' LIMIT 1").get(shareId);
   }

@@ -122,6 +122,33 @@ It uses the peer address instead when the header is missing, is longer than 4,09
 It answers 400 to a connection without an IP address.
 The [proxy section of the share-web operations reference](../../services/share-web/README.md#public-origin-and-proxy) describes the `share-web` rules.
 
+## Choose who can create an account
+
+By default, anyone who can reach the server can create an account on it.
+To close sign-up, list the approved email addresses in `.env.self-host`, separated by commas:
+
+```dotenv
+DOHC_SIGN_UP_EMAILS=you@your-domain.com,colleague@your-domain.com
+```
+
+Include your own address.
+With a list, the server also accepts an address that has a pending invite.
+A pending invite exists when someone shares work with an email address that has no verified account on the server.
+Revoking that share removes the invite.
+The server ignores case and surrounding spaces when it compares addresses.
+
+Any other address gets a message that the server creates accounts only for approved or invited addresses.
+Share links need no account, so closed sign-up does not change them.
+Removing an address from the list does not remove its existing account.
+Stop and start the deployment to apply a changed list.
+Leave `DOHC_SIGN_UP_EMAILS` empty to open sign-up again.
+
+`workspace-api` asks `sync-relay` about pending invites over the internal Docker network.
+If the relay does not answer, an address outside the list gets a message to try again.
+Listed addresses can still sign up.
+Outside the self-host bundle, set `WORKSPACE_API_RELAY_URL` on `workspace-api` to the relay's internal origin.
+Both services must use the same `BETTER_AUTH_SECRET`.
+
 ## Start and check the server
 
 ```sh
