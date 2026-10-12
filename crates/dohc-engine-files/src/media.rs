@@ -36,25 +36,38 @@ pub fn media_type_for_path(rel_path: &str) -> &'static str {
 const COLLECTION_TEXT_FILENAMES: [&str; 2] = ["collection.yaml", "automations.yaml"];
 
 /// The text/binary routing decision the capture pipeline makes before any
-/// UTF-8 sniffing. Ports `isTextMediaType` (`packages/workspace-fs/src/metadata.ts`)
-/// byte-for-byte, including its quirks (a `.ts` file outside a site source
-/// tree routes as binary; `.js` routes as text): the differential harness
-/// compares against the TS oracle, so the quirks are the contract.
+/// UTF-8 sniffing. Matches `isTextMediaType` in `packages/workspace-fs/src/metadata.ts`:
+/// MIME tokens and basename extensions identify text; directory names do not.
+/// Collection filenames and site source paths retain their explicit text rules.
 pub fn is_text_media_type(media_type: &str, rel_path: &str) -> bool {
     if is_sqlite_media_type(media_type, rel_path) {
         return false;
     }
     let basename = rel_path.rsplit(['/', '\\']).next().unwrap_or(rel_path);
-    let lower = format!("{media_type} {rel_path}").to_lowercase();
+    let media = media_type
+        .split(';')
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_lowercase();
+    let lower_name = basename.to_lowercase();
+    let extension = lower_name
+        .rsplit_once('.')
+        .map(|(_, extension)| extension)
+        .unwrap_or_default();
     COLLECTION_TEXT_FILENAMES.contains(&basename)
-        || lower.contains("text/")
-        || lower.contains("json")
-        || lower.contains("csv")
+        || media.starts_with("text/")
+        || media.ends_with("/json")
+        || media.ends_with("+json")
+        || matches!(
+            media.as_str(),
+            "application/x-ndjson" | "application/ndjson" | "application/csv" | "application/x-csv"
+        )
         || is_site_source_path(rel_path)
-        || lower.ends_with(".md")
-        || lower.ends_with(".markdown")
-        || lower.ends_with(".sh")
-        || lower.ends_with(".txt")
+        || matches!(
+            extension,
+            "json" | "jsonl" | "ndjson" | "csv" | "excalidraw" | "md" | "markdown" | "sh" | "txt"
+        )
 }
 
 /// Ports `isSqliteMediaType` (`packages/workspace-fs/src/metadata.ts`).

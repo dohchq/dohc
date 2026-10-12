@@ -989,12 +989,12 @@ describe("createCaptureLiveStores", () => {
     });
   });
 
-  it("translates capture origins and flattens daemon conflict side states", async () => {
+  it.each(["open", "resolved"] as const)("translates %s conflicts into public records", async (status) => {
     const client = clientFor(async (request) => {
       expect(request.method).toBe(WORKSPACE_METHOD.conflictsList);
       return {
         id: request.id,
-        result: { conflicts: [conflict()], nextAfterConflictId: null },
+        result: { conflicts: [conflict(status)], nextAfterConflictId: null },
       };
     });
     const { store } = createCaptureLiveStores(
@@ -1002,9 +1002,8 @@ describe("createCaptureLiveStores", () => {
       sessionsFor(client),
     );
 
-    await expect(
-      store.listTextConflicts({ workspaceId: WORKSPACE_ID, status: "open" }),
-    ).resolves.toMatchObject({
+    const result = await store.listTextConflicts({ workspaceId: WORKSPACE_ID, status });
+    expect(result).toMatchObject({
       nextAfterConflictId: null,
       conflicts: [
         {
@@ -1022,6 +1021,11 @@ describe("createCaptureLiveStores", () => {
         },
       ],
     });
+    if (status === "open") {
+      expect(result.conflicts[0]).not.toHaveProperty("resolution");
+    } else {
+      expect(result.conflicts[0]?.resolution).toBe("applied-incoming");
+    }
   });
 
   it("preserves nonempty binary conflict-side byte lengths", async () => {

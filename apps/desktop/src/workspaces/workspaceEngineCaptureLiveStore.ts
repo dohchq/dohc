@@ -12,6 +12,7 @@ import type {
   SecretFileStore,
   TextFileSnapshot,
   VersionRecord,
+  VersionedTextConflictRecord,
   VersionedTextFileState,
   VersionedTextMoment,
   VersionedTextMomentSummary,
@@ -428,9 +429,10 @@ function momentSummaryFromWire(
   };
 }
 
-function conflictFromWire(conflict: ConflictRecord) {
+function conflictFromWire(conflict: ConflictRecord): VersionedTextConflictRecord {
+  const { resolution, ...record } = conflict;
   return {
-    ...conflict,
+    ...record,
     base: conflictStateFromWire(conflict.base),
     current: conflictStateFromWire(conflict.current),
     incoming: conflictStateFromWire(conflict.incoming),
@@ -443,8 +445,8 @@ function conflictFromWire(conflict: ConflictRecord) {
         ? { correlationId: conflict.metadata.correlationId }
         : {}),
     }),
-    ...(conflict.resolution !== null
-      ? { resolution: conflict.resolution }
+    ...(resolution !== null
+      ? { resolution }
       : {}),
   };
 }
@@ -1133,7 +1135,7 @@ export function createCaptureLiveStores(
       metadata: ActorNeutralWriteMetadata;
       author?: MomentWriteAuthor;
       captureHoldId?: string;
-    }) {
+    }): ReturnType<VersionedTextStore["renameTextFile"]> {
       const before = await store.readTextFile({
         workspaceId: input.workspaceId,
         versionId: input.versionId,
@@ -1278,7 +1280,7 @@ export function createCaptureLiveStores(
       sourceVersionId: string;
       path: string;
       metadata: ActorNeutralWriteMetadata;
-    }) {
+    }): ReturnType<VersionedTextStore["mergeTextFileFromVersion"]> {
       const before = await store.readTextFile({
         workspaceId: input.workspaceId,
         versionId: input.targetVersionId,
@@ -1554,7 +1556,7 @@ export function createCaptureLiveStores(
     },
 
     close: async () => await sessions.closeWorkspace(workspace),
-  };
+  } satisfies CaptureVersionedTextStore;
 
   const secretStore = {
     async writeSecretFile(input: Parameters<SecretFileStore["writeSecretFile"]>[0]) {
@@ -1564,7 +1566,7 @@ export function createCaptureLiveStores(
           metadata: adapterMetadata(input.metadata),
         });
         return {
-          ...result,
+          changed: result.changed,
           ...(result.moment
             ? { moment: secretMomentFromWire(result.moment) }
             : {}),
@@ -1607,7 +1609,7 @@ export function createCaptureLiveStores(
       runRawMutation(async (adapter) => {
         const result = await adapter.applySecretFileFromVersion(input);
         return {
-          ...result,
+          changed: result.changed,
           ...(result.moment
             ? { moment: secretMomentFromWire(result.moment) }
             : {}),
@@ -1628,10 +1630,7 @@ export function createCaptureLiveStores(
     ) =>
       runRawRead(async (adapter) => await adapter.materializeSecretFile(input)),
     close: async () => await sessions.closeWorkspace(workspace),
-  };
+  } satisfies SecretFileStore;
 
-  return {
-    store: store as unknown as CaptureVersionedTextStore,
-    secretStore: secretStore as unknown as SecretFileStore,
-  };
+  return { store, secretStore };
 }
