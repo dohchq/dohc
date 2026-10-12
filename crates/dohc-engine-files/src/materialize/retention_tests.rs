@@ -1012,3 +1012,168 @@ fn checked_delete_receipt_failure_returns_retained_original() {
         }
     }
 }
+
+#[cfg(all(unix, feature = "fault-injection"))]
+#[test]
+fn checked_delete_release_failure_preserves_receipt_error_and_rolls_back() {
+    for occupied in [false, true] {
+        let scratch = ScratchDir::new_named("checked-delete-release-failure").unwrap();
+        let root = scratch.path();
+        let db = root.join("engine.db");
+        let mut store = EngineStore::open(&db, 0).unwrap();
+        let target = root.join("notes.md");
+        std::fs::write(&target, b"before").unwrap();
+        let j = checked_delete_job(&mut store);
+        store
+            .read_with(|conn| {
+                conn.execute_batch(
+                    "CREATE TRIGGER fail_receipt BEFORE UPDATE OF status ON materialization_jobs
+             WHEN NEW.status='complete' BEGIN SELECT RAISE(FAIL, 'receipt failure'); END;
+             CREATE TRIGGER fail_release BEFORE DELETE ON materialization_retained
+             BEGIN SELECT RAISE(FAIL, 'release failure'); END;",
+                )
+            })
+            .unwrap();
+        struct OccupyOnReceipt<'a>(&'a Path, bool);
+        impl FaultInjector for OccupyOnReceipt<'_> {
+            fn poll(&self, point: FaultPoint) -> dohc_engine_storage::FaultAction {
+                if self.1 && point == FaultPoint::MaterializeAfterKnownCopyDeletion {
+                    std::fs::write(self.0, b"outside replacement").unwrap();
+                }
+                dohc_engine_storage::FaultAction::Continue
+            }
+        }
+        let fill = OccupyOnReceipt(&target, occupied);
+        let mut opts = options(0, &StdReplacer);
+        opts.faults = &fill;
+        let error = materialize_one_ordinary(&store, root, &j, &opts).unwrap_err();
+        assert!(
+            format!("{error:?}").contains("receipt failure"),
+            "{error:?}"
+        );
+        let row = store.retained_displacements_after(0).unwrap().remove(0);
+        assert_eq!(
+            store
+                .load_materialization_job(&j.job_id)
+                .unwrap()
+                .unwrap()
+                .status,
+            JobStatus::Pending
+        );
+        assert!(store.list_kept_displacements("ws").unwrap().is_empty());
+        assert_eq!(
+            std::fs::read(&target).unwrap(),
+            if occupied {
+                b"outside replacement".as_slice()
+            } else {
+                b"before".as_slice()
+            }
+        );
+        if occupied {
+            assert_eq!(
+                std::fs::read(root.join(&row.source_path)).unwrap(),
+                b"before"
+            );
+        } else {
+            assert!(!root.join(&row.source_path).exists());
+            assert!(matches!(
+                crate::retained::inspect(root, &row, 1000).unwrap(),
+                crate::retained::Inspection::Missing
+            ));
+        }
+        drop(store);
+        let store = EngineStore::open(&db, 1000).unwrap();
+        recover_displacements(&store, root, Some("ws"), &options(1000, &StdReplacer)).unwrap();
+        assert_eq!(
+            store.retained_displacements_after(0).unwrap(),
+            vec![row.clone()]
+        );
+        store
+            .read_with(|conn| {
+                conn.execute_batch("DROP TRIGGER fail_receipt; DROP TRIGGER fail_release;")
+            })
+            .unwrap();
+        if occupied {
+            std::fs::write(root.join(&row.source_path), b"late outside write").unwrap();
+            sweep(&store, root, 1000);
+            let bytes: Vec<u8> = store
+                .read_with(|conn| {
+                    conn.query_row(
+                        "SELECT bytes FROM materialization_displacement_reads",
+                        [],
+                        |r| r.get(0),
+                    )
+                })
+                .unwrap();
+            assert_eq!(bytes, b"late outside write");
+        } else {
+            sweep(&store, root, 1000);
+            assert!(store.retained_displacements_after(0).unwrap().is_empty());
+        }
+        assert_eq!(
+            std::fs::read(&target).unwrap(),
+            if occupied {
+                b"outside replacement".as_slice()
+            } else {
+                b"before".as_slice()
+            }
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn checked_delete_retry_reserves_missing_retained_name_after_recovering_another_row() {
+    let scratch = ScratchDir::new_named("checked-delete-reserved-name").unwrap();
+    let root = scratch.path();
+    let mut store = EngineStore::open(&root.join("engine.db"), 0).unwrap();
+    std::fs::write(root.join("notes.md"), b"before").unwrap();
+    let j = checked_delete_job(&mut store);
+    store
+        .read_with(|conn| {
+            conn.execute_batch(
+                "CREATE TRIGGER fail_receipt BEFORE UPDATE OF status ON materialization_jobs
+         WHEN NEW.status='complete' BEGIN SELECT RAISE(FAIL, 'receipt failure'); END;
+         CREATE TRIGGER fail_release BEFORE DELETE ON materialization_retained
+         BEGIN SELECT RAISE(FAIL, 'release failure'); END;",
+            )
+        })
+        .unwrap();
+    materialize_one_ordinary(&store, root, &j, &options(0, &StdReplacer)).unwrap_err();
+    let old = store.retained_displacements_after(0).unwrap().remove(0);
+    assert!(!root.join(&old.source_path).exists());
+    store
+        .read_with(|conn| conn.execute_batch("DROP TRIGGER fail_receipt;"))
+        .unwrap();
+    // Force recovery through its row loop instead of its empty-row fast path.
+    let name = staged_name(&j.job_id, 1);
+    std::fs::write(root.join(STAGING_DIR).join(&name), b"before").unwrap();
+    store
+        .open_displacement(&DisplacementSpec {
+            job_id: j.job_id.clone(),
+            workspace_id: "ws".into(),
+            target_path: "notes.md".into(),
+            displaced_name: name,
+            expected_sha256: hex_sha256(b"before"),
+            content_sha256: None,
+            now_ms: 1,
+        })
+        .unwrap();
+    assert_eq!(
+        materialize_one_ordinary(&store, root, &j, &options(1000, &StdReplacer)).unwrap(),
+        JobOutcome::Completed
+    );
+    assert!(
+        !root.join(&old.source_path).exists(),
+        "retry must not reuse the stale row's name"
+    );
+    let rows = store.retained_displacements_after(0).unwrap();
+    assert_eq!(rows.len(), 3);
+    assert_eq!(rows[0], old);
+    store
+        .read_with(|conn| conn.execute_batch("DROP TRIGGER fail_release;"))
+        .unwrap();
+    sweep(&store, root, 31_000);
+    assert!(store.retained_displacements_after(0).unwrap().is_empty());
+    assert!(!root.join("notes.md").exists());
+}

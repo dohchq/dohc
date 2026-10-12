@@ -1604,16 +1604,25 @@ fn materialize_delete(
             Ok(JobOutcome::Completed)
         })();
         #[cfg(unix)]
-        if published.is_err()
-            && let Some((id, _)) = registered
-        {
-            // Rollback owns this source again; the retention worker must not release it.
-            store.release_retained(id)?;
-        }
+        let retention_release_failed = published.is_err()
+            && registered.is_some_and(|(id, _)| {
+                if let Err(error) = store.release_retained(id) {
+                    eprintln!("materialization rollback retention release: {error}");
+                    true
+                } else {
+                    false
+                }
+            });
+        #[cfg(not(unix))]
+        let retention_release_failed = false;
         if published.is_err()
             && entry_exists(&staged)?
             && !return_displaced(target, &staged, options)?
         {
+            // A failed return leaves retention as the only owner of this source.
+            if retention_release_failed {
+                return published;
+            }
             let moved = Moved::open(store, spec, &staging.dir)?;
             store.resolve_displacement(
                 moved.displacement_id,
@@ -3421,6 +3430,7 @@ fn recover_job_displacements(
         .into_iter()
         .map(|row| row.displaced_name)
         .collect();
+    taken.extend(store.retained_names_for_job(&job.job_id)?);
     Ok((
         Staging {
             root: root.to_owned(),

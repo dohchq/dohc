@@ -3860,6 +3860,32 @@ mod doc_cache_reset_tests {
 
     #[test]
     fn conditional_restore_delete_complete_version_switch_discards_publication() {
+        checked_delete_version_switch_discards_publication(true);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn conditional_restore_delete_pending_retained_version_switch_discards_publication() {
+        checked_delete_version_switch_discards_publication(false);
+    }
+
+    #[cfg(unix)]
+    fn assert_pending_retained_checked_delete(store: &EngineStore, root: &std::path::Path) {
+        assert_eq!(
+            store
+                .load_materialization_job("restore-delete-mat_restore-delete")
+                .unwrap()
+                .unwrap()
+                .status,
+            JobStatus::Pending
+        );
+        let rows = store.retained_displacements_after(0).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert!(root.join(&rows[0].source_path).is_file());
+        assert!(!root.join("record.md").exists());
+    }
+
+    fn checked_delete_version_switch_discards_publication(complete: bool) {
         for binary in [false, true] {
             let (root, mut store, input, expected) = checked_delete_fixture(binary);
             crash_checked_delete(
@@ -3869,7 +3895,12 @@ mod doc_cache_reset_tests {
                 &expected,
                 FaultPoint::MaterializeAfterKnownCopyDeletion,
             );
-            complete_checked_delete_materialization(&store, &root);
+            if complete {
+                complete_checked_delete_materialization(&store, &root);
+            } else {
+                #[cfg(unix)]
+                assert_pending_retained_checked_delete(&store, &root);
+            }
             create_checked_delete_version(&mut store);
             let switched = super::super::versions::switch_active_version_on_store(
                 &mut store,
@@ -3907,6 +3938,16 @@ mod doc_cache_reset_tests {
     fn conditional_restore_delete_pending_discard_restores_current_snapshot_before_capture() {
         checked_delete_discard_restores_current_snapshot(
             FaultPoint::MaterializeAfterRenameBeforeComplete,
+            false,
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn conditional_restore_delete_pending_retained_discard_restores_snapshot() {
+        checked_delete_discard_restores_current_snapshot(
+            FaultPoint::MaterializeAfterKnownCopyDeletion,
+            false,
         );
     }
 
@@ -3914,10 +3955,11 @@ mod doc_cache_reset_tests {
     fn conditional_restore_delete_complete_discard_restores_current_snapshot_before_capture() {
         checked_delete_discard_restores_current_snapshot(
             FaultPoint::MaterializeAfterKnownCopyDeletion,
+            true,
         );
     }
 
-    fn checked_delete_discard_restores_current_snapshot(point: FaultPoint) {
+    fn checked_delete_discard_restores_current_snapshot(point: FaultPoint, complete: bool) {
         #[derive(Default)]
         struct RecordedWrites(std::sync::Mutex<Vec<String>>);
         impl SelfWriteRecorder for RecordedWrites {
@@ -3932,8 +3974,11 @@ mod doc_cache_reset_tests {
             for crash_finish in [false, true] {
                 let (root, mut store, input, expected) = checked_delete_fixture(binary);
                 crash_checked_delete(&root, &mut store, &input, &expected, point);
-                if point == FaultPoint::MaterializeAfterKnownCopyDeletion {
+                if complete {
                     complete_checked_delete_materialization(&store, &root);
+                } else if point == FaultPoint::MaterializeAfterKnownCopyDeletion {
+                    #[cfg(unix)]
+                    assert_pending_retained_checked_delete(&store, &root);
                 }
                 change_checked_delete_content(&mut store, &root, binary);
                 dohc_engine_files::recover_displacements(
