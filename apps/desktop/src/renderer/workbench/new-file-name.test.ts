@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { withMarkdownDefault } from "./new-file-name";
+import { withMarkdownDefault, withRenameDefault } from "./new-file-name";
 
 describe("withMarkdownDefault", () => {
   it("appends .md to a plain name", () => {
@@ -51,5 +51,38 @@ describe("withMarkdownDefault", () => {
     expect(withMarkdownDefault("/")).toBe("/");
     expect(withMarkdownDefault(".")).toBe(".");
     expect(withMarkdownDefault("..")).toBe("..");
+  });
+});
+
+describe("withRenameDefault", () => {
+  it("gives a typed name without an extension the file's own extension", () => {
+    expect(withRenameDefault("notes.md", "notes")).toBe("notes.md");
+    expect(withRenameDefault("report.csv", "report")).toBe("report.csv");
+    expect(withRenameDefault("report.csv", "summary")).toBe("summary.csv");
+    expect(withRenameDefault("report.csv", "summary.")).toBe("summary.csv");
+    expect(withRenameDefault("docs/plan.txt", "docs/outline")).toBe("docs/outline.txt");
+  });
+
+  it("gives back only the last part of a multi-part extension", () => {
+    expect(withRenameDefault("archive.tar.gz", "archive")).toBe("archive.gz");
+  });
+
+  it("respects a typed extension or dotfile exactly", () => {
+    expect(withRenameDefault("hello.m", "hello.txt")).toBe("hello.txt");
+    expect(withRenameDefault("archive.tar.gz", "backup.tar.gz")).toBe("backup.tar.gz");
+    expect(withRenameDefault("report.csv", ".env")).toBe(".env");
+  });
+
+  it("treats a last-dot tail with whitespace as no extension", () => {
+    expect(withRenameDefault("Dr. Smith notes", "Smith")).toBe("Smith");
+    expect(withRenameDefault("Mr. Rogers", "Fred")).toBe("Fred");
+  });
+
+  it("takes the typed name for a file without an extension", () => {
+    expect(withRenameDefault("LICENSE", "LICENSE")).toBe("LICENSE");
+    expect(withRenameDefault("LICENSE", "NOTICE")).toBe("NOTICE");
+    expect(withRenameDefault("docs/Makefile", "docs/Rakefile")).toBe("docs/Rakefile");
+    expect(withRenameDefault(".env", "env")).toBe("env");
+    expect(withRenameDefault("LICENSE", "LICENSE.txt")).toBe("LICENSE.txt");
   });
 });

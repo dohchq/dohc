@@ -1,6 +1,12 @@
+// The dohc Markdown schema and tokenizers, without the Y.Doc conversions.
+// Every surface that builds a dohc schema imports its definitions from here,
+// so a fix to a tokenizer reaches the editor and the projection together.
 import { Extension, Mark, Node, markInputRule } from '@tiptap/core'
-import type { JSONContent } from '@tiptap/core'
-import { TaskItem } from '@tiptap/extension-list'
+import type { JSONContent, MarkdownRendererHelpers } from '@tiptap/core'
+import { getDefaults, Lexer, Tokenizer, type Tokens } from 'marked'
+import { preprocessTablePipes, renderTableToMarkdown, Table } from '@tiptap/extension-table'
+import { OrderedList, ORDERED_LIST_MARKER_PATTERN, TaskItem, TaskList } from '@tiptap/extension-list'
+import { Paragraph } from '@tiptap/extension-paragraph'
 import { sanitizeImageSrc } from './image-src.js'
 
 function firstTokenMatch(src: string, pattern: RegExp): RegExpMatchArray | null {
@@ -14,7 +20,22 @@ function firstUnescapedIndex(src: string, pattern: RegExp): number {
   return match.index + (match[1]?.length ?? 0)
 }
 
-function lineMarkerStart(src: string, marker: string): number {
+// marked asks where a block may start only to cut the paragraph it is about
+// to read, and that paragraph ends at the first line holding only spaces. A
+// search past that line would read the rest of the document per paragraph.
+function paragraphRegion(src: string): string {
+  let lineEnd = src.indexOf('\n')
+  while (lineEnd >= 0) {
+    let next = lineEnd + 1
+    while (src[next] === ' ') next += 1
+    if (next === src.length || src[next] === '\n') return src.slice(0, lineEnd)
+    lineEnd = src.indexOf('\n', next)
+  }
+  return src
+}
+
+function lineMarkerStart(source: string, marker: string): number {
+  const src = paragraphRegion(source)
   let markerIndex = src.indexOf(marker)
   while (markerIndex >= 0) {
     if (markerIndex === 0 || src[markerIndex - 1] === '\n') {
@@ -25,7 +46,8 @@ function lineMarkerStart(src: string, marker: string): number {
   return -1
 }
 
-function calloutStart(src: string): number {
+function calloutStart(source: string): number {
+  const src = paragraphRegion(source)
   let markerIndex = src.indexOf('[!')
   while (markerIndex >= 0) {
     let quoteIndex = markerIndex - 1
@@ -151,7 +173,7 @@ function imageTokenAttr(
   return String(value ?? '')
 }
 
-const DohcImage = Node.create({
+export const DohcImage = Node.create({
   name: 'image',
   inline: true,
   group: 'inline',
@@ -389,6 +411,13 @@ const DohcInlineAtom = Node.create({
 // optional fold flag (`-` folded, `+` open) and an optional title, e.g.
 // `> [!note]- My title`. Unknown callout types are preserved verbatim (styled
 // like a note but keeping the original type string) so nothing is ever dropped.
+// The callout and display math are block nodes. One below the paragraph's
+// priority of 1000 keeps the paragraph the block an empty document fills with:
+// a callout holds `block+`, so filling with one would recurse without end, as
+// a browser's HTML parse of `<!-- note -->` does. It stays above every
+// default-priority tokenizer, so the block tokenizers register in the same order.
+const CUSTOM_BLOCK_PRIORITY = 999
+
 const DEFAULT_CALLOUT_TYPE = 'note'
 const CALLOUT_HEADER_RE = /^\[!([^\]\n]+)\]([+-]?)[ \t]*(.*)$/
 const CALLOUT_LINE_RE = /^ {0,3}>/
@@ -542,7 +571,7 @@ function isCalloutFenceCloser(line: string, opener: string): boolean {
 
 const DohcCallout = Node.create({
   name: 'callout',
-  priority: 1000,
+  priority: CUSTOM_BLOCK_PRIORITY,
   group: 'block',
   content: 'block+',
   defining: true,
@@ -783,7 +812,7 @@ function findClosingInlineMath(src: string): number {
   return -1
 }
 
-const DohcMathInline = Node.create({
+export const DohcMathInline = Node.create({
   name: 'mathInline',
   priority: 1000,
   inline: true,
@@ -841,9 +870,9 @@ const DohcMathInline = Node.create({
   renderMarkdown: (node) => `$${String(node.attrs?.tex ?? '')}$`,
 })
 
-const DohcMathBlock = Node.create({
+export const DohcMathBlock = Node.create({
   name: 'mathBlock',
-  priority: 1000,
+  priority: CUSTOM_BLOCK_PRIORITY,
   group: 'block',
   atom: true,
 
@@ -967,3 +996,260 @@ export const dohcMarkdownExtensions = [
   DohcTableRowHeight,
   DohcCodeBlock,
 ]
+
+// GFM forbids block nodes inside table cells but permits inline raw HTML, so a
+// multi-block ProseMirror cell uses a visible hard break instead of U+001F.
+export const GFM_TABLE_CELL_BLOCK_SEPARATOR = '<br>'
+function prepareRenderedTableCell(markdown: string): string {
+  // Raw inline HTML is the canonical representation of cell block boundaries.
+  // The importer represents those tags as text, so normalize them before the
+  // table renderer measures the cell again.
+  markdown = markdown
+    .replaceAll('&amp;lt;br&amp;gt;', GFM_TABLE_CELL_BLOCK_SEPARATOR)
+    .replaceAll('&lt;br&gt;', GFM_TABLE_CELL_BLOCK_SEPARATOR)
+  let output = ''
+  let precedingBackslashes = 0
+
+  for (const character of markdown) {
+    if (character === '|' && precedingBackslashes % 2 === 0) {
+      output += '\\'
+    }
+    output += character
+    precedingBackslashes = character === '\\' ? precedingBackslashes + 1 : 0
+  }
+
+  return output
+}
+
+function firstLine(source: string): string {
+  const newline = source.indexOf('\n')
+  return newline < 0 ? source : source.slice(0, newline)
+}
+
+const orderedListTokenizer = OrderedList.config.markdownTokenizer!
+const taskListTokenizer = TaskList.config.markdownTokenizer!
+const tableTokenizer = Table.config.markdownTokenizer!
+const orderedListStart = new RegExp(`^(\\s*)(${ORDERED_LIST_MARKER_PATTERN})([.)])\\s+(.*)$`)
+
+// Tiptap 3.29.2 splits the remaining document before rejecting unrelated
+// blocks. Check only the first line, then leave eligible blocks to Tiptap.
+export const MarkdownOrderedList = OrderedList.extend({
+  markdownTokenizer: {
+    ...orderedListTokenizer,
+    tokenize: (src, tokens, helpers) => {
+      if (!orderedListStart.test(firstLine(src))) return undefined
+      return orderedListTokenizer.tokenize(src, tokens, helpers)
+    },
+  },
+})
+export const MarkdownTaskList = TaskList.extend({
+  markdownTokenizer: {
+    ...taskListTokenizer,
+    tokenize: (src, tokens, helpers) => {
+      // parseIndentedBlocks also accepts leading blank lines.
+      const firstContent = src.search(/\S/)
+      if (firstContent < 0) return undefined
+      const line = firstLine(src.slice(firstContent))
+      if (!/^([-+*])\s+\[([ xX])\]\s+(.*)$/.test(line)) return undefined
+      return taskListTokenizer.tokenize(src, tokens, helpers)
+    },
+  },
+})
+
+// A resized row keeps its height in an HTML comment on the line above its
+// table: `<!-- dohc:table row-heights=1:84,2:120 -->`. Row indexes count from
+// the header row. GFM has no row-height syntax, Markdown renderers hide the
+// comment, and the Rust projector writes the same bytes, so a local close
+// that prunes the Y.Doc and reseeds from the file keeps the height.
+const TABLE_ROW_HEIGHTS_RE =
+  /^<!-- dohc:table row-heights=(\d+:\d+(?:,\d+:\d+)*) -->[ \t]*(?:\n+|$)/u
+const tableParseMarkdown = Table.config.parseMarkdown!
+type TableRowHeightsToken = Parameters<typeof tableParseMarkdown>[0] & {
+  rowHeights?: [number, number][]
+}
+
+// The Rust projector reads the attribute through `attr_i64`, which accepts
+// an integer or a trimmed integer string. Keep the same rule here so both
+// projectors write the same annotation for the same Y.Doc.
+function tableRowHeight(value: unknown): number | null {
+  const height = typeof value === 'number'
+    ? value
+    : typeof value === 'string' && /^\s*[+-]?\d+\s*$/u.test(value)
+      ? Number(value)
+      : Number.NaN
+  return Number.isSafeInteger(height) && height > 0 ? height : null
+}
+
+function tableRowHeightsAnnotation(rows: JSONContent[]): string {
+  const pairs: string[] = []
+  rows.forEach((row, index) => {
+    const height = tableRowHeight(row.attrs?.height)
+    if (height !== null) pairs.push(`${index}:${height}`)
+  })
+  return pairs.length ? `<!-- dohc:table row-heights=${pairs.join(',')} -->` : ''
+}
+
+// Table.start only inspects the first two lines. Avoid splitting the full
+// remaining document while probing ordinary blocks.
+function tableStart(src: string): number {
+  const newline = src.indexOf('\n')
+  if (newline < 0) return -1
+  const second = src.indexOf('\n', newline + 1)
+  const prefix = second < 0 ? src : src.slice(0, second)
+  return (tableTokenizer.start as (source: string) => number)(prefix)
+}
+
+// Finds the table at the start of `rest` with marked's table rule and nothing
+// else, and returns its lines as that rule read them. Lexing the rest of the
+// document would re-enter this tokenizer for every later table, and even a
+// plain lexer would parse every block after the table, so a run of tables
+// would cost quadratic time. GFM rows are one line each, which Tiptap's raw
+// reconstruction gets wrong when a cell holds a pipe inside inline code.
+//
+// The importer reads a table the way Tiptap's tokenizer does: first with the
+// pipes inside code spans escaped, and only when that is no table, from the
+// raw text with marked's own rule. The two can count a row's cells
+// differently, so this reads the same text. An escape never starts or ends a
+// line, so marked's rule spans the same lines of either text, and only those
+// lines are read.
+function leadingTable(
+  rest: string,
+): { table: Tokens.Table; lines: string[]; source: string[] } | undefined {
+  const tokenizer = new Tokenizer()
+  // The lexer gives the tokenizer its GFM rules and the inline queue the
+  // table rule fills.
+  tokenizer.lexer = new Lexer({ ...getDefaults(), tokenizer })
+  const own = tokenizer.rules.block.table.exec(rest)?.[0].replace(/\n+$/u, '')
+  if (own === undefined) return undefined
+  const escaped = preprocessTablePipes(own)
+  for (const text of escaped === own ? [own] : [escaped, own]) {
+    const table = tokenizer.table(text)
+    // The header, the delimiter, and each row take one line.
+    const count = 2 + (table?.rows.length ?? 0)
+    if (table) return { table, lines: text.split('\n', count), source: own.split('\n', count) }
+  }
+  return undefined
+}
+
+// A table row's cells as marked splits them: at each unescaped pipe, without
+// the empty cells outside a leading or trailing pipe.
+function tableRowCells(row: string): string[] {
+  const cells: string[] = []
+  let start = 0
+  let backslashes = 0
+  for (let index = 0; index < row.length; index += 1) {
+    if (row[index] === '|' && backslashes % 2 === 0) {
+      cells.push(row.slice(start, index))
+      start = index + 1
+    }
+    backslashes = row[index] === '\\' ? backslashes + 1 : 0
+  }
+  cells.push(row.slice(start))
+  if (!cells[0]?.trim()) cells.shift()
+  if (cells.length > 0 && !cells.at(-1)?.trim()) cells.pop()
+  return cells
+}
+
+// The lines of the table at the start of `rest`, joined. marked drops the
+// cells of a row past its header's count, so a row whose extra cells hold
+// text ends the table instead, and that text stays in the document.
+// Otherwise a file, or a preserved source, could hold text its document
+// lacks.
+function leadingTableText(rest: string): { text: string; cut: boolean } | undefined {
+  const read = leadingTable(rest)
+  if (!read) return undefined
+  const { table, lines, source: raw } = read
+  for (let row = 2; row < lines.length; row += 1) {
+    const extra = tableRowCells(lines[row]).slice(table.header.length)
+    if (extra.some(cell => cell.trim())) return { text: raw.slice(0, row).join('\n'), cut: true }
+  }
+  return { text: raw.join('\n'), cut: false }
+}
+
+// Only a line after the first that could be a delimiter row can start a
+// table, so ordinary blocks skip the table probe.
+const TABLE_DELIMITER_RE = /^[ \t|:]*-[ \t|:-]*$/u
+function secondLine(src: string): string {
+  const first = src.indexOf('\n')
+  if (first < 0) return ''
+  const second = src.indexOf('\n', first + 1)
+  return src.slice(first + 1, second < 0 ? undefined : second)
+}
+
+export const DohcMarkdownTable = Table.extend({
+  markdownTokenizer: {
+    ...tableTokenizer,
+    start: (src: string) => (TABLE_ROW_HEIGHTS_RE.test(src) ? 0 : tableStart(src)),
+    tokenize: (src, tokens, helpers) => {
+      const annotation = TABLE_ROW_HEIGHTS_RE.exec(src)
+      const prefix = annotation?.[0] ?? ''
+      const rest = src.slice(prefix.length)
+      const second = secondLine(rest)
+      const delimiter = TABLE_DELIMITER_RE.test(second)
+      const extent = annotation || delimiter ? leadingTableText(rest) : undefined
+      if (!annotation && !extent?.cut) {
+        // Tiptap's tokenizer reads a table only when its second line is a
+        // delimiter row with a pipe, and here it reads only the table's own
+        // lines. Given the text up to the next blank line, it would read every
+        // line after the table too, and when a code span there holds a pipe,
+        // count the line after the table as one of its own.
+        if (!extent || !second.includes('|')) return undefined
+        const table = tableTokenizer.tokenize(extent.text, tokens, helpers)
+        if (!table?.raw) return undefined
+        // The newline after the last row belongs to the table, as in marked.
+        return { ...table, raw: table.raw + (rest[table.raw.length] === '\n' ? '\n' : '') }
+      }
+      // An annotation belongs to the table that starts right after it. With
+      // no table there it stays an ordinary HTML comment for marked.
+      if (!extent) return undefined
+      const table = helpers.blockTokens(extent.text)[0]
+      if (table?.type !== 'table') return undefined
+      // The newline after the last row belongs to the table, as in marked.
+      const raw = prefix + extent.text + (extent.text.length < rest.length ? '\n' : '')
+      const rowHeights: [number, number][] = []
+      for (const pair of annotation?.[1].split(',') ?? []) {
+        const [index, height] = pair.split(':').map(Number)
+        if (Number.isSafeInteger(index) && tableRowHeight(height) !== null) {
+          rowHeights.push([index, height])
+        }
+      }
+      return { ...table, raw, rowHeights }
+    },
+  },
+  parseMarkdown: (token: TableRowHeightsToken, helpers) => {
+    const table = tableParseMarkdown(token, helpers) as JSONContent
+    const rows = table.content ?? []
+    for (const [index, height] of token.rowHeights ?? []) {
+      const row = rows[index]
+      if (row) row.attrs = { ...row.attrs, height }
+    }
+    return table
+  },
+  renderMarkdown: (node, helpers) => {
+    const tableHelpers: MarkdownRendererHelpers = {
+      ...helpers,
+      renderChildren: (nodes, separator) =>
+        prepareRenderedTableCell(helpers.renderChildren(nodes, separator)),
+    }
+    // Tiptap's table renderer includes its own trailing newline, while the
+    // document renderer also joins sibling blocks with `\n\n`. Returning both
+    // would put two blank lines between a table and its next sibling.
+    const table = renderTableToMarkdown(
+      node,
+      tableHelpers,
+      { cellLineSeparator: GFM_TABLE_CELL_BLOCK_SEPARATOR },
+    ).replace(/\n$/u, '')
+    return table ? tableRowHeightsAnnotation(node.content ?? []) + table : table
+  },
+})
+
+// Tiptap's paragraph returns a lone image without its paragraph, for a block
+// image. The dohc image is inline, so keep the paragraph around it.
+export const MarkdownParagraph = Paragraph.extend({
+  parseMarkdown: (token, helpers) => {
+    const tokens = token.tokens ?? []
+    return tokens.length === 1 && tokens[0]?.type === 'image'
+      ? helpers.createNode('paragraph', undefined, helpers.parseInline(tokens))
+      : Paragraph.config.parseMarkdown!(token, helpers)
+  },
+})

@@ -8,7 +8,7 @@ It does not rebuild the package, change Electron fuses, or enable a product test
 
 1. Install the checkout's pinned dependencies before the measurement slot.
 2. Prepare baseline and candidate packages with their build receipts.
-3. Reserve an idle Windows host and exclusive access to its desktop. Use Node 24.14 or newer and PowerShell 7.
+3. Reserve an idle Windows host and exclusive access to its desktop. Use Node 24.16 or newer and PowerShell 7.
 4. Run `node tools/perf-profiling/packaged-benchmark.mjs --help` for the options.
 5. Run each package with a new output directory and its full build commit:
 
@@ -160,7 +160,7 @@ The reader is the next agent preparing a scheduled profiling run.
 
 ## Run the full profiles
 
-Use Node 24.14 or newer and pnpm 11.20.0.
+Use Node 24.16 or newer and pnpm 11.20.0.
 
 1. Schedule an otherwise idle machine and exclusive access to the desktop display.
 2. Run `node tools/perf-profiling/run-profiles.mjs --output test-results/perf-profiling`.

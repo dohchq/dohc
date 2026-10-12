@@ -56,6 +56,8 @@ fn seed_divergent_base(
     let winner_base = winner_doc.encode_full_state();
     let winner_sha = store.put_binary_blob(&winner_base).expect("winner blob");
     let base_op = ReplicationEnvelope {
+        settlement_admission: None,
+        admitted_author_snapshot: None,
         workspace_id: WS.to_owned(),
         origin_id: "winner-origin".to_owned(),
         origin_seq: 0,
@@ -529,6 +531,8 @@ async fn a_resolution_fold_self_bounds_the_update_log() {
             let delta = winner_doc.plaintext_insert(0, "x");
             let delta_sha = store.put_binary_blob(&delta).expect("delta blob");
             let op = ReplicationEnvelope {
+                settlement_admission: None,
+                admitted_author_snapshot: None,
                 workspace_id: WS.to_owned(),
                 origin_id: "winner-origin".to_owned(),
                 origin_seq: seq + 1,

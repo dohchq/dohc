@@ -1081,6 +1081,239 @@ fn captured_disk_occupant_relocates_the_recovery_exactly_once() {
     );
 }
 
+/// A relay recovery's copy met a file at its chosen name that capture has
+/// not recorded. That copy waits for a later pass. A local recovery of
+/// unsettled typing, written to a free name, does not wait with it: the same
+/// pass still returns the local copy for placement and announcement, and the
+/// relay copy's refused write stays as it was.
+#[test]
+fn a_relay_copy_waiting_for_capture_does_not_hold_back_a_local_copy() {
+    use dohc_engine_collab::{
+        BaseRelayCoordinate, ClaimOutcome, ContentKind, DocKey, LocalAppend, MarkerCreation,
+        Regime, WriterDocCache, Ydoc, claim_base_at_relay, record_local_update,
+    };
+
+    let (_scratch, _path, mut engine) = open_store();
+    VersionedTextStore::new(&mut engine)
+        .ensure_main_version("ws", "main", 1_000, &NoFaults)
+        .expect("main version");
+    seed_identity(&mut engine);
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT INTO sync_relay_cursors
+                 (workspace_id,cursor,replication_epoch,stream_identity)
+                 VALUES ('ws','0','epoch-1','stream-1')",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .expect("relay contact");
+
+    // The relay recovery: a local lineage loses arbitration and its text
+    // becomes a sibling whose write then finds another program's file.
+    seed_text_head(
+        &mut engine,
+        "object-waiting-relay-recovery",
+        "notes/waiting.md",
+        "external editor draft",
+    );
+    let relay_key = DocKey::new("ws", "main", "object-waiting-relay-recovery").expect("doc key");
+    let loser = Ydoc::wire();
+    loser.plaintext_insert(0, "losing local draft");
+    let loser_bytes = loser.encode_full_state();
+    assert!(matches!(
+        claim_base_at_relay(
+            &mut engine,
+            &relay_key,
+            ContentKind::Plaintext,
+            &loser_bytes,
+            &BaseRelayCoordinate::new("loser", 0, 20).expect("loser coordinate"),
+            &NoFaults,
+            1_100,
+        ),
+        Ok(TxnOutcome::Committed(ClaimOutcome::Claimed { .. }))
+    ));
+    let winner = Ydoc::wire();
+    winner.plaintext_insert(0, "winning remote lineage");
+    let winner_bytes = winner.encode_full_state();
+    let winner_claim = engine.put_binary_blob(&winner_bytes).expect("winner blob");
+    let mut winner_base = envelope(
+        "waiting-winner",
+        0,
+        "ydoc.update",
+        json!({
+            "versionId": "main",
+            "objectId": "object-waiting-relay-recovery",
+            "path": "notes/waiting.md",
+            "contentKind": "plaintext",
+            "updateBlobSha256": winner_claim,
+            "lineageClaimId": winner_claim,
+            "isBaseState": true
+        }),
+    );
+    winner_base.relay_seq = Some(10);
+    let applied = apply_ydoc_envelope(
+        &mut engine,
+        &mut WriterDocCache::new(),
+        &winner_base,
+        &NoFaults,
+        &NoLiveLeases,
+    )
+    .expect("winning base");
+    assert!(matches!(
+        applied,
+        ApplyOutcome {
+            primary: ApplyDisposition::Applied(_),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        } if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
+    ));
+    let relay_job: String = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT 'sync-mat_' || recovery_moment_id FROM ydoc_recovery_decisions
+                  WHERE workspace_id='ws' AND origin_id='waiting-winner' AND origin_seq=0",
+                [],
+                |row| row.get(0),
+            )
+        })
+        .expect("relay recovery decision");
+    // Model the serialized disk boundary: the absent-preimage write found an
+    // unexpected file. Capture has not recorded it.
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "UPDATE materialization_jobs SET status='conflict' WHERE job_id=?1",
+                [&relay_job],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .expect("refused relay write");
+
+    // The local recovery: typing a closed lineage held but never settled,
+    // kept as a sibling when a local write folds the lineage onto other text.
+    let seed = "Base paragraph.\n";
+    let local_sha = seed_text_head(&mut engine, "object-local-recovery", "notes/local.md", seed);
+    let local_key = DocKey::new("ws", "main", "object-local-recovery").expect("doc key");
+    let mut cache = WriterDocCache::new();
+    let doc = Ydoc::wire();
+    let marker = MarkerCreation {
+        path: Some("notes/local.md"),
+        content_kind: ContentKind::Plaintext,
+        regime: Regime::LocalOnly,
+    };
+    let seed_update = doc.plaintext_insert(0, seed);
+    record_local_update(
+        &mut engine,
+        &mut cache,
+        &local_key,
+        &seed_update,
+        LocalAppend {
+            marker: Some(marker),
+            is_seed: true,
+            seed_source_sha256: Some(&local_sha),
+            ..Default::default()
+        },
+        &NoFaults,
+        2_000,
+        |_tx, _outcome, _sha| Ok(()),
+    )
+    .expect("seed the lineage from the file");
+    let typing_update = doc.plaintext_insert(
+        seed.encode_utf16().count() as u32,
+        "Typed and never saved.\n",
+    );
+    record_local_update(
+        &mut engine,
+        &mut cache,
+        &local_key,
+        &typing_update,
+        LocalAppend {
+            marker: Some(marker),
+            ..Default::default()
+        },
+        &NoFaults,
+        2_001,
+        |_tx, _outcome, _sha| Ok(()),
+    )
+    .expect("admit typing the session never settles");
+    engine
+        .write_with(&NoFaults, |tx| {
+            let written = dohc_engine_domain::write_text_in_tx(
+                tx,
+                &dohc_engine_domain::WriteText {
+                    workspace_id: "ws".to_owned(),
+                    version_id: "main".to_owned(),
+                    object_id: "object-local-recovery".to_owned(),
+                    path: "notes/local.md".to_owned(),
+                    text: "Written outside dohc.\n".to_owned(),
+                    moment_id: "moment-local-write".to_owned(),
+                    metadata_origin: "api".to_owned(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    now_ms: 2_100,
+                    request_id: None,
+                },
+            )
+            .map_err(|error| SyncError::corrupt(std::io::Error::other(error.to_string())))?;
+            reconcile_local_resulting_head_in_tx(
+                tx,
+                "ws",
+                "main",
+                &written.snapshot.object_id,
+                ResultingHead::Text {
+                    path: &written.snapshot.path,
+                    text: &written.snapshot.text,
+                },
+                None,
+                None,
+                2_100,
+            )?;
+            Ok::<_, SyncError>(())
+        })
+        .expect("the local write folds the lineage and keeps the typing");
+    let (local_path, local_job): (String, String) = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT target_path, job_id FROM materialization_jobs
+                  WHERE workspace_id='ws' AND status='pending'
+                    AND job_id GLOB 'sync-mat_ydoc-recovery-moment-*'
+                    AND target_path LIKE 'notes/local (recovered %'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+        })
+        .expect("the local copy's pending write");
+
+    let repaired = repair_conflicted_ydoc_recoveries(&mut engine, "ws", &NoFaults)
+        .expect("a relay copy waiting for capture is not an error");
+    assert_eq!(
+        repaired,
+        vec![YdocRecoveryMaterialization {
+            path: local_path,
+            materialization_job_id: local_job,
+        }],
+        "the local copy is placed and announced"
+    );
+    let relay_status: String = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT status FROM materialization_jobs WHERE job_id=?1",
+                [&relay_job],
+                |row| row.get(0),
+            )
+        })
+        .expect("relay job status");
+    assert_eq!(
+        relay_status, "conflict",
+        "the relay copy still waits for capture"
+    );
+}
+
 #[test]
 fn a_losing_lineage_delta_is_acked_without_entering_the_winner() {
     let (_scratch, _path, mut engine) = open_store();
@@ -1961,7 +2194,346 @@ fn a_coalesced_conflict_still_recounts_on_redelivery() {
 }
 
 #[test]
+fn file_folds_converge_through_the_peer_projection_path() {
+    assert_peer_fold("", "Completed\n", false);
+    assert_peer_fold("", "- parent\n  - nested\n", true);
+    let initial =
+        "---\nid: rec_aaaaaaaaaaaaaaaaaaaaaaaaaa\nstatus: todo\n---\n- parent\n  - nested\n";
+    assert_peer_fold(initial, &initial.replace("todo", "done"), false);
+    assert_peer_fold(initial, &initial.replace("nested", "changed nested"), true);
+}
+
+fn assert_peer_fold(initial: &str, chosen: &str, refuses: bool) {
+    assert_peer_fold_from(initial, chosen, refuses, None, false);
+}
+
+#[test]
+fn a_compensated_settle_cannot_restore_seed_source_authority() {
+    let seed = "---\nid: rec_aaaaaaaaaaaaaaaaaaaaaaaaaa\nstatus: todo\n---\n- parent\n  - nested\n";
+    // The old nested body cannot borrow the original seed's exception once
+    // a live edit has settled a different body, even when its disk write lost.
+    for reserved in [false, true] {
+        assert_peer_fold_from(
+            seed,
+            &seed.replace("todo", "done"),
+            true,
+            Some("Live body"),
+            reserved,
+        );
+    }
+}
+
+#[test]
+fn a_strict_fold_after_compensation_and_its_file_moment_converge_on_the_peer() {
+    let seed = "---\nid: rec_aaaaaaaaaaaaaaaaaaaaaaaaaa\nstatus: todo\n---\n- parent\n  - nested\n";
+    assert_peer_fold_from(seed, "Recovered", false, Some("Live body"), true);
+}
+
+fn deliver_fold_moment(origin: &mut EngineStore, peer: &mut EngineStore, id: &str, seq: i64) {
+    let payload = origin
+        .write_with(&NoFaults, |tx| {
+            crate::outbound::moment_append_payload_in_tx(tx, "ws", id)
+        })
+        .unwrap();
+    let TxnOutcome::Committed((payload, at)) = payload else {
+        panic!("moment payload");
+    };
+    let mut op = envelope("fold-origin", seq, "moment.append", payload);
+    op.recorded_at_ms = at;
+    let applied = crate::apply_replication_envelope(
+        peer,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &op,
+        &NoFaults,
+        &NoLiveLeases,
+    )
+    .unwrap();
+    assert!(
+        matches!(applied.primary, ApplyDisposition::Applied(_)),
+        "{applied:?}"
+    );
+    assert!(applied.refusals.is_empty());
+}
+
+fn assert_peer_fold_from(
+    initial: &str,
+    chosen: &str,
+    refuses: bool,
+    settled: Option<&str>,
+    reserved: bool,
+) {
+    use dohc_engine_collab::{ContentKind, DocKey, WriterDocCache, Ydoc};
+    const PATH: &str = "tasks/record.md";
+    let (_origin_dir, _origin_path, mut origin) = open_store();
+    let (_peer_dir, _peer_path, mut peer) = open_store();
+    let key = DocKey::new("ws", "main", "fold-record").unwrap();
+    for store in [&mut origin, &mut peer] {
+        seed_replication_version(store, "main", "main");
+        seed_text_head(store, &key.object_id, PATH, initial);
+        VersionedTextStore::new(store)
+            .write_text(
+                &dohc_engine_domain::WriteText {
+                    workspace_id: "ws".into(),
+                    version_id: "main".into(),
+                    object_id: key.object_id.clone(),
+                    path: PATH.into(),
+                    text: initial.into(),
+                    moment_id: "fold-initial".into(),
+                    metadata_origin: "api".into(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    now_ms: 1400,
+                    request_id: None,
+                },
+                &NoFaults,
+            )
+            .unwrap();
+    }
+    let source = Ydoc::wire();
+    source
+        .rewrite_content_to_markdown_preserving_source(ContentKind::Richdoc, initial)
+        .unwrap();
+    let base = source.encode_full_state();
+    let claim = dohc_engine_storage::hex_sha256(&base);
+    dohc_engine_collab::claim_base(
+        &mut origin,
+        &key,
+        ContentKind::Richdoc,
+        &base,
+        &NoFaults,
+        1500,
+    )
+    .unwrap();
+    origin
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "UPDATE ydoc_docs SET last_settled_sha=?1 WHERE object_id=?2",
+                params![
+                    dohc_engine_storage::hex_sha256(initial.as_bytes()),
+                    key.object_id
+                ],
+            )
+            .map_err(SyncError::persist)
+        })
+        .unwrap();
+    let base_sha = peer.put_binary_blob(&base).unwrap();
+    let base_op = envelope(
+        "fold-origin",
+        0,
+        "ydoc.update",
+        json!({
+            "versionId": "main", "objectId": key.object_id, "path": PATH,
+            "contentKind": "richdoc", "updateBlobSha256": base_sha,
+            "lineageClaimId": claim, "isBaseState": true
+        }),
+    );
+    let applied = apply_ydoc_envelope(
+        &mut peer,
+        &mut WriterDocCache::new(),
+        &base_op,
+        &NoFaults,
+        &NoLiveLeases,
+    )
+    .unwrap();
+    assert!(
+        matches!(applied.primary, ApplyDisposition::Applied(_)),
+        "{applied:?}"
+    );
+
+    if let Some(settled) = settled {
+        let delta = source
+            .rewrite_content_to_markdown_for_fold(ContentKind::Richdoc, settled)
+            .unwrap();
+        origin.write_with(&NoFaults, |tx| {
+            dohc_engine_collab::record_update_in_tx(tx, &key, &delta, Some("editor"), None, 1550)
+            .map_err(SyncError::corrupt)?;
+            dohc_engine_collab::author_coverage::advance_in(tx, &key, reserved).map_err(SyncError::corrupt)?;
+            let result = dohc_engine_domain::write_projected_text_in_tx(tx, &dohc_engine_domain::WriteText {
+                workspace_id: "ws".into(), version_id: "main".into(), object_id: key.object_id.clone(),
+                path: PATH.into(), text: settled.into(), moment_id: "live-settle".into(),
+                metadata_origin: "ydoc".into(), metadata_summary: None, metadata_correlation_id: None,
+                author_json: None, now_ms: 1550, request_id: None,
+            }).map_err(crate::ydoc_apply::map_domain_hard_error)?;
+            tx.execute("UPDATE ydoc_docs SET settle_seq=?1,last_settled_sha=?2,seed_source_sha256=?3 WHERE object_id=?4",
+                params![result.moment.moment_order, result.snapshot.blob_sha256,
+                    dohc_engine_storage::hex_sha256(initial.as_bytes()), key.object_id]).map_err(SyncError::persist)?;
+            dohc_engine_collab::author_coverage::compensate_in(tx, &key, Some("live-settle"), 1551)
+                .map_err(SyncError::corrupt)
+        }).unwrap();
+        let last: Option<String> = origin
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT last_settled_sha FROM ydoc_docs WHERE object_id=?1",
+                    [&key.object_id],
+                    |row| row.get(0),
+                )
+            })
+            .unwrap();
+        assert!(
+            last.is_none(),
+            "real compensation clears the source witness"
+        );
+        let sha = peer.put_binary_blob(&delta).unwrap();
+        let op = envelope(
+            "fold-origin",
+            1,
+            "ydoc.update",
+            json!({
+                "versionId":"main", "objectId":key.object_id, "path":PATH, "contentKind":"richdoc",
+                "updateBlobSha256":sha, "lineageClaimId":claim, "isBaseState":false,
+            }),
+        );
+        let applied = apply_ydoc_envelope(
+            &mut peer,
+            &mut WriterDocCache::new(),
+            &op,
+            &NoFaults,
+            &NoLiveLeases,
+        )
+        .unwrap();
+        assert!(
+            matches!(applied.primary, ApplyDisposition::Applied(_)),
+            "{applied:?}"
+        );
+        deliver_fold_moment(&mut origin, &mut peer, "live-settle", 2);
+    }
+
+    // Capture installs C before folding. The receiver still has the old file.
+    let folded = origin.write_with(&NoFaults, |tx| {
+        dohc_engine_domain::write_projected_text_in_tx(
+            tx,
+            &dohc_engine_domain::WriteText {
+                workspace_id: "ws".into(),
+                version_id: "main".into(),
+                object_id: key.object_id.clone(),
+                path: PATH.into(),
+                text: chosen.into(),
+                moment_id: "fold-choice".into(),
+                metadata_origin: "capture".into(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 1600,
+                request_id: None,
+            },
+        )
+        .map_err(crate::ydoc_apply::map_domain_hard_error)?;
+        crate::ydoc_apply::fold_resolution_into_ydoc_in_tx(
+            tx,
+            "ws",
+            "main",
+            &key.object_id,
+            PATH,
+            chosen,
+            1600,
+        )
+    });
+    if refuses {
+        assert!(
+            matches!(
+                folded,
+                Err(SyncError::InvalidInput {
+                    reason: "ydoc-resolution-not-representable"
+                })
+            ),
+            "{folded:?}"
+        );
+        let updates: i64 = origin
+            .read_with(|conn| {
+                conn.query_row("SELECT COUNT(*) FROM ydoc_updates", [], |row| row.get(0))
+            })
+            .unwrap();
+        assert_eq!(
+            updates,
+            i64::from(settled.is_some()),
+            "the originated base must survive without replacement or a delta"
+        );
+    } else {
+        folded.unwrap();
+        let delta = origin
+            .read_with(|conn| {
+                let sha: String = conn
+                    .query_row(
+                        "SELECT update_blob_sha256 FROM ydoc_updates ORDER BY seq DESC LIMIT 1",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .unwrap();
+                dohc_engine_storage::get_binary_blob(conn, &sha)
+            })
+            .unwrap()
+            .unwrap();
+        let delta_sha = peer.put_binary_blob(&delta).unwrap();
+        let update = envelope(
+            "fold-origin",
+            if settled.is_some() { 3 } else { 1 },
+            "ydoc.update",
+            json!({
+                "versionId": "main", "objectId": key.object_id, "path": PATH,
+                "contentKind": "richdoc", "updateBlobSha256": delta_sha,
+                "lineageClaimId": claim, "isBaseState": false
+            }),
+        );
+        let applied = apply_ydoc_envelope(
+            &mut peer,
+            &mut WriterDocCache::new(),
+            &update,
+            &NoFaults,
+            &NoLiveLeases,
+        )
+        .unwrap();
+        assert!(
+            matches!(applied.primary, ApplyDisposition::Applied(_)),
+            "{applied:?}"
+        );
+        assert!(applied.refusals.is_empty());
+        deliver_fold_moment(
+            &mut origin,
+            &mut peer,
+            "fold-choice",
+            if settled.is_some() { 4 } else { 2 },
+        );
+    }
+    let expected = if refuses {
+        settled.unwrap_or(initial)
+    } else {
+        chosen
+    };
+    for store in [&mut origin, &mut peer] {
+        let snapshot = VersionedTextStore::new(store)
+            .read_text("ws", "main", PATH)
+            .unwrap()
+            .unwrap();
+        assert_eq!(snapshot.text, expected);
+        let projection = store
+            .read_with(|conn| {
+                let doc = dohc_engine_collab::load_doc_in(conn, &key).unwrap();
+                crate::ydoc_apply::project_ydoc_with_store(conn, &key, &doc, ContentKind::Richdoc)
+            })
+            .unwrap();
+        assert_eq!(projection.content, expected);
+        let conflicts: i64 = store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT COUNT(*) FROM conflicts WHERE status='open'",
+                    [],
+                    |row| row.get(0),
+                )
+            })
+            .unwrap();
+        assert_eq!(conflicts, 0);
+    }
+}
+
+#[test]
 fn a_fold_that_cannot_reproduce_the_choice_refuses_instead_of_diverging() {
+    assert_refused_fold("", false);
+    assert_refused_fold("original", false);
+    assert_refused_fold("", true);
+}
+
+fn assert_refused_fold(initial: &str, chosen_file_head: bool) {
     // The fold's markdown parser is ASSERTED to be the projector's inverse
     // and nothing makes that true. Past the quote budget the leftover `> `
     // markers become paragraph text and the projector escapes them to
@@ -1988,7 +2560,8 @@ fn a_fold_that_cannot_reproduce_the_choice_refuses_instead_of_diverging() {
         .expect("scaffolding");
     let key = dohc_engine_collab::DocKey::new("ws", "main", "object-unrepresentable").expect("key");
     let doc = dohc_engine_collab::Ydoc::wire();
-    doc.richdoc_append_paragraph("original");
+    doc.rewrite_content_to_markdown(dohc_engine_collab::ContentKind::Richdoc, initial)
+        .expect("seed rich document");
     dohc_engine_collab::claim_base(
         &mut engine,
         &key,
@@ -2002,6 +2575,30 @@ fn a_fold_that_cannot_reproduce_the_choice_refuses_instead_of_diverging() {
     // Deeper than the fold's recursion budget: representable as markdown,
     // not reproducible by the parser.
     let unrepresentable = format!("{}deep", "> ".repeat(200));
+    if chosen_file_head {
+        // Even identical disk bytes cannot prove the parser retained content.
+        engine
+            .write_with(&NoFaults, |tx| {
+                dohc_engine_domain::write_projected_text_in_tx(
+                    tx,
+                    &dohc_engine_domain::WriteText {
+                        workspace_id: "ws".to_owned(),
+                        version_id: "main".to_owned(),
+                        object_id: key.object_id.clone(),
+                        path: "notes/unrepresentable.md".to_owned(),
+                        text: unrepresentable.clone(),
+                        moment_id: "unrepresentable-head".to_owned(),
+                        metadata_origin: "local-file".to_owned(),
+                        metadata_summary: None,
+                        metadata_correlation_id: None,
+                        author_json: None,
+                        now_ms: 1_550,
+                        request_id: None,
+                    },
+                )
+            })
+            .expect("chosen file head");
+    }
     let refused = engine.write_with(&NoFaults, |tx| {
         crate::ydoc_apply::fold_resolution_into_ydoc_in_tx(
             tx,
@@ -3256,6 +3853,8 @@ fn scene_base_and_asset_moment_converge_in_both_arrival_orders() {
     let (scratch_a, path_a, mut asset_first) = open_store();
     let (asset_a, scene_a, asset_ref_a, _) = make_ops(&mut asset_first);
     let asset_first_pull = RelaySyncClient::new(FakeRelay {
+        refuse_oversized_proofs: false,
+        push_budget_limit: None,
         pushes: Mutex::new(Vec::new()),
         pull: Mutex::new(Some(PullResponse {
             ops: vec![asset_a, scene_a],
@@ -3285,6 +3884,8 @@ fn scene_base_and_asset_moment_converge_in_both_arrival_orders() {
     let (scratch_b, path_b, mut scene_first) = open_store();
     let (asset_b, scene_b, asset_ref_b, portable) = make_ops(&mut scene_first);
     let scene_first_pull = RelaySyncClient::new(FakeRelay {
+        refuse_oversized_proofs: false,
+        push_budget_limit: None,
         pushes: Mutex::new(Vec::new()),
         pull: Mutex::new(Some(PullResponse {
             ops: vec![scene_b, asset_b],
@@ -6263,6 +6864,75 @@ fn incomplete_preserved_local_side_credits_authors_before_choice_or_noop_complet
 }
 
 #[test]
+fn plain_owner_drain_keeps_declared_agent() {
+    use dohc_engine_collab::{ContentKind, DocKey, WriterDocCache, Ydoc};
+    let (_scratch, _db, mut engine) = open_store();
+    VersionedTextStore::new(&mut engine)
+        .ensure_main_version("ws", "main", 1_000, &NoFaults)
+        .unwrap();
+    let path = "notes/agent.md";
+    let key = DocKey::new("ws", "main", "agent-drain").unwrap();
+    seed_text_head(&mut engine, &key.object_id, path, "seed");
+    let source = Ydoc::wire();
+    source.plaintext_insert(0, "seed");
+    let base = source.encode_full_state();
+    let claim = dohc_engine_storage::hex_sha256(&base);
+    dohc_engine_collab::claim_base_at_relay(
+        &mut engine,
+        &key,
+        ContentKind::Plaintext,
+        &base,
+        &dohc_engine_collab::BaseRelayCoordinate::new("source", 0, 0).unwrap(),
+        &NoFaults,
+        1_100,
+    )
+    .unwrap();
+    for seq in 0..2 {
+        let update = source.plaintext_insert(0, "x");
+        let sha = engine.put_binary_blob(&update).unwrap();
+        let mut op = envelope(
+            "computer-a",
+            seq,
+            "ydoc.update",
+            json!({
+                "versionId":"main", "objectId":key.object_id, "path":path,
+                "contentKind":"plaintext", "updateBlobSha256":sha,
+                "lineageClaimId":claim, "isBaseState":false,
+                "actorOriginId":"agent-x", "attribution":{"actorKind":"agent","depth":0},
+                "authors":[{"kind":"human","humanId":"forged-recipient"}],
+            }),
+        );
+        op.relay_seq = Some(seq + 1);
+        let parked = apply_ydoc_envelope(
+            &mut engine,
+            &mut WriterDocCache::new(),
+            &op,
+            &NoFaults,
+            &AlwaysLive,
+        )
+        .unwrap();
+        assert!(matches!(parked.primary, ApplyDisposition::Applied(result) if result.deferred));
+    }
+    let drained =
+        drain_deferred_ydoc_for_key(&mut engine, &mut WriterDocCache::new(), &key, &NoFaults)
+            .unwrap();
+    assert_eq!(drained.drained, 2);
+    let head = VersionedTextStore::new(&mut engine)
+        .read_text("ws", "main", path)
+        .unwrap()
+        .unwrap();
+    assert_eq!(head.text, "xxseed");
+    let moment = VersionedTextStore::new(&mut engine)
+        .get_moment("ws", &head.latest_moment_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(moment.author_json.as_deref().unwrap()).unwrap(),
+        json!([{"kind":"agent","agentId":"agent-x"}])
+    );
+}
+
+#[test]
 fn deferred_author_capacity_projects_a_prefix_without_waiting_for_disk() {
     use dohc_engine_collab::{
         ContentKind, DocKey, WriterDocCache, Ydoc, author_coverage::MAX_INTERVAL_AUTHORS,
@@ -6323,7 +6993,9 @@ fn deferred_author_capacity_projects_a_prefix_without_waiting_for_disk() {
         &NoFaults,
     )
     .unwrap();
-    assert_eq!(first.drained, MAX_INTERVAL_AUTHORS);
+    let prefix_count = MAX_INTERVAL_AUTHORS;
+    let suffix_count = total - prefix_count;
+    assert_eq!(first.drained, prefix_count);
     let pending_count = |engine: &EngineStore| {
         engine
             .read_with(|conn| {
@@ -6335,15 +7007,12 @@ fn deferred_author_capacity_projects_a_prefix_without_waiting_for_disk() {
             })
             .unwrap()
     };
-    assert_eq!(pending_count(&engine), 2);
+    assert_eq!(pending_count(&engine), suffix_count as i64);
     let prefix = VersionedTextStore::new(&mut engine)
         .read_text("ws", "main", path)
         .unwrap()
         .unwrap();
-    assert_eq!(
-        prefix.text,
-        format!("{}seed", "x".repeat(MAX_INTERVAL_AUTHORS))
-    );
+    assert_eq!(prefix.text, format!("{}seed", "x".repeat(prefix_count)));
     let prefix_authors: String = engine
         .read_with(|conn| {
             conn.query_row(
@@ -6359,6 +7028,11 @@ fn deferred_author_capacity_projects_a_prefix_without_waiting_for_disk() {
             .len(),
         MAX_INTERVAL_AUTHORS
     );
+    assert!(
+        !serde_json::from_str::<Vec<serde_json::Value>>(&prefix_authors)
+            .unwrap()
+            .contains(&json!({"kind":"unattributed"}))
+    );
     drop(engine);
     let mut engine = EngineStore::open(&db, 3_000).unwrap();
     let job = format!("ydoc-mat_{}", prefix.latest_moment_id);
@@ -6373,7 +7047,7 @@ fn deferred_author_capacity_projects_a_prefix_without_waiting_for_disk() {
     let resumed =
         drain_deferred_ydoc_for_key(&mut engine, &mut WriterDocCache::new(), &key, &NoFaults)
             .unwrap();
-    assert_eq!(resumed.drained, 2);
+    assert_eq!(resumed.drained, suffix_count);
     assert_eq!(pending_count(&engine), 0);
     let final_head = VersionedTextStore::new(&mut engine)
         .read_text("ws", "main", path)
@@ -6393,6 +7067,11 @@ fn deferred_author_capacity_projects_a_prefix_without_waiting_for_disk() {
         serde_json::from_str::<Vec<serde_json::Value>>(&suffix_authors)
             .unwrap()
             .len(),
-        2
+        suffix_count
+    );
+    assert!(
+        !serde_json::from_str::<Vec<serde_json::Value>>(&suffix_authors)
+            .unwrap()
+            .contains(&json!({"kind":"unattributed"}))
     );
 }

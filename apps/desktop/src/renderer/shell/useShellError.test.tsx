@@ -2,8 +2,10 @@
 import { act, cleanup, renderHook } from "@testing-library/react";
 import { StrictMode, type ReactNode } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { CHECKPOINT_FAILURE_MESSAGE, IMPORT_FAILURE_MESSAGE } from "../../workspaces/typingRecoveryWords";
 import { ipcErrorMessage } from "../ipcError";
 import { useShellError } from "./useShellError";
+import { shareCaptureNoticeState } from "../../workspaces/shareCaptureNotice";
 import { CreationPartialError } from "@dohc/cli/creation";
 import { errorDetails } from "./copyDetails";
 
@@ -14,6 +16,71 @@ const strict = ({ children }: { children: ReactNode }) => (
 );
 
 describe("useShellError", () => {
+  it("routes an additional Notice action independently of its primary action", () => {
+    const first=vi.fn();const discard=vi.fn();const {result}=renderHook(()=>useShellError("workspace"));
+    act(()=>result.current.reportShellFailure({message:"Kept typing",action:{label:"Copy your typing",run:first,additional:[{label:"Discard your typing",run:discard}]}}));
+    const id=result.current.shellErrors[0]!.id;
+    act(()=>result.current.runShellErrorAction(id,1));expect(discard).toHaveBeenCalledOnce();expect(first).not.toHaveBeenCalled();
+    act(()=>result.current.runShellErrorAction(id));expect(first).toHaveBeenCalledOnce();
+  });
+  it("hides only the persisted dismissal's matching restriction key", () => {
+    const snapshot = { paths: ["tasks/local.yaml"], unchecked: false, checked: 1 };
+    const dismissed = { ...snapshot, dismissedKey: shareCaptureNoticeState([], snapshot, false).key };
+    const { result } = renderHook(() => useShellError("restriction-dismissal-key"));
+    act(() => result.current.reportShareCapture("share", [], dismissed, false));
+    expect(result.current.shellErrors).toHaveLength(0);
+    act(() => result.current.reportShareCapture("share", [], dismissed, true));
+    expect(result.current.shellErrors).toHaveLength(1);
+    expect(result.current.shellErrors[0]!.message).toContain("They are kept on this computer.");
+    expect(result.current.shellErrors[0]!.seen).toBe(false);
+    act(() => result.current.reportShareCapture("share", [], {
+      ...snapshot, dismissedKey: shareCaptureNoticeState([], snapshot, true).key,
+    }, true));
+    expect(result.current.shellErrors).toHaveLength(0);
+  });
+
+  it("keeps a dismissed capture Notice dismissed across remounts until the path set changes", () => {
+    const first = renderHook(() => useShellError("capture-notice-workspace"));
+    const paths = ["tasks/locked.md", "tasks/another.md"];
+    act(() => first.result.current.reportShareCapture("share-a", paths));
+    const notice = first.result.current.shellErrors[0]!;
+    expect(notice.identity).toBe("share-capture:capture-notice-workspace:share-a");
+    expect(notice.title).toBe("Changes kept on this computer");
+    expect(notice.message).toBe("dohc couldn't confirm these changes reached the share. They are kept on this computer. Copy these files to another workspace.");
+    expect(notice.message).not.toContain(paths[0]);
+    expect(errorDetails(notice.details!)).toContain("File: tasks/another.md\nFile: tasks/locked.md");
+    act(() => first.result.current.hideShellError(notice.id));
+    act(() => first.result.current.reportShareCapture("share-a", [...paths].reverse()));
+    expect(first.result.current.shellErrors[0]).toMatchObject({ id: notice.id, seen: true });
+    act(() => first.result.current.dismissShellError(notice.id));
+    act(() => first.result.current.reportShareCapture("share-a", [...paths, paths[0]!]));
+    expect(first.result.current.shellErrors).toHaveLength(0);
+    first.unmount();
+    const reopened = renderHook(() => useShellError("capture-notice-workspace"));
+    act(() => reopened.result.current.reportShareCapture("share-a", paths));
+    expect(reopened.result.current.shellErrors).toHaveLength(0);
+    act(() => reopened.result.current.reportShareCapture("share-a", [paths[0]!]));
+    expect(reopened.result.current.shellErrors).toHaveLength(1);
+    expect(reopened.result.current.shellErrors[0]!.seen).toBe(false);
+    act(() => reopened.result.current.reportShareCapture("share-a", []));
+    expect(reopened.result.current.shellErrors).toHaveLength(0);
+    act(() => reopened.result.current.reportShareCapture("share-a", null));
+    expect(reopened.result.current.shellErrors).toHaveLength(1);
+    expect(reopened.result.current.shellErrors[0]!.message).toBe("dohc couldn't check this share's files. Copy any files you changed to another workspace now.");
+    expect(reopened.result.current.shellErrors[0]!.details).toBeUndefined();
+    act(() => reopened.result.current.reportShareCapture("share-a", [], { paths: ["tasks/draft.md"], unchecked: true, checked: 0 }));
+    expect(reopened.result.current.shellErrors).toHaveLength(1);
+    expect(reopened.result.current.shellErrors[0]!.message).toBe("dohc checked only some of this share's files. dohc couldn't confirm these changes reached the share. They are kept on this computer. Copy these files and any others you changed to another workspace now.");
+    expect(reopened.result.current.shellErrors[0]!.details).toEqual([["File", "tasks/draft.md", "tasks/draft.md".length]]);
+  });
+
+  it("describes a partial check with no names without claiming changes exist", () => {
+    const { result } = renderHook(() => useShellError("partial-empty-share"));
+    act(() => result.current.reportShareCapture("share", [], { paths: [], unchecked: true, checked: 256 }, false));
+    expect(result.current.shellErrors[0]).toMatchObject({ title: "Share check incomplete",
+      message: "dohc checked only some of this share's files. Copy any files you changed to another workspace now.", details: undefined });
+  });
+
   it.each([true, false])("keeps separate partial creations and replaces only the retried creation (record: %s)", record => {
     const { result } = renderHook(() => useShellError("ws-a"));
     const firstRetry = vi.fn();
@@ -233,6 +300,50 @@ describe("useShellError", () => {
     expect(result.current.shellErrors).toEqual([]);
   });
 
+  it("replaces a repeated failure's row and keeps that row's toast, open or closed", () => {
+    const { result } = renderHook(() => useShellError("ws-a"));
+    act(() => result.current.reportShellFailure({ message: "Could not load History.", identity: "about-history:a.md" }));
+    expect(result.current.shellErrors.map((error) => error.seen)).toEqual([false]);
+    // Still open: the repeat keeps it open, as one row.
+    act(() => result.current.reportShellFailure({ message: "Could not load History.", identity: "about-history:a.md", repeat: true }));
+    expect(result.current.shellErrors.map((error) => error.seen)).toEqual([false]);
+    // Closed by the person: the repeat does not toast again.
+    act(() => result.current.hideShellError(result.current.shellErrors[0]!.id));
+    act(() => result.current.reportShellFailure({ message: "Could not load History.", identity: "about-history:a.md", repeat: true }));
+    expect(result.current.shellErrors.map((error) => error.seen)).toEqual([true]);
+    // Another file's first failure is a toast of its own, repeat or not.
+    act(() => result.current.reportShellFailure({ message: "Could not load History.", identity: "about-history:b.md", repeat: true }));
+    expect(result.current.shellErrors.map((error) => [error.identity, error.seen])).toEqual([
+      ["about-history:a.md", true], ["about-history:b.md", false],
+    ]);
+  });
+
+  it("toasts a repeat again once Try again or Dismiss has removed its row", () => {
+    const retry = vi.fn();
+    const { result } = renderHook(() => useShellError("ws-a"));
+    const report = () => result.current.reportShellFailure({
+      message: "Could not load History.", identity: "about-history:a.md", retry, repeat: true,
+    });
+    act(report);
+    act(() => result.current.hideShellError(result.current.shellErrors[0]!.id));
+    // Try again removes the row, then reads; the read fails again.
+    act(() => result.current.retryShellError(result.current.shellErrors[0]!.id));
+    expect(retry).toHaveBeenCalledTimes(1);
+    expect(result.current.shellErrors).toEqual([]);
+    act(report);
+    expect(result.current.shellErrors.map((error) => error.seen)).toEqual([false]);
+    // Dismissed, then failing again: a toast, not a quiet row.
+    act(() => result.current.dismissShellError(result.current.shellErrors[0]!.id));
+    act(report);
+    expect(result.current.shellErrors.map((error) => error.seen)).toEqual([false]);
+  });
+
+  it("still files a sync failure that asks for no toast quietly when it has no predecessor", () => {
+    const { result } = renderHook(() => useShellError("ws-a"));
+    act(() => result.current.reportSyncFailure({ message: "Sync stopped.", detail: "relay", toast: false }, vi.fn()));
+    expect(result.current.shellErrors.map((error) => error.seen)).toEqual([true]);
+  });
+
   it("shows words instead of Electron's prefix, a class name or a code, and keeps them for Copy", () => {
     const { result } = renderHook(() => useShellError("ws-a"));
     const refused = new Error(
@@ -317,4 +428,40 @@ it("retries unavailable recovery through the supplied action", () => {
   act(() => result.current.retryShellError(result.current.shellErrors[0].id));
   expect(retry).toHaveBeenCalledOnce();
   expect(result.current.shellErrors).toEqual([]);
+});
+
+it.each([["typing-checkpoint", CHECKPOINT_FAILURE_MESSAGE], ["typing-import", IMPORT_FAILURE_MESSAGE]] as const)("files one %s Notice with retry and copy details", (kind, message) => {
+ const retry = vi.fn(); const {result} = renderHook(() => useShellError("workspace"));
+ act(() => {result.current.reportShellFailure({kind, message, details: [["Reason", "disk or author refusal"]], retry}); result.current.reportShellFailure({kind, message, details: [["Reason", "retry refused"]], retry});});
+ expect(result.current.shellErrors).toHaveLength(1); const row = result.current.shellErrors[0]!;
+ expect(row).toMatchObject({kind, message, seen: false, retry}); expect(row.details).toEqual([["Reason", "retry refused"]]);
+ act(() => result.current.retryShellError(row.id)); expect(retry).toHaveBeenCalledOnce();
+});
+
+it("toasts a first repeated report and retains the toast identity and seen state on refresh",()=>{
+ const {result}=renderHook(()=>useShellError("typing-refresh"));
+ const report=()=>result.current.reportShellFailure({identity:"typing-import:one",kind:"typing-import",message:IMPORT_FAILURE_MESSAGE,repeat:true});
+ act(report);const first=result.current.shellErrors[0]!;expect(first.seen).toBe(false);
+ act(report);expect(result.current.shellErrors[0]).toMatchObject({id:first.id,atMs:first.atMs,seen:false});
+ act(()=>result.current.hideShellError(first.id));act(report);
+ expect(result.current.shellErrors).toHaveLength(1);expect(result.current.shellErrors[0]).toMatchObject({id:first.id,atMs:first.atMs,seen:true});
+});
+
+it("toasts a changed reason even when the prior repeated toast was closed", () => {
+ const {result}=renderHook(()=>useShellError("typing-new-reason"));
+ act(()=>result.current.reportShellFailure({identity:"typing-import:one",kind:"typing-import",message:IMPORT_FAILURE_MESSAGE,repeat:true}));
+ const first=result.current.shellErrors[0]!;
+ act(()=>result.current.hideShellError(first.id));
+ act(()=>result.current.reportShellFailure({identity:"typing-import:one",kind:"typing-import",message:"This file is no longer in History.",repeat:true}));
+ expect(result.current.shellErrors).toHaveLength(1);
+ expect(result.current.shellErrors[0]).toMatchObject({message:"This file is no longer in History.",seen:false});
+ expect(result.current.shellErrors[0]!.id).not.toBe(first.id);
+});
+
+it("gives a success Notice its Open History action without reporting a failure", () => {
+ const open=vi.fn();const {result}=renderHook(()=>useShellError("typing-recovered"));
+ act(()=>result.current.showSuccessNotice('dohc recovered your typing in "note.md".',undefined,undefined,{label:"Open History",run:open}));
+ const row=result.current.shellErrors[0]!;
+ expect(row).toMatchObject({tone:"success",retry:null,seen:false,action:{label:"Open History"}});
+ act(()=>result.current.runShellErrorAction(row.id));expect(open).toHaveBeenCalledOnce();
 });

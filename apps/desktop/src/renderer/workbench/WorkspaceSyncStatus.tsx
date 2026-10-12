@@ -1,3 +1,4 @@
+import { TriangleAlert } from "lucide-react";
 import type { SyncStatusResult } from "../../ipc/bridgeContract";
 
 // A pass in flight is syncing, never saving: the files are already on disk.
@@ -10,14 +11,33 @@ const SYNC_LABEL: Record<SyncStatusResult["state"], string> = {
   "cloud-disconnected": "Server disconnected",
 };
 
-const SYNC_DOT: Record<SyncStatusResult["state"], string> = {
-  synced: "bg-success",
-  syncing: "bg-warning",
-  "local-changes": "bg-warning",
-  conflict: "bg-danger",
-  "sync-failed": "bg-danger",
-  "cloud-disconnected": "bg-subtle",
+// The dot's shape says the kind of state before its color does: filled is
+// settled, a ring is still working or waiting, a triangle needs the person.
+// Only a state that needs the person shows its words; the rest keep them for
+// the accessible name and the tooltip.
+type DotKind = "saved" | "working" | "waiting" | "attention";
+
+const SYNC_DOT: Record<SyncStatusResult["state"], DotKind> = {
+  synced: "saved",
+  syncing: "working",
+  "local-changes": "working",
+  conflict: "attention",
+  "sync-failed": "attention",
+  "cloud-disconnected": "waiting",
 };
+
+function Dot(props: { kind: DotKind }) {
+  switch (props.kind) {
+    case "saved":
+      return <span aria-hidden data-dot="saved" className="size-1.5 shrink-0 rounded-full bg-success" />;
+    case "working":
+      return <span aria-hidden data-dot="working" className="size-2 shrink-0 rounded-full border-[1.5px] border-warning" />;
+    case "waiting":
+      return <span aria-hidden data-dot="waiting" className="size-2 shrink-0 rounded-full border-[1.5px] border-subtle" />;
+    case "attention":
+      return <TriangleAlert aria-hidden data-dot="attention" size={12} className="shrink-0 text-danger" />;
+  }
+}
 
 // Sync stopped until one side updates, so the title bar names that side.
 export const UPDATE_REQUIRED_LABEL: Record<NonNullable<SyncStatusResult["updateRequired"]>, string> = {
@@ -39,8 +59,21 @@ function liveDeliveryLabel(
   return reason ? "Live editing paused" : "Live editing retrying";
 }
 
-export function WorkspaceSyncStatus({ syncStatus }: {
+// A file that couldn't save outranks every state but those that stop sync
+// for the whole workspace, which keep the title bar.
+function saveFailedLabel(syncStatus: SyncStatusResult | null, failedSaves: number): string | null {
+  if (failedSaves === 0 || syncStatus?.updateRequired) return null;
+  if (syncStatus?.state === "conflict" || syncStatus?.state === "sync-failed") return null;
+  return `Couldn't save ${failedSaves} ${failedSaves === 1 ? "file" : "files"}`;
+}
+
+// The workspace's save and sync state. An editor's own edits in flight show
+// on its tab, not here: this is a live region, and typing must not make it
+// speak.
+export function WorkspaceSyncStatus({ syncStatus, failedSaves }: {
   syncStatus: SyncStatusResult | null;
+  // Files in this workspace whose save failed.
+  failedSaves: number;
 }) {
   const state = syncStatus?.state;
   const conflictCount = state === "conflict" ? syncStatus?.conflictCount ?? 0 : 0;
@@ -55,11 +88,19 @@ export function WorkspaceSyncStatus({ syncStatus }: {
   const label = stateLabel
     ? `${stateLabel}${conflictCount > 0 ? ` (${conflictCount})` : ""}`
     : "Checking status";
-  const shownLabel = syncStatus?.updateRequired
+  const saveFailed = saveFailedLabel(syncStatus, failedSaves);
+  const shownLabel = saveFailed ?? (syncStatus?.updateRequired
     ? UPDATE_REQUIRED_LABEL[syncStatus.updateRequired]
     : state === "syncing" && syncStatus?.claimingIdentity
       ? "Setting up sync…"
-      : label;
+      : label);
+  const dot: DotKind = saveFailed || syncStatus?.updateRequired
+    ? "attention"
+    : state
+      ? SYNC_DOT[state]
+      : "waiting";
+  // A state that needs the person says so in words beside the dot.
+  const worded = dot === "attention" || (dot === "waiting" && state !== undefined);
   // Absent means this workspace has nothing to say about live delivery, so
   // the title bar says nothing either.
   const liveDelivery = syncStatus?.ownerLiveDelivery;
@@ -70,14 +111,15 @@ export function WorkspaceSyncStatus({ syncStatus }: {
     <>
       <span
         data-testid="sync-status"
-        data-state={state ?? "unknown"}
+        data-state={saveFailed ? "save-failed" : state ?? "unknown"}
         role="status"
         aria-label={shownLabel}
         title={shownLabel}
-        className="flex shrink-0 items-center gap-1.5 text-[11px] text-muted"
+        // The dot's box keeps a 20x24 hover target for its tooltip.
+        className={`flex h-6 shrink-0 items-center gap-1.5 text-[11px] text-muted ${worded ? "px-1" : "w-5 justify-center"}`}
       >
-        <span aria-hidden className={`inline-block size-1.5 rounded-full ${state ? SYNC_DOT[state] : "bg-subtle"}`} />
-        <span>{shownLabel}</span>
+        <Dot kind={dot} />
+        <span className={worded ? undefined : "sr-only"}>{shownLabel}</span>
       </span>
       {liveDelivery && liveLabel ? (
         <span

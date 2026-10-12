@@ -172,6 +172,7 @@ pub(crate) struct ConflictResolveV1 {
     pub effect_context: EffectContextV1,
     pub effects: Vec<EffectV1>,
     pub lineage_transition: Option<LineageTransitionV1>,
+    pub exported_before: Option<HeadV1>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -241,14 +242,7 @@ pub(crate) fn build_conflict_resolve_v1(
 ) -> Result<BuiltConflictResolveV1, SyncError> {
     validate_bindings(&payload)?;
     for effect_index in 0..payload.effects.len() {
-        let shadow = match payload.effects[effect_index].kind {
-            EffectKindV1::Delete => {
-                delete_shadow(&payload, &payload.effects[effect_index], effect_index)?
-            }
-            EffectKindV1::Write => {
-                write_shadow(&payload, &payload.effects[effect_index], effect_index)?
-            }
-        };
+        let shadow = effect_shadow(&payload, &payload.effects[effect_index], effect_index)?;
         let canonical = crate::relay::canonical_json_bytes(&shadow)?;
         ensure_limit(
             "MAX_PAYLOAD_JSON_BYTES",
@@ -280,25 +274,33 @@ pub(crate) fn validate_conflict_resolve_v1(
         MAX_PAYLOAD_JSON_BYTES,
         encoded_payload_bytes,
     )?;
-    let record = exact_object(
-        value,
-        &[
-            "formatVersion",
-            "workspaceId",
-            "conflictId",
-            "status",
-            "chosenFrom",
-            "resolution",
-            "targetVersionId",
-            "sourceVersionId",
-            "paths",
-            "transition",
-            "effectContext",
-            "effects",
-            "lineageTransition",
-        ],
-        "conflict.resolve v1 payload has unknown or missing fields",
-    )?;
+    let required = [
+        "formatVersion",
+        "workspaceId",
+        "conflictId",
+        "status",
+        "chosenFrom",
+        "resolution",
+        "targetVersionId",
+        "sourceVersionId",
+        "paths",
+        "transition",
+        "effectContext",
+        "effects",
+        "lineageTransition",
+    ];
+    let record = value
+        .as_object()
+        .ok_or_else(|| invalid("conflict.resolve v1 payload is not an object"))?;
+    if required.iter().any(|key| !record.contains_key(*key))
+        || record
+            .keys()
+            .any(|key| !required.contains(&key.as_str()) && key != "exportedBefore")
+    {
+        return Err(invalid(
+            "conflict.resolve v1 payload has unknown or missing fields",
+        ));
+    }
     if wire_integer(field(record, "formatVersion")?)? != FORMAT_VERSION {
         return Err(invalid("conflict.resolve formatVersion must be 1"));
     }
@@ -325,6 +327,10 @@ pub(crate) fn validate_conflict_resolve_v1(
     let current = parse_head(field(transition, "current")?, paths.len())?;
     let incoming = parse_head(field(transition, "incoming")?, paths.len())?;
     let result = parse_head(field(transition, "result")?, paths.len())?;
+    let exported_before = record
+        .get("exportedBefore")
+        .map(|head| parse_head(head, paths.len()))
+        .transpose()?;
     let effect_context = parse_effect_context(field(record, "effectContext")?)?;
     if effect_context.recorded_at_ms != envelope.recorded_at_ms {
         return Err(invalid(
@@ -347,16 +353,14 @@ pub(crate) fn validate_conflict_resolve_v1(
         effect_context,
         effects,
         lineage_transition,
+        exported_before,
     };
     validate_bindings(&payload)?;
 
     let mut shadows = Vec::with_capacity(payload.effects.len());
     let mut shadow_sha256s = Vec::with_capacity(payload.effects.len());
     for (effect_index, effect) in payload.effects.iter().enumerate() {
-        let shadow = match effect.kind {
-            EffectKindV1::Delete => delete_shadow(&payload, effect, effect_index)?,
-            EffectKindV1::Write => write_shadow(&payload, effect, effect_index)?,
-        };
+        let shadow = effect_shadow(&payload, effect, effect_index)?;
         let canonical = crate::relay::canonical_json_bytes(&shadow)?;
         ensure_limit(
             "MAX_PAYLOAD_JSON_BYTES",
@@ -507,9 +511,9 @@ fn parse_paths(value: &Value) -> Result<Vec<String>, SyncError> {
     let Some(values) = value.as_array() else {
         return Err(invalid("conflict.resolve paths must be an array"));
     };
-    if !(1..=2).contains(&values.len()) {
+    if !(1..=3).contains(&values.len()) {
         return Err(invalid(
-            "conflict.resolve paths must contain one or two entries",
+            "conflict.resolve paths must contain one to three entries",
         ));
     }
     let mut paths = Vec::with_capacity(values.len());
@@ -857,9 +861,22 @@ fn validate_bindings(payload: &ConflictResolveV1) -> Result<(), SyncError> {
         payload.result.path_ref(),
     ]
     .into_iter()
+    .chain(payload.exported_before.iter().map(HeadV1::path_ref))
     .collect::<BTreeSet<_>>();
     if used_paths.len() != payload.paths.len() {
         return Err(invalid("conflict.resolve path table has an unused entry"));
+    }
+    if let Some(exported) = &payload.exported_before {
+        if payload.lineage_transition.is_some()
+            || payload.current.present().is_none()
+            || exported.present().is_some_and(|head| {
+                Some(&head.object_id) != payload.current.present().map(|head| &head.object_id)
+            })
+        {
+            return Err(invalid(
+                "conflict.resolve exported preimage must name its unclaimed object",
+            ));
+        }
     }
     if payload.current.present().is_some()
         != payload
@@ -1104,6 +1121,57 @@ fn delete_shadow(
     }))
 }
 
+fn effect_shadow(
+    payload: &ConflictResolveV1,
+    effect: &EffectV1,
+    effect_index: usize,
+) -> Result<Value, SyncError> {
+    let mut shadow = match effect.kind {
+        EffectKindV1::Delete => delete_shadow(payload, effect, effect_index)?,
+        EffectKindV1::Write => write_shadow(payload, effect, effect_index)?,
+    };
+    if let Some(exported) = &payload.exported_before
+        && shadow["objectId"].as_str()
+            == payload
+                .current
+                .present()
+                .map(|head| head.object_id.as_str())
+    {
+        let absent = HeadV1::Absent {
+            path_ref: payload.result.path_ref(),
+        };
+        let before = if effect.kind == EffectKindV1::Write
+            && payload.effects[..effect_index]
+                .iter()
+                .any(|effect| effect.kind == EffectKindV1::Delete)
+        {
+            &absent
+        } else {
+            exported
+        };
+        portable_head_before(payload, before).apply_to(&mut shadow);
+        shadow["beforeMetadata"] = Value::Null;
+    }
+    Ok(shadow)
+}
+
+fn portable_head_before(
+    payload: &ConflictResolveV1,
+    head: &HeadV1,
+) -> crate::outbound::PortableBefore {
+    let published = match head {
+        HeadV1::Absent { .. } => json!({"operation":"delete"}),
+        HeadV1::Present(head) => json!({
+            "operation":"write", "versionId":payload.target_version_id, "objectId":head.object_id,
+            "momentId":head.latest_moment_id, "recordedAtMs":head.updated_at_ms,
+            "payloadAfterPath":payload.paths[head.path_ref], "payloadAfterContentKind":head.content_kind.as_str(),
+            "payloadAfterBlobSha256":head.blob_sha256, "payloadAfterByteLength":head.byte_length,
+            "metadata":Value::Null,
+        }),
+    };
+    crate::outbound::PortableBefore::published(&published)
+}
+
 fn write_shadow(
     payload: &ConflictResolveV1,
     effect: &EffectV1,
@@ -1161,6 +1229,7 @@ fn blob_roots(payload: &ConflictResolveV1) -> (Vec<String>, Vec<String>, Vec<Str
     let mut ydoc = BTreeSet::new();
     for head in [&payload.current, &payload.incoming, &payload.result]
         .into_iter()
+        .chain(payload.exported_before.iter())
         .filter_map(HeadV1::present)
     {
         match head.content_kind {
@@ -1261,7 +1330,7 @@ fn payload_value(payload: &ConflictResolveV1) -> Value {
             })
         })
         .collect::<Vec<_>>();
-    json!({
+    let mut value = json!({
         "formatVersion": FORMAT_VERSION,
         "workspaceId": payload.workspace_id,
         "conflictId": payload.conflict_id,
@@ -1285,7 +1354,11 @@ fn payload_value(payload: &ConflictResolveV1) -> Value {
         },
         "effects": effects,
         "lineageTransition": lineage_transition_value(payload.lineage_transition.as_ref()),
-    })
+    });
+    if let Some(exported) = &payload.exported_before {
+        value["exportedBefore"] = head_value(exported);
+    }
+    value
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1475,10 +1548,15 @@ pub(crate) fn apply_imported_conflict_resolve_v1_in_tx(
                     shadow,
                 )?;
             }
-            if payload
+            if (payload
                 .lineage_transition
                 .as_ref()
                 .is_some_and(|transition| transition.successor.is_some())
+                || (payload.exported_before.is_some()
+                    && payload
+                        .effects
+                        .last()
+                        .is_some_and(|effect| effect.kind == EffectKindV1::Write)))
                 && let Some(result) = payload.result.present()
                 && let Some(current) = live.present()
                 && current.latest_moment_id != result.latest_moment_id
@@ -1828,6 +1906,12 @@ fn classify_imported_head(
 ) -> Result<(ImportedHeadDisposition, HeadV1), SyncError> {
     let current_path_ref = payload.current.path_ref();
     let current_live = imported_live_head(tx, payload, current_path_ref)?;
+    if let Some(exported) = &payload.exported_before {
+        let exported_live = imported_live_head(tx, payload, exported.path_ref())?;
+        if exported_live == *exported {
+            return Ok((ImportedHeadDisposition::ExactCurrent, exported_live));
+        }
+    }
     if current_live == payload.current {
         return Ok((ImportedHeadDisposition::ExactCurrent, current_live));
     }
@@ -2866,9 +2950,38 @@ pub fn prepare_local_conflict_resolve_v1_in_tx(
         },
         effects,
         lineage_transition: None,
+        exported_before: None,
     };
     let lineage = prepare_local_lineage_in_tx(tx, conflict, &payload, result_text.as_deref())?;
     payload.lineage_transition = lineage_transition(&lineage)?;
+    if payload.lineage_transition.is_none()
+        && let Some(current) = payload.current.present()
+    {
+        let key = DocKey::new(
+            &payload.workspace_id,
+            &payload.target_version_id,
+            &current.object_id,
+        )
+        .map_err(|_| corrupt_local("conflict.resolve current coordinates are invalid"))?;
+        if let Some(before) = crate::outbound::lane_before_in_tx(tx, &key)? {
+            let mut fields = json!({});
+            before.apply_to(&mut fields);
+            let path = fields["beforePath"]
+                .as_str()
+                .unwrap_or(&payload.paths[0])
+                .to_owned();
+            let path_ref = intern_path(&mut payload.paths, &path);
+            let head = if fields["beforePresent"] == "present" {
+                json!({"present":true,"pathRef":path_ref,"objectId":fields["beforeObjectId"],
+                    "latestMomentId":fields["beforeLatestMomentId"],"contentKind":fields["beforeContentKind"],
+                    "blobSha256":fields["beforeBlobSha256"],"byteLength":fields["beforeByteLength"],
+                    "updatedAtMs":fields["beforeUpdatedAtMs"]})
+            } else {
+                json!({"present":false,"pathRef":path_ref})
+            };
+            payload.exported_before = Some(parse_head(&head, payload.paths.len())?);
+        }
+    }
     let built = build_conflict_resolve_v1(payload)?;
     Ok(PreparedLocalConflictResolveV1 {
         built,
@@ -2887,7 +3000,9 @@ pub fn commit_local_conflict_resolve_v1_in_tx(
     prepared: &PreparedLocalConflictResolveV1,
     result: &ResolveTextConflictResult,
 ) -> Result<(), SyncError> {
-    verify_local_result_in_tx(tx, &prepared.built.validated.payload, result)?;
+    let mut local_expected = prepared.built.validated.payload.clone();
+    local_expected.exported_before = None;
+    verify_local_result_in_tx(tx, &local_expected, result)?;
     crate::refusal_notices::clear_conflict_in_tx(
         tx,
         &prepared.built.validated.payload.workspace_id,
@@ -3439,13 +3554,12 @@ fn verify_local_result_in_tx(
         ));
     }
     for (effect_index, effect) in expected.effects.iter().enumerate() {
-        let actual = durable_effect_shadow_in_tx(
+        let (actual, _) = crate::outbound::moment_append_payload_in_tx(
             tx,
             &expected.workspace_id,
             &effect.moment_id,
-            &expected.conflict_id,
-            effect_index,
         )?;
+        let actual = tag_effect_shadow(actual, &expected.conflict_id, effect_index)?;
         let shadow = match effect.kind {
             EffectKindV1::Delete => delete_shadow(expected, effect, effect_index)?,
             EffectKindV1::Write => write_shadow(expected, effect, effect_index)?,
@@ -3511,8 +3625,16 @@ pub(crate) fn durable_effect_shadow_in_tx(
     conflict_id: &str,
     effect_index: usize,
 ) -> Result<Value, SyncError> {
-    let (mut shadow, _) =
-        crate::outbound::moment_append_payload_in_tx(tx, workspace_id, moment_id)?;
+    let (shadow, _) =
+        crate::outbound::published_moment_append_payload_in_tx(tx, workspace_id, moment_id)?;
+    tag_effect_shadow(shadow, conflict_id, effect_index)
+}
+
+fn tag_effect_shadow(
+    mut shadow: Value,
+    conflict_id: &str,
+    effect_index: usize,
+) -> Result<Value, SyncError> {
     shadow["beforeMetadata"] = Value::Null;
     let record = shadow
         .as_object_mut()
@@ -3787,6 +3909,34 @@ mod tests {
         incoming_text: &str,
         predecessor_update: Option<&[u8]>,
     ) -> (ScratchDir, EngineStore, DocKey) {
+        content_conflict_store(
+            current_text,
+            incoming_text,
+            predecessor_update,
+            ContentKind::Scene,
+        )
+    }
+
+    fn content_conflict_store(
+        current_text: &str,
+        incoming_text: &str,
+        predecessor_update: Option<&[u8]>,
+        content_kind: ContentKind,
+    ) -> (ScratchDir, EngineStore, DocKey) {
+        let path = if content_kind == ContentKind::Scene {
+            "drawing.excalidraw"
+        } else {
+            "doc.md"
+        };
+        let (object_id, peer_object_id, conflict_id) = if content_kind == ContentKind::Scene {
+            ("drawing-object", "peer-drawing-object", "scene-conflict")
+        } else {
+            (
+                "document-object",
+                "peer-document-object",
+                "document-conflict",
+            )
+        };
         let scratch = ScratchDir::new().expect("scratch");
         let mut store = EngineStore::open(
             &dohc_engine_testkit::engine_db_path(&scratch).expect("db path"),
@@ -3801,8 +3951,8 @@ mod tests {
                 &WriteText {
                     workspace_id: "ws".to_owned(),
                     version_id: "main".to_owned(),
-                    object_id: "drawing-object".to_owned(),
-                    path: "drawing.excalidraw".to_owned(),
+                    object_id: object_id.to_owned(),
+                    path: path.to_owned(),
                     text: current_text.to_owned(),
                     moment_id: "moment-current".to_owned(),
                     metadata_origin: "sync".to_owned(),
@@ -3814,12 +3964,19 @@ mod tests {
                 },
                 &NoFaults,
             )
-            .expect("current scene");
-        let key = DocKey::new("ws", "main", "drawing-object").expect("scene key");
+            .expect("current content");
+        let key = DocKey::new("ws", "main", object_id).expect("content key");
         let imported_update = predecessor_update.is_none().then(|| {
-            dohc_engine_collab::import_portable_scene(current_text)
-                .expect("import current scene")
-                .initial_update
+            if content_kind == ContentKind::Scene {
+                dohc_engine_collab::import_portable_scene(current_text)
+                    .expect("import current content")
+                    .initial_update
+            } else {
+                let doc = dohc_engine_collab::Ydoc::wire();
+                doc.rewrite_content_to_markdown(content_kind, current_text)
+                    .expect("import current text");
+                doc.encode_full_state()
+            }
         });
         let initial_update = predecessor_update
             .or(imported_update.as_deref())
@@ -3827,17 +3984,17 @@ mod tests {
         dohc_engine_collab::claim_base(
             &mut store,
             &key,
-            ContentKind::Scene,
+            content_kind,
             initial_update,
             &NoFaults,
             11,
         )
-        .expect("claim scene base");
+        .expect("claim content base");
         let incoming = TextSnapshot {
             workspace_id: "ws".to_owned(),
             version_id: "peer".to_owned(),
-            object_id: "peer-drawing-object".to_owned(),
-            path: "drawing.excalidraw".to_owned(),
+            object_id: peer_object_id.to_owned(),
+            path: path.to_owned(),
             text: incoming_text.to_owned(),
             blob_sha256: dohc_engine_storage::hex_sha256(incoming_text.as_bytes()),
             updated_at_ms: 12,
@@ -3847,9 +4004,9 @@ mod tests {
             metadata_correlation_id: None,
         };
         let conflict = TextConflict {
-            conflict_id: "scene-conflict".to_owned(),
+            conflict_id: conflict_id.to_owned(),
             workspace_id: "ws".to_owned(),
-            path: "drawing.excalidraw".to_owned(),
+            path: path.to_owned(),
             target_version_id: "main".to_owned(),
             source_version_id: "peer".to_owned(),
             created_at_ms: 12,
@@ -3858,15 +4015,15 @@ mod tests {
             chosen_from: ConflictChoice::Current,
             resolution: None,
             metadata: ConflictMetadata::origin("sync"),
-            base: ConflictFileState::text("drawing.excalidraw", None),
-            current: ConflictFileState::text("drawing.excalidraw", Some(current.snapshot)),
-            incoming: ConflictFileState::text("drawing.excalidraw", Some(incoming)),
+            base: ConflictFileState::text(path, None),
+            current: ConflictFileState::text(path, Some(current.snapshot)),
+            incoming: ConflictFileState::text(path, Some(incoming)),
         };
         store
             .write_with(&NoFaults, |tx| {
                 insert_text_conflict_if_absent(tx, &conflict).map(|_| ())
             })
-            .expect("open scene conflict");
+            .expect("open content conflict");
         (scratch, store, key)
     }
 
@@ -3926,17 +4083,19 @@ mod tests {
             .expect("open scene conflict");
     }
 
-    fn resolve_scene_conflict(
+    fn resolve_content_conflict(
         store: &mut EngineStore,
         conflict_id: &str,
+        object_id: &str,
         ordinal: i64,
     ) -> BuiltConflictResolveV1 {
-        resolve_scene_conflict_with_author(store, conflict_id, ordinal, None)
+        resolve_content_conflict_with_author(store, conflict_id, object_id, ordinal, None)
     }
 
-    fn resolve_scene_conflict_with_author(
+    fn resolve_content_conflict_with_author(
         store: &mut EngineStore,
         conflict_id: &str,
+        object_id: &str,
         ordinal: i64,
         author_json: Option<String>,
     ) -> BuiltConflictResolveV1 {
@@ -3944,7 +4103,7 @@ mod tests {
             workspace_id: "ws".to_owned(),
             conflict_id: conflict_id.to_owned(),
             resolution: ResolveConflictKind::ApplyIncoming,
-            object_id: "drawing-object".to_owned(),
+            object_id: object_id.to_owned(),
             write_moment_id: format!("moment-resolved-{ordinal}"),
             delete_moment_id: format!("moment-delete-unused-{ordinal}"),
             metadata_origin: "sync".to_owned(),
@@ -3952,7 +4111,7 @@ mod tests {
             metadata_correlation_id: None,
             author_json,
             now_ms: ordinal,
-            request_id: Some(format!("resolve-scene-{ordinal}")),
+            request_id: Some(format!("resolve-content-{ordinal}")),
             conflict_answer_budget_bytes: usize::MAX,
         };
         let prepare_input = input.clone();
@@ -3976,7 +4135,7 @@ mod tests {
                         .map_err(sync_as_domain)
                 },
             )
-            .expect("resolve scene conflict");
+            .expect("resolve content conflict");
         assert_eq!(result.conflict.status, ConflictStatus::Resolved);
         built.into_inner().expect("captured replicated carrier")
     }
@@ -4161,6 +4320,57 @@ mod tests {
         })
     }
 
+    #[test]
+    fn lane_exported_preimage_has_its_own_path_and_binds_the_ordered_shadows() {
+        let context = ConflictResolveEnvelopeContext {
+            workspace_id: "workspace-a",
+            recorded_at_ms: 21,
+        };
+        for content_kind in [HeadContentKindV1::Text, HeadContentKindV1::Binary] {
+            let mut payload = validate_conflict_resolve_v1(&compact_path_change(), context)
+                .unwrap()
+                .payload;
+            payload.lineage_transition = None;
+            payload.paths.push("docs/exported.md".to_owned());
+            let mut exported = payload.current.present().unwrap().clone();
+            exported.path_ref = 2;
+            exported.latest_moment_id = "moment-exported".to_owned();
+            exported.blob_sha256 = dohc_engine_storage::hex_sha256(b"last exported text");
+            exported.content_kind = content_kind;
+            exported.byte_length = 18;
+            exported.updated_at_ms = 5;
+            payload.exported_before = Some(HeadV1::Present(exported));
+            let built = build_conflict_resolve_v1(payload).unwrap();
+            let validated = validate_conflict_resolve_v1(&built.value, context).unwrap();
+            assert_eq!(validated.shadows[0]["beforePath"], "docs/exported.md");
+            let expected_kind = match content_kind {
+                HeadContentKindV1::Text => "text",
+                HeadContentKindV1::Binary => "binary",
+            };
+            assert_eq!(validated.shadows[0]["beforeContentKind"], expected_kind);
+            let exported_sha = dohc_engine_storage::hex_sha256(b"last exported text");
+            assert_eq!(
+                validated.text_blob_sha256s.contains(&exported_sha),
+                content_kind == HeadContentKindV1::Text
+            );
+            assert_eq!(
+                validated.binary_blob_sha256s.contains(&exported_sha),
+                content_kind == HeadContentKindV1::Binary
+            );
+            assert_eq!(
+                validated.shadows[0]["beforeLatestMomentId"],
+                "moment-exported"
+            );
+            assert_eq!(validated.shadows[1]["beforePresent"], "null");
+            let mut too_many_paths = built.value;
+            too_many_paths["paths"]
+                .as_array_mut()
+                .unwrap()
+                .push(json!("docs/fourth.md"));
+            assert!(validate_conflict_resolve_v1(&too_many_paths, context).is_err());
+        }
+    }
+
     fn receiver_fixture() -> (ScratchDir, EngineStore, DocKey, BuiltConflictResolveV1) {
         let scratch = ScratchDir::new().expect("scratch");
         let path = dohc_engine_testkit::engine_db_path(&scratch).expect("db path");
@@ -4279,6 +4489,7 @@ mod tests {
                 moment_id: "moment-result".to_owned(),
                 payload_sha256: String::new(),
             }],
+            exported_before: None,
             lineage_transition: Some(LineageTransitionV1 {
                 predecessor_claim_id,
                 predecessor_state_vector_sha256,
@@ -4412,6 +4623,8 @@ mod tests {
 
     fn imported_envelope(seq: i64, kind: &str, payload: Value) -> ReplicationEnvelope {
         ReplicationEnvelope {
+            settlement_admission: None,
+            admitted_author_snapshot: None,
             workspace_id: "ws".to_owned(),
             origin_id: "peer".to_owned(),
             origin_seq: seq,
@@ -4495,7 +4708,75 @@ mod tests {
             },
             effects: Vec::new(),
             lineage_transition: None,
+            exported_before: None,
         }
+    }
+
+    #[test]
+    fn incoming_nested_list_resolution_installs_and_replicates_exact_source() {
+        let incoming = "- parent\n  - child\n";
+        let (_scratch, mut sender, key) =
+            content_conflict_store("Current body", incoming, None, ContentKind::Richdoc);
+        let predecessor_claim = dohc_engine_collab::read_marker(&sender, &key)
+            .unwrap()
+            .unwrap()
+            .lineage_claim_id
+            .unwrap();
+        let predecessor_update = sender.get_binary_blob(&predecessor_claim).unwrap().unwrap();
+        let built =
+            resolve_content_conflict(&mut sender, "document-conflict", "document-object", 20);
+        let (_receiver_scratch, mut receiver, receiver_key) = content_conflict_store(
+            "Current body",
+            incoming,
+            Some(&predecessor_update),
+            ContentKind::Richdoc,
+        );
+        copy_resolution_roots(&sender, &mut receiver, &built);
+        let mut envelope = imported_envelope(0, "conflict.resolve", built.value);
+        envelope.recorded_at_ms = 20;
+        let outcome = crate::apply_replication_envelope(
+            &mut receiver,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &envelope,
+            &NoFaults,
+            &crate::NoLiveLeases,
+        )
+        .expect("import nested-list resolution");
+        assert!(
+            matches!(outcome.primary, crate::ApplyDisposition::Applied(_)),
+            "{outcome:?}"
+        );
+        assert!(outcome.refusals.is_empty(), "{outcome:?}");
+        for (store, key) in [(&sender, &key), (&receiver, &receiver_key)] {
+            let snapshot: String = store.read_with(|conn| conn.query_row(
+                "SELECT b.text FROM snapshots s JOIN blobs b ON b.sha256=s.blob_sha256 WHERE s.workspace_id=?1 AND s.version_id=?2 AND s.object_id=?3",
+                params![key.workspace_id, key.version_id, key.object_id], |row| row.get(0),
+            ).map_err(SyncError::corrupt)).unwrap();
+            assert_eq!(snapshot.as_bytes(), incoming.as_bytes());
+            let loaded = dohc_engine_collab::load_persisted(store, key)
+                .unwrap()
+                .unwrap();
+            let projected = store
+                .read_with(|conn| {
+                    crate::project_ydoc_with_store(conn, key, &loaded.doc, ContentKind::Richdoc)
+                })
+                .unwrap();
+            assert_eq!(projected.content.as_bytes(), incoming.as_bytes());
+            assert_eq!(
+                dohc_engine_collab::read_last_settled_sha(store, key).unwrap(),
+                Some(dohc_engine_storage::hex_sha256(incoming.as_bytes()))
+            );
+        }
+        assert_eq!(
+            dohc_engine_collab::read_marker(&sender, &key)
+                .unwrap()
+                .unwrap()
+                .lineage_claim_id,
+            dohc_engine_collab::read_marker(&receiver, &receiver_key)
+                .unwrap()
+                .unwrap()
+                .lineage_claim_id
+        );
     }
 
     #[test]
@@ -4511,7 +4792,7 @@ mod tests {
             .get_binary_blob(&predecessor_claim)
             .expect("read predecessor update")
             .expect("predecessor update");
-        let built = resolve_scene_conflict(&mut store, "scene-conflict", 20);
+        let built = resolve_content_conflict(&mut store, "scene-conflict", "drawing-object", 20);
         assert!(matches!(
             built
                 .validated
@@ -4547,6 +4828,8 @@ mod tests {
             scene_conflict_store(&current_text, &incoming_text, Some(&predecessor_update));
         copy_resolution_roots(&store, &mut receiver, &built);
         let replicated = ReplicationEnvelope {
+            settlement_admission: None,
+            admitted_author_snapshot: None,
             workspace_id: "ws".to_owned(),
             origin_id: "resolution-peer".to_owned(),
             origin_seq: 0,
@@ -4610,7 +4893,8 @@ mod tests {
             &incoming_text,
             31,
         );
-        let reinstall = resolve_scene_conflict(&mut store, "scene-conflict-reinstall", 32);
+        let reinstall =
+            resolve_content_conflict(&mut store, "scene-conflict-reinstall", "drawing-object", 32);
         let second_sender_asset = scene_asset_head(&store);
         assert_eq!(second_sender_asset.0, first_sender_asset.0);
         assert_ne!(second_sender_asset.1, first_sender_asset.1);
@@ -4619,6 +4903,8 @@ mod tests {
 
         copy_resolution_roots(&store, &mut receiver, &reinstall);
         let replayed_reinstall = ReplicationEnvelope {
+            settlement_admission: None,
+            admitted_author_snapshot: None,
             workspace_id: "ws".to_owned(),
             origin_id: "resolution-peer".to_owned(),
             origin_seq: 1,
@@ -4670,7 +4956,7 @@ mod tests {
         let current_text = canonical_scene("current-box");
         let incoming_text = canonical_image_scene("incoming-image");
         let (_scratch, mut store, key) = scene_conflict_store(&current_text, &incoming_text, None);
-        resolve_scene_conflict(&mut store, "scene-conflict", 20);
+        resolve_content_conflict(&mut store, "scene-conflict", "drawing-object", 20);
         let asset = scene_asset_head(&store);
         assert_eq!(asset.3, "ydoc");
 
@@ -4754,9 +5040,10 @@ mod tests {
                 "kind": "agent", "agentId": "agent-1",
                 "onBehalfOf": person_id, "agentRunId": "run-1"
             }]);
-            let built = resolve_scene_conflict_with_author(
+            let built = resolve_content_conflict_with_author(
                 &mut sender,
                 "scene-conflict",
+                "drawing-object",
                 20,
                 Some(authors.to_string()),
             );
@@ -5311,6 +5598,8 @@ mod tests {
             .lineage_claim_id
             .expect("active lineage claim");
         let update = ReplicationEnvelope {
+            settlement_admission: None,
+            admitted_author_snapshot: None,
             workspace_id: "ws".to_owned(),
             origin_id: "dependency-peer".to_owned(),
             origin_seq: 0,
@@ -5575,6 +5864,8 @@ mod tests {
             let update = old.doc.plaintext_insert(0, &"x".repeat(9 * 1024 * 1024));
             let sha = store.put_binary_blob(&update).unwrap();
             let op = ReplicationEnvelope {
+                settlement_admission: None,
+                admitted_author_snapshot: None,
                 workspace_id: "ws".into(),
                 origin_id: "byte-budget".into(),
                 origin_seq: seq,
@@ -5644,6 +5935,8 @@ mod tests {
         {
             let sha = store.put_binary_blob(&update).unwrap();
             let op = ReplicationEnvelope {
+                settlement_admission: None,
+                admitted_author_snapshot: None,
                 workspace_id: "ws".into(),
                 origin_id: origin.into(),
                 origin_seq: 0,
@@ -5710,6 +6003,8 @@ mod tests {
                 let sha = store.put_binary_blob(&update).unwrap();
                 let seq = batch * 257 + index;
                 let op = ReplicationEnvelope {
+                    settlement_admission: None,
+                    admitted_author_snapshot: None,
                     workspace_id: "ws".into(),
                     origin_id: "batch-archive".into(),
                     origin_seq: seq,
@@ -5806,6 +6101,8 @@ mod tests {
         for (seq, bytes) in [oversized, poison].into_iter().enumerate() {
             let sha = store.put_binary_blob(&bytes).unwrap();
             let op = ReplicationEnvelope {
+                settlement_admission: None,
+                admitted_author_snapshot: None,
                 workspace_id: "ws".into(),
                 origin_id: "archive-rejections".into(),
                 origin_seq: seq as i64,
@@ -5859,6 +6156,8 @@ mod tests {
             let update = old.doc.plaintext_insert(0, &"x".repeat(size));
             let sha = store.put_binary_blob(&update).unwrap();
             let op = |seq, sha: String| ReplicationEnvelope {
+                settlement_admission: None,
+                admitted_author_snapshot: None,
                 workspace_id: "ws".to_owned(),
                 origin_id: "late-archive".to_owned(),
                 origin_seq: seq,
@@ -6998,6 +7297,71 @@ mod tests {
         );
     }
 
+    fn exported_before_relay_vector() -> Value {
+        let mut payload = validate_conflict_resolve_v1(
+            &compact_path_change(),
+            ConflictResolveEnvelopeContext {
+                workspace_id: "workspace-a",
+                recorded_at_ms: 21,
+            },
+        )
+        .unwrap()
+        .payload;
+        payload.lineage_transition = None;
+        payload.paths.push("docs/exported.md".to_owned());
+        let mut exported = payload.current.present().unwrap().clone();
+        exported.path_ref = 2;
+        exported.latest_moment_id = "moment-exported".to_owned();
+        exported.blob_sha256 = dohc_engine_storage::hex_sha256(b"last exported text");
+        exported.byte_length = 18;
+        exported.updated_at_ms = 5;
+        payload.exported_before = Some(HeadV1::Present(exported));
+        let built = build_conflict_resolve_v1(payload).unwrap();
+        json!({"payload":built.value,"shadows":built.validated.shadows})
+    }
+
+    const RELAY_VECTOR_PATH: &str = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../services/sync-relay/src/server.test.ts"
+    );
+    const RELAY_VECTOR_BEGIN: &str = "// BEGIN RUST EXPORTED-BEFORE VECTOR\n";
+    const RELAY_VECTOR_END: &str = "// END RUST EXPORTED-BEFORE VECTOR";
+    const RELAY_VECTOR_DECLARATION: &str = "const RUST_EXPORTED_BEFORE_VECTOR = ";
+
+    #[test]
+    fn exported_before_carrier_matches_the_shared_rust_relay_vector() {
+        let source = std::fs::read_to_string(RELAY_VECTOR_PATH)
+            .unwrap()
+            .replace("\r\n", "\n");
+        let (_, vector) = source.split_once(RELAY_VECTOR_BEGIN).unwrap();
+        let (vector, _) = vector.split_once(RELAY_VECTOR_END).unwrap();
+        let encoded = vector
+            .trim()
+            .strip_prefix(RELAY_VECTOR_DECLARATION)
+            .unwrap()
+            .strip_suffix(';')
+            .unwrap();
+        let checked_in: Value = serde_json::from_str(encoded).unwrap();
+        assert_eq!(
+            checked_in,
+            exported_before_relay_vector(),
+            "regenerate with update_exported_before_relay_vector"
+        );
+    }
+
+    // Like protocol/examples/update_fixtures.rs, Rust is the fixture's only writer.
+    #[test]
+    #[ignore = "regenerates the Rust-owned vector in relay server.test.ts"]
+    fn update_exported_before_relay_vector() {
+        let source = std::fs::read_to_string(RELAY_VECTOR_PATH)
+            .unwrap()
+            .replace("\r\n", "\n");
+        let (prefix, rest) = source.split_once(RELAY_VECTOR_BEGIN).unwrap();
+        let (_, suffix) = rest.split_once(RELAY_VECTOR_END).unwrap();
+        let generated = serde_json::to_string_pretty(&exported_before_relay_vector()).unwrap();
+        std::fs::write(RELAY_VECTOR_PATH, format!("{prefix}{RELAY_VECTOR_BEGIN}{RELAY_VECTOR_DECLARATION}{generated};\n{RELAY_VECTOR_END}{suffix}")).unwrap();
+    }
+
     #[test]
     fn lineage_artifact_preimage_mismatch_is_refused_without_mutating_input() {
         let mut payload = compact_path_change();
@@ -7110,6 +7474,7 @@ mod tests {
                     payload_sha256: String::new(),
                 },
             ],
+            exported_before: None,
             lineage_transition: Some(LineageTransitionV1 {
                 predecessor_claim_id: "e".repeat(64),
                 predecessor_state_vector_sha256: "f".repeat(64),

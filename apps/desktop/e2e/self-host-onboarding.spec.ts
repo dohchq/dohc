@@ -1,3 +1,4 @@
+import { activityPin, settingsNavPin } from "../src/testPins";
 import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -47,8 +48,10 @@ test("@self-host-onboarding a real account connects two fresh desktops and keeps
     await writeWorkspaceFiles(first, [{ path: "welcome.md", contents: "# Self-hosted workspace\n\nCreated before connecting.\n" }]);
     left = await launchDesktopApp({ workspace: first });
     const workspace = await openWorkspaceFromFirstRun(left.page, first);
-    // Sync and sharing lives on the activity bar; the connect form is inside it.
-    await left.page.getByTestId("activity-cloud").click();
+    // Sync and sharing lives in Settings; the connect form is inside it.
+    await left.page.getByTestId(activityPin("settings")).click();
+    await left.page.getByTestId(settingsNavPin("cloud")).click();
+    await left.page.getByRole("button", { name: "Open sync and sharing" }).click();
     await expect(left.page.getByTestId("cloud-sync-panel")).toBeVisible();
     ownerBrowser = await browser.newContext();
     const ownerPage = await ownerBrowser.newPage();

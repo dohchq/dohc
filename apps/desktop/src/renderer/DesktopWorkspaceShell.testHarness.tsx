@@ -14,6 +14,7 @@ import * as Y from "yjs";
 import type { DatasetRequest, DatasetResult } from "@dohc/cli/dataset";
 import type {
   AgentRunStatusResult,
+  CaptureRecoveryStatusResult,
   ReadCrashReportResult,
   ListCollectionAutomationRunsResult,
   ListCollectionAutomationsResult,
@@ -34,6 +35,7 @@ import type {
   ImportWorkspaceFilesResult,
   ListEngineMomentsResponse,
   ListFileChatsResult,
+  ListKeptCopiesResult,
   ListMyShareChangesResult,
   ListShareProposalsResult,
   GetCollectionResult,
@@ -55,14 +57,16 @@ import type {
   UndoRelaySharePayload,
   SettleShareProposalResult,
   SubmitShareChangesResult,
-  PushShareDirectWritesResult,
   ShareDirectWritesPushedEvent,
+  ShareDirectWriteAnswerDelivery,
   WithdrawShareChangesResult,
   McpConfigResult,
   ReadWorkspaceTextPayload,
   ReadEngineMomentResult,
   RebuildEngineStoreResult,
   RefreshSharedViewResult,
+  ReportKinds,
+  UsageRecordResult,
   StartAgentRunResult,
   SwitchWorkspaceVersionResult,
   SyncDmsPayload,
@@ -169,9 +173,12 @@ export const STORED_STATE: WorkspaceUiState = {
     { id: "primary", tabs: ["b.md"], activeTab: "b.md", size: 1 },
   ],
   activeEditorGroup: "primary",
-  chatsVisible: true,
-  chatsWidth: 360,
+  aboutVisible: true,
+  aboutWidth: 360,
 };
+
+// The stored state with the chat list showing in the left side panel.
+export const STORED_CHATS_STATE: WorkspaceUiState = { ...STORED_STATE, activeView: "chats" };
 
 export function storedStateWithTabs(
   tabs: string[],
@@ -296,12 +303,15 @@ function makeBaseBridge(
   platform: NodeJS.Platform = "linux",
 ) {
   const activityCallbacks = new Set<(event: WorkspaceActivityEvent) => void>();
-  const directWritesPushedCallbacks = new Set<(event: ShareDirectWritesPushedEvent) => void>();
+  const heldDirectAnswers: ShareDirectWritesPushedEvent[] = [];
+  const directAnswerDelivery: ShareDirectWriteAnswerDelivery = { claim: async () => true, acknowledge: async () => true, release: async () => true };
+  const directWritesPushedCallbacks = new Set<(event: ShareDirectWritesPushedEvent, delivery: ShareDirectWriteAnswerDelivery) => void>();
   const crashReportCallbacks = new Set<() => void>();
   let searchCallback: ((batch: SearchResultsEvent) => void) | null = null;
   let menuCallback: ((command: MenuCommand) => void) | null = null;
   return {
     platform,
+    typingRecovery: vi.fn(async () => ({failures: []})),
     emitWorkspaceActivity: (event: WorkspaceActivityEvent = {}) => {
       for (const callback of [...activityCallbacks]) callback(event);
     },
@@ -328,6 +338,8 @@ function makeBaseBridge(
       }),
     ),
     openWorkspace: vi.fn(async () => SYNC_STATUS),
+    listLiveDraftRecovery: vi.fn(async (): Promise<import("../ipc/bridgeContract").LiveDraftRecoveryRecord[]> => []),
+    discardLiveDraftRecovery: vi.fn(async (_input: Parameters<import("../ipc/bridgeContract").DohcDesktopBridge["discardLiveDraftRecovery"]>[0]): Promise<import("../ipc/bridgeContract").LiveDraftRecoveryRecord[]> => []),
     getSyncStatus: vi.fn(async () => SYNC_STATUS),
     // Owner live documents and the live-delivery retry command. Typed to the
     // contracts, not to these empty defaults: the live-document tests swap in
@@ -363,6 +375,7 @@ function makeBaseBridge(
     retryCloudSync: vi.fn(
       async (_payload: { workspaceId: string; reason: "person" | "reconnect" }): Promise<SyncStatusResult> => SYNC_STATUS,
     ),
+    retryFileObservation: vi.fn(async (_payload: { workspaceId: string }): Promise<SyncStatusResult> => SYNC_STATUS),
     // The refused-store rebuild. Typed to the contract, not to this
     // default: the recovery tests swap in the no-clobber refusal.
     rebuildEngineStore: vi.fn(
@@ -374,7 +387,6 @@ function makeBaseBridge(
     // a real running agent through it.
     getAgentRunStatus: vi.fn(
       async (): Promise<AgentRunStatusResult> => ({
-        mcpEnabled: false,
         activeRun: null,
         lastRun: null,
       }),
@@ -425,7 +437,6 @@ function makeBaseBridge(
       settings: DEFAULT_WORKSPACE_SETTINGS,
       source: "stored" as const,
     })),
-    writeClipboardText: vi.fn(async () => undefined),
     setTitlebarTheme: vi.fn(async () => undefined),
     onUserSettingsChanged: vi.fn(() => () => {}),
     onChatDispatchNotices: vi.fn(() => () => {}),
@@ -515,6 +526,7 @@ function makeBaseBridge(
       shareCode: "dohc-share:relay-share-1:http://relay.test",
       recipientEmail: "friend@dohc.test",
     })),
+    getShareCopyDetails: vi.fn(async () => ({ status: "ended" as const })),
     listRelayShares: vi.fn(async () => ({ granted: [], received: [], removed: [] })),
     retryShareHandoff: vi.fn(async () => undefined),
     dismissShareHandoff: vi.fn(async () => undefined),
@@ -570,14 +582,17 @@ function makeBaseBridge(
       async (): Promise<WithdrawShareChangesResult> => ({ state: "withdrawn" }),
     ),
     pushShareDirectWrites: vi.fn(
-      async (): Promise<PushShareDirectWritesResult> => ({ status: "pushed", writes: [] }),
+      async (): Promise<void> => undefined,
     ),
-    emitShareDirectWritesPushed: (event: ShareDirectWritesPushedEvent) => {
-      for (const callback of [...directWritesPushedCallbacks]) callback(event);
+    emitShareDirectWritesPushed: (input: Omit<ShareDirectWritesPushedEvent, "answerId"> & { answerId?: string }) => {
+      const event = { ...input, answerId: input.answerId ?? crypto.randomUUID() };
+      if (!directWritesPushedCallbacks.size) heldDirectAnswers.push(event);
+      for (const callback of [...directWritesPushedCallbacks]) callback(event, directAnswerDelivery);
     },
     onShareDirectWritesPushed: vi.fn(
-      (listener: (event: ShareDirectWritesPushedEvent) => void) => {
+      (listener: (event: ShareDirectWritesPushedEvent, delivery: ShareDirectWriteAnswerDelivery) => void) => {
         directWritesPushedCallbacks.add(listener);
+        for (const event of heldDirectAnswers.splice(0)) listener(event, directAnswerDelivery);
         return () => directWritesPushedCallbacks.delete(listener);
       },
     ),
@@ -611,6 +626,8 @@ function makeBaseBridge(
         refusedDetail: null,
       }),
     ),
+    checkSharedViewAccess: vi.fn<import("../ipc/bridgeContract").DohcDesktopBridge["checkSharedViewAccess"]>(async () => ({ status: "unverified" })),
+    dismissShareCaptureNotice: vi.fn<import("../ipc/bridgeContract").DohcDesktopBridge["dismissShareCaptureNotice"]>(async () => undefined),
     onWorkspaceActivity: vi.fn(
       (callback: (event: WorkspaceActivityEvent) => void) => {
         activityCallbacks.add(callback);
@@ -626,8 +643,13 @@ function makeBaseBridge(
         menuCallback = null;
       };
     }),
-    listKeptCopies: vi.fn(async () => ({ keptCopies: [], more: false })),
+    listKeptCopies: vi.fn(async (): Promise<ListKeptCopiesResult> => ({ keptCopies: [], more: false })),
     saveKeptCopy: vi.fn(async () => ({ status: "gone" as const })),
+    // Typed to the contract: the capture recovery tests swap the answer.
+    getCaptureRecoveryStatus: vi.fn(
+      async (_payload: { workspaceId: string }): Promise<CaptureRecoveryStatusResult> => ({ captureRecoveries: [] }),
+    ),
+    clearCaptureRecovery: vi.fn(async (_payload: { workspaceId: string; momentId: string }): Promise<void> => undefined),
     retryAutomationNotice: vi.fn(
       async (): Promise<RetryCollectionAutomationResult> => ({ status: "queued", press: false }),
     ),
@@ -663,6 +685,15 @@ function makeBaseBridge(
     ),
     dismissCrashReport: vi.fn(async (_payload: { through: number }) => undefined),
     sendCrashReport: vi.fn(async (_payload: Record<string, never>) => ({ sent: true })),
+    readReportsNotice: vi.fn(async (_payload: Record<string, never>) => ({ usage: false, errors: false })),
+    acknowledgeReportsNotice: vi.fn(async (_shown: ReportKinds) => undefined),
+    readDiagnostics: vi.fn(async (_payload: Record<string, never>) => ({ text: "dohc diagnostics", available: { usage: false, errors: false } })),
+    saveDiagnostics: vi.fn(async (_payload: Record<string, never>) => ({ saved: true })),
+    readUsageRecord: vi.fn(async (_payload: Record<string, never>): Promise<UsageRecordResult> =>
+      ({ status: "readable", enabled: true, file: "/state/dohc-usage.json", since: null, incompleteDays: 0, rows: [] })),
+    clearUsageRecord: vi.fn(async (_payload: Record<string, never>) => undefined),
+    setUsageRecordEnabled: vi.fn(async (_payload: { enabled: boolean }) => undefined),
+    reportRendererError: vi.fn(async (_payload: unknown) => undefined),
     emitCrashReportChanged: () => {
       for (const callback of [...crashReportCallbacks]) callback();
     },
@@ -695,6 +726,8 @@ export function makeBridge(
 ) {
   const bridge = makeBaseBridge(uiStatePromise, platform);
   return Object.assign(bridge, {
+    pendingStopAndRestores: vi.fn(async (): Promise<import("../ipc/bridgeContract").PendingStopAndRestoresResult> => []),
+    dismissStopAndRestore: vi.fn(async (): Promise<void> => undefined),
     onEngineYDocSaveState: vi.fn((_listener: (event: import("../ipc/bridgeContract").EngineYDocSaveStateEvent) => void) => () => undefined),
     // Collections: the flagged shell lists collections on
     // ready and on activity. Typed to the contract; the collection tests

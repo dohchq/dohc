@@ -771,6 +771,10 @@ impl EngineService {
                 "workspace-read-only",
             ));
         }
+        self.ensure_handle_allows_method(
+            Some(&config.workspace),
+            "liveApplication.provisionOwner",
+        )?;
         let _serial = Arc::clone(&open.session_ops).lock_owned().await;
         if !Arc::ptr_eq(&self.open(Some(&config.workspace))?, &open) {
             return Err(workspace_unavailable());
@@ -1202,7 +1206,11 @@ mod tests {
                 .unwrap();
         }
         ingress.chunk(1, true, &bytes).unwrap();
-        let (apply_request, input) = ingress.chunk(2, true, &[]).unwrap().unwrap();
+        let crate::live_application_ingress::UploadCompletion::Admitted(apply_request, input) =
+            ingress.chunk(2, true, &[]).unwrap().unwrap()
+        else {
+            panic!("unexpected refusal")
+        };
         let mut ctx = RequestContext::unbounded();
         ctx.connection = Some(owner.handle());
         let applied = service
@@ -1821,7 +1829,11 @@ mod tests {
                     sha256: Some(hex_sha256(&baseline)),
                 })
                 .unwrap();
-            let (request, input) = upload.chunk(1, true, &baseline).unwrap().unwrap();
+            let crate::live_application_ingress::UploadCompletion::Admitted(request, input) =
+                upload.chunk(1, true, &baseline).unwrap().unwrap()
+            else {
+                panic!("unexpected refusal")
+            };
             let mut bootstrap_ctx = RequestContext::unbounded();
             bootstrap_ctx.connection = Some(owner.handle());
             let response = service
@@ -2064,7 +2076,11 @@ mod tests {
                 .unwrap();
         }
         ingress.chunk(1, true, &bytes).unwrap();
-        let (request, input) = ingress.chunk(2, true, &[]).unwrap().unwrap();
+        let crate::live_application_ingress::UploadCompletion::Admitted(request, input) =
+            ingress.chunk(2, true, &[]).unwrap().unwrap()
+        else {
+            panic!("unexpected refusal")
+        };
         let retry = input.clone();
         let handle = dohc_engine_protocol::wire::WorkspaceHandle(workspace);
         let open = service.open(Some(&handle)).unwrap();

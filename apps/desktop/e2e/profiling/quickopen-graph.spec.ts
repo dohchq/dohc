@@ -1,4 +1,5 @@
 import { expect, test } from "@playwright/test";
+import { activityPin, desktopPins } from "../../src/testPins";
 import { startLongTaskObserver, stopLongTaskObserver } from "./cdpCapture";
 import {
   launchFixture,
@@ -34,14 +35,14 @@ test("profiles eight Quick Open keystrokes and Graph construction", async () => 
     expect(typed).toHaveLength(8);
     await page.keyboard.press("Escape");
 
-    const graphButton = page.getByTestId("activity-graph");
+    const graphButton = page.getByTestId(activityPin("graph"));
     if ((await graphButton.getAttribute("aria-current")) === "page") {
-      await page.getByTestId("activity-explorer").click();
+      await page.getByTestId(activityPin("explorer")).click();
       await expect(graphButton).not.toHaveAttribute("aria-current", "page");
     }
     const graphStart = await page.evaluate(() => performance.now());
     await graphButton.click();
-    const sidePanel = page.getByTestId("side-panel");
+    const sidePanel = page.getByTestId(desktopPins.sidePanel);
     const graph = sidePanel.locator('[data-testid="graph-view"][data-state="ready"]');
     await expect(graph).toBeVisible({ timeout: 180_000 });
     await expect(sidePanel.getByTestId("graph-node").first()).toBeVisible();

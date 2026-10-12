@@ -21,6 +21,7 @@ pub struct OwnerEnrollmentInput {
     pub journal_cursor: i64,
     pub checkpoint: Vec<u8>,
     pub host_vector: Vec<u8>,
+    pub recovery: bool,
 }
 
 /// The same observed document at a strictly later restore generation.
@@ -100,8 +101,21 @@ pub fn prepare_in(
     conn: &Connection,
     binding: &LiveObjectBinding,
     namespace: &str,
+    recovery: bool,
 ) -> Result<OwnerEnrollmentPreparation, OwnerOutboxError> {
     validate_identifier(namespace, "invalid relay namespace")?;
+    if let Some(previous) = if recovery {
+        recovery_previous(conn, binding)?
+    } else {
+        None
+    } {
+        if previous.relay_database_namespace != namespace {
+            return Err(OwnerOutboxError::ParentMismatch);
+        }
+        return Ok(OwnerEnrollmentPreparation::Capture {
+            captured: capture(conn, binding, true)?,
+        });
+    }
     if let Some(draft) = super::draft::descriptor_for_key_in(conn, &key(binding)?)? {
         if draft.relay_database_namespace != namespace {
             return Err(OwnerOutboxError::ParentMismatch);
@@ -123,6 +137,67 @@ pub fn prepare_in(
     Ok(OwnerEnrollmentPreparation::Capture {
         captured: capture_in(conn, binding)?,
     })
+}
+
+fn recovery_previous(
+    conn: &Connection,
+    next: &LiveObjectBinding,
+) -> Result<Option<ObservedOwnerBinding>, OwnerOutboxError> {
+    next.validate_canonical()
+        .map_err(OwnerOutboxError::InvalidInput)?;
+    let mut stmt = conn.prepare("SELECT binding_json FROM ydoc_owner_bindings WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 LIMIT 2").map_err(read_sql)?;
+    let rows = stmt
+        .query_map(
+            params![next.workspace_id, next.main_version_id, next.object_id],
+            |r| r.get::<_, String>(0),
+        )
+        .map_err(read_sql)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(read_sql)?;
+    if rows.is_empty() {
+        return Ok(None);
+    }
+    if rows.len() != 1 {
+        return Err(OwnerOutboxError::Frozen);
+    }
+    let old: LiveObjectBinding =
+        serde_json::from_str(&rows[0]).map_err(|_| OwnerOutboxError::Corrupt)?;
+    if old.workspace_id != next.workspace_id
+        || old.main_version_id != next.main_version_id
+        || old.object_id != next.object_id
+        || old.lineage_claim_id != next.lineage_claim_id
+        || next.restore_fence_generation < old.restore_fence_generation
+    {
+        return Err(OwnerOutboxError::ParentMismatch);
+    }
+    let parent = find_parent_for_binding(conn, &old)?;
+    if parent
+        .as_ref()
+        .is_none_or(|p| p.state != OwnerOutboxState::Quarantined)
+    {
+        return Ok(None);
+    }
+    require_recoverable_parent(conn, &old)?;
+    super::draft::read_observed_in(conn, &old)?
+        .map(Some)
+        .ok_or(OwnerOutboxError::NotFound)
+}
+
+fn require_recoverable_parent(
+    conn: &Connection,
+    binding: &LiveObjectBinding,
+) -> Result<ParentRow, OwnerOutboxError> {
+    let parent = find_parent_for_binding(conn, binding)?.ok_or(OwnerOutboxError::NotFound)?;
+    if parent.binding != *binding
+        || parent.state != OwnerOutboxState::Quarantined
+        || !matches!(
+            parent.quarantine_reason.as_deref(),
+            Some("stale-binding" | "restore-fenced" | "binding-changed")
+        )
+    {
+        return Err(OwnerOutboxError::Frozen);
+    }
+    Ok(parent)
 }
 
 /// A changed capture, invalid host cut, or exceeded bound rolls back the whole
@@ -147,14 +222,27 @@ pub fn enroll_in_tx(
             "invalid owner enrollment cut",
         ));
     }
-    let previous = match super::draft::descriptor_for_key_in(tx, &key(&input.binding)?)? {
-        Some(draft) if restore_successor(&draft.binding, &input.binding) => {
-            if draft.relay_database_namespace != input.relay_database_namespace {
-                return Err(OwnerOutboxError::ParentMismatch);
-            }
-            Some(super::accepted::current(tx, &draft.binding)?)
+    let recovery = if input.recovery {
+        recovery_previous(tx, &input.binding)?
+    } else {
+        None
+    };
+    let recovering = recovery.is_some();
+    let previous = if let Some(previous) = recovery {
+        if previous.relay_database_namespace != input.relay_database_namespace {
+            return Err(OwnerOutboxError::ParentMismatch);
         }
-        _ => None,
+        Some(previous)
+    } else {
+        match super::draft::descriptor_for_key_in(tx, &key(&input.binding)?)? {
+            Some(draft) if restore_successor(&draft.binding, &input.binding) => {
+                if draft.relay_database_namespace != input.relay_database_namespace {
+                    return Err(OwnerOutboxError::ParentMismatch);
+                }
+                Some(super::accepted::current(tx, &draft.binding)?)
+            }
+            _ => None,
+        }
     };
     let (marker, local_bytes) = native_state(tx, &input.binding, previous.is_some())?;
     if marker.head_update_seq != input.captured.native_head_sequence
@@ -185,6 +273,20 @@ pub fn enroll_in_tx(
         return Err(OwnerOutboxError::ParentMismatch);
     }
     if let Some(previous) = previous {
+        if recovering {
+            let draft = recover_in_tx(
+                tx,
+                workspace,
+                input,
+                previous,
+                &marker,
+                &local_bytes,
+                &checkpoint,
+                now_ms,
+            )?;
+            index_frontmatter_in_tx(tx, &input.binding, &host, None, None, now_ms)?;
+            return Ok(draft);
+        }
         let draft = advance_generation_in_tx(
             tx,
             workspace,
@@ -195,10 +297,9 @@ pub fn enroll_in_tx(
             checkpoint,
             now_ms,
         )?;
-        index_checkpoint_frontmatter_in_tx(tx, &input.binding, &host.frontmatter_json(), now_ms)?;
+        index_frontmatter_in_tx(tx, &input.binding, &host, None, None, now_ms)?;
         return Ok(draft);
     }
-    let checkpoint_frontmatter = host.frontmatter_json();
     host.apply(&local_bytes).map_err(collab)?;
     let merged = bounded(&host)?;
     if host.has_pending_dependencies() || host.lineage_epoch_tag() != original.lineage_epoch_tag() {
@@ -229,7 +330,7 @@ pub fn enroll_in_tx(
         &input.host_vector,
         now_ms,
     )?;
-    index_checkpoint_frontmatter_in_tx(tx, &input.binding, &checkpoint_frontmatter, now_ms)?;
+    index_frontmatter_in_tx(tx, &input.binding, &host, None, None, now_ms)?;
     let observed = ObservedOwnerBinding {
         binding: input.binding.clone(),
         relay_database_namespace: input.relay_database_namespace.clone(),
@@ -254,45 +355,62 @@ pub fn enroll_in_tx(
     super::draft::descriptor_for_key_in(tx, &key)?.ok_or(OwnerOutboxError::Corrupt)
 }
 
-fn index_checkpoint_frontmatter_in_tx(
+#[allow(clippy::too_many_arguments)]
+fn recover_in_tx(
     tx: &rusqlite::Transaction<'_>,
-    binding: &LiveObjectBinding,
-    after: &serde_json::Value,
+    workspace: &str,
+    input: &OwnerEnrollmentInput,
+    previous: ObservedOwnerBinding,
+    marker: &crate::Marker,
+    local_bytes: &[u8],
+    checkpoint: &[u8],
     now_ms: i64,
-) -> Result<(), OwnerOutboxError> {
-    let before = dohc_engine_domain::collections::indexed_collection_record_frontmatter_in_tx(
+) -> Result<OwnerDraftDescriptor, OwnerOutboxError> {
+    let parent = require_recoverable_parent(tx, &previous.binding)?;
+    if input.journal_cursor < previous.accepted_cursor {
+        return Err(OwnerOutboxError::ParentMismatch);
+    }
+    let checkpoint_digest = hex_sha256(checkpoint);
+    put_binary_blob_with_sha(tx, checkpoint, &checkpoint_digest)?;
+    if checkpoint != local_bytes {
+        dohc_engine_storage::count_remote_change_in_tx(tx, workspace)?;
+    }
+    let head = install_native_checkpoint_in_tx(
         tx,
-        &binding.workspace_id,
-        &binding.main_version_id,
-        &binding.object_id,
-    )
-    .map_err(checkpoint_index_error)?;
-    if let Some(before) = before {
-        dohc_engine_domain::index_collection_frontmatter_apply_in_tx(
-            tx,
-            &binding.workspace_id,
-            &binding.main_version_id,
-            &binding.object_id,
-            &before,
-            after,
-            &before,
-            after,
-            None,
-            None,
-            None,
-            None,
-            now_ms,
-        )
-        .map_err(checkpoint_index_error)?;
+        &key(&input.binding)?,
+        marker,
+        local_bytes,
+        checkpoint,
+        &checkpoint_digest,
+        &input.host_vector,
+        now_ms,
+    )?;
+    let revision = previous
+        .revision
+        .checked_add(1)
+        .filter(|n| *n < 9_007_199_254_740_991)
+        .ok_or(OwnerOutboxError::Frozen)?;
+    tx.execute("UPDATE owner_ydoc_outbox_entries SET pending=0,terminal_blob_digest=update_blob_digest,update_blob_digest=NULL,terminal_reason=?2 WHERE outbox_id=?1 AND pending=1", params![parent.outbox_id,parent.quarantine_reason]).map_err(write_sql)?;
+    if previous.binding == input.binding {
+        tx.execute("UPDATE owner_ydoc_outboxes SET state='active',pending_bytes=0,oldest_entry_at_ms=NULL,quarantine_reason=NULL,observed_binding_json=NULL WHERE outbox_id=?1", [&parent.outbox_id]).map_err(write_sql)?;
+    } else {
+        tx.execute("UPDATE owner_ydoc_outboxes SET pending_bytes=0,oldest_entry_at_ms=NULL,observed_binding_json=?2 WHERE outbox_id=?1", params![parent.outbox_id,binding_json(&input.binding)?]).map_err(write_sql)?;
+        if let Some(target) = find_parent_for_binding(tx, &input.binding)? {
+            if target.state != OwnerOutboxState::Quarantined || target.pending_bytes != 0 {
+                return Err(OwnerOutboxError::ParentMismatch);
+            }
+            require_recoverable_parent(tx, &input.binding)?;
+            tx.execute("UPDATE owner_ydoc_outboxes SET state='active',quarantine_reason=NULL,observed_binding_json=NULL WHERE outbox_id=?1", [&target.outbox_id]).map_err(write_sql)?;
+        }
     }
-    Ok(())
-}
-
-fn checkpoint_index_error(error: dohc_engine_domain::DomainError) -> OwnerOutboxError {
-    match error {
-        dohc_engine_domain::DomainError::Storage(error) => OwnerOutboxError::Storage(error),
-        _ => OwnerOutboxError::Corrupt,
+    let changed = tx.execute("UPDATE ydoc_owner_bindings SET binding_revision=?5,accepted_cursor=?6,native_head_sequence=?7,checkpoint_digest=?8,binding_json=?10 WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND lineage_claim_id=?4 AND binding_revision=?9", params![input.binding.workspace_id,input.binding.main_version_id,input.binding.object_id,input.binding.lineage_claim_id,revision,input.journal_cursor,head,checkpoint_digest,previous.revision,binding_json(&input.binding)?]).map_err(write_sql)?;
+    if changed != 1 {
+        return Err(OwnerOutboxError::ParentMismatch);
     }
+    if previous.checkpoint_digest != checkpoint_digest {
+        delete_binary_blob_if_unreferenced(tx, &previous.checkpoint_digest)?;
+    }
+    super::draft::descriptor_for_key_in(tx, &key(&input.binding)?)?.ok_or(OwnerOutboxError::Corrupt)
 }
 
 /// A later restore generation of an observed owner. The authenticated host cut
@@ -326,10 +444,36 @@ fn advance_generation_in_tx(
             now_ms,
         )?;
     }
-    tx.execute(
-        "UPDATE owner_ydoc_outboxes SET state='quarantined',quarantine_reason='restore-fenced',observed_binding_json=?6 WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND lineage_claim_id=?4 AND restore_fence_generation=?5 AND state!='quarantined'",
-        params![old.workspace_id,old.main_version_id,old.object_id,old.lineage_claim_id,old.restore_fence_generation,binding_json(&input.binding)?],
-    ).map_err(write_sql)?;
+    let outboxes = {
+        let mut stmt = tx.prepare(
+            "SELECT outbox_id FROM owner_ydoc_outboxes WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND lineage_claim_id=?4 AND restore_fence_generation=?5 AND state!='quarantined'",
+        ).map_err(read_sql)?;
+        let rows = stmt
+            .query_map(
+                params![
+                    old.workspace_id,
+                    old.main_version_id,
+                    old.object_id,
+                    old.lineage_claim_id,
+                    old.restore_fence_generation
+                ],
+                |row| row.get::<_, String>(0),
+            )
+            .map_err(read_sql)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(read_sql)?
+    };
+    for outbox_id in outboxes {
+        quarantine_in_tx(
+            tx,
+            workspace,
+            &OwnerOutboxQuarantineInput {
+                outbox_id,
+                reason: "restore-fenced".into(),
+                observed_binding: Some(input.binding.clone()),
+            },
+            now_ms,
+        )?;
+    }
     let key = key(&input.binding)?;
     let checkpoint_digest = hex_sha256(&checkpoint);
     put_binary_blob_with_sha(tx, &checkpoint, &checkpoint_digest)?;

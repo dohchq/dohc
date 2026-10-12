@@ -14,8 +14,6 @@ import {
 import type {
   AgentDispatchClaim,
   AgentRunRecord,
-  ChatChannelKind,
-  ChatMessage,
   LinkedChatStore,
 } from "@dohc/workspace-contracts/engine";
 import type { RunnerSettings } from "../settings/userSettings";
@@ -238,20 +236,6 @@ function buildRunnerPrompt(threadMarkdown: string, threadId: string): string {
 ## Report contract
 
 Work on the request represented by this thread. Reply in-thread with \`dohc chat reply ${threadId} --as-agent "<report>"\`. Report outcomes, not tool logs. On long tasks, post progress the way a teammate would. If blocked on the user, reply with \`--needs-decision\`. To ask them to pick, add \`--option "<choice>"\` once per choice; their answer arrives as the next message with the chosen option. Your final text is not shown anywhere; only messages you post through \`dohc chat\` are shown.`;
-}
-
-export function messageCanTrigger(
-  message: ChatMessage,
-  verifiedUserId: string | undefined,
-  context: {
-    channelKind: ChatChannelKind | undefined;
-    mentionsAgent: boolean;
-  },
-): boolean {
-  if (context.channelKind !== "agent" && !context.mentionsAgent) return false;
-  if (message.author.kind !== "human" || message.origin === "cli") return false;
-  if (message.authorUserId === undefined) return true;
-  return verifiedUserId !== undefined && message.authorUserId === verifiedUserId;
 }
 
 export function createChatDispatchService(options: ChatDispatchServiceOptions) {
@@ -885,7 +869,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
         try {
           options.onDispatchNotice?.(workspace, {
             reason: "no-runner", threadId,
-            message: `No agent could take this request. ${command ? "Agent dispatch is off." : "No agent runner is configured."} Set up agent dispatch in Settings → Agents & MCP.`,
+            message: `No agent could take this request. ${command ? "Agent dispatch is off." : "No agent runner is configured."} Set up agent dispatch in Settings → Agents.`,
           });
         } catch (error) {
           reportError(error);

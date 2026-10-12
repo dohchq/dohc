@@ -12,12 +12,14 @@ import {LIVE_JOURNAL_TABLE, LIVE_JOURNAL_PROVENANCE} from "./schema";
 const documentWhere = "workspace_id=? AND main_version_id=? AND object_id=? AND lineage_claim_id=?";
 function require(value: unknown): asserts value {if (!value) throw new Error("Accepted journal history is damaged.");}
 
+export class RestoreHistoryBudgetExceeded extends Error {}
+
 export class RestoreHistoryBudget {
   bytes: number;
   events: number;
   constructor(maxBytes: number, maxEvents: number) {this.bytes = authorityInteger(maxBytes); this.events = authorityInteger(maxEvents);}
-  chargeBytes(value: number) {const n = authorityInteger(value); if (n > this.bytes) throw new Error("Restore history exceeds configured byte bounds."); this.bytes -= n;}
-  chargeEvents(value: number) {const n = authorityInteger(value); if (n > this.events) throw new Error("Restore history exceeds configured event bounds."); this.events -= n;}
+  chargeBytes(value: number) {const n = authorityInteger(value); if (n > this.bytes) throw new RestoreHistoryBudgetExceeded("Restore history exceeds configured byte bounds."); this.bytes -= n;}
+  chargeEvents(value: number) {const n = authorityInteger(value); if (n > this.events) throw new RestoreHistoryBudgetExceeded("Restore history exceeds configured event bounds."); this.events -= n;}
 }
 
 type HistoryInput = {document: LiveDocumentKey; namespace: string; through: number; baseline: Uint8Array; baselineDigest: string; originBinding: LiveObjectBinding};

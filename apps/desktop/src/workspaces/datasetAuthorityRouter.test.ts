@@ -55,6 +55,19 @@ it("does not read a stale local copy when shared authority is offline", async ()
   expect(f.local.describe).not.toHaveBeenCalled();
 });
 
+it("routes Access permission pages to live local or transferred authority without a cached fallback", async () => {
+  const f = fixture();
+  f.local.permissions = vi.fn(async () => ({ permissions: [], nextCursor: null }));
+  f.remote.permissions = vi.fn(async () => ({ permissions: [], nextCursor: null }));
+  await f.data.permissions!({ action: "permissions", workspaceId: "w", datasetId: localId, limit: 100 });
+  expect(f.local.permissions).toHaveBeenCalledOnce(); expect(f.remote.permissions).not.toHaveBeenCalled();
+  await f.data.permissions!({ action: "permissions", workspaceId: "w", datasetId: remoteId, limit: 100 });
+  expect(f.remote.permissions).toHaveBeenCalledOnce();
+  vi.mocked(f.remote.permissions).mockRejectedValue(Error("offline"));
+  await expect(f.data.permissions!({ action: "permissions", workspaceId: "w", datasetId: remoteId })).rejects.toThrow("offline");
+  expect(f.local.permissions).toHaveBeenCalledOnce();
+});
+
 it("cancels only through the transferred authority and never falls back locally", async () => {
   const f = fixture(); const cancel = vi.fn(async () => ({ cancelled: true as const })); f.remote.cancelAttempt = cancel; f.local.cancelAttempt = vi.fn();
   const input = { datasetId: remoteId, reference: "a".repeat(64), acknowledge: true as const };

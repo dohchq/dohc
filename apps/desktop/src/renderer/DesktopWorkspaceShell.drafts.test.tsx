@@ -5,6 +5,7 @@ import { act, fireEvent, render, screen, waitFor, within } from "@testing-librar
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
+import { webcrypto } from "node:crypto";
 import { markdownToYDoc } from "@dohc/ydoc-projection";
 import type { ListWorkspaceFilesPayload, ListWorkspaceFilesResult, ReadWorkspaceTextPayload, SwitchWorkspaceVersionResult, EngineYDocSaveStateEvent } from "../ipc/bridgeContract";
 import { rendererMarks } from "../performance/rendererMarks";
@@ -78,7 +79,7 @@ describe("workspace switch admission", () => {
       expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"),
     );
     await screen.findByTestId("tab-b.md");
-    await screen.findByTestId("titlebar-chats-sidebar");
+    await screen.findByTestId("titlebar-about-sidebar");
     await waitFor(() => expect(bridge.listEngineMoments).toHaveBeenCalled());
     await act(async () => {});
 
@@ -237,7 +238,7 @@ describe("workspace admission over collection writes", () => {
     await waitFor(() => expect(harness.bridge.applyEngineYDocUpdate).toHaveBeenCalled());
     act(() => {
       const sessionId = harness.sessions.get("tasks/two.md")!;
-      for (const listener of [...harness.saveListeners]) listener({ sessionId, state: "saved", seq: 1 });
+      for (const listener of [...harness.saveListeners]) listener({ sessionId, workspaceId: "ws-1", path: "notes/a.md", state: { kind: "saved-here" }, seq: 1 });
     });
     await waitFor(() => expect(hasPendingCollectionFieldWrites()).toBe(false));
     expect(collectionWriteFailures()).toHaveLength(0);
@@ -270,7 +271,7 @@ describe("workspace admission over collection writes", () => {
       await act(async () => {
         const sessionId = harness.sessions.get("tasks/one.md")!;
         for (const listener of [...harness.saveListeners]) {
-          listener({ sessionId, state: "saved", seq: 1 });
+          listener({ sessionId, workspaceId: "ws-1", path: "notes/a.md", state: { kind: "saved-here" }, seq: 1 });
         }
       });
       expect(harness.bridge.openWorkspace).toHaveBeenCalledExactlyOnceWith({ workspaceId: OTHER_WORKSPACE.workspaceId });
@@ -312,7 +313,7 @@ describe("workspace admission over collection writes", () => {
     act(() => {
       const sessionId = harness.sessions.get("tasks/one.md")!;
       for (const listener of [...harness.saveListeners]) {
-        listener({ sessionId, state: "saved", seq: 1 });
+        listener({ sessionId, workspaceId: "ws-1", path: "notes/a.md", state: { kind: "saved-here" }, seq: 1 });
       }
     });
     await waitFor(() =>
@@ -1958,6 +1959,53 @@ describe("explorer destructive change flush boundaries", () => {
 // distinction between recovery (dot, no save promise) and savable-dirty
 // (dot and the version-switch save-first prompt).
 describe("set-aside draft recovery", () => {
+  it.each(["EBUSY", "EACCES"])("reports a %s draft read failure in Notices and retries discovery", async code => {
+    const user = userEvent.setup();
+    const bridge = makeBridge(Promise.resolve(null));
+    const record = {recordId: "a".repeat(64), path: "deleted/gone.md", objectId: "object", text: "Unseen typing", updateBase64: "AAA="};
+    bridge.listLiveDraftRecovery.mockRejectedValueOnce(Object.assign(new Error("temporary read failure"), {code})).mockResolvedValue([record]);
+    renderShell(bridge);
+    const toast = await screen.findByTestId("workspace-shell-error");
+    expect(toast.textContent).toContain("dohc could not read set-aside edits.");
+    await user.click(await screen.findByTestId("notice-center-toggle"));
+    const notices = screen.getByTestId("notice-center");
+    expect(notices.textContent).toContain("dohc could not read set-aside edits.");
+    await user.click(within(notices).getByRole("button", {name: "Try again"}));
+    await waitFor(() => expect(bridge.listLiveDraftRecovery).toHaveBeenCalledTimes(2));
+    await user.click(screen.getByTestId("notice-center-toggle"));
+    await screen.findByTestId("notice-set-aside-edits");
+    expect(bridge.listLiveDraftRecovery).toHaveBeenCalledTimes(2);
+    await user.click(screen.getByTestId("recovery-list-copy"));
+    await waitFor(async () => expect(await navigator.clipboard.readText()).toBe(record.text));
+  });
+
+  it("shows main drafts on open and exposes each survivor through Notices Copy and Dismiss", async () => {
+    const user = userEvent.setup();
+    vi.stubGlobal("crypto", webcrypto);
+    const bridge = makeBridge(Promise.resolve(null));
+    const first = {recordId: "a".repeat(64), path: "deleted/gone.md", objectId: "object", text: "First main copy", updateBase64: "AAA="};
+    const second = {...first, recordId: "b".repeat(64), text: "Unseen main copy", updateBase64: "AAE="};
+    bridge.listLiveDraftRecovery.mockResolvedValue([first]);
+    bridge.discardLiveDraftRecovery.mockResolvedValueOnce([second]).mockResolvedValueOnce([]);
+    renderShell(bridge);
+    await screen.findByTestId("file-tree");
+    await user.click(await screen.findByTestId("notice-center-toggle"));
+    await screen.findByTestId("notice-set-aside-edits");
+    await user.click(screen.getByTestId("recovery-list-copy"));
+    await waitFor(async () => expect(await navigator.clipboard.readText()).toBe(first.text));
+    await user.click(screen.getByTestId("recovery-dismiss"));
+    await user.click(screen.getByTestId("recovery-dismiss-confirm"));
+    await waitFor(() => expect(bridge.discardLiveDraftRecovery).toHaveBeenCalledOnce());
+    await waitFor(() => expect(screen.getAllByTestId("recovery-list-row")).toHaveLength(1));
+    await user.click(screen.getByTestId("recovery-list-copy"));
+    await waitFor(async () => expect(await navigator.clipboard.readText()).toBe(second.text));
+    await user.click(screen.getByTestId("recovery-dismiss"));
+    await user.click(screen.getByTestId("recovery-dismiss-confirm"));
+    await waitFor(() => expect(screen.queryByTestId("notice-set-aside-edits")).toBeNull());
+    expect(bridge.listLiveDraftRecovery).toHaveBeenCalledExactlyOnceWith({workspaceId: WORKSPACE.workspaceId});
+    expect(bridge.discardLiveDraftRecovery.mock.calls.map(([input]) => input.recordId)).toEqual([first.recordId, second.recordId]);
+  });
+
   // Most tests capture a draft before the shell mounts, and the draft store
   // reads the platform from the bridge. `renderShell` replaces this stub.
   beforeEach(() => {
@@ -2105,7 +2153,7 @@ describe("set-aside draft recovery", () => {
     await screen.findByTestId("tab-dirty");
     act(() => {
       for (const listener of [...saveStateListeners]) {
-        listener({ sessionId, state: "deleted", seq: 1 });
+        listener({ sessionId, workspaceId: "ws-1", path: "notes/a.md", state: { kind: "unknown" }, access: "deleted", seq: 1 });
       }
     });
     await screen.findByTestId("deleted-while-editing-notice");

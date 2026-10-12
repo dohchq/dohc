@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { posix } from "node:path";
-import { datasetColumnFields, parseDatasetDefinition, type DatasetDefinition, type DatasetField } from "@dohc/security-contract/dataset";
+import { datasetBaseFolder, datasetColumnFields, parseDatasetDefinition, type DatasetDefinition, type DatasetField } from "@dohc/security-contract/dataset";
 import { verifyDatasetArtifacts } from "@dohc/security-contract/dataset-artifacts";
 import type { DatasetHistoryRevision } from "@dohc/cli/dataset";
 
@@ -81,10 +81,10 @@ export function generateDatasetHistoryRestore(current: DatasetHistoryRevision, s
     throw new Error("The schema or rules changed again. Review a source migration against the current records before reversing this change.");
   }
   definition.name = restoreLabel(old.name, after.name, definition.name, "Collection name");
-  const base = posix.dirname(definition.schemaPath).split(/(?:^|\/)revisions\//)[0]!;
+  const base = datasetBaseFolder(definition);
   const directory = posix.join(base, "revisions", `${current.revision.revision + 1}-${randomUUID()}`);
   definition.schemaPath = posix.join(directory, "schema.sql"); definition.operationsPath = posix.join(directory, `operations${posix.extname(restoresSource ? old.operationsPath : definition.operationsPath)}`);
-  const parsed = parseDatasetDefinition(definition), descriptorPath = posix.join(directory, "dataset.json"), migrationPath = posix.join(directory, "migration.sql");
+  const parsed = parseDatasetDefinition(definition), descriptorPath = posix.join(directory, "revision.json"), migrationPath = posix.join(directory, "migration.sql");
   const schemaSql = current.schemaSql, operationSource = restoresSource ? saved.operationSource : current.operationSource, migrationSql = "SELECT 1;";
   return { definition: parsed, descriptorPath, migrationPath, schemaSql, operationSource, migrationSql,
     files: { [descriptorPath]: JSON.stringify(parsed, null, 2) + "\n", [definition.schemaPath]: schemaSql,

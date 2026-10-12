@@ -127,6 +127,7 @@ impl ActorHandle {
     pub async fn history_page(
         &self,
         workspace_id: String,
+        object_id: Option<String>,
         limit: i64,
         before_moment_order: Option<i64>,
         protected_probe_limit: usize,
@@ -138,10 +139,20 @@ impl ActorHandle {
                 let text_moment_page = versioned.list_moments(&ListMomentsQuery {
                     workspace_id: workspace_id.clone(),
                     version_id: Some(active_version.version_id.clone()),
-                    object_id: None,
+                    object_id: object_id.clone(),
                     limit,
                     before_moment_order,
                 })?;
+                // Protected moments have no object identity. Keep path-addressed
+                // protected history out of object reads.
+                if object_id.is_some() {
+                    return Ok(HistoryPageRead {
+                        active_version,
+                        text_moment_page,
+                        protected_moments: Vec::new(),
+                        upper_recorded_at_ms: None,
+                    });
+                }
                 let upper_recorded_at_ms = before_moment_order
                     .map(|cursor| {
                         let through_cursor =
@@ -784,7 +795,7 @@ pub(super) fn reconcile_active_plaintext_projection_on_store(
     clippy::too_many_arguments,
     reason = "switch ordering, disk root, suppression, faults, and cancellation are independent"
 )]
-fn switch_active_version_on_store(
+pub(super) fn switch_active_version_on_store(
     store: &mut EngineStore,
     workspace_id: &str,
     version_id: &str,

@@ -186,6 +186,20 @@ it("keeps Public Edit disabled without the release marker", async () => {
   expect(result.status).toBe(404);
 });
 
+it("an Edit-link agent creates one record through the same collection file operation", async () => {
+  const f = fixture("edit", true, null, "text", ["Tasks"]);
+  const client = await f.connect(await f.exchange());
+  const tools = await client.listTools();
+  expect(tools.tools.find(tool => tool.name === "dohc_write_collection_files")?.description).toContain("one Markdown record");
+  const args = { submitId: "create-record-1", files: [{ path: "Tasks/One.md", basedOnBlobSha256: null,
+    text: "---\nid: rec_aaaaaaaaaaaaaaaaaaaaaaaaaa\n---\n" }] };
+  expect((await client.callTool({ name: "dohc_write_collection_files", arguments: args })).structuredContent)
+    .toEqual({ ok: true, outcome: "accepted", submitId: args.submitId });
+  const request = f.calls.find(call => new URL(call.url).pathname === "/sync/link/collection-writes");
+  expect(request?.headers.get("x-dohc-link-profile-secret")).toBeTruthy();
+  expect(request?.headers.get("authorization")).toMatch(/^LinkCapability /);
+});
+
 it("does not turn a browser session token into an agent bearer", async () => {
   const f = fixture();
   const browser = await f.send("/api/exchange", {method: "POST", body: JSON.stringify({secret})});

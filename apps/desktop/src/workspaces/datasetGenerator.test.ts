@@ -41,6 +41,18 @@ async function runtime(definition = fixture()) {
 // Each test drives a real app runtime through dozens of worker calls; a loaded
 // gate host stretched one past 30 s while it passes alone in a few seconds.
 describe("initial dataset source", { timeout: 60_000 }, () => {
+  it.each([
+    ["data/registrations", "data/registrations/dataset.json"],
+    [`data/registrations/revisions/2-${id(99)}`, "data/registrations/dataset.json"],
+    [`revisions/3-${id(99)}`, "dataset.json"],
+    ["revisions/2-paris", "revisions/2-paris/dataset.json"],
+  ])("places the descriptor at the base for sources in %s", (folder, descriptor) => {
+    const definition = { ...fixture(), schemaPath: `${folder}/schema.sql`, operationsPath: `${folder}/operations.js` };
+    const { files } = generateDatasetSources(definition);
+    expect(Object.keys(files)).toEqual([descriptor, definition.schemaPath, definition.operationsPath]);
+    expect(JSON.parse(files[descriptor]!)).toMatchObject({ schemaPath: definition.schemaPath, operationsPath: definition.operationsPath });
+  });
+
   it("keeps field identity through display renames and requires authored actions", () => {
     const definition = fixture(), first = generateDatasetSources(definition);
     expect(first.definition.operations.find(operation => operation.kind === "edit")!.reversible).toBe(true);

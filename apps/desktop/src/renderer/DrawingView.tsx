@@ -1,5 +1,5 @@
+import type { SaveState } from "@dohc/workspace-contracts/save-state";
 import type { BinaryFileData } from "@excalidraw/excalidraw/types";
-import { Shapes } from "lucide-react";
 import {
   Suspense,
   lazy,
@@ -23,12 +23,13 @@ import {
   parseExcalidrawDocument,
 } from "./excalidrawDocument";
 import {
-  AffordanceCard,
   EngineArtifactAssetsInvalidNotice,
   EngineMayHoldDocumentNotice,
-  ViewHeader,
-  type FileSaveState,
+  OpenExternallyButton,
+  ViewActions,
 } from "./fileInspectorUi";
+import { TriangleAlert } from "lucide-react";
+import { EmptyState } from "./ui/controls";
 import { SkeletonRows } from "./ui/SkeletonRows";
 import { StateMark } from "./ui/StateMark";
 import type { SharedLocalDocument } from "./sharedLocalDocument";
@@ -83,7 +84,7 @@ export function DrawingView({
   engine: UseEngineDoc;
   onRetryEngineOpen: () => void;
   presenceFactory?: ExcalidrawPresenceFactory | null;
-  onSaveStateChange?: (state: FileSaveState) => void;
+  onSaveStateChange?: (state: SaveState) => void;
   localBuffer: SharedLocalDocument;
 }) {
   const engineMode = engine.available && engine.doc !== null;
@@ -156,15 +157,7 @@ export function DrawingView({
 
   useEffect(() => {
     if (!engineMode) return;
-    onSaveStateChange?.(
-      engine.saveState === "saved" ||
-        engine.saveState === "saving" ||
-        engine.saveState === "deleted"
-        ? engine.saveState
-        : engine.saveState === "object-changed"
-          ? "deleted"
-          : "error",
-    );
+    onSaveStateChange?.(engine.saveState);
   }, [engineMode, engine.saveState, onSaveStateChange]);
 
   const canvasReadOnly = readOnly || engineReadOnly;
@@ -268,8 +261,8 @@ export function DrawingView({
   }, [assetHydrationAttempt, hydrationSession]);
   const drawingChipState =
     engineMode &&
-    (engine.saveState === "deleted" || engine.saveState === "object-changed")
-      ? engine.saveState
+    (engine.deletedWhileEditing)
+      ? engine.goneCause!
       : readOnly || (truncated && !engineMode) || engineReadOnly
         ? "read-only"
         : engineMode
@@ -278,8 +271,11 @@ export function DrawingView({
   // Three reasons a drawing is read-only, named in the order they are known:
   // the share is read-only, the live session cannot take edits (its notice
   // says why), or the bounded read cut the file short.
+  // A read-only status after every edit saved sets nothing aside.
   const drawingShown = engine.readOnlyWhileEditing
-    ? "read-only-transition"
+    ? engine.saveState.kind === "unknown" && engine.readOnlyDraftId === null
+      ? "read-only"
+      : "read-only-transition"
     : drawingChipState !== "read-only"
       ? drawingChipState
       : readOnly
@@ -290,17 +286,16 @@ export function DrawingView({
 
   return (
     <div className="flex min-h-0 flex-1 flex-col bg-bg" data-testid="file-inspector">
-      <ViewHeader
-        icon={<Shapes size={13} aria-hidden />}
-        path={path}
-        label="drawing"
+      <ViewActions
         onShare={onShare}
-        actions={
+        status={
           <StateMark
             testId="drawing-save-state"
+            truncate
+            quietWhenCalm
             state={drawingChipState}
             shown={drawingShown}
-            title={drawingChipState === "error" && engine.saveError ? engine.saveError : undefined}
+            title={typeof drawingChipState !== "string" && drawingChipState.kind === "error" && engine.saveError ? engine.saveError : undefined}
           />
         }
       />
@@ -345,10 +340,9 @@ export function DrawingView({
       {engine.opening ? (
         <SkeletonRows layout="panel" testId="view-drawing-opening" label="Loading drawing…" />
       ) : truncated && !engineMode ? (
-        <AffordanceCard
-          testId="view-drawing-truncated"
-          title="Drawing too large"
-          body="dohc cannot open a partial Excalidraw file."
+        <EmptyState
+          data-testid="view-drawing-truncated"
+          title="This drawing is too large for dohc to open."
         />
       ) : drawingReady ? (
         <div
@@ -372,12 +366,14 @@ export function DrawingView({
           </Suspense>
         </div>
       ) : (
-        <AffordanceCard
-          testId="view-drawing-error"
-          title="Couldn't open drawing"
-          body={document.error ?? "The drawing is invalid."}
-          openExternally={{ workspaceId, path }}
-        />
+        <EmptyState
+          data-testid="view-drawing-error"
+          icon={TriangleAlert}
+          tone="danger"
+          title={`dohc could not open this drawing. ${document.error ?? "The drawing is invalid."}`}
+        >
+          <OpenExternallyButton workspaceId={workspaceId} path={path} />
+        </EmptyState>
       )}
     </div>
   );

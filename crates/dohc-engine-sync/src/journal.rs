@@ -640,6 +640,8 @@ pub fn list_replication_ops(
             let payload =
                 serde_json::from_str(&payload_json).map_err(|_| SyncError::CoordinateDiverged)?;
             out.push(ReplicationEnvelope {
+                settlement_admission: None,
+                admitted_author_snapshot: None,
                 workspace_id: workspace_id.to_owned(),
                 origin_id: origin_id.to_owned(),
                 origin_seq,

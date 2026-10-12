@@ -27,6 +27,10 @@ pub(crate) fn can_originate_local_bases_in_tx(
 /// the observed size, because the caller cannot act on "it did not happen".
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SharingDeclined {
+    pub object_id: String,
+    pub version_id: String,
+    pub lineage_pruned: bool,
+    pub head_blob_sha256: Option<String>,
     pub path: String,
     pub constraint: &'static str,
     pub limit_bytes: usize,
@@ -42,6 +46,73 @@ impl std::fmt::Display for SharingDeclined {
             self.path, self.constraint, self.limit_bytes, self.observed_bytes
         )
     }
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StoredSharingDeclined {
+    head_sha256: Option<String>,
+    constraint: String,
+    limit_bytes: usize,
+    observed_bytes: usize,
+}
+
+pub(crate) fn current_sharing_declines_in_tx(
+    tx: &Transaction<'_>,
+    workspace_id: &str,
+) -> Result<Vec<SharingDeclined>, SyncError> {
+    let mut statement = tx
+        .prepare(
+            "SELECT d.object_id,d.version_id,s.path,d.sharing_declined_json,
+                d.head_update_seq=0 AND d.head_snapshot_seq=0
+         FROM ydoc_docs d JOIN snapshots s USING(workspace_id,version_id,object_id)
+         WHERE d.workspace_id=?1 AND d.lineage_claim_status='unclaimed'
+           AND d.sharing_declined_json IS NOT NULL AND s.content_kind='text'
+           AND (d.file_export_lane IN (1,2)
+             OR s.blob_sha256=json_extract(d.sharing_declined_json,'$.head_sha256'))
+         ORDER BY d.version_id,d.object_id",
+        )
+        .map_err(SyncError::corrupt)?;
+    let rows = statement
+        .query_map([workspace_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, bool>(4)?,
+            ))
+        })
+        .map_err(SyncError::corrupt)?;
+    let mut declines = Vec::new();
+    for row in rows {
+        let (object_id, version_id, path, json, lineage_pruned) =
+            row.map_err(SyncError::corrupt)?;
+        // Resolve and admit today's path before disclosing a stored fact.
+        if dohc_engine_domain::validate_plaintext_storable_path(&path).is_err() {
+            continue;
+        }
+        let stored: StoredSharingDeclined =
+            serde_json::from_str(&json).map_err(SyncError::corrupt)?;
+        if stored.constraint != "MAX_YDOC_UPDATE_BYTES"
+            || stored.observed_bytes <= stored.limit_bytes
+        {
+            return Err(SyncError::corrupt(std::io::Error::other(
+                "invalid stored sharing decline",
+            )));
+        }
+        declines.push(SharingDeclined {
+            object_id,
+            version_id,
+            path,
+            lineage_pruned,
+            head_blob_sha256: stored.head_sha256,
+            constraint: "MAX_YDOC_UPDATE_BYTES",
+            limit_bytes: stored.limit_bytes,
+            observed_bytes: stored.observed_bytes,
+        });
+    }
+    Ok(declines)
 }
 
 /// What an origination attempt decided.
@@ -100,7 +171,9 @@ pub fn originate_ydoc_base_in_tx(
     else {
         return Ok(BaseOrigination::NothingToDo);
     };
-    if marker.lineage_claim_status.has_claimed_base() {
+    if marker.lineage_claim_status.has_claimed_base()
+        || marker.file_export_lane == dohc_engine_collab::FileExportLane::Declined
+    {
         return Ok(BaseOrigination::NothingToDo);
     }
     // Check replication before the claim. A later refusal in the caller's
@@ -109,6 +182,29 @@ pub fn originate_ydoc_base_in_tx(
     if !can_originate_local_bases_in_tx(tx, &key.workspace_id)? {
         return Ok(BaseOrigination::NothingToDo);
     }
+    let catch_up: Option<String> = if marker.file_export_lane
+        != dohc_engine_collab::FileExportLane::Off
+    {
+        let head: Option<String> = tx.query_row(
+            "SELECT s.latest_moment_id FROM snapshots s JOIN ydoc_docs d USING(workspace_id,version_id,object_id)
+             WHERE s.workspace_id=?1 AND s.version_id=?2 AND s.object_id=?3 AND s.content_kind='text'
+               AND ((d.settled_update_seq=d.head_update_seq AND d.last_settled_sha=s.blob_sha256)
+                 OR (d.head_update_seq=1 AND d.head_snapshot_seq=0 AND d.seed_source_sha256=s.blob_sha256
+                   AND EXISTS(SELECT 1 FROM ydoc_updates u WHERE u.workspace_id=d.workspace_id AND u.version_id=d.version_id AND u.object_id=d.object_id AND u.seq=1 AND u.is_seed=1)))",
+            params![key.workspace_id,key.version_id,key.object_id], |r|r.get(0),
+        ).optional().map_err(SyncError::corrupt)?;
+        if !head
+            .as_deref()
+            .map(|id| crate::enrolment::file_version_is_publishable_in_tx(tx, key, id))
+            .transpose()?
+            .unwrap_or(false)
+        {
+            return Ok(BaseOrigination::NothingToDo);
+        }
+        head
+    } else {
+        None
+    };
     let Some(encoded) =
         dohc_engine_collab::encode_origination_base_in_tx(tx, key).map_err(SyncError::corrupt)?
     else {
@@ -119,12 +215,47 @@ pub fn originate_ydoc_base_in_tx(
     // user can act on, and it is indistinguishable from the four benign ones
     // unless it says so.
     if encoded.base.len() > dohc_engine_collab::limits::MAX_YDOC_UPDATE_BYTES {
-        return Ok(BaseOrigination::Declined(SharingDeclined {
+        let mut declined = SharingDeclined {
+            object_id: key.object_id.clone(),
+            version_id: key.version_id.clone(),
+            lineage_pruned: false,
+            head_blob_sha256: None,
             path: path.to_owned(),
             constraint: "MAX_YDOC_UPDATE_BYTES",
             limit_bytes: dohc_engine_collab::limits::MAX_YDOC_UPDATE_BYTES,
             observed_bytes: encoded.base.len(),
-        }));
+        };
+        let head: Option<String> = tx.query_row(
+            "SELECT CASE WHEN d.file_export_lane IN (1,2) AND d.sharing_declined_json IS NOT NULL
+                THEN json_extract(d.sharing_declined_json,'$.head_sha256')
+                ELSE (SELECT s.blob_sha256 FROM snapshots s WHERE s.workspace_id=d.workspace_id
+                  AND s.version_id=d.version_id AND s.object_id=d.object_id) END
+             FROM ydoc_docs d WHERE d.workspace_id=?1 AND d.version_id=?2 AND d.object_id=?3",
+            params![key.workspace_id, key.version_id, key.object_id], |row| row.get(0),
+        ).map_err(SyncError::corrupt)?;
+        declined.head_blob_sha256 = head.clone();
+        let stored = serde_json::to_string(&StoredSharingDeclined {
+            head_sha256: head,
+            constraint: declined.constraint.to_owned(),
+            limit_bytes: declined.limit_bytes,
+            observed_bytes: declined.observed_bytes,
+        })
+        .map_err(SyncError::corrupt)?;
+        tx.execute(
+                "UPDATE ydoc_docs SET file_export_lane=1,sharing_declined_json=?4 WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND (file_export_lane!=1 OR sharing_declined_json IS NOT ?4)",
+                params![key.workspace_id, key.version_id, key.object_id, stored],
+            ).map_err(SyncError::persist)?;
+        return Ok(BaseOrigination::Declined(declined));
+    }
+    if let Some(moment_id) = catch_up
+        && !crate::enrolment::journal_file_version_in_tx(
+            tx,
+            key,
+            &moment_id,
+            &mut crate::enrolment::FileExportBudget::default(),
+        )?
+    {
+        return Ok(BaseOrigination::NothingToDo);
     }
     match dohc_engine_collab::claim_base_in_tx(
         tx,
@@ -195,6 +326,27 @@ pub fn originate_ydoc_base_in_tx(
             )))
         }
     }
+}
+
+/// An established lane skips append origination until its next seed.
+#[allow(clippy::too_many_arguments)]
+pub fn originate_appended_ydoc_base_in_tx(
+    tx: &Transaction<'_>,
+    key: &DocKey,
+    path: &str,
+    actor_origin_id: Option<&str>,
+    attribution: Option<&ChangeAttribution>,
+    fresh_seed: bool,
+    now_ms: i64,
+) -> Result<BaseOrigination, SyncError> {
+    if !fresh_seed
+        && dohc_engine_collab::read_marker_in(tx, key)
+            .map_err(SyncError::corrupt)?
+            .is_some_and(|marker| marker.file_export_lane.is_enabled())
+    {
+        return Ok(BaseOrigination::NothingToDo);
+    }
+    originate_ydoc_base_in_tx(tx, key, path, actor_origin_id, attribution, now_ms)
 }
 
 /// Build the one wire payload used by every locally journaled Y.Doc update.

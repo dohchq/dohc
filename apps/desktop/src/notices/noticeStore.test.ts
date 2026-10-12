@@ -1,6 +1,7 @@
-import { mkdir, readdir, readFile, rmdir } from "node:fs/promises";
+import { open, readdir, readFile, rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
+
 import { TokenBucketLimiter } from "@dohc/service-http";
 import {
   claimWorkspace,
@@ -39,6 +40,7 @@ import {
 } from "../automations/automationNotices";
 import { createAutomationWakeConsumer, createAutomationWakeIntents } from "../automations/automationWakeIntents";
 import { createTestScratch } from "../workspaces/testTemp";
+import { deferred } from "../testing/deferred";
 import { NoticeNotSentError } from "@dohc/automation-executor/automation-chat";
 import {
   createNoticeStore,
@@ -48,6 +50,134 @@ import {
 } from "./noticeStore";
 
 afterEach(closeTestStorages);
+
+describe("Notice save durability", () => {
+  it.each(["local", "account"] as const)("reloads the %s list after postNotice fails to sync the directory", async (where) => {
+    const server = await relay();
+    server.online = false;
+    let fail = false;
+    const error = new Error("directory sync failed");
+    const laptop = await computer(where === "local" ? null : account(server, "ana"), { fileOperations: {
+      platform: "linux",
+      open: async (path, flags, mode) => {
+        if (flags === "r") return {
+          writeFile: async () => {},
+          sync: async () => { if (fail) throw error; },
+          close: async () => {},
+        };
+        return open(path, flags, mode);
+      },
+    } });
+    await laptop.store.postNotice(notice({ noticeId: "first" }));
+    await laptop.store.sync();
+    fail = true;
+    await expect(laptop.store.postNotice(notice({ noticeId: "second" }))).rejects.toBe(error);
+    fail = false;
+    await laptop.store.postNotice(notice({ noticeId: "third" }));
+    await laptop.store.sync();
+    const restarted = await computer(laptop.signedIn, { directory: laptop.directory });
+    expect((await restarted.store.list()).notices.map(row => row.noticeId).sort()).toEqual(["first", "second", "third"]);
+  });
+
+  it("reloads the local list so retrying mark after a failed temp sync saves the change", async () => {
+    let fail = false;
+    const error = new Error("temp sync failed");
+    const laptop = await computer(null, { fileOperations: {
+      open: async (...args) => {
+        const handle = await open(...args);
+        return {
+          writeFile: handle.writeFile.bind(handle),
+          sync: async () => { if (fail) throw error; await handle.sync(); },
+          close: handle.close.bind(handle),
+        };
+      },
+    } });
+    await laptop.store.postNotice(notice({ noticeId: "first" }));
+    const refs = [{ store: "local", noticeId: "first" }] as const;
+    fail = true;
+    await expect(laptop.store.mark(refs, "read", null)).rejects.toBe(error);
+    fail = false;
+    await laptop.store.mark(refs, "read", null);
+    const restarted = await computer(null, { directory: laptop.directory });
+    expect((await restarted.store.list()).notices).toEqual([
+      expect.objectContaining({ noticeId: "first", readAtMs: clock }),
+    ]);
+  });
+
+  it.each(["local", "account"] as const)("syncs and closes a %s save before rename and caller completion", async (where) => {
+    const events: string[] = [];
+    let completed = 0;
+    let beginSync!: () => void;
+    let releaseSync!: () => void;
+    const started = new Promise<void>(resolve => { beginSync = resolve; });
+    const released = new Promise<void>(resolve => { releaseSync = resolve; });
+    const server = await relay();
+    server.online = false;
+    const laptop = await computer(where === "local" ? null : account(server, "ana"), { fileOperations: {
+      platform: "win32",
+      open: async (...args) => {
+        const handle = await open(...args);
+        return {
+          writeFile: async (data) => { events.push("write"); await handle.writeFile(data); },
+          sync: async () => { events.push("sync"); beginSync(); await released; await handle.sync(); },
+          close: async () => { events.push("close"); await handle.close(); },
+        };
+      },
+      rename: async (...args) => { events.push("rename"); await rename(...args); },
+    } });
+    const saved = laptop.store.postNotice(notice()).then(() => { completed += 1; });
+    try {
+      await Promise.race([started, saved]);
+      expect(events).toEqual(["write", "sync"]);
+      expect(completed).toBe(0);
+    } finally {
+      releaseSync();
+      await saved;
+      await laptop.store.sync();
+    }
+    const saveEvents = ["write", "sync", "close", "rename"];
+    expect(events.slice(0, 4)).toEqual(saveEvents);
+    // Account sync also saves the attempted post before sending.
+    for (let i = 4; i < events.length; i += 4) expect(events.slice(i, i + 4)).toEqual(saveEvents);
+    events.length = 0;
+    await laptop.store.mark([{ store: where, noticeId: "agent-run:1" }], "read", laptop.signedIn?.key ?? null);
+    await laptop.store.sync();
+    expect(events.slice(0, 4)).toEqual(saveEvents);
+    for (let i = 4; i < events.length; i += 4) expect(events.slice(i, i + 4)).toEqual(saveEvents);
+    const restarted = await computer(laptop.signedIn, { directory: laptop.directory });
+    expect((await restarted.store.list()).notices).toHaveLength(1);
+  });
+
+  it.each(["local", "account"] as const)("rejects a failed %s temp sync, preserves the old file, and permits retry", async (where) => {
+    const server = await relay();
+    server.online = false;
+    let fail = false;
+    const error = new Error("sync failed");
+    const close = vi.fn();
+    const laptop = await computer(where === "local" ? null : account(server, "ana"), { fileOperations: {
+      open: async (...args) => {
+        const handle = await open(...args);
+        return { writeFile: handle.writeFile.bind(handle), sync: async () => { if (fail) throw error; await handle.sync(); },
+          close: async () => { close(); await handle.close(); } };
+      },
+    } });
+    await laptop.store.postNotice(notice({ noticeId: "first" }));
+    await laptop.store.sync();
+    const name = (await readdir(laptop.directory)).find((entry) => entry.endsWith(".json"))!;
+    const prior = await readFile(join(laptop.directory, name), "utf8");
+    close.mockClear();
+    fail = true;
+    await expect(laptop.store.postNotice(notice({ noticeId: "failed:0" }))).rejects.toBe(error);
+    expect(close).toHaveBeenCalledOnce();
+    expect(await readFile(join(laptop.directory, name), "utf8")).toBe(prior);
+    expect(await readdir(laptop.directory)).toEqual([name]);
+    expect((await laptop.store.list()).notices.map(row => row.noticeId)).toEqual(["first"]);
+    fail = false;
+    await laptop.store.postNotice(notice({ noticeId: "failed:0" }));
+    await laptop.store.sync();
+    expect((await computer(laptop.signedIn, { directory: laptop.directory }).then(c => c.store.list())).notices).toHaveLength(2);
+  });
+});
 
 const WORKSPACE = "workspace-trip";
 let clock = 10_000;
@@ -130,7 +260,7 @@ function switchTo(computer: Computer, signedIn: NoticeAccount | null): void {
 
 async function computer(
   signedIn: NoticeAccount | null,
-  options: { directory?: string; outboxPostLimit?: number; installId?: string; refusalNotices?: Parameters<typeof createNoticeStore>[0]["refusalNotices"]; dismissRefusal?: Parameters<typeof createNoticeStore>[0]["dismissRefusal"] } = {},
+  options: { directory?: string; outboxPostLimit?: number; installId?: string; refusalNotices?: Parameters<typeof createNoticeStore>[0]["refusalNotices"]; dismissRefusal?: Parameters<typeof createNoticeStore>[0]["dismissRefusal"]; fileOperations?: Parameters<typeof createNoticeStore>[0]["fileOperations"] } = {},
 ): Promise<Computer> {
   const state: Computer = {
     directory: options.directory ?? await createTestScratch("notices-"),
@@ -163,6 +293,7 @@ async function computer(
     nowMs: () => clock,
     refusalNotices: options.refusalNotices,
     dismissRefusal: options.dismissRefusal,
+    fileOperations: options.fileOperations,
     ...(options.outboxPostLimit === undefined ? {} : { outboxPostLimit: options.outboxPostLimit }),
   });
   return state;
@@ -182,6 +313,109 @@ function notice(overrides: Partial<PostNoticeInput> = {}): PostNoticeInput {
 async function titles(computer: Computer): Promise<string[]> {
   return (await computer.store.list()).notices.map((row) => `${row.store}:${row.title}${row.readAtMs === null ? "" : " (read)"}`);
 }
+
+describe("Notices passes requested by a shared view", () => {
+  it("checks the account inside the missing-route lock before moving Notices", async () => {
+    const server = await relay(); server.outdated = true;
+    const signedIn = account(server, "owner");
+    const recipient = await computer(signedIn);
+    const fetch = signedIn.relay.fetch!;
+    signedIn.relay.fetch = async (input, init) => {
+      const response = await fetch(input, init);
+      recipient.onAccountRead = () => {
+        recipient.onAccountRead = undefined;
+        switchTo(recipient, account(server, "ben"));
+        server.outdated = false;
+      };
+      return response;
+    };
+    await recipient.store.sync();
+    expect(recipient.changes).toBe(0);
+    expect((await recipient.store.list()).notices).toEqual([]);
+  });
+  it.each(["share", "account"] as const)("announces a saved page only for its current account after the %s closes during the next page", async change => {
+    const server = await relay();
+    const signedIn = account(server, "owner");
+    const owner = await computer(signedIn);
+    await owner.store.postNotice(notice()); await owner.store.sync();
+    const recipient = await computer(signedIn);
+    const fetch = signedIn.relay.fetch!;
+    const started = deferred(); const release = deferred();
+    let pages = 0;
+    signedIn.relay.fetch = async (input, init) => {
+      const response = await fetch(input, init);
+      const page = await response.json();
+      if (++pages === 1) return Response.json({ ...page, hasMore: true });
+      started.resolve(); await release.promise;
+      return Response.json(page);
+    };
+    let current = true;
+    const syncing = recipient.store.sync(() => current);
+    await started.promise;
+    expect((await recipient.store.list()).notices).toHaveLength(1);
+    current = false;
+    if (change === "account") switchTo(recipient, account(server, "ben"));
+    release.resolve(); await syncing;
+    expect(recipient.changes).toBe(change === "share" ? 1 : 0);
+    await recipient.store.sync();
+    expect(recipient.changes).toBe(change === "share" ? 1 : 0);
+  });
+  it("drops a late missing-route response instead of moving Notices into another account's local list", async () => {
+    const server = await relay(); server.outdated = true;
+    const recipient = await computer(account(server, "owner"));
+    const started = deferred(); const release = deferred();
+    server.onRequest = async () => { started.resolve(); await release.promise; };
+    let current = true; const syncing = recipient.store.sync(() => current);
+    await started.promise; current = false; switchTo(recipient, account(server, "ben"));
+    release.resolve(); await syncing;
+    expect(recipient.changes).toBe(0);
+    expect((await recipient.store.list()).notices).toEqual([]);
+  });
+  it.each(["workspace", "account"] as const)("drops a late pull after the %s changes without starting a pass for another account", async change => {
+    const server = await relay();
+    const signedIn = account(server, "owner");
+    const owner = await computer(signedIn);
+    await owner.store.postNotice(notice()); await owner.store.sync();
+    const recipient = await computer(signedIn);
+    const started = deferred(); const response = deferred<Response>();
+    const fetch = signedIn.relay.fetch!;
+    signedIn.relay.fetch = async (input, init) => {
+      const result = await fetch(input, init); started.resolve(); return response.promise.then(() => result);
+    };
+    let current = true;
+    const changes = recipient.changes;
+    const syncing = recipient.store.sync(() => current);
+    await started.promise;
+    current = false;
+    if (change === "account") switchTo(recipient, account(server, "ben"));
+    response.resolve(Response.json({})); await syncing;
+    expect(recipient.changes).toBe(changes);
+    expect((await recipient.store.list()).notices).toEqual([]);
+    switchTo(recipient, signedIn);
+    expect((await recipient.store.list()).notices).toEqual([]);
+  });
+
+  it("coalesces bursts into one flight and one follow-up", async () => {
+    const server = await relay(); const recipient = await computer(account(server, "owner"));
+    const started = deferred(); const release = deferred(); let requests = 0;
+    server.onRequest = async () => { requests += 1; if (requests === 1) { started.resolve(); await release.promise; } };
+    const first = recipient.store.sync(() => true); await started.promise;
+    const burst = Array.from({ length: 20 }, () => recipient.store.sync(() => true));
+    expect(requests).toBe(1); release.resolve(); await Promise.all([first, ...burst]);
+    expect(requests).toBe(2);
+  });
+  it.each(["share", "account-wide"] as const)("keeps a queued %s pass when another share closes", async kind => {
+    const server = await relay(); const recipient = await computer(account(server, "owner"));
+    const started = deferred(); const release = deferred(); let requests = 0;
+    server.onRequest = async () => { requests += 1; if (requests === 1) { started.resolve(); await release.promise; } };
+    let current = true;
+    const first = recipient.store.sync(() => current); await started.promise;
+    const next = recipient.store.sync(kind === "share" ? () => true : undefined);
+    const closed = recipient.store.sync(() => false);
+    current = false; release.resolve(); await Promise.all([first, next, closed]);
+    expect(requests).toBe(2);
+  });
+});
 
 function shareNotice(shareId: string) {
   return expect.objectContaining({
@@ -489,18 +723,22 @@ describe("notices on one person's computers", () => {
     const server = await relay();
     server.online = false;
     for (const signedIn of [null, account(server, "ana")]) {
-      const laptop = await computer(signedIn);
+      let fail = false;
+      const laptop = await computer(signedIn, { fileOperations: {
+        open: async (...args) => {
+          if (fail) throw Object.assign(new Error("disk full"), { code: "ENOSPC" });
+          return open(...args);
+        },
+      } });
       await laptop.store.postNotice(notice({ noticeId: "first", title: "First" }));
       // Sync saves the account outbox before sending, even when the relay is offline.
       await laptop.store.sync();
-      const name = (await readdir(laptop.directory)).find((entry) => entry.endsWith(".json"))!;
       const where = signedIn ? "account" : "local";
-      // A folder where the save writes its temporary file makes the save fail.
-      await mkdir(join(laptop.directory, `${name}.tmp`));
-      await expect(laptop.store.postNotice(notice({ noticeId: "second", title: "Second" }))).rejects.toThrow();
+      fail = true;
+      await expect(laptop.store.postNotice(notice({ noticeId: "second", title: "Second" }))).rejects.toThrow("disk full");
       expect(await titles(laptop)).toEqual([`${where}:First`]);
-
-      await rmdir(join(laptop.directory, `${name}.tmp`));
+      expect((await readdir(laptop.directory)).filter((entry) => entry.includes(".tmp-"))).toEqual([]);
+      fail = false;
       await laptop.store.postNotice(notice({ noticeId: "second", title: "Second" }));
       // dohc runs one store per profile; let this one's background sync finish before the next opens.
       await laptop.store.sync();
@@ -746,6 +984,40 @@ describe("notices that stay on this computer", () => {
 });
 
 describe("notices while the signed-in account changes", () => {
+  it.each(["switch", "sign-out"] as const)("resolves an accepted post once after %s before its answer arrives", async change => {
+    const server = await relay();
+    await createShare(server.handler, "owner", WORKSPACE, { paths: ["trip"], recipientUserId: "ana" });
+    const signedIn = account(server, "owner");
+    const laptop = await computer(signedIn);
+    const fetch = signedIn.relay.fetch!;
+    const requests = vi.fn();
+    server.onRequest = requests;
+    signedIn.relay.fetch = async (input, init) => {
+      const response = await fetch(input, init);
+      expect(response.ok).toBe(true);
+      switchTo(laptop, change === "switch" ? account(server, "ben") : null);
+      return response;
+    };
+    await expect(laptop.store.postNotice(notice({ kind: "automation-failed", recipientUserId: "ana", target: { path: "trip/tasks" } }))).resolves.toBeUndefined();
+    expect(requests).toHaveBeenCalledOnce();
+    const recipient = await computer(account(server, "ana")); await recipient.store.sync();
+    expect((await recipient.store.list()).notices.filter(row => row.kind === "automation-failed"))
+      .toEqual([expect.objectContaining({ noticeId: "from:owner:agent-run:1", senderLabel: "Name owner" })]);
+  });
+
+  it("keeps the relay's first-dismissal answer after the account changes", async () => {
+    const server = await relay();
+    const signedIn = account(server, "owner");
+    const laptop = await computer(signedIn);
+    await laptop.store.postNotice(notice()); await laptop.store.sync();
+    const fetch = signedIn.relay.fetch!;
+    signedIn.relay.fetch = async (input, init) => {
+      const response = await fetch(input, init);
+      if (new URL(String(input)).pathname === "/sync/notices/marks") switchTo(laptop, account(server, "ben"));
+      return response;
+    };
+    await expect(laptop.store.dismissFirst({ store: "account", noticeId: "agent-run:1" }, signedIn.key)).resolves.toBe("first");
+  });
   it("queues a notice for the account signed in when it is queued", async () => {
     const server = await relay();
     const laptop = await computer(account(server, "ana"));

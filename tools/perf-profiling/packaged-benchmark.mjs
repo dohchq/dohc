@@ -164,7 +164,7 @@ async function fixture(runDir) {
     const workspace = { workspaceId: `perf4-package-${index}`, rootPath: join(runDir, `workspace-${index}`).replaceAll('\\', '/'), kind: 'personal', mode: 'local-first' };
     await mkdir(join(workspace.rootPath, '.dohc'), { recursive: true });
     await json(join(workspace.rootPath, '.dohc/manifest.json'), { version: 1, workspaceId: workspace.workspaceId, kind: workspace.kind, mode: workspace.mode });
-    await json(join(workspace.rootPath, '.dohc/ui-state.json'), { version: 3, activeView: 'explorer', sidebarVisible: true, sidebarWidth: 320, editorGroups: [{ id: 'primary', tabs: ['small.md'], activeTab: 'small.md', size: 1 }], activeEditorGroup: 'primary', chatsVisible: false, chatsWidth: 360 });
+    await json(join(workspace.rootPath, '.dohc/ui-state.json'), { version: 3, activeView: 'explorer', sidebarVisible: true, sidebarWidth: 320, editorGroups: [{ id: 'primary', tabs: ['small.md'], activeTab: 'small.md', size: 1 }], activeEditorGroup: 'primary', aboutVisible: false, aboutWidth: 360 });
     const workspaceHash = createHash('sha256');
     for (const [name, paragraphs] of [['small', 100], ['large', 5000]]) {
       const content = `# Workspace ${index} ${name}\n\n${Array.from({ length: scenario === 'small-tab' ? 100 : paragraphs }, (_, n) => `Paragraph ${n}. Performance text.`).join('\n\n')}\n`;
@@ -549,10 +549,9 @@ async function seedChatHistory(instance, workspace, runDir) {
   return { ...JSON.parse(stdout.trim().split(/\r?\n/).at(-1)), seededThrough: seedScript, cliLauncher };
 }
 async function openChatHistory(page, seed) {
-  const panel = page.getByTestId('chats-panel');
-  if (!(await panel.isVisible())) await page.getByTestId('titlebar-chats-sidebar').click();
-  await panel.waitFor({ timeout: 30000 });
-  await page.getByTestId('chats-panel-tab-all').click();
+  const rail = page.getByTestId('activity-chats');
+  if ((await rail.getAttribute('aria-current')) !== 'page') await rail.click();
+  await page.getByTestId('side-panel').getByTestId('chats-view').waitFor({ timeout: 30000 });
   const channel = page.locator(`[data-testid="chats-channel"][data-channel-slug="${seed.channel}"]`);
   await channel.waitFor({ timeout: 60000 });
   const card = '[data-testid="chats-channel-view"] [data-testid="chats-post-card"]';

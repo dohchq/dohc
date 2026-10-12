@@ -23,6 +23,7 @@ import {
   copyIntoWorkspace,
   createFile,
   createFolder,
+  removeEmptyWorkspaceFolder,
   deletePath,
   extractFrontmatterIcon,
   getWorkspaceListingMetadata,
@@ -424,6 +425,13 @@ describe("listFiles", () => {
 });
 
 describe("createFolder", () => {
+  it("creates exclusively without making parents or reusing an existing folder", async () => {
+    await expect(createFolder(root, "missing/child", { exclusive: true })).rejects.toMatchObject({ code: "ENOENT" });
+    expect(existsSync(join(root, "missing"))).toBe(false);
+    await expect(createFolder(root, "app", { exclusive: true })).resolves.toBe("app");
+    await expect(createFolder(root, "app", { exclusive: true })).rejects.toMatchObject({ code: "EEXIST" });
+  });
+
   it("creates nested folders and returns the normalized path", async () => {
     const path = await createFolder(root, "projects//alpha/./deep");
     expect(path).toBe("projects/alpha/deep");
@@ -1348,5 +1356,29 @@ describe("containment of '..'-prefixed names", () => {
     const path = await createFile(root, "..cache/today.md", "cached text");
     expect(path, "..-segment: a bare '..-prefix' isInside refuses this real contained name.").toBe("..cache/today.md");
     expect(await readFile(join(root, "..cache", "today.md"), "utf8")).toBe("cached text");
+  });
+});
+
+
+describe("empty folder rollback", () => {
+  it("removes empty folders and preserves another writer's descendants", async () => {
+    await mkdir(join(root, "empty"));
+    await expect(removeEmptyWorkspaceFolder(root, "empty")).resolves.toBe(true);
+    await mkdir(join(root, "occupied"));
+    await writeFile(join(root, "occupied/agent.txt"), "agent work");
+    await expect(removeEmptyWorkspaceFolder(root, "occupied")).resolves.toBe(false);
+    expect(await readFile(join(root, "occupied/agent.txt"), "utf8")).toBe("agent work");
+  });
+  it("preserves files and refuses reserved paths, traversal, and escaping ancestors", async () => {
+    await writeFile(join(root, "agent.txt"), "agent work");
+    await expect(removeEmptyWorkspaceFolder(root, "agent.txt")).resolves.toBe(false);
+    expect(await readFile(join(root, "agent.txt"), "utf8")).toBe("agent work");
+    await expect(removeEmptyWorkspaceFolder(root, "../escape")).rejects.toThrow(/traversal/);
+    await expect(removeEmptyWorkspaceFolder(root, ".dohc/empty")).rejects.toThrow(/reserved/);
+    const outside = await createTestScratch("dohc-empty-outside-");
+    await mkdir(join(outside, "keep"));
+    await symlink(outside, join(root, "link"), "dir");
+    await expect(removeEmptyWorkspaceFolder(root, "link/keep")).rejects.toThrow(/escapes the workspace/);
+    expect(existsSync(join(outside, "keep"))).toBe(true);
   });
 });

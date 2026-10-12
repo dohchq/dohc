@@ -1,10 +1,11 @@
+import { visibleSharePath } from "@dohc/security-contract/share-selector";
 import { createHash, randomUUID } from "node:crypto";
 import { parseAppPublicationCandidate, parseAppCollectionCapability, APP_COLLECTION_CURSOR_BYTES, APP_COLLECTION_PAGE_BYTES, APP_COLLECTION_FIELDS_BYTES, type AppCollectionCapability } from "@dohc/security-contract/app-publication";
 import { isRecordId, parseCollectionRecordFields, parseCollectionSchema, validateFieldValue } from "@dohc/workspace-contracts/collection-values";
 import type { CollectionSchema } from "@dohc/workspace-contracts/collection";
 import { collectionVersionError } from "@dohc/workspace-contracts/collection";
 import { notFound, badRequest, relayError } from "../errors";
-import { effectiveShareSelector, parseStoredAnyShareSelectorJson, targetVersionId, visibleSharePath } from "../shareFilter";
+import { effectiveShareSelector, parseStoredAnyShareSelectorJson, targetVersionId } from "../shareFilter";
 import type { StorageContext } from "./context";
 import { requireLinkAppPublication, type LinkAppPublicationInput, type ReadAppPublicationInput } from "./publications";
 import { appendLogBatchInTransaction, maxOriginSeq } from "./log";

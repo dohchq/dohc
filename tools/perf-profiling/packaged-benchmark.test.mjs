@@ -5,6 +5,7 @@ import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { once } from 'node:events';
 import { mkdir, mkdtemp, realpath, rm, readFile, writeFile } from 'node:fs/promises';
+import fsPromises from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -14,7 +15,7 @@ import { startWindowController, waitForVisibleWindow } from './window-controller
 import { closeOwnedPackage, observeExit, benchmarkCancellation, verifyRestartInput } from './packaged-process.mjs';
 import { summarize } from './summarize-packaged-benchmark.mjs';
 import { compareSummaries, DEFAULT_MARGIN } from './compare-packaged-benchmark.mjs';
-import { createRequire } from 'node:module';
+import { createRequire, syncBuiltinESMExports } from 'node:module';
 import { observeStartupReadiness, startupTargetFromRegistry } from './startup-readiness.mjs';
 import { observeSurface, observeSearchSubmit, seededPostThreadId, collectionFixtureFiles, recordId, classifyProcess, aggregateByKind } from './packaged-surfaces.mjs';
 import { automationCases, automationFixtureDigest, automationOf, busyShare, classifyOutcome, cpuByKind, DATASET_NAME, datasetAutomationDefinition, datasetListRequest, datasetRowValues, datasetSetupRequest, DEFAULT_LIMITS,
@@ -849,9 +850,9 @@ test('a press uses its own saved run', async t => {
   const folder = join(root, '.dohc', 'automations', 'runs', 'f1');
   await mkdir(folder, { recursive: true });
   const save = (claimId, startedAtMs) => writeFile(join(folder, `run-${claimId}.json`), JSON.stringify({
-    claimId, startedAtMs, automationId: `collection:object-a#${automation.name}`,
+    kind: 'header', version: 9, claimId, startedAtMs, automationId: `collection:object-a#${automation.name}`,
     collections: [{ collectionId: 'object-a', path: automation.collectionPath }], outcome: { state: 'failed' },
-  }));
+  }) + '\n');
   await save('old', 1000);
   const previousRuns = await readRunJournal(root, automation);
   const missing = runForPress(await readRunJournal(root, automation), previousRuns);
@@ -924,6 +925,57 @@ test('step-1 refusals in both Collections use the new Notice body with no saved 
   }
 });
 
+test('journal byte samples read only bounded headers and stat progress after appends and rewrites', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'dohc-automation-byte-sample-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const folder = join(root, '.dohc', 'automations', 'runs', 'f1');
+  await mkdir(folder, { recursive: true });
+  const path = join(folder, 'run-c1.json');
+  const automation = automationOf('document', 'baseline');
+  const header = extra => JSON.stringify({ kind: 'header', automationId: 'collection:object-a#bench-baseline',
+    collections: [{ collectionId: 'object-a', path: automation.collectionPath }], ...extra }) + '\n';
+  let headerText = header({ label: 'é', padding: 'x'.repeat(5000) });
+  let progress = 'x'.repeat(1024 * 1024);
+  await writeFile(path, headerText + progress);
+  const originalReadFile = fsPromises.readFile;
+  const originalOpen = fsPromises.open;
+  let bytesRead = 0, stats = 0;
+  t.mock.method(fsPromises, 'readFile', (file, ...args) => {
+    assert.notEqual(file, path, 'byte sampling must not read the whole run');
+    return originalReadFile(file, ...args);
+  });
+  t.mock.method(fsPromises, 'open', async (...args) => {
+    const handle = await originalOpen(...args);
+    const read = handle.read.bind(handle), stat = handle.stat.bind(handle);
+    handle.read = async (...readArgs) => {
+      const result = await read(...readArgs);
+      bytesRead += result.bytesRead;
+      return result;
+    };
+    handle.stat = async (...statArgs) => { stats++; return stat(...statArgs); };
+    return handle;
+  });
+  syncBuiltinESMExports();
+  t.after(() => { t.mock.restoreAll(); syncBuiltinESMExports(); });
+  const sample = async () => {
+    bytesRead = 0; stats = 0;
+    assert.deepEqual(await journalBytes(root, automation), {
+      headerBytes: Buffer.byteLength(headerText), progressBytes: Buffer.byteLength(progress),
+    });
+    assert.ok(stats > 0, 'sample must use stat for the total size');
+    assert.ok(bytesRead < 32 * 1024, `sample read ${bytesRead} bytes of progress`);
+  };
+  await sample();
+  await fsPromises.appendFile(path, '\nmore progress\n');
+  progress += '\nmore progress\n';
+  await sample();
+  headerText = header({ outcome: { state: 'done' } });
+  const replacement = join(folder, 'replacement.tmp');
+  await writeFile(replacement, headerText + progress);
+  await fsPromises.rename(replacement, path);
+  await sample();
+});
+
 test('run journal reads saved headers and progress, and a refused run leaves none', async t => {
   const root = await mkdtemp(join(tmpdir(), 'dohc-automation-journal-'));
   t.after(() => rm(root, { recursive: true, force: true }));
@@ -935,20 +987,19 @@ test('run journal reads saved headers and progress, and a refused run leaves non
   const runs = join(root, '.dohc', 'automations', 'runs');
   const elsewhere = join(runs, 'f0');
   await mkdir(elsewhere, { recursive: true });
-  await writeFile(join(elsewhere, 'run-x.json'), JSON.stringify({ automationId: 'collection:object-b#bench-baseline', collections: [{ collectionId: 'object-b', path: 'automation-data' }] }));
-  // A header caught mid-rewrite reads as partial JSON; the lookup skips it instead of stopping the run.
+  await writeFile(join(elsewhere, 'run-x.json'), JSON.stringify({ kind: 'header', version: 9, automationId: 'collection:object-b#bench-baseline', collections: [{ collectionId: 'object-b', path: 'automation-data' }] }) + '\n');
+  // An unreadable run is skipped instead of stopping the lookup.
   await writeFile(join(elsewhere, 'run-partial.json'), '{"automationId": "collection:obj');
   assert.deepEqual(await journalBytes(root, automation), { headerBytes: 0, progressBytes: 0 });
   const folder = join(runs, 'f1');
   await mkdir(folder, { recursive: true });
   const automationId = 'collection:object-a#bench-baseline';
-  const header = JSON.stringify({ version: 2, claimId: 'c1', automationId, collections: [{ collectionId: 'object-a', path: 'automation-bench' }], startedAtMs: 1000, finishedAtMs: 1600, plan: null, outcome: { state: 'done' } });
+  const header = JSON.stringify({ kind: 'header', version: 9, claimId: 'c1', automationId, collections: [{ collectionId: 'object-a', path: 'automation-bench' }], startedAtMs: 1000, finishedAtMs: 1600, outcome: { state: 'done' } }) + '\n';
   const progress = [{ kind: 'created', ordinal: 0, recordId: 'r', path: 'p' },
     { kind: 'effect', ordinal: 1, writes: [{ kind: 'field', field: 'A' }, { kind: 'field', field: 'B' }, { kind: 'created', recordId: 'r', path: 'p' }] },
     { kind: 'effect', ordinal: 2, writes: [{ kind: 'dataset-edit', fields: [{}, {}, {}] }, { kind: 'dataset-created' }] }].map(line => `${JSON.stringify(line)}\n`).join('');
-  await writeFile(join(folder, 'run-c1.json'), header);
-  await writeFile(join(folder, 'run-c1.progress.jsonl'), progress);
-  await writeFile(join(folder, 'other.json'), JSON.stringify({ automationId: 'collection:elsewhere#x', startedAtMs: 0 }));
+  await writeFile(join(folder, 'run-c1.json'), header + progress);
+  await writeFile(join(folder, 'other.json'), JSON.stringify({ kind: 'header', version: 9, automationId: 'collection:elsewhere#x', startedAtMs: 0 }) + '\n');
   const [run, ...others] = await readRunJournal(root, automation);
   assert.deepEqual(others, []);
   assert.deepEqual(run, { claimId: 'c1', startedAtMs: 1000, finishedAtMs: 1600, outcome: { state: 'done' }, headerBytes: Buffer.byteLength(header),
@@ -957,7 +1008,7 @@ test('run journal reads saved headers and progress, and a refused run leaves non
     progressBytes: Buffer.byteLength(progress), progressLines: 3, fieldWrites: 5, created: 2, createdPaths: ['p'] });
   const bytes = await journalBytes(root, automation);
   assert.equal(bytes.progressBytes, Buffer.byteLength(progress));
-  assert.ok(bytes.headerBytes > Buffer.byteLength(header));
+  assert.equal(bytes.headerBytes, Buffer.byteLength(header));
   const measured = [
     { kind: 'step', ordinal: 0, effects: [], findMs: 12, planMs: 3, appendMs: 0, appendCount: 0 },
     { kind: 'step', ordinal: 1, effects: [{}, {}], findMs: 8, planMs: 7, appendMs: 31, appendCount: 2 },
@@ -965,7 +1016,7 @@ test('run journal reads saved headers and progress, and a refused run leaves non
     { kind: 'effect', ordinal: 1, writes: [], writeMs: 0, writeCount: 1 },
   ];
   const timing = async lines => {
-    await writeFile(join(folder, 'run-c1.progress.jsonl'), lines.map(line => `${JSON.stringify(line)}\n`).join(''));
+    await writeFile(join(folder, 'run-c1.json'), header + lines.map(line => `${JSON.stringify(line)}\n`).join(''));
     const [saved] = await readRunJournal(root, automation);
     return { findMs: saved.findMs, planMs: saved.planMs, writeMs: saved.writeMs, writes: saved.writes };
   };

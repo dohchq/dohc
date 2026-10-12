@@ -1,4 +1,5 @@
-import { mkdir, readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { atomicReplaceFile } from "../atomicReplaceFile";
 import { join } from "node:path";
 import type { ScheduleRecord } from "@dohc/automation-executor/automation-scheduler";
 
@@ -55,9 +56,7 @@ export function createScheduleRecords(directory: string) {
           return;
         }
         await mkdir(directory, { recursive: true });
-        const temporary = `${file}.tmp`;
-        await writeFile(temporary, `${JSON.stringify({ version: 1, workspaceId, schedules: record.schedules })}\n`);
-        await rename(temporary, file);
+        await atomicReplaceFile(file, (temporary) => writeFile(temporary, `${JSON.stringify({ version: 1, workspaceId, schedules: record.schedules })}\n`));
       });
       queue = write.catch(() => undefined);
       return write;

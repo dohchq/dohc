@@ -26,6 +26,10 @@
 
 mod automations;
 mod capture;
+mod recovery_import;
+pub use recovery_import::{
+    RecoveryImport, RecoveryImportOutcome, RecoveryImportResult, RecoveryUpdate,
+};
 mod chats;
 mod collections;
 mod journal;
@@ -482,6 +486,23 @@ impl ActorHandle {
         self.run(move |store, _| {
             store
                 .bind_root_token(&token, faults.as_ref())
+                .map_err(RuntimeError::Storage)
+        })
+        .await
+    }
+
+    /// Whether this store already records a workspace other than `workspace_id`.
+    pub async fn holds_other_workspace(&self, workspace_id: String) -> Result<bool, RuntimeError> {
+        self.run(move |store, _| {
+            store
+                .read_with(|conn| {
+                    conn.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM versioned_workspaces WHERE workspace_id <> ?1)",
+                        rusqlite::params![workspace_id],
+                        |row| row.get(0),
+                    )
+                    .map_err(dohc_engine_storage::StorageError::corrupt_public)
+                })
                 .map_err(RuntimeError::Storage)
         })
         .await

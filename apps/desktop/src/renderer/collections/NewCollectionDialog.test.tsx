@@ -55,7 +55,7 @@ describe("NewCollectionDialog", () => {
   });
 
   it("defaults to data and creates a typed backend without an app or SQL input", async () => {
-    bridgeMock.dataset.mockImplementation(async (request: { definition: DatasetDefinition }) => ({ kind: "approved", revision: { datasetId: request.definition.datasetId } }));
+    bridgeMock.dataset.mockImplementation(async (request: { definition: DatasetDefinition }) => ({ kind: "approved", revision: { datasetId: request.definition.datasetId, definition: request.definition } }));
     const onCreated = vi.fn();
     renderDialog(onCreated, false);
     expect((screen.getByLabelText("Data") as HTMLInputElement).checked).toBe(true);
@@ -101,7 +101,7 @@ describe("NewCollectionDialog", () => {
     fireEvent.change(screen.getByLabelText("Collection name"), { target: { value: "registrations" } });
     fireEvent.click(screen.getByTestId("new-collection-create"));
     rerender(<NewCollectionDialog {...props} workspaceId="ws-2" />);
-    await act(async () => { pending.resolve({ kind: "approved", revision: { datasetId: bridgeMock.dataset.mock.calls[0]![0].definition.datasetId } }); });
+    await act(async () => { pending.resolve({ kind: "approved", revision: { datasetId: bridgeMock.dataset.mock.calls[0]![0].definition.datasetId, definition: bridgeMock.dataset.mock.calls[0]![0].definition } }); });
     expect(onCreated).not.toHaveBeenCalled();
     bridgeMock.dataset.mockRejectedValue(new Error("Storage unavailable"));
     fireEvent.change(screen.getByLabelText("Collection name"), { target: { value: "new-data" } });

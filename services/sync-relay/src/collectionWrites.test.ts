@@ -77,7 +77,7 @@ async function datasetFolder(r: Relay, descriptorChange: "matching" | "different
     db.exec("CREATE TABLE IF NOT EXISTS dohc_dataset_catalog(workspace_id TEXT NOT NULL,dataset_id TEXT NOT NULL,revision_json TEXT NOT NULL,artifacts_json TEXT NOT NULL,PRIMARY KEY(workspace_id,dataset_id))");
     if (descriptorChange !== "unapproved") db.prepare("INSERT INTO dohc_dataset_catalog VALUES(?,?,?,?)").run(WORKSPACE, definition.datasetId, JSON.stringify(revision), "{}");
   } finally { db.close(); }
-  const text = descriptorChange === "malformed" ? "{" : JSON.stringify(descriptorChange === "different" ? { ...definition, name: "Changed" } : definition);
+  const text = descriptorChange === "malformed" ? "{" : JSON.stringify(descriptorChange === "different" ? { ...definition, datasetId: id(99) } : definition);
   await r.owner.write("dataset-descriptor", `${folder}/dataset.json`, text);
   return folder;
 }
@@ -111,6 +111,107 @@ async function relay(
   const grantId = storage.listActiveShareGrantsForRecipient(shareId, RECIPIENT)[0]!.grantId;
   return { h, storage, shareId, grantId, owner };
 }
+
+it("shares a named direct-write snapshot with a co-editor, without private authority", async () => {
+  const lookup = vi.fn((_id: string) => "Recipient name");
+  const r = await relay({overrides: {lookupUserDisplayName: lookup}});
+  const coShare = await createShare(r.h, OWNER, WORKSPACE, {recipientUserId: "coeditor", paths: ["trip"], access: "edit"});
+  await upload(r, SCHEMA_TWO);
+  lookup.mockClear();
+  expect((await write(r, [edit(`${PACKING}/collection.yaml`, SCHEMA, SCHEMA_TWO)])).status).toBe(200);
+  const response = await r.h(request("coeditor", `/sync/shares/${coShare}/log?since=0`));
+  expect(response.status).toBe(200);
+  const body = await response.text();
+  for (const secret of [r.grantId, "grantId", "grantGeneration", "@dohc.test", "principalId"]) expect.soft(body).not.toContain(secret);
+  const ops = JSON.parse(body).ops as Array<{payload: Record<string, unknown>}>;
+  expect.soft(ops.at(-1)?.payload.authors).toEqual([{kind: "human", humanId: RECIPIENT, humanName: "Recipient name"}]);
+  expect(lookup.mock.calls.filter(([id]) => id === RECIPIENT)).toHaveLength(1);
+});
+
+it("starts the name lookup before reading the body and waits for it at commit", async () => {
+  let lookupStarted = false;
+  let bodyFinished = false;
+  let finishLookup!: (name: string) => void;
+  const lookup = vi.fn(() => {
+    lookupStarted = true;
+    return bodyFinished ? Promise.resolve("Recipient name")
+      : new Promise<string>(resolve => { finishLookup = resolve; });
+  });
+  const r = await relay();
+  await upload(r, SCHEMA_TWO);
+  const h = testHandler(r.storage, {nowMs: () => CLOCK, lookupUserDisplayName: lookup});
+  const req = request(RECIPIENT, `/sync/shares/${r.shareId}/collection-writes`,
+    jsonBody({submitId: "lookup-overlap", changes: [edit(`${PACKING}/collection.yaml`, SCHEMA, SCHEMA_TWO)]}));
+  const reader = req.body!.getReader();
+  const read = reader.read.bind(reader);
+  let startedBeforeBody: boolean | undefined;
+  vi.spyOn(req.body!, "getReader").mockReturnValue(reader);
+  vi.spyOn(reader, "read").mockImplementation(async () => {
+    startedBeforeBody ??= lookupStarted;
+    const item = await read();
+    if (item.done) {
+      bodyFinished = true;
+      if (lookupStarted) finishLookup("Recipient name");
+    }
+    return item;
+  });
+  expect((await h(req)).status).toBe(200);
+  expect(startedBeforeBody).toBe(true);
+  expect(lookup).toHaveBeenCalledExactlyOnceWith(RECIPIENT);
+});
+
+it("stores bounded, quota-counted public snapshots per log row and keeps them after a rename and retry", async () => {
+  let name = "Recipient name";
+  const lookup = vi.fn((_id: string) => name);
+  const r = await relay({overrides: {lookupUserDisplayName: lookup}});
+  const folder = "trip/new";
+  const coShare = await createShare(r.h, OWNER, WORKSPACE, {recipientUserId: "coeditor", paths: [folder], access: "edit"});
+  const one = "---\nid: rec_aaaaaaaaaaaaaaaaaaaaaaaaaa\n---\nOne\n";
+  const two = "---\nid: rec_bbbbbbbbbbbbbbbbbbbbbbbbbb\n---\nTwo\n";
+  const changes = [create(`${folder}/collection.yaml`, SCHEMA), create(`${folder}/One.md`, one), create(`${folder}/Two.md`, two)];
+  await upload(r, SCHEMA, one, two);
+  const beforeDb = inspectDatabase(storagePath(r.storage));
+  const beforeUsage = Number(beforeDb.prepare("SELECT usage_bytes FROM sync_relay_workspace_usage WHERE workspace_id=?").get(WORKSPACE)!.usage_bytes);
+  beforeDb.close();
+  lookup.mockClear();
+  expect((await write(r, changes)).status).toBe(200);
+  expect(lookup).toHaveBeenCalledExactlyOnceWith(RECIPIENT);
+  const db = inspectDatabase(storagePath(r.storage));
+  const rows = db.prepare("SELECT * FROM sync_relay_collection_writes").all();
+  expect(rows).toHaveLength(1);
+  const row = rows[0]!;
+  expect(row).not.toHaveProperty("admitted_author_snapshot_json");
+  const logSnapshots = db.prepare("SELECT admitted_author_snapshot_json FROM sync_relay_log WHERE origin_id=?").all(row.origin_id);
+  const snapshotJson = String(logSnapshots[0]!.admitted_author_snapshot_json);
+  const snapshot = JSON.parse(snapshotJson);
+  expect(snapshot).toEqual([{kind: "human", humanId: RECIPIENT, humanName: "Recipient name"}]);
+  expect(snapshot.length).toBeLessThanOrEqual(2);
+  expect(Buffer.byteLength(JSON.stringify(snapshot[0]))).toBeLessThanOrEqual(4096);
+  expect(row.storage_bytes).toBe(Buffer.byteLength(String(row.paths_json)) + Buffer.byteLength(String(row.receipt_json)) +
+    Buffer.byteLength(r.grantId) + Buffer.byteLength(RECIPIENT) + Buffer.byteLength(String(row.origin_id)) + 256);
+  expect(logSnapshots).toEqual(Array(3).fill({admitted_author_snapshot_json: snapshotJson}));
+  expect(db.prepare("SELECT name FROM sqlite_schema WHERE name='idx_sync_relay_collection_writes_origin_seq'").get()).toBeUndefined();
+  expect(db.prepare("SELECT 1 FROM sync_relay_migrations WHERE migration_id='collection-write-public-authors-v1'").get()).toBeUndefined();
+  const usage = db.prepare("SELECT usage_bytes FROM sync_relay_workspace_usage WHERE workspace_id=?").get(WORKSPACE);
+  const logBytes = Number(db.prepare("SELECT SUM(length(CAST(payload_json AS BLOB))) AS bytes FROM sync_relay_log WHERE origin_id=?").get(row.origin_id)!.bytes);
+  expect(Number(usage!.usage_bytes) - beforeUsage).toBe(Number(row.storage_bytes) + logBytes + 3 * Buffer.byteLength(snapshotJson));
+  db.close();
+  name = "Renamed recipient";
+  expect(await json(await write(r, changes))).toMatchObject({created: false});
+  const again = inspectDatabase(storagePath(r.storage));
+  expect(again.prepare("SELECT usage_bytes FROM sync_relay_workspace_usage WHERE workspace_id=?").get(WORKSPACE)).toEqual(usage);
+  expect(again.prepare("SELECT admitted_author_snapshot_json FROM sync_relay_log WHERE origin_id=?").all(row.origin_id)).toEqual(logSnapshots);
+  again.close();
+  const path = storagePath(r.storage);
+  closeTestStorage(r.storage);
+  const reopened = reopenTestStorage(path);
+  const h = testHandler(reopened);
+  const response = await h(request("coeditor", `/sync/shares/${coShare}/log?since=0`));
+  expect(response.status).toBe(200);
+  const ops = (await json(response)).ops as Array<{payload: Record<string, unknown>}>;
+  expect(ops).toHaveLength(3);
+  for (const op of ops) expect(op.payload.authors).toEqual(snapshot);
+});
 
 // The owner's own log and blobs. A write to a path the owner already has
 // states the content it replaces, as the owner's engine does.
@@ -249,6 +350,107 @@ describe("the fixtures", () => {
 });
 
 describe("direct writes to a Collection's own files", () => {
+  const record = (id = "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa") => `---\nid: ${id}\nTitle: Socks\n---\nBring two pairs.\n`;
+
+  it("creates one record in an existing Collection, attributes it, and replays a lost acknowledgement after restart", async () => {
+    const r = await relay();
+    const path = `${PACKING}/Socks.md`, body = record();
+    await upload(r, body);
+    const first = await json(await write(r, [create(path, body)]));
+    expect(first).toMatchObject({ ok: true, created: true, paths: [path] });
+    expect((await r.owner.directMoments())[0]?.payload).toMatchObject({ path,
+      authors: [{ kind: "named", userId: RECIPIENT, grantId: r.grantId, grantGeneration: 1 }] });
+    const dbPath = storagePath(r.storage);
+    closeTestStorage(r.storage);
+    r.storage = reopenTestStorage(dbPath);
+    r.h = testHandler(r.storage, { nowMs: () => CLOCK });
+    expect(await json(await write(r, [create(path, body)]))).toEqual({ ...first, created: false });
+    const response = await r.h(request(OWNER, `/sync/${WORKSPACE}/log?since=0&limit=1000`));
+    const ops = (await json(response)).ops as Array<{ originId: string }>;
+    expect(ops.filter(op => op.originId.startsWith("relay:collection-file:"))).toHaveLength(1);
+  });
+
+  it("refuses path and record ID collisions without overwriting either file", async () => {
+    const r = await relay();
+    const body = record(), another = record("rec_bbbbbbbbbbbbbbbbbbbbbbbbbb");
+    await r.owner.write("socks", `${PACKING}/Socks.md`, body);
+    await upload(r, body, another);
+    await expectCode(await write(r, [create(`${PACKING}/SOCKS.md`, another)]), 409, "stale");
+    await expectCode(await write(r, [create(`${PACKING}/Other.md`, body)]), 403, "share_op_rejected");
+    expect(await r.owner.directMoments()).toEqual([]);
+  });
+
+  it("keeps two recipients racing for one name as separate creations", async () => {
+    const r = await relay();
+    const otherUser = "recipient-two";
+    const shareId = await createShare(r.h, OWNER, WORKSPACE, {
+      recipientUserId: otherUser, paths: ["trip"], access: "edit",
+    });
+    const path = `${PACKING}/Untitled.md`, first = record(), second = record("rec_bbbbbbbbbbbbbbbbbbbbbbbbbb");
+    await upload(r, first);
+    expect((await r.h(request(otherUser, `/sync/shares/${shareId}/blobs/${sha256(second)}`, {
+      method: "PUT", body: new TextEncoder().encode(second),
+    }))).status).toBe(200);
+    const responses = await Promise.all([
+      write(r, [create(path, first)]),
+      write({ ...r, shareId }, [create(path, second)], { as: otherUser }),
+    ]);
+    expect(responses.map(response => response.status).sort()).toEqual([200, 409]);
+    const moments = await r.owner.directMoments();
+    expect(moments).toHaveLength(1);
+    const retry = await write({ ...r, shareId }, [create(path, second)], { as: otherUser });
+    expect(retry.status).toBe(responses[1]!.status);
+    expect(await r.owner.directMoments()).toEqual(moments);
+  });
+
+  it("validates identity without counting a large Markdown body as frontmatter", async () => {
+    const r = await relay(), body = record() + "é".repeat(40_000);
+    await upload(r, body);
+    expect((await write(r, [create(`${PACKING}/Large.md`, body)])).status).toBe(200);
+    await expectCode(await write(r, [create(`${PACKING}/Duplicate.md`, body)], { submitId: "duplicate" }), 403, "share_op_rejected");
+    expect(await r.owner.directMoments()).toHaveLength(1);
+  });
+
+  it("requires one create, a valid ID, a current document schema, and folder Edit", async () => {
+    const r = await relay();
+    const body = record();
+    await upload(r, body, "---\nid: forged\n---\n");
+    for (const changes of [
+      [create(`${PACKING}/One.md`, body), create(`${PACKING}/Two.md`, body)],
+      [edit(`${PACKING}/Socks.md`, body, body)],
+      [create(`${PACKING}/Bad.md`, "---\nid: forged\n---\n")],
+      [create("trip/not-a-collection/One.md", body)],
+      [create("private/One.md", body)],
+    ]) await expectCode(await write(r, changes), 403, "share_op_rejected");
+    await r.owner.write("object-schema", `${PACKING}/collection.yaml`, "broken: [");
+    await expectCode(await write(r, [create(`${PACKING}/One.md`, body)]), 403, "share_op_rejected");
+    const narrow = await relay({ paths: [`${PACKING}/collection.yaml`] });
+    await upload(narrow, body);
+    await expectCode(await write(narrow, [create(`${PACKING}/One.md`, body)]), 403, "share_op_rejected");
+  });
+
+  it("rejects a forged author or owner identity on a record request", async () => {
+    const r = await relay();
+    const body = record(), change = create(`${PACKING}/One.md`, body);
+    await upload(r, body);
+    await expectCode(await write(r, [{ ...change, author: { kind: "named", userId: OWNER } }]), 403, "share_op_rejected");
+    await expectCode(await r.h(request(RECIPIENT, `/sync/shares/${r.shareId}/collection-writes`,
+      jsonBody({ submitId: "forged", changes: [change], workspaceId: WORKSPACE }))), 403, "share_op_rejected");
+    expect(await r.owner.directMoments()).toEqual([]);
+  });
+
+  it("rechecks revocation inside the commit after record content validation", async () => {
+    const r = await relay();
+    const body = record();
+    await upload(r, body);
+    const original = r.storage.getBlob.bind(r.storage);
+    vi.spyOn(r.storage, "getBlob").mockImplementation((workspaceId, hash) => {
+      if (hash === sha256(body)) r.storage.revokeShareGrant({ shareId: r.shareId, grantId: r.grantId, revokedAtMs: CLOCK });
+      return original(workspaceId, hash);
+    });
+    await expectCode(await write(r, [create(`${PACKING}/One.md`, body)]), 404, "not_found");
+    expect(await r.owner.directMoments()).toEqual([]);
+  });
   it.each(["view", "comment", "edit"] as const)("reads definitions through the named %s log and blob transport", async access => {
     const r = await relay({ access }), text = automations(STAMP), path = `${PACKING}/automations.yaml`;
     await r.owner.write("object-automations", path, text);
@@ -615,7 +817,7 @@ describe("direct writes to a Collection's own files", () => {
       shareId: r.shareId,
       grantId: r.grantId,
       grantGeneration: 1,
-      writer: { kind: "named", userId: RECIPIENT },
+      writer: { kind: "named", userId: RECIPIENT, humanName: "Recipient" },
       submitId: "submit-1",
       rawChanges: changes,
       write: decision.write,
@@ -653,7 +855,7 @@ describe("round 1 of review", () => {
     expect(body).toMatchObject({ error: "trip/packing/collection.yaml uses a newer version. Update the sync service to read this file." });
     expect(await r.owner.directMoments()).toEqual([]);
   });
-  it("keeps the lane's origin and a named author out of the owner's own log", async () => {
+  it("rejects the lane's origin and consumes refused owner authors without projecting their moment", async () => {
     const r = await relay();
     const append = (originId: string, author: unknown) => r.h(request(OWNER, `/sync/${WORKSPACE}/log`, jsonBody({
       originId,
@@ -668,11 +870,13 @@ describe("round 1 of review", () => {
       }],
     })));
     await expectCode(await append(`relay:collection-file:${r.grantId}`, null), 400, "bad_request");
-    await expectCode(
-      await append("origin-owner", { kind: "named", userId: RECIPIENT, grantId: r.grantId, grantGeneration: 1 }),
-      403,
-      "authorship_mismatch",
-    );
+    const response = await append("owner-forgery", { kind: "named", userId: RECIPIENT, grantId: r.grantId, grantGeneration: 1 });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({currentMaxOriginSeq: 0,
+      settlementRefusals: [{originId: "owner-forgery", originSeq: 0, momentId: "forged", reason: "authorship-mismatch"}]});
+    expect(r.storage.fetchLogCoordinate({workspaceId: WORKSPACE, originId: "owner-forgery", originSeq: 0}))
+      .toMatchObject({settlementAdmission: {status: "refused", reason: "authorship-mismatch"}});
+    expect(await r.owner.directMoments()).toEqual([]);
   });
 
   it("refuses a batch whose files sum past the byte bound, before reading anything", async () => {
@@ -1148,6 +1352,90 @@ describe("the direct-write decision", () => {
 // An Edit share link writes the same files through its own route (ADR 0013),
 // with its content in the request and its authority from the capability.
 describe("direct writes through an Edit share link", () => {
+  it("shares a link direct-write public snapshot without private authority", async () => {
+    const r = await linkRelay();
+    const path = `${PACKING}/collection.yaml`;
+    expect((await linkWrite(r, [linkEdit(path, SCHEMA, SCHEMA_TWO)])).status).toBe(200);
+    const db = inspectDatabase(storagePath(r.storage));
+    const principal = db.prepare("SELECT principal_id FROM sync_relay_link_principals WHERE grant_id=?").get(LINK_GRANT)!;
+    const mapping = db.prepare("SELECT public_principal_id FROM sync_relay_app_public_principals WHERE grant_id=? AND principal_id=?")
+      .get(LINK_GRANT, principal.principal_id);
+    db.prepare("UPDATE sync_relay_link_principals SET display_name='Renamed link holder' WHERE principal_id=?").run(principal.principal_id);
+    db.close();
+    const coShare = await createShare(r.h, OWNER, WORKSPACE, {recipientUserId: "coeditor", paths: ["trip"], access: "edit"});
+    const response = await r.h(request("coeditor", `/sync/shares/${coShare}/log?since=0`));
+    expect(response.status).toBe(200);
+    const body = await response.text();
+    for (const secret of [LINK_GRANT, r.grantId, "grantGeneration", "grant_generation", "grantId", "@dohc.test", String(principal.principal_id), TOKEN, PROFILE]) {
+      expect.soft(body).not.toContain(secret);
+    }
+    expect.soft(mapping).toBeDefined();
+    const ops = JSON.parse(body).ops as Array<{payload: Record<string, unknown>}>;
+    expect.soft(ops.at(-1)?.payload.authors).toEqual([{kind: "link", publicPrincipalId: mapping?.public_principal_id, label: "Anonymous"}]);
+    const accountless = await r.h(linkRequest(TOKEN, "/sync/link/log?since=0"));
+    expect(accountless.status).toBe(200);
+    const accountlessBody = await accountless.text();
+    for (const excluded of ['"authors"', 'admittedAuthorSnapshot', LINK_GRANT, String(principal.principal_id), TOKEN, PROFILE]) {
+      expect(accountlessBody).not.toContain(excluded);
+    }
+  });
+
+  it.skipIf(!process.env.SHARE_AUTHOR_PERF_OUTPUT)("measures direct-write routes and share reads", async () => {
+    const {writeFile} = await import("node:fs/promises");
+    let clock = CLOCK;
+    const r = await linkRelay({overrides: {nowMs: () => clock,
+      lookupUserDisplayName: async () => {
+        // Model a 2 ms account-service round trip in this performance workload.
+        await new Promise(resolve => setTimeout(resolve, 2));
+        return "Recipient";
+      }}});
+    sql(r, "UPDATE sync_relay_link_sessions SET expires_at_ms=10000000");
+    const coShare = await createShare(r.h, OWNER, WORKSPACE, {recipientUserId: "coeditor", paths: ["trip"], access: "edit"});
+    await upload(r, SCHEMA, SCHEMA_TWO);
+    let before = SCHEMA;
+    const samples: Record<string, number[]> = {namedWrite: [], linkWrite: [], shareRead: []};
+    for (const lane of ["namedWrite", "linkWrite"] as const) {
+      for (let i = 0; i < 280; i++) {
+        clock += 3000;
+        const after = before === SCHEMA ? SCHEMA_TWO : SCHEMA;
+        const cursor = r.storage.fetchLogPageDescending({workspaceId: WORKSPACE, beforeRelaySeq: null, limit: 1})[0]!.relaySeq;
+        const start = performance.now();
+        const response = lane === "namedWrite"
+          ? await write(r, [edit(`${PACKING}/collection.yaml`, before, after)], {submitId: `perf-${lane}-${i}`})
+          : await linkWrite(r, [linkEdit(`${PACKING}/collection.yaml`, before, after)], {submitId: `perf-${lane}-${i}`});
+        await response.text();
+        const elapsed = performance.now() - start;
+        expect(response.status).toBe(200);
+        if (i >= 40) samples[lane]!.push(elapsed);
+        const readStart = performance.now();
+        const read = await r.h(request("coeditor", `/sync/shares/${coShare}/log?since=${cursor}&limit=10`));
+        const body = await read.text();
+        const readElapsed = performance.now() - readStart;
+        expect(read.status).toBe(200);
+        expect(JSON.parse(body).ops).toHaveLength(1);
+        if (i >= 40) samples.shareRead!.push(readElapsed);
+        before = after;
+      }
+    }
+    const results = Object.fromEntries(Object.entries(samples).map(([lane, values]) => {
+      const sorted = [...values].sort((a, b) => a - b);
+      return [lane, {requests: values.length, medianMs: sorted[Math.floor(sorted.length / 2)], p95Ms: sorted[Math.ceil(sorted.length * 0.95) - 1], samplesMs: values}];
+    }));
+    await writeFile(process.env.SHARE_AUTHOR_PERF_OUTPUT!, JSON.stringify(results, null, 2));
+    console.log(JSON.stringify(Object.fromEntries(Object.entries(results).map(([lane, result]) => [lane, {...result, samplesMs: undefined}]))));
+  });
+
+  it("creates a record with link-principal provenance and obeys the owner's pause control", async () => {
+    const r = await linkRelay();
+    const path = `${PACKING}/One.md`;
+    const text = "---\nid: rec_aaaaaaaaaaaaaaaaaaaaaaaaaa\n---\n";
+    expect((await linkWrite(r, [linkCreate(path, text)])).status).toBe(200);
+    expect((await r.owner.directMoments())[0]?.payload).toMatchObject({ path,
+      authors: [{ kind: "link", grantId: LINK_GRANT, grantGeneration: 1, principalId: expect.any(String) }] });
+    sql(r, `UPDATE sync_relay_shares SET link_writes_paused_at_ms = 1 WHERE share_id = '${r.shareId}'`);
+    await expectOpaque(await linkWrite(r, [linkCreate(`${PACKING}/Two.md`, text.replace(/a/g, "b"))], { submitId: "create-two" }));
+    expect(await r.owner.directMoments()).toHaveLength(1);
+  });
   it.each(["matching", "different", "wrong-folder", "unapproved", "malformed"] as const)("advertises catalog permission for a %s dataset through the link inventory", async problem => {
     const r = await linkRelay(), folder = await datasetFolder(r, problem);
     await r.owner.write("object-automations", `${folder}/automations.yaml`, automations(STAMP));
@@ -1243,6 +1531,22 @@ describe("direct writes through an Edit share link", () => {
       db.close();
     }
   }
+
+  it("returns only the direct writer's scoped public participant mapping to the owner", async () => {
+    const r = await linkRelay();
+    expect((await linkWrite(r, [linkCreate(`${PACKING}/automations.yaml`, automations(STAMP))])).status).toBe(200);
+    const [row] = ledger(r);
+    const read = async () => await json(await r.h(request(OWNER, `/sync/${WORKSPACE}/collection-writes/${LINK_GRANT}`)));
+    expect(await read()).toMatchObject({writes: [{files: [{publicPrincipalId: expect.stringMatching(/^public_/)}]}]});
+    sql(r, "UPDATE sync_relay_app_public_principals SET public_principal_id='public-ana'");
+    expect(await read()).toMatchObject({ writes: [{ files: [{ publicPrincipalId: "public-ana" }] }] });
+    sql(r, "PRAGMA foreign_keys=OFF; UPDATE sync_relay_app_public_principals SET principal_id='different-participant'");
+    expect(await read()).not.toHaveProperty("writes.0.files.0.publicPrincipalId");
+    sql(r, `PRAGMA foreign_keys=OFF; UPDATE sync_relay_app_public_principals SET principal_id='${row!.principal_id}',grant_id='different-grant'`);
+    expect(await read()).not.toHaveProperty("writes.0.files.0.publicPrincipalId");
+    sql(r, `PRAGMA foreign_keys=OFF; UPDATE sync_relay_app_public_principals SET grant_id='${LINK_GRANT}',workspace_id='different-workspace'`);
+    expect(await read()).not.toHaveProperty("writes.0.files.0.publicPrincipalId");
+  });
 
   it("writes an automations file under the link, never a person, with content the relay hashed", async () => {
     const r = await linkRelay();
@@ -1394,7 +1698,7 @@ describe("direct writes through an Edit share link", () => {
     const one = automations(STAMP);
     const decision = filterCollectionWriteForShare(
       { versionId: null, paths: ["trip"], access: "edit" },
-      [{ ...linkCreate(`${PACKING}/automations.yaml`, one), afterContentBase64: undefined, afterBlobSha256: sha256(one), afterByteLength: bytes(one) }],
+      [create(`${PACKING}/automations.yaml`, one)],
     );
     if (!decision.allowed) throw new Error("expected the write to be allowed");
     expect(r.storage.revokeShareGrant({ shareId: r.shareId, grantId: LINK_GRANT, revokedAtMs: CLOCK }).ok).toBe(true);
@@ -1490,7 +1794,7 @@ describe("direct writes through an Edit share link", () => {
     const one = automations(STAMP);
     const decision = filterCollectionWriteForShare(
       { versionId: null, paths: ["trip"], access: "edit" },
-      [{ ...linkCreate(`${PACKING}/automations.yaml`, one), afterContentBase64: undefined, afterBlobSha256: sha256(one), afterByteLength: bytes(one) }],
+      [create(`${PACKING}/automations.yaml`, one)],
     );
     if (!decision.allowed) throw new Error("expected the write to be allowed");
     now = CLOCK + 1;
@@ -1635,4 +1939,20 @@ describe("direct writes through an Edit share link", () => {
   it("streams its body instead of the adapter buffering it", () => {
     expect(streamsRequestBody(new URL("http://relay.test/sync/link/collection-writes"), "POST")).toBe(true);
   });
+});
+
+it.each([2, 3])("switches base-folder automations after revision %s with an unchanged address", async number => {
+  const r = await relay(), folder = await datasetFolder(r);
+  const db = inspectDatabase(storagePath(r.storage));
+  try {
+    const previous = JSON.parse(String(db.prepare("SELECT revision_json FROM dohc_dataset_catalog WHERE workspace_id=?").get(WORKSPACE)?.revision_json));
+    const definition: DatasetDefinition = { ...previous.definition, name: "Current People", schemaPath: `${folder}/revisions/${number}-00000000-0000-4000-8000-000000000099/schema.sql` };
+    const approved = describeDatasetRevision({ definition, revision: number, schemaSql: "SCHEMA", operationSource: "OPERATIONS" });
+    db.prepare("UPDATE dohc_dataset_catalog SET revision_json=? WHERE workspace_id=?").run(JSON.stringify(approved), WORKSPACE);
+  } finally { db.close(); }
+  const preflight = await r.h(request(RECIPIENT, `/sync/shares/${r.shareId}/collection-writes?${new URLSearchParams({ collectionPath: folder })}`));
+  expect(await json(preflight)).toEqual({ ok: true, canSwitch: true });
+  const one = automations(STAMP);
+  await upload(r, one);
+  expect((await write(r, [create(`${folder}/automations.yaml`, one)])).status).toBe(200);
 });

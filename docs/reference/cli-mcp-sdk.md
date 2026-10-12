@@ -7,7 +7,7 @@ Agents and developers use this page to work with dohc from outside the app. It l
 
 ## Connect
 
-- **MCP.** In dohc, open **Settings**, then **Agents & MCP**. Choose **Enable MCP**, then copy the **MCP config** into your agent's MCP settings. The server works on one workspace.
+- **MCP.** In dohc, open **Settings**, then **Agents**. Copy the **MCP config** into your agent's MCP settings. The server works on one workspace.
 - **CLI.** The `dohc` command talks to the running dohc app, so keep dohc open. Run it inside the workspace folder. Agents that dohc starts have it on their `PATH`.
 - **Share links.** A share link has its own MCP server, `dohc-share`, with other tools. This page does not list them. The [share-web README](../../services/share-web/README.md) says how an agent connects to it.
 
@@ -78,7 +78,7 @@ List workspace history, newest first: workspace-engine moments (the recorder for
 - `includeFiles`: `boolean`
 - `path`: `string`
 
-Returns `{ changes: { id, recordedAtMs, source: "workspace-engine", operation, path, versionId, authors?, fileCount: 1, files? }[], count, totalAvailable, hasMore, cursorMs }`.
+Returns `{ changes: { id, recordedAtMs, source: "workspace-engine", operation, path, versionId, authors?, fileCount: 1, files? }[], count, totalAvailable, hasMore, cursorMs } | { ok: false, status: "policy-unreadable", unreadable, reason }`.
 
 ### `dohc_list_kept_copies`
 
@@ -106,7 +106,7 @@ Read one history entry by id: a workspace-engine moment with its full before/aft
 
 - `id`: `string`. Required.
 
-Returns `{ ok: true, change: { id, recordedAtMs, source: "workspace-engine", operation, path, versionId, authors?, fileCount: 1, files, before, after } } | { ok: false, reason }`.
+Returns `{ ok: true, change: { id, recordedAtMs, source: "workspace-engine", operation, path, versionId, authors?, fileCount: 1, files, before, after } } | { ok: false, reason } | { ok: false, status: "untracked", reason } | { ok: false, status: "policy-unreadable", unreadable, reason }`.
 
 ### `dohc_list_files`
 
@@ -368,7 +368,7 @@ Read one collection record by id: current field values plus per-field history wi
 - `historyLimit`: `integer`
 - `beforeHistoryId`: `integer`
 
-Returns `{ ok: true, collection: { path, status, reasons }, record: { id, path, conflicted, values }, history: { historyId, field, previous, next, authorOriginId, actorKind, onBehalfOf, depth, recordedAtMs, automationRun }[] } | { ok: false, reason }`.
+Returns `{ ok: true, collection: { path, status, reasons }, record: { id, path, conflicted, values }, history: { historyId, field, previous, next, authorOriginId, actorKind, onBehalfOf, depth, recordedAtMs, linkAuthor, automationRun }[] } | { ok: false, reason }`.
 
 ### `dohc_set_record_fields`
 
@@ -485,9 +485,47 @@ Two environment variables also change what the CLI does:
 - `DOHC_RUN_ID` links the messages that `post` and `reply` write to a local agent run.
 - `DOHC_STATE_DIR` names the app's state folder when the CLI cannot find the running app in its default place.
 
+### `dohc access`
+
+Read observed object grants and Sharing inventories.
+
+Answers describe observed grants, not authorization. An empty page means no matching grants within its coverage. Paths resolve from your current folder. Received selectors use their source workspace's coordinates.
+
+Both verbs return only the allowlisted AccessAnswer fields shown below, with at most 100 rows per page. They never return credentials, bearer URLs, invitation URLs, share codes, or link URLs.
+
+Share answers use the current observation; the CLI never refreshes share inventories. `freshness` is `fresh`, `stale`, or `unknown`; `checkedAtMs` is the observation timestamp in milliseconds, or null when unknown. `coverage` names the observed scope and whether it is complete. Its `observation` is `interval`: pages do not form an atomic snapshot. `nextCursor` continues the answer, or is null at the end.
+
+Queries use only the CLI's registered workspace, with no workspace enumeration. The granted lane contains that workspace owner's grants; the received lane contains the signed-in account's received shares. A received object's answer shows only the recipient's own grant.
+
+Collection answers read current Collection authority and return capability facts, not share grants.
+
+#### `dohc access object`
+
+```sh
+dohc access object <reference-json> [options]
+```
+
+Read the grants covering an object.
+
+- `--cursor <cursor>`: Continue the previous answer.
+
+With `--json`, prints `{ schemaVersion, ref: { kind: "path", path, versionId } | { kind: "file", objectId } | { kind: "chat", channelWireId } | { kind: "collection", datasetId } | null, rows: ({ kind: "share", shareId, grantId, via, granterUserId, granterEmail, recipientUserId, recipientEmail, subjectName, sharerName, selector, access, status, generation, fileScope?, removalMessage? } | { kind: "collection", datasetId, principal, appId, operationIds, revision, revisionSha256, compatible })[], visibility, coverage: { kind, complete, observation: "interval" }, checkedAtMs, freshness, nextCursor }`. Uses socket verb `accessObject`.
+
+#### `dohc access sharing`
+
+```sh
+dohc access sharing <granted|received> [options]
+```
+
+Page this workspace's granted shares or this account's received shares.
+
+- `--cursor <cursor>`: Continue the previous answer.
+
+With `--json`, prints `{ schemaVersion, ref: { kind: "path", path, versionId } | { kind: "file", objectId } | { kind: "chat", channelWireId } | { kind: "collection", datasetId } | null, rows: ({ kind: "share", shareId, grantId, via, granterUserId, granterEmail, recipientUserId, recipientEmail, subjectName, sharerName, selector, access, status, generation, fileScope?, removalMessage? } | { kind: "collection", datasetId, principal, appId, operationIds, revision, revisionSha256, compatible })[], visibility, coverage: { kind, complete, observation: "interval" }, checkedAtMs, freshness, nextCursor }`. Uses socket verb `accessSharing`.
+
 ### `dohc document`
 
-Read, edit, and create live Markdown documents.
+Read, edit, and create live Markdown documents, and comment on tracked text files.
 
 Paths resolve from your current folder. Changes are recorded as an agent's, as with MCP. A refusal exits with status 1 and prints its reason to stderr, including with --json.
 
@@ -534,6 +572,24 @@ Use - as the body to read it from stdin. Use --text instead to supply Markdown. 
 - `--agent <name>`: Record this agent name with the change.
 
 With `--json`, prints `{ schemaVersion, ok: true, path }`.
+
+#### `dohc document comment`
+
+```sh
+dohc document comment <path> [-] [options]
+```
+
+Start a chat linked to a file with its first message.
+
+Use - as the body to read it from stdin. The first message allows at most 64 KiB of UTF-8.
+
+- `--title <title>`: Set the chat title. Use 1 to 200 characters that are not all whitespace.
+- `--text <markdown>`: Set the first message as Markdown. The message must contain text that is not all whitespace.
+- `--agent <name>`: Record this agent name with the change.
+- `--request-id <key>`: Set a key for safe retries. Use 1 to 64 printable ASCII characters. A retry with the same key and the same payload returns the existing result. A retry with the same key and a changed payload is refused.
+- `--run-id <id>`: Set the run ID. The value must not be empty. This flag overrides DOHC_RUN_ID.
+
+With `--json`, prints `{ schemaVersion, ok: true, path, threadId, messageId, warning? }`.
 
 ### `dohc chat`
 

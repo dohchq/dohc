@@ -37,6 +37,11 @@ async function closedDatabase() {
 }
 
 function removeAuthorshipMigration(db: InspectionDatabase): void {
+  // Recreate the pre-authorship store without the later hosted-publication extension.
+  for(const name of ["settlement_cut_usage_insert","settlement_cut_usage_delete","settlement_cut_journal_delete","settlement_binding_usage_insert","settlement_binding_usage_delete","settlement_admission_usage_insert","settlement_admission_usage_delete"])db.exec(`DROP TRIGGER ${name}`);
+  db.exec("DROP TABLE sync_relay_live_settlement_bindings");db.exec("DROP TABLE sync_relay_live_settlement_cuts");
+  db.exec("ALTER TABLE sync_relay_log DROP COLUMN settlement_admission_json");
+  db.prepare("DELETE FROM sync_relay_migrations WHERE migration_id='hosted-settlement-admission-v1'").run();
   for (const trigger of triggers) db.exec(`DROP TRIGGER ${trigger}`);
   db.exec(`DROP TABLE ${LIVE_AUTHOR_CLIENTS}`);
   for (const column of LIVE_AUTHOR_COLUMNS) db.exec(`ALTER TABLE ${journal} DROP COLUMN ${column.split(" ")[0]}`);

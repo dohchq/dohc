@@ -281,7 +281,6 @@ type DemoDesktopBridge = Pick<
   | "resolveChatDecision"
   | "stopAgentRun"
   | "resumeThreadDispatch"
-  | "writeClipboardText"
   | "openExternalUrl"
   | "shareChatChannel"
   | "joinSharedChannel"
@@ -588,7 +587,6 @@ const demoBridge = {
     return {
       settings: {
         version: 1 as const,
-        agents: { mcpAutoStart: false },
         sites: { defaultPreviewMode: "auto" as const },
         privacy: { confirmExternalLinks: true },
         files: { attachmentLocation: "per-document" as const, attachmentFolderName: "assets" },
@@ -723,7 +721,6 @@ const demoBridge = {
   },
   async stopAgentRun() {},
   async resumeThreadDispatch() {},
-  async writeClipboardText() {},
   async openExternalUrl(payload: { url: string }) {
     window.open(payload.url, "_blank", "noopener,noreferrer");
   },

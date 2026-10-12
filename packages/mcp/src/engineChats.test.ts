@@ -190,6 +190,7 @@ describe("desktop CLI proxy", () => {
       });
       for (const request of requests) {
         expect(request.protocolVersion).toBe(CLI_PROTOCOL_VERSION);
+        expect(request.door).toBe("mcp");
         expect(request.args).toMatchObject({ cwd: base.root, actor: "agent" });
       }
     });
@@ -376,6 +377,15 @@ describe("desktop CLI proxy", () => {
 });
 
 describe("desktop unavailable failures", () => {
+  it("maps a missing production desktop endpoint to a failed tool result", async () => {
+    await withWorkspace(async (ctx) => {
+      await expect(startGroupChat(ctx, { group: "general", body: "Must not be stored" }))
+        .resolves.toEqual({ ok: false, reason: DOHC_TRANSPORT_UNAVAILABLE_REASON });
+      await expect(readdir(ctx.root)).resolves.toEqual([]);
+      await expect(readdir(ctx.home)).resolves.toEqual([]);
+    });
+  });
+
   it("write tools with desktop down return ok:false and do not touch the filesystem", async () => {
     await withWorkspace(async (base) => {
       const ctx: ToolContext = {

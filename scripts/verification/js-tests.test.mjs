@@ -10,6 +10,45 @@ test("unknown repository scope cannot silently omit contracts", async () => {
   await assert.rejects(testWorkspace({repository: "unknown"}), /Unknown repository test scope/);
 });
 
+test("bounded verification runs source guards before sequential single-worker packages", () => {
+  const root = mkdtempSync(join(tmpdir(), "dohc-bounded-js-"));
+  const put = (path, data) => { mkdirSync(dirname(join(root, path)), {recursive: true}); writeFileSync(join(root, path), data); };
+  try {
+    put("package.json", '{"type":"module"}');
+    for (const name of ["js-tests.mjs", "cancellation.mjs", "timing.mjs"]) put(`scripts/verification/${name}`, readFileSync(new URL(`./${name}`, import.meta.url)));
+    for (const name of ["one", "two"]) put(`packages/${name}/package.json`, JSON.stringify({name: `@dohc/${name}`, scripts: {test: "vitest run"}}));
+    put("scripts/verification/process.mjs", `
+      import assert from 'node:assert/strict';
+      import {join,resolve} from 'node:path';
+      import {setImmediate} from 'node:timers/promises';
+      export const repoRoot=resolve(import.meta.dirname,'../..');
+      export const pnpm=args=>['pnpm',args];
+      let active=0,repositoryDone=false;
+      export const calls=[];
+      export async function run(command,args){
+        assert.equal(++active,1,'bounded commands overlapped');calls.push(args);
+        await setImmediate();
+        try{
+          if(args.includes('test:repo:source')){repositoryDone=true;return {stdout:''};}
+          assert.equal(repositoryDone,true,'command started before repository guards');
+          if(args.includes('list'))return {stdout:JSON.stringify(['one','two'].map(name=>({name:'@dohc/'+name,path:join(repoRoot,'packages',name)})))};
+          assert.ok(args.includes('--maxWorkers=1'));return {stdout:''};
+        }finally{active--;}
+      }
+    `);
+    const result = spawnSync(process.execPath, ["--input-type=module", "-e", `
+      import assert from 'node:assert/strict';
+      import {readFileSync} from 'node:fs';
+      import {testWorkspace} from './scripts/verification/js-tests.mjs';
+      import {calls} from './scripts/verification/process.mjs';
+      await testWorkspace({prepared:true,bounded:true,repository:'source',desktopScripts:false,selectedPackages:['@dohc/one','@dohc/two'],output:'evidence'});
+      assert.equal(calls.filter(args=>args.includes('--maxWorkers=1')).length,2);
+      assert.equal(JSON.parse(readFileSync('evidence/result.json')).concurrency,1);
+    `], {cwd: root, encoding: "utf8", timeout: 10_000});
+    assert.equal(result.status, 0, result.stderr);
+  } finally { rmSync(root, {recursive: true, force: true}); }
+});
+
 test("desktop scripts need an explicit boolean selection", async () => {
   await assert.rejects(testWorkspace({desktopScripts: "false"}), /Desktop script selection must be a boolean/);
 });
@@ -72,7 +111,7 @@ test("the plan retains every package test and preserves stricter worker caps", (
   assert.equal(tasks.length, 8);
   assert.equal(tasks[0].name, "@dohc/ydoc-projection");
   assert.equal(tasks[1].name, "@dohc/desktop");
-  assert.equal(tasks.find(task => task.name === "@dohc/app-backend-runtime").args.at(-1), "--maxWorkers=2");
+  assert.equal(tasks.find(task => task.name === "@dohc/app-backend-runtime").args.at(-1), "--maxWorkers=1");
   assert.equal(tasks.find(task => task.name === "@dohc/future-package").script, "test");
   assert.equal(tasks.filter(task => task.resource === "postgres").length, 4);
   assert.throws(() => testPlan([pkg("desktop")]), /Missing test:unit/);

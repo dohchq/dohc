@@ -6,6 +6,7 @@ import { MentionComposer } from "./MentionComposer";
 import type { MentionCandidate } from "@dohc/workspace-contracts/chat-mentions";
 import type { WorkspaceHeadingRecord } from "../../ipc/bridgeContract";
 import { useState } from "react";
+import { inListView, mockListLayout } from "../ui/listLayout.testSupport";
 
 const candidates: MentionCandidate[] = [
   { id: "agent:default", kind: "agent", handle: "agent", label: "Your agent", description: "your agent" },
@@ -15,7 +16,9 @@ const candidates: MentionCandidate[] = [
 // A tiny controlled harness so the composer behaves like it does in ChatsView
 // (parent owns the value).
 function Harness(props: {
+  fileCandidates?: { path: string; label: string }[];
   onSend?: () => void;
+  onRosterPick?: (pick: import("../offers/agentAddressed").AgentRosterPick | null) => void;
   onEscape?: () => void;
   loadFileHeadings?: (path: string) => Promise<readonly WorkspaceHeadingRecord[]>;
   surface?: "post";
@@ -31,10 +34,11 @@ function Harness(props: {
       placeholder="Write a message…"
       sendLabel="Send message"
       candidates={candidates}
-      fileCandidates={[{ path: "docs/plan.md", label: "Plan" }]}
+      fileCandidates={props.fileCandidates ?? [{ path: "docs/plan.md", label: "Plan" }]}
       {...(props.loadFileHeadings
         ? { loadFileHeadings: props.loadFileHeadings }
         : {})}
+      onRosterPick={props.onRosterPick}
       onChange={setValue}
       onSend={props.onSend ?? (() => {})}
       {...(props.onEscape ? { onEscape: props.onEscape } : {})}
@@ -272,5 +276,101 @@ describe("MentionComposer autocomplete", () => {
     expect(pill.getAttribute("aria-label")).toBe("Write a post");
     await userEvent.click(pill);
     expect(document.activeElement).toBe(screen.getByTestId("chats-composer"));
+  });
+});
+
+// Two people and six files fill more than the menu's height. The textarea
+// keeps focus while the arrows move the active option.
+describe("MentionComposer menu on the Menu part's recipe", () => {
+  const files = Array.from({ length: 6 }, (_, index) => ({ path: `docs/file-${index + 1}.md`, label: `File ${index + 1}` }));
+
+  it("keeps the active option in the list's view as the arrows move it", async () => {
+    const restore = mockListLayout(120);
+    try {
+      render(<Harness fileCandidates={files} />);
+      await userEvent.type(screen.getByTestId("chats-composer"), "@");
+      const menu = await screen.findByTestId("chats-mention-menu");
+      const options = [...menu.querySelectorAll<HTMLElement>('[role="option"]')];
+      expect(options).toHaveLength(8);
+      await userEvent.keyboard("{ArrowUp}");
+      const last = options.at(-1)!;
+      expect(last.hasAttribute("data-active")).toBe(true);
+      expect(inListView(menu, last)).toBe(true);
+      await userEvent.keyboard("{ArrowDown}");
+      expect(inListView(menu, options[0]!)).toBe(true);
+    } finally {
+      restore();
+    }
+  });
+
+  // The @ shows as an icon; a screen reader still hears it, so a person or
+  // an agent never reads like a file.
+  it("keeps @ in a person's or agent's name", async () => {
+    render(<Harness />);
+    await userEvent.type(screen.getByTestId("chats-composer"), "@");
+    const menu = await screen.findByTestId("chats-mention-menu");
+    // The menu is a popover, which jsdom leaves out of the accessibility tree.
+    const agent = within(menu).getByRole("option", { hidden: true, name: /^@agent/ });
+    const user = within(menu).getByRole("option", { hidden: true, name: "@you" });
+    expect(agent.getAttribute("data-candidate-id")).toBe("agent:default");
+    expect(user.getAttribute("data-candidate-id")).toBe("user:you");
+  });
+
+  it("takes the active option only from a pointer that moves", async () => {
+    render(<Harness />);
+    await userEvent.type(screen.getByTestId("chats-composer"), "@");
+    const menu = await screen.findByTestId("chats-mention-menu");
+    const second = menu.querySelectorAll<HTMLElement>('[role="option"]')[1]!;
+    fireEvent.mouseMove(second, { movementX: 0, movementY: 0 });
+    expect(second.hasAttribute("data-active")).toBe(false);
+    fireEvent.mouseMove(second, { movementX: 0, movementY: 2 });
+    expect(second.hasAttribute("data-active")).toBe(true);
+  });
+});
+
+
+describe("offer roster picks", () => {
+  it("emits an agent pick only on roster completion and clears it when removed", async () => {
+    const onRosterPick = vi.fn();
+    const user = userEvent.setup();
+    render(<Harness onRosterPick={onRosterPick} />);
+    const composer = screen.getByTestId("chats-composer") as HTMLTextAreaElement;
+    await user.type(composer, "@agent");
+    expect(onRosterPick).not.toHaveBeenCalled();
+    await user.click(screen.getAllByTestId("chats-mention-option")[0]!);
+    expect(onRosterPick).toHaveBeenLastCalledWith({ candidate: candidates[0], from: 0, to: 6 });
+    composer.focus();
+    composer.setSelectionRange(0, 6);
+    await user.keyboard("{Backspace}");
+    expect(onRosterPick).toHaveBeenLastCalledWith(null);
+  });
+  it("moves the picked span when text is inserted before it", async () => {
+    const onRosterPick = vi.fn();
+    const user = userEvent.setup();
+    render(<Harness onRosterPick={onRosterPick} />);
+    const composer = screen.getByTestId("chats-composer") as HTMLTextAreaElement;
+    await user.type(composer, "@ag");
+    await user.click(screen.getAllByTestId("chats-mention-option")[0]!);
+    composer.focus(); composer.setSelectionRange(0, 0);
+    await user.paste("Hi ");
+    expect(onRosterPick).toHaveBeenLastCalledWith({ candidate: candidates[0], from: 3, to: 9 });
+  });
+});
+
+describe("agent pick continuity", () => {
+  it("keeps the picked agent when a person is picked, and clears it when the agent mention is removed", async () => {
+    const onRosterPick = vi.fn();
+    const user = userEvent.setup();
+    render(<Harness onRosterPick={onRosterPick} />);
+    const composer = screen.getByTestId("chats-composer") as HTMLTextAreaElement;
+    await user.type(composer, "@ag");
+    await user.click(screen.getAllByTestId("chats-mention-option")[0]!);
+    await user.type(composer, "and @yo");
+    await user.click(screen.getAllByTestId("chats-mention-option").find(option => option.getAttribute("data-candidate-id") === "user:you")!);
+    expect(composer.value).toBe("@agent and @you ");
+    expect(onRosterPick).toHaveBeenLastCalledWith({ candidate: candidates[0], from: 0, to: 6 });
+    composer.focus(); composer.setSelectionRange(0, 7);
+    await user.keyboard("{Backspace}");
+    expect(onRosterPick).toHaveBeenLastCalledWith(null);
   });
 });

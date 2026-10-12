@@ -29,6 +29,8 @@ use crate::*;
 /// relay sequence equals its origin sequence.
 fn envelope(origin: &str, seq: i64, kind: &str, payload: serde_json::Value) -> ReplicationEnvelope {
     ReplicationEnvelope {
+        settlement_admission: None,
+        admitted_author_snapshot: None,
         workspace_id: "ws".to_owned(),
         origin_id: origin.to_owned(),
         origin_seq: seq,
@@ -224,16 +226,58 @@ fn decision_payload(state: &str, at_ms: i64, resolver: Option<&str>) -> serde_js
 
 #[derive(Default)]
 pub(crate) struct FakeRelay {
+    refuse_oversized_proofs: bool,
+    push_budget_limit: Option<usize>,
     pushes: Mutex<Vec<PushRequest>>,
     pub(crate) pull: Mutex<Option<PullResponse>>,
+}
+
+impl FakeRelay {
+    pub(crate) fn refusing_oversized_proofs() -> Self {
+        Self {
+            refuse_oversized_proofs: true,
+            ..Default::default()
+        }
+    }
+    pub(crate) fn pushed_requests(&self) -> Vec<PushRequest> {
+        self.pushes.lock().unwrap().clone()
+    }
 }
 
 impl RelayTransport for FakeRelay {
     fn push(&self, req: PushRequest) -> Result<PushResponse, RelayError> {
         self.pushes.lock().expect("push lock").push(req.clone());
+        let mut settlement_refusals = Vec::new();
+        if self.refuse_oversized_proofs
+            && let Some(op) = req
+                .ops
+                .iter()
+                .find(|op| op.payload.get("settlementReference").is_some())
+        {
+            if req.ops.len() > 1 {
+                return Err(RelayError::SettlementProofBudget);
+            }
+            settlement_refusals.push(SettlementPublicationRefusal {
+                origin_id: req.origin_id.clone(),
+                origin_seq: op.origin_seq,
+                moment_id: op.payload["momentId"].as_str().unwrap().into(),
+                settlement_id: op.payload["settlementReference"]["record"]["settlementId"]
+                    .as_str()
+                    .unwrap()
+                    .into(),
+                reason: "authorship-mismatch".into(),
+            });
+        }
+        if self
+            .push_budget_limit
+            .is_some_and(|limit| req.ops.len() > limit)
+        {
+            return Err(RelayError::SettlementProofBudget);
+        }
         let accepted = req.ops.len();
         let current_max_origin_seq = req.ops.last().map_or(req.after_seq, |op| op.origin_seq);
         Ok(PushResponse {
+            settlement_refusals,
             accepted,
             inserted: accepted,
             skipped: 0,
@@ -427,11 +471,16 @@ impl RelayTransport for KeyConflictRelay {
 }
 
 struct PagedRelay {
+    relay_seq_offset: i64,
+    origin_max_probe_elapsed: Mutex<Vec<std::time::Duration>>,
     pages: BTreeMap<i64, PullResponse>,
     blobs: BTreeMap<String, Vec<u8>>,
     coordinates: Mutex<BTreeMap<(String, i64), LogCoordinateResponse>>,
     pulls: Mutex<Vec<(i64, usize)>>,
+    coordinate_lookups: Mutex<Vec<(String, i64)>>,
+    pushes: Mutex<Vec<PushRequest>>,
     download_batches: Mutex<Vec<BlobDownloadBatchRequest>>,
+    push_conflicts: Mutex<usize>,
 }
 
 impl PagedRelay {
@@ -445,10 +494,15 @@ impl PagedRelay {
             .collect();
         Self {
             pages,
+            relay_seq_offset: 100,
+            origin_max_probe_elapsed: Mutex::new(Vec::new()),
             blobs: BTreeMap::new(),
             coordinates: Mutex::new(BTreeMap::new()),
             pulls: Mutex::new(Vec::new()),
+            coordinate_lookups: Mutex::new(Vec::new()),
+            pushes: Mutex::new(Vec::new()),
             download_batches: Mutex::new(Vec::new()),
+            push_conflicts: Mutex::new(0),
         }
     }
 
@@ -480,21 +534,65 @@ fn assign_fixture_relay_sequences(page: &mut PullResponse) {
 
 impl RelayTransport for PagedRelay {
     fn push(&self, req: PushRequest) -> Result<PushResponse, RelayError> {
+        let started = std::time::Instant::now();
         let accepted = req.ops.len();
-        let current_max_origin_seq = req.ops.last().map_or(req.after_seq, |op| op.origin_seq);
+        self.pushes.lock().unwrap().push(req.clone());
         let mut coordinates = self.coordinates.lock().expect("coordinate responses");
+        // Check the whole batch before inserting, as the relay does for a cloned origin.
+        for op in &req.ops {
+            if let Some(
+                LogCoordinateResponse::Present(existing)
+                | LogCoordinateResponse::PresentBelowEpochFloor(existing),
+            ) = coordinates.get(&(op.origin_id.clone(), op.origin_seq))
+                && (existing.workspace_id != op.workspace_id
+                    || existing.op_kind != op.op_kind
+                    || existing.payload != op.payload
+                    || existing.recorded_at_ms != op.recorded_at_ms)
+            {
+                *self.push_conflicts.lock().unwrap() += 1;
+                return Err(RelayError::Conflict);
+            }
+        }
+        let mut inserted = 0;
         for op in req.ops {
             let mut pulled = op;
-            pulled.relay_seq = Some(100 + pulled.origin_seq);
-            coordinates.insert(
-                (pulled.origin_id.clone(), pulled.origin_seq),
-                LogCoordinateResponse::Present(pulled),
-            );
+            pulled.relay_seq = Some(self.relay_seq_offset + pulled.origin_seq);
+            let coordinate = (pulled.origin_id.clone(), pulled.origin_seq);
+            if !matches!(
+                coordinates.get(&coordinate),
+                Some(
+                    LogCoordinateResponse::Present(_)
+                        | LogCoordinateResponse::PresentBelowEpochFloor(_)
+                )
+            ) {
+                coordinates.insert(coordinate, LogCoordinateResponse::Present(pulled));
+                inserted += 1;
+            }
+        }
+        let current_max_origin_seq = coordinates
+            .iter()
+            .filter_map(|((origin, seq), response)| {
+                (origin == &req.origin_id
+                    && matches!(
+                        response,
+                        LogCoordinateResponse::Present(_)
+                            | LogCoordinateResponse::PresentBelowEpochFloor(_)
+                    ))
+                .then_some(*seq)
+            })
+            .max()
+            .unwrap_or(-1);
+        if accepted == 0 {
+            self.origin_max_probe_elapsed
+                .lock()
+                .unwrap()
+                .push(started.elapsed());
         }
         Ok(PushResponse {
+            settlement_refusals: Vec::new(),
             accepted,
-            inserted: accepted,
-            skipped: 0,
+            inserted,
+            skipped: accepted - inserted,
             current_max_origin_seq,
         })
     }
@@ -514,6 +612,10 @@ impl RelayTransport for PagedRelay {
         &self,
         req: LogCoordinateRequest,
     ) -> Result<LogCoordinateResponse, RelayError> {
+        self.coordinate_lookups
+            .lock()
+            .expect("coordinate lookups")
+            .push((req.origin_id.clone(), req.origin_seq));
         self.coordinates
             .lock()
             .expect("coordinate responses")
@@ -764,6 +866,7 @@ impl RelayTransport for PagedShareRelay {
             .expect("shared push calls")
             .push(req);
         Ok(PushResponse {
+            settlement_refusals: Vec::new(),
             accepted,
             inserted: accepted,
             skipped: 0,
@@ -944,6 +1047,7 @@ fn version_create_with_shipped_snapshots(
 
 // Keep child modules after assert_invalid_refusal so they inherit its macro scope.
 mod chat;
+mod file_export_lane;
 mod outbound_authors;
 mod owner_publication;
 mod recover;
@@ -959,4 +1063,117 @@ mod version;
 mod ydoc_base;
 mod ydoc_cache;
 mod ydoc_drain;
+mod ydoc_projection_authors;
 mod ydoc_restore;
+
+#[test]
+fn publication_budget_splits_batches_and_keeps_non_settlement_errors_retryable() {
+    for budget in [0, 2] {
+        let (_scratch, _path, mut store) = open_store();
+        VersionedTextStore::new(&mut store)
+            .ensure_main_version("ws", "main", 1, &NoFaults)
+            .unwrap();
+        adopt_join_identity(&mut store, "ws", "local", "epoch", "stream", 1, &NoFaults).unwrap();
+        store
+            .write_with(&NoFaults, |tx| {
+                for index in 0..7 {
+                    journal_local_op_in_tx(tx, "ws", "probe", &json!({"index":index}), 10)?;
+                }
+                Ok::<_, SyncError>(())
+            })
+            .unwrap();
+        let client = RelaySyncClient::new(FakeRelay {
+            push_budget_limit: Some(budget),
+            ..Default::default()
+        });
+        let result = client.push_workspace(&mut store, "ws", &NoFaults, &NoLiveLeases, 20, 0);
+        if budget == 0 {
+            assert_eq!(result, Err(RelayError::SettlementProofBudget));
+            assert_eq!(read_pushed_seq(&store, "ws", "local").unwrap(), -1);
+        } else {
+            assert!(matches!(
+                result,
+                Ok(SyncPassOutcome::Complete { pushed: 7, .. })
+            ));
+            assert_eq!(read_pushed_seq(&store, "ws", "local").unwrap(), 6);
+        }
+        let requests = client.transport().pushes.lock().unwrap();
+        assert_eq!(requests[0].ops.len(), 7);
+        assert_eq!(requests[1].ops.len(), 3);
+        assert_eq!(requests[2].ops.len(), 1);
+    }
+}
+
+#[test]
+fn refused_malformed_proof_with_phantom_blobs_does_not_block_the_next_pull_operation() {
+    for payload in [
+        json!({"payloadAfterBlobSha256":"a".repeat(64),"settlementReference":{"record":{"acceptedStateBlobSha256":"b".repeat(64)}}}),
+        json!({"momentId":null,"settlementReference":"malformed","payloadAfterBlobSha256":"not-a-digest"}),
+    ] {
+        let (_scratch, _path, mut store) = open_store();
+        VersionedTextStore::new(&mut store)
+            .ensure_main_version("ws", "main", 1, &NoFaults)
+            .unwrap();
+        adopt_join_identity(&mut store, "ws", "local", "epoch", "stream", 1, &NoFaults).unwrap();
+        let mut refused = envelope("malicious", 0, "moment.append", payload);
+        refused.settlement_admission = Some(SettlementAdmission::Refused {
+            settlement_id: "unavailable".into(),
+            reason: "invalid-proof".into(),
+        });
+        let next = envelope("malicious", 1, "workspace.init", json!({}));
+        let client = RelaySyncClient::new(FakeRelay {
+            pull: Mutex::new(Some(PullResponse {
+                ops: vec![refused, next],
+                next_cursor: 2,
+                has_more: false,
+            })),
+            ..Default::default()
+        });
+        let outcome = client
+            .pull_chat_workspace(
+                &mut store,
+                &mut WriterDocCache::new(),
+                "ws",
+                &NoFaults,
+                &NoLiveLeases,
+                20,
+            )
+            .unwrap();
+        assert!(matches!(
+            outcome,
+            SyncPassOutcome::Complete {
+                applied: 1,
+                refused: 1,
+                ..
+            }
+        ));
+        assert_eq!(
+            read_replication_acked_seq(&store, "ws", "malicious").unwrap(),
+            1
+        );
+        let notices = list_refusal_notices(&store, "ws").unwrap();
+        assert_eq!(notices.len(), 1);
+        dismiss_refusal_notice(
+            &mut store,
+            "ws",
+            &notices[0].notice_id,
+            &notices[0].refusal_coordinates,
+            &NoFaults,
+        )
+        .unwrap();
+        client
+            .pull_chat_workspace(
+                &mut store,
+                &mut WriterDocCache::new(),
+                "ws",
+                &NoFaults,
+                &NoLiveLeases,
+                21,
+            )
+            .unwrap();
+        assert!(
+            list_refusal_notices(&store, "ws").unwrap().is_empty(),
+            "redelivery must not recreate a dismissed refusal"
+        );
+    }
+}

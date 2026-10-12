@@ -1,8 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
   HISTORY_DIFF_WORK_LIMIT,
+  WORD_DIFF_CHAR_LIMIT,
   buildUnifiedDiffLines,
+  changedWords,
   computeTextDiff,
+  diffStatCells,
   diffWorkEstimate,
   splitDiffLines,
 } from "./unifiedDiff";
@@ -65,6 +68,174 @@ describe("buildUnifiedDiffLines", () => {
         newLineNumber: null,
       },
     ]);
+  });
+});
+
+// The marked text of each changed line, in order.
+function markedWords(before: string, after: string): [string, string[]][] {
+  return unified(before, after)
+    .filter((line) => line.kind === "added" || line.kind === "removed")
+    .map((line) => [line.kind, (line.words ?? []).map(([start, end]) => line.text.slice(start, end))]);
+}
+
+describe("changed words", () => {
+  it("marks the word a prose edit replaced, on both lines", () => {
+    expect(
+      markedWords(
+        "- Get a new person to their first document in under 30 seconds\n",
+        "- Get a new person to their first document in under 20 seconds\n",
+      ),
+    ).toEqual([
+      ["removed", ["30"]],
+      ["added", ["20"]],
+    ]);
+  });
+
+  it("marks an insertion as one span, and nothing on the line it grew from", () => {
+    const lines = unified(
+      "- Make agent activity readable at a glance\n",
+      "- Make agent activity readable at a glance, with who changed what\n",
+    );
+    expect(lines.map((line) => [line.kind, line.words])).toEqual([
+      ["removed", []],
+      ["added", [[42, 65]]],
+    ]);
+    expect(lines[1].text.slice(42, 65)).toBe(", with who changed what");
+  });
+
+  it("joins two changed words one space apart into one span", () => {
+    expect(markedWords("the quick brown fox jumps\n", "the slow red fox jumps\n")).toEqual([
+      ["removed", ["quick brown"]],
+      ["added", ["slow red"]],
+    ]);
+  });
+
+  it("marks a code edit at its token", () => {
+    expect(
+      markedWords(
+        "const diff = computeTextDiff(before, after, 800);\n",
+        "const diff = computeTextDiff(before, after, displayLimit);\n",
+      ),
+    ).toEqual([
+      ["removed", ["800"]],
+      ["added", ["displayLimit"]],
+    ]);
+  });
+
+  it("splits CJK text into characters, which it does not space as words", () => {
+    expect(markedWords("今日は晴れです\n", "今日は雨です\n")).toEqual([
+      ["removed", ["晴れ"]],
+      ["added", ["雨"]],
+    ]);
+  });
+
+  it("pairs a block's removed and added lines in order", () => {
+    expect(
+      markedWords(
+        "keep\nalpha one\nbeta two\nkeep\n",
+        "keep\nalpha uno\nbeta dos\nkeep\n",
+      ),
+    ).toEqual([
+      ["removed", ["one"]],
+      ["removed", ["two"]],
+      ["added", ["uno"]],
+      ["added", ["dos"]],
+    ]);
+  });
+
+  it("leaves a rewritten line whole, and an unpaired line whole", () => {
+    const lines = unified(
+      "intro\nThe meeting moved to Tuesday.\n",
+      "intro\nBring snacks for everyone!\nA line nobody had before\n",
+    );
+    expect(lines.filter((line) => line.words !== undefined)).toEqual([]);
+    expect(changedWords("The meeting moved to Tuesday.", "Bring snacks for everyone!")).toBeNull();
+  });
+
+  it("keeps notes and context lines free of word marks", () => {
+    for (const line of unified("a\nb\nc\nd\ne\nf\ng\nh\n", "a\nb\nc\nd\ne\nf\ng\nh changed\n")) {
+      if (line.kind === "note" || line.kind === "context") expect(line.words).toBeUndefined();
+    }
+  });
+});
+
+describe("word marks' size limit", () => {
+  // Pairs of lines that each differ by one word, totalling `chars` characters
+  // across both sides.
+  function pairsOf(chars: number): [string, string] {
+    const lineChars = 1_000;
+    const count = Math.round(chars / (2 * lineChars));
+    const body = (word: string) =>
+      Array.from({ length: count }, (_, index) => `${String(index).padStart(6, "0")} ${word} ${"x".repeat(lineChars - 14)}`).join("\n") + "\n";
+    return [body("aaaaaa"), body("bbbbbb")];
+  }
+
+  it("marks every pair up to the limit", () => {
+    const [before, after] = pairsOf(WORD_DIFF_CHAR_LIMIT);
+    const lines = unified(before, after, 800);
+    const changed = lines.filter((line) => line.kind !== "note" && line.kind !== "context");
+    expect(changed).toHaveLength(200);
+    expect(changed.every((line) => line.words?.length === 1)).toBe(true);
+  });
+
+  it("keeps the whole diff at line level past the limit, never half marked", () => {
+    const [before, after] = pairsOf(WORD_DIFF_CHAR_LIMIT + 2_000);
+    const lines = unified(before, after, 800);
+    expect(lines.filter((line) => line.kind === "removed")).toHaveLength(101);
+    expect(lines.some((line) => line.words !== undefined)).toBe(false);
+  });
+
+  it("keeps one huge line at line level and splits none of it", () => {
+    const before = "word ".repeat(100_000);
+    const lines = unified(before, before.replace("word word", "word other"));
+    expect(lines.map((line) => [line.kind, line.words])).toEqual([
+      ["removed", undefined],
+      ["added", undefined],
+    ]);
+  });
+
+  it("stops comparing word by word once the page has spent its comparisons", () => {
+    // Each pair changes its first and last word, so it compares its whole
+    // line: 99 tokens a side, 10,000 cells. The page has 1,000,000.
+    const body = (start: string, end: string) =>
+      Array.from({ length: 150 }, (_, index) => `${start}${index} ${"word ".repeat(48)}${end}${index}`).join("\n") + "\n";
+    const lines = unified(body("a", "z"), body("b", "y"), 800).filter((line) => line.kind === "removed");
+    expect(lines).toHaveLength(150);
+    expect(lines[0].words).toHaveLength(2);
+    // Past the budget, the marks would cover the whole line, so there are none.
+    expect(lines[149].words).toBeUndefined();
+    expect(lines.filter((line) => line.words?.length === 2)).toHaveLength(100);
+  });
+
+  it("marks the whole middle of a long rewrite inside a kept start and end", () => {
+    const middle = (word: string) => Array.from({ length: 200 }, (_, index) => `${word}${index}`).join(" ");
+    const before = `Start of the paragraph. ${middle("a")} ${"x ".repeat(600)}End.`;
+    const after = `Start of the paragraph. ${middle("b")} ${"x ".repeat(600)}End.`;
+    const words = changedWords(before, after);
+    expect(words?.before).toEqual([[24, 24 + middle("a").length]]);
+    expect(words?.after).toEqual([[24, 24 + middle("b").length]]);
+  });
+});
+
+describe("the diff's size", () => {
+  it("draws one cell per line while the change is five lines or fewer", () => {
+    expect(diffStatCells(2, 2)).toEqual(["added", "added", "removed", "removed", "none"]);
+    expect(diffStatCells(0, 0)).toEqual(["none", "none", "none", "none", "none"]);
+    expect(diffStatCells(5, 0)).toEqual(["added", "added", "added", "added", "added"]);
+  });
+
+  it("shares five cells in proportion past five lines, one at least for each side", () => {
+    expect(diffStatCells(30, 10)).toEqual(["added", "added", "added", "added", "removed"]);
+    expect(diffStatCells(1, 1000)).toEqual(["added", "removed", "removed", "removed", "removed"]);
+    expect(diffStatCells(1000, 1)).toEqual(["added", "added", "added", "added", "removed"]);
+    expect(diffStatCells(0, 40)).toEqual(["removed", "removed", "removed", "removed", "removed"]);
+  });
+
+  it("counts lines, not words, however many words a line changed", () => {
+    // Two lines changed, four words among them: the count is the lines.
+    expect(
+      computeTextDiff("alpha one two\nbeta three four\n", "alpha uno dos\nbeta tres cuatro\n").counts,
+    ).toEqual({ added: 2, removed: 2 });
   });
 });
 

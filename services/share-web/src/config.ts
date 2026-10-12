@@ -6,6 +6,7 @@ import { parseNamedLiveBrowserClientLimits, type NamedLiveBrowserClientLimits } 
 import {parseLiveGatewayLimits, type LiveGatewayLimits} from "./liveGateway";
 import {parseNamedLiveBrowserLimits, type NamedLiveBrowserLimits} from "@dohc/ydoc-projection/named-live-browser-transport";
 import {selfHostLiveProfile} from "../../sync-relay/src/selfHostLiveProfile";
+import {canonicalIpAddress} from "@dohc/service-http";
 
 export interface ShareWebConfig {
   appLaunch?: AppLaunchConfig;
@@ -88,7 +89,11 @@ export function loadShareWebConfig(env: NodeJS.ProcessEnv): ShareWebConfig {
       : exactList(
           trustedProxyValue,
           "DOHC_SHARE_WEB_TRUSTED_PROXIES must contain exact comma-separated peer addresses.",
-        ),
+        ).map(entry => {
+          const address = canonicalIpAddress(entry);
+          if (!address) throw new Error("DOHC_SHARE_WEB_TRUSTED_PROXIES must contain exact comma-separated peer addresses.");
+          return address;
+        }),
   );
 
   const portValue = env.DOHC_SHARE_WEB_PORT ?? "1790";

@@ -366,6 +366,8 @@ mod tests {
 
     fn envelope(kind: &str, payload: serde_json::Value) -> ReplicationEnvelope {
         ReplicationEnvelope {
+            settlement_admission: None,
+            admitted_author_snapshot: None,
             workspace_id: "ws".to_owned(),
             origin_id: "peer".to_owned(),
             origin_seq: 0,

@@ -7,7 +7,7 @@ import type { SyncRelayStorage } from "./storage";
 import type { StopRestoreIntent, StopRestoreLookup } from "./storage/liveRestoreOperation";
 import { MAX_PAYLOAD_JSON_BYTES } from "./wireLimits";
 import { ownerRestoreReviewResponse } from "./ownerRestoreResponse";
-import {parseOwnerRestoreGrantCursor} from "./storage/ownerRestoreOptions";
+import {MAX_RESTORE_EMAIL_BYTES, parseOwnerRestoreGrantCursor} from "./storage/ownerRestoreOptions";
 
 export type OwnerRestoreHost = {
   readonly restoreConfigured: boolean;
@@ -28,6 +28,7 @@ function response(value: unknown, code = 200) {
 
 export function createOwnerRestoreRoutes(options: {
   storage: SyncRelayStorage; host(): OwnerRestoreHost | undefined; nowMs(): number; newId(): string;
+  lookupUserEmail?: (userId: string) => Promise<string | null> | string | null;
 }) {
   return async (request: Request, route: OwnerRestoreRoute, ownerUserId: string) => {
     const {storage} = options;
@@ -55,9 +56,32 @@ export function createOwnerRestoreRoutes(options: {
       if (Object.hasOwn(input, "beforeCursor") && (!Number.isSafeInteger(input.beforeCursor) || Number(input.beforeCursor) < 1)) {
         throw badRequest("Invalid restore cursor.");
       }
-      return response(storage.readOwnerRestoreOptions({workspaceId: route.workspaceId, ownerUserId, path: input.path,
+      const restoreOptions = storage.readOwnerRestoreOptions({workspaceId: route.workspaceId, ownerUserId, path: input.path,
         ...(Object.hasOwn(input, "grantCursor") ? {grantCursor: parseOwnerRestoreGrantCursor(input.grantCursor)} : {}),
-        ...(Object.hasOwn(input, "beforeCursor") ? {beforeCursor: input.beforeCursor as number} : {})}));
+        ...(Object.hasOwn(input, "beforeCursor") ? {beforeCursor: input.beforeCursor as number} : {})});
+      // Name each account by its email, as Settings does. An account without
+      // one keeps null, and the owner sees its account ID instead. An email
+      // fits the room the page held for it once encoded, or it is left out.
+      const emails = new Map<string, Promise<string | null>>();
+      const email = (userId: string) => {
+        if (!emails.has(userId)) {
+          emails.set(userId, Promise.resolve().then(() => options.lookupUserEmail?.(userId) ?? null)
+            .then(found => found && Buffer.byteLength(JSON.stringify(found)) <= MAX_RESTORE_EMAIL_BYTES ? found : null, () => null));
+        }
+        return emails.get(userId)!;
+      };
+      await Promise.all([...restoreOptions.grants, ...restoreOptions.authors].map(async recipient => {
+        if (recipient.principalKind === "user" && recipient.userId !== null && recipient.email === null) {
+          recipient.email = await email(recipient.userId);
+        }
+      }));
+      signal.throwIfAborted();
+      // The lookups yield. Ownership must still hold before answering.
+      if (!storage.workspaceIsOwnedBy(route.workspaceId, ownerUserId)) throw notFound();
+      if (Buffer.byteLength(JSON.stringify(restoreOptions)) > MAX_PAYLOAD_JSON_BYTES) {
+        throw relayError("payload_too_large", "Restore options exceed the metadata limit.");
+      }
+      return response(restoreOptions);
     }
     if (route.action === "plan") {
       const input = ticketRecord(raw, ["document", "shareId", "grantId", "restorePointCursor", "restorePointReceiptDigest"]);

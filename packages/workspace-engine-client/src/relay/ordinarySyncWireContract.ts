@@ -5,6 +5,10 @@ import { ProtocolShapeError, mutableStruct } from "../wireSchema";
 const Text = Schema.String.check(Schema.isMinLength(1));
 const Count = Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(0));
 const SharingDeclined = mutableStruct({
+  objectId: Text,
+  versionId: Text,
+  lineagePruned: Schema.Boolean,
+  headBlobSha256: Schema.NullOr(Text),
   path: Text,
   constraint: Text,
   limitBytes: Count,

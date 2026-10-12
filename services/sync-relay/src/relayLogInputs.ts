@@ -17,12 +17,24 @@ export function namedShareOrigin(shareId: string, userId: string, originId: stri
   return `${SHARE_MEMBER_ORIGIN_PREFIX}${sha256Hex(JSON.stringify([shareId, userId, originId]))}`;
 }
 
-// A client's moment names no author, or its own agent or automation. Only
-// the relay mints the others (public, named, and link), under these origins,
-// so an author kind a client may not stamp is refused whatever it is.
+// Clients can publish their agent and automation authors, or an exact
+// unattributed coverage marker. The marker claims no identity. The relay
+// alone mints human, public, named, and link attribution.
 const CLIENT_MOMENT_AUTHOR_KINDS: ReadonlySet<unknown> = new Set(["agent", "automation"]);
 
-export function assertClientLogProvenance(originId: string, rawOps: unknown[]): void {
+export function assertClientLogProvenance(originId: string, rawOps: unknown[], deferMomentRefusal = false): void {
+  assertUnreservedLogOrigin(originId);
+  for (const raw of rawOps) {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) continue;
+    const op = raw as Record<string, unknown>;
+    if (op.opKind !== "moment.append") continue;
+    const payload = op.payload as Record<string, unknown> | null;
+    if (deferMomentRefusal && payload && Object.hasOwn(payload, "settlementReference")) continue;
+    if (clientMomentAuthorsRefused(payload?.authors) && !deferMomentRefusal) throw relayError("authorship_mismatch");
+  }
+}
+
+function assertUnreservedLogOrigin(originId: string): void {
   if (originId.startsWith(SHARE_MEMBER_ORIGIN_PREFIX)) {
     throw badRequest("originId is reserved for named share writes");
   }
@@ -32,17 +44,13 @@ export function assertClientLogProvenance(originId: string, rawOps: unknown[]): 
   if (originId.startsWith(COLLECTION_FILE_ORIGIN_PREFIX)) {
     throw badRequest("originId is reserved for relay collection file writes");
   }
-  for (const raw of rawOps) {
-    if (!raw || typeof raw !== "object" || Array.isArray(raw)) continue;
-    const op = raw as Record<string, unknown>;
-    if (op.opKind !== "moment.append") continue;
-    const payload = op.payload as Record<string, unknown> | null;
-    const authors = payload?.authors;
-    if (authors == null) continue;
-    if (!Array.isArray(authors) || authors.length === 0 || authors.some((author: unknown) =>
-      !author || typeof author !== "object" || !CLIENT_MOMENT_AUTHOR_KINDS.has((author as Record<string, unknown>).kind)
-    )) throw relayError("authorship_mismatch");
-  }
+}
+
+export function clientMomentAuthorsRefused(authors:unknown):boolean {
+  return authors != null && (!Array.isArray(authors) || authors.length === 0 || authors.some((author: unknown) =>
+    !author || typeof author !== "object" || Array.isArray(author) ||
+    (!CLIENT_MOMENT_AUTHOR_KINDS.has((author as Record<string, unknown>).kind) &&
+      !((author as Record<string, unknown>).kind === "unattributed" && Object.keys(author).length === 1))));
 }
 
 export function parseLogOp(value: unknown): SyncRelayLogInput {
@@ -101,7 +109,7 @@ export async function parseAuthenticatedLogOps(
     if (context?.kind !== "account" || context.accountId !== actorUserId) continue;
     ops[index]!.admittedAuthorSnapshot = parseLiveAuthorSnapshot([
       {kind: "human", humanId: actorUserId, humanName},
-      ...(context.agent ? [{kind: "agent", ...context.agent}] : []),
+      ...(context.agent ? [{kind: "agent", ...context.agent, onBehalfOf: actorUserId}] : []),
     ]);
   }
   return ops;

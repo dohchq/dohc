@@ -228,9 +228,32 @@ impl EngineStore {
     where
         E: From<StorageError>,
     {
-        let tx = self
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)
+        Self::write_on_connection(&self.conn, faults, f)
+    }
+
+    /// One FULL commit syncs this transaction and every earlier WAL commit.
+    pub fn write_durable_with<T, E>(
+        &mut self,
+        faults: &dyn FaultInjector,
+        f: impl FnOnce(&Transaction<'_>) -> Result<T, E>,
+    ) -> Result<TxnOutcome<T>, E>
+    where
+        E: From<StorageError>,
+    {
+        crate::durability::with_full_synchronous(&self.conn, |conn| {
+            Self::write_on_connection(conn, faults, f)
+        })
+    }
+
+    fn write_on_connection<T, E>(
+        conn: &Connection,
+        faults: &dyn FaultInjector,
+        f: impl FnOnce(&Transaction<'_>) -> Result<T, E>,
+    ) -> Result<TxnOutcome<T>, E>
+    where
+        E: From<StorageError>,
+    {
+        let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)
             .map_err(StorageError::persist)?;
 
         let value = match f(&tx) {
@@ -334,8 +357,8 @@ impl EngineStore {
 
     // ---- R04: materialization jobs --------------------------------------
 
-    /// Every pending materialization job, oldest first — the set the filesystem
-    /// pipeline replays at startup and executes on enqueue.
+    /// Generic pending jobs, oldest first. Checked deletes are owned by the
+    /// runtime publication state machine and must never enter generic replay.
     pub fn list_pending_materialization_jobs(
         &self,
     ) -> Result<Vec<MaterializationJob>, StorageError> {
@@ -380,6 +403,15 @@ impl EngineStore {
         now_ms: i64,
     ) -> Result<(), StorageError> {
         materialize::mark_cancelled(&self.conn, job_id, now_ms)
+    }
+
+    /// Record a superseded job's keyed write as unpublished. Call it before
+    /// the job is marked complete.
+    pub fn record_superseded_publication(
+        &self,
+        job: &MaterializationJob,
+    ) -> Result<(), StorageError> {
+        materialize::record_superseded_publication(&self.conn, job)
     }
 
     /// Mark a job in conflict (newer external content was preserved).

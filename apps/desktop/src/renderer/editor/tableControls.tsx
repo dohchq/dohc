@@ -1,4 +1,20 @@
 import { stopEditorMouseEvent, ownerWindow, shadowHost } from "./pmHelpers";
+import {
+  MENU_ACTIVE_OPTION,
+  MENU_ENTER,
+  MENU_FRAME,
+  MENU_LABEL,
+  MENU_ROW,
+  MENU_ROW_TONE,
+  MENU_SEPARATOR_LINE,
+  MENU_SHORTCUT,
+  deleteShortcut,
+  menuEnterFrom,
+  movedPointer,
+  moveInMenu,
+  revealMenuRow,
+} from "../ui/Menu";
+import { listenForDismiss } from "../ui/useDismiss";
 // Table row/column/header controls — Notion-style handles + menus layered on
 // TableKit's existing commands (addRowBefore/After, deleteRow,
 // addColumnBefore/After, deleteColumn, toggleHeaderRow, deleteTable).
@@ -133,6 +149,8 @@ type TableControlsRuntime = {
   activeRowResize: TableRowResizeState | null;
   cancelPointer: (() => void) | null;
   closeMenu: (() => void) | null;
+  /** The grip or button whose menu is open. */
+  menuAnchor: HTMLElement | null;
   menuSerial: number;
 };
 
@@ -143,6 +161,7 @@ function createTableControlsRuntime(): TableControlsRuntime {
     activeRowResize: null,
     cancelPointer: null,
     closeMenu: null,
+    menuAnchor: null,
     menuSerial: 0,
   };
 }
@@ -515,10 +534,67 @@ function tableMenuItems(): GripMenuItem[] {
   ];
 }
 
-// A single vanilla-DOM popover per editor instance. Visuals mirror
-// `.dohc-slash-menu` (`.dohc-table-menu`
-// in styles.css); keyboard model (arrows/Enter/Escape) mirrors
-// SlashCommandMenu's handleKeyDown in MarkdownEditor.tsx.
+/** What draws a grip menu row; what it does stays with the menu. */
+export type TableMenuRow = Pick<GripMenuItem, "label" | "destructive" | "separatorBefore">;
+
+/**
+ * A grip menu's list and rows, drawn from the Menu part's recipe. ProseMirror
+ * owns the grips, so this is built from the DOM, not the Menu component.
+ * Exported for the states page, which draws it without an editor.
+ */
+export function buildTableMenu(
+  ownerDocument: Document,
+  rows: readonly TableMenuRow[],
+  menuId: string,
+): { menu: HTMLElement; buttons: HTMLButtonElement[] } {
+  const menu = ownerDocument.createElement("div");
+  // The frame holds focus for its rows, and the active row draws the focus
+  // outline, so the frame draws none of its own.
+  menu.className = `dohc-table-menu ${MENU_FRAME} outline-none`;
+  menu.setAttribute("role", "menu");
+  menu.setAttribute("aria-label", "table controls");
+  menu.tabIndex = -1;
+  menu.id = menuId;
+  const buttons = rows.map((row, index) => {
+    if (row.separatorBefore) {
+      const line = ownerDocument.createElement("div");
+      line.setAttribute("role", "separator");
+      line.className = MENU_SEPARATOR_LINE;
+      menu.appendChild(line);
+    }
+    const button = ownerDocument.createElement("button");
+    button.type = "button";
+    button.id = `${menuId}-item-${index}`;
+    button.tabIndex = -1;
+    button.setAttribute("role", "menuitem");
+    button.className = `dohc-table-menu__item ${MENU_ROW} ${MENU_ACTIVE_OPTION} ${
+      row.destructive ? MENU_ROW_TONE.danger : `${MENU_ROW_TONE.rest} data-active:text-ink`
+    }`;
+    const label = ownerDocument.createElement("span");
+    label.className = MENU_LABEL;
+    label.textContent = row.label;
+    button.appendChild(label);
+    if (row.destructive) {
+      // Delete and Backspace run the destructive row from anywhere in the
+      // menu; the chip shows the one this keyboard labels.
+      const { label: keyLabel, keys } = deleteShortcut();
+      button.setAttribute("aria-keyshortcuts", keys);
+      const shortcut = ownerDocument.createElement("span");
+      shortcut.setAttribute("aria-hidden", "true");
+      shortcut.className = MENU_SHORTCUT;
+      shortcut.textContent = keyLabel;
+      button.appendChild(shortcut);
+    }
+    menu.appendChild(button);
+    return button;
+  });
+  return { menu, buttons };
+}
+
+// One grip menu per editor instance. It closes by the Menu part's rule
+// (listenForDismiss) and moves by its keys (moveInMenu). Focus stays on the
+// frame and aria-activedescendant names the active row, which draws the
+// accent outline whichever of the keyboard or the pointer moved it there.
 function openGripMenu(
   runtime: TableControlsRuntime,
   view: EditorView,
@@ -526,6 +602,12 @@ function openGripMenu(
   items: GripMenuItem[],
   placement: TableMenuPlacement,
 ): void {
+  // The grip of the open menu closes it, like any trigger.
+  if (runtime.closeMenu && runtime.menuAnchor === anchor) {
+    runtime.closeMenu();
+    anchor.focus({ preventScroll: true });
+    return;
+  }
   runtime.closeMenu?.();
   runtime.closeMenu = null;
   if (view.editable === false || items.length === 0) return;
@@ -533,44 +615,36 @@ function openGripMenu(
   const ownerDocument = view.dom.ownerDocument;
   const hostWindow = ownerWindow(view.dom);
   const menuHost = shadowHost(view);
-  const menu = ownerDocument.createElement("div");
-  menu.className = "dohc-table-menu";
-  menu.setAttribute("role", "menu");
-  menu.setAttribute("aria-label", "table controls");
-  menu.tabIndex = -1;
   const menuId = `dohc-table-menu-${runtime.instanceId}-${runtime.menuSerial++}`;
-  menu.id = menuId;
+  const { menu, buttons } = buildTableMenu(ownerDocument, items, menuId);
   const menuMaxHeight = Math.max(80, Math.min(280, hostWindow.innerHeight - 16));
   menu.style.maxHeight = `${menuMaxHeight}px`;
   menu.style.visibility = "hidden";
-  menu.style.animation = "none";
 
   let selected = 0;
-  const buttons: HTMLButtonElement[] = [];
+  const labels = items.map((item) => item.label);
   const highlight = () => {
-    buttons.forEach((button, index) => {
-      button.classList.toggle("is-selected", index === selected);
-    });
+    buttons.forEach((button, index) => button.toggleAttribute("data-active", index === selected));
     const activeButton = buttons[selected];
     if (activeButton) menu.setAttribute("aria-activedescendant", activeButton.id);
+    revealMenuRow(menu, activeButton);
   };
 
+  // Focus goes back to the grip first, as the Menu part does, and the
+  // command then moves it into the document.
   const runItem = (index: number) => {
     const item = items[index];
     close();
+    anchor.focus({ preventScroll: true });
     item?.run(view);
   };
 
-  items.forEach((item, index) => {
-    const button = ownerDocument.createElement("button");
-    button.type = "button";
-    button.id = `${menuId}-item-${index}`;
-    button.setAttribute("role", "menuitem");
-    button.className = `dohc-table-menu__item${item.destructive ? " dohc-table-menu__item--danger" : ""}`;
-    if (item.separatorBefore) button.classList.add("dohc-table-menu__item--separated");
-    button.textContent = item.label;
+  buttons.forEach((button, index) => {
     button.addEventListener("mousedown", (event) => event.preventDefault());
-    button.addEventListener("mouseenter", () => {
+    // Only a pointer that moves picks the active row, so a menu that opens
+    // under a still pointer keeps its first row.
+    button.addEventListener("mousemove", (event) => {
+      if (!movedPointer(event) || selected === index) return;
       selected = index;
       highlight();
     });
@@ -578,21 +652,16 @@ function openGripMenu(
       stopEditorMouseEvent(event);
       runItem(index);
     });
-    buttons.push(button);
-    menu.appendChild(button);
   });
   highlight();
 
   function onKeyDown(event: KeyboardEvent): void {
-    if (event.key === "ArrowDown") {
+    const next = moveInMenu(event, selected, labels);
+    if (next !== null) {
       event.preventDefault();
-      selected = (selected + 1) % items.length;
+      selected = next;
       highlight();
-    } else if (event.key === "ArrowUp") {
-      event.preventDefault();
-      selected = (selected - 1 + items.length) % items.length;
-      highlight();
-    } else if (event.key === "Enter") {
+    } else if (event.key === "Enter" || event.key === " ") {
       event.preventDefault();
       runItem(selected);
     } else if (event.key === "Backspace" || event.key === "Delete") {
@@ -602,19 +671,19 @@ function openGripMenu(
         runItem(deleteIndex);
       }
     } else if (event.key === "Escape") {
+      // One Escape closes one surface.
       event.preventDefault();
+      event.stopPropagation();
       close();
-      anchor.focus();
+      anchor.focus({ preventScroll: true });
+    } else if (event.key === "Tab") {
+      // From the grip, the key moves on to the control after it.
+      anchor.focus({ preventScroll: true });
+      close();
     }
   }
 
-  function onPointerDown(event: MouseEvent): void {
-    // Window-level events are retargeted to the shadow host when the embedded
-    // editor owns this menu. composedPath preserves the real menu ancestry.
-    if (event.composedPath().includes(menu)) return;
-    close();
-  }
-
+  let entered = false;
   function reposition(): void {
     const anchorRect = anchor.getBoundingClientRect();
     const measured = menu.getBoundingClientRect();
@@ -622,7 +691,7 @@ function openGripMenu(
     // one-frame jump in a very slow renderer before the first measurement.
     const menuHeight = Math.min(
       menuMaxHeight,
-      measured.height || items.length * 35 + 10,
+      measured.height || items.length * 28 + 10,
     );
     const position = resolveTableMenuPosition({
       anchorRect,
@@ -633,21 +702,36 @@ function openGripMenu(
     });
     menu.style.left = `${position.x}px`;
     menu.style.top = `${position.y}px`;
+    if (entered) return;
+    // The list enters from its grip's side.
+    entered = true;
+    const side = placement === "row"
+      ? position.x >= anchorRect.right ? "right" : "left"
+      : position.y >= anchorRect.bottom ? "below" : "above";
+    for (const [name, value] of Object.entries(menuEnterFrom(side))) {
+      menu.style.setProperty(name, String(value));
+    }
   }
 
+  let closed = false;
+  let stopDismiss = () => {};
   function close(): void {
+    if (closed) return;
+    closed = true;
     hostWindow.removeEventListener("keydown", onKeyDown, true);
-    hostWindow.removeEventListener("mousedown", onPointerDown, true);
     hostWindow.removeEventListener("resize", reposition);
     hostWindow.removeEventListener("scroll", reposition, true);
+    stopDismiss();
     anchor.classList.remove("is-open");
     anchor.setAttribute("aria-expanded", "false");
     menu.remove();
-    if (runtime.closeMenu === close) runtime.closeMenu = null;
+    if (runtime.closeMenu === close) {
+      runtime.closeMenu = null;
+      runtime.menuAnchor = null;
+    }
   }
 
   hostWindow.addEventListener("keydown", onKeyDown, true);
-  hostWindow.addEventListener("mousedown", onPointerDown, true);
   hostWindow.addEventListener("resize", reposition);
   hostWindow.addEventListener("scroll", reposition, true);
   anchor.classList.add("is-open");
@@ -655,9 +739,26 @@ function openGripMenu(
   menuHost.appendChild(menu);
   reposition();
   menu.style.removeProperty("visibility");
-  menu.style.removeProperty("animation");
+  menu.classList.add(MENU_ENTER);
   menu.focus({ preventScroll: true });
+  // Escape is answered above, with focus back on the grip. When the window
+  // loses focus to another window, closing leaves focus on the page, so it
+  // goes back to the grip, ready for the person's return. A click in an
+  // embedded frame blurs the window too, but focus is in the frame then and
+  // stays there, as useFocusReturn leaves it. A press or focus moving
+  // elsewhere puts it where the person chose.
+  stopDismiss = listenForDismiss({
+    menu,
+    trigger: () => anchor,
+    onClose: (reason) => {
+      close();
+      if (reason !== "blur") return;
+      const active = anchor.ownerDocument.activeElement;
+      if (active === null || active === anchor.ownerDocument.body) anchor.focus({ preventScroll: true });
+    },
+  });
   runtime.closeMenu = close;
+  runtime.menuAnchor = anchor;
 }
 
 function clearTableDropTargetChrome(view: EditorView): void {

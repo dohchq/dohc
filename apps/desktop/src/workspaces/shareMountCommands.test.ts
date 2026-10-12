@@ -72,6 +72,7 @@ async function withLiveMountOwner<T>(
       throw new Error("Live owner test reached relay pull.");
     },
     recordRefusals: async () => undefined,
+    updateUnsavedPaths: async () => undefined,
     markEnded: async () => undefined,
     retireTarget: async () => undefined,
     assertProjectionRoot: async () => undefined,
@@ -145,6 +146,8 @@ function harness() {
   };
 
   const files: ShareViewFiles = {
+    narrow: vi.fn(async () => undefined),
+    end: vi.fn(async () => undefined),
     mount: vi.fn(async (_lease, target: PreparedShareViewFilesMount) => {
       events.push("files:mount");
       await withLiveMountOwner(target, (owner) =>
@@ -190,7 +193,8 @@ function harness() {
 
   const dependencies: ShareMountCommandDependencies<{ id: string }> = {
     readMounts: () => mounts,
-    writeMounts: (_workspaceId, next) => {
+    updateMounts: async (_workspaceId, update) => {
+      const next = update(mounts);
       events.push(`registry:${next.length}`);
       mounts = [...next];
     },
@@ -618,7 +622,7 @@ describe("share mount commands", () => {
 
   it("turns registry-write plus projection-remove failure into rollback evidence", async () => {
     const h = harness();
-    h.dependencies.writeMounts = () => {
+    h.dependencies.updateMounts = async () => {
       throw new Error("registry failed");
     };
     h.removeOutcome = { folderLeft: true };

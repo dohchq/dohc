@@ -12,6 +12,7 @@ import { OpenSharedView } from "./OpenSharedView";
 import { ShareHandoffSurface } from "./ShareHandoffSurface";
 import { ConnectionNotices, useConnectionNotices } from "./shell/connectionNotices";
 import { useCrashReport } from "./shell/useCrashReport";
+import { useWorkspacePathOpenFailures } from "./shell/workspacePathOpenFailures";
 import { Titlebar, workspaceName } from "./Titlebar";
 import { IconButton, SecondaryButton } from "./ui/controls";
 import { Menu } from "./ui/Menu";
@@ -195,6 +196,8 @@ export function WorkspaceManager(props: {
   // it along with the way to try again.
   const connectionNotices = useConnectionNotices();
   const crashReportNotice = useCrashReport(connectionNotices);
+  // A folder the command line or the OS asked for that did not open.
+  useWorkspacePathOpenFailures(null, connectionNotices.reportFailure);
   // The address a failed attempt used, put back when a notice's Try again
   // reopens the route it came from.
   const [retryServerUrl, setRetryServerUrl] = useState("");
@@ -231,7 +234,7 @@ export function WorkspaceManager(props: {
       const workspace = await openExistingFolder();
       if (workspace) await open(workspace);
     } catch (cause) {
-      setError(ipcErrorMessage(cause));
+      connectionNotices.reportError("Could not open that workspace folder.", cause, () => void openExisting());
     }
   }
 
@@ -418,6 +421,7 @@ export function WorkspaceManager(props: {
       </div>
       <ConnectionNotices
         notices={connectionNotices.notices}
+        reportFailure={connectionNotices.reportFailure}
         onRetry={connectionNotices.retryNotice}
         onHide={connectionNotices.hideNotice}
         onDismiss={connectionNotices.dismissNotice}

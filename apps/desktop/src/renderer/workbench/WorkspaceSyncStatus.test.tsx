@@ -5,9 +5,14 @@ import { WorkspaceSyncStatus } from "./WorkspaceSyncStatus";
 import type { SyncStatusResult } from "../../ipc/bridgeContract";
 
 afterEach(cleanup);
-function renderStatus(props: { syncStatus: SyncStatusResult | null }) {
-  return render(<WorkspaceSyncStatus {...props} />);
+function renderStatus(props: { syncStatus: SyncStatusResult | null; failedSaves?: number }) {
+  return render(<WorkspaceSyncStatus failedSaves={0} {...props} />);
 }
+
+// The dot's kind: saved, working, waiting or attention.
+const dotOf = () => screen.getByTestId("sync-status").querySelector("[data-dot]")?.getAttribute("data-dot");
+// Whether the label shows beside the dot, or only names it.
+const worded = () => !screen.getByTestId("sync-status").querySelector("span:not([data-dot])")?.classList.contains("sr-only");
 
 // A clean workspace whose only news is owner live delivery. A fresh object
 // every call, so a rerender models a new status read rather than the same
@@ -48,9 +53,9 @@ describe("sync status surface", () => {
     const { rerender } = renderStatus({ syncStatus: { ...syncState("syncing"), claimingIdentity: true } });
     expect(screen.getByTestId("sync-status").textContent).toBe("Setting up sync…");
     expect(screen.getByTestId("sync-status").getAttribute("data-state")).toBe("syncing");
-    rerender(<WorkspaceSyncStatus syncStatus={{ ...syncState("sync-failed"), claimingIdentity: true }} />);
+    rerender(<WorkspaceSyncStatus syncStatus={{ ...syncState("sync-failed"), claimingIdentity: true }} failedSaves={0} />);
     expect(screen.getByTestId("sync-status").textContent).toBe("Sync failed");
-    rerender(<WorkspaceSyncStatus syncStatus={syncState("syncing")} />);
+    rerender(<WorkspaceSyncStatus syncStatus={syncState("syncing")} failedSaves={0} />);
     expect(screen.getByTestId("sync-status").textContent).toBe("Syncing…");
   });
 
@@ -78,6 +83,7 @@ describe("sync status surface", () => {
     rerender(
       <WorkspaceSyncStatus
         syncStatus={syncState("sync-failed", { cause: "unknown", detail: "Error: refused", sinceMs: 1, attempts: 1 })}
+        failedSaves={0}
       />,
     );
     expect(screen.getByTestId("sync-status").textContent).toBe("Sync failed");
@@ -96,8 +102,65 @@ describe("sync status surface", () => {
     });
     const status = screen.getByTestId("sync-status");
     expect(status.getAttribute("data-state")).toBe("synced");
-    expect(screen.getByText("Local · saved").classList.contains("sr-only")).toBe(false);
     expect(status.textContent).not.toContain("(");
+  });
+
+  // One saved mark in one place: a saved workspace shows the dot alone, and
+  // its words stay its accessible name and tooltip.
+  it("shows a saved workspace as the dot alone, named for screen readers", () => {
+    renderStatus({ syncStatus: syncState("synced") });
+    const status = screen.getByRole("status", { name: "Local · saved" });
+    expect(status.getAttribute("title")).toBe("Local · saved");
+    expect(dotOf()).toBe("saved");
+    expect(worded()).toBe(false);
+  });
+
+  // A sync pass is work in flight: a ring, its words kept for the name.
+  it("shows a sync pass as a ring and a lost server in words", () => {
+    const { rerender } = renderStatus({ syncStatus: syncState("syncing") });
+    const status = screen.getByTestId("sync-status");
+    expect(dotOf()).toBe("working");
+    expect(worded()).toBe(false);
+    rerender(<WorkspaceSyncStatus syncStatus={syncState("cloud-disconnected")} failedSaves={0} />);
+    expect(status.getAttribute("data-state")).toBe("cloud-disconnected");
+    expect(dotOf()).toBe("waiting");
+    expect(worded()).toBe(true);
+  });
+
+  // A file whose save failed: the title bar must not say saved over it.
+  it("names the files that couldn't save instead of saved, and says saved again once they clear", () => {
+    const { rerender } = renderStatus({ syncStatus: syncState("synced"), failedSaves: 1 });
+    const status = screen.getByTestId("sync-status");
+    expect(status.textContent).toBe("Couldn't save 1 file");
+    expect(status.getAttribute("aria-label")).toBe("Couldn't save 1 file");
+    expect(status.getAttribute("data-state")).toBe("save-failed");
+    expect(dotOf()).toBe("attention");
+    expect(worded()).toBe(true);
+    expect(status.textContent).not.toContain("saved");
+
+    // It stays through a sync pass, so the mark does not flicker to Syncing.
+    rerender(<WorkspaceSyncStatus syncStatus={syncState("syncing")} failedSaves={2} />);
+    expect(status.textContent).toBe("Couldn't save 2 files");
+
+    rerender(<WorkspaceSyncStatus syncStatus={syncState("synced")} failedSaves={0} />);
+    expect(status.textContent).toBe("Local · saved");
+    expect(status.getAttribute("data-state")).toBe("synced");
+    expect(dotOf()).toBe("saved");
+    expect(worded()).toBe(false);
+  });
+
+  it("leaves conflicts, failed syncs and required updates ahead of a failed save", () => {
+    const { rerender } = renderStatus({ syncStatus: { ...syncState("conflict"), conflictCount: 1 }, failedSaves: 1 });
+    const status = screen.getByTestId("sync-status");
+    expect(status.textContent).toBe("Conflict (1)");
+    expect(status.getAttribute("data-state")).toBe("conflict");
+    rerender(<WorkspaceSyncStatus syncStatus={syncState("sync-failed")} failedSaves={1} />);
+    expect(status.textContent).toBe("Sync failed");
+    rerender(
+      <WorkspaceSyncStatus syncStatus={{ ...syncState("cloud-disconnected"), updateRequired: "app" }} failedSaves={1} />,
+    );
+    expect(status.textContent).toBe("Update dohc to sync");
+    expect(dotOf()).toBe("attention");
   });
 
   it("appends the conflict COUNT only in the conflict state", () => {

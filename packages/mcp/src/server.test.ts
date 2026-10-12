@@ -12,6 +12,7 @@ import type { ToolContext } from "./tools";
 // changes the granter's files; a chat write posts to a thread.
 const DOCUMENT_WRITE_TOOLS = [
   "dohc_dataset",
+  "dohc_save_kept_copy",
   "dohc_publish_app",
   "dohc_write_file",
   "dohc_create_directory",
@@ -111,11 +112,8 @@ describe("share-level tool profiles", () => {
     }
   });
 
-  // #646 PR2 registers NO write tool at any level, chat included. The two
-  // chat tools are GROUP tools, and a shared view refuses every group
-  // write before the level is read; `comment` grants per-FILE chat, which no
-  // MCP tool writes yet. A tool the workspace always refuses is worse than an
-  // absent one — the agent spends a turn discovering the refusal.
+  // Local file, document, and chat writes require an owning workspace.
+  // Shared views expose Button presses checked by the owner's host.
   it("registers no write tool at all for a comment profile, chat tools included", async () => {
     const { names } = await connectedToolNames({ ...base, shareAccess: "comment" });
     for (const tool of [...DOCUMENT_WRITE_TOOLS, ...CHAT_WRITE_TOOLS]) {
@@ -336,6 +334,33 @@ describe("MCP tool results", () => {
     expect(result.structuredContent).toEqual({
       ok: true, path: "notes/budget.md", threadId: "thread-1", messageId: "message-1",
     });
+  });
+
+  it("passes bodies at the normalized UTF-8 limit to the server for every chat write", async () => {
+    // CRLF becomes LF and trailing JS whitespace is removed before the cap.
+    const body = "x".repeat(65_534) + "\r\ny\uFEFF ";
+    const sent: unknown[] = [];
+    const root = await workspaceRoot();
+    const { client } = await connectedToolNames({ root, home: "/home",
+      request: async request => {
+        if (!("body" in request.args)) throw new Error("Expected a chat write");
+        sent.push(request.args.body);
+        return request.verb === "fileChatStart"
+          ? { ok: true, path: "tracked.md", threadId: "thread-1", messageId: "message-1" }
+          : request.verb === "post"
+            ? { group: { id: "ch_1", name: "general", slug: "general", kind: "group" }, threadId: "th_1", messageId: "msg_1", title: "" }
+            : { threadId: "th_1", messageId: "msg_2" };
+      },
+    });
+    for (const [name, args] of [
+      ["dohc_start_file_chat", { path: "tracked.md", title: "Limit" }],
+      ["dohc_start_group_chat", { group: "general" }],
+      ["dohc_reply_to_chat", { threadId: "thread-1" }],
+    ] as const) {
+      const result = await client.callTool({ name, arguments: { ...args, body } });
+      expect(result, JSON.stringify(result)).not.toHaveProperty("isError", true);
+    }
+    expect(sent).toEqual([body, body, body]);
   });
 
   it("turns poll options into a decision even without needsDecision", async () => {

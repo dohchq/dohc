@@ -8,10 +8,14 @@ import { git, pnpm, repoRoot, run } from "./process.mjs";
 import { cancellationScope } from "./cancellation.mjs";
 import { startTiming, timed } from "./timing.mjs";
 import { testWorkspace } from "./js-tests.mjs";
-import { readWorkspacePackages, selectJavaScript } from "./selection.mjs";
+import { readWorkspacePackages, selectJavaScript, selectedGates, workflowFilters } from "./selection.mjs";
+import { readFocusedRendererSelection } from "./renderer-selection.mjs";
 import { classifyTreeProvenance, readTreeState } from "../../tools/rust-engine-program/tree-provenance.mjs";
-import { acquireVerificationSlot } from "../../tools/rust-engine-program/build-slot.mjs";
+import { acquireExclusiveSlot, acquireVerificationSlot, resolveBuildBudget } from "../../tools/rust-engine-program/build-slot.mjs";
+import { processIdentity, ticketEvidence } from "./ticket-evidence.mjs";
+import { admissionPreflight, installedDependenciesMatch, verificationAdmission } from "./admission.mjs";
 import { readGit } from "../../tools/rust-engine-program/git-read.mjs";
+import { finishRustEvidence, refreshRustReuse, rustIdentity } from "./rust-reuse.mjs";
 
 const require = createRequire(join(repoRoot, "apps/desktop/package.json"));
 export function desktopProofCommand(args, { platform = process.platform, env = process.env } = {}) {
@@ -19,6 +23,15 @@ export function desktopProofCommand(args, { platform = process.platform, env = p
   return platform === "linux" && !env.DISPLAY && !env.WAYLAND_DISPLAY
     ? ["xvfb-run", ["-a", command[0], ...command[1]]]
     : command;
+}
+
+export function desktopProofTags(proofs, {platform = process.platform} = {}) {
+  const gallery = proofs.statesPage && platform === "win32";
+  const smoke = proofs.desktop || proofs.smoke;
+  return {
+    selected: [...(smoke ? ["@verification-smoke"] : []), ...(proofs.desktop ? ["@self-host-onboarding"] : []), ...(gallery ? ["@states-page"] : [])],
+    required: [...(smoke ? ["@verification-smoke"] : []), ...(proofs.desktop ? ["@self-host-onboarding"] : []), ...(gallery ? ["@states-baselines"] : [])],
+  };
 }
 
 function createTreeReader() {
@@ -34,16 +47,6 @@ function passedSpecTitles(suites = []) {
     ...(suite.specs ?? []).filter((spec) => spec.ok === true && spec.tests?.some((test) => test.results?.some((result) => result.status === "passed"))).map((spec) => spec.title),
     ...passedSpecTitles(suite.suites),
   ]);
-}
-function workflowFilters(workflow) {
-  const yaml = require("js-yaml");
-  const document = yaml.load(workflow);
-  const filterStep = document.jobs.changes.steps.find((step) => step.with?.filters);
-  return yaml.load(filterStep.with.filters);
-}
-export function selectedGates(files, workflow) {
-  const filters = workflowFilters(workflow);
-  return Object.fromEntries(["rust", "js"].map((name) => [name, files.some((file) => filters[name].some((pattern) => matchesGlob(file, pattern)))]));
 }
 
 export function changedFiles(baseCommit, includeUncommitted = false, root = repoRoot) {
@@ -140,6 +143,11 @@ export async function verify(args) {
   const jobIndex = args.indexOf("--job");
   const job = jobIndex < 0 ? null : args[jobIndex + 1];
   const full = args.includes("--full");
+  const reuseIndex = args.indexOf("--reuse-rust");
+  const reuseRust = reuseIndex < 0 ? null : args[reuseIndex + 1];
+  if (reuseIndex >= 0 && (mode !== "pr" || !reuseRust || reuseRust.startsWith("--") || job === "js")) {
+    throw new Error("Use --reuse-rust <canonical-result.json> with a PR run that includes Rust.");
+  }
   if (full && !["pr", "plan"].includes(mode)) throw new Error("--full is available only for PR verification and planning.");
   if (jobIndex >= 0 && (mode !== "pr" || !["rust", "js"].includes(job))) throw new Error("--job rust|js is available only for PR verification.");
   if (["pr", "plan"].includes(mode) && (!base || base.startsWith("--"))) throw new Error("Supply --base <ref> for PR gate selection.");
@@ -153,10 +161,17 @@ export async function verify(args) {
     const gates = Object.fromEntries(Object.entries(requiredGates).map(([name, needed]) => [name, needed && (!job || name === job)]));
     const jsPatterns = workflowFilters(workflow).js;
     const jsFiles = files.filter(file => jsPatterns.some(pattern => matchesGlob(file, pattern)));
-    const javascript = gates.js ? selectJavaScript(jsFiles, readWorkspacePackages(repoRoot), { full: full || job === "js" && !jsFiles.length }) : null;
+    const forceFull = full || job === "js" && !jsFiles.length;
+    const javascript = gates.js ? (!forceFull && readFocusedRendererSelection(repoRoot, jsFiles, baseCommit)
+      || selectJavaScript(jsFiles, readWorkspacePackages(repoRoot), { full: forceFull })) : null;
     return { baseCommit, files, workflow, requiredGates, gates, javascript };
   }
-  if (mode === "plan") { const {baseCommit, files, gates, javascript} = selection(); console.log(JSON.stringify({base, baseCommit, files, gates, javascript}, null, 2)); return; }
+  if (mode === "plan") {
+    const {baseCommit, files, gates, javascript} = selection();
+    const admission = verificationAdmission({gates, javascript}, gates.js ? readWorkspacePackages(repoRoot) : [], installedDependenciesMatch(repoRoot));
+    console.log(JSON.stringify({base, baseCommit, files, gates, javascript, admission}, null, 2));
+    return;
+  }
   let treeState;
   const output = join(repoRoot, ".agent-artifacts/verification", `${new Date().toISOString().replaceAll(":", "-")}-${randomUUID().slice(0, 8)}`);
   mkdirSync(output, { recursive: true });
@@ -164,6 +179,8 @@ export async function verify(args) {
   const reportPath = join(output, "result.json");
   const save = () => writeFileSync(reportPath, JSON.stringify(report, null, 2) + "\n");
   const measure = (name, action) => {
+    lane?.update?.({phase: name});
+    checkoutOwner?.update?.({phase: name});
     const row = {name};
     report.timings.push(row);
     return timed(row, action, save);
@@ -188,10 +205,15 @@ export async function verify(args) {
   }
   let database;
   let lane;
+  let checkoutOwner;
   const previousIncremental = process.env.CARGO_INCREMENTAL;
   let desktopEnvironment;
+  let originalRustIdentity;
+  let rustTools;
   async function checkedStep(row, action, checkpoint = () => cancellation.checkpoint()) {
     await checkpoint();
+    lane?.update?.({phase: row.name});
+    checkoutOwner?.update?.({phase: row.name});
     report.steps.push(row); save();
     const result = await timed(row, action, save);
     await checkTree(row.name);
@@ -214,26 +236,56 @@ export async function verify(args) {
       recordTree("start");
       return selected;
     });
+    if (mode === "pr") checkoutOwner = await measure("checkout", () => acquireExclusiveSlot({
+      root: join(repoRoot, ".dohc-dev/verification"), kind: "verification-checkout",
+      metadata: {purpose: `PR verification (${report.scope})`, checkout: repoRoot, commit: report.commit, phase: "selection"},
+    }));
     if (mode === "pr" && report.dirty) throw new Error("Commit the worktree before running the PR gate.");
+    if (reuseRust && !gates.rust) throw new Error("--reuse-rust requires a selected Rust job. Use --job rust when needed.");
     if (mode === "pr" && !gates.js && !gates.rust) {
       report.reason = "No code gate applies to the changed files.";
       await checkTree("finish");
       report.verdict = "PASS";
       return report;
     }
-    // One PR gate at a time per host; the wait is recorded as `queue`.
-    if (mode === "pr") lane = await measure("queue", () => acquireVerificationSlot());
     const needs = mode === "pr" ? (javascript?.needs ?? {engine: false, desktop: false, postgres: false}) : {engine: true, desktop: true};
     const proofs = mode === "pr" ? (javascript?.proofs ?? {}) : {desktop: true};
     const native = gates.rust || needs.engine || needs.desktop;
+    if (mode === "pr") {
+      const preflight = () => admissionPreflight({rust: gates.rust, native, root: repoRoot, pins: require("js-yaml").load(workflow).env});
+      await measure("preflight", preflight);
+      report.admission = verificationAdmission({gates, javascript}, readWorkspacePackages(repoRoot), installedDependenciesMatch(repoRoot));
+      // Identify this process before publishing a ticket; no lookup may delay admission.
+      const tickets = resolveBuildBudget() ? ticketEvidence({output, checkout: repoRoot, commit: report.commit,
+        producer: await measure("producer-identity", () => processIdentity()), persist: save}) : null;
+      report.ticketEvidence = tickets?.record;
+      let ticketCleanup;
+      try {
+        lane = await measure("queue", () => acquireVerificationSlot(process.env, {
+          lightweight: report.admission.lightweight,
+          metadata: {purpose: report.admission.lightweight ? "light PR verification" : "full PR verification", checkout: repoRoot, commit: report.commit, phase: "admission"},
+          observeTicket: tickets?.observe,
+        }));
+      } finally {
+        ticketCleanup = tickets?.settle();
+        save();
+      }
+      if (ticketCleanup) throw new Error(ticketCleanup);
+      await checkTree("admission");
+      await measure("preflight:admission", preflight);
+    }
     startSource = await measure("source-fingerprints:start", () => ({ ...(native ? {engine: sourceFingerprint("engine")} : {}), desktop: sourceFingerprint("desktop") }));
     await cancellation.checkpoint();
-    if (mode === "pr" && (gates.js || gates.rust)) await step("install", ...pnpm(["install", "--frozen-lockfile"]));
+    if (mode === "pr" && (gates.js || gates.rust)) {
+      if (report.admission.lightweight) {
+        if (!installedDependenciesMatch(repoRoot)) throw new Error("Installed dependencies changed while waiting. Rerun verification for full-lane admission.");
+      } else await step("install", ...pnpm(["install", "--frozen-lockfile"]));
+    }
     if (needs.desktop) await step("electron-install", process.execPath, ["apps/desktop/scripts/ensure-electron-installed.mjs"]);
-    report.doctor = await measure("doctor", () => doctor({engine: native, desktop: needs.desktop, browser: Boolean(proofs.accounts || proofs.desktop)})); save();
+    report.doctor = await measure("doctor", () => doctor({engine: native, desktop: needs.desktop, browser: Boolean(proofs.accounts || desktopProofTags(proofs).selected.length)})); save();
     await cancellation.checkpoint();
     if (report.doctor.checks.some((check) => check.state === "FAIL")) throw new Error("Preflight failed. Read result.json and run pnpm setup:worktree.");
-    await step("app-backend-runtime", ...pnpm(["--filter", "@dohc/app-backend-runtime", "build"]));
+    if (!report.admission?.lightweight) await step("app-backend-runtime", ...pnpm(["--filter", "@dohc/app-backend-runtime", "build"]));
     const preparedOptions = {engineOnly: !needs.desktop, engineBinary: stagedEnginePath};
     if (needs.engine || needs.desktop) {
       await measure("prepare", () => prepare({ ...preparedOptions, output, install: mode !== "pr" }));
@@ -245,9 +297,21 @@ export async function verify(args) {
       if (mode !== "pr" || !gates.rust) return;
       try {
         const pins = require("js-yaml").load(workflow).env;
+        rustTools = Object.fromEntries(report.doctor.checks.filter(check => ["rustc", "cargo"].includes(check.name) && check.state === "PASS")
+          .map(check => [check.name, check.detail]));
         for (const [tool, variable] of [["deny", "CARGO_DENY_VERSION"], ["audit", "CARGO_AUDIT_VERSION"], ["nextest", "CARGO_NEXTEST_VERSION"]]) {
           const result = await step(`cargo-${tool}-version`, "cargo", [tool, "--version"]);
           if (result.stdout.split(/\r?\n/)[0].split(/\s+/)[1] !== pins[variable]) throw new Error(`Install cargo-${tool} ${pins[variable]} to match the workflow.`);
+          rustTools[tool] = result.stdout.trim();
+        }
+        const identity = rustIdentity({root: repoRoot, engine: sourceFingerprint("engine"), tools: rustTools});
+        originalRustIdentity = identity;
+        if (reuseRust) {
+          report.rustEvidence = await checkedStep({name: "rust-reuse", reused: true, report: resolve(reuseRust)},
+            () => refreshRustReuse(reuseRust, {root: repoRoot, identity,
+              step: (name, command, args) => step(name, command, args, buildEnvironment())}));
+          save();
+          return;
         }
         await step("rust", process.execPath, ["tools/rust-engine-program/run-rust-checks.mjs", "--prepared-runtime"], buildEnvironment());
         await step("rust-verdict", process.execPath, ["tools/rust-engine-program/require-ci-pass-verdict.mjs", join(output, "rust.log")]);
@@ -269,7 +333,8 @@ export async function verify(args) {
             {...env, DOHC_SERVICE_HOST_PROOF_BINARY: stagedEnginePath, DOHC_SERVICE_HOST_PROOF_SHA256: nativeHash, DOHC_SERVICE_HOST_PROOF_OUTPUT: nativeOutput});
           report.selfHostNative = readSelfHostNativeProof(nativeOutput, stagedEnginePath, nativeHash); save();
         }
-        if (mode === "pr" && (proofs.accounts || proofs.desktop)) {
+        const tags = mode === "pr" ? desktopProofTags(proofs) : {selected: ["@verification-smoke"], required: ["@verification-smoke"]};
+        if (mode === "pr" && (proofs.accounts || tags.selected.length)) {
           await proofStep("browser-install", ...pnpm(["exec", "playwright", "install", ...(process.platform === "linux" ? ["--with-deps"] : []), "chromium"]), env);
         }
         if (mode === "pr" && proofs.accounts) {
@@ -278,17 +343,16 @@ export async function verify(args) {
           report.accounts = JSON.parse(readFileSync(accountReport, "utf8")).stats;
           if (!report.accounts?.expected || report.accounts.unexpected || report.accounts.flaky || report.accounts.skipped) throw new Error("Account browser verification did not complete without failures or skips.");
         }
-        if (proofs.desktop) {
+        if (mode === "pr" && proofs.statesPage && process.platform !== "win32") {
+          report.statesPage = `not run: the states page compares pixels on win32 only, and this host is ${process.platform}`; save();
+        }
+        if (tags.selected.length) {
           // The states page compares its baselines on Windows, where they were
           // taken. Elsewhere its pixel test skips itself, which the skip check
           // below would count as a failure, so it is left out and the report
           // says so. @states-page selects both of its tests; the pixel test
           // alone carries @states-baselines, and that is the proof required.
-          const gallery = mode === "pr" && proofs.statesPage && process.platform === "win32";
-          if (mode === "pr" && proofs.statesPage && !gallery) { report.statesPage = `not run: the states page compares pixels on win32 only, and this host is ${process.platform}`; save(); }
-          const selected = mode === "pr" ? ["@verification-smoke", "@self-host-onboarding", ...(gallery ? ["@states-page"] : [])] : ["@verification-smoke"];
-          const required = mode === "pr" ? ["@verification-smoke", "@self-host-onboarding", ...(gallery ? ["@states-baselines"] : [])] : ["@verification-smoke"];
-          const forwarded = mode === "e2e" ? args.slice(1).filter((arg) => arg !== "--") : ["--grep", selected.join("|")];
+          const forwarded = mode === "e2e" ? args.slice(1).filter((arg) => arg !== "--") : ["--grep", tags.selected.join("|")];
           const jsonReport = join(output, "playwright.json");
           await proofStep("desktop", ...desktopProofCommand(["--config", "apps/desktop/playwright.config.ts", "--output", join(output, "desktop"), ...forwarded, "--reporter=list,json"], { env }), { ...env, PLAYWRIGHT_JSON_OUTPUT_NAME: jsonReport, DOHC_QA_OUTPUT: output, DOHC_REQUIRE_ENGINE_E2E: "1" });
           const desktopReport = JSON.parse(readFileSync(jsonReport, "utf8"));
@@ -296,7 +360,7 @@ export async function verify(args) {
           report.desktopProofs = passedSpecTitles(desktopReport.suites);
           if (!report.desktop?.expected || report.desktop.unexpected || report.desktop.flaky) throw new Error("Desktop verification did not complete a passing test run.");
           if (mode !== "e2e" && report.desktop.skipped) throw new Error("A mandatory desktop smoke test was skipped.");
-          if (mode === "pr" && required.some((tag) => !report.desktopProofs.some((title) => title.split(/\s+/u).includes(tag)))) throw new Error(`The desktop gate did not pass every required proof: ${required.join(", ")}.`);
+          if (mode === "pr" && tags.required.some((tag) => !report.desktopProofs.some((title) => title.split(/\s+/u).includes(tag)))) throw new Error(`The desktop gate did not pass every required proof: ${tags.required.join(", ")}.`);
         }
       }
       if (mode === "pr" && gates.js) {
@@ -305,12 +369,13 @@ export async function verify(args) {
           report.postgres = { id: database.id }; save();
         }
         const env = { ...process.env, POSTGRES_URL: database?.url ?? "", DOHC_REQUIRE_POSTGRES: "1", DOHC_REQUIRE_ENGINE_E2E: "1", DOHC_TEST_ENGINE_BINARY: stagedEnginePath };
-        await step("typecheck", ...pnpm(["run", "typecheck"]), env);
+        await step("typecheck", ...pnpm(report.admission?.lightweight ? ["-r", "--workspace-concurrency=1", "--if-present", "typecheck"] : ["run", "typecheck"]), env);
         report.jsTests = join(output, "js-tests", "result.json");
         // Keep package groups under this owner so cancellation finishes their
         // escalation before database cleanup, without a competing parent timer.
         await checkedStep({ name: "tests", runner: "testWorkspace", report: report.jsTests },
           () => testWorkspace({ prepared: true, output: join(output, "js-tests"), env, selectedPackages: javascript.packages, testFiles: javascript.testFiles, repository: javascript.repository, desktopScripts: javascript.desktopScripts,
+            bounded: report.admission?.lightweight ?? false,
             beforeDesktopScripts: () => measure("packaging-wait", () => rustSettled),
             ...(Object.values(proofs).some(Boolean) ? {runProofs: checkpoint => selectedProofs(env, checkpoint)} : {}) }));
       } else if (mode !== "pr") {
@@ -332,17 +397,33 @@ export async function verify(args) {
     throw error;
   }
   finally {
-    try { await database?.stop(); }
-    catch (error) { report.verdict = "FAIL"; report.cleanupError = error.message; process.exitCode = 1; }
-    const interrupted = await cancellation.dispose();
-    lane?.release();
-    if (interrupted) { report.verdict = "FAIL"; report.error ??= interrupted.message; }
-    if (mode === "pr") {
-      if (previousIncremental === undefined) delete process.env.CARGO_INCREMENTAL;
-      else process.env.CARGO_INCREMENTAL = previousIncremental;
-    }
-    finishTiming(); Object.assign(report, total);
-    save(); console.log(`[verification] ${report.verdict} (${report.scope}): ${reportPath}`);
+    try {
+      lane?.update?.({phase: "cleanup"});
+      checkoutOwner?.update?.({phase: "cleanup"});
+      try { await database?.stop(); }
+      catch (error) { report.verdict = "FAIL"; report.cleanupError = error.message; process.exitCode = 1; }
+      const interrupted = await cancellation.dispose();
+      lane?.release();
+      if (interrupted) { report.verdict = "FAIL"; report.error ??= interrupted.message; }
+      finishTiming(); Object.assign(report, total);
+      if (originalRustIdentity && !interrupted && !report.rustError && !report.cleanupError) {
+        try {
+          recordTree("rust-receipt:finish");
+          report.provenance = classifyTreeProvenance(report.treeReadings);
+          const finalIdentity = rustIdentity({root: repoRoot, engine: sourceFingerprint("engine"), tools: rustTools});
+          report.rustEvidence = finishRustEvidence(report, originalRustIdentity, finalIdentity);
+        } catch (error) {
+          report.rustEvidence = {kind: "unavailable", reason: error.message};
+          report.verdict = "FAIL"; report.error ??= error.message; process.exitCode = 1;
+        }
+      }
+      if (mode === "pr") {
+        if (previousIncremental === undefined) delete process.env.CARGO_INCREMENTAL;
+        else process.env.CARGO_INCREMENTAL = previousIncremental;
+      }
+      finishTiming(); Object.assign(report, total);
+      save(); console.log(`[verification] ${report.verdict} (${report.scope}): ${reportPath}`);
+    } finally { checkoutOwner?.release(); }
   }
 }
 

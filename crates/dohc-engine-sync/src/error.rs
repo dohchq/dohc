@@ -301,6 +301,7 @@ impl RelayError {
             | RelayError::IdentityRequired
             | RelayError::ClaimRefused(_)
             | RelayError::StreamIdentityMismatch
+            | RelayError::SettlementProofBudget
             | RelayError::AuthorshipMismatch
             | RelayError::UnknownChatOperation
             | RelayError::ShareReadOnly
@@ -310,6 +311,7 @@ impl RelayError {
             | RelayError::QuotaExceeded
             | RelayError::DiscussionRateLimited
             | RelayError::LinkReadRateLimited
+            | RelayError::ShareAccessRateLimited
             | RelayError::SelfShare
             | RelayError::AmbiguousSelector
             | RelayError::InvalidChannel
@@ -406,6 +408,8 @@ pub enum RelayError {
     ClaimRefused(Box<RelayError>),
     #[error("replication stream identity does not match")]
     StreamIdentityMismatch,
+    #[error("settlement proof verification is temporarily over budget")]
+    SettlementProofBudget,
     #[error("relay authorship check failed")]
     AuthorshipMismatch,
     #[error("relay cannot verify this chat operation")]
@@ -424,6 +428,8 @@ pub enum RelayError {
     DiscussionRateLimited,
     #[error("relay rate-limited link reads")]
     LinkReadRateLimited,
+    #[error("relay rate-limited share access checks")]
+    ShareAccessRateLimited,
     #[error("self-sharing is not allowed")]
     SelfShare,
     #[error("share selector is ambiguous")]

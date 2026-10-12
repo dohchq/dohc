@@ -112,6 +112,7 @@ export async function startSelfHostedLiveHost(options: {
         current.onEvent((event) => { for (const handler of eventHandlers) handler(event); });
         current.invalidated.addEventListener("abort", schedule, {once: true});
         signature = next; lastError = undefined; initialReconciliationComplete = true;
+        options.frameChanges.notifyHost(workspaces.map(row => row.workspaceId));
       } finally {await rm(temporary, {recursive: true, force: true});}
     } catch (error) {
       if (!signal.aborted) {lastError = error; options.onError?.(error);}

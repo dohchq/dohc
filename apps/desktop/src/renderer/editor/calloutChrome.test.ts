@@ -5,7 +5,8 @@ import { NodeSelection } from "@tiptap/pm/state";
 import { StarterKit } from "@tiptap/starter-kit";
 import { Markdown } from "@tiptap/markdown";
 import { TaskList } from "@tiptap/extension-list";
-import { DohcTaskItem, dohcMarkdownExtensions } from "./extensions";
+import { DohcTaskItem } from "@dohc/ydoc-projection/markdown-extensions";
+import { desktopMarkdownExtensions } from "./extensions";
 import { makeCalloutChromePlugin } from "./calloutChrome";
 
 const calloutChrome = Extension.create({
@@ -26,7 +27,7 @@ function makeEditor(markdown: string): Editor {
     element,
     extensions: [
       StarterKit.configure({ trailingNode: false }),
-      ...dohcMarkdownExtensions,
+      ...desktopMarkdownExtensions,
       TaskList,
       DohcTaskItem,
       Markdown.configure({ indentation: { style: "space", size: 2 } }),
