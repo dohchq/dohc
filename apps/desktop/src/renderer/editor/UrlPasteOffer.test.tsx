@@ -74,6 +74,30 @@ describe("URL paste offer row", () => {
     expect(document.activeElement).toBe(screen.getByTestId("url-paste-link"));
   });
 
+  it("returns focus to the editor when a choice of the current form closes the row", () => {
+    const { onChoose, view, rerender } = renderOffer();
+    screen.getByTestId("url-paste-link").focus();
+    fireEvent.click(screen.getByTestId("url-paste-link"));
+    expect(onChoose).toHaveBeenCalledWith("link");
+    expect(view.focus).toHaveBeenCalledOnce();
+    rerender(null);
+    expect(screen.queryByTestId("url-paste-offer")).toBeNull();
+  });
+
+  it("leaves the editor's focus alone when the pointer chooses", () => {
+    const { view } = renderOffer();
+    fireEvent.click(screen.getByTestId("url-paste-link"));
+    expect(view.focus).not.toHaveBeenCalled();
+  });
+
+  it("returns focus to the editor after Undo from the keyboard", () => {
+    const { onUndo, view } = renderOffer({ ...OFFER, form: "plain", chosen: true });
+    screen.getByTestId("url-paste-undo").focus();
+    fireEvent.click(screen.getByTestId("url-paste-undo"));
+    expect(onUndo).toHaveBeenCalledOnce();
+    expect(view.focus).toHaveBeenCalledOnce();
+  });
+
   it("shows Undo after a choice made from the keyboard, with focus on it", () => {
     const { onChoose, onUndo, onDismiss, rerender } = renderOffer();
     screen.getByTestId("url-paste-plain").focus();

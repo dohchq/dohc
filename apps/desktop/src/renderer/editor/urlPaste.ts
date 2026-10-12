@@ -46,9 +46,28 @@ function spanOf(offer: UrlPasteOffer, tr: Transaction, state: EditorState): UrlP
   return { from, to, url: offer.url, text: offer.text, form: formAt(state, from, to), chosen: false };
 }
 
+// Y.js applies a remote edit, or an undo, by replacing the whole document,
+// which maps the span away. The URL is still on the caret's line when the
+// edit was elsewhere: take the copy there nearest the mapped position. A copy
+// inside a longer word is a changed URL, not this one.
+function refind(state: EditorState, text: string, near: number): number | null {
+  const { $head } = state.selection;
+  if (!$head.parent.isTextblock) return null;
+  // One character for each inline leaf, so offsets in the line are positions.
+  const line = $head.parent.textBetween(0, $head.parent.content.size, undefined, "￼");
+  const bounded = (at: number) => !/\S/.test(line[at - 1] ?? " ") && !/\S/.test(line[at + text.length] ?? " ");
+  let found: number | null = null;
+  for (let at = line.indexOf(text); at >= 0; at = line.indexOf(text, at + 1)) {
+    if (!bounded(at)) continue;
+    const from = $head.start() + at;
+    if (found === null || Math.abs(from - near) < Math.abs(found - near)) found = from;
+  }
+  return found;
+}
+
 // The offer a URL paste raises. It leaves when its text changes or the caret
-// leaves its line; typing, Escape and a click elsewhere dismiss it from the
-// row and the editor's key handler.
+// leaves its line; typing, composing, Escape and a click elsewhere dismiss it
+// from the row and the editor's key handler.
 export function makeUrlPasteOfferPlugin(onChange: (offer: UrlPasteOfferState | null) => void) {
   let pending: UrlPasteOffer | null = null;
   return new Plugin<UrlPasteOfferState | null>({
@@ -64,9 +83,14 @@ export function makeUrlPasteOfferPlugin(onChange: (offer: UrlPasteOfferState | n
           return spanOf(offer, tr, state);
         }
         if (!value) return null;
-        const from = tr.mapping.map(value.from, 1);
-        const to = tr.mapping.map(value.to, -1);
-        if (tr.docChanged && (to - from !== value.text.length || state.doc.textBetween(from, to) !== value.text)) return null;
+        let from = tr.mapping.map(value.from, 1);
+        let to = tr.mapping.map(value.to, -1);
+        if (tr.docChanged && (to - from !== value.text.length || state.doc.textBetween(from, to) !== value.text)) {
+          const found = refind(state, value.text, from);
+          if (found === null) return null;
+          from = found;
+          to = found + value.text.length;
+        }
         if (!state.selection.$head.sameParent(state.doc.resolve(from))) return null;
         const form = tr.docChanged ? formAt(state, from, to) : value.form;
         const chosen = value.chosen || meta?.type === "chosen";
@@ -77,6 +101,13 @@ export function makeUrlPasteOfferPlugin(onChange: (offer: UrlPasteOfferState | n
     },
     props: {
       handlePaste: (view, event) => handleUrlPaste(view, event, offer => { pending = offer; }),
+      // ProseMirror gives the key handler no keys while an IME composes.
+      handleDOMEvents: {
+        compositionstart: (view) => {
+          dismissUrlPasteOffer(view);
+          return false;
+        },
+      },
     },
     view: () => ({
       update(view, previous) {

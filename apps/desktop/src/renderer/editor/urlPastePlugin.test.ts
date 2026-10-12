@@ -48,6 +48,15 @@ function paste(target: Editor, text = URL_TEXT) {
   target.view.dispatch(tr.setMeta("paste", true).setMeta("uiEvent", "paste"));
 }
 
+// A remote Y.js update as the editor receives it: the whole document
+// replaced in one step, and the caret restored where its text moved.
+function remoteReplace(target: Editor, edit: (json: string) => string, caretShift: number) {
+  const next = target.schema.nodeFromJSON(JSON.parse(edit(JSON.stringify(target.state.doc.toJSON()))));
+  const caret = target.state.selection.head + caretShift;
+  const tr = target.state.tr.replaceWith(0, target.state.doc.content.size, next.content).setMeta("addToHistory", false);
+  target.view.dispatch(tr.setSelection(TextSelection.create(tr.doc, caret)));
+}
+
 function key(target: Editor, init: KeyboardEventInit) {
   const focusRow = vi.fn();
   const handled = urlPasteOfferKeyDown(target.view, new KeyboardEvent("keydown", init), focusRow);
@@ -134,6 +143,31 @@ describe("URL paste offer", () => {
     const before = editor.state.doc;
     chooseUrlForm(editor.view, "link");
     expect(editor.state.doc).toBe(before);
+    expect(offer(editor)).toBeNull();
+  });
+
+  it("stays through a remote edit that replaces the whole document", () => {
+    const { editor } = setup();
+    paste(editor);
+    // Another paragraph grows by eight characters.
+    remoteReplace(editor, (json) => json.replace('"text":"Before"', '"text":"Before, edited"'), 8);
+    expect(offer(editor)).toMatchObject({ from: 17, to: 17 + URL_TEXT.length, form: "link" });
+    // The remote edit is outside this editor's history, so a choice still undoes alone.
+    chooseUrlForm(editor.view, "plain");
+    expect(offer(editor)).toMatchObject({ form: "plain", chosen: true });
+  });
+
+  it("leaves when a remote edit changes its text", () => {
+    const { editor } = setup();
+    paste(editor);
+    remoteReplace(editor, (json) => json.replace(`"text":"${URL_TEXT}"`, `"text":"${URL_TEXT}/other"`), 0);
+    expect(offer(editor)).toBeNull();
+  });
+
+  it("is dismissed when an IME starts composing, which the key handler never sees", () => {
+    const { editor } = setup();
+    paste(editor);
+    editor.view.dom.dispatchEvent(new Event("compositionstart", { bubbles: true }));
     expect(offer(editor)).toBeNull();
   });
 

@@ -138,11 +138,23 @@ export function UrlPasteOffer(props: {
       chosen={offer.chosen}
       className={MENU_ENTER}
       style={{ position: "fixed", left: position.x, top: position.y, zIndex: 60, ...menuEnterFrom(position.placement) }}
+      // A choice of the current form and Undo close the row: focus they held
+      // goes back to the editor, at its caret.
       onChoose={(form) => {
-        focusUndo.current = rowRef.current?.contains(document.activeElement) ?? false;
+        const focused = rowRef.current?.contains(document.activeElement) ?? false;
+        if (form === offer.form) {
+          props.onChoose(form);
+          if (focused) view.focus();
+          return;
+        }
+        focusUndo.current = focused;
         props.onChoose(form);
       }}
-      onUndo={props.onUndo}
+      onUndo={() => {
+        const focused = rowRef.current?.contains(document.activeElement) ?? false;
+        props.onUndo();
+        if (focused) view.focus();
+      }}
       onKeyDown={(event) => {
         if (event.key === "Escape") {
           event.preventDefault();
