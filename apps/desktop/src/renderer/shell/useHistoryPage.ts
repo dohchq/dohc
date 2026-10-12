@@ -27,6 +27,15 @@ export type HistoryReadState = "loading" | "failed" | "updating";
 const HISTORY_UPDATING_RETRY_DELAYS_MS = [100, 250, 500, 1_000] as const;
 const HISTORY_PAGE_LIMIT = 50;
 
+type MomentPosition = Pick<HistoryPage["moments"][number], "recordedAtMs" | "momentOrder" | "protected">;
+
+// Match the engine's newest-first merge: time, text before protected, then order.
+function compareMomentPositions(left: MomentPosition, right: MomentPosition): number {
+  return right.recordedAtMs - left.recordedAtMs ||
+    Number(left.protected === true) - Number(right.protected === true) ||
+    right.momentOrder - left.momentOrder;
+}
+
 function waitForHistoryRetry(delayMs: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, delayMs));
 }
@@ -362,6 +371,14 @@ export function useHistoryPage(
     const watermark = committed.current;
     const version = committedVersionId.current;
     const live = () => liveRequest && !loadingMoreNow.current && latestPage.current === shown && committed.current === watermark && committedVersionId.current === version;
+    const oldest = shown.moments.reduce((last, moment) => compareMomentPositions(moment, last) > 0 ? moment : last);
+    // Deletion can move a page cut past its original cursor. Bound the scan
+    // by position, including progress through filtered or marker-only pages.
+    // At equal times, markers follow both moment streams.
+    const reachedEnd = (cursor: NonNullable<HistoryPage["nextCursor"]>) =>
+      (cursor.text !== null && compareMomentPositions(cursor.text, oldest) >= 0) ||
+      (cursor.protected !== null && compareMomentPositions({ ...cursor.protected, protected: true }, oldest) >= 0) ||
+      (cursor.marker !== null && cursor.marker.createdAtMs <= oldest.recordedAtMs);
     const scan = async () => {
       const named = new Map<string, HistoryPage["moments"][number]>();
       const remaining = new Set(shown.moments.map(moment => moment.id));
@@ -377,7 +394,7 @@ export function useHistoryPage(
           named.set(moment.id, moment);
           remaining.delete(moment.id);
         }
-        if (remaining.size === 0 || response.nextCursor === null) break;
+        if (remaining.size === 0 || response.nextCursor === null || reachedEnd(response.nextCursor)) break;
         cursor = response.nextCursor;
       } while (live());
       if (!live()) return false;

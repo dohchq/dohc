@@ -1,4 +1,3 @@
-import { historyCursor, historyPageFields } from "../../testing/historyPageFixture";
 // @vitest-environment jsdom
 import { act, cleanup, renderHook } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -10,6 +9,7 @@ import type {
   ListEngineMomentsResult,
 } from "../../ipc/bridgeContract";
 import { deferred, type Deferred } from "../../testing/deferred";
+import { historyCursor, historyPageFields } from "../../testing/historyPageFixture";
 import { useHistoryPage } from "./useHistoryPage";
 
 let previousBridge: DohcDesktopBridge | undefined;
@@ -767,7 +767,7 @@ it("re-reads each names revision once, without scanning again on refresh or load
   const it0 = mount();
   const orderedPage = (id: string, order: number, next: number | null): ListEngineMomentsResult => ({
     ...page(id, { startCursor: historyCursor(order + 1), nextCursor: next === null ? null : historyCursor(next), latestMomentOrder: 3 }),
-    moments: [{ ...moment(id), momentOrder: order }],
+    moments: [{ ...moment(id), recordedAtMs: order, momentOrder: order }],
   });
   await committed(it0, orderedPage("first", 3, 3));
   act(() => notify({ workspaceId: "ws-1" }));
@@ -883,16 +883,72 @@ it("refreshes names from the original fenced cursor across a marker-only page", 
   const it0 = mount();
   const start = { ...historyCursor(5), workspaceId: "ws-1", text: null };
   const afterMarker = { ...start, marker: { createdAtMs: 90, versionId: "draft" } };
-  await committed(it0, page("kept", { startCursor: start }));
+  await committed(it0, { ...page("kept", { startCursor: start }), moments: [{ ...moment("kept"), recordedAtMs: 80 }] });
   act(() => notify({ workspaceId: "ws-1" }));
   expect(listEngineMoments.mock.calls[1]?.[0].cursor).toEqual(start);
   await settle(reads[1]!, { ...page("unused", { startCursor: start, nextCursor: afterMarker }), moments: [],
     versionMarkers: [{ id: "draft", workspaceId: "ws-1", kind: "named", name: "Draft", createdAtMs: 90 }] });
   expect(listEngineMoments.mock.calls[2]?.[0].cursor).toEqual(afterMarker);
   await settle(reads[2]!, { ...page("kept", { startCursor: afterMarker }), moments: [{
-    ...moment("kept"), namedAuthor: { userId: "ben", label: "ben@test.example (via share link)" },
+    ...moment("kept"), recordedAtMs: 80, namedAuthor: { userId: "ben", label: "ben@test.example (via share link)" },
   }] });
   expect(it0.hook().page?.moments[0]?.namedAuthor?.label).toContain("ben@test.example");
   expect(it0.hook().page?.startCursor).toEqual(start);
   expect(reads).toHaveLength(3);
+});
+
+
+it.each([
+  ["text", "moment"], ["protected", "moment"],
+  ["text", "marker"], ["protected", "marker"],
+])("bounds a names rescan when a shown %s moment was deleted at a %s page cut", async (stream, cut) => {
+  let notify!: (event: { workspaceId: string }) => void;
+  window.dohcDesktop!.onHistoryNamesChanged = listener => { notify = listener; return () => {}; };
+  const it0 = mount();
+  const start = { ...historyCursor(), workspaceId: "ws-1", text: null };
+  const kept = { ...moment("kept"), recordedAtMs: 100, momentOrder: 1 };
+  // Old-dated sync moments can have a higher order than newer text moments.
+  const missing = { ...moment("deleted"), recordedAtMs: 80, momentOrder: stream === "text" ? 500 : 5,
+    ...(stream === "protected" ? { protected: true } : {}) };
+  const originalEnd = { ...start, text: stream === "text"
+    ? { recordedAtMs: 80, momentOrder: 500 } : { recordedAtMs: 100, momentOrder: 1 },
+    protected: stream === "protected" ? { recordedAtMs: 80, momentOrder: 5 } : null };
+  await committed(it0, { ...page("unused", { startCursor: start, nextCursor: originalEnd }), moments: [kept, missing] });
+
+  const renamed = { ...kept, namedAuthor: { userId: "ben", label: "ben@test.example (via share link)" } };
+  const newer = { ...moment("unshown-newer"), recordedAtMs: 90, momentOrder: 2 };
+  const afterNewer = { ...start, text: { recordedAtMs: 90, momentOrder: 2 } };
+  const afterMarker = { ...afterNewer, marker: { createdAtMs: 85, versionId: "draft" } };
+  // Text at the same millisecond still precedes the protected boundary.
+  const sameTimeText = { ...moment("unshown-same-time"), recordedAtMs: 80, momentOrder: stream === "text" ? 501 : 1 };
+  const beforeBound = { ...afterMarker, text: { recordedAtMs: 80, momentOrder: sameTimeText.momentOrder } };
+  const older = { ...moment("unshown-older"), recordedAtMs: 79, momentOrder: 1_000,
+    ...(stream === "protected" ? { protected: true } : {}) };
+  const pastBound = cut === "marker"
+    ? { ...beforeBound, marker: { createdAtMs: 80, versionId: "older-draft" } }
+    : { ...beforeBound, [stream]: { recordedAtMs: older.recordedAtMs, momentOrder: older.momentOrder } };
+  const scan = async () => {
+    const offset = reads.length;
+    act(() => notify({ workspaceId: "ws-1" }));
+    expect(listEngineMoments.mock.calls[offset]?.[0].cursor).toEqual(start);
+    await settle(reads[offset]!, { ...page("unused", { startCursor: start, nextCursor: afterNewer }), moments: [renamed, newer] });
+    expect(reads).toHaveLength(offset + 2);
+    await settle(reads[offset + 1]!, { ...page("unused", { startCursor: afterNewer, nextCursor: afterMarker }), moments: [],
+      versionMarkers: [{ id: "draft", workspaceId: "ws-1", kind: "named", name: "Draft", createdAtMs: 85 }] });
+    expect(reads).toHaveLength(offset + 3);
+    await settle(reads[offset + 2]!, { ...page("unused", { startCursor: afterMarker, nextCursor: beforeBound }), moments: [sameTimeText] });
+    expect(reads).toHaveLength(offset + 4);
+    await settle(reads[offset + 3]!, { ...page("unused", { startCursor: beforeBound, nextCursor: pastBound }),
+      moments: cut === "moment" ? [older] : [],
+      versionMarkers: cut === "marker" ? [{ id: "older-draft", workspaceId: "ws-1", kind: "named", name: "Older draft", createdAtMs: 80 }] : [] });
+    expect(reads).toHaveLength(offset + 4);
+    await act(async () => { await Promise.resolve(); });
+    expect(reads).toHaveLength(offset + 4);
+  };
+  await scan();
+  expect(it0.ids()).toEqual(["kept", "deleted"]);
+  expect(it0.hook().page?.moments[0]?.namedAuthor).toEqual(renamed.namedAuthor);
+  expect(it0.hook().page?.nextCursor).toEqual(originalEnd);
+  await scan();
+  expect(reads).toHaveLength(9);
 });
