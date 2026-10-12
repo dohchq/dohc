@@ -1164,16 +1164,27 @@ fn maximal_writes_checkpoint_within_the_client_busy_budget() {
             }
         })
         .collect();
-    write(&mut store, "maximum", "maximum.md", &maximum_text, 3);
-    maximum_text.replace_range(0..1, "Z");
-    write(&mut store, "maximum", "maximum.md", &maximum_text, 4);
-    maximum_text.replace_range(0..1, "Q");
-    write(&mut store, "maximum", "maximum.md", &maximum_text, 5);
+    // Pin only through the accepted transaction that crosses the admission
+    // cap. Fresh-schema frames can make that happen before the third write;
+    // another write while still pinned would measure a permanent refusal.
+    let mut maximum_writes = 0;
+    for (n, prefix) in [(3, "a"), (4, "Z"), (5, "Q")] {
+        let frames: i64 = store
+            .read_with(|c| c.query_row("PRAGMA wal_checkpoint(NOOP)", [], |r| r.get(1)))
+            .unwrap();
+        if frames >= 6000 {
+            break;
+        }
+        maximum_text.replace_range(0..1, prefix);
+        write(&mut store, "maximum", "maximum.md", &maximum_text, n);
+        maximum_writes += 1;
+    }
+    assert!(maximum_writes > 0, "the fixture must commit a maximal document");
     let frames: i64 = store
         .read_with(|c| c.query_row("PRAGMA wal_checkpoint(NOOP)", [], |r| r.get(1)))
         .unwrap();
     assert!(
-        frames > 6000,
+        frames >= 6000,
         "maximum text must exercise refused admission, frames={frames}"
     );
     reader.execute_batch("COMMIT").unwrap();
