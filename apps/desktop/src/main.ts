@@ -95,7 +95,7 @@ import { runInWorkspaceAuthorityLane } from "./workspaces/workspaceAuthorityLane
 import { normalizeAbsolutePath } from "@dohc/workspace-core";
 import { randomUUID } from "node:crypto";
 import { accessCliQueries, createAccessAcquisition, createAccessOwner, ownerAccessRoster } from "./access/accessOwner";
-import { hasAccessChat, locateAccessVersionPath, resolveAccessObject } from "./access/accessObjectResolution";
+import { hasAccessChat, locateAccessVersionPath, resolveAccessFileObject, resolveAccessObject } from "./access/accessObjectResolution";
 import { createShareCopyHandler } from "./ipc/shareCopyHandler";
 import { shareCopyOperations } from "./ipc/shareCopyOperations";
 import { accessOperations } from "./ipc/accessOperations";
@@ -1579,13 +1579,8 @@ const accessOwner = createAccessOwner<AccessWorkspaceOperation>({
   resolve: async (operation, ref) => {
     const workspace = operation.workspace;
     return resolveAccessObject(workspace, ref, {
-      filePathForObjectId: async objectId => {
-        const resolved = await withEngineAdapter(receivedShareEngine.workspaceForRegistered(workspace), adapter =>
-          adapter.resolveFiles({ workspaceId: workspace.workspaceId, targets: [{ objectId }], signal: operation.signal }));
-        if (!resolved) throw new Error("File aliases are unavailable.");
-        const [file] = resolved.results;
-        return file?.status === "found" ? { path: file.path, versionId: resolved.versionId } : null;
-      },
+      filePathForObjectId: objectId => resolveAccessFileObject(workspace, objectId,
+        work => withEngineAdapter(receivedShareEngine.workspaceForRegistered(workspace), work), operation.signal),
       locatePath: async (path, versionId) => {
         if (versionId !== null && versionId !== "main") {
           return withEngineAdapter(receivedShareEngine.workspaceForRegistered(workspace), adapter =>
