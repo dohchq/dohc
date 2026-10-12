@@ -81,6 +81,7 @@ function Rail(props: Partial<ComponentProps<typeof ShellAboutRail>>) {
         shareView={null}
         searchChatTarget={null}
         onSearchHitRead={() => undefined}
+        onSearchHitClosed={() => undefined}
         openPathWithHeading={() => undefined}
         onChatsThreadRead={() => undefined}
         reportFailureMessage={() => undefined}

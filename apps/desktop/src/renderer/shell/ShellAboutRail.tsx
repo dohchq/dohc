@@ -32,7 +32,8 @@ export type AboutSearchHit = {
   thread: ChatThreadRecord;
   focusMessageId?: string;
   tab: string | null;
-  // Read by About's file panel, which then shows it until focus moves.
+  // Read by About's file panel. The shell drops a read hit once that panel
+  // stops showing its thread, so it never hides the tab's own About after.
   read: boolean;
 };
 
@@ -52,6 +53,7 @@ export const ShellAboutRail = memo(function ShellAboutRail(props: {
   shareView: NonNullable<WorkspaceSummary["shareView"]> | null;
   searchChatTarget: AboutSearchHit | null;
   onSearchHitRead: () => void;
+  onSearchHitClosed: () => void;
   openPathWithHeading: LinkedChatsPanelProps["onOpenPath"];
   onChatsThreadRead: LinkedChatsPanelProps["onThreadRead"];
   reportFailureMessage: LinkedChatsPanelProps["onError"];
@@ -73,6 +75,7 @@ export const ShellAboutRail = memo(function ShellAboutRail(props: {
     shareView,
     searchChatTarget,
     onSearchHitRead,
+    onSearchHitClosed,
     openPathWithHeading,
     onChatsThreadRead,
     reportFailureMessage,
@@ -152,6 +155,7 @@ export const ShellAboutRail = memo(function ShellAboutRail(props: {
               initialThread={pendingHit?.thread ?? null}
               initialFocusMessageId={pendingHit?.focusMessageId}
               onInitialThreadConsumed={onSearchHitRead}
+              onInitialThreadClosed={onSearchHitClosed}
               onOpenPath={openPathWithHeading}
               onThreadRead={onChatsThreadRead}
               onError={reportFailureMessage}

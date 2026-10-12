@@ -1657,6 +1657,11 @@ export function DesktopWorkspaceShell(props: {
   const onSearchHitRead = useCallback(() => {
     setSearchChatTarget((target) => (target === null || target.read ? target : { ...target, read: true }));
   }, []);
+  // About's file panel stopped showing the hit it read: Back, a switch, or
+  // About closing. A newer hit it has not read stays.
+  const onSearchHitClosed = useCallback(() => {
+    setSearchChatTarget((target) => (target?.read ? null : target));
+  }, []);
   // The local writers on these lanes. Dismissing the review card clears it
   // here, and that IS the user acting: it supersedes whatever a request issued
   // earlier will eventually say.
@@ -5733,6 +5738,7 @@ export function DesktopWorkspaceShell(props: {
             shareView={shareView}
             searchChatTarget={searchChatTarget}
             onSearchHitRead={onSearchHitRead}
+            onSearchHitClosed={onSearchHitClosed}
             openPathWithHeading={openPathWithHeading}
             onChatsThreadRead={onChatsThreadRead}
             reportFailureMessage={reportFailureMessage}

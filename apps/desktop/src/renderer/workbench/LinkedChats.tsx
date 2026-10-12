@@ -108,6 +108,8 @@ export function LinkedChatsPanel(props: {
   // panel (History <-> Chats toggle) resets consumedInitialThread and
   // re-opens the stale thread.
   onInitialThreadConsumed?: () => void;
+  // Fired when the thread initialThread opened stops showing here.
+  onInitialThreadClosed?: () => void;
   onOpenPath?: (path: string, headingAnchor?: string) => void;
   // Reports a landed read so the Chats navigator can refetch its badges. The
   // file-linked threads it lists are read here, not in the Chats view.
@@ -273,6 +275,21 @@ export function LinkedChatsPanel(props: {
     [props.onError, props.onThreadRead, reactions, workspaceId],
   );
 
+  // The thread initialThread opened, while it is the one shown. When it stops
+  // showing (Back, a switch, or this panel unmounting), the parent hears so.
+  // Declared before the effect that sets it, so its first run sees nothing.
+  const shownInitialThread = useRef<string | null>(null);
+  const onInitialThreadClosed = useRef(props.onInitialThreadClosed);
+  onInitialThreadClosed.current = props.onInitialThreadClosed;
+  useEffect(() => {
+    if (shownInitialThread.current === null || activeThread?.id === shownInitialThread.current) return;
+    shownInitialThread.current = null;
+    onInitialThreadClosed.current?.();
+  }, [activeThread]);
+  useEffect(() => () => {
+    if (shownInitialThread.current !== null) onInitialThreadClosed.current?.();
+  }, []);
+
   // Consume each search-result click once. The shell creates a fresh record
   // per click, including when the user reopens the same thread.
   const consumedInitialThread = useRef<ChatThreadRecord | null>(null);
@@ -280,6 +297,7 @@ export function LinkedChatsPanel(props: {
     if (!props.initialThread) return;
     if (consumedInitialThread.current === props.initialThread) return;
     consumedInitialThread.current = props.initialThread;
+    shownInitialThread.current = props.initialThread.id;
     void openThread(props.initialThread, props.initialFocusMessageId);
     props.onInitialThreadConsumed?.();
   }, [

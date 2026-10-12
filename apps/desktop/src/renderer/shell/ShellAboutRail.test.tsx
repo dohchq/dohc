@@ -263,6 +263,49 @@ describe("About rail (right side)", () => {
     expect(within(rail).queryByTestId("linked-chat-thread")).toBeNull();
   });
 
+  it("gives a conversation its About back once a read hit stops showing", async () => {
+    const general = chatTabPath({ kind: "channel", id: "general" });
+    const bridge = makeBridge(Promise.resolve(storedStateWithTabs([general], general)));
+    bridge.listChatChannels.mockResolvedValue({
+      channels: [{
+        id: "general", name: "general", slug: "general", kind: "channel",
+        createdAtMs: 1, updatedAtMs: 1, threadCount: 0, unreadCount: 0, wireId: "general",
+      }],
+      fileThreads: [],
+    });
+    const user = userEvent.setup();
+    renderShell(bridge);
+    expect((await within(await screen.findByTestId("about-rail")).findByTestId("about-header")).textContent).toBe("general");
+
+    await user.click(screen.getByTestId("activity-search"));
+    await user.type(screen.getByTestId("search-input"), "pricing");
+    await waitFor(() => expect(bridge.searchWorkspace).toHaveBeenCalled());
+    const { searchId } = bridge.searchWorkspace.mock.calls.at(-1)![0];
+    act(() => {
+      bridge.emitSearchResults({
+        searchId,
+        entries: [{
+          path: "other.md", line: 1, column: 1, preview: "pricing questions", matchStart: 0, matchEnd: 7,
+          surface: "chat", threadId: "thread-pricing", title: "Pricing questions",
+        }],
+        done: true,
+        limitHit: false,
+      });
+    });
+    await user.click(await screen.findByTestId("search-result-row"));
+    expect((await within(screen.getByTestId("about-rail")).findByTestId("linked-chat-title")).textContent)
+      .toBe("Pricing questions");
+
+    // Close About and open it again on the same tab: the hit was read and is
+    // no longer showing, so the conversation's own About returns.
+    await user.click(screen.getByTestId("titlebar-about-sidebar"));
+    await user.click(screen.getByTestId("titlebar-about-sidebar"));
+    const reopened = await screen.findByTestId("about-rail");
+    expect((await within(reopened).findByTestId("about-header")).textContent).toBe("general");
+    expect(within(reopened).queryByTestId("linked-chat-thread")).toBeNull();
+    expect(within(reopened).queryByTestId("linked-chats-empty")).toBeNull();
+  });
+
   it("points a shared view at its files only, whatever chat tabs it kept", async () => {
     const bridge = makeShareBridge(Promise.resolve({
       ...storedStateWithTabs([chatTabPath({ kind: "channel", id: "general" }), CHATS_TAB_PATH], CHATS_TAB_PATH),
