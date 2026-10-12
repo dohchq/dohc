@@ -667,6 +667,12 @@ impl EngineService {
             // close cannot tear down the desktop's actor, capture, or relay.
             // Same workspace: short-circuit only on a live binding. A bound-but-
             // closed actor (its worker died) is stale — drop it and reopen fresh.
+            if (open.mode == WorkspaceOpenMode::Passive) != passive {
+                return Err(WireError::new(
+                    ErrorCode::InvalidParams,
+                    "workspace root is already open in a different mode",
+                ));
+            }
             if !open.actor.lifecycle().needs_reopen() {
                 if requested_mode == WorkspaceOpenMode::ReadOnly {
                     // Caller-supplied relay params and captureAuthor are
@@ -1292,6 +1298,87 @@ mod tests {
     use std::time::Duration;
 
     #[tokio::test]
+    async fn passive_store_refuses_read_only_attach() {
+        let scratch = ScratchDir::new().unwrap();
+        let service = EngineService::new();
+        let params = json!({"rootDir":scratch.path(), "workspaceId":"passive", "captureMode":"none", "storeMode":"passive"});
+        let opened = service
+            .workspace_open(&RequestContext::unbounded(), params)
+            .await
+            .unwrap();
+        let handle = serde_json::from_value(opened["workspace"].clone()).unwrap();
+        let attach = service.workspace_open(&RequestContext::unbounded(), json!({"rootDir":scratch.path(), "workspaceId":"passive", "skipStartupMaintenance":true})).await;
+        service.workspace_close(Some(handle)).await.unwrap();
+        assert!(
+            attach.is_err(),
+            "a passive binding must not expose raw history through an attach"
+        );
+    }
+
+    #[tokio::test]
+    async fn passive_store_refuses_owner_reopen_after_restart() {
+        let scratch = ScratchDir::new().unwrap();
+        let passive = json!({"rootDir":scratch.path(), "workspaceId":"passive", "captureMode":"none", "storeMode":"passive"});
+        for _ in 0..2 {
+            let service = EngineService::new();
+            let opened = service
+                .workspace_open(&RequestContext::unbounded(), passive.clone())
+                .await
+                .unwrap();
+            service
+                .workspace_close(Some(
+                    serde_json::from_value(opened["workspace"].clone()).unwrap(),
+                ))
+                .await
+                .unwrap();
+        }
+        let service = EngineService::new();
+        let mut owner = passive;
+        owner.as_object_mut().unwrap().remove("storeMode");
+        let reopened = service
+            .workspace_open(&RequestContext::unbounded(), owner.clone())
+            .await;
+        assert!(
+            reopened.is_err(),
+            "a passive root must keep its durable role"
+        );
+        owner["skipStartupMaintenance"] = json!(true);
+        assert!(
+            service
+                .workspace_open(&RequestContext::unbounded(), owner)
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn passive_store_refuses_existing_owner_root() {
+        let scratch = ScratchDir::new().unwrap();
+        let params = json!({"rootDir":scratch.path(), "workspaceId":"owner", "captureMode":"none"});
+        let service = EngineService::new();
+        let opened = service
+            .workspace_open(&RequestContext::unbounded(), params.clone())
+            .await
+            .unwrap();
+        service
+            .workspace_close(Some(
+                serde_json::from_value(opened["workspace"].clone()).unwrap(),
+            ))
+            .await
+            .unwrap();
+        let service = EngineService::new();
+        let mut passive = params;
+        passive["storeMode"] = json!("passive");
+        assert!(
+            service
+                .workspace_open(&RequestContext::unbounded(), passive)
+                .await
+                .is_err(),
+            "an owner root cannot become a passive store"
+        );
+    }
+
+    #[tokio::test]
     async fn passive_store_opens_writable_without_starting_work() {
         let scratch = dohc_engine_testkit::ScratchDir::new().unwrap();
         let service = EngineService::new();
@@ -1332,7 +1419,7 @@ mod tests {
     async fn passive_store_startup_leaves_existing_file_jobs_pending() {
         let scratch = ScratchDir::new().unwrap();
         let service = EngineService::new();
-        let mut params = json!({"rootDir":scratch.path(), "workspaceId":"passive-startup", "captureMode":"none"});
+        let mut params = json!({"rootDir":scratch.path(), "workspaceId":"passive-startup", "captureMode":"none", "storeMode":"passive"});
         let opened = service
             .workspace_open(&RequestContext::unbounded(), params.clone())
             .await
@@ -1377,26 +1464,25 @@ mod tests {
         let latest = latest.unwrap();
         service.workspace_close(Some(handle)).await.unwrap();
         let db_path = scratch.path().join(".dohc/engine/engine.db");
-        let mut store = dohc_engine_storage::EngineStore::open(&db_path, 4).unwrap();
-        store
-            .write_with(&NoFaults, |tx| {
-                dohc_engine_storage::enqueue_job(
-                    tx,
-                    &dohc_engine_storage::MaterializationJobSpec {
-                        job_id: "pending-startup".into(),
-                        workspace_id: "passive-startup".into(),
-                        target_path: "note.txt".into(),
-                        content_sha256: latest.snapshot.blob_sha256,
-                        preimage: dohc_engine_storage::Preimage::Present(
-                            dohc_engine_storage::hex_sha256(b"old"),
-                        ),
-                        target_generation: latest.moment.moment_order,
-                        now_ms: 4,
-                    },
-                )
-            })
-            .unwrap();
-        drop(store);
+        let mut conn = rusqlite::Connection::open(&db_path).unwrap();
+        let tx = conn.transaction().unwrap();
+        dohc_engine_storage::enqueue_job(
+            &tx,
+            &dohc_engine_storage::MaterializationJobSpec {
+                job_id: "pending-startup".into(),
+                workspace_id: "passive-startup".into(),
+                target_path: "note.txt".into(),
+                content_sha256: latest.snapshot.blob_sha256,
+                preimage: dohc_engine_storage::Preimage::Present(dohc_engine_storage::hex_sha256(
+                    b"old",
+                )),
+                target_generation: latest.moment.moment_order,
+                now_ms: 4,
+            },
+        )
+        .unwrap();
+        tx.commit().unwrap();
+        drop(conn);
         std::fs::write(scratch.path().join("note.txt"), "old").unwrap();
         params["storeMode"] = json!("passive");
         let opened = service

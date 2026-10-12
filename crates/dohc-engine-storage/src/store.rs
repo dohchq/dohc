@@ -64,21 +64,48 @@ fn should_crash(_faults: &dyn FaultInjector, _point: FaultPoint) -> bool {
     false
 }
 
+pub(crate) fn install_passive_guards(conn: &Connection) -> Result<(), StorageError> {
+    conn.execute_batch(
+        "CREATE TEMP TRIGGER IF NOT EXISTS passive_no_file_jobs BEFORE INSERT ON main.materialization_jobs
+         BEGIN SELECT RAISE(IGNORE); END;
+         CREATE TEMP TRIGGER IF NOT EXISTS passive_no_automation_claims BEFORE INSERT ON main.automation_claims
+         BEGIN SELECT RAISE(IGNORE); END;
+         CREATE TEMP TRIGGER IF NOT EXISTS passive_no_local_ops BEFORE INSERT ON main.replication_log
+         WHEN NEW.imported = 0
+         BEGIN SELECT RAISE(ABORT, 'passive store cannot originate'); END;
+         CREATE TEMP TRIGGER IF NOT EXISTS passive_no_audit_exports BEFORE INSERT ON main.live_audit_pending_exports
+         BEGIN SELECT RAISE(ABORT, 'passive store cannot export live history'); END;"
+    ).map_err(StorageError::persist)
+}
+
 impl EngineStore {
-    /// Restrict this writable connection to imported state and private projections.
-    /// The guards live only on this connection; ordinary opens keep their behavior.
+    /// Install connection guards only for a store with the durable passive role.
     pub fn make_passive(&mut self) -> Result<(), StorageError> {
-        self.conn.execute_batch(
-            "CREATE TEMP TRIGGER passive_no_file_jobs BEFORE INSERT ON main.materialization_jobs
-             BEGIN SELECT RAISE(IGNORE); END;
-             CREATE TEMP TRIGGER passive_no_automation_claims BEFORE INSERT ON main.automation_claims
-             BEGIN SELECT RAISE(IGNORE); END;
-             CREATE TEMP TRIGGER passive_no_local_ops BEFORE INSERT ON main.replication_log
-             WHEN NEW.imported = 0
-             BEGIN SELECT RAISE(ABORT, 'passive store cannot originate'); END;"
-        ).map_err(StorageError::persist)?;
+        if !crate::schema::store_is_passive(&self.conn)? {
+            return Err(StorageError::InvalidInput {
+                reason: "engine store role mismatch",
+            });
+        }
+        install_passive_guards(&self.conn)?;
         self.passive = true;
         Ok(())
+    }
+
+    /// Open a passive store; existing owner stores are refused.
+    pub fn open_passive(
+        path: &Path,
+        now_ms: i64,
+        root_token: Option<&str>,
+        work: Option<Arc<AtomicU64>>,
+    ) -> Result<Self, StorageError> {
+        let opened =
+            crate::schema::open_engine_db_with_store_role(path, now_ms, root_token, work, true)?;
+        Ok(Self {
+            conn: opened.conn,
+            freshly_created: opened.freshly_created,
+            database_path: path.to_path_buf(),
+            passive: true,
+        })
     }
 
     pub fn is_passive(&self) -> bool {
@@ -142,11 +169,12 @@ impl EngineStore {
         work: Option<Arc<AtomicU64>>,
     ) -> Result<Self, StorageError> {
         let opened = open_engine_db_read_only(path, work)?;
+        let passive = crate::schema::store_is_passive(&opened.conn)?;
         Ok(EngineStore {
             conn: opened.conn,
             freshly_created: false,
             database_path: path.to_path_buf(),
-            passive: false,
+            passive,
         })
     }
 

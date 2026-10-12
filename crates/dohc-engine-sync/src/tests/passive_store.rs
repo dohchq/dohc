@@ -1,11 +1,14 @@
 use super::*;
 use dohc_engine_collab::{ContentKind, Ydoc};
-use std::time::Instant;
+
+fn open_passive_store() -> (ScratchDir, std::path::PathBuf, EngineStore) {
+    let scratch = ScratchDir::new().unwrap();
+    let path = engine_db_path(&scratch).unwrap();
+    let store = EngineStore::open_passive(&path, 1, None, None).unwrap();
+    (scratch, path, store)
+}
 
 fn replica(store: &mut EngineStore) {
-    if std::env::var_os("PASSIVE_STORE_OWNER").is_none() {
-        store.make_passive().unwrap();
-    }
     adopt_join_identity(
         store,
         "ws",
@@ -91,71 +94,8 @@ fn head(store: &EngineStore, object: &str) -> String {
 }
 
 #[test]
-#[ignore = "manual release replica spike: --ignored --nocapture"]
-fn passive_store_incremental_cost() {
-    let mut report = Vec::new();
-    for body_bytes in [50_000, 1_000_000] {
-        let (scratch, path, mut store) = open_store();
-        replica(&mut store);
-        let doc = Ydoc::wire();
-        doc.plaintext_insert(0, &"a".repeat(body_bytes));
-        let base = doc.encode_full_state();
-        let claim = dohc_engine_storage::hex_sha256(&base);
-        let mut pages = vec![(
-            0,
-            page(
-                vec![
-                    envelope("owner", 0, "workspace.init", json!({})),
-                    update(1, "note", &base, &claim, true),
-                ],
-                2,
-                false,
-            ),
-        )];
-        let mut blobs = BTreeMap::from([(claim.clone(), base)]);
-        for n in 0..101 {
-            let delta = doc.plaintext_insert(0, "x");
-            blobs.insert(dohc_engine_storage::hex_sha256(&delta), delta.clone());
-            pages.push((
-                n + 2,
-                page(
-                    vec![update(n + 2, "note", &delta, &claim, false)],
-                    n + 3,
-                    false,
-                ),
-            ));
-        }
-        let mut relay = PagedRelay::new(pages);
-        relay.blobs = blobs;
-        let client = RelaySyncClient::new(relay);
-        let mut cache = WriterDocCache::new();
-        pull(&client, &mut store, &mut cache);
-        let mut samples = Vec::new();
-        for n in 0..101 {
-            let start = Instant::now();
-            pull(&client, &mut store, &mut cache);
-            let micros = start.elapsed().as_micros();
-            if n > 0 {
-                samples.push(micros);
-            }
-        }
-        assert_eq!(
-            head(&store, "note"),
-            format!("{}{}", "x".repeat(101), "a".repeat(body_bytes))
-        );
-        assert!(client.transport().pushes.lock().unwrap().is_empty());
-        let disk = std::fs::metadata(&path).unwrap().len();
-        let wal = std::fs::metadata(format!("{}-wal", path.display())).map_or(0, |m| m.len());
-        let mut sorted = samples.clone();
-        sorted.sort_unstable();
-        report.push(json!({"bodyBytes":body_bytes,"timed":"in-process transport pull, hydrate, apply/projection and store cursor commit; no file materialization", "samplesUs":samples,"medianUs":(sorted[49]+sorted[50])/2,"p95Us":sorted[94],"databaseBytes":disk,"walBytes":wal,"pushRequests":0,"root":scratch.path().display().to_string()}));
-    }
-    println!("{}", serde_json::to_string(&report).unwrap());
-}
-
-#[test]
 fn passive_store_concurrent_delayed_and_source() {
-    let (_scratch, _path, mut store) = open_store();
+    let (_scratch, _path, mut store) = open_passive_store();
     replica(&mut store);
     apply_replication_envelope(
         &mut store,
@@ -235,12 +175,15 @@ fn passive_store_concurrent_delayed_and_source() {
     );
     let mut source_results = Vec::new();
     for (name, source) in [
-        ("README.md", include_str!("../../../../README.md")),
-        ("CONTEXT.md", include_str!("../../../../CONTEXT.md")),
         (
-            "verify-agent-work.md",
-            include_str!("../../../../docs/engineering/verify-agent-work.md"),
+            "headings.md",
+            "# Workspace\n\nText with **bold** and [a link](https://example.test).\n",
         ),
+        (
+            "table.md",
+            "| Name | Value |\n| --- | --- |\n| Item | 2 |\n",
+        ),
+        ("code.md", "Before\n\n    let value = 2;\n\nAfter\n"),
         (
             "nested-list-witness.md",
             "---\nid: rec\n---\n\n- parent\n  - nested\n",
@@ -257,7 +200,7 @@ fn passive_store_concurrent_delayed_and_source() {
             .read_with(|conn| project_ydoc_with_store(conn, &key, &doc, ContentKind::Richdoc))
             .unwrap()
             .content;
-        let (_scratch, _path, mut replica_store) = open_store();
+        let (_scratch, _path, mut replica_store) = open_passive_store();
         seed_replication_version(&mut replica_store, "main", "main");
         let missing_source = replica_store
             .read_with(|conn| project_ydoc_with_store(conn, &key, &doc, ContentKind::Richdoc))
@@ -305,8 +248,70 @@ fn passive_store_concurrent_delayed_and_source() {
 }
 
 #[test]
+fn passive_store_first_pull_never_backfills_local_history() {
+    let (_scratch, _path, mut store) = open_passive_store();
+    seed_replication_version(&mut store, "main", "main");
+    VersionedTextStore::new(&mut store)
+        .write_text(
+            &dohc_engine_domain::WriteText {
+                workspace_id: "ws".into(),
+                version_id: "main".into(),
+                object_id: "local".into(),
+                path: "local.txt".into(),
+                text: "must stay private".into(),
+                moment_id: "local-moment".into(),
+                metadata_origin: "api".into(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 1,
+                request_id: None,
+            },
+            &NoFaults,
+        )
+        .unwrap();
+    replica(&mut store);
+    let sha = store.put_binary_blob(b"checkpoint").unwrap();
+    store.write_with(&NoFaults, |tx| {
+        tx.execute("INSERT INTO live_accepted_checkpoints (relay_database_namespace,workspace_id,main_version_id,object_id,lineage_claim_id,event_count,journal_cursor,terminal_json,binding_json,origin_stamp,state_sha256,evidence_digest) VALUES ('relay','ws','main','local',?1,0,0,'{}','{}',?1,?1,?1)", [&sha]).map_err(SyncError::persist)?;
+        Ok::<_, SyncError>(())
+    }).unwrap();
+    let client = RelaySyncClient::new(PagedRelay::new(vec![(
+        0,
+        page(
+            vec![envelope("owner", 0, "workspace.init", json!({}))],
+            1,
+            false,
+        ),
+    )]));
+    let result = client
+        .pull_chat_workspace(
+            &mut store,
+            &mut WriterDocCache::new(),
+            "ws",
+            &NoFaults,
+            &NoLiveLeases,
+            3000,
+        )
+        .unwrap();
+    let SyncPassOutcome::Complete {
+        pending_cursor: Some(cursor),
+        ..
+    } = result
+    else {
+        panic!("{result:?}")
+    };
+    assert_eq!(cursor.cursor, 1);
+    let (local, exports): (i64, i64) = store.read_with(|conn| conn.query_row("SELECT (SELECT count(*) FROM replication_log WHERE imported=0), (SELECT count(*) FROM live_audit_pending_exports)", [], |row| Ok((row.get(0)?,row.get(1)?)))).unwrap();
+    assert_eq!((local, exports), (0, 0));
+    client
+        .commit_pull_cursor(&mut store, "ws", &cursor, &NoFaults, &NoLiveLeases, 3000)
+        .unwrap();
+}
+
+#[test]
 fn passive_store_cursor_never_backfills_local_heads() {
-    let (_scratch, _path, mut store) = open_store();
+    let (_scratch, _path, mut store) = open_passive_store();
     seed_replication_version(&mut store, "main", "main");
     VersionedTextStore::new(&mut store)
         .write_text(
@@ -366,7 +371,7 @@ fn passive_store_cursor_never_backfills_local_heads() {
 #[test]
 fn passive_store_restarts_mid_history_across_a_secret_page() {
     use base64::{Engine as _, engine::general_purpose::STANDARD};
-    let (scratch, path, mut store) = open_store();
+    let (scratch, path, mut store) = open_passive_store();
     replica(&mut store);
     let doc = Ydoc::wire();
     doc.plaintext_insert(0, "base");
@@ -437,8 +442,7 @@ fn passive_store_restarts_mid_history_across_a_secret_page() {
         secret_cursor
     );
     drop(store);
-    let mut store = EngineStore::open(&path, 3001).unwrap();
-    store.make_passive().unwrap();
+    let mut store = EngineStore::open_passive(&path, 3001, None, None).unwrap();
     pull(&client, &mut store, &mut WriterDocCache::new());
     assert_eq!(head(&store, "note"), "after base");
     assert_eq!(
@@ -457,7 +461,7 @@ fn passive_store_restarts_mid_history_across_a_secret_page() {
 
 #[test]
 fn passive_store_refuses_claim_and_push_before_transport() {
-    let (_scratch, _path, mut store) = open_store();
+    let (_scratch, _path, mut store) = open_passive_store();
     replica(&mut store);
     assert!(
         create_claim_identity(

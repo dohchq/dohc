@@ -5,9 +5,20 @@ use dohc_engine_testkit::{ScratchDir, engine_db_path};
 use rusqlite::params;
 
 fn fixture(coordinates: usize) -> (ScratchDir, std::path::PathBuf, EngineStore) {
+    fixture_with_mode(coordinates, false)
+}
+
+fn fixture_with_mode(
+    coordinates: usize,
+    passive: bool,
+) -> (ScratchDir, std::path::PathBuf, EngineStore) {
     let scratch = ScratchDir::new().unwrap();
     let path = engine_db_path(&scratch).unwrap();
-    let mut store = EngineStore::open(&path, 1_000).unwrap();
+    let mut store = if passive {
+        EngineStore::open_passive(&path, 1_000, None, None).unwrap()
+    } else {
+        EngineStore::open(&path, 1_000).unwrap()
+    };
     dohc_engine_domain::VersionedTextStore::new(&mut store)
         .ensure_main_version("ws", "main", 1_000, &NoFaults)
         .unwrap();
@@ -725,7 +736,7 @@ fn stalled_lookup_batch(first_error: bool) {
 
 #[test]
 fn passive_store_base_repair_never_posts_a_confirmation() {
-    let (_scratch, _path, mut store) = fixture(1);
+    let (_scratch, _path, mut store) = fixture_with_mode(1, true);
     store
         .write_with(&NoFaults, |tx| {
             tx.execute(
@@ -735,7 +746,6 @@ fn passive_store_base_repair_never_posts_a_confirmation() {
             .map_err(StorageError::persist_public)
         })
         .unwrap();
-    store.make_passive().unwrap();
     let mut cache = WriterDocCache::new();
     let transport = DeferredRelayTransport::default();
     let mut relay = Relay::default();

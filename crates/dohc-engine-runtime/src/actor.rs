@@ -594,8 +594,18 @@ fn worker_main(
     // Drop SQLite first, then its owner lock, then publish Closed, including unwind.
     let _writer_lock = writer_lock;
 
-    let mut store = match if matches!(mode, ActorOpenMode::ReadOnly) {
-        EngineStore::open_read_only_counting(&db_path, work_count.clone())
+    let mut store = match if matches!(mode, ActorOpenMode::Passive) {
+        EngineStore::open_passive(&db_path, now_ms, root_token.as_deref(), work_count.clone())
+    } else if matches!(mode, ActorOpenMode::ReadOnly) {
+        EngineStore::open_read_only_counting(&db_path, work_count.clone()).and_then(|store| {
+            if store.is_passive() {
+                Err(dohc_engine_storage::StorageError::InvalidInput {
+                    reason: "engine store role mismatch",
+                })
+            } else {
+                Ok(store)
+            }
+        })
     } else if let Some(token) = &root_token {
         EngineStore::open_with_root_token(&db_path, now_ms, token, work_count.clone())
     } else {
@@ -607,12 +617,6 @@ fn worker_main(
             return;
         }
     };
-    if matches!(mode, ActorOpenMode::Passive)
-        && let Err(err) = store.make_passive()
-    {
-        let _ = startup_tx.send(Err(err));
-        return;
-    }
     let store_freshly_created = store.was_freshly_created();
     // The open that asked for counting owns the counter. The actor keeps only
     // a weak reference, so counting ends with that open, whether it succeeds,
@@ -759,6 +763,21 @@ mod saturation_tests {
     use std::task::Poll;
     use std::time::{Duration, Instant};
     use tokio::sync::Semaphore;
+
+    #[test]
+    fn passive_store_restart_without_active_slot_fails_closed() {
+        let scratch = ScratchDir::new().unwrap();
+        let db = engine_db_path(&scratch).unwrap();
+        let supervisor = crate::WorkspaceSupervisor::new();
+        supervisor
+            .open_passive_root_bound(&db, 1, "passive-root", None)
+            .unwrap();
+        supervisor.close(&db).unwrap();
+        assert!(
+            supervisor.restart(&db, 2).is_err(),
+            "restart without a passive mode must fail closed"
+        );
+    }
 
     #[tokio::test]
     async fn passive_store_supervisor_restart_still_refuses_origination() {

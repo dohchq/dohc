@@ -1010,12 +1010,8 @@ impl EngineService {
                     | "sync.adoptJoinIdentity"
                     | "sync.pull"
                     | "sync.commitCursor"
-                    | "sync.refusalNotices"
-                    | "sync.remoteChanges"
-                    | "versionedText.list"
                     | "versionedText.read"
                     | "versionedText.readBlob"
-                    | "conflicts.list"
             )
         {
             return Err(WireError::new(

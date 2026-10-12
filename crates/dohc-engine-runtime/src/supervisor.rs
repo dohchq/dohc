@@ -227,6 +227,15 @@ impl WorkspaceSupervisor {
                 match action {
                     Action::Return => {
                         if let Some(Slot::Active(actor)) = guard.get(&identity) {
+                            if matches!(mode, ActorOpenMode::Passive)
+                                != matches!(actor.open_mode(), ActorOpenMode::Passive)
+                            {
+                                return Err(RuntimeError::Storage(
+                                    dohc_engine_storage::StorageError::InvalidInput {
+                                        reason: "engine store role mismatch",
+                                    },
+                                ));
+                            }
                             return Ok(SupervisorOpen {
                                 actor: actor.handle(),
                                 created_actor: false,

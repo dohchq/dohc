@@ -13,9 +13,9 @@ import {
   renameSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { performance } from "node:perf_hooks";
+import { requireEngineBinaryOrSkip } from "../../../apps/desktop/src/testing/engineBinary";
 import {
   EngineClient,
   DuplexEngineClientConnection,
@@ -24,14 +24,12 @@ import { openEngineYdocProviderSession } from "../../../packages/workspace-engin
 import { testStorage, testHandler, closeTestStorages } from "./testing/index";
 import { createServiceHostReplication } from "./serviceHostReplication";
 
-it.skipIf(!process.env.PASSIVE_STORE_ENGINE)(
+const engineBinary = requireEngineBinaryOrSkip();
+
+it.skipIf(engineBinary.missing)(
   "passive store restarts through owner history without side effects",
   async () => {
-    const evidence =
-      process.env.PASSIVE_STORE_EVIDENCE ??
-      resolve("../../.agent-artifacts/passive-store");
-    mkdirSync(evidence, { recursive: true });
-    const exe = process.env.PASSIVE_STORE_ENGINE!;
+    const exe = engineBinary.require();
     const root = mkdtempSync(join(tmpdir(), "dohc-passive-store-"));
     const storage = await testStorage();
     const ownerHandler = testHandler(storage);
@@ -40,7 +38,6 @@ it.skipIf(!process.env.PASSIVE_STORE_ENGINE)(
     const httpRequests: Array<{
       method: string;
       path: string;
-      at: number;
       replica: boolean;
     }> = [];
     const readHandler = createServiceHostReplication({
@@ -64,7 +61,6 @@ it.skipIf(!process.env.PASSIVE_STORE_ENGINE)(
         httpRequests.push({
           method: incoming.method!,
           path: incoming.url!,
-          at: performance.now(),
           replica: isReplica,
         });
         const request = new Request(`http://127.0.0.1${incoming.url}`, {
@@ -76,8 +72,6 @@ it.skipIf(!process.env.PASSIVE_STORE_ENGINE)(
           request,
         );
         const body = Buffer.from(await response.arrayBuffer());
-        if (incoming.url?.includes("/log?") && incoming.method === "GET")
-          writeFileSync(join(evidence, "last-pull.json"), body);
         outgoing.writeHead(response.status, {
           ...Object.fromEntries(response.headers),
           "content-length": body.length,
@@ -159,35 +153,18 @@ it.skipIf(!process.env.PASSIVE_STORE_ENGINE)(
         () => stream.end(),
         exited,
       );
-      child.stderr!.on("data", (chunk) =>
-        writeFileSync(join(evidence, `${name}.stderr.log`), chunk, {
-          flag: "a",
-        }),
-      );
+      child.stderr!.resume();
       child.on("exit", (code, signal) =>
         client.notifyProcessExit(code, signal),
       );
       const engine = { client, child, dir, name, workspace: "" };
       engines.push(engine);
-      writeFileSync(
-        join(evidence, "processes.json"),
-        JSON.stringify(
-          engines.map((e) => ({
-            pid: e.child.pid,
-            exe,
-            root: e.dir,
-            name: e.name,
-          })),
-          null,
-          2,
-        ),
-      );
       await client.ready();
       const opened = await rpc(engine, "workspace.open", {
         rootDir: dir,
         workspaceId,
         ...(captureNone ? { captureMode: "none" } : {}),
-        ...(replica && !process.env.PASSIVE_STORE_BASELINE
+        ...(replica
           ? { storeMode: "passive" }
           : {}),
         recoverRunningDispatches: false,
@@ -198,7 +175,7 @@ it.skipIf(!process.env.PASSIVE_STORE_ENGINE)(
         },
       });
       engine.workspace = opened.workspace;
-      if (!replica || process.env.PASSIVE_STORE_BASELINE)
+      if (!replica)
         await rpc(engine, "versions.ensureMain", { workspaceId });
       return engine;
     };
@@ -228,14 +205,8 @@ it.skipIf(!process.env.PASSIVE_STORE_ENGINE)(
       } while (r.hasMore);
       return r;
     };
-    const report: any = {
-      base: "56584a876",
-      profile:
-        "release opt-level=3, debug-assertions=true for loopback test transport",
-      startedAt: new Date().toISOString(),
-    };
     try {
-      const a = await open("owner-a", false, !!process.env.PASSIVE_STORE_COST);
+      const a = await open("owner-a", false, false);
       await rpc(a, "sync.claim", { workspaceId });
       await rpc(a, "versions.ensureMain", { workspaceId });
       await rpc(a, "versionedText.write", {
@@ -247,99 +218,8 @@ it.skipIf(!process.env.PASSIVE_STORE_ENGINE)(
       });
       await push(a);
       const identity = storage.getWorkspaceIdentity(workspaceId)!;
-      const ownerCost = !!process.env.PASSIVE_STORE_OWNER;
-      let r = await open(
-        ownerCost ? "owner-receiver" : "replica",
-        !ownerCost,
-        true,
-      );
+      let r = await open("replica", true, true);
       await rpc(r, "sync.adoptJoinIdentity", { workspaceId, ...identity });
-      if (process.env.PASSIVE_STORE_COST) {
-        await pull(r);
-        const lanes = [];
-        for (const bodyBytes of [50_000, 1_000_000]) {
-          const path = `cost-${bodyBytes}.txt`;
-          await rpc(a, "versionedText.write", {
-            versionId: "main",
-            path,
-            text: "a",
-            origin: "api",
-            publish: true,
-          });
-          await push(a);
-          await pull(r);
-          const session = await openEngineYdocProviderSession({
-            transport: a.client,
-            workspace: a.workspace,
-            versionId: "main",
-            path,
-            contentKind: "plaintext",
-            onRemoteUpdate() {},
-          });
-          try {
-            const edit = async (text: string) => {
-              let delta!: Uint8Array;
-              session.doc.once("update", (value: Uint8Array) => {
-                delta = value;
-              });
-              session.doc.getText("plainText").insert(0, text);
-              await session.applyLocalUpdate(delta, { armSettle: false });
-              await session.settleNow();
-              await push(a);
-            };
-            await edit("a".repeat(bodyBytes - 1));
-            await pull(r);
-            const samplesMs: number[] = [];
-            for (let n = 0; n < 21; n++) {
-              await edit("x");
-              const started = performance.now();
-              await pull(r);
-              if (n > 0) samplesMs.push(performance.now() - started);
-            }
-            const sorted = [...samplesMs].sort((a, b) => a - b);
-            const db = new DatabaseSync(join(r.dir, ".dohc/engine/engine.db"), {
-              readOnly: true,
-            });
-            try {
-              const row = db
-                .prepare(
-                  "SELECT b.text FROM snapshots s JOIN blobs b ON b.sha256=s.blob_sha256 WHERE s.path=?",
-                )
-                .get(path)!;
-              expect(Buffer.from(row.text as string, "utf8")).toEqual(
-                readFileSync(join(a.dir, path)),
-              );
-              if (!ownerCost && !process.env.PASSIVE_STORE_BASELINE)
-                expect(
-                  db
-                    .prepare("SELECT COUNT(*) AS n FROM materialization_jobs")
-                    .get()!.n,
-                ).toBe(0);
-            } finally {
-              db.close();
-            }
-            lanes.push({
-              bodyBytes,
-              samplesMs,
-              medianMs: (sorted[9] + sorted[10]) / 2,
-              p95Ms: sorted[18],
-            });
-          } finally {
-            await session.close();
-          }
-        }
-        report.cost = {
-          path: ownerCost
-            ? "ordinary owner pull, materialize, commit"
-            : "private pull, apply/project, commit",
-          lanes,
-        };
-        expect(
-          httpRequests.filter((x) => x.replica && x.method !== "GET"),
-        ).toEqual([]);
-        report.verdict = "PASS";
-        return;
-      }
       const stored = async (path: string) =>
         await rpc(r, "versionedText.read", { versionId: "main", path });
       const inspect = () => {
@@ -423,7 +303,6 @@ it.skipIf(!process.env.PASSIVE_STORE_ENGINE)(
         );
         untouched();
       };
-      report.scenarios = {};
       await rpc(a, "versionedText.write", {
         versionId: "main",
         path: "scenario.txt",
@@ -450,10 +329,6 @@ it.skipIf(!process.env.PASSIVE_STORE_ENGINE)(
       expect(readFileSync(join(b.dir, "scenario.txt"))).toEqual(
         readFileSync(join(a.dir, "scenario.txt")),
       );
-      report.scenarios.concurrentTwoDaemons = {
-        converged: true,
-        text: readFileSync(join(a.dir, "scenario.txt"), "utf8"),
-      };
       await edit(pb, "delayed ");
       await edit(pa, "online ");
       await push(a);
@@ -465,11 +340,8 @@ it.skipIf(!process.env.PASSIVE_STORE_ENGINE)(
       await pa.settleNow();
       await pb.settleNow();
       await equal();
-      report.scenarios.delayedPush = {
-        converged: true,
-        text: readFileSync(join(a.dir, "scenario.txt"), "utf8"),
-      };
       await pa.close();
+      const delayedText = readFileSync(join(a.dir, "scenario.txt"), "utf8");
       await rpc(a, "versionedText.write", {
         versionId: "main",
         path: "scenario.txt",
@@ -484,7 +356,7 @@ it.skipIf(!process.env.PASSIVE_STORE_ENGINE)(
       await rpc(a, "versionedText.write", {
         versionId: "main",
         path: "scenario.txt",
-        text: report.scenarios.delayedPush.text,
+        text: delayedText,
         restoreBeforeMomentId: "scenario-changed",
         momentId: "scenario-restore",
         origin: "restore",
@@ -499,11 +371,8 @@ it.skipIf(!process.env.PASSIVE_STORE_ENGINE)(
       expect(readFileSync(join(b.dir, "scenario.txt"))).toEqual(
         readFileSync(join(a.dir, "scenario.txt")),
       );
-      report.scenarios.restoreWithOpenEditor = {
-        converged: true,
-        text: readFileSync(join(a.dir, "scenario.txt"), "utf8"),
-      };
       await pb.close();
+      const restoredText = readFileSync(join(a.dir, "scenario.txt"), "utf8");
       let hold = await rpc(a, "capture.hold", {});
       renameSync(join(a.dir, "scenario.txt"), join(a.dir, "renamed.txt"));
       await rpc(a, "versionedText.rename", {
@@ -538,7 +407,7 @@ it.skipIf(!process.env.PASSIVE_STORE_ENGINE)(
       await rpc(a, "versionedText.write", {
         versionId: "main",
         path: "renamed.txt",
-        text: report.scenarios.restoreWithOpenEditor.text,
+        text: restoredText,
         restoreBeforeMomentId: deleted.moment.momentId,
         origin: "restore",
         publish: true,
@@ -550,15 +419,11 @@ it.skipIf(!process.env.PASSIVE_STORE_ENGINE)(
         readFileSync(join(a.dir, "renamed.txt")),
       );
       untouched();
-      report.scenarios.renameDeleteRestore = {
-        converged: true,
-        text: readFileSync(join(a.dir, "renamed.txt"), "utf8"),
-      };
-      report.openConflictCounts = {};
       for (const e of [a, b, r]) {
-        const conflicts = await rpc(e, "conflicts.list", { status: "open" });
-        report.openConflictCounts[e.name] = conflicts.conflicts.length;
-        expect(conflicts.conflicts).toHaveLength(0);
+        const db = new DatabaseSync(join(e.dir, ".dohc/engine/engine.db"), { readOnly: true });
+        try {
+          expect(db.prepare("SELECT COUNT(*) AS n FROM conflicts WHERE status='open'").get()!.n).toBe(0);
+        } finally { db.close(); }
       }
       const keyPath = join(r.dir, ".dohc/engine/secret.key");
       writeFileSync(keyPath, "invalid key sentinel");
@@ -598,15 +463,6 @@ it.skipIf(!process.env.PASSIVE_STORE_ENGINE)(
         );
       }
       untouched();
-      report.replicaWriteRequests = httpRequests.filter(
-        (x) => x.replica && x.method !== "GET",
-      );
-      report.verdict = "PASS";
-    } catch (error) {
-      report.verdict = "FAIL";
-      report.error = String(error);
-      report.httpRequests = httpRequests;
-      throw error;
     } finally {
       for (const engine of engines.reverse()) {
         engine.client.close();
@@ -615,14 +471,6 @@ it.skipIf(!process.env.PASSIVE_STORE_ENGINE)(
       server.close();
       await once(server, "close");
       await closeTestStorages();
-      report.finishedAt = new Date().toISOString();
-      writeFileSync(
-        join(
-          evidence,
-          process.env.PASSIVE_STORE_COST ? "cost.json" : "scenarios.json",
-        ),
-        JSON.stringify(report, null, 2),
-      );
       rmSync(root, { recursive: true, force: true });
     }
   },
