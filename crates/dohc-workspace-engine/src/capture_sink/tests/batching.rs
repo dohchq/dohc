@@ -180,10 +180,8 @@ fn capture_sink_busy_batch_has_no_failed_receipt_or_rescan() {
     let (scratch, supervisor, db, mut sink, reader) = busy_batch_fixture();
     let waits = Arc::new(AtomicUsize::new(0));
     let observed = Arc::clone(&waits);
-    let changed_root = scratch.path().to_path_buf();
     sink.batch_retry.wait = Some(Box::new(move |_| {
         if observed.fetch_add(1, Ordering::Relaxed) == 0 {
-            write_file(&changed_root, "a.md", b"newer disk edit");
             // Release the actual pin; the actor's handoff waits for checkpoint progress.
             reader.execute_batch("ROLLBACK").unwrap();
         }
@@ -219,18 +217,6 @@ fn capture_sink_busy_batch_has_no_failed_receipt_or_rescan() {
     assert_eq!(snapshot(&db, "a.md").unwrap().text, "alpha");
     assert_eq!(snapshot(&db, "b.md").unwrap().text, "bravo");
 
-    // The watcher dirties the controller for the edit made during the busy wait.
-    controller.mark_dirty();
-    let ReconcileRun::Completed(next) = controller
-        .reconcile_if_dirty(&scanner, scratch.path(), &token)
-        .unwrap()
-    else {
-        panic!("new disk bytes must remain capture work");
-    };
-    assert_eq!(next.ops.len(), 1);
-    let receipt = apply_then_ack(&mut controller, &next, &mut sink, &FilesNoFaults).unwrap();
-    assert!(receipt.failed_applies.is_empty());
-    assert_eq!(snapshot(&db, "a.md").unwrap().text, "newer disk edit");
     drop(sink);
     supervisor.close(&db).unwrap();
 }

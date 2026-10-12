@@ -394,11 +394,7 @@ impl StoreCaptureSink {
             PolicyState::Known(snapshot.files_policy.clone())
         };
         StoreCaptureSink {
-            batch_retry: CaptureBatchRetry {
-                cancel,
-                #[cfg(test)]
-                wait: None,
-            },
+            batch_retry: CaptureBatchRetry::new(cancel),
             actor,
             leases,
             workspace_id,
@@ -415,6 +411,14 @@ impl StoreCaptureSink {
             self_writes,
             provenance,
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_batch_wait_for_test(
+        &mut self,
+        wait: impl Fn(std::time::Duration) + Send + 'static,
+    ) {
+        self.batch_retry.wait = Some(Box::new(wait));
     }
 
     fn captured_root(&self) -> Result<&CapturedRoot, CaptureError> {

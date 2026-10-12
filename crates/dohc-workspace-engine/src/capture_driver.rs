@@ -63,6 +63,8 @@ pub struct CaptureApplyProbe {
     #[cfg(test)]
     reconcile_refused: Arc<tokio::sync::Notify>,
     #[cfg(test)]
+    capture_batch_wait: Option<Arc<dyn Fn(std::time::Duration) + Send + Sync>>,
+    #[cfg(test)]
     collection_committed: Option<dohc_engine_runtime::actor::CollectionCommitListener>,
     #[cfg(test)]
     pub(crate) observation_root: Option<PathBuf>,
@@ -2672,7 +2674,7 @@ async fn apply_bound_run_with_handle(
                             .name("dohc-capture-collection-reconcile".to_owned())
                             .spawn(move || {
                                 let sink = StoreCaptureSink::new(StoreCaptureSinkParams {
-                                    cancel: dohc_engine_files::CancellationToken::new(),
+                                    cancel: collection_cancel.clone(),
                                     actor: collection_actor,
                                     workspace_id: collection_workspace.clone(),
                                     version_id,
@@ -2822,6 +2824,13 @@ async fn apply_bound_run_with_handle(
                 self_writes: apply_self_writes,
                 provenance: apply_provenance,
             });
+            #[cfg(test)]
+            if let Some(wait) = apply_probe
+                .as_ref()
+                .and_then(|probe| probe.capture_batch_wait.clone())
+            {
+                sink.set_batch_wait_for_test(move |duration| wait(duration));
+            }
             let result =
                 apply_reconcile_plan_cancellable(&apply_plan, &mut sink, &NoFaults, &apply_cancel);
             let mut collection_release_generation = 0;
@@ -2952,6 +2961,7 @@ async fn apply_bound_run_with_handle(
             let retire_author_json = author_json.clone();
             let retire_pass_provenance = retire_provenance.clone();
             let retire_captured_root = Arc::clone(&captured_root);
+            let retire_cancel = cancel.clone();
             // A dedicated plain thread, same as the apply above: the sink's
             // blocking actor calls assert they run outside any tokio runtime
             // context, and spawn_blocking threads carry the runtime handle.
@@ -2960,7 +2970,7 @@ async fn apply_bound_run_with_handle(
                 .name("dohc-capture-overcap-retire".to_owned())
                 .spawn(move || {
                     let mut sink = StoreCaptureSink::new(StoreCaptureSinkParams {
-                        cancel: dohc_engine_files::CancellationToken::new(),
+                        cancel: retire_cancel,
                         actor: retire_actor,
                         workspace_id: retire_workspace,
                         version_id: retire_version,
@@ -3215,6 +3225,9 @@ mod root_bound_run_tests;
 
 #[cfg(test)]
 mod collection_reconcile_scheduling_tests;
+
+#[cfg(test)]
+mod capture_batch_retry_tests;
 
 #[cfg(test)]
 mod live_session_deferral_tests;
