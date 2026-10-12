@@ -65,7 +65,8 @@ it("refuses non-canonical coverage on a stored checkpoint", () => {
     const original = f.storage.readLiveUpdateJournalCut({document});
     if (original.kind !== "cut") throw new Error("Expected checkpoint cut");
     expect(original.cut.checkpoint.cursor).not.toBeNull();
-    expect(original.cut.checkpoint.metadata?.checkpointCoverage).toEqual([]);
+    expect(original.cut.checkpoint.metadata?.checkpointCoverage).toEqual([{author: {kind: "unattributed"},
+      structRanges: [{clientId: expect.any(Number), startClock: 0, endClock: 1}], deletionRanges: []}]);
     expect(original.cut.suffix).toEqual([]);
     const coverage = JSON.stringify([{author: {kind: "human", humanId: "owner", humanName: "Owner"},
       structRanges: [{clientId: 999, startClock: 5, endClock: 6}, {clientId: 999, startClock: 0, endClock: 1}], deletionRanges: []}]);

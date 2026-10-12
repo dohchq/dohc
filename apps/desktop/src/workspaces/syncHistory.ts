@@ -1,7 +1,7 @@
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { readFile, writeFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { mkdir, readFile, realpath, rename, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { atomicReplaceFileSync } from "../atomicReplaceFile";
+import { setTimeout as delay } from "node:timers/promises";
 import type { RegistryEntry } from "./registryStore";
 
 // Whether a workspace ever synced or opened as a share, kept in its own
@@ -40,35 +40,93 @@ export async function recordNeverSynced(rootPath: string): Promise<void> {
 }
 
 /** The workspace synced or opened as a share. The record never goes back. */
-export function recordSynced(rootPath: string): void {
-  mkdirSync(join(rootPath, ".dohc"), { recursive: true });
-  replaceRecord(rootPath, historyText(true));
+export function recordSynced(rootPath: string): Promise<void> {
+  return inTurn(rootPath, async () => {
+    await mkdir(join(rootPath, ".dohc"), { recursive: true });
+    await replaceRecord(rootPath, historyText(true));
+  });
+}
+
+// Changes to one record take turns, so a share read as never synced cannot be
+// written over a sync recorded meanwhile. A folder reached through a junction
+// or link takes the same turns as its real path. Other folders' records do not
+// wait.
+const turns = new Map<string, Promise<void>>();
+async function inTurn(rootPath: string, change: () => Promise<void>): Promise<void> {
+  const folder = await realFolder(rootPath);
+  const next = (turns.get(folder) ?? Promise.resolve()).then(change);
+  const settled = next.catch(() => undefined);
+  turns.set(folder, settled);
+  void settled.then(() => {
+    if (turns.get(folder) === settled) turns.delete(folder);
+  });
+  return next;
+}
+
+// Changes asked for under one path meanwhile share its lookup, so they keep
+// their order. A folder that cannot be resolved, as one that is gone, keeps
+// the path it was given, and the change itself says what is wrong.
+const lookups = new Map<string, Promise<string>>();
+function realFolder(rootPath: string): Promise<string> {
+  let lookup = lookups.get(rootPath);
+  if (!lookup) {
+    lookup = realpath(rootPath).catch(() => rootPath);
+    lookups.set(rootPath, lookup);
+    void lookup.then(() => lookups.delete(rootPath));
+  }
+  return lookup;
 }
 
 // Written beside the record and renamed over it, so a crash never leaves a
 // cut-off record.
-function replaceRecord(rootPath: string, text: string): void {
-  atomicReplaceFileSync(historyPath(rootPath), (temporary) => writeFileSync(temporary, text));
+async function replaceRecord(rootPath: string, text: string): Promise<void> {
+  const path = historyPath(rootPath);
+  const temporary = `${path}.${randomUUID()}.tmp`;
+  try {
+    await writeFile(temporary, text);
+    await renameOver(temporary, path);
+  } catch (error) {
+    // The write's own error says what went wrong.
+    await rm(temporary, { force: true }).catch(() => undefined);
+    throw error;
+  }
+}
+
+// Windows refuses to replace a file another program has open, as a virus
+// scanner or indexer does for a moment. Try again for at most about 2.4 s,
+// then fail with the real error.
+async function renameOver(from: string, to: string): Promise<void> {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return await rename(from, to);
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (process.platform !== "win32" || attempt >= 99 || !["EPERM", "EACCES", "EBUSY"].includes(code ?? "")) throw error;
+      await delay(Math.min(2 ** attempt, 25));
+    }
+  }
 }
 
 /**
  * A received share or a shared chat came into a workspace that never synced.
  * The record never goes back. A missing record, or one that says the
  * workspace synced or that dohc cannot parse, already proves nothing, so it
- * stays as it is. Throws when the record cannot be read or written, so the
+ * stays as it is. Rejects when the record cannot be read or written, so the
  * share is not kept without it.
  */
-export function recordReceivedShare(rootPath: string): void {
-  let text: string;
-  try {
-    text = readFileSync(historyPath(rootPath), "utf8");
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
-    throw error;
-  }
-  const record = parseRecord(text);
-  if (record === null || record.synced || record.receivedShare === true) return;
-  replaceRecord(rootPath, historyText(false, true));
+export function recordReceivedShare(rootPath: string): Promise<void> {
+  return inTurn(rootPath, async () => {
+    let text: string;
+    try {
+      text = await readFile(historyPath(rootPath), "utf8");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+      throw error;
+    }
+    const record = parseRecord(text);
+    if (record === null || record.synced || record.receivedShare === true) return;
+    await replaceRecord(rootPath, historyText(false, true));
+  });
 }
 
 function parseRecord(text: string): HistoryRecord | null {

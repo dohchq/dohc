@@ -54,17 +54,20 @@ export function isSqliteMediaType(mediaType: string, path = "") {
 const COLLECTION_TEXT_FILENAMES = new Set(["collection.yaml", "automations.yaml"]);
 
 export function isTextMediaType(mediaType: string, path = "") {
-  const lower = `${mediaType} ${path}`.toLowerCase();
+  const type = mediaType.split(";")[0]?.trim().toLowerCase() ?? "";
+  const name = fileName(path);
+  const extension = name.toLowerCase().match(/(\.[^.]+)$/)?.[1] ?? "";
   return (
     !isSqliteMediaType(mediaType, path) &&
-    (COLLECTION_TEXT_FILENAMES.has(fileName(path)) ||
-      lower.includes("text/") ||
-      lower.includes("json") ||
-      lower.includes("csv") ||
+    (COLLECTION_TEXT_FILENAMES.has(name) ||
+      type.startsWith("text/") ||
+      type.endsWith("/json") ||
+      type.endsWith("+json") ||
+      type === "application/x-ndjson" ||
+      type === "application/ndjson" ||
+      type === "application/csv" ||
+      type === "application/x-csv" ||
       isSiteSourcePath(path) ||
-      lower.endsWith(".md") ||
-      lower.endsWith(".markdown") ||
-      lower.endsWith(".sh") ||
-      lower.endsWith(".txt"))
+      [".json", ".geojson", ".json5", ".json-seq", ".jsonl", ".ndjson", ".csv", ".excalidraw", ".md", ".markdown", ".sh", ".txt"].includes(extension))
   );
 }

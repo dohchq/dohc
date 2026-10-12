@@ -25,7 +25,7 @@ export function createWorkspaceReplicationRoutes(
     | "getWorkspaceBootstrap"
     | "rotateWorkspaceIdentity"
     | "appendLogBatch"
-    | "prepareHostedSettlements"
+    | "prepareLogAppend"
     | "fetchLogPage"
     | "fetchLogCoordinate"
     | "getWorkspaceIdentity"
@@ -128,7 +128,7 @@ export function createWorkspaceReplicationRoutes(
       assertChatAuthorship(input.ops, actor.userId);
       assertClientLogProvenance(originId, input.ops, true);
       const ops = await parseAuthenticatedLogOps(input.ops, actor.userId, lookupUserDisplayName);
-      await storage.prepareHostedSettlements({workspaceId:route.workspaceId,originId,ops},request.signal);
+      await storage.prepareLogAppend({workspaceId:route.workspaceId,originId,ops},request.signal);
       const result = storage.appendLogBatch({
         workspaceId: route.workspaceId,
         originId,

@@ -1,4 +1,4 @@
-import { Check, Copy, TriangleAlert } from "lucide-react";
+import { Check, Copy, TriangleAlert, type LucideIcon } from "lucide-react";
 import { useContext, useLayoutEffect, useRef, useState, type ReactNode, type Ref } from "react";
 import { withErrorWords } from "../../ipc/errorWords";
 import { ShellErrorReporter, type ReportShellFailure } from "../shell/useShellError";
@@ -30,7 +30,9 @@ export const COPY_TILE_STATE_CLASS: Record<CopyFeedback | "rest", string> = {
 const TONE: Record<CopyFeedback, string> = { copied: "text-success", failed: "text-danger" };
 const ICON = { copied: Check, failed: TriangleAlert } as const;
 const wordsClass =
-  "inline-flex h-6 shrink-0 items-center gap-1.5 rounded-md border border-line px-2 text-[12px] text-muted transition-colors duration-75 hover:bg-hover hover:text-ink disabled:pointer-events-none disabled:opacity-40";
+  "inline-flex shrink-0 items-center rounded-md border border-line px-2 text-muted transition-colors duration-75 hover:bg-hover hover:text-ink disabled:pointer-events-none disabled:opacity-40";
+// A row's copy, or one among a page header's 28px buttons.
+const WORDS_SIZE = { row: "h-6 gap-1.5 text-[12px]", header: "h-7 gap-1 text-[11px]" } as const;
 
 // A missing clipboard is a failure like any other. The write starts in the
 // task that called it, so a click with its text at hand writes at once.
@@ -177,6 +179,10 @@ export function CopyButton(props: {
   pinName?: boolean;
   // The tile alone; what it says is the tooltip.
   iconOnly?: boolean;
+  // The mark at rest, where a row offers more than one copy. Default Copy.
+  icon?: LucideIcon | undefined;
+  // The worded button's size. Default "row".
+  size?: keyof typeof WORDS_SIZE;
   // Marks the text secret, such as a share link, a share code or a sync
   // code: what it is called, and where to copy it again once Try again
   // cannot.
@@ -230,7 +236,7 @@ export function CopyButton(props: {
   }, []);
 
   const shown = feedback ? words[feedback] : label;
-  const Icon = feedback ? ICON[feedback] : Copy;
+  const Icon = feedback ? ICON[feedback] : props.icon ?? Copy;
   return (
     <>
       <button
@@ -241,9 +247,13 @@ export function CopyButton(props: {
         aria-label={props.pinName ? label : props.iconOnly ? shown : undefined}
         title={props.iconOnly ? shown : undefined}
         onClick={() => void action.current?.copy()}
-        className={props.iconOnly ? `${COPY_TILE_CLASS} ${COPY_TILE_STATE_CLASS[feedback ?? "rest"]}` : wordsClass}
+        className={
+          props.iconOnly
+            ? `${COPY_TILE_CLASS} ${COPY_TILE_STATE_CLASS[feedback ?? "rest"]}`
+            : `${wordsClass} ${WORDS_SIZE[props.size ?? "row"]}`
+        }
       >
-        <Icon size={13} aria-hidden className={!props.iconOnly && feedback ? TONE[feedback] : undefined} />
+        <Icon size={props.size === "header" ? 12 : 13} aria-hidden className={!props.iconOnly && feedback ? TONE[feedback] : undefined} />
         {props.iconOnly ? null : shown}
       </button>
       <span role="status" aria-live="polite" className="sr-only">

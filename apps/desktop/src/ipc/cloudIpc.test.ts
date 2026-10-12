@@ -78,7 +78,7 @@ async function harness() {
   const readdir = vi.fn(async (_root: string) => [] as string[]);
   const mkdir = vi.fn(async () => { steps.push("mkdir"); });
   const bindRelay = vi.fn<Dependencies["relayClientForWorkspace"]>(() => relay);
-  const setRemote = vi.fn<Dependencies["setWorkspaceRemote"]>((id, remote) => {
+  const setRemote = vi.fn<Dependencies["setWorkspaceRemote"]>(async (id, remote) => {
     steps.push("remote");
     registry.get(id)!.remote = remote;
   });
@@ -282,6 +282,39 @@ describe("registered cloud handlers", () => {
     }));
     expect(h.enroll).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: "existing", dataKey: null, passphrase: "phrase" }));
     expect(h.steps).toEqual(["claim", "enroll", "remote", "enable"]);
+  });
+
+  it("starts sync only after the remote and its folder record are written, and not when that write fails", async () => {
+    const h = await harness();
+    const started = deferred();
+    const held = deferred();
+    h.setRemote.mockImplementationOnce(() => { started.resolve(); return held.promise; });
+    const result = h.invoke(CHANNELS.cloudEnableSync, { workspaceId: "existing" });
+    await started.promise;
+    expect(h.enable).not.toHaveBeenCalled();
+    const failure = Object.assign(new Error("EPERM: operation not permitted, rename"), { code: "EPERM" });
+    held.reject(failure);
+    await expect(result).rejects.toBe(failure);
+    expect(h.enable).not.toHaveBeenCalled();
+  });
+
+  it("does not start sync for a window that switched workspaces while the remote was written", async () => {
+    const h = await harness();
+    const started = deferred();
+    const held = deferred();
+    h.setRemote.mockImplementationOnce(async (id, remote) => {
+      started.resolve();
+      await held.promise;
+      h.steps.push("remote");
+      h.registry.get(id)!.remote = remote;
+    });
+    const result = h.invoke(CHANNELS.cloudEnableSync, { workspaceId: "existing" });
+    await started.promise;
+    h.retireRenderer();
+    held.resolve();
+    await expect(result).rejects.toThrow();
+    expect(h.steps).toEqual(["claim", "enroll", "remote"]);
+    expect(h.enable).not.toHaveBeenCalled();
   });
 
   it.each([

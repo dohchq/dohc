@@ -74,7 +74,7 @@ fn relay_base_repair_unpushed_benchmark() {
         let identity = read_sync_identity(&engine, "ws").unwrap().unwrap();
         let started = std::time::Instant::now();
         client
-            .repair_pending_ydoc_base_orders(&mut engine, "ws", &identity, &NoFaults)
+            .repair_pending_ydoc_base_orders(&mut engine, "ws", &identity, &NoFaults, &[])
             .expect("repair fixture");
         let elapsed = started.elapsed().as_micros();
         let probes = client.transport().pushes.lock().unwrap().len();

@@ -1,4 +1,4 @@
-import { desktopPins, chatsPanelTabPin } from "../src/testPins";
+import { activityPin } from "../src/testPins";
 import { expect, test, type Locator, type Page } from "@playwright/test";
 import { join } from "node:path";
 import { seedThroughDaemon } from "./helpers/daemonSeed";
@@ -11,6 +11,7 @@ import {
   createTempWorkspace,
   explorerRow,
   openAboutPanel,
+  openChatsView,
   openWorkspaceFromFirstRun,
   seedCloudCredentials,
   seedWorkspaceManifest,
@@ -22,13 +23,6 @@ import {
 
 const messageCount = 300;
 const author = { kind: "human" as const, displayName: "Reader" };
-
-async function openChats(page: Page): Promise<Locator> {
-  const panel = page.getByTestId(desktopPins.chatsPanel);
-  if (!(await panel.isVisible())) await page.getByTestId(desktopPins.titlebarChatsSidebar).click();
-  await panel.getByTestId(chatsPanelTabPin("all")).click();
-  return panel;
-}
 
 function timeline(root: Locator): Locator {
   return root.locator('[role="list"][data-chat-virtualized="true"]');
@@ -87,7 +81,7 @@ test("chat lane keeps history, follows within 40px, and retains focused rows", a
     await openWorkspaceFromFirstRun(desktop.page, temp);
     const page = desktop.page;
     await waitForCliEndpoint(temp.homeDir);
-    const panel = await openChats(page);
+    const panel = await openChatsView(page);
 
     await panel.getByTestId("chats-channel").filter({ hasText: "Empty chat" }).click();
     const lane = page.getByTestId("chats-lane");
@@ -222,13 +216,14 @@ test("a file linked mention opens the exact unmounted DM message", async () => {
     desktop = await launchDesktopApp({ workspace: temp });
     await openWorkspaceFromFirstRun(desktop.page, temp);
     const page = desktop.page;
-    const panel = await openChats(page);
+    const panel = await openChatsView(page);
     await panel.getByTestId("chats-dm-item").filter({ hasText: "reader@dohc.test" }).click();
     const dm = page.getByTestId("chats-dm-view");
     await expectWindowed(dm, "chats-dm", `Direct message ${messageCount - 1}`);
     await expect(dm.locator(`[data-message-id="${firstMessageId}"]`)).toHaveCount(0);
 
     await waitForWorkspaceFile(page, workspaceId, "topic.md");
+    await page.getByTestId(activityPin("explorer")).click();
     await explorerRow(page, "topic.md").click();
     await page.getByTestId("chat-file-mention").filter({ hasText: "reader@dohc.test" }).click();
     await expect(page.getByTestId("chats-dm-view").locator(`[data-message-id="${firstMessageId}"]`)).toBeInViewport();

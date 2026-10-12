@@ -19,6 +19,7 @@ import { existingAncestor } from "./workspaceFiles";
 import { assertResolvedWorkspacePath } from "./workspaceRealPath";
 import {
   ShareUnavailableError,
+  RelayUnauthorizedError,
   type PullShareViewResult,
   type ShareViewChangedPath,
   type ShareViewRefusal,
@@ -75,7 +76,7 @@ export type StandaloneShareViewRefreshOutcome =
       ok: true;
       collisionRecordQuarantined: boolean;
     } & RefreshSharedViewOutcome)
-  | { ok: false; changedPaths: number; errorMessage: string };
+  | { ok: false; changedPaths: number; errorMessage: string; errorKind?: "unauthorized" };
 
 export interface CaptureSharedViewLocalDivergenceOutcome {
   capturedPaths: number;
@@ -148,6 +149,7 @@ function standaloneShareViewFailureOutcome(
     ok: false,
     changedPaths,
     errorMessage: errorMessage(error),
+    ...(error instanceof RelayUnauthorizedError ? { errorKind: "unauthorized" as const } : {}),
   };
 }
 
@@ -1943,6 +1945,7 @@ async function refreshSharedViewOnce(input: {
   // past it is committed, and idempotent by origin coordinate, because a
   // re-fetched page repeats refusals the record already holds.
   recordRefusals: (refusals: ShareViewRefusal[]) => Promise<void>;
+  onCursorCommitted?: (cursor: number) => void;
   excludeFromMaterialization?: ReadonlySet<string>;
   unjournalablePaths?: readonly UnjournalablePath[];
   trackPendingMaterialization?: boolean;
@@ -2103,6 +2106,7 @@ async function refreshSharedViewOnce(input: {
     await clearPullInFlightMarker(input.rootDir);
   }
   await pull.commitCursor();
+  input.onCursorCommitted?.(pull.nextCursor);
   // Logged one line per refusal, because the count alone cannot be diagnosed.
   // The engine's message names the constraint, and for a version refusal its
   // limit, unit and observed usage.

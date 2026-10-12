@@ -88,6 +88,72 @@ function sha256Utf8(text: string): string {
 const WORKSPACE_ID = "engine-capture-test";
 const WORKSPACE_ATTACHMENT_ID = Symbol("workspace-engine-capture-test");
 
+it.each(["text", "delete"])("replays a keyed %s restore without reversing a later edit", async kind => {
+  const root = await createTestScratch("dohc-keyed-restore-");
+  const sessions = mockLiveSessions(new VersionedLoopbackEngine());
+  const store = createCaptureLiveStores({workspaceId: WORKSPACE_ID, rootPath: root, attachmentId: WORKSPACE_ATTACHMENT_ID}, sessions).store;
+  const target = {workspaceId: WORKSPACE_ID, versionId: "main", path: "notes/file.txt", metadata: {origin: "api" as const}};
+  await store.ensureMainVersion({workspaceId: WORKSPACE_ID});
+  if (kind === "text") await store.writeTextFile({...target, text: "old"});
+  const changed = await store.writeTextFile({...target, text: "new"});
+  await write(root, target.path, "new");
+  const engine = capture(root, {store, rustEngineSessions: sessions});
+  const options = {expectedHeadMomentId: changed.moment.id, requestId: "restore/saved-session-file"};
+  const first = await engine.restoreFileToBeforeMoment(changed.moment.id, RESTORER, options);
+  const newer = await store.writeTextFile({...target, text: "teammate"});
+  await write(root, target.path, "teammate");
+  await expect(engine.restoreFileToBeforeMoment(changed.moment.id, RESTORER, {...options, requestId: "another-session"})).rejects.toMatchObject({name: "RestoreHeadChangedError"});
+  expect(await engine.restoreFileToBeforeMoment(changed.moment.id, {kind: "human", humanId: "another-owner"}, options)).toEqual(first);
+  const moments = await store.listMoments({workspaceId: WORKSPACE_ID, versionId: "main", objectId: changed.moment.objectId, limit: 100});
+  expect(moments.moments.filter(m => m.metadata.correlationId === options.requestId && m.metadata.origin === "restore")).toHaveLength(1);
+  expect((await store.readTextFile(target))?.objectId).toBe(newer.moment.objectId);
+  expect(await readFile(join(root, target.path), "utf8")).toBe("teammate");
+  await engine.stop();
+});
+
+it.each([["text", "error"], ["text", "conflict"], ["binary", "conflict"], ["binary", "superseded"]] as const)(
+  "never adopts an unconfirmed keyed %s restore (%s) on retry", async (kind, outcome) => {
+    const root = await createTestScratch("dohc-keyed-restore-unpublished-");
+    const loopback = new VersionedLoopbackEngine();
+    const send = loopback.sendRequest.bind(loopback);
+    const unpublished = new Set<string>();
+    vi.spyOn(loopback, "sendRequest").mockImplementation(async request => {
+      const response = await send(request);
+      const params = request.params as Record<string, JsonValue>;
+      // The daemon's request ledger answers as the injected publication ended.
+      if (request.method === VERSIONED_METHOD.publicationApplied) {
+        return {...response, result: response.result === true && !unpublished.has(params.momentId as string)};
+      }
+      if ((request.method !== VERSIONED_METHOD.textWrite && request.method !== VERSIONED_METHOD.binaryWrite) || params.origin !== "restore") return response;
+      const result = response.result as Record<string, JsonValue>;
+      unpublished.add((result.moment as Record<string, JsonValue>).momentId as string);
+      return {...response, result: {...result, materialized: false, materializeOutcome: outcome}};
+    });
+    const sessions = mockLiveSessions(loopback);
+    const store = createCaptureLiveStores({workspaceId: WORKSPACE_ID, rootPath: root, attachmentId: WORKSPACE_ATTACHMENT_ID}, sessions).store;
+    const target = {workspaceId: WORKSPACE_ID, versionId: "main", path: kind === "text" ? "note.txt" : "image.bin", metadata: {origin: "api" as const}};
+    const current = kind === "text" ? "current" : Buffer.from([0, 255, 2]);
+    await store.ensureMainVersion({workspaceId: WORKSPACE_ID});
+    if (kind === "text") await store.writeTextFile({...target, text: "original"});
+    else await store.writeBinaryFile({...target, bytes: Buffer.from([0, 255, 1])});
+    const changed = kind === "text"
+      ? await store.writeTextFile({...target, text: "current"})
+      : await store.writeBinaryFile({...target, bytes: Buffer.from([0, 255, 2])});
+    await write(root, target.path, current);
+    const engine = capture(root, {store, rustEngineSessions: sessions});
+    const options = {expectedHeadMomentId: changed.moment.id, requestId: "restore/unpublished-session-file"};
+    try {
+      await expect(engine.restoreFileToBeforeMoment(changed.moment.id, RESTORER, options)).rejects.toThrow();
+      expect(unpublished.size).toBe(1);
+      await expect(engine.restoreFileToBeforeMoment(changed.moment.id, RESTORER, options)).rejects.toMatchObject({name: "RestoreHeadChangedError"});
+      expect(await engine.findRestoreReceipt(changed.moment.id, options.requestId)).toBeNull();
+      expect(await engine.publicationApplied([...unpublished][0]!, options.requestId)).toBe(false);
+      expect(await readFile(join(root, target.path))).toEqual(Buffer.from(current));
+    } finally {
+      await engine.stop();
+    }
+  });
+
 // chmod/ACL-based fixtures cannot make a path unreadable for root (root
 // ignores file modes), so every test that needs an unreadable path skips
 // under uid 0.
@@ -184,9 +250,9 @@ function liveCapture(
     get(target, property, receiver) {
       if (property !== "sendRequest") return Reflect.get(target, property, receiver);
       return async (request: Request) => {
-        const params = request.params as { createOnly?: boolean; path: string; text?: string; bytesBase64?: string; expectedSha256?: string; requestId?: string };
+        const params = request.params as { createOnly?: boolean; path: string; text?: string; bytesBase64?: string; expectedSha256?: string };
         const writing = request.method === VERSIONED_METHOD.textWrite || request.method === VERSIONED_METHOD.textWriteBlob;
-        const key = params.requestId ?? String(request.id);
+        const key = request.idempotencyKey ?? String(request.id);
         if (writing && !completed.has(key)) {
           const current = await readFile(join(root, params.path)).catch(() => null);
           if (params.createOnly && current !== null) throw new VersionedTextStoreError("target-path-exists", "target-path-exists");
@@ -422,7 +488,6 @@ describe("workspaceEngineCapture batch capture", () => {
     let healthyPending = true;
     const reconcile = vi.fn(async () => {
       healthyPending = false;
-      throw new DaemonRefusalError({ code: "COLLECTION_RECONCILIATION_LEASE_HELD", message: "A document is still open.", retry: "afterBackoff" }, undefined);
     });
     const store = new Proxy(liveStore, {
       get(target, property) {
@@ -485,9 +550,9 @@ describe("workspaceEngineCapture batch capture", () => {
     expect(errors).toEqual([]);
     healthyPending = true;
     reconcile.mockRejectedValueOnce(new DaemonRefusalError({
-      code: "INTERNAL", message: "collection-reconciliation-lease-held", retry: "no",
+      code: "INTERNAL", message: "reconciliation-failed", retry: "no",
     }, undefined));
-    await expect(engine.flush()).rejects.toThrow("collection-reconciliation-lease-held");
+    await expect(engine.flush()).rejects.toThrow("reconciliation-failed");
     healthyPending = false;
     // Retry after capacity clears, or observe adoption completed by the owner host.
     if (transient) blocked = false;
@@ -496,6 +561,69 @@ describe("workspaceEngineCapture batch capture", () => {
     expect(pending).toBe(false);
     if (transient) expect(session.doc.getMap("frontmatter").get("id")).toBe("rec_aaaaaaaaaaaaaaaaaaaaaaaaaa");
     expect(errors).toEqual([]);
+    await session.close({ settle: false });
+    await engine.stop();
+    expect(close).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    ["OVERLOADED", "engine-store-busy", "afterBackoff", false],
+    ["OVERLOADED", "live-settlement-capacity", "afterBackoff", false],
+    ["INTERNAL", "live-settlement-capacity", "no", true],
+  ] as const)("retries an open adoption refused with %s %s on the next pass", async (code, message, retry, reported) => {
+    const root = await createTestScratch("dohc-engine-capture-");
+    const path = "tasks/pending.md";
+    const objectId = "pending-object";
+    const recordId = "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const loopback = new VersionedLoopbackEngine();
+    loopback.seedTextFile({ workspace: WORKSPACE_ID, versionId: "main", path, objectId, text: "# Body\n" });
+    const sessions = mockLiveSessions(loopback);
+    const liveStore = createCaptureLiveStores({ workspaceId: WORKSPACE_ID, rootPath: root,
+      attachmentId: WORKSPACE_ATTACHMENT_ID }, sessions).store;
+    let pending = true;
+    const store = new Proxy(liveStore, {
+      get(target, property) {
+        if (property === "flushCapture" || property === "reconcileCapture") return async () => undefined;
+        if (property === "listPendingCollectionAdoptions") return async () => ({
+          adoptions: pending ? [{ versionId: "main", recordId, collectionPath: "tasks", filePath: path, objectId }] : [],
+          nextCursor: null,
+        });
+        const value = Reflect.get(target, property, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    const refusal = new DaemonRefusalError({ code, message, retry }, undefined);
+    const doc = new Y.Doc();
+    doc.getMap("frontmatter").set("Name", "Manual");
+    const close = vi.fn(async () => undefined);
+    const evict = vi.fn(async () => undefined);
+    let adoptions = 0;
+    const adopt = vi.fn(async () => {
+      if (++adoptions === 1) throw refusal;
+      doc.getMap("frontmatter").set("id", recordId);
+      pending = false;
+      return "settled" as const;
+    });
+    const open = vi.fn(async () => ({
+      doc, initialUpdate: Y.encodeStateAsUpdate(doc), contentKind: "richdoc" as const,
+      path, objectId, versionId: "main", head: "present" as const, lineage: "existing" as const,
+      unsettled: false, close, evict,
+      applyLocalUpdate: async (update: Uint8Array) => { Y.applyUpdate(doc, update); },
+      adoptCollectionRecord: adopt,
+      settleNow: async () => undefined,
+    }) as unknown as EngineYdocProviderSession);
+    const errors: Array<{ context: string; error: unknown }> = [];
+    const engine = capture(root, { store, rustEngineSessions: sessions, openRustYDocProviderSession: open,
+      onError: (context, error) => errors.push({ context, error }) });
+    const session = await engine.openYDocSession({ path, contentKind: "richdoc", onRemoteUpdate: () => undefined });
+    await engine.flush();
+    expect(adopt).toHaveBeenCalledTimes(2);
+    expect(pending).toBe(false);
+    expect(session.doc.getMap("frontmatter").toJSON()).toEqual({ Name: "Manual", id: recordId });
+    expect(open).toHaveBeenCalledTimes(1);
+    expect(close).not.toHaveBeenCalled();
+    expect(evict).not.toHaveBeenCalled();
+    expect(errors).toEqual(reported ? [{ context: `collection adoption of ${path}`, error: refusal }] : []);
     await session.close({ settle: false });
     await engine.stop();
     expect(close).toHaveBeenCalledTimes(1);
@@ -586,7 +714,11 @@ describe("workspaceEngineCapture batch capture", () => {
     await engine.stop();
   });
 
-  it("retries a busy collection adoption provider on a later pass while other items proceed", async () => {
+  it.each([
+    ["OVERLOADED", "engine-store-busy", "afterBackoff", false],
+    ["OVERLOADED", "live-settlement-capacity", "afterBackoff", false],
+    ["INTERNAL", "live-settlement-capacity", "no", true],
+  ] as const)("retries a %s %s collection adoption provider on a later pass while other items proceed", async (code, message, retry, reported) => {
     const root = await createTestScratch("dohc-engine-capture-");
     const adoptions = [
       {
@@ -612,9 +744,6 @@ describe("workspaceEngineCapture batch capture", () => {
       flushCapture: async () => undefined,
       reconcileCapture: async () => {
         attempts.push("reconcile");
-        if (leasedPaths.size > 0) {
-          throw new DaemonRefusalError({ code: "COLLECTION_RECONCILIATION_LEASE_HELD", message: "A document is still open.", retry: "afterBackoff" }, undefined);
-        }
       },
       listPendingCollectionAdoptions: async () => ({
         adoptions: adoptions.filter(
@@ -623,14 +752,10 @@ describe("workspaceEngineCapture batch capture", () => {
         nextCursor: null,
       }),
     } as unknown as CaptureVersionedTextStore;
-    const busy = new DaemonRefusalError(
-      {
-        code: "OVERLOADED",
-        message: "engine-store-busy",
-        retry: "afterBackoff",
-      },
-      undefined,
-    );
+    const busy = new DaemonRefusalError({ code, message, retry }, undefined);
+    const expectedErrors = reported
+      ? [{ context: "collection adoption of projects/busy.md", error: busy }]
+      : [];
     const opens = new Map<string, number>();
     const sessions = {
       run: async (_workspace: unknown, task: (binding: unknown) => unknown) =>
@@ -667,7 +792,7 @@ describe("workspaceEngineCapture batch capture", () => {
       "projects/busy.md:1", "projects/healthy.md:1", "reconcile",
       "projects/busy.md:2", "reconcile",
     ]);
-    expect(errors).toEqual([]);
+    expect(errors).toEqual(expectedErrors);
 
     await engine.flush();
 
@@ -687,7 +812,7 @@ describe("workspaceEngineCapture batch capture", () => {
         ["projects/healthy.md", 1],
       ]),
     );
-    expect(errors).toEqual([]);
+    expect(errors).toEqual(expectedErrors);
     await engine.stop();
   });
 
@@ -708,9 +833,6 @@ describe("workspaceEngineCapture batch capture", () => {
       flushCapture: async () => undefined,
       reconcileCapture: async () => {
         attempts.push("reconcile");
-        if (leasedPaths.size > 0) {
-          throw new DaemonRefusalError({ code: "COLLECTION_RECONCILIATION_LEASE_HELD", message: "A document is still open.", retry: "afterBackoff" }, undefined);
-        }
       },
       listPendingCollectionAdoptions: async () => ({
         adoptions: completed.has(adoption.filePath) ? [] : [adoption],
@@ -1169,7 +1291,8 @@ describe("workspaceEngineCapture batch capture", () => {
     expect(result.status).toBe("deleted");expect(result.momentId).toBeTruthy();
     expect(existsSync(join(root,"responses/moved.md"))).toBe(false);
     const deletion=requests.findLast(request=>request.method==="versionedText.delete");
-    expect(deletion?.params).toMatchObject({path:"responses/moved.md",expectedObjectId:created.object.id,requestId:"undo-a"});
+    expect(deletion).toMatchObject({idempotencyKey:"undo-a",params:{path:"responses/moved.md",expectedObjectId:created.object.id}});
+    expect(deletion?.params).not.toHaveProperty("requestId");
     await engine.stop();
     const reopened=capture(root,{store,rustEngineSessions:sessions});
     // Another object now occupies the deleted path; retries cannot touch it.
@@ -1198,9 +1321,11 @@ describe("workspaceEngineCapture batch capture", () => {
     const engine=capture(root,{store,rustEngineSessions:sessions});
     const selection={acceptanceId:"accepted-a",objectId:created.object.id,momentId:created.moment.id,path:created.snapshot.path,collectionPath:"responses",versionId:"main",publicPrincipalId:"public-a",grantId:"grant",requestId:"undo-a"};
     expect((await engine.undoAcceptedAppResponse(selection,{kind:"agent",agentId:"dohc-mcp",onBehalfOf:"local",depth:3})).status).toBe("deleted");
-    expect(requests.findLast(request=>request.method==="versionedText.delete")?.params).toMatchObject({
-      requestId:"undo-a",author:{kind:"agent",agentId:"dohc-mcp",onBehalfOf:"local",depth:3},
+    const deletion=requests.findLast(request=>request.method==="versionedText.delete");
+    expect(deletion).toMatchObject({
+      idempotencyKey:"undo-a",params:{author:{kind:"agent",agentId:"dohc-mcp",onBehalfOf:"local",depth:3}},
     });
+    expect(deletion?.params).not.toHaveProperty("requestId");
     await engine.stop();
   });
 
@@ -3105,7 +3230,8 @@ describe("workspaceEngineCapture agent attribution", () => {
       { createOnly: true, requestId: "binary", correlationId: "batch" });
     expect(outcome.materializeOutcome).toBe("applied");
     const request = requests.find(request => request.method === VERSIONED_METHOD.binaryWrite);
-    expect(request).toMatchObject({ params: { bytes: [0, 255, 1], author, createOnly: true, requestId: "binary", correlationId: "batch" } });
+    expect(request).toMatchObject({ idempotencyKey: "binary", params: { bytes: [0, 255, 1], author, createOnly: true, correlationId: "batch" } });
+    expect(request?.params).not.toHaveProperty("requestId");
     expect(requests.findIndex(request => request.method === "capture.flush")).toBeLessThan(requests.indexOf(request!));
     expect(await liveMomentAuthors(engine)).toEqual([[author]]);
     await engine.stop();

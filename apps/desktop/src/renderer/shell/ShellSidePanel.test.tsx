@@ -77,7 +77,7 @@ describe("apps pinned to the sidebar", () => {
     await user.click(screen.getByTestId("activity-search"));
     await waitFor(() =>
       expect(within(screen.getByTestId("side-panel")).getByText("Search")).toBeTruthy());
-    view.rerender(shellWith(withSidebar(["history", "explorer", "search"])));
+    view.rerender(shellWith(withSidebar(["history", "explorer", "chats", "search"])));
     await waitFor(() =>
       expect(within(screen.getByTestId("side-panel")).getByText("Graph")).toBeTruthy());
   });
@@ -101,11 +101,18 @@ describe("apps pinned to the sidebar", () => {
     const shell = await screen.findByTestId("workspace-shell");
     await waitFor(() => expect(shell.dataset.ready).toBe("true"));
     for (const view of VIEW_IDS) expect(screen.queryByTestId(`activity-${view}`)).toBeNull();
-    expect(screen.queryByTestId("side-panel")).toBeNull();
+    // Sharing sits at the rail's foot and cannot be hidden, so it is the
+    // view the panel shows.
+    await waitFor(() =>
+      expect(within(screen.getByTestId("side-panel")).getByText("Sharing")).toBeTruthy());
+    expect(screen.queryByTestId("file-tree")).toBeNull();
 
     fireEvent.keyDown(window, { key: "b", ctrlKey: true });
     await act(async () => { await Promise.resolve(); });
     expect(screen.queryByTestId("side-panel")).toBeNull();
+    fireEvent.keyDown(window, { key: "b", ctrlKey: true });
+    await waitFor(() =>
+      expect(within(screen.getByTestId("side-panel")).getByText("Sharing")).toBeTruthy());
     expect(screen.queryByTestId("file-tree")).toBeNull();
   });
 

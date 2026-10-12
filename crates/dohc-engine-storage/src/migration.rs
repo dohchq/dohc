@@ -2846,6 +2846,40 @@ CREATE TABLE live_settlement_attribution_unavailable (
 ) STRICT;
 ";
 
+const V2_FIELD_HISTORY_LINK_AUTHOR_DDL: &str = "
+ALTER TABLE collection_field_history ADD COLUMN link_author_json TEXT;
+";
+
+const V2_YDOC_FILE_EXPORT_LANE_DDL: &str = "
+ALTER TABLE ydoc_docs ADD COLUMN file_export_lane INTEGER NOT NULL DEFAULT 0 CHECK (file_export_lane IN (0,1,2,3));
+UPDATE ydoc_docs SET file_export_lane=1 WHERE lineage_claim_status='unclaimed' AND sharing_declined_json IS NOT NULL;
+DROP TRIGGER ydoc_sharing_declined_head;
+CREATE TRIGGER ydoc_sharing_declined_head AFTER UPDATE ON snapshots
+WHEN NEW.blob_sha256 IS NOT OLD.blob_sha256
+    OR (NEW.latest_moment_id IS NOT OLD.latest_moment_id AND NEW.metadata_origin='restore')
+BEGIN
+    UPDATE ydoc_docs SET sharing_declined_json=NULL
+    WHERE workspace_id=NEW.workspace_id AND version_id=NEW.version_id AND object_id=NEW.object_id
+        AND file_export_lane NOT IN (1,2) AND sharing_declined_json IS NOT NULL;
+END;
+DROP TRIGGER ydoc_sharing_declined_restore;
+CREATE TRIGGER ydoc_sharing_declined_restore AFTER INSERT ON live_restore_fences
+BEGIN
+    UPDATE ydoc_docs SET sharing_declined_json=NULL
+    WHERE workspace_id=NEW.workspace_id AND version_id=NEW.main_version_id AND object_id=NEW.object_id
+        AND file_export_lane NOT IN (1,2) AND sharing_declined_json IS NOT NULL;
+END;
+CREATE TRIGGER ydoc_file_export_claimed AFTER UPDATE OF lineage_claim_status ON ydoc_docs
+WHEN NEW.lineage_claim_status != 'unclaimed' AND NEW.file_export_lane != 0
+BEGIN
+    UPDATE ydoc_docs SET file_export_lane=0 WHERE workspace_id=NEW.workspace_id AND version_id=NEW.version_id AND object_id=NEW.object_id;
+END;
+CREATE TRIGGER ydoc_file_export_deleted AFTER DELETE ON snapshots
+BEGIN
+    UPDATE ydoc_docs SET file_export_lane=3 WHERE workspace_id=OLD.workspace_id AND version_id=OLD.version_id AND object_id=OLD.object_id AND file_export_lane IN (1,2);
+END;
+";
+
 /// The frozen, ordered list of migrations this build knows. No build may
 /// delete or rename the `v2-baseline` ledger row, because an older build
 /// recognizes a newer store only by that row and would otherwise offer
@@ -3099,7 +3133,137 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         sql: V2_LIVE_SETTLEMENT_PUBLICATION_DDL,
         sets_user_version: None,
     },
+    Migration {
+        ordinal: 39,
+        id: "v2-retained-export-attempt-lineage",
+        sql: "ALTER TABLE ydoc_docs ADD COLUMN export_attempt_lineage_claim_id TEXT; ALTER TABLE ydoc_docs ADD COLUMN export_wait_asset_sha256 TEXT; ALTER TABLE ydoc_docs ADD COLUMN export_wait_asset_path TEXT CHECK (export_wait_asset_path IS NULL OR export_wait_asset_sha256 IS NOT NULL); CREATE INDEX idx_moments_version_path_order ON moments(workspace_id,version_id,path,moment_order DESC) WHERE path GLOB 'assets/excalidraw/*';",
+        sets_user_version: None,
+    },
+    Migration {
+        ordinal: 40,
+        id: "v2-open-document-artifacts",
+        sql: V2_OPEN_DOCUMENT_ARTIFACTS_DDL,
+        sets_user_version: None,
+    },
+    Migration {
+        ordinal: 41,
+        id: "v2-ydoc-file-export-lane",
+        sql: V2_YDOC_FILE_EXPORT_LANE_DDL,
+        sets_user_version: None,
+    },
+    Migration {
+        ordinal: 42,
+        id: "v2-field-history-link-author",
+        sql: V2_FIELD_HISTORY_LINK_AUTHOR_DDL,
+        sets_user_version: None,
+    },
+    Migration {
+        ordinal: 43,
+        id: "v2-audited-projection-contributions",
+        sql: "CREATE TABLE live_audit_projection_contributions ( \
+                workspace_id TEXT NOT NULL, origin_id TEXT NOT NULL, origin_seq INTEGER NOT NULL, \
+                record_digest TEXT NOT NULL, author_json TEXT NOT NULL \
+                  CHECK (json_valid(author_json) AND json_type(author_json)='array' \
+                    AND json_array_length(author_json) BETWEEN 1 AND 1024 \
+                    AND length(CAST(author_json AS BLOB))<=131072), \
+                PRIMARY KEY(workspace_id,origin_id,origin_seq,record_digest), \
+                FOREIGN KEY(workspace_id) REFERENCES versioned_workspaces(workspace_id) ON DELETE CASCADE \
+              ) STRICT; \
+              ALTER TABLE live_audit_projection_authors ADD COLUMN moment_base_json TEXT;",
+        sets_user_version: None,
+    },
+    Migration {
+        ordinal: 44,
+        id: "v2-chat-channel-keyset-page",
+        sql: "CREATE INDEX idx_chat_channels_page ON chat_channels(workspace_id, created_at_ms, channel_id);",
+        sets_user_version: None,
+    },
+    Migration {
+        ordinal: 45,
+        id: "v2-chat-local-dispatch-discovery",
+        sql: "CREATE TABLE chat_dispatch_local_discovery (workspace_id TEXT NOT NULL, message_id TEXT NOT NULL, PRIMARY KEY (workspace_id, message_id), FOREIGN KEY (workspace_id, message_id) REFERENCES chat_messages(workspace_id, message_id) ON DELETE CASCADE) STRICT;",
+        sets_user_version: None,
+    },
 ];
+
+const V2_OPEN_DOCUMENT_ARTIFACTS_DDL: &str = "\
+CREATE TABLE replication_pending_refusals_next (
+    workspace_id TEXT NOT NULL,
+    origin_id TEXT NOT NULL,
+    origin_seq INTEGER NOT NULL CHECK (origin_seq >= 0),
+    op_kind TEXT NOT NULL,
+    reason_code TEXT NOT NULL CHECK (reason_code IN ('invalid-input','document-artifact-recovery-failed')),
+    reason_message TEXT NOT NULL,
+    report_id TEXT,
+    PRIMARY KEY(workspace_id,origin_id,origin_seq),
+    FOREIGN KEY(workspace_id,origin_id,origin_seq)
+      REFERENCES replication_log(workspace_id,origin_id,origin_seq)
+      ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED
+) STRICT;
+INSERT INTO replication_pending_refusals_next SELECT * FROM replication_pending_refusals;
+DROP TABLE replication_pending_refusals;
+ALTER TABLE replication_pending_refusals_next RENAME TO replication_pending_refusals;
+CREATE INDEX replication_pending_refusals_by_report ON replication_pending_refusals(workspace_id,report_id);
+ALTER TABLE ydoc_docs ADD COLUMN last_local_update_seq INTEGER NOT NULL DEFAULT 0;
+UPDATE ydoc_docs SET last_local_update_seq=head_update_seq
+    WHERE head_update_seq>COALESCE(settled_update_seq,0);
+CREATE TABLE ydoc_pending_artifacts (
+    workspace_id TEXT NOT NULL,
+    version_id TEXT NOT NULL,
+    object_id TEXT NOT NULL,
+    moment_id TEXT NOT NULL,
+    origin_id TEXT NOT NULL,
+    origin_seq INTEGER NOT NULL,
+    lineage_claim_id TEXT NOT NULL,
+    last_attempt_state TEXT,
+    PRIMARY KEY(workspace_id,version_id,object_id),
+    FOREIGN KEY(workspace_id,version_id,object_id)
+      REFERENCES ydoc_docs(workspace_id,version_id,object_id) ON DELETE CASCADE,
+    FOREIGN KEY(workspace_id,moment_id)
+      REFERENCES moments(workspace_id,moment_id) ON DELETE CASCADE
+) STRICT;
+CREATE INDEX replication_ydoc_origin_document ON replication_log(workspace_id,
+    json_extract(payload_json,'$.versionId'),json_extract(payload_json,'$.objectId'),origin_id,origin_seq)
+    WHERE op_kind='ydoc.update';
+CREATE TRIGGER ydoc_pending_artifacts_settled AFTER UPDATE OF last_settled_sha,settled_update_seq ON ydoc_docs
+WHEN NEW.settled_update_seq=NEW.head_update_seq AND EXISTS (
+    SELECT 1 FROM snapshots s WHERE s.workspace_id=NEW.workspace_id
+      AND s.version_id=NEW.version_id AND s.object_id=NEW.object_id
+      AND s.blob_sha256=NEW.last_settled_sha)
+BEGIN
+    DELETE FROM replication_pending_refusals WHERE workspace_id=NEW.workspace_id
+      AND reason_code='document-artifact-recovery-failed'
+      AND (origin_id,origin_seq) IN (SELECT origin_id,origin_seq FROM ydoc_pending_artifacts
+        WHERE workspace_id=NEW.workspace_id AND version_id=NEW.version_id AND object_id=NEW.object_id);
+    DELETE FROM ydoc_pending_artifacts WHERE workspace_id=NEW.workspace_id
+      AND version_id=NEW.version_id AND object_id=NEW.object_id;
+END;
+CREATE TRIGGER ydoc_local_tail_retired AFTER UPDATE OF head_update_seq ON ydoc_docs
+WHEN NEW.head_update_seq<OLD.head_update_seq
+BEGIN
+    UPDATE ydoc_docs SET last_local_update_seq=0 WHERE workspace_id=NEW.workspace_id
+      AND version_id=NEW.version_id AND object_id=NEW.object_id;
+END;
+CREATE TRIGGER ydoc_recovery_mark_advanced BEFORE UPDATE OF origin_id,origin_seq ON ydoc_pending_artifacts
+WHEN OLD.last_attempt_state IS NOT NULL
+BEGIN
+    DELETE FROM replication_pending_refusals WHERE workspace_id=OLD.workspace_id
+      AND origin_id=OLD.origin_id AND origin_seq=OLD.origin_seq
+      AND reason_code='document-artifact-recovery-failed';
+END;
+CREATE TRIGGER ydoc_recovery_text_repaired AFTER UPDATE OF text ON blobs
+BEGIN
+    UPDATE ydoc_pending_artifacts SET last_attempt_state=NULL WHERE last_attempt_state IS NOT NULL
+      AND EXISTS(SELECT 1 FROM snapshots s WHERE s.workspace_id=ydoc_pending_artifacts.workspace_id
+        AND s.version_id=ydoc_pending_artifacts.version_id AND s.object_id=ydoc_pending_artifacts.object_id
+        AND s.blob_sha256=NEW.sha256);
+END;
+CREATE TRIGGER ydoc_recovery_blob_repaired AFTER UPDATE OF bytes ON binary_blobs
+BEGIN
+    UPDATE ydoc_pending_artifacts SET last_attempt_state=NULL WHERE last_attempt_state IS NOT NULL;
+END;
+
+";
 
 /// Lowercase-hex sha-256 of the migration DDL — the checksum stored in and
 /// re-verified against the ledger.
@@ -3419,6 +3583,80 @@ mod tests {
     #[cfg(feature = "fault-injection")]
     use crate::faults::FaultAction;
     use crate::faults::NoFaults;
+
+    fn field_history_link_upgrade(rows: i64) {
+        let dir = tempdir();
+        let path = dir.join("engine.db");
+        let mut conn = open_bare(&path);
+        let ctx = MigrationContext::current(1000);
+        let target = BASELINE_MIGRATIONS
+            .iter()
+            .position(|migration| migration.id == "v2-field-history-link-author")
+            .unwrap_or(BASELINE_MIGRATIONS.len());
+        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..target], &ctx, &NoFaults).unwrap();
+        conn.execute_batch("INSERT INTO versioned_workspaces VALUES ('ws','main'); INSERT INTO versions(workspace_id,version_id,kind,name,created_at_ms) VALUES ('ws','main','main','main',0);").unwrap();
+        let tx = conn.transaction().unwrap();
+        {
+            let mut insert = tx.prepare("INSERT INTO collection_field_history(workspace_id,version_id,record_id,field_name,previous_value_json,next_value_json,author_origin_id,source_origin_id,source_origin_seq,recorded_at_ms,actor_kind,on_behalf_of,chain_depth,automation_claim_id,automation_name) VALUES ('ws','main','record','status','\"before\"','\"after\"','actor','source',?1,?1,'automation','person',2,'claim','Stamp')").unwrap();
+            for id in 1..=rows {
+                insert.execute([id]).unwrap();
+            }
+        }
+        tx.commit().unwrap();
+        let root = |conn: &Connection| {
+            conn.query_row(
+                "SELECT rootpage FROM sqlite_schema WHERE name='collection_field_history'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap()
+        };
+        let before_root = root(&conn);
+        let start = std::time::Instant::now();
+        run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).unwrap();
+        println!(
+            "field_history_link_migration: rows={rows} on_disk=true elapsed_ns={}",
+            start.elapsed().as_nanos()
+        );
+        assert_eq!(root(&conn), before_root, "the table was not rebuilt");
+        let unchanged: i64 = conn.query_row("SELECT count(*) FROM collection_field_history WHERE history_id=source_origin_seq AND recorded_at_ms=history_id AND workspace_id='ws' AND version_id='main' AND record_id='record' AND field_name='status' AND previous_value_json='\"before\"' AND next_value_json='\"after\"' AND author_origin_id='actor' AND source_origin_id='source' AND actor_kind='automation' AND on_behalf_of='person' AND chain_depth=2 AND automation_claim_id='claim' AND automation_name='Stamp' AND link_author_json IS NULL", [], |row| row.get(0)).unwrap();
+        assert_eq!(unchanged, rows);
+        assert_eq!(
+            conn.query_row("SELECT count(*) FROM collection_field_history", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap(),
+            rows
+        );
+        conn.execute("INSERT INTO collection_field_history(workspace_id,version_id,record_id,field_name,recorded_at_ms,link_author_json) VALUES ('ws','main','record','status',?1,?2)", rusqlite::params![rows+1, r#"{"kind":"link","grantId":"grant","grantGeneration":1,"publicPrincipalId":"public"}"#]).unwrap();
+        assert_eq!(conn.last_insert_rowid(), rows + 1);
+        assert_eq!(conn.query_row("SELECT count(*) FROM sqlite_schema WHERE name IN ('collection_field_history_by_record','collection_field_history_by_source')", [], |row| row.get::<_, i64>(0)).unwrap(), 2);
+        drop(conn);
+        let mut conn = open_bare(&path);
+        assert_eq!(root(&conn), before_root);
+        assert_eq!(
+            conn.query_row("SELECT count(*) FROM collection_field_history", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap(),
+            rows + 1
+        );
+        assert_eq!(
+            run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).unwrap(),
+            MigrationOutcome::Applied { newly_applied: 0 }
+        );
+    }
+
+    #[test]
+    fn field_history_link_migration_preserves_populated_rows() {
+        field_history_link_upgrade(3);
+    }
+
+    #[test]
+    #[ignore = "manual migration timing on one million persisted rows"]
+    fn field_history_link_migration_million_rows() {
+        field_history_link_upgrade(1_000_000);
+    }
     #[cfg(feature = "fault-injection")]
     use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -3577,6 +3815,34 @@ mod tests {
                 "v2-live-settlement-publication",
                 "e37325b7a31bbba1c63cfd891cbecd6054809201002ac482c95ab41d54ad8458",
             ),
+            (
+                "v2-retained-export-attempt-lineage",
+                "e971935dc8d67177407762aab1adae46e2c7def69762f4e0764239a28a5feed8",
+            ),
+            (
+                "v2-open-document-artifacts",
+                "2a4525cbf68a02045589052295e240bc621fc2de73f96f3a549d505bc06394d7",
+            ),
+            (
+                "v2-ydoc-file-export-lane",
+                "7caa4d6ee7db128cdb9b6b87e2c05b487ce39cb4b5f93ac96b2da5d4bbec7175",
+            ),
+            (
+                "v2-field-history-link-author",
+                "459b1b741b2a2ae0ee53c7c4696a6935ad651ae5905c1e3da42642f88ee413f0",
+            ),
+            (
+                "v2-audited-projection-contributions",
+                "ffe123de3b71b3874993b68c764c0f939d081ec784a982d8dc8b359152955d55",
+            ),
+            (
+                "v2-chat-channel-keyset-page",
+                "67a6a8d2f92652a3d1cbbdf98b66d8441830a2db5a74502cdd15ca4c23851001",
+            ),
+            (
+                "v2-chat-local-dispatch-discovery",
+                "659dcf6fbde5b08aa32a066d0c07cdd6bfe8514fae5cc718904d0de059ef4eb6",
+            ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());
         for (migration, (id, checksum)) in BASELINE_MIGRATIONS.iter().zip(pinned) {
@@ -3587,6 +3853,22 @@ mod tests {
                 "the {id} migration changed after it shipped"
             );
         }
+    }
+
+    #[test]
+    fn local_dispatch_discovery_upgrade_preserves_the_cursor_without_backfilling_messages() {
+        let dir = tempdir();
+        let mut conn = open_bare(&dir.join("engine.db"));
+        let ctx = MigrationContext::current(1);
+        let before = migration_index("v2-chat-local-dispatch-discovery");
+        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..before], &ctx, &NoFaults).unwrap();
+        conn.execute_batch("INSERT INTO chat_channels (workspace_id,channel_id,name,slug,kind,created_at_ms,updated_at_ms) VALUES ('ws','channel','Channel','channel','channel',1,1); INSERT INTO chat_threads (workspace_id,thread_id,title,created_at_ms,updated_at_ms,channel_id) VALUES ('ws','thread','Thread',20,20,'channel'); INSERT INTO chat_messages (workspace_id,thread_id,message_order,message_id,author_kind,author_display_name,body,created_at_ms) VALUES ('ws','thread',0,'old','human','Ada','@agent',20); INSERT INTO chat_dispatch_scan_cursor (workspace_id,max_created_at_ms,updated_at_ms) VALUES ('ws',100,101);").unwrap();
+        run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).unwrap();
+        let state: (i64, i64, i64) = conn.query_row(
+            "SELECT (SELECT COUNT(*) FROM chat_messages), (SELECT COUNT(*) FROM chat_dispatch_local_discovery), (SELECT max_created_at_ms FROM chat_dispatch_scan_cursor WHERE workspace_id='ws')",
+            [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        ).unwrap();
+        assert_eq!(state, (1, 0, 100));
     }
 
     #[test]
@@ -4821,6 +5103,271 @@ mod tests {
                 FaultAction::Continue
             }
         }
+    }
+
+    #[test]
+    fn file_export_lane_migration_preserves_prune_and_head_changes_clears_claim_and_retires_delete()
+    {
+        let mut conn = Connection::open_in_memory().unwrap();
+        let ctx = MigrationContext::current(1000);
+        let target = BASELINE_MIGRATIONS
+            .iter()
+            .position(|migration| migration.ordinal == 41)
+            .unwrap();
+        assert_eq!(BASELINE_MIGRATIONS[target - 1].ordinal, 40);
+        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..target], &ctx, &NoFaults).unwrap();
+        conn.execute_batch("INSERT INTO versioned_workspaces VALUES ('ws','main'); INSERT INTO versions(workspace_id,version_id,kind,name,created_at_ms) VALUES ('ws','main','main','main',0); INSERT INTO file_objects VALUES ('ws','doc',0);").unwrap();
+        let sha = "a".repeat(64);
+        conn.execute("INSERT INTO blobs VALUES (?1,1,'a')", [&sha])
+            .unwrap();
+        conn.execute("INSERT INTO snapshots(workspace_id,version_id,object_id,path,blob_sha256,updated_at_ms,latest_moment_id,metadata_origin) VALUES ('ws','main','doc','doc.md',?1,0,'a','ydoc')",[&sha]).unwrap();
+        conn.execute("INSERT INTO ydoc_docs(workspace_id,version_id,object_id,content_kind,regime,lineage_claim_status,updated_at_ms,sharing_declined_json) VALUES ('ws','main','doc','plaintext','local-only','unclaimed',0,?1)",[format!(r#"{{"head_sha256":"{sha}","constraint":"MAX_YDOC_UPDATE_BYTES","limit_bytes":20,"observed_bytes":21}}"#)]).unwrap();
+        assert_eq!(
+            run_migrations(&mut conn, &BASELINE_MIGRATIONS[..=target], &ctx, &NoFaults).unwrap(),
+            MigrationOutcome::Applied { newly_applied: 1 }
+        );
+        let flag = |conn: &Connection| {
+            conn.query_row("SELECT file_export_lane FROM ydoc_docs", [], |r| {
+                r.get::<_, i64>(0)
+            })
+            .unwrap()
+        };
+        assert_eq!(flag(&conn), 1);
+        conn.execute(
+            "UPDATE ydoc_docs SET head_update_seq=0,head_snapshot_seq=0",
+            [],
+        )
+        .unwrap();
+        conn.execute("UPDATE snapshots SET latest_moment_id='b'", [])
+            .unwrap();
+        assert_eq!(flag(&conn), 1);
+        let next_sha = "b".repeat(64);
+        conn.execute("INSERT INTO blobs VALUES (?1,1,'b')", [&next_sha])
+            .unwrap();
+        conn.execute(
+            "UPDATE snapshots SET blob_sha256=?1,metadata_origin='restore'",
+            [&next_sha],
+        )
+        .unwrap();
+        assert_eq!(flag(&conn), 1);
+        assert!(
+            conn.query_row(
+                "SELECT sharing_declined_json IS NOT NULL FROM ydoc_docs",
+                [],
+                |r| r.get::<_, bool>(0)
+            )
+            .unwrap()
+        );
+        let claim = crate::hex_sha256(b"");
+        conn.execute("INSERT INTO binary_blobs VALUES (?1,0,X'')", [&claim])
+            .unwrap();
+        conn.execute("UPDATE ydoc_docs SET regime='replicated',lineage_claim_status='exact',lineage_claim_id=?1",[&claim]).unwrap();
+        assert_eq!(flag(&conn), 0);
+        conn.execute(
+            "UPDATE ydoc_docs SET regime='local-only',lineage_claim_status='unclaimed',lineage_claim_id=NULL,file_export_lane=1",
+            [],
+        )
+        .unwrap();
+        conn.execute("DELETE FROM snapshots", []).unwrap();
+        assert_eq!(flag(&conn), 3);
+        assert!(
+            conn.execute("UPDATE ydoc_docs SET file_export_lane=4", [])
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn retained_export_lineage_migration_upgrades_ordinal_38_without_backfill() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        let ctx = MigrationContext::current(1_000);
+        let before = BASELINE_MIGRATIONS
+            .iter()
+            .take_while(|m| m.ordinal <= 38)
+            .count();
+        assert_eq!(BASELINE_MIGRATIONS[before - 1].ordinal, 38);
+        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..before], &ctx, &NoFaults).unwrap();
+        conn.execute_batch("INSERT INTO versioned_workspaces VALUES ('ws','main'); \
+            INSERT INTO versions(workspace_id,version_id,kind,name,created_at_ms) VALUES ('ws','main','main','main',0); \
+            INSERT INTO file_objects VALUES ('ws','doc',0);").unwrap();
+        let claim = "c".repeat(64);
+        conn.execute(
+            "INSERT INTO binary_blobs(sha256,byte_length,bytes) VALUES (?1,0,X'')",
+            [&claim],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO ydoc_docs (workspace_id,version_id,object_id,content_kind,regime, \
+            head_update_seq,head_snapshot_seq,lineage_claim_status,lineage_claim_id,updated_at_ms, \
+            export_attempt_moment_id,export_attempt_update_seq,export_attempt_snapshot_seq) \
+            VALUES ('ws','main','doc','plaintext','replicated',1,0,'exact',?1,0,'moment',1,0)",
+            [&claim],
+        )
+        .unwrap();
+        assert_eq!(
+            run_migrations(&mut conn, &BASELINE_MIGRATIONS[..=before], &ctx, &NoFaults).unwrap(),
+            MigrationOutcome::Applied { newly_applied: 1 }
+        );
+        let waiting: (Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT export_wait_asset_path,export_wait_asset_sha256 FROM ydoc_docs",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(waiting, (None, None), "existing rows have no asset wait");
+        let retry = || {
+            conn.query_row(
+                "SELECT export_attempt_lineage_claim_id IS NOT lineage_claim_id \
+            FROM ydoc_docs WHERE export_attempt_moment_id='moment' \
+            AND export_attempt_update_seq=1 AND export_attempt_snapshot_seq=0",
+                [],
+                |r| r.get::<_, bool>(0),
+            )
+            .unwrap()
+        };
+        assert!(retry(), "NULL attempt lineage retries the existing row");
+        conn.execute(
+            "UPDATE ydoc_docs SET export_attempt_lineage_claim_id=lineage_claim_id",
+            [],
+        )
+        .unwrap();
+        assert!(
+            !retry(),
+            "recording the lineage suppresses the next unchanged attempt"
+        );
+    }
+
+    #[test]
+    fn open_document_artifacts_upgrade_from_39_backfills_local_tails() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        let ctx = MigrationContext::current(1);
+        let before = migration_index("v2-open-document-artifacts");
+        assert_eq!(BASELINE_MIGRATIONS[before - 1].ordinal, 39);
+        assert_eq!(BASELINE_MIGRATIONS[before].ordinal, 40);
+        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..before], &ctx, &NoFaults).unwrap();
+        conn.execute_batch("INSERT INTO versioned_workspaces VALUES ('ws','main'); INSERT INTO versions(workspace_id,version_id,kind,name,created_at_ms) VALUES ('ws','main','main','main',0); INSERT INTO file_objects VALUES ('ws','doc',0),('ws','settled',0); INSERT INTO blobs(sha256,byte_length,text) VALUES ('old',3,'old'),('new',3,'new'); INSERT INTO ydoc_docs(workspace_id,version_id,object_id,content_kind,regime,lineage_claim_status,head_update_seq,head_snapshot_seq,settled_update_seq,updated_at_ms) VALUES ('ws','main','doc','plaintext','local-only','unclaimed',2,0,1,0),('ws','main','settled','plaintext','local-only','unclaimed',2,0,2,0); INSERT INTO snapshots(workspace_id,version_id,object_id,path,blob_sha256,updated_at_ms,latest_moment_id,metadata_origin) VALUES ('ws','main','doc','doc.md','old',0,'m0','sync'); INSERT INTO replication_log(workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms,imported) VALUES ('ws','peer',0,'moment.append','{}',0,1); INSERT INTO replication_pending_refusals VALUES ('ws','peer',0,'moment.append','invalid-input','Existing refusal','report');").unwrap();
+        assert_eq!(
+            run_migrations(&mut conn, &BASELINE_MIGRATIONS[..=before], &ctx, &NoFaults).unwrap(),
+            MigrationOutcome::Applied { newly_applied: 1 }
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT last_local_update_seq FROM ydoc_docs WHERE object_id='doc'",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+            2
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT last_local_update_seq FROM ydoc_docs WHERE object_id='settled'",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+            0
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT reason_message,report_id FROM replication_pending_refusals",
+                [],
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+            )
+            .unwrap(),
+            ("Existing refusal".into(), "report".into())
+        );
+        let ddl:String=conn.query_row("SELECT sql FROM sqlite_master WHERE type='table' AND name='replication_pending_refusals'",[],|r|r.get(0)).unwrap();
+        assert!(ddl.contains("CHECK (origin_seq >= 0)"));
+        assert!(
+            ddl.contains("reason_code IN ('invalid-input','document-artifact-recovery-failed')")
+        );
+        assert!(ddl.contains("PRIMARY KEY(workspace_id,origin_id,origin_seq)"));
+        assert!(ddl.contains("DEFERRABLE INITIALLY DEFERRED"));
+        assert!(ddl.ends_with("STRICT"));
+        let index_columns = conn
+            .prepare("PRAGMA index_info(replication_pending_refusals_by_report)")
+            .unwrap()
+            .query_map([], |r| r.get::<_, String>(2))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(index_columns, ["workspace_id", "report_id"]);
+        let foreign_columns = conn
+            .prepare("PRAGMA foreign_key_list(replication_pending_refusals)")
+            .unwrap()
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(2)?,
+                    r.get::<_, String>(3)?,
+                    r.get::<_, String>(4)?,
+                    r.get::<_, String>(6)?,
+                ))
+            })
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(
+            foreign_columns,
+            ["workspace_id", "origin_id", "origin_seq"].map(|column| (
+                "replication_log".into(),
+                column.into(),
+                column.into(),
+                "CASCADE".into()
+            ))
+        );
+        assert!(
+            conn.execute(
+                "UPDATE replication_pending_refusals SET reason_code='unknown'",
+                []
+            )
+            .is_err()
+        );
+        conn.execute_batch("INSERT INTO moments(workspace_id,moment_order,moment_id,version_id,object_id,path,recorded_at_ms,operation,after_blob_sha256,before_present,metadata_origin) VALUES ('ws',1,'m1','main','doc','doc.md',1,'write','new',0,'sync'); INSERT INTO ydoc_pending_artifacts VALUES ('ws','main','doc','m1','peer',0,'claim',NULL);").unwrap();
+        conn.execute("UPDATE ydoc_docs SET settled_update_seq=2,last_settled_sha='new' WHERE object_id='doc'", []).unwrap();
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM ydoc_pending_artifacts", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        conn.execute("UPDATE snapshots SET blob_sha256='new'", [])
+            .unwrap();
+        conn.execute(
+            "UPDATE ydoc_docs SET last_settled_sha='new' WHERE object_id='doc'",
+            [],
+        )
+        .unwrap();
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM ydoc_pending_artifacts", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        // Cleanup must retain unrelated refusals on the same coordinate.
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM replication_pending_refusals",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+            1
+        );
+        conn.execute(
+            "UPDATE ydoc_docs SET head_update_seq=0,settled_update_seq=NULL WHERE object_id='doc'",
+            [],
+        )
+        .unwrap();
+        assert_eq!(
+            conn.query_row(
+                "SELECT last_local_update_seq FROM ydoc_docs WHERE object_id='doc'",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+            0
+        );
     }
 
     #[test]

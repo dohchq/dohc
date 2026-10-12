@@ -418,18 +418,7 @@ fn publication_source_before_in_tx(
             params![b.workspace_id,b.main_version_id,b.object_id,b.current_path,
                 source.bootstrap_moment_id,source.projected_markdown_digest,
                 source.projected_markdown_byte_length,source.baseline_registered_at_ms],
-            |row| Ok(crate::outbound::PortableBefore {
-                moment_id: row.get(0)?,
-                version_id: row.get(1)?,
-                object_id: row.get(2)?,
-                path: row.get(3)?,
-                blob_sha256: row.get(4)?,
-                byte_length: row.get(5)?,
-                recorded_at_ms: row.get(6)?,
-                metadata_origin: row.get(7)?,
-                metadata_summary: row.get(8)?,
-                metadata_correlation_id: row.get(9)?,
-            }),
+            portable_before_from_row,
         ).map(Some).map_err(SyncError::corrupt);
     }
     if record.previous_cursor == 0
@@ -441,7 +430,7 @@ fn publication_source_before_in_tx(
     // The next proof starts at its prior accepted cut and names that artifact.
     let skipped: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM live_device_settlements s JOIN live_settlement_attribution_unavailable u ON u.workspace_id=s.workspace_id AND u.settlement_id=s.settlement_id WHERE s.workspace_id=?1 AND s.relay_database_namespace=?2 AND s.main_version_id=?3 AND s.object_id=?4 AND s.lineage_claim_id=?5 AND s.terminal_cursor>?6 AND s.terminal_cursor<?7)",params![b.workspace_id,record.relay_database_namespace,b.main_version_id,b.object_id,b.lineage_claim_id,record.previous_cursor,record.terminal_cursor],|r|r.get(0)).map_err(SyncError::corrupt)?;
     if skipped && record.previous_cursor > 0 {
-        return tx.query_row(concat!("SELECT m.moment_id,m.version_id,m.object_id,m.path,m.after_blob_sha256,t.byte_length,m.recorded_at_ms,m.metadata_origin,m.metadata_summary,m.metadata_correlation_id FROM live_device_settlements s JOIN live_settlement_publication_states p USING(settlement_id) JOIN moments m ON ", dohc_engine_domain::exclude_capture_recovery_sql!("m"), " AND m.workspace_id=s.workspace_id AND m.moment_id=s.moment_id JOIN blobs t ON t.sha256=s.markdown_digest WHERE s.workspace_id=?1 AND s.relay_database_namespace=?2 AND s.main_version_id=?3 AND s.object_id=?4 AND s.lineage_claim_id=?5 AND s.terminal_cursor=?6 AND m.after_blob_sha256=s.markdown_digest"),params![b.workspace_id,record.relay_database_namespace,b.main_version_id,b.object_id,b.lineage_claim_id,record.previous_cursor],|row|Ok(crate::outbound::PortableBefore {moment_id:row.get(0)?,version_id:row.get(1)?,object_id:row.get(2)?,path:row.get(3)?,blob_sha256:row.get(4)?,byte_length:row.get(5)?,recorded_at_ms:row.get(6)?,metadata_origin:row.get(7)?,metadata_summary:row.get(8)?,metadata_correlation_id:row.get(9)?})).map(Some).map_err(SyncError::corrupt);
+        return tx.query_row(concat!("SELECT m.moment_id,m.version_id,m.object_id,m.path,m.after_blob_sha256,t.byte_length,m.recorded_at_ms,m.metadata_origin,m.metadata_summary,m.metadata_correlation_id FROM live_device_settlements s JOIN live_settlement_publication_states p USING(settlement_id) JOIN moments m ON ", dohc_engine_domain::exclude_capture_recovery_sql!("m"), " AND m.workspace_id=s.workspace_id AND m.moment_id=s.moment_id JOIN blobs t ON t.sha256=s.markdown_digest WHERE s.workspace_id=?1 AND s.relay_database_namespace=?2 AND s.main_version_id=?3 AND s.object_id=?4 AND s.lineage_claim_id=?5 AND s.terminal_cursor=?6 AND m.after_blob_sha256=s.markdown_digest"),params![b.workspace_id,record.relay_database_namespace,b.main_version_id,b.object_id,b.lineage_claim_id,record.previous_cursor],portable_before_from_row).map(Some).map_err(SyncError::corrupt);
     }
     tx.query_row(
         concat!("SELECT m.moment_id,m.version_id,m.object_id,m.path,a.source_digest,a.source_byte_length,m.recorded_at_ms,m.metadata_origin,m.metadata_summary,m.metadata_correlation_id
@@ -454,18 +443,7 @@ fn publication_source_before_in_tx(
            AND (?10 OR NOT EXISTS(SELECT 1 FROM live_device_settlements s WHERE s.relay_database_namespace=?1 AND s.workspace_id=?2 AND s.main_version_id=?3 AND s.object_id=?4 AND s.lineage_claim_id=?5 AND s.terminal_cursor<?9))"),
         params![record.relay_database_namespace,b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id,
             serde_json::to_string(b).map_err(SyncError::corrupt)?,b.current_path,record.previous_cursor,record.terminal_cursor,skipped],
-        |row| Ok(crate::outbound::PortableBefore {
-            moment_id: row.get(0)?,
-            version_id: row.get(1)?,
-            object_id: row.get(2)?,
-            path: row.get(3)?,
-            blob_sha256: row.get(4)?,
-            byte_length: row.get(5)?,
-            recorded_at_ms: row.get(6)?,
-            metadata_origin: row.get(7)?,
-            metadata_summary: row.get(8)?,
-            metadata_correlation_id: row.get(9)?,
-        }),
+        portable_before_from_row,
     )
     .optional()
     .map_err(SyncError::corrupt)
@@ -532,12 +510,7 @@ fn imported_event_zero_before_in_tx(
            AND m.after_content_kind='text' AND m.after_blob_sha256=?5 AND t.byte_length=?6
          ORDER BY m.moment_order LIMIT 1"),
         params![b.workspace_id,b.main_version_id,b.object_id,b.current_path,digest,markdown.len() as i64],
-        |row| Ok(crate::outbound::PortableBefore {
-            moment_id: row.get(0)?, version_id: row.get(1)?, object_id: row.get(2)?,
-            path: row.get(3)?, blob_sha256: row.get(4)?, byte_length: row.get(5)?,
-            recorded_at_ms: row.get(6)?, metadata_origin: row.get(7)?,
-            metadata_summary: row.get(8)?, metadata_correlation_id: row.get(9)?,
-        }),
+        portable_before_from_row,
     ).map(Some).map_err(SyncError::corrupt)
 }
 
@@ -596,4 +569,16 @@ pub(super) fn apply_settlement_envelope(
         tx.execute("INSERT INTO live_audit_settlements(settlement_id,workspace_id,record_digest,record_json,markdown_digest) VALUES (?1,?2,?3,?4,?5)",params![record.settlement_id,op.workspace_id,payload.record_digest,json,record.markdown_digest]).map_err(SyncError::persist)?;
         Ok(MutationOutcome::Applied(()))
     })
+}
+
+fn portable_before_from_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<crate::outbound::PortableBefore> {
+    Ok(crate::outbound::PortableBefore::published(
+        &serde_json::json!({
+            "operation":"write", "momentId":row.get::<_,String>(0)?, "versionId":row.get::<_,String>(1)?, "objectId":row.get::<_,String>(2)?,
+            "payloadAfterPath":row.get::<_,String>(3)?, "payloadAfterBlobSha256":row.get::<_,String>(4)?, "payloadAfterContentKind":"text", "payloadAfterByteLength":row.get::<_,i64>(5)?, "recordedAtMs":row.get::<_,i64>(6)?,
+            "metadata":{"origin":row.get::<_,String>(7)?, "summary":row.get::<_,Option<String>>(8)?, "correlationId":row.get::<_,Option<String>>(9)?}
+        }),
+    ))
 }

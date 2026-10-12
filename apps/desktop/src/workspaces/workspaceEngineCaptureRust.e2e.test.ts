@@ -1,11 +1,11 @@
-import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
 import { join } from "node:path";
 import { expect, it, vi } from "vitest";
 import * as Y from "yjs";
-import { patchFrontmatter } from "@dohc/ydoc-projection/frontmatter";
+import { patchFrontmatter } from "@dohc/ydoc-projection/frontmatter-map";
 import pipelineFixture from "../../../../crates/dohc-engine-domain/tests/fixtures/collection-field-pipeline.json";
 import { defaultWorkspaceMode, type WatcherEvent } from "@dohc/workspace-core";
 import type {
@@ -156,6 +156,24 @@ async function waitForDaemonCaptureDeferral(
     await delay(25);
   }
   throw new Error("Daemon capture did not report its live-session deferral.");
+}
+
+// The one `<stem> (recovered …).md` beside `<stem>.md` at the workspace root,
+// once the reopened daemon has written it. Same bounded poll as the moment
+// waits: the file lands after the open-time replay, not on a fixed clock.
+async function waitForRecoveredSibling(root: string, stem: string): Promise<string> {
+  const prefix = `${stem} (recovered `;
+  let matches: string[] = [];
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    matches = (await readdir(root)).filter(
+      (name) => name.startsWith(prefix) && name.endsWith(".md"),
+    );
+    if (matches.length === 1) return matches[0]!;
+    await delay(25);
+  }
+  throw new Error(
+    `Expected exactly one recovered sibling of ${stem}.md, found ${JSON.stringify(matches)}.`,
+  );
 }
 
 async function listDaemonPathMoments(
@@ -1063,6 +1081,19 @@ it.skipIf(engine.missing)(
       expect(detail.moment.payload.before?.text).toBe("never settled\ntyped in dohc\nbase\n");
       expect(detail.moment.payload.after?.text).toBe(outside);
       expect(await readFile(join(root, "note.md"), "utf8")).toBe(outside);
+
+      // The outside bytes became the file. The text the engine admitted but
+      // never settled is not discarded with the lineage: it comes back as an
+      // ordinary sibling file, complete, with its own History moment.
+      const recovered = await waitForRecoveredSibling(root, "note");
+      expect(await readFile(join(root, recovered), "utf8")).toBe(
+        "never settled\ntyped in dohc\nbase\n",
+      );
+      const [recoveredMoment] = await waitForPathMoments(capture, recovered, 1);
+      expect(recoveredMoment?.metadata.origin).toBe("ydoc");
+      expect(recoveredMoment?.metadata.summary).toBe(
+        "Recovered unsaved edits from note.md after a later write changed the file.",
+      );
     } finally {
       await capture.stop().catch(() => undefined);
       await sessions.closeAll().catch(() => undefined);

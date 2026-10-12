@@ -7,7 +7,7 @@ import { Editor } from "@tiptap/core";
 import { StarterKit } from "@tiptap/starter-kit";
 import { Markdown } from "@tiptap/markdown";
 import type { JSONContent } from "@tiptap/core";
-import { dohcMarkdownExtensions } from "./extensions";
+import { desktopMarkdownExtensions } from "./extensions";
 import {
   applyWikilinkPick,
   WikilinkPicker,
@@ -58,7 +58,7 @@ function makeEditor(markdown: string): Editor {
     element: document.createElement("div"),
     extensions: [
       StarterKit.configure({ trailingNode: false }),
-      ...dohcMarkdownExtensions,
+      ...desktopMarkdownExtensions,
       Markdown.configure({ indentation: { style: "space", size: 2 } }),
     ],
     content: markdown,

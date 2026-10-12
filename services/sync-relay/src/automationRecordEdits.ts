@@ -1,4 +1,6 @@
+import { VersionedTextStoreError } from "@dohc/workspace-contracts/engine";
 import type {AutomationDeclaration} from "@dohc/live-session-contract/live-authorship";
+import {AutomationCreationCommitted} from "@dohc/automation-executor/collection-record-edits";
 import {createHash} from "node:crypto";
 import {posix} from "node:path";
 import type {
@@ -97,7 +99,8 @@ export function replicaRecordEditContext(
         ...(author.onBehalfOf === undefined ? {} : {onBehalfOf: author.onBehalfOf}), depth: author.depth, run: author.run}}, signal);
       const versionId = await activeVersion();
       signal.throwIfAborted();
-      await adapter.writeTextFile({
+      let result;
+      try { result = await adapter.writeTextFile({
         workspaceId,
         versionId,
         path,
@@ -106,19 +109,25 @@ export function replicaRecordEditContext(
         createOnly: true,
         // The same file again is the same request, so a retry after the
         // engine committed it replays the answer instead of refusing.
-        requestId: `automation-create:${createHash("sha256").update(`${path}\0${text}`).digest("hex")}`,
+        requestId: `automation-create:${createHash("sha256").update(text).digest("hex")}`,
         metadata: {origin: "api", summary: `Added ${posix.basename(path)}`},
         author: {kind: "automation", automationId: author.automationId, onBehalfOf: author.onBehalfOf, depth: author.depth},
-      });
+      }); }
+      catch (error) {
+        if (isIdempotencyKeyReuseRefusal(error)) throw new AutomationCreationCommitted();
+        throw error;
+      }
+      if (result.deduped) throw new AutomationCreationCommitted();
       return path;
     },
     async readText(path) {
       const read = await adapter.readTextFile({workspaceId, versionId: await activeVersion(), path});
-      if (typeof read?.text !== "string") throw new Error(`${path} is not a text file in this server's copy of the workspace.`);
+      if (typeof read?.text !== "string") throw new VersionedTextStoreError("file-not-found", `${path} is not a text file in this server's copy of the workspace.`);
       return {text: read.text, truncated: false};
     },
     withAdapter: async (work) => replica.signal.aborted ? null : await work(adapter),
-    // The engine adopted each record before its create returned.
+    // No change notices here. A new record is adopted before its create returns;
+    // a deduped one adopted later makes the run wait out its adoption deadline and resume on retry.
     onRecordsChanged: () => () => undefined,
     signal,
   };

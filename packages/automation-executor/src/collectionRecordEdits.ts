@@ -21,8 +21,8 @@ import * as Queue from "effect/Queue";
 import {
   FRONTMATTER_EDIT_REFUSED_MESSAGE,
   frontmatterEditsRefused,
-  patchFrontmatter,
 } from "@dohc/ydoc-projection/frontmatter";
+import { patchFrontmatter } from "@dohc/ydoc-projection/frontmatter-map";
 import type { CollectionRecordWrites } from "./collectionAutomationRun";
 import { recordIdFromBytes } from "./recordIds";
 
@@ -51,6 +51,13 @@ const RECORD_NOT_FOUND = "collection-record-not-found";
 // caller's own signal allows longer. A healthy engine adopts within one
 // Collection reconcile.
 const ADOPTION_DEADLINE_MS = 15_000;
+
+export class AutomationCreationSkipped extends Error {
+  constructor() { super("The record was already created, then moved or deleted."); }
+}
+
+/** The request committed; its file may still need Collection adoption. */
+export class AutomationCreationCommitted extends Error {}
 
 /** The engine adapter subset the seam reads through. VersionedLiveAdapter satisfies it. */
 export interface CollectionRecordEditAdapter {
@@ -122,6 +129,8 @@ export interface SetCollectionRecordFieldsInput {
   allowPendingSharedSettlement?: boolean;
   /** A creation key already recorded by the engine must not seed the field again. */
   preserveCompletedSeeds?: boolean;
+  /** Undo treats an existing field key as a completed reversal, even after a later edit. */
+  preserveCompletedFields?: boolean;
   /** Creation reports the stage that could not finish. */
   onStage?(stage: CreationStage): void;
   /** Finish a prior journaled update even when its values already match. */
@@ -375,12 +384,13 @@ export async function setCollectionRecordFields(
         }
         return written;
       }).catch(async error => {
-        if (!input.preserveCompletedSeeds || idempotencyKey === undefined || !isIdempotencyKeyReuseRefusal(error)) throw error;
-        // This typed refusal proves the creation key already landed. The session
-        // restores canonical state before rejecting; no new seed was recorded.
+        if ((!input.preserveCompletedSeeds && !input.preserveCompletedFields) || idempotencyKey === undefined || !isIdempotencyKeyReuseRefusal(error)) throw error;
+        // This typed refusal proves the chosen key already landed. The session
+        // restores canonical state before rejecting; no new write was recorded.
         if (fieldArmed) armed -= 1;
         delete replaced[field];
         decidedFields.delete(field);
+        if (input.preserveCompletedFields) return false;
         return session.applyDecidedLocalUpdate(doc => {
           const current = doc.getMap(FRONTMATTER_FIELD).get(field);
           kept[field] = (current instanceof Y.AbstractType ? current.toJSON() : current) ?? null;
@@ -410,9 +420,15 @@ export async function setCollectionRecordFields(
         nativeHeadSequence: error.draft.nativeHeadSequence, appendKey: `${appendPrefix}/${field}`,
       }] as const);
       const unchanged = candidates.filter(([field]) => !decidedFields.has(field));
-      // A failed status read leaves unchanged fields unknown; journaled writes still succeeded.
+      // Undo cannot finish while a prior reversal's receipt is unknown.
       const states = unchanged.length === 0 ? [] : await context.withAdapter(adapter =>
-        adapter.sharedFileUpdateStates(unchanged.map(([, draft]) => draft))).catch(() => []);
+        adapter.sharedFileUpdateStates(unchanged.map(([, draft]) => draft))).catch(error => {
+          if (input.preserveCompletedFields) throw new Error("dohc could not check this run's shared reversals.", {cause: error});
+          return [];
+        });
+      if (input.preserveCompletedFields && unchanged.some((_, index) => states?.[index] === undefined)) {
+        throw new Error("dohc could not check this run's shared reversals.");
+      }
       const existing = new Set(unchanged.filter((_, index) => states?.[index] !== undefined && states[index] !== "absent")
         .map(([field]) => field));
       sharedFileUpdates = Object.fromEntries(candidates.filter(([field]) => decidedFields.has(field) || existing.has(field)));
@@ -462,11 +478,21 @@ export async function createCollectionRecord(
   let path = prepared.path;
   let recordId = requestedId;
   let durable = false;
+  let checkingExistingFile = false;
   let failedStage: CreationStage = "index";
   try {
     const existingPath = input.recordId === undefined
       ? null : await recordPathFor(context, input.collectionPath, requestedId);
     if (existingPath !== null) {
+      if (input.author.kind === "automation") {
+        checkingExistingFile = true;
+        const existingId = await fileRecordId(context, existingPath).catch((error: unknown) => {
+          if (isFileNotFound(error)) throw new AutomationCreationSkipped();
+          throw error;
+        });
+        if (existingId !== requestedId) throw new AutomationCreationSkipped();
+        checkingExistingFile = false;
+      }
       if (input.author.kind !== "automation" && existingPath !== prepared.path) {
         throw new Error("This record ID belongs to another path. Open that record to edit its fields.");
       }
@@ -498,6 +524,7 @@ export async function createCollectionRecord(
     return { path, recordId, ...(Object.keys(kept).length > 0 ? { kept } : {}) };
   } catch (error) {
     // A transport or lease can fail after the write landed.
+    if (error instanceof AutomationCreationSkipped || checkingExistingFile) throw error;
     const diskId = await fileRecordId(context, path).catch(() => null);
     if (!durable && diskId !== requestedId) throw error;
     if (diskId !== null && ["write", "capture", "index"].includes(failedStage)) recordId = diskId;
@@ -613,18 +640,26 @@ async function createRecordFile(
   try {
     return await context.createFile(requestedPath, text, author);
   } catch (error) {
+    const committed = error instanceof AutomationCreationCommitted;
     const collision = error instanceof VersionedTextStoreError
       ? error.code === "target-path-exists"
       : (error as NodeJS.ErrnoException | null)?.code === "EEXIST";
-    if (!collision) throw error;
-    const existing = await fileRecordId(context, requestedPath).catch(
-      () => undefined,
-    );
+    if (!collision && !committed) throw error;
+    const existing = await fileRecordId(context, requestedPath).catch((readError: unknown) => {
+      if (!committed || isFileNotFound(readError)) return undefined;
+      throw readError;
+    });
+    if (committed && existing !== recordId) throw new AutomationCreationSkipped();
     // Nothing is there: the create itself failed.
     if (existing === undefined) throw error;
     if (existing === recordId) return requestedPath;
   }
   throw new Error(`${requestedPath} already exists. Choose another record name.`);
+}
+
+function isFileNotFound(error: unknown): boolean {
+  return (error as NodeJS.ErrnoException | null)?.code === "ENOENT"
+    || (error instanceof VersionedTextStoreError && error.code === "file-not-found");
 }
 
 /** The valid record id in a file's frontmatter, or null. */

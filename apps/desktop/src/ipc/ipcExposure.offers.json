@@ -1,0 +1,9 @@
+{
+  "nameAdditions": [
+    "desktop:get-folder-app",
+    "desktop:folder-app-changed"
+  ],
+  "channelKeyAdditions": [
+    "folderAppChanged"
+  ]
+}

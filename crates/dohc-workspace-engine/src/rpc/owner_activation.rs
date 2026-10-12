@@ -250,7 +250,8 @@ impl EngineService {
                 key,
                 &captured,
                 lease.ok_or_else(workspace_unavailable)?,
-            );
+            )
+            .map_err(|error| map_runtime(dohc_engine_runtime::RuntimeError::Collab(error)))?;
             lock(&self.sessions).insert(id.clone(), session);
             id
         };

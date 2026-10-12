@@ -1,5 +1,5 @@
-import { desktopPins, activityPin, chatsPanelTabPin } from "../../src/testPins";
-import { expect, type Page } from "@playwright/test";
+import { desktopPins, activityPin } from "../../src/testPins";
+import { expect, type Locator, type Page } from "@playwright/test";
 import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join } from "node:path";
 import { normalizeAbsolutePath } from "@dohc/workspace-core";
@@ -167,6 +167,8 @@ export async function seedWorkspaceRegistry(
       serverUrl: string;
       ownerUserId: string;
     };
+    // Mount records as the registry stores them (`ShareMountRecord`).
+    shareMounts?: ReadonlyArray<Record<string, unknown>>;
   }>,
 ): Promise<void> {
   await mkdir(workspace.homeDir, { recursive: true });
@@ -182,6 +184,7 @@ export async function seedWorkspaceRegistry(
           rootPath: normalizeAbsolutePath(entry.rootPath),
           ...SEEDED_WORKSPACE_SHAPE,
           ...(entry.remote ? { remote: entry.remote } : {}),
+          ...(entry.shareMounts ? { shareMounts: entry.shareMounts } : {}),
         })),
       },
       null,
@@ -354,6 +357,7 @@ export async function revealExplorerPath(
   path: string,
 ): Promise<void> {
   assertSafeRelativePath(path);
+  await openExplorerView(page);
   for (const folder of ancestorsOf(path)) {
     const row = explorerRow(page, folder);
     await expect(row).toBeVisible();
@@ -362,6 +366,16 @@ export async function revealExplorerPath(
     }
   }
   await expect(explorerRow(page, path)).toBeVisible();
+}
+
+// Opens the left Explorer view, which shares the side panel with Chats
+// (idempotent, like openHistoryView).
+export async function openExplorerView(page: Page): Promise<void> {
+  const button = page.getByTestId(activityPin("explorer"));
+  if ((await button.getAttribute("aria-current")) !== "page") {
+    await button.click();
+  }
+  await expect(button).toHaveAttribute("aria-current", "page");
 }
 
 // Opens the left History view (idempotent: re-clicking the active activity
@@ -376,16 +390,28 @@ export async function openHistoryView(page: Page): Promise<void> {
   await expect(button).toHaveAttribute("aria-current", "page");
 }
 
-// Opens the right-hand Chats panel (idempotent: the panel's visibility
-// persists in ui-state, so a relaunch may restore it already open) and lands
-// on the About tab — the active file's chats, history and access.
+// Opens the right-hand About rail — the active file's chats, history and
+// access (idempotent: the rail's visibility persists in ui-state, so a
+// relaunch may restore it already open).
 export async function openAboutPanel(page: Page): Promise<void> {
-  const panel = page.getByTestId(desktopPins.chatsPanel);
-  if (!(await panel.isVisible())) {
-    await page.getByTestId(desktopPins.titlebarChatsSidebar).click();
-    await expect(panel).toBeVisible();
+  const rail = page.getByTestId(desktopPins.aboutRail);
+  if (!(await rail.isVisible())) {
+    await page.getByTestId(desktopPins.titlebarAboutSidebar).click();
+    await expect(rail).toBeVisible();
   }
-  await page.getByTestId(chatsPanelTabPin("about")).click();
+}
+
+// Opens the left Chats view (idempotent, like openHistoryView) and returns
+// the side panel that holds the chat list.
+export async function openChatsView(page: Page): Promise<Locator> {
+  const button = page.getByTestId(activityPin("chats"));
+  if ((await button.getAttribute("aria-current")) !== "page") {
+    await button.click();
+  }
+  await expect(button).toHaveAttribute("aria-current", "page");
+  const panel = page.getByTestId(desktopPins.sidePanel);
+  await expect(panel.getByTestId("chats-view")).toBeVisible();
+  return panel;
 }
 
 export async function expectVisibleContent(

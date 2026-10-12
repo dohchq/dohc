@@ -276,6 +276,7 @@ pub(crate) fn apply_envelope_with_mutation_outcome<T>(
                 }
             }
             if let Some(refusal) = crate::settlement_publication::refresh_in_tx(tx,envelope)? { return Ok(Admission::Refused(refusal)); }
+            crate::live_audit::refresh_confirmed_application_in_tx(tx, envelope)?;
             return Ok(Admission::Skipped);
         }
         let expected = acked.checked_add(1).ok_or(SyncError::CoordinateDiverged)?;
@@ -298,6 +299,7 @@ pub(crate) fn apply_envelope_with_mutation_outcome<T>(
             }
             ack_tx(tx, &envelope.workspace_id, &envelope.origin_id, envelope.origin_seq)?;
             if let Some(refusal) = crate::settlement_publication::refresh_in_tx(tx,envelope)? { return Ok(Admission::Refused(refusal)); }
+            crate::live_audit::refresh_confirmed_application_in_tx(tx, envelope)?;
             return Ok(Admission::Skipped);
         }
         tx.execute_batch("SAVEPOINT dohc_replication_mutation")
@@ -467,6 +469,12 @@ pub(crate) fn persist_refusal(
         ],
     )
     .map_err(SyncError::persist)?;
+    if refusal.op_kind == "ydoc.update" {
+        tx.execute(
+            "UPDATE replication_log SET apply_disposition='refused' WHERE workspace_id=?1 AND origin_id=?2 AND origin_seq=?3",
+            params![refusal.workspace_id,refusal.origin_id,refusal.origin_seq],
+        ).map_err(SyncError::persist)?;
+    }
     Ok(())
 }
 
@@ -478,7 +486,7 @@ pub fn read_replayed_refusal(
         conn.query_row(
             "SELECT op_kind, reason_code, reason_message \
              FROM replication_pending_refusals \
-             WHERE workspace_id=?1 AND origin_id=?2 AND origin_seq=?3",
+             WHERE workspace_id=?1 AND origin_id=?2 AND origin_seq=?3 AND reason_code='invalid-input'",
             params![
                 envelope.workspace_id,
                 envelope.origin_id,
@@ -537,7 +545,7 @@ pub(crate) fn read_pending_refusals(
     store.read_with(|conn| {
         let mut stmt = conn.prepare(
             "SELECT origin_id, origin_seq, op_kind, reason_message FROM replication_pending_refusals \
-             WHERE workspace_id=?1 AND COALESCE(report_id,'') != ?2 ORDER BY origin_id, origin_seq",
+             WHERE workspace_id=?1 AND reason_code='invalid-input' AND COALESCE(report_id,'') != ?2 ORDER BY origin_id, origin_seq",
         ).map_err(SyncError::corrupt)?;
         stmt.query_map(params![workspace_id, DIRECT_RPC_REFUSAL_REPORT_ID], |row| {
             Ok(ReplicationRefusal {

@@ -39,6 +39,7 @@ import {
   LIVE_RESTORE_OPERATIONS,
 } from "./liveRestoreOperationSchema";
 import type { StorageContext } from "./context";
+import { liveContentAuthors } from "./liveAuthorWindow";
 import type { SyncRelayLogInput } from "./types";
 export const SETTLEMENT_PUSH_MAX_BYTES = 64_000_000;
 export const SETTLEMENT_PUSH_MAX_METADATA_EVENTS = 65_536;
@@ -498,7 +499,7 @@ export async function prepareHostedSettlements(
           (metadata.firstSeenDeletes?.length ?? 0) === 0
         )
           continue;
-        for (const author of metadata.authorSnapshot ?? []) {
+        for (const author of liveContentAuthors(metadata.authorSnapshot)) {
           const key = liveAuthorIdentity(author),
             prior = authors.get(key);
           authors.set(

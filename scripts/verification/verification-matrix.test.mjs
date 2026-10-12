@@ -123,7 +123,7 @@ test("verification selects packages and proofs and prepares before parallel jobs
       }
       git(["config", "core.logAllRefUpdates", "true"]);
       mkdirSync(join(root, ".dohc-dev"), { recursive: true });
-      for (const path of ["scripts/verification/verify.mjs", "scripts/verification/js-tests.mjs", "scripts/verification/selection.mjs", "scripts/verification/renderer-selection.mjs", "scripts/verification/timing.mjs", "tools/rust-engine-program/tree-provenance.mjs",
+      for (const path of ["scripts/verification/verify.mjs", "scripts/verification/ticket-evidence.mjs", "scripts/verification/js-tests.mjs", "scripts/verification/selection.mjs", "scripts/verification/renderer-selection.mjs", "scripts/verification/timing.mjs", "tools/rust-engine-program/tree-provenance.mjs",
         "tools/rust-engine-program/git-read.mjs",
         "apps/desktop/scripts/require-e2e-engine.mjs", ".github/workflows/pr-checks.yml"]) {
         put(path, readFileSync(join(repoRoot, path)));

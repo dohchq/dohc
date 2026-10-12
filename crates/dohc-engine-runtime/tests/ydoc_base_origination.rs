@@ -1607,26 +1607,26 @@ async fn capture_retiring_a_closed_ydoc_head_retires_the_lineage() {
         .expect("record private Y.Doc update");
     assert!(lineage_exists(&db, &key));
 
-    let retired = handle
-        .capture_retire(
-            CaptureRetire {
-                workspace_id: WS.to_owned(),
-                version_id: "main".to_owned(),
-                path: PATH.to_owned(),
-                metadata_summary: None,
-                metadata_correlation_id: None,
-                now_ms: 300,
-                request_id: None,
-                only_if_text_head: true,
-                only_if_capture_origin: true,
-                allow_ydoc_origin: true,
-            },
-            dohc_engine_collab::LeaseRegistry::new(),
-            Arc::new(NoFaults),
-            CancellationToken::new(),
-        )
-        .await
-        .expect("capture retire");
+    let retired = dohc_engine_testkit::capture::retire_captured_path(
+        &handle,
+        CaptureRetire {
+            workspace_id: WS.to_owned(),
+            version_id: "main".to_owned(),
+            path: PATH.to_owned(),
+            metadata_summary: None,
+            metadata_correlation_id: None,
+            now_ms: 300,
+            request_id: None,
+            only_if_text_head: true,
+            only_if_capture_origin: true,
+            allow_ydoc_origin: true,
+        },
+        scratch.path(),
+        dohc_engine_collab::LeaseRegistry::new(),
+        Arc::new(NoFaults),
+    )
+    .await
+    .expect("capture retire");
     assert!(retired.retired.is_some(), "the Y.Doc-owned head is retired");
     assert!(
         !lineage_exists(&db, &key),
@@ -1748,15 +1748,15 @@ async fn live_lease_blocks_capture_retire_until_retry_and_rolls_back_every_row()
     };
     let leases = LeaseRegistry::new();
     let lease = leases.acquire(&key).expect("hold live session lease");
-    let error = handle
-        .capture_retire(
-            input.clone(),
-            leases.clone(),
-            Arc::new(NoFaults),
-            CancellationToken::new(),
-        )
-        .await
-        .expect_err("a live Y.Doc lease must make capture retirement retryable");
+    let error = dohc_engine_testkit::capture::retire_captured_path(
+        &handle,
+        input.clone(),
+        scratch.path(),
+        leases.clone(),
+        Arc::new(NoFaults),
+    )
+    .await
+    .expect_err("a live Y.Doc lease must make capture retirement retryable");
     assert!(matches!(
         error,
         RuntimeError::Sync(SyncError::RetryableState {
@@ -1770,15 +1770,15 @@ async fn live_lease_blocks_capture_retire_until_retry_and_rolls_back_every_row()
     );
 
     drop(lease);
-    let error = handle
-        .capture_retire(
-            input.clone(),
-            leases.clone(),
-            Arc::new(NoFaults),
-            CancellationToken::new(),
-        )
-        .await
-        .expect_err("an unseen deferred update must keep retirement retryable");
+    let error = dohc_engine_testkit::capture::retire_captured_path(
+        &handle,
+        input.clone(),
+        scratch.path(),
+        leases.clone(),
+        Arc::new(NoFaults),
+    )
+    .await
+    .expect_err("an unseen deferred update must keep retirement retryable");
     assert!(matches!(
         error,
         RuntimeError::Sync(SyncError::RetryableState {
@@ -1810,10 +1810,15 @@ async fn live_lease_blocks_capture_retire_until_retry_and_rolls_back_every_row()
         .open(&db, 3)
         .expect("reopen actor for retry")
         .actor;
-    let retired = handle
-        .capture_retire(input, leases, Arc::new(NoFaults), CancellationToken::new())
-        .await
-        .expect("capture retire retries after the session closes");
+    let retired = dohc_engine_testkit::capture::retire_captured_path(
+        &handle,
+        input,
+        scratch.path(),
+        leases,
+        Arc::new(NoFaults),
+    )
+    .await
+    .expect("capture retire retries after the session closes");
     assert!(retired.retired.is_some());
     let after = capture_retire_state(&db, &key, PATH);
     assert_eq!((after.aliases, after.snapshots), (0, 0));
@@ -3630,9 +3635,8 @@ async fn oversized_close_decline_survives_prune_and_restart() {
     let mut store = EngineStore::open(&db, 260).unwrap();
     store.write_with(&NoFaults, |tx| {
         tx.execute_batch("CREATE TEMP TABLE refusal_writes (n INTEGER); CREATE TEMP TRIGGER count_refusal_writes AFTER UPDATE OF sharing_declined_json ON ydoc_docs BEGIN INSERT INTO refusal_writes VALUES(1); END;").unwrap();
-        for now in [270, 280] {
-            assert!(matches!(dohc_engine_sync::originate_ydoc_base_in_tx(tx, &key, PATH, None, None, now).unwrap(), dohc_engine_sync::BaseOrigination::Declined(_)));
-        }
+        assert!(matches!(dohc_engine_sync::originate_ydoc_base_in_tx(tx, &key, PATH, None, None, 270).unwrap(), dohc_engine_sync::BaseOrigination::Declined(_)));
+        assert_eq!(dohc_engine_sync::originate_ydoc_base_in_tx(tx, &key, PATH, None, None, 280).unwrap(), dohc_engine_sync::BaseOrigination::NothingToDo);
         assert_eq!(tx.query_row("SELECT COUNT(*) FROM refusal_writes", [], |r| r.get::<_,i64>(0)).unwrap(), 1, "unchanged refusals do not write the column twice");
         Ok::<_, StorageError>(())
     }).unwrap();
@@ -3735,19 +3739,84 @@ async fn oversized_close_decline_survives_prune_and_restart() {
         })
         .unwrap();
     assert_eq!(pass(&mut store).len(), 1);
-    // Reopening from the settled Markdown reseeds a small state and claims it.
+    // An offline reopen keeps the lane until the fresh seed reaches its first sync pass.
+    store
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "DELETE FROM sync_relay_push_state WHERE workspace_id=?1",
+                [WS],
+            )
+            .unwrap();
+            tx.execute("DELETE FROM sync_relay_cursors WHERE workspace_id=?1", [WS])
+                .unwrap();
+            Ok::<_, StorageError>(())
+        })
+        .unwrap();
     drop(store);
     let handle = supervisor.open(&db, 800).unwrap().actor;
     let (reopened_key, _, seed) = open_with_seed(&handle, WS, "notes/renamed.md").await;
     assert_eq!(reopened_key, key);
     assert!(seed.len() < dohc_engine_collab::limits::MAX_YDOC_UPDATE_BYTES);
-    assert!(
-        record_editor_update(&handle, &key, "notes/renamed.md", seed, None, true)
-            .await
-            .is_some()
+    let source = handle
+        .ydoc_open_state(
+            WS.into(),
+            810,
+            true,
+            Some(key.clone()),
+            "main".into(),
+            "notes/renamed.md".into(),
+            Some(ContentKind::Plaintext),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap()
+        .owner_seed_source;
+    let reopened = handle
+        .ydoc_record_update(
+            key.clone(),
+            "notes/renamed.md".into(),
+            ContentKind::Plaintext,
+            Regime::LocalOnly,
+            seed,
+            None,
+            None,
+            None,
+            true,
+            source,
+            None,
+            820,
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+            None,
+        )
+        .await
+        .unwrap();
+    assert!(reopened.lineage_claim_id.is_none());
+    enable_sync(&db, WS);
+    let cache_before = handle.ydoc_cache_stats_for_test().await.unwrap();
+    let (claim, decline) = handle
+        .ydoc_originate_live_lineage(key.clone(), 830, CancellationToken::new())
+        .await
+        .unwrap();
+    assert!(claim.is_none(), "the live push hook skips a reseeded lane");
+    assert!(decline.is_none());
+    assert_eq!(
+        handle.ydoc_cache_stats_for_test().await.unwrap(),
+        cache_before
     );
     supervisor.close(&db).unwrap();
     let mut store = EngineStore::open(&db, 900).unwrap();
+    assert!(matches!(
+        commit_relay_cursor(&mut store, WS, &cursor, &NoFaults, &NoLiveLeases, 910).unwrap(),
+        dohc_engine_storage::TxnOutcome::Committed(declines) if declines.is_empty()
+    ));
+    assert!(
+        dohc_engine_collab::read_marker(&store, &key)
+            .unwrap()
+            .unwrap()
+            .lineage_claim_id
+            .is_some()
+    );
     assert!(pass(&mut store).is_empty());
     let refusal: Option<String> = store
         .read_with(|conn| {
@@ -3762,7 +3831,7 @@ async fn oversized_close_decline_survives_prune_and_restart() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn oversized_declined_editor_settlements_stay_local_after_enrolment() {
+async fn oversized_declined_editor_settlements_export_only_latest_after_enrolment() {
     const WS: &str = "ws-declined-editor-delivery";
     const PATH: &str = "notes/declined-editor.md";
     let scratch = ScratchDir::new().expect("scratch");
@@ -3836,6 +3905,7 @@ async fn oversized_declined_editor_settlements_stay_local_after_enrolment() {
     let doc = Ydoc::wire();
     doc.apply(&opened.initial_update)
         .expect("load editor state");
+    let refusal_head = opened.head_blob_sha256.clone();
     let mut expected_head = opened.head_blob_sha256;
     let mut settlements = Vec::new();
     for (now, edit) in [(200, "first edit\n"), (300, "second edit\n")] {
@@ -3912,7 +3982,10 @@ async fn oversized_declined_editor_settlements_stay_local_after_enrolment() {
         .expect("read pruned marker");
     assert_eq!(claim_status, "unclaimed");
     assert_eq!(head_seq, 0);
-    assert!(refusal.is_some(), "close records the oversized refusal");
+    assert!(
+        refusal.is_some(),
+        "settlement preserves the lane's decline without retrying origination"
+    );
     for settled in &settlements {
         let (origin, sha): (String, String) = store
             .read_with(|conn| {
@@ -3937,16 +4010,17 @@ async fn oversized_declined_editor_settlements_stay_local_after_enrolment() {
             };
         assert_eq!(declines.len(), 1);
         assert_eq!(declines[0].object_id, object);
-        assert_eq!(declines[0].version_id, "main");
-        assert!(declines[0].lineage_pruned);
-        assert_eq!(declines[0].head_blob_sha256, expected_head);
+        assert_eq!(declines[0].head_blob_sha256, refusal_head);
+        dohc_engine_sync::RelaySyncClient::new(AcceptPushTransport)
+            .push_workspace(&mut store, WS, &NoFaults, &NoLiveLeases, now, 0)
+            .expect("push the latest selected editor version");
         let ops = read_local_ops(&store);
-        for settled in &settlements {
+        for (index, settled) in settlements.iter().enumerate() {
             assert!(
-                !ops.iter().any(|op| {
+                ops.iter().any(|op| {
                     op.op_kind == "moment.append" && op.payload["momentId"] == settled.moment_id
-                }),
-                "dohc editor settlement {} stays local after decline and prune",
+                }) == (index == settlements.len() - 1),
+                "only the latest dohc editor settlement {} reaches recipients",
                 settled.moment_id,
             );
         }
@@ -3954,5 +4028,203 @@ async fn oversized_declined_editor_settlements_stay_local_after_enrolment() {
             ops.iter().all(|op| op.op_kind != "ydoc.update"),
             "the declined lineage has no outbound live edits either"
         );
+    }
+}
+
+#[test]
+#[ignore = "explicit oversized performance measurement"]
+fn oversized_encoding_and_origination_lane_measurement() {
+    let fixture = oversized_lineage();
+    let doc = Ydoc::wire();
+    doc.apply(&fixture.base).unwrap();
+    let mut encode_ms = Vec::new();
+    for _ in 0..3 {
+        let start = std::time::Instant::now();
+        let bytes = doc.encode_full_state();
+        encode_ms.push(start.elapsed().as_secs_f64() * 1000.0);
+        assert!(bytes.len() > dohc_engine_collab::limits::MAX_YDOC_UPDATE_BYTES);
+    }
+    let scratch = ScratchDir::new().unwrap();
+    let db = engine_db_path(&scratch).unwrap();
+    let key = DocKey::new("measure", "main", "doc").unwrap();
+    let mut store = EngineStore::open(&db, 1).unwrap();
+    VersionedTextStore::new(&mut store)
+        .ensure_main_version("measure", "main", 1, &NoFaults)
+        .unwrap();
+    VersionedTextStore::new(&mut store)
+        .write_text(
+            &WriteText {
+                workspace_id: "measure".into(),
+                version_id: "main".into(),
+                object_id: "doc".into(),
+                path: "doc.md".into(),
+                text: "x".repeat(1024 * 1024),
+                moment_id: "seed".into(),
+                metadata_origin: "api".into(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 2,
+                request_id: None,
+            },
+            &NoFaults,
+        )
+        .unwrap();
+    drop(store);
+    seed_unclaimed_oversized_lineage(&db, &key, "doc.md");
+    enable_sync(&db, "measure");
+    let mut store = EngineStore::open(&db, 3).unwrap();
+    let mut before_ms = Vec::new();
+    let mut after_ms = Vec::new();
+    for lane in [0, 1] {
+        for _ in 0..3 {
+            store
+                .write_with(&NoFaults, |tx| {
+                    tx.execute("UPDATE ydoc_docs SET file_export_lane=?1", [lane])
+                        .unwrap();
+                    let start = std::time::Instant::now();
+                    let result = dohc_engine_sync::originate_ydoc_base_in_tx(
+                        tx, &key, "doc.md", None, None, 4,
+                    )
+                    .unwrap();
+                    let ms = start.elapsed().as_secs_f64() * 1000.0;
+                    if lane == 0 {
+                        assert!(matches!(
+                            result,
+                            dohc_engine_sync::BaseOrigination::Declined(_)
+                        ));
+                        before_ms.push(ms);
+                    } else {
+                        assert_eq!(result, dohc_engine_sync::BaseOrigination::NothingToDo);
+                        after_ms.push(ms);
+                    }
+                    Ok::<_, StorageError>(())
+                })
+                .unwrap();
+        }
+    }
+    println!(
+        "OVERSIZED_ENGINE_MEASUREMENT {}",
+        serde_json::json!({"baseBytes":fixture.base.len(),"visibleBytes":1024*1024,"nativeFullEncodeMs":encode_ms,"originationWithoutLaneMs":before_ms,"originationWithLaneMs":after_ms,"method":"Three direct native full-state encodes; three matched origination calls with the lane disabled and enabled. Origination includes durable reconstruction and encode. The enabled lane encodes zero times."})
+    );
+}
+
+struct AcceptPushTransport;
+impl dohc_engine_sync::RelayTransport for AcceptPushTransport {
+    fn push(
+        &self,
+        req: dohc_engine_sync::PushRequest,
+    ) -> Result<dohc_engine_sync::PushResponse, dohc_engine_sync::RelayError> {
+        Ok(dohc_engine_sync::PushResponse {
+            settlement_refusals: Vec::new(),
+            accepted: req.ops.len(),
+            inserted: req.ops.len(),
+            skipped: 0,
+            current_max_origin_seq: req.ops.last().map_or(req.after_seq, |op| op.origin_seq),
+        })
+    }
+    fn blobs_have(
+        &self,
+        req: dohc_engine_sync::BlobHaveRequest,
+    ) -> Result<dohc_engine_sync::BlobHaveResponse, dohc_engine_sync::RelayError> {
+        Ok(dohc_engine_sync::BlobHaveResponse {
+            missing: req.sha256s,
+        })
+    }
+    fn upload_blob(
+        &self,
+        _req: dohc_engine_sync::BlobUploadRequest,
+    ) -> Result<(), dohc_engine_sync::RelayError> {
+        Ok(())
+    }
+    fn pull(
+        &self,
+        _req: dohc_engine_sync::PullRequest,
+    ) -> Result<dohc_engine_sync::PullResponse, dohc_engine_sync::RelayError> {
+        Err(dohc_engine_sync::RelayError::InvalidResponse)
+    }
+    fn lookup_log_coordinate(
+        &self,
+        _req: dohc_engine_sync::LogCoordinateRequest,
+    ) -> Result<dohc_engine_sync::LogCoordinateResponse, dohc_engine_sync::RelayError> {
+        Err(dohc_engine_sync::RelayError::InvalidResponse)
+    }
+    fn probe(
+        &self,
+        _req: dohc_engine_sync::ProbeRequest,
+    ) -> Result<dohc_engine_sync::ProbeResponse, dohc_engine_sync::RelayError> {
+        Err(dohc_engine_sync::RelayError::InvalidResponse)
+    }
+    fn claim_workspace(
+        &self,
+        _req: dohc_engine_sync::ClaimRequest,
+    ) -> Result<dohc_engine_sync::ClaimResponse, dohc_engine_sync::RelayError> {
+        Err(dohc_engine_sync::RelayError::InvalidResponse)
+    }
+    fn rotate_epoch(
+        &self,
+        _req: dohc_engine_sync::EpochRequest,
+    ) -> Result<dohc_engine_sync::EpochResponse, dohc_engine_sync::RelayError> {
+        Err(dohc_engine_sync::RelayError::InvalidResponse)
+    }
+    fn download_blobs(
+        &self,
+        _req: dohc_engine_sync::BlobDownloadBatchRequest,
+    ) -> Result<dohc_engine_sync::BlobDownloadBatchResponse, dohc_engine_sync::RelayError> {
+        Err(dohc_engine_sync::RelayError::InvalidResponse)
+    }
+    fn upload_key_envelope(
+        &self,
+        _req: dohc_engine_sync::KeyEnvelopeRequest,
+    ) -> Result<dohc_engine_sync::KeyEnvelopeResponse, dohc_engine_sync::RelayError> {
+        Err(dohc_engine_sync::RelayError::InvalidResponse)
+    }
+    fn download_key_envelope(
+        &self,
+        _req: dohc_engine_sync::KeyEnvelopeDownloadRequest,
+    ) -> Result<dohc_engine_sync::KeyEnvelopeDownloadResponse, dohc_engine_sync::RelayError> {
+        Err(dohc_engine_sync::RelayError::InvalidResponse)
+    }
+    fn shared_channel_pull(
+        &self,
+        _req: dohc_engine_sync::SharedChannelRequest,
+    ) -> Result<dohc_engine_sync::SharedChannelResponse, dohc_engine_sync::RelayError> {
+        Err(dohc_engine_sync::RelayError::InvalidResponse)
+    }
+    fn share_log_push(
+        &self,
+        _req: dohc_engine_sync::ShareLogPushRequest,
+    ) -> Result<dohc_engine_sync::PushResponse, dohc_engine_sync::RelayError> {
+        Err(dohc_engine_sync::RelayError::InvalidResponse)
+    }
+    fn share_view_pull(
+        &self,
+        _req: dohc_engine_sync::ShareViewRequest,
+    ) -> Result<dohc_engine_sync::ShareViewResponse, dohc_engine_sync::RelayError> {
+        Err(dohc_engine_sync::RelayError::InvalidResponse)
+    }
+    fn share_blob(
+        &self,
+        _req: dohc_engine_sync::ShareBlobRequest,
+    ) -> Result<dohc_engine_sync::BlobDownloadResponse, dohc_engine_sync::RelayError> {
+        Err(dohc_engine_sync::RelayError::InvalidResponse)
+    }
+    fn share_blob_upload(
+        &self,
+        _req: dohc_engine_sync::ShareBlobUploadRequest,
+    ) -> Result<(), dohc_engine_sync::RelayError> {
+        Err(dohc_engine_sync::RelayError::InvalidResponse)
+    }
+    fn share_proposal_submit(
+        &self,
+        _req: dohc_engine_sync::ShareProposalSubmitRequest,
+    ) -> Result<dohc_engine_sync::ShareProposalSubmitResponse, dohc_engine_sync::RelayError> {
+        Err(dohc_engine_sync::RelayError::InvalidResponse)
+    }
+    fn share_collection_write(
+        &self,
+        _req: dohc_engine_sync::ShareCollectionWriteRequest,
+    ) -> Result<dohc_engine_sync::ShareCollectionWriteResponse, dohc_engine_sync::RelayError> {
+        Err(dohc_engine_sync::RelayError::InvalidResponse)
     }
 }

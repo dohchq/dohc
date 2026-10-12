@@ -146,34 +146,27 @@ test("in-editor image: a link escaping the workspace root does not render", asyn
     await waitForWorkspaceFile(page, workspace.workspaceId, "notes/plan.md");
     await openMarkdownDoc(page, "notes/plan.md");
 
-    const img = page.locator(".dohc-editor-image").first();
+    // The node view resolves the src, then sets alt, before ProseMirror attaches
+    // its <img>. An attached image carrying the link's alt has therefore
+    // finished resolving, and a src-less image never starts a load, so the
+    // state read next is final rather than early.
+    const img = page.locator('.dohc-editor-image[alt="escape"]');
     await expect(img).toBeAttached({ timeout: 15_000 });
-    // The containment guarantee, asserted positively: no src attribute at all.
-    // (Not `src=""` either — browsers re-request the page's own URL for that.)
-    await expect
-      .poll(async () => await img.evaluate((el) => el.getAttribute("src")), {
-        timeout: 10_000,
-      })
-      .toBe(null);
-    // ...and it was never rewritten to the privileged scheme on the way there.
+    // It was never rewritten to the privileged scheme.
     await expect(img).not.toHaveAttribute("src", /^dohc-file:\/\//);
-
-    // Now prove it never decodes. `naturalWidth` is 0 before a load is even
-    // attempted, so polling for the first 0 would pass trivially: give the
-    // browser a real window to attempt (and finish) a load, then assert the
-    // settled state once. An <img> with no src reports complete=true with
-    // naturalWidth 0 and an empty currentSrc — i.e. it never fetched anything.
-    await page.waitForTimeout(2_000);
+    // No src attribute at all (not `src=""` either, which re-requests the
+    // page's own URL), and nothing fetched or decoded.
     expect(
       await img.evaluate((el) => {
         const image = el as HTMLImageElement;
         return {
           hasSrc: image.hasAttribute("src"),
+          complete: image.complete,
           naturalWidth: image.naturalWidth,
           currentSrc: image.currentSrc,
         };
       }),
-    ).toEqual({ hasSrc: false, naturalWidth: 0, currentSrc: "" });
+    ).toEqual({ hasSrc: false, complete: true, naturalWidth: 0, currentSrc: "" });
   } finally {
     await cleanupDesktopWorkspace(desktop, temp);
   }

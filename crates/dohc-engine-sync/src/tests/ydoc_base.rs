@@ -1081,6 +1081,239 @@ fn captured_disk_occupant_relocates_the_recovery_exactly_once() {
     );
 }
 
+/// A relay recovery's copy met a file at its chosen name that capture has
+/// not recorded. That copy waits for a later pass. A local recovery of
+/// unsettled typing, written to a free name, does not wait with it: the same
+/// pass still returns the local copy for placement and announcement, and the
+/// relay copy's refused write stays as it was.
+#[test]
+fn a_relay_copy_waiting_for_capture_does_not_hold_back_a_local_copy() {
+    use dohc_engine_collab::{
+        BaseRelayCoordinate, ClaimOutcome, ContentKind, DocKey, LocalAppend, MarkerCreation,
+        Regime, WriterDocCache, Ydoc, claim_base_at_relay, record_local_update,
+    };
+
+    let (_scratch, _path, mut engine) = open_store();
+    VersionedTextStore::new(&mut engine)
+        .ensure_main_version("ws", "main", 1_000, &NoFaults)
+        .expect("main version");
+    seed_identity(&mut engine);
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT INTO sync_relay_cursors
+                 (workspace_id,cursor,replication_epoch,stream_identity)
+                 VALUES ('ws','0','epoch-1','stream-1')",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .expect("relay contact");
+
+    // The relay recovery: a local lineage loses arbitration and its text
+    // becomes a sibling whose write then finds another program's file.
+    seed_text_head(
+        &mut engine,
+        "object-waiting-relay-recovery",
+        "notes/waiting.md",
+        "external editor draft",
+    );
+    let relay_key = DocKey::new("ws", "main", "object-waiting-relay-recovery").expect("doc key");
+    let loser = Ydoc::wire();
+    loser.plaintext_insert(0, "losing local draft");
+    let loser_bytes = loser.encode_full_state();
+    assert!(matches!(
+        claim_base_at_relay(
+            &mut engine,
+            &relay_key,
+            ContentKind::Plaintext,
+            &loser_bytes,
+            &BaseRelayCoordinate::new("loser", 0, 20).expect("loser coordinate"),
+            &NoFaults,
+            1_100,
+        ),
+        Ok(TxnOutcome::Committed(ClaimOutcome::Claimed { .. }))
+    ));
+    let winner = Ydoc::wire();
+    winner.plaintext_insert(0, "winning remote lineage");
+    let winner_bytes = winner.encode_full_state();
+    let winner_claim = engine.put_binary_blob(&winner_bytes).expect("winner blob");
+    let mut winner_base = envelope(
+        "waiting-winner",
+        0,
+        "ydoc.update",
+        json!({
+            "versionId": "main",
+            "objectId": "object-waiting-relay-recovery",
+            "path": "notes/waiting.md",
+            "contentKind": "plaintext",
+            "updateBlobSha256": winner_claim,
+            "lineageClaimId": winner_claim,
+            "isBaseState": true
+        }),
+    );
+    winner_base.relay_seq = Some(10);
+    let applied = apply_ydoc_envelope(
+        &mut engine,
+        &mut WriterDocCache::new(),
+        &winner_base,
+        &NoFaults,
+        &NoLiveLeases,
+    )
+    .expect("winning base");
+    assert!(matches!(
+        applied,
+        ApplyOutcome {
+            primary: ApplyDisposition::Applied(_),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        } if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
+    ));
+    let relay_job: String = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT 'sync-mat_' || recovery_moment_id FROM ydoc_recovery_decisions
+                  WHERE workspace_id='ws' AND origin_id='waiting-winner' AND origin_seq=0",
+                [],
+                |row| row.get(0),
+            )
+        })
+        .expect("relay recovery decision");
+    // Model the serialized disk boundary: the absent-preimage write found an
+    // unexpected file. Capture has not recorded it.
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "UPDATE materialization_jobs SET status='conflict' WHERE job_id=?1",
+                [&relay_job],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .expect("refused relay write");
+
+    // The local recovery: typing a closed lineage held but never settled,
+    // kept as a sibling when a local write folds the lineage onto other text.
+    let seed = "Base paragraph.\n";
+    let local_sha = seed_text_head(&mut engine, "object-local-recovery", "notes/local.md", seed);
+    let local_key = DocKey::new("ws", "main", "object-local-recovery").expect("doc key");
+    let mut cache = WriterDocCache::new();
+    let doc = Ydoc::wire();
+    let marker = MarkerCreation {
+        path: Some("notes/local.md"),
+        content_kind: ContentKind::Plaintext,
+        regime: Regime::LocalOnly,
+    };
+    let seed_update = doc.plaintext_insert(0, seed);
+    record_local_update(
+        &mut engine,
+        &mut cache,
+        &local_key,
+        &seed_update,
+        LocalAppend {
+            marker: Some(marker),
+            is_seed: true,
+            seed_source_sha256: Some(&local_sha),
+            ..Default::default()
+        },
+        &NoFaults,
+        2_000,
+        |_tx, _outcome, _sha| Ok(()),
+    )
+    .expect("seed the lineage from the file");
+    let typing_update = doc.plaintext_insert(
+        seed.encode_utf16().count() as u32,
+        "Typed and never saved.\n",
+    );
+    record_local_update(
+        &mut engine,
+        &mut cache,
+        &local_key,
+        &typing_update,
+        LocalAppend {
+            marker: Some(marker),
+            ..Default::default()
+        },
+        &NoFaults,
+        2_001,
+        |_tx, _outcome, _sha| Ok(()),
+    )
+    .expect("admit typing the session never settles");
+    engine
+        .write_with(&NoFaults, |tx| {
+            let written = dohc_engine_domain::write_text_in_tx(
+                tx,
+                &dohc_engine_domain::WriteText {
+                    workspace_id: "ws".to_owned(),
+                    version_id: "main".to_owned(),
+                    object_id: "object-local-recovery".to_owned(),
+                    path: "notes/local.md".to_owned(),
+                    text: "Written outside dohc.\n".to_owned(),
+                    moment_id: "moment-local-write".to_owned(),
+                    metadata_origin: "api".to_owned(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    now_ms: 2_100,
+                    request_id: None,
+                },
+            )
+            .map_err(|error| SyncError::corrupt(std::io::Error::other(error.to_string())))?;
+            reconcile_local_resulting_head_in_tx(
+                tx,
+                "ws",
+                "main",
+                &written.snapshot.object_id,
+                ResultingHead::Text {
+                    path: &written.snapshot.path,
+                    text: &written.snapshot.text,
+                },
+                None,
+                None,
+                2_100,
+            )?;
+            Ok::<_, SyncError>(())
+        })
+        .expect("the local write folds the lineage and keeps the typing");
+    let (local_path, local_job): (String, String) = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT target_path, job_id FROM materialization_jobs
+                  WHERE workspace_id='ws' AND status='pending'
+                    AND job_id GLOB 'sync-mat_ydoc-recovery-moment-*'
+                    AND target_path LIKE 'notes/local (recovered %'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+        })
+        .expect("the local copy's pending write");
+
+    let repaired = repair_conflicted_ydoc_recoveries(&mut engine, "ws", &NoFaults)
+        .expect("a relay copy waiting for capture is not an error");
+    assert_eq!(
+        repaired,
+        vec![YdocRecoveryMaterialization {
+            path: local_path,
+            materialization_job_id: local_job,
+        }],
+        "the local copy is placed and announced"
+    );
+    let relay_status: String = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT status FROM materialization_jobs WHERE job_id=?1",
+                [&relay_job],
+                |row| row.get(0),
+            )
+        })
+        .expect("relay job status");
+    assert_eq!(
+        relay_status, "conflict",
+        "the relay copy still waits for capture"
+    );
+}
+
 #[test]
 fn a_losing_lineage_delta_is_acked_without_entering_the_winner() {
     let (_scratch, _path, mut engine) = open_store();

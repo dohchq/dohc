@@ -196,7 +196,7 @@ impl EngineService {
             Some(encode_chat_cursor(&ChatKeysetCursor {
                 version: 1,
                 binding,
-                consumed: cursor.as_ref().map_or(0, |cursor| cursor.consumed) + included as i64,
+                consumed: None,
                 first: last.latest_created_at_ms,
                 second: last.latest_message_id.clone(),
                 third: None,

@@ -5,18 +5,11 @@ import { randomUUID } from "node:crypto";
 import { resolveWorkspaceMetadataDir } from "../workspaces/workspaceMetadata";
 import type { ActiveAgentRun } from "./activeAgentRun";
 
-// Local agent integration. Two local-only concepts live here:
-//
-//  1. The MCP server lifecycle. The DESKTOP runs the dohc MCP server; the
-//     user's AI tool (Claude Code, Codex) is the client that launches it as a
-//     stdio child via its own config. "Enabling" agents flips a per-workspace
-//     toggle and (optionally) spawns the stdio server as a managed child; the
-//     copyable config snippet in Settings points the AI tool at it.
-//
-//  2. The active agent-run slot + its persisted record. An agent run is a
-//     LOCAL concept: a small record in .dohc/agent-runs.json (id, startedAt,
-//     agentId, status). While a run is active, the workspace activity slot is
-//     set so the watcher attributes the run's writes to the agent.
+// Local agent runs. An agent run is a LOCAL concept: a small record in
+// .dohc/agent-runs.json (id, startedAt, agentId, status). While a run is
+// active, the workspace activity slot is set so the watcher attributes the
+// run's writes to the agent. The user's AI tool launches its own MCP server
+// from the config snippet in Settings; the desktop never runs one.
 
 export interface AgentRunRecord {
   id: string;
@@ -28,19 +21,11 @@ export interface AgentRunRecord {
 }
 
 interface AgentRunStatus {
-  mcpEnabled: boolean;
   activeRun: AgentRunRecord | null;
   lastRun: AgentRunRecord | null;
 }
 
-// A handle to a spawned MCP child the integration can stop. Kept minimal so a
-// test can inject a fake spawner without a real process.
-export interface McpServerHandle {
-  stop(): void;
-}
-
 export class AgentIntegrationState {
-  mcp: McpServerHandle | null = null;
   activeRun: AgentRunRecord | null = null;
   chain: Promise<unknown> = Promise.resolve();
 }
@@ -58,12 +43,6 @@ interface AgentIntegrationAuthority {
 export interface AgentIntegrationOptions {
   acquire(workspaceId: string): AgentIntegrationAuthority;
   workspaceIds(): string[];
-  // Spawns the MCP stdio server for a workspace. Injectable so tests never
-  // launch a real child. Omitted ⇒ enabling only flips the toggle (the user's
-  // AI tool launches its own copy via the config snippet).
-  spawnMcpServer?: (input: { root: string; home: string }) => McpServerHandle;
-  // The state home (registry dir) handed to a spawned server as --home.
-  home?: string;
   agentId?: string;
   // The person this computer's agent runs work for, read when a run starts.
   localPersonId(): string;
@@ -107,13 +86,34 @@ function isAgentRunRecord(value: unknown): value is AgentRunRecord {
 // Dohc (malicious attached workspace) is refused, never followed, so the run
 // log can't be planted outside the workspace boundary.
 async function readRuns(rootPath: string): Promise<AgentRunRecord[]> {
+  const path = join(await resolveWorkspaceMetadataDir(rootPath), RUNS_FILE);
+  let source: string;
   try {
-    const path = join(await resolveWorkspaceMetadataDir(rootPath), RUNS_FILE);
-    const parsed = JSON.parse(await readFile(path, "utf8"));
-    return Array.isArray(parsed) ? parsed.filter(isAgentRunRecord) : [];
-  } catch {
-    return [];
+    source = await readFile(path, "utf8");
+  } catch (cause) {
+    if (typeof cause === "object" && cause !== null && "code" in cause && cause.code === "ENOENT") {
+      return [];
+    }
+    throw new Error(
+      "dohc could not read this workspace's agent run history. Check .dohc/agent-runs.json, then try again.",
+      { cause },
+    );
   }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(source);
+  } catch (cause) {
+    throw new Error(
+      "This workspace's agent run history contains invalid JSON. Repair .dohc/agent-runs.json, then try again.",
+      { cause },
+    );
+  }
+  if (!Array.isArray(parsed) || !parsed.every(isAgentRunRecord)) {
+    throw new Error(
+      "This workspace's agent run history contains invalid run records. Repair .dohc/agent-runs.json, then try again.",
+    );
+  }
+  return parsed;
 }
 
 async function writeRuns(rootPath: string, runs: AgentRunRecord[]): Promise<void> {
@@ -141,17 +141,13 @@ export function createAgentIntegration(options: AgentIntegrationOptions) {
     return run;
   }
 
-  // Enabling spawns the managed MCP child (if a spawner was provided) and
-  // records the run. The active-run slot is set so the watcher attributes the
+  // Records the run. The active-run slot is set so the watcher attributes the
   // run's writes to the agent until endAgentRun clears it.
   async function startAgentRun(workspaceId: string): Promise<AgentRunRecord> {
     const authority = options.acquire(workspaceId);
     const root = authority.rootPath;
     const state = authority.state;
     try {
-      if (!state.mcp && options.spawnMcpServer) {
-        state.mcp = options.spawnMcpServer({ root, home: options.home ?? root });
-      }
       const record: AgentRunRecord = {
         id: createId(),
         startedAt: now(),
@@ -178,17 +174,21 @@ export function createAgentIntegration(options: AgentIntegrationOptions) {
       } catch (error) {
         record.status = "failed";
         record.endedAt = now();
-        await serialize(state, async () => {
-          const runs = await readRuns(root);
-          const persisted = runs.find(
-            (candidate) => candidate.id === record.id,
-          );
-          if (persisted) {
-            persisted.status = record.status;
-            persisted.endedAt = record.endedAt;
-            await writeRuns(root, runs);
-          }
-        });
+        try {
+          await serialize(state, async () => {
+            const runs = await readRuns(root);
+            const persisted = runs.find(
+              (candidate) => candidate.id === record.id,
+            );
+            if (persisted) {
+              persisted.status = record.status;
+              persisted.endedAt = record.endedAt;
+              await writeRuns(root, runs);
+            }
+          });
+        } catch (historyError) {
+          console.error("[desktop] Could not record the failed agent run", historyError);
+        }
         throw error;
       }
       return record;
@@ -198,7 +198,7 @@ export function createAgentIntegration(options: AgentIntegrationOptions) {
   }
 
   // Ends a run: clears the active-run slot (so later writes are local again),
-  // marks the persisted record, and stops the managed MCP child.
+  // and marks the persisted record.
   async function endAgentRun(
     workspaceId: string,
     runId: string,
@@ -208,16 +208,13 @@ export function createAgentIntegration(options: AgentIntegrationOptions) {
     const root = authority.rootPath;
     const state = authority.state;
     try {
-      // Only the run that currently owns the workspace may clear its live
-      // state. Ending an older run must not unhook a newer run.
+      // An explicit stop must release attribution even when history is unreadable.
+      // Ending an older run must not unhook a newer run.
       if (state.activeRun?.id === runId) {
-        if (state.mcp) {
-          state.mcp.stop();
-          state.mcp = null;
-        }
         await authority.setAgentRun(null);
         authority.assertCurrent();
-        state.activeRun = null;
+        // A newer run may have installed while the clear was pending.
+        if (state.activeRun?.id === runId) state.activeRun = null;
       }
       const recorded = await serialize(state, async () => {
         const runs = await readRuns(root);
@@ -251,13 +248,16 @@ export function createAgentIntegration(options: AgentIntegrationOptions) {
     const root = authority.rootPath;
     const state = authority.state;
     try {
-      const runs = await readRuns(root);
+      // Unreadable history still has a live answer: the run this attachment
+      // owns, or none after a stop. Mutations keep refusing until it is repaired.
+      let runs: AgentRunRecord[];
+      try {
+        runs = await readRuns(root);
+      } catch {
+        runs = state.activeRun ? [state.activeRun] : [];
+      }
       authority.assertCurrent();
       return {
-        // "Enabled" means agent integration is active for this workspace: a
-        // run is open, so writes are attributed and the live config is valid.
-        // A managed MCP child remains optional.
-        mcpEnabled: state.activeRun !== null,
         activeRun: state.activeRun,
         lastRun: runs.length > 0 ? runs[runs.length - 1] : null,
       };
@@ -266,7 +266,7 @@ export function createAgentIntegration(options: AgentIntegrationOptions) {
     }
   }
 
-  // Quit path: stop every managed child and clear slots.
+  // Quit path: clear every active run's slot.
   async function stopAll(): Promise<void> {
     let failed = false;
     let firstError: unknown;
@@ -275,10 +275,6 @@ export function createAgentIntegration(options: AgentIntegrationOptions) {
       try {
         authority = options.acquire(workspaceId);
         const state = authority.state;
-        if (state.mcp) {
-          state.mcp.stop();
-          state.mcp = null;
-        }
         if (state.activeRun) {
           await authority.setAgentRun(null);
           authority.assertCurrent();
@@ -304,8 +300,6 @@ export function createAgentIntegration(options: AgentIntegrationOptions) {
   }
 
   function disposeState(state: AgentIntegrationState): void {
-    state.mcp?.stop();
-    state.mcp = null;
     state.activeRun = null;
   }
 

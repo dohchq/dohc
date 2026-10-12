@@ -66,6 +66,7 @@ import type {
   RebuildEngineStoreResult,
   RefreshSharedViewResult,
   ReportKinds,
+  UsageRecordResult,
   StartAgentRunResult,
   SwitchWorkspaceVersionResult,
   SyncDmsPayload,
@@ -172,9 +173,12 @@ export const STORED_STATE: WorkspaceUiState = {
     { id: "primary", tabs: ["b.md"], activeTab: "b.md", size: 1 },
   ],
   activeEditorGroup: "primary",
-  chatsVisible: true,
-  chatsWidth: 360,
+  aboutVisible: true,
+  aboutWidth: 360,
 };
+
+// The stored state with the chat list showing in the left side panel.
+export const STORED_CHATS_STATE: WorkspaceUiState = { ...STORED_STATE, activeView: "chats" };
 
 export function storedStateWithTabs(
   tabs: string[],
@@ -307,6 +311,7 @@ function makeBaseBridge(
   let menuCallback: ((command: MenuCommand) => void) | null = null;
   return {
     platform,
+    typingRecovery: vi.fn(async () => ({failures: []})),
     emitWorkspaceActivity: (event: WorkspaceActivityEvent = {}) => {
       for (const callback of [...activityCallbacks]) callback(event);
     },
@@ -333,6 +338,8 @@ function makeBaseBridge(
       }),
     ),
     openWorkspace: vi.fn(async () => SYNC_STATUS),
+    listLiveDraftRecovery: vi.fn(async (): Promise<import("../ipc/bridgeContract").LiveDraftRecoveryRecord[]> => []),
+    discardLiveDraftRecovery: vi.fn(async (_input: Parameters<import("../ipc/bridgeContract").DohcDesktopBridge["discardLiveDraftRecovery"]>[0]): Promise<import("../ipc/bridgeContract").LiveDraftRecoveryRecord[]> => []),
     getSyncStatus: vi.fn(async () => SYNC_STATUS),
     // Owner live documents and the live-delivery retry command. Typed to the
     // contracts, not to these empty defaults: the live-document tests swap in
@@ -368,6 +375,7 @@ function makeBaseBridge(
     retryCloudSync: vi.fn(
       async (_payload: { workspaceId: string; reason: "person" | "reconnect" }): Promise<SyncStatusResult> => SYNC_STATUS,
     ),
+    retryFileObservation: vi.fn(async (_payload: { workspaceId: string }): Promise<SyncStatusResult> => SYNC_STATUS),
     // The refused-store rebuild. Typed to the contract, not to this
     // default: the recovery tests swap in the no-clobber refusal.
     rebuildEngineStore: vi.fn(
@@ -379,7 +387,6 @@ function makeBaseBridge(
     // a real running agent through it.
     getAgentRunStatus: vi.fn(
       async (): Promise<AgentRunStatusResult> => ({
-        mcpEnabled: false,
         activeRun: null,
         lastRun: null,
       }),
@@ -519,6 +526,7 @@ function makeBaseBridge(
       shareCode: "dohc-share:relay-share-1:http://relay.test",
       recipientEmail: "friend@dohc.test",
     })),
+    getShareCopyDetails: vi.fn(async () => ({ status: "ended" as const })),
     listRelayShares: vi.fn(async () => ({ granted: [], received: [], removed: [] })),
     retryShareHandoff: vi.fn(async () => undefined),
     dismissShareHandoff: vi.fn(async () => undefined),
@@ -681,6 +689,10 @@ function makeBaseBridge(
     acknowledgeReportsNotice: vi.fn(async (_shown: ReportKinds) => undefined),
     readDiagnostics: vi.fn(async (_payload: Record<string, never>) => ({ text: "dohc diagnostics", available: { usage: false, errors: false } })),
     saveDiagnostics: vi.fn(async (_payload: Record<string, never>) => ({ saved: true })),
+    readUsageRecord: vi.fn(async (_payload: Record<string, never>): Promise<UsageRecordResult> =>
+      ({ status: "readable", enabled: true, file: "/state/dohc-usage.json", since: null, incompleteDays: 0, rows: [] })),
+    clearUsageRecord: vi.fn(async (_payload: Record<string, never>) => undefined),
+    setUsageRecordEnabled: vi.fn(async (_payload: { enabled: boolean }) => undefined),
     reportRendererError: vi.fn(async (_payload: unknown) => undefined),
     emitCrashReportChanged: () => {
       for (const callback of [...crashReportCallbacks]) callback();
@@ -714,6 +726,8 @@ export function makeBridge(
 ) {
   const bridge = makeBaseBridge(uiStatePromise, platform);
   return Object.assign(bridge, {
+    pendingStopAndRestores: vi.fn(async (): Promise<import("../ipc/bridgeContract").PendingStopAndRestoresResult> => []),
+    dismissStopAndRestore: vi.fn(async (): Promise<void> => undefined),
     onEngineYDocSaveState: vi.fn((_listener: (event: import("../ipc/bridgeContract").EngineYDocSaveStateEvent) => void) => () => undefined),
     // Collections: the flagged shell lists collections on
     // ready and on activity. Typed to the contract; the collection tests

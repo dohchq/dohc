@@ -1,4 +1,4 @@
-import { desktopPins, activityPin, settingsNavPin } from "../src/testPins";
+import { desktopPins, activityPin } from "../src/testPins";
 import { expect, test } from "@playwright/test";
 import { createHash, randomBytes } from "node:crypto";
 import { existsSync } from "node:fs";
@@ -41,6 +41,10 @@ import {
 //   revoke → refresh surfaces "this share was ended" honestly.
 
 const GRANTER_TOKEN = "test:e2e-granter";
+// How a recipient sees the granter: the relay's sharer name with their email.
+const GRANTER_LABEL = "e2e-granter (e2e-granter@dohc.test)";
+// What an Edit share view's banner says; Send changes sits beside it.
+const EDIT_BANNER = `Shared view from ${GRANTER_LABEL}. Markdown edits save to the live host. Other file changes need their acceptance.`;
 const UNUSED_CONTENT_HASH = "0".repeat(64);
 const RECIPIENT_TOKEN = "test:e2e-recipient";
 const RECIPIENT_EMAIL = "e2e-recipient@dohc.test";
@@ -159,7 +163,7 @@ async function openOnlyProposal(
   return { summary, proposal };
 }
 
-test("grant side: share a file by email from the explorer, copy the code, and end it from Settings", async () => {
+test("grant side: share a file by email from the explorer, copy the code, and end it from Sharing", async () => {
   test.setTimeout(240_000);
   const temp = await createTempWorkspace();
   const workspaceId = "share-grant-e2e";
@@ -243,18 +247,20 @@ test("grant side: share a file by email from the explorer, copy the code, and en
     expect(strangerFetch.status).toBe(404);
     expect(strangerFetch.body).toBe(missingFetch.body);
 
-    // Settings → Sync and sharing → "Shared by me": the grant is listed and endable.
-    await page.getByTestId(activityPin("settings")).click();
-    await page.getByTestId(settingsNavPin("cloud")).click();
-    const row = page.getByTestId("shared-by-me-row");
+    // Sharing → "Shared by me": the grant is listed and endable.
+    await page.getByTestId(activityPin("sharing")).click();
+    const row = page.locator(`[data-testid="sharing-granted-row"][data-share-id="${shareId}"]`);
     await expect(row).toBeVisible();
-    await expect(row).toContainText("docs/plan.md");
-    await expect(row).toContainText(RECIPIENT_EMAIL);
-    // Ending asks before it ends: the first click opens the confirm.
-    await row.getByTestId("shared-by-me-revoke-start").click();
-    await expect(row.getByTestId("shared-by-me-revoke-confirm")).toBeVisible();
-    await row.getByTestId("shared-by-me-revoke").click();
-    await expect(row).toContainText("Ended — was shared with");
+    await expect(row).toContainText("plan.md");
+    await expect(row).toContainText("docs/");
+    // Ending asks before it ends: the menu opens the confirm.
+    await row.hover();
+    await row.getByRole("button", { name: "Share actions" }).click();
+    await page.getByRole("menuitem", { name: "End share…" }).click();
+    const confirm = page.getByTestId("sharing-end-confirm");
+    await expect(confirm).toContainText(RECIPIENT_EMAIL);
+    await confirm.getByTestId("sharing-end").click();
+    await expect(row.getByTestId("sharing-row-status")).toHaveText("ended");
 
     // Revocation is live: the recipient's next fetch returns 404 with the
     // owner-removed explanation (#1438).
@@ -777,7 +783,7 @@ test("receive side: open a share read-only, follow the granter's edits, and see 
     await expect(page.getByTestId("workspace-shell")).toBeVisible();
     const banner = page.getByTestId("shared-view-banner");
     await expect(banner).toBeVisible();
-    await expect(banner).toContainText("Shared view from e2e-granter@dohc.test");
+    await expect(banner).toContainText(`Shared view from ${GRANTER_LABEL}`);
     await expect(banner).toContainText("read-only");
 
     await revealExplorerPath(page, "docs/shared.md");
@@ -1194,9 +1200,7 @@ test("mount side: an Edit code opens separately by default, and added to a works
     await expect(page.getByTestId("open-share-start")).toHaveText("Open share");
     await expect(page.getByTestId("open-share-start")).toBeEnabled();
     await page.getByTestId("open-share-start").click();
-    await expect(page.getByTestId("shared-view-banner")).toContainText(
-      "Markdown edits save to the live host.",
-    );
+    await expect(page.getByTestId("shared-view-banner")).toContainText(EDIT_BANNER);
     await expect(page.getByTestId("share-changes-send")).toBeVisible();
   } finally {
     await relay?.stop();
@@ -1307,8 +1311,8 @@ test("Comment handoff opens files without creating a second generic chat", async
     );
     await revealExplorerPath(page, "docs/shared.md");
     await explorerRow(page, "docs/shared.md").click();
-    if ((await page.getByTestId(desktopPins.chatsPanel).count()) === 0) {
-      await page.getByTestId(desktopPins.titlebarChatsSidebar).click();
+    if ((await page.getByTestId(desktopPins.aboutRail).count()) === 0) {
+      await page.getByTestId(desktopPins.titlebarAboutSidebar).click();
     }
     await expect(page.getByTestId("linked-chat-readonly-note")).toBeVisible();
     await expect(page.getByTestId("linked-chat-composer")).toHaveCount(0);
@@ -1430,13 +1434,13 @@ test("direct named Comment keeps desktop generic chat read-only", async () => {
     const banner = page.getByTestId("shared-view-banner");
     await expect(banner).toBeVisible();
     await expect(banner).toContainText(
-      "Files and Chats are read-only here. Ask e2e-granter@dohc.test where to continue the conversation.",
+      `Files and Chats are read-only here. Ask ${GRANTER_LABEL} where to continue the conversation.`,
     );
 
     await revealExplorerPath(page, "docs/shared.md");
     await explorerRow(page, "docs/shared.md").click();
-    if ((await page.getByTestId(desktopPins.chatsPanel).count()) === 0) {
-      await page.getByTestId(desktopPins.titlebarChatsSidebar).click();
+    if ((await page.getByTestId(desktopPins.aboutRail).count()) === 0) {
+      await page.getByTestId(desktopPins.titlebarAboutSidebar).click();
     }
     await expect(page.getByTestId("linked-chat-readonly-note")).toBeVisible();
     await expect(page.getByTestId("linked-chat-composer")).toHaveCount(0);
@@ -1569,7 +1573,8 @@ test("edit side: a recipient edits a shared file, sends the changes, and the gra
     // The banner states the right the share actually grants.
     const banner = page.getByTestId("shared-view-banner");
     await expect(banner).toBeVisible();
-    await expect(banner).toContainText("send your changes");
+    await expect(banner).toContainText(EDIT_BANNER);
+    await expect(page.getByTestId("share-changes-send")).toBeVisible();
 
     // The edit, written through the IPC boundary main owns. At view and
     // comment this same call is refused; the receive-side spec pins that.
@@ -1765,7 +1770,8 @@ test("edit side: a recipient creates, renames, deletes and imports, and the gran
     await expect(page.getByTestId("open-shared-view")).toContainText(temp.rootPath);
     await page.getByTestId("open-share-start").click();
     await expect(page.getByTestId("workspace-shell")).toBeVisible();
-    await expect(page.getByTestId("shared-view-banner")).toContainText("send your changes");
+    await expect(page.getByTestId("shared-view-banner")).toContainText(EDIT_BANNER);
+    await expect(page.getByTestId("share-changes-send")).toBeVisible();
 
     // The four operations, each through the IPC boundary main owns.
     await desktop.app.evaluate((_electron, paths: string[]) => {

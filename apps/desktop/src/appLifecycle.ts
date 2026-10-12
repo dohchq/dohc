@@ -1,3 +1,4 @@
+import { flushTypingCheckpointsSync } from "./workspaces/outageTypingRecovery";
 import { isAbsolute } from "node:path";
 import {
   classifyShareHandoffArguments,
@@ -107,6 +108,7 @@ export function createAppLifecycle<Window, Workspace, Settings>(dependencies: {
     finished(): void;
   };
   beforeQuit(event: QuitEvent): void;
+  beforeQuitWithoutWindows?(event: QuitEvent): void;
   shutdown: {
     budgetMs: number;
     deadlineExitCode: 0 | 1;
@@ -350,7 +352,10 @@ export function createAppLifecycle<Window, Workspace, Settings>(dependencies: {
       }
 
       app.on("browser-window-created", (_event, window) => {
-        window.on("session-end", () => launch.finished());
+        window.on("session-end", () => {
+          try {flushTypingCheckpointsSync();} catch {/* Session end cannot be cancelled. */}
+          launch.finished();
+        });
       });
 
       app.on("open-url", (event, rawArgument) => {
@@ -388,7 +393,7 @@ export function createAppLifecycle<Window, Workspace, Settings>(dependencies: {
 
       app.on("before-quit", (event) => {
         // A hidden export window cannot answer for renderer-held drafts.
-        if (!windows.hasWorkspace()) return;
+        if (!windows.hasWorkspace()) {dependencies.beforeQuitWithoutWindows?.(event); return;}
         dependencies.beforeQuit(event);
       });
 

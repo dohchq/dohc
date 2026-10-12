@@ -45,7 +45,10 @@ fn fixture_with_files(files: usize) -> (ScratchDir, std::path::PathBuf, EngineSt
 }
 
 fn append_file(store: &mut EngineStore, index: usize) {
-    let moment_id = format!("moment-{index}");
+    append_file_as(store, index, &format!("moment-{index}"));
+}
+
+fn append_file_as(store: &mut EngineStore, index: usize, moment_id: &str) {
     VersionedTextStore::new(store)
         .write_binary(
             &WriteBinary {
@@ -54,7 +57,7 @@ fn append_file(store: &mut EngineStore, index: usize) {
                 object_id: format!("object-{index}"),
                 path: format!("files/{index}.bin"),
                 bytes: format!("binary content {index}").into_bytes(),
-                moment_id: moment_id.clone(),
+                moment_id: moment_id.to_owned(),
                 metadata_origin: "api".to_owned(),
                 metadata_summary: None,
                 metadata_correlation_id: None,
@@ -67,7 +70,7 @@ fn append_file(store: &mut EngineStore, index: usize) {
         .expect("write content-bearing moment");
     store
         .write_with(&NoFaults, |tx| {
-            journal_moment_append_in_tx(tx, WORKSPACE, &moment_id)
+            journal_moment_append_in_tx(tx, WORKSPACE, moment_id)
         })
         .expect("journal moment");
 }
@@ -473,13 +476,22 @@ async fn cancellation_during_deferred_upload_preserves_acknowledged_prefix() {
 
 #[tokio::test]
 async fn deferred_push_requires_hosted_author_proof_and_preserves_neutral_markers() {
+    // Even a live settlement moment on the native lane needs a proof.
+    let settlement = format!("moment-ydoc-{}", "a".repeat(64));
     for authors in [
         serde_json::json!([{"kind":"human","humanId":"recipient","humanName":"Recipient"}]),
         serde_json::json!([{"kind":"link","publicPrincipalId":"recipient","label":"Edit link"}]),
         serde_json::json!([{"kind":"unattributed"}]),
     ] {
-        for native_settlements in [false, true] {
-            let (_scratch, path, mut store) = fixture_with_files(2);
+        for (moment_id, native_settlements) in [
+            (settlement.as_str(), false),
+            (settlement.as_str(), true),
+            ("moment-0", false),
+            ("moment-0", true),
+        ] {
+            let (_scratch, path, mut store) = fixture_with_files(0);
+            append_file_as(&mut store, 0, moment_id);
+            append_file(&mut store, 1);
             store.write_with(&NoFaults, |tx| {
             tx.execute("UPDATE replication_log SET payload_json=json_set(payload_json,'$.authors',json(?1)) WHERE op_kind='moment.append' AND origin_seq=0", [authors.to_string()]).map_err(StorageError::persist_public)?;
             Ok::<_, StorageError>(())

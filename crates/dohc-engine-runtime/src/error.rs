@@ -7,6 +7,8 @@ use dohc_engine_storage::StorageError;
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum RuntimeError {
+    #[error("capture-recovery-refused: {reason}")]
+    RecoveryImportRefused { reason: &'static str },
     /// The engine.db path could not be resolved to a canonical identity
     /// (parent directory missing or not canonicalizable).
     #[error("could not resolve engine.db identity: {reason}")]
@@ -140,6 +142,7 @@ impl RuntimeError {
                     }
                 }
             }
+            RuntimeError::RecoveryImportRefused { .. } => "capture-recovery-refused",
             RuntimeError::Sync(err) => err.code(),
             RuntimeError::Relay(_) => "relay-failed",
             RuntimeError::Search(err) => err.code(),

@@ -39,7 +39,7 @@ export function resolveDocumentTitle(markdown: string, fallbackTitle: string): s
 // meant to be read/printed, not a copy of the editor's own styles.css (which
 // is thousands of lines of app chrome this file has no business carrying).
 // Selectors mirror the class/data-attribute names the custom tiptap nodes in
-// extensions.ts actually render (dohc-wikilink-pill, dohc-callout,
+// dohc-markdown-extensions.ts actually render (dohc-wikilink-pill, dohc-callout,
 // dohc-highlight, [data-type="taskItem"]) so structure fidelity survives
 // the export.
 const EXPORT_STYLE_CSS = `
@@ -163,7 +163,7 @@ const EXPORT_STYLE_CSS = `
   .dohc-callout-body > *:last-child { margin-bottom: 0; }
 `.trim()
 
-// markdownBodyToHtml renders the math atom nodes (extensions.ts) as their raw
+// markdownBodyToHtml renders the math atom nodes (dohc-markdown-extensions.ts) as their raw
 // TeX source — <span data-dohc-math-inline>$tex$</span> and
 // <div data-dohc-math-block>$$tex$$</div> — which would print as literal
 // dollar-delimited LaTeX. Typeset them with KaTeX so the export matches what
@@ -221,7 +221,7 @@ function isExportSafeImageSrc(src: string): boolean {
   const trimmed = src.trim()
   if (trimmed.length === 0) return false
   // Strip control chars/whitespace before sniffing, mirroring the sanitizer in
-  // extensions.ts, so an obfuscated scheme ("java\nscript:") can't slip past.
+  // image-src.ts, so an obfuscated scheme ("java\nscript:") can't slip past.
   const compact = trimmed.replace(/[\u0000-\u001F\u007F\s]+/g, '')
   const scheme = /^[a-z][a-z\d+.-]*:/i.exec(compact)?.[0]
   if (scheme) {

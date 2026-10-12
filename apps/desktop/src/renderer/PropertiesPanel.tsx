@@ -3,8 +3,9 @@ import {
   frontmatterEditsRefused,
   loadMarkdownFrontmatter,
   markdownFrontmatterEditsRefused,
-  patchFrontmatter,
+  nullPrototypeRecord,
 } from "@dohc/ydoc-projection/frontmatter";
+import { frontmatterMapValues, patchFrontmatter } from "@dohc/ydoc-projection/frontmatter-map";
 import { Plus, X } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import type * as Y from "yjs";
@@ -88,7 +89,8 @@ function buildProperties(
   currentEntries: FrontmatterEntry[],
   nextEntries: FrontmatterEntry[],
 ): Record<string, unknown> {
-  const props: Record<string, unknown> = {};
+  // A property named `__proto__` stays a property.
+  const props = nullPrototypeRecord();
   for (const entry of currentEntries) {
     if (isReserved(entry.key)) props[entry.key] = entryValue(entry);
   }
@@ -167,22 +169,28 @@ function applySharedFrontmatterPatch(
   const next = valuesByEditableKey(nextEntries);
 
   const remove = [...previous.keys()].filter(key => !next.has(key));
+  // A row holds the key and value it was read or written with. A row the
+  // person left alone never writes, whatever a later read decoded for it.
   const values = new Map<string, unknown>();
-  for (const [key, value] of next) {
-    if (!previous.has(key) || !Object.is(previous.get(key), value)) {
-      values.set(key, value);
+  for (const entry of nextEntries) {
+    const key = propertyKey(entry);
+    if (key !== null && (key !== entry.sourceKey || entry.value !== entry.sourceValue)) {
+      values.set(key, entryValue(entry));
     }
   }
   patchFrontmatter(doc, values, remove, renamedKeys(previousEntries, nextEntries));
 }
 
 // The map has no order of its own, so rows follow the kept text, as the file
-// does. Keys the text does not hold follow in map order.
+// does. Keys the text does not hold follow in map order. Values arrive decoded,
+// so a shared-type value shows as the YAML the file holds.
 function liveEntries(doc: Y.Doc): FrontmatterEntry[] {
   const source = doc.getMap("meta").get(FRONTMATTER_SOURCE_META_KEY);
   const order = typeof source === "string" ? (loadMarkdownFrontmatter(source)?.keys ?? []) : [];
   const place = (key: string): number => (order.includes(key) ? order.indexOf(key) : order.length);
-  return frontmatterEntriesFromPairs(doc.getMap(FRONTMATTER_FIELD).entries())
+  const map = doc.getMap(FRONTMATTER_FIELD);
+  const values = frontmatterMapValues(map);
+  return frontmatterEntriesFromPairs(Array.from(map.keys(), (key) => [key, values[key]] as const))
     .map((entry) => ({ entry, place: place(entry.key) }))
     .sort((first, second) => first.place - second.place)
     .map(({ entry }) => entry);
@@ -230,11 +238,13 @@ export function PropertiesPanel(props: PropertiesPanelProps) {
     try {
       if (ydoc) {
         applySharedFrontmatterPatch(ydoc, previous, next);
-        // Each row now names the key it wrote. The document's update reaches
-        // the rows later, and a keystroke before then renames from this key.
+        // Each row now holds the key and value it wrote. The document's update
+        // reaches the rows later, and a keystroke before then edits from here.
         setEntries(next.map((entry) => {
           const key = propertyKey(entry);
-          return key === null ? entry : { ...entry, sourceKey: key };
+          return key === null
+            ? entry
+            : { ...entry, sourceKey: key, sourceValue: entry.value, rawValue: entryValue(entry) };
         }));
       } else {
         props.onChange?.(

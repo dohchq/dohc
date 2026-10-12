@@ -466,8 +466,7 @@ pub struct ResolveTextConflictResult {
 pub struct BinaryResolveWrite {
     pub path: String,
     pub binary_sha256: String,
-    /// Doubles as the materialization job id (the BINHEAD moment/job
-    /// generation-sharing contract in [`write_binary_file_in_tx`]).
+    /// Names its materialization job through [`binary_write_job_id`].
     pub moment_id: String,
 }
 
@@ -1128,6 +1127,12 @@ pub fn binary_delete_job_id(moment_id: &str) -> String {
     format!("binary-delete-mat_{moment_id}")
 }
 
+/// The job that writes a binary head to disk. Callers choose moment ids, so
+/// the prefix keeps these jobs out of every internal job's namespace.
+pub fn binary_write_job_id(moment_id: &str) -> String {
+    format!("binary-mat_{moment_id}")
+}
+
 /// Enqueue the two durable disk operations for an active-version binary
 /// rename. The lexical job-id order writes the destination before removing the
 /// source during startup replay.
@@ -1370,7 +1375,7 @@ pub fn write_binary_file_in_tx(
         enqueue_job(
             tx,
             &MaterializationJobSpec {
-                job_id: input.moment_id.clone(),
+                job_id: binary_write_job_id(&input.moment_id),
                 workspace_id: input.workspace_id.clone(),
                 target_path: input.path.clone(),
                 content_sha256: input.binary_sha256.clone(),

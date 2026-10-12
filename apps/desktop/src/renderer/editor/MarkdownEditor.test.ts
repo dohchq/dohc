@@ -13,7 +13,13 @@ import userEvent from "@testing-library/user-event";
 import * as Y from "yjs";
 import { Awareness, applyAwarenessUpdate, encodeAwarenessUpdate } from "y-protocols/awareness";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { Editor, Extension, getSchema, type JSONContent } from "@tiptap/core";
+import {
+  Editor,
+  Extension,
+  getSchema,
+  type JSONContent,
+  type TiptapEditorHTMLElement,
+} from "@tiptap/core";
 import { StarterKit } from "@tiptap/starter-kit";
 import { Markdown } from "@tiptap/markdown";
 import { marked } from "marked";
@@ -22,17 +28,20 @@ import { marked } from "marked";
 // this file uses DohcTaskItem.
 import { TaskItem, TaskList } from "@tiptap/extension-list";
 import { TableKit } from "@tiptap/extension-table";
+import { NodeSelection } from "@tiptap/pm/state";
 import {
   prosemirrorJSONToYXmlFragment,
   yXmlFragmentToProseMirrorRootNode,
 } from "y-prosemirror";
-import { DohcTaskItem, dohcMarkdownExtensions } from "./extensions";
+import { DohcTaskItem } from "@dohc/ydoc-projection/markdown-extensions";
+import { desktopMarkdownExtensions } from "./extensions";
 import {
   getDohcProseMirrorSchema,
   getDohcYDocBodyFragment,
   markdownToYDoc,
-} from "./import-export";
-import { MarkdownEditor, SelectionToolbar, type MarkdownEditorHandle } from "./MarkdownEditor";
+} from "@dohc/ydoc-projection";
+import { MarkdownEditor, type MarkdownEditorHandle } from "./MarkdownEditor";
+import { measureParseWork } from "./markdownParseWork";
 import {
   findEmptyListItemParagraph,
   makeCodeBlockChromePlugin,
@@ -61,6 +70,13 @@ async function flushAnimationFrames(count = 2): Promise<void> {
       });
     }
   });
+}
+
+/** The Tiptap editor behind a mounted MarkdownEditor surface. */
+function editorBehind(surface: HTMLElement): Editor {
+  const { editor } = surface as TiptapEditorHTMLElement;
+  if (!editor) throw new Error("The editor surface has no Tiptap editor mounted.");
+  return editor;
 }
 
 function selectionTextOffset(element: HTMLElement): number | null {
@@ -453,7 +469,7 @@ describe("MarkdownEditor task-item schema fidelity", () => {
   function roundTrip(taskItemExtension: typeof TaskItem | typeof DohcTaskItem): JSONContent {
     const schema = getSchema([
       StarterKit.configure({ trailingNode: false }),
-      ...dohcMarkdownExtensions,
+      ...desktopMarkdownExtensions,
       TaskList,
       taskItemExtension,
     ]);
@@ -578,37 +594,42 @@ describe("MarkdownEditor slash commands", () => {
 });
 
 describe("MarkdownEditor selection toolbar", () => {
-  it("shows the block and marks of the current selection, not the first one", () => {
-    const editor = new Editor({
-      element: document.createElement("div"),
-      extensions: [
-        StarterKit.configure({ trailingNode: false }),
-        ...dohcMarkdownExtensions,
-        Markdown.configure({ indentation: { style: "space", size: 2 } }),
-      ],
-      content: "# Big heading\n\nA paragraph with **bold words** in it.",
-      contentType: "markdown",
-    });
-    try {
+  it("shows the block and marks of the current selection, not the first one", async () => {
+    render(
+      createElement(MarkdownEditor, {
+        value: "# Big heading\n\nA paragraph with **bold words** in it.",
+        onDirty: vi.fn(),
+        workspaceId: "workspace-1",
+        path: "notes/toolbar.md",
+        knownFiles: [],
+      }),
+    );
+    const editor = editorBehind(await screen.findByTestId("markdown-editor"));
+    await flushAnimationFrames();
+
+    act(() => {
       editor.commands.setTextSelection({ from: 2, to: 5 });
-      render(createElement(SelectionToolbar, { editor, onOpenLink: vi.fn() }));
-      const bold = screen.getByRole("button", { name: "Bold" });
-      expect(screen.getByTitle("Turn into").textContent).toContain("Heading 1");
-      expect(bold.className).not.toContain("is-active");
+    });
+    // The bubble menu attaches once its debounced update sees the selection.
+    const menu = await waitFor(() => {
+      const element = document.querySelector<HTMLElement>(".dohc-bubble-menu");
+      expect(element).not.toBeNull();
+      return element!;
+    });
+    const bold = within(menu).getByRole("button", { name: "Bold" });
+    expect(within(menu).getByTitle("Turn into").textContent).toContain("Heading 1");
+    expect(bold.className).not.toContain("is-active");
 
-      let boldFrom = -1;
-      editor.state.doc.descendants((node, pos) => {
-        if (boldFrom === -1 && node.isText && node.text === "bold words") boldFrom = pos;
-      });
-      act(() => {
-        editor.commands.setTextSelection({ from: boldFrom, to: boldFrom + 4 });
-      });
+    let boldFrom = -1;
+    editor.state.doc.descendants((node, pos) => {
+      if (boldFrom === -1 && node.isText && node.text === "bold words") boldFrom = pos;
+    });
+    act(() => {
+      editor.commands.setTextSelection({ from: boldFrom, to: boldFrom + 4 });
+    });
 
-      expect(screen.getByTitle("Turn into").textContent).toContain("Text");
-      expect(bold.className).toContain("is-active");
-    } finally {
-      editor.destroy();
-    }
+    expect(within(menu).getByTitle("Turn into").textContent).toContain("Text");
+    expect(bold.className).toContain("is-active");
   });
 });
 
@@ -618,7 +639,7 @@ describe("MarkdownEditor slash command: image", () => {
       element: document.createElement("div"),
       extensions: [
         StarterKit.configure({ trailingNode: false }),
-        ...dohcMarkdownExtensions,
+        ...desktopMarkdownExtensions,
         TaskList,
         DohcTaskItem,
         Markdown.configure({ indentation: { style: "space", size: 2 } }),
@@ -685,7 +706,7 @@ describe("MarkdownEditor slash command: math", () => {
       element: document.createElement("div"),
       extensions: [
         StarterKit.configure({ trailingNode: false }),
-        ...dohcMarkdownExtensions,
+        ...desktopMarkdownExtensions,
         TaskList,
         DohcTaskItem,
         Markdown.configure({ indentation: { style: "space", size: 2 } }),
@@ -738,7 +759,7 @@ describe("MarkdownEditor code block continuation", () => {
       element: document.createElement("div"),
       extensions: [
         StarterKit.configure({ trailingNode: false }),
-        ...dohcMarkdownExtensions,
+        ...desktopMarkdownExtensions,
         TaskList,
         DohcTaskItem,
         Markdown.configure({ indentation: { style: "space", size: 2 } }),
@@ -882,6 +903,83 @@ describe("MarkdownEditor nested checklists", () => {
   });
 });
 
+// The block gutter selects a whole table, which Backspace and Delete then
+// remove. Without the editor's table node selection, Tiptap turns the gutter's
+// selection into a selection of the table's cells.
+describe("MarkdownEditor table gutter", () => {
+  it.each(["Backspace", "Delete"])("selects a whole table from its gutter and deletes it with %s", async (key) => {
+    render(
+      createElement(MarkdownEditor, {
+        value: "Before\n\n| A | B |\n| --- | --- |\n| 1 | 2 |\n\nAfter",
+        onDirty: vi.fn(),
+        workspaceId: "workspace-1",
+        path: "notes/table.md",
+        knownFiles: [],
+      }),
+    );
+    const surface = await screen.findByTestId("markdown-editor");
+    const editor = editorBehind(surface);
+    const handle = surface.querySelectorAll<HTMLElement>(".dohc-block-handle")[1];
+    expect(handle).toBeDefined();
+
+    fireEvent.click(handle!);
+    const { selection } = editor.state;
+    expect(selection).toBeInstanceOf(NodeSelection);
+    expect((selection as NodeSelection).node.type.name).toBe("table");
+
+    fireEvent.keyDown(surface, { key });
+    const blocks: string[] = [];
+    editor.state.doc.forEach((block) => blocks.push(block.type.name));
+    expect(blocks).toEqual(["paragraph", "paragraph"]);
+    expect(editor.state.doc.textContent).toBe("BeforeAfter");
+  });
+});
+
+// The editor reads Markdown through the projection's parser. A block
+// tokenizer that splits or searches the rest of the document only to reject an
+// ordinary paragraph makes opening a long note quadratic. Counting newline
+// splits alone missed the block-marker searches.
+describe("MarkdownEditor markdown import", () => {
+  it("reads a linear amount of text when it opens or replaces ordinary paragraphs", async () => {
+    const body = (paragraphs: number, text: string) => Array(paragraphs).fill(text).join("\n\n");
+    const measure = async (paragraphs: number) => {
+      const ref = createRef<MarkdownEditorHandle>();
+      let view: ReturnType<typeof render> | undefined;
+      const open = await measureParseWork(async () => {
+        view = render(
+          createElement(MarkdownEditor, {
+            ref,
+            value: body(paragraphs, "Ordinary paragraph."),
+            onDirty: vi.fn(),
+            workspaceId: "workspace-1",
+            path: "notes/long.md",
+            knownFiles: [],
+          }),
+        );
+        const editor = editorBehind(await screen.findByTestId("markdown-editor"));
+        expect(editor.state.doc.childCount).toBe(paragraphs);
+      });
+      const replace = await measureParseWork(() => {
+        act(() => ref.current?.replaceMarkdown(body(paragraphs, "Replaced paragraph.")));
+        const editor = editorBehind(screen.getByTestId("markdown-editor"));
+        expect(editor.state.doc.childCount).toBe(paragraphs);
+        expect(editor.state.doc.lastChild?.textContent).toBe("Replaced paragraph.");
+      });
+      view?.unmount();
+      return { open, replace };
+    };
+    const small = await measure(64);
+    const large = await measure(128);
+    for (const path of ["open", "replace"] as const) {
+      expect(small[path].search, path).toBeGreaterThan(0);
+      expect(large[path].split, `${path} newline split characters: ${small[path].split} -> ${large[path].split}`)
+        .toBeLessThan(small[path].split * 2.2);
+      expect(large[path].search, `${path} searched characters: ${small[path].search} -> ${large[path].search}`)
+        .toBeLessThan(small[path].search * 2.2);
+    }
+  });
+});
+
 describe("MarkdownEditor history", () => {
   it("keeps malformed rich markdown from crashing the editor transaction loop", async () => {
     const user = userEvent.setup();
@@ -900,7 +998,7 @@ describe("MarkdownEditor history", () => {
       element: document.createElement("div"),
       extensions: [
         StarterKit.configure({ trailingNode: false }),
-        ...dohcMarkdownExtensions,
+        ...desktopMarkdownExtensions,
         TaskList,
         DohcTaskItem,
         TableKit,
@@ -1256,12 +1354,10 @@ describe("MarkdownEditor remote carets", () => {
 
 // The live editor's getMarkdown() is what FileInspector.tsx's WYSIWYG save
 // and engine-draft export, and blockControls.tsx's "copy block as markdown"
-// all read from (they all serialize through this same mounted editor's
-// markdown manager). Before MarkdownEditor.tsx registered
-// FenceWideningCodeBlock, StarterKit's default codeBlock hardcoded a
-// three-backtick fence regardless of content, so a code block whose own
-// content held a ``` line closed its fence early and truncated on
-// re-import.
+// all read from (they all serialize through the projection's
+// serializeRichdocBody). A three-backtick fence around content that holds a
+// ``` line would close early and truncate on re-import, so the serializer
+// widens the fence.
 describe("MarkdownEditor markdown export: code fence widening", () => {
   it("reports Replace all while the find input owns focus", async () => {
     Object.defineProperty(Element.prototype, "scrollIntoView", {

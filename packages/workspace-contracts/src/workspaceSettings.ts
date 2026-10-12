@@ -1,6 +1,4 @@
-import * as Effect from "effect/Effect";
-import * as Schema from "effect/Schema";
-import * as Struct from "effect/Struct";
+import { z } from "zod";
 import {
   ATTACHMENT_FOLDER_NAME_MAX_LENGTH,
   ATTACHMENT_LOCATIONS,
@@ -14,58 +12,52 @@ export { ATTACHMENT_FOLDER_NAME_MAX_LENGTH } from "./workspaceSettingsValues";
 //
 // It lives here, not in the desktop app, so every reader parses the file
 // through one schema.
+export const WorkspaceSettings = z
+  .object({
+    version: z.literal(1),
+    sites: z
+      .object({
+        defaultPreviewMode: z.enum(WORKSPACE_PREVIEW_MODES),
+      })
+      .strict(),
+    privacy: z
+      .object({
+        confirmExternalLinks: z.boolean(),
+      })
+      .strict(),
+    // Defaulted, not required, so settings written before this group existed
+    // keep parsing as-is. The desktop reader turns off only a key it does not
+    // know or cannot decode, never the whole file. Controls where
+    // pasted/uploaded attachments (images/files) are saved,
+    // modeled on Obsidian's "Default location for new attachments":
+    //   per-document  — a subfolder next to the document (`<folder>/x.png`)
+    //   global-folder — one folder at the workspace root (`../<folder>/x.png`)
+    //   same-folder   — directly beside the document (`x.png`)
+    // `attachmentFolderName` is the subfolder name (per-document) or root folder
+    // name (global-folder); it is ignored for same-folder. Stored loosely (any
+    // string) and sanitized to a single safe path segment at use time — an
+    // invalid value falls back to "assets" rather than resetting the file.
+    files: z
+      .object({
+        attachmentLocation: z.enum(ATTACHMENT_LOCATIONS),
+        // The settings UI enforces the same bound on its input:
+        // mergeWorkspaceSettings re-parses and throws on an over-long value,
+        // and it is called straight from a React change handler.
+        attachmentFolderName: z
+          .string()
+          .max(
+            ATTACHMENT_FOLDER_NAME_MAX_LENGTH,
+            `Attachment folder names must contain ${ATTACHMENT_FOLDER_NAME_MAX_LENGTH} characters or fewer.`,
+          ),
+      })
+      .strict()
+      .default(WORKSPACE_SETTINGS_DEFAULTS.files),
+  })
+  .strict();
+export type WorkspaceSettings = z.infer<typeof WorkspaceSettings>;
 
-// The schema bound on `files.attachmentFolderName`. Exported because the
-// settings UI must enforce the same bound on its input: mergeWorkspaceSettings
-// re-parses and throws on an over-long value, and it is called straight from a
-// React change handler — so an unbounded input would turn a long paste into an
-// unhandled exception instead of a rejected edit.
-const WorkspaceAgentsSettings = Schema.Struct({
-  mcpAutoStart: Schema.Boolean,
-}).mapFields(Struct.map(Schema.mutableKey));
-
-const WorkspaceSitesSettings = Schema.Struct({
-  defaultPreviewMode: Schema.Literals(WORKSPACE_PREVIEW_MODES),
-}).mapFields(Struct.map(Schema.mutableKey));
-
-const WorkspacePrivacySettings = Schema.Struct({
-  confirmExternalLinks: Schema.Boolean,
-}).mapFields(Struct.map(Schema.mutableKey));
-
-const WorkspaceFilesSettings = Schema.Struct({
-  attachmentLocation: Schema.Literals(ATTACHMENT_LOCATIONS),
-  attachmentFolderName: Schema.String.check(
-    Schema.isMaxLength(ATTACHMENT_FOLDER_NAME_MAX_LENGTH, {
-      message: `Attachment folder names must contain ${ATTACHMENT_FOLDER_NAME_MAX_LENGTH} characters or fewer.`,
-    }),
-  ),
-}).mapFields(Struct.map(Schema.mutableKey));
-
-export const WorkspaceSettings = Schema.Struct({
-  version: Schema.Literal(1),
-  agents: WorkspaceAgentsSettings,
-  sites: WorkspaceSitesSettings,
-  privacy: WorkspacePrivacySettings,
-  // Defaulted, not required, so settings written before this group existed
-  // keep parsing as-is. The desktop reader turns off only a key it does not
-  // know or cannot decode, never the whole file. Controls where
-  // pasted/uploaded attachments (images/files) are saved,
-  // modeled on Obsidian's "Default location for new attachments":
-  //   per-document  — a subfolder next to the document (`<folder>/x.png`)
-  //   global-folder — one folder at the workspace root (`../<folder>/x.png`)
-  //   same-folder   — directly beside the document (`x.png`)
-  // `attachmentFolderName` is the subfolder name (per-document) or root folder
-  // name (global-folder); it is ignored for same-folder. Stored loosely (any
-  // string) and sanitized to a single safe path segment at use time — an
-  // invalid value falls back to "assets" rather than resetting the file.
-  files: WorkspaceFilesSettings.pipe(
-    Schema.withDecodingDefault(Effect.succeed(WORKSPACE_SETTINGS_DEFAULTS.files)),
-  ),
-}).mapFields(Struct.map(Schema.mutableKey));
-export type WorkspaceSettings = typeof WorkspaceSettings.Type;
-
-export const decodeWorkspaceSettings = Schema.decodeUnknownSync(WorkspaceSettings, {
-  onExcessProperty: "error",
-});
+export function decodeWorkspaceSettings(input: unknown): WorkspaceSettings {
+  return WorkspaceSettings.parse(input);
+}
 
 export const DEFAULT_WORKSPACE_SETTINGS: WorkspaceSettings = WORKSPACE_SETTINGS_DEFAULTS;

@@ -1,8 +1,6 @@
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
-import {
-  frontmatterEditsRefused,
-  setFrontmatterValue,
-} from "@dohc/ydoc-projection/frontmatter";
+import { frontmatterEditsRefused } from "@dohc/ydoc-projection/frontmatter";
+import { setFrontmatterValue } from "@dohc/ydoc-projection/frontmatter-map";
 import { FRONTMATTER_EDIT_REFUSED_MESSAGE } from "../markdown/frontmatter";
 import type { CollectionCellChange } from "@dohc/collection-views";
 import type { CollectionValue } from "@dohc/workspace-contracts";

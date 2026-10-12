@@ -885,7 +885,7 @@ mod tests {
                 }),
             };
             service
-                .versioned_text_write(&ctx, &request, request.params.clone())
+                .versioned_text_write(&ctx, request)
                 .await
                 .expect("create through the engine");
         }
@@ -910,5 +910,116 @@ mod tests {
             .workspace_close(Some(handle))
             .await
             .expect("close no-capture workspace");
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ImportRecoveryParams {
+    admitted_base_base64: String,
+    version_id: String,
+    object_id: String,
+    path: String,
+    expected_claim_id: Option<String>,
+    expected_state_vector_sha256: String,
+    expected_disk_sha256: Option<String>,
+    text: String,
+    updates: Vec<ImportRecoveryUpdate>,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ImportRecoveryUpdate {
+    request_id: String,
+    update_base64: String,
+    actor_origin_id: Option<String>,
+    attribution: Option<dohc_engine_domain::ChangeAttribution>,
+}
+impl EngineService {
+    pub(super) async fn capture_import_recovery(
+        &self,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        use base64::Engine as _;
+        use dohc_engine_runtime::actor::{RecoveryImport, RecoveryImportOutcome, RecoveryUpdate};
+        let input: ImportRecoveryParams = parse(params)?;
+        let open = self.open(handle.as_ref())?;
+        if !open.is_local_owner() {
+            return Err(WireError::new(
+                ErrorCode::Forbidden,
+                "capture.importRecovery needs the workspace's owning handle",
+            ));
+        }
+        let admitted_base = base64::engine::general_purpose::STANDARD
+            .decode(input.admitted_base_base64)
+            .map_err(|_| {
+                WireError::new(
+                    ErrorCode::InvalidParams,
+                    "capture-recovery-refused:invalid-admitted-base",
+                )
+            })?;
+        let _serial = open.session_ops.lock().await;
+        let updates = input
+            .updates
+            .into_iter()
+            .map(|u| {
+                Ok(RecoveryUpdate {
+                    request_id: u.request_id,
+                    update: base64::engine::general_purpose::STANDARD
+                        .decode(u.update_base64)
+                        .map_err(|_| {
+                            WireError::new(
+                                ErrorCode::InvalidParams,
+                                "capture-recovery-refused:invalid-update",
+                            )
+                        })?,
+                    actor_origin_id: u.actor_origin_id,
+                    attribution: u.attribution,
+                })
+            })
+            .collect::<Result<Vec<_>, WireError>>()?;
+        let outcome = open
+            .actor
+            .capture_import_recovery(
+                open.root.clone(),
+                RecoveryImport {
+                    key: dohc_engine_collab::DocKey::new(
+                        &open.workspace_id,
+                        input.version_id,
+                        input.object_id,
+                    )
+                    .map_err(|e| WireError::new(ErrorCode::InvalidParams, e.to_string()))?,
+                    path: input.path,
+                    expected_claim_id: input.expected_claim_id,
+                    expected_state_vector_sha256: input.expected_state_vector_sha256,
+                    expected_disk_sha256: input.expected_disk_sha256,
+                    admitted_base,
+                    updates,
+                    text: input.text,
+                },
+                now_ms()?,
+                Arc::new(dohc_engine_storage::NoFaults),
+            )
+            .await
+            .map_err(map_runtime)?;
+        for facts in &outcome.record_facts {
+            crate::events::emit_record_events(&self.events, &open.workspace_id, facts);
+        }
+        crate::events::emit_automation_claimed(
+            &self.events,
+            &open.workspace_id,
+            &outcome.automation_claims,
+        );
+        Ok(match outcome.outcome {
+            RecoveryImportOutcome::Imported { moment_id } => {
+                json!({"committed":true,"outcome":"imported","momentId":moment_id})
+            }
+            RecoveryImportOutcome::Replayed => {
+                json!({"committed":true,"outcome":"replayed","momentId":null})
+            }
+            RecoveryImportOutcome::Covered => {
+                json!({"committed":true,"outcome":"covered","momentId":null})
+            }
+        })
     }
 }

@@ -36,6 +36,7 @@ import {
   type AutomationRetryParams,
   type AutomationScheduleMarksResult,
   type AutomationSettleParams,
+  type AutomationMakeDurableParams,
   type AutomationSubscribeParams,
   type AutomationSubscribeResult,
   type AutomationUnsubscribeParams,
@@ -44,6 +45,8 @@ import {
   type AutomationWatchGroupsParams,
   type AutomationWatchGroupsResult,
   type CaptureFlushResult,
+  type CaptureRecoveryImportParams,
+  type CaptureRecoveryImportResult,
   type CaptureMoveFileResult,
   type CollectionGetParams,
   type CollectionGetRecordParams,
@@ -455,7 +458,6 @@ export class VersionedLiveAdapter {
         : {}),
       ...(input.author ? { author: input.author } : {}),
       ...(input.momentId !== undefined ? { momentId: input.momentId } : {}),
-      requestId,
     };
     if (Buffer.byteLength(input.text, "utf8") > MAX_DESKTOP_CAPTURE_TEXT_BYTES) {
       const bytes = Buffer.from(input.text, "utf8");
@@ -506,7 +508,6 @@ export class VersionedLiveAdapter {
             : {}),
           ...(input.author ? { author: input.author } : {}),
           ...(input.momentId !== undefined ? { momentId: input.momentId } : {}),
-          requestId,
         },
         { idempotencyKey: requestId },
       );
@@ -529,7 +530,6 @@ export class VersionedLiveAdapter {
           : {}),
         ...(input.author ? { author: input.author } : {}),
         ...(input.momentId !== undefined ? { momentId: input.momentId } : {}),
-        requestId,
       },
       { idempotencyKey: requestId },
     );
@@ -764,7 +764,6 @@ export class VersionedLiveAdapter {
     metadata: AdapterWriteMetadata;
   }): Promise<VersionedMethodResultMap["versionedText.merge"]> {
     this.assertWorkspace(input.workspaceId);
-    const requestId = randomUUID();
     return this.request(
       VERSIONED_METHOD.versionsMerge,
       {
@@ -779,9 +778,8 @@ export class VersionedLiveAdapter {
         ...(input.metadata.correlationId !== undefined
           ? { correlationId: input.metadata.correlationId }
           : {}),
-        requestId,
       },
-      { idempotencyKey: requestId },
+      { idempotencyKey: randomUUID() },
     );
   }
 
@@ -1032,7 +1030,6 @@ export class VersionedLiveAdapter {
     captureHoldId?: string;
   }): Promise<VersionedMethodResultMap["versionedText.rename"]> {
     this.assertWorkspace(input.workspaceId);
-    const requestId = randomUUID();
     return this.request(
       VERSIONED_METHOD.textRename,
       {
@@ -1049,9 +1046,8 @@ export class VersionedLiveAdapter {
           : {}),
         ...(input.author ? { author: input.author } : {}),
         ...(input.captureHoldId !== undefined ? { captureHoldId: input.captureHoldId } : {}),
-        requestId,
       },
-      { idempotencyKey: requestId },
+      { idempotencyKey: randomUUID() },
     );
   }
 
@@ -1074,7 +1070,6 @@ export class VersionedLiveAdapter {
         "versionedText.delete does not accept a caller-supplied moment id.",
       );
     }
-    const requestId = input.requestId ?? randomUUID();
     return this.request(
       VERSIONED_METHOD.textDelete,
       {
@@ -1093,9 +1088,8 @@ export class VersionedLiveAdapter {
           : {}),
         ...(input.author ? { author: input.author } : {}),
         ...(input.captureHoldId !== undefined ? { captureHoldId: input.captureHoldId } : {}),
-        requestId,
       },
-      { idempotencyKey: requestId },
+      { idempotencyKey: input.requestId ?? randomUUID() },
     );
   }
 
@@ -1108,12 +1102,7 @@ export class VersionedLiveAdapter {
     author?: WriteAuthor;
   }): Promise<void> {
     this.assertWorkspace(input.workspaceId);
-    const requestId = randomUUID();
-    await this.request(
-      VERSIONED_METHOD.textRollback,
-      { ...input, requestId },
-      { idempotencyKey: requestId },
-    );
+    await this.request(VERSIONED_METHOD.textRollback, input, { idempotencyKey: randomUUID() });
   }
 
   async listMoments(input: {
@@ -1161,6 +1150,18 @@ export class VersionedLiveAdapter {
   }): Promise<MomentRecord | null> {
     this.assertWorkspace(input.workspaceId);
     return this.request(VERSIONED_METHOD.momentsGet, {
+      momentId: input.momentId,
+    });
+  }
+
+  async publicationApplied(input: {
+    workspaceId: string;
+    requestId: string;
+    momentId: string;
+  }): Promise<boolean> {
+    this.assertWorkspace(input.workspaceId);
+    return this.request(VERSIONED_METHOD.publicationApplied, {
+      requestId: input.requestId,
       momentId: input.momentId,
     });
   }
@@ -1263,6 +1264,11 @@ export class VersionedLiveAdapter {
     input: AutomationClaimNextParams,
   ): Promise<AutomationClaimNextResult> {
     return this.workspaceRequest(WORKSPACE_METHOD.automationsClaimNext, input);
+  }
+
+  /** Syncs earlier engine writes; the claim may belong to an external ledger. */
+  async makeAutomationWritesDurable(input: AutomationMakeDurableParams = {}): Promise<void> {
+    await this.workspaceRequest(WORKSPACE_METHOD.automationsMakeDurable, input);
   }
 
   /** Settles a running claim as done, or failed with its error text. */
@@ -1594,6 +1600,10 @@ export class VersionedLiveAdapter {
 
   async watcherStatus(): Promise<WatcherStatusResult> {
     return this.workspaceRequest(WORKSPACE_METHOD.watcherStatus, {});
+  }
+
+  async importRecovery(input: CaptureRecoveryImportParams): Promise<CaptureRecoveryImportResult> {
+    return this.workspaceRequest(WORKSPACE_METHOD.captureImportRecovery, input);
   }
 
   async clearCaptureRecovery(momentId: string): Promise<void> {

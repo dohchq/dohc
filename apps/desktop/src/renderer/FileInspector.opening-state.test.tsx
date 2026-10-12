@@ -5,7 +5,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-libra
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
-import { markdownToYDoc } from "./editor/import-export";
+import { markdownToYDoc } from "@dohc/ydoc-projection";
 import { FileInspector } from "./FileInspector";
 import { DEFAULT_WORKSPACE_SETTINGS } from "../workspaces/workspaceSettings";
 import { captureOrphanedDraft, resetOrphanedDrafts } from "./orphanedDrafts";
@@ -1587,7 +1587,7 @@ describe("markdown document opening state", () => {
     );
   });
 
-  it("settles a held raw-source save after switching to lossy WYSIWYG without repainting or retrying", async () => {
+  it("settles a held raw-source save after switching to WYSIWYG without repainting or retrying", async () => {
     const bridge = makeHeldOpenBridge();
     let releaseWrite!: () => void;
     const heldWrite = new Promise<{ status: "written"; contentHash: string }>(
@@ -1613,7 +1613,8 @@ describe("markdown document opening state", () => {
       return editor;
     });
     const renderedBeforeWriteLands = wysiwyg.innerHTML;
-    expect(wysiwyg.textContent).not.toContain("keep raw");
+    // The editor shows the comment as the text the file holds.
+    expect(wysiwyg.textContent).toContain("<!-- keep raw -->");
     expect(bridge.bridgeMock.writeWorkspaceText.mock.calls[0]?.[0].text).toBe(
       rawSource,
     );

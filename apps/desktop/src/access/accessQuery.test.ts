@@ -82,7 +82,7 @@ it("shows the recipient's removal observation for an ended object's exact share"
   const inventory = parseReceivedInventory({ received: [], removed: [{ shareId: "received", grantId: "own", removedAtMs: 2, message: "removed" }] })!;
   const answer = createAccessQuery().answer({ ...input(), observation: { inventory, checkedAtMs: 100, freshness: "fresh" },
     recipientUserId: "recipient", coverage: "received-own-grant", shareId: "received" });
-  expect(answer.rows).toMatchObject([{ shareId: "received", grantId: "own", status: "removed", recipientUserId: "recipient" }]);
+  expect(answer.rows).toMatchObject([{ shareId: "received", grantId: "own", status: "removed", recipientUserId: "recipient", removalMessage: "removed" }]);
 });
 it("pages the account's full received inventory but confines an object's answer to its own share", () => {
   const inventory = parseReceivedInventory({ received: Array.from({ length: 1001 }, (_, n) => ({ ...grant(String(n).padStart(4, "0")),

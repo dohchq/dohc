@@ -1,4 +1,4 @@
-import { desktopPins } from "../src/testPins";
+import { desktopPins, activityPin } from "../src/testPins";
 import { expect, test } from "@playwright/test";
 import type { DohcDesktopBridge } from "../src/ipc/bridgeContract";
 import { launchDesktopApp } from "./helpers/desktopApp";
@@ -24,9 +24,10 @@ test("posts and Home keep a bounded list while preserving focus and older pages"
       await bridge.setChatFollow({ workspaceId, target: { kind: "channel", channelId: channel.id }, state: "following" });
       return (await bridge.listChannelThreads({ workspaceId, channelId: channel.id })).threads.map((thread) => thread.id);
     }, workspaceId);
-    await page.getByTestId(desktopPins.titlebarChatsSidebar).click();
+    // Chats toggles the side panel, so the second press hides the navigator.
+    await page.getByTestId(activityPin("chats")).click();
     await page.getByTestId("chats-channel").filter({ hasText: "List regression" }).click();
-    await page.getByTestId(desktopPins.chatsPanelCollapse).click();
+    await page.getByTestId(activityPin("chats")).click();
     const view = page.locator("main");
     const list = view.getByTestId("chats-feed-column");
     const cards = view.getByTestId("chats-post-card");
@@ -44,9 +45,9 @@ test("posts and Home keep a bounded list while preserving focus and older pages"
     await expect(view.locator(`[data-testid="chats-post-card"][data-thread-id="${order[1]}"]`)).toBeFocused();
     await list.evaluate((element) => { element.scrollTop = element.scrollHeight; });
     await expect(view.locator(`[data-testid="chats-post-card"][data-thread-id="${order.at(-1)}"]`)).toBeVisible();
-    await page.getByTestId(desktopPins.titlebarChatsSidebar).click();
-    await page.getByTestId(desktopPins.chatsPanel).getByTestId("chats-feed-link").click();
-    await page.getByTestId(desktopPins.chatsPanelCollapse).click();
+    await page.getByTestId(activityPin("chats")).click();
+    await page.getByTestId(desktopPins.sidePanel).getByTestId("chats-feed-link").click();
+    await page.getByTestId(activityPin("chats")).click();
     const home = view.getByTestId("chats-personal-feed");
     await expect(home.getByTestId("chats-feed-item").first()).toBeVisible();
     await expect(home.locator('[role="listitem"]').first()).toHaveAttribute("aria-setsize", "30");

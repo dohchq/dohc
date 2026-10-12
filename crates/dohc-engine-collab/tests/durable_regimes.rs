@@ -582,6 +582,11 @@ fn another_workspaces_pending_job_cannot_block_this_close() {
     );
     let settle_outcome =
         committed(settle(&mut ts.store, &key, "notes/doc.md", &NoFaults, 1_200).expect("settle"));
+    ts.store
+        .write_with(&NoFaults, |tx| {
+            dohc_engine_collab::author_coverage::advance_in(tx, &key, false)
+        })
+        .expect("settlement consumes author coverage");
     // The settle's OWN job must land before this test's cross-workspace
     // collision means anything — a still-pending job for this object's own
     // path is correctly blocking (#715: the guard now reads any pending job
@@ -913,6 +918,11 @@ fn local_only_close_prunes_the_cache() {
 
     // Settle the head, THEN close — now the .md covers the head, safe to prune.
     committed(settle(&mut ts.store, &key, "notes/doc.md", &NoFaults, 1_800).expect("settle"));
+    ts.store
+        .write_with(&NoFaults, |tx| {
+            dohc_engine_collab::author_coverage::advance_in(tx, &key, false)
+        })
+        .expect("settlement consumes author coverage");
     let out = committed(
         close_session(&mut ts.store, &key, false, None, &NoFaults, 2_000).expect("close"),
     );
@@ -1001,14 +1011,7 @@ fn seed_head(
 }
 
 #[test]
-fn a_captured_head_lets_a_never_settled_local_close_prune() {
-    // The prune guard asks one question — does the artifact already hold
-    // these bytes — and used to read one column, `last_settled_sha`, which only
-    // a settle writes. A capture puts the document's own projection into the
-    // head and touches no column, so the guard refused a document that was
-    // already on disk, and capture -> discharge -> open never converged: every
-    // lap refused, and the file stayed read-only until the daemon restarted.
-    //
+fn a_captured_head_keeps_actorless_coverage_until_settlement() {
     let mut ts = fresh_store("captured-head-prune");
     let key = test_key();
     seed_parents(&mut ts.store, &key, 1_000);
@@ -1039,6 +1042,28 @@ fn a_captured_head_lets_a_never_settled_local_close_prune() {
         .expect("rec"),
     );
     seed_head(&mut ts.store, &key, "what the user typed", None);
+
+    assert!(matches!(
+        close_session(&mut ts.store, &key, false, None, &NoFaults, 1_400),
+        Err(CollabError::UnsettledClose)
+    ));
+    assert_eq!(count(&ts.store, "ydoc_updates", &key), 1);
+    assert_eq!(
+        ts.store
+            .read_with(|conn| dohc_engine_collab::author_coverage::interval_in(
+                conn,
+                &key,
+                i64::MAX
+            ))
+            .unwrap()
+            .json(),
+        r#"[{"kind":"unattributed"}]"#
+    );
+    ts.store
+        .write_with(&NoFaults, |tx| {
+            dohc_engine_collab::author_coverage::advance_in(tx, &key, false)
+        })
+        .expect("settlement consumes author coverage");
 
     let out = committed(
         close_session(&mut ts.store, &key, false, None, &NoFaults, 1_400).expect("close"),
@@ -1264,6 +1289,11 @@ fn a_captured_reversion_discharges_despite_a_leftover_completed_job_row() {
     // reproduces exactly that, leaving the completed job row untouched.
     seed_head(&mut ts.store, &key, "what the user typed", None);
 
+    ts.store
+        .write_with(&NoFaults, |tx| {
+            dohc_engine_collab::author_coverage::advance_in(tx, &key, false)
+        })
+        .expect("settlement consumes the captured edit's coverage");
     let out = committed(
         close_session(&mut ts.store, &key, false, None, &NoFaults, 1_400).expect("close"),
     );

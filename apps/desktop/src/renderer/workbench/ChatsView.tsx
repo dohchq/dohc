@@ -7,7 +7,16 @@ import { configuredRunnerCommand } from "../../agents/agentToolCatalog";
 import { agentIsSetUp } from "../askAgent";
 import { PostFeedList } from "./PostFeedList";
 import { BookmarkAction, ThreadMessages } from "./ChatPosts";
-import { ActionButton, PostCard, SaveAsFileActions, type PostData } from "./PostCard";
+import {
+  ActionButton,
+  FEED_META,
+  FEED_ROW,
+  FeedReactionPill,
+  HOME_TOOLBAR,
+  PostCard,
+  SaveAsFileActions,
+  type PostData,
+} from "./PostCard";
 import { useIsOwnAuthor } from "./AgentBadge";
 import { ChatAvatar } from "./ChatAvatar";
 import { ChatLane } from "./ChatLane";
@@ -41,7 +50,7 @@ import {
 } from "./chatShareLanes";
 import { SectionLabel } from "../ui/controls";
 import { SkeletonRows } from "../ui/SkeletonRows";
-import { formatChatTime } from "../time";
+import { formatChatTime, formatShortTime } from "../time";
 import { basenameOf } from "../path";
 import { ipcErrorMessage } from "../ipcError";
 import type { ShareRemovalNotices } from "../shell/useShareRemovalNotices";
@@ -129,7 +138,7 @@ export interface AgentSetupSummary {
   preferredName?: string;
   runnerConfigured: boolean;
   runnerEnabled: boolean;
-  mcpEnabled: boolean;
+  agentRunActive: boolean;
 }
 
 // The Chats view (PR 13, WS-E): workspace Chats organized in channels, plus
@@ -3709,7 +3718,7 @@ export function ChatsView(props: {
                   });
                 };
                 const body = (
-                  <span className="mt-2 block whitespace-pre-wrap break-words text-[14px] leading-relaxed text-ink">
+                  <span className="mt-0.5 block whitespace-pre-wrap break-words text-[14px] leading-[21px] text-ink">
                     <MentionText
                       body={item.message.body}
                       candidates={mentionCandidates}
@@ -3723,111 +3732,112 @@ export function ChatsView(props: {
                     key={item.message.id}
                     data-testid="chats-feed-item"
                     data-author-kind={item.message.authorKind}
-                    className="group @container rounded-xl border border-line bg-panel px-4 pb-1 pt-3.5"
+                    className={FEED_ROW}
                   >
                     <button
                       type="button"
                       onClick={open}
-                      className="block w-full cursor-pointer text-left dohc-focus-visible"
+                      className="flex w-full cursor-pointer gap-3 text-left dohc-focus-visible"
                     >
-                      <span className="flex items-center gap-2.5">
-                        <ChatAvatar
-                          name={item.message.authorDisplayName}
-                          kind={isAgent ? "agent" : "human"}
-                          own={isOwn(isAgent ? "agent" : "human", item.message, itemViewer)}
-                        />
-                        <span className="flex min-w-0 flex-1 flex-col leading-tight">
+                      <ChatAvatar
+                        name={item.message.authorDisplayName}
+                        kind={isAgent ? "agent" : "human"}
+                        own={isOwn(isAgent ? "agent" : "human", item.message, itemViewer)}
+                        size="row"
+                      />
+                      <span className="min-w-0 flex-1">
+                        <span className="flex items-baseline gap-1.5 leading-[18px]">
                           <span
-                            className={`truncate text-[14px] font-semibold ${
+                            className={`truncate text-[13px] font-semibold ${
                               isAgent ? "text-agent" : "text-ink"
                             }`}
                           >
                             {chatAuthorLabel(item.message)}
                           </span>
-                          <span className="flex items-center gap-1.5 text-[12px] text-subtle">
-                            <span className="truncate font-mono text-[11px]">{where}</span>
-                            <span aria-hidden>·</span>
-                            <time dateTime={time.iso} title={time.iso} className="shrink-0">
-                              {time.label}
-                            </time>
-                          </span>
-                        </span>
-                      </span>
-                      {isComment ? (
-                        <span className="mt-2.5 flex items-center gap-1.5 text-[12px] text-muted">
-                          <MessageSquare size={12} aria-hidden className="shrink-0" />
-                          <span className="truncate">{item.thread.title}</span>
-                        </span>
-                      ) : null}
-                      {hasFileMentions ? null : body}
-                    </button>
-                    {hasFileMentions ? body : null}
-                    {byEmoji.size > 0 ? (
-                      <div
-                        data-testid="chats-feed-item-footer"
-                        className="mt-2.5 flex items-center gap-1.5 py-1.5 text-[12px] text-subtle"
-                      >
-                        {[...byEmoji.entries()].map(([emoji, count]) => (
-                          <button
-                            type="button"
-                            disabled={locked}
-                            aria-disabled={reactionPending || undefined}
-                            aria-label={`${emoji} ${count}`}
-                            aria-pressed={itemReactions.some((reaction) => reaction.emoji === emoji && reaction.authorId === itemViewer)}
-                            onClick={(event) => {
-                              if (reactionPending) return;
-                              const mine = itemReactions.some((reaction) => reaction.emoji === emoji && reaction.authorId === itemViewer);
-                              // Removing the only row unmounts this pill. Focus
-                              // that came with the activation stays in the post.
-                              if (mine && count === 1 && document.activeElement === event.currentTarget) {
-                                homeLikeTriggers.current.get(item.message.id)?.focus();
-                              }
-                              toggleHomeReaction(item, itemViewer, emoji, mine ? "removed" : "added");
-                            }}
-                            key={emoji}
-                            data-testid="chats-feed-reaction-pill"
-                            data-emoji={emoji}
-                            className="inline-flex items-center gap-1 rounded-full border border-line bg-bg px-1.5 text-[11px] leading-5 text-muted hover:border-accent/60 dohc-focus-visible aria-disabled:opacity-50 aria-disabled:cursor-default"
+                          <span className="truncate font-mono text-[11px] text-subtle">{where}</span>
+                          <time
+                            dateTime={time.iso}
+                            title={time.label}
+                            className="shrink-0 font-mono text-[11px] text-subtle"
                           >
-                            <span aria-hidden>{emoji}</span>
-                            <span className="tabular-nums">{count}</span>
-                          </button>
-                        ))}
+                            {formatShortTime(item.message.createdAtMs)}
+                          </time>
+                        </span>
+                        {isComment ? (
+                          <span className="mt-0.5 flex items-center gap-1.5 text-[12px] text-muted">
+                            <MessageSquare size={12} aria-hidden className="shrink-0" />
+                            <span className="truncate">{item.thread.title}</span>
+                          </span>
+                        ) : null}
+                        {hasFileMentions ? null : body}
+                      </span>
+                    </button>
+                    {hasFileMentions || byEmoji.size > 0 ? (
+                      <div className="pl-11">
+                        {hasFileMentions ? body : null}
+                        {byEmoji.size > 0 ? (
+                          <div data-testid="chats-feed-item-footer" className={FEED_META}>
+                            {[...byEmoji.entries()].map(([emoji, count]) => {
+                              const mine = itemReactions.some((reaction) => reaction.emoji === emoji && reaction.authorId === itemViewer);
+                              return (
+                                <FeedReactionPill
+                                  key={emoji}
+                                  testId="chats-feed-reaction-pill"
+                                  emoji={emoji}
+                                  count={count}
+                                  mine={mine}
+                                  disabled={locked}
+                                  pending={reactionPending}
+                                  onClick={(event) => {
+                                    if (reactionPending) return;
+                                    // Removing the only row unmounts this pill. Focus
+                                    // that came with the activation stays in the post.
+                                    if (mine && count === 1 && document.activeElement === event.currentTarget) {
+                                      homeLikeTriggers.current.get(item.message.id)?.focus();
+                                    }
+                                    toggleHomeReaction(item, itemViewer, emoji, mine ? "removed" : "added");
+                                  }}
+                                />
+                              );
+                            })}
+                          </div>
+                        ) : null}
                       </div>
-                    ) : (
-                      <span className="block h-2.5" />
-                    )}
-                    <div className="flex items-center gap-2 border-t border-line py-1.5">
-                      <MessageReactions testIdPrefix="chats-feed" actionTestId="chats-feed-like" pickerOnly flush
-                        messageId={item.message.id} records={itemReactions}
-                        triggerRef={(node) => {
-                          if (node) homeLikeTriggers.current.set(item.message.id, node);
-                          else homeLikeTriggers.current.delete(item.message.id);
-                        }}
-                        controls={{ reactions: itemReactions, viewerAuthorId: itemViewer, readOnly: locked, pending: reactionPending,
-                          onToggle: ({ emoji, nextState }) => toggleHomeReaction(item, itemViewer, emoji, nextState) }} />
-                      <ActionButton
-                        label={isComment ? "Reply" : "Comment"}
-                        icon={<MessageSquare size={15} strokeWidth={1.9} aria-hidden />}
-                        onClick={open}
-                      />
-                      <SaveAsFileActions
-                        testIdPrefix="chats-feed-bookmark"
-                        bookmark={bookmark}
-                        busy={bookmarkBusy.has(bookmarkKey)}
-                        onToggle={(mode) =>
-                          void toggleBookmark({
-                            target: bookmarkTarget,
-                            mode,
-                          })
-                        }
-                        onOpen={
-                          bookmark && props.onOpenPath
-                            ? () => props.onOpenPath?.(bookmark.destinationPath)
-                            : undefined
-                        }
-                      />
-                    </div>
+                    ) : null}
+                    <MessageReactions testIdPrefix="chats-feed" actionTestId="chats-feed-like" pickerOnly hoverToolbar
+                      toolbarClassName={HOME_TOOLBAR}
+                      messageId={item.message.id} records={itemReactions}
+                      triggerRef={(node) => {
+                        if (node) homeLikeTriggers.current.set(item.message.id, node);
+                        else homeLikeTriggers.current.delete(item.message.id);
+                      }}
+                      controls={{ reactions: itemReactions, viewerAuthorId: itemViewer, readOnly: locked, pending: reactionPending,
+                        onToggle: ({ emoji, nextState }) => toggleHomeReaction(item, itemViewer, emoji, nextState) }}
+                      toolbarActions={
+                        <>
+                          <ActionButton
+                            label={isComment ? "Reply" : "Comment"}
+                            icon={<MessageSquare size={14} strokeWidth={1.9} aria-hidden />}
+                            onClick={open}
+                          />
+                          <SaveAsFileActions
+                            testIdPrefix="chats-feed-bookmark"
+                            bookmark={bookmark}
+                            busy={bookmarkBusy.has(bookmarkKey)}
+                            onToggle={(mode) =>
+                              void toggleBookmark({
+                                target: bookmarkTarget,
+                                mode,
+                              })
+                            }
+                            onOpen={
+                              bookmark && props.onOpenPath
+                                ? () => props.onOpenPath?.(bookmark.destinationPath)
+                                : undefined
+                            }
+                          />
+                        </>
+                      } />
                   </div>
                 );
 
@@ -4377,8 +4387,8 @@ export function ChatsView(props: {
                   : "Runner on"
                 : props.agentSetup.runnerConfigured
                   ? "Runner configured · dispatch is off"
-                  : props.agentSetup.mcpEnabled
-                    ? "Workspace MCP on · connect an agent to reply here"
+                  : props.agentSetup.agentRunActive
+                    ? "Agent run active · connect an agent to reply here"
                     : "No runner yet · add an agent under Agents"}
             </span>
             {props.workspacePath ? (

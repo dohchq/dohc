@@ -301,6 +301,9 @@ export function parseRoute(request: Pick<Request, "url">): SyncRelayRoute {
   if (parts.length === 3 && parts[2] === "keys") {
     return { route: "keys", workspaceId };
   }
+  if (parts.length === 7 && parts[2] === "shares" && parts[4] === "grants" && parts[6] === "copy") {
+    return { route: "share-copy", workspaceId, shareId: parseShareId(parts[3]), grantId: parseShareId(parts[5]) };
+  }
   if (parts.length === 3 && parts[2] === "shares") {
     return { route: "shares-create", workspaceId };
   }

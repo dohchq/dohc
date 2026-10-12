@@ -119,7 +119,7 @@ describe("application menu template", () => {
       ["View", "Go To", "CommandOrControl+P"],
       ["View", "New Editor Group Right", "CommandOrControl+\\"],
       ["View", "Toggle Sidebar", "CommandOrControl+B"],
-      ["View", "Toggle Chats Panel", "CommandOrControl+Alt+B"],
+      ["View", "Toggle About", "CommandOrControl+Alt+B"],
       ["Go", "Settings", "CommandOrControl+,"],
     ] as const) {
       const item = items(template, menu).find((i) => i.label === label);
@@ -144,17 +144,19 @@ describe("application menu template", () => {
     );
   });
 
-  it("routes Toggle Chats through the native application menu", () => {
+  it.each([
+    ["Toggle About", "toggle-about", "CommandOrControl+Alt+B"],
+    ["Chats", "show-chats", undefined],
+  ] as const)("routes %s through the native application menu", (label, id, accelerator) => {
     const { template, sendCommand } = build(false, "darwin");
     const fakeWindow = { id: 6 };
-    const toggleChats = items(template, "View").find(
-      (entry) => entry.label === "Toggle Chats Panel",
-    );
-    (toggleChats?.click as (a: unknown, b: unknown) => void)(
+    const entry = items(template, "View").find((item) => item.label === label);
+    expect(entry?.accelerator).toBe(accelerator);
+    (entry?.click as (a: unknown, b: unknown) => void)(
       undefined,
       fakeWindow,
     );
-    expect(sendCommand).toHaveBeenCalledWith(fakeWindow, "toggle-chats");
+    expect(sendCommand).toHaveBeenCalledWith(fakeWindow, id);
   });
 
   it("keeps a hidden CommandOrControl+K command-palette alias active", () => {

@@ -3,7 +3,7 @@ import { createDesktopSharedChannelSync } from "./desktopSharedChannelSync";
 import { createWorkspaceAuthorityOwner, type WorkspaceAuthorityOperation } from "./workspaceAuthorityOwner";
 import type { CloudCredentials } from "./cloudCredentialStore";
 import type { JoinedSharedChannel, RegistryEntry } from "./registryStore";
-import { SharedChannelReadOnlyError } from "@dohc/workspace-contracts/relay";
+import { SharedChannelReadOnlyError, ShareUnavailableError } from "@dohc/workspace-contracts/relay";
 import { SHARED_CHANNEL_SYNC_PASS_ROWS } from "./sharedChannels";
 import { deferred } from "../testing/deferred";
 
@@ -41,14 +41,17 @@ function harness(rows: JoinedSharedChannel[], recheckRemovedShares?: (workspaceI
     workspaceId: string; rootPath: string; attachmentId: symbol;
     relay: { baseUrl: string; token: string };
   }) => ({ pullSharedChannel: pull, pushSharedChannel: push }));
-  const write = vi.fn((_workspaceId: string, channels: JoinedSharedChannel[]) => { workspace.sharedChannels = channels; });
+  const write = vi.fn(async (
+    _workspaceId: string,
+    update: (channels: readonly JoinedSharedChannel[]) => readonly JoinedSharedChannel[],
+  ) => { workspace.sharedChannels = [...update(workspace.sharedChannels ?? [])]; });
   const notify = vi.fn();
   const project = vi.fn(async () => undefined);
   const sync = createDesktopSharedChannelSync<typeof state, Operation>({
     workspaceAuthorities: authorities, findWorkspace: () => workspace,
     warmCredentialCache: warm, currentCredentialGeneration: () => generation,
     currentCredentials: () => currentCredentials, normalizeServerUrl: (url) => url,
-    receivedShareEngine: { relayForRegistered }, setWorkspaceSharedChannels: write,
+    receivedShareEngine: { relayForRegistered }, updateWorkspaceSharedChannels: write,
     notifyRenderer: notify, projectPendingChatBookmarksAfterPull: project,
     linkedChatStoreFor: () => ({
       findThreadChannelId: async () => "channel", getChannelWireId: async () => rows[0]?.channelWireId ?? null,
@@ -188,8 +191,27 @@ describe("desktop shared-channel pass composition", () => {
     h.pull.mockResolvedValue({ fetched: 1, applied: 1, skipped: 0, nextCursor: 1 });
     await expect(h.rendererPass()).resolves.toBe(0);
     expect(h.workspace.sharedChannels?.[0]?.access).toBe("read-only");
-    expect(h.write).toHaveBeenCalledWith("workspace", h.workspace.sharedChannels);
+    expect(h.write).toHaveBeenCalledOnce();
     expect(h.notify).toHaveBeenCalledWith({ workspaceId: "workspace" });
     expect(h.project).toHaveBeenCalledWith("workspace");
+  });
+
+  it("ends a revoked row without undoing a row joined while the end waits on the folder record", async () => {
+    const h = harness([joined("one")]);
+    h.pull.mockRejectedValueOnce(new ShareUnavailableError());
+    const waiting = deferred();
+    const recorded = deferred();
+    const store = h.write.getMockImplementation()!;
+    h.write.mockImplementationOnce(async (id, update) => {
+      waiting.resolve();
+      await recorded.promise;
+      await store(id, update);
+    });
+    const pass = h.sync.syncWorkspaceSharedChannels("workspace");
+    await waiting.promise;
+    h.workspace.sharedChannels = [...h.workspace.sharedChannels!, joined("two")];
+    recorded.resolve();
+    await pass;
+    expect(h.workspace.sharedChannels).toEqual([{ ...joined("one"), ended: true }, joined("two")]);
   });
 });
