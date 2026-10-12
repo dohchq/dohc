@@ -4,6 +4,9 @@ import { Editor, Extension } from "@tiptap/core";
 import { StarterKit } from "@tiptap/starter-kit";
 import { Slice } from "@tiptap/pm/model";
 import { TextSelection } from "@tiptap/pm/state";
+import { Collaboration } from "@tiptap/extension-collaboration";
+import * as yTiptap from "@tiptap/y-tiptap";
+import * as Y from "yjs";
 import {
   chooseUrlForm,
   makeUrlPasteOfferPlugin,
@@ -48,18 +51,6 @@ function paste(target: Editor, text = URL_TEXT) {
   target.view.dispatch(tr.setMeta("paste", true).setMeta("uiEvent", "paste"));
 }
 
-// A remote Y.js update as the editor receives it: the whole document
-// replaced in one step, and the caret restored to `caret`, where its text
-// moved. `edit` changes the document's JSON: paragraphs, then their nodes.
-type Json = { type: string; text?: string; content?: Json[] };
-function remoteReplace(target: Editor, edit: (paragraphs: Json[]) => void, caret: number) {
-  const json = structuredClone(target.state.doc.toJSON()) as Json;
-  edit(json.content!);
-  const next = target.schema.nodeFromJSON(json);
-  const tr = target.state.tr.replaceWith(0, target.state.doc.content.size, next.content).setMeta("addToHistory", false);
-  target.view.dispatch(tr.setSelection(TextSelection.create(tr.doc, caret)));
-}
-
 // Each linked text in the document, in order.
 function linkedTexts(target: Editor): string[] {
   const texts: string[] = [];
@@ -82,7 +73,7 @@ describe("URL paste offer", () => {
     const { editor, changes } = setup();
     paste(editor);
     expect(offer(editor)).toEqual({
-      from: 9, to: 9 + URL_TEXT.length, url: URL_TEXT, text: URL_TEXT, line: URL_TEXT, offset: 0, form: "link", chosen: false,
+      from: 9, to: 9 + URL_TEXT.length, url: URL_TEXT, text: URL_TEXT, form: "link", chosen: false, anchors: null,
     });
     expect(changes.at(-1)).toBe(offer(editor));
   });
@@ -160,47 +151,14 @@ describe("URL paste offer", () => {
     expect(offer(editor)).toBeNull();
   });
 
-  it("stays through a remote edit that replaces the whole document", () => {
+  // Without a Y.Doc nothing replaces the whole document but the editor's own
+  // setContent, and mapping is exact: the span is gone, so the offer is.
+  it("leaves when the whole document is replaced in an editor without a Y.Doc", () => {
     const { editor } = setup();
     paste(editor);
-    // Another paragraph grows by eight characters; the caret, after the URL,
-    // moves with it from 33 to 41.
-    remoteReplace(editor, ([before]) => { before!.content![0]!.text = "Before, edited"; }, 41);
-    expect(offer(editor)).toMatchObject({ from: 17, to: 17 + URL_TEXT.length, form: "link" });
-    chooseUrlForm(editor.view, "plain");
-    expect(offer(editor)).toMatchObject({ form: "plain", chosen: true });
-  });
-
-  it("leaves when a remote edit changes its text", () => {
-    const { editor } = setup();
-    paste(editor);
-    remoteReplace(editor, ([, line]) => { line!.content![0]!.text = `${URL_TEXT}/other`; }, 33);
+    const tr = editor.state.tr.replaceWith(0, editor.state.doc.content.size, editor.state.doc.content);
+    editor.view.dispatch(tr.setSelection(TextSelection.create(tr.doc, 33)));
     expect(offer(editor)).toBeNull();
-  });
-
-  // Never act on text the person didn't paste: when a remote edit leaves
-  // another copy of the URL where the pasted one might be, the offer leaves.
-  it("leaves when a remote edit puts a second copy of the URL on its line", () => {
-    const { editor } = setup();
-    paste(editor);
-    remoteReplace(editor, ([, line]) => {
-      line!.content!.push({ type: "text", text: " " }, structuredClone(line!.content![0]!));
-    }, 33);
-    expect(offer(editor)).toBeNull();
-    chooseUrlForm(editor.view, "plain");
-    expect(linkedTexts(editor)).toEqual([URL_TEXT, URL_TEXT]);
-  });
-
-  it("leaves when a remote edit puts the caret in another paragraph with the URL", () => {
-    const { editor } = setup();
-    paste(editor);
-    // "After" becomes "See " and a linked copy; the caret lands at its end.
-    remoteReplace(editor, ([, line, after]) => {
-      after!.content = [{ type: "text", text: "See " }, structuredClone(line!.content![0]!)];
-    }, 35 + 4 + URL_TEXT.length);
-    expect(offer(editor)).toBeNull();
-    chooseUrlForm(editor.view, "plain");
-    expect(linkedTexts(editor)).toEqual([URL_TEXT, URL_TEXT]);
   });
 
   it("is dismissed when an IME starts composing, which the key handler never sees", () => {
@@ -222,5 +180,101 @@ describe("URL paste offer", () => {
     const { editor } = setup("<p>See </p>", 5);
     paste(editor);
     expect(offer(editor)).toBeNull();
+  });
+});
+
+// A collaborator's edits arrive through Y.js, which replaces the whole
+// document in the editor and restores the caret. The offer follows the pasted
+// characters themselves, and never moves to text the person didn't paste.
+describe("URL paste offer in a shared document", () => {
+  const docs: Y.Doc[] = [];
+  afterEach(() => {
+    for (const doc of docs.splice(0)) doc.destroy();
+  });
+
+  // The editor on one Y.Doc, and a collaborator's Y.Doc synced both ways.
+  function setupShared(content: string) {
+    const ydoc = new Y.Doc();
+    const peer = new Y.Doc();
+    docs.push(ydoc, peer);
+    const relay = (from: Y.Doc, to: Y.Doc) =>
+      from.on("update", (update: Uint8Array, origin: unknown) => {
+        if (origin !== "relay") Y.applyUpdate(to, update, "relay");
+      });
+    relay(ydoc, peer);
+    relay(peer, ydoc);
+    editor = new Editor({
+      element: document.createElement("div"),
+      extensions: [
+        StarterKit.configure({ trailingNode: false, undoRedo: false, link: { openOnClick: false, linkOnPaste: false } }),
+        Collaboration.configure({ document: ydoc }),
+        Extension.create({ name: "urlOffer", addProseMirrorPlugins: () => [makeUrlPasteOfferPlugin(() => {}, yTiptap)] }),
+      ],
+    });
+    editor.commands.setContent(content);
+    editor.commands.setTextSelection(9);
+    const fragment = peer.getXmlFragment("default");
+    const peerText = (paragraph: number) => (fragment.get(paragraph) as Y.XmlElement).get(0) as Y.XmlText;
+    return { editor, fragment, peerText };
+  }
+
+  it("anchors the paste in the Y.Doc and keeps it through an edit elsewhere", () => {
+    const { editor, peerText } = setupShared("<p>Before</p><p></p><p>After</p>");
+    paste(editor);
+    expect(offer(editor)?.anchors).not.toBeNull();
+    peerText(0).insert(6, ", edited");
+    expect(editor.state.doc.child(0).textContent).toBe("Before, edited");
+    expect(offer(editor)).toMatchObject({ from: 17, to: 17 + URL_TEXT.length, form: "link" });
+    chooseUrlForm(editor.view, "plain");
+    expect(offer(editor)).toMatchObject({ form: "plain", chosen: true });
+    expect(linkedTexts(editor)).toEqual([]);
+  });
+
+  it("leaves when a remote edit changes its text", () => {
+    const { editor, peerText } = setupShared("<p>Before</p><p></p><p>After</p>");
+    paste(editor);
+    peerText(1).delete(10, 1);
+    expect(offer(editor)).toBeNull();
+  });
+
+  it("leaves when a remote edit deletes the pasted line, and never takes an identical one", () => {
+    const { editor, fragment } = setupShared(`<p>Before</p><p></p><p><a href="${URL_TEXT}">${URL_TEXT}</a></p>`);
+    paste(editor);
+    expect(linkedTexts(editor)).toEqual([URL_TEXT, URL_TEXT]);
+    fragment.delete(1, 1);
+    expect(editor.state.doc.childCount).toBe(2);
+    expect(offer(editor)).toBeNull();
+    chooseUrlForm(editor.view, "plain");
+    expect(linkedTexts(editor)).toEqual([URL_TEXT]);
+  });
+
+  it("keeps its own span when a collaborator adds a copy of the URL to its line", () => {
+    const { editor, peerText } = setupShared("<p>Before</p><p></p><p>After</p>");
+    paste(editor);
+    peerText(1).insert(URL_TEXT.length, " ", { link: null });
+    peerText(1).insert(URL_TEXT.length + 1, URL_TEXT, { link: { href: URL_TEXT } });
+    expect(linkedTexts(editor)).toEqual([URL_TEXT, URL_TEXT]);
+    expect(offer(editor)).toMatchObject({ from: 9, to: 9 + URL_TEXT.length });
+    chooseUrlForm(editor.view, "plain");
+    // The collaborator's copy keeps its link.
+    expect(linkedTexts(editor)).toEqual([URL_TEXT]);
+    expect(editor.state.doc.textBetween(9 + URL_TEXT.length + 1, 9 + 2 * URL_TEXT.length + 1)).toBe(URL_TEXT);
+    expect(editor.state.doc.rangeHasMark(9 + URL_TEXT.length + 1, 9 + 2 * URL_TEXT.length + 1, editor.schema.marks.link!)).toBe(true);
+  });
+
+  it("leaves when the caret moves into another paragraph with the URL", () => {
+    const { editor, fragment } = setupShared("<p>Before</p><p></p><p>After</p>");
+    paste(editor);
+    // A collaborator adds a last paragraph holding a linked copy.
+    const text = new Y.XmlText();
+    const copy = new Y.XmlElement("paragraph");
+    copy.insert(0, [text]);
+    fragment.insert(3, [copy]);
+    text.insert(0, URL_TEXT, { link: { href: URL_TEXT } });
+    expect(offer(editor)).not.toBeNull();
+    editor.commands.setTextSelection(editor.state.doc.content.size - 1);
+    expect(offer(editor)).toBeNull();
+    chooseUrlForm(editor.view, "plain");
+    expect(linkedTexts(editor)).toEqual([URL_TEXT, URL_TEXT]);
   });
 });

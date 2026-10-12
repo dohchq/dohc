@@ -1,7 +1,8 @@
 import { closeHistory } from "@tiptap/pm/history";
-import type { Node as ProseMirrorNode } from "@tiptap/pm/model";
 import { Plugin, PluginKey, type EditorState, type Transaction } from "@tiptap/pm/state";
 import type { EditorView } from "@tiptap/pm/view";
+import type { ProsemirrorBinding } from "@tiptap/y-tiptap";
+import { ContentString, getItem, Item, type Doc, type RelativePosition, type XmlFragment } from "yjs";
 export interface UrlPasteOffer { kind: "url-paste"; text: string; url: string; from: number; to: number }
 export function detectUrlPaste(input: { text: string; from: number; to: number; ownLine: boolean; inCode: boolean }): UrlPasteOffer | null {
   if (!input.ownLine || input.inCode || input.from !== input.to || input.text.length > 8192 || /\s/.test(input.text)
@@ -27,14 +28,18 @@ export function handleUrlPaste(view: EditorView, event: ClipboardEvent, offer?: 
 }
 
 export type UrlForm = "link" | "plain";
-// The pasted URL's span in the document, mapped through every later
-// transaction. `line` and `offset` identify it: the text of its line, and
-// where in that line it starts. `chosen` is set once the person picks a form,
-// so the row shows Undo.
+// Y.js anchors on the URL's first and last characters, in a document bound to
+// a Y.Doc.
+type SpanAnchors = { start: RelativePosition; end: RelativePosition };
+// The pasted URL's span in the document, mapped through every later local
+// transaction and found again through `anchors` after a remote one. `chosen`
+// is set once the person picks a form, so the row shows Undo.
 export interface UrlPasteOfferState {
-  from: number; to: number; url: string; text: string; line: string; offset: number; form: UrlForm; chosen: boolean;
+  from: number; to: number; url: string; text: string; form: UrlForm; chosen: boolean; anchors: SpanAnchors | null;
 }
-type OfferMeta = { type: "dismiss" } | { type: "chosen" };
+type OfferMeta = { type: "dismiss" } | { type: "chosen" } | { type: "anchor"; anchors: SpanAnchors };
+type YTiptap = typeof import("@tiptap/y-tiptap");
+type YSync = { type: XmlFragment; binding: ProsemirrorBinding };
 
 export const urlPasteOfferKey = new PluginKey<UrlPasteOfferState | null>("dohc-url-paste-offer");
 
@@ -48,46 +53,58 @@ function spanOf(offer: UrlPasteOffer, tr: Transaction, state: EditorState): UrlP
   const to = tr.mapping.map(offer.from, 1);
   if (to - from !== offer.text.length || !state.doc.resolve(from).sameParent(state.doc.resolve(to))) return null;
   if (state.doc.textBetween(from, to) !== offer.text) return null;
-  return { from, to, url: offer.url, text: offer.text, ...lineOf(state, from), form: formAt(state, from, to), chosen: false };
+  return { from, to, url: offer.url, text: offer.text, form: formAt(state, from, to), chosen: false, anchors: null };
 }
 
-// One character for each inline leaf, so offsets in the line are positions.
-function lineText(block: ProseMirrorNode): string {
-  return block.textBetween(0, block.content.size, undefined, "￼");
+// The character a Y.js anchor sits on, or null once it is deleted.
+function anchoredCharacter(doc: Doc, anchor: RelativePosition): string | null {
+  if (!anchor.item) return null;
+  try {
+    const item = getItem(doc.store, anchor.item);
+    if (!(item instanceof Item) || item.deleted || !(item.content instanceof ContentString)) return null;
+    return item.content.str[anchor.item.clock - item.id.clock] ?? null;
+  } catch {
+    return null;
+  }
 }
 
-function lineOf(state: EditorState, from: number): { line: string; offset: number } {
-  const $from = state.doc.resolve(from);
-  return { line: lineText($from.parent), offset: from - $from.start() };
+// y-tiptap anchors a position to the character before it, so `from + 1`
+// anchors the URL's first character and `to` its last.
+function anchorSpan(yTiptap: YTiptap, sync: YSync, offer: UrlPasteOfferState): SpanAnchors | null {
+  const anchors = {
+    start: yTiptap.absolutePositionToRelativePosition(offer.from + 1, sync.type, sync.binding.mapping),
+    end: yTiptap.absolutePositionToRelativePosition(offer.to, sync.type, sync.binding.mapping),
+  };
+  const span = sync.type.doc && anchoredSpan(yTiptap, sync, anchors, offer.text);
+  return span?.from === offer.from && span.to === offer.to ? anchors : null;
 }
 
 // Y.js applies a remote edit, or an undo, by replacing the whole document,
-// which maps the span away. The span survives only where nothing can be
-// mistaken for it: the caret's line is its line, unchanged and the only line
-// with that text in the document, and the URL is at its offset. Anything less
-// dismisses the offer, so a choice never touches text the person didn't paste.
-function refind(state: EditorState, offer: UrlPasteOfferState): number | null {
-  const { $head } = state.selection;
-  if (!$head.parent.isTextblock || lineText($head.parent) !== offer.line) return null;
-  let copies = 0;
-  state.doc.descendants((node) => {
-    if (!node.isTextblock) return copies < 2;
-    if (lineText(node) === offer.line) copies += 1;
-    return false;
-  });
-  return copies === 1 ? $head.start() + offer.offset : null;
+// which maps every position away. The anchors find the pasted characters
+// themselves, so the span is the person's own paste or nothing: a deleted
+// character, or one that no longer starts or ends the URL, dismisses it.
+function anchoredSpan(yTiptap: YTiptap, sync: YSync, anchors: SpanAnchors, text: string): { from: number; to: number } | null {
+  const doc = sync.type.doc;
+  if (!doc || anchoredCharacter(doc, anchors.start) !== text[0] || anchoredCharacter(doc, anchors.end) !== text.at(-1)) return null;
+  const start = yTiptap.relativePositionToAbsolutePosition(doc, sync.type, anchors.start, sync.binding.mapping);
+  const end = yTiptap.relativePositionToAbsolutePosition(doc, sync.type, anchors.end, sync.binding.mapping);
+  return start === null || end === null ? null : { from: start - 1, to: end };
 }
 
 // The offer a URL paste raises. It leaves when its text changes or the caret
 // leaves its line; typing, composing, Escape and a click elsewhere dismiss it
-// from the row and the editor's key handler.
-export function makeUrlPasteOfferPlugin(onChange: (offer: UrlPasteOfferState | null) => void) {
+// from the row and the editor's key handler. `yTiptap` is the lazily loaded
+// y-tiptap module when the editor is bound to a Y.Doc.
+export function makeUrlPasteOfferPlugin(
+  onChange: (offer: UrlPasteOfferState | null) => void,
+  yTiptap: YTiptap | null = null,
+) {
   let pending: UrlPasteOffer | null = null;
   return new Plugin<UrlPasteOfferState | null>({
     key: urlPasteOfferKey,
     state: {
       init: () => null,
-      apply(tr, value, _old, state) {
+      apply(tr, value, old, state) {
         const meta = tr.getMeta(urlPasteOfferKey) as OfferMeta | undefined;
         if (meta?.type === "dismiss") return null;
         if (pending && tr.getMeta("uiEvent") === "paste") {
@@ -96,23 +113,25 @@ export function makeUrlPasteOfferPlugin(onChange: (offer: UrlPasteOfferState | n
           return spanOf(offer, tr, state);
         }
         if (!value) return null;
+        if (meta?.type === "anchor") return { ...value, anchors: meta.anchors };
+        const change: { isChangeOrigin?: boolean } | undefined = yTiptap ? tr.getMeta(yTiptap.ySyncPluginKey) : undefined;
         let from = tr.mapping.map(value.from, 1);
         let to = tr.mapping.map(value.to, -1);
-        if (tr.docChanged && (to - from !== value.text.length || state.doc.textBetween(from, to) !== value.text)) {
-          const found = refind(state, value);
-          if (found === null) return null;
-          from = found;
-          to = found + value.text.length;
+        if (yTiptap && change?.isChangeOrigin) {
+          // Read from the old state: this state's later plugins aren't built yet.
+          const sync = yTiptap.ySyncPluginKey.getState(old) as YSync | undefined;
+          const span = value.anchors && sync ? anchoredSpan(yTiptap, sync, value.anchors, value.text) : null;
+          if (!span) return null;
+          ({ from, to } = span);
         }
+        if (tr.docChanged && (to - from !== value.text.length || state.doc.textBetween(from, to) !== value.text)) return null;
         if (!state.selection.$head.sameParent(state.doc.resolve(from))) return null;
         if (!tr.docChanged && meta?.type !== "chosen") return value;
-        const { line, offset } = lineOf(state, from);
         const form = formAt(state, from, to);
         const chosen = value.chosen || meta?.type === "chosen";
-        return from === value.from && to === value.to && line === value.line && offset === value.offset
-          && form === value.form && chosen === value.chosen
+        return from === value.from && to === value.to && form === value.form && chosen === value.chosen
           ? value
-          : { ...value, from, to, line, offset, form, chosen };
+          : { ...value, from, to, form, chosen };
       },
     },
     props: {
@@ -128,6 +147,14 @@ export function makeUrlPasteOfferPlugin(onChange: (offer: UrlPasteOfferState | n
     view: () => ({
       update(view, previous) {
         const offer = urlPasteOfferKey.getState(view.state) ?? null;
+        // y-tiptap's view writes the paste to the Y.Doc before this one runs,
+        // so the anchors can be taken now. anchorSpan checks that they find it.
+        const sync = yTiptap?.ySyncPluginKey.getState(view.state) as YSync | undefined;
+        const anchors = yTiptap && sync && offer && !offer.anchors ? anchorSpan(yTiptap, sync, offer) : null;
+        if (anchors) {
+          view.dispatch(view.state.tr.setMeta(urlPasteOfferKey, { type: "anchor", anchors }));
+          return;
+        }
         if (offer !== (urlPasteOfferKey.getState(previous) ?? null)) onChange(offer);
       },
       destroy: () => onChange(null),

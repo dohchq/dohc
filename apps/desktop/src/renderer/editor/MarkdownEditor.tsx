@@ -716,7 +716,10 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
               makeTableControlsPlugin({
                 rowResizeEnabled: Boolean(collab?.ydoc),
               }),
-              makeUrlPasteOfferPlugin(setUrlOffer),
+              makeUrlPasteOfferPlugin(
+                setUrlOffer,
+                collaborationExtensions?.yTiptap ?? null,
+              ),
             ];
           },
         }),
