@@ -171,14 +171,27 @@ describeWithPostgres("closed sign-up", () => {
     expect(sent.some((message) => message.to === email)).toBe(false);
   });
 
-  it("creates an account the server admitted, with no session until its email is verified", async () => {
+  function emailsTo(email: string): EmailMessage[] {
+    return sent.filter((message) => message.to === email);
+  }
+
+  /** Opens the newest emailed link the way the reset page does. */
+  async function choosePassword(closed: WorkspaceAuth, email: string, newPassword: string): Promise<void> {
+    const message = lastEmailTo(email);
+    expect(message.subject).toBe("Choose your dohc password");
+    const link = linkIn(message);
+    expect(link.pathname).toBe("/account/reset-password");
+    await closed.api.resetPassword({ body: { newPassword, token: link.searchParams.get("token") ?? "" } });
+  }
+
+  it("creates an account the server admitted, with no session until its owner chooses a password from the emailed link", async () => {
     const email = `${unique()}@dohc.test`;
     const closed = closedAuth("admitted");
     const response = await closed.handler(
       new Request("http://localhost:1786/api/auth/sign-up/email", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ email, password: PASSWORD, name: "Test User" }),
+        body: JSON.stringify({ email, password: PASSWORD, name: "Test User", callbackURL: "/device?user_code=ABCD-EFGH" }),
       }),
     );
     expect(response.status).toBe(200);
@@ -186,16 +199,18 @@ describeWithPostgres("closed sign-up", () => {
     expect(response.headers.get("set-auth-token")).toBeNull();
     expect(response.headers.get("set-cookie")).toBeNull();
     expect(await accountExists(email)).toBe(true);
+    expect(linkIn(lastEmailTo(email)).searchParams.get("next")).toBe("/device?user_code=ABCD-EFGH");
 
     await expect(closed.api.signInEmail({ body: { email, password: PASSWORD } })).rejects.toMatchObject({
       statusCode: 403,
       body: { code: "EMAIL_NOT_VERIFIED" },
     });
 
-    // Opening the emailed link proves the mailbox; then the desktop's device
+    // Choosing the password proves the mailbox; then the desktop's device
     // sign-in completes as on an open server.
-    await closed.api.verifyEmail({ query: { token: linkIn(lastEmailTo(email)).searchParams.get("token") ?? "" } });
-    const signin = await closed.api.signInEmail({ body: { email, password: PASSWORD }, returnHeaders: true });
+    const chosen = "chosen-from-the-link-123";
+    await choosePassword(closed, email, chosen);
+    const signin = await closed.api.signInEmail({ body: { email, password: chosen }, returnHeaders: true });
     const cookie = signin.headers.get("set-cookie")?.split(";")[0] ?? "";
     const device = await closed.api.deviceCode({ body: { client_id: "dohc-desktop" } });
     await closed.api.deviceVerify({ query: { user_code: device.user_code }, headers: { cookie } });
@@ -209,6 +224,56 @@ describeWithPostgres("closed sign-up", () => {
     });
     const session = await closed.api.getSession({ headers: { authorization: `Bearer ${token.access_token}` } });
     expect(session?.user.email).toBe(email);
+  });
+
+  it("never lets a password typed by someone else outlast the owner's emailed link", async () => {
+    const email = `${unique()}@dohc.test`;
+    const closed = closedAuth("admitted");
+    const attackerPassword = "attacker-password-aaa";
+    const ownerPassword = "owner-password-bbb";
+
+    await closed.api.signUpEmail({ body: { email, password: attackerPassword, name: "Attacker" } });
+    // The owner's own sign-up gets the generic answer and a fresh link.
+    const before = emailsTo(email).length;
+    const duplicate = await closed.api.signUpEmail({ body: { email, password: ownerPassword, name: "Owner" } });
+    expect(duplicate.token).toBeNull();
+    expect(emailsTo(email).length).toBe(before + 1);
+    // Asking for a new link sends the same kind of link, never a plain verification.
+    await closed.api.sendVerificationEmail({ body: { email } });
+    expect(emailsTo(email).length).toBe(before + 2);
+    expect(emailsTo(email).every((message) => linkIn(message).pathname === "/account/reset-password")).toBe(true);
+
+    await choosePassword(closed, email, ownerPassword);
+
+    await expect(closed.api.signInEmail({ body: { email, password: attackerPassword } })).rejects.toMatchObject({
+      statusCode: 401,
+    });
+    const signin = await closed.api.signInEmail({ body: { email, password: ownerPassword } });
+    expect(signin.user.emailVerified).toBe(true);
+  });
+
+  it("sends no link when someone signs up again with a verified address", async () => {
+    const email = `${unique()}@dohc.test`;
+    const closed = closedAuth("admitted");
+    await closed.api.signUpEmail({ body: { email, password: PASSWORD, name: "Test User" } });
+    await choosePassword(closed, email, PASSWORD);
+    const before = emailsTo(email).length;
+    const duplicate = await closed.api.signUpEmail({ body: { email, password: "another-password-1", name: "Test User" } });
+    expect(duplicate.token).toBeNull();
+    expect(emailsTo(email).length).toBe(before);
+  });
+
+  it("refuses a verification link sent while sign-up was open", async () => {
+    const email = `${unique()}@dohc.test`;
+    await signUp(email);
+    const token = linkIn(lastEmailTo(email)).searchParams.get("token") ?? "";
+    await expect(closedAuth("admitted").api.verifyEmail({ query: { token } })).rejects.toMatchObject({
+      statusCode: 403,
+      body: { code: "PASSWORD_LINK_REQUIRED" },
+    });
+    await expect(auth.api.signInEmail({ body: { email, password: PASSWORD } })).resolves.toMatchObject({
+      user: { emailVerified: false },
+    });
   });
 
   it("asks the person to try again when the server cannot check invites", async () => {
@@ -266,9 +331,19 @@ describeWithPostgres("account email", () => {
 
     const signin = await auth.api.signInEmail({ body: { email, password: newPassword } });
     expect(signin.user.email).toBe(email);
+    // An open server keeps verification a separate step.
+    expect(signin.user.emailVerified).toBe(false);
     await expect(
       auth.api.signInEmail({ body: { email, password: PASSWORD } }),
     ).rejects.toMatchObject({ statusCode: 401 });
+  });
+
+  it("refuses a second sign-up for the same address and sends no mail", async () => {
+    const email = `${unique()}@dohc.test`;
+    await signUp(email);
+    const before = sent.filter((message) => message.to === email).length;
+    await expect(signUp(email)).rejects.toMatchObject({ statusCode: 422 });
+    expect(sent.filter((message) => message.to === email).length).toBe(before);
   });
 
   it("answers a reset request for an unknown address without sending mail", async () => {

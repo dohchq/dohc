@@ -57,6 +57,11 @@ function field(id: string, label: string, attributes: string): string {
   return `<div class="field"><label for="${id}">${escapeHtml(label)}</label><input id="${id}" ${attributes}></div>`;
 }
 
+// On a closed server a person chooses their password from the emailed link,
+// which also verifies the address. The pages ask for no password before that
+// and offer no plain verification link.
+const CLOSED = "closed";
+
 export function signInPage(options: { next?: string } = {}): string {
   const next = options.next;
   const signUpHref = next
@@ -73,34 +78,36 @@ ${field("password", "Password", 'type="password" name="password" autocomplete="c
 <button type="submit">Sign in</button>
 </form>
 ${STATUS}
-<p class="links"><a href="${escapeHtml(signUpHref)}">Create an account</a><a href="/account/forgot-password">Forgot your password?</a><a href="${escapeHtml(`/account/verify-email?next=${encodeURIComponent(next ?? "/account")}`)}">Send a verification link</a></p>`,
+<p class="links"><a href="${escapeHtml(signUpHref)}">Create an account</a><a href="/account/forgot-password">Forgot your password?</a></p>`,
   });
 }
 
-export function signUpPage(options: { next?: string } = {}): string {
+export function signUpPage(options: { next?: string; closed?: boolean } = {}): string {
+  const { next, closed } = options;
   return shell({
     title: "Create an account",
     page: "sign-up",
-    data: { next: options.next },
+    data: { next },
     main: `<h1>Create your dohc account</h1>
 <form id="form">
 ${field("name", "Name", 'type="text" name="name" autocomplete="name" required autofocus')}
 ${field("email", "Email", 'type="email" name="email" autocomplete="username" required')}
-${field("password", "Password", 'type="password" name="password" autocomplete="new-password" minlength="8" required')}
+${closed ? "" : field("password", "Password", 'type="password" name="password" autocomplete="new-password" minlength="8" required')}
 <button type="submit">Create account</button>
 </form>
 ${STATUS}
-<p class="links"><a href="${escapeHtml(options.next ? `/account/sign-in?next=${encodeURIComponent(options.next)}` : "/account/sign-in")}">Sign in instead</a><a href="${escapeHtml(`/account/verify-email?next=${encodeURIComponent(options.next ?? "/account")}`)}">Send a verification link</a></p>`,
+<p class="links"><a href="${escapeHtml(next ? `/account/sign-in?next=${encodeURIComponent(next)}` : "/account/sign-in")}">Sign in instead</a>${closed ? "" : `<a href="${escapeHtml(`/account/verify-email?next=${encodeURIComponent(next ?? "/account")}`)}">Send a verification link</a>`}</p>`,
   });
 }
 
-export function verifyEmailPage(options: { token?: string; email?: string; next?: string } = {}): string {
-  const { token, email, next } = options;
+export function verifyEmailPage(options: { token?: string; email?: string; next?: string; closed?: boolean } = {}): string {
+  const { token, email, next, closed } = options;
+  const heading = closed ? "Choose your password" : "Verify your email";
   return shell({
-    title: "Verify your email",
+    title: heading,
     page: "verify-email",
-    data: { token, next },
-    main: `<h1>Verify your email</h1>
+    data: { token, next, "sign-up": closed ? CLOSED : undefined },
+    main: `<h1>${heading}</h1>
 <p>${token ? "dohc is checking your link." : "Open the link dohc sent to your email. It works for one hour."}</p>
 <p id="verified" hidden><a href="${escapeHtml(next ?? "/account")}">${next?.startsWith("/device?") ? "Continue connecting your device" : "Go to your account"}</a></p>
 <form id="form"${token ? " hidden" : ""}>
@@ -127,8 +134,8 @@ ${STATUS}
   });
 }
 
-export function resetPasswordPage(options: { token?: string } = {}): string {
-  const token = options.token;
+export function resetPasswordPage(options: { token?: string; next?: string } = {}): string {
+  const { token, next } = options;
   if (!token) {
     return shell({
       title: "Reset your password",
@@ -148,7 +155,7 @@ ${field("password", "New password", 'type="password" name="password" autocomplet
 ${field("confirm", "Confirm new password", 'type="password" name="confirm" autocomplete="new-password" minlength="8" required')}
 <button type="submit">Save password</button>
 </form>
-<p id="after" hidden><a href="/account/sign-in">Sign in with your new password</a></p>
+<p id="after" hidden><a href="${escapeHtml(next ? `/account/sign-in?next=${encodeURIComponent(next)}` : "/account/sign-in")}">Sign in with your new password</a></p>
 ${STATUS}`,
   });
 }
@@ -216,11 +223,11 @@ ${field("user_code", "Device code", `type="text" name="user_code" autocomplete="
   });
 }
 
-export function accountPage(user: { name: string; email: string; emailVerified: boolean }): string {
+export function accountPage(user: { name: string; email: string; emailVerified: boolean }, closed = false): string {
   return shell({
     title: "Your account",
     page: "account",
-    data: { email: user.email },
+    data: { email: user.email, "sign-up": closed ? CLOSED : undefined },
     main: `<h1>Your dohc account</h1>
 <dl>
 <dt>Name</dt><dd>${escapeHtml(user.name)}</dd>

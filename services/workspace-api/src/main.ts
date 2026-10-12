@@ -108,6 +108,7 @@ const router = createRouter({
   descriptor: config.descriptor,
   emailTransport: config.emailTransport,
   allowedOrigins: config.allowedOrigins,
+  closedSignUp: config.signUp !== null,
   ...(config.crashReports ? { crashReports: createCrashReportIntake({ store: crashReportStore }) } : {}),
   seams: {
     ...(config.testAuthSeam ? { deviceApprove: handleTestDeviceApprove } : {}),

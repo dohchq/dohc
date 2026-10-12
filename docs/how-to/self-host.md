@@ -137,8 +137,13 @@ A pending invite exists when someone shares work with an email address that has 
 Revoking that share removes the invite.
 The server ignores case and surrounding spaces when it compares addresses.
 
-With a list, a person cannot sign in until they open the verification link sent to their address.
-This also applies to existing accounts that never verified their address.
+With a list, the sign-up page asks for no password.
+The server emails a link instead, and the person chooses their password there.
+Opening that link also verifies the address and signs out every session of the account.
+Until then, nobody can sign in to the account.
+An existing account that never verified its address works the same way: select **Forgot your password?** to get the link.
+Closing sign-up does not sign anyone out.
+Sessions created while sign-up was open stay valid.
 
 Any other address gets a message that the server creates accounts only for approved or invited addresses.
 Share links need no account, so closed sign-up does not change them.
@@ -212,7 +217,7 @@ If it fails, inspect the sync-relay logs and verify disk space and the relay's p
 1. Open **Settings → Sync and sharing**.
 2. Enter the HTTPS address you configured above.
 3. Follow the browser sign-in flow.
-4. Create an account on your server and verify your email.
+4. Create an account on your server and open the link in the email it sends.
 5. Approve the device after checking the displayed code.
 6. Return to dohc and select **Sync this workspace**.
 

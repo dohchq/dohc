@@ -187,8 +187,37 @@ describe("account pages", () => {
       await router()(get("/account/sign-in?next=%2Fdevice%3Fuser_code%3DABCD-EFGH"))
     ).text();
     expect(body).toContain('data-next="/device?user_code=ABCD-EFGH"');
-    // A closed server refuses an unverified sign-in, so the page offers a new link.
-    expect(body).toContain('href="/account/verify-email?next=%2Fdevice%3Fuser_code%3DABCD-EFGH"');
+  });
+
+  it("asks for a password at sign-up only on an open server", async () => {
+    const open = await (await router()(get("/account/sign-up"))).text();
+    expect(open).toContain('id="password"');
+    expect(open).toContain("Send a verification link");
+
+    // A closed server binds the password when the person opens the emailed link.
+    const closed = await (await router({ closedSignUp: true })(get("/account/sign-up"))).text();
+    expect(closed).not.toContain('id="password"');
+    expect(closed).not.toContain("Send a verification link");
+  });
+
+  it("sends a closed server's new accounts to their email to choose a password", async () => {
+    const closed = await (
+      await router({ closedSignUp: true })(get("/account/verify-email?next=%2Fdevice%3Fuser_code%3DABCD-EFGH"))
+    ).text();
+    expect(closed).toContain("<h1>Choose your password</h1>");
+    expect(closed).toContain('data-sign-up="closed"');
+    const open = await (await router()(get("/account/verify-email"))).text();
+    expect(open).toContain("<h1>Verify your email</h1>");
+    expect(open).not.toContain("data-sign-up");
+  });
+
+  it("continues a device sign-in after a new password", async () => {
+    const body = await (
+      await router()(get("/account/reset-password?token=abc&next=%2Fdevice%3Fuser_code%3DABCD-EFGH"))
+    ).text();
+    expect(body).toContain('href="/account/sign-in?next=%2Fdevice%3Fuser_code%3DABCD-EFGH"');
+    const hostile = await (await router()(get("/account/reset-password?token=abc&next=https%3A%2F%2Fevil.example"))).text();
+    expect(hostile).not.toContain("evil.example");
   });
 
   it("sends a signed-out visitor from the account page to sign-in", async () => {
