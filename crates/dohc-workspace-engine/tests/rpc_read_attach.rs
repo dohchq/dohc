@@ -160,16 +160,16 @@ async fn read_attachment_over_a_full_owner_cannot_reach_mutating_methods() {
     let error = transport
         .call(
             RequestContext::unbounded(),
-            request(
+            keyed_request(
                 3,
                 "versionedText.write",
                 Some(cli.clone()),
+                "attach-write-1",
                 json!({
                     "versionId": "main",
                     "path": "notes/isolated.md",
                     "text": "a read handle must not write",
                     "origin": "api",
-                    "requestId": "attach-write-1",
                 }),
             ),
         )
@@ -185,16 +185,16 @@ async fn read_attachment_over_a_full_owner_cannot_reach_mutating_methods() {
     let written = transport
         .call(
             RequestContext::unbounded(),
-            request(
+            keyed_request(
                 4,
                 "versionedText.write",
                 Some(desktop.clone()),
+                "attach-write-2",
                 json!({
                     "versionId": "main",
                     "path": "notes/isolated.md",
                     "text": "the owner still writes",
                     "origin": "api",
-                    "requestId": "attach-write-2",
                 }),
             ),
         )

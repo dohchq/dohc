@@ -250,9 +250,9 @@ function liveCapture(
     get(target, property, receiver) {
       if (property !== "sendRequest") return Reflect.get(target, property, receiver);
       return async (request: Request) => {
-        const params = request.params as { createOnly?: boolean; path: string; text?: string; bytesBase64?: string; expectedSha256?: string; requestId?: string };
+        const params = request.params as { createOnly?: boolean; path: string; text?: string; bytesBase64?: string; expectedSha256?: string };
         const writing = request.method === VERSIONED_METHOD.textWrite || request.method === VERSIONED_METHOD.textWriteBlob;
-        const key = params.requestId ?? String(request.id);
+        const key = request.idempotencyKey ?? String(request.id);
         if (writing && !completed.has(key)) {
           const current = await readFile(join(root, params.path)).catch(() => null);
           if (params.createOnly && current !== null) throw new VersionedTextStoreError("target-path-exists", "target-path-exists");
@@ -1291,7 +1291,8 @@ describe("workspaceEngineCapture batch capture", () => {
     expect(result.status).toBe("deleted");expect(result.momentId).toBeTruthy();
     expect(existsSync(join(root,"responses/moved.md"))).toBe(false);
     const deletion=requests.findLast(request=>request.method==="versionedText.delete");
-    expect(deletion?.params).toMatchObject({path:"responses/moved.md",expectedObjectId:created.object.id,requestId:"undo-a"});
+    expect(deletion).toMatchObject({idempotencyKey:"undo-a",params:{path:"responses/moved.md",expectedObjectId:created.object.id}});
+    expect(deletion?.params).not.toHaveProperty("requestId");
     await engine.stop();
     const reopened=capture(root,{store,rustEngineSessions:sessions});
     // Another object now occupies the deleted path; retries cannot touch it.
@@ -1320,9 +1321,11 @@ describe("workspaceEngineCapture batch capture", () => {
     const engine=capture(root,{store,rustEngineSessions:sessions});
     const selection={acceptanceId:"accepted-a",objectId:created.object.id,momentId:created.moment.id,path:created.snapshot.path,collectionPath:"responses",versionId:"main",publicPrincipalId:"public-a",grantId:"grant",requestId:"undo-a"};
     expect((await engine.undoAcceptedAppResponse(selection,{kind:"agent",agentId:"dohc-mcp",onBehalfOf:"local",depth:3})).status).toBe("deleted");
-    expect(requests.findLast(request=>request.method==="versionedText.delete")?.params).toMatchObject({
-      requestId:"undo-a",author:{kind:"agent",agentId:"dohc-mcp",onBehalfOf:"local",depth:3},
+    const deletion=requests.findLast(request=>request.method==="versionedText.delete");
+    expect(deletion).toMatchObject({
+      idempotencyKey:"undo-a",params:{author:{kind:"agent",agentId:"dohc-mcp",onBehalfOf:"local",depth:3}},
     });
+    expect(deletion?.params).not.toHaveProperty("requestId");
     await engine.stop();
   });
 
@@ -3227,7 +3230,8 @@ describe("workspaceEngineCapture agent attribution", () => {
       { createOnly: true, requestId: "binary", correlationId: "batch" });
     expect(outcome.materializeOutcome).toBe("applied");
     const request = requests.find(request => request.method === VERSIONED_METHOD.binaryWrite);
-    expect(request).toMatchObject({ params: { bytes: [0, 255, 1], author, createOnly: true, requestId: "binary", correlationId: "batch" } });
+    expect(request).toMatchObject({ idempotencyKey: "binary", params: { bytes: [0, 255, 1], author, createOnly: true, correlationId: "batch" } });
+    expect(request?.params).not.toHaveProperty("requestId");
     expect(requests.findIndex(request => request.method === "capture.flush")).toBeLessThan(requests.indexOf(request!));
     expect(await liveMomentAuthors(engine)).toEqual([[author]]);
     await engine.stop();

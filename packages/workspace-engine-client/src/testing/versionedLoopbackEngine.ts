@@ -155,7 +155,6 @@ const MUTATION_OPTIONAL_STRINGS = [
   "origin",
   "summary",
   "correlationId",
-  "requestId",
   "expectedSha256",
 ] as const;
 const WRITE_OPTIONAL_STRINGS = [
@@ -209,7 +208,7 @@ const VERSIONED_PARAM_SHAPES = {
   },
   [VERSIONED_METHOD.textRollback]: {
     requiredStrings: ["versionId", "path", "mutationMomentId"],
-    optionalStrings: ["workspaceId", "origin", "requestId"],
+    optionalStrings: ["workspaceId", "origin"],
     optionalJson: ["author"],
   },
   [VERSIONED_METHOD.textList]: {
@@ -657,7 +656,6 @@ function requestIdempotencyKey(request: Request): string | undefined {
 }
 
 function parseWriteFields(params: JsonObject, request: Request): ParsedWriteFields {
-  const idempotencyKey = requestIdempotencyKey(request);
   serdeOptionalParamString(params, "workspaceId");
   serdeOptionalParamString(params, "origin");
   serdeOptionalParamString(params, "summary");
@@ -665,7 +663,7 @@ function parseWriteFields(params: JsonObject, request: Request): ParsedWriteFiel
   return {
     objectId: serdeOptionalParamString(params, "objectId"),
     momentId: serdeOptionalParamString(params, "momentId"),
-    requestId: serdeOptionalParamString(params, "requestId") ?? idempotencyKey,
+    requestId: requestIdempotencyKey(request),
     nowMs: serdeOptionalParamNumber(params, "nowMs"),
   };
 }
@@ -710,7 +708,6 @@ function parseTextRenameFields(
   params: JsonObject,
   request: Request,
 ): ParsedTextRenameFields {
-  const idempotencyKey = requestIdempotencyKey(request);
   serdeOptionalParamString(params, "workspaceId");
   serdeOptionalParamString(params, "origin");
   serdeOptionalParamString(params, "summary");
@@ -719,7 +716,7 @@ function parseTextRenameFields(
     versionId: serdeRequiredParamString(params, "versionId"),
     fromPath: serdeRequiredParamString(params, "fromPath"),
     toPath: serdeRequiredParamString(params, "toPath"),
-    requestId: serdeOptionalParamString(params, "requestId") ?? idempotencyKey,
+    requestId: requestIdempotencyKey(request),
     nowMs: serdeOptionalParamNumber(params, "nowMs"),
   };
 }
@@ -728,7 +725,6 @@ function parseTextDeleteFields(
   params: JsonObject,
   request: Request,
 ): ParsedTextDeleteFields {
-  const idempotencyKey = requestIdempotencyKey(request);
   serdeOptionalParamString(params, "workspaceId");
   serdeOptionalParamString(params, "origin");
   serdeOptionalParamString(params, "summary");
@@ -736,7 +732,7 @@ function parseTextDeleteFields(
   return {
     versionId: serdeRequiredParamString(params, "versionId"),
     path: serdeRequiredParamString(params, "path"),
-    requestId: serdeOptionalParamString(params, "requestId") ?? idempotencyKey,
+    requestId: requestIdempotencyKey(request),
     nowMs: serdeOptionalParamNumber(params, "nowMs"),
   };
 }
@@ -1834,8 +1830,7 @@ export class VersionedLoopbackEngine implements EngineTransport {
     );
     const origin = requiredOrigin(params);
     const authorJson = this.writeAuthorFingerprint(params);
-    const requestId =
-      serdeOptionalString(params, "requestId") ?? requestIdempotencyKey(request);
+    const requestId = requestIdempotencyKey(request);
     const fingerprint = JSON.stringify({
       workspaceId: workspace,
       versionId: params.versionId,
@@ -2119,8 +2114,7 @@ export class VersionedLoopbackEngine implements EngineTransport {
     const origin = requiredOrigin(params);
     // Before every replay/dedup/unchanged return — see metadataField.
     const metadata = this.momentMetadataFields(params);
-    const requestId =
-      serdeOptionalString(params, "requestId") ?? requestIdempotencyKey(request);
+    const requestId = requestIdempotencyKey(request);
     const sourceVersionId = requiredString(params, "sourceVersionId", "merge");
     const targetVersionId = requiredString(params, "targetVersionId", "merge");
     const path = requiredString(params, "path", "merge");

@@ -939,10 +939,11 @@ describe("createCaptureLiveStores", () => {
       text: "hello", createOnly, requestId: "caller-stable", expectedSha256: "a".repeat(64), metadata: { origin: "api" },
     })).rejects.toBe(SENTINEL);
     expect(requests).toHaveLength(2);
-    expect(requests[0]?.params).toMatchObject({ createOnly, requestId: "caller-stable", expectedSha256: "a".repeat(64) });
+    expect(requests[0]?.params).toMatchObject({ createOnly, expectedSha256: "a".repeat(64) });
+    expect(requests[0]?.params).not.toHaveProperty("requestId");
+    expect(requests[0]?.idempotencyKey).toBe("caller-stable");
     expect(requests[1]?.params).toEqual(requests[0]?.params);
     expect(requests[1]?.idempotencyKey).toBe(requests[0]?.idempotencyKey);
-    expect(requests[0]?.params).toMatchObject({ requestId: requests[0]?.idempotencyKey });
   });
 
   it("retries transport failures for reads but not mutations", async () => {

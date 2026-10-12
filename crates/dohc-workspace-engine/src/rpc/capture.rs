@@ -885,7 +885,7 @@ mod tests {
                 }),
             };
             service
-                .versioned_text_write(&ctx, &request, request.params.clone())
+                .versioned_text_write(&ctx, request)
                 .await
                 .expect("create through the engine");
         }
