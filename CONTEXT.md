@@ -115,7 +115,7 @@ A URL carrying the credential that authenticates a link grant: anyone holding it
 _Avoid_: public link, web share, share URL
 
 **Link holder**:
-A person using a share link without a dohc identity. Known by a link principal and an optional self-claimed, unverified name.
+A person using a share link without a server account. Known by a link principal and an optional self-claimed, unverified name.
 _Avoid_: guest (means sandboxed code in the app runtime), anonymous user, visitor
 
 **Link principal**:
@@ -123,11 +123,11 @@ The server-minted identity for one browser holding one share link. It carries pr
 _Avoid_: anonymous id, device id
 
 **Received share**:
-The recipient-side materialization of a share: either its own workspace or a mount inside a host workspace under `shared-with-me/`, constrained by the grant's access. A mount syncs only with the share's server. The host workspace's server records only that the mount exists.
+The recipient-side materialization of a share: either its own workspace or a mount inside a host workspace under `shared-with-me/`, constrained by the grant's access. A mount syncs only with the share's server.
 _Avoid_: shared folder, remote workspace
 
 **Pending invite**:
-A share grant addressed to an email with no dohc account yet, claimed on the recipient's first relay contact.
+A share grant addressed to an email with no server account on the share's server yet, claimed on the recipient's first relay contact.
 _Avoid_: unclaimed share
 
 **Session host**:
@@ -143,7 +143,7 @@ An immutable, owner-approved bundle of one app revision. Authority comes from th
 _Avoid_: deploy, build (for the approved object)
 
 **App domain**:
-The domain that serves app launches, kept apart from the server's own domains. Each launch gets a random subdomain. With the domain on the Public Suffix List, browsers treat every subdomain as its own site, so one app cannot set cookies another app reads.
+The domain that serves app launches, on a different registrable domain from the server's share pages. Each launch gets a random subdomain. With the domain on the Public Suffix List, browsers treat every subdomain as its own site and refuse cookies set for the shared parent, so one app cannot set cookies another app reads.
 _Avoid_: publish domain, user content domain
 
 **Dataset**:
