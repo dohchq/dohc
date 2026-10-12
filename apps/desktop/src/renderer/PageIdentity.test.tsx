@@ -417,126 +417,98 @@ describe("PageIdentity", () => {
       }
     });
 
-    // A blur can come before the composed text reaches onChange. The title
-    // stays open until the composition ends, then folds only if it is empty.
-    it.each([
-      ["keeps the composed text and stays open", "東京", false],
-      ["folds when the composition commits nothing", "", true],
-    ])("holds a blur during composition until it ends: %s", (_, composed, foldsAfter) => {
+    // A blur can come before the composed text reaches onChange. The field
+    // keeps its text, as if it still had focus, until the composition ends:
+    // a title written from outside reaches it only then. The live document
+    // writes that outside title.
+    function renderComposing() {
+      const doc = markdownToYDoc("# Plan\n");
       render(
         <>
-          <ControlledPageIdentity initialBody={"# Plan\n"} stem="plan" />
+          <PageIdentity ydoc={doc} filenameStem="plan" />
           <button type="button">elsewhere</button>
         </>,
       );
       const field = titleField();
+      const elsewhere = screen.getByRole("button", { name: "elsewhere" });
+      const writeOutside = (title: string) => act(() => void doc.getMap("frontmatter").set("title", title));
       act(() => field.focus());
       fireEvent.compositionStart(field);
-      act(() => screen.getByRole("button", { name: "elsewhere" }).focus());
-      expect(folded()).toBe(false);
+      fireEvent.input(field, { target: { value: "東" }, isComposing: true, inputType: "insertCompositionText" });
+      act(() => elsewhere.focus());
+      return { doc, field, elsewhere, writeOutside };
+    }
+
+    it("keeps the field's text through a blur during composition, until the composition ends", () => {
+      const { doc, field, writeOutside } = renderComposing();
+      expect(field.value).toBe("東");
+      writeOutside("Outside");
+      expect(field.value).toBe("東");
 
       fireEvent.compositionEnd(field);
-      if (composed) fireEvent.change(field, { target: { value: composed } });
-      expect(folded()).toBe(foldsAfter);
-      expect(field.value).toBe(composed);
-      expect(currentMeta().title).toBe(composed || undefined);
+      expect(field.value).toBe("Outside");
+      doc.destroy();
     });
 
     // Some input methods never send compositionend after a blur. The next
-    // move elsewhere ends the composition, so the field folds and later blurs
-    // count again.
+    // move elsewhere ends the composition, so outside titles reach the field
+    // and later blurs count again.
     it.each([
       ["a click elsewhere", () => fireEvent.pointerDown(document.body)],
       ["a key elsewhere", () => fireEvent.keyDown(screen.getByRole("button", { name: "elsewhere" }), { key: "a" })],
       ["the window's focus", () => window.dispatchEvent(new Event("focus"))],
     ])("ends a composition that never ends on %s", (_, move) => {
-      render(
-        <>
-          <ControlledPageIdentity initialBody={"# Plan\n"} stem="plan" />
-          <button type="button">elsewhere</button>
-        </>,
-      );
-      const field = titleField();
-      const elsewhere = screen.getByRole("button", { name: "elsewhere" });
-      act(() => field.focus());
-      fireEvent.compositionStart(field);
-      act(() => elsewhere.focus());
-      expect(folded()).toBe(false);
+      const { doc, field, elsewhere, writeOutside } = renderComposing();
+      writeOutside("Held");
+      expect(field.value).toBe("東");
 
       act(move);
-      expect(folded()).toBe(true);
+      expect(field.value).toBe("Held");
       act(() => field.focus());
-      expect(folded()).toBe(false);
+      writeOutside("Focused");
+      expect(field.value).toBe("Held");
       act(() => elsewhere.focus());
-      expect(folded()).toBe(true);
+      expect(field.value).toBe("Focused");
+      doc.destroy();
     });
 
     it("keeps a held composition through a key the input method still owns", () => {
-      render(
-        <>
-          <ControlledPageIdentity initialBody={"# Plan\n"} stem="plan" />
-          <button type="button">elsewhere</button>
-        </>,
-      );
-      const field = titleField();
-      const elsewhere = screen.getByRole("button", { name: "elsewhere" });
-      act(() => field.focus());
-      fireEvent.compositionStart(field);
-      act(() => elsewhere.focus());
-
+      const { doc, field, elsewhere, writeOutside } = renderComposing();
       fireEvent.keyDown(elsewhere, { key: "Process", isComposing: true });
       fireEvent.keyDown(elsewhere, { key: "Process", keyCode: 229 });
-      expect(folded()).toBe(false);
+      writeOutside("Outside");
+      expect(field.value).toBe("東");
+
       fireEvent.keyDown(elsewhere, { key: "a" });
-      expect(folded()).toBe(true);
+      expect(field.value).toBe("Outside");
+      doc.destroy();
     });
 
-    it("keeps a held composition open through empty interim text, and folds once it ends empty", () => {
-      render(
-        <>
-          <ControlledPageIdentity initialBody={"# Plan\n"} stem="plan" />
-          <button type="button">elsewhere</button>
-        </>,
-      );
-      const field = titleField();
-      act(() => field.focus());
-      fireEvent.compositionStart(field);
-      fireEvent.input(field, { target: { value: "と" }, isComposing: true, inputType: "insertCompositionText" });
-      act(() => screen.getByRole("button", { name: "elsewhere" }).focus());
-
+    it("keeps a held composition through interim text, even empty, until it ends", () => {
+      const { doc, field, writeOutside } = renderComposing();
       fireEvent.input(field, { target: { value: "" }, isComposing: true, inputType: "insertCompositionText" });
+      writeOutside("Outside");
       expect(field.value).toBe("");
-      expect(folded()).toBe(false);
+
       fireEvent.compositionEnd(field);
-      expect(folded()).toBe(true);
+      expect(field.value).toBe("Outside");
+      doc.destroy();
     });
 
     it("keeps text a composition commits after a blur with no compositionend, and counts later blurs", () => {
-      render(
-        <>
-          <ControlledPageIdentity initialBody={"# Plan\n"} stem="plan" />
-          <button type="button">elsewhere</button>
-        </>,
-      );
-      const field = titleField();
-      const elsewhere = screen.getByRole("button", { name: "elsewhere" });
-      act(() => field.focus());
-      fireEvent.compositionStart(field);
-      act(() => elsewhere.focus());
-
+      const { doc, field, elsewhere, writeOutside } = renderComposing();
       fireEvent.change(field, { target: { value: "東京" } });
       expect(field.value).toBe("東京");
-      expect(currentMeta().title).toBe("東京");
+      expect(doc.getMap("frontmatter").get("title")).toBe("東京");
 
-      // A new composition that a refocus ends, then an ordinary blur.
-      act(() => field.focus());
-      fireEvent.compositionStart(field);
-      act(() => elsewhere.focus());
+      writeOutside("Outside");
+      expect(field.value).toBe("Outside");
       act(() => field.focus());
       fireEvent.change(field, { target: { value: "" } });
       act(() => elsewhere.focus());
       expect(folded()).toBe(true);
-      expect(currentMeta().title).toBeUndefined();
+      expect(doc.getMap("frontmatter").get("title")).toBeUndefined();
+      doc.destroy();
     });
 
     it("folds a read-only title too, keeping it mounted and read-only", () => {
@@ -546,7 +518,9 @@ describe("PageIdentity", () => {
       expect(titleField().className).toContain("invisible");
     });
 
-    it("unfolds the same field on focus, folds it on blur with no title, and writes a typed title", async () => {
+    // Focus and blur never change the layout below the title: the field folds
+    // while it holds no text, so only typing opens or folds it.
+    it("stays folded through focus and blur, opens on the first character, and folds when cleared", async () => {
       const user = userEvent.setup();
       render(
         <>
@@ -558,24 +532,33 @@ describe("PageIdentity", () => {
       expect(folded()).toBe(true);
 
       act(() => field.focus());
-      expect(titleField()).toBe(field);
-      expect(folded()).toBe(false);
-      expect(field.placeholder).toBe("plan");
       expect(document.activeElement).toBe(field);
-
+      expect(folded()).toBe(true);
+      expect(field.className).toContain("focus:opacity-100");
       await user.click(screen.getByRole("button", { name: "elsewhere" }));
       expect(folded()).toBe(true);
 
       await user.click(field);
-      await user.keyboard("Q3");
+      await user.keyboard("Q");
+      expect(titleField()).toBe(field);
+      expect(folded()).toBe(false);
+      expect(field.placeholder).toBe("plan");
+      await user.keyboard("3");
       expect(field.selectionStart).toBe(2);
       expect(currentMeta().title).toBe("Q3");
+
+      await user.keyboard("{Backspace}{Backspace}");
+      expect(document.activeElement).toBe(field);
+      expect(folded()).toBe(true);
+      expect(currentMeta().title).toBeUndefined();
+
+      await user.keyboard("Q3");
       await user.click(screen.getByRole("button", { name: "elsewhere" }));
       expect(folded()).toBe(false);
       expect(field.value).toBe("Q3");
     });
 
-    it("keeps the Tab order icon, then title", async () => {
+    it("keeps the Tab order icon, then title, without opening the empty title", async () => {
       const user = userEvent.setup();
       render(<PageIdentity body={"# Plan\n"} onChange={() => {}} filenameStem="plan" />);
 
@@ -583,7 +566,7 @@ describe("PageIdentity", () => {
       expect(document.activeElement).toBe(screen.getByTestId("page-icon-add"));
       await user.tab();
       expect(document.activeElement).toBe(titleField());
-      expect(folded()).toBe(false);
+      expect(folded()).toBe(true);
     });
 
     describe("in a live document", () => {

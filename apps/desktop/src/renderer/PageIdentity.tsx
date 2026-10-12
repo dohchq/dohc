@@ -113,8 +113,9 @@ const TITLE_FIELD = "block resize-none overflow-hidden border-0 bg-transparent f
 // Its own line under the icon, as large as the drawing's title.
 const TITLE_OPEN = `${TITLE_FIELD} w-full basis-full p-0 font-sans text-[2em] font-bold leading-[1.15] tracking-[-0.02em] text-ink placeholder:text-subtle`;
 // Folded beside "Add icon", and shown with it while the pointer is over the
-// page's identity. A read-only page has nothing to add, so it stays hidden.
-const TITLE_FOLDED = `${TITLE_FIELD} rounded-md px-1.5 py-[3px] text-[12.5px] leading-normal text-subtle placeholder:text-subtle hover:placeholder:text-muted`;
+// page's identity or the field has focus. A read-only page has nothing to
+// add, so it stays hidden.
+const TITLE_FOLDED = `${TITLE_FIELD} rounded-md px-1.5 py-[3px] text-[12.5px] leading-normal text-subtle placeholder:text-subtle hover:placeholder:text-muted focus:placeholder:text-muted`;
 
 // A small curated palette — enough for the common cases (docs, projects,
 // status, life) without shipping a multi-thousand-emoji database. Anything
@@ -261,7 +262,7 @@ export function PageIdentity(props: PageIdentityProps) {
   const titleRef = useRef<HTMLTextAreaElement | null>(null);
   const titleCaret = useRef<number | null>(null);
   // A blur while an input method composes can come before the composed text
-  // reaches onChange. The field stays open until the composition ends.
+  // reaches onChange. The field keeps its text until the composition ends.
   const titleComposing = useRef(false);
   const [blurHeld, setBlurHeld] = useState(false);
   // Ends a composition, and the blur it held back if the field has lost
@@ -274,8 +275,8 @@ export function PageIdentity(props: PageIdentityProps) {
   }
   // Some input methods never send compositionend after a blur. The person's
   // next click or key elsewhere, or the window's next focus, ends the
-  // composition instead, so the field cannot stay open, or ignore later
-  // blurs, for good. Not focusin: the focus move that held the blur can still
+  // composition instead, so the field cannot ignore later blurs, or outside
+  // changes to the title, for good. Not focusin: the focus move that held the blur can still
   // be arriving at its new element.
   useEffect(() => {
     if (!blurHeld) return;
@@ -305,7 +306,10 @@ export function PageIdentity(props: PageIdentityProps) {
     if (!titleFocused) setTitleDraft(title);
   }, [title, titleFocused]);
   // The same field folds and unfolds, so focus, caret and Tab order stay.
-  const folded = (liveOpensWithH1 || localOpensWithH1) && title === "" && !titleFocused;
+  // It folds while it holds no text, whether or not it has focus, so focus
+  // and blur never move what is below it: the first character typed opens
+  // it, and clearing it folds it again.
+  const folded = (liveOpensWithH1 || localOpensWithH1) && title === "" && titleDraft === "";
 
   const [pickerOpen, setPickerOpen] = useState(false);
   const [emojiInput, setEmojiInput] = useState("");
@@ -367,7 +371,7 @@ export function PageIdentity(props: PageIdentityProps) {
       {/* The icon's line, then the title on its own line. Folded, the title
           joins the icon's line. */}
       <div className="dohc-page-identity__inner flex flex-wrap items-center gap-x-1 gap-y-3">
-        {editRefused ? <span role="status" className={`${TOPMATTER_FLAG} basis-full px-1.5`} title={FRONTMATTER_EDIT_REFUSED_MESSAGE}>Edit in text</span> : null}
+        {editRefused ? <span role="status" className={`${TOPMATTER_FLAG} basis-full px-1.5`} title={FRONTMATTER_EDIT_REFUSED_MESSAGE}>Edit in Source</span> : null}
         <div className="relative min-h-5">
           {icon ? (
             <button
@@ -510,7 +514,7 @@ export function PageIdentity(props: PageIdentityProps) {
               ? TITLE_OPEN
               : readOnly
                 ? `${TITLE_FOLDED} invisible`
-                : `${TITLE_FOLDED} opacity-0 transition-opacity duration-100 ease-out group-hover:opacity-100`
+                : `${TITLE_FOLDED} opacity-0 transition-opacity duration-100 ease-out group-hover:opacity-100 focus:opacity-100`
           }
         />
       </div>

@@ -7,7 +7,7 @@ import {
 } from "@dohc/ydoc-projection/frontmatter";
 import { frontmatterMapValues, patchFrontmatter } from "@dohc/ydoc-projection/frontmatter-map";
 import { Plus, X } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type * as Y from "yjs";
 import { AutomationFieldMark } from "./collections/collectionFieldMarks";
 import {
@@ -27,7 +27,7 @@ const FRONTMATTER_FIELD = "frontmatter";
 const PILL =
   "group/pill relative inline-flex h-6 max-w-full min-w-0 items-center gap-1.5 rounded-full border border-line px-[9px] text-[12px] transition-colors duration-100 hover:bg-hover focus-within:border-muted";
 const PILL_FIELD =
-  "h-5 min-w-[2ch] max-w-64 border-0 bg-transparent p-0 leading-5 field-sizing-content placeholder:text-subtle";
+  "h-5 min-w-[2ch] max-w-64 text-ellipsis border-0 bg-transparent p-0 leading-5 field-sizing-content placeholder:text-subtle";
 
 export type PropertiesPanelProps = (
   | {
@@ -279,7 +279,27 @@ export function PropertiesPanel(props: PropertiesPanelProps) {
     commit(entries.map((entry, i) => (i === index ? { ...entry, value } : entry)));
   }
 
+  // Where focus goes once the pills render: a pill's name, or the +.
+  const line = useRef<HTMLDivElement | null>(null);
+  const focusNext = useRef<number | "add" | null>(null);
+  useLayoutEffect(() => {
+    const target = focusNext.current;
+    if (target === null) return;
+    focusNext.current = null;
+    const element = target === "add"
+      ? line.current?.querySelector<HTMLElement>('[data-testid="property-add"]')
+      : line.current?.querySelectorAll<HTMLElement>('[data-testid="property-key"]')[target];
+    element?.focus();
+  });
+
+  function add() {
+    focusNext.current = entries.length;
+    setEntries((current) => [...current, { key: "", value: "" }]);
+  }
+
+  // Focus moves to the next pill, else the one before, else the +.
   function remove(index: number) {
+    focusNext.current = index < entries.length - 1 ? index : index > 0 ? index - 1 : "add";
     commit(entries.filter((_, i) => i !== index));
   }
 
@@ -288,10 +308,10 @@ export function PropertiesPanel(props: PropertiesPanelProps) {
 
   return (
     <section data-testid="properties-panel" className={PROPERTIES_PANEL} aria-label="Properties">
-      <div className={PROPERTIES_LINE}>
+      <div ref={line} className={PROPERTIES_LINE}>
         {locked || editRefused ? (
           <span data-testid="properties-locked" className={TOPMATTER_FLAG} title={FRONTMATTER_EDIT_REFUSED_MESSAGE}>
-            Edit in text
+            Edit in Source
           </span>
         ) : null}
         {entries.map((entry, index) => {
@@ -316,7 +336,7 @@ export function PropertiesPanel(props: PropertiesPanelProps) {
                 <span
                   data-testid="property-reserved"
                   className={TOPMATTER_FLAG}
-                  title="Reserved names are managed by the document system."
+                  title="dohc uses this name for the page's title, icon or ID. Choose another name."
                 >
                   reserved name
                 </span>
@@ -329,6 +349,9 @@ export function PropertiesPanel(props: PropertiesPanelProps) {
                   data-testid="property-value"
                   aria-label={`Property ${entry.key || index + 1} value`}
                   value={entry.value}
+                  // A value longer than the pill ends in an ellipsis; its
+                  // tooltip holds all of it.
+                  title={entry.value || undefined}
                   placeholder="Empty"
                   spellCheck={false}
                   readOnly={locked}
@@ -336,34 +359,40 @@ export function PropertiesPanel(props: PropertiesPanelProps) {
                   className={`${PILL_FIELD} text-ink`}
                 />
               )}
-              {/* On the pill's corner, so showing it moves nothing. */}
-              <button
-                type="button"
-                data-testid="property-remove"
-                aria-label={`Remove property ${entry.key || index + 1}`}
-                title="Remove property"
-                onClick={() => remove(index)}
-                className="absolute -top-2 -right-2 grid size-[18px] place-items-center rounded-full border border-line bg-bg text-subtle opacity-0 transition duration-100 group-hover/pill:opacity-100 group-focus-within/pill:opacity-100 hover:text-danger"
-              >
-                <X size={12} aria-hidden />
-              </button>
+              {/* On the pill's corner, so showing it moves nothing. A locked
+                  block cannot lose one property, so it offers no ×. */}
+              {locked ? null : (
+                <button
+                  type="button"
+                  data-testid="property-remove"
+                  aria-label={`Remove property ${entry.key || index + 1}`}
+                  title="Remove property"
+                  onClick={() => remove(index)}
+                  className="absolute -top-2 -right-2 grid size-[18px] place-items-center rounded-full border border-line bg-bg text-subtle opacity-0 transition duration-100 group-hover/pill:opacity-100 group-focus-within/pill:opacity-100 hover:text-danger"
+                >
+                  <X size={12} aria-hidden />
+                </button>
+              )}
             </div>
           );
         })}
         {/* Alone on a page with no properties, it shows while the pointer is
-            over the title and properties, like "Add icon". */}
-        <button
-          type="button"
-          data-testid="property-add"
-          aria-label="Add a property"
-          title="Add a property"
-          onClick={() => setEntries((current) => [...current, { key: "", value: "" }])}
-          className={`grid size-6 shrink-0 place-items-center rounded-full border border-dashed border-line text-subtle transition duration-100 hover:bg-hover hover:text-muted${
-            isEmpty ? " opacity-0 group-hover/topmatter:opacity-100 focus-visible:opacity-100" : ""
-          }`}
-        >
-          <Plus size={12} aria-hidden />
-        </button>
+            over the title and properties, like "Add icon". A locked block
+            cannot gain a property, so it offers no +. */}
+        {locked ? null : (
+          <button
+            type="button"
+            data-testid="property-add"
+            aria-label="Add a property"
+            title="Add a property"
+            onClick={add}
+            className={`grid size-6 shrink-0 place-items-center rounded-full border border-dashed border-line text-subtle transition duration-100 hover:bg-hover hover:text-muted${
+              isEmpty ? " opacity-0 group-hover/topmatter:opacity-100 focus-visible:opacity-100" : ""
+            }`}
+          >
+            <Plus size={12} aria-hidden />
+          </button>
+        )}
       </div>
     </section>
   );

@@ -875,6 +875,7 @@ function TopmatterSpecimen(props: { children: ReactNode }) {
 }
 
 const PILLS = "---\nowner: Sam\nrelease: September launch\nstatus: In progress\n---\n";
+const LONG_PILL = "---\nowner: Sam\nbrief: https://example.com/plans/2026/q3/product-plan-with-every-goal-and-owner\n---\n";
 
 // A reserved name shows only while a person types it, so the specimen types
 // it into the second pill's name once, as a keystroke would.
@@ -1910,10 +1911,10 @@ function Pane(props: { theme: "light" | "dark" }) {
             </div>
           </TopmatterSpecimen>
         </Specimen>
-        <Specimen label="focused: a folded title opens to this, empty, with the file name">
+        <Specimen label="folded, focused: Add title in place, so nothing below moves">
           <TopmatterSpecimen>
             <div data-force-state="focus" data-force-target={`[data-testid="page-title"]`}>
-              <PageIdentity body={"Q3 notes\n"} onChange={noop} filenameStem="product-plan" />
+              <PageIdentity body={"# Q3 product plan\n"} onChange={noop} filenameStem="product-plan" />
             </div>
           </TopmatterSpecimen>
         </Specimen>
@@ -1948,6 +1949,11 @@ function Pane(props: { theme: "light" | "dark" }) {
             </div>
           </TopmatterSpecimen>
         </Specimen>
+        <Specimen label="a long value: an ellipsis, all of it in the tooltip">
+          <TopmatterSpecimen>
+            <PropertiesPanel body={LONG_PILL} onChange={noop} />
+          </TopmatterSpecimen>
+        </Specimen>
         <Specimen label="reserved name, typed">
           <TopmatterSpecimen>
             <ReservedPillSpecimen />
@@ -1962,7 +1968,7 @@ function Pane(props: { theme: "light" | "dark" }) {
           <TopmatterSpecimen>
             {/* Written on one line, the block cannot change one property
                 without rewriting the others. */}
-            <PropertiesPanel body={"---\n{status: draft, score: .nan}\n---\n"} onChange={noop} />
+            <PropertiesPanel body={"---\n{owner: Sam, status: Draft}\n---\n"} onChange={noop} />
           </TopmatterSpecimen>
         </Specimen>
         <Specimen label="set by an automation">

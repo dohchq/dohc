@@ -296,6 +296,61 @@ describe("PropertiesPanel", () => {
       expect(screen.getByTestId("current-body").textContent).toBe("---\nrelease: September\n---\n\nBody");
     });
 
+    it("moves focus to the new pill's name after an add", async () => {
+      const user = userEvent.setup();
+      render(<ControlledPropertiesPanel initialBody={"---\nowner: Sam\n---\n\nBody"} />);
+
+      await user.click(screen.getByTestId("property-add"));
+      expect(document.activeElement).toBe(screen.getByLabelText("Property 2 name"));
+      await user.keyboard("release");
+      expect((screen.getByLabelText("Property 2 name") as HTMLInputElement).value).toBe("release");
+    });
+
+    it("moves focus after a remove to the next pill, else the one before, else the +", async () => {
+      const user = userEvent.setup();
+      render(<ControlledPropertiesPanel initialBody={"---\nowner: Sam\nrelease: September\nstatus: Draft\n---\n\nBody"} />);
+
+      // The middle pill: the next one takes its place.
+      screen.getByLabelText("Remove property release").focus();
+      await user.keyboard("{Enter}");
+      expect(screen.getAllByTestId("property-row")).toHaveLength(2);
+      expect(document.activeElement).toBe(screen.getAllByTestId("property-key")[1]);
+      expect((document.activeElement as HTMLInputElement).value).toBe("status");
+
+      // The last pill: the one before it.
+      screen.getByLabelText("Remove property status").focus();
+      await user.keyboard("{Enter}");
+      expect(document.activeElement).toBe(screen.getAllByTestId("property-key")[0]);
+      expect((document.activeElement as HTMLInputElement).value).toBe("owner");
+
+      // The only pill: the +.
+      screen.getByLabelText("Remove property owner").focus();
+      await user.keyboard("{Enter}");
+      expect(screen.queryAllByTestId("property-row")).toHaveLength(0);
+      expect(document.activeElement).toBe(screen.getByTestId("property-add"));
+    });
+
+    it.each([false, true])("offers no + and no × on a block written on one line (shared: %s)", (shared) => {
+      const body = "---\n{status: draft, owner: Sam}\n---\n\nBody";
+      const doc = markdownToYDoc(body);
+      try {
+        render(shared ? <PropertiesPanel ydoc={doc} /> : <PropertiesPanel body={body} onChange={vi.fn()} />);
+        expect(screen.getByTestId("properties-locked").textContent).toBe("Edit in Source");
+        expect(screen.getAllByTestId("property-row")).toHaveLength(2);
+        expect(screen.queryByTestId("property-add")).toBeNull();
+        expect(screen.queryAllByTestId("property-remove")).toHaveLength(0);
+      } finally { doc.destroy(); }
+    });
+
+    it("keeps a long value whole in its tooltip", () => {
+      const value = "https://example.com/a/very/long/path/that/keeps/going/past/the/width/of/one/pill";
+      render(<PropertiesPanel body={`---\nlink: ${value}\n---\n`} onChange={vi.fn()} />);
+      const input = screen.getByLabelText("Property link value") as HTMLInputElement;
+      expect(input.value).toBe(value);
+      expect(input.title).toBe(value);
+      expect(input.className).toContain("text-ellipsis");
+    });
+
     it("shows the + alone, hidden until hover or focus, on a page with no properties", () => {
       render(<PropertiesPanel body={"Body"} onChange={vi.fn()} />);
       expect(screen.queryAllByTestId("property-row")).toHaveLength(0);
@@ -427,9 +482,11 @@ describe("PropertiesPanel", () => {
     const initialBody = `---\n# Keep\n${yaml}\n---\n\n# Plan\n`;
     render(<ControlledPropertiesPanel initialBody={initialBody} />);
 
-    expect(screen.getByTestId("properties-locked")).toBeTruthy();
+    expect(screen.getByTestId("properties-locked").textContent).toBe("Edit in Source");
     await user.type(screen.getByLabelText("Property status value"), "x");
-    await user.click(screen.getByLabelText("Remove property score"));
+    // A locked block offers no + and no ×, which could do nothing.
+    expect(screen.queryByTestId("property-add")).toBeNull();
+    expect(screen.queryAllByTestId("property-remove")).toHaveLength(0);
 
     expect(screen.getByTestId("current-body").textContent).toBe(initialBody);
   });
