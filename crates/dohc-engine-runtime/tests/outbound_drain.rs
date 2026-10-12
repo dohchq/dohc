@@ -3361,14 +3361,13 @@ async fn an_enrolled_share_view_journals_a_file_write_and_no_ydoc_update() {
             && op.payload["momentId"] == "moment-share-view"),
         "an enrolled share view must journal its file writes: {ops:?}",
     );
-    // Deliberately not asserting the absence of a `ydoc.update` here. This
-    // write opens no live session and claims no lineage, so none could be
-    // journaled whatever the Y.Doc gate reads — the assertion would pass with
-    // the gate widened and prove nothing. The lane boundary is pinned where it
-    // can actually fail: `only_the_file_moment_journal_reads_the_share_lane`
-    // (both predicates, behaviourally) and
-    // `the_ydoc_journal_reads_the_owner_lane_predicate` (the call site), both
-    // in `crates/dohc-engine-sync/src/tests/share_view.rs`.
+    // This write opens no live session and claims no lineage, so checking for
+    // absent Y.Doc updates would not distinguish the lanes. The sync tests
+    // `only_the_file_moment_journal_reads_the_share_lane`,
+    // `resolution_fold_journals_a_ydoc_update_only_in_the_owner_lane`,
+    // `origination_and_conflict_outbox_wait_for_owner_contact_not_a_share_cursor`,
+    // and `recovered_share_file_moment_survives_restart_and_submits_within_its_grant`
+    // exercise the lane boundary in `dohc-engine-sync/src/tests/share_view.rs`.
     assert!(
         ops.iter().all(|op| op.op_kind != "version.create"),
         "a share view creates no versions, so none may journal: {ops:?}",
