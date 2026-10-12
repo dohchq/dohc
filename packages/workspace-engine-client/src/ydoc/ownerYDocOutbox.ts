@@ -45,8 +45,9 @@ export interface OwnerYDocOutboxEntry {
   readonly update: Uint8Array;
   readonly byteLength: number;
   readonly createdAtMs: number;
-  /** The agent the queued edit declared; absent when it declared none. Never authority. */
+  /** Present when the engine recorded the queued edit as a person's. Never authority. */
   readonly personEdit?: true;
+  /** The agent the queued edit declared; absent when it declared none. Never authority. */
   readonly agentDeclaration?: AgentDeclaration;
   readonly automationDeclaration?: AutomationDeclaration;
 }

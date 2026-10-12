@@ -669,7 +669,7 @@ export function commitLiveUpdateJournal(storage: StorageContext, input: LiveUpda
             if (!prior) {unbound++; bindings.push({clientId,snapshot:encoded});}
           }
           if (bindingFailed || unbound > 1) {
-            if (request.actor.kind !== "owner") return refused({kind:"refused",reason:"provenance-refused"});
+            if (request.actor.kind !== "owner" || trustedAutomation) return refused({kind:"refused",reason:"provenance-refused"});
             authorSnapshot = [];
             bindings.length = 0;
           }

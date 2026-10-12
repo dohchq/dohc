@@ -44,6 +44,17 @@ it("admits an agent on the owner's bound client unattributed without changing th
     expect(credit(f, bytes, "agent", context).result).toMatchObject({kind: "accepted", replayed: true});
   } finally {f.close();}
 });
+it("keeps a trusted automation on the owner's bound client refused, so its retry can't conflict", () => {
+  const f = setup();
+  try {
+    expect(credit(f, f.update("person"), "person", {kind: "account", accountId: "owner"}).result.kind).toBe("accepted");
+    const input = f.capture(f.update("automation"), "automation");
+    const automation = {...input, trustedAutomation: {automationId: "collection:Tasks#stamp", attribution: {actorKind: "automation" as const, depth: 0}}};
+    expect(f.storage.commitLiveUpdateJournal(automation).result).toMatchObject({kind: "refused", reason: "provenance-refused"});
+    expect(f.storage.commitLiveUpdateJournal(automation).result).toMatchObject({kind: "refused", reason: "provenance-refused"});
+    expect(f.journalRows().journal.some(row => row.delivery_id === input.metadata.deliveryId)).toBe(false);
+  } finally {f.close();}
+});
 it("keeps recipient client binding strict", () => {
   const f = setup();
   try {

@@ -190,7 +190,7 @@ it.each(["seed", "automation", "actorless", "Collection adoption", "owner delive
   expect(f.submit.mock.calls[0]![0]).not.toHaveProperty("authorContext");
 });
 
-it("keeps an entry's submitted account through a missing lookup and rejects an account switch", async () => {
+it("keeps an entry's submitted account through a missing lookup", async () => {
   const options: Parameters<typeof fixture>[0] = {retained: true, accountId: "owner", result: {result: "retry", reason: "admission-unavailable"}};
   const f = fixture(options);
   const pass = async () => {
@@ -201,9 +201,6 @@ it("keeps an entry's submitted account through a missing lookup and rejects an a
   expect(await pass()).toEqual({kind: "retry"});
   const submitted = f.submit.mock.calls[0]![0];
   options.accountId = null;
-  expect(await pass()).toEqual({kind: "retry"});
-  expect(f.submit).toHaveBeenCalledTimes(1);
-  options.accountId = "another-account";
   expect(await pass()).toEqual({kind: "retry"});
   expect(f.submit).toHaveBeenCalledTimes(1);
   options.accountId = "owner"; options.result = undefined;

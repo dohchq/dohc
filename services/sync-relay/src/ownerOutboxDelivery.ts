@@ -31,7 +31,7 @@ export interface OwnerOutboxAdmission {
 /**
  * The adoption this queue belongs to, as the relay recorded it from the host's
  * adoption ACK. A divergent adoption queues its local seed first, under
- * `owner-adoption:sha256([adoptionId, sequence, updateDigest])`. `applied` is
+ * `owner-adoption:sha256([adoptionId, sequence, updateDigest])`. `applied`
  * releases the accepted-feed gate when the queue is empty, its head is later
  * work, or the host acknowledged applying the seed. A quarantined queue also
  * releases that gate while preserving its unapplied local work.

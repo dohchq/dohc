@@ -33,8 +33,9 @@ export interface OwnerYDocDeliveryEnvelope {
   readonly deliveryId: string;
   readonly update: Uint8Array;
   readonly updateDigest: string;
-  /** The agent the queued edit declared; absent when it declared none. */
+  /** Present when the engine recorded the queued edit as a person's. */
   readonly personEdit?: true;
+  /** The agent the queued edit declared; absent when it declared none. */
   readonly agentDeclaration?: AgentDeclaration;
   readonly automationDeclaration?: AutomationDeclaration;
 }
