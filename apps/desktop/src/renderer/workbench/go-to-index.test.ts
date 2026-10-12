@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { GoToIndex, isGoToPathQuery, quickOpenMatchTier, rankQuickOpenPaths, type GoToListing } from "./quick-open-rank";
+import { GoToIndex, isGoToPathQuery, prepareQuickOpenPaths, rankPreparedQuickOpenPaths, type GoToListing } from "./quick-open-rank";
 const context = { pinned: [], recent: [] };
 const listing = (paths: string[]): GoToListing => ({
   files: paths.map((path) => ({ path, kind: "file" })), folders: [],
@@ -22,12 +22,29 @@ describe("Go to names", () => {
 });
 
 const ids = (rows: ReturnType<GoToIndex["query"]>) => rows.map(row => row.id);
+// Keep the full-sort oracle independent of the bounded production matcher.
+function referenceMatchTier(query: string, path: string): number | null {
+  const needle = query.toLowerCase(), haystack = path.toLowerCase();
+  if (!needle) return 2;
+  if (haystack.slice(haystack.lastIndexOf("/") + 1).startsWith(needle)) return 0;
+  for (let i = 0; i <= haystack.length - needle.length; i++) {
+    if ((i === 0 || /[/\-_. ]/.test(haystack[i - 1])) && haystack.startsWith(needle, i)) return 1;
+  }
+  if (haystack.includes(needle)) return 2;
+  let at = 0;
+  for (const character of haystack) {
+    if (character === needle[at]) at += 1;
+    if (at === needle.length) return 3;
+  }
+  return null;
+}
+
 function fullSort(index: GoToIndex, query: string, limit = 50) {
   const pathQuery = isGoToPathQuery(query);
   return index.rows.map(row => {
-    let tier = quickOpenMatchTier(query, row.path);
+    let tier = referenceMatchTier(query, row.path);
     if (row.kind === "app") {
-      const titleTier = quickOpenMatchTier(query, row.label);
+      const titleTier = referenceMatchTier(query, row.label);
       if (titleTier !== null) tier = tier === null ? titleTier : Math.min(tier, titleTier);
     }
     return { row, tier };
@@ -122,7 +139,7 @@ it("keeps the existing file-only tier, pin, recency, tie, and duplicate semantic
   const index = new GoToIndex("workspace");
   index.update({ listing: listing(paths) }, ranking);
   for (const query of ["", "no", "note", "nte", "notes.md"]) {
-    expect(index.query(query).map(row => row.path)).toEqual(rankQuickOpenPaths(query, [...new Set(paths)], ranking).slice(0, 50));
+    expect(index.query(query).map(row => row.path)).toEqual(rankPreparedQuickOpenPaths(query, prepareQuickOpenPaths([...new Set(paths)], ranking), 50));
   }
 });
 it("subtracts only host rule verdicts, leaving .env and mounted names findable after a policy edit", () => {
