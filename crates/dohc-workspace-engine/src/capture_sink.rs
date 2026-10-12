@@ -604,7 +604,7 @@ impl StoreCaptureSink {
         text: String,
         claim_foreign_head: bool,
     ) -> Result<DomainIngest, CaptureError> {
-        match self.actor.capture_ingest_with_search_policy_blocking(
+        let result = self.actor.capture_ingest_with_search_policy_blocking(
             CaptureIngest {
                 workspace_id: self.workspace_id.clone(),
                 version_id: self.version_id.clone(),
@@ -621,7 +621,8 @@ impl StoreCaptureSink {
             Arc::clone(&self.search_policy),
             self.leases.clone(),
             Arc::new(NoFaults),
-        ) {
+        );
+        match self.batch_retry.observe(result) {
             Ok(result) => {
                 self.automation_claims
                     .borrow_mut()
@@ -652,7 +653,7 @@ impl StoreCaptureSink {
         bytes: Vec<u8>,
         claim_foreign_head: bool,
     ) -> Result<DomainIngest, CaptureError> {
-        match self.actor.capture_ingest_binary_blocking(
+        let result = self.actor.capture_ingest_binary_blocking(
             CaptureIngestBinary {
                 workspace_id: self.workspace_id.clone(),
                 version_id: self.version_id.clone(),
@@ -668,7 +669,8 @@ impl StoreCaptureSink {
             },
             self.leases.clone(),
             Arc::new(NoFaults),
-        ) {
+        );
+        match self.batch_retry.observe(result) {
             Ok(_) => Ok(DomainIngest::Persisted),
             // Same settled-refusal rule as text: the store's admission gate is
             // stricter than the scan floor, and a refused name can never
@@ -719,7 +721,7 @@ impl StoreCaptureSink {
                 self.ensure_secret_key()?;
                 let key = self.secret_key.clone().expect("key ensured just above");
                 self.require_captured_root()?;
-                match self.actor.capture_secret_blocking(
+                let result = self.actor.capture_secret_blocking(
                     CaptureSecret {
                         workspace_id: self.workspace_id.clone(),
                         version_id: self.version_id.clone(),
@@ -732,7 +734,8 @@ impl StoreCaptureSink {
                     },
                     key,
                     Arc::new(NoFaults),
-                ) {
+                );
+                match self.batch_retry.observe(result) {
                     Ok(_) => Ok(IngestOutcome::Captured { size, sha256 }),
                     Err(RuntimeError::Domain(DomainError::InvalidPath { .. })) => {
                         Ok(IngestOutcome::NotOwned)
@@ -815,7 +818,7 @@ impl StoreCaptureSink {
 
     fn retire_secret(&self, path: &str) -> Result<(), CaptureError> {
         let root_guard = self.root_guard()?;
-        match self.actor.capture_secret_retire_blocking_guarded(
+        let result = self.actor.capture_secret_retire_blocking_guarded(
             CaptureSecretRetire {
                 workspace_id: self.workspace_id.clone(),
                 version_id: self.version_id.clone(),
@@ -828,7 +831,8 @@ impl StoreCaptureSink {
             self.shadow_root.clone(),
             Arc::new(NoFaults),
             root_guard,
-        ) {
+        );
+        match self.batch_retry.observe(result) {
             Ok(_) => Ok(()),
             Err(RuntimeError::Domain(DomainError::InvalidPath { .. })) => Ok(()),
             Err(_) => Err(SECRET_RETIRE_FAILED),
@@ -867,7 +871,7 @@ impl StoreCaptureSink {
         confirm_absent: bool,
     ) -> Result<(), CaptureError> {
         let root_guard = self.root_guard()?;
-        match self.actor.capture_retire_materialized_blocking_guarded(
+        let result = self.actor.capture_retire_materialized_blocking_guarded(
             CaptureRetire {
                 workspace_id: self.workspace_id.clone(),
                 version_id: self.version_id.clone(),
@@ -886,7 +890,8 @@ impl StoreCaptureSink {
             self.leases.clone(),
             Arc::new(NoFaults),
             root_guard,
-        ) {
+        );
+        match self.batch_retry.observe(result) {
             Ok(_) => Ok(()),
             // A name the store refuses to address can never hold a head;
             // there is nothing to retire.

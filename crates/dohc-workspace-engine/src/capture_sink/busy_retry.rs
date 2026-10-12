@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 const BUSY_RETRY_LIMIT: Duration = Duration::from_secs(5);
 const BUSY_RETRY_INTERVAL: Duration = Duration::from_millis(10);
 
-/// Share a contention budget across the pass; a success starts a new episode.
+/// Share a contention budget across the pass; a non-busy result ends the episode.
 #[derive(Default)]
 pub(super) struct CaptureBatchRetry {
     pub(super) cancel: CancellationToken,
@@ -23,6 +23,19 @@ impl CaptureBatchRetry {
             ..Self::default()
         }
     }
+    /// Single-file writes share the pass's contention state with batch writes.
+    pub(super) fn observe<T>(&self, result: Result<T, RuntimeError>) -> Result<T, RuntimeError> {
+        if !matches!(&result, Err(error) if crate::rpc::error::store_busy(error)) {
+            self.deadline.set(None);
+        }
+        result
+    }
+
+    #[cfg(test)]
+    pub(super) fn exhaust_for_test(&self) {
+        self.deadline.set(Some(Instant::now()));
+    }
+
     pub(super) fn run<T>(
         &self,
         attempt: impl FnMut() -> Result<T, RuntimeError>,
@@ -45,7 +58,7 @@ impl CaptureBatchRetry {
     ) -> Result<T, RuntimeError> {
         loop {
             if self.cancel.is_cancelled() {
-                return Err(RuntimeError::Cancelled);
+                return self.observe(Err(RuntimeError::Cancelled));
             }
             if self
                 .deadline
@@ -67,11 +80,7 @@ impl CaptureBatchRetry {
                     }
                     wait(remaining.min(BUSY_RETRY_INTERVAL));
                 }
-                Ok(value) => {
-                    self.deadline.set(None);
-                    return Ok(value);
-                }
-                Err(error) => return Err(error),
+                result => return self.observe(result),
             }
         }
     }
@@ -106,6 +115,51 @@ mod tests {
             assert_eq!(attempts.get(), 2);
             assert_eq!(clock.get() - start, elapsed + BUSY_RETRY_INTERVAL);
         }
+    }
+
+    #[test]
+    fn non_busy_failure_ends_the_episode_before_a_later_batch() {
+        let retry = CaptureBatchRetry::default();
+        let start = Instant::now();
+        let clock = Cell::new(start);
+        let attempts = Cell::new(0);
+        assert!(matches!(
+            retry.run_with(
+                || {
+                    attempts.set(attempts.get() + 1);
+                    if attempts.get() == 1 {
+                        Err::<(), _>(RuntimeError::Storage(StorageError::FileLocked))
+                    } else {
+                        Err(RuntimeError::OperationCrashed)
+                    }
+                },
+                || clock.get(),
+                |wait| clock.set(clock.get() + wait),
+            ),
+            Err(RuntimeError::OperationCrashed)
+        ));
+        assert_eq!(attempts.get(), 2);
+        clock.set(start + Duration::from_secs(6));
+        attempts.set(0);
+        retry
+            .run_with(
+                || {
+                    attempts.set(attempts.get() + 1);
+                    if attempts.get() == 1 {
+                        Err(RuntimeError::Storage(StorageError::FileLocked))
+                    } else {
+                        Ok(())
+                    }
+                },
+                || clock.get(),
+                |wait| clock.set(clock.get() + wait),
+            )
+            .unwrap();
+        assert_eq!(attempts.get(), 2);
+        assert_eq!(
+            clock.get() - start,
+            Duration::from_secs(6) + BUSY_RETRY_INTERVAL
+        );
     }
 
     #[test]

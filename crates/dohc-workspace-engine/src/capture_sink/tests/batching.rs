@@ -259,3 +259,25 @@ fn capture_sink_cancellation_stops_an_inflight_busy_batch() {
     drop(sink);
     supervisor.close(&db).unwrap();
 }
+
+#[test]
+fn single_file_ingest_and_retire_end_the_shared_busy_episode() {
+    let scratch = ScratchDir::new().unwrap();
+    let supervisor = WorkspaceSupervisor::new();
+    let (db, mut sink) = sink_for(&scratch, &supervisor);
+    let hold = sink.actor.defer_link_drain_for_capture();
+    write_file(scratch.path(), "single.md", b"single");
+    sink.batch_retry.exhaust_for_test();
+    ingest(&mut sink, "single.md").unwrap();
+    sink.batch_retry.run(|| Ok(())).unwrap();
+    assert_eq!(snapshot(&db, "single.md").unwrap().text, "single");
+
+    std::fs::remove_file(scratch.path().join("single.md")).unwrap();
+    sink.batch_retry.exhaust_for_test();
+    sink.retire("single.md").unwrap();
+    sink.batch_retry.run(|| Ok(())).unwrap();
+    assert!(snapshot(&db, "single.md").is_none());
+    drop(hold);
+    drop(sink);
+    supervisor.close(&db).unwrap();
+}
