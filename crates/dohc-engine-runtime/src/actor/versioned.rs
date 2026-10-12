@@ -3607,6 +3607,38 @@ mod doc_cache_reset_tests {
         ));
     }
 
+    fn complete_checked_delete_materialization(store: &EngineStore, root: &std::path::Path) {
+        let job = store
+            .load_materialization_job("restore-delete-mat_restore-delete")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            dohc_engine_files::materialize::materialize_one_ordinary(
+                store,
+                root,
+                &job,
+                &dohc_engine_files::MaterializeOptions {
+                    policy: dohc_engine_files::DurabilityPolicy::per_os(),
+                    replacer: &dohc_engine_files::StdReplacer,
+                    backoff: &dohc_engine_files::NoBackoff,
+                    now_ms: 4,
+                    faults: &NoFaults,
+                },
+            )
+            .unwrap(),
+            dohc_engine_files::JobOutcome::AlreadyMaterialized
+        );
+        assert_eq!(
+            store
+                .load_materialization_job(&job.job_id)
+                .unwrap()
+                .unwrap()
+                .status,
+            JobStatus::Complete
+        );
+        assert!(!root.join("record.md").exists());
+    }
+
     fn checked_delete_replay(store: &mut EngineStore, root: &std::path::Path) {
         super::super::materialization::replay_pending_materializations(
             store,
@@ -3764,6 +3796,7 @@ mod doc_cache_reset_tests {
                     &expected,
                     FaultPoint::MaterializeAfterKnownCopyDeletion,
                 );
+                complete_checked_delete_materialization(&store, &root);
                 if failure == "commit" {
                     let armed = Arc::new(AtomicBool::new(true));
                     store
@@ -3836,6 +3869,7 @@ mod doc_cache_reset_tests {
                 &expected,
                 FaultPoint::MaterializeAfterKnownCopyDeletion,
             );
+            complete_checked_delete_materialization(&store, &root);
             create_checked_delete_version(&mut store);
             let switched = super::super::versions::switch_active_version_on_store(
                 &mut store,
@@ -3898,6 +3932,9 @@ mod doc_cache_reset_tests {
             for crash_finish in [false, true] {
                 let (root, mut store, input, expected) = checked_delete_fixture(binary);
                 crash_checked_delete(&root, &mut store, &input, &expected, point);
+                if point == FaultPoint::MaterializeAfterKnownCopyDeletion {
+                    complete_checked_delete_materialization(&store, &root);
+                }
                 change_checked_delete_content(&mut store, &root, binary);
                 dohc_engine_files::recover_displacements(
                     &store,
