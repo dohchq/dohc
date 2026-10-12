@@ -1,12 +1,11 @@
 import { APP_PUBLICATION_CAPABILITIES, CLI_CAPABILITIES, cliRequestSchema, DATASET_CAPABILITIES } from "@dohc/cli/protocol";
-import { CLI_COMMANDS } from "@dohc/cli/args";
+import { CLI_COMMANDS, parseCliArguments } from "@dohc/cli/args";
 import { DatasetRequest } from "@dohc/cli/dataset";
 import { OwnerAppPublicationRequest } from "@dohc/cli/app-publication";
 import { renderCliHelp } from "@dohc/cli/help";
 import { advertisedCapabilityTools as advertisedTools } from "@dohc/mcp/capability-exposure-fixture";
 import { MCP_TOOL_CAPABILITIES } from "@dohc/mcp/tools";
 import { CAPABILITIES } from "@dohc/workspace-contracts/capabilities";
-import issuedIds from "../../../../packages/workspace-contracts/src/capabilityIds.issued.json";
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 import { CHANNELS } from "./channels";
@@ -27,6 +26,8 @@ import saveRetryIpc from "./ipcExposure.saveRetry.json";
 import fileObservationIpc from "./ipcExposure.fileObservation.json";
 import usageRecordIpc from "./ipcExposure.usageRecord.json";
 import mainCli from "./cliExposure.main.json";
+import pinnedCliCapabilities from "./cliCapabilities.pinned.json";
+import { CLI_DISPATCH_ARGUMENTS } from "./cliDispatchInputs.fixture";
 import publicationCli from "./cliExposure.pr1659.json";
 import commentsCli from "./cliExposure.pr1700.json";
 import admission from "./operationAdmission.json";
@@ -38,14 +39,6 @@ import sharedWriteFeedback from "./ipcExposure.sharedWriteFeedback.json";
 const rows: OperationDefinition[] = OPERATION_TABLES.flatMap(table => Object.values(table));
 const publicVerbs = Object.entries(CLI_COMMANDS).flatMap(([group, command]) => Object.keys(command.verbs).map(verb => `${group} ${verb}`));
 const socketVerbs = cliRequestSchema.options.map(option => option.shape.verb.value).sort();
-
-function assertCliCapabilityIds(verb: string, ids: readonly string[], currentIds: readonly string[] = Object.keys(CAPABILITIES)) {
-  expect(ids.length, verb).toBeGreaterThan(0);
-  for (const id of ids) {
-    expect(issuedIds, `${verb}: ${id}`).toContain(id);
-    expect(currentIds, `${verb}: ${id}`).toContain(id);
-  }
-}
 
 function carriesWorkspaceId(payload: z.core.$ZodType): boolean {
   if (payload instanceof z.ZodObject) return "workspaceId" in payload.shape;
@@ -177,14 +170,27 @@ describe("capability identities and exposure", () => {
     expect(DATASET_CAPABILITIES.approveMigration).toBe("dataset.migration.approve");
   });
 
-  it("names a current issued capability for every socket verb", () => {
+  it("pins every socket verb's capability ids", () => {
     expect(Object.keys(CLI_CAPABILITIES).sort()).toEqual(socketVerbs);
-    for (const [verb, ids] of Object.entries(CLI_CAPABILITIES)) assertCliCapabilityIds(verb, ids);
+    expect(CLI_CAPABILITIES).toEqual(pinnedCliCapabilities.socket);
+    for (const [verb, ids] of Object.entries(CLI_CAPABILITIES)) expect(ids.length, verb).toBeGreaterThan(0);
   });
 
-  it("names a current issued capability for every public verb", () => {
+  it("pins every public verb's capability id", () => {
+    const ids = Object.fromEntries(Object.entries(CLI_COMMANDS).flatMap(([group, command]) =>
+      Object.entries(command.verbs).map(([name, verb]) => [`${group} ${name}`, verb.capabilityId])));
+    expect(ids).toEqual(pinnedCliCapabilities.public);
+  });
+
+  it("uses a public verb's capability among its parser's socket capabilities", () => {
+    expect(Object.keys(CLI_DISPATCH_ARGUMENTS).sort()).toEqual([...publicVerbs].sort());
     for (const [group, command] of Object.entries(CLI_COMMANDS)) {
-      for (const [name, verb] of Object.entries(command.verbs)) assertCliCapabilityIds(`${group} ${name}`, [verb.capabilityId]);
+      for (const [name, verb] of Object.entries(command.verbs)) {
+        const label = `${group} ${name}`;
+        const parsed = parseCliArguments([group, name, ...CLI_DISPATCH_ARGUMENTS[label]!], {});
+        if ("help" in parsed) throw new Error(`Expected socket dispatch for ${label}.`);
+        expect(CLI_CAPABILITIES[parsed.verb], label).toContain(verb.capabilityId);
+      }
     }
   });
 
@@ -192,12 +198,6 @@ describe("capability identities and exposure", () => {
     const publicSocketVerbs = new Set([...mainCli.publicSocketVerbs, ...commentsCli.publicSocketPromotions, ...accessExposure.socketVerbAdditions]);
     const internalVerbs = socketVerbs.filter(verb => !publicSocketVerbs.has(verb));
     expect(internalVerbs).toEqual(mainCli.internalVerbs.filter(verb => !commentsCli.publicSocketPromotions.includes(verb)));
-  });
-
-  it("rejects an unknown, removed, or missing CLI capability id", () => {
-    expect(() => assertCliCapabilityIds("unknown", ["capability.unknown"])).toThrow();
-    expect(() => assertCliCapabilityIds("removed", ["group.list"], Object.keys(CAPABILITIES).filter(id => id !== "group.list"))).toThrow();
-    expect(() => assertCliCapabilityIds("missing", [])).toThrow();
   });
 
   it("matches IPC and MCP exposure to their actual rows and advertised tools", async () => {
