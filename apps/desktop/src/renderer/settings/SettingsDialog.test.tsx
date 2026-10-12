@@ -1336,13 +1336,116 @@ describe("SettingsDialog", () => {
       />,
     );
 
-    expect((await screen.findByTestId("mcp-load-error")).textContent).toContain(
-      "Could not load agent settings.",
-    );
-    expect(onError).toHaveBeenCalledWith("MCP unavailable", expect.any(Error));
+    expect((await screen.findByTestId("mcp-load-error")).textContent).toBe("Retry");
+    expect(onError).toHaveBeenCalledWith("MCP unavailable", expect.any(Error), expect.any(Function));
     await user.click(screen.getByRole("button", { name: "Retry" }));
     await waitFor(() => expect(screen.queryByTestId("mcp-load-error")).toBeNull());
     expect(screen.getByTestId("mcp-config-snippet").textContent).toContain("dohc-mcp");
+  });
+
+  it("retries a refused stop's original run from its notice after Settings closes", async () => {
+    runActive = true;
+    const user = userEvent.setup();
+    const onError = vi.fn();
+    const cause = new Error("Repair .dohc/agent-runs.json, then try again.");
+    bridge.endAgentRun.mockImplementationOnce(async () => {
+      runActive = false;
+      throw cause;
+    });
+    const view = render(
+      <SettingsDialog workspaceId="ws-1" workspacePath="/x" initialSection="agents" onError={onError} onClose={() => {}} />,
+    );
+    await waitFor(() => expect(screen.getByTestId("mcp-status").getAttribute("data-state")).toBe("running"));
+    await user.click(screen.getByTestId("mcp-enable-toggle"));
+    await waitFor(() => expect(screen.getByTestId("mcp-status").getAttribute("data-state")).toBe("stopped"));
+    const retry = onError.mock.calls[0]?.[2];
+    expect(retry).toBeTypeOf("function");
+    view.unmount();
+    await act(async () => { await retry(); });
+    expect(bridge.endAgentRun).toHaveBeenNthCalledWith(2, { workspaceId: "ws-1", runId: "run-1" });
+    expect(bridge.startAgentRun).not.toHaveBeenCalled();
+  });
+
+  it("retries the terminal history write instead of starting a replacement run", async () => {
+    runActive = true;
+    const user = userEvent.setup();
+    bridge.endAgentRun.mockImplementationOnce(async () => {
+      runActive = false;
+      throw new Error("Repair .dohc/agent-runs.json, then try again.");
+    });
+    render(<SettingsDialog workspaceId="ws-1" workspacePath="/x" initialSection="agents" onError={vi.fn()} onClose={() => {}} />);
+    await waitFor(() => expect(screen.getByTestId("mcp-status").getAttribute("data-state")).toBe("running"));
+    await user.click(screen.getByTestId("mcp-enable-toggle"));
+    await waitFor(() => expect(screen.getByTestId("mcp-status").getAttribute("data-state")).toBe("stopped"));
+    await user.click(screen.getByRole("button", { name: "Retry" }));
+    await waitFor(() => expect(bridge.endAgentRun).toHaveBeenCalledTimes(2));
+    expect(bridge.endAgentRun).toHaveBeenLastCalledWith({ workspaceId: "ws-1", runId: "run-1" });
+    expect(bridge.startAgentRun).not.toHaveBeenCalled();
+  });
+
+  it("queues a notice retry behind a refused stop's pending status read", async () => {
+    runActive = true;
+    const user = userEvent.setup();
+    const onError = vi.fn();
+    render(<SettingsDialog workspaceId="ws-1" workspacePath="/x" initialSection="agents" onError={onError} onClose={() => {}} />);
+    await waitFor(() => expect(screen.getByTestId("mcp-status").getAttribute("data-state")).toBe("running"));
+    const recovery = deferred<Awaited<ReturnType<typeof bridge.getAgentRunStatus>>>();
+    bridge.endAgentRun.mockImplementationOnce(async () => {
+      runActive = false;
+      throw new Error("Repair .dohc/agent-runs.json, then try again.");
+    });
+    bridge.getAgentRunStatus
+      .mockResolvedValueOnce({ activeRun: { id: "run-1", startedAt: 1, agentId: "dohc-mcp", onBehalfOf: "local", status: "running" }, lastRun: null })
+      .mockImplementationOnce(() => recovery.promise);
+    await user.click(screen.getByTestId("mcp-enable-toggle"));
+    await waitFor(() => expect(onError).toHaveBeenCalledOnce());
+    const retried = onError.mock.calls[0]?.[2]();
+    expect(bridge.endAgentRun).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      recovery.resolve({ activeRun: null, lastRun: null });
+      await retried;
+    });
+    expect(bridge.endAgentRun).toHaveBeenCalledTimes(2);
+    expect(bridge.endAgentRun).toHaveBeenLastCalledWith({ workspaceId: "ws-1", runId: "run-1" });
+  });
+
+  it("keeps a stopped run's retry bound to its ID when another run starts", async () => {
+    runActive = true;
+    const user = userEvent.setup();
+    const onError = vi.fn();
+    bridge.endAgentRun.mockImplementationOnce(async () => {
+      runActive = false;
+      throw new Error("Repair .dohc/agent-runs.json, then try again.");
+    });
+    const view = render(<SettingsDialog workspaceId="ws-1" workspacePath="/x" initialSection="agents" onError={onError} onClose={() => {}} />);
+    await waitFor(() => expect(screen.getByTestId("mcp-status").getAttribute("data-state")).toBe("running"));
+    await user.click(screen.getByTestId("mcp-enable-toggle"));
+    await waitFor(() => expect(screen.getByTestId("mcp-status").getAttribute("data-state")).toBe("stopped"));
+    bridge.getAgentRunStatus.mockResolvedValueOnce({
+      activeRun: { id: "run-new", startedAt: 2, agentId: "dohc-mcp", onBehalfOf: "local", status: "running" }, lastRun: null,
+    });
+    await act(async () => { await onError.mock.calls[0]?.[2](); });
+    expect(bridge.endAgentRun).toHaveBeenNthCalledWith(2, { workspaceId: "ws-1", runId: "run-1" });
+    expect(screen.getByTestId("mcp-status").getAttribute("data-state")).toBe("running");
+    view.unmount();
+  });
+
+  it("retries only the read after a successful start", async () => {
+    const user = userEvent.setup();
+    const onError = vi.fn();
+    render(<SettingsDialog workspaceId="ws-1" workspacePath="/x" initialSection="agents" onError={onError} onClose={() => {}} />);
+    await screen.findByTestId("mcp-config-snippet");
+    bridge.startAgentRun.mockImplementationOnce(async () => {
+      runActive = true;
+      bridge.getMcpConfig.mockRejectedValueOnce(new Error("MCP unavailable"));
+      return { id: "run-1", startedAt: 1, agentId: "dohc-mcp", onBehalfOf: "local", status: "running" as const };
+    });
+    await user.click(screen.getByTestId("mcp-enable-toggle"));
+    await waitFor(() => expect(onError).toHaveBeenCalledOnce());
+    await act(async () => { await onError.mock.calls[0]?.[2](); });
+    expect(bridge.startAgentRun).toHaveBeenCalledTimes(1);
+    expect(bridge.endAgentRun).not.toHaveBeenCalled();
+    expect(screen.queryByTestId("mcp-load-error")).toBeNull();
   });
 
   it("reports an agent history mutation refusal through the notice hook", async () => {
@@ -1356,9 +1459,9 @@ describe("SettingsDialog", () => {
     await screen.findByTestId("mcp-config-snippet");
     expect(screen.getByTestId("mcp-enable-toggle").textContent).toBe("Start run");
     await user.click(screen.getByTestId("mcp-enable-toggle"));
-    await waitFor(() => expect(onError).toHaveBeenCalledWith(cause.message, cause));
+    await waitFor(() => expect(onError).toHaveBeenCalledWith(cause.message, cause, expect.any(Function)));
     expect(screen.getByTestId("mcp-status").getAttribute("data-state")).toBe("stopped");
-    expect(screen.getByTestId("mcp-load-error").textContent).toContain("Could not start the agent run.");
+    expect(screen.getByTestId("mcp-load-error").textContent).toBe("Retry");
   });
 
   it.each([
@@ -1389,8 +1492,8 @@ describe("SettingsDialog", () => {
     expect(bridge.startAgentRun).not.toHaveBeenCalled();
     expect(bridge.endAgentRun).not.toHaveBeenCalled();
     expect(onAgentActiveChange).not.toHaveBeenCalled();
-    expect(onError).toHaveBeenCalledExactlyOnceWith("dohc could not load agent settings.", cause);
-    expect(screen.getByTestId("mcp-load-error").textContent).toContain("Could not load agent settings.");
+    expect(onError).toHaveBeenCalledExactlyOnceWith("dohc could not load agent settings.", cause, expect.any(Function));
+    expect(screen.getByTestId("mcp-load-error").textContent).toBe("Retry");
     expect(screen.getByTestId("mcp-status").getAttribute("data-state")).toBe(state);
   });
 
@@ -1425,8 +1528,8 @@ describe("SettingsDialog", () => {
     );
     expect(onAgentActiveChange).not.toHaveBeenCalledWith(expect.objectContaining({ mutated: true }));
     expect(screen.getByTestId("mcp-status").getAttribute("data-state")).toBe("stopped");
-    expect(onError).toHaveBeenCalledExactlyOnceWith(cause.message, cause);
-    expect(screen.getByTestId("mcp-load-error").textContent).toContain("Could not stop the agent run.");
+    expect(onError).toHaveBeenCalledExactlyOnceWith(cause.message, cause, expect.any(Function));
+    expect(screen.getByTestId("mcp-load-error").textContent).toBe("Retry");
   });
 
   it("keeps a run active when its stop refuses the attribution clear and status still says running", async () => {
@@ -1455,10 +1558,10 @@ describe("SettingsDialog", () => {
     );
     expect(onAgentActiveChange).toHaveBeenCalledOnce();
     expect(bridge.endAgentRun).toHaveBeenCalledWith({ workspaceId: "ws-1", runId: "run-1" });
-    expect(onError).toHaveBeenCalledExactlyOnceWith(cause.message, cause);
+    expect(onError).toHaveBeenCalledExactlyOnceWith(cause.message, cause, expect.any(Function));
     expect(screen.getByTestId("mcp-status").getAttribute("data-state")).toBe("running");
     expect(screen.getByTestId("mcp-enable-toggle").textContent).toBe("Stop run");
-    expect(screen.getByTestId("mcp-load-error").textContent).toContain("Could not stop the agent run.");
+    expect(screen.getByTestId("mcp-load-error").textContent).toBe("Retry");
   });
 
   it("keeps Retry from racing a refused stop's pending recovery read", async () => {
@@ -1489,7 +1592,7 @@ describe("SettingsDialog", () => {
       }))
       .mockImplementationOnce(() => recovery.promise);
     await user.click(screen.getByTestId("mcp-enable-toggle"));
-    await waitFor(() => expect(onError).toHaveBeenCalledExactlyOnceWith(cause.message, cause));
+    await waitFor(() => expect(onError).toHaveBeenCalledExactlyOnceWith(cause.message, cause, expect.any(Function)));
     const retry = screen.getByRole("button", { name: "Retry" });
     expect(retry.hasAttribute("disabled")).toBe(true);
     // A newer read lands while the recovery is still pending.
@@ -1497,7 +1600,7 @@ describe("SettingsDialog", () => {
     await user.click(retry);
     await act(async () => {});
     expect(screen.getByTestId("mcp-status").getAttribute("data-state")).toBe("running");
-    expect(screen.getByTestId("mcp-load-error").textContent).toContain("Could not stop the agent run.");
+    expect(screen.getByTestId("mcp-load-error").textContent).toBe("Retry");
     await act(async () => {
       recovery.resolve({
         activeRun: { id: "run-1", startedAt: 1, agentId: "dohc-mcp", onBehalfOf: "local", status: "running" },
@@ -1507,7 +1610,7 @@ describe("SettingsDialog", () => {
     });
     await waitFor(() => expect(screen.getByTestId("mcp-enable-toggle").hasAttribute("disabled")).toBe(false));
     expect(onAgentActiveChange).toHaveBeenLastCalledWith({ active: true, mutated: false });
-    expect(screen.getByTestId("mcp-load-error").textContent).toContain("Could not stop the agent run.");
+    expect(screen.getByTestId("mcp-load-error").textContent).toBe("Retry");
     // Once the recovery settles, Retry reads the newer status.
     await user.click(screen.getByRole("button", { name: "Retry" }));
     await waitFor(() =>
@@ -1555,7 +1658,7 @@ describe("SettingsDialog", () => {
       expect(onAgentActiveChange).toHaveBeenLastCalledWith({ active: true, mutated: true }),
     );
     expect(screen.getByTestId("mcp-status").getAttribute("data-state")).toBe("running");
-    expect(onError).toHaveBeenCalledExactlyOnceWith(loadFailure.message, loadFailure);
+    expect(onError).toHaveBeenCalledExactlyOnceWith(loadFailure.message, loadFailure, expect.any(Function));
   });
 
   it("does not let an old workspace's late Retry re-enable a new workspace's pending toggle", async () => {
@@ -1616,8 +1719,8 @@ describe("SettingsDialog", () => {
         expect(onAgentActiveChange).toHaveBeenLastCalledWith({ active: true, mutated: true }),
       );
       expect(screen.getByTestId("mcp-status").getAttribute("data-state")).toBe("running");
-      expect(onError).toHaveBeenCalledExactlyOnceWith(configFailure.message, configFailure);
-      expect(screen.getByTestId("mcp-load-error").textContent).toContain("Could not load agent settings.");
+      expect(onError).toHaveBeenCalledExactlyOnceWith(configFailure.message, configFailure, expect.any(Function));
+      expect(screen.getByTestId("mcp-load-error").textContent).toBe("Retry");
     } finally {
       bridge.getMcpConfig.mockImplementation(getDefaultMcpConfig);
     }
@@ -1651,8 +1754,8 @@ describe("SettingsDialog", () => {
     // Neither panel read confirmed the run, so the shell gets an observation
     // and rereads for itself.
     expect(onAgentActiveChange).toHaveBeenCalledWith(expect.objectContaining({ mutated: false }));
-    expect(onError).toHaveBeenCalledExactlyOnceWith(statusFailure.message, statusFailure);
-    expect(screen.getByTestId("mcp-load-error").textContent).toContain("Could not load agent settings.");
+    expect(onError).toHaveBeenCalledExactlyOnceWith(statusFailure.message, statusFailure, expect.any(Function));
+    expect(screen.getByTestId("mcp-load-error").textContent).toBe("Retry");
   });
 
   it("ignores a started run's failed recovery read after switching workspaces", async () => {
@@ -1712,7 +1815,7 @@ describe("SettingsDialog", () => {
         expect(onAgentActiveChange).toHaveBeenLastCalledWith({ active: false, mutated: false }),
       );
       expect(screen.getByTestId("mcp-status").getAttribute("data-state")).toBe("stopped");
-      expect(onError).toHaveBeenCalledExactlyOnceWith(cause.message, cause);
+      expect(onError).toHaveBeenCalledExactlyOnceWith(cause.message, cause, expect.any(Function));
       expect(screen.getByTestId("mcp-config-snippet").textContent).toContain("dohc-mcp");
     } finally {
       bridge.getMcpConfig.mockImplementation(getDefaultMcpConfig);
@@ -1749,10 +1852,10 @@ describe("SettingsDialog", () => {
     await user.click(screen.getByTestId("mcp-enable-toggle"));
     await waitFor(() => expect(bridge.getAgentRunStatus).toHaveBeenCalledTimes(statusReads + 2));
     await waitFor(() => expect(screen.getByTestId("mcp-enable-toggle").hasAttribute("disabled")).toBe(false));
-    expect(onError).toHaveBeenCalledExactlyOnceWith(cause.message, cause);
+    expect(onError).toHaveBeenCalledExactlyOnceWith(cause.message, cause, expect.any(Function));
     expect(onAgentActiveChange).not.toHaveBeenCalled();
     expect(screen.getByTestId("mcp-status").getAttribute("data-state")).toBe("running");
-    expect(screen.getByTestId("mcp-load-error").textContent).toContain("Could not stop the agent run.");
+    expect(screen.getByTestId("mcp-load-error").textContent).toBe("Retry");
   });
 
   it("ignores a refused stop's late recovery read after switching workspaces", async () => {
@@ -1775,7 +1878,7 @@ describe("SettingsDialog", () => {
       }))
       .mockImplementationOnce(() => recovery.promise);
     await user.click(screen.getByTestId("mcp-enable-toggle"));
-    await waitFor(() => expect(onError).toHaveBeenCalledExactlyOnceWith(cause.message, cause));
+    await waitFor(() => expect(onError).toHaveBeenCalledExactlyOnceWith(cause.message, cause, expect.any(Function)));
     view.rerender(<SettingsDialog workspaceId="ws-2" {...props} />);
     await waitFor(() =>
       expect(bridge.getAgentRunStatus).toHaveBeenLastCalledWith({ workspaceId: "ws-2" }),
