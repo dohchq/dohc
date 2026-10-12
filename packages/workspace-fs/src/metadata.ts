@@ -68,6 +68,6 @@ export function isTextMediaType(mediaType: string, path = "") {
       type === "application/csv" ||
       type === "application/x-csv" ||
       isSiteSourcePath(path) ||
-      [".json", ".jsonl", ".ndjson", ".csv", ".excalidraw", ".md", ".markdown", ".sh", ".txt"].includes(extension))
+      [".json", ".geojson", ".json5", ".json-seq", ".jsonl", ".ndjson", ".csv", ".excalidraw", ".md", ".markdown", ".sh", ".txt"].includes(extension))
   );
 }

@@ -66,7 +66,18 @@ pub fn is_text_media_type(media_type: &str, rel_path: &str) -> bool {
         || is_site_source_path(rel_path)
         || matches!(
             extension,
-            "json" | "jsonl" | "ndjson" | "csv" | "excalidraw" | "md" | "markdown" | "sh" | "txt"
+            "json"
+                | "geojson"
+                | "json5"
+                | "json-seq"
+                | "jsonl"
+                | "ndjson"
+                | "csv"
+                | "excalidraw"
+                | "md"
+                | "markdown"
+                | "sh"
+                | "txt"
         )
 }
 
