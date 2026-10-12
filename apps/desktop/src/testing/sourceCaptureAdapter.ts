@@ -16,6 +16,13 @@ export function sourceCaptureAdapter(sources: ReadonlyMap<string, string | Uint8
   return new VersionedLiveAdapter({ close() {}, async sendRequest(request) {
     const params = request.params as Record<string, unknown>;
     options.onRequest?.(request.method, params);
+    if (request.method === "files.resolve") {
+      const targets = params.targets as Array<{ path?: string; objectId?: string }>;
+      return { id: request.id, result: { versionId: String(params.versionId ?? "main"), results: targets.map(target => {
+        const path = target.path ?? target.objectId;
+        return path && sources.has(path) ? { status: "found", objectId: path, path } : { status: "absent" };
+      }) } };
+    }
     if (request.method === "versionedText.list") {
       const after = typeof params.afterPath === "string" ? params.afterPath : "", limit = Number(params.limit ?? 500);
       const rest = [...sources.keys()].filter(path => path > after).sort();

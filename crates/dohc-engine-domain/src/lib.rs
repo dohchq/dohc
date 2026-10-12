@@ -36,6 +36,7 @@ pub mod normalize;
 pub mod records;
 pub mod secrets;
 pub mod store;
+pub use store::{FileResolution, FileResolveTarget};
 
 pub use automations::{
     AUTOMATION_CHAIN_DEPTH_CAP, AUTOMATION_CHAIN_STOPPED, AUTOMATION_GROUP_COVERAGE_MS,

@@ -25,6 +25,16 @@ export async function hasAccessChat(workspaceId: string, channelWireId: string,
   return false;
 }
 
+export async function resolveAccessFileObject(workspace: Pick<RegistryEntry, "workspaceId">, objectId: string,
+  runAdapter: <T>(work: (adapter: Pick<VersionedLiveAdapter, "resolveFiles">) => Promise<T>) => Promise<T | null>,
+  signal: AbortSignal): Promise<{ path: string; versionId: string } | null> {
+  const resolved = await runAdapter(adapter =>
+    adapter.resolveFiles({ workspaceId: workspace.workspaceId, targets: [{ objectId }], signal }));
+  if (!resolved) throw new Error("File aliases are unavailable.");
+  const [file] = resolved.results;
+  return file?.status === "found" ? { path: file.path, versionId: resolved.versionId } : null;
+}
+
 export async function resolveAccessObject(workspace: RegistryEntry, ref: AccessObjectRef, ports: {
   filePathForObjectId(objectId: string): Promise<{ path: string; versionId: string } | null>;
   locatePath(path: string, versionId: string | null): Promise<{ path: string; exists: boolean } | null>;
