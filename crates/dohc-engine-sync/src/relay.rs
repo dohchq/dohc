@@ -1639,6 +1639,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         leases: &dyn crate::LeaseProbe,
         now_ms: i64,
     ) -> Result<SyncPassOutcome, RelayError> {
+        crate::passive_projection::flush(store, workspace_id, faults).map_err(local)?;
         let identity = read_sync_identity(store, workspace_id)
             .map_err(local)?
             .ok_or(RelayError::InvalidResponse)?;
@@ -1840,6 +1841,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             }
             retryable = still_retryable;
         }
+        crate::passive_projection::flush(store, workspace_id, faults).map_err(local)?;
         crate::ydoc_apply::drain_inactive_ydoc_updates(store, workspace_id, faults)
             .map_err(local)?;
         let mut settlements = match crate::moment_apply::pending::drain_and_claim(

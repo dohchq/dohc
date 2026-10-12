@@ -2688,6 +2688,54 @@ pub fn load_doc_in(conn: &Connection, key: &DocKey) -> Result<Ydoc, CollabError>
     Ok(doc)
 }
 
+/// Reconstruct a retained prefix for a private text cut. This is a read-only
+/// consumer, never a gate base or a source of durable lineage bytes.
+pub fn load_doc_prefix_in(
+    conn: &Connection,
+    key: &DocKey,
+    through: i64,
+) -> Result<Ydoc, CollabError> {
+    let marker = read_marker_in(conn, key)?.ok_or(CollabError::NoMarker)?;
+    if through < 0 || through > marker.head_update_seq {
+        return Err(CollabError::Corrupt {
+            reason: "projection prefix is outside the lineage".into(),
+        });
+    }
+    let snapshot: Option<(i64, String)> = conn
+        .query_row(
+            "SELECT up_to_seq,snapshot_blob_sha256 FROM ydoc_snapshots \
+         WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND up_to_seq<=?4 \
+         ORDER BY up_to_seq DESC LIMIT 1",
+            rusqlite::params![key.workspace_id, key.version_id, key.object_id, through],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(map_sql)?;
+    let mut seq = snapshot.as_ref().map_or(0, |(seq, _)| *seq);
+    let doc = Ydoc::wire();
+    if let Some((_, sha)) = snapshot {
+        doc.apply(&binary_blob_for_gate(conn, &sha)?)?;
+    }
+    for (next, sha) in updates_after(conn, key, seq)? {
+        if next > through {
+            break;
+        }
+        if next != seq + 1 {
+            return Err(CollabError::Corrupt {
+                reason: "projection prefix was pruned".into(),
+            });
+        }
+        doc.apply(&binary_blob_for_gate(conn, &sha)?)?;
+        seq = next;
+    }
+    if seq != through {
+        return Err(CollabError::Corrupt {
+            reason: "projection prefix is incomplete".into(),
+        });
+    }
+    Ok(doc)
+}
+
 pub(crate) fn binary_blob_for_gate(conn: &Connection, sha: &str) -> Result<Vec<u8>, CollabError> {
     let bytes: Vec<u8> = conn
         .query_row(

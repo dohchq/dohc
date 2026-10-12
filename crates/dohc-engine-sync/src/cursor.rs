@@ -93,7 +93,8 @@ pub fn commit_relay_cursor(
         "stream_identity must be non-empty and bounded",
     )?;
     let passive = store.is_passive();
-    store
+    crate::passive_projection::flush(store, workspace_id, faults)?;
+    let outcome = store
         .write_with(faults, |tx| {
             let was_enrolled =
                 crate::workspace_replicates_with_relay_in_tx(tx, workspace_id)?;
@@ -152,7 +153,11 @@ pub fn commit_relay_cursor(
                 .map_err(SyncError::persist)?;
             }
             Ok::<_, SyncError>(sharing_declined)
-    })
+    })?;
+    if passive && matches!(outcome, TxnOutcome::Committed(_)) {
+        store.checkpoint_passive()?;
+    }
+    Ok(outcome)
 }
 
 fn parse_relay_cursor(value: &str) -> Result<i64, SyncError> {
