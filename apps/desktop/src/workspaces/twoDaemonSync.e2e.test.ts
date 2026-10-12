@@ -16,7 +16,7 @@ import * as Y from "yjs";
 import { patchFrontmatter } from "@dohc/ydoc-projection/frontmatter-map";
 import { markdownToYDoc, yDocToMarkdown } from "@dohc/ydoc-projection";
 import { createLocalChangeAuthor } from "@dohc/workspace-core";
-import { DaemonRefusalError, openEngineYdocProviderSession, YdocAdapterError, YdocOwnerDraftPendingError, VersionedLiveAdapter, WorkspaceDaemonRequester, type AutomationClaim } from "@dohc/workspace-engine-client";
+import { DaemonRefusalError, OwnerYDocOutbox, openEngineYdocProviderSession, YdocAdapterError, YdocOwnerDraftPendingError, VersionedLiveAdapter, WorkspaceDaemonRequester, type AutomationClaim } from "@dohc/workspace-engine-client";
 import { parseAutomationsFile } from "@dohc/workspace-contracts/automations";
 import { collectionRecordWrites } from "@dohc/automation-executor/collection-record-edits";
 import { createAutomationRunStore } from "@dohc/automation-executor/automation-run-store";
@@ -511,6 +511,13 @@ it.skipIf(engine.missing).each([
       await capture.flush();
       expect((await adapter.listPendingCollectionAdoptions()).adoptions).toEqual([pending]);
     }
+    if (hasId) {
+      const db = new DatabaseSync(join(rootA, SECRET_FILE_STORE_RELATIVE_PATH), {readOnly: true});
+      const outboxId = String(db.prepare("SELECT outbox_id FROM owner_ydoc_outboxes WHERE workspace_id=? AND object_id=? AND pending_bytes>0").get(workspaceId, document.binding.objectId)!.outbox_id);
+      db.close();
+      const pending = await source.sessions.run(source.workspace, async ({client, workspace}) => new OwnerYDocOutbox(client, workspace).readPending(outboxId));
+      expect(pending.entries.some(entry => entry.personEdit)).toBe(true);
+    }
     await expect(session.settleNow()).rejects.toMatchObject({name: "YdocOwnerDraftPendingError"});
     expect((await adapter.listPendingCollectionAdoptions()).adoptions).toHaveLength(1);
     await capture.flush();
@@ -569,8 +576,8 @@ it.skipIf(engine.missing).each([
     const ownerSettlement = (await capture.listMoments({limit: 100})).moments.find(moment => moment.path === path);
     expect(ownerSettlement).toBeDefined();
     // The test relay uses the account id as its name; the longest fixture exceeds the display-name limit.
-    const ownerAuthors = [{kind: "human", humanId: workspaceId, humanName: name === "id-less non-canonical" ? "Unnamed" : workspaceId}];
-    const confirmedOwnerAuthors = ownerAuthors.map(author => ({...author, relayConfirmed: true}));
+    const ownerAuthors = hasId ? [{kind: "human", humanId: workspaceId, humanName: workspaceId}] : [{kind: "unattributed"}];
+    const confirmedOwnerAuthors = hasId ? ownerAuthors.map(author => ({...author, relayConfirmed: true})) : ownerAuthors;
     expect.soft(ownerSettlement!.authors).toEqual(confirmedOwnerAuthors);
     const publicationDb = new DatabaseSync(join(rootA, SECRET_FILE_STORE_RELATIVE_PATH), {readOnly: true});
     try {

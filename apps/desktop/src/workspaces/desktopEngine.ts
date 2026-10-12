@@ -118,6 +118,7 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
   let serverOwnerUnavailable = false;
   let activeOwnerWorkspace: string | undefined;
   const failedOwnerDocuments = new Map<string, Set<string>>();
+  const frozenOwnerDocuments = new Map<string, Set<string>>();
   const ownerDeliveryReason = new Map<string, OwnerLiveDeliveryReason>();
   const setOwnerDeliveryStatus = (workspaceId: string, status: OwnerLiveDeliveryStatus | undefined, reason?: OwnerLiveDeliveryReason) => {
     if (ownerDeliveryStatus.get(workspaceId) === status && ownerDeliveryReason.get(workspaceId) === reason) return;
@@ -129,6 +130,7 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
     ownerDeliveryGeneration += 1;
     for (const id of ownerDeliveryStatus.keys()) setOwnerDeliveryStatus(id, undefined);
     failedOwnerDocuments.clear();
+    frozenOwnerDocuments.clear();
     const previous = ownerDelivery;
     ownerDelivery = undefined;
     if (previous) ownerDeliverySettled = Promise.all([ownerDeliverySettled, previous.stop()]).then(() => undefined);
@@ -168,8 +170,11 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
               const reason = rows.some(row => row.status === "unavailable" && row.reason === "workspace-changed") ? "workspace-changed" :
                 rows.some(row => row.status === "unavailable" && row.reason === "document-unavailable") ? "document-unavailable" : undefined;
               const failures = failedOwnerDocuments.get(workspaceId) ?? new Set<string>();
+              const frozen = frozenOwnerDocuments.get(workspaceId) ?? new Set<string>();
               for (const path of failures) if (!documents.some(document => document.binding.currentPath === path)) failures.delete(path);
+              for (const path of frozen) if (!documents.some(document => document.binding.currentPath === path)) frozen.delete(path);
               failedOwnerDocuments.set(workspaceId, failures);
+              frozenOwnerDocuments.set(workspaceId, frozen);
               if (!documents.length) {
                 setOwnerDeliveryStatus(workspaceId, unavailable ? "retrying" : preparing ? "preparing" : undefined, reason);
                 return {documentCount: 0, acknowledged: false};
@@ -193,9 +198,11 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
               check();
               if (result === "retry" || result === "frozen") failures.add(document.binding.currentPath);
               else failures.delete(document.binding.currentPath);
+              if (result === "frozen") frozen.add(document.binding.currentPath);
+              else if (result !== "retry") frozen.delete(document.binding.currentPath);
               if (result === "acknowledged" || result === "frozen") notifyRenderer({workspaceId});
               setOwnerDeliveryStatus(workspaceId, failures.size || unavailable ? "retrying" : preparing ? "preparing" : "active",
-                result === "frozen" ? "document-unavailable" : reason);
+                frozen.size ? "document-unavailable" : reason);
               return {documentCount: documents.length, acknowledged: result === "acknowledged"};
               } catch (error) {
                 if (!operation.signal.aborted && !session.signal.aborted && generation === ownerDeliveryGeneration && !isQuitting()) {

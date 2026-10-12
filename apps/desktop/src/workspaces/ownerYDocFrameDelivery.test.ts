@@ -12,7 +12,7 @@ const frames = {receive: {maxFrameBytes: 4096, maxStateVectorBytes: 1024, maxUpd
   maxQueuedBytes: 4096, maxQueuedFrames: 32, maxControlBytes: 4096, maxControlFrames: 8, maxAssemblyBytes: 4096};
 const hash = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
 const envelope: OwnerYDocDeliveryEnvelope = {outboxId: "outbox", binding, baseUpdate: new Uint8Array([0,0]), baseUpdateDigest: hash(new Uint8Array([0,0])),
-  sequence: 4, appendKey: "append", deliveryId: "stable-delivery", update: new Uint8Array([1,2,3]), updateDigest: hash(new Uint8Array([1,2,3]))};
+  personEdit: true, sequence: 4, appendKey: "append", deliveryId: "stable-delivery", update: new Uint8Array([1,2,3]), updateDigest: hash(new Uint8Array([1,2,3]))};
 function deferred<T>() {let resolve!: (value: T) => void; const promise = new Promise<T>(done => {resolve = done;}); return {promise, resolve};}
 const disposals: (() => void)[] = [];
 afterEach(() => {for (const close of disposals.splice(0)) close();});
@@ -81,18 +81,24 @@ it("submits the agent a queued edit declared, owned before transport, beside its
     authorContext: {kind: "account", accountId: "owner", agent: {agentId: "trip-agent-ü", onBehalfOf: "local-person", depth: 2}}}, expect.any(AbortSignal));
 });
 
-it("leaves a declared draft unnamed when no recording account is available", async () => {
+it.each([{}, {agentDeclaration: {agentId: "trip-agent", onBehalfOf: null, depth: 0}}])("retries a credited entry while the recording account is unavailable (%j)", async declaration => {
   const f = fixture({retained: true, accountId: null}), fresh = await f.delivery.freshOwnerAuthority(binding);
   if (fresh.kind !== "authority") throw new Error("Missing authority");
-  const work = f.delivery.deliver(fresh.authority, {...envelope, agentDeclaration: {agentId: "trip-agent", onBehalfOf: null, depth: 0}});
-  expect(await work).toEqual({kind: "receipt", receipt: f.receipt});
-  expect(f.submit).toHaveBeenCalledWith({deliveryId: envelope.deliveryId, updateDigest: envelope.updateDigest, updateBytes: envelope.update}, expect.any(AbortSignal));
+  const work = f.delivery.deliver(fresh.authority, {...envelope, ...declaration});
+  expect(await work).toEqual({kind: "retry"});
+  expect(f.submit).not.toHaveBeenCalled();
 });
 
 it("freezes a conflicting delivery for explicit recovery instead of retrying forever", async () => {
   const f = fixture({result: {result: "refused", reason: "delivery-conflict"}}), fresh = await f.delivery.freshOwnerAuthority(binding);
   if (fresh.kind !== "authority") throw new Error("Missing authority");
   expect(await f.delivery.deliver(fresh.authority, envelope)).toEqual({kind: "quarantine", reason: "delivery-conflict"});
+});
+
+it("freezes a provenance refusal for visible recovery", async () => {
+  const f = fixture({result: {result: "refused", reason: "provenance-refused"}}), fresh = await f.delivery.freshOwnerAuthority(binding);
+  if (fresh.kind !== "authority") throw new Error("Missing authority");
+  expect(await f.delivery.deliver(fresh.authority, envelope)).toEqual({kind: "quarantine", reason: "provenance-refused"});
 });
 
 it("requires an owner frame policy that carries the largest declared submission", () => {
@@ -173,4 +179,34 @@ it("owns Buffer-backed pending bytes before an asynchronous transport can observ
   update.fill(9);
   expect(await work).toEqual({kind: "receipt", receipt: f.receipt});
   expect(f.submit.mock.calls[0]![0].updateBytes).toEqual(envelope.update);
+});
+
+// These entries carry no retained person or agent provenance.
+it.each(["seed", "automation", "actorless", "Collection adoption", "owner delivery"])("leaves %s entries unattributed", async () => {
+  const f = fixture({retained: true}), fresh = await f.delivery.freshOwnerAuthority(binding);
+  if (fresh.kind !== "authority") throw new Error("Missing authority");
+  const {personEdit: _, ...uncredited} = envelope;
+  expect(await f.delivery.deliver(fresh.authority, uncredited)).toEqual({kind: "receipt", receipt: f.receipt});
+  expect(f.submit.mock.calls[0]![0]).not.toHaveProperty("authorContext");
+});
+
+it("keeps an entry's submitted account through a missing lookup and rejects an account switch", async () => {
+  const options: Parameters<typeof fixture>[0] = {retained: true, accountId: "owner", result: {result: "retry", reason: "admission-unavailable"}};
+  const f = fixture(options);
+  const pass = async () => {
+    const fresh = await f.delivery.freshOwnerAuthority(binding);
+    if (fresh.kind !== "authority") throw new Error("Missing authority");
+    return f.delivery.deliver(fresh.authority, envelope);
+  };
+  expect(await pass()).toEqual({kind: "retry"});
+  const submitted = f.submit.mock.calls[0]![0];
+  options.accountId = null;
+  expect(await pass()).toEqual({kind: "retry"});
+  expect(f.submit).toHaveBeenCalledTimes(1);
+  options.accountId = "another-account";
+  expect(await pass()).toEqual({kind: "retry"});
+  expect(f.submit).toHaveBeenCalledTimes(1);
+  options.accountId = "owner"; options.result = undefined;
+  expect(await pass()).toEqual({kind: "receipt", receipt: f.receipt});
+  expect(f.submit.mock.calls[1]![0]).toEqual(submitted);
 });

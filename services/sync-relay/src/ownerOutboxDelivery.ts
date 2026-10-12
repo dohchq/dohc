@@ -20,7 +20,7 @@ export type LiveAdmissionValidation = LiveJournalValidation | {
 
 export interface OwnerOutboxAdmission {
   readonly activation?: ServiceActivationAccess;
-  trustedAccount?(accountId: string): TrustedLiveAccount | undefined | Promise<TrustedLiveAccount | undefined>;
+  trustedAccount(accountId: string): TrustedLiveAccount | undefined | Promise<TrustedLiveAccount | undefined>;
   readonly shares: ReadonlyMap<string,string>;
   readonly maxEntriesPerDrain: number;
   readonly maxBytesPerDrain: number;
@@ -32,8 +32,9 @@ export interface OwnerOutboxAdmission {
  * The adoption this queue belongs to, as the relay recorded it from the host's
  * adoption ACK. A divergent adoption queues its local seed first, under
  * `owner-adoption:sha256([adoptionId, sequence, updateDigest])`. `applied` is
- * called once this pass proves no such seed still waits: the queue is empty,
- * its head is later work, or the host acknowledged applying the seed.
+ * releases the accepted-feed gate when the queue is empty, its head is later
+ * work, or the host acknowledged applying the seed. A quarantined queue also
+ * releases that gate while preserving its unapplied local work.
  */
 export interface OwnerOutboxAdoption {
   readonly adoptionId: string;
@@ -63,11 +64,12 @@ export async function drainOwnerOutbox(options: {
     check();
     const status = configRecord(available.result,["outboxId","pendingBytes","state"]);
     if (typeof status.pendingBytes !== "number" || !Number.isSafeInteger(status.pendingBytes) || status.pendingBytes < 0) throw new Error("Invalid owner pending bytes.");
-    if (status.state === "quarantined") throw new Error(`Owner outbox is ${status.state}; explicit recovery is required.`);
+    if (status.state === "quarantined") return {outboxId: status.outboxId, pendingBytes: status.pendingBytes, quarantined: true};
     if (status.pendingBytes > 0 && ((status.state !== "active" && status.state !== "sealed") || typeof status.outboxId !== "string")) throw new Error("Invalid owner outbox state.");
     return {outboxId: status.outboxId, pendingBytes: status.pendingBytes};
   };
   const status = await readStatus(), outboxId = status.outboxId;
+  if (status.quarantined) {adoption.applied(); return {admittedEntries: 0, hasMore: false};}
   if (status.pendingBytes === 0) {adoption.applied(); return {admittedEntries: 0, hasMore: false};}
   if (typeof outboxId !== "string") throw new Error("Invalid owner outbox identity.");
   let receivedBytes = 0, admittedEntries = 0;
@@ -93,7 +95,7 @@ export async function drainOwnerOutbox(options: {
       check();
       const pending = await outbox.readDeliveryHead(outboxId,binding); check();
       if (!isDeepStrictEqual(pending.binding,binding) || pending.baseUpdateDigest !== binding.lineageClaimId) throw new Error("Owner outbox binding changed.");
-      if (pending.state === "quarantined") throw new Error("Owner outbox requires explicit recovery.");
+      if (pending.state === "quarantined") {adoption.applied(); return {admittedEntries, hasMore: false};}
       if (!pending.entry) {adoption.applied(); return {admittedEntries, hasMore: false};}
       const entry = pending.entry;
       // The seed is the queue's first entry, so a later head proves it applied.
@@ -111,15 +113,15 @@ export async function drainOwnerOutbox(options: {
       const cut = storage.readLiveUpdateJournalCut({document});
       if (cut.kind !== "cut") throw new Error("Owner journal is unavailable.");
       const declared = entry.agentDeclaration;
-      const trustedAccount = await admission.trustedAccount?.(current.authority.principalId) ??
-        {accountId: current.authority.principalId, name: current.authority.principalId};
+      const trustedAccount = await admission.trustedAccount(current.authority.principalId);
       check();
-      if (trustedAccount.accountId !== current.authority.principalId) throw new Error("Owner account changed.");
-      const authorContext = {kind: "account" as const, accountId: trustedAccount.accountId,
-        ...(declared ? {agent: {agentId: declared.agentId, ...(declared.onBehalfOf !== null ? {onBehalfOf: declared.onBehalfOf} : {}), depth: declared.depth}} : {})};
+      if ((entry.personEdit || declared) && !trustedAccount) return {admittedEntries, hasMore: true};
+      if (trustedAccount && trustedAccount.accountId !== current.authority.principalId) throw new Error("Owner account changed.");
+      const authorContext = entry.personEdit || declared ? {kind: "account" as const, accountId: trustedAccount!.accountId,
+        ...(declared ? {agent: {agentId: declared.agentId, ...(declared.onBehalfOf !== null ? {onBehalfOf: declared.onBehalfOf} : {}), depth: declared.depth}} : {})} : undefined;
       const validation = await admission.validate({document,currentPath: binding.currentPath,checkpoint: cut.cut.checkpoint.bytes,
         suffix: cut.cut.suffix.map(row => row.bytes),candidate: entry.update,
-        retainStateUpdate: liveAuthorCheckpointAnticipated(cut.cut.suffix.map(row => row.metadata),
+        retainStateUpdate: liveAuthorCheckpointAnticipated(cut.cut.suffix.map(row => row.metadata), []) || liveAuthorCheckpointAnticipated(cut.cut.suffix.map(row => row.metadata),
           limitLiveDeclaredAgents(cut.cut.suffix.map(row => row.metadata), current.authority,
             deriveLiveAuthorSnapshot(storage as StorageContext, current.authority, authorContext, trustedAccount)))}, signal);
       check();
@@ -129,10 +131,19 @@ export async function drainOwnerOutbox(options: {
       }
       const committed = storage.commitLiveUpdateJournal({host,actor,expectedAuthority: current.authority,
         trustedAccount,
-        metadata: {deliveryId: entry.deliveryId,updateDigest: entry.updateDigest,binding,authorContext},
+        metadata: {deliveryId: entry.deliveryId,updateDigest: entry.updateDigest,binding,...(authorContext ? {authorContext} : {})},
         cutToken: cut.cut,validation,updateBytes: entry.update,receivedAtMs: Date.now()}, admission.activation);
       if (committed.result.kind === "retry") return {admittedEntries, hasMore: true, retryReady: true};
-      if (committed.result.kind !== "accepted") throw new Error("Owner update admission refused.");
+      if (committed.result.kind !== "accepted") {
+        if (["provenance-refused", "delivery-conflict"].includes(committed.result.reason)) {
+          await client.sendRequest({...request(), method: "liveApplication.quarantineOwnerOutbox",
+            params: {registrationId, reason: committed.result.reason}}, signal);
+          check();
+          adoption.applied();
+          return {admittedEntries, hasMore: false};
+        }
+        throw new Error("Owner update admission refused.");
+      }
       const receipt = committed.result.receipt;
       const applied = await options.applyThrough(receipt); check();
       if (applied === null) return {admittedEntries, hasMore: true};

@@ -1,4 +1,5 @@
 import type {LiveObjectBinding} from "@dohc/live-session-contract/live-object-binding";
+import type {OwnerOutboxAdmission} from "./ownerOutboxDelivery";
 import {isDeepStrictEqual} from "node:util";
 import type {EngineClient} from "@dohc/workspace-engine-client/daemon";
 import {parseLiveDocumentKey,parseLiveUpdateIdentifier,type LiveDocumentKey} from "@dohc/live-session-contract/live-update-admission";
@@ -50,7 +51,7 @@ export class ServiceActivationDriver {
   readonly #restoreConsumers=new Map<string,OwnerCommittedDelivery>();
   readonly #staleLeases=new Map<string,{activationId:string;sessionId:string}>();
   readonly #owners=new Map<string,Owner>();
-  constructor(readonly options:{storage:SyncRelayStorage;history:LiveJournalHistoryAuthority;client:EngineClient;host:LiveHostConnectionCoordinate;
+  constructor(readonly options:{trustedAccount: OwnerOutboxAdmission["trustedAccount"];storage:SyncRelayStorage;history:LiveJournalHistoryAuthority;client:EngineClient;host:LiveHostConnectionCoordinate;
     workspaces:ReadonlyMap<string,{handle:string;ordinary:ServiceOrdinaryReplication}>;config:ServiceActivationConfig;
     adoption:{maxBytes:number;maxEvents:number};restore?:LiveRestorePreparation;nextRequestId():number;deadlineMs:number;
     assertCurrent():void;registered():void;
@@ -79,7 +80,7 @@ export class ServiceActivationDriver {
     const consumer=new OwnerCommittedDelivery(o.storage,o.history,{client:o.client,workspace:workspace.handle,host:o.host,
       deadlineMs:o.deadlineMs,nextRequestId:o.nextRequestId,bounds:o.adoption,restore:o.restore,
       publishOrdinary:signal=>workspace.ordinary.publish(signal),
-      ownerAdmission:{shares:new Map([[target.workspaceId,target.shareId]]),maxEntriesPerDrain:o.config.maxEntriesPerDrain,
+      ownerAdmission:{trustedAccount:o.trustedAccount,shares:new Map([[target.workspaceId,target.shareId]]),maxEntriesPerDrain:o.config.maxEntriesPerDrain,
         maxBytesPerDrain:o.config.maxBytesPerDrain,validate:o.config.validateAdmission}});
     this.#restoreConsumers.set(key,consumer);return consumer;
   }
@@ -151,7 +152,7 @@ export class ServiceActivationDriver {
       const consumer=new OwnerCommittedDelivery(o.storage,o.history,{client:transport.client,workspace:workspace.handle,
         host:o.host,deadlineMs:o.deadlineMs,nextRequestId:o.nextRequestId,bounds:o.adoption,restore:o.restore,
         publishOrdinary:signal=>workspace.ordinary.publish(signal),
-        ownerAdmission:{activation:resumed.access,shares:new Map([[target.workspaceId,target.shareId]]),
+        ownerAdmission:{trustedAccount:o.trustedAccount,activation:resumed.access,shares:new Map([[target.workspaceId,target.shareId]]),
           maxEntriesPerDrain:c.maxEntriesPerDrain,maxBytesPerDrain:c.maxBytesPerDrain,validate:c.validateAdmission}});
       owner={consumer,transport,binding:resumed.binding,completed:false,activationPending:!resumed.completed,
         target:targetKey,actor:{ownerUserId:saved.ownerUserId,shareId:saved.shareId}};

@@ -77,6 +77,7 @@ interface Attempt {
 export class OwnerYDocFrameDelivery implements OwnerYDocDelivery {
   private active?: Attempt;
   private disposed = false;
+  private creditedEntry?: {deliveryId: string; accountId: string};
   private readonly options: OwnerYDocFrameDeliveryOptions;
 
   constructor(options: OwnerYDocFrameDeliveryOptions) {
@@ -152,8 +153,13 @@ export class OwnerYDocFrameDelivery implements OwnerYDocDelivery {
     const declared = envelopeValue.agentDeclaration;
     let agentDeclaration: AgentDeclaration | undefined;
     try {agentDeclaration = declared === undefined ? undefined : parseAgentDeclaration(declared);} catch {this.stop(attempt); return {kind: "retry"};}
+    const credited = envelopeValue.personEdit || agentDeclaration;
+    if (credited && (!attempt.accountId || (this.creditedEntry?.deliveryId === envelopeValue.deliveryId && this.creditedEntry.accountId !== attempt.accountId))) {
+      this.stop(attempt); return {kind: "retry"};
+    }
+    if (credited) this.creditedEntry = {deliveryId: envelopeValue.deliveryId, accountId: attempt.accountId!};
     attempt.envelope = {deliveryId: envelopeValue.deliveryId, updateDigest: envelopeValue.updateDigest, update: Uint8Array.from(envelopeValue.update),
-      ...(attempt.accountId ? {authorContext: {kind: "account", accountId: attempt.accountId,
+      ...(credited ? {authorContext: {kind: "account", accountId: attempt.accountId!,
         ...(agentDeclaration ? {agent: {agentId: agentDeclaration.agentId,
           ...(agentDeclaration.onBehalfOf !== null ? {onBehalfOf: agentDeclaration.onBehalfOf} : {}), depth: agentDeclaration.depth}} : {})}} : {})};
     void this.pump(attempt);
@@ -231,7 +237,7 @@ export class OwnerYDocFrameDelivery implements OwnerYDocDelivery {
             attempt.receipt = {deliveryId, updateDigest, journalCursor, acceptingHostEpoch};
             await this.finishReceipt(attempt);
           }
-          else if (frame.result === "refused" && ["stale-binding", "restore-fenced", "delivery-conflict"].includes(frame.reason)) this.stop(attempt, {kind: "quarantine", reason: frame.reason});
+          else if (frame.result === "refused" && ["stale-binding", "restore-fenced", "delivery-conflict", "provenance-refused"].includes(frame.reason)) this.stop(attempt, {kind: "quarantine", reason: frame.reason});
           else this.stop(attempt);
         }
         if (transfer && this.current(attempt)) {

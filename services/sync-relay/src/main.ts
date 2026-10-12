@@ -535,6 +535,7 @@ const server = serveFetchHandler({
 const host = testAuthSeam ? "127.0.0.1" : (process.env.SYNC_RELAY_BIND ?? "0.0.0.0");
 let deviceControl: ReturnType<typeof createDeviceControl> | undefined;
 const deviceDeliveryConfig = process.env.DOHC_RELAY_DEVICE_DELIVERY_CONFIG;
+const trustedOwnerAccount = async (accountId: string) => ({accountId, name: await accountDisplayName(lookupUserDisplayName, accountId) ?? "Unnamed"});
 const ownerAdmissionPath = process.env.DOHC_RELAY_OWNER_ADMISSION_CONFIG;
 if (ownerAdmissionPath && !deviceDeliveryConfig) fatal("FATAL: Private owner admission requires configured device delivery.");
 let ownerAdmission: ReturnType<typeof readOwnerAdmissionConfig> | undefined;
@@ -544,8 +545,7 @@ if (process.env.DOHC_DEVICE_CONTROL_LIMITS !== undefined) {
     const limits = parseDeviceControlLimits(JSON.parse(process.env.DOHC_DEVICE_CONTROL_LIMITS));
     const delivery = deviceDeliveryConfig ? readRelayDeviceDeliveryConfig(deviceDeliveryConfig,limits) : undefined;
     if (ownerAdmissionPath && delivery) {
-      ownerAdmission = readOwnerAdmissionConfig(ownerAdmissionPath,delivery.workspaceIds);
-      ownerAdmission.admission.trustedAccount = async accountId => ({accountId, name: await accountDisplayName(lookupUserDisplayName, accountId) ?? "Unnamed"});
+      ownerAdmission = readOwnerAdmissionConfig(ownerAdmissionPath,delivery.workspaceIds,trustedOwnerAccount);
     }
     deviceControl = createDeviceControl({
       storage, relayExchangeKey: relayExchangeKey ?? "",
@@ -575,12 +575,12 @@ process.once("SIGTERM",stopOwnerAdmission);
 const serviceHostConfig = process.env.DOHC_RELAY_SERVICE_HOST_CONFIG;
 if (serviceHostConfig && !deployment) fatal("FATAL: A service host requires an initialized relay deployment.");
 const configuredServiceHost = serviceHostConfig && deployment
-  ? await startServiceLiveHost({ configPath: serviceHostConfig, storage, history: deployment.history, frameChanges })
+  ? await startServiceLiveHost({ trustedAccount: trustedOwnerAccount, configPath: serviceHostConfig, storage, history: deployment.history, frameChanges })
   : undefined;
 if (selfHostedLive && (!deployment || !frameChanges || !linkKey || !process.env.DOHC_RELAY_SERVICE_HOST_ROOT || !process.env.DOHC_RELAY_ENGINE_EXECUTABLE || !process.env.DOHC_RELAY_PUBLIC_ORIGIN)) {
   fatal("FATAL: Self-host live editing requires a deployment, a persistent host root, the native engine executable, and the public HTTPS relay origin.");
 }
-const selfHost = selfHostedLive ? await startSelfHostedLiveHost({storage, history: deployment!.history, frameChanges: frameChanges!,
+const selfHost = selfHostedLive ? await startSelfHostedLiveHost({trustedAccount: trustedOwnerAccount,storage, history: deployment!.history, frameChanges: frameChanges!,
   root: process.env.DOHC_RELAY_SERVICE_HOST_ROOT!, engineExecutable: process.env.DOHC_RELAY_ENGINE_EXECUTABLE!,
   relayOrigin: process.env.DOHC_RELAY_PUBLIC_ORIGIN!, key: Buffer.from(linkKey!),
   onError: error => console.error("[sync-relay] self-host live service:", error)}) : undefined;

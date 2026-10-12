@@ -658,17 +658,21 @@ export function commitLiveUpdateJournal(storage: StorageContext, input: LiveUpda
         if (authorSnapshot.length && clients.length) {
           const encoded = JSON.stringify(authorSnapshot);
           const identities = authorSnapshot.map(liveAuthorIdentity);
-          let unbound = 0;
+          let unbound = 0, bindingFailed = false;
           for (const clientId of clients) {
             const prior = storage.db.prepare(`SELECT author_snapshot_json FROM ${LIVE_AUTHOR_CLIENTS} WHERE ${JOURNAL_DOCUMENT_WHERE} AND client_id=?`).get(...documentParams(document), clientId);
             if (prior) {
               const storedSnapshot = parseLiveAuthorSnapshot(JSON.parse(String(prior.author_snapshot_json)));
-              if (!isDeepStrictEqual(storedSnapshot.map(liveAuthorIdentity), identities)) return refused({kind:"refused",reason:"provenance-refused"});
+              if (!isDeepStrictEqual(storedSnapshot.map(liveAuthorIdentity), identities)) bindingFailed = true;
               authorSnapshot = storedSnapshot;
             }
             if (!prior) {unbound++; bindings.push({clientId,snapshot:encoded});}
           }
-          if (unbound > 1) return refused({kind:"refused",reason:"provenance-refused"});
+          if (bindingFailed || unbound > 1) {
+            if (request.actor.kind !== "owner") return refused({kind:"refused",reason:"provenance-refused"});
+            authorSnapshot = [];
+            bindings.length = 0;
+          }
         }
         authorSnapshot = limitLiveDeclaredAgents(read.cut.suffix.map(row => row.metadata), current.authority, authorSnapshot);
         const window = assessLiveAuthorWindow(read.cut.suffix.map(row => row.metadata), {authorSnapshot,firstSeen,firstSeenDeletes});

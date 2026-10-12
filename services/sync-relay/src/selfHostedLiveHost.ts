@@ -1,4 +1,5 @@
 import {createHash} from "node:crypto";
+import type {OwnerOutboxAdmission} from "./ownerOutboxDelivery";
 import {mkdir, mkdtemp, rm, writeFile} from "node:fs/promises";
 import {realpathSync, statSync} from "node:fs";
 import {isAbsolute, join, posix, resolve} from "node:path";
@@ -31,6 +32,7 @@ function canonicalPath(value: string, directory: boolean): string {
 
 /** Owns the sole service daemon; account requests can select documents, never native paths or credentials. */
 export async function startSelfHostedLiveHost(options: {
+  trustedAccount: OwnerOutboxAdmission["trustedAccount"];
   storage: SyncRelayStorage; history: LiveJournalHistoryAuthority; root: string; engineExecutable: string;
   relayOrigin: string; key: Uint8Array; frameChanges: LiveHostChanges;
   startHost?: typeof startServiceLiveHost;
@@ -108,7 +110,7 @@ export async function startSelfHostedLiveHost(options: {
         await stopCurrent();
         signal.throwIfAborted();
         if (next !== selectionSignature(selection())) {schedule(); return;}
-        current = await (options.startHost ?? startServiceLiveHost)({configPath, storage, history, frameChanges: options.frameChanges, signal});
+        current = await (options.startHost ?? startServiceLiveHost)({trustedAccount: options.trustedAccount,configPath, storage, history, frameChanges: options.frameChanges, signal});
         current.onEvent((event) => { for (const handler of eventHandlers) handler(event); });
         current.invalidated.addEventListener("abort", schedule, {once: true});
         signature = next; lastError = undefined; initialReconciliationComplete = true;

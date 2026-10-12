@@ -42,7 +42,7 @@ async function fixture(options: {beforeStart?(): Promise<void>; empty?: boolean;
   });
   const onError = vi.fn();
   const frameChanges = createNamedFrameChanges(8);
-  const host = await startSelfHostedLiveHost({storage: f.storage, history, root: data, engineExecutable: process.execPath,
+  const host = await startSelfHostedLiveHost({trustedAccount: (accountId: string) => ({accountId, name: "Owner name"}), storage: f.storage, history, root: data, engineExecutable: process.execPath,
     relayOrigin: "https://relay.test", key: new Uint8Array(32).fill(9), frameChanges, startHost, onError});
   cleanup.push(() => host.close());
   // The supervisor reconciles on timers and writes configuration files; a loaded

@@ -34,6 +34,7 @@ export interface OwnerYDocDeliveryEnvelope {
   readonly update: Uint8Array;
   readonly updateDigest: string;
   /** The agent the queued edit declared; absent when it declared none. */
+  readonly personEdit?: true;
   readonly agentDeclaration?: AgentDeclaration;
   readonly automationDeclaration?: AutomationDeclaration;
 }
@@ -81,6 +82,7 @@ function envelopeFor(
     deliveryId: entry.deliveryId,
     update: entry.update,
     updateDigest: entry.updateDigest,
+    ...(entry.personEdit ? {personEdit: entry.personEdit} : {}),
     ...(entry.agentDeclaration ? { agentDeclaration: entry.agentDeclaration } : {}),
     ...(entry.automationDeclaration ? { automationDeclaration: entry.automationDeclaration } : {}),
   };
