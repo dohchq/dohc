@@ -821,10 +821,14 @@ describe("FileInspector Excalidraw view", () => {
 
     await screen.findByTestId("mock-excalidraw-canvas");
     act(() => bridge.emitSaveState("saved", 0));
-    const chip = await screen.findByTestId("drawing-save-state");
-    expect(chip.textContent).toBe("Saved");
+    // Saved says so only to screen readers; the titlebar's dot shows it.
+    const saved = await screen.findByTestId("drawing-save-state");
+    expect(saved.textContent).toBe("Saved");
+    expect(saved.classList.contains("sr-only")).toBe(true);
     act(() => bridge.emitSaveState("file-locked", 1));
 
+    const chip = screen.getByTestId("drawing-save-state");
+    expect(chip.classList.contains("sr-only")).toBe(false);
     expect(chip.dataset.state).toBe("file-locked");
     expect(chip.textContent).toBe("File in use");
     expect(chip.title).toContain("retries until the file is free");

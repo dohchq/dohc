@@ -1,4 +1,4 @@
-import { ViewHeader } from "./fileInspectorUi";
+import { ViewActions } from "./fileInspectorUi";
 import { EmptyState, SectionLabel } from "./ui/controls";
 import { SkeletonRows } from "./ui/SkeletonRows";
 import { ArrowDown, ArrowUp, Database, Search, TriangleAlert } from "lucide-react";
@@ -290,7 +290,7 @@ export function DatabaseStudioView(props: {
         className="flex min-h-0 flex-1 flex-col bg-bg"
         data-testid="file-inspector"
       >
-        <ViewHeader path={path} onShare={onShare} />
+        <ViewActions onShare={onShare} />
         {error ? (
           <EmptyState
             data-testid="view-database"
@@ -310,7 +310,7 @@ export function DatabaseStudioView(props: {
       className="flex min-h-0 flex-1 flex-col bg-bg"
       data-testid="file-inspector"
     >
-      <ViewHeader path={path} onShare={onShare} />
+      <ViewActions onShare={onShare} />
       <div
         className="grid min-h-0 flex-1 grid-cols-[220px_minmax(0,1fr)]"
         data-testid="view-database"
