@@ -57,6 +57,14 @@ enum CaptureIndexing {
 }
 
 impl ActorHandle {
+    #[cfg(feature = "fault-injection")]
+    pub async fn capture_phase_totals_for_harness(
+        &self,
+    ) -> Result<dohc_engine_storage::capture_phase::Snapshot, RuntimeError> {
+        self.run(|_, _| Ok(dohc_engine_storage::capture_phase::snapshot()))
+            .await
+    }
+
     pub async fn capture_recoveries(
         &self,
         workspace_id: String,
@@ -329,6 +337,15 @@ fn capture_ingest_on_store(
     faults: &dyn FaultInjector,
     token: &CancellationToken,
 ) -> Result<WriteResult, RuntimeError> {
+    #[cfg(feature = "fault-injection")]
+    let mut phase = dohc_engine_storage::capture_phase::Phase::new(
+        "actor_capture_text",
+        input.metadata_correlation_id.as_deref(),
+        1,
+        true,
+    );
+    #[cfg(feature = "fault-injection")]
+    phase.finish("attempted");
     if token.is_cancelled() {
         return Err(RuntimeError::Cancelled);
     }
@@ -1038,6 +1055,15 @@ fn capture_ingest_binary_on_store(
     faults: &dyn FaultInjector,
     token: &CancellationToken,
 ) -> Result<CaptureIngestBinaryResult, RuntimeError> {
+    #[cfg(feature = "fault-injection")]
+    let mut phase = dohc_engine_storage::capture_phase::Phase::new(
+        "actor_capture_binary",
+        input.metadata_correlation_id.as_deref(),
+        1,
+        true,
+    );
+    #[cfg(feature = "fault-injection")]
+    phase.finish("attempted");
     if token.is_cancelled() {
         return Err(RuntimeError::Cancelled);
     }
@@ -1130,6 +1156,15 @@ fn capture_secret_on_store(
     faults: &dyn FaultInjector,
     token: &CancellationToken,
 ) -> Result<SecretWriteResult, RuntimeError> {
+    #[cfg(feature = "fault-injection")]
+    let mut phase = dohc_engine_storage::capture_phase::Phase::new(
+        "actor_capture_secret",
+        input.metadata_correlation_id.as_deref(),
+        1,
+        true,
+    );
+    #[cfg(feature = "fault-injection")]
+    phase.finish("attempted");
     if token.is_cancelled() {
         return Err(RuntimeError::Cancelled);
     }
@@ -1157,6 +1192,15 @@ fn capture_secret_retire_on_store(
     root_guard: &dyn WorkspaceRootGuard,
     faults: &dyn FaultInjector,
 ) -> Result<Option<SecretMomentRecord>, RuntimeError> {
+    #[cfg(feature = "fault-injection")]
+    let mut phase = dohc_engine_storage::capture_phase::Phase::new(
+        "actor_capture_secret_retire",
+        input.metadata_correlation_id.as_deref(),
+        1,
+        true,
+    );
+    #[cfg(feature = "fault-injection")]
+    phase.finish("attempted");
     root_guard.validate(root_dir)?;
     ensure_mutation_version_on_store(
         store,
@@ -1235,6 +1279,15 @@ fn capture_retire_on_store(
     leases: &LeaseRegistry,
     faults: &dyn FaultInjector,
 ) -> Result<CaptureRetireResult, RuntimeError> {
+    #[cfg(feature = "fault-injection")]
+    let mut phase = dohc_engine_storage::capture_phase::Phase::new(
+        "actor_capture_retire",
+        input.metadata_correlation_id.as_deref(),
+        1,
+        true,
+    );
+    #[cfg(feature = "fault-injection")]
+    phase.finish("attempted");
     root_guard.validate(root_dir)?;
     ensure_mutation_version_on_store(
         store,

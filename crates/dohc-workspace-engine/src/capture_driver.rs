@@ -135,6 +135,9 @@ impl CaptureApplyProbe {
 
 #[cfg(feature = "harness")]
 struct CaptureApplyProbeInner {
+    initial_settled_armed: std::sync::atomic::AtomicBool,
+    initial_settled_entered: tokio::sync::Semaphore,
+    initial_settled_release: tokio::sync::Semaphore,
     armed: std::sync::atomic::AtomicBool,
     apply_blocked: std::sync::atomic::AtomicBool,
     entered: tokio::sync::Semaphore,
@@ -166,6 +169,9 @@ struct CaptureApplyProbeInner {
 impl Default for CaptureApplyProbeInner {
     fn default() -> Self {
         Self {
+            initial_settled_armed: std::sync::atomic::AtomicBool::new(false),
+            initial_settled_entered: tokio::sync::Semaphore::new(0),
+            initial_settled_release: tokio::sync::Semaphore::new(0),
             armed: std::sync::atomic::AtomicBool::new(false),
             apply_blocked: std::sync::atomic::AtomicBool::new(false),
             entered: tokio::sync::Semaphore::new(0),
@@ -197,6 +203,42 @@ impl Default for CaptureApplyProbeInner {
 
 #[cfg(feature = "harness")]
 impl CaptureApplyProbe {
+    pub fn pause_at_initial_settled(&self) {
+        self.inner
+            .initial_settled_armed
+            .store(true, Ordering::Release);
+    }
+
+    pub async fn wait_at_initial_settled(&self) {
+        self.inner
+            .initial_settled_entered
+            .acquire()
+            .await
+            .unwrap()
+            .forget();
+    }
+
+    pub fn release_initial_settled(&self) {
+        self.inner.initial_settled_release.add_permits(1);
+    }
+
+    async fn pause_after_initial_settled_if_armed(&self, cancel: &CancellationToken) {
+        if self
+            .inner
+            .initial_settled_armed
+            .swap(false, Ordering::AcqRel)
+        {
+            self.inner.initial_settled_entered.add_permits(1);
+            tokio::select! {
+                biased;
+                () = cancel.cancelled() => {},
+                permit = self.inner.initial_settled_release.acquire() => {
+                    permit.unwrap().forget();
+                },
+            }
+        }
+    }
+
     pub fn pause_next_apply(&self) {
         self.inner.apply_blocked.store(true, Ordering::Release);
         self.inner.armed.store(true, Ordering::Release);
@@ -2059,6 +2101,12 @@ impl DriverEnv for RealEnv {
         let mut fence_phase =
             dohc_engine_storage::capture_phase::Phase::new("fenced_capture", None, 0, false);
         let _links_hold = self.actor.defer_link_drain_for_capture();
+        #[cfg(feature = "harness")]
+        let actor_before = self
+            .actor
+            .capture_phase_totals_for_harness()
+            .await
+            .map_err(|_| ())?;
         let initial_start = matches!(
             self.status.snapshot().phase,
             CapturePhase::Starting | CapturePhase::Importing
@@ -2271,6 +2319,12 @@ impl DriverEnv for RealEnv {
             && fresh.watcher.disruption_count() == 0;
         #[cfg(feature = "harness")]
         {
+            let actor_after = self
+                .actor
+                .capture_phase_totals_for_harness()
+                .await
+                .map_err(|_| ())?;
+            fence_phase.field("totals", actor_after.delta(&actor_before));
             fence_phase.field("initial_ready", initial_ready);
             fence_phase.finish(if initial_ready { "settled" } else { "degraded" });
         }
@@ -2285,6 +2339,10 @@ impl DriverEnv for RealEnv {
                 CAPTURE_INITIAL_SETTLED_EVENT,
                 serde_json::json!({ "workspaceId": self.workspace_id }),
             );
+        }
+        #[cfg(feature = "harness")]
+        if let Some(probe) = &self.apply_probe {
+            probe.pause_after_initial_settled_if_armed(cancel).await;
         }
         // Unsafe starts release only here, after the bounded settle attempt.
         // An early import already sent this edge; watch::Sender coalesces it.

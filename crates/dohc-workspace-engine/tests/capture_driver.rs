@@ -2506,6 +2506,85 @@ async fn large_first_capture_retries_checkpoint_backpressure_without_losing_file
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn five_thousand_file_capture_has_no_link_writes_at_initial_settled() {
+    let scratch = ScratchDir::new().unwrap();
+    write_root_binding(scratch.path(), TOKEN).unwrap();
+    for n in 0..5_000 {
+        write_file(scratch.path(), &format!("note-{n:04}.md"), b"[[target]]");
+    }
+    let probe = CaptureApplyProbe::default();
+    probe.pause_at_initial_settled();
+    let service = Arc::new(EngineService::with_capture_apply_probe_for_harness(
+        probe.clone(),
+    ));
+    let mut events = service.events().subscribe();
+    let transport = InProcessTransport::new(service);
+    let handle = open_workspace(&transport, &scratch, 1).await;
+    tokio::time::timeout(Duration::from_secs(120), async {
+        loop {
+            if events.recv().await.unwrap().name == CAPTURE_INITIAL_SETTLED_EVENT {
+                break;
+            }
+        }
+        probe.wait_at_initial_settled().await;
+    })
+    .await
+    .unwrap();
+    // The driver's real hold is still owned at the event edge; the probe only
+    // pauses its release, so the observation cannot race the deferred drain.
+    let db = scratch.path().join(".dohc/engine/engine.db");
+    let actor = dohc_engine_runtime::WorkspaceSupervisor::global()
+        .open(&db, 1)
+        .unwrap()
+        .actor;
+    let observer = EngineStore::open_read_only(&db).unwrap();
+    assert_eq!(observer.table_row_count("snapshots").unwrap(), 5_000);
+    let phase: String = observer
+        .read_with(|c| {
+            c.query_row(
+        "SELECT seed_phase FROM link_index_state WHERE workspace_id=?1 AND version_id='main'",
+        [WORKSPACE_ID], |r| r.get(0))
+        })
+        .unwrap();
+    assert_eq!(
+        phase, "deferred",
+        "seed started before the initial fence closed"
+    );
+    assert_eq!(observer.table_row_count("link_pending").unwrap(), 0);
+    assert_eq!(observer.table_row_count("link_aliases").unwrap(), 0);
+    assert_eq!(
+        actor
+            .capture_phase_totals_for_harness()
+            .await
+            .unwrap()
+            .count("link_pending_row_writes"),
+        0
+    );
+    probe.release_initial_settled();
+    tokio::time::timeout(Duration::from_secs(120), async {
+        let mut poll = tokio::time::interval(Duration::from_millis(10));
+        loop {
+            let ready: bool = observer.read_with(|c| c.query_row(
+                "SELECT seed_phase='ready' FROM link_index_state WHERE workspace_id=?1 AND version_id='main'",
+                [WORKSPACE_ID], |r| r.get(0))).unwrap();
+            if ready { break; }
+            poll.tick().await;
+        }
+    }).await.unwrap();
+    assert_eq!(observer.table_row_count("link_aliases").unwrap(), 5_000);
+    assert_eq!(observer.table_row_count("link_sources").unwrap(), 5_000);
+    assert_eq!(observer.table_row_count("link_pending").unwrap(), 0);
+    drop(observer);
+    transport
+        .call(
+            RequestContext::unbounded(),
+            request(100, "workspace.close", Some(handle), json!({})),
+        )
+        .await
+        .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "manual quiet-host 5000-file initial capture measurement"]
 async fn measure_five_thousand_file_initial_capture() {
     measure_initial_capture(true).await;

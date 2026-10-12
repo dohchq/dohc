@@ -14,6 +14,7 @@ struct Total {
 }
 thread_local! {
     static PARENT: Cell<u64> = const { Cell::new(0) };
+    static CORRELATION: RefCell<Option<String>> = const { RefCell::new(None) };
     static TOTALS: RefCell<BTreeMap<&'static str, Total>> = const { RefCell::new(BTreeMap::new()) };
 }
 static NEXT: AtomicU64 = AtomicU64::new(1);
@@ -22,7 +23,8 @@ fn enabled() -> bool {
     *ENABLED.get_or_init(|| std::env::var("DOHC_CAPTURE_PHASE_DIAGNOSTICS").is_ok_and(|v| v == "1"))
 }
 pub fn count(label: &'static str, count: u64) {
-    if enabled() {
+    // Keep this invariant counter available to harness tests without timing logs.
+    if label == "link_pending_row_writes" || enabled() {
         TOTALS.with(|totals| {
             let mut totals = totals.borrow_mut();
             let total = totals.entry(label).or_default();
@@ -30,6 +32,39 @@ pub fn count(label: &'static str, count: u64) {
         });
     }
 }
+/// Copy on the actor, then compute the fence delta on its async driver.
+#[derive(Clone, Default)]
+pub struct Snapshot(BTreeMap<&'static str, Total>);
+
+pub fn snapshot() -> Snapshot {
+    Snapshot(TOTALS.with(|totals| totals.borrow().clone()))
+}
+
+impl Snapshot {
+    pub fn count(&self, label: &str) -> u64 {
+        self.0.get(label).map_or(0, |total| total.count)
+    }
+
+    pub fn delta(&self, before: &Self) -> serde_json::Value {
+        let totals = self
+            .0
+            .iter()
+            .map(|(label, after)| {
+                let before = before.0.get(label).copied().unwrap_or_default();
+                (
+                    (*label).to_owned(),
+                    serde_json::json!({
+                        "calls": after.calls.saturating_sub(before.calls),
+                        "elapsed_us": after.elapsed_us.saturating_sub(before.elapsed_us),
+                        "count": after.count.saturating_sub(before.count),
+                    }),
+                )
+            })
+            .collect::<serde_json::Map<_, _>>();
+        totals.into()
+    }
+}
+
 /// Aggregate timers on the actor thread; these never log per file or row.
 pub struct Measure {
     label: &'static str,
@@ -66,6 +101,7 @@ pub struct Phase {
     before: Option<BTreeMap<&'static str, Total>>,
     thread: std::thread::ThreadId,
     parent: u64,
+    previous_correlation: Option<String>,
 }
 impl Phase {
     pub fn new(
@@ -81,6 +117,10 @@ impl Phase {
             0
         };
         let parent = if active { PARENT.with(Cell::get) } else { 0 };
+        let previous_correlation = CORRELATION.with(|value| value.borrow().clone());
+        let correlation = correlation
+            .map(str::to_owned)
+            .or_else(|| previous_correlation.clone());
         let mut fields = serde_json::Map::new();
         if active {
             fields.insert("parent_phase_id".into(), parent.into());
@@ -100,12 +140,14 @@ impl Phase {
         }
         if active && actor_totals {
             PARENT.set(id);
+            CORRELATION.with(|value| *value.borrow_mut() = correlation);
         }
         Self {
             began: active.then(Instant::now),
             phase,
             id,
             parent,
+            previous_correlation,
             fields,
             before: (active && actor_totals).then(|| TOTALS.with(|t| t.borrow().clone())),
             thread: std::thread::current().id(),
@@ -153,6 +195,7 @@ impl Drop for Phase {
             });
             self.fields.insert("totals".into(), totals.into());
             PARENT.set(self.parent);
+            CORRELATION.with(|value| *value.borrow_mut() = self.previous_correlation.take());
         }
         self.fields.insert("phase".into(), self.phase.into());
         self.fields.insert("phase_id".into(), self.id.into());
