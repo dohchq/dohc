@@ -581,21 +581,6 @@ export function acquireBuildSlot(options) {
   return acquireSlot({ ...options, kind: "build-slot", lanes: "cargo lanes" });
 }
 
-/**
- * Take up to `count` cargo lanes. Only the first waits; each further lane is
- * taken only when it is free now, so no claimant holds a lane while it waits
- * for another. Resolves to the held slots; the caller sizes its caps by them.
- */
-export async function acquireBuildSlots(options, count) {
-  const held = [await acquireBuildSlot(options)];
-  try {
-    while (held.length < count) held.push(await acquireBuildSlot({ ...options, waitMs: 0 }));
-  } catch (error) {
-    if (error.code !== "ETIMEDOUT") { for (const slot of held) slot.release(); throw error; }
-  }
-  return held;
-}
-
 /** Fail-fast ownership for mutable local resources; this creates no waiter queue. */
 export function acquireExclusiveSlot({ root, kind, metadata, cooperativeCancellation = true }) {
   mkdirSync(root, { recursive: true });
@@ -772,7 +757,7 @@ async function acquireSlot({
         : `denied: pid ${process.pid} waiting at queue position ${ahead + 1}`);
     }
     if (Date.now() >= deadline) {
-      throw Object.assign(new Error(
+      throw new Error(
         `no ${label} freed within ${Math.round(waitMs / 60_000)} minutes: ` +
           `the concurrency budget is ${slots} concurrent ${lanes} ` +
           `at ${root} ${free.length === 0
@@ -780,7 +765,7 @@ async function acquireSlot({
             : `with ${ahead < 0 ? "queue position unavailable" : `queue position ${ahead + 1} behind older waiters`}; ${holders(root, slots, kind) || "no current holder"}`}. Wait for a lane to finish and ` +
           `rerun; a dead lane's slot is reclaimed automatically once its ` +
           `heartbeat is 30 minutes stale.`,
-      ), { code: "ETIMEDOUT" });
+      );
     }
     if (Date.now() >= nextMessageAt) {
       const position = ahead < 0 ? "unavailable" : ahead + 1;

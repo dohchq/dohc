@@ -237,7 +237,6 @@ test("verification selects packages and proofs and prepares before parallel jobs
           if(args[0]==='tools/rust-engine-program/run-rust-checks.mjs') {
             assert.ok(runtimeBuilt, 'Rust started before the runtime build completed');
             assert.ok(args.includes('--prepared-runtime'));
-            assert.ok(args.includes('--verification-lane'),'The lane holder did not take its Rust share');
             if(${prepare})assertPrepared({engineOnly:!${desktop},engineBinary:stagedEnginePath});
             mkdirSync(dirname(enginePath),{recursive:true});writeFileSync(enginePath,'workspace engine');chmodSync(enginePath,0o755);
             if(${rust && js}) {

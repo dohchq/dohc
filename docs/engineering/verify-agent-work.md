@@ -108,8 +108,6 @@ Selected integration suites must run; unavailable prerequisites cause failure ra
 The native self-host editing proof checks the prepared engine and its complete delivery evidence when selected.
 The Rust gate uses the repository build budget and checks its summary verdict.
 On the shared Windows host, one full PR verification runs at a time. Full runs wait in FIFO order.
-Its Rust gate also takes a second of the four Cargo build slots when one is free, which doubles its jobs and test threads.
-The evidence line records the caps the gate used.
 Each PR run owns its checkout until cleanup and receipt writing finish.
 Another PR run in that checkout fails before installation or queue admission and reports the owner.
 Warm, narrow JavaScript plans can use one separate light lane beside the full lane.

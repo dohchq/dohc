@@ -47,8 +47,6 @@ You do not set these up:
   `DOHC_GATE_DISK_FLOOR_GB` overrides it.
 - It takes one of 4 build slots before any cargo runs. If all slots are
   held, it waits and prints who holds them.
-- Inside `pnpm verify:pr`, which holds the host's verification lane, it also
-  takes a second slot when one is free and doubles its caps.
 - It caps cargo's build and test parallelism to its share of the cores,
   and turns incremental compilation off for the run.
 - It records the caps it ran under in the evidence line.

@@ -10,7 +10,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { spawn, spawnSync } from "node:child_process";
-import { once } from "node:events";
 import {
   existsSync,
   mkdirSync,
@@ -28,7 +27,6 @@ import { setTimeout as poll } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import {
   acquireBuildSlot,
-  acquireBuildSlots,
   acquireExclusiveSlot,
   acquireVerificationSlot,
   buildQueueStatus,
@@ -931,67 +929,6 @@ test("two lanes get two different slots", async () => {
     second.release();
   } finally {
     rmSync(root, { recursive: true, force: true });
-  }
-});
-
-test("a lane holder takes a second cargo lane only when it is free now", async () => {
-  const root = slotRoot();
-  try {
-    const pair = await acquireBuildSlots({ root, slots: 4, waitMs: 0 }, 2);
-    assert.deepEqual(pair.map(slot => slot.name), ["build-slot-1", "build-slot-2"]);
-    for (const slot of pair) slot.release();
-    assert.equal(existsSync(join(root, "build-slot-1")) || existsSync(join(root, "build-slot-2")), false);
-    // A free lane reserved for an older waiter is not free: the holder runs on one.
-    const older = plantTicket(root, 1, { pid: process.pid });
-    const single = await acquireBuildSlots({ root, slots: 2, waitMs: 0 }, 2);
-    assert.deepEqual(single.map(slot => slot.name), ["build-slot-2"]);
-    assert.equal(existsSync(join(root, "build-slot-1")), false);
-    assert.deepEqual(tickets(root), [older.split(/[\\/]/u).at(-1)]);
-    single[0].release();
-  } finally {
-    rmSync(root, { recursive: true, force: true });
-  }
-});
-
-test("a fault on the second cargo lane releases the first", () => {
-  const root = slotRoot();
-  try {
-    queueProbe(root, `
-      const { acquireBuildSlots } = await import(${JSON.stringify(new URL("../tools/rust-engine-program/build-slot.mjs", import.meta.url).href)});
-      const write = fs.writeFileSync;
-      let owners = 0;
-      fs.writeFileSync = (path, ...args) => {
-        if (String(path).endsWith("owner.json") && ++owners === 2) throw Object.assign(new Error("disk fault"), { code: "EIO" });
-        return write(path, ...args);
-      };
-      syncBuiltinESMExports();
-      await assert.rejects(acquireBuildSlots({ root, slots: 2, waitMs: 0 }, 2), { code: "EIO" });
-      assert.deepEqual(fs.readdirSync(root).filter(name => /^build-slot-\\d$/u.test(name)), []);
-    `);
-  } finally {
-    rmSync(root, { recursive: true, force: true });
-  }
-});
-
-test("an interrupted lane holder releases every cargo lane it took", async t => {
-  const root = slotRoot();
-  t.after(() => rmSync(root, { recursive: true, force: true }));
-  const other = await acquireBuildSlot({ root, slots: 1, waitMs: 0 });
-  t.after(() => other.release());
-  for (const [slots, expected] of [[3, ["build-slot-2", "build-slot-3"]], [2, ["build-slot-2"]]]) {
-    const child = spawn(process.execPath, ["--input-type=module", "-e", `
-      import { acquireBuildSlots } from ${JSON.stringify(new URL("../tools/rust-engine-program/build-slot.mjs", import.meta.url).href)};
-      const held = await acquireBuildSlots({ root: process.argv[1], slots: Number(process.argv[2]), waitMs: 0 }, 2);
-      process.on("message", signal => process.emit(signal));
-      process.send(held.map(slot => slot.name));
-    `, root, String(slots)], { stdio: ["ignore", "ignore", "inherit", "ipc"], windowsHide: true });
-    const [names] = await once(child, "message");
-    assert.deepEqual(names, expected);
-    const exited = once(child, "exit");
-    child.send("SIGINT");
-    assert.deepEqual(await exited, [130, null]);
-    for (const name of expected) assert.equal(existsSync(join(root, name)), false);
-    assert.equal(existsSync(other.dir), true);
   }
 });
 

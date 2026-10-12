@@ -323,7 +323,7 @@ export async function verify(args) {
           save();
           return;
         }
-        await step("rust", process.execPath, ["tools/rust-engine-program/run-rust-checks.mjs", "--prepared-runtime", ...(lane ? ["--verification-lane"] : [])], buildEnvironment());
+        await step("rust", process.execPath, ["tools/rust-engine-program/run-rust-checks.mjs", "--prepared-runtime"], buildEnvironment());
         await step("rust-verdict", process.execPath, ["tools/rust-engine-program/require-ci-pass-verdict.mjs", join(output, "rust.log")]);
       } catch (error) {
         report.rustError = error.message; save();
