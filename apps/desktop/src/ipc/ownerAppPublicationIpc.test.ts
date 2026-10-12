@@ -448,3 +448,14 @@ it("refuses owner reactivation review before loading an operator-disabled manife
   expect(h.compile).not.toHaveBeenCalled();
   expect(h.relay).toHaveBeenCalledTimes(1);
 });
+
+it("shows the operator message when a publish retry returns a taken-down publication", async () => {
+  const h = harness(), prepared = await h.prepare(), original = h.relay.getMockImplementation()!;
+  h.relay.mockImplementation(async (...args) => {
+    const result = await original(...args);
+    if (!args[1].endsWith("/app-publications")) return result;
+    return {...result as Record<string, unknown>, active: false, operatorTakedown: {actor: "operator", disabledAtMs: 30, reason: "Confirmed phishing"}};
+  });
+  await expect(h.approve(prepared)).rejects.toThrow("The server operator disabled this publication. Contact the server operator.");
+  expect(h.relay.mock.calls.some(call => call[1].endsWith("/reactivate"))).toBe(false);
+});

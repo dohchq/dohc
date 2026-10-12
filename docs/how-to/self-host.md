@@ -260,18 +260,25 @@ See the [browser service operations reference](../../services/share-web/README.m
 If a published app is unsafe, run this command from the deployment bundle directory on the server:
 
 ```sh
-node scripts/self-host/app-takedown.mjs --publication-id PUBLICATION_ID --reason "Phishing reported and confirmed"
+docker compose --env-file .env.self-host -f docker-compose.self-host.yml exec -T sync-relay \
+  node /app/services/sync-relay/dist/app-publication-takedown.js \
+  --publication-id PUBLICATION_ID --reason "Phishing reported and confirmed"
 ```
 
 Use the publication ID from the owner's publication list or the app URL's `app` parameter.
-The command permanently disables that publication. The owner sees the reason and cannot reactivate it.
-The relay records the actor as "operator", the time, and the reason.
-It refuses new launches and Collection writes, including requests from existing launches.
+The command disables that one publication. The owner sees the reason and cannot reactivate that publication.
+The owner can still publish the app under a new share link or after rotating the grant.
+Watch for new publications of the same app.
+The relay records the actor as "operator", the time, and the reason durably.
+It immediately refuses serving, new launches, and writes, including requests from existing launches.
 
-The command stops the selected Compose project, then restarts its previously running services after success.
-Sync and sharing pause during the command. If the command fails, services remain stopped for inspection.
-Use `--env-file`, `--compose-file`, or `--project-name` when selecting a custom deployment.
-Retries preserve the first takedown record.
+The command uses a private socket inside the running relay container. Other publications, sync, and sharing keep running.
+Use Compose's `--env-file`, `-f`, or `--project-name` options when selecting a custom deployment.
+Exit codes are 0 for success, 2 for bad input, 3 for not found, and 1 for connection or operation failures.
+The client times out after 10 seconds. Retries preserve the first takedown record.
+
+Restoring a backup taken before the takedown brings that publication back.
+Run the takedown command again after restoring such a backup.
 
 ## Back up and maintain the deployment
 

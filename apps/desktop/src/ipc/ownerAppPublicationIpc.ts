@@ -259,6 +259,7 @@ export function createOwnerAppPublicationHandler<Caller, Workspace extends { wor
         const owner = row.owner as Record<string, unknown> | undefined;
         if (!owner || owner.workspaceId !== input.workspaceId || owner.shareId !== entry.input.shareId || owner.grantId !== entry.input.grantId || owner.generation !== prepared.generation ||
             JSON.stringify(row.candidate) !== JSON.stringify(candidate)) throw new Error("The app publication changed. Review it again.");
+        if (row.operatorTakedown) throw new Error("The server operator disabled this publication. Contact the server operator.");
         if (row.active !== true) throw new Error("This app is already unpublished. Review it from the publication list to republish it.");
         return finishPublication(row.publicationId, row.authorityRevision);
       }

@@ -98,9 +98,11 @@ function header(storage: StorageContext, publicationId: string, workspaceId: str
     active: row.active === 1,authorityRevision: Number(row.authority_revision),createdAtMs: Number(row.created_at_ms)};
   const approval = storage.db.prepare("SELECT facts_json FROM sync_relay_app_publication_approvals WHERE publication_id=? ORDER BY authority_revision DESC LIMIT 1").get(publicationId);
   if (approval) state.approvalProvenance = JSON.parse(String(approval.facts_json));
-  const takedown = storage.db.prepare("SELECT disabled_at_ms,reason FROM sync_relay_app_publication_takedowns WHERE publication_id=?").get(publicationId);
-  if (takedown) state.operatorTakedown = {actor: "operator", disabledAtMs: Number(takedown.disabled_at_ms), reason: String(takedown.reason)};
   return {row, state};
+}
+function withOperatorTakedown<State extends AppPublicationState>(storage: StorageContext, state: State): State {
+  const takedown = storage.db.prepare("SELECT disabled_at_ms,reason FROM sync_relay_app_publication_takedowns WHERE publication_id=?").get(state.publicationId);
+  return takedown ? {...state, operatorTakedown: {actor: "operator", disabledAtMs: Number(takedown.disabled_at_ms), reason: String(takedown.reason)}} : state;
 }
 class PublicationManifestUnavailable extends RelayError {
   constructor() {super("bad_request", "Publication manifest is unavailable.");}
@@ -134,7 +136,7 @@ export function publishAppPublication(storage: StorageContext, input: PublishApp
       put(storage, owner.workspaceId, file.sha256, content, now);
     }
     const existing = storage.db.prepare("SELECT 1 FROM sync_relay_app_publications WHERE publication_id=?").get(publicationId);
-    if (existing) return stored(storage, {...owner, publicationId, limits: input.limits}); // A retry never reactivates a withdrawn publication.
+    if (existing) return withOperatorTakedown(storage, stored(storage, {...owner, publicationId, limits: input.limits})); // A retry never reactivates a withdrawn publication.
     put(storage, owner.workspaceId, manifestHash, bytes, now);
     storage.db.prepare(`INSERT INTO sync_relay_app_publications(publication_id,workspace_id,share_id,grant_id,grant_generation,owner_user_id,manifest_sha256,created_at_ms,active,authority_revision)
       VALUES(?,?,?,?,?,?,?,?,1,1)`).run(publicationId,owner.workspaceId,owner.shareId,owner.grantId,owner.generation,owner.ownerUserId,manifestHash,now);
@@ -146,7 +148,7 @@ export function publishAppPublication(storage: StorageContext, input: PublishApp
   });
 }
 export function readAppPublication(storage: StorageContext, input: ReadAppPublicationInput): AppPublicationRow {
-  return storage.readTx(() => stored(storage, input));
+  return storage.readTx(() => withOperatorTakedown(storage, stored(storage, input)));
 }
 
 export interface ListAppPublicationsInput {
@@ -183,7 +185,7 @@ export function listAppPublications(storage: StorageContext, input: ListAppPubli
         catch { collectionCapability = "unavailable"; }
       }
       try {
-        const publication = stored(storage, {...input, publicationId});
+        const publication = withOperatorTakedown(storage, stored(storage, {...input, publicationId}));
         if (input.appRoot !== undefined && publication.candidate.appRoot !== input.appRoot) return [];
         const capability = publication.candidate.capabilities[0];
 
@@ -193,7 +195,7 @@ export function listAppPublications(storage: StorageContext, input: ListAppPubli
           sourceRevision: publication.candidate.sourceRevision, active: publication.active, linkCurrent: publicationLinkIsCurrent(storage, publication.owner), collectionCapability, datasetCapability}];
       } catch (error) {
         if (!(error instanceof PublicationManifestUnavailable)) throw error;
-        const {state} = header(storage, publicationId, input.workspaceId, input.ownerUserId);
+        const state = withOperatorTakedown(storage, header(storage, publicationId, input.workspaceId, input.ownerUserId).state);
         return [{publicationId, ...(state.operatorTakedown ? {operatorTakedown:state.operatorTakedown} : {}), approvalProvenance:state.approvalProvenance, authorityRevision: state.authorityRevision, manifestUnavailable: true,
           shareId: state.owner.shareId, grantId: state.owner.grantId, active: state.active, linkCurrent: publicationLinkIsCurrent(storage, state.owner), collectionCapability, datasetCapability: null}];
       }
@@ -203,7 +205,7 @@ export function listAppPublications(storage: StorageContext, input: ListAppPubli
 }
 export function withdrawAppPublication(storage: StorageContext, input: WithdrawAppPublicationInput): AppPublicationState {
   return storage.tx(() => {
-    const {state: current} = header(storage,input.publicationId,input.workspaceId,input.ownerUserId);
+    const current = withOperatorTakedown(storage, header(storage,input.publicationId,input.workspaceId,input.ownerUserId).state);
     const share = storage.getShare(current.owner.shareId);
     if (!share || share.workspaceId !== current.owner.workspaceId || share.granterUserId !== input.ownerUserId) throw notFound();
     if (current.authorityRevision !== input.expectedAuthorityRevision) throw relayError("conflict","Publication authority changed.");
@@ -221,7 +223,7 @@ export function disableAppPublication(storage: StorageContext, input: DisableApp
   return storage.tx(() => {
     const row = storage.db.prepare("SELECT workspace_id,owner_user_id FROM sync_relay_app_publications WHERE publication_id=?").get(input.publicationId);
     if (!row) throw notFound();
-    const {state: current} = header(storage, input.publicationId, String(row.workspace_id), String(row.owner_user_id));
+    const current = withOperatorTakedown(storage, header(storage, input.publicationId, String(row.workspace_id), String(row.owner_user_id)).state);
     if (current.operatorTakedown) return current;
     if (current.authorityRevision >= Number.MAX_SAFE_INTEGER) throw relayError("conflict", "Publication authority is exhausted.");
     const operatorTakedown: AppPublicationTakedown = {actor: "operator", disabledAtMs: now, reason: input.reason.trim()};
@@ -241,7 +243,7 @@ function recordApproval(storage: StorageContext, publicationId: string, authorit
 
 export function reactivateAppPublication(storage: StorageContext, input: ReactivateAppPublicationInput): AppPublicationState {
   return storage.tx(() => {
-    const {state: current} = header(storage, input.publicationId, input.workspaceId, input.ownerUserId);
+    const current = withOperatorTakedown(storage, header(storage, input.publicationId, input.workspaceId, input.ownerUserId).state);
     if (current.operatorTakedown) throw relayError("conflict", "The server operator disabled this publication. Contact the server operator.");
     if (current.authorityRevision !== input.expectedAuthorityRevision) throw relayError("conflict", "Publication authority changed.");
     const candidate = stored(storage, input).candidate;

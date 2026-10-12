@@ -12,6 +12,9 @@ import { createSyncRelayHandler } from "../server";
 import { UnauthorizedError } from "@dohc/workspace-auth/session";
 import { MAX_PAYLOAD_JSON_BYTES } from "../wireLimits";
 import { hashLinkBearer, hashLinkProfileSecret, LinkEgressRateLimiter } from "../linkSecurity";
+import { startPublicationOperator } from "../appPublicationOperator";
+import { operatorSocketPath } from "../appPublicationOperatorProtocol";
+import { requestPublicationTakedown } from "../appPublicationOperatorClient";
 import { TokenBucketLimiter } from "@dohc/service-http";
 
 const limits = { maxFiles: 10, maxMetadataBytes: 16_384, maxBundleBytes: 4096 };
@@ -551,8 +554,13 @@ it("operator takedown stops serving and cached launch authority without disclosi
     capabilityHash: f.capabilityHash, profileTokenHash: hashLinkProfileSecret("P".repeat(43), "test-key"), nowMs: 20});
   const stream = await f.http(f.blobPath), reader = stream.body!.getReader();
   expect((await reader.read()).value!.byteLength).toBe(64 * 1024);
-  const disabled = f.storage.disableAppPublication({publicationId: f.published.publicationId, reason: "Confirmed phishing", nowMs: 21});
-  expect(disabled).toMatchObject({active: false, authorityRevision: 2, operatorTakedown: {actor: "operator", disabledAtMs: 21, reason: "Confirmed phishing"}});
+  const socketPath = operatorSocketPath({SYNC_RELAY_DB_PATH: f.path});
+  const operator = await startPublicationOperator(f.storage, socketPath);
+  try {
+    expect(operator.address()).toBe(socketPath);
+    const disabled = await requestPublicationTakedown(socketPath, {type: "disable-publication", publicationId: f.published.publicationId, reason: "Confirmed phishing"});
+    expect(disabled).toMatchObject({code: 0, authorityRevision: 2, operatorTakedown: {actor: "operator", reason: "Confirmed phishing"}});
+  } finally {await operator.close();}
   expect(() => guard(22)).toThrow();
   await expect(reader.read()).rejects.toThrow();
   for (const path of [f.path, f.blobPath]) {
@@ -612,4 +620,21 @@ it("refuses to recreate a missing marked takedown table", () => {
   const f = fixture();
   f.raw.exec("DROP TABLE sync_relay_app_publication_takedowns");
   expect(() => openSyncRelayStorage(f.path)).toThrow("Publication takedown schema is missing or damaged.");
+});
+
+it("avoids takedown reads while serving and retains them for owner reads", () => {
+  const f = linkFixture(), original = f.raw.prepare.bind(f.raw);
+  const prepare = vi.spyOn(f.raw, "prepare");
+  let takedownReads = 0;
+  prepare.mockImplementation(sql => {if (sql.includes("sync_relay_app_publication_takedowns")) takedownReads++; return original(sql);});
+  try {
+    const input = {...f.input, publicationId: f.published.publicationId, capabilityHash: f.capabilityHash, profileTokenHash: hashLinkProfileSecret("P".repeat(43), "test-key"), nowMs: 20};
+    const guard = f.storage.createLinkAppPublicationGuard(input);
+    guard(21);
+    f.storage.authorizeLinkAppPublication(input);
+    f.storage.readLinkAppPublicationBlob({...input, sha256: digest(script), expectedAuthorityRevision: 1});
+    expect(takedownReads).toBe(0);
+    f.storage.readAppPublication({...owner, publicationId: f.published.publicationId, limits});
+    expect(takedownReads).toBe(1);
+  } finally {prepare.mockRestore();}
 });

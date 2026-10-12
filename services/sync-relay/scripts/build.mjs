@@ -5,6 +5,7 @@ import { build } from "esbuild";
 const entry = fileURLToPath(new URL("../src/main.ts", import.meta.url));
 const connectEntry = fileURLToPath(new URL("../src/deviceHostConnectCommand.ts", import.meta.url));
 const deploymentEntry = fileURLToPath(new URL("../src/relayDeploymentCommand.ts", import.meta.url));
+const takedownEntry = fileURLToPath(new URL("../src/appPublicationTakedownCommand.ts", import.meta.url));
 const credentialEntry = fileURLToPath(new URL("../src/deviceHostCredentialCommand.ts", import.meta.url));
 
 /** @type {import("esbuild").BuildOptions} */
@@ -22,7 +23,7 @@ const buildOptions = {
 export function buildRelay(outdir) {
   return build({
     ...buildOptions,
-    entryPoints: { main: entry, liveValidationWorker: fileURLToPath(new URL("../src/liveValidationWorker.ts", import.meta.url)), "device-host-connect": connectEntry, "app-publication-takedown": fileURLToPath(new URL("../src/appPublicationTakedownCommand.ts", import.meta.url)), "relay-deployment": deploymentEntry, "device-host-credential": credentialEntry },
+    entryPoints: { main: entry, liveValidationWorker: fileURLToPath(new URL("../src/liveValidationWorker.ts", import.meta.url)), "device-host-connect": connectEntry, "app-publication-takedown": takedownEntry, "relay-deployment": deploymentEntry, "device-host-credential": credentialEntry },
     outdir,
   });
 }
