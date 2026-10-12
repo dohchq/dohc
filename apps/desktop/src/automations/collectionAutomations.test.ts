@@ -1,3 +1,4 @@
+import { historyPageFields } from "../testing/historyPageFixture";
 import { createHash } from "node:crypto";
 import { mkdir, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { dirname, join, relative } from "node:path";
@@ -4115,7 +4116,7 @@ describe("Collection automations", () => {
       ] as const) {
         const page = await listEngineMomentsForIpc(async () => ({
           moments: [{ id: "moment-1", versionId: "main", path: "Tasks/notes.md", recordedAtMs: 1, operation: "write", metadata: { origin: "local-file" }, authors: [...authors], momentOrder: 1, protected: false }],
-          nextBeforeMomentOrder: null, latestMomentOrder: 1, activeVersionId: "main", protectedTruncated: false,
+          nextCursor: null, latestMomentOrder: 1, activeVersionId: "main", ...historyPageFields,
         }), names);
         if (!("moments" in page)) throw new Error("Expected ready history");
         expect(page.moments[0]).toMatchObject(expected);

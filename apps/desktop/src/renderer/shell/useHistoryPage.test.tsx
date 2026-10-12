@@ -226,6 +226,7 @@ describe("history page pagination", () => {
     await loadMore;
     expect(it0.hook().page).toEqual({
       moments: [moment("first"), moment("earlier")],
+      startCursor: historyPageFields.startCursor,
       nextCursor: historyCursor(0),
       latestMomentOrder: 5,
       versionMarkers: [newerMarker, olderMarker],
@@ -765,7 +766,7 @@ it("re-reads each names revision once, without scanning again on refresh or load
   window.dohcDesktop!.onHistoryNamesChanged = listener => { notify = listener; return () => {}; };
   const it0 = mount();
   const orderedPage = (id: string, order: number, next: number | null): ListEngineMomentsResult => ({
-    ...page(id, { nextBeforeMomentOrder: next, latestMomentOrder: 3 }),
+    ...page(id, { startCursor: historyCursor(order + 1), nextCursor: next === null ? null : historyCursor(next), latestMomentOrder: 3 }),
     moments: [{ ...moment(id), momentOrder: order }],
   });
   await committed(it0, orderedPage("first", 3, 3));
@@ -789,7 +790,7 @@ it("re-reads each names revision once, without scanning again on refresh or load
   await settle(reads[5]!, orderedPage("refreshed", 3, 3));
   await settle(reads[6]!, orderedPage("older", 2, 2));
   await settle(reads[7]!, orderedPage("oldest", 1, null));
-  expect(listEngineMoments.mock.calls.map(([payload]) => payload.beforeMomentOrder)).toEqual([undefined, 4, undefined, 3, 2, 4, 3, 2]);
+  expect(listEngineMoments.mock.calls.map(([payload]) => payload.cursor?.text?.momentOrder)).toEqual([undefined, 4, undefined, 3, 2, 4, 3, 2]);
   expect(reads).toHaveLength(8);
   expect(it0.ids()).toEqual(["refreshed", "older", "oldest"]);
 });
@@ -799,7 +800,7 @@ it("defers a names event until pending load-more settles, then renames kept rows
   window.dohcDesktop!.onHistoryNamesChanged = listener => { notify = listener; return () => {}; };
   const it0 = mount();
   const first = { ...moment("first"), momentOrder: 3, namedAuthor: { userId: "ben", label: "Someone you shared with" } };
-  await committed(it0, { ...page("first", { nextBeforeMomentOrder: 3 }), moments: [first] });
+  await committed(it0, { ...page("first", { nextCursor: historyCursor(3) }), moments: [first] });
   const older = it0.loadMore();
   act(() => notify({ workspaceId: "ws-1" }));
   expect.soft(reads).toHaveLength(2);
@@ -819,7 +820,7 @@ it("restarts an interrupted timeline scan after load-more commits", async () => 
   let notify!: (event: { workspaceId: string }) => void;
   window.dohcDesktop!.onHistoryNamesChanged = listener => { notify = listener; return () => {}; };
   const it0 = mount();
-  await committed(it0, page("first", { nextBeforeMomentOrder: 1 }));
+  await committed(it0, page("first", { nextCursor: historyCursor(1) }));
   act(() => notify({ workspaceId: "ws-1" }));
   const interrupted = reads[1]!;
   const older = it0.loadMore();
@@ -873,4 +874,25 @@ it.each(["failure", "updating"])("retries a %s naming scan once and consumes onl
   expect(it0.hook().page?.moments[0]?.namedAuthor?.label).toContain("ben@test.example");
   await committed(it0, page("refreshed"));
   expect(reads).toHaveLength(4);
+});
+
+
+it("refreshes names from the original fenced cursor across a marker-only page", async () => {
+  let notify!: (event: { workspaceId: string }) => void;
+  window.dohcDesktop!.onHistoryNamesChanged = listener => { notify = listener; return () => {}; };
+  const it0 = mount();
+  const start = { ...historyCursor(5), workspaceId: "ws-1", text: null };
+  const afterMarker = { ...start, marker: { createdAtMs: 90, versionId: "draft" } };
+  await committed(it0, page("kept", { startCursor: start }));
+  act(() => notify({ workspaceId: "ws-1" }));
+  expect(listEngineMoments.mock.calls[1]?.[0].cursor).toEqual(start);
+  await settle(reads[1]!, { ...page("unused", { startCursor: start, nextCursor: afterMarker }), moments: [],
+    versionMarkers: [{ id: "draft", workspaceId: "ws-1", kind: "named", name: "Draft", createdAtMs: 90 }] });
+  expect(listEngineMoments.mock.calls[2]?.[0].cursor).toEqual(afterMarker);
+  await settle(reads[2]!, { ...page("kept", { startCursor: afterMarker }), moments: [{
+    ...moment("kept"), namedAuthor: { userId: "ben", label: "ben@test.example (via share link)" },
+  }] });
+  expect(it0.hook().page?.moments[0]?.namedAuthor?.label).toContain("ben@test.example");
+  expect(it0.hook().page?.startCursor).toEqual(start);
+  expect(reads).toHaveLength(3);
 });

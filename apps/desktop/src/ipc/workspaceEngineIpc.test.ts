@@ -876,7 +876,7 @@ describe("workspace engine IPC registrations", () => {
         settled("account", [owner]),
         settled("link", [{ kind: "link", publicPrincipalId: "public_1", label: "Anonymous" }]),
       ],
-      nextBeforeMomentOrder: null, latestMomentOrder: 1, activeVersionId: "main", protectedTruncated: false,
+      nextCursor: null, latestMomentOrder: 1, activeVersionId: "main", ...historyPageFields,
     });
     const listed = (await h.invoke(CHANNELS.listEngineMoments)) as { moments: EngineMomentRecord[] };
     expect(listed.moments.map(engineMomentSourceLabel)).toEqual([

@@ -10,7 +10,7 @@ import { bridge } from "../bridge";
 // pages, and the latest order of the answer on screen. A refresh replaces
 // that order outright; the shell keeps its own floor for the open-file
 // refresh key.
-export type HistoryPage = Pick<ListEngineMomentsResult, "moments" | "nextCursor" | "versionMarkers" | "latestMomentOrder">;
+export type HistoryPage = Pick<ListEngineMomentsResult, "moments" | "startCursor" | "nextCursor" | "versionMarkers" | "latestMomentOrder">;
 
 // Why there is no page. A null timeline is not "no changes": it is also a
 // first read still in flight, a read that failed, and a page dropped as stale
@@ -201,6 +201,7 @@ export function useHistoryPage(
         setLoadingMore(false);
         setPage({
           moments: answer.moments,
+          startCursor: answer.startCursor,
           nextCursor: answer.nextCursor,
           latestMomentOrder: answer.latestMomentOrder,
           versionMarkers: answer.versionMarkers,
@@ -264,6 +265,7 @@ export function useHistoryPage(
           committed.current = token;
           setPage({
             moments: [...current.moments, ...answer.moments],
+            startCursor: current.startCursor,
             nextCursor: answer.nextCursor,
             latestMomentOrder: Math.max(current.latestMomentOrder, answer.latestMomentOrder),
             versionMarkers: [...current.versionMarkers, ...answer.versionMarkers],
@@ -361,16 +363,22 @@ export function useHistoryPage(
     const version = committedVersionId.current;
     const live = () => liveRequest && !loadingMoreNow.current && latestPage.current === shown && committed.current === watermark && committedVersionId.current === version;
     const scan = async () => {
-      const named = new Map<string, EngineMomentRecord>();
-      let before = Math.max(...shown.moments.map(moment => moment.momentOrder)) + 1;
-      const last = Math.min(...shown.moments.map(moment => moment.momentOrder));
+      const named = new Map<string, HistoryPage["moments"][number]>();
+      const remaining = new Set(shown.moments.map(moment => moment.id));
+      const seenCursors = new Set<string>();
+      let cursor = shown.startCursor;
       do {
-        const response = await bridge().listEngineMoments({ workspaceId, beforeMomentOrder: before, limit: HISTORY_PAGE_LIMIT });
+        const position = JSON.stringify(cursor);
+        if (seenCursors.has(position)) return false;
+        seenCursors.add(position);
+        const response = await bridge().listEngineMoments({ workspaceId, cursor, limit: HISTORY_PAGE_LIMIT });
         if (!live() || "status" in response || response.activeVersionId !== version) return false;
-        for (const moment of response.moments) named.set(moment.id, moment);
-        if (response.nextBeforeMomentOrder === null || response.nextBeforeMomentOrder <= last) break;
-        if (response.nextBeforeMomentOrder >= before) return false;
-        before = response.nextBeforeMomentOrder;
+        for (const moment of response.moments) {
+          named.set(moment.id, moment);
+          remaining.delete(moment.id);
+        }
+        if (remaining.size === 0 || response.nextCursor === null) break;
+        cursor = response.nextCursor;
       } while (live());
       if (!live()) return false;
       const next = { ...shown, moments: shown.moments.map(moment => named.get(moment.id) ?? moment) };

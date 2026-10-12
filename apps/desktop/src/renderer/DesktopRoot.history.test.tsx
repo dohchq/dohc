@@ -1,3 +1,4 @@
+import { historyPageFields } from "../testing/historyPageFixture";
 // @vitest-environment jsdom
 import "./DesktopWorkspaceShell.testSupport";
 import { act, render, screen, waitFor } from "@testing-library/react";
@@ -23,10 +24,10 @@ function historyPage(id: string, summary: string): ListEngineMomentsResult {
   };
   return {
     moments: [moment],
-    nextBeforeMomentOrder: null,
+    nextCursor: null,
     latestMomentOrder: 1,
     activeVersionId: "main",
-    protectedTruncated: false,
+    ...historyPageFields,
   };
 }
 
