@@ -255,7 +255,7 @@ it("enrolls a self-hosted document, resumes native activation, and publishes own
     if (!identity) throw new Error("Ordinary source owner did not establish a relay identity.");
     workspace = join(hostRoot, hash(Buffer.from(JSON.stringify([history.namespace, "workspace", identity.replicationEpoch, identity.streamIdentity]))));
     async function startSupervisor() {
-      supervisor = await startSelfHostedLiveHost({storage, history, frameChanges, root: hostRoot, engineExecutable: executable!,
+      supervisor = await startSelfHostedLiveHost({trustedAccount: (accountId: string) => ({accountId, name: accountId}), storage, history, frameChanges, root: hostRoot, engineExecutable: executable!,
         relayOrigin: "https://service-activation-relay.example.test", key: Buffer.from(ticketKey), onError: error => {harness.failed?.(error instanceof Error ? error : new Error(String(error)));}});
       enrollment = createServiceHostEnrollmentRoutes({storage, history, host: supervisor, resolveActor});
       await vi.waitFor(() => {active = supervisor!.current(); expect(active).toBeDefined();}, {timeout: 30000});

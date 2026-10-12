@@ -3869,6 +3869,10 @@ mod tests {
                 "v2-engine-store-role",
                 "8d75962511b05d48c91ea5c041ed69c8ab6b181212aee4c0cad4c7e16f61a54b",
             ),
+            (
+                "v2-owner-outbox-person-edit",
+                "55940512b28bebcdda24b3c86763c66e29416eed55f157b8c06edf9f5b5622df",
+            ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());
         for (migration, (id, checksum)) in BASELINE_MIGRATIONS.iter().zip(pinned) {
