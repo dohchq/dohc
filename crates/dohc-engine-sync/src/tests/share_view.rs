@@ -5368,6 +5368,178 @@ fn origination_and_conflict_outbox_wait_for_owner_contact_not_a_share_cursor() {
 }
 
 #[test]
+fn inactive_recovery_update_journals_a_new_share_moment_after_initial_submission() {
+    use crate::ydoc_recovery::recover_inactive_projection_in_tx;
+    use dohc_engine_collab::{DocKey, Ydoc};
+
+    let (_scratch, _database, mut engine) = journal_lane_store(JournalLane::EditShare);
+    let key = DocKey::new("ws", "main", "object-inactive").unwrap();
+    let doc = Ydoc::wire();
+    doc.plaintext_insert(0, "saved draft");
+    let claim = engine.put_binary_blob(&doc.encode_full_state()).unwrap();
+    let initial_sha = dohc_engine_storage::hex_sha256(b"saved draft");
+    let TxnOutcome::Committed(()) = engine
+        .write_with(&NoFaults, |tx| {
+            recover_inactive_projection_in_tx(
+                tx,
+                &key,
+                "shared/docs/draft.md",
+                &claim,
+                "saved draft",
+                &dohc_engine_storage::hex_sha256(b""),
+                &claim,
+                None,
+                1_200,
+                None,
+            )
+        })
+        .unwrap()
+    else {
+        panic!("initial recovery crashed");
+    };
+    let (object_id, path): (String, String) = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT object_id, path FROM snapshots WHERE workspace_id='ws' \
+                 AND version_id='main' AND metadata_correlation_id LIKE 'ydoc-inactive-recovery:%'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+        })
+        .unwrap();
+    let initial = VersionedTextStore::new(&mut engine)
+        .read_text("ws", "main", &path)
+        .unwrap()
+        .unwrap();
+    assert_eq!(initial.blob_sha256, initial_sha);
+    let initial_moments = local_lane_ops(&engine, "moment.append");
+    assert_eq!(initial_moments.len(), 1);
+    assert_eq!(
+        initial_moments[0].payload["momentId"],
+        initial.latest_moment_id
+    );
+
+    // Advance the proposal cursor before updating so the first moment cannot carry the update.
+    let client = RelaySyncClient::new(PagedShareRelay::new([], []));
+    let grant = share_proposal::proposal_grant(ShareAccess::Edit);
+    let submitted = client
+        .submit_share_proposal(
+            &mut engine,
+            "ws",
+            "share-journal",
+            &grant,
+            "inactive-initial",
+            &NoFaults,
+            0,
+        )
+        .unwrap();
+    assert_eq!(submitted.submitted, 1);
+    assert!(submitted.proposal_id.is_some());
+    assert_eq!(client.transport().proposal_submits.lock().unwrap().len(), 1);
+    assert_eq!(
+        client.transport().blob_uploads.lock().unwrap()[0].bytes,
+        b"saved draft"
+    );
+    let scanned_seq = |engine: &EngineStore| {
+        engine
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT scanned_seq FROM share_proposal_push_state \
+                     WHERE workspace_id='ws' AND share_id='share-journal'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+            })
+            .unwrap()
+    };
+    assert_eq!(scanned_seq(&engine), initial_moments[0].origin_seq);
+
+    let updated_text = "saved draft updated";
+    doc.plaintext_insert(11, " updated");
+    let state_sha = engine.put_binary_blob(&doc.encode_full_state()).unwrap();
+    assert_ne!(state_sha, claim);
+    let TxnOutcome::Committed(()) = engine
+        .write_with(&NoFaults, |tx| {
+            recover_inactive_projection_in_tx(
+                tx,
+                &key,
+                "shared/docs/draft.md",
+                &claim,
+                updated_text,
+                &initial_sha,
+                &state_sha,
+                None,
+                1_300,
+                None,
+            )
+        })
+        .unwrap()
+    else {
+        panic!("recovery update crashed");
+    };
+    let updated = VersionedTextStore::new(&mut engine)
+        .read_text("ws", "main", &path)
+        .unwrap()
+        .unwrap();
+    assert_eq!(updated.object_id, object_id);
+    assert_eq!(updated.path, path);
+    assert_eq!(updated.text, updated_text);
+    assert_ne!(updated.latest_moment_id, initial.latest_moment_id);
+    let recovery_count: i64 = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT COUNT(*) FROM snapshots WHERE workspace_id='ws' AND version_id='main' \
+                 AND metadata_correlation_id LIKE 'ydoc-inactive-recovery:%'",
+                [],
+                |row| row.get(0),
+            )
+        })
+        .unwrap();
+    assert_eq!(recovery_count, 1);
+    let moments = local_lane_ops(&engine, "moment.append");
+    assert_eq!(moments.len(), 2);
+    assert_eq!(moments[1].payload["momentId"], updated.latest_moment_id);
+    assert_eq!(moments[1].payload["objectId"], object_id);
+    assert!(moments[1].origin_seq > initial_moments[0].origin_seq);
+    assert!(local_lane_ops(&engine, "ydoc.update").is_empty());
+
+    let submitted = client
+        .submit_share_proposal(
+            &mut engine,
+            "ws",
+            "share-journal",
+            &grant,
+            "inactive-updated",
+            &NoFaults,
+            0,
+        )
+        .unwrap();
+    assert_eq!(submitted.submitted, 1);
+    assert!(submitted.proposal_id.is_some());
+    assert_eq!(scanned_seq(&engine), moments[1].origin_seq);
+    let submits = client.transport().proposal_submits.lock().unwrap();
+    assert_eq!(submits.len(), 2);
+    assert_eq!(submits[1].ops.len(), 1);
+    let change = &submits[1].ops[0];
+    assert_eq!(change.operation, "write");
+    assert_eq!(change.based_on_path.as_deref(), Some(path.as_str()));
+    assert_eq!(
+        change.based_on_blob_sha256.as_deref(),
+        Some(initial_sha.as_str())
+    );
+    assert_eq!(change.after_path.as_deref(), Some(path.as_str()));
+    assert_eq!(
+        change.after_blob_sha256.as_deref(),
+        Some(updated.blob_sha256.as_str())
+    );
+    assert_eq!(change.after_content_kind.as_deref(), Some("text"));
+    assert_eq!(change.after_byte_length, Some(updated_text.len() as i64));
+    let uploads = client.transport().blob_uploads.lock().unwrap();
+    assert_eq!(uploads.len(), 2);
+    assert_eq!(uploads[1].bytes, updated_text.as_bytes());
+}
+
+#[test]
 fn recovered_share_file_moment_survives_restart_and_submits_within_its_grant() {
     use crate::ydoc_recovery::{RecoveryEnvelopeBinding, recover_lineage_in_tx};
     use dohc_engine_collab::{DocKey, Ydoc};
