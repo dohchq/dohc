@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, rm } from "node:fs/promises";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import type { SyncRelayStorage } from "./storage";
 import { observeRelayWrites } from "./relayWriteChanges";
@@ -48,8 +48,11 @@ export function createReplicaSupervisor(options: ReplicaSupervisorOptions) {
   const principal = createReplicaReadPrincipal(options.storage);
   const entries = new Map<string, Entry>();
   // Leases and stores belong to this process. Finish the crash sweep before activation.
-  const ready = rm(options.storeRoot, { recursive: true, force: true })
-    .then(() => mkdir(options.storeRoot, { recursive: true, mode: 0o700 }));
+  // Only this supervisor's replica-* stores are removed; anything else under the root stays.
+  const ready = mkdir(options.storeRoot, { recursive: true, mode: 0o700 })
+    .then(() => readdir(options.storeRoot, { withFileTypes: true }))
+    .then(found => Promise.all(found.filter(item => item.isDirectory() && item.name.startsWith("replica-"))
+      .map(item => rm(join(options.storeRoot, item.name), { recursive: true, force: true }))));
   void ready.catch(() => {});
   let closed = false;
   let unsubscribe: (() => void) | undefined;

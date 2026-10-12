@@ -230,8 +230,11 @@ it("sweeps stores from a prior process before admitting a child", async () => {
   const { storage } = await fixture(), root = await tempRoot("sweep");
   const stale = join(root, "replica-crashed"); mkdirSync(stale);
   writeFileSync(join(stale, "deleted-text-and-ciphertext"), "private bytes");
+  const unrelated = join(root, "relay-data"); mkdirSync(unrelated);
+  writeFileSync(join(unrelated, "keep"), "not a replica");
   const supervisor = createReplicaSupervisor({ storage, storeRoot: root, startChild: async input => {
     expect(existsSync(stale)).toBe(false);
+    expect(existsSync(join(unrelated, "keep"))).toBe(true);
     return { pull: async () => {}, close: async () => {} };
   } });
   try { await supervisor.activate("w"); }
