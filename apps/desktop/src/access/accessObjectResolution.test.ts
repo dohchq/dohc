@@ -1,7 +1,7 @@
 import { expect, it, vi } from "vitest";
 import { VersionedLiveAdapter } from "@dohc/workspace-engine-client";
 import { VersionedLoopbackEngine } from "@dohc/workspace-engine-client/testing";
-import { hasAccessChat, locateAccessVersionPath, resolveAccessObject } from "./accessObjectResolution";
+import { hasAccessChat, locateAccessVersionPath, resolveAccessFileObject, resolveAccessObject } from "./accessObjectResolution";
 import type { RegistryEntry } from "../workspaces/registryStore";
 
 it("resolves binary files and binary-only folders in a non-main version through metadata", async () => {
@@ -39,4 +39,30 @@ it("labels a chat outside the bounded page unknown through the owner instead of 
     roster: () => ({ listing: null, checkedAtMs: null, freshness: "unknown" }), received: () => ({ inventory: null, checkedAtMs: null, freshness: "unknown" }),
     permissions: async () => { throw Error("unused"); } });
   expect(await owner.object("w", { ref: { kind: "chat", channelWireId: "unvisited" } })).toMatchObject({ freshness: "unknown", visibility: "unknown", coverage: { complete: false } });
+});
+
+it("resolves an Access file through its own workspace and operation signal with the returned version", async () => {
+  const workspace = { workspaceId: "owned-workspace" };
+  const objectId = "file-object";
+  const signal = new AbortController().signal;
+  const resolveFiles = vi.fn<VersionedLiveAdapter["resolveFiles"]>().mockResolvedValue({
+    versionId: "engine-draft", results: [{ status: "found", objectId, path: "Documents/file.md" }],
+  });
+  expect(await resolveAccessFileObject(workspace, objectId, work => work({ resolveFiles }), signal))
+    .toEqual({ path: "Documents/file.md", versionId: "engine-draft" });
+  expect(resolveFiles).toHaveBeenCalledExactlyOnceWith({ workspaceId: workspace.workspaceId, targets: [{ objectId }], signal });
+  expect(resolveFiles.mock.calls[0]?.[0].signal).toBe(signal);
+});
+
+it.each(["absent", "invalid"] as const)("maps an %s Access file resolution to null", async status => {
+  const resolveFiles = vi.fn<VersionedLiveAdapter["resolveFiles"]>().mockResolvedValue({
+    versionId: "engine-draft", results: [{ status }],
+  });
+  expect(await resolveAccessFileObject({ workspaceId: "owned-workspace" }, "file-object",
+    work => work({ resolveFiles }), new AbortController().signal)).toBeNull();
+});
+
+it("reports unavailable file aliases when the Access adapter is unavailable", async () => {
+  await expect(resolveAccessFileObject({ workspaceId: "owned-workspace" }, "file-object",
+    async () => null, new AbortController().signal)).rejects.toThrow("File aliases are unavailable.");
 });

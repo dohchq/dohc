@@ -964,10 +964,31 @@ it("rolls back owner ACK reservation and quota changes when its progress UPDATE 
 });
 
 type AcceptedNative = {bytes: Uint8Array; source: Omit<ReturnType<typeof pendingSource>, "acceptedReceipt"> & {acceptedReceipt: ReturnType<ReturnType<typeof fixture>["add"]>}};
+// Seed completed prefix delivery without one durable commit per author.
+// Keep the band's final admission and application acknowledgement on the real path.
+function seedOwnerApplicationPrefix(f: ReturnType<typeof fixture>, terminal: ReturnType<ReturnType<typeof fixture>["add"]>, count: number) {
+  const where = "workspace_id=? AND main_version_id=? AND object_id=? AND lineage_claim_id=? AND host_id=?";
+  const params = [f.document.workspaceId, f.document.mainVersionId, f.document.objectId, f.document.lineageClaimId, f.coordinate.hostId];
+  const owner = f.context.db.prepare(`SELECT * FROM sync_relay_live_delivery_owners WHERE relay_database_namespace=? AND ${where}`).get("restore-test", ...params)!;
+  const tip = JSON.stringify(terminal), sequence = 9, applicationSequence = count === 1 ? 9 : 2;
+  const charge = Buffer.byteLength(JSON.stringify(["restore-test", ...params, owner.origin_json, tip, terminal.journalCursor, sequence, applicationSequence]));
+  const reserved = f.context.db.prepare(`SELECT COUNT(*) AS count, SUM(reserved_bytes + accounted_bytes) AS bytes
+    FROM sync_relay_live_delivery_reservations WHERE ${where} AND journal_cursor>0 AND journal_cursor<=?`).get(...params, terminal.journalCursor)!;
+  expect(reserved.count).toBe(count);
+  const refund = Number(reserved.bytes) + Number(owner.accounted_bytes) - charge;
+  expect(f.context.db.prepare(`UPDATE sync_relay_live_delivery_owners
+    SET tip_receipt_json=?,tip_cursor=?,tip_sequence=?,tip_application_sequence=?,accounted_bytes=? WHERE relay_database_namespace=? AND ${where}`)
+    .run(tip, terminal.journalCursor, sequence, applicationSequence, charge, "restore-test", ...params).changes).toBe(1);
+  expect(f.context.db.prepare(`DELETE FROM sync_relay_live_delivery_reservations WHERE ${where} AND journal_cursor>0 AND journal_cursor<=?`)
+    .run(...params, terminal.journalCursor).changes).toBe(count);
+  expect(f.context.db.prepare("UPDATE sync_relay_workspace_usage SET usage_bytes=usage_bytes-? WHERE workspace_id=? AND usage_bytes>=?")
+    .run(refund, f.document.workspaceId, refund).changes).toBe(1);
+}
 function readyNativeFence(kind: "bootstrap" | "owner", mode: "service" | "device", events: boolean | "native" | number = false, selectedPoint = false) {
   const f = fixture(kind, mode);
   if (kind === "owner") f.adopt();
   let acceptedNative: AcceptedNative | undefined;
+  let seededPredecessor: ReturnType<typeof f.add> | null = null;
   const receipts: ReturnType<typeof f.add>[] = [];
   if (typeof events === "number") {
     const head = new Y.Doc();
@@ -989,7 +1010,13 @@ function readyNativeFence(kind: "bootstrap" | "owner", mode: "service" | "device
           checkpointBytes: null, checkpointDigest: null, priorMetadata});
         priorMetadata = row.metadata;
         receipts.push(row.metadata.accepted.receipt);
-      }});
+      }
+        if (kind === "owner" && !selectedPoint && receipts.length) {
+          seededPredecessor = receipts.at(-1)!;
+          seedOwnerApplicationPrefix(f, seededPredecessor, receipts.length);
+          receipts.length = 0;
+        }
+      });
       {
         const index = events - 1;
         head.clientID = index + 1;
@@ -1034,7 +1061,7 @@ function readyNativeFence(kind: "bootstrap" | "owner", mode: "service" | "device
     f.store.acknowledgeStopRestoreBootstrap(capture, bootstrapAck(next.baseline));
   }
   for (const [index, receipt] of receipts.entries()) {
-    f.store.acknowledgeStopRestoreApplication(capture, receipts[index - 1] ?? null, applicationAck(receipt, index === 0 ? 9 : 2));
+    f.store.acknowledgeStopRestoreApplication(capture, receipts[index - 1] ?? seededPredecessor, applicationAck(receipt, index === 0 && !seededPredecessor ? 9 : 2));
   }
   f.store.completeStopRestoreCut(capture);
   const operation = f.store.pendingStopRestoreFence(f.lookup).operation;
