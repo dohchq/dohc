@@ -301,6 +301,7 @@ async fn restore_settlement_keeps_pending_artifact_and_rejects_damaged_anchor_be
         let initial = settle_restore(&f, input.clone(), Arc::new(NoFaults)).await;
         assert!(initial.as_ref().map_or(true, |result| !result.materialized));
         assert_eq!(f.counts(), (1, 2));
+        f.assert_pending_absent_projection();
         if let Some(sql) = damage {
             rusqlite::Connection::open(&f.db)
                 .unwrap()
@@ -907,6 +908,16 @@ impl Fixture {
     }
     fn counts(&self) -> (i64, i64) {
         self.read(|db|db.query_row("SELECT (SELECT COUNT(*) FROM live_device_settlements),(SELECT COUNT(*) FROM moments)",[],|r|Ok((r.get(0)?,r.get(1)?))).unwrap())
+    }
+    fn assert_pending_absent_projection(&self) {
+        let count: i64 = self.read(|db| {
+            db.query_row(
+                "SELECT COUNT(*) FROM materialization_jobs WHERE job_id LIKE 'ydoc-mat_%' AND target_path=?1 AND status='pending' AND preimage_present=0 AND preimage_sha256 IS NULL",
+                [&self.binding.current_path],
+                |row| row.get(0),
+            ).unwrap()
+        });
+        assert_eq!(count, 1);
     }
     fn read<T>(&self, f: impl FnOnce(&rusqlite::Connection) -> T) -> T {
         let db = rusqlite::Connection::open_with_flags(
@@ -2670,6 +2681,45 @@ async fn configured_settlement_bounds_interval_and_preserves_precommit_rollback(
 }
 
 #[tokio::test]
+async fn configured_settlement_refuses_a_file_ancestor_before_committing() {
+    let f = Fixture::new().await;
+    f.settle(None, 4, Arc::new(NoFaults)).await.unwrap();
+    let path = f.root.path().join(&f.binding.current_path);
+    std::fs::remove_file(&path).unwrap();
+    std::fs::remove_dir(path.parent().unwrap()).unwrap();
+    let obstacle = f.root.path().join("notes");
+    std::fs::write(&obstacle, b"owned obstacle").unwrap();
+    let update = f
+        .doc
+        .rewrite_content_to_markdown_preserving_source(ContentKind::Richdoc, "# Later\n")
+        .unwrap();
+    let terminal = f.apply(7, update).await;
+    let state = || {
+        f.read(|db| {
+        db.query_row(
+            "SELECT (SELECT COUNT(*) FROM live_device_settlements), (SELECT COUNT(*) FROM moments), (SELECT COUNT(*) FROM materialization_jobs), (SELECT blob_sha256 FROM snapshots WHERE object_id='object'), (SELECT text FROM engine_search_files_fts WHERE object_id='object')",
+            [],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?, row.get::<_, i64>(2)?, row.get::<_, String>(3)?, row.get::<_, String>(4)?)),
+        ).unwrap()
+    })
+    };
+    let before = state();
+    let error = f
+        .settle(Some(terminal), 4, Arc::new(NoFaults))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(
+            error,
+            RuntimeError::Domain(dohc_engine_domain::DomainError::ConflictStaleTarget)
+        ),
+        "unexpected settlement error: {error:?}",
+    );
+    assert_eq!(state(), before);
+    assert_eq!(std::fs::read(obstacle).unwrap(), b"owned obstacle");
+}
+
+#[tokio::test]
 async fn configured_settlement_refuses_competing_bootstrap_artifact() {
     let f = Fixture::new().await;
     let path = f.root.path().join(&f.binding.current_path);
@@ -2785,6 +2835,7 @@ async fn configured_settlement_retains_pending_projection_when_parent_is_unusabl
     let f = Fixture::new().await;
     std::fs::write(f.root.path().join("notes"), "owned file").unwrap();
     assert!(f.settle(None, 4, Arc::new(NoFaults)).await.is_err());
+    f.assert_pending_absent_projection();
     let counts = f.counts();
     assert_eq!(counts.0, 1);
     assert_eq!(
