@@ -45,11 +45,17 @@ export function createReplicaSupervisor(options: ReplicaSupervisorOptions) {
   }
   const principal = createReplicaReadPrincipal(options.storage);
   const entries = new Map<string, Entry>();
+  const failures = new Map<string, { lease: ReplicaReadLease; error: unknown }>();
   let closed = false;
   let notification: ReturnType<typeof setTimeout> | undefined;
   let notificationDone = Promise.resolve();
   let finishNotification = () => {};
   const report = (entry: Entry, error: unknown) => options.onError?.(entry.lease.workspaceId, error);
+  const standingCurrent = (lease: ReplicaReadLease) => {
+    const standing = options.storage.readReplicaStanding(lease.workspaceId, lease.shareGrantBindings);
+    return standing && standing.ownerUserId === lease.ownerUserId &&
+      standing.replicationEpoch === lease.replicationEpoch && standing.streamIdentity === lease.streamIdentity;
+  };
 
   async function retire(entry: Entry): Promise<void> {
     if (entry.retirement) return entry.retirement;
@@ -71,19 +77,37 @@ export function createReplicaSupervisor(options: ReplicaSupervisorOptions) {
     entry.dirty = true;
     if (entry.run) return entry.run;
     entry.run = (async () => {
-      if (!entry.child) {
+      const fresh = !entry.child;
+      if (fresh) {
         await mkdir(options.storeRoot, { recursive: true, mode: 0o700 });
         entry.storeDir = await mkdtemp(join(options.storeRoot, "replica-"));
-        if (!entry.stopping && principal.current(entry.lease)) {
-          entry.child = await options.startChild({ storeDir: entry.storeDir, lease: entry.lease });
-        }
       }
-      while (entry.dirty && !entry.stopping) {
-        if (!principal.current(entry.lease)) break;
-        entry.dirty = false;
-        const frontier = options.storage.readReplicaStanding(entry.lease.workspaceId)!.logSeq;
-        await entry.child!.pull();
-        entry.frontier = frontier;
+      for (let attempt = 0; ; attempt++) {
+        try {
+          if (!entry.child && !entry.stopping && principal.current(entry.lease)) {
+            entry.child = await options.startChild({ storeDir: entry.storeDir!, lease: entry.lease });
+          }
+          while (entry.dirty && !entry.stopping) {
+            if (!principal.current(entry.lease)) break;
+            entry.dirty = false;
+            const frontier = options.storage.readReplicaStanding(entry.lease.workspaceId)!.logSeq;
+            await entry.child!.pull();
+            entry.frontier = frontier;
+          }
+          return;
+        } catch (error) {
+          if (!fresh || attempt === 1 || entry.frontier >= 0 || entry.stopping || !principal.current(entry.lease)) throw error;
+          // A crash before the passive role is recorded can leave an owner-role store.
+          principal.revoke(entry.lease);
+          await entry.child?.close();
+          entry.child = undefined;
+          await rm(entry.storeDir!, { recursive: true, force: true });
+          if (entry.stopping) throw error;
+          await mkdir(entry.storeDir!, { mode: 0o700 });
+          if (entry.stopping || !standingCurrent(entry.lease)) throw error;
+          entry.lease = principal.issue(entry.lease.workspaceId, randomUUID());
+          entry.dirty = true;
+        }
       }
     })().finally(() => { entry.run = undefined; });
     const running = entry.run;
@@ -94,7 +118,11 @@ export function createReplicaSupervisor(options: ReplicaSupervisorOptions) {
         entry.idle = setTimeout(() => { void retire(entry).catch(error => report(entry, error)); }, limits.idleMs);
         entry.idle.unref();
       }
-    }, error => { report(entry, error); void retire(entry).catch(failure => report(entry, failure)); });
+    }, error => {
+      if (!entry.stopping && standingCurrent(entry.lease)) failures.set(entry.lease.workspaceId, { lease: entry.lease, error });
+      report(entry, error);
+      void retire(entry).catch(failure => report(entry, failure));
+    });
     return running;
   }
 
@@ -106,7 +134,7 @@ export function createReplicaSupervisor(options: ReplicaSupervisorOptions) {
       notification = undefined;
       for (const entry of entries.values()) {
         if (entry.stopping) continue;
-        if (!principal.current(entry.lease)) void retire(entry).catch(error => report(entry, error));
+        if (!standingCurrent(entry.lease)) void retire(entry).catch(error => report(entry, error));
         else if (options.storage.readReplicaStanding(entry.lease.workspaceId)!.logSeq !== entry.frontier) {
           void schedule(entry).catch(() => {});
         }
@@ -117,8 +145,13 @@ export function createReplicaSupervisor(options: ReplicaSupervisorOptions) {
 
   async function activate(workspaceId: string): Promise<void> {
     if (closed) throw new Error("Replica supervisor is closed.");
+    const failure = failures.get(workspaceId);
+    if (failure) {
+      if (standingCurrent(failure.lease)) throw failure.error;
+      failures.delete(workspaceId);
+    }
     let entry = entries.get(workspaceId);
-    if (entry && (entry.stopping || !principal.current(entry.lease))) {
+    if (entry && (entry.stopping || !standingCurrent(entry.lease))) {
       await retire(entry);
       return activate(workspaceId);
     }

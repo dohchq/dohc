@@ -1,9 +1,9 @@
 import { afterEach, expect, it, vi } from "vitest";
 import { createHash } from "node:crypto";
-import { existsSync } from "node:fs";
+import { existsSync, writeFileSync } from "node:fs";
 import { closeTestStorages, inspectDatabase, storagePath, tempRoot, testStorage } from "./testing";
 import { createReplicaReadPrincipal } from "./replicaReadPrincipal";
-import { createReplicaSupervisor, type ReplicaChild } from "./replicaSupervisor";
+import { createReplicaSupervisor, type ReplicaChild, type ReplicaChildInput } from "./replicaSupervisor";
 import { createReplicaEngineStarter } from "./replicaEngine";
 
 afterEach(async () => { vi.useRealTimers(); await closeTestStorages(); });
@@ -86,6 +86,7 @@ it("wakes on append, caps children, evicts idle stores, and deletes after revoca
     await supervisor.activate("w");
     await vi.advanceTimersByTimeAsync(60_000); vi.useRealTimers();
     await expect.poll(() => existsSync(starts[0]!.storeDir)).toBe(false);
+    await supervisor.settled("w");
     expect(close).toHaveBeenCalledTimes(1);
     await supervisor.activate("second");
     storage.revokeShareGrant({ shareId: "second", grantId: "second", revokedAtMs: 2 });
@@ -135,18 +136,58 @@ it("revokes a starting child, waits for it, and deletes its private directory", 
   expect(pull).not.toHaveBeenCalled(); expect(close).toHaveBeenCalledTimes(1); expect(existsSync(storeDir)).toBe(false);
 });
 
-it("cleans failed starts and permits a later activation without leaking capacity", async () => {
+it("rebuilds a failed fresh store once before completing activation", async () => {
   const { storage } = await fixture();
   const errors: unknown[] = [];
+  const paths: string[] = [], bearers: string[] = [];
+  const startChild = vi.fn(async (input: ReplicaChildInput) => {
+    paths.push(input.storeDir); bearers.push(input.lease.bearer);
+    if (paths.length === 1) { writeFileSync(`${input.storeDir}/broken`, "owner-role store"); throw new Error("start failed"); }
+    expect(existsSync(`${input.storeDir}/broken`)).toBe(false);
+    return { pull: async () => {}, close: async () => {} };
+  });
   const supervisor = createReplicaSupervisor({ storage, storeRoot: await tempRoot("failure"), maxRunning: 1,
-    onError: (_, error) => errors.push(error), startChild: vi.fn().mockRejectedValueOnce(new Error("start failed"))
-      .mockResolvedValue({ pull: async () => {}, close: async () => {} }) });
+    onError: (_, error) => errors.push(error), startChild });
   try {
-    await expect(supervisor.activate("w")).rejects.toThrow("start failed");
-    await supervisor.settled("w");
     await supervisor.activate("w");
-    expect(errors).toHaveLength(1);
+    expect(startChild).toHaveBeenCalledTimes(2);
+    expect(new Set(paths).size).toBe(1);
+    expect(new Set(bearers).size).toBe(2);
+    expect(errors).toHaveLength(0);
   } finally { await supervisor.close(); }
+});
+
+it("marks a replica failed after two fresh attempts and stops retrying without holding capacity", async () => {
+  const { storage, seed } = await fixture(); seed("second");
+  const errors: unknown[] = [], paths: string[] = [];
+  const startChild = vi.fn(async (input: ReplicaChildInput) => {
+    if (input.lease.workspaceId === "w") { paths.push(input.storeDir); throw new Error("unrecoverable"); }
+    return { pull: async () => {}, close: async () => {} };
+  });
+  const supervisor = createReplicaSupervisor({ storage, storeRoot: await tempRoot("failed"), maxRunning: 1,
+    onError: (_, error) => errors.push(error), startChild });
+  try {
+    await expect(supervisor.activate("w")).rejects.toThrow("unrecoverable");
+    await supervisor.settled("w");
+    expect(paths).toHaveLength(2);
+    expect(paths.every(path => !existsSync(path))).toBe(true);
+    storage.appendLogBatch({ workspaceId: "w", originId: "o", ops: [{ originSeq: 0, opKind: "moment.append", payloadJson: "{}", recordedAtMs: 1 }] });
+    await supervisor.settled("w");
+    await expect(supervisor.activate("w")).rejects.toThrow("unrecoverable");
+    expect(paths).toHaveLength(2);
+    expect(errors).toHaveLength(1);
+    await supervisor.activate("second");
+  } finally { await supervisor.close(); }
+});
+
+it("rebuilds after an unrecoverable first pull and waits for the old child to close", async () => {
+  const { storage } = await fixture();
+  const closed = vi.fn(async () => {});
+  const startChild = vi.fn(async () => ({ close: closed,
+    pull: async () => { if (startChild.mock.calls.length === 1) throw new Error("first pull failed"); expect(closed).toHaveBeenCalledTimes(1); } }));
+  const supervisor = createReplicaSupervisor({ storage, storeRoot: await tempRoot("first-pull"), startChild });
+  try { await supervisor.activate("w"); expect(startChild).toHaveBeenCalledTimes(2); }
+  finally { await supervisor.close(); }
 });
 
 it("settles a pending append notification when shutdown cancels its drain", async () => {
