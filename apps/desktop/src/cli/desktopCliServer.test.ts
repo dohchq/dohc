@@ -1,3 +1,4 @@
+import { historyCursor, historyPageFields } from "../testing/historyPageFixture";
 import { createHash } from "node:crypto";
 import { AuthoredTextChangedError } from "../workspaces/workspaceEngineCapture";
 import { parseCliResult, type CliFileWrite } from "@dohc/cli/protocol";
@@ -60,7 +61,7 @@ function fixture(rootPath = resolve("cli-workspace")) {
     listKeptCopies: vi.fn<NonNullable<ReturnType<Dependencies["activity"]["engineCaptureFor"]>>["listKeptCopies"]>(),
     saveKeptCopy: vi.fn<NonNullable<ReturnType<Dependencies["activity"]["engineCaptureFor"]>>["saveKeptCopy"]>(),
     listVersions: vi.fn<NonNullable<ReturnType<Dependencies["activity"]["engineCaptureFor"]>>["listVersions"]>(
-      async () => ({ versions: [], activeVersionId: "main" })),
+      async () => ({ versions: [], activeVersionId: "main" })), ...historyPageFields,
     // Writes the file as the capture chain does, refusing one that exists.
     writeAuthoredFile: vi.fn<Capture["writeAuthoredFile"]>(async (absolutePath, text, _author, options) => {
       await mkdir(dirname(absolutePath), { recursive: true });
@@ -222,7 +223,7 @@ describe("desktop CLI workspace context", () => {
     const { byteLength: _bytes, contentKind: _kind, authors: _authors, ...plain } = moment;
     f.capture.listMoments.mockResolvedValue({ moments: [moment, { ...plain, id: "plain" },
       { ...moment, id: "protected", protected: true }, { ...moment, id: "objectless", objectId: "" }],
-      nextBeforeMomentOrder: null, latestMomentOrder: 3, activeVersionId: "version", protectedTruncated: false });
+      nextCursor: null, latestMomentOrder: 3, activeVersionId: "version", ...historyPageFields,  });
     const context = await f.create().openCliWorkspace(f.workspace);
     const { protected: _protected, ...expected } = moment;
     const { protected: _plainProtected, ...plainExpected } = plain;
@@ -266,7 +267,7 @@ describe("desktop CLI workspace context", () => {
       f.capture.listMoments.mockResolvedValue({
         moments: [summary("notes", "notes.md"), summary("journal", "private/journal.md"),
           { ...summary("moved", "notes/moved.md"), operation: "rename", metadata: { origin: "local-file", summary: renamed } }],
-        nextBeforeMomentOrder: null, latestMomentOrder: 1, activeVersionId: "main", protectedTruncated: false,
+        nextCursor: null, latestMomentOrder: 1, activeVersionId: "main", ...historyPageFields,
       });
       f.capture.readMoment.mockImplementation(async (id) => ({ protected: false, moment: details[id]! }));
       await f.create().startDesktopCliServer();

@@ -1,3 +1,4 @@
+import { historyCursor, historyPageFields } from "../testing/historyPageFixture";
 import { describe, expect, it, vi } from "vitest";
 import {
   engineMomentDetailForIpc,
@@ -49,7 +50,7 @@ describe("listEngineMomentsForIpc", () => {
     }
     const response = await listEngineMomentsForIpc(async () => ({
       moments: [{...detail.moment, momentOrder: 1, protected: false}],
-      nextBeforeMomentOrder: null, latestMomentOrder: 1, activeVersionId: "main", protectedTruncated: false,
+      nextCursor: null, latestMomentOrder: 1, activeVersionId: "main", ...historyPageFields,
     }), names);
     if (!("moments" in response)) throw new Error("Expected ready history");
     expect(response.moments[0]?.authors).toEqual(authors);
@@ -87,10 +88,10 @@ describe("listEngineMomentsForIpc", () => {
     ];
     const response = await listEngineMomentsForIpc(async () => ({
       moments: [{...detail.moment, authors, momentOrder: 1, protected: false}],
-      nextBeforeMomentOrder: null,
+      nextCursor: null,
       latestMomentOrder: 1,
-      activeVersionId: "main",
-      protectedTruncated: false,
+      activeVersionId: "main", ...historyPageFields,
+
     }), names);
     if (!("moments" in response)) throw new Error("Expected ready history");
     expect(response.moments[0]?.authors).toEqual(authors);
@@ -204,7 +205,7 @@ describe("engineMomentDetailForIpc per-side content kinds", () => {
       expect(record).toMatchObject(field);
       const page = await listEngineMomentsForIpc(async () => ({
         moments: [{...detail.moment, momentOrder: 1, protected: false}],
-        nextBeforeMomentOrder: null, latestMomentOrder: 1, activeVersionId: "main", protectedTruncated: false,
+        nextCursor: null, latestMomentOrder: 1, activeVersionId: "main", ...historyPageFields,
       }), shortNames);
       if (!("moments" in page)) throw new Error("Expected ready history");
       expect(page.moments[0]).toMatchObject(field);
@@ -263,7 +264,7 @@ describe("engineMomentDetailForIpc per-side content kinds", () => {
       detail.moment.authors = [...authors];
       const page = await listEngineMomentsForIpc(async () => ({
         moments: [{...detail.moment, momentOrder: 1, protected: false}],
-        nextBeforeMomentOrder: null, latestMomentOrder: 1, activeVersionId: "main", protectedTruncated: false,
+        nextCursor: null, latestMomentOrder: 1, activeVersionId: "main", ...historyPageFields,
       }), {...names, automation: () => automation});
       if (!("moments" in page)) throw new Error("Expected ready history");
       expect(page.moments[0]).toMatchObject(expected);
@@ -325,7 +326,7 @@ describe("engineMomentDetailForIpc per-side content kinds", () => {
       expect(EngineMomentDetailRecord.parse(record)).toEqual(record);
       const page = await listEngineMomentsForIpc(async () => ({
         moments: [{...detail.moment, momentOrder: 1, protected: false}],
-        nextBeforeMomentOrder: null, latestMomentOrder: 1, activeVersionId: "main", protectedTruncated: false,
+        nextCursor: null, latestMomentOrder: 1, activeVersionId: "main", ...historyPageFields,
       }), names);
       if (!("moments" in page)) throw new Error("Expected ready history");
       expect(page.moments[0]).toMatchObject({authors: [owner, agent], authorLabels: labels});
@@ -670,7 +671,7 @@ it("omits only rename summaries from timeline rows and details", async () => {
     detail.moment.metadata.summary = operation === "rename" ? "Renamed private/a.md to notes/a.md" : "Saved latest edits";
     const listed = await listEngineMomentsForIpc(async () => ({
       moments: [{ ...detail.moment, momentOrder: 1, protected: false }],
-      nextBeforeMomentOrder: null, latestMomentOrder: 1, activeVersionId: "main", protectedTruncated: false,
+      nextCursor: null, latestMomentOrder: 1, activeVersionId: "main", ...historyPageFields,
     }), names);
     if (!("moments" in listed)) throw new Error("Expected ready history");
     for (const row of [listed.moments[0], engineMomentDetailForIpc(detail, names)]) {

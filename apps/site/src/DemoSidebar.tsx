@@ -285,7 +285,6 @@ export function DemoSidebar(props: {
           moments={moments}
           hasMore={false}
           loadingMore={false}
-          protectedTruncated={false}
           onLoadMore={() => undefined}
           onOpenMoment={(momentId) => {
             const path = moments.find((moment) => moment.id === momentId)?.path;

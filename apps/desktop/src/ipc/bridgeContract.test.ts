@@ -1,3 +1,4 @@
+import { historyCursor, historyPageFields } from "../testing/historyPageFixture";
 import { MAX_SHARE_PROPOSAL_OPS } from "@dohc/security-contract/share-proposal-bound";
 import { describe, expect, it } from "vitest";
 import { activityPathsAffectWorkspaceListing, WorkspacePathOpenFailure } from "./bridgeContract";
@@ -3537,10 +3538,10 @@ describe("engine history and linked Chats IPC contract", () => {
     expect(
       ListEngineMomentsPayload.parse({
         workspaceId: "ws-engine",
-        limit: 200,
-        beforeMomentOrder: 41,
+        limit: 50,
+        cursor: historyCursor(41),
       }).limit,
-    ).toBe(200);
+    ).toBe(50);
     const page = ListEngineMomentsResult.parse({
       moments: [
         {
@@ -3555,13 +3556,13 @@ describe("engine history and linked Chats IPC contract", () => {
           momentOrder: 7,
         },
       ],
-      nextBeforeMomentOrder: null,
+      nextCursor: null,
       latestMomentOrder: 7,
       activeVersionId: "main",
-      protectedTruncated: true,
+      ...historyPageFields,
     });
     expect(page.moments[0].summary).toBe("Reconciled offline edits");
-    expect(page.protectedTruncated).toBe(true);
+    expect(page.startCursor).toEqual(historyCursor());
     expect(
       EngineMomentDetailRecord.parse({
         id: "moment_2",

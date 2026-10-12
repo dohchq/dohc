@@ -1,3 +1,4 @@
+import type { HistoryCursor, HistoryMomentMetadata } from "@dohc/workspace-engine-client";
 import {
   VersionedTextStoreError,
   type VersionedTextStoreErrorCode,
@@ -159,15 +160,10 @@ export type CaptureVersionedTextStore = VersionedTextStore & {
     versionId: string;
   }): Promise<CaptureTextFileMetadata[]>;
   listHistoryPage(input: {
-    workspaceId: string;
-    objectId?: string;
-    limit?: number;
-    beforeMomentOrder?: number;
+    workspaceId: string; versionId?: string; objectId?: string; limit?: number; cursor?: HistoryCursor;
   }): Promise<{
-    activeVersion: VersionRecord;
-    textMomentPage: Awaited<ReturnType<VersionedTextStore["listMoments"]>>;
-    protectedMoments: SecretFileMoment[];
-    protectedTruncated: boolean;
+    activeVersion: VersionRecord; moments: VersionedTextMomentSummary[]; protectedMoments: SecretFileMoment[];
+    versionMarkers: VersionRecord[]; startCursor: HistoryCursor; nextCursor: HistoryCursor | null; latestMomentOrder: number;
   }>;
   flushCapture?(): Promise<void>;
   reconcileCapture?(): Promise<void>;
@@ -399,7 +395,7 @@ function momentFromWire(
 
 function momentSummaryFromWire(
   workspaceId: string,
-  moment: MomentRecord,
+  moment: HistoryMomentMetadata,
 ): VersionedTextMomentSummary {
   const authors = authorsFromWire(moment.authors);
   return {
@@ -1205,24 +1201,13 @@ export function createCaptureLiveStores(
     },
 
     async listHistoryPage(input: {
-      workspaceId: string;
-      objectId?: string;
-      limit?: number;
-      beforeMomentOrder?: number;
+      workspaceId: string; versionId?: string; objectId?: string; limit?: number; cursor?: HistoryCursor;
     }) {
-      const page = await runRead(
-        async (adapter) => await adapter.readHistoryPage(input),
-      );
+      const page = await runRead(async adapter => await adapter.readHistoryPage(input));
       return {
-        activeVersion: page.activeVersion,
-        textMomentPage: {
-          ...page.textMomentPage,
-          moments: page.textMomentPage.moments.map((moment) =>
-            momentSummaryFromWire(input.workspaceId, moment),
-          ),
-        },
+        ...page,
+        moments: page.moments.map(moment => momentSummaryFromWire(input.workspaceId, moment)),
         protectedMoments: page.protectedMoments.map(secretMomentFromWire),
-        protectedTruncated: page.protectedTruncated,
       };
     },
 

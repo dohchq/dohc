@@ -369,7 +369,6 @@ export function EngineHistoryView(props: {
   moments: EngineMomentRecord[];
   hasMore: boolean;
   loadingMore: boolean;
-  protectedTruncated: boolean;
   onLoadMore: () => void;
   onOpenMoment: (momentId: string, filePath: string) => void;
 }) {
@@ -410,7 +409,7 @@ export function EngineHistoryView(props: {
   const retainedKeys = focusedIndex < 0
     ? []
     : rows.slice(Math.max(0, focusedIndex - 2), focusedIndex + 3).map((row) => row.key);
-  const headerItemCount = props.protectedTruncated ? 1 : 0;
+  const headerItemCount = 0;
   const listItemCount = headerItemCount + rows.length + (props.hasMore ? 1 : 0);
   const rowPresentation = useMemo(
     () => ({ expandedGroups, headerItemCount, listItemCount, onOpenMoment: props.onOpenMoment }),
@@ -480,16 +479,6 @@ export function EngineHistoryView(props: {
           if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setFocusedKey(null);
         }}
         extraData={rowPresentation}
-        ListHeaderComponent={props.protectedTruncated ? (
-          <li
-            role="listitem"
-            aria-posinset={1}
-            aria-setsize={listItemCount}
-            className="border-b border-line px-3 py-2 text-[11px] text-muted"
-          >
-            Some protected activity in this range is not shown.
-          </li>
-        ) : null}
         renderItem={({ item, index }) => item.day ? (
           <li
             role="listitem"
