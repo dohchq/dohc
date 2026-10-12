@@ -5,7 +5,6 @@ export function profilingHostContext(env = process.env) {
   const roots = budget ? [...new Set([budget.root, env.DOHC_VERIFICATION_SLOT_ROOT].filter(Boolean))] : [];
   const lanes = roots.flatMap(root => [
     buildQueueStatus({ root, slots: 2, kind: 'verification-slot' }),
-    buildQueueStatus({ root, slots: 1, kind: 'verification-light-slot' }),
     ...(root === budget.root ? [buildQueueStatus({ root, slots: budget.slots, kind: 'build-slot' })] : []),
   ]);
   return { at: new Date().toISOString(), lanes };

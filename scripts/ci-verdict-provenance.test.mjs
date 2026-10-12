@@ -373,7 +373,7 @@ test("PR workflow uses both canonical jobs and provisions the pinned Rust tools"
     assert.ok(!steps.some(step => /setup:worktree|xvfb-run|playwright install-deps/u.test(step.run ?? "")), "the canonical verifier owns selected desktop setup");
     const selected = steps.find(step => step.run?.trim() === `pnpm verify:pr --base "$PR_BASE_SHA" --job ${gate}`);
     const full = steps.find(step => step.run?.trim() === `pnpm verify:pr --base HEAD --job ${gate} --full`);
-    assert.ok(selected, `${job} must use affected-package selection for PRs`);
+    assert.ok(selected, `${job} must use the PR base for gate selection`);
     assert.equal(selected.if, "github.event_name == 'pull_request'");
     assert.equal(selected.env.PR_BASE_SHA, "${{ github.event.pull_request.base.sha }}");
     assert.ok(full, `${job} must support complete manual verification`);

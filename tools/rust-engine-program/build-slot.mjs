@@ -814,15 +814,15 @@ export function verificationLanes(env = process.env) {
   return Number(requested);
 }
 
-export function acquireVerificationSlot(env = process.env, { lightweight = false, metadata, waitMs = 6 * 60 * 60_000, observeTicket, entry = process.argv[1] } = {}) {
+export function acquireVerificationSlot(env = process.env, { metadata, waitMs = 6 * 60 * 60_000, observeTicket, entry = process.argv[1] } = {}) {
   if (!entry || canonical(entry) !== canonical(verifierEntry)) {
     throw new Error(`Only the PR verifier (${verifierEntry}) may hold a verification lane. Run pnpm verify:pr, or take a build slot for other Cargo work.`);
   }
-  const fullLanes = verificationLanes(env);
+  const slots = verificationLanes(env);
   const budget = resolveBuildBudget(env);
   if (!budget) return null;
-  return acquireSlot({ root: env.DOHC_VERIFICATION_SLOT_ROOT ?? budget.root, slots: lightweight ? 1 : fullLanes,
-    kind: lightweight ? "verification-light-slot" : "verification-slot", lanes: "verification runs", metadata,
+  return acquireSlot({ root: env.DOHC_VERIFICATION_SLOT_ROOT ?? budget.root, slots,
+    kind: "verification-slot", lanes: "verification runs", metadata,
     waitMs, pollMs: 60_000, cooperativeCancellation: true, observeTicket });
 }
 
@@ -992,7 +992,6 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
     ...(cargoRoot ? [buildQueueStatus({root: cargoRoot, slots: budget?.slots ?? 4})] : []),
     ...(verificationRoot ? [
       buildQueueStatus({root: verificationRoot, kind: "verification-slot", slots: inspectedVerificationSlots}),
-      buildQueueStatus({root: verificationRoot, kind: "verification-light-slot", slots: 1}),
     ] : []),
   ];
   console.log(JSON.stringify({cargoRoot: cargoRoot ?? null, verificationRoot: verificationRoot ?? null,
