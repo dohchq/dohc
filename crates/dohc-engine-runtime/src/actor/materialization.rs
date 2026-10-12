@@ -659,10 +659,6 @@ pub(super) fn replay_pending_materializations(
                 continue;
             }
             summary.selected_seen += usize::from(selected.is_some());
-            if store.placement_is_held(&job.workspace_id, &job.target_path)? {
-                summary.parked += 1;
-                continue;
-            }
             if let Some(progress) = scope.progress {
                 progress.fetch_add(1, Ordering::Relaxed);
             }

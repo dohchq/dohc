@@ -25,7 +25,6 @@ use dohc_engine_domain::{
 };
 use dohc_engine_storage::capture_file_holds::{self, CaptureFileHold};
 use dohc_engine_storage::{EngineStore, FaultInjector, StorageError, TxnOutcome};
-use rusqlite::OptionalExtension;
 use rusqlite::{Connection, Transaction, params};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -107,6 +106,275 @@ mod capture_file_hold_tests {
             &NoFaults,
             &CancellationToken::new(),
         )
+    }
+
+    fn assert_unheld(store: &EngineStore) {
+        assert!(
+            store
+                .read_with(|conn| capture_file_holds::hold_in(conn, "hold-proof", "held.md"))
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn fix1_hold_released_by_rename() {
+        let (_scratch, mut store, refused) = seeded();
+        assert_eq!(
+            offer(&mut store, &refused).unwrap_err().code(),
+            "capture-file-held"
+        );
+        VersionedTextStore::new(&mut store)
+            .rename_text_file(
+                &dohc_engine_domain::RenameTextFile {
+                    workspace_id: "hold-proof".into(),
+                    version_id: "main".into(),
+                    from_path: "held.md".into(),
+                    to_path: "moved.md".into(),
+                    moment_id: "rename-held".into(),
+                    request_id: None,
+                    metadata_origin: "api".into(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    now_ms: 6,
+                },
+                &NoFaults,
+            )
+            .unwrap();
+        assert_unheld(&store);
+        let captured = offer(&mut store, &input("held.md", "New file.\n")).unwrap();
+        assert_eq!(captured.snapshot.text, "New file.\n");
+    }
+
+    #[test]
+    fn fix1_hold_released_by_rollback_removing_alias() {
+        let (_scratch, mut store, refused) = seeded();
+        let initial = VersionedTextStore::new(&mut store)
+            .read_text("hold-proof", "main", "held.md")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            offer(&mut store, &refused).unwrap_err().code(),
+            "capture-file-held"
+        );
+        VersionedTextStore::new(&mut store)
+            .rollback_text_file_mutation(
+                &dohc_engine_domain::RollbackTextFileMutation {
+                    workspace_id: "hold-proof".into(),
+                    version_id: "main".into(),
+                    path: "held.md".into(),
+                    mutation_moment_id: initial.latest_moment_id,
+                    request_id: None,
+                    metadata_origin: "api".into(),
+                    author_json: None,
+                },
+                &NoFaults,
+            )
+            .unwrap();
+        assert_unheld(&store);
+        assert_eq!(
+            offer(&mut store, &input("held.md", "New file.\n"))
+                .unwrap()
+                .snapshot
+                .text,
+            "New file.\n"
+        );
+    }
+
+    #[test]
+    fn fix1_hold_does_not_claim_foreign_text_or_binary_head() {
+        for binary in [false, true] {
+            let (scratch, mut store, refused) = seeded();
+            assert_eq!(
+                offer(&mut store, &refused).unwrap_err().code(),
+                "capture-file-held"
+            );
+            let head = VersionedTextStore::new(&mut store)
+                .read_text("hold-proof", "main", "held.md")
+                .unwrap()
+                .unwrap();
+            let remote = VersionedTextStore::new(&mut store)
+                .write_text(
+                    &dohc_engine_domain::WriteText {
+                        workspace_id: "hold-proof".into(),
+                        version_id: "main".into(),
+                        object_id: head.object_id,
+                        path: "held.md".into(),
+                        text: "Remote edit.\n".into(),
+                        moment_id: "remote-edit".into(),
+                        metadata_origin: "sync".into(),
+                        metadata_summary: None,
+                        metadata_correlation_id: None,
+                        author_json: None,
+                        now_ms: 6,
+                        request_id: None,
+                    },
+                    &NoFaults,
+                )
+                .unwrap();
+            std::fs::write(scratch.path().join("held.md"), &refused.text).unwrap();
+            store
+                .write_with(&NoFaults, |tx| {
+                    dohc_engine_storage::enqueue_job(
+                        tx,
+                        &dohc_engine_storage::MaterializationJobSpec {
+                            job_id: "relay-remote-edit".into(),
+                            workspace_id: "hold-proof".into(),
+                            target_path: "held.md".into(),
+                            content_sha256: remote.snapshot.blob_sha256.clone(),
+                            preimage: dohc_engine_storage::Preimage::Present(
+                                dohc_engine_storage::hex_sha256(refused.text.as_bytes()),
+                            ),
+                            target_generation: remote.moment.moment_order,
+                            now_ms: 6,
+                        },
+                    )
+                })
+                .unwrap();
+            let job = store
+                .load_materialization_job("relay-remote-edit")
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                dohc_engine_files::materialize_one(
+                    &store,
+                    scratch.path(),
+                    &job,
+                    &dohc_engine_files::MaterializeOptions {
+                        policy: dohc_engine_files::DurabilityPolicy::per_os(),
+                        replacer: &dohc_engine_files::StdReplacer,
+                        backoff: &dohc_engine_files::NoBackoff,
+                        now_ms: 6,
+                        faults: &NoFaults,
+                    }
+                )
+                .unwrap(),
+                dohc_engine_files::JobOutcome::Parked
+            );
+            let error = if binary {
+                capture_ingest_binary_on_store(
+                    &mut store,
+                    &CaptureIngestBinary {
+                        workspace_id: "hold-proof".into(),
+                        version_id: "main".into(),
+                        path: "held.md".into(),
+                        bytes: vec![0, 1, 2],
+                        metadata_origin: "capture".into(),
+                        metadata_summary: None,
+                        metadata_correlation_id: None,
+                        author_json: None,
+                        now_ms: 7,
+                        request_id: None,
+                        claim_foreign_head: false,
+                    },
+                    &LeaseRegistry::new(),
+                    &NoFaults,
+                    &CancellationToken::new(),
+                )
+                .unwrap_err()
+            } else {
+                offer(&mut store, &input("held.md", "Outside edit.\n")).unwrap_err()
+            };
+            assert!(
+                matches!(error, RuntimeError::Domain(DomainError::CaptureNotOwned)),
+                "{error:?}"
+            );
+            assert_unheld(&store);
+            assert_eq!(
+                VersionedTextStore::new(&mut store)
+                    .read_text("hold-proof", "main", "held.md")
+                    .unwrap()
+                    .unwrap()
+                    .text,
+                "Remote edit.\n"
+            );
+        }
+    }
+
+    #[test]
+    fn fix1_missing_alias_refusal_does_not_abort_batch() {
+        let (scratch, mut store, refused) = seeded();
+        // Capture can recreate an alias over an existing lineage. If its fold
+        // refuses, rolling back the item also removes that provisional alias.
+        store
+            .write_with(&NoFaults, |tx| {
+                tx.execute("DELETE FROM path_aliases WHERE path='held.md'", [])
+                    .map_err(StorageError::persist_public)
+            })
+            .unwrap();
+        let results = capture_ingest_batch_on_store(
+            &mut store,
+            &[refused, input("sibling.txt", "Sibling.\n")],
+            &Arc::new(crate::search::read_engine_search_policy(scratch.path())),
+            &LeaseRegistry::new(),
+            &NoFaults,
+            &CancellationToken::new(),
+            (scratch.path(), &Root),
+        )
+        .unwrap();
+        assert!(results[0].is_err());
+        assert!(results[1].is_ok());
+        assert_unheld(&store);
+    }
+
+    #[test]
+    fn fix1_hold_batch_ownership_refusal_releases_only_its_hold() {
+        let (scratch, mut store, refused) = seeded();
+        assert_eq!(
+            offer(&mut store, &refused).unwrap_err().code(),
+            "capture-file-held"
+        );
+        let head = VersionedTextStore::new(&mut store)
+            .read_text("hold-proof", "main", "held.md")
+            .unwrap()
+            .unwrap();
+        VersionedTextStore::new(&mut store)
+            .write_text(
+                &dohc_engine_domain::WriteText {
+                    workspace_id: "hold-proof".into(),
+                    version_id: "main".into(),
+                    object_id: head.object_id,
+                    path: "held.md".into(),
+                    text: "Remote edit.\n".into(),
+                    moment_id: "remote-edit".into(),
+                    metadata_origin: "sync".into(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    now_ms: 6,
+                    request_id: None,
+                },
+                &NoFaults,
+            )
+            .unwrap();
+        let results = capture_ingest_batch_on_store(
+            &mut store,
+            &[
+                input("held.md", "Outside edit.\n"),
+                input("sibling.txt", "Sibling.\n"),
+            ],
+            &Arc::new(crate::search::read_engine_search_policy(scratch.path())),
+            &LeaseRegistry::new(),
+            &NoFaults,
+            &CancellationToken::new(),
+            (scratch.path(), &Root),
+        )
+        .unwrap();
+        assert!(matches!(
+            results[0],
+            Err(RuntimeError::Domain(DomainError::CaptureNotOwned))
+        ));
+        assert!(results[1].is_ok());
+        assert_unheld(&store);
+        assert_eq!(
+            VersionedTextStore::new(&mut store)
+                .read_text("hold-proof", "main", "held.md")
+                .unwrap()
+                .unwrap()
+                .text,
+            "Remote edit.\n"
+        );
     }
 
     #[test]
@@ -229,7 +497,81 @@ enum CaptureIndexing {
     UseSnapshot(Arc<SearchPolicySnapshot>),
 }
 
+pub struct CapturePassSettlement {
+    pub paths: Vec<String>,
+    pub repair_recoveries: bool,
+}
+
 impl ActorHandle {
+    pub async fn capture_notices(
+        &self,
+        workspace_id: String,
+    ) -> Result<
+        (
+            Vec<dohc_engine_domain::CaptureRecovery>,
+            Vec<CaptureFileHold>,
+        ),
+        RuntimeError,
+    > {
+        self.run(move |store, _| {
+            store.read_with(|conn| {
+                Ok((
+                    dohc_engine_domain::capture_recoveries_in(conn, &workspace_id)?,
+                    capture_file_holds::list_in(conn, &workspace_id)?,
+                ))
+            })
+        })
+        .await
+    }
+
+    /// Drain intents for settled observations after their capture commit.
+    /// A completed capture generation supersedes an older parked placement.
+    pub async fn finish_capture_pass(
+        &self,
+        workspace_id: String,
+        root_dir: PathBuf,
+        settlement: CapturePassSettlement,
+        self_writes: Arc<dyn SelfWriteRecorder>,
+        now_ms: i64,
+        root_guard: Arc<dyn WorkspaceRootGuard>,
+    ) -> Result<Vec<dohc_engine_sync::YdocRecoveryMaterialization>, RuntimeError> {
+        self.run(move |store, cache| {
+            let selected = if settlement.paths.is_empty() {
+                std::collections::HashSet::new()
+            } else {
+                store.read_with(|conn| {
+                    let mut query = conn.prepare_cached("SELECT job_id FROM materialization_jobs WHERE workspace_id IN (?1,'') AND target_path=?2 AND status='pending'")
+                        .map_err(StorageError::corrupt_public)?;
+                    let mut selected = std::collections::HashSet::new();
+                    for path in &settlement.paths {
+                        for job in query.query_map(params![workspace_id,path], |r| r.get::<_,String>(0)).map_err(StorageError::corrupt_public)? {
+                            selected.insert(job.map_err(StorageError::corrupt_public)?);
+                        }
+                    }
+                    Ok::<_,RuntimeError>(selected)
+                })?
+            };
+            if !selected.is_empty() {
+                root_guard.validate(&root_dir)?;
+                let replay = super::materialization::replay_pending_materializations(store, &root_dir,
+                    super::materialization::MaterializationReplayScope { workspace_id: &workspace_id, self_writes: Some(self_writes.as_ref()), progress: None },
+                    now_ms, &dohc_engine_storage::NoFaults, Some(&selected), true);
+                cache.clear();
+                let summary = replay?;
+                if summary.failed > 0 {
+                    return Err(RuntimeError::ActiveVersionMaterializationIncomplete { failed_jobs: summary.failed });
+                }
+            }
+            if !settlement.repair_recoveries {
+                return Ok(Vec::new());
+            }
+            let outcome = dohc_engine_sync::repair_conflicted_ydoc_recoveries(store, &workspace_id, &dohc_engine_storage::NoFaults)
+                .map_err(RuntimeError::from);
+            if !matches!(&outcome, Ok(recoveries) if recoveries.is_empty()) { cache.clear(); }
+            outcome
+        }).await
+    }
+
     pub async fn capture_file_holds(
         &self,
         workspace_id: String,
@@ -548,11 +890,20 @@ fn capture_ingest_on_store(
     }) {
         Err(error) if unrepresentable(&error) => {
             match store.write_with(faults, |tx| record_capture_file_hold_in(tx, input))? {
-                TxnOutcome::Committed(()) => {
+                TxnOutcome::Committed(true) => {
                     return Err(RuntimeError::CaptureFileHeld {
                         path: input.path.clone(),
                     });
                 }
+                TxnOutcome::Committed(false) => return Err(error),
+                TxnOutcome::Crashed { .. } => return Err(RuntimeError::OperationCrashed),
+            }
+        }
+        Err(error @ RuntimeError::Domain(DomainError::CaptureNotOwned)) => {
+            match store.write_with(faults, |tx| {
+                capture_file_holds::clear_in(tx, &input.workspace_id, &input.path)
+            })? {
+                TxnOutcome::Committed(()) => return Err(error),
                 TxnOutcome::Crashed { .. } => return Err(RuntimeError::OperationCrashed),
             }
         }
@@ -571,12 +922,16 @@ fn unrepresentable(error: &RuntimeError) -> bool {
 fn record_capture_file_hold_in(
     tx: &Transaction<'_>,
     input: &CaptureIngest,
-) -> Result<(), RuntimeError> {
-    let existing = capture_file_holds::hold_in(tx, &input.workspace_id, &input.path)?;
+) -> Result<bool, RuntimeError> {
+    let existing = capture_file_holds::pin_in(tx, &input.workspace_id, &input.path)?;
     let version = existing.as_ref().map_or(input.version_id.as_str(), |hold| {
         hold.source_version_id.as_str()
     });
-    let object_id: String = tx.query_row("SELECT object_id FROM path_aliases WHERE workspace_id=?1 AND version_id=?2 AND path=?3", params![input.workspace_id, version, input.path], |r| r.get(0)).map_err(StorageError::corrupt_public)?;
+    let Some(object_id) =
+        capture_file_holds::alias_in(tx, &input.workspace_id, version, &input.path)?
+    else {
+        return Ok(false);
+    };
     capture_file_holds::record_in(
         tx,
         &CaptureFileHold {
@@ -592,21 +947,19 @@ fn record_capture_file_hold_in(
             retry_requested: false,
         },
     )?;
-    Ok(())
+    Ok(true)
 }
 
 /// A held observation can only recover the object and version that refused it.
 fn pinned_capture_input<'a>(
-    conn: &Connection,
+    tx: &Transaction<'_>,
     input: &'a CaptureIngest,
 ) -> Result<(std::borrow::Cow<'a, CaptureIngest>, bool), RuntimeError> {
-    let Some(hold) = capture_file_holds::hold_in(conn, &input.workspace_id, &input.path)? else {
+    let Some(hold) = capture_file_holds::pin_in(tx, &input.workspace_id, &input.path)? else {
         return Ok((std::borrow::Cow::Borrowed(input), false));
     };
-    let object: Option<String> = conn.query_row("SELECT object_id FROM path_aliases WHERE workspace_id=?1 AND version_id=?2 AND path=?3", params![input.workspace_id,hold.source_version_id,input.path], |r| r.get(0)).optional().map_err(StorageError::corrupt_public)?;
-    if object.as_deref() != Some(hold.object_id.as_str())
-        || (!hold.retry_requested
-            && hold.observed_sha256 == dohc_engine_storage::hex_sha256(input.text.as_bytes()))
+    if !hold.retry_requested
+        && hold.observed_sha256 == dohc_engine_storage::hex_sha256(input.text.as_bytes())
     {
         return Err(RuntimeError::CaptureFileHeld {
             path: input.path.clone(),
@@ -614,7 +967,6 @@ fn pinned_capture_input<'a>(
     }
     let mut pinned = input.clone();
     pinned.version_id = hold.source_version_id;
-    pinned.claim_foreign_head = true;
     Ok((std::borrow::Cow::Owned(pinned), true))
 }
 
@@ -906,6 +1258,32 @@ fn capture_ingest_in_tx(
         ),
     }
     .map_err(RuntimeError::from)?;
+    // An alias change may have released the hold before this observation.
+    // Mark these captured bytes before replay can revive an older intent.
+    let pending_placement: bool = if held {
+        false
+    } else {
+        tx.prepare_cached("SELECT EXISTS(SELECT 1 FROM materialization_jobs WHERE workspace_id IN (?1,'') AND target_path=?2 AND status='pending')")
+            .map_err(StorageError::corrupt_public)?
+            .query_row(params![input.workspace_id, input.path], |r| r.get(0))
+            .map_err(StorageError::corrupt_public)?
+    };
+    if held || pending_placement {
+        dohc_engine_storage::record_completed_job(
+            tx,
+            &dohc_engine_storage::MaterializationJobSpec {
+                job_id: format!("capture-mat_{}", result.moment.moment_id),
+                workspace_id: input.workspace_id.clone(),
+                target_path: input.path.clone(),
+                content_sha256: result.snapshot.blob_sha256.clone(),
+                preimage: dohc_engine_storage::Preimage::Present(
+                    result.snapshot.blob_sha256.clone(),
+                ),
+                target_generation: result.moment.moment_order,
+                now_ms: input.now_ms,
+            },
+        )?;
+    }
     if held {
         capture_file_holds::clear_in(tx, &input.workspace_id, &input.path)?;
     }
@@ -1045,12 +1423,14 @@ fn capture_ingest_batch_with_item_savepoints_in_tx(
                 )
                 .map_err(StorageError::persist_public)?;
                 batch.capture = prior_capture;
-                if unrepresentable(&error) {
-                    record_capture_file_hold_in(tx, input)?;
+                if unrepresentable(&error) && record_capture_file_hold_in(tx, input)? {
                     results.push(Err(RuntimeError::CaptureFileHeld {
                         path: input.path.clone(),
                     }));
                 } else {
+                    if matches!(error, RuntimeError::Domain(DomainError::CaptureNotOwned)) {
+                        capture_file_holds::clear_in(tx, &input.workspace_id, &input.path)?;
+                    }
                     results.push(Err(error));
                 }
             }
@@ -1273,27 +1653,6 @@ fn capture_ingest_binary_on_store(
     faults: &dyn FaultInjector,
     token: &CancellationToken,
 ) -> Result<CaptureIngestBinaryResult, RuntimeError> {
-    let hold = store
-        .read_with(|conn| capture_file_holds::hold_in(conn, &input.workspace_id, &input.path))?;
-    let mut pinned = if hold.is_some() {
-        std::borrow::Cow::Owned(input.clone())
-    } else {
-        std::borrow::Cow::Borrowed(input)
-    };
-    if let Some(hold) = &hold {
-        pinned
-            .to_mut()
-            .version_id
-            .clone_from(&hold.source_version_id);
-        pinned.to_mut().claim_foreign_head = true;
-        let object: Option<String> = store.read_with(|conn| conn.query_row("SELECT object_id FROM path_aliases WHERE workspace_id=?1 AND version_id=?2 AND path=?3", params![input.workspace_id, hold.source_version_id, input.path], |r| r.get(0)).optional().map_err(StorageError::corrupt_public))?;
-        if object.as_deref() != Some(hold.object_id.as_str()) {
-            return Err(RuntimeError::CaptureFileHeld {
-                path: input.path.clone(),
-            });
-        }
-    }
-    let input = pinned.as_ref();
     if token.is_cancelled() {
         return Err(RuntimeError::Cancelled);
     }
@@ -1308,6 +1667,15 @@ fn capture_ingest_binary_on_store(
         return Err(RuntimeError::Cancelled);
     }
     let outcome = store.write_with(faults, |tx| {
+        let hold = capture_file_holds::pin_in(tx, &input.workspace_id, &input.path)?;
+        let mut pinned = std::borrow::Cow::Borrowed(input);
+        if let Some(hold) = &hold {
+            pinned
+                .to_mut()
+                .version_id
+                .clone_from(&hold.source_version_id);
+        }
+        let input = pinned.as_ref();
         let mut admitted = false;
         let result = capture_ingest_binary_with_admission_in_tx(
             tx,
@@ -1345,7 +1713,18 @@ fn capture_ingest_binary_on_store(
             capture_file_holds::clear_in(tx, &input.workspace_id, &input.path)?;
         }
         Ok::<_, RuntimeError>(result)
-    })?;
+    });
+    let outcome = match outcome {
+        Err(error @ RuntimeError::Domain(DomainError::CaptureNotOwned)) => {
+            match store.write_with(faults, |tx| {
+                capture_file_holds::clear_in(tx, &input.workspace_id, &input.path)
+            })? {
+                TxnOutcome::Committed(()) => return Err(error),
+                TxnOutcome::Crashed { .. } => return Err(RuntimeError::OperationCrashed),
+            }
+        }
+        result => result?,
+    };
     match outcome {
         TxnOutcome::Committed(result) => Ok(result),
         TxnOutcome::Crashed { .. } => Err(RuntimeError::OperationCrashed),
@@ -1495,19 +1874,6 @@ fn capture_retire_on_store(
     faults: &dyn FaultInjector,
 ) -> Result<CaptureRetireResult, RuntimeError> {
     root_guard.validate(root_dir)?;
-    let hold = store
-        .read_with(|conn| capture_file_holds::hold_in(conn, &input.workspace_id, &input.path))?;
-    let mut pinned = input.clone();
-    if let Some(hold) = &hold {
-        pinned.version_id.clone_from(&hold.source_version_id);
-        let object: Option<String> = store.read_with(|conn| conn.query_row("SELECT object_id FROM path_aliases WHERE workspace_id=?1 AND version_id=?2 AND path=?3", params![input.workspace_id, hold.source_version_id, input.path], |r| r.get(0)).optional().map_err(StorageError::corrupt_public))?;
-        if object.as_deref() != Some(hold.object_id.as_str()) {
-            return Err(RuntimeError::CaptureFileHeld {
-                path: input.path.clone(),
-            });
-        }
-    }
-    let input = &pinned;
     ensure_mutation_version_on_store(
         store,
         &input.workspace_id,
@@ -1525,6 +1891,15 @@ fn capture_retire_on_store(
         )?;
     }
     let outcome = store.write_with(faults, |tx| {
+        let hold = capture_file_holds::pin_in(tx, &input.workspace_id, &input.path)?;
+        let mut pinned = std::borrow::Cow::Borrowed(input);
+        if let Some(hold) = &hold {
+            pinned
+                .to_mut()
+                .version_id
+                .clone_from(&hold.source_version_id);
+        }
+        let input = pinned.as_ref();
         let result = capture_retire_in_tx(tx, input).map_err(RuntimeError::from)?;
         let mut asset_jobs = Vec::new();
         if !result.deduped

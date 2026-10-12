@@ -160,6 +160,72 @@ async fn capture_hold_leaves_siblings_healthy() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fix1_capture_release_drains_parked_path_without_reopen() {
+    let f = Fixture::new().await;
+    let db = engine_db_path(&f.scratch).unwrap();
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    let generation: i64 = conn.query_row("SELECT moment_order FROM moments WHERE workspace_id=?1 AND path=?2 ORDER BY moment_order DESC LIMIT 1", [WS,HELD], |r| r.get(0)).unwrap();
+    // A real durable relay intent for the pre-hold head, parked by the same
+    // boundary that an incoming relay page uses.
+    conn.execute("INSERT INTO materialization_jobs(job_id,workspace_id,target_path,content_sha256,preimage_sha256,target_generation,status,created_at_ms,operation,preimage_present) VALUES ('relay-held-proof',?1,?2,?3,?4,?5,'pending',5,'write',1)",
+        rusqlite::params![WS,HELD,dohc_engine_storage::hex_sha256(SEED.as_bytes()),dohc_engine_storage::hex_sha256(outside().as_bytes()),generation]).unwrap();
+    std::fs::write(f.scratch.path().join(HELD), "Representable.\n").unwrap();
+    f.scan().await;
+    assert_eq!(f.status().await["heldFiles"], json!([]));
+    let status: String = conn
+        .query_row(
+            "SELECT status FROM materialization_jobs WHERE job_id='relay-held-proof'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(
+        status == "complete" || status == "cancelled",
+        "parked job remained {status}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(f.scratch.path().join(HELD)).unwrap(),
+        "Representable.\n"
+    );
+    f.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fix1_unheld_capture_supersedes_older_parked_intent() {
+    let f = Fixture::new().await;
+    std::fs::write(f.scratch.path().join(HELD), "Representable.\n").unwrap();
+    f.scan().await;
+    assert_eq!(f.status().await["heldFiles"], json!([]));
+    let conn = rusqlite::Connection::open(engine_db_path(&f.scratch).unwrap()).unwrap();
+    let (generation, sha): (i64, String) = conn.query_row(
+        "SELECT m.moment_order,s.blob_sha256 FROM snapshots s JOIN moments m ON m.workspace_id=s.workspace_id AND m.moment_id=s.latest_moment_id WHERE s.workspace_id=?1 AND s.path=?2",
+        [WS, HELD], |r| Ok((r.get(0)?, r.get(1)?)),
+    ).unwrap();
+    // The old intent's preimage deliberately matches the next outside edit.
+    // Unknown-preimage protection alone cannot establish which write is newer.
+    conn.execute("INSERT INTO materialization_jobs(job_id,workspace_id,target_path,content_sha256,preimage_sha256,target_generation,status,created_at_ms,operation,preimage_present) VALUES ('relay-unheld-proof',?1,?2,?3,?4,?5,'pending',5,'write',1)",
+        rusqlite::params![WS,HELD,sha,dohc_engine_storage::hex_sha256(b"Latest.\n"),generation]).unwrap();
+    std::fs::write(f.scratch.path().join(HELD), "Latest.\n").unwrap();
+    f.scan().await;
+    let status: String = conn
+        .query_row(
+            "SELECT status FROM materialization_jobs WHERE job_id='relay-unheld-proof'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(
+        status == "complete" || status == "cancelled",
+        "parked job remained {status}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(f.scratch.path().join(HELD)).unwrap(),
+        "Latest.\n"
+    );
+    f.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn capture_hold_flush_reports_the_file_separately() {
     let f = Fixture::new().await;
     let flush = f.call("capture.flush", json!({})).await;
@@ -297,4 +363,48 @@ async fn capture_hold_active_switch_refusal_names_the_file() {
         outside()
     );
     f.close().await;
+}
+
+#[cfg(windows)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fix1_released_path_drains_despite_sibling_io_failure() {
+    use std::os::windows::fs::OpenOptionsExt;
+    let f = Fixture::new().await;
+    let conn = rusqlite::Connection::open(engine_db_path(&f.scratch).unwrap()).unwrap();
+    let generation: i64 = conn.query_row("SELECT moment_order FROM moments WHERE workspace_id=?1 AND path=?2 ORDER BY moment_order DESC LIMIT 1", [WS,HELD], |r| r.get(0)).unwrap();
+    conn.execute("INSERT INTO materialization_jobs(job_id,workspace_id,target_path,content_sha256,preimage_sha256,target_generation,status,created_at_ms,operation,preimage_present) VALUES ('relay-partial-proof',?1,?2,?3,?4,?5,'pending',5,'write',1)",
+        rusqlite::params![WS,HELD,dohc_engine_storage::hex_sha256(SEED.as_bytes()),dohc_engine_storage::hex_sha256(outside().as_bytes()),generation]).unwrap();
+    std::fs::write(f.scratch.path().join(HELD), "Representable.\n").unwrap();
+    std::fs::write(
+        f.scratch.path().join("sibling.txt"),
+        "Changed, but unreadable.\n",
+    )
+    .unwrap();
+    let locked = std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(0)
+        .open(f.scratch.path().join("sibling.txt"))
+        .unwrap();
+    f.scan().await;
+    let capture = f.status().await;
+    let status: String = conn
+        .query_row(
+            "SELECT status FROM materialization_jobs WHERE job_id='relay-partial-proof'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let disk = std::fs::read_to_string(f.scratch.path().join(HELD)).unwrap();
+    drop(locked);
+    f.close().await;
+    assert_eq!(capture["heldFiles"], json!([]), "{capture}");
+    assert_eq!(
+        capture["degraded"], true,
+        "real I/O failure must remain degraded: {capture}"
+    );
+    assert!(
+        status == "complete" || status == "cancelled",
+        "released path's parked job remained {status}"
+    );
+    assert_eq!(disk, "Representable.\n");
 }

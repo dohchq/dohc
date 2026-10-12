@@ -39,15 +39,14 @@ fn row(r: &rusqlite::Row<'_>) -> rusqlite::Result<CaptureFileHold> {
     })
 }
 
-const COLUMNS: &str = "workspace_id,source_version_id,object_id,path,observed_sha256,observed_size,reason,observed_at_ms,attempt_count,retry_requested";
-
 pub fn hold_in(
     conn: &Connection,
     workspace: &str,
     path: &str,
 ) -> Result<Option<CaptureFileHold>, StorageError> {
-    conn.query_row(
-        &format!("SELECT {COLUMNS} FROM capture_file_holds WHERE workspace_id=?1 AND path=?2"),
+    conn.prepare_cached("SELECT workspace_id,source_version_id,object_id,path,observed_sha256,observed_size,reason,observed_at_ms,attempt_count,retry_requested FROM capture_file_holds WHERE workspace_id=?1 AND path=?2")
+    .map_err(StorageError::corrupt_public)?
+    .query_row(
         [workspace, path],
         row,
     )
@@ -57,9 +56,7 @@ pub fn hold_in(
 
 pub fn list_in(conn: &Connection, workspace: &str) -> Result<Vec<CaptureFileHold>, StorageError> {
     let mut q = conn
-        .prepare(&format!(
-            "SELECT {COLUMNS} FROM capture_file_holds WHERE workspace_id=?1 ORDER BY path"
-        ))
+        .prepare_cached("SELECT workspace_id,source_version_id,object_id,path,observed_sha256,observed_size,reason,observed_at_ms,attempt_count,retry_requested FROM capture_file_holds WHERE workspace_id=?1 ORDER BY path")
         .map_err(StorageError::corrupt_public)?;
     q.query_map([workspace], row)
         .map_err(StorageError::corrupt_public)?
@@ -99,6 +96,71 @@ pub fn request_retry_in(
 impl EngineStore {
     /// Empty workspace is the legacy placement sentinel. It must also park.
     pub fn placement_is_held(&self, workspace: &str, path: &str) -> Result<bool, StorageError> {
-        self.read_with(|conn| conn.query_row("SELECT EXISTS(SELECT 1 FROM capture_file_holds WHERE path=?2 AND (workspace_id=?1 OR ?1=''))", [workspace,path], |r| r.get(0)).map_err(StorageError::corrupt_public))
+        self.read_with(|conn| {
+            if workspace.is_empty() {
+                conn.prepare_cached("SELECT EXISTS(SELECT 1 FROM capture_file_holds WHERE path=?1)")
+                    .map_err(StorageError::corrupt_public)?.query_row([path], |r| r.get(0))
+            } else {
+                conn.prepare_cached("SELECT EXISTS(SELECT 1 FROM capture_file_holds WHERE workspace_id=?1 AND path=?2)")
+                    .map_err(StorageError::corrupt_public)?.query_row([workspace,path], |r| r.get(0))
+            }.map_err(StorageError::corrupt_public)
+        })
     }
+}
+
+/// Release only holds whose source alias has left the held object.
+pub fn clear_orphaned_in(
+    tx: &Transaction<'_>,
+    workspace: &str,
+    version: &str,
+    path: &str,
+) -> Result<(), StorageError> {
+    tx.prepare_cached("DELETE FROM capture_file_holds WHERE workspace_id=?1 AND source_version_id=?2 AND path=?3 AND NOT EXISTS (SELECT 1 FROM path_aliases a WHERE a.workspace_id=capture_file_holds.workspace_id AND a.version_id=capture_file_holds.source_version_id AND a.path=capture_file_holds.path AND a.object_id=capture_file_holds.object_id)")
+        .map_err(StorageError::persist_public)?.execute([workspace,version,path]).map_err(StorageError::persist_public)?;
+    Ok(())
+}
+
+/// One lookup establishes both the hold and its source alias. Old orphan rows
+/// are released in the caller's mutation transaction before ordinary capture.
+pub fn pin_in(
+    tx: &Transaction<'_>,
+    workspace: &str,
+    path: &str,
+) -> Result<Option<CaptureFileHold>, StorageError> {
+    let found = tx.prepare_cached("SELECT h.workspace_id,h.source_version_id,h.object_id,h.path,h.observed_sha256,h.observed_size,h.reason,h.observed_at_ms,h.attempt_count,h.retry_requested,a.object_id=h.object_id FROM capture_file_holds h LEFT JOIN path_aliases a ON a.workspace_id=h.workspace_id AND a.version_id=h.source_version_id AND a.path=h.path WHERE h.workspace_id=?1 AND h.path=?2")
+        .map_err(StorageError::corrupt_public)?.query_row([workspace,path], |r| Ok((row(r)?,r.get::<_,Option<bool>>(10)?.unwrap_or(false))))
+        .optional().map_err(StorageError::corrupt_public)?;
+    match found {
+        Some((hold, true)) => Ok(Some(hold)),
+        Some((_, false)) => {
+            clear_in(tx, workspace, path)?;
+            Ok(None)
+        }
+        None => Ok(None),
+    }
+}
+
+pub fn alias_in(
+    conn: &Connection,
+    workspace: &str,
+    version: &str,
+    path: &str,
+) -> Result<Option<String>, StorageError> {
+    conn.prepare_cached(
+        "SELECT object_id FROM path_aliases WHERE workspace_id=?1 AND version_id=?2 AND path=?3",
+    )
+    .map_err(StorageError::corrupt_public)?
+    .query_row([workspace, version, path], |r| r.get(0))
+    .optional()
+    .map_err(StorageError::corrupt_public)
+}
+
+pub fn first_path_in(conn: &Connection, workspace: &str) -> Result<Option<String>, StorageError> {
+    conn.prepare_cached(
+        "SELECT path FROM capture_file_holds WHERE workspace_id=?1 ORDER BY path LIMIT 1",
+    )
+    .map_err(StorageError::corrupt_public)?
+    .query_row([workspace], |r| r.get(0))
+    .optional()
+    .map_err(StorageError::corrupt_public)
 }

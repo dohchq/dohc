@@ -755,13 +755,10 @@ pub(super) fn switch_active_version_on_store(
     if previous.version_id == version_id {
         return Ok(target);
     }
-    if let Some(hold) = store
-        .read_with(|conn| dohc_engine_storage::capture_file_holds::list_in(conn, workspace_id))?
-        .first()
-    {
-        return Err(RuntimeError::CaptureFileHeld {
-            path: hold.path.clone(),
-        });
+    if let Some(path) = store.read_with(|conn| {
+        dohc_engine_storage::capture_file_holds::first_path_in(conn, workspace_id)
+    })? {
+        return Err(RuntimeError::CaptureFileHeld { path });
     }
     let mut secret_key = None;
     let mut projections = plan_plaintext_switch(

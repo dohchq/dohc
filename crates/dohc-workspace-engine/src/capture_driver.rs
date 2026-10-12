@@ -38,6 +38,7 @@ use dohc_engine_files::{
     IngestReason, ManifestEntry, PoolGauge, ReconcilePlan, ReconcileRun, ScanBounds,
     ScanGeneration, ScanManifest, apply_reconcile_plan_cancellable,
 };
+use dohc_engine_runtime::actor::CapturePassSettlement;
 use dohc_engine_runtime::{ActorHandle, CollectionReconciliation, NoFaults, RuntimeError};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
@@ -2585,6 +2586,7 @@ async fn apply_bound_run_with_handle(
                         let collection_actor = actor.clone();
                         let collection_workspace = workspace_id.to_owned();
                         let collection_root = root.to_path_buf();
+                        let collection_captured_root = captured_root.clone();
                         let collection_leases = leases.clone();
                         let collection_self_writes = self_writes.clone();
                         let collection_author_json = author_json.clone();
@@ -2598,7 +2600,7 @@ async fn apply_bound_run_with_handle(
                                     workspace_id: collection_workspace,
                                     version_id,
                                     shadow_root: collection_root,
-                                    captured_root: Ok(captured_root),
+                                    captured_root: Ok(collection_captured_root),
                                     now_ms,
                                     author_json: collection_author_json,
                                     leases: collection_leases,
@@ -2649,6 +2651,11 @@ async fn apply_bound_run_with_handle(
                 workspace_id,
                 self_writes,
                 now_ms,
+                CapturePassSettlement {
+                    paths: Vec::new(),
+                    repair_recoveries: true,
+                },
+                captured_root.clone(),
             )
             .await
             {
@@ -2932,9 +2939,26 @@ async fn apply_bound_run_with_handle(
             }
         }
     }
-    if result.failed_applies.is_empty() && !result.degraded && result.completed() {
-        match repair_and_materialize_ydoc_recoveries(root, actor, workspace_id, self_writes, now_ms)
-            .await
+    if result.completed() {
+        let settled_paths = result
+            .applied_paths
+            .iter()
+            .chain(&result.not_owned_paths)
+            .cloned()
+            .collect();
+        match repair_and_materialize_ydoc_recoveries(
+            root,
+            actor,
+            workspace_id,
+            self_writes,
+            now_ms,
+            CapturePassSettlement {
+                paths: settled_paths,
+                repair_recoveries: result.failed_applies.is_empty() && !result.degraded,
+            },
+            captured_root.clone(),
+        )
+        .await
         {
             Ok(recovered_paths) => result.applied_paths.extend(recovered_paths),
             Err(_) => {
@@ -2988,12 +3012,17 @@ async fn repair_and_materialize_ydoc_recoveries(
     workspace_id: &str,
     self_writes: &SelfWriteSuppression,
     now_ms: i64,
+    settlement: CapturePassSettlement,
+    captured_root: Arc<CapturedRoot>,
 ) -> Result<Vec<String>, RuntimeError> {
     let recoveries = actor
-        .repair_conflicted_ydoc_recoveries(
+        .finish_capture_pass(
             workspace_id.to_owned(),
-            Arc::new(NoFaults),
-            CancellationToken::new(),
+            root.to_path_buf(),
+            settlement,
+            Arc::new(self_writes.clone()),
+            now_ms,
+            captured_root,
         )
         .await?;
     if recoveries.is_empty() {

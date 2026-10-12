@@ -282,18 +282,12 @@ impl EngineService {
             .kept_materialization_files(open.workspace_id.clone(), open.root.clone())
             .await
             .unwrap_or_default();
-        let capture_recoveries = open
+        let (capture_recoveries, holds) = open
             .actor
-            .capture_recoveries(open.workspace_id.clone())
+            .capture_notices(open.workspace_id.clone())
             .await
             .map_err(map_runtime)?;
-        let held_files = held_files_json(
-            &open
-                .actor
-                .capture_file_holds(open.workspace_id.clone())
-                .await
-                .map_err(map_runtime)?,
-        );
+        let held_files = held_files_json(&holds);
         let guard = lock(&open.capture);
         Ok(match guard.as_ref() {
             Some(driver) => {

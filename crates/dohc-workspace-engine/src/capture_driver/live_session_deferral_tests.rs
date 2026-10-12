@@ -1025,6 +1025,7 @@ async fn capture_file_hold_capture_and_idle_cost() {
         assert_eq!(held_count, count as i64);
         let mut capture = Vec::new();
         let mut idle = Vec::new();
+        let mut phases = Vec::new();
         for sample in 0..33 {
             std::fs::write(
                 harness.root.join("notes/sibling.txt"),
@@ -1033,7 +1034,28 @@ async fn capture_file_hold_capture_and_idle_cost() {
             .unwrap();
             files.handle().request_rescan();
             let start = std::time::Instant::now();
-            assert!(harness.capture(&files.handle()).await);
+            let run =
+                reconcile_if_dirty_bound(&harness.root, &files.handle(), CancellationToken::new())
+                    .await
+                    .unwrap();
+            let scan_ms = start.elapsed().as_secs_f64() * 1000.0;
+            let apply_start = std::time::Instant::now();
+            assert!(
+                apply_bound_run_with_handle(
+                    apply_context(
+                        &harness.root,
+                        &harness.actor,
+                        &harness.leases,
+                        &harness.status,
+                        &harness.self_writes
+                    ),
+                    &files.handle(),
+                    run,
+                    &CancellationToken::new()
+                )
+                .await
+            );
+            let apply_ms = apply_start.elapsed().as_secs_f64() * 1000.0;
             let elapsed = start.elapsed().as_secs_f64() * 1000.0;
             let start = std::time::Instant::now();
             assert!(harness.capture(&files.handle()).await);
@@ -1041,9 +1063,23 @@ async fn capture_file_hold_capture_and_idle_cost() {
             if sample >= 3 {
                 capture.push(elapsed);
                 idle.push(idle_elapsed);
+                phases.push((scan_ms, apply_ms));
             }
         }
+        println!("capture_phases held_files={count} scan_apply_ms={phases:?}");
+        let attempts: i64 = rusqlite::Connection::open(&harness.db)
+            .unwrap()
+            .query_row("SELECT COALESCE(SUM(attempt_count),0) FROM capture_file_holds WHERE workspace_id=?1", [WORKSPACE_ID], |row| row.get(0))
+            .unwrap();
+        assert_eq!(
+            attempts, count as i64,
+            "unchanged holds must not retry during measurement"
+        );
+        println!(
+            "capture_attempts held_files={count} attempts_before={count} attempts_after={attempts}"
+        );
         for (name, mut samples) in [("capture_pass", capture), ("idle_capture_tick", idle)] {
+            println!("{name}_samples held_files={count} ms={samples:?}");
             samples.sort_by(f64::total_cmp);
             println!(
                 "{name} held_files={count} files=101 warmups=3 samples=30 median_ms={:.6} p95_ms={:.6}",
@@ -1238,4 +1274,172 @@ async fn an_outside_write_to_a_held_new_file_keeps_capture_unsettled_until_recor
 
     files.close().await;
     harness.close();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "manual capture cost measurement"]
+async fn fix1_no_hold_capture_and_idle_cost() {
+    for count in [0] {
+        let harness = Harness::new();
+        let outside = format!("{} too deep\n", "> ".repeat(121));
+        let mut store = dohc_engine_storage::EngineStore::open(&harness.db, 1).unwrap();
+        dohc_engine_domain::VersionedTextStore::new(&mut store)
+            .ensure_main_version(WORKSPACE_ID, "main", 1, &NoFaults)
+            .unwrap();
+        for index in 0..100 {
+            let path = format!("notes/held-{index:03}.md");
+            let input = dohc_engine_domain::CaptureIngest {
+                workspace_id: WORKSPACE_ID.into(),
+                version_id: "main".into(),
+                path: path.clone(),
+                text: SEED.into(),
+                metadata_origin: "capture".into(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 2,
+                request_id: None,
+                claim_foreign_head: false,
+            };
+            let head = dohc_engine_domain::VersionedTextStore::new(&mut store)
+                .capture_ingest(&input, &NoFaults)
+                .unwrap()
+                .snapshot;
+            let key = harness.key(&head.object_id);
+            let doc = dohc_engine_collab::Ydoc::wire();
+            doc.rewrite_content_to_markdown_preserving_source(
+                dohc_engine_collab::ContentKind::Richdoc,
+                SEED,
+            )
+            .unwrap();
+            dohc_engine_collab::record_local_update(
+                &mut store,
+                &mut dohc_engine_collab::WriterDocCache::new(),
+                &key,
+                &doc.encode_full_state(),
+                dohc_engine_collab::LocalAppend {
+                    marker: Some(dohc_engine_collab::MarkerCreation {
+                        path: Some(&path),
+                        content_kind: dohc_engine_collab::ContentKind::Richdoc,
+                        regime: dohc_engine_collab::Regime::LocalOnly,
+                    }),
+                    is_seed: true,
+                    seed_source_sha256: Some(&head.blob_sha256),
+                    ..Default::default()
+                },
+                &NoFaults,
+                3,
+                |_tx, _outcome, _sha| Ok(()),
+            )
+            .unwrap();
+            std::fs::write(
+                harness.root.join(&path),
+                if count == 0 { SEED } else { &outside },
+            )
+            .unwrap();
+        }
+        drop(store);
+        let seed = manifest_seed(&harness.root, &harness.actor, WORKSPACE_ID)
+            .await
+            .unwrap();
+        let files = FilesActorCloseGuard::new(
+            FilesActor::spawn_async_with_manifest(
+                harness.root.clone(),
+                ScanBounds::default(),
+                seed.into_scan_seed(),
+            )
+            .await
+            .unwrap(),
+        );
+        assert!(harness.capture(&files.handle()).await);
+        let mut capture = Vec::new();
+        let mut idle = Vec::new();
+        for sample in 0..33 {
+            std::fs::write(
+                harness.root.join("notes/sibling.txt"),
+                format!("Sibling {sample}.\n"),
+            )
+            .unwrap();
+            files.handle().request_rescan();
+            let start = std::time::Instant::now();
+            assert!(harness.capture(&files.handle()).await);
+            let elapsed = start.elapsed().as_secs_f64() * 1000.0;
+            let start = std::time::Instant::now();
+            assert!(harness.capture(&files.handle()).await);
+            let idle_elapsed = start.elapsed().as_secs_f64() * 1000.0;
+            if sample >= 3 {
+                capture.push(elapsed);
+                idle.push(idle_elapsed);
+            }
+        }
+        for (name, mut samples) in [("capture_pass", capture), ("idle_capture_tick", idle)] {
+            println!("{name}_samples held_files={count} ms={samples:?}");
+            samples.sort_by(f64::total_cmp);
+            println!(
+                "{name} held_files={count} files=101 warmups=3 samples=30 median_ms={:.6} p95_ms={:.6}",
+                (samples[14] + samples[15]) / 2.0,
+                samples[28]
+            );
+        }
+        files.close().await;
+        harness.close();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "manual placement replay cost measurement"]
+async fn fix1_no_hold_placement_replay_cost() {
+    let mut samples = Vec::new();
+    for sample in 0..33 {
+        let harness = Harness::new();
+        let mut store = dohc_engine_storage::EngineStore::open(&harness.db, 1).unwrap();
+        store
+            .write_with(&NoFaults, |tx| {
+                let text = "Replay content.\n";
+                let sha = dohc_engine_storage::hex_sha256(text.as_bytes());
+                tx.execute(
+                    "INSERT OR IGNORE INTO blobs (sha256,byte_length,text) VALUES (?1,?2,?3)",
+                    rusqlite::params![sha, text.len() as i64, text],
+                )
+                .map_err(dohc_engine_storage::StorageError::persist_public)?;
+                for index in 0..100 {
+                    dohc_engine_storage::enqueue_job(
+                        tx,
+                        &dohc_engine_storage::MaterializationJobSpec {
+                            job_id: format!("replay-{index}"),
+                            workspace_id: WORKSPACE_ID.into(),
+                            target_path: format!("notes/replay-{index}.txt"),
+                            content_sha256: sha.clone(),
+                            preimage: dohc_engine_storage::Preimage::Absent,
+                            target_generation: index + 1,
+                            now_ms: 2,
+                        },
+                    )?;
+                }
+                Ok::<_, dohc_engine_storage::StorageError>(())
+            })
+            .unwrap();
+        drop(store);
+        let start = std::time::Instant::now();
+        assert_eq!(
+            harness
+                .actor
+                .materialize_replay_pending(harness.root.clone(), WORKSPACE_ID.into(), 3)
+                .await
+                .unwrap(),
+            100
+        );
+        let elapsed = start.elapsed().as_secs_f64() * 1000.0;
+        if sample >= 3 {
+            samples.push(elapsed);
+        }
+        harness.close();
+    }
+    println!("placement_replay_samples jobs=100 ms={samples:?}");
+    samples.sort_by(f64::total_cmp);
+    println!(
+        "placement_replay held_files=0 jobs=100 warmups=3 samples=30 median_ms={:.6} p95_ms={:.6}",
+        (samples[14] + samples[15]) / 2.0,
+        samples[28]
+    );
 }
