@@ -7,6 +7,7 @@ import type {connectOwnerLiveTransport} from "@dohc/sync-relay/owner-live-transp
 import {parseHostEpoch} from "@dohc/live-session-contract/host-control";
 import {createNamedLiveFrameSession, type NamedFrameHostSession} from "../../../../services/sync-relay/src/namedLiveFrameSession";
 import {deriveLiveAuthorSnapshot} from "../../../../services/sync-relay/src/storage/liveAuthorSnapshot";
+import {liveContentAuthors} from "../../../../services/sync-relay/src/storage/liveAuthorWindow";
 import type {StorageContext} from "../../../../services/sync-relay/src/storage/context";
 import {runNativeOwnerDeliveryPass} from "./nativeOwnerDelivery";
 import {parseDesktopOwnerDeliveryConfig} from "./desktopOwnerDelivery";
@@ -28,7 +29,7 @@ const receipt = {deliveryId: "delivery", updateDigest: hash(update), journalCurs
 const cleanups: (() => void)[] = [];
 afterEach(() => {for (const close of cleanups.splice(0).reverse()) close(); vi.restoreAllMocks(); transport.connect.mockReset();});
 
-async function deliver(accountId: string) {
+async function deliver(accountId: string, declared: typeof agentDeclaration | null = agentDeclaration) {
   const lifetime = new AbortController();
   let server: ReturnType<typeof createNamedLiveFrameSession> | undefined;
   cleanups.push(() => {lifetime.abort(); server?.close();});
@@ -46,7 +47,7 @@ async function deliver(accountId: string) {
   vi.spyOn(OwnerYDocOutbox.prototype, "readHead").mockResolvedValue({outboxId: "outbox", binding, baseUpdate, baseUpdateDigest: hash(baseUpdate),
     state: "active", pendingBytes: update.length, oldestEntryAtMs: 0, quarantineReason: null, observedBinding: null,
     entry: {sequence: 4, appendKey: "edit", deliveryId: receipt.deliveryId, updateDigest: hash(update), update, byteLength: update.length, createdAtMs: 0,
-      agentDeclaration, ...{accountId: "forged-outbox-account", authorContext: {kind: "account", accountId: "forged-outbox-account"}}}});
+      ...(declared ? {agentDeclaration: declared} : {}), ...{accountId: "forged-outbox-account", authorContext: {kind: "account", accountId: "forged-outbox-account"}}}});
   const acknowledge = vi.spyOn(OwnerYDocOutbox.prototype, "acknowledge").mockResolvedValue({acknowledged: 1, pendingBytes: 0, oldestEntryAtMs: null});
   const client = {ownerYDocPrepareEnrollment: vi.fn(async () => ({status: "observed", draft: {outboxId: "outbox"}})),
     ownerYDocReadState: vi.fn(async () => ({revision: 1, acceptedCursor: 0, nativeHeadSequence: 1, stateVector: Uint8Array.of(0)})),
@@ -76,6 +77,14 @@ it("ignores a forged recording account at relay admission", async () => {
   expect(deriveLiveAuthorSnapshot({} as StorageContext,
     {principalKind: "owner", principalId: "authenticated-owner", grantId: null, grantGeneration: null}, submitted.authorContext,
     {accountId: "authenticated-owner", name: "Owner"})).toEqual([]);
+});
+
+it("keeps an undeclared edit with a forged recording account unattributed", async () => {
+  const submitted = await deliver("forged-account", null);
+  expect(submitted.authorContext).toEqual({kind: "account", accountId: "forged-account"});
+  expect(liveContentAuthors(deriveLiveAuthorSnapshot({} as StorageContext,
+    {principalKind: "owner", principalId: "authenticated-owner", grantId: null, grantGeneration: null}, submitted.authorContext,
+    {accountId: "authenticated-owner", name: "Owner"}))).toEqual([{kind: "unattributed"}]);
 });
 
 it("rejects an account supplied in private delivery configuration", () => {

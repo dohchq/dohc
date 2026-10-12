@@ -194,7 +194,8 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
               if (result === "retry" || result === "frozen") failures.add(document.binding.currentPath);
               else failures.delete(document.binding.currentPath);
               if (result === "acknowledged" || result === "frozen") notifyRenderer({workspaceId});
-              setOwnerDeliveryStatus(workspaceId, failures.size || unavailable ? "retrying" : preparing ? "preparing" : "active", reason);
+              setOwnerDeliveryStatus(workspaceId, failures.size || unavailable ? "retrying" : preparing ? "preparing" : "active",
+                result === "frozen" ? "document-unavailable" : reason);
               return {documentCount: documents.length, acknowledged: result === "acknowledged"};
               } catch (error) {
                 if (!operation.signal.aborted && !session.signal.aborted && generation === ownerDeliveryGeneration && !isQuitting()) {

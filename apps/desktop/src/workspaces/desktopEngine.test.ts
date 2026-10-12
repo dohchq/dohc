@@ -722,7 +722,7 @@ describe("server owner peer lifecycle", () => {
       expect(f.engine.ownerLiveDeliveryReason("owner")).toBe("restart-required");
     } finally {await f.close();}
   });
-  it("reports preparing and retrying once, and an explicit retry clears the failed document after recovery", async () => {
+  it.each(["retry", "frozen"])("reports preparing and %s once, and an explicit retry clears the failed document after recovery", async outcome => {
     const f = fixture(), credentials = new AbortController();
     Object.setPrototypeOf(f.client, Object.defineProperties(Object.create(EngineClient.prototype), Object.getOwnPropertyDescriptors(Client.prototype)));
     const rootPath = await createTestScratch("dohc-server-owner-status-");
@@ -740,12 +740,13 @@ describe("server owner peer lifecycle", () => {
       connect: async () => ({bearer: "token", accountId: "owner-account", relayUrl: "https://relay.test", signal: credentials.signal, assertCurrent() {},
         refusals: async () => {},
         documents: async () => ({ok: true, documents: [{path: "a.md", status, document}]})})};
-    ownerDeliveryMock.pass.mockResolvedValue("retry");
+    ownerDeliveryMock.pass.mockResolvedValue(outcome);
     try {
       expect(await f.engine.start()).toBe(true);
       await vi.waitFor(() => expect(f.engine.ownerLiveDeliveryStatus("owner")).toBe("preparing"));
       status = "ready"; f.engine.retryOwnerDelivery("owner");
       await vi.waitFor(() => expect(f.engine.ownerLiveDeliveryStatus("owner")).toBe("retrying"));
+      expect(f.engine.ownerLiveDeliveryReason("owner")).toBe(outcome === "frozen" ? "document-unavailable" : undefined);
       f.engine.retryOwnerDelivery("owner");
       await vi.waitFor(() => expect(ownerDeliveryMock.pass).toHaveBeenCalledTimes(2));
       expect(changed).toHaveBeenCalledTimes(2);

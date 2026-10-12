@@ -113,20 +113,20 @@ it("submits the agent each entry declared and none for an entry that declared no
   const [first, second] = run.storage.commitLiveUpdateJournal.mock.calls.map(([input]) => (input as {metadata: Record<string, unknown>}).metadata);
   expect(first).toMatchObject({deliveryId: "delivery-1",authorContext: {kind: "account",accountId: "owner",agent: agentDeclaration}});
   expect(first).not.toHaveProperty("agentDeclaration");
-  expect(second).toMatchObject({deliveryId: "delivery-3"});
+  expect(second).toMatchObject({deliveryId: "delivery-3", authorContext: {kind: "account", accountId: "owner"}});
   expect(second).not.toHaveProperty("agentDeclaration");
-  expect(second).not.toHaveProperty("authorContext");
+  expect(second!.authorContext).not.toHaveProperty("agent");
   await expect(fixture(1, 10_000, {agentId: "",onBehalfOf: null,depth: 0}).run()).rejects.toThrow();
 });
 
-it("uses authenticated account names and refuses another account's metadata", async () => {
-  const f = fixture(1, 10_000, {agentId: "trip-agent", onBehalfOf: null, depth: 0});
+it.each([undefined, {agentId: "trip-agent", onBehalfOf: null, depth: 0}])("uses authenticated account names and refuses another account's metadata (%j)", async declared => {
+  const f = fixture(1, 10_000, declared);
   f.admission.trustedAccount = vi.fn(async accountId => ({accountId, name: "Owner name"}));
   await f.run();
   expect(f.admission.trustedAccount).toHaveBeenCalledWith("owner");
   expect(f.storage.commitLiveUpdateJournal.mock.calls[0]![0]).toMatchObject({trustedAccount: {accountId: "owner", name: "Owner name"},
-    metadata: {authorContext: {kind: "account", accountId: "owner", agent: {agentId: "trip-agent", depth: 0}}}});
-  const changed = fixture(1, 10_000, {agentId: "trip-agent", onBehalfOf: null, depth: 0});
+    metadata: {authorContext: {kind: "account", accountId: "owner", ...(declared ? {agent: {agentId: "trip-agent", depth: 0}} : {})}}});
+  const changed = fixture(1, 10_000, declared);
   changed.admission.trustedAccount = () => ({accountId: "another", name: "Another"});
   await expect(changed.run()).rejects.toThrow("Owner account changed.");
   expect(changed.storage.commitLiveUpdateJournal).not.toHaveBeenCalled();

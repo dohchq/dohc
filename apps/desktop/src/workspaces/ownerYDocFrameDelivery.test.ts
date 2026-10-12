@@ -63,7 +63,8 @@ it("uses owner bearer route and exact stored delivery bytes; waits for durable o
   const work = f.delivery.deliver(fresh.authority, envelope).then(result => {settled = true; return result;});
   await f.receiptChecked.promise;
   expect(settled).toBe(false);
-  expect(f.submit).toHaveBeenCalledWith({deliveryId: envelope.deliveryId, updateDigest: envelope.updateDigest, updateBytes: envelope.update}, expect.any(AbortSignal));
+  expect(f.submit).toHaveBeenCalledWith({deliveryId: envelope.deliveryId, updateDigest: envelope.updateDigest, updateBytes: envelope.update,
+    authorContext: {kind: "account", accountId: "owner"}}, expect.any(AbortSignal));
   f.feed();
   expect(await work).toEqual({kind: "receipt", receipt: f.receipt});
   expect(f.acceptedState.applyAcceptedFrame).toHaveBeenCalledWith({binding, previousAcceptedCursor: 0, journalCursor: 9, updateBytes: envelope.update}, expect.any(AbortSignal));
@@ -86,6 +87,12 @@ it("leaves a declared draft unnamed when no recording account is available", asy
   const work = f.delivery.deliver(fresh.authority, {...envelope, agentDeclaration: {agentId: "trip-agent", onBehalfOf: null, depth: 0}});
   expect(await work).toEqual({kind: "receipt", receipt: f.receipt});
   expect(f.submit).toHaveBeenCalledWith({deliveryId: envelope.deliveryId, updateDigest: envelope.updateDigest, updateBytes: envelope.update}, expect.any(AbortSignal));
+});
+
+it("freezes a conflicting delivery for explicit recovery instead of retrying forever", async () => {
+  const f = fixture({result: {result: "refused", reason: "delivery-conflict"}}), fresh = await f.delivery.freshOwnerAuthority(binding);
+  if (fresh.kind !== "authority") throw new Error("Missing authority");
+  expect(await f.delivery.deliver(fresh.authority, envelope)).toEqual({kind: "quarantine", reason: "delivery-conflict"});
 });
 
 it("requires an owner frame policy that carries the largest declared submission", () => {

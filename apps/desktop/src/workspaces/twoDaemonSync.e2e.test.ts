@@ -568,13 +568,15 @@ it.skipIf(engine.missing).each([
     console.log(`native owner delivery ${name}: ${resyncSignals} resync signals recovered on the original session`);
     const ownerSettlement = (await capture.listMoments({limit: 100})).moments.find(moment => moment.path === path);
     expect(ownerSettlement).toBeDefined();
-    // Native owner delivery sends no recording context for an undeclared edit, so no author is verified.
-    expect(ownerSettlement!.authors).toEqual([{kind: "unattributed"}]);
+    // The test relay uses the account id as its name; the longest fixture exceeds the display-name limit.
+    const ownerAuthors = [{kind: "human", humanId: workspaceId, humanName: name === "id-less non-canonical" ? "Unnamed" : workspaceId}];
+    const confirmedOwnerAuthors = ownerAuthors.map(author => ({...author, relayConfirmed: true}));
+    expect.soft(ownerSettlement!.authors).toEqual(confirmedOwnerAuthors);
     const publicationDb = new DatabaseSync(join(rootA, SECRET_FILE_STORE_RELATIVE_PATH), {readOnly: true});
     try {
-      expect(publicationDb.prepare("SELECT admission_json,authors_json FROM live_settlement_publication_admissions WHERE workspace_id=? AND moment_id=?")
+      expect.soft(publicationDb.prepare("SELECT admission_json,authors_json FROM live_settlement_publication_admissions WHERE workspace_id=? AND moment_id=?")
         .get(workspaceId, ownerSettlement!.id)).toMatchObject({
-          admission_json: expect.stringContaining('"status":"accepted"'), authors_json: '[{"kind":"unattributed"}]',
+          admission_json: expect.stringContaining('"status":"accepted"'), authors_json: stableJsonStringify(ownerAuthors),
         });
     } finally {publicationDb.close();}
     // Publish owner operations before the peer imports settlement coverage.
@@ -603,7 +605,7 @@ it.skipIf(engine.missing).each([
     await pullAndExpect(peer, rootB, path, markdown);
     const imported = (await peer.capture.listMoments({limit: 100})).moments.find(moment => moment.id === ownerSettlement?.id);
     expect(imported).toBeDefined();
-    expect(imported!.authors).toEqual([{kind: "unattributed"}]);
+    expect.soft(imported!.authors).toEqual(confirmedOwnerAuthors);
     if (hasId) {
       await delivery.stop();
       delivery = undefined;
