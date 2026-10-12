@@ -341,8 +341,11 @@ impl EngineService {
         self.attach_configured_workspace(workspace).await
     }
 
-    /// Close one attached workspace. Its registrations, sessions, and leases
-    /// end with it; other workspaces keep theirs.
+    /// `liveApplication.detachWorkspace`: close one attached workspace. Its
+    /// registrations, sessions, and leases end with it; other workspaces keep
+    /// theirs. Detach does not wait for pending delivery, settlement, or
+    /// materialization. That work stays in the workspace store and resumes
+    /// when the workspace is attached again.
     pub(super) async fn configured_detach_workspace(
         &self,
         ctx: &RequestContext,
@@ -403,6 +406,13 @@ impl EngineService {
                         ));
                     }
                     unfinished.push(entry.handle.clone());
+                } else if entry.root.starts_with(&workspace.root)
+                    || workspace.root.starts_with(&entry.root)
+                {
+                    // Capture and the engine store would cover another workspace's files.
+                    return Err(invalid(
+                        "live host workspace roots must not contain one another",
+                    ));
                 } else {
                     listed.push(sized_entry(&entry.workspace_id));
                 }
@@ -1178,6 +1188,52 @@ mod tests {
                 .unwrap();
         }
         assert_eq!(hosts(&ctx)["workspaces"], json!([]));
+        assert!(lock(&service.handles).is_empty());
+    }
+
+    #[tokio::test]
+    async fn attach_refuses_a_root_inside_or_around_an_attached_root() {
+        let tree = dohc_engine_testkit::ScratchDir::new().unwrap();
+        let attached = tree.path().join("attached");
+        let nested = attached.join("nested");
+        std::fs::create_dir_all(&nested).unwrap();
+        let (service, owner, _ingress) = EngineService::configured_live_host(config(&[]))
+            .await
+            .unwrap();
+        let mut ctx = RequestContext::unbounded();
+        ctx.connection = Some(owner.handle());
+        let attach = |root: &Path, id: &str| {
+            host_request(
+                "liveApplication.attachWorkspace",
+                None,
+                json!({"root": root, "workspaceId": id, "maxRegistrations": 4}),
+            )
+        };
+        let opened = service
+            .configured_attach_workspace(&ctx, attach(attached.as_path(), "attached"))
+            .await
+            .unwrap();
+        for (root, id) in [(nested.as_path(), "descendant"), (tree.path(), "ancestor")] {
+            assert_eq!(
+                service
+                    .configured_attach_workspace(&ctx, attach(root, id))
+                    .await
+                    .unwrap_err()
+                    .code,
+                ErrorCode::InvalidParams,
+                "{id}"
+            );
+            assert!(!root.join(".dohc").exists(), "{id}");
+        }
+        let handle: WorkspaceHandle =
+            serde_json::from_value(opened["workspaceHandle"].clone()).unwrap();
+        service
+            .configured_detach_workspace(
+                &ctx,
+                host_request("liveApplication.detachWorkspace", Some(handle), json!({})),
+            )
+            .await
+            .unwrap();
         assert!(lock(&service.handles).is_empty());
     }
 }

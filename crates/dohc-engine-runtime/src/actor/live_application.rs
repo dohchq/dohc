@@ -423,11 +423,14 @@ impl ActorLiveApplicationOwner {
     }
 
     /// Release one document's registration and cached state on the writer queue.
-    /// Returns the incomplete work instead, with nothing released.
+    /// Returns the incomplete work instead, with nothing released. Work is
+    /// complete once every applied update is settled and `root` holds the head.
     pub async fn unload(
         &self,
         object_id: String,
         keys: Vec<dohc_engine_collab::DocKey>,
+        root: std::path::PathBuf,
+        now_ms: i64,
     ) -> Result<Option<UnloadPending>, RuntimeError> {
         current(&self.actor, &self.token)?;
         let (reply, receive) = oneshot::channel();
@@ -438,6 +441,8 @@ impl ActorLiveApplicationOwner {
                 token: self.token.clone(),
                 object_id,
                 keys,
+                root,
+                now_ms,
                 reply,
             })))
             .await
@@ -892,6 +897,8 @@ pub(super) enum Request {
         token: Token,
         object_id: String,
         keys: Vec<dohc_engine_collab::DocKey>,
+        root: std::path::PathBuf,
+        now_ms: i64,
         reply: Reply<Option<UnloadPending>>,
     },
     Close {
@@ -1328,11 +1335,19 @@ impl Request {
                 token,
                 object_id,
                 keys,
+                root,
+                now_ms,
                 reply,
             } => {
                 let result = registry.owner(&workspace_id, &token).and_then(|owner| {
-                    let pending =
+                    let mut pending =
                         store.read_with(|conn| unload_pending(conn, &workspace_id, &object_id))?;
+                    for key in &keys {
+                        if pending.is_some() {
+                            break;
+                        }
+                        pending = super::ydoc::ydoc_unload_pending(store, key, &root, now_ms)?;
+                    }
                     if pending.is_some() {
                         return Ok(pending);
                     }

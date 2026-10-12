@@ -1043,10 +1043,15 @@ pub enum UnloadPending {
     Restore,
     /// Owner updates or deferred replicated updates have not been delivered.
     Delivery,
-    /// Applied updates are past the document's last settlement.
+    /// Applied updates on the current lineage are past its last settlement,
+    /// or the Markdown artifact does not hold the document's head.
     Settlement,
+    /// A settlement committed but its Markdown artifact is not written yet.
+    Materialization,
 }
 
+/// The settlement clause reads only the binding's current lineage: a restore
+/// replaces the lineage, and the replaced one never settles again.
 const UNLOAD_PENDING: &str = "SELECT
     EXISTS(SELECT 1 FROM live_restore_fences
         WHERE workspace_id=?1 AND object_id=?2 AND resume_receipt_json IS NULL),
@@ -1054,6 +1059,10 @@ const UNLOAD_PENDING: &str = "SELECT
         OR EXISTS(SELECT 1 FROM owner_ydoc_outboxes
             WHERE workspace_id=?1 AND object_id=?2 AND pending_bytes>0 AND state<>'quarantined'),
     EXISTS(SELECT 1 FROM live_device_update_applications a
+        JOIN live_device_application_bindings b
+            ON b.relay_database_namespace=a.relay_database_namespace AND b.workspace_id=a.workspace_id
+            AND b.main_version_id=a.main_version_id AND b.object_id=a.object_id
+            AND b.lineage_claim_id=a.lineage_claim_id
         WHERE a.workspace_id=?1 AND a.object_id=?2 AND a.journal_cursor>max(
             COALESCE((SELECT max(s.terminal_cursor) FROM live_device_settlements s
                 WHERE s.relay_database_namespace=a.relay_database_namespace AND s.workspace_id=a.workspace_id
@@ -1064,7 +1073,8 @@ const UNLOAD_PENDING: &str = "SELECT
                 AND o.main_version_id=a.main_version_id AND o.object_id=a.object_id
                 AND o.lineage_claim_id=a.lineage_claim_id),0)))";
 
-/// Name the first incomplete work for one document, or none when it can unload.
+/// Name the first incomplete restore, delivery, or settlement record for one
+/// document. The caller still proves the artifact holds the head.
 pub fn unload_pending(
     conn: &Connection,
     workspace_id: &str,

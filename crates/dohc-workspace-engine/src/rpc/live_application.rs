@@ -978,6 +978,8 @@ impl EngineService {
         if keys.is_empty() {
             return Err(workspace_unavailable());
         }
+        let root = host.open.root.clone();
+        let now_ms = super::request::now_ms()?;
         // A cancelled caller cannot strand a released registration with its
         // session still leased: the task finishes every step it starts.
         let registry = Arc::clone(&self.live_applications);
@@ -985,7 +987,10 @@ impl EngineService {
         let task_host = host.clone();
         let operation = tokio::spawn(async move {
             let _serial = serial;
-            let pending = task_host.owner.unload(object_id.clone(), keys).await?;
+            let pending = task_host
+                .owner
+                .unload(object_id.clone(), keys, root, now_ms)
+                .await?;
             if pending.is_none() {
                 {
                     let mut registry = lock(&registry);
@@ -1023,6 +1028,7 @@ impl EngineService {
                 UnloadPending::Restore => "restore-pending",
                 UnloadPending::Delivery => "delivery-pending",
                 UnloadPending::Settlement => "settlement-pending",
+                UnloadPending::Materialization => "materialization-pending",
             }}),
         })
     }
@@ -2465,6 +2471,64 @@ mod tests {
         assert!(lock(&service.sessions).contains_key("ydoc-unload-document"));
         deferred(
             "DELETE FROM ydoc_deferred_updates WHERE object_id='document';",
+            &mut store,
+        );
+        drop(store);
+        let unloaded = service
+            .call(context(), unload_request(&workspace, "document"))
+            .await
+            .unwrap();
+        assert_eq!(unloaded.response.result, json!({"status":"unloaded"}));
+        service.workspace_close(Some(workspace)).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn unload_waits_only_for_applications_on_the_current_lineage() {
+        let (_scratch, service, owner, workspace, _, _) = unload_fixture().await;
+        let context = || {
+            let mut ctx = RequestContext::unbounded();
+            ctx.connection = Some(owner.handle());
+            ctx
+        };
+        let open = service.open(Some(&workspace)).unwrap();
+        let mut store = dohc_engine_storage::EngineStore::open(&open.db_path, 0).unwrap();
+        let execute = |sql: &str, store: &mut dohc_engine_storage::EngineStore| {
+            store
+                .write_with(&NoFaults, |tx| {
+                    tx.execute_batch(sql).unwrap();
+                    Ok::<_, dohc_engine_storage::StorageError>(())
+                })
+                .unwrap();
+        };
+        let digest = hex_sha256(&[0, 0]);
+        execute(
+            &format!(
+                "INSERT OR IGNORE INTO binary_blobs(sha256,byte_length,bytes) VALUES ('{digest}',2,x'0000');
+                 INSERT INTO live_device_update_applications(relay_database_namespace,workspace_id,
+                    delivery_id,main_version_id,object_id,lineage_claim_id,current_path,
+                    selector_paths_json,restore_fence_generation,update_digest,update_byte_length,
+                    journal_cursor,accepting_host_epoch,principal_kind,principal_id,grant_id,
+                    grant_generation,received_at_ms,first_seen_count,local_ydoc_sequence,
+                    applied_host_id,applied_host_epoch,applied_instance_id,applied_connection_id)
+                 SELECT relay_database_namespace,workspace_id,'unsettled',main_version_id,object_id,
+                    lineage_claim_id,current_path,selector_paths_json,restore_fence_generation,
+                    '{digest}',2,1,1,'owner','person',NULL,NULL,0,0,1,
+                    host_id,host_epoch,instance_id,connection_id
+                 FROM live_device_application_bindings WHERE object_id='document';"
+            ),
+            &mut store,
+        );
+        let refused = service
+            .call(context(), unload_request(&workspace, "document"))
+            .await
+            .unwrap();
+        assert_eq!(
+            refused.response.result,
+            json!({"status":"pending","reason":"settlement-pending"})
+        );
+        // A restore replaced that lineage; its applications never settle.
+        execute(
+            "UPDATE live_device_update_applications SET lineage_claim_id=printf('%064d',0);",
             &mut store,
         );
         drop(store);

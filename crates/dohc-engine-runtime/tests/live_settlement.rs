@@ -2853,6 +2853,92 @@ async fn configured_settlement_retains_pending_projection_when_parent_is_unusabl
     f.assert_projection();
 }
 
+async fn unload(f: &Fixture) -> Option<UnloadPending> {
+    f.owner
+        .unload(
+            f.binding.object_id.clone(),
+            vec![dohc_engine_collab::DocKey::new("workspace", "main", "object").unwrap()],
+            f.root.path().to_owned(),
+            40,
+        )
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn unload_waits_for_a_committed_settlement_whose_file_write_failed() {
+    for crash in [false, true] {
+        let f = Fixture::new().await;
+        let terminal = if crash {
+            let terminal = f.apply(2, vector("ordinary-frontmatter-order")).await;
+            let _interrupted = f
+                .settle(
+                    Some(terminal.clone()),
+                    4,
+                    Arc::new(Crash(FaultPoint::MaterializeAfterJobCommit)),
+                )
+                .await;
+            Some(terminal)
+        } else {
+            std::fs::write(f.root.path().join("notes"), "owned file").unwrap();
+            assert!(f.settle(None, 4, Arc::new(NoFaults)).await.is_err());
+            None
+        };
+        assert_eq!(f.counts().0, 1, "crash={crash}");
+        assert_eq!(
+            unload(&f).await,
+            Some(UnloadPending::Materialization),
+            "crash={crash}"
+        );
+        if !crash {
+            std::fs::remove_file(f.root.path().join("notes")).unwrap();
+        }
+        // The refusal kept the registration, so the normal retry lands the file.
+        assert!(
+            f.settle(terminal, 4, Arc::new(NoFaults))
+                .await
+                .unwrap()
+                .materialized
+        );
+        f.assert_projection();
+        assert_eq!(unload(&f).await, None, "crash={crash}");
+    }
+}
+
+#[tokio::test]
+async fn unload_waits_for_a_committed_settlement_whose_file_write_was_blocked() {
+    let f = Fixture::new().await;
+    f.settle(None, 4, Arc::new(NoFaults)).await.unwrap();
+    let path = f.root.path().join(&f.binding.current_path);
+    let settled = std::fs::read(&path).unwrap();
+    let terminal = f.apply(1, vector("ordinary-frontmatter-order")).await;
+    let elsewhere = ScratchDir::new().unwrap();
+    std::fs::remove_file(&path).unwrap();
+    assert!(
+        dohc_engine_testkit::try_make_dir_alias(elsewhere.path(), &path).unwrap(),
+        "host must create the directory alias; this regression cannot skip"
+    );
+    let blocked = f
+        .settle(Some(terminal.clone()), 4, Arc::new(NoFaults))
+        .await
+        .unwrap();
+    assert!(!blocked.materialized);
+    assert_eq!(unload(&f).await, Some(UnloadPending::Materialization));
+    #[cfg(windows)]
+    std::fs::remove_dir(&path).unwrap();
+    #[cfg(not(windows))]
+    std::fs::remove_file(&path).unwrap();
+    std::fs::write(&path, settled).unwrap();
+    assert!(
+        f.settle(Some(terminal), 4, Arc::new(NoFaults))
+            .await
+            .unwrap()
+            .materialized
+    );
+    f.assert_projection();
+    assert_eq!(unload(&f).await, None);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn restore_application_keeps_queued_memory_and_replays_after_cancelled_or_retired_owner() {
     struct Hold {
