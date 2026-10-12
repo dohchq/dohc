@@ -1,6 +1,6 @@
 // Keep a local Vitest at the root and one installed major across its consumers.
 // Otherwise npx can fetch its own runner, or a package can under-collect tests
-// under a different major. See https://github.com/dohc-ai/dohc/issues/405.
+// under a different major. See https://github.com/dohchq/dohc/issues/405.
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";

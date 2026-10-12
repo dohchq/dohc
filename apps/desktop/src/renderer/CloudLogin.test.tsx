@@ -116,7 +116,7 @@ describe("CloudLogin", () => {
     fireEvent.click(screen.getByTestId("cloud-setup-guide"));
     await waitFor(() =>
       expect(bridgeMock.openExternalUrl).toHaveBeenCalledWith({
-        url: "https://github.com/dohc-ai/dohc/blob/main/docs/how-to/self-host.md",
+        url: "https://github.com/dohchq/dohc/blob/main/docs/how-to/self-host.md",
       }),
     );
   });

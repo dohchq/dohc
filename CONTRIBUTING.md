@@ -10,11 +10,11 @@ dohc is still in development and has one maintainer. Contributions are limited f
 
 We're not accepting pull requests for new features, large changes, refactors, rewrites, new dependencies, or new tooling.
 
-For feature ideas, read [what dohc is trying to build](AGENTS.md#what-dohc-looks-like-in-practice), then start a [Discussion](https://github.com/dohc-ai/dohc/discussions) before writing code.
+For feature ideas, read [what dohc is trying to build](AGENTS.md#what-dohc-looks-like-in-practice), then start a [Discussion](https://github.com/dohchq/dohc/discussions) before writing code.
 
 ## Report a bug
 
-Use [GitHub Issues](https://github.com/dohc-ai/dohc/issues) for bugs only. Include reproduction steps, expected and actual results, your operating system, and the dohc version or commit.
+Use [GitHub Issues](https://github.com/dohchq/dohc/issues) for bugs only. Include reproduction steps, expected and actual results, your operating system, and the dohc version or commit.
 
 For security vulnerabilities, follow [SECURITY.md](SECURITY.md) instead of opening a public issue.
 

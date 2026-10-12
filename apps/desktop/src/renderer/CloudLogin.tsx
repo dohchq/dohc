@@ -18,7 +18,7 @@ import { CopyField, type CopySecret } from "./ui/CopyButton";
 const SYNC_CODE_SECRET: CopySecret = { what: "the workspace code", again: "Copy it again from Settings." };
 
 const SETUP_GUIDE_URL =
-  "https://github.com/dohc-ai/dohc/blob/main/docs/how-to/self-host.md";
+  "https://github.com/dohchq/dohc/blob/main/docs/how-to/self-host.md";
 
 type WorkspaceSyncState = Required<Pick<
   CloudStatusResult,
