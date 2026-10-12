@@ -3178,6 +3178,12 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         sql: "CREATE INDEX idx_chat_channels_page ON chat_channels(workspace_id, created_at_ms, channel_id);",
         sets_user_version: None,
     },
+    Migration {
+        ordinal: 45,
+        id: "v2-chat-local-dispatch-discovery",
+        sql: "CREATE TABLE chat_dispatch_local_discovery (workspace_id TEXT NOT NULL, message_id TEXT NOT NULL, PRIMARY KEY (workspace_id, message_id), FOREIGN KEY (workspace_id, message_id) REFERENCES chat_messages(workspace_id, message_id) ON DELETE CASCADE) STRICT;",
+        sets_user_version: None,
+    },
 ];
 
 const V2_OPEN_DOCUMENT_ARTIFACTS_DDL: &str = "\
@@ -3833,6 +3839,10 @@ mod tests {
                 "v2-chat-channel-keyset-page",
                 "67a6a8d2f92652a3d1cbbdf98b66d8441830a2db5a74502cdd15ca4c23851001",
             ),
+            (
+                "v2-chat-local-dispatch-discovery",
+                "659dcf6fbde5b08aa32a066d0c07cdd6bfe8514fae5cc718904d0de059ef4eb6",
+            ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());
         for (migration, (id, checksum)) in BASELINE_MIGRATIONS.iter().zip(pinned) {
@@ -3843,6 +3853,22 @@ mod tests {
                 "the {id} migration changed after it shipped"
             );
         }
+    }
+
+    #[test]
+    fn local_dispatch_discovery_upgrade_preserves_the_cursor_without_backfilling_messages() {
+        let dir = tempdir();
+        let mut conn = open_bare(&dir.join("engine.db"));
+        let ctx = MigrationContext::current(1);
+        let before = migration_index("v2-chat-local-dispatch-discovery");
+        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..before], &ctx, &NoFaults).unwrap();
+        conn.execute_batch("INSERT INTO chat_channels (workspace_id,channel_id,name,slug,kind,created_at_ms,updated_at_ms) VALUES ('ws','channel','Channel','channel','channel',1,1); INSERT INTO chat_threads (workspace_id,thread_id,title,created_at_ms,updated_at_ms,channel_id) VALUES ('ws','thread','Thread',20,20,'channel'); INSERT INTO chat_messages (workspace_id,thread_id,message_order,message_id,author_kind,author_display_name,body,created_at_ms) VALUES ('ws','thread',0,'old','human','Ada','@agent',20); INSERT INTO chat_dispatch_scan_cursor (workspace_id,max_created_at_ms,updated_at_ms) VALUES ('ws',100,101);").unwrap();
+        run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).unwrap();
+        let state: (i64, i64, i64) = conn.query_row(
+            "SELECT (SELECT COUNT(*) FROM chat_messages), (SELECT COUNT(*) FROM chat_dispatch_local_discovery), (SELECT max_created_at_ms FROM chat_dispatch_scan_cursor WHERE workspace_id='ws')",
+            [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        ).unwrap();
+        assert_eq!(state, (1, 0, 100));
     }
 
     #[test]
