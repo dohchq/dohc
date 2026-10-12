@@ -27,7 +27,6 @@ import {
 const MAX_BLOB_HAVE = 2_000;
 const REACH_PAGE_ROWS = 500;
 const REACH_IDLE_MS = 10 * 60_000;
-const MAX_UPLOADED_BLOBS = 10_000;
 
 type DocumentClaim = { objectId: unknown; versionId: unknown; path: unknown; workspaceId: unknown };
 
@@ -102,16 +101,16 @@ export function hostedWriteAllowed(scope: ServiceHostFeedScope, opKind: string, 
 }
 
 type DocumentReach = { through: number; blobs: Set<string> };
-type WorkspaceReach = { documents: Map<string, DocumentReach>; uploaded: Set<string>; usedAtMs: number };
+type WorkspaceReach = { documents: Map<string, DocumentReach>; usedAtMs: number };
 
 /**
  * The blobs the host may fetch or name: those the accepted rows of its current
  * documents reference, and those it uploaded itself. Each document's reach
  * extends as its rows arrive and survives other documents joining or leaving.
- * A workspace unused for REACH_IDLE_MS is dropped; losing it costs a rescan,
- * or an upload the host repeats.
+ * A workspace unused for REACH_IDLE_MS drops its reach, which costs a rescan.
+ * Uploads are stored, so a pending write keeps them.
  */
-function createBlobReach(storage: Pick<SyncRelayStorage, "listServiceHostDocumentRows">) {
+function createBlobReach(storage: Pick<SyncRelayStorage, "listServiceHostDocumentRows" | "serviceHostUploaded">) {
   const workspaces = new Map<string, WorkspaceReach>();
   let sweptAtMs = 0;
   const workspaceReach = (workspaceId: string) => {
@@ -122,7 +121,7 @@ function createBlobReach(storage: Pick<SyncRelayStorage, "listServiceHostDocumen
       for (const [id, entry] of workspaces) if (nowMs - entry.usedAtMs >= REACH_IDLE_MS) workspaces.delete(id);
     }
     let entry = workspaces.get(workspaceId);
-    if (!entry) workspaces.set(workspaceId, entry = { documents: new Map(), uploaded: new Set(), usedAtMs: nowMs });
+    if (!entry) workspaces.set(workspaceId, entry = { documents: new Map(), usedAtMs: nowMs });
     entry.usedAtMs = nowMs;
     return entry;
   };
@@ -139,22 +138,13 @@ function createBlobReach(storage: Pick<SyncRelayStorage, "listServiceHostDocumen
       if (rows.length < REACH_PAGE_ROWS) return document.blobs;
     }
   };
-  return {
-    /** Whether the host may fetch, or name in a write, each blob under this scope. */
-    known(scope: ServiceHostFeedScope): (sha256: string) => boolean {
-      const entry = workspaceReach(scope.workspaceId);
-      // A document that left the scope takes its blobs along.
-      for (const objectId of entry.documents.keys()) if (!scope.shared.has(objectId)) entry.documents.delete(objectId);
-      const reaches = [...scope.shared.keys()].map(objectId => documentReach(scope, entry, objectId));
-      return sha256 => entry.uploaded.has(sha256) || reaches.some(blobs => blobs.has(sha256));
-    },
-    /** The host proved it holds these bytes. */
-    uploaded(workspaceId: string, sha256: string) {
-      const { uploaded } = workspaceReach(workspaceId);
-      uploaded.delete(sha256);
-      uploaded.add(sha256);
-      if (uploaded.size > MAX_UPLOADED_BLOBS) uploaded.delete(uploaded.values().next().value!);
-    },
+  /** Whether the host may fetch, or name in a write, each blob under this scope. */
+  return (scope: ServiceHostFeedScope): ((sha256: string) => boolean) => {
+    const entry = workspaceReach(scope.workspaceId);
+    // A document that left the scope takes its blobs along.
+    for (const objectId of entry.documents.keys()) if (!scope.shared.has(objectId)) entry.documents.delete(objectId);
+    const reaches = [...scope.shared.keys()].map(objectId => documentReach(scope, entry, objectId));
+    return sha256 => reaches.some(blobs => blobs.has(sha256)) || storage.serviceHostUploaded(scope.workspaceId, sha256);
   };
 }
 
@@ -220,7 +210,7 @@ export function createServiceHostFeed(storage: SyncRelayStorage) {
       const admitted = () => {
         guard();
         const scope = currentScope(workspaceId);
-        const known = blobReach.known(scope);
+        const known = blobReach(scope);
         for (const op of ops) {
           const row = asRecord(op);
           if (!row || typeof row.opKind !== "string" || !hostedWriteAllowed(scope, row.opKind, row.payload) ||
@@ -255,14 +245,14 @@ export function createServiceHostFeed(storage: SyncRelayStorage) {
         return value;
       });
       guard();
-      const stored = new Set(sha256s.filter(blobReach.known(currentScope(workspaceId))));
+      const stored = new Set(sha256s.filter(blobReach(currentScope(workspaceId))));
       for (const sha256 of storage.missingBlobs(workspaceId, [...stored])) stored.delete(sha256);
       return jsonResponse({ ok: true, missing: sha256s.filter(sha256 => !stored.has(sha256)) });
     }
 
     if (head === "blobs" && second && second !== "have" && route.length === 2 && request.method === "GET") {
       assertSha256(second);
-      const blob = blobReach.known(currentScope(workspaceId))(second) ? storage.getBlob(workspaceId, second) : null;
+      const blob = blobReach(currentScope(workspaceId))(second) ? storage.getBlob(workspaceId, second) : null;
       if (!blob) throw relayError("blob_not_found");
       return new Response(arrayBufferForBytes(blob), { status: 200, headers: { "content-type": "application/octet-stream" } });
     }
@@ -272,9 +262,8 @@ export function createServiceHostFeed(storage: SyncRelayStorage) {
       const bytes = await readBytes(request, MAX_BLOB_BYTES);
       if (sha256Hex(bytes) !== second) throw badRequest("blob content does not match sha256 path");
       guard();
-      const known = blobReach.known(currentScope(workspaceId))(second);
-      const put = storage.putBlob({ workspaceId, sha256: second, content: bytes, createdAtMs: Date.now() });
-      blobReach.uploaded(workspaceId, second);
+      const known = blobReach(currentScope(workspaceId))(second);
+      const put = storage.putServiceHostBlob({ workspaceId, sha256: second, content: bytes, createdAtMs: Date.now() });
       // Whether the owner already held these bytes is theirs to know, unless the host could already fetch them.
       return jsonResponse({ ok: true, workspaceId, sha256: second, byteLength: put.byteLength, alreadyHad: put.alreadyHad && known });
     }

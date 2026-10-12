@@ -251,7 +251,13 @@ it("refuses a write naming a blob the host never fetched or uploaded, and keeps 
     ["live.audit.application", {objectId: binding.objectId, mainVersionId: "main", updateBlobSha256: sha256}],
     ["live.audit.application", {objectId: binding.objectId, mainVersionId: "main", updateBlobSha256: own.sha256, manifest: {chunks: [{sha256: own.sha256}, {sha256}]}}],
     ["ydoc.update", ydoc(binding.objectId, "docs/a.md", {sha256})],
+    // Settlement preparation would probe this digest before final admission.
+    ["moment.append", write(binding.objectId, "docs/a.md", own, {payloadBeforePath: "docs/a.md",
+      settlementReference: {formatVersion: 1, record: {acceptedStateBlobSha256: sha256}}})],
   ] satisfies Array<[string, Record<string, unknown>]>;
+  let prepared = 0;
+  const prepare = f.storage.prepareLogAppend.bind(f.storage);
+  f.storage.prepareLogAppend = async (...args) => {prepared++; return prepare(...args);};
   const answer = async (op: [string, Record<string, unknown>]) => {
     const response = await f.push([op]);
     return {status: response.status, body: await response.json() as unknown};
@@ -267,6 +273,7 @@ it("refuses a write naming a blob the host never fetched or uploaded, and keeps 
     expect(await answer(named(absentSha256)[index]!), op[0]).toEqual(refused);
   }
   expect(await answer(["ydoc.update", ydoc(binding.objectId, "docs/a.md", YP)])).toMatchObject({status: 403, body: {code: "share_op_rejected"}});
+  expect(prepared).toBe(0);
   expect(f.hostCoordinate(0)).toBeNull();
   for (const sha256 of [P.sha256, YP.sha256]) expect(await f.blobStatus(sha256)).toBe(404);
 
@@ -318,6 +325,46 @@ it("keeps each document's blob reach across scope changes and drops an idle work
   expect(await scans()).toEqual([[binding.objectId, true], ["object-b", false]]);
   vi.setSystemTime(1_000_000 + 10 * 60_000);
   expect(await scans()).toEqual([[binding.objectId, false], ["object-b", false]]);
+});
+
+it("keeps upload proof through later uploads and idle time", async () => {
+  vi.useFakeTimers({toFake: ["Date"]});
+  vi.setSystemTime(1_000_000);
+  const f = await fixture();
+  const first = blob("first upload");
+  await f.upload(first);
+  // Ten thousand later uploads' proofs in one commit, then one more through the route.
+  const proof = f.raw.prepare("INSERT INTO sync_relay_service_host_uploads(workspace_id,sha256) VALUES (?,?)");
+  f.raw.exec("BEGIN");
+  for (let index = 0; index < 10_000; index++) proof.run(ws, blob(`later upload ${index}`).sha256);
+  f.raw.exec("COMMIT");
+  await f.upload(blob("last upload"));
+  vi.setSystemTime(1_000_000 + 10 * 60_000);
+  expect((await f.push([["ydoc.update", ydoc(binding.objectId, "docs/a.md", first)]])).status).toBe(200);
+  expect(await f.blobStatus(first.sha256)).toBe(200);
+});
+
+it("drops upload proof when the workspace stops being hosted", async () => {
+  const f = await fixture();
+  const uploads = () => f.raw.prepare("SELECT count(*) AS count FROM sync_relay_service_host_uploads WHERE workspace_id=?").get(ws)!.count;
+  const setEnabled = (path: string, enabled: boolean) =>
+    f.storage.setServiceHostEnrollmentEnabled({workspaceId: ws, path, ownerUserId: "owner-1", enabled, nowMs: 30, guard() {}});
+  const kept = blob("kept upload");
+  await f.upload(kept);
+  f.enroll("docs/b.md");
+  // Another document is still hosted.
+  setEnabled("docs/b.md", false);
+  expect(uploads()).toBe(1);
+  setEnabled("docs/a.md", false);
+  expect(uploads()).toBe(0);
+  setEnabled("docs/a.md", true);
+  const edit = ["ydoc.update", ydoc(binding.objectId, "docs/a.md", kept)] satisfies [string, Record<string, unknown>];
+  expect(await (await f.push([edit])).json()).toMatchObject({code: "share_op_rejected"});
+  await f.upload(kept);
+  expect((await f.push([edit])).status).toBe(200);
+  // A new workspace identity leaves every enrollment behind.
+  expect(f.storage.rotateWorkspaceIdentity({workspaceId: ws, ownerUserId: "owner-1", replicationEpoch: "epoch-2", streamIdentity: "stream-2", rotatedAtMs: 40})).toBe("rotated");
+  expect(uploads()).toBe(0);
 });
 
 it("admits the engine's own settlement batch for its hosted document, both ways", () => {

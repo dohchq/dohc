@@ -9,6 +9,7 @@ import {effectiveShareSelector, isLiveEditShareSelector, parseStoredAnyShareSele
 import {parseWorkspaceId} from "../requestInputs";
 import {canonicalLiveSelector, currentLiveDocumentMoment} from "./liveDocumentAuthority";
 import {assertWorkspaceQuota} from "./workspaces";
+import {forgetServiceHostUploads} from "./serviceHostUploads";
 import {badRequest, notFound, relayError} from "../errors";
 
 export const SERVICE_HOST_ENROLLMENTS = "sync_relay_service_host_enrollments";
@@ -259,6 +260,7 @@ export function setServiceHostEnrollmentEnabled(storage: StorageContext, input: 
     const retired = input.enabled ? false : current.retired || input.retire === true;
     storage.db.prepare(`UPDATE ${SERVICE_HOST_ENROLLMENTS} SET enabled=?,retired=?,updated_at_ms=? WHERE workspace_id=? AND object_id=?`)
       .run(Number(input.enabled), Number(retired), Math.max(nowMs, current.updatedAtMs), workspaceId, current.objectId);
+    if (!listCurrentServiceHostEnrollments(storage, workspaceId).length) forgetServiceHostUploads(storage, workspaceId);
     return read(storage, workspaceId, path);
   });
 }
