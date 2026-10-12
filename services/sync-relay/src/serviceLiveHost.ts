@@ -373,8 +373,17 @@ export async function startServiceLiveHost(options: {
       }));
       if (wanted.size !== value.documents.length) throw new Error("Duplicate service activation target.");
       checkServiceMembership(workspaces, [...wanted.values()].map(row => row.target));
-      // A workspace whose identity changed, and with it its root and credential, attaches again at once.
-      const changed = [...members].filter(([workspaceId, member]) => desired.has(workspaceId) && !isDeepStrictEqual(desired.get(workspaceId), member.workspace))
+      // An identity change fences the old identity: the relay refuses its
+      // settlement and replication, so its unsettled work stays in the old
+      // workspace store and this host does not settle it. The old attachment
+      // detaches at once without unloading, and the workspace attaches again
+      // under its new identity, root and credential once that has documents.
+      const obsolete = (workspaceId: string, workspace: ServiceWorkspace) => {
+        const attached = workspace.ordinaryReplication?.identity, current = storage.getWorkspaceIdentity(workspaceId);
+        return attached?.kind === "join" && (attached.replicationEpoch !== current?.replicationEpoch || attached.streamIdentity !== current?.streamIdentity);
+      };
+      const changed = [...members].filter(([workspaceId, member]) => desired.has(workspaceId)
+        ? !isDeepStrictEqual(desired.get(workspaceId), member.workspace) : obsolete(workspaceId, member.workspace))
         .map(([workspaceId]) => workspaceId);
       const retiring: {workspaceId: string; objectId: string}[] = [];
       for (const [key, document] of hosted) {
@@ -385,7 +394,7 @@ export async function startServiceLiveHost(options: {
       // Any other workspace detaches only once its last document unloads, so
       // its unsettled work keeps settling while it stays attached.
       const holding = new Set([...hosted.values()].map(document => document.target.workspaceId));
-      const leaving = [...changed, ...[...members.keys()].filter(workspaceId => !desired.has(workspaceId) && !holding.has(workspaceId))];
+      const leaving = new Set([...changed, ...[...members.keys()].filter(workspaceId => !desired.has(workspaceId) && !holding.has(workspaceId))]);
       for (const workspaceId of leaving) await detach(workspaceId, joined);
       for (const workspace of workspaces) if (!members.has(workspace.workspaceId)) await attach(workspace, joined);
       for (const [key, document] of wanted) {
@@ -442,11 +451,21 @@ export async function startServiceLiveHost(options: {
       /**
        * Moves this running daemon to the hosted set. It attaches a workspace for
        * its first document, adds documents to activation, unloads documents
-       * that left, and detaches a workspace once its last document unloads.
+       * that left, and detaches a workspace once its last document unloads,
+       * or at once when its identity changed.
        * Resolves to the documents that left but whose unsettled work the
        * engine still holds; a later update retries them.
        */
       update,
+      /** Whether this daemon holds the document: it is hosted, or it left and its unload is pending. */
+      holds(document: {workspaceId: string; objectId: string}): boolean {
+        return [...hosted.values()].some(row => row.target.workspaceId === document.workspaceId && row.objectId === document.objectId);
+      },
+      /** Whether an activation pass on this daemon has delivered and settled the hosted document. */
+      settled(document: {workspaceId: string; objectId: string}): boolean {
+        const row = [...hosted.values()].find(row => row.target.workspaceId === document.workspaceId && row.objectId === document.objectId);
+        return !!row && activation!.completed(row.target);
+      },
       isDocumentReady(document: LiveDocumentKey): boolean {
         try { check(); return consumerFor(parseLiveDocumentKey(document)) !== undefined; }
         catch { return false; }

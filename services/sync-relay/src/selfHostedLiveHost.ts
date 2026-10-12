@@ -54,9 +54,15 @@ export async function startSelfHostedLiveHost(options: {
   const changes = Effect.runSync(Queue.sliding<void>(1));
   const valid = (row: ServiceHostEnrollment) => row.enabled && storage.workspaceIsOwnedBy(row.workspaceId, row.ownerUserId) &&
     storage.verifyWorkspaceIdentity(row) === "matched" && storage.objectIdAtPathInVersion({workspaceId: row.workspaceId, versionId: "main", path: row.path}) === row.objectId;
-  // A document is hosted only while an active Edit grant covers it and its owner has not paused or stopped it.
-  const hosts = (row: ServiceHostEnrollment) => !row.ownerStop && valid(row) && storage.serviceHostEnrollmentHasEditGrant(row);
-  const selection = () => storage.listServiceHostEnrollments().filter(hosts);
+  const documentKey = (row: ServiceHostEnrollment) => JSON.stringify([row.workspaceId, row.objectId]);
+  // Documents awaiting release that an earlier daemon may have left with
+  // unsettled work in their workspace stores. Each stays hosted until one
+  // activation pass settles it, then leaves through the ordinary unload.
+  // Only the workspace's current identity recovers; an old identity's work stays unsettled in its store.
+  let recovering = new Set<string>();
+  // A document is hosted while an active Edit grant covers it and its owner has not paused or stopped it, or while it recovers.
+  const hosts = (row: ServiceHostEnrollment, covered: boolean) => (recovering.has(documentKey(row)) || (covered && !row.ownerStop)) && valid(row);
+  const selection = () => storage.listServiceHostEnrollments().filter(row => hosts(row, storage.serviceHostEnrollmentHasEditGrant(row)));
   const selectionSignature = (rows: readonly ServiceHostEnrollment[]) => JSON.stringify(rows.map(({workspaceId, objectId, path, shareId, ownerUserId, replicationEpoch, streamIdentity}) =>
     ({workspaceId, objectId, path, shareId, ownerUserId, replicationEpoch, streamIdentity})));
   function schedule() {
@@ -96,6 +102,9 @@ export async function startSelfHostedLiveHost(options: {
     } finally {await rm(temporary, {recursive: true, force: true});}
   }
   async function reconcile() {
+    // An owner's Pause or Stop, or the loss of the last Edit grant, takes
+    // effect once the host no longer holds the document.
+    let releasing: readonly ServiceHostEnrollment[] = [];
     try {
       signal.throwIfAborted();
       if (discoveryCursor || scannedGeneration !== writeGeneration) {
@@ -104,32 +113,36 @@ export async function startSelfHostedLiveHost(options: {
         if (!discoveryCursor) scannedGeneration = scanGeneration;
       }
       const enrolled = storage.listServiceHostEnrollments();
-      const covered = enrolled.filter(row => storage.serviceHostEnrollmentHasEditGrant(row));
-      const rows = covered.filter(row => !row.ownerStop && valid(row)), next = selectionSignature(rows);
-      selectedDocuments = rows.length > 0;
+      const covered = new Set(enrolled.filter(row => storage.serviceHostEnrollmentHasEditGrant(row)));
+      releasing = enrolled.filter(row => !covered.has(row) || (row.enabled && row.ownerStop));
       // Only a failed daemon restarts. Membership changes update the running one.
       if (current?.invalidated.aborted) {await stopCurrent(); signature = "";}
-      let retiring: readonly {workspaceId: string; objectId: string}[] = [];
+      if (!current) recovering = new Set(releasing.filter(valid).map(documentKey));
+      else for (const row of releasing) if (current.settled(row)) recovering.delete(documentKey(row));
+      const rows = enrolled.filter(row => hosts(row, covered.has(row))), next = selectionSignature(rows);
+      // A document that can no longer be hosted has nothing to recover.
+      recovering = new Set(rows.map(documentKey).filter(key => recovering.has(key)));
+      selectedDocuments = rows.length > 0;
       if (next !== signature || (rows.length > 0 && !current)) {
         const desired = await hostedSet(rows);
         signal.throwIfAborted();
         if (next !== selectionSignature(selection())) {schedule(); return;}
         if (!current && rows.length > 0) current = await start();
-        if (current) retiring = await current.update(desired);
+        // A failed update may already have changed membership, so the next reconciliation updates again.
+        signature = "";
         // A document still settling keeps the selection open, so the next reconciliation retries its unload.
-        signature = retiring.length ? "" : next;
-      }
-      // An owner's Pause or Stop, or the loss of the last Edit grant, takes
-      // effect once the host no longer holds the document.
-      for (const row of enrolled) {
-        if ((!covered.includes(row) || (row.enabled && row.ownerStop)) &&
-          !retiring.some(document => document.workspaceId === row.workspaceId && document.objectId === row.objectId)) {
-          storage.releaseServiceHostEnrollment({workspaceId: row.workspaceId, objectId: row.objectId, nowMs: Date.now()});
-        }
+        if (!current || !(await current.update(desired)).length) signature = next;
       }
       lastError = undefined; initialReconciliationComplete = true;
     } catch (error) {
       if (!signal.aborted) {lastError = error; options.onError?.(error);}
+    } finally {
+      // A failed update or one damaged row does not hold back the others.
+      for (const row of releasing) {
+        if (signal.aborted || recovering.has(documentKey(row)) || current?.holds(row)) continue;
+        try {storage.releaseServiceHostEnrollment({workspaceId: row.workspaceId, objectId: row.objectId, nowMs: Date.now()});}
+        catch (error) {options.onError?.(error);}
+      }
     }
   }
   const finished = Effect.runPromiseExit(Effect.scoped(Effect.gen(function* () {

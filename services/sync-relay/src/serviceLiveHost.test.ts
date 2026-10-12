@@ -530,7 +530,8 @@ async function completedServiceOwner(options: {empty?: boolean} = {}) {
       if (/^liveApplication\.(attach|detach|unload)/.test(request.method)) membership.push({method: request.method, workspace: request.workspace, params: request.params});
       switch (request.method) {
         case "liveApplication.hosts": return discovery();
-        case "liveApplication.attachWorkspace": return reply({workspaceId: request.params.workspaceId, workspaceHandle: "attached-handle"});
+        case "liveApplication.attachWorkspace": return reply({workspaceId: request.params.workspaceId,
+          workspaceHandle: request.params.workspaceId === "workspace" ? "attached-handle" : `attached-${request.params.workspaceId}`});
         case "liveApplication.detachWorkspace": return reply({detached: true});
         case "liveApplication.unloadDocument": return reply(unloads.shift() ?? {status: "unloaded"});
         case "liveApplication.register": return reply({registrationId: 7});
@@ -642,13 +643,17 @@ it("adds and unloads documents on one daemon while the sibling document stays re
   expect(await o.host.update({workspaces, documents: [o.sibling]})).toEqual([]);
   await o.pushed.promise;
   await vi.waitFor(() => expect(o.host.isDocumentReady(o.document)).toBe(true));
+  expect(o.host.settled(o.sibling)).toBe(true);
   expect(o.membership).toEqual([o.attach]);
   expect(await o.host.update({workspaces, documents: [o.sibling, o.other]})).toEqual([]);
+  expect(o.host.holds(o.other)).toBe(true); expect(o.host.settled(o.other)).toBe(false);
   // The engine still holds unsettled work for the removed document, so it waits for a later update.
   o.unloads.push({status: "pending", reason: "settlement-pending"});
   expect(await o.host.update({workspaces, documents: [o.sibling]})).toEqual([{workspaceId: "workspace", objectId: o.other.objectId}]);
+  expect(o.host.holds(o.other)).toBe(true);
   expect(o.host.isDocumentReady(o.document)).toBe(true);
   expect(await o.host.update({workspaces, documents: [o.sibling]})).toEqual([]);
+  expect(o.host.holds(o.other)).toBe(false); expect(o.host.holds(o.sibling)).toBe(true);
   expect(o.membership).toEqual([o.attach, o.unload, o.unload]);
   await expect(o.host.drain(o.document)).resolves.toMatchObject({kind: "done"});
   expect(o.host.isDocumentReady(o.document)).toBe(true);
@@ -681,6 +686,41 @@ it("keeps a workspace attached while its last document's unload is pending and d
   expect(await o.host.update({workspaces: [], documents: []})).toEqual([]);
   expect(o.membership).toEqual([o.attach, o.unload, o.unload, {method: "liveApplication.detachWorkspace", workspace: "attached-handle", params: {}}]);
   expect(o.host.automationLedger("workspace")).toBeNull();
+  expect(o.spawned()).toBe(1); expect(o.client().close).not.toHaveBeenCalled();
+});
+
+it.each([false, true])("detaches a workspace at once when its identity changes, leaving its pending document unsettled (new documents at once: %s)", async newAtOnce => {
+  const o = await emptyServiceHost();
+  const siblingRoot = join(o.f.root, "workspace-2"), rotatedRoot = join(o.f.root, "workspace-rotated");
+  await mkdir(siblingRoot); await mkdir(rotatedRoot);
+  const sibling = {...o.workspace, root: siblingRoot, workspaceId: "workspace-2"}, siblingDocument = {...o.other, workspaceId: "workspace-2"};
+  const rotated = {...o.workspace, root: rotatedRoot,
+    ordinaryReplication: {...o.workspace.ordinaryReplication!, identity: {kind: "join" as const, replicationEpoch: "epoch-2", streamIdentity: "stream-2"}}};
+  await o.host.update({workspaces: [o.workspace, sibling], documents: [o.other, siblingDocument]});
+  expect(o.host.holds(o.other)).toBe(true);
+  o.membership.splice(0);
+  // Settlement under the old identity is refused, so an unload would stay pending forever.
+  o.unloads.push({status: "pending", reason: "settlement-pending"});
+  expect(o.f.storage.rotateWorkspaceIdentity({workspaceId: "workspace", ownerUserId: "owner", replicationEpoch: "epoch-2", streamIdentity: "stream-2", rotatedAtMs: 10})).toBe("rotated");
+  const detach = {method: "liveApplication.detachWorkspace", workspace: "attached-handle", params: {}};
+  const attach = {...o.attach, params: {...o.attach.params, root: rotatedRoot}};
+  const rotatedSet = {workspaces: [rotated, sibling], documents: [o.other, siblingDocument]};
+  if (!newAtOnce) {
+    expect(await o.host.update({workspaces: [sibling], documents: [siblingDocument]})).toEqual([]);
+    expect(o.membership).toEqual([detach]);
+    expect(o.host.holds(o.other)).toBe(false);
+    expect(o.host.automationLedger("workspace")).toBeNull();
+    // Nothing is left to retry.
+    expect(await o.host.update({workspaces: [sibling], documents: [siblingDocument]})).toEqual([]);
+    expect(o.membership).toEqual([detach]);
+  }
+  expect(await o.host.update(rotatedSet)).toEqual([]);
+  expect(o.membership).toEqual([detach, attach]);
+  expect(o.host.holds(o.other)).toBe(true);
+  // The sibling workspace keeps its attachment and document throughout.
+  expect(o.host.holds(siblingDocument)).toBe(true);
+  expect(o.host.automationLedger("workspace-2")).not.toBeNull();
+  expect(o.membership.every(row => row.workspace !== "attached-workspace-2")).toBe(true);
   expect(o.spawned()).toBe(1); expect(o.client().close).not.toHaveBeenCalled();
 });
 

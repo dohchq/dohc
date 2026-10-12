@@ -6,6 +6,7 @@ import {createServiceHostEnrollmentRoutes, discoverServiceHostDocuments} from ".
 import {createServiceHostReplication} from "./serviceHostReplication";
 import {authorizeServiceHostReplication, deriveServiceHostBearer} from "./serviceHostCredential";
 import {relayError} from "./errors";
+import {SERVICE_HOST_ENROLLMENTS} from "./storage/serviceHostEnrollment";
 
 const cleanup: Array<() => Promise<void>> = [];
 afterEach(async () => {vi.restoreAllMocks(); for (const close of cleanup.splice(0).reverse()) await close();});
@@ -169,12 +170,14 @@ it("advances refusal pages past healthy shares to an oversized share", async () 
 
 it("counts only missing documents when a share contains more than 64 stopped documents", async () => {
   const f = await fixture();
+  // Stop and release have their own lifecycle tests, so one transaction seeds the stopped documents.
+  f.raw.exec("BEGIN");
   for (let index = 0; index < 65; index++) {
     const path = `docs/stopped-${index}.md`; f.seed(path, `stopped-${index}`);
-    f.storage.enrollServiceHostDocument({...f.input, path});
-    f.storage.setServiceHostEnrollmentEnabled({...f.input, path, enabled: false, retire: true});
-    f.release(`stopped-${index}`);
+    f.raw.prepare(`INSERT INTO ${SERVICE_HOST_ENROLLMENTS}(workspace_id,object_id,path,owner_user_id,share_id,replication_epoch,stream_identity,owner_stop,enabled,retired,created_at_ms,updated_at_ms,accounted_bytes)
+      VALUES (?,?,?,'owner-1',?,'epoch','stream','retire',0,1,10,20,1)`).run(scope.workspaceId, `stopped-${index}`, path, scope.shareId);
   }
+  f.raw.exec("COMMIT");
   expect(await (await f.handle(f.request("GET", undefined, {}, "?refusals=1"))).json()).toEqual({ok: true, refusals: [], nextCursor: null});
   expect((await f.handle(f.request("POST", {shareId: scope.shareId, retry: true}))).status).toBe(202);
   expect(f.storage.listServiceHostEnrollments()).toHaveLength(1);

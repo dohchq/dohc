@@ -335,11 +335,13 @@ it("retiring the last enrollment in a workspace frees its workspace slot", async
 
 it("pages retired documents by path without mixing workspaces or active rows", async () => {
   const f = await fixture(); f.enroll();
+  // Retirement has its own lifecycle tests, so one transaction seeds the retired rows.
+  f.raw.exec("BEGIN");
   for (let i = 0; i < 65; i++) {
-    const path = `docs/retired-${String(i).padStart(2, "0")}.md`, shareId = `retired-page-${i}`;
-    f.seed(scope.workspaceId, shareId, path, shareId); f.enroll({path, shareId});
-    f.stop({path});
+    f.raw.prepare(`INSERT INTO ${SERVICE_HOST_ENROLLMENTS}(workspace_id,object_id,path,owner_user_id,share_id,replication_epoch,stream_identity,owner_stop,enabled,retired,created_at_ms,updated_at_ms,accounted_bytes)
+      VALUES (?,?,?,'owner-1',?,'epoch','stream','retire',0,1,10,25,1)`).run(scope.workspaceId, `retired-page-${i}`, `docs/retired-${String(i).padStart(2, "0")}.md`, scope.shareId);
   }
+  f.raw.exec("COMMIT");
   const first = f.storage.listRetiredServiceHostEnrollments(scope.workspaceId);
   expect(first.documents).toHaveLength(64); expect(first.nextCursor).toBe("docs/retired-63.md");
   expect(first.documents.every(row => row.retired && !row.enabled)).toBe(true);

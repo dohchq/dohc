@@ -73,6 +73,8 @@ export class ServiceActivationDriver {
   }
   /** Whether this driver may have loaded the document into the engine. */
   loaded(target:ServiceActivationTarget){return this.#loaded.has(targetKey(target));}
+  /** Whether the target's last pass delivered and settled it. */
+  completed(target:ServiceActivationTarget){return this.#completedTargets.has(targetKey(target));}
   /** The document a target's owner delivery holds, if one does. */
   ownerDocument(target:ServiceActivationTarget){
     for(const [document,owner] of this.#owners)if(owner.target===targetKey(target))return parseLiveDocumentKey(JSON.parse(document));

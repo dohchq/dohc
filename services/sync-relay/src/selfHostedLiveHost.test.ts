@@ -1,6 +1,7 @@
 import {mkdtemp, mkdir, readFile, rm} from "node:fs/promises";
 import {join} from "node:path";
 import {tmpdir} from "node:os";
+import {isDeepStrictEqual} from "node:util";
 import {afterEach, expect, it, vi} from "vitest";
 import {startSelfHostedLiveHost} from "./selfHostedLiveHost";
 import type {ServiceHostedSet} from "./serviceLiveHost";
@@ -32,30 +33,45 @@ async function fixture(options: {beforeStart?(): Promise<void>; empty?: boolean;
   const root = await mkdtemp(join(tmpdir(), "dohc-self-host-supervisor-")); const data = join(root, "data"); await mkdir(data);
   cleanup.push(() => rm(root, {recursive: true, force: true}));
   const input = {workspaceId: scope.workspaceId, ownerUserId: "owner-1", shareId: scope.shareId, path: binding.currentPath, nowMs: 10, guard() {}};
-  f.storage.enrollServiceHostDocument(input);
-  if (options.empty) f.storage.setServiceHostEnrollmentEnabled({...input, enabled: false});
+  const enrolled = f.storage.enrollServiceHostDocument(input);
+  if (options.empty) {
+    f.storage.setServiceHostEnrollmentEnabled({...input, enabled: false});
+    f.storage.releaseServiceHostEnrollment({workspaceId: enrolled.workspaceId, objectId: enrolled.objectId, nowMs: 10});
+  }
   const history = createLiveJournalHistoryAuthority({namespace: "supervisor-history", reconciled: true});
   const frameChanges = createNamedFrameChanges(8);
   // A stand-in for the service host: it records each membership update and,
   // like the engine, keeps a document that left while its unload is pending,
-  // with its workspace attached.
-  const pending = new Set<string>(), updates: ServiceHostedSet[] = [], attachedAfter: string[][] = [];
-  let failUpdate: Error | undefined, holdUpdate: {entered: ReturnType<typeof deferred>; release: ReturnType<typeof deferred>} | undefined;
+  // with its workspace attached, unless the workspace's identity changed.
+  // Unloads finish before a refused attach fails the update.
+  const pending = new Set<string>(), settled = new Set<string>(), updates: ServiceHostedSet[] = [], attachedAfter: string[][] = [];
+  const refusal = new Error("Workspace attach refused.");
+  let failUpdate: Error | undefined, refusedPath: string | undefined, holdUpdate: {entered: ReturnType<typeof deferred>; release: ReturnType<typeof deferred>} | undefined;
+  let holding: (document: {workspaceId: string; objectId: string}) => boolean = () => false;
   const starts: Array<{config: Configuration; configPath: string; close: ReturnType<typeof vi.fn<() => Promise<void>>>; controller: AbortController}> = [];
   let live = 0, peak = 0;
   const startHost = vi.fn(async ({configPath}: {configPath: string}) => {
     await options.beforeStart?.();
     const config = JSON.parse(await readFile(configPath, "utf8")) as Configuration;
     const controller = new AbortController(); let stopped = false, held: Hosted[] = [];
+    const identities = new Map<string, unknown>();
+    const fenced = (workspaceId: string) => {
+      const current = f.storage.getWorkspaceIdentity(workspaceId);
+      return !isDeepStrictEqual(identities.get(workspaceId), {kind: "join", replicationEpoch: current?.replicationEpoch, streamIdentity: current?.streamIdentity});
+    };
     const close = vi.fn(async () => {if (!stopped) {stopped = true; live--; controller.abort();}});
     live++; peak = Math.max(peak, live); starts.push({config, configPath, close, controller});
     const update = vi.fn(async (desired: ServiceHostedSet) => {
       const hold = holdUpdate; holdUpdate = undefined;
       if (hold) {hold.entered.resolve(); await hold.release.promise;}
       if (failUpdate) {const failure = failUpdate; failUpdate = undefined; throw failure;}
+      const retiring = held.filter(document => !desired.documents.some(row => row.objectId === document.objectId) &&
+        pending.has(document.objectId) && !fenced(document.workspaceId));
+      held = [...held.filter(document => desired.documents.some(row => row.objectId === document.objectId)), ...retiring];
+      if (desired.documents.some(row => row.path === refusedPath)) throw refusal;
       updates.push(desired);
-      const retiring = held.filter(document => !desired.documents.some(row => row.objectId === document.objectId) && pending.has(document.objectId));
       held = [...desired.documents, ...retiring];
+      for (const workspace of desired.workspaces) identities.set(workspace.workspaceId, workspace.ordinaryReplication!.identity);
       const attached = new Set([...desired.workspaces.map(row => row.workspaceId), ...retiring.map(row => row.workspaceId)]);
       attachedAfter.push([...attached]);
       frameChanges.notifyHost([...attached]);
@@ -63,7 +79,10 @@ async function fixture(options: {beforeStart?(): Promise<void>; empty?: boolean;
     });
     const isDocumentReady = (document: {workspaceId: string; objectId: string}) =>
       updates.at(-1)?.documents.some(row => row.workspaceId === document.workspaceId && row.objectId === document.objectId) ?? false;
-    return {invalidated: controller.signal, close, update, isDocumentReady, onEvent: () => () => undefined} as never;
+    const holds = (document: {workspaceId: string; objectId: string}) => held.some(row => row.workspaceId === document.workspaceId && row.objectId === document.objectId);
+    holding = holds;
+    const settledHere = (document: {workspaceId: string; objectId: string}) => holds(document) && settled.has(document.objectId);
+    return {invalidated: controller.signal, close, update, holds, settled: settledHere, isDocumentReady, onEvent: () => () => undefined} as never;
   });
   const onError = vi.fn();
   const host = await startSelfHostedLiveHost({storage: f.storage, history, root: data, engineExecutable: process.execPath,
@@ -90,8 +109,11 @@ async function fixture(options: {beforeStart?(): Promise<void>; empty?: boolean;
       VALUES (?,?,'user','editor',NULL,'edit',1,'active',1,NULL,NULL)`).run(options.grantId ?? `${shareId}-edit`, shareId);
   };
   const enrollment = (path = binding.currentPath) => f.storage.readServiceHostEnrollment(scope.workspaceId, path);
-  return {...f, host, history, starts, startHost, input, add, share, moment, waitStarted, waitUpdate, onError, frameChanges, updates, pending, attachedAfter, enrollment,
-    peak: () => peak, failNextUpdate(error: Error) {failUpdate = error;},
+  return {...f, host, history, starts, startHost, input, add, share, moment, waitStarted, waitUpdate, onError, frameChanges, updates, pending, settled, attachedAfter, enrollment,
+    refusal, peak: () => peak, failNextUpdate(error: Error) {failUpdate = error;},
+    /** Refuses every update that wants the path, after its unloads. */
+    refuseAttach(path: string | undefined) {refusedPath = path;},
+    holds: (objectId: string, workspaceId = scope.workspaceId) => holding({workspaceId, objectId}),
     holdNextUpdate() {holdUpdate = {entered: deferred(), release: deferred()}; return holdUpdate;}};
 }
 
@@ -266,6 +288,103 @@ it("keeps the running daemon when an update fails and retries the update", async
   f.onError.mockClear();
   await f.waitUpdate(["docs/a.md", "docs/b.md"]);
   expect(f.starts[0]!.close).not.toHaveBeenCalled(); expect(f.starts).toHaveLength(1); expect(f.host.current()).toBeDefined();
+});
+
+it("hosts a document again after a failed update unloaded it and the selection returned to its last success", async () => {
+  const f = await fixture(); f.add(); await f.waitStarted(1);
+  await f.waitUpdate(["docs/a.md", "docs/b.md"]);
+  // One update unloads the paused document, then its attach of docs/c.md is refused.
+  f.refuseAttach("docs/c.md");
+  f.storage.setServiceHostEnrollmentEnabled({...f.input, enabled: false});
+  f.add("docs/c.md", "object-c");
+  await vi.waitFor(() => expect(f.onError).toHaveBeenCalledWith(f.refusal), {timeout: 10_000});
+  expect(f.holds(binding.objectId)).toBe(false);
+  // The owner resumes docs/a.md and stops docs/c.md, so the selection equals the last successful one.
+  f.storage.setServiceHostEnrollmentEnabled({...f.input, enabled: true});
+  f.storage.setServiceHostEnrollmentEnabled({...f.input, path: "docs/c.md", enabled: false, retire: true});
+  await vi.waitFor(() => expect(f.holds(binding.objectId)).toBe(true), {timeout: 10_000});
+  expect(f.updates.at(-1)!.documents.map(row => row.path)).toEqual(["docs/a.md", "docs/b.md"]);
+  expect(f.enrollment()).toMatchObject({enabled: true, ownerStop: null});
+  expect(f.starts).toHaveLength(1);
+});
+
+it("releases a paused document while another workspace's attach stays refused", async () => {
+  const f = await fixture(); f.add(); await f.waitStarted(1);
+  await f.waitUpdate(["docs/a.md", "docs/b.md"]);
+  const workspaceId = "workspace-2", ownerUserId = "owner-2", shareId = "share-2", path = "docs/other.md";
+  f.storage.claimWorkspace({workspaceId, ownerUserId, createdAtMs: 1});
+  f.storage.claimWorkspaceIdentity({workspaceId, replicationEpoch: "epoch-2", streamIdentity: "stream-2"});
+  f.share(shareId, ["docs"], {workspaceId, ownerUserId});
+  f.moment(path, "second-owner-object", workspaceId);
+  f.refuseAttach(path);
+  f.storage.enrollServiceHostDocument({...f.input, workspaceId, ownerUserId, shareId, path});
+  await vi.waitFor(() => expect(f.onError).toHaveBeenCalledWith(f.refusal), {timeout: 10_000});
+  f.storage.setServiceHostEnrollmentEnabled({...f.input, enabled: false});
+  // Every update still fails on the other workspace, but the paused document has left the host.
+  await vi.waitFor(() => expect(f.enrollment()).toMatchObject({enabled: false, ownerStop: "pause"}), {timeout: 10_000});
+  expect(f.holds(binding.objectId)).toBe(false);
+  expect(f.onError.mock.calls.every(([error]) => error === f.refusal)).toBe(true);
+  expect(f.storage.readServiceHostEnrollment(workspaceId, path)).toMatchObject({enabled: true});
+});
+
+it("settles a paused document on a restarted daemon before releasing it", async () => {
+  const f = await fixture(); f.add(); await f.waitStarted(1);
+  await f.waitUpdate(["docs/a.md", "docs/b.md"]);
+  f.pending.add(binding.objectId);
+  f.storage.setServiceHostEnrollmentEnabled({...f.input, enabled: false});
+  await f.waitUpdate(["docs/b.md"]);
+  // The daemon fails while the paused document's unload is pending.
+  f.starts[0]!.controller.abort();
+  await f.waitStarted(2);
+  // The replacement loads the document again, so its unsettled work can settle there.
+  await f.waitUpdate(["docs/a.md", "docs/b.md"]);
+  const passes = vi.spyOn(f.storage, "listServiceHostEnrollments");
+  f.host.reconcile();
+  await vi.waitFor(() => expect(passes).toHaveBeenCalled(), {timeout: 10_000});
+  expect(f.enrollment()).toMatchObject({enabled: true, ownerStop: "pause"});
+  f.settled.add(binding.objectId);
+  await f.waitUpdate(["docs/b.md"]);
+  // The engine still holds unsettled work, so the release waits for the unload.
+  expect(f.enrollment()).toMatchObject({enabled: true, ownerStop: "pause"});
+  f.pending.delete(binding.objectId);
+  await vi.waitFor(() => expect(f.enrollment()).toMatchObject({enabled: false, ownerStop: "pause"}), {timeout: 10_000});
+  expect(f.starts).toHaveLength(2);
+});
+
+it.each([false, true])("releases a paused document under an obsolete identity without retrying its unload (new documents at once: %s)", async newAtOnce => {
+  const f = await fixture(); await f.waitStarted(1);
+  const workspaceId = "workspace-2", ownerUserId = "owner-2", shareId = "share-2", path = "docs/other.md";
+  f.storage.claimWorkspace({workspaceId, ownerUserId, createdAtMs: 1});
+  f.storage.claimWorkspaceIdentity({workspaceId, replicationEpoch: "epoch-2", streamIdentity: "stream-2"});
+  f.share(shareId, ["docs"], {workspaceId, ownerUserId});
+  f.moment(path, "second-owner-object", workspaceId);
+  f.storage.enrollServiceHostDocument({...f.input, workspaceId, ownerUserId, shareId, path});
+  const first = await f.waitUpdate(["docs/a.md", path]);
+  f.pending.add(binding.objectId);
+  f.storage.setServiceHostEnrollmentEnabled({...f.input, enabled: false});
+  await f.waitUpdate([path]);
+  expect(f.holds(binding.objectId)).toBe(true);
+  expect(f.storage.rotateWorkspaceIdentity({workspaceId: scope.workspaceId, ownerUserId: "owner-1", replicationEpoch: "epoch-2", streamIdentity: "stream-2", rotatedAtMs: 20})).toBe("rotated");
+  if (newAtOnce) f.add();
+  f.host.reconcile();
+  await f.waitUpdate(newAtOnce ? ["docs/b.md", path] : [path]);
+  // The old identity's unsettled work cannot settle here, so the host lets the document go and the pause applies.
+  await vi.waitFor(() => expect(f.enrollment()).toMatchObject({enabled: false, ownerStop: "pause"}), {timeout: 10_000});
+  expect(f.holds(binding.objectId)).toBe(false);
+  // Later passes find nothing to retry. Without an update, each pass lists enrollments once.
+  const updates = f.updates.length, passes = vi.spyOn(f.storage, "listServiceHostEnrollments");
+  await vi.waitFor(() => {f.host.reconcile(); expect(passes.mock.calls.length).toBeGreaterThanOrEqual(3);}, {timeout: 10_000});
+  expect(f.updates).toHaveLength(updates);
+  if (!newAtOnce) {f.add(); await f.waitUpdate(["docs/b.md", path]);}
+  const attached = f.updates.at(-1)!.workspaces;
+  expect(attached.find(row => row.workspaceId === scope.workspaceId)!.ordinaryReplication!.identity)
+    .toEqual({kind: "join", replicationEpoch: "epoch-2", streamIdentity: "stream-2"});
+  // The sibling workspace keeps its attachment and document throughout.
+  expect(attached.find(row => row.workspaceId === workspaceId)).toEqual(first.workspaces.find(row => row.workspaceId === workspaceId));
+  expect(f.updates.slice(f.updates.indexOf(first)).every(update => update.documents.some(row => row.path === path))).toBe(true);
+  expect(f.storage.readServiceHostEnrollment(workspaceId, path)).toMatchObject({enabled: true, ownerStop: null});
+  expect(f.onError).not.toHaveBeenCalled();
+  expect(f.starts).toHaveLength(1); expect(f.starts[0]!.close).not.toHaveBeenCalled();
 });
 
 it("retries runtime checks without rescanning unchanged shares and rescans after owner writes", async () => {
