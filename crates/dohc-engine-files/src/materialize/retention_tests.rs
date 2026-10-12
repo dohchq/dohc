@@ -797,3 +797,218 @@ fn ordinary_entry_point_cleans_empty_sibling_staging() {
     assert!(!sibling.exists());
     assert!(store.staging_location(&j.job_id).unwrap().is_none());
 }
+
+#[test]
+fn blocked_job_cleans_empty_sibling_staging() {
+    let scratch = ScratchDir::new_named("blocked-entry-cleanup").unwrap();
+    let root = scratch.path();
+    let mut store = EngineStore::open(&root.join("engine.db"), 0).unwrap();
+    let j = job(
+        &mut store,
+        "blocked-cleanup",
+        "notes.md",
+        b"before",
+        b"after",
+        1,
+    );
+    let real = root.join("real.md");
+    std::fs::write(&real, b"before").unwrap();
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&real, root.join("notes.md")).unwrap();
+    #[cfg(windows)]
+    std::os::windows::fs::symlink_file(&real, root.join("notes.md")).unwrap();
+    let sibling = root.join(".dohc-write-displaced");
+    std::fs::create_dir(&sibling).unwrap();
+    store
+        .remember_staging(&j.job_id, ".dohc-write-displaced")
+        .unwrap();
+    assert_eq!(
+        materialize_one(&store, root, &j, &options(0, &StdReplacer)).unwrap(),
+        JobOutcome::Blocked
+    );
+    assert!(!sibling.exists());
+    assert!(store.staging_location(&j.job_id).unwrap().is_none());
+    assert_eq!(std::fs::read(&real).unwrap(), b"before");
+}
+
+#[cfg(unix)]
+fn checked_delete_job(store: &mut EngineStore) -> MaterializationJob {
+    let before = store.put_binary_blob(b"before").unwrap();
+    store
+        .write_with(&NoFaults, |tx| {
+            dohc_engine_storage::enqueue_delete_job(
+                tx,
+                &MaterializationJobSpec {
+                    job_id: "restore-delete-mat_crash-retention".into(),
+                    workspace_id: "ws".into(),
+                    target_path: "notes.md".into(),
+                    content_sha256: before.clone(),
+                    preimage: Preimage::Present(before),
+                    target_generation: 1,
+                    now_ms: 0,
+                },
+            )
+        })
+        .unwrap();
+    store
+        .load_materialization_job("restore-delete-mat_crash-retention")
+        .unwrap()
+        .unwrap()
+}
+
+#[cfg(all(unix, feature = "fault-injection"))]
+#[test]
+fn checked_delete_crash_after_retention_replays_without_returning_late_write() {
+    use std::io::Write;
+    struct CrashAfterRetention;
+    impl FaultInjector for CrashAfterRetention {
+        fn poll(&self, point: FaultPoint) -> dohc_engine_storage::FaultAction {
+            if point == FaultPoint::MaterializeAfterKnownCopyDeletion {
+                dohc_engine_storage::FaultAction::Crash
+            } else {
+                dohc_engine_storage::FaultAction::Continue
+            }
+        }
+    }
+    let scratch = ScratchDir::new_named("checked-delete-retained-crash").unwrap();
+    let root = scratch.path();
+    let db = root.join("engine.db");
+    let mut store = EngineStore::open(&db, 0).unwrap();
+    let target = root.join("notes.md");
+    std::fs::write(&target, b"before").unwrap();
+    let mut writer = std::fs::OpenOptions::new()
+        .write(true)
+        .open(&target)
+        .unwrap();
+    let j = checked_delete_job(&mut store);
+    let mut opts = options(0, &StdReplacer);
+    opts.faults = &CrashAfterRetention;
+    assert_eq!(
+        materialize_one_ordinary(&store, root, &j, &opts).unwrap(),
+        JobOutcome::Crashed(FaultPoint::MaterializeAfterKnownCopyDeletion)
+    );
+    let row = store.retained_displacements_after(0).unwrap().remove(0);
+    assert_eq!(
+        store
+            .load_materialization_job(&j.job_id)
+            .unwrap()
+            .unwrap()
+            .status,
+        JobStatus::Pending
+    );
+    assert_eq!(
+        std::fs::read(root.join(&row.source_path)).unwrap(),
+        b"before"
+    );
+    writer.write_all(b"late outside write").unwrap();
+    drop(writer);
+    drop(store);
+    let store = EngineStore::open(&db, 1000).unwrap();
+    recover_displacements(&store, root, Some("ws"), &options(1000, &StdReplacer)).unwrap();
+    assert!(!target.exists());
+    let pending = store.load_materialization_job(&j.job_id).unwrap().unwrap();
+    assert_eq!(
+        materialize_one_ordinary(&store, root, &pending, &options(1000, &StdReplacer)).unwrap(),
+        JobOutcome::AlreadyMaterialized
+    );
+    sweep(&store, root, 1000);
+    let bytes: Vec<u8> = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT bytes FROM materialization_displacement_reads",
+                [],
+                |r| r.get(0),
+            )
+        })
+        .unwrap();
+    assert_eq!(bytes, b"late outside write");
+    assert!(!target.exists());
+    assert_eq!(
+        store
+            .load_materialization_job(&j.job_id)
+            .unwrap()
+            .unwrap()
+            .status,
+        JobStatus::Complete
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn checked_delete_receipt_failure_returns_retained_original() {
+    use std::sync::Arc;
+    for (linked, occupied) in [(false, false), (true, false), (false, true)] {
+        let scratch = ScratchDir::new_named("checked-delete-retained-rollback").unwrap();
+        let root = scratch.path();
+        let mut store = EngineStore::open(&root.join("engine.db"), 0).unwrap();
+        let target = root.join("notes.md");
+        std::fs::write(&target, b"before").unwrap();
+        if linked {
+            std::fs::hard_link(&target, root.join("other.md")).unwrap();
+        }
+        let j = checked_delete_job(&mut store);
+        let commits = Arc::new(AtomicUsize::new(0));
+        let hook = commits.clone();
+        let competing_target = target.clone();
+        store
+            .read_with(|conn| {
+                conn.commit_hook(Some(move || {
+                    let refuse = hook.fetch_add(1, Ordering::SeqCst) == 1;
+                    if refuse && occupied {
+                        std::fs::write(&competing_target, b"outside replacement").unwrap();
+                    }
+                    refuse
+                }))
+                .unwrap();
+                Ok::<_, dohc_engine_storage::StorageError>(())
+            })
+            .unwrap();
+        assert!(matches!(
+            materialize_one_ordinary(&store, root, &j, &options(0, &StdReplacer)),
+            Err(MaterializeError::Storage(_))
+        ));
+        assert!(commits.load(Ordering::SeqCst) >= 3);
+        store
+            .read_with(|conn| {
+                conn.commit_hook(None::<fn() -> bool>).unwrap();
+                Ok::<_, dohc_engine_storage::StorageError>(())
+            })
+            .unwrap();
+        assert!(store.retained_displacements_after(0).unwrap().is_empty());
+        if occupied {
+            assert_eq!(std::fs::read(&target).unwrap(), b"outside replacement");
+            let kept = store.list_kept_displacements("ws").unwrap();
+            assert_eq!(kept.len(), 1);
+            assert_eq!(
+                std::fs::read(root.join(STAGING_DIR).join(&kept[0].displaced_name)).unwrap(),
+                b"before"
+            );
+            sweep(&store, root, 100_000);
+            assert!(
+                root.join(STAGING_DIR)
+                    .join(&kept[0].displaced_name)
+                    .exists()
+            );
+            continue;
+        }
+        assert_eq!(std::fs::read(&target).unwrap(), b"before");
+        assert_eq!(
+            store
+                .load_materialization_job(&j.job_id)
+                .unwrap()
+                .unwrap()
+                .status,
+            JobStatus::Pending
+        );
+        sweep(&store, root, 1000);
+        assert!(store.retained_displacements_after(0).unwrap().is_empty());
+        assert_eq!(
+            materialize_one_ordinary(&store, root, &j, &options(1000, &StdReplacer)).unwrap(),
+            JobOutcome::Completed
+        );
+        assert!(!target.exists());
+        if linked {
+            assert_eq!(std::fs::read(root.join("other.md")).unwrap(), b"before");
+        }
+    }
+}

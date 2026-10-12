@@ -827,7 +827,12 @@ pub fn materialize_one_ordinary(
     options: &MaterializeOptions<'_>,
 ) -> Result<JobOutcome, MaterializeError> {
     let result = materialize_one_inner(store, root, job, options);
-    if matches!(&result, Ok(outcome) if !matches!(outcome, JobOutcome::Crashed(_))) {
+    if matches!(&result, Ok(outcome) if !matches!(outcome, JobOutcome::Crashed(_)))
+        || matches!(
+            &result,
+            Err(MaterializeError::SymlinkTarget | MaterializeError::RecoveryUnavailable)
+        )
+    {
         let cleanup = (|| {
             if let Some(relative) = store.staging_location(&job.job_id)? {
                 cleanup_staging_directory(store, root, &root.join(relative))?;
@@ -1523,6 +1528,8 @@ fn materialize_delete(
     if job.job_id.starts_with("restore-delete-mat_") {
         // Keep the preimage until the durable publication receipt exists. A
         // filesystem or receipt failure returns it without replacing new work.
+        #[cfg(unix)]
+        let mut registered = None;
         let published = (|| {
             if should_crash(faults, FaultPoint::MaterializeAfterRenameBeforeComplete) {
                 return Ok(JobOutcome::Crashed(
@@ -1555,11 +1562,40 @@ fn materialize_delete(
                 return Ok(JobOutcome::Conflict);
             }
             sync_parent_dir(target.parent(), policy)?;
+            #[cfg(unix)]
+            {
+                registered = if let Inspected::Known {
+                    _guard: file,
+                    sha256,
+                } = &inspected
+                {
+                    // Register before the receipt, but keep the staged name for rollback.
+                    Some(crate::retained::register_known(
+                        store, root, &staged, file, sha256, &spec, now_ms,
+                    )?)
+                } else {
+                    None
+                };
+            }
+            #[cfg(unix)]
+            if should_crash(faults, FaultPoint::MaterializeAfterKnownCopyDeletion) {
+                return Ok(JobOutcome::Crashed(
+                    FaultPoint::MaterializeAfterKnownCopyDeletion,
+                ));
+            }
             store.mark_materialization_complete(&job.job_id, now_ms)?;
             // Cleanup cannot turn an applied publication into a refusal.
+            #[cfg(unix)]
+            if let Some((id, links)) = registered
+                && let Err(error) = crate::retained::release_linked(store, &staged, id, links)
+            {
+                eprintln!("materialization staged original cleanup: {error}");
+            }
+            #[cfg(not(unix))]
             if let Err(error) = dispose_known(store, root, &staged, &spec, &inspected, now_ms) {
                 eprintln!("materialization staged original retention: {error}");
             }
+            #[cfg(not(unix))]
             if should_crash(faults, FaultPoint::MaterializeAfterKnownCopyDeletion) {
                 return Ok(JobOutcome::Crashed(
                     FaultPoint::MaterializeAfterKnownCopyDeletion,
@@ -1567,6 +1603,13 @@ fn materialize_delete(
             }
             Ok(JobOutcome::Completed)
         })();
+        #[cfg(unix)]
+        if published.is_err()
+            && let Some((id, _)) = registered
+        {
+            // Rollback owns this source again; the retention worker must not release it.
+            store.release_retained(id)?;
+        }
         if published.is_err()
             && entry_exists(&staged)?
             && !return_displaced(target, &staged, options)?

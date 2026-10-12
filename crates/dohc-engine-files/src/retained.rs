@@ -27,6 +27,19 @@ pub(super) fn retain_known(
     spec: &DisplacementSpec,
     now_ms: i64,
 ) -> Result<(), MaterializeError> {
+    let (id, links) = register_known(store, root, path, file, digest, spec, now_ms)?;
+    release_linked(store, path, id, links)
+}
+
+pub(super) fn register_known(
+    store: &EngineStore,
+    root: &Path,
+    path: &Path,
+    file: &std::fs::File,
+    digest: &str,
+    spec: &DisplacementSpec,
+    now_ms: i64,
+) -> Result<(i64, u64), MaterializeError> {
     let meta = file
         .metadata()
         .map_err(|e| MaterializeError::io(path, &e))?;
@@ -50,7 +63,16 @@ pub(super) fn retain_known(
         ctime,
         changed_at_ms: now_ms,
     })?;
-    if meta.nlink() > 1 {
+    Ok((id, meta.nlink()))
+}
+
+pub(super) fn release_linked(
+    store: &EngineStore,
+    path: &Path,
+    id: i64,
+    links: u64,
+) -> Result<(), MaterializeError> {
+    if links > 1 {
         // Unlinking this staged name leaves the other hard link reachable.
         std::fs::remove_file(path).map_err(|e| MaterializeError::io(path, &e))?;
         store.release_retained(id)?;
