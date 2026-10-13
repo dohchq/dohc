@@ -16,7 +16,7 @@ use dohc_engine_sync::{
     ShareViewPullOutcome, ShareViewRequest, ShareViewResponse, SharedChannelPullOutcome,
     SharedChannelPushOutcome, SharedChannelRequest, SharedChannelResponse, SyncError,
     SyncPassOutcome, adopt_join_identity, create_claim_identity, create_hosted_replica,
-    read_hosted_replica, read_sync_identity,
+    is_hosted_replica, read_sync_identity,
 };
 use dohc_engine_sync_http::HttpRelayTransport;
 use std::sync::{Arc, Mutex};
@@ -194,6 +194,39 @@ impl RelayOperation {
             | Self::CommitHostedCursor { workspace_id, .. } => workspace_id,
         }
     }
+
+    /// The replicas this operation runs on. A push goes to whichever log
+    /// its replica writes.
+    fn replicas(&self) -> Replicas {
+        match self {
+            Self::Push { .. } => Replicas::Both,
+            Self::CreateHostedReplica { .. }
+            | Self::PullHosted { .. }
+            | Self::CommitHostedCursor { .. } => Replicas::Hosted,
+            Self::Pull { .. }
+            | Self::CommitCursor { .. }
+            | Self::Probe { .. }
+            | Self::Claim { .. }
+            | Self::AdoptJoinIdentity { .. }
+            | Self::RecoverOrigin { .. }
+            | Self::UploadKeyEnvelope { .. }
+            | Self::DownloadKeyEnvelope { .. }
+            | Self::PullSharedChannel { .. }
+            | Self::PushSharedChannel { .. }
+            | Self::PullShareView { .. }
+            | Self::RecordShareViewIdentity { .. }
+            | Self::SubmitShareProposal { .. }
+            | Self::PushDirectWrites { .. }
+            | Self::CommitShareViewCursor { .. } => Replicas::Ordinary,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Replicas {
+    Ordinary,
+    Hosted,
+    Both,
 }
 
 const RELAY_IO_PENDING: &str = "relay-io-pending";
@@ -1811,7 +1844,7 @@ impl ActorHandle {
         // A hosted replica reads and writes only the session host's scoped feed.
         let workspace_id = operation.workspace_id().to_owned();
         let hosted = self
-            .run(move |store, _cache| Ok(read_hosted_replica(store, &workspace_id)?.is_some()))
+            .run(move |store, _cache| Ok(is_hosted_replica(store, &workspace_id)?))
             .await?;
         let http_transport = Arc::new(if hosted {
             http_transport.hosted()
@@ -2228,6 +2261,7 @@ fn run_relay_operation(
     operation: RelayOperation,
     leases: &LeaseRegistry,
 ) -> Result<RelayOperationOutcome, RuntimeError> {
+    let replicas = operation.replicas();
     if store.is_passive()
         && !matches!(
             &operation,
@@ -2236,9 +2270,19 @@ fn run_relay_operation(
                 | RelayOperation::AdoptJoinIdentity { .. }
         )
     {
+        if replicas == Replicas::Hosted {
+            return Err(RuntimeError::Relay(RelayError::HostedRefusal(
+                dohc_engine_sync::PASSIVE_STORE_CANNOT_HOST,
+            )));
+        }
         return Err(RuntimeError::Sync(SyncError::InvalidInput {
             reason: "passive store cannot execute this relay operation",
         }));
+    }
+    // Before any state change or relay request: a hosted replica reaches only
+    // its hosted feed.
+    if replicas == Replicas::Ordinary && is_hosted_replica(store, operation.workspace_id())? {
+        return Err(RuntimeError::Relay(dohc_engine_sync::hosted_feed_only()));
     }
     match operation {
         RelayOperation::Push {
@@ -2885,6 +2929,172 @@ mod share_view_identity_tests {
             ShareViewIdentityRecord::AlreadyRecorded,
             "every refresh calls this; a second row would split the log",
         );
+    }
+}
+
+#[cfg(test)]
+mod hosted_refusal_tests {
+    use super::*;
+    use dohc_engine_sync::{CursorKind, ShareAccess, ShareGrant};
+    use dohc_engine_testkit::ScratchDir;
+
+    /// Every row of every table, to show a refusal changed nothing.
+    fn everything(store: &EngineStore) -> Vec<String> {
+        store
+            .read_with(|conn| {
+                let tables = conn
+                    .prepare("SELECT name FROM sqlite_schema WHERE type='table' ORDER BY name")?
+                    .query_map([], |row| row.get::<_, String>(0))?
+                    .collect::<Result<Vec<_>, _>>()?;
+                let mut rows = Vec::new();
+                for table in tables {
+                    let mut statement = conn.prepare(&format!("SELECT * FROM \"{table}\""))?;
+                    let columns = statement.column_count();
+                    let mut query = statement.query([])?;
+                    while let Some(row) = query.next()? {
+                        let values = (0..columns)
+                            .map(|column| row.get::<_, rusqlite::types::Value>(column))
+                            .collect::<Result<Vec<_>, _>>()?;
+                        rows.push(format!("{table}: {values:?}"));
+                    }
+                }
+                Ok::<_, rusqlite::Error>(rows)
+            })
+            .unwrap()
+    }
+
+    /// Sol's slice-4 review: ordinary operations reached ordinary relay
+    /// routes from a hosted replica, and a claim left `pending` behind.
+    /// Each is refused with its reason before it writes or sends anything.
+    #[test]
+    fn a_hosted_replica_refuses_every_ordinary_operation_untouched() {
+        let scratch = ScratchDir::new().unwrap();
+        let path = dohc_engine_testkit::engine_db_path(&scratch).unwrap();
+        let mut store = EngineStore::open(&path, 1_000).unwrap();
+        create_hosted_replica(
+            &mut store,
+            "ws",
+            "service-host:host",
+            "epoch",
+            "stream",
+            1_000,
+            &NoFaults,
+        )
+        .unwrap();
+        let ws = || "ws".to_owned();
+        let granted = || ShareGrant {
+            paths: Vec::new(),
+            version_id: None,
+            access: ShareAccess::Edit,
+        };
+        let operations = [
+            RelayOperation::Pull {
+                workspace_id: ws(),
+                now_ms: 2_000,
+            },
+            RelayOperation::CommitCursor {
+                workspace_id: ws(),
+                cursor: RelayCursor {
+                    cursor: 1,
+                    replication_epoch: "epoch".into(),
+                    stream_identity: "stream".into(),
+                    bootstrap_complete: true,
+                    settlement_report_id: None,
+                },
+                now_ms: 2_000,
+            },
+            RelayOperation::Probe { workspace_id: ws() },
+            RelayOperation::Claim {
+                workspace_id: ws(),
+                account_id: Some("account".into()),
+                new_origin_id: "origin".into(),
+                new_replication_epoch: "epoch-2".into(),
+                new_stream_identity: "stream-2".into(),
+                created_at_ms: 2_000,
+            },
+            RelayOperation::AdoptJoinIdentity {
+                workspace_id: ws(),
+                new_origin_id: "origin".into(),
+                replication_epoch: "epoch".into(),
+                stream_identity: "stream".into(),
+                created_at_ms: 2_000,
+            },
+            RelayOperation::RecoverOrigin {
+                workspace_id: ws(),
+                new_origin_id: "service-host:rebased".into(),
+            },
+            RelayOperation::UploadKeyEnvelope {
+                workspace_id: ws(),
+                envelope_json: "{}".into(),
+                if_match: None,
+            },
+            RelayOperation::DownloadKeyEnvelope { workspace_id: ws() },
+            RelayOperation::PullSharedChannel {
+                workspace_id: ws(),
+                share_id: "share".into(),
+                channel_wire_id: "wire".into(),
+            },
+            RelayOperation::PushSharedChannel {
+                workspace_id: ws(),
+                share_id: "share".into(),
+                channel_wire_id: "wire".into(),
+            },
+            RelayOperation::PullShareView {
+                workspace_id: ws(),
+                share_id: "share".into(),
+                granted: granted(),
+            },
+            RelayOperation::RecordShareViewIdentity {
+                workspace_id: ws(),
+                access: ShareAccess::Edit,
+                origin_id: "origin".into(),
+                replication_epoch: "epoch".into(),
+                stream_identity: "stream".into(),
+                created_at_ms: 2_000,
+            },
+            RelayOperation::SubmitShareProposal {
+                workspace_id: ws(),
+                share_id: "share".into(),
+                granted: granted(),
+                submit_id: "submit".into(),
+                max_read_bytes: 0,
+            },
+            RelayOperation::PushDirectWrites {
+                workspace_id: ws(),
+                share_id: "share".into(),
+                granted: granted(),
+                max_read_bytes: 0,
+            },
+            RelayOperation::CommitShareViewCursor {
+                workspace_id: ws(),
+                cursor: ShareCursor {
+                    kind: CursorKind::ShareView,
+                    share_id: "share".into(),
+                    cursor: 1,
+                },
+            },
+        ];
+        let before = everything(&store);
+        let mut cache = WriterDocCache::new();
+        for operation in operations {
+            assert_eq!(operation.replicas(), Replicas::Ordinary, "{operation:?}");
+            let transport = DeferredRelayTransport::default();
+            let refused = execute_relay_operation(
+                &mut store,
+                &mut cache,
+                transport.clone(),
+                operation.clone(),
+                &LeaseRegistry::default(),
+                &ClaimAnnouncer::default(),
+            );
+            assert!(
+                matches!(&refused, Err(RuntimeError::Relay(refusal))
+                    if *refusal == dohc_engine_sync::hosted_feed_only()),
+                "{operation:?}: {refused:?}"
+            );
+            assert_eq!(transport.take_pending(), None, "{operation:?} sent nothing");
+            assert_eq!(everything(&store), before, "{operation:?} wrote nothing");
+        }
     }
 }
 

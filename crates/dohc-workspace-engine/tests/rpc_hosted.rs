@@ -145,6 +145,43 @@ impl HostedRelay {
         );
     }
 
+    /// A rename of `object_id`, holding `text`, from `from` to `to`. Its
+    /// before side is the object's own head, last written by `before_moment_id`.
+    #[allow(clippy::too_many_arguments)]
+    fn rename(
+        &mut self,
+        origin: &str,
+        seq: i64,
+        object_id: &str,
+        from: &str,
+        to: &str,
+        text: &str,
+        before_moment_id: &str,
+    ) {
+        let sha256 = hex_sha256(text.as_bytes());
+        self.write(
+            origin,
+            seq,
+            object_id,
+            to,
+            text,
+            json!({
+                "operation": "rename",
+                "payloadBeforeBlobSha256": sha256,
+                "payloadBeforePath": from,
+                "beforePresent": "present",
+                "beforeObjectId": object_id,
+                "beforeVersionId": "main",
+                "beforePath": from,
+                "beforeBlobSha256": sha256,
+                "beforeContentKind": "text",
+                "beforeUpdatedAtMs": 1_500,
+                "beforeLatestMomentId": before_moment_id,
+                "beforeMetadata": {"origin": "sync"}
+            }),
+        );
+    }
+
     fn write(
         &mut self,
         origin: &str,
@@ -683,19 +720,83 @@ async fn a_hosted_replica_pulls_its_documents_and_pushes_live_writes_to_the_host
         host.error("sync.push").await,
         (ErrorCode::InvalidParams, "relay-origin-diverged".to_owned())
     );
-    assert_eq!(
-        host.error("sync.recoverOrigin").await,
+    for method in ["sync.recoverOrigin", "sync.pull"] {
+        assert_eq!(
+            host.error(method).await,
+            (ErrorCode::InvalidParams, HOSTED_FEED_ONLY.to_owned()),
+            "{method}"
+        );
+    }
+}
+
+const HOSTED_FEED_ONLY: &str = "invalid-input: a hosted replica uses only its hosted feed";
+
+/// Sol's slice-4 review: ordinary relay RPCs reached ordinary routes from a
+/// hosted replica, and a refused claim left `pending` behind to hold back
+/// hosted pushes. Each is refused with its reason before it reaches the
+/// relay or writes, and the replica keeps pushing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn ordinary_relay_rpcs_leave_a_hosted_replica_untouched() {
+    let relay = rotated_relay();
+    let scratch = ScratchDir::new().expect("scratch");
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let handle = open_workspace(&transport, &scratch, &relay).await;
+    let mut host = Host {
+        transport,
+        handle,
+        id: 1,
+    };
+    host.create().await;
+    host.sync().await;
+    let requests = relay.relay().requests.len();
+
+    let workspace = || json!({"workspaceId": WORKSPACE});
+    for (method, params) in [
+        ("sync.probe", workspace()),
         (
-            ErrorCode::InvalidParams,
-            "invalid-input: a hosted replica never rebases its origin".to_owned()
-        )
+            "sync.claim",
+            json!({"workspaceId": WORKSPACE, "accountId": "account"}),
+        ),
+        (
+            "sync.adoptJoinIdentity",
+            json!({"workspaceId": WORKSPACE, "replicationEpoch": "epoch-2", "streamIdentity": "stream-2"}),
+        ),
+        ("sync.pull", workspace()),
+        ("sync.recoverOrigin", workspace()),
+        (
+            "keys.upload",
+            json!({"workspaceId": WORKSPACE, "envelopeJson": "{}"}),
+        ),
+        ("keys.download", workspace()),
+    ] {
+        host.id += 1;
+        let refused = call_error(&host.transport, &host.handle, host.id, method, params).await;
+        assert_eq!(
+            (refused.code, refused.message.as_str()),
+            (ErrorCode::InvalidParams, HOSTED_FEED_ONLY),
+            "{method}"
+        );
+    }
+    assert_eq!(
+        relay.relay().requests.len(),
+        requests,
+        "no refusal reached the relay"
     );
-    assert_eq!(
-        host.error("sync.pull").await,
-        (
-            ErrorCode::InvalidParams,
-            "invalid-input: a hosted replica pulls with pull_hosted_workspace".to_owned()
+    let conn = Connection::open(engine_db_path(&scratch).expect("db path")).expect("open db");
+    let claim: (Option<String>, Option<String>) = conn
+        .query_row(
+            "SELECT claim_state,claim_account_id FROM sync_identity WHERE workspace_id=?1",
+            [WORKSPACE],
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
+        .expect("identity");
+    assert_eq!(claim, (None, None));
+
+    journal_live_update(&scratch, "doc-a", "a.md", b"live update");
+    assert_eq!(
+        host.call("sync.push", json!({"workspaceId": WORKSPACE}))
+            .await["pushed"],
+        1
     );
 }
 
@@ -769,6 +870,63 @@ async fn a_departed_document_retires_and_frees_its_file_for_its_replacement() {
         )
         .expect("count");
     assert_eq!((objects, conflicts), (0, 0));
+}
+
+/// The retirement round's open case, on disk: `doc-b` left the scope at
+/// `a.md`, the owner moved it to `b.md`, and `doc-a` took `a.md`. When
+/// `doc-b` returns, its backfill passes through `a.md` without touching
+/// `doc-a` or its file, and `doc-b` lands at `b.md`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_returning_document_lands_at_its_new_path_and_leaves_the_old_one_alone() {
+    let mut relay = HostedRelay::default();
+    relay.log.push(json!({
+        "relaySeq": 1, "workspaceId": WORKSPACE, "originId": "owner", "originSeq": 0,
+        "opKind": "workspace.init", "payload": {}, "recordedAtMs": 1_001,
+    }));
+    relay.create("owner", 1, "doc-b", "a.md", "hosted b");
+    relay.share("doc-b", "a.md");
+    let relay = FakeRelay::start(relay);
+    let scratch = ScratchDir::new().expect("scratch");
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let handle = open_workspace(&transport, &scratch, &relay).await;
+    let mut host = Host {
+        transport,
+        handle,
+        id: 1,
+    };
+    host.create().await;
+    host.sync().await;
+
+    {
+        let mut relay = relay.relay();
+        relay.unshare("doc-b");
+        relay.rename(
+            "owner",
+            2,
+            "doc-b",
+            "a.md",
+            "b.md",
+            "hosted b",
+            "moment-owner-1",
+        );
+        relay.create("owner", 3, "doc-a", "a.md", "hosted a");
+        relay.share("doc-a", "a.md");
+    }
+    host.sync().await;
+    assert_eq!(document_state(&scratch, "doc-b"), None);
+    let read = |path: &str| std::fs::read_to_string(scratch.path().join(path)).ok();
+    assert_eq!(read("a.md").as_deref(), Some("hosted a"));
+
+    relay.relay().share("doc-b", "b.md");
+    host.sync().await;
+    assert_eq!(document_state(&scratch, "doc-b").as_deref(), Some("ready"));
+    assert_eq!(read("a.md").as_deref(), Some("hosted a"));
+    assert_eq!(read("b.md").as_deref(), Some("hosted b"));
+    let conn = Connection::open(engine_db_path(&scratch).expect("db path")).expect("open db");
+    let conflicts: i64 = conn
+        .query_row("SELECT COUNT(*) FROM conflicts", [], |row| row.get(0))
+        .expect("count");
+    assert_eq!(conflicts, 0);
 }
 
 /// The slice-3 re-review's first reproduction, through a live session:

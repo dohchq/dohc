@@ -417,7 +417,7 @@ pub fn create_hosted_replica(
 ) -> Result<TxnOutcome<AdoptJoinIdentityOutcome>, SyncError> {
     if store.is_passive() {
         return Err(SyncError::InvalidInput {
-            reason: "a passive store cannot host documents",
+            reason: crate::PASSIVE_STORE_CANNOT_HOST,
         });
     }
     create_sync_identity(

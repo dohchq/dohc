@@ -2105,3 +2105,129 @@ fn hosted_feed_refusals_map_to_their_errors() {
         Err(dohc_engine_sync::no_hosted_feed())
     );
 }
+
+/// A hosted transport reaches only the hosted feed: every ordinary workspace,
+/// claim, key and share route refuses without a request.
+#[test]
+fn a_hosted_transport_sends_nothing_to_an_ordinary_route() {
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let seen = Arc::clone(&requests);
+    let server = FakeServer::start(move |request| {
+        seen.lock().unwrap().push(request.target);
+        TestResponse::json(500, json!({"ok": false}))
+    });
+    let hosted = transport(&server).hosted();
+    let refused = Err::<(), _>(dohc_engine_sync::hosted_feed_only());
+    let refusals = [
+        hosted
+            .push(dohc_engine_sync::PushRequest {
+                workspace_id: "ws".to_owned(),
+                replication_epoch: "epoch".to_owned(),
+                stream_identity: "stream".to_owned(),
+                origin_id: "service-host:host".to_owned(),
+                after_seq: -1,
+                ops: Vec::new(),
+            })
+            .map(drop),
+        hosted
+            .pull(PullRequest {
+                workspace_id: "ws".to_owned(),
+                replication_epoch: "epoch".to_owned(),
+                stream_identity: "stream".to_owned(),
+                cursor: 0,
+                limit: 1,
+            })
+            .map(drop),
+        hosted
+            .probe(ProbeRequest {
+                workspace_id: "ws".to_owned(),
+                replication_epoch: "epoch".to_owned(),
+                stream_identity: "stream".to_owned(),
+            })
+            .map(drop),
+        hosted
+            .claim_workspace(ClaimRequest {
+                workspace_id: "ws".to_owned(),
+                replication_epoch: "epoch".to_owned(),
+                stream_identity: "stream".to_owned(),
+            })
+            .map(drop),
+        hosted
+            .rotate_epoch(EpochRequest {
+                workspace_id: "ws".to_owned(),
+                replication_epoch: "epoch".to_owned(),
+                stream_identity: "stream".to_owned(),
+            })
+            .map(drop),
+        hosted
+            .upload_key_envelope(KeyEnvelopeRequest {
+                workspace_id: "ws".to_owned(),
+                replication_epoch: "epoch".to_owned(),
+                stream_identity: "stream".to_owned(),
+                envelope_json: "{}".to_owned(),
+                if_match: None,
+            })
+            .map(drop),
+        hosted
+            .download_key_envelope(KeyEnvelopeDownloadRequest {
+                workspace_id: "ws".to_owned(),
+                replication_epoch: "epoch".to_owned(),
+                stream_identity: "stream".to_owned(),
+            })
+            .map(drop),
+        hosted
+            .share_log_push(ShareLogPushRequest {
+                share_id: "share-1".to_owned(),
+                origin_id: "member".to_owned(),
+                ops: Vec::new(),
+            })
+            .map(drop),
+        hosted
+            .shared_channel_pull(SharedChannelRequest {
+                share_id: "share-1".to_owned(),
+                channel_wire_id: "wire-1".to_owned(),
+                origin_id: "member".to_owned(),
+                cursor: 0,
+                ops: Vec::new(),
+            })
+            .map(drop),
+        hosted
+            .share_view_pull(ShareViewRequest {
+                share_id: "share-1".to_owned(),
+                cursor: 0,
+                limit: 1,
+            })
+            .map(drop),
+        hosted
+            .share_blob(ShareBlobRequest {
+                share_id: "share-1".to_owned(),
+                sha256: "b".repeat(64),
+            })
+            .map(drop),
+        hosted
+            .share_blob_upload(dohc_engine_sync::ShareBlobUploadRequest {
+                share_id: "share-1".to_owned(),
+                sha256: "b".repeat(64),
+                bytes: b"bytes".to_vec(),
+            })
+            .map(drop),
+        hosted
+            .share_proposal_submit(dohc_engine_sync::ShareProposalSubmitRequest {
+                share_id: "share-1".to_owned(),
+                submit_id: "submit".to_owned(),
+                ops: Vec::new(),
+            })
+            .map(drop),
+        hosted
+            .share_collection_write(dohc_engine_sync::ShareCollectionWriteRequest {
+                share_id: "share-1".to_owned(),
+                submit_id: "submit".to_owned(),
+                changes: Vec::new(),
+            })
+            .map(drop),
+    ];
+    for (index, refusal) in refusals.into_iter().enumerate() {
+        assert_eq!(refusal, refused, "ordinary route {index}");
+    }
+    assert!(requests.lock().unwrap().is_empty(), "{requests:?}");
+}

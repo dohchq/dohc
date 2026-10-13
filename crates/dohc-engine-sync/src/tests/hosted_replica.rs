@@ -2310,6 +2310,177 @@ fn a_document_that_returns_after_retiring_backfills_from_the_start() {
     assert_eq!(document.path, "b.md");
 }
 
+/// [`sync_retiring`], answering each path the passes changed and how it
+/// last changed.
+fn sync_changes(
+    client: &RelaySyncClient<HostedFeed>,
+    store: &mut EngineStore,
+) -> Vec<(String, &'static str)> {
+    let mut changes = BTreeMap::new();
+    for _ in 0..64 {
+        let outcome = pass(client, store, &NoFaults).unwrap();
+        for change in &outcome.changed_paths {
+            changes.insert(change.path.clone(), change.operation);
+        }
+        commit(client, store, &outcome);
+        if !retire(store) && !outcome.has_more {
+            return changes.into_iter().collect();
+        }
+    }
+    panic!("the hosted replica did not catch up");
+}
+
+/// Each object's head path, and the object each path names.
+fn paths(store: &EngineStore) -> (Vec<(String, String)>, Vec<(String, String)>) {
+    store
+        .read_with(|conn| {
+            let pairs = |sql: &str| -> rusqlite::Result<Vec<(String, String)>> {
+                conn.prepare(sql)?
+                    .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+                    .collect()
+            };
+            Ok::<_, rusqlite::Error>((
+                pairs("SELECT object_id,path FROM snapshots ORDER BY object_id")?,
+                pairs("SELECT path,object_id FROM path_aliases ORDER BY path")?,
+            ))
+        })
+        .unwrap()
+}
+
+/// The retirement round's open case: `doc-b` left the scope at `a.md`, the
+/// owner moved it to `b.md`, and `doc-a` took `a.md`. `doc-b` returns, and
+/// its backfill replays its creation at `a.md` after `doc-a`'s later row.
+/// `a.md` is only a path `doc-b` passed through, so the creation parks in
+/// its history without touching `doc-a`, and its rename takes `b.md`.
+#[test]
+fn a_returning_document_passes_through_a_path_another_document_took() {
+    let (_scratch, _path, mut store, client) = departing_b();
+    let feed = client.transport();
+    feed.unshare("doc-b");
+    feed.rename(
+        "owner",
+        2,
+        "doc-b",
+        "a.md",
+        "b.md",
+        "hosted b",
+        "moment-owner-1",
+    );
+    feed.create("owner", 3, "doc-a", "a.md", "hosted a");
+    feed.share("doc-a", "a.md");
+    sync_retiring(&client, &mut store);
+    assert_eq!(content(&store).0, heads(&[("doc-a", "hosted a")]));
+    assert!(holding(&store, "doc-b").is_empty());
+
+    feed.share("doc-b", "b.md");
+    assert_eq!(
+        sync_changes(&client, &mut store),
+        [("b.md".to_owned(), "write")],
+        "doc-a's file stays as it is"
+    );
+    assert_eq!(
+        content(&store),
+        (
+            heads(&[("doc-a", "hosted a"), ("doc-b", "hosted b")]),
+            BTreeMap::from([
+                ("moment-owner-1".to_owned(), 1),
+                ("moment-owner-2".to_owned(), 1),
+                ("moment-owner-3".to_owned(), 1)
+            ])
+        )
+    );
+    let pair = |left: &str, right: &str| (left.to_owned(), right.to_owned());
+    assert_eq!(
+        paths(&store),
+        (
+            vec![pair("doc-a", "a.md"), pair("doc-b", "b.md")],
+            vec![pair("a.md", "doc-a"), pair("b.md", "doc-b")]
+        )
+    );
+    assert_eq!(count(&store, "SELECT COUNT(*) FROM conflicts"), 0);
+    assert_eq!(retained(&store), 0);
+    let document = document(&store, "doc-b").unwrap();
+    assert!(document.ready);
+    assert_eq!(document.path, "b.md");
+}
+
+/// A head the backfill already placed parks too: `doc-b` was created at
+/// `x.md`, passed through `a.md`, which `doc-a` holds, and ended at `b.md`.
+/// Its file leaves `x.md` when it parks, and nothing of `doc-a` changes.
+#[test]
+fn a_backfilling_head_parks_off_its_path_and_resumes_from_there() {
+    let (_scratch, _path, mut store) = hosted_store();
+    let client = RelaySyncClient::new(HostedFeed::new());
+    let feed = client.transport();
+    feed.append(envelope("owner", 0, "workspace.init", json!({})));
+    feed.create("owner", 1, "doc-b", "x.md", "hosted b");
+    feed.rename(
+        "owner",
+        2,
+        "doc-b",
+        "x.md",
+        "a.md",
+        "hosted b",
+        "moment-owner-1",
+    );
+    feed.rename(
+        "owner",
+        3,
+        "doc-b",
+        "a.md",
+        "b.md",
+        "hosted b",
+        "moment-owner-2",
+    );
+    feed.create("owner", 4, "doc-a", "a.md", "hosted a");
+    feed.share("doc-a", "a.md");
+    sync(&client, &mut store);
+
+    feed.share("doc-b", "b.md");
+    assert_eq!(
+        sync_changes(&client, &mut store),
+        [("b.md".to_owned(), "write"), ("x.md".to_owned(), "delete")]
+    );
+    let pair = |left: &str, right: &str| (left.to_owned(), right.to_owned());
+    assert_eq!(
+        paths(&store),
+        (
+            vec![pair("doc-a", "a.md"), pair("doc-b", "b.md")],
+            vec![pair("a.md", "doc-a"), pair("b.md", "doc-b")]
+        )
+    );
+    assert_eq!(count(&store, "SELECT COUNT(*) FROM conflicts"), 0);
+    assert!(document(&store, "doc-b").unwrap().ready);
+}
+
+/// The path a backfill ends at takes part in occupancy as any other write
+/// does: `doc-b` was created at `b.md`, which `doc-a` holds, so its backfill
+/// opens the one conflict a ready document's write would.
+#[test]
+fn a_backfill_that_ends_on_a_held_path_opens_its_conflict() {
+    let (_scratch, _path, mut store) = hosted_store();
+    let client = RelaySyncClient::new(HostedFeed::new());
+    let feed = client.transport();
+    feed.append(envelope("owner", 0, "workspace.init", json!({})));
+    feed.create("owner", 1, "doc-a", "b.md", "hosted a");
+    feed.create("peer", 0, "doc-b", "b.md", "hosted b");
+    feed.share("doc-a", "b.md");
+    sync(&client, &mut store);
+
+    feed.share("doc-b", "b.md");
+    assert!(sync_changes(&client, &mut store).is_empty());
+    assert_eq!(content(&store).0, heads(&[("doc-a", "hosted a")]));
+    assert_eq!(
+        count(
+            &store,
+            "SELECT COUNT(*) FROM conflicts WHERE path='b.md' \
+             AND incoming_latest_moment_id='moment-peer-0'"
+        ),
+        1
+    );
+    assert_eq!(count(&store, "SELECT COUNT(*) FROM conflicts"), 1);
+}
+
 #[test]
 fn an_ordinary_replica_has_nothing_to_retire() {
     let (_scratch, _path, mut ordinary) = open_store();

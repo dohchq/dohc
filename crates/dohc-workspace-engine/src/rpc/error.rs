@@ -941,6 +941,98 @@ mod tests {
         supervisor.close(&db).unwrap();
     }
 
+    /// Relay operations a store cannot take as a hosted replica keep their
+    /// reason: creating one on a passive store, and adopting an ordinary
+    /// identity on one that exists.
+    #[tokio::test]
+    async fn hosted_relay_refusals_reach_the_caller_with_their_reason() {
+        use dohc_engine_runtime::{
+            ActorHandle, CancellationToken, NoFaults, RelayConfiguration, RelayOperation,
+        };
+        use dohc_engine_storage::EngineStore;
+
+        let relay = |actor: ActorHandle, operation: RelayOperation| async move {
+            let refused = actor
+                .relay(
+                    RelayConfiguration {
+                        base_url: "https://relay.invalid".to_owned(),
+                        bearer_token: "token".to_owned(),
+                        #[cfg(debug_assertions)]
+                        allow_insecure_loopback_for_tests: false,
+                    },
+                    operation,
+                    dohc_engine_collab::LeaseRegistry::default(),
+                    CancellationToken::new(),
+                    None,
+                )
+                .await
+                .unwrap_err();
+            let surfaced = map_runtime(refused);
+            (surfaced.code, surfaced.message)
+        };
+        let supervisor = dohc_engine_runtime::WorkspaceSupervisor::new();
+
+        let passive_scratch = dohc_engine_testkit::ScratchDir::new().unwrap();
+        let passive = dohc_engine_testkit::engine_db_path(&passive_scratch).unwrap();
+        let actor = supervisor
+            .open_passive_root_bound(&passive, 1, "root-token", None)
+            .unwrap()
+            .actor;
+        assert_eq!(
+            relay(
+                actor,
+                RelayOperation::CreateHostedReplica {
+                    workspace_id: "ws".into(),
+                    new_origin_id: "service-host:host".into(),
+                    replication_epoch: "epoch".into(),
+                    stream_identity: "stream".into(),
+                    created_at_ms: 2,
+                }
+            )
+            .await,
+            (
+                ErrorCode::InvalidParams,
+                "invalid-input: a passive store cannot host documents".to_owned()
+            )
+        );
+        supervisor.close(&passive).unwrap();
+
+        let hosted_scratch = dohc_engine_testkit::ScratchDir::new().unwrap();
+        let hosted = dohc_engine_testkit::engine_db_path(&hosted_scratch).unwrap();
+        {
+            let mut store = EngineStore::open(&hosted, 1).unwrap();
+            dohc_engine_sync::create_hosted_replica(
+                &mut store,
+                "ws",
+                "service-host:host",
+                "epoch",
+                "stream",
+                1,
+                &NoFaults,
+            )
+            .unwrap();
+        }
+        let actor = supervisor.open(&hosted, 1).unwrap().actor;
+        assert_eq!(
+            relay(
+                actor,
+                RelayOperation::AdoptJoinIdentity {
+                    workspace_id: "ws".into(),
+                    new_origin_id: "origin".into(),
+                    replication_epoch: "epoch".into(),
+                    stream_identity: "stream".into(),
+                    created_at_ms: 2,
+                }
+            )
+            .await,
+            (
+                ErrorCode::InvalidParams,
+                "invalid-input: a hosted replica uses only its hosted feed".to_owned()
+            )
+        );
+        supervisor.close(&hosted).unwrap();
+    }
+
     #[test]
     fn domain_refusals_keep_wire_names_and_hide_internal_reasons() {
         use dohc_engine_protocol::Retryability;

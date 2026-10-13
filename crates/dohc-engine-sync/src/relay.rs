@@ -2324,6 +2324,13 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             &req.replication_epoch,
             &req.stream_identity,
         )?;
+        // Before the pending state below, which would hold back hosted pushes.
+        if store
+            .read_with(|conn| crate::hosted::is_hosted(conn, &req.workspace_id))
+            .map_err(local)?
+        {
+            return Err(hosted_feed_only());
+        }
         let save = |store: &mut EngineStore, state: Option<&str>, keep_refusal: bool| match store
             .write_with(faults, |tx| {
                 let changed = tx
@@ -5809,6 +5816,12 @@ fn local(error: SyncError) -> RelayError {
 /// A hosted feed request on a transport built for an ordinary replica.
 pub fn no_hosted_feed() -> RelayError {
     RelayError::HostedRefusal("relay transport serves no hosted feed")
+}
+
+/// An ordinary relay operation or route on a hosted replica, which reaches
+/// only the session host's scoped feed.
+pub fn hosted_feed_only() -> RelayError {
+    RelayError::HostedRefusal("a hosted replica uses only its hosted feed")
 }
 
 #[cfg(test)]

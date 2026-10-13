@@ -67,8 +67,9 @@ use error::ShareDisposition;
 pub use error::{ObservedBytes, RelayError, SyncError};
 pub use hosted::{
     DepartedDocument, DepartedHead, HostedCursor, HostedDocumentState, HostedReplicaState,
-    SERVICE_HOST_ORIGIN_PREFIX, commit_hosted_cursor, departed_hosted_documents,
-    hosted_document_retirable, read_hosted_replica, retire_hosted_document,
+    PASSIVE_STORE_CANNOT_HOST, SERVICE_HOST_ORIGIN_PREFIX, commit_hosted_cursor,
+    departed_hosted_documents, hosted_document_retirable, is_hosted_replica, read_hosted_replica,
+    retire_hosted_document,
 };
 pub use hydration::{
     BlobContent, BlobHydration, BlobKind, MAX_INGEST_BLOB_BYTES, blob_ceiling, hydrate_blob_content,
@@ -114,7 +115,8 @@ pub use relay::{
     ShareReplicationEnvelope, ShareViewChangedPath, ShareViewPullOutcome, ShareViewRefusal,
     ShareViewRequest, ShareViewResponse, SharedChannelPullOutcome, SharedChannelPushOutcome,
     SharedChannelRejection, SharedChannelRequest, SharedChannelResponse, SyncPassOutcome,
-    collision_key, no_hosted_feed, read_direct_write_status, read_record_creation_statuses,
+    collision_key, hosted_feed_only, no_hosted_feed, read_direct_write_status,
+    read_record_creation_statuses,
 };
 pub use router::{RoutedApply, apply_replication_envelope};
 pub use secret_apply::apply_secret_envelope;

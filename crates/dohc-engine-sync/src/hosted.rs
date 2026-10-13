@@ -31,6 +31,9 @@ pub const SERVICE_HOST_ORIGIN_PREFIX: &str = "service-host:";
 
 pub(crate) const NOT_A_HOSTED_REPLICA: &str = "workspace is not a hosted replica";
 
+/// Why a passive store refuses every hosted operation.
+pub const PASSIVE_STORE_CANNOT_HOST: &str = "a passive store cannot host documents";
+
 /// A conflict child whose `conflict.resolve` parent the feed withheld. The
 /// child waits in deferred work until the relay serves what it needs.
 pub(crate) const CONFLICT_PARENT_WITHHELD: &str = "hosted-conflict-parent-withheld";
@@ -46,6 +49,11 @@ pub(crate) fn is_hosted(conn: &Connection, workspace_id: &str) -> Result<bool, S
         |row| row.get(0),
     )
     .map_err(SyncError::corrupt)
+}
+
+/// Whether `workspace_id` is a hosted replica.
+pub fn is_hosted_replica(store: &EngineStore, workspace_id: &str) -> Result<bool, SyncError> {
+    store.read_with(|conn| is_hosted(conn, workspace_id))
 }
 
 /// The next sequence a hosted replica writes under its own origin, or `None`
@@ -229,6 +237,61 @@ pub(crate) fn wait_for_departed_occupant_in_tx(
         });
     }
     Ok(())
+}
+
+/// Whether a moment of a backfilling hosted document parks: it moves the
+/// document to `path`, which another object holds here, and the scope names
+/// the document elsewhere. A backfill replays the document's history after
+/// other documents' later rows, so a path it only passed through may since
+/// belong to another document. A parked moment applies to the document's own
+/// history and holds no path; only the path the scope names, where the
+/// backfill leaves the document, takes part in occupancy.
+pub(crate) fn parks_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    workspace_id: &str,
+    version_id: &str,
+    object_id: &str,
+    path: &str,
+) -> Result<bool, SyncError> {
+    tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM hosted_documents d JOIN hosted_replicas h \
+           ON h.workspace_id=d.workspace_id AND h.scope_generation=d.scope_generation \
+         WHERE d.workspace_id=?1 AND d.object_id=?3 AND d.state='backfilling' AND d.path<>?4) \
+         AND (EXISTS(SELECT 1 FROM path_aliases \
+                WHERE workspace_id=?1 AND version_id=?2 AND path=?4 AND object_id<>?3) \
+           OR EXISTS(SELECT 1 FROM snapshots \
+                WHERE workspace_id=?1 AND version_id=?2 AND path=?4 AND object_id<>?3))",
+        params![workspace_id, version_id, object_id, path],
+        |row| row.get(0),
+    )
+    .map_err(SyncError::corrupt)
+}
+
+/// Whether `moment_id` is the parked head of `object_id`: its latest moment,
+/// applied as history while the document held no path. The document's next
+/// moment continues from it.
+pub(crate) fn parked_head_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    workspace_id: &str,
+    version_id: &str,
+    object_id: &str,
+    moment_id: &str,
+) -> Result<bool, SyncError> {
+    tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM hosted_replicas h JOIN moments m ON m.workspace_id=h.workspace_id \
+         WHERE h.workspace_id=?1 AND m.version_id=?2 AND m.object_id=?3 AND m.moment_id=?4 \
+           AND m.sync_record_only=1 AND m.operation<>'delete' \
+           AND NOT EXISTS(SELECT 1 FROM snapshots s WHERE s.workspace_id=?1 \
+             AND s.version_id=?2 AND s.object_id=?3) \
+           AND NOT EXISTS(SELECT 1 FROM conflicts c WHERE c.workspace_id=?1 \
+             AND c.incoming_latest_moment_id=m.moment_id) \
+           AND NOT EXISTS(SELECT 1 FROM moments later WHERE later.workspace_id=?1 \
+             AND later.version_id=?2 AND later.object_id=?3 \
+             AND later.moment_order>m.moment_order))",
+        params![workspace_id, version_id, object_id, moment_id],
+        |row| row.get(0),
+    )
+    .map_err(SyncError::corrupt)
 }
 
 /// Record the withheld before side of a moment this transaction applied. A

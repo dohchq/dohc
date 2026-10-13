@@ -263,7 +263,7 @@ impl HttpRelayTransport {
             &req.replication_epoch,
             &req.stream_identity,
             &[],
-        );
+        )?;
         let request = self
             .agent
             .get(&url)
@@ -335,7 +335,7 @@ impl HttpRelayTransport {
                     &req.replication_epoch,
                     &req.stream_identity,
                     &[],
-                );
+                )?;
                 if cancelled() {
                     return Err(cancelled_relay_request());
                 }
@@ -399,8 +399,23 @@ impl HttpRelayTransport {
         format!("Bearer {}", self.token)
     }
 
-    fn url(&self, path: &str) -> String {
-        format!("{}{}", self.base_url, path)
+    /// The URL of a relay route. A hosted transport reaches only the session
+    /// host's scoped feed, `/sync/:ws/hosted/`, and no other transport does.
+    fn url(&self, path: &str) -> Result<String, RelayError> {
+        let hosted_route = path
+            .strip_prefix("/sync/")
+            .and_then(|route| route.split_once('/'))
+            .is_some_and(|(workspace, route)| {
+                workspace != "shares" && route.starts_with("hosted/")
+            });
+        if hosted_route != self.hosted {
+            return Err(if self.hosted {
+                dohc_engine_sync::hosted_feed_only()
+            } else {
+                dohc_engine_sync::no_hosted_feed()
+            });
+        }
+        Ok(format!("{}{}", self.base_url, path))
     }
 
     fn workspace_path(&self, workspace_id: &str, suffix: &str) -> String {
@@ -414,7 +429,7 @@ impl HttpRelayTransport {
         replication_epoch: &str,
         stream_identity: &str,
         extra_query: &[(&str, String)],
-    ) -> String {
+    ) -> Result<String, RelayError> {
         let mut query = vec![
             (
                 "replicationEpoch",
@@ -439,7 +454,12 @@ impl HttpRelayTransport {
         ))
     }
 
-    fn share_url(&self, share_id: &str, suffix: &str, query: &[(&str, String)]) -> String {
+    fn share_url(
+        &self,
+        share_id: &str,
+        suffix: &str,
+        query: &[(&str, String)],
+    ) -> Result<String, RelayError> {
         let mut path = format!("/sync/shares/{}{}", encode_segment(share_id), suffix);
         if !query.is_empty() {
             path.push('?');
@@ -731,7 +751,7 @@ impl RelayTransport for HttpRelayTransport {
                 ("since", req.cursor.to_string()),
                 ("limit", req.limit.to_string()),
             ],
-        );
+        )?;
         let wire: WireLogPage = self.json(
             self.agent
                 .get(&url)
@@ -747,9 +767,6 @@ impl RelayTransport for HttpRelayTransport {
     }
 
     fn pull_hosted(&self, req: HostedPullRequest) -> Result<HostedPullResponse, RelayError> {
-        if !self.hosted {
-            return Err(dohc_engine_sync::no_hosted_feed());
-        }
         // The feed serves the scope it holds to a request without `scope`.
         let mut query = vec![
             ("since", req.cursor.to_string()),
@@ -767,7 +784,7 @@ impl RelayTransport for HttpRelayTransport {
             &req.replication_epoch,
             &req.stream_identity,
             &query,
-        );
+        )?;
         let wire: WireHostedLogPage = self.json(
             self.agent
                 .get(&url)
@@ -795,9 +812,6 @@ impl RelayTransport for HttpRelayTransport {
     }
 
     fn push_hosted(&self, req: PushRequest) -> Result<PushResponse, RelayError> {
-        if !self.hosted {
-            return Err(dohc_engine_sync::no_hosted_feed());
-        }
         self.push_log("/hosted/log", req)
     }
 
@@ -829,7 +843,7 @@ impl RelayTransport for HttpRelayTransport {
         };
         let _: WireOk = self.json(
             self.agent
-                .post(&self.url("/sync/workspaces"))
+                .post(&self.url("/sync/workspaces")?)
                 .header("authorization", &self.authorization())
                 .send_json(body),
             RequestContext::Claim,
@@ -848,7 +862,7 @@ impl RelayTransport for HttpRelayTransport {
             &req.replication_epoch,
             &req.stream_identity,
             &[],
-        );
+        )?;
         let wire: WireEpochResponse = self.json(
             self.agent
                 .post(&url)
@@ -875,7 +889,7 @@ impl RelayTransport for HttpRelayTransport {
             &req.replication_epoch,
             &req.stream_identity,
             &[],
-        );
+        )?;
         let wire: WireBlobHaveResponse = self.json(
             self.agent
                 .post(&url)
@@ -895,7 +909,7 @@ impl RelayTransport for HttpRelayTransport {
             &req.replication_epoch,
             &req.stream_identity,
             &[],
-        );
+        )?;
         let _: WireOk = self.json(
             self.agent
                 .put(&url)
@@ -923,7 +937,7 @@ impl RelayTransport for HttpRelayTransport {
             &req.replication_epoch,
             &req.stream_identity,
             &[],
-        );
+        )?;
         let mut request = self
             .agent
             .put(&url)
@@ -962,7 +976,7 @@ impl RelayTransport for HttpRelayTransport {
             &req.replication_epoch,
             &req.stream_identity,
             &[],
-        );
+        )?;
         let (bytes, etag) = self.bytes(
             self.agent
                 .get(&url)
@@ -1009,12 +1023,12 @@ impl RelayTransport for HttpRelayTransport {
     }
 
     fn share_log_push(&self, req: ShareLogPushRequest) -> Result<PushResponse, RelayError> {
+        let url = self.share_url(&req.share_id, "/log", &[])?;
         validate_outbound_payloads(req.ops.iter().map(|op| &op.payload))?;
         let body = WireSharePushRequest {
             origin_id: &req.origin_id,
             ops: req.ops.iter().map(WireShareLogInput::from).collect(),
         };
-        let url = self.share_url(&req.share_id, "/log", &[]);
         let wire: WirePushResponse = self.json(
             self.agent
                 .post(&url)
@@ -1050,7 +1064,7 @@ impl RelayTransport for HttpRelayTransport {
             &req.share_id,
             &format!("/blobs/{}", encode_segment(&req.sha256)),
             &[],
-        );
+        )?;
         let (bytes, _) = self.bytes(
             self.agent
                 .get(&url)
@@ -1068,7 +1082,7 @@ impl RelayTransport for HttpRelayTransport {
             &req.share_id,
             &format!("/blobs/{}", encode_segment(&req.sha256)),
             &[],
-        );
+        )?;
         let _: WireOk = self.json(
             self.agent
                 .put(&url)
@@ -1087,7 +1101,7 @@ impl RelayTransport for HttpRelayTransport {
             submit_id: &req.submit_id,
             ops: &req.ops,
         };
-        let url = self.share_url(&req.share_id, "/proposals", &[]);
+        let url = self.share_url(&req.share_id, "/proposals", &[])?;
         let wire: WireShareProposalSubmitResponse = self.json(
             self.agent
                 .post(&url)
@@ -1109,7 +1123,7 @@ impl RelayTransport for HttpRelayTransport {
             submit_id: &req.submit_id,
             changes: &req.changes,
         };
-        let url = self.share_url(&req.share_id, "/collection-writes", &[]);
+        let url = self.share_url(&req.share_id, "/collection-writes", &[])?;
         let mut response = self
             .agent
             .post(&url)
@@ -1174,6 +1188,13 @@ fn collection_write_answer(
 
 impl HttpRelayTransport {
     fn push_log(&self, suffix: &str, req: PushRequest) -> Result<PushResponse, RelayError> {
+        let url = self.workspace_url(
+            &req.workspace_id,
+            suffix,
+            &req.replication_epoch,
+            &req.stream_identity,
+            &[],
+        )?;
         validate_outbound_payloads(req.ops.iter().map(|op| &op.payload))?;
         let body = WirePushRequest {
             replication_epoch: &req.replication_epoch,
@@ -1181,13 +1202,6 @@ impl HttpRelayTransport {
             origin_id: &req.origin_id,
             ops: req.ops.iter().map(WireLogInput::from).collect(),
         };
-        let url = self.workspace_url(
-            &req.workspace_id,
-            suffix,
-            &req.replication_epoch,
-            &req.stream_identity,
-            &[],
-        );
         let wire: WirePushResponse = self.json(
             self.agent
                 .post(&url)
@@ -1213,7 +1227,7 @@ impl HttpRelayTransport {
     ) -> Result<WireLogPage, RelayError> {
         let mut query = vec![("since", cursor.to_string()), ("limit", limit.to_string())];
         query.extend_from_slice(extra_query);
-        let url = self.share_url(share_id, "/log", &query);
+        let url = self.share_url(share_id, "/log", &query)?;
         let wire: WireLogPage = self.json(
             self.agent
                 .get(&url)
