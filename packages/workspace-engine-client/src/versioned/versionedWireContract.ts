@@ -42,6 +42,8 @@ export const VERSIONED_METHOD = {
   momentsGet: "moments.get",
   publicationApplied: "versionedText.publicationApplied",
   historyPage: "history.page",
+  historyOperations: "history.operations",
+  historyUndo: "history.undo",
   searchEnsureIndex: "search.ensureIndex",
 } as const;
 
@@ -508,6 +510,8 @@ export type VersionedMethodParamsMap = {
   [VERSIONED_METHOD.momentsGet]: MomentsGetParams;
   [VERSIONED_METHOD.publicationApplied]: PublicationAppliedParams;
   [VERSIONED_METHOD.historyPage]: HistoryPageParams;
+  [VERSIONED_METHOD.historyOperations]: JsonObject & {operationId: string};
+  [VERSIONED_METHOD.historyUndo]: JsonObject & {operationId: string; author?: WriteAuthor};
   [VERSIONED_METHOD.searchEnsureIndex]: SearchEnsureIndexParams;
 };
 
@@ -549,6 +553,8 @@ export type VersionedMethodResultMap = {
   [VERSIONED_METHOD.momentsGet]: MomentsGetResult;
   [VERSIONED_METHOD.publicationApplied]: boolean;
   [VERSIONED_METHOD.historyPage]: HistoryPageResult;
+  [VERSIONED_METHOD.historyOperations]: typeof HistoryOperationSchema.Type;
+  [VERSIONED_METHOD.historyUndo]: typeof HistoryUndoSchema.Type;
   [VERSIONED_METHOD.searchEnsureIndex]: SearchEnsureIndexResult;
 };
 
@@ -1017,6 +1023,12 @@ const HistoryMomentMetadataSchema = mutableStruct({
   authors: MomentAuthorsSchema, syncRecordOnly: Schema.Boolean,
 });
 export type HistoryMomentMetadata = typeof HistoryMomentMetadataSchema.Type;
+const OperationMomentSchema = mutableStruct({
+  momentId: Schema.String, objectId: Schema.String, operation: Schema.Literals(["write", "rename", "delete"]),
+  path: Schema.String, beforePath: NullableString, momentOrder: Schema.Int,
+});
+const HistoryOperationSchema = mutableStruct({operationId: Schema.String, versionId: Schema.String, moments: Schema.mutable(Schema.Array(OperationMomentSchema))});
+const HistoryUndoSchema = mutableStruct({...HistoryOperationSchema.fields, deduped: Schema.Boolean, materialized: Schema.Boolean});
 const HistoryPageResultSchema = mutableStruct({
   activeVersion: VersionRecordSchema,
   moments: Schema.mutable(Schema.Array(HistoryMomentMetadataSchema)),
@@ -1100,6 +1112,8 @@ const VersionedResultSchemas = {
   [VERSIONED_METHOD.momentsGet]: Schema.NullOr(MomentRecordSchema),
   [VERSIONED_METHOD.publicationApplied]: Schema.Boolean,
   [VERSIONED_METHOD.historyPage]: HistoryPageResultSchema,
+  [VERSIONED_METHOD.historyOperations]: HistoryOperationSchema,
+  [VERSIONED_METHOD.historyUndo]: HistoryUndoSchema,
   [VERSIONED_METHOD.searchEnsureIndex]: EmptyObjectSchema,
 } as const;
 

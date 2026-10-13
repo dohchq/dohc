@@ -269,3 +269,163 @@ async fn a_change_made_during_a_hold_is_captured_after_release_and_close_does_no
         .await
         .expect("close does not wait for an unreleased hold");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn history_operation_minted_group_refuses_forged_and_reused_ids() {
+    let scratch = ScratchDir::new().unwrap();
+    write_root_binding(scratch.path(), TOKEN).unwrap();
+    write_file(scratch.path(), "old.md", b"Before.\n");
+    let (transport, handle) = open(&scratch).await;
+    reconcile_until_settled(&transport, &handle, 100).await;
+    let op = "dohc-operation:minted";
+    let hold = call(
+        &transport,
+        &handle,
+        101,
+        "capture.hold",
+        json!({"operationId":op}),
+    )
+    .await["holdId"]
+        .clone();
+    std::fs::rename(scratch.path().join("old.md"), scratch.path().join("new.md")).unwrap();
+    call_keyed(
+        &transport,
+        &handle,
+        102,
+        "versionedText.rename",
+        "caller-request",
+        json!({"versionId":"main","origin":"api","fromPath":"old.md","toPath":"new.md","captureHoldId":hold}),
+    )
+    .await;
+    call(
+        &transport,
+        &handle,
+        103,
+        "capture.release",
+        json!({"holdId":hold}),
+    )
+    .await;
+    let forged = call_error(
+        &transport,
+        &handle,
+        104,
+        "versionedText.write",
+        json!({"versionId":"main","origin":"api","path":"new.md","text":"Forged","correlationId":op}),
+    )
+    .await;
+    assert_eq!(forged.message, "reserved-operation-id");
+    let reuse = call_error(
+        &transport,
+        &handle,
+        105,
+        "capture.hold",
+        json!({"operationId":op}),
+    )
+    .await;
+    assert_eq!(reuse.message, "invalid-input");
+    // A caller's request key is permitted but never joins the operation.
+    call_keyed(
+        &transport,
+        &handle,
+        106,
+        "versionedText.write",
+        op,
+        json!({"versionId":"main","origin":"api","path":"other.md","text":"Unrelated"}),
+    )
+    .await;
+    let group = call(
+        &transport,
+        &handle,
+        107,
+        "history.operations",
+        json!({"operationId":op}),
+    )
+    .await;
+    assert_eq!(
+        group["moments"].as_array().unwrap().len(),
+        1,
+        "caller id must not form a group"
+    );
+    assert_eq!(group["moments"][0]["operation"], "rename");
+    assert!(group["moments"][0].get("beforeText").is_none());
+    assert!(group["moments"][0].get("afterText").is_none());
+    call(&transport, &handle, 108, "workspace.close", json!({})).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn history_operation_rpc_fence_reconciles_typing_and_uses_envelope_key() {
+    let scratch = ScratchDir::new().unwrap();
+    write_root_binding(scratch.path(), TOKEN).unwrap();
+    write_file(scratch.path(), "old.md", b"Before.\n");
+    let (transport, handle) = open(&scratch).await;
+    reconcile_until_settled(&transport, &handle, 100).await;
+    let op = "dohc-operation:rename";
+    let hold = call(
+        &transport,
+        &handle,
+        101,
+        "capture.hold",
+        json!({"operationId":op}),
+    )
+    .await["holdId"]
+        .clone();
+    std::fs::rename(scratch.path().join("old.md"), scratch.path().join("new.md")).unwrap();
+    call_keyed(
+        &transport,
+        &handle,
+        102,
+        "versionedText.rename",
+        "rename",
+        json!({"versionId":"main","origin":"api","fromPath":"old.md","toPath":"new.md","captureHoldId":hold}),
+    )
+    .await;
+    call(
+        &transport,
+        &handle,
+        103,
+        "capture.release",
+        json!({"holdId":hold}),
+    )
+    .await;
+    write_file(scratch.path(), "new.md", b"Later typing.\n");
+    assert!(
+        call_error(
+            &transport,
+            &handle,
+            104,
+            "history.undo",
+            json!({"operationId":op})
+        )
+        .await
+        .message
+        .contains("idempotency")
+    );
+    let result = call_keyed(
+        &transport,
+        &handle,
+        105,
+        "history.undo",
+        "undo",
+        json!({"operationId":op}),
+    )
+    .await;
+    assert_eq!(result["materialized"], true);
+    assert_eq!(result["deduped"], false);
+    assert_eq!(
+        std::fs::read_to_string(scratch.path().join("old.md")).unwrap(),
+        "Later typing.\n"
+    );
+    assert!(!scratch.path().join("new.md").exists());
+    let replay = call_keyed(
+        &transport,
+        &handle,
+        106,
+        "history.undo",
+        "undo",
+        json!({"operationId":op}),
+    )
+    .await;
+    assert_eq!(replay["deduped"], true);
+    assert_eq!(replay["moments"], result["moments"]);
+    call(&transport, &handle, 107, "workspace.close", json!({})).await;
+}

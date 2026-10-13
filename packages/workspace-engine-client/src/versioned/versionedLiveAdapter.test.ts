@@ -2149,3 +2149,19 @@ describe("outage typing recovery import", () => {
     await expect(adapter.importRecovery(checkpoint)).rejects.toThrow();
   });
 });
+
+it("sends Undo retry identity in the request envelope and reads body-free operation references", async () => {
+  const requests: Request[]=[];
+  const client:MinimalDaemonClient={close:()=>undefined,sendRequest:async request=>{
+    requests.push(request);
+    return {id:request.id,result:{operationId:"dohc-operation:minted",versionId:"main",moments:[],...(request.method===VERSIONED_METHOD.historyUndo?{deduped:true,materialized:false}:{})}};
+  }};
+  const adapter=new VersionedLiveAdapter(client,WORKSPACE,{workspaceId:WORKSPACE});
+  await adapter.holdCapture({operationId:"dohc-operation:minted"}).catch(()=>undefined);
+  await adapter.readHistoryOperation({workspaceId:WORKSPACE,operationId:"dohc-operation:minted"});
+  await adapter.undoHistoryOperation({workspaceId:WORKSPACE,operationId:"dohc-operation:minted",requestId:"retry"});
+  expect(requests[0]?.params).toEqual({operationId:"dohc-operation:minted"});
+  expect(requests[1]).toMatchObject({method:"history.operations",params:{operationId:"dohc-operation:minted"}});
+  expect(requests[2]).toMatchObject({method:"history.undo",idempotencyKey:"retry",params:{operationId:"dohc-operation:minted"}});
+  expect(requests[2]?.params).not.toHaveProperty("requestId");
+});

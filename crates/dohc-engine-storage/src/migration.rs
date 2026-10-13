@@ -3223,6 +3223,12 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         sql: V2_LIVE_RESTORE_RESUMED_LOOKUP_DDL,
         sets_user_version: None,
     },
+    Migration {
+        ordinal: 53,
+        id: "v2-history-operation-correlation",
+        sql: "CREATE INDEX idx_moments_operation_correlation ON moments(workspace_id, metadata_correlation_id);",
+        sets_user_version: None,
+    },
 ];
 
 const V2_OPEN_DOCUMENT_ARTIFACTS_DDL: &str = "\
@@ -3903,7 +3909,12 @@ mod tests {
                 "ccc7e17969beb6ae6259e9ce174863fa91d15c2bdad66c3f8232e8b236ff8b8c",
             ),
         ];
-        assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());
+        assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len() + 1);
+        assert_eq!(BASELINE_MIGRATIONS.last().unwrap().ordinal, 53);
+        assert_eq!(
+            migration_checksum(BASELINE_MIGRATIONS.last().unwrap().sql),
+            "c0f4d24b926a03be07f0999f3aab707da566b2de18654243031f0cb1b80a4819"
+        );
         for (migration, (id, checksum)) in BASELINE_MIGRATIONS.iter().zip(pinned) {
             assert_eq!(migration.id, id);
             assert_eq!(
@@ -5744,6 +5755,60 @@ mod tests {
         }
     }
 
+    #[test]
+    fn history_operation_index_upgrades_across_reserved_ordinals() {
+        let dir = tempdir();
+        let mut conn = open_bare(&dir.join("history-operation-index.db"));
+        let ctx = MigrationContext::current(1100);
+        let last = BASELINE_MIGRATIONS.len() - 1;
+        assert_eq!(BASELINE_MIGRATIONS[last].ordinal, 53);
+        assert!(BASELINE_MIGRATIONS[last - 1].ordinal < 53);
+        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..last], &ctx, &NoFaults).unwrap();
+        assert_eq!(
+            run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).unwrap(),
+            MigrationOutcome::Applied { newly_applied: 1 }
+        );
+        let plan: Vec<String> = conn.prepare("EXPLAIN QUERY PLAN SELECT moment_id FROM moments WHERE workspace_id=?1 AND metadata_correlation_id=?2")
+            .unwrap().query_map(rusqlite::params!["ws", "dohc-operation:one"], |row| row.get(3)).unwrap().collect::<rusqlite::Result<_>>().unwrap();
+        assert!(
+            plan.iter()
+                .any(|line| line.contains("idx_moments_operation_correlation")),
+            "{plan:?}"
+        );
+        assert_eq!(
+            run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).unwrap(),
+            MigrationOutcome::Applied { newly_applied: 0 }
+        );
+        // Missing lower ordinals can arrive after 53 without applying 53 twice.
+        let mut filled = BASELINE_MIGRATIONS.to_vec();
+        let mut missing = 0;
+        for ordinal in [51, 52] {
+            if !filled.iter().any(|m| m.ordinal == ordinal) {
+                filled.push(Migration {
+                    ordinal,
+                    id: if ordinal == 51 {
+                        "test-late-51"
+                    } else {
+                        "test-late-52"
+                    },
+                    sql: "SELECT 1;",
+                    sets_user_version: None,
+                });
+                missing += 1;
+            }
+        }
+        filled.sort_by_key(|m| m.ordinal);
+        assert_eq!(
+            run_migrations(&mut conn, &filled, &ctx, &NoFaults).unwrap(),
+            MigrationOutcome::Applied {
+                newly_applied: missing
+            }
+        );
+        assert_eq!(
+            run_migrations(&mut conn, &filled, &ctx, &NoFaults).unwrap(),
+            MigrationOutcome::Applied { newly_applied: 0 }
+        );
+    }
     #[test]
     fn collection_history_index_serves_newest_first_record_reads() {
         let dir = tempdir();

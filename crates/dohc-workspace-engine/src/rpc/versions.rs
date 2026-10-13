@@ -46,6 +46,11 @@ struct WorkspaceBarriers {
 }
 
 enum VersionFenceIntent {
+    Undo {
+        operation_id: String,
+        request_id: String,
+        author_json: Option<String>,
+    },
     Fork {
         input: CreateNamedVersion,
     },
@@ -56,6 +61,7 @@ enum VersionFenceIntent {
 }
 
 enum VersionFenceOutcome {
+    UndoCommitted(dohc_engine_runtime::HistoryUndoResult),
     AlreadyActive,
     CreateReplay(VersionRecord),
     Committed(VersionRecord),
@@ -474,6 +480,55 @@ impl EngineService {
                 unreachable!("fork fences never return AlreadyActive");
             }
             VersionFenceOutcome::Committed(version) => Ok(version_record_json(&version)),
+            VersionFenceOutcome::UndoCommitted(_) => unreachable!("version fences never undo"),
+        }
+    }
+
+    pub(super) async fn history_undo(
+        &self,
+        ctx: &RequestContext,
+        request: Request,
+    ) -> Result<Value, WireError> {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase", deny_unknown_fields)]
+        struct Params {
+            operation_id: String,
+            author: Option<Value>,
+        }
+        let params: Params = parse(request.params)?;
+        let handle = request
+            .workspace
+            .as_ref()
+            .ok_or_else(workspace_unavailable)?;
+        let open = self.open(Some(handle))?;
+        if !open.is_local_owner() {
+            return Err(WireError::new(
+                ErrorCode::InvalidParams,
+                "history.undo needs the workspace's owning handle",
+            ));
+        }
+        let request_id = crate::rpc::request::required_idempotency_key(request.idempotency_key)?;
+        let author_json = crate::rpc::request::validated_author(params.author.as_ref())?;
+        let cancellation = OperationCancellation::new(ctx);
+        let result = self
+            .fence_version_snapshot(
+                &cancellation,
+                open,
+                handle,
+                "history.undo",
+                "Undo settlement",
+                VersionFenceIntent::Undo {
+                    operation_id: params.operation_id,
+                    request_id,
+                    author_json,
+                },
+            )
+            .await?;
+        match result {
+            VersionFenceOutcome::UndoCommitted(result) => Ok(
+                json!({"operationId":result.operation_id,"versionId":result.version_id,"moments":result.moments,"deduped":result.deduped,"materialized":result.materialized}),
+            ),
+            _ => unreachable!("Undo fence returns its own result"),
         }
     }
 
@@ -500,6 +555,16 @@ impl EngineService {
             .await?;
 
         let (reconcile_version_id, fork_source_version_id) = match &intent {
+            VersionFenceIntent::Undo { .. } => (
+                Self::read_under_ctx(
+                    cancellation,
+                    "history.undo (active version)",
+                    open.actor.active_version(open.workspace_id.clone()),
+                )
+                .await?
+                .version_id,
+                None,
+            ),
             VersionFenceIntent::Fork { input } => {
                 // The preflight is intentionally repeated while the fence is
                 // held: a competing create may have won between the cheap
@@ -606,6 +671,7 @@ impl EngineService {
             correlation_id: Some(capture_driver::pass_correlation_id(match &intent {
                 VersionFenceIntent::Fork { .. } => "version-create",
                 VersionFenceIntent::Switch { .. } => "version-switch",
+                VersionFenceIntent::Undo { .. } => "history-undo",
             })),
         };
         let probe = self.capture_apply_probe.clone();
@@ -663,6 +729,10 @@ impl EngineService {
                 &capture_status,
                 &self_writes.scoped(&open.root),
                 capture_author_json,
+                match &intent {
+                    VersionFenceIntent::Undo { operation_id, .. } => Some(operation_id.as_str()),
+                    _ => None,
+                },
                 reconcile_provenance,
                 events.clone(),
                 token.clone(),
@@ -679,14 +749,45 @@ impl EngineService {
                 })?;
                 driver.request_manifest_refresh();
             }
-            let _manifest_changed = reconcile
-                .map_err(|error| map_switch_reconcile_error(error, &detached_operation))?;
+            match reconcile {
+                Err(capture_driver::SwitchReconcileError::HeldFiles(_))
+                    if matches!(&intent, VersionFenceIntent::Undo { .. }) => {}
+                result => {
+                    result
+                        .map_err(|error| map_switch_reconcile_error(error, &detached_operation))?;
+                }
+            }
 
             if let Some(probe) = &probe {
                 probe.pause_version_commit_if_armed().await;
             }
 
             let version = match intent {
+                VersionFenceIntent::Undo {
+                    operation_id,
+                    request_id,
+                    author_json,
+                } => {
+                    let result = open
+                        .actor
+                        .history_undo(
+                            open.workspace_id.clone(),
+                            operation_id,
+                            request_id,
+                            author_json,
+                            open.root.clone(),
+                            Arc::new(self_writes.scoped(&open.root)),
+                            Arc::new(NoFaults),
+                            now_ms()?,
+                        )
+                        .await
+                        .map_err(map_runtime)?;
+                    lock(&open.capture)
+                        .as_ref()
+                        .unwrap()
+                        .request_manifest_refresh();
+                    return Ok(VersionFenceOutcome::UndoCommitted(result));
+                }
                 VersionFenceIntent::Fork { input } => open
                     .actor
                     .create_named_version(input, Arc::new(NoFaults), token)
@@ -917,6 +1018,7 @@ impl EngineService {
                 unreachable!("switch fences never return CreateReplay");
             }
             VersionFenceOutcome::Committed(version) => Ok(version_record_json(&version)),
+            VersionFenceOutcome::UndoCommitted(_) => unreachable!("version fences never undo"),
         }
     }
 

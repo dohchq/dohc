@@ -327,6 +327,8 @@ const VERSIONED_PARAM_SHAPES = {
   },
   [VERSIONED_METHOD.momentsGet]: { requiredStrings: ["momentId"] },
   [VERSIONED_METHOD.publicationApplied]: { requiredStrings: ["requestId", "momentId"] },
+  [VERSIONED_METHOD.historyOperations]: {requiredStrings: ["operationId"]},
+  [VERSIONED_METHOD.historyUndo]: {requiredStrings: ["operationId"], optionalJson: ["author"]},
   [VERSIONED_METHOD.historyPage]: {
     requiredStrings: ["workspaceId"],
     optionalStrings: ["versionId", "objectId"],

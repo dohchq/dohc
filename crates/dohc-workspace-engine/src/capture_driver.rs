@@ -1372,6 +1372,7 @@ async fn manifest_seed(
     root: &Path,
     actor: &ActorHandle,
     workspace_id: &str,
+    operation_id: Option<&str>,
 ) -> Result<ManifestSeed, RuntimeError> {
     let version_id = match actor.active_version_id(workspace_id.to_owned()).await {
         Ok(version_id) => version_id,
@@ -1380,9 +1381,17 @@ async fn manifest_seed(
         }
         Err(error) => return Err(error),
     };
-    let entries = actor
+    let mut entries = actor
         .capture_manifest_seed(workspace_id.to_owned(), version_id)
         .await?;
+    if let Some(operation) = operation_id {
+        // Authored heads must enter as Changed so outside edits can be captured.
+        entries.extend(
+            actor
+                .history_operation_capture_seed(workspace_id.to_owned(), operation.to_owned())
+                .await?,
+        );
+    }
     if entries.is_empty() {
         return Ok(ManifestSeed::Existing(None));
     }
@@ -2052,7 +2061,7 @@ impl DriverEnv for RealEnv {
         // layer claims to be current).
         let fingerprint_before_seed = policy_fingerprint(&self.root);
         let (seed, seed_loaded) =
-            match manifest_seed(&self.root, &self.actor, &self.workspace_id).await {
+            match manifest_seed(&self.root, &self.actor, &self.workspace_id, None).await {
                 Ok(seed) => (seed, true),
                 Err(_) => {
                     // Empty is the conservative capture fallback, but a failed
@@ -2333,6 +2342,7 @@ pub(crate) async fn reconcile_full_for_switch(
     status: &Arc<DriverStatus>,
     self_writes: &SelfWriteSuppression,
     author_json: Option<String>,
+    operation_id: Option<&str>,
     provenance: CaptureProvenance,
     events: EngineEvents,
     token: CancellationToken,
@@ -2340,7 +2350,7 @@ pub(crate) async fn reconcile_full_for_switch(
     if token.is_cancelled() {
         return Err(SwitchReconcileError::Cancelled);
     }
-    let seed = manifest_seed(root, actor, workspace_id)
+    let seed = manifest_seed(root, actor, workspace_id, operation_id)
         .await
         .map_err(|_| SwitchReconcileError::Unavailable)?
         .into_scan_seed();

@@ -536,6 +536,32 @@ impl EngineService {
         Ok(encode_moment_page(&page)?.into_json())
     }
 
+    pub(super) async fn history_operation(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase", deny_unknown_fields)]
+        struct Params {
+            operation_id: String,
+        }
+        let params: Params = parse(params)?;
+        let open = self.open(handle.as_ref())?;
+        let cancellation = OperationCancellation::new(ctx);
+        let result = Self::read_under_ctx(
+            &cancellation,
+            "history.operations",
+            open.actor
+                .history_operation(open.workspace_id.clone(), params.operation_id),
+        )
+        .await?;
+        Ok(
+            json!({"operationId":result.operation_id,"versionId":result.version_id,"moments":result.moments}),
+        )
+    }
+
     pub(super) async fn history_page(
         &self,
         ctx: &RequestContext,

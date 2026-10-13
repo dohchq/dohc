@@ -78,6 +78,9 @@ pub enum DomainError {
     CaptureNotOwned,
 
     /// A rename/rollback restore path is already occupied by another object.
+    #[error("Undo refused: {reason}: {path}")]
+    UndoRefused { path: String, reason: &'static str },
+
     #[error("target path already exists")]
     TargetPathExists,
 
@@ -231,6 +234,7 @@ impl DomainError {
             DomainError::TextHeadNotBinary => "text-head-not-binary",
             DomainError::CaptureNotOwned => "capture-not-owned",
             DomainError::WritePreconditionFailed { .. } => "write-precondition-failed",
+            DomainError::UndoRefused { .. } => "undo-refused",
             DomainError::TargetPathExists => "target-path-exists",
             DomainError::LiveDocumentBindingActive => "live-document-binding-active",
             DomainError::ForkBaseNotFound => "fork-base-not-found",

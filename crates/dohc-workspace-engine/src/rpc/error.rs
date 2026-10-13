@@ -102,6 +102,9 @@ fn store_busy(error: &RuntimeError) -> bool {
 }
 
 pub(super) fn map_runtime(error: RuntimeError) -> WireError {
+    if let RuntimeError::Domain(DomainError::UndoRefused { .. }) = &error {
+        return WireError::new(ErrorCode::Conflict, error.to_string());
+    }
     if let RuntimeError::CaptureFileHeld { path } = &error {
         return WireError::new(ErrorCode::Conflict, format!("capture-file-held: {path}"));
     }

@@ -408,3 +408,116 @@ async fn fix1_released_path_drains_despite_sibling_io_failure() {
     );
     assert_eq!(disk, "Representable.\n");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn history_operation_fence_scopes_capture_holds_and_preserves_ownership() {
+    for affected in [true, false] {
+        let f = Fixture::new().await;
+        let from = if affected {
+            write_file(f.scratch.path(), HELD, SEED.as_bytes());
+            f.scan().await;
+            HELD
+        } else {
+            "sibling.txt"
+        };
+        let op = "dohc-operation:held-fence";
+        let hold = f.call("capture.hold", json!({"operationId":op})).await["holdId"].clone();
+        std::fs::rename(
+            f.scratch.path().join(from),
+            f.scratch.path().join("moved.md"),
+        )
+        .unwrap();
+        call_keyed(&f.transport, &f.handle, 20, "versionedText.rename", "rename-held", json!({
+            "versionId":"main", "origin":"api", "fromPath":from, "toPath":"moved.md", "captureHoldId":hold
+        })).await;
+        f.call("capture.release", json!({"holdId":hold})).await;
+        let db = rusqlite::Connection::open(engine_db_path(&f.scratch).unwrap()).unwrap();
+        let count = || {
+            db.query_row(
+                "SELECT COUNT(*) FROM moments WHERE workspace_id=?1",
+                [WS],
+                |r| r.get::<_, i64>(0),
+            )
+            .unwrap()
+        };
+        let held_before = f.status().await["heldFiles"].clone();
+        if affected {
+            write_file(f.scratch.path(), "moved.md", outside().as_bytes());
+            let before = count();
+            let error = f
+                .transport
+                .call(
+                    RequestContext::unbounded(),
+                    keyed_request(
+                        21,
+                        "history.undo",
+                        Some(f.handle.clone()),
+                        "undo-held",
+                        json!({"operationId":op}),
+                    ),
+                )
+                .await
+                .unwrap_err();
+            assert!(
+                error.message.contains("capture hold") && error.message.contains("moved.md"),
+                "{error:?}"
+            );
+            assert_eq!(count(), before, "refused inverse appends no compensators");
+            let held = f.status().await["heldFiles"].clone();
+            let object: String = db
+                .query_row(
+                    "SELECT object_id FROM snapshots WHERE workspace_id=?1 AND path='moved.md'",
+                    [WS],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(held[0]["objectId"], object);
+            assert_eq!(held[0]["sourceVersionId"], "main");
+            assert_eq!(
+                held[0]["observedSha256"],
+                dohc_engine_storage::hex_sha256(outside().as_bytes())
+            );
+            f.transport
+                .call(
+                    RequestContext::unbounded(),
+                    keyed_request(
+                        22,
+                        "history.undo",
+                        Some(f.handle.clone()),
+                        "undo-held",
+                        json!({"operationId":op}),
+                    ),
+                )
+                .await
+                .unwrap_err();
+            assert_eq!(f.status().await["heldFiles"], held);
+            assert_eq!(count(), before);
+            assert_eq!(
+                std::fs::read_to_string(f.scratch.path().join("moved.md")).unwrap(),
+                outside()
+            );
+            assert!(!f.scratch.path().join(HELD).exists());
+        } else {
+            let result = call_keyed(
+                &f.transport,
+                &f.handle,
+                21,
+                "history.undo",
+                "undo-unrelated",
+                json!({"operationId":op}),
+            )
+            .await;
+            assert_eq!(result["materialized"], true);
+            assert_eq!(f.status().await["heldFiles"], held_before);
+            assert_eq!(
+                std::fs::read_to_string(f.scratch.path().join("sibling.txt")).unwrap(),
+                "Sibling.\n"
+            );
+            assert_eq!(
+                std::fs::read_to_string(f.scratch.path().join(HELD)).unwrap(),
+                outside()
+            );
+        }
+        f.close().await;
+    }
+}

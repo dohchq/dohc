@@ -1347,6 +1347,7 @@ async fn an_unrepresentable_replicated_record_never_enters_the_deferred_count() 
             &harness.status,
             &harness.self_writes,
             None,
+            None,
             CaptureProvenance::default(),
             EngineEvents::default(),
             CancellationToken::new(),
@@ -1428,7 +1429,7 @@ async fn capture_file_hold_capture_and_idle_cost() {
             .unwrap();
         }
         drop(store);
-        let seed = manifest_seed(&harness.root, &harness.actor, WORKSPACE_ID)
+        let seed = manifest_seed(&harness.root, &harness.actor, WORKSPACE_ID, None)
             .await
             .unwrap();
         let files = FilesActorCloseGuard::new(
@@ -1538,6 +1539,7 @@ async fn a_switch_refuses_while_a_new_file_is_held_unrecorded() {
             &harness.leases,
             &harness.status,
             &harness.self_writes,
+            None,
             None,
             CaptureProvenance::default(),
             EngineEvents::default(),
@@ -1766,7 +1768,7 @@ async fn fix1_no_hold_capture_and_idle_cost() {
             .unwrap();
         }
         drop(store);
-        let seed = manifest_seed(&harness.root, &harness.actor, WORKSPACE_ID)
+        let seed = manifest_seed(&harness.root, &harness.actor, WORKSPACE_ID, None)
             .await
             .unwrap();
         let files = FilesActorCloseGuard::new(

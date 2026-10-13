@@ -285,3 +285,13 @@ describe("metadata-only History pages", () => {
     expect(() => decodeVersionedResult(VERSIONED_METHOD.historyPage, { ...page, moments: [{ ...metadata, [key]: "body" }] })).toThrow(ProtocolShapeError);
   });
 });
+
+const operationMoment = {momentId:"inverse", objectId:"file", operation:"rename", path:"old.md", beforePath:"new.md", momentOrder:3};
+const operationResult = {operationId:"dohc-operation:minted", versionId:"main", moments:[operationMoment]};
+it.each([VERSIONED_METHOD.historyOperations, VERSIONED_METHOD.historyUndo])("decodes %s as references and outcomes only", method => {
+  const result = method===VERSIONED_METHOD.historyUndo ? {...operationResult,deduped:true,materialized:false} : operationResult;
+  expect(decodeVersionedResult(method,result)).toEqual(result);
+  for (const field of ["beforeText","afterText","payload","bytes"]) {
+    expect(()=>decodeVersionedResult(method,{...result,moments:[{...operationMoment,[field]:"retained body"}]})).toThrow(ProtocolShapeError);
+  }
+});

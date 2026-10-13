@@ -574,6 +574,252 @@ mod capture_file_hold_tests {
         );
     }
 
+    fn operation_rename(store: &mut EngineStore) {
+        VersionedTextStore::new(store)
+            .rename_text_file_with(
+                &dohc_engine_domain::RenameTextFile {
+                    workspace_id: "hold-proof".into(),
+                    version_id: "main".into(),
+                    from_path: "held.md".into(),
+                    to_path: "moved.md".into(),
+                    moment_id: "operation-rename".into(),
+                    request_id: None,
+                    metadata_origin: "api".into(),
+                    metadata_summary: None,
+                    metadata_correlation_id: Some("dohc-operation:hold-proof".into()),
+                    author_json: None,
+                    now_ms: 4,
+                },
+                &NoFaults,
+                |tx, result| {
+                    dohc_engine_sync::reconcile_local_resulting_head_in_tx(
+                        tx,
+                        "hold-proof",
+                        "main",
+                        &result.object.object_id,
+                        dohc_engine_sync::ResultingHead::Text {
+                            path: "moved.md",
+                            text: &result.after.text,
+                        },
+                        None,
+                        None,
+                        4,
+                    )
+                    .map_err(|e| {
+                        DomainError::Storage(StorageError::persist_public(std::io::Error::other(e)))
+                    })?;
+                    Ok(())
+                },
+            )
+            .unwrap();
+    }
+    fn operation_undo(
+        store: &mut EngineStore,
+        root: &std::path::Path,
+        faults: &dyn FaultInjector,
+    ) -> Result<super::super::history_operations::HistoryUndoResult, RuntimeError> {
+        super::super::history_operations::history_undo_on_store(
+            store,
+            "hold-proof",
+            "dohc-operation:hold-proof",
+            "undo-hold-proof",
+            None,
+            root,
+            &(),
+            faults,
+            10,
+        )
+    }
+    #[test]
+    fn history_operation_held_rename_refuses_without_compensators_or_hold_changes() {
+        let (scratch, mut store, mut refused) = seeded();
+        operation_rename(&mut store);
+        refused.path = "moved.md".into();
+        refused.claim_foreign_head = true;
+        std::fs::write(scratch.path().join("moved.md"), &refused.text).unwrap();
+        assert_eq!(
+            offer(&mut store, &refused).unwrap_err().code(),
+            "capture-file-held"
+        );
+        let before = store
+            .read_with(|conn| capture_file_holds::list_in(conn, "hold-proof"))
+            .unwrap();
+        let n: i64 = store
+            .read_with(|conn| conn.query_row("SELECT COUNT(*) FROM moments", [], |r| r.get(0)))
+            .unwrap();
+        assert!(
+            matches!(operation_undo(&mut store,scratch.path(),&NoFaults),Err(RuntimeError::Domain(DomainError::UndoRefused {path,reason:"capture hold"})) if path=="moved.md")
+        );
+        assert_eq!(
+            store
+                .read_with(|conn| capture_file_holds::list_in(conn, "hold-proof"))
+                .unwrap(),
+            before
+        );
+        assert_eq!(
+            store
+                .read_with(|conn| conn
+                    .query_row("SELECT COUNT(*) FROM moments", [], |r| r.get::<_, i64>(0)))
+                .unwrap(),
+            n
+        );
+        assert_eq!(
+            std::fs::read_to_string(scratch.path().join("moved.md")).unwrap(),
+            refused.text
+        );
+        assert!(!scratch.path().join("held.md").exists());
+    }
+    #[test]
+    fn history_operation_held_restoration_target_refuses_whole_undo() {
+        let (scratch, mut store, refused) = seeded();
+        VersionedTextStore::new(&mut store)
+            .delete_text_file(
+                &dohc_engine_domain::DeleteTextFile {
+                    workspace_id: "hold-proof".into(),
+                    version_id: "main".into(),
+                    path: "held.md".into(),
+                    moment_id: "operation-delete".into(),
+                    request_id: None,
+                    metadata_origin: "api".into(),
+                    metadata_summary: None,
+                    metadata_correlation_id: Some("dohc-operation:hold-proof".into()),
+                    author_json: None,
+                    now_ms: 4,
+                },
+                &NoFaults,
+            )
+            .unwrap();
+        std::fs::write(scratch.path().join("held.md"), &refused.text).unwrap();
+        assert_eq!(
+            offer(&mut store, &refused).unwrap_err().code(),
+            "capture-file-held"
+        );
+        let before = store
+            .read_with(|conn| capture_file_holds::list_in(conn, "hold-proof"))
+            .unwrap();
+        assert!(
+            matches!(operation_undo(&mut store,scratch.path(),&NoFaults),Err(RuntimeError::Domain(DomainError::UndoRefused {path,reason:"capture hold"})) if path=="held.md")
+        );
+        assert_eq!(
+            store
+                .read_with(|conn| capture_file_holds::list_in(conn, "hold-proof"))
+                .unwrap(),
+            before
+        );
+        assert_eq!(
+            store
+                .read_with(|conn| conn
+                    .query_row("SELECT COUNT(*) FROM moments", [], |r| r.get::<_, i64>(0)))
+                .unwrap(),
+            2
+        );
+        assert_eq!(
+            std::fs::read_to_string(scratch.path().join("held.md")).unwrap(),
+            refused.text
+        );
+    }
+    #[test]
+    fn history_operation_unrelated_hold_does_not_block_undo() {
+        let (scratch, mut store, refused) = seeded();
+        std::fs::write(scratch.path().join("held.md"), &refused.text).unwrap();
+        assert_eq!(
+            offer(&mut store, &refused).unwrap_err().code(),
+            "capture-file-held"
+        );
+        let before = store
+            .read_with(|conn| capture_file_holds::list_in(conn, "hold-proof"))
+            .unwrap();
+        offer(&mut store, &input("other.txt", "Other")).unwrap();
+        VersionedTextStore::new(&mut store)
+            .rename_text_file(
+                &dohc_engine_domain::RenameTextFile {
+                    workspace_id: "hold-proof".into(),
+                    version_id: "main".into(),
+                    from_path: "other.txt".into(),
+                    to_path: "renamed.txt".into(),
+                    moment_id: "operation-rename".into(),
+                    request_id: None,
+                    metadata_origin: "api".into(),
+                    metadata_summary: None,
+                    metadata_correlation_id: Some("dohc-operation:hold-proof".into()),
+                    author_json: None,
+                    now_ms: 4,
+                },
+                &NoFaults,
+            )
+            .unwrap();
+        std::fs::write(scratch.path().join("renamed.txt"), "Other").unwrap();
+        assert!(
+            operation_undo(&mut store, scratch.path(), &NoFaults)
+                .unwrap()
+                .materialized
+        );
+        assert_eq!(
+            store
+                .read_with(|conn| capture_file_holds::list_in(conn, "hold-proof"))
+                .unwrap(),
+            before
+        );
+        assert_eq!(
+            std::fs::read_to_string(scratch.path().join("other.txt")).unwrap(),
+            "Other"
+        );
+        assert_eq!(
+            std::fs::read_to_string(scratch.path().join("held.md")).unwrap(),
+            refused.text
+        );
+    }
+    #[test]
+    fn history_operation_restart_parked_placement_never_reports_restored() {
+        struct Crash;
+        impl FaultInjector for Crash {
+            fn poll(&self, p: dohc_engine_storage::FaultPoint) -> dohc_engine_storage::FaultAction {
+                if p == dohc_engine_storage::FaultPoint::StorageAfterCommitBeforeAck {
+                    dohc_engine_storage::FaultAction::Crash
+                } else {
+                    dohc_engine_storage::FaultAction::Continue
+                }
+            }
+        }
+        let (scratch, mut store, mut refused) = seeded();
+        refused.claim_foreign_head = true;
+        operation_rename(&mut store);
+        std::fs::write(scratch.path().join("moved.md"), "Before.\n").unwrap();
+        assert!(matches!(
+            operation_undo(&mut store, scratch.path(), &Crash),
+            Err(RuntimeError::OperationCrashed)
+        ));
+        drop(store);
+        let mut store = EngineStore::open(&engine_db_path(&scratch).unwrap(), 11).unwrap();
+        std::fs::write(scratch.path().join("held.md"), &refused.text).unwrap();
+        assert_eq!(
+            offer(&mut store, &refused).unwrap_err().code(),
+            "capture-file-held"
+        );
+        let before = store
+            .read_with(|conn| capture_file_holds::list_in(conn, "hold-proof"))
+            .unwrap();
+        let result = operation_undo(&mut store, scratch.path(), &NoFaults).unwrap();
+        assert!(result.deduped && !result.materialized);
+        assert_eq!(
+            store
+                .read_with(|conn| capture_file_holds::list_in(conn, "hold-proof"))
+                .unwrap(),
+            before
+        );
+        assert_eq!(
+            std::fs::read_to_string(scratch.path().join("held.md")).unwrap(),
+            refused.text
+        );
+        assert_eq!(
+            store
+                .read_with(|conn| conn
+                    .query_row("SELECT COUNT(*) FROM moments", [], |r| r.get::<_, i64>(0)))
+                .unwrap(),
+            3
+        );
+    }
+
     struct Root;
     impl WorkspaceRootGuard for Root {
         fn validate(&self, _: &std::path::Path) -> Result<(), RuntimeError> {
