@@ -84,6 +84,27 @@ describe("chat presentation admission", () => {
     expect(own.hue).toBe(row.hue);
     expect(own.self).toBe(true);
   });
+  it.each(["https://account.test?query=1", "https://account.test#fragment", "invalid"])("falls back to the installation hue for malformed account URL %s", (serverUrl) => {
+    expect(ownActorPresentation("device", { ...credentials, serverUrl })).toEqual(ownActorPresentation("device", null));
+  });
+  it("retains no unknown-author entries while keeping visible groups stable", async () => {
+    const workspaceId = "unknown-churn";
+    const r = request(false, workspaceId);
+    const alice = message({ authorUserId: "alice", author: { kind: "human", displayName: "Alice" } });
+    const first = await r.present(alice, "t");
+    const set = vi.spyOn(Map.prototype, "set");
+    try {
+      for (let i = 0; i < 2000; i++) {
+        await r.present(message({ authorUserId: String(i), author: { kind: "human", displayName: "Label " + i } }), "t");
+      }
+      expect(set.mock.calls.filter(([key]) => typeof key === "string" && key.startsWith('["unknown",'))).toHaveLength(0);
+    } finally { set.mockRestore(); }
+    expect(await request(false, workspaceId).present(alice, "t")).toEqual(first);
+    expect((await r.present(alice, "other-thread")).group).not.toBe(first.group);
+    expect((await request(false, "other-workspace").present(alice, "t")).group).not.toBe(first.group);
+    forgetWorkspacePresentation(workspaceId);
+    expect((await request(false, workspaceId).present(alice, "t")).group).not.toBe(first.group);
+  });
   it("groups unknowns by author id and visible name", async () => {
     const r = request(false);
     const alice = message({ authorUserId: undefined, author: { kind: "human", displayName: "Alice" } });

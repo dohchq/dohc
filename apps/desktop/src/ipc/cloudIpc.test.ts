@@ -152,6 +152,15 @@ async function harness() {
 }
 
 describe("registered cloud handlers", () => {
+  it.each(["https://account.example.test?query=1", "https://account.example.test#fragment"])("keeps cloud status available with malformed account URL %s", async (serverUrl) => {
+    const h = await harness();
+    h.cache.set({ ...credentials, serverUrl });
+    h.login.status.mockResolvedValue({ connected: true, email: credentials.email, serverUrl });
+    await expect(h.invoke(CHANNELS.cloudStatus)).resolves.toMatchObject({
+      connected: true, email: credentials.email, serverUrl,
+      ownPresentation: ownActorPresentation("device", null),
+    });
+  });
   it("registers the original sequence and rejects untrusted senders before any work", async () => {
     const h = await harness();
     expect([...h.handlers.keys()]).toEqual([
