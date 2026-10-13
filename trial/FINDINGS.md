@@ -25,7 +25,7 @@ Each account owns one workspace. On a given day 10% of workspaces are active, ea
 | A: one Hetzner CPX32 | $42.59 | The server. Memory for this profile is 2.83 GiB of 8. |
 | B1: the same cell as one Cloudflare container (standard-2) | $107.45 | Memory all month ($38.66), session host polls as Worker and Durable Object requests ($48.56) |
 | B2: one container per workspace, with measured inputs | $2,844.35 | 100 hosted workspaces awake all month: CPU $1,112, memory $726, Durable Object duration $448, requests $473 |
-| B2 projected after the session host changes below, including on-demand hosting | $166.45 | Memory while people work ($84), home cell, Durable Object duration |
+| B2 projected after the session host changes below, including on-demand hosting | $166.45 | Memory ($84, of which the home cell is $26), Durable Object duration ($37) |
 | C: relay as Durable Objects (paper) | $65.00 | Home cell and engine containers ($38), SQLite storage ($9) |
 
 [`trial/measure/cost.mjs`](measure/cost.mjs) computes every row from the inputs above, so a reader can change the profile and rerun it.
@@ -176,9 +176,9 @@ A container per workspace (B2) needs more. These come from a code map of the rel
 
 ## Risks
 
-- **Silent rollback.** Until acknowledged writes are durable outside the container, a host failure, out-of-memory kill, drain overrun, or child process that hangs on SIGTERM can roll them back without detection. The trial's supervisor never escalates a hung child to SIGKILL.
+- **Silent rollback.** Until acknowledged writes are durable outside the container, a host failure, out-of-memory kill, drain overrun, failed save, or child process that hangs on SIGTERM can roll them back without detection. The trial's supervisor never escalates a hung child to SIGKILL.
 - **Cost runaway.** One hosted share keeps its container and Durable Object awake and polling. Nothing fails, so only the bill shows it.
-- **Unauthenticated wakes.** The edge routes `/sync/<workspace>` before the relay checks a token, so any request with a new workspace ID starts a container. The trial's `max_instances` capped it. The edge must check the bearer or a workspace directory before it wakes a container.
+- **Unauthenticated wakes.** The edge routes `/sync/<workspace>` before the relay checks a token, so any request with a new workspace ID starts a container and leaves an archive in R2 when it stops. The trial's `max_instances` capped it. The edge must check the bearer or a workspace directory before it wakes a container.
 - **No tenant isolation.** A container per workspace separates load, not tenants, until credentials are scoped to the workspace.
 - **Path handling.** The Worker gates on the encoded path while Caddy routes on the cleaned path, so a crafted `/sync/..%2f` path may reach routes behind the gate. This is untested. The edge must normalize paths the way the router does.
 - **Mixed versions.** Worker code updates at once, while images and Durable Object code follow later. Releases must tolerate old images under new Worker code for minutes.
@@ -189,7 +189,7 @@ A container per workspace (B2) needs more. These come from a code map of the rel
 
 ## Option C on paper
 
-C rewrites the relay as one Durable Object per workspace, with SQLite storage and hibernating WebSockets. Under the same profile the model puts it at about $65 a month per 1,000 accounts. That covers $38 of container time for a home cell (accounts and share-web) and for engine containers that host live documents only while people work, $9 of SQLite storage above the 5 GB included, request charges under $7, and $6 of Durable Object duration, assuming relay objects hibernate 90% of the time people work.
+C rewrites the relay as one Durable Object per workspace, with SQLite storage and hibernating WebSockets. Under the same profile the model puts it at about $65 a month per 1,000 accounts. That covers $38 of container time for a home cell (accounts and share-web) and for engine containers that host live documents only while people work, $9 of SQLite storage above the 5 GB included, request charges under $7, $6 of Durable Object duration, and the $5 Workers Paid plan. It assumes relay objects hibernate 90% of the time people work.
 
 C's real cost is reimplementing about 33,000 lines of relay TypeScript, its storage format, and its permission checks in Worker code. Q1 rules that out, and so did the trial's own authorization. Settlement and live hosting stay in the Rust engine, so C does not remove containers.
 
@@ -221,3 +221,13 @@ Done on 2026-10-13 between 05:16 and 05:21 UTC:
   - The account's workers.dev subdomain `dohc.workers.dev`. Cloudflare can rename it but not delete it.
   - The Neon database, which Ice owns. It still holds the trial's accounts and tables.
 - **Local, removed:** the Compose project and its volumes, the driver volumes, and Tailscale route 8446.
+
+## Review
+
+- **GPT-6.1 Sol, the other model family, for correctness and simplification.**
+  - Round 1, at `1fabe2fa0`, found nine problems, eight of them blocking. All were accepted and fixed in `6659f75a4`. Sol recomputed the A, B1, and B2 rows by hand.
+  - Round 2, at `6659f75a4`, found no remaining blocking problems.
+  - The first round 1 attempt stalled, because Codex file reads on this host wait for approval. It was cancelled and resent with the evidence inline.
+- **Opus 5.5, for durability, security, and isolation.**
+  - Round 1, at `2e1af63d2`, found eight problems, three of them blocking. All were accepted and fixed in `6659f75a4`.
+  - Round 2, at `6659f75a4`, found no remaining blocking problems. Its four non-blocking wording fixes are applied in the commit that adds this section.
