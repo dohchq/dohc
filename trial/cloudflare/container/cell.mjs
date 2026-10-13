@@ -176,7 +176,8 @@ async function ready(name) {
   }
 }
 
-// Loopback-only trial endpoint for startup timings and per-process memory.
+// Trial endpoint for startup timings and per-process memory. Caddy exposes it
+// at /__trial/stats behind the Worker's trial key.
 function processes() {
   const rows = [];
   for (const pid of readdirSync('/proc').filter(name => /^\d+$/.test(name))) {

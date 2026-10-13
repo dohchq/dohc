@@ -1,0 +1,28 @@
+Local test of the save, restore, and generation guard in cell.mjs (2026-10-13, Docker Desktop).
+trial/measure/fake-state.mjs stood in for the Worker's state.trial outbound handler (parts in memory,
+generation record with the same "next = saved + 1" commit rule). Postgres was a local postgres:17.9-alpine.
+
+1. st-cell1, first boot (no saved generation)
+   {"trial":"phase","name":"restore generation=0 bytes=0","ms":34}
+   {"trial":"phase","name":"router","ms":5451}
+   /continuity/deployment.json namespace edb51b0b-71f2-4b09-8622-c3f33b5dc89d
+   docker stop -t 120 st-cell1 (SIGTERM):
+   {"trial":"phase","name":"save generation=1 bytes=48317 parts=1 saveMs=22","ms":27232}
+   fake-state: commit {"parts":1,"bytes":48317,"relayStamp":14,"saveMs":22,"generation":1}
+
+2. st-cell2, fresh container
+   {"trial":"phase","name":"restore generation=1 bytes=48317","ms":109}
+   Using the existing relay deployment. Startup will verify its continuity.
+   {"trial":"phase","name":"router","ms":3659}
+   /continuity/deployment.json namespace edb51b0b-71f2-4b09-8622-c3f33b5dc89d (same deployment)
+   docker kill st-cell2 (SIGKILL): no save line was logged.
+
+3. Stale archive injected by hand into fake-state:
+   PUT /parts/2/0 with the generation 1 archive bytes, then
+   POST /commit/2 {"parts":1,"bytes":48317,"relayStamp":99,"saveMs":0} -> 204
+   So the record claims generation 2 with stamp 99 over an archive whose relay stamp is 14.
+
+4. st-cell3, fresh container
+   Error: Restored relay stamp 14 is not the recorded 99.
+       at restore (file:///app/trial/cell.mjs:93:50)
+   container exit code 1 (no service started)

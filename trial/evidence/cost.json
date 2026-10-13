@@ -50,7 +50,7 @@
       "doDuration": 0,
       "r2": 0.6
     },
-    "B2 container per workspace (measured)": {
+    "B2 container per workspace, measured inputs": {
       "total": 2844.35,
       "plan": 5,
       "memory": 726.35,
@@ -61,7 +61,7 @@
       "doDuration": 447.56,
       "r2": 0.6
     },
-    "B2 after session host changes": {
+    "B2 projected after session host changes": {
       "total": 166.45,
       "plan": 5,
       "memory": 84.2,
@@ -73,13 +73,15 @@
       "r2": 0.6
     },
     "C relay as Durable Objects (paper)": {
-      "total": 28.69,
+      "total": 65,
       "plan": 5,
       "workerRequests": 3.48,
       "doRequests": 3.09,
       "doStorage": 9,
-      "doDuration": 0,
-      "sessionHostContainers": 8.12
+      "memory": 31.55,
+      "cpu": 4.48,
+      "disk": 2.06,
+      "doDuration": 6.35
     }
   }
 }

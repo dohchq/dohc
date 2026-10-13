@@ -90,12 +90,13 @@ const B2fixed = { plan: price.plan, ...containers(add(
   ...requests(clientRequests), ...doDuration(allActiveSeconds + MONTH_S), ...r2 };
 
 // C (paper): relay rewritten as one Durable Object per workspace with SQLite storage and
-// hibernating WebSockets. Live hosting still needs the Rust engine, so hosted documents
-// run in B2-fixed containers.
+// hibernating WebSockets, active 10% of the time people work. Live hosting still needs the
+// Rust engine, so hosted documents run in containers while people work, and accounts and
+// share-web keep a home cell.
 const hostedActiveSeconds = activeWorkspaceDays * profile.hostedShare * awakeSecondsPerActiveDay;
 const C = { plan: price.plan, ...requests(clientRequests), doStorage: over(storageGB, price.includedDoSqlGB) * price.doSqlGBMonth,
-  ...doDuration(activeWorkspaceDays * profile.awakeHoursPerActiveDay * HOUR_S * 0.1),
-  sessionHostContainers: total(containers(usage('basic', hostedActiveSeconds, profile.activeVcpu))) };
+  ...containers(add(usage('basic', hostedActiveSeconds, profile.activeVcpu), usage('standard-1', MONTH_S, measured.homeCellVcpu))),
+  ...doDuration(activeWorkspaceDays * profile.awakeHoursPerActiveDay * HOUR_S * 0.1 + hostedActiveSeconds + MONTH_S) };
 
 console.log(JSON.stringify({
   profile, measured,
@@ -104,8 +105,8 @@ console.log(JSON.stringify({
   monthlyUsd: {
     'A Hetzner CPX32': { total: total(A), ...rounded(A) },
     'B1 one Cloudflare cell': { total: total(B1), ...rounded(B1) },
-    'B2 container per workspace (measured)': { total: total(B2), ...rounded(B2) },
-    'B2 after session host changes': { total: total(B2fixed), ...rounded(B2fixed) },
+    'B2 container per workspace, measured inputs': { total: total(B2), ...rounded(B2) },
+    'B2 projected after session host changes': { total: total(B2fixed), ...rounded(B2fixed) },
     'C relay as Durable Objects (paper)': { total: total(C), ...rounded(C) },
   },
 }, null, 2));
