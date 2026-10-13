@@ -704,6 +704,7 @@ function makeBaseBridge(
       crashReportCallbacks.add(listener);
       return () => crashReportCallbacks.delete(listener);
     }),
+    onUsageRecordStopped: vi.fn((_listener: () => void) => () => {}),
     emitMenuCommand: (command: MenuCommand) => menuCallback?.(command),
     onUpdateState: vi.fn(() => () => {}),
     // Content search (E5.0): the shell subscribes on mount.

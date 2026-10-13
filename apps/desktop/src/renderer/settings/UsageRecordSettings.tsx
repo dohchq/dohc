@@ -8,6 +8,7 @@ import { ConfirmDialog, ConfirmDialogCard } from "../ui/ConfirmDialog";
 import { CopyButton } from "../ui/CopyButton";
 import { EmptyState, SecondaryButton } from "../ui/controls";
 import { SkeletonRows } from "../ui/SkeletonRows";
+import { unreadableNotice, unreadableWords } from "../shell/usageRecordStops";
 import { SwitchControl } from "./SettingRow";
 
 // The usage record: counts dohc keeps on this computer and never sends. It is
@@ -24,15 +25,11 @@ const DOORS: readonly { door: Door; name: string }[] = [
 ];
 export const NOT_COUNTED = "Not counted by this version";
 const SWITCH_LABEL = "Keep a usage record";
-const unreadableWords = (code: string) => `dohc could not read the usage record (${code}).`;
 // What to do next. A file dohc cannot decode can be set aside; one it cannot
 // open needs the person to fix it.
 const unreadableHint = (code: string) => code === INVALID_USAGE_RECORD
   ? "This version of dohc does not recognize its contents. Start a new record, and dohc keeps this file in the same folder."
   : "Fix the file or its permissions at the path below, then try again.";
-const unreadableNotice = (code: string) => `${unreadableWords(code)} ${code === INVALID_USAGE_RECORD
-  ? "Start a new record in Privacy, or fix the file and try again."
-  : "Fix the file or its permissions, then try again."}`;
 
 function total(row: UsageRecordRow): number {
   return DOORS.reduce((sum, { door }) => sum + row.doors[door].count, 0);
@@ -272,6 +269,8 @@ function SetAsideRow(props: { name: string; busy?: boolean | undefined; onRestor
   );
 }
 
+type ReportFailure = (message: string, cause?: unknown, retry?: () => Promise<void>) => void;
+
 /** Clear's confirm. It offers Copy first, because Clear cannot be undone. */
 export function UsageRecordClearConfirm(props: { record: Readable; card?: boolean; onCancel(): void; onConfirm(): void }) {
   const Dialog = props.card ? ConfirmDialogCard : ConfirmDialog;
@@ -293,9 +292,7 @@ export function UsageRecordClearConfirm(props: { record: Readable; card?: boolea
  * change, and never polls. A read that answers after Privacy closed, or after
  * a newer read started, is dropped, unless Try again in Notices asked for it
  * after Privacy closed. */
-export function UsageRecordSettings(props: {
-  onError?: ((message: string, cause?: unknown, retry?: () => Promise<void>) => void) | undefined;
-}) {
+export function UsageRecordSettings(props: { onError?: ReportFailure | undefined }) {
   const [view, setView] = useState<UsageRecordView>({ status: "loading" });
   const [busy, setBusy] = useState(false);
   const [confirming, setConfirming] = useState(false);

@@ -6115,6 +6115,8 @@ export const UsageRecordResult = z.discriminatedUnion("status", [
 ]);
 export type UsageRecordResult = z.infer<typeof UsageRecordResult>;
 
+export const UsageRecordStoppedEvent = z.undefined();
+
 export const usageRecordOperations = {
   readUsageRecord: {
     capabilityId: "usage.read",
@@ -7201,6 +7203,9 @@ export interface DohcDesktopBridge
   // Live push: the crash report changed. A poke, not the report; the
   // subscriber reads it again. Returns an unsubscribe function.
   onCrashReportChanged(listener: () => void): () => void;
+  // Live push: a timed save stopped counting, because the usage record
+  // changed outside dohc. A poke; readUsageRecord reads the file again.
+  onUsageRecordStopped(listener: () => void): () => void;
   // Live push: the notices listNotices returns changed. A poke, not the
   // rows. Returns an unsubscribe function.
   onNoticesChanged(listener: () => void): () => void;

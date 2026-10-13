@@ -33,7 +33,14 @@ function setup(options: { readError?: NodeJS.ErrnoException } = {}) {
       if (!disk.has(from)) throw Object.assign(new Error("missing"), { code: "ENOENT" });
       disk.set(to, disk.get(from)!); disk.delete(from);
     }),
+    link: vi.fn(async (from: string, to: string) => {
+      if (disk.has(to)) throw Object.assign(new Error("exists"), { code: "EEXIST" });
+      disk.set(to, disk.get(from)!);
+    }),
+    unlink: vi.fn(async (path: string) => { disk.delete(path); }),
     rm: vi.fn(async (path: string) => { disk.delete(path); }),
+    sync: vi.fn(async () => {}),
+    syncDirectory: vi.fn(async () => {}),
   } satisfies UsageFileSystem;
   const store = createUsageStore({ stateDir: () => "state", appVersion: "0.1.0", coverage: DESKTOP_USAGE_COVERAGE, io });
   stores.push(store);
@@ -145,7 +152,8 @@ describe("usage record bridge", () => {
     expect(disk.get(FILE)).toBe(raw);
     expect(io.writeFile).not.toHaveBeenCalled();
     expect(io.rename).not.toHaveBeenCalled();
-    expect(io.rm).not.toHaveBeenCalled();
+    // A launch clears only a leftover swap beside the record.
+    expect(io.rm.mock.calls.filter(([file]) => !file.startsWith(`${FILE}.incoming`))).toEqual([]);
   });
 
   it("starts a new record Off beside an undecodable one, names it, and restores it, never counting itself", async () => {

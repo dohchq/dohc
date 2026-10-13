@@ -4,6 +4,8 @@
     "desktop:read-usage-record",
     "desktop:restore-usage-record",
     "desktop:set-usage-record-enabled",
-    "desktop:start-usage-record"
-  ]
+    "desktop:start-usage-record",
+    "desktop:usage-record-stopped"
+  ],
+  "channelKeyAdditions": ["usageRecordStopped"]
 }

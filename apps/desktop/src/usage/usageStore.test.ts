@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import * as fs from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -26,6 +27,8 @@ function memoryStore(initial: unknown = seed(), buildMapping = mapping) {
     if (dead || crash?.(operation, path)) { dead = true; throw new Error("dohc stopped"); }
   };
   const missing = () => Object.assign(new Error("missing"), { code: "ENOENT" });
+  // Names whose contents were written but never synced. A power cut empties them.
+  const unsynced = new Set<string>();
   const io = {
     readFile: vi.fn(async (path: string) => {
       alive("readFile", path);
@@ -37,20 +40,36 @@ function memoryStore(initial: unknown = seed(), buildMapping = mapping) {
     copyFile: vi.fn(async (from: string, to: string) => {
       alive("copyFile", from);
       if (!disk.has(from)) throw missing();
-      disk.set(to, disk.get(from)!);
+      disk.set(to, disk.get(from)!); unsynced.add(to);
     }),
     mkdir: vi.fn(async () => {}),
-    writeFile: vi.fn(async (path: string, data: string) => { alive("writeFile", path); disk.set(path, data); }),
+    writeFile: vi.fn(async (path: string, data: string) => { alive("writeFile", path); disk.set(path, data); unsynced.add(path); }),
     rename: vi.fn(async (from: string, to: string) => {
       alive("rename", from);
       if (!disk.has(from)) throw missing();
       disk.set(to, disk.get(from)!); disk.delete(from);
+      if (unsynced.delete(from)) unsynced.add(to); else unsynced.delete(to);
     }),
-    rm: vi.fn(async (path: string) => { alive("rm", path); disk.delete(path); }),
+    link: vi.fn(async (from: string, to: string) => {
+      alive("link", from);
+      if (!disk.has(from)) throw missing();
+      if (disk.has(to)) throw Object.assign(new Error("exists"), { code: "EEXIST" });
+      disk.set(to, disk.get(from)!);
+      if (unsynced.has(from)) unsynced.add(to);
+    }),
+    unlink: vi.fn(async (path: string) => {
+      alive("unlink", path);
+      if (!disk.delete(path)) throw missing();
+      unsynced.delete(path);
+    }),
+    rm: vi.fn(async (path: string) => { alive("rm", path); disk.delete(path); unsynced.delete(path); }),
+    sync: vi.fn(async (path: string) => { alive("sync", path); unsynced.delete(path); }),
+    syncDirectory: vi.fn(async (directory: string) => { alive("syncDirectory", directory); }),
   } satisfies UsageFileSystem;
   const stateDir = vi.fn(() => "isolated-state");
   const onWriteFailure = vi.fn();
-  const store = createUsageStore({ stateDir, appVersion: "0.1.0", coverage: buildMapping, io, onWriteFailure });
+  const onStop = vi.fn();
+  const store = createUsageStore({ stateDir, appVersion: "0.1.0", coverage: buildMapping, io, onWriteFailure, onStop });
   stores.push(store);
   const restart = (appVersion = "0.1.0", coverage = buildMapping) => {
     if (dead) {
@@ -64,7 +83,13 @@ function memoryStore(initial: unknown = seed(), buildMapping = mapping) {
     return next;
   };
   const crashOn = (match: (operation: string, path: string) => boolean) => { crash = match; };
-  return { store, io, disk, path, stateDir, onWriteFailure, restart, crashOn,
+  // The power fails: the process stops, and what it never synced comes back empty.
+  const powerCut = () => {
+    dead = true;
+    for (const file of unsynced) disk.set(file, "");
+    unsynced.clear();
+  };
+  return { store, io, disk, path, stateDir, onWriteFailure, onStop, restart, crashOn, powerCut,
     saved: () => UsageSnapshot.parse(JSON.parse(disk.get(path)!)) };
 }
 beforeEach(() => { vi.useFakeTimers(); vi.setSystemTime(new Date(2026, 9, 7, 12)); });
@@ -76,7 +101,8 @@ describe("local usage store", () => {
     expect(stateDir).not.toHaveBeenCalled();
     expect(io.readFile).not.toHaveBeenCalled();
     await Promise.all([store.load(), store.load()]);
-    expect(io.readFile).toHaveBeenCalledTimes(1);
+    // A missing record, then the swap a first run never left to finish.
+    expect(io.readFile).toHaveBeenCalledTimes(3);
     expect((await store.read()).enabled).toBe(true);
     const rows = await store.query({ ...query(), pairs: [pair, { capabilityId: "file.list", door: "mcp" },
       { capabilityId: "file.read", door: "mcp" }, { capabilityId: "file.search", door: "mcp" },
@@ -315,7 +341,8 @@ describe("local usage store", () => {
     await next.close();
     expect(io.writeFile).not.toHaveBeenCalled();
     expect(io.rename).not.toHaveBeenCalled();
-    expect(io.rm).not.toHaveBeenCalled();
+    // A launch clears only a leftover swap beside the record.
+    expect(io.rm.mock.calls.filter(([file]) => !file.startsWith(`${path}.incoming`))).toEqual([]);
     expect(disk.get(path)).toBe(raw);
     expect(vi.getTimerCount()).toBe(0);
   });
@@ -407,12 +434,12 @@ describe("local usage store", () => {
     expect((await store.read()).counts).toEqual([{ ...pair, day: today(), count: 1 }]);
     expect(store.recordSuccess(pair)).toBe(true);
   });
-  // Fails the next rename of `from`, and only that one.
-  function failRename(io: ReturnType<typeof memoryStore>["io"], from: string, error = new Error("file in use")) {
-    const rename = io.rename.getMockImplementation()!;
-    io.rename.mockImplementation(async (source, target) => {
-      if (source !== from) return rename(source, target);
-      io.rename.mockImplementation(rename);
+  // Fails the next move of `from`, and only that one.
+  function failMove(io: ReturnType<typeof memoryStore>["io"], from: string, error = new Error("file in use")) {
+    const link = io.link.getMockImplementation()!;
+    io.link.mockImplementation(async (source, target) => {
+      if (source !== from) return link(source, target);
+      io.link.mockImplementation(link);
       throw error;
     });
   }
@@ -421,7 +448,7 @@ describe("local usage store", () => {
     const at = (number: number) => join("isolated-state", usageAsideName(number));
     disk.set(path, "not JSON");
     await store.load();
-    failRename(io, path);
+    failMove(io, path);
     await expect(store.startNewRecord()).rejects.toThrow("file in use");
     expect(disk.get(path)).toBe("not JSON");
     expect(disk.has(at(1))).toBe(false);
@@ -430,11 +457,13 @@ describe("local usage store", () => {
     await store.startNewRecord();
     const newer = disk.get(path);
     // The newer record moves aside, the older one cannot move in, so the newer returns.
-    failRename(io, `${path}.incoming`);
+    failMove(io, `${path}.incoming`);
     await expect(store.restoreSetAside()).rejects.toThrow("file in use");
     expect(disk.get(path)).toBe(newer);
     expect(disk.get(at(1))).toBe("not JSON");
     expect(disk.has(at(2))).toBe(false);
+    // A rolled-back Restore leaves nothing a later launch could install.
+    expect([...disk.keys()].filter(file => file.includes(".incoming"))).toEqual([]);
     expect((await store.read()).enabled).toBe(false);
   });
   it("reports a Start whose new record could not be written, and moves nothing", async () => {
@@ -448,7 +477,8 @@ describe("local usage store", () => {
     await expect(store.read()).rejects.toMatchObject({ code: "INVALID_USAGE_RECORD" });
     expect(store.recordSuccess(pair)).toBe(false);
   });
-  it.each([1, 2, 3, 4, 5, 6])("never turns recording on after dohc stops at file change %i of a Start", async step => {
+  const steps = Array.from({ length: 22 }, (_, index) => index + 1);
+  it.each(steps)("never turns recording on after dohc stops at file change %i of a Start", async step => {
     const { store, disk, path, restart, crashOn } = memoryStore();
     disk.set(path, "not JSON");
     await store.load();
@@ -462,7 +492,7 @@ describe("local usage store", () => {
     expect(next.recordSuccess(pair)).toBe(false);
     expect([...disk.values()]).toContain("not JSON");
   });
-  it.each([1, 2, 3, 4, 5, 6, 7])("keeps both records after dohc stops at file change %i of a Restore", async step => {
+  it.each(steps)("keeps both records after dohc stops at file change %i of a Restore", async step => {
     const older = seed(false);
     older.counts.push({ ...pair, day: today(), count: 7 });
     const { store, disk, path, restart, crashOn } = memoryStore();
@@ -519,17 +549,92 @@ describe("local usage store", () => {
     disk.set(join("isolated-state", usageAsideName(1)), JSON.stringify(older));
     await store.load();
     const aside = join("isolated-state", usageAsideName(2));
-    const rename = io.rename.getMockImplementation()!;
-    io.rename.mockImplementation(async (source, target) => {
+    const link = io.link.getMockImplementation()!;
+    io.link.mockImplementation(async (source, target) => {
       if (source === `${path}.incoming` || source === aside) throw new Error("file in use");
-      return rename(source, target);
+      return link(source, target);
     });
     await expect(store.restoreSetAside()).rejects.toThrow("could not put either usage record back in place");
     expect(disk.has(path)).toBe(false);
     expect(store.recordSuccess(pair)).toBe(false);
-    io.rename.mockImplementation(rename);
+    io.link.mockImplementation(link);
     // The next read finishes the swap from the record waiting beside it.
     expect((await store.read()).counts.map(row => row.count)).toEqual([7]);
+  });
+  it.each(["one dohc can read", "one dohc cannot decode"])("syncs a restored record, %s, before it moves, so a power cut keeps it", async kind => {
+    const older = kind === "one dohc can read" ? JSON.stringify({ ...seed(false), counts: [{ ...pair, day: today(), count: 7 }] }) : "not JSON";
+    const { store, io, disk, path, restart, powerCut } = memoryStore();
+    disk.set(join("isolated-state", usageAsideName(1)), older);
+    await store.load();
+    await store.restoreSetAside();
+    const incoming = io.sync.mock.calls.findIndex(([file]) => file === `${path}.incoming`);
+    expect(incoming).toBeGreaterThanOrEqual(0);
+    expect(io.sync.mock.invocationCallOrder[incoming]).toBeLessThan(Math.min(...io.link.mock.invocationCallOrder));
+    powerCut();
+    const next = restart();
+    if (older === "not JSON") expect(disk.get(path)).toBe("not JSON");
+    else expect((await next.read()).counts.map(row => row.count)).toEqual([7]);
+  });
+  it("keeps a file another program puts at the record's name during a Restore", async () => {
+    const { store, io, disk, path } = memoryStore();
+    const older = join("isolated-state", usageAsideName(1));
+    disk.set(older, "older");
+    await store.load();
+    await store.flush();
+    const active = disk.get(path);
+    // The file appears after the active record moves aside, before the restored one moves in.
+    const appear = (from: string) => { if (from === `${path}.incoming`) disk.set(path, "someone else's"); };
+    const link = io.link.getMockImplementation()!;
+    io.link.mockImplementation(async (from, to) => { appear(from); return link(from, to); });
+    const rename = io.rename.getMockImplementation()!;
+    io.rename.mockImplementation(async (from, to) => { appear(from); return rename(from, to); });
+    await expect(store.restoreSetAside()).rejects.toThrow();
+    expect(disk.get(path)).toBe("someone else's");
+    expect(disk.get(join("isolated-state", usageAsideName(2)))).toBe(active);
+    expect(disk.get(older)).toBe("older");
+    expect(store.recordSuccess(pair)).toBe(false);
+  });
+  it("discards a leftover incoming record when the record is in place, and when a person deleted it", async () => {
+    const older = JSON.stringify({ ...seed(), counts: [{ ...pair, day: "2026-10-07", count: 7 }] });
+    const sha = (text: string) => createHash("sha256").update(text).digest("hex");
+    const present = memoryStore();
+    present.disk.set(`${present.path}.incoming`, older);
+    present.disk.set(`${present.path}.incoming.ready`, sha(older));
+    await present.store.load();
+    expect([...present.disk.keys()].filter(file => file.includes(".incoming"))).toEqual([]);
+
+    // Never committed, or committed to other bytes: a person who deleted the record starts fresh.
+    for (const ready of [undefined, sha("other bytes")]) {
+      const deleted = memoryStore(null);
+      deleted.disk.set(`${deleted.path}.incoming`, older);
+      if (ready) deleted.disk.set(`${deleted.path}.incoming.ready`, ready);
+      expect((await deleted.store.read()).counts).toEqual([]);
+      expect([...deleted.disk.keys()].filter(file => file.includes(".incoming"))).toEqual([]);
+    }
+  });
+  it("tells main when a timed save stops counting, and leaves a control to report its own", async () => {
+    const { store, io, disk, path, onStop } = memoryStore();
+    await store.load();
+    store.recordSuccess(pair);
+    disk.set(path, JSON.stringify(seed(false)));
+    await vi.advanceTimersByTimeAsync(USAGE_WRITE_INTERVAL_MS);
+    expect(onStop).toHaveBeenCalledTimes(1);
+    expect(store.recordSuccess(pair)).toBe(false);
+    await store.read();
+    // The file changes inside Clear, after its read. Clear reports that itself.
+    io.rm.mockImplementationOnce(async () => { disk.set(path, `${JSON.stringify(seed(false))} `); });
+    await expect(store.clear()).rejects.toThrow("changed outside dohc");
+    expect(onStop).toHaveBeenCalledTimes(1);
+  });
+  it("keeps unsaved counts through a read that fails for a moment, such as during a scan", async () => {
+    const { store, io } = memoryStore();
+    await store.load();
+    store.recordSuccess(pair);
+    store.recordSuccess(pair);
+    io.readFile.mockRejectedValueOnce(Object.assign(new Error("locked"), { code: "EBUSY" }));
+    await expect(store.read()).rejects.toMatchObject({ code: "EBUSY" });
+    expect((await store.read()).counts).toEqual([{ ...pair, day: today(), count: 2 }]);
+    expect(store.recordSuccess(pair)).toBe(true);
   });
   it("ignores interrupted temporary snapshots and can retry a failed Clear", async () => {
     const { store, io, saved, disk, path } = memoryStore();
