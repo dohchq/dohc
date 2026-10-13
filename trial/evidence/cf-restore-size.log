@@ -1,0 +1,17 @@
+ballast {"uptimeMs":2694,"generation":4,"timings":[{"name":"supervisor","ms":2},{"name":"restore generation=4 bytes=66238","ms":226},{"name":"initialize","ms":266},{"name":"sync-relay ready","ms":2169
+stopped after ~1s saved="saved":{"parts":1,"bytes":66229,"relayStamp":41,"saveMs":295,"generation":5}
+wake 200 8.007868s
+timings supervisor@2, restore generation=5 bytes=66229@2239, initialize@2283, sync-relay ready@4190, router@4198
+ballast {"uptimeMs":5272,"generation":5,"timings":[{"name":"supervisor","ms":2},{"name":"restore generation=5 bytes=66229","ms":2239},{"name":"initialize","ms":2283},{"name":"sync-relay ready","ms":41
+stopped after ~0s saved="saved":{"parts":1,"bytes":66236,"relayStamp":42,"saveMs":192,"generation":6}
+wake 200 8.078612s
+timings supervisor@2, restore generation=6 bytes=66236@2296, initialize@2336, sync-relay ready@4158, router@4166
+== rerun after rollout ready
+ballast {"mib":256,"ms":682,"bytes":{"/data":270111011,"/continuity":61679,"/host-data":8649}}
+stopped after ~24s "saved":{"parts":5,"bytes":268584797,"relayStamp":44,"saveMs":22937,"generation":8}
+wake 200 8.629340s
+timings supervisor@2, restore generation=8 bytes=268584797@4820, initialize@4864, sync-relay ready@6605, router@6613
+ballast {"mib":1024,"ms":2108,"bytes":{"/data":1075417379,"/continuity":61679,"/host-data":8649}}
+stopped after ~131s "saved":{"parts":17,"bytes":1074137136,"relayStamp":45,"saveMs":125884,"generation":9}
+wake 200 32.702619s
+timings supervisor@2, restore generation=9 bytes=1074137136@23575, initialize@23687, sync-relay ready@31683, router@31767

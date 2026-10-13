@@ -195,7 +195,7 @@ C has the lowest bill. Its real cost is reimplementing about 33,000 lines of rel
   - The load driver is [`trial/load/driver.ts`](load/driver.ts). Its commands are `accounts`, `seed`, `share`, `edit`, `status`, and `verify`.
 - **Cost.** `node trial/measure/cost.mjs`.
 
-The raw logs stay outside the branch, in the worktree's `.agent-artifacts/`. They include traces, request counters, and the editor run reports.
+[`trial/evidence/`](evidence/) holds the measurement output behind every number here: snapshots, analyses, the cost model output, the sleep and crash log, cold starts, restore times, request counters, probes, and the teardown log. Worker traces and driver state stayed local because they hold account tokens.
 
 ## Teardown
 

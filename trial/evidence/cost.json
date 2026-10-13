@@ -1,0 +1,85 @@
+{
+  "profile": {
+    "accounts": 1000,
+    "workspacesPerAccount": 1,
+    "activeDailyShare": 0.1,
+    "awakeHoursPerActiveDay": 2,
+    "sleepAfterHours": 0.16666666666666666,
+    "activeVcpu": 0.05,
+    "hostedShare": 0.1,
+    "docsPerHostedWorkspace": 4,
+    "storageGBPerWorkspace": 0.05,
+    "clientRequestsPerActiveHour": 3600
+  },
+  "measured": {
+    "serverIdleMiB": 350,
+    "relayMiBPerWorkspace": 1,
+    "relayMiBPerLiveDoc": 2.9,
+    "hostMiBPerLiveDoc": 0.96,
+    "cellIdleVcpu": 0.25,
+    "hairpinPerHostedSingleCell": 0.36,
+    "hairpinPerHostedOwnDaemon": 4,
+    "hostedWorkspaceVcpu": 0.21,
+    "homeCellVcpu": 0.05
+  },
+  "derived": {
+    "workspaces": 1000,
+    "hosted": 100,
+    "liveDocs": 400,
+    "activeWorkspaceDays": 3000,
+    "clientRequests": 21600000,
+    "storageGB": 50,
+    "aMemoryGiB": 2.83,
+    "b1HairpinRequests": 93312000,
+    "b2HairpinRequests": 1036800000
+  },
+  "monthlyUsd": {
+    "A Hetzner CPX32": {
+      "total": 42.59,
+      "server": 41.99,
+      "r2": 0.6
+    },
+    "B1 one Cloudflare cell": {
+      "total": 107.45,
+      "plan": 5,
+      "memory": 38.66,
+      "cpu": 12.51,
+      "disk": 2.13,
+      "workerRequests": 31.47,
+      "doRequests": 17.09,
+      "doDuration": 0,
+      "r2": 0.6
+    },
+    "B2 container per workspace (measured)": {
+      "total": 2844.35,
+      "plan": 5,
+      "memory": 726.35,
+      "cpu": 1111.84,
+      "disk": 79.87,
+      "workerRequests": 314.52,
+      "doRequests": 158.61,
+      "doDuration": 447.56,
+      "r2": 0.6
+    },
+    "B2 after session host changes": {
+      "total": 166.45,
+      "plan": 5,
+      "memory": 84.2,
+      "cpu": 25.54,
+      "disk": 7.95,
+      "workerRequests": 3.48,
+      "doRequests": 3.09,
+      "doDuration": 36.59,
+      "r2": 0.6
+    },
+    "C relay as Durable Objects (paper)": {
+      "total": 28.69,
+      "plan": 5,
+      "workerRequests": 3.48,
+      "doRequests": 3.09,
+      "doStorage": 9,
+      "doDuration": 0,
+      "sessionHostContainers": 8.12
+    }
+  }
+}

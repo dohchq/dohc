@@ -1,0 +1,138 @@
+{
+  "idle I0 1ws-2live": {
+    "seconds": 120.544,
+    "cpuCoresByContainer": {
+      "cell": 0.167
+    },
+    "sessionHost": {
+      "rssMiB": 47.6,
+      "cpuCores": 0.071
+    },
+    "relayNode": {
+      "rssMiB": 204,
+      "cpuCores": 0.09
+    },
+    "anonMiB": {
+      "cell": 314.7
+    }
+  },
+  "idle L4 4ws-14live": {
+    "seconds": 120.526,
+    "cpuCoresByContainer": {
+      "cell": 0.26
+    },
+    "sessionHost": {
+      "rssMiB": 54.9,
+      "cpuCores": 0.114
+    },
+    "relayNode": {
+      "rssMiB": 247.4,
+      "cpuCores": 0.138
+    },
+    "anonMiB": {
+      "cell": 365
+    }
+  },
+  "idle L8 8ws-30live": {
+    "seconds": 120.498,
+    "cpuCoresByContainer": {
+      "cell": 0.265
+    },
+    "sessionHost": {
+      "rssMiB": 69.3,
+      "cpuCores": 0.117
+    },
+    "relayNode": {
+      "rssMiB": 283.4,
+      "cpuCores": 0.139
+    },
+    "anonMiB": {
+      "cell": 415.6
+    }
+  },
+  "idle L16 16ws-62live": {
+    "seconds": 120.552,
+    "cpuCoresByContainer": {
+      "cell": 0.251
+    },
+    "sessionHost": {
+      "rssMiB": 85.2,
+      "cpuCores": 0.115
+    },
+    "relayNode": {
+      "rssMiB": 377.5,
+      "cpuCores": 0.131
+    },
+    "anonMiB": {
+      "cell": 525.3
+    }
+  },
+  "per synced workspace (16 -> 32, 20 files x 4 KiB)": {
+    "relayNodeRssMiB": -3.119,
+    "relayAnonMiB": -3.106,
+    "dataMiB": 0.145,
+    "postgresMiB": null,
+    "fromFirstWorkspace": {
+      "relayNodeRssMiB": 2.345,
+      "dataMiB": 0.242
+    }
+  },
+  "live documents": [
+    {
+      "documents": 2,
+      "sessionHostRssMiB": 47.6,
+      "relayNodeRssMiB": 204,
+      "hostDataMiB": 5.99
+    },
+    {
+      "documents": 14,
+      "sessionHostRssMiB": 54.9,
+      "relayNodeRssMiB": 247.4,
+      "hostDataMiB": 13.9
+    },
+    {
+      "documents": 30,
+      "sessionHostRssMiB": 69.3,
+      "relayNodeRssMiB": 283.4,
+      "hostDataMiB": 23.99
+    },
+    {
+      "documents": 62,
+      "sessionHostRssMiB": 85.2,
+      "relayNodeRssMiB": 377.5,
+      "hostDataMiB": 44.19
+    }
+  ],
+  "per live document": {
+    "sessionHostRssMiB": 0.627,
+    "relayNodeRssMiB": 2.892,
+    "hostDataMiB": 0.637
+  },
+  "editors 8": {
+    "seconds": 63.441,
+    "cpuCores": {
+      "cell": 0.376
+    },
+    "serverCoresPerEditor": 0.016,
+    "sessionHostRssMiB": 86.1,
+    "relayNodeRssMiB": 491.2
+  },
+  "editors 16": {
+    "seconds": 65.741,
+    "cpuCores": {
+      "cell": 0.368
+    },
+    "serverCoresPerEditor": 0.007,
+    "sessionHostRssMiB": 88.5,
+    "relayNodeRssMiB": 524.2
+  },
+  "editors 32": {
+    "seconds": 71.902,
+    "cpuCores": {
+      "cell": 0.418
+    },
+    "serverCoresPerEditor": 0.005,
+    "sessionHostRssMiB": 91.5,
+    "relayNodeRssMiB": 534.2
+  }
+}

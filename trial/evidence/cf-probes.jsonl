@@ -1,0 +1,10 @@
+{"directory":"/data","count":200,"p50Ms":0.15,"p95Ms":0.18,"p99Ms":0.31,"maxMs":0.41}
+{"directory":"/host-data","count":200,"p50Ms":0.14,"p95Ms":0.17,"p99Ms":0.34,"maxMs":0.41}
+{"target":"do","bytes":4096,"count":50,"p50Ms":157.42,"p95Ms":161.97,"p99Ms":169.23,"maxMs":175.69}
+{"target":"r2","bytes":4096,"count":50,"p50Ms":133.69,"p95Ms":171.96,"p99Ms":172.61,"maxMs":196.34}
+{"target":"do","bytes":65536,"count":50,"p50Ms":203.64,"p95Ms":207.88,"p99Ms":208.97,"maxMs":210.75}
+{"target":"r2","bytes":1048576,"count":50,"p50Ms":156.21,"p95Ms":216.98,"p99Ms":267.43,"maxMs":297.62}
+{"target":"do","bytes":4096,"count":50,"p50Ms":49.89,"p95Ms":58.85,"p99Ms":91.05,"maxMs":103.04}
+{"target":"r2","bytes":4096,"count":50,"p50Ms":133.47,"p95Ms":170.2,"p99Ms":233.95,"maxMs":269.67}
+{"target":"do","bytes":65536,"count":50,"p50Ms":63.52,"p95Ms":87.59,"p99Ms":139.59,"maxMs":148.22}
+{"target":"r2","bytes":1048576,"count":50,"p50Ms":170.05,"p95Ms":200.6,"p99Ms":222.34,"maxMs":238.1}

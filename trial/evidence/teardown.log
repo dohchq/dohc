@@ -1,0 +1,41 @@
+== inventory 2026-10-13T05:16:06Z
+│ a0345958-b611-4e46-841d-f5c997870699 │ dohc-cloudflare-trial-workspacecell │ active │ 1              │ 2026-10-13T05:09:56.443000064Z │
+│ a039b5df-fe5a-4673-9eb8-3865cf2a60e8 │ dohc-cloudflare-trial-cell          │ ready  │ 0              │ 2026-10-13T05:08:44.942000128Z │
+REPOSITORY                           TAG
+dohc-cloudflare-trial-cell           788df274
+dohc-cloudflare-trial-cell           bafca168
+dohc-cloudflare-trial-cell           c2300dad
+dohc-cloudflare-trial-workspacecell  788df274
+dohc-cloudflare-trial-workspacecell  bafca168
+dohc-cloudflare-trial-workspacecell  c2300dad
+name:           dohc-cloudflare-trial-state
+name:           vibeam-app-prod
+delete container app a0345958-b611-4e46-841d-f5c997870699: │ ╰ Your container has been deleted  
+delete container app a039b5df-fe5a-4673-9eb8-3865cf2a60e8: │ ╰ Your container has been deleted  
+purge 1: {"deleted":46}
+purge 2: {"deleted":1}
+purge 3: {"deleted":1}
+ ⛅️ wrangler 4.149.0
+? Are you sure you want to delete dohc-cloudflare-trial? This action cannot be undone.
+🤖 Using fallback value in non-interactive context: yes
+Successfully deleted dohc-cloudflare-trial
+X [ERROR] A request to the Cloudflare API (/accounts/afe5aa946bc777c3b65c8648e17b4f24/r2/buckets/dohc-cloudflare-trial-state) failed.
+  The bucket you tried to delete (dohc-cloudflare-trial-state) is not empty (account afe5aa946bc777c3b65c8648e17b4f24). [code: 10008]
+  If you think this is a bug, please open an issue at: https://github.com/cloudflare/workers-sdk/issues/new/choose
+🪵  Logs were written to "C:\Users\ice\.wrangler\logs\wrangler-2026-10-13_05-17-10_366.log"
+dohc-cloudflare-trial-cell:788df274 Deleted dohc-cloudflare-trial-cell:788df274 (sha256:3b9f2284e42a99d24ce045119a04dd3a297966473a3f531f785c8e1b5c987da3)
+dohc-cloudflare-trial-cell:bafca168 Deleted dohc-cloudflare-trial-cell:bafca168 (sha256:61526a9bf46443de26aa4d0668df3e8a88df1ce77f9d3bd28b33b303cc8814e2)
+dohc-cloudflare-trial-cell:c2300dad Deleted dohc-cloudflare-trial-cell:c2300dad (sha256:55a6e49e7db243e1f918e17104a2aa12c57938d3831b5ac394c1c90acc1d797d)
+dohc-cloudflare-trial-workspacecell:788df274 Deleted dohc-cloudflare-trial-workspacecell:788df274 (sha256:3b9f2284e42a99d24ce045119a04dd3a297966473a3f531f785c8e1b5c987da3)
+dohc-cloudflare-trial-workspacecell:bafca168 Deleted dohc-cloudflare-trial-workspacecell:bafca168 (sha256:61526a9bf46443de26aa4d0668df3e8a88df1ce77f9d3bd28b33b303cc8814e2)
+dohc-cloudflare-trial-workspacecell:c2300dad Deleted dohc-cloudflare-trial-workspacecell:c2300dad (sha256:55a6e49e7db243e1f918e17104a2aa12c57938d3831b5ac394c1c90acc1d797d)
+== teardown 2026-10-13T05:20:22Z
+Deleted bucket dohc-cloudflare-trial-state (eu).
+Successfully deleted dohc-trial-purge
+== verify
+containers: 0
+images: 0
+r2 eu: 
+r2 default: name:           vibeam-app-prod 
+dohc-cloudflare-trial: 1 not-found-lines
+dohc-trial-purge: 1 not-found-lines

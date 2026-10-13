@@ -1,0 +1,193 @@
+{
+  "idle I0 1ws-2live": {
+    "seconds": 129.254,
+    "cpuCoresByContainer": {
+      "gateway": 0.009,
+      "share-web": 0.045,
+      "mailpit": 0.013,
+      "workspace-api": 0.04,
+      "sync-relay": 0.351,
+      "postgres": 0.016
+    },
+    "sessionHost": {
+      "rssMiB": 51.8,
+      "cpuCores": 0.123
+    },
+    "relayNode": {
+      "rssMiB": 296,
+      "cpuCores": 0.186
+    },
+    "anonMiB": {
+      "gateway": 19.1,
+      "share-web": 57.6,
+      "mailpit": 15.1,
+      "workspace-api": 50.4,
+      "sync-relay": 264.8,
+      "postgres": 9.7
+    }
+  },
+  "idle L4 4ws-14live": {
+    "seconds": 126.701,
+    "cpuCoresByContainer": {
+      "gateway": 0.015,
+      "share-web": 0.026,
+      "mailpit": 0.008,
+      "workspace-api": 0.025,
+      "sync-relay": 0.606,
+      "postgres": 0.01
+    },
+    "sessionHost": {
+      "rssMiB": 62.5,
+      "cpuCores": 0.267
+    },
+    "relayNode": {
+      "rssMiB": 332.1,
+      "cpuCores": 0.31
+    },
+    "anonMiB": {
+      "gateway": 19.6,
+      "share-web": 57.7,
+      "mailpit": 14.9,
+      "workspace-api": 51.5,
+      "sync-relay": 311.6,
+      "postgres": 9.8
+    }
+  },
+  "idle L8 8ws-30live": {
+    "seconds": 126.427,
+    "cpuCoresByContainer": {
+      "gateway": 0.015,
+      "share-web": 0.025,
+      "mailpit": 0.006,
+      "workspace-api": 0.023,
+      "sync-relay": 0.611,
+      "postgres": 0.01
+    },
+    "sessionHost": {
+      "rssMiB": 77.5,
+      "cpuCores": 0.276
+    },
+    "relayNode": {
+      "rssMiB": 397.8,
+      "cpuCores": 0.308
+    },
+    "anonMiB": {
+      "gateway": 19.5,
+      "share-web": 58.3,
+      "mailpit": 15.2,
+      "workspace-api": 51.3,
+      "sync-relay": 391.9,
+      "postgres": 10.1
+    }
+  },
+  "idle L16 16ws-62live": {
+    "seconds": 125.854,
+    "cpuCoresByContainer": {
+      "gateway": 0.013,
+      "share-web": 0.02,
+      "mailpit": 0.004,
+      "workspace-api": 0.019,
+      "sync-relay": 0.569,
+      "postgres": 0.008
+    },
+    "sessionHost": {
+      "rssMiB": 109.6,
+      "cpuCores": 0.266
+    },
+    "relayNode": {
+      "rssMiB": 427.4,
+      "cpuCores": 0.281
+    },
+    "anonMiB": {
+      "gateway": 20.1,
+      "share-web": 58.8,
+      "mailpit": 14.9,
+      "workspace-api": 51.9,
+      "sync-relay": 453.7,
+      "postgres": 9.7
+    }
+  },
+  "per synced workspace (16 -> 32, 20 files x 4 KiB)": {
+    "relayNodeRssMiB": 0.981,
+    "relayAnonMiB": 0.875,
+    "dataMiB": 0.198,
+    "postgresMiB": 0,
+    "fromFirstWorkspace": {
+      "relayNodeRssMiB": 3.09,
+      "dataMiB": 0.173
+    }
+  },
+  "live documents": [
+    {
+      "documents": 2,
+      "sessionHostRssMiB": 51.8,
+      "relayNodeRssMiB": 296,
+      "hostDataMiB": 6.54
+    },
+    {
+      "documents": 14,
+      "sessionHostRssMiB": 62.5,
+      "relayNodeRssMiB": 332.1,
+      "hostDataMiB": 14.15
+    },
+    {
+      "documents": 30,
+      "sessionHostRssMiB": 77.5,
+      "relayNodeRssMiB": 397.8,
+      "hostDataMiB": 24.15
+    },
+    {
+      "documents": 62,
+      "sessionHostRssMiB": 109.6,
+      "relayNodeRssMiB": 427.4,
+      "hostDataMiB": 44.15
+    }
+  ],
+  "per live document": {
+    "sessionHostRssMiB": 0.963,
+    "relayNodeRssMiB": 2.19,
+    "hostDataMiB": 0.627
+  },
+  "editors 8": {
+    "seconds": 68.787,
+    "cpuCores": {
+      "gateway": 0.014,
+      "share-web": 0.024,
+      "mailpit": 0.005,
+      "workspace-api": 0.021,
+      "sync-relay": 0.59,
+      "postgres": 0.01
+    },
+    "serverCoresPerEditor": 0.004,
+    "sessionHostRssMiB": 114.7,
+    "relayNodeRssMiB": 493.6
+  },
+  "editors 16": {
+    "seconds": 67.762,
+    "cpuCores": {
+      "gateway": 0.016,
+      "share-web": 0.019,
+      "mailpit": 0.004,
+      "workspace-api": 0.02,
+      "sync-relay": 0.71,
+      "postgres": 0.01
+    },
+    "serverCoresPerEditor": 0.009,
+    "sessionHostRssMiB": 122.3,
+    "relayNodeRssMiB": 560.1
+  },
+  "editors 32": {
+    "seconds": 74.113,
+    "cpuCores": {
+      "gateway": 0.015,
+      "share-web": 0.023,
+      "mailpit": 0.004,
+      "workspace-api": 0.021,
+      "sync-relay": 0.746,
+      "postgres": 0.011
+    },
+    "serverCoresPerEditor": 0.006,
+    "sessionHostRssMiB": 128.9,
+    "relayNodeRssMiB": 592.8
+  }
+}
