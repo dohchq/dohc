@@ -220,6 +220,7 @@ They require the named browser session limits, account authentication, and relay
 Chat does not require live tickets, a document host, or editor limits.
 
 Named chat invitations use `/s/chat/<encoded-grantId>`.
+The browser view signs in with the invited account, then reads, follows, and posts through these endpoints.
 The URL identifies a share. It carries no credential.
 The relay resolves the signed-in account and uses the same grants as the recipient desktop.
 A recipient with several grants gets the highest permitted access on that share.
