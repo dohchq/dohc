@@ -293,84 +293,84 @@
       "source": "999999999. a\n999999999. b"
     },
     {
-      "canonical": "---\n\nfollowing",
+      "canonical": "***\n\nfollowing",
       "fileFold": true,
       "name": "rule---5-text",
       "rustBase64": "AQWZ4/Kd+PTuCwAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5Aw5ob3Jpem9udGFsUnVsZYeZ4/Kd+PTuCwEDCXBhcmFncmFwaAcAmePynfj07gsCBgQAmePynfj07gsDCWZvbGxvd2luZwA=",
       "source": "- - -\nfollowing"
     },
     {
-      "canonical": "---\n\nfollowing",
+      "canonical": "***\n\nfollowing",
       "fileFold": true,
       "name": "rule---5-blank",
       "rustBase64": "AQXnyJmz1/SQBgAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5Aw5ob3Jpem9udGFsUnVsZYfnyJmz1/SQBgEDCXBhcmFncmFwaAcA58iZs9f0kAYCBgQA58iZs9f0kAYDCWZvbGxvd2luZwA=",
       "source": "- - -\n\nfollowing"
     },
     {
-      "canonical": "---",
+      "canonical": "***",
       "fileFold": true,
       "name": "rule---5-eof",
       "rustBase64": "AQLw+tKx/eLeAQAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5Aw5ob3Jpem9udGFsUnVsZQA=",
       "source": "- - -"
     },
     {
-      "canonical": "---\n\nfollowing",
+      "canonical": "***\n\nfollowing",
       "fileFold": true,
       "name": "rule-*-5-text",
       "rustBase64": "AQWzsJfg0/rqDwAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5Aw5ob3Jpem9udGFsUnVsZYezsJfg0/rqDwEDCXBhcmFncmFwaAcAs7CX4NP66g8CBgQAs7CX4NP66g8DCWZvbGxvd2luZwA=",
       "source": "* * *\nfollowing"
     },
     {
-      "canonical": "---\n\nfollowing",
+      "canonical": "***\n\nfollowing",
       "fileFold": true,
       "name": "rule-*-5-blank",
       "rustBase64": "AQXDkcv3wYy3CwAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5Aw5ob3Jpem9udGFsUnVsZYfDkcv3wYy3CwEDCXBhcmFncmFwaAcAw5HL98GMtwsCBgQAw5HL98GMtwsDCWZvbGxvd2luZwA=",
       "source": "* * *\n\nfollowing"
     },
     {
-      "canonical": "---",
+      "canonical": "***",
       "fileFold": true,
       "name": "rule-*-5-eof",
       "rustBase64": "AQLAqIva+abkDQAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5Aw5ob3Jpem9udGFsUnVsZQA=",
       "source": "* * *"
     },
     {
-      "canonical": "---\n\nfollowing",
+      "canonical": "***\n\nfollowing",
       "fileFold": true,
       "name": "rule-_-5-text",
       "rustBase64": "AQWupsSHob2oBQAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5Aw5ob3Jpem9udGFsUnVsZYeupsSHob2oBQEDCXBhcmFncmFwaAcArqbEh6G9qAUCBgQArqbEh6G9qAUDCWZvbGxvd2luZwA=",
       "source": "_ _ _\nfollowing"
     },
     {
-      "canonical": "---\n\nfollowing",
+      "canonical": "***\n\nfollowing",
       "fileFold": true,
       "name": "rule-_-5-blank",
       "rustBase64": "AQWqxeLt+bHoCwAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5Aw5ob3Jpem9udGFsUnVsZYeqxeLt+bHoCwEDCXBhcmFncmFwaAcAqsXi7fmx6AsCBgQAqsXi7fmx6AsDCWZvbGxvd2luZwA=",
       "source": "_ _ _\n\nfollowing"
     },
     {
-      "canonical": "---",
+      "canonical": "***",
       "fileFold": true,
       "name": "rule-_-5-eof",
       "rustBase64": "AQLGi63PtdiBAgAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5Aw5ob3Jpem9udGFsUnVsZQA=",
       "source": "_ _ _"
     },
     {
-      "canonical": "---\n\nfollowing",
+      "canonical": "***\n\nfollowing",
       "fileFold": true,
       "name": "rule-*-3-text",
       "rustBase64": "AQXi2IaS8Yf0BQAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5Aw5ob3Jpem9udGFsUnVsZYfi2IaS8Yf0BQEDCXBhcmFncmFwaAcA4tiGkvGH9AUCBgQA4tiGkvGH9AUDCWZvbGxvd2luZwA=",
       "source": "***\nfollowing"
     },
     {
-      "canonical": "---\n\nfollowing",
+      "canonical": "***\n\nfollowing",
       "fileFold": true,
       "name": "rule-*-3-blank",
       "rustBase64": "AQWihvTQrpKMCgAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5Aw5ob3Jpem9udGFsUnVsZYeihvTQrpKMCgEDCXBhcmFncmFwaAcAoob00K6SjAoCBgQAoob00K6SjAoDCWZvbGxvd2luZwA=",
       "source": "***\n\nfollowing"
     },
     {
-      "canonical": "---",
+      "canonical": "***",
       "fileFold": true,
       "name": "rule-*-3-eof",
       "rustBase64": "AQKzu4iG383QCAAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5Aw5ob3Jpem9udGFsUnVsZQA=",
@@ -412,12 +412,12 @@
       "source": "1. I. Overview"
     },
     {
-      "canonical": "---\n\n&#9;code",
+      "canonical": "***\n\n&#9;code",
       "fileFold": true,
       "name": "dash-rule-tab-code",
       "rustBase64": "AQXLi6CB+ajZBwAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5Aw5ob3Jpem9udGFsUnVsZYfLi6CB+ajZBwEDCXBhcmFncmFwaAcAy4uggfmo2QcCBgQAy4uggfmo2QcDBQljb2RlAA==",
       "source": "- - -\n\tcode",
-      "sourceCanonical": "---\n\n```\ncode\n```"
+      "sourceCanonical": "***\n\n```\ncode\n```"
     },
     {
       "canonical": "- a\n\n---\n\n&#9;code",
@@ -435,70 +435,178 @@
       "source": "- a\n---\n - b"
     },
     {
-      "canonical": "---\n\n&#32;x",
+      "canonical": "***\n\n&#32;x",
       "fileFold": true,
       "name": "dash-rule-blank-prose",
       "rustBase64": "AQWAw/PcnNbLDQAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5Aw5ob3Jpem9udGFsUnVsZYeAw/PcnNbLDQEDCXBhcmFncmFwaAcAgMPz3JzWyw0CBgQAgMPz3JzWyw0DAiB4AA==",
       "source": "- - -\n\n x"
     },
     {
-      "canonical": "---\n\n---",
+      "canonical": "***\n\n---",
       "fileFold": true,
       "name": "dash-rule-before-star-rule",
       "rustBase64": "AQP42NyLiazdBQAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5Aw5ob3Jpem9udGFsUnVsZYf42NyLiazdBQEDDmhvcml6b250YWxSdWxlAA==",
-      "source": "- - -\n  ***",
-      "witnessRefuse": true
+      "source": "- - -\n  ***"
     },
     {
-      "canonical": "---",
+      "canonical": "***",
       "fileFold": true,
       "name": "dash-rule-short-spacing",
       "rustBase64": "AQKyiIbsgcnODgAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5Aw5ob3Jpem9udGFsUnVsZQA=",
       "source": "- --"
     },
     {
-      "canonical": "---",
+      "canonical": "***",
       "fileFold": true,
       "name": "dash-rule-leading-space",
       "rustBase64": "AQKgvrHVyp6CDAAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5Aw5ob3Jpem9udGFsUnVsZQA=",
       "source": " - - -"
     },
     {
-      "canonical": "---",
+      "canonical": "***",
       "fileFold": true,
       "name": "star-rule-tab-separated",
       "rustBase64": "AQLLq4jBpJdUACgBBG1ldGENc2NoZW1hVmVyc2lvbgF9AQcBBGJvZHkDDmhvcml6b250YWxSdWxlAA==",
       "source": "*\t*\t*"
     },
     {
-      "canonical": "---",
+      "canonical": "***",
       "fileFold": true,
       "name": "dash-rule-tab-separated",
       "rustBase64": "AQKh2p2Um9LCDAAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5Aw5ob3Jpem9udGFsUnVsZQA=",
       "source": "-\t-\t-"
     },
     {
-      "canonical": "---",
+      "canonical": "***",
       "fileFold": true,
       "name": "dash-rule-mixed-spacing",
       "rustBase64": "AQKm6/PXx4ZLACgBBG1ldGENc2NoZW1hVmVyc2lvbgF9AQcBBGJvZHkDDmhvcml6b250YWxSdWxlAA==",
       "source": "- \t- -"
     },
     {
-      "canonical": "---",
+      "canonical": "***",
       "fileFold": true,
       "name": "star-rule-mixed-spacing",
       "rustBase64": "AQLN0eO4uJb4DgAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5Aw5ob3Jpem9udGFsUnVsZQA=",
       "source": "* \t* *"
     },
     {
-      "canonical": "- a\n  ---",
+      "canonical": "- a\n\n  ---",
       "foldRefuse": true,
       "name": "item-setext-rule-disagreement",
       "note": "CommonMark and TypeScript read an item heading; Rust reads a paragraph and rule. File folding refuses before mutation.",
       "rustBase64": "AQeV4dnbuK8rACgBBG1ldGENc2NoZW1hVmVyc2lvbgF9AQcBBGJvZHkDCmJ1bGxldExpc3QHAJXh2du4rysBAwhsaXN0SXRlbQcAleHZ27ivKwIDCXBhcmFncmFwaAcAleHZ27ivKwMGBACV4dnbuK8rBAFhh5Xh2du4rysDAw5ob3Jpem9udGFsUnVsZQA=",
       "source": "- a\n  ---",
       "sourceCanonical": "- \n  ## a"
+    },
+    {
+      "canonical": "- a\n\n  ---",
+      "foldRefuse": true,
+      "name": "item-rule-blank",
+      "rustBase64": "AQfdqIDB66XLCQAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwDdqIDB66XLCQEDCGxpc3RJdGVtBwDdqIDB66XLCQIDCXBhcmFncmFwaAcA3aiAweulywkDBgQA3aiAweulywkEAWGH3aiAweulywkDAw5ob3Jpem9udGFsUnVsZQA=",
+      "source": "- a\n\n  ---"
+    },
+    {
+      "canonical": "1. a\n\n   ---",
+      "foldRefuse": true,
+      "name": "ordered-item-rule-blank",
+      "rustBase64": "AQjVyN6i1LX1CQAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwtvcmRlcmVkTGlzdCgA1cjeotS19QkBBXN0YXJ0AX0BBwDVyN6i1LX1CQEDCGxpc3RJdGVtBwDVyN6i1LX1CQMDCXBhcmFncmFwaAcA1cjeotS19QkEBgQA1cjeotS19QkFAWGH1cjeotS19QkEAw5ob3Jpem9udGFsUnVsZQA=",
+      "source": "1. a\n\n   ---"
+    },
+    {
+      "canonical": "- a\n\n  ---",
+      "foldRefuse": true,
+      "name": "item-spaced-rule-blank",
+      "rustBase64": "AQet8/3xn7WzAQAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwCt8/3xn7WzAQEDCGxpc3RJdGVtBwCt8/3xn7WzAQIDCXBhcmFncmFwaAcArfP98Z+1swEDBgQArfP98Z+1swEEAWGHrfP98Z+1swEDAw5ob3Jpem9udGFsUnVsZQA=",
+      "source": "- a\n\n  - - -"
+    },
+    {
+      "canonical": "- a\n\n  ---",
+      "foldRefuse": true,
+      "name": "item-spaced-rule-tight",
+      "rustBase64": "AQf2zLWnyKElACgBBG1ldGENc2NoZW1hVmVyc2lvbgF9AQcBBGJvZHkDCmJ1bGxldExpc3QHAPbMtafIoSUBAwhsaXN0SXRlbQcA9sy1p8ihJQIDCXBhcmFncmFwaAcA9sy1p8ihJQMGBAD2zLWnyKElBAFhh/bMtafIoSUDAw5ob3Jpem9udGFsUnVsZQA=",
+      "source": "- a\n  - - -"
+    },
+    {
+      "canonical": "***\n\n# Chapter One\n\n---\n\nIt was dark.",
+      "fileFold": true,
+      "name": "rule-first-chapter",
+      "rustBase64": "AQqwwtSt54rqAwAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5Aw5ob3Jpem9udGFsUnVsZYewwtSt54rqAwEDB2hlYWRpbmcoALDC1K3niuoDAgVsZXZlbAF9AQcAsMLUreeK6gMCBgQAsMLUreeK6gMEC0NoYXB0ZXIgT25lh7DC1K3niuoDAgMOaG9yaXpvbnRhbFJ1bGWHsMLUreeK6gMQAwlwYXJhZ3JhcGgHALDC1K3niuoDEQYEALDC1K3niuoDEgxJdCB3YXMgZGFyay4A",
+      "source": "* * *\n\n# Chapter One\n\n* * *\n\nIt was dark."
+    },
+    {
+      "canonical": "***\n\nAuthor: Jane\n\n---\n\nIt was dark.",
+      "fileFold": true,
+      "name": "rule-first-author",
+      "rustBase64": "AQne6LrY5+K6DQAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5Aw5ob3Jpem9udGFsUnVsZYfe6LrY5+K6DQEDCXBhcmFncmFwaAcA3ui62Ofiug0CBgQA3ui62Ofiug0DDEF1dGhvcjogSmFuZYfe6LrY5+K6DQIDDmhvcml6b250YWxSdWxlh97outjn4roNEAMJcGFyYWdyYXBoBwDe6LrY5+K6DREGBADe6LrY5+K6DRIMSXQgd2FzIGRhcmsuAA==",
+      "source": "* * *\n\nAuthor: Jane\n\n* * *\n\nIt was dark."
+    },
+    {
+      "name": "item-ordered-non-one",
+      "source": "- a\n\n  2. child",
+      "canonical": "- a\n\n  2. child",
+      "foldRefuse": true,
+      "rustBase64": "AQz4juDA98eIDQAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwD4juDA98eIDQEDCGxpc3RJdGVtBwD4juDA98eIDQIDCXBhcmFncmFwaAcA+I7gwPfHiA0DBgQA+I7gwPfHiA0EAWGH+I7gwPfHiA0DAwtvcmRlcmVkTGlzdCgA+I7gwPfHiA0GBXN0YXJ0AX0CBwD4juDA98eIDQYDCGxpc3RJdGVtBwD4juDA98eIDQgDCXBhcmFncmFwaAcA+I7gwPfHiA0JBgQA+I7gwPfHiA0KBWNoaWxkAA==",
+      "note": "CommonMark 0.31.2 reads the blank-separated source and projection as an ordered child starting at 2."
+    },
+    {
+      "name": "item-empty-bullet",
+      "source": "- a\n\n  - ",
+      "canonical": "- a\n\n  -",
+      "foldRefuse": true,
+      "rustBase64": "AQmp9LuessFSACgBBG1ldGENc2NoZW1hVmVyc2lvbgF9AQcBBGJvZHkDCmJ1bGxldExpc3QHAKn0u56ywVIBAwhsaXN0SXRlbQcAqfS7nrLBUgIDCXBhcmFncmFwaAcAqfS7nrLBUgMGBACp9LuessFSBAFhh6n0u56ywVIDAwpidWxsZXRMaXN0BwCp9LuessFSBgMIbGlzdEl0ZW0HAKn0u56ywVIHAwlwYXJhZ3JhcGgA",
+      "note": "CommonMark 0.31.2 reads the blank-separated source and projection as an empty bullet child."
+    },
+    {
+      "name": "item-empty-ordered",
+      "source": "- a\n\n  1. ",
+      "canonical": "- a\n\n  1.",
+      "foldRefuse": true,
+      "rustBase64": "AQrXpKL56sutAgAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwDXpKL56sutAgEDCGxpc3RJdGVtBwDXpKL56sutAgIDCXBhcmFncmFwaAcA16Si+erLrQIDBgQA16Si+erLrQIEAWGH16Si+erLrQIDAwtvcmRlcmVkTGlzdCgA16Si+erLrQIGBXN0YXJ0AX0BBwDXpKL56sutAgYDCGxpc3RJdGVtBwDXpKL56sutAggDCXBhcmFncmFwaAA=",
+      "note": "CommonMark 0.31.2 reads the blank-separated source and projection as an empty ordered child."
+    },
+    {
+      "name": "item-ordered-non-one-tight",
+      "source": "- a\n  2. child",
+      "canonical": "- a\n2&#46; child",
+      "sourceCanonical": "- a\n\n  2. child",
+      "note": "CommonMark 0.31.2 and Rust read source as paragraph text; TypeScript reads a child list. Both canonical readings keep their own structure.",
+      "rustBase64": "AQaK9MGRmo7dCwAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwCK9MGRmo7dCwEDCGxpc3RJdGVtBwCK9MGRmo7dCwIDCXBhcmFncmFwaAcAivTBkZqO3QsDBgQAivTBkZqO3QsECmEKMi4gY2hpbGQA",
+      "fileFold": true
+    },
+    {
+      "name": "item-empty-bullet-tight",
+      "source": "- a\n  - ",
+      "canonical": "- a\n\n  -",
+      "sourceCanonical": "- \n  ## a",
+      "note": "CommonMark 0.31.2 and TypeScript read source as an item heading; Rust reads an empty child list. Blank-separated projection keeps the child list.",
+      "foldRefuse": true,
+      "rustBase64": "AQmW48uSx+DhBgAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwCW48uSx+DhBgEDCGxpc3RJdGVtBwCW48uSx+DhBgIDCXBhcmFncmFwaAcAluPLksfg4QYDBgQAluPLksfg4QYEAWGHluPLksfg4QYDAwpidWxsZXRMaXN0BwCW48uSx+DhBgYDCGxpc3RJdGVtBwCW48uSx+DhBgcDCXBhcmFncmFwaAA="
+    },
+    {
+      "name": "item-empty-ordered-tight",
+      "source": "- a\n  1. ",
+      "canonical": "- a\n\n  1.",
+      "note": "CommonMark 0.31.2 reads source as paragraph text; both dohc readers read an empty ordered child. Blank-separated projection keeps the child list.",
+      "foldRefuse": true,
+      "rustBase64": "AQr7gaHus4zZDAAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwD7gaHus4zZDAEDCGxpc3RJdGVtBwD7gaHus4zZDAIDCXBhcmFncmFwaAcA+4Gh7rOM2QwDBgQA+4Gh7rOM2QwEAWGH+4Gh7rOM2QwDAwtvcmRlcmVkTGlzdCgA+4Gh7rOM2QwGBXN0YXJ0AX0BBwD7gaHus4zZDAYDCGxpc3RJdGVtBwD7gaHus4zZDAgDCXBhcmFncmFwaAA="
+    },
+    {
+      "name": "item-empty-whitespace-markers",
+      "source": "- a\n\n  -  \n  2.  ",
+      "canonical": "- a\n\n  - \n  2.",
+      "note": "CommonMark 0.31.2 reads whitespace-only bullet and ordered markers as empty child lists when separated from the preceding paragraph.",
+      "foldRefuse": true,
+      "rustBase64": "AQ2Yo5a+vPbdDAAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwCYo5a+vPbdDAEDCGxpc3RJdGVtBwCYo5a+vPbdDAIDCXBhcmFncmFwaAcAmKOWvrz23QwDBgQAmKOWvrz23QwEAWGHmKOWvrz23QwDAwpidWxsZXRMaXN0BwCYo5a+vPbdDAYDCGxpc3RJdGVtBwCYo5a+vPbdDAcDCXBhcmFncmFwaIeYo5a+vPbdDAYDC29yZGVyZWRMaXN0KACYo5a+vPbdDAkFc3RhcnQBfQIHAJijlr689t0MCQMIbGlzdEl0ZW0HAJijlr689t0MCwMJcGFyYWdyYXBoAA=="
+    },
+    {
+      "name": "item-math-table-before-ordered",
+      "source": "- a\n\n  $$x$$\n\n  2. child\n\n  | cell |\n  | ---- |\n  | cell |\n\n  2. child",
+      "canonical": "- a\n\n  \\$\\$x$$\n\n  2. child\n  \n  | cell |\n  | ---- |\n  | cell |\n\n  2. child",
+      "sourceCanonical": "- a\n\n  $$x$$\n\n  2. child\n  \n  | cell |\n  | ---- |\n  | cell |\n\n  2. child",
+      "note": "CommonMark 0.31.2 reads math and GFM table syntax as separate paragraphs. Ordered children remain separate after each. Rust keeps math as literal text; TypeScript reads a math block.",
+      "foldRefuse": true,
+      "rustBase64": "ASSbrZf2pK1VACgBBG1ldGENc2NoZW1hVmVyc2lvbgF9AQcBBGJvZHkDCmJ1bGxldExpc3QHAJutl/akrVUBAwhsaXN0SXRlbQcAm62X9qStVQIDCXBhcmFncmFwaAcAm62X9qStVQMGBACbrZf2pK1VBAFhh5utl/akrVUDAwlwYXJhZ3JhcGgHAJutl/akrVUGBgQAm62X9qStVQcFJCR4JCSHm62X9qStVQYDC29yZGVyZWRMaXN0KACbrZf2pK1VDQVzdGFydAF9AgcAm62X9qStVQ0DCGxpc3RJdGVtBwCbrZf2pK1VDwMJcGFyYWdyYXBoBwCbrZf2pK1VEAYEAJutl/akrVURBWNoaWxkh5utl/akrVUNAwV0YWJsZQcAm62X9qStVRcDCHRhYmxlUm93BwCbrZf2pK1VGAMLdGFibGVIZWFkZXIoAJutl/akrVUZB2NvbHNwYW4BfQEoAJutl/akrVUZB3Jvd3NwYW4BfQEHAJutl/akrVUZAwlwYXJhZ3JhcGgHAJutl/akrVUcBgQAm62X9qStVR0EY2VsbIebrZf2pK1VGAMIdGFibGVSb3cHAJutl/akrVUiAwl0YWJsZUNlbGwoAJutl/akrVUjB2NvbHNwYW4BfQEoAJutl/akrVUjB3Jvd3NwYW4BfQEHAJutl/akrVUjAwlwYXJhZ3JhcGgHAJutl/akrVUmBgQAm62X9qStVScEY2VsbIebrZf2pK1VFwMLb3JkZXJlZExpc3QoAJutl/akrVUsBXN0YXJ0AX0CBwCbrZf2pK1VLAMIbGlzdEl0ZW0HAJutl/akrVUuAwlwYXJhZ3JhcGgHAJutl/akrVUvBgQAm62X9qStVTAFY2hpbGQA"
     }
   ],
   "rules": "Blank lines contain only spaces or tabs. Same-kind siblings across blanks form one loose list. An indented line after a blank starts another item paragraph; a nonblank unindented line can lazily continue the current paragraph. Children must reach their parent's marker content column. Task checkboxes are content after a two-column bullet marker. Refusals for ambiguous lines apply inside list bodies; root prose, rules and code remain accepted. Each projector output must be accepted unchanged by its projected reader. Ordered output is capped at nine digits. Letter and Roman prefixes are prose. Thematic breaks take precedence over list markers."

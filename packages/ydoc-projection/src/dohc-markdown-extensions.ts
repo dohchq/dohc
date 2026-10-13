@@ -1,7 +1,7 @@
 // The dohc Markdown schema and tokenizers, without the Y.Doc conversions.
 // Every surface that builds a dohc schema imports its definitions from here,
 // so a fix to a tokenizer reaches the editor and the projection together.
-import { Extension, Mark, Node, markInputRule, renderNestedMarkdownContent } from '@tiptap/core'
+import { Extension, Mark, Node, markInputRule } from '@tiptap/core'
 import type { JSONContent, MarkdownRendererHelpers } from '@tiptap/core'
 import { getDefaults, Lexer, Tokenizer, type Tokens } from 'marked'
 import { preprocessTablePipes, renderTableToMarkdown, Table } from '@tiptap/extension-table'
@@ -963,7 +963,10 @@ export const DohcTableRowHeight = Extension.create({
 // checkbox schema-invalid — the Y.Doc conversion then drops the whole task
 // list. `nested: true` widens it to `paragraph block*`. Every dohc
 // schema registers this extension so the editor and the conversions agree.
-export const DohcTaskItem = TaskItem.configure({ nested: true })
+export const DohcTaskItem = TaskItem.extend({
+  renderMarkdown: (node, helpers) => renderItemBlocks(node, helpers,
+    `- [${node.attrs?.checked ? 'x' : ' '}] `, 2),
+}).configure({ nested: true })
 
 // dohc owns the `code` token instead of StarterKit's CodeBlock, whose
 // parseMarkdown accepts a token only when its raw text starts at column 0 with
@@ -1074,12 +1077,26 @@ export const MarkdownListItem = ListItem.extend({
     const start = Number(context.meta?.parentAttrs?.start ?? 1)
     const prefix = context.parentType === 'orderedList'
       ? `${Math.min(999_999_999, start + (context.index || 0))}. ` : '- '
-    return renderNestedMarkdownContent(node, {
-      ...helpers,
-      indent: text => ' '.repeat(prefix.length) + text,
-    }, prefix)
+    return renderItemBlocks(node, helpers, prefix, prefix.length)
   },
 })
+
+function renderItemBlocks(node: JSONContent, helpers: MarkdownRendererHelpers, prefix: string, indent: number): string {
+  const [first, ...children] = node.content ?? []
+  let output = prefix + helpers.renderChildren(first ? [first] : []).replace(/^[ \t]*$/u, '')
+  children.forEach((child, index) => {
+    const content = (helpers.renderChild?.(child, index + 1) ?? helpers.renderChildren([child]))
+    const rendered = content.split('\n').map(line => ' '.repeat(indent) + line).join('\n')
+    const firstLine = content.split('\n', 1)[0]
+    const previous = index === 0 ? first : children[index - 1]
+    const interrupts = child.type === 'orderedList' ? /^1\. [ \t]*[^ \t]/u.test(firstLine)
+      : child.type !== 'bulletList' || firstLine.replace(/[ \t]+$/u, '') !== '-'
+    const separate = child.type === 'paragraph' || child.type === 'horizontalRule' || child.type === 'mathBlock'
+      || (['paragraph', 'mathBlock', 'table'].includes(previous?.type ?? '') && !interrupts)
+    output += (separate ? '\n\n' : '\n') + rendered
+  })
+  return output
+}
 export const MarkdownTaskList = TaskList.extend({
   // DohcMarkdownLists groups items before Tiptap's task-only list splitter.
   markdownTokenName: 'list',

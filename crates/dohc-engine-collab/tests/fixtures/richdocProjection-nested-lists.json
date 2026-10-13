@@ -22,6 +22,6 @@
   ]
  },
  "expected": {
-  "markdown": "- first\n  - nested [link](notes/item)\n    3. deep ordered\n    4. next deep\n  - nested sibling\n- second\n\n3. ordered start\n4. ordered next\n   - bullet inside ordered\n\n- loose item\n\n  second paragraph in item"
+  "markdown": "- first\n  - nested [link](notes/item)\n  \n    3. deep ordered\n    4. next deep\n  - nested sibling\n- second\n\n3. ordered start\n4. ordered next\n   - bullet inside ordered\n\n- loose item\n\n  second paragraph in item"
  }
 }

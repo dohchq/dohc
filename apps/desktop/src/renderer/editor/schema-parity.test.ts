@@ -526,7 +526,7 @@ describe("desktop editor schema parity", () => {
     const ref = createRef<MarkdownEditorHandle>();
     const sourceBody = parseFrontmatter(item.source).body;
     const expected = 'sourceCanonical' in item ? item.sourceCanonical! : item.canonical!;
-    const canonicalBody = (sourceBody === item.source ? expected : parseFrontmatter(expected).body)
+    const canonicalBody = parseFrontmatter(expected).body
       .replaceAll('\r\n', '\n').replace(/^\n+/u, '');
     render(createElement(MarkdownEditor, {
       ref, value: sourceBody, onDirty: vi.fn(), workspaceId: "workspace-1", path: "notes/nested.md", knownFiles: [],

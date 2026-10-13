@@ -1008,6 +1008,9 @@ export function serializeRichdocBody(root: JSONContent): string {
 
   const prepared = visit(root)
   let markdown = markdownManager.serialize(prepared)
+  if (prepared.content?.[0]?.type === 'horizontalRule') {
+    markdown = '***' + markdown.slice(3)
+  }
   markdown = restoreCharacterSentinels(
     markdown,
     new Map(Array.from(

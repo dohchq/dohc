@@ -108,15 +108,25 @@ fn nested_contract_combines_list_and_quote_depth() {
 
 #[test]
 fn nested_contract_file_fold_refuses_before_mutation() {
+    let corpus: Value = serde_json::from_str(include_str!(
+        "../../../../tools/rust-engine-program/nested-markdown-contract.json"
+    ))
+    .unwrap();
     let doc = Ydoc::wire();
     doc.rewrite_content_to_markdown(ContentKind::Richdoc, "Original")
         .unwrap();
     let before = doc.encode_full_state();
-    for source in [
-        "- parent\n  - child\n",
-        "1. parent\n\n   continuation\n",
-        "- a\n  ---",
-    ] {
+    for source in ["- parent\n  - child\n", "1. parent\n\n   continuation\n"]
+        .into_iter()
+        .chain(
+            corpus["cases"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|case| case["foldRefuse"] == true)
+                .map(|case| case["source"].as_str().unwrap()),
+        )
+    {
         assert!(doc
             .rewrite_content_to_markdown_for_fold(ContentKind::Richdoc, source)
             .is_err());

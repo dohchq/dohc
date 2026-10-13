@@ -68,7 +68,7 @@ it('fix1 refuses inline nesting before marked can overflow its stack', () => {
 })
 it.each(corpus.cases.filter(item => !item.refuse))('fix1 accepts its canonical output for $name unchanged', item => {
   const doc = markdownToYDoc(item.canonical!, { reading: 'projection' })
-  try { expect(yDocToMarkdown(doc)).toBe(item.foldRefuse ? item.sourceCanonical : item.canonical) } finally { doc.destroy() }
+  try { expect(yDocToMarkdown(doc)).toBe(item.canonical) } finally { doc.destroy() }
 })
 
 it.each(['- Mr. Smith arrived.', '- I. Overview', '- a. child'])('accepts projected item prose unchanged: %s', source => {

@@ -2547,7 +2547,7 @@ fn unsupported_markdown_line(line: &str) -> bool {
         return true;
     }
     if rest.as_bytes().first().is_some_and(u8::is_ascii_digit)
-        && parse_ordered_item(rest).is_some_and(|(_, text)| {
+        && parse_ordered_item(rest, false).is_some_and(|(_, text)| {
             matches!(text.get(..3), Some("[ ]" | "[x]" | "[X]"))
                 && (text.len() == 3 || text.as_bytes().get(3) == Some(&b' '))
         })
@@ -2732,7 +2732,7 @@ fn parse_markdown_blocks_at<'src>(
             }
             continue;
         }
-        if let Some(first) = list_marker(line) {
+        if let Some(first) = list_marker(line, reading) {
             if let Some((list, next)) =
                 parse_list(lines, index, first, depth, quote_depth, reading, refused)
             {
@@ -2764,7 +2764,7 @@ fn parse_markdown_blocks_at<'src>(
                 || markdown_fence(next, source_fences).is_some()
                 || next == ">"
                 || next.starts_with("> ")
-                || list_marker(next).is_some_and(|marker| {
+                || list_marker(next, reading).is_some_and(|marker| {
                     !matches!(marker.kind, ListKind::Ordered(_)) || marker.start == 1
                 })
                 || parse_heading(next).is_some()
@@ -2778,6 +2778,32 @@ fn parse_markdown_blocks_at<'src>(
         }
         let mut paragraph = para.join("\n");
         if reading != MarkdownReading::Source {
+            if paragraph.contains("&#") {
+                paragraph = paragraph
+                    .split('\n')
+                    .enumerate()
+                    .map(|(index, line)| {
+                        let digits = line.bytes().take_while(u8::is_ascii_digit).count();
+                        let marker = line[digits..]
+                            .strip_prefix("&#46;")
+                            .map(|rest| ('.', rest))
+                            .or_else(|| {
+                                line[digits..].strip_prefix("&#41;").map(|rest| (')', rest))
+                            });
+                        match marker {
+                            Some((marker, rest))
+                                if index > 0
+                                    && (1..=9).contains(&digits)
+                                    && (rest.is_empty() || rest.starts_with([' ', '\t'])) =>
+                            {
+                                format!("{}{marker}{rest}", &line[..digits])
+                            }
+                            _ => line.to_owned(),
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+            }
             if let Some(rest) = paragraph.strip_prefix("&#32;") {
                 paragraph = format!(" {rest}");
             } else if let Some(rest) = paragraph.strip_prefix("&#9;") {
@@ -2977,7 +3003,7 @@ fn parse_table<'src>(
     let first = lines.first()?;
     // marked reads a list item or HTML before a table, and so does this.
     let rest = first.trim_start_matches(' ');
-    if ends_table(first) || rest.starts_with('<') || parse_ordered_item(rest).is_some() {
+    if ends_table(first) || rest.starts_with('<') || parse_ordered_item(rest, false).is_some() {
         return None;
     }
     let header = parse_table_row(first)?;
@@ -3092,14 +3118,15 @@ fn parse_bullet_item(line: &str) -> Option<(char, &str)> {
 }
 
 /// A numbered item: one to nine digits, then `.` or `)` and one space.
-fn parse_ordered_item(line: &str) -> Option<(i64, &str)> {
+fn parse_ordered_item(line: &str, bare: bool) -> Option<(i64, &str)> {
     let digits = line.bytes().take_while(u8::is_ascii_digit).count();
     if digits > 9 {
         return None;
     }
-    let rest = line[digits..]
-        .strip_prefix(". ")
-        .or_else(|| line[digits..].strip_prefix(") "))?;
+    let rest = line[digits..].strip_prefix(['.', ')'])?;
+    let rest = rest
+        .strip_prefix(' ')
+        .or_else(|| (bare && rest.is_empty()).then_some(rest))?;
     let ordinal = line[..digits].parse::<i64>().ok()?;
     Some((ordinal, rest))
 }
@@ -3122,7 +3149,7 @@ struct ListMarker<'a> {
 }
 
 #[inline(always)]
-fn list_marker(line: &str) -> Option<ListMarker<'_>> {
+fn list_marker(line: &str, reading: MarkdownReading) -> Option<ListMarker<'_>> {
     if !matches!(
         *line.as_bytes().first()?,
         b' ' | b'-' | b'+' | b'*' | b'0'..=b'9'
@@ -3137,7 +3164,11 @@ fn list_marker(line: &str) -> Option<ListMarker<'_>> {
     if thematic_break(rest) {
         return None;
     }
-    if let Some((bullet, text)) = parse_bullet_item(rest) {
+    let bullet = parse_bullet_item(rest).or_else(|| {
+        (reading != MarkdownReading::Source && matches!(rest, "-" | "*" | "+"))
+            .then(|| (rest.chars().next().unwrap(), &rest[rest.len()..]))
+    });
+    if let Some((bullet, text)) = bullet {
         let task = if text.starts_with('[')
             && (text.len() == 3 || text.as_bytes().get(3) == Some(&b' '))
         {
@@ -3166,8 +3197,8 @@ fn list_marker(line: &str) -> Option<ListMarker<'_>> {
             },
         });
     }
-    let (start, text) = parse_ordered_item(rest)?;
-    let width = rest.len() - text.len();
+    let (start, text) = parse_ordered_item(rest, reading != MarkdownReading::Source)?;
+    let width = rest.bytes().take_while(u8::is_ascii_digit).count() + 2;
     Some(ListMarker {
         kind: ListKind::Ordered(rest.as_bytes()[width - 2] as char),
         indent,
@@ -3249,7 +3280,7 @@ fn parse_list<'src>(
         && lines.get(prefix_end).is_some_and(|line| blank_line(line))
         && after_blank.is_none_or(|at| {
             !lines[at].starts_with([' ', '\t'])
-                && list_marker(lines[at]).is_none_or(|next| next.kind != first.kind)
+                && list_marker(lines[at], reading).is_none_or(|next| next.kind != first.kind)
         });
     if prefix_end == lines.len() || ends_before_block {
         return Some((
@@ -3286,7 +3317,9 @@ fn parse_list<'src>(
         // The checkbox is content after the bullet marker, not part of its width.
         let content_indent = marker.indent + marker.width;
         while let Some(line) = lines.get(at) {
-            if let Some(next) = list_marker(line).filter(|next| next.indent < content_indent) {
+            if let Some(next) =
+                list_marker(line, reading).filter(|next| next.indent < content_indent)
+            {
                 *refused |= next.indent > marker.indent;
                 next_marker = Some(next);
                 break;
@@ -3362,7 +3395,7 @@ fn parse_list<'src>(
             }
         }
         if next_marker.is_none() {
-            next_marker = lines.get(at).and_then(|line| list_marker(line));
+            next_marker = lines.get(at).and_then(|line| list_marker(line, reading));
         }
     }
     let block = match first.kind {
@@ -5572,7 +5605,12 @@ fn render_node(node: &MarkdownNode, context: RenderContext<'_>) -> ProjectionRes
                 render_list_item(children, &context, Some(prefix))
             }
             "codeBlock" => render_code_block(attrs, children),
-            "horizontalRule" => Ok("---".to_string()),
+            "horizontalRule" => Ok(if context.parent_tag == "doc" && context.index == 0 {
+                "***"
+            } else {
+                "---"
+            }
+            .to_string()),
             "hardBreak" => Ok("  \n".to_string()),
             "image" => render_image(attrs),
             "escapedPunctuation" => ensure_projection_string(format!(
@@ -5699,7 +5737,9 @@ fn render_list_item(
     let mut output =
         ProjectionBuffer::with_capacity(prefix.len().saturating_add(first_rendered.len()))?;
     output.push_str(prefix)?;
-    output.push_str(&first_rendered)?;
+    if !first_rendered.trim_matches([' ', '\t']).is_empty() {
+        output.push_str(&first_rendered)?;
+    }
     for (index, child) in nested.iter().enumerate() {
         let child_rendered = render_node(
             child,
@@ -5730,7 +5770,23 @@ fn render_list_item(
             )?;
             indented.push_str(line)?;
         }
-        if element_tag(child) == Some("paragraph") {
+        let first_line = child_rendered.split('\n').next().unwrap_or_default();
+        let previous = index.checked_sub(1).map_or(first, |i| &nested[i]);
+        let list_interrupts = match element_tag(child) {
+            Some("orderedList") => first_line
+                .strip_prefix("1. ")
+                .is_some_and(|text| !text.trim_end_matches([' ', '\t']).is_empty()),
+            Some("bulletList") => first_line.trim_end_matches([' ', '\t']) != "-",
+            _ => true,
+        };
+        if matches!(
+            element_tag(child),
+            Some("paragraph" | "horizontalRule" | "mathBlock")
+        ) || (matches!(
+            element_tag(previous),
+            Some("paragraph" | "mathBlock" | "table")
+        ) && !list_interrupts)
+        {
             output.push_str("\n\n")?;
         } else {
             output.push('\n')?;

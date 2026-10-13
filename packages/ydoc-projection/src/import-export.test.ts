@@ -1960,7 +1960,7 @@ describe('Y.Doc markdown import/export', () => {
 
       expect(getDohcYDocFrontmatter(doc)).toEqual({})
       expect(output).toContain(content)
-      expect(output).toContain('---')
+      expect(output).toMatch(/^\*\*\*/)
       expect(output).toContain('# Body')
     }
   })
