@@ -721,6 +721,7 @@ async function createAgentThread(
   });
   const actor = input.actor ?? "human";
   const started = await fixture.chat.startChannelThread({
+    authorActorKey: null,
     workspaceId: WORKSPACE_ID,
     channelId: channel.id,
     ...(input.title === undefined ? {} : { title: input.title }),
@@ -742,6 +743,7 @@ async function linkAgentReply(
   body = "Finished the work.",
 ): Promise<string> {
   const message = await fixture.chat.sendMessage({
+    authorActorKey: null,
     workspaceId: WORKSPACE_ID,
     threadId,
     author: { kind: "agent", displayName: "Sam" },
@@ -850,6 +852,7 @@ describe("chatDispatchService", () => {
       workspaceId: WORKSPACE_ID,
     });
     const mention = await fixture.chat.startChannelThread({
+      authorActorKey: null,
       workspaceId: WORKSPACE_ID,
       channelId: general.id,
       author: { kind: "human", displayName: "Sam" },
@@ -857,6 +860,7 @@ describe("chatDispatchService", () => {
       body: "Could @agent audit this plan?",
     });
     await fixture.chat.startChannelThread({
+      authorActorKey: null,
       workspaceId: WORKSPACE_ID,
       channelId: general.id,
       author: { kind: "agent", displayName: "Sam" },
@@ -896,6 +900,7 @@ describe("chatDispatchService", () => {
           for (const mentionsAgent of [false, true]) {
             caseNumber += 1;
             const started = await fixture.chat.startChannelThread({
+              authorActorKey: null,
               workspaceId: WORKSPACE_ID,
               channelId:
                 channelKind === "agent" ? agentChannel.id : generalChannel.id,
@@ -939,6 +944,7 @@ describe("chatDispatchService", () => {
       workspaceId: WORKSPACE_ID,
     });
     const unrelated = await fixture.chat.startChannelThread({
+      authorActorKey: null,
       workspaceId: WORKSPACE_ID,
       channelId: generalChannel.id,
       author: { kind: "human", displayName: "Sam" },
@@ -1075,6 +1081,7 @@ describe("chatDispatchService", () => {
 
     const channel = await fixture.chat.ensureAgentChannel({ workspaceId: WORKSPACE_ID });
     const wake = await fixture.chat.startChannelThread({
+      authorActorKey: null,
       workspaceId: WORKSPACE_ID,
       channelId: channel.id,
       author: { kind: "automation", displayName: "Stamp the finish date" },
@@ -1349,6 +1356,7 @@ describe("chatDispatchService", () => {
     });
     for (const body of ["Second request.", "Third request."]) {
       await fixture.chat.sendMessage({
+        authorActorKey: null,
         workspaceId: WORKSPACE_ID,
         threadId: trigger.threadId,
         author: { kind: "human", displayName: "Sam" },
@@ -1377,6 +1385,7 @@ describe("chatDispatchService", () => {
     });
 
     await fixture.chat.sendMessage({
+      authorActorKey: null,
       workspaceId: WORKSPACE_ID,
       threadId: trigger.threadId,
       author: { kind: "human", displayName: "Sam" },
@@ -1440,6 +1449,7 @@ describe("chatDispatchService", () => {
           workspaceId: WORKSPACE_ID,
         });
         await chat.startChannelThread({
+          authorActorKey: null,
           workspaceId: WORKSPACE_ID,
           channelId: channel.id,
           author: { kind: "human", displayName: "Sam" },
@@ -1582,6 +1592,7 @@ describe("chatDispatchService", () => {
     await fixture.service.scanWorkspace(WORKSPACE_ID);
     expect(fixture.dispatchNotices).toHaveLength(1);
     const followUp = await fixture.chat.sendMessage({
+      authorActorKey: null,
       workspaceId: WORKSPACE_ID,
       threadId: trigger.threadId,
       author: { kind: "human", displayName: "Sam" },
@@ -1603,6 +1614,7 @@ describe("chatDispatchService", () => {
       authorUserId: "user_local",
     });
     const pausedFollowUp = await fixture.chat.sendMessage({
+      authorActorKey: null,
       workspaceId: WORKSPACE_ID,
       threadId: paused.threadId,
       author: { kind: "human", displayName: "Sam" },
@@ -1858,6 +1870,7 @@ describe("chatDispatchService", () => {
       reason: "clear failed preparation",
     });
     const followUp = await fixture.chat.sendMessage({
+      authorActorKey: null,
       workspaceId: WORKSPACE_ID,
       threadId: pending.threadId,
       author: { kind: "human", displayName: "Sam" },
@@ -3024,6 +3037,7 @@ describe("chatDispatchService", () => {
 
     expect(await fixture.chat.listChannelThreads({ workspaceId: WORKSPACE_ID, channelId: agentChannel.id })).toEqual([]);
     const started = await fixture.chat.startChannelThread({
+      authorActorKey: null,
       workspaceId: WORKSPACE_ID,
       channelId: agentChannel.id,
       title: "dohc runner self-test",
@@ -3056,6 +3070,7 @@ describe("chatDispatchService", () => {
     const retryMarker = `dohc-runner-self-test:${retryRunId}`;
     expect(retryMarker).not.toBe(marker);
     await fixture.chat.sendMessage({
+      authorActorKey: null,
       workspaceId: WORKSPACE_ID,
       threadId,
       author: { kind: "agent", displayName: "Sam" },
@@ -3124,6 +3139,7 @@ describe("chatDispatchService", () => {
     const call = fixture.spawnCalls[0]!;
     const agentChannel = await fixture.chat.ensureAgentChannel({ workspaceId: WORKSPACE_ID });
     await fixture.chat.startChannelThread({
+      authorActorKey: null,
       workspaceId: WORKSPACE_ID,
       channelId: agentChannel.id,
       title: "dohc runner self-test",

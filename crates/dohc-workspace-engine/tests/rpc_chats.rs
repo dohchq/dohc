@@ -5183,3 +5183,345 @@ async fn pending_bookmark_pages_keep_the_advisory_total_and_refuse_oversized_cou
     assert_eq!(second["nextCursor"], Value::Null);
     call(&transport, &handle, &mut id, "workspace.close", json!({})).await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn local_chat_actor_key_survives_restart_and_never_enters_replication() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let handle = open_workspace(&transport, &scratch, 1, "actor-key").await;
+    let mut id = 1;
+    let installation_key = r#"{"kind":"installation","installationId":"device-a"}"#;
+    let account_key = r#"{"kind":"account","issuer":"https://accounts.test","userId":"alice"}"#;
+    call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.channels.create",
+        json!({
+            "channelId": "channel", "name": "General", "kind": "channel", "nowMs": 10,
+        }),
+    )
+    .await;
+    let opening = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.threads.start",
+        json!({
+            "channelId": "channel", "threadId": "thread", "messageId": "opening",
+            "authorKind": "human", "authorDisplayName": "Alice", "authorActorKey": installation_key,
+            "body": "Offline", "nowMs": 20,
+        }),
+    )
+    .await;
+    assert_eq!(opening["message"]["authorActorKey"], installation_key);
+    let signed_in = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.messages.send",
+        json!({
+            "threadId": "thread", "messageId": "signed-in", "authorKind": "human",
+            "authorDisplayName": "Alice", "authorUserId": "alice", "authorActorKey": account_key,
+            "body": "Online", "nowMs": 21,
+        }),
+    )
+    .await;
+    assert_eq!(signed_in["authorActorKey"], account_key);
+    call(&transport, &handle, &mut id, "workspace.close", json!({})).await;
+
+    let db = engine_db_path(&scratch).expect("db");
+    let mut store = EngineStore::open(&db, 30).expect("reopen own store");
+    let payloads: Vec<String> = store
+        .read_with(|conn| {
+            let mut query = conn.prepare(
+                "SELECT payload_json FROM replication_log WHERE workspace_id='actor-key'",
+            )?;
+            query.query_map([], |row| row.get(0))?.collect()
+        })
+        .expect("payloads");
+    assert!(!payloads.is_empty());
+    for payload in payloads {
+        let value: Value = serde_json::from_str(&payload).expect("JSON payload");
+        assert!(value.get("authorActorKey").is_none());
+        assert!(value.get("author_actor_key").is_none());
+        assert!(!payload.contains("device-a"));
+        assert!(!payload.contains("https://accounts.test"));
+    }
+    for (seq, message_id, forged) in [(0, "received-keyless", false), (1, "received-forged", true)]
+    {
+        let mut payload = json!({
+            "threadId": "thread", "messageId": message_id, "authorKind": "agent",
+            "authorDisplayName": "Peer claim", "authorUserId": "peer", "body": "Received", "createdAtMs": 40 + seq,
+        });
+        if forged {
+            payload["authorActorKey"] = json!(installation_key);
+        }
+        apply_chat_envelope(
+            &mut store,
+            &ReplicationEnvelope {
+                workspace_id: "actor-key".to_owned(),
+                origin_id: "peer-device".to_owned(),
+                origin_seq: seq,
+                relay_seq: Some(seq),
+                admitted_author_snapshot: None,
+                settlement_admission: None,
+                op_kind: "chat.message.append".to_owned(),
+                payload,
+                recorded_at_ms: 40 + seq,
+            },
+            &NoFaults,
+        )
+        .expect("ingest");
+    }
+    assert!(
+        store
+            .read_with(|conn| {
+                conn.execute(
+                    "UPDATE chat_messages SET author_actor_key='broken' WHERE message_id='opening'",
+                    [],
+                )
+            })
+            .is_err(),
+        "local chat actor keys must contain valid JSON"
+    );
+    let received_keys: Vec<Option<String>> = store
+        .read_with(|conn| {
+            let mut query = conn.prepare(
+                "SELECT author_actor_key FROM chat_messages WHERE message_id LIKE 'received-%'",
+            )?;
+            query.query_map([], |row| row.get(0))?.collect()
+        })
+        .expect("received keys");
+    assert_eq!(received_keys, vec![None, None]);
+    drop(store);
+
+    let reopened = open_workspace(&transport, &scratch, 100, "actor-key").await;
+    let listed = call(
+        &transport,
+        &reopened,
+        &mut id,
+        "chats.messages.list",
+        json!({ "threadId": "thread" }),
+    )
+    .await;
+    let rows = listed["messages"].as_array().expect("messages");
+    assert_eq!(
+        rows.iter().find(|row| row["id"] == "opening").unwrap()["authorActorKey"],
+        installation_key
+    );
+    assert_eq!(
+        rows.iter().find(|row| row["id"] == "signed-in").unwrap()["authorActorKey"],
+        account_key
+    );
+    for row in rows
+        .iter()
+        .filter(|row| row["id"].as_str().unwrap().starts_with("received-"))
+    {
+        assert!(row.get("authorActorKey").is_none());
+    }
+    call(&transport, &reopened, &mut id, "workspace.close", json!({})).await;
+}
+
+async fn oversized_local_chat_actor_key_is_rejected(method: &str) {
+    let scratch = ScratchDir::new().expect("scratch");
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let handle = open_workspace(&transport, &scratch, 1, "actor-key-bound").await;
+    let mut id = 1;
+    call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.channels.create",
+        json!({
+            "channelId": "channel", "name": "General", "kind": "channel", "nowMs": 10,
+        }),
+    )
+    .await;
+    let prefix = r#"{"kind":"installation","installationId":""#;
+    let suffix = r#""}"#;
+    let bounded_key = format!(
+        "{prefix}{}{suffix}",
+        "x".repeat(16 * 1024 - prefix.len() - suffix.len())
+    );
+    let opening = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.threads.start",
+        json!({
+            "channelId": "channel", "threadId": "thread", "messageId": "opening",
+            "authorKind": "human", "authorDisplayName": "Alice", "body": "Hello",
+            "authorActorKey": bounded_key, "nowMs": 20,
+        }),
+    )
+    .await;
+    assert_eq!(opening["message"]["authorActorKey"], bounded_key);
+    for padding in ["x".repeat(16 * 1024), "é".repeat(8 * 1024)] {
+        let mut params = json!({
+            "threadId": "thread", "messageId": "oversized",
+            "authorKind": "human", "authorDisplayName": "Alice", "body": "Hello",
+            "authorActorKey": format!("{prefix}{padding}{suffix}"), "nowMs": 30,
+        });
+        if method == "chats.threads.start" {
+            params["channelId"] = json!("channel");
+            params["threadId"] = json!("oversized-thread");
+        }
+        let error = call_error(&transport, &handle, &mut id, method, params).await;
+        assert_eq!(error.code, ErrorCode::InvalidParams, "{error:?}");
+        assert_eq!(error.message, "chat actor key exceeds 16384 bytes");
+    }
+    let listed = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.messages.list",
+        json!({ "threadId": "thread" }),
+    )
+    .await;
+    assert_eq!(listed["messages"].as_array().unwrap().len(), 1);
+    let threads = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.threads.listForChannel",
+        json!({ "channelId": "channel" }),
+    )
+    .await;
+    assert_eq!(threads["threads"].as_array().unwrap().len(), 1);
+    call(&transport, &handle, &mut id, "workspace.close", json!({})).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn local_chat_actor_key_thread_start_has_a_byte_bound() {
+    oversized_local_chat_actor_key_is_rejected("chats.threads.start").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn local_chat_actor_key_message_send_has_a_byte_bound() {
+    oversized_local_chat_actor_key_is_rejected("chats.messages.send").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn passive_store_pulls_chat_rows_but_refuses_local_actor_key_admission() {
+    use dohc_engine_domain::{
+        ChatActorKind, ChatThreadLane, LinkedChatStore, SendMessage, StartChannelThread,
+    };
+    let source = ScratchDir::new().expect("source");
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let handle = open_workspace(&transport, &source, 1, "actor-key-passive").await;
+    let mut id = 1;
+    call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.channels.create",
+        json!({
+            "channelId":"channel", "name":"General", "kind":"channel", "nowMs":10
+        }),
+    )
+    .await;
+    let key = r#"{"kind":"installation","installationId":"owner-device"}"#;
+    call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.threads.start",
+        json!({
+            "channelId":"channel", "threadId":"pulled-thread", "messageId":"pulled-message",
+            "authorKind":"human", "authorDisplayName":"Alice", "authorUserId":"alice", "authorActorKey":key,
+            "body":"Pulled", "nowMs":20
+        }),
+    )
+    .await;
+    call(&transport, &handle, &mut id, "workspace.close", json!({})).await;
+    let owner = EngineStore::open(&engine_db_path(&source).unwrap(), 30).unwrap();
+    let envelopes: Vec<ReplicationEnvelope> = owner.read_with(|conn| {
+        let mut query = conn.prepare("SELECT origin_id, origin_seq, op_kind, payload_json, recorded_at_ms FROM replication_log WHERE op_kind LIKE 'chat.%' ORDER BY origin_seq")?;
+        query.query_map([], |row| {
+            let payload: String = row.get(3)?;
+            Ok(ReplicationEnvelope {
+                workspace_id:"actor-key-passive".into(), origin_id:row.get(0)?, origin_seq:row.get(1)?,
+                relay_seq:None, admitted_author_snapshot:None, settlement_admission:None, op_kind:row.get(2)?, payload:serde_json::from_str(&payload).unwrap(), recorded_at_ms:row.get(4)?
+            })
+        })?.collect()
+    }).unwrap();
+    assert!(!envelopes.is_empty());
+    let replica = ScratchDir::new().expect("replica");
+    let replica_db = engine_db_path(&replica).unwrap();
+    let mut passive = EngineStore::open_passive(&replica_db, 1, None, None).unwrap();
+    for mut envelope in envelopes {
+        envelope.payload["authorActorKey"] = json!(key);
+        apply_chat_envelope(&mut passive, &envelope, &NoFaults).expect("pulled row");
+    }
+    let mut start = StartChannelThread {
+        workspace_id: "actor-key-passive".into(),
+        channel_id: "channel".into(),
+        thread_id: "local-thread".into(),
+        message_id: "local-opening".into(),
+        title: None,
+        lane: ChatThreadLane::Posts,
+        author_kind: ChatActorKind::Human,
+        author_display_name: "Alice".into(),
+        author_owner_display_name: None,
+        author_user_id: None,
+        origin: None,
+        body: "Local".into(),
+        needs_decision: false,
+        options: vec![],
+        attachments: vec![],
+        automation: None,
+        now_ms: 40,
+        request_id: Some("passive-start".into()),
+    };
+    let mut reply = SendMessage {
+        workspace_id: "actor-key-passive".into(),
+        thread_id: "pulled-thread".into(),
+        message_id: "local-reply".into(),
+        author_kind: ChatActorKind::Human,
+        author_display_name: "Alice".into(),
+        author_owner_display_name: None,
+        author_user_id: None,
+        parent_message_id: None,
+        origin: None,
+        body: "Local reply".into(),
+        needs_decision: false,
+        options: vec![],
+        attachments: vec![],
+        automation: None,
+        now_ms: 41,
+        request_id: Some("passive-send".into()),
+    };
+    let mut chats = LinkedChatStore::new(&mut passive);
+    for author_user_id in [None, Some("alice".to_owned())] {
+        start.author_user_id = author_user_id.clone();
+        reply.author_user_id = author_user_id;
+        for author_actor_key in [None, Some(key)] {
+            let start_error = chats
+                .start_admitted_channel_thread(&start, author_actor_key, &NoFaults)
+                .unwrap_err();
+            assert!(
+                start_error
+                    .to_string()
+                    .contains("passive store cannot originate"),
+                "{start_error:?}"
+            );
+            let send_error = chats
+                .send_admitted_message(&reply, author_actor_key, &NoFaults)
+                .unwrap_err();
+            assert!(
+                send_error
+                    .to_string()
+                    .contains("passive store cannot originate"),
+                "{send_error:?}"
+            );
+        }
+    }
+    drop(passive);
+    let passive = EngineStore::open_passive(&replica_db, 50, None, None).unwrap();
+    passive.read_with(|conn| {
+        let counts: (i64,i64,i64,i64,i64) = conn.query_row("SELECT (SELECT count(*) FROM chat_messages), (SELECT count(*) FROM chat_threads), (SELECT count(*) FROM chat_messages WHERE author_actor_key IS NOT NULL), (SELECT count(*) FROM replication_log WHERE imported=0), (SELECT count(*) FROM engine_requests WHERE request_id IN ('passive-start','passive-send'))", [], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?)))?;
+        assert_eq!(counts, (1,1,0,0,0));
+        Ok::<_,rusqlite::Error>(())
+    }).unwrap();
+}

@@ -199,6 +199,433 @@ struct Harness {
     _capture_scratch: ScratchDir,
 }
 
+fn seed_held_richdoc(harness: &Harness) -> String {
+    use dohc_engine_collab::{
+        ContentKind, LocalAppend, MarkerCreation, Regime, WriterDocCache, Ydoc,
+    };
+    let mut store = dohc_engine_storage::EngineStore::open(&harness.db, 1).unwrap();
+    let input = dohc_engine_domain::CaptureIngest {
+        workspace_id: WORKSPACE_ID.into(),
+        version_id: "main".into(),
+        path: NEW_FILE.into(),
+        text: "Before.\n".into(),
+        metadata_origin: "capture".into(),
+        metadata_summary: None,
+        metadata_correlation_id: None,
+        author_json: None,
+        now_ms: 2,
+        request_id: None,
+        claim_foreign_head: false,
+    };
+    dohc_engine_domain::VersionedTextStore::new(&mut store)
+        .ensure_main_version(WORKSPACE_ID, "main", 1, &NoFaults)
+        .unwrap();
+    let head = dohc_engine_domain::VersionedTextStore::new(&mut store)
+        .capture_ingest(&input, &NoFaults)
+        .unwrap()
+        .snapshot;
+    let key = harness.key(&head.object_id);
+    let doc = Ydoc::wire();
+    doc.rewrite_content_to_markdown_preserving_source(ContentKind::Richdoc, &input.text)
+        .unwrap();
+    dohc_engine_collab::record_local_update(
+        &mut store,
+        &mut WriterDocCache::new(),
+        &key,
+        &doc.encode_full_state(),
+        LocalAppend {
+            marker: Some(MarkerCreation {
+                path: Some(NEW_FILE),
+                content_kind: ContentKind::Richdoc,
+                regime: Regime::LocalOnly,
+            }),
+            is_seed: true,
+            seed_source_sha256: Some(&head.blob_sha256),
+            ..Default::default()
+        },
+        &NoFaults,
+        3,
+        |_tx, _outcome, _sha| Ok(()),
+    )
+    .unwrap();
+    drop(store);
+    head.object_id
+}
+
+async fn fix2_repaired_hold_with_relay_job(first_sight: bool) {
+    let harness = Harness::new();
+    let outside = format!("{} too deep\n", "> ".repeat(121));
+    let object_id = seed_held_richdoc(&harness);
+    std::fs::write(harness.root.join(NEW_FILE), &outside).unwrap();
+    let files = FilesActorCloseGuard::new(
+        FilesActor::spawn_async(harness.root.clone(), ScanBounds::default())
+            .await
+            .unwrap(),
+    );
+    assert!(harness.capture(&files.handle()).await);
+    assert_eq!(
+        harness
+            .actor
+            .capture_file_holds(WORKSPACE_ID.into())
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    harness
+        .actor
+        .versioned_text_write(
+            dohc_engine_domain::WriteText {
+                workspace_id: WORKSPACE_ID.into(),
+                version_id: "main".into(),
+                object_id,
+                path: NEW_FILE.into(),
+                text: "Remote edit.\n".into(),
+                moment_id: "fix2-remote-edit".into(),
+                metadata_origin: "sync".into(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 4,
+                request_id: None,
+            },
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    harness
+        .actor
+        .materialize_relay_page(
+            WORKSPACE_ID.into(),
+            harness.root.clone(),
+            vec![dohc_engine_sync::MomentMaterializationChange {
+                version_id: "main".into(),
+                path: NEW_FILE.into(),
+                operation: "write",
+                content_kind: "text",
+            }],
+            Arc::new(harness.self_writes.clone()),
+            5,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    let observer = rusqlite::Connection::open(&harness.db).unwrap();
+    let job_id: String = observer
+        .query_row(
+            "SELECT job_id FROM materialization_jobs WHERE status='pending' AND target_path=?1",
+            [NEW_FILE],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(job_id.starts_with("version-switch-mat_"));
+    assert_eq!(
+        std::fs::read_to_string(harness.root.join(NEW_FILE)).unwrap(),
+        outside
+    );
+    std::fs::write(harness.root.join(NEW_FILE), "Repaired outside.\n").unwrap();
+    let fresh = if first_sight {
+        Some(FilesActorCloseGuard::new(
+            FilesActor::spawn_async(harness.root.clone(), ScanBounds::default())
+                .await
+                .unwrap(),
+        ))
+    } else {
+        None
+    };
+    let active_files = if let Some(fresh) = &fresh {
+        fresh.handle()
+    } else {
+        files.handle().request_rescan();
+        files.handle()
+    };
+    let clean = harness.capture(&active_files).await;
+    let degraded = harness.status.degraded();
+    let job_status: String = observer
+        .query_row(
+            "SELECT status FROM materialization_jobs WHERE job_id=?1",
+            [&job_id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let disk = std::fs::read_to_string(harness.root.join(NEW_FILE)).unwrap();
+    let recorded_sha: String = observer
+        .query_row(
+            "SELECT blob_sha256 FROM snapshots WHERE workspace_id=?1 AND path=?2",
+            [WORKSPACE_ID, NEW_FILE],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let notices = std::fs::read_dir(harness.root.join("notes"))
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .filter(|p| p.to_string_lossy().ends_with(".conflict"))
+        .collect::<Vec<_>>();
+    assert!(
+        harness
+            .actor
+            .capture_file_holds(WORKSPACE_ID.into())
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let history_shas: Vec<String> = observer
+        .prepare("SELECT after_blob_sha256 FROM moments WHERE workspace_id=?1 AND path=?2 AND operation='write'")
+        .unwrap()
+        .query_map([WORKSPACE_ID, NEW_FILE], |r| r.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    drop(observer);
+    let notice_bytes = notices
+        .iter()
+        .map(|p| std::fs::read_to_string(p).unwrap())
+        .collect::<Vec<_>>();
+    if let Some(fresh) = fresh {
+        fresh.close().await;
+    }
+    files.close().await;
+    harness.close();
+    assert!(
+        clean && !degraded,
+        "a file outcome degraded capture: clean={clean}, degraded={degraded}, status={job_status}"
+    );
+    assert_eq!(disk, "Repaired outside.\n");
+    if first_sight {
+        assert_eq!(
+            recorded_sha,
+            dohc_engine_storage::hex_sha256(b"Remote edit.\n")
+        );
+        assert_eq!(job_status, "conflict");
+        assert_eq!(notices.len(), 1, "ordinary file conflict notice artifact");
+        assert_eq!(notice_bytes[0], "Remote edit.\n");
+    } else {
+        assert_eq!(
+            recorded_sha,
+            dohc_engine_storage::hex_sha256(b"Repaired outside.\n")
+        );
+        assert_eq!(job_status, "conflict");
+        assert_eq!(notices.len(), 1, "parked remote edit stays visible");
+        assert_eq!(notice_bytes[0], "Remote edit.\n");
+        for text in ["Remote edit.\n", "Repaired outside.\n"] {
+            assert!(
+                history_shas.contains(&dohc_engine_storage::hex_sha256(text.as_bytes())),
+                "History must retain {text:?}"
+            );
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fix4_unheld_capture_settles_stale_relay_without_conflict_copy() {
+    let harness = Harness::new();
+    let object_id = seed_held_richdoc(&harness);
+    std::fs::write(harness.root.join(NEW_FILE), SEED).unwrap();
+    let files = FilesActorCloseGuard::new(
+        FilesActor::spawn_async(harness.root.clone(), ScanBounds::default())
+            .await
+            .unwrap(),
+    );
+    assert!(harness.capture(&files.handle()).await);
+    harness
+        .actor
+        .versioned_text_write(
+            dohc_engine_domain::WriteText {
+                workspace_id: WORKSPACE_ID.into(),
+                version_id: "main".into(),
+                object_id,
+                path: NEW_FILE.into(),
+                text: "Remote edit.\n".into(),
+                moment_id: "fix4-remote-edit".into(),
+                metadata_origin: "sync".into(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 4,
+                request_id: None,
+            },
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    harness
+        .actor
+        .materialize_relay_page(
+            WORKSPACE_ID.into(),
+            harness.root.clone(),
+            vec![dohc_engine_sync::MomentMaterializationChange {
+                version_id: "main".into(),
+                path: NEW_FILE.into(),
+                operation: "write",
+                content_kind: "text",
+            }],
+            Arc::new(harness.self_writes.clone()),
+            5,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    let observer = rusqlite::Connection::open(&harness.db).unwrap();
+    let job_id: String = observer
+        .query_row(
+            "SELECT job_id FROM materialization_jobs WHERE target_path=?1 AND job_id LIKE 'version-switch-mat_%'",
+            [NEW_FILE],
+            |r| r.get(0),
+        )
+        .unwrap();
+    // Requeue the real relay intent to model a failed placement without an OS lock.
+    observer
+        .execute(
+            "UPDATE materialization_jobs SET status='pending' WHERE job_id=?1",
+            [&job_id],
+        )
+        .unwrap();
+    assert!(
+        harness
+            .actor
+            .capture_file_holds(WORKSPACE_ID.into())
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    std::fs::write(harness.root.join(NEW_FILE), "Saved outside.\n").unwrap();
+    files.handle().request_rescan();
+    let clean = harness.capture(&files.handle()).await;
+    let degraded = harness.status.degraded();
+    let job_status: String = observer
+        .query_row(
+            "SELECT status FROM materialization_jobs WHERE job_id=?1",
+            [&job_id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let disk = std::fs::read_to_string(harness.root.join(NEW_FILE)).unwrap();
+    let notices = std::fs::read_dir(harness.root.join("notes"))
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .filter(|p| p.to_string_lossy().ends_with(".conflict"))
+        .collect::<Vec<_>>();
+    drop(observer);
+    files.close().await;
+    harness.close();
+    assert!(clean && !degraded, "clean={clean}, degraded={degraded}");
+    assert_eq!(disk, "Saved outside.\n");
+    assert!(
+        notices.is_empty(),
+        "an unheld stale job must settle without a conflict copy: {notices:?}"
+    );
+    assert_eq!(job_status, "complete");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fix3_repaired_hold_keeps_stale_relay_as_visible_conflict() {
+    fix2_repaired_hold_with_relay_job(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fix2_first_sight_hold_drains_real_relay_conflict_without_degrading() {
+    fix2_repaired_hold_with_relay_job(true).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fix3_real_delete_recreate_hold_delete_and_recreate_normally() {
+    let harness = Harness::new();
+    seed_held_richdoc(&harness);
+    std::fs::write(harness.root.join(NEW_FILE), SEED).unwrap();
+    let files = FilesActorCloseGuard::new(
+        FilesActor::spawn_async(harness.root.clone(), ScanBounds::default())
+            .await
+            .unwrap(),
+    );
+    assert!(harness.capture(&files.handle()).await);
+    let mut store = dohc_engine_storage::EngineStore::open(&harness.db, 4).unwrap();
+    dohc_engine_domain::VersionedTextStore::new(&mut store)
+        .delete_text_file(
+            &dohc_engine_domain::DeleteTextFile {
+                workspace_id: WORKSPACE_ID.into(),
+                version_id: "main".into(),
+                path: NEW_FILE.into(),
+                moment_id: "fix3-real-delete".into(),
+                request_id: None,
+                metadata_origin: "api".into(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 4,
+            },
+            &NoFaults,
+        )
+        .unwrap();
+    drop(store);
+    std::fs::remove_file(harness.root.join(NEW_FILE)).unwrap();
+    assert!(!harness.root.join(NEW_FILE).exists());
+    assert_eq!(head_count(&harness.db, NEW_FILE), 0);
+    files.handle().request_rescan();
+    assert!(harness.capture(&files.handle()).await);
+    std::fs::write(
+        harness.root.join(NEW_FILE),
+        format!("{} too deep\n", "> ".repeat(121)),
+    )
+    .unwrap();
+    files.handle().request_rescan();
+    assert!(harness.capture(&files.handle()).await);
+    assert_eq!(
+        harness
+            .actor
+            .capture_file_holds(WORKSPACE_ID.into())
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(head_count(&harness.db, NEW_FILE), 0);
+    std::fs::remove_file(harness.root.join(NEW_FILE)).unwrap();
+    files.handle().request_rescan();
+    let clean = harness.capture(&files.handle()).await;
+    let degraded = harness.status.degraded();
+    let holds = harness
+        .actor
+        .capture_file_holds(WORKSPACE_ID.into())
+        .await
+        .unwrap();
+    let quarantined = files.handle().stats().await.unwrap().quarantined;
+    // Close even on the baseline failure, before asserting the expected result.
+    if !clean || degraded || !holds.is_empty() || quarantined != 0 {
+        files.close().await;
+        harness.close();
+        panic!(
+            "delete of recreated hold failed: clean={clean}, degraded={degraded}, holds={holds:?}, quarantined={quarantined}"
+        );
+    }
+    std::fs::write(harness.root.join(NEW_FILE), "Recreated normally.\n").unwrap();
+    files.handle().request_rescan();
+    let clean = harness.capture(&files.handle()).await;
+    let degraded = harness.status.degraded();
+    let recorded = harness
+        .actor
+        .versioned_text_read(
+            WORKSPACE_ID.into(),
+            "main".into(),
+            NEW_FILE.into(),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    let holds = harness
+        .actor
+        .capture_file_holds(WORKSPACE_ID.into())
+        .await
+        .unwrap();
+    files.close().await;
+    harness.close();
+    assert!(clean && !degraded);
+    assert!(holds.is_empty());
+    assert_eq!(recorded.text, "Recreated normally.\n");
+}
+
 impl Harness {
     fn new() -> Self {
         let store_scratch = ScratchDir::new().expect("store scratch");
@@ -902,14 +1329,18 @@ async fn an_unrepresentable_replicated_record_never_enters_the_deferred_count() 
         })
         .unwrap();
     drop(store);
-    std::fs::write(harness.root.join(path), "- parent\n  - child\n").unwrap();
+    std::fs::write(
+        harness.root.join(path),
+        format!("{} too deep\n", "> ".repeat(121)),
+    )
+    .unwrap();
     let files = FilesActorCloseGuard::new(
         FilesActor::spawn_async(harness.root.clone(), ScanBounds::default())
             .await
             .unwrap(),
     );
-    assert!(!harness.capture(&files.handle()).await);
-    assert!(harness.status.degraded());
+    assert!(harness.capture(&files.handle()).await);
+    assert!(!harness.status.degraded());
     assert_eq!(files.handle().stats().await.unwrap().deferred, 0);
     let switch = || {
         reconcile_full_for_switch(
@@ -925,10 +1356,10 @@ async fn an_unrepresentable_replicated_record_never_enters_the_deferred_count() 
             CancellationToken::new(),
         )
     };
-    assert!(matches!(
-        switch().await,
-        Err(SwitchReconcileError::ApplyFailed)
-    ));
+    assert_eq!(
+        format!("{:?}", switch().await.unwrap_err()),
+        format!("HeldFiles({:?})", vec![path])
+    );
     std::fs::write(harness.root.join(path), "Completed\n").unwrap();
     assert!(
         switch().await.is_ok(),
@@ -936,6 +1367,161 @@ async fn an_unrepresentable_replicated_record_never_enters_the_deferred_count() 
     );
     files.close().await;
     harness.close();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "manual capture cost measurement"]
+async fn capture_file_hold_capture_and_idle_cost() {
+    for count in [0, 100] {
+        let harness = Harness::new();
+        let outside = format!("{} too deep\n", "> ".repeat(121));
+        let mut store = dohc_engine_storage::EngineStore::open(&harness.db, 1).unwrap();
+        dohc_engine_domain::VersionedTextStore::new(&mut store)
+            .ensure_main_version(WORKSPACE_ID, "main", 1, &NoFaults)
+            .unwrap();
+        for index in 0..100 {
+            let path = format!("notes/held-{index:03}.md");
+            let input = dohc_engine_domain::CaptureIngest {
+                workspace_id: WORKSPACE_ID.into(),
+                version_id: "main".into(),
+                path: path.clone(),
+                text: SEED.into(),
+                metadata_origin: "capture".into(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 2,
+                request_id: None,
+                claim_foreign_head: false,
+            };
+            let head = dohc_engine_domain::VersionedTextStore::new(&mut store)
+                .capture_ingest(&input, &NoFaults)
+                .unwrap()
+                .snapshot;
+            let key = harness.key(&head.object_id);
+            let doc = dohc_engine_collab::Ydoc::wire();
+            doc.rewrite_content_to_markdown_preserving_source(
+                dohc_engine_collab::ContentKind::Richdoc,
+                SEED,
+            )
+            .unwrap();
+            dohc_engine_collab::record_local_update(
+                &mut store,
+                &mut dohc_engine_collab::WriterDocCache::new(),
+                &key,
+                &doc.encode_full_state(),
+                dohc_engine_collab::LocalAppend {
+                    marker: Some(dohc_engine_collab::MarkerCreation {
+                        path: Some(&path),
+                        content_kind: dohc_engine_collab::ContentKind::Richdoc,
+                        regime: dohc_engine_collab::Regime::LocalOnly,
+                    }),
+                    is_seed: true,
+                    seed_source_sha256: Some(&head.blob_sha256),
+                    ..Default::default()
+                },
+                &NoFaults,
+                3,
+                |_tx, _outcome, _sha| Ok(()),
+            )
+            .unwrap();
+            std::fs::write(
+                harness.root.join(&path),
+                if count == 0 { SEED } else { &outside },
+            )
+            .unwrap();
+        }
+        drop(store);
+        let seed = manifest_seed(&harness.root, &harness.actor, WORKSPACE_ID)
+            .await
+            .unwrap();
+        let files = FilesActorCloseGuard::new(
+            FilesActor::spawn_async_with_manifest(
+                harness.root.clone(),
+                ScanBounds::default(),
+                seed.into_scan_seed(),
+            )
+            .await
+            .unwrap(),
+        );
+        assert!(harness.capture(&files.handle()).await);
+        let held_count: i64 = rusqlite::Connection::open(&harness.db)
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM capture_file_holds WHERE workspace_id=?1",
+                [WORKSPACE_ID],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(held_count, count as i64);
+        let mut capture = Vec::new();
+        let mut idle = Vec::new();
+        let mut phases = Vec::new();
+        for sample in 0..33 {
+            std::fs::write(
+                harness.root.join("notes/sibling.txt"),
+                format!("Sibling {sample}.\n"),
+            )
+            .unwrap();
+            files.handle().request_rescan();
+            let start = std::time::Instant::now();
+            let run =
+                reconcile_if_dirty_bound(&harness.root, &files.handle(), CancellationToken::new())
+                    .await
+                    .unwrap();
+            let scan_ms = start.elapsed().as_secs_f64() * 1000.0;
+            let apply_start = std::time::Instant::now();
+            assert!(
+                apply_bound_run_with_handle(
+                    apply_context(
+                        &harness.root,
+                        &harness.actor,
+                        &harness.leases,
+                        &harness.status,
+                        &harness.self_writes
+                    ),
+                    &files.handle(),
+                    run,
+                    &CancellationToken::new()
+                )
+                .await
+                .clean
+            );
+            let apply_ms = apply_start.elapsed().as_secs_f64() * 1000.0;
+            let elapsed = start.elapsed().as_secs_f64() * 1000.0;
+            let start = std::time::Instant::now();
+            assert!(harness.capture(&files.handle()).await);
+            let idle_elapsed = start.elapsed().as_secs_f64() * 1000.0;
+            if sample >= 3 {
+                capture.push(elapsed);
+                idle.push(idle_elapsed);
+                phases.push((scan_ms, apply_ms));
+            }
+        }
+        println!("capture_phases held_files={count} scan_apply_ms={phases:?}");
+        let attempts: i64 = rusqlite::Connection::open(&harness.db)
+            .unwrap()
+            .query_row("SELECT COALESCE(SUM(attempt_count),0) FROM capture_file_holds WHERE workspace_id=?1", [WORKSPACE_ID], |row| row.get(0))
+            .unwrap();
+        assert_eq!(
+            attempts, count as i64,
+            "unchanged holds must not retry during measurement"
+        );
+        println!(
+            "capture_attempts held_files={count} attempts_before={count} attempts_after={attempts}"
+        );
+        for (name, mut samples) in [("capture_pass", capture), ("idle_capture_tick", idle)] {
+            println!("{name}_samples held_files={count} ms={samples:?}");
+            samples.sort_by(f64::total_cmp);
+            println!(
+                "{name} held_files={count} files=101 warmups=3 samples=30 median_ms={:.6} p95_ms={:.6}",
+                (samples[14] + samples[15]) / 2.0,
+                samples[28]
+            );
+        }
+        files.close().await;
+        harness.close();
+    }
 }
 
 // A version switch or fork captures the whole workspace first. A new file an
@@ -1120,4 +1706,172 @@ async fn an_outside_write_to_a_held_new_file_keeps_capture_unsettled_until_recor
 
     files.close().await;
     harness.close();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "manual capture cost measurement"]
+async fn fix1_no_hold_capture_and_idle_cost() {
+    for count in [0] {
+        let harness = Harness::new();
+        let outside = format!("{} too deep\n", "> ".repeat(121));
+        let mut store = dohc_engine_storage::EngineStore::open(&harness.db, 1).unwrap();
+        dohc_engine_domain::VersionedTextStore::new(&mut store)
+            .ensure_main_version(WORKSPACE_ID, "main", 1, &NoFaults)
+            .unwrap();
+        for index in 0..100 {
+            let path = format!("notes/held-{index:03}.md");
+            let input = dohc_engine_domain::CaptureIngest {
+                workspace_id: WORKSPACE_ID.into(),
+                version_id: "main".into(),
+                path: path.clone(),
+                text: SEED.into(),
+                metadata_origin: "capture".into(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 2,
+                request_id: None,
+                claim_foreign_head: false,
+            };
+            let head = dohc_engine_domain::VersionedTextStore::new(&mut store)
+                .capture_ingest(&input, &NoFaults)
+                .unwrap()
+                .snapshot;
+            let key = harness.key(&head.object_id);
+            let doc = dohc_engine_collab::Ydoc::wire();
+            doc.rewrite_content_to_markdown_preserving_source(
+                dohc_engine_collab::ContentKind::Richdoc,
+                SEED,
+            )
+            .unwrap();
+            dohc_engine_collab::record_local_update(
+                &mut store,
+                &mut dohc_engine_collab::WriterDocCache::new(),
+                &key,
+                &doc.encode_full_state(),
+                dohc_engine_collab::LocalAppend {
+                    marker: Some(dohc_engine_collab::MarkerCreation {
+                        path: Some(&path),
+                        content_kind: dohc_engine_collab::ContentKind::Richdoc,
+                        regime: dohc_engine_collab::Regime::LocalOnly,
+                    }),
+                    is_seed: true,
+                    seed_source_sha256: Some(&head.blob_sha256),
+                    ..Default::default()
+                },
+                &NoFaults,
+                3,
+                |_tx, _outcome, _sha| Ok(()),
+            )
+            .unwrap();
+            std::fs::write(
+                harness.root.join(&path),
+                if count == 0 { SEED } else { &outside },
+            )
+            .unwrap();
+        }
+        drop(store);
+        let seed = manifest_seed(&harness.root, &harness.actor, WORKSPACE_ID)
+            .await
+            .unwrap();
+        let files = FilesActorCloseGuard::new(
+            FilesActor::spawn_async_with_manifest(
+                harness.root.clone(),
+                ScanBounds::default(),
+                seed.into_scan_seed(),
+            )
+            .await
+            .unwrap(),
+        );
+        assert!(harness.capture(&files.handle()).await);
+        let mut capture = Vec::new();
+        let mut idle = Vec::new();
+        for sample in 0..33 {
+            std::fs::write(
+                harness.root.join("notes/sibling.txt"),
+                format!("Sibling {sample}.\n"),
+            )
+            .unwrap();
+            files.handle().request_rescan();
+            let start = std::time::Instant::now();
+            assert!(harness.capture(&files.handle()).await);
+            let elapsed = start.elapsed().as_secs_f64() * 1000.0;
+            let start = std::time::Instant::now();
+            assert!(harness.capture(&files.handle()).await);
+            let idle_elapsed = start.elapsed().as_secs_f64() * 1000.0;
+            if sample >= 3 {
+                capture.push(elapsed);
+                idle.push(idle_elapsed);
+            }
+        }
+        for (name, mut samples) in [("capture_pass", capture), ("idle_capture_tick", idle)] {
+            println!("{name}_samples held_files={count} ms={samples:?}");
+            samples.sort_by(f64::total_cmp);
+            println!(
+                "{name} held_files={count} files=101 warmups=3 samples=30 median_ms={:.6} p95_ms={:.6}",
+                (samples[14] + samples[15]) / 2.0,
+                samples[28]
+            );
+        }
+        files.close().await;
+        harness.close();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "manual placement replay cost measurement"]
+async fn fix1_no_hold_placement_replay_cost() {
+    let mut samples = Vec::new();
+    for sample in 0..33 {
+        let harness = Harness::new();
+        let mut store = dohc_engine_storage::EngineStore::open(&harness.db, 1).unwrap();
+        store
+            .write_with(&NoFaults, |tx| {
+                let text = "Replay content.\n";
+                let sha = dohc_engine_storage::hex_sha256(text.as_bytes());
+                tx.execute(
+                    "INSERT OR IGNORE INTO blobs (sha256,byte_length,text) VALUES (?1,?2,?3)",
+                    rusqlite::params![sha, text.len() as i64, text],
+                )
+                .map_err(dohc_engine_storage::StorageError::persist_public)?;
+                for index in 0..100 {
+                    dohc_engine_storage::enqueue_job(
+                        tx,
+                        &dohc_engine_storage::MaterializationJobSpec {
+                            job_id: format!("replay-{index}"),
+                            workspace_id: WORKSPACE_ID.into(),
+                            target_path: format!("notes/replay-{index}.txt"),
+                            content_sha256: sha.clone(),
+                            preimage: dohc_engine_storage::Preimage::Absent,
+                            target_generation: index + 1,
+                            now_ms: 2,
+                        },
+                    )?;
+                }
+                Ok::<_, dohc_engine_storage::StorageError>(())
+            })
+            .unwrap();
+        drop(store);
+        let start = std::time::Instant::now();
+        assert_eq!(
+            harness
+                .actor
+                .materialize_replay_pending(harness.root.clone(), WORKSPACE_ID.into(), 3)
+                .await
+                .unwrap(),
+            100
+        );
+        let elapsed = start.elapsed().as_secs_f64() * 1000.0;
+        if sample >= 3 {
+            samples.push(elapsed);
+        }
+        harness.close();
+    }
+    println!("placement_replay_samples jobs=100 ms={samples:?}");
+    samples.sort_by(f64::total_cmp);
+    println!(
+        "placement_replay held_files=0 jobs=100 warmups=3 samples=30 median_ms={:.6} p95_ms={:.6}",
+        (samples[14] + samples[15]) / 2.0,
+        samples[28]
+    );
 }

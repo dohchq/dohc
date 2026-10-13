@@ -1,0 +1,238 @@
+{
+  "socket": {
+    "accessObject": [
+      "access.object.read"
+    ],
+    "accessSharing": [
+      "access.sharing.read"
+    ],
+    "groups": [
+      "group.list"
+    ],
+    "threads": [
+      "chat.threads.list"
+    ],
+    "inbox": [
+      "chat.inbox.read"
+    ],
+    "show": [
+      "chat.show"
+    ],
+    "post": [
+      "chat.post"
+    ],
+    "reply": [
+      "chat.reply"
+    ],
+    "react": [
+      "chat.react"
+    ],
+    "grep": [
+      "chat.search"
+    ],
+    "export": [
+      "chat.export"
+    ],
+    "moments": [
+      "history.list"
+    ],
+    "moment": [
+      "history.read"
+    ],
+    "fileChats": [
+      "file.chats.list"
+    ],
+    "chat": [
+      "chat.read"
+    ],
+    "groupsFull": [
+      "group.list"
+    ],
+    "collectionQuery": [
+      "collection.query"
+    ],
+    "collectionRecord": [
+      "collection.record.read"
+    ],
+    "collectionSetFields": [
+      "collection.record.edit"
+    ],
+    "collectionCreateRecord": [
+      "collection.record.create"
+    ],
+    "fileWrite": [
+      "file.write"
+    ],
+    "fileMove": [
+      "file.move"
+    ],
+    "fileDelete": [
+      "file.delete"
+    ],
+    "documentRead": [
+      "document.read"
+    ],
+    "keptCopies": [
+      "file.kept.list"
+    ],
+    "saveKeptCopy": [
+      "file.kept.save"
+    ],
+    "documentEdit": [
+      "document.edit"
+    ],
+    "documentCreate": [
+      "document.create"
+    ],
+    "fileChatStart": [
+      "file.chat.start"
+    ],
+    "automationRuns": [
+      "automation.runs.list"
+    ],
+    "automationList": [
+      "automation.list"
+    ],
+    "automationSwitch": [
+      "automation.switch"
+    ],
+    "automationRun": [
+      "automation.run.read"
+    ],
+    "automationRetry": [
+      "automation.run.retry"
+    ],
+    "automationPress": [
+      "automation.button.press"
+    ],
+    "automationButtons": [
+      "automation.buttons.inspect"
+    ],
+    "dataset": [
+      "dataset.list",
+      "dataset.describe",
+      "dataset.history.list",
+      "dataset.history.revision",
+      "dataset.history.restore.prepare",
+      "dataset.lifecycle.read",
+      "dataset.delete.preview",
+      "dataset.delete",
+      "dataset.archive",
+      "dataset.restore",
+      "dataset.attempts.list",
+      "dataset.attempt.reconcile",
+      "dataset.attempt.cancel",
+      "dataset.permissions.read",
+      "dataset.grant.set",
+      "dataset.grant.remove",
+      "dataset.export",
+      "dataset.recovery.prepare",
+      "dataset.recovery.claim",
+      "dataset.recovery.discard",
+      "dataset.file.upload",
+      "dataset.file.read",
+      "dataset.form.create",
+      "dataset.relation.choices.prepare",
+      "dataset.create",
+      "dataset.prepare",
+      "dataset.approve",
+      "dataset.discard",
+      "dataset.migration.prepare",
+      "dataset.migration.preview",
+      "dataset.schema.change.prepare",
+      "dataset.migration.approve",
+      "dataset.migration.discard",
+      "dataset.operation.invoke"
+    ],
+    "appPublication": [
+      "app.link.create",
+      "app.local.list",
+      "app.local.prepare",
+      "app.local.launch",
+      "app.publication.list",
+      "app.publication.prepare",
+      "app.publication.approve",
+      "app.publication.cancel",
+      "app.publication.withdraw",
+      "app.collection.revoke",
+      "app.publication.reactivation.review"
+    ],
+    "ownerAppResponses": [
+      "app.responses.list",
+      "app.responses.undo"
+    ]
+  },
+  "public": {
+    "access object": "access.object.read",
+    "access sharing": "access.sharing.read",
+    "document read": "document.read",
+    "document edit": "document.edit",
+    "document create": "document.create",
+    "document comment": "file.chat.start",
+    "chat groups": "group.list",
+    "chat threads": "chat.threads.list",
+    "chat inbox": "chat.inbox.read",
+    "chat show": "chat.show",
+    "chat post": "chat.post",
+    "chat reply": "chat.reply",
+    "chat react": "chat.react",
+    "chat grep": "chat.search",
+    "chat export": "chat.export",
+    "dataset list": "dataset.list",
+    "dataset describe": "dataset.describe",
+    "dataset history": "dataset.history.list",
+    "dataset historyRevision": "dataset.history.revision",
+    "dataset prepareHistoryRestore": "dataset.history.restore.prepare",
+    "dataset permissions": "dataset.permissions.read",
+    "dataset setGrant": "dataset.grant.set",
+    "dataset removeGrant": "dataset.grant.remove",
+    "dataset lifecycle": "dataset.lifecycle.read",
+    "dataset archive": "dataset.archive",
+    "dataset restore": "dataset.restore",
+    "dataset deletePreview": "dataset.delete.preview",
+    "dataset delete": "dataset.delete",
+    "dataset pendingAttempts": "dataset.attempts.list",
+    "dataset reconcileAttempt": "dataset.attempt.reconcile",
+    "dataset cancelAttempt": "dataset.attempt.cancel",
+    "dataset export": "dataset.export",
+    "dataset prepareRecovery": "dataset.recovery.prepare",
+    "dataset claimRecovery": "dataset.recovery.claim",
+    "dataset discardRecovery": "dataset.recovery.discard",
+    "dataset upload": "dataset.file.upload",
+    "dataset file": "dataset.file.read",
+    "dataset createForm": "dataset.form.create",
+    "dataset prepareRelationChoices": "dataset.relation.choices.prepare",
+    "dataset create": "dataset.create",
+    "dataset prepare": "dataset.prepare",
+    "dataset approve": "dataset.approve",
+    "dataset discard": "dataset.discard",
+    "dataset prepareMigration": "dataset.migration.prepare",
+    "dataset migrationPreviewPage": "dataset.migration.preview",
+    "dataset prepareSchemaChange": "dataset.schema.change.prepare",
+    "dataset approveMigration": "dataset.migration.approve",
+    "dataset discardMigration": "dataset.migration.discard",
+    "dataset invoke": "dataset.operation.invoke",
+    "app createLink": "app.link.create",
+    "app listLocal": "app.local.list",
+    "app prepareLocal": "app.local.prepare",
+    "app launchLocal": "app.local.launch",
+    "app list": "app.publication.list",
+    "app prepare": "app.publication.prepare",
+    "app approve": "app.publication.approve",
+    "app cancel": "app.publication.cancel",
+    "app withdraw": "app.publication.withdraw",
+    "app revokeCollection": "app.collection.revoke",
+    "app reviewReactivation": "app.publication.reactivation.review",
+    "app responses": "app.responses.list",
+    "app undo-responses": "app.responses.undo",
+    "history list": "history.list",
+    "history show": "history.read",
+    "automation list": "automation.list",
+    "automation switch": "automation.switch",
+    "automation buttons": "automation.buttons.inspect",
+    "automation runs": "automation.runs.list",
+    "automation run": "automation.run.read",
+    "automation retry": "automation.run.retry",
+    "automation press": "automation.button.press"
+  }
+}

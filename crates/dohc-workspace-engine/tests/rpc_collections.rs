@@ -362,15 +362,14 @@ async fn empty_record_seed_completes_through_watched_capture_and_adopts_every_re
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_replicated_empty_seed_refuses_unrepresentable_api_and_capture_writes() {
-    assert_empty_seed_completion(
-        "---\nTitle: Completed\n---\n- parent\n  - child\n",
-        false,
-        true,
-    )
-    .await;
+    let full = format!(
+        "---\nTitle: Completed\n---\n{} Completed\n",
+        "> ".repeat(121)
+    );
+    assert_empty_seed_completion(&full, false, true).await;
 }
 
-async fn assert_empty_seed_completion(full: &'static str, retires: bool, replicated: bool) {
+async fn assert_empty_seed_completion(full: &str, retires: bool, replicated: bool) {
     let scratch = ScratchDir::new().expect("scratch");
     write_root_binding(scratch.path(), TOKEN).expect("root binding");
     seed_schema(&scratch, "name: Tasks\nfields:\n  Title:\n    type: text\n");
@@ -395,9 +394,10 @@ async fn assert_empty_seed_completion(full: &'static str, retires: bool, replica
     let (finish, completed) = tokio::sync::oneshot::channel::<()>();
     let record_path = scratch.path().join("tasks/empty.md");
     std::fs::write(&record_path, "").expect("create empty record");
+    let writer_text = full.to_owned();
     let writer = tokio::spawn(async move {
         completed.await.expect("writer barrier");
-        std::fs::write(record_path, full).expect("complete record");
+        std::fs::write(record_path, writer_text).expect("complete record");
     });
     reconcile_capture(&transport, &handle, 10).await;
     let pending = call(
@@ -535,8 +535,9 @@ async fn assert_empty_seed_completion(full: &'static str, retires: bool, replica
     if replicated {
         for id in 60..63 {
             let status = call(&transport, &handle, id, "capture.flush", json!({})).await;
-            assert_eq!(status["degraded"], true, "{status}");
-            assert_eq!(status["settled"], false, "{status}");
+            assert_eq!(status["degraded"], false, "{status}");
+            assert_eq!(status["settled"], true, "{status}");
+            assert_eq!(status["heldFiles"][0]["path"], "tasks/empty.md");
         }
         let conn = rusqlite::Connection::open(&db).unwrap();
         let captured: String = conn
@@ -593,14 +594,17 @@ async fn assert_empty_seed_completion(full: &'static str, retires: bool, replica
         );
         drop(conn);
         // Another unrepresentable edit remains visibly refused.
-        std::fs::write(
-            scratch.path().join("tasks/empty.md"),
-            full.replace("Completed", "Changed"),
-        )
-        .unwrap();
-        let status = call(&transport, &handle, 70, "capture.reconcile", json!({})).await;
-        assert_eq!(status["degraded"], true, "{status}");
-        assert_eq!(status["settled"], false, "{status}");
+        let changed = full.replace("Completed", "Changed");
+        std::fs::write(scratch.path().join("tasks/empty.md"), &changed).unwrap();
+        reconcile_until_settled(&transport, &handle, 70).await;
+        let status = call(&transport, &handle, 71, "capture.flush", json!({})).await;
+        assert_eq!(status["degraded"], false, "{status}");
+        assert_eq!(status["settled"], true, "{status}");
+        assert_eq!(status["heldFiles"][0]["path"], "tasks/empty.md");
+        assert_eq!(
+            status["heldFiles"][0]["observedSha256"],
+            hex_sha256(changed.as_bytes())
+        );
         // A representable disk change recovers capture and version creation.
         std::fs::write(scratch.path().join("tasks/empty.md"), "Completed").unwrap();
         let named = call(

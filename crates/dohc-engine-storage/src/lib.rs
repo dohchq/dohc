@@ -28,6 +28,7 @@
 
 pub mod backup;
 pub mod blob;
+pub mod capture_file_holds;
 #[cfg(feature = "fault-injection")]
 pub mod capture_phase;
 pub mod diagnostics;

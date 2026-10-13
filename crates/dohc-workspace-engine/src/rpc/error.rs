@@ -37,6 +37,13 @@ pub(super) fn map_switch_reconcile_error(
         capture_driver::SwitchReconcileError::ApplyFailed => {
             WireError::new(ErrorCode::Internal, "pre-version-reconcile-failed")
         }
+        capture_driver::SwitchReconcileError::HeldFiles(paths) => WireError::new(
+            ErrorCode::Conflict,
+            format!(
+                "dohc did not record the outside edit in \"{}\". Try again before switching versions.",
+                paths.join("\", \"")
+            ),
+        ),
     }
 }
 
@@ -95,6 +102,9 @@ pub(crate) fn store_busy(error: &RuntimeError) -> bool {
 }
 
 pub(super) fn map_runtime(error: RuntimeError) -> WireError {
+    if let RuntimeError::CaptureFileHeld { path } = &error {
+        return WireError::new(ErrorCode::Conflict, format!("capture-file-held: {path}"));
+    }
     if matches!(
         &error,
         RuntimeError::Sync(SyncError::RetryableState {

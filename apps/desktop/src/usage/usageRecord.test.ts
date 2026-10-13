@@ -1,5 +1,6 @@
 import { join } from "node:path";
 import { CLI_CAPABILITIES } from "@dohc/cli/protocol";
+import { CLI_COMMANDS } from "@dohc/cli/args";
 import { MCP_TOOL_CAPABILITIES } from "@dohc/mcp/tools";
 import { CAPABILITIES } from "@dohc/workspace-contracts/capabilities";
 import { USAGE_ACTION_IDS } from "@dohc/workspace-contracts/usage";
@@ -166,12 +167,11 @@ describe("usage record bridge", () => {
     const ids = ["usage.read", "usage.clear", "usage.switch"] as const;
     for (const id of ids) {
       const meta = CAPABILITIES[id];
-      expect(meta.cli.socket).toEqual([]);
-      expect(meta.cli.public).toEqual([]);
       for (const level of ["owner", "view", "comment", "edit"] as const) expect(meta.mcp[level]).toEqual([]);
       expect(USAGE_ACTION_IDS).not.toContain(id);
     }
-    const doors = JSON.stringify([CLI_CAPABILITIES, MCP_TOOL_CAPABILITIES]);
+    const publicCapabilityIds = Object.values(CLI_COMMANDS).flatMap(command => Object.values(command.verbs).map(verb => verb.capabilityId));
+    const doors = JSON.stringify([CLI_CAPABILITIES, publicCapabilityIds, MCP_TOOL_CAPABILITIES]);
     for (const id of ids) expect(doors).not.toContain(`"${id}"`);
     expect(Object.values(usageRecordOperations).map(row => [row.capabilityId, row.scope, row.guard])).toEqual(
       ids.map(id => [id, "device", "trusted-sender"]));
