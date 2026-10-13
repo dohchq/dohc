@@ -191,7 +191,7 @@ pub struct WorkspaceActor {
     worker: Option<JoinHandle<()>>,
     claims: ClaimAnnouncer,
     link_metrics: SharedMetrics,
-    capture_holds: Arc<AtomicU64>,
+    link_drain_holds: Arc<AtomicU64>,
 }
 
 impl WorkspaceActor {
@@ -312,8 +312,8 @@ impl WorkspaceActor {
 
         let link_metrics = SharedMetrics::default();
         let worker_metrics = Arc::clone(&link_metrics);
-        let capture_holds = Arc::new(AtomicU64::new(0));
-        let worker_capture_holds = Arc::clone(&capture_holds);
+        let link_drain_holds = Arc::new(AtomicU64::new(0));
+        let worker_link_drain_holds = Arc::clone(&link_drain_holds);
         let worker_state = Arc::clone(&state);
         let worker = std::thread::Builder::new()
             .name("dohc-engine-actor".to_owned())
@@ -326,7 +326,7 @@ impl WorkspaceActor {
                     rx,
                     worker_state,
                     worker_metrics,
-                    worker_capture_holds,
+                    worker_link_drain_holds,
                     startup_tx,
                     writer_lock,
                     work,
@@ -346,7 +346,7 @@ impl WorkspaceActor {
                 worker: Some(worker),
                 claims: ClaimAnnouncer::default(),
                 link_metrics,
-                capture_holds,
+                link_drain_holds,
             }),
             Ok(Err(storage_err)) => {
                 let _ = worker.join();
@@ -367,7 +367,7 @@ impl WorkspaceActor {
             state: Arc::clone(&self.state),
             claims: self.claims.clone(),
             link_metrics: Arc::clone(&self.link_metrics),
-            capture_holds: Arc::clone(&self.capture_holds),
+            link_drain_holds: Arc::clone(&self.link_drain_holds),
         }
     }
 
@@ -450,7 +450,7 @@ pub struct ActorHandle {
     state: Arc<AtomicU8>,
     claims: ClaimAnnouncer,
     link_metrics: SharedMetrics,
-    capture_holds: Arc<AtomicU64>,
+    link_drain_holds: Arc<AtomicU64>,
 }
 
 /// Keeps derived link writes behind capture, including its queued commands.
@@ -470,10 +470,10 @@ impl Drop for LinkDrainHold {
 }
 
 impl ActorHandle {
-    pub fn defer_link_drain_for_capture(&self) -> LinkDrainHold {
-        self.capture_holds.fetch_add(1, Ordering::AcqRel);
+    pub fn hold_link_drain(&self) -> LinkDrainHold {
+        self.link_drain_holds.fetch_add(1, Ordering::AcqRel);
         LinkDrainHold {
-            holds: Arc::clone(&self.capture_holds),
+            holds: Arc::clone(&self.link_drain_holds),
             tx: self.tx.clone(),
         }
     }
@@ -631,7 +631,7 @@ fn worker_main(
     mut rx: mpsc::Receiver<Command>,
     state: Arc<AtomicU8>,
     link_metrics: SharedMetrics,
-    capture_holds: Arc<AtomicU64>,
+    link_drain_holds: Arc<AtomicU64>,
     startup_tx: std::sync::mpsc::SyncSender<Result<bool, StorageError>>,
     writer_lock: Option<WriterLock>,
     work_count: Option<Arc<AtomicU64>>,
@@ -712,7 +712,7 @@ fn worker_main(
     // once every sender is dropped.
     // Publish before link startup, then let queued foreground commands win.
     // An idle reopened store must also resume its durable drain without a
-    // foreground request; capture holds still postpone startup and slices.
+    // foreground request; link-drain holds still postpone startup and slices.
     let mut links_started = false;
     let mut links = None;
     let mut timer = None;
@@ -725,7 +725,7 @@ fn worker_main(
             Err(mpsc::error::TryRecvError::Empty) => {
                 if !links_started
                     && matches!(mode, ActorOpenMode::ReadWrite)
-                    && capture_holds.load(Ordering::Acquire) == 0
+                    && link_drain_holds.load(Ordering::Acquire) == 0
                 {
                     links_started = true;
                     match DrainWorker::new(Arc::clone(&link_metrics)) {
@@ -743,8 +743,16 @@ fn worker_main(
                         Err(_) => eprintln!("links parser could not start; pending work retained"),
                     }
                 }
+                #[cfg(test)]
+                {
+                    // Count after startup so observing this slot also observes
+                    // whether the hold prevented worker and timer creation.
+                    link_metrics.lock().unwrap().idle_slots += 1;
+                }
                 match (&mut links, &timer) {
-                    (Some(worker), Some(timer)) if capture_holds.load(Ordering::Acquire) == 0 => {
+                    (Some(worker), Some(timer))
+                        if link_drain_holds.load(Ordering::Acquire) == 0 =>
+                    {
                         #[cfg(feature = "fault-injection")]
                         let mut phase = dohc_engine_storage::capture_phase::Phase::new(
                             "actor_background_slice",
@@ -753,7 +761,7 @@ fn worker_main(
                             true,
                         );
                         #[cfg(feature = "fault-injection")]
-                        phase.field("capture_holds", capture_holds.load(Ordering::Acquire));
+                        phase.field("link_drain_holds", link_drain_holds.load(Ordering::Acquire));
                         let delay = worker.tick(&mut store);
                         #[cfg(feature = "fault-injection")]
                         {
@@ -928,14 +936,14 @@ mod saturation_tests {
             worker: None,
             claims: ClaimAnnouncer::default(),
             link_metrics: metrics,
-            capture_holds: holds,
+            link_drain_holds: holds,
         };
         prepare(&actor.handle());
         let (startup_tx, startup_rx) = std_sync_channel(1);
         let db = db.to_owned();
         let state = Arc::clone(&actor.state);
         let metrics = Arc::clone(&actor.link_metrics);
-        let holds = Arc::clone(&actor.capture_holds);
+        let holds = Arc::clone(&actor.link_drain_holds);
         actor.worker = Some(std::thread::spawn(move || {
             worker_main(
                 db,
@@ -1000,14 +1008,24 @@ mod saturation_tests {
     }
 
     #[tokio::test]
-    async fn capture_hold_before_first_idle_slot_postpones_link_startup_until_release() {
+    async fn link_drain_hold_before_first_idle_slot_postpones_startup_until_release() {
         let scratch = ScratchDir::new().unwrap();
         let db = engine_db_path(&scratch).unwrap();
         drop(EngineStore::open(&db, 1).unwrap());
         let mut hold = None;
         let mut actor = spawn_prequeued_actor(&db, |handle| {
-            hold = Some(handle.defer_link_drain_for_capture());
+            hold = Some(handle.hold_link_drain());
         });
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if actor.handle().link_drain_metrics().idle_slots > 0 {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .expect("actor reaches an idle slot while the hold is active");
         // Commands still run while held, after publication returns to the caller.
         for _ in 0..2 {
             actor

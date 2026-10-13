@@ -15,6 +15,8 @@ pub struct LinkDrainMetrics {
     #[cfg(test)]
     pub(crate) timer_starts: u64,
     #[cfg(test)]
+    pub(crate) idle_slots: u64,
+    #[cfg(test)]
     pub(crate) worker_starts_at_publication: Option<u64>,
     #[cfg(test)]
     pub(crate) actor_batches_at_publication: Option<u64>,

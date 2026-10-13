@@ -266,7 +266,7 @@ fn single_file_ingest_and_retire_end_the_shared_busy_episode() {
     let supervisor = WorkspaceSupervisor::new();
     let (db, mut sink) = sink_for(&scratch, &supervisor);
     sink.provenance.correlation_id = Some("diagnostic-text".into());
-    let hold = sink.actor.defer_link_drain_for_capture();
+    let hold = sink.actor.hold_link_drain();
     write_file(scratch.path(), "single.md", b"single");
     sink.batch_retry.exhaust_for_test();
     ingest(&mut sink, "single.md").unwrap();
@@ -289,7 +289,7 @@ fn binary_ingest_ends_the_shared_busy_episode() {
     let supervisor = WorkspaceSupervisor::new();
     let (db, mut sink) = sink_for(&scratch, &supervisor);
     sink.provenance.correlation_id = Some("diagnostic-binary".into());
-    let hold = sink.actor.defer_link_drain_for_capture();
+    let hold = sink.actor.hold_link_drain();
     write_file(
         scratch.path(),
         "image.png",

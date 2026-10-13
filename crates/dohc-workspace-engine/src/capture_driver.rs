@@ -1083,7 +1083,7 @@ impl CaptureDriver {
             events,
             apply_probe,
         } = params;
-        let initial_links_hold = actor.defer_link_drain_for_capture();
+        let initial_links_hold = actor.hold_link_drain();
         let cancel = CancellationToken::new();
         let status = Arc::new(DriverStatus::default());
         let author_json = Arc::new(Mutex::new(initial_author_json));
@@ -2102,13 +2102,6 @@ impl DriverEnv for RealEnv {
         #[cfg(feature = "harness")]
         let mut fence_phase =
             dohc_engine_storage::capture_phase::Phase::new("fenced_capture", None, 0, false);
-        let _links_hold = self.actor.defer_link_drain_for_capture();
-        #[cfg(feature = "harness")]
-        let actor_before = self
-            .actor
-            .capture_phase_totals_for_harness()
-            .await
-            .map_err(|_| ())?;
         let initial_start = matches!(
             self.status.snapshot().phase,
             CapturePhase::Starting | CapturePhase::Importing
@@ -2122,6 +2115,13 @@ impl DriverEnv for RealEnv {
             },
             guard = self.apply_gate.lock() => guard,
         };
+        let _links_hold = self.actor.hold_link_drain();
+        #[cfg(feature = "harness")]
+        let actor_before = self
+            .actor
+            .capture_phase_totals_for_harness()
+            .await
+            .map_err(|_| ())?;
         // REHYDRATE the scan manifest from the domain's captured state:
         // against an empty baseline a file deleted while the daemon was down
         // could never emit a Retire and its stale head would stay readable
@@ -2356,7 +2356,6 @@ impl DriverEnv for RealEnv {
     }
 
     async fn tick(&mut self, layer: &FilesLayer, cancel: &CancellationToken) -> TickIo {
-        let _links_hold = self.actor.defer_link_drain_for_capture();
         // A write, or a recovery at open, fell back since the last tick; its
         // own rename is what woke this tick.
         self.announce_no_atomic_placement();
@@ -2368,6 +2367,7 @@ impl DriverEnv for RealEnv {
             () = cancel.cancelled() => return TickIo::Cancelled,
             guard = self.apply_gate.lock() => guard,
         };
+        let _links_hold = self.actor.hold_link_drain();
         if self.refresh_due(layer) {
             return TickIo::RefreshRequired;
         }
@@ -2489,7 +2489,7 @@ pub(crate) async fn reconcile_full_for_switch(
     events: EngineEvents,
     token: CancellationToken,
 ) -> Result<bool, SwitchReconcileError> {
-    let _links_hold = actor.defer_link_drain_for_capture();
+    let _links_hold = actor.hold_link_drain();
     if token.is_cancelled() {
         return Err(SwitchReconcileError::Cancelled);
     }
@@ -2743,7 +2743,7 @@ async fn apply_bound_run_with_handle(
     run: RootBoundRun,
     cancel: &CancellationToken,
 ) -> ApplyOutcome {
-    let _links_hold = context.actor.defer_link_drain_for_capture();
+    let _links_hold = context.actor.hold_link_drain();
     let ApplyRunContext {
         root,
         actor,

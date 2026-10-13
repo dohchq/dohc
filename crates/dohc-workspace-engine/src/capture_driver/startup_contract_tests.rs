@@ -92,6 +92,139 @@ fn a_restarted_layer_cannot_republish_the_startup_import_phase() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn layer_start_waiting_on_apply_gate_leaves_link_drain_running() {
+    assert_gate_wait_leaves_link_drain_running(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tick_waiting_on_apply_gate_leaves_link_drain_running() {
+    assert_gate_wait_leaves_link_drain_running(true).await;
+}
+
+async fn assert_gate_wait_leaves_link_drain_running(tick: bool) {
+    use dohc_engine_storage::EngineStore;
+    use dohc_engine_testkit::ScratchDir;
+    use std::future::{Future, poll_fn};
+    use std::sync::atomic::AtomicU64;
+    use std::task::Poll;
+    use std::time::Duration;
+
+    let scratch = ScratchDir::new().unwrap();
+    let db = scratch.path().join(".dohc/engine/engine.db");
+    let supervisor = dohc_engine_runtime::WorkspaceSupervisor::new();
+    let actor = supervisor.open(&db, 1).unwrap().actor;
+    let events = EngineEvents::default();
+    let (open_ready_tx, _) = tokio::sync::watch::channel(true);
+    let status = Arc::new(DriverStatus::default());
+    status.mark_initial_ready();
+    let gate = Arc::new(tokio::sync::Mutex::new(()));
+    let mut env = RealEnv {
+        observation: crate::file_observation::FileObservation::new(events.clone(), "ws".into()),
+        root: scratch.path().to_owned(),
+        initial_links_hold: None, // A later layer start has no initial fence hold.
+        actor: actor.clone(),
+        lease_releases_seen: 0,
+        workspace_id: "ws".into(),
+        leases: LeaseRegistry::new(),
+        status,
+        author_json: Arc::new(Mutex::new(None)),
+        self_writes: SelfWriteSuppression::default(),
+        apply_gate: Arc::clone(&gate),
+        store_freshly_created: false,
+        open_ready_tx,
+        refresh_epoch: Arc::new(AtomicU64::new(0)),
+        events,
+        apply_probe: None,
+        scan: ScanGauge::default(),
+        no_atomic_placement_announced: false,
+    };
+    let cancel = CancellationToken::new();
+    env.observation.start(env.root.clone()).unwrap();
+    let layer = if tick {
+        Some(
+            FilesLayer::start_with_fingerprint(
+                &env.root,
+                &cancel,
+                None,
+                policy_fingerprint(&env.root),
+                0,
+                &env.scan,
+                &env.observation,
+            )
+            .await
+            .unwrap()
+            .0,
+        )
+    } else {
+        None
+    };
+    let guard = gate.lock().await;
+    {
+        let attempt = async {
+            if let Some(layer) = &layer {
+                assert!(matches!(env.tick(layer, &cancel).await, TickIo::Cancelled));
+            } else {
+                assert!(env.start_layer(&cancel).await.is_err());
+            }
+        };
+        tokio::pin!(attempt);
+        // Both paths reach gate acquisition before their first await. Polling
+        // once proves capture is waiting, rather than merely not scheduled.
+        poll_fn(|cx| {
+            assert!(attempt.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        actor
+            .capture_ingest(
+                dohc_engine_domain::CaptureIngest {
+                    workspace_id: "ws".into(),
+                    version_id: "main".into(),
+                    path: "source.md".into(),
+                    text: "[[target]]".into(),
+                    metadata_origin: "capture".into(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    now_ms: 2,
+                    request_id: None,
+                    claim_foreign_head: false,
+                },
+                LeaseRegistry::new(),
+                Arc::new(NoFaults),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        let observer = EngineStore::open_read_only(&db).unwrap();
+        let drained = tokio::time::timeout(Duration::from_secs(20), async {
+            let mut poll = tokio::time::interval(Duration::from_millis(10));
+            while observer.table_row_count("links").unwrap() != 1 {
+                poll.tick().await;
+            }
+        })
+        .await;
+        // Cancel and join the blocked attempt even if the assertion fails.
+        cancel.cancel();
+        attempt.await;
+        drop(observer);
+        assert!(
+            drained.is_ok(),
+            "link drain paused while capture waited on apply gate"
+        );
+    }
+    drop(guard);
+    if let Some(layer) = layer {
+        layer.stop().await;
+    }
+    drop(env);
+    tokio::task::spawn_blocking(move || supervisor.close(&db))
+        .await
+        .unwrap()
+        .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn failed_first_layer_start_releases_link_drain_in_the_open_workspace() {
     use dohc_engine_storage::{EngineStore, NoFaults};
     use dohc_engine_testkit::ScratchDir;
@@ -101,7 +234,7 @@ async fn failed_first_layer_start_releases_link_drain_in_the_open_workspace() {
     let db = scratch.path().join("engine.db");
     let supervisor = dohc_engine_runtime::WorkspaceSupervisor::new();
     let actor = supervisor.open(&db, 1).unwrap().actor;
-    let hold = actor.defer_link_drain_for_capture();
+    let hold = actor.hold_link_drain();
     actor
         .capture_ingest(
             dohc_engine_domain::CaptureIngest {

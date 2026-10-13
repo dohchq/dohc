@@ -898,14 +898,14 @@ fn small_note_certifies_before_obsolete_large_document_cleanup() {
 }
 
 #[test]
-fn capture_holds_pause_the_actor_and_last_release_resumes_it() {
+fn link_drain_holds_pause_the_actor_and_last_release_resumes_it() {
     let scratch = ScratchDir::new().unwrap();
     let db = engine_db_path(&scratch).unwrap();
     let supervisor = crate::WorkspaceSupervisor::new();
     let actor = supervisor.open(&db, 1).unwrap().actor;
     let policy = std::sync::Arc::new(crate::search::read_engine_search_policy(scratch.path()));
-    let outer = actor.defer_link_drain_for_capture();
-    let inner = actor.defer_link_drain_for_capture();
+    let outer = actor.hold_link_drain();
+    let inner = actor.hold_link_drain();
     for n in 0..32 {
         actor
             .capture_ingest_with_search_policy_blocking(
