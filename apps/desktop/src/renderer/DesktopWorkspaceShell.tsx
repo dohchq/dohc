@@ -3899,7 +3899,6 @@ export function DesktopWorkspaceShell(props: {
         void bridge().stepWindowZoom({ step: "reset" }).catch((error) =>
           reportShellError("Could not change the window zoom.", error),
         ),
-      "open-history": openHistoryView,
       ...Object.fromEntries(pinnedApps.map((app) => [
         pinnedAppCommandId(app.root),
         () => mutateWb((state) => showView(state, appViewId(app.root))),
@@ -3917,7 +3916,6 @@ export function DesktopWorkspaceShell(props: {
       checkForDesktopUpdates,
       installDesktopUpdate,
       openCloud,
-      openHistoryView,
       openEditorGroupRight,
       openSettings,
       reportShellError,

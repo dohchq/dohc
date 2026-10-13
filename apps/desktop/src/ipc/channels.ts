@@ -60,12 +60,6 @@ export const WORKBENCH_MENU_COMMANDS = [
   "unpin-app",
 ] as const;
 
-// These global workbench actions are checked against the command registry.
-// The contextual dispatch stays in the shell until ObjectMenu replaces it.
-export const WORKBENCH_GLOBAL_COMMANDS = [
-  "open-history", "connect-cloud", "settings", "check-updates", "install-update", "toggle-theme",
-] as const satisfies readonly (CommandId & (typeof WORKBENCH_MENU_COMMANDS)[number])[];
-
 // Workspace content search streams batches main→renderer. The bounds mirror
 // workspaceSearch.ts (the producer); bridgeContract's SearchResultsEvent
 // schema enforces them at both ends of the channel.

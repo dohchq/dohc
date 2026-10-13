@@ -1,10 +1,10 @@
 // @vitest-environment jsdom
 import { cleanup, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { MENU_COMMANDS, WORKBENCH_GLOBAL_COMMANDS } from "../../ipc/channels";
+import { MENU_COMMANDS, WORKBENCH_MENU_COMMANDS } from "../../ipc/channels";
 import { CommandPalette } from "../CommandPalette";
 import { VIEW_IDENTITY } from "../workbench/viewIdentity";
-import { VIEW_IDS } from "../workbench/workbenchState";
+import { appViewId, VIEW_IDS } from "../workbench/workbenchState";
 import mainPalette from "./commandRows.main.json";
 import {
   isCommandAvailable,
@@ -60,7 +60,7 @@ describe("command availability", () => {
       const rows = paletteCommandRows(current);
       const cloudIndex = rows.findIndex((row) => row.id === "connect-cloud");
       expect(rows.slice(cloudIndex - 2, cloudIndex).map(({ id, label }) => ({ id, label }))).toEqual(
-        pinnedApps.map((app) => ({ id: pinnedAppCommandId(app.root), label: `View: ${app.label}` })),
+        pinnedApps.map((app) => ({ id: `show-${appViewId(app.root)}`, label: `View: ${app.label}` })),
       );
       for (const app of pinnedApps) expect(isCommandAvailable(pinnedAppCommandId(app.root), current)).toBe(true);
     }
@@ -82,13 +82,12 @@ describe("command inventory", () => {
     expect(unknownIds).toEqual([]);
   });
 
-  it("checks the six global workbench ids without changing their dispatch", () => {
-    expect(WORKBENCH_GLOBAL_COMMANDS).toEqual([
-      "open-history", "connect-cloud", "settings", "check-updates", "install-update", "toggle-theme",
-    ]);
-    for (const id of WORKBENCH_GLOBAL_COMMANDS) expect(isStaticCommandId(id)).toBe(true);
-    expect(isCommandAvailable("open-history", context)).toBe(true);
-    expect(paletteCommandRows(context).some((row) => row.id === "open-history")).toBe(false);
+  it("checks the five global workbench command ids without changing their dispatch", () => {
+    const globalCommands = [
+      "connect-cloud", "settings", "check-updates", "install-update", "toggle-theme",
+    ] as const satisfies readonly (CommandId & (typeof WORKBENCH_MENU_COMMANDS)[number])[];
+    for (const id of globalCommands) expect(isStaticCommandId(id)).toBe(true);
+    expect(isStaticCommandId("open-history")).toBe(false);
   });
 
   it("keeps each built-in view label and order aligned with the rail", () => {

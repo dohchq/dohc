@@ -1,4 +1,5 @@
 import type { CapabilityId } from "@dohc/workspace-contracts/capabilities";
+import { APP_VIEW_ID_PREFIX, appViewId, type AppViewId } from "../workbench/workbenchState";
 
 export interface CommandContext {
   isShareView: boolean;
@@ -20,7 +21,6 @@ interface StaticRow {
   label: string;
   availability: Exclude<keyof typeof COMMAND_AVAILABILITY, "pinnedApp">;
   capabilityId?: CapabilityId;
-  palette?: false;
 }
 
 export const COMMAND_ROWS = {
@@ -53,11 +53,10 @@ export const COMMAND_ROWS = {
   "zoom-in": { label: "Zoom in", availability: "always" },
   "zoom-out": { label: "Zoom out", availability: "always" },
   "zoom-reset": { label: "Reset zoom", availability: "always" },
-  "open-history": { label: "Open History", availability: "always", palette: false },
 } as const satisfies Record<string, StaticRow>;
 
 export type StaticCommandId = keyof typeof COMMAND_ROWS;
-export type PinnedAppCommandId = `show-app-view:${string}`;
+export type PinnedAppCommandId = `show-${AppViewId}`;
 export type CommandId = StaticCommandId | PinnedAppCommandId;
 export type CommandHandlers = Record<CommandId, () => void>;
 
@@ -69,7 +68,7 @@ export interface CommandRow {
 }
 
 export function pinnedAppCommandId(root: string): PinnedAppCommandId {
-  return `show-app-view:${encodeURIComponent(root)}`;
+  return `show-${appViewId(root)}`;
 }
 
 export function isStaticCommandId(id: string): id is StaticCommandId {
@@ -78,12 +77,11 @@ export function isStaticCommandId(id: string): id is StaticCommandId {
 
 export function isCommandAvailable(id: CommandId, context: CommandContext): boolean {
   if (isStaticCommandId(id)) return COMMAND_AVAILABILITY[COMMAND_ROWS[id].availability](context);
-  if (!id.startsWith("show-app-view:")) throw new Error(`Unknown command: ${id}`);
+  if (!id.startsWith(`show-${APP_VIEW_ID_PREFIX}`)) throw new Error(`Unknown command: ${id}`);
   return COMMAND_AVAILABILITY.pinnedApp(context, id);
 }
 
-// Workbench-only Open History keeps its own id and dispatch. It is not a
-// palette entry. Pinned app rows keep their position before Connect server.
+// Pinned app rows keep their position before Connect server.
 export function paletteCommandRows(context: CommandContext): CommandRow[] {
   const rows: CommandRow[] = [];
   for (const id of Object.keys(COMMAND_ROWS) as StaticCommandId[]) {
@@ -95,7 +93,7 @@ export function paletteCommandRows(context: CommandContext): CommandRow[] {
       })));
     }
     const row: StaticRow = COMMAND_ROWS[id];
-    if (row.palette !== false && isCommandAvailable(id, context)) rows.push({ id, ...row });
+    if (isCommandAvailable(id, context)) rows.push({ id, ...row });
   }
   return rows;
 }
