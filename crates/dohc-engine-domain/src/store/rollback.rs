@@ -388,6 +388,14 @@ impl<'a> VersionedTextStore<'a> {
                 upsert_snapshot(tx, before)?;
             }
 
+            dohc_engine_storage::capture_file_holds::clear_orphaned_in(
+                tx, ws, &input.version_id, &input.path,
+            )?;
+            if let Some(before) = &prep.before {
+                dohc_engine_storage::capture_file_holds::clear_orphaned_in(
+                    tx, ws, &input.version_id, &before.path,
+                )?;
+            }
             let current_present = prep.moment.operation != MomentOp::Delete;
             let restored = prep.before.as_ref();
             let restored_path = restored

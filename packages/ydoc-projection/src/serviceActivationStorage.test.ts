@@ -27,6 +27,7 @@ const validateBaseline=createLiveMarkdownRegistrationValidator(policy),validateJ
 const host={mode:'service' as const,hostId:'service',hostEpoch:parseHostEpoch(1),instanceId:'instance',connectionId:'connection'}
 const actor={kind:'owner' as const,userId:'owner',shareId:'share'}
 const bounds={maxCaptureBytes:1_000_000,maxEntriesPerDrain:10,maxBytesPerDrain:1_000_000}
+const stop={operationId:'restore',workspaceId:'workspace',ownerUserId:'owner'}
 function fixture(){
   const root=mkdtempSync(join(tmpdir(),'dohc-service-activation-')),path=join(root,'relay.sqlite')
   const storage=openSyncRelayStorage(path),raw=new DatabaseSync(path)
@@ -409,12 +410,15 @@ it('requires exact seed application ACK and supports lost completion responses',
     try{
       const active=activationDriver(f,vi.fn(async()=>f.capture))
       expect(await active.driver.activate(active.target,new AbortController().signal)).toMatchObject({kind:'done'})
-      expect(active.driver.restoreConsumer(f.document)).toBe(active.driver.consumer(f.document).consumer)
+      expect(active.driver.restoreConsumer(f.document,stop)).toBe(active.driver.consumer(f.document).consumer)
     }finally{drain.mockRestore()}
     f.raw.exec("UPDATE sync_relay_live_documents SET restore_fence_generation=2")
     expect(()=>f.store.resume({document:f.document,activationId:f.capture.activationId,host,registeredAtMs:5,guard(){}})).toThrow()
     f.raw.exec("UPDATE sync_relay_live_documents SET admission_state='closed'")
-    expect(activationDriver(f,vi.fn()).driver.restoreConsumer(f.document)).toBeInstanceOf(OwnerCommittedDelivery)
+    // Without that session, a restore needs its operation to name the retained adoption, and refuses without one.
+    const capture=vi.fn()
+    expect(()=>activationDriver(f,capture).driver.restoreConsumer(f.document,stop)).toThrow('Service restore owner adoption is unavailable.')
+    expect(capture).not.toHaveBeenCalled()
   }finally{f.close()}
 })
 
@@ -453,7 +457,7 @@ function activationDriver(f:ReturnType<typeof fixture>,captureOwnerActivation:Re
     client:{...native,captureOwnerActivation,sendRequest} as never,
     workspaces:new Map([['workspace',{handle:'native-workspace',ordinary:{pull} as never}]]),
     config:{targets:[target],validateBaseline,validateJournal,validateAdmission:validateJournal,maxCaptureBytes:1_000_000,maxEntriesPerDrain:10,maxBytesPerDrain:1_000_000,
-      maxDocumentsPerPass:1,pollIntervalMs:1000,passDeadlineMs:10_000},
+      maxDocumentsPerPass:1,pollIntervalMs:1000,passDeadlineMs:10_000,idleUnloadMs:600_000,idleRetryMs:30_000},
     adoption:{maxBytes:1_000_000,maxEvents:10},nextRequestId:()=>1,deadlineMs:1000,assertCurrent(){},registered(){},
     runDocument,
   })
@@ -658,7 +662,7 @@ it('clears readiness when a restore fence is visible before the next activation'
     expect(native.client.sendRequest).toHaveBeenCalledTimes(calls)
     expect(()=>d.driver.consumer(f.document)).toThrow('incomplete')
     expect(d.driver.workspaceReady('workspace')).toBe(false)
-    expect(d.driver.restoreConsumer(f.document)).toBe(active)
+    expect(d.driver.restoreConsumer(f.document,stop)).toBe(active)
     reopen(f,fence)
     expect(await d.driver.activate(d.target,signal)).toMatchObject({kind:'done'})
     expect(d.driver.consumer(f.document).consumer).toBe(active)

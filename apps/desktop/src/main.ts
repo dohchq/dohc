@@ -60,6 +60,7 @@ import { createDatasetHandler } from "./ipc/datasetIpc";
 import { DatasetRequest, DatasetResult } from "@dohc/cli/dataset";
 import { createHash } from "node:crypto";
 import { createDatasetSources, type SourceCreationProgress } from "./workspaces/datasetSourceCreation";
+import { flushDatasetSourceCapture } from "./workspaces/datasetSourceCapture";
 import { createLocalAppLaunchHost, type LocalAppLaunchHost } from "./workspaces/localAppLaunch";
 import { createDesktopAppRuntimeLauncher } from "./workspaces/localAppBackendRuntime";
 import {registerOwnerAppResponsesIpc,createOwnerAppResponsesHandler} from "./ipc/ownerAppResponsesIpc";
@@ -131,7 +132,7 @@ import {
   type WebContents,
 } from "electron";
 import { watch, existsSync, realpathSync, statSync } from "node:fs";
-import { lstat, mkdir, readdir, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import { hostname, release as osRelease, type as osType } from "node:os";
 import { dirname, join } from "node:path";
 import {
@@ -558,16 +559,14 @@ const crashReportPreview = createCrashReportPreview({
   openPath: (path) => shell.openPath(path),
 });
 void crashReportPreview.remove();
-// Usage and short error reports. Only a packaged build that names a report
-// service sends them, and only as the switches in Privacy allow.
+// Usage and short error reports. Only a packaged build that names a PostHog
+// project sends them, and only as the switches in Privacy allow.
 const telemetry = createTelemetry({
   reporting: resolveReporting({
     build: REPORTING_BUILD,
     packaged: app.isPackaged,
     env: process.env,
     argv: process.argv,
-    version: app.getVersion(),
-    channel: resolveUpdateChannel(app.getVersion()),
   }),
   statePath: join(stateDir(), "reporting.json"),
   facts: () => ({
@@ -580,6 +579,7 @@ const telemetry = createTelemetry({
     electron: process.versions.electron ?? "unknown",
   }),
   locate: createCodeLocations(codeRoots, process.platform),
+  readCode: (path) => readFile(join(codeRoots[0]!, path), "utf8"),
 });
 // The report switches as the settings file sets them. A file main cannot
 // read turns both off.
@@ -6049,14 +6049,7 @@ function registerIpcHandlers(): void {
     flushSourceCapture: async (workspace: DesktopRendererWorkspaceOperation["workspace"], signal: AbortSignal) => {
       await openWorkspaceActivity(workspace);
       const captured = await withEngineAdapter(workspace, async adapter => {
-        signal.throwIfAborted();
-        let capture = await adapter.reconcileCapture();
-        for (let attempt = 0; !capture.settled && !capture.degraded && attempt < 8; attempt++) {
-          signal.throwIfAborted();
-          capture = await adapter.flushCapture();
-        }
-        signal.throwIfAborted();
-        if (!capture.settled || !capture.running || capture.degraded) throw new Error("dohc could not capture these Collection files. Reopen the workspace and try again.");
+        await flushDatasetSourceCapture(adapter, signal);
         return true;
       });
       if (!captured) throw new Error("The workspace engine is unavailable. Reopen the workspace.");
@@ -6072,12 +6065,7 @@ function registerIpcHandlers(): void {
         register: () => openWorkspaceActivity(workspace),
         capture: async () => {
           const captured = await withEngineAdapter(workspace, async adapter => {
-            let capture = await adapter.reconcileCapture();
-            for (let attempt = 0; !capture.settled && !capture.degraded && attempt < 8; attempt++) {
-              signal.throwIfAborted();
-              capture = await adapter.flushCapture();
-            }
-            if (!capture.settled || !capture.running || capture.degraded) throw new Error("dohc could not capture the saved files.");
+            await flushDatasetSourceCapture(adapter, signal, Object.keys(files));
             return true;
           });
           if (!captured) throw new Error("The workspace engine is unavailable. Reopen the workspace.");
