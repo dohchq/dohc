@@ -5,6 +5,7 @@ import userEvent from "@testing-library/user-event";
 import { expect, it, vi } from "vitest";
 import type { EngineMomentRecord, ListEngineMomentsResult, ShareHandoffStatus } from "../ipc/bridgeContract";
 import { deferred } from "../testing/deferred";
+import { historyPageFields } from "../testing/historyPageFixture";
 import { CollectionFieldWriteHost } from "./collections/recordFieldWrites";
 import { DesktopRoot } from "./DesktopRoot";
 import type { Workspace } from "./DesktopWorkspaceShell";
@@ -23,10 +24,10 @@ function historyPage(id: string, summary: string): ListEngineMomentsResult {
   };
   return {
     moments: [moment],
-    nextBeforeMomentOrder: null,
+    nextCursor: null,
     latestMomentOrder: 1,
     activeVersionId: "main",
-    protectedTruncated: false,
+    ...historyPageFields,
   };
 }
 

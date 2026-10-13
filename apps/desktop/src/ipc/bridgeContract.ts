@@ -1652,23 +1652,28 @@ export const EngineMomentRecord = z.object({
 });
 export type EngineMomentRecord = z.infer<typeof EngineMomentRecord>;
 
+export const HistoryMomentPosition = z.object({ recordedAtMs: z.number().int(), momentOrder: z.number().int().nonnegative() }).strict();
+export const HistoryCursor = z.object({
+  format: z.literal(1), engineUuid: z.string().min(1), workspaceId: WORKSPACE_ID, versionId: OPAQUE_ID,
+  objectId: OPAQUE_ID.nullable(), textFence: z.number().int().min(-1), protectedFence: z.number().int().min(-1),
+  markerFence: z.number().int().min(-1), text: HistoryMomentPosition.nullable(), protected: HistoryMomentPosition.nullable(),
+  marker: z.object({ createdAtMs: z.number().int(), versionId: OPAQUE_ID }).strict().nullable(),
+}).strict();
+export type HistoryCursor = z.infer<typeof HistoryCursor>;
+export const HistoryVersionMarker = z.object({
+  id: OPAQUE_ID, workspaceId: WORKSPACE_ID, kind: z.enum(["main", "named"]), name: z.string(),
+  createdAtMs: z.number().int(),
+  forkPoint: z.object({ versionId: OPAQUE_ID, momentId: OPAQUE_ID.optional() }).strict().optional(),
+}).strict();
 export const ListEngineMomentsPayload = z.object({
-  workspaceId: WORKSPACE_ID,
-  objectId: OPAQUE_ID.optional(),
-  limit: z.number().int().min(1).max(500).optional(),
-  beforeMomentOrder: z.number().int().nonnegative().optional(),
-});
+  workspaceId: WORKSPACE_ID, objectId: OPAQUE_ID.optional(), limit: z.number().int().min(1).max(50).optional(),
+  cursor: HistoryCursor.optional(),
+}).strict();
 export type ListEngineMomentsPayload = z.infer<typeof ListEngineMomentsPayload>;
-
 export const ListEngineMomentsResult = z.object({
-  moments: z.array(EngineMomentRecord),
-  nextBeforeMomentOrder: z.number().int().nonnegative().nullable(),
-  // -1 is the store's honest "no moments yet" sentinel for an empty
-  // timeline; anything below that is malformed.
-  latestMomentOrder: z.number().int().min(-1),
-  activeVersionId: OPAQUE_ID,
-  protectedTruncated: z.boolean(),
-});
+  moments: z.array(EngineMomentRecord), startCursor: HistoryCursor, nextCursor: HistoryCursor.nullable(),
+  versionMarkers: z.array(HistoryVersionMarker), latestMomentOrder: z.number().int().min(-1), activeVersionId: OPAQUE_ID,
+}).strict();
 export type ListEngineMomentsResult = z.infer<typeof ListEngineMomentsResult>;
 
 // `history.page` can answer that its capture flush is still settling. Main
@@ -6703,8 +6708,22 @@ export const LaunchMarksResult = z.object({
 });
 export type LaunchMarksResult = z.infer<typeof LaunchMarksResult>;
 
+export const SystemReducedMotionResult = z.boolean();
+
+export const systemMotionOperations = {
+  getSystemReducedMotion: {
+    capabilityId: "device.motion.read",
+    scope: "device",
+    channel: "desktop:get-system-reduced-motion",
+    payload: z.object({}),
+    result: SystemReducedMotionResult,
+    guard: "trusted-sender",
+  },
+} as const satisfies OperationTable;
+
 export interface DohcDesktopBridge
   extends OperationBridge<typeof shareCopyOperations>,
+    OperationBridge<typeof systemMotionOperations>,
     OperationBridge<typeof accessOperations>,
     OperationBridge<typeof workspaceVersionOperations>,
     OperationBridge<typeof captureRecoveryOperations>,

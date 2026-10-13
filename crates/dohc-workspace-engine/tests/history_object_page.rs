@@ -54,32 +54,17 @@ async fn history_object_page_preserves_identity_paging_and_active_version() {
     )
     .await;
     assert_eq!(first_page["activeVersion"]["id"], "main");
-    assert_eq!(
-        first_page["textMomentPage"]["moments"][0]["operation"],
-        "rename"
-    );
-    assert_eq!(first_page["textMomentPage"]["moments"][0]["path"], "new.md");
+    assert_eq!(first_page["moments"][0]["operation"], "rename");
+    assert_eq!(first_page["moments"][0]["path"], "new.md");
     assert_eq!(first_page["protectedMoments"], json!([]));
-    assert_eq!(first_page["protectedTruncated"], false);
-    let second_page = call(&transport, &handle, 8, "history.page", json!({"workspaceId": "history-object", "objectId": object_id, "limit": 1, "beforeMomentOrder": first_page["textMomentPage"]["nextBeforeMomentOrder"]})).await;
+    assert_eq!(first_page["versionMarkers"], json!([]));
+    let second_page = call(&transport, &handle, 8, "history.page", json!({"workspaceId": "history-object", "objectId": object_id, "limit": 1, "cursor": first_page["nextCursor"]})).await;
+    assert_eq!(second_page["moments"].as_array().unwrap().len(), 1);
+    assert_eq!(second_page["moments"][0]["momentId"], "first");
+    assert_eq!(second_page["nextCursor"], Value::Null);
     assert_eq!(
-        second_page["textMomentPage"]["moments"]
-            .as_array()
-            .unwrap()
-            .len(),
-        1
-    );
-    assert_eq!(
-        second_page["textMomentPage"]["moments"][0]["momentId"],
-        "first"
-    );
-    assert_eq!(
-        second_page["textMomentPage"]["nextBeforeMomentOrder"],
-        Value::Null
-    );
-    assert_eq!(
-        second_page["textMomentPage"]["latestMomentOrder"],
-        first_page["textMomentPage"]["latestMomentOrder"]
+        second_page["latestMomentOrder"],
+        first_page["latestMomentOrder"]
     );
     let missing = call(
         &transport,
@@ -89,8 +74,8 @@ async fn history_object_page_preserves_identity_paging_and_active_version() {
         json!({"workspaceId": "history-object", "objectId": "not-imported"}),
     )
     .await;
-    assert_eq!(missing["textMomentPage"]["moments"], json!([]));
-    assert_eq!(missing["textMomentPage"]["latestMomentOrder"], -1);
+    assert_eq!(missing["moments"], json!([]));
+    assert_eq!(missing["latestMomentOrder"], -1);
     assert_eq!(missing["protectedMoments"], json!([]));
     let workspace = call(
         &transport,
@@ -100,13 +85,7 @@ async fn history_object_page_preserves_identity_paging_and_active_version() {
         json!({"workspaceId": "history-object"}),
     )
     .await;
-    assert_eq!(
-        workspace["textMomentPage"]["moments"]
-            .as_array()
-            .unwrap()
-            .len(),
-        3
-    );
+    assert_eq!(workspace["moments"].as_array().unwrap().len(), 3);
     assert_eq!(workspace["protectedMoments"].as_array().unwrap().len(), 1);
     let branch = call(
         &transport,
@@ -125,13 +104,7 @@ async fn history_object_page_preserves_identity_paging_and_active_version() {
         json!({"workspaceId": "history-object", "objectId": object_id}),
     )
     .await;
-    assert_eq!(
-        active["textMomentPage"]["moments"]
-            .as_array()
-            .unwrap()
-            .len(),
-        2
-    );
+    assert_eq!(active["moments"].as_array().unwrap().len(), 2);
     let empty = call_error(
         &transport,
         &handle,
@@ -173,7 +146,7 @@ async fn history_object_page_includes_the_latest_external_save() {
         json!({"workspaceId": "history-object"}),
     )
     .await;
-    let object_id = initial["textMomentPage"]["moments"][0]["objectId"]
+    let object_id = initial["moments"][0]["objectId"]
         .as_str()
         .expect("captured object");
     probe.pause_next_apply();
@@ -218,11 +191,17 @@ async fn history_object_page_includes_the_latest_external_save() {
     probe.release();
     assert!(waited, "History answered before the latest save settled");
     let saved = history.await.expect("History after save settles").result;
-    assert_eq!(
-        saved["textMomentPage"]["moments"][0]["afterText"],
-        "latest save"
-    );
-    assert_eq!(saved["textMomentPage"]["moments"][0]["objectId"], object_id);
+    assert!(saved["moments"][0].get("afterText").is_none());
+    let detail = call(
+        &transport,
+        &handle,
+        5,
+        "moments.get",
+        json!({"momentId":saved["moments"][0]["momentId"]}),
+    )
+    .await;
+    assert_eq!(detail["afterText"], "latest save");
+    assert_eq!(saved["moments"][0]["objectId"], object_id);
     assert_eq!(saved["protectedMoments"], json!([]));
     call(&transport, &handle, 4, "workspace.close", json!({})).await;
 }

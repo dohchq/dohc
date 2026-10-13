@@ -1,5 +1,5 @@
 import { APP_PUBLICATION_CAPABILITIES, CLI_CAPABILITIES, cliRequestSchema, DATASET_CAPABILITIES } from "@dohc/cli/protocol";
-import { CLI_COMMANDS } from "@dohc/cli/args";
+import { CLI_COMMANDS, parseCliArguments } from "@dohc/cli/args";
 import { DatasetRequest } from "@dohc/cli/dataset";
 import { OwnerAppPublicationRequest } from "@dohc/cli/app-publication";
 import { renderCliHelp } from "@dohc/cli/help";
@@ -26,6 +26,8 @@ import saveRetryIpc from "./ipcExposure.saveRetry.json";
 import fileObservationIpc from "./ipcExposure.fileObservation.json";
 import usageRecordIpc from "./ipcExposure.usageRecord.json";
 import mainCli from "./cliExposure.main.json";
+import pinnedCliCapabilities from "./cliCapabilities.pinned.json";
+import { CLI_DISPATCH_ARGUMENTS } from "./cliDispatchInputs.fixture";
 import publicationCli from "./cliExposure.pr1659.json";
 import commentsCli from "./cliExposure.pr1700.json";
 import admission from "./operationAdmission.json";
@@ -33,6 +35,7 @@ import accessExposure from "./accessExposure.delta.json";
 import shareCopyExposure from "./ipcExposure.shareCopy.json";
 import offersIpc from "./ipcExposure.offers.json";
 import sharedWriteFeedback from "./ipcExposure.sharedWriteFeedback.json";
+import systemMotionIpc from "./ipcExposure.systemMotion.json";
 
 const rows: OperationDefinition[] = OPERATION_TABLES.flatMap(table => Object.values(table));
 const publicVerbs = Object.entries(CLI_COMMANDS).flatMap(([group, command]) => Object.keys(command.verbs).map(verb => `${group} ${verb}`));
@@ -62,7 +65,7 @@ describe("B1 main inventories (a4be19d5b)", () => {
   it("preserves every IPC wire name and the 26 enforced table guards", () => {
     // Hand-reviewed #1639 removals and #1701, #1688, #1747, reports, save retry,
     // capture recovery, History names, shared write feedback, Stop and restore,
-    // usage record, share copy, early-quit typing recovery and offer additions,
+    // usage record, share copy, early-quit typing recovery, offer and system motion additions,
     // separate from the hashed main baseline.
     const expectedNames = [...mainIpc.names];
     expectedNames.push("desktop:check-shared-view-access");
@@ -71,7 +74,7 @@ describe("B1 main inventories (a4be19d5b)", () => {
       expect(expectedNames).toContain(name);
       expectedNames.splice(expectedNames.indexOf(name), 1);
     }
-    for (const name of [...launchOpenIpc.nameAdditions, ...recipientRecordsIpc.nameAdditions, ...liveDraftRecoveryIpc.nameAdditions, ...liveDraftListingIpc.nameAdditions, ...restartCaptureIpc.nameAdditions, ...historyNamesIpc.nameAdditions, ...reportsIpc.nameAdditions, ...saveRetryIpc.nameAdditions, ...accessExposure.nameAdditions, ...sharedWriteFeedback.nameAdditions, ...fileObservationIpc.nameAdditions, ...stopAndRestoreIpc.nameAdditions, ...usageRecordIpc.nameAdditions, ...shareCopyExposure.nameAdditions, ...earlyQuitIpc.nameAdditions, ...offersIpc.nameAdditions]) {
+    for (const name of [...launchOpenIpc.nameAdditions, ...recipientRecordsIpc.nameAdditions, ...liveDraftRecoveryIpc.nameAdditions, ...liveDraftListingIpc.nameAdditions, ...restartCaptureIpc.nameAdditions, ...historyNamesIpc.nameAdditions, ...reportsIpc.nameAdditions, ...saveRetryIpc.nameAdditions, ...accessExposure.nameAdditions, ...sharedWriteFeedback.nameAdditions, ...fileObservationIpc.nameAdditions, ...stopAndRestoreIpc.nameAdditions, ...usageRecordIpc.nameAdditions, ...shareCopyExposure.nameAdditions, ...earlyQuitIpc.nameAdditions, ...offersIpc.nameAdditions, ...systemMotionIpc.nameAdditions]) {
       expect(expectedNames).not.toContain(name);
       expectedNames.push(name);
     }
@@ -83,9 +86,6 @@ describe("B1 main inventories (a4be19d5b)", () => {
   it("preserves socket verbs, public verbs, and all public help", () => {
     expect(socketVerbs).toEqual([...mainCli.socketVerbs, ...accessExposure.socketVerbAdditions].sort());
     expect(Object.keys(CLI_COMMANDS)).toEqual([...accessExposure.publicGroupAdditions, ...mainCli.publicGroups]);
-    const internal = new Set(mainCli.internalVerbs.filter(verb => !commentsCli.publicSocketPromotions.includes(verb)));
-    expect(socketVerbs.filter(verb => internal.has(verb))).toEqual([...internal]);
-    expect(socketVerbs.filter(verb => !internal.has(verb))).toEqual([...mainCli.publicSocketVerbs, ...commentsCli.publicSocketPromotions, ...accessExposure.socketVerbAdditions].sort());
     // Hand-reviewed #1659 additions, separate from the hashed main baseline.
     const expectedPublicVerbs = [...accessExposure.publicVerbAdditions, ...mainCli.publicVerbs];
     for (const { verb, before } of [...publicationCli.publicVerbAdditions, ...commentsCli.publicVerbAdditions]) {
@@ -171,19 +171,43 @@ describe("capability identities and exposure", () => {
     expect(DATASET_CAPABILITIES.approveMigration).toBe("dataset.migration.approve");
   });
 
-  it("matches each door's declared exposure to its actual rows, verbs, help, and advertised tools", async () => {
+  it("pins every socket verb's capability ids", () => {
+    expect(Object.keys(CLI_CAPABILITIES).sort()).toEqual(socketVerbs);
+    expect(CLI_CAPABILITIES).toEqual(pinnedCliCapabilities.socket);
+    for (const [verb, ids] of Object.entries(CLI_CAPABILITIES)) expect(ids.length, verb).toBeGreaterThan(0);
+  });
+
+  it("pins every public verb's capability id", () => {
+    const ids = Object.fromEntries(Object.entries(CLI_COMMANDS).flatMap(([group, command]) =>
+      Object.entries(command.verbs).map(([name, verb]) => [`${group} ${name}`, verb.capabilityId])));
+    expect(ids).toEqual(pinnedCliCapabilities.public);
+  });
+
+  it("uses a public verb's capability among its parser's socket capabilities", () => {
+    expect(Object.keys(CLI_DISPATCH_ARGUMENTS).sort()).toEqual([...publicVerbs].sort());
+    for (const [group, command] of Object.entries(CLI_COMMANDS)) {
+      for (const [name, verb] of Object.entries(command.verbs)) {
+        const label = `${group} ${name}`;
+        const parsed = parseCliArguments([group, name, ...CLI_DISPATCH_ARGUMENTS[label]!], {});
+        if ("help" in parsed) throw new Error(`Expected socket dispatch for ${label}.`);
+        expect(CLI_CAPABILITIES[parsed.verb], label).toContain(verb.capabilityId);
+      }
+    }
+  });
+
+  it("pins every internal-only socket verb in the main CLI inventory", () => {
+    const publicSocketVerbs = new Set([...mainCli.publicSocketVerbs, ...commentsCli.publicSocketPromotions, ...accessExposure.socketVerbAdditions]);
+    const internalVerbs = socketVerbs.filter(verb => !publicSocketVerbs.has(verb));
+    expect(internalVerbs).toEqual(mainCli.internalVerbs.filter(verb => !commentsCli.publicSocketPromotions.includes(verb)));
+  });
+
+  it("matches IPC and MCP exposure to their actual rows and advertised tools", async () => {
     const entries = Object.entries(CAPABILITIES);
     const sorted = (values: readonly (readonly string[])[]) => values.map(value => value.join(":")).sort();
     const actualIpc = OPERATION_TABLES.flatMap(table => Object.entries<OperationDefinition>(table).flatMap(([name, row]) =>
       (row.capabilityId ? [row.capabilityId] : Object.values(row.capabilityIdsByAction)).map(id => [name, id])));
     expect(sorted(actualIpc)).toEqual(sorted(entries.flatMap(([id, meta]) => meta.ipc.operations.map(name => [name, id]))));
     for (const row of rows) assertAdmission(row);
-    expect(Object.keys(CLI_CAPABILITIES).sort()).toEqual(socketVerbs);
-    expect(sorted(Object.entries(CLI_CAPABILITIES).flatMap(([verb, ids]) => ids.map(id => [verb, id]))))
-      .toEqual(sorted(entries.flatMap(([id, meta]) => meta.cli.socket.map(verb => [verb, id]))));
-    const actualPublic = Object.entries(CLI_COMMANDS).flatMap(([group, command]) => Object.entries(command.verbs).map(([name, verb]) => [`${group} ${name}`, verb.capabilityId]));
-    expect(sorted(actualPublic)).toEqual(sorted(entries.flatMap(([id, meta]) => meta.cli.public.map(verb => [verb, id]))));
-    expect(actualPublic.map(([verb]) => verb)).toEqual(publicVerbs);
     const offeredTools = new Set<string>();
     for (const level of ["owner", "view", "comment", "edit"] as const) {
       const tools = await advertisedTools(level === "owner" ? undefined : level);
@@ -198,7 +222,7 @@ describe("capability identities and exposure", () => {
     expect(Object.keys(MCP_TOOL_CAPABILITIES).sort()).toEqual([...offeredTools].sort());
     for (const [, meta] of entries) {
       expect(meta.description).toBeTruthy();
-      for (const door of [meta.ipc, meta.cli, meta.mcp]) expect(door.reason).toBeTruthy();
+      for (const door of [meta.ipc, meta.mcp]) expect(door.reason).toBeTruthy();
     }
   });
 });

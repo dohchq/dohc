@@ -48,7 +48,8 @@ import { siteTabPath, VIEW_IDS } from "../workbench/workbenchState";
 import { AutomationBadge } from "../workbench/AutomationBadge";
 import { ChatAvatar } from "../workbench/ChatAvatar";
 import { ThreadMessages } from "../workbench/ChatPosts";
-import type { ChatReactionControls } from "../workbench/chatMessages";
+import { ChatComposer, type ChatReactionControls } from "../workbench/chatMessages";
+import { MentionComposer } from "../workbench/MentionComposer";
 import { PostCard, type PostData } from "../workbench/PostCard";
 import { EditorGroupLayout } from "../workbench/EditorGroupLayout";
 import { EditorTabs } from "../workbench/EditorTabs";
@@ -68,6 +69,8 @@ import {
   type AccessSetup,
   type AccessView,
 } from "../workbench/About";
+import type { AboutConversation } from "../workbench/aboutConversation";
+import type { PresencePeer } from "../collab/presenceChannel";
 import { SharingPanel, type ShareMount, type SharingActions, type SkipView } from "../workbench/SharingView";
 import { CAPTURE_RECOVERY_TITLE, captureRecoveryMessage } from "../shell/useCaptureRecoveryNotices";
 import { WorkspaceSyncStatus } from "../workbench/WorkspaceSyncStatus";
@@ -463,6 +466,25 @@ const ABOUT_ACCESS_UNKNOWN: AccessAnswer = {
   freshness: "unknown",
 };
 
+// About for the drawing's #general: Sam and Nova here, and the Group's grants.
+const aboutPeer = (faceToken: string, displayName: string, paletteSlot: number): PresencePeer => ({
+  faceToken, sessionToken: `${faceToken}-session`, isSelf: false, displayName, paletteSlot, state: null, updatedAtMs: 0,
+});
+const ABOUT_PRESENT = [aboutPeer("face-sam", "Sam Rivera", 1), aboutPeer("face-nova", "Nova", 4)];
+const ABOUT_GROUP: AboutConversation = {
+  kind: "group", name: "general", channelWireId: "wire-general", received: false, present: ABOUT_PRESENT,
+};
+const ABOUT_CHAT_ACCESS: AccessAnswer = {
+  ...ABOUT_ACCESS,
+  ref: { kind: "chat", channelWireId: "wire-general" },
+  rows: [
+    aboutGrant({ shareId: "share-general", grantId: "grant-sam", recipientUserId: "sam", recipientEmail: "sam@example.com",
+      selector: { kind: "chat", channelWireId: "wire-general" }, access: "read-write" }),
+    aboutGrant({ shareId: "share-general", grantId: "grant-kim", recipientUserId: "kim", recipientEmail: "kim@example.com",
+      selector: { kind: "chat", channelWireId: "wire-general" }, access: "read-only" }),
+  ],
+};
+
 // A group's feed and a thread, from the drawing's #general.
 const CHAT_AT = new Date(2026, 6, 8, 14, 43).getTime();
 const CHAT_REACTIONS: ChatReactionControls = { reactions: [], viewerAuthorId: "you", onToggle: noop };
@@ -539,6 +561,8 @@ function ChatThreadSpecimen() {
     </div>
   );
 }
+
+const COMPOSER_DRAFT = "Can we cut the last paragraph?";
 
 // The About rail at the drawing's 290px, on the chrome.
 function AboutPanelSpecimen(props: { children: ReactNode }) {
@@ -1520,7 +1544,7 @@ function Pane(props: { theme: "light" | "dark" }) {
       <Section part="about" title="About">
         <Specimen label="a document: chats, history, access checked">
           <AboutPanelSpecimen>
-            <AboutHeader path={ABOUT_PATH} />
+            <AboutHeader subject={{ path: ABOUT_PATH }} />
             <AboutSection id="chats" icon={MessageSquare} label="Chats" count="2" expanded onToggle={noop}>
               <ul className="m-0 list-none p-0">
                 {ABOUT_THREADS.map((thread) => (
@@ -1823,7 +1847,80 @@ function Pane(props: { theme: "light" | "dark" }) {
         </Specimen>
       </Section>
 
-      {/* After Rails, so the parts above keep their places. */}
+      {/* Last, so the parts above keep their places. A send shows only once it
+          has taken a second, so the capture waits for the ring. */}
+      <Section part="composer-sending" title="Composer sending">
+        <Specimen label="at rest">
+          <div className="w-[400px] rounded-lg border border-line bg-panel">
+            <MentionComposer testIdPrefix={`states-composer-rest-${theme}`} composerId={`states-composer-rest-${theme}`}
+              value={COMPOSER_DRAFT} sending={false} placeholder="Message #general" sendLabel="Send message"
+              candidates={[]} onChange={noop} onSend={noop} />
+          </div>
+        </Specimen>
+        <Specimen label="cannot send yet, or a send under a second">
+          <div className="w-[400px] rounded-lg border border-line bg-panel">
+            <MentionComposer testIdPrefix={`states-composer-disabled-${theme}`} composerId={`states-composer-disabled-${theme}`}
+              value={COMPOSER_DRAFT} sending={false} disabled placeholder="Message #general" sendLabel="Send message"
+              candidates={[]} onChange={noop} onSend={noop} />
+          </div>
+        </Specimen>
+        <Specimen label="sending, after a second: a group, a message or a post's comments">
+          <div className="w-[400px] rounded-lg border border-line bg-panel">
+            <MentionComposer testIdPrefix={`states-composer-stream-${theme}`} composerId={`states-composer-stream-${theme}`}
+              value={COMPOSER_DRAFT} sending placeholder="Message #general" sendLabel="Send message"
+              candidates={[]} onChange={noop} onSend={noop} />
+          </div>
+        </Specimen>
+        <Specimen label="sending, after a second: a new post">
+          <div className="w-[560px]">
+            <MentionComposer testIdPrefix={`states-composer-post-${theme}`} composerId={`states-composer-post-${theme}`}
+              value={COMPOSER_DRAFT} sending surface="post" authorName="Ada" placeholder="What's happening in #general?"
+              sendLabel="Start post" candidates={[]} onChange={noop} onSend={noop} />
+          </div>
+        </Specimen>
+        <Specimen label="sending, after a second: a file's chats in About">
+          <AboutPanelSpecimen>
+            <ChatComposer testIdPrefix={`states-composer-about-${theme}`} composerId={`states-composer-about-${theme}`}
+              value={COMPOSER_DRAFT} sending placeholder="Write a message…" sendLabel="Send message"
+              onChange={noop} onSend={noop} />
+          </AboutPanelSpecimen>
+        </Specimen>
+      </Section>
+
+      {/* Last, so the parts above keep their places. */}
+      <Section part="about-conversation" title="About a conversation">
+        <Specimen label="a Group: who is here, and its access checked">
+          <AboutPanelSpecimen>
+            <AboutHeader subject={ABOUT_GROUP} />
+            <AboutAccessView view={{ status: "ready", answer: ABOUT_CHAT_ACCESS }} expanded onToggle={noop} onRetry={noop}
+              onMore={noop} setup={ACCESS_UNEXPLAINED} noun="chat" />
+          </AboutPanelSpecimen>
+        </Specimen>
+        <Specimen label="a person, with Access closed">
+          <AboutPanelSpecimen>
+            <AboutHeader subject={{ ...ABOUT_GROUP, kind: "person", name: "Sam Rivera", present: ABOUT_PRESENT.slice(0, 1) }} />
+            <AboutAccessView view={{ status: "loading" }} expanded={false} onToggle={noop} onRetry={noop} onMore={noop}
+              setup={ACCESS_UNEXPLAINED} noun="chat" />
+          </AboutPanelSpecimen>
+        </Specimen>
+        <Specimen label="an agent, alone: no share includes it">
+          <AboutPanelSpecimen>
+            <AboutHeader subject={{ ...ABOUT_GROUP, kind: "agent", name: "Nova", present: [] }} />
+            <AboutAccessView view={{ status: "ready", answer: { ...ABOUT_CHAT_ACCESS, rows: [] } }} expanded onToggle={noop}
+              onRetry={noop} onMore={noop} setup={ACCESS_UNEXPLAINED} noun="chat" />
+          </AboutPanelSpecimen>
+        </Specimen>
+        <Specimen label="unknown, then gone">
+          <AboutPanelSpecimen>
+            <AboutAccessView view={{ status: "ready", answer: ABOUT_ACCESS_UNKNOWN }} expanded onToggle={noop} onRetry={noop}
+              onMore={noop} setup={ACCESS_UNEXPLAINED} noun="chat" />
+            <AboutAccessView view={{ status: "ready", answer: { ...ABOUT_ACCESS_UNKNOWN, visibility: "missing" } }} expanded
+              onToggle={noop} onRetry={noop} onMore={noop} setup={ACCESS_UNEXPLAINED} noun="chat" />
+          </AboutPanelSpecimen>
+        </Specimen>
+      </Section>
+
+      {/* Last, so the parts above keep their places. */}
       <Section part="settings-sync" title="Settings: Sync and sharing">
         <Specimen label="signed in, syncing, on a private server; keyboard focus on Disconnect">
           <div className="w-[640px]" data-force-state="focus focus-visible" data-force-target='[data-testid="cloud-disconnect"]'>

@@ -4,24 +4,32 @@ import {parseLiveObjectBinding, type LiveObjectBinding} from "@dohc/live-session
 import {configRecord} from "./deviceLiveHostConfig";
 import {authorityInteger} from "./storage/liveDocumentAuthority";
 
-/** Adapts one real imported native session to the existing owner delivery consumer. */
+/**
+ * Adapts one real imported native session to the existing owner delivery consumer.
+ * The session is captured at the first registration, so work that never registers never loads it.
+ */
 export function serviceOwnerTransport(options: {
-  client: EngineClient; workspace: string; capture: NativeOwnerActivation; binding: LiveObjectBinding;
+  client: EngineClient; workspace: string; capture(signal?: AbortSignal): Promise<NativeOwnerActivation>; binding: LiveObjectBinding;
   nextRequestId(): number; assertCurrent(): void;
 }) {
   const {client,workspace,nextRequestId,assertCurrent}=options;
-  const capture={activationId:options.capture.activationId,sessionId:options.capture.sessionId,source:{...options.capture.source}};
   const binding=parseLiveObjectBinding(options.binding);
-  let registrationId: number|undefined, adopted=false, outboxId: string|undefined;
+  let captured: Pick<NativeOwnerActivation,"activationId"|"sessionId"|"source">|undefined, registrationId: number|undefined, adopted=false, outboxId: string|undefined;
   const check=(signal?:AbortSignal)=>{signal?.throwIfAborted();assertCurrent();};
   const registration=(id:unknown)=>{
     if(registrationId===undefined || id!==registrationId)throw new Error("Service owner registration changed.");
     return registrationId;
   };
+  // Registration sets the session before any call that reads it.
+  const session=()=>{
+    if(!captured)throw new Error("Service owner registration changed.");
+    return captured;
+  };
   const readState=async(request:Parameters<EngineClient["sendRequest"]>[0],signal?:AbortSignal)=>{
     check(signal);
+    const id=registration(configRecord(request.params,["registrationId"]).registrationId),capture=session();
     const response=await client.sendRequest({...request,workspace,method:"liveApplication.ownerState",
-      params:{registrationId:registration(configRecord(request.params,["registrationId"]).registrationId),sessionId:capture.sessionId}},signal);
+      params:{registrationId:id,sessionId:capture.sessionId}},signal);
     check(signal);
     const state=configRecord(response.result,["adoptionId","expectedLocalSequence","throughCursor","outboxId","pendingBytes","outboxState"]);
     const sequence=authorityInteger(state.expectedLocalSequence),pendingBytes=authorityInteger(state.pendingBytes);
@@ -39,8 +47,13 @@ export function serviceOwnerTransport(options: {
     if(request.workspace!==workspace)throw new Error("Service owner workspace changed.");
     if(request.method==="liveApplication.register") {
       const params=configRecord(request.params,["binding"],["resumeAdoptionId"]);
-      if(!isDeepStrictEqual(parseLiveObjectBinding(params.binding),binding) ||
-        (params.resumeAdoptionId!==undefined && params.resumeAdoptionId!==capture.activationId))throw new Error("Service owner binding changed.");
+      if(!isDeepStrictEqual(parseLiveObjectBinding(params.binding),binding))throw new Error("Service owner binding changed.");
+      if(!captured) {
+        const capture=await options.capture(signal);
+        check(signal);
+        captured={activationId:capture.activationId,sessionId:capture.sessionId,source:{...capture.source}};
+      }
+      if(params.resumeAdoptionId!==undefined && params.resumeAdoptionId!==captured.activationId)throw new Error("Service owner binding changed.");
       const response=await client.sendRequest({...request,params:{binding:{...binding,selectorPaths:[...binding.selectorPaths]}}},signal);
       check(signal);
       registrationId=authorityInteger(configRecord(response.result,["registrationId"]).registrationId,1);
@@ -57,6 +70,7 @@ export function serviceOwnerTransport(options: {
         if(!adopted)throw new Error("Native adoption must finish before outbox delivery.");
         return {id:request.id,result:{outboxId:outboxId??null,pendingBytes:state.pendingBytes,state:state.outboxState} as never};
       }
+      const capture=session();
       return {id:request.id,result:{adoptionId:capture.activationId,expectedLocalSequence:capture.source.nativeHeadSequence,
         throughCursor:state.throughCursor??0,sessionId:capture.sessionId}};
     }
@@ -75,6 +89,7 @@ export function serviceOwnerTransport(options: {
   };
   const sendLiveOwnerAdoption:EngineClient["sendLiveOwnerAdoption"]=async(request,cut,bounds,signal)=>{
     check(signal);registration(request.registrationId);
+    const capture=session();
     if(request.workspace!==workspace || request.sessionId!==capture.sessionId || cut.adoptionId!==capture.activationId ||
       cut.expectedLocalSequence!==capture.source.nativeHeadSequence || cut.events.length!==0 || cut.terminalReceipt!==null) {
       throw new Error("Service owner adoption cut changed.");
@@ -93,6 +108,6 @@ export function serviceOwnerTransport(options: {
   return {client:facade,async state(request:Omit<Parameters<EngineClient["sendRequest"]>[0],"method"|"params">,signal?:AbortSignal){
     const state=await readState({...request,method:"liveApplication.ownerState",params:{registrationId:registration(registrationId)}},signal);
     if(!adopted)throw new Error("Native service adoption is unavailable.");
-    return {adoptionId:capture.activationId,pendingBytes:state.pendingBytes};
+    return {adoptionId:session().activationId,pendingBytes:state.pendingBytes};
   }};
 }

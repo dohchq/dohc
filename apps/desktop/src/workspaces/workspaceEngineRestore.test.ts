@@ -92,7 +92,7 @@ describe("engine history reads", () => {
     expect(page.moments[0].recordedAtMs).toBeGreaterThanOrEqual(
       page.moments[1].recordedAtMs,
     );
-    expect(page.nextBeforeMomentOrder).toBeNull();
+    expect(page.nextCursor).toBeNull();
 
     const detail = await engine.readMoment(page.moments[0].id);
     expect(detail?.protected).toBe(false);
@@ -656,7 +656,8 @@ describe("stable object ids for the linked-chat rail", () => {
 
     expect(await engine.filePathForObjectId(objectId)).toBe("two.md");
     expect(await engine.filePathForObjectId("missing-object-id")).toBeNull();
-    expect(requests.map((request) => request.method)).toContain(
+    expect(requests.map((request) => request.method)).toContain("files.resolve");
+    expect(requests.map((request) => request.method)).not.toContain(
       VERSIONED_METHOD.textList,
     );
     expect(requests.map((request) => request.method)).not.toContain(

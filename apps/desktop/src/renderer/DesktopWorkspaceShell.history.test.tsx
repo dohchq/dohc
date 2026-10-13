@@ -9,6 +9,7 @@ import { DEFAULT_WORKSPACE_SETTINGS, type WorkspaceSettingsResult } from "../wor
 import { rendererMarks } from "../performance/rendererMarks";
 import { momentDiffTabPath, versionCompareTabPath } from "./workbench/workbenchState";
 import { deferred } from "../testing/deferred";
+import { historyCursor, historyPageFields } from "../testing/historyPageFixture";
 import type { Workspace } from "./DesktopWorkspaceShell";
 import { textEditorContent } from "./FileInspector.editor-fixture";
 import { DesktopWorkspaceShell, WORKSPACE, OTHER_WORKSPACE, SYNC_STATUS, STORED_STATE, storedStateWithTabs, storedTabs, makeBridge, renderShell, shellBootstrapProps, SHARE_STATUS, SHARE_VIEW, makeShareBridge, settleShareView } from "./DesktopWorkspaceShell.testHarness";
@@ -266,10 +267,10 @@ describe("history page", () => {
   ): ListEngineMomentsResult {
     return {
       moments,
-      nextBeforeMomentOrder: null,
+      nextCursor: null,
       latestMomentOrder: 1,
-      activeVersionId,
-      protectedTruncated: false,
+      activeVersionId, ...historyPageFields,
+
     };
   }
 
@@ -383,7 +384,7 @@ describe("history page", () => {
   it("keeps earlier History reachable when the bounded policy scan returns no rows", async () => {
     const bridge = makeBridge(Promise.resolve(null));
     bridge.listEngineMoments = vi.fn()
-      .mockResolvedValueOnce({ ...historyPage([]), nextBeforeMomentOrder: 80 })
+      .mockResolvedValueOnce({ ...historyPage([]), nextCursor: historyCursor(80) })
       .mockResolvedValue(historyPage([historyMoment("older", "Older admitted edit")]));
     const user = userEvent.setup();
     renderShell(bridge);
@@ -392,7 +393,7 @@ describe("history page", () => {
     await user.click(await screen.findByTestId("engine-history-load-more"));
     expect(await screen.findByText("Older admitted edit")).toBeTruthy();
     expect(screen.queryByText("No changes yet")).toBeNull();
-    expect(bridge.listEngineMoments).toHaveBeenLastCalledWith(expect.objectContaining({ beforeMomentOrder: 80 }));
+    expect(bridge.listEngineMoments).toHaveBeenLastCalledWith(expect.objectContaining({ cursor: historyCursor(80) }));
   });
 
   it("says History is hidden while its rules can't be read, and shows it again once they can", async () => {
@@ -605,11 +606,11 @@ describe("history page", () => {
     }
   });
 
-  it("shows the protected truncation marker from the history page", async () => {
+  it("shows complete protected paging without a truncation banner", async () => {
     const bridge = makeBridge(Promise.resolve(null));
     bridge.listEngineMoments = vi.fn(async () => ({
       ...historyPage([historyMoment("m-1", "Wrote the plan")]),
-      protectedTruncated: true,
+
     }));
     const user = userEvent.setup();
     renderShell(bridge);
@@ -617,9 +618,8 @@ describe("history page", () => {
 
     await user.click(screen.getByTestId("activity-history"));
 
-    expect(
-      await screen.findAllByText("Some protected activity in this range is not shown."),
-    ).toHaveLength(1);
+    expect(await screen.findByText("Wrote the plan")).toBeTruthy();
+    expect(screen.queryByText("Some protected activity in this range is not shown.")).toBeNull();
   });
 
   it("keeps a moment diff selected when an older duplicate-file open finishes flushing", async () => {
@@ -824,7 +824,7 @@ describe("history page", () => {
     await act(async () => {
       first.resolve({
         ...historyPage([historyMoment("m-first", "Added the launch checklist")]),
-        nextBeforeMomentOrder: 1,
+        nextCursor: historyCursor(1),
       });
       await first.promise;
     });
@@ -840,15 +840,15 @@ describe("history page", () => {
     await waitFor(() => expect(bridge.listEngineMoments).toHaveBeenCalledTimes(2));
     expect(bridge.listEngineMoments).toHaveBeenLastCalledWith({
       workspaceId: WORKSPACE.workspaceId,
-      limit: 200,
-      beforeMomentOrder: 1,
+      limit: 50,
+      cursor: historyCursor(1),
     });
     // The earlier page still has a cursor, so the control stays and is
     // usable again once the page lands.
     await act(async () => {
       earlier.resolve({
         ...historyPage([historyMoment("m-earlier", "Started the plan")]),
-        nextBeforeMomentOrder: 0,
+        nextCursor: historyCursor(0),
       });
       await earlier.promise;
     });
@@ -878,7 +878,7 @@ describe("history page", () => {
     await act(async () => {
       first.resolve({
         ...historyPage([historyMoment("m-first", "Added the launch checklist")]),
-        nextBeforeMomentOrder: 1,
+        nextCursor: historyCursor(1),
       });
       await first.promise;
     });
@@ -939,7 +939,7 @@ describe("history page", () => {
     await act(async () => {
       first.resolve({
         ...historyPage([historyMoment("m-first", "Added the launch checklist")]),
-        nextBeforeMomentOrder: 1,
+        nextCursor: historyCursor(1),
       });
       await first.promise;
     });
@@ -1003,7 +1003,7 @@ describe("history page", () => {
     await act(async () => {
       first.resolve({
         ...historyPage([historyMoment("m-first", "Added the launch checklist")]),
-        nextBeforeMomentOrder: 1,
+        nextCursor: historyCursor(1),
       });
       await first.promise;
     });
@@ -1073,11 +1073,11 @@ describe("history page", () => {
           canMergeIntoMain: false,
         },
       ],
-      activeVersionId: switched ? "main" : "try-1",
+      activeVersionId: switched ? "main" : "try-1", ...historyPageFields,
     }));
     bridge.switchWorkspaceVersion = vi.fn(async () => {
       switched = true;
-      return { activeVersionId: "main", changedFileCount: 0 };
+      return { activeVersionId: "main", ...historyPageFields, changedFileCount: 0 };
     });
     const user = userEvent.setup();
     renderShell(bridge);
@@ -1090,7 +1090,7 @@ describe("history page", () => {
           [historyMoment("m-first", "Wrote the note in the try version")],
           "try-1",
         ),
-        nextBeforeMomentOrder: 1,
+        nextCursor: historyCursor(1),
       });
       await first.promise;
     });
@@ -1170,7 +1170,7 @@ describe("history page", () => {
           canMergeIntoMain: false,
         },
       ],
-      activeVersionId: switched ? "main" : "try-1",
+      activeVersionId: switched ? "main" : "try-1", ...historyPageFields,
     }));
     // The switch lands in the daemon and notifies the renderer before the
     // invoke resolves, which is the ordering this test exists for.
@@ -1179,7 +1179,7 @@ describe("history page", () => {
       switched = true;
       bridge.emitWorkspaceActivity();
       await switchInvoke.promise;
-      return { activeVersionId: "main", changedFileCount: 0 };
+      return { activeVersionId: "main", ...historyPageFields, changedFileCount: 0 };
     });
     const user = userEvent.setup();
     renderShell(bridge);
@@ -1260,11 +1260,11 @@ describe("history page", () => {
           canMergeIntoMain: true,
         },
       ],
-      activeVersionId: switched ? "main" : "try-1",
+      activeVersionId: switched ? "main" : "try-1", ...historyPageFields,
     }));
     bridge.switchWorkspaceVersion = vi.fn(async () => {
       switched = true;
-      return { activeVersionId: "main", changedFileCount: 0 };
+      return { activeVersionId: "main", ...historyPageFields, changedFileCount: 0 };
     });
     const user = userEvent.setup();
     renderShell(bridge);
@@ -1348,12 +1348,12 @@ describe("history page", () => {
             canMergeIntoMain: true,
           },
         ],
-        activeVersionId: switched ? "main" : "try-1",
+        activeVersionId: switched ? "main" : "try-1", ...historyPageFields,
       });
     });
     bridge.switchWorkspaceVersion = vi.fn(async () => {
       switched = true;
-      return { activeVersionId: "main", changedFileCount: 0 };
+      return { activeVersionId: "main", ...historyPageFields, changedFileCount: 0 };
     });
     const user = userEvent.setup();
     renderShell(bridge);
@@ -2049,11 +2049,11 @@ describe("history page", () => {
       versionReads += 1;
       return {
         versions: versionList,
-        activeVersionId: versionReads === 1 ? "try-1" : "main",
+        activeVersionId: versionReads === 1 ? "try-1" : "main", ...historyPageFields,
       };
     });
     bridge.switchWorkspaceVersion = vi.fn(async () => ({
-      activeVersionId: "main",
+      activeVersionId: "main", ...historyPageFields,
       changedFileCount: 0,
     }));
     const user = userEvent.setup();
@@ -2124,11 +2124,11 @@ describe("history page", () => {
       versionReads += 1;
       return {
         versions: versionList,
-        activeVersionId: versionReads === 1 ? "try-1" : "main",
+        activeVersionId: versionReads === 1 ? "try-1" : "main", ...historyPageFields,
       };
     });
     bridge.switchWorkspaceVersion = vi.fn(async () => ({
-      activeVersionId: "main",
+      activeVersionId: "main", ...historyPageFields,
       changedFileCount: 0,
     }));
     const user = userEvent.setup();
@@ -2179,7 +2179,7 @@ describe("history page", () => {
             canMergeIntoMain: true,
           },
         ],
-        activeVersionId: switched ? "main" : "try-1",
+        activeVersionId: switched ? "main" : "try-1", ...historyPageFields,
       });
       versionReads += 1;
       if (versionReads === 1) return Promise.resolve(answer());
@@ -2189,7 +2189,7 @@ describe("history page", () => {
     });
     bridge.switchWorkspaceVersion = vi.fn(async () => {
       switched = true;
-      return { activeVersionId: "main", changedFileCount: 0 };
+      return { activeVersionId: "main", ...historyPageFields, changedFileCount: 0 };
     });
     const user = userEvent.setup();
     renderShell(bridge);
@@ -2257,11 +2257,11 @@ describe("history page", () => {
           canMergeIntoMain: true,
         },
       ],
-      activeVersionId: switched ? "main" : "try-1",
+      activeVersionId: switched ? "main" : "try-1", ...historyPageFields,
     }));
     bridge.switchWorkspaceVersion = vi.fn(async () => {
       switched = true;
-      return { activeVersionId: "main", changedFileCount: 0 };
+      return { activeVersionId: "main", ...historyPageFields, changedFileCount: 0 };
     });
     // The switch lands; the dismissal that follows it never does.
     bridge.dismissTryInVersionReview = vi.fn(() => new Promise<never>(() => {}));
@@ -2353,11 +2353,11 @@ describe("history page", () => {
           canMergeIntoMain: true,
         },
       ],
-      activeVersionId: switched ? "main" : "try-1",
+      activeVersionId: switched ? "main" : "try-1", ...historyPageFields,
     }));
     bridge.switchWorkspaceVersion = vi.fn(async () => {
       switched = true;
-      return { activeVersionId: "main", changedFileCount: 0 };
+      return { activeVersionId: "main", ...historyPageFields, changedFileCount: 0 };
     });
     const user = userEvent.setup();
     renderShell(bridge);
@@ -2459,7 +2459,7 @@ describe("history page", () => {
     await act(async () => {
       first.resolve({
         ...historyPage([historyMoment("m-first", "Added the launch checklist")]),
-        nextBeforeMomentOrder: 1,
+        nextCursor: historyCursor(1),
       });
       await first.promise;
     });
@@ -2536,11 +2536,11 @@ describe("history page", () => {
           canMergeIntoMain: true,
         },
       ],
-      activeVersionId: switched ? "main" : "try-1",
+      activeVersionId: switched ? "main" : "try-1", ...historyPageFields,
     }));
     bridge.switchWorkspaceVersion = vi.fn(async () => {
       switched = true;
-      return { activeVersionId: "main", changedFileCount: 0 };
+      return { activeVersionId: "main", ...historyPageFields, changedFileCount: 0 };
     });
     const user = userEvent.setup();
     renderShell(bridge);
@@ -2553,7 +2553,7 @@ describe("history page", () => {
           [historyMoment("m-first", "Wrote the note in the try version")],
           "try-1",
         ),
-        nextBeforeMomentOrder: 1,
+        nextCursor: historyCursor(1),
       });
       await first.promise;
     });

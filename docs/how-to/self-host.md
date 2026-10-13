@@ -22,6 +22,11 @@ Local work remains available when the server is offline.
 
 App publishing is disabled in the default self-host bundle.
 It needs a separate HTTPS app domain and additional relay limits.
+The app domain can be a registrable domain or a private suffix you control from the Public Suffix List.
+Use an app domain you control.
+Keep the viewer outside the app domain.
+The app domain must not be the viewer's registrable domain or a host under it.
+Launch hosts must not be public suffixes.
 Follow the [share-web operations reference](../../services/share-web/README.md) before enabling it.
 Apps use their approved datasets when `DOHC_RELAY_APP_PUBLICATIONS=1` is enabled.
 Set `DOHC_RELAY_APP_BACKEND_MAX_PARTICIPANTS_PER_GRANT` to change the default limit of 1,000 submitting participants per app and share grant.
@@ -122,6 +127,45 @@ It uses the peer address instead when the header is missing, is longer than 4,09
 It answers 400 to a connection without an IP address.
 The [proxy section of the share-web operations reference](../../services/share-web/README.md#public-origin-and-proxy) describes the `share-web` rules.
 
+## Choose who can create an account
+
+By default, anyone who can reach the server can create an account on it.
+To close sign-up, list the approved email addresses in `.env.self-host`, separated by commas:
+
+```dotenv
+DOHC_SIGN_UP_EMAILS=you@your-domain.com,colleague@your-domain.com
+```
+
+Include your own address.
+With a list, the server also accepts an address that has a pending invite.
+A pending invite exists when someone shares work with an email address that has no verified account on the server.
+Revoking that share removes the invite.
+The server ignores case and surrounding spaces when it compares addresses.
+
+With a list, the sign-up page asks for no password.
+The server emails a link instead, and the person chooses their password there.
+Opening that link also verifies the address and signs out every session of the account.
+Until then, nobody can sign in to the account.
+An existing account that never verified its address works the same way: select **Forgot your password?** to get the link.
+When the server starts with a list, it signs out everyone whose email is not verified.
+To sign in again, they choose a password from an emailed link.
+People with a verified email stay signed in.
+Run one account service per database: an instance still running with open sign-up could issue new unverified sessions after this sign-out.
+
+Any other address gets a message that the server creates accounts only for approved or invited addresses.
+Share links need no account, so closed sign-up does not change them.
+The server checks eligibility when it creates the account.
+Removing an address from the list later does not remove its account.
+Revoking an invite after its account exists does not remove that account either.
+Stop and start the deployment to apply a changed list.
+Leave `DOHC_SIGN_UP_EMAILS` empty to open sign-up again.
+
+`workspace-api` asks `sync-relay` about pending invites over the internal Docker network.
+If the relay does not answer, an address outside the list gets a message to try again.
+Listed addresses can still sign up.
+Outside the self-host bundle, set `WORKSPACE_API_RELAY_URL` on `workspace-api` to the relay's internal origin.
+Both services must use the same `BETTER_AUTH_SECRET`.
+
 ## Start and check the server
 
 ```sh
@@ -180,7 +224,7 @@ If it fails, inspect the sync-relay logs and verify disk space and the relay's p
 1. Open **Settings → Sync and sharing** and select **Connect server**.
 2. Enter the HTTPS address you configured above.
 3. Follow the browser sign-in flow.
-4. Create an account on your server and verify your email.
+4. Create an account on your server and open the link in the email it sends.
 5. Approve the device after checking the displayed code.
 6. Return to dohc. Settings opens on **Sync and sharing**; turn on **Sync this workspace**.
 
@@ -210,6 +254,31 @@ Restart the services and confirm that the workspace remains available.
 
 Keep a local copy of important work while testing your deployment.
 See the [browser service operations reference](../../services/share-web/README.md) for storage and permission boundaries.
+
+## Disable a published app
+
+If a published app is unsafe, run this command from the deployment bundle directory on the server:
+
+```sh
+docker compose --env-file .env.self-host -f docker-compose.self-host.yml exec -T sync-relay \
+  node /app/services/sync-relay/dist/app-publication-takedown.js \
+  --publication-id PUBLICATION_ID --reason "Phishing reported and confirmed"
+```
+
+Use the publication ID from the owner's publication list or the app URL's `app` parameter.
+The command disables that one publication. The owner sees the reason and cannot reactivate that publication.
+The owner can still publish the app under a new share link or after rotating the grant.
+Watch for new publications of the same app.
+The relay records the actor as "operator", the time, and the reason durably.
+It immediately refuses serving, new launches, and writes, including requests from existing launches.
+
+The command uses a private socket inside the running relay container. Other publications, sync, and sharing keep running.
+Use Compose's `--env-file`, `-f`, or `--project-name` options when selecting a custom deployment.
+Exit codes are 0 for success, 2 for bad input, 3 for not found, and 1 for connection or operation failures.
+The client times out after 10 seconds. Retries preserve the first takedown record.
+
+Restoring a backup taken before the takedown brings that publication back.
+Run the takedown command again after restoring such a backup.
 
 ## Back up and maintain the deployment
 

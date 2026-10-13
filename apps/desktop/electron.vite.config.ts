@@ -71,14 +71,13 @@ function effectFree(surface: "preload" | "renderer"): Plugin {
   };
 }
 
-// The report services a release build names, compiled into main. Empty
-// values name none; see src/telemetry/reportingConfig.ts.
+// The PostHog project a release build reports to, compiled into main.
+// Empty values name none; see src/telemetry/reportingConfig.ts.
 export function reportingBuild(env: NodeJS.ProcessEnv = process.env) {
   return {
     posthogKey: env.DOHC_POSTHOG_KEY?.trim() ?? "",
     posthogHost: env.DOHC_POSTHOG_HOST?.trim() ?? "",
-    sentryDsn: env.DOHC_SENTRY_DSN?.trim() ?? "",
-    dist: env.DOHC_SENTRY_DIST?.trim() ?? "",
+    dist: env.DOHC_DESKTOP_DIST?.trim() ?? "",
   };
 }
 

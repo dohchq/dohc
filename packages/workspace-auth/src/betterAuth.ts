@@ -1,6 +1,8 @@
 import { betterAuth } from "better-auth";
+import { APIError } from "better-auth/api";
 import { bearer, deviceAuthorization, organization } from "better-auth/plugins";
 import type { Pool } from "pg";
+import type { SignUpAdmission } from "./signUp";
 import type { SendEmail } from "./smtp";
 
 // dohc server auth: Better Auth mounted on the same Postgres the workspace
@@ -9,7 +11,8 @@ import type { SendEmail } from "./smtp";
 // device-authorization grant for desktop login (the desktop shows a code, the
 // browser approves, and the desktop polls).
 //
-// This package owns only the auth surface and has no application callbacks.
+// This package owns the auth surface. Its only application callbacks deliver
+// email and decide whether a new account may exist.
 
 /** Verification and reset links expire one hour after dohc sends them. */
 export const EMAIL_LINK_TTL_SECONDS = 3600;
@@ -30,46 +33,101 @@ interface WorkspaceAuthOptions {
   // transport must refuse the request that would send mail (workspace-api
   // answers 503) rather than report a send that never happened.
   sendEmail?: SendEmail;
+  // Closed sign-up. Without it, anyone who reaches the server can create an
+  // account. The hook runs on every user insert, so no route can skip it.
+  // Admission trusts the typed address, and anyone could have typed the
+  // sign-up password, so on a closed server no password works until someone
+  // opens the emailed link and chooses one there.
+  admitAccount?: (email: string) => Promise<SignUpAdmission>;
 }
 
 export function createWorkspaceAuth(options: WorkspaceAuthOptions) {
   // The browser account pages live at the auth origin, so every emailed link
   // points at a dohc page that then calls /api/auth itself.
   const page = (path: string): string => new URL(path, options.baseURL).toString();
-  return betterAuth({
+  const send = options.sendEmail ?? unavailableEmail;
+  const admitAccount = options.admitAccount;
+  const closed = admitAccount !== undefined;
+  // A closed server proves the mailbox with a password reset token: opening
+  // the link sets the password, verifies the address, and signs out every
+  // session, so a password typed by someone else never becomes usable.
+  const sendPasswordLink = async (email: string, next: string | null): Promise<void> => {
+    await auth.api.requestPasswordReset({ body: { email, ...(next ? { redirectTo: next } : {}) } });
+  };
+  // Better Auth commits each step of a reset on its own. Signing out first
+  // means a failure in between leaves an unverified account nobody is in.
+  const verifyOnPasswordReset = async (userId: string): Promise<void> => {
+    const { internalAdapter } = await auth.$context;
+    await internalAdapter.deleteUserSessions(userId);
+    await internalAdapter.updateUser(userId, { emailVerified: true });
+  };
+  const auth = betterAuth({
+    ...(admitAccount
+      ? {
+          databaseHooks: {
+            user: {
+              create: {
+                before: async (user: { email: string }) => {
+                  refuseUnadmitted(await admitAccount(user.email));
+                },
+              },
+            },
+          },
+        }
+      : {}),
     baseURL: options.baseURL,
     secret: options.secret,
     basePath: "/api/auth",
     database: options.pool,
     emailAndPassword: {
       enabled: true,
+      requireEmailVerification: closed,
       resetPasswordTokenExpiresIn: EMAIL_LINK_TTL_SECONDS,
       revokeSessionsOnPasswordReset: true,
-      sendResetPassword: async ({ user, token }) => {
-        const url = page(`/account/reset-password?token=${encodeURIComponent(token)}`);
-        await (options.sendEmail ?? unavailableEmail)({
+      sendResetPassword: async ({ user, token, url: originalUrl }) => {
+        const next = nextPage(originalUrl);
+        const url = page(
+          `/account/reset-password?token=${encodeURIComponent(token)}${next ? `&next=${encodeURIComponent(next)}` : ""}`,
+        );
+        // Until the address is verified, nobody has chosen a password yet.
+        const settingUp = closed && !user.emailVerified;
+        await send({
           to: user.email,
-          subject: "Reset your dohc password",
+          subject: settingUp ? "Choose your dohc password" : "Reset your dohc password",
           text: [
-            "Choose a new password for your dohc account:",
+            settingUp
+              ? "Choose a password to finish setting up your dohc account:"
+              : "Choose a new password for your dohc account:",
             "",
             url,
             "",
             "The link works for one hour.",
-            "If you did not ask for a new password, ignore this email. Your password stays as it is.",
+            settingUp
+              ? "If you did not create a dohc account, ignore this email. Nobody can sign in to it until you choose a password."
+              : "If you did not ask for a new password, ignore this email. Your password stays as it is.",
             "",
           ].join("\n"),
         });
       },
+      ...(closed
+        ? {
+            onExistingUserSignUp: async ({ user }: { user: { email: string; emailVerified: boolean } }) => {
+              if (!user.emailVerified) await sendPasswordLink(user.email, null);
+            },
+            onPasswordReset: async ({ user }: { user: { id: string; emailVerified: boolean } }) => {
+              if (!user.emailVerified) await verifyOnPasswordReset(user.id);
+            },
+          }
+        : {}),
     },
     emailVerification: {
       sendOnSignUp: true,
       expiresIn: EMAIL_LINK_TTL_SECONDS,
       sendVerificationEmail: async ({ user, token, url: originalUrl }) => {
-        const callback = new URL(originalUrl).searchParams.get("callbackURL");
-        const next = callback && /^\/device\?user_code=[A-Za-z0-9%_-]+$/.test(callback) ? callback : "/account";
-        const url = page(`/account/verify-email?token=${encodeURIComponent(token)}&next=${encodeURIComponent(next)}`);
-        await (options.sendEmail ?? unavailableEmail)({
+        const next = nextPage(originalUrl);
+        if (closed) return sendPasswordLink(user.email, next);
+        const url = page(`/account/verify-email?token=${encodeURIComponent(token)}&next=${encodeURIComponent(next ?? "/account")}`);
+        await send({
           to: user.email,
           subject: "Verify your dohc email",
           text: [
@@ -83,6 +141,18 @@ export function createWorkspaceAuth(options: WorkspaceAuthOptions) {
           ].join("\n"),
         });
       },
+      // A verification link sent while sign-up was open would keep whatever
+      // password the account already has.
+      ...(closed
+        ? {
+            beforeEmailVerification: async () => {
+              throw new APIError("FORBIDDEN", {
+                code: "PASSWORD_LINK_REQUIRED",
+                message: "This server now asks you to choose a password from the emailed link.",
+              });
+            },
+          }
+        : {}),
     },
     ...(options.trustedOrigins ? { trustedOrigins: options.trustedOrigins } : {}),
     // The host derives the client address from the socket and its own trusted
@@ -121,6 +191,42 @@ export function createWorkspaceAuth(options: WorkspaceAuthOptions) {
       }),
     ],
   });
+  return auth;
+}
+
+/**
+ * Signs out every account whose email is not verified, including desktop
+ * sign-ins approved but not yet collected. A closed server runs this before it
+ * serves requests: a session from while sign-up was open never proved its
+ * mailbox, and closed sign-in refuses to create a new one.
+ */
+export async function signOutUnverifiedAccounts(pool: Pool): Promise<void> {
+  await pool.query(`
+    with unverified as (select "id" from "user" where not "emailVerified"),
+      signed_out as (delete from "session" where "userId" in (select "id" from unverified))
+    delete from "deviceCode" where "userId" in (select "id" from unverified)`);
+}
+
+/** The device sign-in an emailed link should continue, if Better Auth's link carries one. */
+function nextPage(betterAuthUrl: string): string | null {
+  const callback = new URL(betterAuthUrl).searchParams.get("callbackURL");
+  return callback && /^\/device\?user_code=[A-Za-z0-9%_-]+$/.test(callback) ? callback : null;
+}
+
+function refuseUnadmitted(admission: SignUpAdmission): void {
+  if (admission === "refused") {
+    throw new APIError("FORBIDDEN", {
+      code: "SIGN_UP_CLOSED",
+      message:
+        "This server creates accounts only for approved or invited email addresses. Ask the server owner to approve this address, or ask someone here to share work with it.",
+    });
+  }
+  if (admission === "unavailable") {
+    throw new APIError("SERVICE_UNAVAILABLE", {
+      code: "SIGN_UP_CHECK_UNAVAILABLE",
+      message: "dohc could not check whether this address is invited. Try again in a minute.",
+    });
+  }
 }
 
 async function unavailableEmail(_message: Parameters<SendEmail>[0]): Promise<void> {

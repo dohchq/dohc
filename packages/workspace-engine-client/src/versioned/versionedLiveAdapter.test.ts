@@ -1,3 +1,5 @@
+import type { HistoryCursor } from "./versionedWireContract";
+function historyCursor(): HistoryCursor { return { format: 1, engineUuid: "test", workspaceId: "workspace", versionId: "main", objectId: null, textFence: 41, protectedFence: -1, markerFence: -1, text: null, protected: null, marker: null }; }
 import { ProtocolShapeError } from "../wireSchema";
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
@@ -399,6 +401,25 @@ function captureClient(requests: Request[]): MinimalDaemonClient {
 }
 
 describe("VersionedLiveAdapter", () => {
+  it.each(["workspaceId", "engineUuid", "versionId", "objectId"] as const)("rejects a History cursor from another %s", async field => {
+    const engine = new VersionedLoopbackEngine();
+    const adapter = new VersionedLiveAdapter({ sendRequest: request => engine.sendRequest(request), close: () => undefined }, WORKSPACE, { workspaceId: WORKSPACE });
+    await adapter.ensureMainVersion({ workspaceId: WORKSPACE });
+    const first = await adapter.readHistoryPage({ workspaceId: WORKSPACE });
+    await expect(adapter.readHistoryPage({ workspaceId: WORKSPACE, cursor: { ...first.startCursor, [field]: "another" } })).rejects.toThrow("invalid-input");
+  });
+
+  it("rejects an actual cursor issued by another engine", async () => {
+    const make = async () => {
+      const engine = new VersionedLoopbackEngine();
+      const adapter = new VersionedLiveAdapter({ sendRequest: request => engine.sendRequest(request), close: () => undefined }, WORKSPACE, { workspaceId: WORKSPACE });
+      await adapter.ensureMainVersion({ workspaceId: WORKSPACE });
+      return adapter;
+    };
+    const source = await make(), target = await make();
+    const first = await source.readHistoryPage({ workspaceId: WORKSPACE });
+    await expect(target.readHistoryPage({ workspaceId: WORKSPACE, cursor: first.startCursor })).rejects.toThrow("invalid-input");
+  });
   it.each(["api", "local-file"] as const)("records %s text without publishing unless explicitly requested", async (origin) => {
     const loopback = new VersionedLoopbackEngine();
     const adapter = new VersionedLiveAdapter({ sendRequest: (request) => loopback.sendRequest(request), close: () => undefined }, WORKSPACE, { workspaceId: WORKSPACE });
@@ -555,13 +576,12 @@ describe("VersionedLiveAdapter", () => {
               name: "Main",
               createdAtMs: 1,
             },
-            textMomentPage: {
+
               moments: [],
-              nextBeforeMomentOrder: null,
+              nextCursor: null,
               latestMomentOrder: -1,
-            },
-            protectedMoments: [],
-            protectedTruncated: true,
+          protectedMoments: [], startCursor: historyCursor(), versionMarkers: [],
+
           },
         };
       },
@@ -574,14 +594,13 @@ describe("VersionedLiveAdapter", () => {
       adapter.readHistoryPage({
         workspaceId: WORKSPACE,
         ...(objectId !== undefined ? { objectId } : {}),
-        limit: 200,
-        beforeMomentOrder: 41,
+        limit: 50,
+        cursor: historyCursor(),
       }),
     ).resolves.toMatchObject({
       activeVersion: { id: "main" },
-      textMomentPage: { moments: [] },
-      protectedMoments: [],
-      protectedTruncated: true,
+       moments: [], protectedMoments: [], startCursor: historyCursor(), nextCursor: null, versionMarkers: [],
+
     });
     expect(requests).toHaveLength(1);
     expect(requests[0]).toMatchObject({
@@ -589,8 +608,8 @@ describe("VersionedLiveAdapter", () => {
       params: {
         workspaceId: WORKSPACE,
         ...(objectId !== undefined ? { objectId } : {}),
-        limit: 200,
-        beforeMomentOrder: 41,
+        limit: 50,
+        cursor: historyCursor(),
       },
     });
   });

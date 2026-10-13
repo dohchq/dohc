@@ -1,3 +1,4 @@
+import type { HistoryCursor, HistoryMomentMetadata } from "@dohc/workspace-engine-client";
 import {
   VersionedTextStoreError,
   type VersionedTextStoreErrorCode,
@@ -147,6 +148,7 @@ export interface CaptureTextFileMetadata {
 }
 
 export type CaptureVersionedTextStore = VersionedTextStore & {
+  resolveFiles: VersionedLiveAdapter["resolveFiles"];
   listUnconfirmedSharePaths(input: { workspaceId: string; shareId: string; grantedSelector: ShareViewSelector }): Promise<ShareUnconfirmedChanges>;
   // Preflight the author of the following rename or delete.
   checkMove(input: { workspaceId: string; versionId: string; path: string; author?: MomentWriteAuthor }): Promise<void>;
@@ -159,15 +161,10 @@ export type CaptureVersionedTextStore = VersionedTextStore & {
     versionId: string;
   }): Promise<CaptureTextFileMetadata[]>;
   listHistoryPage(input: {
-    workspaceId: string;
-    objectId?: string;
-    limit?: number;
-    beforeMomentOrder?: number;
+    workspaceId: string; versionId?: string; objectId?: string; limit?: number; cursor?: HistoryCursor;
   }): Promise<{
-    activeVersion: VersionRecord;
-    textMomentPage: Awaited<ReturnType<VersionedTextStore["listMoments"]>>;
-    protectedMoments: SecretFileMoment[];
-    protectedTruncated: boolean;
+    activeVersion: VersionRecord; moments: VersionedTextMomentSummary[]; protectedMoments: SecretFileMoment[];
+    versionMarkers: VersionRecord[]; startCursor: HistoryCursor; nextCursor: HistoryCursor | null; latestMomentOrder: number;
   }>;
   flushCapture?(): Promise<void>;
   reconcileCapture?(): Promise<void>;
@@ -399,7 +396,7 @@ function momentFromWire(
 
 function momentSummaryFromWire(
   workspaceId: string,
-  moment: MomentRecord,
+  moment: HistoryMomentMetadata,
 ): VersionedTextMomentSummary {
   const authors = authorsFromWire(moment.authors);
   return {
@@ -958,6 +955,10 @@ export function createCaptureLiveStores(
     checkMove: ({ author, ...input }: { workspaceId: string; versionId: string; path: string; author?: MomentWriteAuthor }) =>
       runRead(async (adapter) => await adapter.checkMove({ ...input, ...(author ? { author: adapterAuthor(author) } : {}) })),
 
+    async resolveFiles(input: Parameters<VersionedLiveAdapter["resolveFiles"]>[0]) {
+      return await runRead(adapter => adapter.resolveFiles(input));
+    },
+
     async listTextFileMetadata(input: {
       workspaceId: string;
       versionId: string;
@@ -1205,24 +1206,13 @@ export function createCaptureLiveStores(
     },
 
     async listHistoryPage(input: {
-      workspaceId: string;
-      objectId?: string;
-      limit?: number;
-      beforeMomentOrder?: number;
+      workspaceId: string; versionId?: string; objectId?: string; limit?: number; cursor?: HistoryCursor;
     }) {
-      const page = await runRead(
-        async (adapter) => await adapter.readHistoryPage(input),
-      );
+      const page = await runRead(async adapter => await adapter.readHistoryPage(input));
       return {
-        activeVersion: page.activeVersion,
-        textMomentPage: {
-          ...page.textMomentPage,
-          moments: page.textMomentPage.moments.map((moment) =>
-            momentSummaryFromWire(input.workspaceId, moment),
-          ),
-        },
+        ...page,
+        moments: page.moments.map(moment => momentSummaryFromWire(input.workspaceId, moment)),
         protectedMoments: page.protectedMoments.map(secretMomentFromWire),
-        protectedTruncated: page.protectedTruncated,
       };
     },
 

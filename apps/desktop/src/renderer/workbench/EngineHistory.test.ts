@@ -80,7 +80,7 @@ describe("engineMomentSourceLabel", () => {
     const submission = engineMomentSourceLabel(moment({
       id: "public", origin: "sync", publicAuthor: {kind: "public", principalId, grantId: "grant-1"},
     }));
-    expect(submission).not.toBe(link);
+    expect(submission).toBe("Link holder 3f9a2c1d");
   });
   it("names every author of a moment several wrote, and none in place of the rest", () => {
     expect(engineMomentSourceLabel(moment({ id: "mixed", origin: "local-file",
@@ -95,7 +95,8 @@ describe("engineMomentSourceLabel", () => {
       .toBe("Link holder Anonymous");
   });
   it("labels a public principal without inventing an agent identity", () => {
-    expect(engineMomentSourceLabel(moment({id: "public", publicAuthor: {kind: "public", principalId: "holder-2", grantId: "grant-1"}}))).toBe("Link holder holder-2");
+    expect(engineMomentSourceLabel(moment({id: "public", publicAuthor: {kind: "public", principalId: "public_3f9a2c1d-7b4e-4c55-9d0a-1e2f3a4b5c6d", grantId: "grant-1"}})))
+      .toBe("Link holder 3f9a2c1d");
   });
   it("shows an agent-authored moment as \"the agent name\"", () => {
     expect(

@@ -1,11 +1,10 @@
-// The report services a release build names. electron.vite.config.ts
-// compiles them in from DOHC_POSTHOG_KEY, DOHC_POSTHOG_HOST, DOHC_SENTRY_DSN
-// and DOHC_SENTRY_DIST; an empty value names no service.
+// The PostHog project a release build reports to. electron.vite.config.ts
+// compiles it in from DOHC_POSTHOG_KEY, DOHC_POSTHOG_HOST and
+// DOHC_DESKTOP_DIST; an empty value names no project.
 // docs/engineering/desktop-release.md says how a release owner sets them.
 export interface ReportingBuild {
   posthogKey: string;
   posthogHost: string;
-  sentryDsn: string;
   dist: string;
 }
 
@@ -21,19 +20,18 @@ export interface UsageService {
 }
 
 export interface ErrorService {
-  // Sentry's envelope endpoint.
-  url: URL;
-  publicKey: string;
+  // The PostHog host the SDK sends to.
+  host: string;
+  key: string;
 }
 
-// Where this build sends reports, and the names the reports carry. Null
-// sends nothing.
+// Where this build sends reports, and the package it names. Null sends
+// nothing.
 export interface Reporting {
   usage: UsageService | null;
   errors: ErrorService | null;
-  release: string;
+  // The platform and processor the package was built for, such as "win-x64".
   dist: string;
-  environment: string;
 }
 
 // The switches that turn every report off for a launch, whatever the
@@ -41,7 +39,7 @@ export interface Reporting {
 const OFF_VALUES = new Set(["0", "off", "false", "no"]);
 
 /**
- * Only a packaged build with a named service reports. A development build,
+ * Only a packaged build with a named project reports. A development build,
  * a test run, an isolated test launch, DOHC_TELEMETRY=off and DO_NOT_TRACK=1
  * all send nothing.
  */
@@ -50,54 +48,31 @@ export function resolveReporting(input: {
   packaged: boolean;
   env: NodeJS.ProcessEnv;
   argv: readonly string[];
-  version: string;
-  channel: string;
 }): Reporting | null {
   const { build, env } = input;
   if (!build || !input.packaged) return null;
   if (env.DOHC_DESKTOP_TEST === "1" || input.argv.includes("--dohc-isolated-test")) return null;
   if (OFF_VALUES.has(env.DOHC_TELEMETRY?.trim().toLowerCase() ?? "")) return null;
   if (env.DO_NOT_TRACK?.trim() === "1") return null;
-  const usage = usageService(build.posthogKey, build.posthogHost);
-  const errors = errorService(build.sentryDsn);
-  if (!usage && !errors) return null;
+  const project = posthogProject(build.posthogKey, build.posthogHost);
+  if (!project) return null;
+  const base = project.base.href.replace(/\/+$/, "");
   return {
-    usage,
-    errors,
-    release: `dohc-desktop@${input.version}`,
+    usage: { url: new URL(`${base}/batch/`), key: project.key },
+    errors: { host: base, key: project.key },
     dist: /^[\w.-]{1,64}$/.test(build.dist) ? build.dist : `${process.platform}-${process.arch}`,
-    environment: input.channel,
   };
 }
 
-function httpsUrl(raw: string): URL | null {
-  let url: URL;
-  try {
-    url = new URL(raw.trim());
-  } catch {
-    return null;
-  }
-  return url.protocol === "https:" && !url.username && !url.password && !url.search && !url.hash ? url : null;
-}
-
-export function usageService(key: string, host: string): UsageService | null {
+/** A project key and an https host, or null when either is unusable. */
+export function posthogProject(key: string, host: string): { key: string; base: URL } | null {
   if (!/^phc_\w{10,100}$/.test(key.trim())) return null;
-  const base = httpsUrl(host);
-  if (!base) return null;
-  return { url: new URL(`${base.pathname.replace(/\/+$/, "")}/batch/`, base), key: key.trim() };
-}
-
-// A DSN is https://<public key>@<host><path>/<project id>. The envelope
-// endpoint is https://<host><path>/api/<project id>/envelope/.
-export function errorService(dsn: string): ErrorService | null {
-  let url: URL;
+  let base: URL;
   try {
-    url = new URL(dsn.trim());
+    base = new URL(host.trim());
   } catch {
     return null;
   }
-  const match = /^(.*)\/(\d+)\/?$/.exec(url.pathname);
-  if (url.protocol !== "https:" || !/^[a-f0-9]{16,64}$/.test(url.username) || !match) return null;
-  const base = new URL(`https://${url.host}`);
-  return { url: new URL(`${match[1]}/api/${match[2]}/envelope/`, base), publicKey: url.username };
+  if (base.protocol !== "https:" || base.username || base.password || base.search || base.hash) return null;
+  return { key: key.trim(), base };
 }

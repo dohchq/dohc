@@ -186,8 +186,8 @@ Verify the Linux update trust model separately; the Windows verifier does not co
 
 ## Configure usage and error reports
 
-Packaged builds send usage reports to PostHog and short error reports to
-Sentry when the build names those services. The
+Packaged builds send usage reports and short error reports to one PostHog
+project when the build names it. The
 [reports reference](../reference/usage-and-error-reports.md) lists what they
 hold for users. Development builds, test runs, isolated test launches, and dry
 runs send nothing.
@@ -199,20 +199,18 @@ the values.
 | --- | --- |
 | `DOHC_POSTHOG_KEY` | The PostHog project API key, which starts with `phc_`. |
 | `DOHC_POSTHOG_HOST` | `https://us.i.posthog.com`, `https://eu.i.posthog.com`, or your own HTTPS host. |
-| `DOHC_SENTRY_DSN` | The Sentry project DSN. |
 
-The workflow sets `DOHC_SENTRY_DIST` to `<platform>-<arch>` for each package.
-The release name is `dohc-desktop@<version>`. A missing or invalid value turns
-off that service only. `scripts/verification/build.mjs` includes these
+The workflow sets `DOHC_DESKTOP_DIST` to `<platform>-<arch>` for each package.
+Error reports carry it as `dist`. A missing or invalid key or host turns off
+both kinds of report. `scripts/verification/build.mjs` includes these
 variables in the desktop build fingerprint.
 
 Before the first release that reports:
 
 1. In PostHog, turn on **Discard client IP data** for the project.
-2. In PostHog, set a billing limit. The free tier covers 1 million events a month.
-3. In Sentry, turn on **Prevent storing of IP addresses** for the project.
-4. In Sentry, keep spike protection on and set a rate limit on the DSN key.
-   The Developer plan covers 5,000 errors a month; Team covers 50,000.
+2. In PostHog, set a billing limit for product analytics and for error
+   tracking. Check the current free allowance for each on PostHog's pricing
+   page.
 
 The app limits what it sends:
 
@@ -224,36 +222,175 @@ The app limits what it sends:
 | Repeats | Each action counts | Each distinct problem once per launch |
 | Prepared per launch | Same as sent | 100, repeats included. Each window hands main at most 25 distinct errors. |
 
-A request times out after 10 s and is never retried. The app honors
-`Retry-After` and `X-Sentry-Rate-Limits` for up to one hour, and drops reports
+A request times out after 10 s and is never retried. After a 429 response the
+app waits as long as `Retry-After` says, up to one hour, and drops reports
 until then. At quit, the app waits up to 3 s in total for a send under way and
 the reports behind it, alongside workspace shutdown, then drops the rest.
+
+Usage reports go to PostHog's batch endpoint from dohc's own code. Error
+reports go through `posthog-node`'s `captureExceptionImmediate`, loaded the
+first time an error report leaves. The SDK reads only the error dohc rebuilds
+from allowlisted values, and it opens no files.
 
 Usage events are `app_launched`, `workspace_created`, `workspace_opened`,
 `share_created`, `app_published`, and `chat_message_sent`. To add one, add it
 to `UsageEvent` and `USAGE_EVENTS` in `apps/desktop/src/telemetry/telemetry.ts`,
 then update the reports reference.
 
+PostHog groups an error report with frames in dohc's code by those frames,
+once source maps resolve them. A report without such a frame sets
+`$exception_fingerprint` from the failed part and the error chain, so problems
+with the same message stay apart.
+
+Each error report carries a new random distinct ID. PostHog's count of users
+affected by an issue therefore counts reports, not people or installations.
+An installation sends a problem at most once per launch, so a problem that
+recurs on one computer still adds a report on each launch.
+
+An error report sets `mechanism.handled` on its first exception to `false`
+when nothing caught the error in main or a window. It is `true` for an error
+a window's error boundary caught, and for engine and process failures that
+dohc handled.
+
 ### Upload source maps
 
 A production build writes hidden source maps beside its files. The installer
-leaves them out. When `DOHC_SENTRY_DSN` is set, add these so Sentry can show
+leaves them out. When `DOHC_POSTHOG_KEY` is set, add these so PostHog can show
 original source lines:
 
 | Name | Kind | Value |
 | --- | --- | --- |
-| `SENTRY_AUTH_TOKEN` | Environment secret | An organization token that can upload release files. |
-| `SENTRY_ORG` | Variable | The organization slug. |
-| `SENTRY_PROJECT` | Variable | The project slug. |
-| `SENTRY_URL` | Variable | Set only for self-hosted Sentry. |
+| `POSTHOG_CLI_API_KEY` | Environment secret | A personal API key with the `error tracking write` and `organization read` scopes. |
+| `POSTHOG_CLI_PROJECT_ID` | Variable | The PostHog project ID. |
+| `POSTHOG_CLI_HOST` | Variable | Set only for a host other than `https://us.posthog.com`, such as `https://eu.posthog.com`. |
 
 The **Upload source maps** step runs `scripts/upload-desktop-source-maps.mjs`
-for each package. The script runs `@sentry/cli` 3.8.0 to upload
-`apps/desktop/dist` with that package's release and dist, under the URL prefix
-`app:///dist`. Error reports name frames the same way. Without
-`DOHC_SENTRY_DSN`, the step uploads nothing. With the DSN but without
-`SENTRY_AUTH_TOKEN`, the step fails. To fix it, add the token or clear the DSN.
-A dry run skips the step.
+for each package, after the desktop build and before packaging. The script
+runs `posthog-cli sourcemap process` from `@posthog/cli` 0.18.10 on
+`apps/desktop/dist/main` and `apps/desktop/dist/renderer`. The CLI writes a
+chunk ID into each script, then uploads each source map under that ID with
+release name `dohc-desktop`, the package version, and the package's dist as
+the build. The script then fails if any script with a source map has no chunk
+ID. The package ships those modified files, and error reports carry each
+frame's chunk ID. No later step may rebuild `apps/desktop/dist`.
+
+Without `DOHC_POSTHOG_KEY`, the step uploads nothing. With the key but without
+`POSTHOG_CLI_API_KEY` or `POSTHOG_CLI_PROJECT_ID`, the step fails. To fix it,
+add the missing value or clear the key. A dry run skips the step.
+
+### Check a release against PostHog
+
+The tests prove what leaves the app, but not that PostHog accepts and
+resolves it. Run both checks below on Windows and on macOS for the first
+release that reports, and after a `posthog-node` or `@posthog/cli` update.
+
+#### Check source maps before the release
+
+The release workflow publishes as soon as its packages pass, so check a local
+package of the release commit first.
+`apps/desktop/scripts/check-error-symbolication.mjs` checks that PostHog
+resolves frames in the packaged main script and in the window's entry script.
+
+The script reads the package's `app.asar` and the `apps/desktop/dist` folder
+of the build that made it. The package leaves source maps out, so only that
+folder has them. The script stops when a script in the folder differs from the
+packaged one, or when its source map carries another chunk ID. It picks a
+position in each script that the source map ties to dohc's own source. It then
+builds one main error and one window error at those positions. dohc's own
+report code prepares and sends them: `createTelemetry`, the same allowlist,
+and `posthog-node`, built from the checkout. Both reports set `channel` and
+`dist` to `release-check`.
+
+The script makes these errors itself, so this check does not test the reports
+notice or the switches. The installed release check below tests them.
+
+1. Use a clean checkout of the release commit on a computer you control.
+2. In one shell, set `DOHC_POSTHOG_KEY` and `DOHC_POSTHOG_HOST` to the
+   release's PostHog project.
+3. In the same shell, set `POSTHOG_CLI_API_KEY` and `POSTHOG_CLI_PROJECT_ID`.
+   Set `POSTHOG_CLI_HOST` only for a host other than `https://us.posthog.com`.
+4. Set `DESKTOP_VERSION` to the release version followed by `-release-check`.
+   Set `DOHC_DESKTOP_DIST` to the package's dist, such as `win-x64`.
+5. Set `CSC_IDENTITY_AUTO_DISCOVERY` to `false`, so the package stays unsigned.
+6. From the repository root, build, upload, and package in this order:
+
+   ```sh
+   node scripts/update-desktop-package-version.mjs
+   pnpm build:desktop
+   node scripts/upload-desktop-source-maps.mjs
+   pnpm --filter @dohc/desktop run build:engine
+   pnpm --filter @dohc/desktop exec electron-builder --dir --publish never
+   ```
+
+7. Run the script without `--send`. It sends nothing:
+
+   ```sh
+   node apps/desktop/scripts/check-error-symbolication.mjs --app <app.asar> --dist apps/desktop/dist
+   ```
+
+   On Windows, `<app.asar>` is
+   `apps/desktop/release/win-unpacked/resources/app.asar`. On an Apple
+   silicon Mac, it is
+   `apps/desktop/release/mac-arm64/dohc.app/Contents/Resources/app.asar`.
+8. Confirm that the output shows `"passed": true`. Read each event's
+   `payload`, which is the report the script would send.
+9. Run the same command with `--send`. The script sends the two reports to
+   the project from step 2 and waits up to 3 s for answers.
+10. Confirm that the output shows `"passed": true`. Record each event's
+    `eventId`, `expected`, and `releaseId`.
+11. In PostHog, find each event by its `eventId`. Confirm that its top frame
+    shows the `expected` file and line, and that its `$release_id` equals
+    `releaseId`.
+
+If `"passed"` is `false`, each event's `problem` says what failed. Fix the
+cause and run the check again. Do not publish a release that reports until
+PostHog resolves both frames.
+
+#### Check the installed release
+
+Use a disposable OS account or virtual machine in which no other dohc runs.
+These steps stop one engine process: the one that this installation started.
+
+1. In the release run, confirm that **Upload source maps** passed.
+2. In PostHog, open the error tracking settings and find the symbol sets.
+   Confirm that the release's chunk IDs are there.
+3. Install the package, open a workspace, and close the reports notice. Keep
+   **Error reports** on.
+4. Find the engine process of this installation. On Windows, set `$install`
+   to the installation folder, then run:
+
+   ```powershell
+   $engine = @(Get-CimInstance Win32_Process -Filter "Name = 'dohc-workspace-engine.exe'" |
+     Where-Object ExecutablePath -eq "$install\resources\workspace-engine\dohc-workspace-engine.exe")
+   $engine | Select-Object ProcessId, ParentProcessId
+   Get-CimInstance Win32_Process -Filter "ProcessId = $($engine[0].ParentProcessId)" |
+     Select-Object ExecutablePath, CommandLine
+   Invoke-CimMethod -InputObject $engine[0] -MethodName GetOwner | Select-Object User
+   ```
+
+   Continue only if `$engine` holds one process, its owner is the disposable
+   account, and its parent is `$install\dohc.exe` with no `--type=` in its
+   command line. On macOS, run:
+
+   ```sh
+   main=$(pgrep -x -U "$(id -u)" dohc)
+   engine=$(pgrep -P "$main" -f /Contents/Resources/workspace-engine/dohc-workspace-engine)
+   ps -o user=,pid=,ppid=,command= -p "$main,$engine"
+   ```
+
+   Continue only if `main` and `engine` each hold one process ID, both belong
+   to your account, and both commands are in the installed `dohc.app`.
+5. Stop only that process. On Windows, run
+   `Stop-Process -Id $engine[0].ProcessId -Force`. On macOS, run
+   `kill -9 "$engine"`.
+6. In PostHog, confirm that an `EngineDaemonUnavailableError` issue arrives
+   with `process` set to `engine`, the release's `app_version` and `dist`, and
+   `$release_id`.
+7. Confirm that the event holds no file names, messages, or paths from your
+   computer, and that PostHog made no person for it.
+8. Turn **Error reports** off. dohc starts a new engine after step 5, so do
+   step 4 again to find its process. Do step 5 again, and confirm that PostHog
+   receives nothing.
 
 ## What the release workflow proves
 

@@ -55,7 +55,6 @@ describe("EngineHistoryView automation rows", () => {
         ]}
         hasMore={false}
         loadingMore={false}
-        protectedTruncated={false}
         onLoadMore={() => {}}
         onOpenMoment={() => {}}
       />,
@@ -85,7 +84,6 @@ describe("EngineHistoryView protected rows", () => {
         ]}
         hasMore={false}
         loadingMore={false}
-        protectedTruncated
         onLoadMore={() => {}}
         onOpenMoment={() => {}}
       />,
@@ -95,9 +93,7 @@ describe("EngineHistoryView protected rows", () => {
     // The protected row is still a normal, clickable timeline row.
     const rows = screen.getAllByTestId("engine-moment-open");
     expect(rows).toHaveLength(2);
-    expect(
-      screen.getAllByText("Some protected activity in this range is not shown."),
-    ).toHaveLength(1);
+    expect(screen.queryByText("Some protected activity in this range is not shown.")).toBeNull();
   });
 });
 

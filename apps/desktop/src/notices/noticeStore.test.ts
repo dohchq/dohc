@@ -1,3 +1,4 @@
+import { historyCursor } from "../testing/historyPageFixture";
 import { open, readdir, readFile, rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -1706,11 +1707,11 @@ describe("automation notices reach the people involved", () => {
     const history = (moments: VersionedTextMoment[]): AutomationsFileHistory => ({
       flush: async () => undefined,
       fileObjectIdForPath: async (path) => (path === PATH ? "object-1" : null),
-      listMoments: async ({ limit, beforeMomentOrder }) => {
-        const start = beforeMomentOrder ?? 0;
+      listMoments: async ({ limit, cursor }) => {
+        const start = cursor?.text?.momentOrder ?? 0;
         return {
           moments: moments.slice(start, start + limit).map((entry) => ({ id: entry.id, protected: false })),
-          nextBeforeMomentOrder: start + limit < moments.length ? start + limit : null,
+          nextCursor: start + limit < moments.length ? historyCursor(start + limit) : null,
         };
       },
       readMoment: async (id) => {

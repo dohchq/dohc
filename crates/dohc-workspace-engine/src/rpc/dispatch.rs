@@ -25,7 +25,8 @@ fn method_requires_initial_capture_ready(method: &str) -> bool {
         || (method.starts_with("secrets.") && method != "secrets.write")
         || matches!(
             method,
-            "capture.reconcile"
+            "files.resolve"
+                | "capture.reconcile"
                 | "capture.importRecovery"
                 | "versionedText.list"
                 | "versionedText.captureSources"
@@ -106,6 +107,9 @@ impl EngineService {
             && !matches!(
                 method,
                 "liveApplication.hosts"
+                    | "liveApplication.attachWorkspace"
+                    | "liveApplication.detachWorkspace"
+                    | "liveApplication.unloadDocument"
                     | "liveApplication.register"
                     | "liveApplication.bootstrap"
                     | "liveApplication.apply"
@@ -278,12 +282,26 @@ impl EngineService {
                     .await?
             }
             "liveApplication.hosts" => self.configured_live_hosts(&ctx, &request)?,
+            "liveApplication.attachWorkspace" => {
+                Box::pin(self.configured_attach_workspace(&ctx, request)).await?
+            }
+            "liveApplication.detachWorkspace" => {
+                Box::pin(self.configured_detach_workspace(&ctx, request)).await?
+            }
+            "liveApplication.unloadDocument" => {
+                Box::pin(self.live_application_unload(&ctx, request.workspace, request.params))
+                    .await?
+            }
             "liveApplication.register" => {
                 self.live_application_register(&ctx, request.workspace, request.params)
                     .await?
             }
             "engine.ping" => engine_ping(),
             "workspace.open" => Box::pin(self.workspace_open(&ctx, request.params)).await?,
+            "files.resolve" => {
+                self.files_resolve(&ctx, request.workspace, request.params)
+                    .await?
+            }
             "files.changesSince" => {
                 Box::pin(self.files_changes_since(&ctx, request.workspace, request.params, false))
                     .await?
@@ -988,15 +1006,32 @@ impl EngineService {
         let Some(handle) = handle else {
             return Ok(());
         };
-        let (projects_collections, read_only) = lock(&self.handles)
+        let (projects_collections, read_only, passive) = lock(&self.handles)
             .get(handle)
             .map(|open| {
                 (
                     open.projects_collections(),
                     open.mode == WorkspaceOpenMode::ReadOnly,
+                    open.mode == WorkspaceOpenMode::Passive,
                 )
             })
             .unwrap_or_default();
+        if passive
+            && !matches!(
+                method,
+                "workspace.close"
+                    | "sync.adoptJoinIdentity"
+                    | "sync.pull"
+                    | "sync.commitCursor"
+                    | "versionedText.read"
+                    | "versionedText.readBlob"
+            )
+        {
+            return Err(WireError::new(
+                ErrorCode::Forbidden,
+                "method is unavailable on a passive store",
+            ));
+        }
         if projects_collections {
             if method.starts_with("automations.") {
                 return Err(WireError::new(
@@ -1225,6 +1260,7 @@ mod tests {
             "versions.ensureMain"
         ));
         for method in [
+            "files.resolve",
             "versions.active",
             "versions.list",
             "versions.createNamed",
@@ -1454,6 +1490,7 @@ mod tests {
             "versionedText.compare",
             "versionedText.checkMove",
             "versionedText.delete",
+            "files.resolve",
             "versionedText.list",
             "versionedText.captureSources",
             "versionedText.merge",

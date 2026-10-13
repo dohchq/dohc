@@ -65,6 +65,8 @@ const PARTS = [
   "theme-picker",
   "zoom-stepper",
   "rails",
+  "composer-sending",
+  "about-conversation",
   "settings-sync",
 ];
 // A fixed instant for the page's clock. The capture pauses the clock an
@@ -294,6 +296,9 @@ test("@states-page @states-baselines every shared part matches its baseline in b
       await expect(field).toHaveAttribute("title", "Copied");
     }
     await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
+    // A send shows its ring only after a second on the timer the page started
+    // when it mounted, before the clock was faked. Three composers per theme.
+    await expect(page.locator('[data-part="composer-sending"] button[aria-busy="true"]')).toHaveCount(2 * 3);
 
     const cdp = await page.context().newCDPSession(page);
     await cdp.send("DOM.enable");

@@ -17,6 +17,9 @@ import {TokenBucketLimiter} from "@dohc/service-http";
 import type { StorageContext } from "./context";
 import type { AcceptAppCollectionInput } from "./appCollections";
 import { DiscussionActivityHub } from "../discussionActivity";
+import { createShareReadQueries } from "../shareReadQueries";
+import { ensureLiveLinkPublicPrincipal } from "./liveAuthorSnapshot";
+import { workspaceUsageBytes } from "./workspaces";
 
 const hash = (value:string|Uint8Array) => createHash("sha256").update(value).digest("hex");
 const limits = {maxFiles:10,maxMetadataBytes:16_384,maxBundleBytes:4096};
@@ -72,6 +75,75 @@ function fixture() {
   return {directory,path,owner,input,write,get storage(){return storage;},get raw(){return (storage as StorageContext).db;},restart(){storage.close();storage=openSyncRelayStorage(path);},accept(patch:Partial<AcceptAppCollectionInput>={},maxCreatesPerGrant=100){return storage.acceptAppCollection({...input,...patch},{maxCreatesPerGrant});}};
 }
 
+it.each([null, "Sam"])("snapshots the app link holder's name %j for authenticated readers only", displayName => {
+  const f = fixture();
+  if (displayName !== null) {
+    f.accept({idempotencyKey: "enroll"});
+    f.raw.prepare("UPDATE sync_relay_link_principals SET display_name=?").run(displayName);
+  }
+  const since = f.storage.fetchLogPage({workspaceId: "w", sinceRelaySeq: 0, limit: 10}).nextCursor;
+  const before = workspaceUsageBytes(f.storage as StorageContext, "w");
+  const receipt = f.accept();
+  const row = f.storage.fetchLogPage({workspaceId: "w", sinceRelaySeq: since, limit: 10}).rows[0]!;
+  const payload = JSON.parse(row.payloadJson);
+  const principalId = String(f.raw.prepare("SELECT principal_id FROM sync_relay_link_principals").get()!.principal_id);
+  const publicPrincipalId = (f.storage as StorageContext).tx(() => ensureLiveLinkPublicPrincipal(f.storage as StorageContext,
+    {principalKind: "link", principalId, grantId: "g", grantGeneration: 1}));
+  const authors = [{kind: "link", publicPrincipalId, label: displayName ?? "Anonymous"}];
+  expect(row.admittedAuthorSnapshot).toEqual(authors);
+  expect(payload.authors).toEqual([{kind: "public", principalId: publicPrincipalId, grantId: "g"}]);
+  const blob = f.storage.getBlob("w", payload.payloadAfterBlobSha256)!;
+  expect(parseCollectionRecordFields(Buffer.from(blob).toString())?.created_by).toBe(publicPrincipalId);
+  const durableCharges = Number(f.raw.prepare("SELECT storage_bytes FROM sync_relay_app_collection_receipts WHERE acceptance_id=?").get(receipt.acceptanceId)!.storage_bytes)
+    + (displayName === null ? Number(f.raw.prepare("SELECT storage_bytes FROM sync_relay_app_public_principals").get()!.storage_bytes)
+      + Number(f.raw.prepare("SELECT storage_bytes FROM sync_relay_link_principals").get()!.storage_bytes) : 0);
+  expect(workspaceUsageBytes(f.storage as StorageContext, "w") - before)
+    .toBe(durableCharges + blob.byteLength + Buffer.byteLength(row.payloadJson) + Buffer.byteLength(JSON.stringify(authors)));
+  const queries = createShareReadQueries(f.storage, 500);
+  const selector = {paths: ["responses"], versionId: null, access: "view" as const};
+  const authenticated = queries.filteredLogPage("w", "s", selector, since, 10, "authenticated");
+  expect(authenticated.ops).toHaveLength(1);
+  expect(authenticated.ops[0]!.payload).toMatchObject({authors});
+  const accountless = queries.filteredLogPage("w", "s", selector, since, 10, "accountless");
+  expect(accountless.ops).toHaveLength(1);
+  expect(accountless.ops[0]!.payload).not.toHaveProperty("authors");
+  expect(accountless.ops[0]).not.toHaveProperty("originId");
+  for (const page of [authenticated, accountless]) {
+    const serialized = JSON.stringify(page);
+    for (const secret of [principalId, f.input.capabilityHash, f.input.profileTokenHash, '"grantId"', '"grantGeneration"', '"principalId"']) {
+      expect(serialized).not.toContain(secret);
+    }
+  }
+  f.raw.prepare("UPDATE sync_relay_link_principals SET display_name='Changed'").run();
+  expect(f.accept()).toEqual(receipt);
+  expect(f.storage.fetchLogPage({workspaceId: "w", sinceRelaySeq: since, limit: 10}).rows[0]!.admittedAuthorSnapshot).toEqual(authors);
+});
+
+it("hides the app-create grant in authenticated share log origins", () => {
+  const f = fixture();
+  f.accept();
+  const queries = createShareReadQueries(f.storage, 500);
+  const selector = {paths: ["responses"], versionId: null, access: "view" as const};
+  const read = (shareId: string) => queries.filteredLogPage("w", shareId, selector, 1, 10, "authenticated").ops[0]!.originId;
+  expect(read("s")).not.toBe("relay:collection-create:g");
+  expect(read("s")).toBe(read("s"));
+  expect(read("s")).not.toBe(read("another-share"));
+});
+
+it("keeps private grant metadata out of app-created share blobs", () => {
+  const f = fixture();
+  f.accept();
+  const queries = createShareReadQueries(f.storage, 500);
+  const selector = {paths: ["responses"], versionId: null, access: "view" as const};
+  for (const audience of ["authenticated", "accountless"] as const) {
+    const page = queries.filteredLogPage("w", "s", selector, 1, 10, audience);
+    const payload = page.ops[0]!.payload as Record<string, unknown>;
+    const blob = queries.historicalSharedBlob("w", selector, String(payload.payloadAfterBlobSha256));
+    expect(blob).not.toBeNull();
+    expect(parseCollectionRecordFields(Buffer.from(blob!).toString())).not.toHaveProperty("grant_id");
+  }
+});
+
 it("names the sync service when collection approval needs a newer reader",()=>{
   const f=fixture();
   const newer="version: 2\n"+schemaText;
@@ -89,7 +161,8 @@ it("accepts one durable workspace moment and payload-bound receipt across retrie
   expect(row.originId).toBe("relay:collection-create:g");
   const payload=JSON.parse(row.payloadJson),blob=f.storage.getBlob("w",payload.payloadAfterBlobSha256)!;
   const record=parseCollectionRecordFields(Buffer.from(blob).toString("utf8"))!;
-  expect(record).toMatchObject({destination:"Tokyo",name:"Sam",created_at:20,grant_id:"g",acceptance_id:receipt.acceptanceId});
+  expect(record).toMatchObject({destination:"Tokyo",name:"Sam",created_at:20,acceptance_id:receipt.acceptanceId});
+  expect(record).not.toHaveProperty("grant_id");
   expect(record).not.toHaveProperty("idempotency_key");
   expect(record).not.toHaveProperty("id");expect(record.created_by).toMatch(/^public_/);
   expect(payload).toMatchObject({metadata:{origin:"sync"},authors:[{kind:"public",principalId:record.created_by,grantId:"g"}]});
@@ -571,4 +644,20 @@ it("rechecks owner authority after an approval upload yields",async()=>{
   await body.ready;f.raw.prepare("UPDATE sync_relay_workspaces SET owner_user_id='other' WHERE workspace_id='w'").run();
   body.send({expectedAuthorityRevision:2,capability:null});expect((await pending).status).toBe(404);
   expect(f.raw.prepare("SELECT authority_revision FROM sync_relay_app_publications").get()!.authority_revision).toBe(2);
+});
+
+it("operator takedown refuses Collection writes and receipt retries from an existing launch", () => {
+  const f = fixture();
+  f.accept();
+  const before = f.storage.maxOriginSeq("w", "relay:collection-create:g");
+  const disabled = f.storage.disableAppPublication({publicationId: f.owner.publicationId, reason: "Confirmed phishing", nowMs: 30});
+  expect(disabled.authorityRevision).toBe(3);
+  expect(() => f.accept()).toThrow(/not found/i);
+  expect(() => f.accept({idempotencyKey: "after-takedown"})).toThrow(/not found/i);
+  expect(() => f.accept({idempotencyKey: "guessed-revision", expectedAuthorityRevision: 3})).toThrow(/not found/i);
+  expect(() => f.storage.reactivateAppPublication({...f.owner, expectedAuthorityRevision: 3})).toThrow(/operator disabled/);
+  f.restart();
+  expect(() => f.accept({idempotencyKey: "after-restart"})).toThrow(/not found/i);
+  expect(f.storage.maxOriginSeq("w", "relay:collection-create:g")).toBe(before);
+  expect(f.raw.prepare("SELECT COUNT(*) n FROM sync_relay_app_collection_receipts").get()!.n).toBe(1);
 });
