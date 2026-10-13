@@ -67,6 +67,7 @@ const PARTS = [
   "rails",
   "composer-sending",
   "about-conversation",
+  "file-view-actions",
   "settings-sync",
 ];
 // A fixed instant for the page's clock. The capture pauses the clock an

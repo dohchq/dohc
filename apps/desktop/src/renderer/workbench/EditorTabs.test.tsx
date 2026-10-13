@@ -54,6 +54,33 @@ function renderTabs(activeTab: string) {
 
 describe("EditorTabs strip scrolling", () => {
   it.each([
+    [siteTabPath("apps/trip"), "apps%2Ftrip"],
+    [collectionTabPath("notes/旅"), "notes%2F%E6%97%85"],
+  ])("keeps the tab-strip title and tooltip for %s", (path, title) => {
+    render(
+      <EditorTabs
+        groupId="left"
+        groupNumber={1}
+        tabs={[{ path }]}
+        activeTab={path}
+        activeTabDirty={false}
+        recoveryPaths={new Set<string>()}
+        tabLabels={new Map([[path, "Discovered name"]])}
+        onActivate={noop}
+        onClose={noop}
+        onContextMenu={noop}
+        onMove={noop}
+        onMoveToGroup={noop}
+        onCreateGroupRight={noop}
+      />,
+    );
+    const tab = screen.getByTestId(editorTabTestId(path));
+    expect(tab.textContent).toBe(title);
+    expect(tab.getAttribute("title")).toBe(path);
+    expect(screen.getByRole("button", { name: "Close " + title })).toBeTruthy();
+  });
+
+  it.each([
     ["notes/旅.md", "tab-notes/旅.md"],
     ["notes/tab://example.md", "tab-notes/tab://example.md"],
     ["notes/dohc://example.md", "tab-notes/dohc://example.md"],
