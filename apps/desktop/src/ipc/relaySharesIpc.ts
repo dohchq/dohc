@@ -216,7 +216,7 @@ export function registerRelaySharesIpcHandlers<
       }]));
       for (const row of documents.values()) {
         const deferred = localStops.find(stop => stop.document.currentPath === row.path)?.deferred;
-        if (deferred) Object.assign(row, {deferredStop: deferred});
+        if (deferred) Object.assign(row, {deferredStop: deferred, canResume: true});
       }
       return OwnerLiveDocumentsResult.parse({documents: [...documents.values()], nextCursor: stopped.nextCursor});
     }, assertOriginalWorkspace);

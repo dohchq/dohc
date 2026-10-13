@@ -163,9 +163,9 @@ function canStop(row: LiveDocumentRow): boolean {
   return row.status !== "retired";
 }
 
-/** Resuming needs a document dohc can still open in this workspace. */
+/** A deferred Stop can need local cleanup after the relay resumes. */
 function canResume(row: LiveDocumentRow): boolean {
-  return (row.status === "retired" || row.status === "paused") && row.canResume && !row.reason;
+  return !!row.deferredStop || ((row.status === "retired" || row.status === "paused") && row.canResume && !row.reason);
 }
 
 function busyLabel(work: Work): string {
@@ -541,7 +541,8 @@ export function LiveDocumentsDialog({
                 ) : null}
                 {row.deferredStop ? (
                   <p className="m-0 basis-full text-[12px] text-muted">
-                    {row.deferredStop.unsentEdits===0 ? "Live editing stopped. Resume live editing to finish syncing. " : `Live editing stopped. ${row.deferredStop.unsentEdits} unsent ${row.deferredStop.unsentEdits===1 ? "edit remains" : "edits remain"} on this computer. Resume live editing to try sending ${row.deferredStop.unsentEdits===1 ? "it" : "them"}. `}
+                    {row.status==="ready" ? "Live editing resumed. " : "Live editing stopped. "}
+                    {row.deferredStop.unsentEdits===0 ? "Resume live editing to finish syncing. " : `${row.deferredStop.unsentEdits} unsent ${row.deferredStop.unsentEdits===1 ? "edit remains" : "edits remain"} on this computer. Resume live editing to try sending ${row.deferredStop.unsentEdits===1 ? "it" : "them"}. `}
                     {row.deferredStop.editable ? "You can keep editing." : "Editing is paused."}
                   </p>
                 ) : null}

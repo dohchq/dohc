@@ -3253,6 +3253,32 @@ async fn stop_defers_a_lost_accepted_receipt_without_double_history() {
         .await
         .unwrap()
         .unwrap();
+    // Resume replays the receipt before another Stop releases this draft.
+    let (outbox, digest): (String, String) = f
+        .store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT outbox_id,update_digest FROM owner_ydoc_outbox_entries WHERE pending=1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+        })
+        .unwrap();
+    actor
+        .owner_ydoc_outbox_acknowledge(
+            "workspace".into(),
+            outbox,
+            vec![dohc_engine_collab::OwnerDeliveryReceipt {
+                delivery_id: "remote-1".into(),
+                update_digest: digest,
+                journal_cursor: 1,
+                accepting_host_epoch: 1,
+            }],
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
     // The host's authenticated History boundary arrives before unbinding.
     let mut envelope=host.store.read_with(|conn| conn.query_row("SELECT payload_json,recorded_at_ms FROM replication_log WHERE op_kind='moment.append' AND json_extract(payload_json,'$.momentId')=?1",[&saved.moment_id],|r| Ok(dohc_engine_sync::ReplicationEnvelope {
         workspace_id:"workspace".into(),origin_id:"host".into(),origin_seq:0,relay_seq:Some(1),op_kind:"moment.append".into(),payload:serde_json::from_str(&r.get::<_,String>(0)?).unwrap(),recorded_at_ms:r.get(1)?,settlement_admission:Some(dohc_engine_sync::SettlementAdmission::Accepted{settlement_id:saved.settlement_id.clone()}),admitted_author_snapshot:Some(serde_json::json!([dohc_engine_collab::live_update_application::LiveAuthorEntry::from(declaration.clone())]))
@@ -3401,6 +3427,121 @@ async fn stop_waits_for_unapplied_owner_settlements() {
         Err(dohc_engine_collab::OwnerOutboxError::StopConflict)
     ));
     assert_eq!(release_snapshot(&f), before);
+    supervisor.close_all().unwrap();
+}
+
+#[tokio::test]
+async fn stop_defers_a_settlement_above_the_observed_cursor() {
+    let (mut f, supervisor, actor) = pending_release_fixture(1).await;
+    f.store.write_with(&NoFaults, |tx| {
+        tx.execute("INSERT INTO replication_log(workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms,imported) VALUES('workspace','held',0,'moment.append','{}',1,1)",[]).unwrap();
+        tx.execute("INSERT INTO owner_pending_settlements(workspace_id,origin_id,origin_seq,main_version_id,object_id,lineage_claim_id,relay_namespace,binding_json,terminal_cursor) VALUES('workspace','held',0,'main','object',?1,'relay',?2,2)",rusqlite::params![f.binding.lineage_claim_id,serde_json::to_string(&f.binding).unwrap()]).unwrap();
+        Ok::<_,dohc_engine_storage::StorageError>(())
+    }).unwrap();
+    let before = release_snapshot(&f);
+    let row = stop_action_at_cursor(&actor, &f, "release", 2)
+        .await
+        .unwrap()
+        .remove(0);
+    assert_eq!(row.deferred.unwrap().unsent_edits, 1);
+    assert!(!row.retirement_owed);
+    assert_eq!(release_snapshot(&f)[1..], before[1..]);
+    supervisor.close_all().unwrap();
+}
+
+#[tokio::test]
+async fn stop_defers_an_entry_contained_by_initial_sync_with_prior_deletion() {
+    let (f, supervisor, actor) = pending_release_fixture(1).await;
+    let entry = f
+        .store
+        .read_with(|conn| {
+            let digest: String = conn
+                .query_row(
+                    "SELECT update_digest FROM owner_ydoc_outbox_entries WHERE pending=1",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            dohc_engine_storage::get_binary_blob(conn, &digest).map(Option::unwrap)
+        })
+        .unwrap();
+    let cut = Ydoc::wire();
+    cut.apply(&f.bytes).unwrap();
+    let vector = cut.encode_state_vector();
+    // The earlier accepted deletion rides in the host cut, not in this entry.
+    cut.rewrite_content_to_markdown(ContentKind::Richdoc, "Accepted replacement\n")
+        .unwrap();
+    cut.apply(&entry).unwrap();
+    let update = cut.diff(&vector).unwrap();
+    assert_ne!(update, entry);
+    let head = dohc_engine_collab::read_marker(
+        &f.store,
+        &DocKey::new("workspace", "main", "object").unwrap(),
+    )
+    .unwrap()
+    .unwrap()
+    .head_update_seq;
+    actor
+        .owner_ydoc_apply_initial_sync(
+            "workspace".into(),
+            dohc_engine_collab::owner_outbox::accepted::OwnerAcceptedFrameInput {
+                binding: f.binding.clone(),
+                relay_database_namespace: "relay".into(),
+                expected_revision: 1,
+                expected_native_head_sequence: head,
+                previous_accepted_cursor: 0,
+                journal_cursor: 2,
+                update_bytes: update,
+            },
+            cut.encode_state_vector(),
+            20,
+            CancellationToken::new(),
+            Arc::new(()),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    f.store
+        .read_with(|conn| {
+            let exact: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM ydoc_updates WHERE update_blob_sha256=?1",
+                    [hex_sha256(&entry)],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(exact, 0, "the accepted cut has different wire bytes");
+            Ok::<_, rusqlite::Error>(())
+        })
+        .unwrap();
+    let before = release_snapshot(&f);
+    let row = stop_action_at_cursor(&actor, &f, "release", 2)
+        .await
+        .unwrap()
+        .remove(0);
+    assert_eq!(row.deferred.unwrap().unsent_edits, 1);
+    assert_eq!(
+        release_snapshot(&f)[1..],
+        before[1..],
+        "Stop must not append or credit contained content again"
+    );
+    let native = dohc_engine_collab::load_persisted(
+        &f.store,
+        &DocKey::new("workspace", "main", "object").unwrap(),
+    )
+    .unwrap()
+    .unwrap()
+    .doc;
+    assert_eq!(native.encode_full_state(), cut.encode_full_state());
+    assert_eq!(
+        native
+            .project(ContentKind::Richdoc)
+            .unwrap()
+            .content
+            .matches("Pending edit 0")
+            .count(),
+        1
+    );
     supervisor.close_all().unwrap();
 }
 

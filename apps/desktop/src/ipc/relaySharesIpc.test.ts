@@ -146,6 +146,23 @@ describe("named browser invitations", () => {
 });
 
 describe("owner live document enrollment", () => {
+  it("offers Resume after a half success and clears the deferred Stop on retry", async () => {
+    const h=harness();
+    const saved={state:"released",binding:null,document:{mainVersionId:"main",objectId:"object",currentPath:"live.md"},retirementOwed:false,relayDatabaseNamespace:"relay",deferred:{unsentEdits:1,editable:true}};
+    h.localStops.mockResolvedValue([saved]);
+    h.request.mockImplementation(async (_credentials,path,init) => init?.method==="POST" ? {ok:true,path:"live.md",status:"ready"} : path.includes("retired=1") ? {ok:true,documents:[],nextCursor:null} : {ok:true,documents:[{path:"live.md",status:"ready"}]});
+    h.ownerLiveStop.mockRejectedValueOnce(new Error("local clear failed"));
+    await expect(h.invoke(CHANNELS.resumeOwnerLiveDocument,{workspaceId,path:"live.md"})).rejects.toThrow("local clear failed");
+    const listed=await h.invoke(CHANNELS.listOwnerLiveDocuments,{workspaceId});
+    expect(listed).toMatchObject({documents:[{path:"live.md",status:"ready",canResume:true,deferredStop:saved.deferred}]});
+    h.ownerLiveStop.mockImplementationOnce(async (_workspace,action) => {
+      expect(action).toBe("clear");h.localStops.mockResolvedValue([]);return undefined;
+    });
+    await h.invoke(CHANNELS.resumeOwnerLiveDocument,{workspaceId,path:"live.md"});
+    expect(h.request.mock.calls.filter(([, ,init])=>init?.method==="POST")).toHaveLength(2);
+    expect(h.ownerLiveStop).toHaveBeenLastCalledWith(h.workspace,"clear","live.md");
+    expect(await h.invoke(CHANNELS.listOwnerLiveDocuments,{workspaceId})).toEqual({documents:[{path:"live.md",status:"ready",canResume:false}],nextCursor:null});
+  });
   it("keeps the local Stop until Resume's POST succeeds", async () => {
     const h=harness(),posting=deferred<unknown>();
     h.request.mockReturnValueOnce(posting.promise);

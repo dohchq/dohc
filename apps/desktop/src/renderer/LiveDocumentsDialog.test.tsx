@@ -66,6 +66,14 @@ afterEach(() => {
 });
 
 describe("LiveDocumentsDialog", () => {
+  it("offers Resume on a live row with a deferred Stop after local clear failed", async () => {
+    const h=harness();
+    h.load.mockResolvedValue(page([{...row("a.md"),status:"ready",canResume:true,deferredStop:{unsentEdits:1,editable:true}}]));
+    render(<LiveDocumentsDialog workspaceId="ws" {...h} />);
+    expect((await screen.findByTestId("live-document-row-a.md")).textContent).toContain("Live editing resumed.");
+    fireEvent.click(await screen.findByRole("button",{name:"Resume live editing for a.md"}));
+    await vi.waitFor(() => expect(h.resume).toHaveBeenCalledWith("ws","a.md"));
+  });
   it.each([0,1])("describes a deferred queue of %s edits", async unsentEdits => {
     const h=harness();
     h.load.mockResolvedValue(page([row("a.md",{status:"retired",canResume:true,deferredStop:{unsentEdits,editable:true}})]));

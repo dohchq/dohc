@@ -256,12 +256,6 @@ pub fn release_in_tx(
         })?
         .ok_or(OwnerOutboxError::StopConflict)?;
     require_not_host_in(tx, &key)?;
-    // Unbinding would strand even a ready settlement: its replay joins this
-    // binding. Let the delivery pass apply it before retrying Stop.
-    let held: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM owner_pending_settlements WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND lineage_claim_id=?4 AND relay_namespace=?5 AND applied=0)", params![binding.workspace_id,binding.main_version_id,binding.object_id,binding.lineage_claim_id,observed.relay_database_namespace], |r| r.get(0)).map_err(read_sql)?;
-    if held {
-        return Err(OwnerOutboxError::StopConflict);
-    }
     crate::live_update_application::require_restore_open(tx, &key)
         .map_err(|_| OwnerOutboxError::Corrupt)?;
     let outboxes = {
@@ -322,10 +316,8 @@ pub fn release_in_tx(
         save_in_tx(tx, &key, &stop, now_ms)?;
         return Ok(stop);
     }
-    tx.execute("DELETE FROM ydoc_owner_bindings WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND lineage_claim_id=?4",params![binding.workspace_id,binding.main_version_id,binding.object_id,binding.lineage_claim_id]).map_err(write_sql)?;
-    tx.execute("DELETE FROM ydoc_owner_applied_frames WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND lineage_claim_id=?4",params![binding.workspace_id,binding.main_version_id,binding.object_id,binding.lineage_claim_id]).map_err(write_sql)?;
     let mut credited = Vec::new();
-    let mut blobs = BTreeSet::from([observed.checkpoint_digest]);
+    let mut blobs = BTreeSet::from([observed.checkpoint_digest.clone()]);
     for id in &current {
         let entries = {
             let mut stmt=tx.prepare("SELECT sequence,update_digest,byte_length,native_source_json,agent_declaration_json,automation_declaration_json,person_edit FROM owner_ydoc_outbox_entries WHERE outbox_id=?1 AND pending=1 ORDER BY sequence").map_err(read_sql)?;
@@ -385,6 +377,25 @@ pub fn release_in_tx(
             credited.push(((actor, attribution), bytes));
         }
     }
+    if contains_pending_in(
+        tx,
+        &observed.checkpoint_digest,
+        credited.iter().map(|(_, bytes)| bytes.as_slice()),
+    )? {
+        stop.state = "released".into();
+        stop.retirement_owed = false;
+        stop.deferred = Some(deferred_in(tx, binding)?);
+        save_in_tx(tx, &key, &stop, now_ms)?;
+        return Ok(stop);
+    }
+    // Unbinding would strand even a ready settlement: its replay joins this
+    // binding. Let the delivery pass apply it before retrying Stop.
+    let held: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM owner_pending_settlements WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND lineage_claim_id=?4 AND relay_namespace=?5 AND applied=0)", params![binding.workspace_id,binding.main_version_id,binding.object_id,binding.lineage_claim_id,observed.relay_database_namespace], |r| r.get(0)).map_err(read_sql)?;
+    if held {
+        return Err(OwnerOutboxError::StopConflict);
+    }
+    tx.execute("DELETE FROM ydoc_owner_bindings WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND lineage_claim_id=?4",params![binding.workspace_id,binding.main_version_id,binding.object_id,binding.lineage_claim_id]).map_err(write_sql)?;
+    tx.execute("DELETE FROM ydoc_owner_applied_frames WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND lineage_claim_id=?4",params![binding.workspace_id,binding.main_version_id,binding.object_id,binding.lineage_claim_id]).map_err(write_sql)?;
     stop.record_facts = crate::durable::record_credited_updates_in_tx(
         tx,
         &key,
@@ -422,6 +433,50 @@ pub fn release_in_tx(
     stop.retirement_owed = false;
     save_in_tx(tx, &key, &stop, now_ms)?;
     Ok(stop)
+}
+
+// A host-cut diff can contain an entry without retaining its original bytes.
+// New struct clocks disprove containment; covered clocks still need the same
+// apply-and-compare proof as receipt acknowledgement, including delete sets.
+fn contains_pending_in<'a>(
+    conn: &Connection,
+    checkpoint_digest: &str,
+    updates: impl Iterator<Item = &'a [u8]>,
+) -> Result<bool, OwnerOutboxError> {
+    use yrs::updates::decoder::Decode;
+    let mut updates = updates.peekable();
+    if updates.peek().is_none() {
+        return Ok(false);
+    }
+    let checkpoint = bounded_blob(conn, checkpoint_digest)?;
+    let accepted = crate::Ydoc::wire();
+    accepted.apply(&checkpoint).map_err(collab)?;
+    if accepted.has_pending_dependencies() {
+        return Err(OwnerOutboxError::Corrupt);
+    }
+    let vector = accepted.state_vector();
+    let mut before = None;
+    for bytes in updates {
+        crate::replay_parity::prevalidate_update_bytes(bytes).map_err(collab)?;
+        let update = yrs::Update::decode_v1(bytes).map_err(|_| OwnerOutboxError::Corrupt)?;
+        if update
+            .insertions(true)
+            .iter()
+            .any(|(client, ranges)| ranges.iter().any(|range| range.end > vector.get(client)))
+        {
+            continue;
+        }
+        if before.is_none() {
+            before = Some(super::draft::bounded(&accepted)?);
+        }
+        let scratch = crate::Ydoc::wire();
+        scratch.apply(&checkpoint).map_err(collab)?;
+        scratch.apply(bytes).map_err(collab)?;
+        if !scratch.has_pending_dependencies() && Some(super::draft::bounded(&scratch)?) == before {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn deferred_in(
