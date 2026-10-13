@@ -170,14 +170,22 @@ impl Checkpoints {
     /// data or concurrent domain writer. Finish that entire finite schema tail.
     /// PASSIVE never waits for an outside reader, even during startup.
     pub(crate) fn checkpoint_fresh_schema(&self, conn: &Connection) {
+        #[cfg(feature = "fault-injection")]
+        let mut phase = crate::capture_phase::Phase::new("fresh_schema_PASSIVE", None, 0, true);
         self.checkpoint_tail(conn, 0, i64::MAX);
+        #[cfg(feature = "fault-injection")]
+        phase.finish("attempted");
     }
 
     /// Upgrades contain user data and may have readers pinning an old prefix.
     /// Attempt only the ordinary small-tail bound; larger backlogs stay on the
     /// background worker, and a pinned reader may leave even a small tail.
     pub(crate) fn checkpoint_migration_tail_if_small(&self, conn: &Connection) {
+        #[cfg(feature = "fault-injection")]
+        let mut phase = crate::capture_phase::Phase::new("migration_tail_PASSIVE", None, 0, true);
         self.checkpoint_tail(conn, 0, MAX_WRITER_BACKFILL_FRAMES);
+        #[cfg(feature = "fault-injection")]
+        phase.finish("attempted");
     }
 
     fn checkpoint_tail(&self, conn: &Connection, minimum_log_frames: i64, maximum_tail: i64) {
