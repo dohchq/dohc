@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
 import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -452,16 +452,17 @@ it("caches a replay that rebuilt the dataset so the next reopen does not repeat 
   const seed=new DatabaseSync(':memory:');
   seed.exec("CREATE TABLE items(id TEXT PRIMARY KEY NOT NULL,value TEXT NOT NULL UNIQUE);");
   try {
-    for(const [key,sql] of [
-      ['a',"INSERT INTO items VALUES('a','x')"],
-      ['b',"INSERT INTO items VALUES('b','y')"],
-      ['swap',"UPDATE items SET value='temp' WHERE id='a'; UPDATE items SET value='x' WHERE id='b'; UPDATE items SET value='y' WHERE id='a';"],
+    for(const [key,input,sql] of [
+      ['a',{id:'a',value:'x'},"INSERT INTO items VALUES('a','x')"],
+      ['b',{id:'b',value:'y'},"INSERT INTO items VALUES('b','y')"],
+      ['swap',{swap:true},"UPDATE items SET value='temp' WHERE id='a'; UPDATE items SET value='x' WHERE id='b'; UPDATE items SET value='y' WHERE id='a';"],
     ] as const) {
       const session=seed.createSession();
       let changeset:Uint8Array;
       try {seed.exec(sql);changeset=session.changeset();}finally{session.close();}
-      expect(f.journal.commitOperation({expected:f.journal.head(f.scope,f.authorize).cursor,proposalId:key,operation:'run',
-        callerKey:'owner',idempotencyKey:key,payloadSha256:hash(key),resultJson:'[]',changeset,
+      const resultJson=JSON.stringify(seed.prepare('SELECT * FROM items ORDER BY id').all());
+      expect(f.journal.commitOperation({expected:f.journal.head(f.scope,f.authorize).cursor,proposalId:randomUUID(),operation:'run',
+        callerKey:'owner',idempotencyKey:key,payloadSha256:hash(JSON.stringify(input)),resultJson,changeset,
         changesetSha256:createHash('sha256').update(changeset).digest('hex'),attachedFileIds:[],authorize:f.authorize}).kind).toBe('committed');
     }
   } finally {seed.close();}
@@ -471,20 +472,20 @@ it("caches a replay that rebuilt the dataset so the next reopen does not repeat 
   let elapsed=0;
   const time=vi.spyOn(performance,'now').mockImplementation(()=>elapsed);
   cleanups.push(async()=>{time.mockRestore();});
-  const opened:number[]=[],replayed:number[]=[],steps:string[]=[],batchInputs:number[][]=[],snapshots:number[]=[];
-  const batches=new Map<number,number[]>();
+  const opened:number[]=[],replyRevisions:number[]=[],steps:string[]=[],batchInputs:number[][]=[];
+  let batchId:number|undefined,snapshots=0;
   const launch=replayConstraintLauncher(launcher((command,controls)=>{
     if(command.command.kind==="open")opened.push(command.command.input.cursor.revision);
     if(command.command.kind==="applyBatch"){
-      const revisions=command.command.input.map((event:{revision:number})=>event.revision);
-      batchInputs.push(revisions);batches.set(command.id,revisions);
+      batchInputs.push(command.command.input.map((event:{revision:number})=>event.revision));
+      batchId=command.id;
     }
-    if(command.command.kind==='snapshot')snapshots.push(replayed.at(-1)!);
+    if(command.command.kind==='snapshot')snapshots++;
     controls.deliver();
   },message=>{
     const reply=message as {id:number;ok?:boolean;result?:{revision:number};progress?:unknown};
     if(typeof reply.progress==="string")steps.push(reply.progress);
-    if(reply.ok&&batches.has(reply.id)){replayed.push(...batches.get(reply.id)!.filter(revision=>revision<=reply.result!.revision));batches.delete(reply.id);elapsed+=replayCacheMs;}
+    if(reply.ok&&reply.id===batchId){replyRevisions.push(reply.result!.revision);batchId=undefined;elapsed+=replayCacheMs;}
   }),2);
   const read={scope:f.scope,tables:["items"],operation:"run",caller:{kind:"owner"},callerKey:"owner",input:{},idempotencyKey:"read",payloadSha256:hash("{}"),readOnly:true,authorize:f.authorize};
   const swapped=[{id:"a",value:"y"},{id:"b",value:"x"}];
@@ -497,8 +498,8 @@ it("caches a replay that rebuilt the dataset so the next reopen does not repeat 
     } finally {await supervisor.close();}
   }
   expect(steps).toContain("rebuilding the dataset from the replay copy");
-  expect(opened).toEqual([0,3]);expect(replayed).toEqual([1,2,3]);
-  expect(batchInputs).toEqual([[1,2,3]]);expect(snapshots).toEqual([3]);
+  expect(opened).toEqual([0,3]);expect(replyRevisions).toEqual([3]);
+  expect(batchInputs).toEqual([[1,2,3]]);expect(snapshots).toBe(1);
 });
 
 // A dataset with one committed event, reopened by a supervisor whose worker
