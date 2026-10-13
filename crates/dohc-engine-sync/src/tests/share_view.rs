@@ -6185,3 +6185,250 @@ fn received_chat_survives_source_rename_on_fresh_pull() {
         Ok::<_,rusqlite::Error>(())
     }).unwrap();
 }
+
+fn received_rename_retry_preserves_recreated_source(fallback: bool, quit: bool) {
+    for binary in [false, true] {
+        let (_scratch, database, mut engine) = open_store();
+        let token = format!("share-object:v1:{}", "e".repeat(64));
+        let new_token = format!("share-object:v1:{}", "f".repeat(64));
+        let body = b"source content".to_vec();
+        let recreated = b"a different file at the old path".to_vec();
+        let later = b"fetched after the rename and re-create".to_vec();
+        let sha = dohc_engine_storage::hex_sha256(&body);
+        let recreated_sha = dohc_engine_storage::hex_sha256(&recreated);
+        let later_sha = dohc_engine_storage::hex_sha256(&later);
+        let write = |seq, path, sha: &str, token: &str| {
+            let mut op = if binary {
+                share_view_binary_write_op(seq, path, sha)
+            } else {
+                share_view_write_op(seq, path, sha)
+            };
+            op.payload["objectId"] = json!(token);
+            op
+        };
+        let mut rename = write(1, "docs/b.md", &sha, &token);
+        rename.payload["operation"] = json!("rename");
+        rename.payload["payloadBeforePath"] = json!("docs/a.md");
+        let pages = [
+            (
+                0,
+                ShareViewResponse {
+                    ops: vec![write(0, "docs/a.md", &sha, &token)],
+                    next_cursor: 1,
+                    has_more: false,
+                },
+            ),
+            (
+                1,
+                ShareViewResponse {
+                    ops: vec![
+                        rename,
+                        write(2, "docs/a.md", &recreated_sha, &new_token),
+                        share_view_write_op(3, "docs/later.md", &later_sha),
+                    ],
+                    next_cursor: 4,
+                    has_more: false,
+                },
+            ),
+            (
+                4,
+                ShareViewResponse {
+                    ops: vec![],
+                    next_cursor: 4,
+                    has_more: false,
+                },
+            ),
+        ];
+        let blobs = [
+            (sha.clone(), body),
+            (recreated_sha.clone(), recreated),
+            (later_sha.clone(), later),
+        ];
+        let client = RelaySyncClient::new(
+            PagedShareRelay::new([], pages.clone()).with_view_blobs(blobs.clone()),
+        );
+        let grant = tracked_grant(["docs"]);
+        let initial = client
+            .pull_share_view(&mut engine, "ws", "share", &grant, &NoFaults)
+            .unwrap();
+        client
+            .commit_share_view_cursor(&mut engine, "ws", &initial.pending_cursor, &NoFaults)
+            .unwrap();
+        if fallback {
+            VersionedTextStore::new(&mut engine)
+                .write_text(
+                    &dohc_engine_domain::WriteText {
+                        workspace_id: "ws".into(),
+                        version_id: "main".into(),
+                        object_id: token.clone(),
+                        path: "docs/a.md".into(),
+                        text: "unsubmitted recipient edit".into(),
+                        moment_id: "local-edit".into(),
+                        request_id: None,
+                        metadata_origin: "user".into(),
+                        metadata_summary: None,
+                        metadata_correlation_id: None,
+                        author_json: None,
+                        now_ms: 10,
+                    },
+                    &NoFaults,
+                )
+                .unwrap();
+        }
+        if quit {
+            client
+                .pull_share_view(&mut engine, "ws", "share", &grant, &NoFaults)
+                .unwrap();
+            // Quit after replay, before publishing the returned cursor.
+            drop(engine);
+            engine = EngineStore::open(&database, 20).unwrap();
+        } else {
+            let failed = RelaySyncClient::new(
+                PagedShareRelay::new([], pages)
+                    .with_view_blobs(blobs)
+                    .with_view_blob_errors([(later_sha, RelayError::InvalidResponse)]),
+            );
+            assert_eq!(
+                failed
+                    .pull_share_view(&mut engine, "ws", "share", &grant, &NoFaults)
+                    .unwrap_err(),
+                RelayError::InvalidResponse,
+            );
+        }
+        let assert_heads = |engine: &EngineStore| {
+            engine.read_with(|conn| {
+                for (path, expected_token, expected_sha) in [
+                    ("docs/a.md", &new_token, &recreated_sha),
+                    ("docs/b.md", &token, &sha),
+                ] {
+                    let head: Option<(String, String)> = conn.query_row(
+                        "SELECT a.object_id,CASE s.content_kind WHEN 'binary' THEN s.binary_sha256 ELSE s.blob_sha256 END
+                         FROM path_aliases a JOIN snapshots s USING(workspace_id,version_id,object_id)
+                         WHERE a.workspace_id='ws' AND a.version_id='main' AND a.path=?1",
+                        [path], |row| Ok((row.get(0)?,row.get(1)?)),
+                    ).optional()?;
+                    assert_eq!(head, Some((expected_token.clone(), expected_sha.clone())), "{path}, binary={binary}, fallback={fallback}");
+                }
+                Ok::<_, rusqlite::Error>(())
+            }).unwrap();
+        };
+        assert_heads(&engine);
+        let retry = client
+            .pull_share_view(&mut engine, "ws", "share", &grant, &NoFaults)
+            .unwrap();
+        assert_heads(&engine);
+        assert_eq!(retry.applied, usize::from(!quit));
+        assert_eq!(retry.skipped, 0);
+        client
+            .commit_share_view_cursor(&mut engine, "ws", &retry.pending_cursor, &NoFaults)
+            .unwrap();
+        assert_eq!(
+            client
+                .pull_share_view(&mut engine, "ws", "share", &grant, &NoFaults)
+                .unwrap()
+                .applied,
+            0
+        );
+    }
+}
+
+#[test]
+fn received_native_rename_retry_keeps_recreated_source_after_blob_failure() {
+    received_rename_retry_preserves_recreated_source(false, false);
+}
+
+#[test]
+fn received_fallback_rename_retry_keeps_recreated_source_after_blob_failure() {
+    received_rename_retry_preserves_recreated_source(true, false);
+}
+
+#[test]
+fn received_native_rename_retry_keeps_recreated_source_after_quit_before_cursor_commit() {
+    received_rename_retry_preserves_recreated_source(false, true);
+}
+
+#[test]
+fn received_fallback_rename_retry_keeps_recreated_source_after_quit_before_cursor_commit() {
+    received_rename_retry_preserves_recreated_source(true, true);
+}
+
+#[test]
+fn received_fallback_rename_commits_write_and_delete_together() {
+    for point in [
+        FaultPoint::StorageBeforePersist,
+        FaultPoint::StorageAfterCommitBeforeAck,
+    ] {
+        let (_scratch, database, mut engine) = open_store();
+        let old_token = format!("share-object:v1:{}", "a".repeat(64));
+        let new_token = format!("share-object:v1:{}", "b".repeat(64));
+        let body = b"source content".to_vec();
+        let sha = dohc_engine_storage::hex_sha256(&body);
+        let mut initial = share_view_write_op(0, "docs/a.md", &sha);
+        initial.payload["objectId"] = json!(old_token);
+        let mut rename = share_view_write_op(1, "docs/b.md", &sha);
+        rename.payload["objectId"] = json!(new_token);
+        rename.payload["operation"] = json!("rename");
+        rename.payload["payloadBeforePath"] = json!("docs/a.md");
+        let client = RelaySyncClient::new(
+            PagedShareRelay::new(
+                [],
+                [
+                    (
+                        0,
+                        ShareViewResponse {
+                            ops: vec![initial],
+                            next_cursor: 1,
+                            has_more: false,
+                        },
+                    ),
+                    (
+                        1,
+                        ShareViewResponse {
+                            ops: vec![rename],
+                            next_cursor: 2,
+                            has_more: false,
+                        },
+                    ),
+                ],
+            )
+            .with_view_blobs([(sha, body)]),
+        );
+        let grant = tracked_grant(["docs"]);
+        let initial = client
+            .pull_share_view(&mut engine, "ws", "share", &grant, &NoFaults)
+            .unwrap();
+        client
+            .commit_share_view_cursor(&mut engine, "ws", &initial.pending_cursor, &NoFaults)
+            .unwrap();
+        let fault = ScriptedFaults::crash_at(point);
+        assert!(
+            client
+                .pull_share_view(&mut engine, "ws", "share", &grant, fault.as_ref())
+                .is_err()
+        );
+        drop(engine);
+        let mut engine = EngineStore::open(&database, 20).unwrap();
+        let committed = point == FaultPoint::StorageAfterCommitBeforeAck;
+        engine.read_with(|conn| {
+            for (path, expected) in [
+                ("docs/a.md", if committed { None } else { Some(&old_token) }),
+                ("docs/b.md", if committed { Some(&new_token) } else { None }),
+            ] {
+                let id: Option<String> = conn.query_row(
+                    "SELECT object_id FROM path_aliases WHERE workspace_id='ws' AND version_id='main' AND path=?1",
+                    [path], |row| row.get(0),
+                ).optional()?;
+                assert_eq!(id.as_ref(), expected, "fallback must publish both effects or neither");
+            }
+            Ok::<_, rusqlite::Error>(())
+        }).unwrap();
+        let retry = client
+            .pull_share_view(&mut engine, "ws", "share", &grant, &NoFaults)
+            .unwrap();
+        assert_eq!(retry.skipped, 0);
+        engine.read_with(|conn| {
+            assert_eq!(conn.query_row("SELECT COUNT(*) FROM path_aliases WHERE workspace_id='ws' AND path='docs/a.md'", [], |row| row.get::<_,i64>(0))?, 0);
+            Ok::<_,rusqlite::Error>(())
+        }).unwrap();
+    }
+}

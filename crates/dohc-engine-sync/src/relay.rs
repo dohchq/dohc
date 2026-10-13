@@ -4926,19 +4926,6 @@ fn replay_share_write<T: RelayTransport>(
                 content_kind,
             },
         );
-        if let Some(before) = rename_from {
-            replay_share_delete(
-                store,
-                workspace_id,
-                version_id,
-                share_id,
-                envelope,
-                before,
-                faults,
-                applied,
-                changed,
-            )?;
-        }
         return Ok(());
     }
     // After the request record, because that one is about this path and this
@@ -5065,6 +5052,22 @@ fn replay_share_write<T: RelayTransport>(
             Err(error) => return Err(replayed_domain(error)),
         }
     }
+    // The rename receipt covers the fallback write and source delete together.
+    let rename_delete = rename_from.map(|before| {
+        let key = replay_id(share_id, envelope, "delete", before);
+        DeleteTextFile {
+            workspace_id: workspace_id.to_owned(),
+            version_id: version_id.to_owned(),
+            path: before.to_owned(),
+            moment_id: format!("moment-share-{key}"),
+            request_id: Some(format!("share-view:{key}")),
+            metadata_origin: "sync".to_owned(),
+            metadata_summary: None,
+            metadata_correlation_id: None,
+            author_json: share_authors::received_authors(envelope),
+            now_ms: envelope.recorded_at_ms,
+        }
+    });
     let deduped = {
         if content_kind == "binary" {
             let input = WriteBinary {
@@ -5105,7 +5108,11 @@ fn replay_share_write<T: RelayTransport>(
                             &input.object_id,
                         )?;
                     }
-                    dohc_engine_domain::write_binary_in_tx(tx, &input)
+                    let result = dohc_engine_domain::write_binary_in_tx(tx, &input)?;
+                    if let Some(delete) = &rename_delete {
+                        delete_received_rename_source_in_tx(tx, delete)?;
+                    }
+                    Ok(result)
                 },
                 |result| result.deduped,
             )
@@ -5161,7 +5168,11 @@ fn replay_share_write<T: RelayTransport>(
                             &input.object_id,
                         )?;
                     }
-                    dohc_engine_domain::write_text_in_tx(tx, &input)
+                    let result = dohc_engine_domain::write_text_in_tx(tx, &input)?;
+                    if let Some(delete) = &rename_delete {
+                        delete_received_rename_source_in_tx(tx, delete)?;
+                    }
+                    Ok(result)
                 },
                 |result| result.deduped,
             )
@@ -5181,19 +5192,27 @@ fn replay_share_write<T: RelayTransport>(
         },
     );
     if let Some(before) = rename_from {
-        replay_share_delete(
-            store,
-            workspace_id,
-            version_id,
-            share_id,
-            envelope,
-            before,
-            faults,
-            applied,
-            changed,
-        )?;
+        changed.insert(
+            before.to_owned(),
+            ShareViewChangedPath {
+                path: before.to_owned(),
+                operation: "delete",
+                content_kind,
+            },
+        );
     }
     Ok(())
+}
+
+// Rebinding can vacate the source before deletion; the rename receipt still covers it.
+fn delete_received_rename_source_in_tx(
+    tx: &Transaction<'_>,
+    input: &DeleteTextFile,
+) -> Result<(), DomainError> {
+    match dohc_engine_domain::delete_text_in_tx(tx, input) {
+        Ok(_) | Err(DomainError::FileNotFound) => Ok(()),
+        Err(error) => Err(error),
+    }
 }
 
 pub(crate) fn received_object_token(id: &str) -> bool {
