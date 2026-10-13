@@ -207,8 +207,11 @@ impl HttpRelayTransport {
     ) -> Result<Self, RelayError> {
         let base_url = base_url.into().trim_end_matches('/').to_owned();
         let token = token.into();
-        if token.is_empty() || !base_url_is_allowed(&base_url, allow_insecure_loopback) {
+        if token.is_empty() {
             return Err(RelayError::InvalidResponse);
+        }
+        if !base_url_is_allowed(&base_url, allow_insecure_loopback) {
+            return Err(RelayError::HttpsRequired);
         }
         Ok(Self {
             base_url,
@@ -2283,12 +2286,19 @@ mod tests {
 
     #[test]
     fn plaintext_bearer_transport_requires_the_debug_loopback_opt_in() {
-        assert!(
-            HttpRelayTransport::new("http://127.0.0.1:1", "token").is_err(),
+        assert_eq!(
+            HttpRelayTransport::new("http://127.0.0.1:1", "token").err(),
+            Some(RelayError::HttpsRequired),
             "accepting `http://` in the normal constructor makes the first two assertions expose a bearer token over plaintext."
         );
-        assert!(HttpRelayTransport::new("http://localhost:1", "token").is_err());
-        assert!(HttpRelayTransport::new("http://example.com", "token").is_err());
+        assert_eq!(
+            HttpRelayTransport::new("http://localhost:1", "token").err(),
+            Some(RelayError::HttpsRequired)
+        );
+        assert_eq!(
+            HttpRelayTransport::new("http://example.com", "token").err(),
+            Some(RelayError::HttpsRequired)
+        );
         assert!(HttpRelayTransport::new("https://example.com", "token").is_ok());
 
         #[cfg(debug_assertions)]

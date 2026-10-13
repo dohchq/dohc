@@ -31,23 +31,16 @@ type Phase =
   // next to the form that restarts it.
   | { kind: "refused"; reason: string };
 
-// canonicalCloudOrigin takes https anywhere but http only on loopback, so say
-// which of those two rules the address missed.
-const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]"]);
-
 function checkServerAddress(
   value: string,
 ): { origin: string } | { problem: string } {
   const typed = value.trim();
   if (!typed) return { problem: "Enter the address of your server." };
-  const origin = canonicalCloudOrigin(typed);
+  const origin = canonicalCloudOrigin(typed, bridge().insecureLoopbackServersForTests);
   if (origin) return { origin };
   try {
-    const url = new URL(typed);
-    if (url.protocol === "http:" && !LOOPBACK_HOSTS.has(url.hostname)) {
-      return {
-        problem: "Enter an https address. dohc allows http only for localhost.",
-      };
+    if (new URL(typed).protocol === "http:") {
+      return { problem: "Enter an https address. dohc connects to servers only over https." };
     }
   } catch {
     // Not a URL at all — the example address is the useful correction.

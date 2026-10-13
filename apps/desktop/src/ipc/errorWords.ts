@@ -59,6 +59,7 @@ const ENGINE_CODE_WORDS = {
   INVALID_CHANNEL: "This channel cannot be shared.",
   RELAY_METHOD_NOT_ALLOWED: "The server does not support this.",
   RELAY_INVALID_RESPONSE: UNREADABLE_ANSWER,
+  RELAY_HTTPS_REQUIRED: "Your server's address does not use https. Disconnect, then connect your server again with its https address.",
   INTERNAL: null,
 } as const satisfies Record<DaemonErrorCode, Words>;
 

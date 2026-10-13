@@ -79,7 +79,7 @@ describe("cloud device-flow login", () => {
     try {
       const { impl, calls } = fakeFetch({});
       const login = createCloudLogin({ store: memoryStore(), fetch: impl });
-      await expect(login.start("")).rejects.toThrow("Enter an HTTPS server address");
+      await expect(login.start("")).rejects.toThrow("Enter the server's https address");
       expect(calls).toEqual([]);
     } finally {
       vi.unstubAllEnvs();
@@ -141,10 +141,21 @@ describe("cloud device-flow login", () => {
   it("rejects an empty or invalid server before making a request", async () => {
     const { impl, calls } = fakeFetch({});
     const login = createCloudLogin({ store: memoryStore(), fetch: impl });
-    for (const address of ["", "https://cloud.test/api", "http://cloud.test"]) {
-      await expect(login.start(address)).rejects.toThrow("Enter an HTTPS server address");
+    for (const address of ["", "https://cloud.test/api", "http://cloud.test", "http://localhost:1786"]) {
+      await expect(login.start(address)).rejects.toThrow("Enter the server's https address");
     }
     expect(calls).toEqual([]);
+  });
+
+  it("signs in to a plain http server on this machine only under the e2e switch", async () => {
+    const local = "http://127.0.0.1:1786";
+    const fetcher = (async (url: string | URL | Request) => String(url).endsWith("/.well-known/dohc-server")
+      ? Response.json({ version: 1, authUrl: local, relayUrl: local, shareUrl: local })
+      : Response.json({ ...DEVICE, verification_uri: `${local}/device`, verification_uri_complete: `${local}/device?user_code=ABCD1234` })) as typeof fetch;
+    await expect(createCloudLogin({ store: memoryStore(), fetch: fetcher }).start(local))
+      .rejects.toThrow("Enter the server's https address");
+    await expect(createCloudLogin({ store: memoryStore(), fetch: fetcher, allowInsecureLoopbackForTests: true }).start(local))
+      .resolves.toMatchObject({ userCode: DEVICE.user_code });
   });
 
   it("discovers the relay from the server before sign-in", async () => {

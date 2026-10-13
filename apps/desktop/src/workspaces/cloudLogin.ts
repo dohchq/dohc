@@ -41,6 +41,8 @@ export interface CloudLoginStore {
 export interface CloudLoginOptions {
   store: CloudLoginStore;
   fetch?: typeof fetch;
+  // Accept plain http servers on this machine, under the e2e switch only.
+  allowInsecureLoopbackForTests?: boolean;
 }
 
 export interface CloudLogin {
@@ -185,6 +187,7 @@ type CloudLoginPollResult = {
 
 export function createCloudLogin(options: CloudLoginOptions): CloudLogin {
   const fetchImpl = options.fetch ?? fetch;
+  const insecureLoopback = options.allowInsecureLoopbackForTests === true;
   let pending: PendingLogin | null = null;
   let attemptEpoch = 0;
   let storeMutation: Promise<void> = Promise.resolve();
@@ -432,7 +435,7 @@ export function createCloudLogin(options: CloudLoginOptions): CloudLogin {
         pending = null;
         return attemptEpoch;
       });
-      const descriptor = await discoverServer(serverUrl, fetchImpl);
+      const descriptor = await discoverServer(serverUrl, fetchImpl, insecureLoopback);
       if (attemptEpoch !== epoch) throw new Error("Server sign-in was cancelled.");
       const response = await postJson(`${descriptor.authUrl}/api/auth/device/code`, {
         client_id: CLIENT_ID,
@@ -451,7 +454,7 @@ export function createCloudLogin(options: CloudLoginOptions): CloudLogin {
       let verificationUri: URL;
       try {
         verificationUri = new URL(data.verification_uri_complete ?? data.verification_uri);
-        if (canonicalCloudOrigin(verificationUri.origin) !== descriptor.authUrl ||
+        if (canonicalCloudOrigin(verificationUri.origin, insecureLoopback) !== descriptor.authUrl ||
             verificationUri.username || verificationUri.password || verificationUri.hash ||
             typeof data.device_code !== "string" || !data.device_code || data.device_code.length > 2048 ||
             typeof data.user_code !== "string" || !data.user_code || data.user_code.length > 128 ||
