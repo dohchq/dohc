@@ -22,6 +22,7 @@ import {createAccountlessPathProjection} from "./accountlessPathProjection";
 import {linkRefusal} from "./linkRefusal";
 import { accountDisplayName } from "./discussionRoutes";
 import type { TrustedLiveAccount } from "./storage/liveAuthorSnapshot";
+import { liveEditors } from "./liveEditors.js";
 
 export interface NamedLiveRouteLimits {
   readonly maxConnections: number;
@@ -99,7 +100,7 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions) {
   const server = new WebSocketServer(wsOptions);
   const connections = new Set<() => void>(), admission = options.admission ?? createLiveConnectionAdmission();
   const shutdown = new AbortController();
-  const storage = options.storage;
+  const storage = options.storage, editors = liveEditors(storage);
   const captureNative = options.captureNative.bind(options), validate = options.validate;
   const accountSnapshot = async (accountId: string): Promise<TrustedLiveAccount> => ({accountId,
     name: await accountDisplayName(options.lookupUserDisplayName,accountId) ?? "Unnamed"});
@@ -202,13 +203,13 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions) {
     const lifetime = new AbortController(), signal = AbortSignal.any([lifetime.signal, storage.unavailable, shutdown.signal]);
     let ws: WebSocket | undefined, host: NamedFrameHostSession | undefined, session: ReturnType<typeof createNamedLiveFrameSession> | undefined;
     let membership: LiveMembershipSession | undefined;
-    let done = false, opening = true, releaseAuthority: (() => void) | undefined;
+    let done = false, opening = true, releaseAuthority: (() => void) | undefined, releaseEditor: (() => void) | undefined;
     let timer = setTimeout(stop, limits.upgradeTimeoutMs);
     async function release() {
       if (opening || !done) return;
       await session?.settled();
       if (!connections.delete(stop)) return;
-      releaseAuthority?.(); releaseConnection!();
+      releaseEditor?.(); releaseAuthority?.(); releaseConnection!();
     }
     function stop() {
       if (done) return;
@@ -243,6 +244,8 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions) {
           [JSON.stringify(["owner", actor.userId]), limits.maxConnectionsPerPrincipal],
           [JSON.stringify(["owner-share", document.workspaceId, shareId]), limits.maxConnectionsPerGrant],
         ]);
+        // Counted before capture, so the host cannot unload the document while this connection opens.
+        releaseEditor = editors.acquire(document);
         const native = await captureNative(current.binding, signal); signal.throwIfAborted(); check();
         if (!isDeepStrictEqual({...native.binding, selectorPaths: current.binding.selectorPaths}, current.binding)) throw new Error("Native owner target changed.");
         const refreshed = storage.resolveCurrentLiveDocumentBinding({document, actor: {kind: "owner", userId: actor.userId, shareId}});
@@ -264,6 +267,7 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions) {
         if (!ticket || ticket.audience !== origin || ticket.authority.principalKind !== context.kind ||
           (context.kind === "named" && ticket.authority.principalId !== context.userId) ||
           ticket.authority.grantId !== context.grantId || ticket.binding.workspaceId !== context.workspaceId) { stop(); return; }
+        releaseEditor = editors.acquire(ticket.binding);
         const native = await captureNative(ticket.binding, signal); signal.throwIfAborted(); check();
         const trustedAccount = context.kind === "named" ? await accountSnapshot(context.userId) : undefined;
         signal.throwIfAborted(); check();

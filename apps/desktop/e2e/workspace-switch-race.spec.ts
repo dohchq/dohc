@@ -90,6 +90,7 @@ test("switching A->B with A's heavy panels open shows only B's history and chats
         });
         for (let index = 0; index < CHAT_MESSAGES; index += 1) {
           await chats.sendMessage({
+            authorActorKey: null,
             workspaceId: WORKSPACE_A_ID,
             threadId: thread.id,
             author:

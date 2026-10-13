@@ -30,6 +30,17 @@ const validMoment = {
 };
 
 describe("versioned result decoder rejection", () => {
+  it("preserves parked rollback placement as a distinct outcome", () => {
+    const result = {
+      rolledBack: true,
+      deduped: false,
+      materializeEnqueued: true,
+      materialized: false,
+      materializeOutcome: "parked",
+    };
+    expect(decodeVersionedResult(VERSIONED_METHOD.textRollback, result)).toEqual(result);
+  });
+
   it.each([
     { kind: "agent", agentId: "agent" },
     { kind: "automation", automationId: "collection:tasks#stamp", depth: 4 },

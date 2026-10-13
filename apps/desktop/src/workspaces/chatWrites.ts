@@ -1,5 +1,6 @@
 import { SharedFileReadOnlyError } from "@dohc/workspace-contracts/relay";
 import type { ChatThreadLane, LinkedChatStore } from "@dohc/workspace-contracts/engine";
+import { createActorIssuer, deriveLocalActor, serializeActorKey } from "@dohc/workspace-contracts/actor-identity";
 import type { CloudCredentials } from "./cloudCredentialStore";
 import type { RegistryEntry } from "./registryStore";
 import { normalizeChatMessageBody } from "@dohc/workspace-contracts/chat-message-body";
@@ -13,8 +14,9 @@ import {
   type ChatRelayIdentityTarget,
 } from "./chatRelayIdentity";
 
-// The one main-process path for chat writes, whoever makes them. The renderer
-// always writes as the local person. The CLI, and MCP through it, names its
+// Admits renderer, CLI, and automation chat writes; DM setup derives its key
+// the same way, from its captured session. The renderer always writes as the
+// local person. The CLI, and MCP through it, names its
 // actor, and its messages carry origin "cli" so no device dispatches an agent
 // on them. The automation executor writes as an automation that ran for the
 // local person, naming the automation and its chain depth. Identity is never
@@ -49,6 +51,8 @@ interface Admission {
   channelWireId: string | null | undefined;
   generation: number;
   authorUserId: string | undefined;
+  actorCredentials: Pick<CloudCredentials, "serverUrl" | "userId"> | null;
+  installationId: string;
 }
 
 const SESSION_CHANGED = "Your server session changed. Try again.";
@@ -156,7 +160,12 @@ export function createChatWrites(dependencies: {
     const channelWireId = hasJoinedChannels(place.workspaceId)
       ? await lookUpWireId(place, target)
       : undefined;
-    return { target, channelWireId, generation, authorUserId: check(place, channelWireId, generation) };
+    const authorUserId = check(place, channelWireId, generation);
+    const credentials = currentCredentials();
+    const actorCredentials = credentials === null ? null : {
+      serverUrl: credentials.serverUrl, userId: credentials.userId,
+    };
+    return { target, channelWireId, generation, authorUserId, actorCredentials, installationId: localInstallationId() };
   }
 
   // The final check and the store call run in one synchronous block, so no
@@ -224,7 +233,15 @@ export function createChatWrites(dependencies: {
     }
     const actor = await actorFor(input.writer);
     const attachments = await input.resolveAttachments();
+    const authorActorKey = deriveChatActorKey({
+      credentials: admission.actorCredentials,
+      installationId: admission.installationId,
+      workspaceId: place.workspaceId,
+      writer: input.writer,
+      displayName: actor.author.displayName,
+    });
     return { admission, fields: {
+      authorActorKey,
       ...actor,
       ...(input.messageId ? { messageId: input.messageId } : {}),
       ...(input.idempotencyKey ? { idempotencyKey: input.idempotencyKey } : {}),
@@ -415,6 +432,37 @@ export function createChatWrites(dependencies: {
   }
 
   return { createFileThread, sendMessage, startThread, setReaction, resolveDecision };
+}
+
+// Use captured admission credentials, including for a DM's opening message.
+export function deriveChatActorKey(input: {
+  credentials: Pick<CloudCredentials, "serverUrl" | "userId"> | null;
+  installationId: string;
+  workspaceId: string;
+  writer: ChatWriter;
+  displayName: string;
+}): string | null {
+  try {
+    return serializeActorKey(deriveLocalActor({
+      identity: {
+        installationId: input.installationId,
+        account: input.credentials === null ? null : {
+          issuer: createActorIssuer(input.credentials.serverUrl), userId: input.credentials.userId,
+        },
+      },
+      workspaceId: input.workspaceId,
+      author: input.writer.via === "automation"
+        ? { kind: "automation", automationId: input.writer.automationId }
+        : input.writer.via === "cli" && input.writer.actor === "agent"
+          ? { kind: "agent", claimedName: input.writer.agentName }
+          : { kind: "human" },
+      displayName: input.displayName,
+      origin: input.writer.via,
+    }).key);
+  } catch {
+    // A damaged signed-in issuer supplies no installation evidence.
+    return null;
+  }
 }
 
 export type ChatWrites = ReturnType<typeof createChatWrites>;

@@ -438,3 +438,24 @@ it("never returns a newly created credential after its grant rotates",async()=>{
   expect(result).toMatchObject({kind:"published"});
   expect(result).not.toHaveProperty("url");
 });
+
+it("refuses owner reactivation review before loading an operator-disabled manifest", async () => {
+  const h = harness();
+  h.relay.mockResolvedValueOnce({publicationId: "a".repeat(64), active: false, authorityRevision: 2,
+    owner: {workspaceId: "w", ownerUserId: "owner", generation: 7},
+    operatorTakedown: {actor: "operator", disabledAtMs: 30, reason: "Confirmed phishing"}});
+  await expect(h.invoke({action: "reviewReactivation", workspaceId: "w", publicationId: "a".repeat(64)})).rejects.toThrow("The server operator disabled this publication. Contact the server operator.");
+  expect(h.compile).not.toHaveBeenCalled();
+  expect(h.relay).toHaveBeenCalledTimes(1);
+});
+
+it("shows the operator message when a publish retry returns a taken-down publication", async () => {
+  const h = harness(), prepared = await h.prepare(), original = h.relay.getMockImplementation()!;
+  h.relay.mockImplementation(async (...args) => {
+    const result = await original(...args);
+    if (!args[1].endsWith("/app-publications")) return result;
+    return {...result as Record<string, unknown>, active: false, operatorTakedown: {actor: "operator", disabledAtMs: 30, reason: "Confirmed phishing"}};
+  });
+  await expect(h.approve(prepared)).rejects.toThrow("The server operator disabled this publication. Contact the server operator.");
+  expect(h.relay.mock.calls.some(call => call[1].endsWith("/reactivate"))).toBe(false);
+});

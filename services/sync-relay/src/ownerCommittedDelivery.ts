@@ -50,6 +50,11 @@ export class OwnerCommittedDelivery {
     return saved !== undefined && this.#seedApplied.get(key) === saved.adoptionId;
   }
   #forget(key: string) { this.#adopted.delete(key); this.#seedApplied.delete(key); }
+  /** Ends the document's registration after the host unloaded it. */
+  release(document: LiveDocumentKey) {
+    const parsed = parseLiveDocumentKey(document);
+    this.#registrations.invalidate(parsed.objectId); this.#forget(JSON.stringify(parsed));
+  }
   get workspace() { return this.connection.workspace; }
   async #run(value: LiveDocumentKey,settle: false,signal?: AbortSignal): Promise<OwnerDeliveryOutcome>;
   async #run(value: LiveDocumentKey,settle: true,signal?: AbortSignal): Promise<CommittedSettlement>;

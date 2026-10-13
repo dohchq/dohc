@@ -144,6 +144,9 @@ export const ERROR_WORDS: Readonly<Record<string, Readonly<Record<string, Words>
     EPERM: "dohc does not have permission to use this file or folder.",
     ENOENT: "The file or folder is not there anymore.",
     EBUSY: "Another program is using this file or folder.",
+    // Import to SQLite never replaces a file. The caller's sentence names
+    // the database's path.
+    "Database already exists": "That file already exists. Rename or move it, then try again.",
   },
   TypeError: { "*": null },
   RangeError: { "*": null },
