@@ -34,7 +34,6 @@
   "vars": {
     "SLEEP_AFTER": "10m",
     "CELL_SHAPE": "single",
-    // Set after the first deploy prints the workers.dev URL.
-    "DOHC_PUBLIC_ORIGIN": "https://dohc-cloudflare-trial.SUBDOMAIN.workers.dev"
+    "DOHC_PUBLIC_ORIGIN": "https://dohc-cloudflare-trial.dohc.workers.dev"
   }
 }

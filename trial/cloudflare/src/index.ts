@@ -104,7 +104,7 @@ export class WorkspaceCell extends TrialCell {
 }
 
 const state = async (request: Request, env: Env, ctx: { containerId: string; className: string }) => {
-  const namespace = ctx.className === "WorkspaceCell" ? env.WORKSPACE : env.CELL;
+  const namespace = (ctx.className === "WorkspaceCell" ? env.WORKSPACE : env.CELL).jurisdiction("eu");
   const cell = namespace.get(namespace.idFromString(ctx.containerId));
   const [, kind, generation, index] = new URL(request.url).pathname.split("/");
   if (kind === "generation") return Response.json(await cell.savedGeneration());
@@ -211,11 +211,13 @@ export default {
     const allowed = open(url.pathname) ||
       (await matches(request.headers.get(HEADER), env.TRIAL_KEY)) || (await matches(cookie(request, COOKIE), env.TRIAL_KEY));
     if (!allowed) return new Response("This trial server needs its key.", { status: 403 });
-    const home = getContainer(env.CELL, "cell-1");
+    // Durable Objects default to the first caller's region; pin them next to their EU containers.
+    const cells = env.CELL.jurisdiction("eu"), workspaces = env.WORKSPACE.jurisdiction("eu");
+    const home = getContainer(cells, "cell-1");
     // Trial controls talk to a Durable Object without waking its container.
     const control = /^\/__trial\/control\/(stop|kill|state)(?:\/([0-9a-f-]{36}))?$/.exec(url.pathname);
     if (control && request.method === "POST") {
-      const target = control[2] ? getContainer(env.WORKSPACE, control[2]) : home;
+      const target = control[2] ? getContainer(workspaces, control[2]) : home;
       return Response.json(await target.trialControl(control[1]!));
     }
 
@@ -230,7 +232,7 @@ export default {
     const forwarded = new Request(request, body === undefined ? { headers } : { headers, body });
     const workspaceId = await workspaceOf(request, url, body, home);
     if (!workspaceId) return home.fetch(forwarded);
-    const response = await getContainer(env.WORKSPACE, workspaceId.toLowerCase()).fetch(forwarded);
+    const response = await getContainer(workspaces, workspaceId.toLowerCase()).fetch(forwarded);
     await learn(url, request, response, workspaceId.toLowerCase(), home);
     return response;
   },

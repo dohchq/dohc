@@ -8,10 +8,11 @@ if (!label || !output) throw new Error('Usage: cf-snapshot.mjs <label> <output.j
 const response = await fetch(`${process.env.DOHC_ORIGIN}/__trial/stats`, { headers: { 'x-dohc-trial-key': process.env.DOHC_TRIAL_KEY } });
 if (!response.ok) throw new Error(`Stats failed with ${response.status}.`);
 const stats = await response.json();
-const counter = (lines, name) => Number(lines.find(line => line.startsWith(`${name} `))?.split(' ')[1]);
-const cell = { name: 'cell', cpuSeconds: +(counter(stats.cgroup.cpuStat, 'usage_usec') / 1e6).toFixed(2),
-  memoryMiB: +(Number(stats.cgroup.memoryCurrent) / 1048576).toFixed(1), anonMiB: +(counter(stats.cgroup.memoryStat, 'anon') / 1048576).toFixed(1) };
-const row = { at: new Date().toISOString(), label, uptimeMs: stats.uptimeMs, containers: [cell], relayProcesses: stats.processes, bytes: stats.bytes };
+// Each Cloudflare container is its own VM, so VM-wide /proc counters are the container's.
+const { system } = stats;
+const cell = { name: 'cell', cpuSeconds: +system.busySeconds.toFixed(2), stealSeconds: system.stealSeconds,
+  memoryMiB: +((system.memTotalKiB - system.memAvailableKiB) / 1024).toFixed(1), anonMiB: +(system.anonKiB / 1024).toFixed(1) };
+const row = { at: new Date().toISOString(), label, uptimeMs: stats.uptimeMs, cpus: system.cpus, containers: [cell], relayProcesses: stats.processes, bytes: stats.bytes };
 appendFileSync(output, JSON.stringify(row) + '\n');
 const mib = value => (value / 1048576).toFixed(1);
 console.log(label, `cell=${cell.anonMiB}MiB/${cell.cpuSeconds}s uptime=${Math.round(stats.uptimeMs / 1000)}s`,

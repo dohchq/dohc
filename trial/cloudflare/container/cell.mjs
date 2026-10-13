@@ -8,6 +8,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import { once as event } from 'node:events';
 import { closeSync, existsSync, fsyncSync, openSync, readFileSync, readdirSync, rmSync, writeSync } from 'node:fs';
 import { createServer } from 'node:http';
+import { availableParallelism } from 'node:os';
 import { DatabaseSync } from 'node:sqlite';
 import { setTimeout as delay } from 'node:timers/promises';
 import { createGunzip, createGzip } from 'node:zlib';
@@ -189,12 +190,16 @@ function processes() {
   }
   return rows;
 }
-function cgroup() {
+// Cloudflare runs each container in its own VM without cgroup files, so /proc
+// describes the instance. Under Docker, /proc is the host and cgroup is the container.
+function system() {
   const read = path => { try { return readFileSync(path, 'utf8').trim(); } catch { return null; } };
-  return { memoryCurrent: read('/sys/fs/cgroup/memory.current'), memoryMax: read('/sys/fs/cgroup/memory.max'),
-    memoryStat: read('/sys/fs/cgroup/memory.stat')?.split('\n').filter(line => /^(anon|file) /.test(line)),
-    cpuStat: read('/sys/fs/cgroup/cpu.stat')?.split('\n').slice(0, 3), cpuMax: read('/sys/fs/cgroup/cpu.max'),
-    meminfo: read('/proc/meminfo')?.split('\n').slice(0, 3) };
+  const meminfo = Object.fromEntries(read('/proc/meminfo').split('\n').map(line => line.split(/:\s+/)).map(([key, value]) => [key, Number.parseInt(value)]));
+  const [user, nice, kernel, idle, iowait, irq, softirq, steal] = read('/proc/stat').split('\n')[0].split(/\s+/).slice(1).map(Number);
+  return { cpus: availableParallelism(), busySeconds: (user + nice + kernel + irq + softirq) / 100, idleSeconds: (idle + iowait) / 100, stealSeconds: steal / 100,
+    memTotalKiB: meminfo.MemTotal, memAvailableKiB: meminfo.MemAvailable, anonKiB: meminfo.AnonPages,
+    cgroup: { memoryCurrent: read('/sys/fs/cgroup/memory.current'), memoryStat: read('/sys/fs/cgroup/memory.stat')?.split('\n').filter(line => /^(anon|file) /.test(line)),
+      cpuStat: read('/sys/fs/cgroup/cpu.stat')?.split('\n').slice(0, 3) } };
 }
 function sizes() {
   const result = spawnSync('du', ['-sb', '/data', '/continuity', '/host-data'], { encoding: 'utf8' });
@@ -238,7 +243,7 @@ createServer(async (request, response) => {
       return response.end(JSON.stringify(await stateProbe(url.searchParams.get('target') ?? 'do', Number(url.searchParams.get('bytes') ?? 4096))));
     }
     response.end(JSON.stringify({ uptimeMs: Math.round(performance.now() - started), generation, timings,
-      processes: processes(), cgroup: cgroup(), bytes: sizes() }));
+      processes: processes(), system: system(), bytes: sizes() }));
   } catch (error) { response.statusCode = 500; response.end(JSON.stringify({ error: String(error) })); }
 }).listen(8099, '127.0.0.1');
 
