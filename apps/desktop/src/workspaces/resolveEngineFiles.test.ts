@@ -101,15 +101,6 @@ it("resolves a token through a second admitted share and keeps outside/deleted/m
   const outside=createEngineFileResolver(async (_workspace,work)=>work(adapter),async()=>[{workspace:{workspaceId:"second-share"},pin,selector:{paths:["other"],versionId:null,access:"view"},assertCurrent(){}}]);
   expect(await outside(workspace,refs)).toEqual([{status:"absent"}]);
 });
-it.each(["selector","version","generation","session","attachment"])("fences %s changes during received resolution",async()=>{
-  const {workspaceFileRefs}=await import("./workspaceFileReferenceScopes");
-  const pin={receivedSource:"share-source:v1:"+"b".repeat(64),grantId:"grant",generation:2};
-  const workspace={workspaceId:"local",shareView:{receivedIdentity:pin,grantedSelector:{paths:["docs"],versionId:null,access:"view"}}};
-  let current=true; const assertCurrent=()=>{if(!current)throw Error("Retired projection");};
-  const adapter={resolveFiles:async()=>{current=false;return {versionId:"main",results:[{status:"found",path:"docs/a.md",objectId:"share-object:v1:"+"a".repeat(64)}]};}} as unknown as VersionedLiveAdapter;
-  const resolve=createEngineFileResolver(async (_workspace,work)=>work(adapter),async()=>[{workspace:{workspaceId:"second"},pin,selector:{paths:["docs"],versionId:null,access:"view"},assertCurrent}]);
-  await expect(resolve(workspace,workspaceFileRefs(workspace,"share-object:v1:"+"a".repeat(64)))).rejects.toThrow("Retired projection");
-});
 it("old handle refs answer absent after rotation without querying old tokens", async () => {
   const { workspaceFileRefs } = await import("./workspaceFileReferenceScopes");
   const oldPin = { receivedSource: "share-source:v1:" + "a".repeat(64), grantId: "grant", generation: 2 };

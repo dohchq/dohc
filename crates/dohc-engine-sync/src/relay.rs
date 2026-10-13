@@ -4926,6 +4926,19 @@ fn replay_share_write<T: RelayTransport>(
                 content_kind,
             },
         );
+        if let Some(before) = rename_from {
+            replay_share_delete(
+                store,
+                workspace_id,
+                version_id,
+                share_id,
+                envelope,
+                before,
+                faults,
+                applied,
+                changed,
+            )?;
+        }
         return Ok(());
     }
     // After the request record, because that one is about this path and this
@@ -4998,15 +5011,15 @@ fn replay_share_write<T: RelayTransport>(
             from_path: before.to_owned(),
             to_path: path.to_owned(),
             moment_id: format!("moment-share-{key}"),
-            request_id: Some(request_id),
+            request_id: Some(request_id.clone()),
             metadata_origin: "sync".to_owned(),
             metadata_summary: None,
             metadata_correlation_id: None,
             author_json: share_authors::received_authors(envelope),
             now_ms: envelope.recorded_at_ms,
         };
-        let result = VersionedTextStore::new(store)
-            .rename_text_file_with(&input, faults, |tx, result| {
+        let result =
+            VersionedTextStore::new(store).rename_text_file_with(&input, faults, |tx, result| {
                 if result.before.blob_sha256 != sha256
                     || object_id
                         .filter(|id| received_object_token(id))
@@ -5021,28 +5034,36 @@ fn replay_share_write<T: RelayTransport>(
                 }
                 dohc_engine_storage::count_remote_change_in_tx(tx, workspace_id)?;
                 Ok(())
-            })
-            .map_err(replayed_domain)?;
-        if !result.deduped {
-            *applied = applied.checked_add(1).ok_or(RelayError::InvalidResponse)?;
+            });
+        match result {
+            Ok(result) => {
+                if !result.deduped {
+                    *applied = applied.checked_add(1).ok_or(RelayError::InvalidResponse)?;
+                }
+                changed.insert(
+                    before.to_owned(),
+                    ShareViewChangedPath {
+                        path: before.to_owned(),
+                        operation: "delete",
+                        content_kind,
+                    },
+                );
+                changed.insert(
+                    path.to_owned(),
+                    ShareViewChangedPath {
+                        path: path.to_owned(),
+                        operation: "write",
+                        content_kind,
+                    },
+                );
+                return Ok(());
+            }
+            Err(DomainError::FileNotFound | DomainError::TargetPathExists) => {}
+            Err(DomainError::InvalidInput {
+                reason: "received rename does not match its object and content",
+            }) => {}
+            Err(error) => return Err(replayed_domain(error)),
         }
-        changed.insert(
-            before.to_owned(),
-            ShareViewChangedPath {
-                path: before.to_owned(),
-                operation: "delete",
-                content_kind,
-            },
-        );
-        changed.insert(
-            path.to_owned(),
-            ShareViewChangedPath {
-                path: path.to_owned(),
-                operation: "write",
-                content_kind,
-            },
-        );
-        return Ok(());
     }
     let deduped = {
         if content_kind == "binary" {
@@ -5074,6 +5095,16 @@ fn replay_share_write<T: RelayTransport>(
                         path,
                         &input.object_id,
                     )?;
+                    if let Some(before) = rename_from {
+                        rebind_received_rename(
+                            tx,
+                            workspace_id,
+                            version_id,
+                            before,
+                            path,
+                            &input.object_id,
+                        )?;
+                    }
                     dohc_engine_domain::write_binary_in_tx(tx, &input)
                 },
                 |result| result.deduped,
@@ -5120,6 +5151,16 @@ fn replay_share_write<T: RelayTransport>(
                         path,
                         &input.object_id,
                     )?;
+                    if let Some(before) = rename_from {
+                        rebind_received_rename(
+                            tx,
+                            workspace_id,
+                            version_id,
+                            before,
+                            path,
+                            &input.object_id,
+                        )?;
+                    }
                     dohc_engine_domain::write_text_in_tx(tx, &input)
                 },
                 |result| result.deduped,
@@ -5139,6 +5180,19 @@ fn replay_share_write<T: RelayTransport>(
             content_kind,
         },
     );
+    if let Some(before) = rename_from {
+        replay_share_delete(
+            store,
+            workspace_id,
+            version_id,
+            share_id,
+            envelope,
+            before,
+            faults,
+            applied,
+            changed,
+        )?;
+    }
     Ok(())
 }
 
@@ -5151,7 +5205,9 @@ pub(crate) fn received_object_token(id: &str) -> bool {
     })
 }
 
-// Accepted proposals replace the local draft identity; pre-token received stores keep theirs.
+// The received head owns this path, including when it displaces an unsubmitted draft.
+// Retire its alias and current snapshot so reads cannot expose two heads at one path.
+// Draft moments and blobs remain in history; pre-token received stores keep their identity.
 fn prepare_received_identity(
     tx: &Transaction<'_>,
     workspace_id: &str,
@@ -5176,6 +5232,27 @@ fn prepare_received_identity(
         )
         .map_err(|err| DomainError::Storage(StorageError::persist_public(err)))?;
     }
+    Ok(())
+}
+
+// A fallback write keeps the token and its preimage while releasing the old path.
+fn rebind_received_rename(
+    tx: &Transaction<'_>,
+    workspace_id: &str,
+    version_id: &str,
+    before: &str,
+    after: &str,
+    token: &str,
+) -> Result<(), DomainError> {
+    if !received_object_token(token) {
+        return Ok(());
+    }
+    tx.execute("UPDATE path_aliases SET path=?4 WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND path=?5",
+        params![workspace_id,version_id,token,after,before])
+        .map_err(|err| DomainError::Storage(StorageError::persist_public(err)))?;
+    tx.execute("UPDATE snapshots SET path=?4 WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND path=?5",
+        params![workspace_id,version_id,token,after,before])
+        .map_err(|err| DomainError::Storage(StorageError::persist_public(err)))?;
     Ok(())
 }
 

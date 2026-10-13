@@ -346,7 +346,7 @@ pub(crate) fn selected_path_within_grant(path: &str, granted: &ShareGrant) -> bo
 /// kind that carries its own file: a served `chat.thread.create` names the
 /// granted PATH.
 ///
-/// Token links carry an admitted path hint, then prove the object owns that path in the transaction.
+/// Token links carry a serve-time path hint checked against the pinned grant.
 fn enforce_share_view_thread_create(
     boundary: &ShareBoundary,
     op: &ReplicationEnvelope,
@@ -403,15 +403,7 @@ fn enforce_share_view_chat_boundary(
     match op.op_kind.as_str() {
         // Decided before the transaction, against the path it carries itself.
         // Re-running that rule here would restate it against the same bytes.
-        "chat.thread.create" => {
-            if let Some(token) = op.payload.get("linkedObjectId").and_then(Value::as_str) {
-                let path: Option<String> = tx.query_row("SELECT path FROM path_aliases WHERE workspace_id=?1 AND version_id='main' AND object_id=?2", params![op.workspace_id, token], |row| row.get(0)).optional().map_err(SyncError::corrupt)?;
-                if path.as_deref() != op.payload.get("linkedPathHint").and_then(Value::as_str) {
-                    return Err(SyncError::ShareBoundaryViolation);
-                }
-            }
-            Ok(())
-        }
+        "chat.thread.create" => Ok(()),
         "chat.message.append"
         | "chat.reaction.set"
         | "chat.decision.set"

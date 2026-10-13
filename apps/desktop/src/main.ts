@@ -1,4 +1,4 @@
-import { receivedReferencePin, type ReceivedFileReferenceScope } from "./workspaces/workspaceFileReferenceScopes";
+import { createReceivedFileReferenceScopes } from "./workspaces/workspaceFileReferenceScopes";
 import { mountRootFor } from "./workspaces/shareMounts";
 import { createEngineFileResolver } from "./workspaces/resolveEngineFiles";
 import { createTypingQuitRecovery } from "./workspaces/typingQuitRecovery";
@@ -2901,34 +2901,18 @@ async function withEngineAdapter<T>(
   );
 }
 
-const resolveEngineFiles = createEngineFileResolver(withEngineAdapter, async workspace => {
-  const captured = findWorkspace(workspace.workspaceId);
-  if (!captured || captured.rootPath !== workspace.rootPath) return [];
-  const attachment = workspaceAuthorities.currentBinding(workspace.workspaceId).attachmentId;
-  if (workspace.attachmentId && workspace.attachmentId !== attachment) return [];
-  await warmCredentialCache();
-  const credentials = cachedCredentials, generation = credentialCacheGeneration;
-  const scopes: ReceivedFileReferenceScope<EngineWorkspace>[] = [];
-  for (const record of [captured.shareView, ...storedShareMounts(captured)]) {
-    if (!record) continue;
-    const pin = receivedReferencePin(record.receivedIdentity), selector = recordedShareSelector(record.grantedSelector);
-    if (!pin || !selector || record.ended || !credentials?.relayUrl || !record.relayUrl ||
-      record.recipientUserId !== credentials.userId || !relayUrlsMatch(record.relayUrl, credentials.relayUrl)) continue;
-    const snapshot = JSON.stringify(record);
-    const assertCurrent = () => {
-      const current = findWorkspace(workspace.workspaceId);
-      const latest = record === captured.shareView ? current?.shareView : storedShareMounts(current ?? {}).find(row => row.shareId === record.shareId);
-      if (!current || !workspaceAuthorities.isCurrentAttachment(workspace.workspaceId, attachment) || current.rootPath !== captured.rootPath || generation !== credentialCacheGeneration || JSON.stringify(latest) !== snapshot) {
-        throw new Error("The shared file session changed.");
-      }
-    };
-    assertCurrent();
-    const mount = "label" in record ? record : undefined;
-    const engineWorkspace = mount ? receivedShareEngine.workspaceFor({ engineWorkspaceId: mountStoreWorkspaceIdFor(workspace.workspaceId, mount.shareId), rootPath: mountRootFor(workspace.rootPath, mount.label) }) : workspace;
-    scopes.push({workspace: engineWorkspace, pin, selector, assertCurrent, ...(mount ? {pathPrefix: `shared-with-me/${mount.label}/`} : {})});
-  }
-  return scopes;
-});
+const resolveEngineFiles = createEngineFileResolver(withEngineAdapter, createReceivedFileReferenceScopes<EngineWorkspace>({
+  findWorkspace,
+  currentAttachment: workspaceId => workspaceAuthorities.currentBinding(workspaceId).attachmentId,
+  isCurrentAttachment: (workspaceId, attachment) => workspaceAuthorities.isCurrentAttachment(workspaceId, attachment),
+  warmCredentials: warmCredentialCache,
+  credentials: () => cachedCredentials,
+  credentialGeneration: () => credentialCacheGeneration,
+  mountWorkspace: (workspace, mount) => receivedShareEngine.workspaceFor({
+    engineWorkspaceId: mountStoreWorkspaceIdFor(workspace.workspaceId, mount.shareId),
+    rootPath: mountRootFor(workspace.rootPath, mount.label),
+  }),
+}));
 
 // The human author every renderer-sent chat message is attributed to. Main
 // derives it — the renderer never supplies identity. At alpha the desktop's

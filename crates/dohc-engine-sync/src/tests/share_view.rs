@@ -5846,7 +5846,7 @@ fn received_token_survives_rename_delete_restore_and_visible_half_reentry() {
 }
 
 #[test]
-fn received_accepted_proposal_and_version_snapshot_get_tokens() {
+fn received_head_replaces_local_draft_and_version_snapshot_gets_tokens() {
     let (_scratch, _path, mut engine) = open_store();
     seed_replication_version(&mut engine, "main", "main");
     VersionedTextStore::new(&mut engine)
@@ -5897,6 +5897,46 @@ fn received_accepted_proposal_and_version_snapshot_get_tokens() {
         )
         .unwrap();
     engine.read_with(|conn| {assert_eq!(conn.query_row("SELECT object_id FROM path_aliases WHERE workspace_id='ws' AND path='docs/a.md'",[],|row|row.get::<_,String>(0))?,token);Ok::<_,rusqlite::Error>(())}).unwrap();
+    // This draft was never submitted. Its current head retires, but history remains readable.
+    let history = VersionedTextStore::new(&mut engine)
+        .history_page("ws", Some("main"), Some("local-proposal"), 50, None)
+        .unwrap();
+    assert_eq!(history.moments.len(), 1);
+    assert_eq!(history.moments[0].moment_id, "local-draft");
+    let draft = VersionedTextStore::new(&mut engine)
+        .get_moment("ws", "local-draft")
+        .unwrap()
+        .unwrap();
+    assert_eq!(draft.object_id, "local-proposal");
+    engine
+        .read_with(|conn| {
+            assert_eq!(
+                conn.query_row(
+                    "SELECT text FROM blobs WHERE sha256=?1",
+                    [draft.after_blob_sha256.as_ref().unwrap()],
+                    |row| row.get::<_, String>(0)
+                )?,
+                "draft"
+            );
+            assert_eq!(
+                conn.query_row(
+                    "SELECT COUNT(*) FROM path_aliases WHERE object_id='local-proposal'",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )?,
+                0
+            );
+            assert_eq!(
+                conn.query_row(
+                    "SELECT COUNT(*) FROM snapshots WHERE object_id='local-proposal'",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )?,
+                0
+            );
+            Ok::<_, rusqlite::Error>(())
+        })
+        .unwrap();
     let (_scratch2, _path2, mut version_engine) = open_store();
     let mut snapshot = share_view_write_op(0, "docs/a.md", &sha);
     snapshot.op_kind = "version.create".into();
@@ -5929,4 +5969,219 @@ fn received_accepted_proposal_and_version_snapshot_get_tokens() {
         )
         .unwrap();
     version_engine.read_with(|conn| {assert_eq!(conn.query_row("SELECT object_id FROM path_aliases WHERE workspace_id='ws' AND path='docs/a.md'",[],|row|row.get::<_,String>(0))?,token);Ok::<_,rusqlite::Error>(())}).unwrap();
+}
+
+fn received_rename_mismatch_replays_as_write_delete(case: &str) {
+    let (_scratch, _path, mut engine) = open_store();
+    let token = format!("share-object:v1:{}", "c".repeat(64));
+    let body = b"source content".to_vec();
+    let sha = dohc_engine_storage::hex_sha256(&body);
+    let mut initial = share_view_write_op(0, "docs/a.md", &sha);
+    initial.payload["objectId"] = json!(token);
+    let mut rename = share_view_write_op(1, "docs/b.md", &sha);
+    rename.payload["objectId"] = json!(token);
+    rename.payload["operation"] = json!("rename");
+    rename.payload["payloadBeforePath"] = json!("docs/a.md");
+    let client = RelaySyncClient::new(
+        PagedShareRelay::new(
+            [],
+            [
+                (
+                    0,
+                    ShareViewResponse {
+                        ops: vec![initial],
+                        next_cursor: 1,
+                        has_more: false,
+                    },
+                ),
+                (
+                    1,
+                    ShareViewResponse {
+                        ops: vec![rename],
+                        next_cursor: 2,
+                        has_more: false,
+                    },
+                ),
+                (
+                    2,
+                    ShareViewResponse {
+                        ops: vec![],
+                        next_cursor: 2,
+                        has_more: false,
+                    },
+                ),
+            ],
+        )
+        .with_view_blobs([(sha.clone(), body)]),
+    );
+    let grant = tracked_grant(["docs"]);
+    let pull = client
+        .pull_share_view(&mut engine, "ws", "share", &grant, &NoFaults)
+        .unwrap();
+    client
+        .commit_share_view_cursor(&mut engine, "ws", &pull.pending_cursor, &NoFaults)
+        .unwrap();
+    match case {
+        "missing" => {
+            VersionedTextStore::new(&mut engine)
+                .delete_text_file(
+                    &dohc_engine_domain::DeleteTextFile {
+                        workspace_id: "ws".into(),
+                        version_id: "main".into(),
+                        path: "docs/a.md".into(),
+                        moment_id: "local-delete".into(),
+                        request_id: None,
+                        metadata_origin: "user".into(),
+                        metadata_summary: None,
+                        metadata_correlation_id: None,
+                        author_json: None,
+                        now_ms: 10,
+                    },
+                    &NoFaults,
+                )
+                .unwrap();
+        }
+        "edited" | "occupied" => {
+            VersionedTextStore::new(&mut engine)
+                .write_text(
+                    &dohc_engine_domain::WriteText {
+                        workspace_id: "ws".into(),
+                        version_id: "main".into(),
+                        object_id: "local-draft".into(),
+                        path: if case == "edited" {
+                            "docs/a.md"
+                        } else {
+                            "docs/b.md"
+                        }
+                        .into(),
+                        text: "unsubmitted edit".into(),
+                        moment_id: "local-edit".into(),
+                        request_id: None,
+                        metadata_origin: "user".into(),
+                        metadata_summary: None,
+                        metadata_correlation_id: None,
+                        author_json: None,
+                        now_ms: 10,
+                    },
+                    &NoFaults,
+                )
+                .unwrap();
+        }
+        _ => unreachable!(),
+    }
+    let pull = client
+        .pull_share_view(&mut engine, "ws", "share", &grant, &NoFaults)
+        .expect("a rename mismatch must not strand the share cursor");
+    assert_eq!(pull.skipped, 0);
+    engine.read_with(|conn| {
+        let (id, actual_sha): (String, String) = conn.query_row(
+            "SELECT a.object_id,s.blob_sha256 FROM path_aliases a JOIN snapshots s USING(workspace_id,version_id,object_id) WHERE a.workspace_id='ws' AND a.path='docs/b.md'", [], |row| Ok((row.get(0)?,row.get(1)?)))?;
+        assert_eq!(id, token);
+        assert_eq!(actual_sha, sha);
+        assert_eq!(conn.query_row("SELECT COUNT(*) FROM path_aliases WHERE workspace_id='ws' AND path='docs/a.md'", [], |row| row.get::<_,i64>(0))?,0);
+        Ok::<_,rusqlite::Error>(())
+    }).unwrap();
+    // Retrying before cursor publication must reuse both fallback receipts.
+    assert_eq!(
+        client
+            .pull_share_view(&mut engine, "ws", "share", &grant, &NoFaults)
+            .unwrap()
+            .applied,
+        0
+    );
+    client
+        .commit_share_view_cursor(&mut engine, "ws", &pull.pending_cursor, &NoFaults)
+        .unwrap();
+    assert_eq!(
+        client
+            .pull_share_view(&mut engine, "ws", "share", &grant, &NoFaults)
+            .unwrap()
+            .applied,
+        0
+    );
+}
+
+#[test]
+fn received_rename_falls_back_after_unsubmitted_edit() {
+    received_rename_mismatch_replays_as_write_delete("edited");
+}
+#[test]
+fn received_rename_falls_back_when_before_is_missing() {
+    received_rename_mismatch_replays_as_write_delete("missing");
+}
+#[test]
+fn received_rename_falls_back_when_after_is_occupied() {
+    received_rename_mismatch_replays_as_write_delete("occupied");
+}
+
+#[test]
+fn received_chat_survives_source_rename_on_fresh_pull() {
+    let (_scratch, _path, mut engine) = open_store();
+    let token = format!("share-object:v1:{}", "d".repeat(64));
+    let body = b"source content".to_vec();
+    let sha = dohc_engine_storage::hex_sha256(&body);
+    let mut initial = share_view_write_op(0, "docs/a.md", &sha);
+    initial.payload["objectId"] = json!(token);
+    let create = thread_create(
+        1,
+        "renamed-thread",
+        json!({"linkedObjectId": token, "linkedPathHint": "docs/b.md"}),
+    );
+    let message = thread_message(2, "renamed-thread", "renamed-message");
+    let mut rename = share_view_write_op(3, "docs/b.md", &sha);
+    rename.payload["objectId"] = json!(token);
+    rename.payload["operation"] = json!("rename");
+    rename.payload["payloadBeforePath"] = json!("docs/a.md");
+    let client = RelaySyncClient::new(
+        PagedShareRelay::new(
+            [],
+            [(
+                0,
+                ShareViewResponse {
+                    ops: vec![
+                        initial,
+                        ShareReplicationEnvelope {
+                            origin_id: create.origin_id,
+                            origin_seq: create.origin_seq,
+                            op_kind: create.op_kind,
+                            payload: create.payload,
+                            recorded_at_ms: create.recorded_at_ms,
+                        },
+                        ShareReplicationEnvelope {
+                            origin_id: message.origin_id,
+                            origin_seq: message.origin_seq,
+                            op_kind: message.op_kind,
+                            payload: message.payload,
+                            recorded_at_ms: message.recorded_at_ms,
+                        },
+                        rename,
+                    ],
+                    next_cursor: 4,
+                    has_more: false,
+                },
+            )],
+        )
+        .with_view_blobs([(sha, body)]),
+    );
+    let pull = client
+        .pull_share_view(
+            &mut engine,
+            "ws",
+            "share",
+            &tracked_grant(["docs"]),
+            &NoFaults,
+        )
+        .unwrap();
+    assert_eq!(
+        pull.skipped, 0,
+        "serve-time path hints must not discard historical chat"
+    );
+    assert_eq!(
+        thread_row_path(&engine, "renamed-thread").as_deref(),
+        Some("docs/b.md")
+    );
+    engine.read_with(|conn| {
+        assert_eq!(conn.query_row("SELECT body FROM chat_messages WHERE workspace_id='ws' AND message_id='renamed-message'", [], |row| row.get::<_,String>(0))?, "hello");
+        Ok::<_,rusqlite::Error>(())
+    }).unwrap();
 }

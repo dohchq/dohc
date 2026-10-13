@@ -19,7 +19,7 @@ import {
   usableShareMountRecord,
   withoutShareMountRecords,
 } from "./shareMounts";
-import { refreshReceivedReferencePin } from "./workspaceFileReferenceScopes";
+import { receivedReferencePin, refreshReceivedReferencePin } from "./workspaceFileReferenceScopes";
 import type { ShareViewInfo } from "./shareViewInfo";
 import {
   ShareViewMountRollbackError,
@@ -451,7 +451,7 @@ export function createShareMountCommands<WorkspaceSummary>(
           assertCurrent();
           mounts = dependencies.readMounts(workspace.workspaceId);
         }
-        const credentials = mounts.some(mount => record(mount) && mount.recipientUserId) ? await dependencies.loadCredentials() : null;
+        const credentials = mounts.some(mount => record(mount) && !mount.ended && mount.recipientUserId && !receivedReferencePin(mount.receivedIdentity)) ? await dependencies.loadCredentials() : null;
         assertCurrent();
         const generation = dependencies.currentCredentialGeneration();
         const assertIdentityCurrent = () => {
@@ -481,11 +481,19 @@ export function createShareMountCommands<WorkspaceSummary>(
             }
             assertCurrent();
             try {
-              if (mount.recipientUserId && credentials?.userId === mount.recipientUserId && credentials.relayUrl && relayUrlsMatch(credentials.relayUrl, mount.relayUrl)) {
-                const info = await dependencies.fetchInfo({ baseUrl: credentials.relayUrl, token: credentials.token }, mount.shareId);
+              if (!mount.ended && !receivedReferencePin(mount.receivedIdentity) && mount.recipientUserId && credentials?.userId === mount.recipientUserId && credentials.relayUrl && relayUrlsMatch(credentials.relayUrl, mount.relayUrl)) {
+                // Recover a missing pin once; ordinary refresh uses the pinned projection.
+                let info: Awaited<ReturnType<typeof dependencies.fetchInfo>> | undefined;
+                try {
+                  info = await dependencies.fetchInfo({ baseUrl: credentials.relayUrl, token: credentials.token }, mount.shareId);
+                } catch (error) {
+                  reportFailure(`share metadata refresh for ${mount.label}:`, error);
+                }
                 assertIdentityCurrent();
-                await dependencies.updateMounts(workspace.workspaceId, rows => rows.map(row => row.shareId === mount.shareId ? { ...row, receivedIdentity: refreshReceivedReferencePin(row.receivedIdentity, info) } : row));
-                assertCurrent();
+                if (info) {
+                  await dependencies.updateMounts(workspace.workspaceId, rows => rows.map(row => row.shareId === mount.shareId ? { ...row, receivedIdentity: refreshReceivedReferencePin(row.receivedIdentity, info) } : row));
+                  assertIdentityCurrent();
+                }
               }
               // A slow relay holds only this mount's workspace transaction,
               // never one lease across the complete refresh pass.
