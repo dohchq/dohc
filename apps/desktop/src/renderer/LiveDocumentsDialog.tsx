@@ -158,14 +158,12 @@ function statusTone(row: LiveDocumentRow): string {
   return "text-muted";
 }
 
-/** A stopped document is already stopped; everything else can be stopped. */
 function canStop(row: LiveDocumentRow): boolean {
-  return row.status !== "retired";
+  return row.status !== "retired" && !row.deferredStop;
 }
 
-/** A deferred Stop can need local cleanup after the relay resumes. */
 function canResume(row: LiveDocumentRow): boolean {
-  return !!row.deferredStop || ((row.status === "retired" || row.status === "paused") && row.canResume && !row.reason);
+  return row.canResume;
 }
 
 function busyLabel(work: Work): string {

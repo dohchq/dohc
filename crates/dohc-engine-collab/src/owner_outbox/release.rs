@@ -436,8 +436,8 @@ pub fn release_in_tx(
 }
 
 // A host-cut diff can contain an entry without retaining its original bytes.
-// New struct clocks disprove containment; covered clocks still need the same
-// apply-and-compare proof as receipt acknowledgement, including delete sets.
+// New insertions or deletions disprove containment; covered ranges still need
+// the same apply-and-compare proof as receipt acknowledgement.
 fn contains_pending_in<'a>(
     conn: &Connection,
     checkpoint_digest: &str,
@@ -455,6 +455,7 @@ fn contains_pending_in<'a>(
         return Err(OwnerOutboxError::Corrupt);
     }
     let vector = accepted.state_vector();
+    let deleted = accepted.delete_set();
     let mut before = None;
     for bytes in updates {
         crate::replay_parity::prevalidate_update_bytes(bytes).map_err(collab)?;
@@ -464,6 +465,9 @@ fn contains_pending_in<'a>(
             .iter()
             .any(|(client, ranges)| ranges.iter().any(|range| range.end > vector.get(client)))
         {
+            continue;
+        }
+        if !update.delete_set().diff(&deleted).is_empty() {
             continue;
         }
         if before.is_none() {
@@ -493,3 +497,7 @@ fn deferred_in(
         editable,
     })
 }
+
+#[cfg(test)]
+#[path = "release_tests.rs"]
+mod tests;

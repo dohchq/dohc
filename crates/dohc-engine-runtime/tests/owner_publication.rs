@@ -2997,8 +2997,6 @@ async fn pending_release_fixture_sized(
     size: Option<usize>,
 ) -> (Fixture, WorkspaceSupervisor, ActorHandle) {
     let mut f = observed_release_fixture();
-    let supervisor = WorkspaceSupervisor::new();
-    let actor = supervisor.open(&f.db, 3).unwrap().actor;
     let mut pending_bytes = 0;
     let updates: Vec<_> = if let Some(size) = size {
         sized_release_updates(&mut f, count, size)
@@ -3014,6 +3012,15 @@ async fn pending_release_fixture_sized(
             })
             .collect()
     };
+    pending_release_fixture_updates(f, updates).await
+}
+
+async fn pending_release_fixture_updates(
+    mut f: Fixture,
+    updates: Vec<Vec<u8>>,
+) -> (Fixture, WorkspaceSupervisor, ActorHandle) {
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&f.db, 3).unwrap().actor;
     let count = updates.len();
     if let Some(first) = updates.first() {
         let entry = actor
@@ -3542,6 +3549,125 @@ async fn stop_defers_an_entry_contained_by_initial_sync_with_prior_deletion() {
             .count(),
         1
     );
+    supervisor.close_all().unwrap();
+}
+
+fn backspace_updates(bytes: &[u8], count: usize) -> Vec<Vec<u8>> {
+    use yrs::updates::decoder::Decode;
+    use yrs::{Text, Transact, XmlFragment};
+    let doc = yrs::Doc::with_options(yrs::Options {
+        client_id: yrs::ClientID::new(777),
+        offset_kind: yrs::OffsetKind::Utf16,
+        skip_gc: true,
+        ..yrs::Options::default()
+    });
+    doc.transact_mut()
+        .apply_update(yrs::Update::decode_v1(bytes).unwrap())
+        .unwrap();
+    let body = doc.get_or_insert_xml_fragment(dohc_engine_collab::ydoc::ROOT_BODY);
+    let text = {
+        let txn = doc.transact();
+        let paragraph = body
+            .children(&txn)
+            .last()
+            .unwrap()
+            .into_xml_element()
+            .unwrap();
+        paragraph
+            .children(&txn)
+            .last()
+            .unwrap()
+            .into_xml_text()
+            .unwrap()
+    };
+    (0..count)
+        .map(|_| {
+            let mut txn = doc.transact_mut();
+            let index = text.len(&txn) - 1;
+            text.remove_range(&mut txn, index, 1);
+            let update = txn.encode_update_v1();
+            let decoded = yrs::Update::decode_v1(&update).unwrap();
+            assert!(decoded.insertions(true).is_empty());
+            assert!(!decoded.delete_set().is_empty());
+            update
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn stop_folds_a_delete_only_entry_against_an_unsent_insertion() {
+    let f = observed_release_fixture();
+    let insertion = f.doc.richdoc_append_paragraph("Unsent insertion");
+    let deletion = backspace_updates(&f.doc.encode_full_state(), 1).remove(0);
+    f.doc.apply(&deletion).unwrap();
+    let expected = f.doc.encode_full_state();
+    let (f, supervisor, actor) =
+        pending_release_fixture_updates(f, vec![insertion, deletion]).await;
+    assert!(
+        stop_action(&actor, &f, "release").await.unwrap()[0]
+            .deferred
+            .is_none()
+    );
+    let native = dohc_engine_collab::load_persisted(
+        &f.store,
+        &DocKey::new("workspace", "main", "object").unwrap(),
+    )
+    .unwrap()
+    .unwrap()
+    .doc;
+    assert_eq!(native.encode_full_state(), expected);
+    assert_eq!(f.store.table_row_count("ydoc_owner_bindings").unwrap(), 0);
+    assert_eq!(
+        f.store
+            .table_row_count("owner_ydoc_outbox_entries")
+            .unwrap(),
+        0
+    );
+    let recorded: i64 = f.store.read_with(|conn| conn.query_row("SELECT COUNT(*) FROM replication_log WHERE op_kind='ydoc.update' AND json_extract(payload_json,'$.attribution.actorKind')='human'", [], |r| r.get(0))).unwrap();
+    assert_eq!(recorded, 2);
+    supervisor.close_all().unwrap();
+}
+
+#[tokio::test]
+async fn stop_defers_an_accepted_delete_only_entry() {
+    let f = observed_release_fixture();
+    let deletion = backspace_updates(&f.bytes, 1).remove(0);
+    f.doc.apply(&deletion).unwrap();
+    let (f, supervisor, actor) = pending_release_fixture_updates(f, vec![deletion]).await;
+    let head = dohc_engine_collab::read_marker(
+        &f.store,
+        &DocKey::new("workspace", "main", "object").unwrap(),
+    )
+    .unwrap()
+    .unwrap()
+    .head_update_seq;
+    actor
+        .owner_ydoc_apply_initial_sync(
+            "workspace".into(),
+            dohc_engine_collab::owner_outbox::accepted::OwnerAcceptedFrameInput {
+                binding: f.binding.clone(),
+                relay_database_namespace: "relay".into(),
+                expected_revision: 1,
+                expected_native_head_sequence: head,
+                previous_accepted_cursor: 0,
+                journal_cursor: 1,
+                update_bytes: f.doc.encode_full_state(),
+            },
+            f.doc.encode_state_vector(),
+            20,
+            CancellationToken::new(),
+            Arc::new(()),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    let before = release_snapshot(&f);
+    let row = stop_action_at_cursor(&actor, &f, "release", 1)
+        .await
+        .unwrap()
+        .remove(0);
+    assert_eq!(row.deferred.unwrap().unsent_edits, 1);
+    assert_eq!(release_snapshot(&f)[1..], before[1..]);
     supervisor.close_all().unwrap();
 }
 

@@ -71,8 +71,16 @@ describe("LiveDocumentsDialog", () => {
     h.load.mockResolvedValue(page([{...row("a.md"),status:"ready",canResume:true,deferredStop:{unsentEdits:1,editable:true}}]));
     render(<LiveDocumentsDialog workspaceId="ws" {...h} />);
     expect((await screen.findByTestId("live-document-row-a.md")).textContent).toContain("Live editing resumed.");
+    expect(actions("a.md")).toEqual(["Resume live editing"]);
     fireEvent.click(await screen.findByRole("button",{name:"Resume live editing for a.md"}));
     await vi.waitFor(() => expect(h.resume).toHaveBeenCalledWith("ws","a.md"));
+  });
+  it.each([true, false])("uses IPC Resume availability on a ready row: %s", async canResume => {
+    const h = harness();
+    h.load.mockResolvedValue(page([row("a.md", {canResume})]));
+    render(<LiveDocumentsDialog workspaceId="ws" {...h} />);
+    const document = await screen.findByTestId("live-document-row-a.md");
+    expect(!!within(document).queryByRole("button", {name:"Resume live editing for a.md"})).toBe(canResume);
   });
   it.each([0,1])("describes a deferred queue of %s edits", async unsentEdits => {
     const h=harness();
@@ -204,12 +212,12 @@ describe("LiveDocumentsDialog", () => {
         row("docs/moved.md", {
           status: "unavailable",
           reason: "document-unavailable",
-          canResume: true,
+          canResume: false,
         }),
         row("docs/elsewhere.md", {
           status: "unavailable",
           reason: "workspace-changed",
-          canResume: true,
+          canResume: false,
         }),
         row("docs/stopped.md", { status: "retired", canResume: true }),
         row("docs/stopped-gone.md", { status: "retired" }),
