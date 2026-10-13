@@ -67,18 +67,20 @@ it("counts UTF-8 bytes, JSON escapes, commas, and the pinned version across requ
   for (const request of requests.slice(1)) expect(request.params).toMatchObject({ versionId: "main" });
 });
 
+it("keeps foreign workspace references absent without querying their ids", async () => {
+  const resolveFiles = vi.fn(async () => ({ versionId: "main", results: [] }));
+  const resolve = createEngineFileResolver(async (_workspace, work) => work({ resolveFiles } as unknown as VersionedLiveAdapter));
+  expect(await resolve({ workspaceId: "local" }, [workspaceFileRef("source", "object", "a.md")])).toEqual([{ status: "absent" }]);
+  expect(resolveFiles).not.toHaveBeenCalled();
+});
 
-it("keeps local native references in the local active version when a self-share projection has the same source", async () => {
-  const engine = new VersionedLoopbackEngine();
-  engine.seedTextFile({ workspace: "w", path: "b.md", text: "local", objectId: "b" });
-  engine.seedTextFile({ workspace: "mount", path: "a.md", text: "old copy", objectId: "a" });
-  const workspace = { workspaceId: "w" }, mount = { workspaceId: "mount" };
-  const resolve = createEngineFileResolver(async (location, work) => work(new VersionedLiveAdapter({
-    close() {}, sendRequest: request => engine.sendRequest(request),
-  }, location.workspaceId, { workspaceId: location.workspaceId })), () => [
-    { workspace, sourceWorkspaceId: "w", assertCurrent() {} },
-    { workspace: mount, sourceWorkspaceId: "w", prefix: "shared-with-me/Self", assertCurrent() {} },
-  ]);
-  expect(await resolve(workspace, [workspaceFileRef("w", "a", "a.md")])).toEqual([{ status: "absent" }]);
-  expect(engine.requests.map(request => request.params)).toEqual([{ targets: [{ objectId: "a" }] }]);
+it("rejects a binding changed during a file resolution await", async () => {
+  let current = true;
+  const assertCurrent = () => { if (!current) throw new Error("Binding changed"); };
+  const resolveFiles = vi.fn(async () => {
+    current = false;
+    return { versionId: "main", results: [{ status: "found", objectId: "a", path: "a.md" }] };
+  });
+  const resolve = createEngineFileResolver(async (_workspace, work) => work({ resolveFiles } as unknown as VersionedLiveAdapter, assertCurrent));
+  await expect(resolve({ workspaceId: "local" }, [workspaceFileRef("local", "a")])).rejects.toThrow("Binding changed");
 });

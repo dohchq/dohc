@@ -179,7 +179,7 @@ export function createShareInventoryRoutes(
         authorized.genericChatWritable,
         sharerName,
       );
-      return jsonResponse({ ok: true, ...summary, sourceWorkspaceId: authorized.share.workspaceId });
+      return jsonResponse({ ok: true, ...summary });
     }
     throw relayError("method_not_allowed");
   }

@@ -29,13 +29,7 @@ export interface ShareUnconfirmedChanges {
   dismissedKey?: string;
 }
 
-export interface ShareReferenceSource {
-  sourceWorkspaceId?: string;
-  grantId?: string;
-  grantGeneration?: number;
-}
-
-export interface ShareViewInfo extends ShareReferenceSource {
+export interface ShareViewInfo {
   subjectName?: string | null;
   sharerName?: string | null;
   shareId: string;
@@ -164,14 +158,6 @@ function parseSelector(
   };
 }
 
-/** Missing or damaged provenance cannot create a native reference. */
-function shareReferenceSource(body: Record<string, unknown>): ShareReferenceSource {
-  if (typeof body.sourceWorkspaceId !== "string" || !body.sourceWorkspaceId ||
-      typeof body.grantId !== "string" || !body.grantId ||
-      typeof body.generation !== "number" || !Number.isSafeInteger(body.generation) || body.generation < 1) return {};
-  return { sourceWorkspaceId: body.sourceWorkspaceId, grantId: body.grantId, grantGeneration: body.generation };
-}
-
 export async function fetchShareViewInfo(input: {
   relay: SyncRelayConnection;
   shareId: string;
@@ -187,7 +173,6 @@ export async function fetchShareViewInfo(input: {
     throw new ShareSelectorInvalidError(input.shareId);
   }
   return {
-    ...shareReferenceSource(body),
     shareId: String(body.shareId ?? input.shareId),
     granterUserId: String(body.granterUserId ?? ""),
     subjectName: normalizeShareLabel(body.subjectName),

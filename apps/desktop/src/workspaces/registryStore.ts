@@ -1,4 +1,3 @@
-import type { ShareReferenceSource } from "./shareViewInfo";
 import {
   closeSync,
   fsyncSync,
@@ -218,7 +217,7 @@ export function acknowledgeShareSkips(
 // A shared VIEW received through a relay share grant: read-only,
 // refreshed from the share, never pushed. `ended` marks a revoked share —
 // the local copy stays readable but stops refreshing.
-export interface ShareViewIdentity extends ShareReferenceSource {
+export interface ShareViewIdentity {
   subjectName?: string | null;
   sharerName?: string | null;
   shareId: string;
@@ -282,7 +281,7 @@ export interface JoinedSharedChannel {
 // files the configured agent can read with normal tools — refreshed from the
 // share's filtered op log, never pushed. `ended` marks a revoked share:
 // the mounted copy stays readable but stops refreshing.
-export interface ShareMountRecord extends ShareReferenceSource {
+export interface ShareMountRecord {
   shareId: string;
   // Folder name under shared-with-me/ (a single path segment; re-validated
   // on every refresh — the registry file is data, not a write path).

@@ -267,17 +267,3 @@ describe("account received pages", () => {
     expect(last.removed).toEqual([]);
   });
 });
-
-
-it("returns source identity only through an authorized share-detail read", async () => {
-  const storage = await testStorage(); claim(storage); seed(storage, "reference-source");
-  const h = testHandler(storage);
-  const response = await h(request("recipient", "/sync/shares/reference-source"));
-  expect(response.status).toBe(200);
-  expect(await response.json()).toMatchObject({ sourceWorkspaceId: WORKSPACE, grantId: "grant-reference-source", generation: 1 });
-  const listing = await h(request("recipient", "/sync/shares?received=true"));
-  expect((await listing.json()).received[0]).not.toHaveProperty("sourceWorkspaceId");
-  expect((await h(request("stranger", "/sync/shares/reference-source"))).status).toBe(404);
-  storage.revokeShare("reference-source", 2);
-  expect((await h(request("recipient", "/sync/shares/reference-source"))).status).toBe(404);
-});

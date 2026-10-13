@@ -24,7 +24,7 @@ function fixture(kind: ScopeKind = "local") {
   };
   if (kind === "damaged") Object.assign(workspace, { shareView: null });
   else if (kind !== "local") workspace.shareView = {
-    shareId: "share", sourceWorkspaceId: "source", grantId: "grant", grantGeneration: 1, granterEmail: "owner@example.test", genericChatWritable: true,
+    shareId: "share", granterEmail: "owner@example.test", genericChatWritable: true,
     grantedSelector: { paths: ["notes"], versionId: null, access: kind === "ended" ? "edit" : kind },
     ...(kind === "ended" ? { ended: true } : {}),
   };

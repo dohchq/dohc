@@ -78,9 +78,6 @@ export function resolveRegisteredShareViewFilesTarget(
         typeof shareView.granterEmail === "string"
           ? shareView.granterEmail
           : null,
-      sourceWorkspaceId: typeof shareView.sourceWorkspaceId === "string" ? shareView.sourceWorkspaceId : undefined,
-      grantId: typeof shareView.grantId === "string" ? shareView.grantId : undefined,
-      grantGeneration: typeof shareView.grantGeneration === "number" ? shareView.grantGeneration : undefined,
       grantedSelector: shareView.grantedSelector,
       recipientUserId: typeof shareView.recipientUserId === "string" ? shareView.recipientUserId : undefined,
       ended: shareView.ended === true,
@@ -113,7 +110,6 @@ export function resolveRegisteredShareViewFilesTarget(
     rootPath: mountRootFor(workspace.rootPath, mount.label),
     shareId: mount.shareId,
     granterEmail: mount.granterEmail,
-    sourceWorkspaceId: mount.sourceWorkspaceId, grantId: mount.grantId, grantGeneration: mount.grantGeneration,
     grantedSelector: mount.grantedSelector,
     ended: mount.ended === true,
     relayUrl: mount.relayUrl,
