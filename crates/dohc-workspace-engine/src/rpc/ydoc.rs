@@ -562,10 +562,13 @@ impl EngineService {
         struct Params {
             path: Option<String>,
             binding: Option<dohc_engine_collab::LiveObjectBinding>,
+            document: Option<dohc_engine_collab::owner_outbox::release::OwnerStopDocument>,
         }
         let params: Params = parse(params)?;
         if (action == "release") != params.binding.is_some()
-            || (matches!(action, "request" | "clear")) != params.path.is_some()
+            || (matches!(action, "request" | "clear" | "retired"))
+                != (params.path.is_some() || params.document.is_some())
+            || (params.path.is_some() && params.document.is_some())
         {
             return Err(WireError::new(
                 ErrorCode::InvalidParams,
@@ -594,6 +597,7 @@ impl EngineService {
                 open.workspace_id.clone(),
                 params.path,
                 params.binding,
+                params.document,
                 action.into(),
                 now_ms()?,
                 Arc::new(NoFaults),
@@ -604,10 +608,15 @@ impl EngineService {
             .map_err(map_owner_outbox)?;
         if action == "release" {
             for row in &rows {
+                if row.deferred.is_some() {
+                    continue;
+                }
                 for facts in &row.record_facts {
                     emit_record_events(&self.events, &open.workspace_id, facts);
                 }
-                let b = &row.binding;
+                let Some(b) = &row.binding else {
+                    continue;
+                };
                 for session in crate::lock(&self.sessions).values_mut() {
                     if session.workspace == handle
                         && session.key.object_id == b.object_id
@@ -631,7 +640,7 @@ impl EngineService {
                         false,
                         Some(key.clone()),
                         b.main_version_id.clone(),
-                        b.current_path.clone(),
+                        row.document.current_path.clone(),
                         Some(ContentKind::Richdoc),
                         cancellation.token(),
                     )
@@ -642,7 +651,7 @@ impl EngineService {
                     .ydoc_settle(
                         open.root.clone(),
                         key,
-                        b.current_path.clone(),
+                        row.document.current_path.clone(),
                         ContentKind::Richdoc,
                         Some(b.lineage_claim_id.clone()),
                         state.head_blob_sha256,

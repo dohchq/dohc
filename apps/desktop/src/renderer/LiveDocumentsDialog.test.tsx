@@ -66,6 +66,17 @@ afterEach(() => {
 });
 
 describe("LiveDocumentsDialog", () => {
+  it.each([true, false])("shows deferred unsent edits and truthful editability: %s", async editable => {
+    const h=harness();
+    h.load.mockResolvedValue(page([row("a.md", {status:"retired",canResume:true,deferredStop:{unsentEdits:65,editable}})]));
+    render(<LiveDocumentsDialog workspaceId="ws" {...h} />);
+    const stopped=await screen.findByTestId("live-document-row-a.md");
+    expect(stopped.textContent).toContain("65 unsent edits remain on this computer.");
+    expect(stopped.textContent).toContain("They are not in History. Resume live editing to try sending them.");
+    expect(stopped.textContent).toContain(editable ? "You can keep editing." : "Editing is paused.");
+    fireEvent.click(within(stopped).getByRole("button",{name:"Resume live editing for a.md"}));
+    await vi.waitFor(() => expect(h.resume).toHaveBeenCalledWith("ws","a.md"));
+  });
   it("reports a waiting Stop through Notices and keeps its retry available", async () => {
     const h = harness(); h.load.mockResolvedValue(page([row("a.md")]));
     const error = new Error("Stop live editing is waiting. You can keep editing.");
@@ -73,7 +84,7 @@ describe("LiveDocumentsDialog", () => {
     render(<LiveDocumentsDialog workspaceId="ws" {...h} />);
     fireEvent.click(await screen.findByRole("button", {name: "Stop live editing for a.md"}));
     await vi.waitFor(() => expect(h.onError).toHaveBeenCalledTimes(1));
-    expect(h.onError.mock.calls[0]!.slice(0,2)).toEqual(["Stop live editing for a.md is waiting. You can keep editing.", error]);
+    expect(h.onError.mock.calls[0]!.slice(0,2)).toEqual(["Stop live editing for a.md is waiting for a connection or restore.", error]);
     expect(h.onError.mock.calls[0]![2]()).toBe(true);
     await vi.waitFor(() => expect(h.stop).toHaveBeenCalledTimes(2));
   });

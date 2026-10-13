@@ -85,7 +85,7 @@ export interface EnrollServiceHostDocumentInput {
   workspaceId: string; path: string; shareId: string; ownerUserId: string; nowMs: number; guard(): void;
 }
 export interface SetServiceHostEnrollmentEnabledInput {
-  workspaceId: string; path: string; ownerUserId: string; enabled: boolean; retire?: boolean; restoreFenceGeneration?: number; nowMs: number; guard(): void;
+  workspaceId: string; path: string; objectId?: string; ownerUserId: string; enabled: boolean; retire?: boolean; restoreFenceGeneration?: number; nowMs: number; guard(): void;
 }
 export interface ServiceHostCandidateCursor {workspaceId: string; shareId: string}
 export interface ServiceHostCandidatePage {shares: readonly SyncRelayShareRow[]; nextCursor: ServiceHostCandidateCursor | null}
@@ -317,16 +317,17 @@ export function setServiceHostEnrollmentEnabled(storage: StorageContext, input: 
   const standing = storage.captureStanding();
   return storage.tx(() => {
     standing(); input.guard();
-    const current = read(storage, workspaceId, path);
+    const value = input.objectId === undefined ? undefined : storage.db.prepare(`SELECT * FROM ${SERVICE_HOST_ENROLLMENTS} WHERE workspace_id=? AND object_id=?`).get(workspaceId,parseLiveUpdateIdentifier(input.objectId,"object ID"));
+    const current = input.objectId === undefined ? read(storage, workspaceId, path) : value ? row(value) : null;
     if (!current || current.ownerUserId !== input.ownerUserId || !storage.workspaceIsOwnedBy(workspaceId, input.ownerUserId)) return null;
     if (input.retire) {
       if (storage.db.prepare(`SELECT 1 FROM ${LIVE_RESTORE_OPERATIONS} WHERE workspace_id=? AND main_version_id='main' AND object_id=? AND phase<>'resumed'`)
         .get(workspaceId, current.objectId)) throw relayError("restore-in-progress", "Stop live editing is waiting. You can keep editing.");
-      if (!Number.isSafeInteger(input.restoreFenceGeneration) || input.restoreFenceGeneration! < 0) throw badRequest("A restore generation is required.");
+      if (input.restoreFenceGeneration !== undefined && (!Number.isSafeInteger(input.restoreFenceGeneration) || input.restoreFenceGeneration < 0)) throw badRequest("Invalid restore generation.");
       const document=storage.db.prepare("SELECT restore_fence_generation FROM sync_relay_live_documents WHERE workspace_id=? AND object_id=? AND main_version_id='main' AND lineage_state='current'").get(workspaceId,current.objectId);
       const generation=document?.restore_fence_generation ?? 0;
       if (typeof generation !== "number" || !Number.isSafeInteger(generation)) throw new Error("Invalid document restore generation.");
-      if (generation !== input.restoreFenceGeneration) throw new ServiceHostRetirementConflict(generation);
+      if (input.restoreFenceGeneration !== undefined && generation !== input.restoreFenceGeneration) throw new ServiceHostRetirementConflict(generation);
     }
     if (input.enabled) {
       assertCurrent(storage, current, input.ownerUserId);
@@ -334,8 +335,8 @@ export function setServiceHostEnrollmentEnabled(storage: StorageContext, input: 
       if (current.retired) assertCapacity(storage, workspaceId);
     }
     const ownerStop = input.enabled ? null : input.retire === true || current.ownerStop === "retire" ? "retire" : "pause";
-    // A Pause or Stop of an enabled document waits for its release, so the document keeps its binding until it unloads.
-    const enabled = input.enabled || current.enabled;
+    // Pause waits for host unload. Stop fences new acceptance in this transaction.
+    const enabled = input.retire ? false : input.enabled || current.enabled;
     const retired = !enabled && (current.retired || ownerStop === "retire");
     storage.db.prepare(`UPDATE ${SERVICE_HOST_ENROLLMENTS} SET owner_stop=?,enabled=?,retired=?,updated_at_ms=? WHERE workspace_id=? AND object_id=?`)
       .run(ownerStop, Number(enabled), Number(retired), Math.max(nowMs, current.updatedAtMs), workspaceId, current.objectId);

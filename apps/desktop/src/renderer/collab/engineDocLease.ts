@@ -1447,7 +1447,8 @@ function createEngineDocLease(
         try {
           await previous?.dispose();
           await previous?.whenClosed();
-          if (!disposed && generation === transitionGeneration) await work();
+          if (disposed || generation !== transitionGeneration) throw new Error("dohc could not stop live editing. Try again.");
+          await work();
         } finally {
           if (!disposed && generation === transitionGeneration) attach(createEngineDocSession(input, requestKey));
         }

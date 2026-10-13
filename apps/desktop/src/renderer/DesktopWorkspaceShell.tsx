@@ -1642,6 +1642,26 @@ export function DesktopWorkspaceShell(props: {
     engineHistoryToken,
     null,
   );
+  const shownStopFailures=useRef(new Map<string,string>());
+  useEffect(() => {
+    if (captureDecidedFor!==workspaceId || syncStatus===null) return;
+    const failures=syncStatus.ownerLiveStopFailures ?? [];
+    const identities=new Set(failures.map(failure => `owner-stop:${workspaceId}:${failure.path}`));
+    for (const identity of shownStopFailures.current.keys()) {
+      if (identity.startsWith(`owner-stop:${workspaceId}:`) && !identities.has(identity)) {
+        shownStopFailures.current.delete(identity);clearIdentity(identity);
+      }
+    }
+    for (const failure of failures) {
+      const identity=`owner-stop:${workspaceId}:${failure.path}`;
+      if (shownStopFailures.current.get(identity)===failure.detail) continue;
+      shownStopFailures.current.set(identity,failure.detail);
+      const retry=() => {void withClosedEngineDocSession(workspaceId,failure.path,()=>bridge().stopOwnerLiveDocument({workspaceId,path:failure.path})).catch(error => {
+        if (!workspaceAdmission.superseded) reportShellError("dohc could not stop live editing.",error,retry,undefined,identity);
+      });};
+      reportShellFailure({message:`dohc could not stop live editing for "${failure.path}".`,details:[["Reason",failure.detail]],retry,identity});
+    }
+  },[captureDecidedFor,syncStatus,workspaceId,workspaceAdmission,reportShellError,reportShellFailure,clearIdentity]);
   const refreshShareViewRef = useRef<(trigger?: "manual" | "background" | "press-burst") => Promise<ShareViewRefresh>>(async () => "current");
   const shareRefreshFlight = useRef<{ admission: typeof workspaceAdmission; promise: Promise<ShareViewRefresh>; trigger: "manual" | "background" | "press-burst"; followUp?: Promise<ShareViewRefresh> } | null>(null);
   const checkShareAccess = useSharedViewAccess({

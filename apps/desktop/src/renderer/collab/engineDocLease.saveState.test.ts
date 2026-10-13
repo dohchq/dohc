@@ -131,6 +131,36 @@ it("does not close another document when Stop changes one document", async () =>
   expect(harness.openCount()).toBe(1);
 });
 
+it("refuses Stop when its lease is disposed while the draft closes", async () => {
+  await retainBound();
+  let finish!: () => void;
+  const closing = new Promise<void>(resolve => {finish = resolve;});
+  const close = vi.spyOn(harness.api, "closeEngineYDocSession").mockImplementationOnce(async () => {await closing;return undefined;});
+  const work = vi.fn(async () => undefined);
+  const stop = withClosedEngineDocSession("ws-1", "notes/big.md", work);
+  const result = expect(stop).rejects.toThrow("could not stop live editing");
+  await waitFor(() => expect(close).toHaveBeenCalled());
+  const disposal = retained.lease.dispose();
+  finish();
+  await disposal;
+  await result;
+  expect(work).not.toHaveBeenCalled();
+});
+
+it("refuses a superseded Stop while the next transition still runs",async () => {
+  await retainBound();
+  let finish!:()=>void;
+  const closing=new Promise<void>(resolve=>{finish=resolve;});
+  const close=vi.spyOn(harness.api,"closeEngineYDocSession").mockImplementationOnce(async()=>{await closing;return undefined;});
+  const first=vi.fn(async()=>undefined),second=vi.fn(async()=>undefined);
+  const stop=withClosedEngineDocSession("ws-1","notes/big.md",first);
+  const result=expect(stop).rejects.toThrow("could not stop live editing");
+  await waitFor(()=>expect(close).toHaveBeenCalled());
+  const successor=withClosedEngineDocSession("ws-1","notes/big.md",second);
+  finish();await result;await successor;
+  expect(first).not.toHaveBeenCalled();expect(second).toHaveBeenCalledOnce();
+});
+
 afterEach(async () => {
   cleanup();
   retained?.release();

@@ -100,13 +100,14 @@ export function createServerOwnerConnection(options: {
           assertCurrent();const requestSignal=AbortSignal.any([signal,attempt]);
           const response=await options.fetch(`${relayUrl}/sync/${encodeURIComponent(workspace.workspaceId)}/live-host`,{
             method:"DELETE",headers:{authorization:`Bearer ${session.value.token}`,"content-type":"application/json"},
-            body:JSON.stringify({path:binding.currentPath,retire:true,restoreFenceGeneration:binding.restoreFenceGeneration}),signal:requestSignal,redirect:"error",
+            body:JSON.stringify({path:binding.currentPath,objectId:binding.objectId,retire:true,restoreFenceGeneration:binding.restoreFenceGeneration}),signal:requestSignal,redirect:"error",
           });
-          const value=await readBoundedJson(response,16*1024,requestSignal);
           assertCurrent();requestSignal.throwIfAborted();
+          if (!response.ok && response.status!==409) {await response.body?.cancel();throw new Error("Owner live retirement failed.");}
+          const value=await readBoundedJson(response,16*1024,requestSignal);
           if (response.status===409 && value && typeof value==="object" && "code" in value && ["restore-fenced","restore-in-progress"].includes(String(value.code))) return false;
-          z.object({ok:z.literal(true),path:z.literal(binding.currentPath),status:z.literal("retired")}).parse(value);
           if (!response.ok) throw new Error("Owner live retirement failed.");
+          z.object({ok:z.literal(true),path:z.string().min(1),objectId:z.literal(binding.objectId),status:z.literal("retired")}).parse(value);
           discovery.delete(workspace.workspaceId);return true;
         },
         async documents(attempt) {

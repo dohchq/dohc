@@ -289,10 +289,7 @@ it("retires an owner document, lists it separately, and resumes its retained ide
   const f = await fixture(), first = f.storage.enrollServiceHostDocument(f.input);
   const bearer = deriveServiceHostBearer(first, {key, namespace});
   const stop = await f.handle(f.request("DELETE", {path: first.path, retire: true, restoreFenceGeneration: binding.restoreFenceGeneration}));
-  expect(await stop.json()).toEqual({ok: true, path: first.path, status: "retired"});
-  // Until the host releases it, the stopped document stays listed as paused.
-  expect(await (await f.handle(f.request())).json()).toEqual({ok: true, documents: [{path: first.path, status: "paused"}]});
-  f.release(first.objectId);
+  expect(await stop.json()).toEqual({ok: true, path: first.path, objectId:first.objectId, status: "retired"});
   expect(await (await f.handle(f.request())).json()).toEqual({ok: true, documents: []});
   discoverServiceHostDocuments(f.storage);
   expect(f.storage.listServiceHostEnrollments()).toEqual([]);
@@ -358,9 +355,18 @@ it("compares the restore generation before retirement and accepts a repeat", asy
   expect((await request(binding.restoreFenceGeneration)).status).toBe(200);
 });
 
-it("rejects missing or invalid generations and a stale repeat after the generation moves", async () => {
+it("retires an unenrolled desktop without a generation and resolves a moved target by object",async () => {
+  const f=await fixture();f.storage.enrollServiceHostDocument(f.input);
+  f.raw.prepare("UPDATE sync_relay_service_host_enrollments SET path='docs/moved.md'").run();
+  const response=await f.handle(f.request("DELETE",{path:binding.currentPath,objectId:binding.objectId,retire:true}));
+  expect(response.status).toBe(200);
+  expect(await response.json()).toEqual({ok:true,path:"docs/moved.md",objectId:binding.objectId,status:"retired"});
+  expect((await f.handle(f.request("DELETE",{path:binding.currentPath,objectId:"wrong-object",retire:true}))).status).toBe(404);
+});
+
+it("rejects invalid generations and a stale repeat after the generation moves", async () => {
   const f = await fixture();f.storage.enrollServiceHostDocument(f.input);
-  for (const generation of [undefined, -1, 0.5, "7"]) {
+  for (const generation of [-1, 0.5, "7"]) {
     expect((await f.handle(f.request("DELETE", {path: binding.currentPath, retire: true, restoreFenceGeneration: generation}))).status).toBe(400);
   }
   const retire = (generation: number) => f.handle(f.request("DELETE", {path: binding.currentPath, retire: true, restoreFenceGeneration: generation}));

@@ -1,15 +1,29 @@
 //! Generation-bound Stop requests and release of this computer's owner draft.
-use super::draft::{bounded, bounded_blob, collab, descriptor_for_key_in, key, read_observed_in};
+use super::draft::{bounded_blob, collab, key, read_observed_in};
 use super::*;
 use crate::{AppendOutcome, CollabError, DocKey};
 use dohc_engine_domain::ChangeAttribution;
 
+pub const MAX_RELEASE_ENTRIES: i64 = 32;
+pub const MAX_RELEASE_BYTES: i64 = 4 * 1024;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DeferredOwnerStop {
+    pub unsent_edits: i64,
+    pub editable: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct OwnerLiveStop {
-    pub binding: LiveObjectBinding,
+    pub binding: Option<LiveObjectBinding>,
+    pub document: OwnerStopDocument,
+    pub retirement_owed: bool,
     pub relay_database_namespace: String,
     pub state: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deferred: Option<DeferredOwnerStop>,
     #[serde(skip)]
     pub record_facts: Vec<dohc_engine_domain::CollectionRecordApplyFacts>,
 }
@@ -26,15 +40,34 @@ pub fn blocked_in(conn: &Connection, key: &DocKey) -> Result<bool, OwnerOutboxEr
     conn.query_row("SELECT EXISTS(SELECT 1 FROM owner_live_stops WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3)", params![key.workspace_id,key.version_id,key.object_id], |r| r.get(0)).map_err(read_sql)
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct OwnerStopDocument {
+    pub main_version_id: String,
+    pub object_id: String,
+    pub current_path: String,
+}
+
 fn read_in(conn: &Connection, key: &DocKey) -> Result<Option<OwnerLiveStop>, OwnerOutboxError> {
-    let row: Option<(String,String,String)> = conn.query_row("SELECT binding_json,relay_database_namespace,state FROM owner_live_stops WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3", params![key.workspace_id,key.version_id,key.object_id], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional().map_err(read_sql)?;
-    row.map(|(binding, relay_database_namespace, state)| {
-        Ok(OwnerLiveStop {
-            binding: serde_json::from_str(&binding).map_err(|_| OwnerOutboxError::Corrupt)?,
-            relay_database_namespace,
-            state,
-            record_facts: Vec::new(),
-        })
+    let row: Option<(String,String)> = conn.query_row("SELECT binding_json,state FROM owner_live_stops WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3", params![key.workspace_id,key.version_id,key.object_id], |r| Ok((r.get(0)?,r.get(1)?))).optional().map_err(read_sql)?;
+    row.map(|(json, state)| {
+        let mut stop: OwnerLiveStop =
+            serde_json::from_str(&json).map_err(|_| OwnerOutboxError::Corrupt)?;
+        if stop.document.main_version_id != key.version_id
+            || stop.document.object_id != key.object_id
+            || stop.binding.as_ref().is_some_and(|b| {
+                b.workspace_id != key.workspace_id
+                    || b.main_version_id != key.version_id
+                    || b.object_id != key.object_id
+            })
+        {
+            return Err(OwnerOutboxError::Corrupt);
+        }
+        stop.state = state;
+        if let Some(binding) = stop.binding.as_ref().filter(|_| stop.deferred.is_some()) {
+            stop.deferred = Some(deferred_in(conn, binding)?);
+        }
+        Ok(stop)
     })
     .transpose()
 }
@@ -45,14 +78,124 @@ pub fn request_in_tx(
     now_ms: i64,
 ) -> Result<OwnerLiveStop, OwnerOutboxError> {
     require_not_host_in(tx, key)?;
+    let main: String = tx
+        .query_row(
+            "SELECT main_version_id FROM versioned_workspaces WHERE workspace_id=?1",
+            [&key.workspace_id],
+            |r| r.get(0),
+        )
+        .map_err(read_sql)?;
+    if main != key.version_id {
+        return Err(OwnerOutboxError::MainVersionMismatch);
+    }
     if let Some(saved) = read_in(tx, key)? {
         if saved.state == "released" {
             return Ok(saved);
         }
     }
-    let draft = descriptor_for_key_in(tx, key)?.ok_or(OwnerOutboxError::NotFound)?;
-    tx.execute("INSERT INTO owner_live_stops(workspace_id,main_version_id,object_id,relay_database_namespace,state,binding_json,requested_at_ms,updated_at_ms) VALUES(?1,?2,?3,?4,'requested',?5,?6,?6) ON CONFLICT(workspace_id,main_version_id,object_id) DO UPDATE SET binding_json=excluded.binding_json,relay_database_namespace=excluded.relay_database_namespace,updated_at_ms=excluded.updated_at_ms WHERE owner_live_stops.state='requested'",params![key.workspace_id,key.version_id,key.object_id,draft.relay_database_namespace,binding_json(&draft.binding)?,now_ms]).map_err(write_sql)?;
-    read_in(tx, key)?.ok_or(OwnerOutboxError::Corrupt)
+    let bindings = {
+        let mut stmt=tx.prepare("SELECT binding_json FROM ydoc_owner_bindings WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 LIMIT 2").map_err(read_sql)?;
+        let rows = stmt
+            .query_map(
+                params![key.workspace_id, key.version_id, key.object_id],
+                |r| r.get::<_, String>(0),
+            )
+            .map_err(read_sql)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(read_sql)?
+    };
+    if bindings.len() > 1 {
+        return Err(OwnerOutboxError::StopConflict);
+    }
+    let draft = bindings
+        .first()
+        .map(|json| {
+            let binding: LiveObjectBinding =
+                serde_json::from_str(json).map_err(|_| OwnerOutboxError::Corrupt)?;
+            if binding.workspace_id != key.workspace_id
+                || binding.main_version_id != key.version_id
+                || binding.object_id != key.object_id
+            {
+                return Err(OwnerOutboxError::Corrupt);
+            }
+            let observed = read_observed_in(tx, &binding)?.ok_or(OwnerOutboxError::Corrupt)?;
+            let marker = crate::read_marker_in(tx, key)
+                .map_err(collab)?
+                .ok_or(OwnerOutboxError::Corrupt)?;
+            if marker.head_update_seq != observed.native_head_sequence
+                || marker.content_kind != crate::ContentKind::Richdoc
+                || marker.regime != crate::Regime::Replicated
+                || marker.lineage_claim_id.as_deref() != Some(&binding.lineage_claim_id)
+            {
+                return Err(OwnerOutboxError::StopConflict);
+            }
+            Ok(observed)
+        })
+        .transpose()?;
+    let path: Option<String> = tx
+        .query_row(
+            "SELECT path FROM snapshots WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+            params![key.workspace_id, key.version_id, key.object_id],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(read_sql)?;
+    let current_path = path
+        .or_else(|| {
+            draft
+                .as_ref()
+                .map(|draft| draft.binding.current_path.clone())
+        })
+        .ok_or(OwnerOutboxError::NotFound)?;
+    // An unenrolled file can have no Y.Doc marker yet. A bare marker records
+    // identity only; ordinary open still imports the authoritative file.
+    tx.execute("INSERT INTO ydoc_docs(workspace_id,version_id,object_id,content_kind,regime,head_update_seq,head_snapshot_seq,lineage_claim_status,updated_at_ms) VALUES(?1,?2,?3,'richdoc','local-only',0,0,'unclaimed',?4) ON CONFLICT DO NOTHING",params![key.workspace_id,key.version_id,key.object_id,now_ms]).map_err(write_sql)?;
+    let stop = OwnerLiveStop {
+        document: OwnerStopDocument {
+            main_version_id: key.version_id.clone(),
+            object_id: key.object_id.clone(),
+            current_path,
+        },
+        retirement_owed: true,
+        state: if draft.is_some() {
+            "requested"
+        } else {
+            "released"
+        }
+        .into(),
+        relay_database_namespace: draft
+            .as_ref()
+            .map(|draft| draft.relay_database_namespace.clone())
+            .unwrap_or_default(),
+        binding: draft.map(|draft| draft.binding),
+        record_facts: Vec::new(),
+        deferred: None,
+    };
+    save_in_tx(tx, key, &stop, now_ms)?;
+    Ok(stop)
+}
+
+fn save_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    key: &DocKey,
+    stop: &OwnerLiveStop,
+    now_ms: i64,
+) -> Result<(), OwnerOutboxError> {
+    let json = serde_json::to_string(stop).map_err(|_| OwnerOutboxError::Corrupt)?;
+    tx.execute("INSERT INTO owner_live_stops(workspace_id,main_version_id,object_id,relay_database_namespace,state,binding_json,requested_at_ms,updated_at_ms) VALUES(?1,?2,?3,?4,?5,?6,?7,?7) ON CONFLICT(workspace_id,main_version_id,object_id) DO UPDATE SET binding_json=excluded.binding_json,relay_database_namespace=excluded.relay_database_namespace,state=excluded.state,updated_at_ms=excluded.updated_at_ms",params![key.workspace_id,key.version_id,key.object_id,stop.relay_database_namespace,stop.state,json,now_ms]).map_err(write_sql)?;
+    Ok(())
+}
+
+pub fn retired_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    key: &DocKey,
+    now_ms: i64,
+) -> Result<(), OwnerOutboxError> {
+    let mut stop = read_in(tx, key)?.ok_or(OwnerOutboxError::StopConflict)?;
+    if stop.binding.is_some() || stop.state != "released" {
+        return Err(OwnerOutboxError::StopConflict);
+    }
+    stop.retirement_owed = false;
+    save_in_tx(tx, key, &stop, now_ms)
 }
 
 pub fn clear_in_tx(tx: &rusqlite::Transaction<'_>, key: &DocKey) -> Result<(), OwnerOutboxError> {
@@ -64,26 +207,24 @@ pub fn list_requested_in(
     conn: &Connection,
     workspace: &str,
 ) -> Result<Vec<OwnerLiveStop>, OwnerOutboxError> {
-    let mut stmt=conn.prepare("SELECT binding_json,relay_database_namespace FROM owner_live_stops WHERE workspace_id=?1 AND state='requested' ORDER BY main_version_id,object_id LIMIT 64").map_err(read_sql)?;
-    let rows = stmt
+    let mut stmt=conn.prepare("SELECT main_version_id,object_id FROM owner_live_stops WHERE workspace_id=?1 AND (state='requested' OR json_extract(binding_json,'$.retirementOwed')=1 OR json_extract(binding_json,'$.deferred') IS NOT NULL) ORDER BY main_version_id,object_id LIMIT 64").map_err(read_sql)?;
+    let keys = stmt
         .query_map([workspace], |r| {
             Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
         })
+        .map_err(read_sql)?
+        .collect::<Result<Vec<_>, _>>()
         .map_err(read_sql)?;
-    rows.map(|r| {
-        let (json, relay_database_namespace) = r.map_err(read_sql)?;
-        Ok(OwnerLiveStop {
-            binding: serde_json::from_str(&json).map_err(|_| OwnerOutboxError::Corrupt)?,
-            relay_database_namespace,
-            state: "requested".into(),
-            record_facts: Vec::new(),
+    keys.into_iter()
+        .map(|(version, object)| {
+            let key = DocKey::new(workspace, &version, &object).map_err(collab)?;
+            read_in(conn, &key)?.ok_or(OwnerOutboxError::Corrupt)
         })
-    })
-    .collect()
+        .collect()
 }
 
 /// The relay has retired exactly this binding's generation. The hook journals
-/// each consecutive credit group in the same transaction, as recovery replay does.
+/// each original entry in the same transaction, as recovery replay does.
 pub fn release_in_tx(
     tx: &rusqlite::Transaction<'_>,
     binding: &LiveObjectBinding,
@@ -101,7 +242,7 @@ pub fn release_in_tx(
         .map_err(OwnerOutboxError::InvalidInput)?;
     let key = key(binding)?;
     let mut stop = read_in(tx, &key)?.ok_or(OwnerOutboxError::StopConflict)?;
-    if stop.binding != *binding {
+    if stop.binding.as_ref() != Some(binding) {
         return Err(OwnerOutboxError::StopConflict);
     }
     if stop.state == "released" {
@@ -150,11 +291,32 @@ pub fn release_in_tx(
             current.push(id);
         }
     }
+    // Check metadata before reading any update blob or changing native state.
+    // Deferred Stops are final for this build; retry never publishes a prefix.
+    let mut entries = 0_i64;
+    let mut bytes = 0_i64;
+    for id in &current {
+        let (count, size): (i64, i64) = tx.query_row(
+            "SELECT COUNT(*),COALESCE(SUM(byte_length),0) FROM (SELECT byte_length FROM owner_ydoc_outbox_entries WHERE outbox_id=?1 AND pending=1 LIMIT ?2)",
+            params![id,MAX_RELEASE_ENTRIES+1], |r| Ok((r.get(0)?,r.get(1)?)),
+        ).map_err(read_sql)?;
+        entries = entries
+            .checked_add(count)
+            .ok_or(OwnerOutboxError::Corrupt)?;
+        bytes = bytes.checked_add(size).ok_or(OwnerOutboxError::Corrupt)?;
+    }
+    if entries > MAX_RELEASE_ENTRIES || bytes > MAX_RELEASE_BYTES {
+        stop.state = "released".into();
+        stop.retirement_owed = false;
+        stop.deferred = Some(deferred_in(tx, binding)?);
+        save_in_tx(tx, &key, &stop, now_ms)?;
+        return Ok(stop);
+    }
     tx.execute("DELETE FROM ydoc_owner_bindings WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND lineage_claim_id=?4",params![binding.workspace_id,binding.main_version_id,binding.object_id,binding.lineage_claim_id]).map_err(write_sql)?;
     tx.execute("DELETE FROM ydoc_owner_applied_frames WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND lineage_claim_id=?4",params![binding.workspace_id,binding.main_version_id,binding.object_id,binding.lineage_claim_id]).map_err(write_sql)?;
-    let doc = crate::load_doc_in(tx, &key).map_err(collab)?;
+    let mut credited = Vec::new();
     let mut blobs = BTreeSet::from([observed.checkpoint_digest]);
-    for id in current {
+    for id in &current {
         let entries = {
             let mut stmt=tx.prepare("SELECT sequence,update_digest,byte_length,native_source_json,agent_declaration_json,automation_declaration_json,person_edit FROM owner_ydoc_outbox_entries WHERE outbox_id=?1 AND pending=1 ORDER BY sequence").map_err(read_sql)?;
             let rows = stmt
@@ -172,7 +334,7 @@ pub fn release_in_tx(
                 .map_err(read_sql)?;
             rows.collect::<Result<Vec<_>, _>>().map_err(read_sql)?
         };
-        let mut credited = Vec::with_capacity(entries.len());
+
         for (_, digest, length, native, agent, automation, person) in entries {
             let bytes = bounded_blob(tx, &digest)?;
             if bytes.len() as i64 != length {
@@ -212,43 +374,16 @@ pub fn release_in_tx(
             };
             credited.push(((actor, attribution), bytes));
         }
-        // A typing burst has many deltas but one credit. Keep each credit
-        // boundary; validate, index and journal the combined delta once.
-        for group in credited.chunk_by(|a, b| a.0 == b.0) {
-            let (actor, attribution) = &group[0].0;
-            let before = bounded(&doc)?;
-            let vector = doc.encode_state_vector();
-            for (_, bytes) in group {
-                doc.apply(bytes).map_err(collab)?;
-                if doc.has_pending_dependencies() {
-                    return Err(OwnerOutboxError::Corrupt);
-                }
-            }
-            if bounded(&doc)? == before {
-                continue;
-            }
-            let update = doc.diff(&vector).map_err(collab)?;
-            let mut outcome = crate::record_update_in_tx(
-                tx,
-                &key,
-                &update,
-                actor.as_deref(),
-                attribution.as_ref(),
-                now_ms,
-            )
-            .map_err(collab)?;
-            post_append(
-                tx,
-                &update,
-                actor.as_deref(),
-                attribution.as_ref(),
-                &mut outcome,
-            )
-            .map_err(collab)?;
-            if let Some(facts) = outcome.record_facts {
-                stop.record_facts.push(facts);
-            }
-        }
+    }
+    stop.record_facts = crate::durable::record_credited_updates_in_tx(
+        tx,
+        &key,
+        &credited,
+        now_ms,
+        &mut post_append,
+    )
+    .map_err(collab)?;
+    for id in current {
         let mut stmt=tx.prepare("SELECT base_blob_digest FROM owner_ydoc_outboxes WHERE outbox_id=?1 UNION SELECT update_blob_digest FROM owner_ydoc_outbox_entries WHERE outbox_id=?1 AND update_blob_digest IS NOT NULL UNION SELECT terminal_blob_digest FROM owner_ydoc_outbox_entries WHERE outbox_id=?1 AND terminal_blob_digest IS NOT NULL").map_err(read_sql)?;
         for r in stmt
             .query_map([&id], |r| r.get::<_, String>(0))
@@ -265,10 +400,31 @@ pub fn release_in_tx(
         tx.execute("DELETE FROM owner_ydoc_outboxes WHERE outbox_id=?1", [&id])
             .map_err(write_sql)?;
     }
-    for digest in blobs {
-        delete_binary_blob_if_unreferenced(tx, &digest)?;
+    // Every original blob now belongs to a native row and journal append.
+    let retained: BTreeSet<_> = credited
+        .iter()
+        .map(|(_, bytes)| hex_sha256(bytes))
+        .collect();
+    for digest in blobs.difference(&retained) {
+        delete_binary_blob_if_unreferenced(tx, digest)?;
     }
-    tx.execute("UPDATE owner_live_stops SET state='released',updated_at_ms=?4 WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3",params![key.workspace_id,key.version_id,key.object_id,now_ms]).map_err(write_sql)?;
     stop.state = "released".into();
+    stop.retirement_owed = false;
+    save_in_tx(tx, &key, &stop, now_ms)?;
     Ok(stop)
+}
+
+fn deferred_in(
+    conn: &Connection,
+    binding: &LiveObjectBinding,
+) -> Result<DeferredOwnerStop, OwnerOutboxError> {
+    let unsent_edits = conn.query_row("SELECT COALESCE(SUM(pending_entry_count),0) FROM owner_ydoc_outboxes WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND lineage_claim_id=?4 AND restore_fence_generation=?5",params![binding.workspace_id,binding.main_version_id,binding.object_id,binding.lineage_claim_id,binding.restore_fence_generation],|r|r.get(0)).map_err(read_sql)?;
+    let parent = find_parent_for_binding(conn, binding)?;
+    let editable = parent.map_or(unsent_edits == 0, |p| {
+        p.binding == *binding && p.state == OwnerOutboxState::Active
+    });
+    Ok(DeferredOwnerStop {
+        unsent_edits,
+        editable,
+    })
 }

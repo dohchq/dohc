@@ -20,6 +20,20 @@ import { DesktopWorkspaceShell, WORKSPACE, OTHER_WORKSPACE, SYNC_STATUS, READY_U
 // generic error. The notice explains what was found; the rebuild is explicit
 // (a confirmed click), states the destination before anything moves, and the
 // success copy names the reverse path.
+it("keeps a failed document Stop in Notices with Try again and Copy details",async () => {
+  const bridge=makeBridge(Promise.resolve(null));
+  bridge.getSyncStatus=vi.fn(async () => ({...SYNC_STATUS,ownerLiveStopFailures:[{path:"a.md",detail:"corrupt"}]}));
+  renderShell(bridge);
+  const user=userEvent.setup();
+  await user.click(await screen.findByTestId("notice-center-toggle"));
+  const notices=await screen.findByTestId("notice-center");
+  const row=(await within(notices).findByText('dohc could not stop live editing for "a.md".')).closest("li")!;
+  expect(within(row).getByRole("button",{name:"Copy error details"})).toBeTruthy();
+  await user.click(within(row).getByRole("button",{name:"Try again"}));
+  await waitFor(() => expect(bridge.stopOwnerLiveDocument).toHaveBeenCalledWith({workspaceId:WORKSPACE.workspaceId,path:"a.md"}));
+  expect(within(notices).queryByText("corrupt")).toBeNull();
+});
+
 it("dismisses unfinished Stop and restore through its workspace operation before removing the Notice", async () => {
   const bridge = makeBridge(Promise.resolve(null));
   const target = {kind: "person" as const, userId: "ana"};

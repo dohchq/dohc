@@ -1048,6 +1048,127 @@ fn next_generation(observed: &ObservedOwnerBinding) -> LiveObjectBinding {
 }
 
 #[test]
+fn stop_without_enrollment_blocks_capture_even_without_a_native_marker() {
+    use super::super::release;
+    let (_dir, mut store, observed, _) = fixture();
+    let key = key(&observed.binding).unwrap();
+    store
+        .write_with(&NoFaults, |tx| {
+            tx.execute("DELETE FROM ydoc_docs", []).unwrap();
+            Ok::<_, OwnerOutboxError>(())
+        })
+        .unwrap();
+    let stop = store
+        .write_with(&NoFaults, |tx| release::request_in_tx(tx, &key, 20))
+        .unwrap();
+    let TxnOutcome::Committed(stop) = stop else {
+        panic!("Stop did not commit")
+    };
+    assert_eq!(stop.state, "released");
+    assert!(store
+        .read_with(|conn| prepare_in(conn, &observed.binding, "relay", false))
+        .is_err());
+}
+
+#[test]
+fn stop_after_move_keeps_the_binding_and_folds_into_the_same_object() {
+    use super::super::release;
+    let (_dir, mut store, observed, _, _, _) = enrolled_with_unsent_draft();
+    let key = key(&observed.binding).unwrap();
+    store
+        .write_with(&NoFaults, |tx| release::request_in_tx(tx, &key, 20))
+        .unwrap();
+    store
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "UPDATE snapshots SET path='moved.md' WHERE object_id='object'",
+                [],
+            )
+            .unwrap();
+            tx.execute(
+                "UPDATE path_aliases SET path='moved.md' WHERE object_id='object'",
+                [],
+            )
+            .unwrap();
+            tx.execute(
+                "UPDATE ydoc_docs SET path='moved.md' WHERE object_id='object'",
+                [],
+            )
+            .unwrap();
+            Ok::<_, OwnerOutboxError>(())
+        })
+        .unwrap();
+    store
+        .write_with(&NoFaults, |tx| {
+            release::request_in_tx(tx, &key, 21)?;
+            release::release_in_tx(tx, &observed.binding, 22, |_, _, _, _, _| Ok(()))
+        })
+        .unwrap();
+    let text = store
+        .read_with(|conn| crate::load_doc_in(conn, &key))
+        .unwrap()
+        .project(crate::ContentKind::Richdoc)
+        .unwrap()
+        .content;
+    assert!(text.contains("unsent before restore"));
+}
+
+#[test]
+fn stop_journals_only_the_credit_groups_own_update_bytes() {
+    use super::super::{accepted, release};
+    let (_dir, mut store, observed, checkpoint, unsent, _) = enrolled_with_unsent_draft();
+    let key = key(&observed.binding).unwrap();
+    let observed = store
+        .read_with(|conn| super::super::draft::read_observed_in(conn, &observed.binding))
+        .unwrap()
+        .unwrap();
+    let remote = Ydoc::wire();
+    remote.apply(&checkpoint).unwrap();
+    let update = remote
+        .rewrite_content_to_markdown(crate::ContentKind::Richdoc, "Accepted replacement\n")
+        .unwrap();
+    store
+        .write_with(&NoFaults, |tx| {
+            accepted::apply_frame_in_tx(
+                tx,
+                "workspace",
+                &accepted::OwnerAcceptedFrameInput {
+                    binding: observed.binding.clone(),
+                    relay_database_namespace: "relay".into(),
+                    expected_revision: 1,
+                    expected_native_head_sequence: observed.native_head_sequence,
+                    previous_accepted_cursor: observed.accepted_cursor,
+                    journal_cursor: observed.accepted_cursor + 1,
+                    update_bytes: update.clone(),
+                },
+                20,
+            )
+        })
+        .unwrap();
+    let expected = crate::load_persisted(&store, &key).unwrap().unwrap().doc;
+    expected.apply(&unsent).unwrap();
+    store
+        .write_with(&NoFaults, |tx| {
+            release::request_in_tx(tx, &key, 21)?;
+            release::release_in_tx(tx, &observed.binding, 22, |_, bytes, _, _, _| {
+                assert_eq!(
+                    bytes,
+                    crate::merge_updates(std::slice::from_ref(&unsent)).unwrap()
+                );
+                Ok(())
+            })
+        })
+        .unwrap();
+    let released = crate::load_persisted(&store, &key).unwrap().unwrap().doc;
+    assert_eq!(released.encode_full_state(), expected.encode_full_state());
+    store.read_with(|conn| {
+        let remote_bytes:Vec<u8>=conn.query_row("SELECT b.bytes FROM ydoc_updates u JOIN binary_blobs b ON b.sha256=u.update_blob_sha256 WHERE u.update_blob_sha256=?1",[hex_sha256(&update)],|r|r.get(0)).unwrap();
+        assert_eq!(remote_bytes,update);
+        Ok::<_,OwnerOutboxError>(())
+    }).unwrap();
+}
+
+#[test]
 fn stop_preserves_old_generation_work_and_start_can_enroll_again() {
     use super::super::release;
     let (_dir, mut store, observed, _, _, host) = enrolled_with_unsent_draft();

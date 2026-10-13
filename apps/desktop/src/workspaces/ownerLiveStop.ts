@@ -1,5 +1,5 @@
 import {EngineRequestError, type EngineClient} from "@dohc/workspace-engine-client/daemon";
-import type {LiveObjectBinding} from "@dohc/live-session-contract/live-object-binding";
+export type OwnerStopRetirementTarget = {objectId: string; currentPath: string; restoreFenceGeneration?: number};
 
 const transitions = new Map<string, Promise<unknown>>();
 /** Stop, Start and reconciliation share one document's relay transition. */
@@ -13,25 +13,37 @@ export async function withOwnerLiveStopTransition<T>(workspaceId: string, path: 
 export type OwnerLiveStop = Awaited<ReturnType<EngineClient["ownerYDocStopRequest"]>>;
 export async function reconcileOwnerLiveStops(options: {
   client: EngineClient; workspaceHandle: string; workspaceId: string; signal: AbortSignal;
-  retire(binding: LiveObjectBinding, signal: AbortSignal): Promise<boolean>;
+  retire(binding: OwnerStopRetirementTarget, signal: AbortSignal): Promise<boolean>;
   assertCurrent(): void;
+  onError?(row: OwnerLiveStop, error: unknown): Promise<void> | void;
+  onComplete?(row: OwnerLiveStop): void;
 }) {
   const request=() => ({id:0,workspace:options.workspaceHandle,deadlineMs:30_000});
   const rows=await options.client.ownerYDocStopList(request(),options.signal);
-  for (const row of rows) await withOwnerLiveStopTransition(options.workspaceId,row.binding.currentPath,async () => {
+  for (const row of rows) {
+    try {await withOwnerLiveStopTransition(options.workspaceId,row.document.currentPath,async () => {
     options.signal.throwIfAborted();options.assertCurrent();
     // Start may have cancelled this row while it waited for the document slot.
-    const current=(await options.client.ownerYDocStopList(request(),options.signal)).find(stop => stop.binding.objectId===row.binding.objectId && stop.binding.mainVersionId===row.binding.mainVersionId);
+    const current=(await options.client.ownerYDocStopList(request(),options.signal)).find(stop => stop.document.objectId===row.document.objectId && stop.document.mainVersionId===row.document.mainVersionId);
     if (!current) return;
-    const stop=await options.client.ownerYDocStopRequest(request(),current.binding.currentPath,options.signal);
-    if (stop.state==="released") return;
-    if (!await options.retire(stop.binding,options.signal)) return;
+    const stop=await options.client.ownerYDocStopRequest(request(),current.document,options.signal);
+    if (!stop.retirementOwed) return;
+    if (!await options.retire(stop.binding ?? stop.document,options.signal)) return;
     options.assertCurrent();
-    try {await options.client.ownerYDocRelease(request(),stop.binding,options.signal);}
+    try {
+      if (stop.binding) await options.client.ownerYDocRelease(request(),stop.binding,options.signal);
+      else await options.client.ownerYDocStopRetired(request(),stop.document,options.signal);
+    }
     catch (error) {
       // Let discovery install a restore successor before the next Stop attempt.
       if (!(error instanceof EngineRequestError && ["owner-stop-conflict","owner-stop-restore-pending"].includes(error.message))) throw error;
     }
+    options.onComplete?.(stop);
     options.assertCurrent();
-  });
+    });} catch (error) {
+      options.signal.throwIfAborted();options.assertCurrent();
+      console.error("[desktop] owner live Stop failed:", row.document.objectId, error);
+      try {await options.onError?.(row,error);} catch (noticeError) {console.error("[desktop] owner Stop notice failed:",noticeError);}
+    }
+  }
 }

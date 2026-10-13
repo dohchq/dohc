@@ -637,6 +637,11 @@ impl IntegratedFrontier {
     /// Advance from one accepted candidate in work proportional to the
     /// candidate facts. Deleted items retain their identities and scalar interiors.
     pub(crate) fn fold(&mut self, delta: IntegratedFrontierDelta) -> (usize, usize) {
+        self.fold_with_audit(delta, true)
+    }
+
+    fn fold_with_audit(&mut self, delta: IntegratedFrontierDelta, audit: bool) -> (usize, usize) {
+        let _ = audit;
         let previous_approx_bytes = self.approx_bytes;
         let identities_before = self.identities.approx_bytes();
 
@@ -737,7 +742,7 @@ impl IntegratedFrontier {
         // retained unsafe interiors cannot intersect the accepted endpoints.
         self.has_unsafe_deletion_endpoint = false;
         #[cfg(any(test, debug_assertions))]
-        {
+        if audit {
             debug_assert_eq!(
                 self.identities.approx_bytes(),
                 self.identities.recompute_approx_bytes(),
@@ -1035,7 +1040,7 @@ pub fn with_armed_scratch_apply_error_for_test<T>(f: impl FnOnce() -> T) -> T {
 /// marked before mutation so its caller can evict it after the transaction
 /// rolls back. The writer base and durable store remain untouched.
 pub fn validate_replay_parity(base: &Ydoc, candidate: &[u8]) -> Result<(), CollabError> {
-    validate_replay_parity_contained(base, candidate, None, None, None).map(drop)
+    validate_replay_parity_contained(base, candidate, None, None, None, true).map(drop)
 }
 
 /// Validate and apply each update in order, reusing the batch's replay gate.
@@ -1043,6 +1048,14 @@ pub fn validate_replay_parity(base: &Ydoc, candidate: &[u8]) -> Result<(), Colla
 pub fn apply_replay_validated_batch(
     base_bytes: &[u8],
     updates: &[Vec<u8>],
+) -> Result<ReplayBatch, CollabError> {
+    replay_validated_batch(base_bytes, updates, false)
+}
+
+pub(crate) fn replay_validated_batch(
+    base_bytes: &[u8],
+    updates: &[Vec<u8>],
+    require_complete: bool,
 ) -> Result<ReplayBatch, CollabError> {
     let mut doc = Ydoc::wire();
     doc.apply(base_bytes)?;
@@ -1052,12 +1065,13 @@ pub fn apply_replay_validated_batch(
     let mut outcomes = Vec::with_capacity(updates.len());
     for bytes in updates {
         let mut mutated = false;
-        match validate_replay_parity_for_cached_gate(
+        match validate_replay_parity_for_burst(
             &doc,
             frontier.as_ref(),
             scratch.as_ref(),
             &mut mutated,
             bytes,
+            !require_complete,
         ) {
             Ok(mut validation) => {
                 if let Err(error) = doc.apply(bytes) {
@@ -1077,17 +1091,38 @@ pub fn apply_replay_validated_batch(
                 frontier
                     .as_mut()
                     .expect("cold batch gate builds a frontier")
-                    .fold(validation.candidate);
+                    .fold_with_audit(validation.candidate, !require_complete);
                 if validation.rebuilt_scratch.is_some() {
                     scratch = validation.rebuilt_scratch;
                 }
                 accepted.push(bytes.as_slice());
+                if require_complete && doc.has_pending_dependencies() {
+                    return Err(CollabError::Corrupt {
+                        reason: "release entry has unresolved dependencies".into(),
+                    });
+                }
                 outcomes.push(Ok(()));
             }
             Err(error) => {
                 scratch = None;
                 outcomes.push(Err(error));
             }
+        }
+    }
+    if require_complete {
+        #[cfg(any(test, debug_assertions))]
+        if let Some(frontier) = &frontier {
+            debug_assert_eq!(frontier.approx_bytes, frontier.recompute_approx_bytes());
+        }
+        let fresh = Ydoc::wire();
+        fresh.apply(base_bytes)?;
+        for bytes in updates {
+            fresh.apply(bytes)?;
+        }
+        if fresh.encode_full_state() != doc.encode_full_state() {
+            return Err(CollabError::Corrupt {
+                reason: "burst replay differs from fresh replay".into(),
+            });
         }
     }
     Ok(ReplayBatch { doc, outcomes })
@@ -1107,7 +1142,7 @@ pub fn validate_replay_parity_with_scratch(
     base: &Ydoc,
     candidate: &[u8],
 ) -> Result<Ydoc, CollabError> {
-    validate_replay_parity_contained(base, candidate, None, None, None).map(|validation| {
+    validate_replay_parity_contained(base, candidate, None, None, None, true).map(|validation| {
         validation
             .scratch
             .expect("a cold gate always builds a fresh scratch")
@@ -1133,12 +1168,24 @@ pub(crate) fn validate_replay_parity_for_cached_gate(
     scratch_mutated: &mut bool,
     candidate: &[u8],
 ) -> Result<CachedGateValidation, CollabError> {
+    validate_replay_parity_for_burst(base, frontier, scratch, scratch_mutated, candidate, true)
+}
+
+fn validate_replay_parity_for_burst(
+    base: &Ydoc,
+    frontier: Option<&IntegratedFrontier>,
+    scratch: Option<&Ydoc>,
+    scratch_mutated: &mut bool,
+    candidate: &[u8],
+    audit_scratch: bool,
+) -> Result<CachedGateValidation, CollabError> {
     let validation = validate_replay_parity_contained(
         base,
         candidate,
         frontier,
         scratch,
         scratch.is_some().then_some(scratch_mutated),
+        audit_scratch,
     )?;
     Ok(CachedGateValidation {
         candidate: IntegratedFrontierDelta::from_structure(validation.candidate_structure),
@@ -1155,7 +1202,7 @@ pub(crate) fn validate_replay_parity_with_delta(
     base: &Ydoc,
     candidate: &[u8],
 ) -> Result<IntegratedFrontierDelta, CollabError> {
-    validate_replay_parity_contained(base, candidate, None, None, None)
+    validate_replay_parity_contained(base, candidate, None, None, None, true)
         .map(|validation| IntegratedFrontierDelta::from_structure(validation.candidate_structure))
 }
 
@@ -1175,9 +1222,17 @@ fn validate_replay_parity_contained(
     frontier: Option<&IntegratedFrontier>,
     scratch: Option<&Ydoc>,
     scratch_mutated: Option<&mut bool>,
+    audit_scratch: bool,
 ) -> Result<GateValidation, CollabError> {
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        validate_replay_parity_inner(base, frontier, scratch, scratch_mutated, candidate)
+        validate_replay_parity_inner(
+            base,
+            frontier,
+            scratch,
+            scratch_mutated,
+            candidate,
+            audit_scratch,
+        )
     }));
     match outcome {
         Ok(result) => result,
@@ -1204,6 +1259,7 @@ fn validate_replay_parity_inner(
     persistent_scratch: Option<&Ydoc>,
     persistent_scratch_mutated: Option<&mut bool>,
     candidate: &[u8],
+    audit_scratch: bool,
 ) -> Result<GateValidation, CollabError> {
     #[cfg(test)]
     if PANIC_INJECT.with(std::cell::Cell::get) {
@@ -1219,6 +1275,7 @@ fn validate_replay_parity_inner(
     // scratch-doc `apply` below with the same `MalformedUpdate` a standalone
     // `Ydoc::validate_update` would report, so no extra pre-decode pass runs
     // on this hot path.
+    let _ = audit_scratch;
     let candidate_structure = scan_v1(candidate)?;
     debug_assert_eq!(
         persistent_scratch.is_some(),
@@ -1378,7 +1435,7 @@ fn validate_replay_parity_inner(
 
     let scratch_facts = gate_scratch_facts(scratch)?;
     #[cfg(any(test, debug_assertions))]
-    if persistent_scratch.is_some() {
+    if audit_scratch && persistent_scratch.is_some() {
         let fresh = replay_gate_scratch(base, pending_bytes.as_deref(), candidate)?;
         let fresh_facts = gate_scratch_facts(&fresh)?;
         if scratch_facts != fresh_facts {

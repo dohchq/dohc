@@ -36,6 +36,12 @@ it("discovers only owned synced workspaces and sends credentials only to their p
 });
 
 const refusal = {shareId: "share", paths: ["docs"], code: "live_document_limit", message: "This server reached its live document limit."};
+it("reports an older relay's non-JSON refusal before parsing a success body", async () => {
+  const f=fixture(), session=(await f.connection.connect(f.workspace,new AbortController().signal))!;
+  f.fetch.mockResolvedValueOnce(new Response("Bad request",{status:400}));
+  await expect(session.retire({objectId:"object",currentPath:"old.md",restoreFenceGeneration:0},new AbortController().signal)).rejects.toThrow("Owner live retirement failed");
+  await expect(session.documents(new AbortController().signal)).resolves.toEqual({ok:true,documents:[]});
+});
 it.each(["restore-fenced", "restore-in-progress"])("keeps Stop pending for %s and retries the successor generation", async code => {
   const f = fixture();
   const session = (await f.connection.connect(f.workspace, new AbortController().signal))!;
@@ -43,7 +49,7 @@ it.each(["restore-fenced", "restore-in-progress"])("keeps Stop pending for %s an
     currentPath: "docs/a.md", selectorPaths: ["docs"], restoreFenceGeneration: 7};
   f.fetch.mockResolvedValueOnce(new Response(JSON.stringify({ok: false, code, restoreFenceGeneration: 8}), {status: 409}));
   expect(await session.retire(binding, new AbortController().signal)).toBe(false);
-  f.fetch.mockResolvedValueOnce(new Response(JSON.stringify({ok: true, path: binding.currentPath, status: "retired"})));
+  f.fetch.mockResolvedValueOnce(new Response(JSON.stringify({ok: true, path: binding.currentPath, objectId:binding.objectId, status: "retired"})));
   expect(await session.retire({...binding, restoreFenceGeneration: 8}, new AbortController().signal)).toBe(true);
   expect(f.fetch.mock.calls.map(call => JSON.parse((call as unknown as [string, RequestInit])[1].body as string).restoreFenceGeneration)).toEqual([7, 8]);
 });

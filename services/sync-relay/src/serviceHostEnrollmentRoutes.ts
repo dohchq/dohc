@@ -122,12 +122,14 @@ export function createServiceHostEnrollmentRoutes(options: {
       if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw badRequest("Invalid live host request.");
       const input = raw as Record<string, unknown>;
       if (request.method === "DELETE") {
-        if (Object.keys(input).some(key => key !== "path" && key !== "retire" && key !== "restoreFenceGeneration") || typeof input.path !== "string" ||
-          (input.retire !== undefined && input.retire !== true) || (input.retire === true && (!Number.isSafeInteger(input.restoreFenceGeneration) || Number(input.restoreFenceGeneration) < 0)) || (input.retire !== true && input.restoreFenceGeneration !== undefined)) throw badRequest("A document path and optional retirement are required.");
+        if (Object.keys(input).some(key => !["path","objectId","retire","restoreFenceGeneration"].includes(key)) || typeof input.path !== "string" ||
+          (input.objectId !== undefined && (typeof input.objectId !== "string" || input.retire !== true)) ||
+          (input.retire !== undefined && input.retire !== true) || (input.restoreFenceGeneration !== undefined && (!Number.isSafeInteger(input.restoreFenceGeneration) || Number(input.restoreFenceGeneration) < 0 || input.retire !== true))) throw badRequest("A document path and optional retirement are required.");
         const row = storage.setServiceHostEnrollmentEnabled({workspaceId, path: input.path, ownerUserId: actor.userId, enabled: false,
-          ...(input.retire === true ? {retire: true, restoreFenceGeneration: Number(input.restoreFenceGeneration)} : {}), nowMs: Date.now(), guard});
+          ...(input.retire === true ? {retire: true, ...(input.objectId === undefined ? {} : {objectId: input.objectId as string}),
+            ...(input.restoreFenceGeneration === undefined ? {} : {restoreFenceGeneration: Number(input.restoreFenceGeneration)})} : {}), nowMs: Date.now(), guard});
         if (!row) throw notFound();
-        host.reconcile(); return response({ok: true, ...(input.retire === true ? {path: row.path, status: "retired"} : state(row))});
+        host.reconcile(); return response({ok: true, ...(input.retire === true ? {path: row.path, objectId: row.objectId, status: "retired"} : state(row))});
       }
       if (Object.keys(input).some(key => !["path", "shareId", "retry"].includes(key)) || (input.shareId !== undefined && typeof input.shareId !== "string") ||
         (input.path !== undefined && typeof input.path !== "string") || (input.retry !== undefined && typeof input.retry !== "boolean") ||

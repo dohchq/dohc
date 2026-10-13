@@ -20,6 +20,7 @@ fn method_requires_initial_capture_ready(method: &str) -> bool {
         || method.starts_with("collections.")
         || method.starts_with("liveApplication.")
         || method.starts_with("ydoc.ownerDelivery.")
+        || method.starts_with("ydoc.ownerStop.")
         || (method.starts_with("versions.") && method != "versions.ensureMain")
         || method.starts_with("conflicts.")
         || (method.starts_with("secrets.") && method != "secrets.write")
@@ -168,7 +169,7 @@ impl EngineService {
         self.ensure_handle_allows_method(request.workspace.as_ref(), &request.method)?;
         self.require_initial_capture_ready(request.workspace.as_ref(), &request.method)?;
         if let Some(action) = request.method.strip_prefix("ydoc.ownerStop.") {
-            if !matches!(action, "request" | "release" | "clear" | "list") {
+            if !matches!(action, "request" | "release" | "clear" | "list" | "retired") {
                 return Err(WireError::new(
                     ErrorCode::InvalidParams,
                     "invalid-owner-stop-method",
@@ -1288,6 +1289,10 @@ mod tests {
         ));
         for method in [
             "files.resolve",
+            "ydoc.ownerStop.request",
+            "ydoc.ownerStop.release",
+            "ydoc.ownerStop.clear",
+            "ydoc.ownerStop.retired",
             "versions.active",
             "versions.list",
             "versions.createNamed",

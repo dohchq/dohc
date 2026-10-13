@@ -9,6 +9,7 @@ import type { BlobStart, Envelope, Event, Request, Response, WireError } from ".
 import type { EngineTransport } from "../ydoc/ydocLiveAdapter";
 import type { OwnerYDocOutboxAppendResult } from "../ydoc/ownerYDocOutbox";
 import { decodeOwnerYDocOutboxAppendResult, decodeOwnerYDocDraftDescriptor, type YdocOwnerDraft } from "../ydoc/ydocWireContract";
+import {validateUserWritePath} from "@dohc/workspace-core";
 import { parseNativeOwnerActivation, type NativeOwnerActivation } from "./nativeOwnerActivation";
 
 const FRAME_MAGIC = Buffer.from("DOP1", "ascii");
@@ -781,15 +782,19 @@ export class EngineClient implements EngineTransport {
     return {status:"capture",captured:{nativeHeadSequence:captured.nativeHeadSequence,localStateDigest:parseLiveUpdateDigest(captured.localStateDigest)}};
   }
 
-  async ownerYDocStopRequest(request: OwnerYDocDeliveryRequest, path: string, signal?: AbortSignal) {
-    const rows = await this.ownerLiveStop(request, "request", {path}, signal);
-    if (rows.length !== 1 || rows[0]!.binding.currentPath !== path) throw new TypeError("Invalid Stop response.");
+  async ownerYDocStopRequest(request: OwnerYDocDeliveryRequest, target: string | {mainVersionId: string; objectId: string; currentPath: string}, signal?: AbortSignal) {
+    const rows = await this.ownerLiveStop(request, "request", typeof target === "string" ? {path: target} : {document: target}, signal);
+    if (rows.length !== 1 || (typeof target !== "string" && (rows[0]!.document.objectId !== target.objectId || rows[0]!.document.mainVersionId !== target.mainVersionId))) throw new TypeError("Invalid Stop response.");
     return rows[0]!;
   }
   async ownerYDocRelease(request: OwnerYDocDeliveryRequest, binding: OwnerYDocDeliveryTarget["binding"], signal?: AbortSignal) {
     const rows = await this.ownerLiveStop(request, "release", {binding}, signal);
     if (rows.length !== 1 || rows[0]!.state !== "released" || JSON.stringify(rows[0]!.binding) !== JSON.stringify(parseLiveObjectBinding(binding))) throw new TypeError("Invalid release response.");
     return rows[0]!;
+  }
+  async ownerYDocStopRetired(request: OwnerYDocDeliveryRequest, document: {mainVersionId: string; objectId: string; currentPath: string}, signal?: AbortSignal): Promise<void> {
+    const rows=await this.ownerLiveStop(request,"retired",{document},signal);
+    if (rows.length) throw new TypeError("Invalid retirement response.");
   }
   async ownerYDocStopClear(request: OwnerYDocDeliveryRequest, path: string, signal?: AbortSignal): Promise<void> {
     const rows = await this.ownerLiveStop(request, "clear", {path}, signal);
@@ -803,10 +808,21 @@ export class EngineClient implements EngineTransport {
     const value = response.result as {stops?: unknown};
     if (!value || Object.keys(value).join() !== "stops" || !Array.isArray(value.stops) || value.stops.length > 64) throw new TypeError("Invalid Stop response.");
     return value.stops.map((row: unknown) => {
-      if (!row || typeof row !== "object" || Object.keys(row).sort().join() !== "binding,relayDatabaseNamespace,state") throw new TypeError("Invalid Stop row.");
-      const r=row as {binding: unknown;relayDatabaseNamespace: unknown;state: unknown};
-      if (r.state !== "requested" && r.state !== "released") throw new TypeError("Invalid Stop state.");
-      return {binding: parseLiveObjectBinding(r.binding), relayDatabaseNamespace: parseLiveUpdateIdentifier(r.relayDatabaseNamespace,"relay namespace"), state: r.state};
+      if (!row || typeof row !== "object" || Object.keys(row).filter(key => key !== "deferred").sort().join() !== "binding,document,relayDatabaseNamespace,retirementOwed,state") throw new TypeError("Invalid Stop row.");
+      const r=row as {binding: unknown;document: unknown;relayDatabaseNamespace: unknown;retirementOwed: unknown;state: unknown;deferred?: unknown};
+      if (r.state !== "requested" && r.state !== "released" || typeof r.retirementOwed !== "boolean") throw new TypeError("Invalid Stop state.");
+      const d=r.document as {mainVersionId?: unknown;objectId?: unknown;currentPath?: unknown};
+      if (!d || Object.keys(d).sort().join()!=="currentPath,mainVersionId,objectId" || typeof d.currentPath!=="string" || !validateUserWritePath(d.currentPath).ok) throw new TypeError("Invalid Stop document.");
+      const document={mainVersionId:parseLiveUpdateIdentifier(d.mainVersionId,"main version"),objectId:parseLiveUpdateIdentifier(d.objectId,"object ID"),currentPath:d.currentPath};
+      const binding=r.binding===null ? null : parseLiveObjectBinding(r.binding);
+      if (binding && (binding.objectId!==document.objectId || binding.mainVersionId!==document.mainVersionId) || !binding && r.state!=="released") throw new TypeError("Invalid Stop binding.");
+      let deferred: {unsentEdits: number; editable: boolean} | undefined;
+      if (r.deferred !== undefined) {
+        const d=r.deferred as {unsentEdits: number; editable: boolean};
+        if (!d || Object.keys(d).sort().join()!=="editable,unsentEdits" || !Number.isSafeInteger(d.unsentEdits) || d.unsentEdits<0 || typeof d.editable!=="boolean" || !binding || r.state!=="released" || r.retirementOwed) throw new TypeError("Invalid deferred Stop.");
+        deferred={unsentEdits:d.unsentEdits,editable:d.editable};
+      }
+      return {binding,document,retirementOwed:r.retirementOwed,relayDatabaseNamespace:binding ? parseLiveUpdateIdentifier(r.relayDatabaseNamespace,"relay namespace") : r.relayDatabaseNamespace==="" ? "" : (()=>{throw new TypeError("Invalid Stop namespace.");})(),state:r.state,...(deferred ? {deferred} : {})};
     });
   }
 

@@ -965,10 +965,12 @@ it.skipIf(engine.missing).each([
           const response = await fetch(`${proxy.origin}${endpoint}`, {...init, headers: {authorization: `Bearer ${relayConnection.token}`, "content-type": "application/json"}});
           expect(response.ok).toBe(true); return await response.json() as R;
         }, relayShareErrorCopy: unexpected, relayShareDiscussionActivityPolls: createPresencePollRegistry(),
+        listOwnerLiveStops: () => source.sessions.run(source.workspace, async ({workspace}) => source.nativeClient().ownerYDocStopList({id:0,workspace,deadlineMs:REAL_DAEMON_DEADLINE_MS})),
         ownerLiveStop: (_workspace, action, stopPath, binding) => source.sessions.run(source.workspace, async ({workspace}) => {
           const client = source.nativeClient(), request = {id: 0, workspace, deadlineMs: REAL_DAEMON_DEADLINE_MS};
           if (action === "clear") {await client.ownerYDocStopClear(request, stopPath);return;}
-          return action === "request" ? client.ownerYDocStopRequest(request, stopPath) : client.ownerYDocRelease(request, binding!);
+          if (action==="retired") {await client.ownerYDocStopRetired(request,binding!);return;}
+          return action === "request" ? client.ownerYDocStopRequest(request, stopPath) : client.ownerYDocRelease(request, binding as import("@dohc/live-session-contract").LiveObjectBinding);
         }), sharesChanged: unexpected, reconcileReceivedShares: unexpected,
       });
       const stop = () => Promise.resolve(handlers.get(CHANNELS.stopOwnerLiveDocument)!({sender: {id: 1}}, {workspaceId, path}));

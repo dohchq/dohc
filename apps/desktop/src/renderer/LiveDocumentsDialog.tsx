@@ -11,6 +11,7 @@ export type LiveDocumentRow = {
   status: "ready" | "preparing" | "paused" | "unavailable" | "retired";
   reason?: "document-unavailable" | "workspace-changed";
   canResume: boolean;
+  deferredStop?: {unsentEdits: number; editable: boolean};
 };
 
 /** One read: the latest active documents, then the next page of stopped ones. */
@@ -325,7 +326,7 @@ export function LiveDocumentsDialog({
           return true;
         };
         const waiting = work.kind === "stop" && String(error).includes("Stop live editing is waiting.");
-        onError(waiting ? `Stop live editing for ${work.path} is waiting. You can keep editing.` : failureMessage(work, mutated), error, retry);
+        onError(waiting ? `Stop live editing for ${work.path} is waiting for a connection or restore.` : failureMessage(work, mutated), error, retry);
       } finally {
         if (isCurrent()) {
           running.current = false;
@@ -537,6 +538,13 @@ export function LiveDocumentsDialog({
                   >
                     Stop live editing
                   </SecondaryButton>
+                ) : null}
+                {row.deferredStop ? (
+                  <p className="m-0 basis-full text-[12px] text-muted">
+                    {`Live editing stopped. ${row.deferredStop.unsentEdits} unsent edits remain on this computer.`}
+                    {" They are not in History. Resume live editing to try sending them. "}
+                    {row.deferredStop.editable ? "You can keep editing." : "Editing is paused."}
+                  </p>
                 ) : null}
               </li>
             ))}

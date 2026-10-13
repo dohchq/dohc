@@ -113,7 +113,7 @@ it("does not retire at the old generation while a restore has begun", async () =
   expect(f.storage.readServiceHostEnrollment(scope.workspaceId, binding.currentPath)?.retired).toBe(false);
 });
 
-it("answers DELETE with a retryable restore-in-progress conflict", async () => {
+it.each([7, undefined])("answers DELETE with a retryable restore-in-progress conflict at generation %s", async restoreFenceGeneration => {
   const f = await fixture(); enrollService(f); f.begin();
   const handle = createServiceHostEnrollmentRoutes({storage: f.storage,
     history: f.history,
@@ -121,7 +121,7 @@ it("answers DELETE with a retryable restore-in-progress conflict", async () => {
     host: {ready: () => false, reconcile() {}, unavailable: false}});
   const response = await handle(new Request(`https://relay.test/sync/${scope.workspaceId}/live-host`, {
     method: "DELETE", headers: {authorization: "Bearer owner", "content-type": "application/json"},
-    body: JSON.stringify({path: binding.currentPath, retire: true, restoreFenceGeneration: 7}),
+    body: JSON.stringify({path: binding.currentPath, retire: true, restoreFenceGeneration}),
   }));
   expect(response.status).toBe(409);
   expect(await response.json()).toMatchObject({ok: false, code: "restore-in-progress"});
