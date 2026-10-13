@@ -2210,6 +2210,7 @@ fn validate_successor_base(
 pub(crate) struct TransactionDocCache<'tx, 'conn> {
     tx: &'tx Transaction<'conn>,
     docs: WriterDocCache,
+    missing_after_append: std::collections::HashMap<DocKey, bool>,
 }
 
 impl<'tx, 'conn> TransactionDocCache<'tx, 'conn> {
@@ -2217,6 +2218,7 @@ impl<'tx, 'conn> TransactionDocCache<'tx, 'conn> {
         Self {
             tx,
             docs: WriterDocCache::new(),
+            missing_after_append: std::collections::HashMap::new(),
         }
     }
 
@@ -2245,10 +2247,26 @@ impl<'tx, 'conn> TransactionDocCache<'tx, 'conn> {
             &sha,
             probe,
         );
+        if !append.deduped {
+            // Keep the last new append's result even if its document is evicted.
+            let missing = match self.docs.missing_updates_after_append(key) {
+                Some(missing) => missing,
+                None => load_doc_in(self.tx, key)?.has_missing_updates(),
+            };
+            self.missing_after_append.insert(key.clone(), missing);
+        }
         Ok(append)
     }
 
     pub(crate) fn has_missing_updates(&self, key: &DocKey) -> Result<bool, CollabError> {
+        match self.missing_after_append.get(key) {
+            Some(missing) => Ok(*missing),
+            // Dedupe-only documents never installed a new replay state.
+            None => self.read_missing_updates(key),
+        }
+    }
+
+    fn read_missing_updates(&self, key: &DocKey) -> Result<bool, CollabError> {
         Ok(match self.docs.doc_for_consumer(self.tx, key)? {
             Some(doc) => doc.has_missing_updates(),
             None => load_doc_in(self.tx, key)?.has_missing_updates(),
@@ -3614,3 +3632,7 @@ pub fn record_recovery_update_in_tx(
         rusqlite::params![request_id,hash,-outcome.seq,now_ms]).map_err(map_sql)?;
     Ok(outcome)
 }
+
+#[cfg(test)]
+#[path = "durable/passive_cache_tests.rs"]
+mod passive_cache_tests;

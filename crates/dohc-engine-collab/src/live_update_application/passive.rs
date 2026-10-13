@@ -2,6 +2,10 @@ use super::*;
 use dohc_engine_storage::replica::{advance_frontiers, read_frontiers};
 use dohc_engine_storage::{FaultAction, FaultPoint};
 
+#[cfg(any(test, feature = "test-support"))]
+#[path = "passive/page_timings.rs"]
+pub mod page_timings;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ReplicaAuthority {
@@ -58,6 +62,8 @@ pub fn apply_page(
         return Err(invalid("replica page exceeds row limit"));
     }
     let mut appended = std::collections::HashMap::<DocKey, i64>::new();
+    #[cfg(any(test, feature = "test-support"))]
+    let mut timings = page_timings::PhaseTimer::default();
     let result = store.write_with(faults, |tx| -> Result<ReplicaPageResult, ApplicationError> {
         let mut cache = durable::TransactionDocCache::new(tx);
         let mut touched = std::collections::HashSet::new();
@@ -66,6 +72,8 @@ pub fn apply_page(
         let mut result = ReplicaPageResult {revision:frontier.revision, log_cursor:frontier.log_cursor,
             journal_cursor:frontier.journal_cursor, applied:0, skipped:0, blocked_cursor:None};
         let mut previous_cursor = after;
+        #[cfg(any(test, feature = "test-support"))]
+        timings.start_rows();
         for row in rows {
             row.admitted.validate()?;
             identifier(&row.relay_database_namespace, 512)?;
@@ -120,14 +128,20 @@ pub fn apply_page(
             if faults.poll(FaultPoint::SyncBeforeApplyCommit)==FaultAction::Crash { return Err(ApplicationError::Interrupted); }
             result.journal_cursor = result.journal_cursor.max(row.journal_cursor);
         }
+        #[cfg(any(test, feature = "test-support"))]
+        timings.start_check();
         for key in touched {
             if cache.has_missing_updates(&key)? { return Err(ApplicationError::Conflict); }
         }
+        #[cfg(any(test, feature = "test-support"))]
+        timings.finish_check();
         advance_frontiers(tx, workspace, frontier.log_cursor, result.journal_cursor)?;
         let frontier = read_frontiers(tx, workspace)?;
         result.revision = frontier.revision;
         Ok(result)
     })?;
+    #[cfg(any(test, feature = "test-support"))]
+    timings.publish();
     match result {
         TxnOutcome::Committed(result) => {
             for (key, now_ms) in appended {

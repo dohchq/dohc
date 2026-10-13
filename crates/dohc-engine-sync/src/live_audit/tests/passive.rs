@@ -312,6 +312,16 @@ fn row_with_bytes(
     previous: &str,
     bytes: Vec<u8>,
 ) -> ReplicaJournalRow {
+    row_with_count(template, cursor, cursor, previous, bytes)
+}
+
+fn row_with_count(
+    template: &ReplicaJournalRow,
+    cursor: i64,
+    event_count: i64,
+    previous: &str,
+    bytes: Vec<u8>,
+) -> ReplicaJournalRow {
     let mut next = template.clone();
     next.admitted.update_bytes = bytes;
     let accepted = &mut next.admitted.metadata.accepted;
@@ -324,12 +334,142 @@ fn row_with_bytes(
         &serde_json::to_vec(&(
             "accepted-event-v1",
             previous,
-            cursor,
+            event_count,
             &next.admitted.metadata,
         ))
         .unwrap(),
     );
     next
+}
+
+struct WideFixture {
+    store: EngineStore,
+    path: std::path::PathBuf,
+    rows: Vec<ReplicaJournalRow>,
+    expected: Vec<(dohc_engine_collab::DocKey, dohc_engine_collab::Ydoc)>,
+    _scratch: ScratchDir,
+}
+
+fn wide_fixture(documents: usize, total_rows: usize, missing_first: bool) -> WideFixture {
+    use dohc_engine_collab::{DocKey, Ydoc, durable};
+    let mut source = fixture_with_binding_generation(true, None, 1);
+    bootstrap(&mut source, false).unwrap();
+    let (scratch, path, mut store) = receiver(&source);
+    let doc = Ydoc::wire();
+    doc.apply(&source.bytes).unwrap();
+    let previous = initial(&source);
+    let template = row(&mut source, 1, &previous, &doc);
+    let mut rows = Vec::new();
+    let mut expected = Vec::new();
+    for index in 0..documents {
+        let key = DocKey::new("ws", "main", format!("wide-{index}")).unwrap();
+        store.write_with(&NoFaults, |tx| {
+            tx.execute("INSERT INTO file_objects(workspace_id,object_id,created_at_ms) VALUES('ws',?1,0)", [&key.object_id]).unwrap();
+            Ok::<_, StorageError>(())
+        }).unwrap();
+        durable::claim_base(
+            &mut store,
+            &key,
+            ContentKind::Richdoc,
+            &source.bytes,
+            &NoFaults,
+            0,
+        )
+        .unwrap();
+        let doc = Ydoc::wire();
+        doc.apply(&source.bytes).unwrap();
+        let mut template = template.clone();
+        let binding = &mut template.admitted.metadata.accepted.binding;
+        binding.object_id = key.object_id.clone();
+        binding.current_path = format!("wide-{index}.md");
+        binding.selector_paths = vec![binding.current_path.clone()];
+        let mut previous = hex_sha256(
+            &serde_json::to_vec(&(
+                "accepted-history-v1",
+                [
+                    "relay",
+                    "ws",
+                    "main",
+                    &binding.object_id,
+                    &binding.lineage_claim_id,
+                ],
+            ))
+            .unwrap(),
+        );
+        let count = total_rows / documents + usize::from(index < total_rows % documents);
+        for event_count in 1..=count {
+            if missing_first && index == 0 && event_count == 1 {
+                doc.richdoc_append_paragraph("Predecessor absent from the replica.");
+            }
+            let bytes =
+                doc.richdoc_append_paragraph(&format!("Wide document {index} row {event_count}."));
+            let next = row_with_count(
+                &template,
+                rows.len() as i64 + 1,
+                event_count as i64,
+                &previous,
+                bytes,
+            );
+            previous = next.evidence_digest.clone();
+            rows.push(next);
+        }
+        expected.push((key, doc));
+    }
+    WideFixture {
+        store,
+        path,
+        rows,
+        expected,
+        _scratch: scratch,
+    }
+}
+
+#[test]
+fn passive_wide_page_refuses_missing_predecessor_after_document_eviction() {
+    let mut fixture = wide_fixture(40, 40, true);
+    let frontier = fixture
+        .store
+        .read_with(|c| dohc_engine_storage::replica::read_frontiers(c, "ws"))
+        .unwrap();
+    let native = count(&fixture.store, "ydoc_updates");
+    assert!(matches!(
+        apply_page(&mut fixture.store, "ws", 0, &fixture.rows, &NoFaults),
+        Err(ApplicationError::Conflict)
+    ));
+    assert_eq!(count(&fixture.store, "ydoc_updates"), native);
+    for table in [
+        "live_accepted_updates",
+        "replica_documents",
+        "replica_first_seen",
+    ] {
+        assert_eq!(count(&fixture.store, table), 0, "rollback {table}");
+    }
+    assert_eq!(
+        fixture
+            .store
+            .read_with(|c| dohc_engine_storage::replica::read_frontiers(c, "ws"))
+            .unwrap(),
+        frontier
+    );
+    fixture
+        .store
+        .read_with(|conn| {
+            for (key, _) in &fixture.expected {
+                let doc = dohc_engine_collab::durable::load_doc_in(conn, key)?;
+                assert!(
+                    !doc.project(ContentKind::Richdoc)?
+                        .content
+                        .contains("Wide document")
+                );
+                assert!(
+                    !doc.project(ContentKind::Richdoc)?
+                        .content
+                        .contains("Predecessor absent")
+                );
+            }
+            Ok::<_, dohc_engine_collab::CollabError>(())
+        })
+        .unwrap();
 }
 
 #[test]
@@ -861,11 +1001,13 @@ fn passive_retired_authority_skips_without_an_old_baseline_and_matching_lineage_
 #[test]
 #[ignore = "release measurement"]
 fn measure_passive_500_row_page() {
+    use page_measurement::*;
     let mut source = fixture_with_binding_generation(true, None, 1);
     bootstrap(&mut source, false).unwrap();
     let doc = dohc_engine_collab::Ydoc::wire();
     doc.apply(&source.bytes).unwrap();
-    let baseline_operations = operations(&source.store);
+    let (scratch, path, store) = receiver(&source);
+    drop(store);
     let mut previous = initial(&source);
     let mut rows = Vec::new();
     for cursor in 1..=500 {
@@ -873,29 +1015,17 @@ fn measure_passive_500_row_page() {
         previous = next.evidence_digest.clone();
         rows.push(next);
     }
+    let mut stores = prepared_stores(&path, &scratch);
     let mut samples = Vec::new();
-    for _ in 0..21 {
-        let scratch = ScratchDir::new().unwrap();
-        let mut store =
-            EngineStore::open_passive(&scratch.path().join("page.db"), 0, None, None).unwrap();
-        copy_blobs(&source.store, &mut store);
-        for mut op in baseline_operations.clone() {
-            op.relay_seq = Some(op.origin_seq + 1);
-            crate::apply_replication_envelope(
-                &mut store,
-                &mut WriterDocCache::new(),
-                &op,
-                &NoFaults,
-                &NoLiveLeases,
-            )
-            .unwrap();
-        }
-        let start = std::time::Instant::now();
-        let result = apply_page(&mut store, "ws", 0, &rows, &NoFaults).unwrap();
-        samples.push(start.elapsed().as_secs_f64() * 1000.0);
+    let mut phases = Vec::new();
+    for (sample, store) in stores.iter_mut().enumerate() {
+        let (result, times) = measured_page(store, 0, &rows, sample);
+        samples.push(times[0]);
+        phases.push(times);
         assert_eq!(result.applied, 500);
-        assert_eq!(state(&store), state(&source.store));
+        assert_eq!(state(store), state(&source.store));
     }
+    print_phases("generic-500", &phases);
     samples.sort_by(f64::total_cmp);
     println!(
         "PASSIVE_PAGE_MS median={} p95={} samples=21 rows=500",
@@ -906,6 +1036,7 @@ fn measure_passive_500_row_page() {
 #[test]
 #[ignore = "release measurement"]
 fn measure_passive_page_after_10000_accepted_rows() {
+    use page_measurement::*;
     let history = std::env::var("DOHC_PASSIVE_MEASURE_HISTORY")
         .map(|v| v.parse::<usize>().unwrap())
         .unwrap_or(10000);
@@ -979,27 +1110,19 @@ fn measure_passive_page_after_10000_accepted_rows() {
         }).unwrap();
     }
     drop(store);
+    let mut stores = prepared_stores(&path, &scratch);
     let mut samples = Vec::new();
-    for sample in 0..21 {
-        let copy = scratch.path().join(format!("sample-{sample}.db"));
-        std::fs::copy(&path, &copy).unwrap();
-        let mut store = EngineStore::open_passive(&copy, 0, None, None).unwrap();
+    let mut phases = Vec::new();
+    for (sample, store) in stores.iter_mut().enumerate() {
         let head = store.read_with(|conn| {
             Ok::<i64, StorageError>(conn.query_row(
                 "SELECT head_update_seq FROM ydoc_docs WHERE workspace_id='ws' AND version_id='main' AND object_id='object'",
                 [], |r| r.get(0),
             ).unwrap())
         }).unwrap();
-        let start = std::time::Instant::now();
-        let result = apply_page(
-            &mut store,
-            "ws",
-            history as i64,
-            &rows[history..],
-            &NoFaults,
-        )
-        .unwrap();
-        samples.push(start.elapsed().as_secs_f64() * 1000.0);
+        let (result, times) = measured_page(store, history as i64, &rows[history..], sample);
+        samples.push(times[0]);
+        phases.push(times);
         assert_eq!(result.applied, 500);
         store
             .read_with(|conn| {
@@ -1024,6 +1147,10 @@ fn measure_passive_page_after_10000_accepted_rows() {
             .unwrap();
         println!("TAIL_PAGE_SAMPLE {sample} {}", samples.last().unwrap());
     }
+    print_phases(
+        &format!("tail-{history}-content-first-{content_first}"),
+        &phases,
+    );
     samples.sort_by(f64::total_cmp);
     println!(
         "TAIL_PAGE_MS median={} p95={} samples=21 rows=500 accepted_tail={history} content_first={content_first}",
@@ -1049,3 +1176,41 @@ fn measurement_vector(doc: &dohc_engine_collab::Ydoc) -> std::collections::BTree
     let count = read();
     (0..count).map(|_| (read(), read())).collect()
 }
+
+#[test]
+#[ignore = "release measurement"]
+fn measure_passive_wide_500_row_page() {
+    use page_measurement::*;
+    let WideFixture {
+        store,
+        path,
+        rows,
+        expected,
+        _scratch: scratch,
+    } = wide_fixture(32, 500, false);
+    drop(store);
+    let mut stores = prepared_stores(&path, &scratch);
+    let mut samples = Vec::new();
+    for (sample, store) in stores.iter_mut().enumerate() {
+        let (result, times) = measured_page(store, 0, &rows, sample);
+        assert_eq!(result.applied, 500);
+        assert_eq!(result.journal_cursor, 500);
+        store
+            .read_with(|conn| {
+                for (key, owner) in &expected {
+                    let actual = dohc_engine_collab::durable::load_doc_in(conn, key)?;
+                    assert_eq!(measurement_vector(&actual), measurement_vector(owner));
+                    assert_eq!(
+                        actual.project(ContentKind::Richdoc)?.content,
+                        owner.project(ContentKind::Richdoc)?.content
+                    );
+                }
+                Ok::<_, dohc_engine_collab::CollabError>(())
+            })
+            .unwrap();
+        samples.push(times);
+    }
+    print_phases("wide-500-documents-32", &samples);
+}
+
+mod page_measurement;
