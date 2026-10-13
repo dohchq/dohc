@@ -17,6 +17,7 @@ import type { SyncRelayStorage } from "./storage";
 import { MAX_DISCUSSION_ACTIVITY_HOLD_MS } from "./wireLimits";
 
 const MAX_MESSAGE_BODY_BYTES = 64 * 1024;
+export const MAX_BROWSER_CHAT_FOLLOWS_PER_WORKSPACE = 128;
 const cacheHeaders = {"cache-control": "private, no-store"};
 
 export interface NamedChatMessage {
@@ -78,6 +79,7 @@ export function createNamedRecipientChat(options: {
   const exchangeHash = hashRelayExchangeKey(options.exchangeKey);
   let pending = 0, pendingFollows = 0;
   const followsByUser = new Map<string, number>();
+  const followsByWorkspace = new Map<string, number>();
   const refuse = () => Response.json({ok: false, error: "not found"}, {status: 404, headers: cacheHeaders});
   const boundedJson = (body: unknown) => {
     const bytes = JSON.stringify(body);
@@ -97,7 +99,7 @@ export function createNamedRecipientChat(options: {
       return errorResponse(relayError("share_access_rate_limited"));
     }
     if (following) pendingFollows++; else pending++;
-    let followUser: string | undefined;
+    let followUser: string | undefined, followWorkspace: string | undefined;
     const controller = new AbortController(), abort = () => controller.abort();
     const cancelled = new Promise<Response>(resolve => controller.signal.addEventListener("abort", () => resolve(refuse()), {once: true}));
     request.signal.addEventListener("abort", abort, {once: true});
@@ -138,6 +140,10 @@ export function createNamedRecipientChat(options: {
           if (count >= limits.maxPendingRequests) throw relayError("share_access_rate_limited");
           followsByUser.set(actor.userId, count + 1);
           followUser = actor.userId;
+          const workspaceCount = followsByWorkspace.get(share.workspaceId) ?? 0;
+          if (workspaceCount >= MAX_BROWSER_CHAT_FOLLOWS_PER_WORKSPACE) throw relayError("share_access_rate_limited");
+          followsByWorkspace.set(share.workspaceId, workspaceCount + 1);
+          followWorkspace = share.workspaceId;
         }
         const authority = requireShareAction(shareId, actor.userId, "read");
         const chat = chatSideOf(authority.effectiveSelector);
@@ -151,7 +157,7 @@ export function createNamedRecipientChat(options: {
           const writable = chat.access === "read-write" && authority.grant.parentGrantId === null;
           const labels = storage.getShareLabels(shareId);
           recheck();
-          return json({shareId, userId: actor.userId, channels: [{channelWireId: chat.channelWireId, name: labels.subjectName,
+          return json({shareId, userId: actor.userId, maxPostBytes: limits.maxRequestBytes, maxBodyBytes: MAX_MESSAGE_BODY_BYTES, channels: [{channelWireId: chat.channelWireId, name: labels.subjectName,
             kind: storage.findChannelCreateKind(share.workspaceId, chat.channelWireId) ?? null, access: writable ? "read-write" : "read-only"}]});
         }
         const channelWireId = parseString(request.method === "POST" ? input.channelWireId : url.searchParams.get("channelWireId"), "channelWireId", 256);
@@ -206,33 +212,29 @@ export function createNamedRecipientChat(options: {
         const resolver = options.reads.chatResolverFor(share.workspaceId);
         const readPage = () => {
           recheck();
+          const result = storage.fetchChatMessages({workspaceId: share.workspaceId, channelWireId,
+            cursor: position, direction: following ? "newer" : "older", limit});
+          position = result.nextCursor;
           const messages: NamedChatMessage[] = [];
-          let more = false, newest: number | undefined;
-          for (;;) {
-            const rows = storage.fetchChatMessages({workspaceId: share.workspaceId, channelWireId,
-              cursor: position, direction: following ? "newer" : "older", limit: limit + 1});
-            for (const row of rows) {
-              if (row.settlementAdmission?.status === "refused") {position = row.relaySeq; continue;}
-              const decision = filterOpForShare(authority.effectiveSelector, row.opKind, row.payloadJson, resolver, "chat");
-              const message = decision.allowed ? messageFromOp({relaySeq: row.relaySeq, opKind: row.opKind, payload: decision.payload}) : null;
-              if (message && messages.length === limit) {more = true; break;}
-              position = row.relaySeq;
-              if (message) {newest ??= row.relaySeq; messages.push(message);}
-            }
-            if (more || rows.length < limit + 1) break;
+          for (const row of result.rows) {
+            if (row.settlementAdmission?.status === "refused") continue;
+            const decision = filterOpForShare(authority.effectiveSelector, row.opKind, row.payloadJson, resolver, "chat");
+            const message = decision.allowed ? messageFromOp({relaySeq: row.relaySeq, opKind: row.opKind, payload: decision.payload}) : null;
+            if (message) messages.push(message);
           }
-          return {messages, nextCursor: following ? position ?? since ?? 0 : newest ?? position ?? 0,
-            ...(following ? {hasMore: more} : {olderCursor: more ? position : null})};
+          return {messages, nextCursor: following ? result.nextCursor : result.latestCursor,
+            ...(following ? {hasMore: result.hasMore} : {olderCursor: result.hasMore ? result.nextCursor : null})};
         };
         let page = readPage();
-        if (following && hold > 0 && page.messages.length === 0) {
+        const caughtUp = () => page.messages.length === 0 && page.nextCursor === since && "hasMore" in page && !page.hasMore;
+        if (following && hold > 0 && caughtUp()) {
           const deadline = Date.now() + hold;
           while (!controller.signal.aborted && Date.now() < deadline) {
             try {
               await options.activity.wait(linkLogWaitGroup(share.workspaceId), `named:${actor.userId}`, {
                 holdMs: Math.max(1, deadline - Date.now()), signal: controller.signal,
                 shouldPark: () => {
-                  try {page = readPage(); return page.messages.length === 0;}
+                  try {page = readPage(); return caughtUp();}
                   catch {return false;}
                 },
               });
@@ -240,30 +242,38 @@ export function createNamedRecipientChat(options: {
               if (error instanceof DiscussionActivityCapacityError) throw relayError("share_access_rate_limited");
               throw error;
             }
-            if (page.messages.length === 0) page = readPage();
-            if (page.messages.length > 0) break;
+            if (caughtUp()) page = readPage();
+            if (!caughtUp()) break;
           }
         }
         recheck();
         const envelope = {shareId, channelWireId, ...page};
-        // Reserve the page's envelope and metadata before admitting each body.
-        const minimum = {...envelope, messages: page.messages.map(message => ({...message, body: null, bodyTooLarge: true}))};
-        let remaining = limits.maxResponseBytes - Buffer.byteLength(JSON.stringify(minimum));
-        if (remaining < 0) throw relayError("payload_too_large");
-        const messages = page.messages.map(message => {
-          const omitted = {...message, body: null, bodyTooLarge: true};
-          const bytes = Buffer.byteLength(JSON.stringify(message)) - Buffer.byteLength(JSON.stringify(omitted));
-          if (bytes > remaining) return omitted;
-          remaining -= bytes;
-          return message;
-        });
-        return json({...envelope, messages});
+        const messages: NamedChatMessage[] = [];
+        const partial = (selected: NamedChatMessage[]) => ({...envelope, messages: selected,
+          ...(following ? {nextCursor: selected[selected.length - 1]!.relaySeq, hasMore: true} :
+            {olderCursor: selected[selected.length - 1]!.relaySeq})});
+        const fits = (value: unknown) => Buffer.byteLength(JSON.stringify(value)) <= limits.maxResponseBytes;
+        let truncated = false;
+        for (const message of page.messages) {
+          let omitted: NamedChatMessage = {...message, body: null, bodyTooLarge: true};
+          if (!fits(partial([omitted]))) {
+            omitted = {...omitted, messageId: `omitted:${message.relaySeq}`, threadId: "",
+              authorUserId: null, authorDisplayName: "", authorOwnerDisplayName: null};
+          }
+          if (!fits(partial([...messages, omitted]))) {truncated = true; break;}
+          messages.push(fits(partial([...messages, message])) ? message : omitted);
+        }
+        return json(truncated ? partial(messages) : {...envelope, messages});
       } catch (error) {return controller.signal.aborted ? refuse() : errorResponse(error);}
       finally {
         if (following) pendingFollows--; else pending--;
         if (followUser !== undefined) {
           const count = (followsByUser.get(followUser) ?? 1) - 1;
           if (count === 0) followsByUser.delete(followUser); else followsByUser.set(followUser, count);
+        }
+        if (followWorkspace !== undefined) {
+          const count = (followsByWorkspace.get(followWorkspace) ?? 1) - 1;
+          if (count === 0) followsByWorkspace.delete(followWorkspace); else followsByWorkspace.set(followWorkspace, count);
         }
         clearTimeout(timer); request.signal.removeEventListener("abort", abort);
       }

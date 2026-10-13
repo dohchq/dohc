@@ -55,7 +55,7 @@ it("exposes channel metadata and plain message reads/posts through the named acc
   incoming.headers.set("x-dohc-relay-exchange-key", "forged");
   const channels = await f.web.handle(request("channels?grantId=grant"));
   expect(channels.status).toBe(200);
-  expect(await channels.json()).toMatchObject({shareId: "share", userId: "alice", channels: [{channelWireId: "wire", name: "Team", access: "read-write"}]});
+  expect(await channels.json()).toMatchObject({shareId: "share", userId: "alice", maxPostBytes: limits.maxRequestBytes, maxBodyBytes: 65536, channels: [{channelWireId: "wire", name: "Team", access: "read-write"}]});
   const posted = await f.web.handle(incoming), result = await posted.json();
   expect(posted.status).toBe(200);
   expect(result).toMatchObject({message: {body: message.body, authorDisplayName: "Alice", authorUserId: "alice", authorKind: "human"}});
@@ -102,7 +102,9 @@ it("enforces same-origin writes, account cookie selection, and request bounds be
     const incoming = request("messages", "alice", message); change(incoming);
     expect((await f.web.handle(incoming)).status).toBe(404);
   }
-  expect((await f.web.handle(request("messages", "alice", {...message, body: "x".repeat(limits.maxRequestBytes)}))).status).toBe(404);
+  const oversized = await f.web.handle(request("messages", "alice", {...message, body: "x".repeat(limits.maxRequestBytes)}));
+  expect(oversized.status).toBe(413);
+  expect(await oversized.json()).toMatchObject({code: "payload_too_large"});
   expect(f.forwarded).toHaveLength(0);
   const foreignRead = request(); foreignRead.headers.set("origin", "https://other.test");
   expect((await f.web.handle(foreignRead)).status).toBe(404);
@@ -146,7 +148,9 @@ it("keeps cancelled authentication in capacity until it settles", async () => {
   const first = f.web.handle(new Request(request(), {signal: controller.signal})), second = f.web.handle(request());
   await both; controller.abort();
   expect((await first).status).toBe(404);
-  expect((await f.web.handle(request())).status).toBe(404);
+  const busy = await f.web.handle(request());
+  expect(busy.status).toBe(429);
+  expect(await busy.json()).toMatchObject({code: "share_access_rate_limited"});
   release(); expect((await second).status).toBe(200);
   expect((await f.web.handle(request())).status).toBe(200);
 });
@@ -234,4 +238,38 @@ it("isolates a full account follow pool from another account's lists, history an
     await Promise.all(polls);
   }
   expect(f.activity.stats().waiters).toBe(0);
+});
+
+it.each([413, 429])("preserves an upstream %s post refusal", async status => {
+  const code = status === 413 ? "payload_too_large" : "share_access_rate_limited";
+  const web = createNamedRecipientChatClient({relayUrl: "http://relay.test", publicOrigin: origin, exchangeKey, limits,
+    fetchRelay: async () => Response.json({ok: false, error: "refused", code}, {status})});
+  const response = await web(request("messages", "alice", message));
+  expect(response.status).toBe(status);
+  expect(await response.json()).toMatchObject({code});
+});
+
+it("caps the advertised post body at share-web's request budget", async () => {
+  const web = createNamedRecipientChatClient({relayUrl: "http://relay.test", publicOrigin: origin, exchangeKey, limits,
+    fetchRelay: async () => Response.json({shareId: "share", userId: "alice", maxPostBytes: 16384, maxBodyBytes: 65536,
+      channels: [{channelWireId: "wire", name: "Team", kind: "channel", access: "read-write"}]})});
+  expect(await (await web(request("channels?grantId=grant"))).json()).toMatchObject({maxPostBytes: limits.maxRequestBytes});
+});
+
+it("returns relay non-follow pool exhaustion as 429 through a larger share-web pool", async () => {
+  const f = await fixture();
+  let release!: () => void, entered!: () => void, count = 0;
+  const blocked = new Promise<void>(resolve => {release = resolve;}), both = new Promise<void>(resolve => {entered = resolve;});
+  f.resolveActor.mockImplementation(async (_request, workspaceId) => {
+    if (++count === 2) entered(); await blocked; return {userId: "alice", workspaceId};
+  });
+  const client = createNamedRecipientChatClient({relayUrl: "http://relay.invalid", publicOrigin: origin, exchangeKey,
+    limits: {...limits, maxPendingRequests: 3}, fetchRelay: f.relay});
+  const first = client(request()), second = client(request());
+  try {
+    await both;
+    const response = await client(request());
+    expect(response.status).toBe(429);
+    expect(await response.json()).toMatchObject({code: "share_access_rate_limited"});
+  } finally {release(); await Promise.all([first, second]);}
 });

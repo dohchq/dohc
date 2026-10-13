@@ -20,14 +20,14 @@ beforeEach(() => {
 });
 afterEach(async () => {await act(async () => root.unmount()); container.remove(); vi.restoreAllMocks(); vi.unstubAllGlobals();});
 
-function server(options: {access?: "read-only" | "read-write"; signedIn?: boolean; channelName?: string;
+function server(options: {access?: "read-only" | "read-write"; signedIn?: boolean; channelName?: string; maxPostBytes?: number;
   history?: (before: string | null) => unknown; post?: (body: Record<string, unknown>) => Response} = {}) {
   let signedIn = options.signedIn ?? true;
   const fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = new URL(String(input), "https://viewer.test"), signal = init?.signal ?? new AbortController().signal;
     if (url.pathname === "/api/account/session") return jsonResponse({user: signedIn ? {id: "alice", name: "Alice"} : null});
     if (url.pathname === "/api/account/sign-in") {signedIn = true; return jsonResponse({ok: true});}
-    if (url.pathname === "/api/named-chat/channels") return jsonResponse({shareId, userId: "alice",
+    if (url.pathname === "/api/named-chat/channels") return jsonResponse({shareId, userId: "alice", maxPostBytes: options.maxPostBytes ?? 100_000, maxBodyBytes: 65536,
       channels: [{channelWireId, name: options.channelName ?? url.searchParams.get("grantId"), kind: "channel", access: options.access ?? "read-write"}]});
     if (init?.method === "POST") {
       const body = JSON.parse(String(init.body)) as Record<string, unknown>; posts.push(body);
@@ -179,4 +179,16 @@ it("returns to sign-in when the session ends while following", async () => {
   await act(async () => follows.at(-1)!.answer({ok: false, error: "unauthorized", code: "unauthorized"}, 401));
   await settle(() => Boolean(container.querySelector('input[name="email"]')));
   expect(container.querySelector('[role="alert"]')?.textContent).toBe("Your session ended. Sign in again to keep reading.");
+});
+
+it("checks the advertised post budget including author fields and JSON escaping", async () => {
+  server({maxPostBytes: 400}); await render(); await opened();
+  await type('"'.repeat(150));
+  expect(button("Send")?.disabled).toBe(true);
+  expect(status()).toContain("too long");
+  expect(posts).toHaveLength(0);
+  await type("x".repeat(150));
+  expect(button("Send")?.disabled).toBe(false);
+  await click("Send"); await settle(() => composer()?.value === "");
+  expect(posts).toHaveLength(1);
 });

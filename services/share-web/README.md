@@ -231,26 +231,30 @@ GET requests can omit Origin. Browser requests must come from the configured pub
 Share-web forwards only recognized account cookies and its trusted relay exchange key.
 
 - `GET /api/named-chat/channels?grantId=<id>` resolves an invitation to its share.
-  It returns `{shareId, userId, channels: [{channelWireId, name, kind, access}]}`.
+  It returns `{shareId, userId, maxPostBytes, maxBodyBytes, channels: [{channelWireId, name, kind, access}]}`.
   A channel or Group share exposes one channel. `name` and `kind` can be null.
   Access is `read-only` or `read-write`, including the desktop's append restrictions.
+  `maxPostBytes` bounds the complete UTF-8 POST JSON at both services. `maxBodyBytes` bounds the normalized message body.
 - `GET /api/named-chat/messages?shareId=<id>&channelWireId=<wire-id>&limit=50` returns the newest page first.
   The response is `{shareId, channelWireId, messages, nextCursor, olderCursor}`.
   Messages appear in descending relay sequence order. The limit defaults to 100 and cannot exceed 100.
   Save the first page's `nextCursor` to follow new messages.
   Pass `before=<olderCursor>` to read older pages. Stop when `olderCursor` is null.
-  The relay selects channel messages in SQL and applies the share filter before returning them.
+  Each page scans at most 2,000 workspace log rows and resolves earliest thread bindings once in SQL.
+  The relay applies the share filter before returning messages.
+  Empty pages can advance through other channels. Follow and older cursors include those scanned rows.
   Older-page watermarks must not replace the saved following cursor.
 - `GET /api/named-chat/messages?shareId=<id>&channelWireId=<wire-id>&since=<nextCursor>&hold=30000&limit=50` follows new messages.
   The response is `{shareId, channelWireId, messages, nextCursor, hasMore}`.
   Messages appear in ascending relay sequence order. Save each returned cursor, including on empty pages.
   If `hasMore` is true, read the next page immediately.
   Hold defaults to zero and accepts integer milliseconds from zero through 30,000.
-  A caught-up read waits for a channel message or the timeout.
+  A caught-up read waits for workspace log activity or the timeout.
   Cancellation releases the parked waiter. The relay hub bounds waiter counts.
   Follow reads use a separate pool at both services, leaving other requests available.
   The relay caps follow requests per account at the configured `maxPendingRequests`.
   Share-web applies the same cap per account cookie; each service also caps total follow requests at 4,096.
+  Browser follows are capped at 128 per workspace, leaving wake-hub capacity for ordinary log readers.
 - `POST /api/named-chat/messages` accepts this body:
 
   ```json
@@ -275,7 +279,8 @@ Display names follow desktop payload rules: trimmed, non-empty, and at most 200 
 Agents and automations can also supply `authorOwnerDisplayName`.
 These names and kinds are payload descriptions; they do not authenticate an account.
 The body normalizes CRLF and CR to LF, trims its end, and must be non-empty.
-The complete POST JSON must fit the relay's `maxRequestBytes`, 16 KiB in the self-hosted profile.
+The complete POST JSON must fit the returned `maxPostBytes`, 16 KiB in the self-hosted profile.
+The normalized body must also fit `maxBodyBytes`.
 JSON escaping and metadata count toward that limit.
 
 A successful post returns `{shareId, channelWireId, message}`.
@@ -284,14 +289,20 @@ The same account, share, ID, and fields return the original result.
 Changed fields receive 409. Use a new ID for a new message.
 The thread and message use the existing named log append, including its transaction authorization check.
 The relay refuses reactions, decisions, attachments, channel creation, and extra body fields.
+The ordinary recipient log route reserves `browser-chat` for these server-assigned sequences.
 
 Every message contains `relaySeq`, `messageId`, `threadId`, `authorUserId`,
 `authorDisplayName`, `authorKind`, `authorOwnerDisplayName`, `createdAtMs`, `body`, and `bodyTooLarge`.
 The user ID and owner name are null when absent.
 If a body cannot fit the response budget, `body` is null and `bodyTooLarge` is true.
-The message still carries its metadata and cursor. Other messages and later pages remain readable.
+If metadata fills a page, the relay returns the prefix that fits and continues after its last message.
+If one message's metadata cannot fit alone, the relay returns a minimal omission marker.
+Its message ID is `omitted:<relaySeq>`; its thread ID and display names are empty, and its user ID is null.
+The marker retains the sequence, author kind, and timestamp, with a null body and `bodyTooLarge: true`.
+Other messages and later pages remain readable.
 No engine is needed to read this JSON.
 
+Oversized posts return 413 with `payload_too_large`. Full request pools return 429 with `share_access_rate_limited`.
 Responses are private and never cached.
 Read-only posts receive 403 at the relay, even when share-web is bypassed.
 Missing or removed access receives 404. Invalid fields receive 400 or 403.

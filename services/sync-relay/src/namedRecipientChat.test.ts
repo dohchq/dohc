@@ -1,6 +1,8 @@
 import { createShareSummaries } from "./shareSummaries";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { DiscussionActivityHub } from "./discussionActivity";
+import { MAX_BROWSER_CHAT_FOLLOWS_PER_WORKSPACE } from "./namedRecipientChat";
+import { CHAT_HISTORY_SCAN_WINDOW } from "./storage/log";
+import { linkLogWaitGroup, DiscussionActivityHub } from "./discussionActivity";
 import { RELAY_EXCHANGE_KEY, SHARE_WEB_ORIGIN, chatChannelCreate, chatMessageAppend, chatThreadCreate,
   closeTestStorages, json, jsonBody, request, resolveTestActor, sequenced, testHandler, testStorage } from "./testing";
 import { UnauthorizedError } from "@dohc/workspace-auth/session";
@@ -268,43 +270,128 @@ it.each([false, true])("observes a message appended between the initial read and
   expect(f.activity.stats().waiters).toBe(0);
 });
 
-it("parks again after activity in a different channel", async () => {
-  const f = await fixture(), first = deferred(), second = deferred(), wait = f.activity.wait.bind(f.activity);
-  let count = 0, answered = false;
-  vi.spyOn(f.activity, "wait").mockImplementation((group, actor, options) => {
-    const pending = wait(group, actor, options);
-    (++count === 1 ? first : second).resolve();
-    return pending;
-  });
-  const controller = new AbortController();
-  const poll = f.call(history + "&since=7&hold=30000", "alice", {signal: controller.signal}).finally(() => {answered = true;});
-  try {
-    await first.promise;
-    f.storage.appendLogBatch({workspaceId, originId: "private-change", ops: sequenced([
-      chatMessageAppend("private-change", "thread-private", "SENTINEL new activity", {authorUserId: "owner"}),
-    ]).map(({payload, ...op}) => ({...op, payloadJson: JSON.stringify(payload)}))});
-    f.activity.wakeLog(workspaceId);
-    await second.promise;
-    expect(answered).toBe(false);
-    expect(f.activity.stats().waiters).toBe(1);
-    expect((await f.post({threadId: "thread-team"})).status).toBe(200);
-    const response = await poll;
-    expect(response.status).toBe(200);
-    const body = await json(response);
-    expect(body.messages).toEqual([expect.objectContaining({body: "hello from browser"})]);
-    expect(JSON.stringify(body)).not.toContain("SENTINEL");
-  } finally {controller.abort(); await poll;}
+it("advances past another channel on each wake without rescanning it", async () => {
+  const f = await fixture(), read = vi.spyOn(f.storage, "fetchChatMessages");
+  let since = 7;
+  for (let index = 0; index < 3; index++) {
+    const controller = new AbortController(), entered = deferred(), wait = f.activity.wait.bind(f.activity);
+    const spy = vi.spyOn(f.activity, "wait").mockImplementation((group, actor, options) => {
+      const pending = wait(group, actor, options); entered.resolve(); return pending;
+    });
+    const poll = f.call(history + `&since=${since}&hold=30000`, "alice", {signal: controller.signal});
+    try {
+      await entered.promise;
+      f.storage.appendLogBatch({workspaceId, originId: `private-change-${index}`, ops: sequenced([
+        chatMessageAppend(`private-${index}`, "thread-private", "SENTINEL", {authorUserId: "owner"}),
+      ]).map(({payload, ...op}) => ({...op, payloadJson: JSON.stringify(payload)}))});
+      f.activity.wakeLog(workspaceId);
+      const page = await json(await poll);
+      expect(page).toMatchObject({messages: [], nextCursor: since + 1, hasMore: false});
+      expect(read.mock.calls.slice(-3).map(([input]) => input.cursor)).toEqual([since, since, since]);
+      since = Number(page.nextCursor);
+      expect(f.activity.stats().waiters).toBe(0);
+    } finally {controller.abort(); await poll; spy.mockRestore();}
+  }
 });
 
-it("selects channel messages without empty pages caused by unrelated log rows", async () => {
+it("bounds quiet-channel history and follows in a workspace with 20k messages and 2k threads", async () => {
   const f = await fixture();
-  f.storage.appendLogBatch({workspaceId, originId: "unrelated", ops: Array.from({length: 2100}, (_value, originSeq) =>
-    ({originSeq, opKind: "workspace.init", payloadJson: "{}", recordedAtMs: originSeq}))});
+  const ops = [
+    ...Array.from({length: 2000}, (_, index) => chatThreadCreate(`busy-thread-${index}`, "wire-private")),
+    ...Array.from({length: 20_000}, (_, index) => chatMessageAppend(`busy-${index}`, `busy-thread-${index % 2000}`, "busy")),
+  ];
+  f.storage.appendLogBatch({workspaceId, originId: "busy", ops: sequenced(ops).map(({payload, ...op}) => ({...op, payloadJson: JSON.stringify(payload)}))});
+  const read = vi.spyOn(f.storage, "fetchChatMessages"), wait = vi.spyOn(f.activity, "wait");
   const recent = await json(await f.call(history));
-  expect(recent.messages).toEqual([
-    expect.objectContaining({messageId: "owner-second"}), expect.objectContaining({messageId: "owner-first"}),
-  ]);
-  expect(recent.olderCursor).toBeNull();
+  expect(recent).toMatchObject({messages: [], nextCursor: 22007, olderCursor: 22007 - CHAT_HISTORY_SCAN_WINDOW + 1});
+  expect(read).toHaveBeenCalledTimes(1);
+  let since = 7;
+  while (since < 22007) {
+    const page = await json(await f.call(history + `&since=${since}&hold=30000`));
+    expect(page.messages).toEqual([]);
+    expect(page.nextCursor).toBe(Math.min(22007, since + CHAT_HISTORY_SCAN_WINDOW));
+    since = Number(page.nextCursor);
+  }
+  expect(wait).not.toHaveBeenCalled();
+  const earlier = await json(await f.call(history + `&before=${recent.olderCursor}`));
+  expect(earlier.olderCursor).toBe(Number(recent.olderCursor) - CHAT_HISTORY_SCAN_WINDOW);
+  const db = inspectDatabase(storagePath(f.storage));
+  const plan = db.prepare(`EXPLAIN QUERY PLAN SELECT payload_json FROM sync_relay_log
+    WHERE workspace_id = ? AND op_kind = 'chat.thread.create' AND json_valid(payload_json)
+      AND json_extract(payload_json, '$.threadId') = ? ORDER BY relay_seq`).all(workspaceId, "thread-team");
+  expect(JSON.stringify(plan)).toContain("idx_sync_relay_log_thread_id");
+  db.close();
+});
+
+it("pages metadata that exceeds the response budget and preserves both continuation directions", async () => {
+  const f = await fixture(new DiscussionActivityHub(), 4152);
+  f.storage.appendLogBatch({workspaceId, originId: "long-names", ops: sequenced(Array.from({length: 50}, (_, index) =>
+    chatMessageAppend(`named-${index}`, "thread-team", "", {authorKind: "agent", authorDisplayName: "名".repeat(200), authorOwnerDisplayName: "名".repeat(200)})))
+    .map(({payload, ...op}) => ({...op, payloadJson: JSON.stringify(payload)}))});
+  let since = 7, total = 0;
+  while (since < 57) {
+    const response = await f.call(history + `&since=${since}&limit=50`), page = await json(response);
+    expect(response.status).toBe(200);
+    const messages = page.messages as Array<{relaySeq: number}>;
+    expect(messages.length).toBeGreaterThan(0);
+    expect(messages.length).toBeLessThan(50);
+    expect(page.nextCursor).toBe(messages[messages.length - 1]!.relaySeq);
+    expect(page.hasMore).toBe(Number(page.nextCursor) < 57);
+    expect(Buffer.byteLength(JSON.stringify(page))).toBeLessThanOrEqual(4152);
+    since = Number(page.nextCursor); total += messages.length;
+  }
+  expect(total).toBe(50);
+  const recent = await json(await f.call(history + "&limit=50"));
+  const messages = recent.messages as Array<{relaySeq: number}>;
+  expect(recent.olderCursor).toBe(messages[messages.length - 1]!.relaySeq);
+  const older = await json(await f.call(history + `&before=${recent.olderCursor}&limit=50`));
+  expect((older.messages as Array<{relaySeq: number}>)[0]!.relaySeq).toBe(Number(recent.olderCursor) - 1);
+});
+
+it("returns a minimal omission marker for metadata that cannot fit alone and advances past it", async () => {
+  const f = await fixture(new DiscussionActivityHub(), 4152);
+  f.storage.appendLogBatch({workspaceId, originId: "huge-metadata", ops: sequenced([
+    chatMessageAppend("x".repeat(60_000), "thread-team", "body", {authorDisplayName: "x".repeat(60_000)}),
+    chatMessageAppend("after", "thread-team", "readable"),
+  ]).map(({payload, ...op}) => ({...op, payloadJson: JSON.stringify(payload)}))});
+  expect(await json(await f.call(history + "&since=7&limit=1"))).toMatchObject({
+    messages: [{messageId: "omitted:8", body: null, bodyTooLarge: true}], nextCursor: 8, hasMore: true,
+  });
+  expect(await json(await f.call(history + "&before=9&limit=1"))).toMatchObject({
+    messages: [{messageId: "omitted:8", body: null, bodyTooLarge: true}], olderCursor: 8,
+  });
+  expect(await json(await f.call(history + "&since=8&limit=1"))).toMatchObject({messages: [{messageId: "after", body: "readable"}], nextCursor: 9});
+});
+
+it("reserves browser-chat on the ordinary recipient log route without consuming its sequences", async () => {
+  const f = await fixture();
+  const response = await f.handler(request("alice", `/sync/shares/${shareId}/log`, jsonBody({originId: "browser-chat", ops: []})));
+  expect(response.status).toBe(400);
+  expect(await json(response)).toMatchObject({code: "bad_request"});
+  expect((await f.post()).status).toBe(200);
+});
+
+it("caps browser follows per workspace while leaving capacity for ordinary log readers", async () => {
+  const f = await fixture(), controllers: AbortController[] = [], polls: Promise<Response>[] = [];
+  try {
+    for (let index = 0; index < MAX_BROWSER_CHAT_FOLLOWS_PER_WORKSPACE; index++) {
+      const user = `account${index}`, controller = new AbortController(), entered = deferred(), wait = f.activity.wait.bind(f.activity);
+      addGrant(f.storage, grant(user, user, "read-only")); controllers.push(controller);
+      const spy = vi.spyOn(f.activity, "wait").mockImplementation((group, actor, options) => {
+        const result = wait(group, actor, options); entered.resolve(); return result;
+      });
+      polls.push(f.call(history + "&since=7&hold=30000", user, {signal: controller.signal}));
+      await entered.promise; spy.mockRestore();
+    }
+    expect(f.activity.stats().waiters).toBe(MAX_BROWSER_CHAT_FOLLOWS_PER_WORKSPACE);
+    expect((await f.call(history + "&since=7&hold=30000")).status).toBe(429);
+    const controller = new AbortController(); controllers.push(controller);
+    const ordinary = f.activity.wait(linkLogWaitGroup(workspaceId), "desktop-reader", {holdMs: 30000, signal: controller.signal, shouldPark: () => true});
+    expect(f.activity.stats().waiters).toBe(MAX_BROWSER_CHAT_FOLLOWS_PER_WORKSPACE + 1);
+    controller.abort(); await ordinary;
+  } finally {controllers.forEach(controller => controller.abort()); await Promise.all(polls);}
+  expect(f.activity.stats().waiters).toBe(0);
+  expect(await json(await f.call(history + "&since=7"))).toMatchObject({nextCursor: 7});
 });
 
 it("refuses a post before appending when its acknowledgment cannot fit the response budget", async () => {

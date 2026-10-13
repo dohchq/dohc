@@ -166,7 +166,7 @@ function ChannelView({channel, account, onEnded}: {channel: NamedChatChannel; ac
     } finally {if (!controller.signal.aborted) olderRef.current = false;}
   };
 
-  const body = normalizeChatBody(draft), tooLong = chatBodyTooLong(draft);
+  const body = normalizeChatBody(draft, channel, account.name), tooLong = chatBodyTooLong(draft, channel, account.name);
   const send = async (event?: FormEvent<HTMLFormElement>) => {
     event?.preventDefault();
     const controller = mounted.current;

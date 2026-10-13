@@ -3,10 +3,9 @@ import {normalizeShareLabel} from "@dohc/security-contract/share-labels";
 // Client for share-web's named recipient chat HTTP. The README section "Named recipient chat HTTP" is the contract.
 export const CHAT_PAGE_LIMIT = 50;
 export const CHAT_FOLLOW_HOLD_MS = 30_000;
-const MAX_BODY_BYTES = 64 * 1024;
 
 export type NamedChatAccess = "read-only" | "read-write";
-export interface NamedChatChannel {shareId: string; userId: string; channelWireId: string; name: string | null; access: NamedChatAccess}
+export interface NamedChatChannel {shareId: string; userId: string; channelWireId: string; name: string | null; access: NamedChatAccess; maxPostBytes: number; maxBodyBytes: number}
 /** `body` is null when the relay left it out because it is too large for a browser response. */
 export interface NamedChatMessage {
   relaySeq: number; messageId: string; threadId: string; authorUserId: string | null; authorDisplayName: string;
@@ -62,9 +61,12 @@ const coordinates = (channel: NamedChatChannel) => ({shareId: channel.shareId, c
 export async function openNamedChannel(grantId: string, signal: AbortSignal): Promise<NamedChatChannel> {
   const value = await chatRequest(`/api/named-chat/channels?${new URLSearchParams({grantId})}`, signal);
   const channel: unknown = Array.isArray(value.channels) && value.channels.length === 1 ? value.channels[0] : null;
-  if (typeof value.shareId !== "string" || typeof value.userId !== "string" || !record(channel) ||
+  if (typeof value.shareId !== "string" || typeof value.userId !== "string" ||
+      !Number.isSafeInteger(value.maxPostBytes) || Number(value.maxPostBytes) <= 0 ||
+      !Number.isSafeInteger(value.maxBodyBytes) || Number(value.maxBodyBytes) <= 0 || !record(channel) ||
       typeof channel.channelWireId !== "string" || (channel.access !== "read-only" && channel.access !== "read-write")) throw invalid();
-  return {shareId: value.shareId, userId: value.userId, channelWireId: channel.channelWireId, name: normalizeShareLabel(channel.name), access: channel.access};
+  return {shareId: value.shareId, userId: value.userId, channelWireId: channel.channelWireId, name: normalizeShareLabel(channel.name), access: channel.access,
+    maxPostBytes: Number(value.maxPostBytes), maxBodyBytes: Number(value.maxBodyBytes)};
 }
 
 /** One history page in reading order, oldest first. `nextCursor` starts following; `olderCursor` reads further back. */
@@ -90,13 +92,15 @@ export async function postNamedChatMessage(channel: NamedChatChannel, post: {id:
 }
 
 /** The body the relay stores, or null when it would refuse it. */
-export function normalizeChatBody(text: string): string | null {
+export function normalizeChatBody(text: string, channel: NamedChatChannel, authorDisplayName: string): string | null {
   const body = text.replace(/\r\n?/gu, "\n").trimEnd();
-  return body && body.isWellFormed() && new TextEncoder().encode(body).length <= MAX_BODY_BYTES ? body : null;
+  return body && body.isWellFormed() && !chatBodyTooLong(body, channel, authorDisplayName) ? body : null;
 }
 
-export function chatBodyTooLong(text: string): boolean {
-  return new TextEncoder().encode(text.replace(/\r\n?/gu, "\n").trimEnd()).length > MAX_BODY_BYTES;
+export function chatBodyTooLong(text: string, channel: NamedChatChannel, authorDisplayName: string): boolean {
+  const body = text.replace(/\r\n?/gu, "\n").trimEnd(), encoder = new TextEncoder();
+  const post = {...coordinates(channel), id: "00000000-0000-0000-0000-000000000000", body, authorKind: "human", authorDisplayName};
+  return encoder.encode(body).length > channel.maxBodyBytes || encoder.encode(JSON.stringify(post)).length > channel.maxPostBytes;
 }
 
 export function mergeChatMessages(current: readonly NamedChatMessage[], incoming: readonly NamedChatMessage[]): NamedChatMessage[] {

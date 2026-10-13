@@ -22,7 +22,9 @@ function message(value: unknown): boolean {
 
 function resultMatches(value: Record<string, unknown>, channels: boolean, write: boolean, following: boolean): boolean {
   if (typeof value.shareId !== "string") return false;
-  if (channels) return Object.keys(value).sort().join() === "channels,shareId,userId" && typeof value.userId === "string" &&
+  if (channels) return Object.keys(value).sort().join() === "channels,maxBodyBytes,maxPostBytes,shareId,userId" && typeof value.userId === "string" &&
+    Number.isSafeInteger(value.maxPostBytes) && Number(value.maxPostBytes) > 0 &&
+    Number.isSafeInteger(value.maxBodyBytes) && Number(value.maxBodyBytes) > 0 &&
     Array.isArray(value.channels) && value.channels.every(channel => record(channel) &&
       Object.keys(channel).sort().join() === "access,channelWireId,kind,name" && typeof channel.channelWireId === "string" &&
       (channel.name === null || typeof channel.name === "string") &&
@@ -49,7 +51,7 @@ export function createNamedRecipientChatClient(options: {
   const followCalls = createNamedRelayCalls({maxPending: MAX_NAMED_CHAT_FOLLOW_REQUESTS, timeoutMs: limits.timeoutMs,
     unrefDeadline: false, refuse, fetchRelay: options.fetchRelay});
   const followsByCookie = new Map<string, number>();
-  const rateLimited = () => Response.json({ok: false, error: "too many follow requests", code: "share_access_rate_limited"},
+  const rateLimited = () => Response.json({ok: false, error: "too many chat requests", code: "share_access_rate_limited"},
     {status: 429, headers: cacheHeaders});
   return async (request: Request): Promise<Response> => {
     const url = new URL(request.url), write = request.method === "POST";
@@ -65,12 +67,22 @@ export function createNamedRecipientChatClient(options: {
     const cookie = namedAccountCookie(request.headers.get("cookie"), options.publicOrigin);
     if (!cookie) return refuse();
     if (pool.full || (following && (followsByCookie.get(cookie) ?? 0) >= limits.maxPendingRequests)) {
-      return following ? rateLimited() : refuse();
+      return rateLimited();
     }
     if (following) followsByCookie.set(cookie, (followsByCookie.get(cookie) ?? 0) + 1);
     return pool.run(request, async (signal, relay) => {
       try {
-        const body = write ? JSON.stringify(await readBoundedJson(request, limits.maxRequestBytes, signal)) : undefined;
+        let body: string | undefined;
+        if (write) {
+          try {body = JSON.stringify(await readBoundedJson(request, limits.maxRequestBytes, signal));}
+          catch (error) {
+            if (error instanceof RangeError && !signal.aborted) return Response.json(
+              {ok: false, error: "Post is too large.", code: "payload_too_large"}, {status: 413, headers: cacheHeaders});
+            throw error;
+          }
+          if (Buffer.byteLength(body) > limits.maxRequestBytes) return Response.json(
+            {ok: false, error: "Post is too large.", code: "payload_too_large"}, {status: 413, headers: cacheHeaders});
+        }
         const relayUrl = new URL(url.pathname.replace("/api/", "/sync/"), options.relayUrl);
         relayUrl.search = url.search;
         const response = await relay(new Request(relayUrl, {
@@ -88,6 +100,7 @@ export function createNamedRecipientChatClient(options: {
           if (!write && !url.pathname.endsWith("/channels") && (result.shareId !== url.searchParams.get("shareId") ||
               result.channelWireId !== url.searchParams.get("channelWireId"))) return refuse();
         } else if (result.ok !== false || typeof result.error !== "string" || (result.code !== undefined && typeof result.code !== "string")) return refuse();
+        if (response.status === 200 && url.pathname.endsWith("/channels")) result.maxPostBytes = Math.min(Number(result.maxPostBytes), limits.maxRequestBytes);
         return Response.json(result, {status: response.status, headers: cacheHeaders});
       } finally {
         if (following) {

@@ -188,6 +188,9 @@ export function createNamedShareTransportRoutes(
       if (originId.startsWith(PROPOSAL_ORIGIN_PREFIX)) {
         throw badRequest(`originId must not start with "${PROPOSAL_ORIGIN_PREFIX}"`);
       }
+      if (originId === "browser-chat" && browserMessageId === undefined) {
+        throw badRequest('originId is reserved for browser chat');
+      }
       if (!Array.isArray(input.ops)) throw badRequest("ops must be an array");
       if (input.ops.length > MAX_OPS_PER_REQUEST) throw badRequest("too many ops");
       // Authorship runs before the filter and parseLogOp so neither admits nor

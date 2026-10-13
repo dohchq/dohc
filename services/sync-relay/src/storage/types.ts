@@ -822,7 +822,7 @@ export interface SyncRelayStorage {
   }): SyncRelayLogRow[];
   fetchChatMessages(input: {
     workspaceId: string; channelWireId: string; cursor: number | null; direction: "older" | "newer"; limit: number;
-  }): SyncRelayLogRow[];
+  }): FetchLogPageResult & {latestCursor: number};
   fetchChatMessage(input: {
     workspaceId: string; originId: string; messageId: string;
   }): SyncRelayLogRow | null;

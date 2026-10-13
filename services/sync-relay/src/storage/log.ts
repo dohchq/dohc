@@ -331,21 +331,38 @@ export function hasRefusedSettlement(storage: StorageContext, input: {
     .get(input.workspaceId,input.originId,input.originSeq,input.settlementId,input.reason,input.momentId) !== undefined;
 }
 
+export const CHAT_HISTORY_SCAN_WINDOW = 2_000;
+
 export function fetchChatMessages(storage: StorageContext, input: {
   workspaceId: string; channelWireId: string; cursor: number | null; direction: "older" | "newer"; limit: number;
-}): SyncRelayLogRow[] {
+}): FetchLogPageResult & {latestCursor: number} {
   const older = input.direction === "older";
-  return storage.db.prepare(`SELECT m.* FROM sync_relay_log m
-    WHERE m.workspace_id = ? AND m.op_kind = 'chat.message.append'
-      AND json_valid(m.payload_json)
-      AND (? IS NULL OR m.relay_seq ${older ? "<" : ">"} ?)
-      AND (SELECT json_extract(t.payload_json, '$.channelWireId') FROM sync_relay_log t
-        WHERE t.workspace_id = m.workspace_id AND t.op_kind = 'chat.thread.create'
-          AND json_valid(t.payload_json)
-          AND json_extract(t.payload_json, '$.threadId') = json_extract(m.payload_json, '$.threadId')
-        ORDER BY t.relay_seq LIMIT 1) = ?
+  const coordinates = storage.db.prepare(`SELECT relay_seq FROM sync_relay_log
+    WHERE workspace_id = ? ${input.cursor === null ? "" : `AND relay_seq ${older ? "<" : ">"} ?`}
+    ORDER BY relay_seq ${older ? "DESC" : "ASC"} LIMIT ?`)
+    .all(input.workspaceId, ...(input.cursor === null ? [] : [input.cursor]), CHAT_HISTORY_SCAN_WINDOW);
+  const window = coordinates.map(row => Number(row.relay_seq));
+  if (window.length === 0) return {rows: [], nextCursor: input.cursor ?? 0, latestCursor: input.cursor ?? 0, hasMore: false};
+  const first = window[0]!, edge = window[window.length - 1]!;
+  const matches = storage.db.prepare(`WITH earliest_threads AS MATERIALIZED (
+      SELECT MIN(relay_seq) AS relay_seq FROM sync_relay_log
+      WHERE workspace_id = ? AND op_kind = 'chat.thread.create' AND json_valid(payload_json)
+      GROUP BY json_extract(payload_json, '$.threadId')
+    ), channel_threads AS MATERIALIZED (
+      SELECT json_extract(t.payload_json, '$.threadId') AS thread_id
+      FROM earliest_threads e JOIN sync_relay_log t ON t.relay_seq = e.relay_seq
+      WHERE json_extract(t.payload_json, '$.channelWireId') = ?
+    )
+    SELECT m.* FROM sync_relay_log m
+    WHERE m.workspace_id = ? AND m.relay_seq BETWEEN ? AND ?
+      AND m.op_kind = 'chat.message.append' AND json_valid(m.payload_json)
+      AND json_extract(m.payload_json, '$.threadId') IN (SELECT thread_id FROM channel_threads)
     ORDER BY m.relay_seq ${older ? "DESC" : "ASC"} LIMIT ?`)
-    .all(input.workspaceId, input.cursor, input.cursor, input.channelWireId, input.limit).map(rowToLogRow);
+    .all(input.workspaceId, input.channelWireId, input.workspaceId, Math.min(first, edge), Math.max(first, edge), input.limit + 1);
+  const rows = matches.slice(0, input.limit).map(rowToLogRow);
+  const truncated = matches.length > input.limit;
+  return {rows, nextCursor: truncated ? rows[rows.length - 1]!.relaySeq : edge,
+    latestCursor: Math.max(first, edge), hasMore: truncated || coordinates.length === CHAT_HISTORY_SCAN_WINDOW};
 }
 
 export function fetchChatMessage(storage: StorageContext, input: {
