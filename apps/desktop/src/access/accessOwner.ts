@@ -82,13 +82,14 @@ export function createAccessOwner<Workspace>(dependencies: {
       }
       if (resolved.shareId) {
         if (!account) return unknownAccess(resolved.ref, "signed-out");
+        if (resolved.relayUrl && account.relayUrl && !relayUrlsMatch(resolved.relayUrl, account.relayUrl))
+          return unknownAccess(resolved.ref, "other-server");
         const recipient = resolved.recipientEmail !== undefined ? resolved.recipientEmail : resolved.recipientUserId;
         if (typeof recipient !== "string" || !recipient) return unknownAccess(resolved.ref, "unreadable");
         if (resolved.recipientEmail !== undefined
           ? recipient.toLowerCase() !== account.email.toLowerCase()
           : recipient !== account.userId) return unknownAccess(resolved.ref, "other-account");
         if (!resolved.relayUrl || !account.relayUrl) return unknownAccess(resolved.ref, "unreadable");
-        if (!relayUrlsMatch(resolved.relayUrl, account.relayUrl)) return unknownAccess(resolved.ref, "other-server");
       }
       const answer = query.answer({ ref: resolved.ref, shareRoot: resolved.shareRoot, observation: resolved.shareId ? dependencies.received() : dependencies.roster(workspace),
         recipientUserId: account?.userId ?? "", cursorScope: capturedScope,

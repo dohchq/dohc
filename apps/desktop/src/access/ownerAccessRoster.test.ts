@@ -28,6 +28,7 @@ it.each([
 
 it.each([
   ["different server", "other-server", { ...credentials, serverUrl: "https://other-server.test" }],
+  ["different server and account", "other-server", { ...credentials, serverUrl: "https://other-server.test", userId: "other-owner" }],
   ["different server with a relay matching the workspace server", "other-server", { ...credentials,
     serverUrl: "https://other-server.test", relayUrl: workspace.remote.serverUrl }],
   ["different account", "other-account", { ...credentials, userId: "other-owner" }],

@@ -491,6 +491,15 @@ describe("About Access", () => {
     expect((await screen.findByTestId("about-access-unknown")).textContent).toBe("This chat is no longer in this workspace.");
   });
 
+  it("names a hidden local chat in a share view as a chat", async () => {
+    bridgeMock.getObjectAccess.mockResolvedValue({ ...UNKNOWN, ref: { kind: "chat", channelWireId: "wire-local" }, visibility: "hidden", unknownReason: null });
+    render(<ChatAccess channelWireId="wire-local" received={false} facts={{ ...SYNCED, shareView: true }} />);
+    const unknown = await screen.findByTestId("about-access-unknown");
+    expect(unknown.dataset.reason).toBe("hidden");
+    expect(unknown.textContent).toBe("Shares do not include this chat.");
+    expect(within(unknown).queryByRole("button")).toBeNull();
+  });
+
   it("does not read again when only the chat's share lane becomes known", async () => {
     bridgeMock.getObjectAccess.mockResolvedValue(answer());
     const { rerender } = render(<ChatAccess channelWireId="wire-general" received={null} />);

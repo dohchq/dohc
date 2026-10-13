@@ -655,7 +655,7 @@ export function AccessUnknown(props: {
 }) {
   const { answer, setup, testId } = props;
   if (answer.visibility === "hidden") {
-    return <AboutNote testId={`${testId}-unknown`} reason="hidden" icon={EyeOff}>Shares do not include this file.</AboutNote>;
+    return <AboutNote testId={`${testId}-unknown`} reason="hidden" icon={EyeOff}>Shares do not include this {props.noun ?? "file"}.</AboutNote>;
   }
   if (answer.visibility === "missing") {
     return (

@@ -150,6 +150,32 @@ it("reports a different received server without reading its inventory", async ()
   expect(await h.owner.object("w", { ref: path })).toMatchObject({ unknownReason: "other-server", rows: [] });
   expect(h.received).not.toHaveBeenCalled();
 });
+it.each([{ recipientUserId: "another-account" }, { recipientEmail: "another@test.dev" }])(
+  "reports another server before another account for %j", async binding => {
+    const h = harness();
+    h.resolve.mockResolvedValue({ ref: path, visibility: "visible", shareId: "received", relayUrl: "https://other-relay.test", ...binding });
+    expect(await h.owner.object("w", { ref: path })).toMatchObject({ unknownReason: "other-server", rows: [] });
+    expect(h.received).not.toHaveBeenCalled();
+  },
+);
+it("keeps the received list on the signed-in account when a share view's server and account differ", () => {
+  const workspace = { workspaceId: "w", rootPath: "/w", shareView: { shareId: "received", relayUrl: "https://other-relay.test",
+    recipientUserId: "another-account", grantedSelector: { paths: ["Notes"], versionId: null, access: "view" } } } as RegistryEntry;
+  const inventory = parseReceivedInventory({ received: [{ shareId: "current-account-share", grantId: "own", granterUserId: "owner", granterEmail: null,
+    selector: { paths: ["Notes"], versionId: null }, access: "view", generation: 1, createdAtMs: 1, genericChatWritable: false }], removed: [] })!;
+  const received = vi.fn((): ReceivedObservation => ({ inventory, checkedAtMs: 42, freshness: "fresh" }));
+  const roster = vi.fn(() => { throw new Error("Received lists must not read the workspace roster."); });
+  const owner = createAccessOwner<RegistryEntry>({
+    resolve: async (_workspace, ref) => ({ ref, visibility: "visible" }), roster, received,
+    account: () => ({ userId: "recipient", email: "recipient@test.dev", relayUrl: "https://relay.test", generation: 1 }),
+    scope: () => "current-account-scope", assertCurrent: () => undefined,
+    permissions: async () => { throw new Error("unused"); }, refresh: async () => undefined,
+  });
+  expect(owner.sharing(workspace, { lane: "received" })).toMatchObject({ unknownReason: null, freshness: "fresh",
+    coverage: { kind: "received-account", complete: true }, rows: [{ shareId: "current-account-share", recipientUserId: "recipient" }] });
+  expect(received).toHaveBeenCalledOnce();
+  expect(roster).not.toHaveBeenCalled();
+});
 it("reports signed-out for received objects and the received lane", async () => {
   const h = harness(); h.signOut();
   h.resolve.mockResolvedValue({ ref: path, visibility: "visible", shareId: "received", relayUrl: "https://relay.test", recipientUserId: "recipient" });
