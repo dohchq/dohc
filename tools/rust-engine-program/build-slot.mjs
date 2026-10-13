@@ -376,20 +376,37 @@ function withSweepLock(root, sweep) {
   try {
     return sweep(owns);
   } finally {
-    // Release by identity: move whatever holds the name aside, and keep it only if it was ours.
-    const moved = `${sweepLock}.release-${randomBytes(4).toString("hex")}`;
-    let renamed = false;
-    try { renameSync(sweepLock, moved); renamed = true; } catch { /* Gone or busy: nothing of ours to remove. */ }
-    if (renamed) {
-      let mine = false;
-      try { mine = readFileSync(join(moved, "owner"), "utf8") === token; } catch { /* A successor's lock without its owner yet. */ }
-      if (mine) rmSync(moved, { recursive: true, force: true });
+    // A lock this sweeper lost stays where it is. Its own lock is moved aside
+    // and deleted only if the owner inside is still this token; a successor
+    // that took the name between the check and the move gets it back.
+    // Residual, accepted: if a third sweeper takes the name in that instant,
+    // the moved lock's holder sees `owns` turn false and stops. Slot safety
+    // never rests on this lock: every reclaim validates its tombstone.
+    if (owns()) {
+      const moved = `${sweepLock}.release-${randomBytes(4).toString("hex")}`;
+      let renamed = false;
+      for (let attempt = 0; attempt < 5 && !renamed; attempt += 1) {
+        try { renameSync(sweepLock, moved); renamed = true; }
+        catch (error) {
+          // A scanner briefly holding the owner file open blocks a directory rename on Windows.
+          if (!["EPERM", "EBUSY", "EACCES"].includes(error.code)) break;
+          Atomics.wait(releaseWait, 0, 0, 50 * (attempt + 1));
+        }
+      }
+      if (!renamed) logEvent(root, "sweep lock release failed; the next sweeper takes it over after 5 minutes");
+      else if (readOwner(moved) === token) rmSync(moved, { recursive: true, force: true });
       else {
         try { renameSync(moved, sweepLock); }
-        catch { logEvent(root, `sweep lock of a successor could not be restored (${moved}); its sweep stops`); }
+        catch { logEvent(root, `a successor's sweep lock could not be restored (${moved}); its sweep stops`); }
       }
     }
   }
+}
+
+const releaseWait = new Int32Array(new SharedArrayBuffer(4));
+function readOwner(lock) {
+  try { return readFileSync(join(lock, "owner"), "utf8"); }
+  catch { return null; }
 }
 
 /**
