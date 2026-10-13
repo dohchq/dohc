@@ -2552,7 +2552,12 @@ impl RecoveryEntry {
         };
         if let Some(path) = path
             && !path.is_empty()
-            && placement_is_held(store, root, self.workspace_id(), path, None)?
+            && match placement_is_held(store, root, self.workspace_id(), path, None) {
+                Ok(held) => held,
+                Err(error @ MaterializeError::Storage(_)) => return Err(error),
+                // Recovery inspects staging before it needs a resolvable target.
+                Err(_) => false,
+            }
         {
             return Ok(false);
         }

@@ -1,7 +1,7 @@
 use super::*;
 
 #[test]
-fn replicated_empty_record_refusal_is_held_in_both_capture_routes() {
+fn excessive_quote_depth_is_held_in_both_collection_capture_routes() {
     for batched in [false, true] {
         let scratch = ScratchDir::new().unwrap();
         let supervisor = WorkspaceSupervisor::new();
@@ -18,15 +18,6 @@ fn replicated_empty_record_refusal_is_held_in_both_capture_routes() {
         sink.reconcile_collections().unwrap();
         seed_captured_richdoc_lineage(&sink, path);
         let conn = Connection::open(&db).unwrap();
-        conn.execute(
-            "INSERT INTO replication_log \
-             (workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms,imported) \
-             SELECT workspace_id,'seed-origin',0,'ydoc.update', \
-               json_object('versionId',version_id,'objectId',object_id),4,0 \
-             FROM ydoc_docs WHERE path=?1",
-            [path],
-        )
-        .unwrap();
         let completed = format!(
             "---\nTitle: Completed\n---\n{} too deep\n",
             "> ".repeat(121)

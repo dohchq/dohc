@@ -8,6 +8,7 @@ import { useShellError } from "./useShellError";
 import { shareCaptureNoticeState } from "../../workspaces/shareCaptureNotice";
 import { CreationPartialError } from "@dohc/cli/creation";
 import { errorDetails } from "./copyDetails";
+import { flushDatasetSourceCapture } from "../../workspaces/datasetSourceCapture";
 
 afterEach(cleanup);
 
@@ -16,6 +17,29 @@ const strict = ({ children }: { children: ReactNode }) => (
 );
 
 describe("useShellError", () => {
+  it("keeps a held source error in Notices with the repair words and retry", async () => {
+    const capture = { running: true, settled: true, degraded: false, heldFiles: [{
+      workspaceId: "ws-a", sourceVersionId: "main", objectId: "object", path: "sources/note.md",
+      observedSha256: "digest", observedSize: 4, reason: "ydoc-resolution-not-representable" as const,
+      observedAtMs: 1, attemptCount: 1, retryRequested: false,
+    }] };
+    const adapter = { reconcileCapture: async () => capture, flushCapture: async () => capture };
+    const failure = await flushDatasetSourceCapture(adapter, new AbortController().signal).catch(error => error as Error);
+    expect(failure).toBeInstanceOf(Error);
+    if (!(failure instanceof Error)) throw Error("Expected a held source refusal");
+    const retry = vi.fn();
+    const { result } = renderHook(() => useShellError("ws-a"));
+    act(() => result.current.reportShellError("dohc could not prepare this Collection.",
+      new Error(`Error invoking remote method 'dataset': Error: ${failure.message}`), retry));
+    const notice = result.current.shellErrors[0]!;
+    expect(notice.message).toBe("dohc could not prepare this Collection. dohc cannot use the content in sources/note.md. The file is still on disk. Edit it in another editor. Try again.");
+    expect(notice.seen).toBe(false);
+    expect(notice.retry).toBe(retry);
+    act(() => result.current.hideShellError(notice.id));
+    expect(result.current.shellErrors[0]).toMatchObject({ id: notice.id, seen: true });
+    act(() => result.current.shellErrors[0]!.retry!());
+    expect(retry).toHaveBeenCalledOnce();
+  });
   it("routes an additional Notice action independently of its primary action", () => {
     const first=vi.fn();const discard=vi.fn();const {result}=renderHook(()=>useShellError("workspace"));
     act(()=>result.current.reportShellFailure({message:"Kept typing",action:{label:"Copy your typing",run:first,additional:[{label:"Discard your typing",run:discard}]}}));
