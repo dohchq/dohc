@@ -5,16 +5,25 @@ import { memo, type CSSProperties, type ComponentPropsWithoutRef, type ReactNode
 // column widths, row hover and the focused cell. Each view supplies its
 // cells' content.
 
+// What the grid knows of a column: whether it holds numbers, and the text that
+// sets its width (its header and its widest cell). A view changes a column
+// only when an edit in it ends, so typing never moves or restyles the table.
+export interface DataGridColumn {
+  numeric: boolean;
+  header: string;
+  cell: string;
+}
+
 // Numbers read down a column: right-aligned, mono, tabular. The table sets
 // these per number column, and each cell reads its own column's values, so a
 // column that starts or stops holding numbers changes one table style and
 // renders no row again. An unset value inherits the table's.
 const columnVar = (name: string, column: number) => `--data-grid-${name}-${column}`;
 
-function numberColumns(numeric: readonly boolean[]): CSSProperties {
+function numberColumns(columns: readonly DataGridColumn[]): CSSProperties {
   const style: Record<string, string> = {};
-  numeric.forEach((isNumber, column) => {
-    if (!isNumber) return;
+  columns.forEach(({ numeric }, column) => {
+    if (!numeric) return;
     style[columnVar("align", column)] = "right";
     style[columnVar("font", column)] = "var(--font-mono)";
     style[columnVar("size", column)] = "12px";
@@ -35,19 +44,31 @@ const cellStyle = (column: number) =>
     fontVariantNumeric: `var(${columnVar("figures", column)})`,
   });
 
-// A grid's columns take their content's width, not the pane's.
+// A grid's columns take their text's width, not the pane's.
 export function DataGrid({
-  numeric,
+  columns,
+  headerAction,
+  trailing,
   className,
   style,
+  children,
   ...props
-}: ComponentPropsWithoutRef<"table"> & { numeric: readonly boolean[] }) {
+}: ComponentPropsWithoutRef<"table"> & {
+  columns: readonly DataGridColumn[];
+  // Room in each header for an action beside its name.
+  headerAction?: boolean;
+  // A last column after the data's, such as Add column.
+  trailing?: boolean;
+}) {
   return (
     <table
       {...props}
-      style={{ ...numberColumns(numeric), ...style }}
+      style={{ ...numberColumns(columns), ...style }}
       className={`border-separate border-spacing-0 overflow-hidden rounded-lg border border-line text-[13px] ${className ?? ""}`}
-    />
+    >
+      {children}
+      <ColumnWidths columns={columns} headerAction={headerAction} trailing={trailing} />
+    </table>
   );
 }
 
@@ -134,21 +155,13 @@ export function DataGridCell({
   );
 }
 
-// The text that sets a column's width: its header, and its widest cell.
-export interface DataGridColumnText {
-  header: string;
-  cell: string;
-}
-
 // Sets each column's width from its text, at least 64px and at most 320px,
-// in a row of no height after the last. Cells then fill their column, so a
-// cell's text never moves the table while it changes; the view hands new
-// text only when an edit ends.
-export const DataGridColumnWidths = memo(function DataGridColumnWidths(props: {
-  columns: readonly DataGridColumnText[];
-  // Room in each header for an action beside its name.
+// in a row of no height after the last. It draws the text in its column's
+// font, which comes from the same columns as its text. Cells fill their
+// column, so a cell's own text never moves the table.
+const ColumnWidths = memo(function ColumnWidths(props: {
+  columns: readonly DataGridColumn[];
   headerAction?: boolean;
-  // A last column after the data's, such as Add column.
   trailing?: boolean;
 }) {
   return (

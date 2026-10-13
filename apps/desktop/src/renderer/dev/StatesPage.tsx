@@ -17,7 +17,7 @@ import type {
   UsageRecordRow,
 } from "../../ipc/bridgeContract";
 import { readError, withErrorWords } from "../../ipc/errorWords";
-import { CsvPreviewBound, CsvTable, CsvViewActions, columnTexts, numericColumns } from "../CsvView";
+import { CsvPreviewBound, CsvTable, CsvViewActions, csvColumns } from "../CsvView";
 import { DocumentMenu } from "../DocumentMenu";
 import { FrontmatterAsWritten } from "../FrontmatterAsWritten";
 import { TextViewActions } from "../TextEditorView";
@@ -2046,7 +2046,7 @@ const GRID_FUNNEL = [
 function CsvGridSpecimen(props: { rows?: string[][]; locked?: boolean }) {
   const rows = props.rows ?? GRID_FUNNEL;
   return (
-    <CsvTable rows={rows} numeric={numericColumns(rows)} widths={columnTexts(rows)} locked={props.locked ?? false}
+    <CsvTable rows={rows} columns={csvColumns(rows)} locked={props.locked ?? false}
       onUpdateCell={noop} onEndEdit={noop} onDeleteRow={noop} onDeleteColumn={noop} onAddRow={noop} onAddColumn={noop} />
   );
 }

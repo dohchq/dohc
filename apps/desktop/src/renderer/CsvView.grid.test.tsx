@@ -3,7 +3,7 @@ import { act, cleanup, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { DohcDesktopBridge } from "../ipc/bridgeContract";
-import { columnTexts, CsvTable, CsvView, numericColumns } from "./CsvView";
+import { csvColumns, CsvTable, CsvView } from "./CsvView";
 import { documentVersionKey } from "./documentVersionKey";
 import { MAX_CSV_PREVIEW_ROWS } from "./offers/csvBound";
 import { resetOrphanedDrafts } from "./orphanedDrafts";
@@ -58,8 +58,7 @@ const table = (rows: string[][], locked = false) =>
   render(
     <CsvTable
       rows={rows}
-      numeric={numericColumns(rows)}
-      widths={columnTexts(rows)}
+      columns={csvColumns(rows)}
       locked={locked}
       onUpdateCell={vi.fn()}
       onEndEdit={vi.fn()}
@@ -77,7 +76,9 @@ const isNumber = (column: number) =>
 const widthText = (column: number) =>
   screen.getByTestId("data-grid-widths").querySelectorAll("td")[column + 1]!.textContent;
 
-describe("CSV numeric columns", () => {
+const numericColumns = (rows: string[][]) => csvColumns(rows).map((column) => column.numeric);
+
+describe("CSV columns", () => {
   it("finds a column numeric when every non-empty preview cell is a finite number", () => {
     expect(numericColumns([
       ["name", "count", "ratio", "blank", "mixed", "infinite"],
@@ -94,27 +95,15 @@ describe("CSV numeric columns", () => {
     expect(numericColumns(rows)).toEqual([true]);
   });
 
-  it("checks only the edited column after a cell edit, and keeps the list when nothing changed", () => {
-    const rows = [["a", "b"], ["1", "x"]];
-    // A stale answer for column b survives an edit to column a, so only a was read.
-    const previous = [true, true];
-    expect(numericColumns(rows, previous, 0)).toBe(previous);
-    const flipped = numericColumns([["a", "b"], ["one", "x"]], previous, 0);
-    expect(flipped).toEqual([false, true]);
-    expect(flipped).not.toBe(previous);
-    // An edit past the last column, or no edited column, reads every column again.
-    expect(numericColumns([["a", "b", "c"], ["1", "x", "2"]], previous, 2)).toEqual([true, false, true]);
-    expect(numericColumns(rows, previous)).toEqual([true, false]);
-  });
-});
-
-describe("CSV column widths", () => {
-  it("takes each column's header and its widest preview cell, counting a wide character as two", () => {
-    expect(columnTexts([
-      ["stage", "note"],
-      ["Visited", "東京駅"],
-      ["Signed up", "Tokyo"],
-    ])).toEqual([{ header: "stage", cell: "Signed up" }, { header: "note", cell: "東京駅" }]);
+  it("takes each column's header and its widest preview cell", () => {
+    expect(csvColumns([
+      ["stage", "count"],
+      ["Visited", "4820"],
+      ["Signed up", "12"],
+    ])).toEqual([
+      { numeric: false, header: "stage", cell: "Signed up" },
+      { numeric: true, header: "count", cell: "4820" },
+    ]);
   });
 });
 
@@ -233,25 +222,64 @@ describe("CSV view while typing", () => {
     expect(widthText(1)).toBe("count4820");
   });
 
-  it("realigns a column when an edit flips it, and renders only the edited row again", async () => {
+  it("keeps a column's alignment and font for the whole edit, renders only the edited row, and realigns when the edit ends", async () => {
     const user = userEvent.setup();
-    const body = ["stage,count", ...Array.from({ length: 20 }, (_, index) => `step ${index + 1},${index + 1}`)].join("\n");
+    const body = ["stage,count", "step 1,123456789012", ...Array.from({ length: 19 }, (_, index) => `step ${index + 2},${index + 2}`)].join("\n");
     render(<CsvView {...csvFile(body)} />);
+    const table = screen.getByRole("table");
+    const style = table.getAttribute("style");
     const input = screen.getByLabelText("Row 3 column 2");
     input.focus();
     gutterRenders.length = 0;
 
-    // Numbers, then a word, then numbers again.
+    // Numbers, then a word, then numbers again: the widths row reads the
+    // table's style, so an unchanged style keeps the column's width.
     await user.keyboard("e");
-    const flippedOff = new Set(gutterRenders);
+    expect(table.getAttribute("style")).toBe(style);
     await user.keyboard("3");
     expect((input as HTMLInputElement).value).toBe("3e3");
-    expect(flippedOff).toEqual(new Set([3]));
+    expect(table.getAttribute("style")).toBe(style);
+    await user.keyboard("x");
+    expect(table.getAttribute("style")).toBe(style);
+    expect(isNumber(1)).toBe(true);
     expect(new Set(gutterRenders)).toEqual(new Set([3]));
 
-    expect(isNumber(1)).toBe(true);
-    expect(isNumber(0)).toBe(false);
-    await user.keyboard("x");
+    gutterRenders.length = 0;
+    await user.keyboard("{Enter}");
     expect(isNumber(1)).toBe(false);
+    expect(isNumber(0)).toBe(false);
+    expect(gutterRenders).toEqual([]);
+  });
+
+  it("ends an edit with Enter in a cell and in a header, keeping focus", async () => {
+    const user = userEvent.setup();
+    render(<CsvView {...csvFile("stage,count\nVisited,4820\nSigned up,1290")} />);
+
+    const cellInput = screen.getByLabelText("Row 1 column 1");
+    await user.type(cellInput, " the pricing page{Enter}");
+    expect(widthText(0)).toBe("stageVisited the pricing page");
+    expect(document.activeElement).toBe(cellInput);
+
+    const headerInput = screen.getByLabelText("Header column 2");
+    await user.type(headerInput, " of people{Enter}");
+    expect(widthText(1)).toBe("count of people4820");
+    expect(document.activeElement).toBe(headerInput);
+  });
+
+  it("sizes a column from its widest cell as drawn, not its longest", () => {
+    // Narrow i, wide CJK, everything else between, as a canvas measures them.
+    const measured = (text: string) =>
+      [...text].reduce((width, char) => width + (char === "i" ? 3 : char.charCodeAt(0) > 0x2fff ? 13 : 7), 0);
+    vi.stubGlobal("OffscreenCanvas", class {
+      getContext() {
+        return { font: "", measureText: (text: string) => ({ width: measured(text) }) };
+      }
+    });
+    const thin = "i".repeat(25);
+    const wide = "東京駅前の広い通りにある";
+    // Counted as two characters each, the wide text still loses.
+    expect(wide.length * 2).toBeLessThan(thin.length);
+    render(<CsvView {...csvFile(`note\n${thin}\n${wide}`)} />);
+    expect(widthText(0)).toBe(`note${wide}`);
   });
 });

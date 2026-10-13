@@ -1,7 +1,7 @@
 import type { SaveState } from "@dohc/workspace-contracts/save-state";
 import { Code, Database, LoaderCircle, Plus, Table, Trash2 } from "lucide-react";
 import { EmptyState, IconButton, SecondaryButton } from "./ui/controls";
-import { memo, useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
+import { memo, useCallback, useEffect, useRef, useState, useSyncExternalStore, type KeyboardEvent } from "react";
 import type { ImportToDatabaseResult } from "../ipc/bridgeContract";
 import { bridge } from "./bridge";
 import type { ReportButtonError } from "./collections/useAutomationButtons";
@@ -11,10 +11,9 @@ import type { SharedLocalDocument } from "./sharedLocalDocument";
 import {
   DataGrid,
   DataGridCell,
+  type DataGridColumn,
   DataGridColumnAction,
-  DataGridColumnWidths,
   DataGridGutter,
-  type DataGridColumnText,
   DataGridGutterHeader,
   DataGridHeaderCell,
   DataGridRow,
@@ -218,10 +217,17 @@ const CELL_INPUT = "dohc-csv-cell w-full bg-transparent outline-none [text-align
 const DELETE_BUTTON =
   "grid size-5 place-items-center rounded text-subtle transition-colors hover:bg-hover hover:text-danger";
 
+// Enter ends a cell's edit and keeps focus there, as leaving the cell does.
+// An Enter that finishes composing a character is the input method's.
+const endEditOnEnter = (onEndEdit: (cellIndex: number) => void, cellIndex: number) =>
+  (event: KeyboardEvent<HTMLInputElement>) => {
+    if (event.key === "Enter" && !event.nativeEvent.isComposing) onEndEdit(cellIndex);
+  };
+
 const CsvTableHeader = memo(function CsvTableHeader({
   header,
   columnCount,
-  numeric,
+  columns,
   truncated,
   onUpdateCell,
   onEndEdit,
@@ -230,7 +236,7 @@ const CsvTableHeader = memo(function CsvTableHeader({
 }: {
   header: string[];
   columnCount: number;
-  numeric: boolean[];
+  columns: readonly DataGridColumn[];
   truncated?: boolean;
   onUpdateCell: (rowIndex: number, cellIndex: number, value: string) => void;
   onEndEdit: (cellIndex: number) => void;
@@ -245,7 +251,7 @@ const CsvTableHeader = memo(function CsvTableHeader({
           <DataGridHeaderCell key={index} column={index}>
             {/* A number column's name ends at its numbers' edge, so its
                 Delete column sits on the left. */}
-            <div className={`flex items-center gap-1 ${numeric[index] ? "flex-row-reverse" : ""}`}>
+            <div className={`flex items-center gap-1 ${columns[index]?.numeric ? "flex-row-reverse" : ""}`}>
               <input
                 data-testid="csv-cell"
                 aria-label={`Header column ${index + 1}`}
@@ -253,6 +259,7 @@ const CsvTableHeader = memo(function CsvTableHeader({
                 value={header[index] ?? ""}
                 readOnly={truncated}
                 onChange={(event) => onUpdateCell(0, index, event.target.value)}
+                onKeyDown={endEditOnEnter(onEndEdit, index)}
                 onBlur={() => onEndEdit(index)}
                 className={CELL_INPUT}
               />
@@ -338,6 +345,7 @@ const CsvTableRow = memo(function CsvTableRow({
             onChange={(event) =>
               onUpdateCell(rowIndex, cellIndex, event.target.value)
             }
+            onKeyDown={endEditOnEnter(onEndEdit, cellIndex)}
             onBlur={() => onEndEdit(cellIndex)}
             className={`${CELL_INPUT} text-ink read-only:text-muted`}
           />
@@ -454,32 +462,31 @@ export function CsvView({
   // recognizes that serialized draft identity instead of parsing its own output.
   const [grid, setGrid] = useState(() => {
     const initial = delimitedTextCodec.parse(draft.draft, delimiter);
-    return { rows: initial, numeric: numericColumns(initial), widths: columnTexts(initial) };
+    return { rows: initial, columns: csvColumns(initial) };
   });
   const rows = grid.rows;
   const rowsRef = useRef(rows);
-  // A cell edit names its column, so only that column's alignment is found
-  // again, and the column keeps its width until the edit ends. Any other
-  // change finds every column's alignment and width.
+  // A cell edit keeps its column's alignment and width until the edit ends.
+  // An edit can widen the table only by writing past its last column; that,
+  // and any other change, finds every column again.
   const showRows = useCallback((nextRows: string[][], editedColumn?: number) => {
     rowsRef.current = nextRows;
-    setGrid((shown) => {
-      const numeric = numericColumns(nextRows, shown.numeric, editedColumn);
-      const sameColumns = editedColumn !== undefined && numeric.length === shown.widths.length;
-      return { rows: nextRows, numeric, widths: sameColumns ? shown.widths : columnTexts(nextRows) };
-    });
+    setGrid((shown) => ({
+      rows: nextRows,
+      columns: editedColumn !== undefined && editedColumn < shown.columns.length ? shown.columns : csvColumns(nextRows),
+    }));
   }, []);
-  // A cell that loses focus ends its edit, and its column takes the width of
-  // its text again.
+  // A cell that loses focus, or takes Enter, ends its edit: its column is
+  // found again, alone.
   const endEdit = useCallback((column: number) => {
     setGrid((shown) => {
-      const current = shown.widths[column];
+      const current = shown.columns[column];
       if (!current) return shown;
-      const text = columnText(shown.rows, column);
-      if (text.header === current.header && text.cell === current.cell) return shown;
-      const widths = [...shown.widths];
-      widths[column] = text;
-      return { ...shown, widths };
+      const next = csvColumn(shown.rows, column);
+      if (next.numeric === current.numeric && next.header === current.header && next.cell === current.cell) return shown;
+      const columns = [...shown.columns];
+      columns[column] = next;
+      return { ...shown, columns };
     });
   }, []);
   const draftRef = useRef(draft);
@@ -666,8 +673,7 @@ export function CsvView({
       ) : (
         <CsvTable
           rows={rows}
-          numeric={grid.numeric}
-          widths={grid.widths}
+          columns={grid.columns}
           locked={locked}
           onUpdateCell={updateCell}
           onEndEdit={endEdit}
@@ -685,8 +691,7 @@ export function CsvView({
 // bound; or, with no header, the empty state.
 export function CsvTable(props: {
   rows: string[][];
-  numeric: boolean[];
-  widths: readonly DataGridColumnText[];
+  columns: readonly DataGridColumn[];
   locked: boolean;
   onUpdateCell: (rowIndex: number, cellIndex: number, value: string) => void;
   onEndEdit: (cellIndex: number) => void;
@@ -695,7 +700,7 @@ export function CsvTable(props: {
   onAddRow: () => void;
   onAddColumn: () => void;
 }) {
-  const { rows, numeric, locked } = props;
+  const { rows, columns, locked } = props;
   const header = rows[0];
   if (!header) {
     return (
@@ -736,11 +741,11 @@ export function CsvTable(props: {
   const columnCount = columnCountFor(rows);
   return (
     <div className="min-h-0 flex-1 overflow-auto p-4">
-      <DataGrid numeric={numeric}>
+      <DataGrid columns={columns} headerAction={!locked} trailing={!locked}>
         <CsvTableHeader
           header={header}
           columnCount={columnCount}
-          numeric={numeric}
+          columns={columns}
           truncated={locked}
           onUpdateCell={props.onUpdateCell}
           onEndEdit={props.onEndEdit}
@@ -762,7 +767,6 @@ export function CsvTable(props: {
           ))}
           {!locked ? <CsvAddRow columnCount={columnCount} onAddRow={props.onAddRow} /> : null}
         </tbody>
-        <DataGridColumnWidths columns={props.widths} headerAction={!locked} trailing={!locked} />
       </DataGrid>
       {dataRowCount > previewRows.length ? <CsvPreviewBound rowCount={dataRowCount} /> : null}
     </div>
@@ -789,44 +793,42 @@ function columnCountFor(rows: string[][]): number {
   return count;
 }
 
+// Every column of the preview, found once per load and after any change
+// other than a cell edit.
+export function csvColumns(rows: string[][]): DataGridColumn[] {
+  return Array.from({ length: columnCountFor(rows) }, (_, column) => csvColumn(rows, column));
+}
+
 // A column holds numbers when every non-empty cell of the preview is a
-// finite number, and at least one is. Found for every column once per load;
-// after a cell edit, only the edited column is checked again, and an
-// unchanged answer keeps the same list. An edit changes the table's width
-// only when it writes past the last column.
-export function numericColumns(rows: string[][], previous?: boolean[], editedColumn?: number): boolean[] {
-  if (editedColumn !== undefined && previous && editedColumn < previous.length) {
-    const numeric = holdsNumbers(rows, editedColumn);
-    if (previous[editedColumn] === numeric) return previous;
-    const next = [...previous];
-    next[editedColumn] = numeric;
-    return next;
-  }
-  return Array.from({ length: columnCountFor(rows) }, (_, column) => holdsNumbers(rows, column));
-}
-
-// Each column's header and its widest preview cell, which set its width.
-export function columnTexts(rows: string[][]): DataGridColumnText[] {
-  return Array.from({ length: columnCountFor(rows) }, (_, column) => columnText(rows, column));
-}
-
-// A wide character, such as a CJK one, takes about two narrow ones' room.
-const WIDE_CHARACTERS = /[ᄀ-ᅟ⺀-꓏가-힣豈-﫿︰-﹏＀-｠￠-￦]/g;
-const textWidth = (text: string) => text.length + (text.match(WIDE_CHARACTERS)?.length ?? 0);
-
-function columnText(rows: string[][], column: number): DataGridColumnText {
+// finite number, and at least one is. Its widest cell is the one that draws
+// widest in the column's font.
+function csvColumn(rows: string[][], column: number): DataGridColumn {
+  const numeric = holdsNumbers(rows, column);
+  const measure = cellMeasure(numeric);
   let cell = "";
   let widest = 0;
   const end = Math.min(rows.length, MAX_CSV_PREVIEW_ROWS + 1);
   for (let index = 1; index < end; index++) {
-    const text = rows[index]![column] ?? "";
-    const width = textWidth(text);
+    const text = rows[index]![column];
+    if (!text) continue;
+    const width = measure(text);
     if (width > widest) {
       cell = text;
       widest = width;
     }
   }
-  return { header: rows[0]?.[column] ?? "", cell };
+  return { numeric, header: rows[0]?.[column] ?? "", cell };
+}
+
+// Measures a cell's text as the grid draws it: 12px mono for numbers, 13px
+// sans otherwise. Where no canvas can measure (a test DOM), it counts
+// characters.
+function cellMeasure(numeric: boolean): (text: string) => number {
+  const context = typeof OffscreenCanvas === "undefined" ? null : new OffscreenCanvas(1, 1).getContext("2d");
+  if (!context) return (text) => text.length;
+  const root = getComputedStyle(document.documentElement);
+  context.font = numeric ? `12px ${root.getPropertyValue("--font-mono")}` : `13px ${root.getPropertyValue("--font-sans")}`;
+  return (text) => context.measureText(text).width;
 }
 
 function holdsNumbers(rows: string[][], column: number): boolean {
