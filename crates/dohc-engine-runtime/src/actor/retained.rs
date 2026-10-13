@@ -123,12 +123,10 @@ impl Worker {
                                 Ok(Inspection::Oversized) => handle.run_blocking(move |s, _| {
                                     Ok(s.keep_oversized_retained(&row, now)?)
                                 }),
-                                Ok(Inspection::Release(source)) => match source.remove() {
-                                    Ok(true) => release(&handle, &path, row),
-                                    Ok(false) => Ok(()),
-                                    Err(e) => Err(RuntimeError::Materialize(e)),
-                                },
-                                Ok(Inspection::Missing) => release(&handle, &path, row),
+                                Ok(Inspection::Release(source)) => {
+                                    release(&handle, &path, row, Some(source))
+                                }
+                                Ok(Inspection::Missing) => release(&handle, &path, row, None),
                                 Ok(Inspection::Keep) => Ok(()),
                                 Err(e) => Err(RuntimeError::Materialize(e)),
                             };
@@ -171,6 +169,7 @@ fn release(
     handle: &ActorHandle,
     root: &std::path::Path,
     row: dohc_engine_storage::RetainedDisplacement,
+    source: Option<dohc_engine_files::retained::Release>,
 ) -> Result<(), RuntimeError> {
     let root = root.to_path_buf();
     let directory = root
@@ -178,6 +177,16 @@ fn release(
         .parent()
         .map(std::path::Path::to_path_buf);
     handle.run_blocking(move |s, _| {
+        // Serialize hold creation with the last check and unlink. Changed reads
+        // still import above; only source release waits for the hold to clear.
+        if s.placement_is_held(&row.workspace_id, &row.target_path)? {
+            return Ok(());
+        }
+        if let Some(source) = source
+            && !source.remove().map_err(RuntimeError::Materialize)?
+        {
+            return Ok(());
+        }
         s.release_retained(row.displacement_id)?;
         if let Some(directory) = directory {
             cleanup_staging_directory(s, &root, &directory)?;

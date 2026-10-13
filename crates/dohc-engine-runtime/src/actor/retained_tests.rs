@@ -272,3 +272,81 @@ fn passive_store_never_spawns_a_retention_worker_even_after_root_binding() {
     actor.close().unwrap();
     assert_eq!(actor.lifecycle(), LifecycleState::Closed);
 }
+
+#[test]
+fn capture_file_hold_worker_keeps_quiet_sources_imports_late_writes_and_releases_after_clear() {
+    let scratch = ScratchDir::new().unwrap();
+    let db = scratch.path().join("engine.db");
+    let target = scratch.path().join("notes.md");
+    let source = scratch.path().join(".dohc/engine/displaced/worker-0");
+    std::fs::write(&target, b"held outside version").unwrap();
+    let mut first = actor(&scratch);
+    add_sources(&first, &scratch, 1);
+    first.handle().run_blocking(|s, _| {
+        s.write_with(&dohc_engine_storage::NoFaults, |tx| {
+            tx.execute_batch("INSERT INTO versioned_workspaces VALUES ('ws','main'); INSERT INTO versions(workspace_id,version_id,kind,name,created_at_ms) VALUES ('ws','main','main','Main',1); INSERT INTO file_objects VALUES ('ws','held-object',1);").map_err(dohc_engine_storage::StorageError::persist_public)?;
+            dohc_engine_storage::capture_file_holds::record_in(tx, &dohc_engine_storage::capture_file_holds::CaptureFileHold {
+                workspace_id: "ws".into(), source_version_id: "main".into(), object_id: "held-object".into(), path: "notes.md".into(), observed_sha256: hex_sha256(b"held outside version"), observed_size: 20, reason: dohc_engine_storage::capture_file_holds::NOT_REPRESENTABLE.into(), observed_at_ms: 0, attempt_count: 1, retry_requested: false,
+            })
+        })?;
+        Ok(())
+    }).unwrap();
+    bind(&first, &scratch);
+    wait_for(&first.retention_root, |p| p.iter().any(|v| v.0 == 1));
+    first.close().unwrap();
+    assert_eq!(std::fs::read(&source).unwrap(), b"known");
+    let store = EngineStore::open(&db, 0).unwrap();
+    assert_eq!(store.retained_displacements_after(0).unwrap().len(), 1);
+    drop(store);
+
+    std::fs::write(&source, b"late outside write to held original").unwrap();
+    let mut second = actor(&scratch);
+    bind(&second, &scratch);
+    wait_for(&second.retention_root, |p| p.iter().any(|v| v.0 == 1));
+    second.close().unwrap();
+    let store = EngineStore::open(&db, 0).unwrap();
+    let bytes: Vec<u8> = store
+        .read_with(|c| {
+            c.query_row(
+                "SELECT bytes FROM materialization_displacement_reads",
+                [],
+                |r| r.get(0),
+            )
+        })
+        .unwrap();
+    assert_eq!(bytes, b"late outside write to held original");
+    assert_eq!(store.retained_displacements_after(0).unwrap().len(), 1);
+    store
+        .read_with(|c| c.execute("UPDATE materialization_retained SET changed_at_ms=0", []))
+        .unwrap();
+    drop(store);
+
+    let mut third = actor(&scratch);
+    bind(&third, &scratch);
+    wait_for(&third.retention_root, |p| p.iter().any(|v| v.0 == 1));
+    third.close().unwrap();
+    assert_eq!(std::fs::read(&source).unwrap(), bytes);
+    let mut store = EngineStore::open(&db, 0).unwrap();
+    assert_eq!(store.retained_displacements_after(0).unwrap().len(), 1);
+    store
+        .write_with(&dohc_engine_storage::NoFaults, |tx| {
+            dohc_engine_storage::capture_file_holds::clear_in(tx, "ws", "notes.md")
+        })
+        .unwrap();
+    drop(store);
+
+    let mut fourth = actor(&scratch);
+    bind(&fourth, &scratch);
+    wait_for(&fourth.retention_root, |p| p.iter().any(|v| v.0 == 1));
+    fourth.close().unwrap();
+    let store = EngineStore::open(&db, 0).unwrap();
+    assert!(store.retained_displacements_after(0).unwrap().is_empty());
+    assert!(!source.exists());
+    assert_eq!(std::fs::read(&target).unwrap(), b"held outside version");
+    assert_eq!(
+        store
+            .table_row_count("materialization_displacement_reads")
+            .unwrap(),
+        1
+    );
+}

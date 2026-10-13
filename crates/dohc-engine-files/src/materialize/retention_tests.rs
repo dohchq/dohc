@@ -1386,3 +1386,80 @@ fn passive_store_materialization_leaves_sources_rows_and_sibling_cleanup_untouch
     assert_eq!(std::fs::read(source).unwrap(), b"late outside bytes");
     assert!(sibling.is_dir());
 }
+
+#[cfg(all(unix, feature = "fault-injection"))]
+#[test]
+fn capture_file_hold_parks_checked_delete_replay_and_preserves_late_retained_source() {
+    use std::io::Write;
+    struct CrashAfterRetention;
+    impl FaultInjector for CrashAfterRetention {
+        fn poll(&self, point: FaultPoint) -> dohc_engine_storage::FaultAction {
+            if point == FaultPoint::MaterializeAfterKnownCopyDeletion {
+                dohc_engine_storage::FaultAction::Crash
+            } else {
+                dohc_engine_storage::FaultAction::Continue
+            }
+        }
+    }
+    let scratch = ScratchDir::new_named("held-checked-delete-retention").unwrap();
+    let root = scratch.path();
+    let db = root.join("engine.db");
+    let target = root.join("notes.md");
+    std::fs::write(&target, b"before").unwrap();
+    let mut writer = std::fs::OpenOptions::new()
+        .write(true)
+        .open(&target)
+        .unwrap();
+    let mut store = EngineStore::open(&db, 0).unwrap();
+    let j = checked_delete_job(&mut store);
+    let mut settings = options(0, &StdReplacer);
+    settings.faults = &CrashAfterRetention;
+    assert_eq!(
+        materialize_one_ordinary(&store, root, &j, &settings).unwrap(),
+        JobOutcome::Crashed(FaultPoint::MaterializeAfterKnownCopyDeletion)
+    );
+    let row = store.retained_displacements_after(0).unwrap().remove(0);
+    writer.write_all(b"late outside write").unwrap();
+    drop(writer);
+    std::fs::write(&target, b"held outside version").unwrap();
+    store.write_with(&NoFaults, |tx| {
+        tx.execute_batch("INSERT INTO versioned_workspaces VALUES ('ws','main'); INSERT INTO versions(workspace_id,version_id,kind,name,created_at_ms) VALUES ('ws','main','main','Main',1); INSERT INTO file_objects VALUES ('ws','held-object',1);").map_err(dohc_engine_storage::StorageError::persist_public)?;
+        dohc_engine_storage::capture_file_holds::record_in(tx, &dohc_engine_storage::capture_file_holds::CaptureFileHold {
+            workspace_id: "ws".into(), source_version_id: "main".into(), object_id: "held-object".into(), path: "notes.md".into(), observed_sha256: hex_sha256(b"held outside version"), observed_size: 20, reason: dohc_engine_storage::capture_file_holds::NOT_REPRESENTABLE.into(), observed_at_ms: 1, attempt_count: 1, retry_requested: false,
+        })
+    }).unwrap();
+    drop(store);
+    let store = EngineStore::open(&db, 1000).unwrap();
+    recover_displacements(&store, root, Some("ws"), &options(1000, &StdReplacer)).unwrap();
+    let pending = store.load_materialization_job(&j.job_id).unwrap().unwrap();
+    assert_eq!(
+        materialize_one_ordinary(&store, root, &pending, &options(1000, &StdReplacer)).unwrap(),
+        JobOutcome::Parked
+    );
+    assert_eq!(std::fs::read(&target).unwrap(), b"held outside version");
+    assert_eq!(
+        std::fs::read(root.join(&row.source_path)).unwrap(),
+        b"late outside write"
+    );
+    assert_eq!(store.retained_displacements_after(0).unwrap(), vec![row]);
+    assert_eq!(
+        store
+            .load_materialization_job(&j.job_id)
+            .unwrap()
+            .unwrap()
+            .status,
+        JobStatus::Pending
+    );
+    sweep(&store, root, 1000);
+    let bytes: Vec<u8> = store
+        .read_with(|c| {
+            c.query_row(
+                "SELECT bytes FROM materialization_displacement_reads",
+                [],
+                |r| r.get(0),
+            )
+        })
+        .unwrap();
+    assert_eq!(bytes, b"late outside write");
+    assert_eq!(std::fs::read(&target).unwrap(), b"held outside version");
+}
