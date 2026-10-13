@@ -340,11 +340,15 @@ export function createUsageStore(deps: {
     await io.rm(path + INCOMING, { force: true });
   }
   // A swap that stopped after moving the record aside left a committed
-  // replacement beside it: install it. Discard one that was never committed.
+  // replacement beside it: install it. The ready file names where the record
+  // went, so a swap that never moved it, such as before a person deleted the
+  // record, is discarded instead.
   async function finishSwap(): Promise<string | undefined> {
     const incoming = path + INCOMING;
     const [ready, text] = await Promise.all([readIfPresent(incoming + READY), readIfPresent(incoming)]);
-    if (text === undefined || ready !== digest(text)) {
+    const [sum, aside] = ready?.split(" ") ?? [];
+    if (text === undefined || sum !== digest(text) || !aside || !ASIDE_NAME.test(aside)
+      || await readIfPresent(join(directory, aside)) === undefined) {
       await discardIncoming();
       return undefined;
     }
@@ -360,11 +364,19 @@ export function createUsageStore(deps: {
     await discardIncoming();
     await prepare(incoming);
     await io.sync(incoming);
-    await io.writeFile(incoming + READY, digest(await io.readFile(incoming, "utf8")), { mode: 0o600 });
+    const asideName = usageAsideName(((await asideNumbers()).at(-1) ?? 0) + 1);
+    const aside = join(directory, asideName);
+    await io.writeFile(incoming + READY, `${digest(await io.readFile(incoming, "utf8"))} ${asideName}`, { mode: 0o600 });
     await io.sync(incoming + READY);
     await io.syncDirectory(directory);
-    const aside = join(directory, usageAsideName(((await asideNumbers()).at(-1) ?? 0) + 1));
-    await move(path, aside);
+    try {
+      await move(path, aside);
+    } catch (error) {
+      // Nothing moved: leave nothing a later launch could install. A failed
+      // move removes its own copy at `aside`.
+      await discardIncoming().catch(() => {});
+      throw error;
+    }
     try {
       await move(incoming, path);
     } catch (error) {

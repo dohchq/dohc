@@ -452,6 +452,7 @@ describe("local usage store", () => {
     await expect(store.startNewRecord()).rejects.toThrow("file in use");
     expect(disk.get(path)).toBe("not JSON");
     expect(disk.has(at(1))).toBe(false);
+    expect([...disk.keys()].filter(file => file.includes(".incoming"))).toEqual([]);
     await expect(store.read()).rejects.toMatchObject({ code: "INVALID_USAGE_RECORD" });
 
     await store.startNewRecord();
@@ -465,6 +466,39 @@ describe("local usage store", () => {
     // A rolled-back Restore leaves nothing a later launch could install.
     expect([...disk.keys()].filter(file => file.includes(".incoming"))).toEqual([]);
     expect((await store.read()).enabled).toBe(false);
+  });
+  // An older record set aside with 7 counts, ready to restore over the active one.
+  function withOlderAside() {
+    const memory = memoryStore();
+    memory.disk.set(join("isolated-state", usageAsideName(1)),
+      JSON.stringify({ ...seed(false), counts: [{ ...pair, day: today(), count: 7 }] }));
+    return memory;
+  }
+  it.each([
+    ["the move is refused", "refused"],
+    ["the record moves aside but cannot leave its name", "unlink"],
+  ] as const)("leaves nothing a later launch installs when %s", async (_case, failure) => {
+    const { store, io, disk, path, restart } = withOlderAside();
+    await store.load();
+    if (failure === "refused") failMove(io, path);
+    else io.unlink.mockImplementationOnce(async () => { throw new Error("file in use"); });
+    await expect(store.restoreSetAside()).rejects.toThrow("file in use");
+    expect([...disk.keys()].filter(file => file.includes(".incoming"))).toEqual([]);
+    expect(disk.has(join("isolated-state", usageAsideName(2)))).toBe(false);
+    await store.close();
+    // The person quits and deletes the record: the next launch starts fresh.
+    disk.delete(path);
+    expect((await restart().read()).counts).toEqual([]);
+  });
+  it("installs nothing when dohc stopped before moving the record and the person then deleted it", async () => {
+    const { store, disk, path, restart, crashOn } = withOlderAside();
+    await store.load();
+    crashOn((operation, file) => operation === "link" && file === path);
+    await expect(store.restoreSetAside()).rejects.toThrow("dohc stopped");
+    disk.delete(path);
+    const next = restart();
+    expect((await next.read()).counts).toEqual([]);
+    expect([...disk.keys()].filter(file => file.includes(".incoming"))).toEqual([]);
   });
   it("reports a Start whose new record could not be written, and moves nothing", async () => {
     const { store, io, disk, path } = memoryStore();
