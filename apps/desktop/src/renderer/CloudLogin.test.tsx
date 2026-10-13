@@ -2,12 +2,26 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { CloudStatusResult } from "../ipc/bridgeContract";
+import type { CloudStatusResult, DohcDesktopBridge } from "../ipc/bridgeContract";
 import { CloudLogin } from "./CloudLogin";
 import { ShellErrorReporter, type ReportShellFailure } from "./shell/useShellError";
 
 import { deferred } from "../testing/deferred";
+
+type SessionListener = Parameters<DohcDesktopBridge["onCloudSessionChanged"]>[0];
+const sessionListeners = new Set<SessionListener>();
+// What main broadcasts when another window or the CLI changes the session.
+function changeSession(sessionKey: string | null, phase: "changing" | "ready" = "ready") {
+  act(() => {
+    for (const listener of [...sessionListeners]) listener({ sessionKey, phase });
+  });
+}
+
 const bridgeMock = {
+  onCloudSessionChanged: (listener: SessionListener) => {
+    sessionListeners.add(listener);
+    return () => { sessionListeners.delete(listener); };
+  },
   cloudStatus: vi.fn(),
   cloudEnableSync: vi.fn(),
   cloudLoginStart: vi.fn(),
@@ -45,6 +59,7 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+  sessionListeners.clear();
   vi.useRealTimers();
 });
 
@@ -796,6 +811,48 @@ describe("CloudLogin", () => {
     expect(screen.queryByTestId("cloud-workspace-synced")).toBeNull();
     expect(screen.queryByTestId("cloud-sync-code-block")).toBeNull();
     expect(bridgeMock.cloudStatus).toHaveBeenCalledTimes(2);
+  });
+
+  it("shows disconnected after another window deletes the account", async () => {
+    bridgeMock.cloudStatus
+      .mockResolvedValueOnce({ connected: true, email: "ice@dohc.dev", serverUrl: "https://dohc.example.test", workspaceSynced: false })
+      .mockResolvedValueOnce({ connected: false, workspaceSynced: false });
+    render(<CloudLogin workspaceId="ws-1" />);
+    await screen.findByTestId("cloud-connected");
+
+    changeSession(null);
+
+    expect(await screen.findByTestId("cloud-server-url")).toBeTruthy();
+    expect(screen.queryByTestId("cloud-connected")).toBeNull();
+    expect(bridgeMock.cloudStatus).toHaveBeenLastCalledWith({ workspaceId: "ws-1" });
+  });
+
+  it("finishes its own sign-in when another window changes the session", async () => {
+    vi.useFakeTimers();
+    const onConnected = vi.fn();
+    bridgeMock.cloudStatus
+      .mockResolvedValueOnce({ connected: false, workspaceSynced: false, serverUrl: "https://dohc.example.test" })
+      .mockResolvedValueOnce({ connected: true, email: "ice@dohc.dev", serverUrl: "https://dohc.example.test", workspaceSynced: false });
+    bridgeMock.cloudLoginPoll.mockResolvedValueOnce({ status: "complete", email: "ice@dohc.dev" });
+
+    render(<CloudLogin workspaceId="ws-1" onConnected={onConnected} />);
+    await act(async () => {});
+    fireEvent.click(screen.getByTestId("cloud-connect-start"));
+    await act(async () => {});
+    expect(screen.getByTestId("cloud-login-pending")).toBeTruthy();
+
+    changeSession(null, "changing");
+    changeSession(null);
+    await act(async () => {});
+    expect(screen.getByTestId("cloud-login-pending")).toBeTruthy();
+    expect(bridgeMock.cloudStatus).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3000);
+    });
+    expect(screen.getByTestId("cloud-connected-email").textContent).toBe("ice@dohc.dev");
+    expect(onConnected).toHaveBeenCalledTimes(1);
+    expect(bridgeMock.cloudLoginPoll).toHaveBeenCalledTimes(1);
   });
 
   // The approval happened in the browser, but only main can say what this

@@ -44,6 +44,7 @@ const bridge = {
   sendCrashReport: vi.fn(async () => ({ sent: true })),
   dismissCrashReport: vi.fn(async () => undefined),
   onCrashReportChanged: vi.fn(() => () => undefined),
+  onCloudSessionChanged: () => () => undefined,
   windowRole: "workspace",
   platform: "linux",
 };

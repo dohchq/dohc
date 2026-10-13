@@ -249,6 +249,35 @@ export function CloudLogin(props: {
     // A notice can retry a different address while this panel is already open.
   }, [props.workspaceId, props.initialServerUrl, statusAttempt]);
 
+  // Another window or the CLI signed in, switched, disconnected, or deleted
+  // the account. Read the session again, but leave a sign-in this panel is
+  // running alone: its poll reads the session when it finishes.
+  const phaseRef = useRef(phase);
+  phaseRef.current = phase;
+  const refreshRequests = useRequestSequence();
+  useEffect(() => bridge().onCloudSessionChanged(({ phase: transition }) => {
+    const signingIn = phaseRef.current.kind === "connecting" || phaseRef.current.kind === "code";
+    if (transition !== "ready" || signingIn) return;
+    const session = sessionRef.current();
+    const refresh = refreshRequests.next();
+    const current = () => sessionRef.isCurrent(session) && refreshRequests.isCurrent(refresh);
+    void bridge()
+      .cloudStatus(statusQuery())
+      .then((status) => {
+        if (current()) applyStatus(status);
+      })
+      .catch((cause: unknown) => {
+        if (!current()) return;
+        setPhase({ kind: "unknown" });
+        reportConnectionError({
+          message: "dohc could not check this connection.",
+          cause,
+          serverUrl: null,
+          retry: retryFor(session, recheckStatus),
+        });
+      });
+  }), [props.workspaceId]);
+
   async function enableSync() {
     if (!props.workspaceId || syncBusy) return;
     const session = sessionRef.current();

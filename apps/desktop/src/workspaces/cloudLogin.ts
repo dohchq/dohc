@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import {
   isCloudCredentialEmail,
   type CloudCredentials,
+  type DeletedAccount,
 } from "./cloudCredentialStore";
 import { canonicalCloudOrigin } from "./cloudConfiguration";
 import { discoverServer } from "./serverDiscovery";
@@ -32,6 +33,9 @@ export interface CloudLoginStore {
   loadInvalidMarker(): Promise<InvalidSessionMarker | null>;
   saveInvalidMarker(marker: InvalidSessionMarker): Promise<void>;
   clearInvalidMarker(): Promise<void>;
+  // Never throws: an unreadable list reads as empty.
+  loadDeletedAccounts(): Promise<DeletedAccount[]>;
+  saveDeletedAccounts(accounts: DeletedAccount[]): Promise<void>;
 }
 
 export interface CloudLoginOptions {
@@ -56,8 +60,9 @@ export interface CloudLogin {
     token: string;
   }): Promise<void>;
   // The same, matched by account instead of token: every session of a deleted
-  // account is dead, including one saved after the deletion began. Another
-  // account's session stays.
+  // account is dead, including one saved after the deletion began. The
+  // account is recorded as deleted, so a sign-in that finishes later is
+  // refused, even after a restart. Another account's session stays.
   invalidateAccount(account: { serverUrl: string; userId: string }): Promise<void>;
   // The persisted token for the sync engine (main-process only — never IPC).
   credentials(): Promise<CloudCredentials | null>;
@@ -218,10 +223,33 @@ export function createCloudLogin(options: CloudLoginOptions): CloudLogin {
       tokenHash: hashToken(session.token),
     };
   }
-  // Dead by the in-memory tombstone OR by the persisted marker — the marker
-  // is what survives a restart while the store still holds the dead record.
+  // Loaded once; invalidateAccount keeps it current.
+  let deletedAccounts: Promise<DeletedAccount[]> | null = null;
+  function knownDeletedAccounts(): Promise<DeletedAccount[]> {
+    deletedAccounts ??= options.store.loadDeletedAccounts();
+    return deletedAccounts;
+  }
+  function sameAccount(a: DeletedAccount, b: DeletedAccount): boolean {
+    return a.serverUrl === b.serverUrl && a.userId === b.userId;
+  }
+  async function isDeletedAccount(account: DeletedAccount): Promise<boolean> {
+    return (await knownDeletedAccounts()).some((deleted) => sameAccount(deleted, account));
+  }
+  // Refuses the account in memory first, so this process refuses it even
+  // when the record cannot be written.
+  async function recordDeletedAccount(account: DeletedAccount): Promise<void> {
+    const known = await knownDeletedAccounts();
+    if (known.some((deleted) => sameAccount(deleted, account))) return;
+    const next = [...known, { serverUrl: account.serverUrl, userId: account.userId }];
+    deletedAccounts = Promise.resolve(next);
+    await options.store.saveDeletedAccounts(next);
+  }
+  // Dead by the in-memory tombstone, the persisted marker, or a deleted
+  // account — the marker is what survives a restart while the store still
+  // holds the dead record.
   async function sessionIsDead(credentials: CloudCredentials): Promise<boolean> {
     if (matchesInvalidatedSession(credentials)) return true;
+    if (await isDeletedAccount(credentials)) return true;
     const marker = await options.store.loadInvalidMarker().catch(() => null);
     return (
       marker !== null &&
@@ -248,32 +276,30 @@ export function createCloudLogin(options: CloudLoginOptions): CloudLogin {
       await options.store.clearInvalidMarker().catch(() => undefined);
     });
   }
-  // Compares and clears inside the store's mutation queue, so a login save
-  // cannot land between the two.
-  async function invalidateSaved(
+  // Callers run it inside the store's mutation queue, so a login save cannot
+  // land between the compare and the clear.
+  async function clearSavedIf(
     matches: (saved: CloudCredentials) => boolean,
   ): Promise<void> {
-    await mutateStore(async () => {
-      const saved = await options.store.load();
-      if (saved === null || !matches(saved)) return;
-      const dead = { serverUrl: saved.serverUrl, userId: saved.userId, token: saved.token };
-      try {
-        await options.store.clear();
-        invalidatedSession = null;
-        await options.store.clearInvalidMarker().catch(() => undefined);
-      } catch (error) {
-        // Deletion failed, but the session is still dead: hold the
-        // in-memory tombstone and persist the marker (best-effort), so
-        // even a restart cannot read the dead record back as connected.
-        // Fail loudly — the next read or invalidation retries the
-        // deletion.
-        invalidatedSession = dead;
-        await options.store
-          .saveInvalidMarker(markerFor(dead))
-          .catch(() => undefined);
-        throw error;
-      }
-    });
+    const saved = await options.store.load();
+    if (saved === null || !matches(saved)) return;
+    const dead = { serverUrl: saved.serverUrl, userId: saved.userId, token: saved.token };
+    try {
+      await options.store.clear();
+      invalidatedSession = null;
+      await options.store.clearInvalidMarker().catch(() => undefined);
+    } catch (error) {
+      // Deletion failed, but the session is still dead: hold the
+      // in-memory tombstone and persist the marker (best-effort), so
+      // even a restart cannot read the dead record back as connected.
+      // Fail loudly — the next read or invalidation retries the
+      // deletion.
+      invalidatedSession = dead;
+      await options.store
+        .saveInvalidMarker(markerFor(dead))
+        .catch(() => undefined);
+      throw error;
+    }
   }
   let pollInFlight: {
     attempt: PendingLogin;
@@ -366,6 +392,11 @@ export function createCloudLogin(options: CloudLoginOptions): CloudLogin {
       assertCurrentAttempt(attempt);
       await mutateStore(async () => {
         assertCurrentAttempt(attempt);
+        // A sign-in that read the session before its account was deleted.
+        if (await isDeletedAccount(credentials)) {
+          if (pending === attempt && attempt.epoch === attemptEpoch) pending = null;
+          throw new Error("You deleted this account on this server. Sign in with another account.");
+        }
         await options.store.save(credentials);
         // logout invalidates attempts immediately while its clear waits behind
         // this save. A superseding start cannot interleave because it uses the
@@ -479,17 +510,21 @@ export function createCloudLogin(options: CloudLoginOptions): CloudLogin {
     },
 
     async invalidateSessionIf(expected) {
-      await invalidateSaved((saved) =>
+      await mutateStore(() => clearSavedIf((saved) =>
         saved.token === expected.token &&
         saved.serverUrl === expected.serverUrl &&
         saved.userId === expected.userId,
-      );
+      ));
     },
 
     async invalidateAccount(account) {
-      await invalidateSaved((saved) =>
-        saved.serverUrl === account.serverUrl && saved.userId === account.userId,
-      );
+      await mutateStore(async () => {
+        try {
+          await recordDeletedAccount(account);
+        } finally {
+          await clearSavedIf((saved) => sameAccount(saved, account));
+        }
+      });
     },
 
     async credentials() {
