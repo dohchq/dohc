@@ -498,15 +498,16 @@ function assertSupportedListMarkdown(markdown: string): string {
       if (run[0] === fence[0] && run.length >= fence.length && rest.slice(run.length).trim() === '') fence = ''
       continue
     }
-    const marker = /^(?:[-+*] |[0-9]{1,9}[.)] )/u.exec(rest)
+    const rule = indent <= 3 && /^(?:-(?:[ \t]*-){2,}|\*(?:[ \t]*\*){2,}|_(?:[ \t]*_){2,})[ \t]*$/u.test(rest)
+    const marker = rule ? null : /^(?:[-+*] |[0-9]{1,9}[.)] )/u.exec(rest)
     if (marker) {
       while (parents.length && indent <= parents.at(-1)!.indent) parents.pop()
     } else if (parents.length && indent <= parents.at(-1)!.indent
-      && (blank || run || quotes || /^(?:#{1,6} |(?:[*_][ \t]*){3,})/u.test(rest))) parents.length = 0
+      && (blank || run || quotes || rule || /^#{1,6} /u.test(rest))) parents.length = 0
     const inList = parents.length > 0
     if (quotes > 120) refuse()
     if (run) { fence = run; fenceInList = inList; blank = false; continue }
-    if (!inList && /^(?:\*(?:[ \t]*\*){2,}|_(?:[ \t]*_){2,})[ \t]*$/u.test(rest)) { blank = false; continue }
+    if (!inList && rule) { blank = false; continue }
     if ((inList || marker || /^[-+*]\t/u.test(rest))
       && (rest.startsWith('\t') || /^(?:[-+*]|[0-9]{1,9}[.)])[ \t]*\t/u.test(rest)
         || /^(?:\*(?:[ \t]*\*){2,}|_(?:[ \t]*_){2,})[ \t]*$/u.test(rest))) refuse()

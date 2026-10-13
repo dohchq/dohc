@@ -6,7 +6,7 @@ import { createLiveMarkdownJournalValidator, createLiveMarkdownRegistrationValid
 import { markdownToYDoc, yDocToMarkdown, serializeRichdocBody } from './import-export.js'
 
 const corpus = JSON.parse(readFileSync(new URL('../../../tools/rust-engine-program/nested-markdown-contract.json', import.meta.url), 'utf8')) as {
-  cases: Array<{ name: string; source: string; canonical?: string; refuse?: boolean; projected?: boolean; rustBase64?: string }>
+  cases: Array<{ name: string; source: string; canonical?: string; sourceCanonical?: string; foldRefuse?: boolean; refuse?: boolean; projected?: boolean; rustBase64?: string }>
 }
 it.each(corpus.cases)('shares the nested Markdown contract for $name', item => {
   if (item.refuse) {
@@ -14,7 +14,7 @@ it.each(corpus.cases)('shares the nested Markdown contract for $name', item => {
     return
   }
   const doc = markdownToYDoc(item.source, { reading: item.projected ? 'projection' : 'source' })
-  try { expect(yDocToMarkdown(doc)).toBe(item.canonical) }
+  try { expect(yDocToMarkdown(doc)).toBe(item.sourceCanonical ?? item.canonical) }
   finally { doc.destroy() }
 })
 
@@ -68,7 +68,7 @@ it('fix1 refuses inline nesting before marked can overflow its stack', () => {
 })
 it.each(corpus.cases.filter(item => !item.refuse))('fix1 accepts its canonical output for $name unchanged', item => {
   const doc = markdownToYDoc(item.canonical!, { reading: 'projection' })
-  try { expect(yDocToMarkdown(doc)).toBe(item.canonical) } finally { doc.destroy() }
+  try { expect(yDocToMarkdown(doc)).toBe(item.foldRefuse ? item.sourceCanonical : item.canonical) } finally { doc.destroy() }
 })
 
 it.each(['- Mr. Smith arrived.', '- I. Overview', '- a. child'])('accepts projected item prose unchanged: %s', source => {

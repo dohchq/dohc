@@ -77,7 +77,7 @@ fn nested_contract_file_fold_accepts_rules_and_prose() {
         assert_eq!(
             doc.preserved_markdown_source(&doc.project_richdoc().unwrap())
                 .as_deref(),
-            Some(source)
+            Some(source).filter(|_| case["witnessRefuse"] != true)
         );
     }
 }
@@ -112,7 +112,11 @@ fn nested_contract_file_fold_refuses_before_mutation() {
     doc.rewrite_content_to_markdown(ContentKind::Richdoc, "Original")
         .unwrap();
     let before = doc.encode_full_state();
-    for source in ["- parent\n  - child\n", "1. parent\n\n   continuation\n"] {
+    for source in [
+        "- parent\n  - child\n",
+        "1. parent\n\n   continuation\n",
+        "- a\n  ---",
+    ] {
         assert!(doc
             .rewrite_content_to_markdown_for_fold(ContentKind::Richdoc, source)
             .is_err());

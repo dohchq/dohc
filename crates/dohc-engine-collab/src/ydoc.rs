@@ -2675,7 +2675,8 @@ fn parse_markdown_blocks_at<'src>(
                 line.trim_start_matches(' ').as_bytes(),
                 [b'-' | b'+' | b'*', b'\t', ..]
             ))
-            && unsupported_markdown_line(line);
+            && unsupported_markdown_line(line)
+            && (in_list || !thematic_break(line));
         if thematic_break(line) {
             blocks.push(MdBlock::Rule);
             index += 1;
@@ -10296,6 +10297,17 @@ mod projection_tests {
         doc.with_delta(|txn| insert_md_paragraph(txn, &body, 0, source.trim_end()));
         let canonical = witness_source(&doc, source);
         assert_eq!(settled(&doc, &canonical, source).as_deref(), Some(source));
+    }
+
+    #[test]
+    fn local_settle_escapes_main_era_rule_text() {
+        let source = "***";
+        let doc = Ydoc::wire();
+        let body = doc.doc.get_or_insert_xml_fragment(ROOT_BODY);
+        doc.with_delta(|txn| insert_md_paragraph(txn, &body, 0, source));
+        let canonical = witness_source(&doc, source);
+        assert_eq!(canonical, "\\***");
+        assert_eq!(settled(&doc, &canonical, source), None);
     }
 
     #[test]

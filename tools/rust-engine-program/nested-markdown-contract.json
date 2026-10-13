@@ -410,6 +410,95 @@
       "name": "roman-overview",
       "rustBase64": "AQfNr96j3cfWDgAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwtvcmRlcmVkTGlzdCgAza/eo93H1g4BBXN0YXJ0AX0BBwDNr96j3cfWDgEDCGxpc3RJdGVtBwDNr96j3cfWDgMDCXBhcmFncmFwaAcAza/eo93H1g4EBgQAza/eo93H1g4FC0kuIE92ZXJ2aWV3AA==",
       "source": "1. I. Overview"
+    },
+    {
+      "canonical": "---\n\n&#9;code",
+      "fileFold": true,
+      "name": "dash-rule-tab-code",
+      "rustBase64": "AQXLi6CB+ajZBwAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5Aw5ob3Jpem9udGFsUnVsZYfLi6CB+ajZBwEDCXBhcmFncmFwaAcAy4uggfmo2QcCBgQAy4uggfmo2QcDBQljb2RlAA==",
+      "source": "- - -\n\tcode",
+      "sourceCanonical": "---\n\n```\ncode\n```"
+    },
+    {
+      "canonical": "- a\n\n---\n\n&#9;code",
+      "fileFold": true,
+      "name": "dash-rule-ends-list-code",
+      "rustBase64": "AQqk7+3azv9EACgBBG1ldGENc2NoZW1hVmVyc2lvbgF9AQcBBGJvZHkDCmJ1bGxldExpc3QHAKTv7drO/0QBAwhsaXN0SXRlbQcApO/t2s7/RAIDCXBhcmFncmFwaAcApO/t2s7/RAMGBACk7+3azv9EBAFhh6Tv7drO/0QBAw5ob3Jpem9udGFsUnVsZYek7+3azv9EBgMJcGFyYWdyYXBoBwCk7+3azv9EBwYEAKTv7drO/0QIBQljb2RlAA==",
+      "source": "- a\n---\n\tcode",
+      "sourceCanonical": "- a\n\n---\n\n```\ncode\n```"
+    },
+    {
+      "canonical": "- a\n\n---\n\n- b",
+      "fileFold": true,
+      "name": "dash-rule-ends-list-item",
+      "rustBase64": "AQzFm+Tv4rqSBQAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwDFm+Tv4rqSBQEDCGxpc3RJdGVtBwDFm+Tv4rqSBQIDCXBhcmFncmFwaAcAxZvk7+K6kgUDBgQAxZvk7+K6kgUEAWGHxZvk7+K6kgUBAw5ob3Jpem9udGFsUnVsZYfFm+Tv4rqSBQYDCmJ1bGxldExpc3QHAMWb5O/iupIFBwMIbGlzdEl0ZW0HAMWb5O/iupIFCAMJcGFyYWdyYXBoBwDFm+Tv4rqSBQkGBADFm+Tv4rqSBQoBYgA=",
+      "source": "- a\n---\n - b"
+    },
+    {
+      "canonical": "---\n\n&#32;x",
+      "fileFold": true,
+      "name": "dash-rule-blank-prose",
+      "rustBase64": "AQWAw/PcnNbLDQAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5Aw5ob3Jpem9udGFsUnVsZYeAw/PcnNbLDQEDCXBhcmFncmFwaAcAgMPz3JzWyw0CBgQAgMPz3JzWyw0DAiB4AA==",
+      "source": "- - -\n\n x"
+    },
+    {
+      "canonical": "---\n\n---",
+      "fileFold": true,
+      "name": "dash-rule-before-star-rule",
+      "rustBase64": "AQP42NyLiazdBQAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5Aw5ob3Jpem9udGFsUnVsZYf42NyLiazdBQEDDmhvcml6b250YWxSdWxlAA==",
+      "source": "- - -\n  ***",
+      "witnessRefuse": true
+    },
+    {
+      "canonical": "---",
+      "fileFold": true,
+      "name": "dash-rule-short-spacing",
+      "rustBase64": "AQKyiIbsgcnODgAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5Aw5ob3Jpem9udGFsUnVsZQA=",
+      "source": "- --"
+    },
+    {
+      "canonical": "---",
+      "fileFold": true,
+      "name": "dash-rule-leading-space",
+      "rustBase64": "AQKgvrHVyp6CDAAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5Aw5ob3Jpem9udGFsUnVsZQA=",
+      "source": " - - -"
+    },
+    {
+      "canonical": "---",
+      "fileFold": true,
+      "name": "star-rule-tab-separated",
+      "rustBase64": "AQLLq4jBpJdUACgBBG1ldGENc2NoZW1hVmVyc2lvbgF9AQcBBGJvZHkDDmhvcml6b250YWxSdWxlAA==",
+      "source": "*\t*\t*"
+    },
+    {
+      "canonical": "---",
+      "fileFold": true,
+      "name": "dash-rule-tab-separated",
+      "rustBase64": "AQKh2p2Um9LCDAAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5Aw5ob3Jpem9udGFsUnVsZQA=",
+      "source": "-\t-\t-"
+    },
+    {
+      "canonical": "---",
+      "fileFold": true,
+      "name": "dash-rule-mixed-spacing",
+      "rustBase64": "AQKm6/PXx4ZLACgBBG1ldGENc2NoZW1hVmVyc2lvbgF9AQcBBGJvZHkDDmhvcml6b250YWxSdWxlAA==",
+      "source": "- \t- -"
+    },
+    {
+      "canonical": "---",
+      "fileFold": true,
+      "name": "star-rule-mixed-spacing",
+      "rustBase64": "AQLN0eO4uJb4DgAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5Aw5ob3Jpem9udGFsUnVsZQA=",
+      "source": "* \t* *"
+    },
+    {
+      "canonical": "- a\n  ---",
+      "foldRefuse": true,
+      "name": "item-setext-rule-disagreement",
+      "note": "CommonMark and TypeScript read an item heading; Rust reads a paragraph and rule. File folding refuses before mutation.",
+      "rustBase64": "AQeV4dnbuK8rACgBBG1ldGENc2NoZW1hVmVyc2lvbgF9AQcBBGJvZHkDCmJ1bGxldExpc3QHAJXh2du4rysBAwhsaXN0SXRlbQcAleHZ27ivKwIDCXBhcmFncmFwaAcAleHZ27ivKwMGBACV4dnbuK8rBAFhh5Xh2du4rysDAw5ob3Jpem9udGFsUnVsZQA=",
+      "source": "- a\n  ---",
+      "sourceCanonical": "- \n  ## a"
     }
   ],
   "rules": "Blank lines contain only spaces or tabs. Same-kind siblings across blanks form one loose list. An indented line after a blank starts another item paragraph; a nonblank unindented line can lazily continue the current paragraph. Children must reach their parent's marker content column. Task checkboxes are content after a two-column bullet marker. Refusals for ambiguous lines apply inside list bodies; root prose, rules and code remain accepted. Each projector output must be accepted unchanged by its projected reader. Ordered output is capped at nine digits. Letter and Roman prefixes are prose. Thematic breaks take precedence over list markers."

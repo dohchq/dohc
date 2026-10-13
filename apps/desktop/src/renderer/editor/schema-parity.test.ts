@@ -525,7 +525,8 @@ describe("desktop editor schema parity", () => {
   it.each(nestedMarkdown.cases.filter(item => !('refuse' in item)))("opens and edits the shared $name contract", async item => {
     const ref = createRef<MarkdownEditorHandle>();
     const sourceBody = parseFrontmatter(item.source).body;
-    const canonicalBody = parseFrontmatter(item.canonical!).body
+    const expected = 'sourceCanonical' in item ? item.sourceCanonical! : item.canonical!;
+    const canonicalBody = (sourceBody === item.source ? expected : parseFrontmatter(expected).body)
       .replaceAll('\r\n', '\n').replace(/^\n+/u, '');
     render(createElement(MarkdownEditor, {
       ref, value: sourceBody, onDirty: vi.fn(), workspaceId: "workspace-1", path: "notes/nested.md", knownFiles: [],
