@@ -258,11 +258,13 @@ function taskDefinition(root) {
   const xml = text => text.replace(/[&<>"]/gu, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;" })[c]);
   const user = `${process.env.USERDOMAIN}\\${process.env.USERNAME}`;
   const command = `--headless pwsh.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "${join(root, "supervisor.ps1")}" -Root "${root}"`;
-  // Logon starts it; the five-minute repetition restarts a supervisor that died. IgnoreNew keeps one.
+  // Logon starts it. Every five minutes a time trigger restarts a supervisor that died; a logon trigger's own
+  // repetition would only begin at the next logon, leaving the session that installed it unguarded. IgnoreNew keeps one.
   return `<?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
   <Triggers>
-    <LogonTrigger><Enabled>true</Enabled><UserId>${xml(user)}</UserId><Repetition><Interval>PT5M</Interval><StopAtDurationEnd>false</StopAtDurationEnd></Repetition></LogonTrigger>
+    <LogonTrigger><Enabled>true</Enabled><UserId>${xml(user)}</UserId></LogonTrigger>
+    <TimeTrigger><Enabled>true</Enabled><StartBoundary>2026-01-01T00:00:00</StartBoundary><Repetition><Interval>PT5M</Interval><StopAtDurationEnd>false</StopAtDurationEnd></Repetition></TimeTrigger>
   </Triggers>
   <Principals><Principal id="Author"><UserId>${xml(user)}</UserId><LogonType>InteractiveToken</LogonType><RunLevel>LeastPrivilege</RunLevel></Principal></Principals>
   <Settings>
