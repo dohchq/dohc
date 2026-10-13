@@ -373,7 +373,7 @@ const WORKSPACE_DECODER_CASES: Array<{
       degraded: false,
       terminal: false,
       phase: "ready",
-      noAtomicPlacement: false, recoveryUnavailable: false, keptFiles: [], captureRecoveries: [],
+      noAtomicPlacement: false, recoveryUnavailable: false, keptFiles: [], captureRecoveries: [], heldFiles: [],
     },
   },
   {
@@ -382,7 +382,7 @@ const WORKSPACE_DECODER_CASES: Array<{
   },
   {
     method: WORKSPACE_METHOD.captureFlush,
-    valid: { settled: true, running: true, degraded: false },
+    valid: { settled: true, running: true, degraded: false, heldFiles: [] },
   },
   {
     method: WORKSPACE_METHOD.captureSetAuthor,

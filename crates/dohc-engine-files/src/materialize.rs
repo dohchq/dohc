@@ -2551,6 +2551,7 @@ impl RecoveryEntry {
             Self::Rowless(staged) => staged.job.as_ref().map(|job| job.target_path.as_str()),
         };
         if let Some(path) = path
+            && !path.is_empty()
             && placement_is_held(store, root, self.workspace_id(), path, None)?
         {
             return Ok(false);
