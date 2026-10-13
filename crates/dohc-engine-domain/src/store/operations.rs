@@ -74,6 +74,17 @@ pub fn preflight_undo_operation_in(
     operation: &str,
 ) -> Result<Vec<OperationMoment>, DomainError> {
     validate_operation_id(operation)?;
+    ensure_operation_published_in(conn, ws, version, operation)?;
+    let originals = operation_moments_in(conn, ws, version, operation)?;
+    preflight_originals_in(conn, ws, version, operation, originals)
+}
+
+pub fn ensure_operation_published_in(
+    conn: &Connection,
+    ws: &str,
+    version: &str,
+    operation: &str,
+) -> Result<(), DomainError> {
     let pending: Option<String> = conn
         .query_row(
             "SELECT m.path FROM moments m
@@ -92,7 +103,16 @@ pub fn preflight_undo_operation_in(
             reason: "operation publication pending",
         });
     }
-    let originals = operation_moments_in(conn, ws, version, operation)?;
+    Ok(())
+}
+
+fn preflight_originals_in(
+    conn: &Connection,
+    ws: &str,
+    version: &str,
+    operation: &str,
+    originals: Vec<OperationMoment>,
+) -> Result<Vec<OperationMoment>, DomainError> {
     if originals.is_empty() {
         return Err(DomainError::UndoRefused {
             path: operation.into(),
@@ -129,7 +149,27 @@ pub fn preflight_undo_operation_in(
             "rename"
                 if current
                     .as_ref()
-                    .is_some_and(|head| head.path == effect.path) => {}
+                    .is_some_and(|head| head.path == effect.path) =>
+            {
+                let changed: bool = conn
+                    .prepare_cached(
+                        "SELECT EXISTS(SELECT 1 FROM moments
+                     WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3
+                         AND moment_order>?4 AND operation IN ('rename','delete'))",
+                    )
+                    .map_err(DomainError::sql_corrupt)?
+                    .query_row(
+                        params![ws, version, effect.object_id, effect.moment_order],
+                        |r| r.get(0),
+                    )
+                    .map_err(DomainError::sql_corrupt)?;
+                if changed {
+                    return Err(DomainError::UndoRefused {
+                        path: effect.path.clone(),
+                        reason: "object moved after rename",
+                    });
+                }
+            }
             "delete" if current.is_none() => {
                 let latest: i64 = conn
                     .query_row(
@@ -179,6 +219,24 @@ fn undo_request_fingerprint(ws: &str, operation: &str, author: Option<&str>) -> 
     ])
 }
 
+fn checked_undo_request_in(
+    conn: &Connection,
+    ws: &str,
+    operation: &str,
+    request: &str,
+    author: Option<&str>,
+) -> Result<Option<super::request_ledger::RecordedRequest>, DomainError> {
+    validate_operation_id(operation)?;
+    validate_identifier(request, "request_id")?;
+    let Some(recorded) = lookup_request(conn, request)? else {
+        return Ok(None);
+    };
+    if recorded.payload_hash != undo_request_fingerprint(ws, operation, author) {
+        return Err(DomainError::IdempotencyKeyReuseMismatch);
+    }
+    Ok(Some(recorded))
+}
+
 pub fn undo_request_is_replay_in(
     conn: &Connection,
     ws: &str,
@@ -186,15 +244,38 @@ pub fn undo_request_is_replay_in(
     request: &str,
     author: Option<&str>,
 ) -> Result<bool, DomainError> {
-    validate_operation_id(operation)?;
-    validate_identifier(request, "request_id")?;
-    let Some(recorded) = lookup_request(conn, request)? else {
-        return Ok(false);
+    Ok(checked_undo_request_in(conn, ws, operation, request, author)?.is_some())
+}
+
+pub fn replayed_undo_operation_in(
+    conn: &Connection,
+    ws: &str,
+    operation: &str,
+    request: &str,
+    author: Option<&str>,
+) -> Result<Option<(String, Vec<OperationMoment>)>, DomainError> {
+    let Some(recorded) = checked_undo_request_in(conn, ws, operation, request, author)? else {
+        return Ok(None);
     };
-    if recorded.payload_hash != undo_request_fingerprint(ws, operation, author) {
-        return Err(DomainError::IdempotencyKeyReuseMismatch);
+    let version: String = conn
+        .query_row(
+            "SELECT version_id FROM moments WHERE workspace_id=?1 AND moment_order=?2",
+            params![ws, recorded.result_seq],
+            |r| r.get(0),
+        )
+        .map_err(DomainError::sql_corrupt)?;
+    let moments = raw_operation_moments_in(
+        conn,
+        ws,
+        &version,
+        &undo_correlation_id(ws, operation, request),
+    )?;
+    if moments.is_empty() {
+        return Err(DomainError::StateCorrupt {
+            reason: "Undo lost result",
+        });
     }
-    Ok(true)
+    Ok(Some((version, moments)))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -216,21 +297,8 @@ where
     validate_moment_metadata("restore", Some("Undo"), Some(operation), author)?;
     let correlation = undo_correlation_id(ws, operation, request);
     let fingerprint = undo_request_fingerprint(ws, operation, author);
-    if let Some(recorded) = lookup_request(tx, request)? {
-        if recorded.payload_hash != fingerprint {
-            return Err(DomainError::IdempotencyKeyReuseMismatch);
-        }
-        let original_version: String = tx
-            .query_row(
-                "SELECT version_id FROM moments WHERE workspace_id=?1 AND moment_order=?2",
-                params![ws, recorded.result_seq],
-                |r| r.get(0),
-            )
-            .map_err(DomainError::sql_corrupt)?;
-        return Ok((
-            raw_operation_moments_in(tx, ws, &original_version, &correlation)?,
-            true,
-        ));
+    if let Some((_, moments)) = replayed_undo_operation_in(tx, ws, operation, request, author)? {
+        return Ok((moments, true));
     }
     let originals = preflight_undo_operation_in(tx, ws, version, operation)?;
     let mut last_order = -1;

@@ -20,8 +20,9 @@ mod file_resolution;
 pub use file_resolution::{FileResolution, FileResolveTarget};
 mod operations;
 pub use operations::{
-    OPERATION_ID_PREFIX, OperationMoment, operation_moments_in, preflight_undo_operation_in,
-    undo_correlation_id, undo_operation_in_tx, undo_request_is_replay_in, validate_operation_id,
+    OPERATION_ID_PREFIX, OperationMoment, ensure_operation_published_in, operation_moments_in,
+    preflight_undo_operation_in, replayed_undo_operation_in, undo_correlation_id,
+    undo_operation_in_tx, undo_request_is_replay_in, validate_operation_id,
 };
 mod history;
 pub use history::{

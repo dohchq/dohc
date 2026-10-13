@@ -45,6 +45,14 @@ struct WorkspaceBarriers {
     _sessions: tokio::sync::OwnedMutexGuard<()>,
 }
 
+fn history_undo_result_json(result: &dohc_engine_runtime::HistoryUndoResult) -> Value {
+    json!({
+        "operationId": result.operation_id, "versionId": result.version_id,
+        "momentCount": result.moments.len(), "compensationOperationId": result.compensation_operation_id,
+        "deduped": result.deduped, "materialized": result.materialized,
+    })
+}
+
 enum VersionFenceIntent {
     Undo {
         operation_id: String,
@@ -510,7 +518,7 @@ impl EngineService {
         let request_id = crate::rpc::request::required_idempotency_key(request.idempotency_key)?;
         let author_json = crate::rpc::request::validated_author(params.author.as_ref())?;
         let cancellation = OperationCancellation::new(ctx);
-        Self::read_under_ctx(
+        if let Some(replay) = Self::read_under_ctx(
             &cancellation,
             "history.undo (availability)",
             open.actor.preflight_history_undo(
@@ -520,7 +528,12 @@ impl EngineService {
                 author_json.clone(),
             ),
         )
-        .await?;
+        .await?
+        {
+            return Ok(history_undo_result_json(
+                &self.resume_history_undo(&open, replay).await,
+            ));
+        }
         let result = self
             .fence_version_snapshot(
                 &cancellation,
@@ -536,11 +549,56 @@ impl EngineService {
             )
             .await?;
         match result {
-            VersionFenceOutcome::UndoCommitted(result) => Ok(
-                json!({"operationId":result.operation_id,"versionId":result.version_id,"momentCount":result.moments.len(),"compensationOperationId":result.compensation_operation_id,"deduped":result.deduped,"materialized":result.materialized}),
-            ),
+            VersionFenceOutcome::UndoCommitted(result) => Ok(history_undo_result_json(&result)),
             _ => unreachable!("Undo fence returns its own result"),
         }
+    }
+
+    async fn resume_history_undo(
+        &self,
+        open: &Arc<OpenWorkspace>,
+        result: dohc_engine_runtime::HistoryUndoResult,
+    ) -> dohc_engine_runtime::HistoryUndoResult {
+        if result.materialized {
+            return result;
+        }
+        if !matches!(open.actor.active_version_id(open.workspace_id.clone()).await, Ok(version) if version == result.version_id)
+        {
+            return result;
+        }
+        let leases = self.leases.scoped(&open.root);
+        let mut held = HashMap::new();
+        for member in &result.moments {
+            if held.contains_key(&member.object_id) {
+                continue;
+            }
+            let Ok(key) = DocKey::new(&open.workspace_id, &result.version_id, &member.object_id)
+            else {
+                return result;
+            };
+            let Ok(lease) = leases.acquire_internal(&key) else {
+                // Keep the existing lease; pending jobs remain replayable.
+                return result;
+            };
+            held.insert(member.object_id.clone(), lease);
+        }
+        let Ok(now) = now_ms() else {
+            return result;
+        };
+        open.actor
+            .history_undo_place(
+                open.workspace_id.clone(),
+                result,
+                open.root.clone(),
+                Arc::new(self.self_writes.scoped(&open.root)),
+                now,
+                |members| {
+                    for member in members {
+                        held.remove(&member.object_id);
+                    }
+                },
+            )
+            .await
     }
 
     /// Freeze the active workspace snapshot before a version fork or switch.
@@ -566,16 +624,36 @@ impl EngineService {
             .await?;
 
         let (reconcile_version_id, fork_source_version_id) = match &intent {
-            VersionFenceIntent::Undo { .. } => (
-                Self::read_under_ctx(
+            VersionFenceIntent::Undo {
+                operation_id,
+                request_id,
+                author_json,
+            } => {
+                if let Some(replay) = Self::read_under_ctx(
                     cancellation,
-                    "history.undo (active version)",
-                    open.actor.active_version(open.workspace_id.clone()),
+                    "history.undo (fenced availability)",
+                    open.actor.preflight_history_undo(
+                        open.workspace_id.clone(),
+                        operation_id.clone(),
+                        request_id.clone(),
+                        author_json.clone(),
+                    ),
                 )
                 .await?
-                .version_id,
-                None,
-            ),
+                {
+                    return Ok(VersionFenceOutcome::UndoCommitted(replay));
+                }
+                (
+                    Self::read_under_ctx(
+                        cancellation,
+                        "history.undo (active version)",
+                        open.actor.active_version(open.workspace_id.clone()),
+                    )
+                    .await?
+                    .version_id,
+                    None,
+                )
+            }
             VersionFenceIntent::Fork { input } => {
                 // The preflight is intentionally repeated while the fence is
                 // held: a competing create may have won between the cheap
@@ -615,10 +693,43 @@ impl EngineService {
             }
         };
 
+        let undo_group = if let VersionFenceIntent::Undo { operation_id, .. } = &intent {
+            Some(
+                Self::read_under_ctx(
+                    cancellation,
+                    "history.undo (scope)",
+                    open.actor
+                        .history_operation(open.workspace_id.clone(), operation_id.clone()),
+                )
+                .await?
+                .moments,
+            )
+        } else {
+            None
+        };
+        let undo_objects = undo_group.as_ref().map(|members| {
+            members
+                .iter()
+                .map(|m| m.object_id.clone())
+                .collect::<std::collections::HashSet<_>>()
+        });
+        let undo_paths = undo_group.as_ref().map(|members| {
+            members
+                .iter()
+                .flat_map(|m| std::iter::once(m.path.clone()).chain(m.before_path.clone()))
+                .collect::<std::collections::HashSet<_>>()
+        });
         let session_views: Vec<(String, DocKey, ContentKind)> = lock(&self.sessions)
             .iter()
             .filter(|(_, session)| {
-                session.workspace == *handle && session.key.version_id == reconcile_version_id
+                session.workspace == *handle
+                    && session.key.version_id == reconcile_version_id
+                    && undo_objects.as_ref().is_none_or(|objects| {
+                        objects.contains(&session.key.object_id)
+                            || undo_paths
+                                .as_ref()
+                                .is_some_and(|paths| paths.contains(&session.path))
+                    })
             })
             .map(|(session_id, session)| {
                 (
@@ -718,15 +829,35 @@ impl EngineService {
                 return Err(unsettled_fork_error(content_kind));
             }
 
-            open.actor
-                .materialize_replay_pending_for_fence(
-                    open.root.clone(),
-                    open.workspace_id.clone(),
-                    Arc::new(self_writes.scoped(&open.root)),
-                    now_ms()?,
-                )
-                .await
-                .map_err(map_runtime)?;
+            if let VersionFenceIntent::Undo { operation_id, .. } = &intent {
+                let jobs = open
+                    .actor
+                    .history_operation_pending_jobs(open.workspace_id.clone(), operation_id.clone())
+                    .await
+                    .map_err(map_runtime)?;
+                if !jobs.is_empty() {
+                    open.actor
+                        .materialize_replay_selected_for_fence(
+                            open.root.clone(),
+                            open.workspace_id.clone(),
+                            Arc::new(self_writes.scoped(&open.root)),
+                            jobs,
+                            now_ms()?,
+                        )
+                        .await
+                        .map_err(map_runtime)?;
+                }
+            } else {
+                open.actor
+                    .materialize_replay_pending_for_fence(
+                        open.root.clone(),
+                        open.workspace_id.clone(),
+                        Arc::new(self_writes.scoped(&open.root)),
+                        now_ms()?,
+                    )
+                    .await
+                    .map_err(map_runtime)?;
+            }
 
             if let Some(probe) = &probe {
                 probe.record_version_scan();
@@ -750,7 +881,9 @@ impl EngineService {
             )
             .await;
 
-            if !matches!(reconcile, Ok(false)) {
+            if !matches!(reconcile, Ok(false))
+                && !matches!(&intent, VersionFenceIntent::Undo { .. })
+            {
                 let capture = lock(&open.capture);
                 let driver = capture.as_ref().ok_or_else(|| {
                     WireError::new(
@@ -760,14 +893,7 @@ impl EngineService {
                 })?;
                 driver.request_manifest_refresh();
             }
-            match reconcile {
-                Err(capture_driver::SwitchReconcileError::HeldFiles(_))
-                    if matches!(&intent, VersionFenceIntent::Undo { .. }) => {}
-                result => {
-                    result
-                        .map_err(|error| map_switch_reconcile_error(error, &detached_operation))?;
-                }
-            }
+            reconcile.map_err(|error| map_switch_reconcile_error(error, &detached_operation))?;
 
             if let Some(probe) = &probe {
                 probe.pause_version_commit_if_armed().await;
@@ -779,23 +905,53 @@ impl EngineService {
                     request_id,
                     author_json,
                 } => {
+                    let mut undo_leases = undo_objects
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(|object| {
+                            let key =
+                                DocKey::new(&open.workspace_id, &reconcile_version_id, &object)
+                                    .map_err(|e| map_runtime(e.into()))?;
+                            capture_leases
+                                .acquire_internal(&key)
+                                .map(|lease| (object, lease))
+                                .map_err(|e| map_runtime(e.into()))
+                        })
+                        .collect::<Result<std::collections::HashMap<_, _>, WireError>>()?;
                     let result = open
                         .actor
-                        .history_undo(
+                        .history_undo_commit(
                             open.workspace_id.clone(),
                             operation_id,
                             request_id,
                             author_json,
                             open.root.clone(),
-                            Arc::new(self_writes.scoped(&open.root)),
                             Arc::new(NoFaults),
                             now_ms()?,
                         )
                         .await
                         .map_err(map_runtime)?;
-                    if let Some(driver) = lock(&open.capture).as_ref() {
-                        driver.request_manifest_refresh();
+                    drop(_barriers);
+                    if let Some(probe) = &probe {
+                        probe.pause_undo_placement_if_armed().await;
                     }
+                    let result = open
+                        .actor
+                        .history_undo_place(
+                            open.workspace_id.clone(),
+                            result,
+                            open.root.clone(),
+                            Arc::new(self_writes.scoped(&open.root)),
+                            now_ms()?,
+                            |members| {
+                                for member in members {
+                                    undo_leases.remove(&member.object_id);
+                                }
+                            },
+                        )
+                        .await;
+                    // Placement receipts and watcher events update the existing manifest.
+                    // Rebuilding it here would rehash unrelated files on the next Undo.
                     return Ok(VersionFenceOutcome::UndoCommitted(result));
                 }
                 VersionFenceIntent::Fork { input } => open
@@ -1105,6 +1261,163 @@ mod tests {
     use serde_json::json;
     use std::sync::Arc;
     use std::time::Duration;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn history_operation_releases_barriers_during_placement() {
+        use dohc_engine_domain::{RenameTextFile, VersionedTextStore, WriteText};
+        use dohc_engine_storage::{EngineStore, NoFaults};
+        let scratch = ScratchDir::new().unwrap();
+        let token = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        crate::root_binding::write_root_binding(scratch.path(), token).unwrap();
+        let mut store =
+            EngineStore::open(&dohc_engine_testkit::engine_db_path(&scratch).unwrap(), 1).unwrap();
+        store.bind_root_token(token, &NoFaults).unwrap();
+        let mut domain = VersionedTextStore::new(&mut store);
+        domain
+            .ensure_main_version("undo-placement", "main", 1, &NoFaults)
+            .unwrap();
+        domain
+            .write_text(
+                &WriteText {
+                    workspace_id: "undo-placement".into(),
+                    version_id: "main".into(),
+                    object_id: "one".into(),
+                    path: "old.md".into(),
+                    text: "Content".into(),
+                    moment_id: "seed".into(),
+                    request_id: None,
+                    metadata_origin: "api".into(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    now_ms: 2,
+                },
+                &NoFaults,
+            )
+            .unwrap();
+        domain
+            .rename_text_file(
+                &RenameTextFile {
+                    workspace_id: "undo-placement".into(),
+                    version_id: "main".into(),
+                    from_path: "old.md".into(),
+                    to_path: "new.md".into(),
+                    moment_id: "move".into(),
+                    request_id: None,
+                    metadata_origin: "api".into(),
+                    metadata_summary: None,
+                    metadata_correlation_id: Some("dohc-operation:move".into()),
+                    author_json: None,
+                    now_ms: 3,
+                },
+                &NoFaults,
+            )
+            .unwrap();
+        std::fs::write(scratch.path().join("new.md"), "Content").unwrap();
+        drop(store);
+        let probe = crate::capture_driver::CaptureApplyProbe::default();
+        let service = Arc::new(EngineService::with_capture_apply_probe_for_harness(
+            probe.clone(),
+        ));
+        let opened = service
+            .workspace_open(
+                &RequestContext::unbounded(),
+                json!({
+                    "rootDir":scratch.path().to_string_lossy(),"workspaceId":"undo-placement"
+                }),
+            )
+            .await
+            .unwrap();
+        let handle: WorkspaceHandle = serde_json::from_value(opened["workspace"].clone()).unwrap();
+        let open = service.open(Some(&handle)).unwrap();
+        let refreshes = probe.manifest_refresh_count();
+        probe.pause_next_undo_placement();
+        let undo_service = Arc::clone(&service);
+        let undo_handle = handle.clone();
+        let undo = tokio::spawn(async move {
+            undo_service
+                .history_undo(
+                    &RequestContext::unbounded(),
+                    Request {
+                        id: 100,
+                        method: "history.undo".into(),
+                        workspace: Some(undo_handle),
+                        deadline_ms: None,
+                        idempotency_key: Some("undo".into()),
+                        progress: false,
+                        params: json!({"operationId":"dohc-operation:move"}),
+                    },
+                )
+                .await
+        });
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            probe.wait_until_undo_placement_paused(),
+        )
+        .await
+        .unwrap();
+        let sessions_available = open.session_ops.try_lock().is_ok();
+        let capture_available = open.capture_apply_gate.try_lock().is_ok();
+        let protected_key =
+            dohc_engine_collab::DocKey::new("undo-placement", "main", "one").unwrap();
+        let affected_protected = service.leases.scoped(&open.root).is_held(&protected_key);
+        let retry = tokio::time::timeout(
+            Duration::from_secs(20),
+            service.history_undo(
+                &RequestContext::unbounded(),
+                Request {
+                    id: 101,
+                    method: "history.undo".into(),
+                    workspace: Some(handle.clone()),
+                    deadline_ms: None,
+                    idempotency_key: Some("undo".into()),
+                    progress: false,
+                    params: json!({"operationId":"dohc-operation:move"}),
+                },
+            ),
+        )
+        .await;
+        let committed = open
+            .actor
+            .active_version(open.workspace_id.clone())
+            .await
+            .unwrap();
+        assert_eq!(committed.version_id, "main");
+        probe.release_undo_placement();
+        let result = undo.await.unwrap().unwrap();
+        service.workspace_close(Some(handle)).await.unwrap();
+        let retry = retry
+            .expect("committed retry must not wait for placement")
+            .expect("committed retry must not reconcile again");
+        assert_eq!(retry["deduped"], true);
+        assert_eq!(retry["materialized"], false);
+        assert_eq!(
+            retry["compensationOperationId"],
+            result["compensationOperationId"]
+        );
+        assert_eq!(result["materialized"], true);
+        assert!(
+            affected_protected,
+            "the pending object must remain protected"
+        );
+        assert!(
+            !service.leases.scoped(&open.root).is_held(&protected_key),
+            "placed objects must release their leases"
+        );
+        assert!(
+            sessions_available,
+            "session mutations must resume before file placement"
+        );
+        assert!(
+            capture_available,
+            "capture must resume for unrelated paths before file placement"
+        );
+        assert_eq!(
+            probe.manifest_refresh_count(),
+            refreshes,
+            "Undo must keep the workspace manifest"
+        );
+    }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn mutation_write_waits_for_session_ops_before_lease_check_and_commit() {

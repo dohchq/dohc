@@ -770,6 +770,89 @@ mod capture_file_hold_tests {
         );
     }
     #[test]
+    fn history_operation_pending_inverse_defers_capture_at_both_endpoints() {
+        struct Crash;
+        impl FaultInjector for Crash {
+            fn poll(&self, p: dohc_engine_storage::FaultPoint) -> dohc_engine_storage::FaultAction {
+                if p == dohc_engine_storage::FaultPoint::StorageAfterCommitBeforeAck {
+                    dohc_engine_storage::FaultAction::Crash
+                } else {
+                    dohc_engine_storage::FaultAction::Continue
+                }
+            }
+        }
+        let (scratch, mut store, _) = seeded();
+        operation_rename(&mut store);
+        std::fs::write(scratch.path().join("moved.md"), "Before.\n").unwrap();
+        assert!(matches!(
+            operation_undo(&mut store, scratch.path(), &Crash),
+            Err(RuntimeError::OperationCrashed)
+        ));
+        let count = store
+            .read_with(|conn| {
+                conn.query_row("SELECT COUNT(*) FROM moments", [], |r| r.get::<_, i64>(0))
+            })
+            .unwrap();
+        for path in ["moved.md", "held.md"] {
+            assert!(matches!(
+                offer(&mut store, &input(path, "Before.\n")),
+                Err(RuntimeError::Sync(
+                    dohc_engine_sync::SyncError::RetryableState {
+                        reason: "history-undo-placement-pending"
+                    }
+                ))
+            ));
+        }
+        let retire = CaptureRetire {
+            workspace_id: "hold-proof".into(),
+            version_id: "main".into(),
+            path: "held.md".into(),
+            metadata_summary: None,
+            metadata_correlation_id: None,
+            now_ms: 6,
+            request_id: None,
+            only_if_text_head: true,
+            only_if_capture_origin: false,
+            allow_ydoc_origin: true,
+        };
+        assert!(matches!(
+            capture_retire_on_store(
+                &mut store,
+                &retire,
+                scratch.path(),
+                &Root,
+                true,
+                &(),
+                &LeaseRegistry::new(),
+                &NoFaults
+            ),
+            Err(RuntimeError::Sync(
+                dohc_engine_sync::SyncError::RetryableState {
+                    reason: "history-undo-placement-pending"
+                }
+            ))
+        ));
+        assert_eq!(
+            store
+                .read_with(|conn| conn
+                    .query_row("SELECT COUNT(*) FROM moments", [], |r| r.get::<_, i64>(0)))
+                .unwrap(),
+            count
+        );
+        assert_unheld(&store);
+        assert_eq!(
+            std::fs::read(scratch.path().join("moved.md")).unwrap(),
+            b"Before.\n"
+        );
+        assert!(!scratch.path().join("held.md").exists());
+        assert!(
+            operation_undo(&mut store, scratch.path(), &NoFaults)
+                .unwrap()
+                .materialized
+        );
+    }
+
+    #[test]
     fn history_operation_restart_parked_placement_never_reports_restored() {
         struct Crash;
         impl FaultInjector for Crash {
@@ -817,6 +900,19 @@ mod capture_file_hold_tests {
                     .query_row("SELECT COUNT(*) FROM moments", [], |r| r.get::<_, i64>(0)))
                 .unwrap(),
             3
+        );
+        refused.text = "Repaired.\n".into();
+        std::fs::write(scratch.path().join("held.md"), &refused.text).unwrap();
+        assert_eq!(
+            offer(&mut store, &refused).unwrap().snapshot.text,
+            refused.text
+        );
+        assert_unheld(&store);
+        // Superseded Undo jobs no longer reserve the repaired path.
+        refused.text = "Continued.\n".into();
+        assert_eq!(
+            offer(&mut store, &refused).unwrap().snapshot.text,
+            refused.text
         );
     }
 
@@ -1577,6 +1673,27 @@ fn capture_ingest_in_tx(
 ) -> Result<WriteResult, RuntimeError> {
     let (pinned, held) = pinned_capture_input(tx, input)?;
     let input = pinned.as_ref();
+    let placement_admission = if held {
+        Ok(())
+    } else {
+        match ensure_no_pending_undo_placement(tx, &input.workspace_id, &input.path) {
+            Err(error)
+                if input.claim_foreign_head
+                    && matches!(
+                        &error,
+                        RuntimeError::Sync(dohc_engine_sync::SyncError::RetryableState {
+                            reason: "history-undo-placement-pending"
+                        })
+                    ) =>
+            {
+                Err(error)
+            }
+            result => {
+                result?;
+                Ok(())
+            }
+        }
+    };
     if held {
         if let Some(shared) = batch.as_deref_mut() {
             shared.recovered_sibling = true;
@@ -1780,6 +1897,8 @@ fn capture_ingest_in_tx(
     }
     result.pending_placement = pending_placement;
     result.released_capture_hold = held;
+    // Projection refusal may establish a hold; a valid pending observation rolls back.
+    placement_admission?;
     Ok(result)
 }
 
@@ -2179,6 +2298,9 @@ fn capture_ingest_binary_on_store(
         }
         let input = pinned.as_ref();
         let mut admitted = false;
+        if hold.is_none() {
+            ensure_no_pending_undo_placement(tx, &input.workspace_id, &input.path)?;
+        }
         let mut result = capture_ingest_binary_with_admission_in_tx(
             tx,
             input,
@@ -2234,6 +2356,40 @@ fn capture_ingest_binary_on_store(
         TxnOutcome::Committed(result) => Ok(result),
         TxnOutcome::Crashed { .. } => Err(RuntimeError::OperationCrashed),
     }
+}
+
+fn ensure_no_pending_undo_placement(
+    conn: &Connection,
+    workspace: &str,
+    path: &str,
+) -> Result<(), RuntimeError> {
+    let pending: bool = conn
+        .prepare_cached(
+            "SELECT EXISTS(SELECT 1 FROM materialization_jobs j
+         JOIN moments m ON m.workspace_id=j.workspace_id AND m.moment_order=j.target_generation
+         JOIN versioned_workspaces w ON w.workspace_id=m.workspace_id
+         JOIN snapshots s ON s.workspace_id=m.workspace_id AND s.version_id=m.version_id
+             AND s.object_id=m.object_id AND s.path=m.path
+         WHERE j.workspace_id=?1 AND j.target_path=?2 AND j.status='pending'
+             AND m.metadata_correlation_id GLOB 'dohc-operation:undo:*'
+             AND m.version_id=coalesce((SELECT version_id FROM active_versions
+                 WHERE workspace_id=m.workspace_id),w.main_version_id)
+             AND coalesce(s.binary_sha256,s.blob_sha256)=j.content_sha256
+             AND (j.operation='write' OR NOT EXISTS(SELECT 1 FROM path_aliases a
+                 WHERE a.workspace_id=m.workspace_id AND a.version_id=m.version_id
+                     AND a.path=j.target_path)))",
+        )
+        .map_err(StorageError::corrupt_public)?
+        .query_row(params![workspace, path], |r| r.get(0))
+        .map_err(StorageError::corrupt_public)?;
+    if pending {
+        return Err(RuntimeError::Sync(
+            dohc_engine_sync::SyncError::RetryableState {
+                reason: "history-undo-placement-pending",
+            },
+        ));
+    }
+    Ok(())
 }
 
 fn ensure_capture_target_not_leased(
@@ -2397,6 +2553,11 @@ fn capture_retire_on_store(
     }
     let outcome = store.write_with(faults, |tx| {
         let hold = capture_file_holds::pin_in(tx, &input.workspace_id, &input.path)?;
+        let placement_admission = if hold.is_none() {
+            ensure_no_pending_undo_placement(tx, &input.workspace_id, &input.path)
+        } else {
+            Ok(())
+        };
         let mut pinned = std::borrow::Cow::Borrowed(input);
         if let Some(hold) = &hold {
             pinned
@@ -2424,6 +2585,9 @@ fn capture_retire_on_store(
             .map_err(StorageError::persist_public)?;
         }
         let mut result = capture_retire_in_tx(tx, input).map_err(RuntimeError::from)?;
+        if result.retired.is_some() {
+            placement_admission?;
+        }
         let mut asset_jobs = Vec::new();
         if !result.deduped
             && let Some(retired) = result.retired.as_ref()

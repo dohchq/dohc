@@ -10,8 +10,8 @@ use crate::RuntimeError;
 use dohc_engine_domain::{
     DomainError, OperationMoment, VersionedTextStore, binary_rename_delete_job_id,
     binary_rename_write_job_id, binary_rollback_job_identity, operation_moments_in,
-    preflight_undo_operation_in, undo_correlation_id, undo_operation_in_tx,
-    undo_request_is_replay_in, validate_operation_id,
+    preflight_undo_operation_in, replayed_undo_operation_in, undo_correlation_id,
+    undo_operation_in_tx, undo_request_is_replay_in, validate_operation_id,
 };
 use dohc_engine_storage::{
     EngineStore, FaultInjector, JobStatus, MaterializationJobSpec, Preimage, StorageError,
@@ -47,16 +47,45 @@ impl ActorHandle {
         operation: String,
         request: String,
         author: Option<String>,
-    ) -> Result<(), RuntimeError> {
+    ) -> Result<Option<HistoryUndoResult>, RuntimeError> {
         self.run(move |store, _| {
-            validate_operation_id(&operation)?;
             let version = VersionedTextStore::new(store)
                 .get_active_version(&ws)?
                 .version_id;
+            let replay = store.read_with(|conn| {
+                replayed_undo_operation_in(conn, &ws, &operation, &request, author.as_deref())
+            })?;
+            if let Some((replay_version, moments)) = replay {
+                let jobs: Vec<String> = moments
+                    .iter()
+                    .flat_map(|m| undo_job_ids(&ws, &replay_version, m))
+                    .collect();
+                let job_ids =
+                    serde_json::to_string(&jobs).map_err(|_| DomainError::StateCorrupt {
+                        reason: "Undo job list",
+                    })?;
+                let completed: i64 = store.read_with(|conn| {
+                    conn.query_row(
+                        "SELECT COUNT(*) FROM materialization_jobs
+                     WHERE workspace_id=?1 AND status='complete'
+                         AND job_id IN (SELECT value FROM json_each(?2))",
+                        params![ws, job_ids],
+                        |r| r.get(0),
+                    )
+                    .map_err(StorageError::corrupt_public)
+                })?;
+                return Ok(Some(HistoryUndoResult {
+                    operation_id: operation.clone(),
+                    version_id: replay_version.clone(),
+                    moments,
+                    compensation_operation_id: undo_correlation_id(&ws, &operation, &request),
+                    deduped: true,
+                    materialized: replay_version == version
+                        && usize::try_from(completed).ok() == Some(jobs.len()),
+                }));
+            }
             let available = store.read_with(|conn| -> Result<bool, DomainError> {
-                if undo_request_is_replay_in(conn, &ws, &operation, &request, author.as_deref())? {
-                    return Ok(true);
-                }
+                dohc_engine_domain::ensure_operation_published_in(conn, &ws, &version, &operation)?;
                 conn.query_row(
                     "SELECT EXISTS(SELECT 1 FROM moments m WHERE m.workspace_id=?1
                         AND m.version_id=?2 AND m.metadata_correlation_id=?3
@@ -77,7 +106,7 @@ impl ActorHandle {
                 }
                 .into());
             }
-            Ok(())
+            Ok(None)
         })
         .await
     }
@@ -87,26 +116,82 @@ impl ActorHandle {
         ws: String,
         operation: String,
     ) -> Result<(), RuntimeError> {
-        self.run(move |store,_| {
-            if !operation.starts_with(dohc_engine_domain::OPERATION_ID_PREFIX) || operation.contains(":undo:") {return Err(DomainError::InvalidInput {reason:"invalid operation id"}.into());}
-            if operation.len() > 512 || operation.chars().any(char::is_control) {return Err(DomainError::InvalidInput {reason:"invalid operation id"}.into());}
-            let exists:bool=store.read_with(|conn|conn.query_row("SELECT EXISTS(SELECT 1 FROM moments WHERE workspace_id=?1 AND metadata_correlation_id=?2)",params![ws,operation],|r|r.get(0)).map_err(StorageError::corrupt_public))?;
-            if exists {return Err(DomainError::InvalidInput {reason:"operation id already used"}.into());} Ok(())
-        }).await
+        self.run(move |store, _| {
+            validate_operation_id(&operation)?;
+            let exists: bool = store.read_with(|conn| {
+                conn.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM moments
+                 WHERE workspace_id=?1 AND metadata_correlation_id=?2)",
+                    params![ws, operation],
+                    |r| r.get(0),
+                )
+                .map_err(StorageError::corrupt_public)
+            })?;
+            if exists {
+                return Err(DomainError::InvalidInput {
+                    reason: "operation id already used",
+                }
+                .into());
+            }
+            Ok(())
+        })
+        .await
     }
     pub async fn history_operation_capture_seed(
         &self,
         ws: String,
         operation: String,
     ) -> Result<Vec<dohc_engine_domain::CaptureManifestSeedEntry>, RuntimeError> {
-        self.run(move |store,_| {
-            let version=VersionedTextStore::new(store).get_active_version(&ws)?.version_id;
-            store.read_with(|conn| {
-                operation_moments_in(conn,&ws,&version,&operation)?.iter().map(|m| {
-                    conn.query_row("SELECT s.path,coalesce(b.byte_length,t.byte_length),coalesce(s.binary_sha256,s.blob_sha256) FROM snapshots s LEFT JOIN binary_blobs b ON b.sha256=s.binary_sha256 LEFT JOIN blobs t ON t.sha256=s.blob_sha256 WHERE s.workspace_id=?1 AND s.version_id=?2 AND s.object_id=?3",params![ws,version,m.object_id],|r|Ok(dohc_engine_domain::CaptureManifestSeedEntry {path:r.get(0)?,size:u64::try_from(r.get::<_,i64>(1)?).map_err(|_|rusqlite::Error::IntegralValueOutOfRange(1,-1))?,sha256:r.get(2)?})).optional().map_err(|e|DomainError::Storage(StorageError::corrupt_public(e)))
-                }).collect::<Result<Vec<_>,_>>().map(|rows|rows.into_iter().flatten().collect())
-            }).map_err(RuntimeError::from)
-        }).await
+        self.run(move |store, _| {
+            let version = VersionedTextStore::new(store)
+                .get_active_version(&ws)?
+                .version_id;
+            store
+                .read_with(|conn| {
+                    let members = operation_moments_in(conn, &ws, &version, &operation)?;
+                    let paths: HashSet<&str> = members
+                        .iter()
+                        .flat_map(|m| {
+                            std::iter::once(m.path.as_str()).chain(m.before_path.as_deref())
+                        })
+                        .collect();
+                    let objects = serde_json::to_string(
+                        &members.iter().map(|m| &m.object_id).collect::<Vec<_>>(),
+                    )
+                    .map_err(|_| DomainError::StateCorrupt {
+                        reason: "Undo object list",
+                    })?;
+                    let mut stmt = conn
+                        .prepare_cached(
+                            "SELECT s.path,coalesce(b.byte_length,t.byte_length),
+                         coalesce(s.binary_sha256,s.blob_sha256)
+                     FROM snapshots s
+                     LEFT JOIN binary_blobs b ON b.sha256=s.binary_sha256
+                     LEFT JOIN blobs t ON t.sha256=s.blob_sha256
+                     WHERE s.workspace_id=?1 AND s.version_id=?2
+                         AND s.object_id IN (SELECT value FROM json_each(?3))",
+                        )
+                        .map_err(|e| DomainError::Storage(StorageError::corrupt_public(e)))?;
+                    stmt.query_map(params![ws, version, objects], |r| {
+                        Ok(dohc_engine_domain::CaptureManifestSeedEntry {
+                            path: r.get(0)?,
+                            size: u64::try_from(r.get::<_, i64>(1)?)
+                                .map_err(|_| rusqlite::Error::IntegralValueOutOfRange(1, -1))?,
+                            sha256: r.get(2)?,
+                        })
+                    })
+                    .map_err(|e| DomainError::Storage(StorageError::corrupt_public(e)))?
+                    .collect::<Result<Vec<_>, _>>()
+                    .map(|rows| {
+                        rows.into_iter()
+                            .filter(|entry| paths.contains(entry.path.as_str()))
+                            .collect()
+                    })
+                    .map_err(|e| DomainError::Storage(StorageError::corrupt_public(e)))
+                })
+                .map_err(RuntimeError::from)
+        })
+        .await
     }
 
     pub async fn history_operation(
@@ -129,31 +214,115 @@ impl ActorHandle {
         .await
     }
     #[allow(clippy::too_many_arguments)]
-    pub async fn history_undo(
+    pub async fn history_undo_commit(
         &self,
         ws: String,
         operation: String,
         request: String,
         author: Option<String>,
         root: PathBuf,
-        recorder: Arc<dyn SelfWriteRecorder>,
         faults: Arc<dyn FaultInjector>,
         now: i64,
     ) -> Result<HistoryUndoResult, RuntimeError> {
         self.run(move |store, cache| {
             with_local_file_mutation_cache_reset(cache, || {
-                history_undo_on_store(
+                commit_history_undo_on_store(
                     store,
                     &ws,
                     &operation,
                     &request,
                     author.as_deref(),
                     &root,
-                    recorder.as_ref(),
                     faults.as_ref(),
                     now,
                 )
             })
+        })
+        .await
+    }
+    pub async fn history_undo_place<F>(
+        &self,
+        ws: String,
+        mut result: HistoryUndoResult,
+        root: PathBuf,
+        recorder: Arc<dyn SelfWriteRecorder>,
+        now: i64,
+        mut on_placed: F,
+    ) -> HistoryUndoResult
+    where
+        F: FnMut(&[OperationMoment]) + Send,
+    {
+        result.materialized = true;
+        // Each actor turn finishes a bounded placement batch, then yields to other work.
+        for members in result.moments.chunks(8) {
+            let selected = members.to_vec();
+            let ws = ws.clone();
+            let version = result.version_id.clone();
+            let root = root.clone();
+            let recorder = Arc::clone(&recorder);
+            match self
+                .run(move |store, _| {
+                    place_undo_members(
+                        store,
+                        &ws,
+                        &version,
+                        &selected,
+                        &root,
+                        recorder.as_ref(),
+                        &dohc_engine_storage::NoFaults,
+                        now,
+                    )
+                })
+                .await
+            {
+                Ok(true) => on_placed(members),
+                Ok(false) => result.materialized = false,
+                Err(error) => {
+                    eprintln!("engine: Undo committed; placement will retry: {error}");
+                    result.materialized = false;
+                    break;
+                }
+            }
+        }
+        result
+    }
+
+    pub async fn history_operation_pending_jobs(
+        &self,
+        ws: String,
+        operation: String,
+    ) -> Result<Vec<String>, RuntimeError> {
+        self.run(move |store, _| {
+            let version = VersionedTextStore::new(store)
+                .get_active_version(&ws)?
+                .version_id;
+            store
+                .read_with(|conn| {
+                    let members = operation_moments_in(conn, &ws, &version, &operation)?;
+                    let paths = serde_json::to_string(
+                        &members
+                            .iter()
+                            .flat_map(|m| {
+                                std::iter::once(m.path.as_str()).chain(m.before_path.as_deref())
+                            })
+                            .collect::<Vec<_>>(),
+                    )
+                    .map_err(|_| DomainError::StateCorrupt {
+                        reason: "Undo path list",
+                    })?;
+                    let mut stmt = conn
+                        .prepare_cached(
+                            "SELECT job_id FROM materialization_jobs
+                     WHERE workspace_id=?1 AND status='pending'
+                         AND target_path IN (SELECT value FROM json_each(?2))",
+                        )
+                        .map_err(|e| DomainError::Storage(StorageError::corrupt_public(e)))?;
+                    stmt.query_map(params![ws, paths], |r| r.get(0))
+                        .map_err(|e| DomainError::Storage(StorageError::corrupt_public(e)))?
+                        .collect::<Result<Vec<_>, _>>()
+                        .map_err(|e| DomainError::Storage(StorageError::corrupt_public(e)))
+                })
+                .map_err(RuntimeError::from)
         })
         .await
     }
@@ -176,18 +345,17 @@ thread_local! {
     static UNDO_PROBE_OBSERVER: std::cell::RefCell<Option<Box<dyn Fn()>>> = std::cell::RefCell::new(None);
 }
 
-fn probe_undo_source(root: &Path, path: &str) -> dohc_engine_files::ProjectionTargetState {
+fn probe_undo_source(
+    probe: &dohc_engine_files::ProjectionProbe,
+    path: &str,
+) -> dohc_engine_files::ProjectionTargetState {
     #[cfg(test)]
     UNDO_PROBE_OBSERVER.with(|observer| {
         if let Some(observer) = observer.borrow().as_ref() {
             observer();
         }
     });
-    dohc_engine_files::probe_projection_target(
-        root,
-        path,
-        dohc_engine_files::ProjectionTargetKind::Plaintext,
-    )
+    probe.probe(path, dohc_engine_files::ProjectionTargetKind::Plaintext)
 }
 
 fn check_undo_ownership(
@@ -235,20 +403,21 @@ fn rename_head_sha(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(super) fn history_undo_on_store(
+fn commit_history_undo_on_store(
     store: &mut EngineStore,
     ws: &str,
     operation: &str,
     request: &str,
     author: Option<&str>,
     root: &Path,
-    recorder: &dyn SelfWriteRecorder,
     faults: &dyn FaultInjector,
     now: i64,
 ) -> Result<HistoryUndoResult, RuntimeError> {
     let version_id = VersionedTextStore::new(store)
         .get_active_version(ws)?
         .version_id;
+    let probe =
+        dohc_engine_files::ProjectionProbe::new(root).map_err(StorageError::persist_public)?;
     // The actor and workspace fence stay held, but disk reads do not hold SQLite's writer.
     let proofs = store.read_with(|conn| -> Result<_, RuntimeError> {
         let replay = undo_request_is_replay_in(conn, ws, operation, request, author)?;
@@ -264,10 +433,10 @@ pub(super) fn history_undo_on_store(
             .map(|m| {
                 let source = if m.operation == "rename" {
                     let sha = rename_head_sha(conn, ws, &version_id, &m.object_id)?;
-                    let stamp = dohc_engine_files::projection_target_stamp(root, &m.path);
-                    let digest = probe_undo_source(root, &m.path);
+                    let stamp = probe.stamp(&m.path);
+                    let digest = probe_undo_source(&probe, &m.path);
                     if !matches!(stamp, dohc_engine_files::ProjectionTargetStamp::File { .. })
-                        || dohc_engine_files::projection_target_stamp(root, &m.path) != stamp
+                        || probe.stamp(&m.path) != stamp
                         || !matches!(digest,
                             dohc_engine_files::ProjectionTargetState::Text { sha256 }
                             | dohc_engine_files::ProjectionTargetState::Binary { sha256 }
@@ -287,12 +456,22 @@ pub(super) fn history_undo_on_store(
             })
             .collect::<Result<Vec<_>, RuntimeError>>()
     })?;
+    let policy = crate::search::read_engine_search_policy(root);
+    let objects = serde_json::to_string(
+        &proofs
+            .iter()
+            .map(|(m, _)| m.object_id.as_str())
+            .collect::<Vec<_>>(),
+    )
+    .map_err(|_| DomainError::StateCorrupt {
+        reason: "Undo object list",
+    })?;
     let result = store.write_with(faults, |tx| {
         for (m, source) in &proofs {
             check_undo_ownership(tx, ws, &version_id, m)?;
             if let Some((sha, stamp)) = source {
                 if rename_head_sha(tx, ws, &version_id, &m.object_id)? != *sha
-                    || dohc_engine_files::projection_target_stamp(root, &m.path) != *stamp
+                    || probe.stamp(&m.path) != *stamp
                 {
                     return Err(DomainError::UndoRefused {
                         path: m.path.clone(),
@@ -302,15 +481,23 @@ pub(super) fn history_undo_on_store(
                 }
             }
             let target = m.before_path.as_deref().unwrap_or(&m.path);
-            if dohc_engine_files::projection_target_stamp(root, target)
-                != dohc_engine_files::ProjectionTargetStamp::Absent
-            {
+            if probe.stamp(target) != dohc_engine_files::ProjectionTargetStamp::Absent {
                 return Err(DomainError::UndoRefused {
                     path: target.into(),
                     reason: "old path occupied on disk",
                 }
                 .into());
             }
+        }
+        if !proofs.is_empty() {
+            crate::search::index::begin_file_search_index_batch(
+                tx,
+                &policy,
+                ws,
+                &version_id,
+                &objects,
+            )
+            .map_err(super::search::search_domain)?;
         }
         undo_operation_in_tx(
             tx,
@@ -352,12 +539,10 @@ pub(super) fn history_undo_on_store(
                 .map_err(|e| {
                     DomainError::Storage(StorageError::persist_public(std::io::Error::other(e)))
                 })?;
-                crate::search::delete_file_search_index(tx, ws, &version_id, &m.object_id)
-                    .map_err(super::search::search_domain)?;
                 if let Some(text) = text.as_deref() {
-                    crate::search::upsert_file_search_index(
+                    crate::search::index::insert_file_search_index_with_policy(
                         tx,
-                        root,
+                        &policy,
                         ws,
                         &version_id,
                         &m.object_id,
@@ -407,7 +592,6 @@ pub(super) fn history_undo_on_store(
         TxnOutcome::Committed(r) => r,
         TxnOutcome::Crashed { .. } => return Err(RuntimeError::OperationCrashed),
     };
-    let active_version = version_id;
     let last = moments.last().ok_or(DomainError::StateCorrupt {
         reason: "Undo lost result",
     })?;
@@ -419,49 +603,87 @@ pub(super) fn history_undo_on_store(
         )
         .map_err(StorageError::corrupt_public)
     })?;
-    if active_version != version_id {
-        return Ok(HistoryUndoResult {
-            operation_id: operation.into(),
-            version_id,
-            moments,
-            compensation_operation_id: undo_correlation_id(ws, operation, request),
-            deduped,
-            materialized: false,
-        });
-    }
-    let mut jobs = HashSet::new();
-    for id in moments
-        .iter()
-        .flat_map(|m| undo_job_ids(ws, &version_id, m))
-    {
-        if store.load_materialization_job(&id)?.is_some() {
-            jobs.insert(id);
-        }
-    }
-    let summary = replay_pending_materializations(
-        store,
-        root,
-        MaterializationReplayScope {
-            workspace_id: ws,
-            self_writes: Some(recorder),
-            progress: None,
-            file_outcomes_settled: false,
-            released_hold_paths: None,
-        },
-        now,
-        faults,
-        Some(&jobs),
-        false,
-    )?;
-    let materialized=summary.failed==0 && summary.parked==0 && jobs.iter().all(|id| matches!(store.load_materialization_job(id),Ok(Some(j)) if j.status==JobStatus::Complete));
     Ok(HistoryUndoResult {
         operation_id: operation.into(),
         version_id,
         moments,
         compensation_operation_id: undo_correlation_id(ws, operation, request),
         deduped,
-        materialized,
+        materialized: false,
     })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn place_undo_members(
+    store: &mut EngineStore,
+    ws: &str,
+    version: &str,
+    members: &[OperationMoment],
+    root: &Path,
+    recorder: &dyn SelfWriteRecorder,
+    faults: &dyn FaultInjector,
+    now: i64,
+) -> Result<bool, RuntimeError> {
+    if VersionedTextStore::new(store)
+        .get_active_version(ws)?
+        .version_id
+        != version
+    {
+        return Ok(false);
+    }
+    let jobs: HashSet<String> = members
+        .iter()
+        .flat_map(|m| undo_job_ids(ws, version, m))
+        .collect();
+    let summary = store.with_materialization_status_batch(|store| {
+        replay_pending_materializations(
+            store,
+            root,
+            MaterializationReplayScope {
+                workspace_id: ws,
+                self_writes: Some(recorder),
+                progress: None,
+                file_outcomes_settled: false,
+                released_hold_paths: None,
+            },
+            now,
+            faults,
+            Some(&jobs),
+            false,
+        )
+    })?;
+    let all_complete = jobs.iter().all(|id| {
+        matches!(store.load_materialization_job(id), Ok(Some(job)) if job.status == JobStatus::Complete)
+    });
+    Ok(summary.failed == 0 && summary.parked == 0 && all_complete)
+}
+
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+pub(super) fn history_undo_on_store(
+    store: &mut EngineStore,
+    ws: &str,
+    operation: &str,
+    request: &str,
+    author: Option<&str>,
+    root: &Path,
+    recorder: &dyn SelfWriteRecorder,
+    faults: &dyn FaultInjector,
+    now: i64,
+) -> Result<HistoryUndoResult, RuntimeError> {
+    let mut result =
+        commit_history_undo_on_store(store, ws, operation, request, author, root, faults, now)?;
+    result.materialized = place_undo_members(
+        store,
+        ws,
+        &result.version_id,
+        &result.moments,
+        root,
+        recorder,
+        faults,
+        now,
+    )?;
+    Ok(result)
 }
 
 #[cfg(test)]
@@ -755,6 +977,252 @@ mod tests {
         assert!(result.unwrap().materialized);
         assert!(observed.get());
     }
+    #[tokio::test]
+    async fn history_operation_old_rename_cannot_reverse_a_later_move() {
+        let (root, mut store) = fixture();
+        seed(&mut store, root.path(), "a.md", "one", "One");
+        rename(&mut store, root.path(), "a.md", "b.md", "move-one", OP);
+        assert!(
+            undo(&mut store, root.path(), "undo-one", &NoFaults)
+                .unwrap()
+                .materialized
+        );
+        rename(
+            &mut store,
+            root.path(),
+            "a.md",
+            "b.md",
+            "move-two",
+            "dohc-operation:second",
+        );
+        let before = count(&store);
+        assert!(
+            matches!(
+                undo(&mut store, root.path(), "fresh-undo-one", &NoFaults),
+                Err(RuntimeError::Domain(DomainError::UndoRefused { .. }))
+            ),
+            "old rename must not reverse the later operation"
+        );
+        assert_eq!(count(&store), before);
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("b.md")).unwrap(),
+            "One"
+        );
+        assert!(!root.path().join("a.md").exists());
+        rename(
+            &mut store,
+            root.path(),
+            "b.md",
+            "elsewhere.md",
+            "move-three",
+            "dohc-operation:third",
+        );
+        drop(store);
+        let supervisor = crate::WorkspaceSupervisor::new();
+        let actor = supervisor
+            .open(&engine_db_path(&root).unwrap(), 4)
+            .unwrap()
+            .actor;
+        let seed = actor
+            .history_operation_capture_seed(WS.into(), OP.into())
+            .await
+            .unwrap();
+        tokio::task::spawn_blocking(move || supervisor.close_all())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            seed.is_empty(),
+            "a head outside the endpoint scan must not be seeded for retirement"
+        );
+    }
+    #[test]
+    fn history_operation_batches_search_deletes() {
+        use std::cell::Cell;
+        thread_local! {static DELETES:Cell<usize>=const {Cell::new(0)};}
+        fn trace(event: rusqlite::trace::TraceEvent<'_>) {
+            if let rusqlite::trace::TraceEvent::Stmt(_, sql) = event {
+                if sql.starts_with("DELETE FROM engine_search_files_fts") {
+                    DELETES.with(|n| n.set(n.get() + 1));
+                }
+            }
+        }
+        let (root, mut store) = fixture();
+        for i in 0..8 {
+            let old = format!("old-{i}.md");
+            let new = format!("new-{i}.md");
+            seed(
+                &mut store,
+                root.path(),
+                &old,
+                &format!("object-{i}"),
+                "Indexed content",
+            );
+            rename(
+                &mut store,
+                root.path(),
+                &old,
+                &new,
+                &format!("move-{i}"),
+                OP,
+            );
+        }
+        store
+            .write_with(&NoFaults, |tx| {
+                crate::search::ensure_search_index_for_version(
+                    tx,
+                    root.path(),
+                    WS,
+                    "main",
+                    1,
+                    &NoFaults,
+                )
+            })
+            .unwrap();
+        DELETES.with(|n| n.set(0));
+        store
+            .read_with(|conn| {
+                conn.trace_v2(
+                    rusqlite::trace::TraceEventCodes::SQLITE_TRACE_STMT,
+                    Some(trace),
+                );
+                Ok::<_, RuntimeError>(())
+            })
+            .unwrap();
+        let result = undo(&mut store, root.path(), "undo", &NoFaults);
+        store
+            .read_with(|conn| {
+                conn.trace_v2(rusqlite::trace::TraceEventCodes::empty(), None);
+                Ok::<_, RuntimeError>(())
+            })
+            .unwrap();
+        assert!(result.unwrap().materialized);
+        assert_eq!(
+            DELETES.with(Cell::get),
+            1,
+            "one group must scan the search table once"
+        );
+        let paths = store
+            .read_with(|conn| {
+                conn.prepare("SELECT path FROM engine_search_files_fts")?
+                    .query_map([], |r| r.get::<_, String>(0))?
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .unwrap();
+        assert_eq!(paths.len(), 8);
+        assert!(paths.iter().all(|p| p.starts_with("old-")));
+    }
+    #[test]
+    fn history_operation_batches_completion_commits() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let (root, mut store) = fixture();
+        for i in 0..8 {
+            let old = format!("old-{i}.md");
+            let new = format!("new-{i}.md");
+            seed(
+                &mut store,
+                root.path(),
+                &old,
+                &format!("object-{i}"),
+                "Content",
+            );
+            rename(
+                &mut store,
+                root.path(),
+                &old,
+                &new,
+                &format!("move-{i}"),
+                OP,
+            );
+        }
+        let commits = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&commits);
+        store
+            .read_with(|conn| {
+                conn.commit_hook(Some(move || {
+                    observed.fetch_add(1, Ordering::Relaxed);
+                    false
+                }))
+            })
+            .unwrap();
+        let result = undo(&mut store, root.path(), "undo", &NoFaults);
+        store
+            .read_with(|conn| conn.commit_hook(None::<fn() -> bool>))
+            .unwrap();
+        assert!(result.unwrap().materialized);
+        assert_eq!(
+            commits.load(Ordering::Relaxed),
+            2,
+            "one inverse commit and one completion commit"
+        );
+    }
+
+    #[tokio::test]
+    async fn history_operation_pending_only_refuses_before_fence() {
+        let (root, mut store) = fixture();
+        seed(&mut store, root.path(), "pending.md", "one", "Content");
+        let sha = dohc_engine_storage::hex_sha256(b"Content");
+        store
+            .write_with(&NoFaults, |tx| {
+                let deletion = dohc_engine_domain::prepare_checked_delete_in_tx(
+                    tx,
+                    &DeleteTextFile {
+                        workspace_id: WS.into(),
+                        version_id: "main".into(),
+                        path: "pending.md".into(),
+                        moment_id: "pending-delete".into(),
+                        request_id: None,
+                        metadata_origin: "api".into(),
+                        metadata_summary: None,
+                        metadata_correlation_id: Some(OP.into()),
+                        author_json: None,
+                        now_ms: 3,
+                    },
+                    Some("one"),
+                    &sha,
+                )?;
+                enqueue_delete_job(
+                    tx,
+                    &MaterializationJobSpec {
+                        job_id: "restore-delete-mat_pending-delete".into(),
+                        workspace_id: WS.into(),
+                        target_path: "pending.md".into(),
+                        content_sha256: sha.clone(),
+                        preimage: Preimage::Present(sha),
+                        target_generation: deletion.moment.moment_order,
+                        now_ms: 3,
+                    },
+                )?;
+                Ok::<_, DomainError>(())
+            })
+            .unwrap();
+        drop(store);
+        let supervisor = crate::WorkspaceSupervisor::new();
+        let actor = supervisor
+            .open(&engine_db_path(&root).unwrap(), 4)
+            .unwrap()
+            .actor;
+        let outcome = actor
+            .preflight_history_undo(WS.into(), OP.into(), "undo".into(), None)
+            .await;
+        // Close on a plain thread: supervisor shutdown joins its actor.
+        tokio::task::spawn_blocking(move || supervisor.close_all())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            outcome,
+            Err(RuntimeError::Domain(DomainError::UndoRefused {
+                reason: "operation publication pending",
+                ..
+            }))
+        ));
+        assert_eq!(
+            std::fs::read(root.path().join("pending.md")).unwrap(),
+            b"Content"
+        );
+    }
+
     #[test]
     fn history_operation_old_delete_cannot_restore_over_a_newer_delete() {
         let (root, mut store) = fixture();

@@ -650,7 +650,22 @@ pub(super) fn replay_pending_materializations(
             }
         }
     }
-    let jobs = store.list_pending_materialization_jobs()?;
+    let jobs = if let Some(selected) = selected {
+        let mut jobs = selected
+            .iter()
+            .map(|id| store.load_materialization_job(id))
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .flatten()
+            .filter(|j| {
+                j.status == JobStatus::Pending && !j.job_id.starts_with("restore-delete-mat_")
+            })
+            .collect::<Vec<_>>();
+        jobs.sort_by(|a, b| (a.created_at_ms, &a.job_id).cmp(&(b.created_at_ms, &b.job_id)));
+        jobs
+    } else {
+        store.list_pending_materialization_jobs()?
+    };
     (|| -> Result<MaterializationReplaySummary, RuntimeError> {
         let mut summary = MaterializationReplaySummary {
             parked: 0,
