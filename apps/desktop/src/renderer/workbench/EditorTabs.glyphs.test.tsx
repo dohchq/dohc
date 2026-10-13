@@ -23,9 +23,9 @@ vi.mock("../ui/KindGlyph", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../ui/KindGlyph")>();
   return {
     ...actual,
-    KindGlyph: (props: ComponentProps<typeof actual.KindGlyph>) => {
+    FileGlyph: (props: ComponentProps<typeof actual.FileGlyph>) => {
       fileGlyphs.renders += 1;
-      return actual.KindGlyph(props);
+      return actual.FileGlyph(props);
     },
   };
 });

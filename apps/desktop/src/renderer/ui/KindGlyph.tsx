@@ -56,15 +56,17 @@ export function KindGlyph(props: {
 
 // The listing, not the file name, says whether a file is a database: the kind
 // registry matches `.db` by extension alone.
-export function listedFileKind(path: string, listed: WorkspaceFileEntry["kind"] | undefined): FileKindRecord {
+export function listedFileKind(path: string, listed: WorkspaceFileEntry["kind"] | null | undefined): FileKindRecord {
   if (listed === "database") return FILE_KIND_RECORDS.database;
   const kind = fileKindForPath(path);
   return kind.displayKind === "database" ? FILE_KIND_RECORDS.binary : kind;
 }
 
-// A page's `icon` frontmatter emoji stands in for its kind glyph
-// (Notion-style), in a box the glyph's size so the name does not move.
-export function PageIcon(props: { icon: string; size: number }) {
+// A listed file's mark: a page's `icon` frontmatter emoji stands in for its
+// kind glyph (Notion-style), in a box the glyph's size so the name does not
+// move.
+export function FileGlyph(props: { kind: FileKindRecord; icon: string | undefined; size: number; className?: string }) {
+  if (!props.icon) return <KindGlyph kind={props.kind} size={props.size} className={props.className} />;
   return (
     <span
       aria-hidden
