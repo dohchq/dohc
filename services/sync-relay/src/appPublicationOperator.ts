@@ -6,14 +6,15 @@ import type { SyncRelayStorage } from "./storage";
 import { OPERATOR_MAX_REQUEST_BYTES, OPERATOR_TIMEOUT_MS, parseDisableRequest, type OperatorResponse } from "./appPublicationOperatorProtocol";
 
 export async function startPublicationOperator(storage: Pick<SyncRelayStorage, "disableAppPublication">, path: string) {
-  const unix = process.platform !== "win32", directory = dirname(path);
+  const uid = typeof process.getuid === "function" ? process.getuid() : undefined;
+  const unix = uid !== undefined, directory = dirname(path);
   if (unix) {
     await mkdir(directory, {mode: 0o700}).catch(error => {if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;});
     const info = await lstat(directory);
-    if (!info.isDirectory() || info.isSymbolicLink() || info.uid !== process.getuid!() || (info.mode & 0o777) !== 0o700) throw new Error("The operator socket directory must belong to the relay user with mode 0700.");
+    if (!info.isDirectory() || info.isSymbolicLink() || info.uid !== uid || (info.mode & 0o777) !== 0o700) throw new Error("The operator socket directory must belong to the relay user with mode 0700.");
     const existing = await lstat(path).catch(error => {if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined; throw error;});
     if (existing) {
-      if (!existing.isSocket() || existing.uid !== process.getuid!() || (existing.mode & 0o777) !== 0o600) throw new Error("Refusing an unowned operator socket.");
+      if (!existing.isSocket() || existing.uid !== uid || (existing.mode & 0o777) !== 0o600) throw new Error("Refusing an unowned operator socket.");
       await new Promise<void>((resolve, reject) => {
         const probe = createConnection(path);
         const deadline = setTimeout(() => {probe.destroy(); reject(new Error("Operator socket probe timed out."));}, OPERATOR_TIMEOUT_MS);

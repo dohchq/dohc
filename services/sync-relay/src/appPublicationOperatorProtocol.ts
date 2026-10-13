@@ -11,7 +11,7 @@ export interface OperatorResponse { code: 0 | 1 | 2 | 3; message: string; public
 export function operatorSocketPath(env: NodeJS.ProcessEnv = process.env): string {
   const identity = resolve(env.DOHC_RELAY_DEPLOYMENT_CONFIG ?? env.SYNC_RELAY_DB_PATH ?? join(tmpdir(), "dohc-sync-relay.sqlite"));
   const key = createHash("sha256").update(identity).digest("hex").slice(0, 24);
-  if (process.platform === "win32") return `\\\\.\\pipe\\dohc-relay-operator-${key}`;
+  if (typeof process.getuid !== "function") return `\\\\.\\pipe\\dohc-relay-operator-${key}`;
   return join(process.platform === "linux" ? "/tmp" : tmpdir(), `dohc-relay-operator-${key}`, "control.sock");
 }
 
