@@ -20,7 +20,7 @@ import type { HostControlSnapshot } from "@dohc/live-session-contract/host-contr
 import type { StorageContext } from "./context";
 import type { SqliteDb, CurrentLiveBindingRequest, LiveHostConnectionCoordinate, LiveUpdateJournalCut, LiveUpdateJournalCutResult, LiveUpdateJournalCommitInput, RelayLiveUpdateJournalResult, CommittedLiveUpdateResult, LiveJournalValidation, StoredLiveDocumentAuthority } from "./types";
 import { LiveJournalAdmittedCapacityError } from "./errors";
-import {LIVE_RESTORE_SOURCE_RANGES} from "./liveRestoreOperationSchema";
+import {LIVE_RESTORE_OPERATIONS, LIVE_RESTORE_SOURCE_RANGES} from "./liveRestoreOperationSchema";
 import { LIVE_JOURNAL_TABLE, LIVE_JOURNAL_PROVENANCE } from "./schema";
 import { snapshotHostCoordinate } from "../liveTicketInputs";
 import { readLiveHostControl } from "./hostControl";
@@ -327,14 +327,15 @@ function captureReplicaJournalRows(storage: StorageContext, workspaceId: string,
     const checkpointLength = (raw.validation_checkpoint_bytes as Uint8Array | null)?.byteLength ?? 0;
     let retainedBytes = updateLength + checkpointLength + replicaMetadataBytes(raw);
     let encodedBytes = 4 * Math.ceil(updateLength / 3) + replicaMetadataBytes(raw, false) + REPLICA_JOURNAL_ROW_FRAME_BYTES +
-      Buffer.byteLength(String(raw.relay_database_namespace)) +
-      (raw.restore_operation_id === null ? 0 : 4 * Math.ceil(checkpointLength / 3) + Buffer.byteLength(String(raw.restore_operation_id)));
+      Buffer.byteLength(JSON.stringify(String(raw.relay_database_namespace))) +
+      (raw.restore_operation_id === null ? 0 : 4 * Math.ceil(checkpointLength / 3) + Buffer.byteLength(JSON.stringify(String(raw.restore_operation_id))));
     const cursor = authorityInteger(raw.journal_cursor, 1);
     // Keep the first admitted row even when it exceeds a cap.
     if (!fits(encodedBytes, retainedBytes, cursor)) break;
     const proofBytes = raw.restore_operation_id === null ? 0 : authorityInteger(storage.db.prepare(
-      "SELECT length(CAST(admission_json AS BLOB)) AS bytes FROM sync_relay_live_restore_lifecycles WHERE relay_database_namespace=? AND operation_id=?")
-      .get(raw.relay_database_namespace, raw.restore_operation_id)?.bytes, 1);
+      `SELECT length(CAST(l.admission_json AS BLOB)) AS bytes FROM sync_relay_live_restore_lifecycles l JOIN ${LIVE_RESTORE_OPERATIONS} o USING(relay_database_namespace,operation_id)
+        WHERE l.relay_database_namespace=? AND l.operation_id=? AND o.workspace_id=?`)
+      .get(raw.relay_database_namespace, raw.restore_operation_id, workspaceId)?.bytes, 1);
     encodedBytes += proofBytes;
     retainedBytes += proofBytes;
     if (!fits(encodedBytes, retainedBytes, cursor)) break;

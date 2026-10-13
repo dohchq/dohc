@@ -307,7 +307,7 @@ it("keeps the header query before the blob overflow chains", async () => {
   try {
     f.append("a");
     const columns = f.raw.prepare("PRAGMA table_info(sync_relay_live_update_journal)").all().map(row => String(row.name));
-    const forbidden = columns.slice(columns.indexOf("update_bytes") + 1).filter(column => column !== "validation_checkpoint_bytes");
+    const forbidden = columns.slice(columns.indexOf("update_bytes") + 1);
     const context = f.storage as StorageContext, prepare = context.db.prepare.bind(context.db), headers: string[] = [];
     vi.spyOn(context.db, "prepare").mockImplementation(sql => {
       if (/SELECT journal_cursor,workspace_id/.test(sql)) headers.push(sql);
@@ -315,7 +315,9 @@ it("keeps the header query before the blob overflow chains", async () => {
     });
     await f.readStorage();
     expect(headers).toHaveLength(1);
-    for (const column of forbidden) expect(headers[0]).not.toMatch(new RegExp("\\b" + column + "\\b"));
+    // Blob lengths come from the record header; any other read of a later column walks the overflow pages.
+    const withoutLengths = headers[0]!.replace(/length\((update_bytes|validation_checkpoint_bytes)\)/g, "");
+    for (const column of forbidden) expect(withoutLengths).not.toMatch(new RegExp("\\b" + column + "\\b"));
     expect(headers[0]).toContain("length(update_bytes)");
     expect(headers[0]).toContain("length(validation_checkpoint_bytes)");
   } finally {f.close();}
