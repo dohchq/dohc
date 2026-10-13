@@ -140,6 +140,7 @@ export function CloudLogin(props: {
   const serverUrlInput = useRef<HTMLInputElement | null>(null);
   const sessionRef = useRequestSequence();
   const statusReads = useRequestSequence();
+  const signInRetries = useRequestSequence();
   // Set while a deletion review is open. The review answers a session change
   // itself: it closes, or reports the deletion it already sent. No status
   // read applies while it is open, and the panel reads the session once it
@@ -185,14 +186,25 @@ export function CloudLogin(props: {
   }
 
   // A retry the owner can hold after this panel closes. It answers false once
-  // the panel is gone or has started a newer attempt, and the owner reopens
-  // the panel instead of rerunning an attempt nothing is watching.
-  function retryFor(session: number, run: () => void): () => boolean {
+  // the panel is gone, has started a newer attempt, or no longer wants this
+  // one, and the owner reopens the panel instead of rerunning an attempt
+  // nothing is watching. An open deletion review owns the panel until it
+  // ends, so a retry then does nothing and still answers true: a reopen would
+  // reset the panel and drop the review's pending result.
+  function retryFor(session: number, run: () => void, wanted = () => true): () => boolean {
     return () => {
       if (!sessionRef.isCurrent(session)) return false;
+      if (reviewOpen.current) return true;
+      if (!wanted()) return false;
       run();
       return true;
     };
+  }
+
+  // A session the panel shows retires every failed sign-in's Try again.
+  function signInAgain(session: number, origin: string): () => boolean {
+    const turn = signInRetries.current();
+    return retryFor(session, () => void connect(origin), () => signInRetries.isCurrent(turn));
   }
 
   // Every status read in the panel takes the next turn, so only the newest
@@ -213,6 +225,7 @@ export function CloudLogin(props: {
     if (status.relayUrl) setRelayUrl(status.relayUrl);
     setServerName(status.serverName ?? "");
     setNetworkAccess(status.networkAccess ?? null);
+    if (status.connected) signInRetries.next();
     setPhase(
       status.connected
         ? { kind: "connected", email: email ?? status.email ?? "" }
@@ -420,7 +433,7 @@ export function CloudLogin(props: {
             message: ipcErrorMessage(cause, "dohc could not reach the server."),
             cause,
             serverUrl: origin,
-            retry: retryFor(session, () => void connect(origin)),
+            retry: signInAgain(session, origin),
           });
         });
     }, 3000);
@@ -464,7 +477,7 @@ export function CloudLogin(props: {
         ),
         cause,
         serverUrl: origin,
-        retry: retryFor(session, () => void connect(origin)),
+        retry: signInAgain(session, origin),
       });
     }
   }
@@ -559,8 +572,7 @@ export function CloudLogin(props: {
   // A review needs the connected account it reviews. Without one, the owner
   // reopens the panel, which shows what the session is now.
   function reviewDeletionAgain(session: number): () => boolean {
-    const retry = retryFor(session, startReview);
-    return () => phaseRef.current.kind === "connected" && retry();
+    return retryFor(session, startReview, () => phaseRef.current.kind === "connected");
   }
 
   const panel = (

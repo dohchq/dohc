@@ -12,6 +12,7 @@ const sessionListeners = new Set<SessionListener>();
 const bridgeMock = {
   cloudStatus: vi.fn(),
   cloudLogout: vi.fn(),
+  cloudLoginStart: vi.fn(),
   previewServerAccountDeletion: vi.fn(),
   deleteServerAccount: vi.fn(),
   platform: "linux",
@@ -381,6 +382,74 @@ describe("CloudLogin account deletion", () => {
     expect(await noticesText()).toContain(`Deleted ice@dohc.dev on ${server}. Workspaces on this computer stay.`);
     expect(await screen.findByTestId("cloud-server-url")).toBeTruthy();
     expect(bridgeMock.cloudStatus).toHaveBeenCalledTimes(3);
+  });
+
+  // A failed sign-in's notice stays clickable above the dialog, and another
+  // window signed in before the review opened.
+  it("keeps a pending delete through an old sign-in's Try again, which the session elsewhere retired", async () => {
+    const onConnectionError = vi.fn();
+    const onConnectionNotice = vi.fn();
+    const slow = deferred<{ ok: true; finished: boolean; email: string; server: string }>();
+    bridgeMock.cloudLoginStart.mockRejectedValue(new Error("dohc could not reach this server."));
+    bridgeMock.deleteServerAccount.mockReturnValue(slow.promise);
+    bridgeMock.cloudStatus
+      .mockResolvedValueOnce({ connected: false, workspaceSynced: false })
+      .mockResolvedValueOnce(connected)
+      .mockResolvedValue({ connected: false, workspaceSynced: false });
+    render(<CloudLogin workspaceId="ws-1" onConnectionError={onConnectionError} onConnectionNotice={onConnectionNotice} />);
+    fireEvent.change(await screen.findByTestId("cloud-server-url"), { target: { value: server } });
+    fireEvent.click(screen.getByTestId("cloud-connect-start"));
+    await waitFor(() => expect(onConnectionError).toHaveBeenCalledOnce());
+    const signInAgain: () => boolean = onConnectionError.mock.calls[0]![0].retry;
+
+    changeSession(`${server}##usr_a`);
+    fireEvent.click(await screen.findByTestId("cloud-delete-account"));
+    await screen.findByTestId("server-account-delete-scope");
+    typePassword("correct horse");
+    fireEvent.click(screen.getByTestId("server-account-delete-confirm"));
+    await waitFor(() => expect(bridgeMock.deleteServerAccount).toHaveBeenCalledOnce());
+
+    // True keeps the owner from reopening the panel over the review.
+    expect(signInAgain()).toBe(true);
+    expect(screen.getByTestId("server-account-delete")).toBeTruthy();
+
+    await act(async () => { slow.resolve({ ok: true, finished: true, email: "ice@dohc.dev", server }); });
+    expect(onConnectionNotice).toHaveBeenCalledWith({
+      tone: "success", message: `Deleted ice@dohc.dev on ${server}. Workspaces on this computer stay.`,
+    });
+    expect(await screen.findByTestId("cloud-server-url")).toBeTruthy();
+
+    expect(signInAgain()).toBe(false);
+    expect(bridgeMock.cloudLoginStart).toHaveBeenCalledOnce();
+  });
+
+  it("keeps a pending delete when a failed disconnect's Try again is chosen during the review", async () => {
+    const slow = deferred<{ ok: true; finished: boolean; email: string; server: string }>();
+    bridgeMock.cloudLogout.mockRejectedValueOnce(new Error("dohc could not finish disconnecting."));
+    bridgeMock.deleteServerAccount.mockReturnValue(slow.promise);
+    bridgeMock.cloudStatus
+      .mockResolvedValueOnce(connected)
+      .mockResolvedValueOnce(connected)
+      .mockResolvedValue({ connected: false, workspaceSynced: false });
+    render(<CloudLogin workspaceId="ws-1" />);
+    fireEvent.click(await screen.findByTestId("cloud-disconnect"));
+    await screen.findByTestId("workspace-shell-error");
+    await waitFor(() => expect(bridgeMock.cloudStatus).toHaveBeenCalledTimes(2));
+
+    fireEvent.click(await screen.findByTestId("cloud-delete-account"));
+    await screen.findByTestId("server-account-delete-scope");
+    typePassword("correct horse");
+    fireEvent.click(screen.getByTestId("server-account-delete-confirm"));
+    await waitFor(() => expect(bridgeMock.deleteServerAccount).toHaveBeenCalledOnce());
+
+    fireEvent.click(screen.getByTestId("workspace-shell-error-retry"));
+    await act(async () => {});
+    expect(bridgeMock.cloudLogout).toHaveBeenCalledOnce();
+    expect(screen.getByTestId("server-account-delete")).toBeTruthy();
+
+    await act(async () => { slow.resolve({ ok: true, finished: true, email: "ice@dohc.dev", server }); });
+    expect(await noticesText()).toContain(`Deleted ice@dohc.dev on ${server}. Workspaces on this computer stay.`);
+    expect(await screen.findByTestId("cloud-server-url")).toBeTruthy();
   });
 
   it("reads the session again when the review is cancelled", async () => {
