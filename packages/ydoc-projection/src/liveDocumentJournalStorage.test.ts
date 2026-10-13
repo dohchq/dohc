@@ -628,6 +628,7 @@ it('bounds coverage reads by candidate ranges at 200 and 2000 clients', () => {
       return rows
     } finally {vi.restoreAllMocks(); f.close()}
   })
+  expect.soft(counts[0]).toBeGreaterThan(0)
   expect.soft(counts[0]).toBeLessThanOrEqual(3)
   expect.soft(counts[1]).toBeLessThanOrEqual(3)
   expect.soft(counts[1]).toBe(counts[0])

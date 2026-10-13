@@ -1422,26 +1422,13 @@ it.each([["bootstrap","service"],["bootstrap","device"],["owner","device"]] as c
   const f=contentProposalFixture(kind,mode,kind==="owner");
   try {
     const proposed=f.store.recordStopRestoreProposal(f.input,f.encoded,policy,200),before=f.journalRows();
-    const originalPrepare=f.context.db.prepare.bind(f.context.db);
-    let windowRows=0;
-    const prepare=vi.spyOn(f.context.db,"prepare").mockImplementation(sql=>{
-      const statement=originalPrepare(sql);
-      if (!/^\s*SELECT/i.test(sql) || !sql.includes("sync_relay_live_update_struct_provenance") ||
-        /WHERE[\s\S]*journal_cursor\s*(?:[<>=]|IN\b)/i.test(sql)) return statement;
-      return new Proxy(statement,{get(target,key){
-        if(key==="all") return (...args: Parameters<typeof statement.all>)=>{
-          const rows=target.all(...args);windowRows+=rows.length;return rows;
-        };
-        const value=Reflect.get(target,key,target);
-        return typeof value==="function"?value.bind(target):value;
-      }});
-    });
+    // Coverage window statements are cached per database, so the row bound lives in the cost test.
+    const prepare=vi.spyOn(f.context.db,"prepare");
     const admitted=f.store.admitStopRestoreProposal(f.input,proposed.proposalDigest,policy,201);
     const provenanceReads=prepare.mock.calls.map(([sql])=>sql).filter(sql=>sql.includes("sync_relay_live_update_struct_provenance") && /^\s*SELECT/i.test(sql));
     expect(provenanceReads.length).toBeGreaterThan(0);
     expect(provenanceReads.every(sql=>/WHERE[\s\S]*journal_cursor\s*(?:[<>=]|IN\b)/i.test(sql) ||
       /WHERE[\s\S]*client_id=\?[\s\S]*start_clock<=\?[\s\S]*start_clock>=/i.test(sql))).toBe(true);
-    expect(windowRows).toBeLessThanOrEqual(3*admitted.admitted.firstSeen.length);
     prepare.mockRestore();
     expect(admitted.phase).toBe("relay-admitted");
     expect(f.raw.prepare("SELECT admission_state FROM sync_relay_live_documents").get()!.admission_state).toBe("closed");
