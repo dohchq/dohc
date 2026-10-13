@@ -92,6 +92,7 @@ pub fn commit_relay_cursor(
         &cursor.stream_identity,
         "stream_identity must be non-empty and bounded",
     )?;
+    let passive = store.is_passive();
     store
         .write_with(faults, |tx| {
             let was_enrolled =
@@ -119,7 +120,9 @@ pub fn commit_relay_cursor(
             .map_err(SyncError::persist)?;
             // Cursor commit is the per-pass level trigger. Re-scan here so an
             // oversized unclaimed base stays visible until it can originate.
-            let sharing_declined = if was_enrolled {
+            let sharing_declined = if passive {
+                Vec::new()
+            } else if was_enrolled {
                 let declined = crate::enrolment::originate_unclaimed_ydoc_bases_in_tx(
                     tx,
                     workspace_id,
@@ -226,6 +229,7 @@ pub(crate) fn write_pushed_seq_with_refusals(
             reason: "pushed_seq is outside the wire integer range",
         });
     }
+    let passive = store.is_passive();
     store
         .write_with(faults, |tx| {
             crate::settlement_publication::push_refusals_in_tx(tx,workspace_id,refusals)?;
@@ -237,7 +241,7 @@ pub(crate) fn write_pushed_seq_with_refusals(
                 params![workspace_id, origin_id, pushed_seq],
             )
             .map_err(SyncError::persist)?;
-            if was_enrolled {
+            if passive || was_enrolled {
                 // Cursor commit owns the recurring scan. A pushed-origin
                 // update must not repeat that full-state work.
                 Ok(Vec::new())
