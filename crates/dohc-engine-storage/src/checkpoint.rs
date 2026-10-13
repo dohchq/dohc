@@ -163,10 +163,20 @@ impl Checkpoints {
     // WAL frames can appear between this probe and its PASSIVE checkpoint.
     // The background connection can only reduce that tail.
     pub(crate) fn checkpoint_on_writer_if_needed(&self, conn: &Connection) {
+        self.checkpoint_small_tail(conn, WRITER_CHECKPOINT_FRAMES);
+    }
+
+    /// Finish fresh schema metadata before readers can pin its WAL prefix.
+    /// The same writer bound applies; larger tails remain background work.
+    pub(crate) fn checkpoint_initial_schema_if_small(&self, conn: &Connection) {
+        self.checkpoint_small_tail(conn, 0);
+    }
+
+    fn checkpoint_small_tail(&self, conn: &Connection, minimum_log_frames: i64) {
         let Ok((log, backfilled)) = frames(conn) else {
             return;
         };
-        if log < WRITER_CHECKPOINT_FRAMES
+        if log < minimum_log_frames
             || !(0..=MAX_WRITER_BACKFILL_FRAMES).contains(&(log - backfilled))
         {
             return;
@@ -371,6 +381,21 @@ mod tests {
     }
 
     #[test]
+    fn fresh_actor_schema_does_not_consume_the_write_admission_budget() {
+        let scratch = ScratchDir::new().unwrap();
+        let path = scratch.path().join("engine.db");
+        let s = EngineStore::open_for_actor(&path, 1, None, None).unwrap();
+        let (log, backfilled) = s.read_with(frames).unwrap();
+        assert_eq!(
+            log, backfilled,
+            "fresh schema must finish its small tail before publication"
+        );
+        let (calls, maximum) = s.checkpoint_work_for_test();
+        assert_eq!(calls, 1);
+        assert!((1..=MAX_WRITER_BACKFILL_FRAMES).contains(&maximum));
+    }
+
+    #[test]
     fn writer_refuses_large_backlogs_and_finishes_only_a_bounded_tail() {
         exercise_background_writer_handoff();
     }
@@ -395,6 +420,7 @@ mod tests {
         let checkpoints = Checkpoints::start(&path).unwrap();
         let unmodified = s.read_with(frames).unwrap();
         s.read_with(|c| {
+            checkpoints.checkpoint_initial_schema_if_small(c);
             checkpoints.checkpoint_on_writer_if_needed(c);
             Ok::<_, rusqlite::Error>(())
         })

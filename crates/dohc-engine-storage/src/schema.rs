@@ -335,6 +335,9 @@ fn open_engine_db_configured(
     stop_counting(&conn)?;
     crate::search_generation::install(&conn).map_err(StorageError::corrupt)?;
     if let Some(checkpoints) = &checkpoints {
+        if disposition == Disposition::Fresh {
+            checkpoints.checkpoint_initial_schema_if_small(&conn);
+        }
         checkpoints.request();
     }
     Ok(OpenedEngineDb {
