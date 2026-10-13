@@ -3,7 +3,7 @@
 // binary, and live editors over the desktop live route. Runs inside the
 // dohc-cf-driver image, which is the release image plus this file.
 import { createHash, randomBytes, randomUUID } from "node:crypto";
-import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import * as Y from "yjs";
 import { WebSocket as NodeWebSocket } from "ws";
@@ -92,13 +92,33 @@ async function ownerEngine(account: Account): Promise<{ engine: Engine; next(): 
 }
 
 // Seeds workspaces through the owner's engine exactly as a desktop would sync them.
+// SEED_CONCURRENCY runs that many lanes, each with its own engine per owner.
+// SEED_DISCARD_LOCAL=1 deletes each owner's local copy after it is pushed.
 async function seed(state: State, count: number, files: number, bytes: number, liveDocs: number) {
   const owners = state.accounts.filter(row => row.role === "owner");
   if (!owners.length) throw new Error("Create owner accounts first.");
+  const lanes = Math.max(1, Number(process.env.SEED_CONCURRENCY ?? 1));
+  let remaining = count;
+  await Promise.all(Array.from({ length: lanes }, (_unused, lane) => seedLane(state, lane, () => remaining-- > 0, owners, files, bytes, liveDocs)));
+}
+
+async function seedLane(state: State, lane: number, take: () => boolean, owners: Account[], files: number, bytes: number, liveDocs: number) {
   const engines = new Map<string, Awaited<ReturnType<typeof ownerEngine>>>();
   try {
-    for (let index = 0; index < count; index++) {
-      const owner = owners[state.workspaces.length % owners.length]!;
+    while (take()) {
+      const owner = owners[(state.workspaces.length + lane) % owners.length]!;
+      // One failed workspace is logged and skipped; its engine is replaced in case it is wedged.
+      try { await seedOne(owner); } catch (error) {
+        log("seed-failed", { lane, error: String(error), cause: String((error as { cause?: unknown }).cause ?? "") });
+        await engines.get(owner.userId)?.engine.close().catch(() => {});
+        engines.delete(owner.userId);
+      }
+    }
+  } finally {
+    for (const { engine } of engines.values()) await engine.close();
+  }
+
+  async function seedOne(owner: Account) {
       let session = engines.get(owner.userId);
       if (!session) { session = await ownerEngine(owner); engines.set(owner.userId, session); }
       const started = Date.now(), workspaceId = randomUUID(), rootDir = join(STATE_DIR, "owners", owner.userId, workspaceId);
@@ -151,12 +171,10 @@ async function seed(state: State, count: number, files: number, bytes: number, l
       }
       await push();
       await rpc("workspace.close", {});
+      if (process.env.SEED_DISCARD_LOCAL === "1") rmSync(rootDir, { recursive: true, force: true });
       state.workspaces.push({ id: workspaceId, owner: owner.email, files, bytes, live });
       save(state);
-      log("workspace", { id: workspaceId, files, bytes, live: live.length, ms: Date.now() - started });
-    }
-  } finally {
-    for (const { engine } of engines.values()) await engine.close();
+      log("workspace", { id: workspaceId, files, bytes, live: live.length, ms: Date.now() - started, lane });
   }
 }
 

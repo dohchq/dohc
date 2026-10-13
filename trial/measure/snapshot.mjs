@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 
 const [label, output] = process.argv.slice(2);
 if (!label || !output) throw new Error('Usage: snapshot.mjs <label> <output.jsonl>');
-const project = 'dohc-cf-trial';
+const project = process.env.PROJECT ?? 'dohc-cf-trial';
 const run = (args, input) => {
   const result = spawnSync('docker', args, { encoding: 'utf8', input, env: { ...process.env, MSYS_NO_PATHCONV: '1' } });
   if (result.status !== 0) throw new Error(`docker ${args[0]} failed: ${result.stderr}`);

@@ -1,6 +1,7 @@
 # The release image plus the trial load driver, so owners run the same engine
 # binary and client code as a desktop.
-FROM dohc-self-host:trial-56584a876
+ARG BASE=dohc-self-host:trial-56584a876
+FROM ${BASE}
 USER root
 RUN mkdir /state && chown node:node /state
 USER node
