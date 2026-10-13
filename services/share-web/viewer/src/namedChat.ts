@@ -7,9 +7,10 @@ const MAX_BODY_BYTES = 64 * 1024;
 
 export type NamedChatAccess = "read-only" | "read-write";
 export interface NamedChatChannel {shareId: string; userId: string; channelWireId: string; name: string | null; access: NamedChatAccess}
+/** `body` is null when the relay left it out because it is too large for a browser response. */
 export interface NamedChatMessage {
-  relaySeq: number; messageId: string; threadId: string; authorUserId: string; authorDisplayName: string;
-  authorKind: "human" | "agent" | "automation"; authorOwnerDisplayName: string | null; createdAtMs: number; body: string;
+  relaySeq: number; messageId: string; threadId: string; authorUserId: string | null; authorDisplayName: string;
+  authorKind: "human" | "agent" | "automation"; authorOwnerDisplayName: string | null; createdAtMs: number; body: string | null;
 }
 
 /** A failed chat request. Status 0 means no usable answer arrived, so a post's outcome is unknown. */
@@ -40,13 +41,15 @@ function cursor(value: unknown): number {
 }
 
 function message(value: unknown): NamedChatMessage {
-  if (!record(value) || !["messageId", "threadId", "authorUserId", "authorDisplayName", "body"].every(key => typeof value[key] === "string") ||
+  if (!record(value) || !["messageId", "threadId", "authorDisplayName"].every(key => typeof value[key] === "string") ||
+      (value.authorUserId !== null && typeof value.authorUserId !== "string") ||
+      !((value.bodyTooLarge === false && typeof value.body === "string") || (value.bodyTooLarge === true && value.body === null)) ||
       (value.authorKind !== "human" && value.authorKind !== "agent" && value.authorKind !== "automation") ||
       (value.authorOwnerDisplayName !== null && typeof value.authorOwnerDisplayName !== "string") ||
       !Number.isSafeInteger(value.createdAtMs) || !Number.isSafeInteger(value.relaySeq) || Number(value.relaySeq) <= 0) throw invalid();
   return {relaySeq: Number(value.relaySeq), messageId: String(value.messageId), threadId: String(value.threadId),
-    authorUserId: String(value.authorUserId), authorDisplayName: String(value.authorDisplayName), authorKind: value.authorKind,
-    authorOwnerDisplayName: value.authorOwnerDisplayName, createdAtMs: Number(value.createdAtMs), body: String(value.body)};
+    authorUserId: value.authorUserId, authorDisplayName: String(value.authorDisplayName), authorKind: value.authorKind,
+    authorOwnerDisplayName: value.authorOwnerDisplayName, createdAtMs: Number(value.createdAtMs), body: value.body};
 }
 
 function page(value: Record<string, unknown>, channel: NamedChatChannel): NamedChatMessage[] {

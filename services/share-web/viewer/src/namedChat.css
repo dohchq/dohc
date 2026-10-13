@@ -40,6 +40,7 @@
 .chat-body pre { max-width: 100%; padding: 8px 10px; }
 .chat-body table { display: block; max-width: 100%; overflow-x: auto; border-collapse: collapse; }
 .chat-body :is(th, td) { border: 1px solid var(--named-line); padding: 4px 8px; }
+.chat-body-omitted { margin: 0; color: var(--named-muted); font-size: 14px; font-style: italic; }
 
 .chat-jump { position: absolute; bottom: 12px; left: 50%; transform: translateX(-50%); background: var(--named-paper); }
 .handoff-button.secondary.chat-jump:hover { background: var(--named-panel); }

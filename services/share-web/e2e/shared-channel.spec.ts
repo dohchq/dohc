@@ -154,7 +154,12 @@ test("a group member reads and posts from a phone while a read-only member follo
     await expect(ana.locator(".chat-list strong", { hasText: "hotel" })).toBeVisible();
     await expect(riley.locator(".chat-list strong", { hasText: "hotel" })).toBeVisible();
 
-    // A message from the owner's desktop reaches both browsers without a reload.
+    // A message from the owner's desktop reaches both browsers without a reload, after an agent message
+    // that has no author ID and a body over the browser response budget.
+    const tooLong = "This message is too long to show in the browser.";
+    storage.appendLogBatch({ workspaceId, originId: "owner-agent", ops: [{ originSeq: 0, opKind: "chat.message.append", recordedAtMs: Date.now(),
+      payloadJson: JSON.stringify({ messageId: "agent-report", threadId, authorKind: "agent", authorDisplayName: "Planner",
+        authorOwnerDisplayName: "Owner", body: "x".repeat(210_000), createdAtMs: Date.now() }) }] });
     const owner = await relay(new Request(`https://relay.example.org/sync/${workspaceId}/log`, { method: "POST",
       headers: { authorization: "Bearer owner", "content-type": "application/json" },
       body: JSON.stringify({ originId: "owner-laptop", ops: [{ originSeq: 0, opKind: "chat.message.append", recordedAtMs: Date.now(),
@@ -163,9 +168,12 @@ test("a group member reads and posts from a phone while a read-only member follo
     expect(owner.status).toBe(200);
     await expect(ana.getByText("Flights are confirmed.", { exact: true })).toBeVisible();
     await expect(riley.getByText("Flights are confirmed.", { exact: true })).toBeVisible();
+    await expect(ana.getByText(tooLong, { exact: true })).toBeVisible();
+    await expect(riley.getByText(tooLong, { exact: true })).toBeVisible();
 
     await ana.reload();
     await expect(ana.locator(".chat-list strong", { hasText: "hotel" })).toBeVisible();
+    await expect(ana.getByText(tooLong, { exact: true })).toBeVisible();
     await ana.emulateMedia({ colorScheme: "dark" });
     await ana.screenshot({ path: testInfo.outputPath("shared-channel-phone-dark.png") });
 

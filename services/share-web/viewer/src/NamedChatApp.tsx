@@ -44,7 +44,7 @@ const sentAt = (ms: number) => new Date(ms).toDateString() === new Date().toDate
 
 function ChatMessage({message}: {message: NamedChatMessage}) {
   // Attachments are out of scope, so no image source is allowed.
-  const html = useMemo(() => renderSafeMarkdown(message.body, () => null), [message.body]);
+  const html = useMemo(() => message.body === null ? null : renderSafeMarkdown(message.body, () => null), [message.body]);
   const agent = message.authorKind !== "human";
   return <li className="chat-message">
     <p className="chat-meta">
@@ -53,7 +53,8 @@ function ChatMessage({message}: {message: NamedChatMessage}) {
       {agent && message.authorOwnerDisplayName && <span className="chat-owner">Owned by {message.authorOwnerDisplayName}</span>}
       <time dateTime={new Date(message.createdAtMs).toISOString()}>{sentAt(message.createdAtMs)}</time>
     </p>
-    <div className="markdown chat-body" dangerouslySetInnerHTML={{__html: html}}/>
+    {html === null ? <p className="chat-body chat-body-omitted">This message is too long to show in the browser.</p> :
+      <div className="markdown chat-body" dangerouslySetInnerHTML={{__html: html}}/>}
   </li>;
 }
 
@@ -98,7 +99,9 @@ function ChannelView({channel, account, onEnded}: {channel: NamedChatChannel; ac
           const reason = ended(error);
           if (reason) {onEndedRef.current(reason); return;}
           if (error instanceof NamedChatError && error.status === 400) {setFollowing("stopped"); return;}
-          setFollowing("delayed"); await wait(delay, signal); delay = Math.min(delay * 2, RETRY_MAX_MS);
+          // 429 means the account or relay holds its maximum of open follows, for example from other tabs. Wait for one to end.
+          if (!(error instanceof NamedChatError && error.status === 429)) setFollowing("delayed");
+          await wait(delay, signal); delay = Math.min(delay * 2, RETRY_MAX_MS);
         }
       }
     })();

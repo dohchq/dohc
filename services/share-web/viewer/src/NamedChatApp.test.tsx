@@ -7,7 +7,9 @@ import {jsonResponse, settle, setControlValue} from "./testing";
 
 const shareId = "share", channelWireId = "wire";
 const message = (relaySeq: number, body: string, author = "Ana") => ({relaySeq, messageId: `m${relaySeq}`, threadId: `t${relaySeq}`,
-  authorUserId: author.toLowerCase(), authorDisplayName: author, authorKind: "human", authorOwnerDisplayName: null, createdAtMs: relaySeq * 1000, body});
+  authorUserId: author.toLowerCase(), authorDisplayName: author, authorKind: "human", authorOwnerDisplayName: null, createdAtMs: relaySeq * 1000,
+  body, bodyTooLarge: false});
+const tooLarge = (relaySeq: number) => ({...message(relaySeq, ""), authorUserId: null, body: null, bodyTooLarge: true});
 type Follow = {grant: string; since: string; signal: AbortSignal; answer(value: unknown, status?: number): void};
 
 let container: HTMLDivElement, root: Root, visibility: DocumentVisibilityState, follows: Follow[], posts: Record<string, unknown>[];
@@ -121,6 +123,36 @@ it("loads older messages without moving the following cursor", async () => {
   await act(async () => follows.at(-1)!.answer({shareId, channelWireId, messages: [], nextCursor: 21, hasMore: false}));
   await settle(() => follows.length === 2);
   expect(follows.map(follow => follow.since)).toEqual(["20", "21"]);
+});
+
+it("shows a message too long for the browser, and keeps paging and following past it", async () => {
+  server({history: before => before === null
+    ? {shareId, channelWireId, messages: [message(5, "Newest"), tooLarge(4)], nextCursor: 20, olderCursor: 4}
+    : {shareId, channelWireId, messages: [message(3, "Oldest")], nextCursor: 3, olderCursor: null}});
+  await render(); await settle(() => text().includes("Newest") && follows.length > 0);
+  const bodies = () => [...container.querySelectorAll(".chat-body")].map(node => node.textContent?.trim());
+  expect(bodies()).toEqual(["This message is too long to show in the browser.", "Newest"]);
+  await click("Load earlier messages"); await settle(() => text().includes("Oldest"));
+  await act(async () => follows.at(-1)!.answer({shareId, channelWireId, messages: [tooLarge(21), message(22, "After")], nextCursor: 22, hasMore: false}));
+  await settle(() => text().includes("After") && follows.length === 2);
+  expect(bodies()).toEqual(["Oldest", "This message is too long to show in the browser.", "Newest",
+    "This message is too long to show in the browser.", "After"]);
+  expect(follows.at(-1)!.since).toBe("22");
+});
+
+it("waits quietly while the account has its maximum of open follows, then resumes from the same cursor", async () => {
+  server(); await render(); await opened();
+  vi.useFakeTimers({toFake: ["setTimeout", "clearTimeout"]});
+  try {
+    await act(async () => follows.at(-1)!.answer({ok: false, error: "too many follow requests", code: "share_access_rate_limited"}, 429));
+    // Advance until the backoff timer exists and fires the next follow.
+    await settle(() => {vi.advanceTimersByTime(1_000); return follows.length === 2;});
+    expect(follows.at(-1)!.since).toBe("10");
+    expect(container.querySelector(".chat-follow-status")).toBeNull();
+    await act(async () => follows.at(-1)!.answer({shareId, channelWireId, messages: [message(11, "Third")], nextCursor: 11, hasMore: false}));
+    await settle(() => text().includes("Third") && follows.length === 3);
+    expect(follows.at(-1)!.since).toBe("11");
+  } finally {vi.useRealTimers();}
 });
 
 it("drops a follow response that arrives after the invitation changed", async () => {
