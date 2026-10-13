@@ -1187,11 +1187,30 @@ fn maximal_writes_checkpoint_within_the_client_busy_budget() {
             }
         })
         .collect();
-    write(&mut store, "maximum", "maximum.md", &maximum_text, 3);
-    maximum_text.replace_range(0..1, "Z");
-    write(&mut store, "maximum", "maximum.md", &maximum_text, 4);
-    maximum_text.replace_range(0..1, "Q");
-    write(&mut store, "maximum", "maximum.md", &maximum_text, 5);
+    // Today's maximal writes add 2,579–2,588 frames. Keep fixed headroom
+    // independently of the startup prefix, so per-write growth cannot hide.
+    const MAXIMAL_WRITE_FRAME_CEILING: i64 = 2700;
+    let mut previous_frames: i64 = store
+        .read_with(|c| c.query_row("PRAGMA wal_checkpoint(NOOP)", [], |r| r.get(1)))
+        .unwrap();
+    for (n, first) in [(3, None), (4, Some("Z")), (5, Some("Q"))] {
+        if let Some(first) = first {
+            maximum_text.replace_range(0..1, first);
+        }
+        write(&mut store, "maximum", "maximum.md", &maximum_text, n);
+        let frames: i64 = store
+            .read_with(|c| c.query_row("PRAGMA wal_checkpoint(NOOP)", [], |r| r.get(1)))
+            .unwrap();
+        let delta = frames - previous_frames;
+        eprintln!(
+            "MAXIMAL_WRITE n={n} frames={frames} delta={delta} ceiling={MAXIMAL_WRITE_FRAME_CEILING}"
+        );
+        assert!(
+            (1..=MAXIMAL_WRITE_FRAME_CEILING).contains(&delta),
+            "maximal write WAL growth exceeded its fixed ceiling: delta={delta}, ceiling={MAXIMAL_WRITE_FRAME_CEILING}"
+        );
+        previous_frames = frames;
+    }
     let frames: i64 = store
         .read_with(|c| c.query_row("PRAGMA wal_checkpoint(NOOP)", [], |r| r.get(1)))
         .unwrap();
