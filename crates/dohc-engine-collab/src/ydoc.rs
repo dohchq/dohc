@@ -357,6 +357,34 @@ pub struct MarkdownSourceReference {
     pub projection_sha256: String,
 }
 
+#[cfg(test)]
+pub(crate) fn main_era_flattened_list_for_test(source: &str) -> Ydoc {
+    let doc = Ydoc::wire();
+    let body = doc.doc.get_or_insert_xml_fragment(ROOT_BODY);
+    doc.with_delta(|txn| {
+        let list = body.insert(txn, 0, XmlElementPrelim::empty("bulletList"));
+        let item = list.insert(txn, 0, XmlElementPrelim::empty("listItem"));
+        insert_md_paragraph(txn, &item, 0, "parent");
+        insert_md_paragraph(txn, &body, 1, "  - nested");
+    });
+    let canonical = "- parent\n\n  \\- nested";
+    let meta = doc.doc.get_or_insert_map(ROOT_META);
+    let mut txn = doc.doc.transact_mut();
+    meta.insert(&mut txn, "schemaVersion", Any::Number(1.0));
+    meta.insert(&mut txn, MARKDOWN_SOURCE_META_KEY, source);
+    meta.insert(
+        &mut txn,
+        MARKDOWN_SOURCE_SHA_META_KEY,
+        crate::hex_sha256(source.as_bytes()),
+    );
+    meta.insert(
+        &mut txn,
+        MARKDOWN_SOURCE_PROJECTION_SHA_META_KEY,
+        crate::hex_sha256(canonical.as_bytes()),
+    );
+    drop(txn);
+    doc
+}
 /// A wire-facing durable Y.Doc.
 pub struct Ydoc {
     doc: Doc,
@@ -624,7 +652,13 @@ impl Ydoc {
             .any(|reading| {
                 let staged = Ydoc::wire();
                 staged
-                    .rewrite_content_to_markdown_as(ContentKind::Richdoc, source, reading)
+                    .rewrite_content_to_markdown_checked(
+                        ContentKind::Richdoc,
+                        source,
+                        reading,
+                        false,
+                        false,
+                    )
                     .is_ok()
                     && staged
                         .project_richdoc()
@@ -1183,7 +1217,7 @@ impl Ydoc {
     /// kind, keeping CRDT convergence while making the choice durable.
     ///
     /// Plaintext replaces the [`ROOT_PLAINTEXT`] text. Richdoc parses the
-    /// chosen markdown SOURCE into the projection's own block schema —
+    /// chosen projected Markdown into the projection's own block schema —
     /// frontmatter scalars, headings, blockquotes, bullet/ordered/task
     /// lists, fenced code blocks, horizontal rules, and paragraphs — so the
     /// folded document projects the chosen bytes back and renders as structure,
@@ -1194,7 +1228,7 @@ impl Ydoc {
         content_kind: ContentKind,
         markdown: &str,
     ) -> Result<Vec<u8>, CollabError> {
-        self.rewrite_content_to_markdown_as(content_kind, markdown, MarkdownReading::Source)
+        self.rewrite_content_to_markdown_as(content_kind, markdown, MarkdownReading::Projection)
     }
 
     fn rewrite_content_to_markdown_as(
@@ -1203,7 +1237,7 @@ impl Ydoc {
         markdown: &str,
         reading: MarkdownReading,
     ) -> Result<Vec<u8>, CollabError> {
-        self.rewrite_content_to_markdown_checked(content_kind, markdown, reading, false)
+        self.rewrite_content_to_markdown_checked(content_kind, markdown, reading, false, true)
     }
 
     /// Rewrite a file fold, refusing nested items and quote-depth overflow
@@ -1218,6 +1252,7 @@ impl Ydoc {
             markdown,
             MarkdownReading::Projection,
             true,
+            true,
         )
     }
 
@@ -1227,6 +1262,7 @@ impl Ydoc {
         markdown: &str,
         reading: MarkdownReading,
         file_fold: bool,
+        wire_defaults: bool,
     ) -> Result<Vec<u8>, CollabError> {
         let update = match content_kind {
             ContentKind::Plaintext => {
@@ -1263,14 +1299,14 @@ impl Ydoc {
                     normalized_body.as_deref().unwrap_or(body),
                     reading,
                 );
-                if refused || (file_fold && has_nested_list(&blocks)) {
+                if refused || (file_fold && refused_fold_item_bodies(&blocks)) {
                     return Err(CollabError::MarkdownNotRepresentable);
                 }
                 if file_fold && quote_fold_overflows(&blocks, 0) {
                     return Err(CollabError::MarkdownQuoteDepthExceeded);
                 }
                 self.with_delta(|txn| {
-                    if missing_schema_version {
+                    if wire_defaults && missing_schema_version {
                         meta.insert(txn, "schemaVersion", Any::Number(1.0));
                     }
                     if file_fold {
@@ -1300,7 +1336,7 @@ impl Ydoc {
                         frag.remove_range(txn, 0, len);
                     }
                     for (index, block) in blocks.iter().enumerate() {
-                        insert_md_block(txn, &frag, index as u32, block);
+                        insert_md_block(txn, &frag, index as u32, block, wire_defaults);
                     }
                 })
             }
@@ -2455,12 +2491,13 @@ fn parse_markdown_blocks_checked(body: &str, reading: MarkdownReading) -> (Vec<M
         0,
         0,
         reading,
+        false,
         &mut refused,
     );
     (blocks, refused)
 }
 
-fn unsupported_markdown_line(line: &str) -> bool {
+fn unsupported_markdown_line(line: &str, reading: MarkdownReading) -> bool {
     let rest = line.trim_start_matches(' ');
     if rest.starts_with('\t') || rest.starts_with("~~~") {
         return true;
@@ -2491,7 +2528,7 @@ fn unsupported_markdown_line(line: &str) -> bool {
     {
         return true;
     }
-    unsupported_letter_marker(rest)
+    reading == MarkdownReading::Source && unsupported_letter_marker(rest)
 }
 
 #[inline(always)]
@@ -2527,12 +2564,22 @@ fn blank_line(line: &str) -> bool {
     line.bytes().all(|byte| matches!(byte, b' ' | b'\t'))
 }
 
-fn has_nested_list(blocks: &[MdBlock<'_>]) -> bool {
+fn refused_fold_item_bodies(blocks: &[MdBlock<'_>]) -> bool {
+    let refused = |text: &str, body: &[MdBlock<'_>]| {
+        !body.is_empty()
+            || text
+                .lines()
+                .any(|line| unsupported_letter_marker(line.trim_start_matches(' ')))
+    };
     blocks.iter().any(|block| match block {
-        MdBlock::Quote(inner) => has_nested_list(inner),
-        MdBlock::BulletList(items) => items.iter().any(|(_, blocks)| !blocks.is_empty()),
-        MdBlock::OrderedList { items, .. } => items.iter().any(|item| !item.blocks().is_empty()),
-        MdBlock::TaskList(items) => items.iter().any(|(_, item)| !item.blocks().is_empty()),
+        MdBlock::Quote(inner) => refused_fold_item_bodies(inner),
+        MdBlock::BulletList(items) => items.iter().any(|(text, body)| refused(text, body)),
+        MdBlock::OrderedList { items, .. } => items
+            .iter()
+            .any(|item| refused(&item.paragraph, item.blocks())),
+        MdBlock::TaskList(items) => items
+            .iter()
+            .any(|(_, item)| refused(&item.paragraph, item.blocks())),
         _ => false,
     })
 }
@@ -2556,35 +2603,69 @@ fn quote_fold_overflows(blocks: &[MdBlock<'_>], depth: usize) -> bool {
     })
 }
 
+fn markdown_fence(line: &str, source: bool) -> Option<(u8, usize, &str)> {
+    if source {
+        return line.strip_prefix("```").map(|language| (b'`', 3, language));
+    }
+    let delimiter = *line.as_bytes().first()?;
+    if !matches!(delimiter, b'`' | b'~') {
+        return None;
+    }
+    let width = line.bytes().take_while(|byte| *byte == delimiter).count();
+    (width >= 3).then(|| (delimiter, width, &line[width..]))
+}
+
 /// `depth` counts XML levels; `quote_depth` enforces the separate quote cap.
 fn parse_markdown_blocks_at<'src>(
     lines: &[&'src str],
     depth: usize,
     quote_depth: usize,
     reading: MarkdownReading,
+    in_list: bool,
     refused: &mut bool,
 ) -> Vec<MdBlock<'src>> {
-    let tables = reading != MarkdownReading::Projection;
+    let tables = in_list || reading != MarkdownReading::Projection;
+    let source_fences = reading == MarkdownReading::Source && !in_list;
     let mut blocks = Vec::new();
     let mut index = 0usize;
     // Find fence closers once; repeated unclosed openers must not rescan the body.
-    let mut closers: Option<Vec<usize>> = None;
-    let mut next_closer = 0usize;
+    let mut closers: Option<Vec<(usize, u8, usize)>> = None;
+    let mut next_closer = BTreeMap::<(u8, usize), usize>::new();
     while index < lines.len() {
         let line = lines[index];
         if blank_line(line) {
             index += 1;
             continue;
         }
-        if let Some(fence_language) = line.strip_prefix("```") {
-            let closers = closers
-                .get_or_insert_with(|| (0..lines.len()).filter(|&at| lines[at] == "```").collect());
-            while closers.get(next_closer).is_some_and(|&at| at <= index) {
-                next_closer += 1;
+        if let Some((delimiter, width, fence_language)) = markdown_fence(line, source_fences) {
+            let closers = closers.get_or_insert_with(|| {
+                lines
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(at, line)| {
+                        let (delimiter, width, rest) = markdown_fence(line, source_fences)?;
+                        (rest.trim().is_empty() && (!source_fences || *line == "```"))
+                            .then_some((at, delimiter, width))
+                    })
+                    .collect()
+            });
+            let cursor = next_closer.entry((delimiter, width)).or_default();
+            while closers
+                .get(*cursor)
+                .is_some_and(|&(at, character, length)| {
+                    at <= index || character != delimiter || length < width
+                })
+            {
+                *cursor += 1;
             }
-            if let Some(&closer) = closers.get(next_closer) {
+            if let Some(&(closer, _, _)) = closers.get(*cursor) {
                 blocks.push(MdBlock::CodeBlock {
-                    language: fence_language.to_string(),
+                    language: if source_fences {
+                        fence_language
+                    } else {
+                        fence_language.trim_start()
+                    }
+                    .to_string(),
                     content: lines[index + 1..closer].join("\n"),
                 });
                 index = closer + 1;
@@ -2592,7 +2673,12 @@ fn parse_markdown_blocks_at<'src>(
             }
             // An unclosed fence is not a code block: fall through to text.
         }
-        *refused |= unsupported_markdown_line(line);
+        *refused |= (in_list
+            || matches!(
+                line.trim_start_matches(' ').as_bytes(),
+                [b'-' | b'+' | b'*', b'\t', ..]
+            ))
+            && unsupported_markdown_line(line, reading);
         if line == "---" {
             blocks.push(MdBlock::Rule);
             index += 1;
@@ -2642,6 +2728,7 @@ fn parse_markdown_blocks_at<'src>(
                     depth + 1,
                     quote_depth + 1,
                     reading,
+                    in_list,
                     refused,
                 )));
             }
@@ -2672,7 +2759,7 @@ fn parse_markdown_blocks_at<'src>(
             let next = lines[index];
             if blank_line(next)
                 || next == "---"
-                || next.starts_with("```")
+                || markdown_fence(next, source_fences).is_some()
                 || next == ">"
                 || next.starts_with("> ")
                 || list_marker(next).is_some_and(|marker| {
@@ -2683,11 +2770,19 @@ fn parse_markdown_blocks_at<'src>(
             {
                 break;
             }
-            *refused |= unsupported_markdown_line(next);
+            *refused |= in_list && unsupported_markdown_line(next, reading);
             para.push(next);
             index += 1;
         }
-        blocks.push(MdBlock::Paragraph(para.join("\n")));
+        let mut paragraph = para.join("\n");
+        if reading != MarkdownReading::Source {
+            if let Some(rest) = paragraph.strip_prefix("&#32;") {
+                paragraph = format!(" {rest}");
+            } else if let Some(rest) = paragraph.strip_prefix("&#9;") {
+                paragraph = format!("\t{rest}");
+            }
+        }
+        blocks.push(MdBlock::Paragraph(paragraph));
     }
     blocks
 }
@@ -3111,7 +3206,9 @@ fn plain_bullet_prefix<'src>(
     while let Some(text) = lines
         .get(end)
         .and_then(|line| line.strip_prefix(prefix))
-        .filter(|text| !structural_item_start(text))
+        .filter(|text| {
+            !structural_item_start(text) || (bullet == '*' && thematic_break(lines[end]))
+        })
     {
         items.push(text);
         end += 1;
@@ -3132,8 +3229,16 @@ fn parse_list<'src>(
         return None;
     }
     let first = list_marker(lines[start])?;
+    *refused |= first.text.trim_start_matches(' ').starts_with('\t');
     let (mut plain_items, prefix_end) = plain_bullet_prefix(lines, start, first);
-    if prefix_end == lines.len() {
+    let after_blank = (prefix_end..lines.len()).find(|&at| !blank_line(lines[at]));
+    let ends_before_block = prefix_end > start
+        && lines.get(prefix_end).is_some_and(|line| blank_line(line))
+        && after_blank.is_none_or(|at| {
+            !lines[at].starts_with([' ', '\t'])
+                && list_marker(lines[at]).is_none_or(|next| next.kind != first.kind)
+        });
+    if prefix_end == lines.len() || ends_before_block {
         return Some((
             MdBlock::BulletList(MdBulletItems::Plain(plain_items)),
             prefix_end,
@@ -3216,7 +3321,8 @@ fn parse_list<'src>(
             let mut body = Vec::with_capacity(continued.len() + 1);
             body.push(marker.text);
             body.extend(continued);
-            let blocks = parse_markdown_blocks_at(&body, depth + 2, quote_depth, reading, refused);
+            let blocks =
+                parse_markdown_blocks_at(&body, depth + 2, quote_depth, reading, true, refused);
             let mut blocks = blocks.into_iter();
             let first_block = blocks.next();
             match first_block {
@@ -3273,10 +3379,11 @@ fn insert_md_list_item<F: XmlFragment>(
     txn: &mut yrs::TransactionMut<'_>,
     parent: &F,
     item: &MdListItem<'_>,
+    wire_defaults: bool,
 ) {
     insert_md_paragraph(txn, parent, 0, &item.paragraph);
     for (index, block) in item.blocks().iter().enumerate() {
-        insert_md_block(txn, parent, index as u32 + 1, block);
+        insert_md_block(txn, parent, index as u32 + 1, block, wire_defaults);
     }
 }
 
@@ -3285,6 +3392,7 @@ fn insert_md_block<F: XmlFragment>(
     parent: &F,
     index: u32,
     block: &MdBlock<'_>,
+    wire_defaults: bool,
 ) {
     match block {
         MdBlock::Paragraph(text) => insert_md_paragraph(txn, parent, index, text),
@@ -3296,7 +3404,7 @@ fn insert_md_block<F: XmlFragment>(
         MdBlock::Quote(children) => {
             let el = parent.insert(txn, index, XmlElementPrelim::empty("blockquote"));
             for (child_index, child) in children.iter().enumerate() {
-                insert_md_block(txn, &el, child_index as u32, child);
+                insert_md_block(txn, &el, child_index as u32, child, wire_defaults);
             }
         }
         MdBlock::BulletList(items) => {
@@ -3313,7 +3421,7 @@ fn insert_md_block<F: XmlFragment>(
                     for (item_index, item) in items.iter().enumerate() {
                         let li =
                             el.insert(txn, item_index as u32, XmlElementPrelim::empty("listItem"));
-                        insert_md_list_item(txn, &li, item);
+                        insert_md_list_item(txn, &li, item, wire_defaults);
                     }
                 }
             }
@@ -3323,7 +3431,7 @@ fn insert_md_block<F: XmlFragment>(
             el.insert_attribute(txn, "start", *start);
             for (item_index, item) in items.iter().enumerate() {
                 let li = el.insert(txn, item_index as u32, XmlElementPrelim::empty("listItem"));
-                insert_md_list_item(txn, &li, item);
+                insert_md_list_item(txn, &li, item, wire_defaults);
             }
         }
         MdBlock::TaskList(items) => {
@@ -3331,7 +3439,7 @@ fn insert_md_block<F: XmlFragment>(
             for (item_index, (checked, item)) in items.iter().enumerate() {
                 let li = el.insert(txn, item_index as u32, XmlElementPrelim::empty("taskItem"));
                 li.insert_attribute(txn, "checked", *checked);
-                insert_md_list_item(txn, &li, item);
+                insert_md_list_item(txn, &li, item, wire_defaults);
             }
         }
         MdBlock::CodeBlock { language, content } => {
@@ -3364,8 +3472,10 @@ fn insert_md_block<F: XmlFragment>(
                 };
                 for (cell_index, text) in cells.iter().enumerate() {
                     let cell = row.insert(txn, cell_index as u32, XmlElementPrelim::empty(tag));
-                    cell.insert_attribute(txn, "colspan", 1_i64);
-                    cell.insert_attribute(txn, "rowspan", 1_i64);
+                    if wire_defaults {
+                        cell.insert_attribute(txn, "colspan", 1_i64);
+                        cell.insert_attribute(txn, "rowspan", 1_i64);
+                    }
                     if let Some(Some(align)) = alignments.get(cell_index) {
                         cell.insert_attribute(txn, "align", align.attribute());
                     }
@@ -4312,6 +4422,12 @@ fn markdown_node<T: ReadTxn>(
                     remaining_nodes,
                     source_text_bytes,
                 )?;
+                if matches!(element.tag().as_ref(), "tableCell" | "tableHeader")
+                    && matches!(key, "colspan" | "rowspan")
+                    && value.as_f64() == Some(1.0)
+                {
+                    continue;
+                }
                 attrs.insert(key.to_string(), value);
             }
             let children = element
@@ -5553,7 +5669,9 @@ fn render_list_item(
     let ordered_prefix =
         (task_prefix.is_none() && context.parent_tag == "orderedList").then(|| {
             let start = attr_i64(context.parent_attrs, "start").unwrap_or(1);
-            let ordinal = start.saturating_add(i64::try_from(context.index).unwrap_or(i64::MAX));
+            let ordinal = start
+                .saturating_add(i64::try_from(context.index).unwrap_or(i64::MAX))
+                .min(999_999_999);
             format!("{ordinal}. ")
         });
     let prefix = task_prefix.or(ordered_prefix.as_deref()).unwrap_or("- ");
@@ -9845,12 +9963,8 @@ mod projection_tests {
             "<!-- dohc:table row-heights=1:84px -->\n| a |\n| --- |\n| b |",
         ] {
             let doc = Ydoc::wire();
-            doc.rewrite_content_to_markdown_as(
-                ContentKind::Richdoc,
-                chosen,
-                MarkdownReading::Projection,
-            )
-            .expect("richdoc rewrite");
+            doc.rewrite_content_to_markdown(ContentKind::Richdoc, chosen)
+                .expect("richdoc rewrite");
             let body = serde_json::to_string(&doc.canonical_content()["body"]).expect("body json");
             assert!(
                 !body.contains("\"table\""),
@@ -9863,12 +9977,8 @@ mod projection_tests {
     fn resolution_fold_keeps_lists_the_projector_separated() {
         let chosen = "- one\n\n- two\n\n1. first\n\n1. again";
         let doc = Ydoc::wire();
-        doc.rewrite_content_to_markdown_as(
-            ContentKind::Richdoc,
-            chosen,
-            MarkdownReading::Projection,
-        )
-        .expect("richdoc rewrite");
+        doc.rewrite_content_to_markdown(ContentKind::Richdoc, chosen)
+            .expect("richdoc rewrite");
         assert_eq!(doc.project_richdoc().expect("projection"), chosen);
     }
 
@@ -10164,40 +10274,18 @@ mod projection_tests {
     }
 
     #[test]
-    fn a_local_settle_keeps_a_source_whose_body_is_the_files_body() {
-        // Raw HTML still reads as syntax while the document keeps it as text.
-        // A local snapshot permits retaining the unchanged file body.
-        let file = "---\nid: rec\n---\n\nHello <b>hidden</b> world\n";
-        let doc = Ydoc::wire();
-        doc.rewrite_content_to_markdown(ContentKind::Richdoc, file)
-            .expect("richdoc rewrite");
-        let canonical = witness_source(&doc, file);
+    fn local_settle_drops_flattened_lists_but_keeps_literal_fence_witness() {
+        let file = "- parent\n  - nested\n";
+        let doc = main_era_flattened_list_for_test(file);
+        let canonical = doc.project_richdoc().unwrap();
         assert_eq!(doc.preserved_markdown_source(&canonical), None);
-        // The file on disk holds that body, so a local settle keeps it, also
-        // under other frontmatter.
-        for local in [
-            file,
-            "---\nid: rec\nrelated: old\n---\n\nHello <b>hidden</b> world\n",
-        ] {
-            assert_eq!(
-                settled(&doc, &canonical, local).as_deref(),
-                Some(file),
-                "{local:?}"
-            );
-        }
-        // Any other body, or no snapshot, is dropped.
-        for local in ["---\nid: rec\n---\n\nHello world\n", "Hello\n"] {
-            assert_eq!(settled(&doc, &canonical, local), None, "{local:?}");
-        }
-        assert_eq!(
-            doc.settled_markdown_source(&canonical, || Ok::<_, ()>(None)),
-            Ok(None)
-        );
-        // A source that does not rebuild the document is dropped, even when
-        // the file holds it.
-        let forged = "---\nid: rec\n---\n\nHidden\n";
-        witness_source(&doc, forged);
-        assert_eq!(settled(&doc, &canonical, forged), None);
+        assert_eq!(settled(&doc, &canonical, file), None);
+        let source = "~~~\ncode\n~~~\n";
+        let doc = Ydoc::wire();
+        let body = doc.doc.get_or_insert_xml_fragment(ROOT_BODY);
+        doc.with_delta(|txn| insert_md_paragraph(txn, &body, 0, source.trim_end()));
+        let canonical = witness_source(&doc, source);
+        assert_eq!(settled(&doc, &canonical, source).as_deref(), Some(source));
     }
 
     fn settled(doc: &Ydoc, canonical: &str, snapshot: &str) -> Option<String> {
@@ -10333,12 +10421,8 @@ fn main() {}
 
 | a | b |
 |---|---|";
-        doc.rewrite_content_to_markdown_as(
-            ContentKind::Richdoc,
-            chosen,
-            MarkdownReading::Projection,
-        )
-        .expect("richdoc rewrite");
+        doc.rewrite_content_to_markdown(ContentKind::Richdoc, chosen)
+            .expect("richdoc rewrite");
         let projected = doc.project(ContentKind::Richdoc).expect("projection");
         assert_eq!(
             projected.content, chosen,

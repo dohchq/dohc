@@ -3411,16 +3411,8 @@ mod successor_validation_tests {
     }
 
     #[test]
-    fn markdown_successor_refuses_quote_nested_200_deep() {
-        let doc = Ydoc::wire();
-        let before = doc.encode_full_state();
-        assert!(doc
-            .rewrite_content_to_markdown(
-                ContentKind::Richdoc,
-                &format!("{}quoted\n", "> ".repeat(200)),
-            )
-            .is_err());
-        assert_eq!(doc.encode_full_state(), before);
+    fn markdown_successor_roundtrips_quote_nested_200_deep() {
+        assert_markdown_successor_roundtrip(&format!("{}quoted\n", "> ".repeat(200)));
     }
 
     #[test]

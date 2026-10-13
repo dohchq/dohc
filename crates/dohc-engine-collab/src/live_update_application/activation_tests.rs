@@ -134,16 +134,11 @@ fn imported_activation_rejects_ordinary_projection_that_does_not_match_native_st
     assert!(capture_imported(&mut f, 1_000_000).is_err());
 }
 
-/// An imported document whose file keeps a body the engine's reader holds as
-/// text, such as raw HTML, activates: activation compares the version's
-/// file with the projection the store settles, not the strict one.
 #[test]
-fn imported_activation_accepts_a_file_body_the_engine_reads_as_text() {
-    const SOURCE: &str = "# Shared\n\nHello <b>hidden</b> world\n";
+fn imported_activation_rejects_main_era_flattened_nested_list_witness() {
+    const SOURCE: &str = "- parent\n  - nested\n";
     let mut f = imported_fixture();
-    f.doc
-        .rewrite_content_to_markdown_preserving_source(ContentKind::Richdoc, SOURCE)
-        .unwrap();
+    f.doc = crate::ydoc::main_era_flattened_list_for_test(SOURCE);
     let projection = f.doc.project(ContentKind::Richdoc).unwrap().content;
     assert_ne!(projection, SOURCE);
     assert_eq!(f.doc.preserved_markdown_source(&projection), None);
@@ -161,7 +156,7 @@ fn imported_activation_accepts_a_file_body_the_engine_reads_as_text() {
                 object_id: "object".into(),
                 path: "owner.md".into(),
                 text: SOURCE.into(),
-                moment_id: "imported-literal-html".into(),
+                moment_id: "imported-flattened-list".into(),
                 metadata_origin: "sync".into(),
                 metadata_summary: None,
                 metadata_correlation_id: None,
@@ -172,8 +167,7 @@ fn imported_activation_accepts_a_file_body_the_engine_reads_as_text() {
             &NoFaults,
         )
         .unwrap();
-    let captured = capture_imported(&mut f, 1_000_000).unwrap();
-    assert_eq!(captured.source.source_digest, hex_sha256(SOURCE.as_bytes()));
+    assert!(capture_imported(&mut f, 1_000_000).is_err());
 }
 
 #[test]

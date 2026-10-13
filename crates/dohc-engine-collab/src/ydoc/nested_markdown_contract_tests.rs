@@ -1,21 +1,16 @@
 use super::*;
 
-fn nested_contract_case(name: &str) {
-    let corpus: Value = serde_json::from_str(include_str!(
-        "../../../../tools/rust-engine-program/nested-markdown-contract.json"
-    ))
-    .unwrap();
-    let case = corpus["cases"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|case| case["name"] == name)
-        .unwrap();
+fn nested_contract_case(case: &Value) {
+    let name = case["name"].as_str().unwrap();
     let doc = Ydoc::wire();
     let result = doc.rewrite_content_to_markdown_as(
         ContentKind::Richdoc,
         case["source"].as_str().unwrap(),
-        MarkdownReading::Source,
+        if case["projected"] == true {
+            MarkdownReading::ProjectedSource
+        } else {
+            MarkdownReading::Source
+        },
     );
     if case["refuse"].as_bool() == Some(true) {
         assert!(result.is_err(), "{name}: unsupported source was accepted");
@@ -26,105 +21,36 @@ fn nested_contract_case(name: &str) {
             case["canonical"].as_str().unwrap(),
             "{name}"
         );
+        let canonical = case["canonical"].as_str().unwrap();
+        doc.rewrite_content_to_markdown_as(
+            ContentKind::Richdoc,
+            canonical,
+            MarkdownReading::ProjectedSource,
+        )
+        .unwrap();
+        assert_eq!(doc.project_richdoc().unwrap(), canonical);
         let replay = Ydoc::wire();
         replay.apply(&doc.encode_full_state()).unwrap();
-        assert_eq!(
-            replay.project_richdoc().unwrap(),
-            doc.project_richdoc().unwrap()
-        );
+        assert_eq!(replay.project_richdoc().unwrap(), canonical);
         doc.validate_public_baseline(&doc.encode_full_state())
             .unwrap();
     }
 }
-macro_rules! nested_contract_test {
-    ($test:ident, $case:literal) => {
-        #[test]
-        fn $test() {
-            nested_contract_case($case);
-        }
-    };
-}
-nested_contract_test!(nested_contract_flat, "flat");
-nested_contract_test!(nested_contract_empty_task_root, "empty-task-root");
-nested_contract_test!(nested_contract_empty_task_nested, "empty-task-nested");
-nested_contract_test!(
-    nested_contract_ordered_checkbox_first_in_bullet,
-    "ordered-checkbox-first-in-bullet"
-);
-nested_contract_test!(
-    nested_contract_ordered_first_in_bullet,
-    "ordered-first-in-bullet"
-);
-nested_contract_test!(
-    nested_contract_letter_first_in_bullet,
-    "letter-first-in-bullet"
-);
-nested_contract_test!(
-    nested_contract_underscore_rule_first_in_bullet,
-    "underscore-rule-first-in-bullet"
-);
-nested_contract_test!(nested_contract_task_checkbox_tab, "task-checkbox-tab");
-nested_contract_test!(nested_contract_collection_record, "collection-record");
-nested_contract_test!(nested_contract_ordered_checkbox, "ordered-checkbox");
-nested_contract_test!(
-    nested_contract_ordered_checkbox_sibling,
-    "ordered-checkbox-sibling"
-);
-nested_contract_test!(nested_contract_fence_first_in_item, "fence-first-in-item");
 #[test]
-fn nested_contract_ordered_fence_first_in_item() {
-    nested_contract_case("ordered-fence-first-in-item");
-    let doc = Ydoc::wire();
-    let source = "1. \n   ```js\n   x()\n   ```";
-    doc.rewrite_content_to_markdown_as(
-        ContentKind::Richdoc,
-        source,
-        MarkdownReading::ProjectedSource,
-    )
+fn nested_contract_corpus() {
+    let corpus: Value = serde_json::from_str(include_str!(
+        "../../../../tools/rust-engine-program/nested-markdown-contract.json"
+    ))
     .unwrap();
-    assert_eq!(doc.project_richdoc().unwrap(), source);
+    let failures: Vec<_> = corpus["cases"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|case| std::panic::catch_unwind(|| nested_contract_case(case)).is_err())
+        .map(|case| case["name"].as_str().unwrap())
+        .collect();
+    assert!(failures.is_empty(), "failed corpus cases: {failures:?}");
 }
-nested_contract_test!(nested_contract_tilde_in_item, "tilde-in-item");
-nested_contract_test!(nested_contract_quotes_in_deep_item, "quotes-in-deep-item");
-nested_contract_test!(nested_contract_quote_overflow, "quote-overflow");
-nested_contract_test!(nested_contract_tab_after_marker, "tab-after-marker");
-nested_contract_test!(nested_contract_tab_item_padding, "tab-item-padding");
-nested_contract_test!(nested_contract_task_marker_changes, "task-marker-changes");
-nested_contract_test!(
-    nested_contract_ordered_delimiter_change,
-    "ordered-delimiter-change"
-);
-nested_contract_test!(nested_contract_ordered_zero, "ordered-zero");
-nested_contract_test!(nested_contract_quote_after_lists, "quote-after-lists");
-nested_contract_test!(nested_contract_bullet_two, "bullet-two");
-nested_contract_test!(nested_contract_bullet_four, "bullet-four");
-nested_contract_test!(nested_contract_ordered_three, "ordered-three");
-nested_contract_test!(nested_contract_ordered_four, "ordered-four");
-nested_contract_test!(nested_contract_wide_ordered, "wide-ordered");
-nested_contract_test!(nested_contract_task_casing, "task-casing");
-nested_contract_test!(nested_contract_mixed, "mixed");
-nested_contract_test!(nested_contract_loose_space_blank, "loose-space-blank");
-nested_contract_test!(nested_contract_lazy_continuation, "lazy-continuation");
-nested_contract_test!(nested_contract_ordered_continuation, "ordered-continuation");
-nested_contract_test!(nested_contract_fence_in_item, "fence-in-item");
-nested_contract_test!(nested_contract_quote_in_item, "quote-in-item");
-nested_contract_test!(nested_contract_table_in_item, "table-in-item");
-nested_contract_test!(nested_contract_crlf, "crlf");
-nested_contract_test!(nested_contract_ordered_one_space, "ordered-one-space");
-nested_contract_test!(nested_contract_ordered_two_spaces, "ordered-two-spaces");
-nested_contract_test!(
-    nested_contract_ordered_blank_under_indent,
-    "ordered-blank-under-indent"
-);
-nested_contract_test!(nested_contract_letter_item, "letter-item");
-nested_contract_test!(nested_contract_roman_item, "roman-item");
-nested_contract_test!(nested_contract_tab_item, "tab-item");
-nested_contract_test!(nested_contract_tilde_fence, "tilde-fence");
-nested_contract_test!(nested_contract_star_rule, "star-rule");
-nested_contract_test!(nested_contract_underscore_rule, "underscore-rule");
-
-nested_contract_test!(nested_contract_root_letter_marker, "root-letter-marker");
-nested_contract_test!(nested_contract_root_roman_marker, "root-roman-marker");
 
 #[test]
 fn nested_contract_combines_list_and_quote_depth() {
@@ -156,7 +82,11 @@ fn nested_contract_file_fold_refuses_before_mutation() {
     doc.rewrite_content_to_markdown(ContentKind::Richdoc, "Original")
         .unwrap();
     let before = doc.encode_full_state();
-    for source in ["- parent\n  - child\n", "1. parent\n\n   continuation\n"] {
+    for source in [
+        "- parent\n  - child\n",
+        "1. parent\n\n   continuation\n",
+        "- a. child\n",
+    ] {
         assert!(doc
             .rewrite_content_to_markdown_for_fold(ContentKind::Richdoc, source)
             .is_err());
@@ -176,14 +106,6 @@ fn nested_contract_seeds_schema_version() {
 }
 
 #[test]
-fn nested_contract_encodes_first_paragraph_space() {
-    let doc = Ydoc::wire();
-    let fragment = doc.doc.get_or_insert_xml_fragment(ROOT_BODY);
-    doc.with_delta(|txn| insert_md_paragraph(txn, &fragment, 0, "  literal"));
-    assert_eq!(doc.project_richdoc().unwrap(), "&#32; literal");
-}
-
-#[test]
 #[ignore = "regenerate development contract seeds"]
 fn regenerate_nested_contract_seeds() {
     let path = concat!(
@@ -196,8 +118,16 @@ fn regenerate_nested_contract_seeds() {
             continue;
         }
         let doc = Ydoc::wire();
-        doc.rewrite_content_to_markdown(ContentKind::Richdoc, case["source"].as_str().unwrap())
-            .unwrap();
+        doc.rewrite_content_to_markdown_as(
+            ContentKind::Richdoc,
+            case["source"].as_str().unwrap(),
+            if case["projected"] == true {
+                MarkdownReading::ProjectedSource
+            } else {
+                MarkdownReading::Source
+            },
+        )
+        .unwrap();
         assert_eq!(
             doc.project_richdoc().unwrap(),
             case["canonical"].as_str().unwrap()
@@ -205,4 +135,118 @@ fn regenerate_nested_contract_seeds() {
         case["rustBase64"] = json!(base64_encode(&doc.encode_full_state()));
     }
     std::fs::write(path, serde_json::to_string_pretty(&corpus).unwrap() + "\n").unwrap();
+}
+
+#[test]
+fn fix1_ordinary_block_lines_are_not_list_refusals() {
+    for source in [
+        "Mr. Smith arrived.",
+        "Dr. Jones",
+        "St. Louis",
+        "I. Overview",
+        "Intro\nMr. Jones",
+        "***",
+        "___",
+        "~~~\ncode\n~~~",
+        "\tliteral",
+    ] {
+        let doc = Ydoc::wire();
+        doc.rewrite_content_to_markdown_as(ContentKind::Richdoc, source, MarkdownReading::Source)
+            .unwrap();
+        assert!(!doc.project_richdoc().unwrap().is_empty());
+    }
+}
+
+#[test]
+fn fix1_ordinary_prose_keeps_its_exact_source_witness() {
+    let source = "Mr. Smith arrived.\nIntro\nDr. Jones\nSt. Louis\nI. Overview\n";
+    let doc = Ydoc::wire();
+    doc.rewrite_content_to_markdown_preserving_source(ContentKind::Richdoc, source)
+        .unwrap();
+    let projection = doc.project_richdoc().unwrap();
+    assert_eq!(
+        doc.preserved_markdown_source(&projection).as_deref(),
+        Some(source)
+    );
+}
+
+#[test]
+fn fix1_public_rewrite_reads_projected_markdown() {
+    for source in ["- one\n\n- two", "| a | b |\n| --- | --- |\n| x | y |"] {
+        let doc = Ydoc::wire();
+        doc.rewrite_content_to_markdown(ContentKind::Richdoc, source)
+            .unwrap();
+        assert_eq!(doc.project_richdoc().unwrap(), source);
+    }
+    let doc = Ydoc::wire();
+    doc.rewrite_content_to_markdown(ContentKind::Richdoc, &format!("{}quoted", "> ".repeat(121)))
+        .unwrap();
+    doc.rewrite_content_to_markdown(
+        ContentKind::Richdoc,
+        "- parent\n\n  | a | b |\n  | --- | --- |\n  | x | y |",
+    )
+    .unwrap();
+    assert!(doc.canonical_content()["body"]
+        .to_string()
+        .contains("\"table\""));
+}
+
+#[test]
+fn fix1_plain_bullets_in_the_middle_keep_borrowed_text() {
+    let source = "# Before\n\n- first\n- second\n\n# After\n\nParagraph";
+    let blocks = parse_markdown_blocks(source, MarkdownReading::Source);
+    assert!(
+        matches!(&blocks[1], MdBlock::BulletList(MdBulletItems::Plain(items)) if items == &["first", "second"])
+    );
+}
+
+#[test]
+fn fix1_projected_fences_are_accepted_unchanged() {
+    for language in ["js", "lang`tick", "~lang`tick"] {
+        for content in ["", "code", "before\n~~~\n```\nafter"] {
+            let attrs = BTreeMap::from([("language".into(), Value::String(language.into()))]);
+            let children = vec![MarkdownNode::Text(vec![TextRun {
+                text: content.into(),
+                marks: Vec::new(),
+            }])];
+            let canonical = render_code_block(&attrs, &children).unwrap();
+            let doc = Ydoc::wire();
+            doc.rewrite_content_to_markdown(ContentKind::Richdoc, &canonical)
+                .unwrap();
+            assert_eq!(doc.project_richdoc().unwrap(), canonical);
+        }
+    }
+}
+
+#[test]
+fn fix1_projected_paragraph_indent_is_accepted_unchanged() {
+    for canonical in ["&#32; literal", "&#32;  \\- x", "&#9;literal"] {
+        let doc = Ydoc::wire();
+        doc.rewrite_content_to_markdown(ContentKind::Richdoc, canonical)
+            .unwrap();
+        assert_eq!(doc.project_richdoc().unwrap(), canonical);
+    }
+}
+
+#[test]
+fn fix1_spaced_rules_keep_root_acceptance() {
+    let blocks = parse_markdown_blocks("* * *", MarkdownReading::Source);
+    assert!(
+        matches!(&blocks[0], MdBlock::BulletList(MdBulletItems::Plain(items)) if items == &["* *"])
+    );
+    for source in ["* * *", "_ _ _"] {
+        Ydoc::wire()
+            .rewrite_content_to_markdown_as(ContentKind::Richdoc, source, MarkdownReading::Source)
+            .unwrap();
+    }
+}
+
+#[test]
+fn fix1_projected_item_prose_is_accepted_unchanged() {
+    for source in ["- Mr. Smith arrived.", "- I. Overview", "- a. child"] {
+        let doc = Ydoc::wire();
+        doc.rewrite_content_to_markdown(ContentKind::Richdoc, source)
+            .unwrap();
+        assert_eq!(doc.project_richdoc().unwrap(), source);
+    }
 }

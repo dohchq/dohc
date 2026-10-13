@@ -6,14 +6,14 @@ import { createLiveMarkdownJournalValidator, createLiveMarkdownRegistrationValid
 import { markdownToYDoc, yDocToMarkdown, serializeRichdocBody } from './import-export.js'
 
 const corpus = JSON.parse(readFileSync(new URL('../../../tools/rust-engine-program/nested-markdown-contract.json', import.meta.url), 'utf8')) as {
-  cases: Array<{ name: string; source: string; canonical?: string; refuse?: boolean; rustBase64?: string }>
+  cases: Array<{ name: string; source: string; canonical?: string; refuse?: boolean; projected?: boolean; rustBase64?: string }>
 }
 it.each(corpus.cases)('shares the nested Markdown contract for $name', item => {
   if (item.refuse) {
     expect(() => markdownToYDoc(item.source)).toThrow(/not representable/)
     return
   }
-  const doc = markdownToYDoc(item.source)
+  const doc = markdownToYDoc(item.source, { reading: item.projected ? 'projection' : 'source' })
   try { expect(yDocToMarkdown(doc)).toBe(item.canonical) }
   finally { doc.destroy() }
 })
@@ -52,4 +52,26 @@ it.each(corpus.cases.filter(item => !item.refuse))('validates the Rust-seeded $n
       kind: 'accepted', evidence: { projectedMarkdownSha256: createHash('sha256').update(item.canonical!).digest('hex') },
     })
   } finally { replay.destroy() }
+})
+
+
+it.each(['Mr. Smith arrived.', 'Dr. Jones', 'St. Louis', 'I. Overview', 'Intro\nMr. Jones', '***', '___', '* * *', '_ _ _', '~~~\ncode\n~~~', '\tliteral'])('fix1 accepts ordinary block lines: %s', source => {
+  const doc = markdownToYDoc(source)
+  try {
+    const canonical = yDocToMarkdown(doc)
+    const replay = markdownToYDoc(canonical)
+    try { expect(yDocToMarkdown(replay)).toBe(canonical) } finally { replay.destroy() }
+  } finally { doc.destroy() }
+})
+it('fix1 refuses inline nesting before marked can overflow its stack', () => {
+  expect(() => markdownToYDoc('- '.repeat(5000) + 'x')).toThrow(/not representable/)
+})
+it.each(corpus.cases.filter(item => !item.refuse))('fix1 accepts its canonical output for $name unchanged', item => {
+  const doc = markdownToYDoc(item.canonical!, { reading: 'projection' })
+  try { expect(yDocToMarkdown(doc)).toBe(item.canonical) } finally { doc.destroy() }
+})
+
+it.each(['- Mr. Smith arrived.', '- I. Overview', '- a. child'])('accepts projected item prose unchanged: %s', source => {
+  const doc = markdownToYDoc(source, { reading: 'projection' })
+  try { expect(yDocToMarkdown(doc)).toBe(source) } finally { doc.destroy() }
 })

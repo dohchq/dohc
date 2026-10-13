@@ -3775,7 +3775,7 @@ describe('Y.Doc markdown import/export', () => {
         const fence = content.includes('~~~') ? '~~~~' : '~~~'
         expect(markdown).toContain(`${fence}${language.startsWith('~') ? ' ' : ''}${language}`)
         expect(markdown).not.toContain('DOHC_CODE_BLOCK')
-        expect(() => markdownToYDoc(markdown)).toThrow(/not representable/)
+        expect(yDocToMarkdown(markdownToYDoc(markdown))).toBe(markdown)
       }
     }
   })
@@ -3783,8 +3783,7 @@ describe('Y.Doc markdown import/export', () => {
   it.each(['js', 'lang`tick'])('keeps an empty %s code block indented inside a list', language => {
     const fence = language.includes('`') ? '~~~' : '```'
     const markdown = `- intro\n  ${fence}${language}\n  \n  ${fence}\n\nAfter`
-    if (fence === '~~~') expect(() => markdownToYDoc(markdown)).toThrow(/not representable/)
-    else expect(yDocToMarkdown(markdownToYDoc(markdown))).toBe(markdown)
+    expect(yDocToMarkdown(markdownToYDoc(markdown))).toBe(markdown)
   })
 
   it('uses collision-free block and inline code delimiters', () => {
@@ -4526,10 +4525,6 @@ describe('indented code fences', () => {
             'After',
           ].join('\n')
 
-          if (fence === '~~~') {
-            expect(() => bodyBlocks(input)).toThrow(/not representable/)
-            return
-          }
           const blocks = bodyBlocks(input)
           expect(blocks.map((block) => block.type)).toEqual([
             'paragraph',

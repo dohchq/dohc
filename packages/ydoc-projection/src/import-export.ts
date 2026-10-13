@@ -17,6 +17,7 @@ import {
   GFM_TABLE_CELL_BLOCK_SEPARATOR,
   MarkdownListItem,
   MarkdownOrderedList,
+  DohcProjectedMarkdownLists,
   MarkdownParagraph,
   MarkdownTaskList,
 } from './dohc-markdown-extensions.js'
@@ -430,13 +431,21 @@ const markdownManager = new MarkdownManager({
   extensions,
   indentation: { style: 'space', size: 2 },
 })
+let projectedManager: MarkdownManager | undefined
+function projectedMarkdownManager(): MarkdownManager {
+  return projectedManager ??= new MarkdownManager({
+    marked: markdownParser as unknown as typeof marked,
+    extensions: extensions.map(extension => extension.name === 'dohcMarkdownLists' ? DohcProjectedMarkdownLists : extension),
+    indentation: { style: 'space', size: 2 },
+  })
+}
 const schema = getSchema(extensions)
 
 type DohcMeta = { schemaVersion: number; contentKind?: 'plain-text' }
 
 export function markdownToYDoc(
   markdown: string,
-  options: { clientID?: number } = {},
+  options: { clientID?: number; reading?: 'source' | 'projection' } = {},
 ): Y.Doc {
   const usesCrlf = markdown.includes('\r\n')
   const { meta, body, frontmatterSource } = parseFrontmatter(markdown, usesCrlf)
@@ -457,7 +466,7 @@ export function markdownToYDoc(
 
   const bodyFragment = getDohcYDocBodyFragment(doc)
   const tiptapJson = parseRichdocMarkdown(
-    usesCrlf ? body.replaceAll('\r\n', '\n') : body,
+    usesCrlf ? body.replaceAll('\r\n', '\n') : body, options.reading,
   )
   prosemirrorJSONToYXmlFragment(schema, tiptapJson, bodyFragment)
 
@@ -466,12 +475,16 @@ export function markdownToYDoc(
 
 // Admission is independent of canonical serialization. Code bodies are opaque;
 // blank lines end lazy continuation, but not an indented continuation block.
-function assertSupportedListMarkdown(markdown: string): void {
+function assertSupportedListMarkdown(markdown: string, reading: 'source' | 'projection'): string {
   const parents: Array<{ indent: number; column: number }> = []
+  const lines = markdown.split('\n')
+  let changed = false
   let blank = false
-  let fenceWidth = 0
-  for (const raw of markdown.split('\n')) {
-    const line = raw.replace(/\r$/u, '')
+  let fence = ''
+  let fenceInList = false
+  const refuse = () => { throw new Error('Markdown is not representable by the live document contract') }
+  for (let at = 0; at < lines.length; at += 1) {
+    const line = lines[at].replace(/\r$/u, '')
     if (/^[ \t]*$/u.test(line)) { blank = true; continue }
     let indent = /^ */u.exec(line)![0].length
     let rest = line.slice(indent)
@@ -480,45 +493,60 @@ function assertSupportedListMarkdown(markdown: string): void {
     const quoteIndent = /^ */u.exec(rest)![0].length
     indent += quoteIndent
     rest = rest.slice(quoteIndent)
-    const ticks = /^`{3,}/u.exec(rest)?.[0].length ?? 0
-    if (fenceWidth) {
-      if (ticks >= fenceWidth && rest.slice(ticks).trim() === '') fenceWidth = 0
+    const run = /^(?:`{3,}|~{3,})/u.exec(rest)?.[0] ?? ''
+    if (fence) {
+      if (run[0] === fence[0] && run.length >= fence.length && rest.slice(run.length).trim() === '') fence = ''
       continue
     }
-    if (ticks) { fenceWidth = ticks; blank = false; continue }
-    const refuse = () => { throw new Error('Markdown is not representable by the live document contract') }
-    if (rest.startsWith('\t') || rest.startsWith('~~~')
-      || /^(?:[-+*]|[0-9]{1,9}[.)])[ \t]*\t/u.test(rest)
-      || /^(?:\*(?:[ \t]*\*){2,}|_(?:[ \t]*_){2,})[ \t]*$/u.test(rest)) refuse()
-    if (quotes > 120 || /^(?:[a-zA-Z]{1,2}|[ivxlcdmIVXLCDM]+)[.)] /u.test(rest)) refuse()
-    if (/^[0-9]{1,9}[.)] \[[ xX]\](?: |$)/u.test(rest)) refuse()
     const marker = /^(?:[-+*] |[0-9]{1,9}[.)] )/u.exec(rest)
+    if (marker) {
+      while (parents.length && indent <= parents.at(-1)!.indent) parents.pop()
+    } else if (parents.length && indent <= parents.at(-1)!.indent
+      && (blank || run || quotes || /^(?:#{1,6} |(?:[*_][ \t]*){3,})/u.test(rest))) parents.length = 0
+    const inList = parents.length > 0
+    if (quotes > 120) refuse()
+    if (run) { fence = run; fenceInList = inList; blank = false; continue }
+    if (!inList && /^(?:\*(?:[ \t]*\*){2,}|_(?:[ \t]*_){2,})[ \t]*$/u.test(rest)) { blank = false; continue }
+    if ((inList || marker || /^[-+*]\t/u.test(rest))
+      && (rest.startsWith('\t') || /^(?:[-+*]|[0-9]{1,9}[.)])[ \t]*\t/u.test(rest)
+        || /^(?:\*(?:[ \t]*\*){2,}|_(?:[ \t]*_){2,})[ \t]*$/u.test(rest)
+        || (reading === 'source' && /^(?:[a-zA-Z]{1,2}|[ivxlcdmIVXLCDM]+)[.)] /u.test(rest)))) refuse()
+    if (/^[0-9]{1,9}[.)] \[[ xX]\](?: |$)/u.test(rest)) refuse()
     if (marker) {
       const itemBody = rest.slice(marker[0].length)
       if (/^\[[ xX]\]\t/u.test(itemBody)) refuse()
       let body = itemBody.replace(/^\[[ xX]\] /u, '')
       if (/^[ \t]*\t/u.test(body)) refuse()
+      let depth = quotes + (parents.length + 1) * 2
       body = body.trimStart()
-      while (body.startsWith('> ')) body = body.slice(2)
-      if (body.startsWith('~~~') || /^(?:\*(?:[ \t]*\*){2,}|_(?:[ \t]*_){2,})[ \t]*$/u.test(body)) refuse()
-      if (/^(?:[a-zA-Z]{1,2}|[ivxlcdmIVXLCDM]+)[.)] /u.test(body)
+      while (true) {
+        if (depth > 128) refuse()
+        if (body.startsWith('> ')) { body = body.slice(2); depth += 1; continue }
+        const child = /^(?:[-+*] |[0-9]{1,9}[.)] )/u.exec(body)
+        if (!child) break
+        if (/^[0-9]/u.test(child[0]) && /^\[[ xX]\](?: |$)/u.test(body.slice(child[0].length))) refuse()
+        body = body.slice(child[0].length); depth += 2
+      }
+      if (/^(?:\*(?:[ \t]*\*){2,}|_(?:[ \t]*_){2,})[ \t]*$/u.test(body)
+        || (reading === 'source' && /^(?:[a-zA-Z]{1,2}|[ivxlcdmIVXLCDM]+)[.)] /u.test(body))
         || /^[0-9]{1,9}[.)] \[[ xX]\](?: |$)/u.test(body)) refuse()
-      const itemTicks = /^`{3,}/u.exec(body)?.[0].length ?? 0
-      if (itemTicks) fenceWidth = itemTicks
-      while (parents.length && indent <= parents.at(-1)!.indent) parents.pop()
+      const itemFence = /^(?:`{3,}|~{3,})/u.exec(body)?.[0] ?? ''
+      if (itemFence) { fence = itemFence; fenceInList = true }
       if (parents.length && indent < parents.at(-1)!.column) refuse()
       parents.push({ indent, column: indent + marker[0].length })
+      if (itemBody === '') { lines[at] = lines[at].trimEnd(); changed = true }
     } else if (parents.length) {
       const parent = parents.at(-1)!
       if (indent > parent.indent && blank && indent < parent.column) refuse()
-      if (indent <= parent.indent && blank) parents.length = 0
     }
     blank = false
   }
+  if (fence.startsWith('~') && fenceInList) refuse()
+  return changed ? lines.join('\n') : markdown
 }
 
-export function parseRichdocMarkdown(markdown: string): JSONContent {
-  assertSupportedListMarkdown(markdown)
+export function parseRichdocMarkdown(markdown: string, reading: 'source' | 'projection' = 'source'): JSONContent {
+  markdown = assertSupportedListMarkdown(markdown, reading)
   const reservedSentinels = new Set(
     markdown.match(PARSE_SENTINEL_RE) ?? [],
   )
@@ -581,7 +609,7 @@ export function parseRichdocMarkdown(markdown: string): JSONContent {
   }
   let parsed: JSONContent
   try {
-    parsed = markdownManager.parse(prepared)
+    parsed = (reading === 'projection' ? projectedMarkdownManager() : markdownManager).parse(prepared)
   } finally {
     parseReferences = new Map()
     rawHtmlMarkup = { lt: '<', gt: '>' }

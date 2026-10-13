@@ -984,20 +984,22 @@ export const DohcCodeBlock = Extension.create({
     ),
 })
 
-const DohcMarkdownLists = Extension.create({
+function markdownLists(projected = false) { return Extension.create({
   name: 'dohcMarkdownLists', priority: 1001, markdownTokenName: 'list',
   parseMarkdown: (token, helpers) => {
     if (token.type !== 'list') return []
     const lists: JSONContent[] = []
+    let separate = false
     for (const item of token.items ?? []) {
       const emptyTask = /^[ ]*[-+*] \[([ xX])\] *\n?$/u.exec(item.raw ?? '')
       const task = item.task || !!emptyTask
       const type = token.ordered ? 'orderedList' : task ? 'taskList' : 'bulletList'
       let list = lists.at(-1)
-      if (list?.type !== type) {
-        list = { type, ...(token.ordered ? { attrs: { start: Number(token.start ?? 1) } } : {}), content: [] }
+      if (list?.type !== type || (projected && separate)) {
+        list = { type, ...(token.ordered ? { attrs: { start: Number(projected ? /^[ ]*([0-9]+)/u.exec(item.raw ?? '')?.[1] ?? token.start ?? 1 : token.start ?? 1) } } : {}), content: [] }
         lists.push(list)
       }
+      separate = /\n[ \t]*\n$/u.test(item.raw ?? '')
       const tokens = (emptyTask ? [] : item.tokens ?? []).map(block => block.type === 'text'
         ? { ...block, type: 'paragraph' } : block)
       const content = (helpers.parseBlockChildren ?? helpers.parseChildren)(tokens)
@@ -1010,6 +1012,10 @@ const DohcMarkdownLists = Extension.create({
     return lists
   },
 })
+
+}
+const DohcMarkdownLists = markdownLists()
+export const DohcProjectedMarkdownLists = markdownLists(true)
 
 export const dohcMarkdownExtensions = [
   DohcImage,
@@ -1067,7 +1073,7 @@ export const MarkdownListItem = ListItem.extend({
   renderMarkdown: (node, helpers, context) => {
     const start = Number(context.meta?.parentAttrs?.start ?? 1)
     const prefix = context.parentType === 'orderedList'
-      ? `${start + (context.index || 0)}. ` : '- '
+      ? `${Math.min(999_999_999, start + (context.index || 0))}. ` : '- '
     return renderNestedMarkdownContent(node, {
       ...helpers,
       indent: text => ' '.repeat(prefix.length) + text,
