@@ -610,13 +610,15 @@ export interface SyncRelayStorage {
   enrollServiceHostDocuments(inputs: readonly import("./serviceHostEnrollment").EnrollServiceHostDocumentInput[]): readonly import("./serviceHostEnrollment").ServiceHostEnrollment[];
   enrollServiceHostDocument(input: import("./serviceHostEnrollment").EnrollServiceHostDocumentInput): import("./serviceHostEnrollment").ServiceHostEnrollment;
   listServiceHostEnrollments(workspaceId?: string): readonly import("./serviceHostEnrollment").ServiceHostEnrollment[];
-  hasServiceHostEnrollment(workspaceId: string, path: string): boolean;
+  hasKeptServiceHostEnrollment(workspaceId: string, path: string): boolean;
   readServiceHostEnrollment(workspaceId: string, path: string): import("./serviceHostEnrollment").ServiceHostEnrollment | null;
   listRetiredServiceHostEnrollments(workspaceId: string, after?: string): {documents: readonly import("./serviceHostEnrollment").ServiceHostEnrollment[]; nextCursor: string | null};
-  listCurrentServiceHostEnrollments(workspaceId: string): readonly import("./serviceHostEnrollment").ServiceHostEnrollment[];
+  currentServiceHostWorkspace(workspaceId: string): import("./serviceHostEnrollment").ServiceHostWorkspace | null;
   scanServiceHostCandidateShares(after?: import("./serviceHostEnrollment").ServiceHostCandidateCursor, workspaceId?: string): import("./serviceHostEnrollment").ServiceHostCandidatePage;
   checkServiceHostDocuments(input: {workspaceId: string; ownerUserId: string; shareId: string; paths: readonly string[]}): void;
   setServiceHostEnrollmentEnabled(input: import("./serviceHostEnrollment").SetServiceHostEnrollmentEnabledInput): import("./serviceHostEnrollment").ServiceHostEnrollment | null;
+  serviceHostEnrollmentHasEditGrant(enrollment: Pick<import("./serviceHostEnrollment").ServiceHostEnrollment, "workspaceId" | "ownerUserId" | "path">): boolean;
+  releaseServiceHostEnrollment(input: {workspaceId: string; objectId: string; nowMs: number}): import("./serviceHostEnrollment").ServiceHostEnrollment | null;
   postNotice(input: import("./notices").PostNoticeInput): void;
   postAutomationWake(input: import("./notices").PostAutomationWakeInput): import("./notices").PostedAutomationWake;
   readNoticeChanges(input: import("./notices").ReadNoticeChangesInput): import("@dohc/workspace-contracts/relay").RelayNoticePage;
