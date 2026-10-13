@@ -1,3 +1,6 @@
+import { createActorIssuer, parseActorKey } from "@dohc/workspace-contracts/actor-identity";
+import type { ActorIssuer, ActorRef } from "@dohc/workspace-contracts/actor-identity";
+import type { ChatMessage } from "@dohc/workspace-contracts/engine";
 import type { CloudCredentials } from "./cloudCredentialStore";
 import type {
   JoinedSharedChannel,
@@ -165,5 +168,70 @@ export function assertSharedChannelMessageIdentity(input: {
     input.authorUserId !== input.joinedChannel.recipientUserId
   ) {
     throw new Error("Sign in to the account that joined this.");
+  }
+}
+
+// Only the native own-store column contains keys this device serialized.
+// Assurance comes from admitted origin and author kind, never the key alone.
+export function readLocalChatActor(message: Pick<ChatMessage, "authorActorKey" | "author" | "origin">): ActorRef | null {
+  const key = message.authorActorKey === undefined ? null : parseActorKey(message.authorActorKey);
+  if (key === null) return null;
+  const origin = message.origin ?? (message.author.kind === "human" ? "renderer"
+    : message.author.kind === "automation" ? "automation" : "unknown");
+  return {
+    key, displayName: message.author.displayName, origin,
+    assurance: key.kind === "unknown" ? "unknown"
+      : message.author.kind === "human" && origin === "renderer" ? "local" : "owner-asserted",
+  };
+}
+
+export async function resolveThreadActorIssuer(input: {
+  readWorkspace(): Pick<RegistryEntry, "workspaceId" | "remote" | "sharedChannels" | "shareView"> | null;
+  store: ChatRelayIdentityStore;
+  threadId: string;
+  // Fence caller attachment/session replacement as well as registry replacement.
+  assertCurrent?: () => void;
+}): Promise<ActorIssuer | null> {
+  const { store, threadId } = input;
+  const workspace = input.readWorkspace();
+  if (workspace === null) return null;
+  const workspaceId = workspace.workspaceId;
+  const changed = new Error("Chat issuer binding changed");
+  const check = () => {
+    input.assertCurrent?.();
+    if (input.readWorkspace() !== workspace) throw changed;
+  };
+  const guardedStore: ChatRelayIdentityStore = {
+    async findThreadChannelId(target) {
+      check();
+      const result = await store.findThreadChannelId(target);
+      check();
+      return result;
+    },
+    async getChannelWireId(target) {
+      check();
+      const result = await store.getChannelWireId(target);
+      check();
+      return result;
+    },
+  };
+  try {
+    check();
+    // A received file share has no admitted account issuer in its registry.
+    if (workspace.shareView) return null;
+    const joined = await joinedSharedChannelForTarget({
+      workspaceId, sharedChannels: workspace.sharedChannels, store: guardedStore, target: { threadId },
+    });
+    check();
+    const serverUrl = joined ? joined.serverUrl : workspace.remote?.serverUrl;
+    if (!serverUrl) return null;
+    try {
+      return createActorIssuer(serverUrl);
+    } catch {
+      return null;
+    }
+  } catch (error) {
+    if (error === changed) return null;
+    throw error;
   }
 }

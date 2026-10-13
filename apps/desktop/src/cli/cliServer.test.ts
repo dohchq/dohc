@@ -988,6 +988,7 @@ describe("CLI socket server", () => {
       },
     });
     const linkedMessage = await store.sendMessage({
+      authorActorKey: null,
       workspaceId: WORKSPACE_ID,
       threadId: linkedThread.id,
       author: { kind: "human", displayName: "Sam" },
@@ -1206,6 +1207,7 @@ describe("CLI socket server", () => {
       workspaceId: WORKSPACE_ID,
     });
     await store.startChannelThread({
+      authorActorKey: null,
       workspaceId: WORKSPACE_ID,
       channelId: primaryGeneral.id,
       title: "Primary-only channel chat",
@@ -1217,6 +1219,7 @@ describe("CLI socket server", () => {
       workspaceId: scopedWorkspaceId,
     });
     const scopedChannelChat = await scopedStore.startChannelThread({
+      authorActorKey: null,
       workspaceId: scopedWorkspaceId,
       channelId: scopedGeneral.id,
       title: "Scoped channel chat",
@@ -1232,6 +1235,7 @@ describe("CLI socket server", () => {
       },
     });
     await scopedStore.sendMessage({
+      authorActorKey: null,
       workspaceId: scopedWorkspaceId,
       threadId: scopedFileThread.id,
       author: { kind: "human", displayName: "Scoped" },
@@ -1359,6 +1363,7 @@ describe("CLI socket server", () => {
     const general = await store.ensureGeneralChannel({ workspaceId: WORKSPACE_ID });
     await store.ensureAgentChannel({ workspaceId: WORKSPACE_ID });
     const existing = await store.startChannelThread({
+      authorActorKey: null,
       workspaceId: WORKSPACE_ID,
       channelId: general.id,
       author: { kind: "human", displayName: "Sam" },
@@ -1394,6 +1399,7 @@ describe("CLI socket server", () => {
     if (!store) throw new Error("Store is not available");
     const general = await store.ensureGeneralChannel({ workspaceId: WORKSPACE_ID });
     const channelChat = await store.startChannelThread({
+      authorActorKey: null,
       workspaceId: WORKSPACE_ID,
       channelId: general.id,
       title: "Readable shared chat",
@@ -1409,6 +1415,7 @@ describe("CLI socket server", () => {
       },
     });
     await store.sendMessage({
+      authorActorKey: null,
       workspaceId: WORKSPACE_ID,
       threadId: fileThread.id,
       author: { kind: "human", displayName: "Sam" },
@@ -2867,6 +2874,7 @@ describe("CLI socket server", () => {
     if (!store) throw new Error("Store is not available");
     const general = await store.ensureGeneralChannel({ workspaceId: WORKSPACE_ID });
     const { thread } = await store.startChannelThread({
+      authorActorKey: null,
       workspaceId: WORKSPACE_ID,
       channelId: general.id,
       author: { kind: "human", displayName: "Sam" },
@@ -2874,6 +2882,7 @@ describe("CLI socket server", () => {
     });
     onReadEffect = async () => {
       await store!.sendMessage({
+        authorActorKey: null,
         workspaceId: WORKSPACE_ID,
         threadId: thread.id,
         author: { kind: "human", displayName: "Peer" },
@@ -2898,6 +2907,7 @@ describe("CLI socket server", () => {
   it("triggers the sync pass for every chat read verb, not a fixed subset", async () => {
     const general = await store!.ensureGeneralChannel({ workspaceId: WORKSPACE_ID });
     const { thread } = await store!.startChannelThread({
+      authorActorKey: null,
       workspaceId: WORKSPACE_ID,
       channelId: general.id,
       author: { kind: "human", displayName: "Sam" },
@@ -2955,6 +2965,7 @@ describe("CLI socket server", () => {
     if (!store) throw new Error("Store is not available");
     const general = await store.ensureGeneralChannel({ workspaceId: WORKSPACE_ID });
     const { thread } = await store.startChannelThread({
+      authorActorKey: null,
       workspaceId: WORKSPACE_ID,
       channelId: general.id,
       author: { kind: "human", displayName: "Sam" },
@@ -2984,6 +2995,7 @@ describe("CLI socket server", () => {
     if (!store) throw new Error("Store is not available");
     const general = await store.ensureGeneralChannel({ workspaceId: WORKSPACE_ID });
     const { thread } = await store.startChannelThread({
+      authorActorKey: null,
       workspaceId: WORKSPACE_ID,
       channelId: general.id,
       author: { kind: "human", displayName: "Sam" },
@@ -3024,6 +3036,7 @@ describe("CLI socket server", () => {
     if (!store) throw new Error("Store is not available");
     const general = await store.ensureGeneralChannel({ workspaceId: WORKSPACE_ID });
     const { thread } = await store.startChannelThread({
+      authorActorKey: null,
       workspaceId: WORKSPACE_ID,
       channelId: general.id,
       author: { kind: "human", displayName: "Sam" },
@@ -3049,6 +3062,7 @@ describe("CLI socket server", () => {
     if (!store) throw new Error("Store is not available");
     const general = await store.ensureGeneralChannel({ workspaceId: WORKSPACE_ID });
     const { thread } = await store.startChannelThread({
+      authorActorKey: null,
       workspaceId: WORKSPACE_ID,
       channelId: general.id,
       author: { kind: "human", displayName: "Sam" },
@@ -3090,6 +3104,7 @@ describe("CLI socket server", () => {
   it("names the read's own channel or thread as the sync priority", async () => {
     const general = await store!.ensureGeneralChannel({ workspaceId: WORKSPACE_ID });
     const { thread } = await store!.startChannelThread({
+      authorActorKey: null,
       workspaceId: WORKSPACE_ID,
       channelId: general.id,
       author: { kind: "human", displayName: "Sam" },
@@ -3235,7 +3250,7 @@ describe("CLI socket server", () => {
     expect(listed.threads).toHaveLength(1);
     const both = await store.createChannel({ workspaceId: WORKSPACE_ID, name: "Mixed group", kind: "channel", type: "both" });
     for (const lane of ["posts", "chat"] as const) {
-      await store.startChannelThread({ workspaceId: WORKSPACE_ID, channelId: both.id, lane, author: { kind: "human", displayName: "Sam" }, body: lane });
+      await store.startChannelThread({ authorActorKey: null, workspaceId: WORKSPACE_ID, channelId: both.id, lane, author: { kind: "human", displayName: "Sam" }, body: lane });
     }
     const mixed = await invoke("threads", { cwd: workspaceRoot, actor: "human", group: both.slug });
     expect(mixed.threads.map(thread => thread.lane)).toEqual(["posts", "chat"]);
@@ -4236,6 +4251,7 @@ describe("CLI socket server", () => {
     const foreignStore = storeForWorkspace("foreign-workspace", foreignRoot);
     const channel = await foreignStore.ensureGeneralChannel({ workspaceId: "foreign-workspace" });
     const opened = await foreignStore.startChannelThread({
+      authorActorKey: null,
       workspaceId: "foreign-workspace", channelId: channel.id,
       author: { kind: "human", displayName: "Other owner" }, body: "Other workspace",
     });
@@ -4421,6 +4437,7 @@ describe("CLI socket server", () => {
       linkedFile: { objectId: "object_tracked", pathHint: "tracked.md" },
     });
     await store.sendMessage({
+      authorActorKey: null,
       workspaceId: WORKSPACE_ID,
       threadId: fileThread.id,
       author: { kind: "agent", displayName: "Sam" },
@@ -4661,6 +4678,7 @@ describe("CLI socket server", () => {
       linkedFile: { objectId: "object_tracked", pathHint: "tracked.md" },
     });
     await store.sendMessage({
+      authorActorKey: null,
       workspaceId: WORKSPACE_ID,
       threadId: fileThread.id,
       author: { kind: "agent", displayName: "Sam" },

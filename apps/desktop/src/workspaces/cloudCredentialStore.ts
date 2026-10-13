@@ -1,7 +1,6 @@
 import { chmod, mkdir, readFile, unlink, writeFile } from "node:fs/promises";
 import { atomicReplaceFile } from "../atomicReplaceFile";
 import { join } from "node:path";
-import { isServerDisplayName } from "./cloudConfiguration";
 
 // server session credentials for this desktop install. The token is
 // sealed with Electron safeStorage when the OS keychain is available, but
@@ -11,7 +10,6 @@ import { isServerDisplayName } from "./cloudConfiguration";
 export interface CloudCredentials {
   serverUrl: string;
   relayUrl?: string;
-  serverName?: string;
   networkAccess?: "private" | "public";
   email: string;
   // The Better Auth user id (an opaque uuid). This is the stable author key,
@@ -97,7 +95,6 @@ export function createCloudCredentialStore(options: {
       return {
         serverUrl: obj.serverUrl,
         ...(nonEmptyString(obj.relayUrl) ? { relayUrl: obj.relayUrl } : {}),
-        ...(isServerDisplayName(obj.serverName) ? { serverName: obj.serverName } : {}),
         ...(obj.networkAccess === "private" || obj.networkAccess === "public" ? { networkAccess: obj.networkAccess } : {}),
         email: obj.email,
         userId: obj.userId,
@@ -114,7 +111,6 @@ export function createCloudCredentialStore(options: {
         !nonEmptyString(credentials.token) ||
         (credentials.relayUrl !== undefined &&
           !nonEmptyString(credentials.relayUrl)) ||
-        (credentials.serverName !== undefined && !isServerDisplayName(credentials.serverName)) ||
         (credentials.networkAccess !== undefined && !["private", "public"].includes(credentials.networkAccess))
       ) {
         throw new Error(
@@ -131,7 +127,6 @@ export function createCloudCredentialStore(options: {
         version: 1,
         serverUrl: credentials.serverUrl,
         ...(credentials.relayUrl ? { relayUrl: credentials.relayUrl } : {}),
-        ...(credentials.serverName ? { serverName: credentials.serverName } : {}),
         ...(credentials.networkAccess ? { networkAccess: credentials.networkAccess } : {}),
         email: credentials.email,
         userId: credentials.userId,

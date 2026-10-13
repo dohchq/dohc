@@ -2846,6 +2846,15 @@ CREATE TABLE live_settlement_attribution_unavailable (
 ) STRICT;
 ";
 
+// A fence row also holds its restore proof, which can be tens of MiB, and SQLite
+// reaches a later column of a row only by walking the overflow pages of every
+// column before it. Each edit and live application on a restored document
+// reads its resumed fence, so answer those reads from this index instead.
+const V2_LIVE_RESTORE_RESUMED_LOOKUP_DDL: &str = "
+DROP INDEX live_restore_document_generation;
+CREATE INDEX live_restore_resumed ON live_restore_fences(workspace_id,main_version_id,object_id,new_generation,relay_database_namespace,resume_receipt_json);
+";
+
 const V2_FIELD_HISTORY_LINK_AUTHOR_DDL: &str = "
 ALTER TABLE collection_field_history ADD COLUMN link_author_json TEXT;
 ";
@@ -3198,6 +3207,24 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
     },
     Migration {
         ordinal: 48,
+        id: "v2-capture-file-holds",
+        sql: "CREATE TABLE capture_file_holds (workspace_id TEXT NOT NULL, source_version_id TEXT NOT NULL, object_id TEXT NOT NULL, path TEXT NOT NULL, observed_sha256 TEXT NOT NULL CHECK(length(observed_sha256)=64 AND observed_sha256 NOT GLOB '*[^0-9a-f]*'), observed_size INTEGER NOT NULL CHECK(observed_size>=0), reason TEXT NOT NULL CHECK(reason='ydoc-resolution-not-representable'), observed_at_ms INTEGER NOT NULL, attempt_count INTEGER NOT NULL CHECK(attempt_count>0), retry_requested INTEGER NOT NULL CHECK(retry_requested IN (0,1)), PRIMARY KEY(workspace_id,path), FOREIGN KEY(workspace_id,source_version_id) REFERENCES versions(workspace_id,version_id), FOREIGN KEY(workspace_id,object_id) REFERENCES file_objects(workspace_id,object_id)) STRICT;",
+        sets_user_version: None,
+    },
+    Migration {
+        ordinal: 49,
+        id: "v2-local-chat-actor-key",
+        sql: "ALTER TABLE chat_messages ADD COLUMN author_actor_key TEXT CHECK (author_actor_key IS NULL OR json_valid(author_actor_key));",
+        sets_user_version: None,
+    },
+    Migration {
+        ordinal: 50,
+        id: "v2-live-restore-resumed-lookup",
+        sql: V2_LIVE_RESTORE_RESUMED_LOOKUP_DDL,
+        sets_user_version: None,
+    },
+    Migration {
+        ordinal: 51,
         id: "v2-hosted-replica",
         sql: V2_HOSTED_REPLICA_DDL,
         sets_user_version: None,
@@ -3934,6 +3961,18 @@ mod tests {
                 "8d75962511b05d48c91ea5c041ed69c8ab6b181212aee4c0cad4c7e16f61a54b",
             ),
             (
+                "v2-capture-file-holds",
+                "e5326f922618067ec6dec0bed092a8ea98c929a101f5166e448f935cd8ac9dfc",
+            ),
+            (
+                "v2-local-chat-actor-key",
+                "f84d0497555ff288db36304ed0c4b41b7f61d1d7f10396b9fd08a61da0fc7219",
+            ),
+            (
+                "v2-live-restore-resumed-lookup",
+                "ccc7e17969beb6ae6259e9ce174863fa91d15c2bdad66c3f8232e8b236ff8b8c",
+            ),
+            (
                 "v2-hosted-replica",
                 "332fbe3728b51bdb26a1cc9cc0d8d1da4decd311aa991687be899f4def7c7468",
             ),
@@ -4072,6 +4111,39 @@ mod tests {
     }
 
     #[test]
+    fn restore_resumed_lookup_upgrade_indexes_existing_fences() {
+        let dir = tempdir();
+        let mut conn = open_bare(&dir.join("engine.db"));
+        conn.pragma_update(None, "foreign_keys", true).unwrap();
+        let ctx = MigrationContext::current(1);
+        let before = migration_index("v2-live-restore-resumed-lookup");
+        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..before], &ctx, &NoFaults).unwrap();
+        conn.execute_batch("INSERT INTO versioned_workspaces VALUES ('ws','main'); INSERT INTO live_restore_fences(workspace_id,main_version_id,object_id,relay_database_namespace,operation_id,input_json,receipt_json) VALUES ('ws','main','doc','relay','restore','{\"newFence\":1}','{}');").unwrap();
+        run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).unwrap();
+        let indexes: Vec<String> = conn
+            .prepare("SELECT name FROM pragma_index_list('live_restore_fences')")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert!(indexes.iter().any(|name| name == "live_restore_resumed"));
+        assert!(
+            !indexes
+                .iter()
+                .any(|name| name == "live_restore_document_generation")
+        );
+        let found: (i64, String) = conn
+            .query_row(
+                "SELECT new_generation,relay_database_namespace FROM live_restore_fences INDEXED BY live_restore_resumed WHERE workspace_id='ws' AND main_version_id='main' AND object_id='doc'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(found, (1, "relay".to_owned()));
+    }
+
+    #[test]
     fn materialization_text_blobs_upgrade_preserves_jobs_and_content_references() {
         let dir = tempdir();
         let mut conn = open_bare(&dir.join("engine.db"));
@@ -4161,6 +4233,75 @@ mod tests {
             .iter()
             .position(|migration| migration.id == id)
             .expect("a shipped migration")
+    }
+
+    #[test]
+    fn capture_file_hold_migration_upgrades_a_populated_store() {
+        let scratch = tempdir();
+        let mut conn = open_bare(&scratch.join("holds.db"));
+        let ctx = MigrationContext::current(10);
+        let before = migration_index("v2-capture-file-holds");
+        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..before], &ctx, &NoFaults).unwrap();
+        conn.execute("INSERT INTO versioned_workspaces VALUES ('ws','main')", [])
+            .unwrap();
+        conn.execute("INSERT INTO versions(workspace_id,version_id,kind,name,created_at_ms) VALUES ('ws','main','main','Main',1)", []).unwrap();
+        conn.execute("WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<100) INSERT INTO file_objects SELECT 'ws','object-'||x,1 FROM n", []).unwrap();
+        run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).unwrap();
+        let objects: i64 = conn
+            .query_row("SELECT COUNT(*) FROM file_objects", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(objects, 100);
+        let holds: i64 = conn
+            .query_row("SELECT COUNT(*) FROM capture_file_holds", [], |r| r.get(0))
+            .expect("the upgrade creates the hold ledger");
+        assert_eq!(holds, 0);
+        conn.execute("INSERT INTO capture_file_holds(workspace_id,source_version_id,object_id,path,observed_sha256,observed_size,reason,observed_at_ms,attempt_count,retry_requested) VALUES ('ws','main','object-1','held.md',?1,1,'ydoc-resolution-not-representable',10,1,0)", ["a".repeat(64)]).unwrap();
+        assert_eq!(
+            conn.query_row("PRAGMA foreign_key_check", [], |_| Ok(()))
+                .optional()
+                .unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    #[ignore = "manual migration cost measurement"]
+    fn capture_file_hold_migration_cost_100000_objects() {
+        let scratch = tempdir();
+        let source = scratch.join("source.db");
+        let mut conn = open_bare(&source);
+        let ctx = MigrationContext::current(10);
+        let before = migration_index("v2-capture-file-holds");
+        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..before], &ctx, &NoFaults).unwrap();
+        conn.execute("INSERT INTO versioned_workspaces VALUES ('ws','main')", [])
+            .unwrap();
+        conn.execute("INSERT INTO versions(workspace_id,version_id,kind,name,created_at_ms) VALUES ('ws','main','main','Main',1)", []).unwrap();
+        conn.execute("WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<100000) INSERT INTO file_objects SELECT 'ws','object-'||x,1 FROM n", []).unwrap();
+        drop(conn);
+        let mut samples = Vec::new();
+        for sample in 0..33 {
+            let copy = scratch.join(format!("copy-{sample}.db"));
+            std::fs::copy(&source, &copy).unwrap();
+            let mut conn = open_bare(&copy);
+            let start = std::time::Instant::now();
+            run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).unwrap();
+            let elapsed = start.elapsed().as_secs_f64() * 1000.0;
+            let objects: i64 = conn
+                .query_row("SELECT COUNT(*) FROM file_objects", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(objects, 100000);
+            drop(conn);
+            std::fs::remove_file(copy).unwrap();
+            if sample >= 3 {
+                samples.push(elapsed);
+            }
+        }
+        samples.sort_by(f64::total_cmp);
+        println!(
+            "migration_100000_objects warmups=3 samples=30 median_ms={:.6} p95_ms={:.6}",
+            (samples[14] + samples[15]) / 2.0,
+            samples[28]
+        );
     }
 
     fn migration_29_history_fixture(conn: &Connection) -> (String, String) {

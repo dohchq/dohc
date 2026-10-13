@@ -952,6 +952,12 @@ fn apply_moment_append(
                 ],
             )
             .map_err(SyncError::persist)?;
+            dohc_engine_storage::capture_file_holds::clear_orphaned_in(
+                tx,
+                &envelope.workspace_id,
+                &payload.version_id,
+                alias_path,
+            )?;
             tx.execute(
                 "DELETE FROM snapshots WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
                 params![envelope.workspace_id, payload.version_id, payload.object_id],
@@ -1007,6 +1013,12 @@ fn apply_moment_append(
                     ],
                 )
                 .map_err(SyncError::persist)?;
+                dohc_engine_storage::capture_file_holds::clear_orphaned_in(
+                    tx,
+                    &envelope.workspace_id,
+                    &payload.version_id,
+                    before_path,
+                )?;
             }
         }
         tx.execute(
@@ -1021,6 +1033,12 @@ fn apply_moment_append(
             ],
         )
         .map_err(SyncError::persist)?;
+        dohc_engine_storage::capture_file_holds::clear_orphaned_in(
+            tx,
+            &envelope.workspace_id,
+            &payload.version_id,
+            &payload.payload_after_path,
+        )?;
         let byte_length = match after_kind {
             ContentKind::Text => after_text
                 .as_ref()

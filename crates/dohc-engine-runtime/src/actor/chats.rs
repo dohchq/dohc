@@ -149,6 +149,7 @@ impl ActorHandle {
     pub async fn chat_thread_start(
         &self,
         input: StartChannelThread,
+        author_actor_key: Option<String>,
         token: CancellationToken,
     ) -> Result<(ChatThread, ChatMessage), RuntimeError> {
         self.run_chats(move |chats| {
@@ -156,7 +157,7 @@ impl ActorHandle {
                 Err(RuntimeError::Cancelled)
             } else {
                 chats
-                    .start_channel_thread(&input, &NoFaults)
+                    .start_admitted_channel_thread(&input, author_actor_key.as_deref(), &NoFaults)
                     .map_err(RuntimeError::from)
             }
         })
@@ -349,6 +350,7 @@ impl ActorHandle {
     pub async fn chat_message_send(
         &self,
         input: SendMessage,
+        author_actor_key: Option<String>,
         token: CancellationToken,
     ) -> Result<ChatMessage, RuntimeError> {
         self.run_chats(move |chats| {
@@ -356,7 +358,7 @@ impl ActorHandle {
                 Err(RuntimeError::Cancelled)
             } else {
                 chats
-                    .send_message(&input, &NoFaults)
+                    .send_admitted_message(&input, author_actor_key.as_deref(), &NoFaults)
                     .map_err(RuntimeError::from)
             }
         })

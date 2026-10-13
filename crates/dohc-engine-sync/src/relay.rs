@@ -753,6 +753,14 @@ pub struct PushWorkspaceProgress {
     page: Option<PreparedPushPage>,
     batch_size: usize,
     file_versions_selected: bool,
+    writer_cache_reset_required: bool,
+}
+
+impl PushWorkspaceProgress {
+    /// Sticky across I/O continuations, including failed enrollment work.
+    pub fn writer_cache_reset_required(&self) -> bool {
+        self.writer_cache_reset_required
+    }
 }
 
 impl Default for PushWorkspaceProgress {
@@ -763,6 +771,7 @@ impl Default for PushWorkspaceProgress {
             page: None,
             batch_size: crate::MAX_PUSH_OPS_PER_BATCH,
             file_versions_selected: false,
+            writer_cache_reset_required: false,
         }
     }
 }
@@ -1397,6 +1406,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 faults,
                 leases,
                 now_ms,
+                &mut progress.writer_cache_reset_required,
             )
             .map_err(local)?;
             select_file_versions(
@@ -1415,6 +1425,8 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         let has_position = store
             .read_with(|conn| has_relay_position(conn, workspace_id))
             .map_err(local)?;
+        // The first pushed cursor can backfill and claim local bases.
+        progress.writer_cache_reset_required |= !has_position;
         let mut enrollment_prepared = has_position || hosted;
         if origins.is_empty() && !enrollment_prepared {
             let response = self.transport.push(push_probe_request(
@@ -1450,6 +1462,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                     faults,
                     leases,
                     now_ms,
+                    &mut progress.writer_cache_reset_required,
                 )
                 .map_err(local)?,
             );
@@ -1630,6 +1643,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                                 faults,
                                 leases,
                                 now_ms,
+                                &mut progress.writer_cache_reset_required,
                             )
                             .map_err(local)?,
                         );
