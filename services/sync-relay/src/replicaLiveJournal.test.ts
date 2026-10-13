@@ -222,6 +222,48 @@ it("bounds rows and complete response bytes without skipping the next row", asyn
   } finally {f.close();}
 });
 
+it("prices metadata before capturing rows, so a page never loads rows it cannot serve", async () => {
+  const f = fixture();
+  try {
+    f.append("a"); f.append("b"); f.append("c");
+    const first = await f.readStorage(0, 1);
+    const bytes = Buffer.byteLength(JSON.stringify({ok: true, ...first, hasMore: false}));
+    const context = f.storage as StorageContext;
+    const prepare = context.db.prepare.bind(context.db);
+    const captured: number[] = [];
+    vi.spyOn(context.db, "prepare").mockImplementation(sql => {
+      const statement = prepare(sql);
+      if (/^SELECT \* FROM sync_relay_live_update_journal\s+WHERE workspace_id=\? AND journal_cursor>\? AND journal_cursor<=\?/.test(sql)) {
+        const all = statement.all.bind(statement);
+        Object.assign(statement, {all: (...args: unknown[]) => {
+          const rows = all(...args);
+          captured.push(rows.length);
+          return rows;
+        }});
+      }
+      return statement;
+    });
+    const page = await f.readStorage(0, 500, bytes);
+    expect(page.rows.map(deliveryId)).toEqual(["a"]);
+    expect(captured).toEqual([1]);
+  } finally {f.close();}
+});
+
+it("counts metadata stored beside the accepted record before capturing rows", async () => {
+  const f = fixture();
+  try {
+    f.append("a"); f.append("b"); f.append("c");
+    const first = await f.readStorage(0, 1);
+    const bytes = Buffer.byteLength(JSON.stringify({ok: true, ...first, hasMore: false}));
+    // Only the deleted-ranges column is heavy; the page must stop before capturing that row.
+    const deletes = JSON.stringify(Array.from({length: 2000}, (_, index) => ({clientId: 1, startClock: 2 * index, endClock: 2 * index + 1})));
+    f.write(db => db.prepare("UPDATE sync_relay_live_update_journal SET first_seen_deletes_json=? WHERE delivery_id='b'").run(deletes));
+    const page = await f.readStorage(0, 500, bytes * 2);
+    expect(page.rows.map(deliveryId)).toEqual(["a"]);
+    expect(page.hasMore).toBe(true);
+  } finally {f.close();}
+});
+
 it("caps an oversized route limit at 500 rows and resumes at the unserved row", async () => {
   const f = fixture();
   try {
