@@ -2498,6 +2498,11 @@ impl<'a> LinkedChatStore<'a> {
         author_actor_key: Option<&str>,
         faults: &dyn FaultInjector,
     ) -> Result<(ChatThread, ChatMessage), DomainError> {
+        if self.store.is_passive() {
+            return Err(DomainError::InvalidInput {
+                reason: "passive store cannot originate",
+            });
+        }
         non_empty(
             &input.workspace_id,
             "invalid-channel-name",
@@ -2813,6 +2818,11 @@ impl<'a> LinkedChatStore<'a> {
         author_actor_key: Option<&str>,
         faults: &dyn FaultInjector,
     ) -> Result<ChatMessage, DomainError> {
+        if self.store.is_passive() {
+            return Err(DomainError::InvalidInput {
+                reason: "passive store cannot originate",
+            });
+        }
         non_empty(
             &input.workspace_id,
             "invalid-channel-name",

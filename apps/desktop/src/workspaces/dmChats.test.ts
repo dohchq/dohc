@@ -792,6 +792,7 @@ describe("DM request decisions", () => {
     const pulled: string[] = [];
     const reserve = (workspaceId: string, shareId: string) =>
       reserveAndPullSharedChannel({
+        serverUrl: "https://accounts.test",
         relay: { baseUrl: "http://relay.test", token: "token" },
         shareId,
         workspaceId,

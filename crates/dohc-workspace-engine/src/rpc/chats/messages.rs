@@ -916,6 +916,7 @@ mod tests {
             author_display_name: "Stamp".to_owned(),
             author_owner_display_name: None,
             author_user_id: None,
+            author_actor_key: None,
             parent_message_id: None,
             origin: None,
             body: "hello".to_owned(),
@@ -956,6 +957,7 @@ mod tests {
         let full = ChatMessage {
             author_owner_display_name: Some("Ada".to_owned()),
             author_user_id: Some("user".to_owned()),
+            author_actor_key: Some(r#"{"kind":"unknown"}"#.to_owned()),
             parent_message_id: Some("parent".to_owned()),
             origin: Some("desktop".to_owned()),
             automation: Some(ChatMessageAutomation {
@@ -983,6 +985,7 @@ mod tests {
                 }],
                 "authorOwnerDisplayName": "Ada",
                 "authorUserId": "user",
+                "authorActorKey": r#"{"kind":"unknown"}"#,
                 "parentMessageId": "parent",
                 "origin": "desktop",
                 "automation": { "automationId": "collection:tasks#stamp" },

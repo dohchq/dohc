@@ -661,8 +661,8 @@ export function registerDirectMessagesIpcHandlers<
                   threadId: running.thread.id,
                   author,
                   authorUserId,
-                    authorActorKey,
-                    body,
+                  authorActorKey,
+                  body,
                   ...(attachments.length > 0 ? { attachments } : {}),
                 })
               : (
