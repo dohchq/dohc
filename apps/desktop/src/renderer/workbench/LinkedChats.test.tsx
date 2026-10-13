@@ -527,6 +527,54 @@ describe("LinkedChatsPanel initialThread consumption", () => {
     await waitFor(() => expect(scrolledMessageIds).toContain("message-2"));
   });
 
+  it("reveals a historical file message after the reload commits, even when a frame runs first", async () => {
+    const messages = Array.from({ length: 300 }, (_, index) => ({
+      id: `message-${index}`, threadId: searchThread.id,
+      authorKind: "human" as const, authorDisplayName: "Reader",
+      body: `File message ${index}`, createdAtMs: index + 1,
+    }));
+    bridgeMock.listChatMessages.mockResolvedValue({ messages });
+    const frames: FrameRequestCallback[] = [];
+    vi.stubGlobal("requestAnimationFrame", vi.fn((callback: FrameRequestCallback) => {
+      frames.push(callback);
+      return frames.length;
+    }));
+    vi.stubGlobal("cancelAnimationFrame", vi.fn());
+    const scrolled: Array<string | null> = [];
+    vi.mocked(Element.prototype.scrollIntoView).mockImplementation(function (this: Element) {
+      scrolled.push(this.getAttribute("data-message-id"));
+    });
+    const view = render(
+      <LinkedChatsPanel workspaceId="workspace-1" filePath="topic.md" onError={() => undefined} />,
+    );
+    await userEvent.setup().click(await screen.findByTestId("linked-chat-open"));
+    await screen.findByText("File message 299");
+    act(() => frames.splice(0).forEach(frame => frame(0)));
+    expect(scrolled).toContain("message-299");
+    scrolled.length = 0;
+
+    const reload = deferred<{ messages: typeof messages }>();
+    bridgeMock.listChatMessages.mockReturnValueOnce(reload.promise);
+    view.rerender(
+      <LinkedChatsPanel workspaceId="workspace-1" filePath="topic.md"
+        initialThread={{ ...searchThread }} initialFocusMessageId="message-0"
+        onError={() => undefined} />,
+    );
+    await waitFor(() => expect(bridgeMock.listChatMessages).toHaveBeenCalledTimes(2));
+    // A response can schedule a frame before React commits its message rows.
+    // Run that frame while the reload still shows its loading state.
+    await act(async () => {
+      reload.resolve({ messages });
+      await reload.promise;
+      await Promise.resolve();
+      await Promise.resolve();
+      frames.splice(0).forEach(frame => frame(1));
+    });
+    await screen.findByText("File message 299");
+    act(() => frames.splice(0).forEach(frame => frame(2)));
+    expect(scrolled).toContain("message-0");
+  });
+
   it("drops a deferred scroll after a newer thread open supersedes its request", async () => {
     const secondThread = {
       ...searchThread,
