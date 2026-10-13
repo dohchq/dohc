@@ -288,6 +288,38 @@ async function status(state: State) {
     shared: state.workspaces.filter(row => row.shareId).length, liveDocs: state.workspaces.reduce((sum, row) => sum + (row.shareId ? row.live.length : 0), 0) });
 }
 
+// Reads every workspace's relay log and compares it with the previous verify,
+// so a sleep or crash shows exactly which acknowledged writes came back.
+async function verify(state: State) {
+  const path = join(STATE_DIR, "verify.json");
+  const previous = existsSync(path) ? JSON.parse(readFileSync(path, "utf8")) as Record<string, { ops: number; lastSeq: number }> : {};
+  const current: Record<string, { ops: number; lastSeq: number; status: number }> = {};
+  for (const workspace of state.workspaces) {
+    const owner = state.accounts.find(row => row.email === workspace.owner)!;
+    let since = 0, ops = 0, status = 200;
+    // Reads must present the workspace's replication identity, which bootstrap reports.
+    const bootstrap = await call(`/sync/${workspace.id}/bootstrap`, { token: owner.token });
+    const identity = bootstrap.ok ? await bootstrap.json() as { replicationEpoch: string | null; streamIdentity: string | null } : null;
+    if (!bootstrap.ok) await bootstrap.body?.cancel();
+    const query = identity?.replicationEpoch && identity.streamIdentity
+      ? `&replicationEpoch=${encodeURIComponent(identity.replicationEpoch)}&streamIdentity=${encodeURIComponent(identity.streamIdentity)}` : "";
+    for (;;) {
+      const response = await call(`/sync/${workspace.id}/log?since=${since}&limit=500${query}`, { token: owner.token });
+      status = response.status;
+      if (!response.ok) { await response.body?.cancel(); break; }
+      const page = await response.json() as { ops: unknown[]; nextCursor: number; hasMore: boolean };
+      ops += page.ops.length; since = page.nextCursor;
+      if (!page.hasMore) break;
+    }
+    current[workspace.id] = { ops, lastSeq: since, status };
+  }
+  const changed = Object.entries(current).filter(([id, row]) => previous[id] && (row.ops !== previous[id]!.ops || row.status !== 200));
+  writeFileSync(path, JSON.stringify(current, null, 2));
+  log("verify", { workspaces: Object.keys(current).length, ops: Object.values(current).reduce((sum, row) => sum + row.ops, 0),
+    missing: Object.values(current).filter(row => row.status !== 200).length, compared: Object.keys(previous).length,
+    changed: changed.map(([id, row]) => ({ id, before: previous[id], after: row })) });
+}
+
 const [command, ...args] = process.argv.slice(2);
 const numbers = args.map(Number);
 const state = load();
@@ -297,6 +329,7 @@ const commands: Record<string, () => Promise<void>> = {
   share: () => share(state, numbers[0] ?? 16),
   edit: () => edit(state, numbers[0] ?? 8, numbers[1] ?? 2, numbers[2] ?? 60),
   status: () => status(state),
+  verify: () => verify(state),
 };
 const run = command ? commands[command] : undefined;
 if (!run) throw new Error(`Use one of: ${Object.keys(commands).join(", ")}.`);

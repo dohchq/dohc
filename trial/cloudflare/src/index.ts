@@ -45,7 +45,16 @@ class TrialCell extends Container<Env> {
     };
   }
 
+  // Requests this object forwarded since it last started, by caller and path shape.
+  // Tail sampling drops events under load; this count does not.
+  private requests: Record<string, number> = {};
+  private countingSince = Date.now();
+
   override async fetch(request: Request): Promise<Response> {
+    const caller = /ureq/i.test(request.headers.get("user-agent") ?? "") ? "engine" : "client";
+    const shape = new URL(request.url).pathname.replace(/[0-9a-f]{8}-[0-9a-f-]{27}/gi, "<id>").replace(/\/blobs\/.*/, "/blobs/*");
+    const key = `${caller} ${request.method} ${shape}`;
+    this.requests[key] = (this.requests[key] ?? 0) + 1;
     if (!this.ctx.container?.running || (await this.getState()).status !== "healthy") {
       const startedAt = Date.now();
       await this.startAndWaitForPorts(PORT, { portReadyTimeoutMS: START_TIMEOUT_MS, abort: request.signal });
@@ -78,7 +87,8 @@ class TrialCell extends Container<Env> {
   async trialControl(action: string): Promise<unknown> {
     if (action === "stop") await this.stop();
     else if (action === "kill") await this.destroy();
-    return { saved: await this.savedGeneration(), state: await this.getState() };
+    if (action === "reset") { this.requests = {}; this.countingSince = Date.now(); }
+    return { saved: await this.savedGeneration(), state: await this.getState(), countingMs: Date.now() - this.countingSince, requests: this.requests };
   }
 }
 
@@ -215,7 +225,7 @@ export default {
     const cells = env.CELL.jurisdiction("eu"), workspaces = env.WORKSPACE.jurisdiction("eu");
     const home = getContainer(cells, "cell-1");
     // Trial controls talk to a Durable Object without waking its container.
-    const control = /^\/__trial\/control\/(stop|kill|state)(?:\/([0-9a-f-]{36}))?$/.exec(url.pathname);
+    const control = /^\/__trial\/control\/(stop|kill|state|reset)(?:\/([0-9a-f-]{36}))?$/.exec(url.pathname);
     if (control && request.method === "POST") {
       const target = control[2] ? getContainer(workspaces, control[2]) : home;
       return Response.json(await target.trialControl(control[1]!));
