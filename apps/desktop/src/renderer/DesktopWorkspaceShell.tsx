@@ -21,6 +21,7 @@ import {
   useState,
 } from "react";
 import type {
+  CaptureFileHold,
   ResolveAutomationControlsResult,
   ChatFileMentionRecord,
   ChatThreadRecord,
@@ -2635,16 +2636,16 @@ export function DesktopWorkspaceShell(props: {
     reportShellError,
     openRecovery: openCaptureRecovery,
   });
-  useCaptureHoldNotices({ workspaceId, heldFiles: syncStatus?.heldFiles, show: showCaptureHolds, reportShellError });
+  const [heldEvent, setHeldEvent] = useState<{ admission: typeof workspaceAdmission; files: CaptureFileHold[] } | null>(null);
+  useCaptureHoldNotices({ workspaceId,
+    heldFiles: heldEvent?.admission === workspaceAdmission ? heldEvent.files : syncStatus?.heldFiles,
+    show: showCaptureHolds, reportShellError, reportShellFailure });
   useEffect(() => {
-    if (!workspaceIsReady) return;
     return bridge().onCaptureHolds(event => {
       if (event.workspaceId !== workspaceId || workspaceAdmission.superseded) return;
-      const status = syncStatusLane.latest();
-      // The poll's answer outranks status reads already in flight.
-      if (status) syncStatusLane.set({ ...status, heldFiles: event.heldFiles });
+      setHeldEvent(current => workspaceAdmission.superseded ? current : { admission: workspaceAdmission, files: event.heldFiles });
     });
-  }, [workspaceId, workspaceIsReady, workspaceAdmission, syncStatusLane]);
+  }, [workspaceId, workspaceAdmission]);
   // Restore resolves this change's notice, including a Copy fallback that
   // the engine no longer lists.
   const onHistoryRestored = useCallback((momentId?: string) => {

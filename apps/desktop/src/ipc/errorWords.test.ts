@@ -1,9 +1,4 @@
 import { ReservedWorkspaceIdError } from "@dohc/workspace-core";
-
-it("explains the held-file live-open refusal after Electron serializes it", () => {
-  const error = new Error("Error invoking remote method 'desktop:engine-ydoc-open': DaemonRefusalError [CONFLICT]: capture-file-held: notes/held.md");
-  expect(readError(error).words).toBe('dohc cannot read the outside edit to "notes/held.md". This file is still on this computer. Edit it in another editor, then try again.');
-});
 import { RelayUnauthorizedError, RelayUnreachableError, SharedFileReadOnlyError, ShareUnavailableError } from "@dohc/workspace-contracts/relay";
 import { readFileSync } from "node:fs";
 import { PersistentRuntimeError } from "@dohc/app-backend-runtime/persistent";
@@ -26,6 +21,11 @@ import {
   shouldRecheckShareAccess,
   withErrorWords,
 } from "./errorWords";
+
+it("explains the held-file live-open refusal after Electron serializes it", () => {
+  const error = new Error("Error invoking remote method 'desktop:engine-ydoc-open': DaemonRefusalError [CONFLICT]: capture-file-held: notes/held.md");
+  expect(readError(error).words).toBe('dohc cannot open "notes/held.md" for live editing. It cannot represent part of the file, such as a very deeply nested quote. The file is unchanged on this computer. Change that part in another editor.');
+});
 
 // What the renderer receives when a main-process handler rejects: Electron
 // sends `error.toString()` and prefixes the channel.

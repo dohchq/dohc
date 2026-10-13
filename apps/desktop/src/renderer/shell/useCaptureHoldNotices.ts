@@ -5,7 +5,7 @@ import { useRequestSequence } from "../useRequestSequence";
 import type { useShellError } from "./useShellError";
 
 export function captureHoldMessage(path: string): string {
-  return `dohc did not record the outside edit to "${path}". This file is still on this computer. Edit it in another editor so dohc can read it, or choose Try again.`;
+  return `dohc did not record the outside edit to "${path}". It cannot represent part of the file, such as a very deeply nested quote. The file is unchanged on this computer. Change that part in another editor.`;
 }
 
 export function useCaptureHoldNotices(input: {
@@ -13,26 +13,35 @@ export function useCaptureHoldNotices(input: {
   heldFiles: readonly CaptureFileHold[] | undefined;
   show: ReturnType<typeof useShellError>["showCaptureHolds"];
   reportShellError: ReturnType<typeof useShellError>["reportShellError"];
+  reportShellFailure: ReturnType<typeof useShellError>["reportShellFailure"];
 }) {
   const latest = useRef(input);
   latest.current = input;
   const requests = useRequestSequence([input.workspaceId]);
   const retry = useCallback(async (path: string) => {
     const workspaceId = input.workspaceId;
-    const token = requests.next();
+    const token = requests.current();
     const current = () => requests.isCurrent(token) && latest.current.workspaceId === workspaceId;
     try {
       const result = await bridge().retryHeldCapture({ workspaceId, path });
       if (!current()) return;
-      publish(result.heldFiles);
       if (result.degraded) {
         latest.current.reportShellError("dohc could not record outside edits. Reopen the workspace and try again.", undefined, () => void retry(path));
+      } else if (result.heldFiles.some(file => file.path === path && file.workspaceId === workspaceId) &&
+        latest.current.heldFiles?.some(file => file.path === path && file.workspaceId === workspaceId)) {
+        reportHeld(path);
       }
     } catch (error) {
       if (!current()) return;
-      latest.current.reportShellError(captureHoldMessage(path), error, () => void retry(path), "capture-held", `capture-held:${path}`);
+      reportHeld(path, error);
     }
   }, [input.workspaceId, requests]);
+
+  function reportHeld(path: string, cause?: unknown) {
+    latest.current.reportShellFailure({ title: "Outside edit not recorded", tone: "warning",
+      message: captureHoldMessage(path), cause, details: [["File", path, path.length]],
+      retry: () => void retry(path), kind: "capture-held", identity: `capture-held:${path}` });
+  }
 
   function publish(files: readonly CaptureFileHold[]) {
     latest.current.show(files.filter(file => file.workspaceId === input.workspaceId).map(file => ({
@@ -43,8 +52,6 @@ export function useCaptureHoldNotices(input: {
   }
   useEffect(() => {
     if (input.heldFiles === undefined) return;
-    // A newer status supersedes a retry already on its way.
-    requests.next();
     publish(input.heldFiles);
   }, [input.workspaceId, input.heldFiles, requests, input.show]);
 }

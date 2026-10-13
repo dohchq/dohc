@@ -127,7 +127,6 @@
   "share.capture.notice.dismiss",
   "document.save.retry",
   "capture.recovery.read",
-  "capture.held.retry",
   "capture.recovery.clear",
   "access.object.read",
   "access.sharing.read",
@@ -144,5 +143,6 @@
   "share.copy.read",
   "document.typing.recovery",
   "app.recognition.read",
-  "device.motion.read"
+  "device.motion.read",
+  "capture.held.retry"
 ]

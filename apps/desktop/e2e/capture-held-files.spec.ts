@@ -38,6 +38,7 @@ test("a real daemon holds a deep quote, shows its notice, and clears it after an
     const toast = page.getByTestId("workspace-shell-notice").filter({ hasText: "Outside edit not recorded" });
     await expect(toast).toHaveCount(1);
     await expect(toast).toContainText('dohc did not record the outside edit to "held.md".');
+    await expect(toast).toContainText("It cannot represent part of the file, such as a very deeply nested quote.");
     expect(await readFile(join(temp.rootPath, "held.md"), "utf8")).toBe(deep);
     for (const theme of ["light", "dark"] as const) {
       await page.evaluate(value => document.documentElement.setAttribute("data-theme", value), theme);
@@ -55,6 +56,7 @@ test("a real daemon holds a deep quote, shows its notice, and clears it after an
     await expect(file).toBeFocused();
     await page.keyboard.press("Enter");
     await expect(page.getByTestId("engine-may-hold-document-notice")).toContainText('dohc cannot open "held.md" for live editing');
+    await expect(page.getByTestId("engine-may-hold-document-notice")).toContainText("It cannot represent part of the file");
     await expect(page.locator('[data-testid="markdown-editor"][contenteditable="true"]')).toHaveCount(0);
     const notices = page.getByTestId("notice-center-toggle");
     for (let i = 0; i < 100 && !await notices.evaluate(node => node === document.activeElement); i++) await page.keyboard.press("Tab");

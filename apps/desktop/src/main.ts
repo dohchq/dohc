@@ -2351,6 +2351,7 @@ function recoverOutageTyping(workspace: CreatedWorkspace & {attachmentId: symbol
 const workspaceActivity = createWorkspaceActivity(notifyRenderer, {
   onHeldFiles: (workspaceId, heldFiles) => {
     for (const win of BrowserWindow.getAllWindows()) {
+      if (win.isDestroyed()) continue;
       if (rendererWorkspaceSessions.current(win.webContents)?.workspaceId === workspaceId) {
         win.webContents.send(CHANNELS.captureHolds, { workspaceId, heldFiles });
       }

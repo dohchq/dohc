@@ -284,6 +284,7 @@ export function useShellError(workspaceId: string) {
   const reportShellFailure = useCallback(
     (failure: {
       title?: string;
+      tone?: ShellError["tone"];
       repeat?: boolean;
       message: string;
       cause?: unknown;
@@ -302,6 +303,7 @@ export function useShellError(workspaceId: string) {
       ];
       push({
         ...(failure.title ? { title: failure.title } : {}),
+        ...(failure.tone ? { tone: failure.tone } : {}),
         message: shown.words ?? UNKNOWN_ERROR_WORDS,
         retry: failure.retry ?? null,
         ...(details.length ? { details } : {}),

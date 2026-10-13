@@ -23,6 +23,6 @@ export async function flushDatasetSourceCapture(
 export function assertSourcePathsNotHeld(files: readonly { path: string }[], paths: readonly string[]): void {
   const held = files.find(file => paths.includes(file.path));
   if (held) {
-    throw new Error(`dohc cannot use the content in ${held.path}. The file is still on this computer. Edit it in another editor.`);
+    throw new Error(`dohc cannot use "${held.path}" for this change. It cannot represent part of the file, such as a very deeply nested quote. The file is unchanged on this computer. Change that part in another editor.`);
   }
 }

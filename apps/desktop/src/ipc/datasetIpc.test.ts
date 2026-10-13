@@ -318,7 +318,7 @@ it.each(["data/dataset.json", "data/schema.sql", "data/operations.js"])("refuses
     await adapter.captureSourceMetadata({ workspaceId: "workspace", versionId: "main", paths: ["data/dataset.json", "data/schema.sql", "data/operations.js"], bounds: { maxInputFiles: 3, maxInputBytes: 4096 }, signal: f.abort.signal });
     throw Error("review read held source");
   } });
-  await expect(f.handler("window", { workspaceId: "workspace", action: "prepare", descriptorPath: "data/dataset.json" })).rejects.toThrow(`dohc cannot use the content in ${path}`);
+  await expect(f.handler("window", { workspaceId: "workspace", action: "prepare", descriptorPath: "data/dataset.json" })).rejects.toThrow(`dohc cannot use "${path}" for this change. It cannot represent part of the file`);
   expect(f.sourceRequests.filter(request => request.method === "versionedText.captureSources")).toHaveLength(0);
 });
 

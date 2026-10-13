@@ -10,14 +10,14 @@ import type { CaptureFileHold, SyncStatusResult } from "../ipc/bridgeContract";
 const held = { workspaceId: WORKSPACE.workspaceId, sourceVersionId: "main", objectId: "held-object", path: "notes/held.md",
   observedSha256: "digest", observedSize: 4, reason: "ydoc-resolution-not-representable" as const,
   observedAtMs: 1, attemptCount: 1, retryRequested: false };
-const message = 'dohc did not record the outside edit to "notes/held.md". This file is still on this computer. Edit it in another editor so dohc can read it, or choose Try again.';
+const message = 'dohc did not record the outside edit to "notes/held.md". It cannot represent part of the file, such as a very deeply nested quote. The file is unchanged on this computer. Change that part in another editor.';
 
 function fixture() {
   const bridge = makeBridge(Promise.resolve(null));
   let files = [held];
   const original = bridge.getSyncStatus.getMockImplementation()!;
   bridge.getSyncStatus.mockImplementation(async () => ({ ...await original(), heldFiles: files }));
-  const retryHeldCapture = vi.fn(async () => ({ settled: true, running: true, degraded: false, retried: true, heldFiles: files }));
+  const retryHeldCapture = vi.fn(async () => { listener?.({ workspaceId: WORKSPACE.workspaceId, heldFiles: files }); return { settled: true, running: true, degraded: false, retried: true, heldFiles: files }; });
   Object.assign(bridge, { retryHeldCapture });
   let listener: ((event: { workspaceId: string; heldFiles: CaptureFileHold[] }) => void) | undefined;
   Object.assign(bridge, { onCaptureHolds: vi.fn((callback: typeof listener) => {
@@ -42,7 +42,7 @@ it("publishes idle hold changes without another status read and ignores another 
   await waitFor(() => expect(screen.queryByText(message)).toBeNull());
 });
 
-it("keeps a newer held event when an older status read answers", async () => {
+it("lands an in-flight status read without replacing a newer held event", async () => {
   const f = fixture(); f.clear(); renderShell(f.bridge);
   await waitFor(() => expect(f.bridge.getCaptureRecoveryStatus).toHaveBeenCalled());
   const current = await f.bridge.getSyncStatus();
@@ -53,8 +53,24 @@ it("keeps a newer held event when an older status read answers", async () => {
   await waitFor(() => expect(f.bridge.getSyncStatus.mock.calls.length).toBeGreaterThan(calls));
   act(() => f.emit([held]));
   await screen.findByText(message);
-  await act(async () => stale.resolve({ ...current, heldFiles: [] }));
-  expect(screen.getByText(message)).toBeTruthy();
+  await act(async () => stale.resolve({ ...current, heldFiles: [], state: "sync-failed",
+    syncFailure: { cause: "server-unreachable", detail: "offline", sinceMs: 1, attempts: 1 } }));
+  const user = userEvent.setup();
+  await user.click(screen.getByTestId("notice-center-toggle"));
+  expect(await screen.findByText("dohc could not reach the server.")).toBeTruthy();
+  expect(screen.getAllByText(message).length).toBeGreaterThan(0);
+});
+
+it("keeps a hold event received while the workspace is opening", async () => {
+  const f = fixture(); f.clear();
+  const opening = deferred<SyncStatusResult>();
+  f.bridge.openWorkspace.mockImplementationOnce(() => opening.promise);
+  renderShell(f.bridge);
+  await waitFor(() => expect(f.bridge.openWorkspace).toHaveBeenCalled());
+  act(() => f.emit([held]));
+  const current = await f.bridge.getSyncStatus();
+  await act(async () => opening.resolve(current));
+  await screen.findByText(message);
 });
 
 it("keeps one row per held path and offers each toast once in the existing queue", async () => {
@@ -125,7 +141,7 @@ it.each([{ staleFiles: [] }, { staleFiles: [held] }])("ignores a stale status co
   const other = { ...held, workspaceId: OTHER_WORKSPACE.workspaceId, path: "other.md" };
   f.set([other]);
   view.rerender(<DesktopWorkspaceShell workspace={OTHER_WORKSPACE} workspaces={[WORKSPACE, OTHER_WORKSPACE]} {...shellBootstrapProps(f.bridge)} onSwitchWorkspace={() => {}} />);
-  await screen.findByText('dohc did not record the outside edit to "other.md". This file is still on this computer. Edit it in another editor so dohc can read it, or choose Try again.');
+  await screen.findByText('dohc did not record the outside edit to "other.md". It cannot represent part of the file, such as a very deeply nested quote. The file is unchanged on this computer. Change that part in another editor.');
   const current = await f.bridge.getSyncStatus();
   await act(async () => stale.resolve({ ...current, heldFiles: staleFiles }));
   expect(screen.queryByText(message)).toBeNull();
