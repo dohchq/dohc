@@ -1,13 +1,15 @@
 import {createWorkspaceReplicationRoutes} from "./workspaceReplicationRoutes";
 import {createWorkspaceBlobRoutes} from "./workspaceBlobRoutes";
 import type {SyncRelayLogRow, SyncRelayStorage} from "./storage";
-import {errorResponse, notFound} from "./errors";
+import {badRequest, errorResponse, notFound} from "./errors";
+import {jsonResponse} from "@dohc/service-http";
+import {REPLICA_LIVE_JOURNAL_MAX_ROWS} from "./storage/liveUpdateJournal";
 
 /**
- * Ordinary replication for a credential this server derived for one of its
- * own replicas: a service host's, or an automation replica's. `authorize`
- * answers the workspace owner the credential acts for, or null. It enters
- * only ordinary replication, never an account resolver or share route.
+ * Replication for a credential this server derived for its own replica.
+ * `authorize` answers the workspace owner the credential acts for, or null.
+ * Workspace replicas can also read the accepted live journal. Credentials
+ * never enter an account resolver or share route.
  */
 export function createServiceHostReplication(options: {
   storage: SyncRelayStorage;
@@ -15,6 +17,8 @@ export function createServiceHostReplication(options: {
   authorize(input: {workspaceId: string; bearer: string; method: string; pathname: string}): string | null;
   revalidate?: (input: {workspaceId: string; bearer: string; method: string; pathname: string}) => string | null;
   onLogRead?: (input: {workspaceId: string; bearer: string}, rows: readonly SyncRelayLogRow[]) => void;
+  // Only the workspace replica principal enables this route.
+  replicaLiveJournal?: boolean;
 }) {
   // It passes no session reauthentication, so a held log read answers at once.
   const replication = createWorkspaceReplicationRoutes(options.storage, Date.now, {wakeLog() {}, wait: async () => {}},
@@ -33,6 +37,15 @@ export function createServiceHostReplication(options: {
       if (!ownerUserId) throw notFound();
       const guard = () => {request.signal.throwIfAborted(); if ((options.revalidate ?? options.authorize)(credential) !== ownerUserId) throw notFound();};
       const actor = {userId: ownerUserId};
+      if (parts[3] === "live-journal" && parts.length === 4) {
+        if (!options.replicaLiveJournal || request.method !== "GET") throw notFound();
+        const after = replicaJournalQueryInteger(url.searchParams, "after", 0, 0);
+        const limit = Math.min(replicaJournalQueryInteger(url.searchParams, "limit", 100, 1), REPLICA_LIVE_JOURNAL_MAX_ROWS);
+        guard();
+        const page = await options.storage.readReplicaLiveJournal({workspaceId, after, limit, signal: request.signal});
+        guard();
+        return jsonResponse({ok: true, ...page});
+      }
       if (parts[3] === "bootstrap") return await replication.respondToWorkspaceReplication(request, {route: "bootstrap", workspaceId}, actor, guard);
       if (parts[3] === "log" && parts.length === 4) return await replication.respondToWorkspaceReplication(request, {route: "log", workspaceId}, actor, guard);
       if (parts[3] === "log" && parts.length === 6) return await replication.respondToWorkspaceReplication(request,
@@ -42,4 +55,14 @@ export function createServiceHostReplication(options: {
       throw notFound();
     } catch (error) {return errorResponse(error);}
   };
+}
+
+function replicaJournalQueryInteger(query: URLSearchParams, name: string, fallback: number, minimum: number): number {
+  const values = query.getAll(name);
+  if (values.length === 0) return fallback;
+  const value = values[0]!;
+  if (values.length !== 1 || !/^(?:0|[1-9]\d*)$/.test(value)) throw badRequest(`${name} must be an integer`);
+  const integer = Number(value);
+  if (!Number.isSafeInteger(integer) || integer < minimum) throw badRequest(`${name} is outside the page bounds`);
+  return integer;
 }

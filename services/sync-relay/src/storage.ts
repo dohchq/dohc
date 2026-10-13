@@ -469,6 +469,10 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     return liveUpdateJournalStorage.readCommittedLiveUpdate(this, input);
   }
 
+  readReplicaLiveJournal(input: liveUpdateJournalStorage.ReplicaLiveJournalRead): Promise<liveUpdateJournalStorage.ReplicaLiveJournalPage> {
+    return liveUpdateJournalStorage.readReplicaLiveJournal(this, input);
+  }
+
   createLiveCommittedDeliveryStore(history: LiveJournalHistoryAuthority, activation?: ServiceActivationAccess): LiveCommittedDeliveryStore {
     return new LiveCommittedDeliveryStore(this, history, activation);
   }
