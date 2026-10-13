@@ -53,7 +53,9 @@ export async function prepareLane({ lane, repo, head, signal }) {
   git(["clean", "-ffdx", "--exclude=node_modules", "--exclude=target"], lane);
   if (git(["rev-parse", "HEAD"], lane) !== head) throw new Error(`The lane did not check out ${head}.`);
   if (git(["status", "--porcelain"], lane) !== "") throw new Error("The lane has changes after checkout and clean.");
-  if (!existsSync(join(lane, "node_modules", "pnpm"))) await run(process.execPath, ["scripts/verification/setup.mjs"], { cwd: lane, signal, quietStdout: true, timeoutMs: 30 * 60_000 });
+  // The verifier runs pnpm from the lane's own install (process.mjs resolves it from apps/desktop) and
+  // installs the head's dependencies itself, so only a lane that cannot resolve pnpm is bootstrapped.
+  if (!existsSync(join(lane, "apps", "desktop", "node_modules", "pnpm", "package.json"))) await run(process.execPath, ["scripts/verification/setup.mjs"], { cwd: lane, signal, quietStdout: true, timeoutMs: 30 * 60_000 });
 }
 
 export async function dockerResponds(command = run) {
