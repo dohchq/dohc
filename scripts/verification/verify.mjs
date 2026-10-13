@@ -16,6 +16,25 @@ import { admissionPreflight, installedDependenciesMatch } from "./admission.mjs"
 import { readGit } from "../../tools/rust-engine-program/git-read.mjs";
 import { clippy, fmtCheck, nextest } from "../../tools/rust-engine-program/gate-commands.mjs";
 import { finishRustEvidence, refreshRustReuse, rustIdentity } from "./rust-reuse.mjs";
+import { queueRoot, verifyThroughQueue } from "./queue.mjs";
+
+// Windows reports a console program that could not start as STATUS_DLL_INIT_FAILED.
+const startupFailures = new Set([3221225794, -1073741502]);
+const environmentCodes = new Set(["ENOENT", "EACCES", "EPERM", "ETIMEDOUT", "EMFILE", "ENFILE", "ENOSPC", "EBUSY", "EAGAIN"]);
+// Phases that test the host, not the change. A failure there says nothing about the commit.
+const hostPhases = new Set(["selection", "checkout", "preflight", "preflight:admission", "source-fingerprints:start", "electron-install", "doctor", "postgres-start", "browser-install"]);
+
+/** Whether a failure is the change's fault ("check") or the machine's ("environment"). The queue retries only the second. */
+export function failureKind(error) {
+  const text = `${error?.message ?? ""}\n${String(error?.stderr ?? "").slice(-65536)}\n${String(error?.stdout ?? "").slice(-65536)}`;
+  if (error?.environment) return { kind: "environment", cause: error.environment };
+  if (environmentCodes.has(error?.code)) return { kind: "environment", cause: error.code };
+  if (startupFailures.has(error?.exitCode) || startupFailures.has(error?.status) || /3221225794|0xC0000142/u.test(text)) return { kind: "environment", cause: "a program could not start (0xC0000142)" };
+  if (/ENOSPC|no space left on device|not enough space on the disk|refusing to run the gate: [\d.]+ GB free/iu.test(text)) return { kind: "environment", cause: "disk space" };
+  if (hostPhases.has(error?.step)) return { kind: "environment", cause: error.step };
+  if (error?.step === "install" && !/ERR_PNPM_(OUTDATED_LOCKFILE|LOCKFILE|PEER)/u.test(text)) return { kind: "environment", cause: "install" };
+  return { kind: "check", cause: error?.step ?? "verification" };
+}
 
 const require = createRequire(join(repoRoot, "apps/desktop/package.json"));
 export function desktopProofCommand(args, { platform = process.platform, env = process.env } = {}) {
@@ -81,7 +100,7 @@ export function readSelfHostNativeProof(output, executable, sha256) {
   return {path, executable, sha256, tests: {passed: tests.numPassedTests}};
 }
 
-export async function postgres(output, command = run, measure = (_name, action) => action()) {
+export async function postgres(output, command = run, measure = (_name, action) => action(), label = "inline") {
   const name = `dohc-verify-${randomUUID()}`;
   let id;
   let cancellation;
@@ -105,7 +124,7 @@ export async function postgres(output, command = run, measure = (_name, action) 
   listen();
   try {
     // A fresh postgres:17-alpine needed 54 s for its first initdb on Windows. Failed checks inside the start period do not count toward the retries.
-    const result = await command("docker", ["run", "--detach", "--name", name, "--publish", "127.0.0.1::5432", "--env", "POSTGRES_USER=dohc", "--env", "POSTGRES_PASSWORD=dohc", "--env", "POSTGRES_DB=dohc", "--health-cmd", "pg_isready -h 127.0.0.1 -U dohc -d dohc", "--health-interval", "1s", "--health-retries", "30", "--health-start-period", "90s", "--health-start-interval", "1s", "postgres:17-alpine"], { log: join(output, "postgres-start.log"), timeoutMs: 300_000 });
+    const result = await command("docker", ["run", "--detach", "--name", name, "--label", `dohc.verification=${label}`, "--publish", "127.0.0.1::5432", "--env", "POSTGRES_USER=dohc", "--env", "POSTGRES_PASSWORD=dohc", "--env", "POSTGRES_DB=dohc", "--health-cmd", "pg_isready -h 127.0.0.1 -U dohc -d dohc", "--health-interval", "1s", "--health-retries", "30", "--health-start-period", "90s", "--health-start-interval", "1s", "postgres:17-alpine"], { log: join(output, "postgres-start.log"), timeoutMs: 300_000 });
     const returnedId = result.stdout.trim();
     if (!/^[a-f0-9]{64}$/.test(returnedId)) throw new Error(`Docker returned no container ID. Inspect container ${name}.`);
     id = returnedId;
@@ -147,6 +166,10 @@ export async function verify(args) {
   const jobIndex = args.indexOf("--job");
   const job = jobIndex < 0 ? null : args[jobIndex + 1];
   const full = args.includes("--full");
+  const detach = args.includes("--detach");
+  const inline = args.includes("--inline");
+  // The queue service runs this verifier in its lane with a grant; it must not queue again.
+  const grant = process.env.DOHC_VERIFICATION_GRANT ? JSON.parse(process.env.DOHC_VERIFICATION_GRANT) : null;
   const reuseIndex = args.indexOf("--reuse-rust");
   const reuseRust = reuseIndex < 0 ? null : args[reuseIndex + 1];
   if (reuseIndex >= 0 && (mode !== "pr" || !reuseRust || reuseRust.startsWith("--") || job === "js")) {
@@ -173,9 +196,9 @@ export async function verify(args) {
     return;
   }
   let treeState;
-  const output = join(repoRoot, ".agent-artifacts/verification", `${new Date().toISOString().replaceAll(":", "-")}-${randomUUID().slice(0, 8)}`);
+  const output = grant ? process.env.DOHC_VERIFICATION_OUTPUT : join(repoRoot, ".agent-artifacts/verification", `${new Date().toISOString().replaceAll(":", "-")}-${randomUUID().slice(0, 8)}`);
   mkdirSync(output, { recursive: true });
-  const report = { version: 1, mode, scope: job ?? "all", full, root: repoRoot, base, ...total, steps: [], timings: [], treeReadings: [], output, verdict: "RUNNING" };
+  const report = { version: 1, mode, scope: job ?? "all", full, root: repoRoot, base, ...(grant ? { grant } : {}), ...total, steps: [], timings: [], treeReadings: [], output, verdict: "RUNNING" };
   const reportPath = join(output, "result.json");
   const save = () => writeFileSync(reportPath, JSON.stringify(report, null, 2) + "\n");
   const measure = (name, action) => {
@@ -183,7 +206,7 @@ export async function verify(args) {
     checkoutOwner?.update?.({phase: name});
     const row = {name};
     report.timings.push(row);
-    return timed(row, action, save);
+    return timed(row, action, save).catch(error => { if (error && typeof error === "object") error.step ??= name; throw error; });
   };
   let startSource = {};
   function recordTree(name) {
@@ -215,7 +238,7 @@ export async function verify(args) {
     lane?.update?.({phase: row.name});
     checkoutOwner?.update?.({phase: row.name});
     report.steps.push(row); save();
-    const result = await timed(row, action, save);
+    const result = await timed(row, action, save).catch(error => { if (error && typeof error === "object") error.step ??= row.name; throw error; });
     await checkTree(row.name);
     return result;
   }
@@ -242,6 +265,9 @@ export async function verify(args) {
       metadata: {purpose: `PR verification (${report.scope})`, checkout: repoRoot, commit: report.commit, phase: "selection"},
     }));
     if (mode === "pr" && report.dirty) throw new Error("Commit the worktree before running the PR gate.");
+    if (grant && (report.commit !== grant.head || report.baseCommit !== grant.base)) {
+      throw Object.assign(new Error(`The lane is at ${report.commit} against ${report.baseCommit}, not the granted ${grant.head} against ${grant.base}.`), { environment: "lane mismatch" });
+    }
     if (reuseRust && !gates.rust) throw new Error("--reuse-rust requires a selected Rust job. Use --job rust when needed.");
     if (mode === "pr" && !gates.js && !gates.rust) {
       report.reason = "No code gate applies to the changed files.";
@@ -256,18 +282,32 @@ export async function verify(args) {
       const preflight = () => admissionPreflight({rust: gates.rust, native, root: repoRoot, pins: require("js-yaml").load(workflow).env});
       await measure("preflight", preflight);
       // Checks that need no lane fail here, fastest first, instead of after the wait. The lane repeats them as evidence.
-      if (gates.rust && !reuseRust) await step("pre-queue-fmt", "cargo", fmtCheck);
-      if (gates.js && installedDependenciesMatch(repoRoot)) await step("pre-queue-typecheck", ...typecheck());
-      if (gates.rust && !reuseRust) await withBuildBudget(async env => {
+      if (!grant && gates.rust && !reuseRust) await step("pre-queue-fmt", "cargo", fmtCheck);
+      if (!grant && gates.js && installedDependenciesMatch(repoRoot)) await step("pre-queue-typecheck", ...typecheck());
+      if (!grant && gates.rust && !reuseRust) await withBuildBudget(async env => {
         await step("pre-queue-clippy", "cargo", clippy, env);
         await step("pre-queue-test-build", "cargo", [...nextest, "--no-run"], env);
       });
+      const queue = grant || inline ? null : queueRoot();
+      if (queue) {
+        // The service verifies the commit in its own checkout, so this checkout is free to change now.
+        checkoutOwner.release();
+        const branch = (() => { try { return git(["symbolic-ref", "-q", "HEAD"]); } catch { return null; } })();
+        const outcome = await measure("queue", () => verifyThroughQueue({ root: queue, detach, checkpoint: () => cancellation.checkpoint(), submission: {
+          head: report.commit, base: report.baseCommit, baseRef: base, scope: report.scope, full, reuseRust: reuseRust && resolve(reuseRust),
+          gates, branch, checkout: repoRoot, requester: { pid: process.pid } } }));
+        report.queue = outcome; save();
+        if (detach) { report.verdict = "QUEUED"; return report; }
+        if (outcome.verdict !== "PASS") throw Object.assign(new Error(outcome.reason ?? `The queued run ended ${outcome.state}.`), { queued: true });
+        report.verdict = "PASS";
+        return report;
+      }
       // Identify this process before publishing a ticket; no lookup may delay admission.
-      const tickets = resolveBuildBudget() ? ticketEvidence({output, checkout: repoRoot, commit: report.commit,
+      const tickets = !grant && resolveBuildBudget() ? ticketEvidence({output, checkout: repoRoot, commit: report.commit,
         producer: await measure("producer-identity", () => processIdentity()), persist: save}) : null;
       report.ticketEvidence = tickets?.record;
       let ticketCleanup;
-      try {
+      if (!grant) try {
         lane = await measure("queue", () => acquireVerificationSlot(process.env, {
           metadata: {purpose: "PR verification", checkout: repoRoot, commit: report.commit, phase: "admission"},
           observeTicket: tickets?.observe,
@@ -286,7 +326,7 @@ export async function verify(args) {
     if (desktop) await step("electron-install", process.execPath, ["apps/desktop/scripts/ensure-electron-installed.mjs"]);
     report.doctor = await measure("doctor", () => doctor({engine: native, desktop, browser: desktop})); save();
     await cancellation.checkpoint();
-    if (report.doctor.checks.some((check) => check.state === "FAIL")) throw new Error("Preflight failed. Read result.json and run pnpm setup:worktree.");
+    if (report.doctor.checks.some((check) => check.state === "FAIL")) throw Object.assign(new Error("Preflight failed. Read result.json and run pnpm setup:worktree."), { environment: "doctor" });
     await step("app-backend-runtime", ...pnpm(["--filter", "@dohc/app-backend-runtime", "build"]));
     const preparedOptions = {engineBinary: stagedEnginePath};
     if (desktop) {
@@ -355,7 +395,7 @@ export async function verify(args) {
         if (mode === "pr" && tags.required.some((tag) => !report.desktopProofs.some((title) => title.split(/\s+/u).includes(tag)))) throw new Error(`The desktop gate did not pass every required proof: ${tags.required.join(", ")}.`);
       }
       if (mode === "pr" && gates.js) {
-        database = await measure("postgres-start", () => postgres(output, run, measure));
+        database = await measure("postgres-start", () => postgres(output, run, measure, grant?.request ?? "inline"));
         report.postgres = { id: database.id }; save();
         const env = { ...process.env, POSTGRES_URL: database.url, DOHC_REQUIRE_POSTGRES: "1", DOHC_REQUIRE_ENGINE_E2E: "1", DOHC_TEST_ENGINE_BINARY: stagedEnginePath };
         await step("typecheck", ...typecheck(), env);
@@ -379,9 +419,13 @@ export async function verify(args) {
     if (desktop) await measure("prepared-build:finish", () => assertPrepared(preparedOptions));
     await checkTree("finish");
     report.verdict = "PASS";
+    // The verdict is on disk before teardown, so a hung cleanup cannot erase it.
+    save();
   } catch (error) {
     report.verdict = "FAIL"; report.error = error.message;
+    if (!error.queued) report.failure = failureKind(error);
     if (error.cleanupError) report.cleanupError = error.cleanupError;
+    save();
     throw error;
   }
   finally {
@@ -389,10 +433,14 @@ export async function verify(args) {
       lane?.update?.({phase: "cleanup"});
       checkoutOwner?.update?.({phase: "cleanup"});
       try { await database?.stop(); }
-      catch (error) { report.verdict = "FAIL"; report.cleanupError = error.message; process.exitCode = 1; }
+      catch (error) {
+        report.cleanupError = error.message;
+        // In the lane the service removes this request's labeled containers; elsewhere a leak fails the run.
+        if (!grant) { report.verdict = "FAIL"; process.exitCode = 1; }
+      }
       const interrupted = await cancellation.dispose();
       lane?.release();
-      if (interrupted) { report.verdict = "FAIL"; report.error ??= interrupted.message; }
+      if (interrupted) { report.verdict = "FAIL"; report.error ??= interrupted.message; report.failure ??= { kind: "environment", cause: "interrupted" }; }
       finishTiming(); Object.assign(report, total);
       if (originalRustIdentity && !interrupted && !report.rustError && !report.cleanupError) {
         try {
