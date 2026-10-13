@@ -530,7 +530,7 @@ function allowedKeys(method: string): readonly string[] {
     case CHATS_METHOD.threadStart:
       return [
         "channelId", "threadId", "messageId", "title", "lane", "authorKind", "authorDisplayName", "authorOwnerDisplayName",
-        "authorUserId", "origin", "body", "needsDecision", "options", "attachments", "automation", "nowMs",
+        "authorUserId", "authorActorKey", "origin", "body", "needsDecision", "options", "attachments", "automation", "nowMs",
       ];
     case CHATS_METHOD.threadCreate: return ["threadId", "title", "linkedFile", "nowMs"];
     case CHATS_METHOD.threadsListForFile: return ["objectId", "pageLimit", "cursor"];
@@ -545,7 +545,7 @@ function allowedKeys(method: string): readonly string[] {
     case CHATS_METHOD.messageSend:
       return [
         "threadId", "messageId", "authorKind", "authorDisplayName", "authorOwnerDisplayName", "authorUserId",
-        "parentMessageId", "origin", "body", "needsDecision", "options", "attachments", "automation", "nowMs",
+        "parentMessageId", "authorActorKey", "origin", "body", "needsDecision", "options", "attachments", "automation", "nowMs",
       ];
     case CHATS_METHOD.messagesList:
       return ["threadId", "limit", "afterMessageOrder"];
@@ -1472,6 +1472,8 @@ export class ChatsLoopbackEngine implements EngineTransport {
       if (authorKind === "human") throw new Error("invalid-sender");
       message.authorOwnerDisplayName = normalizeNonempty(ownerName, "invalid-sender");
     }
+    const authorActorKey = optionalString(params, "authorActorKey");
+    if (authorActorKey !== undefined) message.authorActorKey = authorActorKey;
     const authorUserId = optionalString(params, "authorUserId");
     const parentMessageId = optionalString(params, "parentMessageId");
     if (authorUserId !== undefined) message.authorUserId = authorUserId;

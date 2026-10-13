@@ -3236,6 +3236,12 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         sets_user_version: None,
     },
     Migration {
+        ordinal: 49,
+        id: "v2-local-chat-actor-key",
+        sql: "ALTER TABLE chat_messages ADD COLUMN author_actor_key TEXT CHECK (author_actor_key IS NULL OR json_valid(author_actor_key));",
+        sets_user_version: None,
+    },
+    Migration {
         ordinal: 50,
         id: "v2-retained-materialization-displacements",
         sql: V2_RETAINED_DISPLACEMENTS_DDL,
@@ -3981,6 +3987,10 @@ mod tests {
             (
                 "v2-capture-file-holds",
                 "e5326f922618067ec6dec0bed092a8ea98c929a101f5166e448f935cd8ac9dfc",
+            ),
+            (
+                "v2-local-chat-actor-key",
+                "f84d0497555ff288db36304ed0c4b41b7f61d1d7f10396b9fd08a61da0fc7219",
             ),
             (
                 "v2-retained-materialization-displacements",
