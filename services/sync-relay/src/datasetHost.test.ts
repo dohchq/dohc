@@ -145,6 +145,7 @@ it("charges only the current replay cache and retains retries across relay resta
     .mockImplementation(options => createSupervisor({...options, replayCacheMs: 60_000}));
   cleanups.push(async () => {replayInterval.mockRestore();});
   const f = await fixture(true); await f.activate();
+  expect(replayInterval).toHaveBeenCalled();
   const db = f.storage.db;
   const usage = () => Number(db.prepare("SELECT storage_bytes FROM sync_relay_dataset_usage WHERE workspace_id=? AND dataset_id=?")
     .get(scope.workspaceId, scope.datasetId)!.storage_bytes);
