@@ -316,7 +316,7 @@ it("enrolls a self-hosted document, resumes native activation, and publishes own
         sockets.push(socket); socket.on("error", () => undefined); socket.once("unexpected-response", (_request, response) => {response.resume(); socket.terminate();}); return socket as unknown as BrowserSocket;}});
     // The baseline named client sends no recording context.
     const manager = browserTransport();
-    const provider = manager.select({accountId: namedUser.id, workspaceId: "workspace", grantId: "grant", objectId}); providers.push(provider);
+    const provider = manager.select({accountId: namedUser.id, workspaceId: "named:grant", grantId: "grant", objectId}); providers.push(provider);
     await provider.reconnect(); await stateWhen(provider, state => state.status === "live");
     expect(yDocToMarkdown(provider.doc)).toBe(yDocToMarkdown(ownerDoc));
     const discovered = await fetch(`${relayUrl}/sync/workspace/live-host`, {headers: {authorization: `Bearer ${bearer}`}});
@@ -462,7 +462,7 @@ it("enrolls a self-hosted document, resumes native activation, and publishes own
     // A named recipient's agent, declared through the real browser transport.
     const agentProvider = browserTransport(() => ({kind: "account", accountId: namedUser.id,
       agent: {agentId: agent.agentId, agentName: agent.agentName, onBehalfOf: agent.onBehalfOf, depth: agent.depth}}))
-      .select({accountId: namedUser.id, workspaceId: "workspace", grantId: "grant", objectId});
+      .select({accountId: namedUser.id, workspaceId: "named:grant", grantId: "grant", objectId});
     providers.push(agentProvider);
     await agentProvider.reconnect(); await stateWhen(agentProvider, state => state.status === "live");
     const beforeAgentCursor = agentProvider.state().lastApplied?.journalCursor ?? 0;
