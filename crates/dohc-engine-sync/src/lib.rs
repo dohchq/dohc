@@ -113,7 +113,7 @@ pub use relay::{
     ShareReplicationEnvelope, ShareViewChangedPath, ShareViewPullOutcome, ShareViewRefusal,
     ShareViewRequest, ShareViewResponse, SharedChannelPullOutcome, SharedChannelPushOutcome,
     SharedChannelRejection, SharedChannelRequest, SharedChannelResponse, SyncPassOutcome,
-    collision_key, read_direct_write_status, read_record_creation_statuses,
+    collision_key, no_hosted_feed, read_direct_write_status, read_record_creation_statuses,
 };
 pub use router::{RoutedApply, apply_replication_envelope};
 pub use secret_apply::apply_secret_envelope;

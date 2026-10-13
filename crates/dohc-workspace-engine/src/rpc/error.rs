@@ -222,6 +222,10 @@ pub(super) fn map_runtime(error: RuntimeError) -> WireError {
         RuntimeError::Relay(RelayError::ShareReadOnly) => {
             return WireError::new(ErrorCode::InvalidParams, "share-read-only");
         }
+        // The caller matches the code prefix and shows the reason.
+        RuntimeError::Relay(RelayError::HostedRefusal(reason)) => {
+            return WireError::new(ErrorCode::InvalidParams, format!("invalid-input: {reason}"));
+        }
         RuntimeError::Relay(RelayError::ClaimRefused(reason)) => {
             let mut wire = map_runtime(RuntimeError::Relay((**reason).clone()));
             wire.message = "relay-claim-refused".to_owned();
@@ -376,7 +380,7 @@ fn map_relay_code(error: RelayError) -> ErrorCode {
         | RelayError::UnknownServerCode(_)
         | RelayError::HttpStatus(_)
         | RelayError::Local(_) => ErrorCode::Internal,
-        RelayError::BadRequest => ErrorCode::InvalidParams,
+        RelayError::BadRequest | RelayError::HostedRefusal(_) => ErrorCode::InvalidParams,
     }
 }
 

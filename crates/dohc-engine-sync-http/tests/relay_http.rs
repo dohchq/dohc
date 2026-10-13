@@ -9,12 +9,12 @@ use std::time::Duration;
 use dohc_engine_storage::{EngineStore, NoFaults, StorageError, TxnOutcome, hex_sha256};
 use dohc_engine_sync::{
     BlobDownloadBatchRequest, BlobDownloadSpec, BlobHaveRequest, BlobKind, BlobUploadRequest,
-    ClaimRequest, EpochRequest, KeyEnvelopeDownloadRequest, KeyEnvelopeRequest,
-    LogCoordinateRequest, LogCoordinateResponse, NoLiveLeases, ObservedBytes, ProbeRequest,
-    PullRequest, RelayError, RelaySyncClient, RelayTransport, ReplicationEnvelope,
-    ShareBlobRequest, ShareLogPushRequest, ShareReplicationEnvelope, ShareViewRequest,
-    SharedChannelRequest, SyncPassOutcome, blob_ceiling, journal_local_replication_op,
-    read_pushed_seq, read_relay_cursor,
+    ClaimRequest, EpochRequest, HostedPullRequest, HostedPullResponse, HostedScope,
+    HostedScopeDocument, KeyEnvelopeDownloadRequest, KeyEnvelopeRequest, LogCoordinateRequest,
+    LogCoordinateResponse, NoLiveLeases, ObservedBytes, ProbeRequest, PullRequest, RelayError,
+    RelaySyncClient, RelayTransport, ReplicationEnvelope, ShareBlobRequest, ShareLogPushRequest,
+    ShareReplicationEnvelope, ShareViewRequest, SharedChannelRequest, SyncPassOutcome,
+    blob_ceiling, journal_local_replication_op, read_pushed_seq, read_relay_cursor,
 };
 use dohc_engine_sync_http::HttpRelayTransport;
 use dohc_engine_testkit::open_store;
@@ -1804,4 +1804,304 @@ fn shared_channel_pull_requires_authenticated_origin_metadata() {
         ops: Vec::new(),
     });
     assert!(matches!(result, Err(RelayError::InvalidResponse)));
+}
+
+/// The scope the fake hosted feed below holds.
+const SCOPE_TOKEN: &str = "scope-2";
+
+fn query(target: &str, key: &str) -> Vec<String> {
+    target
+        .split_once('?')
+        .map_or("", |(_, query)| query)
+        .split('&')
+        .filter_map(|part| part.split_once('='))
+        .filter(|(name, _)| *name == key)
+        .map(|(_, value)| value.to_owned())
+        .collect()
+}
+
+fn hosted_scope() -> Value {
+    json!({"token": SCOPE_TOKEN, "documents": [{"objectId": "doc-a", "path": "a.md"}]})
+}
+
+/// `GET /hosted/log` as the relay's scoped feed answers it: a request without
+/// the current scope learns it before any row, and a backfill of a document
+/// outside the scope is a bad request.
+fn hosted_feed(request: &TestRequest) -> TestResponse {
+    assert_eq!(
+        (request.method.as_str(), request.path()),
+        ("GET", "/sync/ws/hosted/log")
+    );
+    let query = |key| query(&request.target, key);
+    assert_eq!(request.header("authorization"), Some("Bearer test-token"));
+    assert_eq!(query("replicationEpoch"), ["epoch"]);
+    assert_eq!(query("streamIdentity"), ["stream"]);
+    assert_eq!(query("limit"), ["50"]);
+    let since: i64 = query("since")[0].parse().expect("since");
+    if query("scope") != [SCOPE_TOKEN] {
+        return TestResponse::json(
+            200,
+            json!({"ok": true, "scope": hosted_scope(), "ops": [], "nextCursor": since, "hasMore": false}),
+        );
+    }
+    if query("object").iter().any(|object| object != "doc-a") {
+        return TestResponse::json(
+            400,
+            json!({"ok": false, "code": "bad_request", "error": "object is not in this scope"}),
+        );
+    }
+    // The page passed rows the feed withholds, so its cursor is past its last row.
+    TestResponse::json(
+        200,
+        json!({
+            "ok": true,
+            "scope": hosted_scope(),
+            "ops": [remote_row("owner", 4, "live.audit.application", json!({"objectId": "doc-a"}))],
+            "nextCursor": 9,
+            "hasMore": true
+        }),
+    )
+}
+
+fn hosted_pull(scope_token: Option<&str>, object_id: Option<&str>) -> HostedPullRequest {
+    HostedPullRequest {
+        workspace_id: "ws".to_owned(),
+        replication_epoch: "epoch".to_owned(),
+        stream_identity: "stream".to_owned(),
+        scope_token: scope_token.map(str::to_owned),
+        object_id: object_id.map(str::to_owned),
+        cursor: 3,
+        limit: 50,
+    }
+}
+
+#[test]
+fn a_hosted_pull_learns_the_scope_then_reads_its_rows_and_backfills() {
+    let targets = Arc::new(Mutex::new(Vec::new()));
+    let seen = Arc::clone(&targets);
+    let server = FakeServer::start(move |request| {
+        seen.lock().unwrap().push(request.target.clone());
+        hosted_feed(&request)
+    });
+    let transport = transport(&server).hosted();
+    let scope = HostedScope {
+        token: SCOPE_TOKEN.to_owned(),
+        documents: vec![HostedScopeDocument {
+            object_id: "doc-a".to_owned(),
+            path: "a.md".to_owned(),
+        }],
+    };
+
+    for (learning, sent) in [
+        (None, Vec::<String>::new()),
+        (Some("scope-1"), vec!["scope-1".to_owned()]),
+    ] {
+        assert_eq!(
+            transport.pull_hosted(hosted_pull(learning, None)),
+            Ok(HostedPullResponse {
+                scope: scope.clone(),
+                ops: Vec::new(),
+                next_cursor: 3,
+                has_more: false,
+            }),
+            "a request under {learning:?} applies nothing and keeps its cursor"
+        );
+        let target = targets.lock().unwrap().last().unwrap().clone();
+        assert_eq!(query(&target, "scope"), sent);
+    }
+
+    for backfill in [None, Some("doc-a")] {
+        let page = transport
+            .pull_hosted(hosted_pull(Some(SCOPE_TOKEN), backfill))
+            .expect("a page under the current scope");
+        assert_eq!(page.scope, scope);
+        assert_eq!((page.next_cursor, page.has_more), (9, true));
+        assert_eq!(page.ops.len(), 1);
+        assert_eq!(
+            (page.ops[0].workspace_id.as_str(), page.ops[0].relay_seq),
+            ("ws", Some(5))
+        );
+        let target = targets.lock().unwrap().last().unwrap().clone();
+        assert_eq!(
+            query(&target, "object"),
+            backfill.map(str::to_owned).into_iter().collect::<Vec<_>>()
+        );
+    }
+    assert_eq!(
+        transport.pull_hosted(hosted_pull(Some(SCOPE_TOKEN), Some("private"))),
+        Err(RelayError::BadRequest)
+    );
+}
+
+#[test]
+fn a_hosted_transport_sends_the_log_blobs_and_coordinates_to_the_hosted_feed() {
+    let bytes = b"hosted bytes".to_vec();
+    let sha256 = hex_sha256(&bytes);
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let seen = Arc::clone(&requests);
+    let served = bytes.clone();
+    let server = FakeServer::start(move |request| {
+        let path = request.path().to_owned();
+        seen.lock()
+            .unwrap()
+            .push(format!("{} {path}", request.method));
+        let route = path.strip_prefix("/sync/ws").expect("a workspace route");
+        let route = route.strip_prefix("/hosted").unwrap_or(route);
+        match (request.method.as_str(), route) {
+            ("POST", "/blobs/have") => TestResponse::json(200, json!({"ok": true, "missing": []})),
+            ("PUT", _) => TestResponse::json(
+                200,
+                json!({"ok": true, "workspaceId": "ws", "sha256": route.trim_start_matches("/blobs/"),
+                    "byteLength": request.body.len(), "alreadyHad": false}),
+            ),
+            ("GET", blob) if blob.starts_with("/blobs/") => TestResponse::bytes(served.clone()),
+            ("GET", coordinate) if coordinate.starts_with("/log/") => {
+                TestResponse::json(200, json!({"ok": true, "status": "absent"}))
+            }
+            ("POST", "/log") => {
+                assert_eq!(request.json()["originId"], "service-host:host");
+                TestResponse::json(
+                    200,
+                    json!({"ok": true, "accepted": 0, "inserted": 0, "skipped": 0, "currentMaxOriginSeq": -1}),
+                )
+            }
+            other => panic!("unexpected request {other:?}"),
+        }
+    });
+    let exercise = |transport: &HttpRelayTransport, hosted: bool| {
+        transport
+            .blobs_have(BlobHaveRequest {
+                workspace_id: "ws".to_owned(),
+                replication_epoch: "epoch".to_owned(),
+                stream_identity: "stream".to_owned(),
+                sha256s: vec![sha256.clone()],
+            })
+            .expect("blob have");
+        transport
+            .upload_blob(BlobUploadRequest {
+                workspace_id: "ws".to_owned(),
+                replication_epoch: "epoch".to_owned(),
+                stream_identity: "stream".to_owned(),
+                sha256: sha256.clone(),
+                bytes: bytes.clone(),
+            })
+            .expect("blob upload");
+        let downloaded = transport
+            .download_blobs(BlobDownloadBatchRequest {
+                workspace_id: "ws".to_owned(),
+                replication_epoch: "epoch".to_owned(),
+                stream_identity: "stream".to_owned(),
+                blobs: vec![BlobDownloadSpec {
+                    sha256: sha256.clone(),
+                    limit_bytes: 1024,
+                }],
+            })
+            .expect("blob download");
+        assert_eq!(
+            downloaded.results[0].as_ref().map(|blob| &blob.bytes),
+            Ok(&bytes)
+        );
+        assert_eq!(
+            transport.lookup_log_coordinate(LogCoordinateRequest {
+                workspace_id: "ws".to_owned(),
+                replication_epoch: "epoch".to_owned(),
+                stream_identity: "stream".to_owned(),
+                origin_id: "owner".to_owned(),
+                origin_seq: 2,
+            }),
+            Ok(LogCoordinateResponse::Absent)
+        );
+        let push = dohc_engine_sync::PushRequest {
+            workspace_id: "ws".to_owned(),
+            replication_epoch: "epoch".to_owned(),
+            stream_identity: "stream".to_owned(),
+            origin_id: "service-host:host".to_owned(),
+            after_seq: -1,
+            ops: Vec::new(),
+        };
+        if hosted {
+            transport.push_hosted(push).expect("hosted push");
+        } else {
+            transport.push(push).expect("ordinary push");
+        }
+        std::mem::take(&mut *requests.lock().unwrap())
+    };
+    let routes = |prefix: &str| {
+        [
+            format!("POST {prefix}/blobs/have"),
+            format!("PUT {prefix}/blobs/{sha256}"),
+            format!("GET {prefix}/blobs/{sha256}"),
+            format!("GET {prefix}/log/owner/2"),
+            format!("POST {prefix}/log"),
+        ]
+    };
+    assert_eq!(
+        exercise(&transport(&server).hosted(), true),
+        routes("/sync/ws/hosted")
+    );
+    assert_eq!(
+        exercise(&transport(&server), false),
+        routes("/sync/ws"),
+        "an ordinary transport keeps the workspace routes"
+    );
+}
+
+#[test]
+fn hosted_feed_refusals_map_to_their_errors() {
+    let server = FakeServer::start(|request| match (request.method.as_str(), request.path()) {
+        ("POST", "/sync/ws/hosted/log") => TestResponse::json(
+            403,
+            json!({"ok": false, "code": "share_op_rejected", "error": "an op is outside the hosted documents"}),
+        ),
+        ("GET", "/sync/ws/hosted/log") => TestResponse::json(
+            404,
+            json!({"ok": false, "code": "not_found", "error": "not found"}),
+        ),
+        ("GET", _) => TestResponse::json(
+            404,
+            json!({"ok": false, "code": "blob_not_found", "error": "blob not found"}),
+        ),
+        other => panic!("unexpected request {other:?}"),
+    });
+    let hosted = transport(&server).hosted();
+    let push = dohc_engine_sync::PushRequest {
+        workspace_id: "ws".to_owned(),
+        replication_epoch: "epoch".to_owned(),
+        stream_identity: "stream".to_owned(),
+        origin_id: "service-host:host".to_owned(),
+        after_seq: -1,
+        ops: Vec::new(),
+    };
+    assert_eq!(
+        hosted.push_hosted(push.clone()),
+        Err(RelayError::ShareOperationRejected)
+    );
+    assert_eq!(
+        hosted.pull_hosted(hosted_pull(None, None)),
+        Err(RelayError::WorkspaceUnavailable),
+        "a workspace the relay does not host"
+    );
+    let outside = hosted
+        .download_blobs(BlobDownloadBatchRequest {
+            workspace_id: "ws".to_owned(),
+            replication_epoch: "epoch".to_owned(),
+            stream_identity: "stream".to_owned(),
+            blobs: vec![BlobDownloadSpec {
+                sha256: "a".repeat(64),
+                limit_bytes: 1024,
+            }],
+        })
+        .expect("a batch answers per blob");
+    assert_eq!(outside.results, vec![Err(RelayError::BlobMissing)]);
+
+    // An ordinary replica's transport serves no hosted feed and sends nothing.
+    let ordinary = transport(&server);
+    assert_eq!(
+        ordinary.pull_hosted(hosted_pull(None, None)),
+        Err(dohc_engine_sync::no_hosted_feed())
+    );
+    assert_eq!(
+        ordinary.push_hosted(push),
+        Err(dohc_engine_sync::no_hosted_feed())
+    );
 }

@@ -1,5 +1,6 @@
 use super::*;
 use std::cell::Cell;
+use std::sync::atomic::AtomicI64;
 
 const HOST: &str = "service-host:host";
 
@@ -301,7 +302,7 @@ fn hosted_outbound_sequences_survive_purged_journal_rows_and_reopen() {
 /// the next sync append collided with a chat coordinate.
 #[test]
 fn a_hosted_replica_writes_no_chat_and_its_journal_keeps_one_counter() {
-    let (_scratch, path, mut store) = hosted_store_with_main();
+    let (_scratch, path, mut store) = hosted_store();
     host_document(&mut store, "doc-a");
     {
         let mut chats = LinkedChatStore::new(&mut store);
@@ -415,9 +416,11 @@ fn a_hosted_replica_journals_only_its_documents_live_work() {
 /// rows of shared documents with their original coordinates, withholds every
 /// other row, and examines `raw_rows_per_page` rows per page as the relay
 /// bounds its scan, so its cursor passes withheld rows. Under a stale scope
-/// token it serves nothing and keeps the cursor.
+/// token it serves nothing and keeps the cursor. It reads above
+/// `epoch_log_floor`, as the relay does after an epoch rotation.
 struct HostedFeed {
     log: Mutex<Vec<ReplicationEnvelope>>,
+    epoch_log_floor: AtomicI64,
     shared: Mutex<BTreeMap<String, String>>,
     revision: AtomicUsize,
     blobs: Mutex<BTreeMap<String, Vec<u8>>>,
@@ -434,6 +437,7 @@ impl HostedFeed {
     fn new() -> Self {
         Self {
             log: Mutex::new(Vec::new()),
+            epoch_log_floor: AtomicI64::new(0),
             shared: Mutex::new(BTreeMap::new()),
             revision: AtomicUsize::new(0),
             blobs: Mutex::new(BTreeMap::new()),
@@ -608,13 +612,14 @@ impl RelayTransport for HostedFeed {
         {
             return Err(RelayError::BadRequest);
         }
+        let since = req.cursor.max(self.epoch_log_floor.load(Ordering::SeqCst));
         let log = self.log.lock().unwrap();
         let rows = log
             .iter()
-            .filter(|row| row.relay_seq.unwrap() > req.cursor)
+            .filter(|row| row.relay_seq.unwrap() > since)
             .collect::<Vec<_>>();
         let raw = self.raw_rows_per_page.load(Ordering::SeqCst);
-        let (mut ops, mut scanned, mut next_cursor) = (Vec::new(), 0, req.cursor);
+        let (mut ops, mut scanned, mut next_cursor) = (Vec::new(), 0, since);
         for row in &rows {
             if scanned == raw || ops.len() == req.limit {
                 break;
@@ -634,7 +639,11 @@ impl RelayTransport for HostedFeed {
         Ok(HostedPullResponse {
             scope,
             ops,
-            next_cursor,
+            next_cursor: if next_cursor == since {
+                req.cursor
+            } else {
+                next_cursor
+            },
             has_more: scanned < rows.len(),
         })
     }
@@ -809,12 +818,6 @@ fn hosted_feed() -> HostedFeed {
     feed
 }
 
-fn hosted_store_with_main() -> (ScratchDir, std::path::PathBuf, EngineStore) {
-    let (scratch, path, mut store) = hosted_store();
-    seed_replication_version(&mut store, "main", "main");
-    (scratch, path, store)
-}
-
 fn pass(
     client: &RelaySyncClient<HostedFeed>,
     store: &mut EngineStore,
@@ -910,7 +913,7 @@ fn count(store: &EngineStore, sql: &str) -> i64 {
 
 #[test]
 fn a_document_that_joins_the_scope_backfills_below_the_frozen_main_cursor() {
-    let (_scratch, path, mut store) = hosted_store_with_main();
+    let (_scratch, path, mut store) = hosted_store();
     let client = RelaySyncClient::new(hosted_feed());
 
     // The first response names the scope and applies nothing.
@@ -1036,7 +1039,7 @@ fn a_document_that_joins_the_scope_backfills_below_the_frozen_main_cursor() {
 
 #[test]
 fn a_scope_change_mid_pass_drops_what_the_pass_fetched() {
-    let (_scratch, _path, mut store) = hosted_store_with_main();
+    let (_scratch, _path, mut store) = hosted_store();
     let client = RelaySyncClient::new(hosted_feed());
     sync(&client, &mut store);
     let feed = client.transport();
@@ -1064,7 +1067,7 @@ fn a_scope_change_mid_pass_drops_what_the_pass_fetched() {
 
 #[test]
 fn a_pass_fetched_under_an_older_scope_cannot_commit() {
-    let (_scratch, _path, mut store) = hosted_store_with_main();
+    let (_scratch, _path, mut store) = hosted_store();
     let client = RelaySyncClient::new(hosted_feed());
     pass(&client, &mut store, &NoFaults).unwrap();
     let backfill = pass(&client, &mut store, &NoFaults).unwrap();
@@ -1118,7 +1121,7 @@ fn finish_after(
     interrupt_commit: bool,
     restart: bool,
 ) -> Finished {
-    let (_scratch, path, mut store) = hosted_store_with_main();
+    let (_scratch, path, mut store) = hosted_store();
     let client = RelaySyncClient::new(hosted_feed());
     client.transport().share("doc-b", "b.md");
     pass(&client, &mut store, &NoFaults).unwrap();
@@ -1172,48 +1175,64 @@ fn interrupted_hosted_passes_resume_to_the_same_content_once() {
     }
 }
 
-/// The slice-2 review's first reproduction: a replica created pristine has
-/// no main version, and a backfill never serves the `workspace.init` that
-/// creates it.
+/// The slice-2 re-review's reproduction: after an epoch rotation the feed
+/// reads above the old log, so it never serves `workspace.init` again. A
+/// replica created then holds `main` from its creation.
 #[test]
-fn a_pristine_hosted_replica_takes_workspace_init_before_its_first_backfill() {
+fn a_hosted_replica_created_after_an_epoch_rotation_needs_no_workspace_init() {
     let (_scratch, _path, mut store) = hosted_store();
-    let client = RelaySyncClient::new(hosted_feed());
-    client.transport().share("doc-b", "b.md");
+    let feed = hosted_feed();
+    feed.epoch_log_floor.store(4, Ordering::SeqCst);
+    feed.create("owner-2", 0, "doc-c", "c.md", "after rotation");
+    feed.share("doc-c", "c.md");
+    let client = RelaySyncClient::new(feed);
     sync(&client, &mut store);
 
-    let requests = client.transport().pull_requests();
-    let initial = |request: &HostedPullRequest| {
-        request.object_id.is_none() && request.cursor == 0 && request.limit == 1
-    };
-    assert!(
-        initial(&requests[1]),
-        "the first backfill pass opens the main feed"
-    );
-    assert_eq!(requests[2].object_id.as_deref(), Some("doc-a"));
-    assert_eq!(
-        requests.iter().filter(|request| initial(request)).count(),
-        1,
-        "only while the main version is missing"
-    );
+    assert!(document(&store, "doc-a").unwrap().ready);
+    assert!(document(&store, "doc-c").unwrap().ready);
     let (heads, moments) = content(&store);
     assert_eq!(
         heads,
-        BTreeMap::from([
-            ("doc-a".to_owned(), "hosted a".to_owned()),
-            ("doc-b".to_owned(), "hosted b".to_owned())
-        ])
+        BTreeMap::from([("doc-c".to_owned(), "after rotation".to_owned())])
     );
     assert!(moments.values().all(|count| *count == 1));
+    assert_eq!(coordinates(&store), [("owner-2".to_owned(), 0)]);
+    assert_eq!(replica(&store).main_cursor, 5);
+}
+
+/// The feed answers a page whose scan passed only withheld rows with no ops
+/// and a moved cursor, on the main feed and in a backfill.
+#[test]
+fn a_page_of_only_withheld_rows_moves_the_cursor() {
+    let (_scratch, _path, mut store) = hosted_store();
+    let feed = HostedFeed::new();
+    feed.create("owner", 0, "private", "private.md", "private");
+    feed.create("owner", 1, "doc-a", "a.md", "hosted a");
+    feed.create("owner", 2, "private", "private.md", "private again");
+    feed.share("doc-a", "a.md");
+    feed.raw_rows_per_page.store(1, Ordering::SeqCst);
+    let client = RelaySyncClient::new(feed);
+    sync(&client, &mut store);
+
+    let cursors = |object_id: Option<&str>| {
+        client
+            .transport()
+            .pull_requests()
+            .iter()
+            .filter(|request| request.scope_token.is_some())
+            .filter(|request| request.object_id.as_deref() == object_id)
+            .map(|request| request.cursor)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(cursors(Some("doc-a")), [0, 1, 2]);
+    assert_eq!(cursors(None), [0, 1, 2]);
+    assert!(document(&store, "doc-a").unwrap().ready);
     assert_eq!(
-        coordinates(&store),
-        [
-            ("owner".to_owned(), 0),
-            ("owner".to_owned(), 1),
-            ("owner".to_owned(), 3)
-        ]
+        content(&store).0,
+        BTreeMap::from([("doc-a".to_owned(), "hosted a".to_owned())])
     );
-    assert_eq!(replica(&store).main_cursor, 4);
+    assert_eq!(coordinates(&store), [("owner".to_owned(), 1)]);
+    assert_eq!(replica(&store).main_cursor, 3);
 }
 
 /// Hold `texts` locally, as the hydration before retention left them.
@@ -1474,7 +1493,7 @@ fn withheld_conflict(
 
 #[test]
 fn a_held_op_holds_later_ops_of_its_document_but_not_of_its_origin() {
-    let (_scratch, _path, mut store) = hosted_store_with_main();
+    let (_scratch, _path, mut store) = hosted_store();
     let (parent, child, result_sha) = withheld_conflict(&mut store);
     assert!(matches!(
         apply_replication_envelope(
@@ -1576,7 +1595,7 @@ fn a_held_op_holds_later_ops_of_its_document_but_not_of_its_origin() {
 
 #[test]
 fn live_writes_journal_and_push_under_the_service_host_origin() {
-    let (_scratch, _path, mut store) = hosted_store_with_main();
+    let (_scratch, _path, mut store) = hosted_store();
     host_document(&mut store, "doc-a");
     assert!(
         store
@@ -1633,7 +1652,7 @@ fn live_writes_journal_and_push_under_the_service_host_origin() {
 
 #[test]
 fn ordinary_only_machinery_stays_off_a_hosted_replica() {
-    let (_scratch, _path, mut store) = hosted_store_with_main();
+    let (_scratch, _path, mut store) = hosted_store();
     // A local file no live session wrote: an ordinary enrolment would journal it.
     VersionedTextStore::new(&mut store)
         .write_text(
@@ -1768,7 +1787,7 @@ fn withheld_befores(store: &EngineStore) -> Vec<(String, String, String, String,
 /// bytes, so on the host the private file never existed.
 #[test]
 fn a_moment_that_replaced_a_withheld_object_applies_as_a_create() {
-    let (_scratch, _path, mut store) = hosted_store_with_main();
+    let (_scratch, _path, mut store) = hosted_store();
     let feed = HostedFeed::new();
     feed.append(envelope("owner", 0, "workspace.init", json!({})));
     feed.create("owner", 1, "private", "a.md", "private text");
@@ -1852,7 +1871,7 @@ fn a_moment_that_replaced_a_withheld_object_applies_as_a_create() {
 /// `doc-a` never became the path's head.
 #[test]
 fn a_withheld_replacement_takes_the_path_from_an_object_that_left_the_scope() {
-    let (_scratch, _path, mut store) = hosted_store_with_main();
+    let (_scratch, _path, mut store) = hosted_store();
     let client = RelaySyncClient::new(HostedFeed::new());
     let feed = client.transport();
     feed.append(envelope("owner", 0, "workspace.init", json!({})));
@@ -1936,7 +1955,7 @@ fn a_withheld_replacement_takes_the_path_from_an_object_that_left_the_scope() {
 /// retry met the same row.
 #[test]
 fn a_refused_settlement_with_an_unreadable_before_side_never_stops_the_feed() {
-    let (_scratch, _path, mut store) = hosted_store_with_main();
+    let (_scratch, _path, mut store) = hosted_store();
     let client = RelaySyncClient::new(HostedFeed::new());
     let feed = client.transport();
     feed.append(envelope("owner", 0, "workspace.init", json!({})));
@@ -1992,7 +2011,7 @@ fn a_refused_settlement_with_an_unreadable_before_side_never_stops_the_feed() {
 /// replica fetches every before side.
 #[test]
 fn a_before_side_the_feed_serves_is_fetched_and_kept() {
-    let (_scratch, _path, mut store) = hosted_store_with_main();
+    let (_scratch, _path, mut store) = hosted_store();
     let feed = HostedFeed::new();
     feed.append(envelope("owner", 0, "workspace.init", json!({})));
     feed.create("owner", 1, "doc-a", "a.md", "first");

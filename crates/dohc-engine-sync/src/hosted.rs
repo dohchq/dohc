@@ -22,6 +22,8 @@ use crate::{ReplicationEnvelope, SyncError};
 /// The origin prefix the relay reserves for a service host's writes.
 pub const SERVICE_HOST_ORIGIN_PREFIX: &str = "service-host:";
 
+pub(crate) const NOT_A_HOSTED_REPLICA: &str = "workspace is not a hosted replica";
+
 /// A conflict child whose `conflict.resolve` parent the feed withheld. The
 /// child waits in deferred work until the relay serves what it needs.
 pub(crate) const CONFLICT_PARENT_WITHHELD: &str = "hosted-conflict-parent-withheld";
@@ -316,23 +318,6 @@ pub fn read_hosted_replica(
     })
 }
 
-/// Whether `workspace.init` created the main version every hosted document's
-/// rows apply to.
-pub(crate) fn has_main_version(store: &EngineStore, workspace_id: &str) -> Result<bool, SyncError> {
-    store
-        .read_with(|conn| {
-            conn.query_row(
-                "SELECT EXISTS(SELECT 1 FROM versioned_workspaces w \
-                 JOIN versions v ON v.workspace_id=w.workspace_id \
-                   AND v.version_id=w.main_version_id \
-                 WHERE w.workspace_id=?1)",
-                [workspace_id],
-                |row| row.get(0),
-            )
-        })
-        .map_err(SyncError::corrupt)
-}
-
 /// Adopt the scope a response announced: its documents, each at its path.
 /// Its generation moves, so no pass fetched under the old scope can commit.
 /// A document still in scope keeps its progress; one that joins, or returns
@@ -419,7 +404,7 @@ pub fn commit_hosted_cursor(
             .optional()
             .map_err(SyncError::corrupt)?;
         let generation = generation.ok_or(SyncError::InvalidInput {
-            reason: "workspace is not a hosted replica",
+            reason: NOT_A_HOSTED_REPLICA,
         })?;
         if generation != cursor.scope_generation {
             return Ok(false);

@@ -1730,9 +1730,9 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             .read_with(|conn| crate::hosted::is_hosted(conn, workspace_id))
             .map_err(local)?
         {
-            return Err(local(SyncError::InvalidInput {
-                reason: "a hosted replica pulls with pull_hosted_workspace",
-            }));
+            return Err(RelayError::HostedRefusal(
+                "a hosted replica pulls with pull_hosted_workspace",
+            ));
         }
         let (queued, durable_origins) = crate::deferred::read(store, workspace_id, &identity)?;
         let current = crate::read_relay_cursor(store, workspace_id).map_err(local)?;
@@ -1913,16 +1913,14 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         faults: &dyn FaultInjector,
         leases: &dyn crate::LeaseProbe,
     ) -> Result<HostedPassOutcome, RelayError> {
+        let replica = crate::read_hosted_replica(store, workspace_id)
+            .map_err(local)?
+            .ok_or(RelayError::HostedRefusal(
+                crate::hosted::NOT_A_HOSTED_REPLICA,
+            ))?;
         let identity = read_sync_identity(store, workspace_id)
             .map_err(local)?
             .ok_or(RelayError::InvalidResponse)?;
-        let replica = crate::read_hosted_replica(store, workspace_id)
-            .map_err(local)?
-            .ok_or_else(|| {
-                local(SyncError::InvalidInput {
-                    reason: "workspace is not a hosted replica",
-                })
-            })?;
         let backfill = replica
             .documents
             .iter()
@@ -1934,26 +1932,10 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             ..HostedPassOutcome::default()
         };
         let mut ops = Vec::new();
-        // A document's rows apply to the main version that `workspace.init`
-        // creates, and only the main feed serves it, as its first row. A
-        // backfill on a replica without that version takes it from there.
-        if backfilled.is_some()
-            && !crate::hosted::has_main_version(store, workspace_id).map_err(local)?
-        {
-            let Some(page) =
-                self.hosted_page(store, workspace_id, &identity, &replica, None, 0, 1, faults)?
-            else {
-                return Ok(adopted());
-            };
-            if page.ops.len() != 1 || page.ops[0].op_kind != "workspace.init" {
-                return Err(RelayError::InvalidResponse);
-            }
-            ops.extend(page.ops);
-        }
         let mut cursor = backfill
             .as_ref()
             .map_or(replica.main_cursor, |(_, cursor)| *cursor);
-        let mut fetched = ops.len();
+        let mut fetched = 0_usize;
         let mut pages = 0_usize;
         let has_more = loop {
             let remaining = crate::model::MAX_PULL_OPS_PER_PASS
@@ -2069,7 +2051,14 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         cursor: &crate::HostedCursor,
         faults: &dyn FaultInjector,
     ) -> Result<TxnOutcome<bool>, RelayError> {
-        crate::commit_hosted_cursor(store, workspace_id, cursor, faults).map_err(local)
+        crate::commit_hosted_cursor(store, workspace_id, cursor, faults).map_err(
+            |error| match error {
+                SyncError::InvalidInput {
+                    reason: reason @ crate::hosted::NOT_A_HOSTED_REPLICA,
+                } => RelayError::HostedRefusal(reason),
+                error => local(error),
+            },
+        )
     }
 
     /// One page of the hosted feed under the stored scope: `workspace.init`
@@ -2433,9 +2422,9 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             .read_with(|conn| crate::hosted::is_hosted(conn, workspace_id))
             .map_err(local)?
         {
-            return Err(local(SyncError::InvalidInput {
-                reason: "a hosted replica never rebases its origin",
-            }));
+            return Err(RelayError::HostedRefusal(
+                "a hosted replica never rebases its origin",
+            ));
         }
         let identity = read_sync_identity(store, workspace_id)
             .map_err(local)?
@@ -5814,8 +5803,9 @@ fn local(error: SyncError) -> RelayError {
     RelayError::Local(error.code().to_owned())
 }
 
-fn no_hosted_feed() -> RelayError {
-    RelayError::Local("relay transport serves no hosted feed".to_owned())
+/// A hosted feed request on a transport built for an ordinary replica.
+pub fn no_hosted_feed() -> RelayError {
+    RelayError::HostedRefusal("relay transport serves no hosted feed")
 }
 
 #[cfg(test)]

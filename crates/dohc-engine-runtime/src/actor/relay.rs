@@ -5,7 +5,8 @@ use dohc_engine_storage::{EngineStore, NoFaults, TxnOutcome};
 use dohc_engine_sync::{
     BlobDownloadBatchRequest, BlobDownloadBatchResponse, BlobDownloadResponse, BlobHaveRequest,
     BlobHaveResponse, BlobUploadRequest, ClaimRequest, ClaimResponse, DirectWritePushOutcome,
-    EpochRequest, EpochResponse, KeyEnvelopeDownloadRequest, KeyEnvelopeDownloadResponse,
+    EpochRequest, EpochResponse, HostedCursor, HostedPassOutcome, HostedPullRequest,
+    HostedPullResponse, KeyEnvelopeDownloadRequest, KeyEnvelopeDownloadResponse,
     KeyEnvelopeRequest, KeyEnvelopeResponse, LogCoordinateRequest, LogCoordinateResponse,
     MAX_BASE_REPAIR_LOOKUPS, MAX_BLOB_DOWNLOAD_BATCH, ProbeRequest, ProbeResponse, PullRequest,
     PullResponse, PushRequest, PushResponse, PushWorkspaceProgress, RecoverResponse, RelayCursor,
@@ -14,7 +15,8 @@ use dohc_engine_sync::{
     ShareProposalSubmitOutcome, ShareProposalSubmitRequest, ShareProposalSubmitResponse,
     ShareViewPullOutcome, ShareViewRequest, ShareViewResponse, SharedChannelPullOutcome,
     SharedChannelPushOutcome, SharedChannelRequest, SharedChannelResponse, SyncError,
-    SyncPassOutcome, adopt_join_identity, create_claim_identity, read_sync_identity,
+    SyncPassOutcome, adopt_join_identity, create_claim_identity, create_hosted_replica,
+    read_hosted_replica, read_sync_identity,
 };
 use dohc_engine_sync_http::HttpRelayTransport;
 use std::sync::{Arc, Mutex};
@@ -142,6 +144,50 @@ pub enum RelayOperation {
         workspace_id: String,
         cursor: ShareCursor,
     },
+    /// Make a pristine workspace the session host's hosted replica under the
+    /// relay's coordinate, before any other write gives it an ordinary one.
+    CreateHostedReplica {
+        workspace_id: String,
+        new_origin_id: String,
+        replication_epoch: String,
+        stream_identity: String,
+        created_at_ms: i64,
+    },
+    /// One pass of the hosted feed. Its cursor commits with
+    /// `CommitHostedCursor` once its changed paths are materialized.
+    PullHosted {
+        workspace_id: String,
+    },
+    CommitHostedCursor {
+        workspace_id: String,
+        cursor: HostedCursor,
+    },
+}
+
+impl RelayOperation {
+    fn workspace_id(&self) -> &str {
+        match self {
+            Self::Push { workspace_id, .. }
+            | Self::Pull { workspace_id, .. }
+            | Self::CommitCursor { workspace_id, .. }
+            | Self::Probe { workspace_id }
+            | Self::Claim { workspace_id, .. }
+            | Self::AdoptJoinIdentity { workspace_id, .. }
+            | Self::RecoverOrigin { workspace_id, .. }
+            | Self::UploadKeyEnvelope { workspace_id, .. }
+            | Self::DownloadKeyEnvelope { workspace_id }
+            | Self::PullSharedChannel { workspace_id, .. }
+            | Self::PushSharedChannel { workspace_id, .. }
+            | Self::PullShareView { workspace_id, .. }
+            | Self::RecordShareViewIdentity { workspace_id, .. }
+            | Self::SubmitShareProposal { workspace_id, .. }
+            | Self::PushDirectWrites { workspace_id, .. }
+            | Self::CommitShareViewCursor { workspace_id, .. }
+            | Self::CreateHostedReplica { workspace_id, .. }
+            | Self::PullHosted { workspace_id }
+            | Self::CommitHostedCursor { workspace_id, .. } => workspace_id,
+        }
+    }
 }
 
 const RELAY_IO_PENDING: &str = "relay-io-pending";
@@ -154,6 +200,8 @@ const RELAY_IO_ABORTED: &str = "relay-io-aborted";
 enum RelayIoRequest {
     Push(PushRequest),
     Pull(PullRequest),
+    PushHosted(PushRequest),
+    PullHosted(HostedPullRequest),
     LookupCoordinates(Vec<LogCoordinateRequest>),
     Probe(ProbeRequest),
     Claim(ClaimRequest),
@@ -174,8 +222,10 @@ enum RelayIoRequest {
 
 #[derive(Debug, Clone)]
 enum RelayIoResponse {
+    /// Answers both log pushes.
     Push(PushResponse),
     Pull(PullResponse),
+    PullHosted(HostedPullResponse),
     LookupCoordinates(Vec<LogCoordinateResponse>),
     Probe(ProbeResponse),
     Claim(ClaimResponse),
@@ -229,6 +279,7 @@ impl DeferredRelayTransport {
                 && matches!(
                     state.completed[index].0,
                     RelayIoRequest::Push(_)
+                        | RelayIoRequest::PushHosted(_)
                         | RelayIoRequest::ShareLogPush(_)
                         | RelayIoRequest::UploadBlob(_)
                         | RelayIoRequest::DownloadBlobs(_)
@@ -292,7 +343,7 @@ impl DeferredRelayTransport {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Ok(RelayIoResponse::Push(response)) = &result
-            && let RelayIoRequest::Push(request) = &request
+            && let RelayIoRequest::Push(request) | RelayIoRequest::PushHosted(request) = &request
             && !request.ops.is_empty()
         {
             state.workspace_pushed = state.workspace_pushed.saturating_add(response.inserted);
@@ -374,6 +425,14 @@ impl RelayTransport for DeferredRelayTransport {
 
     relay_transport_method!(push, PushRequest, Push, PushResponse, Push);
     relay_transport_method!(pull, PullRequest, Pull, PullResponse, Pull);
+    relay_transport_method!(push_hosted, PushRequest, PushHosted, PushResponse, Push);
+    relay_transport_method!(
+        pull_hosted,
+        HostedPullRequest,
+        PullHosted,
+        HostedPullResponse,
+        PullHosted
+    );
     fn lookup_log_coordinate(
         &self,
         request: LogCoordinateRequest,
@@ -1598,6 +1657,10 @@ pub enum RelayOperationOutcome {
     ShareViewIdentity(ShareViewIdentityRecord),
     ShareProposalSubmitted(ShareProposalSubmitOutcome),
     DirectWritesPushed(DirectWritePushOutcome),
+    HostedReplicaCreated,
+    HostedPass(HostedPassOutcome),
+    /// `false` when the scope moved since the pass fetched; nothing committed.
+    HostedCursorCommitted(bool),
 }
 
 /// What a share view's identity call settled on, including the answer the
@@ -1732,7 +1795,17 @@ impl ActorHandle {
         if token.is_cancelled() {
             return Err(RuntimeError::Cancelled);
         }
-        let http_transport = Arc::new(build_http_transport(configuration)?);
+        let http_transport = build_http_transport(configuration)?;
+        // A hosted replica reads and writes only the session host's scoped feed.
+        let workspace_id = operation.workspace_id().to_owned();
+        let hosted = self
+            .run(move |store, _cache| Ok(read_hosted_replica(store, &workspace_id)?.is_some()))
+            .await?;
+        let http_transport = Arc::new(if hosted {
+            http_transport.hosted()
+        } else {
+            http_transport
+        });
         // Keep the deferred I/O state out of callers' inline RPC futures.
         Box::pin(self.relay_with_io(
             http_transport.publishes_native_settlements(),
@@ -2068,6 +2141,12 @@ fn execute_blocking_http_request(
     match request {
         RelayIoRequest::Push(request) => transport.push(request).map(RelayIoResponse::Push),
         RelayIoRequest::Pull(request) => transport.pull(request).map(RelayIoResponse::Pull),
+        RelayIoRequest::PushHosted(request) => {
+            transport.push_hosted(request).map(RelayIoResponse::Push)
+        }
+        RelayIoRequest::PullHosted(request) => transport
+            .pull_hosted(request)
+            .map(RelayIoResponse::PullHosted),
         RelayIoRequest::LookupCoordinates(_) => Err(RelayError::InvalidResponse),
         RelayIoRequest::Probe(request) => transport.probe(request).map(RelayIoResponse::Probe),
         RelayIoRequest::Claim(request) => transport
@@ -2412,6 +2491,43 @@ fn run_relay_operation(
             TxnOutcome::Committed(()) => Ok(RelayOperationOutcome::CursorCommitted {
                 sharing_declined: Vec::new(),
             }),
+            TxnOutcome::Crashed { .. } => Err(RuntimeError::OperationCrashed),
+        },
+        RelayOperation::CreateHostedReplica {
+            workspace_id,
+            new_origin_id,
+            replication_epoch,
+            stream_identity,
+            created_at_ms,
+        } => match create_hosted_replica(
+            store,
+            &workspace_id,
+            &new_origin_id,
+            &replication_epoch,
+            &stream_identity,
+            created_at_ms,
+            &NoFaults,
+        )
+        .map_err(|error| match error {
+            SyncError::InvalidInput { reason } => {
+                RuntimeError::Relay(RelayError::HostedRefusal(reason))
+            }
+            error => RuntimeError::Sync(error),
+        })? {
+            TxnOutcome::Committed(_) => Ok(RelayOperationOutcome::HostedReplicaCreated),
+            TxnOutcome::Crashed { .. } => Err(RuntimeError::OperationCrashed),
+        },
+        RelayOperation::PullHosted { workspace_id } => client
+            .pull_hosted_workspace(store, doc_cache, &workspace_id, &NoFaults, leases)
+            .map(RelayOperationOutcome::HostedPass)
+            .map_err(RuntimeError::from),
+        RelayOperation::CommitHostedCursor {
+            workspace_id,
+            cursor,
+        } => match client.commit_hosted_cursor(store, &workspace_id, &cursor, &NoFaults)? {
+            TxnOutcome::Committed(committed) => {
+                Ok(RelayOperationOutcome::HostedCursorCommitted(committed))
+            }
             TxnOutcome::Crashed { .. } => Err(RuntimeError::OperationCrashed),
         },
     }

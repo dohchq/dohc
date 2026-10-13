@@ -402,7 +402,8 @@ pub fn adopt_join_identity(
 /// Make a pristine workspace a hosted replica under the relay's existing
 /// coordinate. Its origin must carry [`SERVICE_HOST_ORIGIN_PREFIX`], and no
 /// other replica may: the relay accepts that prefix only on the hosted feed.
-/// An ordinary replica never becomes hosted, nor the reverse.
+/// An ordinary replica never becomes hosted, nor the reverse. It creates the
+/// main version too, as opening a passive store does.
 ///
 /// [`SERVICE_HOST_ORIGIN_PREFIX`]: crate::SERVICE_HOST_ORIGIN_PREFIX
 pub fn create_hosted_replica(
@@ -571,6 +572,10 @@ fn create_sync_identity(
                 params![workspace_id, created_at_ms],
             )
             .map_err(SyncError::persist)?;
+            // Every hosted row applies to `main`. The feed cannot be relied on
+            // to serve `workspace.init`: after an epoch rotation it never does.
+            dohc_engine_domain::ensure_main_version_in_tx(tx, workspace_id, "main", created_at_ms)
+                .map_err(crate::ydoc_apply::map_domain_hard_error)?;
         }
         Ok(AdoptJoinIdentityOutcome::Adopted)
     })
