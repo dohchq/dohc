@@ -9,6 +9,8 @@ const by = label => {
   return row;
 };
 const container = (row, name) => row.containers.find(entry => entry.name === name);
+// The Cloudflare cell runs every service in one container named "cell".
+const relayContainer = row => container(row, "sync-relay") ?? container(row, "cell");
 const real = row => row.relayProcesses.filter(entry => !entry.command.includes('health.mjs'));
 // The session host daemon is the engine with the most memory; the automation daemon stays near 9 MiB.
 const host = row => real(row).filter(entry => entry.command.includes('engine')).sort((a, b) => b.rssMiB - a.rssMiB)[0];
@@ -33,9 +35,9 @@ for (const window of ['I0 1ws-2live', 'L4 4ws-14live', 'L8 8ws-30live', 'L16 16w
 const sync16 = by('S16 sync-only'), sync32 = by('S32 sync-only'), first = by('I0 1ws-2live idle-end');
 out['per synced workspace (16 -> 32, 20 files x 4 KiB)'] = {
   relayNodeRssMiB: round((relayNode(sync32).rssMiB - relayNode(sync16).rssMiB) / 16),
-  relayAnonMiB: round((container(sync32, 'sync-relay').anonMiB - container(sync16, 'sync-relay').anonMiB) / 16),
+  relayAnonMiB: round((relayContainer(sync32).anonMiB - relayContainer(sync16).anonMiB) / 16),
   dataMiB: round(mib(sync32.bytes['/data'] - sync16.bytes['/data']) / 16),
-  postgresMiB: round(mib(sync32.bytes.postgres - sync16.bytes.postgres) / 16),
+  postgresMiB: sync32.bytes.postgres === undefined ? null : round(mib(sync32.bytes.postgres - sync16.bytes.postgres) / 16),
   fromFirstWorkspace: { relayNodeRssMiB: round((relayNode(sync32).rssMiB - relayNode(first).rssMiB) / 31), dataMiB: round(mib(sync32.bytes['/data'] - first.bytes['/data']) / 31) },
 };
 const live = [['I0 1ws-2live idle-end', 2], ['L4 4ws-14live idle-end', 14], ['L8 8ws-30live idle-end', 30], ['L16 16ws-62live idle-end', 62]]
@@ -54,7 +56,7 @@ for (const sessions of [8, 16, 32]) {
   const cores = Object.fromEntries(end.containers.map(entry => [entry.name, round((entry.cpuSeconds - container(start, entry.name).cpuSeconds) / elapsed)]));
   // Net of the idle rate with the same documents hosted, so polling is not charged to editors.
   const idle = out['idle L16 16ws-62live']?.cpuCoresByContainer ?? {};
-  const server = ['sync-relay', 'share-web', 'workspace-api', 'postgres', 'gateway'];
+  const server = ['sync-relay', 'share-web', 'workspace-api', 'postgres', 'gateway', 'cell'].filter(name => name in cores);
   out[`editors ${sessions}`] = { seconds: elapsed, cpuCores: cores,
     serverCoresPerEditor: round(server.reduce((sum, name) => sum + cores[name] - (idle[name] ?? 0), 0) / sessions),
     sessionHostRssMiB: host(end).rssMiB, relayNodeRssMiB: relayNode(end).rssMiB };
