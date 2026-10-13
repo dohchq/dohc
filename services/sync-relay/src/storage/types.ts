@@ -766,6 +766,7 @@ export interface SyncRelayStorage {
     rotatedAtMs: number;
   }): RotateWorkspaceIdentityResult;
   workspaceIsOwnedBy(workspaceId: string, ownerUserId: string): boolean;
+  readReplicaStanding(workspaceId: string, shareGrantBindings?: string): ReturnType<typeof import("./replicaReads").readReplicaStanding>;
   putBlob(input: {
     workspaceId: string;
     sha256: string;

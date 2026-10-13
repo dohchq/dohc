@@ -1,6 +1,7 @@
 import {prepareLiveApplications} from "./storage/liveApplicationAuthorship";
 import {prepareHostedSettlements} from "./storage/hostedSettlement";
 import * as shareLabelsStorage from "./storage/shareLabels";
+import * as replicaReads from "./storage/replicaReads";
 import * as buttonInspections from "./automationButtonInspections";
 import type {ShareLabels} from "@dohc/security-contract/share-labels";
 import type { ServiceActivationAccess } from "./storage/serviceActivationAccess";
@@ -575,6 +576,8 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
   workspaceIsOwnedBy(workspaceId: string, ownerUserId: string): boolean {
     return workspacesStorage.workspaceIsOwnedBy(this, workspaceId, ownerUserId);
   }
+
+  readReplicaStanding(workspaceId: string, shareGrantBindings?: string) { return replicaReads.readReplicaStanding(this, workspaceId, shareGrantBindings); }
 
   postAutomationWake(input: noticeStorage.PostAutomationWakeInput): noticeStorage.PostedAutomationWake {
     return noticeStorage.postAutomationWake(this, input);
