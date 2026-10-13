@@ -352,7 +352,7 @@ export class GoToIndex {
     }
     return this.filteredRows.rows;
   }
-  private files: readonly string[] = [];
+  private files: PreparedGoToRow[] = [];
   private listingGeneration = 0;
   private readonly subsets = new Map<GoToKind, Map<string, PreparedGoToRow>>();
   private sources: GoToSources = {};
@@ -460,15 +460,22 @@ export class GoToIndex {
     if (!force && sameSources(sources, this.sources)) {
       const metadata = this.queryMetadata.slice();
       const ordered = this.orderedRows.slice(), complete = this.completeRows.slice();
+      for (const [kind, subset] of this.subsets) {
+        let fileIndex = 0;
+        for (const previous of kind === "file" ? this.files : subset.values()) {
+          const row = withGoToRanks(previous, pinned, recent);
+          if (row !== previous) subset.set(goToRowKey(row), row);
+          if (kind === "file") this.files[fileIndex++] = row;
+          if (complete[previous.sourceIndex] === previous) complete[previous.sourceIndex] = row;
+          if (++work.operations % GO_TO_CHUNK_SIZE === 0) yield;
+        }
+      }
       for (let i = 0; i < this.orderedRows.length; i++) {
-        const previous = this.orderedRows[i];
-        const row = withGoToRanks(previous, pinned, recent);
-        if (row !== previous) this.subsets.get(row.kind)!.set(goToRowKey(row), row);
+        const row = complete[this.orderedRows[i].sourceIndex];
         row.includedRevision = this.revision + 1;
         metadata[i * 8 + 5] = row.pinnedRank;
         metadata[i * 8 + 7] = recent.get(row.path) ?? -1;
         ordered[i] = row;
-        complete[row.sourceIndex] = row;
         if (++work.operations % GO_TO_CHUNK_SIZE === 0) yield;
       }
       this.queryMetadata = metadata;
@@ -483,16 +490,17 @@ export class GoToIndex {
     const index = this;
     function* replace(kind: GoToKind, entries: Iterable<{
       key: string; label: string; path: string; record: PreparedGoToRow["record"];
-      glyphId: PreparedGoToRow["glyphId"];
+      glyphId: PreparedGoToRow["glyphId"]; previous?: PreparedGoToRow;
     } | null>, verdictsChanged = true): Generator<void> {
       const previous = index.subsets.get(kind);
       const next = kind === "file" ? previous ?? new Map<string, PreparedGoToRow>() : new Map<string, PreparedGoToRow>();
       const generation = kind === "file" ? ++index.listingGeneration : 0;
-      const files: string[] = [];
-      const removed: string[] = [];
+      const files: PreparedGoToRow[] = [];
+      const removed: PreparedGoToRow[] = [];
+      if (kind === "file") index.subsets.set(kind, next);
       for (const entry of entries) {
         if (!entry) { if (++work.operations % GO_TO_CHUNK_SIZE === 0) yield; continue; }
-        let row = kind === "file" ? next.get(entry.key) : previous?.get(entry.key);
+        let row = kind === "file" ? entry.previous : previous?.get(entry.key);
         const existing = row;
         if (kind === "file" && row?.listingGeneration === generation) { if (++work.operations % GO_TO_CHUNK_SIZE === 0) yield; continue; }
         const isNew = !row || row.path !== entry.path || row.label !== entry.label;
@@ -527,16 +535,18 @@ export class GoToIndex {
         if (row !== existing || kind !== "file") next.set(entry.key, row);
         if (kind === "file") {
           const old = index.files[files.length];
-          if (old && old !== row.path) removed.push(old);
-          row.listingGeneration = generation; files.push(row.path);
+          if (old && old.path !== row.path) removed.push(old);
+          row.listingGeneration = generation; files.push(row);
         }
         if (++work.operations % GO_TO_CHUNK_SIZE === 0) yield;
       }
       if (kind === "file") {
         for (let i = files.length; i < index.files.length; i++) { removed.push(index.files[i]); if (++work.operations % GO_TO_CHUNK_SIZE === 0) yield; }
         // Interrupted passes can add entries before publishing their file array.
-        for (const key of force ? next.keys() : removed) {
-          if (next.get(key)?.listingGeneration !== generation) next.delete(key);
+        for (const entry of force ? next.keys() : removed) {
+          if (typeof entry === "string") {
+            if (next.get(entry)?.listingGeneration !== generation) next.delete(entry);
+          } else if (entry.listingGeneration !== generation && next.get(entry.path)?.listingGeneration !== generation) next.delete(entry.path);
           if (++work.operations % GO_TO_CHUNK_SIZE === 0) yield;
         }
         index.files = files;
@@ -549,15 +559,15 @@ export class GoToIndex {
       const verdictsChanged = forceVerdicts || !samePathVerdicts(snapshot, this.sources.listing);
       if (force || snapshot.files !== this.sources.listing?.files || verdictsChanged) yield* replace("file", (function* () {
         const previous = index.subsets.get("file");
-        let entry: { key: string; path: string; label: string; record: GoToFile; glyphId: PreparedGoToRow["glyphId"] } | undefined;
+        let entry: { key: string; path: string; label: string; record: GoToFile; glyphId: PreparedGoToRow["glyphId"]; previous?: PreparedGoToRow } | undefined;
         for (const file of snapshot.files) {
           const row = previous?.get(file.path);
           const glyphId = row && (row.record as GoToFile).kind === file.kind ? row.glyphId :
             file.kind === "database" ? FILE_KIND_RECORDS.database.glyphId : fileKindForPath(file.path).glyphId;
-          if (!entry) entry = { key: file.path, path: file.path, label: row?.label ?? basenameOf(file.path), record: file, glyphId };
+          if (!entry) entry = { key: file.path, path: file.path, label: row?.label ?? basenameOf(file.path), record: file, glyphId, previous: row };
           else {
             entry.key = file.path; entry.path = file.path; entry.label = row?.label ?? basenameOf(file.path);
-            entry.record = file; entry.glyphId = glyphId;
+            entry.record = file; entry.glyphId = glyphId; entry.previous = row;
           }
           yield entry;
         }
@@ -594,24 +604,28 @@ export class GoToIndex {
     if (!changed && !contextChanged) return;
     const rows: PreparedGoToRow[] = [];
     const addedRows: PreparedGoToRow[] = [];
-    for (const [kind, subset] of this.subsets) for (const entry of kind === "file" ? this.files : subset.values()) {
-      const previous = typeof entry === "string" ? subset.get(entry)! : entry;
-      let row = previous;
-      if (contextChanged) row = withGoToRanks(row, pinned, recent);
-      if (kind === "folder" || kind === "collection" || kind === "app") {
-        if (sources.listing) row = yield* applyGoToPathState(row, sources.listing, work);
-        else if (row.visible) row = { ...row, visible: false, includedRevision: -1 };
-      }
-      if (row !== previous) subset.set(goToRowKey(row), row);
-      if (row.visible && !(kind === "folder" && this.subsets.get("collection")?.has(row.path))) {
-        if (forceVerdicts || row.includedRevision !== this.revision || row.sourceIndex !== rows.length) {
-          addedRows.push(row);
-          row.includedRevision = -1;
+    let previousKeptIndex = -1;
+    for (const [kind, subset] of this.subsets) {
+      let fileIndex = 0;
+      for (const previous of kind === "file" ? this.files : subset.values()) {
+        let row = previous;
+        if (contextChanged) row = withGoToRanks(row, pinned, recent);
+        if (kind === "folder" || kind === "collection" || kind === "app") {
+          if (sources.listing) row = yield* applyGoToPathState(row, sources.listing, work);
+          else if (row.visible) row = { ...row, visible: false, includedRevision: -1 };
         }
-        row.sourceIndex = rows.length;
-        rows.push(row);
+        if (row !== previous) subset.set(goToRowKey(row), row);
+        if (kind === "file") this.files[fileIndex++] = row;
+        if (row.visible && !(kind === "folder" && this.subsets.get("collection")?.has(row.path))) {
+          if (forceVerdicts || row.includedRevision !== this.revision || row.sourceIndex < previousKeptIndex) {
+            addedRows.push(row);
+            row.includedRevision = -1;
+          } else previousKeptIndex = row.sourceIndex;
+          row.sourceIndex = rows.length;
+          rows.push(row);
+        }
+        if (++work.operations % GO_TO_CHUNK_SIZE === 0) yield;
       }
-      if (++work.operations % GO_TO_CHUNK_SIZE === 0) yield;
     }
     // Sort only newly admitted rows, then merge them into the previous order.
     // Bounded native sorts handle small runs; merge copies yield in chunks.

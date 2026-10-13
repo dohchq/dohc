@@ -568,3 +568,44 @@ it("reorders only the changed rows after superseding a safe rename", () => {
   expect(index.query("first")).toHaveLength(1);
   expect(index.query("second")).toHaveLength(1);
 });
+
+
+it("reorders only the created row near the top and none after deletion", () => {
+  const index = new GoToIndex("workspace");
+  const first = listing(Array.from({ length: 2_000 }, (_, n) => "src/file-" + n + ".ts"));
+  update(index, { listing: first });
+  const created = { ...first, files: [first.files[0], { path: "src/new.ts", kind: "file" as const }, ...first.files.slice(1)] };
+  update(index, { listing: created });
+  expect(index.lastReorderedCount).toBe(1);
+  expect(ids(index.query(""))).toEqual(fullSort(index, ""));
+  update(index, { listing: first });
+  expect(index.lastReorderedCount).toBe(0);
+  expect(ids(index.query(""))).toEqual(fullSort(index, ""));
+});
+it("looks up each unchanged file only once during a rename", () => {
+  const index = new GoToIndex("workspace");
+  const first = listing(Array.from({ length: 2_000 }, (_, n) => "src/file-" + n + ".ts"));
+  update(index, { listing: first });
+  const get = vi.spyOn(Map.prototype, "get");
+  update(index, { listing: { ...first, files: first.files.map((file, n) => n === 1 ? { ...file, path: "src/new.ts" } : file) } });
+  const calls = get.mock.calls.slice(), maps = get.mock.contexts.slice();
+  get.mockRestore();
+  const fileMap = maps.find(map => map instanceof Map && (map.get(first.files[0].path) as PreparedGoToRow | undefined)?.kind === "file");
+  const fileLookups = calls.filter((_, n) => maps[n] === fileMap);
+  expect(fileMap).toBeDefined();
+  expect(fileLookups.length).toBeLessThanOrEqual(first.files.length + 2);
+  expect(index.query("new")[0].path).toBe("src/new.ts");
+});
+it("keeps pins and recency made while host visibility is degraded", () => {
+  const index = new GoToIndex("workspace");
+  const ready = listing(["a/report.md", "b/report.md", "c/report.md"]);
+  update(index, { listing: ready });
+  const old = index.query("report");
+  update(index, { listing: { ...ready, visibility: { status: "degraded", hiddenHostPaths: new Set() } } });
+  update(index, {}, { pinned: ["c/report.md"], recent: ["b/report.md"] });
+  expect(index.query("report")).toEqual([]);
+  update(index, { listing: ready });
+  expect(index.query("report").map(row => row.path)).toEqual(["c/report.md", "b/report.md", "a/report.md"]);
+  expect(ids(index.query("report"))).toEqual(fullSort(index, "report"));
+  expect(old.every(row => row.pinnedRank === 1 && row.recentRank === Number.MAX_SAFE_INTEGER)).toBe(true);
+});

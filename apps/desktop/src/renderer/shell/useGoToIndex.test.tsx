@@ -274,3 +274,26 @@ it("keeps a pending channel removal hidden through an undefined reload source", 
   expect(answers.every(answer => answer.length === 0)).toBe(true);
   queue.drain();
 });
+
+
+it("reuses filtered rows across unchanged renders during a pending removal", () => {
+  const queue = taskQueue();
+  const rows: (readonly unknown[])[] = [];
+  function Groups(props: { groups: { id: string; name: string; kind: "channel" }[] }) {
+    const index = useGoToIndex("workspace", { groups: props.groups }, context);
+    rows.push(index.rows);
+    return null;
+  }
+  const groups = Array.from({ length: 2_000 }, (_, n) => ({ id: String(n), name: "Channel " + n, kind: "channel" as const }));
+  const view = render(<Groups groups={groups} />);
+  queue.drain();
+  const remaining = groups.slice(1);
+  view.rerender(<Groups groups={remaining} />);
+  const filtered = rows.at(-1);
+  expect(filtered).toHaveLength(1_999);
+  rows.length = 0;
+  view.rerender(<Groups groups={remaining} />);
+  expect(rows.length).toBeGreaterThan(0);
+  expect(rows.every(row => row === filtered)).toBe(true);
+  queue.drain();
+});

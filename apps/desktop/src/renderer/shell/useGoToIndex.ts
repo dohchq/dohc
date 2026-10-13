@@ -41,7 +41,8 @@ export function useGoToIndex(workspaceId: string, sources: GoToSources, context:
   }, [index, listingCommitted, sources.listing, sources.collections, sources.apps, sources.versions, sources.groups, context.pinned, context.recent]);
   // This render owns the view, not the index. An abandoned render changes no state.
   // Check incoming verdicts before any query, including before the effect commits them.
-  const removed = index.removedKeys(sources);
+  const removed = useMemo(() => index.removedKeys(sources),
+    [index, index.revision, sources.collections, sources.apps, sources.versions, sources.groups]);
   const safe = () => index.canQuery(listingCommitted ? sources.listing : undefined);
   return {
     workspaceId,
