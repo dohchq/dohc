@@ -212,6 +212,8 @@ async fn enrollment_push_claims_base_and_still_misses() {
     let actor = supervisor.open(&path, 1000).unwrap().actor;
     let before = append(&actor, producer.plaintext_insert(100, "b")).await;
     push(&actor).await;
+    // The claim alone would force the next miss; this proves first contact cleared the cache.
+    assert!(actor.ydoc_cache_stats_for_test().await.unwrap().removes > before.removes);
     actor
         .run(|store, _| {
             assert!(
