@@ -68,6 +68,7 @@ const PARTS = [
   "composer-sending",
   "about-conversation",
   "file-view-actions",
+  "offers",
   "data-grid",
 ];
 // A fixed instant for the page's clock. The capture pauses the clock an
