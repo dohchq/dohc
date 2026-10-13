@@ -163,26 +163,34 @@ impl Checkpoints {
     // WAL frames can appear between this probe and its PASSIVE checkpoint.
     // The background connection can only reduce that tail.
     pub(crate) fn checkpoint_on_writer_if_needed(&self, conn: &Connection) {
-        self.checkpoint_small_tail(conn, WRITER_CHECKPOINT_FRAMES);
+        self.checkpoint_tail(conn, WRITER_CHECKPOINT_FRAMES, MAX_WRITER_BACKFILL_FRAMES);
     }
 
-    /// Finish fresh schema metadata before readers can pin its WAL prefix.
-    /// The same writer bound applies; larger tails remain background work.
-    pub(crate) fn checkpoint_initial_schema_if_small(&self, conn: &Connection) {
-        self.checkpoint_small_tail(conn, 0);
+    /// Before publication a fresh store contains only schema metadata, no user
+    /// data or concurrent domain writer. Finish that entire finite schema tail.
+    /// PASSIVE never waits for an outside reader, even during startup.
+    pub(crate) fn checkpoint_fresh_schema(&self, conn: &Connection) {
+        self.checkpoint_tail(conn, 0, i64::MAX);
     }
 
-    fn checkpoint_small_tail(&self, conn: &Connection, minimum_log_frames: i64) {
+    /// Upgrades contain user data and may have readers pinning an old prefix.
+    /// Attempt only the ordinary small-tail bound; larger backlogs stay on the
+    /// background worker, and a pinned reader may leave even a small tail.
+    pub(crate) fn checkpoint_migration_tail_if_small(&self, conn: &Connection) {
+        self.checkpoint_tail(conn, 0, MAX_WRITER_BACKFILL_FRAMES);
+    }
+
+    fn checkpoint_tail(&self, conn: &Connection, minimum_log_frames: i64, maximum_tail: i64) {
         let Ok((log, backfilled)) = frames(conn) else {
             return;
         };
-        if log < minimum_log_frames
-            || !(0..=MAX_WRITER_BACKFILL_FRAMES).contains(&(log - backfilled))
-        {
+        if log < minimum_log_frames || !(0..=maximum_tail).contains(&(log - backfilled)) {
             return;
         }
         #[cfg(feature = "fault-injection")]
         let _writer_phase = crate::capture_phase::Measure::new("writer_PASSIVE");
+        #[cfg(test)]
+        let began = std::time::Instant::now();
         if let Ok((latest, finished)) =
             conn.query_row("PRAGMA main.wal_checkpoint(PASSIVE)", [], |row| {
                 Ok((row.get::<_, i64>(1)?, row.get::<_, i64>(2)?))
@@ -193,7 +201,14 @@ impl Checkpoints {
                 self.writer_calls.fetch_add(1, Ordering::Relaxed);
                 self.writer_max
                     .fetch_max((finished - backfilled).max(0), Ordering::Relaxed);
-                assert!(latest < 0 || finished - backfilled <= MAX_WRITER_BACKFILL_FRAMES);
+                assert!(latest < 0 || finished - backfilled <= maximum_tail);
+                if minimum_log_frames == 0 {
+                    eprintln!(
+                        "STARTUP_PASSIVE fresh={} elapsed_us={} starting_log={log} starting_backfilled={backfilled} finished={finished}",
+                        maximum_tail == i64::MAX,
+                        began.elapsed().as_micros()
+                    );
+                }
             }
             #[cfg(not(test))]
             let _ = (latest, finished);
@@ -388,11 +403,120 @@ mod tests {
         let (log, backfilled) = s.read_with(frames).unwrap();
         assert_eq!(
             log, backfilled,
-            "fresh schema must finish its small tail before publication"
+            "fresh schema must finish its whole metadata tail before publication"
         );
         let (calls, maximum) = s.checkpoint_work_for_test();
         assert_eq!(calls, 1);
+        assert!(maximum > 0);
+    }
+
+    #[test]
+    fn fresh_schema_larger_than_the_writer_bound_finishes_before_publication() {
+        let scratch = ScratchDir::new().unwrap();
+        let path = scratch.path().join("engine.db");
+        let mut conn = Connection::open(&path).unwrap();
+        conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0;")
+            .unwrap();
+        let tx = conn.transaction().unwrap();
+        for n in 0..1100 {
+            tx.execute_batch(&format!(
+                "CREATE TABLE metadata_{n}(id INTEGER PRIMARY KEY)"
+            ))
+            .unwrap();
+        }
+        tx.commit().unwrap();
+        let (log, backfilled) = frames(&conn).unwrap();
+        assert!(log - backfilled > MAX_WRITER_BACKFILL_FRAMES);
+        let checkpoints = Checkpoints::start(&path).unwrap();
+        checkpoints.checkpoint_fresh_schema(&conn);
+        assert_eq!(frames(&conn).unwrap(), (log, log));
+        assert_eq!(checkpoints.writer_work_for_test(), (1, log - backfilled));
+    }
+
+    fn store_before_link_migration(path: &Path) -> Connection {
+        use crate::migration::{BASELINE_MIGRATIONS, MigrationContext, run_migrations};
+        let mut conn = Connection::open(path).unwrap();
+        conn.set_db_config(
+            rusqlite::config::DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE,
+            true,
+        )
+        .unwrap();
+        conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0;")
+            .unwrap();
+        let before = BASELINE_MIGRATIONS
+            .iter()
+            .position(|m| m.ordinal == 47)
+            .unwrap();
+        run_migrations(
+            &mut conn,
+            &BASELINE_MIGRATIONS[..before],
+            &MigrationContext::current(1),
+            &NoFaults,
+        )
+        .unwrap();
+        conn.execute_batch("CREATE TABLE checkpoint_load(id INTEGER PRIMARY KEY, body BLOB); INSERT INTO checkpoint_load VALUES(0, X'01'); PRAGMA wal_checkpoint(TRUNCATE);")
+            .unwrap();
+        conn
+    }
+
+    #[test]
+    fn upgrade_finishes_a_small_migration_tail_before_publication() {
+        let scratch = ScratchDir::new().unwrap();
+        let path = scratch.path().join("engine.db");
+        drop(store_before_link_migration(&path));
+        let s = EngineStore::open_for_actor(&path, 2, None, None).unwrap();
+        assert!(!s.was_freshly_created());
+        assert_eq!(s.table_row_count("checkpoint_load").unwrap(), 1);
+        let (log, backfilled) = s.read_with(frames).unwrap();
+        assert_eq!(log, backfilled);
+        let (calls, maximum) = s.checkpoint_work_for_test();
+        assert_eq!(calls, 1);
         assert!((1..=MAX_WRITER_BACKFILL_FRAMES).contains(&maximum));
+    }
+
+    #[test]
+    fn upgrade_with_a_pinned_reader_keeps_startup_work_bounded() {
+        for bytes in [4096, 12 * 1024 * 1024] {
+            let scratch = ScratchDir::new().unwrap();
+            let path = scratch.path().join("engine.db");
+            let conn = store_before_link_migration(&path);
+            let reader =
+                Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+            reader
+                .execute_batch("BEGIN; SELECT * FROM checkpoint_load;")
+                .unwrap();
+            conn.execute(
+                "INSERT INTO checkpoint_load VALUES(1, ?1)",
+                [vec![42_u8; bytes]],
+            )
+            .unwrap();
+            drop(conn);
+            let mut s = EngineStore::open_for_actor(&path, 2, None, None).unwrap();
+            s.stop_checkpoint_worker_for_test();
+            assert!(!s.was_freshly_created());
+            assert_eq!(s.table_row_count("checkpoint_load").unwrap(), 2);
+            let (calls, maximum) = s.checkpoint_work_for_test();
+            assert_eq!(calls, u64::from(bytes == 4096));
+            assert!(maximum <= MAX_WRITER_BACKFILL_FRAMES);
+            let (log, backfilled) = s.read_with(frames).unwrap();
+            assert!(
+                log > backfilled,
+                "PASSIVE must leave the reader's pinned prefix alone"
+            );
+            assert_eq!(
+                reader
+                    .query_row("SELECT count(*) FROM checkpoint_load", [], |r| r
+                        .get::<_, i64>(0))
+                    .unwrap(),
+                1
+            );
+            reader.execute_batch("ROLLBACK").unwrap();
+            drop(reader);
+            drop(s);
+            let s = EngineStore::open_for_actor(&path, 3, None, None).unwrap();
+            assert_eq!(s.table_row_count("checkpoint_load").unwrap(), 2);
+            assert_eq!(s.checkpoint_work_for_test().0, 0);
+        }
     }
 
     #[test]
@@ -420,7 +544,7 @@ mod tests {
         let checkpoints = Checkpoints::start(&path).unwrap();
         let unmodified = s.read_with(frames).unwrap();
         s.read_with(|c| {
-            checkpoints.checkpoint_initial_schema_if_small(c);
+            checkpoints.checkpoint_migration_tail_if_small(c);
             checkpoints.checkpoint_on_writer_if_needed(c);
             Ok::<_, rusqlite::Error>(())
         })
@@ -688,10 +812,23 @@ mod tests {
                 .unwrap(),
             0
         );
+        // Keep a small retained user-data WAL, so a removed Fresh guard is
+        // observable even when an empty WAL would report no checkpoint work.
+        s.read_with(|c| c.execute_batch("CREATE TABLE reopen_probe(id INTEGER PRIMARY KEY); INSERT INTO reopen_probe VALUES(1);"))
+            .unwrap();
+        let reader = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+        reader
+            .execute_batch("BEGIN; SELECT * FROM reopen_probe;")
+            .unwrap();
         drop(s);
         let s = EngineStore::open_for_actor(&path, 2, None, None).unwrap();
         assert!(!s.was_freshly_created());
         assert!(s.checkpoint_worker_running_for_test());
+        assert_eq!(
+            s.checkpoint_work_for_test().0,
+            0,
+            "an existing, fully migrated store must do no startup checkpoint"
+        );
         assert_eq!(
             s.read_with(|c| c.query_row("PRAGMA wal_autocheckpoint", [], |r| r.get::<_, i64>(0)))
                 .unwrap(),

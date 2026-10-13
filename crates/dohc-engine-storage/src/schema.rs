@@ -320,15 +320,15 @@ fn open_engine_db_configured(
         ctx.initial_root_token = root_token.map(str::to_owned);
     }
     let no_faults = NoFaults;
-    match run_migrations(
+    let newly_applied = match run_migrations(
         &mut conn,
         BASELINE_MIGRATIONS,
         &ctx,
         &no_faults as &dyn FaultInjector,
     )? {
-        MigrationOutcome::Applied { .. } => {}
+        MigrationOutcome::Applied { newly_applied } => newly_applied,
         MigrationOutcome::Crashed => return Err(StorageError::MigrationFailed { source: None }),
-    }
+    };
 
     validate_v2(&conn)?;
     integrity_check(&conn)?;
@@ -336,7 +336,9 @@ fn open_engine_db_configured(
     crate::search_generation::install(&conn).map_err(StorageError::corrupt)?;
     if let Some(checkpoints) = &checkpoints {
         if disposition == Disposition::Fresh {
-            checkpoints.checkpoint_initial_schema_if_small(&conn);
+            checkpoints.checkpoint_fresh_schema(&conn);
+        } else if newly_applied > 0 {
+            checkpoints.checkpoint_migration_tail_if_small(&conn);
         }
         checkpoints.request();
     }
