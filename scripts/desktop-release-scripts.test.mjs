@@ -45,7 +45,7 @@ import {
   createMockUpdateServer,
   resolveServablePath,
 } from "./mock-update-server.mjs";
-import { sourceMapUpload, uploadSourceMaps } from "./upload-desktop-source-maps.mjs";
+import { scriptsWithoutChunkIds, sourceMapUpload, uploadSourceMaps } from "./upload-desktop-source-maps.mjs";
 
 async function fixtureRoot(version = "0.1.0") {
   const root = await mkdtemp(join(tmpdir(), "dohc-release-"));
@@ -750,90 +750,129 @@ test("desktop release workflow uploads only distributable release assets", () =>
 });
 
 const SOURCE_MAP_ENV = {
-  DOHC_SENTRY_DSN: "https://abcdef0123456789abcdef0123456789@sentry.example.test/42",
-  SENTRY_AUTH_TOKEN: "sntrys_fixture",
+  DOHC_POSTHOG_KEY: "phc_abcdefghij0123456789",
+  POSTHOG_CLI_API_KEY: "phx_fixture",
+  POSTHOG_CLI_PROJECT_ID: "42",
   DESKTOP_VERSION: "0.1.1-nightly.20260621.2.1",
-  DOHC_SENTRY_DIST: "win-x64",
+  DOHC_DESKTOP_DIST: "win-x64",
 };
+const CHUNK_ID = "0192f5b8-7c3a-5e1d-9a2b-3c4d5e6f7a8b";
 
-test("a build with a Sentry DSN uploads its source maps under the names its reports carry", () => {
-  assert.deepEqual(sourceMapUpload(SOURCE_MAP_ENV).args, [
-    "dlx", "@sentry/cli@3.8.0", "sourcemaps", "upload",
-    "--release", "dohc-desktop@0.1.1-nightly.20260621.2.1",
-    "--dist", "win-x64",
-    "--url-prefix", "app:///dist",
-    "apps/desktop/dist",
-  ]);
-  assert.match(sourceMapUpload({ ...SOURCE_MAP_ENV, DOHC_SENTRY_DSN: " " }).skip, /DOHC_SENTRY_DSN is not set/);
-  assert.match(sourceMapUpload({ DOHC_SENTRY_DSN: "" }).skip, /needs no source maps/);
-  for (const missing of [{ SENTRY_AUTH_TOKEN: "" }, { SENTRY_AUTH_TOKEN: undefined }]) {
-    assert.throws(() => sourceMapUpload({ ...SOURCE_MAP_ENV, ...missing }), /Add the SENTRY_AUTH_TOKEN secret/);
+// The files a production build writes, before and after the CLI injects them.
+async function builtDist({ injected }) {
+  const root = await mkdtemp(join(tmpdir(), "dohc-source-maps-"));
+  const trailer = injected ? `\n//# chunkId=${CHUNK_ID}` : "";
+  for (const file of ["main/app.js", "main/chunks/posthogErrors-Ab12.js", "renderer/assets/index-Cd34.js"]) {
+    await mkdir(join(root, file, ".."), { recursive: true });
+    await writeFile(join(root, file), `console.log(1);\n${trailer}`);
+    await writeFile(join(root, `${file}.map`), "{}");
   }
+  // A file without a source map is not code the reports name.
+  await writeFile(join(root, "renderer/assets/worker-copy.js"), "console.log(2);\n");
+  return [join(root, "main"), join(root, "renderer")];
+}
+
+test("a build with a PostHog key injects and uploads its source maps under the release and dist its reports carry", () => {
+  assert.deepEqual(sourceMapUpload(SOURCE_MAP_ENV).args, [
+    "dlx", "--allow-build=@posthog/cli", "@posthog/cli@0.18.10", "sourcemap", "process",
+    "--directory", "apps/desktop/dist/main",
+    "--directory", "apps/desktop/dist/renderer",
+    "--release-name", "dohc-desktop",
+    "--release-version", "0.1.1-nightly.20260621.2.1",
+    "--build", "win-x64",
+  ]);
+  assert.match(sourceMapUpload({ ...SOURCE_MAP_ENV, DOHC_POSTHOG_KEY: " " }).skip, /DOHC_POSTHOG_KEY is not set/);
+  assert.match(sourceMapUpload({ DOHC_POSTHOG_KEY: "" }).skip, /needs no source maps/);
+  for (const missing of [{ POSTHOG_CLI_API_KEY: "" }, { POSTHOG_CLI_API_KEY: undefined }]) {
+    assert.throws(() => sourceMapUpload({ ...SOURCE_MAP_ENV, ...missing }), /POSTHOG_CLI_API_KEY is empty\. Add it/);
+  }
+  assert.throws(
+    () => sourceMapUpload({ ...SOURCE_MAP_ENV, POSTHOG_CLI_API_KEY: " ", POSTHOG_CLI_PROJECT_ID: "" }),
+    /POSTHOG_CLI_API_KEY and POSTHOG_CLI_PROJECT_ID are empty\. Add them/,
+  );
   assert.throws(() => sourceMapUpload({ ...SOURCE_MAP_ENV, DESKTOP_VERSION: "" }), /DESKTOP_VERSION/);
-  assert.throws(() => sourceMapUpload({ ...SOURCE_MAP_ENV, DOHC_SENTRY_DIST: "win x64" }), /DOHC_SENTRY_DIST/);
+  assert.throws(() => sourceMapUpload({ ...SOURCE_MAP_ENV, DOHC_DESKTOP_DIST: "win x64" }), /DOHC_DESKTOP_DIST/);
 });
 
-test("the source map upload leaves Sentry settings the release did not set unset, and keeps the ones it did", () => {
+test("the source map upload leaves a PostHog host the release did not set unset, and keeps one it did", async () => {
+  const directories = await builtDist({ injected: true });
   const calls = [];
   const spawn = (command, args, options) => {
     calls.push({ command, args, env: options.env });
     return { status: 0 };
   };
   // A repository variable that is not set reaches the step as an empty string.
-  uploadSourceMaps({ ...SOURCE_MAP_ENV, PATH: "/bin", SENTRY_URL: "", SENTRY_ORG: " ", SENTRY_PROJECT: "" }, spawn);
-  uploadSourceMaps({
-    ...SOURCE_MAP_ENV,
-    SENTRY_URL: "https://sentry.example.test/",
-    SENTRY_ORG: "dohc",
-    SENTRY_PROJECT: "desktop",
-  }, spawn);
+  uploadSourceMaps({ ...SOURCE_MAP_ENV, PATH: "/bin", POSTHOG_CLI_HOST: " " }, spawn, directories);
+  uploadSourceMaps({ ...SOURCE_MAP_ENV, POSTHOG_CLI_HOST: "https://eu.posthog.com" }, spawn, directories);
 
   const [unset, configured] = calls;
   assert.equal(unset.command, "pnpm");
   assert.deepEqual(unset.args, sourceMapUpload(SOURCE_MAP_ENV).args);
-  for (const name of ["SENTRY_URL", "SENTRY_ORG", "SENTRY_PROJECT"]) assert.equal(name in unset.env, false, name);
-  assert.equal(unset.env.SENTRY_AUTH_TOKEN, SOURCE_MAP_ENV.SENTRY_AUTH_TOKEN);
+  assert.equal("POSTHOG_CLI_HOST" in unset.env, false);
+  assert.equal(unset.env.POSTHOG_CLI_API_KEY, SOURCE_MAP_ENV.POSTHOG_CLI_API_KEY);
+  assert.equal(unset.env.POSTHOG_CLI_PROJECT_ID, SOURCE_MAP_ENV.POSTHOG_CLI_PROJECT_ID);
   assert.equal(unset.env.PATH, "/bin");
-  assert.equal(configured.env.SENTRY_URL, "https://sentry.example.test/");
-  assert.equal(configured.env.SENTRY_ORG, "dohc");
-  assert.equal(configured.env.SENTRY_PROJECT, "desktop");
+  assert.equal(configured.env.POSTHOG_CLI_HOST, "https://eu.posthog.com");
 
   assert.throws(
-    () => uploadSourceMaps(SOURCE_MAP_ENV, () => ({ status: 1 })),
+    () => uploadSourceMaps(SOURCE_MAP_ENV, () => ({ status: 1 }), directories),
     /The source map upload failed with exit code 1/,
   );
 });
 
-test("upload-desktop-source-maps skips without a DSN and fails without a token when run as a command", async () => {
+test("the source map upload fails when a script the reports name ships without its chunk ID", async () => {
+  const directories = await builtDist({ injected: false });
+  assert.deepEqual(scriptsWithoutChunkIds(directories).map((path) => path.replaceAll("\\", "/").split("/").at(-1)).sort(), [
+    "app.js", "index-Cd34.js", "posthogErrors-Ab12.js",
+  ]);
+  assert.throws(
+    () => uploadSourceMaps(SOURCE_MAP_ENV, () => ({ status: 0 }), directories),
+    /These scripts carry no chunk ID[\s\S]*app\.js/,
+  );
+  assert.deepEqual(scriptsWithoutChunkIds(await builtDist({ injected: true })), []);
+});
+
+test("upload-desktop-source-maps skips without a PostHog key and fails without upload credentials when run as a command", async () => {
   const skipped = await runReleaseScript("upload-desktop-source-maps.mjs", [], {
     ...SOURCE_MAP_ENV,
-    DOHC_SENTRY_DSN: "",
-    SENTRY_AUTH_TOKEN: "",
+    DOHC_POSTHOG_KEY: "",
+    POSTHOG_CLI_API_KEY: "",
   });
   assert.match(skipped.stdout, /needs no source maps/);
 
   await assert.rejects(
-    runReleaseScript("upload-desktop-source-maps.mjs", [], { ...SOURCE_MAP_ENV, SENTRY_AUTH_TOKEN: "" }),
-    (error) => error.code === 1 && /Add the SENTRY_AUTH_TOKEN secret/.test(error.stderr),
+    runReleaseScript("upload-desktop-source-maps.mjs", [], { ...SOURCE_MAP_ENV, POSTHOG_CLI_PROJECT_ID: "" }),
+    (error) => error.code === 1 && /POSTHOG_CLI_PROJECT_ID is empty/.test(error.stderr),
   );
 });
 
-test("the release uploads source maps for every build that names Sentry, and never in a dry run", () => {
+test("the release injects source maps for every build that names PostHog before packaging, and never in a dry run", () => {
   const job = releaseWorkflow.jobs.build;
   const build = releaseStep(job, "pnpm build:desktop");
   const upload = releaseStep(job, "upload-desktop-source-maps.mjs");
+  const packaging = releaseStep(job, "electron-builder");
   assert.equal(upload.if, "needs.preflight.outputs.dry_run != 'true'");
   assert.equal(upload.run, "node scripts/upload-desktop-source-maps.mjs");
-  // The upload sees the DSN and dist the build compiled in.
-  for (const name of ["DOHC_SENTRY_DSN", "DOHC_SENTRY_DIST"]) {
+  // The upload sees the key and dist the build compiled in.
+  for (const name of ["DOHC_POSTHOG_KEY", "DOHC_DESKTOP_DIST"]) {
     assert.ok(build.env[name], `the build sets ${name}`);
     assert.equal(upload.env[name], build.env[name], `the upload reads the build's ${name}`);
   }
+  assert.match(build.env.DOHC_POSTHOG_KEY, /needs\.preflight\.outputs\.dry_run != 'true' && vars\.DOHC_POSTHOG_KEY/);
   assert.equal(upload.env.DESKTOP_VERSION, "${{ needs.preflight.outputs.version }}");
-  assert.match(upload.env.SENTRY_AUTH_TOKEN, /needs\.preflight\.outputs\.dry_run != 'true' && secrets\.SENTRY_AUTH_TOKEN/);
+  assert.match(upload.env.POSTHOG_CLI_API_KEY, /needs\.preflight\.outputs\.dry_run != 'true' && secrets\.POSTHOG_CLI_API_KEY/);
   assert.ok(job.steps.indexOf(upload) > job.steps.indexOf(build), "the upload runs after the build writes the source maps");
+  assert.ok(job.steps.indexOf(packaging) > job.steps.indexOf(upload), "the package ships the files the upload injected");
+  for (const step of job.steps.slice(job.steps.indexOf(upload) + 1)) {
+    assert.doesNotMatch(step.run ?? "", /build:desktop|electron-vite build/, `${step.name} must not rebuild the injected files`);
+  }
 });
 
+test("the installer leaves out every source map", async () => {
+  const builder = load(await readFile(new URL("../apps/desktop/electron-builder.yml", import.meta.url), "utf8"));
+  assert.ok(builder.files.includes("dist/**"));
+  assert.ok(builder.files.includes("!dist/**/*.map"));
+});
 async function artifactFixture(platform = "win", arch = "x64") {
   const directory = await mkdtemp(join(tmpdir(), "dohc-artifact-test-"));
   const version = "0.1.0";
