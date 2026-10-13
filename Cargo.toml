@@ -72,14 +72,20 @@ debug = "line-tables-only"
 [profile.dev.package."*"]
 debug = false
 
-# Large-history tests parse and hash real persisted proofs. Optimize these
-# paths while retaining the test profile's assertions and overflow checks.
+# Large-history tests parse, hash, and validate real persisted proofs.
+# Optimize these paths while retaining the test profile's assertions and
+# overflow checks.
 [profile.test]
 debug-assertions = true
 overflow-checks = true
 
 [profile.test.package.dohc-engine-collab]
 opt-level = 1
+debug-assertions = true
+overflow-checks = true
+
+[profile.test.package.dohc-engine-files]
+opt-level = 2
 debug-assertions = true
 overflow-checks = true
 
