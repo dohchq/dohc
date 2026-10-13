@@ -1397,7 +1397,7 @@ fn native_restore_keeps_enrolled_owner_drafts_as_truthful_sources() {
             f.store
                 .write_with(&NoFaults, |tx| {
                     durable::record_authorized_update_in_tx(
-                        tx, &key, &update, true, None, None, false, true, 11,
+                        tx, &key, &update, true, None, None, false, true, 11, None,
                     )
                 })
                 .unwrap();
@@ -1551,7 +1551,7 @@ fn native_restore_tail_accepts_trusted_deduped_pre_adoption_source_as_overlappin
         .store
         .write_with(&NoFaults, |tx| {
             let outcome = durable::record_authorized_update_in_tx(
-                tx, &key, &original, true, None, None, false, true, 11,
+                tx, &key, &original, true, None, None, false, true, 11, None,
             )?;
             owner_outbox::append_adopted_local_update_in_tx(
                 tx,

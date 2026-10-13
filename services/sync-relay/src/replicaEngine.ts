@@ -28,7 +28,7 @@ export function createReplicaEngineStarter(options: ReplicaEngineOptions) {
   return async ({ storeDir, lease }: ReplicaChildInput): Promise<ReplicaChild> => {
     if (!(await stat(options.engineExecutable)).isFile()) throw new TypeError("Replica engine executable must be a file.");
     const authToken = randomBytes(32).toString("hex");
-    const child = spawn(options.engineExecutable, [], { cwd: storeDir, env: { DOHC_ENGINE_AUTH_TOKEN: authToken,
+    const child = spawn(options.engineExecutable, ["--store-role", "passive"], { cwd: storeDir, env: { DOHC_ENGINE_AUTH_TOKEN: authToken,
       ...(process.platform === "win32" ? { SystemRoot: process.env.SystemRoot } : {}) },
       windowsHide: true, stdio: ["pipe", "pipe", "pipe"] });
     const termination = new Promise<void>(resolve => child.once("close", () => resolve()));

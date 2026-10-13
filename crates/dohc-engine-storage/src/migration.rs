@@ -3239,7 +3239,7 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
 
 const V2_REPLICA_FRONTIERS_DDL: &str = "\
 CREATE TABLE replica_frontiers (
-    workspace TEXT PRIMARY KEY,
+    workspace_id TEXT PRIMARY KEY,
     revision INTEGER NOT NULL CHECK (revision BETWEEN 1 AND 9007199254740991),
     log_cursor INTEGER NOT NULL CHECK (log_cursor BETWEEN 0 AND 9007199254740991),
     journal_cursor INTEGER NOT NULL CHECK (journal_cursor BETWEEN 0 AND 9007199254740991)
@@ -3248,13 +3248,24 @@ CREATE TABLE replica_documents (
     workspace_id TEXT NOT NULL,
     main_version_id TEXT NOT NULL,
     object_id TEXT NOT NULL,
-    lineage_claim_id TEXT NOT NULL,
+    lineage_claim_id TEXT NOT NULL CHECK (length(lineage_claim_id)=64 AND lineage_claim_id NOT GLOB '*[^0-9a-f]*'),
     relay_database_namespace TEXT NOT NULL,
-    restore_generation INTEGER NOT NULL CHECK (restore_generation BETWEEN 0 AND 9007199254740991),
-    event_count INTEGER NOT NULL CHECK (event_count BETWEEN 0 AND 9007199254740991),
-    evidence_digest TEXT NOT NULL CHECK (length(evidence_digest)=64),
-    journal_cursor INTEGER NOT NULL CHECK (journal_cursor BETWEEN 0 AND 9007199254740991),
+    restore_generation INTEGER NOT NULL CHECK (restore_generation BETWEEN 1 AND 9007199254740991),
+    event_count INTEGER NOT NULL CHECK (event_count BETWEEN 1 AND 9007199254740991),
+    evidence_digest TEXT NOT NULL CHECK (length(evidence_digest)=64 AND evidence_digest NOT GLOB '*[^0-9a-f]*'),
+    journal_cursor INTEGER NOT NULL CHECK (journal_cursor BETWEEN 1 AND 9007199254740991),
     PRIMARY KEY(workspace_id,main_version_id,object_id,lineage_claim_id)
+) STRICT;
+CREATE TABLE replica_first_seen (
+    relay_database_namespace TEXT NOT NULL,
+    workspace_id TEXT NOT NULL,
+    main_version_id TEXT NOT NULL,
+    object_id TEXT NOT NULL,
+    lineage_claim_id TEXT NOT NULL CHECK (length(lineage_claim_id)=64 AND lineage_claim_id NOT GLOB '*[^0-9a-f]*'),
+    client_id INTEGER NOT NULL CHECK (client_id BETWEEN 0 AND 9007199254740991),
+    start_clock INTEGER NOT NULL CHECK (start_clock BETWEEN 0 AND 9007199254740991),
+    end_clock INTEGER NOT NULL CHECK (end_clock BETWEEN 1 AND 9007199254740991 AND end_clock>start_clock),
+    PRIMARY KEY(relay_database_namespace,workspace_id,main_version_id,object_id,lineage_claim_id,client_id,start_clock)
 ) STRICT;
 ";
 
@@ -3941,7 +3952,7 @@ mod tests {
             ),
             (
                 "v2-replica-frontiers",
-                "0d279b9a0a1a91227fb4ac6cb36b5c24940ba2d7b612117450c00c217b0122ee",
+                "b42454c383b3e4b2b7c107a4c2b7abe56476235d857dba46aa3fbbae1a790af3",
             ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());

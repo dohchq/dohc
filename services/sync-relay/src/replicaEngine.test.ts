@@ -60,7 +60,7 @@ it("gives the child only its private directory, fresh RPC token, and GET lease",
     expect(child.requests[3]!.params.pendingCursor).toEqual({ kind: "relay", token: "issued-2" });
     expect(child.requests[5]!.params.pendingCursor).toEqual({ kind: "relay", token: "issued-3" });
     const [command, args, options] = mocks.spawn.mock.calls[0]!;
-    expect(command).toBe(process.execPath); expect(args).toEqual([]); expect(options.cwd).toBe(input().storeDir);
+    expect(command).toBe(process.execPath); expect(args).toEqual(["--store-role", "passive"]); expect(options.cwd).toBe(input().storeDir);
     expect(Object.keys(options.env).sort()).toEqual(process.platform === "win32" ? ["DOHC_ENGINE_AUTH_TOKEN", "SystemRoot"] : ["DOHC_ENGINE_AUTH_TOKEN"]);
     expect(options.env.DOHC_ENGINE_AUTH_TOKEN).toMatch(/^[a-f0-9]{64}$/);
     expect(JSON.stringify(child.requests)).not.toContain("serviceHost"); expect(JSON.stringify(child.requests)).not.toContain("ownerSecret");

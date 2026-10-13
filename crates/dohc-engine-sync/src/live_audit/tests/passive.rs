@@ -195,7 +195,7 @@ fn passive_journal_echo_both_orders_have_one_history_and_equal_owner_evidence_an
             &NoFaults,
         )
         .unwrap();
-        assert_eq!(result.applied, usize::from(journal_first));
+        assert_eq!(result.applied, 1);
         if journal_first {
             assert_eq!(count(&replica, "snapshots"), before_snapshots);
             echo(&source, &mut replica);
@@ -272,6 +272,112 @@ fn passive_journal_echo_both_orders_have_one_history_and_equal_owner_evidence_an
             apply_page(&mut replica, "ws", 0, &[retired_mismatch], &NoFaults),
             Err(ApplicationError::Conflict)
         ));
+    }
+}
+
+#[test]
+fn passive_audit_without_content_still_applies_the_update() {
+    let mut source = fixture_with_binding_generation(true, None, 1);
+    bootstrap(&mut source, false).unwrap();
+    let (_scratch, _path, mut replica) = receiver(&source);
+    let doc = dohc_engine_collab::Ydoc::wire();
+    doc.apply(&source.bytes).unwrap();
+    let previous = initial(&source);
+    let first = row(&mut source, 1, &previous, &doc);
+    echo(&source, &mut replica);
+    replica
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "DELETE FROM ydoc_updates WHERE update_blob_sha256=?1",
+                [&first.admitted.metadata.accepted.receipt.update_digest],
+            )
+            .unwrap();
+            tx.execute(
+                "UPDATE ydoc_docs SET head_update_seq=head_update_seq-1,settled_update_seq=NULL",
+                [],
+            )
+            .unwrap();
+            Ok::<_, StorageError>(())
+        })
+        .unwrap();
+    assert_ne!(state(&replica), state(&source.store));
+    let result = apply_page(&mut replica, "ws", 0, &[first], &NoFaults).unwrap();
+    assert_eq!(state(&replica), state(&source.store));
+    assert_eq!(result.applied, 1);
+}
+
+#[test]
+fn passive_deduplicated_content_refuses_unresolved_dependencies() {
+    let mut source = fixture_with_binding_generation(true, None, 1);
+    bootstrap(&mut source, false).unwrap();
+    let (_scratch, _path, mut replica) = receiver(&source);
+    let doc = dohc_engine_collab::Ydoc::wire();
+    doc.apply(&source.bytes).unwrap();
+    let previous = initial(&source);
+    let first = row(&mut source, 1, &previous, &doc);
+    echo(&source, &mut replica);
+    let missing = dohc_engine_collab::Ydoc::wire();
+    missing.apply(&source.bytes).unwrap();
+    missing.richdoc_append_paragraph("Held predecessor.");
+    let pending = missing.richdoc_append_paragraph("Unresolved successor.");
+    replica.write_with(&NoFaults, |tx| {
+        let sha = put_binary_blob(tx, &pending)?;
+        tx.execute("INSERT INTO ydoc_updates(workspace_id,version_id,object_id,seq,update_blob_sha256,recorded_at_ms) SELECT workspace_id,version_id,object_id,head_update_seq+1,?1,0 FROM ydoc_docs",[sha]).unwrap();
+        tx.execute("UPDATE ydoc_docs SET head_update_seq=head_update_seq+1",[]).unwrap();
+        Ok::<_, StorageError>(())
+    }).unwrap();
+    assert!(matches!(
+        apply_page(&mut replica, "ws", 0, &[first], &NoFaults),
+        Err(ApplicationError::Conflict)
+    ));
+    assert_eq!(count(&replica, "live_accepted_updates"), 0);
+}
+
+#[test]
+fn passive_matching_archived_lineage_applies_and_compacts_a_page_once() {
+    for archived in [false, true] {
+        let mut source = fixture_with_binding_generation(true, None, 1);
+        bootstrap(&mut source, false).unwrap();
+        let (_scratch, _path, mut replica) = receiver(&source);
+        if archived {
+            replica.write_with(&NoFaults, |tx| {
+        let full = put_binary_blob(tx, &source.bytes)?;
+        let doc = dohc_engine_collab::Ydoc::wire();
+        doc.apply(&source.bytes).unwrap();
+        let vector = put_binary_blob(tx, &doc.encode_state_vector())?;
+        tx.execute("INSERT INTO ydoc_inactive_lineages(workspace_id,version_id,object_id,lineage_claim_id,disposition,content_kind,full_state_blob_sha256,state_vector_blob_sha256,recorded_at_ms,updated_at_ms) VALUES ('ws','main','object',?1,'superseded-predecessor','richdoc',?2,?3,0,0)", params![source.binding.lineage_claim_id,full,vector]).unwrap();
+        Ok::<_, dohc_engine_collab::CollabError>(())
+    }).unwrap();
+        }
+        let doc = dohc_engine_collab::Ydoc::wire();
+        doc.apply(&source.bytes).unwrap();
+        let mut previous = initial(&source);
+        let mut rows = Vec::new();
+        for cursor in 1..=65 {
+            let next = row(&mut source, cursor, &previous, &doc);
+            previous = next.evidence_digest.clone();
+            rows.push(next);
+        }
+        let before = replica
+            .read_with(|c| dohc_engine_storage::replica::read_frontiers(c, "ws"))
+            .unwrap();
+        let result = apply_page(&mut replica, "ws", 0, &rows, &NoFaults).unwrap();
+        assert_eq!(result.applied, 65);
+        let pending: i64 = replica
+            .read_with(|c| {
+                c.query_row(
+                    "SELECT head_update_seq-head_snapshot_seq FROM ydoc_docs",
+                    [],
+                    |r| r.get(0),
+                )
+            })
+            .unwrap();
+        assert!(
+            pending < 64,
+            "page must compact its appended tail: {pending}"
+        );
+        assert_eq!(result.revision, before.revision + 1);
+        assert_eq!(state(&replica), state(&source.store));
     }
 }
 
@@ -359,10 +465,12 @@ fn passive_epoch_floor_skips_missing_old_baselines_but_preserves_current_markers
     assert_eq!(blocked.journal_cursor, 1);
 }
 
-struct Crash;
+struct Crash(std::sync::atomic::AtomicUsize);
 impl FaultInjector for Crash {
     fn poll(&self, p: FaultPoint) -> FaultAction {
-        if p == FaultPoint::SyncBeforeApplyCommit {
+        if p == FaultPoint::SyncBeforeApplyCommit
+            && self.0.fetch_sub(1, std::sync::atomic::Ordering::SeqCst) == 1
+        {
             FaultAction::Crash
         } else {
             FaultAction::Continue
@@ -373,120 +481,202 @@ impl FaultInjector for Crash {
 #[test]
 fn passive_generation_steps_only_with_the_restore_application_and_refuses_old_rows() {
     use dohc_engine_collab::live_update_application::passive::ReplicaRestore;
-    let mut source = fixture_with_binding_generation(true, None, 1);
-    bootstrap(&mut source, false).unwrap();
-    let (_scratch, _path, mut replica) = receiver(&source);
-    let doc = dohc_engine_collab::Ydoc::wire();
-    doc.apply(&source.bytes).unwrap();
-    let previous = initial(&source);
-    let first = row(&mut source, 1, &previous, &doc);
-    apply_page(
-        &mut replica,
-        "ws",
-        0,
-        std::slice::from_ref(&first),
-        &NoFaults,
-    )
-    .unwrap();
-    let mut restored = first.clone();
-    restored.journal_cursor = 2;
-    restored.admitted.metadata.accepted.receipt.delivery_id = "restore".into();
-    restored.admitted.metadata.accepted.receipt.journal_cursor = 2;
-    restored
-        .admitted
-        .metadata
-        .accepted
-        .binding
-        .restore_fence_generation = 2;
-    restored
-        .authority
-        .as_mut()
-        .unwrap()
-        .restore_fence_generation = 2;
-    restored.admitted.update_bytes = doc.richdoc_append_paragraph("Restored paragraph.");
-    restored.admitted.metadata.accepted.receipt.update_digest =
-        hex_sha256(&restored.admitted.update_bytes);
-    restored.evidence_digest = hex_sha256(
-        &serde_json::to_vec(&(
-            "accepted-event-v1",
-            &first.evidence_digest,
-            2,
-            &restored.admitted.metadata,
-        ))
-        .unwrap(),
-    );
-    assert!(matches!(
-        apply_page(
-            &mut replica,
-            "ws",
-            1,
-            std::slice::from_ref(&restored),
-            &NoFaults
-        ),
-        Err(ApplicationError::Conflict)
-    ));
-    let checkpoint_bytes = doc.encode_full_state();
-    let checkpoint_digest = hex_sha256(&checkpoint_bytes);
-    restored.restore = Some(ReplicaRestore {
-        operation_id: "restore-op".into(),
-        checkpoint_digest: checkpoint_digest.clone(),
-        checkpoint_bytes,
-        proof: json!({"admitted":restored.admitted.metadata,"candidateDigest":restored.admitted.metadata.accepted.receipt.update_digest,
+    for echo_ahead in [false, true] {
+        for native_source in [false, true] {
+            let mut source = fixture_with_binding_generation(true, None, 1);
+            bootstrap(&mut source, false).unwrap();
+            let (_scratch, _path, mut replica) = receiver(&source);
+            let doc = dohc_engine_collab::Ydoc::wire();
+            doc.apply(&source.bytes).unwrap();
+            let previous = initial(&source);
+            let first = row(&mut source, 1, &previous, &doc);
+            apply_page(
+                &mut replica,
+                "ws",
+                0,
+                std::slice::from_ref(&first),
+                &NoFaults,
+            )
+            .unwrap();
+            let mut restored = first.clone();
+            restored.journal_cursor = 2;
+            restored.admitted.metadata.accepted.receipt.delivery_id = "restore".into();
+            restored.admitted.metadata.accepted.receipt.journal_cursor = 2;
+            restored
+                .admitted
+                .metadata
+                .accepted
+                .binding
+                .restore_fence_generation = 2;
+            restored
+                .authority
+                .as_mut()
+                .unwrap()
+                .restore_fence_generation = 2;
+            restored.admitted.update_bytes = doc.richdoc_append_paragraph("Restored paragraph.");
+            restored.admitted.metadata.accepted.receipt.update_digest =
+                hex_sha256(&restored.admitted.update_bytes);
+            restored.evidence_digest = hex_sha256(
+                &serde_json::to_vec(&(
+                    "accepted-event-v1",
+                    &first.evidence_digest,
+                    2,
+                    &restored.admitted.metadata,
+                ))
+                .unwrap(),
+            );
+            assert!(matches!(
+                apply_page(
+                    &mut replica,
+                    "ws",
+                    1,
+                    std::slice::from_ref(&restored),
+                    &NoFaults
+                ),
+                Err(ApplicationError::Conflict)
+            ));
+            let checkpoint_bytes = doc.encode_full_state();
+            let checkpoint_digest = hex_sha256(&checkpoint_bytes);
+            restored.restore = Some(ReplicaRestore {
+                operation_id: "restore-op".into(),
+                checkpoint_digest: checkpoint_digest.clone(),
+                checkpoint_bytes,
+                proof: json!({"admitted":restored.admitted.metadata,"candidateDigest":restored.admitted.metadata.accepted.receipt.update_digest,
             "checkpointDigest":checkpoint_digest,"preparation":{"fence":{"operation":{"operationId":"restore-op","relayDatabaseNamespace":"relay",
                 "oldBinding":source.binding,"hostId":"host","newFence":2,"origin":{"kind":"bootstrap","id":"bootstrap"},
                 "terminal":first.admitted.metadata.accepted.receipt,"appliedSequence":1},"localHeadSequence":1,"recordedAtMs":3}}}),
-    });
-    let mut bad = restored.clone();
-    bad.restore.as_mut().unwrap().proof["preparation"]["fence"]["operation"]["operationId"] =
-        json!("wrong");
-    assert!(matches!(
-        apply_page(&mut replica, "ws", 1, &[bad], &NoFaults),
-        Err(ApplicationError::Conflict)
-    ));
-    apply_page(
-        &mut replica,
-        "ws",
-        1,
-        std::slice::from_ref(&restored),
-        &NoFaults,
-    )
-    .unwrap();
-    let generation: i64 = replica
-        .read_with(|c| {
-            c.query_row(
-                "SELECT restore_generation FROM replica_documents",
-                [],
-                |r| r.get(0),
+            });
+            let extra = dohc_engine_collab::Ydoc::wire();
+            extra
+                .apply(&restored.restore.as_ref().unwrap().checkpoint_bytes)
+                .unwrap();
+            extra.richdoc_append_paragraph("Native content not present in accepted rows.");
+            let mut bad = restored.clone();
+            bad.restore.as_mut().unwrap().proof["preparation"]["fence"]["operation"]["operationId"] =
+                json!("wrong");
+            assert!(matches!(
+                apply_page(&mut replica, "ws", 1, &[bad], &NoFaults),
+                Err(ApplicationError::Conflict)
+            ));
+            if native_source {
+                let before = measurement_vector(&doc);
+                let checkpoint = extra.encode_full_state();
+                let restore = restored.restore.as_mut().unwrap();
+                restore.checkpoint_digest = hex_sha256(&checkpoint);
+                restore.checkpoint_bytes = checkpoint;
+                restore.proof["checkpointDigest"] = json!(restore.checkpoint_digest);
+                restore.proof["proposalDigest"] = json!(hex_sha256(b"retained proposal"));
+                restore.proof["nativeSourceManifestDigest"] =
+                    json!(hex_sha256(b"retained native manifest"));
+                restore.proof["sourceRanges"] = json!(measurement_vector(&extra).iter().filter_map(|(client,end)| {
+                let start = before.get(client).copied().unwrap_or(0);
+                (*end > start).then_some(json!({"sourceOrdinal":0,"clientId":client,"startClock":start,"endClock":end,"sourceDigest":hex_sha256(b"retained source")}))
+            }).collect::<Vec<_>>());
+                doc.apply(&restored.restore.as_ref().unwrap().checkpoint_bytes)
+                    .unwrap();
+            }
+            if echo_ahead {
+                let later =
+                    doc.richdoc_append_paragraph("An ordinary echo beyond the restore position.");
+                replica.write_with(&NoFaults, |tx| {
+            for bytes in [&restored.admitted.update_bytes, &later] {
+                let sha = put_binary_blob(tx, bytes)?;
+                tx.execute("INSERT INTO ydoc_updates(workspace_id,version_id,object_id,seq,update_blob_sha256,recorded_at_ms) SELECT workspace_id,version_id,object_id,head_update_seq+1,?1,0 FROM ydoc_docs", [sha]).unwrap();
+                tx.execute("UPDATE ydoc_docs SET head_update_seq=head_update_seq+1", []).unwrap();
+            }
+            Ok::<_, StorageError>(())
+        }).unwrap();
+            }
+            let native_before = count(&replica, "ydoc_updates");
+            apply_page(
+                &mut replica,
+                "ws",
+                1,
+                std::slice::from_ref(&restored),
+                &NoFaults,
             )
-        })
-        .unwrap();
-    assert_eq!(generation, 2);
-    let mut old = first.clone();
-    old.journal_cursor = 3;
-    old.admitted.metadata.accepted.receipt.journal_cursor = 3;
-    old.admitted.metadata.accepted.receipt.delivery_id = "old-after-restore".into();
-    assert!(matches!(
-        apply_page(&mut replica, "ws", 2, &[old], &NoFaults),
-        Err(ApplicationError::Conflict)
-    ));
-    assert_eq!(
-        replica
-            .read_with(|c| c.query_row(
-                "SELECT restore_generation FROM replica_documents",
-                [],
-                |r| r.get::<_, i64>(0)
-            ))
-            .unwrap(),
-        2
-    );
-    assert_eq!(
-        state(&replica),
-        (
-            doc.encode_state_vector(),
-            doc.project(ContentKind::Richdoc).unwrap().content
-        )
-    );
+            .unwrap();
+            assert_eq!(
+                count(&replica, "ydoc_updates"),
+                native_before + i64::from(!echo_ahead) + 1
+            );
+            let generation: i64 = replica
+                .read_with(|c| {
+                    c.query_row(
+                        "SELECT restore_generation FROM replica_documents",
+                        [],
+                        |r| r.get(0),
+                    )
+                })
+                .unwrap();
+            assert_eq!(generation, 2);
+            let mut old = first.clone();
+            old.journal_cursor = 3;
+            old.admitted.metadata.accepted.receipt.journal_cursor = 3;
+            old.admitted.metadata.accepted.receipt.delivery_id = "old-after-restore".into();
+            assert!(matches!(
+                apply_page(&mut replica, "ws", 2, &[old], &NoFaults),
+                Err(ApplicationError::Conflict)
+            ));
+            assert_eq!(
+                replica
+                    .read_with(|c| c.query_row(
+                        "SELECT restore_generation FROM replica_documents",
+                        [],
+                        |r| r.get::<_, i64>(0)
+                    ))
+                    .unwrap(),
+                2
+            );
+            if native_source && !echo_ahead {
+                let mut second = restored.clone();
+                second.journal_cursor = 3;
+                second.admitted.metadata.accepted.receipt.journal_cursor = 3;
+                second.admitted.metadata.accepted.receipt.delivery_id = "second-restore".into();
+                second
+                    .admitted
+                    .metadata
+                    .accepted
+                    .binding
+                    .restore_fence_generation = 3;
+                second.authority.as_mut().unwrap().restore_fence_generation = 3;
+                second.admitted.update_bytes = doc.richdoc_append_paragraph("Second restore.");
+                second.admitted.metadata.accepted.receipt.update_digest =
+                    hex_sha256(&second.admitted.update_bytes);
+                second.evidence_digest = hex_sha256(
+                    &serde_json::to_vec(&(
+                        "accepted-event-v1",
+                        &restored.evidence_digest,
+                        3,
+                        &second.admitted.metadata,
+                    ))
+                    .unwrap(),
+                );
+                let restore = second.restore.as_mut().unwrap();
+                restore.operation_id = "second-restore-op".into();
+                restore.checkpoint_bytes = doc.encode_full_state();
+                restore.checkpoint_digest = hex_sha256(&restore.checkpoint_bytes);
+                restore.proof["admitted"] = json!(second.admitted.metadata);
+                restore.proof["candidateDigest"] =
+                    json!(second.admitted.metadata.accepted.receipt.update_digest);
+                restore.proof["checkpointDigest"] = json!(restore.checkpoint_digest);
+                restore.proof["sourceRanges"] = json!([]);
+                restore.proof["preparation"]["fence"] = json!({"operation":{"operationId":"second-restore-op","relayDatabaseNamespace":"relay",
+                    "oldBinding":restored.admitted.metadata.accepted.binding,"hostId":"host","newFence":3,"origin":{"kind":"bootstrap","id":"bootstrap"},
+                    "terminal":restored.admitted.metadata.accepted.receipt,"appliedSequence":2},"localHeadSequence":2,"recordedAtMs":4});
+                apply_page(&mut replica, "ws", 2, &[second], &NoFaults).unwrap();
+            }
+            assert_eq!(
+                state(&replica),
+                (
+                    doc.encode_state_vector(),
+                    doc.project(ContentKind::Richdoc).unwrap().content
+                )
+            );
+        }
+    }
 }
+
 #[test]
 fn passive_crash_between_apply_and_frontier_rolls_back_and_restarts_once() {
     let mut source = fixture_with_binding_generation(true, None, 1);
@@ -496,25 +686,22 @@ fn passive_crash_between_apply_and_frontier_rolls_back_and_restarts_once() {
     doc.apply(&source.bytes).unwrap();
     let previous = initial(&source);
     let first = row(&mut source, 1, &previous, &doc);
+    let second = row(&mut source, 2, &first.evidence_digest, &doc);
+    let rows = [first, second];
+    let crash = Crash(std::sync::atomic::AtomicUsize::new(2));
     assert!(matches!(
-        apply_page(&mut replica, "ws", 0, std::slice::from_ref(&first), &Crash),
+        apply_page(&mut replica, "ws", 0, &rows, &crash),
         Err(ApplicationError::Interrupted)
     ));
     drop(replica);
     let mut replica = EngineStore::open_passive(&path, 1, None, None).unwrap();
     assert_eq!(count(&replica, "live_accepted_updates"), 0);
-    let result = apply_page(
-        &mut replica,
-        "ws",
-        0,
-        std::slice::from_ref(&first),
-        &NoFaults,
-    )
-    .unwrap();
-    let replay = apply_page(&mut replica, "ws", 0, &[first], &NoFaults).unwrap();
-    assert_eq!(result.journal_cursor, 1);
+    let result = apply_page(&mut replica, "ws", 0, &rows, &NoFaults).unwrap();
+    let replay = apply_page(&mut replica, "ws", 0, &rows, &NoFaults).unwrap();
+    assert_eq!(result.journal_cursor, 2);
     assert_eq!(result.revision, replay.revision);
-    assert_eq!(count(&replica, "live_accepted_updates"), 1);
+    assert_eq!(count(&replica, "live_accepted_updates"), 2);
+    assert_eq!(state(&replica), state(&source.store));
 }
 
 #[test]
@@ -610,4 +797,151 @@ fn measure_passive_500_row_page() {
         "PASSIVE_PAGE_MS median={} p95={} samples=21 rows=500",
         samples[10], samples[19]
     );
+}
+
+#[test]
+#[ignore = "release measurement"]
+fn measure_passive_page_after_10000_accepted_rows() {
+    let history = std::env::var("DOHC_PASSIVE_MEASURE_HISTORY")
+        .map(|v| v.parse::<usize>().unwrap())
+        .unwrap_or(10000);
+    let mut source = fixture_with_binding_generation(true, None, 1);
+    bootstrap(&mut source, false).unwrap();
+    let doc = dohc_engine_collab::Ydoc::wire();
+    doc.apply(&source.bytes).unwrap();
+    let mut previous = initial(&source);
+    let template = row(&mut source, 1, &previous, &doc);
+    let mut rows = Vec::new();
+    for cursor in 1..=history + 500 {
+        let cursor = cursor as i64;
+        let before = measurement_vector(&doc);
+        let mut next = template.clone();
+        next.admitted.update_bytes = doc
+            .frontmatter_set("measurement", &cursor.to_string())
+            .unwrap();
+        next.admitted.metadata.first_seen = measurement_vector(&doc)
+            .iter()
+            .filter_map(|(client, clock)| {
+                let start = before.get(client).copied().unwrap_or(0);
+                (*clock > start).then_some(
+                    dohc_engine_collab::live_update_application::LiveUpdateStructRange {
+                        client_id: *client as i64,
+                        start_clock: start as i64,
+                        end_clock: *clock as i64,
+                    },
+                )
+            })
+            .collect();
+        let accepted = &mut next.admitted.metadata.accepted;
+        accepted.receipt.delivery_id = format!("measure-{cursor}");
+        accepted.receipt.journal_cursor = cursor;
+        accepted.receipt.update_digest = hex_sha256(&next.admitted.update_bytes);
+        accepted.received_at_ms = cursor;
+        next.journal_cursor = cursor;
+        next.evidence_digest = hex_sha256(
+            &serde_json::to_vec(&(
+                "accepted-event-v1",
+                &previous,
+                cursor,
+                &next.admitted.metadata,
+            ))
+            .unwrap(),
+        );
+        previous = next.evidence_digest.clone();
+        rows.push(next);
+    }
+    let (scratch, path, mut store) = receiver(&source);
+    // The receiver includes the template's echo. Use its already-integrated
+    // paragraph as the baseline, but not its unrelated accepted audit identity.
+    store
+        .write_with(&NoFaults, |tx| {
+            tx.execute("DELETE FROM live_audit_events", []).unwrap();
+            Ok::<_, StorageError>(())
+        })
+        .unwrap();
+    for page in rows[..history].chunks(500) {
+        let after = page[0].journal_cursor - 1;
+        apply_page(&mut store, "ws", after, page, &NoFaults).unwrap();
+    }
+    let content_first = std::env::var("DOHC_PASSIVE_MEASURE_CONTENT_FIRST").as_deref() == Ok("1");
+    if content_first {
+        store.write_with(&NoFaults, |tx| {
+            for row in &rows[history..] {
+                let sha = put_binary_blob(tx, &row.admitted.update_bytes)?;
+                tx.execute("INSERT INTO ydoc_updates(workspace_id,version_id,object_id,seq,update_blob_sha256,recorded_at_ms) SELECT workspace_id,version_id,object_id,head_update_seq+1,?1,0 FROM ydoc_docs", [sha]).unwrap();
+                tx.execute("UPDATE ydoc_docs SET head_update_seq=head_update_seq+1", []).unwrap();
+            }
+            Ok::<_, StorageError>(())
+        }).unwrap();
+    }
+    drop(store);
+    let mut samples = Vec::new();
+    for sample in 0..21 {
+        let copy = scratch.path().join(format!("sample-{sample}.db"));
+        std::fs::copy(&path, &copy).unwrap();
+        let mut store = EngineStore::open_passive(&copy, 0, None, None).unwrap();
+        let head = store.read_with(|conn| {
+            Ok::<i64, StorageError>(conn.query_row(
+                "SELECT head_update_seq FROM ydoc_docs WHERE workspace_id='ws' AND version_id='main' AND object_id='object'",
+                [], |r| r.get(0),
+            ).unwrap())
+        }).unwrap();
+        let start = std::time::Instant::now();
+        let result = apply_page(
+            &mut store,
+            "ws",
+            history as i64,
+            &rows[history..],
+            &NoFaults,
+        )
+        .unwrap();
+        samples.push(start.elapsed().as_secs_f64() * 1000.0);
+        assert_eq!(result.applied, 500);
+        store
+            .read_with(|conn| {
+                if content_first {
+                    let current: i64 = conn.query_row(
+                        "SELECT head_update_seq FROM ydoc_docs WHERE workspace_id='ws' AND version_id='main' AND object_id='object'",
+                        [], |r| r.get(0),
+                    ).unwrap();
+                    assert_eq!(current, head, "content-first page must exercise digest dedupe");
+                }
+                let actual = dohc_engine_collab::durable::load_doc_in(
+                    conn,
+                    &dohc_engine_collab::DocKey::new("ws", "main", "object").unwrap(),
+                )?;
+                assert_eq!(measurement_vector(&actual), measurement_vector(&doc));
+                assert_eq!(
+                    actual.project(ContentKind::Richdoc)?.content,
+                    doc.project(ContentKind::Richdoc)?.content
+                );
+                Ok::<_, dohc_engine_collab::CollabError>(())
+            })
+            .unwrap();
+        println!("TAIL_PAGE_SAMPLE {sample} {}", samples.last().unwrap());
+    }
+    samples.sort_by(f64::total_cmp);
+    println!(
+        "TAIL_PAGE_MS median={} p95={} samples=21 rows=500 accepted_tail={history} content_first={content_first}",
+        samples[10], samples[19]
+    );
+}
+
+fn measurement_vector(doc: &dohc_engine_collab::Ydoc) -> std::collections::BTreeMap<u64, u64> {
+    let bytes = doc.encode_state_vector();
+    let mut bytes = bytes.iter();
+    let mut read = || {
+        let mut value = 0u64;
+        let mut shift = 0;
+        loop {
+            let byte = *bytes.next().unwrap();
+            value |= u64::from(byte & 127) << shift;
+            if byte < 128 {
+                break value;
+            }
+            shift += 7;
+        }
+    };
+    let count = read();
+    (0..count).map(|_| (read(), read())).collect()
 }

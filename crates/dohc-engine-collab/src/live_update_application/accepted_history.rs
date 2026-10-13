@@ -51,10 +51,22 @@ fn parameters(held: &Registration) -> [&str; 5] {
     ]
 }
 
-pub(super) fn initial_digest(held: &Registration) -> Result<String, ApplicationError> {
+pub(super) fn initial_digest(
+    namespace: &str,
+    binding: &LiveObjectBinding,
+) -> Result<String, ApplicationError> {
     Ok(hex_sha256(
-        &serde_json::to_vec(&("accepted-history-v1", parameters(held)))
-            .map_err(|_| ApplicationError::Corrupt)?,
+        &serde_json::to_vec(&(
+            "accepted-history-v1",
+            [
+                namespace,
+                &binding.workspace_id,
+                &binding.main_version_id,
+                &binding.object_id,
+                &binding.lineage_claim_id,
+            ],
+        ))
+        .map_err(|_| ApplicationError::Corrupt)?,
     ))
 }
 
@@ -194,7 +206,7 @@ pub(super) fn initialize(
         terminal: None,
         binding: held.binding.clone(),
         state_digest: put_binary_blob(tx, baseline)?,
-        evidence_digest: initial_digest(held)?,
+        evidence_digest: initial_digest(&held.namespace, &held.binding)?,
     };
     insert_checkpoint(
         tx,
@@ -362,7 +374,7 @@ fn checkpoint_in(
     }
     if count == 0
         && (state_digest != held.binding.lineage_claim_id
-            || evidence_digest != initial_digest(held)?)
+            || evidence_digest != initial_digest(&held.namespace, &held.binding)?)
     {
         return Err(ApplicationError::Corrupt);
     }
@@ -1034,7 +1046,7 @@ pub(super) fn accepted_source(
     require_document(held, &metadata.accepted.binding)?;
     metadata.accepted.receipt.validate()?;
     let previous = if count == 1 {
-        initial_digest(held)?
+        initial_digest(&held.namespace, &held.binding)?
     } else {
         let p = parameters(held);
         let length: i64 = conn.query_row(
@@ -1162,7 +1174,7 @@ mod tests {
                 binding,
                 live: true,
             };
-            let initial = initial_digest(&held).unwrap();
+            let initial = initial_digest(&held.namespace, &held.binding).unwrap();
             assert_eq!(initial, row["initialDigest"].as_str().unwrap(), "{case}");
             assert_eq!(
                 serde_json::to_string(&metadata).unwrap(),

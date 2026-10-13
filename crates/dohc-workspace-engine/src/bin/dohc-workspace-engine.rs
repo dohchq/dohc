@@ -87,7 +87,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         )?;
         return Ok(());
     }
-    if !args.is_empty() {
+    let passive = args == ["--store-role", "passive"];
+    if !args.is_empty() && !passive {
         return Err(io::Error::other("unknown engine arguments").into());
     }
     let auth_token = std::env::var(AUTH_TOKEN_ENV)
@@ -96,10 +97,35 @@ fn main() -> Result<(), Box<dyn Error>> {
         .ok_or_else(|| {
             io::Error::new(io::ErrorKind::PermissionDenied, "engine auth token missing")
         })?;
-    tokio::runtime::Runtime::new()?.block_on(run_stdio(auth_token))
+    tokio::runtime::Runtime::new()?.block_on(run_stdio(auth_token, passive))
 }
 
-async fn run_stdio(auth_token: String) -> Result<(), Box<dyn Error>> {
+fn passive_ingress(
+    service: Arc<EngineService>,
+    passive: bool,
+) -> Result<Option<(ConnectionOwner, LiveApplicationIngress)>, Box<dyn Error>> {
+    if !passive {
+        return Ok(None);
+    }
+    let ingress = LiveApplicationIngress::new(
+        service,
+        LiveApplicationIngressConfig {
+            aggregate_bytes: 2 * 1024 * 1024 * 1024,
+            application_working_reserve_bytes: 32 * 1024 * 1024,
+            max_uploads: 1,
+            upload_deadline: std::time::Duration::from_secs(120),
+        },
+    )?;
+    Ok(Some((ConnectionOwner::authenticated(), ingress)))
+}
+
+async fn run_stdio(auth_token: String, passive: bool) -> Result<(), Box<dyn Error>> {
+    if passive
+        && (std::env::var_os("DOHC_ENGINE_LIVE_HOST_CONFIG").is_some()
+            || std::env::var_os("DOHC_ENGINE_OWNER_HOST_CONFIG").is_some())
+    {
+        return Err(io::Error::other("passive daemon takes no live host configuration").into());
+    }
     if std::env::var_os("DOHC_ENGINE_LIVE_HOST_CONFIG").is_some()
         && std::env::var_os("DOHC_ENGINE_OWNER_HOST_CONFIG").is_some()
     {
@@ -125,16 +151,8 @@ async fn run_stdio(auth_token: String) -> Result<(), Box<dyn Error>> {
             }
             None => {
                 let service = Arc::new(EngineService::new());
-                let ingress = LiveApplicationIngress::new(
-                    service.clone(),
-                    LiveApplicationIngressConfig {
-                        aggregate_bytes: 2 * 1024 * 1024 * 1024,
-                        application_working_reserve_bytes: 32 * 1024 * 1024,
-                        max_uploads: 1,
-                        upload_deadline: std::time::Duration::from_secs(120),
-                    },
-                )?;
-                (service, Some((ConnectionOwner::authenticated(), ingress)))
+                let live = passive_ingress(service.clone(), passive)?;
+                (service, live)
             }
         },
     };
@@ -1364,6 +1382,100 @@ mod tests {
     use tokio::sync::Notify;
 
     const TEST_AUTH_TOKEN: &str = "r14-test-token";
+
+    #[tokio::test]
+    async fn desktop_daemon_keeps_live_upload_methods_on_dispatch() {
+        let (_, live) = {
+            let service = Arc::new(EngineService::new());
+            let live = passive_ingress(service.clone(), false).unwrap();
+            (service, live)
+        };
+        assert!(live.is_none());
+        assert!(
+            passive_ingress(Arc::new(EngineService::new()), true)
+                .unwrap()
+                .is_some()
+        );
+        let calls = Arc::new(AtomicUsize::new(0));
+        let supervisor = Arc::new(Supervisor::new(
+            SupervisorConfig::default(),
+            Arc::new(CountingService {
+                calls: calls.clone(),
+            }),
+        ));
+        let (input, reader) = tokio::io::duplex(65536);
+        let (output, mut client) = tokio::io::duplex(65536);
+        let (events, rx) = tokio::sync::mpsc::channel(1);
+        let run = tokio::spawn(run_transport_with_live(
+            TEST_AUTH_TOKEN.into(),
+            reader,
+            output,
+            supervisor,
+            rx.into(),
+            || Ok(()),
+            live,
+        ));
+        let mut input = input;
+        input
+            .write_all(&encode_envelope(&Envelope::Hello(Hello {
+                protocol_version: PROTOCOL_VERSION,
+                auth_token: TEST_AUTH_TOKEN.into(),
+                capabilities: vec!["blobs".into()],
+                last_session_generation: None,
+                max_frame_bytes: None,
+            })))
+            .await
+            .unwrap();
+        let methods = [
+            "liveApplication.apply",
+            "ydoc.ownerDelivery.applyAcceptedFrame",
+            "ydoc.ownerDelivery.applyInitialSync",
+            "ydoc.ownerDelivery.enroll",
+            "ydoc.ownerDelivery.appendDraft",
+            "liveApplication.bootstrap",
+            "liveApplication.adoptOwner",
+            "liveApplication.prepareRestore",
+            "liveApplication.syncOpen",
+            "liveApplication.applyRestore",
+            "liveApplication.settleRestore",
+            "liveApplication.resumeRestore",
+        ];
+        for (id, method) in methods.iter().enumerate() {
+            input
+                .write_all(&encode_envelope(&Envelope::Request(WireRequest {
+                    id: id as u64 + 1,
+                    method: (*method).into(),
+                    workspace: None,
+                    deadline_ms: None,
+                    idempotency_key: None,
+                    progress: false,
+                    params: serde_json::Value::Null,
+                })))
+                .await
+                .unwrap();
+        }
+        let mut decoder = FrameDecoder::new(WireLimits::default());
+        let mut responses = 0;
+        while responses < methods.len() {
+            let mut buffer = [0; 4096];
+            let size = client.read(&mut buffer).await.unwrap();
+            assert_ne!(size, 0);
+            decoder.push(&buffer[..size]);
+            while let Some(frame) = decoder.next_frame().unwrap() {
+                if let Frame::Control(bytes) = frame {
+                    match decode_control(&bytes, &WireLimits::default()).unwrap() {
+                        Envelope::Response(_) => responses += 1,
+                        Envelope::HelloAck(_) => {}
+                        other => panic!("expected desktop dispatch, got {other:?}"),
+                    }
+                }
+            }
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), methods.len());
+        drop(input);
+        drop(events);
+        run.await.unwrap().unwrap();
+    }
 
     #[tokio::test]
     #[ignore = "requires an owned external consumer fixture"]

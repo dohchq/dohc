@@ -1291,7 +1291,7 @@ pub fn apply_committed(
                     Vec::new(),
                 ));
             }
-            check_provenance(tx, &held.namespace, &event, false)?;
+            check_provenance(tx, &held.namespace, &event)?;
             if adoption::read_origin(tx, &held)?.is_some_and(|origin| {
                 event.metadata.accepted.receipt.journal_cursor
                     <= origin
@@ -1374,6 +1374,7 @@ pub fn apply_committed(
                 true,
                 true,
                 event.metadata.accepted.received_at_ms,
+                None,
             )?;
             // Keep canonical snapshot names in coverage instead of synthesizing
             // native authors. Only the field rows created by this append change.
@@ -1710,16 +1711,12 @@ fn check_provenance(
     conn: &Connection,
     namespace: &str,
     event: &AdmittedLiveUpdate,
-    passive: bool,
 ) -> Result<(), ApplicationError> {
     let b = &event.metadata.accepted.binding;
     // Join by the namespace-wide delivery identity, then check the child's raw
     // workspace. A damaged child must not disappear behind a workspace filter.
-    let passive_sql = "SELECT a.delivery_id,json_array_length(a.metadata_json,'$.firstSeen'),CASE WHEN f.key IS NOT NULL THEN a.workspace_id END,f.key,json_extract(f.value,'$.clientId'),json_extract(f.value,'$.startClock'),json_extract(f.value,'$.endClock') FROM live_accepted_updates a LEFT JOIN json_each(a.metadata_json,'$.firstSeen') f WHERE a.relay_database_namespace=?1 AND a.workspace_id=?2 AND a.main_version_id=?3 AND a.object_id=?4 AND a.lineage_claim_id=?5 ORDER BY json_extract(f.value,'$.clientId'),json_extract(f.value,'$.startClock'),a.delivery_id,f.key";
     let native_sql = "SELECT a.delivery_id,a.first_seen_count,f.workspace_id,f.ordinal,f.client_id,f.start_clock,f.end_clock FROM live_device_update_applications a LEFT JOIN live_device_application_first_seen f ON f.relay_database_namespace=a.relay_database_namespace AND f.delivery_id=a.delivery_id WHERE a.relay_database_namespace=?1 AND a.workspace_id=?2 AND a.main_version_id=?3 AND a.object_id=?4 AND a.lineage_claim_id=?5 ORDER BY f.client_id,f.start_clock,a.delivery_id,f.ordinal";
-    let mut query = conn
-        .prepare(if passive { passive_sql } else { native_sql })
-        .map_err(read_sql)?;
+    let mut query = conn.prepare(native_sql).map_err(read_sql)?;
     let mut rows = query
         .query(params![
             namespace,

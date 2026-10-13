@@ -187,7 +187,7 @@ pub fn read_next_applied(
         if !has_checkpoint {return Err(ApplicationError::Conflict)}
         let p = params![held.namespace,b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id,after.event_count];
         if after.event_count == 0 {
-            if after.evidence_digest != accepted_history::initial_digest(&held)? {return Err(ApplicationError::Conflict)}
+            if after.evidence_digest != accepted_history::initial_digest(&held.namespace, &held.binding)? {return Err(ApplicationError::Conflict)}
         } else {
             let saved: Option<(i64,String)> = conn.query_row("SELECT journal_cursor,evidence_digest FROM live_accepted_updates WHERE relay_database_namespace=?1 AND workspace_id=?2 AND main_version_id=?3 AND object_id=?4 AND lineage_claim_id=?5 AND event_count=?6",p,|r|Ok((r.get(0)?,r.get(1)?))).optional().map_err(read_sql)?;
             if saved != Some((after.journal_cursor, after.evidence_digest.clone())) {return Err(ApplicationError::Conflict)}

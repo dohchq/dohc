@@ -1,5 +1,5 @@
 use super::error::{map_runtime, workspace_unavailable};
-use super::workspace::WorkspaceOpenMode;
+use super::workspace::{OpenWorkspace, WorkspaceOpenMode};
 use crate::EngineService;
 use dohc_engine_collab::live_update_application::passive::ReplicaJournalRow;
 use dohc_engine_protocol::error::{ErrorCode, WireError};
@@ -17,22 +17,25 @@ pub struct ReplicaInput {
 }
 
 impl EngineService {
-    pub(crate) fn replica_open(&self, handle: Option<&WorkspaceHandle>) -> Result<(), WireError> {
-        if self.open(handle)?.mode != WorkspaceOpenMode::Passive {
+    pub(crate) fn replica_open(
+        &self,
+        handle: Option<&WorkspaceHandle>,
+    ) -> Result<Arc<OpenWorkspace>, WireError> {
+        let open = self.open(handle)?;
+        if open.mode != WorkspaceOpenMode::Passive {
             return Err(WireError::new(
                 ErrorCode::Forbidden,
                 "journal application requires a passive store",
             ));
         }
-        Ok(())
+        Ok(open)
     }
 
     pub(super) async fn replica_frontiers(
         &self,
         handle: Option<WorkspaceHandle>,
     ) -> Result<serde_json::Value, WireError> {
-        self.replica_open(handle.as_ref())?;
-        let open = self.open(handle.as_ref())?;
+        let open = self.replica_open(handle.as_ref())?;
         let workspace = open.workspace_id.clone();
         let frontiers = open
             .actor
@@ -50,8 +53,7 @@ impl EngineService {
         request: Request,
         input: ReplicaInput,
     ) -> Result<ServiceResponse, WireError> {
-        self.replica_open(request.workspace.as_ref())?;
-        let open = self.open(request.workspace.as_ref())?;
+        let open = self.replica_open(request.workspace.as_ref())?;
         if ctx.cancel.is_cancelled() || ctx.connection.as_ref().is_none_or(|c| !c.is_current()) {
             return Err(workspace_unavailable());
         }

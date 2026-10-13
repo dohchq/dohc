@@ -388,7 +388,7 @@ impl ApplicationOwner {
             if exists {
                 return Err(ApplicationError::Conflict);
             }
-            check_provenance(tx, &held.namespace, &event, false)?;
+            check_provenance(tx, &held.namespace, &event)?;
             let frozen = Ydoc::wire();
             frozen.apply(&proposal.frozen_state_bytes)?;
             let (projected, sequence, record_facts) = durable::append_and_index_update(

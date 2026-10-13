@@ -21,8 +21,9 @@
 //! drain projection. Forced compaction, close, `claim_base`, origination, and
 //! lineage successor always fully reconstruct. Durable lineage bytes are never
 //! derived from the cache.
-//! The byte-replay document, frontier, tuple, map, and accounting are never
-//! mutated inside a transaction. The check-4-only persistent scratch applies a
+//! A resident writer's byte-replay document, frontier, tuple, map, and accounting
+//! are never mutated inside a transaction. A `TransactionDocCache` instead
+//! advances a private copy between appends and cannot escape its transaction. The check-4-only persistent scratch applies a
 //! gated candidate in place; the transaction probe retains it only after an
 //! exact commit and evicts it after any rollback or post-mutation refusal.
 //!
@@ -54,7 +55,7 @@ const MAX_TOTAL_BYTES: usize = 64 * 1024 * 1024;
 /// later rebuilds the same coordinates over different history. Every such reset
 /// must call [`WriterDocCache::remove`].
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct CacheTuple {
+pub(crate) struct CacheTuple {
     head_update_seq: i64,
     head_snapshot_seq: i64,
     lineage_claim_id: Option<String>,
@@ -99,7 +100,10 @@ impl CacheTuple {
 
     /// Read the current tuple from the caller's connection, or `None` when the
     /// marker is absent or torn (head row missing).
-    fn read_current(conn: &Connection, key: &DocKey) -> Result<Option<Self>, CollabError> {
+    pub(crate) fn read_current(
+        conn: &Connection,
+        key: &DocKey,
+    ) -> Result<Option<Self>, CollabError> {
         let Some(marker) = read_marker_in(conn, key)? else {
             return Ok(None);
         };

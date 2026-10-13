@@ -13,7 +13,7 @@ pub fn read_frontiers(
     workspace: &str,
 ) -> Result<ReplicaFrontiers, StorageError> {
     conn.query_row(
-        "SELECT revision,log_cursor,journal_cursor FROM replica_frontiers WHERE workspace=?1",
+        "SELECT revision,log_cursor,journal_cursor FROM replica_frontiers WHERE workspace_id=?1",
         [workspace],
         |r| {
             Ok(ReplicaFrontiers {
@@ -34,8 +34,8 @@ pub fn advance_frontiers(
     log: i64,
     journal: i64,
 ) -> Result<(), StorageError> {
-    conn.execute("INSERT INTO replica_frontiers(workspace,revision,log_cursor,journal_cursor) VALUES (?1,1,?2,?3)
-        ON CONFLICT(workspace) DO UPDATE SET revision=replica_frontiers.revision+1,
+    conn.execute("INSERT INTO replica_frontiers(workspace_id,revision,log_cursor,journal_cursor) VALUES (?1,1,?2,?3)
+        ON CONFLICT(workspace_id) DO UPDATE SET revision=replica_frontiers.revision+1,
         log_cursor=MAX(replica_frontiers.log_cursor,excluded.log_cursor),
         journal_cursor=MAX(replica_frontiers.journal_cursor,excluded.journal_cursor)
         WHERE excluded.log_cursor>replica_frontiers.log_cursor OR excluded.journal_cursor>replica_frontiers.journal_cursor",

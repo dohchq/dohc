@@ -22,7 +22,7 @@ use dohc_engine_storage::{
 };
 use rusqlite::{Connection, OptionalExtension, Transaction};
 
-use crate::doc_cache::{GateBaseProbe, GateBaseSource, ServedGateBase, WriterDocCache};
+use crate::doc_cache::{CacheTuple, GateBaseProbe, GateBaseSource, ServedGateBase, WriterDocCache};
 use crate::error::CollabError;
 use crate::limits::{DEFAULT_COMPACTION_THRESHOLD, MAX_YDOC_UPDATE_BYTES};
 use crate::ydoc::{ContentKind, Projection, SuccessorBase, Ydoc};
@@ -2211,6 +2211,48 @@ fn validate_successor_base(
     Ok(())
 }
 
+/// A bounded replay cache borrowed from one transaction, never retained by its writer.
+pub(crate) struct TransactionDocCache<'tx, 'conn> {
+    tx: &'tx Transaction<'conn>,
+    docs: WriterDocCache,
+    // At most one inexpensive flag per document in the bounded journal page.
+    dependency_checks: std::collections::HashMap<DocKey, (CacheTuple, bool)>,
+}
+
+impl<'tx, 'conn> TransactionDocCache<'tx, 'conn> {
+    pub(crate) fn new(tx: &'tx Transaction<'conn>) -> Self {
+        Self {
+            tx,
+            docs: WriterDocCache::new(),
+            dependency_checks: std::collections::HashMap::new(),
+        }
+    }
+
+    pub(crate) fn has_missing_updates(&mut self, key: &DocKey) -> Result<bool, CollabError> {
+        let tuple = CacheTuple::read_current(self.tx, key)?;
+        if let Some(tuple) = &tuple {
+            if let Some((saved, missing)) = self.dependency_checks.get(key) {
+                if saved == tuple {
+                    #[cfg(any(test, debug_assertions))]
+                    assert_eq!(load_doc_in(self.tx, key)?.has_missing_updates(), *missing);
+                    return Ok(*missing);
+                }
+            }
+        }
+        let missing = match self.docs.doc_for_consumer(self.tx, key)? {
+            Some(doc) => doc.has_missing_updates(),
+            None => load_doc_in(self.tx, key)?.has_missing_updates(),
+        };
+        if let Some(tuple) = tuple {
+            self.dependency_checks.insert(key.clone(), (tuple, missing));
+        }
+        Ok(missing)
+    }
+}
+
+#[cfg(test)]
+mod transaction_cache_tests;
+
 /// Append one locally-produced update inside the caller's transaction — the
 /// transaction-composable core of [`record_local_update`]. Validates the
 /// bytes, content-dedupes, runs the replay-parity gate, and advances the
@@ -2238,6 +2280,7 @@ pub fn record_update_in_tx(
         false,
         true,
         now_ms,
+        None,
     )
 }
 
@@ -2254,10 +2297,52 @@ pub(crate) fn record_authorized_update_in_tx(
     authors_admitted: bool,
     local_edit: bool,
     now_ms: i64,
+    page_cache: Option<&mut TransactionDocCache<'_, '_>>,
 ) -> Result<AppendOutcome, CollabError> {
     validate_update_bytes(update)?;
     let marker = read_marker_in(tx, key)?.ok_or(CollabError::NoMarker)?;
     let sha = crate::hex_sha256(update);
+    if let Some(cache) = page_cache {
+        if !std::ptr::eq(cache.tx, tx)
+            || index_frontmatter
+            || actor_origin_id.is_some()
+            || attribution.is_some()
+            || !authors_admitted
+            || local_edit
+        {
+            return Err(CollabError::Corrupt {
+                reason: "invalid transaction cache authorization".into(),
+            });
+        }
+        let mut probe = GateBaseProbe::default();
+        let mut append = append_local_update_cached(
+            tx,
+            key,
+            &marker,
+            update,
+            &sha,
+            false,
+            None,
+            None,
+            true,
+            now_ms,
+            false,
+            &cache.docs,
+            &mut probe,
+        )?;
+        append.emit_outbound = false;
+        probe.capture_commit(tx, key);
+        // Only this transaction's private cache advances before commit. It
+        // cannot escape the transaction and rollback discards every entry.
+        cache.docs.finish_local_append(
+            key,
+            &TxnOutcome::Committed(append.clone()),
+            update,
+            &sha,
+            probe,
+        );
+        return Ok(append);
+    }
     append_local_update(
         tx,
         key,

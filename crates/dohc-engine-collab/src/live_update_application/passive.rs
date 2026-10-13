@@ -57,7 +57,9 @@ pub fn apply_page(
     if rows.len() > 500 {
         return Err(invalid("replica page exceeds row limit"));
     }
+    let mut appended = std::collections::HashMap::<DocKey, i64>::new();
     let result = store.write_with(faults, |tx| -> Result<ReplicaPageResult, ApplicationError> {
+        let mut cache = durable::TransactionDocCache::new(tx);
         let frontier = read_frontiers(tx, workspace)?;
         if after > frontier.journal_cursor { return Err(ApplicationError::Conflict); }
         let mut result = ReplicaPageResult {revision:frontier.revision, log_cursor:frontier.log_cursor,
@@ -91,14 +93,15 @@ pub fn apply_page(
                 params![workspace,b.main_version_id,b.object_id,b.lineage_claim_id], |r| r.get(0)).map_err(read_sql)?;
             // Delete removes rich-document markers rather than archiving them.
             // An applied base proves this missing lineage was already present.
-            let retired = retired || (!matches && tx.query_row(
+            let retired = !matches && (retired || tx.query_row(
                 "SELECT EXISTS(SELECT 1 FROM replication_log WHERE workspace_id=?1 AND op_kind='ydoc.update' AND apply_disposition='applied' \
                  AND json_extract(payload_json,'$.versionId')=?2 AND json_extract(payload_json,'$.objectId')=?3 \
                  AND json_extract(payload_json,'$.lineageClaimId')=?4 AND json_extract(payload_json,'$.isBaseState')=1)",
                 params![workspace,b.main_version_id,b.object_id,b.lineage_claim_id], |r|r.get::<_,bool>(0)).map_err(read_sql)?);
             let retired_by_authority = row.authority.as_ref().is_none_or(|a| a.lineage_claim_id != b.lineage_claim_id)
                 && !matches && row.authority.as_ref().is_none_or(|a| frontier.log_cursor >= a.baseline_sequence);
-            // A new lease cannot fetch ordinary baselines from a superseded epoch.
+            // Epoch-floor skips depend on the relay refusing sessions at/below the floor
+            // and refusing re-registration with a different baseline for the same lineage.
             let retired_by_epoch = !matches && row.authority.as_ref().is_some_and(|a| a.baseline_sequence <= epoch_log_floor);
             if retained.replay || retired || retired_by_authority || retired_by_epoch {
                 result.skipped += 1;
@@ -106,21 +109,26 @@ pub fn apply_page(
                 result.blocked_cursor = Some(row.journal_cursor);
                 break;
             } else {
-                match apply_row(tx, row, &key, retained.audit)? {
-                    true => result.applied += 1,
-                    false => result.skipped += 1,
+                if apply_row(tx, row, &key, retained.audit, &mut cache)? {
+                    appended.insert(key, event.metadata.accepted.received_at_ms);
                 }
+                result.applied += 1;
             }
             if faults.poll(FaultPoint::SyncBeforeApplyCommit)==FaultAction::Crash { return Err(ApplicationError::Interrupted); }
-            advance_frontiers(tx, workspace, frontier.log_cursor, row.journal_cursor)?;
             result.journal_cursor = result.journal_cursor.max(row.journal_cursor);
         }
+        advance_frontiers(tx, workspace, frontier.log_cursor, result.journal_cursor)?;
         let frontier = read_frontiers(tx, workspace)?;
         result.revision = frontier.revision;
         Ok(result)
     })?;
     match result {
-        TxnOutcome::Committed(result) => Ok(result),
+        TxnOutcome::Committed(result) => {
+            for (key, now_ms) in appended {
+                durable::maybe_compact(store, &key, DEFAULT_COMPACTION_THRESHOLD, faults, now_ms)?;
+            }
+            Ok(result)
+        }
         TxnOutcome::Crashed { .. } => Err(ApplicationError::Interrupted),
     }
 }
@@ -135,12 +143,8 @@ fn retained_delivery(
     row: &ReplicaJournalRow,
 ) -> Result<RetainedDelivery, ApplicationError> {
     let event = &row.admitted;
-    let b = &event.metadata.accepted.binding;
     let receipt = &event.metadata.accepted.receipt;
     let namespace = &row.relay_database_namespace;
-    if let Some(restore) = &row.restore {
-        validate_restore(row, restore, b.restore_fence_generation - 1)?;
-    }
     let saved: Option<(String,String,i64,String)> = tx.query_row(
         "SELECT metadata_json,update_sha256,journal_cursor,evidence_digest FROM live_accepted_updates WHERE relay_database_namespace=?1 AND (delivery_id=?2 OR journal_cursor=?3)",
         params![namespace,receipt.delivery_id,receipt.journal_cursor], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional().map_err(read_sql)?;
@@ -186,7 +190,7 @@ fn retained_audit(
         return Err(ApplicationError::Conflict);
     }
     let previous = if count == 1 {
-        Some(initial_digest(namespace, b)?)
+        Some(accepted_history::initial_digest(namespace, b)?)
     } else {
         tx.query_row("SELECT evidence_digest FROM live_accepted_updates WHERE relay_database_namespace=?1 AND workspace_id=?2 AND main_version_id=?3 AND object_id=?4 AND lineage_claim_id=?5 AND event_count=?6 \
             UNION ALL SELECT evidence_digest FROM live_audit_events WHERE relay_database_namespace=?1 AND workspace_id=?2 AND main_version_id=?3 AND object_id=?4 AND lineage_claim_id=?5 AND event_count=?6 LIMIT 1",
@@ -205,6 +209,7 @@ fn apply_row(
     row: &ReplicaJournalRow,
     key: &DocKey,
     audited: Option<(i64, String)>,
+    cache: &mut durable::TransactionDocCache<'_, '_>,
 ) -> Result<bool, ApplicationError> {
     let event = &row.admitted;
     let b = &event.metadata.accepted.binding;
@@ -222,7 +227,7 @@ fn apply_row(
             (generation, count, evidence, cursor)
         }
         None => {
-            let initial = initial_digest(namespace, b)?;
+            let initial = accepted_history::initial_digest(namespace, b)?;
             // The relay registers every new lineage at restore generation one.
             (1, 0, initial, 0)
         }
@@ -233,9 +238,11 @@ fn apply_row(
     if b.restore_fence_generation > generation && row.restore.is_none() {
         return Err(ApplicationError::Conflict);
     }
-    if let Some(restore) = &row.restore {
-        validate_restore(row, restore, generation)?;
-    }
+    let checkpoint = row
+        .restore
+        .as_ref()
+        .map(|restore| validate_restore(row, restore, generation))
+        .transpose()?;
     let count = count
         .checked_add(1)
         .filter(|n| *n <= SAFE)
@@ -250,35 +257,32 @@ fn apply_row(
     {
         return Err(ApplicationError::Conflict);
     }
-    check_provenance(tx, namespace, event, true)?;
-    if audited.is_some() {
-        accepted_history::append(
-            tx,
-            namespace,
-            b,
-            event,
-            count,
-            1,
-            event.update_bytes.len() as i64,
-            &evidence,
-        )?;
-        save_position(tx, row, count, &evidence)?;
-        return Ok(false);
-    }
-    if let Some(restore) = &row.restore {
-        durable::record_authorized_update_in_tx(
+    record_provenance(tx, namespace, event)?;
+    let mut appended = false;
+    if checkpoint.is_some() {
+        // Restore admissions can include native sources absent from the journal,
+        // including delete-only updates with no new clock ranges. Their retained
+        // proof contains digests, not bytes, so the checkpoint supplies that state.
+        let bytes = &row
+            .restore
+            .as_ref()
+            .ok_or(ApplicationError::Conflict)?
+            .checkpoint_bytes;
+        appended = !durable::record_authorized_update_in_tx(
             tx,
             key,
-            &restore.checkpoint_bytes,
+            bytes,
             false,
             None,
             None,
             true,
             false,
             event.metadata.accepted.received_at_ms,
-        )?;
+            Some(cache),
+        )?
+        .deduped;
     }
-    durable::record_authorized_update_in_tx(
+    let append = durable::record_authorized_update_in_tx(
         tx,
         key,
         &event.update_bytes,
@@ -288,7 +292,11 @@ fn apply_row(
         true,
         false,
         event.metadata.accepted.received_at_ms,
+        Some(cache),
     )?;
+    if append.deduped && cache.has_missing_updates(key)? {
+        return Err(ApplicationError::Conflict);
+    }
     accepted_history::append(
         tx,
         namespace,
@@ -300,23 +308,40 @@ fn apply_row(
         &evidence,
     )?;
     save_position(tx, row, count, &evidence)?;
-    Ok(true)
+    Ok(appended || !append.deduped)
 }
 
-fn initial_digest(namespace: &str, b: &LiveObjectBinding) -> Result<String, ApplicationError> {
-    Ok(hex_sha256(
-        &serde_json::to_vec(&(
-            "accepted-history-v1",
-            [
+// The index contains disjoint ranges. The last range starting before a
+// candidate's end is therefore the only possible overlap, even across pages.
+fn record_provenance(
+    tx: &Transaction<'_>,
+    namespace: &str,
+    event: &AdmittedLiveUpdate,
+) -> Result<(), ApplicationError> {
+    let b = &event.metadata.accepted.binding;
+    for range in &event.metadata.first_seen {
+        let end: Option<i64> = tx.query_row(
+            "SELECT end_clock FROM replica_first_seen WHERE relay_database_namespace=?1 AND workspace_id=?2 AND main_version_id=?3 AND object_id=?4 AND lineage_claim_id=?5 AND client_id=?6 AND start_clock<?7 ORDER BY start_clock DESC LIMIT 1",
+            params![namespace,b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id,range.client_id,range.end_clock],|r|r.get(0)).optional().map_err(read_sql)?;
+        if end.is_some_and(|end| end > range.start_clock) {
+            return Err(ApplicationError::Conflict);
+        }
+        tx.execute(
+            "INSERT INTO replica_first_seen VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
+            params![
                 namespace,
-                &b.workspace_id,
-                &b.main_version_id,
-                &b.object_id,
-                &b.lineage_claim_id,
+                b.workspace_id,
+                b.main_version_id,
+                b.object_id,
+                b.lineage_claim_id,
+                range.client_id,
+                range.start_clock,
+                range.end_clock
             ],
-        ))
-        .map_err(|_| ApplicationError::Corrupt)?,
-    ))
+        )
+        .map_err(write_sql)?;
+    }
+    Ok(())
 }
 
 fn save_position(
@@ -326,7 +351,7 @@ fn save_position(
     evidence: &str,
 ) -> Result<(), ApplicationError> {
     let b = &row.admitted.metadata.accepted.binding;
-    tx.execute("INSERT INTO replica_documents VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)
+    tx.execute("INSERT INTO replica_documents(workspace_id,main_version_id,object_id,lineage_claim_id,relay_database_namespace,restore_generation,event_count,evidence_digest,journal_cursor) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)
         ON CONFLICT(workspace_id,main_version_id,object_id,lineage_claim_id) DO UPDATE SET
         restore_generation=excluded.restore_generation,event_count=excluded.event_count,evidence_digest=excluded.evidence_digest,journal_cursor=excluded.journal_cursor
         WHERE excluded.journal_cursor>replica_documents.journal_cursor AND excluded.restore_generation>=replica_documents.restore_generation",
@@ -338,7 +363,7 @@ fn validate_restore(
     row: &ReplicaJournalRow,
     restore: &ReplicaRestore,
     generation: i64,
-) -> Result<(), ApplicationError> {
+) -> Result<crate::Ydoc, ApplicationError> {
     identifier(&restore.operation_id, 512)?;
     let proof = &restore.proof;
     let admitted: AdmittedLiveUpdateMetadata = serde_json::from_value(proof["admitted"].clone())
@@ -372,5 +397,5 @@ fn validate_restore(
     let checkpoint = crate::Ydoc::wire();
     checkpoint.apply(&restore.checkpoint_bytes)?;
     checkpoint.validate_public_baseline(&restore.checkpoint_bytes)?;
-    Ok(())
+    Ok(checkpoint)
 }
