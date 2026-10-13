@@ -1,6 +1,7 @@
 import type { SaveState } from "@dohc/workspace-contracts/save-state";
 import { Suspense } from "react";
 import { LazySourceCodeEditor } from "./LazySourceCodeEditor";
+import { ViewActions } from "./fileInspectorUi";
 import type { PendingTextUndo } from "./fileEditorUndo";
 import type { SharedLocalDocument } from "./sharedLocalDocument";
 import { SkeletonRows } from "./ui/SkeletonRows";
@@ -9,6 +10,31 @@ import {
   useAutosavedTextDraft,
   type DraftFlush,
 } from "./useAutosavedTextDraft";
+
+// A text, code or JSON file's actions in its tab row: the save state and
+// Share. The tab's icon already says what the file is.
+export function TextViewActions(props: {
+  testId: string;
+  onShare?: () => void;
+  saveState: SaveState;
+  truncated?: boolean;
+  readOnly?: boolean;
+}) {
+  return (
+    <ViewActions
+      onShare={props.onShare}
+      status={
+        <StateMark
+          testId={`${props.testId}-save-state`}
+          truncate
+          quietWhenCalm
+          state={props.saveState}
+          shown={props.readOnly ? "read-only" : props.truncated ? "too-large" : props.saveState}
+        />
+      }
+    />
+  );
+}
 
 export function TextEditorView({
   body,
@@ -32,6 +58,7 @@ export function TextEditorView({
   pendingUndo,
   onPendingUndoConsumed,
   localBuffer,
+  onShare,
 }: {
   reopenKey?: number;
   switchReadPending: boolean;
@@ -56,6 +83,7 @@ export function TextEditorView({
   // Search-result landing for read-only text views: scroll the
   // pre so the matched line sits in the upper third.
   scrollLine?: number;
+  onShare?: () => void;
 }) {
   const editor = useAutosavedTextDraft({
     body,
@@ -79,17 +107,13 @@ export function TextEditorView({
       data-testid={testId}
       className="flex min-h-0 flex-1 flex-col"
     >
-      <div className="flex h-8 shrink-0 items-center gap-2 border-b border-line px-3">
-        <span className="font-mono text-[11px] uppercase tracking-wide text-subtle">
-          {language}
-        </span>
-        <StateMark
-          testId={`${testId}-save-state`}
-          state={editor.saveState}
-          shown={readOnly ? "read-only" : truncated ? "too-large" : editor.saveState}
-          className="ml-auto"
-        />
-      </div>
+      <TextViewActions
+        testId={testId}
+        onShare={onShare}
+        saveState={editor.saveState}
+        truncated={truncated}
+        readOnly={readOnly}
+      />
       <Suspense fallback={<SkeletonRows layout="panel" label="Loading editor..." />}>
         <LazySourceCodeEditor
           testId={`${testId}-editor`}
