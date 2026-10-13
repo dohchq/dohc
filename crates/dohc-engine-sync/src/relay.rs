@@ -2117,6 +2117,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             conflicts_opened: pass.conflicts_opened,
             pending_cursor: Some(crate::HostedCursor {
                 scope_generation: replica.scope_generation,
+                cursor_commits: replica.cursor_commits,
                 main_cursor: backfill.is_none().then_some(cursor),
                 reads,
                 settlement_report_id: pass.settlement_report_id,
@@ -2130,7 +2131,8 @@ impl<T: RelayTransport> RelaySyncClient<T> {
     }
 
     /// Commit a hosted pass's cursor after its work materialized. Answers
-    /// `false`, committing nothing, when the scope moved since its fetch.
+    /// `false`, committing nothing, when the scope moved or another pass
+    /// committed since its fetch.
     pub fn commit_hosted_cursor(
         &self,
         store: &mut EngineStore,

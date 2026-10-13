@@ -2749,6 +2749,63 @@ fn a_document_away_from_its_scope_path_is_held_until_it_arrives() {
     assert_eq!(replica(&store).main_cursor, 4);
 }
 
+/// Sol's out-of-date pass: pass A completed held `doc-b`'s read with its
+/// rename but committed late. Pass B, after it, skipped a later edit on the
+/// main feed while `doc-b`'s own read stopped before it, and committed
+/// first. A's commit then marked `doc-b` ready, so nothing read the edit
+/// again. A pass that read before another committed cannot commit.
+#[test]
+fn a_pass_another_commit_overtook_cannot_commit() {
+    let (_scratch, _path, mut store) = hosted_store();
+    let client = RelaySyncClient::new(HostedFeed::new());
+    let feed = client.transport();
+    feed.append(envelope("owner", 0, "workspace.init", json!({})));
+    feed.create("owner", 1, "doc-b", "a.md", "hosted b");
+    feed.share("doc-b", "b.md");
+    sync(&client, &mut store);
+    feed.rename(
+        "owner",
+        2,
+        "doc-b",
+        "a.md",
+        "b.md",
+        "hosted b",
+        "moment-owner-1",
+    );
+    let late = pass(&client, &mut store, &NoFaults).unwrap();
+    assert!(late.pending_cursor.as_ref().unwrap().reads["doc-b"].complete);
+
+    feed.replace(
+        "owner",
+        3,
+        "doc-b",
+        "b.md",
+        "edited b",
+        ("doc-b", "hosted b", "moment-owner-2"),
+    );
+    let first = client
+        .pull_hosted_workspace(
+            &mut store,
+            &mut WriterDocCache::new(),
+            "ws",
+            &NoFaults,
+            &LiveSession("doc-b"),
+        )
+        .unwrap();
+    assert!(commit(&client, &mut store, &first));
+    assert_eq!(hold(&store, "doc-b"), Some(HostedHold::WorkWaiting));
+    assert_eq!(replica(&store).main_cursor, 4);
+
+    assert!(!commit(&client, &mut store, &late));
+    assert_eq!(hold(&store, "doc-b"), Some(HostedHold::WorkWaiting));
+    sync(&client, &mut store);
+    assert!(ready(&store, "doc-b"));
+    assert_eq!(
+        content(&store).0,
+        BTreeMap::from([("doc-b".to_owned(), "edited b".to_owned())])
+    );
+}
+
 /// Sol's held-backfill review, fourth finding: a ready document whose scope
 /// path changed kept its readiness at its old head. `doc-b` is held, naming
 /// both paths, and reads its own rows from where the main feed is until the

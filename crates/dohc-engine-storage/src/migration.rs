@@ -3213,6 +3213,7 @@ CREATE TABLE hosted_replicas (
     scope_token TEXT CHECK (scope_token IS NULL OR length(scope_token) > 0),
     scope_generation INTEGER NOT NULL DEFAULT 0 CHECK (scope_generation >= 0),
     main_cursor INTEGER NOT NULL DEFAULT 0 CHECK (main_cursor >= 0),
+    cursor_commits INTEGER NOT NULL DEFAULT 0 CHECK (cursor_commits >= 0),
     last_outbound_seq INTEGER NOT NULL DEFAULT -1 CHECK (last_outbound_seq >= -1),
     created_at_ms INTEGER NOT NULL
 ) STRICT;
@@ -3930,7 +3931,7 @@ mod tests {
             ),
             (
                 "v2-hosted-replica",
-                "e7839708625dfb61784b2ed3bdfc1fc966ae26e829473138714d91539d9d98fc",
+                "dfd15555dc7d6508a04281f2cdd2301de8e18343d001aa0d8e614b6aefe7376c",
             ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());
@@ -3973,10 +3974,11 @@ mod tests {
                  VALUES ('hosted','gone.md',printf('%064d',0));",
             )
             .unwrap();
-            let state: (Option<String>, i64, i64, i64, i64) = conn
+            let state: (Option<String>, i64, i64, i64, i64, i64) = conn
                 .query_row(
-                    "SELECT scope_token,scope_generation,main_cursor,last_outbound_seq, \
-                     (SELECT backfill_cursor FROM hosted_documents) FROM hosted_replicas",
+                    "SELECT scope_token,scope_generation,main_cursor,cursor_commits, \
+                     last_outbound_seq,(SELECT backfill_cursor FROM hosted_documents) \
+                     FROM hosted_replicas",
                     [],
                     |row| {
                         Ok((
@@ -3985,11 +3987,12 @@ mod tests {
                             row.get(2)?,
                             row.get(3)?,
                             row.get(4)?,
+                            row.get(5)?,
                         ))
                     },
                 )
                 .unwrap();
-            assert_eq!(state, (None, 0, 0, -1, 0));
+            assert_eq!(state, (None, 0, 0, 0, -1, 0));
             for invalid in [
                 "INSERT INTO hosted_replicas (workspace_id,created_at_ms) VALUES ('no-identity',1)",
                 "UPDATE hosted_documents SET state='retired'",
@@ -4001,6 +4004,7 @@ mod tests {
                 "INSERT INTO hosted_deferred_ops (workspace_id,origin_id,origin_seq,object_id,relay_seq) \
                  VALUES ('hosted','origin:a',0,'doc',1)",
                 "UPDATE hosted_replicas SET scope_token=''",
+                "UPDATE hosted_replicas SET cursor_commits=-1",
                 "UPDATE hosted_replicas SET last_outbound_seq=-2",
                 "INSERT INTO hosted_withheld_befores (workspace_id,moment_id,before_object_id,\
                  before_path,before_sha256,before_content_kind) \

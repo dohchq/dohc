@@ -376,6 +376,8 @@ pub struct HostedReplicaState {
     pub scope_token: Option<String>,
     pub scope_generation: i64,
     pub main_cursor: i64,
+    /// How many hosted passes have committed.
+    pub cursor_commits: i64,
     /// The documents in the current scope, by object id.
     pub documents: BTreeMap<String, HostedDocumentState>,
 }
@@ -487,14 +489,14 @@ pub fn read_hosted_replica(
     store.read_with(|conn| {
         let replica = conn
             .query_row(
-                "SELECT scope_token,scope_generation,main_cursor FROM hosted_replicas \
-                 WHERE workspace_id=?1",
+                "SELECT scope_token,scope_generation,main_cursor,cursor_commits \
+                 FROM hosted_replicas WHERE workspace_id=?1",
                 [workspace_id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
             )
             .optional()
             .map_err(SyncError::corrupt)?;
-        let Some((scope_token, scope_generation, main_cursor)) = replica else {
+        let Some((scope_token, scope_generation, main_cursor, cursor_commits)) = replica else {
             return Ok(None);
         };
         let mut statement = conn
@@ -539,6 +541,7 @@ pub fn read_hosted_replica(
             scope_token,
             scope_generation,
             main_cursor,
+            cursor_commits,
             documents,
         }))
     })
@@ -623,6 +626,8 @@ pub(crate) fn adopt_scope(
 pub struct HostedCursor {
     /// The scope generation the pass fetched under.
     pub scope_generation: i64,
+    /// How many hosted passes had committed when the pass read the replica.
+    pub cursor_commits: i64,
     /// The main feed's position, or `None` when a document backfilled instead.
     pub main_cursor: Option<i64>,
     /// Each document whose own rows the pass read, by object id: the one
@@ -662,11 +667,12 @@ impl HostedRead {
 
 /// Commit a hosted pass's position. Answers `false`, committing nothing, when
 /// the scope moved since the pass fetched, since its page may hold rows the
-/// current scope withholds, or when a newer commit already moved past it.
-/// Each document read is settled in the same transaction: held where its
-/// read stopped, ready once its read completes with nothing of it waiting in
-/// deferred work and its head at its scope's path, and still backfilling
-/// otherwise. So readiness never precedes its content.
+/// current scope withholds, or when another pass committed since it read the
+/// replica, since it read from a position and states that one replaced: its
+/// caller pulls again. Each document read is settled in the same transaction:
+/// held where its read stopped, ready once its read completes with nothing of
+/// it waiting in deferred work and its head at its scope's path, and still
+/// backfilling otherwise. So readiness never precedes its content.
 pub fn commit_hosted_cursor(
     store: &mut EngineStore,
     workspace_id: &str,
@@ -686,53 +692,31 @@ pub fn commit_hosted_cursor(
         }
     }
     store.write_with(faults, |tx| {
-        let generation: Option<i64> = tx
+        let replica: Option<(i64, i64)> = tx
             .query_row(
-                "SELECT scope_generation FROM hosted_replicas WHERE workspace_id=?1",
+                "SELECT scope_generation,cursor_commits FROM hosted_replicas WHERE workspace_id=?1",
                 [workspace_id],
-                |row| row.get(0),
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .optional()
             .map_err(SyncError::corrupt)?;
-        let generation = generation.ok_or(SyncError::InvalidInput {
+        let (generation, commits) = replica.ok_or(SyncError::InvalidInput {
             reason: NOT_A_HOSTED_REPLICA,
         })?;
-        if generation != cursor.scope_generation {
+        // Only a scope change or a commit changes the scope's documents, so
+        // the pass's reads still name documents in the states it read.
+        if generation != cursor.scope_generation || commits != cursor.cursor_commits {
             return Ok(false);
         }
-        // The main cursor stays frozen while any document backfills, and a
-        // read commits only for a document that is not ready.
-        let backfilling: bool = tx
-            .query_row(
-                "SELECT EXISTS(SELECT 1 FROM hosted_documents WHERE workspace_id=?1 \
-                 AND scope_generation=?2 AND state='backfilling')",
-                params![workspace_id, generation],
-                |row| row.get(0),
-            )
-            .map_err(SyncError::corrupt)?;
-        if cursor.main_cursor.is_some() && backfilling {
-            return Ok(false);
-        }
-        for object_id in cursor.reads.keys() {
-            let unready: bool = tx
-                .query_row(
-                    "SELECT EXISTS(SELECT 1 FROM hosted_documents WHERE workspace_id=?1 \
-                     AND object_id=?2 AND scope_generation=?3 AND state<>'ready')",
-                    params![workspace_id, object_id, generation],
-                    |row| row.get(0),
-                )
-                .map_err(SyncError::corrupt)?;
-            if !unready {
-                return Ok(false);
-            }
-        }
-        if let Some(main_cursor) = cursor.main_cursor {
-            tx.execute(
-                "UPDATE hosted_replicas SET main_cursor=MAX(main_cursor,?2) WHERE workspace_id=?1",
-                params![workspace_id, main_cursor],
-            )
-            .map_err(SyncError::persist)?;
-        }
+        let commits = commits
+            .checked_add(1)
+            .ok_or(SyncError::CoordinateDiverged)?;
+        tx.execute(
+            "UPDATE hosted_replicas SET cursor_commits=?2, \
+             main_cursor=MAX(main_cursor,COALESCE(?3,main_cursor)) WHERE workspace_id=?1",
+            params![workspace_id, commits, cursor.main_cursor],
+        )
+        .map_err(SyncError::persist)?;
         for (object_id, read) in &cursor.reads {
             let hold = read.hold(tx, workspace_id, object_id)?;
             let state = match &hold {
