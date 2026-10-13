@@ -39,6 +39,8 @@ export interface RouterOptions {
   emailTransport: EmailTransport;
   /** Origins answered with CORS headers; everything else gets none. */
   allowedOrigins: string[];
+  /** True when only approved or invited addresses may create accounts. */
+  closedSignUp?: boolean;
   /** Present only when the operator turned on crash reports. */
   crashReports?: CrashReportIntake;
   /** Development and test only. main.ts decides whether these exist. */
@@ -67,6 +69,7 @@ const PAGE_HEADERS: Record<string, string> = {
 
 export function createRouter(options: RouterOptions): (request: Request) => Promise<Response> {
   const allowed = new Set(options.allowedOrigins);
+  const closed = options.closedSignUp === true;
 
   return async function handle(request: Request): Promise<Response> {
     try {
@@ -132,11 +135,16 @@ export function createRouter(options: RouterOptions): (request: Request) => Prom
         case "/account/sign-in":
           return page(signInPage({ next: samePath(url.searchParams.get("next")) ?? undefined }));
         case "/account/sign-up":
-          return page(signUpPage({ next: samePath(url.searchParams.get("next")) ?? undefined }));
+          return page(signUpPage({ next: samePath(url.searchParams.get("next")) ?? undefined, closed }));
         case "/account/forgot-password":
           return page(forgotPasswordPage());
         case "/account/reset-password":
-          return page(resetPasswordPage({ token: url.searchParams.get("token") ?? undefined }));
+          return page(
+            resetPasswordPage({
+              token: url.searchParams.get("token") ?? undefined,
+              next: samePath(url.searchParams.get("next")) ?? undefined,
+            }),
+          );
         case "/account/verify-email": {
           const session = await options.auth.api.getSession({ headers: request.headers });
           return page(
@@ -144,6 +152,7 @@ export function createRouter(options: RouterOptions): (request: Request) => Prom
               token: url.searchParams.get("token") ?? undefined,
               email: session?.user.email,
               next: samePath(url.searchParams.get("next")) ?? undefined,
+              closed,
             }),
           );
         }
@@ -152,7 +161,7 @@ export function createRouter(options: RouterOptions): (request: Request) => Prom
         case "/account": {
           const session = await options.auth.api.getSession({ headers: request.headers });
           if (!session) return redirect("/account/sign-in?next=%2Faccount");
-          return page(accountPage(session.user));
+          return page(accountPage(session.user, closed));
         }
       }
       if (options.seams?.sentEmails && path === "/test/email/messages") {

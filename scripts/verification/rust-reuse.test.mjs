@@ -19,7 +19,7 @@ function fixture() {
   const put = (path, text) => { mkdirSync(dirname(join(root, path)), {recursive: true}); writeFileSync(join(root, path), text); };
   const git = args => readGit(args, root);
   const commit = () => { git(["add", "."]); git(["commit", "-qm", "fixture"]); return git(["rev-parse", "HEAD"]).trim(); };
-  git(["init", "-q"]); git(["config", "core.autocrlf", "false"]); git(["config", "user.name", "Fixture"]); git(["config", "user.email", "fixture@example.invalid"]);
+  git(["init", "-q"]); git(["config", "commit.gpgsign", "false"]); git(["config", "core.autocrlf", "false"]); git(["config", "user.name", "Fixture"]); git(["config", "user.email", "fixture@example.invalid"]);
   put(".gitignore", ".agent-artifacts/\n.cargo/config.toml\n.config/nextest.toml\n");
   put("Cargo.toml", "fixture cargo manifest");
   put("crates/fixture/src/lib.rs", "fixture native source");
