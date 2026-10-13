@@ -18,7 +18,7 @@ export function serviceHostSharePaths(storage: SyncRelayStorage, input: {workspa
   const files = storage.readCurrentFileState({workspaceId: input.workspaceId, versionId: "main", selectorPaths: selector.paths, limit: 5_000});
   if (files.tooMany) throw badRequest("This share has too many files for live editing.");
   const paths = files.files.filter(file => file.contentKind === "text" && liveDocumentKindForPath(file.path) === "richdoc" &&
-    (!input.missingOnly || !storage.hasServiceHostEnrollment(input.workspaceId, file.path))).map(file => file.path);
+    (!input.missingOnly || !storage.hasKeptServiceHostEnrollment(input.workspaceId, file.path))).map(file => file.path);
   if (paths.length > 64) throw badRequest("This server supports up to 64 live documents.");
   return paths;
 }
@@ -34,7 +34,7 @@ export function discoverServiceHostDocuments(storage: SyncRelayStorage, onRefuse
     catch (error) {if (error instanceof RelayError) {onRefused?.(error); continue;} throw error;}
     for (const path of paths) {
       const key = JSON.stringify([share.workspaceId, path]);
-      if (existing.has(key) || storage.hasServiceHostEnrollment(share.workspaceId, path)) continue;
+      if (existing.has(key) || storage.hasKeptServiceHostEnrollment(share.workspaceId, path)) continue;
       try {storage.enrollServiceHostDocument({workspaceId: share.workspaceId, ownerUserId, shareId: share.shareId, path, nowMs: Date.now(), guard: storage.captureStanding()});}
       catch (error) {if (error instanceof RelayError) {onRefused?.(error); continue;} throw error;}
       existing.add(key);
@@ -81,7 +81,8 @@ export function createServiceHostEnrollmentRoutes(options: {
   const activation = storage.createServiceActivationStore(history);
   function state(row: ServiceHostEnrollment) {
     const base = {path: row.path};
-    if (!row.enabled) return {...base, status: "paused"};
+    // A Pause still waiting for its document to unload reads as paused.
+    if (!row.enabled || row.ownerStop) return {...base, status: "paused"};
     if (!storage.workspaceIsOwnedBy(row.workspaceId, row.ownerUserId) || storage.verifyWorkspaceIdentity(row) !== "matched") return {...base, status: "unavailable", reason: "workspace-changed"};
     if (storage.objectIdAtPathInVersion({workspaceId: row.workspaceId, versionId: "main", path: row.path}) !== row.objectId) return {...base, status: "unavailable", reason: "document-unavailable"};
     const saved = activation.read(row.workspaceId, row.path, 4 * 1024 * 1024);

@@ -335,7 +335,7 @@ export async function verify(args) {
         }
         const tags = mode === "pr" ? desktopProofTags(proofs) : {selected: ["@verification-smoke"], required: ["@verification-smoke"]};
         if (mode === "pr" && (proofs.accounts || tags.selected.length)) {
-          await proofStep("browser-install", ...pnpm(["exec", "playwright", "install", ...(process.platform === "linux" ? ["--with-deps"] : []), "chromium"]), env);
+          await proofStep("browser-install", ...pnpm(["exec", "playwright", "install", "chromium"]), env);
         }
         if (mode === "pr" && proofs.accounts) {
           const accountReport = join(output, "accounts-playwright.json");

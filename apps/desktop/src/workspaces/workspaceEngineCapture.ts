@@ -679,6 +679,7 @@ export interface WorkspaceEngineCapture {
   // Stable-identity seam for the linked-chat rail: the active version's
   // engine object id for a path, or null when the engine does not own it.
   fileObjectIdForPath(path: string): Promise<string | null>;
+  resolveFileForPath(path: string): Promise<{ objectId: string; path: string } | null>;
   // Reverse lookup for projections that must name a linked object's current
   // active-version path after renames.
   filePathForObjectId(objectId: string): Promise<string | null>;
@@ -5539,6 +5540,15 @@ export function createWorkspaceEngineCapture(
       }
   }
 
+  async function resolveFileForPath(path: string) {
+    // Drain capture work before resolving a newly saved file.
+    await chain;
+    const engine = await engineStore();
+    await engine.flushCapture?.();
+    const [file] = (await engine.resolveFiles({ workspaceId, targets: [{ path }] })).results;
+    return file?.status === "found" ? file : null;
+  }
+
   return {
     start() {
       pollDaemonCaptureHealth();
@@ -6792,12 +6802,14 @@ export function createWorkspaceEngineCapture(
           page=await engine.listMoments({workspaceId,versionId,objectId:input.objectId,limit:100,beforeMomentOrder:page.nextBeforeMomentOrder});
           previous=page.moments.find(moment=>moment.operation==="delete" && moment.metadata.correlationId===input.requestId);
         }
-        const files=await listTextFileMetadata(engine,versionId);
-        const current=files.find(file=>file.objectId===input.objectId);
+        const paths = [...new Set([input.path, lastKnownPath, ...(previous ? [previous.path] : [])])];
+        const resolved = await engine.resolveFiles({workspaceId, versionId, targets: [{objectId: input.objectId}, ...paths.map(path => ({path}))]});
+        const current = resolved.results[0]?.status === "found" ? resolved.results[0] : undefined;
+        const pathPresent = new Map(paths.map((path, index) => [path, resolved.results[index + 1]?.status === "found"]));
         // A completed retry must never remove an object the owner restored later.
         if(previous && current)return {status:"deleted" as const,momentId:previous.id};
         if(previous && !current) {
-          if(files.some(file=>file.path===previous.path))return {status:"deleted" as const,momentId:previous.id};
+          if(pathPresent.get(previous.path))return {status:"deleted" as const,momentId:previous.id};
           const deleted=await engine.getMoment({workspaceId,momentId:previous.id});
           const disk=await readDiskTextState(rootPath,previous.path);
           if(disk.kind==="text") {
@@ -6808,7 +6820,7 @@ export function createWorkspaceEngineCapture(
         }
         if(!current) {
           for(const path of new Set([input.path,lastKnownPath])) {
-            if(!files.some(file=>file.path===path) && (await readDiskTextState(rootPath,path)).kind!=="absent")return {status:"conflict" as const};
+            if(!pathPresent.get(path) && (await readDiskTextState(rootPath,path)).kind!=="absent")return {status:"conflict" as const};
           }
           return {status:"already-absent" as const};
         }
@@ -6831,26 +6843,17 @@ export function createWorkspaceEngineCapture(
       });
     },
 
+    resolveFileForPath,
+
     async fileObjectIdForPath(path) {
-      // Drain the chain so a just-captured file is immediately chat-able.
-      await chain;
-      const engine = await engineStore();
-      await engine.flushCapture?.();
-      const activeVersionId = await activeVersionIdOf(engine);
-      const snapshot = await engine.readTextFile({
-        workspaceId,
-        versionId: activeVersionId,
-        path,
-      });
-      return snapshot?.objectId ?? null;
+      return (await resolveFileForPath(path))?.objectId ?? null;
     },
 
     async filePathForObjectId(objectId) {
       await chain;
       const engine = await engineStore();
-      const activeVersionId = await activeVersionIdOf(engine);
-      const files = await listTextFileMetadata(engine, activeVersionId);
-      return files.find((file) => file.objectId === objectId)?.path ?? null;
+      const [file] = (await engine.resolveFiles({ workspaceId, targets: [{ objectId }] })).results;
+      return file?.status === "found" ? file.path : null;
     },
 
     writeGeneratedTextFile(input) {

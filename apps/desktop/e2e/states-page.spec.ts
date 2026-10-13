@@ -66,6 +66,7 @@ const PARTS = [
   "zoom-stepper",
   "rails",
   "composer-sending",
+  "about-conversation",
   "offers",
 ];
 // A fixed instant for the page's clock. The capture pauses the clock an

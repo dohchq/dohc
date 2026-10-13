@@ -113,6 +113,15 @@ test('app participant limit reaches the relay and validates positive safe intege
   }
 });
 
+test('sign-up stays open by default and asks the relay about invites on the internal network', () => {
+  assert.equal(settings().DOHC_SIGN_UP_EMAILS, '');
+  const api = compose.services['workspace-api'].environment;
+  assert.equal(api.DOHC_SIGN_UP_EMAILS, '${DOHC_SIGN_UP_EMAILS:-}');
+  assert.equal(api.WORKSPACE_API_RELAY_URL, `http://sync-relay:${compose.services['sync-relay'].environment.SYNC_RELAY_PORT}`);
+  assert.equal(api.BETTER_AUTH_SECRET, compose.services['sync-relay'].environment.BETTER_AUTH_SECRET);
+  assert.doesNotMatch(readFileSync('tools/self-host/Caddyfile', 'utf8'), /\/internal/);
+});
+
 test('private mode selects the private-only gateway overlay and the real env file', () => {
   const args = composeArgs('.env.self-host', {...settings(), DOHC_SERVER_NETWORK_ACCESS: 'private'}, 'up');
   assert.ok(args.includes('tools/self-host/compose.private.yml'));
