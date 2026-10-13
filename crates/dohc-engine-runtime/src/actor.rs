@@ -735,6 +735,10 @@ fn worker_main(
                                 .enable_time()
                                 .build()
                                 .ok();
+                            #[cfg(test)]
+                            if timer.is_some() {
+                                link_metrics.lock().unwrap().timer_starts += 1;
+                            }
                         }
                         Err(_) => eprintln!("links parser could not start; pending work retained"),
                     }
@@ -900,6 +904,139 @@ mod saturation_tests {
     use std::task::Poll;
     use std::time::{Duration, Instant};
     use tokio::sync::Semaphore;
+
+    // Prepare the real command channel and holds before worker_main publishes.
+    // This removes the race between spawn returning and its first idle slot.
+    fn spawn_prequeued_actor(
+        db: &std::path::Path,
+        prepare: impl FnOnce(&ActorHandle),
+    ) -> WorkspaceActor {
+        let identity = EngineDbIdentity::resolve_or_create(db).unwrap();
+        let writer_lock = acquire_writer_lock(db).unwrap();
+        let (tx, rx) = mpsc::channel(CHANNEL_CAPACITY);
+        let state = Arc::new(AtomicU8::new(LifecycleState::Opening.as_u8()));
+        let metrics = SharedMetrics::default();
+        let holds = Arc::new(AtomicU64::new(0));
+        let mut actor = WorkspaceActor {
+            identity,
+            generation: 1,
+            mode: ActorOpenMode::ReadWrite,
+            store_freshly_created: false,
+            close_permit: Some(tx.clone().try_reserve_owned().unwrap()),
+            tx,
+            state,
+            worker: None,
+            claims: ClaimAnnouncer::default(),
+            link_metrics: metrics,
+            capture_holds: holds,
+        };
+        prepare(&actor.handle());
+        let (startup_tx, startup_rx) = std_sync_channel(1);
+        let db = db.to_owned();
+        let state = Arc::clone(&actor.state);
+        let metrics = Arc::clone(&actor.link_metrics);
+        let holds = Arc::clone(&actor.capture_holds);
+        actor.worker = Some(std::thread::spawn(move || {
+            worker_main(
+                db,
+                2,
+                ActorOpenMode::ReadWrite,
+                None,
+                rx,
+                state,
+                metrics,
+                holds,
+                startup_tx,
+                Some(writer_lock),
+                None,
+            );
+        }));
+        actor.store_freshly_created = startup_rx
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap()
+            .unwrap();
+        assert!(!actor.store_freshly_created, "exercise a reopened store");
+        actor
+    }
+
+    #[test]
+    fn commands_queued_at_publication_finish_before_link_worker_and_timer_start() {
+        let scratch = ScratchDir::new().unwrap();
+        let db = engine_db_path(&scratch).unwrap();
+        drop(EngineStore::open(&db, 1).unwrap());
+        let (completed_tx, completed_rx) = std::sync::mpsc::channel();
+        let mut actor = spawn_prequeued_actor(&db, |handle| {
+            for command in 0..3 {
+                let metrics = Arc::clone(&handle.link_metrics);
+                let state = Arc::clone(&handle.state);
+                let completed = completed_tx.clone();
+                handle
+                    .tx
+                    .try_send(Command::Run(Box::new(move |store, _| {
+                        assert_eq!(state.load(Ordering::Acquire), LifecycleState::Ready.as_u8());
+                        let migrations = store
+                            .read_with(|conn| {
+                                conn.query_row(
+                                    "SELECT COUNT(*) FROM engine_migrations",
+                                    [],
+                                    |row| row.get::<_, i64>(0),
+                                )
+                            })
+                            .unwrap();
+                        assert!(migrations > 0);
+                        let metrics = metrics.lock().unwrap();
+                        completed
+                            .send((command, metrics.worker_starts, metrics.timer_starts))
+                            .unwrap();
+                    })))
+                    .unwrap();
+            }
+        });
+        let completed: Vec<_> = (0..3)
+            .map(|_| completed_rx.recv_timeout(Duration::from_secs(5)).unwrap())
+            .collect();
+        actor.close().unwrap();
+        assert_eq!(completed, [(0, 0, 0), (1, 0, 0), (2, 0, 0)]);
+    }
+
+    #[tokio::test]
+    async fn capture_hold_before_first_idle_slot_postpones_link_startup_until_release() {
+        let scratch = ScratchDir::new().unwrap();
+        let db = engine_db_path(&scratch).unwrap();
+        drop(EngineStore::open(&db, 1).unwrap());
+        let mut hold = None;
+        let mut actor = spawn_prequeued_actor(&db, |handle| {
+            hold = Some(handle.defer_link_drain_for_capture());
+        });
+        // Commands still run while held, after publication returns to the caller.
+        for _ in 0..2 {
+            actor
+                .handle()
+                .run(|_, _| Ok(()))
+                .await
+                .expect("foreground command while held");
+            let metrics = actor.handle().link_drain_metrics();
+            assert_eq!(
+                metrics.worker_starts, 0,
+                "hold must postpone parser startup"
+            );
+            assert_eq!(metrics.timer_starts, 0, "hold must postpone timer startup");
+        }
+        drop(hold.take());
+        // Drop wakes the empty queue. No foreground request drives startup.
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let metrics = actor.handle().link_drain_metrics();
+                if metrics.worker_starts == 1 && metrics.timer_starts == 1 {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .expect("the next idle slot starts links after the last hold drops");
+        actor.close().unwrap();
+    }
 
     #[tokio::test]
     async fn reopened_actor_publishes_before_link_work_and_resumes_while_idle() {
