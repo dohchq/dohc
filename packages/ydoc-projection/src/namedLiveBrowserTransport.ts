@@ -69,7 +69,6 @@ export function createNamedLiveBrowserTransport<Selection extends LiveSelection 
   function session(selection: Selection) {
     const target = { ...selection };
     for (const value of Object.values(target)) parseLiveUpdateIdentifier(value);
-    if ("grantId" in target && target.workspaceId !== `named:${parseLiveUpdateIdentifier(target.grantId)}`) throw new TypeError("Invalid named live selection.");
     const recordingContext = options.recordingContext;
     const provider = createNamedLiveProvider(limits.provider, target,
       recordingContext ? () => recordingContext(target) : undefined);
