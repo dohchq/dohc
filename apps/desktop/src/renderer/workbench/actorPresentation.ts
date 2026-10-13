@@ -50,12 +50,6 @@ export function presentationColor(token: ActorPresentation, kind: "human" | "age
   const rgb = [1, 3, 5].map(offset => parseInt(stroke.slice(offset, offset + 2), 16));
   return { stroke, background: "rgba(" + rgb.join(", ") + ", 0.15)" };
 }
-export function subscribePresentationColors(listener: () => void): () => void {
-  const unsubscribe = subscribePresentation(listener);
-  const observer = typeof MutationObserver === "undefined" ? null : new MutationObserver(listener);
-  observer?.observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
-  return () => { observer?.disconnect(); unsubscribe(); };
-}
 
 // The account token applies before a workspace opens, including manager settings.
 export function bindOwnPresentation(api: Pick<DohcDesktopBridge, "cloudStatus" | "onCloudSessionChanged">): () => void {

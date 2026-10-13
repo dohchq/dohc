@@ -289,13 +289,13 @@ describe("the type stacks name the bundled families", () => {
   }
 });
 
-it("keeps document caret labels at AA for every hue in both themes", () => {
+it("keeps document caret labels at AA for every hue and neutral in both themes", () => {
   const css = readFileSync(new URL("./styles.css", import.meta.url), "utf8");
   const label = css.match(/\.dohc-notion-editor \.collaboration-carets__label\s*\{([^}]+)\}/)![1]!;
   expect(label.match(/\bcolor:\s*([^;]+);/)![1]!.trim()).toBe("var(--dohc-bg)");
-  for (const hue of IDENTITY_HUES) {
+  for (const hue of [null, ...IDENTITY_HUES]) {
     for (const mode of ["light", "dark"] as const) {
-      expect(contrast(palette[mode].bg, presentationColor({ group: "label", hue, self: false }, "human", mode).stroke), `${hue} label (${mode})`).toBeGreaterThanOrEqual(4.5);
+      expect(contrast(palette[mode].bg, presentationColor({ group: "label", hue, self: false }, "human", mode).stroke), `${hue ?? "neutral"} label (${mode})`).toBeGreaterThanOrEqual(4.5);
     }
   }
 });

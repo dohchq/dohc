@@ -1,4 +1,3 @@
-import { identityHues } from "../tokens";
 import { Awareness, applyAwarenessUpdate, encodeAwarenessUpdate } from "y-protocols/awareness";
 import { describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
@@ -83,7 +82,7 @@ describe("bindDocPresence", () => {
       transport: relay.make(),
       topic: "notes/a.md",
       clientId: "a",
-      user: { name: "Alice", color: "#f00" },
+      user: { name: "Alice" },
       onPeers: namesA,
     });
     const b = bindDocPresence({
@@ -91,7 +90,7 @@ describe("bindDocPresence", () => {
       transport: relay.make(),
       topic: "notes/a.md",
       clientId: "b",
-      user: { name: "Bob", color: "#00f" },
+      user: { name: "Bob" },
       onPeers: namesB,
     });
 
@@ -99,7 +98,10 @@ describe("bindDocPresence", () => {
 
     // Alice sees Bob among the doc's editors, via the Yjs Awareness states.
     expect(a.awareness.getStates().size).toBeGreaterThanOrEqual(2);
-    expect(a.awareness.getStates().get(docB.clientID)?.user.color).toBe(identityHues.light.rust);
+    expect(a.awareness.getStates().get(docB.clientID)?.user).toEqual({
+      name: "Bob",
+      sessionToken: "b",
+    });
     expect(namesA.mock.calls.at(-1)?.[0]).toEqual(["Bob"]);
     expect(namesB.mock.calls.at(-1)?.[0]).toEqual(["Alice"]);
     const probeDoc = new Y.Doc();
@@ -126,7 +128,7 @@ describe("bindDocPresence", () => {
       transport: relay.make(),
       topic: "notes/a.md",
       clientId: "a",
-      user: { name: "Alice", color: "#f00" },
+      user: { name: "Alice" },
       onPeers: namesA,
     });
     const b = bindDocPresence({
@@ -134,7 +136,7 @@ describe("bindDocPresence", () => {
       transport: relay.make(),
       topic: "notes/a.md",
       clientId: "b",
-      user: { name: "Bob", color: "#00f" },
+      user: { name: "Bob" },
       onPeers: namesB,
     });
     await flush();
@@ -216,7 +218,7 @@ describe("bindDocPresence", () => {
       },
       topic: "notes/a.md",
       clientId: "me",
-      user: { name: "Me", color: "#fff" },
+      user: { name: "Me" },
       onPeers,
     });
     await flush();
@@ -374,7 +376,7 @@ describe("bindDocPresence", () => {
       },
       topic: "notes/a.md",
       clientId: "me",
-      user: { name: "Me", color: "#fff" },
+      user: { name: "Me" },
       onPeers,
     });
     await flush();
@@ -416,7 +418,7 @@ it("batches remote changes and skips unchanged snapshots while retaining present
     transport,
     topic: "notes/a.md",
     clientId: "me",
-    user: { name: "Me", color: "#fff" },
+    user: { name: "Me" },
     onPeers,
   });
   await flush();
@@ -453,6 +455,8 @@ it("batches remote changes and skips unchanged snapshots while retaining present
     }
     changes.mockClear();
     await push(peers);
+    expect(changes).not.toHaveBeenCalled();
+    await push(peers.map((peer) => ({ ...peer, paletteSlot: 6 })));
     expect(changes).not.toHaveBeenCalled();
     await push(
       peers.map((peer) => ({
@@ -492,7 +496,7 @@ it("groups named sessions by face rather than equal display names", async () => 
     doc,
     topic: "notes/a.md",
     clientId: "me",
-    user: { name: "Me", color: "#fff" },
+    user: { name: "Me" },
     onPeers,
     transport: {
       async publish() {

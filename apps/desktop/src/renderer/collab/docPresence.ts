@@ -16,8 +16,6 @@ import {
   resolvePeerDisplayName,
 } from "./presenceChannel";
 
-import { presentationColor, relayPresentation, subscribePresentationColors } from "../workbench/actorPresentation";
-
 type AwarenessChanges = {
   added: number[];
   updated: number[];
@@ -73,7 +71,6 @@ class SnapshotAwareness extends Awareness {
 
 export interface DocPresenceUser {
   name: string;
-  color: string;
 }
 
 // Each publish carries the encoded Yjs awareness update plus the numeric Yjs
@@ -97,7 +94,7 @@ interface DocPresenceOptions {
   transport: PresenceTransport;
   topic: string;
   clientId: string;
-  user: Omit<DocPresenceUser, "color"> & { color?: string };
+  user: DocPresenceUser;
   // Called with the display names of other editors whenever the set changes.
   onPeers: (names: string[]) => void;
 }
@@ -200,8 +197,6 @@ export function bindDocPresence(options: DocPresenceOptions): DocPresenceBinding
           if (!embedded || embedded.some((id) => id !== state.yc)) continue;
           const user = {
             name: resolvePeerDisplayName(peer),
-            color: presentationColor(relayPresentation(peer.paletteSlot, peer.isSelf)).stroke,
-            paletteSlot: peer.paletteSlot,
             sessionToken: peer.sessionToken,
           };
           applyAwarenessUpdate(
@@ -209,13 +204,11 @@ export function bindDocPresence(options: DocPresenceOptions): DocPresenceBinding
             modifyAwarenessUpdate(update, (state) => (state === null ? null : { ...state, user })),
             "presence-remote",
           );
-          // Same-clock heartbeats are ignored by Yjs, but relay presentation can still change.
+          // Same-clock heartbeats are ignored by Yjs, but disclosed names can still change.
           const remote = awareness.getStates().get(state.yc);
           if (
             remote &&
             (remote.user?.name !== user.name ||
-              remote.user?.color !== user.color ||
-              remote.user?.paletteSlot !== user.paletteSlot ||
               remote.user?.sessionToken !== user.sessionToken)
           ) {
             remote.user = user;
@@ -266,25 +259,9 @@ export function bindDocPresence(options: DocPresenceOptions): DocPresenceBinding
   };
   awareness.on("update", onLocalChange);
 
-  const refreshColors = (): void => {
-    const updated: number[] = [];
-    for (const id of remoteClients) {
-      const state = awareness.getStates().get(id);
-      if (!state?.user) continue;
-      const color = presentationColor(relayPresentation(state.user.paletteSlot)).stroke;
-      if (state.user.color === color) continue;
-      state.user.color = color;
-      updated.push(id);
-    }
-    if (updated.length) awareness.emit("change", [{ added: [], updated, removed: [] }, "presence-remote"]);
-  };
-  // Drawing users omit colour; document carets need the live theme value.
-  const unsubscribeColors = options.user.color === undefined ? () => {} : subscribePresentationColors(refreshColors);
-
   return {
     awareness,
     destroy() {
-      unsubscribeColors();
       awareness.off("update", onLocalChange);
       const stopped = channel?.stop() ?? Promise.resolve();
       channel = null;

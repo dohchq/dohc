@@ -155,9 +155,10 @@ describe("Excalidraw presence", () => {
       transport: relay.make(),
       topic: "scene-1",
       clientId: "remote",
-      user: { name: "Remote", color: "url(javascript:bad)" },
+      user: { name: "Remote" },
       onPeers: () => undefined,
     });
+    remote.awareness.setLocalStateField("user", { name: "Remote", color: "url(javascript:bad)" });
     const selectedElementIds = Object.create(null) as Record<string, boolean>;
     selectedElementIds.good = true;
     selectedElementIds.falseValue = false;
