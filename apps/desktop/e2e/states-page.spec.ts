@@ -224,7 +224,12 @@ async function press(page: Page, button: Locator): Promise<void> {
   await page.keyboard.press("Enter");
 }
 
-async function checkThemeBaselines(theme: (typeof THEMES)[number]): Promise<void> {
+// The gate requires this test by its own tag: the route check below shares
+// @states-page and must not stand in for the pixels.
+test("@states-page @states-baselines every shared part matches its baseline in both themes", async () => {
+  test.skip(process.platform !== "win32", "the baselines were taken on Windows");
+  // About 210s unloaded (3.5 min in gate logs), and over 240s with a gate or build alongside.
+  test.setTimeout(480_000);
   await withDesktop({ DOHC_DEV_TOOLS: "1" }, async (page) => {
     expect(await page.evaluate(() => window.devicePixelRatio), "the baselines are one device pixel per CSS pixel").toBe(1);
     await page.setViewportSize({ width: WIDTH, height: 900 });
@@ -280,18 +285,17 @@ async function checkThemeBaselines(theme: (typeof THEMES)[number]): Promise<void
     // capture; the parts are unchanged.
     await page.clock.pauseAt(CLOCK_START + HOUR_MS);
 
-    // Both panes remain in the whole-page settling check, so initialize both.
-    for (const paneTheme of THEMES) {
-      const pane = page.getByTestId(`states-${paneTheme}`);
+    for (const theme of THEMES) {
+      const pane = page.getByTestId(`states-${theme}`);
       for (const [answer, words] of [["copied", "Copied"], ["failed", "Couldn't copy"]] as const) {
-        const withWords = pane.getByTestId(`states-copy-words-${answer}-${paneTheme}`);
+        const withWords = pane.getByTestId(`states-copy-words-${answer}-${theme}`);
         await press(page, withWords);
         await expect(withWords).toHaveText(words);
-        const icon = pane.getByTestId(`states-copy-icon-${answer}-${paneTheme}`);
+        const icon = pane.getByTestId(`states-copy-icon-${answer}-${theme}`);
         await press(page, icon);
         await expect(icon).toHaveAttribute("title", words);
       }
-      const field = pane.getByTestId(`states-copy-field-copied-${paneTheme}`);
+      const field = pane.getByTestId(`states-copy-field-copied-${theme}`);
       await press(page, field);
       await expect(field).toHaveAttribute("title", "Copied");
     }
@@ -311,7 +315,7 @@ async function checkThemeBaselines(theme: (typeof THEMES)[number]): Promise<void
 
     const seen = new Set<string>();
     const failures: string[] = [];
-    const capture = async (name: string, box: Box) => {
+    const capture = async (name: string, theme: string, box: Box) => {
       const pixels = await page.screenshot({
         ...CSS_PIXELS,
         clip: { x: box.x - BLEED, y: box.y - BLEED, width: box.width + 2 * BLEED, height: box.height + 2 * BLEED },
@@ -319,34 +323,36 @@ async function checkThemeBaselines(theme: (typeof THEMES)[number]): Promise<void
       const failure = await compareWithBaseline(`${name}-${theme}`, pixels);
       if (failure) failures.push(failure);
     };
-    const menuParts: { name: string; part: Locator; box: Box }[] = [];
-    const pane = page.getByTestId(`states-${theme}`);
-    for (const part of await pane.locator("[data-part]").all()) {
-      const name = await part.getAttribute("data-part");
-      const box = await part.boundingBox();
-      if (!name || !box) throw new Error("every part needs a data-part name and a box on the page");
-      // A part's pixels depend on where in a pixel it starts, so a
-      // fractional offset in one section would change every part below it.
-      if (!Number.isInteger(box.x) || !Number.isInteger(box.y)) {
-        throw new Error(`${name} (${theme}) starts at a fractional pixel: ${box.x}, ${box.y}`);
+    const menuParts: { name: string; theme: string; part: Locator; box: Box }[] = [];
+    for (const theme of THEMES) {
+      const pane = page.getByTestId(`states-${theme}`);
+      for (const part of await pane.locator("[data-part]").all()) {
+        const name = await part.getAttribute("data-part");
+        const box = await part.boundingBox();
+        if (!name || !box) throw new Error("every part needs a data-part name and a box on the page");
+        // A part's pixels depend on where in a pixel it starts, so a
+        // fractional offset in one section would change every part below it.
+        if (!Number.isInteger(box.x) || !Number.isInteger(box.y)) {
+          throw new Error(`${name} (${theme}) starts at a fractional pixel: ${box.x}, ${box.y}`);
+        }
+        if (seen.has(`${name}-${theme}`)) throw new Error(`two parts are named ${name}`);
+        seen.add(`${name}-${theme}`);
+        const menus = (await part.getAttribute("data-menus")) === "rest" ? 0 : await part.locator("[aria-haspopup='menu']").count();
+        if (menus > 1) throw new Error(`${name} (${theme}) has ${menus} menus; a part opens one`);
+        if (menus === 1) menuParts.push({ name, theme, part, box });
+        else await capture(name, theme, box);
       }
-      if (seen.has(`${name}-${theme}`)) throw new Error(`two parts are named ${name}`);
-      seen.add(`${name}-${theme}`);
-      const menus = (await part.getAttribute("data-menus")) === "rest" ? 0 : await part.locator("[aria-haspopup='menu']").count();
-      if (menus > 1) throw new Error(`${name} (${theme}) has ${menus} menus; a part opens one`);
-      if (menus === 1) menuParts.push({ name, part, box });
-      else await capture(name, box);
     }
     // Each marking pass starts from a fresh DOM.getDocument, which clears the
     // states forced before it, so the menu parts are captured last. One menu is open at a time: opening
     // another moves focus and closes the first.
-    for (const { name, part, box } of menuParts) {
+    for (const { name, theme, part, box } of menuParts) {
       const trigger = part.locator("[aria-haspopup='menu']");
       const menu = part.getByRole("menu");
       await openMenu(page, trigger, menu);
       await forceMarkedStates(cdp, `[data-testid="states-${theme}"] [data-part="${name}"]`);
       await waitForStillPage(page);
-      await capture(name, box);
+      await capture(name, theme, box);
       await closeMenu(page, trigger, menu);
     }
     // A tab row keeps Share and the document's controls inside itself at any
@@ -355,55 +361,45 @@ async function checkThemeBaselines(theme: (typeof THEMES)[number]): Promise<void
     // and an ellipsis (13px of 11px mono). A row whose save state shows no
     // words draws the same width as the loading row. The narrow specimen must
     // really have cut its save state short, or the check proves nothing.
-    const part = pane.locator('[data-part="tab-row-actions"]');
-    const widths: number[] = [];
-    for (const row of await part.getByTestId("editor-tabs").all()) {
-      const edge = await row.evaluate((el) => el.getBoundingClientRect().right);
-      const actions = row.getByTestId("editor-tab-actions");
-      const rights = await actions
-        .locator("button")
-        .evaluateAll((buttons) => buttons.map((button) => button.getBoundingClientRect().right));
-      if (rights.length === 0) failures.push(`a tab row (${theme}) has no document actions`);
-      if (rights.some((right) => right > edge + 0.5)) failures.push(`a document control (${theme}) runs past its tab row`);
-      const order = await row.evaluate((el) => {
-        const list = el.querySelector('[role="tablist"]')!.getBoundingClientRect();
-        const tab = el.querySelector('[role="tab"][data-active]');
-        const name = tab?.querySelector(".truncate");
-        const box = tab?.getBoundingClientRect();
-        const label = el.querySelector('[data-testid="editor-tab-actions"] [data-view-status] .truncate');
-        const nameCut =
-          !!name && (name.scrollWidth > name.clientWidth || (!!box && (box.right > list.right + 0.5 || box.left < list.left - 0.5)));
-        const actionsBox = el.querySelector('[data-testid="editor-tab-actions"]')!.getBoundingClientRect();
-        return { nameCut, statusWidth: label?.clientWidth ?? 0, worded: !!label, actionsWidth: actionsBox.width };
-      });
-      if (order.nameCut && order.statusWidth >= 13) {
-        failures.push(`a tab row (${theme}) cut its file name while its save state still had ${order.statusWidth}px of words`);
+    for (const theme of THEMES) {
+      const part = page.getByTestId(`states-${theme}`).locator('[data-part="tab-row-actions"]');
+      const widths: number[] = [];
+      for (const row of await part.getByTestId("editor-tabs").all()) {
+        const edge = await row.evaluate((el) => el.getBoundingClientRect().right);
+        const actions = row.getByTestId("editor-tab-actions");
+        const rights = await actions
+          .locator("button")
+          .evaluateAll((buttons) => buttons.map((button) => button.getBoundingClientRect().right));
+        if (rights.length === 0) failures.push(`a tab row (${theme}) has no document actions`);
+        if (rights.some((right) => right > edge + 0.5)) failures.push(`a document control (${theme}) runs past its tab row`);
+        const order = await row.evaluate((el) => {
+          const list = el.querySelector('[role="tablist"]')!.getBoundingClientRect();
+          const tab = el.querySelector('[role="tab"][data-active]');
+          const name = tab?.querySelector(".truncate");
+          const box = tab?.getBoundingClientRect();
+          const label = el.querySelector('[data-testid="editor-tab-actions"] [data-view-status] .truncate');
+          const nameCut =
+            !!name && (name.scrollWidth > name.clientWidth || (!!box && (box.right > list.right + 0.5 || box.left < list.left - 0.5)));
+          const actionsBox = el.querySelector('[data-testid="editor-tab-actions"]')!.getBoundingClientRect();
+          return { nameCut, statusWidth: label?.clientWidth ?? 0, worded: !!label, actionsWidth: actionsBox.width };
+        });
+        if (order.nameCut && order.statusWidth >= 13) {
+          failures.push(`a tab row (${theme}) cut its file name while its save state still had ${order.statusWidth}px of words`);
+        }
+        if (!order.worded) widths.push(order.actionsWidth);
       }
-      if (!order.worded) widths.push(order.actionsWidth);
-    }
-    if (widths.length > 0 && Math.max(...widths) - Math.min(...widths) > 0.5) {
-      failures.push(`the tab rows without save-state words (${theme}) draw different widths: ${widths.join(", ")}`);
-    }
-    const label = page.getByTestId(`states-tab-row-actions-cut-${theme}`).locator(".truncate");
-    if (!(await label.evaluate((el) => el.scrollWidth > el.clientWidth))) {
-      failures.push(`the narrow tab row's save state (${theme}) is not cut short`);
+      if (widths.length > 0 && Math.max(...widths) - Math.min(...widths) > 0.5) {
+        failures.push(`the tab rows without save-state words (${theme}) draw different widths: ${widths.join(", ")}`);
+      }
+      const label = page.getByTestId(`states-tab-row-actions-cut-${theme}`).locator(".truncate");
+      if (!(await label.evaluate((el) => el.scrollWidth > el.clientWidth))) {
+        failures.push(`the narrow tab row's save state (${theme}) is not cut short`);
+      }
     }
     expect(failures, "every part must equal its baseline").toEqual([]);
-    expect([...seen].sort()).toEqual(PARTS.map((part) => `${part}-${theme}`).sort());
+    expect([...seen].sort()).toEqual(PARTS.flatMap((part) => THEMES.map((theme) => `${part}-${theme}`)).sort());
   });
-}
-
-// The gate requires these tests by their own tag: the route check below shares
-// @states-page and must not stand in for the pixels.
-for (const theme of THEMES) {
-  test(`@states-page @states-baselines every shared part matches its baseline in ${theme}`, async () => {
-    test.skip(process.platform !== "win32", "the baselines were taken on Windows");
-    // The combined pass took about 210s unloaded. Give each theme the same
-    // 240s budget, so half the captures leave room for a busy host.
-    test.setTimeout(240_000);
-    await checkThemeBaselines(theme);
-  });
-}
+});
 
 test("@states-page the page stays closed without the dev-tools grant", async () => {
   test.setTimeout(120_000);
