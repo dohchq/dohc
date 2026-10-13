@@ -116,7 +116,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     if (MCP_TOOL_LEVELS[name].includes(level)) server.registerTool(name, config, handler);
   }
 
-  register("dohc_get_share_copy_details", {
+  register("dohc_read_share_copy", {
     description: "Read one owned grant's share code and named-account invite link. Requires the original workspace and its signed-in owner account. Ended grants return only status; unknown and link grants are refused.",
     inputSchema: ShareCopyInput.shape,
   }, async args => text(await getShareCopyDetails(ctx, args)));

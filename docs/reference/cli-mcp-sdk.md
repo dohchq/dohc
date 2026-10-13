@@ -25,11 +25,11 @@ Partial form creation returns `{ kind: "partial", created, failedStage, reason, 
 
 ## Desktop MCP tools
 
-### `dohc_get_share_copy_details`
+### `dohc_read_share_copy`
 
 Read one owned grant's share code and named-account invite link. Requires the original workspace and its signed-in owner account. Ended grants return only status; unknown and link grants are refused.
 
-Shared profiles do not offer this read.
+The code and invite link belong to the owner's sharing. Shared profiles do not offer this read.
 
 - `shareId`: `string`. Required.
 - `grantId`: `string`. Required.

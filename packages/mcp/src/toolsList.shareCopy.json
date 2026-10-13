@@ -2,7 +2,7 @@
   "sourceCommit": "2671b92c98460a879cd5037285407640fe41bb3c",
   "ownerToolAdditions": [
     {
-      "name": "dohc_get_share_copy_details",
+      "name": "dohc_read_share_copy",
       "description": "Read one owned grant's share code and named-account invite link. Requires the original workspace and its signed-in owner account. Ended grants return only status; unknown and link grants are refused.",
       "inputSchema": {
         "type": "object",

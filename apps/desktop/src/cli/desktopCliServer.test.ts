@@ -2,7 +2,7 @@ import { getShareCopyDetails } from "@dohc/mcp/tools";
 import { createShareCopyReader } from "../ipc/shareCopyHandler";
 import { workspaceRemoteMatchesCredentials } from "../workspaces/chatRelayIdentity";
 import type { CloudCredentials } from "../workspaces/cloudCredentialStore";
-import { closeTestStorages, testStorage, testHandler, request as relayRequest, inspectDatabase, storagePath, SHARE_WEB_ORIGIN, RELAY_EXCHANGE_KEY } from "../../../../services/sync-relay/src/testing";
+import { closeTestStorages, testStorage, testHandler, request as relayRequest, inspectDatabase, storagePath, SHARE_WEB_ORIGIN, RELAY_EXCHANGE_KEY } from "@dohc/sync-relay/testing";
 import { historyCursor, historyPageFields } from "../testing/historyPageFixture";
 import { createHash } from "node:crypto";
 import { AuthoredTextChangedError } from "../workspaces/workspaceEngineCapture";
@@ -841,6 +841,16 @@ describe.each(["cli", "mcp"] as const)("share copy through %s", door => {
     const f = await shareCopyFixture(); f.otherAccount();
     expect(await f.copy(door)).toMatchObject({ ok: false, reason: expect.stringContaining("Sign in") });
     expect(f.relay).not.toHaveBeenCalled();
+  });
+  it("refuses when the relay workspace belongs to another account", async () => {
+    const f = await shareCopyFixture();
+    const db = inspectDatabase(storagePath(f.storage));
+    try {
+      db.prepare("UPDATE sync_relay_workspaces SET owner_user_id = 'stranger' WHERE workspace_id = 'workspace'").run();
+    } finally { db.close(); }
+    expect(await f.copy(door)).toMatchObject({ ok: false, reason: expect.stringContaining("not found") });
+    expect(f.remote).toHaveBeenCalledOnce();
+    expect(f.relay).toHaveBeenCalledOnce();
   });
   it("refuses a received workspace at socket per-verb admission", async () => {
     const f = await shareCopyFixture(); vi.mocked(f.dependencies.sharedViewOf).mockReturnValue({});

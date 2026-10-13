@@ -57,7 +57,7 @@ import {
 import { basename, join } from "node:path";
 
 export const MCP_TOOL_CAPABILITIES = {
-  dohc_get_share_copy_details: ["share.copy.read"],
+  dohc_read_share_copy: ["share.copy.read"],
   dohc_list_automations: ["automation.list"],
   dohc_switch_automation: ["automation.switch"],
   dohc_dataset: Object.values(DATASET_CAPABILITIES),

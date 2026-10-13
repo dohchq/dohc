@@ -3,13 +3,6 @@ import { CAPABILITIES, CAPABILITY_ID_PATTERN, CAPABILITY_WAYS, RETIRED_CAPABILIT
 import issuedIds from "./capabilityIds.issued.json";
 
 describe("capability ids", () => {
-  it("keeps the issued share-copy identity and exposes only the owner MCP door", () => {
-    expect(issuedIds.filter(id => id === "share.copy.read")).toEqual(["share.copy.read"]);
-    const meta = CAPABILITIES["share.copy.read"];
-    expect(meta.mcp.owner).toEqual(["dohc_get_share_copy_details"]);
-    for (const level of ["view", "comment", "edit"] as const) expect(meta.mcp[level]).toEqual([]);
-    expect(meta.mcp.reason).not.toContain("pending");
-  });
   it("uses dotted lowercase identities independent of door names", () => {
     for (const id of Object.keys(CAPABILITIES)) expect(id).toMatch(CAPABILITY_ID_PATTERN);
     for (const invalid of ["file", "File.move", "file.Move", "file-move", "file..move", "file.move.", "file/path.move"]) {

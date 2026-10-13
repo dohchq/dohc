@@ -450,16 +450,16 @@ describe("share copy profile admission", () => {
   it("advertises and calls the copy tool only for the owner profile", async () => {
     const request = vi.fn(async () => details);
     const { names, client } = await connectedToolNames({ root: "/workspace", home: "/state", request });
-    expect(names).toContain("dohc_get_share_copy_details");
-    const result = await client.callTool({ name: "dohc_get_share_copy_details", arguments: input });
+    expect(names).toContain("dohc_read_share_copy");
+    const result = await client.callTool({ name: "dohc_read_share_copy", arguments: input });
     expect(result.structuredContent).toEqual(details);
     expect(request).toHaveBeenCalledWith(expect.objectContaining({ verb: "shareCopy", door: "mcp", args: { ...input, cwd: "/workspace", actor: "agent" } }));
   });
   it.each(["view", "comment", "edit"] as const)("refuses tools/call for a %s profile", async shareAccess => {
     const request = vi.fn(async () => details);
     const { names, client } = await connectedToolNames({ root: "/workspace", home: "/state", shareAccess, request });
-    expect(names).not.toContain("dohc_get_share_copy_details");
-    expect(await client.callTool({ name: "dohc_get_share_copy_details", arguments: input })).toMatchObject({ isError: true });
+    expect(names).not.toContain("dohc_read_share_copy");
+    expect(await client.callTool({ name: "dohc_read_share_copy", arguments: input })).toMatchObject({ isError: true });
     expect(request).not.toHaveBeenCalled();
   });
   it.each(["view", "comment", "edit"] as const)("refuses direct copy reads for a %s profile", async shareAccess => {
