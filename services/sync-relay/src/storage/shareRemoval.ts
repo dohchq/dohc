@@ -166,7 +166,7 @@ export function undoShareRemoval(storage: StorageContext, input: {
 }
 
 export function listRemovedSharesForRecipient(storage: StorageContext, userId: string, shareId?: string) {
-  const rows = storage.db.prepare(`SELECT g.share_id, g.grant_id, MAX(g.revoked_at_ms) AS revoked_at_ms
+  let rows = storage.db.prepare(`SELECT g.share_id, g.grant_id, MAX(g.revoked_at_ms) AS revoked_at_ms
     FROM sync_relay_share_grants g JOIN sync_relay_shares s ON s.share_id = g.share_id
     JOIN sync_relay_workspaces w ON w.workspace_id = s.workspace_id AND w.owner_user_id = s.granter_user_id
     WHERE g.principal_kind = 'user' AND g.principal_user_id = ? AND g.status = 'revoked'
@@ -179,7 +179,9 @@ export function listRemovedSharesForRecipient(storage: StorageContext, userId: s
   if (storage.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='sync_relay_ended_shares'").get()) {
     const ended = storage.db.prepare("SELECT share_id,ended_at_ms FROM sync_relay_ended_shares WHERE recipient_user_id=?" +
       (shareId === undefined ? "" : " AND share_id=?")).all(...(shareId === undefined ? [userId] : [userId,shareId]));
-    for (const row of ended) rows.push({share_id:String(row.share_id),grant_id:String(row.share_id),revoked_at_ms:Number(row.ended_at_ms)});
+    const byShare = new Map(rows.map(row => [row.share_id, row]));
+    for (const row of ended) byShare.set(String(row.share_id), {share_id:String(row.share_id),grant_id:String(row.share_id),revoked_at_ms:Number(row.ended_at_ms)});
+    rows = [...byShare.values()];
     rows.sort((a,b) => b.revoked_at_ms-a.revoked_at_ms || a.grant_id.localeCompare(b.grant_id));
   }
   return rows.slice(0,1000).map(row => ({ shareId: row.share_id, grantId: row.grant_id,

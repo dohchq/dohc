@@ -238,6 +238,14 @@ it("refuses account, link, and service access while runtime purge is pending",as
   expect(f.serviceAccess()).toBeNull();
   expect((await f.h(request(deleted,"/sync/"+workspace+"/log"))).status).toBe(404);
   expect((await f.h(linkRequest(f.capability,"/sync/link/current"))).status).toBe(404);
+  const removed=f.storage.listRemovedSharesForRecipient("other");
+  expect(removed.filter(row=>row.shareId===f.ownedShare)).toHaveLength(1);
+  for(const path of ["/sync/shares","/sync/shares?received=true"]) {
+    const response=await f.h(request("other",path));expect(response.status).toBe(200);
+    const inventory=await response.json() as {received:{shareId:string}[];removed:{shareId:string}[]};
+    expect([...inventory.received,...inventory.removed].filter(row=>row.shareId===f.ownedShare)).toHaveLength(1);
+    expect(inventory.removed.filter(row=>row.shareId===f.ownedShare)).toHaveLength(1);
+  }
   expect((await f.h(request(null,"/sync/link-exchange",jsonBody({secret:f.secret})))).status).toBe(404);
   await expect(f.host.invoke({kind:"named",userId:deleted,workspaceId:workspace},{workspaceId:workspace,datasetId:definition.datasetId,revision:1,revisionSha256:revision.revisionSha256,operationId:id(6),input:{},idempotencyKey:"after-fence"})).rejects.toThrow();
   await deletion.purge(deleted,email);

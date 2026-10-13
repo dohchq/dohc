@@ -120,6 +120,9 @@ export function loadShareWebConfig(env: NodeJS.ProcessEnv): ShareWebConfig {
   if (devMode && nodeEnv !== "development" && nodeEnv !== "test") {
     throw new Error("DOHC_SHARE_WEB_DEV=1 requires NODE_ENV=development or test.");
   }
+  const internalHosts = new Set(env.DOHC_SHARE_WEB_INTERNAL_HOSTS ? exactList(env.DOHC_SHARE_WEB_INTERNAL_HOSTS,
+    "DOHC_SHARE_WEB_INTERNAL_HOSTS must contain exact comma-separated Host values.").map(host => host.toLowerCase()) : []);
+  if (relayExchangeKey && internalHosts.size === 0) throw new Error("DOHC_SHARE_WEB_INTERNAL_HOSTS must be set when DOHC_SHARE_WEB_RELAY_EXCHANGE_KEY is configured.");
 
   let accountAuth: AccountAuthConfig | undefined;
   const authUpstream = env.DOHC_SHARE_WEB_AUTH_URL;
@@ -186,7 +189,7 @@ export function loadShareWebConfig(env: NodeJS.ProcessEnv): ShareWebConfig {
     publicRelayUrl,
     relayExchangeKey,
     publicHosts: new Set(hosts),
-    internalHosts: new Set(env.DOHC_SHARE_WEB_INTERNAL_HOSTS ? exactList(env.DOHC_SHARE_WEB_INTERNAL_HOSTS, "DOHC_SHARE_WEB_INTERNAL_HOSTS must contain exact comma-separated Host values.").map(host => host.toLowerCase()) : []),
+    internalHosts,
     trustedProxies,
     port,
     bind: env.DOHC_SHARE_WEB_BIND ?? (devMode ? "127.0.0.1" : "0.0.0.0"),

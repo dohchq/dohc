@@ -2,7 +2,7 @@ import { APIError } from "better-auth/api";
 import type { Pool } from "pg";
 import {
   ACCOUNT_DELETION_KEY_HEADER, ACCOUNT_DELETION_PATH, accountDeletionKey,
-  mintDeletionPreviewToken, matchesDeletionPreviewToken, verifiesDeletionPreviewToken, accountDeletionPreviewKey, ACCOUNT_DELETION_FRESH_AGE_MS,
+  mintDeletionPreviewToken, matchesDeletionPreviewToken, verifiesDeletionPreviewToken, accountDeletionPreviewKey,
   type AccountDeletionPreview, type AccountDeletionScope,
 } from "@dohc/workspace-auth/accountDeletion";
 
@@ -45,13 +45,14 @@ export function createAccountDeletion(options: {pool: Pool; secret: string; serv
   return {
     async preview(user: {id: string; email: string}): Promise<Record<string, unknown>> {
       const preview = await previewFor(user);
-      return {...preview, signInMaxAgeMs: ACCOUNT_DELETION_FRESH_AGE_MS, previewToken: mintDeletionPreviewToken(previewKey, user.id, preview)};
+      return {...preview, passwordRequired: true, previewToken: mintDeletionPreviewToken(previewKey, user.id, preview)};
     },
-    async delete(user: {id: string; email: string}, token: string): Promise<Record<string, unknown>> {
+    async delete(user: {id: string; email: string}, token: string, confirmPassword: () => Promise<void>): Promise<Record<string, unknown>> {
       const changed = () => new APIError("CONFLICT", {code: "PREVIEW_CHANGED", message: "Account deletion changed or the preview expired. Review it again."});
       if (!verifiesDeletionPreviewToken(previewKey, token, user.id)) throw changed();
       const preview = await previewFor(user);
       if (!matchesDeletionPreviewToken(previewKey, token, user.id, preview)) throw changed();
+      await confirmPassword();
       const client = await pool.connect();
       try {
         await client.query("BEGIN");

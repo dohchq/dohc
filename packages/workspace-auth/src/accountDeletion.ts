@@ -14,7 +14,6 @@ export interface AccountDeletionPreview extends AccountDeletionScope {
   email: string;
   serverOrigin: string;
 }
-export const ACCOUNT_DELETION_FRESH_AGE_MS = 15 * 60 * 1000;
 export function accountDeletionPreviewKey(secret: string): string {
   return createHmac("sha256", secret).update("dohc account deletion preview v1").digest("base64url");
 }

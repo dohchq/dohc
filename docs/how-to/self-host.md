@@ -134,9 +134,10 @@ A signed-in person can preview deletion with `POST /api/auth/account/deletion-pr
 The preview lists the email, server origin, owned workspace IDs, stored bytes, and counts of shares and grants.
 It returns a preview token that expires after five minutes.
 
-Send that token as `{"previewToken":"..."}` to `POST /api/auth/account/delete`.
-The request needs a session created by a sign-in within the last 15 minutes.
-The preview returns this limit as `signInMaxAgeMs`.
+Send the token and account password as `{"previewToken":"...","password":"..."}` to `POST /api/auth/account/delete`.
+The preview returns `passwordRequired: true`.
+The server verifies the password before recording deletion and rate limits attempts like password sign-in.
+An incorrect or missing password refuses deletion, including for sessions created through device approval.
 If the preview changed, request another preview before continuing.
 Share-link and app credentials cannot delete a server account.
 

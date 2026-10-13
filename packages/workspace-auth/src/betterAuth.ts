@@ -1,6 +1,5 @@
 import { betterAuth } from "better-auth";
 import { APIError, createAuthEndpoint, sessionMiddleware } from "better-auth/api";
-import { ACCOUNT_DELETION_FRESH_AGE_MS } from "./accountDeletion";
 import { bearer, deviceAuthorization, organization } from "better-auth/plugins";
 import type { Pool } from "pg";
 import type { SignUpAdmission } from "./signUp";
@@ -42,11 +41,12 @@ interface WorkspaceAuthOptions {
   admitAccount?: (email: string) => Promise<SignUpAdmission>;
   accountDeletion?: {
     preview(user: { id: string; email: string }): Promise<Record<string, unknown>>;
-    delete(user: { id: string; email: string }, token: string): Promise<Record<string, unknown>>;
+    delete(user: { id: string; email: string }, token: string, confirmPassword: () => Promise<void>): Promise<Record<string, unknown>>;
   };
 }
 
 export function createWorkspaceAuth(options: WorkspaceAuthOptions) {
+  const passwordAttemptLimit = { window: 60, max: 10 };
   // The browser account pages live at the auth origin, so every emailed link
   // points at a dohc page that then calls /api/auth itself.
   const page = (path: string): string => new URL(path, options.baseURL).toString();
@@ -172,7 +172,8 @@ export function createWorkspaceAuth(options: WorkspaceAuthOptions) {
       window: 60,
       max: 600,
       customRules: {
-        "/sign-in/email": { window: 60, max: 10 },
+        "/sign-in/email": passwordAttemptLimit,
+        "/account/delete": passwordAttemptLimit,
         "/sign-up/email": { window: 3600, max: 10 },
         "/request-password-reset": { window: 3600, max: 5 },
         "/forget-password": { window: 3600, max: 5 },
@@ -188,11 +189,19 @@ export function createWorkspaceAuth(options: WorkspaceAuthOptions) {
             return ctx.json(await options.accountDeletion!.preview(ctx.context.session.user));
           }),
           deleteServerAccount: createAuthEndpoint("/account/delete", {method: "POST", use: [sessionMiddleware], requireHeaders: true}, async ctx => {
-            if (Date.now() - new Date(ctx.context.session.session.createdAt).getTime() > ACCOUNT_DELETION_FRESH_AGE_MS) throw new APIError("FORBIDDEN", {code: "FRESH_SESSION_REQUIRED", message: "Sign in again before deleting this server account."});
             const body: unknown = ctx.body;
             const token = body && typeof body === "object" && "previewToken" in body ? body.previewToken : undefined;
             if (typeof token !== "string" || token.length > 512) throw new APIError("BAD_REQUEST", {code: "PREVIEW_REQUIRED", message: "Review account deletion before continuing."});
-            return ctx.json(await options.accountDeletion!.delete(ctx.context.session.user, token));
+            return ctx.json(await options.accountDeletion!.delete(ctx.context.session.user, token, async () => {
+              const password = body && typeof body === "object" && "password" in body ? body.password : undefined;
+              if (typeof password !== "string" || password.length === 0) throw new APIError("BAD_REQUEST", {code: "PASSWORD_REQUIRED", message: "Enter your server account password to delete this account."});
+              try {
+                await ctx.context.password.checkPassword(ctx.context.session.user.id, ctx);
+              } catch (error) {
+                if (error instanceof APIError && error.body?.code === "INVALID_PASSWORD") throw new APIError("BAD_REQUEST", {code: "INVALID_PASSWORD", message: "The password is incorrect. Enter your server account password."});
+                throw error;
+              }
+            }));
           }),
         },
       }] : []),
