@@ -272,7 +272,10 @@ fn materialize_held_source_reads_only_after_stamp_changes() {
         read_source(file, path)
     };
     for _ in 0..10 {
-        let _ = inspect_with_reader(root, &row, 60_000, true, read).unwrap();
+        assert!(matches!(
+            inspect_with_reader(root, &row, 60_000, true, read).unwrap(),
+            Inspection::Keep
+        ));
     }
     println!("10 quiet held inspections: {} reads", reads.get());
     assert_eq!(reads.get(), 0, "quiet held sources must not be read");

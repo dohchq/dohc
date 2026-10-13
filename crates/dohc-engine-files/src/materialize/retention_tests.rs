@@ -1411,7 +1411,7 @@ fn capture_file_hold_parks_checked_delete_replay_and_preserves_late_retained_sou
 
 #[cfg(all(unix, feature = "fault-injection"))]
 #[test]
-fn capture_file_hold_parks_rowless_checked_delete_recovery_until_clear() {
+fn capture_file_hold_parks_open_checked_delete_displacement_until_clear() {
     held_checked_delete_recovery(FaultPoint::MaterializeAfterDisplacedHash, false);
 }
 
