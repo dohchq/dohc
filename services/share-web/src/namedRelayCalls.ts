@@ -9,13 +9,13 @@ export function createNamedRelayCalls(options: {
   let pending = 0;
   return {
     get full() {return pending >= options.maxPending;},
-    run(request: Request, work: (signal: AbortSignal, relay: (input: Request) => Promise<Response>) => Promise<Response>): Promise<Response> {
+    run(request: Request, work: (signal: AbortSignal, relay: (input: Request) => Promise<Response>) => Promise<Response>, timeoutMs = options.timeoutMs): Promise<Response> {
       pending++;
       const controller = new AbortController(), abort = () => controller.abort();
       const cancelled = new Promise<Response>(resolve => controller.signal.addEventListener("abort", () => resolve(options.refuse()), {once: true}));
       request.signal.addEventListener("abort", abort, {once: true});
       if (request.signal.aborted) abort();
-      const timer = setTimeout(abort, options.timeoutMs);
+      const timer = setTimeout(abort, timeoutMs);
       if (options.unrefDeadline) timer.unref();
       let upstream: Response | undefined;
       const relay = async (input: Request) => {

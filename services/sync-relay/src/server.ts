@@ -13,6 +13,7 @@ import { createOwnerAppPublicationRoutes } from "./ownerAppPublicationRoutes";
 import {readOwnerAppResponses} from "./ownerAppResponseRoutes";
 import { createLinkAppPublicationRoutes } from "./linkAppPublicationRoutes";
 import { createLinkAppCollectionRoutes, type AppCollectionPolicy } from "./appCollectionRoutes";
+import {createNamedRecipientChat} from "./namedRecipientChat";
 import {createNamedRecipientDocuments} from "./namedRecipientDocuments";
 import { TokenBucketLimiter } from "@dohc/service-http";
 import {
@@ -440,6 +441,11 @@ export function createSyncRelayHandler({
     lookupUserDisplayName,
   );
 
+  const namedChat = namedBrowserSessionLimits ? createNamedRecipientChat({
+    storage, publicOrigin: shareWebOrigin!, exchangeKey: relayExchangeKey!, limits: namedBrowserSessionLimits,
+    resolveActor: resolveNamedActor, nowMs, requireShareAction, transport: respondToNamedShareTransport, reads: {chatResolverFor},
+  }) : undefined;
+
   const { respondToShareProposals, respondToWorkspaceProposals } = createProposalRoutes(
     storage,
     nowMs,
@@ -689,6 +695,9 @@ export function createSyncRelayHandler({
       }
       if (pathname === "/sync/live/named-documents") {
         return namedDocuments ? await namedDocuments(request) : errorResponse(notFound());
+      }
+      if (pathname.startsWith("/sync/named-chat/")) {
+        return namedChat ? await namedChat(request) : errorResponse(notFound());
       }
       const route = parseRoute(request);
       if (route.route === "link-exchange") {

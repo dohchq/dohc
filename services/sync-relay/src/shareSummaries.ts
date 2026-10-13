@@ -2,7 +2,7 @@ import {
   isChatShareAccessValue,
   isShareAccessValue,
 } from "@dohc/security-contract";
-import { groupChannelIsOrdinary, isGroupSelector, effectiveShareSelector, isLiveEditShareSelector, parseStoredAnyShareSelectorJson, type StoredAnyShareSelector } from "./shareFilter";
+import { chatSideOf, groupChannelIsOrdinary, isGroupSelector, effectiveShareSelector, isLiveEditShareSelector, parseStoredAnyShareSelectorJson, type StoredAnyShareSelector } from "./shareFilter";
 import type {
   SyncRelayStorage,
   SyncRelayGrantedShareRow,
@@ -37,9 +37,9 @@ export function createShareSummaries(
 ) {
   const namedBrowserInvitation = (grantId: string, selector: StoredAnyShareSelector, access: string) => {
     const effective = effectiveShareSelector(selector, access);
-    return namedBrowserOrigin && effective && isLiveEditShareSelector(effective)
-      ? { browserInvitationUrl: `${namedBrowserOrigin}/s/edit/${encodeURIComponent(grantId)}` }
-      : {};
+    if (!namedBrowserOrigin || !effective) return {};
+    const view = chatSideOf(effective) ? "chat" : isLiveEditShareSelector(effective) ? "edit" : null;
+    return view ? {browserInvitationUrl: `${namedBrowserOrigin}/s/${view}/${encodeURIComponent(grantId)}`} : {};
   };
   const groupFileScope = (workspaceId: string, selector: StoredAnyShareSelector | null, access: string) => {
     const effective = selector && effectiveShareSelector(selector, access);

@@ -213,6 +213,91 @@ Share-web refuses editor requests when its named editor is unconfigured.
 Live browser editing covers shared Markdown files. Other files retain their existing sharing permissions and change-submission flow.
 Desktop share codes remain available when browser invitations are unconfigured.
 
+## Named recipient chat HTTP
+
+These endpoints serve named recipients and agents holding their account session.
+They require the named browser session limits, account authentication, and relay exchange configuration.
+Chat does not require live tickets, a document host, or editor limits.
+
+Named chat invitations use `/s/chat/<encoded-grantId>`.
+The HTTP endpoints are available before the browser chat view.
+The URL identifies a share. It carries no credential.
+The relay resolves the signed-in account and uses the same grants as the recipient desktop.
+A recipient with several grants gets the highest permitted access on that share.
+
+Send the account session cookie to share-web.
+For POST requests, send `Origin: <public-origin>` and `Content-Type: application/json`.
+GET requests can omit Origin. Browser requests must come from the configured public Host.
+Share-web forwards only recognized account cookies and its trusted relay exchange key.
+
+- `GET /api/named-chat/channels?grantId=<id>` resolves an invitation to its share.
+  It returns `{shareId, userId, channels: [{channelWireId, name, kind, access}]}`.
+  A channel or Group share exposes one channel. `name` and `kind` can be null.
+  Access is `read-only` or `read-write`, including the desktop's append restrictions.
+- `GET /api/named-chat/messages?shareId=<id>&channelWireId=<wire-id>&limit=50` returns the newest page first.
+  The response is `{shareId, channelWireId, messages, nextCursor, olderCursor}`.
+  Messages appear in descending relay sequence order. The limit defaults to 100 and cannot exceed 100.
+  Save the first page's `nextCursor` to follow new messages.
+  Pass `before=<olderCursor>` to read older pages. Stop when `olderCursor` is null.
+  Each history request scans at most 2,000 log rows. A page can be empty and still have an older cursor.
+  Older-page watermarks must not replace the saved following cursor.
+- `GET /api/named-chat/messages?shareId=<id>&channelWireId=<wire-id>&since=<nextCursor>&hold=30000&limit=50` follows new messages.
+  The response is `{shareId, channelWireId, messages, nextCursor, hasMore}`.
+  Messages appear in ascending relay sequence order. Save each returned cursor, including on empty pages.
+  If `hasMore` is true, read the next page immediately.
+  Hold defaults to zero and accepts integer milliseconds from zero through 30,000.
+  A caught-up read waits for a log change or the timeout. Unrelated rows can advance an empty page's cursor.
+  Cancellation releases the parked waiter. The existing relay hub bounds waiter counts.
+- `POST /api/named-chat/messages` accepts this body:
+
+  ```json
+  {
+    "shareId": "share-id",
+    "channelWireId": "channel-wire-id",
+    "id": "client-retry-id",
+    "threadId": "existing-thread-id",
+    "body": "Hello",
+    "authorKind": "human",
+    "authorDisplayName": "Ana"
+  }
+  ```
+
+Omit `threadId` to create a chat thread and its first message atomically.
+An existing thread must belong to the selected channel.
+Post IDs are non-empty, trimmed strings of at most 256 UTF-16 code units, without control characters.
+The relay assigns the message ID, timestamp, and authenticated `authorUserId`.
+An optional `authorUserId` must equal that account; a different claim receives 403.
+Author kind accepts `human`, `agent`, or `automation`.
+Display names follow desktop payload rules: trimmed, non-empty, and at most 200 UTF-16 code units.
+Agents and automations can also supply `authorOwnerDisplayName`.
+These names and kinds are payload descriptions; they do not authenticate an account.
+The body normalizes CRLF and CR to LF, trims its end, and must contain 1 to 65,536 UTF-8 bytes.
+
+A successful post returns `{shareId, channelWireId, message}`.
+Reuse the client ID and normalized request fields on retry.
+The same account, share, ID, and fields return the original result.
+Changed fields receive 409. Use a new ID for a new message.
+The thread and message use the existing named log append, including its transaction authorization check.
+The relay refuses reactions, decisions, attachments, channel creation, and extra body fields.
+
+Every message contains `relaySeq`, `messageId`, `threadId`, `authorUserId`,
+`authorDisplayName`, `authorKind`, `authorOwnerDisplayName`, `createdAtMs`, and `body`.
+The owner name is null when absent. No engine is needed to read this JSON.
+
+Responses are private and never cached.
+Read-only posts receive 403 at the relay, even when share-web is bypassed.
+Missing or removed access receives 404. Invalid fields receive 400 or 403.
+Waiter capacity receives 429. Response size overflow receives 413; request a smaller page.
+The configured named session request and response byte limits also apply.
+Share-web refuses malformed, oversized, redirected, or non-JSON relay responses.
+Link holders cannot use these endpoints or create chat link grants.
+
+The corresponding trusted relay endpoints use `/sync/named-chat/channels` and `/sync/named-chat/messages`.
+They require the recipient account cookie, configured public Origin, and relay exchange key.
+The desktop transport also accepts `hold` on `GET /sync/shares/:shareId/log`.
+It retains its existing envelope, channel filtering, and cursor contract.
+
+
 ## Storage and recovery
 
 The supported Compose deployment runs one `share-web` instance.

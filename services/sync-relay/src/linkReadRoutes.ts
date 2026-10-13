@@ -325,7 +325,7 @@ export function createLinkReadRoutes(
   };
 }
 
-function parseLinkLogHold(value: string | null): number {
+export function parseLinkLogHold(value: string | null): number {
   if (value === null) return 0;
   if (!/^(?:0|[1-9]\d*)$/u.test(value)) {
     throw badRequest("hold must be a non-negative integer");
