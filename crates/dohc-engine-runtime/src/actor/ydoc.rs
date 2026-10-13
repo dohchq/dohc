@@ -721,6 +721,8 @@ impl ActorHandle {
                             workspace_id: &workspace_id,
                             self_writes: Some(self_writes.as_ref()),
                             progress: None,
+                            file_outcomes_settled: false,
+                            released_hold_paths: None,
                         },
                         now_ms,
                         &NoFaults,
@@ -1565,6 +1567,11 @@ pub(super) fn ydoc_open_state_on_store(
         return Err(RuntimeError::Cancelled);
     }
     let canonical_path = validate_addressable_plaintext_path(path)?;
+    if store.placement_is_held(workspace_id, &canonical_path)? {
+        return Err(RuntimeError::CaptureFileHeld {
+            path: canonical_path,
+        });
+    }
     // Bootstrap: the first live doc in an empty workspace must be creatable —
     // without this, read_text errors VersionNotFound before the absent-path
     // flow can run (capture normally creates main, but nothing has captured).
@@ -2660,6 +2667,12 @@ pub(super) fn ydoc_settle_on_store(
                 }
             };
             match replay_outcome {
+                JobOutcome::Parked => {
+                    self_writes.retract(&key.workspace_id, &current.path, &current.blob_sha256);
+                    return Err(RuntimeError::CaptureFileHeld {
+                        path: current.path.clone(),
+                    });
+                }
                 JobOutcome::Completed | JobOutcome::AlreadyMaterialized => {
                     reconcile_author_coverage(store, key, now_ms, faults)?;
                 }
@@ -3048,6 +3061,16 @@ pub(super) fn ydoc_settle_on_store(
     };
     let mut materialized = true;
     match job_outcome {
+        JobOutcome::Parked => {
+            self_writes.retract(
+                &key.workspace_id,
+                &write.snapshot.path,
+                &write.snapshot.blob_sha256,
+            );
+            return Err(RuntimeError::CaptureFileHeld {
+                path: write.snapshot.path.clone(),
+            });
+        }
         JobOutcome::Completed | JobOutcome::AlreadyMaterialized => {
             reconcile_author_coverage(store, key, now_ms, faults)?;
         }
@@ -3450,6 +3473,8 @@ fn materialize_ydoc_drain(
             workspace_id: &key.workspace_id,
             self_writes: Some(materialization.self_writes.as_ref()),
             progress: None,
+            file_outcomes_settled: false,
+            released_hold_paths: None,
         },
         now_ms,
         faults,
@@ -4024,6 +4049,8 @@ mod scene_seed_transaction_tests {
                 workspace_id: "workspace",
                 self_writes: None,
                 progress: None,
+                file_outcomes_settled: false,
+                released_hold_paths: None,
             },
             3,
             &NoFaults,
@@ -4066,6 +4093,8 @@ mod scene_seed_transaction_tests {
                 workspace_id: "workspace",
                 self_writes: None,
                 progress: Some(&jobs_taken),
+                file_outcomes_settled: false,
+                released_hold_paths: None,
             },
             7,
             &NoFaults,

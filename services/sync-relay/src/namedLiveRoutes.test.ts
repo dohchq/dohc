@@ -25,6 +25,7 @@ import { createNamedFrameChanges, type NamedFrameNativeHost } from "./namedLiveF
 import { fixture as ticketFixture, audience, binding, host, key, scope } from "./liveTickets.test-helper.js";
 import { parseNamedLiveConfig } from "./namedLiveConfig.js";
 import type { StorageContext } from "./storage/context.js";
+import { liveEditors } from "./liveEditors.js";
 
 const exchangeKey = "test-exchange-key-".repeat(3), relayHost = "relay.example.test";
 const frames = { receive: { maxFrameBytes: LIVE_FRAME_DECLARED_SUBMIT_MAX_BYTES, maxStateVectorBytes: 1024, maxUpdateBytes: 4096, maxSyncBytes: 4096 },
@@ -731,6 +732,31 @@ it("applies owner connection limits and closes captured owners on host invalidat
   const first = f.connect(""); expect(await first.status).toBe(101);
   expect(await f.connect("").status).toBe(404);
   const closed = once(first.ws, "close"); f.invalidated.abort(); await closed;
+});
+
+it.each(["named", "link", "desktop", "owner"] as const)("counts a %s connection as an editor from before native capture until it closes", async kind => {
+  const f = await fixture(limits, kind === "link", undefined, kind === "owner", kind === "desktop");
+  const editors = liveEditors(f.storage), document = {workspaceId: binding.workspaceId, objectId: binding.objectId}, counted: boolean[] = [];
+  f.captureNative.mockImplementation(async () => {counted.push(editors.connected(document)); return f.native;});
+  const ticket = kind === "owner" ? {token: ""} : await f.mint();
+  const client = f.connect(ticket.token); expect(await client.status).toBe(101);
+  expect(counted.at(-1)).toBe(true); expect(editors.connected(document)).toBe(true);
+  const closed = once(client.ws, "close"); client.ws.terminate(); await closed;
+  await vi.waitFor(() => expect(editors.connected(document)).toBe(false));
+});
+
+it("stops counting an editor whose native capture fails", async () => {
+  const f = await fixture(), minted = await f.mint(), editors = liveEditors(f.storage);
+  const document = {workspaceId: binding.workspaceId, objectId: binding.objectId};
+  // Ticket redemption captures too, before the route counts the connection; only the route's capture fails.
+  let counted = false;
+  f.captureNative.mockImplementation(async () => {
+    if (!editors.connected(document)) return f.native;
+    counted = true; throw new Error("Host reconnecting.");
+  });
+  expect(await f.connect(minted.token).status).toBe(404);
+  expect(counted).toBe(true);
+  await vi.waitFor(() => expect(editors.connected(document)).toBe(false));
 });
 
 
