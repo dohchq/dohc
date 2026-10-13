@@ -140,6 +140,10 @@ pub struct HostedPassOutcome {
     pub refusals: Vec<crate::ReplicationRefusal>,
     pub sharing_declined: Vec<crate::SharingDeclined>,
     pub record_facts: Vec<dohc_engine_domain::CollectionRecordApplyFacts>,
+    /// The fetched documents this pass leaves held, by object id, with what
+    /// holds each. None of them can be edited live until a later pass
+    /// settles it ready.
+    pub held: BTreeMap<String, crate::HostedHold>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1902,7 +1906,8 @@ impl<T: RelayTransport> RelaySyncClient<T> {
 
     /// Pull one hosted pass: the first document still backfilling reads its
     /// own rows from its backfill cursor, and only when none is left does the
-    /// main feed move. A response under a new scope applies nothing; the pass
+    /// main feed move. A held document's work replays from deferred work on
+    /// every pass. A response under a new scope applies nothing; the pass
     /// adopts the scope and returns no cursor. The returned cursor stays
     /// pending until the caller materializes the pass and commits it.
     pub fn pull_hosted_workspace(
@@ -1924,8 +1929,14 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         let backfill = replica
             .documents
             .iter()
-            .find(|(_, document)| !document.ready)
+            .find(|(_, document)| document.status == crate::HostedDocumentStatus::Backfilling)
             .map(|(object_id, document)| (object_id.clone(), document.backfill_cursor));
+        let unready = replica
+            .documents
+            .iter()
+            .filter(|(_, document)| document.status != crate::HostedDocumentStatus::Ready)
+            .map(|(object_id, _)| object_id.clone())
+            .collect();
         let backfilled = backfill.as_ref().map(|(object_id, _)| object_id.as_str());
         let adopted = || HostedPassOutcome {
             has_more: true,
@@ -2015,11 +2026,18 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             &queued,
             &ops,
             durable,
-            Holding::ByDocument { behind },
+            Holding::ByDocument { behind, unready },
             faults,
             leases,
         )?;
         let backfill_object_id = backfill.map(|(object_id, _)| object_id);
+        let fetched_document = backfill_object_id.as_deref().filter(|_| !has_more);
+        let held = store
+            .read_with(|conn| crate::hosted::hosted_holds(conn, workspace_id, fetched_document))
+            .map_err(local)?
+            .into_iter()
+            .filter_map(|(object_id, hold)| Some((object_id, hold?)))
+            .collect();
         Ok(HostedPassOutcome {
             fetched,
             // A finished backfill still leaves the main feed or another document.
@@ -2039,6 +2057,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             refusals: pass.refusals,
             sharing_declined: pass.sharing_declined,
             record_facts: pass.record_facts,
+            held,
         })
     }
 
@@ -2172,7 +2191,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             let mut made_progress = false;
             for op in round {
                 let key = holding.key(op);
-                if let (Holding::ByDocument { behind }, Some(key)) = (&holding, &key) {
+                if let (Holding::ByDocument { behind, .. }, Some(key)) = (&holding, &key) {
                     let omitted = behind
                         .get(key)
                         .is_some_and(|from| op.relay_seq.is_some_and(|seq| seq >= *from));
@@ -2185,9 +2204,15 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                     crate::ydoc_apply::drain_inactive_ydoc_updates(store, workspace_id, faults)
                         .map_err(local)?;
                 }
-                let routed = crate::router::apply_replication_envelope_in_batch(
-                    store, cache, op, faults, leases, true,
-                );
+                let routed = if holding.path_held(store, op)? {
+                    Err(SyncError::RetryableState {
+                        reason: crate::hosted::BACKFILL_PATH_HELD,
+                    })
+                } else {
+                    crate::router::apply_replication_envelope_in_batch(
+                        store, cache, op, faults, leases, true,
+                    )
+                };
                 match routed {
                     Err(SyncError::RetryableState { reason }) => {
                         if let Some(key) = key {
@@ -4106,16 +4131,18 @@ pub(crate) fn take_canonical_json_call_count() -> usize {
 
 /// Whether a held op is retained across passes, so the cursor can move past
 /// it: work behind a live session, a hosted conflict child whose parent the
-/// feed withheld, and a hosted moment whose path waits for a departed
-/// document to retire.
+/// feed withheld, a hosted moment whose path waits for a departed document to
+/// retire, and a backfilled op whose path another hosted document holds.
 fn retained_while_held(op: &ReplicationEnvelope, reason: &str) -> bool {
-    matches!(op.op_kind.as_str(), "conflict.resolve" | "moment.append")
-        && matches!(
-            reason,
-            "ydoc-session-live"
-                | crate::hosted::CONFLICT_PARENT_WITHHELD
-                | crate::hosted::PATH_HELD_BY_DEPARTED
-        )
+    match reason {
+        crate::hosted::BACKFILL_PATH_HELD => true,
+        "ydoc-session-live"
+        | crate::hosted::CONFLICT_PARENT_WITHHELD
+        | crate::hosted::PATH_HELD_BY_DEPARTED => {
+            matches!(op.op_kind.as_str(), "conflict.resolve" | "moment.append")
+        }
+        _ => false,
+    }
 }
 
 /// How a pass holds later work behind an op that cannot apply yet.
@@ -4127,7 +4154,11 @@ enum Holding {
     /// a held document. `behind` gives, for each document whose retained work
     /// runs past this pass's replay, the relay position of the first op the
     /// replay left out: that op and every later one of the document hold.
-    ByDocument { behind: BTreeMap<String, i64> },
+    /// `unready` names the documents in the scope that are not ready.
+    ByDocument {
+        behind: BTreeMap<String, i64>,
+        unready: BTreeSet<String>,
+    },
 }
 
 impl Holding {
@@ -4136,6 +4167,18 @@ impl Holding {
             Self::ByOrigin => Some(op.origin_id.clone()),
             Self::ByDocument { .. } => crate::hosted::hosted_document(op).map(str::to_owned),
         }
+    }
+
+    /// Whether `op` of a document that is not ready reaches a path another
+    /// hosted document holds ([`crate::hosted::backfill_path_held`]).
+    fn path_held(&self, store: &EngineStore, op: &ReplicationEnvelope) -> Result<bool, RelayError> {
+        let Self::ByDocument { unready, .. } = self else {
+            return Ok(false);
+        };
+        store
+            .read_with(|conn| crate::hosted::backfill_path_held(conn, unready, op))
+            .map(|hold| hold.is_some())
+            .map_err(local)
     }
 }
 

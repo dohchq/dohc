@@ -143,6 +143,30 @@ pub(crate) fn read_hosted(
         })
 }
 
+/// The first of `object_id`'s retained work, in relay order, still to apply.
+pub(crate) fn first_unapplied_hosted(
+    conn: &Connection,
+    workspace: &str,
+    object_id: &str,
+) -> Result<Option<ReplicationEnvelope>, SyncError> {
+    let encoded: Option<String> = conn
+        .query_row(
+            &format!(
+                "SELECT d.envelope_json FROM relay_deferred_ops d JOIN hosted_deferred_ops h
+                 ON h.workspace_id=d.workspace_id AND h.origin_id=d.origin_id AND h.origin_seq=d.origin_seq
+                 WHERE d.workspace_id=?1 AND h.object_id=?2 AND {UNAPPLIED}
+                 ORDER BY h.relay_seq LIMIT 1"
+            ),
+            params![workspace, object_id],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(SyncError::corrupt)?;
+    encoded
+        .map(|encoded| serde_json::from_str(&encoded).map_err(SyncError::corrupt))
+        .transpose()
+}
+
 pub(crate) fn has_unapplied(store: &EngineStore, workspace: &str) -> Result<bool, RelayError> {
     store
         .read_with(|conn| {

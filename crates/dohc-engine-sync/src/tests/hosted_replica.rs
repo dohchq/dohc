@@ -981,6 +981,10 @@ fn document(store: &EngineStore, object_id: &str) -> Option<HostedDocumentState>
     replica(store).documents.get(object_id).cloned()
 }
 
+fn ready(store: &EngineStore, object_id: &str) -> bool {
+    document(store, object_id).unwrap().status == HostedDocumentStatus::Ready
+}
+
 fn coordinates(store: &EngineStore) -> Vec<(String, i64)> {
     store
         .read_with(|conn| {
@@ -1040,7 +1044,7 @@ fn a_document_that_joins_the_scope_backfills_below_the_frozen_main_cursor() {
         document(&store, "doc-a"),
         Some(HostedDocumentState {
             path: "a.md".to_owned(),
-            ready: false,
+            status: HostedDocumentStatus::Backfilling,
             backfill_cursor: 0
         })
     );
@@ -1053,13 +1057,13 @@ fn a_document_that_joins_the_scope_backfills_below_the_frozen_main_cursor() {
         Some("doc-a")
     );
     assert_eq!(backfill.applied, 1);
-    assert!(!document(&store, "doc-a").unwrap().ready);
+    assert!(!ready(&store, "doc-a"));
     assert!(commit(&client, &mut store, &backfill));
     assert_eq!(
         document(&store, "doc-a"),
         Some(HostedDocumentState {
             path: "a.md".to_owned(),
-            ready: true,
+            status: HostedDocumentStatus::Ready,
             backfill_cursor: 4
         })
     );
@@ -1084,8 +1088,8 @@ fn a_document_that_joins_the_scope_backfills_below_the_frozen_main_cursor() {
     let state = replica(&store);
     assert_eq!(state.scope_generation, 2);
     assert_eq!(state.main_cursor, 4, "and keeps the cursor");
-    assert!(document(&store, "doc-a").unwrap().ready);
-    assert!(!document(&store, "doc-b").unwrap().ready);
+    assert!(ready(&store, "doc-a"));
+    assert!(!ready(&store, "doc-b"));
 
     // One pass reads sixteen rows of doc-b's backfill, below the main cursor
     // and past it, and stops before the end.
@@ -1096,7 +1100,7 @@ fn a_document_that_joins_the_scope_backfills_below_the_frozen_main_cursor() {
         document(&store, "doc-b"),
         Some(HostedDocumentState {
             path: "b.md".to_owned(),
-            ready: false,
+            status: HostedDocumentStatus::Backfilling,
             backfill_cursor: 16
         })
     );
@@ -1119,7 +1123,7 @@ fn a_document_that_joins_the_scope_backfills_below_the_frozen_main_cursor() {
         "nothing applies twice"
     );
     assert!(commit(&client, &mut store, &resumed));
-    assert!(document(&store, "doc-b").unwrap().ready);
+    assert!(ready(&store, "doc-b"));
     assert_eq!(
         replica(&store).main_cursor,
         4,
@@ -1174,7 +1178,7 @@ fn a_scope_change_mid_pass_drops_what_the_pass_fetched() {
         before,
         "nothing the old scope served applies"
     );
-    assert!(document(&store, "doc-b").is_some_and(|doc| !doc.ready));
+    assert!(!ready(&store, "doc-b"));
 }
 
 #[test]
@@ -1194,7 +1198,7 @@ fn a_pass_fetched_under_an_older_scope_cannot_commit() {
         document(&store, "doc-a"),
         Some(HostedDocumentState {
             path: "a.md".to_owned(),
-            ready: false,
+            status: HostedDocumentStatus::Backfilling,
             backfill_cursor: 0
         })
     );
@@ -1300,8 +1304,15 @@ fn a_hosted_replica_created_after_an_epoch_rotation_needs_no_workspace_init() {
     let client = RelaySyncClient::new(feed);
     sync(&client, &mut store);
 
-    assert!(document(&store, "doc-a").unwrap().ready);
-    assert!(document(&store, "doc-c").unwrap().ready);
+    assert_eq!(
+        hold(&store, "doc-a"),
+        Some(HostedHold::ScopePathMismatch {
+            scope_path: "a.md".to_owned(),
+            head_path: None
+        }),
+        "its rows are all below the floor, so it is at no path"
+    );
+    assert!(ready(&store, "doc-c"));
     let (heads, moments) = content(&store);
     assert_eq!(
         heads,
@@ -1338,7 +1349,7 @@ fn a_page_of_only_withheld_rows_moves_the_cursor() {
     };
     assert_eq!(cursors(Some("doc-a")), [0, 1, 2]);
     assert_eq!(cursors(None), [0, 1, 2]);
-    assert!(document(&store, "doc-a").unwrap().ready);
+    assert!(ready(&store, "doc-a"));
     assert_eq!(
         content(&store).0,
         BTreeMap::from([("doc-a".to_owned(), "hosted a".to_owned())])
@@ -2285,8 +2296,8 @@ fn a_retired_file_holds_its_path_until_it_is_forgotten() {
 
 /// Sol's retirement review: retiring a document deleted every conflict that
 /// named it, including one another hosted document still needs. `doc-b`'s
-/// backfill left a conflict against `doc-a` at `b.md`; `doc-a` retires and
-/// the conflict stays, with the bytes of both sides, until `doc-b` retires too.
+/// rename left a conflict against `doc-a` at `b.md`; `doc-a` retires and the
+/// conflict stays, with the bytes of both sides, until `doc-b` retires too.
 #[test]
 fn retirement_keeps_a_conflict_another_hosted_document_holds() {
     let (_scratch, _path, mut store) = hosted_store();
@@ -2294,10 +2305,19 @@ fn retirement_keeps_a_conflict_another_hosted_document_holds() {
     let feed = client.transport();
     feed.append(envelope("owner", 0, "workspace.init", json!({})));
     feed.create("owner", 1, "doc-a", "b.md", "hosted a");
-    feed.create("peer", 0, "doc-b", "b.md", "hosted b");
+    feed.create("peer", 0, "doc-b", "x.md", "hosted b");
     feed.share("doc-a", "b.md");
+    feed.share("doc-b", "x.md");
     sync(&client, &mut store);
-    feed.share("doc-b", "b.md");
+    feed.rename(
+        "peer",
+        1,
+        "doc-b",
+        "x.md",
+        "b.md",
+        "hosted b",
+        "moment-peer-0",
+    );
     sync(&client, &mut store);
     let conflict = "SELECT COUNT(*) FROM conflicts WHERE current_object_id='doc-a' \
                     AND incoming_object_id='doc-b'";
@@ -2388,9 +2408,8 @@ fn a_document_that_returns_after_retiring_backfills_from_the_start() {
         ],
         "its creation applied again"
     );
-    let document = document(&store, "doc-b").unwrap();
-    assert!(document.ready);
-    assert_eq!(document.path, "b.md");
+    assert!(ready(&store, "doc-b"));
+    assert_eq!(document(&store, "doc-b").unwrap().path, "b.md");
 }
 
 /// [`sync_retiring`], answering each path the passes changed and how it
@@ -2430,13 +2449,28 @@ fn paths(store: &EngineStore) -> (Vec<(String, String)>, Vec<(String, String)>) 
         .unwrap()
 }
 
+fn path_held(path: &str, held_by: &str) -> HostedHold {
+    HostedHold::PathHeld {
+        path: path.to_owned(),
+        held_by: held_by.to_owned(),
+    }
+}
+
+fn hold(store: &EngineStore, object_id: &str) -> Option<HostedHold> {
+    match document(store, object_id).unwrap().status {
+        HostedDocumentStatus::Held(hold) => Some(hold),
+        HostedDocumentStatus::Backfilling | HostedDocumentStatus::Ready => None,
+    }
+}
+
 /// The retirement round's open case: `doc-b` left the scope at `a.md`, the
 /// owner moved it to `b.md`, and `doc-a` took `a.md`. `doc-b` returns, and
 /// its backfill replays its creation at `a.md` after `doc-a`'s later row.
-/// `a.md` is only a path `doc-b` passed through, so the creation parks in
-/// its history without touching `doc-a`, and its rename takes `b.md`.
+/// The creation neither applies nor opens a conflict: `doc-b` is held, and
+/// `doc-a` and the main cursor go on. Once the owner moves `doc-a`, `doc-b`'s
+/// history applies behind it and `doc-b` is ready at `b.md`.
 #[test]
-fn a_returning_document_passes_through_a_path_another_document_took() {
+fn a_returning_document_is_held_while_another_holds_its_old_path() {
     let (_scratch, _path, mut store, client) = departing_b();
     let feed = client.transport();
     feed.unshare("doc-b");
@@ -2456,56 +2490,226 @@ fn a_returning_document_passes_through_a_path_another_document_took() {
     assert!(holding(&store, "doc-b").is_empty());
 
     feed.share("doc-b", "b.md");
-    assert_eq!(
-        sync_changes(&client, &mut store),
-        [("b.md".to_owned(), "write")],
+    assert!(
+        sync_changes(&client, &mut store).is_empty(),
         "doc-a's file stays as it is"
     );
-    assert_eq!(
-        content(&store),
-        (
-            heads(&[("doc-a", "hosted a"), ("doc-b", "hosted b")]),
-            BTreeMap::from([
-                ("moment-owner-1".to_owned(), 1),
-                ("moment-owner-2".to_owned(), 1),
-                ("moment-owner-3".to_owned(), 1)
-            ])
-        )
+    assert_eq!(hold(&store, "doc-b"), Some(path_held("a.md", "doc-a")));
+    assert_eq!(retained(&store), 2, "its creation and rename wait");
+    assert_eq!(count(&store, "SELECT COUNT(*) FROM conflicts"), 0);
+
+    // doc-a keeps syncing, and the pass reports doc-b held.
+    feed.replace(
+        "owner",
+        4,
+        "doc-a",
+        "a.md",
+        "edited a",
+        ("doc-a", "hosted a", "moment-owner-3"),
     );
+    let outcome = pass(&client, &mut store, &NoFaults).unwrap();
+    assert_eq!(
+        outcome.held,
+        BTreeMap::from([("doc-b".to_owned(), path_held("a.md", "doc-a"))])
+    );
+    assert!(commit(&client, &mut store, &outcome));
+    assert_eq!(content(&store).0, heads(&[("doc-a", "edited a")]));
+    assert_eq!(replica(&store).main_cursor, 5);
+
+    feed.rename(
+        "owner",
+        5,
+        "doc-a",
+        "a.md",
+        "c.md",
+        "edited a",
+        "moment-owner-4",
+    );
+    sync_retiring(&client, &mut store);
     let pair = |left: &str, right: &str| (left.to_owned(), right.to_owned());
     assert_eq!(
         paths(&store),
         (
-            vec![pair("doc-a", "a.md"), pair("doc-b", "b.md")],
-            vec![pair("a.md", "doc-a"), pair("b.md", "doc-b")]
+            vec![pair("doc-a", "c.md"), pair("doc-b", "b.md")],
+            vec![pair("b.md", "doc-b"), pair("c.md", "doc-a")]
         )
+    );
+    assert_eq!(
+        content(&store).0,
+        heads(&[("doc-a", "edited a"), ("doc-b", "hosted b")])
     );
     assert_eq!(count(&store, "SELECT COUNT(*) FROM conflicts"), 0);
     assert_eq!(retained(&store), 0);
-    let document = document(&store, "doc-b").unwrap();
-    assert!(document.ready);
-    assert_eq!(document.path, "b.md");
+    assert!(ready(&store, "doc-b"));
 }
 
-/// A head the backfill already placed parks too: `doc-b` was created at
-/// `x.md`, passed through `a.md`, which `doc-a` holds, and ended at `b.md`.
-/// Its file leaves `x.md` when it parks, and nothing of `doc-a` changes.
+/// Sol's second finding: a backfilled Y.Doc base at a path another hosted
+/// document holds was retried on every pass and held the pass. `doc-b`'s base
+/// is held like a moment: `doc-a` and the main cursor go on, and once `doc-a`
+/// moves, the base applies and `doc-b` is ready.
 #[test]
-fn a_backfilling_head_parks_off_its_path_and_resumes_from_there() {
+fn a_ydoc_base_at_a_held_path_holds_its_document_until_the_path_frees() {
     let (_scratch, _path, mut store) = hosted_store();
     let client = RelaySyncClient::new(HostedFeed::new());
     let feed = client.transport();
     feed.append(envelope("owner", 0, "workspace.init", json!({})));
-    feed.create("owner", 1, "doc-b", "x.md", "hosted b");
+    feed.create("owner", 1, "doc-a", "a.md", "hosted a");
+    let ydoc = dohc_engine_collab::Ydoc::wire();
+    ydoc.plaintext_insert(0, "hosted b");
+    let base = ydoc.encode_full_state();
+    let base_sha = dohc_engine_storage::hex_sha256(&base);
+    feed.blobs.lock().unwrap().insert(base_sha.clone(), base);
+    feed.append(envelope(
+        "peer",
+        0,
+        "ydoc.update",
+        json!({
+            "versionId": "main",
+            "objectId": "doc-b",
+            "path": "a.md",
+            "contentKind": "plaintext",
+            "updateBlobSha256": base_sha,
+            "lineageClaimId": base_sha,
+            "isBaseState": true
+        }),
+    ));
+    feed.share("doc-a", "a.md");
+    sync(&client, &mut store);
+
+    feed.share("doc-b", "a.md");
+    sync(&client, &mut store);
+    assert_eq!(hold(&store, "doc-b"), Some(path_held("a.md", "doc-a")));
+    feed.replace(
+        "owner",
+        2,
+        "doc-a",
+        "a.md",
+        "edited a",
+        ("doc-a", "hosted a", "moment-owner-1"),
+    );
+    sync(&client, &mut store);
+    assert_eq!(content(&store).0, heads(&[("doc-a", "edited a")]));
+    assert_eq!(replica(&store).main_cursor, 4);
+    assert_eq!(retained(&store), 1);
+    assert_eq!(
+        count(
+            &store,
+            "SELECT COUNT(*) FROM ydoc_docs WHERE object_id='doc-b'"
+        ),
+        0
+    );
+
+    feed.rename(
+        "owner",
+        3,
+        "doc-a",
+        "a.md",
+        "c.md",
+        "edited a",
+        "moment-owner-2",
+    );
+    sync(&client, &mut store);
+    assert!(ready(&store, "doc-b"));
+    assert_eq!(retained(&store), 0);
+    assert_eq!(count(&store, "SELECT COUNT(*) FROM conflicts"), 0);
+    assert_eq!(
+        count(
+            &store,
+            "SELECT COUNT(*) FROM snapshots WHERE object_id='doc-b' AND path='a.md'"
+        ),
+        1
+    );
+}
+
+/// Reports one document's live session.
+struct LiveSession(&'static str);
+
+impl LeaseProbe for LiveSession {
+    fn is_live(&self, key: &dohc_engine_collab::DocKey) -> bool {
+        key.object_id == self.0
+    }
+}
+
+/// Sol's third finding: a document became ready once its backfill was
+/// fetched, while its rename still waited behind a live session. It is held
+/// until the rename applies.
+#[test]
+fn a_backfill_is_ready_only_once_its_retained_work_applies() {
+    let (_scratch, _path, mut store) = hosted_store();
+    let client = RelaySyncClient::new(HostedFeed::new());
+    let feed = client.transport();
+    feed.append(envelope("owner", 0, "workspace.init", json!({})));
+    feed.create("owner", 1, "doc-b", "a.md", "hosted b");
+    feed.share("doc-b", "b.md");
+    pass(&client, &mut store, &NoFaults).unwrap();
+    // The creation applies, but the pass never commits, so the backfill
+    // fetches it again with the rename.
+    pass(&client, &mut store, &NoFaults).unwrap();
     feed.rename(
         "owner",
         2,
         "doc-b",
-        "x.md",
         "a.md",
+        "b.md",
         "hosted b",
         "moment-owner-1",
     );
+    let behind_session = client
+        .pull_hosted_workspace(
+            &mut store,
+            &mut WriterDocCache::new(),
+            "ws",
+            &NoFaults,
+            &LiveSession("doc-b"),
+        )
+        .unwrap();
+    assert!(
+        behind_session
+            .pending_cursor
+            .as_ref()
+            .unwrap()
+            .backfill_complete
+    );
+    assert!(commit(&client, &mut store, &behind_session));
+    assert_eq!(hold(&store, "doc-b"), Some(HostedHold::WorkRetained));
+    assert_eq!(retained(&store), 1);
+
+    // The session closed.
+    sync(&client, &mut store);
+    assert!(ready(&store, "doc-b"));
+    assert_eq!(retained(&store), 0);
+    assert_eq!(
+        count(
+            &store,
+            "SELECT COUNT(*) FROM snapshots WHERE object_id='doc-b' AND path='b.md'"
+        ),
+        1
+    );
+}
+
+/// Sol's fourth finding: nothing compared a document's head with the path its
+/// scope names. The scope names `doc-b` at `b.md` before the feed serves the
+/// rename that takes it there: `doc-b` is held, naming both paths, while the
+/// main cursor goes on, and is ready once the rename applies.
+#[test]
+fn a_document_away_from_its_scope_path_is_held_until_it_arrives() {
+    let (_scratch, _path, mut store) = hosted_store();
+    let client = RelaySyncClient::new(HostedFeed::new());
+    let feed = client.transport();
+    feed.append(envelope("owner", 0, "workspace.init", json!({})));
+    feed.create("owner", 1, "doc-b", "a.md", "hosted b");
+    feed.create("owner", 2, "private", "private.md", "private");
+    feed.share("doc-b", "b.md");
+    sync(&client, &mut store);
+    assert_eq!(
+        hold(&store, "doc-b"),
+        Some(HostedHold::ScopePathMismatch {
+            scope_path: "b.md".to_owned(),
+            head_path: Some("a.md".to_owned())
+        })
+    );
+    assert_eq!(replica(&store).main_cursor, 3);
+
     feed.rename(
         "owner",
         3,
@@ -2513,55 +2717,11 @@ fn a_backfilling_head_parks_off_its_path_and_resumes_from_there() {
         "a.md",
         "b.md",
         "hosted b",
-        "moment-owner-2",
+        "moment-owner-1",
     );
-    feed.create("owner", 4, "doc-a", "a.md", "hosted a");
-    feed.share("doc-a", "a.md");
     sync(&client, &mut store);
-
-    feed.share("doc-b", "b.md");
-    assert_eq!(
-        sync_changes(&client, &mut store),
-        [("b.md".to_owned(), "write"), ("x.md".to_owned(), "delete")]
-    );
-    let pair = |left: &str, right: &str| (left.to_owned(), right.to_owned());
-    assert_eq!(
-        paths(&store),
-        (
-            vec![pair("doc-a", "a.md"), pair("doc-b", "b.md")],
-            vec![pair("a.md", "doc-a"), pair("b.md", "doc-b")]
-        )
-    );
-    assert_eq!(count(&store, "SELECT COUNT(*) FROM conflicts"), 0);
-    assert!(document(&store, "doc-b").unwrap().ready);
-}
-
-/// The path a backfill ends at takes part in occupancy as any other write
-/// does: `doc-b` was created at `b.md`, which `doc-a` holds, so its backfill
-/// opens the one conflict a ready document's write would.
-#[test]
-fn a_backfill_that_ends_on_a_held_path_opens_its_conflict() {
-    let (_scratch, _path, mut store) = hosted_store();
-    let client = RelaySyncClient::new(HostedFeed::new());
-    let feed = client.transport();
-    feed.append(envelope("owner", 0, "workspace.init", json!({})));
-    feed.create("owner", 1, "doc-a", "b.md", "hosted a");
-    feed.create("peer", 0, "doc-b", "b.md", "hosted b");
-    feed.share("doc-a", "b.md");
-    sync(&client, &mut store);
-
-    feed.share("doc-b", "b.md");
-    assert!(sync_changes(&client, &mut store).is_empty());
-    assert_eq!(content(&store).0, heads(&[("doc-a", "hosted a")]));
-    assert_eq!(
-        count(
-            &store,
-            "SELECT COUNT(*) FROM conflicts WHERE path='b.md' \
-             AND incoming_latest_moment_id='moment-peer-0'"
-        ),
-        1
-    );
-    assert_eq!(count(&store, "SELECT COUNT(*) FROM conflicts"), 1);
+    assert!(ready(&store, "doc-b"));
+    assert_eq!(replica(&store).main_cursor, 4);
 }
 
 #[test]
@@ -2632,9 +2792,12 @@ fn a_refused_settlement_with_an_unreadable_before_side_never_stops_the_feed() {
         1,
         "the refusal is journaled"
     );
-    let document = document(&store, "doc-a").unwrap();
-    assert!(document.ready);
-    assert_eq!(document.backfill_cursor, 4, "the cursor passed the row");
+    assert!(ready(&store, "doc-a"));
+    assert_eq!(
+        document(&store, "doc-a").unwrap().backfill_cursor,
+        4,
+        "the cursor passed the row"
+    );
 }
 
 /// A before side the feed serves is fetched and kept: the document's own

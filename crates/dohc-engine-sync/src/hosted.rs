@@ -9,12 +9,13 @@
 //!
 //! Its fetch position lives here too, never in `sync_relay_cursors`: one main
 //! cursor, frozen while any document backfills, and one backfill cursor per
-//! document. A document is in scope while its row carries the replica's scope
-//! generation; one that left keeps its state until it retires.
+//! document. A fetched document that something still holds from being ready
+//! does not freeze it. A document is in scope while its row carries the
+//! replica's scope generation; one that left keeps its state until it retires.
 
 mod retirement;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use dohc_engine_storage::{EngineStore, FaultInjector, TxnOutcome};
 use rusqlite::{Connection, OptionalExtension, params};
@@ -42,6 +43,10 @@ pub(crate) const CONFLICT_PARENT_WITHHELD: &str = "hosted-conflict-parent-withhe
 /// A moment whose path a document outside the scope still holds here. It
 /// waits in deferred work until that document retires.
 pub(crate) const PATH_HELD_BY_DEPARTED: &str = "hosted-path-held-by-departed";
+
+/// A backfilled op whose path another document in the scope holds here
+/// ([`backfill_path_held`]). It waits in deferred work until that one moves.
+pub(crate) const BACKFILL_PATH_HELD: &str = "hosted-backfill-path-held";
 
 pub(crate) fn is_hosted(conn: &Connection, workspace_id: &str) -> Result<bool, SyncError> {
     conn.query_row(
@@ -241,59 +246,48 @@ pub(crate) fn wait_for_departed_occupant_in_tx(
     Ok(())
 }
 
-/// Whether a moment of a backfilling hosted document parks: it moves the
-/// document to `path`, which another object holds here, and the scope names
-/// the document elsewhere. A backfill replays the document's history after
-/// other documents' later rows, so a path it only passed through may since
-/// belong to another document. A parked moment applies to the document's own
-/// history and holds no path; only the path the scope names, where the
-/// backfill leaves the document, takes part in occupancy.
-pub(crate) fn parks_in_tx(
-    tx: &rusqlite::Transaction<'_>,
-    workspace_id: &str,
-    version_id: &str,
-    object_id: &str,
-    path: &str,
-) -> Result<bool, SyncError> {
-    tx.query_row(
-        "SELECT EXISTS(SELECT 1 FROM hosted_documents d JOIN hosted_replicas h \
-           ON h.workspace_id=d.workspace_id AND h.scope_generation=d.scope_generation \
-         WHERE d.workspace_id=?1 AND d.object_id=?3 AND d.state='backfilling' AND d.path<>?4) \
-         AND (EXISTS(SELECT 1 FROM path_aliases \
-                WHERE workspace_id=?1 AND version_id=?2 AND path=?4 AND object_id<>?3) \
-           OR EXISTS(SELECT 1 FROM snapshots \
-                WHERE workspace_id=?1 AND version_id=?2 AND path=?4 AND object_id<>?3))",
-        params![workspace_id, version_id, object_id, path],
-        |row| row.get(0),
-    )
-    .map_err(SyncError::corrupt)
-}
-
-/// Whether `moment_id` is the parked head of `object_id`: its latest moment,
-/// applied as history while the document held no path. The document's next
-/// moment continues from it.
-pub(crate) fn parked_head_in_tx(
-    tx: &rusqlite::Transaction<'_>,
-    workspace_id: &str,
-    version_id: &str,
-    object_id: &str,
-    moment_id: &str,
-) -> Result<bool, SyncError> {
-    tx.query_row(
-        "SELECT EXISTS(SELECT 1 FROM hosted_replicas h JOIN moments m ON m.workspace_id=h.workspace_id \
-         WHERE h.workspace_id=?1 AND m.version_id=?2 AND m.object_id=?3 AND m.moment_id=?4 \
-           AND m.sync_record_only=1 AND m.operation<>'delete' \
-           AND NOT EXISTS(SELECT 1 FROM snapshots s WHERE s.workspace_id=?1 \
-             AND s.version_id=?2 AND s.object_id=?3) \
-           AND NOT EXISTS(SELECT 1 FROM conflicts c WHERE c.workspace_id=?1 \
-             AND c.incoming_latest_moment_id=m.moment_id) \
-           AND NOT EXISTS(SELECT 1 FROM moments later WHERE later.workspace_id=?1 \
-             AND later.version_id=?2 AND later.object_id=?3 \
-             AND later.moment_order>m.moment_order))",
-        params![workspace_id, version_id, object_id, moment_id],
-        |row| row.get(0),
-    )
-    .map_err(SyncError::corrupt)
+/// The path an op of a document that is not ready would claim or validate
+/// against, when another document in the scope holds it here. A backfill
+/// replays a document's history after other documents' later rows, so a path
+/// it only passed through may since belong to another document. Such an op
+/// neither applies nor opens a conflict: it waits in deferred work, and its
+/// document is held, until the other document moves. A ready document's op
+/// meets ordinary occupancy instead.
+pub(crate) fn backfill_path_held(
+    conn: &Connection,
+    unready: &BTreeSet<String>,
+    op: &ReplicationEnvelope,
+) -> Result<Option<HostedHold>, SyncError> {
+    let Some(object_id) = hosted_document(op).filter(|id| unready.contains(*id)) else {
+        return Ok(None);
+    };
+    let payload = &op.payload;
+    let path = match op.op_kind.as_str() {
+        "moment.append" if payload["operation"] != "delete" => &payload["payloadAfterPath"],
+        "ydoc.update" => &payload["path"],
+        _ => return Ok(None),
+    };
+    let (Some(path), Some(version_id)) = (path.as_str(), payload["versionId"].as_str()) else {
+        return Ok(None);
+    };
+    let held_by: Option<String> = conn
+        .query_row(
+            "SELECT o.object_id FROM hosted_documents o JOIN hosted_replicas h \
+               ON h.workspace_id=o.workspace_id AND h.scope_generation=o.scope_generation \
+             WHERE o.workspace_id=?1 AND o.object_id<>?3 AND o.object_id IN \
+               (SELECT object_id FROM snapshots WHERE workspace_id=?1 AND version_id=?2 AND path=?4 \
+                UNION SELECT object_id FROM path_aliases \
+                  WHERE workspace_id=?1 AND version_id=?2 AND path=?4) \
+             LIMIT 1",
+            params![op.workspace_id, version_id, object_id, path],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(SyncError::corrupt)?;
+    Ok(held_by.map(|held_by| HostedHold::PathHeld {
+        path: path.to_owned(),
+        held_by,
+    }))
 }
 
 /// Record the withheld before side of a moment this transaction applied. A
@@ -337,9 +331,95 @@ pub struct HostedReplicaState {
 pub struct HostedDocumentState {
     /// The path the scope names it at.
     pub path: String,
-    /// Its backfill completed and committed.
-    pub ready: bool,
+    pub status: HostedDocumentStatus,
     pub backfill_cursor: i64,
+}
+
+/// Where a hosted document stands. Only a ready document can be edited live.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HostedDocumentStatus {
+    /// Its backfill is still being fetched. The main cursor waits for it.
+    Backfilling,
+    /// Its backfill was fetched, but something holds it from being ready.
+    /// Later passes retry it; the main cursor does not wait.
+    Held(HostedHold),
+    /// Its backfill was fetched and applied, and it is at its scope's path.
+    Ready,
+}
+
+/// What holds a fetched hosted document from being ready.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HostedHold {
+    /// Its history reaches `path`, which `held_by`, another document in the
+    /// scope, holds here. Its work waits until `held_by` moves.
+    PathHeld { path: String, held_by: String },
+    /// Its work waits for another reason: a live session, a conflict parent
+    /// the feed withheld, or a departed document still holding its path.
+    WorkRetained,
+    /// Its history leaves it at `head_path`, or at no path, while the scope
+    /// names it at `scope_path`. It waits for the row that moves it there.
+    ScopePathMismatch {
+        scope_path: String,
+        head_path: Option<String>,
+    },
+}
+
+impl HostedHold {
+    /// The reason code a hold is stored and reported under.
+    pub const fn reason(&self) -> &'static str {
+        match self {
+            Self::PathHeld { .. } => BACKFILL_PATH_HELD,
+            Self::WorkRetained => "hosted-backfill-work-retained",
+            Self::ScopePathMismatch { .. } => "hosted-scope-path-mismatch",
+        }
+    }
+
+    fn held_path(&self) -> Option<&str> {
+        match self {
+            Self::PathHeld { path, .. } => Some(path),
+            Self::WorkRetained => None,
+            Self::ScopePathMismatch { head_path, .. } => head_path.as_deref(),
+        }
+    }
+
+    fn held_by(&self) -> Option<&str> {
+        match self {
+            Self::PathHeld { held_by, .. } => Some(held_by),
+            Self::WorkRetained | Self::ScopePathMismatch { .. } => None,
+        }
+    }
+}
+
+/// A `hosted_documents` row's state, held reason, held path and held-by
+/// columns, with `scope_path` its `path`.
+fn decode_status(
+    scope_path: &str,
+    state: &str,
+    reason: Option<&str>,
+    held_path: Option<String>,
+    held_by: Option<String>,
+) -> Result<HostedDocumentStatus, SyncError> {
+    Ok(match (state, reason, held_path, held_by) {
+        ("backfilling", None, None, None) => HostedDocumentStatus::Backfilling,
+        ("ready", None, None, None) => HostedDocumentStatus::Ready,
+        ("held", Some("hosted-backfill-path-held"), Some(path), Some(held_by)) => {
+            HostedDocumentStatus::Held(HostedHold::PathHeld { path, held_by })
+        }
+        ("held", Some("hosted-backfill-work-retained"), None, None) => {
+            HostedDocumentStatus::Held(HostedHold::WorkRetained)
+        }
+        ("held", Some("hosted-scope-path-mismatch"), head_path, None) => {
+            HostedDocumentStatus::Held(HostedHold::ScopePathMismatch {
+                scope_path: scope_path.to_owned(),
+                head_path,
+            })
+        }
+        _ => {
+            return Err(crate::error::local_corruption(
+                "a hosted document's state is malformed",
+            ));
+        }
+    })
 }
 
 /// The replica's state, or `None` for a workspace that is not hosted.
@@ -362,24 +442,42 @@ pub fn read_hosted_replica(
         };
         let mut statement = conn
             .prepare(
-                "SELECT object_id,path,state,backfill_cursor FROM hosted_documents \
-                 WHERE workspace_id=?1 AND scope_generation=?2",
+                "SELECT object_id,path,state,held_reason,held_path,held_by,backfill_cursor \
+                 FROM hosted_documents WHERE workspace_id=?1 AND scope_generation=?2",
             )
             .map_err(SyncError::corrupt)?;
-        let documents = statement
+        let rows = statement
             .query_map(params![workspace_id, scope_generation], |row| {
                 Ok((
                     row.get::<_, String>(0)?,
-                    HostedDocumentState {
-                        path: row.get(1)?,
-                        ready: row.get::<_, String>(2)? == "ready",
-                        backfill_cursor: row.get(3)?,
-                    },
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
                 ))
             })
             .map_err(SyncError::corrupt)?
-            .collect::<Result<_, _>>()
+            .collect::<Result<Vec<_>, _>>()
             .map_err(SyncError::corrupt)?;
+        let documents = rows
+            .into_iter()
+            .map(
+                |(object_id, path, state, reason, held_path, held_by, cursor)| {
+                    let status =
+                        decode_status(&path, &state, reason.as_deref(), held_path, held_by)?;
+                    Ok((
+                        object_id,
+                        HostedDocumentState {
+                            path,
+                            status,
+                            backfill_cursor: cursor,
+                        },
+                    ))
+                },
+            )
+            .collect::<Result<_, SyncError>>()?;
         Ok(Some(HostedReplicaState {
             scope_token,
             scope_generation,
@@ -425,6 +523,9 @@ pub(crate) fn adopt_scope(
                  ON CONFLICT(workspace_id,object_id) DO UPDATE SET \
                  path=excluded.path, \
                  state=CASE WHEN scope_generation=?3 THEN state ELSE 'backfilling' END, \
+                 held_reason=CASE WHEN scope_generation=?3 THEN held_reason END, \
+                 held_path=CASE WHEN scope_generation=?3 THEN held_path END, \
+                 held_by=CASE WHEN scope_generation=?3 THEN held_by END, \
                  backfill_cursor=CASE WHEN scope_generation=?3 THEN backfill_cursor ELSE 0 END, \
                  scope_generation=excluded.scope_generation",
                 params![workspace_id, object_id, previous, generation, path],
@@ -451,8 +552,10 @@ pub struct HostedCursor {
 
 /// Commit a hosted pass's position. Answers `false`, committing nothing, when
 /// the scope moved since the pass fetched: its page may hold rows the current
-/// scope withholds. A backfill that completed marks its document ready in the
-/// same transaction, so readiness never precedes its content.
+/// scope withholds. A backfill that completed, and every held document, is
+/// settled in the same transaction: ready when none of its work waits in
+/// deferred work and its head is at its scope's path, held otherwise. So
+/// readiness never precedes its content.
 pub fn commit_hosted_cursor(
     store: &mut EngineStore,
     workspace_id: &str,
@@ -489,26 +592,101 @@ pub fn commit_hosted_cursor(
                 params![workspace_id, cursor.cursor, generation],
             ),
             Some(object_id) => tx.execute(
-                "UPDATE hosted_documents SET backfill_cursor=MAX(backfill_cursor,?3), \
-                 state=CASE WHEN ?4 THEN 'ready' ELSE state END \
-                 WHERE workspace_id=?1 AND object_id=?2 AND scope_generation=?5 \
+                "UPDATE hosted_documents SET backfill_cursor=MAX(backfill_cursor,?3) \
+                 WHERE workspace_id=?1 AND object_id=?2 AND scope_generation=?4 \
                    AND state='backfilling'",
-                params![
-                    workspace_id,
-                    object_id,
-                    cursor.cursor,
-                    cursor.backfill_complete,
-                    generation
-                ],
+                params![workspace_id, object_id, cursor.cursor, generation],
             ),
         }
         .map_err(SyncError::persist)?;
         if moved != 1 {
             return Ok(false);
         }
+        let fetched = cursor
+            .backfill_object_id
+            .as_deref()
+            .filter(|_| cursor.backfill_complete);
+        for (object_id, hold) in hosted_holds(tx, workspace_id, fetched)? {
+            tx.execute(
+                "UPDATE hosted_documents SET state=CASE WHEN ?3 IS NULL THEN 'ready' ELSE 'held' END, \
+                 held_reason=?3,held_path=?4,held_by=?5 WHERE workspace_id=?1 AND object_id=?2",
+                params![
+                    workspace_id,
+                    object_id,
+                    hold.as_ref().map(HostedHold::reason),
+                    hold.as_ref().and_then(HostedHold::held_path),
+                    hold.as_ref().and_then(HostedHold::held_by)
+                ],
+            )
+            .map_err(SyncError::persist)?;
+        }
         if let Some(report_id) = &cursor.settlement_report_id {
             crate::cursor::release_settlement_report_in_tx(tx, workspace_id, report_id)?;
         }
         Ok(true)
     })
+}
+
+/// The documents in the scope whose backfill was fetched but that are not
+/// ready yet, the held ones and `fetched`, each with what holds it, if
+/// anything still does.
+pub(crate) fn hosted_holds(
+    conn: &Connection,
+    workspace_id: &str,
+    fetched: Option<&str>,
+) -> Result<BTreeMap<String, Option<HostedHold>>, SyncError> {
+    let mut statement = conn
+        .prepare(
+            "SELECT d.object_id,d.path FROM hosted_documents d JOIN hosted_replicas h \
+               ON h.workspace_id=d.workspace_id AND h.scope_generation=d.scope_generation \
+             WHERE d.workspace_id=?1 AND (d.state='held' OR (d.object_id=?2 AND d.state='backfilling'))",
+        )
+        .map_err(SyncError::corrupt)?;
+    let documents = statement
+        .query_map(params![workspace_id, fetched], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .map_err(SyncError::corrupt)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(SyncError::corrupt)?;
+    documents
+        .into_iter()
+        .map(|(object_id, scope_path)| {
+            let hold = hosted_hold(conn, workspace_id, &object_id, &scope_path)?;
+            Ok((object_id, hold))
+        })
+        .collect()
+}
+
+/// What holds a document whose backfill was fetched from being ready: the
+/// first of its work still waiting in deferred work, or a head away from the
+/// path its scope names. `None` once nothing does.
+fn hosted_hold(
+    conn: &Connection,
+    workspace_id: &str,
+    object_id: &str,
+    scope_path: &str,
+) -> Result<Option<HostedHold>, SyncError> {
+    if let Some(waiting) = crate::deferred::first_unapplied_hosted(conn, workspace_id, object_id)? {
+        let unready = BTreeSet::from([object_id.to_owned()]);
+        return Ok(Some(
+            backfill_path_held(conn, &unready, &waiting)?.unwrap_or(HostedHold::WorkRetained),
+        ));
+    }
+    let head_path: Option<String> = conn
+        .query_row(
+            "SELECT path FROM snapshots WHERE workspace_id=?1 AND object_id=?2 AND version_id=\
+               COALESCE((SELECT version_id FROM active_versions WHERE workspace_id=?1), \
+                 (SELECT main_version_id FROM versioned_workspaces WHERE workspace_id=?1))",
+            params![workspace_id, object_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(SyncError::corrupt)?;
+    Ok(
+        (head_path.as_deref() != Some(scope_path)).then(|| HostedHold::ScopePathMismatch {
+            scope_path: scope_path.to_owned(),
+            head_path,
+        }),
+    )
 }

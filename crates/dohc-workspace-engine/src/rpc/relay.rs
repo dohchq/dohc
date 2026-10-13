@@ -301,6 +301,11 @@ fn refusals_json(refusals: Vec<dohc_engine_sync::ReplicationRefusal>) -> Vec<Val
 
 /// A hosted pass, without its cursor: the caller issues that as a token.
 fn hosted_pass_json(pass: HostedPassOutcome) -> Value {
+    let held = pass
+        .held
+        .iter()
+        .map(|(object_id, hold)| hosted_hold_json(object_id, hold))
+        .collect::<Vec<_>>();
     json!({
         "fetched": pass.fetched,
         "hasMore": pass.has_more,
@@ -311,8 +316,30 @@ fn hosted_pass_json(pass: HostedPassOutcome) -> Value {
         "changedPaths": changed_paths_json(&pass.changed_paths),
         "refusals": refusals_json(pass.refusals),
         "sharingDeclined": sharing_declined_json(pass.sharing_declined),
+        "held": held,
         "pendingCursor": null,
     })
+}
+
+/// A held document, which the relay must not open for live editing.
+fn hosted_hold_json(object_id: &str, hold: &dohc_engine_sync::HostedHold) -> Value {
+    use dohc_engine_sync::HostedHold;
+    let mut held = json!({"objectId": object_id, "reason": hold.reason()});
+    match hold {
+        HostedHold::PathHeld { path, held_by } => {
+            held["path"] = json!(path);
+            held["heldBy"] = json!(held_by);
+        }
+        HostedHold::WorkRetained => {}
+        HostedHold::ScopePathMismatch {
+            scope_path,
+            head_path,
+        } => {
+            held["scopePath"] = json!(scope_path);
+            held["headPath"] = json!(head_path);
+        }
+    }
+    held
 }
 
 fn sync_outcome_json(outcome: SyncPassOutcome) -> Value {

@@ -422,15 +422,7 @@ pub fn apply_moment_envelope_detailed(
         if payload.conflict_id.is_some() || payload.conflict_effect_index.is_some() {
             return crate::conflict_resolve_v1::verify_imported_conflict_effect_in_tx(tx, envelope);
         }
-        let parks = payload.operation != "delete"
-            && crate::hosted::parks_in_tx(
-                tx,
-                &envelope.workspace_id,
-                &payload.version_id,
-                &payload.object_id,
-                &payload.payload_after_path,
-            )?;
-        if payload.operation != "delete" && !parks {
+        if payload.operation != "delete" {
             crate::hosted::wait_for_departed_occupant_in_tx(
                 tx,
                 &envelope.workspace_id,
@@ -457,7 +449,6 @@ pub fn apply_moment_envelope_detailed(
             &payload,
             search_policy.as_ref(),
             MomentApplyMode::Ordinary,
-            parks,
             content_held,
             content_held
                 .then(|| leases.bound_claim(&key))
@@ -644,16 +635,12 @@ pub(crate) fn redelivered_conflicts_opened(
     })
 }
 
-/// `parks`: the moment of a backfilling hosted document applies to its own
-/// history and takes it off every path (`crate::hosted::parks_in_tx`).
-#[allow(clippy::too_many_arguments)]
 fn apply_moment_append(
     tx: &Transaction<'_>,
     envelope: &ReplicationEnvelope,
     payload: &MomentAppendPayload,
     search_policy: Option<&SearchPolicySnapshot>,
     mode: MomentApplyMode,
-    parks: bool,
     content_held: bool,
     live_claim: Option<&str>,
 ) -> Result<MomentApplyResult, SyncError> {
@@ -710,35 +697,14 @@ fn apply_moment_append(
     let recorded_preimage = local.as_ref().map_or(Ok(false), |snapshot| {
         recorded_preimage_matches(tx, &envelope.workspace_id, payload, snapshot)
     })?;
-    // The document continues from the head it parked at.
-    let adopts_parked = match payload.before_latest_moment_id.as_deref() {
-        Some(before_moment_id)
-            if mode == MomentApplyMode::Ordinary
-                && !origin_saw_absent
-                && local.is_none()
-                && conflicting_occupant.is_none()
-                && payload.before_object_id.as_deref() == Some(payload.object_id.as_str()) =>
-        {
-            crate::hosted::parked_head_in_tx(
-                tx,
-                &envelope.workspace_id,
-                &payload.version_id,
-                &payload.object_id,
-                before_moment_id,
-            )?
-        }
-        _ => false,
-    };
     let mut head_fast_forward = if origin_saw_absent {
         local.is_none() && conflicting_occupant.is_none()
     } else {
-        adopts_parked
-            || (local.as_ref().is_some_and(|snapshot| {
-                Some(snapshot.latest_moment_id.as_str())
-                    == payload.before_latest_moment_id.as_deref()
-                    || equivalent_ydoc_settlement_preimage(snapshot, payload)
-                    || recorded_preimage
-            }) && conflicting_occupant.is_none())
+        local.as_ref().is_some_and(|snapshot| {
+            Some(snapshot.latest_moment_id.as_str()) == payload.before_latest_moment_id.as_deref()
+                || equivalent_ydoc_settlement_preimage(snapshot, payload)
+                || recorded_preimage
+        }) && conflicting_occupant.is_none()
     };
     let after_kind = ContentKind::from_wire(payload.payload_after_content_kind.as_deref());
     let after_text = if after_kind == ContentKind::Text {
@@ -764,55 +730,6 @@ fn apply_moment_append(
 
     validate_payload_sides(tx, payload)?;
     let remote_before = moment_before_from_payload(tx, payload)?;
-
-    if parks {
-        if content_held {
-            return Err(SyncError::RetryableState {
-                reason: "ydoc-session-live",
-            });
-        }
-        ensure_file_object(tx, &envelope.workspace_id, payload)?;
-        insert_moment(tx, &envelope.workspace_id, payload, &remote_before, true)?;
-        let mut materialization_changes = Vec::new();
-        if let Some(head) = &local {
-            tx.execute(
-                "DELETE FROM path_aliases \
-                 WHERE workspace_id=?1 AND version_id=?2 AND path=?3 AND object_id=?4",
-                params![
-                    envelope.workspace_id,
-                    payload.version_id,
-                    head.path,
-                    payload.object_id
-                ],
-            )
-            .map_err(SyncError::persist)?;
-            tx.execute(
-                "DELETE FROM snapshots WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
-                params![envelope.workspace_id, payload.version_id, payload.object_id],
-            )
-            .map_err(SyncError::persist)?;
-            delete_file_search_index(
-                tx,
-                &envelope.workspace_id,
-                &payload.version_id,
-                &payload.object_id,
-            )?;
-            if is_active_version(tx, &envelope.workspace_id, &payload.version_id)? {
-                materialization_changes.push(MomentMaterializationChange {
-                    version_id: payload.version_id.clone(),
-                    path: head.path.clone(),
-                    operation: "delete",
-                    content_kind: head.kind.as_str(),
-                });
-            }
-            record_materialization_changes(tx, envelope, &materialization_changes)?;
-        }
-        return Ok(MomentApplyResult {
-            conflicts_opened: 0,
-            materialization_changes,
-            record_facts: None,
-        });
-    }
 
     if mode == MomentApplyMode::Ordinary
         && payload.operation == "write"
@@ -1290,9 +1207,7 @@ fn apply_moment_append(
         )?;
         let mut materialization_changes = Vec::new();
         if active {
-            // A parked head held no path, so it leaves no file behind.
             if payload.operation == "rename"
-                && !adopts_parked
                 && let Some(before_path) = payload.payload_before_path.as_deref()
                 && before_path != payload.payload_after_path
             {
@@ -1627,7 +1542,6 @@ pub(crate) fn apply_conflict_parent_shadow_in_tx(
         &payload,
         search_policy,
         MomentApplyMode::ConflictParent,
-        false,
         false,
         None,
     )

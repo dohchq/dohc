@@ -970,10 +970,10 @@ async fn a_retired_file_that_could_not_go_holds_its_path_until_it_goes() {
 
 /// The retirement round's open case, on disk: `doc-b` left the scope at
 /// `a.md`, the owner moved it to `b.md`, and `doc-a` took `a.md`. When
-/// `doc-b` returns, its backfill passes through `a.md` without touching
-/// `doc-a` or its file, and `doc-b` lands at `b.md`.
+/// `doc-b` returns, it is held without touching `doc-a` or its file, and the
+/// pass says so. Once the owner moves `doc-a`, `doc-b` lands at `b.md`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_returning_document_lands_at_its_new_path_and_leaves_the_old_one_alone() {
+async fn a_returning_document_is_held_off_another_documents_path_until_it_moves() {
     let mut relay = HostedRelay::default();
     relay.log.push(json!({
         "relaySeq": 1, "workspaceId": WORKSPACE, "originId": "owner", "originSeq": 0,
@@ -1015,9 +1015,33 @@ async fn a_returning_document_lands_at_its_new_path_and_leaves_the_old_one_alone
 
     relay.relay().share("doc-b", "b.md");
     host.sync().await;
-    assert_eq!(document_state(&scratch, "doc-b").as_deref(), Some("ready"));
+    assert_eq!(document_state(&scratch, "doc-b").as_deref(), Some("held"));
     assert_eq!(read("a.md").as_deref(), Some("hosted a"));
+    assert_eq!(read("b.md"), None);
+    let pass = host.pull().await;
+    assert_eq!(
+        pass["held"],
+        json!([{
+            "objectId": "doc-b", "reason": "hosted-backfill-path-held",
+            "path": "a.md", "heldBy": "doc-a",
+        }])
+    );
+    assert!(host.commit(&pass["pendingCursor"]).await);
+
+    relay.relay().rename(
+        "owner",
+        4,
+        "doc-a",
+        "a.md",
+        "c.md",
+        "hosted a",
+        "moment-owner-3",
+    );
+    host.sync().await;
+    assert_eq!(document_state(&scratch, "doc-b").as_deref(), Some("ready"));
+    assert_eq!(read("a.md"), None);
     assert_eq!(read("b.md").as_deref(), Some("hosted b"));
+    assert_eq!(read("c.md").as_deref(), Some("hosted a"));
     let conn = Connection::open(engine_db_path(&scratch).expect("db path")).expect("open db");
     let conflicts: i64 = conn
         .query_row("SELECT COUNT(*) FROM conflicts", [], |row| row.get(0))
