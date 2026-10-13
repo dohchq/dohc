@@ -47,9 +47,10 @@ it.each(corpus.cases.filter(item => !item.refuse))('validates the Rust-seeded $n
     expect(replay.getMap('meta').get('schemaVersion')).toBe(1)
     expect(yDocToMarkdown(replay)).toBe(item.canonical)
     const input = { document, currentPath: 'tasks/record.md', checkpoint }
-    expect(registration(input)).toMatchObject({ kind: 'accepted', evidence: { projectedMarkdown: item.canonical } })
+    const expectedMarkdown = replay.getMap('meta').has('dohcMarkdownSource') ? item.source : item.canonical!
+    expect(registration(input)).toMatchObject({ kind: 'accepted', evidence: { projectedMarkdown: expectedMarkdown } })
     expect(journal({ ...input, suffix: [], candidate: Y.encodeStateAsUpdate(replay) })).toMatchObject({
-      kind: 'accepted', evidence: { projectedMarkdownSha256: createHash('sha256').update(item.canonical!).digest('hex') },
+      kind: 'accepted', evidence: { projectedMarkdownSha256: createHash('sha256').update(expectedMarkdown).digest('hex') },
     })
   } finally { replay.destroy() }
 })

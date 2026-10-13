@@ -482,13 +482,14 @@ function assertSupportedListMarkdown(markdown: string): string {
   const lines = markdown.split('\n')
   let changed = false
   let blank = false
+  let open: { indent: number; column: number } | undefined
   let fence = ''
   let fenceInList = false
   const refuse = () => { throw new Error('Markdown is not representable by the live document contract') }
   for (let at = 0; at < lines.length; at += 1) {
     const line = lines[at].replace(/\r$/u, '')
     if (line && !' \t>_-+*0123456789`~#'.includes(line[0])) {
-      if (!fence) { if (blank) parents.length = 0; blank = false }
+      if (!fence) { if (open) { parents.pop(); open = undefined } if (blank) parents.length = 0; blank = false }
       continue
     }
     if (/^[ \t]*$/u.test(line)) { blank = true; continue }
@@ -507,6 +508,11 @@ function assertSupportedListMarkdown(markdown: string): string {
     const rule = indent <= 3 && /^(?:-(?:[ \t]*-){2,}|\*(?:[ \t]*\*){2,}|_(?:[ \t]*_){2,})[ \t]*$/u.test(rest)
     let marker = rule ? null : /^(?:[-+*]|[0-9]{1,9}[.)])(?: |$)/u.exec(rest)
     if (marker && !marker[0].endsWith(' ') && at > 0 && !blank) marker = null
+    if (open && !marker && (blank || indent < open.column)) {
+      if (blank ? indent > open.indent && indent < open.column : rest.startsWith('\t')) refuse()
+      parents.pop()
+    }
+    open = undefined
     if (marker) {
       while (parents.length && indent <= parents.at(-1)!.indent) parents.pop()
     } else if (parents.length && indent <= parents.at(-1)!.indent
@@ -540,6 +546,7 @@ function assertSupportedListMarkdown(markdown: string): string {
       if (itemFence) { fence = itemFence; fenceInList = true }
       if (parents.length && indent < parents.at(-1)!.column) refuse()
       parents.push({ indent, column: indent + marker[0].trimEnd().length + 1 })
+      if (itemBody.trim() === '') open = parents.at(-1)
       if (itemBody === '') { lines[at] = lines[at].trimEnd(); changed = true }
     } else if (parents.length) {
       const parent = parents.at(-1)!

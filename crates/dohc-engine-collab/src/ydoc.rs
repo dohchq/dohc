@@ -2858,6 +2858,9 @@ fn parse_markdown_blocks_at<'src>(
                         if code_spans.iter().any(|span| span.contains(&index)) {
                             return line.to_owned();
                         }
+                        if let Some(rest) = line.strip_prefix("&#9;") {
+                            return format!("\t{rest}");
+                        }
                         if index > 0 && line == "&#42;" {
                             return "*".to_owned();
                         }
