@@ -14,17 +14,26 @@
       "instance_type": "standard-1",
       "max_instances": 1,
       "constraints": { "jurisdiction": "eu" }
+    },
+    {
+      "class_name": "WorkspaceCell",
+      "image": "./container/Dockerfile",
+      "instance_type": "basic",
+      "max_instances": 8,
+      "constraints": { "jurisdiction": "eu" }
     }
   ],
   "r2_buckets": [{ "binding": "STATE", "bucket_name": "dohc-cloudflare-trial-state", "jurisdiction": "eu" }],
   "durable_objects": {
-    "bindings": [{ "name": "CELL", "class_name": "Cell" }]
+    "bindings": [{ "name": "CELL", "class_name": "Cell" }, { "name": "WORKSPACE", "class_name": "WorkspaceCell" }]
   },
   "exports": {
-    "Cell": { "type": "durable-object", "storage": "sqlite" }
+    "Cell": { "type": "durable-object", "storage": "sqlite" },
+    "WorkspaceCell": { "type": "durable-object", "storage": "sqlite" }
   },
   "vars": {
     "SLEEP_AFTER": "10m",
+    "CELL_SHAPE": "single",
     // Set after the first deploy prints the workers.dev URL.
     "DOHC_PUBLIC_ORIGIN": "https://dohc-cloudflare-trial.SUBDOMAIN.workers.dev"
   }

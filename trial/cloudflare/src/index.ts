@@ -4,8 +4,11 @@ export { ContainerProxy };
 
 interface Env {
   CELL: DurableObjectNamespace<Cell>;
+  WORKSPACE: DurableObjectNamespace<WorkspaceCell>;
   STATE: R2Bucket;
   SLEEP_AFTER: string;
+  // "single": one cell serves everything. "per-workspace": workspace traffic goes to its own container.
+  CELL_SHAPE: string;
   DOHC_PUBLIC_ORIGIN: string;
   TRIAL_KEY: string;
   POSTGRES_URL: string;
@@ -26,13 +29,14 @@ interface Generation {
   saveMs: number;
 }
 
-export class Cell extends Container<Env> {
+class TrialCell extends Container<Env> {
   defaultPort = PORT;
 
-  constructor(ctx: DurableObjectState<{}>, env: Env) {
+  constructor(ctx: DurableObjectState<{}>, env: Env, role: string) {
     super(ctx, env);
     this.sleepAfter = env.SLEEP_AFTER;
     this.envVars = {
+      DOHC_CELL_ROLE: role,
       DOHC_PUBLIC_ORIGIN: env.DOHC_PUBLIC_ORIGIN,
       POSTGRES_URL: env.POSTGRES_URL,
       BETTER_AUTH_SECRET: env.BETTER_AUTH_SECRET,
@@ -45,13 +49,13 @@ export class Cell extends Container<Env> {
     if (!this.ctx.container?.running || (await this.getState()).status !== "healthy") {
       const startedAt = Date.now();
       await this.startAndWaitForPorts(PORT, { portReadyTimeoutMS: START_TIMEOUT_MS, abort: request.signal });
-      console.log(JSON.stringify({ trial: "cold-start", ms: Date.now() - startedAt }));
+      console.log(JSON.stringify({ trial: "cold-start", cell: this.ctx.id.name ?? this.ctx.id.toString(), ms: Date.now() - startedAt }));
     }
     return super.fetch(request);
   }
 
   override onStop(params: { exitCode: number; reason: string }) {
-    console.log(JSON.stringify({ trial: "stop", ...params }));
+    console.log(JSON.stringify({ trial: "stop", cell: this.ctx.id.name ?? this.ctx.id.toString(), ...params }));
   }
 
   // The archive lives in R2. Which generation is current lives here, outside the
@@ -63,7 +67,7 @@ export class Cell extends Container<Env> {
   async commitGeneration(next: Generation): Promise<boolean> {
     if (next.generation !== (await this.savedGeneration()).generation + 1) return false;
     await this.ctx.storage.put("generation", next);
-    console.log(JSON.stringify({ trial: "commit", ...next }));
+    console.log(JSON.stringify({ trial: "commit", cell: this.ctx.id.toString(), ...next }));
     return true;
   }
 
@@ -78,29 +82,51 @@ export class Cell extends Container<Env> {
   }
 }
 
-Cell.outboundByHost = {
-  "state.trial": async (request: Request, env: Env, ctx: { containerId: string }) => {
-    const cell = env.CELL.get(env.CELL.idFromString(ctx.containerId));
-    const [, kind, generation, index] = new URL(request.url).pathname.split("/");
-    if (kind === "generation") return Response.json(await cell.savedGeneration());
-    if (kind === "parts" && request.method === "PUT") {
-      await env.STATE.put(`${ctx.containerId}/${generation}/${index}`, request.body);
-      return new Response(null, { status: 204 });
-    }
-    if (kind === "parts") {
-      const object = await env.STATE.get(`${ctx.containerId}/${generation}/${index}`);
-      return object ? new Response(object.body) : new Response(null, { status: 404 });
-    }
-    if (kind === "commit") {
-      const next = { ...(await request.json<Omit<Generation, "generation">>()), generation: Number(generation) };
-      return new Response(null, { status: (await cell.commitGeneration(next)) ? 204 : 409 });
-    }
-    if (kind === "probe" && generation === "do") await cell.probeWrite(await request.arrayBuffer());
-    else if (kind === "probe" && generation === "r2") await env.STATE.put(`${ctx.containerId}/probe`, request.body);
-    else return new Response(null, { status: 404 });
+export class Cell extends TrialCell {
+  constructor(ctx: DurableObjectState<{}>, env: Env) {
+    super(ctx, env, "all");
+  }
+
+  // Per-workspace routing directory: credentials the relay mints, mapped to their workspace.
+  async directoryGet(key: string): Promise<string | undefined> {
+    return this.ctx.storage.get<string>(`directory:${key}`);
+  }
+
+  async directoryPut(key: string, workspaceId: string): Promise<void> {
+    await this.ctx.storage.put(`directory:${key}`, workspaceId);
+  }
+}
+
+export class WorkspaceCell extends TrialCell {
+  constructor(ctx: DurableObjectState<{}>, env: Env) {
+    super(ctx, env, "workspace");
+  }
+}
+
+const state = async (request: Request, env: Env, ctx: { containerId: string; className: string }) => {
+  const namespace = ctx.className === "WorkspaceCell" ? env.WORKSPACE : env.CELL;
+  const cell = namespace.get(namespace.idFromString(ctx.containerId));
+  const [, kind, generation, index] = new URL(request.url).pathname.split("/");
+  if (kind === "generation") return Response.json(await cell.savedGeneration());
+  if (kind === "parts" && request.method === "PUT") {
+    await env.STATE.put(`${ctx.containerId}/${generation}/${index}`, request.body);
     return new Response(null, { status: 204 });
-  },
+  }
+  if (kind === "parts") {
+    const object = await env.STATE.get(`${ctx.containerId}/${generation}/${index}`);
+    return object ? new Response(object.body) : new Response(null, { status: 404 });
+  }
+  if (kind === "commit") {
+    const next = { ...(await request.json<Omit<Generation, "generation">>()), generation: Number(generation) };
+    return new Response(null, { status: (await cell.commitGeneration(next)) ? 204 : 409 });
+  }
+  if (kind === "probe" && generation === "do") await cell.probeWrite(await request.arrayBuffer());
+  else if (kind === "probe" && generation === "r2") await env.STATE.put(`${ctx.containerId}/probe`, request.body);
+  else return new Response(null, { status: 404 });
+  return new Response(null, { status: 204 });
 };
+Cell.outboundByHost = { "state.trial": state };
+WorkspaceCell.outboundByHost = { "state.trial": state };
 
 const COOKIE = "dohc_trial";
 const HEADER = "x-dohc-trial-key";
@@ -135,6 +161,40 @@ function withoutTrialCookie(header: string): string {
 const enterPage = `<!doctype html><meta name="viewport" content="width=device-width">
 <form method="post"><label>Trial key <input name="key" type="password" autofocus></label> <button>Enter</button></form>`;
 
+const WORKSPACE_PATH = /^\/sync\/(?:workspaces\/)?([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?:\/|$)/i;
+
+function field(body: string, name: string): string | undefined {
+  try {
+    const value = (JSON.parse(body) as Record<string, unknown>)[name];
+    return typeof value === "string" ? value : undefined;
+  } catch { return undefined; }
+}
+
+// Finds the workspace a request belongs to. Only the routes the trial driver and a
+// desktop editor use are covered; the rest stay on the home cell (see step5-map).
+async function workspaceOf(request: Request, url: URL, body: string | undefined, home: DurableObjectStub<Cell>): Promise<string | undefined> {
+  const inPath = WORKSPACE_PATH.exec(url.pathname)?.[1];
+  if (inPath) return inPath;
+  if (url.pathname === "/sync/workspaces" && body) return field(body, "workspaceId");
+  if ((url.pathname === "/sync/live/desktop-open" || url.pathname === "/sync/live/desktop-ready") && body) {
+    const shareId = field(body, "shareId");
+    return shareId ? home.directoryGet(`share:${shareId}`) : undefined;
+  }
+  const session = url.searchParams.get("session");
+  if (url.pathname === "/sync/live/desktop" && session) return home.directoryGet(`session:${session}`);
+  return undefined;
+}
+
+// Records the identifiers a workspace relay mints, so later requests that carry only them can be routed.
+async function learn(url: URL, request: Request, response: Response, workspaceId: string, home: DurableObjectStub<Cell>): Promise<void> {
+  if (request.method !== "POST" || !response.ok) return;
+  const learned = url.pathname === `/sync/${workspaceId}/shares` ? ["share", "shareId"]
+    : url.pathname === "/sync/live/desktop-open" ? ["session", "discriminator"] : undefined;
+  if (!learned) return;
+  const value = field(await response.clone().text(), learned[1]!);
+  if (value) await home.directoryPut(`${learned[0]}:${value}`, workspaceId);
+}
+
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const secrets = [env.TRIAL_KEY, env.POSTGRES_URL, env.BETTER_AUTH_SECRET, env.DOHC_RELAY_LINK_KEY, env.DOHC_RELAY_EXCHANGE_KEY];
@@ -151,9 +211,12 @@ export default {
     const allowed = open(url.pathname) ||
       (await matches(request.headers.get(HEADER), env.TRIAL_KEY)) || (await matches(cookie(request, COOKIE), env.TRIAL_KEY));
     if (!allowed) return new Response("This trial server needs its key.", { status: 403 });
-    // Trial controls talk to the Durable Object without waking the container.
-    if (url.pathname.startsWith("/__trial/control/") && request.method === "POST") {
-      return Response.json(await getContainer(env.CELL, "cell-1").trialControl(url.pathname.slice("/__trial/control/".length)));
+    const home = getContainer(env.CELL, "cell-1");
+    // Trial controls talk to a Durable Object without waking its container.
+    const control = /^\/__trial\/control\/(stop|kill|state)(?:\/([0-9a-f-]{36}))?$/.exec(url.pathname);
+    if (control && request.method === "POST") {
+      const target = control[2] ? getContainer(env.WORKSPACE, control[2]) : home;
+      return Response.json(await target.trialControl(control[1]!));
     }
 
     const headers = new Headers(request.headers);
@@ -161,7 +224,14 @@ export default {
     const remaining = withoutTrialCookie(headers.get("cookie") ?? "");
     if (remaining) headers.set("cookie", remaining); else headers.delete("cookie");
     headers.set("x-forwarded-for", request.headers.get("cf-connecting-ip") ?? "");
-    const cell = getContainer(env.CELL, "cell-1");
-    return cell.fetch(new Request(request, { headers }));
+    if (env.CELL_SHAPE !== "per-workspace") return home.fetch(new Request(request, { headers }));
+
+    const body = request.method === "POST" && url.pathname.startsWith("/sync/") ? await request.text() : undefined;
+    const forwarded = new Request(request, body === undefined ? { headers } : { headers, body });
+    const workspaceId = await workspaceOf(request, url, body, home);
+    if (!workspaceId) return home.fetch(forwarded);
+    const response = await getContainer(env.WORKSPACE, workspaceId.toLowerCase()).fetch(forwarded);
+    await learn(url, request, response, workspaceId.toLowerCase(), home);
+    return response;
   },
 } satisfies ExportedHandler<Env>;

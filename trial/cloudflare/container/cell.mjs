@@ -21,6 +21,8 @@ const mark = name => {
 };
 
 const env = process.env;
+// "all" runs every service. "workspace" runs only the relay and its session host for one workspace.
+const role = env.DOHC_CELL_ROLE ?? 'all';
 const origin = env.DOHC_PUBLIC_ORIGIN, host = new URL(origin).host;
 for (const name of ['POSTGRES_URL', 'BETTER_AUTH_SECRET', 'DOHC_RELAY_LINK_KEY', 'DOHC_RELAY_EXCHANGE_KEY']) {
   if (!env[name]) throw new Error(`${name} is missing.`);
@@ -242,13 +244,11 @@ createServer(async (request, response) => {
 
 mark('supervisor');
 await restore();
-once('migrate', 'migrate');
+if (role === 'all') once('migrate', 'migrate');
 once('initialize', 'initialize');
-start('mailpit');
-start('workspace-api');
+if (role === 'all') { start('mailpit'); start('workspace-api'); }
 start('sync-relay');
-await Promise.all([ready('workspace-api'), ready('sync-relay')]);
-start('share-web');
-await ready('share-web');
+await Promise.all(role === 'all' ? [ready('workspace-api'), ready('sync-relay')] : [ready('sync-relay')]);
+if (role === 'all') { start('share-web'); await ready('share-web'); }
 start('caddy');
 mark('router');
