@@ -31,7 +31,18 @@ describe("states page", () => {
       for (const part of document.querySelectorAll('[data-part="avatars"]')) {
         const coloured = part.querySelectorAll('[title="Sam Rivera"]');
         expect(coloured).toHaveLength(4);
-        for (const avatar of coloured) expect(avatar.className).toContain("text-hue-teal");
+        for (const avatar of coloured) expect(avatar.className).toContain("text-hue-amber");
+      }
+      for (const part of document.querySelectorAll('[data-part="chat-rows"]')) {
+        const identified = part.querySelector('[data-thread-id="post-plain"] [title="Sam"]');
+        const unknown = part.querySelector('[data-thread-id="post-unkeyed"] [title="Kim"]');
+        expect(identified).not.toBeNull();
+        expect(identified!.className).toContain("text-hue-amber");
+        expect(unknown).not.toBeNull();
+        expect(unknown!.className).toContain("text-muted");
+        const posts = part.querySelectorAll('[data-testid="chats-post-card"]');
+        expect(posts[0]!.getAttribute("data-thread-id")).toBe("post-plain");
+        expect(posts[1]!.getAttribute("data-thread-id")).toBe("post-unkeyed");
       }
     };
     expectPinnedHues();

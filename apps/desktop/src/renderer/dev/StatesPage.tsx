@@ -50,7 +50,7 @@ import { AppRows } from "../workbench/AppsView";
 import { siteTabPath, VIEW_IDS } from "../workbench/workbenchState";
 import { AutomationBadge } from "../workbench/AutomationBadge";
 import { ChatAvatar } from "../workbench/ChatAvatar";
-import { neutralPresentation } from "../workbench/actorPresentation";
+import { neutralPresentation, relayPresentation } from "../workbench/actorPresentation";
 import { ThreadMessages } from "../workbench/ChatPosts";
 import { ChatComposer, type ChatReactionControls } from "../workbench/chatMessages";
 import { MentionComposer } from "../workbench/MentionComposer";
@@ -100,7 +100,9 @@ import { closeStatesPage } from "./statesRoute";
 // the parts.
 
 // Specimens ignore this installation and live account colour choices.
-const SAMPLE_PERSON: ActorPresentation = { group: "states-person", hue: "teal", self: false };
+const SAMPLE_ADA: ActorPresentation = { group: "states-ada", hue: "teal", self: false };
+const SAM_PALETTE_SLOT = 1;
+const SAMPLE_SAM: ActorPresentation = { ...relayPresentation(SAM_PALETTE_SLOT), group: "states-sam" };
 
 const KBD = "rounded border border-line bg-bg px-1 font-mono text-[10px] text-subtle";
 
@@ -542,7 +544,7 @@ const ABOUT_ACCESS_UNKNOWN: AccessAnswer = {
 const aboutPeer = (faceToken: string, displayName: string, paletteSlot: number): PresencePeer => ({
   faceToken, sessionToken: `${faceToken}-session`, isSelf: false, displayName, paletteSlot, state: null, updatedAtMs: 0,
 });
-const ABOUT_PRESENT = [aboutPeer("face-sam", "Sam Rivera", 1), aboutPeer("face-nova", "Nova", 4)];
+const ABOUT_PRESENT = [aboutPeer("face-sam", "Sam Rivera", SAM_PALETTE_SLOT), aboutPeer("face-nova", "Nova", 4)];
 const ABOUT_GROUP: AboutConversation = {
   kind: "group", name: "general", channelWireId: "wire-general", received: false, present: ABOUT_PRESENT,
 };
@@ -566,7 +568,7 @@ const CHAT_CHANNEL: ChatChannelRecord = {
 };
 const chatPost = (
   id: string,
-  author: { authorKind: "human" | "agent"; authorDisplayName: string },
+  author: { authorKind: "human" | "agent"; authorDisplayName: string; presentation: ActorPresentation },
   title: string,
   bodySnippet: string,
   counts: Partial<Pick<ChannelThreadRecord, "messageCount" | "unreadCount" | "openDecisionCount">> = {},
@@ -575,27 +577,30 @@ const chatPost = (
     id, title, createdAtMs: CHAT_AT, updatedAtMs: CHAT_AT, channelId: CHAT_CHANNEL.id,
     messageCount: 1, lastReadSequence: 0, unreadCount: 0, ...counts,
   },
-  data: { openingMessage: { presentation: neutralPresentation, id: `${id}-opening`, createdAtMs: CHAT_AT, bodySnippet, ...author }, reactions: [], viewerAuthorId: "you" },
+  data: { openingMessage: { id: `${id}-opening`, createdAtMs: CHAT_AT, bodySnippet, ...author }, reactions: [], viewerAuthorId: "you" },
 });
-const SAM = { authorKind: "human", authorDisplayName: "Sam" } as const;
+const SAM = { authorKind: "human", authorDisplayName: "Sam", presentation: SAMPLE_SAM } as const;
 const CHAT_POSTS = [
   chatPost("post-plain", SAM, "Pricing page copy", "Pricing page copy\nDraft is in research/competitors.md for now. Comments welcome."),
-  chatPost("post-hover", { authorKind: "agent", authorDisplayName: "Agent" }, "The funnel numbers changed since last week.",
+  chatPost("post-hover", { authorKind: "agent", authorDisplayName: "Agent", presentation: neutralPresentation }, "The funnel numbers changed since last week.",
     "The funnel numbers changed since last week.", { unreadCount: 1 }),
   chatPost("post-poll", SAM, "Can we get the launch checklist into shape before Friday?",
     "Can we get the launch checklist into shape before Friday?", { messageCount: 5, unreadCount: 2, openDecisionCount: 1 }),
+  chatPost("post-unkeyed", { authorKind: "human", authorDisplayName: "Kim", presentation: neutralPresentation },
+    "Launch checklist notes", "Launch checklist notes\nI added the remaining review notes."),
 ];
 // The feed's rows, then two kept rows with keyboard focus: on the row, and
 // on Comment inside its toolbar.
 const CHAT_FEED_SPECIMENS: { key: string; post: (typeof CHAT_POSTS)[number]; force?: { row?: string; button?: string }; last?: boolean }[] = [
   { key: "titled", post: CHAT_POSTS[0]! },
+  { key: "unkeyed", post: CHAT_POSTS[3]! },
   { key: "hovered", post: CHAT_POSTS[1]!, force: { row: "hover" } },
   { key: "poll", post: CHAT_POSTS[2]! },
   { key: "row-focus", post: CHAT_POSTS[0]!, force: { row: "focus focus-visible" } },
   { key: "toolbar-focus", post: CHAT_POSTS[0]!, force: { row: "focus-within", button: "focus focus-visible" }, last: true },
 ];
 const chatMessage = (id: string, body: string, minutes: number, parentMessageId?: string): ChatMessageRecord => ({
-  presentation: neutralPresentation, id, threadId: "post-plain", ...SAM, body, createdAtMs: CHAT_AT + minutes * 60_000,
+  id, threadId: "post-plain", ...SAM, body, createdAtMs: CHAT_AT + minutes * 60_000,
   ...(parentMessageId ? { parentMessageId } : {}),
 });
 const CHAT_THREAD_MESSAGES = [
@@ -1113,7 +1118,7 @@ function Pane(props: { theme: "light" | "dark" }) {
         </Specimen>
         <Specimen label="coloured person: post, row, comment, strip">
           {avatarSizes.map((size) => (
-            <ChatAvatar presentation={SAMPLE_PERSON} key={size} name="Sam Rivera" kind="human" size={size} />
+            <ChatAvatar presentation={SAMPLE_SAM} key={size} name="Sam Rivera" kind="human" size={size} />
           ))}
         </Specimen>
         <Specimen label="agent: post, row, comment, strip">
@@ -1806,7 +1811,7 @@ function Pane(props: { theme: "light" | "dark" }) {
       </Section>
 
       <Section part="chat-rows" title="Chat rows">
-        <Specimen label="feed: titled; hovered, unread; untitled, unread, poll, comments; focus on a row; focus in its toolbar">
+        <Specimen label="feed: identified and unknown authors; hovered, unread; untitled, unread, poll, comments; focus on a row; focus in its toolbar">
           <div className="w-[560px]">
             {CHAT_FEED_SPECIMENS.map(({ key, post, force, last }) => (
               // Each row is painted in its own box, as the feed list's items are.
@@ -1841,7 +1846,7 @@ function Pane(props: { theme: "light" | "dark" }) {
             <div className="min-w-0 flex-1 px-8 py-7">
               <div className="max-w-[640px]">
                 <SettingRow title="Your name">
-                  <PreferredNameControl presentation={SAMPLE_PERSON} value="Ada" onChange={async () => undefined} testIdPrefix={`states-name-${theme}`} />
+                  <PreferredNameControl presentation={SAMPLE_ADA} value="Ada" onChange={async () => undefined} testIdPrefix={`states-name-${theme}`} />
                 </SettingRow>
                 <SettingRow title="Editor font" modified onReset={noop}>
                   <SegmentedControl label="Editor font" value="serif" options={EDITOR_FONT_OPTIONS} onChange={noop} />
@@ -1951,7 +1956,7 @@ function Pane(props: { theme: "light" | "dark" }) {
         <Specimen label="sending, after a second: a new post">
           <div className="w-[560px]">
             <MentionComposer testIdPrefix={`states-composer-post-${theme}`} composerId={`states-composer-post-${theme}`}
-              value={COMPOSER_DRAFT} sending surface="post" authorName="Ada" authorPresentation={SAMPLE_PERSON} placeholder="What's happening in #general?"
+              value={COMPOSER_DRAFT} sending surface="post" authorName="Ada" authorPresentation={SAMPLE_ADA} placeholder="What's happening in #general?"
               sendLabel="Start post" candidates={[]} onChange={noop} onSend={noop} />
           </div>
         </Specimen>
