@@ -14,7 +14,7 @@
 :8080 {
 	@home path /
 	redir @home /account 302
-	@stats path /__trial/stats
+	@stats path /__trial/stats /__trial/stats/*
 	handle @stats {
 		reverse_proxy 127.0.0.1:8099
 	}
