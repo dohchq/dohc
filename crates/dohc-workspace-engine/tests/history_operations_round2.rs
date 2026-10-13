@@ -150,7 +150,8 @@ async fn undo_rpc_proof(n: usize) {
     println!("{n}-member Undo summary: {bytes} bytes");
     assert!(bytes < 16 * 1024, "committed Undo response must be bounded");
     assert_eq!(result["momentCount"], n);
-    assert_eq!(result["materialized"], true);
+    assert_eq!(result["materialized"], false);
+    wait_for_undo_placement(&transport, &handle, OP, "undo").await;
     assert!(result.get("moments").is_none());
     let compensation = result["compensationOperationId"].as_str().unwrap();
     let refused = transport

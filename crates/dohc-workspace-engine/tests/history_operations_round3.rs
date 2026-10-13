@@ -143,7 +143,8 @@ async fn history_operation_release_budget_one_in_5000() {
         .await;
         samples.push(start.elapsed().as_secs_f64() * 1000.0);
         assert_eq!(result["momentCount"], 1);
-        assert_eq!(result["materialized"], true);
+        assert_eq!(result["materialized"], false);
+        wait_for_undo_placement(&transport, &handle, &operation, &format!("undo-{i}")).await;
         let name = format!("{i:05}-{}.md", "long-path".repeat(8));
         assert_eq!(
             std::fs::read_to_string(scratch.path().join(format!("old/{name}"))).unwrap(),
@@ -180,7 +181,8 @@ async fn history_operation_release_folder_5000() {
         start.elapsed().as_secs_f64() * 1000.0
     );
     assert_eq!(result["momentCount"], 5000);
-    assert_eq!(result["materialized"], true);
+    assert_eq!(result["materialized"], false);
+    wait_for_undo_placement(&transport, &handle, OP, "undo").await;
     for i in 0..5000 {
         let name = format!("{i:05}-{}.md", "long-path".repeat(8));
         assert_eq!(
@@ -205,7 +207,8 @@ async fn history_operation_leaves_unrelated_session_and_disk_edit_alone() {
         json!({"operationId":"dohc-operation:move-0"}),
     )
     .await;
-    assert_eq!(result["materialized"], true);
+    assert_eq!(result["materialized"], false);
+    wait_for_undo_placement(&transport, &handle, "dohc-operation:move-0", "undo").await;
     let doc = Ydoc::wire();
     let update =
         base64::engine::general_purpose::STANDARD.encode(doc.plaintext_insert(0, "Still open"));

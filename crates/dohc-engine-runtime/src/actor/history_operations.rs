@@ -1,6 +1,6 @@
 use super::{
     ActorHandle,
-    journal::journal_moment_outbound_in_tx,
+    journal::journal_moment_outbound_with_batch_in_tx,
     materialization::{
         MaterializationReplayScope, SelfWriteRecorder, replay_pending_materializations,
     },
@@ -30,7 +30,7 @@ pub struct HistoryOperation {
     pub version_id: String,
     pub moments: Vec<OperationMoment>,
 }
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct HistoryUndoResult {
     pub operation_id: String,
     pub version_id: String,
@@ -111,6 +111,25 @@ impl ActorHandle {
         .await
     }
 
+    pub async fn ensure_history_undo_path_available(
+        &self,
+        ws: String,
+        version: String,
+        path: String,
+    ) -> Result<(), RuntimeError> {
+        self.run(move |store, _| {
+            match VersionedTextStore::new(store).get_active_version(&ws) {
+                Ok(active) if active.version_id == version => {}
+                Ok(_) | Err(DomainError::WorkspaceNotFound) => return Ok(()),
+                Err(error) => return Err(error.into()),
+            }
+            store.read_with(|conn| {
+                super::capture::ensure_no_pending_undo_placement(conn, &ws, &path)
+            })
+        })
+        .await
+    }
+
     pub async fn admit_history_operation(
         &self,
         ws: String,
@@ -155,12 +174,10 @@ impl ActorHandle {
                             std::iter::once(m.path.as_str()).chain(m.before_path.as_deref())
                         })
                         .collect();
-                    let objects = serde_json::to_string(
-                        &members.iter().map(|m| &m.object_id).collect::<Vec<_>>(),
-                    )
-                    .map_err(|_| DomainError::StateCorrupt {
-                        reason: "Undo object list",
-                    })?;
+                    let paths_json =
+                        serde_json::to_string(&paths).map_err(|_| DomainError::StateCorrupt {
+                            reason: "Undo path list",
+                        })?;
                     let mut stmt = conn
                         .prepare_cached(
                             "SELECT s.path,coalesce(b.byte_length,t.byte_length),
@@ -169,10 +186,10 @@ impl ActorHandle {
                      LEFT JOIN binary_blobs b ON b.sha256=s.binary_sha256
                      LEFT JOIN blobs t ON t.sha256=s.blob_sha256
                      WHERE s.workspace_id=?1 AND s.version_id=?2
-                         AND s.object_id IN (SELECT value FROM json_each(?3))",
+                         AND s.path IN (SELECT value FROM json_each(?3))",
                         )
                         .map_err(|e| DomainError::Storage(StorageError::corrupt_public(e)))?;
-                    stmt.query_map(params![ws, version, objects], |r| {
+                    stmt.query_map(params![ws, version, paths_json], |r| {
                         Ok(dohc_engine_domain::CaptureManifestSeedEntry {
                             path: r.get(0)?,
                             size: u64::try_from(r.get::<_, i64>(1)?)
@@ -182,11 +199,6 @@ impl ActorHandle {
                     })
                     .map_err(|e| DomainError::Storage(StorageError::corrupt_public(e)))?
                     .collect::<Result<Vec<_>, _>>()
-                    .map(|rows| {
-                        rows.into_iter()
-                            .filter(|entry| paths.contains(entry.path.as_str()))
-                            .collect()
-                    })
                     .map_err(|e| DomainError::Storage(StorageError::corrupt_public(e)))
                 })
                 .map_err(RuntimeError::from)
@@ -448,7 +460,7 @@ fn commit_history_undo_on_store(
                         }
                         .into());
                     }
-                    Some((sha, stamp))
+                    Some(stamp)
                 } else {
                     None
                 };
@@ -468,11 +480,8 @@ fn commit_history_undo_on_store(
     })?;
     let result = store.write_with(faults, |tx| {
         for (m, source) in &proofs {
-            check_undo_ownership(tx, ws, &version_id, m)?;
-            if let Some((sha, stamp)) = source {
-                if rename_head_sha(tx, ws, &version_id, &m.object_id)? != *sha
-                    || probe.stamp(&m.path) != *stamp
-                {
+            if let Some(stamp) = source {
+                if probe.stamp(&m.path) != *stamp {
                     return Err(DomainError::UndoRefused {
                         path: m.path.clone(),
                         reason: "source changed on disk",
@@ -499,6 +508,7 @@ fn commit_history_undo_on_store(
             )
             .map_err(super::search::search_domain)?;
         }
+        let mut journal_eligibility = None;
         undo_operation_in_tx(
             tx,
             ws,
@@ -582,7 +592,13 @@ fn commit_history_undo_on_store(
                         },
                     )?;
                 }
-                journal_moment_outbound_in_tx(tx, ws, &m.moment_id, false)?;
+                journal_moment_outbound_with_batch_in_tx(
+                    tx,
+                    ws,
+                    &m.moment_id,
+                    false,
+                    &mut journal_eligibility,
+                )?;
                 Ok(())
             },
         )
@@ -694,6 +710,35 @@ mod tests {
     use dohc_engine_testkit::{ScratchDir, engine_db_path};
     const WS: &str = "history-operations";
     const OP: &str = "dohc-operation:original";
+
+    #[tokio::test]
+    async fn history_operation_seed_includes_other_objects_at_endpoints() {
+        let (root, mut store) = fixture();
+        seed(&mut store, root.path(), "a.md", "one", "One");
+        rename(&mut store, root.path(), "a.md", "b.md", "move", OP);
+        seed(&mut store, root.path(), "a.md", "other", "New A");
+        drop(store);
+        let supervisor = crate::WorkspaceSupervisor::new();
+        let actor = supervisor
+            .open(&engine_db_path(&root).unwrap(), 4)
+            .unwrap()
+            .actor;
+        let seed = actor
+            .history_operation_capture_seed(WS.into(), OP.into())
+            .await
+            .unwrap();
+        tokio::task::spawn_blocking(move || supervisor.close_all())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            seed.len(),
+            2,
+            "both endpoint heads must seed reconciliation"
+        );
+        assert!(seed.iter().any(|entry| entry.path == "a.md"));
+        assert!(seed.iter().any(|entry| entry.path == "b.md"));
+    }
 
     fn fixture() -> (ScratchDir, EngineStore) {
         let root = ScratchDir::new().unwrap();

@@ -2358,7 +2358,7 @@ fn capture_ingest_binary_on_store(
     }
 }
 
-fn ensure_no_pending_undo_placement(
+pub(super) fn ensure_no_pending_undo_placement(
     conn: &Connection,
     workspace: &str,
     path: &str,

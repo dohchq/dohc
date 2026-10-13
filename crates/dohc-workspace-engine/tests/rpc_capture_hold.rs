@@ -415,7 +415,8 @@ async fn history_operation_rpc_fence_reconciles_typing_and_uses_envelope_key() {
         json!({"operationId":op}),
     )
     .await;
-    assert_eq!(result["materialized"], true);
+    assert_eq!(result["materialized"], false);
+    wait_for_undo_placement(&transport, &handle, op, "undo").await;
     assert_eq!(result["deduped"], false);
     assert_eq!(
         std::fs::read_to_string(scratch.path().join("old.md")).unwrap(),

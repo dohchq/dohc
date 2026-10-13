@@ -507,7 +507,8 @@ async fn history_operation_fence_scopes_capture_holds_and_preserves_ownership() 
                 json!({"operationId":op}),
             )
             .await;
-            assert_eq!(result["materialized"], true);
+            assert_eq!(result["materialized"], false);
+            wait_for_undo_placement(&f.transport, &f.handle, op, "undo-unrelated").await;
             assert_eq!(f.status().await["heldFiles"], held_before);
             assert_eq!(
                 std::fs::read_to_string(f.scratch.path().join("sibling.txt")).unwrap(),

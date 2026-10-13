@@ -397,6 +397,14 @@ impl EngineService {
     ) -> Result<(), WireError> {
         let canonical_path = validate_addressable_plaintext_path(path)
             .map_err(|error| map_runtime(RuntimeError::Domain(error)))?;
+        open.actor
+            .ensure_history_undo_path_available(
+                open.workspace_id.clone(),
+                version_id.to_owned(),
+                canonical_path.clone(),
+            )
+            .await
+            .map_err(map_runtime)?;
         let existing = match open
             .actor
             .resolve_path_object(
@@ -585,20 +593,26 @@ impl EngineService {
         let Ok(now) = now_ms() else {
             return result;
         };
-        open.actor
-            .history_undo_place(
-                open.workspace_id.clone(),
-                result,
-                open.root.clone(),
-                Arc::new(self.self_writes.scoped(&open.root)),
-                now,
-                |members| {
-                    for member in members {
-                        held.remove(&member.object_id);
-                    }
-                },
-            )
-            .await
+        let pending = result.clone();
+        let open = Arc::clone(open);
+        let recorder = Arc::new(self.self_writes.scoped(&open.root));
+        tokio::spawn(async move {
+            open.actor
+                .history_undo_place(
+                    open.workspace_id.clone(),
+                    pending,
+                    open.root.clone(),
+                    recorder,
+                    now,
+                    |members| {
+                        for member in members {
+                            held.remove(&member.object_id);
+                        }
+                    },
+                )
+                .await;
+        });
+        result
     }
 
     /// Freeze the active workspace snapshot before a version fork or switch.
@@ -918,6 +932,7 @@ impl EngineService {
                                 .map_err(|e| map_runtime(e.into()))
                         })
                         .collect::<Result<std::collections::HashMap<_, _>, WireError>>()?;
+                    let placement_now = now_ms()?;
                     let result = open
                         .actor
                         .history_undo_commit(
@@ -927,31 +942,34 @@ impl EngineService {
                             author_json,
                             open.root.clone(),
                             Arc::new(NoFaults),
-                            now_ms()?,
+                            placement_now,
                         )
                         .await
                         .map_err(map_runtime)?;
                     drop(_barriers);
-                    if let Some(probe) = &probe {
-                        probe.pause_undo_placement_if_armed().await;
-                    }
-                    let result = open
-                        .actor
-                        .history_undo_place(
-                            open.workspace_id.clone(),
-                            result,
-                            open.root.clone(),
-                            Arc::new(self_writes.scoped(&open.root)),
-                            now_ms()?,
-                            |members| {
-                                for member in members {
-                                    undo_leases.remove(&member.object_id);
-                                }
-                            },
-                        )
-                        .await;
-                    // Placement receipts and watcher events update the existing manifest.
-                    // Rebuilding it here would rehash unrelated files on the next Undo.
+                    let pending = result.clone();
+                    tokio::spawn(async move {
+                        if let Some(probe) = &probe {
+                            probe.pause_undo_placement_if_armed().await;
+                        }
+                        let _placed = open
+                            .actor
+                            .history_undo_place(
+                                open.workspace_id.clone(),
+                                pending,
+                                open.root.clone(),
+                                Arc::new(self_writes.scoped(&open.root)),
+                                placement_now,
+                                |members| {
+                                    for member in members {
+                                        undo_leases.remove(&member.object_id);
+                                    }
+                                },
+                            )
+                            .await;
+                        // Placement receipts and watcher events update the existing manifest.
+                        // Rebuilding it here would rehash unrelated files on the next Undo.
+                    });
                     return Ok(VersionFenceOutcome::UndoCommitted(result));
                 }
                 VersionFenceIntent::Fork { input } => open
@@ -1263,7 +1281,21 @@ mod tests {
     use std::time::Duration;
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn history_operation_releases_barriers_during_placement() {
+    async fn history_operation_replies_before_placement() {
+        undo_placement_proof(0).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn history_operation_vacated_path_is_reserved_during_placement() {
+        undo_placement_proof(1).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn history_operation_retry_held_during_partial_placement() {
+        undo_placement_proof(2).await;
+    }
+
+    async fn undo_placement_proof(mode: u8) {
         use dohc_engine_domain::{RenameTextFile, VersionedTextStore, WriteText};
         use dohc_engine_storage::{EngineStore, NoFaults};
         let scratch = ScratchDir::new().unwrap();
@@ -1313,6 +1345,48 @@ mod tests {
                 &NoFaults,
             )
             .unwrap();
+        if mode == 2 {
+            domain
+                .write_text(
+                    &WriteText {
+                        workspace_id: "undo-placement".into(),
+                        version_id: "main".into(),
+                        object_id: "held".into(),
+                        path: "held.txt".into(),
+                        text: "Before".into(),
+                        moment_id: "held-seed".into(),
+                        request_id: None,
+                        metadata_origin: "api".into(),
+                        metadata_summary: None,
+                        metadata_correlation_id: None,
+                        author_json: None,
+                        now_ms: 4,
+                    },
+                    &NoFaults,
+                )
+                .unwrap();
+            std::fs::write(scratch.path().join("held.txt"), "Held outside").unwrap();
+            store
+                .write_with(&NoFaults, |tx| {
+                    dohc_engine_storage::capture_file_holds::record_in(
+                        tx,
+                        &dohc_engine_storage::capture_file_holds::CaptureFileHold {
+                            workspace_id: "undo-placement".into(),
+                            source_version_id: "main".into(),
+                            object_id: "held".into(),
+                            path: "held.txt".into(),
+                            observed_sha256: dohc_engine_storage::hex_sha256(b"Held outside"),
+                            observed_size: 12,
+                            reason: dohc_engine_storage::capture_file_holds::NOT_REPRESENTABLE
+                                .into(),
+                            observed_at_ms: 4,
+                            attempt_count: 1,
+                            retry_requested: false,
+                        },
+                    )
+                })
+                .unwrap();
+        }
         std::fs::write(scratch.path().join("new.md"), "Content").unwrap();
         drop(store);
         let probe = crate::capture_driver::CaptureApplyProbe::default();
@@ -1334,7 +1408,7 @@ mod tests {
         probe.pause_next_undo_placement();
         let undo_service = Arc::clone(&service);
         let undo_handle = handle.clone();
-        let undo = tokio::spawn(async move {
+        let mut undo = tokio::spawn(async move {
             undo_service
                 .history_undo(
                     &RequestContext::unbounded(),
@@ -1356,6 +1430,104 @@ mod tests {
         )
         .await
         .unwrap();
+        if mode == 1 {
+            let admission = service
+                .ensure_path_not_leased(&open, "main", "new.md")
+                .await;
+            if admission.is_ok() {
+                probe.release_undo_placement();
+                let _ = undo.await;
+                service.workspace_close(Some(handle)).await.unwrap();
+                panic!("a vacated path with pending Undo deletion must refuse writes");
+            }
+        }
+        let reply = tokio::time::timeout(Duration::from_secs(2), &mut undo).await;
+        if reply.is_err() {
+            probe.release_undo_placement();
+            let _ = undo.await;
+            service.workspace_close(Some(handle)).await.unwrap();
+            panic!("Undo reply must arrive before paused placement finishes");
+        }
+        let result = reply.unwrap().unwrap().unwrap();
+        assert_eq!(result["materialized"], false);
+        assert!(scratch.path().join("new.md").exists());
+        assert!(!scratch.path().join("old.md").exists());
+        if mode == 2 {
+            let replay = open
+                .actor
+                .preflight_history_undo(
+                    "undo-placement".into(),
+                    "dohc-operation:move".into(),
+                    "undo".into(),
+                    None,
+                )
+                .await
+                .unwrap()
+                .unwrap();
+            let member = &replay.moments[0];
+            let id = dohc_engine_domain::binary_rollback_job_identity(
+                "undo-placement",
+                "main",
+                &member.moment_id,
+            );
+            open.actor
+                .materialize_replay_selected_for_fence(
+                    open.root.clone(),
+                    "undo-placement".into(),
+                    Arc::new(service.self_writes.scoped(&open.root)),
+                    vec![dohc_engine_domain::binary_rename_write_job_id(&id)],
+                    5,
+                )
+                .await
+                .unwrap();
+            assert!(scratch.path().join("old.md").exists());
+            assert!(scratch.path().join("new.md").exists());
+            let retried = service
+                .capture_retry_held(
+                    &RequestContext::unbounded(),
+                    Some(handle.clone()),
+                    json!({"path":"held.txt"}),
+                )
+                .await
+                .unwrap();
+            assert_eq!(retried["retried"], true);
+            assert!(probe.manifest_refresh_count() > refreshes);
+            assert_eq!(
+                std::fs::read_to_string(scratch.path().join("old.md")).unwrap(),
+                "Content"
+            );
+            assert_eq!(
+                std::fs::read_to_string(scratch.path().join("new.md")).unwrap(),
+                "Content"
+            );
+            let pending = open
+                .actor
+                .preflight_history_undo(
+                    "undo-placement".into(),
+                    "dohc-operation:move".into(),
+                    "undo".into(),
+                    None,
+                )
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(!pending.materialized);
+            assert_eq!(pending.moments[0].moment_id, member.moment_id);
+            assert_eq!(
+                open.actor
+                    .resolve_path_object("undo-placement".into(), "main".into(), "old.md".into())
+                    .await
+                    .unwrap(),
+                Some("one".into())
+            );
+            assert_eq!(
+                open.actor
+                    .resolve_path_object("undo-placement".into(), "main".into(), "new.md".into())
+                    .await
+                    .unwrap(),
+                None
+            );
+        }
         let sessions_available = open.session_ops.try_lock().is_ok();
         let capture_available = open.capture_apply_gate.try_lock().is_ok();
         let protected_key =
@@ -1384,7 +1556,13 @@ mod tests {
             .unwrap();
         assert_eq!(committed.version_id, "main");
         probe.release_undo_placement();
-        let result = undo.await.unwrap().unwrap();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while service.leases.scoped(&open.root).is_held(&protected_key) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
         service.workspace_close(Some(handle)).await.unwrap();
         let retry = retry
             .expect("committed retry must not wait for placement")
@@ -1395,7 +1573,7 @@ mod tests {
             retry["compensationOperationId"],
             result["compensationOperationId"]
         );
-        assert_eq!(result["materialized"], true);
+        assert_eq!(result["materialized"], false);
         assert!(
             affected_protected,
             "the pending object must remain protected"
@@ -1412,11 +1590,18 @@ mod tests {
             capture_available,
             "capture must resume for unrelated paths before file placement"
         );
+        if mode != 2 {
+            assert_eq!(
+                probe.manifest_refresh_count(),
+                refreshes,
+                "Undo must keep the workspace manifest"
+            );
+        }
         assert_eq!(
-            probe.manifest_refresh_count(),
-            refreshes,
-            "Undo must keep the workspace manifest"
+            std::fs::read_to_string(scratch.path().join("old.md")).unwrap(),
+            "Content"
         );
+        assert!(!scratch.path().join("new.md").exists());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
