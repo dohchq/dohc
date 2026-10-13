@@ -149,7 +149,7 @@ export function registerRelaySharesIpcHandlers<
     ReturnType<typeof createPresencePollRegistry>,
     "begin" | "cancel"
   >;
-  ownerLiveStop(workspace: Workspace, action: "request" | "release" | "clear" | "retired", path: string, binding?: LiveObjectBinding | OwnerLiveStop["document"]): Promise<OwnerLiveStop | undefined>;
+  ownerLiveStop(workspace: Workspace, action: "request" | "release" | "clear" | "retired", path: string, binding?: LiveObjectBinding | OwnerLiveStop["document"], acceptedCursor?: number): Promise<OwnerLiveStop | undefined>;
   listOwnerLiveStops(workspace: Workspace): Promise<OwnerLiveStop[]>;
   // A grant changed on the relay. Null when the change names no workspace.
   sharesChanged(workspaceId: string | null): void;
@@ -259,7 +259,7 @@ export function registerRelaySharesIpcHandlers<
       return withRendererWorkspaceOperation(event.sender,input.workspaceId,"Live editing stopped because this window changed workspaces.",async operation => {
         operation.assertCurrent();assertOriginalWorkspace(operation.workspace);
         return withOwnerLiveStopTransition(input.workspaceId,input.path,async () => {
-          const local=await dependencies.ownerLiveStop(operation.workspace,stop ? "request" : "clear",input.path);
+          const local=stop ? await dependencies.ownerLiveStop(operation.workspace,"request",input.path) : undefined;
           operation.assertCurrent();
           if (stop && local && !local.retirementOwed) return;
           let result: unknown;
@@ -276,9 +276,10 @@ export function registerRelaySharesIpcHandlers<
             if (stop) throw new Error("Stop live editing is waiting. Reconnect or wait for the restore to finish.",{cause:error});
             throw error;
           }
-          const response=z.object({ok:z.literal(true),objectId:stop ? z.literal(local!.document.objectId) : z.string().optional(),path:stop ? z.string().min(1) : z.literal(input.path),status:stop ? z.literal("retired") : z.enum(["ready","preparing","unavailable"])}).parse(result);
+          const response=z.object({ok:z.literal(true),objectId:stop ? z.literal(local!.document.objectId) : z.string().optional(),path:stop ? z.string().min(1) : z.literal(input.path),status:stop ? z.literal("retired") : z.enum(["ready","preparing","unavailable"]),acceptedCursor:stop ? z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER) : z.number().optional()}).parse(result);
           if (response.status==="unavailable") throw new Error("This document could not resume live editing. Refresh the list and try again.");
-          if (stop) await dependencies.ownerLiveStop(operation.workspace,local!.binding ? "release" : "retired",input.path,local!.binding ?? local!.document);
+          if (stop) await dependencies.ownerLiveStop(operation.workspace,local!.binding ? "release" : "retired",input.path,local!.binding ?? local!.document,response.acceptedCursor);
+          else await dependencies.ownerLiveStop(operation.workspace,"clear",input.path);
           operation.assertCurrent();
         });
       });

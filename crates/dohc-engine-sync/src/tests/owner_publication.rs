@@ -101,7 +101,13 @@ fn released_owner_accepts_an_ordinary_peer_update_through_replication() {
     store
         .write_with(&NoFaults, |tx| {
             release::request_in_tx(tx, &key, 20)?;
-            release::release_in_tx(tx, &observed.binding, 21, |_, _, _, _, _| Ok(()))
+            release::release_in_tx(
+                tx,
+                &observed.binding,
+                observed.accepted_cursor,
+                21,
+                |_, _, _, _, _| Ok(()),
+            )
         })
         .unwrap();
     let peer = Ydoc::wire();

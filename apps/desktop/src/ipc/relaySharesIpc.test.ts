@@ -82,6 +82,7 @@ function harness() {
   const reconcileReceivedShares = vi.fn<(listing: unknown) => Promise<void>>(async () => undefined);
   let enrolled=true;
   const localStops = vi.fn<Dependencies["listOwnerLiveStops"]>(async () => []);
+  const ownerLiveStop=vi.fn<Dependencies["ownerLiveStop"]>(async (_workspace,action,path) => action==="clear" || action==="retired" ? undefined : ({state:action==="release" || !enrolled ? "released" : "requested",relayDatabaseNamespace:enrolled ? "relay" : "",retirementOwed:true,document:{mainVersionId:"main",objectId:"object",currentPath:path},binding:enrolled ? {workspaceId,mainVersionId:"main",objectId:"object",lineageClaimId:"a".repeat(64),currentPath:path,selectorPaths:[path],restoreFenceGeneration:0} : null}));
   registerRelaySharesIpcHandlers<Sender, Event, Workspace, Operation>({
     registerHandler: (channel, handler) => {
       expect(handlers.has(channel)).toBe(false);
@@ -97,7 +98,7 @@ function harness() {
     relayShareJsonWithCredentials: request as Dependencies["relayShareJsonWithCredentials"],
     relayShareErrorCopy: (status) => `sharing failed (${status})`,
     relayShareDiscussionActivityPolls: polls,
-    ownerLiveStop: async (_workspace,action,path) => action==="clear" || action==="retired" ? undefined : ({state:action==="release" || !enrolled ? "released" : "requested",relayDatabaseNamespace:enrolled ? "relay" : "",retirementOwed:true,document:{mainVersionId:"main",objectId:"object",currentPath:path},binding:enrolled ? {workspaceId,mainVersionId:"main",objectId:"object",lineageClaimId:"a".repeat(64),currentPath:path,selectorPaths:[path],restoreFenceGeneration:0} : null}),
+    ownerLiveStop,
     listOwnerLiveStops: localStops,
     sharesChanged,
     reconcileReceivedShares,
@@ -112,6 +113,7 @@ function harness() {
     reconcileReceivedShares,
     unenrolled:() => {enrolled=false;},
     localStops,
+    ownerLiveStop,
     retireRenderer: () => { rendererCurrent = false; },
     retirePhysical: () => { physicalCurrent = false; },
     rotateCredentials: () => { generation += 1; },
@@ -121,7 +123,7 @@ function harness() {
 describe("named browser invitations", () => {
   it.each(["preparing","paused","unavailable","renamed","not-yet-enrolled"])("retires %s documents without claiming a restore generation",async () => {
     const h=harness();h.unenrolled();
-    h.request.mockResolvedValue({ok:true,path:"live.md",objectId:"object",status:"retired"});
+    h.request.mockResolvedValue({ok:true,path:"live.md",objectId:"object",status: "retired", acceptedCursor: 0});
     await expect(h.invoke(CHANNELS.stopOwnerLiveDocument,{workspaceId,path:"live.md"})).resolves.toBeUndefined();
     expect(JSON.parse(h.request.mock.calls[0]![2]!.body as string)).toEqual({path:"live.md",objectId:"object",retire:true});
   });
@@ -144,11 +146,24 @@ describe("named browser invitations", () => {
 });
 
 describe("owner live document enrollment", () => {
+  it("keeps the local Stop until Resume's POST succeeds", async () => {
+    const h=harness(),posting=deferred<unknown>();
+    h.request.mockReturnValueOnce(posting.promise);
+    const resume=h.invoke(CHANNELS.resumeOwnerLiveDocument,{workspaceId,path:"live.md"});
+    await vi.waitFor(() => expect(h.request).toHaveBeenCalledTimes(1));
+    expect(h.ownerLiveStop).not.toHaveBeenCalled();
+    posting.reject(new Error("offline"));
+    await expect(resume).rejects.toThrow("offline");
+    expect(h.ownerLiveStop).not.toHaveBeenCalled();
+    h.request.mockResolvedValueOnce({ok:true,path:"live.md",status:"ready"});
+    await h.invoke(CHANNELS.resumeOwnerLiveDocument,{workspaceId,path:"live.md"});
+    expect(h.ownerLiveStop).toHaveBeenCalledWith(h.workspace,"clear","live.md");
+  });
   it("adds only deferred counts and editability to a stopped row",async () => {
     const h=harness();
     h.localStops.mockResolvedValue([{state:"released",binding:{workspaceId,mainVersionId:"main",objectId:"object",lineageClaimId:"a".repeat(64),currentPath:"old.md",selectorPaths:["old.md"],restoreFenceGeneration:0},document:{mainVersionId:"main",objectId:"object",currentPath:"old.md"},retirementOwed:false,relayDatabaseNamespace:"relay",deferred:{unsentEdits:65,editable:false}}]);
-    h.request.mockImplementation(async (_credentials,path)=>path.includes("retired=1") ? {ok:true,documents:[{path:"old.md",objectId:"object",status:"retired"}],nextCursor:null} : {ok:true,documents:[]});
-    await expect(h.invoke(CHANNELS.listOwnerLiveDocuments,{workspaceId})).resolves.toEqual({documents:[{path:"old.md",status:"retired",canResume:true,deferredStop:{unsentEdits:65,editable:false}}],nextCursor:null});
+    h.request.mockImplementation(async (_credentials,path)=>path.includes("retired=1") ? {ok:true,documents:[{path:"old.md",objectId:"object",status: "retired", acceptedCursor: 0}],nextCursor:null} : {ok:true,documents:[]});
+    await expect(h.invoke(CHANNELS.listOwnerLiveDocuments,{workspaceId})).resolves.toEqual({documents:[{path:"old.md",status: "retired",canResume:true,deferredStop:{unsentEdits:65,editable:false}}],nextCursor:null});
   });
   const refusal = {shareId: "share", paths: ["docs"], code: "live_document_limit", message: "This server reached its live document limit."};
 
@@ -207,7 +222,7 @@ describe("owner live document enrollment", () => {
   it("lists active and retired rows without exposing bindings", async () => {
     const h = harness();
     h.request.mockImplementation(async (_credentials, path) => path.includes("retired=1")
-      ? {ok: true, documents: [{path: "old.md", objectId:"object", status: "retired"}], nextCursor: "old.md"}
+      ? {ok: true, documents: [{path: "old.md", objectId:"object", status: "retired", acceptedCursor: 0}], nextCursor: "old.md"}
       : {ok: true, documents: [{path: "live.md", status: "ready", document: {shareId: "secret"}}]});
     await expect(h.invoke(CHANNELS.listOwnerLiveDocuments, {workspaceId, retiredAfter: "older.md"})).resolves.toEqual({
       documents: [
@@ -225,10 +240,11 @@ describe("owner live document enrollment", () => {
     h.request.mockImplementation(async (_credentials, path, init) => {
       expect(path).toBe("/sync/workspace/live-host");
       return init?.method === "DELETE"
-        ? {ok: true, path: "live.md", objectId:"object", status: "retired"}
+        ? {ok: true, path: "live.md", objectId:"object", status: "retired", acceptedCursor: 37}
         : {ok: true, path: "live.md", status: "ready", document: {shareId: "server-only"}};
     });
     await expect(h.invoke(CHANNELS.stopOwnerLiveDocument, {workspaceId, path: "live.md"})).resolves.toBeUndefined();
+    expect(h.ownerLiveStop).toHaveBeenCalledWith(h.workspace,"release","live.md",expect.objectContaining({objectId:"object"}),37);
     await expect(h.invoke(CHANNELS.resumeOwnerLiveDocument, {workspaceId, path: "live.md"})).resolves.toBeUndefined();
     expect(h.request.mock.calls.map((call) => [call[0], call[2]?.method, call[2]?.body])).toEqual([
       [h.credentials, "DELETE", JSON.stringify({path: "live.md", objectId:"object", retire: true, restoreFenceGeneration: 0})],
@@ -254,14 +270,14 @@ describe("owner live document enrollment", () => {
     });
 
   it("refuses mismatched action responses instead of claiming another file stopped", async () => {
-    const h = harness(); h.request.mockResolvedValue({ok: true, path: "other.md", objectId:"other-object", status: "retired"});
+    const h = harness(); h.request.mockResolvedValue({ok: true, path: "other.md", objectId:"other-object", status: "retired", acceptedCursor: 0});
     await expect(h.invoke(CHANNELS.stopOwnerLiveDocument, {workspaceId, path: "live.md"})).rejects.toThrow();
   });
 
   it("refuses invalid retired paging cursors and malformed document paths", async () => {
     const h = harness();
     h.request.mockImplementation(async (_credentials, path) => path.includes("retired=1")
-      ? {ok: true, documents: [{path: "old.md", objectId:"object", status: "retired"}], nextCursor: "old.md"}
+      ? {ok: true, documents: [{path: "old.md", objectId:"object", status: "retired", acceptedCursor: 0}], nextCursor: "old.md"}
       : {ok: true, documents: []});
     await expect(h.invoke(CHANNELS.listOwnerLiveDocuments, {workspaceId, retiredAfter: "old.md"})).rejects.toThrow("list changed");
     h.request.mockResolvedValue({ok: true, documents: [{path: "../outside", status: "ready"}]});

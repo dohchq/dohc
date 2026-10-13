@@ -66,13 +66,22 @@ afterEach(() => {
 });
 
 describe("LiveDocumentsDialog", () => {
+  it.each([0,1])("describes a deferred queue of %s edits", async unsentEdits => {
+    const h=harness();
+    h.load.mockResolvedValue(page([row("a.md",{status:"retired",canResume:true,deferredStop:{unsentEdits,editable:true}})]));
+    render(<LiveDocumentsDialog workspaceId="ws" {...h} />);
+    const stopped=await screen.findByTestId("live-document-row-a.md");
+    expect(stopped.textContent).toContain(unsentEdits===0 ? "Resume live editing to finish syncing." : "1 unsent edit remains on this computer.");
+    expect(stopped.textContent).not.toContain("1 unsent edits");
+    expect(stopped.textContent).not.toContain("They are not in History");
+  });
   it.each([true, false])("shows deferred unsent edits and truthful editability: %s", async editable => {
     const h=harness();
     h.load.mockResolvedValue(page([row("a.md", {status:"retired",canResume:true,deferredStop:{unsentEdits:65,editable}})]));
     render(<LiveDocumentsDialog workspaceId="ws" {...h} />);
     const stopped=await screen.findByTestId("live-document-row-a.md");
     expect(stopped.textContent).toContain("65 unsent edits remain on this computer.");
-    expect(stopped.textContent).toContain("They are not in History. Resume live editing to try sending them.");
+    expect(stopped.textContent).toContain("Resume live editing to try sending them.");
     expect(stopped.textContent).toContain(editable ? "You can keep editing." : "Editing is paused.");
     fireEvent.click(within(stopped).getByRole("button",{name:"Resume live editing for a.md"}));
     await vi.waitFor(() => expect(h.resume).toHaveBeenCalledWith("ws","a.md"));

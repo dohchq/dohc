@@ -61,7 +61,7 @@ it.skipIf(engine.missing)("measures Stop reconciliation at startup and each sync
       const request = (current = handle) => ({id: 0, workspace: current, deadlineMs: 20_000});
       const measure = async (rows: number) => {
         const pass = () => sessions.run(workspace, async ({workspace: current}) => reconcileOwnerLiveStops({client, workspaceHandle: current, workspaceId: workspace.workspaceId,
-          signal: AbortSignal.timeout(20_000), assertCurrent() {}, retire: async () => false}));
+          signal: AbortSignal.timeout(20_000), assertCurrent() {}, retire: async () => null}));
         const startup = performance.now(); await pass(); const startupMs = performance.now() - startup;
         const samples: number[] = [];
         for (let i = 0; i < 20; i++) {const start = performance.now(); await pass(); samples.push(performance.now() - start);}

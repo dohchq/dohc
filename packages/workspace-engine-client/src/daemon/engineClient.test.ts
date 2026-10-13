@@ -35,14 +35,20 @@ describe("private owner delivery transport", () => {
   const request={id:970,workspace:"workspace",deadlineMs:30_000};
   const target={binding:{workspaceId:"workspace",mainVersionId:"main",objectId:"object",lineageClaimId:"cd".repeat(32),currentPath:"a.md",selectorPaths:["a.md"],restoreFenceGeneration:0},relayDatabaseNamespace:"relay"};
   const stopTarget={...target,document:{mainVersionId:"main",objectId:"object",currentPath:"a.md"},retirementOwed:true};
+  it.each([-1,0.5,Number.MAX_SAFE_INTEGER+1,NaN,Infinity])("rejects an invalid retirement cursor before sending: %s",async cursor => {
+    const peer=new FakePeerConnection(),transport=client(peer);peer.acknowledge();await transport.ready();
+    const sent=vi.fn();peer.onEnvelope=sent;
+    try {await expect(transport.ownerYDocRelease(request,target.binding,cursor)).rejects.toThrow("Invalid retirement cursor");expect(sent).not.toHaveBeenCalled();}
+    finally {transport.close();}
+  });
   it.each(["valid", "negative", "extra", "unretired", "requested", "unbound"])("checks the deferred Stop contract: %s", async scenario => {
     const peer=new FakePeerConnection(),transport=client(peer);peer.acknowledge();await transport.ready();
     const row={...stopTarget,state:scenario==="requested" ? "requested" : "released",retirementOwed:scenario==="unretired",
       ...(scenario==="unbound" ? {binding:null,relayDatabaseNamespace:""} : {}),
       deferred:{unsentEdits:scenario==="negative" ? -1 : 65,editable:false,...(scenario==="extra" ? {secret:"no"} : {})}};
     peer.onEnvelope=e=>{if (e.type==="request") peer.send({type:"response",id:e.id,result:{stops:[row]}});};
-    try {if (scenario==="valid") expect(await transport.ownerYDocRelease(request,target.binding)).toEqual(row);
-      else await expect(transport.ownerYDocRelease(request,target.binding)).rejects.toThrow(TypeError);
+    try {if (scenario==="valid") expect(await transport.ownerYDocRelease(request, target.binding, 0)).toEqual(row);
+      else await expect(transport.ownerYDocRelease(request, target.binding, 0)).rejects.toThrow(TypeError);
     } finally {transport.close();}
   });
   it("sends Stop request, release, list and cancellation with exact coordinates", async () => {
@@ -52,12 +58,12 @@ describe("private owner delivery transport", () => {
       if (e.type !== "request") return;
       const action = e.method.split(".").at(-1);
       expect(e.method).toBe(`ydoc.ownerStop.${action}`);
-      expect(e.params).toEqual(action === "release" ? {binding: target.binding} : action === "list" ? {} : {path: "a.md"});
+      expect(e.params).toEqual(action === "release" ? {binding: target.binding,acceptedCursor:0} : action === "list" ? {} : {path: "a.md"});
       peer.send({type: "response", id: e.id, result: {stops: action === "clear" ? [] : [{...stopTarget, state: action === "release" ? "released" : "requested"}]}});
     };
     try {
       expect((await transport.ownerYDocStopRequest(request, "a.md")).state).toBe("requested");
-      expect((await transport.ownerYDocRelease(request, target.binding)).state).toBe("released");
+      expect((await transport.ownerYDocRelease(request, target.binding, 0)).state).toBe("released");
       expect(await transport.ownerYDocStopList(request)).toEqual([{...stopTarget, state: "requested"}]);
       await transport.ownerYDocStopClear(request, "a.md");
     } finally {transport.close();}
@@ -67,7 +73,7 @@ describe("private owner delivery transport", () => {
     peer.acknowledge(); await transport.ready();
     const row = {...stopTarget, state: "released", ...(scenario === "binding" ? {binding: {...stopTarget.binding, restoreFenceGeneration: 1}} : scenario === "state" ? {state: "requested"} : scenario === "extra" ? {extra: true} : {relayDatabaseNamespace: ""})};
     peer.onEnvelope = e => {if (e.type === "request") peer.send({type: "response", id: e.id, result: {stops: [row]}});};
-    try {await expect(transport.ownerYDocRelease(request, target.binding)).rejects.toThrow(TypeError);}
+    try {await expect(transport.ownerYDocRelease(request, target.binding, 0)).rejects.toThrow(TypeError);}
     finally {transport.close();}
   });
   it("requests a Stop by its saved key and acknowledges an unenrolled retirement",async () => {

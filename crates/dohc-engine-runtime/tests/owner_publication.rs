@@ -2588,6 +2588,18 @@ async fn stop_action(
     Vec<dohc_engine_collab::owner_outbox::release::OwnerLiveStop>,
     dohc_engine_collab::OwnerOutboxError,
 > {
+    stop_action_at_cursor(actor, f, action, 0).await
+}
+
+async fn stop_action_at_cursor(
+    actor: &ActorHandle,
+    f: &Fixture,
+    action: &str,
+    accepted_cursor: i64,
+) -> Result<
+    Vec<dohc_engine_collab::owner_outbox::release::OwnerLiveStop>,
+    dohc_engine_collab::OwnerOutboxError,
+> {
     actor
         .owner_ydoc_stop(
             "workspace".into(),
@@ -2602,6 +2614,7 @@ async fn stop_action(
                 None
             },
             None,
+            Some(accepted_cursor),
             action.into(),
             40,
             Arc::new(NoFaults),
@@ -2868,6 +2881,7 @@ async fn stop_release_is_atomic_at_both_commit_faults_and_survives_restart() {
                         None,
                         Some(f.binding.clone()),
                         None,
+                        Some(0),
                         "release".into(),
                         30,
                         Arc::new(CrashAt(point)),
@@ -3129,6 +3143,279 @@ async fn stop_release_entry_and_byte_bounds_are_inclusive() {
             f.store.table_row_count("ydoc_owner_bindings").unwrap(),
             i64::from(size > MAX_RELEASE_BYTES as usize)
         );
+        supervisor.close_all().unwrap();
+    }
+}
+
+#[tokio::test]
+async fn stop_defers_a_lost_accepted_receipt_without_double_history() {
+    let (mut f, supervisor, actor) = pending_release_fixture(1).await;
+    let declaration = AgentDeclaration {
+        agent_id: "lost-receipt-agent".into(),
+        on_behalf_of: Some("owner".into()),
+        depth: 1,
+    };
+    f.store
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "UPDATE owner_ydoc_outbox_entries SET delivery_id='remote-1',person_edit=NULL,agent_declaration_json=?1",
+                [serde_json::to_string(&declaration).unwrap()],
+            )
+            .unwrap();
+            Ok::<_, dohc_engine_storage::StorageError>(())
+        })
+        .unwrap();
+    let host = Fixture::new();
+    let host_actor = supervisor.open(&host.db, 3).unwrap().actor;
+    let host_owner = host_actor
+        .live_application_owner("workspace".into())
+        .await
+        .unwrap();
+    let host_handle = host.adopt(&host_owner).await;
+    let update = f
+        .store
+        .read_with(|conn| {
+            let digest: String = conn
+                .query_row(
+                    "SELECT update_digest FROM owner_ydoc_outbox_entries",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            dohc_engine_storage::get_binary_blob(conn, &digest).map(Option::unwrap)
+        })
+        .unwrap();
+    let (receipt, _) =
+        deliver_declared(&host_handle, &host.binding, 1, &update, declaration.clone()).await;
+    let saved = host.settle(&host_handle, Some(receipt)).await;
+    assert_eq!(
+        host.moment_authors(&saved.moment_id)[0]["agentId"],
+        declaration.agent_id
+    );
+    let before = release_snapshot(&f);
+    // The relay has accepted this entry at cursor 1, but its receipt was lost.
+    let row = stop_action_at_cursor(&actor, &f, "release", 1)
+        .await
+        .unwrap()
+        .remove(0);
+    assert_eq!(row.deferred.as_ref().unwrap().unsent_edits, 1);
+    assert_eq!(row.state, "released");
+    assert_eq!(release_snapshot(&f)[1..], before[1..]);
+    assert!(
+        f.store
+            .read_with(|conn| conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM ydoc_owner_bindings)",
+                [],
+                |r| r.get::<_, bool>(0)
+            ))
+            .unwrap()
+    );
+    stop_action(&actor, &f, "clear").await.unwrap();
+    let (revision, head): (i64, i64) = f
+        .store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT binding_revision,native_head_sequence FROM ydoc_owner_bindings",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+        })
+        .unwrap();
+    let update = f
+        .store
+        .read_with(|conn| {
+            let digest: String = conn
+                .query_row(
+                    "SELECT update_digest FROM owner_ydoc_outbox_entries WHERE pending=1",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            dohc_engine_storage::get_binary_blob(conn, &digest).map(|bytes| bytes.unwrap())
+        })
+        .unwrap();
+    actor
+        .owner_ydoc_apply_accepted(
+            "workspace".into(),
+            dohc_engine_collab::owner_outbox::accepted::OwnerAcceptedFrameInput {
+                binding: f.binding.clone(),
+                relay_database_namespace: "relay".into(),
+                expected_revision: revision,
+                expected_native_head_sequence: head,
+                previous_accepted_cursor: 0,
+                journal_cursor: 1,
+                update_bytes: update,
+            },
+            41,
+            CancellationToken::new(),
+            Arc::new(()),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    // The host's authenticated History boundary arrives before unbinding.
+    let mut envelope=host.store.read_with(|conn| conn.query_row("SELECT payload_json,recorded_at_ms FROM replication_log WHERE op_kind='moment.append' AND json_extract(payload_json,'$.momentId')=?1",[&saved.moment_id],|r| Ok(dohc_engine_sync::ReplicationEnvelope {
+        workspace_id:"workspace".into(),origin_id:"host".into(),origin_seq:0,relay_seq:Some(1),op_kind:"moment.append".into(),payload:serde_json::from_str(&r.get::<_,String>(0)?).unwrap(),recorded_at_ms:r.get(1)?,settlement_admission:Some(dohc_engine_sync::SettlementAdmission::Accepted{settlement_id:saved.settlement_id.clone()}),admitted_author_snapshot:Some(serde_json::json!([dohc_engine_collab::live_update_application::LiveAuthorEntry::from(declaration.clone())]))
+    }))).unwrap();
+    envelope.payload.as_object_mut().unwrap().remove("authors");
+    let blobs: Vec<(String, String)> = host
+        .store
+        .read_with(|conn| {
+            let mut stmt = conn.prepare("SELECT sha256,text FROM blobs").unwrap();
+            stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .unwrap();
+    f.store
+        .write_with(&NoFaults, |tx| {
+            // Seed the committed output of the authenticated audit import;
+            // its parser and proof checks have their own sync coverage.
+            let record=envelope.payload["settlementReference"]["record"].to_string();
+            for (digest, text) in blobs {
+                tx.execute(
+                    "INSERT OR IGNORE INTO blobs(sha256,byte_length,text) VALUES(?1,?2,?3)",
+                    rusqlite::params![digest, text.len() as i64, text],
+                )
+                .unwrap();
+            }
+            tx.execute("INSERT INTO live_audit_settlements(settlement_id,workspace_id,record_digest,record_json,markdown_digest) VALUES(?1,'workspace',?2,?3,?4)",rusqlite::params![saved.settlement_id,hex_sha256(record.as_bytes()),record,envelope.payload["payloadAfterBlobSha256"].as_str().unwrap()]).unwrap();
+            Ok::<_, dohc_engine_storage::StorageError>(())
+        })
+        .unwrap();
+    let applied = dohc_engine_sync::apply_replication_envelope(
+        &mut f.store,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &envelope,
+        &NoFaults,
+        &dohc_engine_sync::NoLiveLeases,
+    )
+    .unwrap();
+    assert!(
+        matches!(
+            applied.primary,
+            dohc_engine_sync::ApplyDisposition::Applied(_)
+        ),
+        "{applied:?}"
+    );
+    stop_action(&actor, &f, "request").await.unwrap();
+    stop_action_at_cursor(&actor, &f, "release", 1)
+        .await
+        .unwrap();
+    actor
+        .materialize_relay_page(
+            "workspace".into(),
+            f.root.path().to_owned(),
+            vec![dohc_engine_sync::MomentMaterializationChange {
+                version_id: "main".into(),
+                path: f.binding.current_path.clone(),
+                operation: "write",
+                content_kind: "text",
+            }],
+            Arc::new(()),
+            42,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    let key = DocKey::new("workspace", "main", "object").unwrap();
+    let state = actor
+        .ydoc_open_state(
+            "workspace".into(),
+            43,
+            false,
+            Some(key.clone()),
+            "main".into(),
+            f.binding.current_path.clone(),
+            Some(ContentKind::Richdoc),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    actor
+        .ydoc_settle(
+            f.root.path().to_owned(),
+            key,
+            f.binding.current_path.clone(),
+            ContentKind::Richdoc,
+            Some(f.binding.lineage_claim_id.clone()),
+            state.head_blob_sha256,
+            "owner-live-stop".into(),
+            Arc::new(()),
+            44,
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+            None,
+        )
+        .await
+        .unwrap();
+    f.store.read_with(|conn| {
+        let count:i64=conn.query_row("SELECT COUNT(*) FROM ydoc_updates WHERE is_seed=0",[],|r|r.get(0)).unwrap();
+        assert_eq!(count,1,"the accepted edit must not be appended again by Stop");
+        let text:String=conn.query_row("SELECT text FROM blobs WHERE sha256=(SELECT blob_sha256 FROM snapshots WHERE object_id='object')",[],|r|r.get(0)).unwrap();
+        assert_eq!(text.matches("Pending edit 0").count(),1);
+        let credits:i64=conn.query_row("SELECT COUNT(*) FROM moments WHERE instr(author_json,'lost-receipt-agent')>0",[],|r|r.get(0)).unwrap();
+        assert_eq!(credits,1,"Stop must not mint a second credited History boundary");
+        Ok::<_,rusqlite::Error>(())
+    }).unwrap();
+    host_owner.close().await.unwrap();
+    supervisor.close_all().unwrap();
+}
+
+#[tokio::test]
+async fn stop_requested_work_precedes_sixty_four_deferred_rows() {
+    let (mut f, supervisor, actor) = pending_release_fixture(0).await;
+    f.store.write_with(&NoFaults,|tx| {
+        let saved:String=tx.query_row("SELECT binding_json FROM owner_live_stops",[],|r|r.get(0)).unwrap();
+        for index in 0..64 {
+            let mut row:serde_json::Value=serde_json::from_str(&saved).unwrap();
+            let object=format!("aaa-deferred-{index:02}");
+            row["binding"]["objectId"]=serde_json::json!(object);
+            row["document"]["objectId"]=serde_json::json!(object);
+            row["retirementOwed"]=serde_json::json!(false);
+            row["deferred"]=serde_json::json!({"unsentEdits":0,"editable":true});
+            tx.execute("INSERT INTO file_objects(workspace_id,object_id,created_at_ms) VALUES('workspace',?1,1)",[&object]).unwrap();
+            tx.execute("INSERT INTO ydoc_docs(workspace_id,version_id,object_id,content_kind,regime,head_update_seq,head_snapshot_seq,lineage_claim_status,updated_at_ms) VALUES('workspace','main',?1,'richdoc','local-only',0,0,'unclaimed',1)",[&object]).unwrap();
+            tx.execute("INSERT INTO owner_live_stops(workspace_id,main_version_id,object_id,relay_database_namespace,state,binding_json,requested_at_ms,updated_at_ms) VALUES('workspace','main',?1,'relay','released',?2,1,1)",rusqlite::params![object,row.to_string()]).unwrap();
+        }
+        Ok::<_,dohc_engine_storage::StorageError>(())
+    }).unwrap();
+    let rows = stop_action(&actor, &f, "list").await.unwrap();
+    assert_eq!(rows.len(), 64);
+    assert_eq!(rows[0].document.object_id, "object");
+    assert!(rows[0].retirement_owed);
+    supervisor.close_all().unwrap();
+}
+
+#[tokio::test]
+async fn stop_waits_for_unapplied_owner_settlements() {
+    let (mut f, supervisor, actor) = pending_release_fixture(1).await;
+    f.store.write_with(&NoFaults,|tx| {
+        tx.execute("INSERT INTO replication_log(workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms,imported) VALUES('workspace','held',0,'moment.append','{}',1,1)",[]).unwrap();
+        tx.execute("INSERT INTO owner_pending_settlements(workspace_id,origin_id,origin_seq,main_version_id,object_id,lineage_claim_id,relay_namespace,binding_json,terminal_cursor) VALUES('workspace','held',0,'main','object',?1,'relay',?2,0)",rusqlite::params![f.binding.lineage_claim_id,serde_json::to_string(&f.binding).unwrap()]).unwrap();
+        Ok::<_,dohc_engine_storage::StorageError>(())
+    }).unwrap();
+    let before = release_snapshot(&f);
+    assert!(matches!(
+        stop_action(&actor, &f, "release").await,
+        Err(dohc_engine_collab::OwnerOutboxError::StopConflict)
+    ));
+    assert_eq!(release_snapshot(&f), before);
+    supervisor.close_all().unwrap();
+}
+
+#[tokio::test]
+async fn stop_rejects_missing_or_reordered_dependent_entries() {
+    for missing in [true, false] {
+        let (mut f, supervisor, actor) = pending_release_fixture(2).await;
+        f.store.write_with(&NoFaults,|tx| {
+            if missing {tx.execute("DELETE FROM owner_ydoc_outbox_entries WHERE sequence=1",[]).unwrap();}
+            else {tx.execute("UPDATE owner_ydoc_outbox_entries SET sequence=sequence+10",[]).unwrap();tx.execute("UPDATE owner_ydoc_outbox_entries SET sequence=CASE sequence WHEN 11 THEN 2 ELSE 1 END",[]).unwrap();}
+            Ok::<_,dohc_engine_storage::StorageError>(())
+        }).unwrap();
+        let before = release_snapshot(&f);
+        assert!(stop_action(&actor, &f, "release").await.is_err());
+        assert_eq!(release_snapshot(&f), before);
         supervisor.close_all().unwrap();
     }
 }
@@ -3504,6 +3791,7 @@ async fn release_contention_sample() -> (f64, f64, f64) {
                 None,
                 Some(f.binding.clone()),
                 None,
+                Some(0),
                 "release".into(),
                 40,
                 Arc::new(ObserveCommit(submitted.clone())),

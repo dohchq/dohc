@@ -65,6 +65,13 @@ function enrollService(f: Awaited<ReturnType<typeof fixture>>) {
   f.storage.enrollServiceHostDocument({workspaceId: scope.workspaceId, path: binding.currentPath, ownerUserId, shareId: scope.shareId, nowMs: 10, guard() {}});
 }
 
+it("returns the accepted head in retirement and repeated retirement", async () => {
+  const f=await fixture();enrollService(f);f.point(3);f.point(9);
+  const retire=() => f.storage.setServiceHostEnrollmentEnabled({...f.input,enabled:false,retire:true,restoreFenceGeneration:7,nowMs:20,guard() {}});
+  expect(retire()).toMatchObject({retired:true,acceptedCursor:9});
+  expect(retire()).toMatchObject({retired:true,acceptedCursor:9});
+});
+
 it("refuses a new restore after service enrollment retirement, including a previously read plan", async () => {
   const f = await fixture(); enrollService(f);
   const plan = f.storage.readStopRestorePlan({operationId: "restore", ownerUserId, document,

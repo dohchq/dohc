@@ -2265,15 +2265,12 @@ pub(crate) fn record_credited_updates_in_tx(
     for outcome in validated.outcomes {
         outcome?;
     }
-    if validated
+    let validated_state = validated
         .doc
         .encode_full_state_bounded(crate::limits::MAX_YDOC_UPDATE_BYTES)
-        .is_none()
-    {
-        return Err(CollabError::Corrupt {
+        .ok_or_else(|| CollabError::Corrupt {
             reason: "release exceeds document limit".into(),
-        });
-    }
+        })?;
     let settlement_requested = crate::author_coverage::check_batch_admission_in(
         tx,
         key,
@@ -2355,7 +2352,7 @@ pub(crate) fn record_credited_updates_in_tx(
             facts.push(record_facts);
         }
     }
-    if doc.encode_full_state() != validated.doc.encode_full_state() {
+    if doc.encode_full_state() != validated_state {
         return Err(CollabError::Corrupt {
             reason: "release replay differs from validated state".into(),
         });

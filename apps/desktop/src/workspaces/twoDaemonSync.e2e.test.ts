@@ -616,6 +616,7 @@ it.skipIf(engine.missing).each([
   { name: "quarantine", hasId: true, body: "# Keep this body\n", stopQuarantine: true },
   { name: "stale-binding quarantine", hasId: true, body: "# Keep this body\n", stopQuarantine: true },
   { name: "offline stop", hasId: true, body: "# Keep this body\n", stopQuarantine: true },
+  { name: "deferred resume", hasId: true, body: "# Keep this body\n", stopQuarantine: true },
 ])("settles open Collection adoption with native owner delivery and recipient sync ($name)", async ({ name, hasId, body: originalBody, stopQuarantine }) => {
   const canonical = markdownToYDoc(originalBody);
   const body = name === "id-less canonical" ? yDocToMarkdown(canonical) : originalBody;
@@ -931,6 +932,7 @@ it.skipIf(engine.missing).each([
     if (stopQuarantine) {
       await delivery?.stop(); delivery = undefined;
       const offlineStop = name === "offline stop";
+      const deferredResume=name==="deferred resume";
       const quarantineReason = name === "stale-binding quarantine" ? "stale-binding" : "delivery-conflict";
       await session.applyDecidedLocalUpdate(doc => {
         const scratch = new Y.Doc();
@@ -938,6 +940,12 @@ it.skipIf(engine.missing).each([
           patchFrontmatter(scratch, new Map([["Name", "Quarantined edit"]])); return Y.encodeStateAsUpdate(scratch, before);
         } finally {scratch.destroy();}
       }, undefined, {actorOriginId: "local-person", attribution: {actorKind: "human"}, idempotencyKey: "quarantine-edit"});
+      if (deferredResume) for (let index=0;index<32;index++) await session.applyDecidedLocalUpdate(doc => {
+        const scratch=new Y.Doc();
+        try {Y.applyUpdate(scratch,Y.encodeStateAsUpdate(doc));const before=Y.encodeStateVector(scratch);
+          patchFrontmatter(scratch,new Map([["Name",`Deferred edit ${index}`]]));return Y.encodeStateAsUpdate(scratch,before);
+        } finally {scratch.destroy();}
+      },undefined,{actorOriginId:"local-person",attribution:{actorKind:"human"},idempotencyKey:`deferred-${index}`});
       const db = new DatabaseSync(join(rootA, SECRET_FILE_STORE_RELATIVE_PATH), {readOnly: true});
       const outboxId = String(db.prepare("SELECT outbox_id FROM owner_ydoc_outboxes WHERE workspace_id=? AND object_id=? AND pending_bytes>0").get(workspaceId, document.binding.objectId)!.outbox_id);
       db.close();
@@ -946,7 +954,7 @@ it.skipIf(engine.missing).each([
         try {return await outbox.readPending(outboxId);} finally {outbox.dispose();}
       });
       expect((await readPending()).entries).not.toHaveLength(0);
-      if (!offlineStop) await source.sessions.run(source.workspace, async ({client, workspace}) => {
+      if (!offlineStop && !deferredResume) await source.sessions.run(source.workspace, async ({client, workspace}) => {
         const outbox = new OwnerYDocOutbox(client, workspace);
         try {await outbox.quarantine({outboxId, reason: quarantineReason});} finally {outbox.dispose();}
       });
@@ -966,11 +974,11 @@ it.skipIf(engine.missing).each([
           expect(response.ok).toBe(true); return await response.json() as R;
         }, relayShareErrorCopy: unexpected, relayShareDiscussionActivityPolls: createPresencePollRegistry(),
         listOwnerLiveStops: () => source.sessions.run(source.workspace, async ({workspace}) => source.nativeClient().ownerYDocStopList({id:0,workspace,deadlineMs:REAL_DAEMON_DEADLINE_MS})),
-        ownerLiveStop: (_workspace, action, stopPath, binding) => source.sessions.run(source.workspace, async ({workspace}) => {
+        ownerLiveStop: (_workspace, action, stopPath, binding, acceptedCursor) => source.sessions.run(source.workspace, async ({workspace}) => {
           const client = source.nativeClient(), request = {id: 0, workspace, deadlineMs: REAL_DAEMON_DEADLINE_MS};
           if (action === "clear") {await client.ownerYDocStopClear(request, stopPath);return;}
           if (action==="retired") {await client.ownerYDocStopRetired(request,binding!);return;}
-          return action === "request" ? client.ownerYDocStopRequest(request, stopPath) : client.ownerYDocRelease(request, binding as import("@dohc/live-session-contract").LiveObjectBinding);
+          return action === "request" ? client.ownerYDocStopRequest(request, stopPath) : client.ownerYDocRelease(request, binding as import("@dohc/live-session-contract").LiveObjectBinding, acceptedCursor!);
         }), sharesChanged: unexpected, reconcileReceivedShares: unexpected,
       });
       const stop = () => Promise.resolve(handlers.get(CHANNELS.stopOwnerLiveDocument)!({sender: {id: 1}}, {workspaceId, path}));
@@ -995,11 +1003,26 @@ it.skipIf(engine.missing).each([
             const response = await fetch(`${proxy.origin}/sync/${workspaceId}/live-host`, {method: "DELETE", signal,
               headers: {authorization: `Bearer ${relayConnection.token}`, "content-type": "application/json"},
               body: JSON.stringify({path: binding.currentPath, retire: true, restoreFenceGeneration: binding.restoreFenceGeneration})});
-            expect(await response.json()).toMatchObject({status: "retired"}); return response.ok;
+            const retired=await response.json() as {acceptedCursor:number};expect(retired).toMatchObject({status: "retired"}); return response.ok ? retired.acceptedCursor : null;
           },
         }));
       } else await stop();
       await expect.poll(async () => (await discovery()).length, {timeout: 60_000}).toBe(0);
+      if (deferredResume) {
+        expect((await readPending()).entries).toHaveLength(33);
+        await handlers.get(CHANNELS.resumeOwnerLiveDocument)!({sender:{id:1}},{workspaceId,path});
+        await expect.poll(async () => {
+          await pass(AbortSignal.timeout(60_000));
+          const db=new DatabaseSync(join(rootA,SECRET_FILE_STORE_RELATIVE_PATH),{readOnly:true});
+          try {return Number(db.prepare("SELECT COALESCE(SUM(pending_entry_count),0) AS count FROM owner_ydoc_outboxes WHERE object_id=?").get(document.binding.objectId)!.count);}
+          finally {db.close();}
+        },{timeout:120_000}).toBe(0);
+        await expect.poll(async () => {
+          await capture!.flush();await pushUntilDrained(relay);await peer!.capture.runRelaySync(page=>peer!.relay.pull(page));
+          return readFile(join(rootB,path),"utf8");
+        },{timeout:120_000}).toContain("Name: Deferred edit 31");
+        return;
+      }
       await expect(readPending()).rejects.toThrow("owner-outbox-not-found");
       expect(await readFile(join(rootA, path), "utf8")).toContain(offlineStop ? "Name: Offline while stopping" : "Name: Quarantined edit");
       const releasedMoment = (await capture.listMoments({limit: 100})).moments.find(moment => moment.path === path);

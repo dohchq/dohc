@@ -13,7 +13,7 @@ export async function withOwnerLiveStopTransition<T>(workspaceId: string, path: 
 export type OwnerLiveStop = Awaited<ReturnType<EngineClient["ownerYDocStopRequest"]>>;
 export async function reconcileOwnerLiveStops(options: {
   client: EngineClient; workspaceHandle: string; workspaceId: string; signal: AbortSignal;
-  retire(binding: OwnerStopRetirementTarget, signal: AbortSignal): Promise<boolean>;
+  retire(binding: OwnerStopRetirementTarget, signal: AbortSignal): Promise<number | null>;
   assertCurrent(): void;
   onError?(row: OwnerLiveStop, error: unknown): Promise<void> | void;
   onComplete?(row: OwnerLiveStop): void;
@@ -21,17 +21,19 @@ export async function reconcileOwnerLiveStops(options: {
   const request=() => ({id:0,workspace:options.workspaceHandle,deadlineMs:30_000});
   const rows=await options.client.ownerYDocStopList(request(),options.signal);
   for (const row of rows) {
+    if (!row.retirementOwed) continue;
     try {await withOwnerLiveStopTransition(options.workspaceId,row.document.currentPath,async () => {
     options.signal.throwIfAborted();options.assertCurrent();
     // Start may have cancelled this row while it waited for the document slot.
     const current=(await options.client.ownerYDocStopList(request(),options.signal)).find(stop => stop.document.objectId===row.document.objectId && stop.document.mainVersionId===row.document.mainVersionId);
-    if (!current) return;
+    if (!current?.retirementOwed) return;
     const stop=await options.client.ownerYDocStopRequest(request(),current.document,options.signal);
     if (!stop.retirementOwed) return;
-    if (!await options.retire(stop.binding ?? stop.document,options.signal)) return;
+    const acceptedCursor=await options.retire(stop.binding ?? stop.document,options.signal);
+    if (acceptedCursor===null) return;
     options.assertCurrent();
     try {
-      if (stop.binding) await options.client.ownerYDocRelease(request(),stop.binding,options.signal);
+      if (stop.binding) await options.client.ownerYDocRelease(request(),stop.binding,acceptedCursor,options.signal);
       else await options.client.ownerYDocStopRetired(request(),stop.document,options.signal);
     }
     catch (error) {

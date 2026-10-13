@@ -1101,7 +1101,13 @@ fn stop_after_move_keeps_the_binding_and_folds_into_the_same_object() {
     store
         .write_with(&NoFaults, |tx| {
             release::request_in_tx(tx, &key, 21)?;
-            release::release_in_tx(tx, &observed.binding, 22, |_, _, _, _, _| Ok(()))
+            release::release_in_tx(
+                tx,
+                &observed.binding,
+                observed.accepted_cursor,
+                22,
+                |_, _, _, _, _| Ok(()),
+            )
         })
         .unwrap();
     let text = store
@@ -1150,13 +1156,19 @@ fn stop_journals_only_the_credit_groups_own_update_bytes() {
     store
         .write_with(&NoFaults, |tx| {
             release::request_in_tx(tx, &key, 21)?;
-            release::release_in_tx(tx, &observed.binding, 22, |_, bytes, _, _, _| {
-                assert_eq!(
-                    bytes,
-                    crate::merge_updates(std::slice::from_ref(&unsent)).unwrap()
-                );
-                Ok(())
-            })
+            release::release_in_tx(
+                tx,
+                &observed.binding,
+                observed.accepted_cursor,
+                22,
+                |_, bytes, _, _, _| {
+                    assert_eq!(
+                        bytes,
+                        crate::merge_updates(std::slice::from_ref(&unsent)).unwrap()
+                    );
+                    Ok(())
+                },
+            )
         })
         .unwrap();
     let released = crate::load_persisted(&store, &key).unwrap().unwrap().doc;
@@ -1236,7 +1248,7 @@ fn stop_preserves_old_generation_work_and_start_can_enroll_again() {
                 21,
             )?;
             release::request_in_tx(tx, &key, 22)?;
-            release::release_in_tx(tx, &next, 23, |_, _, _, _, _| Ok(()))
+            release::release_in_tx(tx, &next, 0, 23, |_, _, _, _, _| Ok(()))
         })
         .unwrap();
     store

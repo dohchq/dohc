@@ -105,10 +105,10 @@ export function createServerOwnerConnection(options: {
           assertCurrent();requestSignal.throwIfAborted();
           if (!response.ok && response.status!==409) {await response.body?.cancel();throw new Error("Owner live retirement failed.");}
           const value=await readBoundedJson(response,16*1024,requestSignal);
-          if (response.status===409 && value && typeof value==="object" && "code" in value && ["restore-fenced","restore-in-progress"].includes(String(value.code))) return false;
+          if (response.status===409 && value && typeof value==="object" && "code" in value && ["restore-fenced","restore-in-progress"].includes(String(value.code))) return null;
           if (!response.ok) throw new Error("Owner live retirement failed.");
-          z.object({ok:z.literal(true),path:z.string().min(1),objectId:z.literal(binding.objectId),status:z.literal("retired")}).parse(value);
-          discovery.delete(workspace.workspaceId);return true;
+          const retired=z.object({ok:z.literal(true),path:z.string().min(1),objectId:z.literal(binding.objectId),status:z.literal("retired"),acceptedCursor:z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER)}).parse(value);
+          discovery.delete(workspace.workspaceId);return retired.acceptedCursor;
         },
         async documents(attempt) {
           assertCurrent();

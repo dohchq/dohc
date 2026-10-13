@@ -735,7 +735,7 @@ describe("server owner peer lifecycle", () => {
     const documents = vi.fn(async () => ({ok: true, documents: [{path: "working.md", status: "ready", document}]}));
     f.dependencies.serverOwnerDelivery = {prepare: async () => config, workspaceIds: () => ["owner"], hasRefusals: () => undefined,
       connect: async () => ({bearer: "token", accountId: "owner-account", relayUrl: "https://relay.test", signal: credentials.signal,
-        assertCurrent() {}, retire: async () => true, refusals: async () => {}, documents})};
+        assertCurrent() {}, retire: async () => 0, refusals: async () => {}, documents})};
     ownerDeliveryMock.pass.mockResolvedValue("acknowledged");
     vi.spyOn(console, "error").mockImplementation(() => {});
     try {
@@ -773,7 +773,7 @@ describe("server owner peer lifecycle", () => {
     f.dependencies.notifyOwnerDeliveryChanged = changed;
     f.dependencies.serverOwnerDelivery = {prepare: async () => config, workspaceIds: () => credentials.signal.aborted ? [] : ["owner"], hasRefusals: () => undefined,
       connect: async () => ({bearer: "token", accountId: "owner-account", relayUrl: "https://relay.test", signal: credentials.signal, assertCurrent() {},
-        retire: async () => true, refusals: async () => {},
+        retire: async () => 0, refusals: async () => {},
         documents: async () => ({ok: true, documents: [{path: "a.md", status, document},
           ...(outcome === "frozen" ? [{path: "b.md", status, document: {...document, binding: {...document.binding, objectId: "other", currentPath: "b.md"}}}] : [])]})})};
     ownerDeliveryMock.pass.mockResolvedValue(outcome);
@@ -814,7 +814,7 @@ describe("server owner peer lifecycle", () => {
     const documents = vi.fn(async () => ({ok: true, documents: [{path: "a.md", status: "ready", document}]}));
     f.dependencies.serverOwnerDelivery = {prepare: vi.fn(async () => config), workspaceIds: () => ["owner"], hasRefusals: () => undefined,
       connect: async () => ({bearer: "actual-token", accountId: "owner-account", relayUrl: "https://relay.test", signal: credentials.signal,
-        assertCurrent: () => credentials.signal.throwIfAborted(), documents, retire: async () => true, refusals: async () => {}})};
+        assertCurrent: () => credentials.signal.throwIfAborted(), documents, retire: async () => 0, refusals: async () => {}})};
     let passOptions!: Parameters<typeof import("./nativeOwnerDelivery")["runNativeOwnerDeliveryPass"]>[0];
     ownerDeliveryMock.pass.mockImplementation(async options => {passOptions = options; entered.resolve(); await settled.promise; options.assertCurrent(); return "empty";});
     try {

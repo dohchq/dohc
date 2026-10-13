@@ -541,8 +541,7 @@ export function LiveDocumentsDialog({
                 ) : null}
                 {row.deferredStop ? (
                   <p className="m-0 basis-full text-[12px] text-muted">
-                    {`Live editing stopped. ${row.deferredStop.unsentEdits} unsent edits remain on this computer.`}
-                    {" They are not in History. Resume live editing to try sending them. "}
+                    {row.deferredStop.unsentEdits===0 ? "Live editing stopped. Resume live editing to finish syncing. " : `Live editing stopped. ${row.deferredStop.unsentEdits} unsent ${row.deferredStop.unsentEdits===1 ? "edit remains" : "edits remain"} on this computer. Resume live editing to try sending ${row.deferredStop.unsentEdits===1 ? "it" : "them"}. `}
                     {row.deferredStop.editable ? "You can keep editing." : "Editing is paused."}
                   </p>
                 ) : null}

@@ -10,6 +10,7 @@ it("never retries a deferred local fold on later sync passes", async () => {
   const options={client,workspaceHandle:"handle",workspaceId:"workspace",signal:new AbortController().signal,assertCurrent() {},retire};
   await reconcileOwnerLiveStops(options);await reconcileOwnerLiveStops(options);
   expect(retire).not.toHaveBeenCalled();expect(client.ownerYDocRelease).not.toHaveBeenCalled();
+  expect(client.ownerYDocStopRequest).not.toHaveBeenCalled();
 });
 
 it("continues past a corrupt Stop and requests moved documents by their saved key", async () => {
@@ -23,7 +24,7 @@ it("continues past a corrupt Stop and requests moved documents by their saved ke
   const request = vi.fn(async (_request, target) => rows.find(row => typeof target==="string" ? row.binding.currentPath===target : row.binding.objectId === target.objectId)!);
   const client = {ownerYDocStopList: vi.fn(async () => rows), ownerYDocStopRequest: request, ownerYDocRelease: release} as unknown as EngineClient;
   await expect(reconcileOwnerLiveStops({client, workspaceHandle: "handle", workspaceId: "workspace", signal: new AbortController().signal,
-    assertCurrent() {}, retire: async () => true})).resolves.toBeUndefined();
+    assertCurrent() {}, retire: async () => 0})).resolves.toBeUndefined();
   expect(request.mock.calls[0]![1]).toEqual(rows[0]!.document);
   expect(release).toHaveBeenCalledTimes(2);
 });
@@ -33,21 +34,21 @@ it("retains a waiting Stop and retries with the engine's successor binding", asy
     currentPath: "a.md", selectorPaths: ["a.md"], restoreFenceGeneration: 7}, relayDatabaseNamespace: "relay", state: "requested"};
   const release = vi.fn(async () => ({...row, state: "released"}));
   const client = {ownerYDocStopList: vi.fn(async () => [withDocument(row)]), ownerYDocStopRequest: vi.fn(async () => withDocument(row)), ownerYDocRelease: release} as unknown as EngineClient;
-  const retire = vi.fn(async () => false);
+  const retire = vi.fn<() => Promise<number | null>>(async () => null);
   const options = {client, workspaceHandle: "handle", workspaceId: "workspace", signal: new AbortController().signal, assertCurrent() {}, retire};
   await reconcileOwnerLiveStops(options);
   expect(release).not.toHaveBeenCalled();
   row = {...row, binding: {...row.binding, restoreFenceGeneration: 8}};
-  retire.mockResolvedValueOnce(true);
+  retire.mockResolvedValueOnce(17);
   await reconcileOwnerLiveStops(options);
   expect(retire.mock.calls).toHaveLength(2);
-  expect(release).toHaveBeenCalledWith({id: 0, workspace: "handle", deadlineMs: 30_000}, row.binding, options.signal);
+  expect(release).toHaveBeenCalledWith({id: 0, workspace: "handle", deadlineMs: 30_000}, row.binding, 17, options.signal);
 });
 
 it("does not retire a Stop cancelled before its document transition runs", async () => {
   const row = {binding: {workspaceId: "workspace", mainVersionId: "main", objectId: "object", lineageClaimId: "a".repeat(64),
     currentPath: "a.md", selectorPaths: ["a.md"], restoreFenceGeneration: 7}, relayDatabaseNamespace: "relay", state: "requested"};
-  const retire = vi.fn(async () => true);
+  const retire = vi.fn(async () => 0);
   const client = {ownerYDocStopList: vi.fn().mockResolvedValueOnce([withDocument(row)]).mockResolvedValueOnce([])} as unknown as EngineClient;
   await reconcileOwnerLiveStops({client, workspaceHandle: "handle", workspaceId: "workspace", signal: new AbortController().signal, assertCurrent() {}, retire});
   expect(retire).not.toHaveBeenCalled();
@@ -59,7 +60,7 @@ it.each(["owner-stop-conflict", "owner-stop-restore-pending"])("keeps the reques
   const client = {ownerYDocStopList: vi.fn(async () => [withDocument(row)]), ownerYDocStopRequest: vi.fn(async () => withDocument(row)),
     ownerYDocRelease: vi.fn(async () => {throw new EngineRequestError(1, {code: "CONFLICT", message, retry: "immediate"});})} as unknown as EngineClient;
   await expect(reconcileOwnerLiveStops({client, workspaceHandle: "handle", workspaceId: "workspace", signal: new AbortController().signal,
-    assertCurrent() {}, retire: async () => true})).resolves.toBeUndefined();
+    assertCurrent() {}, retire: async () => 0})).resolves.toBeUndefined();
   expect(await client.ownerYDocStopList({id: 0, workspace: "handle", deadlineMs: 30_000})).toEqual([withDocument(row)]);
 });
 
@@ -71,12 +72,12 @@ it("retries an unenrolled offline Stop by document key and acknowledges retireme
   const ack = vi.fn(async () => {owed = false;});
   const client = {ownerYDocStopList: vi.fn(async () => owed ? [row] : []), ownerYDocStopRequest: request,
     ownerYDocStopRetired: ack, ownerYDocRelease: vi.fn()} as unknown as EngineClient;
-  const retire = vi.fn(async () => false);
+  const retire = vi.fn<() => Promise<number | null>>(async () => null);
   const options = {client, workspaceHandle: "handle", workspaceId: "workspace", signal: new AbortController().signal,
     assertCurrent() {}, retire};
   await reconcileOwnerLiveStops(options);
   expect(ack).not.toHaveBeenCalled();
-  retire.mockResolvedValue(true);
+  retire.mockResolvedValue(0);
   await reconcileOwnerLiveStops(options);
   await reconcileOwnerLiveStops(options);
   expect(request).toHaveBeenCalledWith({id: 0, workspace: "handle", deadlineMs: 30_000}, row.document, options.signal);

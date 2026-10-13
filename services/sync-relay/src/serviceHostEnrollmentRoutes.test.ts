@@ -67,7 +67,7 @@ it("discovers rich documents in folders, skips other content, and preserves a pa
   expect((await f.handle(f.request("POST", {shareId: scope.shareId}))).status).toBe(202);
   expect(f.storage.listServiceHostEnrollments().every(row => row.enabled && !row.ownerStop)).toBe(true);
   await f.handle(f.request("DELETE", {path: binding.currentPath}));
-  await f.handle(f.request("DELETE", {path: "docs/b.md", retire: true, restoreFenceGeneration: binding.restoreFenceGeneration}));
+  await f.handle(f.request("DELETE", {path: "docs/b.md", retire: true, restoreFenceGeneration: 0}));
   f.release("object-b");
   f.seed("docs/retry.md", "retry-object");
   expect((await f.handle(f.request("POST", {shareId: scope.shareId, retry: true}))).status).toBe(202);
@@ -140,9 +140,6 @@ it("clears derived capacity refusals when an owner frees space and retries enrol
   const read = async () => (await f.handle(f.request("GET", undefined, {}, "?refusals=1"))).json();
   expect(await read()).toMatchObject({refusals: [{shareId: "pending-share", code: "quota_exceeded"}], nextCursor: null});
   f.storage.setServiceHostEnrollmentEnabled({...f.input, enabled: false, retire: true, restoreFenceGeneration: binding.restoreFenceGeneration});
-  // The stopped document holds its place until the host releases it.
-  expect(await read()).toMatchObject({refusals: [{shareId: "pending-share", code: "quota_exceeded"}], nextCursor: null});
-  f.release(binding.objectId);
   expect(await read()).toEqual({ok: true, refusals: [], nextCursor: null});
   expect((await f.handle(f.request("POST", {shareId: "pending-share"}))).status).toBe(202);
   expect(f.storage.readServiceHostEnrollment(scope.workspaceId, "pending/a.md")).toMatchObject({enabled: true});
@@ -289,7 +286,7 @@ it("retires an owner document, lists it separately, and resumes its retained ide
   const f = await fixture(), first = f.storage.enrollServiceHostDocument(f.input);
   const bearer = deriveServiceHostBearer(first, {key, namespace});
   const stop = await f.handle(f.request("DELETE", {path: first.path, retire: true, restoreFenceGeneration: binding.restoreFenceGeneration}));
-  expect(await stop.json()).toEqual({ok: true, path: first.path, objectId:first.objectId, status: "retired"});
+  expect(await stop.json()).toEqual({ok: true, path: first.path, objectId:first.objectId, status: "retired", acceptedCursor: 0});
   expect(await (await f.handle(f.request())).json()).toEqual({ok: true, documents: []});
   discoverServiceHostDocuments(f.storage);
   expect(f.storage.listServiceHostEnrollments()).toEqual([]);
@@ -327,7 +324,7 @@ it("hosts a document retired by revocation again for a new Edit share, but leave
   await f.handle(f.request("DELETE", {path: "docs/paused.md"}));
   await f.handle(f.request("DELETE", {path: "docs/stopped.md", retire: true}));
   expect(f.storage.revokeShareGrant({shareId: scope.shareId, grantId: scope.grantId, revokedAtMs: 30}).ok).toBe(true);
-  for (const objectId of [binding.objectId, "paused-object", "stopped-object"]) expect(f.release(objectId)).toMatchObject({enabled: false, retired: true});
+  for (const objectId of [binding.objectId, "paused-object"]) expect(f.release(objectId)).toMatchObject({enabled: false, retired: true});
   discoverServiceHostDocuments(f.storage);
   expect(f.storage.listServiceHostEnrollments()).toEqual([]);
   // A new Edit share covering the folder; nobody presses Resume.
@@ -360,7 +357,7 @@ it("retires an unenrolled desktop without a generation and resolves a moved targ
   f.raw.prepare("UPDATE sync_relay_service_host_enrollments SET path='docs/moved.md'").run();
   const response=await f.handle(f.request("DELETE",{path:binding.currentPath,objectId:binding.objectId,retire:true}));
   expect(response.status).toBe(200);
-  expect(await response.json()).toEqual({ok:true,path:"docs/moved.md",objectId:binding.objectId,status:"retired"});
+  expect(await response.json()).toEqual({ok:true,path:"docs/moved.md",objectId:binding.objectId,status:"retired",acceptedCursor:0});
   expect((await f.handle(f.request("DELETE",{path:binding.currentPath,objectId:"wrong-object",retire:true}))).status).toBe(404);
 });
 

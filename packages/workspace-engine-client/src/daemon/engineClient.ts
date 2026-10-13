@@ -787,8 +787,9 @@ export class EngineClient implements EngineTransport {
     if (rows.length !== 1 || (typeof target !== "string" && (rows[0]!.document.objectId !== target.objectId || rows[0]!.document.mainVersionId !== target.mainVersionId))) throw new TypeError("Invalid Stop response.");
     return rows[0]!;
   }
-  async ownerYDocRelease(request: OwnerYDocDeliveryRequest, binding: OwnerYDocDeliveryTarget["binding"], signal?: AbortSignal) {
-    const rows = await this.ownerLiveStop(request, "release", {binding}, signal);
+  async ownerYDocRelease(request: OwnerYDocDeliveryRequest, binding: OwnerYDocDeliveryTarget["binding"], acceptedCursor: number, signal?: AbortSignal) {
+    if (!Number.isSafeInteger(acceptedCursor) || acceptedCursor < 0) throw new TypeError("Invalid retirement cursor.");
+    const rows = await this.ownerLiveStop(request, "release", {binding,acceptedCursor}, signal);
     if (rows.length !== 1 || rows[0]!.state !== "released" || JSON.stringify(rows[0]!.binding) !== JSON.stringify(parseLiveObjectBinding(binding))) throw new TypeError("Invalid release response.");
     return rows[0]!;
   }

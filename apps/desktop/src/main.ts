@@ -5980,13 +5980,13 @@ function registerIpcHandlers(): void {
       if (!(client instanceof EngineClient)) throw new Error("dohc could not read live editing. Restart dohc and try again.");
       return client.ownerYDocStopList({id:0,workspace:session.workspace,deadlineMs:30_000});
     }),
-    ownerLiveStop: async (workspace,action,path,binding) => {
+    ownerLiveStop: async (workspace,action,path,binding,acceptedCursor) => {
       const result=await requireEngineSessions().run(workspace,async session => {
         const client=desktopEngine.daemon?.currentClient();
         if (!(client instanceof EngineClient)) throw new Error("dohc could not change live editing. Restart dohc and try again.");
         const request={id:0,workspace:session.workspace,deadlineMs:30_000};
         if (action==="request") return client.ownerYDocStopRequest(request,path);
-        if (action==="release" && binding && "lineageClaimId" in binding) return client.ownerYDocRelease(request,binding);
+        if (action==="release" && binding && "lineageClaimId" in binding) return client.ownerYDocRelease(request,binding,acceptedCursor!);
         if (action==="retired") {await client.ownerYDocStopRetired(request,binding!);return undefined;}
         await client.ownerYDocStopClear(request,path);return undefined;
       });

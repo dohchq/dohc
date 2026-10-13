@@ -80,6 +80,7 @@ export interface ServiceHostEnrollment {
   readonly retired: boolean;
   readonly createdAtMs: number;
   readonly updatedAtMs: number;
+  readonly acceptedCursor?: number;
 }
 export interface EnrollServiceHostDocumentInput {
   workspaceId: string; path: string; shareId: string; ownerUserId: string; nowMs: number; guard(): void;
@@ -320,6 +321,7 @@ export function setServiceHostEnrollmentEnabled(storage: StorageContext, input: 
     const value = input.objectId === undefined ? undefined : storage.db.prepare(`SELECT * FROM ${SERVICE_HOST_ENROLLMENTS} WHERE workspace_id=? AND object_id=?`).get(workspaceId,parseLiveUpdateIdentifier(input.objectId,"object ID"));
     const current = input.objectId === undefined ? read(storage, workspaceId, path) : value ? row(value) : null;
     if (!current || current.ownerUserId !== input.ownerUserId || !storage.workspaceIsOwnedBy(workspaceId, input.ownerUserId)) return null;
+    let acceptedCursor: number | undefined;
     if (input.retire) {
       if (storage.db.prepare(`SELECT 1 FROM ${LIVE_RESTORE_OPERATIONS} WHERE workspace_id=? AND main_version_id='main' AND object_id=? AND phase<>'resumed'`)
         .get(workspaceId, current.objectId)) throw relayError("restore-in-progress", "Stop live editing is waiting. You can keep editing.");
@@ -328,6 +330,9 @@ export function setServiceHostEnrollmentEnabled(storage: StorageContext, input: 
       const generation=document?.restore_fence_generation ?? 0;
       if (typeof generation !== "number" || !Number.isSafeInteger(generation)) throw new Error("Invalid document restore generation.");
       if (input.restoreFenceGeneration !== undefined && generation !== input.restoreFenceGeneration) throw new ServiceHostRetirementConflict(generation);
+      const high = storage.db.prepare("SELECT MAX(journal_cursor) AS cursor FROM sync_relay_live_update_journal WHERE workspace_id=? AND main_version_id='main' AND object_id=? AND lineage_claim_id=(SELECT lineage_claim_id FROM sync_relay_live_documents WHERE workspace_id=? AND main_version_id='main' AND object_id=? AND lineage_state='current')")
+        .get(workspaceId,current.objectId,workspaceId,current.objectId);
+      acceptedCursor = timestamp(high?.cursor ?? 0);
     }
     if (input.enabled) {
       assertCurrent(storage, current, input.ownerUserId);
@@ -340,7 +345,7 @@ export function setServiceHostEnrollmentEnabled(storage: StorageContext, input: 
     const retired = !enabled && (current.retired || ownerStop === "retire");
     storage.db.prepare(`UPDATE ${SERVICE_HOST_ENROLLMENTS} SET owner_stop=?,enabled=?,retired=?,updated_at_ms=? WHERE workspace_id=? AND object_id=?`)
       .run(ownerStop, Number(enabled), Number(retired), Math.max(nowMs, current.updatedAtMs), workspaceId, current.objectId);
-    return read(storage, workspaceId, path);
+    return {...read(storage, workspaceId, current.path)!, ...(acceptedCursor === undefined ? {} : {acceptedCursor})};
   });
 }
 

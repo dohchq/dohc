@@ -129,7 +129,7 @@ export function createServiceHostEnrollmentRoutes(options: {
           ...(input.retire === true ? {retire: true, ...(input.objectId === undefined ? {} : {objectId: input.objectId as string}),
             ...(input.restoreFenceGeneration === undefined ? {} : {restoreFenceGeneration: Number(input.restoreFenceGeneration)})} : {}), nowMs: Date.now(), guard});
         if (!row) throw notFound();
-        host.reconcile(); return response({ok: true, ...(input.retire === true ? {path: row.path, objectId: row.objectId, status: "retired"} : state(row))});
+        host.reconcile(); return response({ok: true, ...(input.retire === true ? {path: row.path, objectId: row.objectId, status: "retired", acceptedCursor: row.acceptedCursor} : state(row))});
       }
       if (Object.keys(input).some(key => !["path", "shareId", "retry"].includes(key)) || (input.shareId !== undefined && typeof input.shareId !== "string") ||
         (input.path !== undefined && typeof input.path !== "string") || (input.retry !== undefined && typeof input.retry !== "boolean") ||

@@ -563,9 +563,14 @@ impl EngineService {
             path: Option<String>,
             binding: Option<dohc_engine_collab::LiveObjectBinding>,
             document: Option<dohc_engine_collab::owner_outbox::release::OwnerStopDocument>,
+            accepted_cursor: Option<i64>,
         }
         let params: Params = parse(params)?;
         if (action == "release") != params.binding.is_some()
+            || (action == "release") != params.accepted_cursor.is_some()
+            || params
+                .accepted_cursor
+                .is_some_and(|cursor| !(0..=9_007_199_254_740_991).contains(&cursor))
             || (matches!(action, "request" | "clear" | "retired"))
                 != (params.path.is_some() || params.document.is_some())
             || (params.path.is_some() && params.document.is_some())
@@ -598,6 +603,7 @@ impl EngineService {
                 params.path,
                 params.binding,
                 params.document,
+                params.accepted_cursor,
                 action.into(),
                 now_ms()?,
                 Arc::new(NoFaults),

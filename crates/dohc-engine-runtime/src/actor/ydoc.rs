@@ -186,6 +186,7 @@ impl ActorHandle {
         path: Option<String>,
         binding: Option<dohc_engine_collab::LiveObjectBinding>,
         document: Option<dohc_engine_collab::owner_outbox::release::OwnerStopDocument>,
+        accepted_cursor: Option<i64>,
         action: String,
         now_ms: i64,
         faults: Arc<dyn FaultInjector>,
@@ -219,7 +220,7 @@ impl ActorHandle {
                     let b=binding.as_ref().ok_or(OwnerOutboxError::StopConflict)?;
                     let path:Option<String>=tx.query_row("SELECT path FROM snapshots WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",params![workspace,key.version_id,key.object_id],|r|r.get(0)).optional().map_err(|_|OwnerOutboxError::Corrupt)?;
                     let path=path.as_deref().unwrap_or(&b.current_path);
-                    release::release_in_tx(tx,b,now_ms,|tx,update,actor,attribution,outcome| {
+                    release::release_in_tx(tx,b,accepted_cursor.ok_or(OwnerOutboxError::StopConflict)?,now_ms,|tx,update,actor,attribution,outcome| {
                         journal_recovery_append_in_tx(tx,&key,path,ContentKind::Richdoc,update,actor,attribution,outcome,now_ms).map(|_|())
                     }).map(|row|vec![row])
                 },

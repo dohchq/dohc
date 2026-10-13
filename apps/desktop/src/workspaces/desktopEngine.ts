@@ -37,7 +37,7 @@ export interface ServerOwnerDelivery {
     assertCurrent(): void;
     refusals(attempt: AbortSignal): Promise<void>;
     documents(signal: AbortSignal): Promise<unknown>;
-    retire(binding: OwnerStopRetirementTarget, signal: AbortSignal): Promise<boolean>;
+    retire(binding: OwnerStopRetirementTarget, signal: AbortSignal): Promise<number | null>;
   } | null>;
 }
 export type OwnerLiveDeliveryStatus = "preparing" | "active" | "retrying";

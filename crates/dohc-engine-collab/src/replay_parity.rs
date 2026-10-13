@@ -1114,16 +1114,6 @@ pub(crate) fn replay_validated_batch(
         if let Some(frontier) = &frontier {
             debug_assert_eq!(frontier.approx_bytes, frontier.recompute_approx_bytes());
         }
-        let fresh = Ydoc::wire();
-        fresh.apply(base_bytes)?;
-        for bytes in updates {
-            fresh.apply(bytes)?;
-        }
-        if fresh.encode_full_state() != doc.encode_full_state() {
-            return Err(CollabError::Corrupt {
-                reason: "burst replay differs from fresh replay".into(),
-            });
-        }
     }
     Ok(ReplayBatch { doc, outcomes })
 }
@@ -1236,15 +1226,15 @@ fn validate_replay_parity_contained(
     }));
     match outcome {
         Ok(result) => result,
-        Err(payload) => {
+        Err(_payload) => {
             // FR2-VALID is a debug/test oracle over trusted cache state. Keep
             // its failure loud while still containing every yrs/input panic.
             #[cfg(any(test, debug_assertions))]
-            if payload
+            if _payload
                 .downcast_ref::<&'static str>()
                 .is_some_and(|message| message.starts_with("FR2-VALID"))
             {
-                std::panic::resume_unwind(payload);
+                std::panic::resume_unwind(_payload);
             }
             Err(CollabError::ReplayParityViolation {
                 reason: "replay validation failed to complete; rejected fail-closed".to_owned(),

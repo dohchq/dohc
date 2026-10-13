@@ -207,7 +207,7 @@ pub fn list_requested_in(
     conn: &Connection,
     workspace: &str,
 ) -> Result<Vec<OwnerLiveStop>, OwnerOutboxError> {
-    let mut stmt=conn.prepare("SELECT main_version_id,object_id FROM owner_live_stops WHERE workspace_id=?1 AND (state='requested' OR json_extract(binding_json,'$.retirementOwed')=1 OR json_extract(binding_json,'$.deferred') IS NOT NULL) ORDER BY main_version_id,object_id LIMIT 64").map_err(read_sql)?;
+    let mut stmt=conn.prepare("SELECT main_version_id,object_id FROM owner_live_stops WHERE workspace_id=?1 AND (state='requested' OR json_extract(binding_json,'$.retirementOwed')=1 OR json_extract(binding_json,'$.deferred') IS NOT NULL) ORDER BY json_extract(binding_json,'$.retirementOwed') DESC,main_version_id,object_id LIMIT 64").map_err(read_sql)?;
     let keys = stmt
         .query_map([workspace], |r| {
             Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
@@ -228,6 +228,7 @@ pub fn list_requested_in(
 pub fn release_in_tx(
     tx: &rusqlite::Transaction<'_>,
     binding: &LiveObjectBinding,
+    accepted_cursor: i64,
     now_ms: i64,
     mut post_append: impl FnMut(
         &rusqlite::Transaction<'_>,
@@ -255,6 +256,12 @@ pub fn release_in_tx(
         })?
         .ok_or(OwnerOutboxError::StopConflict)?;
     require_not_host_in(tx, &key)?;
+    // Unbinding would strand even a ready settlement: its replay joins this
+    // binding. Let the delivery pass apply it before retrying Stop.
+    let held: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM owner_pending_settlements WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND lineage_claim_id=?4 AND relay_namespace=?5 AND applied=0)", params![binding.workspace_id,binding.main_version_id,binding.object_id,binding.lineage_claim_id,observed.relay_database_namespace], |r| r.get(0)).map_err(read_sql)?;
+    if held {
+        return Err(OwnerOutboxError::StopConflict);
+    }
     crate::live_update_application::require_restore_open(tx, &key)
         .map_err(|_| OwnerOutboxError::Corrupt)?;
     let outboxes = {
@@ -305,7 +312,10 @@ pub fn release_in_tx(
             .ok_or(OwnerOutboxError::Corrupt)?;
         bytes = bytes.checked_add(size).ok_or(OwnerOutboxError::Corrupt)?;
     }
-    if entries > MAX_RELEASE_ENTRIES || bytes > MAX_RELEASE_BYTES {
+    if observed.accepted_cursor < accepted_cursor
+        || entries > MAX_RELEASE_ENTRIES
+        || bytes > MAX_RELEASE_BYTES
+    {
         stop.state = "released".into();
         stop.retirement_owed = false;
         stop.deferred = Some(deferred_in(tx, binding)?);
