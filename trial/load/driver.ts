@@ -240,7 +240,7 @@ async function edit(state: State, sessions: number, ratePerSecond: number, secon
         const check = () => {
           const status = session.state().status;
           if (status === "live") { unsubscribe(); resolve(); }
-          else if (!["authorizing", "connecting", "syncing"].includes(status)) { unsubscribe(); reject(new Error(`Session ${status}`)); }
+          else if (!["authorizing", "connecting", "syncing"].includes(status)) { unsubscribe(); reject(new Error(`Session ${status} (${session.state().reason})`)); }
         };
         const unsubscribe = session.subscribe(check);
         check();
@@ -257,7 +257,7 @@ async function edit(state: State, sessions: number, ratePerSecond: number, secon
           const check = () => {
             const current = session.state();
             if (current.status === "live" && current.pendingUpdates === 0) { unsubscribe(); resolve(); }
-            else if (!["live", "authorizing", "connecting", "syncing"].includes(current.status)) { unsubscribe(); reject(new Error(`Session ${current.status}`)); }
+            else if (!["live", "authorizing", "connecting", "syncing"].includes(current.status)) { unsubscribe(); reject(new Error(`Session ${current.status} (${current.reason})`)); }
           };
           const unsubscribe = session.subscribe(check);
           check();

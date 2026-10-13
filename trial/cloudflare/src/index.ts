@@ -9,6 +9,7 @@ interface Env {
   SLEEP_AFTER: string;
   // "single": one cell serves everything. "per-workspace": workspace traffic goes to its own container.
   CELL_SHAPE: string;
+  HOME_CELL: string;
   DOHC_PUBLIC_ORIGIN: string;
   TRIAL_KEY: string;
   POSTGRES_URL: string;
@@ -223,7 +224,7 @@ export default {
     if (!allowed) return new Response("This trial server needs its key.", { status: 403 });
     // Durable Objects default to the first caller's region; pin them next to their EU containers.
     const cells = env.CELL.jurisdiction("eu"), workspaces = env.WORKSPACE.jurisdiction("eu");
-    const home = getContainer(cells, "cell-1");
+    const home = getContainer(cells, env.HOME_CELL);
     // Trial controls talk to a Durable Object without waking its container.
     const control = /^\/__trial\/control\/(stop|kill|state|reset)(?:\/([0-9a-f-]{36}))?$/.exec(url.pathname);
     if (control && request.method === "POST") {
@@ -236,6 +237,10 @@ export default {
     const remaining = withoutTrialCookie(headers.get("cookie") ?? "");
     if (remaining) headers.set("cookie", remaining); else headers.delete("cookie");
     headers.set("x-forwarded-for", request.headers.get("cf-connecting-ip") ?? "");
+    const workspaceStats = /^\/__trial\/ws\/([0-9a-f-]{36})(\/stats.*)$/.exec(url.pathname);
+    if (workspaceStats) {
+      return getContainer(workspaces, workspaceStats[1]!).fetch(new Request(new URL(`/__trial${workspaceStats[2]}${url.search}`, url), { headers }));
+    }
     if (env.CELL_SHAPE !== "per-workspace") return home.fetch(new Request(request, { headers }));
 
     const body = request.method === "POST" && url.pathname.startsWith("/sync/") ? await request.text() : undefined;

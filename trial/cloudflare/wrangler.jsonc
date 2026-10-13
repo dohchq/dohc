@@ -32,8 +32,9 @@
     "WorkspaceCell": { "type": "durable-object", "storage": "sqlite" }
   },
   "vars": {
-    "SLEEP_AFTER": "10m",
-    "CELL_SHAPE": "single",
+    "SLEEP_AFTER": "2m",
+    "CELL_SHAPE": "per-workspace",
+    "HOME_CELL": "home-2",
     "DOHC_PUBLIC_ORIGIN": "https://dohc-cloudflare-trial.dohc.workers.dev"
   }
 }
