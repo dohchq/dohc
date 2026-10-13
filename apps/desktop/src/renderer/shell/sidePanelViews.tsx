@@ -1,3 +1,4 @@
+import { parseTab } from "../workbench/workbenchState";
 import { Maximize2, RefreshCw } from "lucide-react";
 import { Suspense, lazy, type ReactNode } from "react";
 import type { CustomizePart } from "../settings/customize";
@@ -8,7 +9,7 @@ import { SkeletonRows, SkeletonSlot } from "../ui/SkeletonRows";
 // missing. The view carries no dependency the shell does not already load.
 import { SearchView } from "../workbench/SearchView";
 import { VIEW_IDENTITY, type ViewIdentity } from "../workbench/viewIdentity";
-import { isChatsTabPath, type ViewId } from "../workbench/workbenchState";
+import { type ViewId } from "../workbench/workbenchState";
 import { chatsOffCopy } from "./capabilityOffCopy";
 import { LazyChatsView, LazyGraphView } from "./lazyViews";
 import type { SidePanelContext } from "./ShellSidePanel";
@@ -59,7 +60,7 @@ export const SIDE_PANEL_VIEWS: Readonly<Record<ViewId, SidePanelView>> = {
     ...VIEW_IDENTITY.chats,
     customize: "chats",
     actions: (context) =>
-      context.captureAvailable && !isChatsTabPath(context.focusedTabPath) ? (
+      context.captureAvailable && !(parseTab(context.focusedTabPath)?.kind === "chat") ? (
         <HeaderButton testId="chats-open-tab" label="Open chats in tab" onClick={context.openChatsTab}>
           {openInTabIcon}
         </HeaderButton>

@@ -1,4 +1,4 @@
-import { isVirtualTabPath } from "./renderer/workbench/workbenchState";
+import { parseTab, TAB_KINDS } from "./renderer/workbench/workbenchState";
 
 // Shared selector values for renderer producers and desktop e2e readers.
 export const desktopPins = {
@@ -23,7 +23,7 @@ function editorTabSelector(path: string, virtual: boolean): string {
 }
 
 export function editorTabTestId(path: string): string {
-  return editorTabSelector(path, isVirtualTabPath(path));
+  return editorTabSelector(path, TAB_KINDS[parseTab(path).kind].virtual);
 }
 
 // Prefix readers cannot classify incomplete identities such as a channel without its ID.
