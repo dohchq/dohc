@@ -92,7 +92,7 @@ function Snapshot(props: { workspaceId?: string; listing: GoToListing; committed
 }
 it("prepares only in yielding tasks outside frames and starts no source reads", () => {
   const queue = taskQueue();
-  const source = snapshot("file", 1);
+  const source = snapshot("file", 2_000);
   const view = render(<Snapshot listing={source} />);
   expect(view.container.textContent).toBe("preparing");
   expect(queue.tasks.size).toBe(1);
@@ -100,7 +100,7 @@ it("prepares only in yielding tasks outside frames and starts no source reads", 
   expect(queue.tasks.size).toBe(1);
   expect(view.container.textContent).toBe("preparing");
   queue.drain();
-  expect(view.container.textContent).toBe("workspace:file0.md");
+  expect(view.container.textContent).toContain("workspace:file0.md");
   view.rerender(<Snapshot listing={source} />);
   expect(queue.tasks.size).toBe(0);
   expect(queue.frame).not.toHaveBeenCalled();
@@ -108,7 +108,7 @@ it("prepares only in yielding tasks outside frames and starts no source reads", 
 });
 it("supersedes in-flight slices with the newer source", () => {
   const queue = taskQueue();
-  const view = render(<Snapshot listing={snapshot("old")} />);
+  const view = render(<Snapshot listing={snapshot("old", 2_000)} />);
   queue.one();
   const late = [...queue.tasks.values()];
   view.rerender(<Snapshot listing={snapshot("new", 1)} />);
@@ -118,7 +118,7 @@ it("supersedes in-flight slices with the newer source", () => {
 });
 it("cannot show A's names after switching the same shell to B during preparation", () => {
   const queue = taskQueue();
-  const sourceA = snapshot("A");
+  const sourceA = snapshot("A", 2_000);
   const sourceB = snapshot("B", 1);
   const view = render(<Snapshot workspaceId="A" listing={sourceA} />);
   queue.one();
@@ -158,4 +158,50 @@ it("cancels the task on unmount even if its callback arrives late", () => {
   expect(queue.tasks.size).toBe(0);
   late.forEach(callback => act(callback));
   expect(step).not.toHaveBeenCalled();
+});
+
+it("withholds a newly hidden path in the render before effects", () => {
+  const queue = taskQueue();
+  const answers: string[][] = [];
+  function QuerySnapshot(props: { listing: GoToListing }) {
+    const index = useGoToIndex("workspace", { listing: props.listing }, context);
+    const paths = index.query("budget").map(row => row.path);
+    answers.push(paths);
+    return <output>{paths.join(",")}</output>;
+  }
+  const first = snapshot("file", 2_000);
+  first.files = [{ path: "private/budget.md", kind: "file" }, ...first.files];
+  const view = render(<QuerySnapshot listing={first} />);
+  queue.drain();
+  expect(view.container.textContent).toBe("private/budget.md");
+  answers.length = 0;
+  view.rerender(<QuerySnapshot listing={{ ...first, visibility: { status: "ready", hiddenHostPaths: new Set(["private/budget.md"]) } }} />);
+  expect(answers.length).toBeGreaterThan(0);
+  expect(answers.every(paths => paths.length === 0)).toBe(true);
+  queue.drain();
+  expect(view.container.textContent).toBe("");
+});
+it("keeps results visible for a rename and equal new context arrays", () => {
+  const queue = taskQueue();
+  const answers: string[][] = [];
+  function QuerySnapshot(props: { listing: GoToListing; ranking: typeof context }) {
+    const index = useGoToIndex("workspace", { listing: props.listing }, props.ranking);
+    const paths = index.query("file").map(row => row.path);
+    answers.push(paths);
+    return <output>{paths.join(",")}</output>;
+  }
+  const first = snapshot("file", 2_000);
+  const view = render(<QuerySnapshot listing={first} ranking={context} />);
+  queue.drain();
+  answers.length = 0;
+  view.rerender(<QuerySnapshot listing={first} ranking={{ pinned: [], recent: [] }} />);
+  expect(queue.tasks.size).toBe(0);
+  expect(answers.every(paths => paths.length > 0)).toBe(true);
+  answers.length = 0;
+  const changed = { ...first, files: first.files.map((file, n) => n === 123 ? { ...file, path: "renamed.md" } : file) };
+  view.rerender(<QuerySnapshot listing={changed} ranking={context} />);
+  expect(answers.every(paths => paths.length > 0)).toBe(true);
+  queue.one();
+  expect(view.container.textContent).not.toBe("");
+  queue.drain();
 });

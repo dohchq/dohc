@@ -206,36 +206,42 @@ export interface PreparedGoToRow extends PreparedQuickOpenPath {
   listingGeneration: number;
 }
 
-function* applyGoToPathState(row: PreparedGoToRow, listing: GoToListing): Generator<void> {
+function* applyGoToPathState(row: PreparedGoToRow, listing: GoToListing, work: { operations: number }): Generator<void> {
   let share: GoToListing["receivedRoots"][number] | undefined;
   for (const root of listing.receivedRoots) {
     if (root.path === "" || row.path === root.path || row.path.startsWith(root.path + "/")) { share = root; break; }
-    yield;
+    if (++work.operations % GO_TO_CHUNK_SIZE === 0) yield;
   }
   row.ended = share?.ended ?? false;
   row.visible = share ? !share.damaged : listing.visibility.status === "ready" &&
     !listing.visibility.hiddenHostPaths.has(row.path);
 }
 
-function* samePathVerdicts(a: GoToListing, b: GoToListing | undefined): Generator<void, boolean> {
-  if (!b || a.visibility.status !== b.visibility.status) return false;
-  const hidden = a.visibility.hiddenHostPaths, previousHidden = b.visibility.hiddenHostPaths;
-  if (hidden !== previousHidden) {
-    if (hidden.size !== previousHidden.size) return false;
-    for (const path of hidden) {
-      if (!previousHidden.has(path)) return false;
-      yield;
-    }
+function samePathVerdicts(a: GoToListing | undefined, b: GoToListing | undefined): boolean {
+  if (a === b) return true;
+  if (!a || !b || a.visibility.status !== b.visibility.status) return false;
+  const hidden = a.visibility.hiddenHostPaths, previous = b.visibility.hiddenHostPaths;
+  if (hidden !== previous) {
+    if (hidden.size !== previous.size) return false;
+    for (const path of hidden) if (!previous.has(path)) return false;
   }
-  if (a.receivedRoots !== b.receivedRoots) {
-    if (a.receivedRoots.length !== b.receivedRoots.length) return false;
-    for (let i = 0; i < a.receivedRoots.length; i++) {
-      const root = a.receivedRoots[i], previous = b.receivedRoots[i];
-      if (root.path !== previous.path || root.ended !== previous.ended || root.damaged !== previous.damaged) return false;
-      yield;
-    }
-  }
+  return sameEntries(a.receivedRoots, b.receivedRoots, (x, y) => x.path === y.path && x.ended === y.ended && x.damaged === y.damaged);
+}
+function sameEntries<T>(a: readonly T[] | undefined, b: readonly T[] | undefined, equal: (a: T, b: T) => boolean): boolean {
+  if (a === b) return true;
+  if (!a || !b || a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i] && !equal(a[i], b[i])) return false;
   return true;
+}
+const samePaths = (a: readonly string[] | undefined, b: readonly string[] | undefined) => sameEntries(a, b, (x, y) => x === y);
+function sameSources(a: GoToSources, b: GoToSources): boolean {
+  return samePathVerdicts(a.listing, b.listing) &&
+    sameEntries(a.listing?.files, b.listing?.files, (x, y) => x.path === y.path && x.kind === y.kind && x.icon === y.icon) &&
+    samePaths(a.listing?.folders, b.listing?.folders) &&
+    sameEntries(a.collections, b.collections, (x, y) => x.path === y.path && x.objectId === y.objectId) &&
+    sameEntries(a.apps, b.apps, (x, y) => x.root === y.root && x.title === y.title) &&
+    sameEntries(a.versions, b.versions, (x, y) => x.id === y.id && x.name === y.name) &&
+    sameEntries(a.groups, b.groups, (x, y) => x.id === y.id && x.name === y.name && x.kind === y.kind);
 }
 
 // A collision can admit extra work, but cannot reject a subsequence match.
@@ -243,8 +249,13 @@ function characterMasks(text: string): [number, number] {
   let low = 0, high = 0;
   for (let i = 0; i < text.length; i++) {
     const code = text.charCodeAt(i);
-    const separator = "/-_. ".indexOf(text[i]);
-    const bit = code >= 97 && code <= 122 ? code - 97 : code >= 48 && code <= 57 ? code - 48 + 26 : separator >= 0 ? 36 + separator : 41 + code % 23;
+    let bit: number;
+    if (code >= 97 && code <= 122) bit = code - 97;
+    else if (code >= 48 && code <= 57) bit = code - 48 + 26;
+    else {
+      const separator = "/-_. ".indexOf(text[i]);
+      bit = separator >= 0 ? 36 + separator : 41 + code % 23;
+    }
     if (bit < 32) low |= 1 << bit;
     else high |= 1 << (bit - 32);
   }
@@ -276,7 +287,7 @@ function preparedGoToTier(query: string, row: PreparedGoToRow, canPrefix: boolea
 }
 
 function compareGoToOrder(a: PreparedGoToRow, b: PreparedGoToRow): number {
-  return a.recentRank - b.recentRank || a.path.length - b.path.length ||
+  return a.path.length - b.path.length ||
     (a.path < b.path ? -1 : a.path > b.path ? 1 : 0) || a.sourceIndex - b.sourceIndex;
 }
 
@@ -291,6 +302,7 @@ const EMPTY_CONTEXT: QuickOpenContext = { pinned: [], recent: [] };
 // source owners keep their own newest-answer-wins guards and refresh triggers.
 // No I/O, identity resolution, relay sync, or source preparation happens in query.
 export const GO_TO_SLICE_BUDGET_MS = 4;
+const GO_TO_CHUNK_SIZE = 128;
 export interface GoToPreparation {
   // Returns true when this run is complete or has been superseded.
   step(now?: () => number): boolean;
@@ -301,12 +313,13 @@ export class GoToIndex {
   readonly workspaceId: string;
   revision = 0;
   preparing = false;
+  private withholding = false;
   lastPreparationCount = 0;
   lastScanCount = 0;
   private completeRows: readonly PreparedGoToRow[] = [];
   private orderedRows: readonly PreparedGoToRow[] = [];
   private queryMetadata = new Int32Array(0);
-  get rows(): readonly PreparedGoToRow[] { return this.preparing ? [] : this.completeRows; }
+  get rows(): readonly PreparedGoToRow[] { return this.withholding ? [] : this.completeRows; }
   private files: readonly PreparedGoToRow[] = [];
   private listingGeneration = 0;
   private readonly subsets = new Map<GoToKind, Map<string, PreparedGoToRow>>();
@@ -320,29 +333,36 @@ export class GoToIndex {
 
   constructor(workspaceId: string) { this.workspaceId = workspaceId; }
 
-  // Starting a run does no row work. Only background tasks call step.
-  update(sources: GoToSources, context: QuickOpenContext = this.requestedContext): GoToPreparation {
-    this.active?.cancel();
-    this.requestedSources = {
+  // Equal content starts no run. Only background tasks prepare rows.
+  update(sources: GoToSources, context: QuickOpenContext = this.requestedContext): GoToPreparation | null {
+    const nextSources: GoToSources = {
       listing: sources.listing ?? this.requestedSources.listing,
       collections: sources.collections ?? this.requestedSources.collections,
       apps: sources.apps ?? this.requestedSources.apps,
       versions: sources.versions ?? this.requestedSources.versions,
       groups: sources.groups ?? this.requestedSources.groups,
     };
+    if (!this.interrupted && sameSources(nextSources, this.requestedSources) &&
+      samePaths(context.pinned, this.requestedContext.pinned) && samePaths(context.recent, this.requestedContext.recent)) {
+      this.lastPreparationCount = 0;
+      return this.active;
+    }
+    this.active?.cancel();
+    this.requestedSources = nextSources;
     this.requestedContext = context;
+    this.withholding = this.interrupted || !samePathVerdicts(nextSources.listing, this.sources.listing);
     this.preparing = true;
-    this.matches = null;
     const work = this.prepare(this.requestedSources, context);
     const run: GoToPreparation = {
       step: (now = () => performance.now()) => {
         if (this.active !== run) return true;
-        // Reserve 3 ms for the final row operation, GC and scheduler noise.
+        // Check once per 128 operations, with headroom below the 4 ms target.
         const deadline = now() + GO_TO_SLICE_BUDGET_MS - 3;
         do {
           if (work.next().done) {
             this.active = null;
             this.preparing = false;
+            this.withholding = false;
             return true;
           }
         } while (now() < deadline);
@@ -353,6 +373,8 @@ export class GoToIndex {
         work.return(undefined);
         this.active = null;
         this.interrupted = true;
+        this.withholding = true;
+        this.matches = null;
         // Queries remain withheld until a complete replacement is prepared.
       },
     };
@@ -360,18 +382,40 @@ export class GoToIndex {
     return run;
   }
 
+  canQuery(listing?: GoToListing): boolean {
+    return !this.withholding && samePathVerdicts(listing ?? this.sources.listing, this.sources.listing);
+  }
+
+  cancel(): void { this.active?.cancel(); }
+
   private *prepare(sources: GoToSources, context: QuickOpenContext): Generator<void> {
+    const work = { operations: 0 };
     this.lastPreparationCount = 0;
     const force = this.interrupted;
     let changed = false;
     const pinned = new Set<string>();
     const recent = new Map<string, number>();
-    for (const path of context.pinned) { pinned.add(path); yield; }
-    for (let i = 0; i < context.recent.length; i++) { recent.set(context.recent[i], i); yield; }
-    let contextChanged = force || context.pinned.length !== this.context.pinned.length || context.recent.length !== this.context.recent.length;
-    if (!contextChanged) {
-      for (let i = 0; i < context.pinned.length; i++) { contextChanged ||= context.pinned[i] !== this.context.pinned[i]; yield; }
-      for (let i = 0; i < context.recent.length; i++) { contextChanged ||= context.recent[i] !== this.context.recent[i]; yield; }
+    for (const path of context.pinned) { pinned.add(path); if (++work.operations % GO_TO_CHUNK_SIZE === 0) yield; }
+    for (let i = 0; i < context.recent.length; i++) { recent.set(context.recent[i], i); if (++work.operations % GO_TO_CHUNK_SIZE === 0) yield; }
+    const contextChanged = force || !samePaths(context.pinned, this.context.pinned) || !samePaths(context.recent, this.context.recent);
+    // Context updates keep the path order and copy only query ranking metadata.
+    if (!force && sameSources(sources, this.sources)) {
+      const metadata = this.queryMetadata.slice();
+      for (let i = 0; i < this.orderedRows.length; i++) {
+        const row = this.orderedRows[i];
+        row.pinnedRank = pinned.has(row.path) ? 0 : 1;
+        row.recentRank = recent.get(row.path) ?? Number.MAX_SAFE_INTEGER;
+        row.includedRevision = this.revision + 1;
+        metadata[i * 8 + 5] = row.pinnedRank;
+        metadata[i * 8 + 7] = recent.get(row.path) ?? -1;
+        if (++work.operations % GO_TO_CHUNK_SIZE === 0) yield;
+      }
+      this.queryMetadata = metadata;
+      this.context = context;
+      this.sources = sources;
+      this.revision += 1;
+      this.matches = null;
+      return;
     }
     const index = this;
     function* replace(kind: GoToKind, entries: Iterable<{
@@ -382,10 +426,12 @@ export class GoToIndex {
       const next = kind === "file" ? previous ?? new Map<string, PreparedGoToRow>() : new Map<string, PreparedGoToRow>();
       const generation = kind === "file" ? ++index.listingGeneration : 0;
       const files: PreparedGoToRow[] = [];
+      const removed: PreparedGoToRow[] = [];
       for (const entry of entries) {
-        if (!entry) { yield; continue; }
-        let row = kind === "file" ? next.get(entry.key) : previous?.get(entry.key);
-        if (kind === "file" && row?.listingGeneration === generation) { yield; continue; }
+        if (!entry) { if (++work.operations % GO_TO_CHUNK_SIZE === 0) yield; continue; }
+        const positional = kind === "file" ? index.files[files.length] : undefined;
+        let row = positional?.path === entry.path ? positional : kind === "file" ? next.get(entry.key) : previous?.get(entry.key);
+        if (kind === "file" && row?.listingGeneration === generation) { if (++work.operations % GO_TO_CHUNK_SIZE === 0) yield; continue; }
         const isNew = !row || row.path !== entry.path || row.label !== entry.label;
         if (!row || row.path !== entry.path || row.label !== entry.label) {
           const lowercasePath = entry.path.toLowerCase();
@@ -410,18 +456,24 @@ export class GoToIndex {
         row.glyphId = entry.glyphId;
         if (kind === "file" || kind === "folder" || kind === "collection" || kind === "app") {
           if (isNew || verdictsChanged) {
-            if (sources.listing) yield* applyGoToPathState(row, sources.listing);
+            if (sources.listing) yield* applyGoToPathState(row, sources.listing, work);
             else row.visible = false;
           }
         }
-        next.set(entry.key, row);
-        if (kind === "file") { row.listingGeneration = generation; files.push(row); }
-        yield;
+        if (isNew || kind !== "file") next.set(entry.key, row);
+        if (kind === "file") {
+          const old = index.files[files.length];
+          if (old && old !== row) removed.push(old);
+          row.listingGeneration = generation; files.push(row);
+        }
+        if (++work.operations % GO_TO_CHUNK_SIZE === 0) yield;
       }
       if (kind === "file") {
-        for (const row of next.values()) {
+        for (let i = files.length; i < index.files.length; i++) { removed.push(index.files[i]); if (++work.operations % GO_TO_CHUNK_SIZE === 0) yield; }
+        // Interrupted passes can add entries before publishing their file array.
+        for (const row of force ? next.values() : removed) {
           if (row.listingGeneration !== generation) next.delete(row.path);
-          yield;
+          if (++work.operations % GO_TO_CHUNK_SIZE === 0) yield;
         }
         index.files = files;
       }
@@ -430,12 +482,14 @@ export class GoToIndex {
     }
     if (sources.listing && (force || sources.listing !== this.sources.listing)) {
       const snapshot = sources.listing;
-      const verdictsChanged = force || !(yield* samePathVerdicts(snapshot, this.sources.listing));
+      const verdictsChanged = force || !samePathVerdicts(snapshot, this.sources.listing);
       if (snapshot.files !== this.sources.listing?.files || verdictsChanged) yield* replace("file", (function* () {
         const previous = index.subsets.get("file");
         let entry: { key: string; path: string; label: string; record: GoToFile; glyphId: PreparedGoToRow["glyphId"] } | undefined;
+        let position = 0;
         for (const file of snapshot.files) {
-          const row = previous?.get(file.path);
+          const candidate = index.files[position++];
+          const row = candidate?.path === file.path ? candidate : previous?.get(file.path);
           const glyphId = row && (row.record as GoToFile).kind === file.kind ? row.glyphId :
             file.kind === "database" ? FILE_KIND_RECORDS.database.glyphId : fileKindForPath(file.path).glyphId;
           if (!entry) entry = { key: file.path, path: file.path, label: row?.label ?? basenameOf(file.path), record: file, glyphId };
@@ -484,24 +538,30 @@ export class GoToIndex {
         row.recentRank = recent.get(row.path) ?? Number.MAX_SAFE_INTEGER;
       }
       if (kind === "folder" || kind === "collection" || kind === "app") {
-        if (sources.listing) yield* applyGoToPathState(row, sources.listing);
+        if (sources.listing) yield* applyGoToPathState(row, sources.listing, work);
         else row.visible = false;
       }
       if (row.visible && !(kind === "folder" && this.subsets.get("collection")?.has(row.path))) {
-        if (force || contextChanged || row.includedRevision !== this.revision || row.sourceIndex !== rows.length) {
+        if (force || row.includedRevision !== this.revision || row.sourceIndex !== rows.length) {
           addedRows.push(row);
           row.includedRevision = -1;
         }
         row.sourceIndex = rows.length;
         rows.push(row);
       }
-      yield;
+      if (++work.operations % GO_TO_CHUNK_SIZE === 0) yield;
     }
     // Sort only newly admitted rows, then merge them into the previous order.
-    // Every copy/comparison yields. Unchanged source positions retain their order.
+    // Bounded native sorts handle small runs; merge copies yield in chunks.
     let added = addedRows;
     let buffer: PreparedGoToRow[] = [];
-    for (let width = 1; width < added.length; width *= 2) {
+    const sortRunSize = 32;
+    for (let left = 0; left < added.length; left += sortRunSize) {
+      const run = added.slice(left, left + sortRunSize).sort(compareGoToOrder);
+      for (let i = 0; i < run.length; i++) added[left + i] = run[i];
+      yield;
+    }
+    for (let width = sortRunSize; width < added.length; width *= 2) {
       for (let left = 0; left < added.length; left += width * 2) {
         const middle = Math.min(left + width, added.length);
         const right = Math.min(left + width * 2, added.length);
@@ -510,7 +570,7 @@ export class GoToIndex {
           const first = added[a], second = added[b];
           if (a < middle && (b >= right || compareGoToOrder(first, second) <= 0)) buffer[to] = added[a++];
           else buffer[to] = added[b++];
-          yield;
+          if (++work.operations % GO_TO_CHUNK_SIZE === 0) yield;
         }
       }
       [added, buffer] = [buffer, added];
@@ -521,17 +581,17 @@ export class GoToIndex {
       if (rows[row.sourceIndex] === row && row.includedRevision === this.revision) {
         while (at < added.length && compareGoToOrder(added[at], row) <= 0) {
           ordered.push(added[at++]);
-          yield;
+          if (++work.operations % GO_TO_CHUNK_SIZE === 0) yield;
         }
         ordered.push(row);
       }
-      yield;
+      if (++work.operations % GO_TO_CHUNK_SIZE === 0) yield;
     }
-    while (at < added.length) { ordered.push(added[at++]); yield; }
-    const metadata = new Int32Array(ordered.length * 7);
+    while (at < added.length) { ordered.push(added[at++]); if (++work.operations % GO_TO_CHUNK_SIZE === 0) yield; }
+    const metadata = new Int32Array(ordered.length * 8);
     for (let i = 0; i < ordered.length; i++) {
       const row = ordered[i];
-      const offset = i * 7;
+      const offset = i * 8;
       metadata[offset] = row.characterMask;
       metadata[offset + 1] = row.characterMaskHigh;
       metadata[offset + 2] = row.boundaryMask;
@@ -539,8 +599,9 @@ export class GoToIndex {
       metadata[offset + 4] = row.lowercaseBasename.charCodeAt(0);
       metadata[offset + 5] = row.pinnedRank;
       metadata[offset + 6] = row.kind === "file" ? 0 : row.kind === "app" ? 3 : 1;
+      metadata[offset + 7] = recent.get(row.path) ?? -1;
       row.includedRevision = this.revision + 1;
-      yield;
+      if (++work.operations % GO_TO_CHUNK_SIZE === 0) yield;
     }
     this.orderedRows = ordered;
     this.queryMetadata = metadata;
@@ -549,11 +610,12 @@ export class GoToIndex {
     this.interrupted = false;
     this.completeRows = rows;
     this.revision += 1;
+    this.matches = null;
   }
 
   query(query: string, limit = 50): PreparedGoToRow[] {
     const boundedLimit = Math.max(0, Math.floor(limit));
-    if (boundedLimit === 0 || this.preparing) { this.lastScanCount = 0; return []; }
+    if (boundedLimit === 0 || this.withholding) { this.lastScanCount = 0; return []; }
     const q = query.toLowerCase();
     const rows = this.orderedRows;
     const metadata = this.queryMetadata;
@@ -569,10 +631,11 @@ export class GoToIndex {
     const scanCount = narrow ? previous.count : rows.length;
     let count = 0;
     const buckets: PreparedGoToRow[][] = Array.from({ length: 16 }, () => []);
+    const recentBuckets: { row: PreparedGoToRow; rank: number }[][] = Array.from({ length: 16 }, () => []);
     const pathQuery = isGoToPathQuery(q);
     for (let at = 0; at < scanCount; at++) {
       const i = narrow ? indices[at] : at;
-      const offset = i * 7;
+      const offset = i * 8;
       if ((metadata[offset] & mask) !== mask || (metadata[offset + 1] & maskHigh) !== maskHigh) continue;
       let tier: number | null;
       if (exactSingleCharacter) {
@@ -592,16 +655,26 @@ export class GoToIndex {
       if (tier === null) continue;
       indices[count++] = i;
       const priority = pathQuery && (flags & 1) ? 1 : 0;
-      const bucket = buckets[(priority * 2 + metadata[offset + 5]) * 4 + tier];
-      if (bucket.length < boundedLimit) bucket.push(rows[i]);
+      const bucketIndex = (priority * 2 + metadata[offset + 5]) * 4 + tier;
+      const rank = metadata[offset + 7];
+      if (rank !== -1) recentBuckets[bucketIndex].push({ row: rows[i], rank });
+      else if (buckets[bucketIndex].length < boundedLimit) buckets[bucketIndex].push(rows[i]);
     }
     this.lastScanCount = scanCount;
     // Compact one current match set in place. All unseen matches survive narrowing.
     this.matches = { query: q, revision: this.revision, indices, count };
     const result: PreparedGoToRow[] = [];
-    for (const bucket of buckets) for (const row of bucket) {
-      if (result.length === boundedLimit) return result;
-      result.push(row);
+    for (let i = 0; i < buckets.length; i++) {
+      // Stable path order breaks equal recency ties, including names of different kinds.
+      recentBuckets[i].sort((a, b) => a.rank - b.rank);
+      for (const candidate of recentBuckets[i]) {
+        if (result.length === boundedLimit) return result;
+        result.push(candidate.row);
+      }
+      for (const row of buckets[i]) {
+        if (result.length === boundedLimit) return result;
+        result.push(row);
+      }
     }
     return result;
   }

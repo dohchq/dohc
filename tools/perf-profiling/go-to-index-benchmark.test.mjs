@@ -15,6 +15,11 @@ test("the pure benchmark exercises first scans, narrowings, slices, and memory",
     assert.equal(measurement.initialPreparationSamplesMs.length, 2);
     assert.ok(measurement.initialPreparationMs.p95 >= measurement.initialPreparationMs.median);
     assert.ok(measurement.longestPreparationSliceMs > 0);
+    assert.equal(measurement.renameWithholdingMs.max, 0);
+    assert.equal(measurement.recentWithholdingMs.max, 0);
+    assert.equal(measurement.initialPreparationWorkSamplesMs.length, 2);
+    assert.equal(measurement.renamePreparationWorkSamplesMs.length, 2);
+    assert.equal(measurement.recentPreparationWorkSamplesMs.length, 2);
     assert.ok(measurement.memoryBytes.indexArrayBuffers > 0);
     assert.equal(measurement.queries.length, 4);
     for (const query of measurement.queries) {

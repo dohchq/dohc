@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { GoToIndex, isGoToPathQuery, prepareQuickOpenPaths, rankPreparedQuickOpenPaths, type GoToListing } from "./quick-open-rank";
 function update(index: GoToIndex, ...args: Parameters<GoToIndex["update"]>) {
   const run = index.update(...args);
-  while (!run.step(() => 0)) { /* Drain preparation for ranking tests. */ }
+  while (run && !run.step(() => 0)) { /* Drain preparation for ranking tests. */ }
 }
 const context = { pinned: [], recent: [] };
 const listing = (paths: string[]): GoToListing => ({
@@ -282,8 +282,8 @@ it("applies share status and explicit rule verdicts to Collection and app names"
   expect(index.query("records")).toEqual([]);
 });
 
-const drain = (run: ReturnType<GoToIndex["update"]>) => { while (!run.step(() => 0)) {} };
-it("budgets every preparation pass on a test clock and withholds partial revisions", () => {
+const drain = (run: ReturnType<GoToIndex["update"]>) => { while (run && !run.step(() => 0)) {} };
+it("withholds unsafe partial revisions across every source pass", () => {
   const index = new GoToIndex("workspace");
   update(index, { listing: listing(["previous.md"]) });
   const revision = index.revision;
@@ -300,32 +300,30 @@ it("budgets every preparation pass on a test clock and withholds partial revisio
   const clock = () => { time += .25; return time; };
   let done = false;
   while (!done) {
-    const start = time;
     expect(index.preparing).toBe(true);
     expect(index.query("previous")).toEqual([]);
     expect(index.rows).toEqual([]);
     expect(index.revision).toBe(revision);
-    done = run.step(clock);
-    expect(time - start).toBeLessThanOrEqual(4);
+    done = run!.step(clock);
     slices += 1;
   }
-  expect(slices).toBeGreaterThan(100);
+  expect(slices).toBeGreaterThan(1);
   expect(index.preparing).toBe(false);
   expect(index.query("report")).toHaveLength(50);
   expect(index.query("Excluded")).toEqual([]);
 });
 it("rebuilds verdicts and every subset after superseding a partially applied revision", () => {
   const index = new GoToIndex("workspace");
-  const first = listing(["a.md", "b.md"]);
+  const first = listing(["a.md", "b.md", ...Array.from({ length: 2_000 }, (_, n) => "other/file-" + n + ".ts")]);
   update(index, { listing: first, versions: [{ id: "main", name: "Main" }] });
   const hidden = { ...first, visibility: { status: "ready" as const, hiddenHostPaths: new Set(["a.md"]) } };
   const old = index.update({ listing: hidden, versions: [{ id: "old", name: "Old" }] });
   let time = 0;
   const clock = () => { time += 1; return time; };
   // Enter the listing pass, mutate a row, then stop before publication.
-  for (let i = 0; i < 3; i++) expect(old.step(clock)).toBe(false);
+  for (let i = 0; i < 3; i++) expect(old!.step(clock)).toBe(false);
   const latest = index.update({ listing: first, versions: [{ id: "latest", name: "Latest" }] });
-  expect(old.step(clock)).toBe(true);
+  expect(old!.step(clock)).toBe(true);
   drain(latest);
   expect(index.query("a.md")).toHaveLength(1);
   expect(index.query("Old")).toEqual([]);
@@ -352,7 +350,8 @@ it("does not cache empty preparing answers when an unchanged snapshot completes"
   update(index, source);
   const revision = index.revision;
   const run = index.update(source);
-  expect(index.query("r")).toEqual([]);
+  expect(run).toBeNull();
+  expect(index.query("r")[0].path).toBe("report.md");
   drain(run);
   expect(index.revision).toBe(revision);
   expect(index.query("re")[0].path).toBe("report.md");
@@ -374,4 +373,88 @@ it("keeps the last record for duplicate app roots and version IDs", () => {
   expect(index.query("Latest app")[0].record).toBe(app);
   expect(index.query("Latest version")[0].record).toBe(version);
   expect(index.query("Old")).toEqual([]);
+});
+
+it("keeps the last complete revision throughout rename and recent-list preparation", () => {
+  const index = new GoToIndex("workspace");
+  const source = listing(Array.from({ length: 2_000 }, (_, n) => "docs/report-" + n + ".ts"));
+  update(index, { listing: source });
+  const before = ids(index.query("report"));
+  const next = { ...source, files: source.files.map((file, n) => n === 123 ? { ...file, path: "docs/renamed.ts" } : file) };
+  const rename = index.update({ listing: next });
+  expect(ids(index.query("report"))).toEqual(before);
+  let ticks = 0;
+  while (!rename!.step(() => ++ticks)) expect(ids(index.query("report"))).toEqual(before);
+  const renamed = ids(index.query("report"));
+  const recent = index.update({}, { pinned: [], recent: ["docs/report-1999.ts"] });
+  expect(ids(index.query("report"))).toEqual(renamed);
+  while (!recent!.step(() => ++ticks)) expect(ids(index.query("report"))).toEqual(renamed);
+  expect(index.query("report")[0].path).toBe("docs/report-1999.ts");
+});
+it("starts no run for unchanged source or context contents", () => {
+  const index = new GoToIndex("workspace");
+  const source = listing(["report.md"]);
+  const ranking = { pinned: ["report.md"], recent: ["report.md"] };
+  update(index, { listing: source }, ranking);
+  const revision = index.revision;
+  expect(index.update({ listing: { ...source, files: source.files.map(file => ({ ...file })) } },
+    { pinned: [...ranking.pinned], recent: [...ranking.recent] })).toBeNull();
+  expect(index.preparing).toBe(false);
+  expect(index.query("report")).toHaveLength(1);
+  expect(index.revision).toBe(revision);
+});
+it("never exposes a cancelled run that would unhide a row", () => {
+  const index = new GoToIndex("workspace");
+  const source = listing(["private/budget.md", ...Array.from({ length: 2_000 }, (_, n) => "other/file-" + n + ".ts")]);
+  const hidden = { ...source, visibility: { status: "ready" as const, hiddenHostPaths: new Set(["private/budget.md"]) } };
+  update(index, { listing: hidden });
+  const unhide = index.update({ listing: source });
+  let ticks = 0;
+  expect(unhide!.step(() => ++ticks)).toBe(false);
+  expect(index.query("budget")).toEqual([]);
+  const latest = index.update({ listing: hidden });
+  expect(unhide!.step(() => ++ticks)).toBe(true);
+  expect(index.query("budget")).toEqual([]);
+  while (!latest!.step(() => ++ticks)) expect(index.query("budget")).toEqual([]);
+  expect(index.query("budget")).toEqual([]);
+});
+it("budgets slices by actual row reads and ordering comparisons", () => {
+  const index = new GoToIndex("workspace");
+  const source = listing(Array.from({ length: 3_000 }, (_, n) => "docs/report-" + n + ".ts"));
+  update(index, { listing: source });
+  let operations = 0;
+  for (const row of index.rows) {
+    const path = row.path;
+    Object.defineProperty(row, "path", { get: () => { operations += 1; return path; } });
+  }
+  const changed = { ...source, files: source.files.map((file, n) => n === 100 ? { ...file, path: "zz/renamed.ts" } : file).reverse() };
+  const run = index.update({ listing: changed });
+  let slices = 0;
+  const clock = () => operations * .002;
+  let done = false;
+  while (!done) {
+    const start = operations;
+    done = run!.step(clock);
+    // A clock read adds no time. Only observed row work moves this clock.
+    expect((operations - start) * .002).toBeLessThanOrEqual(4);
+    slices += 1;
+  }
+  expect(slices).toBeGreaterThan(1);
+  expect(index.query("renamed")[0].path).toBe("zz/renamed.ts");
+});
+
+it("discards unpublished file entries when rebuilding after interruption", () => {
+  const index = new GoToIndex("workspace");
+  const source = listing(Array.from({ length: 2_000 }, (_, n) => "docs/file-" + n + ".md"));
+  update(index, { listing: source });
+  const added = { ...source, files: [{ path: "unpublished.md", kind: "file" as const }, ...source.files] };
+  const run = index.update({ listing: added });
+  let ticks = 0;
+  expect(run!.step(() => ++ticks)).toBe(false);
+  drain(index.update({ listing: source }));
+  expect(index.query("unpublished")).toEqual([]);
+  update(index, { listing: added });
+  // An entry from a cancelled run is not a retained prepared row.
+  expect(index.lastPreparationCount).toBe(1);
+  expect(index.query("unpublished")).toHaveLength(1);
 });
