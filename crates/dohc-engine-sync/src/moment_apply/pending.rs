@@ -6,8 +6,8 @@ const PAGE_SIZE: usize = 64;
 pub(crate) const SUPERSEDED: &str =
     "A later restore replaced this save. Open the file to continue.";
 
-/// The row becomes ready only once the authenticated owner binding equals
-/// `binding` and its accepted cursor reaches `terminal_cursor`.
+/// The row becomes ready once the authenticated owner reaches the held restore
+/// generation and cursor. Replay checks the full binding before publication.
 pub(super) fn enqueue(
     tx: &Transaction<'_>,
     envelope: &ReplicationEnvelope,
@@ -86,13 +86,13 @@ pub(crate) fn drain_and_claim(
 ) -> Result<PendingSettlementReport, SyncError> {
     let search_policy = search_policy_for_store(store);
     let result = store.write_with(faults, |tx| {
-        // A row is ready at its exact binding and cursor, or superseded once the
-        // same document has reached a later restore generation: generations
-        // never move backwards, so its binding can no longer return.
+        // Paths can change during recovery without advancing the generation.
+        // Replay decides whether a ready settlement still matches the binding.
+        // A later generation supersedes it regardless of path changes.
         let mut stmt = tx.prepare(
             "SELECT p.origin_id,p.origin_seq,l.payload_json,l.recorded_at_ms,p.applied,\
                     p.main_version_id,p.object_id,p.record_facts_json,\
-                    p.applied=0 AND json(p.binding_json)!=json(b.binding_json) \
+                    p.applied=0 AND json_extract(b.binding_json,'$.restoreFenceGeneration')>json_extract(p.binding_json,'$.restoreFenceGeneration') \
              FROM owner_pending_settlements p \
              JOIN replication_log l ON l.workspace_id=p.workspace_id \
                AND l.origin_id=p.origin_id AND l.origin_seq=p.origin_seq \
@@ -100,9 +100,8 @@ pub(crate) fn drain_and_claim(
                AND b.main_version_id=p.main_version_id AND b.object_id=p.object_id \
                AND b.lineage_claim_id=p.lineage_claim_id \
              WHERE p.workspace_id=?1 AND (p.applied=1 OR (p.relay_namespace=b.relay_database_namespace AND (\
-               (p.terminal_cursor<=b.accepted_cursor AND json(p.binding_json)=json(b.binding_json)) \
-               OR (json_extract(b.binding_json,'$.restoreFenceGeneration')>json_extract(p.binding_json,'$.restoreFenceGeneration') \
-                AND json_remove(b.binding_json,'$.restoreFenceGeneration')=json_remove(p.binding_json,'$.restoreFenceGeneration'))))) \
+               (p.terminal_cursor<=b.accepted_cursor AND json_extract(p.binding_json,'$.restoreFenceGeneration')=json_extract(b.binding_json,'$.restoreFenceGeneration')) \
+               OR json_extract(b.binding_json,'$.restoreFenceGeneration')>json_extract(p.binding_json,'$.restoreFenceGeneration')))) \
              ORDER BY p.checked_sequence,p.terminal_cursor,p.origin_id,p.origin_seq LIMIT 65",
         ).map_err(SyncError::corrupt)?;
         let mut rows = stmt.query([workspace_id]).map_err(SyncError::corrupt)?;
