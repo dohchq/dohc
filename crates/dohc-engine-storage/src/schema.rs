@@ -109,6 +109,7 @@ const REQUIRED_TABLES: &[&str] = &[
     "versioned_workspaces",
     "versions",
     "active_versions",
+    "capture_file_holds",
     "file_objects",
     "blobs",
     "path_aliases",

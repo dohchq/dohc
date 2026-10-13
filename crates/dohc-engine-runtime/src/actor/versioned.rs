@@ -1114,7 +1114,10 @@ fn publish_write_job(
                     now_ms,
                     faults,
                 );
-                let settled = !matches!(result.1, Outcome::Error | Outcome::Skipped);
+                let settled = !matches!(
+                    result.1,
+                    Outcome::Error | Outcome::Skipped | Outcome::Parked
+                );
                 (result, settled)
             }
         },
@@ -1126,6 +1129,7 @@ fn publish_write_job(
             Outcome::Conflict => "conflict",
             Outcome::Superseded => "superseded",
             Outcome::Error => unreachable!("transient errors are not settled"),
+            Outcome::Parked => unreachable!("held publications remain pending"),
         };
         store.read_with(|conn| {
             conn.execute(
@@ -1533,6 +1537,11 @@ pub(super) fn publish_checked_delete_on_store(
     );
     if !applied {
         self_writes.retract(workspace_id, &job.target_path, &job.content_sha256);
+    }
+    if matches!(outcome, Ok(JobOutcome::Parked)) {
+        return Err(RuntimeError::CaptureFileHeld {
+            path: job.target_path.clone(),
+        });
     }
     if (recovery || request_retry)
         && matches!(
@@ -3542,6 +3551,8 @@ mod doc_cache_reset_tests {
                         workspace_id: "workspace",
                         self_writes: None,
                         progress: None,
+                        file_outcomes_settled: false,
+                        released_hold_paths: None,
                     },
                     4,
                     &NoFaults,
@@ -3578,6 +3589,8 @@ mod doc_cache_reset_tests {
                     workspace_id: "workspace",
                     self_writes: None,
                     progress: None,
+                    file_outcomes_settled: false,
+                    released_hold_paths: None,
                 },
                 5,
                 &NoFaults,
@@ -3669,6 +3682,8 @@ mod doc_cache_reset_tests {
                 workspace_id: "workspace",
                 self_writes: None,
                 progress: None,
+                file_outcomes_settled: false,
+                released_hold_paths: None,
             },
             5,
             &NoFaults,
@@ -4125,6 +4140,8 @@ mod doc_cache_reset_tests {
                         workspace_id: "workspace",
                         self_writes: Some(&writes),
                         progress: None,
+                        file_outcomes_settled: false,
+                        released_hold_paths: None,
                     },
                     6,
                     &NoFaults,
@@ -4533,6 +4550,8 @@ mod doc_cache_reset_tests {
                             workspace_id: "workspace",
                             self_writes: None,
                             progress: None,
+                            file_outcomes_settled: false,
+                            released_hold_paths: None,
                         },
                         4,
                         &NoFaults,
@@ -4675,6 +4694,8 @@ mod doc_cache_reset_tests {
                             workspace_id: "workspace",
                             self_writes: None,
                             progress: None,
+                            file_outcomes_settled: false,
+                            released_hold_paths: None,
                         },
                         4,
                         &NoFaults,
@@ -4851,6 +4872,8 @@ mod doc_cache_reset_tests {
                         workspace_id: "workspace",
                         self_writes: None,
                         progress: None,
+                        file_outcomes_settled: false,
+                        released_hold_paths: None,
                     },
                     4,
                     &NoFaults,

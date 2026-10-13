@@ -28,6 +28,7 @@
 
 pub mod backup;
 pub mod blob;
+pub mod capture_file_holds;
 pub mod diagnostics;
 mod durability;
 pub mod error;

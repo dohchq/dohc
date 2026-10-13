@@ -27,6 +27,7 @@ fn method_requires_initial_capture_ready(method: &str) -> bool {
             method,
             "files.resolve"
                 | "capture.reconcile"
+                | "capture.retryHeld"
                 | "capture.importRecovery"
                 | "versionedText.list"
                 | "versionedText.captureSources"
@@ -509,6 +510,10 @@ impl EngineService {
             }
             "capture.flush" => self.capture_flush(&ctx, request.workspace).await?,
             "capture.reconcile" => self.capture_reconcile(&ctx, request.workspace).await?,
+            "capture.retryHeld" => {
+                self.capture_retry_held(&ctx, request.workspace, request.params)
+                    .await?
+            }
             "capture.setAuthor" => {
                 self.capture_set_author(&ctx, request.workspace, request.params)
                     .await?
@@ -1366,6 +1371,7 @@ mod tests {
             "capture.hold",
             "capture.moveFile",
             "capture.reconcile",
+            "capture.retryHeld",
             "capture.release",
             "capture.renew",
             "capture.setAuthor",

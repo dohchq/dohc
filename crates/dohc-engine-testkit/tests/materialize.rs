@@ -3254,6 +3254,106 @@ fn put_staged(sc: &Scratch, name: &str, bytes: &[u8]) {
     std::fs::write(sc.target(&staged(name)), bytes).expect("staged file");
 }
 
+#[cfg(windows)]
+fn recover_with_unresolvable_target(missing: bool) {
+    for path_only in [false, true] {
+        // The path sweep selects open rows; unreadable kept rows use startup recovery.
+        if !missing && path_only {
+            continue;
+        }
+        let sc = Scratch::new("recovery-junction");
+        let elsewhere = Scratch::new("recovery-junction-target");
+        std::fs::write(elsewhere.target("a.md"), OUTSIDE).unwrap();
+        assert!(
+            std::process::Command::new("cmd")
+                .args(["/C", "mklink", "/J"])
+                .arg(sc.target("notes"))
+                .arg(elsewhere.workspace())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .unwrap()
+                .success()
+        );
+        let mut store = EngineStore::open(&sc.db(), 1).unwrap();
+        stage_job(
+            &mut store,
+            OURS,
+            &spec(
+                "j1",
+                "notes/a.md",
+                &hex_sha256(OURS),
+                Preimage::Absent,
+                1,
+                1,
+            ),
+        );
+        put_staged(&sc, "6a31.0", PREIMAGE);
+        let displacement = DisplacementSpec {
+            job_id: "j1".into(),
+            workspace_id: "ws".into(),
+            target_path: "notes/a.md".into(),
+            displaced_name: "6a31.0".into(),
+            expected_sha256: hex_sha256(PREIMAGE),
+            content_sha256: Some(hex_sha256(OURS)),
+            now_ms: 2,
+        };
+        if missing {
+            store.open_displacement(&displacement).unwrap();
+            std::fs::remove_file(sc.target(&staged("6a31.0"))).unwrap();
+        } else {
+            store.keep_displacement(&displacement, None).unwrap();
+            std::fs::hard_link(sc.target(&staged("6a31.0")), sc.target("visible.md")).unwrap();
+        }
+        // Recovery follows reopening, with a target that now fails Windows resolution.
+        drop(store);
+        let store = EngineStore::open(&sc.db(), 3).unwrap();
+        let result = if path_only {
+            recover_path_displacements(&store, sc.workspace(), "ws", "notes/a.md", &sweep_options())
+        } else {
+            recover_displacements(&store, sc.workspace(), Some("ws"), &sweep_options())
+        };
+        remove_dir_alias(&sc.target("notes"));
+        result.expect("recovery must finish its staging-only steps");
+        assert_eq!(std::fs::read(elsewhere.target("a.md")).unwrap(), OUTSIDE);
+        if missing {
+            assert!(store.list_unsettled_displacements().unwrap().is_empty());
+            assert_eq!(
+                store
+                    .load_materialization_job("j1")
+                    .unwrap()
+                    .unwrap()
+                    .status,
+                JobStatus::Pending
+            );
+        } else {
+            assert_eq!(
+                store
+                    .load_materialization_job("j1")
+                    .unwrap()
+                    .unwrap()
+                    .status,
+                JobStatus::Conflict
+            );
+            assert_eq!(store.list_kept_displacements("ws").unwrap().len(), 1);
+            assert_eq!(read(&sc, "visible.md").as_deref(), Some(PREIMAGE));
+            assert_eq!(read(&sc, &staged("6a31.0")).as_deref(), Some(PREIMAGE));
+        }
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn missing_staged_file_is_discarded_before_target_resolution() {
+    recover_with_unresolvable_target(true);
+}
+
+#[cfg(windows)]
+#[test]
+fn linked_kept_file_conflicts_before_target_resolution() {
+    recover_with_unresolvable_target(false);
+}
+
 /// A staged file whose job the store no longer has is never deleted, even
 /// when the store holds its bytes: nothing says which path they came from.
 /// It stays with a kept row, and later sweeps leave it alone.

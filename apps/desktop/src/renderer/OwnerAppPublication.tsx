@@ -535,8 +535,9 @@ function PublicationDialog(props: PublicationProps & { onClose: () => void; onRe
             <p role="alert" className="mb-0 text-[13px] text-danger">{publicationsError}</p> : publications.length === 0 ?
               <p className="mb-0 text-[12px] text-muted">No publications.</p> : <ul className="m-0 mt-3 list-none space-y-3 p-0">
                   {publications.map(publication => <li key={publication.publicationId} className="flex items-center justify-between gap-3">
-                  <div className="min-w-0 text-[12px] text-muted"><p className="m-0 break-all">Link {publication.grantId.slice(0, 8)} · {!publication.linkCurrent ? "Link changed" : publication.active ? "Published" : "Unpublished"}</p>
-                    {!publication.linkCurrent ? <p className="m-0 text-warning">This publication is unavailable. Choose a current link below and review the app again.</p> : null}
+                  <div className="min-w-0 text-[12px] text-muted"><p className="m-0 break-all">Link {publication.grantId.slice(0, 8)} · {publication.operatorTakedown ? "Disabled by server operator" : !publication.linkCurrent ? "Link changed" : publication.active ? "Published" : "Unpublished"}</p>
+                    {publication.operatorTakedown ? <><p className="m-0 break-words whitespace-pre-wrap text-warning">{publication.operatorTakedown.reason}</p><p className="m-0">Contact the server operator about this publication.</p></> : null}
+                    {!publication.operatorTakedown && !publication.linkCurrent ? <p className="m-0 text-warning">This publication is unavailable. Choose a current link below and review the app again.</p> : null}
                     {publication.manifestUnavailable ? <><p className="m-0 text-warning">Source details unavailable. This publication may belong to another app.</p>
                       <p className="m-0 break-all font-mono">{publication.publicationId}</p></> :
                       <p className="m-0 truncate font-mono" title={publication.sourceRevision}>Source {publication.sourceRevision.slice(0, 12)}</p>}
@@ -552,7 +553,7 @@ function PublicationDialog(props: PublicationProps & { onClose: () => void; onRe
                   <div className="flex shrink-0 flex-col items-end gap-2">
                     {publication.collectionCapability ? <SecondaryButton disabled={!!busy || responsesBusy} aria-label={`Revoke collection access ${publication.publicationId}`} onClick={() => setPendingRevoke(publication)}>{busy === "revokeCollection" && busyPublicationId === publication.publicationId ? "Revoking…" : "Revoke collection access"}</SecondaryButton> : null}
                     {publication.active ? <SecondaryButton disabled={!!busy || responsesBusy} aria-label={`Unpublish ${publication.publicationId}`} onClick={() => setPendingWithdraw(publication)}>{busy === "withdraw" && busyPublicationId === publication.publicationId ? "Unpublishing…" : "Unpublish"}</SecondaryButton> :
-                      !publication.linkCurrent ? null : publication.manifestUnavailable ? <span className="text-[12px] text-muted">Source unavailable</span> : <SecondaryButton disabled={!!busy || responsesBusy} onClick={() => void reviewReactivation(publication)}>{busy === "prepare" && busyPublicationId === publication.publicationId ? "Loading revision…" : "Review and republish"}</SecondaryButton>}
+                      publication.operatorTakedown || !publication.linkCurrent ? null : publication.manifestUnavailable ? <span className="text-[12px] text-muted">Source unavailable</span> : <SecondaryButton disabled={!!busy || responsesBusy} onClick={() => void reviewReactivation(publication)}>{busy === "prepare" && busyPublicationId === publication.publicationId ? "Loading revision…" : "Review and republish"}</SecondaryButton>}
                   </div>
                 </li>)}
               </ul>}

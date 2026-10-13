@@ -675,6 +675,7 @@ export interface SyncRelayStorage {
   listAppPublications(input: import("./publications").ListAppPublicationsInput): ReturnType<typeof import("./publications").listAppPublications>;
   listLinkAppPublications(input: import("./publications").ListLinkAppPublicationsInput): ReturnType<typeof import("./publications").listLinkAppPublications>;
   withdrawAppPublication(input: import("./publications").WithdrawAppPublicationInput): import("./publications").AppPublicationState;
+  disableAppPublication(input: import("./publications").DisableAppPublicationInput): import("./publications").AppPublicationState;
   reactivateAppPublication(input: import("./publications").ReactivateAppPublicationInput): import("./publications").AppPublicationState;
   authorizeLinkAppPublication(input: import("./publications").LinkAppPublicationInput): import("./publications").LinkAppPublicationAuthority;
   createLinkAppPublicationGuard(input: import("./publications").LinkAppPublicationInput): (nowMs: number) => void;
@@ -766,6 +767,7 @@ export interface SyncRelayStorage {
     rotatedAtMs: number;
   }): RotateWorkspaceIdentityResult;
   workspaceIsOwnedBy(workspaceId: string, ownerUserId: string): boolean;
+  readReplicaStanding(workspaceId: string, shareGrantBindings?: string): ReturnType<typeof import("./replicaReads").readReplicaStanding>;
   putBlob(input: {
     workspaceId: string;
     sha256: string;
