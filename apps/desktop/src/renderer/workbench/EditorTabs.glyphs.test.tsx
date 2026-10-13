@@ -34,7 +34,7 @@ afterEach(cleanup);
 
 const noop = () => {};
 
-function strip(paths: string[], options: { active?: string; dirty?: boolean; files?: WorkspaceFileEntry[] } = {}) {
+function strip(paths: string[], options: { active?: string; dirty?: boolean; files?: WorkspaceFileEntry[]; onActivate?: (groupId: string, path: string) => void } = {}) {
   return (
     <EditorTabs
       groupId="left"
@@ -44,7 +44,7 @@ function strip(paths: string[], options: { active?: string; dirty?: boolean; fil
       activeTabDirty={options.dirty ?? false}
       recoveryPaths={new Set<string>()}
       files={options.files ? new Map(options.files.map((file) => [file.path, file])) : undefined}
-      onActivate={noop}
+      onActivate={options.onActivate ?? noop}
       onClose={noop}
       onContextMenu={noop}
       onMove={noop}
@@ -128,6 +128,22 @@ describe("EditorTabs glyphs", () => {
     expect(glyphs[0]).toContain("text-ink");
     expect(glyphs[1]).toContain("text-subtle");
     expect(glyphs[2]).toContain("text-subtle");
+  });
+
+  it("leaves a press on the glyph or emoji to the tab, which activates it and arms its drag", () => {
+    const onActivate = vi.fn();
+    render(strip(["a.md", "b.md", "launch.md"], { onActivate, files: [{ path: "launch.md", kind: "file", icon: "🚀" }] }));
+    const glyph = glyphOf("b.md");
+    if (!glyph) throw new Error("no glyph");
+    fireEvent.pointerDown(glyph, { button: 0, pointerId: 1, clientX: 0, clientY: 0 });
+    expect(onActivate).toHaveBeenLastCalledWith("left", "b.md");
+    fireEvent.pointerMove(window, { pointerId: 1, buttons: 1, clientX: 20, clientY: 0 });
+    expect(screen.getByTestId(editorTabTestId("b.md")).dataset.dragging).toBe("");
+    fireEvent.pointerUp(window, { pointerId: 1 });
+    const emoji = within(screen.getByTestId(editorTabTestId("launch.md"))).getByText("🚀");
+    fireEvent.pointerDown(emoji, { button: 0, pointerId: 2 });
+    expect(onActivate).toHaveBeenLastCalledWith("left", "launch.md");
+    fireEvent.pointerUp(window, { pointerId: 2 });
   });
 
   it("re-renders only the active tab when its dirty state flips", () => {
