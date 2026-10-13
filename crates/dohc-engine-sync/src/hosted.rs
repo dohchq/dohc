@@ -12,7 +12,7 @@
 //! document. A document is in scope while its row carries the replica's scope
 //! generation; one that left keeps its state for removal.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 use dohc_engine_storage::{EngineStore, FaultInjector, TxnOutcome};
 use rusqlite::{Connection, OptionalExtension, params};
@@ -216,8 +216,10 @@ pub struct HostedReplicaState {
     pub documents: BTreeMap<String, HostedDocumentState>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HostedDocumentState {
+    /// The path the scope names it at.
+    pub path: String,
     /// Its backfill completed and committed.
     pub ready: bool,
     pub backfill_cursor: i64,
@@ -243,7 +245,7 @@ pub fn read_hosted_replica(
         };
         let mut statement = conn
             .prepare(
-                "SELECT object_id,state,backfill_cursor FROM hosted_documents \
+                "SELECT object_id,path,state,backfill_cursor FROM hosted_documents \
                  WHERE workspace_id=?1 AND scope_generation=?2",
             )
             .map_err(SyncError::corrupt)?;
@@ -252,8 +254,9 @@ pub fn read_hosted_replica(
                 Ok((
                     row.get::<_, String>(0)?,
                     HostedDocumentState {
-                        ready: row.get::<_, String>(1)? == "ready",
-                        backfill_cursor: row.get(2)?,
+                        path: row.get(1)?,
+                        ready: row.get::<_, String>(2)? == "ready",
+                        backfill_cursor: row.get(3)?,
                     },
                 ))
             })
@@ -269,15 +272,33 @@ pub fn read_hosted_replica(
     })
 }
 
-/// Adopt the scope a response announced. Its generation moves, so no pass
-/// fetched under the old scope can commit. A document still in scope keeps
-/// its progress; one that joins, or returns after leaving, backfills from the
-/// start, because the feed withheld its rows while it was out.
+/// Whether `workspace.init` created the main version every hosted document's
+/// rows apply to.
+pub(crate) fn has_main_version(store: &EngineStore, workspace_id: &str) -> Result<bool, SyncError> {
+    store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM versioned_workspaces w \
+                 JOIN versions v ON v.workspace_id=w.workspace_id \
+                   AND v.version_id=w.main_version_id \
+                 WHERE w.workspace_id=?1)",
+                [workspace_id],
+                |row| row.get(0),
+            )
+        })
+        .map_err(SyncError::corrupt)
+}
+
+/// Adopt the scope a response announced: its documents, each at its path.
+/// Its generation moves, so no pass fetched under the old scope can commit.
+/// A document still in scope keeps its progress; one that joins, or returns
+/// after leaving, backfills from the start, because the feed withheld its
+/// rows while it was out.
 pub(crate) fn adopt_scope(
     store: &mut EngineStore,
     workspace_id: &str,
     token: &str,
-    objects: &BTreeSet<String>,
+    documents: &BTreeMap<String, String>,
     faults: &dyn FaultInjector,
 ) -> Result<TxnOutcome<()>, SyncError> {
     store.write_with(faults, |tx| {
@@ -296,16 +317,17 @@ pub(crate) fn adopt_scope(
             params![workspace_id, token, generation],
         )
         .map_err(SyncError::persist)?;
-        for object_id in objects {
+        for (object_id, path) in documents {
             tx.execute(
                 "INSERT INTO hosted_documents \
-                 (workspace_id,object_id,state,backfill_cursor,scope_generation) \
-                 VALUES (?1,?2,'backfilling',0,?4) \
+                 (workspace_id,object_id,path,state,backfill_cursor,scope_generation) \
+                 VALUES (?1,?2,?5,'backfilling',0,?4) \
                  ON CONFLICT(workspace_id,object_id) DO UPDATE SET \
+                 path=excluded.path, \
                  state=CASE WHEN scope_generation=?3 THEN state ELSE 'backfilling' END, \
                  backfill_cursor=CASE WHEN scope_generation=?3 THEN backfill_cursor ELSE 0 END, \
                  scope_generation=excluded.scope_generation",
-                params![workspace_id, object_id, previous, generation],
+                params![workspace_id, object_id, previous, generation, path],
             )
             .map_err(SyncError::persist)?;
         }

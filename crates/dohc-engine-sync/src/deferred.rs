@@ -1,10 +1,10 @@
 //! Relay work held behind a live conflict. Fetch position and application ACK
 //! are separate: retaining an envelope permits the former, never the latter.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use dohc_engine_storage::{EngineStore, FaultInjector, TxnOutcome};
-use rusqlite::{OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::{BlobKind, RelayError, ReplicationEnvelope, SyncError, SyncIdentity};
 
@@ -27,16 +27,32 @@ fn local(error: impl std::fmt::Display) -> RelayError {
     RelayError::Local(error.to_string())
 }
 
+fn mismatched(
+    conn: &Connection,
+    workspace: &str,
+    identity: &SyncIdentity,
+) -> rusqlite::Result<bool> {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM relay_deferred_ops WHERE workspace_id=?1
+         AND (replication_epoch!=?2 OR stream_identity!=?3))",
+        params![
+            workspace,
+            identity.replication_epoch,
+            identity.stream_identity
+        ],
+        |r| r.get(0),
+    )
+}
+
+const MISMATCHED: &str = "deferred relay work belongs to another replication epoch or stream";
+
 pub(crate) fn read(
     store: &EngineStore,
     workspace: &str,
     identity: &SyncIdentity,
 ) -> Result<(Vec<ReplicationEnvelope>, BTreeSet<String>), RelayError> {
     store.read_with(|conn| {
-        let mismatched: bool = conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM relay_deferred_ops WHERE workspace_id=?1
-             AND (replication_epoch!=?2 OR stream_identity!=?3))",
-            params![workspace, identity.replication_epoch, identity.stream_identity], |r| r.get(0))?;
+        let mismatched = mismatched(conn, workspace, identity)?;
 
         let mut stmt = conn.prepare(&format!(
             "SELECT DISTINCT d.origin_id FROM relay_deferred_ops d WHERE d.workspace_id=?1 AND {UNAPPLIED}"))?;
@@ -51,11 +67,80 @@ pub(crate) fn read(
             .collect::<Result<Vec<_>, _>>()?;
         Ok::<_, rusqlite::Error>((mismatched, encoded, origins))
     }).map_err(local).and_then(|(mismatched, encoded, origins)| {
-        if mismatched { return Err(local("deferred relay work belongs to another replication epoch or stream")); }
+        if mismatched { return Err(local(MISMATCHED)); }
         let ops = encoded.into_iter().map(|s| serde_json::from_str(&s).map_err(local))
             .collect::<Result<Vec<_>, _>>()?;
         Ok((ops, origins))
     })
+}
+
+/// A hosted pass's share of retained work.
+pub(crate) struct HostedReplay {
+    /// One page of the current scope's retained work.
+    pub(crate) ops: Vec<ReplicationEnvelope>,
+    /// Each scoped document with unapplied retained work, and the relay
+    /// position of the first such op the page leaves out, if any.
+    pub(crate) documents: BTreeMap<String, Option<i64>>,
+}
+
+/// The retained work of the documents in the current scope, in pages that
+/// keep each document's work in relay order. Documents take turns by when
+/// their work was last checked, so a held document cannot starve another,
+/// and a document that left the scope keeps its work for its removal.
+const HOSTED_PAGE: &str = "scoped AS (
+    SELECT d.origin_id,d.origin_seq,d.envelope_json,d.checked_sequence,h.object_id,h.relay_seq,
+      {UNAPPLIED} AS unapplied
+    FROM relay_deferred_ops d
+    JOIN hosted_deferred_ops h ON h.workspace_id=d.workspace_id
+      AND h.origin_id=d.origin_id AND h.origin_seq=d.origin_seq
+    JOIN hosted_replicas r ON r.workspace_id=d.workspace_id
+    JOIN hosted_documents s ON s.workspace_id=d.workspace_id AND s.object_id=h.object_id
+      AND s.scope_generation=r.scope_generation
+    WHERE d.workspace_id=?1),
+  page AS (
+    SELECT w.origin_id,w.origin_seq,w.envelope_json,w.relay_seq FROM scoped w
+    JOIN (SELECT object_id,MIN(checked_sequence) AS turn FROM scoped GROUP BY object_id) t
+      ON t.object_id=w.object_id
+    ORDER BY t.turn,w.object_id,w.relay_seq LIMIT ?2)";
+
+pub(crate) fn read_hosted(
+    store: &EngineStore,
+    workspace: &str,
+    identity: &SyncIdentity,
+) -> Result<HostedReplay, RelayError> {
+    let page = HOSTED_PAGE.replace("{UNAPPLIED}", UNAPPLIED);
+    store
+        .read_with(|conn| {
+            let mismatched = mismatched(conn, workspace, identity)?;
+            let mut stmt = conn.prepare(&format!(
+                "WITH {page} SELECT envelope_json FROM page ORDER BY relay_seq"
+            ))?;
+            let encoded = stmt
+                .query_map(params![workspace, REPLAY_PAGE], |r| r.get::<_, String>(0))?
+                .collect::<Result<Vec<_>, _>>()?;
+            let mut stmt = conn.prepare(&format!(
+                "WITH {page} SELECT w.object_id,MIN(CASE WHEN p.origin_id IS NULL THEN w.relay_seq END)
+                 FROM scoped w LEFT JOIN page p ON p.origin_id=w.origin_id AND p.origin_seq=w.origin_seq
+                 WHERE w.unapplied GROUP BY w.object_id"
+            ))?;
+            let documents = stmt
+                .query_map(params![workspace, REPLAY_PAGE], |r| {
+                    Ok((r.get(0)?, r.get(1)?))
+                })?
+                .collect::<Result<BTreeMap<_, _>, _>>()?;
+            Ok::<_, rusqlite::Error>((mismatched, encoded, documents))
+        })
+        .map_err(local)
+        .and_then(|(mismatched, encoded, documents)| {
+            if mismatched {
+                return Err(local(MISMATCHED));
+            }
+            let ops = encoded
+                .into_iter()
+                .map(|s| serde_json::from_str(&s).map_err(local))
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(HostedReplay { ops, documents })
+        })
 }
 
 pub(crate) fn has_unapplied(store: &EngineStore, workspace: &str) -> Result<bool, RelayError> {
@@ -68,30 +153,6 @@ pub(crate) fn has_unapplied(store: &EngineStore, workspace: &str) -> Result<bool
                 [workspace],
                 |row| row.get(0),
             )
-        })
-        .map_err(local)
-}
-
-/// The document each unapplied retained op names, with its coordinate, read
-/// as [`crate::hosted::hosted_document`] reads it. A hosted pass holds a
-/// document behind retained work it does not replay.
-pub(crate) fn unapplied_documents(
-    store: &EngineStore,
-    workspace: &str,
-) -> Result<Vec<(Option<String>, String, i64)>, RelayError> {
-    store
-        .read_with(|conn| {
-            let mut stmt = conn.prepare(&format!(
-                "SELECT CASE json_extract(d.envelope_json,'$.opKind')
-                   WHEN 'live.audit.settlement' THEN json_extract(d.envelope_json,'$.payload.record.binding.objectId')
-                   WHEN 'live.audit.base' THEN json_extract(d.envelope_json,'$.payload.record.checkpoint.binding.objectId')
-                   WHEN 'moment.append' THEN json_extract(d.envelope_json,'$.payload.objectId')
-                   WHEN 'ydoc.update' THEN json_extract(d.envelope_json,'$.payload.objectId')
-                   WHEN 'live.audit.application' THEN json_extract(d.envelope_json,'$.payload.objectId') END,
-                 d.origin_id,d.origin_seq
-                 FROM relay_deferred_ops d WHERE d.workspace_id=?1 AND {UNAPPLIED}"))?;
-            stmt.query_map([workspace], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
-                .collect::<Result<Vec<_>, _>>()
         })
         .map_err(local)
 }
@@ -142,23 +203,51 @@ pub(crate) fn retain(
                 continue;
             }
             // A hosted replica's origins arrive sparse, and the journal, not a
-            // sequence, says what applied.
-            if !hosted {
+            // sequence, says what applied. It replays each document in relay
+            // order, so it keeps both with the op.
+            let placed = if hosted {
+                let object_id = crate::hosted::hosted_document(op).ok_or(SyncError::InvalidInput {
+                    reason: "a hosted replica retains only its documents' work",
+                })?;
+                let relay_seq = op.relay_seq.ok_or(SyncError::InvalidInput {
+                    reason: "retained hosted work has no relay position",
+                })?;
+                Some((object_id, relay_seq))
+            } else {
                 let last: i64 = tx.query_row(
                     "SELECT MAX(COALESCE((SELECT MAX(origin_seq) FROM relay_deferred_ops WHERE workspace_id=?1 AND origin_id=?2),-1),
                      COALESCE((SELECT acked_seq FROM replication_peers WHERE workspace_id=?1 AND origin_id=?2),-1))",
                     params![op.workspace_id,op.origin_id], |r| r.get(0)).map_err(SyncError::corrupt)?;
                 if last.checked_add(1) != Some(op.origin_seq) { return Err(SyncError::SequenceGap); }
-            }
+                None
+            };
+            // It waits its turn with the rest of its document's work or, on an
+            // ordinary replica, its origin's.
+            let turn: Option<i64> = match placed {
+                Some((object_id, _)) => tx.query_row(
+                    "SELECT MAX(d.checked_sequence) FROM relay_deferred_ops d JOIN hosted_deferred_ops h
+                     ON h.workspace_id=d.workspace_id AND h.origin_id=d.origin_id AND h.origin_seq=d.origin_seq
+                     WHERE h.workspace_id=?1 AND h.object_id=?2",
+                    params![op.workspace_id,object_id], |r| r.get(0)),
+                None => tx.query_row(
+                    "SELECT MAX(checked_sequence) FROM relay_deferred_ops WHERE workspace_id=?1 AND origin_id=?2",
+                    params![op.workspace_id,op.origin_id], |r| r.get(0)),
+            }.map_err(SyncError::corrupt)?;
             let inserted = tx.execute(
                 "INSERT OR IGNORE INTO relay_deferred_ops
                  (workspace_id,origin_id,origin_seq,replication_epoch,stream_identity,envelope_json,retained_bytes,checked_sequence)
                  VALUES (?1,?2,?3,?4,?5,?6,?7,
-                    COALESCE((SELECT MAX(checked_sequence) FROM relay_deferred_ops WHERE workspace_id=?1 AND origin_id=?2),
-                             (SELECT MAX(checked_sequence) FROM relay_deferred_ops WHERE workspace_id=?1),0))",
-                params![op.workspace_id,op.origin_id,op.origin_seq,identity.replication_epoch,identity.stream_identity,json,json.len() as i64])
+                    COALESCE(?8,(SELECT MAX(checked_sequence) FROM relay_deferred_ops WHERE workspace_id=?1),0))",
+                params![op.workspace_id,op.origin_id,op.origin_seq,identity.replication_epoch,identity.stream_identity,json,json.len() as i64,turn])
                 .map_err(SyncError::persist)?;
             if inserted == 0 { continue; }
+            if let Some((object_id, relay_seq)) = placed {
+                tx.execute(
+                    "INSERT INTO hosted_deferred_ops (workspace_id,origin_id,origin_seq,object_id,relay_seq)
+                     VALUES (?1,?2,?3,?4,?5)",
+                    params![op.workspace_id,op.origin_id,op.origin_seq,object_id,relay_seq])
+                    .map_err(SyncError::persist)?;
+            }
             for (digest, kinds) in blobs {
                 for kind in kinds {
                     let text = *kind == BlobKind::Text;
@@ -218,9 +307,17 @@ pub(crate) fn claim_report(
     let outcome = store.write_with(faults, |tx| {
         let next: i64 = tx.query_row("SELECT COALESCE(MAX(checked_sequence),0)+1 FROM relay_deferred_ops WHERE workspace_id=?1",
             [workspace], |r| r.get(0)).map_err(SyncError::corrupt)?;
-        for origin in checked.iter().map(|op| &op.origin_id).collect::<BTreeSet<_>>() {
-            tx.execute("UPDATE relay_deferred_ops SET checked_sequence=?3 WHERE workspace_id=?1 AND origin_id=?2",
-                params![workspace,origin,next]).map_err(SyncError::persist)?;
+        if crate::hosted::is_hosted(tx, workspace)? {
+            for object_id in checked.iter().filter_map(crate::hosted::hosted_document).collect::<BTreeSet<_>>() {
+                tx.execute("UPDATE relay_deferred_ops SET checked_sequence=?3 WHERE workspace_id=?1 AND (origin_id,origin_seq) IN
+                    (SELECT origin_id,origin_seq FROM hosted_deferred_ops WHERE workspace_id=?1 AND object_id=?2)",
+                    params![workspace,object_id,next]).map_err(SyncError::persist)?;
+            }
+        } else {
+            for origin in checked.iter().map(|op| &op.origin_id).collect::<BTreeSet<_>>() {
+                tx.execute("UPDATE relay_deferred_ops SET checked_sequence=?3 WHERE workspace_id=?1 AND origin_id=?2",
+                    params![workspace,origin,next]).map_err(SyncError::persist)?;
+            }
         }
         let mut claimed = false;
         for op in completed {

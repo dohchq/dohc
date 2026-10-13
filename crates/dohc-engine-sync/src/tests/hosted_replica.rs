@@ -169,15 +169,35 @@ fn hosted_backfill_below_applied_coordinates_applies_exactly_once() {
     );
 }
 
+/// An op of `object_id` at relay position `relay_seq`.
+fn document_op(seq: i64, relay_seq: i64, object_id: &str) -> ReplicationEnvelope {
+    let mut op = envelope(
+        "owner",
+        seq,
+        "live.audit.application",
+        json!({ "objectId": object_id }),
+    );
+    op.relay_seq = Some(relay_seq);
+    op
+}
+
 #[test]
 fn hosted_deferred_work_replays_by_coordinate_membership() {
     let mutations = Cell::new(0);
     let (_scratch, _path, mut store) = hosted_store();
+    host_document(&mut store, "doc-a");
     let identity = read_sync_identity(&store, "ws").unwrap().unwrap();
-    let (early, late) = (op(3, "early"), op(7, "late"));
+    let (early, late) = (document_op(3, 1, "doc-a"), document_op(7, 2, "doc-a"));
     crate::deferred::retain(&mut store, &identity, &[&early, &late], &NoFaults).unwrap();
-    let held = |store: &EngineStore| crate::deferred::read(store, "ws", &identity).unwrap().1;
-    assert_eq!(held(&store), BTreeSet::from(["owner".to_owned()]));
+    let waiting = |store: &EngineStore| {
+        crate::deferred::read_hosted(store, "ws", &identity)
+            .unwrap()
+            .documents
+    };
+    assert_eq!(
+        waiting(&store),
+        BTreeMap::from([("doc-a".to_owned(), None)])
+    );
 
     admit(&mut store, &early, &mutations).unwrap();
     assert!(
@@ -186,11 +206,20 @@ fn hosted_deferred_work_replays_by_coordinate_membership() {
     );
     admit(&mut store, &late, &mutations).unwrap();
     assert!(!crate::deferred::has_unapplied(&store, "ws").unwrap());
-    assert!(held(&store).is_empty());
+    assert!(waiting(&store).is_empty());
     assert_eq!(
         read_replication_acked_seq(&store, "ws", "owner").unwrap(),
         -1
     );
+
+    let mut unplaced = document_op(8, 3, "doc-a");
+    unplaced.relay_seq = None;
+    for refused in [op(9, "names no document"), unplaced] {
+        assert!(
+            crate::deferred::retain(&mut store, &identity, &[&refused], &NoFaults).is_err(),
+            "a hosted replica retains its documents' work at its relay position"
+        );
+    }
 }
 
 /// Make `object_id` a document of the replica's current scope.
@@ -198,8 +227,8 @@ fn host_document(store: &mut EngineStore, object_id: &str) {
     store
         .write_with(&NoFaults, |tx| {
             tx.execute(
-                "INSERT INTO hosted_documents (workspace_id,object_id,state,scope_generation) \
-                 SELECT workspace_id,?1,'ready',scope_generation FROM hosted_replicas \
+                "INSERT INTO hosted_documents (workspace_id,object_id,path,state,scope_generation) \
+                 SELECT workspace_id,?1,?1||'.md','ready',scope_generation FROM hosted_replicas \
                  WHERE workspace_id='ws'",
                 [object_id],
             )
@@ -427,6 +456,11 @@ impl HostedFeed {
             .lock()
             .unwrap()
             .insert(object_id.to_owned(), path.to_owned());
+        self.revision.fetch_add(1, Ordering::SeqCst);
+    }
+
+    fn unshare(&self, object_id: &str) {
+        self.shared.lock().unwrap().remove(object_id);
         self.revision.fetch_add(1, Ordering::SeqCst);
     }
 
@@ -829,7 +863,7 @@ fn replica(store: &EngineStore) -> HostedReplicaState {
 }
 
 fn document(store: &EngineStore, object_id: &str) -> Option<HostedDocumentState> {
-    replica(store).documents.get(object_id).copied()
+    replica(store).documents.get(object_id).cloned()
 }
 
 fn coordinates(store: &EngineStore) -> Vec<(String, i64)> {
@@ -890,6 +924,7 @@ fn a_document_that_joins_the_scope_backfills_below_the_frozen_main_cursor() {
     assert_eq!(
         document(&store, "doc-a"),
         Some(HostedDocumentState {
+            path: "a.md".to_owned(),
             ready: false,
             backfill_cursor: 0
         })
@@ -908,6 +943,7 @@ fn a_document_that_joins_the_scope_backfills_below_the_frozen_main_cursor() {
     assert_eq!(
         document(&store, "doc-a"),
         Some(HostedDocumentState {
+            path: "a.md".to_owned(),
             ready: true,
             backfill_cursor: 4
         })
@@ -944,6 +980,7 @@ fn a_document_that_joins_the_scope_backfills_below_the_frozen_main_cursor() {
     assert_eq!(
         document(&store, "doc-b"),
         Some(HostedDocumentState {
+            path: "b.md".to_owned(),
             ready: false,
             backfill_cursor: 16
         })
@@ -1041,6 +1078,7 @@ fn a_pass_fetched_under_an_older_scope_cannot_commit() {
     assert_eq!(
         document(&store, "doc-a"),
         Some(HostedDocumentState {
+            path: "a.md".to_owned(),
             ready: false,
             backfill_cursor: 0
         })
@@ -1132,6 +1170,232 @@ fn interrupted_hosted_passes_resume_to_the_same_content_once() {
         assert_eq!(resumed, clean, "{name}");
         assert!(resumed.0.1.values().all(|count| *count == 1), "{name}");
     }
+}
+
+/// The slice-2 review's first reproduction: a replica created pristine has
+/// no main version, and a backfill never serves the `workspace.init` that
+/// creates it.
+#[test]
+fn a_pristine_hosted_replica_takes_workspace_init_before_its_first_backfill() {
+    let (_scratch, _path, mut store) = hosted_store();
+    let client = RelaySyncClient::new(hosted_feed());
+    client.transport().share("doc-b", "b.md");
+    sync(&client, &mut store);
+
+    let requests = client.transport().pull_requests();
+    let initial = |request: &HostedPullRequest| {
+        request.object_id.is_none() && request.cursor == 0 && request.limit == 1
+    };
+    assert!(
+        initial(&requests[1]),
+        "the first backfill pass opens the main feed"
+    );
+    assert_eq!(requests[2].object_id.as_deref(), Some("doc-a"));
+    assert_eq!(
+        requests.iter().filter(|request| initial(request)).count(),
+        1,
+        "only while the main version is missing"
+    );
+    let (heads, moments) = content(&store);
+    assert_eq!(
+        heads,
+        BTreeMap::from([
+            ("doc-a".to_owned(), "hosted a".to_owned()),
+            ("doc-b".to_owned(), "hosted b".to_owned())
+        ])
+    );
+    assert!(moments.values().all(|count| *count == 1));
+    assert_eq!(
+        coordinates(&store),
+        [
+            ("owner".to_owned(), 0),
+            ("owner".to_owned(), 1),
+            ("owner".to_owned(), 3)
+        ]
+    );
+    assert_eq!(replica(&store).main_cursor, 4);
+}
+
+/// Hold `texts` locally, as the hydration before retention left them.
+fn hydrated(store: &mut EngineStore, texts: &[String]) {
+    store
+        .write_with(&NoFaults, |tx| {
+            for text in texts {
+                tx.execute(
+                    "INSERT OR IGNORE INTO blobs (sha256,byte_length,text) VALUES (?1,?2,?3)",
+                    params![text_sha(text), text.len() as i64, text],
+                )
+                .map_err(SyncError::persist)?;
+            }
+            Ok::<_, SyncError>(())
+        })
+        .unwrap();
+}
+
+/// Retain the feed's rows from relay position `from` on, as a pass that held
+/// them behind a live editor did, and commit the main cursor past them. The
+/// editor has since closed.
+fn retain_behind_closed_editor(
+    client: &RelaySyncClient<HostedFeed>,
+    store: &mut EngineStore,
+    from: usize,
+) {
+    let held = client.transport().log.lock().unwrap()[from - 1..].to_vec();
+    let identity = read_sync_identity(store, "ws").unwrap().unwrap();
+    let held_refs = held.iter().collect::<Vec<_>>();
+    crate::deferred::retain(store, &identity, &held_refs, &NoFaults).unwrap();
+    let end = held.last().and_then(|op| op.relay_seq).unwrap();
+    store
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "UPDATE hosted_replicas SET main_cursor=?1 WHERE workspace_id='ws'",
+                [end],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .unwrap();
+}
+
+/// The slice-2 review's second reproduction: more retained work of one
+/// document than one replay reads. Each pass applies the prefix it read.
+#[test]
+fn retained_work_longer_than_a_replay_page_drains_in_order() {
+    let (_scratch, _path, mut store) = hosted_store();
+    let client = RelaySyncClient::new(hosted_feed());
+    sync(&client, &mut store);
+    let feed = client.transport();
+    let mut texts = Vec::new();
+    let mut before = ("hosted a".to_owned(), "moment-owner-1".to_owned());
+    for seq in 0..501 {
+        let text = format!("edit {seq}");
+        feed.replace(
+            "peer",
+            seq,
+            "doc-a",
+            "a.md",
+            &text,
+            ("doc-a", &before.0, &before.1),
+        );
+        before = (text.clone(), format!("moment-peer-{seq}"));
+        texts.push(text);
+    }
+    hydrated(&mut store, &texts);
+    retain_behind_closed_editor(&client, &mut store, 5);
+    assert_eq!(retained(&store), 501);
+
+    sync(&client, &mut store);
+    assert_eq!(retained(&store), 0);
+    let (heads, moments) = content(&store);
+    assert_eq!(
+        heads,
+        BTreeMap::from([("doc-a".to_owned(), "edit 500".to_owned())])
+    );
+    assert_eq!(moments.len(), 502);
+    assert!(moments.values().all(|count| *count == 1));
+}
+
+/// The slice-2 review's third reproduction: a full replay page of a document
+/// that left the scope came first, and the hosted document's work behind it
+/// never replayed.
+#[test]
+fn retained_work_of_a_removed_document_leaves_a_hosted_one_free() {
+    let (_scratch, _path, mut store) = hosted_store();
+    let client = RelaySyncClient::new(hosted_feed());
+    let feed = client.transport();
+    feed.share("gone", "gone.md");
+    sync(&client, &mut store);
+    for seq in 100..600 {
+        feed.append(document_op(seq, 1, "gone"));
+    }
+    feed.replace(
+        "peer",
+        0,
+        "doc-a",
+        "a.md",
+        "kept",
+        ("doc-a", "hosted a", "moment-owner-1"),
+    );
+    hydrated(&mut store, &["kept".to_owned()]);
+    retain_behind_closed_editor(&client, &mut store, 5);
+    feed.unshare("gone");
+
+    sync(&client, &mut store);
+    assert_eq!(
+        content(&store).0,
+        BTreeMap::from([("doc-a".to_owned(), "kept".to_owned())])
+    );
+    assert_eq!(
+        retained(&store),
+        500,
+        "the removed document's work waits for its removal"
+    );
+}
+
+/// Documents take turns at the replay page, so one whose work stays held
+/// cannot starve another's.
+#[test]
+fn hosted_replay_takes_turns_by_document() {
+    let (_scratch, _path, mut store) = hosted_store();
+    host_document(&mut store, "doc-a");
+    host_document(&mut store, "doc-b");
+    let identity = read_sync_identity(&store, "ws").unwrap().unwrap();
+    let mut held = (0..500)
+        .map(|seq| document_op(seq, seq + 1, "doc-a"))
+        .collect::<Vec<_>>();
+    held.push(document_op(500, 501, "doc-b"));
+    held.push(document_op(501, 502, "doc-a"));
+    crate::deferred::retain(
+        &mut store,
+        &identity,
+        &held.iter().collect::<Vec<_>>(),
+        &NoFaults,
+    )
+    .unwrap();
+
+    let first = crate::deferred::read_hosted(&store, "ws", &identity).unwrap();
+    assert_eq!(first.ops, held[..500]);
+    assert_eq!(
+        first.documents,
+        BTreeMap::from([
+            ("doc-a".to_owned(), Some(502)),
+            ("doc-b".to_owned(), Some(501))
+        ]),
+        "each holds from the first op the page left out"
+    );
+    let mut report = None;
+    crate::deferred::claim_report(&mut store, "ws", &first.ops, &[], &mut report, &NoFaults)
+        .unwrap();
+    let second = crate::deferred::read_hosted(&store, "ws", &identity).unwrap();
+    assert!(second.ops.contains(&held[500]), "doc-b's turn comes next");
+    assert_eq!(second.ops.len(), 500);
+    assert_eq!(
+        second.documents,
+        BTreeMap::from([("doc-a".to_owned(), Some(500)), ("doc-b".to_owned(), None)])
+    );
+}
+
+/// One scope token names one set of documents at their paths: a response
+/// that keeps the token but moves a document is not the scope this replica
+/// adopted.
+#[test]
+fn a_scope_token_names_its_documents_paths() {
+    let (_scratch, _path, mut store) = hosted_store();
+    let client = RelaySyncClient::new(hosted_feed());
+    sync(&client, &mut store);
+    let feed = client.transport();
+    feed.shared
+        .lock()
+        .unwrap()
+        .insert("doc-a".to_owned(), "moved.md".to_owned());
+    assert!(matches!(
+        pass(&client, &mut store, &NoFaults),
+        Err(RelayError::InvalidResponse)
+    ));
+
+    feed.share("doc-a", "moved.md");
+    sync(&client, &mut store);
+    assert_eq!(document(&store, "doc-a").unwrap().path, "moved.md");
 }
 
 /// A conflict child of `hosted-object` whose `conflict.resolve` parent the

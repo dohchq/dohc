@@ -301,8 +301,8 @@ fn hosted_activation_waits_for_its_document_backfill_not_the_ordinary_cursor() {
     );
     set(
         &mut f,
-        "INSERT INTO hosted_documents (workspace_id,object_id,state,backfill_cursor,scope_generation) \
-         VALUES ('workspace','object','backfilling',9,1)",
+        "INSERT INTO hosted_documents (workspace_id,object_id,path,state,backfill_cursor,scope_generation) \
+         VALUES ('workspace','object','object.md','backfilling',9,1)",
     );
     assert!(matches!(
         capture_imported(&mut f, 1_000_000),

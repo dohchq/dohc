@@ -3219,6 +3219,7 @@ CREATE TABLE hosted_replicas (
 CREATE TABLE hosted_documents (
     workspace_id TEXT NOT NULL REFERENCES hosted_replicas(workspace_id) ON DELETE CASCADE,
     object_id TEXT NOT NULL,
+    path TEXT NOT NULL CHECK (length(path) > 0),
     state TEXT NOT NULL CHECK (state IN ('backfilling','ready')),
     backfill_cursor INTEGER NOT NULL DEFAULT 0 CHECK (backfill_cursor >= 0),
     scope_generation INTEGER NOT NULL CHECK (scope_generation >= 0),
@@ -3235,6 +3236,17 @@ CREATE TABLE hosted_withheld_befores (
     FOREIGN KEY (workspace_id, moment_id)
       REFERENCES moments(workspace_id, moment_id) ON DELETE CASCADE
 ) STRICT;
+CREATE TABLE hosted_deferred_ops (
+    workspace_id TEXT NOT NULL REFERENCES hosted_replicas(workspace_id) ON DELETE CASCADE,
+    origin_id TEXT NOT NULL,
+    origin_seq INTEGER NOT NULL,
+    object_id TEXT NOT NULL,
+    relay_seq INTEGER NOT NULL CHECK (relay_seq > 0),
+    PRIMARY KEY (workspace_id, origin_id, origin_seq),
+    FOREIGN KEY (workspace_id, origin_id, origin_seq)
+      REFERENCES relay_deferred_ops(workspace_id, origin_id, origin_seq) ON DELETE CASCADE
+) STRICT;
+CREATE INDEX hosted_deferred_ops_by_document ON hosted_deferred_ops(workspace_id, object_id, relay_seq);
 ";
 
 const V2_OPEN_DOCUMENT_ARTIFACTS_DDL: &str = "\
@@ -3904,7 +3916,7 @@ mod tests {
             ),
             (
                 "v2-hosted-replica",
-                "dbefd4305927b9c750e5b6ed4837a8bdf0790a25340d6ed6cff150165d348ab9",
+                "8e64ca75ed1742397c4d098b5d9af7532a5c71337d191268996524283ba87847",
             ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());
@@ -3941,8 +3953,8 @@ mod tests {
                 "INSERT INTO sync_identity (workspace_id,origin_id,replication_epoch,stream_identity,created_at_ms) \
                  VALUES ('hosted','service-host:a','epoch','stream',1); \
                  INSERT INTO hosted_replicas (workspace_id,created_at_ms) VALUES ('hosted',1); \
-                 INSERT INTO hosted_documents (workspace_id,object_id,state,scope_generation) \
-                 VALUES ('hosted','doc','backfilling',0);",
+                 INSERT INTO hosted_documents (workspace_id,object_id,path,state,scope_generation) \
+                 VALUES ('hosted','doc','doc.md','backfilling',0);",
             )
             .unwrap();
             let state: (Option<String>, i64, i64, i64, i64) = conn
@@ -3965,6 +3977,9 @@ mod tests {
             for invalid in [
                 "INSERT INTO hosted_replicas (workspace_id,created_at_ms) VALUES ('no-identity',1)",
                 "UPDATE hosted_documents SET state='retired'",
+                "UPDATE hosted_documents SET path=''",
+                "INSERT INTO hosted_deferred_ops (workspace_id,origin_id,origin_seq,object_id,relay_seq) \
+                 VALUES ('hosted','origin:a',0,'doc',1)",
                 "UPDATE hosted_replicas SET scope_token=''",
                 "UPDATE hosted_replicas SET last_outbound_seq=-2",
                 "INSERT INTO hosted_withheld_befores (workspace_id,moment_id,before_object_id,\

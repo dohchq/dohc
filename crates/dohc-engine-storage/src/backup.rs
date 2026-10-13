@@ -115,6 +115,7 @@ const COMPARED_TABLES: &[&str] = &[
     "hosted_replicas",
     "hosted_documents",
     "hosted_withheld_befores",
+    "hosted_deferred_ops",
     "replication_refused_moment_blobs",
     "replication_refused_ydoc_blobs",
     "replication_pending_conflict_bundles",

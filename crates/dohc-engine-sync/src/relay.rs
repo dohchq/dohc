@@ -1928,68 +1928,53 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             .iter()
             .find(|(_, document)| !document.ready)
             .map(|(object_id, document)| (object_id.clone(), document.backfill_cursor));
+        let backfilled = backfill.as_ref().map(|(object_id, _)| object_id.as_str());
+        let adopted = || HostedPassOutcome {
+            has_more: true,
+            ..HostedPassOutcome::default()
+        };
+        let mut ops = Vec::new();
+        // A document's rows apply to the main version that `workspace.init`
+        // creates, and only the main feed serves it, as its first row. A
+        // backfill on a replica without that version takes it from there.
+        if backfilled.is_some()
+            && !crate::hosted::has_main_version(store, workspace_id).map_err(local)?
+        {
+            let Some(page) =
+                self.hosted_page(store, workspace_id, &identity, &replica, None, 0, 1, faults)?
+            else {
+                return Ok(adopted());
+            };
+            if page.ops.len() != 1 || page.ops[0].op_kind != "workspace.init" {
+                return Err(RelayError::InvalidResponse);
+            }
+            ops.extend(page.ops);
+        }
         let mut cursor = backfill
             .as_ref()
             .map_or(replica.main_cursor, |(_, cursor)| *cursor);
-        let mut fetched = 0_usize;
+        let mut fetched = ops.len();
         let mut pages = 0_usize;
-        let mut ops = Vec::new();
         let has_more = loop {
             let remaining = crate::model::MAX_PULL_OPS_PER_PASS
                 .checked_sub(fetched)
                 .ok_or(RelayError::InvalidResponse)?;
             let limit = remaining.min(crate::MAX_PULL_OPS);
-            let response = self.transport.pull_hosted(HostedPullRequest {
-                workspace_id: workspace_id.to_owned(),
-                replication_epoch: identity.replication_epoch.clone(),
-                stream_identity: identity.stream_identity.clone(),
-                scope_token: replica.scope_token.clone(),
-                object_id: backfill.as_ref().map(|(object_id, _)| object_id.clone()),
+            let Some(response) = self.hosted_page(
+                store,
+                workspace_id,
+                &identity,
+                &replica,
+                backfilled,
                 cursor,
                 limit,
-            })?;
-            validate_hosted_page(&response, workspace_id, cursor)?;
-            if response.ops.len() > limit {
-                return Err(RelayError::InvalidResponse);
-            }
-            let objects = hosted_scope_objects(&response.scope)?;
-            if replica.scope_token.as_deref() != Some(response.scope.token.as_str()) {
-                // The feed serves nothing under a stale scope. What earlier
-                // pages fetched under it is dropped too: it cannot commit.
-                if !response.ops.is_empty() || response.next_cursor != cursor {
-                    return Err(RelayError::InvalidResponse);
-                }
-                match crate::hosted::adopt_scope(
-                    store,
-                    workspace_id,
-                    &response.scope.token,
-                    &objects,
-                    faults,
-                )
-                .map_err(local)?
-                {
-                    TxnOutcome::Committed(()) => {}
-                    TxnOutcome::Crashed { .. } => return Err(local(SyncError::FaultCrash)),
-                }
-                return Ok(HostedPassOutcome {
-                    has_more: true,
-                    ..HostedPassOutcome::default()
-                });
-            }
-            if !objects.iter().eq(replica.documents.keys()) {
-                return Err(RelayError::InvalidResponse);
-            }
-            for op in &response.ops {
-                let admitted = match (crate::hosted::hosted_document(op), &backfill) {
-                    (Some(object_id), Some((backfilled, _))) => object_id == backfilled.as_str(),
-                    (Some(object_id), None) => replica.documents.contains_key(object_id),
-                    (None, None) => op.op_kind == "workspace.init",
-                    (None, Some(_)) => false,
-                };
-                if !admitted {
-                    return Err(RelayError::InvalidResponse);
-                }
-            }
+                faults,
+            )?
+            else {
+                // What earlier pages fetched under the old scope is dropped
+                // too: it cannot commit.
+                return Ok(adopted());
+            };
             fetched = fetched
                 .checked_add(response.ops.len())
                 .ok_or(RelayError::InvalidResponse)?;
@@ -2005,32 +1990,16 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             }
         };
 
-        // Retained work of a document that left the scope stays for its removal.
-        let (queued, _) = crate::deferred::read(store, workspace_id, &identity)?;
-        let queued = queued
-            .into_iter()
-            .filter(|op| {
-                crate::hosted::hosted_document(op)
-                    .is_none_or(|object_id| replica.documents.contains_key(object_id))
-            })
-            .collect::<Vec<_>>();
         // Every document with retained work may retain more behind it; one
-        // whose retained work this pass does not replay holds from the start.
-        let replayed: BTreeSet<_> = queued
-            .iter()
-            .map(|op| (op.origin_id.as_str(), op.origin_seq))
+        // whose retained work runs past this replay holds from where it stops.
+        let replay = crate::deferred::read_hosted(store, workspace_id, &identity)?;
+        let queued = replay.ops;
+        let durable = replay.documents.keys().cloned().collect();
+        let behind = replay
+            .documents
+            .into_iter()
+            .filter_map(|(object_id, from)| Some((object_id, from?)))
             .collect();
-        let mut durable = BTreeSet::new();
-        let mut outside = BTreeSet::new();
-        for (object_id, origin_id, origin_seq) in
-            crate::deferred::unapplied_documents(store, workspace_id)?
-        {
-            let Some(object_id) = object_id else { continue };
-            if !replayed.contains(&(origin_id.as_str(), origin_seq)) {
-                outside.insert(object_id.clone());
-            }
-            durable.insert(object_id);
-        }
         if !queued.is_empty() {
             crate::deferred::check_redelivery(store, &ops)?;
         }
@@ -2064,7 +2033,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             &queued,
             &ops,
             durable,
-            Holding::ByDocument { outside },
+            Holding::ByDocument { behind },
             faults,
             leases,
         )?;
@@ -2103,6 +2072,76 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         crate::commit_hosted_cursor(store, workspace_id, cursor, faults).map_err(local)
     }
 
+    /// One page of the hosted feed under the stored scope: `workspace.init`
+    /// and scoped documents' rows on the main feed, and only `backfilled`'s
+    /// rows in its backfill. `None` when the response announced another
+    /// scope, which is adopted instead: the feed serves nothing under a stale
+    /// one.
+    #[allow(clippy::too_many_arguments)]
+    fn hosted_page(
+        &self,
+        store: &mut EngineStore,
+        workspace_id: &str,
+        identity: &crate::SyncIdentity,
+        replica: &crate::HostedReplicaState,
+        backfilled: Option<&str>,
+        cursor: i64,
+        limit: usize,
+        faults: &dyn FaultInjector,
+    ) -> Result<Option<HostedPullResponse>, RelayError> {
+        let response = self.transport.pull_hosted(HostedPullRequest {
+            workspace_id: workspace_id.to_owned(),
+            replication_epoch: identity.replication_epoch.clone(),
+            stream_identity: identity.stream_identity.clone(),
+            scope_token: replica.scope_token.clone(),
+            object_id: backfilled.map(str::to_owned),
+            cursor,
+            limit,
+        })?;
+        validate_hosted_page(&response, workspace_id, cursor)?;
+        if response.ops.len() > limit {
+            return Err(RelayError::InvalidResponse);
+        }
+        let documents = hosted_scope_documents(&response.scope)?;
+        if replica.scope_token.as_deref() != Some(response.scope.token.as_str()) {
+            if !response.ops.is_empty() || response.next_cursor != cursor {
+                return Err(RelayError::InvalidResponse);
+            }
+            match crate::hosted::adopt_scope(
+                store,
+                workspace_id,
+                &response.scope.token,
+                &documents,
+                faults,
+            )
+            .map_err(local)?
+            {
+                TxnOutcome::Committed(()) => return Ok(None),
+                TxnOutcome::Crashed { .. } => return Err(local(SyncError::FaultCrash)),
+            }
+        }
+        // One token names one set of documents at their paths.
+        if !documents.iter().eq(replica
+            .documents
+            .iter()
+            .map(|(object_id, document)| (object_id, &document.path)))
+        {
+            return Err(RelayError::InvalidResponse);
+        }
+        for op in &response.ops {
+            let admitted = match (crate::hosted::hosted_document(op), backfilled) {
+                (Some(object_id), Some(backfilled)) => object_id == backfilled,
+                (Some(object_id), None) => replica.documents.contains_key(object_id),
+                (None, None) => op.op_kind == "workspace.init",
+                (None, Some(_)) => false,
+            };
+            if !admitted {
+                return Err(RelayError::InvalidResponse);
+            }
+        }
+        Ok(Some(response))
+    }
+
     /// Apply a pass's ops in order and settle what they left pending. An op
     /// that cannot apply yet holds the ops behind it; when a round makes no
     /// progress, work held for a durable reason is retained so the cursor can
@@ -2138,17 +2177,20 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         loop {
             let mut held = match &holding {
                 Holding::ByOrigin => durable.clone(),
-                Holding::ByDocument { outside } => outside.clone(),
+                Holding::ByDocument { .. } => BTreeSet::new(),
             };
             let mut still_retryable = Vec::new();
             let mut made_progress = false;
             for op in round {
                 let key = holding.key(op);
-                if matches!(holding, Holding::ByDocument { .. })
-                    && key.as_ref().is_some_and(|key| held.contains(key))
-                {
-                    still_retryable.push(op);
-                    continue;
+                if let (Holding::ByDocument { behind }, Some(key)) = (&holding, &key) {
+                    let omitted = behind
+                        .get(key)
+                        .is_some_and(|from| op.relay_seq.is_some_and(|seq| seq >= *from));
+                    if omitted || held.contains(key) {
+                        still_retryable.push(op);
+                        continue;
+                    }
                 }
                 if op.op_kind != "ydoc.update" || op.payload["isBaseState"] == true {
                     crate::ydoc_apply::drain_inactive_ydoc_updates(store, workspace_id, faults)
@@ -4077,9 +4119,10 @@ enum Holding {
     /// held origin with a gap.
     ByOrigin,
     /// A hosted replica admits sparsely, so the pass itself holds later ops of
-    /// a held document. `outside` names documents whose retained work this
-    /// pass does not replay, which hold from the start.
-    ByDocument { outside: BTreeSet<String> },
+    /// a held document. `behind` gives, for each document whose retained work
+    /// runs past this pass's replay, the relay position of the first op the
+    /// replay left out: that op and every later one of the document hold.
+    ByDocument { behind: BTreeMap<String, i64> },
 }
 
 impl Holding {
@@ -4106,24 +4149,26 @@ struct AppliedPass {
     has_more: bool,
 }
 
-/// The documents a scope names, each once.
-fn hosted_scope_objects(scope: &HostedScope) -> Result<BTreeSet<String>, RelayError> {
+/// The documents a scope names, each once, with its path.
+fn hosted_scope_documents(scope: &HostedScope) -> Result<BTreeMap<String, String>, RelayError> {
     let bounded = |value: &str| {
         crate::model::bounded(value, "hosted scope fields must be non-empty and bounded").is_ok()
     };
-    let mut objects = BTreeSet::new();
+    let mut documents = BTreeMap::new();
     if !bounded(&scope.token) {
         return Err(RelayError::InvalidResponse);
     }
     for document in &scope.documents {
         if !bounded(&document.object_id)
             || !bounded(&document.path)
-            || !objects.insert(document.object_id.clone())
+            || documents
+                .insert(document.object_id.clone(), document.path.clone())
+                .is_some()
         {
             return Err(RelayError::InvalidResponse);
         }
     }
-    Ok(objects)
+    Ok(documents)
 }
 
 fn merge_by_origin(ops: Vec<ReplicationEnvelope>) -> Vec<ReplicationEnvelope> {
