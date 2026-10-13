@@ -22,6 +22,14 @@ fn nested_contract_case(case: &Value) {
             "{name}"
         );
         let canonical = case["canonical"].as_str().unwrap();
+        if case["exactSource"] == true {
+            let source = case["source"].as_str().unwrap();
+            doc.preserve_folded_markdown_source(source).unwrap();
+            assert_eq!(
+                doc.preserved_markdown_source(canonical).as_deref(),
+                Some(source)
+            );
+        }
         doc.rewrite_content_to_markdown_as(
             ContentKind::Richdoc,
             canonical,

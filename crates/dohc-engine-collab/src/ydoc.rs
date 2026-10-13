@@ -2776,16 +2776,11 @@ fn parse_markdown_blocks_at<'src>(
         } else {
             reading
         };
+        // Only the first marker needs the override; source_reproduces also tries Projection.
         if let Some(first) = list_marker(line, list_reading) {
-            if let Some((list, next)) = parse_list(
-                lines,
-                index,
-                first,
-                depth,
-                quote_depth,
-                list_reading,
-                refused,
-            ) {
+            if let Some((list, next)) =
+                parse_list(lines, index, first, depth, quote_depth, reading, refused)
+            {
                 blocks.push(list);
                 index = next;
                 continue;
@@ -3419,6 +3414,17 @@ fn parse_list<'src>(
                 && (blank_line(line)
                     || line.bytes().take_while(|byte| *byte == b' ').count() < content_indent)
             {
+                *refused |= if blank_line(line) {
+                    lines[at..]
+                        .iter()
+                        .find(|line| !blank_line(line))
+                        .is_some_and(|line| {
+                            let indent = line.bytes().take_while(|byte| *byte == b' ').count();
+                            indent > marker.indent && indent < content_indent
+                        })
+                } else {
+                    line.trim_start_matches(' ').starts_with('\t')
+                };
                 break;
             }
             if blank_line(line) {

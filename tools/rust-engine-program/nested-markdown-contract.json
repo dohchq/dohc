@@ -795,12 +795,47 @@
       "source": "1.\n   foo"
     },
     {
-      "canonical": "- x\n\n  - \n  -",
+      "canonical": "- a\n  - b\n  - c",
+      "exactSource": true,
       "foldRefuse": true,
-      "name": "item-bare-bullet-siblings",
-      "note": "CommonMark 0.31.2: <ul> <li> <p>x</p> <ul> <li></li> <li></li> </ul> </li> </ul>",
-      "rustBase64": "AQvNsJHZs7CDDQAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwDNsJHZs7CDDQEDCGxpc3RJdGVtBwDNsJHZs7CDDQIDCXBhcmFncmFwaAcAzbCR2bOwgw0DBgQAzbCR2bOwgw0EAXiHzbCR2bOwgw0DAwpidWxsZXRMaXN0BwDNsJHZs7CDDQYDCGxpc3RJdGVtBwDNsJHZs7CDDQcDCXBhcmFncmFwaIfNsJHZs7CDDQcDCGxpc3RJdGVtBwDNsJHZs7CDDQkDCXBhcmFncmFwaAA=",
-      "source": "- x\n\n  -\n  -"
+      "name": "source-loose-bullet-child-siblings",
+      "note": "CommonMark 0.31.2: <ul> <li>a <ul> <li> <p>b</p> </li> <li> <p>c</p> </li> </ul> </li> </ul>",
+      "rustBase64": "AQ+fxIXZtIagDQAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwCfxIXZtIagDQEDCGxpc3RJdGVtBwCfxIXZtIagDQIDCXBhcmFncmFwaAcAn8SF2bSGoA0DBgQAn8SF2bSGoA0EAWGHn8SF2bSGoA0DAwpidWxsZXRMaXN0BwCfxIXZtIagDQYDCGxpc3RJdGVtBwCfxIXZtIagDQcDCXBhcmFncmFwaAcAn8SF2bSGoA0IBgQAn8SF2bSGoA0JAWKHn8SF2bSGoA0HAwhsaXN0SXRlbQcAn8SF2bSGoA0LAwlwYXJhZ3JhcGgHAJ/Ehdm0hqANDAYEAJ/Ehdm0hqANDQFjAA==",
+      "source": "- a\n  - b\n\n  - c"
+    },
+    {
+      "canonical": "1. Step one\n   - detail a\n   - detail b\n2. Step two",
+      "exactSource": true,
+      "foldRefuse": true,
+      "name": "source-loose-ordered-parent-child-siblings",
+      "note": "CommonMark 0.31.2: <ol> <li> <p>Step one</p> <ul> <li> <p>detail a</p> </li> <li> <p>detail b</p> </li> </ul> </li> <li> <p>Step two</p> </li> </ol>",
+      "rustBase64": "ARTcj/nQ6viICQAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwtvcmRlcmVkTGlzdCgA3I/50Or4iAkBBXN0YXJ0AX0BBwDcj/nQ6viICQEDCGxpc3RJdGVtBwDcj/nQ6viICQMDCXBhcmFncmFwaAcA3I/50Or4iAkEBgQA3I/50Or4iAkFCFN0ZXAgb25lh9yP+dDq+IgJBAMKYnVsbGV0TGlzdAcA3I/50Or4iAkOAwhsaXN0SXRlbQcA3I/50Or4iAkPAwlwYXJhZ3JhcGgHANyP+dDq+IgJEAYEANyP+dDq+IgJEQhkZXRhaWwgYYfcj/nQ6viICQ8DCGxpc3RJdGVtBwDcj/nQ6viICRoDCXBhcmFncmFwaAcA3I/50Or4iAkbBgQA3I/50Or4iAkcCGRldGFpbCBih9yP+dDq+IgJAwMIbGlzdEl0ZW0HANyP+dDq+IgJJQMJcGFyYWdyYXBoBwDcj/nQ6viICSYGBADcj/nQ6viICScIU3RlcCB0d28A",
+      "source": "1. Step one\n\n   - detail a\n\n   - detail b\n\n2. Step two"
+    },
+    {
+      "name": "empty-bullet-tab-continuation",
+      "note": "CommonMark 0.31.2: <ul> <li>foo</li> </ul>",
+      "refuse": true,
+      "source": "- \n\tfoo"
+    },
+    {
+      "name": "empty-bullet-space-tab-continuation",
+      "note": "CommonMark 0.31.2: <ul> <li>foo</li> </ul>",
+      "refuse": true,
+      "source": "- \n \tfoo"
+    },
+    {
+      "name": "empty-bullet-underindent-after-blank",
+      "note": "CommonMark 0.31.2: <ul> <li></li> </ul> <p>x</p>",
+      "refuse": true,
+      "source": "- \n\n x"
+    },
+    {
+      "name": "empty-ordered-underindent-after-blank",
+      "note": "CommonMark 0.31.2: <ol> <li></li> </ol> <p>x</p>",
+      "projected": true,
+      "refuse": true,
+      "source": "1.\n\n  x"
     }
   ],
   "rules": "Blank lines contain only spaces or tabs. Same-kind siblings across blanks form one loose list. An indented line after a blank starts another item paragraph; a nonblank unindented line can lazily continue the current paragraph. Children must reach their parent's marker content column. Task checkboxes are content after a two-column bullet marker. Refusals for ambiguous lines apply inside list bodies; root prose, rules and code remain accepted. Each projector output must be accepted unchanged by its projected reader. Ordered output is capped at nine digits. Letter and Roman prefixes are prose. Thematic breaks take precedence over list markers."

@@ -505,7 +505,8 @@ function assertSupportedListMarkdown(markdown: string): string {
       continue
     }
     const rule = indent <= 3 && /^(?:-(?:[ \t]*-){2,}|\*(?:[ \t]*\*){2,}|_(?:[ \t]*_){2,})[ \t]*$/u.test(rest)
-    const marker = rule ? null : /^(?:[-+*] |[0-9]{1,9}[.)] )/u.exec(rest)
+    let marker = rule ? null : /^(?:[-+*]|[0-9]{1,9}[.)])(?: |$)/u.exec(rest)
+    if (marker && !marker[0].endsWith(' ') && at > 0 && !blank) marker = null
     if (marker) {
       while (parents.length && indent <= parents.at(-1)!.indent) parents.pop()
     } else if (parents.length && indent <= parents.at(-1)!.indent
@@ -538,7 +539,7 @@ function assertSupportedListMarkdown(markdown: string): string {
       const itemFence = /^(?:`{3,}|~{3,})/u.exec(body)?.[0] ?? ''
       if (itemFence) { fence = itemFence; fenceInList = true }
       if (parents.length && indent < parents.at(-1)!.column) refuse()
-      parents.push({ indent, column: indent + marker[0].length })
+      parents.push({ indent, column: indent + marker[0].trimEnd().length + 1 })
       if (itemBody === '') { lines[at] = lines[at].trimEnd(); changed = true }
     } else if (parents.length) {
       const parent = parents.at(-1)!

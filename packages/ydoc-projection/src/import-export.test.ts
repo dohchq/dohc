@@ -4608,3 +4608,9 @@ for (const reading of ['source', 'projection'] as const) {
     expect(parseRichdocMarkdown(saved, reading)).toEqual(document)
   })
 }
+
+it.each(['Total\n1.\n\n  x', 'Total\n*\n\tfoo'])('keeps a bare marker in root paragraph text: %s', source => {
+  for (const reading of ['source', 'projection'] as const) {
+    expect(parseRichdocMarkdown(source, reading).content?.every(node => node.type === 'paragraph')).toBe(true)
+  }
+})
