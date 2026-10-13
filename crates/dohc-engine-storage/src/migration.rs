@@ -3202,6 +3202,12 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         sql: "CREATE TABLE capture_file_holds (workspace_id TEXT NOT NULL, source_version_id TEXT NOT NULL, object_id TEXT NOT NULL, path TEXT NOT NULL, observed_sha256 TEXT NOT NULL CHECK(length(observed_sha256)=64 AND observed_sha256 NOT GLOB '*[^0-9a-f]*'), observed_size INTEGER NOT NULL CHECK(observed_size>=0), reason TEXT NOT NULL CHECK(reason='ydoc-resolution-not-representable'), observed_at_ms INTEGER NOT NULL, attempt_count INTEGER NOT NULL CHECK(attempt_count>0), retry_requested INTEGER NOT NULL CHECK(retry_requested IN (0,1)), PRIMARY KEY(workspace_id,path), FOREIGN KEY(workspace_id,source_version_id) REFERENCES versions(workspace_id,version_id), FOREIGN KEY(workspace_id,object_id) REFERENCES file_objects(workspace_id,object_id)) STRICT;",
         sets_user_version: None,
     },
+    Migration {
+        ordinal: 49,
+        id: "v2-local-chat-actor-key",
+        sql: "ALTER TABLE chat_messages ADD COLUMN author_actor_key TEXT CHECK (author_actor_key IS NULL OR json_valid(author_actor_key));",
+        sets_user_version: None,
+    },
 ];
 
 const V2_OPEN_DOCUMENT_ARTIFACTS_DDL: &str = "\
@@ -3872,6 +3878,10 @@ mod tests {
             (
                 "v2-capture-file-holds",
                 "e5326f922618067ec6dec0bed092a8ea98c929a101f5166e448f935cd8ac9dfc",
+            ),
+            (
+                "v2-local-chat-actor-key",
+                "f84d0497555ff288db36304ed0c4b41b7f61d1d7f10396b9fd08a61da0fc7219",
             ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());

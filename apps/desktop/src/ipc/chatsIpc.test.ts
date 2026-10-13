@@ -50,7 +50,7 @@ function fixture(kind: ScopeKind = "local") {
   }
   const storeMethods = {
     createThread: vi.fn<DesktopLinkedChatStore["createThread"]>(async () => thread),
-    sendMessage: vi.fn<DesktopLinkedChatStore["sendMessage"]>(async ({ automation: _automation, ...input }) => ({ ...message, ...input, attachments: storedAttachments(input.attachments) })),
+    sendMessage: vi.fn<DesktopLinkedChatStore["sendMessage"]>(async ({ automation: _automation, authorActorKey, ...input }) => ({ ...message, ...input, ...(authorActorKey !== null ? { authorActorKey } : {}), attachments: storedAttachments(input.attachments) })),
     resolveChatDecision: vi.fn<DesktopLinkedChatStore["resolveChatDecision"]>(async input => ({ ...input, state: "resolved", atMs: 4 })),
     setReaction: vi.fn<DesktopLinkedChatStore["setReaction"]>(async input => ({ ...input, reactionId: "reaction", atMs: 4 })),
     listReactions: vi.fn<DesktopLinkedChatStore["listReactions"]>(async () => []),
@@ -65,9 +65,9 @@ function fixture(kind: ScopeKind = "local") {
     findThreadChannelId: vi.fn<DesktopLinkedChatStore["findThreadChannelId"]>(async () => "channel"),
     getChannelWireId: vi.fn<DesktopLinkedChatStore["getChannelWireId"]>(async () => "wire"),
     createChannel: vi.fn<DesktopLinkedChatStore["createChannel"]>(async input => ({ ...input, id: "channel", kind: "channel", slug: "general", type: input.type ?? "posts", purpose: input.purpose ?? "", ...(input.folderPath ? { folderPath: input.folderPath } : {}), createdAtMs: 1, updatedAtMs: 1 })),
-    startChannelThread: vi.fn<DesktopLinkedChatStore["startChannelThread"]>(async ({ automation: _automation, ...input }) => ({
+    startChannelThread: vi.fn<DesktopLinkedChatStore["startChannelThread"]>(async ({ automation: _automation, authorActorKey, ...input }) => ({
       thread: { id: thread.id, workspaceId: thread.workspaceId, title: thread.title, createdAtMs: 1, updatedAtMs: 2, channelId: input.channelId },
-      message: { ...message, ...input, attachments: storedAttachments(input.attachments) },
+      message: { ...message, ...input, ...(authorActorKey !== null ? { authorActorKey } : {}), attachments: storedAttachments(input.attachments) },
     })),
     listBookmarks: vi.fn<DesktopLinkedChatStore["listBookmarks"]>(async () => [bookmark]),
     ensureDefaultChannelFollows: vi.fn<DesktopLinkedChatStore["ensureDefaultChannelFollows"]>(async () => undefined),
@@ -298,11 +298,13 @@ describe("registered chat writes", () => {
     const test = fixture();
     await test.invoke(CHANNELS.sendChatMessage, {
       workspaceId: "workspace", threadId: "thread", body: "Hello", authorUserId: "forged",
+      authorActorKey: '{"kind":"installation","installationId":"forged"}',
       author: { kind: "agent", displayName: "Forged" }, fileReferences: [{ path: "notes/a.md" }],
     });
     expect(test.storeMethods.sendMessage).toHaveBeenCalledWith({
       workspaceId: "workspace", threadId: "thread", body: "Hello",
       author: { kind: "human", displayName: "Sam" }, authorUserId: "verified-owner",
+      authorActorKey: '{"kind":"account","issuer":"https://cloud.test","userId":"verified-owner"}',
       attachments: [{ objectId: "object", pathHint: "notes/a.md" }],
     });
     expect(test.projectChatBookmarks).toHaveBeenCalledWith("workspace");
@@ -374,7 +376,11 @@ describe("registered channels and personal chat projections", () => {
     expect(test.ensureGroupFolder).toHaveBeenCalledWith(test.workspace, "general");
     expect(test.ensureGroupFolder.mock.invocationCallOrder[0]).toBeLessThan(test.storeMethods.createChannel.mock.invocationCallOrder[0]!);
     await test.invoke(CHANNELS.startChannelThread, { workspaceId: "workspace", channelId: "channel", body: "First message" });
-    expect(test.storeMethods.startChannelThread).toHaveBeenCalledWith({ workspaceId: "workspace", channelId: "channel", body: "First message", author: { kind: "human", displayName: "Sam" }, authorUserId: "verified-owner" });
+    expect(test.storeMethods.startChannelThread).toHaveBeenCalledWith({
+      workspaceId: "workspace", channelId: "channel", body: "First message",
+      author: { kind: "human", displayName: "Sam" }, authorUserId: "verified-owner",
+      authorActorKey: '{"kind":"account","issuer":"https://cloud.test","userId":"verified-owner"}',
+    });
     expect(test.projectChatBookmarks).toHaveBeenCalledWith("workspace");
   });
 
