@@ -652,11 +652,10 @@ impl Ydoc {
             .any(|reading| {
                 let staged = Ydoc::wire();
                 staged
-                    .rewrite_content_to_markdown_checked(
+                    .rewrite_content_to_markdown_checked::<false>(
                         ContentKind::Richdoc,
                         source,
                         reading,
-                        false,
                         false,
                     )
                     .is_ok()
@@ -1237,7 +1236,7 @@ impl Ydoc {
         markdown: &str,
         reading: MarkdownReading,
     ) -> Result<Vec<u8>, CollabError> {
-        self.rewrite_content_to_markdown_checked(content_kind, markdown, reading, false, true)
+        self.rewrite_content_to_markdown_checked::<true>(content_kind, markdown, reading, false)
     }
 
     /// Rewrite a file fold, refusing nested items and quote-depth overflow
@@ -1247,22 +1246,20 @@ impl Ydoc {
         content_kind: ContentKind,
         markdown: &str,
     ) -> Result<Vec<u8>, CollabError> {
-        self.rewrite_content_to_markdown_checked(
+        self.rewrite_content_to_markdown_checked::<true>(
             content_kind,
             markdown,
             MarkdownReading::Projection,
             true,
-            true,
         )
     }
 
-    fn rewrite_content_to_markdown_checked(
+    fn rewrite_content_to_markdown_checked<const WIRE_SEED: bool>(
         &self,
         content_kind: ContentKind,
         markdown: &str,
         reading: MarkdownReading,
         file_fold: bool,
-        wire_defaults: bool,
     ) -> Result<Vec<u8>, CollabError> {
         let update = match content_kind {
             ContentKind::Plaintext => {
@@ -1305,8 +1302,8 @@ impl Ydoc {
                 if file_fold && quote_fold_overflows(&blocks, 0) {
                     return Err(CollabError::MarkdownQuoteDepthExceeded);
                 }
-                self.with_delta(|txn| {
-                    if wire_defaults && missing_schema_version {
+                let edit = |txn: &mut yrs::TransactionMut<'_>| {
+                    if WIRE_SEED && missing_schema_version {
                         meta.insert(txn, "schemaVersion", Any::Number(1.0));
                     }
                     if file_fold {
@@ -1336,9 +1333,17 @@ impl Ydoc {
                         frag.remove_range(txn, 0, len);
                     }
                     for (index, block) in blocks.iter().enumerate() {
-                        insert_md_block(txn, &frag, index as u32, block, wire_defaults);
+                        insert_md_block::<_, WIRE_SEED>(txn, &frag, index as u32, block);
                     }
-                })
+                };
+                if WIRE_SEED {
+                    self.with_delta(edit)
+                } else {
+                    // Witness checks use a disposable document and discard its update.
+                    let mut txn = self.doc.transact_mut();
+                    edit(&mut txn);
+                    Vec::new()
+                }
             }
             ContentKind::Scene => {
                 return Err(CollabError::MarkdownRewriteUnsupported {
@@ -2086,7 +2091,7 @@ enum TextPlace {
 }
 
 fn texts_read_alike(source: &str, projection: &str, place: TextPlace) -> bool {
-    read_text(source, place) == read_text(projection, place)
+    source == projection || read_text(source, place) == read_text(projection, place)
 }
 
 /// Stands for a table cell's `<br>`, however it is spelled.
@@ -2486,14 +2491,12 @@ fn parse_markdown_blocks(body: &str, reading: MarkdownReading) -> Vec<MdBlock<'_
 
 fn parse_markdown_blocks_checked(body: &str, reading: MarkdownReading) -> (Vec<MdBlock<'_>>, bool) {
     let mut refused = false;
-    let blocks = parse_markdown_blocks_at(
-        &body.lines().collect::<Vec<_>>(),
-        0,
-        0,
-        reading,
-        false,
-        &mut refused,
-    );
+    let lines: Vec<_> = if body.contains('\r') {
+        body.lines().collect()
+    } else {
+        body.split('\n').collect()
+    };
+    let blocks = parse_markdown_blocks_at(&lines, 0, 0, reading, false, &mut refused);
     (blocks, refused)
 }
 
@@ -2603,6 +2606,7 @@ fn quote_fold_overflows(blocks: &[MdBlock<'_>], depth: usize) -> bool {
     })
 }
 
+#[inline(always)]
 fn markdown_fence(line: &str, source: bool) -> Option<(u8, usize, &str)> {
     if source {
         return line.strip_prefix("```").map(|language| (b'`', 3, language));
@@ -2643,9 +2647,11 @@ fn parse_markdown_blocks_at<'src>(
                     .iter()
                     .enumerate()
                     .filter_map(|(at, line)| {
-                        let (delimiter, width, rest) = markdown_fence(line, source_fences)?;
-                        (rest.trim().is_empty() && (!source_fences || *line == "```"))
-                            .then_some((at, delimiter, width))
+                        if source_fences {
+                            return (*line == "```").then_some((at, b'`', 3));
+                        }
+                        let (delimiter, width, rest) = markdown_fence(line, false)?;
+                        rest.trim().is_empty().then_some((at, delimiter, width))
                     })
                     .collect()
             });
@@ -2734,10 +2740,14 @@ fn parse_markdown_blocks_at<'src>(
             }
             continue;
         }
-        if let Some((list, next)) = parse_list(lines, index, depth, quote_depth, reading, refused) {
-            blocks.push(list);
-            index = next;
-            continue;
+        if let Some(first) = list_marker(line) {
+            if let Some((list, next)) =
+                parse_list(lines, index, first, depth, quote_depth, reading, refused)
+            {
+                blocks.push(list);
+                index = next;
+                continue;
+            }
         }
         let table = match parse_annotated_table(&lines[index..]) {
             None if tables => parse_table(&lines[index..], Vec::new()),
@@ -3116,7 +3126,14 @@ struct ListMarker<'a> {
     text: &'a str,
 }
 
+#[inline(always)]
 fn list_marker(line: &str) -> Option<ListMarker<'_>> {
+    if !matches!(
+        *line.as_bytes().first()?,
+        b' ' | b'-' | b'+' | b'*' | b'0'..=b'9'
+    ) {
+        return None;
+    }
     let indent = line.bytes().take_while(|byte| *byte == b' ').count();
     if indent > 3 {
         return None;
@@ -3219,16 +3236,16 @@ fn plain_bullet_prefix<'src>(
 fn parse_list<'src>(
     lines: &[&'src str],
     start: usize,
+    first: ListMarker<'src>,
     depth: usize,
     quote_depth: usize,
     reading: MarkdownReading,
     refused: &mut bool,
 ) -> Option<(MdBlock<'src>, usize)> {
     if depth + 3 > MARKDOWN_XML_MAX_DEPTH {
-        *refused |= list_marker(lines[start]).is_some();
+        *refused = true;
         return None;
     }
-    let first = list_marker(lines[start])?;
     *refused |= first.text.trim_start_matches(' ').starts_with('\t');
     let (mut plain_items, prefix_end) = plain_bullet_prefix(lines, start, first);
     let after_blank = (prefix_end..lines.len()).find(|&at| !blank_line(lines[at]));
@@ -3375,24 +3392,22 @@ fn insert_md_paragraph<F: XmlFragment>(
     }
 }
 
-fn insert_md_list_item<F: XmlFragment>(
+fn insert_md_list_item<F: XmlFragment, const WIRE_DEFAULTS: bool>(
     txn: &mut yrs::TransactionMut<'_>,
     parent: &F,
     item: &MdListItem<'_>,
-    wire_defaults: bool,
 ) {
     insert_md_paragraph(txn, parent, 0, &item.paragraph);
     for (index, block) in item.blocks().iter().enumerate() {
-        insert_md_block(txn, parent, index as u32 + 1, block, wire_defaults);
+        insert_md_block::<_, WIRE_DEFAULTS>(txn, parent, index as u32 + 1, block);
     }
 }
 
-fn insert_md_block<F: XmlFragment>(
+fn insert_md_block<F: XmlFragment, const WIRE_DEFAULTS: bool>(
     txn: &mut yrs::TransactionMut<'_>,
     parent: &F,
     index: u32,
     block: &MdBlock<'_>,
-    wire_defaults: bool,
 ) {
     match block {
         MdBlock::Paragraph(text) => insert_md_paragraph(txn, parent, index, text),
@@ -3404,7 +3419,7 @@ fn insert_md_block<F: XmlFragment>(
         MdBlock::Quote(children) => {
             let el = parent.insert(txn, index, XmlElementPrelim::empty("blockquote"));
             for (child_index, child) in children.iter().enumerate() {
-                insert_md_block(txn, &el, child_index as u32, child, wire_defaults);
+                insert_md_block::<_, WIRE_DEFAULTS>(txn, &el, child_index as u32, child);
             }
         }
         MdBlock::BulletList(items) => {
@@ -3421,7 +3436,7 @@ fn insert_md_block<F: XmlFragment>(
                     for (item_index, item) in items.iter().enumerate() {
                         let li =
                             el.insert(txn, item_index as u32, XmlElementPrelim::empty("listItem"));
-                        insert_md_list_item(txn, &li, item, wire_defaults);
+                        insert_md_list_item::<_, WIRE_DEFAULTS>(txn, &li, item);
                     }
                 }
             }
@@ -3431,7 +3446,7 @@ fn insert_md_block<F: XmlFragment>(
             el.insert_attribute(txn, "start", *start);
             for (item_index, item) in items.iter().enumerate() {
                 let li = el.insert(txn, item_index as u32, XmlElementPrelim::empty("listItem"));
-                insert_md_list_item(txn, &li, item, wire_defaults);
+                insert_md_list_item::<_, WIRE_DEFAULTS>(txn, &li, item);
             }
         }
         MdBlock::TaskList(items) => {
@@ -3439,7 +3454,7 @@ fn insert_md_block<F: XmlFragment>(
             for (item_index, (checked, item)) in items.iter().enumerate() {
                 let li = el.insert(txn, item_index as u32, XmlElementPrelim::empty("taskItem"));
                 li.insert_attribute(txn, "checked", *checked);
-                insert_md_list_item(txn, &li, item, wire_defaults);
+                insert_md_list_item::<_, WIRE_DEFAULTS>(txn, &li, item);
             }
         }
         MdBlock::CodeBlock { language, content } => {
@@ -3472,7 +3487,7 @@ fn insert_md_block<F: XmlFragment>(
                 };
                 for (cell_index, text) in cells.iter().enumerate() {
                     let cell = row.insert(txn, cell_index as u32, XmlElementPrelim::empty(tag));
-                    if wire_defaults {
+                    if WIRE_DEFAULTS {
                         cell.insert_attribute(txn, "colspan", 1_i64);
                         cell.insert_attribute(txn, "rowspan", 1_i64);
                     }
