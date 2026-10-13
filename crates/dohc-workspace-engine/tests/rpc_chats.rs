@@ -5404,7 +5404,7 @@ async fn local_chat_actor_key_message_send_has_a_byte_bound() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn passive_store_pulls_chat_rows_but_rolls_back_local_actor_key_admission() {
+async fn passive_store_pulls_chat_rows_but_refuses_local_actor_key_admission() {
     use dohc_engine_domain::{
         ChatActorKind, ChatThreadLane, LinkedChatStore, SendMessage, StartChannelThread,
     };
