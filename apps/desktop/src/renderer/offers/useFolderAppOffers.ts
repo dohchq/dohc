@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { FolderAppAnswer } from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
 import { dirnameOf } from "../path";
-import { isVirtualTabPath } from "../workbench/workbenchState";
+import { TAB_KINDS, parseTab } from "../workbench/workbenchState";
 import { observeFolderAppOffers, readFolderAppOffer, type OfferWorkspaceToken } from "./folderApp";
 
 export type FolderApps = ReadonlyMap<string, FolderAppAnswer>;
@@ -32,7 +32,7 @@ export function useFolderAppOffers(input: {
   const failing = useRef(new Set<string>());
   const onError = useRef(input.onError);
   onError.current = input.onError;
-  const activeFolder = input.activePath && !isVirtualTabPath(input.activePath)
+  const activeFolder = input.activePath && !TAB_KINDS[parseTab(input.activePath).kind].virtual
     ? dirnameOf(input.activePath) || null
     : null;
   const activeFolderRef = useRef(activeFolder);
