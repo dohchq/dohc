@@ -3,6 +3,7 @@
 
 mod common;
 
+use base64::Engine as _;
 use common::*;
 use std::collections::{BTreeMap, HashMap};
 use std::io::{Read, Write};
@@ -91,34 +92,97 @@ impl HostedRelay {
         self.revision += 1;
     }
 
+    fn unshare(&mut self, object_id: &str) {
+        self.shared.remove(object_id);
+        self.revision += 1;
+    }
+
     /// A text write that creates `object_id`, with its bytes on the relay.
     fn create(&mut self, origin: &str, seq: i64, object_id: &str, path: &str, text: &str) {
+        self.write(
+            origin,
+            seq,
+            object_id,
+            path,
+            text,
+            json!({"beforePresent": "absent"}),
+        );
+    }
+
+    /// A text write of `object_id` at `path` replacing another object's head
+    /// there: its id, text and latest moment. The relay holds only the after
+    /// bytes.
+    fn replace(
+        &mut self,
+        origin: &str,
+        seq: i64,
+        object_id: &str,
+        path: &str,
+        text: &str,
+        before: (&str, &str, &str),
+    ) {
+        let (before_object_id, before_text, before_moment_id) = before;
+        let before_sha256 = hex_sha256(before_text.as_bytes());
+        self.write(
+            origin,
+            seq,
+            object_id,
+            path,
+            text,
+            json!({
+                "payloadBeforeBlobSha256": before_sha256,
+                "payloadBeforePath": path,
+                "beforePresent": "present",
+                "beforeObjectId": before_object_id,
+                "beforeVersionId": "main",
+                "beforePath": path,
+                "beforeBlobSha256": before_sha256,
+                "beforeContentKind": "text",
+                "beforeUpdatedAtMs": 1_500,
+                "beforeLatestMomentId": before_moment_id,
+                "beforeMetadata": {"origin": "sync"}
+            }),
+        );
+    }
+
+    fn write(
+        &mut self,
+        origin: &str,
+        seq: i64,
+        object_id: &str,
+        path: &str,
+        text: &str,
+        before: Value,
+    ) {
         let sha256 = hex_sha256(text.as_bytes());
         self.blobs.insert(sha256.clone(), text.as_bytes().to_vec());
         let relay_seq = self.log.len() as i64 + 1;
+        let mut payload = json!({
+            "momentId": format!("moment-{origin}-{seq}"),
+            "versionId": "main",
+            "objectId": object_id,
+            "objectCreatedAtMs": 1,
+            "path": path,
+            "recordedAtMs": 2_000,
+            "operation": "write",
+            "payloadBeforeBlobSha256": null,
+            "payloadBeforePath": null,
+            "payloadAfterBlobSha256": sha256,
+            "payloadAfterPath": path,
+            "payloadAfterContentKind": "text",
+            "payloadAfterByteLength": text.len(),
+            "metadata": {"origin": "sync"}
+        });
+        for (name, value) in before.as_object().expect("before fields") {
+            payload[name] = value.clone();
+        }
         self.log.push(json!({
             "relaySeq": relay_seq,
             "workspaceId": WORKSPACE,
             "originId": origin,
             "originSeq": seq,
             "opKind": "moment.append",
-            "payload": {
-                "momentId": format!("moment-{origin}-{seq}"),
-                "versionId": "main",
-                "objectId": object_id,
-                "objectCreatedAtMs": 1,
-                "path": path,
-                "recordedAtMs": 2_000,
-                "operation": "write",
-                "payloadBeforeBlobSha256": null,
-                "payloadBeforePath": null,
-                "payloadAfterBlobSha256": sha256,
-                "payloadAfterPath": path,
-                "payloadAfterContentKind": "text",
-                "payloadAfterByteLength": text.len(),
-                "metadata": {"origin": "sync"},
-                "beforePresent": "absent"
-            },
+            "payload": payload,
             "recordedAtMs": 1_000 + relay_seq,
         }));
     }
@@ -438,27 +502,36 @@ impl Host {
             .await
     }
 
-    /// Materialize and commit a pass's cursor, answering whether it committed.
-    async fn commit(&mut self, pending: &Value) -> bool {
+    /// Materialize and commit a pass's cursor, answering the commit.
+    async fn commit_answer(&mut self, pending: &Value) -> Value {
         let params = json!({"workspaceId": WORKSPACE, "pendingCursor": pending});
         assert_eq!(
             self.call("sync.materializePendingCursor", params.clone())
                 .await,
             json!({"materialized": true})
         );
-        self.call("sync.commitCursor", params).await["committed"]
+        self.call("sync.commitCursor", params).await
+    }
+
+    /// Materialize and commit a pass's cursor, answering whether it committed.
+    async fn commit(&mut self, pending: &Value) -> bool {
+        self.commit_answer(pending).await["committed"]
             .as_bool()
             .expect("committed")
     }
 
-    /// Pass, materialize and commit until the feed has nothing more.
+    /// Pass, materialize and commit until neither the feed nor a commit has
+    /// anything more.
     async fn sync(&mut self) {
         for _ in 0..16 {
             let pass = self.pull().await;
+            let mut more = pass["hasMore"] == true;
             if pass["pendingCursor"].is_object() {
-                assert!(self.commit(&pass["pendingCursor"]).await);
+                let commit = self.commit_answer(&pass["pendingCursor"]).await;
+                assert_eq!(commit["committed"], true);
+                more |= commit["hasMore"] == true;
             }
-            if pass["hasMore"] == false {
+            if !more {
                 return;
             }
         }
@@ -624,6 +697,152 @@ async fn a_hosted_replica_pulls_its_documents_and_pushes_live_writes_to_the_host
             "invalid-input: a hosted replica pulls with pull_hosted_workspace".to_owned()
         )
     );
+}
+
+/// A document that leaves the scope retires once nothing of it is pending:
+/// its rows and its file go, and the document that replaced it at its path
+/// takes it. A file holding anything but its head is a bug in a service
+/// root, so retirement stops and names it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_departed_document_retires_and_frees_its_file_for_its_replacement() {
+    let mut relay = HostedRelay::default();
+    relay.log.push(json!({
+        "relaySeq": 1, "workspaceId": WORKSPACE, "originId": "owner", "originSeq": 0,
+        "opKind": "workspace.init", "payload": {}, "recordedAtMs": 1_001,
+    }));
+    relay.create("owner", 1, "doc-b", "a.md", "hosted b");
+    relay.share("doc-b", "a.md");
+    let relay = FakeRelay::start(relay);
+    let scratch = ScratchDir::new().expect("scratch");
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let handle = open_workspace(&transport, &scratch, &relay).await;
+    let mut host = Host {
+        transport,
+        handle,
+        id: 1,
+    };
+    host.create().await;
+    host.sync().await;
+    let file = scratch.path().join("a.md");
+    assert_eq!(std::fs::read_to_string(&file).expect("a.md"), "hosted b");
+
+    {
+        let mut relay = relay.relay();
+        relay.unshare("doc-b");
+        relay.replace(
+            "owner",
+            2,
+            "doc-a",
+            "a.md",
+            "hosted a",
+            ("doc-b", "hosted b", "moment-owner-1"),
+        );
+        relay.share("doc-a", "a.md");
+    }
+    std::fs::write(&file, "not the head").expect("write a.md");
+    let (code, message) = host.error("sync.pullHosted").await;
+    assert_eq!(code, ErrorCode::Internal);
+    assert!(
+        message.contains("hosted-file-unexpected: a.md"),
+        "{message}"
+    );
+    assert_eq!(document_state(&scratch, "doc-b").as_deref(), Some("ready"));
+    assert_eq!(
+        std::fs::read_to_string(&file).expect("a.md"),
+        "not the head"
+    );
+
+    // With its head back on disk, doc-b retires after the next commit, and
+    // doc-a's waiting write applies and takes the path.
+    std::fs::write(&file, "hosted b").expect("write a.md");
+    host.sync().await;
+    assert_eq!(std::fs::read_to_string(&file).expect("a.md"), "hosted a");
+    assert_eq!(document_state(&scratch, "doc-b"), None);
+    assert_eq!(document_state(&scratch, "doc-a").as_deref(), Some("ready"));
+    let conn = Connection::open(engine_db_path(&scratch).expect("db path")).expect("open db");
+    let (objects, conflicts): (i64, i64) = conn
+        .query_row(
+            "SELECT (SELECT COUNT(*) FROM file_objects WHERE object_id='doc-b'), \
+                    (SELECT COUNT(*) FROM conflicts)",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("count");
+    assert_eq!((objects, conflicts), (0, 0));
+}
+
+/// The slice-3 re-review's first reproduction, through a live session:
+/// `doc-b` has an unsettled edit when the scope moves to `doc-a`. It keeps
+/// its head and its file while its session holds that edit, and retires once
+/// the edit settles, the relay has the host's rows and the session closes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_departed_document_keeps_its_head_until_its_session_settles() {
+    let mut relay = HostedRelay::default();
+    relay.log.push(json!({
+        "relaySeq": 1, "workspaceId": WORKSPACE, "originId": "owner", "originSeq": 0,
+        "opKind": "workspace.init", "payload": {}, "recordedAtMs": 1_001,
+    }));
+    relay.create("owner", 1, "doc-b", "a.txt", "hosted b");
+    relay.share("doc-b", "a.txt");
+    let relay = FakeRelay::start(relay);
+    let scratch = ScratchDir::new().expect("scratch");
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let handle = open_workspace(&transport, &scratch, &relay).await;
+    let mut host = Host {
+        transport,
+        handle,
+        id: 1,
+    };
+    host.create().await;
+    host.sync().await;
+    let opened = host
+        .call(
+            "ydoc.open",
+            json!({"versionId": "main", "path": "a.txt", "contentKind": "plaintext",
+                "seedFromArtifact": false}),
+        )
+        .await;
+    let session = opened["sessionId"].clone();
+    let edit = base64::engine::general_purpose::STANDARD
+        .encode(dohc_engine_collab::Ydoc::wire().plaintext_insert(0, "unsettled "));
+    host.call(
+        "ydoc.recordUpdate",
+        json!({"sessionId": session, "updateBase64": edit}),
+    )
+    .await;
+    // Nothing waits for the relay, so only the session keeps doc-b.
+    assert_eq!(
+        host.call("sync.push", json!({"workspaceId": WORKSPACE}))
+            .await["pushed"],
+        0
+    );
+
+    {
+        let mut relay = relay.relay();
+        relay.unshare("doc-b");
+        relay.replace(
+            "owner",
+            2,
+            "doc-a",
+            "a.txt",
+            "hosted a",
+            ("doc-b", "hosted b", "moment-owner-1"),
+        );
+        relay.share("doc-a", "a.txt");
+    }
+    host.sync().await;
+    let file = scratch.path().join("a.txt");
+    assert_eq!(document_state(&scratch, "doc-b").as_deref(), Some("ready"));
+    assert_eq!(std::fs::read_to_string(&file).expect("a.txt"), "hosted b");
+
+    host.call("ydoc.settle", json!({"sessionId": session}))
+        .await;
+    host.call("ydoc.close", json!({"sessionId": session})).await;
+    host.call("sync.push", json!({"workspaceId": WORKSPACE}))
+        .await;
+    host.sync().await;
+    assert_eq!(document_state(&scratch, "doc-b"), None);
+    assert_eq!(std::fs::read_to_string(&file).expect("a.txt"), "hosted a");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

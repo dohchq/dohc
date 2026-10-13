@@ -10,7 +10,9 @@
 //! Its fetch position lives here too, never in `sync_relay_cursors`: one main
 //! cursor, frozen while any document backfills, and one backfill cursor per
 //! document. A document is in scope while its row carries the replica's scope
-//! generation; one that left keeps its state for removal.
+//! generation; one that left keeps its state until it retires.
+
+mod retirement;
 
 use std::collections::BTreeMap;
 
@@ -18,6 +20,11 @@ use dohc_engine_storage::{EngineStore, FaultInjector, TxnOutcome};
 use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::{ReplicationEnvelope, SyncError};
+
+pub use retirement::{
+    DepartedDocument, DepartedHead, departed_hosted_documents, hosted_document_retirable,
+    retire_hosted_document,
+};
 
 /// The origin prefix the relay reserves for a service host's writes.
 pub const SERVICE_HOST_ORIGIN_PREFIX: &str = "service-host:";
@@ -27,6 +34,10 @@ pub(crate) const NOT_A_HOSTED_REPLICA: &str = "workspace is not a hosted replica
 /// A conflict child whose `conflict.resolve` parent the feed withheld. The
 /// child waits in deferred work until the relay serves what it needs.
 pub(crate) const CONFLICT_PARENT_WITHHELD: &str = "hosted-conflict-parent-withheld";
+
+/// A moment whose path a document outside the scope still holds here. It
+/// waits in deferred work until that document retires.
+pub(crate) const PATH_HELD_BY_DEPARTED: &str = "hosted-path-held-by-departed";
 
 pub(crate) fn is_hosted(conn: &Connection, workspace_id: &str) -> Result<bool, SyncError> {
     conn.query_row(
@@ -107,6 +118,16 @@ fn document_named<'a>(op_kind: &str, payload: &'a serde_json::Value) -> Option<&
     .as_str()
 }
 
+/// [`document_named`] over a `replication_log` row's `op_kind` and
+/// `payload_json`.
+const DOCUMENT_NAMED_SQL: &str = "CASE op_kind \
+    WHEN 'moment.append' THEN json_extract(payload_json,'$.objectId') \
+    WHEN 'ydoc.update' THEN json_extract(payload_json,'$.objectId') \
+    WHEN 'live.audit.application' THEN json_extract(payload_json,'$.objectId') \
+    WHEN 'live.audit.settlement' THEN json_extract(payload_json,'$.record.binding.objectId') \
+    WHEN 'live.audit.base' \
+      THEN json_extract(payload_json,'$.record.checkpoint.binding.objectId') END";
+
 /// The before side of a hosted moment that replaced an object the feed
 /// withholds, as the moment's row states it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -179,48 +200,33 @@ pub(crate) fn forget_before(payload: &mut serde_json::Value) {
     fields.insert("beforePresent".to_owned(), "null".into());
 }
 
-/// Clear `path` of every head this replica holds for an object outside the
-/// current scope, so the hosted document `object_id` arriving there is the
-/// path's only occupant. The feed withholds those objects, so here they never
-/// held it. Each keeps its history, journal rows, retained work and live
-/// document state for its removal. An ordinary replica clears nothing.
-pub(crate) fn clear_withheld_occupants_in_tx(
+/// Hold back a moment that would take `path` while a hosted document that
+/// left the scope still holds it here. That document may still settle work
+/// against its head there, so the path stays its own until it retires; the
+/// moment waits in deferred work and applies after. An ordinary replica
+/// holds nothing back.
+pub(crate) fn wait_for_departed_occupant_in_tx(
     tx: &rusqlite::Transaction<'_>,
     workspace_id: &str,
     version_id: &str,
     object_id: &str,
     path: &str,
 ) -> Result<(), SyncError> {
-    if !is_hosted(tx, workspace_id)? {
-        return Ok(());
-    }
-    let withheld = tx
-        .prepare(
-            "SELECT s.object_id FROM snapshots s \
-             JOIN hosted_replicas h ON h.workspace_id=s.workspace_id \
+    let held: bool = tx
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM snapshots s \
+             JOIN hosted_documents d ON d.workspace_id=s.workspace_id AND d.object_id=s.object_id \
+             JOIN hosted_replicas h ON h.workspace_id=d.workspace_id \
              WHERE s.workspace_id=?1 AND s.version_id=?2 AND s.path=?3 AND s.object_id<>?4 \
-               AND NOT EXISTS(SELECT 1 FROM hosted_documents d \
-                 WHERE d.workspace_id=s.workspace_id AND d.object_id=s.object_id \
-                   AND d.scope_generation=h.scope_generation)",
+               AND d.scope_generation<>h.scope_generation)",
+            params![workspace_id, version_id, path, object_id],
+            |row| row.get(0),
         )
-        .map_err(SyncError::corrupt)?
-        .query_map(params![workspace_id, version_id, path, object_id], |row| {
-            row.get::<_, String>(0)
-        })
-        .map_err(SyncError::corrupt)?
-        .collect::<Result<Vec<_>, _>>()
         .map_err(SyncError::corrupt)?;
-    for occupant in withheld {
-        for table in ["path_aliases", "snapshots"] {
-            tx.execute(
-                &format!(
-                    "DELETE FROM {table} WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3"
-                ),
-                params![workspace_id, version_id, occupant],
-            )
-            .map_err(SyncError::persist)?;
-        }
-        crate::file_search::delete_file_search_index(tx, workspace_id, version_id, &occupant)?;
+    if held {
+        return Err(SyncError::RetryableState {
+            reason: PATH_HELD_BY_DEPARTED,
+        });
     }
     Ok(())
 }

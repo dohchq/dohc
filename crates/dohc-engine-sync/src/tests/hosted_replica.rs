@@ -550,6 +550,50 @@ impl HostedFeed {
         ));
     }
 
+    /// A rename of `object_id`, holding `text`, from `from` to `to`. Its
+    /// before side is the object's own head, last written by `before_moment_id`.
+    #[allow(clippy::too_many_arguments)]
+    fn rename(
+        &self,
+        origin: &str,
+        seq: i64,
+        object_id: &str,
+        from: &str,
+        to: &str,
+        text: &str,
+        before_moment_id: &str,
+    ) {
+        let sha = dohc_engine_storage::hex_sha256(text.as_bytes());
+        self.append(envelope(
+            origin,
+            seq,
+            "moment.append",
+            json!({
+                "momentId": format!("moment-{origin}-{seq}"),
+                "versionId": "main",
+                "objectId": object_id,
+                "objectCreatedAtMs": 1,
+                "path": to,
+                "recordedAtMs": 2_000,
+                "operation": "rename",
+                "payloadBeforeBlobSha256": sha,
+                "payloadBeforePath": from,
+                "payloadAfterBlobSha256": sha,
+                "payloadAfterPath": to,
+                "metadata": {"origin": "sync"},
+                "beforePresent": "present",
+                "beforeObjectId": object_id,
+                "beforeVersionId": "main",
+                "beforePath": from,
+                "beforeBlobSha256": sha,
+                "beforeContentKind": "text",
+                "beforeUpdatedAtMs": 1_500,
+                "beforeLatestMomentId": before_moment_id,
+                "beforeMetadata": {"origin": "sync"}
+            }),
+        ));
+    }
+
     fn pull_requests(&self) -> Vec<HostedPullRequest> {
         self.pulls.lock().unwrap().clone()
     }
@@ -859,6 +903,67 @@ fn sync(client: &RelaySyncClient<HostedFeed>, store: &mut EngineStore) {
         }
     }
     panic!("the hosted replica did not catch up");
+}
+
+/// Retire every departed document that can retire. Answers whether one did.
+fn retire(store: &mut EngineStore) -> bool {
+    let mut retired = false;
+    for document in departed_hosted_documents(store, "ws").unwrap() {
+        retired |= retire_hosted_document(store, "ws", &document.object_id, &NoFaults).unwrap()
+            == TxnOutcome::Committed(true);
+    }
+    retired
+}
+
+/// [`sync`], retiring where the runtime does: after a pass that adopted a
+/// scope, and after each commit. A retirement leaves more to pull.
+fn sync_retiring(client: &RelaySyncClient<HostedFeed>, store: &mut EngineStore) {
+    for _ in 0..64 {
+        let outcome = pass(client, store, &NoFaults).unwrap();
+        commit(client, store, &outcome);
+        if !retire(store) && !outcome.has_more {
+            return;
+        }
+    }
+    panic!("the hosted replica did not catch up");
+}
+
+/// The tables with an `object_id` column that still hold a row of
+/// `object_id`, so a table added later is checked too.
+fn holding(store: &EngineStore, object_id: &str) -> Vec<String> {
+    store
+        .read_with(|conn| {
+            let tables = conn
+                .prepare(
+                    "SELECT name FROM sqlite_schema s WHERE type='table' \
+                     AND EXISTS(SELECT 1 FROM pragma_table_info(s.name) WHERE name='object_id')",
+                )?
+                .query_map([], |row| row.get::<_, String>(0))?
+                .collect::<Result<Vec<_>, _>>()?;
+            let mut holding = Vec::new();
+            for table in tables {
+                let rows: i64 = conn.query_row(
+                    &format!("SELECT COUNT(*) FROM \"{table}\" WHERE object_id=?1"),
+                    [object_id],
+                    |row| row.get(0),
+                )?;
+                if rows > 0 {
+                    holding.push(table);
+                }
+            }
+            Ok::<_, rusqlite::Error>(holding)
+        })
+        .unwrap()
+}
+
+fn has_blob(store: &EngineStore, sha256: &str) -> bool {
+    count(
+        store,
+        &format!(
+            "SELECT EXISTS(SELECT 1 FROM blobs WHERE sha256='{sha256}') \
+             OR EXISTS(SELECT 1 FROM binary_blobs WHERE sha256='{sha256}')"
+        ),
+    ) == 1
 }
 
 fn replica(store: &EngineStore) -> HostedReplicaState {
@@ -1347,8 +1452,11 @@ fn retained_work_of_a_removed_document_leaves_a_hosted_one_free() {
     assert_eq!(
         retained(&store),
         500,
-        "the removed document's work waits for its removal"
+        "the removed document's work waits for its retirement"
     );
+    assert!(retire(&mut store));
+    assert_eq!(retained(&store), 0);
+    assert!(holding(&store, "gone").is_empty());
 }
 
 /// Documents take turns at the replay page, so one whose work stays held
@@ -1865,13 +1973,14 @@ fn a_moment_that_replaced_a_withheld_object_applies_as_a_create() {
     );
 }
 
-/// The slice-3 review's first reproduction: `doc-b` held `a.md` while hosted,
-/// then the scope moved to `doc-a`, whose moment replaced it. The host still
-/// held `doc-b`'s head there, so the moment opened an occupancy conflict and
-/// `doc-a` never became the path's head.
-#[test]
-fn a_withheld_replacement_takes_the_path_from_an_object_that_left_the_scope() {
-    let (_scratch, _path, mut store) = hosted_store();
+/// `doc-b` is hosted at `a.md` and synced.
+fn departing_b() -> (
+    ScratchDir,
+    std::path::PathBuf,
+    EngineStore,
+    RelaySyncClient<HostedFeed>,
+) {
+    let (scratch, path, mut store) = hosted_store();
     let client = RelaySyncClient::new(HostedFeed::new());
     let feed = client.transport();
     feed.append(envelope("owner", 0, "workspace.init", json!({})));
@@ -1882,7 +1991,11 @@ fn a_withheld_replacement_takes_the_path_from_an_object_that_left_the_scope() {
         content(&store).0,
         BTreeMap::from([("doc-b".to_owned(), "hosted b".to_owned())])
     );
+    (scratch, path, store, client)
+}
 
+/// `doc-b` leaves the scope, and `doc-a` replaces it at `a.md`.
+fn replace_b_with_a(feed: &HostedFeed) {
     feed.unshare("doc-b");
     feed.replace(
         "owner",
@@ -1893,20 +2006,52 @@ fn a_withheld_replacement_takes_the_path_from_an_object_that_left_the_scope() {
         ("doc-b", "hosted b", "moment-owner-1"),
     );
     feed.share("doc-a", "a.md");
-    sync(&client, &mut store);
+}
 
-    let (heads, moments) = content(&store);
-    assert_eq!(
-        heads,
-        BTreeMap::from([("doc-a".to_owned(), "hosted a".to_owned())])
+fn heads(entries: &[(&str, &str)]) -> BTreeMap<String, String> {
+    entries
+        .iter()
+        .map(|(object_id, text)| ((*object_id).to_owned(), (*text).to_owned()))
+        .collect()
+}
+
+/// The slice-3 re-review's first finding: clearing `a.md` for `doc-a` dropped
+/// the head `doc-b`'s unsettled work still needed. `doc-a`'s moments now
+/// wait, in order, until `doc-b` retires, and then apply as a create and its
+/// edit, with nothing of `doc-b` left behind.
+#[test]
+fn a_replacement_waits_for_the_departed_document_holding_its_path() {
+    let (_scratch, _path, mut store, client) = departing_b();
+    let feed = client.transport();
+    replace_b_with_a(feed);
+    feed.replace(
+        "owner",
+        3,
+        "doc-a",
+        "a.md",
+        "edited a",
+        ("doc-a", "hosted a", "moment-owner-2"),
     );
+    sync(&client, &mut store);
+    assert_eq!(content(&store).0, heads(&[("doc-b", "hosted b")]));
+    assert_eq!(retained(&store), 2, "the edit waits behind the create");
+
+    sync_retiring(&client, &mut store);
+    let (now, moments) = content(&store);
+    assert_eq!(now, heads(&[("doc-a", "edited a")]));
+    assert_eq!(
+        moments,
+        BTreeMap::from([
+            ("moment-owner-2".to_owned(), 1),
+            ("moment-owner-3".to_owned(), 1)
+        ])
+    );
+    assert_eq!(retained(&store), 0);
     assert_eq!(count(&store, "SELECT COUNT(*) FROM conflicts"), 0);
     assert_eq!(
-        count(
-            &store,
-            "SELECT COUNT(*) FROM path_aliases WHERE path='a.md' AND object_id='doc-a'"
-        ),
-        1
+        stored_before(&store, "moment-owner-2"),
+        (1, None, None, None),
+        "the host's history records a create"
     );
     assert_eq!(
         withheld_befores(&store),
@@ -1918,13 +2063,238 @@ fn a_withheld_replacement_takes_the_path_from_an_object_that_left_the_scope() {
             "text".to_owned()
         )]
     );
-    // What the departed document needs for its removal stays.
+    assert!(holding(&store, "doc-b").is_empty());
     assert_eq!(
-        moments,
-        BTreeMap::from([
-            ("moment-owner-1".to_owned(), 1),
-            ("moment-owner-2".to_owned(), 1)
-        ])
+        coordinates(&store),
+        [
+            ("owner".to_owned(), 0),
+            ("owner".to_owned(), 2),
+            ("owner".to_owned(), 3)
+        ]
+    );
+    assert!(!has_blob(&store, &text_sha("hosted b")));
+    assert!(departed_hosted_documents(&store, "ws").unwrap().is_empty());
+}
+
+/// Accepted live work of `object_id` at journal cursor 7, past any
+/// settlement, as the session host applied it.
+fn accept_live_work(store: &mut EngineStore, object_id: &str) -> String {
+    let update = dohc_engine_storage::hex_sha256(b"live update");
+    store
+        .write_with(&NoFaults, |tx| {
+            dohc_engine_storage::put_binary_blob(tx, b"live update").map_err(SyncError::Storage)?;
+            tx.execute_batch(&format!(
+                "INSERT INTO live_device_application_bindings VALUES \
+                   ('relay','ws','main','{object_id}','lineage','a.md','[]',0,'host',1,'instance', \
+                    'connection',1); \
+                 INSERT INTO live_device_update_applications (relay_database_namespace,workspace_id, \
+                   delivery_id,main_version_id,object_id,lineage_claim_id,current_path, \
+                   selector_paths_json,restore_fence_generation,update_digest,update_byte_length, \
+                   journal_cursor,accepting_host_epoch,principal_kind,principal_id,received_at_ms, \
+                   first_seen_count,local_ydoc_sequence,applied_host_id,applied_host_epoch, \
+                   applied_instance_id,applied_connection_id) VALUES \
+                   ('relay','ws','delivery','main','{object_id}','lineage','a.md','[]',0,'{update}', \
+                    11,7,1,'owner','owner',0,0,1,'host',1,'instance','connection'); \
+                 INSERT INTO live_device_application_first_seen VALUES \
+                   ('relay','ws','delivery',0,1,0,1);"
+            ))
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .unwrap();
+    update
+}
+
+/// The settlement of `object_id`'s accepted work through journal cursor 7.
+fn settle_live_work(store: &mut EngineStore, object_id: &str) {
+    let digest = "d".repeat(64);
+    store
+        .write_with(&NoFaults, |tx| {
+            tx.execute_batch(&format!(
+                "INSERT INTO live_device_settlements (settlement_id,relay_database_namespace, \
+                   workspace_id,main_version_id,object_id,lineage_claim_id,previous_cursor, \
+                   terminal_cursor,previous_ydoc_sequence,local_ydoc_sequence,application_count, \
+                   interval_digest,moment_id,markdown_digest,source_state_vector_digest, \
+                   binding_json,host_coordinate_json,recorded_at_ms) VALUES \
+                   ('settlement','relay','ws','main','{object_id}','lineage',0,7,0,1,1, \
+                    '{digest}','settled','{digest}','{digest}','{{}}','{{}}',0)"
+            ))
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .unwrap();
+}
+
+/// The slice-3 re-review's first reproduction: `doc-b` has accepted,
+/// unsettled live work when the scope moves to `doc-a`. `doc-b` keeps its
+/// head until that work settles and the relay holds every row the host wrote
+/// for it; only then does it retire and `doc-a` take the path.
+#[test]
+fn a_departed_document_keeps_its_head_until_its_work_settles() {
+    let (_scratch, _path, mut store, client) = departing_b();
+    let update = accept_live_work(&mut store, "doc-b");
+    for (kind, payload) in [
+        ("ydoc.update", json!({"objectId": "doc-b"})),
+        ("moment.append", json!({"objectId": "doc-b"})),
+        ("live.audit.application", json!({"objectId": "doc-b"})),
+        (
+            "live.audit.settlement",
+            json!({"record": {"binding": {"objectId": "doc-b"}}}),
+        ),
+        (
+            "live.audit.base",
+            json!({"record": {"checkpoint": {"binding": {"objectId": "doc-b"}}}}),
+        ),
+    ] {
+        store
+            .write_with(&NoFaults, |tx| {
+                journal_local_op_in_tx(tx, "ws", kind, &payload, 3_000)
+            })
+            .unwrap();
+    }
+    replace_b_with_a(client.transport());
+
+    sync_retiring(&client, &mut store);
+    assert_eq!(content(&store).0, heads(&[("doc-b", "hosted b")]));
+    assert_eq!(retained(&store), 1, "doc-a waits");
+    assert!(!hosted_document_retirable(&store, "ws", "doc-b").unwrap());
+
+    // The work settles; the rows the host wrote are not acknowledged yet.
+    settle_live_work(&mut store, "doc-b");
+    sync_retiring(&client, &mut store);
+    assert_eq!(content(&store).0, heads(&[("doc-b", "hosted b")]));
+    assert!(!hosted_document_retirable(&store, "ws", "doc-b").unwrap());
+
+    store
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT INTO sync_relay_push_state (workspace_id,origin_id,pushed_seq) \
+                 VALUES ('ws',?1,4)",
+                [HOST],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .unwrap();
+    sync_retiring(&client, &mut store);
+    assert_eq!(content(&store).0, heads(&[("doc-a", "hosted a")]));
+    assert_eq!(retained(&store), 0);
+    assert!(holding(&store, "doc-b").is_empty());
+    assert_eq!(
+        coordinates(&store),
+        [("owner".to_owned(), 0), ("owner".to_owned(), 2)],
+        "every row naming doc-b goes, the host's own too"
+    );
+    assert_eq!(
+        count(
+            &store,
+            "SELECT COUNT(*) FROM live_device_application_first_seen"
+        ),
+        0
+    );
+    assert!(!has_blob(&store, &update));
+}
+
+#[test]
+fn retirement_is_all_or_nothing_and_idempotent() {
+    let (_scratch, path, mut store, client) = departing_b();
+    client.transport().unshare("doc-b");
+    sync(&client, &mut store);
+    let before = (
+        content(&store),
+        coordinates(&store),
+        holding(&store, "doc-b"),
+    );
+    assert!(!before.2.is_empty());
+
+    let crash = ScriptedFaults::crash_at(FaultPoint::StorageBeforePersist);
+    assert_eq!(
+        retire_hosted_document(&mut store, "ws", "doc-b", crash.as_ref()).unwrap(),
+        TxnOutcome::Crashed { committed: false }
+    );
+    drop(store);
+    let mut store = EngineStore::open(&path, 3_000).unwrap();
+    assert_eq!(
+        (
+            content(&store),
+            coordinates(&store),
+            holding(&store, "doc-b")
+        ),
+        before
+    );
+
+    assert_eq!(
+        retire_hosted_document(&mut store, "ws", "doc-b", &NoFaults).unwrap(),
+        TxnOutcome::Committed(true)
+    );
+    assert!(holding(&store, "doc-b").is_empty());
+    assert_eq!(
+        retire_hosted_document(&mut store, "ws", "doc-b", &NoFaults).unwrap(),
+        TxnOutcome::Committed(false),
+        "nothing is left to retire"
+    );
+    assert!(!retire(&mut store));
+}
+
+#[test]
+fn retirement_keeps_bytes_another_document_holds() {
+    let (_scratch, _path, mut store) = hosted_store();
+    let client = RelaySyncClient::new(HostedFeed::new());
+    let feed = client.transport();
+    feed.append(envelope("owner", 0, "workspace.init", json!({})));
+    feed.create("owner", 1, "doc-a", "a.md", "shared text");
+    feed.create("owner", 2, "doc-b", "b.md", "shared text");
+    feed.replace(
+        "owner",
+        3,
+        "doc-b",
+        "b.md",
+        "only b",
+        ("doc-b", "shared text", "moment-owner-2"),
+    );
+    feed.share("doc-a", "a.md");
+    feed.share("doc-b", "b.md");
+    sync(&client, &mut store);
+
+    feed.unshare("doc-b");
+    sync_retiring(&client, &mut store);
+    assert!(holding(&store, "doc-b").is_empty());
+    assert_eq!(content(&store).0, heads(&[("doc-a", "shared text")]));
+    assert!(has_blob(&store, &text_sha("shared text")));
+    assert!(!has_blob(&store, &text_sha("only b")));
+}
+
+/// The slice-3 re-review's second finding: a returning document skipped its
+/// journaled creation as a redelivery, so the rename fetched after it found
+/// no head and opened a conflict. `doc-b` retires after it leaves, the owner
+/// moves it to `b.md`, and its return rebuilds it from its first row.
+#[test]
+fn a_document_that_returns_after_retiring_backfills_from_the_start() {
+    let (_scratch, _path, mut store, client) = departing_b();
+    let feed = client.transport();
+    feed.unshare("doc-b");
+    sync_retiring(&client, &mut store);
+    assert!(holding(&store, "doc-b").is_empty());
+
+    feed.rename(
+        "owner",
+        2,
+        "doc-b",
+        "a.md",
+        "b.md",
+        "hosted b",
+        "moment-owner-1",
+    );
+    feed.share("doc-b", "b.md");
+    sync_retiring(&client, &mut store);
+    assert_eq!(content(&store).0, heads(&[("doc-b", "hosted b")]));
+    assert_eq!(count(&store, "SELECT COUNT(*) FROM conflicts"), 0);
+    assert_eq!(
+        count(
+            &store,
+            "SELECT COUNT(*) FROM snapshots WHERE object_id='doc-b' AND path='b.md'"
+        ),
+        1
     );
     assert_eq!(
         coordinates(&store),
@@ -1932,19 +2302,26 @@ fn a_withheld_replacement_takes_the_path_from_an_object_that_left_the_scope() {
             ("owner".to_owned(), 0),
             ("owner".to_owned(), 1),
             ("owner".to_owned(), 2)
-        ]
+        ],
+        "its creation applied again"
+    );
+    let document = document(&store, "doc-b").unwrap();
+    assert!(document.ready);
+    assert_eq!(document.path, "b.md");
+}
+
+#[test]
+fn an_ordinary_replica_has_nothing_to_retire() {
+    let (_scratch, _path, mut ordinary) = open_store();
+    seed_identity(&mut ordinary);
+    assert!(
+        departed_hosted_documents(&ordinary, "ws")
+            .unwrap()
+            .is_empty()
     );
     assert_eq!(
-        count(
-            &store,
-            "SELECT COUNT(*) FROM hosted_documents WHERE object_id='doc-b'"
-        ),
-        1
-    );
-    assert_eq!(
-        document(&store, "doc-b"),
-        None,
-        "it is outside the current scope"
+        retire_hosted_document(&mut ordinary, "ws", "doc-b", &NoFaults).unwrap(),
+        TxnOutcome::Committed(false)
     );
 }
 

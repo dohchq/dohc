@@ -423,7 +423,7 @@ pub fn apply_moment_envelope_detailed(
             return crate::conflict_resolve_v1::verify_imported_conflict_effect_in_tx(tx, envelope);
         }
         if payload.operation != "delete" {
-            crate::hosted::clear_withheld_occupants_in_tx(
+            crate::hosted::wait_for_departed_occupant_in_tx(
                 tx,
                 &envelope.workspace_id,
                 &payload.version_id,
@@ -552,10 +552,19 @@ pub(crate) fn stored_materialization_changes(
 }
 
 fn materialization_decision_id(envelope: &ReplicationEnvelope) -> String {
-    let coordinate = format!(
-        "{}\0{}\0{}",
-        envelope.workspace_id, envelope.origin_id, envelope.origin_seq
-    );
+    materialization_decision_id_at(
+        &envelope.workspace_id,
+        &envelope.origin_id,
+        envelope.origin_seq,
+    )
+}
+
+pub(crate) fn materialization_decision_id_at(
+    workspace_id: &str,
+    origin_id: &str,
+    origin_seq: i64,
+) -> String {
+    let coordinate = format!("{workspace_id}\0{origin_id}\0{origin_seq}");
     format!(
         "sync-materialization:{}",
         dohc_engine_storage::hex_sha256(coordinate.as_bytes())

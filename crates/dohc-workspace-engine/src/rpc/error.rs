@@ -241,6 +241,10 @@ pub(super) fn map_runtime(error: RuntimeError) -> WireError {
         RuntimeError::Relay(RelayError::Partitioned) => {
             return WireError::new(ErrorCode::WorkspaceUnavailable, "relay-unreachable");
         }
+        // Only the session host's service reads it, and it must find the file.
+        RuntimeError::HostedFileUnexpected { .. } => {
+            return WireError::new(ErrorCode::Internal, error.to_string());
+        }
         RuntimeError::SceneAssetDeletePending => {
             return WireError::new(
                 ErrorCode::Overloaded,

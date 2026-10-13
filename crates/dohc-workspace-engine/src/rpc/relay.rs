@@ -482,8 +482,11 @@ fn relay_outcome_json(outcome: RelayOperationOutcome) -> Result<Value, WireError
         RelayOperationOutcome::HostedReplicaCreated => json!({ "hosted": true }),
         RelayOperationOutcome::HostedPass(pass) => hosted_pass_json(pass),
         // A pass fetched under a scope that has since moved commits nothing.
-        RelayOperationOutcome::HostedCursorCommitted(committed) => json!({
+        // A commit that retired a departed document has more to pull: work
+        // that waited for its path.
+        RelayOperationOutcome::HostedCursorCommitted { committed, retired } => json!({
             "committed": committed,
+            "hasMore": retired,
             "sharingDeclined": [],
         }),
         RelayOperationOutcome::ShareViewPulled(outcome) => json!({
@@ -1069,6 +1072,8 @@ impl EngineService {
             IssuedCursor::Hosted(cursor) => RelayOperation::CommitHostedCursor {
                 workspace_id: open.workspace_id.clone(),
                 cursor,
+                root: open.root.clone(),
+                now_ms: now_ms()?,
             },
         };
         let mut outcome = self
@@ -1078,7 +1083,7 @@ impl EngineService {
             open.request_collection_reconcile();
         }
         // A hosted replica takes no part in enrollment.
-        if matches!(outcome, RelayOperationOutcome::HostedCursorCommitted(_)) {
+        if matches!(outcome, RelayOperationOutcome::HostedCursorCommitted { .. }) {
             return relay_outcome_json(outcome);
         }
         // A cursor commit can be what makes enrollment ready, as a push can.
@@ -1300,7 +1305,9 @@ impl EngineService {
     /// new scope applies nothing and has no `pendingCursor`: pull again.
     /// Otherwise materialize its `pendingCursor` with
     /// `sync.materializePendingCursor`, then commit it with
-    /// `sync.commitCursor`, and pull again while `hasMore`.
+    /// `sync.commitCursor`, and pull again while the pass or the commit
+    /// answers `hasMore`. Adopting a scope and committing also retire the
+    /// documents that left the scope.
     pub(super) async fn sync_pull_hosted(
         &self,
         ctx: &RequestContext,
@@ -1317,6 +1324,8 @@ impl EngineService {
                 configuration,
                 RelayOperation::PullHosted {
                     workspace_id: open.workspace_id.clone(),
+                    root: open.root.clone(),
+                    now_ms: now_ms()?,
                 },
                 "sync.pullHosted",
             )

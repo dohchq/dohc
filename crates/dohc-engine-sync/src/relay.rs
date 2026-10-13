@@ -4098,13 +4098,16 @@ pub(crate) fn take_canonical_json_call_count() -> usize {
 }
 
 /// Whether a held op is retained across passes, so the cursor can move past
-/// it: work behind a live session, and a hosted conflict child whose parent
-/// the feed withheld.
+/// it: work behind a live session, a hosted conflict child whose parent the
+/// feed withheld, and a hosted moment whose path waits for a departed
+/// document to retire.
 fn retained_while_held(op: &ReplicationEnvelope, reason: &str) -> bool {
     matches!(op.op_kind.as_str(), "conflict.resolve" | "moment.append")
         && matches!(
             reason,
-            "ydoc-session-live" | crate::hosted::CONFLICT_PARENT_WITHHELD
+            "ydoc-session-live"
+                | crate::hosted::CONFLICT_PARENT_WITHHELD
+                | crate::hosted::PATH_HELD_BY_DEPARTED
         )
 }
 

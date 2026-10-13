@@ -154,13 +154,19 @@ pub enum RelayOperation {
         created_at_ms: i64,
     },
     /// One pass of the hosted feed. Its cursor commits with
-    /// `CommitHostedCursor` once its changed paths are materialized.
+    /// `CommitHostedCursor` once its changed paths are materialized. A pass
+    /// that adopts a new scope, and every commit, then retire the documents
+    /// that left the scope, as `root` holds them.
     PullHosted {
         workspace_id: String,
+        root: std::path::PathBuf,
+        now_ms: i64,
     },
     CommitHostedCursor {
         workspace_id: String,
         cursor: HostedCursor,
+        root: std::path::PathBuf,
+        now_ms: i64,
     },
 }
 
@@ -184,7 +190,7 @@ impl RelayOperation {
             | Self::PushDirectWrites { workspace_id, .. }
             | Self::CommitShareViewCursor { workspace_id, .. }
             | Self::CreateHostedReplica { workspace_id, .. }
-            | Self::PullHosted { workspace_id }
+            | Self::PullHosted { workspace_id, .. }
             | Self::CommitHostedCursor { workspace_id, .. } => workspace_id,
         }
     }
@@ -1659,8 +1665,14 @@ pub enum RelayOperationOutcome {
     DirectWritesPushed(DirectWritePushOutcome),
     HostedReplicaCreated,
     HostedPass(HostedPassOutcome),
-    /// `false` when the scope moved since the pass fetched; nothing committed.
-    HostedCursorCommitted(bool),
+    HostedCursorCommitted {
+        /// `false` when the scope moved since the pass fetched; nothing
+        /// committed.
+        committed: bool,
+        /// A document that left the scope retired, so work that waited for
+        /// its path can apply: pull again.
+        retired: bool,
+    },
 }
 
 /// What a share view's identity call settled on, including the answer the
@@ -2517,20 +2529,131 @@ fn run_relay_operation(
             TxnOutcome::Committed(_) => Ok(RelayOperationOutcome::HostedReplicaCreated),
             TxnOutcome::Crashed { .. } => Err(RuntimeError::OperationCrashed),
         },
-        RelayOperation::PullHosted { workspace_id } => client
-            .pull_hosted_workspace(store, doc_cache, &workspace_id, &NoFaults, leases)
-            .map(RelayOperationOutcome::HostedPass)
-            .map_err(RuntimeError::from),
+        RelayOperation::PullHosted {
+            workspace_id,
+            root,
+            now_ms,
+        } => {
+            let pass =
+                client.pull_hosted_workspace(store, doc_cache, &workspace_id, &NoFaults, leases)?;
+            // A pass without a cursor adopted a new scope.
+            if pass.pending_cursor.is_none() {
+                retire_departed_hosted(store, doc_cache, leases, &workspace_id, &root, now_ms)?;
+            }
+            Ok(RelayOperationOutcome::HostedPass(pass))
+        }
         RelayOperation::CommitHostedCursor {
             workspace_id,
             cursor,
+            root,
+            now_ms,
         } => match client.commit_hosted_cursor(store, &workspace_id, &cursor, &NoFaults)? {
-            TxnOutcome::Committed(committed) => {
-                Ok(RelayOperationOutcome::HostedCursorCommitted(committed))
-            }
+            TxnOutcome::Committed(committed) => Ok(RelayOperationOutcome::HostedCursorCommitted {
+                committed,
+                retired: retire_departed_hosted(
+                    store,
+                    doc_cache,
+                    leases,
+                    &workspace_id,
+                    &root,
+                    now_ms,
+                )?,
+            }),
             TxnOutcome::Crashed { .. } => Err(RuntimeError::OperationCrashed),
         },
     }
+}
+
+/// Retire each hosted document that left the scope once nothing of it is
+/// left to settle, deliver or push: no live session holds it, the unload
+/// checks pass, and its file holds its head or nothing. Each retires in its
+/// own transaction; its file goes after. A file holding anything else is a
+/// bug in a service root nothing else writes to, so retirement stops and
+/// names it. Answers whether any document retired.
+fn retire_departed_hosted(
+    store: &mut EngineStore,
+    doc_cache: &mut WriterDocCache,
+    leases: &LeaseRegistry,
+    workspace_id: &str,
+    root: &std::path::Path,
+    now_ms: i64,
+) -> Result<bool, RuntimeError> {
+    let active = dohc_engine_domain::VersionedTextStore::new(store)
+        .get_active_version(workspace_id)?
+        .version_id;
+    let mut retired = false;
+    'departed: for document in dohc_engine_sync::departed_hosted_documents(store, workspace_id)? {
+        let versions = document
+            .heads
+            .iter()
+            .map(|head| &head.version_id)
+            .chain(&document.ydoc_versions)
+            .collect::<std::collections::BTreeSet<_>>();
+        let keys = versions
+            .into_iter()
+            .map(|version_id| {
+                dohc_engine_collab::DocKey::new(workspace_id, version_id, &document.object_id)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        if keys.iter().any(|key| leases.is_held(key))
+            || !dohc_engine_sync::hosted_document_retirable(
+                store,
+                workspace_id,
+                &document.object_id,
+            )?
+        {
+            continue;
+        }
+        for key in &keys {
+            if super::ydoc::ydoc_unload_pending(store, key, root, now_ms)?.is_some() {
+                continue 'departed;
+            }
+        }
+        let files = document
+            .heads
+            .iter()
+            .filter(|head| head.version_id == active)
+            .collect::<Vec<_>>();
+        for head in &files {
+            use dohc_engine_files::ProjectionTargetState as File;
+            match dohc_engine_files::probe_projection_target(
+                root,
+                &head.path,
+                dohc_engine_files::ProjectionTargetKind::Plaintext,
+            ) {
+                File::Absent => {}
+                File::Text { sha256 } | File::Binary { sha256 } if sha256 == head.sha256 => {}
+                _ => {
+                    return Err(RuntimeError::HostedFileUnexpected {
+                        path: head.path.clone(),
+                    });
+                }
+            }
+        }
+        match dohc_engine_sync::retire_hosted_document(
+            store,
+            workspace_id,
+            &document.object_id,
+            &NoFaults,
+        )? {
+            TxnOutcome::Committed(true) => {}
+            TxnOutcome::Committed(false) => continue,
+            TxnOutcome::Crashed { .. } => return Err(RuntimeError::OperationCrashed),
+        }
+        retired = true;
+        for key in &keys {
+            doc_cache.remove(key);
+            doc_cache.unpin(key);
+        }
+        for head in files {
+            if !dohc_engine_files::remove_file_holding(root, &head.path, &head.sha256)? {
+                return Err(RuntimeError::HostedFileUnexpected {
+                    path: head.path.clone(),
+                });
+            }
+        }
+    }
+    Ok(retired)
 }
 
 /// The level gate on share-view enrolment, read at the one place
