@@ -10,7 +10,7 @@ import type { CaptureFileHold, SyncStatusResult } from "../ipc/bridgeContract";
 const held = { workspaceId: WORKSPACE.workspaceId, sourceVersionId: "main", objectId: "held-object", path: "notes/held.md",
   observedSha256: "digest", observedSize: 4, reason: "ydoc-resolution-not-representable" as const,
   observedAtMs: 1, attemptCount: 1, retryRequested: false };
-const message = 'dohc did not record the outside edit to "notes/held.md". It cannot represent part of the file, such as a very deeply nested quote. The file is unchanged on this computer. Change that part in another editor.';
+const message = 'dohc did not record the outside edit to "notes/held.md". dohc cannot represent part of the file, such as a very deeply nested quote. The file is unchanged on this computer. Change that part in another editor.';
 
 function fixture() {
   const bridge = makeBridge(Promise.resolve(null));
@@ -141,7 +141,7 @@ it.each([{ staleFiles: [] }, { staleFiles: [held] }])("ignores a stale status co
   const other = { ...held, workspaceId: OTHER_WORKSPACE.workspaceId, path: "other.md" };
   f.set([other]);
   view.rerender(<DesktopWorkspaceShell workspace={OTHER_WORKSPACE} workspaces={[WORKSPACE, OTHER_WORKSPACE]} {...shellBootstrapProps(f.bridge)} onSwitchWorkspace={() => {}} />);
-  await screen.findByText('dohc did not record the outside edit to "other.md". It cannot represent part of the file, such as a very deeply nested quote. The file is unchanged on this computer. Change that part in another editor.');
+  await screen.findByText('dohc did not record the outside edit to "other.md". dohc cannot represent part of the file, such as a very deeply nested quote. The file is unchanged on this computer. Change that part in another editor.');
   const current = await f.bridge.getSyncStatus();
   await act(async () => stale.resolve({ ...current, heldFiles: staleFiles }));
   expect(screen.queryByText(message)).toBeNull();
@@ -180,5 +180,5 @@ it("reports genuine degraded capture after retry", async () => {
   const toast = await screen.findByTestId("workspace-shell-notice");
   f.retryHeldCapture.mockResolvedValueOnce({ settled: false, running: true, degraded: true, retried: true, heldFiles: [held] });
   await user.click(within(toast).getByRole("button", { name: "Try again" }));
-  await screen.findByText("dohc could not record outside edits. Reopen the workspace and try again.");
+  await screen.findByText("dohc could not record outside edits. Reopen the workspace.");
 });

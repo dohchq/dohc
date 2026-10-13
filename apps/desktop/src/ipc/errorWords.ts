@@ -295,7 +295,7 @@ export function isCaptureFileHeldRefusal(error: unknown): boolean {
 }
 
 export function captureHeldLiveMessage(path: string): string {
-  return `dohc cannot open "${path}" for live editing. It cannot represent part of the file, such as a very deeply nested quote. The file is unchanged on this computer. Change that part in another editor.`;
+  return `dohc cannot open "${path}" for live editing. dohc cannot represent part of the file, such as a very deeply nested quote. The file is unchanged on this computer. Change that part in another editor.`;
 }
 
 /** Access and connection failures can hide a changed grant behind an IPC error. */

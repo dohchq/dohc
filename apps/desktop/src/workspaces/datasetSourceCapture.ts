@@ -14,7 +14,7 @@ export async function flushDatasetSourceCapture(
   }
   signal.throwIfAborted();
   if (!capture.settled || !capture.running || capture.degraded) {
-    throw new Error("dohc could not capture these files. Reopen the workspace and try again.");
+    throw new Error("dohc could not capture these files. Reopen the workspace.");
   }
   assertSourcePathsNotHeld(capture.heldFiles, paths ?? []);
   return capture.heldFiles;
@@ -23,6 +23,6 @@ export async function flushDatasetSourceCapture(
 export function assertSourcePathsNotHeld(files: readonly { path: string }[], paths: readonly string[]): void {
   const held = files.find(file => paths.includes(file.path));
   if (held) {
-    throw new Error(`dohc cannot use "${held.path}" for this change. It cannot represent part of the file, such as a very deeply nested quote. The file is unchanged on this computer. Change that part in another editor.`);
+    throw new Error(`dohc cannot use "${held.path}" for this change. dohc cannot represent part of the file, such as a very deeply nested quote. The file is unchanged on this computer. Change that part in another editor.`);
   }
 }

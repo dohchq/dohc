@@ -5,7 +5,7 @@ import { useRequestSequence } from "../useRequestSequence";
 import type { useShellError } from "./useShellError";
 
 export function captureHoldMessage(path: string): string {
-  return `dohc did not record the outside edit to "${path}". It cannot represent part of the file, such as a very deeply nested quote. The file is unchanged on this computer. Change that part in another editor.`;
+  return `dohc did not record the outside edit to "${path}". dohc cannot represent part of the file, such as a very deeply nested quote. The file is unchanged on this computer. Change that part in another editor.`;
 }
 
 export function useCaptureHoldNotices(input: {
@@ -26,7 +26,7 @@ export function useCaptureHoldNotices(input: {
       const result = await bridge().retryHeldCapture({ workspaceId, path });
       if (!current()) return;
       if (result.degraded) {
-        latest.current.reportShellError("dohc could not record outside edits. Reopen the workspace and try again.", undefined, () => void retry(path));
+        latest.current.reportShellError("dohc could not record outside edits. Reopen the workspace.", undefined, () => void retry(path));
       } else if (result.heldFiles.some(file => file.path === path && file.workspaceId === workspaceId) &&
         latest.current.heldFiles?.some(file => file.path === path && file.workspaceId === workspaceId)) {
         reportHeld(path);

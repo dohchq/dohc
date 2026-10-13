@@ -29,7 +29,7 @@ it.skipIf(engine.missing)("reports a held written source before verification and
       const verify = vi.fn(async () => {});
       const finish = { register: async () => {}, capture: () => flushDatasetSourceCapture(adapter, new AbortController().signal, ["sources/note.md"]), verify };
       await expect(createDatasetSources(root, { "sources/note.md": unsupported }, new AbortController().signal, finish))
-        .rejects.toThrow('dohc cannot use "sources/note.md" for this change. It cannot represent part of the file, such as a very deeply nested quote. The file is unchanged on this computer. Change that part in another editor.');
+        .rejects.toThrow('dohc cannot use "sources/note.md" for this change. dohc cannot represent part of the file, such as a very deeply nested quote. The file is unchanged on this computer. Change that part in another editor.');
       expect(verify).not.toHaveBeenCalled();
       expect(await readFile(join(root, "sources/note.md"), "utf8")).toBe(unsupported);
       await expect(flushDatasetSourceCapture(adapter, new AbortController().signal, ["sources/note.md"])).rejects.toThrow("sources/note.md");

@@ -165,7 +165,7 @@ export function EngineMayHoldDocumentNotice(props: {
       <button
         type="button"
         onClick={props.onRetry}
-        className="text-subtle hover:text-ink"
+        className="shrink-0 whitespace-nowrap text-subtle hover:text-ink"
       >
         Try again
       </button>
