@@ -212,7 +212,7 @@ test("a submission the service cannot verify is rejected with a reason", async t
   assert.match((await request("pass", { scope: "docs" })).rejected, /Unknown scope/u);
 });
 
-test("a restarted service keeps a finished receipt and retries an interrupted run", async t => {
+test("a restarted service keeps a finished receipt and retries an interrupted run, even one it could not read at first", async t => {
   const root = mkdtempSync(join(tmpdir(), "dohc-queue-restart-"));
   const fixture = fixtureRepo();
   t.after(() => { rmSync(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 }); rmSync(fixture.repo, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 }); });
@@ -225,20 +225,31 @@ test("a restarted service keeps a finished receipt and retries an interrupted ru
   };
   await plant("000000001-aaaaaa", true);
   await plant("000000002-bbbbbb", false);
+  await plant("000000003-cccccc", false);
+  // The third request's status cannot be read when the service starts, as when antivirus holds the file.
+  const held = join(paths.request("000000003-cccccc"), "status.json");
+  const status = readFileSync(held, "utf8");
+  rmSync(held);
+  mkdirSync(held);
   const calls = [];
   const stop = new AbortController();
   const service = runService({ root, repo: fixture.repo, lane: join(root, "lane"), tickMs: 20, floorGb: 1, freeDisk: () => 100,
     docker: async () => true, prepare: async () => {}, sweep: async () => 0, holdLane: async () => ({ release() {} }), retryDelay: () => 0,
     worker: async ({ grant, output }) => { calls.push(grant); writeFileSync(join(output, "result.json"), JSON.stringify({ grant, commit: grant.head, baseCommit: grant.base, verdict: "PASS", final: true })); },
     stop: stop.signal, log: () => {} });
-  const finished = await waitFor(() => {
+  const settled = count => waitFor(() => {
     const all = listRequests(root);
-    return all.every(candidate => terminalStates.has(candidate.status.state)) ? all : null;
-  }, "both requests must finish");
+    return all.length === count && all.every(candidate => terminalStates.has(candidate.status.state)) ? all : null;
+  }, `${count} requests must finish`);
+  await settled(2);
+  // Once the status can be read, the running service recovers the request like the others.
+  rmSync(held, { recursive: true });
+  writeFileSync(held, status);
+  const finished = await settled(3);
   stop.abort();
   await service;
-  assert.deepEqual(finished.map(candidate => candidate.status.verdict), ["PASS", "PASS"]);
-  assert.deepEqual(calls.map(grant => [grant.request, grant.attempt]), [["000000002-bbbbbb", 2]], "only the interrupted request runs again, as a new attempt");
+  assert.deepEqual(finished.map(candidate => candidate.status.verdict), ["PASS", "PASS", "PASS"]);
+  assert.deepEqual(calls.map(grant => [grant.request, grant.attempt]), [["000000002-bbbbbb", 2], ["000000003-cccccc", 2]], "only interrupted requests run again, as new attempts");
 });
 
 test("only one service serves a queue root", async t => {
@@ -281,6 +292,8 @@ test("the supervisor stops everything a dead service started, restarts it, and i
     for await (const chunk of process.stdin) if (String(chunk).includes("go")) break;
     const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
     run(process.execPath, ["-e", ${JSON.stringify(command)}], { quietStdout: true }).catch(() => {});
+    // Store PowerShell escapes every job, so a run stopped mid-test would leave this supervisor restarting stubs.
+    setInterval(() => { try { process.kill(${process.pid}, 0); } catch (error) { if (error.code === "ESRCH") { try { process.kill(process.ppid); } catch {} process.exit(0); } } }, 1000);
     appendFileSync(join(root, "pids.log"), process.pid + " " + child.pid + "\\n");
     setInterval(() => writeFileSync(join(root, "service.json"), "{}"), 1000);
   `);

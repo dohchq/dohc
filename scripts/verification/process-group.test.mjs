@@ -642,6 +642,54 @@ test("a command started through the Windows job relay stops when its caller exit
   }
 });
 
+test("a descendant holding the relay's output stops when the caller exits", {
+  skip: process.platform !== "win32", timeout: 60_000,
+}, async () => {
+  const root = mkdtempSync(join(tmpdir(), "dohc-job-drain-"));
+  const descendantPid = join(root, "descendant.pid");
+  // A relay that leaves a descendant holding its output, then exits: the job owner is left draining output.
+  const relay = join(root, "relay.mjs");
+  writeFileSync(relay, `
+    import { spawn } from "node:child_process";
+    import { writeFileSync } from "node:fs";
+    for await (const chunk of process.stdin) void chunk;
+    const descendant = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: ["ignore", "inherit", "inherit"], detached: true });
+    writeFileSync(${JSON.stringify(descendantPid)}, String(descendant.pid));
+    descendant.unref();
+  `);
+  const quote = (value) => `'${value.replaceAll("'", "''")}'`;
+  const job = fileURLToPath(new URL("./windows-job.ps1", import.meta.url));
+  const callerScript = join(root, "caller.mjs");
+  writeFileSync(callerScript, `
+    import { spawn } from "node:child_process";
+    const command = ${JSON.stringify(`& ([scriptblock]::Create([IO.File]::ReadAllText(${quote(job)}))) `)} +
+      [process.execPath, ${JSON.stringify(relay)}, "payload", String(process.pid)].map(value => "'" + value.replaceAll("'", "''") + "'").join(" ");
+    spawn("pwsh.exe", ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", command], { stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
+    setInterval(() => {}, 1000);
+  `);
+  const alive = pid => { try { process.kill(pid, 0); return true; } catch (error) { return error.code === "EPERM"; } };
+  const until = async (read, message) => {
+    const deadline = Date.now() + 20_000;
+    for (;;) {
+      const value = read();
+      if (value) return value;
+      assert.ok(Date.now() < deadline, message);
+      await new Promise(done => setTimeout(done, 50));
+    }
+  };
+  const caller = spawn(process.execPath, [callerScript], { stdio: "ignore", windowsHide: true });
+  let pid;
+  try {
+    pid = await until(() => existsSync(descendantPid) && Number(readFileSync(descendantPid, "utf8")), "the relay must start its descendant");
+    caller.kill("SIGKILL");
+    await until(() => !alive(pid), "the descendant must stop once the caller has exited");
+  } finally {
+    caller.kill("SIGKILL");
+    if (pid && alive(pid)) process.kill(pid);
+    rmSync(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+  }
+});
+
 for (const waitForRelay of [false, true]) {
   test(`Windows job closes the relay without launching commands or preloads when assignment fails${waitForRelay ? " after relay startup" : ""}`, {
     skip: process.platform !== "win32", timeout: 30_000,

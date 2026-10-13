@@ -57,7 +57,7 @@ public static class VerificationJob {
     // packaged app. So the command's lifetime follows the caller's process instead of its job.
     static IntPtr OpenCaller(int pid) {
         IntPtr caller = OpenProcess(0x00100000 | 0x1000, false, pid); // SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION
-        if (caller == IntPtr.Zero) throw new InvalidOperationException("The caller exited before its command started.");
+        if (caller == IntPtr.Zero) throw new Win32Exception(Marshal.GetLastWin32Error(), $"Could not watch caller {pid}; it may have exited before its command started.");
         // A pid reused after the caller exited names a process created after this one.
         if (WaitForSingleObject(caller, 0) == 0 || Created(caller) > Created(GetCurrentProcess())) {
             CloseHandle(caller);
@@ -96,8 +96,9 @@ public static class VerificationJob {
                     var stdout = child.StandardOutput.BaseStream.CopyToAsync(Console.OpenStandardOutput());
                     var stderr = child.StandardError.BaseStream.CopyToAsync(Console.OpenStandardError());
                     // The caller cannot read the result once it has exited; closing the job stops the command.
+                    // A descendant can hold the output open after the relay exits, so draining watches the caller too.
                     while (!child.WaitForExit(250)) if (WaitForSingleObject(caller, 0) == 0) return 1;
-                    Task.WaitAll(stdout, stderr);
+                    while (!Task.WaitAll(new Task[] { stdout, stderr }, 250)) if (WaitForSingleObject(caller, 0) == 0) return 1;
                     return child.ExitCode;
                 } finally {
                     if (!child.HasExited) child.Kill();

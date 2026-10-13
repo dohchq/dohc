@@ -53,9 +53,10 @@ export async function prepareLane({ lane, repo, head, signal }) {
   git(["clean", "-ffdx", "--exclude=node_modules", "--exclude=target"], lane);
   if (git(["rev-parse", "HEAD"], lane) !== head) throw new Error(`The lane did not check out ${head}.`);
   if (git(["status", "--porcelain"], lane) !== "") throw new Error("The lane has changes after checkout and clean.");
-  // The verifier runs pnpm from the lane's own install (process.mjs resolves it from apps/desktop) and
-  // installs the head's dependencies itself, so only a lane that cannot resolve pnpm is bootstrapped.
-  if (!existsSync(join(lane, "apps", "desktop", "node_modules", "pnpm", "package.json"))) await run(process.execPath, ["scripts/verification/setup.mjs"], { cwd: lane, signal, quietStdout: true, timeoutMs: 30 * 60_000 });
+  // The verifier runs pnpm from the lane's own install (process.mjs resolves it from apps/desktop) and installs
+  // the head's dependencies itself, so the lane is bootstrapped only when that pnpm is missing or not the head's.
+  const installed = readJson(join(lane, "apps", "desktop", "node_modules", "pnpm", "package.json"))?.version;
+  if (!installed || installed !== readJson(join(lane, "package.json"))?.engines?.pnpm) await run(process.execPath, ["scripts/verification/setup.mjs"], { cwd: lane, signal, quietStdout: true, timeoutMs: 30 * 60_000 });
 }
 
 export async function dockerResponds(command = run) {
@@ -176,10 +177,10 @@ export async function runService({
     history({ event: "finished", id: entry.id, attempt: attempt?.n, awakeMs: attempt?.awakeMs, ...outcome });
   }
 
-  async function reconcile() {
-    // A previous service died with requests running. Its job object stopped their workers;
-    // a receipt that finished still counts, anything else is retried.
-    for (const entry of load().filter(entry => entry.status.state === "running")) {
+  async function recover(requests) {
+    // A request marked running while this service runs nothing was left by a previous service, whose
+    // worker has stopped, or could not be read when this one started. A finished receipt still counts.
+    for (const entry of requests.filter(entry => entry.status.state === "running")) {
       const attempt = entry.status.attempts.at(-1);
       const grant = { request: entry.id, attempt: attempt?.n, head: entry.request.head, base: entry.request.base };
       const result = attempt ? readJson(join(paths.attempt(entry.id, attempt.n), "result.json")) : null;
@@ -343,7 +344,6 @@ export async function runService({
   }
 
   await beat();
-  await reconcile();
   log(`service ${commit ?? "(unversioned)"} started, pid ${process.pid}`);
   let last = Date.now();
   try {
@@ -398,6 +398,7 @@ export async function runService({
             await setStatus(id, { ...status, cleanupPending: false });
           }
         }
+        await recover(requests);
         await checkHealth(requests);
         const entry = health.pausedUntil > now ? null : nextRequest(requests, health, now);
         if (entry) attempt(entry).catch(error => { log(`attempt bookkeeping failed: ${error.stack ?? error.message}`); fatal = error; });
