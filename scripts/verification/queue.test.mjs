@@ -240,10 +240,13 @@ test("only one service serves a queue root", async t => {
   await first;
 });
 
-test("the supervisor's job stops the service and everything it started", { skip: process.platform !== "win32" && "job objects are Windows-only" }, async t => {
+test("the supervisor stops everything a dead service started, restarts it, and its job takes the rest", { skip: process.platform !== "win32" && "job objects are Windows-only" }, async t => {
   const root = mkdtempSync(join(tmpdir(), "dohc-queue-supervisor-"));
-  // Windows releases a killed process's handles shortly after it exits, so removal retries until then.
   t.after(async () => {
+    // A failed run can leave processes behind; each names this folder on its command line, some with escaped separators.
+    const folder = root.split(/[\\/]/u).at(-1);
+    spawnSync("pwsh.exe", ["-NoProfile", "-NonInteractive", "-Command", `Get-CimInstance Win32_Process | Where-Object { $_.ProcessId -ne $PID -and $_.CommandLine -and $_.CommandLine.Contains('${folder}') } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }`], { windowsHide: true });
+    // Windows releases a killed process's handles shortly after it exits, so removal retries until then.
     for (let attempt = 0; ; attempt += 1) {
       try { rmSync(root, { recursive: true, force: true }); return; }
       catch (error) { if (attempt >= 50 || !["EPERM", "EBUSY", "ENOTEMPTY"].includes(error.code)) throw error; await sleep(200); }
@@ -252,29 +255,40 @@ test("the supervisor's job stops the service and everything it started", { skip:
   const service = join(root, "service", "stub", "scripts", "verification");
   mkdirSync(service, { recursive: true });
   writeFileSync(join(root, "current"), "stub");
-  // A stub service: waits for go, starts a grandchild, records both pids, and heartbeats.
+  // A command through the Windows job relay, as the verifier starts every command; it records its own pid.
+  const command = `require("node:fs").appendFileSync(${JSON.stringify(join(root, "commands.log"))}, process.pid + "\\n"); setInterval(() => {}, 1000);`;
+  // A stub service: waits for go, starts a child and a relayed command, records its pids, and heartbeats.
   writeFileSync(join(service, "queue-service.mjs"), `
     import { spawn } from "node:child_process";
     import { appendFileSync, writeFileSync } from "node:fs";
     import { join } from "node:path";
+    const { run } = await import(${JSON.stringify(new URL("./process.mjs", import.meta.url).href)});
     const root = process.argv[process.argv.indexOf("--root") + 1];
     for await (const chunk of process.stdin) if (String(chunk).includes("go")) break;
     const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
+    run(process.execPath, ["-e", ${JSON.stringify(command)}], { quietStdout: true }).catch(() => {});
     appendFileSync(join(root, "pids.log"), process.pid + " " + child.pid + "\\n");
     setInterval(() => writeFileSync(join(root, "service.json"), "{}"), 1000);
   `);
   const supervisor = spawn("pwsh.exe", ["-NoLogo", "-NoProfile", "-NonInteractive", "-File", new URL("./queue-supervisor.ps1", import.meta.url).pathname.replace(/^\/([A-Za-z]:)/u, "$1"), "-Root", root], { stdio: "ignore", windowsHide: true });
-  t.after(() => { try { process.kill(supervisor.pid); } catch { /* Already stopped. */ } });
-  // The file exists before its line is written; wait for both pids.
-  const pids = await waitFor(() => {
-    const line = existsSync(join(root, "pids.log")) ? readFileSync(join(root, "pids.log"), "utf8").split(/\r?\n/u)[0] : "";
-    return /^\d+ \d+$/u.test(line) ? line.split(" ").map(Number) : null;
-  }, "the supervisor must start the service", 60_000);
+  const lines = name => existsSync(join(root, name)) ? readFileSync(join(root, name), "utf8").split(/\r?\n/u).filter(line => /^\d+( \d+)?$/u.test(line)) : [];
+  // Each service generation records its pid and its child's, and its command records its own.
+  const generation = n => waitFor(() => {
+    const service = lines("pids.log")[n];
+    const command = lines("commands.log")[n];
+    return service && command ? [...service.split(" ").map(Number), Number(command)] : null;
+  }, `the supervisor must start service generation ${n + 1}`, 60_000);
   const alive = pid => { try { process.kill(pid, 0); return true; } catch (error) { return error.code === "EPERM"; } };
-  assert.ok(pids.every(alive));
+  const first = await generation(0);
+  assert.ok(first.every(alive));
+  // Kill only the service, as a crash would: the supervisor closes its job, and the relay stops the command.
+  spawnSync("taskkill.exe", ["/PID", String(first[0]), "/F"], { windowsHide: true });
+  await waitFor(() => first.every(pid => !alive(pid)), "everything the dead service started must stop", 15_000);
+  const second = await generation(1);
+  assert.ok(second.every(alive));
   // Stop only the supervisor, as a crash or Task Scheduler would; its job takes the rest.
   spawnSync("taskkill.exe", ["/PID", String(supervisor.pid), "/F"], { windowsHide: true });
-  await waitFor(() => pids.every(pid => !alive(pid)), "the service and its child must stop with the supervisor", 15_000);
+  await waitFor(() => second.every(pid => !alive(pid)), "the service and everything it started must stop with the supervisor", 15_000);
 });
 
 test("a check that fails while Docker stops answering is retried, and fails on a healthy host", async t => {

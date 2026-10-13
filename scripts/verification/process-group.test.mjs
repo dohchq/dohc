@@ -604,6 +604,44 @@ for (const flag of ["--require", "--import"]) {
   });
 }
 
+test("a command started through the Windows job relay stops when its caller exits", {
+  skip: process.platform !== "win32", timeout: 60_000,
+}, async () => {
+  // Microsoft Store PowerShell starts outside its caller's job, so only the relay can tie the command to its caller.
+  const root = mkdtempSync(join(tmpdir(), "dohc-job-caller-"));
+  const commandPid = join(root, "command.pid");
+  const callerScript = join(root, "caller.mjs");
+  const command = `require("node:fs").writeFileSync(${JSON.stringify(commandPid)}, String(process.pid)); setInterval(() => {}, 1000);`;
+  writeFileSync(callerScript, `
+    const { run } = await import(${JSON.stringify(new URL("./process.mjs", import.meta.url).href)});
+    run(process.execPath, ["-e", ${JSON.stringify(command)}], { quietStdout: true }).catch(() => {});
+    setInterval(() => {}, 1000);
+  `);
+  const alive = pid => { try { process.kill(pid, 0); return true; } catch (error) { return error.code === "EPERM"; } };
+  const until = async (read, message) => {
+    const deadline = Date.now() + 20_000;
+    for (;;) {
+      const value = read();
+      if (value) return value;
+      assert.ok(Date.now() < deadline, message);
+      await new Promise(done => setTimeout(done, 50));
+    }
+  };
+  const caller = spawn(process.execPath, [callerScript], { stdio: "ignore", windowsHide: true });
+  let pid;
+  try {
+    pid = await until(() => existsSync(commandPid) && Number(readFileSync(commandPid, "utf8")), "the command must start");
+    assert.ok(alive(pid));
+    // Terminating the caller runs none of its cleanup, as when an agent or the queue service is killed.
+    caller.kill("SIGKILL");
+    await until(() => !alive(pid), "the command must stop once its caller has exited");
+  } finally {
+    caller.kill("SIGKILL");
+    if (pid && alive(pid)) process.kill(pid);
+    rmSync(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+  }
+});
+
 for (const waitForRelay of [false, true]) {
   test(`Windows job closes the relay without launching commands or preloads when assignment fails${waitForRelay ? " after relay startup" : ""}`, {
     skip: process.platform !== "win32", timeout: 30_000,
@@ -626,7 +664,7 @@ for (const waitForRelay of [false, true]) {
       const quote = (value) => `'${value.replaceAll("'", "''")}'`;
       const result = spawnSync("pwsh.exe", ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command",
         `& ([scriptblock]::Create([IO.File]::ReadAllText(${quote(script)}))) ${[
-          process.execPath, fileURLToPath(new URL("./windows-command.mjs", import.meta.url)), payload,
+          process.execPath, fileURLToPath(new URL("./windows-command.mjs", import.meta.url)), payload, String(process.pid),
         ].map(quote).join(" ")}`], {
         env: { ...process.env, NODE_OPTIONS: `--require ${JSON.stringify(preload)}` },
         encoding: "utf8", windowsHide: true, timeout: 20_000,
