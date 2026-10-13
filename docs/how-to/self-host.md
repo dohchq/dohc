@@ -287,6 +287,31 @@ Restart the services and confirm that the workspace remains available.
 Keep a local copy of important work while testing your deployment.
 See the [browser service operations reference](../../services/share-web/README.md) for storage and permission boundaries.
 
+## Disable a published app
+
+If a published app is unsafe, run this command from the deployment bundle directory on the server:
+
+```sh
+docker compose --env-file .env.self-host -f docker-compose.self-host.yml exec -T sync-relay \
+  node /app/services/sync-relay/dist/app-publication-takedown.js \
+  --publication-id PUBLICATION_ID --reason "Phishing reported and confirmed"
+```
+
+Use the publication ID from the owner's publication list or the app URL's `app` parameter.
+The command disables that one publication. The owner sees the reason and cannot reactivate that publication.
+The owner can still publish the app under a new share link or after rotating the grant.
+Watch for new publications of the same app.
+The relay records the actor as "operator", the time, and the reason durably.
+It immediately refuses serving, new launches, and writes, including requests from existing launches.
+
+The command uses a private socket inside the running relay container. Other publications, sync, and sharing keep running.
+Use Compose's `--env-file`, `-f`, or `--project-name` options when selecting a custom deployment.
+Exit codes are 0 for success, 2 for bad input, 3 for not found, and 1 for connection or operation failures.
+The client times out after 10 seconds. Retries preserve the first takedown record.
+
+Restoring a backup taken before the takedown brings that publication back.
+Run the takedown command again after restoring such a backup.
+
 ## Back up and maintain the deployment
 
 Follow the [backup and recovery procedure](self-host-recovery.md) before changing your deployment.
