@@ -17,7 +17,9 @@ function initials(name: string): string {
 
 const MAX_FACES = 3;
 
-export function PresenceFaces(props: { others: PresencePeer[]; className?: string }) {
+// `live` false draws the same faces with the same name but no live region,
+// for a second copy beside one that already announces them.
+export function PresenceFaces(props: { others: PresencePeer[]; className?: string; live?: boolean }) {
   // Collapse a user's multiple devices/tabs into one face.
   const unique = useMemo(() => {
     const byUser = new Map<string, PresencePeer>();
@@ -37,8 +39,7 @@ export function PresenceFaces(props: { others: PresencePeer[]; className?: strin
   return (
     <div
       className={`dohc-presence-faces flex items-center ${props.className ?? ""}`}
-      role="status"
-      aria-live="polite"
+      {...(props.live === false ? { role: "img" } : { role: "status", "aria-live": "polite" as const })}
       aria-label={label}
       title={names.join(", ")}
     >

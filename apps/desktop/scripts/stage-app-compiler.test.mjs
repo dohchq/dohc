@@ -5,8 +5,11 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createRequire } from "node:module";
+import { fileURLToPath } from "node:url";
+import { build } from "esbuild";
 import { load } from "js-yaml";
 import { createInstalledAppCompiler } from "../src/workspaces/installedAppCompiler.ts";
+import { createInstalledDatasetCompiler } from "../src/workspaces/installedDatasetCompiler.ts";
 import { stageAppCompiler, requireAppCompiler, readPinnedCompilerNode, NODE_SHA256 } from "./stage-app-compiler.mjs";
 
 const require = createRequire(import.meta.url);
@@ -30,8 +33,31 @@ test("staging refuses an unpinned executable without running it", async t => {
   const nodeExecutable = join(root, "node.exe"); await writeFile(nodeExecutable, "not Node");
   await assert.rejects(stageAppCompiler({ platform: "win32", arch: "x64", nodeExecutable, destination: join(root, "staged") }), /official Node/);
   assert.deepEqual(await stageAppCompiler({ platform: "win32", arch: "arm64" }), { supported: false });
+  assert.deepEqual(await stageAppCompiler({ platform: "linux", arch: "arm64" }), { supported: false });
   await assert.rejects(requireAppCompiler(root, "win32", "arm64"), /Windows x64/);
   await assert.rejects(requireAppCompiler(root, "win32", "x64"), /ENOENT/);
+  await assert.rejects(requireAppCompiler(root, "linux", "x64"), /ENOENT/);
+  assert.equal(await requireAppCompiler(root, "linux", "arm64"), undefined);
+});
+
+test("installed Linux Collection compiler runs electron-builder resources after relocation", { skip: process.platform !== "linux" || process.arch !== "x64", timeout: 30000 }, async t => {
+  const root = await mkdtemp(join(tmpdir(), "dohc-installed-dataset-compiler-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const sourceRoot = join(root, "source");
+  const staged = join(sourceRoot, "resources/app-compiler");
+  await stageAppCompiler({ destination: staged });
+  assert.equal((await stageAppCompiler({ destination: staged })).changed, false);
+  const resourcesRoot = join(root, "packaged/resources");
+  await packageCompiler(sourceRoot, resourcesRoot);
+  await rm(sourceRoot, { recursive: true, force: true });
+  const destination = join(resourcesRoot, "app-compiler");
+  await requireAppCompiler(destination);
+  await build({ entryPoints: [fileURLToPath(new URL("../../../packages/app-backend-runtime/src/dataset-compiler.ts", import.meta.url))],
+    outfile: join(resourcesRoot, "app-backend-runtime/dataset-compiler.mjs"), bundle: true, platform: "node", format: "esm", logLevel: "silent" });
+  const compile = await createInstalledDatasetCompiler(resourcesRoot);
+  assert.match(await compile("const answer: number = 42; globalThis.answer = answer;", "actions.ts", AbortSignal.timeout(10000)), /answer = 42/);
+  await writeFile(join(destination, "node_modules/@esbuild/linux-x64/bin/esbuild"), "changed");
+  await assert.rejects(requireAppCompiler(destination), /asset changed/);
 });
 
 test("installed compiler runs electron-builder resources after relocation and checks packaging identities", { skip: process.platform !== "win32" || process.arch !== "x64", timeout: 30000 }, async t => {

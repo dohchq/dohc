@@ -1629,7 +1629,7 @@ describe("mcp tools operate on allowed paths", () => {
 
       expect(imported).toMatchObject({
         ok: false,
-        reason: expect.stringContaining("EEXIST"),
+        reason: "File already exists",
       });
       await expect(readFile(join(ctx.root, "people.sqlite"), "utf8")).resolves.toBe("already here\n");
       await expect(listChanges(ctx, { limit: 10 })).resolves.toMatchObject({

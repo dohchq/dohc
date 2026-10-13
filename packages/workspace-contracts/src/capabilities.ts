@@ -1,4 +1,4 @@
-// Metadata describes existing doors. It never registers, invokes, or admits a call.
+// Metadata describes existing doors and drives desktop MCP registration. It never invokes a handler or admits a call.
 export const CAPABILITY_WAYS = ["control", "palette", "menu", "shortcut", "cli", "mcp", "app"] as const;
 export const CAPABILITY_ID_PATTERN = /^[a-z][a-z0-9]*(?:\.[a-z][a-z0-9]*)+$/;
 export const RETIRED_CAPABILITY_IDS: readonly string[] = [];
@@ -186,6 +186,7 @@ export const CAPABILITIES = {
   "document.draft.discard": capability("Discard the recovery copy of a set-aside draft.", {ipc: ["discardLiveDraftRecovery"]}),
   "document.draft.list": capability("Read saved live drafts for review.", {ipc: ["listLiveDraftRecovery"]}),
   "document.save.retry": capability("Try again to save an open document to its file.", {ipc: ["retryEngineYDocSave"]}),
+  "device.motion.read": capability("Read this computer's reduced-motion preference.", {ipc: ["getSystemReducedMotion"]}),
 } as const;
 
 export type CapabilityId = keyof typeof CAPABILITIES;

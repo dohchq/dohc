@@ -42,11 +42,22 @@ test("a Windows x64 desktop artifact rejects a changed, deleted or missing probe
   assert.throws(fingerprint, { code: "ENOENT" });
 });
 
+test("a Linux x64 desktop artifact reads the compiler tree but not the probe", t => {
+  const { root, write } = artifacts(t);
+  rmSync(join(root, probe), { recursive: true });
+  const fingerprint = () => artifactFingerprint("desktop", root, "linux", "x64");
+  const prepared = fingerprint();
+  write("apps/desktop/resources/app-compiler/node_modules/@esbuild/linux-x64/bin/esbuild", "esbuild");
+  assert.notEqual(fingerprint(), prepared);
+  rmSync(join(root, dirname(node)), { recursive: true });
+  assert.throws(fingerprint, { code: "ENOENT" });
+});
+
 test("other targets do not read the probe or compiler trees", t => {
   const { root } = artifacts(t);
   rmSync(join(root, probe), { recursive: true });
   rmSync(join(root, dirname(node)), { recursive: true });
-  assert.doesNotThrow(() => artifactFingerprint("desktop", root, "linux", "x64"));
+  assert.doesNotThrow(() => artifactFingerprint("desktop", root, "linux", "arm64"));
   assert.doesNotThrow(() => artifactFingerprint("desktop", root, "win32", "arm64"));
 });
 

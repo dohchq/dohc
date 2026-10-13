@@ -1,4 +1,5 @@
 import {
+  systemMotionOperations,
   chatDispatchNoticeOperations,
   crashReportOperations,
   engineYDocAdmissionOperations,
@@ -26,6 +27,7 @@ import { workspaceFileOperations } from "./workspaceFileOperations";
 export const OPERATION_TABLES = [
   workspaceFileOperations,
   shareCopyOperations,
+  systemMotionOperations,
   accessOperations,
   workspaceVersionOperations,
   workspaceSearchOperations,
