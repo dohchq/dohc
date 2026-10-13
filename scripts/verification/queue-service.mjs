@@ -363,7 +363,7 @@ export async function runService({
       if (running?.phase === "preparing") running.prepareMs += awake;
       last = now;
       // Recovered first, so a submission that arrived during a restart replaces the interrupted request.
-      if (!running) await recover(load());
+      if (!running) { await recover(load()); if (fatal) continue; }
       await ingest();
       for (const entry of load().filter(entry => entry.status.state === "queued" && existsSync(join(paths.request(entry.id), "cancel")))) {
         await finish(entry, null, { outcome: "cancelled", cause: "cancelled" });
