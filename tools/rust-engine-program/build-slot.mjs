@@ -29,7 +29,6 @@ import {
   realpathSync,
   readdirSync,
   renameSync,
-  rmdirSync,
   rmSync,
   statSync,
   statfsSync,
@@ -358,26 +357,38 @@ function withSweepLock(root, sweep) {
     }
   }
   // A sweep suspended past the takeover window loses its lock to a successor.
-  // Its own token file lets it notice and stop mutating. Release removes only
-  // that file and then an empty directory, so a successor's lock, which holds
-  // the successor's token, always survives.
-  const tokenPath = join(sweepLock, `owner-${randomBytes(8).toString("hex")}`);
-  const owns = () => existsSync(tokenPath);
-  const release = () => {
-    try { rmSync(tokenPath, { force: true }); rmdirSync(sweepLock); }
-    catch { /* Not empty, or already gone: not ours to remove. */ }
+  // One owner file, created exclusively, names the lock's holder: a late
+  // writer finds it taken and backs off, and `owns` lets a running sweep stop
+  // mutating once its lock is gone.
+  const token = randomBytes(8).toString("hex");
+  const ownerPath = join(sweepLock, "owner");
+  const owns = () => {
+    try { return readFileSync(ownerPath, "utf8") === token; }
+    catch { return false; }
   };
   try {
-    writeFileSync(tokenPath, "", { flag: "wx" });
+    writeFileSync(ownerPath, token, { flag: "wx" });
   } catch (error) {
-    release();
-    if (error.code === "ENOENT") return null; // A takeover removed the lock first.
+    // EEXIST: a successor owns it now. ENOENT: a takeover removed it. Neither is ours to clean.
+    if (error.code === "EEXIST" || error.code === "ENOENT") return null;
     throw error;
   }
   try {
     return sweep(owns);
   } finally {
-    release();
+    // Release by identity: move whatever holds the name aside, and keep it only if it was ours.
+    const moved = `${sweepLock}.release-${randomBytes(4).toString("hex")}`;
+    let renamed = false;
+    try { renameSync(sweepLock, moved); renamed = true; } catch { /* Gone or busy: nothing of ours to remove. */ }
+    if (renamed) {
+      let mine = false;
+      try { mine = readFileSync(join(moved, "owner"), "utf8") === token; } catch { /* A successor's lock without its owner yet. */ }
+      if (mine) rmSync(moved, { recursive: true, force: true });
+      else {
+        try { renameSync(moved, sweepLock); }
+        catch { logEvent(root, `sweep lock of a successor could not be restored (${moved}); its sweep stops`); }
+      }
+    }
   }
 }
 
@@ -734,7 +745,7 @@ export function acquireBuildSlot(options) {
 }
 
 /** Fail-fast ownership for mutable local resources; this creates no waiter queue. */
-export function acquireExclusiveSlot({ root, kind, metadata, cooperativeCancellation = true }) {
+export function acquireExclusiveSlot({ root, kind, metadata, cooperativeCancellation = true, identityDelayMs = defaultIdentityDelayMs }) {
   mkdirSync(root, { recursive: true });
   const dir = slotDir(root, 1, kind);
   for (let attempt = 0; attempt < 2; attempt += 1) {
@@ -752,8 +763,7 @@ export function acquireExclusiveSlot({ root, kind, metadata, cooperativeCancella
       reclaimStaleSlots({ root, slots: 1, kind, staleMs });
       continue;
     }
-    // An exclusive holder frees immediately once dead, and a lookup would start mid-run (profiling measures then).
-    return claimSlot(dir, `${kind}-1`, defaultHeartbeatMs, cooperativeCancellation, () => {}, root, kind, metadata, null);
+    return claimSlot(dir, `${kind}-1`, defaultHeartbeatMs, cooperativeCancellation, () => {}, root, kind, metadata, identityDelayMs);
   }
 }
 
@@ -914,8 +924,9 @@ async function acquireSlot({
           `at ${root} ${free.length === 0
             ? `and all ${slots} slots are held — ${holders(root, slots, kind)}`
             : `with ${ahead < 0 ? "queue position unavailable" : `queue position ${ahead + 1} behind older waiters`}; ${holders(root, slots, kind) || "no current holder"}`}. Wait for a lane to finish and ` +
-          `rerun; a lane's slot is reclaimed automatically two minutes after ` +
-          `its process exits or its pid passes to another process.`,
+          `rerun; a slot is reclaimed automatically ` +
+          `${Math.round(Math.min(staleMs, goneMs ?? 2 * defaultHeartbeatMs) / 60_000)} minutes after its holder's last ` +
+          `heartbeat once its process exits, or once its pid passes to another process and the holder recorded its identity.`,
       );
     }
     if (Date.now() >= nextMessageAt) {

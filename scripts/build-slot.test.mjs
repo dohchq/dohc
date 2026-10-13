@@ -1486,7 +1486,7 @@ test("an owner record without an identity is never judged reused", () => {
 test("a heartbeat during the identity probe cancels the reclaim", () => {
   const root = slotRoot();
   try {
-    const dir = plantOwner(root, 1, { pid: process.pid, created: "claimer" }, 3 * 60_000);
+    const dir = plantOwner(root, 1, { pid: process.pid, created: "probe-heartbeat-claimer" }, 3 * 60_000);
     const identify = () => {
       const now = new Date();
       utimesSync(join(dir, "owner.json"), now, now);
@@ -1499,21 +1499,59 @@ test("a heartbeat during the identity probe cancels the reclaim", () => {
   }
 });
 
-test("a sweep that lost its lock stops and leaves the successor's lock", () => {
+for (const [when, successorOwner] of [["after it wrote its owner", "successor"], ["before it wrote its owner", null]]) {
+  test(`a sweep that lost its lock stops and leaves a successor's lock taken ${when}`, () => {
+    const root = slotRoot();
+    try {
+      plantOwner(root, 1, { pid: process.pid, created: "lost-lock-claimer" }, 3 * 60_000);
+      const lock = join(root, "reclaim.lock");
+      const identify = () => {
+        // A successor takes the lock over while this sweep is suspended in its probe.
+        rmSync(lock, { recursive: true, force: true });
+        mkdirSync(lock);
+        if (successorOwner) writeFileSync(join(lock, "owner"), successorOwner);
+        return "later process";
+      };
+      assert.equal(reclaimStaleSlots({ root, slots: 1, staleMs: 30 * 60_000, identify }), 0);
+      assert.equal(existsSync(join(root, "build-slot-1")), true);
+      assert.deepEqual(readdirSync(lock), successorOwner ? ["owner"] : []);
+      if (successorOwner) assert.equal(readFileSync(join(lock, "owner"), "utf8"), successorOwner);
+      assert.deepEqual(readdirSync(root).filter(name => name.startsWith("reclaim.lock.")), []);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+}
+
+test("a sweeper that resumes after a takeover finds the lock owned and backs off", () => {
   const root = slotRoot();
   try {
-    plantOwner(root, 1, { pid: process.pid, created: "claimer" }, 3 * 60_000);
-    const lock = join(root, "reclaim.lock");
-    const identify = () => {
-      // A successor takes the lock over while this sweep is suspended in its probe.
-      rmSync(lock, { recursive: true, force: true });
-      mkdirSync(lock);
-      writeFileSync(join(lock, "owner-successor"), "");
-      return "later process";
-    };
-    assert.equal(reclaimStaleSlots({ root, slots: 1, staleMs: 30 * 60_000, identify }), 0);
-    assert.equal(existsSync(join(root, "build-slot-1")), true);
-    assert.deepEqual(readdirSync(lock), ["owner-successor"]);
+    plantSlot(root, 1, { pid: deadPid(), heartbeatAgeMs: 3 * 60_000, kind: "verification-slot" });
+    // The sweeper creates the lock, then a successor takes it over before the sweeper writes its owner file.
+    const result = spawnSync(process.execPath, ["--input-type=module", "-e", `
+      import fs from "node:fs";
+      import { join } from "node:path";
+      import { syncBuiltinESMExports } from "node:module";
+      import { reclaimStaleSlots } from ${JSON.stringify(buildSlotUrl)};
+      const root = process.argv[1];
+      const lock = join(root, "reclaim.lock");
+      const mkdir = fs.mkdirSync;
+      fs.mkdirSync = (path, ...args) => {
+        const made = mkdir(path, ...args);
+        if (path === lock) {
+          fs.rmSync(lock, { recursive: true, force: true });
+          mkdir(lock);
+          fs.writeFileSync(join(lock, "owner"), "successor");
+        }
+        return made;
+      };
+      syncBuiltinESMExports();
+      console.log(reclaimStaleSlots({ root, slots: 1, kind: "verification-slot", staleMs: 30 * 60_000 }));
+    `, root], { encoding: "utf8", timeout: 15_000 });
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.stdout.trim(), "0");
+    assert.equal(readFileSync(join(root, "reclaim.lock", "owner"), "utf8"), "successor");
+    assert.equal(existsSync(join(root, "verification-slot-1")), true);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
