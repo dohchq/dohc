@@ -83,7 +83,7 @@ describe("listEngineMomentsForIpc", () => {
       {kind: "automation", automationId: "collection:Tasks#stamp", depth: 1},
       {kind: "named", userId: "ana", grantId: "grant", grantGeneration: 1},
       {kind: "link", grantId: "grant", grantGeneration: 1, principalId: "holder"},
-      {kind: "public", principalId: "public", grantId: "grant"},
+      {kind: "public", principalId: "public_3f9a2c1d-7b4e-4c55-9d0a-1e2f3a4b5c6d", grantId: "grant"},
       {kind: "unattributed"},
     ];
     const response = await listEngineMomentsForIpc(async () => ({
@@ -100,7 +100,7 @@ describe("listEngineMomentsForIpc", () => {
     // Several authors read as each of them, in order; none stands in for the rest.
     expect(response.moments[0]?.authorLabels).toEqual([
       "Ice", "Agent", "Named collection:Tasks#stamp in Tasks", "ana@example.com (Edit)",
-      "Edit link · holder holder", "Link holder public", "An unrecorded author",
+      "Edit link · holder holder", "Link holder 3f9a2c1d", "An unrecorded author",
     ]);
   });
 

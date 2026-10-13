@@ -1,3 +1,4 @@
+import type { EngineFileResolver } from "../workspaces/resolveEngineFiles";
 import { CHANNELS } from "./channels";
 import {
   GetBacklinksPayload,
@@ -10,6 +11,7 @@ import {
   type ReadWorkspaceTextResult,
 } from "./bridgeContract";
 import type { RegistryEntry } from "../workspaces/registryStore";
+import type { FileResolveTarget } from "@dohc/workspace-engine-client/daemon";
 import type { EngineWorkspace } from "@dohc/workspace-engine-client/daemon";
 import type { DesktopLinkedChatStore } from "../workspaces/liveLinkedChatStore";
 import type { WorkspaceGraphIndex } from "../workspaces/workspaceGraph";
@@ -58,10 +60,7 @@ export function registerWorkspaceGraphIpcHandlers<
     DesktopLinkedChatStore,
     "listThreads" | "listChannels" | "getChannelWireId" | "listThreadAttachments"
   >;
-  activeEngineFileIndex(workspace: EngineWorkspace): Promise<{
-    pathByObjectId: Map<string, string>;
-    objectIdByPath: Map<string, string>;
-  }>;
+  resolveEngineFiles: EngineFileResolver<EngineWorkspace>;
 }): void {
   const {
     registerHandler,
@@ -73,7 +72,7 @@ export function registerWorkspaceGraphIpcHandlers<
     requireEngineCapture,
     syncWorkspaceSharedChannels,
     linkedChatStoreFor,
-    activeEngineFileIndex,
+    resolveEngineFiles,
   } = dependencies;
   function ownedWorkspaceGraphSource(workspace: Workspace) {
     const hasShareState = workspaceHasReceivedShareState(workspace);
@@ -140,21 +139,38 @@ export function registerWorkspaceGraphIpcHandlers<
             ] as const),
           ),
         );
-        const activeFiles = await activeEngineFileIndex(engineWorkspace);
+        const threadAttachments = await Promise.all(threads.map(thread => store.listThreadAttachments(engineWorkspace.workspaceId, thread.id)));
+        const mentionTargets = threadAttachments.flat().flatMap<FileResolveTarget>(attachment => attachment.objectId
+          ? [{ objectId: attachment.objectId }]
+          : attachment.pathHint ? [{ path: attachment.pathHint }] : []);
+        const targets = [...new Map(mentionTargets.map(target => [JSON.stringify(target), target])).values()];
+        const resolvedFiles = await resolveEngineFiles(engineWorkspace, targets);
+        const basePaths = new Set(graph.nodes.map(node => node.path));
+        const hintPaths = new Map<string, string>();
+        targets.forEach((target, index) => {
+          const result = resolvedFiles[index];
+          if ("path" in target && result?.status === "found") hintPaths.set(target.path, result.path);
+        });
+        const activeFiles = {
+          pathByObjectId: new Map<string, string>(),
+          objectIdByPath: new Map<string, string>(),
+        };
+        for (const file of resolvedFiles) {
+          if (file.status !== "found" || !basePaths.has(file.path)) continue;
+          activeFiles.pathByObjectId.set(file.objectId, file.path);
+          activeFiles.objectIdByPath.set(file.path, file.objectId);
+        }
         const authorizedMentions = (
           await Promise.all(
-            threads.map(async (thread) => {
-              const attachments = await store.listThreadAttachments(
-                engineWorkspace.workspaceId,
-                thread.id,
-              );
+            threads.map(async (thread, index) => {
+              const attachments = threadAttachments[index]!;
               return attachments.flatMap((attachment) => {
                 // Stable object identity owns path resolution. A hint is usable
                 // only for legacy/opaque rows where no object identity exists; an
                 // object that disappeared from the active version fails closed.
                 const filePath = attachment.objectId
                   ? activeFiles.pathByObjectId.get(attachment.objectId)
-                  : attachment.pathHint;
+                  : attachment.pathHint ? hintPaths.get(attachment.pathHint) : undefined;
                 const fileObjectId =
                   attachment.objectId ??
                   (filePath ? activeFiles.objectIdByPath.get(filePath) : undefined);

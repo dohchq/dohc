@@ -58,8 +58,10 @@ function fixture(kind: ScopeKind = "local") {
     listMessages: vi.fn<DesktopLinkedChatStore["listMessages"]>(async () => [message]),
     listThreads: vi.fn<DesktopLinkedChatStore["listThreads"]>(async () => [thread]),
     listThreadsForFile: vi.fn<DesktopLinkedChatStore["listThreadsForFile"]>(async () => [thread]),
+    listFileMentions: vi.fn<DesktopLinkedChatStore["listFileMentions"]>(async () => []),
     getThreadRevision: vi.fn<DesktopLinkedChatStore["getThreadRevision"]>(async () => 7),
     listChannels: vi.fn<DesktopLinkedChatStore["listChannels"]>(async () => []),
+    ensureGeneralChannel: vi.fn<DesktopLinkedChatStore["ensureGeneralChannel"]>(async () => ({ id: "general", workspaceId: "workspace", name: "General", slug: "general", kind: "channel", type: "posts", purpose: "", createdAtMs: 1, updatedAtMs: 1 })),
     findThreadChannelId: vi.fn<DesktopLinkedChatStore["findThreadChannelId"]>(async () => "channel"),
     getChannelWireId: vi.fn<DesktopLinkedChatStore["getChannelWireId"]>(async () => "wire"),
     createChannel: vi.fn<DesktopLinkedChatStore["createChannel"]>(async input => ({ ...input, id: "channel", kind: "channel", slug: "general", type: input.type ?? "posts", purpose: input.purpose ?? "", ...(input.folderPath ? { folderPath: input.folderPath } : {}), createdAtMs: 1, updatedAtMs: 1 })),
@@ -81,7 +83,10 @@ function fixture(kind: ScopeKind = "local") {
       throw new Error(`Unexpected chat store method: ${String(key)}`);
     },
   }) as unknown as DesktopLinkedChatStore;
-  const captureMethods = { fileObjectIdForPath: vi.fn(async () => "object" as string | null) };
+  const captureMethods = {
+    fileObjectIdForPath: vi.fn(async () => "object" as string | null),
+    resolveFileForPath: vi.fn<WorkspaceEngineCapture["resolveFileForPath"]>(async () => ({ objectId: "object", path: "notes/a.md" })),
+  };
   const capture = captureMethods as unknown as WorkspaceEngineCapture;
   const authorities = createWorkspaceAuthorityOwner({
     findWorkspace: id => id === workspace.workspaceId ? workspace : null,
@@ -100,15 +105,15 @@ function fixture(kind: ScopeKind = "local") {
   const openWorkspaceActivity = vi.fn(async (): Promise<void> => undefined);
   const activity = { queueCloudSync: vi.fn() };
   const syncSharedChannelsForChatTarget = vi.fn(async () => 0);
-  const activeEngineFileIndex = vi.fn(async () => ({
-    objectIdByPath: new Map([["notes/a.md", "object"]]), pathByObjectId: new Map([["object", "notes/a.md"]]),
-  }));
+  const resolveEngineFiles = vi.fn<import("../workspaces/resolveEngineFiles").EngineFileResolver<import("@dohc/workspace-engine-client/daemon").EngineWorkspace>>(async (_workspace, targets) => targets.map(target =>
+    ("path" in target ? target.path === "notes/a.md" : target.objectId === "object")
+      ? { status: "found", objectId: "object", path: "notes/a.md" } : { status: "absent" }));
   const readOwnedWorkspaceText = vi.fn(async () => ({ text: "# Section\n" }));
   const chatScope = createChatScopeCapability({
     workspaceAuthorities: authorities, canonicalWorkspaceFor, requireEngineCapture,
     linkedChatStoreFor, openWorkspaceActivity,
     receivedShareEngine: { workspaceFor: input => ({ workspaceId: input.engineWorkspaceId, rootPath: input.rootPath, attachmentId: input.attachmentId }) },
-    activeEngineFileIndex, readOwnedWorkspaceText,
+    resolveEngineFiles, readOwnedWorkspaceText,
   });
   const warmCredentialCache = vi.fn(async (): Promise<void> => undefined);
   const scanChatDispatch = vi.fn(async () => undefined);
@@ -153,7 +158,7 @@ function fixture(kind: ScopeKind = "local") {
     syncWorkspaceSharedChannels: async () => 0, syncSharedChannelsForChatTarget,
     syncRendererWorkspaceSharedChannels: async () => 0,
     withRendererWorkspaceOperation: async (_sender, _id, _message, run) => run({ workspace, assertCurrent() {} }),
-    activeEngineFileIndex, activity, desktopChatBookmarks, notifyRenderer: () => undefined, automationCollectionOf: () => () => null,
+    resolveEngineFiles, activity, desktopChatBookmarks, notifyRenderer: () => undefined, automationCollectionOf: () => () => null,
     ensureGroupFolder,
   });
   async function invoke(channel: string, payload: unknown, event: Event = { sender }) {
@@ -163,7 +168,7 @@ function fixture(kind: ScopeKind = "local") {
   }
   return { invoke, workspace, thread, message, bookmark, storeMethods, captureMethods, capture, ensureGroupFolder,
     authorities, chatScope, requireEngineCapture, linkedChatStoreFor, openWorkspaceActivity,
-    activity, syncSharedChannelsForChatTarget, activeEngineFileIndex, readOwnedWorkspaceText,
+    activity, syncSharedChannelsForChatTarget, resolveEngineFiles, readOwnedWorkspaceText,
     warmCredentialCache, chatRelayIdentityFor, scanChatDispatch, projectChatBookmarks, desktopChatBookmarks,
     signOutChatWrites: () => { chatCredentials = null; } };
 }
@@ -259,7 +264,7 @@ describe("registered chat writes", () => {
       await expect(test.invoke(mutation.channel, mutation.payload)).rejects.toThrow("Chats are read-only in this shared view.");
       for (const method of Object.values(test.storeMethods)) expect(method).not.toHaveBeenCalled();
       expect(test.captureMethods.fileObjectIdForPath).not.toHaveBeenCalled();
-      expect(test.activeEngineFileIndex).not.toHaveBeenCalled();
+      expect(test.resolveEngineFiles).not.toHaveBeenCalled();
       expect(test.chatRelayIdentityFor).not.toHaveBeenCalled();
       expect(test.activity.queueCloudSync).not.toHaveBeenCalled();
       expect(test.requireEngineCapture).not.toHaveBeenCalled();
@@ -324,13 +329,13 @@ describe("registered chat reads and reader-local state", () => {
     expect(test.syncSharedChannelsForChatTarget).not.toHaveBeenCalled();
   });
 
-  it("reads served file chats through the share engine index without acquiring capture", async () => {
+  it("resolves served file chats through the share engine without acquiring capture", async () => {
     const test = fixture("ended");
     expect(await test.invoke(CHANNELS.listFileChats, { workspaceId: "workspace", path: "notes/a.md" })).toEqual({
       fileObjectId: "object", threads: [{ id: "thread", title: "Notes", createdAtMs: 1, updatedAtMs: 2 }],
     });
     expect(test.storeMethods.listThreadsForFile).toHaveBeenCalledWith({ workspaceId: "workspace", objectId: "object" });
-    expect(test.activeEngineFileIndex).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: "workspace", attachmentId: expect.any(Symbol) }));
+    expect(test.resolveEngineFiles).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: "workspace", attachmentId: expect.any(Symbol) }), [{ path: "notes/a.md" }]);
     expect(test.requireEngineCapture).not.toHaveBeenCalled();
   });
 
@@ -356,7 +361,7 @@ describe("registered chat reads and reader-local state", () => {
     const successor = test.authorities.acquire("workspace");
     successor.release();
     await expect(test.chatScope.chatFileObjectId(scope, "notes/a.md")).rejects.toThrow("retired workspace authority");
-    expect(test.activeEngineFileIndex).not.toHaveBeenCalled();
+    expect(test.resolveEngineFiles).not.toHaveBeenCalled();
   });
 });
 
@@ -454,5 +459,36 @@ describe("registered channels and personal chat projections", () => {
     expect(test.linkedChatStoreFor).not.toHaveBeenCalled();
     for (const method of Object.values(test.storeMethods)) expect(method).not.toHaveBeenCalled();
     expect(test.desktopChatBookmarks.archiveChatBookmark).not.toHaveBeenCalled();
+  });
+});
+
+
+describe("targeted file resolution", () => {
+  it("keeps mention attachment identity when a path is reused", async () => {
+    const test = fixture();
+    test.captureMethods.resolveFileForPath.mockResolvedValue({ objectId: "replacement", path: "notes/a.md" });
+    const attachment = { attachmentId: "attachment", threadId: test.thread.id, messageId: test.message.id, targetKind: "file" as const, objectId: "object", pathHint: "notes/a.md", createdAtMs: 1 };
+    test.storeMethods.listFileMentions.mockResolvedValue([
+      { attachment, thread: test.thread, message: test.message },
+      { attachment: { ...attachment, attachmentId: "replacement-attachment", objectId: "replacement" }, thread: test.thread, message: test.message },
+    ]);
+    expect(await test.invoke(CHANNELS.listChatFileMentions, { workspaceId: "workspace", path: "./notes//a.md" })).toMatchObject({ mentions: [
+      { attachment: { objectId: "replacement", pathHint: "notes/a.md" } },
+    ] });
+    expect(test.captureMethods.resolveFileForPath).toHaveBeenCalledExactlyOnceWith("./notes//a.md");
+    expect(test.storeMethods.listFileMentions).toHaveBeenCalledWith({ workspaceId: "workspace", objectId: "replacement" });
+    expect(test.captureMethods.fileObjectIdForPath).not.toHaveBeenCalled();
+    expect(test.resolveEngineFiles).not.toHaveBeenCalled();
+  });
+  it("resolves distinct linked file ids and retains display hints for absent objects", async () => {
+    const test = fixture();
+    test.storeMethods.listThreads.mockResolvedValue([test.thread, { ...test.thread, id: "duplicate" }, {
+      ...test.thread, id: "gone", linkedFile: { objectId: "gone", pathHint: "../legacy display hint", linkedAtMs: 1 },
+    }]);
+    test.resolveEngineFiles.mockResolvedValue([{ status: "found", objectId: "object", path: "moved.md" }, { status: "absent" }]);
+    expect(await test.invoke(CHANNELS.listChatChannels, { workspaceId: "workspace" })).toMatchObject({ fileThreads: [
+      { id: "thread", path: "moved.md" }, { id: "duplicate", path: "moved.md" }, { id: "gone", path: "../legacy display hint" },
+    ] });
+    expect(test.resolveEngineFiles).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: "workspace" }), [{ objectId: "object" }, { objectId: "gone" }]);
   });
 });

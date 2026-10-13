@@ -60,7 +60,7 @@ import {
 } from "./shareSkipNotice";
 import { useChatEditorTabs } from "./shell/useChatEditorTabs";
 import { LazyChatsView, LazyGraphView, LazySitePreviewPage } from "./shell/lazyViews";
-import { ShellAboutRail } from "./shell/ShellAboutRail";
+import { ShellAboutRail, type AboutSearchHit } from "./shell/ShellAboutRail";
 import { SIDE_PANEL_VIEWS } from "./shell/sidePanelViews";
 import { ShellSidePanel } from "./shell/ShellSidePanel";
 import { ShellTitlebar } from "./shell/ShellTitlebar";
@@ -996,11 +996,18 @@ export function DesktopWorkspaceShell(props: {
   const activeDocumentPath = TAB_KINDS[parseTab(focusedTabPath)?.kind ?? "removed"].virtual
     ? null
     : focusedTabPath;
-  // Whether any group holds a file tab, so About can tell "open a file" apart
-  // from "a chat or another non-file tab has focus".
-  const fileTabOpen = useMemo(
-    () => wb.editorGroups.some((group) => group.tabs.some((tab) => !TAB_KINDS[parseTab(tab.path).kind].virtual)),
-    [wb.editorGroups],
+  // Whether some tab holds what About covers, so its empty state says to
+  // switch to that tab instead of to open one: any file, or a conversation
+  // other than the focused one. A shared view has no conversations.
+  const sharedView = props.workspace.shareView != null;
+  const aboutTabOpen = useMemo(
+    () => wb.editorGroups.some((group) => group.tabs.some((tab) => {
+      const parsed = parseTab(tab.path);
+      if (!TAB_KINDS[parsed.kind].virtual) return true;
+      return !sharedView && tab.path !== focusedTabPath && parsed.kind === "chat" &&
+        (parsed.target.kind === "channel" || parsed.target.kind === "dm");
+    })),
+    [focusedTabPath, sharedView, wb.editorGroups],
   );
 
   // A clicked search result: open the file and land at the line. The target
@@ -1628,10 +1635,22 @@ export function DesktopWorkspaceShell(props: {
     engineHistoryToken,
     null,
   );
-  const [searchChatTarget, setSearchChatTarget] = useState<{
-    thread: ChatThreadRecord;
-    focusMessageId?: string;
-  } | null>(null);
+  // A file's chat waiting in About, named for the tab it belongs to. It ends
+  // when focus leaves that tab, whether or not About is open to show it.
+  const [searchChatTarget, setSearchChatTarget] = useState<AboutSearchHit | null>(null);
+  const focusedTabRef = useRef(focusedTabPath);
+  focusedTabRef.current = focusedTabPath;
+  useEffect(() => {
+    setSearchChatTarget((target) => (target === null || target.tab === focusedTabPath ? target : null));
+  }, [focusedTabPath]);
+  const onSearchHitRead = useCallback(() => {
+    setSearchChatTarget((target) => (target === null || target.read ? target : { ...target, read: true }));
+  }, []);
+  // About's file panel stopped showing the hit it read: Back, a switch, or
+  // About closing. A newer hit it has not read stays.
+  const onSearchHitClosed = useCallback(() => {
+    setSearchChatTarget((target) => (target?.read ? null : target));
+  }, []);
   // The local writers on these lanes. Dismissing the review card clears it
   // here, and that IS the user acting: it supersedes whatever a request issued
   // earlier will eventually say.
@@ -2468,10 +2487,13 @@ export function DesktopWorkspaceShell(props: {
   // mentions without channel metadata, and the Chats view "Files" grouping
   // all route here): hand the known thread to About's consume-once seam and
   // force the rail visible.
+  // The hit belongs to the focused tab, or to the file tab the caller is
+  // opening for it.
   const openChatThreadInPanel = useCallback(
     (
       thread: { id: string; title: string; createdAtMs: number; updatedAtMs: number },
       focusMessageId?: string,
+      tab: string | null = focusedTabRef.current,
     ) => {
       // The user picked a different chat destination. The panel is not the
       // editor, so no tab moves and the check in mutateWb cannot see this —
@@ -2486,6 +2508,8 @@ export function DesktopWorkspaceShell(props: {
           updatedAtMs: thread.updatedAtMs,
         },
         ...(focusMessageId ? { focusMessageId } : {}),
+        tab,
+        read: false,
       });
       mutateWb((state) => ({ ...state, aboutVisible: true }));
     },
@@ -2677,7 +2701,7 @@ export function DesktopWorkspaceShell(props: {
       thread: { id: string; title: string; createdAtMs: number; updatedAtMs: number; path: string | null },
       focusMessageId?: string,
     ) => {
-      openChatThreadInPanel(thread, focusMessageId);
+      openChatThreadInPanel(thread, focusMessageId, thread.path ?? undefined);
       if (thread.path) openFile(thread.path);
     },
     [openChatThreadInPanel, openFile],
@@ -5719,10 +5743,11 @@ export function DesktopWorkspaceShell(props: {
             syncStatus={syncStatus}
             workspaceId={workspaceId}
             activeDocumentPath={activeDocumentPath}
-            fileTabOpen={fileTabOpen}
+            aboutTabOpen={aboutTabOpen}
             shareView={shareView}
             searchChatTarget={searchChatTarget}
-            setSearchChatTarget={setSearchChatTarget}
+            onSearchHitRead={onSearchHitRead}
+            onSearchHitClosed={onSearchHitClosed}
             openPathWithHeading={openPathWithHeading}
             onChatsThreadRead={onChatsThreadRead}
             reportFailureMessage={reportFailureMessage}

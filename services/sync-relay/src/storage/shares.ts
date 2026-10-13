@@ -22,7 +22,7 @@ import {
 } from "./types";
 import { type StorageContext } from "./context";
 import { nextShareDiscussionRevision } from "./discussion";
-import { readCurrentShareGrant } from "./currentShareGrant";
+import { currentShareGrantSql, readCurrentShareGrant } from "./currentShareGrant";
 import {
   rowToShareGrantRow,
   rowToLinkCredentialRow,
@@ -690,6 +690,16 @@ export function claimPendingSharesForEmail(storage: StorageContext, email: strin
         .run(userId, normalized);
       return Number(result.changes ?? 0);
     });
+  }
+
+export function hasPendingInvite(storage: StorageContext, email: string): boolean {
+    return !!storage.db
+      .prepare(
+        `SELECT 1 FROM sync_relay_share_grants AS g JOIN sync_relay_shares AS s ON s.share_id = g.share_id
+         WHERE g.principal_kind = 'email' AND g.principal_email = ? AND ${currentShareGrantSql("g", "s")}
+         LIMIT 1`,
+      )
+      .get(email.trim().toLowerCase());
   }
 
 export function getShare(storage: StorageContext, shareId: string): SyncRelayShareRow | null {
