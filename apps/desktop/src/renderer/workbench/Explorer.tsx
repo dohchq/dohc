@@ -1,7 +1,7 @@
 import { FILE_KIND_RECORDS, fileKindForPath, type FileKindRecord } from "@dohc/workspace-contracts/kinds";
 import { useFocusSurface } from "../ui/focusReturn";
 import { DangerButton, SecondaryButton, SectionLabel } from "../ui/controls";
-import { KindGlyph } from "../ui/KindGlyph";
+import { AppGlyph, KindGlyph } from "../ui/KindGlyph";
 import { basenameOf, dirnameOf } from "../path";
 import {
   ChevronsUp,
@@ -108,6 +108,9 @@ export interface ExplorerProps {
   // collection's views; the chevron still expands the folder in place, and
   // keyboard expand/collapse is untouched.
   collectionFolders: ReadonlySet<string>;
+  // Folders main recognizes as apps. Their rows draw the app glyph; a row
+  // still opens and expands as any folder's does.
+  appFolders?: ReadonlySet<string>;
   onOpenCollection: (path: string) => void;
   dataCollections?: Array<{ datasetId: string; datasetPath: string | null; tableId: string; name: string; archived?: boolean }>;
   includeArchivedCollections?: boolean;
@@ -314,6 +317,9 @@ export const TreeRow = memo(function TreeRow(props: {
   // views. Exposed as data-collection so tests can gate on the state before
   // clicking.
   collection: boolean;
+  // Main recognizes this folder as an app: the row draws the app glyph in
+  // the folder glyph's place, and says so as data-app.
+  app: boolean;
   selected: boolean;
   active: boolean;
   tabbable: boolean;
@@ -351,6 +357,7 @@ export const TreeRow = memo(function TreeRow(props: {
         data-path={row.fullPath}
         data-kind={row.isFolder ? "folder" : "file"}
         data-collection={props.collection ? "true" : undefined}
+        data-app={props.app ? "true" : undefined}
         data-drop-state={props.dropPreview?.kind}
         aria-level={row.depth + 1}
         aria-posinset={row.positionInSet}
@@ -421,7 +428,9 @@ export const TreeRow = memo(function TreeRow(props: {
                 className={`shrink-0 text-subtle transition-transform ${row.isExpanded ? "rotate-90" : ""}`}
               />
             </span>
-            {row.isExpanded ? (
+            {props.app ? (
+              <AppGlyph size={GLYPH_SIZE} className={glyphClass} />
+            ) : row.isExpanded ? (
               <FolderOpen size={GLYPH_SIZE} aria-hidden className={`shrink-0 ${glyphClass}`} />
             ) : (
               <Folder size={GLYPH_SIZE} aria-hidden className={`shrink-0 ${glyphClass}`} />
@@ -1594,6 +1603,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
           key={item.key}
           row={row}
           collection={row.isFolder && props.collectionFolders.has(row.fullPath)}
+          app={row.isFolder && (props.appFolders?.has(row.fullPath) ?? false)}
           selected={selection.has(row.fullPath)}
           active={activeTab === row.fullPath}
           tabbable={tabbablePath === row.fullPath}
@@ -1938,7 +1948,9 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
                           }}
                           className="flex h-7 w-full items-center gap-1.5 px-3 text-left text-[13px] text-muted hover:bg-hover hover:text-ink"
                         >
-                          {isFolderPath(path) ? (
+                          {props.appFolders?.has(path) ? (
+                            <AppGlyph size={GLYPH_SIZE} className={glyphTone(false)} />
+                          ) : isFolderPath(path) ? (
                             <Folder size={GLYPH_SIZE} aria-hidden className={`shrink-0 ${glyphTone(false)}`} />
                           ) : (
                             fileGlyph(path)

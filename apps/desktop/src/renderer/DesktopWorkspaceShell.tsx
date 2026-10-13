@@ -1,4 +1,5 @@
 import { useTypingRecoveryNotices } from "./shell/useTypingRecoveryNotices";
+import { useFolderAppOffers } from "./offers/useFolderAppOffers";
 import { CreationPartialError } from "@dohc/cli/creation";
 import {shareSenderLabel} from "@dohc/security-contract/share-labels";
 import { AgentSettingsProvider } from "./workbench/AgentBadge";
@@ -1532,6 +1533,26 @@ export function DesktopWorkspaceShell(props: {
     shareViewReadsCollections,
     shareViewEnded,
   );
+  const folderApps = useFolderAppOffers({
+    workspaceId,
+    enabled: workspaceIsReady && !shareViewEnded,
+    expandedFolders: wb.expandedFolders,
+    activePath: wb.editorGroups.find((group) => group.id === wb.activeEditorGroup)?.activeTab ?? null,
+    onError: (folder, error, retry, quiet) => reportShellFailure({
+      message: `dohc could not read the folder ${folder}.`,
+      cause: error,
+      retry,
+      identity: `folder-app:${folder}`,
+      quiet,
+    }),
+  });
+  const appFolders = useMemo(() => new Set(folderApps.keys()), [folderApps]);
+  // The app folder of each entry file, so a file view shows Run.
+  const appEntries = useMemo(() => {
+    const entries = new Map<string, string>();
+    for (const app of folderApps.values()) if (app.run?.entryPath) entries.set(app.run.entryPath, app.run.path);
+    return entries;
+  }, [folderApps]);
   useEffect(() => {
     if (!workspaceIsReady || shareViewEnded) return;
     const refresh = () => {
@@ -4527,6 +4548,7 @@ export function DesktopWorkspaceShell(props: {
         onToggleFolder={toggleExplorerFolder}
         onTogglePin={toggleExplorerPin}
         collectionFolders={collectionFolders}
+        appFolders={appFolders}
         onOpenCollection={openCollectionTab}
         dataCollections={dataCollections}
         includeArchivedCollections={includeArchived}
@@ -5666,6 +5688,8 @@ export function DesktopWorkspaceShell(props: {
                 registerSourceToggle={editorCallbacks.registerSourceToggle}
                 autoFocus={wb.activeEditorGroup === editorGroup.id}
                 knownMarkdownFiles={markdownWikilinkFiles}
+                appFolder={appEntries.get(tabPath) ?? null}
+                onRunApp={openAppTab}
                 onButtonError={reportShellError}
                 onButtonNotice={showSuccessNotice}
                 onOpenRecordHistory={recordHistory.open}
