@@ -242,14 +242,14 @@ export function tabPath(tab: ParsedTab): string {
 type TabTitle = (tab: ParsedTab, label?: string) => string;
 // The object a tab shows, for its glyph. Null for a file, whose glyph comes
 // from the listing: its kind and page icon.
-type TabGlyph = (tab: ParsedTab) => ObjectKind | null;
-type TabRules = { virtual: boolean; singleton: boolean; title: TabTitle; tooltip: TabTitle; explorerTitle: TabTitle; glyph: TabGlyph };
+type TabObjectRule = (tab: ParsedTab) => ObjectKind | null;
+type TabRules = { virtual: boolean; singleton: boolean; title: TabTitle; tooltip: TabTitle; explorerTitle: TabTitle; glyph: TabObjectRule };
 const fileTitles = {
   title: (tab: ParsedTab) => basenameOf(tab.path),
   tooltip: (tab: ParsedTab) => tab.path,
   explorerTitle: (tab: ParsedTab) => basenameOf(tab.path),
 };
-const chatGlyph: TabGlyph = (tab) => tab.kind === "chat" && tab.target.kind === "channel" ? "group" : "chat";
+const chatGlyph: TabObjectRule =(tab) => tab.kind === "chat" && tab.target.kind === "channel" ? "group" : "chat";
 const chatTitle: TabTitle = (tab, label) => {
   if (label !== undefined) return label;
   if (tab.kind !== "chat") return "Chat";

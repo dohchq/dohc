@@ -1046,7 +1046,15 @@ export const EditorTabs = memo(function EditorTabs(props: {
             id: tab.path,
             label: fileName(tab.path, props.tabLabels?.get(tab.path)),
             title: tab.path,
-            icon: <TabGlyph {...tabMark(tab.path, props.files)} size={TAB_GLYPH_SIZE} />,
+            // Ink on the current row's selected fill and subtle elsewhere,
+            // as Explorer's open editors tone the same glyph.
+            icon: (
+              <TabGlyph
+                {...tabMark(tab.path, props.files)}
+                size={TAB_GLYPH_SIZE}
+                className={tab.path === props.activeTab ? "text-ink" : "text-subtle"}
+              />
+            ),
             current: tab.path === props.activeTab,
             onSelect: () => props.onActivate(props.groupId, tab.path),
           }))}

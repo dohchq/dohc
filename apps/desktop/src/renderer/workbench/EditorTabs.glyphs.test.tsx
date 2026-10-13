@@ -123,6 +123,11 @@ describe("EditorTabs glyphs", () => {
     expect(glyphs[0]).toContain("lucide-file-spreadsheet");
     expect(glyphs[1]).toContain("lucide-app-window");
     expect(glyphs[2]).toContain("lucide-hash");
+    // Ink on the current row's selected fill, subtle on the rest, as
+    // Explorer's open editors tone the same glyph.
+    expect(glyphs[0]).toContain("text-ink");
+    expect(glyphs[1]).toContain("text-subtle");
+    expect(glyphs[2]).toContain("text-subtle");
   });
 
   it("re-renders only the active tab when its dirty state flips", () => {
