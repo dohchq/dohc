@@ -171,7 +171,13 @@ test("a line typed after click, Ctrl+End and Enter lands at the end of an existi
 
 test("the page title's Enter reveals a body below the viewport", async () => {
   const path = "notes/long-properties.md";
-  const properties = Array.from({ length: 60 }, (_, index) => `field${index}: value`).join("\n");
+  // Properties are pills that share lines. A long value fills its pill to
+  // the cap, about half the 720px line, so two share a line and 120 of them
+  // push the body far below the viewport.
+  const properties = Array.from(
+    { length: 120 },
+    (_, index) => `field${index}: a value long enough to fill most of a line on its own`,
+  ).join("\n");
   await withDesktop(
     [{ path, contents: `---\ntitle: Packing\n${properties}\n---\n\nFirst line.\n` }],
     async (page, temp) => {
