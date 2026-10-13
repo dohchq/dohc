@@ -554,6 +554,28 @@ impl ActorHandle {
         .await
     }
 
+    pub async fn resolve_files(
+        &self,
+        workspace_id: String,
+        version_id: Option<String>,
+        targets: Vec<dohc_engine_domain::FileResolveTarget>,
+        token: CancellationToken,
+    ) -> Result<(String, Vec<dohc_engine_domain::FileResolution>), RuntimeError> {
+        self.run(move |store, _| {
+            if token.is_cancelled() {
+                return Err(RuntimeError::Cancelled);
+            }
+            let result = VersionedTextStore::new(store)
+                .resolve_files(&workspace_id, version_id.as_deref(), &targets)
+                .map_err(RuntimeError::from);
+            if token.is_cancelled() {
+                return Err(RuntimeError::Cancelled);
+            }
+            result
+        })
+        .await
+    }
+
     pub async fn resolve_path_object(
         &self,
         workspace_id: String,

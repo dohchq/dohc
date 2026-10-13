@@ -5,9 +5,20 @@ use dohc_engine_testkit::{ScratchDir, engine_db_path};
 use rusqlite::params;
 
 fn fixture(coordinates: usize) -> (ScratchDir, std::path::PathBuf, EngineStore) {
+    fixture_with_mode(coordinates, false)
+}
+
+fn fixture_with_mode(
+    coordinates: usize,
+    passive: bool,
+) -> (ScratchDir, std::path::PathBuf, EngineStore) {
     let scratch = ScratchDir::new().unwrap();
     let path = engine_db_path(&scratch).unwrap();
-    let mut store = EngineStore::open(&path, 1_000).unwrap();
+    let mut store = if passive {
+        EngineStore::open_passive(&path, 1_000, None, None).unwrap()
+    } else {
+        EngineStore::open(&path, 1_000).unwrap()
+    };
     dohc_engine_domain::VersionedTextStore::new(&mut store)
         .ensure_main_version("ws", "main", 1_000, &NoFaults)
         .unwrap();
@@ -721,4 +732,44 @@ fn stalled_lookup_batch(first_error: bool) {
         "lookup batch first_error={first_error} shutdown_us={shutdown_us} requests={}",
         coordinates.len()
     );
+}
+
+#[test]
+fn passive_store_base_repair_never_posts_a_confirmation() {
+    let (_scratch, _path, mut store) = fixture_with_mode(1, true);
+    store
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "UPDATE sync_identity SET origin_id='peer' WHERE workspace_id='ws'",
+                [],
+            )
+            .map_err(StorageError::persist_public)
+        })
+        .unwrap();
+    let mut cache = WriterDocCache::new();
+    let transport = DeferredRelayTransport::default();
+    let mut relay = Relay::default();
+    for _ in 0..8 {
+        match execute_relay_operation(
+            &mut store,
+            &mut cache,
+            transport.clone(),
+            operation(),
+            &LeaseRegistry::default(),
+            &ClaimAnnouncer::default(),
+        ) {
+            Ok(RelayOperationOutcome::Sync(SyncPassOutcome::Complete { .. })) => {
+                assert_eq!(remaining(&store), 0);
+                assert_eq!(relay.lookups, 1);
+                return;
+            }
+            Err(RuntimeError::Relay(RelayError::Local(reason))) if reason == RELAY_IO_PENDING => {
+                let request = transport.take_pending().unwrap();
+                let response = relay.answer(&request);
+                transport.complete(request, Ok(response));
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+    panic!("base repair did not finish");
 }

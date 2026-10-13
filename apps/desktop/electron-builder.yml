@@ -120,6 +120,10 @@ linux:
   # Use package.json desktopName for the launcher filename and StartupWMClass;
   # app.setDesktopName("dohc.desktop") supplies the matching runtime identity.
   syncDesktopName: true
+appImage:
+  # electron-builder's default AppImage desktop entry passes --no-sandbox.
+  # Menu launches, dohc:// links and opened files keep the Chromium sandbox.
+  executableArgs: []
 
 fileAssociations:
   - ext: [md, markdown, txt, csv, json]

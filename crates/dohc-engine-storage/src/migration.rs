@@ -3224,6 +3224,12 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         sets_user_version: None,
     },
     Migration {
+        ordinal: 47,
+        id: "v2-engine-store-role",
+        sql: "ALTER TABLE engine_ownership ADD COLUMN store_role TEXT NOT NULL DEFAULT 'owner' CHECK (store_role IN ('owner','passive'));",
+        sets_user_version: None,
+    },
+    Migration {
         ordinal: 48,
         id: "v2-retained-materialization-displacements",
         sql: V2_RETAINED_DISPLACEMENTS_DDL,
@@ -3933,6 +3939,10 @@ mod tests {
             (
                 "v2-moments-history-time",
                 "5aa8707d5659bbfb8e3e0076c812d1d723a011e6cfb32fefe490f8b1066b2c39",
+            ),
+            (
+                "v2-engine-store-role",
+                "8d75962511b05d48c91ea5c041ed69c8ab6b181212aee4c0cad4c7e16f61a54b",
             ),
             (
                 "v2-retained-materialization-displacements",

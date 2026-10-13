@@ -588,9 +588,9 @@ test("proof edits during preparation reject full source provenance", () => {
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
-test("prepared desktop checks staged compiler bytes only on Windows x64", () => {
-  for (const [platform, arch] of [["win32", "x64"], ["win32", "arm64"], ["linux", "x64"]]) {
-    const supported = platform === "win32" && arch === "x64";
+test("prepared desktop checks staged compiler bytes on Windows and Linux x64", () => {
+  for (const [platform, arch] of [["win32", "x64"], ["win32", "arm64"], ["linux", "x64"], ["linux", "arm64"]]) {
+    const supported = arch === "x64" && ["win32", "linux"].includes(platform);
     const root = mkdtempSync(join(tmpdir(), "dohc-prepare-compiler-"));
     try {
       const invoke = createPrepareFixture(root, new URL("./build.mjs", import.meta.url));

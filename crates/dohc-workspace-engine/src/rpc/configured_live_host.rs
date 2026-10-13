@@ -12,7 +12,7 @@ use serde_json::{Value, json};
 use std::collections::HashSet;
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 // Operator configuration is bounded separately from runtime update admission.
@@ -73,6 +73,25 @@ struct WorkspaceConfig {
     workspace_id: String,
     max_registrations: usize,
     relay: Option<super::relay::RelayOpenParams>,
+}
+
+impl WorkspaceConfig {
+    fn canonicalize(&mut self) -> Result<(), WireError> {
+        ApplicationOwner::new(self.workspace_id.clone())
+            .map_err(|_| invalid("invalid live host workspace identity"))?;
+        if !self.root.is_absolute() || self.max_registrations == 0 {
+            return Err(invalid("invalid live host workspace configuration"));
+        }
+        self.root = std::fs::canonicalize(&self.root)
+            .map_err(|_| invalid("live host workspace root unavailable"))?;
+        if self.root.to_str().is_none() {
+            return Err(invalid("live host workspace root must be UTF-8"));
+        }
+        if !self.root.is_dir() {
+            return Err(invalid("live host workspace root unavailable"));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Deserialize)]
@@ -138,9 +157,9 @@ impl ConfiguredLiveHostConfig {
     }
 
     fn canonicalize_and_validate(&mut self) -> Result<LiveApplicationIngressConfig, WireError> {
+        // A host may start empty; the relay attaches workspaces as it enrolls them.
         if self.version != 1
             || self.relay_namespace.is_empty()
-            || self.workspaces.is_empty()
             || self.workspaces.len() > super::workspace::MAX_OPEN_HANDLES
         {
             return Err(invalid("invalid live host configuration"));
@@ -152,18 +171,8 @@ impl ConfiguredLiveHostConfig {
         let mut roots = HashSet::new();
         let mut identities = HashSet::new();
         for workspace in &mut self.workspaces {
-            ApplicationOwner::new(workspace.workspace_id.clone())
-                .map_err(|_| invalid("invalid live host workspace identity"))?;
-            if !workspace.root.is_absolute() || workspace.max_registrations == 0 {
-                return Err(invalid("invalid live host workspace configuration"));
-            }
-            workspace.root = std::fs::canonicalize(&workspace.root)
-                .map_err(|_| invalid("live host workspace root unavailable"))?;
-            if workspace.root.to_str().is_none() {
-                return Err(invalid("live host workspace root must be UTF-8"));
-            }
-            if !workspace.root.is_dir()
-                || !roots.insert(workspace.root.clone())
+            workspace.canonicalize()?;
+            if !roots.insert(workspace.root.clone())
                 || !identities.insert(workspace.workspace_id.clone())
             {
                 return Err(invalid(
@@ -171,11 +180,13 @@ impl ConfiguredLiveHostConfig {
                 ));
             }
         }
-        let workspaces: Vec<_> = self.workspaces.iter().map(|workspace|
-            json!({"workspaceId": workspace.workspace_id, "workspaceHandle": "ws-ffffffffffffffff"})
-        ).collect();
+        let workspaces = self
+            .workspaces
+            .iter()
+            .map(|workspace| sized_entry(&workspace.workspace_id))
+            .collect();
         validate_discovery(
-            &discovery(&self.relay_namespace, &self.host, workspaces),
+            &discovery_json(&self.relay_namespace, &self.host, workspaces),
             MAX_WIRE_INTEGER,
             MIN_NEGOTIABLE_FRAME_BYTES,
         )?;
@@ -185,15 +196,35 @@ impl ConfiguredLiveHostConfig {
 
 pub(crate) struct Discovery {
     connection: ConnectionHandle,
-    ordinary_workspaces: HashSet<WorkspaceHandle>,
+    namespace: String,
+    host: HostCoordinate,
+    attached: Mutex<Vec<AttachedWorkspace>>,
+    /// Serializes attach and detach. Other host methods do not wait on it.
+    membership: tokio::sync::Mutex<()>,
     sync: Option<(
         dohc_engine_collab::live_update_application::AppliedSyncPolicy,
         SettlementAdmission,
     )>,
-    result: Value,
     settlement: Option<(usize, SettlementAdmission)>,
     restore: Option<crate::live_application_ingress::RestoreConfig>,
     adoption: Option<ConfiguredOwnerAdoption>,
+}
+
+/// One attached workspace, in attach order. An entry whose handle has no live
+/// host is an attach that never finished; discovery omits it.
+struct AttachedWorkspace {
+    workspace_id: String,
+    root: PathBuf,
+    handle: WorkspaceHandle,
+    ordinary: bool,
+}
+
+impl Discovery {
+    fn is_ordinary(&self, workspace: &WorkspaceHandle) -> bool {
+        lock(&self.attached)
+            .iter()
+            .any(|entry| entry.ordinary && &entry.handle == workspace)
+    }
 }
 
 impl EngineService {
@@ -213,10 +244,6 @@ impl EngineService {
                 || adoption.owner_outbox.max_pending_age_ms > MAX_WIRE_INTEGER as i64
                 || adoption.max_bytes == 0
                 || adoption.max_events == 0
-                || !config
-                    .workspaces
-                    .iter()
-                    .any(|workspace| workspace.relay.is_some())
             {
                 return Err(invalid("invalid configured owner adoption"));
             }
@@ -242,66 +269,26 @@ impl EngineService {
             })
             .transpose()?;
         let owner = ConnectionOwner::authenticated();
-        let mut ctx = RequestContext::unbounded();
-        ctx.connection = Some(owner.handle());
-        let mut workspaces = Vec::new();
-        let mut ordinary_workspaces = HashSet::new();
-        let result = async {
-            for workspace in &config.workspaces {
-                let opened = service.workspace_open(&ctx, json!({
-                    "rootDir": workspace.root, "workspaceId": workspace.workspace_id, "captureMode": "none",
-                    "relay": workspace.relay
-                })).await?;
-                let handle: WorkspaceHandle = serde_json::from_value(opened["workspace"].clone())
-                    .map_err(|_| WireError::new(ErrorCode::Internal, "workspace open returned no handle"))?;
-                if workspace.relay.is_some() {
-                    service.versions_ensure_main(
-                        &ctx,
-                        Some(handle.clone()),
-                        json!({"workspaceId": workspace.workspace_id}),
-                    ).await?;
-                    ordinary_workspaces.insert(handle.clone());
-                }
-                if let Some(adoption) = &config.adoption {
-                    let opened = service.open(Some(&handle))?;
-                    let db_path = opened.db_path.clone();
-                    let workspace_id = workspace.workspace_id.clone();
-                    let limits = adoption.owner_outbox.clone();
-                    let mismatch = tokio::task::spawn_blocking(move || {
-                        let store = dohc_engine_storage::EngineStore::open_read_only(&db_path).map_err(|_|invalid("owner adoption budget read failed"))?;
-                        store.read_with(|conn|conn.query_row(
-                            "SELECT EXISTS(SELECT 1 FROM live_owner_adoptions a JOIN ydoc_docs d
-                             ON d.workspace_id=a.workspace_id AND d.version_id=a.main_version_id AND d.object_id=a.object_id
-                             AND d.lineage_claim_id=a.lineage_claim_id WHERE a.workspace_id=?1 AND (a.max_pending_bytes>?2 OR a.max_pending_age_ms>?3))",
-                            rusqlite::params![workspace_id,limits.max_pending_bytes,limits.max_pending_age_ms],|row|row.get::<_,bool>(0)))
-                            .map_err(|_|invalid("owner adoption budget read failed"))
-                    }).await.map_err(|_|invalid("owner adoption budget read interrupted"))??;
-                    if mismatch { return Err(invalid("configured owner outbox budget is smaller than retained adoption")); }
-                }
-                service.provision_live_application(owner.handle(), LiveApplicationHostConfig {
-                    workspace: handle.clone(), namespace: config.relay_namespace.clone(),
-                    coordinate: config.host.coordinate(), max_registrations: workspace.max_registrations,
-                }).await?;
-                workspaces.push(json!({"workspaceId": workspace.workspace_id, "workspaceHandle": handle}));
+        let _ = service.configured_live_host.set(Discovery {
+            connection: owner.handle(),
+            namespace: config.relay_namespace,
+            host: config.host,
+            attached: Mutex::new(Vec::new()),
+            membership: tokio::sync::Mutex::new(()),
+            settlement,
+            sync,
+            restore: config.restore,
+            adoption: config.adoption,
+        });
+        let mut result = Ok(());
+        for workspace in config.workspaces {
+            if let Err(error) = service.attach_configured_workspace(workspace).await {
+                result = Err(error);
+                break;
             }
-            let result = discovery(&config.relay_namespace, &config.host, workspaces);
-            // The smallest supported negotiated frame must hold readiness.
-            validate_discovery(&result, MAX_WIRE_INTEGER, MIN_NEGOTIABLE_FRAME_BYTES)?;
-            Ok::<_, WireError>(result)
-        }.await;
+        }
         match result {
-            Ok(result) => {
-                let _ = service.configured_live_host.set(Discovery {
-                    connection: owner.handle(),
-                    ordinary_workspaces,
-                    result,
-                    settlement,
-                    sync,
-                    restore: config.restore,
-                    adoption: config.adoption,
-                });
-                Ok((service, owner, ingress))
-            }
+            Ok(()) => Ok((service, owner, ingress)),
             Err(error) => {
                 owner.retire();
                 let handles: Vec<_> = lock(&service.handles).keys().cloned().collect();
@@ -311,6 +298,231 @@ impl EngineService {
                 Err(error)
             }
         }
+    }
+
+    /// The configured host, when its own connection is the caller.
+    pub(super) fn configured_host_caller(
+        &self,
+        ctx: &RequestContext,
+    ) -> Result<&Discovery, WireError> {
+        let discovery = self
+            .configured_live_host
+            .get()
+            .ok_or_else(|| WireError::new(ErrorCode::Forbidden, "live host is not configured"))?;
+        if !discovery.connection.is_current()
+            || !ctx
+                .connection
+                .as_ref()
+                .is_some_and(|connection| discovery.connection.same_connection(connection))
+        {
+            return Err(WireError::new(
+                ErrorCode::SessionExpired,
+                "live host connection is not current",
+            ));
+        }
+        Ok(discovery)
+    }
+
+    pub(super) async fn configured_attach_workspace(
+        &self,
+        ctx: &RequestContext,
+        request: Request,
+    ) -> Result<Value, WireError> {
+        let discovery = self.configured_host_caller(ctx)?;
+        if request.workspace.is_some() {
+            return Err(invalid(
+                "liveApplication.attachWorkspace takes no workspace",
+            ));
+        }
+        let workspace: WorkspaceConfig = serde_json::from_value(request.params)
+            .map_err(|_| invalid("invalid live host workspace configuration"))?;
+        let _membership = discovery.membership.lock().await;
+        self.configured_host_caller(ctx)?;
+        self.attach_configured_workspace(workspace).await
+    }
+
+    /// `liveApplication.detachWorkspace`: close one attached workspace. Its
+    /// registrations, sessions, and leases end with it; other workspaces keep
+    /// theirs. Detach does not wait for pending delivery, settlement, or
+    /// materialization. That work stays in the workspace store and resumes
+    /// when the workspace is attached again.
+    pub(super) async fn configured_detach_workspace(
+        &self,
+        ctx: &RequestContext,
+        request: Request,
+    ) -> Result<Value, WireError> {
+        let discovery = self.configured_host_caller(ctx)?;
+        if request
+            .params
+            .as_object()
+            .is_none_or(|params| !params.is_empty())
+        {
+            return Err(invalid(
+                "liveApplication.detachWorkspace requires empty params",
+            ));
+        }
+        let handle = request
+            .workspace
+            .ok_or_else(super::error::workspace_unavailable)?;
+        let _membership = discovery.membership.lock().await;
+        self.configured_host_caller(ctx)?;
+        if !lock(&discovery.attached)
+            .iter()
+            .any(|entry| entry.handle == handle)
+        {
+            return Err(super::error::workspace_unavailable());
+        }
+        // A detach dropped after close began leaves an entry without a host.
+        // Discovery omits it and the next attach prunes it.
+        self.workspace_close(Some(handle.clone())).await?;
+        lock(&discovery.attached).retain(|entry| entry.handle != handle);
+        Ok(json!({"detached": true}))
+    }
+
+    /// Open, provision, and list one workspace. Callers serialize membership.
+    async fn attach_configured_workspace(
+        &self,
+        mut workspace: WorkspaceConfig,
+    ) -> Result<Value, WireError> {
+        let discovery = self
+            .configured_live_host
+            .get()
+            .ok_or_else(|| WireError::new(ErrorCode::Forbidden, "live host is not configured"))?;
+        workspace.canonicalize()?;
+        let unfinished = {
+            let mut attached = lock(&discovery.attached);
+            {
+                let handles = lock(&self.handles);
+                attached.retain(|entry| handles.contains_key(&entry.handle));
+            }
+            let registry = lock(&self.live_applications);
+            let mut unfinished = Vec::new();
+            let mut listed = Vec::new();
+            for entry in attached.iter() {
+                if entry.root == workspace.root || entry.workspace_id == workspace.workspace_id {
+                    if registry.has_host(&entry.handle) {
+                        return Err(invalid(
+                            "live host workspace roots and identities must be unique",
+                        ));
+                    }
+                    unfinished.push(entry.handle.clone());
+                } else if entry.root.starts_with(&workspace.root)
+                    || workspace.root.starts_with(&entry.root)
+                {
+                    // Capture and the engine store would cover another workspace's files.
+                    return Err(invalid(
+                        "live host workspace roots must not contain one another",
+                    ));
+                } else {
+                    listed.push(sized_entry(&entry.workspace_id));
+                }
+            }
+            listed.push(sized_entry(&workspace.workspace_id));
+            // The smallest supported negotiated frame must hold readiness.
+            validate_discovery(
+                &discovery_json(&discovery.namespace, &discovery.host, listed),
+                MAX_WIRE_INTEGER,
+                MIN_NEGOTIABLE_FRAME_BYTES,
+            )?;
+            unfinished
+        };
+        // An attach dropped before provisioning left its workspace open.
+        for handle in unfinished {
+            self.workspace_close(Some(handle.clone())).await?;
+            lock(&discovery.attached).retain(|entry| entry.handle != handle);
+        }
+        let mut ctx = RequestContext::unbounded();
+        ctx.connection = Some(discovery.connection.clone());
+        let opened = self
+            .workspace_open(
+                &ctx,
+                json!({
+                    "rootDir": workspace.root, "workspaceId": workspace.workspace_id,
+                    "captureMode": "none", "relay": workspace.relay
+                }),
+            )
+            .await?;
+        let handle: WorkspaceHandle =
+            serde_json::from_value(opened["workspace"].clone()).map_err(|_| {
+                WireError::new(ErrorCode::Internal, "workspace open returned no handle")
+            })?;
+        lock(&discovery.attached).push(AttachedWorkspace {
+            workspace_id: workspace.workspace_id.clone(),
+            root: workspace.root.clone(),
+            handle: handle.clone(),
+            ordinary: workspace.relay.is_some(),
+        });
+        if let Err(error) = self
+            .provision_configured_workspace(discovery, &ctx, &workspace, &handle)
+            .await
+        {
+            if self.workspace_close(Some(handle.clone())).await.is_ok() {
+                lock(&discovery.attached).retain(|entry| entry.handle != handle);
+            }
+            return Err(error);
+        }
+        Ok(json!({"workspaceId": workspace.workspace_id, "workspaceHandle": handle}))
+    }
+
+    async fn provision_configured_workspace(
+        &self,
+        discovery: &Discovery,
+        ctx: &RequestContext,
+        workspace: &WorkspaceConfig,
+        handle: &WorkspaceHandle,
+    ) -> Result<(), WireError> {
+        if workspace.relay.is_some() {
+            self.versions_ensure_main(
+                ctx,
+                Some(handle.clone()),
+                json!({"workspaceId": workspace.workspace_id}),
+            )
+            .await?;
+        }
+        if let Some(adoption) = &discovery.adoption {
+            let opened = self.open(Some(handle))?;
+            let db_path = opened.db_path.clone();
+            let workspace_id = workspace.workspace_id.clone();
+            let limits = adoption.owner_outbox.clone();
+            let mismatch = tokio::task::spawn_blocking(move || {
+                let store = dohc_engine_storage::EngineStore::open_read_only(&db_path).map_err(|_|invalid("owner adoption budget read failed"))?;
+                store.read_with(|conn|conn.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM live_owner_adoptions a JOIN ydoc_docs d
+                     ON d.workspace_id=a.workspace_id AND d.version_id=a.main_version_id AND d.object_id=a.object_id
+                     AND d.lineage_claim_id=a.lineage_claim_id WHERE a.workspace_id=?1 AND (a.max_pending_bytes>?2 OR a.max_pending_age_ms>?3))",
+                    rusqlite::params![workspace_id,limits.max_pending_bytes,limits.max_pending_age_ms],|row|row.get::<_,bool>(0)))
+                    .map_err(|_|invalid("owner adoption budget read failed"))
+            }).await.map_err(|_|invalid("owner adoption budget read interrupted"))??;
+            if mismatch {
+                return Err(invalid(
+                    "configured owner outbox budget is smaller than retained adoption",
+                ));
+            }
+        }
+        self.provision_live_application(
+            discovery.connection.clone(),
+            LiveApplicationHostConfig {
+                workspace: handle.clone(),
+                namespace: discovery.namespace.clone(),
+                coordinate: discovery.host.coordinate(),
+                max_registrations: workspace.max_registrations,
+            },
+        )
+        .await
+    }
+
+    /// Discovery lists attached workspaces whose live host is installed.
+    fn configured_discovery(&self, discovery: &Discovery) -> Value {
+        let attached = lock(&discovery.attached);
+        let registry = lock(&self.live_applications);
+        let workspaces = attached
+            .iter()
+            .filter(|entry| registry.has_host(&entry.handle))
+            .map(
+                |entry| json!({"workspaceId": entry.workspace_id, "workspaceHandle": entry.handle}),
+            )
+            .collect();
+        discovery_json(&discovery.namespace, &discovery.host, workspaces)
     }
 
     pub(super) fn configured_ordinary_namespace(
@@ -323,8 +535,7 @@ impl EngineService {
         }
         self.configured_live_host
             .get()
-            .and_then(|host| host.result["relayNamespace"].as_str())
-            .map(str::to_owned)
+            .map(|host| host.namespace.clone())
             .ok_or_else(|| invalid("ordinary service namespace unavailable"))
     }
 
@@ -349,7 +560,7 @@ impl EngineService {
             .ok_or_else(|| invalid("owner adoption not configured"))?;
         if !host.connection.same_connection(connection)
             || !connection.is_current()
-            || !workspace.is_some_and(|workspace| host.ordinary_workspaces.contains(workspace))
+            || !workspace.is_some_and(|workspace| host.is_ordinary(workspace))
         {
             return Err(invalid("owner adoption connection retired"));
         }
@@ -373,7 +584,7 @@ impl EngineService {
                 && request
                     .workspace
                     .as_ref()
-                    .is_some_and(|handle| host.ordinary_workspaces.contains(handle))
+                    .is_some_and(|handle| host.is_ordinary(handle))
         })
     }
 
@@ -408,8 +619,9 @@ impl EngineService {
                 "live host connection is not current",
             ));
         }
-        validate_discovery(&discovery.result, request.id, ctx.max_frame_bytes)?;
-        Ok(discovery.result.clone())
+        let result = self.configured_discovery(discovery);
+        validate_discovery(&result, request.id, ctx.max_frame_bytes)?;
+        Ok(result)
     }
 
     pub(super) fn configured_settlement_admission(
@@ -524,8 +736,13 @@ impl EngineService {
     }
 }
 
-fn discovery(namespace: &str, host: &HostCoordinate, workspaces: Vec<Value>) -> Value {
+fn discovery_json(namespace: &str, host: &HostCoordinate, workspaces: Vec<Value>) -> Value {
     json!({"relayNamespace": namespace, "host": host, "workspaces": workspaces})
+}
+
+/// A discovery entry with the widest handle, for sizing before a workspace opens.
+fn sized_entry(workspace_id: &str) -> Value {
+    json!({"workspaceId": workspace_id, "workspaceHandle": "ws-ffffffffffffffff"})
 }
 
 fn validate_discovery(result: &Value, id: u64, max_frame_bytes: u32) -> Result<(), WireError> {
@@ -567,6 +784,14 @@ mod tests {
         }
     }
 
+    fn handle(service: &EngineService, index: usize) -> WorkspaceHandle {
+        let discovery = service.configured_live_host.get().unwrap();
+        serde_json::from_value(
+            service.configured_discovery(discovery)["workspaces"][index]["workspaceHandle"].clone(),
+        )
+        .unwrap()
+    }
+
     #[tokio::test]
     async fn configured_relay_publication_uses_the_sync_budget_and_reservation() {
         let scratch = dohc_engine_testkit::ScratchDir::new().unwrap();
@@ -599,11 +824,7 @@ mod tests {
                 .max_read_bytes,
             policy.max_read_bytes
         );
-        let handle: WorkspaceHandle = serde_json::from_value(
-            service.configured_live_host.get().unwrap().result["workspaces"][0]["workspaceHandle"]
-                .clone(),
-        )
-        .unwrap();
+        let handle = handle(&service, 0);
         let mut reservations = Vec::new();
         loop {
             match admission.reserve() {
@@ -647,11 +868,7 @@ mod tests {
             );
             let (service, owner, _ingress) =
                 EngineService::configured_live_host(config).await.unwrap();
-            let discovery = service.configured_live_host.get().unwrap();
-            let handle: WorkspaceHandle = serde_json::from_value(
-                discovery.result["workspaces"][0]["workspaceHandle"].clone(),
-            )
-            .unwrap();
+            let handle = handle(&service, 0);
             let mut ctx = RequestContext::unbounded();
             ctx.connection = Some(owner.handle());
             let main = service
@@ -688,13 +905,7 @@ mod tests {
             },
         });
         let (service, owner, _ingress) = EngineService::configured_live_host(config).await.unwrap();
-        let discovery = service.configured_live_host.get().unwrap();
-        let attached: WorkspaceHandle =
-            serde_json::from_value(discovery.result["workspaces"][0]["workspaceHandle"].clone())
-                .unwrap();
-        let private: WorkspaceHandle =
-            serde_json::from_value(discovery.result["workspaces"][1]["workspaceHandle"].clone())
-                .unwrap();
+        let (attached, private) = (handle(&service, 0), handle(&service, 1));
         assert!(
             service
                 .owner_adoption_config(&owner.handle(), Some(&attached))
@@ -817,5 +1028,212 @@ mod tests {
         );
         close(&service).await;
         close(&reopened).await;
+    }
+
+    fn host_request(method: &str, workspace: Option<WorkspaceHandle>, params: Value) -> Request {
+        Request {
+            id: 1,
+            method: method.into(),
+            workspace,
+            deadline_ms: None,
+            idempotency_key: None,
+            progress: false,
+            params,
+        }
+    }
+
+    #[tokio::test]
+    async fn empty_host_attaches_and_detaches_while_a_sibling_keeps_registrations() {
+        let first = dohc_engine_testkit::ScratchDir::new().unwrap();
+        let second = dohc_engine_testkit::ScratchDir::new().unwrap();
+        let unused = dohc_engine_testkit::ScratchDir::new().unwrap();
+        let (service, owner, _ingress) = EngineService::configured_live_host(config(&[]))
+            .await
+            .unwrap();
+        let mut ctx = RequestContext::unbounded();
+        ctx.connection = Some(owner.handle());
+        let hosts = |ctx: &RequestContext| {
+            service
+                .configured_live_hosts(ctx, &host_request("liveApplication.hosts", None, json!({})))
+                .unwrap()
+        };
+        assert_eq!(hosts(&ctx)["workspaces"], json!([]));
+        let attach = |root: &Path, id: &str| {
+            host_request(
+                "liveApplication.attachWorkspace",
+                None,
+                json!({"root": root, "workspaceId": id, "maxRegistrations": 4}),
+            )
+        };
+        let detach = |handle: &WorkspaceHandle| {
+            host_request(
+                "liveApplication.detachWorkspace",
+                Some(handle.clone()),
+                json!({}),
+            )
+        };
+        let mut handles = Vec::new();
+        let mut registrations = Vec::new();
+        for (root, id) in [(first.path(), "first"), (second.path(), "second")] {
+            let attached = service
+                .configured_attach_workspace(&ctx, attach(root, id))
+                .await
+                .unwrap();
+            assert_eq!(attached["workspaceId"], id);
+            let handle: WorkspaceHandle =
+                serde_json::from_value(attached["workspaceHandle"].clone()).unwrap();
+            let open = service.open(Some(&handle)).unwrap();
+            open.actor
+                .ensure_main_version(
+                    id.into(),
+                    0,
+                    Arc::new(dohc_engine_storage::NoFaults),
+                    dohc_engine_runtime::CancellationToken::new(),
+                )
+                .await
+                .unwrap();
+            let binding = json!({"workspaceId":id,"mainVersionId":"main","objectId":"document",
+                "lineageClaimId":dohc_engine_storage::hex_sha256(&dohc_engine_collab::Ydoc::wire().encode_full_state()),
+                "currentPath":"document.md","selectorPaths":["document.md"],"restoreFenceGeneration":0});
+            let registered = service
+                .live_application_register(&ctx, Some(handle.clone()), json!({"binding": binding}))
+                .await
+                .unwrap();
+            registrations.push(registered["registrationId"].as_u64().unwrap());
+            handles.push(handle);
+        }
+        let ids = |listed: Value| -> Vec<Value> {
+            listed["workspaces"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|workspace| workspace["workspaceId"].clone())
+                .collect()
+        };
+        assert_eq!(ids(hosts(&ctx)), [json!("first"), json!("second")]);
+        for duplicate in [
+            attach(first.path(), "other"),
+            attach(unused.path(), "first"),
+        ] {
+            assert_eq!(
+                service
+                    .configured_attach_workspace(&ctx, duplicate)
+                    .await
+                    .unwrap_err()
+                    .code,
+                ErrorCode::InvalidParams
+            );
+        }
+        let stranger = ConnectionOwner::authenticated();
+        let mut foreign = RequestContext::unbounded();
+        foreign.connection = Some(stranger.handle());
+        assert_eq!(
+            service
+                .configured_attach_workspace(&foreign, attach(unused.path(), "unused"))
+                .await
+                .unwrap_err()
+                .code,
+            ErrorCode::SessionExpired
+        );
+        assert_eq!(
+            service
+                .configured_detach_workspace(&foreign, detach(&handles[0]))
+                .await
+                .unwrap_err()
+                .code,
+            ErrorCode::SessionExpired
+        );
+        assert!(!unused.path().join(".dohc").exists());
+
+        assert_eq!(
+            service
+                .configured_detach_workspace(&ctx, detach(&handles[1]))
+                .await
+                .unwrap(),
+            json!({"detached": true})
+        );
+        assert!(
+            service
+                .live_application_registration(&owner.handle(), Some(&handles[0]), registrations[0])
+                .is_ok()
+        );
+        assert!(
+            service
+                .live_application_registration(&owner.handle(), Some(&handles[1]), registrations[1])
+                .is_err()
+        );
+        assert_eq!(ids(hosts(&ctx)), [json!("first")]);
+        let unavailable = crate::rpc::error::workspace_unavailable().code;
+        assert_eq!(
+            service
+                .configured_detach_workspace(&ctx, detach(&handles[1]))
+                .await
+                .unwrap_err()
+                .code,
+            unavailable
+        );
+        // The released root attaches again with a fresh handle.
+        let again = service
+            .configured_attach_workspace(&ctx, attach(second.path(), "second"))
+            .await
+            .unwrap();
+        let again: WorkspaceHandle =
+            serde_json::from_value(again["workspaceHandle"].clone()).unwrap();
+        assert_ne!(again, handles[1]);
+        assert_eq!(ids(hosts(&ctx)), [json!("first"), json!("second")]);
+        for handle in [handles[0].clone(), again] {
+            service
+                .configured_detach_workspace(&ctx, detach(&handle))
+                .await
+                .unwrap();
+        }
+        assert_eq!(hosts(&ctx)["workspaces"], json!([]));
+        assert!(lock(&service.handles).is_empty());
+    }
+
+    #[tokio::test]
+    async fn attach_refuses_a_root_inside_or_around_an_attached_root() {
+        let tree = dohc_engine_testkit::ScratchDir::new().unwrap();
+        let attached = tree.path().join("attached");
+        let nested = attached.join("nested");
+        std::fs::create_dir_all(&nested).unwrap();
+        let (service, owner, _ingress) = EngineService::configured_live_host(config(&[]))
+            .await
+            .unwrap();
+        let mut ctx = RequestContext::unbounded();
+        ctx.connection = Some(owner.handle());
+        let attach = |root: &Path, id: &str| {
+            host_request(
+                "liveApplication.attachWorkspace",
+                None,
+                json!({"root": root, "workspaceId": id, "maxRegistrations": 4}),
+            )
+        };
+        let opened = service
+            .configured_attach_workspace(&ctx, attach(attached.as_path(), "attached"))
+            .await
+            .unwrap();
+        for (root, id) in [(nested.as_path(), "descendant"), (tree.path(), "ancestor")] {
+            assert_eq!(
+                service
+                    .configured_attach_workspace(&ctx, attach(root, id))
+                    .await
+                    .unwrap_err()
+                    .code,
+                ErrorCode::InvalidParams,
+                "{id}"
+            );
+            assert!(!root.join(".dohc").exists(), "{id}");
+        }
+        let handle: WorkspaceHandle =
+            serde_json::from_value(opened["workspaceHandle"].clone()).unwrap();
+        service
+            .configured_detach_workspace(
+                &ctx,
+                host_request("liveApplication.detachWorkspace", Some(handle), json!({})),
+            )
+            .await
+            .unwrap();
+        assert!(lock(&service.handles).is_empty());
     }
 }
