@@ -7,6 +7,7 @@ import pipelineFixture from "../../../../crates/dohc-engine-domain/tests/fixture
 import reasonCodes from "../../../../crates/dohc-engine-domain/tests/fixtures/collection-reason-codes.json";
 import {
   WORKSPACE_METHOD,
+  type WorkspaceMethod,
   decodeAutomationGroupHandover,
   decodeCollectionValue,
   decodeConflictRecord,
@@ -967,5 +968,59 @@ it("recovery replies only authorize retirement after a committed decision", () =
 
 it("decodes whether a recovery keeps typing for a deleted file",()=>{
  const record={momentId:"recovery",versionId:"main",objectId:"object",path:"note.md",captureMomentId:"deleted",deleted:true};
- expect(decodeWorkspaceResult(WORKSPACE_METHOD.watcherStatus,{running:true,degraded:false,terminal:false,phase:"ready",noAtomicPlacement:false,recoveryUnavailable:false,keptFiles:[],captureRecoveries:[record]})).toMatchObject({captureRecoveries:[record]});
+ expect(decodeWorkspaceResult(WORKSPACE_METHOD.watcherStatus,{running:true,degraded:false,terminal:false,phase:"ready",noAtomicPlacement:false,recoveryUnavailable:false,keptFiles:[],captureRecoveries:[record],heldFiles:[]})).toMatchObject({captureRecoveries:[record],heldFiles:[]});
 });
+
+const heldFile = {
+  workspaceId: "workspace",
+  sourceVersionId: "main",
+  objectId: "object",
+  path: "held.md",
+  observedSha256: "a".repeat(64),
+  observedSize: 244,
+  reason: "ydoc-resolution-not-representable",
+  observedAtMs: 10,
+  attemptCount: 1,
+  retryRequested: false,
+};
+const holdReplies: Array<[WorkspaceMethod, Record<string, JsonValue>]> = [
+  [WORKSPACE_METHOD.captureFlush, { settled: true, running: true, degraded: false }],
+  [WORKSPACE_METHOD.captureReconcile, { settled: true, running: true, degraded: false }],
+  [WORKSPACE_METHOD.watcherStatus, {
+    running: true,
+    degraded: false,
+    terminal: false,
+    phase: "ready",
+    noAtomicPlacement: false,
+    recoveryUnavailable: false,
+    keptFiles: [],
+    captureRecoveries: [],
+  }],
+];
+
+for (const [method, base] of holdReplies) {
+  it.each([{ heldFiles: [] }, { heldFiles: [heldFile] }])(
+    `decodes ${method} held files (%j)`,
+    ({ heldFiles }) => {
+      expect(decodeWorkspaceResult(method, { ...base, heldFiles })).toEqual({
+        ...base,
+        heldFiles,
+      });
+    },
+  );
+  it(`rejects malformed ${method} held files`, () => {
+    for (const heldFiles of [
+      null,
+      [{}],
+      [{ ...heldFile, observedSize: "244" }],
+      [{ ...heldFile, retryRequested: 1 }],
+      [{ ...heldFile, attemptCount: 1.5 }],
+      [{ ...heldFile, unexpected: true }],
+    ]) {
+      expect(() => decodeWorkspaceResult(method, { ...base, heldFiles })).toThrow(
+        ProtocolShapeError,
+      );
+    }
+    expect(() => decodeWorkspaceResult(method, base)).toThrow(ProtocolShapeError);
+  });
+}

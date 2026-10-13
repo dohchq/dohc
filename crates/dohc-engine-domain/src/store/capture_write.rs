@@ -729,6 +729,8 @@ pub fn capture_retire_in_tx(
             )?)
         };
         return Ok(CaptureRetireResult {
+            pending_placement: false,
+            released_capture_hold: false,
             retired,
             deduped: true,
         });
@@ -744,6 +746,8 @@ pub fn capture_retire_in_tx(
             input.now_ms,
         )?;
         return Ok(CaptureRetireResult {
+            pending_placement: false,
+            released_capture_hold: false,
             retired: None,
             deduped: false,
         });
@@ -772,6 +776,8 @@ pub fn capture_retire_in_tx(
                 input.now_ms,
             )?;
             return Ok(CaptureRetireResult {
+                pending_placement: false,
+                released_capture_hold: false,
                 retired: None,
                 deduped: false,
             });
@@ -787,6 +793,8 @@ pub fn capture_retire_in_tx(
                 input.now_ms,
             )?;
             return Ok(CaptureRetireResult {
+                pending_placement: false,
+                released_capture_hold: false,
                 retired: None,
                 deduped: false,
             });
@@ -837,6 +845,8 @@ pub fn capture_retire_in_tx(
         input.now_ms,
     )?;
     Ok(CaptureRetireResult {
+        pending_placement: false,
+        released_capture_hold: false,
         retired: Some(result),
         deduped: false,
     })
@@ -1049,6 +1059,8 @@ where
             )
             .map_err(DomainError::from)?;
             let result = CaptureIngestBinaryResult {
+                pending_placement: false,
+                released_capture_hold: false,
                 object_id: object_id.clone(),
                 moment_id: moment.moment_id.clone(),
                 moment_order: moment.moment_order,
@@ -1165,6 +1177,8 @@ where
         input.now_ms,
     )?;
     Ok(CaptureIngestBinaryResult {
+        pending_placement: false,
+        released_capture_hold: false,
         object_id,
         moment_id,
         moment_order,
@@ -1352,6 +1366,8 @@ fn reconstruct_capture_binary(
             reason: "deduped binary capture moment has no binary blob",
         })?;
     Ok(CaptureIngestBinaryResult {
+        pending_placement: false,
+        released_capture_hold: false,
         object_id: moment.object_id,
         moment_id: moment.moment_id,
         moment_order: moment.moment_order,
@@ -1764,6 +1780,8 @@ fn write_normalized_text_in_tx(
         (object, moment)
     };
     Ok(WriteResult {
+        pending_placement: false,
+        released_capture_hold: false,
         object,
         snapshot: TextSnapshot {
             workspace_id: input.workspace_id.to_owned(),
@@ -1872,6 +1890,20 @@ fn refused_local_recovery_occupies(
         |row| row.get(0),
     )
     .map_err(DomainError::sql_corrupt)
+}
+
+/// Give a refused observation the same object identity as first-sight capture.
+/// This records only the alias and object, without a snapshot or moment.
+pub fn ensure_capture_object_in_tx(
+    tx: &Transaction<'_>,
+    workspace_id: &str,
+    version_id: &str,
+    path: &str,
+    now_ms: i64,
+) -> Result<String, DomainError> {
+    let alias = alias_object_id(tx, workspace_id, version_id, path)?;
+    resolve_capture_object(tx, workspace_id, version_id, path, now_ms, alias, None)
+        .map(|resolved| resolved.object_id)
 }
 
 fn resolve_capture_object(
