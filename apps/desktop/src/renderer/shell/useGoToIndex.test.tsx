@@ -71,7 +71,7 @@ it("waits for a complete paint before the first preparation and starts no extra 
   let frameId = 0;
   vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => { frames.set(++frameId, callback); return frameId; });
   vi.stubGlobal("cancelAnimationFrame", (id: number) => { frames.delete(id); });
-  const update = vi.spyOn(GoToIndex.prototype, "update");
+  const update = vi.spyOn(GoToIndex.prototype, "prepareSlice");
   listWorkspaceFiles.mockResolvedValue(answer("painted.md"));
   const view = render(<Root workspaceId="A" />);
   await waitFor(() => expect(screen.getByTestId("explorer").textContent).toBe("painted.md"));
@@ -81,14 +81,15 @@ it("waits for a complete paint before the first preparation and starts no extra 
   act(frame);
   expect(update).not.toHaveBeenCalled();
   act(frame);
-  expectListing("painted.md");
+  expect(update).not.toHaveBeenCalled();
+  await waitFor(() => expectListing("painted.md"));
   expect(update).toHaveBeenCalledTimes(1);
   view.rerender(<Root workspaceId="A" />);
   expect(update).toHaveBeenCalledTimes(1);
   expect(listWorkspaceFiles).toHaveBeenCalledTimes(1);
 });
 
-it("does not reapply existing file verdicts when hook inputs recreate unchanged metadata", () => {
+it("does not reapply existing file verdicts when hook inputs recreate unchanged metadata", async () => {
   const frames: FrameRequestCallback[] = [];
   vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => { frames.push(callback); return frames.length; });
   vi.stubGlobal("cancelAnimationFrame", () => {});
@@ -106,14 +107,14 @@ it("does not reapply existing file verdicts when hook inputs recreate unchanged 
   const view = render(<Snapshot renamed={false} rules={[{ path: "private", visibility: "hidden" }]} />);
   act(() => frames.shift()!(0));
   act(() => frames.shift()!(0));
-  expect(view.container.textContent).toBe("a.md");
+  await waitFor(() => expect(view.container.textContent).toBe("a.md"));
   const freshRules: VisibilityPolicyRule[] = [{ path: "private", visibility: "hidden" }];
   view.rerender(<Snapshot renamed rules={freshRules} />);
-  expect(view.container.textContent).toBe("renamed.md");
+  await waitFor(() => expect(view.container.textContent).toBe("renamed.md"));
 });
 
  it("withholds a hidden host path from Go to while Explorer retains it", async () => {
-  const update = vi.spyOn(GoToIndex.prototype, "update");
+  const update = vi.spyOn(GoToIndex.prototype, "prepareSlice");
   listWorkspaceFiles.mockResolvedValueOnce({ ...answer("private.md"), visibility: { status: "ready", rules: [{ path: "private.md", visibility: "hidden" }] } });
   render(<Root workspaceId="A" />);
   await waitFor(() => expect(screen.getByTestId("explorer").textContent).toBe("private.md"));

@@ -3663,7 +3663,8 @@ export function DesktopWorkspaceShell(props: {
       (event: WorkspaceActivityEvent) => {
         const paths =
           event.workspaceId === workspaceId ? event.paths : undefined;
-        if (paths?.some(path => isWorkspaceVisibilityPolicyPath(path, bridge().platform))) invalidateVisibility();
+        if (event.workspaceId === workspaceId &&
+          (!paths?.length || paths.some(path => isWorkspaceVisibilityPolicyPath(path, bridge().platform)))) invalidateVisibility();
         if (event.workspaceId === workspaceId && event.pathSetChanged === false &&
           (!paths?.length || activityPathsAffectWorkspaceListing(paths, bridge().platform))) {
           if (filesRefreshMode !== "full") filesRefreshMode = "cached";

@@ -291,3 +291,42 @@ it("applies share status and explicit rule verdicts to Collection and app names"
   expect(index.lastVisibilityCheckCount).toBe(1);
   expect(index.query("new")).toEqual([]);
  });
+
+it("reuses published verdicts after an unchanged policy save while withholding host names", () => {
+  const index = new GoToIndex("workspace");
+  const snapshot = listing(["public.md", "private/secret.md", "shared-with-me/team/shared.md"]);
+  snapshot.visibility.rules = [{ path: "private/**", visibility: "hidden" }];
+  snapshot.receivedRoots = [{ path: "shared-with-me/team", ended: false, damaged: false }];
+  index.update({ listing: snapshot });
+  const publicRow = index.query("public")[0];
+  index.update({ listing: { ...snapshot, visibility: { status: "unavailable", rules: [] } } });
+  expect(index.query("public")).toEqual([]);
+  expect(index.query("shared.md")).toHaveLength(1);
+  expect(index.lastVisibilityCheckCount).toBe(0);
+  index.update({ listing: { ...snapshot, visibility: { ...snapshot.visibility,
+    rules: snapshot.visibility.rules.map(rule => ({ ...rule })) } } });
+  expect(index.lastVisibilityCheckCount).toBe(0);
+  expect(index.query("public")[0]).toBe(publicRow);
+  expect(index.query("secret")).toEqual([]);
+});
+
+it("withholds queries across recheck slices and publishes only the latest queued policy", () => {
+  const index = new GoToIndex("workspace");
+  const snapshot = listing(Array.from({ length: 30_000 }, (_, n) => "src/file-" + n + ".ts"));
+  index.update({ listing: snapshot });
+  const changed = { ...snapshot, visibility: { status: "ready" as const, rules: [
+    { path: "src/**", visibility: "hidden" as const },
+    { path: "src/file-1.ts", visibility: "visible" as const },
+  ] } };
+  index.queuePreparation({ listing: changed });
+  expect(index.query("file")).toEqual([]);
+  expect(index.prepareSlice(0)).toBe(false);
+  expect(index.query("file")).toEqual([]);
+  index.queuePreparation({ listing: { ...changed, visibility: { ...changed.visibility,
+    rules: [{ path: "src/**", visibility: "hidden" }] } } });
+  let slices = 1;
+  while (!index.prepareSlice(0)) { expect(index.query("file")).toEqual([]); slices++; }
+  expect(slices).toBeGreaterThan(1);
+  expect(index.lastVisibilityCheckCount).toBe(30_000);
+  expect(index.query("file-1.ts")).toEqual([]);
+});

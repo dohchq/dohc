@@ -18,6 +18,9 @@ import { basenameOf } from "./path";
 import { deferred } from "../testing/deferred";
 import { DesktopWorkspaceShell, WORKSPACE, STORED_STATE, STORED_CHATS_STATE, storedStateWithTabs, CANONICAL_DM, dmSyncResult, recordDocUpdate, makeBridge, renderShell, holdHistory, shellBootstrapProps, SHARE_VIEW } from "./DesktopWorkspaceShell.testHarness";
 
+import { useWorkspaceListing } from "./shell/useWorkspaceListing";
+vi.mock("./shell/useWorkspaceListing", { spy: true });
+
 // Count inspector and explorer work when the shell renders again.
 vi.mock("./documentVersionKey", { spy: true });
 vi.mock("./path", { spy: true });
@@ -1728,6 +1731,31 @@ describe("workbench render cost", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it.each(["policy path", "path-less batch"])("withholds visibility through a %s refresh and rejects a pre-event answer", async mode => {
+    const bridge = makeBridge(Promise.resolve(null));
+    renderShell(bridge);
+    const visibility = () => vi.mocked(useWorkspaceListing).mock.results.at(-1)!.value.visibility.status;
+    await waitFor(() => expect(visibility()).toBe("ready"));
+    await waitFor(() => expect(bridge.workspaceActivitySubscriberCount()).toBe(2));
+    const old = deferred<Awaited<ReturnType<typeof bridge.listWorkspaceFiles>>>();
+    const fresh = deferred<Awaited<ReturnType<typeof bridge.listWorkspaceFiles>>>();
+    const initial = await bridge.listWorkspaceFiles({ workspaceId: WORKSPACE.workspaceId });
+    bridge.listWorkspaceFiles.mockReturnValueOnce(old.promise).mockReturnValueOnce(fresh.promise);
+    vi.useFakeTimers();
+    try {
+      act(() => bridge.emitWorkspaceActivity({ workspaceId: WORKSPACE.workspaceId, paths: ["notes.md"] }));
+      await act(async () => { await vi.advanceTimersByTimeAsync(WORKSPACE_ACTIVITY_REFRESH_DELAY_MS); });
+      act(() => bridge.emitWorkspaceActivity({ workspaceId: WORKSPACE.workspaceId,
+        ...(mode === "policy path" ? { paths: [".dohc/visibility.toml"], pathSetChanged: false } : {}) }));
+      expect(visibility()).toBe("unavailable");
+      await act(async () => { old.resolve(initial); });
+      expect(visibility()).toBe("unavailable");
+      await act(async () => { await vi.advanceTimersByTimeAsync(WORKSPACE_ACTIVITY_REFRESH_DELAY_MS); });
+      await act(async () => { fresh.resolve(initial); });
+      expect(visibility()).toBe("ready");
+    } finally { vi.useRealTimers(); }
   });
 
   it("coalesces a mixed path-rich window through main's complete-listing cache", async () => {
