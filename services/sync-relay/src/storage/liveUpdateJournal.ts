@@ -1054,19 +1054,30 @@ function readJournalCut(storage: StorageContext, document: LiveDocumentKey, expe
     return { kind: "cut", cut };
   }
 
-export function liveJournalCoverageWithin(storage: StorageContext, document: LiveDocumentKey, windows: readonly LiveUpdateStructRange[]): LiveUpdateStructRange[] {
-    if (windows.length === 0) return [];
-    const provenance = storage.db.prepare(`SELECT p.*, j.workspace_id AS parent_workspace, j.main_version_id AS parent_version,
+const coverageStatements = new WeakMap<SqliteDb, {provenance: ReturnType<SqliteDb["prepare"]>; baseline: ReturnType<SqliteDb["prepare"]>}>();
+
+function prepareCoverageStatements(db: SqliteDb) {
+    let statements = coverageStatements.get(db);
+    if (statements) return statements;
+    const provenance = db.prepare(`SELECT p.*, j.workspace_id AS parent_workspace, j.main_version_id AS parent_version,
       j.object_id AS parent_object, j.lineage_claim_id AS parent_lineage FROM ${LIVE_JOURNAL_PROVENANCE} p
       LEFT JOIN ${LIVE_JOURNAL_TABLE} j ON j.journal_cursor=p.journal_cursor
       WHERE p.workspace_id=? AND p.main_version_id=? AND p.object_id=? AND p.lineage_claim_id=?
         AND p.client_id=? AND p.start_clock<=? AND p.start_clock>=COALESCE(
           (SELECT MAX(start_clock) FROM ${LIVE_JOURNAL_PROVENANCE} WHERE ${JOURNAL_DOCUMENT_WHERE} AND client_id=? AND start_clock<?), ?)
       ORDER BY p.start_clock`);
-    const baseline = storage.db.prepare(`SELECT client_id,start_clock,end_clock FROM sync_relay_live_document_baseline_ranges
+    const baseline = db.prepare(`SELECT client_id,start_clock,end_clock FROM sync_relay_live_document_baseline_ranges
       WHERE ${JOURNAL_DOCUMENT_WHERE} AND client_id=? AND start_clock<=? AND start_clock>=COALESCE(
         (SELECT MAX(start_clock) FROM sync_relay_live_document_baseline_ranges WHERE ${JOURNAL_DOCUMENT_WHERE} AND client_id=? AND start_clock<?), ?)
       ORDER BY start_clock`);
+    statements = {provenance, baseline};
+    coverageStatements.set(db, statements);
+    return statements;
+}
+
+export function liveJournalCoverageWithin(storage: StorageContext, document: LiveDocumentKey, windows: readonly LiveUpdateStructRange[]): LiveUpdateStructRange[] {
+    if (windows.length === 0) return [];
+    const {provenance, baseline} = prepareCoverageStatements(storage.db);
     const ranges = new Map<string, LiveUpdateStructRange & {cursor: number | null}>();
     for (const window of windows) {
       const params = [...documentParams(document), window.clientId, window.endClock,

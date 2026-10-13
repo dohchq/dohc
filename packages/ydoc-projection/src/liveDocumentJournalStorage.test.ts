@@ -600,8 +600,7 @@ it('bounds coverage reads by candidate ranges at 200 and 2000 clients', () => {
   const counts = [200, 2000].map(k => {
     const f = registered()
     try {
-      const merged = Y.mergeUpdates(Array.from({length: k}, (_, i) => gcCandidate(i + 1, 0, 1)))
-      expect(f.storage.commitLiveUpdateJournal(f.capture(merged, 'history')).result.kind).toBe('accepted')
+      // Spy before the first commit: coverage statements are prepared once per database and reused.
       const context = f.storage as StorageContext, prepare = context.db.prepare.bind(context.db)
       let rows = 0
       vi.spyOn(context.db, 'prepare').mockImplementation(sql => {
@@ -616,6 +615,9 @@ it('bounds coverage reads by candidate ranges at 200 and 2000 clients', () => {
           return typeof value === 'function' ? value.bind(target) : value
         }})
       })
+      const merged = Y.mergeUpdates(Array.from({length: k}, (_, i) => gcCandidate(i + 1, 0, 1)))
+      expect(f.storage.commitLiveUpdateJournal(f.capture(merged, 'history')).result.kind).toBe('accepted')
+      rows = 0
       const input = f.capture(gcCandidate(k + 1, 0, 1), 'candidate')
       expect(input.validation.kind).toBe('accepted')
       const result = f.storage.commitLiveUpdateJournal(input).result
@@ -631,7 +633,24 @@ it('bounds coverage reads by candidate ranges at 200 and 2000 clients', () => {
   expect.soft(counts[1]).toBe(counts[0])
 })
 
-it.each(['provenance', 'baseline'] as const)('refuses restore append overlapping %s before writing', kind => {
+it('seeks coverage windows through indexes without scans or sorts', () => {
+  const f = registered()
+  try {
+    const context = f.storage as StorageContext, prepare = context.db.prepare.bind(context.db)
+    const plans: string[] = []
+    vi.spyOn(context.db, 'prepare').mockImplementation(sql => {
+      if (/start_clock>=COALESCE/.test(sql)) plans.push(prepare(`EXPLAIN QUERY PLAN ${sql}`).all(...Array(13).fill(0)).map(row => row.detail).join('; '))
+      return prepare(sql)
+    })
+    expect(f.storage.commitLiveUpdateJournal(f.capture(gcCandidate(91, 0, 10), 'history')).result.kind).toBe('accepted')
+    expect(plans).toHaveLength(2)
+    for (const plan of plans) expect(plan).not.toMatch(/SCAN |TEMP B-TREE/)
+    expect(plans[0]).toContain('idx_sync_relay_live_update_struct_provenance_coverage')
+    expect(plans[1]).toContain('idx_sync_relay_live_document_baseline_coverage')
+  } finally {vi.restoreAllMocks(); f.close()}
+})
+
+it.each(['provenance', 'baseline'] as const)('refuses an append overlapping %s before writing', kind => {
   const f = registered()
   try {
     const prior = f.storage.commitLiveUpdateJournal(f.capture(gcCandidate(91, 0, 10), 'history')).admitted!
