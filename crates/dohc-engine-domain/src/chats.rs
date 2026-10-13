@@ -6699,7 +6699,7 @@ fn local_replication_coordinate(
         .map_err(DomainError::sql_corrupt)?;
     if hosted {
         return Err(DomainError::InvalidInput {
-            reason: "a hosted replica writes only its hosted documents",
+            reason: crate::HOSTED_REPLICA_WRITE_REFUSED,
         });
     }
     tx.execute(

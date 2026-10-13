@@ -1846,6 +1846,147 @@ fn a_moment_that_replaced_a_withheld_object_applies_as_a_create() {
     );
 }
 
+/// The slice-3 review's first reproduction: `doc-b` held `a.md` while hosted,
+/// then the scope moved to `doc-a`, whose moment replaced it. The host still
+/// held `doc-b`'s head there, so the moment opened an occupancy conflict and
+/// `doc-a` never became the path's head.
+#[test]
+fn a_withheld_replacement_takes_the_path_from_an_object_that_left_the_scope() {
+    let (_scratch, _path, mut store) = hosted_store_with_main();
+    let client = RelaySyncClient::new(HostedFeed::new());
+    let feed = client.transport();
+    feed.append(envelope("owner", 0, "workspace.init", json!({})));
+    feed.create("owner", 1, "doc-b", "a.md", "hosted b");
+    feed.share("doc-b", "a.md");
+    sync(&client, &mut store);
+    assert_eq!(
+        content(&store).0,
+        BTreeMap::from([("doc-b".to_owned(), "hosted b".to_owned())])
+    );
+
+    feed.unshare("doc-b");
+    feed.replace(
+        "owner",
+        2,
+        "doc-a",
+        "a.md",
+        "hosted a",
+        ("doc-b", "hosted b", "moment-owner-1"),
+    );
+    feed.share("doc-a", "a.md");
+    sync(&client, &mut store);
+
+    let (heads, moments) = content(&store);
+    assert_eq!(
+        heads,
+        BTreeMap::from([("doc-a".to_owned(), "hosted a".to_owned())])
+    );
+    assert_eq!(count(&store, "SELECT COUNT(*) FROM conflicts"), 0);
+    assert_eq!(
+        count(
+            &store,
+            "SELECT COUNT(*) FROM path_aliases WHERE path='a.md' AND object_id='doc-a'"
+        ),
+        1
+    );
+    assert_eq!(
+        withheld_befores(&store),
+        [(
+            "moment-owner-2".to_owned(),
+            "doc-b".to_owned(),
+            "a.md".to_owned(),
+            text_sha("hosted b"),
+            "text".to_owned()
+        )]
+    );
+    // What the departed document needs for its removal stays.
+    assert_eq!(
+        moments,
+        BTreeMap::from([
+            ("moment-owner-1".to_owned(), 1),
+            ("moment-owner-2".to_owned(), 1)
+        ])
+    );
+    assert_eq!(
+        coordinates(&store),
+        [
+            ("owner".to_owned(), 0),
+            ("owner".to_owned(), 1),
+            ("owner".to_owned(), 2)
+        ]
+    );
+    assert_eq!(
+        count(
+            &store,
+            "SELECT COUNT(*) FROM hosted_documents WHERE object_id='doc-b'"
+        ),
+        1
+    );
+    assert_eq!(
+        document(&store, "doc-b"),
+        None,
+        "it is outside the current scope"
+    );
+}
+
+/// The slice-3 review's second reproduction: the relay serves a refused
+/// settlement without validating it, so a refused row naming a hosted
+/// document can carry a before side too incomplete to read. Reading it during
+/// hydration failed the pass before the refusal was journaled, and every
+/// retry met the same row.
+#[test]
+fn a_refused_settlement_with_an_unreadable_before_side_never_stops_the_feed() {
+    let (_scratch, _path, mut store) = hosted_store_with_main();
+    let client = RelaySyncClient::new(HostedFeed::new());
+    let feed = client.transport();
+    feed.append(envelope("owner", 0, "workspace.init", json!({})));
+    feed.create("owner", 1, "doc-a", "a.md", "first");
+    let mut refused = envelope(
+        "owner",
+        2,
+        "moment.append",
+        json!({
+            "momentId": "moment-owner-2",
+            "objectId": "doc-a",
+            "beforePresent": "present",
+            "beforeObjectId": "private"
+        }),
+    );
+    refused.settlement_admission = Some(SettlementAdmission::Refused {
+        settlement_id: "unavailable".into(),
+        reason: "invalid-proof".into(),
+    });
+    feed.append(refused);
+    feed.replace(
+        "owner",
+        3,
+        "doc-a",
+        "a.md",
+        "second",
+        ("doc-a", "first", "moment-owner-1"),
+    );
+    feed.share("doc-a", "a.md");
+    sync(&client, &mut store);
+
+    assert_eq!(
+        content(&store).0,
+        BTreeMap::from([("doc-a".to_owned(), "second".to_owned())])
+    );
+    assert!(coordinates(&store).contains(&("owner".to_owned(), 2)));
+    assert_eq!(
+        count(
+            &store,
+            "SELECT COUNT(*) FROM replication_pending_refusals \
+             WHERE origin_id='owner' AND origin_seq=2"
+        ),
+        1,
+        "the refusal is journaled"
+    );
+    let document = document(&store, "doc-a").unwrap();
+    assert!(document.ready);
+    assert_eq!(document.backfill_cursor, 4, "the cursor passed the row");
+}
+
 /// A before side the feed serves is fetched and kept: the document's own
 /// earlier content, or another document the replica hosts. An ordinary
 /// replica fetches every before side.

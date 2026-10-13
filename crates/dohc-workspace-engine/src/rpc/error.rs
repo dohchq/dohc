@@ -413,6 +413,12 @@ fn map_domain(error: DomainError) -> WireError {
         DomainError::InvalidText { .. } => (InvalidParams, "invalid-text"),
         DomainError::NotSecretPath => (InvalidParams, "not-secret-path"),
         DomainError::SecretMomentNotFound => (InvalidParams, "moment-not-found"),
+        // The caller matches the code prefix and shows the reason.
+        DomainError::InvalidInput {
+            reason: reason @ dohc_engine_domain::HOSTED_REPLICA_WRITE_REFUSED,
+        } => {
+            return WireError::new(InvalidParams, format!("invalid-input: {reason}"));
+        }
         DomainError::InvalidInput { .. } => (InvalidParams, "invalid-input"),
         DomainError::StateCorrupt { .. } => (Internal, "state-corrupt"),
         DomainError::Storage(_) => (Internal, "persist-failed"),
@@ -806,6 +812,7 @@ mod tests {
             reason: "test invalid input",
         }));
         assert_eq!(invalid.code, ErrorCode::InvalidParams);
+        assert_eq!(invalid.message, "invalid-input");
 
         // S1 (BINHEAD): a text read of a binary head is a normal user error, not
         // an internal server fault — it must map to InvalidParams, never fall
@@ -867,6 +874,63 @@ mod tests {
                 (code, message, Retryability::No)
             );
         }
+    }
+
+    /// A session host's hosted replica refuses a named version. The write
+    /// rolls back and the caller hears why, as its own input error rather than
+    /// an internal storage failure.
+    #[tokio::test]
+    async fn a_hosted_replica_refusal_reaches_the_caller_with_its_reason() {
+        use dohc_engine_runtime::{CancellationToken, NoFaults};
+        use dohc_engine_storage::EngineStore;
+        use std::sync::Arc;
+
+        let scratch = dohc_engine_testkit::ScratchDir::new().unwrap();
+        let db = dohc_engine_testkit::engine_db_path(&scratch).unwrap();
+        {
+            let mut store = EngineStore::open(&db, 1).unwrap();
+            dohc_engine_sync::create_hosted_replica(
+                &mut store,
+                "ws",
+                "service-host:host",
+                "epoch",
+                "stream",
+                1,
+                &NoFaults,
+            )
+            .unwrap();
+            dohc_engine_domain::VersionedTextStore::new(&mut store)
+                .ensure_main_version("ws", "main", 1, &NoFaults)
+                .unwrap();
+        }
+        let supervisor = dohc_engine_runtime::WorkspaceSupervisor::new();
+        let actor = supervisor.open(&db, 1).unwrap().actor;
+        let refused = actor
+            .create_named_version(
+                dohc_engine_domain::CreateNamedVersion {
+                    workspace_id: "ws".into(),
+                    new_version_id: "draft".into(),
+                    name: "Draft".into(),
+                    from_version_id: "main".into(),
+                    now_ms: 2,
+                    request_id: None,
+                },
+                Arc::new(NoFaults),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap_err();
+        let surfaced = map_runtime(refused);
+        assert_eq!(
+            (surfaced.code, surfaced.message.as_str()),
+            (
+                ErrorCode::InvalidParams,
+                "invalid-input: a hosted replica writes only its hosted documents"
+            )
+        );
+        let versions = actor.list_versions("ws".into()).await.unwrap();
+        assert_eq!(versions.len(), 1, "the refused version rolled back");
+        supervisor.close(&db).unwrap();
     }
 
     #[test]

@@ -3463,6 +3463,7 @@ pub(crate) fn blob_refs_to_apply(
     let mut forgotten: Option<Vec<ReplicationEnvelope>> = None;
     for (index, op) in ops.iter().enumerate() {
         if op.op_kind == "moment.append"
+            && !settlement_refused(op)
             && store
                 .read_with(|conn| crate::hosted::withheld_before(conn, op))
                 .map_err(local)?
@@ -3475,17 +3476,22 @@ pub(crate) fn blob_refs_to_apply(
     collect_blob_refs(forgotten.as_deref().unwrap_or(ops))
 }
 
+/// Deterministic refusal acknowledges only the immutable coordinate, and the
+/// relay serves a refused row without validating it: unavailable hostile
+/// content must not hold up subsequent operations.
+fn settlement_refused(op: &ReplicationEnvelope) -> bool {
+    matches!(
+        op.settlement_admission,
+        Some(crate::SettlementAdmission::Refused { .. })
+    )
+}
+
 pub(crate) fn collect_blob_refs(
     ops: &[ReplicationEnvelope],
 ) -> Result<BTreeMap<String, BTreeSet<BlobKind>>, RelayError> {
     let mut refs = BTreeMap::new();
     for op in ops {
-        // Deterministic refusal acknowledges only the immutable coordinate;
-        // unavailable hostile content must not hold up subsequent operations.
-        if matches!(
-            op.settlement_admission,
-            Some(crate::SettlementAdmission::Refused { .. })
-        ) {
+        if settlement_refused(op) {
             continue;
         }
         match op.op_kind.as_str() {

@@ -134,7 +134,7 @@ pub use conflicts::{
     live_state_matches_conflict_current, load_text_conflict_in_tx, select_snapshot_by_path_in_tx,
     update_text_conflict_row, write_binary_file_in_tx,
 };
-pub use error::DomainError;
+pub use error::{DomainError, HOSTED_REPLICA_WRITE_REFUSED};
 pub use merge::{
     BinaryMergeWrite, CompareTextFileVersions, ComparisonSide, ComparisonStatus, MAX_MERGE_LINES,
     MarkdownMergeResult, MergeTextFileFromVersion, MergeTextFileResult, MergeUnchangedReason,

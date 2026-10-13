@@ -422,6 +422,15 @@ pub fn apply_moment_envelope_detailed(
         if payload.conflict_id.is_some() || payload.conflict_effect_index.is_some() {
             return crate::conflict_resolve_v1::verify_imported_conflict_effect_in_tx(tx, envelope);
         }
+        if payload.operation != "delete" {
+            crate::hosted::clear_withheld_occupants_in_tx(
+                tx,
+                &envelope.workspace_id,
+                &payload.version_id,
+                &payload.object_id,
+                &payload.payload_after_path,
+            )?;
+        }
         let key = DocKey::new(
             &envelope.workspace_id,
             &payload.version_id,

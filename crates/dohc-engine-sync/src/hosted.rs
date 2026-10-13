@@ -26,8 +26,6 @@ pub const SERVICE_HOST_ORIGIN_PREFIX: &str = "service-host:";
 /// child waits in deferred work until the relay serves what it needs.
 pub(crate) const CONFLICT_PARENT_WITHHELD: &str = "hosted-conflict-parent-withheld";
 
-const HOSTED_WRITES_ONLY_ITS_DOCUMENTS: &str = "a hosted replica writes only its hosted documents";
-
 pub(crate) fn is_hosted(conn: &Connection, workspace_id: &str) -> Result<bool, SyncError> {
     conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM hosted_replicas WHERE workspace_id=?1)",
@@ -76,7 +74,7 @@ pub(crate) fn allocate_outbound_seq_in_tx(
     };
     if !hosted {
         return Err(SyncError::InvalidInput {
-            reason: HOSTED_WRITES_ONLY_ITS_DOCUMENTS,
+            reason: dohc_engine_domain::HOSTED_REPLICA_WRITE_REFUSED,
         });
     }
     if !(-1..crate::MAX_WIRE_INTEGER).contains(&last) {
@@ -177,6 +175,52 @@ pub(crate) fn forget_before(payload: &mut serde_json::Value) {
         }
     }
     fields.insert("beforePresent".to_owned(), "null".into());
+}
+
+/// Clear `path` of every head this replica holds for an object outside the
+/// current scope, so the hosted document `object_id` arriving there is the
+/// path's only occupant. The feed withholds those objects, so here they never
+/// held it. Each keeps its history, journal rows, retained work and live
+/// document state for its removal. An ordinary replica clears nothing.
+pub(crate) fn clear_withheld_occupants_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    workspace_id: &str,
+    version_id: &str,
+    object_id: &str,
+    path: &str,
+) -> Result<(), SyncError> {
+    if !is_hosted(tx, workspace_id)? {
+        return Ok(());
+    }
+    let withheld = tx
+        .prepare(
+            "SELECT s.object_id FROM snapshots s \
+             JOIN hosted_replicas h ON h.workspace_id=s.workspace_id \
+             WHERE s.workspace_id=?1 AND s.version_id=?2 AND s.path=?3 AND s.object_id<>?4 \
+               AND NOT EXISTS(SELECT 1 FROM hosted_documents d \
+                 WHERE d.workspace_id=s.workspace_id AND d.object_id=s.object_id \
+                   AND d.scope_generation=h.scope_generation)",
+        )
+        .map_err(SyncError::corrupt)?
+        .query_map(params![workspace_id, version_id, path, object_id], |row| {
+            row.get::<_, String>(0)
+        })
+        .map_err(SyncError::corrupt)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(SyncError::corrupt)?;
+    for occupant in withheld {
+        for table in ["path_aliases", "snapshots"] {
+            tx.execute(
+                &format!(
+                    "DELETE FROM {table} WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3"
+                ),
+                params![workspace_id, version_id, occupant],
+            )
+            .map_err(SyncError::persist)?;
+        }
+        crate::file_search::delete_file_search_index(tx, workspace_id, version_id, &occupant)?;
+    }
+    Ok(())
 }
 
 /// Record the withheld before side of a moment this transaction applied. A
