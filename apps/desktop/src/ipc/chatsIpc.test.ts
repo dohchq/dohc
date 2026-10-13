@@ -465,6 +465,15 @@ describe("registered channels and personal chat projections", () => {
 
 
 describe("targeted file resolution", () => {
+  it.each(["resolution failure", "deleted file"])("retains the file-chat hint after %s", async outcome => {
+    const test = fixture();
+    if (outcome === "resolution failure") test.resolveEngineFiles.mockRejectedValue(new Error("Engine unavailable"));
+    else test.resolveEngineFiles.mockResolvedValue([{ status: "absent" }]);
+    expect(await test.invoke(CHANNELS.listChatChannels, { workspaceId: "workspace" })).toMatchObject({
+      fileThreads: [{ id: "thread", path: "notes/a.md", ref: null }],
+    });
+  });
+
   it("keeps mention attachment identity when a path is reused", async () => {
     const test = fixture();
     test.captureMethods.resolveFileForPath.mockResolvedValue({ objectId: "replacement", path: "notes/a.md" });

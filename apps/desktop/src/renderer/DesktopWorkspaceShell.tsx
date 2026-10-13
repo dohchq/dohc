@@ -2691,7 +2691,8 @@ export function DesktopWorkspaceShell(props: {
       focusMessageId?: string,
     ) => {
       openChatThreadInPanel(thread, focusMessageId);
-      if (thread.ref && thread.path) openFile(thread.path);
+      const path = thread.ref?.labels.path ?? thread.path;
+      if (path) openFile(path);
     },
     [openChatThreadInPanel, openFile],
   );

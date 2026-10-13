@@ -14,7 +14,7 @@ vi.hoisted(() => {
 import { act, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
-import type { WorkspaceUiState } from "../../ipc/bridgeContract";
+import type { FileChatThreadRecord, WorkspaceUiState } from "../../ipc/bridgeContract";
 import {
   SHARE_VIEW,
   WORKSPACE,
@@ -53,6 +53,35 @@ function lastStoredState(bridge: ReturnType<typeof makeBridge>): WorkspaceUiStat
 }
 
 describe("Chats in the left side panel", () => {
+  it.each(["resolution failure", "deleted file", "resolved reference"])("opens the file-chat path after %s", async outcome => {
+    const user = userEvent.setup();
+    const bridge = makeBridge(Promise.resolve(STORED_CHATS_STATE));
+    const path = outcome === "deleted file" ? "deleted.md" : "b.md";
+    const thread: FileChatThreadRecord = {
+      id: "file-thread", title: "File discussion", createdAtMs: 1, updatedAtMs: 2,
+      path: outcome === "resolved reference" ? "old.md" : path,
+      ref: outcome === "resolved reference" ? {
+        workspaceId: WORKSPACE.workspaceId, target: { kind: "file" as const, objectId: "file-object" },
+        labels: { path, name: path, displayKind: "markdown" },
+      } : null,
+    };
+    bridge.listChatChannels.mockResolvedValue({ channels: [], fileThreads: [thread] });
+    Object.assign(bridge, {
+      listPersonalChatFeed: vi.fn(async () => ({ items: [{
+        message: { id: "file-message", threadId: thread.id, authorKind: "human", authorDisplayName: "You", body: "Discuss this file", createdAtMs: 1 },
+        thread: { id: thread.id, title: thread.title, createdAtMs: 1, updatedAtMs: 2 },
+        channel: null, reactions: [],
+      }], nextCursor: null })),
+    });
+    if (outcome === "deleted file") bridge.readWorkspaceText.mockRejectedValue(new Error("File not found"));
+    renderShell(bridge);
+    await user.click(await screen.findByTestId("chats-feed-link"));
+    const item = await screen.findByTestId("chats-feed-item");
+    bridge.readWorkspaceText.mockClear();
+    await user.click(within(item).getByRole("button", { name: /Discuss this file/ }));
+    await waitFor(() => expect(bridge.readWorkspaceText).toHaveBeenCalledWith(expect.objectContaining({ relativePath: path })));
+  });
+
   it("selects Chats from the rail beside Files, and stores the choice", async () => {
     const bridge = makeBridge(Promise.resolve(null));
     const user = userEvent.setup();
