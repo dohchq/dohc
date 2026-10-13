@@ -7,6 +7,7 @@
 import { spawn, spawnSync } from 'node:child_process';
 import { once as event } from 'node:events';
 import { closeSync, existsSync, fsyncSync, openSync, readFileSync, readdirSync, rmSync, writeSync } from 'node:fs';
+import { randomFillSync } from 'node:crypto';
 import { createServer } from 'node:http';
 import { availableParallelism } from 'node:os';
 import { DatabaseSync } from 'node:sqlite';
@@ -239,6 +240,13 @@ createServer(async (request, response) => {
   response.setHeader('content-type', 'application/json');
   try {
     if (url.pathname === '/__trial/stats/fsync') return response.end(JSON.stringify(fsyncProbe(url.searchParams.get('dir') ?? '/host-data')));
+    // Incompressible bytes in the relay directory, to time save and restore by size.
+    if (url.pathname === '/__trial/stats/ballast') {
+      const begun = performance.now(), mib = Number(url.searchParams.get('mb') ?? 0), chunk = Buffer.alloc(1048576);
+      const fd = openSync('/data/trial-ballast.bin', 'w');
+      try { for (let index = 0; index < mib; index++) writeSync(fd, randomFillSync(chunk)); fsyncSync(fd); } finally { closeSync(fd); }
+      return response.end(JSON.stringify({ mib, ms: Math.round(performance.now() - begun), bytes: sizes() }));
+    }
     if (url.pathname === '/__trial/stats/state') {
       return response.end(JSON.stringify(await stateProbe(url.searchParams.get('target') ?? 'do', Number(url.searchParams.get('bytes') ?? 4096))));
     }
