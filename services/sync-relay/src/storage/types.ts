@@ -1001,6 +1001,9 @@ export interface SyncRelayStorage {
   // match is exact on the normalized (lowercased) address. Returns the number
   // of grants claimed.
   claimPendingSharesForEmail(email: string, userId: string): number;
+  // Whether a current pending invite is addressed to `email`, matched on the
+  // same normalized address a claim uses.
+  hasPendingInvite(email: string): boolean;
   shareHasActiveGrants(shareId: string): boolean;
   getShareLabels(shareId: string): ShareLabels;
   setShareLabels(shareId: string, labels: ShareLabels, updatedAtMs: number): void;
