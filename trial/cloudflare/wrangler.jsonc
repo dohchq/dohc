@@ -1,0 +1,28 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "dohc-cloudflare-trial",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-12",
+  "observability": { "enabled": true },
+  "workers_dev": true,
+  "preview_urls": false,
+  "containers": [
+    {
+      "class_name": "Cell",
+      "image": "./container/Dockerfile",
+      "instance_type": "standard-1",
+      "max_instances": 1,
+      "constraints": { "jurisdiction": "eu" }
+    }
+  ],
+  "durable_objects": {
+    "bindings": [{ "name": "CELL", "class_name": "Cell" }]
+  },
+  "exports": {
+    "Cell": { "type": "durable-object", "storage": "sqlite" }
+  },
+  "vars": {
+    // Set after the first deploy prints the workers.dev URL.
+    "DOHC_PUBLIC_ORIGIN": "https://dohc-cloudflare-trial.SUBDOMAIN.workers.dev"
+  }
+}

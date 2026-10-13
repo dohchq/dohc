@@ -1,0 +1,17 @@
+{
+  "name": "dohc-cloudflare-trial",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "deploy": "wrangler deploy",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@cloudflare/containers": "^0.3.7"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20261012.1",
+    "typescript": "^7.0.2",
+    "wrangler": "4.149.0"
+  }
+}

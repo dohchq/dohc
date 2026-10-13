@@ -1,0 +1,17 @@
+# Trial-only additions to the private self-host bundle for the local baseline.
+# Mailpit shares workspace-api's network namespace so mail goes to loopback,
+# which the SMTP client accepts without TLS. Its API is published on loopback
+# for the load driver to read verification mail.
+services:
+  workspace-api:
+    ports: ['127.0.0.1:18025:8025']
+  mailpit:
+    image: axllent/mailpit:latest
+    restart: unless-stopped
+    network_mode: service:workspace-api
+    environment:
+      MP_SMTP_BIND_ADDR: 127.0.0.1:1025
+      MP_UI_BIND_ADDR: 0.0.0.0:8025
+      MP_MAX_MESSAGES: '20000'
+    depends_on:
+      workspace-api: {condition: service_started}
