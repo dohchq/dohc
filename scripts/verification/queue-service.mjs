@@ -186,7 +186,9 @@ export async function runService({
       const result = attempt ? readJson(join(paths.attempt(entry.id, attempt.n), "result.json")) : null;
       const last = previous?.running?.id === entry.id && previous.running.attempt === attempt?.n ? previous.running.awakeMs : 0;
       const stopped = entry.status.stopping ?? "service restart";
-      await finish(entry, attempt && { n: attempt.n, awakeMs: last }, attemptOutcome(result, grant, { stopped }), { cleanup: true });
+      // A recovery that cannot be recorded would repeat every tick; restart under the supervisor's backoff instead.
+      try { await finish(entry, attempt && { n: attempt.n, awakeMs: last }, attemptOutcome(result, grant, { stopped }), { cleanup: true }); }
+      catch (error) { fatal = error; return; }
     }
   }
 
@@ -360,25 +362,29 @@ export async function runService({
       if (running?.phase === "verifying") running.awakeMs += awake;
       if (running?.phase === "preparing") running.prepareMs += awake;
       last = now;
+      // Recovered first, so a submission that arrived during a restart replaces the interrupted request.
+      if (!running) await recover(load());
       await ingest();
       for (const entry of load().filter(entry => entry.status.state === "queued" && existsSync(join(paths.request(entry.id), "cancel")))) {
         await finish(entry, null, { outcome: "cancelled", cause: "cancelled" });
       }
       const requests = load();
-      if (running && !running.stopped) {
-        if (existsSync(join(paths.request(running.id), "cancel"))) running.stopped = "cancelled";
-        else if (running.awakeMs > running.limitMs) running.stopped = running.limitMs < timeLimitMs ? "time budget" : "time limit";
+      // The attempt can finish during the status write below, so this block keeps its own reference.
+      const current = running;
+      if (current && !current.stopped) {
+        if (existsSync(join(paths.request(current.id), "cancel"))) current.stopped = "cancelled";
+        else if (current.awakeMs > current.limitMs) current.stopped = current.limitMs < timeLimitMs ? "time budget" : "time limit";
         // A hung preparation is the host's problem, so its stop is retried like any machine failure.
-        else if (running.prepareMs > prepareLimitMs) running.stopped = "preparation limit";
-        if (running.stopped) {
-          log(`stopping ${running.id}: ${running.stopped}`);
-          running.stoppedAt = now;
+        else if (current.prepareMs > prepareLimitMs) current.stopped = "preparation limit";
+        if (current.stopped) {
+          log(`stopping ${current.id}: ${current.stopped}`);
+          current.stoppedAt = now;
           // Recorded first, so a restart before the run ends still honors the stop.
           try {
-            const status = readJson(statusPath(running.id));
-            if (status) await setStatus(running.id, { ...status, stopping: running.stopped });
+            const status = readJson(statusPath(current.id));
+            if (status) await setStatus(current.id, { ...status, stopping: current.stopped });
           }
-          finally { running.abort.abort(); }
+          finally { current.abort.abort(); }
         }
       }
       if (running?.stoppedAt && now - running.stoppedAt > stopGraceMs) {
@@ -398,7 +404,6 @@ export async function runService({
             await setStatus(id, { ...status, cleanupPending: false });
           }
         }
-        await recover(requests);
         await checkHealth(requests);
         const entry = health.pausedUntil > now ? null : nextRequest(requests, health, now);
         if (entry) attempt(entry).catch(error => { log(`attempt bookkeeping failed: ${error.stack ?? error.message}`); fatal = error; });

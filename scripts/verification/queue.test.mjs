@@ -252,6 +252,35 @@ test("a restarted service keeps a finished receipt and retries an interrupted ru
   assert.deepEqual(calls.map(grant => [grant.request, grant.attempt]), [["000000002-bbbbbb", 2], ["000000003-cccccc", 2]], "only interrupted requests run again, as new attempts");
 });
 
+test("a newer commit submitted while the service was down replaces the request it interrupted", async t => {
+  const root = mkdtempSync(join(tmpdir(), "dohc-queue-restart-newer-"));
+  const fixture = fixtureRepo();
+  t.after(() => { rmSync(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 }); rmSync(fixture.repo, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 }); });
+  const paths = queuePaths(root);
+  const old = "000000001-aaaaaa";
+  const fields = { base: fixture.base, scope: "all", gates: { rust: true, js: false }, checkout: "pass", branch: "refs/heads/feature" };
+  await writeJson(join(paths.request(old), "request.json"), { id: old, sequence: 1, head: fixture.head, ...fields });
+  await writeJson(join(paths.request(old), "status.json"), { state: "running", attempts: [{ n: 1, startedAt: new Date().toISOString() }] });
+  fixture.git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "newer");
+  const newer = fixture.git("rev-parse", "HEAD");
+  const key = await submit(root, { head: newer, ...fields });
+  const calls = [];
+  const stop = new AbortController();
+  const service = runService({ root, repo: fixture.repo, lane: join(root, "lane"), tickMs: 20, floorGb: 1, freeDisk: () => 100,
+    docker: async () => true, prepare: async () => {}, sweep: async () => 0, holdLane: async () => ({ release() {} }), retryDelay: () => 0,
+    worker: async ({ grant, output }) => { calls.push(grant.head); writeFileSync(join(output, "result.json"), JSON.stringify({ grant, commit: grant.head, baseCommit: grant.base, verdict: "PASS", final: true })); },
+    stop: stop.signal, log: () => {} });
+  const id = (await waitFor(() => readJson(join(paths.keys, key)), "the newer commit must be accepted")).id;
+  const all = await waitFor(() => {
+    const requests = listRequests(root);
+    return requests.length === 2 && requests.every(candidate => terminalStates.has(candidate.status.state)) ? requests : null;
+  }, "both requests must settle");
+  stop.abort();
+  await service;
+  assert.deepEqual(Object.fromEntries(all.map(candidate => [candidate.id, candidate.status.state])), { [old]: "superseded", [id]: "passed" });
+  assert.deepEqual(calls, [newer], "only the newer commit is verified");
+});
+
 test("only one service serves a queue root", async t => {
   const root = mkdtempSync(join(tmpdir(), "dohc-queue-single-"));
   const fixture = fixtureRepo();
