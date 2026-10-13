@@ -565,6 +565,7 @@ it("seeks only window thread bindings in a workspace with 20k single-message thr
     for (const plan of plans) {
       expect(plan.map(row => row.detail)).toContainEqual(expect.stringMatching(/SEARCH t USING INDEX idx_sync_relay_log_thread_id .*workspace_id=\? AND <expr>=\?/u));
       expect(plan.map(row => row.detail)).toContainEqual(expect.stringMatching(/SEARCH m USING INDEX idx_sync_relay_log_page .*relay_seq>\? AND relay_seq<\?/u));
+      expect(plan.map(row => row.detail)).not.toContainEqual(expect.stringMatching(/^SCAN (?:sync_relay_log|t|m)\b/u));
     }
   } finally {spy.mockRestore(); db.close();}
 });
