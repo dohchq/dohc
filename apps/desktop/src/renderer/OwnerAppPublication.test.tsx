@@ -783,3 +783,19 @@ it("reviews a chosen read and its fields, with approval off by default", async (
   cleanup(); vi.unstubAllGlobals(); vi.resetAllMocks(); api.publishOwnerApp.mockImplementation(answer);
     api.dataset.mockResolvedValue({ kind: "list", datasets: [{ datasetId: datasetCapability.datasetId, datasetPath: "data/dataset.json", datasetAddressStatus: "available" }], nextCursor: null }); api.listRelayShareLinks.mockResolvedValue(page);
 });
+
+it.each([false, true])("shows an operator takedown reason and removes republishing, with current link %s", async linkCurrent => {
+  vi.stubGlobal("dohcDesktop", api);
+  api.publishOwnerApp.mockImplementation(async request => request.action === "list" ? {
+    kind: "listed", publications: [{...datasetRow, active: false, linkCurrent,
+      operatorTakedown: {actor: "operator", disabledAtMs: 30, reason: "Confirmed phishing"}}], nextCursor: null,
+  } : answer(request));
+  try {
+    render(<OwnerAppPublication workspaceId="ws-trip" appRoot="trip" />);
+    await open();
+    await screen.findByText("Confirmed phishing");
+    expect(screen.getByText(/Disabled by server operator/)).toBeTruthy();
+    expect(screen.queryByRole("button", {name: "Review and republish"})).toBeNull();
+    expect(screen.queryByRole("button", {name: `Unpublish ${published.publicationId}`})).toBeNull();
+  } finally { cleanup(); vi.unstubAllGlobals(); api.publishOwnerApp.mockImplementation(answer); }
+});

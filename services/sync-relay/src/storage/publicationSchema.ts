@@ -37,4 +37,27 @@ export function initializeAppPublicationSchema(db: SqliteDb): void {
     CREATE INDEX IF NOT EXISTS idx_sync_relay_publication_discovery
       ON sync_relay_app_publications(workspace_id, grant_id, grant_generation, active, publication_id);
   `);
+  initializeAppPublicationTakedownSchema(db);
+}
+
+const TAKEDOWN_MIGRATION = "app-publication-operator-takedowns-v1";
+const TAKEDOWN_TABLE = "sync_relay_app_publication_takedowns";
+const TAKEDOWN_SQL = `CREATE TABLE sync_relay_app_publication_takedowns (
+  publication_id TEXT PRIMARY KEY REFERENCES sync_relay_app_publications(publication_id) ON DELETE CASCADE,
+  actor TEXT NOT NULL CHECK (actor = 'operator'),
+  disabled_at_ms INTEGER NOT NULL CHECK (disabled_at_ms BETWEEN 0 AND 9007199254740991),
+  reason TEXT NOT NULL CHECK (length(reason) BETWEEN 1 AND 1024 AND length(CAST(reason AS BLOB)) <= 4096 AND instr(reason, char(0)) = 0)
+) STRICT`;
+
+function initializeAppPublicationTakedownSchema(db: SqliteDb): void {
+  const marked = db.prepare("SELECT 1 FROM sync_relay_migrations WHERE migration_id=?").get(TAKEDOWN_MIGRATION);
+  const existing = db.prepare("SELECT sql FROM sqlite_schema WHERE name=? AND type='table'").get(TAKEDOWN_TABLE);
+  const normalize = (sql: string) => sql.trim().replace(/\s+/g, " ");
+  if (marked) {
+    if (!existing || normalize(String(existing.sql)) !== normalize(TAKEDOWN_SQL)) throw new Error("Publication takedown schema is missing or damaged.");
+    return;
+  }
+  if (existing) throw new Error("Unmarked publication takedown schema already exists.");
+  db.exec(TAKEDOWN_SQL);
+  db.prepare("INSERT INTO sync_relay_migrations(migration_id,completed_at_ms) VALUES(?,?)").run(TAKEDOWN_MIGRATION, Date.now());
 }

@@ -18,6 +18,7 @@
     "typecheck": "tsc --noEmit",
     "start": "node dist/main.js",
     "host:credential": "tsx src/deviceHostCredentialCommand.ts",
+    "app:takedown": "tsx src/appPublicationTakedownCommand.ts",
     "deployment": "tsx src/relayDeploymentCommand.ts",
     "host:connect": "node dist/device-host-connect.js"
   },
