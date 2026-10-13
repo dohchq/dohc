@@ -23,7 +23,8 @@ import { resolveBuildBudget } from "../../tools/rust-engine-program/build-slot.m
 import { git } from "./process.mjs";
 
 export const protocol = 1;
-export const terminalStates = new Set(["passed", "failed", "cancelled", "superseded"]);
+// "error" ends a request the host kept failing; it carries no verdict about the change.
+export const terminalStates = new Set(["passed", "failed", "error", "cancelled", "superseded"]);
 
 /**
  * The queue root on a host that runs the service, else null. CI, other
@@ -137,6 +138,7 @@ export function attemptOutcome(result, grant, { stopped } = {}) {
   const matches = result?.grant && result.grant.request === grant.request && result.grant.attempt === grant.attempt
     && result.commit === grant.head && result.baseCommit === grant.base;
   if (!matches) return { outcome: "environment", cause: stopped ?? "no receipt", reason: "The worker ended without a receipt for this attempt." };
+  if (result.final !== true) return { outcome: "environment", cause: stopped ?? "unfinished", reason: "The worker stopped before its receipt was final." };
   if (result.verdict === "PASS") return { outcome: "passed", cause: "pass" };
   if (result.verdict === "FAIL" && result.failure?.kind === "check") return { outcome: "failed", cause: "check", reason: result.error };
   if (result.verdict === "FAIL") return { outcome: "environment", cause: result.failure?.cause ?? "environment", reason: result.error };
@@ -186,7 +188,8 @@ export function ensureService(root, { start = () => spawnSync("schtasks.exe", ["
 /** Median awake minutes of recent passing attempts, for estimates only. */
 export function typicalRunMs(root) {
   try {
-    const runs = readFileSync(queuePaths(root).history, "utf8").trim().split("\n").slice(-400)
+    const text = readFileSync(queuePaths(root).history, "utf8");
+    const runs = text.slice(-256 * 1024).trim().split("\n").slice(-400)
       .flatMap(line => { try { const event = JSON.parse(line); return event.event === "finished" && event.outcome === "passed" && event.awakeMs > 0 ? [event.awakeMs] : []; } catch { return []; } })
       .slice(-20).sort((a, b) => a - b);
     return runs.length ? runs[Math.floor(runs.length / 2)] : null;
@@ -215,10 +218,18 @@ export async function verifyThroughQueue({ root, submission, detach = false, che
   if (detach) return { id, state: "queued" };
   let shown = "";
   let shownAt = 0;
+  let missing = 0;
+  const follow = async () => {
+    try { await checkpoint(); }
+    catch (error) { log(`stopped following ${id}; the request continues. Run the same command again to follow it.`); throw error; }
+  };
   for (;;) {
     const requests = listRequests(root);
     const entry = requests.find(candidate => candidate.id === id);
-    if (!entry) throw new Error(`Request ${id} disappeared from ${root}.`);
+    // A record being replaced can read as missing for a moment.
+    if (!entry && (missing += 1) > 10) throw new Error(`Request ${id} disappeared from ${root}.`);
+    if (!entry) { await follow(); await sleep(pollMs); continue; }
+    missing = 0;
     const { status } = entry;
     if (terminalStates.has(status.state)) {
       if (status.state === "superseded") log(`superseded by ${status.supersededBy}, a newer commit on the same branch`);
@@ -231,7 +242,7 @@ export async function verifyThroughQueue({ root, submission, detach = false, che
     const line = status.state === "running" ? `running attempt ${status.attempts.at(-1).n}${current ? `, ${current}` : ""}`
       : `queued at position ${place}${typical && place ? `, about ${Math.round(((place - 1) * typical) / 60_000)} min until it starts` : ""}${status.waiting ? `; ${status.waiting}` : ""}`;
     if (line !== shown || Date.now() - shownAt > 5 * 60_000) { log(line); shown = line; shownAt = Date.now(); }
-    await checkpoint();
+    await follow();
     await sleep(pollMs);
   }
 }
@@ -270,7 +281,11 @@ async function install(root, ref) {
   const short = commit.slice(0, 12);
   const dir = join(paths.installs, short);
   mkdirSync(paths.installs, { recursive: true });
-  if (!existsSync(join(dir, ".git"))) git(["worktree", "add", "--detach", "--force", dir, commit], repo);
+  if (!existsSync(join(dir, ".git"))) {
+    git(["worktree", "add", "--detach", "--force", dir, commit], repo);
+    // Workspace cleanup keeps locked worktrees, so a rollback install survives it.
+    git(["worktree", "lock", "--reason", "dohc verification queue service", dir], repo);
+  }
   const check = spawnSync(process.execPath, [join(dir, "scripts/verification/queue-service.mjs"), "--self-test", "--root", root], { encoding: "utf8", windowsHide: true, timeout: 120_000 });
   if (check.status !== 0) throw new Error(`The service at ${short} failed its self-test, so the current one stays active:\n${check.stderr || check.stdout}`);
   copyFileSync(join(dir, "scripts/verification/queue-supervisor.ps1"), join(root, "supervisor.ps1"));
@@ -285,9 +300,11 @@ async function install(root, ref) {
     mkdirSync(paths.control, { recursive: true });
     writeFileSync(join(paths.control, "restart"), "");
   } else if (!serviceState(root).alive) spawnSync("schtasks.exe", ["/run", "/tn", taskName], { windowsHide: true });
-  // Keep the active and the previous installation; older ones are removed.
-  for (const name of readdirSync(paths.installs).filter(name => name !== short && name !== previous)) {
-    try { git(["worktree", "remove", "--force", join(paths.installs, name)], repo); } catch { rmSync(join(paths.installs, name), { recursive: true, force: true }); }
+  // Keep the active, the previous, and the running installation; older ones are removed.
+  const runningInstall = serviceState(root).record?.commit?.slice(0, 12);
+  for (const name of readdirSync(paths.installs).filter(name => ![short, previous, runningInstall].includes(name))) {
+    try { git(["worktree", "remove", "--force", "--force", join(paths.installs, name)], repo); }
+    catch (error) { console.error(`could not remove the old install ${name}: ${error.message}`); }
   }
   console.log(`verification queue service ${short} installed at ${root}${previous && previous !== short ? `, replacing ${previous} once the current run ends` : ""}.`);
 }

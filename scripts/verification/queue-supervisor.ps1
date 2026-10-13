@@ -97,12 +97,19 @@ while ($true) {
         $process.StandardInput.WriteLine('go')
         $process.StandardInput.Flush()
         $beat = Join-Path $rootPath 'service.json'
+        # Count polls without a new heartbeat, not wall-clock age: a wait does not advance
+        # while the machine sleeps, so a resumed service is never mistaken for a hung one.
+        $lastBeat = $null
+        $quiet = 0
         while (-not $process.WaitForExit(5000)) {
-            $age = if (Test-Path $beat) { ([DateTime]::UtcNow - (Get-Item $beat).LastWriteTimeUtc).TotalSeconds } else { [double]::MaxValue }
-            if (([DateTime]::UtcNow - $started).TotalSeconds -gt 120 -and $age -gt 120) { $reason = 'heartbeat stopped'; break }
+            $seen = if (Test-Path $beat) { (Get-Item $beat).LastWriteTimeUtc } else { $null }
+            if ($seen -ne $lastBeat) { $lastBeat = $seen; $quiet = 0 } else { $quiet += 1 }
+            if ($quiet -ge 24) { $reason = 'heartbeat stopped for 24 polls'; break }
         }
     } catch {
         $reason = "failed to start: $($_.Exception.Message)"
+        # A service that never entered the job must not run unsupervised.
+        if ($process -and -not $process.HasExited) { $process.Kill($true) }
     } finally {
         [QueueJob]::Close($job)
     }

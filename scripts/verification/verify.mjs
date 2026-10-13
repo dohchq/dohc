@@ -26,14 +26,28 @@ const hostPhases = new Set(["selection", "checkout", "preflight", "preflight:adm
 
 /** Whether a failure is the change's fault ("check") or the machine's ("environment"). The queue retries only the second. */
 export function failureKind(error) {
-  const text = `${error?.message ?? ""}\n${String(error?.stderr ?? "").slice(-65536)}\n${String(error?.stdout ?? "").slice(-65536)}`;
+  // Test output can contain any text, so only structured causes and the gate's own refusal count.
+  // The queue also measures the host after a failure: low disk or a silent Docker makes it a machine failure.
   if (error?.environment) return { kind: "environment", cause: error.environment };
-  if (environmentCodes.has(error?.code)) return { kind: "environment", cause: error.code };
-  if (startupFailures.has(error?.exitCode) || startupFailures.has(error?.status) || /3221225794|0xC0000142/u.test(text)) return { kind: "environment", cause: "a program could not start (0xC0000142)" };
-  if (/ENOSPC|no space left on device|not enough space on the disk|refusing to run the gate: [\d.]+ GB free/iu.test(text)) return { kind: "environment", cause: "disk space" };
+  if (String(error?.syscall ?? "").startsWith("spawn") && environmentCodes.has(error.code)) return { kind: "environment", cause: `${error.code} starting a program` };
+  if (startupFailures.has(error?.exitCode) || startupFailures.has(error?.status)) return { kind: "environment", cause: "a program could not start (0xC0000142)" };
+  if (/^refusing to run the gate: [\d.]+ GB free/mu.test(String(error?.stdout ?? "").slice(-65536) + String(error?.stderr ?? "").slice(-65536))) return { kind: "environment", cause: "disk space" };
   if (hostPhases.has(error?.step)) return { kind: "environment", cause: error.step };
-  if (error?.step === "install" && !/ERR_PNPM_(OUTDATED_LOCKFILE|LOCKFILE|PEER)/u.test(text)) return { kind: "environment", cause: "install" };
+  if (error?.step === "install" && !/ERR_PNPM_(OUTDATED_LOCKFILE|LOCKFILE|PEER)/u.test(`${error?.message ?? ""}\n${String(error?.stderr ?? "").slice(-65536)}`)) return { kind: "environment", cause: "install" };
   return { kind: "check", cause: error?.step ?? "verification" };
+}
+
+/**
+ * The queue's grant and evidence folder, removed from the environment so that
+ * nothing this verifier starts, such as a test that runs another verifier,
+ * inherits them.
+ */
+export function takeGrant(env = process.env) {
+  const grant = env.DOHC_VERIFICATION_GRANT ? JSON.parse(env.DOHC_VERIFICATION_GRANT) : null;
+  const output = env.DOHC_VERIFICATION_OUTPUT ?? null;
+  delete env.DOHC_VERIFICATION_GRANT;
+  delete env.DOHC_VERIFICATION_OUTPUT;
+  return { grant, output };
 }
 
 const require = createRequire(join(repoRoot, "apps/desktop/package.json"));
@@ -169,7 +183,7 @@ export async function verify(args) {
   const detach = args.includes("--detach");
   const inline = args.includes("--inline");
   // The queue service runs this verifier in its lane with a grant; it must not queue again.
-  const grant = process.env.DOHC_VERIFICATION_GRANT ? JSON.parse(process.env.DOHC_VERIFICATION_GRANT) : null;
+  const { grant, output: grantOutput } = takeGrant();
   const reuseIndex = args.indexOf("--reuse-rust");
   const reuseRust = reuseIndex < 0 ? null : args[reuseIndex + 1];
   if (reuseIndex >= 0 && (mode !== "pr" || !reuseRust || reuseRust.startsWith("--") || job === "js")) {
@@ -196,7 +210,7 @@ export async function verify(args) {
     return;
   }
   let treeState;
-  const output = grant ? process.env.DOHC_VERIFICATION_OUTPUT : join(repoRoot, ".agent-artifacts/verification", `${new Date().toISOString().replaceAll(":", "-")}-${randomUUID().slice(0, 8)}`);
+  const output = grant ? grantOutput : join(repoRoot, ".agent-artifacts/verification", `${new Date().toISOString().replaceAll(":", "-")}-${randomUUID().slice(0, 8)}`);
   mkdirSync(output, { recursive: true });
   const report = { version: 1, mode, scope: job ?? "all", full, root: repoRoot, base, ...(grant ? { grant } : {}), ...total, steps: [], timings: [], treeReadings: [], output, verdict: "RUNNING" };
   const reportPath = join(output, "result.json");
@@ -289,6 +303,7 @@ export async function verify(args) {
         await step("pre-queue-test-build", "cargo", [...nextest, "--no-run"], env);
       });
       const queue = grant || inline ? null : queueRoot();
+      if (queue && reuseRust) throw new Error("The queue cannot reuse Rust evidence yet. Add --inline to reuse it in this checkout.");
       if (queue) {
         // The service verifies the commit in its own checkout, so this checkout is free to change now.
         checkoutOwner.release();
@@ -419,13 +434,10 @@ export async function verify(args) {
     if (desktop) await measure("prepared-build:finish", () => assertPrepared(preparedOptions));
     await checkTree("finish");
     report.verdict = "PASS";
-    // The verdict is on disk before teardown, so a hung cleanup cannot erase it.
-    save();
   } catch (error) {
     report.verdict = "FAIL"; report.error = error.message;
     if (!error.queued) report.failure = failureKind(error);
     if (error.cleanupError) report.cleanupError = error.cleanupError;
-    save();
     throw error;
   }
   finally {
@@ -442,7 +454,8 @@ export async function verify(args) {
       lane?.release();
       if (interrupted) { report.verdict = "FAIL"; report.error ??= interrupted.message; report.failure ??= { kind: "environment", cause: "interrupted" }; }
       finishTiming(); Object.assign(report, total);
-      if (originalRustIdentity && !interrupted && !report.rustError && !report.cleanupError) {
+      // In the lane a failed container removal does not change the verdict, so the Rust evidence still finishes.
+      if (originalRustIdentity && !interrupted && !report.rustError && (grant || !report.cleanupError)) {
         try {
           recordTree("rust-receipt:finish");
           report.provenance = classifyTreeProvenance(report.treeReadings);
@@ -458,6 +471,8 @@ export async function verify(args) {
         else process.env.CARGO_INCREMENTAL = previousIncremental;
       }
       finishTiming(); Object.assign(report, total);
+      // Nothing after this changes the verdict. The queue accepts only a final receipt.
+      report.final = true;
       save(); console.log(`[verification] ${report.verdict} (${report.scope}): ${reportPath}`);
     } finally { checkoutOwner?.release(); }
   }

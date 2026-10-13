@@ -10,7 +10,7 @@ import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { attemptOutcome, cancel, listRequests, nextRequest, placeSubmission, position, queuePaths, readJson, submit, terminalStates, writeJson } from "./queue.mjs";
 import { runService } from "./queue-service.mjs";
-import { failureKind } from "./verify.mjs";
+import { failureKind, takeGrant } from "./verify.mjs";
 
 const entry = (id, request, state = "queued", extra = {}) => ({ id, request: { sequence: Number(id.slice(0, 9)), scope: "all", gates: { rust: true, js: true }, checkout: "C:\\w\\a", branch: "refs/heads/a", ...request }, status: { state, attempts: [], ...extra } });
 
@@ -42,11 +42,12 @@ test("the oldest runnable request goes next; Docker trouble holds back only Java
 
 test("only a receipt for this exact attempt counts", () => {
   const grant = { request: "r", attempt: 2, head: "h", base: "b" };
-  const receipt = fields => ({ grant, commit: "h", baseCommit: "b", ...fields });
+  const receipt = fields => ({ grant, commit: "h", baseCommit: "b", final: true, ...fields });
   assert.equal(attemptOutcome(receipt({ verdict: "PASS" }), grant).outcome, "passed");
   assert.equal(attemptOutcome(receipt({ verdict: "FAIL", failure: { kind: "check" }, error: "tests" }), grant).outcome, "failed");
   assert.equal(attemptOutcome(receipt({ verdict: "FAIL", failure: { kind: "environment", cause: "doctor" } }), grant).cause, "doctor");
   assert.equal(attemptOutcome(receipt({ verdict: "RUNNING" }), grant).outcome, "environment");
+  assert.equal(attemptOutcome(receipt({ verdict: "PASS", final: false }), grant).outcome, "environment", "a pass saved before teardown finished is not trusted");
   assert.equal(attemptOutcome({ ...receipt({ verdict: "PASS" }), grant: { ...grant, attempt: 1 } }, grant).outcome, "environment", "an earlier attempt's pass is not this attempt's");
   assert.equal(attemptOutcome(null, grant).outcome, "environment");
   assert.equal(attemptOutcome(receipt({ verdict: "PASS" }), grant, { stopped: "time limit" }).outcome, "failed");
@@ -54,14 +55,23 @@ test("only a receipt for this exact attempt counts", () => {
 });
 
 test("machine failures are told apart from failures of the change", () => {
-  assert.equal(failureKind(Object.assign(new Error("git failed"), { status: 3221225794 })).kind, "environment");
-  assert.equal(failureKind(Object.assign(new Error("spawn"), { code: "ENOENT" })).kind, "environment");
-  assert.equal(failureKind(Object.assign(new Error("Verification Postgres did not become healthy."), { step: "postgres-start" })).kind, "environment");
-  assert.equal(failureKind(Object.assign(new Error("pnpm failed"), { step: "install", stderr: "ERR_PNPM_OUTDATED_LOCKFILE" })).kind, "check");
-  assert.equal(failureKind(Object.assign(new Error("pnpm failed"), { step: "install", stderr: "ECONNRESET" })).kind, "environment");
-  assert.equal(failureKind(Object.assign(new Error("node failed (1)."), { step: "tests", commandExitFailure: true })).kind, "check");
-  assert.equal(failureKind(Object.assign(new Error("write failed"), { step: "tests", stderr: "ENOSPC: no space left on device" })).kind, "environment");
-  assert.equal(failureKind(Object.assign(new Error("node failed (1)."), { step: "rust", stdout: "refusing to run the gate: 38.2 GB free on the worktree volume is below the 40 GB floor" })).kind, "environment");
+  const kind = fields => failureKind(Object.assign(new Error(fields.message ?? "failed"), fields)).kind;
+  assert.equal(kind({ status: 3221225794 }), "environment", "a program that could not start");
+  assert.equal(kind({ code: "ENOENT", syscall: "spawn git" }), "environment");
+  assert.equal(kind({ code: "ENOENT", syscall: "open", step: "desktop" }), "check", "a missing report is the run's own failure");
+  assert.equal(kind({ step: "postgres-start", message: "Verification Postgres did not become healthy." }), "environment");
+  assert.equal(kind({ step: "install", stderr: "ERR_PNPM_OUTDATED_LOCKFILE" }), "check");
+  assert.equal(kind({ step: "install", stderr: "ECONNRESET" }), "environment");
+  assert.equal(kind({ step: "tests", commandExitFailure: true }), "check");
+  assert.equal(kind({ step: "tests", stderr: "expected ENOSPC: no space left on device", stdout: "0xC0000142" }), "check", "text in test output proves nothing");
+  assert.equal(kind({ step: "rust", stdout: "refusing to run the gate: 38.2 GB free on the worktree volume is below the 40 GB floor" }), "environment");
+});
+
+test("a verifier takes its grant out of the environment its children inherit", () => {
+  const env = { DOHC_VERIFICATION_GRANT: JSON.stringify({ request: "r", attempt: 1 }), DOHC_VERIFICATION_OUTPUT: "C:\\out", PATH: "x" };
+  assert.deepEqual(takeGrant(env), { grant: { request: "r", attempt: 1 }, output: "C:\\out" });
+  assert.deepEqual(env, { PATH: "x" });
+  assert.deepEqual(takeGrant({}), { grant: null, output: null });
 });
 
 function fixtureRepo() {
@@ -75,25 +85,28 @@ function fixtureRepo() {
 }
 
 /** A service on a private root with a stub verifier: request.checkout names its behavior. */
-function harness(t, { timeLimitMs = 60_000 } = {}) {
+function harness(t, { timeLimitMs = 60_000, docker = async () => true, sweep = async () => 0, hostFails = () => {}, holdLane = async () => ({ release() {} }) } = {}) {
   const root = mkdtempSync(join(tmpdir(), "dohc-queue-"));
   const fixture = fixtureRepo();
   const calls = [];
   const stop = new AbortController();
   const worker = async ({ request, grant, output, signal }) => {
     calls.push({ id: grant.request, attempt: grant.attempt, behavior: request.checkout });
-    const receipt = fields => writeFileSync(join(output, "result.json"), JSON.stringify({ grant, commit: grant.head, baseCommit: grant.base, ...fields }));
+    const receipt = fields => writeFileSync(join(output, "result.json"), JSON.stringify({ grant, commit: grant.head, baseCommit: grant.base, final: true, ...fields }));
     const behavior = request.checkout;
     if (behavior === "pass") receipt({ verdict: "PASS" });
     else if (behavior === "fail") receipt({ verdict: "FAIL", error: "a test failed", failure: { kind: "check", cause: "tests" } });
+    else if (behavior === "fail-as-host-fails") { hostFails(calls.length); receipt({ verdict: "FAIL", error: "a test failed", failure: { kind: "check", cause: "tests" } }); }
     else if (behavior === "flaky-host") receipt(calls.filter(call => call.id === grant.request).length === 1
       ? { verdict: "FAIL", error: "Docker did not answer", failure: { kind: "environment", cause: "postgres-start" } } : { verdict: "PASS" });
     else if (behavior === "crash") throw new Error("worker crashed without a receipt");
     else if (behavior === "hang") await new Promise(done => signal.addEventListener("abort", done, { once: true }));
+    else if (behavior === "host-down") receipt({ verdict: "FAIL", error: "Docker did not answer", failure: { kind: "environment", cause: "postgres-start" } });
+    else if (behavior === "slow-host") { await sleep(250); receipt({ verdict: "FAIL", error: "Docker did not answer", failure: { kind: "environment", cause: "postgres-start" } }); }
   };
   const service = runService({ root, repo: fixture.repo, lane: join(root, "lane"), tickMs: 20, timeLimitMs, floorGb: 1,
-    freeDisk: () => 100, docker: async () => true, prepare: async () => {}, sweep: async () => 0,
-    holdLane: async () => ({ release() {} }), worker, retryDelay: () => 50, stop: stop.signal, log: () => {} });
+    freeDisk: () => 100, docker, prepare: async () => {}, sweep,
+    holdLane, worker, retryDelay: () => 50, cleanupRetryMs: 50, stop: stop.signal, log: () => {} });
   t.after(async () => { stop.abort(); await service; rmSync(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 }); rmSync(fixture.repo, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 }); });
   const request = async (behavior, fields = {}) => {
     // Each behavior verifies its own commit: one commit with the same gates is one piece of work.
@@ -183,7 +196,7 @@ test("a restarted service keeps a finished receipt and retries an interrupted ru
     await writeJson(join(paths.request(id), "request.json"), { id, sequence: Number(id.slice(0, 9)), head: fixture.head, base: fixture.base, scope: "all", gates: { rust: true, js: false }, checkout: "pass", branch: `refs/heads/${id}` });
     await writeJson(join(paths.request(id), "status.json"), { state: "running", attempts: [{ n: 1, startedAt: new Date().toISOString() }] });
     mkdirSync(paths.attempt(id, 1), { recursive: true });
-    if (receipt) writeFileSync(join(paths.attempt(id, 1), "result.json"), JSON.stringify({ grant: { request: id, attempt: 1, head: fixture.head, base: fixture.base }, commit: fixture.head, baseCommit: fixture.base, verdict: "PASS" }));
+    if (receipt) writeFileSync(join(paths.attempt(id, 1), "result.json"), JSON.stringify({ grant: { request: id, attempt: 1, head: fixture.head, base: fixture.base }, commit: fixture.head, baseCommit: fixture.base, verdict: "PASS", final: true }));
   };
   await plant("000000001-aaaaaa", true);
   await plant("000000002-bbbbbb", false);
@@ -191,7 +204,7 @@ test("a restarted service keeps a finished receipt and retries an interrupted ru
   const stop = new AbortController();
   const service = runService({ root, repo: fixture.repo, lane: join(root, "lane"), tickMs: 20, floorGb: 1, freeDisk: () => 100,
     docker: async () => true, prepare: async () => {}, sweep: async () => 0, holdLane: async () => ({ release() {} }), retryDelay: () => 0,
-    worker: async ({ grant, output }) => { calls.push(grant); writeFileSync(join(output, "result.json"), JSON.stringify({ grant, commit: grant.head, baseCommit: grant.base, verdict: "PASS" })); },
+    worker: async ({ grant, output }) => { calls.push(grant); writeFileSync(join(output, "result.json"), JSON.stringify({ grant, commit: grant.head, baseCommit: grant.base, verdict: "PASS", final: true })); },
     stop: stop.signal, log: () => {} });
   const finished = await waitFor(() => {
     const all = listRequests(root);
@@ -251,4 +264,89 @@ test("the supervisor's job stops the service and everything it started", { skip:
   // Stop only the supervisor, as a crash or Task Scheduler would; its job takes the rest.
   spawnSync("taskkill.exe", ["/PID", String(supervisor.pid), "/F"], { windowsHide: true });
   await waitFor(() => pids.every(pid => !alive(pid)), "the service and its child must stop with the supervisor", 15_000);
+});
+
+test("a check that fails while Docker stops answering is retried, and fails on a healthy host", async t => {
+  let dockerUp = true;
+  // The first run takes Docker down with it; the second runs on a healthy host.
+  const { request, settled } = harness(t, { docker: async () => dockerUp, hostFails: calls => {
+    dockerUp = calls > 1;
+    if (!dockerUp) setTimeout(() => { dockerUp = true; }, 200);
+  } });
+  const failed = await request("fail-as-host-fails");
+  const final = await settled(failed.id);
+  assert.deepEqual(final.status.attempts.map(attempt => [attempt.outcome, attempt.cause]), [["environment", "host"], ["failed", "check"]]);
+  assert.equal(final.status.state, "failed", "on a healthy host the same failure is the change's");
+});
+
+test("retries share one time budget, so a request that keeps failing late ends", async t => {
+  const { request, settled } = harness(t, { timeLimitMs: 300 });
+  const slow = await request("slow-host");
+  const ended = await settled(slow.id);
+  assert.equal(ended.status.state, "failed");
+  assert.match(ended.status.cause, /^time (limit|budget)$/u);
+  assert.ok(ended.status.attempts.length <= 4, `${ended.status.attempts.length} attempts`);
+});
+
+test("a cleanup that fails is retried until it succeeds, and its request is kept until then", async t => {
+  let failures = 2;
+  const cleaned = [];
+  const { root, request, settled } = harness(t, { sweep: async ({ request: id }) => {
+    if (!id) return 0;
+    if (failures > 0) { failures -= 1; throw new Error("Docker is not answering"); }
+    cleaned.push(id);
+    return 1;
+  } });
+  const passed = await request("pass");
+  const done = await settled(passed.id);
+  assert.equal(done.status.verdict, "PASS", "a cleanup failure does not change the verdict");
+  await waitFor(() => cleaned.includes(passed.id), "the cleanup must be retried");
+  await waitFor(() => readJson(join(queuePaths(root).request(passed.id), "status.json"))?.cleanupPending === false, "the pending cleanup must be cleared");
+});
+
+test("a malformed submission is rejected and the service keeps serving", async t => {
+  const { root, fixture, request, settled } = harness(t);
+  const key = await submit(root, { head: fixture.head, base: fixture.base, scope: "all", gates: { rust: true, js: true }, branch: null });
+  const answer = await waitFor(() => readJson(join(queuePaths(root).keys, key)), "the malformed submission must be answered");
+  assert.match(answer.rejected, /names no checkout/u);
+  const pass = await request("pass");
+  assert.equal((await settled(pass.id)).status.verdict, "PASS");
+});
+
+test("a request the host keeps failing ends in error, with no verdict", async t => {
+  const { request, settled, calls } = harness(t);
+  const down = await request("host-down");
+  const ended = await settled(down.id);
+  assert.equal(ended.status.state, "error");
+  assert.equal(ended.status.verdict, null);
+  assert.equal(calls.filter(call => call.id === down.id).length, 5);
+});
+
+test("cancel reaches a request still waiting for the host lane", async t => {
+  const { root, request, settled } = harness(t, { holdLane: ({ signal }) => new Promise((_, fail) => signal.addEventListener("abort", () => fail(signal.reason), { once: true })) });
+  const waiting = await request("pass");
+  await waitFor(() => listRequests(root).find(candidate => candidate.id === waiting.id)?.status.state === "running", "the request must reach the lane wait");
+  await cancel(root, waiting.id);
+  assert.equal((await settled(waiting.id)).status.state, "cancelled");
+});
+
+test("a stop decided before a restart is honored after it", async t => {
+  const root = mkdtempSync(join(tmpdir(), "dohc-queue-stopping-"));
+  const fixture = fixtureRepo();
+  t.after(() => { rmSync(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 }); rmSync(fixture.repo, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 }); });
+  const paths = queuePaths(root);
+  const id = "000000001-aaaaaa";
+  await writeJson(join(paths.request(id), "request.json"), { id, sequence: 1, head: fixture.head, base: fixture.base, scope: "all", gates: { rust: true, js: false }, checkout: "hang", branch: null });
+  await writeJson(join(paths.request(id), "status.json"), { state: "running", stopping: "time limit", attempts: [{ n: 1, startedAt: new Date().toISOString() }] });
+  const calls = [];
+  const stop = new AbortController();
+  const service = runService({ root, repo: fixture.repo, lane: join(root, "lane"), tickMs: 20, floorGb: 1, freeDisk: () => 100,
+    docker: async () => true, prepare: async () => {}, sweep: async () => 0, holdLane: async () => ({ release() {} }),
+    worker: async ({ grant }) => { calls.push(grant); }, stop: stop.signal, log: () => {} });
+  const ended = await waitFor(() => terminalStates.has(listRequests(root)[0]?.status.state) && listRequests(root)[0], "the request must end");
+  stop.abort();
+  await service;
+  assert.equal(ended.status.state, "failed");
+  assert.equal(ended.status.cause, "time limit");
+  assert.deepEqual(calls, [], "a run stopped for its time limit is not run again");
 });
