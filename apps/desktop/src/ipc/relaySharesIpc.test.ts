@@ -240,11 +240,17 @@ describe("owner live document enrollment", () => {
     const h = harness();
     h.request.mockImplementation(async (_credentials, path) => path.includes("retired=1")
       ? {ok: true, documents: [{path: "old.md", objectId:"object", status: "retired", acceptedCursor: 0}], nextCursor: "old.md"}
-      : {ok: true, documents: [{path: "live.md", status: "ready", document: {shareId: "secret"}}]});
+      : {ok: true, documents: [
+        {path: "live.md", status: "ready", document: {shareId: "secret"}},
+        {path: "paused.md", status: "paused"},
+        {path: "moved.md", status: "paused", reason: "document-unavailable"},
+      ]});
     await expect(h.invoke(CHANNELS.listOwnerLiveDocuments, {workspaceId, retiredAfter: "older.md"})).resolves.toEqual({
       documents: [
         {path: "old.md", status: "retired", canResume: true},
         {path: "live.md", status: "ready", canResume: false},
+        {path: "paused.md", status: "paused", canResume: true},
+        {path: "moved.md", status: "paused", reason: "document-unavailable", canResume: false},
       ], nextCursor: "old.md",
     });
     expect(h.request.mock.calls.map((call) => call[1])).toEqual([
