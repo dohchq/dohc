@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { GoToIndex, isGoToPathQuery, prepareQuickOpenPaths, rankPreparedQuickOpenPaths, type GoToListing } from "./quick-open-rank";
+import { GoToIndex, isGoToPathQuery, prepareQuickOpenPaths, rankPreparedQuickOpenPaths, type GoToListing, type PreparedGoToRow } from "./quick-open-rank";
 function update(index: GoToIndex, ...args: Parameters<GoToIndex["update"]>) {
   const run = index.update(...args);
   while (run && !run.step(() => 0)) { /* Drain preparation for ranking tests. */ }
@@ -259,7 +259,7 @@ it("reuses rows through reordering, deletion, insertion, and duplicate paths", (
     update(index, { listing: listing(paths) });
     expect(index.lastPreparationCount).toBe(0);
     expect(index.rows.map(row => row.path)).toEqual([...new Set(paths)]);
-    for (const row of index.rows) expect(row).toBe(original.get(row.path));
+    for (const row of index.rows) expect(row.target).toBe(original.get(row.path)?.target);
   }
   update(index, { listing: listing(["new.md", "c.md", "b.md"]) });
   expect(index.lastPreparationCount).toBe(1);
@@ -417,26 +417,29 @@ it("never exposes a cancelled run that would unhide a row", () => {
   expect(index.query("budget")).toEqual([]);
   while (!latest!.step(() => ++ticks)) expect(index.query("budget")).toEqual([]);
   expect(index.query("budget")).toEqual([]);
+  update(index, { listing: { ...hidden, files: hidden.files.map((file, n) => n === 500 ? { ...file, path: "other/renamed.ts" } : file) } });
+  expect(index.query("budget")).toEqual([]);
 });
-it("budgets slices by actual row reads and ordering comparisons", () => {
+it.each(["visible", "includedRevision"] as const)("budgets collection and old-order work independently through %s reads", property => {
   const index = new GoToIndex("workspace");
   const source = listing(Array.from({ length: 3_000 }, (_, n) => "docs/report-" + n + ".ts"));
   update(index, { listing: source });
-  let operations = 0;
-  for (const row of index.rows) {
+  let time = 0;
+  // Instrument work independently of the loop's yield or operation counter.
+  const workRows = (index as unknown as { completeWorkRows: PreparedGoToRow[] }).completeWorkRows;
+  for (const row of workRows) {
+    let value = row[property];
+    Object.defineProperty(row, property, { get: () => { time += .002; return value; }, set: next => { value = next; }, enumerable: true });
     const path = row.path;
-    Object.defineProperty(row, "path", { get: () => { operations += 1; return path; } });
+    Object.defineProperty(row, "path", { get: () => { time += .00005; return path; }, enumerable: true });
   }
   const changed = { ...source, files: source.files.map((file, n) => n === 100 ? { ...file, path: "zz/renamed.ts" } : file).reverse() };
   const run = index.update({ listing: changed });
-  let slices = 0;
-  const clock = () => operations * .002;
-  let done = false;
+  let slices = 0, done = false;
   while (!done) {
-    const start = operations;
-    done = run!.step(clock);
-    // A clock read adds no time. Only observed row work moves this clock.
-    expect((operations - start) * .002).toBeLessThanOrEqual(4);
+    const start = time;
+    done = run!.step(() => time);
+    expect(time - start).toBeLessThanOrEqual(4);
     slices += 1;
   }
   expect(slices).toBeGreaterThan(1);
@@ -457,4 +460,60 @@ it("discards unpublished file entries when rebuilding after interruption", () =>
   // An entry from a cancelled run is not a retained prepared row.
   expect(index.lastPreparationCount).toBe(1);
   expect(index.query("unpublished")).toHaveLength(1);
+});
+
+it("keeps answering when a safe rename supersedes another safe rename", () => {
+  const index = new GoToIndex("workspace");
+  const source = listing(Array.from({ length: 3_000 }, (_, n) => "docs/file-" + n + ".ts"));
+  update(index, { listing: source });
+  const before = ids(index.query("file"));
+  const first = { ...source, files: source.files.map((file, n) => n === 200 ? { ...file, path: "docs/first.ts" } : file) };
+  const run = index.update({ listing: first });
+  let ticks = 0;
+  expect(run!.step(() => ++ticks)).toBe(false);
+  const second = { ...first, files: first.files.map((file, n) => n === 300 ? { ...file, path: "docs/second.ts" } : file) };
+  const latest = index.update({ listing: second });
+  expect(ids(index.query("file"))).toEqual(before);
+  while (!latest!.step(() => ++ticks)) expect(ids(index.query("file"))).toEqual(before);
+  expect(index.query("first")).toHaveLength(1);
+  expect(index.query("second")).toHaveLength(1);
+});
+it("keeps published row fields unchanged throughout preparation", () => {
+  const index = new GoToIndex("workspace");
+  const source = listing(Array.from({ length: 2_000 }, (_, n) => "docs/file-" + n + ".ts"));
+  update(index, { listing: source });
+  const row = index.query("file-0.ts")[0];
+  const fields = { record: row.record, glyphId: row.glyphId, pinnedRank: row.pinnedRank, recentRank: row.recentRank };
+  const assertFields = () => expect({ record: row.record, glyphId: row.glyphId, pinnedRank: row.pinnedRank, recentRank: row.recentRank }).toEqual(fields);
+  let ticks = 0;
+  const ranking = index.update({}, { pinned: [row.path], recent: [row.path] });
+  while (!ranking!.step(() => ++ticks)) assertFields();
+  assertFields();
+  const ranked = index.query("file-0.ts")[0];
+  expect(ranked.pinnedRank).toBe(0);
+  const oldRecord = ranked.record, oldGlyph = ranked.glyphId;
+  const next = { ...source, files: source.files.map((file, n) => n === 0 ? { ...file, kind: "database" as const } : file) };
+  const change = index.update({ listing: next });
+  while (!change!.step(() => ++ticks)) { expect(ranked.record).toBe(oldRecord); expect(ranked.glyphId).toBe(oldGlyph); }
+  expect(index.query("file-0.ts")[0].record).toBe(next.files[0]);
+});
+it("filters removed non-file entries before publication without losing retained matches", () => {
+  const index = new GoToIndex("workspace");
+  const source = listing(Array.from({ length: 2_000 }, (_, n) => "docs/file-" + n + ".ts"));
+  update(index, { listing: source, collections: [{ path: "records", objectId: "records" }], apps: [{ root: "planner", title: "Planner" }], versions: [{ id: "main", name: "Main" }], groups: Array.from({ length: 70 }, (_, n) => ({ id: String(n), name: "Channel " + n, kind: "channel" as const })) });
+  expect(index.query("Channel")).toHaveLength(50);
+  const run = index.update({ collections: [], apps: [], versions: [], groups: [{ id: "69", name: "Channel 69", kind: "channel" }] });
+  expect(index.query("Channel").map(row => row.id)).toEqual(["group:69"]);
+  for (const word of ["records", "Planner", "Main"]) expect(index.query(word)).toEqual([]);
+  expect(index.query("file")).toHaveLength(50);
+  drain(run);
+});
+
+it("does not let an abandoned removal view discard cached match indices", () => {
+  const index = new GoToIndex("workspace");
+  update(index, { groups: Array.from({ length: 70 }, (_, n) => ({ id: String(n), name: "Channel " + n, kind: "channel" as const })) });
+  const removed = index.removedKeys({ groups: [] });
+  expect(index.query("Channel", 50, removed)).toEqual([]);
+  expect(index.query("Channel")).toHaveLength(50);
+  expect(index.query("Channel 69").map(row => row.id)).toEqual(["group:69"]);
 });

@@ -319,7 +319,14 @@ export class GoToIndex {
   private completeRows: readonly PreparedGoToRow[] = [];
   private orderedRows: readonly PreparedGoToRow[] = [];
   private queryMetadata = new Int32Array(0);
-  get rows(): readonly PreparedGoToRow[] { return this.withholding ? [] : this.completeRows; }
+  private completeWorkRows: readonly PreparedGoToRow[] = [];
+  private orderedWorkRows: readonly PreparedGoToRow[] = [];
+  private readonly rowSnapshots = new WeakMap<PreparedGoToRow, PreparedGoToRow>();
+  private removed = new Set<string>();
+  get rows(): readonly PreparedGoToRow[] { return this.rowsWithout(this.removed); }
+  rowsWithout(removed: ReadonlySet<string>): readonly PreparedGoToRow[] {
+    return this.withholding ? [] : removed.size ? this.completeRows.filter(row => !removed.has(row.id)) : this.completeRows;
+  }
   private files: readonly PreparedGoToRow[] = [];
   private listingGeneration = 0;
   private readonly subsets = new Map<GoToKind, Map<string, PreparedGoToRow>>();
@@ -350,9 +357,11 @@ export class GoToIndex {
     this.active?.cancel();
     this.requestedSources = nextSources;
     this.requestedContext = context;
-    this.withholding = this.interrupted || !samePathVerdicts(nextSources.listing, this.sources.listing);
+    this.withholding ||= !samePathVerdicts(nextSources.listing, this.sources.listing);
+    this.removed = this.removedKeys(nextSources);
     this.preparing = true;
-    const work = this.prepare(this.requestedSources, context);
+    const counter = { operations: 0 };
+    const work = this.prepare(this.requestedSources, context, counter);
     const run: GoToPreparation = {
       step: (now = () => performance.now()) => {
         if (this.active !== run) return true;
@@ -373,9 +382,7 @@ export class GoToIndex {
         work.return(undefined);
         this.active = null;
         this.interrupted = true;
-        this.withholding = true;
-        this.matches = null;
-        // Queries remain withheld until a complete replacement is prepared.
+        // Published snapshots remain usable after a safe cancellation.
       },
     };
     this.active = run;
@@ -386,12 +393,46 @@ export class GoToIndex {
     return !this.withholding && samePathVerdicts(listing ?? this.sources.listing, this.sources.listing);
   }
 
+  removedKeys(sources: GoToSources): Set<string> {
+    const removed = new Set<string>();
+    const compare = <T>(kind: GoToKind, next: readonly T[] | undefined, previous: readonly T[] | undefined, key: (entry: T) => string) => {
+      if (!next || next === previous || !previous) return;
+      const keys = new Set(next.map(key));
+      for (const entry of previous) if (!keys.has(key(entry))) removed.add(kind + ":" + key(entry));
+    };
+    compare("collection", sources.collections, this.sources.collections, entry => entry.path);
+    compare("app", sources.apps, this.sources.apps, entry => entry.root);
+    compare("version", sources.versions, this.sources.versions, entry => entry.id);
+    if (sources.groups !== this.sources.groups) compare("group", sources.groups?.filter(entry => entry.kind === "channel"), this.sources.groups?.filter(entry => entry.kind === "channel"), entry => entry.id);
+    return removed;
+  }
+
+  private snapshotRow(row: PreparedGoToRow): PreparedGoToRow {
+    const previous = this.rowSnapshots.get(row);
+    const file = row.record as GoToFile, oldFile = previous?.record as GoToFile | undefined;
+    const sameRecord = previous?.record === row.record || row.kind === "file" && oldFile?.path === file.path && oldFile.kind === file.kind && oldFile.icon === file.icon;
+    if (previous && sameRecord && previous.glyphId === row.glyphId && previous.pinnedRank === row.pinnedRank &&
+      previous.recentRank === row.recentRank && previous.visible === row.visible && previous.ended === row.ended && previous.sourceIndex === row.sourceIndex) return previous;
+    const snapshot = { ...row, record: sameRecord && previous ? previous.record : row.record };
+    this.rowSnapshots.set(row, snapshot);
+    return snapshot;
+  }
+
   cancel(): void { this.active?.cancel(); }
 
-  private *prepare(sources: GoToSources, context: QuickOpenContext): Generator<void> {
-    const work = { operations: 0 };
+  private *prepare(sources: GoToSources, context: QuickOpenContext, work: { operations: number }): Generator<void> {
     this.lastPreparationCount = 0;
     const force = this.interrupted;
+    const forceVerdicts = force && this.withholding;
+    if (force && !forceVerdicts) {
+      // Repair positions and admission markers without sorting the completed order.
+      for (let i = 0; i < this.completeWorkRows.length; i++) {
+        const row = this.completeWorkRows[i];
+        row.sourceIndex = i;
+        row.includedRevision = this.revision;
+        if (++work.operations % GO_TO_CHUNK_SIZE === 0) yield;
+      }
+    }
     let changed = false;
     const pinned = new Set<string>();
     const recent = new Map<string, number>();
@@ -401,16 +442,21 @@ export class GoToIndex {
     // Context updates keep the path order and copy only query ranking metadata.
     if (!force && sameSources(sources, this.sources)) {
       const metadata = this.queryMetadata.slice();
-      for (let i = 0; i < this.orderedRows.length; i++) {
-        const row = this.orderedRows[i];
+      const views: PreparedGoToRow[] = [], complete: PreparedGoToRow[] = [];
+      for (let i = 0; i < this.orderedWorkRows.length; i++) {
+        const row = this.orderedWorkRows[i];
         row.pinnedRank = pinned.has(row.path) ? 0 : 1;
         row.recentRank = recent.get(row.path) ?? Number.MAX_SAFE_INTEGER;
         row.includedRevision = this.revision + 1;
         metadata[i * 8 + 5] = row.pinnedRank;
         metadata[i * 8 + 7] = recent.get(row.path) ?? -1;
+        views.push(this.snapshotRow(row));
+        complete[row.sourceIndex] = views[i];
         if (++work.operations % GO_TO_CHUNK_SIZE === 0) yield;
       }
       this.queryMetadata = metadata;
+      this.orderedRows = views;
+      this.completeRows = complete;
       this.context = context;
       this.sources = sources;
       this.revision += 1;
@@ -482,8 +528,8 @@ export class GoToIndex {
     }
     if (sources.listing && (force || sources.listing !== this.sources.listing)) {
       const snapshot = sources.listing;
-      const verdictsChanged = force || !samePathVerdicts(snapshot, this.sources.listing);
-      if (snapshot.files !== this.sources.listing?.files || verdictsChanged) yield* replace("file", (function* () {
+      const verdictsChanged = forceVerdicts || !samePathVerdicts(snapshot, this.sources.listing);
+      if (force || snapshot.files !== this.sources.listing?.files || verdictsChanged) yield* replace("file", (function* () {
         const previous = index.subsets.get("file");
         let entry: { key: string; path: string; label: string; record: GoToFile; glyphId: PreparedGoToRow["glyphId"] } | undefined;
         let position = 0;
@@ -500,7 +546,7 @@ export class GoToIndex {
           yield entry;
         }
       })(), verdictsChanged);
-      if (snapshot.folders !== this.sources.listing?.folders || verdictsChanged) yield* replace("folder", (function* () {
+      if (force || snapshot.folders !== this.sources.listing?.folders || verdictsChanged) yield* replace("folder", (function* () {
         for (const path of snapshot.folders) yield { key: path, path, label: basenameOf(path), record: path, glyphId: "folder" as const };
       })());
       changed = true;
@@ -542,7 +588,7 @@ export class GoToIndex {
         else row.visible = false;
       }
       if (row.visible && !(kind === "folder" && this.subsets.get("collection")?.has(row.path))) {
-        if (force || row.includedRevision !== this.revision || row.sourceIndex !== rows.length) {
+        if (forceVerdicts || row.includedRevision !== this.revision || row.sourceIndex !== rows.length) {
           addedRows.push(row);
           row.includedRevision = -1;
         }
@@ -577,7 +623,7 @@ export class GoToIndex {
     }
     const ordered: PreparedGoToRow[] = [];
     let at = 0;
-    for (const row of force ? [] : this.orderedRows) {
+    for (const row of forceVerdicts ? [] : this.orderedWorkRows) {
       if (rows[row.sourceIndex] === row && row.includedRevision === this.revision) {
         while (at < added.length && compareGoToOrder(added[at], row) <= 0) {
           ordered.push(added[at++]);
@@ -589,6 +635,7 @@ export class GoToIndex {
     }
     while (at < added.length) { ordered.push(added[at++]); if (++work.operations % GO_TO_CHUNK_SIZE === 0) yield; }
     const metadata = new Int32Array(ordered.length * 8);
+    const views: PreparedGoToRow[] = [], complete: PreparedGoToRow[] = [];
     for (let i = 0; i < ordered.length; i++) {
       const row = ordered[i];
       const offset = i * 8;
@@ -601,19 +648,23 @@ export class GoToIndex {
       metadata[offset + 6] = row.kind === "file" ? 0 : row.kind === "app" ? 3 : 1;
       metadata[offset + 7] = recent.get(row.path) ?? -1;
       row.includedRevision = this.revision + 1;
+      views.push(this.snapshotRow(row));
+      complete[row.sourceIndex] = views[i];
       if (++work.operations % GO_TO_CHUNK_SIZE === 0) yield;
     }
-    this.orderedRows = ordered;
+    this.orderedWorkRows = ordered;
+    this.completeWorkRows = rows;
+    this.orderedRows = views;
     this.queryMetadata = metadata;
     this.sources = sources;
     this.context = context;
     this.interrupted = false;
-    this.completeRows = rows;
+    this.completeRows = complete;
     this.revision += 1;
     this.matches = null;
   }
 
-  query(query: string, limit = 50): PreparedGoToRow[] {
+  query(query: string, limit = 50, removed: ReadonlySet<string> = this.removed): PreparedGoToRow[] {
     const boundedLimit = Math.max(0, Math.floor(limit));
     if (boundedLimit === 0 || this.withholding) { this.lastScanCount = 0; return []; }
     const q = query.toLowerCase();
@@ -654,6 +705,7 @@ export class GoToIndex {
       }
       if (tier === null) continue;
       indices[count++] = i;
+      if (removed.size && removed.has(rows[i].id)) continue;
       const priority = pathQuery && (flags & 1) ? 1 : 0;
       const bucketIndex = (priority * 2 + metadata[offset + 5]) * 4 + tier;
       const rank = metadata[offset + 7];

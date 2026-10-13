@@ -13,6 +13,10 @@ test("the pure benchmark exercises first scans, narrowings, slices, and memory",
   assert.ok(receipt.host.busyPercent >= 0 && receipt.host.busyPercent <= 100);
   for (const measurement of receipt.measurements) {
     assert.equal(measurement.initialPreparationSamplesMs.length, 2);
+    assert.equal(measurement.timeToFirstResultsSamplesMs.length, 2);
+    assert.ok(measurement.timeToFirstResultsMs.median > 0);
+    assert.equal(measurement.supersededRenameWithholdingMs.max, 0);
+    assert.equal(measurement.supersededRenameWorkSamplesMs.length, 2);
     assert.ok(measurement.initialPreparationMs.p95 >= measurement.initialPreparationMs.median);
     assert.ok(measurement.longestPreparationSliceMs > 0);
     assert.equal(measurement.renameWithholdingMs.max, 0);

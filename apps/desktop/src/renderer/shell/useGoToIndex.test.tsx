@@ -69,6 +69,16 @@ function taskQueue() {
   let id = 0;
   vi.stubGlobal("setTimeout", (callback: () => void) => { tasks.set(++id, callback); return id; });
   vi.stubGlobal("clearTimeout", (task: number) => tasks.delete(task));
+  const timers = vi.fn((callback: () => void) => { tasks.set(++id, callback); return id; });
+  vi.stubGlobal("setTimeout", timers);
+  const postTask = vi.fn((callback: () => void, options: { priority: string; signal: AbortSignal }) => {
+    const task = ++id;
+    const abort = () => tasks.delete(task);
+    tasks.set(task, () => { options.signal.removeEventListener("abort", abort); callback(); });
+    options.signal.addEventListener("abort", abort, { once: true });
+    return Promise.resolve();
+  });
+  vi.stubGlobal("scheduler", { postTask });
   const frame = vi.fn(() => { throw new Error("preparation entered a frame callback"); });
   vi.stubGlobal("requestAnimationFrame", frame);
   vi.stubGlobal("cancelAnimationFrame", vi.fn());
@@ -80,7 +90,7 @@ function taskQueue() {
     act(callback);
   };
   const drain = () => { while (tasks.size) one(); };
-  return { tasks, one, drain, frame };
+  return { tasks, one, drain, frame, timers, postTask, enqueue: (callback: () => void) => tasks.set(++id, callback) };
 }
 const snapshot = (prefix: string, count = 20): GoToListing => ({
   files: Array.from({ length: count }, (_, i) => ({ path: prefix + i + ".md", kind: "file" })),
@@ -104,6 +114,8 @@ it("prepares only in yielding tasks outside frames and starts no source reads", 
   view.rerender(<Snapshot listing={source} />);
   expect(queue.tasks.size).toBe(0);
   expect(queue.frame).not.toHaveBeenCalled();
+  expect(queue.timers).not.toHaveBeenCalled();
+  expect(queue.postTask).toHaveBeenCalledWith(expect.any(Function), { priority: "background", signal: expect.any(AbortSignal) });
   expect(listWorkspaceFiles).not.toHaveBeenCalled();
 });
 it("supersedes in-flight slices with the newer source", () => {
@@ -204,4 +216,43 @@ it("keeps results visible for a rename and equal new context arrays", () => {
   queue.one();
   expect(view.container.textContent).not.toBe("");
   queue.drain();
+});
+
+it("filters removed non-file keys in the render before effects", () => {
+  const queue = taskQueue();
+  const answers: string[][] = [];
+  function QuerySnapshot(props: { groups: { id: string; name: string; kind: "channel" }[] }) {
+    const index = useGoToIndex("workspace", { groups: props.groups }, context);
+    const names = index.query("Channel").map(row => row.id);
+    answers.push(names);
+    return <output>{names.join(",")}</output>;
+  }
+  const view = render(<QuerySnapshot groups={Array.from({ length: 70 }, (_, n) => ({ id: String(n), name: "Channel " + n, kind: "channel" }))} />);
+  queue.drain();
+  answers.length = 0;
+  view.rerender(<QuerySnapshot groups={[{ id: "69", name: "Channel 69", kind: "channel" }]} />);
+  expect(answers.length).toBeGreaterThan(0);
+  expect(answers.every(names => names.length === 1 && names[0] === "group:69")).toBe(true);
+  queue.drain();
+});
+
+it("yields through MessageChannel when background postTask is unavailable", () => {
+  const queue = taskQueue();
+  vi.stubGlobal("scheduler", undefined);
+  const channels: FakeChannel[] = [];
+  class FakeChannel {
+    port1 = { onmessage: null as (() => void) | null, close: vi.fn() };
+    port2 = { postMessage: vi.fn(() => queue.enqueue(() => this.port1.onmessage?.())), close: vi.fn() };
+    constructor() { channels.push(this); }
+  }
+  vi.stubGlobal("MessageChannel", FakeChannel);
+  const view = render(<Snapshot listing={snapshot("file", 2_000)} />);
+  queue.one();
+  expect(queue.tasks.size).toBe(1);
+  queue.drain();
+  expect(view.container.textContent).toContain("workspace:file0.md");
+  expect(queue.timers).not.toHaveBeenCalled();
+  expect(queue.frame).not.toHaveBeenCalled();
+  expect(channels[0].port1.close).toHaveBeenCalled();
+  expect(channels[0].port2.close).toHaveBeenCalled();
 });

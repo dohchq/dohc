@@ -14,27 +14,40 @@ export function useGoToIndex(workspaceId: string, sources: GoToSources, context:
     const run = index.update(sources, context);
     if (!run) return;
     let current = true;
-    let task: ReturnType<typeof setTimeout>;
+    const controller = new AbortController();
+    const scheduler = (globalThis as typeof globalThis & { scheduler?: {
+      postTask(callback: () => void, options: { priority: "background"; signal: AbortSignal }): Promise<unknown>;
+    } }).scheduler;
+    const channel = scheduler ? undefined : new MessageChannel();
+    const close = () => { controller.abort(); channel?.port1.close(); channel?.port2.close(); };
+    const schedule = () => {
+      if (scheduler) void scheduler.postTask(prepare, { priority: "background", signal: controller.signal }).catch(error => {
+        if (!controller.signal.aborted) throw error;
+      });
+      else channel!.port2.postMessage(null);
+    };
     const prepare = () => {
       if (!current) return;
-      if (run.step()) repaint();
-      else task = setTimeout(prepare, 0);
+      if (run.step()) { close(); repaint(); }
+      else schedule();
     };
     repaint();
-    task = setTimeout(prepare, 0);
+    if (channel) channel.port1.onmessage = prepare;
+    schedule();
     return () => {
       current = false;
-      clearTimeout(task);
+      close();
     };
   }, [index, listingCommitted, sources.listing, sources.collections, sources.apps, sources.versions, sources.groups, context.pinned, context.recent]);
   // This render owns the view, not the index. An abandoned render changes no state.
   // Check incoming verdicts before any query, including before the effect commits them.
+  const removed = index.removedKeys(sources);
   const safe = () => index.canQuery(listingCommitted ? sources.listing : undefined);
   return {
     workspaceId,
     get revision() { return index.revision; },
     get preparing() { return index.preparing || !safe(); },
-    get rows() { return safe() ? index.rows : []; },
-    query: (query, limit) => safe() ? index.query(query, limit) : [],
+    get rows() { return safe() ? index.rowsWithout(removed) : []; },
+    query: (query, limit) => safe() ? index.query(query, limit, removed) : [],
   };
 }

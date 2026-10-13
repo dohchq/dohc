@@ -26,6 +26,10 @@ const summarize = values => {
 };
 const source = resolve("apps/desktop/src/renderer/workbench/quick-open-rank.ts");
 const baseline = process.argv.indexOf("--baseline");
+const taskChannel = new MessageChannel();
+let finishTask;
+taskChannel.port1.onmessage = () => { const finish = finishTask; finishTask = undefined; finish?.(); };
+const yieldTask = () => new Promise(resolve => { finishTask = resolve; taskChannel.port2.postMessage(null); });
 const scratch = await mkdtemp(join(tmpdir(), "dohc-goto-index-"));
 try {
   const entry = join(scratch, "index.mjs");
@@ -35,14 +39,17 @@ try {
     const start = performance.now();
     const run = index.update(sources, context);
     let workMs = performance.now() - start;
-    let withheldStart = -1, withheldMs = 0;
+    let withheldStart = -1, withheldMs = 0, firstResultsMs;
     const check = () => {
       if (!probe) return;
       if (index.query(probe).length === 0) {
         if (withheldStart === -1) withheldStart = performance.now();
-      } else if (withheldStart !== -1) {
-        withheldMs += performance.now() - withheldStart;
-        withheldStart = -1;
+      } else {
+        firstResultsMs ??= performance.now() - start;
+        if (withheldStart !== -1) {
+          withheldMs += performance.now() - withheldStart;
+          withheldStart = -1;
+        }
       }
     };
     check();
@@ -54,14 +61,14 @@ try {
       workMs += duration;
       check();
       if (done) break;
-      await new Promise(resolve => setImmediate(resolve));
+      await yieldTask();
     }
     if (withheldStart !== -1) throw Error("completed revision still withholds " + probe);
-    return { elapsedMs: performance.now() - start, workMs, withheldMs };
+    return { elapsedMs: performance.now() - start, workMs, withheldMs, firstResultsMs };
   };
   const receipt = { head: execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim(), source: baseline === -1 ? "checkout" : process.argv[baseline + 1],
     node: process.version, host: { cpu: cpus()[0].model, logicalProcessors: cpus().length, loadAverage: loadavg(), note: "Windows loadavg is unavailable; capture Win32_Processor.LoadPercentage beside this receipt" },
-    samples, scope: "pure module, long paths, first query on a fresh complete index; excludes packaged paint and renderer private bytes", measurements: [] };
+    samples, scope: "pure module, long paths, first query on a fresh complete index; MessageChannel task yields; excludes packaged paint, Chromium postTask scheduling and renderer private bytes", measurements: [] };
   const shapes = [
     { name: "no-hit", first: "z", narrow: "zz", expected: 0, narrowExpected: 0, pathQuery: false },
     { name: "many-hit", first: "c", narrow: "cu", expected: 50, narrowExpected: 50, pathQuery: false },
@@ -78,17 +85,19 @@ try {
     let index = new GoToIndex("benchmark");
     const slices = [];
     const initial = await prepare(index, sources, slices);
-    const initialPreparations = [initial.elapsedMs], initialWork = [initial.workMs];
+    const initialPreparations = [initial.elapsedMs], initialWork = [initial.workMs], firstResults = [];
     global.gc();
     const preparedMemory = process.memoryUsage();
+    const firstQueryStart = performance.now();
     index.query("c");
+    firstResults.push(initial.elapsedMs + performance.now() - firstQueryStart);
     global.gc();
     const matchedMemory = process.memoryUsage();
     for (let n = 1; n < samples; n++) {
       global.gc();
       let fresh = new GoToIndex("initial-preparation");
-      const measurement = await prepare(fresh, sources, slices);
-      initialPreparations.push(measurement.elapsedMs); initialWork.push(measurement.workMs);
+      const measurement = await prepare(fresh, sources, slices, undefined, "c");
+      initialPreparations.push(measurement.elapsedMs); initialWork.push(measurement.workMs); firstResults.push(measurement.firstResultsMs);
       if (fresh.rows.length !== index.rows.length) throw Error("initial preparation lost rows");
       fresh = null;
     }
@@ -130,8 +139,30 @@ try {
       const measurement = await prepare(index, {}, slices, { pinned: [], recent: [sources.listing.files[n % count].path] }, "c");
       recentPreparations.push(measurement.elapsedMs); recentWork.push(measurement.workMs); recentWithholding.push(measurement.withheldMs);
     }
+    const supersededWork = [], supersededWithholding = [], supersededFirstResults = [];
+    for (let n = 0; n < samples; n++) {
+      const firstAt = Math.min(4242, count - 2), secondAt = Math.min(500, count - 1);
+      const first = { ...sources.listing, files: sources.listing.files.map((file, i) => i === firstAt ? { ...file, path: file.path + ".first-" + n } : file) };
+      const second = { ...first, files: first.files.map((file, i) => i === secondAt ? { ...file, path: file.path + ".second-" + n } : file) };
+      const start = performance.now();
+      const obsolete = index.update({ listing: first });
+      let workMs = performance.now() - start;
+      let ticks = 0;
+      const sliceStart = performance.now();
+      if (!obsolete || obsolete.step(() => ++ticks)) throw Error("supersession did not interrupt preparation");
+      const duration = performance.now() - sliceStart;
+      slices.push(duration); workMs += duration;
+      await yieldTask();
+      const measurement = await prepare(index, { listing: second }, slices, undefined, "c");
+      supersededWork.push(workMs + measurement.workMs);
+      supersededWithholding.push(measurement.withheldMs);
+      supersededFirstResults.push(measurement.firstResultsMs);
+      if (!index.query(first.files[firstAt].path).some(row => row.path === first.files[firstAt].path) || !index.query(second.files[secondAt].path).some(row => row.path === second.files[secondAt].path)) throw Error("superseded rename lost a changed path");
+    }
     const lengths = sources.listing.files.map(file => file.path.length);
     receipt.measurements.push({ files: count, rows: index.rows.length, pathLength: summarize(lengths), initialPreparationMs: summarize(initialPreparations), initialPreparationSamplesMs: initialPreparations, initialPreparationWorkMs: summarize(initialWork), initialPreparationWorkSamplesMs: initialWork,
+      timeToFirstResultsMs: summarize(firstResults), timeToFirstResultsSamplesMs: firstResults,
+      supersededRenameWorkMs: summarize(supersededWork), supersededRenameWorkSamplesMs: supersededWork, supersededRenameWithholdingMs: summarize(supersededWithholding), supersededRenameWithholdingSamplesMs: supersededWithholding, supersededRenameFirstResultsMs: summarize(supersededFirstResults),
       sliceMs: summarize(slices), longestPreparationSliceMs: slices.reduce((longest, slice) => Math.max(longest, slice), 0), sliceCount: slices.length, queries,
       renamePreparationMs: summarize(preparations), renamePreparationWorkMs: summarize(preparationWork), renamePreparationWorkSamplesMs: preparationWork, renames,
       renameWithholdingMs: summarize(renameWithholding), recentPreparationMs: summarize(recentPreparations), recentPreparationWorkMs: summarize(recentWork), recentPreparationWorkSamplesMs: recentWork, recentWithholdingMs: summarize(recentWithholding),
@@ -145,6 +176,7 @@ try {
   receipt.host.busyPercent = 100 * (1 - (cpuEnd.idle - cpuStart.idle) / (cpuEnd.total - cpuStart.total));
   console.log(JSON.stringify(receipt, null, 2));
 } finally {
+  taskChannel.port1.close(); taskChannel.port2.close();
   const withinTmp = relative(resolve(tmpdir()), resolve(scratch));
   if (withinTmp.startsWith("..") || isAbsolute(withinTmp) || !withinTmp.startsWith("dohc-goto-index-")) throw new Error("refusing cleanup outside owned scratch");
   await rm(scratch, { recursive: true, force: true });
