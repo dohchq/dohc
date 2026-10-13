@@ -46,7 +46,7 @@ function answer(overrides: Partial<AccessAnswer> = {}): AccessAnswer {
     ref: { kind: "path", path: "docs/plan.md", versionId: null },
     rows: [],
     visibility: "visible",
-    coverage: { kind: "granted", complete: true, observation: "interval" },
+    unknownReason: null, coverage: { kind: "granted", complete: true, observation: "interval" },
     checkedAtMs: CHECKED_AT,
     freshness: "fresh",
     nextCursor: null,
@@ -56,7 +56,7 @@ function answer(overrides: Partial<AccessAnswer> = {}): AccessAnswer {
 
 // What main answers when it has no observation to read: no coverage at all.
 const UNKNOWN = answer({
-  coverage: { kind: "unavailable", complete: false, observation: "interval" },
+  unknownReason: "not-listed-yet", coverage: { kind: "unavailable", complete: false, observation: "interval" },
   checkedAtMs: null,
   freshness: "unknown",
 });
@@ -222,7 +222,7 @@ describe("About Access", () => {
   it("names a received file's own grant within its coverage", async () => {
     bridgeMock.getObjectAccess.mockResolvedValue(
       answer({
-        coverage: { kind: "received-own-grant", complete: true, observation: "interval" },
+        unknownReason: null, coverage: { kind: "received-own-grant", complete: true, observation: "interval" },
         rows: [share({ via: "received", sharerName: "Ice de Vera", access: "comment" })],
       }),
     );

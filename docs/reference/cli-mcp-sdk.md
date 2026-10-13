@@ -16,7 +16,7 @@ Agents and developers use this page to work with dohc from outside the app. It l
 Agent prompts and scripts depend on these names. Before launch, a rename replaces the old name outright, with no alias.
 
 - The desktop MCP server reports its version as `0.3.0`. A rename or removal of a tool, argument, or result field raises it.
-- `--json` output carries `schemaVersion: 2`. A change to the shape of that output raises it.
+- `--json` output carries `schemaVersion: 3`. A change to the shape of that output raises it.
 - The CLI and the app must be the same build. Otherwise the CLI stops with `CLI/app version mismatch — restart the app`.
 
 A tool or command that cannot do what was asked returns `{ ok: false, reason }`, or exits with status 1 and prints the reason. MCP marks such a result as an error.
@@ -495,6 +495,8 @@ Both verbs return only the allowlisted AccessAnswer fields shown below, with at 
 
 Share answers use the current observation; the CLI never refreshes share inventories. `freshness` is `fresh`, `stale`, or `unknown`; `checkedAtMs` is the observation timestamp in milliseconds, or null when unknown. `coverage` names the observed scope and whether it is complete. Its `observation` is `interval`: pages do not form an atomic snapshot. `nextCursor` continues the answer, or is null at the end.
 
+`unknownReason` is null when coverage is known, and required when `coverage.kind` is `unavailable`. Its closed values are `signed-out`, `not-synced`, `other-account`, `other-server`, `not-listed-yet`, `changed`, and `unreadable`. Reasons describe only this device's records and account. They contain no account identity, email, server URL, share id, or path.
+
 Queries use only the CLI's registered workspace, with no workspace enumeration. The granted lane contains that workspace owner's grants; the received lane contains the signed-in account's received shares. A received object's answer shows only the recipient's own grant.
 
 Collection answers read current Collection authority and return capability facts, not share grants.
@@ -509,7 +511,7 @@ Read the grants covering an object.
 
 - `--cursor <cursor>`: Continue the previous answer.
 
-With `--json`, prints `{ schemaVersion, ref: { kind: "path", path, versionId } | { kind: "file", objectId } | { kind: "chat", channelWireId } | { kind: "collection", datasetId } | null, rows: ({ kind: "share", shareId, grantId, via, granterUserId, granterEmail, recipientUserId, recipientEmail, subjectName, sharerName, selector, access, status, generation, fileScope?, removalMessage? } | { kind: "collection", datasetId, principal, appId, operationIds, revision, revisionSha256, compatible })[], visibility, coverage: { kind, complete, observation: "interval" }, checkedAtMs, freshness, nextCursor }`. Uses socket verb `accessObject`.
+With `--json`, prints `{ schemaVersion, ref: { kind: "path", path, versionId } | { kind: "file", objectId } | { kind: "chat", channelWireId } | { kind: "collection", datasetId } | null, rows: ({ kind: "share", shareId, grantId, via, granterUserId, granterEmail, recipientUserId, recipientEmail, subjectName, sharerName, selector, access, status, generation, fileScope?, removalMessage? } | { kind: "collection", datasetId, principal, appId, operationIds, revision, revisionSha256, compatible })[], visibility, coverage: { kind, complete, observation: "interval" }, unknownReason, checkedAtMs, freshness, nextCursor }`. Uses socket verb `accessObject`.
 
 #### `dohc access sharing`
 
@@ -521,7 +523,7 @@ Page this workspace's granted shares or this account's received shares.
 
 - `--cursor <cursor>`: Continue the previous answer.
 
-With `--json`, prints `{ schemaVersion, ref: { kind: "path", path, versionId } | { kind: "file", objectId } | { kind: "chat", channelWireId } | { kind: "collection", datasetId } | null, rows: ({ kind: "share", shareId, grantId, via, granterUserId, granterEmail, recipientUserId, recipientEmail, subjectName, sharerName, selector, access, status, generation, fileScope?, removalMessage? } | { kind: "collection", datasetId, principal, appId, operationIds, revision, revisionSha256, compatible })[], visibility, coverage: { kind, complete, observation: "interval" }, checkedAtMs, freshness, nextCursor }`. Uses socket verb `accessSharing`.
+With `--json`, prints `{ schemaVersion, ref: { kind: "path", path, versionId } | { kind: "file", objectId } | { kind: "chat", channelWireId } | { kind: "collection", datasetId } | null, rows: ({ kind: "share", shareId, grantId, via, granterUserId, granterEmail, recipientUserId, recipientEmail, subjectName, sharerName, selector, access, status, generation, fileScope?, removalMessage? } | { kind: "collection", datasetId, principal, appId, operationIds, revision, revisionSha256, compatible })[], visibility, coverage: { kind, complete, observation: "interval" }, unknownReason, checkedAtMs, freshness, nextCursor }`. Uses socket verb `accessSharing`.
 
 ### `dohc document`
 

@@ -27,16 +27,16 @@ it.each([
 });
 
 it.each([
-  ["different server", { ...credentials, serverUrl: "https://other-server.test" }],
-  ["different server with a relay matching the workspace server", { ...credentials,
+  ["different server", "other-server", { ...credentials, serverUrl: "https://other-server.test" }],
+  ["different server with a relay matching the workspace server", "other-server", { ...credentials,
     serverUrl: "https://other-server.test", relayUrl: workspace.remote.serverUrl }],
-  ["different account", { ...credentials, userId: "other-owner" }],
-  ["signed out", null],
-  ["missing relay", { ...credentials, relayUrl: undefined }],
-] as const)("withholds owner Access for %s", async (_case, account) => {
+  ["different account", "other-account", { ...credentials, userId: "other-owner" }],
+  ["signed out", "signed-out", null],
+  ["missing relay", "unreadable", { ...credentials, relayUrl: undefined }],
+] as const)("withholds owner Access for %s", async (_case, unknownReason, account) => {
   const h = harness(workspace, account);
   for (const answer of [await h.owner.object(workspace, { ref }), h.owner.sharing(workspace, { lane: "granted" })]) {
-    expect(answer).toMatchObject({ freshness: "unknown", checkedAtMs: null, rows: [], coverage: { complete: false } });
+    expect(answer).toMatchObject({ freshness: "unknown", unknownReason, checkedAtMs: null, rows: [], coverage: { complete: false } });
   }
   expect(h.readObservation).not.toHaveBeenCalled();
 });
@@ -46,9 +46,10 @@ it.each([
   { ...workspace, shareView: { shareId: "received", granterEmail: null, genericChatWritable: false,
     grantedSelector: { paths: ["Notes"], versionId: null, access: "view" as const } } },
 ])("does not use an owner's roster without an owned remote workspace", async entry => {
+  const unknownReason = "not-synced";
   const h = harness(entry, credentials);
   for (const answer of [await h.owner.object(entry, { ref }), h.owner.sharing(entry, { lane: "granted" })]) {
-    expect(answer).toMatchObject({ freshness: "unknown", checkedAtMs: null, rows: [], coverage: { complete: false } });
+    expect(answer).toMatchObject({ freshness: "unknown", unknownReason, checkedAtMs: null, rows: [], coverage: { complete: false } });
   }
   expect(h.readObservation).not.toHaveBeenCalled();
 });

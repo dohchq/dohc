@@ -18,7 +18,7 @@ it("parses Access answers through the field allowlist and refuses caller workspa
   const answer = parseCliResult("accessSharing", { ref: null, rows: [{ kind: "share", shareId: "share", grantId: "grant", via: "received", status: "removed",
       granterUserId: null, granterEmail: null, recipientUserId: "recipient", recipientEmail: null, subjectName: null, sharerName: null,
       selector: null, access: null, generation: null, removalMessage: "The owner removed your access." }],
-    visibility: "visible", freshness: "stale", checkedAtMs: 7,
+    visibility: "visible", freshness: "stale", checkedAtMs: 7, unknownReason: null,
     nextCursor: null, coverage: { kind: "received-account", complete: true, observation: "interval" }, bearerUrl: "secret" });
   expect(answer).not.toHaveProperty("bearerUrl");
   expect(JSON.parse(renderCliResult("accessSharing", answer)).rows[0].removalMessage).toBe("The owner removed your access.");
@@ -433,4 +433,10 @@ it("validates file write authors and preserves partial batch results", () => {
   expect(cliRequestSchema.safeParse({ ...input, args: { ...input.args, files: [] } }).success).toBe(false);
   const failed = { ok: false, written: ["1.txt", "2.txt"], path: "3.txt", reason: "Changed. Read again.", currentSha256: "a".repeat(64) };
   expect(parseCliResult("fileWrite", failed)).toEqual(failed);
+});
+
+it.each(["accessObject", "accessSharing"] as const)("preserves the unknown reason in %s results", verb => {
+  const answer = parseCliResult(verb, { ref: null, rows: [], visibility: "unknown", freshness: "unknown", checkedAtMs: null,
+    unknownReason: "other-account", nextCursor: null, coverage: { kind: "unavailable", complete: false, observation: "interval" } });
+  expect(JSON.parse(renderCliResult(verb, answer))).toHaveProperty("unknownReason", "other-account");
 });

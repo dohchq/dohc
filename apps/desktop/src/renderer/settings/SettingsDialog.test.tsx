@@ -88,7 +88,7 @@ function sharingAnswer(lane: "granted" | "received"): AccessAnswer {
         selector: { paths: ["data/funnel.csv"], versionId: null }, access: "view", status: "active", generation: 1 };
   return {
     ref: null, rows: [row], visibility: "visible",
-    coverage: { kind: lane === "granted" ? "granted" : "received-account", complete: true, observation: "interval" },
+    unknownReason: null, coverage: { kind: lane === "granted" ? "granted" : "received-account", complete: true, observation: "interval" },
     checkedAtMs: 1, freshness: "fresh", nextCursor: null,
   };
 }
