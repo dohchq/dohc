@@ -40,18 +40,20 @@ function wait(ms: number, signal: AbortSignal): Promise<void> {
 
 const timeOfDay = new Intl.DateTimeFormat(undefined, {hour: "numeric", minute: "2-digit"});
 const dayAndTime = new Intl.DateTimeFormat(undefined, {month: "short", day: "numeric", hour: "numeric", minute: "2-digit"});
-const sentAt = (ms: number) => new Date(ms).toDateString() === new Date().toDateString() ? timeOfDay.format(ms) : dayAndTime.format(ms);
+const sentAt = (date: Date) => date.toDateString() === new Date().toDateString() ? timeOfDay.format(date) : dayAndTime.format(date);
 
 function ChatMessage({message}: {message: NamedChatMessage}) {
   // Attachments are out of scope, so no image source is allowed.
   const html = useMemo(() => message.body === null ? null : renderSafeMarkdown(message.body, () => null), [message.body]);
   const agent = message.authorKind !== "human";
-  return <li className="chat-message">
+  // A safe integer can lie outside the Date range; such a message shows without a time.
+  const sent = new Date(message.createdAtMs), dated = !Number.isNaN(sent.getTime());
+  return <li className="chat-message" data-seq={message.relaySeq}>
     <p className="chat-meta">
       {agent && <span className="chat-agent-mark" role="img" aria-label={message.authorKind === "agent" ? "Agent" : "Automation"}/>}
       <span className="chat-author">{message.authorDisplayName}</span>
       {agent && message.authorOwnerDisplayName && <span className="chat-owner">Owned by {message.authorOwnerDisplayName}</span>}
-      <time dateTime={new Date(message.createdAtMs).toISOString()}>{sentAt(message.createdAtMs)}</time>
+      {dated && <time dateTime={sent.toISOString()}>{sentAt(sent)}</time>}
     </p>
     {html === null ? <p className="chat-body chat-body-omitted">This message is too long to show in the browser.</p> :
       <div className="markdown chat-body" dangerouslySetInnerHTML={{__html: html}}/>}
@@ -68,7 +70,8 @@ function ChannelView({channel, account, onEnded}: {channel: NamedChatChannel; ac
   const mounted = useRef<AbortController | null>(null), follower = useRef<AbortController | null>(null);
   const messagesRef = useRef<NamedChatMessage[]>([]), cursorRef = useRef<number | null>(null);
   const intent = useRef<{id: string; body: string} | null>(null), postingRef = useRef(false), olderRef = useRef(false);
-  const scroller = useRef<HTMLDivElement | null>(null), pinned = useRef(true), stick = useRef(false), anchor = useRef<number | null>(null);
+  const scroller = useRef<HTMLDivElement | null>(null), pinned = useRef(true), stick = useRef(false);
+  const anchor = useRef<{seq: string; offset: number} | null>(null);
   const onEndedRef = useRef(onEnded); onEndedRef.current = onEnded;
 
   const receive = (incoming: NamedChatMessage[], own: boolean) => {
@@ -136,8 +139,12 @@ function ChannelView({channel, account, onEnded}: {channel: NamedChatChannel; ac
   useLayoutEffect(() => {
     const node = scroller.current;
     if (!node) return;
-    if (anchor.current !== null) {node.scrollTop = node.scrollHeight - anchor.current; anchor.current = null;}
-    else if (stick.current) {node.scrollTop = node.scrollHeight; stick.current = false; pinned.current = true; setUnseen(0);}
+    const place = anchor.current; anchor.current = null;
+    if (place) {
+      const item = node.querySelector(`.chat-message[data-seq="${place.seq}"]`);
+      if (item) node.scrollTop += item.getBoundingClientRect().top - node.getBoundingClientRect().top - place.offset;
+      stick.current = false;
+    } else if (stick.current) {node.scrollTop = node.scrollHeight; stick.current = false; pinned.current = true; setUnseen(0);}
   }, [messages]);
 
   const scrolled = () => {
@@ -147,6 +154,15 @@ function ChannelView({channel, account, onEnded}: {channel: NamedChatChannel; ac
     if (pinned.current) setUnseen(0);
   };
   const jump = () => {const node = scroller.current; if (node) node.scrollTop = node.scrollHeight; pinned.current = true; setUnseen(0);};
+  // Keep the first visible message in place, whatever else the same commit adds above or below it.
+  const holdPlace = () => {
+    const node = scroller.current;
+    if (!node) return;
+    const top = node.getBoundingClientRect().top;
+    const first = [...node.querySelectorAll<HTMLElement>(".chat-message")].find(item => item.getBoundingClientRect().bottom > top);
+    if (first?.dataset.seq) anchor.current = {seq: first.dataset.seq, offset: first.getBoundingClientRect().top - top};
+    else stick.current = true;
+  };
 
   const loadOlder = async () => {
     const controller = mounted.current, before = olderCursor;
@@ -155,7 +171,7 @@ function ChannelView({channel, account, onEnded}: {channel: NamedChatChannel; ac
     try {
       const result = await readNamedChatHistory(channel, before, controller.signal);
       if (controller.signal.aborted) return;
-      const node = scroller.current; if (node) anchor.current = node.scrollHeight - node.scrollTop;
+      holdPlace();
       // Older pages never move the following cursor.
       messagesRef.current = mergeChatMessages(messagesRef.current, result.messages); setMessages(messagesRef.current);
       setOlderCursor(result.olderCursor); setOlder("idle");
@@ -207,7 +223,7 @@ function ChannelView({channel, account, onEnded}: {channel: NamedChatChannel; ac
             <button type="button" className="handoff-button secondary" onClick={() => setAttempt(value => value + 1)}>Try again</button></div> :
             !messages ? <p className="chat-state">Loading messages…</p> :
             !messages.length && olderCursor === null ? <p className="chat-state">No messages in this channel yet.</p> :
-            <ol className="chat-list">{messages.map(message => <ChatMessage key={message.messageId} message={message}/>)}</ol>}
+            <ol className="chat-list">{messages.map(message => <ChatMessage key={message.relaySeq} message={message}/>)}</ol>}
           {following === "delayed" && <p className="chat-follow-status" role="status">New messages are delayed. dohc is trying again.</p>}
           {following === "stopped" && <div className="chat-follow-status"><p role="status">New messages stopped updating.</p>
             <button type="button" className="handoff-button secondary" onClick={follow}>Try again</button></div>}

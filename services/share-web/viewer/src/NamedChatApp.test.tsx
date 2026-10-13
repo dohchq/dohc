@@ -3,6 +3,7 @@ import {act} from "react";
 import {createRoot, type Root} from "react-dom/client";
 import {afterEach, beforeEach, expect, it, vi} from "vitest";
 import NamedChatApp from "./NamedChatApp";
+import {CHAT_EMPTY_PAGE_LIMIT} from "./namedChat";
 import {jsonResponse, settle, setControlValue} from "./testing";
 
 const shareId = "share", channelWireId = "wire";
@@ -38,7 +39,7 @@ function server(options: {access?: "read-only" | "read-write"; signedIn?: boolea
       follows.push({grant: String(container.querySelector("h1")?.textContent), since: url.searchParams.get("since")!, signal,
         answer: (value, status = 200) => resolve(jsonResponse(value, status))});
     });
-    return jsonResponse(options.history?.(url.searchParams.get("before")) ??
+    return jsonResponse(await options.history?.(url.searchParams.get("before")) ??
       {shareId, channelWireId, messages: [message(2, "Second"), message(1, "First")], nextCursor: 10, olderCursor: null});
   });
   vi.stubGlobal("fetch", fetch);
@@ -52,6 +53,8 @@ async function render(grantId: string | null = "grant") {await act(async () => r
 async function click(label: string) {const control = button(label); expect(control).toBeDefined(); await act(async () => control!.click());}
 async function type(value: string) {setControlValue(composer()!, value);}
 async function opened() {await settle(() => text().includes("Second") && follows.some(follow => !follow.signal.aborted));}
+const historyReads = (fetch: ReturnType<typeof server>) => fetch.mock.calls.map(([input]) => new URL(String(input), "https://viewer.test"))
+  .filter(url => url.pathname === "/api/named-chat/messages" && !url.searchParams.has("since")).map(url => url.searchParams.get("before"));
 
 it("signs in with the shared form, reads the channel oldest first, and posts as the signed-in account", async () => {
   server({signedIn: false, channelName: "Trip to Lisbon"}); await render();
@@ -123,6 +126,78 @@ it("loads older messages without moving the following cursor", async () => {
   await act(async () => follows.at(-1)!.answer({shareId, channelWireId, messages: [], nextCursor: 21, hasMore: false}));
   await settle(() => follows.length === 2);
   expect(follows.map(follow => follow.since)).toEqual(["20", "21"]);
+});
+
+it("keeps the reader on the same message when older history and a new message commit together", async () => {
+  let releaseOlder!: () => void;
+  const olderPage = new Promise(resolve => {
+    releaseOlder = () => resolve({shareId, channelWireId, messages: [9, 8, 7].map(seq => message(seq, `Old ${seq}`)), nextCursor: 10, olderCursor: null});
+  });
+  server({history: before => before === null
+    ? {shareId, channelWireId, messages: [14, 13, 12, 11, 10].map(seq => message(seq, `Message ${seq}`)), nextCursor: 20, olderCursor: 10}
+    : olderPage});
+  await render(); await settle(() => text().includes("Message 14") && follows.length > 0);
+  // jsdom has no layout: each message is 100px tall below a 40px row for "Load earlier messages", in a 300px scroller.
+  const node = container.querySelector<HTMLElement>(".chat-scroller")!;
+  const head = () => node.querySelector(".chat-older") ? 40 : 0, content = () => head() + node.querySelectorAll(".chat-message").length * 100;
+  let scrollTop = 0;
+  Object.defineProperties(node, {scrollHeight: {configurable: true, get: content}, clientHeight: {configurable: true, get: () => 300},
+    scrollTop: {configurable: true, get: () => scrollTop, set: (value: number) => {scrollTop = Math.max(0, Math.min(value, content() - 300));}}});
+  vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+    const index = [...node.querySelectorAll(".chat-message")].indexOf(this);
+    if (index < 0) return {top: 0, bottom: 300} as DOMRect;
+    const top = head() + index * 100 - scrollTop;
+    return {top, bottom: top + 100} as DOMRect;
+  });
+  const offset = (seq: number) => container.querySelector(`[data-seq="${seq}"]`)!.getBoundingClientRect().top;
+  await act(async () => node.dispatchEvent(new Event("scroll")));
+  expect(offset(10)).toBe(40);
+  await click("Load earlier messages");
+  await act(async () => {
+    releaseOlder();
+    follows.at(-1)!.answer({shareId, channelWireId, messages: [message(21, "New")], nextCursor: 21, hasMore: false});
+    // Updates inside one act commit together when it ends.
+    for (let turn = 0; turn < 100 && follows.length < 2; turn += 1) await Promise.resolve();
+  });
+  expect(text()).toContain("Old 7"); expect(text()).toContain("New");
+  expect(offset(10)).toBe(40);
+  expect(button("1 new message")).toBeDefined();
+});
+
+it("reads past empty history pages and shows an empty channel once nothing older remains", async () => {
+  const fetch = server({history: before => ({shareId, channelWireId, messages: [], nextCursor: before === null ? 30 : 0,
+    olderCursor: before === null ? 4000 : before === "4000" ? 2000 : null})});
+  await render(); await settle(() => text().includes("No messages in this channel yet.") && follows.length > 0);
+  expect(button("Load earlier messages")).toBeUndefined();
+  expect(historyReads(fetch)).toEqual([null, "4000", "2000"]);
+  expect(follows.at(-1)!.since).toBe("30");
+});
+
+it("loads earlier messages past empty pages in one click", async () => {
+  const fetch = server({history: before => before === null
+    ? {shareId, channelWireId, messages: [message(5000, "Newest")], nextCursor: 5001, olderCursor: 5000}
+    : before === "5000" ? {shareId, channelWireId, messages: [], nextCursor: 0, olderCursor: 3000}
+    : {shareId, channelWireId, messages: [message(3, "Oldest")], nextCursor: 0, olderCursor: null}});
+  await render(); await settle(() => text().includes("Newest") && follows.length > 0);
+  await click("Load earlier messages"); await settle(() => text().includes("Oldest"));
+  expect(button("Load earlier messages")).toBeUndefined();
+  expect(historyReads(fetch)).toEqual([null, "5000", "3000"]);
+});
+
+it("stops after a bounded run of empty pages and offers to keep reading", async () => {
+  const fetch = server({history: () => ({shareId, channelWireId, messages: [], nextCursor: 30, olderCursor: 1})});
+  await render(); await settle(() => Boolean(button("Load earlier messages")) && follows.length > 0);
+  expect(historyReads(fetch)).toHaveLength(CHAT_EMPTY_PAGE_LIMIT);
+  expect(text()).not.toContain("No messages in this channel yet.");
+});
+
+it("shows a message whose time is outside the date range without a time, and keeps following", async () => {
+  server({history: () => ({shareId, channelWireId, nextCursor: 10, olderCursor: null,
+    messages: [{...message(2, "Second"), createdAtMs: Number.MAX_SAFE_INTEGER}, message(1, "First")]})});
+  await render(); await opened();
+  expect([...container.querySelectorAll(".chat-body")].map(node => node.textContent?.trim())).toEqual(["First", "Second"]);
+  expect(container.querySelectorAll(".chat-message time")).toHaveLength(1);
+  expect(follows.at(-1)!.since).toBe("10");
 });
 
 it("shows a message too long for the browser, and keeps paging and following past it", async () => {

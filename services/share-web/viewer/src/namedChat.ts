@@ -3,6 +3,7 @@ import {normalizeShareLabel} from "@dohc/security-contract/share-labels";
 // Client for share-web's named recipient chat HTTP. The README section "Named recipient chat HTTP" is the contract.
 export const CHAT_PAGE_LIMIT = 50;
 export const CHAT_FOLLOW_HOLD_MS = 30_000;
+export const CHAT_EMPTY_PAGE_LIMIT = 20;
 
 export type NamedChatAccess = "read-only" | "read-write";
 export interface NamedChatChannel {shareId: string; userId: string; channelWireId: string; name: string | null; access: NamedChatAccess; maxPostBytes: number; maxBodyBytes: number}
@@ -69,12 +70,23 @@ export async function openNamedChannel(grantId: string, signal: AbortSignal): Pr
     maxPostBytes: Number(value.maxPostBytes), maxBodyBytes: Number(value.maxBodyBytes)};
 }
 
-/** One history page in reading order, oldest first. `nextCursor` starts following; `olderCursor` reads further back. */
-export async function readNamedChatHistory(channel: NamedChatChannel, before: number | null, signal: AbortSignal) {
+async function readHistoryPage(channel: NamedChatChannel, before: number | null, signal: AbortSignal) {
   const query = new URLSearchParams({...coordinates(channel), limit: String(CHAT_PAGE_LIMIT), ...(before === null ? {} : {before: String(before)})});
   const value = await chatRequest(`/api/named-chat/messages?${query}`, signal);
   return {messages: page(value, channel).reverse(), nextCursor: cursor(value.nextCursor),
     olderCursor: value.olderCursor === null ? null : cursor(value.olderCursor)};
+}
+
+/**
+ * History in reading order, oldest first. A page whose scanned rows hold none of this channel's messages is skipped,
+ * up to `CHAT_EMPTY_PAGE_LIMIT` pages. `nextCursor` is the first page's and starts following; `olderCursor` reads further back.
+ */
+export async function readNamedChatHistory(channel: NamedChatChannel, before: number | null, signal: AbortSignal) {
+  const first = await readHistoryPage(channel, before, signal);
+  let {messages, olderCursor} = first;
+  for (let read = 1; !messages.length && olderCursor !== null && read < CHAT_EMPTY_PAGE_LIMIT; read += 1)
+    ({messages, olderCursor} = await readHistoryPage(channel, olderCursor, signal));
+  return {messages, nextCursor: first.nextCursor, olderCursor};
 }
 
 export async function followNamedChat(channel: NamedChatChannel, since: number, holdMs: number, signal: AbortSignal) {
@@ -104,7 +116,8 @@ export function chatBodyTooLong(text: string, channel: NamedChatChannel, authorD
 }
 
 export function mergeChatMessages(current: readonly NamedChatMessage[], incoming: readonly NamedChatMessage[]): NamedChatMessage[] {
-  const byId = new Map(current.map(item => [item.messageId, item]));
-  for (const item of incoming) byId.set(item.messageId, item);
-  return [...byId.values()].sort((left, right) => left.relaySeq - right.relaySeq);
+  // The relay sequence is unique; a message ID can match an omission marker's `omitted:<relaySeq>`.
+  const bySeq = new Map(current.map(item => [item.relaySeq, item]));
+  for (const item of incoming) bySeq.set(item.relaySeq, item);
+  return [...bySeq.values()].sort((left, right) => left.relaySeq - right.relaySeq);
 }
