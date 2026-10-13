@@ -2480,3 +2480,846 @@ async fn unload_waits_for_an_owner_edit_adopted_before_its_first_settlement() {
     owner.close().await.unwrap();
     supervisor.close_all().unwrap();
 }
+
+fn observed_release_fixture() -> Fixture {
+    use dohc_engine_collab::owner_outbox::draft::{
+        ObservedOwnerBinding, install_observed_binding_in_tx,
+    };
+    let mut f = Fixture::new();
+    let key = DocKey::new("workspace", "main", "object").unwrap();
+    let state = dohc_engine_collab::load_persisted(&f.store, &key)
+        .unwrap()
+        .unwrap();
+    let checkpoint = state.doc.encode_full_state();
+    f.store
+        .write_with(&NoFaults, |tx| {
+            tx.execute("DELETE FROM collection_records", []).unwrap();
+            tx.execute("DELETE FROM collections", []).unwrap();
+            install_observed_binding_in_tx(
+                tx,
+                "workspace",
+                &ObservedOwnerBinding {
+                    binding: f.binding.clone(),
+                    relay_database_namespace: "relay".into(),
+                    revision: 1,
+                    accepted_cursor: 0,
+                    native_head_sequence: state.marker.head_update_seq,
+                    checkpoint_digest: hex_sha256(&checkpoint),
+                    limits: dohc_engine_collab::OwnerOutboxLimits {
+                        max_pending_bytes: 1_000_000,
+                        max_pending_age_ms: 100_000,
+                    },
+                },
+                &checkpoint,
+            )
+        })
+        .unwrap();
+    f
+}
+
+fn release_snapshot(f: &Fixture) -> Vec<Vec<String>> {
+    f.store
+        .read_with(|conn| {
+            [
+                "owner_live_stops",
+                "ydoc_owner_bindings",
+                "ydoc_owner_applied_frames",
+                "owner_ydoc_outboxes",
+                "owner_ydoc_outbox_entries",
+                "binary_blobs",
+                "ydoc_docs",
+                "ydoc_updates",
+                "ydoc_snapshots",
+                "replication_log",
+                "moments",
+            ]
+            .iter()
+            .map(|table| {
+                let mut stmt = conn.prepare(&format!("SELECT * FROM {table}")).unwrap();
+                let columns = stmt.column_count();
+                let mut rows = stmt
+                    .query_map([], |row| {
+                        (0..columns)
+                            .map(|i| row.get::<_, rusqlite::types::Value>(i))
+                            .collect::<rusqlite::Result<Vec<_>>>()
+                    })
+                    .unwrap()
+                    .map(|row| format!("{:?}", row.unwrap()))
+                    .collect::<Vec<_>>();
+                rows.sort();
+                Ok::<_, dohc_engine_storage::StorageError>(rows)
+            })
+            .collect()
+        })
+        .unwrap()
+}
+
+async fn stop_action(
+    actor: &ActorHandle,
+    f: &Fixture,
+    action: &str,
+) -> Result<
+    Vec<dohc_engine_collab::owner_outbox::release::OwnerLiveStop>,
+    dohc_engine_collab::OwnerOutboxError,
+> {
+    actor
+        .owner_ydoc_stop(
+            "workspace".into(),
+            if action == "release" {
+                None
+            } else {
+                Some(f.binding.current_path.clone())
+            },
+            if action == "release" {
+                Some(f.binding.clone())
+            } else {
+                None
+            },
+            action.into(),
+            40,
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn stop_releases_current_owner_edits_with_credit_and_preserves_remote_edits() {
+    for reason in [
+        None,
+        Some("stale-binding"),
+        Some("binding-changed"),
+        Some("delivery-conflict"),
+        Some("provenance-refused"),
+    ] {
+        let f = observed_release_fixture();
+        let key = DocKey::new("workspace", "main", "object").unwrap();
+        let supervisor = WorkspaceSupervisor::new();
+        let actor = supervisor.open(&f.db, 3).unwrap().actor;
+        let pending = f
+            .doc
+            .frontmatter_set("pending", "Owner pending edit")
+            .unwrap();
+        let entry = actor
+            .owner_ydoc_append_draft(
+                "workspace".into(),
+                dohc_engine_collab::owner_outbox::draft::OwnerDraftAppendInput {
+                    person_edit: true,
+                    binding: f.binding.clone(),
+                    expected_revision: 1,
+                    append_key: "pending".into(),
+                    update: pending,
+                    now_ms: 10,
+                    agent_declaration: None,
+                    automation_declaration: None,
+                },
+                CancellationToken::new(),
+                Arc::new(()),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        let remote = Ydoc::wire();
+        remote.apply(&f.bytes).unwrap();
+        let update = remote
+            .frontmatter_set("remote", "Accepted remote edit")
+            .unwrap();
+        let head = dohc_engine_collab::read_marker(&f.store, &key)
+            .unwrap()
+            .unwrap()
+            .head_update_seq;
+        actor
+            .owner_ydoc_apply_accepted(
+                "workspace".into(),
+                dohc_engine_collab::owner_outbox::accepted::OwnerAcceptedFrameInput {
+                    binding: f.binding.clone(),
+                    relay_database_namespace: "relay".into(),
+                    expected_revision: 1,
+                    expected_native_head_sequence: head,
+                    previous_accepted_cursor: 0,
+                    journal_cursor: 1,
+                    update_bytes: update,
+                },
+                20,
+                CancellationToken::new(),
+                Arc::new(()),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        if let Some(reason) = reason {
+            actor
+                .owner_ydoc_outbox_quarantine(
+                    "workspace".into(),
+                    dohc_engine_collab::OwnerOutboxQuarantineInput {
+                        outbox_id: entry.outbox_id.clone(),
+                        reason: reason.into(),
+                        observed_binding: None,
+                    },
+                    30,
+                    CancellationToken::new(),
+                )
+                .await
+                .unwrap()
+                .unwrap();
+        }
+        assert_eq!(
+            stop_action(&actor, &f, "request").await.unwrap()[0].state,
+            "requested"
+        );
+        assert_eq!(
+            stop_action(&actor, &f, "release").await.unwrap()[0].state,
+            "released"
+        );
+        assert_eq!(
+            stop_action(&actor, &f, "release").await.unwrap()[0].state,
+            "released"
+        );
+        let doc = dohc_engine_collab::load_persisted(&f.store, &key)
+            .unwrap()
+            .unwrap()
+            .doc;
+        assert_eq!(doc.frontmatter_json()["pending"], "Owner pending edit");
+        assert_eq!(doc.frontmatter_json()["remote"], "Accepted remote edit");
+        let update = doc.frontmatter_set("after", "Ordinary edit").unwrap();
+        f.record(&actor, update, "after-stop", 41).await;
+        assert!(
+            f.ordinary_settle(&actor)
+                .await
+                .unwrap()
+                .settled()
+                .unwrap()
+                .materialized
+        );
+        let text = std::fs::read_to_string(f.root.path().join(&f.binding.current_path)).unwrap();
+        assert!(
+            text.contains("Owner pending edit")
+                && text.contains("Accepted remote edit")
+                && text.contains("Ordinary edit")
+        );
+        f.store.read_with(|conn| {
+            let (updates,authors):(i64,String)=conn.query_row("SELECT (SELECT COUNT(*) FROM replication_log WHERE op_kind='ydoc.update'),(SELECT author_json FROM moments ORDER BY moment_order DESC LIMIT 1)",[],|r|Ok((r.get(0)?,r.get(1)?))).unwrap();
+            assert!(updates>=2);assert!(authors.contains("local-person"));
+            assert_eq!(conn.query_row("SELECT COUNT(*) FROM owner_ydoc_outboxes",[],|r|r.get::<_,i64>(0)).unwrap(),0);
+            Ok::<_,rusqlite::Error>(())
+        }).unwrap();
+        supervisor.close_all().unwrap();
+    }
+}
+
+#[tokio::test]
+async fn stop_waits_for_current_restore_and_refuses_a_desktop_host() {
+    let f = observed_release_fixture();
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&f.db, 3).unwrap().actor;
+    let update = f
+        .doc
+        .frontmatter_set("pending", "Frozen restore work")
+        .unwrap();
+    let entry = actor
+        .owner_ydoc_append_draft(
+            "workspace".into(),
+            dohc_engine_collab::owner_outbox::draft::OwnerDraftAppendInput {
+                person_edit: true,
+                binding: f.binding.clone(),
+                expected_revision: 1,
+                append_key: "pending".into(),
+                update,
+                now_ms: 10,
+                agent_declaration: None,
+                automation_declaration: None,
+            },
+            CancellationToken::new(),
+            Arc::new(()),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    actor
+        .owner_ydoc_outbox_quarantine(
+            "workspace".into(),
+            dohc_engine_collab::OwnerOutboxQuarantineInput {
+                outbox_id: entry.outbox_id,
+                reason: "restore-fenced".into(),
+                observed_binding: None,
+            },
+            20,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    stop_action(&actor, &f, "request").await.unwrap();
+    let before = release_snapshot(&f);
+    assert!(matches!(
+        stop_action(&actor, &f, "release").await,
+        Err(dohc_engine_collab::OwnerOutboxError::RestorePending)
+    ));
+    assert_eq!(release_snapshot(&f), before);
+    assert!(
+        f.store
+            .read_with(|c| dohc_engine_collab::owner_outbox::release::blocked_in(
+                c,
+                &DocKey::new("workspace", "main", "object").unwrap()
+            ))
+            .unwrap()
+    );
+    stop_action(&actor, &f, "clear").await.unwrap();
+    supervisor.close_all().unwrap();
+    let f = Fixture::new();
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&f.db, 3).unwrap().actor;
+    let owner = actor
+        .live_application_owner("workspace".into())
+        .await
+        .unwrap();
+    let _host = f.adopt(&owner).await;
+    let before = f.counts();
+    assert!(matches!(
+        stop_action(&actor, &f, "request").await,
+        Err(dohc_engine_collab::OwnerOutboxError::DesktopHost)
+    ));
+    assert_eq!(f.counts(), before);
+    supervisor.close_all().unwrap();
+}
+
+#[tokio::test]
+async fn stop_release_is_atomic_at_both_commit_faults_and_survives_restart() {
+    use dohc_engine_storage::{FaultAction, FaultInjector, FaultPoint};
+    struct CrashAt(FaultPoint);
+    impl FaultInjector for CrashAt {
+        fn poll(&self, point: FaultPoint) -> FaultAction {
+            if point == self.0 {
+                FaultAction::Crash
+            } else {
+                FaultAction::Continue
+            }
+        }
+    }
+    for point in [
+        FaultPoint::StorageBeforePersist,
+        FaultPoint::StorageAfterCommitBeforeAck,
+    ] {
+        let f = observed_release_fixture();
+        let supervisor = WorkspaceSupervisor::new();
+        let actor = supervisor.open(&f.db, 3).unwrap().actor;
+        for index in 0..101 {
+            let update = f
+                .doc
+                .richdoc_append_paragraph(&format!("Atomic pending edit {index}"));
+            actor
+                .owner_ydoc_append_draft(
+                    "workspace".into(),
+                    dohc_engine_collab::owner_outbox::draft::OwnerDraftAppendInput {
+                        person_edit: true,
+                        binding: f.binding.clone(),
+                        expected_revision: 1,
+                        append_key: format!("atomic-{index}"),
+                        update,
+                        now_ms: 10,
+                        agent_declaration: None,
+                        automation_declaration: None,
+                    },
+                    CancellationToken::new(),
+                    Arc::new(()),
+                )
+                .await
+                .unwrap()
+                .unwrap();
+        }
+        stop_action(&actor, &f, "request").await.unwrap();
+        let before = release_snapshot(&f);
+        assert!(
+            actor
+                .owner_ydoc_stop(
+                    "workspace".into(),
+                    None,
+                    Some(f.binding.clone()),
+                    "release".into(),
+                    30,
+                    Arc::new(CrashAt(point)),
+                    CancellationToken::new()
+                )
+                .await
+                .unwrap()
+                .is_err()
+        );
+        supervisor.close_all().unwrap();
+        let supervisor = WorkspaceSupervisor::new();
+        let actor = supervisor.open(&f.db, 31).unwrap().actor;
+        if point == FaultPoint::StorageBeforePersist {
+            assert_eq!(release_snapshot(&f), before);
+        }
+        assert_eq!(
+            stop_action(&actor, &f, "release").await.unwrap()[0].state,
+            "released"
+        );
+        let counts = release_snapshot(&f);
+        assert_eq!(
+            stop_action(&actor, &f, "release").await.unwrap()[0].state,
+            "released"
+        );
+        assert_eq!(release_snapshot(&f), counts);
+        let doc = dohc_engine_collab::load_persisted(
+            &f.store,
+            &DocKey::new("workspace", "main", "object").unwrap(),
+        )
+        .unwrap()
+        .unwrap()
+        .doc;
+        assert!(
+            doc.project(ContentKind::Richdoc)
+                .unwrap()
+                .content
+                .contains("Atomic pending edit")
+        );
+        supervisor.close_all().unwrap();
+    }
+}
+
+#[tokio::test]
+async fn stop_refuses_device_hosts_and_synthetic_restore_fences_without_mutation() {
+    for hosted in [false, true] {
+        let mut f = observed_release_fixture();
+        if !hosted {
+            let supervisor = WorkspaceSupervisor::new();
+            let actor = supervisor.open(&f.db, 3).unwrap().actor;
+            stop_action(&actor, &f, "request").await.unwrap();
+            supervisor.close_all().unwrap();
+        }
+        f.store.write_with(&NoFaults, |tx| {
+            if hosted {
+                tx.execute("INSERT INTO live_device_application_bindings (relay_database_namespace,workspace_id,main_version_id,object_id,lineage_claim_id,current_path,selector_paths_json,restore_fence_generation,host_id,host_epoch,instance_id,connection_id,available) VALUES ('relay','workspace','main','object',?1,'notes/owner.md','[\"notes/owner.md\"]',0,'host',1,'instance','connection',1)", [&f.binding.lineage_claim_id]).unwrap();
+            } else {
+                tx.execute("INSERT INTO live_restore_fences(workspace_id,main_version_id,object_id,relay_database_namespace,operation_id,input_json,receipt_json) VALUES ('workspace','main','object','relay','synthetic','{}','{}')", []).unwrap();
+            }
+            Ok::<_, dohc_engine_storage::StorageError>(())
+        }).unwrap();
+        let before = f.counts();
+        let supervisor = WorkspaceSupervisor::new();
+        let actor = supervisor.open(&f.db, 3).unwrap().actor;
+        let result = stop_action(&actor, &f, if hosted { "request" } else { "release" }).await;
+        assert!(if hosted {
+            matches!(
+                result,
+                Err(dohc_engine_collab::OwnerOutboxError::DesktopHost)
+            )
+        } else {
+            matches!(result, Err(dohc_engine_collab::OwnerOutboxError::Corrupt))
+        });
+        assert_eq!(f.counts(), before);
+        supervisor.close_all().unwrap();
+    }
+}
+
+// Seed real, dependent Yjs deltas without timing the unrelated draft append
+// path. The first append creates the actual outbox; the rest copy its schema.
+async fn pending_release_fixture(count: usize) -> (Fixture, WorkspaceSupervisor, ActorHandle) {
+    let mut f = observed_release_fixture();
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&f.db, 3).unwrap().actor;
+    let updates: Vec<_> = (0..count)
+        .map(|index| {
+            f.doc
+                .richdoc_append_paragraph(&format!("Pending edit {index}"))
+        })
+        .collect();
+    if let Some(first) = updates.first() {
+        let entry = actor
+            .owner_ydoc_append_draft(
+                "workspace".into(),
+                dohc_engine_collab::owner_outbox::draft::OwnerDraftAppendInput {
+                    person_edit: true,
+                    binding: f.binding.clone(),
+                    expected_revision: 1,
+                    append_key: "pending-0".into(),
+                    update: first.clone(),
+                    now_ms: 10,
+                    agent_declaration: None,
+                    automation_declaration: None,
+                },
+                CancellationToken::new(),
+                Arc::new(()),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        f.store.write_with(&NoFaults, |tx| {
+            let mut total = first.len();
+            for (index, update) in updates.iter().enumerate().skip(1) {
+                let digest = hex_sha256(update);
+                dohc_engine_storage::put_binary_blob_with_sha(tx, update, &digest)?;
+                total += update.len();
+                tx.execute("INSERT INTO owner_ydoc_outbox_entries (outbox_id,sequence,append_key,delivery_id,update_digest,update_blob_digest,byte_length,created_at_ms,pending,result_pending_bytes,result_oldest_entry_at_ms,result_state,draft_binding_revision,person_edit) SELECT outbox_id,?1,?2,?2,?3,?3,?4,created_at_ms,pending,?5,result_oldest_entry_at_ms,result_state,draft_binding_revision,person_edit FROM owner_ydoc_outbox_entries WHERE append_key='pending-0'",
+                    rusqlite::params![index as i64+1,format!("pending-{index}"),digest,update.len() as i64,total as i64]).unwrap();
+            }
+            tx.execute("UPDATE owner_ydoc_outboxes SET next_sequence=?2,pending_bytes=?3 WHERE outbox_id=?1",rusqlite::params![entry.outbox_id,count as i64+1,total as i64]).unwrap();
+            Ok::<_,dohc_engine_storage::StorageError>(())
+        }).unwrap();
+    }
+    stop_action(&actor, &f, "request").await.unwrap();
+    (f, supervisor, actor)
+}
+
+#[tokio::test]
+#[ignore = "manual Stop transaction timing"]
+async fn measure_stop_release_pending_entries() {
+    for count in [0, 100, 1_000, 5_000] {
+        let mut samples = Vec::new();
+        for run in 0..5 {
+            let (f, supervisor, actor) = pending_release_fixture(count).await;
+            let started = std::time::Instant::now();
+            stop_action(&actor, &f, "release").await.unwrap();
+            let elapsed_ms = started.elapsed().as_secs_f64() * 1_000.0;
+            samples.push(elapsed_ms);
+            println!("stop_release entries={count} run={run} elapsed_ms={elapsed_ms:.3}");
+            let native_updates: i64 = f
+                .store
+                .read_with(|conn| {
+                    conn.query_row("SELECT COUNT(*) FROM ydoc_updates", [], |r| r.get(0))
+                })
+                .unwrap();
+            assert_eq!(native_updates, i64::from(count > 0));
+            assert!(
+                f.ordinary_settle(&actor)
+                    .await
+                    .unwrap()
+                    .settled()
+                    .unwrap()
+                    .materialized
+            );
+            if count > 0 {
+                let text = f.file();
+                for index in 0..count {
+                    assert!(text.contains(&format!("Pending edit {index}")));
+                }
+            }
+            supervisor.close_all().unwrap();
+        }
+        samples.sort_by(f64::total_cmp);
+        println!(
+            "stop_release_median entries={count} elapsed_ms={:.3} per_entry_us={:.3}",
+            samples[2],
+            if count == 0 {
+                0.0
+            } else {
+                samples[2] * 1_000.0 / count as f64
+            }
+        );
+    }
+}
+
+#[tokio::test]
+async fn stop_release_only_queues_another_documents_append_for_its_duration() {
+    use dohc_engine_storage::{FaultAction, FaultInjector, FaultPoint};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    struct ObserveCommit(Arc<AtomicBool>);
+    impl FaultInjector for ObserveCommit {
+        fn poll(&self, point: FaultPoint) -> FaultAction {
+            if point == FaultPoint::StorageBeforePersist {
+                assert!(
+                    self.0.load(Ordering::SeqCst),
+                    "the other append was submitted during release"
+                );
+            }
+            FaultAction::Continue
+        }
+    }
+    let (mut f, supervisor, actor) = pending_release_fixture(1_000).await;
+    let key = DocKey::new("workspace", "main", "other").unwrap();
+    dohc_engine_domain::VersionedTextStore::new(&mut f.store)
+        .write_text(
+            &dohc_engine_domain::WriteText {
+                workspace_id: "workspace".into(),
+                version_id: "main".into(),
+                object_id: "other".into(),
+                path: "notes/other.md".into(),
+                text: f.text.clone(),
+                moment_id: "other-base".into(),
+                metadata_origin: "api".into(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 19,
+                request_id: None,
+            },
+            &NoFaults,
+        )
+        .unwrap();
+    dohc_engine_collab::claim_base(
+        &mut f.store,
+        &key,
+        ContentKind::Richdoc,
+        &f.bytes,
+        &NoFaults,
+        20,
+    )
+    .unwrap();
+    let other = Ydoc::wire();
+    other.apply(&f.bytes).unwrap();
+    let update = other.richdoc_append_paragraph("Other document edit");
+    let submitted = Arc::new(AtomicBool::new(false));
+    let start = std::time::Instant::now();
+    let release = async {
+        actor
+            .owner_ydoc_stop(
+                "workspace".into(),
+                None,
+                Some(f.binding.clone()),
+                "release".into(),
+                40,
+                Arc::new(ObserveCommit(submitted.clone())),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        start.elapsed()
+    };
+    let append = async {
+        submitted.store(true, Ordering::SeqCst);
+        actor
+            .ydoc_record_update(
+                key.clone(),
+                "notes/other.md".into(),
+                ContentKind::Richdoc,
+                Regime::Replicated,
+                update,
+                Some("local-person".into()),
+                None,
+                Some(f.binding.lineage_claim_id.clone()),
+                false,
+                None,
+                Some("other-append".into()),
+                41,
+                Arc::new(NoFaults),
+                CancellationToken::new(),
+                None,
+            )
+            .await
+            .unwrap();
+        start.elapsed()
+    };
+    let (release, append) = tokio::join!(release, append);
+    println!(
+        "stop_writer release_ms={:.3} other_append_ms={:.3} tail_ms={:.3}",
+        release.as_secs_f64() * 1_000.0,
+        append.as_secs_f64() * 1_000.0,
+        append.saturating_sub(release).as_secs_f64() * 1_000.0
+    );
+    assert!(append.saturating_sub(release).as_millis() < 100);
+    let persisted = dohc_engine_collab::load_persisted(&f.store, &key)
+        .unwrap()
+        .unwrap();
+    assert!(
+        persisted
+            .doc
+            .project(ContentKind::Richdoc)
+            .unwrap()
+            .content
+            .contains("Other document edit")
+    );
+    supervisor.close_all().unwrap();
+}
+
+#[tokio::test]
+async fn stop_keeps_each_pending_entrys_declared_credit() {
+    let mut f = observed_release_fixture();
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&f.db, 3).unwrap().actor;
+    for (index, kind) in [
+        "person",
+        "agent",
+        "agent-other",
+        "automation",
+        "unattributed",
+        "native",
+        "person",
+    ]
+    .iter()
+    .enumerate()
+    {
+        for repetition in 0..3 {
+            let update = f
+                .doc
+                .richdoc_append_paragraph(&format!("credit-{index}-{repetition}-{kind}"));
+            actor
+                .owner_ydoc_append_draft(
+                    "workspace".into(),
+                    dohc_engine_collab::owner_outbox::draft::OwnerDraftAppendInput {
+                        person_edit: *kind == "person",
+                        binding: f.binding.clone(),
+                        expected_revision: 1,
+                        append_key: format!("credit-{index}-{repetition}"),
+                        update,
+                        now_ms: 10 + index as i64,
+                        agent_declaration: kind.starts_with("agent").then(|| AgentDeclaration {
+                            agent_id: "agent-A".into(),
+                            on_behalf_of: Some(
+                                if *kind == "agent" {
+                                    "person-A"
+                                } else {
+                                    "person-C"
+                                }
+                                .into(),
+                            ),
+                            depth: if *kind == "agent" { 2 } else { 3 },
+                        }),
+                        automation_declaration: (*kind == "automation").then(|| {
+                            dohc_engine_domain::AutomationDeclaration {
+                                automation_id: "automation-A".into(),
+                                attribution: ChangeAttribution {
+                                    actor_kind: ChangeActorKind::Automation,
+                                    on_behalf_of: Some("person-B".into()),
+                                    depth: 1,
+                                    run: None,
+                                },
+                            }
+                        }),
+                    },
+                    CancellationToken::new(),
+                    Arc::new(()),
+                )
+                .await
+                .unwrap()
+                .unwrap();
+        }
+    }
+    // Native-source credit is trusted local journal metadata, separate from
+    // declarations on owner draft entries.
+    f.store.write_with(&dohc_engine_storage::NoFaults, |tx| {
+        for repetition in 0..3 {
+        let append_key = format!("credit-5-{repetition}");
+        let digest: String = tx.query_row("SELECT update_digest FROM owner_ydoc_outbox_entries WHERE append_key=?1", [&append_key], |r| r.get(0)).unwrap();
+        let source = dohc_engine_collab::owner_outbox::OwnerOutboxSource::Native(
+            dohc_engine_collab::owner_outbox::OwnerOutboxNativeSource {
+                binding: f.binding.clone(), adoption_id: "native-credit".into(), native_sequence: 10,
+                update_digest: digest,
+                origin: dohc_engine_collab::owner_outbox::OwnerOutboxNativeOrigin::NativeUpdate {
+                    actor_origin_id: Some("native-agent".into()), actor_kind: Some("agent".into()),
+                    on_behalf_of: Some("native-person".into()), chain_depth: Some(3), recorded_at_ms: 9,
+                },
+            });
+        tx.execute("UPDATE owner_ydoc_outbox_entries SET native_source_json=?1,draft_binding_revision=NULL WHERE append_key=?2", [serde_json::to_string(&source).unwrap(),append_key]).unwrap();
+        }
+        Ok::<_, dohc_engine_storage::StorageError>(())
+    }).unwrap();
+    stop_action(&actor, &f, "request").await.unwrap();
+    stop_action(&actor, &f, "release").await.unwrap();
+    let credits = f.store.read_with(|conn| {
+        let mut stmt = conn.prepare("SELECT actor_origin_id,actor_kind,on_behalf_of,chain_depth FROM ydoc_updates WHERE workspace_id='workspace' ORDER BY seq").unwrap();
+        Ok::<_,dohc_engine_storage::StorageError>(stmt.query_map([],|r|Ok((r.get::<_,Option<String>>(0)?,r.get::<_,Option<String>>(1)?,r.get::<_,Option<String>>(2)?,r.get::<_,Option<i64>>(3)?))).unwrap().map(|r|r.unwrap()).collect::<Vec<_>>())
+    }).unwrap();
+    assert_eq!(
+        credits,
+        vec![
+            (
+                Some("local-person".into()),
+                Some("human".into()),
+                None,
+                Some(0)
+            ),
+            (
+                Some("agent-A".into()),
+                Some("agent".into()),
+                Some("person-A".into()),
+                Some(2)
+            ),
+            (
+                Some("agent-A".into()),
+                Some("agent".into()),
+                Some("person-C".into()),
+                Some(3)
+            ),
+            (
+                Some("automation-A".into()),
+                Some("automation".into()),
+                Some("person-B".into()),
+                Some(1)
+            ),
+            (None, None, None, None),
+            (
+                Some("native-agent".into()),
+                Some("agent".into()),
+                Some("native-person".into()),
+                Some(3)
+            ),
+            (
+                Some("local-person".into()),
+                Some("human".into()),
+                None,
+                Some(0)
+            ),
+        ]
+    );
+    // Replaying successive credited rows proves that no later author's delta
+    // leaked into an earlier group. The same rows are journaled for peers.
+    let grouped = f.store.read_with(|conn| {
+        let mut stmt = conn.prepare("SELECT b.bytes FROM ydoc_updates u JOIN binary_blobs b ON b.sha256=u.update_blob_sha256 ORDER BY u.seq").unwrap();
+        Ok::<_,rusqlite::Error>(stmt.query_map([],|r|r.get::<_,Vec<u8>>(0)).unwrap().map(|r|r.unwrap()).collect::<Vec<_>>())
+    }).unwrap();
+    let replay = Ydoc::wire();
+    replay.apply(&f.bytes).unwrap();
+    for (index, update) in grouped.iter().enumerate() {
+        replay.apply(update).unwrap();
+        let text = replay.project(ContentKind::Richdoc).unwrap().content;
+        for repetition in 0..3 {
+            assert!(text.contains(&format!("credit-{index}-{repetition}-")));
+            assert!(!text.contains(&format!("credit-{}-{repetition}-", index + 1)));
+        }
+    }
+    let journaled = f.store.read_with(|conn| {
+        let mut stmt = conn.prepare("SELECT payload_json FROM replication_log WHERE op_kind='ydoc.update' ORDER BY origin_seq").unwrap();
+        Ok::<_,rusqlite::Error>(stmt.query_map([],|r|r.get::<_,String>(0)).unwrap().map(|r|serde_json::from_str::<serde_json::Value>(&r.unwrap()).unwrap()).collect::<Vec<_>>())
+    }).unwrap();
+    assert_eq!(journaled.len(), 7);
+    for ((payload, update), (actor, kind, behalf, depth)) in
+        journaled.iter().zip(&grouped).zip(&credits)
+    {
+        assert_eq!(payload["updateBlobSha256"], hex_sha256(update));
+        assert_eq!(payload["actorOriginId"], serde_json::json!(actor));
+        if kind.is_some() {
+            assert_eq!(payload["attribution"]["actorKind"], serde_json::json!(kind));
+            assert_eq!(
+                payload["attribution"]["onBehalfOf"],
+                serde_json::json!(behalf)
+            );
+            assert_eq!(payload["attribution"]["depth"], serde_json::json!(depth));
+        } else {
+            assert!(payload["attribution"].is_null());
+        }
+    }
+    assert!(
+        f.ordinary_settle(&actor)
+            .await
+            .unwrap()
+            .settled()
+            .unwrap()
+            .materialized
+    );
+    let authors: String = f
+        .store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT author_json FROM moments ORDER BY moment_order DESC LIMIT 1",
+                [],
+                |r| r.get(0),
+            )
+        })
+        .unwrap();
+    let authors: Vec<serde_json::Value> = serde_json::from_str(&authors).unwrap();
+    let expected = serde_json::json!([
+        {"kind":"human","humanId":"local-person"},
+        {"kind":"agent","agentId":"agent-A","onBehalfOf":"person-A","depth":2},
+        {"kind":"agent","agentId":"agent-A","onBehalfOf":"person-C","depth":3},
+        {"kind":"automation","automationId":"automation-A","onBehalfOf":"person-B","depth":1},
+        {"kind":"unattributed"},
+        {"kind":"agent","agentId":"native-agent","onBehalfOf":"native-person","depth":3}
+    ]);
+    assert_eq!(authors.len(), 6);
+    for author in expected.as_array().unwrap() {
+        assert!(authors.contains(author), "{authors:?}");
+    }
+    supervisor.close_all().unwrap();
+}

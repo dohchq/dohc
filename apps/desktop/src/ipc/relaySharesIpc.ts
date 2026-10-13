@@ -1,3 +1,5 @@
+import {withOwnerLiveStopTransition, type OwnerLiveStop} from "../workspaces/ownerLiveStop";
+import type {LiveObjectBinding} from "@dohc/live-session-contract/live-object-binding";
 import {
   ListOwnerLiveDocumentsPayload,
   ListOwnerLiveRefusalsPayload,
@@ -147,6 +149,7 @@ export function registerRelaySharesIpcHandlers<
     ReturnType<typeof createPresencePollRegistry>,
     "begin" | "cancel"
   >;
+  ownerLiveStop(workspace: Workspace, action: "request" | "release" | "clear", path: string, binding?: LiveObjectBinding): Promise<OwnerLiveStop | undefined>;
   // A grant changed on the relay. Null when the change names no workspace.
   sharesChanged(workspaceId: string | null): void;
   // An authenticated account listing, applied to this machine's received
@@ -246,16 +249,35 @@ export function registerRelaySharesIpcHandlers<
     registerHandler(channel, async (event, payload) => {
       assertTrustedSender(event);
       const input = OwnerLiveDocumentActionPayload.parse(payload);
-      return ownerRelayShareHandler(event.sender, input.workspaceId, async (operation, credentials, session) => {
-        const result = await session.run(() => relayShareJsonWithCredentials<unknown>(credentials,
-          `/sync/${encodeURIComponent(operation.workspace.workspaceId)}/live-host`, {
-            method: stop ? "DELETE" : "POST",
-            body: JSON.stringify(stop ? {path: input.path, retire: true} : {path: input.path}),
-          }));
-        const response = z.object({ok: z.literal(true), path: z.literal(input.path),
-          status: stop ? z.literal("retired") : z.enum(["ready", "preparing", "unavailable"])}).parse(result);
-        if (response.status === "unavailable") throw new Error("This document could not resume live editing. Refresh the list and try again.");
-      }, assertOriginalWorkspace);
+      return withRendererWorkspaceOperation(event.sender,input.workspaceId,"Live editing stopped because this window changed workspaces.",async operation => {
+        operation.assertCurrent();assertOriginalWorkspace(operation.workspace);
+        return withOwnerLiveStopTransition(input.workspaceId,input.path,async () => {
+          const local=await dependencies.ownerLiveStop(operation.workspace,stop ? "request" : "clear",input.path);
+          operation.assertCurrent();
+          if (stop && local?.state==="released") {
+            await dependencies.ownerLiveStop(operation.workspace,"release",input.path,local.binding);
+            operation.assertCurrent();return;
+          }
+          let result: unknown;
+          try {
+            const {credentials,credentialGeneration}=await remoteForWorkspace(operation.workspace);
+            if (credentialGeneration!==currentCredentialGeneration()) throw new Error("Sharing account changed.");
+            result=await relayShareJsonWithCredentials<unknown>(credentials,`/sync/${encodeURIComponent(operation.workspace.workspaceId)}/live-host`,{
+              method:stop ? "DELETE" : "POST",body:JSON.stringify(stop ? {path:input.path,retire:true,restoreFenceGeneration:local!.binding.restoreFenceGeneration} : {path:input.path}),
+            });
+            operation.assertCurrent();
+            if (credentialGeneration!==currentCredentialGeneration()) throw new Error("Sharing account changed.");
+          } catch (error) {
+            operation.assertCurrent();
+            if (stop) throw new Error("Stop live editing is waiting. You can keep editing.",{cause:error});
+            throw error;
+          }
+          const response=z.object({ok:z.literal(true),path:z.literal(input.path),status:stop ? z.literal("retired") : z.enum(["ready","preparing","unavailable"])}).parse(result);
+          if (response.status==="unavailable") throw new Error("This document could not resume live editing. Refresh the list and try again.");
+          if (stop) await dependencies.ownerLiveStop(operation.workspace,"release",input.path,local!.binding);
+          operation.assertCurrent();
+        });
+      });
     });
   }
 

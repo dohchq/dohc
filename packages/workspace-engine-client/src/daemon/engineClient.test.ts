@@ -34,6 +34,31 @@ const LIMITS = {
 describe("private owner delivery transport", () => {
   const request={id:970,workspace:"workspace",deadlineMs:30_000};
   const target={binding:{workspaceId:"workspace",mainVersionId:"main",objectId:"object",lineageClaimId:"cd".repeat(32),currentPath:"a.md",selectorPaths:["a.md"],restoreFenceGeneration:0},relayDatabaseNamespace:"relay"};
+  it("sends Stop request, release, list and cancellation with exact coordinates", async () => {
+    const peer = new FakePeerConnection(), transport = client(peer);
+    peer.acknowledge(); await transport.ready();
+    peer.onEnvelope = e => {
+      if (e.type !== "request") return;
+      const action = e.method.split(".").at(-1);
+      expect(e.method).toBe(`ydoc.ownerStop.${action}`);
+      expect(e.params).toEqual(action === "release" ? {binding: target.binding} : action === "list" ? {} : {path: "a.md"});
+      peer.send({type: "response", id: e.id, result: {stops: action === "clear" ? [] : [{...target, state: action === "release" ? "released" : "requested"}]}});
+    };
+    try {
+      expect((await transport.ownerYDocStopRequest(request, "a.md")).state).toBe("requested");
+      expect((await transport.ownerYDocRelease(request, target.binding)).state).toBe("released");
+      expect(await transport.ownerYDocStopList(request)).toEqual([{...target, state: "requested"}]);
+      await transport.ownerYDocStopClear(request, "a.md");
+    } finally {transport.close();}
+  });
+  it.each(["binding", "state", "extra", "namespace"])("rejects an invalid Stop release response: %s", async scenario => {
+    const peer = new FakePeerConnection(), transport = client(peer);
+    peer.acknowledge(); await transport.ready();
+    const row = {...target, state: "released", ...(scenario === "binding" ? {binding: {...target.binding, restoreFenceGeneration: 1}} : scenario === "state" ? {state: "requested"} : scenario === "extra" ? {extra: true} : {relayDatabaseNamespace: ""})};
+    peer.onEnvelope = e => {if (e.type === "request") peer.send({type: "response", id: e.id, result: {stops: [row]}});};
+    try {await expect(transport.ownerYDocRelease(request, target.binding)).rejects.toThrow(TypeError);}
+    finally {transport.close();}
+  });
   it.each([null, "active", "sealed", "quarantined", "absent bytes", "extra", "binding extra", "cursor mismatch"])("decodes listed draft %s and retains page policy", async (scenario) => {
     const peer = new FakePeerConnection(), transport = client(peer, { privateLiveApplication: { aggregateBytes: 128 * 1024 * 1024, maxUploads: 1 } });
     peer.acknowledge(); await transport.ready();

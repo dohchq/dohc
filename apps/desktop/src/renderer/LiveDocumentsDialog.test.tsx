@@ -66,6 +66,17 @@ afterEach(() => {
 });
 
 describe("LiveDocumentsDialog", () => {
+  it("reports a waiting Stop through Notices and keeps its retry available", async () => {
+    const h = harness(); h.load.mockResolvedValue(page([row("a.md")]));
+    const error = new Error("Stop live editing is waiting. You can keep editing.");
+    h.stop.mockRejectedValueOnce(error);
+    render(<LiveDocumentsDialog workspaceId="ws" {...h} />);
+    fireEvent.click(await screen.findByRole("button", {name: "Stop live editing for a.md"}));
+    await vi.waitFor(() => expect(h.onError).toHaveBeenCalledTimes(1));
+    expect(h.onError.mock.calls[0]!.slice(0,2)).toEqual(["Stop live editing for a.md is waiting. You can keep editing.", error]);
+    expect(h.onError.mock.calls[0]![2]()).toBe(true);
+    await vi.waitFor(() => expect(h.stop).toHaveBeenCalledTimes(2));
+  });
   it("stands lines in for the first page, and keeps the words while a Reload keeps the list", async () => {
     const h = harness();
     const first = deferred<LiveDocumentPage>();

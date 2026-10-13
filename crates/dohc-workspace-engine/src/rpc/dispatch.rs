@@ -167,6 +167,22 @@ impl EngineService {
         self.ensure_configured_host_method(&ctx, &request)?;
         self.ensure_handle_allows_method(request.workspace.as_ref(), &request.method)?;
         self.require_initial_capture_ready(request.workspace.as_ref(), &request.method)?;
+        if let Some(action) = request.method.strip_prefix("ydoc.ownerStop.") {
+            if !matches!(action, "request" | "release" | "clear" | "list") {
+                return Err(WireError::new(
+                    ErrorCode::InvalidParams,
+                    "invalid-owner-stop-method",
+                ));
+            }
+            let result = self
+                .owner_ydoc_stop(&ctx, request.workspace, request.params, action)
+                .await?;
+            return Ok(ServiceResponse {
+                response: Response { id, result },
+                blob_egress: None,
+                output_guard: None,
+            });
+        }
         if request.method == "ydoc.ownerDelivery.prepareEnrollment" {
             return self.owner_delivery_prepare_enrollment(ctx, request).await;
         }
@@ -1038,6 +1054,12 @@ impl EngineService {
             ));
         }
         if projects_collections {
+            if method.starts_with("ydoc.ownerStop.") {
+                return Err(WireError::new(
+                    ErrorCode::Forbidden,
+                    "received shares do not stop owner documents",
+                ));
+            }
             if method.starts_with("automations.") {
                 return Err(WireError::new(
                     ErrorCode::Forbidden,

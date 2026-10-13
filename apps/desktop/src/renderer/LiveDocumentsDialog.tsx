@@ -324,7 +324,8 @@ export function LiveDocumentsDialog({
           perform(overtaken || mutated ? { kind: "reload" } : work);
           return true;
         };
-        onError(failureMessage(work, mutated), error, retry);
+        const waiting = work.kind === "stop" && String(error).includes("Stop live editing is waiting.");
+        onError(waiting ? `Stop live editing for ${work.path} is waiting. You can keep editing.` : failureMessage(work, mutated), error, retry);
       } finally {
         if (isCurrent()) {
           running.current = false;

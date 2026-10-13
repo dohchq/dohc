@@ -182,7 +182,11 @@ fn invalid() -> WireError {
 }
 
 impl EngineService {
-    fn notify_owner_sessions(&self, workspace: &WorkspaceHandle, binding: &LiveObjectBinding) {
+    pub(super) fn notify_owner_sessions(
+        &self,
+        workspace: &WorkspaceHandle,
+        binding: &LiveObjectBinding,
+    ) {
         let sessions = crate::lock(&self.sessions);
         for (session_id, session) in sessions.iter() {
             if &session.workspace == workspace

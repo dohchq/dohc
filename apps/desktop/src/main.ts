@@ -393,6 +393,7 @@ import { startWorkspaceFileObservation } from "./workspaces/workspaceFileObserva
 import { createWorkspaceFilesWorker } from "./workspaces/workspaceFilesWorker";
 import {
   createRustEngineDaemon,
+  EngineClient,
   defaultEngineBinaryPath,
 } from "@dohc/workspace-engine-client/daemon";
 import {
@@ -5973,6 +5974,18 @@ function registerIpcHandlers(): void {
     relayShareJsonWithCredentials,
     relayShareErrorCopy,
     relayShareDiscussionActivityPolls,
+    ownerLiveStop: async (workspace,action,path,binding) => {
+      const result=await requireEngineSessions().run(workspace,async session => {
+        const client=desktopEngine.daemon?.currentClient();
+        if (!(client instanceof EngineClient)) throw new Error("dohc could not change live editing. Restart dohc and try again.");
+        const request={id:0,workspace:session.workspace,deadlineMs:30_000};
+        if (action==="request") return client.ownerYDocStopRequest(request,path);
+        if (action==="release") return client.ownerYDocRelease(request,binding!);
+        await client.ownerYDocStopClear(request,path);return undefined;
+      });
+      desktopEngine.retryOwnerDelivery(workspace.workspaceId);
+      return result;
+    },
     sharesChanged: (workspaceId) => { receivedShareAcquisition.invalidate(); invalidateHistoryLabels(workspaceId); shareRosters.sharesChanged(workspaceId); },
     reconcileReceivedShares,
   });

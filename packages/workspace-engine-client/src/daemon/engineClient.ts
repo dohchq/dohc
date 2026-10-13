@@ -781,6 +781,35 @@ export class EngineClient implements EngineTransport {
     return {status:"capture",captured:{nativeHeadSequence:captured.nativeHeadSequence,localStateDigest:parseLiveUpdateDigest(captured.localStateDigest)}};
   }
 
+  async ownerYDocStopRequest(request: OwnerYDocDeliveryRequest, path: string, signal?: AbortSignal) {
+    const rows = await this.ownerLiveStop(request, "request", {path}, signal);
+    if (rows.length !== 1 || rows[0]!.binding.currentPath !== path) throw new TypeError("Invalid Stop response.");
+    return rows[0]!;
+  }
+  async ownerYDocRelease(request: OwnerYDocDeliveryRequest, binding: OwnerYDocDeliveryTarget["binding"], signal?: AbortSignal) {
+    const rows = await this.ownerLiveStop(request, "release", {binding}, signal);
+    if (rows.length !== 1 || rows[0]!.state !== "released" || JSON.stringify(rows[0]!.binding) !== JSON.stringify(parseLiveObjectBinding(binding))) throw new TypeError("Invalid release response.");
+    return rows[0]!;
+  }
+  async ownerYDocStopClear(request: OwnerYDocDeliveryRequest, path: string, signal?: AbortSignal): Promise<void> {
+    const rows = await this.ownerLiveStop(request, "clear", {path}, signal);
+    if (rows.length) throw new TypeError("Invalid Stop cancellation response.");
+  }
+  async ownerYDocStopList(request: OwnerYDocDeliveryRequest, signal?: AbortSignal) {
+    return this.ownerLiveStop(request, "list", {}, signal);
+  }
+  private async ownerLiveStop(request: OwnerYDocDeliveryRequest, action: string, params: object, signal?: AbortSignal) {
+    const response = await this.sendRequest({...request, method: `ydoc.ownerStop.${action}`, params}, signal);
+    const value = response.result as {stops?: unknown};
+    if (!value || Object.keys(value).join() !== "stops" || !Array.isArray(value.stops) || value.stops.length > 64) throw new TypeError("Invalid Stop response.");
+    return value.stops.map((row: unknown) => {
+      if (!row || typeof row !== "object" || Object.keys(row).sort().join() !== "binding,relayDatabaseNamespace,state") throw new TypeError("Invalid Stop row.");
+      const r=row as {binding: unknown;relayDatabaseNamespace: unknown;state: unknown};
+      if (r.state !== "requested" && r.state !== "released") throw new TypeError("Invalid Stop state.");
+      return {binding: parseLiveObjectBinding(r.binding), relayDatabaseNamespace: parseLiveUpdateIdentifier(r.relayDatabaseNamespace,"relay namespace"), state: r.state};
+    });
+  }
+
   async ownerYDocEnroll(request:OwnerYDocDeliveryRequest, input:OwnerYDocDeliveryTarget & {
     captured:{nativeHeadSequence:number;localStateDigest:string};journalCursor:number;hostVector:Uint8Array;checkpoint:Uint8Array;recovery?:boolean
   }, signal?:AbortSignal):Promise<OwnerYDocDraftDescriptor> {

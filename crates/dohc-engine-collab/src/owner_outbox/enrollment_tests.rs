@@ -1046,6 +1046,137 @@ fn next_generation(observed: &ObservedOwnerBinding) -> LiveObjectBinding {
         ..observed.binding.clone()
     }
 }
+
+#[test]
+fn stop_preserves_old_generation_work_and_start_can_enroll_again() {
+    use super::super::release;
+    let (_dir, mut store, observed, _, _, host) = enrolled_with_unsent_draft();
+    let key = key(&observed.binding).unwrap();
+    let old = store
+        .read_with(|conn| open_draft_in(conn, &observed.binding, 1))
+        .unwrap();
+    // Cut the old paragraph and paste its text under a new paragraph, creating
+    // new CRDT ids that would resurrect it if release folded an old generation.
+    let moved = old
+        .doc
+        .rewrite_content_to_markdown(
+            crate::ContentKind::Richdoc,
+            "old draft heading\n\nunsent before restore",
+        )
+        .unwrap();
+    store
+        .write_with(&NoFaults, |tx| {
+            super::super::draft::append_draft_in_tx(
+                tx,
+                "workspace",
+                &observed.binding,
+                1,
+                "cut-and-paste".into(),
+                moved,
+                19,
+            )
+        })
+        .unwrap();
+    store
+        .write_with(&NoFaults, |tx| release::request_in_tx(tx, &key, 20))
+        .unwrap();
+    let next = next_generation(&observed);
+    let restored = successor_input(&store, &next, host);
+    enroll(&mut store, &restored, &observed.limits).unwrap();
+    let preserved = store
+        .read_with(|conn| Ok::<_, OwnerOutboxError>(old_generation_queue(conn)))
+        .unwrap();
+    fn old_rows(conn: &Connection) -> Vec<Vec<Vec<rusqlite::types::Value>>> {
+        ["SELECT * FROM owner_ydoc_outboxes WHERE restore_fence_generation=0 ORDER BY outbox_id",
+         "SELECT e.* FROM owner_ydoc_outbox_entries e JOIN owner_ydoc_outboxes o USING(outbox_id) WHERE o.restore_fence_generation=0 ORDER BY e.outbox_id,e.sequence",
+         "SELECT * FROM binary_blobs WHERE sha256 IN (SELECT base_blob_digest FROM owner_ydoc_outboxes WHERE restore_fence_generation=0 UNION SELECT update_blob_digest FROM owner_ydoc_outbox_entries e JOIN owner_ydoc_outboxes o USING(outbox_id) WHERE o.restore_fence_generation=0 UNION SELECT terminal_blob_digest FROM owner_ydoc_outbox_entries e JOIN owner_ydoc_outboxes o USING(outbox_id) WHERE o.restore_fence_generation=0) ORDER BY sha256"]
+        .map(|sql| {let mut stmt = conn.prepare(sql).unwrap(); let columns = stmt.column_count();
+            stmt.query_map([], |r| (0..columns).map(|i| r.get(i)).collect::<Result<Vec<_>,_>>()).unwrap()
+                .collect::<Result<Vec<_>,_>>().unwrap()}).into()
+    }
+    let old_before = store
+        .read_with(|conn| Ok::<_, OwnerOutboxError>(old_rows(conn)))
+        .unwrap();
+    let draft = store
+        .read_with(|conn| open_draft_in(conn, &next, 2))
+        .unwrap();
+    let update = draft
+        .doc
+        .richdoc_append_paragraph("current generation edit");
+    store
+        .write_with(&NoFaults, |tx| {
+            super::super::draft::append_draft_in_tx(
+                tx,
+                "workspace",
+                &next,
+                2,
+                "current".into(),
+                update,
+                21,
+            )?;
+            release::request_in_tx(tx, &key, 22)?;
+            release::release_in_tx(tx, &next, 23, |_, _, _, _, _| Ok(()))
+        })
+        .unwrap();
+    store
+        .read_with(|conn| {
+            assert_eq!(old_generation_queue(conn), preserved);
+            assert_eq!(old_rows(conn), old_before);
+            let doc = crate::load_doc_in(conn, &key).map_err(collab)?;
+            let text = doc.project(crate::ContentKind::Richdoc).map_err(collab)?;
+            assert!(text.content.contains("current generation edit"));
+            assert!(!text.content.contains("unsent before restore"));
+            assert!(prepare_in(conn, &next, "relay", false).is_err());
+            Ok::<_, OwnerOutboxError>(())
+        })
+        .unwrap();
+    store
+        .write_with(&NoFaults, |tx| release::clear_in_tx(tx, &key))
+        .unwrap();
+    let checkpoint = store
+        .read_with(|conn| bounded(&crate::load_doc_in(conn, &key).map_err(collab)?))
+        .unwrap();
+    let mut current = observed.clone();
+    current.binding = next;
+    let input = input(&store, &current, checkpoint);
+    enroll(&mut store, &input, &observed.limits).unwrap();
+    assert_eq!(
+        store
+            .read_with(|conn| Ok::<_, OwnerOutboxError>(old_generation_queue(conn)))
+            .unwrap(),
+        preserved
+    );
+}
+
+#[test]
+#[ignore = "manual first-enrollment guard timing"]
+fn measure_prepare_stop_guard() {
+    let (_dir, store, observed, _) = fixture();
+    let binding = &observed.binding;
+    store.read_with(|conn| {
+        let baseline = || {
+            validate_identifier("relay", "invalid relay namespace").unwrap();
+            assert!(super::super::draft::descriptor_for_key_in(conn, &key(binding).unwrap()).unwrap().is_none());
+            binding.validate_canonical().unwrap();let key = key(binding).unwrap();
+            let configured:bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM live_device_application_bindings WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3)",params![key.workspace_id,key.version_id,key.object_id],|r|r.get(0)).unwrap();
+            assert!(!configured && !super::super::has_adopted_owner_in(conn,&key).unwrap());
+            super::super::draft::require_ordinary_write(conn,&key).unwrap();
+            crate::live_update_application::require_restore_open(conn,&key).unwrap();
+            let marker = crate::read_marker_in(conn,&key).unwrap().unwrap();
+            assert_eq!(marker.content_kind,crate::ContentKind::Richdoc);assert_eq!(marker.regime,crate::Regime::Replicated);
+            assert_eq!(marker.lineage_claim_id.as_ref(),Some(&binding.lineage_claim_id));assert_eq!(marker.path.as_ref(),Some(&binding.current_path));
+            let doc = crate::load_doc_in(conn,&key).unwrap();assert!(!doc.has_pending_dependencies());
+            std::hint::black_box(OwnerEnrollmentCapture {native_head_sequence:marker.head_update_seq,local_state_digest:hex_sha256(&bounded(&doc).unwrap())});
+        };
+        for _ in 0..100 {baseline();std::hint::black_box(prepare_in(conn,binding,"relay",false).unwrap());}
+        for round in 0..5 {
+            let time = |guard: bool| {let start = std::time::Instant::now();for _ in 0..1_000 {if guard {std::hint::black_box(prepare_in(conn,binding,"relay",false).unwrap());} else {baseline();}} start.elapsed().as_secs_f64()*1_000.0};
+            let (before,after) = if round%2==0 {(time(false),time(true))} else {let after=time(true);(time(false),after)};
+            println!("prepare_stop_guard round={round} samples=1000 baseline_ms={before:.3} guarded_ms={after:.3}");
+        }
+        Ok::<_, OwnerOutboxError>(())
+    }).unwrap();
+}
 fn successor_input(
     store: &EngineStore,
     binding: &LiveObjectBinding,

@@ -3229,7 +3229,29 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         sql: "ALTER TABLE owner_ydoc_outbox_entries ADD COLUMN person_edit INTEGER CHECK (person_edit IS NULL OR person_edit=1);",
         sets_user_version: None,
     },
+    Migration {
+        ordinal: 53,
+        id: "v2-owner-live-stops",
+        sql: V2_OWNER_LIVE_STOPS_DDL,
+        sets_user_version: None,
+    },
 ];
+
+const V2_OWNER_LIVE_STOPS_DDL: &str = "\
+CREATE TABLE owner_live_stops (
+    workspace_id TEXT NOT NULL,
+    main_version_id TEXT NOT NULL,
+    object_id TEXT NOT NULL,
+    relay_database_namespace TEXT NOT NULL,
+    state TEXT NOT NULL CHECK (state IN ('requested','released')),
+    binding_json TEXT NOT NULL CHECK (json_valid(binding_json)),
+    requested_at_ms INTEGER NOT NULL CHECK (requested_at_ms >= 0),
+    updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms >= requested_at_ms),
+    PRIMARY KEY(workspace_id,main_version_id,object_id),
+    FOREIGN KEY(workspace_id,main_version_id,object_id) REFERENCES ydoc_docs(workspace_id,version_id,object_id) ON DELETE CASCADE
+) STRICT;
+CREATE INDEX idx_owner_live_stops_requested ON owner_live_stops(workspace_id,main_version_id,object_id) WHERE state='requested';
+";
 
 const V2_OPEN_DOCUMENT_ARTIFACTS_DDL: &str = "\
 CREATE TABLE replication_pending_refusals_next (
@@ -3911,6 +3933,10 @@ mod tests {
             (
                 "v2-owner-outbox-person-edit",
                 "55940512b28bebcdda24b3c86763c66e29416eed55f157b8c06edf9f5b5622df",
+            ),
+            (
+                "v2-owner-live-stops",
+                "b98cb7c563ea21bfe811b923328ace3caf3f00b0eef74a93a4d027498f946896",
             ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());
@@ -5359,7 +5385,7 @@ mod tests {
             INSERT INTO owner_ydoc_outbox_entries(outbox_id,sequence,append_key,delivery_id,update_digest,update_blob_digest,byte_length,created_at_ms,pending,result_pending_bytes,result_oldest_entry_at_ms,result_state) \
             VALUES ('outbox',1,'append','delivery','base','base',1,1,1,1,1,'active');").unwrap();
         assert_eq!(
-            run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).unwrap(),
+            run_migrations(&mut conn, &BASELINE_MIGRATIONS[..=before], &ctx, &NoFaults).unwrap(),
             MigrationOutcome::Applied { newly_applied: 1 }
         );
         let retained: (String, Option<bool>) = conn

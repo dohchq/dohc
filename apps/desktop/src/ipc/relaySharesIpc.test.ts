@@ -95,6 +95,7 @@ function harness() {
     relayShareJsonWithCredentials: request as Dependencies["relayShareJsonWithCredentials"],
     relayShareErrorCopy: (status) => `sharing failed (${status})`,
     relayShareDiscussionActivityPolls: polls,
+    ownerLiveStop: async (_workspace,action,path) => action==="clear" ? undefined : ({state:action==="release" ? "released" : "requested",relayDatabaseNamespace:"relay",binding:{workspaceId,mainVersionId:"main",objectId:"object",lineageClaimId:"a".repeat(64),currentPath:path,selectorPaths:[path],restoreFenceGeneration:0}}),
     sharesChanged,
     reconcileReceivedShares,
   });
@@ -213,7 +214,7 @@ describe("owner live document enrollment", () => {
     await expect(h.invoke(CHANNELS.stopOwnerLiveDocument, {workspaceId, path: "live.md"})).resolves.toBeUndefined();
     await expect(h.invoke(CHANNELS.resumeOwnerLiveDocument, {workspaceId, path: "live.md"})).resolves.toBeUndefined();
     expect(h.request.mock.calls.map((call) => [call[0], call[2]?.method, call[2]?.body])).toEqual([
-      [h.credentials, "DELETE", JSON.stringify({path: "live.md", retire: true})],
+      [h.credentials, "DELETE", JSON.stringify({path: "live.md", retire: true, restoreFenceGeneration: 0})],
       [h.credentials, "POST", JSON.stringify({path: "live.md"})],
     ]);
   });

@@ -49,6 +49,11 @@ pub(super) fn map_switch_reconcile_error(
 
 pub(super) fn map_owner_outbox(error: OwnerOutboxError) -> WireError {
     let message = match error {
+        OwnerOutboxError::DesktopHost => "owner-stop-desktop-host",
+        OwnerOutboxError::RestorePending => {
+            return WireError::new(ErrorCode::Overloaded, "owner-stop-restore-pending");
+        }
+        OwnerOutboxError::StopConflict => "owner-stop-conflict",
         OwnerOutboxError::InvalidInput(_) => "invalid-owner-outbox-input",
         OwnerOutboxError::WorkspaceMismatch => "owner-outbox-workspace-mismatch",
         OwnerOutboxError::MainVersionMismatch => "owner-outbox-main-version-mismatch",

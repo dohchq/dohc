@@ -36,6 +36,17 @@ it("discovers only owned synced workspaces and sends credentials only to their p
 });
 
 const refusal = {shareId: "share", paths: ["docs"], code: "live_document_limit", message: "This server reached its live document limit."};
+it.each(["restore-fenced", "restore-in-progress"])("keeps Stop pending for %s and retries the successor generation", async code => {
+  const f = fixture();
+  const session = (await f.connection.connect(f.workspace, new AbortController().signal))!;
+  const binding = {workspaceId: "workspace", mainVersionId: "main", objectId: "object", lineageClaimId: "a".repeat(64),
+    currentPath: "docs/a.md", selectorPaths: ["docs"], restoreFenceGeneration: 7};
+  f.fetch.mockResolvedValueOnce(new Response(JSON.stringify({ok: false, code, restoreFenceGeneration: 8}), {status: 409}));
+  expect(await session.retire(binding, new AbortController().signal)).toBe(false);
+  f.fetch.mockResolvedValueOnce(new Response(JSON.stringify({ok: true, path: binding.currentPath, status: "retired"})));
+  expect(await session.retire({...binding, restoreFenceGeneration: 8}, new AbortController().signal)).toBe(true);
+  expect(f.fetch.mock.calls.map(call => JSON.parse((call as unknown as [string, RequestInit])[1].body as string).restoreFenceGeneration)).toEqual([7, 8]);
+});
 const refusalPage = (refusals: typeof refusal[], nextCursor: string | null = null) => new Response(JSON.stringify({ok: true, refusals, nextCursor}));
 
 it("surfaces refused enrollment on the existing tick and clears only after a complete clean scan", async () => {

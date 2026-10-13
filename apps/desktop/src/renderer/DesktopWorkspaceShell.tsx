@@ -1,5 +1,6 @@
 import { useTypingRecoveryNotices } from "./shell/useTypingRecoveryNotices";
 import { useFolderAppOffers } from "./offers/useFolderAppOffers";
+import { withClosedEngineDocSession } from "./collab/engineDocLease";
 import { CreationPartialError } from "@dohc/cli/creation";
 import {shareSenderLabel} from "@dohc/security-contract/share-labels";
 import { AgentSettingsProvider } from "./workbench/AgentBadge";
@@ -858,7 +859,7 @@ export function DesktopWorkspaceShell(props: {
   );
   const stopLiveDocument = useCallback(
     (id: string, path: string) =>
-      bridge().stopOwnerLiveDocument({ workspaceId: id, path }),
+      withClosedEngineDocSession(id, path, () => bridge().stopOwnerLiveDocument({ workspaceId: id, path })),
     [],
   );
   const resumeLiveDocument = useCallback(

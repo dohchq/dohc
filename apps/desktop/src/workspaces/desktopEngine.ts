@@ -1,3 +1,5 @@
+import {reconcileOwnerLiveStops} from "./ownerLiveStop";
+import type {LiveObjectBinding} from "@dohc/live-session-contract/live-object-binding";
 import { waitForEnginePublicationGate } from "./testEnginePublicationGate";
 import type { App, Dialog } from "electron";
 import {
@@ -36,6 +38,7 @@ export interface ServerOwnerDelivery {
     assertCurrent(): void;
     refusals(attempt: AbortSignal): Promise<void>;
     documents(signal: AbortSignal): Promise<unknown>;
+    retire(binding: LiveObjectBinding, signal: AbortSignal): Promise<boolean>;
   } | null>;
 }
 export type OwnerLiveDeliveryStatus = "preparing" | "active" | "retrying";
@@ -161,6 +164,12 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
               try {
               try {await session.refusals(signal);}
               catch (error) {check(); console.error("[desktop] owner live refusal discovery failed:", error);}
+              await sessions.run(operation.workspace,async binding => {
+                const client=daemon.currentClient();
+                if (!(client instanceof EngineClient)) throw new Error("Owner Stop requires the desktop daemon client.");
+                await reconcileOwnerLiveStops({client,workspaceHandle:binding.workspace,workspaceId,signal,
+                  retire:session.retire,assertCurrent:() => {check();sessions.assertCurrentBinding(operation.workspace,binding);}});
+              });
               const response = await session.documents(signal);
               const documents = readyOwnerDeliveryDocuments(response, workspaceId);
               check();

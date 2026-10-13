@@ -339,6 +339,7 @@ export type EngineDocLease = Omit<EngineDocSession, "start"> & {
   release: () => void;
   disposeIfReleased: () => void;
   reopenForRetry: (input: EngineDocInput, requestKey: string) => void;
+  withClosedSession: (work: () => Promise<void>) => Promise<void>;
 };
 
 const engineDocLeases = new Map<string, EngineDocLease>();
@@ -1435,6 +1436,25 @@ function createEngineDocLease(
 
   lease = {
     documentKey: stableDocumentKey,
+    withClosedSession(work) {
+      const generation = ++transitionGeneration;
+      const previous = activeSession;
+      activeSession = null;
+      unsubscribeSession?.();
+      unsubscribeSession = null;
+      publish(emptyLeaseSnapshot(requestKey));
+      const operation = transition.then(async () => {
+        try {
+          await previous?.dispose();
+          await previous?.whenClosed();
+          if (!disposed && generation === transitionGeneration) await work();
+        } finally {
+          if (!disposed && generation === transitionGeneration) attach(createEngineDocSession(input, requestKey));
+        }
+      });
+      transition = operation.catch(() => undefined);
+      return operation;
+    },
     retain() {
       refCount += 1;
       releaseToken += 1;
@@ -1457,6 +1477,8 @@ function createEngineDocLease(
     reopenForRetry(nextInput, nextRequestKey) {
       if (disposed) return;
       if (snapshot.key === nextRequestKey && snapshot.outcome === null) return;
+      input = nextInput;
+      requestKey = nextRequestKey;
 
       const generation = ++transitionGeneration;
       const previous = activeSession;
@@ -1545,6 +1567,13 @@ export async function disposeEngineDocLeasesForTests(): Promise<void> {
   // the session disposed so a late answer closes instead of binding.
   engineDocDisposalBarriers.clear();
   await Promise.all(leases.map((lease) => lease.dispose()));
+}
+
+/** Flush and close every pane for this document before changing its live mode. */
+export async function withClosedEngineDocSession(workspaceId: string, path: string, work: () => Promise<void>): Promise<void> {
+  const leases = [...engineDocLeases.values()].filter(lease => lease.documentKey === documentKey(workspaceId, path));
+  const close = (index: number): Promise<void> => index === leases.length ? work() : leases[index]!.withClosedSession(() => close(index + 1));
+  await close(0);
 }
 
 export function retainEngineDocLease(

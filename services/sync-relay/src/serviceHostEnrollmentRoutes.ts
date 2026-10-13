@@ -1,3 +1,4 @@
+import {ServiceHostRetirementConflict} from "./storage/serviceHostEnrollment";
 import {readBoundedJson} from "@dohc/service-http";
 import type {ResolveActor} from "@dohc/workspace-auth/session";
 import {liveDocumentKindForPath} from "@dohc/workspace-contracts/live-documents";
@@ -121,10 +122,10 @@ export function createServiceHostEnrollmentRoutes(options: {
       if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw badRequest("Invalid live host request.");
       const input = raw as Record<string, unknown>;
       if (request.method === "DELETE") {
-        if (Object.keys(input).some(key => key !== "path" && key !== "retire") || typeof input.path !== "string" ||
-          (input.retire !== undefined && input.retire !== true)) throw badRequest("A document path and optional retirement are required.");
+        if (Object.keys(input).some(key => key !== "path" && key !== "retire" && key !== "restoreFenceGeneration") || typeof input.path !== "string" ||
+          (input.retire !== undefined && input.retire !== true) || (input.retire === true && (!Number.isSafeInteger(input.restoreFenceGeneration) || Number(input.restoreFenceGeneration) < 0)) || (input.retire !== true && input.restoreFenceGeneration !== undefined)) throw badRequest("A document path and optional retirement are required.");
         const row = storage.setServiceHostEnrollmentEnabled({workspaceId, path: input.path, ownerUserId: actor.userId, enabled: false,
-          ...(input.retire === true ? {retire: true} : {}), nowMs: Date.now(), guard});
+          ...(input.retire === true ? {retire: true, restoreFenceGeneration: Number(input.restoreFenceGeneration)} : {}), nowMs: Date.now(), guard});
         if (!row) throw notFound();
         host.reconcile(); return response({ok: true, ...(input.retire === true ? {path: row.path, status: "retired"} : state(row))});
       }
@@ -139,6 +140,6 @@ export function createServiceHostEnrollmentRoutes(options: {
       host.reconcile();
       const documents = rows.map(state);
       return response({ok: true, ...(input.path === undefined ? {documents} : documents[0])}, documents.every(row => row.status === "ready") ? 200 : 202);
-    } catch (error) {return errorResponse(error);}
+    } catch (error) {if (error instanceof ServiceHostRetirementConflict) return response({ok:false,code:"restore-fenced",restoreFenceGeneration:error.restoreFenceGeneration},409); return errorResponse(error);}
   };
 }

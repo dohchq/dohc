@@ -5,7 +5,7 @@ import * as Y from "yjs";
 import { insertElementRevision, putSceneAsset } from "@dohc/excalidraw-scene";
 import { resetOrphanedDrafts, useOrphanedDrafts } from "../orphanedDrafts";
 import { ORPHANED_DRAFT_STORAGE_KEY, loadStoredDrafts } from "../orphanedDraftStorage";
-import { disposeEngineDocLeasesForTests } from "./engineDocLease";
+import { disposeEngineDocLeasesForTests, withClosedEngineDocSession } from "./engineDocLease";
 import { retainObservedEngineDocLease } from "./engineDocLeaseTestHarness";
 import { harnessBridge, IMAGE_DESCRIPTOR } from "./engineDocSaveStateTestHarness";
 import { EngineYDocDeliveryRefusedError } from "./engineYDocProvider";
@@ -97,6 +97,38 @@ beforeEach(() => {
   resetOrphanedDrafts();
   projectionGate.pending = null;
   projectionGate.completed = 0;
+});
+
+it.each([false, true])("flushes and closes Stop's draft before the request, then reopens it (waiting=%s)", async waiting => {
+  retainDocument();
+  await waitFor(() => expect(retained.snapshot.outcome?.kind).toBe("bound"));
+  const previous = harness.sessionId()!;
+  act(() => editDocument());
+  const work = vi.fn(async () => {
+    expect(harness.mainText()).toBe("seed!");
+    expect(harness.closed).toContain(previous);
+    expect(retained.snapshot.outcome).toBeNull();
+    if (waiting) throw new Error("Stop live editing is waiting. You can keep editing.");
+  });
+  await act(async () => {
+    const stop = withClosedEngineDocSession("ws-1", "notes/big.md", work);
+    if (waiting) await expect(stop).rejects.toThrow("waiting"); else await stop;
+  });
+  await waitFor(() => expect(harness.openCount()).toBe(2));
+  expect(harness.sessionId()).not.toBe(previous);
+  expect(work).toHaveBeenCalledTimes(1);
+  expect(retained.boundDoc().getText("plainText").toString()).toBe("seed!");
+  act(() => editDocument());
+  await boundOutcome().flushPendingLocalUpdates();
+  expect(harness.mainText()).toBe("seed!!");
+});
+
+it("does not close another document when Stop changes one document", async () => {
+  retainDocument();
+  await waitFor(() => expect(retained.snapshot.outcome?.kind).toBe("bound"));
+  await withClosedEngineDocSession("other-workspace", "notes/big.md", async () => undefined);
+  expect(harness.closed).toEqual([]);
+  expect(harness.openCount()).toBe(1);
 });
 
 afterEach(async () => {

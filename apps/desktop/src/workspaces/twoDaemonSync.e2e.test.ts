@@ -54,6 +54,10 @@ import { selfHostLiveProfile } from "../../../../services/sync-relay/src/selfHos
 import { runNativeOwnerDeliveryPass } from "./nativeOwnerDelivery";
 import { readyOwnerDeliveryDocuments } from "./serverOwnerDelivery";
 import { startServerOwnerDelivery } from "./serverOwnerDelivery";
+import {registerRelaySharesIpcHandlers} from "../ipc/relaySharesIpc";
+import {CHANNELS} from "../ipc/channels";
+import {createPresencePollRegistry} from "../collab/presencePollRegistry";
+import {reconcileOwnerLiveStops} from "./ownerLiveStop";
 
 const engine = requireEngineBinaryOrSkip();
 let relayBuildDirectory: string;
@@ -606,14 +610,17 @@ it.skipIf(engine.missing)(
 );
 
 it.skipIf(engine.missing).each([
-  { name: "existing id", hasId: true, body: "# Keep this body\n" },
-  { name: "id-less canonical", hasId: false, body: "# Body\n" },
-  { name: "id-less non-canonical", hasId: false, body: "A setext heading\n================\n\n* first\n* second\n" },
-])("settles open Collection adoption with native owner delivery and recipient sync ($name)", async ({ name, hasId, body: originalBody }) => {
+  { name: "existing id", hasId: true, body: "# Keep this body\n", stopQuarantine: false },
+  { name: "id-less canonical", hasId: false, body: "# Body\n", stopQuarantine: false },
+  { name: "id-less non-canonical", hasId: false, body: "A setext heading\n================\n\n* first\n* second\n", stopQuarantine: false },
+  { name: "quarantine", hasId: true, body: "# Keep this body\n", stopQuarantine: true },
+  { name: "stale-binding quarantine", hasId: true, body: "# Keep this body\n", stopQuarantine: true },
+  { name: "offline stop", hasId: true, body: "# Keep this body\n", stopQuarantine: true },
+])("settles open Collection adoption with native owner delivery and recipient sync ($name)", async ({ name, hasId, body: originalBody, stopQuarantine }) => {
   const canonical = markdownToYDoc(originalBody);
   const body = name === "id-less canonical" ? yDocToMarkdown(canonical) : originalBody;
   canonical.destroy();
-  const workspaceId = `native-open-adoption-${name.replaceAll(" ", "-")}`;
+  const workspaceId = name === "stale-binding quarantine" ? "native-stale-quarantine" : `native-open-adoption-${name.replaceAll(" ", "-")}`;
   const rootA = await createTestScratch("dohc-native-adoption-owner-");
   const rootB = await createTestScratch("dohc-native-adoption-peer-");
   const relayRoot = await createTestScratch("dohc-native-adoption-relay-");
@@ -921,6 +928,107 @@ it.skipIf(engine.missing).each([
           document: expect.objectContaining({path}), refusalCoordinates: [coordinate]})),
       });
     expect(errors).toEqual([]);
+    if (stopQuarantine) {
+      await delivery?.stop(); delivery = undefined;
+      const offlineStop = name === "offline stop";
+      const quarantineReason = name === "stale-binding quarantine" ? "stale-binding" : "delivery-conflict";
+      await session.applyDecidedLocalUpdate(doc => {
+        const scratch = new Y.Doc();
+        try {Y.applyUpdate(scratch, Y.encodeStateAsUpdate(doc)); const before = Y.encodeStateVector(scratch);
+          patchFrontmatter(scratch, new Map([["Name", "Quarantined edit"]])); return Y.encodeStateAsUpdate(scratch, before);
+        } finally {scratch.destroy();}
+      }, undefined, {actorOriginId: "local-person", attribution: {actorKind: "human"}, idempotencyKey: "quarantine-edit"});
+      const db = new DatabaseSync(join(rootA, SECRET_FILE_STORE_RELATIVE_PATH), {readOnly: true});
+      const outboxId = String(db.prepare("SELECT outbox_id FROM owner_ydoc_outboxes WHERE workspace_id=? AND object_id=? AND pending_bytes>0").get(workspaceId, document.binding.objectId)!.outbox_id);
+      db.close();
+      const readPending = () => source.sessions.run(source.workspace, async ({client, workspace}) => {
+        const outbox = new OwnerYDocOutbox(client, workspace);
+        try {return await outbox.readPending(outboxId);} finally {outbox.dispose();}
+      });
+      expect((await readPending()).entries).not.toHaveLength(0);
+      if (!offlineStop) await source.sessions.run(source.workspace, async ({client, workspace}) => {
+        const outbox = new OwnerYDocOutbox(client, workspace);
+        try {await outbox.quarantine({outboxId, reason: quarantineReason});} finally {outbox.dispose();}
+      });
+      await session.close({settle: false});
+      const handlers = new Map<string, (event: {sender: {id: number}}, payload: unknown) => unknown>();
+      const credentials = {serverUrl: proxy.origin, relayUrl: proxy.origin, userId: workspaceId, email: "owner@dohc.test", token: relayConnection.token};
+      const unexpected = (): never => {throw new Error("Unexpected Stop dependency");};
+      let offline = offlineStop;
+      registerRelaySharesIpcHandlers({
+        registerHandler: (channel, handler) => {handlers.set(channel, handler);}, assertTrustedSender() {},
+        withRendererWorkspaceOperation: async (_sender, id, _message, work) => {expect(id).toBe(workspaceId);return work({workspace: source.workspace, assertCurrent() {}});},
+        remoteForWorkspace: async () => ({credentials, credentialGeneration: 1}), currentCredentialGeneration: () => 1,
+        currentCredentials: () => credentials, warmCredentialCache: async () => {}, relayShareJson: unexpected,
+        relayShareJsonWithCredentials: async <R,>(_credentials: unknown, endpoint: string, init?: RequestInit): Promise<R> => {
+          if (offline) throw new Error("offline");
+          const response = await fetch(`${proxy.origin}${endpoint}`, {...init, headers: {authorization: `Bearer ${relayConnection.token}`, "content-type": "application/json"}});
+          expect(response.ok).toBe(true); return await response.json() as R;
+        }, relayShareErrorCopy: unexpected, relayShareDiscussionActivityPolls: createPresencePollRegistry(),
+        ownerLiveStop: (_workspace, action, stopPath, binding) => source.sessions.run(source.workspace, async ({workspace}) => {
+          const client = source.nativeClient(), request = {id: 0, workspace, deadlineMs: REAL_DAEMON_DEADLINE_MS};
+          if (action === "clear") {await client.ownerYDocStopClear(request, stopPath);return;}
+          return action === "request" ? client.ownerYDocStopRequest(request, stopPath) : client.ownerYDocRelease(request, binding!);
+        }), sharesChanged: unexpected, reconcileReceivedShares: unexpected,
+      });
+      const stop = () => Promise.resolve(handlers.get(CHANNELS.stopOwnerLiveDocument)!({sender: {id: 1}}, {workspaceId, path}));
+      if (offlineStop) {
+        await expect(stop()).rejects.toThrow("Stop live editing is waiting.");
+        const requested = await source.sessions.run(source.workspace, async ({workspace}) =>
+          source.nativeClient().ownerYDocStopList({id: 0, workspace, deadlineMs: REAL_DAEMON_DEADLINE_MS}));
+        expect(requested).toMatchObject([{state: "requested", binding: document.binding}]);
+        const stillBound = await capture.openYDocSession({path, contentKind: "richdoc", onRemoteUpdate: () => undefined});
+        await stillBound.applyDecidedLocalUpdate(doc => {
+          const scratch = new Y.Doc();
+          try {Y.applyUpdate(scratch, Y.encodeStateAsUpdate(doc)); const before = Y.encodeStateVector(scratch);
+            patchFrontmatter(scratch, new Map([["Name", "Offline while stopping"]])); return Y.encodeStateAsUpdate(scratch, before);
+          } finally {scratch.destroy();}
+        }, undefined, {actorOriginId: "local-person", attribution: {actorKind: "human"}, idempotencyKey: "offline-stop"});
+        await stillBound.close({settle: false});
+        expect((await discovery()).length).toBe(1);
+        offline = false;
+        await source.sessions.run(source.workspace, async ({workspace}) => reconcileOwnerLiveStops({
+          client: source.nativeClient(), workspaceHandle: workspace, workspaceId, signal: AbortSignal.timeout(60_000), assertCurrent() {},
+          async retire(binding, signal) {
+            const response = await fetch(`${proxy.origin}/sync/${workspaceId}/live-host`, {method: "DELETE", signal,
+              headers: {authorization: `Bearer ${relayConnection.token}`, "content-type": "application/json"},
+              body: JSON.stringify({path: binding.currentPath, retire: true, restoreFenceGeneration: binding.restoreFenceGeneration})});
+            expect(await response.json()).toMatchObject({status: "retired"}); return response.ok;
+          },
+        }));
+      } else await stop();
+      await expect.poll(async () => (await discovery()).length, {timeout: 60_000}).toBe(0);
+      await expect(readPending()).rejects.toThrow("owner-outbox-not-found");
+      expect(await readFile(join(rootA, path), "utf8")).toContain(offlineStop ? "Name: Offline while stopping" : "Name: Quarantined edit");
+      const releasedMoment = (await capture.listMoments({limit: 100})).moments.find(moment => moment.path === path);
+      expect(releasedMoment?.authors).toContainEqual({kind: "human", humanId: "local-person"});
+      const ordinary = await capture.openYDocSession({path, contentKind: "richdoc", onRemoteUpdate: () => undefined});
+      await expect(ordinary.applyDecidedLocalUpdate(doc => {
+        const scratch = new Y.Doc();
+        try {Y.applyUpdate(scratch, Y.encodeStateAsUpdate(doc)); const before = Y.encodeStateVector(scratch);
+          patchFrontmatter(scratch, new Map([["Name", "Local after stop"]])); return Y.encodeStateAsUpdate(scratch, before);
+        } finally {scratch.destroy();}
+      }, undefined, {actorOriginId: "local-person", attribution: {actorKind: "human"}, idempotencyKey: "after-stop"})).resolves.toBeDefined();
+      await ordinary.settleNow();await ordinary.close();
+      await pushUntilDrained(relay);
+      await peer.capture.runRelaySync(page => peer!.relay.pull(page));
+      expect(await readFile(join(rootB, path), "utf8")).toContain("Name: Local after stop");
+      await handlers.get(CHANNELS.resumeOwnerLiveDocument)!({sender: {id: 1}}, {workspaceId, path});
+      await expect.poll(async () => (await discovery()).length, {timeout: 120_000}).toBe(1);
+      expect(["empty", "acknowledged"]).toContain(await pass(AbortSignal.timeout(60_000)));
+      const restarted = await capture.openYDocSession({path, contentKind: "richdoc", onRemoteUpdate: () => undefined});
+      await restarted.applyDecidedLocalUpdate(doc => {
+        const scratch = new Y.Doc();
+        try {Y.applyUpdate(scratch, Y.encodeStateAsUpdate(doc));const before = Y.encodeStateVector(scratch);
+          patchFrontmatter(scratch, new Map([["Name", "Live again"]]));return Y.encodeStateAsUpdate(scratch, before);
+        } finally {scratch.destroy();}
+      }, undefined, {actorOriginId: "local-person", attribution: {actorKind: "human"}, idempotencyKey: "live-again"});
+      await expect.poll(async () => {
+        await pass(AbortSignal.timeout(60_000));await capture!.flush();await pushUntilDrained(relay);
+        await peer!.capture.runRelaySync(page => peer!.relay.pull(page));return readFile(join(rootB, path), "utf8");
+      }, {timeout: 120_000}).toContain("Name: Live again");
+      await restarted.close({settle: false});
+    }
     await session.close({settle: false});
   } finally {
     await delivery?.stop(); await peer?.close();

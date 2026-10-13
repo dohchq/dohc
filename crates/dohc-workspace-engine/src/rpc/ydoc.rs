@@ -550,6 +550,122 @@ impl EngineService {
         }
     }
 
+    pub(super) async fn owner_ydoc_stop(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+        action: &str,
+    ) -> Result<Value, WireError> {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase", deny_unknown_fields)]
+        struct Params {
+            path: Option<String>,
+            binding: Option<dohc_engine_collab::LiveObjectBinding>,
+        }
+        let params: Params = parse(params)?;
+        if (action == "release") != params.binding.is_some()
+            || (matches!(action, "request" | "clear")) != params.path.is_some()
+        {
+            return Err(WireError::new(
+                ErrorCode::InvalidParams,
+                "invalid-owner-stop-input",
+            ));
+        }
+        let handle = handle.ok_or_else(workspace_unavailable)?;
+        let open = self.open(Some(&handle))?;
+        if let Some(b) = &params.binding {
+            validate_owner_outbox_wire_binding(b)?;
+            if b.workspace_id != open.workspace_id {
+                return Err(workspace_unavailable());
+            }
+        }
+        if let Some(path) = &params.path {
+            dohc_engine_domain::validate_plaintext_storable_path(path)
+                .map_err(|_| WireError::new(ErrorCode::InvalidParams, "invalid-owner-stop-path"))?;
+        }
+        let cancellation = OperationCancellation::new(ctx);
+        let _serial = self
+            .mutation_session_guard(&open, &cancellation, "owner Stop (queued)")
+            .await?;
+        let rows = open
+            .actor
+            .owner_ydoc_stop(
+                open.workspace_id.clone(),
+                params.path,
+                params.binding,
+                action.into(),
+                now_ms()?,
+                Arc::new(NoFaults),
+                cancellation.token(),
+            )
+            .await
+            .map_err(map_runtime)?
+            .map_err(map_owner_outbox)?;
+        if action == "release" {
+            for row in &rows {
+                for facts in &row.record_facts {
+                    emit_record_events(&self.events, &open.workspace_id, facts);
+                }
+                let b = &row.binding;
+                for session in crate::lock(&self.sessions).values_mut() {
+                    if session.workspace == handle
+                        && session.key.object_id == b.object_id
+                        && session.key.version_id == b.main_version_id
+                    {
+                        session.owner_draft = None;
+                    }
+                }
+                self.notify_owner_sessions(&handle, b);
+                let key = dohc_engine_collab::DocKey::new(
+                    &b.workspace_id,
+                    &b.main_version_id,
+                    &b.object_id,
+                )
+                .map_err(|_| WireError::new(ErrorCode::InvalidParams, "invalid-owner-stop-key"))?;
+                let state = open
+                    .actor
+                    .ydoc_open_state(
+                        open.workspace_id.clone(),
+                        now_ms()?,
+                        false,
+                        Some(key.clone()),
+                        b.main_version_id.clone(),
+                        b.current_path.clone(),
+                        Some(ContentKind::Richdoc),
+                        cancellation.token(),
+                    )
+                    .await
+                    .map_err(map_runtime)?;
+                let settled = open
+                    .actor
+                    .ydoc_settle(
+                        open.root.clone(),
+                        key,
+                        b.current_path.clone(),
+                        ContentKind::Richdoc,
+                        Some(b.lineage_claim_id.clone()),
+                        state.head_blob_sha256,
+                        "owner-live-stop".into(),
+                        Arc::new(self.self_writes.scoped(&open.root)),
+                        now_ms()?,
+                        Arc::new(NoFaults),
+                        cancellation.token(),
+                        None,
+                    )
+                    .await
+                    .map_err(map_runtime)?;
+                if settled
+                    .settled()
+                    .is_some_and(|s| s.collection_reconcile_required)
+                {
+                    open.request_collection_reconcile();
+                }
+            }
+        }
+        Ok(json!({"stops":rows}))
+    }
+
     pub(super) async fn owner_ydoc_outbox_append(
         &self,
         ctx: &RequestContext,
