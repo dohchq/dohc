@@ -40,7 +40,7 @@ function checkServerAddress(
   if (origin) return { origin };
   try {
     if (new URL(typed).protocol === "http:") {
-      return { problem: "Enter an https address. dohc connects to servers only over https." };
+      return { problem: "dohc connects to servers only over https. Enter an https address." };
     }
   } catch {
     // Not a URL at all — the example address is the useful correction.

@@ -190,7 +190,7 @@ describe("CloudLogin", () => {
     fireEvent.click(screen.getByTestId("cloud-connect-start"));
 
     expect(screen.getByTestId("cloud-connection-error").textContent).toBe(
-      "Enter an https address. dohc connects to servers only over https.",
+      "dohc connects to servers only over https. Enter an https address.",
     );
     expect(bridgeMock.cloudLoginStart).not.toHaveBeenCalled();
   });

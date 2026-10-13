@@ -309,6 +309,21 @@ export function createCloudLogin(options: CloudLoginOptions): CloudLogin {
       throw error;
     }
   }
+  // Sign-in takes only https servers, or plain http on this machine under the
+  // e2e switch. A session saved for any other server reads as signed out, so
+  // no call sends its token in clear text.
+  function allowedServer(url: string): boolean {
+    try {
+      return canonicalCloudOrigin(new URL(url).origin, insecureLoopback) !== null;
+    } catch {
+      return false;
+    }
+  }
+  async function loadSession(): Promise<CloudCredentials | null> {
+    const saved = await options.store.load();
+    if (saved === null || !allowedServer(saved.serverUrl)) return null;
+    return saved.relayUrl === undefined || allowedServer(saved.relayUrl) ? saved : null;
+  }
   let pollInFlight: {
     attempt: PendingLogin;
     promise: Promise<CloudLoginPollResult>;
@@ -488,7 +503,7 @@ export function createCloudLogin(options: CloudLoginOptions): CloudLogin {
 
     async status() {
       await storeMutation;
-      const credentials = await options.store.load();
+      const credentials = await loadSession();
       if (credentials === null) return { connected: false };
       if (await sessionIsDead(credentials)) {
         await retryInvalidatedDeletion(credentials).catch(() => undefined);
@@ -534,7 +549,7 @@ export function createCloudLogin(options: CloudLoginOptions): CloudLogin {
 
     async credentials() {
       await storeMutation;
-      const loaded = await options.store.load();
+      const loaded = await loadSession();
       if (loaded === null) return null;
       // A tombstoned record is a dead session: handing it out would let a
       // sync engine retry the dead token as if it were live.

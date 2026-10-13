@@ -211,7 +211,16 @@ impl HttpRelayTransport {
             return Err(RelayError::InvalidResponse);
         }
         if !base_url_is_allowed(&base_url, allow_insecure_loopback) {
-            return Err(RelayError::HttpsRequired);
+            // An https address refused for its query or fragment is malformed,
+            // not a scheme the engine refuses.
+            let https = base_url
+                .get(..8)
+                .is_some_and(|scheme| scheme.eq_ignore_ascii_case("https://"));
+            return Err(if https {
+                RelayError::InvalidResponse
+            } else {
+                RelayError::HttpsRequired
+            });
         }
         Ok(Self {
             base_url,
@@ -2326,8 +2335,15 @@ mod tests {
 
     #[test]
     fn relay_base_url_rejects_query_and_fragment_components() {
-        assert!(HttpRelayTransport::new("https://relay.example?tenant=a", "token").is_err());
-        assert!(HttpRelayTransport::new("https://relay.example/#fragment", "token").is_err());
+        assert_eq!(
+            HttpRelayTransport::new("https://relay.example?tenant=a", "token").err(),
+            Some(RelayError::InvalidResponse),
+            "a malformed https address must not tell the person to use https"
+        );
+        assert_eq!(
+            HttpRelayTransport::new("HTTPS://relay.example/#fragment", "token").err(),
+            Some(RelayError::InvalidResponse)
+        );
         assert!(
             HttpRelayTransport::new("https://relay.example/base", "token").is_ok(),
             "ordinary path prefixes remain supported"

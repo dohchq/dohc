@@ -147,6 +147,20 @@ describe("cloud device-flow login", () => {
     expect(calls).toEqual([]);
   });
 
+  it("reads a session saved for a plain http server as signed out, except under the e2e switch", async () => {
+    const saved = { serverUrl: "http://localhost:1786", relayUrl: "http://localhost:1786", email: "user@example.test", userId: "user", token: "secret" };
+    for (const allowInsecureLoopbackForTests of [false, true]) {
+      const store = memoryStore();
+      store.saved = saved;
+      const login = createCloudLogin({ store, fetch: fakeFetch({}).impl, allowInsecureLoopbackForTests });
+      await expect(login.credentials()).resolves.toEqual(allowInsecureLoopbackForTests ? saved : null);
+      await expect(login.status()).resolves.toMatchObject({ connected: allowInsecureLoopbackForTests });
+    }
+    const store = memoryStore();
+    store.saved = { ...saved, serverUrl: "https://cloud.test", relayUrl: "http://localhost:1786" };
+    await expect(createCloudLogin({ store }).credentials()).resolves.toBeNull();
+  });
+
   it("signs in to a plain http server on this machine only under the e2e switch", async () => {
     const local = "http://127.0.0.1:1786";
     const fetcher = (async (url: string | URL | Request) => String(url).endsWith("/.well-known/dohc-server")
