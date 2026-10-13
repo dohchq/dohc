@@ -163,7 +163,13 @@ impl Checkpoints {
     // WAL frames can appear between this probe and its PASSIVE checkpoint.
     // The background connection can only reduce that tail.
     pub(crate) fn checkpoint_on_writer_if_needed(&self, conn: &Connection) {
-        self.checkpoint_tail(conn, WRITER_CHECKPOINT_FRAMES, MAX_WRITER_BACKFILL_FRAMES);
+        self.checkpoint_tail(
+            conn,
+            WRITER_CHECKPOINT_FRAMES,
+            MAX_WRITER_BACKFILL_FRAMES,
+            #[cfg(feature = "fault-injection")]
+            None,
+        );
     }
 
     /// Before publication a fresh store contains only schema metadata, no user
@@ -172,9 +178,13 @@ impl Checkpoints {
     pub(crate) fn checkpoint_fresh_schema(&self, conn: &Connection) {
         #[cfg(feature = "fault-injection")]
         let mut phase = crate::capture_phase::Phase::new("fresh_schema_PASSIVE", None, 0, true);
-        self.checkpoint_tail(conn, 0, i64::MAX);
-        #[cfg(feature = "fault-injection")]
-        phase.finish("attempted");
+        self.checkpoint_tail(
+            conn,
+            0,
+            i64::MAX,
+            #[cfg(feature = "fault-injection")]
+            Some(&mut phase),
+        );
     }
 
     /// Upgrades contain user data and may have readers pinning an old prefix.
@@ -183,16 +193,43 @@ impl Checkpoints {
     pub(crate) fn checkpoint_migration_tail_if_small(&self, conn: &Connection) {
         #[cfg(feature = "fault-injection")]
         let mut phase = crate::capture_phase::Phase::new("migration_tail_PASSIVE", None, 0, true);
-        self.checkpoint_tail(conn, 0, MAX_WRITER_BACKFILL_FRAMES);
-        #[cfg(feature = "fault-injection")]
-        phase.finish("attempted");
+        self.checkpoint_tail(
+            conn,
+            0,
+            MAX_WRITER_BACKFILL_FRAMES,
+            #[cfg(feature = "fault-injection")]
+            Some(&mut phase),
+        );
     }
 
-    fn checkpoint_tail(&self, conn: &Connection, minimum_log_frames: i64, maximum_tail: i64) {
+    fn checkpoint_tail(
+        &self,
+        conn: &Connection,
+        minimum_log_frames: i64,
+        maximum_tail: i64,
+        #[cfg(feature = "fault-injection")] mut phase: Option<&mut crate::capture_phase::Phase>,
+    ) {
         let Ok((log, backfilled)) = frames(conn) else {
+            #[cfg(feature = "fault-injection")]
+            if let Some(phase) = phase.as_mut() {
+                phase.finish("error");
+            }
             return;
         };
+        #[cfg(feature = "fault-injection")]
+        if let Some(phase) = phase.as_mut() {
+            phase.field("starting_log", log);
+            phase.field("starting_backfilled", backfilled);
+            phase.field("ending_log", log);
+            phase.field("ending_backfilled", backfilled);
+            phase.field("frames_backfilled", 0);
+            phase.field("frames_finished", backfilled);
+        }
         if log < minimum_log_frames || !(0..=maximum_tail).contains(&(log - backfilled)) {
+            #[cfg(feature = "fault-injection")]
+            if let Some(phase) = phase.as_mut() {
+                phase.finish("skipped");
+            }
             return;
         }
         #[cfg(feature = "fault-injection")]
@@ -204,6 +241,18 @@ impl Checkpoints {
                 Ok((row.get::<_, i64>(1)?, row.get::<_, i64>(2)?))
             })
         {
+            #[cfg(feature = "fault-injection")]
+            if let Some(phase) = phase.as_mut() {
+                phase.field("ending_log", latest);
+                phase.field("ending_backfilled", finished);
+                phase.field("frames_backfilled", (finished - backfilled).max(0));
+                phase.field("frames_finished", finished);
+                phase.finish(if latest >= 0 && latest == finished {
+                    "completed"
+                } else {
+                    "skipped"
+                });
+            }
             #[cfg(test)]
             {
                 self.writer_calls.fetch_add(1, Ordering::Relaxed);
@@ -220,6 +269,11 @@ impl Checkpoints {
             }
             #[cfg(not(test))]
             let _ = (latest, finished);
+        } else {
+            #[cfg(feature = "fault-injection")]
+            if let Some(phase) = phase.as_mut() {
+                phase.finish("error");
+            }
         }
     }
 
@@ -401,6 +455,76 @@ mod tests {
             );
             std::thread::yield_now();
         }
+    }
+
+    #[cfg(feature = "fault-injection")]
+    #[test]
+    fn startup_checkpoint_spans_report_completed_and_skipped_work() {
+        const CHILD: &str = "DOHC_STARTUP_PHASE_TEST_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            let scratch = ScratchDir::new().unwrap();
+            let path = scratch.path().join("engine.db");
+            let mut s = EngineStore::open_for_actor(&path, 1, None, None).unwrap();
+            s.stop_checkpoint_worker_for_test();
+            s.read_with(|c| {
+                c.execute_batch("CREATE TABLE checkpoint_load(id INTEGER PRIMARY KEY, body BLOB)")
+            })
+            .unwrap();
+            write(&mut s, 0, 12 * 1024 * 1024);
+            let checkpoints = Checkpoints::start(&path).unwrap();
+            s.read_with(|c| {
+                checkpoints.checkpoint_migration_tail_if_small(c);
+                Ok::<_, rusqlite::Error>(())
+            })
+            .unwrap();
+            assert_eq!(checkpoints.writer_work_for_test().0, 0);
+            return;
+        }
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "checkpoint::tests::startup_checkpoint_spans_report_completed_and_skipped_work",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .env("DOHC_CAPTURE_PHASE_DIAGNOSTICS", "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let phases: Vec<serde_json::Value> = String::from_utf8_lossy(&output.stderr)
+            .lines()
+            .filter_map(|line| line.strip_prefix("R16_CAPTURE_PHASE "))
+            .map(|json| serde_json::from_str(json).unwrap())
+            .collect();
+        let fresh = phases
+            .iter()
+            .find(|p| p["phase"] == "fresh_schema_PASSIVE")
+            .unwrap();
+        assert_eq!(fresh["outcome"], "completed");
+        assert!(fresh["starting_log"].as_i64().unwrap() > 0);
+        assert_eq!(fresh["ending_log"], fresh["frames_finished"]);
+        assert_eq!(
+            fresh["frames_backfilled"].as_i64().unwrap(),
+            fresh["frames_finished"].as_i64().unwrap()
+                - fresh["starting_backfilled"].as_i64().unwrap()
+        );
+        let skipped = phases
+            .iter()
+            .find(|p| p["phase"] == "migration_tail_PASSIVE")
+            .unwrap();
+        assert_eq!(skipped["outcome"], "skipped");
+        assert!(
+            skipped["starting_log"].as_i64().unwrap()
+                - skipped["starting_backfilled"].as_i64().unwrap()
+                > MAX_WRITER_BACKFILL_FRAMES
+        );
+        assert_eq!(skipped["frames_backfilled"], 0);
+        assert_eq!(skipped["frames_finished"], skipped["starting_backfilled"]);
+        assert_eq!(skipped["ending_log"], skipped["starting_log"]);
     }
 
     #[test]
