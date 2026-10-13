@@ -102,6 +102,7 @@ describe("Explorer render cost", () => {
       const costs: Array<{ indexes: number; trees: number }> = [];
       for (const cached of [true, false, true, true]) {
         listWorkspaceFiles.mockResolvedValueOnce({
+          visibility: { status: "ready", hiddenHostPaths: [] },
           files: LARGE_FILE_PATHS.map((path) => ({ path, kind: "file" })),
           folders: [],
           ...(cached ? { cached: true } : {}),

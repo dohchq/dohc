@@ -3661,7 +3661,8 @@ export function DesktopWorkspaceShell(props: {
       (event: WorkspaceActivityEvent) => {
         const paths =
           event.workspaceId === workspaceId ? event.paths : undefined;
-        if (event.workspaceId === workspaceId && event.pathSetChanged === false) {
+        if (event.workspaceId === workspaceId && event.pathSetChanged === false &&
+          (!paths?.length || activityPathsAffectWorkspaceListing(paths, bridge().platform))) {
           if (filesRefreshMode !== "full") filesRefreshMode = "cached";
         } else if (!paths?.length) {
           filesRefreshMode = "full";

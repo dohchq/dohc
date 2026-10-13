@@ -5,7 +5,8 @@ import { createWorkspaceFilesIpc } from "./workspaceFilesIpc";
 import { registerWorkspaceGraphIpcHandlers } from "./workspaceGraphIpc";
 import { registerNativeMenusIpcHandlers } from "./nativeMenusIpc";
 import { CHANNELS } from "./channels";
-import { CreateWorkspaceFileResult, DeleteWorkspacePathResult } from "./bridgeContract";
+import * as visibilityReads from "../workspaces/workspaceListingVisibility";
+import { CreateWorkspaceFileResult, DeleteWorkspacePathResult, type WorkspaceListingVisibility } from "./bridgeContract";
 import { createFirstAppFiles } from "../renderer/workbench/createFirstApp";
 import type { RegistryEntry } from "../workspaces/registryStore";
 import type { ShareViewFiles } from "../workspaces/shareViewFiles";
@@ -142,7 +143,7 @@ async function harness() {
     return handler({ sender: { id: 1 }, trusted: isTrusted }, payload);
   };
   return {
-    workspace, handlers, invoke, change, openDialog, saveDialog, listing, readText, repair,
+    workspace, listings, handlers, invoke, change, openDialog, saveDialog, listing, readText, repair,
     openPath, reveal, renderPdf, notify, capture, syncChannels, store, resolveFiles, buildMenu,
     retireRenderer: () => { rendererCurrent = false; },
     retirePhysical: () => { physicalCurrent = false; },
@@ -493,3 +494,31 @@ describe("registered native menu handlers", () => {
     expect(h.reveal).toHaveBeenCalledWith(expect.stringMatching(/notes\.md$/));
   });
 });
+
+ it("delivers current visibility verdicts after only the policy file changes", async () => {
+  const h = await harness();
+  await writeFile(join(h.workspace.rootPath, "private.md"), "private");
+  const first = await h.invoke(CHANNELS.listWorkspaceFiles);
+  expect(first).toMatchObject({ visibility: { status: "ready", hiddenHostPaths: [] } });
+  await mkdir(join(h.workspace.rootPath, ".dohc"), { recursive: true });
+  await writeFile(join(h.workspace.rootPath, ".dohc/visibility.toml"), '[[rule]]\npath = "private.md"\nvisibility = "hidden"');
+  h.listings.invalidate({ workspaceId: "workspace", paths: [".dohc/visibility.toml"], pathSetChanged: false });
+  expect(await h.invoke(CHANNELS.listWorkspaceFiles, { workspaceId: "workspace", allowCached: true })).toMatchObject({
+    files: [{ path: "private.md" }], visibility: { status: "ready", hiddenHostPaths: ["private.md"] },
+  });
+  expect(h.listing).toHaveBeenCalledTimes(2);
+});
+
+ it.each(["retireRenderer", "retirePhysical", "reenterWorkspace"] as const)("rejects %s while visibility verdicts are in flight", async invalidate => {
+  const h = await harness();
+  const started = deferred();
+  const verdict = deferred<WorkspaceListingVisibility>();
+  const spy = vi.spyOn(visibilityReads, "readWorkspaceListingVisibility").mockImplementationOnce(() => { started.resolve(); return verdict.promise; });
+  try {
+    const reading = h.invoke(CHANNELS.listWorkspaceFiles);
+    await started.promise;
+    h[invalidate]();
+    verdict.resolve({ status: "ready", hiddenHostPaths: ["A.md"] });
+    await expect(reading).rejects.toThrow();
+  } finally { spy.mockRestore(); }
+ });

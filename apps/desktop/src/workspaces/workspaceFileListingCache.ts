@@ -1,12 +1,13 @@
 import {
   activityPathsAffectWorkspaceListing,
-  type ListWorkspaceFilesResult,
+  isWorkspaceVisibilityPolicyPath,
+  type WorkspacePathListing,
   type WorkspaceActivityEvent,
 } from "../ipc/bridgeContract";
 import type { FileObservationFact } from "@dohc/workspace-engine-client/daemon";
 import type { WorkspaceFileListingEntry } from "./workspaceFiles";
 
-type ListingPromise = Promise<ListWorkspaceFilesResult>;
+type ListingPromise = Promise<WorkspacePathListing>;
 interface ListingEntry {
   attachmentId: symbol;
   listing: ListingPromise;
@@ -123,7 +124,7 @@ export class WorkspaceFileListingCache {
       this.#listings.clear();
       return;
     }
-    if (event.pathSetChanged === false) return;
+    if (event.pathSetChanged === false && !event.paths?.some(path => isWorkspaceVisibilityPolicyPath(path, this.platform))) return;
     if (
       !event.paths?.length ||
       activityPathsAffectWorkspaceListing(event.paths, this.platform)

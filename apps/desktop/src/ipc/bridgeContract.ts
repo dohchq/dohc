@@ -453,7 +453,7 @@ export const WorkspaceFileEntry = z.object({
 });
 export type WorkspaceFileEntry = z.infer<typeof WorkspaceFileEntry>;
 
-export const ListWorkspaceFilesResult = z.object({
+export const WorkspacePathListing = z.object({
   files: z.array(WorkspaceFileEntry),
   // Directories ride along so empty folders
   // appear in the tree. Optional so older fixtures/consumers keep parsing;
@@ -463,6 +463,17 @@ export const ListWorkspaceFilesResult = z.object({
   // the owned-workspace walk; a cached answer must be revalidated before the
   // renderer uses it as evidence that a path is missing.
   cached: z.literal(true).optional(),
+});
+export type WorkspacePathListing = z.infer<typeof WorkspacePathListing>;
+
+export const WorkspaceListingVisibility = z.object({
+  status: z.enum(["ready", "degraded", "unavailable"]),
+  hiddenHostPaths: z.array(PATH_STRING),
+});
+export type WorkspaceListingVisibility = z.infer<typeof WorkspaceListingVisibility>;
+
+export const ListWorkspaceFilesResult = WorkspacePathListing.extend({
+  visibility: WorkspaceListingVisibility,
 });
 export type ListWorkspaceFilesResult = z.infer<typeof ListWorkspaceFilesResult>;
 
@@ -3384,7 +3395,11 @@ export function activityPathsAffectWorkspaceListing(
   paths: readonly string[],
   platform: NodeJS.Platform,
 ): boolean {
-  return paths.some((path) => !hasEngineIgnoredSegment(path, platform));
+  return paths.some((path) => isWorkspaceVisibilityPolicyPath(path, platform) || !hasEngineIgnoredSegment(path, platform));
+}
+
+export function isWorkspaceVisibilityPolicyPath(path: string, platform: NodeJS.Platform): boolean {
+  return (platform === "win32" ? path.toLowerCase() : path) === ".dohc/visibility.toml";
 }
 
 // An activity ping must never be dropped on a schema failure: under-notifying is the staleness bug the channel exists to

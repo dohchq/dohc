@@ -62,7 +62,7 @@ describe("editor groups", () => {
         activeEditorGroup: "right",
       }),
     );
-    bridge.listWorkspaceFiles = vi.fn(async () => ({
+    bridge.listWorkspaceFiles = vi.fn(async () => ({ visibility: { status: "ready" as const, hiddenHostPaths: [] },
       files: ["race-a.md", "b.md", "c.md"].map((path) => ({
         path,
         kind: "file" as const,
@@ -134,7 +134,7 @@ describe("editor groups", () => {
         activeEditorGroup: "left",
       }),
     );
-    bridge.listWorkspaceFiles = vi.fn(async () => ({
+    bridge.listWorkspaceFiles = vi.fn(async () => ({ visibility: { status: "ready" as const, hiddenHostPaths: [] },
       files: ["race-a.md", "b.md", "c.md"].map((path) => ({
         path,
         kind: "file" as const,
@@ -224,7 +224,7 @@ describe("editor groups", () => {
         activeEditorGroup: "left",
       }),
     );
-    bridge.listWorkspaceFiles = vi.fn(async () => ({
+    bridge.listWorkspaceFiles = vi.fn(async () => ({ visibility: { status: "ready" as const, hiddenHostPaths: [] },
       files: ["race-a.md", "b.md", "c.md"].map((path) => ({
         path,
         kind: "file" as const,
@@ -460,7 +460,7 @@ describe("editor groups", () => {
         activeEditorGroup: "left",
       }),
     );
-    bridge.listWorkspaceFiles = vi.fn(async () => ({
+    bridge.listWorkspaceFiles = vi.fn(async () => ({ visibility: { status: "ready" as const, hiddenHostPaths: [] },
       files: ["a.md", "b.md", "c.md"].map((path) => ({
         path,
         kind: "file" as const,
@@ -537,7 +537,7 @@ describe("editor groups", () => {
         activeEditorGroup: "left",
       }),
     );
-    bridge.listWorkspaceFiles = vi.fn(async () => ({
+    bridge.listWorkspaceFiles = vi.fn(async () => ({ visibility: { status: "ready" as const, hiddenHostPaths: [] },
       files: ["a.md", "b.md"].map((path) => ({
         path,
         kind: "file" as const,
@@ -710,7 +710,7 @@ describe("editor groups", () => {
         activeEditorGroup: "right",
       }),
     );
-    bridge.listWorkspaceFiles = vi.fn(async () => ({
+    bridge.listWorkspaceFiles = vi.fn(async () => ({ visibility: { status: "ready" as const, hiddenHostPaths: [] },
       files: ["race-a.md", "race-b.md", "race-c.md"].map((path) => ({
         path,
         kind: "file" as const,
@@ -813,7 +813,7 @@ describe("editor groups", () => {
           activeEditorGroup: "right",
         }),
       );
-      bridge.listWorkspaceFiles = vi.fn(async () => ({
+      bridge.listWorkspaceFiles = vi.fn(async () => ({ visibility: { status: "ready" as const, hiddenHostPaths: [] },
         files: ["race-a.md", "b.md", "c.md"].map((path) => ({
           path,
           kind: "file" as const,
@@ -932,7 +932,7 @@ describe("editor groups", () => {
           activeEditorGroup: "right",
         }),
       );
-      bridge.listWorkspaceFiles = vi.fn(async () => ({
+      bridge.listWorkspaceFiles = vi.fn(async () => ({ visibility: { status: "ready" as const, hiddenHostPaths: [] },
         files: ["race-a.txt", "b.md"].map((path) => ({
           path,
           kind: "file" as const,
@@ -1040,7 +1040,7 @@ describe("editor groups", () => {
           activeEditorGroup: "right",
         }),
       );
-      bridge.listWorkspaceFiles = vi.fn(async () => ({
+      bridge.listWorkspaceFiles = vi.fn(async () => ({ visibility: { status: "ready" as const, hiddenHostPaths: [] },
         files: ["race-a.md", "b.md"].map((path) => ({
           path,
           kind: "file" as const,
@@ -1214,7 +1214,7 @@ describe("editor groups", () => {
     const bridge = makeBridge(
       Promise.resolve(storedStateWithTabs(["a.md"], "a.md")),
     );
-    bridge.listWorkspaceFiles = vi.fn(async () => ({
+    bridge.listWorkspaceFiles = vi.fn(async () => ({ visibility: { status: "ready" as const, hiddenHostPaths: [] },
       files: [
         { path: "a.md", kind: "file" as const },
         { path: "b.md", kind: "file" as const },
@@ -1448,7 +1448,7 @@ describe("ui-state merge-on-load", () => {
   // restored tabs against a pre-pull snapshot.
   it("prunes a restored tab on a listing that lands after the share pull", async () => {
     const listing = (...paths: string[]) =>
-      vi.fn(async () => ({
+      vi.fn(async () => ({ visibility: { status: "ready" as const, hiddenHostPaths: [] },
         files: paths.map((path) => ({ path, kind: "file" as const })),
         folders: [] as string[],
       }));
@@ -2292,7 +2292,7 @@ describe("ui-state merge-on-load", () => {
   // requires the file, the write fails, the failure is swallowed — the draft
   // would be gone with no error and no way back.
   it("never closes a restored tab with an unsaved draft, and closes it once saved", async () => {
-    const listing = (...paths: string[]) => ({
+    const listing = (...paths: string[]) => ({ visibility: { status: "ready" as const, hiddenHostPaths: [] },
       files: paths.map((path) => ({ path, kind: "file" as const })),
       folders: [] as string[],
     });
@@ -2329,11 +2329,11 @@ describe("ui-state merge-on-load", () => {
   // A provisional display-fill must not drive a destructive close: the pull
   // still in flight can carry back a file the older listing predates.
   it("defers closing a tab while a newer listing is still pending", async () => {
-    const older = deferred<{
+    const older = deferred<{ visibility: { status: "ready"; hiddenHostPaths: string[] };
       files: Array<{ path: string; kind: "file" }>;
       folders: string[];
     }>();
-    const newer = deferred<{
+    const newer = deferred<{ visibility: { status: "ready"; hiddenHostPaths: string[] };
       files: Array<{ path: string; kind: "file" }>;
       folders: string[];
     }>();
@@ -2361,7 +2361,7 @@ describe("ui-state merge-on-load", () => {
 
     // The older listing lands first and does not know about pulled.md.
     await act(async () => {
-      older.resolve({ files: [{ path: "b.md", kind: "file" }], folders: [] });
+      older.resolve({ visibility: { status: "ready" as const, hiddenHostPaths: [] }, files: [{ path: "b.md", kind: "file" }], folders: [] });
       await older.promise;
     });
     // It fills the display, but must not close anything: a newer answer is
@@ -2370,7 +2370,7 @@ describe("ui-state merge-on-load", () => {
 
     // The newer one carries the file back.
     await act(async () => {
-      newer.resolve({
+      newer.resolve({ visibility: { status: "ready" as const, hiddenHostPaths: [] },
         files: [
           { path: "b.md", kind: "file" },
           { path: "pulled.md", kind: "file" },
@@ -2416,7 +2416,7 @@ describe("ui-state merge-on-load", () => {
   // successful listing re-enables it — and correctness beats eagerness for
   // work that cannot be undone.
   it("waits for a listing that succeeds after a failure before closing", async () => {
-    const older = deferred<{
+    const older = deferred<{ visibility: { status: "ready"; hiddenHostPaths: string[] };
       files: Array<{ path: string; kind: "file" }>;
       folders: string[];
     }>();
@@ -2424,7 +2424,7 @@ describe("ui-state merge-on-load", () => {
     const newer = new Promise<never>((_resolve, reject) => {
       failNewer = reject;
     });
-    const third = deferred<{
+    const third = deferred<{ visibility: { status: "ready"; hiddenHostPaths: string[] };
       files: Array<{ path: string; kind: "file" }>;
       folders: string[];
     }>();
@@ -2454,7 +2454,7 @@ describe("ui-state merge-on-load", () => {
 
     // The older listing commits, but a newer request is still in flight.
     await act(async () => {
-      older.resolve({ files: [{ path: "b.md", kind: "file" }], folders: [] });
+      older.resolve({ visibility: { status: "ready" as const, hiddenHostPaths: [] }, files: [{ path: "b.md", kind: "file" }], folders: [] });
       await older.promise;
     });
     expect(await screen.findByTestId("tab-gone.md")).toBeTruthy();
@@ -2475,7 +2475,7 @@ describe("ui-state merge-on-load", () => {
     });
     await waitFor(() => expect(bridge.listWorkspaceFiles).toHaveBeenCalledTimes(3));
     await act(async () => {
-      third.resolve({ files: [{ path: "b.md", kind: "file" }], folders: [] });
+      third.resolve({ visibility: { status: "ready" as const, hiddenHostPaths: [] }, files: [{ path: "b.md", kind: "file" }], folders: [] });
       await third.promise;
     });
     await waitFor(() => {
@@ -2488,7 +2488,7 @@ describe("ui-state merge-on-load", () => {
   // have shown it is the one that failed. Closing on the pre-pull snapshot
   // would close a tab whose file exists.
   it("does not close on a pre-pull snapshot when the post-pull listing failed", async () => {
-    const prePull = deferred<{
+    const prePull = deferred<{ visibility: { status: "ready"; hiddenHostPaths: string[] };
       files: Array<{ path: string; kind: "file" }>;
       folders: string[];
     }>();
@@ -2496,7 +2496,7 @@ describe("ui-state merge-on-load", () => {
     const postPull = new Promise<never>((_resolve, reject) => {
       failPostPull = reject;
     });
-    const afterPull = deferred<{
+    const afterPull = deferred<{ visibility: { status: "ready"; hiddenHostPaths: string[] };
       files: Array<{ path: string; kind: "file" }>;
       folders: string[];
     }>();
@@ -2538,7 +2538,7 @@ describe("ui-state merge-on-load", () => {
 
     // The pre-pull snapshot commits; it predates the file coming back.
     await act(async () => {
-      prePull.resolve({ files: [{ path: "b.md", kind: "file" }], folders: [] });
+      prePull.resolve({ visibility: { status: "ready" as const, hiddenHostPaths: [] }, files: [{ path: "b.md", kind: "file" }], folders: [] });
       await prePull.promise;
     });
     // The listing that would have carried the pulled file fails.
@@ -2554,7 +2554,7 @@ describe("ui-state merge-on-load", () => {
     });
     await waitFor(() => expect(bridge.listWorkspaceFiles).toHaveBeenCalledTimes(3));
     await act(async () => {
-      afterPull.resolve({
+      afterPull.resolve({ visibility: { status: "ready" as const, hiddenHostPaths: [] },
         files: [
           { path: "b.md", kind: "file" },
           { path: "pulled.md", kind: "file" },
@@ -2583,7 +2583,7 @@ describe("ui-state merge-on-load", () => {
       incoming: 1,
       outgoing: 0,
     };
-    const listing = deferred<{
+    const listing = deferred<{ visibility: { status: "ready"; hiddenHostPaths: string[] };
       files: Array<{ path: string; kind: "file" }>;
       folders: string[];
     }>();
@@ -2615,7 +2615,7 @@ describe("ui-state merge-on-load", () => {
     // Now the listing lands without the active tab's file, so the close runs
     // and hands over to the survivor.
     await act(async () => {
-      listing.resolve({ files: [{ path: "b.md", kind: "file" }], folders: [] });
+      listing.resolve({ visibility: { status: "ready" as const, hiddenHostPaths: [] }, files: [{ path: "b.md", kind: "file" }], folders: [] });
       await listing.promise;
     });
     await waitFor(() => {
@@ -3567,7 +3567,7 @@ describe("ui-state merge-on-load", () => {
   // request that fails never will. Superseding on ISSUE would drop the only
   // answer there is and leave the explorer empty with nothing to retry it.
   it("commits an older listing when the newer request failed", async () => {
-    const older = deferred<{
+    const older = deferred<{ visibility: { status: "ready"; hiddenHostPaths: string[] };
       files: Array<{ path: string; kind: "file" }>;
       folders: string[];
     }>();
@@ -3605,7 +3605,7 @@ describe("ui-state merge-on-load", () => {
 
     // The older answer arrives — and it is the only answer there is.
     await act(async () => {
-      older.resolve({
+      older.resolve({ visibility: { status: "ready" as const, hiddenHostPaths: [] },
         files: [
           { path: "a.md", kind: "file" },
           { path: "b.md", kind: "file" },
@@ -3624,7 +3624,7 @@ describe("ui-state merge-on-load", () => {
   // stale tree and, worse, make the reconciliation read a live file as
   // deleted and close its tab.
   it("ignores a listing that resolves after a newer one was issued", async () => {
-    type Listing = {
+    type Listing = { visibility: { status: "ready"; hiddenHostPaths: string[] };
       files: Array<{ path: string; kind: "file" }>;
       folders: string[];
     };
@@ -3655,7 +3655,7 @@ describe("ui-state merge-on-load", () => {
 
     // The newer one lands first and knows about live.md.
     await act(async () => {
-      newer.resolve({
+      newer.resolve({ visibility: { status: "ready" as const, hiddenHostPaths: [] },
         files: [
           { path: "a.md", kind: "file" },
           { path: "b.md", kind: "file" },
@@ -3669,7 +3669,7 @@ describe("ui-state merge-on-load", () => {
 
     // Then the stale one, which predates live.md, arrives last.
     await act(async () => {
-      older.resolve({
+      older.resolve({ visibility: { status: "ready" as const, hiddenHostPaths: [] },
         files: [
           { path: "a.md", kind: "file" },
           { path: "b.md", kind: "file" },
@@ -3727,7 +3727,7 @@ describe("ui-state merge-on-load", () => {
     expect(await screen.findByTestId("tab-a.md")).toBeTruthy();
 
     // A listing that knows about neither file arrives.
-    bridge.listWorkspaceFiles = vi.fn(async () => ({
+    bridge.listWorkspaceFiles = vi.fn(async () => ({ visibility: { status: "ready" as const, hiddenHostPaths: [] },
       files: [] as Array<{ path: string; kind: "file" }>,
       folders: [] as string[],
     }));

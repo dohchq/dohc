@@ -46,7 +46,7 @@ describe("editor group limits", () => {
         activeEditorGroup: "group-0",
       }),
     );
-    bridge.listWorkspaceFiles = vi.fn(async () => ({
+    bridge.listWorkspaceFiles = vi.fn(async () => ({ visibility: { status: "ready" as const, hiddenHostPaths: [] },
       files: editorGroups.map((group) => ({
         path: group.activeTab,
         kind: "file" as const,
@@ -102,7 +102,7 @@ describe("editor group limits", () => {
         activeEditorGroup: "group-0",
       }),
     );
-    bridge.listWorkspaceFiles = vi.fn(async () => ({
+    bridge.listWorkspaceFiles = vi.fn(async () => ({ visibility: { status: "ready" as const, hiddenHostPaths: [] },
       files: [
         ...editorGroups.map((group) => ({
           path: group.activeTab,
@@ -151,7 +151,7 @@ describe("editor group limits", () => {
         activeEditorGroup: "chats",
       }),
     );
-    bridge.listWorkspaceFiles = vi.fn(async () => ({
+    bridge.listWorkspaceFiles = vi.fn(async () => ({ visibility: { status: "ready" as const, hiddenHostPaths: [] },
       files: fileGroups.map((group) => ({
         path: group.activeTab,
         kind: "file" as const,

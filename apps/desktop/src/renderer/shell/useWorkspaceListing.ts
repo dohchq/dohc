@@ -1,5 +1,5 @@
 import { useCallback, useMemo, useRef, useState } from "react";
-import type { WorkspaceFileEntry } from "../../ipc/bridgeContract";
+import type { WorkspaceFileEntry, WorkspaceListingVisibility } from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
 import { indexFileListing } from "../workbench/file-listing-index";
 import {
@@ -7,7 +7,15 @@ import {
   type WorkbenchState,
 } from "../workbench/workbenchState";
 
+type ListingVisibility = { status: WorkspaceListingVisibility["status"]; hiddenHostPaths: ReadonlySet<string> };
+const unavailableVisibility: ListingVisibility = { status: "unavailable", hiddenHostPaths: new Set<string>() };
+
 export function useWorkspaceListing(workspaceId: string) {
+  const workspaceToken = useRef({ workspaceId });
+  if (workspaceToken.current.workspaceId !== workspaceId) workspaceToken.current = { workspaceId };
+  const token = workspaceToken.current;
+  const [visibilitySnapshot, setVisibility] = useState({ token, verdict: unavailableVisibility });
+  const visibility = visibilitySnapshot.token === token ? visibilitySnapshot.verdict : unavailableVisibility;
   const [files, setFiles] = useState<WorkspaceFileEntry[]>([]);
   // An empty workspace also lists zero files, so freshness needs its own flag.
   // A completed main-process cache hit can paint the explorer immediately,
@@ -54,7 +62,7 @@ export function useWorkspaceListing(workspaceId: string) {
           workspaceId,
           ...options,
         });
-        if (request <= committedFilesRequest.current) {
+        if (workspaceToken.current !== token || request <= committedFilesRequest.current) {
           return result.cached === true;
         }
         committedFilesRequest.current = request;
@@ -76,6 +84,13 @@ export function useWorkspaceListing(workspaceId: string) {
             ? current
             : nextFolders,
         );
+        setVisibility(current => {
+          const next = result.visibility;
+          return current.token === token && current.verdict.status === next.status &&
+            current.verdict.hiddenHostPaths.size === next.hiddenHostPaths.length &&
+            next.hiddenHostPaths.every(path => current.verdict.hiddenHostPaths.has(path))
+            ? current : { token, verdict: { status: next.status, hiddenHostPaths: new Set(next.hiddenHostPaths) } };
+        });
         setFilesRevalidated(result.cached !== true);
         setFileListingCommit({
           request,
@@ -83,18 +98,18 @@ export function useWorkspaceListing(workspaceId: string) {
         });
         return result.cached === true;
       } catch (error) {
-        if (request > failedFilesRequest.current) {
+        if (workspaceToken.current === token && request > failedFilesRequest.current) {
           failedFilesRequest.current = request;
         }
         throw error;
       } finally {
         pendingFilesRequests.current -= 1;
-        if (pendingFilesRequests.current === 0) {
+        if (workspaceToken.current === token && pendingFilesRequests.current === 0) {
           setListingsSettled((settled) => settled + 1);
         }
       }
     },
-    [workspaceId],
+    [workspaceId, token],
   );
 
   const hasCommittedListing = useCallback(
@@ -139,6 +154,7 @@ export function useWorkspaceListing(workspaceId: string) {
   return {
     files,
     folders,
+    visibility,
     fileIndex,
     filesRevalidated,
     listingsSettled,

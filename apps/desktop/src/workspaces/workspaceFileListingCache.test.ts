@@ -1,16 +1,16 @@
 import { describe, expect, it, vi } from "vitest";
-import type { ListWorkspaceFilesResult } from "../ipc/bridgeContract";
+import type { WorkspacePathListing } from "../ipc/bridgeContract";
 import { WorkspaceFileListingCache } from "./workspaceFileListingCache";
 import { deferred } from "../testing/deferred";
 
 const ATTACHMENT_A = Symbol("attachment-a");
 const ATTACHMENT_B = Symbol("attachment-b");
 
-function listing(path: string): ListWorkspaceFilesResult {
+function listing(path: string): WorkspacePathListing {
   return { files: [{ path, kind: "file" }], folders: [] };
 }
 
-function cachedListing(path: string): ListWorkspaceFilesResult {
+function cachedListing(path: string): WorkspacePathListing {
   return { ...listing(path), cached: true };
 }
 
@@ -112,7 +112,7 @@ describe("WorkspaceFileListingCache", () => {
 
   it("keeps the replacement attachment cached when the old listing rejects late", async () => {
     const cache = new WorkspaceFileListingCache();
-    const old = deferred<ListWorkspaceFilesResult>();
+    const old = deferred<WorkspacePathListing>();
     const replacementLoad = vi.fn(async () => listing("new-root.md"));
 
     const oldRead = cache.list({
@@ -148,7 +148,7 @@ describe("WorkspaceFileListingCache", () => {
 
   it("coalesces concurrent permitted reads without sharing across workspaces", async () => {
     const cache = new WorkspaceFileListingCache();
-    const pending = deferred<ListWorkspaceFilesResult>();
+    const pending = deferred<WorkspacePathListing>();
     const loadA = vi.fn(() => pending.promise);
     const loadB = vi.fn(async () => listing("b.md"));
 
@@ -233,8 +233,8 @@ describe("WorkspaceFileListingCache", () => {
 
   it("does not let an invalidated in-flight listing repopulate the cache", async () => {
     const cache = new WorkspaceFileListingCache();
-    const old = deferred<ListWorkspaceFilesResult>();
-    const fresh = deferred<ListWorkspaceFilesResult>();
+    const old = deferred<WorkspacePathListing>();
+    const fresh = deferred<WorkspacePathListing>();
 
     const oldRead = cache.list({
       workspaceId: "ws-a",
@@ -285,4 +285,17 @@ describe("WorkspaceFileListingCache", () => {
       }),
     ).resolves.toEqual(listing("retry.md"));
   });
+});
+
+ it("refreshes visibility policy edits even when the ordinary path set did not change", async () => {
+  const cache = new WorkspaceFileListingCache("win32");
+  const load = vi.fn(async () => listing("kept.md"));
+  const read = () => cache.list({ workspaceId: "ws-a", attachmentId: ATTACHMENT_A, allowCached: true, load });
+  await read();
+  cache.invalidate({ workspaceId: "ws-a", paths: [".dohc/engine/index", ".dohc/ui-state.json"], pathSetChanged: false });
+  await read();
+  expect(load).toHaveBeenCalledOnce();
+  cache.invalidate({ workspaceId: "ws-a", paths: [".DOHC/VISIBILITY.TOML"], pathSetChanged: false });
+  await read();
+  expect(load).toHaveBeenCalledTimes(2);
 });

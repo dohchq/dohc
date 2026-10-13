@@ -123,9 +123,21 @@ function segmentMatches(patternSegment: string, pathSegment: string): boolean {
  * validate first so unsupported syntax is rejected, not silently misread.
  */
 export function policyGlobMatches(pattern: string, path: string): boolean {
-  if (pattern === "**") return path.length > 0;
+  return preparePolicyGlob(pattern)(path);
+}
+
+function preparePolicyGlob(pattern: string): (path: string) => boolean {
+  if (pattern === "**") return path => path.length > 0;
+  if (!pattern.includes("*")) return path => path === pattern;
+  if (pattern.endsWith("/**") && !pattern.slice(0, -3).includes("*")) {
+    const prefix = pattern.slice(0, -2);
+    return path => path.startsWith(prefix);
+  }
   const patternSegments = pattern.split("/");
-  const pathSegments = path.split("/");
+  return path => policySegmentsMatch(patternSegments, path.split("/"));
+}
+
+function policySegmentsMatch(patternSegments: readonly string[], pathSegments: readonly string[]): boolean {
   const finalPattern = patternSegments[patternSegments.length - 1];
   if (finalPattern === "**") {
     const prefixSegments = patternSegments.slice(0, -1);
@@ -304,19 +316,13 @@ export function resolveEffectivePolicy(input: EffectivePolicyInput): EffectivePo
 
   let tracked = true;
   let searchable = true;
-  let visibility: EffectivePolicyResult["visibility"] = "visible";
-  let exportPolicy: EffectivePolicyResult["export"] = "included";
 
   for (const rule of input.filesPolicy ?? []) {
     if (!policyGlobMatches(rule.path, input.path)) continue;
     if (rule.tracked !== undefined) tracked = rule.tracked;
     if (rule.searchable !== undefined) searchable = rule.searchable;
   }
-  for (const rule of input.visibilityPolicy ?? []) {
-    if (!policyGlobMatches(rule.path, input.path)) continue;
-    if (rule.visibility !== undefined) visibility = rule.visibility;
-    if (rule.export !== undefined) exportPolicy = rule.export;
-  }
+  const { visibility, export: exportPolicy } = resolveVisibilityPolicy(input.path, input.visibilityPolicy);
 
   return {
     path: input.path,
@@ -328,4 +334,33 @@ export function resolveEffectivePolicy(input: EffectivePolicyInput): EffectivePo
     captureOwned: tracked,
     floor: floor.kind,
   };
+}
+
+/** The visibility-rule decision, independent of capture and search admission. */
+export function resolveVisibilityPolicy(
+  path: string,
+  rules?: readonly VisibilityPolicyRule[] | null,
+): Pick<EffectivePolicyResult, "visibility" | "export"> {
+  return evaluateVisibilityPolicy(path, rules, policyGlobMatches);
+}
+
+function evaluateVisibilityPolicy(
+  path: string,
+  rules: readonly VisibilityPolicyRule[] | null | undefined,
+  matches: (pattern: string, path: string) => boolean,
+): Pick<EffectivePolicyResult, "visibility" | "export"> {
+  let visibility: EffectivePolicyResult["visibility"] = "visible";
+  let exportPolicy: EffectivePolicyResult["export"] = "included";
+  for (const rule of rules ?? []) {
+    if (!matches(rule.path, path)) continue;
+    if (rule.visibility !== undefined) visibility = rule.visibility;
+    if (rule.export !== undefined) exportPolicy = rule.export;
+  }
+  return { visibility, export: exportPolicy };
+}
+
+/** Prepare matchers once when evaluating the same rules over a complete listing. */
+export function prepareVisibilityPolicy(rules: readonly VisibilityPolicyRule[]) {
+  const matchers = new Map(rules.map(rule => [rule.path, preparePolicyGlob(rule.path)]));
+  return (path: string) => evaluateVisibilityPolicy(path, rules, (pattern, candidate) => matchers.get(pattern)!(candidate));
 }
