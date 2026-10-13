@@ -398,6 +398,11 @@ pub fn create_claim_identity(
     created_at_ms: i64,
     faults: &dyn FaultInjector,
 ) -> Result<TxnOutcome<AdoptJoinIdentityOutcome>, SyncError> {
+    if store.is_passive() {
+        return Err(SyncError::InvalidInput {
+            reason: "passive stores adopt a join identity",
+        });
+    }
     create_sync_identity(
         store,
         workspace_id,

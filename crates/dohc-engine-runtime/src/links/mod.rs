@@ -107,6 +107,9 @@ pub fn prepare(store: &EngineStore) -> Result<Option<(Work, Option<Head>)>, Stor
         .transpose()
 }
 fn prepare_batch(store: &EngineStore, limit: usize) -> Result<Vec<Prepared>, StorageError> {
+    if store.is_passive() {
+        return Ok(Vec::new());
+    }
     store.read_with(|conn| {
         let began = Instant::now();
         let mut stmt = conn.prepare_cached("SELECT pending_id,revision,workspace_id,version_id,object_id,queued_at_ms FROM link_pending WHERE retry_after_ms<=?1 AND NOT EXISTS(SELECT 1 FROM link_index_state s WHERE s.workspace_id=link_pending.workspace_id AND s.version_id=link_pending.version_id AND s.seed_phase IN ('deferred','aliases')) ORDER BY pending_id LIMIT ?2").map_err(sql)?;
@@ -473,6 +476,9 @@ fn stage_batch(
 }
 
 pub fn gc_step(store: &mut EngineStore) -> Result<bool, StorageError> {
+    if store.is_passive() {
+        return Ok(false);
+    }
     if !store
         .read_with(|c| {
             c.query_row("SELECT EXISTS(SELECT 1 FROM link_gc)", [], |r| {
@@ -501,6 +507,9 @@ pub fn gc_step(store: &mut EngineStore) -> Result<bool, StorageError> {
 }
 
 pub fn reseed_step(store: &mut EngineStore) -> Result<bool, StorageError> {
+    if store.is_passive() {
+        return Ok(false);
+    }
     if !store
         .read_with(|c| {
             c.query_row(
@@ -541,6 +550,9 @@ fn seed_step_with(
     store: &mut EngineStore,
     faults: &dyn FaultInjector,
 ) -> Result<bool, StorageError> {
+    if store.is_passive() {
+        return Ok(false);
+    }
     let needed = store
         .read_with(|c| {
             c.query_row(

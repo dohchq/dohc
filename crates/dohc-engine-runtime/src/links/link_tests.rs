@@ -1561,3 +1561,56 @@ fn fork_of_a_partial_seed_preserves_its_cursor_and_obligation() {
         .unwrap();
     assert_eq!(obligations, 0);
 }
+
+#[test]
+fn passive_links_never_queue_seed_or_drain_even_with_leftover_work() {
+    let scratch = ScratchDir::new().unwrap();
+    let db = engine_db_path(&scratch).unwrap();
+    let mut store = EngineStore::open_passive(&db, 1, None, None).unwrap();
+    VersionedTextStore::new(&mut store)
+        .ensure_main_version("ws", "main", 1, &NoFaults)
+        .unwrap();
+    assert_eq!(
+        count(&store, "link_index_state"),
+        0,
+        "passive versions create no seed obligation"
+    );
+    for phase in ["deferred", "aliases", "draining", "ready"] {
+        store.read_with(|c| {
+            c.execute("INSERT INTO link_index_state(workspace_id,version_id,parser_generation,seed_phase) VALUES('ws','main',0,?1) ON CONFLICT(workspace_id,version_id) DO UPDATE SET seed_phase=excluded.seed_phase", [phase])?;
+            c.execute_batch("INSERT OR IGNORE INTO file_objects VALUES('ws','note',1); INSERT OR IGNORE INTO blobs VALUES('hash',10,'[[target]]'); INSERT INTO path_aliases VALUES('ws','main','note.md','note'); INSERT INTO snapshots(workspace_id,version_id,object_id,path,blob_sha256,updated_at_ms,latest_moment_id,metadata_origin) VALUES('ws','main','note','note.md','hash',1,'m','sync'); INSERT INTO fork_base_snapshots(workspace_id,version_id,object_id,path,blob_sha256,updated_at_ms,latest_moment_id,metadata_origin) VALUES('ws','main','note','note.md','hash',1,'m','sync'); UPDATE snapshots SET path='renamed.md'; UPDATE fork_base_snapshots SET path='renamed.md'; UPDATE path_aliases SET path='renamed.md'; DELETE FROM snapshots; DELETE FROM fork_base_snapshots; DELETE FROM path_aliases;")?;
+            Ok::<_, rusqlite::Error>(())
+        }).unwrap();
+        assert_eq!(count(&store, "link_pending"), 0, "phase={phase}");
+        assert_eq!(count(&store, "link_aliases"), 0, "phase={phase}");
+    }
+    // Leftover derived work must remain inert on a passive store as well.
+    store.read_with(|c| c.execute_batch("UPDATE link_index_state SET seed_phase='aliases'; INSERT INTO link_pending(workspace_id,version_id,object_id,queued_at_ms) VALUES('ws','main','note',1); INSERT INTO link_gc VALUES('ws','main','note','old');")).unwrap();
+    let before = store
+        .read_with(|c| Ok::<_, rusqlite::Error>(c.total_changes()))
+        .unwrap();
+    assert!(!seed_step(&mut store).unwrap());
+    assert!(!reseed_step(&mut store).unwrap());
+    assert!(!gc_step(&mut store).unwrap());
+    assert!(prepare_batch(&store, SOURCE_SLICE).unwrap().is_empty());
+    let metrics = SharedMetrics::default();
+    let mut worker = DrainWorker::new(metrics.clone()).unwrap();
+    assert_eq!(worker.tick(&mut store), Duration::MAX);
+    assert_eq!(metrics.lock().unwrap().actor_batches, 0);
+    store
+        .write_with(&NoFaults, |tx| {
+            dohc_engine_storage::links::copy_version_in_tx(tx, "ws", "main", "fork")
+                .map_err(sql)?;
+            Ok::<_, StorageError>(())
+        })
+        .unwrap();
+    assert_eq!(
+        store
+            .read_with(|c| Ok::<_, rusqlite::Error>(c.total_changes()))
+            .unwrap(),
+        before
+    );
+    assert_eq!(count(&store, "link_pending"), 1);
+    assert_eq!(count(&store, "link_index_state"), 1);
+    assert_eq!(count(&store, "link_gc"), 1);
+}

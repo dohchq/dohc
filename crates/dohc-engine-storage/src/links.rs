@@ -7,6 +7,13 @@ pub fn copy_version_in_tx(
     source: &str,
     destination: &str,
 ) -> rusqlite::Result<()> {
+    if tx.query_row(
+        "SELECT store_role='passive' FROM engine_ownership WHERE rowid_guard=1",
+        [],
+        |row| row.get::<_, bool>(0),
+    )? {
+        return Ok(());
+    }
     // Derived-index failure must not abort authoritative version creation.
     // Rollback retains the destination's durable deferred seed.
     tx.execute_batch("SAVEPOINT link_fork_copy")?;

@@ -576,6 +576,13 @@ pub(super) fn replay_pending_materializations(
     selected: Option<&HashSet<String>>,
     superseded_after_projection_is_drained: bool,
 ) -> Result<MaterializationReplaySummary, RuntimeError> {
+    if store.is_passive() {
+        return Ok(MaterializationReplaySummary {
+            completed: 0,
+            failed: 0,
+            selected_seen: 0,
+        });
+    }
     // A crash can leave a replace half done, including for a job that will not
     // run again. Resolve those first, so no displaced file is left unsettled.
     recover_displacements(

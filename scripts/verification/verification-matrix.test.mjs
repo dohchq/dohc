@@ -292,7 +292,7 @@ test("verification selects packages and proofs and prepares before parallel jobs
           }
           if(command==='pnpm' && args[0]==='exec') {
             if(!${browser})throw Error('Browser tools unavailable for this change');
-            assert.deepEqual(args,['exec','playwright','install',...(process.platform==='linux'?['--with-deps']:[]),'chromium']);
+            assert.deepEqual(args,['exec','playwright','install','chromium']);
             assert.equal(options.env.DOHC_REQUIRE_POSTGRES,'1');
             writeFileSync(join(repoRoot,'.dohc-dev/browser-installed'),'yes');
             return {stdout:''};

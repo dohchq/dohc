@@ -88,6 +88,9 @@ impl DrainWorker {
     // Called between foreground commands. Immediate work returns zero delay;
     // idle and transient failures wait without monopolizing the actor.
     pub fn tick(&mut self, store: &mut EngineStore) -> Duration {
+        if store.is_passive() {
+            return Duration::MAX;
+        }
         #[cfg(feature = "fault-injection")]
         let mut phase =
             dohc_engine_storage::capture_phase::Phase::new("link_drain_tick", None, 0, true);

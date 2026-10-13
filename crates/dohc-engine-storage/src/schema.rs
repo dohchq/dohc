@@ -251,7 +251,47 @@ pub(crate) fn open_engine_db_with_root_token(
     root_token: Option<&str>,
     work: Option<Arc<AtomicU64>>,
 ) -> Result<OpenedEngineDb, StorageError> {
-    open_engine_db_configured(path, now_ms, root_token, work, false)
+    open_engine_db_configured(path, now_ms, root_token, work, false, false)
+}
+
+pub(crate) fn store_is_passive(conn: &Connection) -> Result<bool, StorageError> {
+    let has_role: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('engine_ownership') WHERE name='store_role')",
+        [], |row| row.get(0),
+    ).map_err(StorageError::corrupt)?;
+    if !has_role {
+        let role_migrated: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM engine_migrations WHERE id='v2-engine-store-role' AND completed_at IS NOT NULL)",
+            [], |row| row.get(0),
+        ).map_err(StorageError::corrupt)?;
+        return if role_migrated {
+            Err(StorageError::StateCorrupt { source: None })
+        } else {
+            Ok(false)
+        };
+    }
+    let role: String = conn
+        .query_row(
+            "SELECT store_role FROM engine_ownership WHERE rowid_guard=1",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(StorageError::corrupt)?;
+    match role.as_str() {
+        "owner" => Ok(false),
+        "passive" => Ok(true),
+        _ => Err(StorageError::StateCorrupt { source: None }),
+    }
+}
+
+pub(crate) fn open_engine_db_with_store_role(
+    path: &Path,
+    now_ms: i64,
+    root_token: Option<&str>,
+    work: Option<Arc<AtomicU64>>,
+    passive: bool,
+) -> Result<OpenedEngineDb, StorageError> {
+    open_engine_db_configured(path, now_ms, root_token, work, false, passive)
 }
 
 pub(crate) fn open_engine_db_for_actor(
@@ -260,7 +300,7 @@ pub(crate) fn open_engine_db_for_actor(
     root_token: Option<&str>,
     work: Option<Arc<AtomicU64>>,
 ) -> Result<OpenedEngineDb, StorageError> {
-    open_engine_db_configured(path, now_ms, root_token, work, true)
+    open_engine_db_configured(path, now_ms, root_token, work, true, false)
 }
 
 fn open_engine_db_configured(
@@ -269,6 +309,7 @@ fn open_engine_db_configured(
     root_token: Option<&str>,
     work: Option<Arc<AtomicU64>>,
     background_checkpoints: bool,
+    passive: bool,
 ) -> Result<OpenedEngineDb, StorageError> {
     // Step 1: "is this file empty?" is our question, not the VFS's.
     reject_undersized_database(path)?;
@@ -297,6 +338,17 @@ fn open_engine_db_configured(
     let disposition = classify_fingerprint(&conn)?;
     crate::migration::refuse_declared_v1_evidence(&conn)?;
 
+    if disposition == Disposition::ExistingV2 {
+        if store_is_passive(&conn)? != passive {
+            return Err(StorageError::InvalidInput {
+                reason: "engine store role mismatch",
+            });
+        }
+        if passive {
+            crate::store::install_passive_guards(&conn)?;
+        }
+    }
+
     // Step 4: the store is ours. Actor connections leave close checkpoints
     // to the background connection, including failed startup and worker exits.
     conn.set_db_config(
@@ -305,7 +357,7 @@ fn open_engine_db_configured(
     )
     .map_err(StorageError::corrupt)?;
     apply_persistent_pragmas(&conn)?;
-    let checkpoints = if background_checkpoints {
+    let checkpoints = if background_checkpoints && !passive {
         Some(crate::checkpoint::Checkpoints::start(path)?)
     } else {
         None
@@ -320,6 +372,7 @@ fn open_engine_db_configured(
         ctx.initial_root_token = root_token.map(str::to_owned);
     }
     let no_faults = NoFaults;
+    // Migrations must not originate operations or queue work for passive stores.
     let newly_applied = match run_migrations(
         &mut conn,
         BASELINE_MIGRATIONS,
@@ -329,6 +382,17 @@ fn open_engine_db_configured(
         MigrationOutcome::Applied { newly_applied } => newly_applied,
         MigrationOutcome::Crashed => return Err(StorageError::MigrationFailed { source: None }),
     };
+
+    if passive {
+        if disposition == Disposition::Fresh {
+            conn.execute(
+                "UPDATE engine_ownership SET store_role='passive' WHERE rowid_guard=1",
+                [],
+            )
+            .map_err(StorageError::persist)?;
+        }
+        crate::store::install_passive_guards(&conn)?;
+    }
 
     validate_v2(&conn)?;
     integrity_check(&conn)?;

@@ -528,6 +528,45 @@ mod tests {
     }
 
     #[test]
+    fn passive_store_open_and_upgrade_do_no_startup_checkpoint_work() {
+        use crate::migration::{BASELINE_MIGRATIONS, MigrationContext, run_migrations};
+        for upgrading in [false, true] {
+            let scratch = ScratchDir::new().unwrap();
+            let path = scratch.path().join("engine.db");
+            if upgrading {
+                let mut conn = Connection::open(&path).unwrap();
+                let before = BASELINE_MIGRATIONS
+                    .iter()
+                    .position(|m| m.id == "v2-persisted-links")
+                    .unwrap();
+                run_migrations(
+                    &mut conn,
+                    &BASELINE_MIGRATIONS[..before],
+                    &MigrationContext::current(1),
+                    &NoFaults,
+                )
+                .unwrap();
+                conn.execute_batch("UPDATE engine_ownership SET store_role='passive'; INSERT INTO versioned_workspaces VALUES('ws','main'); INSERT INTO versions(workspace_id,version_id,kind,name,created_at_ms) VALUES('ws','main','main','Main',1);").unwrap();
+            }
+            let s = EngineStore::open_passive(&path, 2, None, None).unwrap();
+            assert!(s.is_passive());
+            assert_eq!(s.checkpoint_work_for_test(), (0, 0));
+            assert!(!s.checkpoint_worker_running_for_test());
+            assert_eq!(s.table_row_count("link_pending").unwrap(), 0);
+            assert_eq!(s.table_row_count("link_aliases").unwrap(), 0);
+            assert_eq!(s.table_row_count("link_index_state").unwrap(), 0);
+            if upgrading {
+                assert_eq!(s.table_row_count("versions").unwrap(), 1);
+            }
+            drop(s);
+            let s = EngineStore::open_passive(&path, 3, None, None).unwrap();
+            assert_eq!(s.checkpoint_work_for_test(), (0, 0));
+            assert!(!s.checkpoint_worker_running_for_test());
+            assert_eq!(s.table_row_count("link_index_state").unwrap(), 0);
+        }
+    }
+
+    #[test]
     fn fresh_actor_schema_does_not_consume_the_write_admission_budget() {
         let scratch = ScratchDir::new().unwrap();
         let path = scratch.path().join("engine.db");
@@ -577,7 +616,7 @@ mod tests {
             .unwrap();
         let before = BASELINE_MIGRATIONS
             .iter()
-            .position(|m| m.ordinal == 47)
+            .position(|m| m.id == "v2-persisted-links")
             .unwrap();
         run_migrations(
             &mut conn,

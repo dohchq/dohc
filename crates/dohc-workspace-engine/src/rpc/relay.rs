@@ -689,6 +689,9 @@ impl EngineService {
         ctx: &RequestContext,
         open: &Arc<OpenWorkspace>,
     ) -> Result<(usize, Vec<dohc_engine_sync::SharingDeclined>), WireError> {
+        if open.mode == super::workspace::WorkspaceOpenMode::Passive {
+            return Ok((0, Vec::new()));
+        }
         let cancellation = OperationCancellation::new(ctx);
         let serial = tokio::select! {
             biased;
@@ -775,6 +778,7 @@ impl EngineService {
                 "sync.pull",
             )
             .await?;
+        let passive = open.mode == super::workspace::WorkspaceOpenMode::Passive;
         // Reconcile only after the terminal pull page. A relation target may
         // be on a later page, and dangling-link cleanup must not observe the
         // pull's partial state. The bounded outcome does not expose whether an
@@ -790,16 +794,17 @@ impl EngineService {
             })
         );
         let reconcile_at_commit = terminal && self.reconciles_collections_itself(&open);
-        if terminal && !reconcile_at_commit {
+        if terminal && !reconcile_at_commit && !passive {
             open.request_collection_reconcile();
         }
         // Post-commit: every applied envelope's record changes are durable,
         // even on a crash after apply (the cursor retries; the durable layer
         // dedupes, so a replay derives no second fact set).
-        if let RelayOperationOutcome::Sync(
-            SyncPassOutcome::Complete { record_facts, .. }
-            | SyncPassOutcome::CrashedAfterApply { record_facts, .. },
-        ) = &outcome
+        if !passive
+            && let RelayOperationOutcome::Sync(
+                SyncPassOutcome::Complete { record_facts, .. }
+                | SyncPassOutcome::CrashedAfterApply { record_facts, .. },
+            ) = &outcome
         {
             for facts in record_facts {
                 emit_record_events(&self.events, &open.workspace_id, facts);
@@ -808,13 +813,15 @@ impl EngineService {
         // Every terminal page asks, whether or not it applied anything: an
         // earlier request may have been dropped, and the parked updates are the
         // debt, which only the editor's resync clears.
-        if matches!(
-            &outcome,
-            RelayOperationOutcome::Sync(SyncPassOutcome::Complete {
-                has_more: false,
-                ..
-            })
-        ) {
+        if !passive
+            && matches!(
+                &outcome,
+                RelayOperationOutcome::Sync(SyncPassOutcome::Complete {
+                    has_more: false,
+                    ..
+                })
+            )
+        {
             self.notify_editors_behind(ctx, &open).await;
         }
         let pending = match &outcome {

@@ -29,7 +29,8 @@ import {
 } from "./chatMessages";
 import { useReactions, type ReactionView } from "./reactionStore";
 
-// The About rail: the open file's Chats, History and Access.
+// The About rail for a file: its Chats, History and Access. A focused chat
+// tab gets AboutConversationPanel instead.
 // Per-file Chats (PR 0M-5) are stored in the engine and linked to the file's
 // stable object id, so a chat follows its file through renames, and that id
 // is what History asks about. Product vocabulary: these are Chats.
@@ -88,10 +89,11 @@ function isWorkspaceUpdatingResponse(
 export function LinkedChatsPanel(props: {
   workspaceId: string;
   filePath: string | null;
-  // With no file focused: whether some tab still holds a file. About covers
-  // files only, so the empty state then points at that tab instead of asking
-  // for a file to be opened.
-  fileTabOpen?: boolean;
+  // The focused tab, which About is about.
+  tabPath?: string | null;
+  // With no file or conversation focused: whether another tab holds a file
+  // or a conversation. The empty state then says to switch instead of to open.
+  aboutTabOpen?: boolean;
   // A shared view always passes true. Absent means a workspace this machine
   // owns, which is writable by definition.
   //
@@ -106,6 +108,8 @@ export function LinkedChatsPanel(props: {
   // panel (History <-> Chats toggle) resets consumedInitialThread and
   // re-opens the stale thread.
   onInitialThreadConsumed?: () => void;
+  // Fired when the thread initialThread opened stops showing here.
+  onInitialThreadClosed?: () => void;
   onOpenPath?: (path: string, headingAnchor?: string) => void;
   // Reports a landed read so the Chats navigator can refetch its badges. The
   // file-linked threads it lists are read here, not in the Chats view.
@@ -196,8 +200,11 @@ export function LinkedChatsPanel(props: {
     }
   }, [filePath, notices, threadsKey, workspaceId]);
 
-  // File (or workspace) switch: drop everything stale and reload. The file
-  // that leaves About takes its Notices row with it.
+  // File, tab or workspace switch: drop everything stale and reload. The file
+  // that leaves About takes its Notices row with it. A tab switch counts even
+  // between two tabs that are not files, so a chat opened under one never
+  // stays under the next. A file's tab is the file, so it reads no more often.
+  const { tabPath } = props;
   useEffect(() => {
     liveToken.current += 1;
     setActiveThread(null);
@@ -214,7 +221,7 @@ export function LinkedChatsPanel(props: {
       threadsToken.current += 1;
       notices.clear(`about-chats:${filePath}`);
     };
-  }, [filePath, notices, refreshThreads]);
+  }, [filePath, notices, refreshThreads, tabPath]);
 
   const openThread = useCallback(
     async (thread: ChatThreadRecord, focusMessageId?: string) => {
@@ -268,6 +275,21 @@ export function LinkedChatsPanel(props: {
     [props.onError, props.onThreadRead, reactions, workspaceId],
   );
 
+  // The thread initialThread opened, while it is the one shown. When it stops
+  // showing (Back, a switch, or this panel unmounting), the parent hears so.
+  // Declared before the effect that sets it, so its first run sees nothing.
+  const shownInitialThread = useRef<string | null>(null);
+  const onInitialThreadClosed = useRef(props.onInitialThreadClosed);
+  onInitialThreadClosed.current = props.onInitialThreadClosed;
+  useEffect(() => {
+    if (shownInitialThread.current === null || activeThread?.id === shownInitialThread.current) return;
+    shownInitialThread.current = null;
+    onInitialThreadClosed.current?.();
+  }, [activeThread]);
+  useEffect(() => () => {
+    if (shownInitialThread.current !== null) onInitialThreadClosed.current?.();
+  }, []);
+
   // Consume each search-result click once. The shell creates a fresh record
   // per click, including when the user reopens the same thread.
   const consumedInitialThread = useRef<ChatThreadRecord | null>(null);
@@ -275,6 +297,7 @@ export function LinkedChatsPanel(props: {
     if (!props.initialThread) return;
     if (consumedInitialThread.current === props.initialThread) return;
     consumedInitialThread.current = props.initialThread;
+    shownInitialThread.current = props.initialThread.id;
     void openThread(props.initialThread, props.initialFocusMessageId);
     props.onInitialThreadConsumed?.();
   }, [
@@ -434,15 +457,18 @@ export function LinkedChatsPanel(props: {
   }
 
   if (!filePath) {
-    const sections = props.history ? "chats, history, and access" : "chats and access";
+    // About covers a file or a conversation. A shared view has no
+    // conversations, so there it names a file's own chats.
+    const subject = readOnly ? "a file" : "a file or a conversation";
+    const shows = readOnly ? "its chats and access" : "who has access";
     return (
       <EmptyState
         data-testid="linked-chats-empty"
         icon={Info}
         title={
-          props.fileTabOpen
-            ? `About covers files. Switch to a file's tab to see its ${sections}.`
-            : `Open a file to see its ${sections}.`
+          props.aboutTabOpen
+            ? `Switch to ${readOnly ? "a file's tab" : subject} to see ${shows}.`
+            : `Open ${subject} to see ${shows}.`
         }
       />
     );
@@ -457,7 +483,7 @@ export function LinkedChatsPanel(props: {
     : { status: "ready", objectId: threads.fileObjectId };
   return (
     <div data-testid="about-panel" className="flex min-h-0 flex-1 flex-col">
-      <AboutHeader path={filePath} />
+      <AboutHeader subject={{ path: filePath }} />
       <div className="flex min-h-0 flex-1 flex-col overflow-y-auto pb-2">
         <AboutSection
           id="chats"
@@ -503,7 +529,7 @@ export function LinkedChatsPanel(props: {
         ) : null}
         <AboutAccess
           workspaceId={workspaceId}
-          path={filePath}
+          subject={{ kind: "path", path: filePath }}
           expanded={sectionsOpen.access}
           onToggle={toggleSection("access")}
           notices={notices}

@@ -892,6 +892,7 @@ impl ActorHandle {
         token: CancellationToken,
     ) -> Result<(), RuntimeError> {
         self.run(move |store, _cache| {
+            if store.is_passive() { return Ok(()); }
             if token.is_cancelled() { return Err(RuntimeError::Cancelled); }
             if changes.is_empty() { return Ok(()); }
             let active = VersionedTextStore::new(store).get_active_version(&workspace_id)?.version_id;

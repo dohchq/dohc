@@ -3192,9 +3192,14 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
     },
     Migration {
         ordinal: 47,
+        id: "v2-engine-store-role",
+        sql: "ALTER TABLE engine_ownership ADD COLUMN store_role TEXT NOT NULL DEFAULT 'owner' CHECK (store_role IN ('owner','passive'));",
+        sets_user_version: None,
+    },
+    Migration {
+        ordinal: 48,
         id: "v2-persisted-links",
         sql: include_str!("links.sql"),
-
         sets_user_version: None,
     },
 ];
@@ -3861,8 +3866,12 @@ mod tests {
                 "5aa8707d5659bbfb8e3e0076c812d1d723a011e6cfb32fefe490f8b1066b2c39",
             ),
             (
+                "v2-engine-store-role",
+                "8d75962511b05d48c91ea5c041ed69c8ab6b181212aee4c0cad4c7e16f61a54b",
+            ),
+            (
                 "v2-persisted-links",
-                "3c99088e56007244b565f9e107465f8bbaf2499e50e5ed0b7325ac47de90aed6",
+                "605a6d01c45ddce5f97465428a20e9f5b2d3185f3e9da2c550a1072521062f44",
             ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());
@@ -6101,7 +6110,7 @@ mod tests {
         let mut conn = open_bare(&dir.join("engine.db"));
         let ctx = MigrationContext::current(1);
         let before = migration_index("v2-persisted-links");
-        assert_eq!(BASELINE_MIGRATIONS[before].ordinal, 47);
+        assert_eq!(BASELINE_MIGRATIONS[before].ordinal, 48);
         assert_eq!(before + 1, BASELINE_MIGRATIONS.len());
         run_migrations(&mut conn, &BASELINE_MIGRATIONS[..before], &ctx, &NoFaults).unwrap();
         conn.execute_batch("INSERT INTO versioned_workspaces VALUES('ws','main'); INSERT INTO versions(workspace_id,version_id,kind,name,created_at_ms) VALUES('ws','main','main','Main',1); INSERT INTO file_objects VALUES('ws','a',1); INSERT INTO blobs VALUES('hash',5,'[[b]]'); INSERT INTO path_aliases VALUES('ws','main','a.md','a'); INSERT INTO snapshots(workspace_id,version_id,object_id,path,blob_sha256,updated_at_ms,latest_moment_id,metadata_origin) VALUES('ws','main','a','a.md','hash',1,'m','test');").unwrap();
