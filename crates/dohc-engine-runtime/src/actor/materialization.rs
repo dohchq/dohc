@@ -590,6 +590,7 @@ pub(super) fn replay_pending_materializations(
 ) -> Result<MaterializationReplaySummary, RuntimeError> {
     if store.is_passive() {
         return Ok(MaterializationReplaySummary {
+            parked: 0,
             completed: 0,
             failed: 0,
             selected_seen: 0,
