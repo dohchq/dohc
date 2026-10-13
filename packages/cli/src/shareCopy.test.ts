@@ -12,7 +12,7 @@ it("parses share copy and sends only grant coordinates and local cwd", async () 
   expect(result.stdout).toContain('"shareCode": "code"');
   expect(request).toHaveBeenCalledWith(expect.objectContaining({ verb: "shareCopy", args: { ...input, cwd: expect.any(String), actor: "human" } }));
 });
-it.each([[], ["share"], ["share", "grant", "extra"]])("refuses missing or extra operands %j", operands => {
+it.each([{ operands: [] }, { operands: ["share"] }, { operands: ["share", "grant", "extra"] }])("refuses missing or extra operands %j", ({ operands }) => {
   expect(() => parseCliArguments(["share", "copy", ...operands], {})).toThrow();
 });
 it.each(["workspaceId", "ownerUserId", "userId", "credentials", "relayUrl"])("refuses caller-supplied %s at socket parsing", key => {
