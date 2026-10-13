@@ -338,8 +338,11 @@ import { readOrCreateLocalInstallationId } from "./workspaces/localInstallationI
 import { createLocalAuthorship } from "./workspaces/localAuthorship";
 import {
   createCloudLogin,
+  runCloudLogoutTransition,
   type CloudLogin,
 } from "./workspaces/cloudLogin";
+import { createServerAccountDeletion } from "./workspaces/serverAccountDeletion";
+import { registerServerAccountIpc } from "./ipc/serverAccountIpc";
 import { createJoinedWorkspaceRunner } from "./workspaces/createJoinedWorkspace";
 import { registerRelaySharesIpcHandlers } from "./ipc/relaySharesIpc";
 import { requireCredentials } from "./workspaces/credentialScopedOperation";
@@ -4543,9 +4546,29 @@ const chatWrites = createChatWrites({
 
 let ownerAppPublicationForCli: ((input: OwnerAppPublicationRequest, agent: import("@dohc/security-contract/approval-provenance").ApprovalAgent | null) => Promise<OwnerAppPublicationResult>) | undefined;
 let ownerAppResponsesForCli:((input:import("@dohc/cli/app-responses").OwnerAppResponsesRequest)=>Promise<import("@dohc/cli/app-responses").OwnerAppResponsesResult>)|undefined;
+// The desktop window and the CLI delete the account through this one client.
+// Afterwards this computer disconnects only if it is still connected to the
+// deleted account. Local workspaces stay.
+const serverAccountDeletion = createServerAccountDeletion({
+  credentials: loadAndCacheCurrentCredentials,
+  workspaces: listWorkspaces,
+  disconnect: async (deleted) => {
+    if (cachedCredentials?.serverUrl !== deleted.serverUrl || cachedCredentials.userId !== deleted.userId) return;
+    await runCloudLogoutTransition({
+      clearCachedCredentials: () => clearCachedCredentials(),
+      logout: () => cloudLogin().invalidateSessionIf(deleted),
+      stopEngines: () => activity.stopEngines(),
+      closeRelayTransportWorkspaces: () => closeAllRelayTransportWorkspaces({ accountChanged: true }),
+      notifyWorkspaceActivity: () => notifyRenderer(),
+      notifyCloudSessionChanged: () => notifyCloudSessionChanged("ready"),
+    });
+  },
+});
+
 const { startDesktopCliServer } = createDesktopCliServer({
   access: workspaceId => accessCliQueries(accessOwner, work => withPhysicalWorkspaceOperation(workspaceId, work)),
   recordSuccess: invocation => usageStore?.recordSuccess(invocation),
+  serverAccount: serverAccountDeletion,
   dataset: (input, agent) => {
     if (!datasetForCli) throw new Error("Collections are not ready. Try again.");
     return datasetForCli(input, agent);
@@ -5743,6 +5766,7 @@ async function currentDiagnostics(): Promise<string> {
 
 function registerIpcHandlers(): void {
   registerSystemMotionIpc(operationBoundary, () => systemPreferences.getAnimationSettings());
+  registerServerAccountIpc(operationBoundary, serverAccountDeletion);
   shareDirectWriteDelivery.register(operationBoundary);
   const shareCopyHandler = createShareCopyHandler<WebContents, RegistryEntry, DesktopRendererWorkspaceOperation>({
     currentSession: sender => rendererWorkspaceSessions.current(sender) ?? null,

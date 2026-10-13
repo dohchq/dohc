@@ -6173,6 +6173,8 @@ export function DesktopWorkspaceShell(props: {
             workspaceId={workspaceId}
             onConnected={refreshCloudStatus}
             onConnectionError={reportConnectionError}
+            onConnectionNotice={(notice) =>
+              notice.tone === "success" ? showSuccessNotice(notice.message) : showWarningNotice(notice.message)}
             initialServerUrl={cloudRetryServerUrl}
           />
         </Overlay>

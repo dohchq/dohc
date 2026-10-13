@@ -42,6 +42,7 @@ export const CLI_DISPATCH_ARGUMENTS: Readonly<Record<string, readonly string[]>>
   "automation switch": ["Tasks", "stamp", "on", "--base", hash, "--submit-id", "switch-1"],
   "automation runs": ["Tasks", "stamp"], "automation run": ["Tasks", "stamp", "run"],
   "automation retry": ["Tasks", "stamp", "run"], "automation press": ["Tasks", "button", "record"],
+  "account deletePreview": [], "account delete": ["--server", "https://dohc.example.com", "--preview-token", "token"],
   // JSON verb parsers declare their socket dispatch after validating these request fields.
   ...Object.fromEntries(Object.entries(CLI_COMMANDS).flatMap(([group, command]) =>
     Object.entries(command.verbs).filter(([, verb]) => verb.fields).map(([name, verb]) => [

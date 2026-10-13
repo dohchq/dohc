@@ -1,5 +1,11 @@
 {
   "socket": {
+    "accountDeletePreview": [
+      "account.delete.preview"
+    ],
+    "accountDelete": [
+      "account.delete"
+    ],
     "accessObject": [
       "access.object.read"
     ],
@@ -233,6 +239,8 @@
     "automation runs": "automation.runs.list",
     "automation run": "automation.run.read",
     "automation retry": "automation.run.retry",
-    "automation press": "automation.button.press"
+    "automation press": "automation.button.press",
+    "account deletePreview": "account.delete.preview",
+    "account delete": "account.delete"
   }
 }

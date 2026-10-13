@@ -1472,6 +1472,39 @@ Name the record by its id, or a dataset record by its primary key as JSON. The p
 
 With `--json`, prints `{ schemaVersion, ok: true, run, outcome, error, waiting }` or `{ schemaVersion, ok: true, relayed: true }`.
 
+### `dohc account`
+
+Review and delete the server account the dohc app is connected to.
+
+Unlike other commands, account verbs also work outside a workspace folder.
+
+#### `dohc account deletePreview`
+
+```sh
+dohc account deletePreview [options]
+```
+
+List what deleting the connected server account removes.
+
+The result holds the server and previewToken that delete needs. The token expires after five minutes.
+
+With `--json`, prints `{ schemaVersion, email, server, workspaces: { workspaceId, name }[], workspacesElsewhere, storedBytes, ownedShareCount, heldGrantCount, previewToken }`.
+
+#### `dohc account delete`
+
+```sh
+dohc account delete [options]
+```
+
+Delete the connected server account and the workspaces it owns on the server.
+
+dohc reads the account password from stdin, or asks for it when stdin is a terminal. Never pass it as an argument. This cannot be undone. Copies on this computer stay. People you shared with lose access and keep their copies. If you create an account again later, the server will not accept your old copies of the deleted workspaces. Its backups keep the data until they expire. When the server cannot finish at once, the account stays blocked and the server finishes later. Either way, the dohc app disconnects from the server. If the preview expired or changed, run deletePreview again.
+
+- `--server <address>`: Use server from deletePreview. Required.
+- `--preview-token <token>`: Use previewToken from deletePreview. Required.
+
+With `--json`, prints `{ schemaVersion, ok: true, finished, email, server }`.
+
 ## App channel
 
 An app page reads and changes its Collection through the app channel. The channel works in two places: a published app opened from a share link, and a local app opened with `dohc app launchLocal`. An app open in a dohc tab has no channel.

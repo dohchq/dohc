@@ -7,6 +7,7 @@ import { CLI_COMMANDS } from "@dohc/cli/args";
 import { cliResultSchemas } from "@dohc/cli/protocol";
 import {
   ACCESS_RESULTS,
+  ACCOUNT_RESULTS,
   APP_CHANNEL_REQUESTS,
   APP_RESPONSE_RESULTS,
   APP_RESULTS,
@@ -54,6 +55,7 @@ describe("CLI, MCP, and app channel reference", () => {
     const documented = new Set<string>([
       ...Object.keys(CLI_COMMANDS.chat!.verbs),
       ...Object.values(ACCESS_RESULTS),
+      ...Object.values(ACCOUNT_RESULTS),
       "dataset", "appPublication", "ownerAppResponses", "fileWrite", "fileMove", "fileDelete",
       ...Object.values(MCP_RETURNS).flatMap((returns) => typeof returns === "string" ? [] : [returns.cli]),
     ]);

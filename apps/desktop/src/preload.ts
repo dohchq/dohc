@@ -21,6 +21,7 @@ import type {
 } from "./ipc/bridgeContract";
 import {
   systemMotionOperations,
+  serverAccountOperations,
   SitePreviewReplacedEvent,
   ListOwnerLiveDocumentsPayload,
   ListOwnerLiveRefusalsPayload,
@@ -114,6 +115,7 @@ const rendererDocumentId = crypto.randomUUID();
 
 const bridge: DohcDesktopBridge = {
   ...operationBridge(systemMotionOperations, invoke),
+  ...operationBridge(serverAccountOperations, invoke),
   ...operationBridge(shareDirectWriteDeliveryOperations, invoke),
   ...operationBridge(shareCopyOperations, invoke),
   ...operationBridge(accessOperations, invoke),

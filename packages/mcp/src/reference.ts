@@ -121,6 +121,11 @@ const ACCESS_NOTES = [
   "Collection answers read current Collection authority and return capability facts, not share grants.",
 ].join("\n\n");
 
+export const ACCOUNT_RESULTS: Record<string, CliSocketVerb> = {
+  deletePreview: "accountDeletePreview",
+  delete: "accountDelete",
+};
+
 const DOCUMENT_RESULTS: Record<string, CliSocketVerb> = {
   read: "documentRead", edit: "documentEdit", create: "documentCreate", comment: "fileChatStart",
 };
@@ -418,7 +423,7 @@ function shellBlock(line: string): string {
   return "```sh\n" + line + "\n```";
 }
 
-// What a verb returns. Chat, history, Access, and automation verbs print their socket verb's
+// What a verb returns. Chat, history, Access, automation, and account verbs print their socket verb's
 // result; the JSON verbs of `dataset` and `app` return the result kinds
 // listed above.
 function verbReturns(command: string, name: string): string {
@@ -429,13 +434,14 @@ function verbReturns(command: string, name: string): string {
       : command === "document"
         ? DOCUMENT_RESULTS[name]
         : command === "automation" ? AUTOMATION_RESULTS[name]
-          : command === "access" ? ACCESS_RESULTS[name] : undefined;
+          : command === "account" ? ACCOUNT_RESULTS[name]
+            : command === "access" ? ACCESS_RESULTS[name] : undefined;
   if (socketVerb !== undefined) {
     if (!Object.hasOwn(cliResultSchemas, socketVerb)) throw new Error(`dohc ${command} ${name} has no result schema.`);
     const result = jsonSchema(cliResultSchemas[socketVerb as CliSocketVerb], "output");
-    // A history, document or automation refusal exits with its reason instead of printing JSON.
+    // A history, document, automation, or account refusal exits with its reason instead of printing JSON.
     const printed = (branches(result) ?? [result])
-      .filter((branch) => (command !== "history" && command !== "document" && command !== "automation") || branch.properties?.ok?.const !== false);
+      .filter((branch) => !["history", "document", "automation", "account"].includes(command) || branch.properties?.ok?.const !== false);
     const shapes = printed.map((branch) => shapeText(branch).replace(/^\{ /, "{ schemaVersion, "));
     const socketNote = command === "access" ? ` Uses socket verb \`${socketVerb}\`.` : "";
     return `With \`--json\`, prints ${shapes.map((shape) => `\`${shape}\``).join(" or ")}.${socketNote}`;
@@ -476,6 +482,7 @@ function commandSection(name: string, command: CliCommandSpec): string {
   if (name === "document") checkCovered(name, Object.keys(command.verbs), Object.keys(DOCUMENT_RESULTS));
   if (name === "automation") checkCovered(name, Object.keys(command.verbs), Object.keys(AUTOMATION_RESULTS));
   if (name === "access") checkCovered(name, Object.keys(command.verbs), Object.keys(ACCESS_RESULTS));
+  if (name === "account") checkCovered(name, Object.keys(command.verbs), Object.keys(ACCOUNT_RESULTS));
   const jsonOperands = [...new Set(verbs.filter(([, verb]) => verb.fields).map(([, verb]) => verb.operands))];
   return [
     `### \`dohc ${name}\``,

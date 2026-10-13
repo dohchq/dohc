@@ -1,5 +1,5 @@
 import { useRequestSequence } from "./useRequestSequence";
-import { Cloud, ExternalLink, LogOut } from "lucide-react";
+import { Cloud, ExternalLink, LogOut, Trash2 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { CloudStatusResult } from "../ipc/bridgeContract";
 import { canonicalCloudOrigin } from "../workspaces/cloudConfiguration";
@@ -14,6 +14,7 @@ import {
 } from "./shell/connectionNotices";
 import { Pill, PrimaryButton, SecondaryButton } from "./ui/controls";
 import { CopyField, type CopySecret } from "./ui/CopyButton";
+import { ServerAccountDeleteDialog, type ServerAccountDeleted } from "./ServerAccountDeleteDialog";
 
 const SYNC_CODE_SECRET: CopySecret = { what: "the workspace code", again: "Copy it again from Settings." };
 
@@ -120,6 +121,8 @@ export function CloudLogin(props: {
   // Inline only for what the user can fix in the field in front of them.
   const [addressProblem, setAddressProblem] = useState<string | null>(null);
   const [disconnectBusy, setDisconnectBusy] = useState(false);
+  // Each opening is a new review; a notice's Try again opens another.
+  const [deleteReview, setDeleteReview] = useState<number | null>(null);
   const [serverUrl, setServerUrl] = useState(props.initialServerUrl ?? "");
   // Kept from the connected session only — the sync code carries the relay the
   // other machine joins through, and main is the one that discovers it.
@@ -145,6 +148,8 @@ export function CloudLogin(props: {
     [ownNotices.reporter],
   );
   const reportConnectionError = props.onConnectionError ?? reportOwnError;
+  const reportConnectionNotice = props.onConnectionNotice ?? ((notice: { message: string; tone: "success" | "warning" }) =>
+    notice.tone === "success" ? ownNotices.showSuccess(notice.message) : ownNotices.showWarning(notice.message));
   const protectPassphraseTooShort =
     needsPassphrase &&
     passphrasePurpose === "protect" &&
@@ -211,6 +216,7 @@ export function CloudLogin(props: {
     setPassphrase("");
     setAddressProblem(null);
     setDisconnectBusy(false);
+    setDeleteReview(null);
     setServerUrl(props.initialServerUrl ?? "");
     setRelayUrl("");
     setServerName("");
@@ -466,6 +472,20 @@ export function CloudLogin(props: {
     } finally {
       if (sessionRef.isCurrent(session)) setDisconnectBusy(false);
     }
+  }
+
+  // Main already disconnected from the deleted account, if this computer was
+  // still connected to it. Ask main what the session is now.
+  function accountDeleted(deleted: ServerAccountDeleted) {
+    setDeleteReview(null);
+    reportConnectionNotice(deleted.finished
+      ? { tone: "success", message: `Deleted ${deleted.email} on ${deleted.server}. Workspaces on this computer stay.` }
+      : { tone: "warning", message: `${deleted.server} blocked ${deleted.email} and will finish deleting its data. Workspaces on this computer stay.` });
+    setStatusAttempt((attempt) => attempt + 1);
+  }
+
+  function reviewDeletionAgain(session: number): () => boolean {
+    return retryFor(session, () => setDeleteReview((review) => (review ?? 0) + 1));
   }
 
   const panel = (
@@ -795,6 +815,33 @@ export function CloudLogin(props: {
             <LogOut size={12} aria-hidden />
             {disconnectBusy ? "Disconnecting…" : "Disconnect"}
           </SecondaryButton>
+          {props.embedded ? null : (
+            // The secondary recipe in the danger color: it ends the account.
+            <button
+              type="button"
+              data-testid="cloud-delete-account"
+              disabled={disconnectBusy}
+              onClick={() => setDeleteReview((review) => (review ?? 0) + 1)}
+              className="mt-4 flex items-center gap-1.5 rounded-lg border border-line bg-transparent px-3 py-1.5 text-xs text-danger transition-colors hover:bg-hover disabled:opacity-50"
+            >
+              <Trash2 size={12} aria-hidden />
+              Delete account…
+            </button>
+          )}
+          {deleteReview !== null ? (
+            <ServerAccountDeleteDialog
+              key={deleteReview}
+              email={phase.email}
+              server={connectedServer}
+              onClose={() => setDeleteReview(null)}
+              onDeleted={accountDeleted}
+              onError={(message, cause) => {
+                const session = sessionRef.current();
+                setDeleteReview(null);
+                reportConnectionError({ message, cause, serverUrl: null, retry: reviewDeletionAgain(session) });
+              }}
+            />
+          ) : null}
         </div>
       ) : null}
     </div>
