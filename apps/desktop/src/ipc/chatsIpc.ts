@@ -1,3 +1,5 @@
+import { createActorPresentationRequest } from "../workspaces/actorPresentation";
+import type { ActorPresentation } from "./bridgeContract";
 import type { EngineFileResolver } from "../workspaces/resolveEngineFiles";
 import { nameSlug } from "@dohc/workspace-contracts/names";
 import {
@@ -112,8 +114,9 @@ function automationForIpc(automation: NonNullable<ChatMessage["automation"]>, co
   return { automationId: automation.automationId, collectionPath: collectionOf(automation.automationId) };
 }
 
-export function chatMessageForIpc(message: ChatMessage, collectionOf: AutomationCollectionOf): ChatMessageRecord {
+export function chatMessageForIpc(message: ChatMessage, collectionOf: AutomationCollectionOf, presentation: ActorPresentation): ChatMessageRecord {
   return {
+    presentation,
     id: message.id,
     threadId: message.threadId,
     authorKind: message.author.kind,
@@ -148,6 +151,7 @@ export function registerChatsIpcHandlers<
   warmCredentialCache(): Promise<void>;
   localUserId(): string;
   localInstallationId(): string;
+  readWorkspace(workspaceId: string): RegistryEntry | null;
   currentCredentials(): CloudCredentials | null;
   chatRelayIdentityFor(
     workspaceId: string, target: ChatRelayIdentityTarget, store: DesktopLinkedChatStore,
@@ -188,6 +192,25 @@ export function registerChatsIpcHandlers<
   } = dependencies;
   const { requireChatScope, chatFileObjectId, resolveChatFileReferences } = dependencies.chatScope;
   const { materializeChatBookmark } = desktopChatBookmarks;
+  function registerScopedHandler<Input extends { workspaceId: string }>(
+    channel: string, schema: { parse(payload: unknown): Input },
+    work: (event: Event, input: Input, operation: Operation) => Promise<unknown>,
+  ) {
+    registerHandler(channel, async (event, payload) => {
+      assertTrustedSender(event);
+      const input = schema.parse(payload);
+      return withRendererWorkspaceOperation(event.sender, input.workspaceId,
+        "Chats stopped because this window changed workspaces.", operation => work(event, input, operation));
+    });
+  }
+  async function presentationRequest(workspace: RegistryEntry, store: DesktopLinkedChatStore, assertCurrent: () => void) {
+    await warmCredentialCache();
+    assertCurrent();
+    return createActorPresentationRequest({
+      readWorkspace: () => dependencies.readWorkspace(workspace.workspaceId), store, assertCurrent,
+      installationId: localInstallationId(), credentials: currentCredentials(),
+    });
+  }
   function chatThreadForIpc(thread: ChatThread): ChatThreadRecord {
     return {
       id: thread.id,
@@ -238,9 +261,7 @@ export function registerChatsIpcHandlers<
     });
   });
 
-  registerHandler(CHANNELS.listChatFileMentions, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = ListChatFileMentionsPayload.parse(payload);
+  registerScopedHandler(CHANNELS.listChatFileMentions, ListChatFileMentionsPayload, async (event, input, operation) => {
     const { workspace, capture } = await requireEngineCapture(
       input.workspaceId,
       "Chats",
@@ -251,6 +272,7 @@ export function registerChatsIpcHandlers<
     const requestedFile = await capture.resolveFileForPath(input.path);
     const objectId = requestedFile?.objectId ?? null;
     const store = linkedChatStoreFor(workspace);
+    const presentation = await presentationRequest(workspace, store, operation.assertCurrent);
     const mentions = await store.listFileMentions({
       workspaceId: workspace.workspaceId,
       ...(objectId ? { objectId } : { pathHint: input.path }),
@@ -281,7 +303,7 @@ export function registerChatsIpcHandlers<
       ...(rowsUncovered > 0
         ? { sharedChannelRowsUncovered: rowsUncovered }
         : {}),
-      mentions: mentions.flatMap((mention) => {
+      mentions: (await Promise.all(mentions.map(async (mention) => {
         const currentPath = resolveChatFileMentionPath({
           requestedObjectId: objectId,
           ...(mention.attachment.objectId
@@ -299,7 +321,7 @@ export function registerChatsIpcHandlers<
               ...mention.attachment,
               pathHint: currentPath,
             }),
-            message: chatMessageForIpc(mention.message, automationCollectionOf(workspace.workspaceId)),
+            message: chatMessageForIpc(mention.message, automationCollectionOf(workspace.workspaceId), await presentation(mention.message, mention.message.threadId)),
             thread: chatThreadForIpc(mention.thread),
             ...(mention.channel
               ? {
@@ -318,7 +340,7 @@ export function registerChatsIpcHandlers<
               : {}),
           },
         ];
-      }),
+      }))).flat(),
     });
   });
 
@@ -423,9 +445,7 @@ export function registerChatsIpcHandlers<
     return CreateFileChatResult.parse({ thread: chatThreadForIpc(thread) });
   });
 
-  registerHandler(CHANNELS.listChatMessages, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = ListChatMessagesPayload.parse(payload);
+  registerScopedHandler(CHANNELS.listChatMessages, ListChatMessagesPayload, async (event, input, operation) => {
     // Reachable from a share view at every level, for a thread on
     // a file the share already served.
     const { workspace, store } = await requireChatScope(input.workspaceId);
@@ -433,8 +453,9 @@ export function registerChatsIpcHandlers<
       workspaceId: workspace.workspaceId,
       threadId: input.threadId,
     });
+    const presentation = await presentationRequest(workspace, store, operation.assertCurrent);
     return ListChatMessagesResult.parse({
-      messages: messages.map((message) => chatMessageForIpc(message, automationCollectionOf(workspace.workspaceId))),
+      messages: await Promise.all(messages.map(async (message) => chatMessageForIpc(message, automationCollectionOf(workspace.workspaceId), await presentation(message, message.threadId)))),
     });
   });
 
@@ -449,9 +470,7 @@ export function registerChatsIpcHandlers<
     return GetChatThreadRevisionResult.parse({ revision });
   });
 
-  registerHandler(CHANNELS.sendChatMessage, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = SendChatMessagePayload.parse(payload);
+  registerScopedHandler(CHANNELS.sendChatMessage, SendChatMessagePayload, async (event, input, operation) => {
     // A share view resolves a scope instead of a capture so reads still work.
     // chatWrites refuses every received share before persistence.
     const scope = await requireChatScope(input.workspaceId);
@@ -467,7 +486,8 @@ export function registerChatsIpcHandlers<
           input.fileReferences,
         ),
     });
-    return SendChatMessageResult.parse({ message: chatMessageForIpc(message, automationCollectionOf(scope.workspace.workspaceId)) });
+    const presentation = await presentationRequest(scope.workspace, scope.store, operation.assertCurrent);
+    return SendChatMessageResult.parse({ message: chatMessageForIpc(message, automationCollectionOf(scope.workspace.workspaceId), await presentation(message, message.threadId)) });
   });
 
   registerHandler(CHANNELS.listChatThreadDecisions, async (event, payload) => {
@@ -564,6 +584,7 @@ export function registerChatsIpcHandlers<
       viewerAuthorId: string;
       localFallbackAuthorId: string;
     },
+    presentation?: ActorPresentation,
   ) {
     const openingReactions =
       summary.openingMessage?.reactions.map(chatReactionForIpc) ?? [];
@@ -576,6 +597,7 @@ export function registerChatsIpcHandlers<
       openDecisionCount: summary.openDecisionCount,
       openingMessage: summary.openingMessage
         ? {
+            presentation,
             id: summary.openingMessage.id,
             authorKind: summary.openingMessage.author.kind,
             authorDisplayName: summary.openingMessage.author.displayName,
@@ -768,9 +790,7 @@ export function registerChatsIpcHandlers<
     return SetChatFollowResult.parse({ follow: chatFollowForIpc(follow) });
   });
 
-  registerHandler(CHANNELS.listPersonalChatFeed, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = ListPersonalChatFeedPayload.parse(payload);
+  registerScopedHandler(CHANNELS.listPersonalChatFeed, ListPersonalChatFeedPayload, async (event, input, operation) => {
     const { workspace } = await requireEngineCapture(
       input.workspaceId,
       "Chats",
@@ -778,6 +798,7 @@ export function registerChatsIpcHandlers<
     await warmCredentialCache();
     const rowsUncovered = await syncWorkspaceSharedChannels(workspace.workspaceId);
     const store = linkedChatStoreFor(workspace);
+    const presentation = await presentationRequest(workspace, store, operation.assertCurrent);
     const ownerUserId = localUserId();
     await store.ensureDefaultChannelFollows({
       workspaceId: workspace.workspaceId,
@@ -822,8 +843,8 @@ export function registerChatsIpcHandlers<
     );
     return ListPersonalChatFeedResult.parse({
       ...(rowsUncovered > 0 ? { sharedChannelRowsUncovered: rowsUncovered } : {}),
-      items: page.items.map((item) => ({
-        message: chatMessageForIpc(item.message, automationCollectionOf(workspace.workspaceId)),
+      items: await Promise.all(page.items.map(async (item) => ({
+        message: chatMessageForIpc(item.message, automationCollectionOf(workspace.workspaceId), await presentation(item.message, item.message.threadId)),
         thread: chatThreadForIpc(item.thread),
         viewerAuthorId: viewerByThread.get(item.thread.id) ?? localFallbackAuthorId,
         // An automation is neither a person nor an agent to follow.
@@ -850,17 +871,17 @@ export function registerChatsIpcHandlers<
             }
           : {}),
         ...(item.parentMessage
-          ? { parentMessage: chatMessageForIpc(item.parentMessage, automationCollectionOf(workspace.workspaceId)) }
+          ? { parentMessage: chatMessageForIpc(item.parentMessage, automationCollectionOf(workspace.workspaceId), await presentation(item.parentMessage, item.parentMessage.threadId)) }
           : {}),
         ...(item.openingMessage
-          ? { openingMessage: chatMessageForIpc(item.openingMessage, automationCollectionOf(workspace.workspaceId)) }
+          ? { openingMessage: chatMessageForIpc(item.openingMessage, automationCollectionOf(workspace.workspaceId), await presentation(item.openingMessage, item.openingMessage.threadId)) }
           : {}),
         reactions: reactionsForViewer(item.reactions.map(chatReactionForIpc), {
           viewerAuthorId: viewerByThread.get(item.thread.id) ?? localFallbackAuthorId,
           localFallbackAuthorId,
         }),
         matchedBy: item.matchedBy,
-      })),
+      }))),
       ...(page.nextCursor ? { nextCursor: page.nextCursor } : {}),
       ...(page.headCursor ? { headCursor: page.headCursor } : {}),
     });
@@ -938,15 +959,14 @@ export function registerChatsIpcHandlers<
     }),
   );
 
-  registerHandler(CHANNELS.listChannelThreads, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = ListChannelThreadsPayload.parse(payload);
+  registerScopedHandler(CHANNELS.listChannelThreads, ListChannelThreadsPayload, async (event, input, operation) => {
     const { workspace } = await requireEngineCapture(
       input.workspaceId,
       "Chats",
     );
     const localFallbackAuthorId = localInstallationId();
     const store = linkedChatStoreFor(workspace);
+    const presentation = await presentationRequest(workspace, store, operation.assertCurrent);
     const viewerAuthorId = await chatViewerAuthorId({
       localFallbackAuthorId,
       resolveReplicationAuthorId: async () =>
@@ -969,19 +989,17 @@ export function registerChatsIpcHandlers<
       ...(input.lane ? { lane: input.lane } : {}),
     });
     return ListChannelThreadsResult.parse({
-      threads: threads.map((thread) =>
+      threads: await Promise.all(threads.map(async (thread) =>
         channelThreadForIpc(thread, automationCollectionOf(workspace.workspaceId), {
           viewerAuthorId,
           localFallbackAuthorId,
-        }),
-      ),
+        }, thread.openingMessage ? await presentation(thread.openingMessage, thread.thread.id) : undefined),
+      )),
       viewerAuthorId,
     });
   });
 
-  registerHandler(CHANNELS.startChannelThread, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = StartChannelThreadPayload.parse(payload);
+  registerScopedHandler(CHANNELS.startChannelThread, StartChannelThreadPayload, async (event, input, operation) => {
     const { workspace, capture } = await requireEngineCapture(
       input.workspaceId,
       "Chats",
@@ -999,6 +1017,7 @@ export function registerChatsIpcHandlers<
       resolveAttachments: () =>
         resolveChatFileReferences(workspace, capture.fileObjectIdForPath, input.fileReferences),
     });
+    const presentation = await presentationRequest(workspace, linkedChatStoreFor(workspace), operation.assertCurrent);
     return StartChannelThreadResult.parse({
       thread: channelThreadForIpc({
         thread: started.thread,
@@ -1007,7 +1026,7 @@ export function registerChatsIpcHandlers<
         unreadCount: 0,
         openDecisionCount: 0,
       }, automationCollectionOf(workspace.workspaceId)),
-      message: chatMessageForIpc(started.message, automationCollectionOf(workspace.workspaceId)),
+      message: chatMessageForIpc(started.message, automationCollectionOf(workspace.workspaceId), await presentation(started.message, started.message.threadId)),
       viewerAuthorId:
         started.message.authorUserId ?? localInstallationId(),
     });

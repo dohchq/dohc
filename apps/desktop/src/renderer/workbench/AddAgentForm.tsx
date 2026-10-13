@@ -12,6 +12,7 @@ import { bridge } from "../bridge";
 import { ipcErrorMessage } from "../ipcError";
 import { PrimaryButton, SecondaryButton } from "../ui/controls";
 import { ChatAvatar } from "./ChatAvatar";
+import { ownPresentation } from "./actorPresentation";
 import { Overlay } from "../Overlay";
 
 const COMMAND_PLACEHOLDER = "node agent.mjs";
@@ -131,7 +132,7 @@ export function AddAgentForm(props: {
         className="dohc-elevated flex w-[min(600px,calc(100vw-32px))] flex-col gap-4 rounded-xl border border-line bg-panel p-5"
       >
         <div className="flex items-center gap-2">
-          <ChatAvatar name={preview} kind="agent" own size="strip" />
+          <ChatAvatar presentation={ownPresentation} name={preview} kind="agent" size="strip" />
           <h3 id="chats-add-agent-title" className="m-0 text-sm font-semibold text-ink">
             Add an agent
           </h3>

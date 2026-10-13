@@ -1713,7 +1713,7 @@ describe("chat IPC contract", () => {
     const preview = {
       id: "thread-1", title: "Launch", createdAtMs: 1, updatedAtMs: 2, channelId: "channel-1",
       messageCount: 1, lastReadSequence: 0, unreadCount: 1,
-      openingMessage: {
+      openingMessage: { presentation: { group: "fixture", hue: null, self: false },
         id: "message-1", authorKind: "automation", authorDisplayName: "Stamp the finish date",
         authorOwnerDisplayName: "Ice", createdAtMs: 1, bodySnippet: "Finished Book hotel", reactions: [],
         automation: { automationId: "collection:Trip/Tasks#stamp", collectionPath: "Trip/Tasks" },
@@ -1736,7 +1736,7 @@ describe("chat IPC contract", () => {
         messageCount: 2,
         lastReadSequence: 1,
         unreadCount: 1,
-        openingMessage: {
+        openingMessage: { presentation: { group: "fixture", hue: null, self: false },
           id: "message-1",
           authorKind: "agent",
           authorDisplayName: "Sam",
@@ -3630,7 +3630,7 @@ describe("engine history and linked Chats IPC contract", () => {
 
   it("round-trips a sent chat message with main-derived authorship", () => {
     const result = SendChatMessageResult.parse({
-      message: {
+      message: { presentation: { group: "fixture", hue: null, self: false },
         id: "message-1",
         threadId: "thread-1",
         authorKind: "human",
@@ -3644,7 +3644,7 @@ describe("engine history and linked Chats IPC contract", () => {
     // "the agent name" in the UI).
     expect(
       SendChatMessageResult.parse({
-        message: {
+        message: { presentation: { group: "fixture", hue: null, self: false },
           id: "message-2",
           threadId: "thread-1",
           authorKind: "agent",

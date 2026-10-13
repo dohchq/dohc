@@ -6631,6 +6631,7 @@ function registerIpcHandlers(): void {
     assertTrustedSender, chatScope, requireEngineCapture, linkedChatStoreFor, chatWrites,
     assertWritableWorkspace, warmCredentialCache, localUserId,
     localInstallationId, currentCredentials: () => cachedCredentials, chatRelayIdentityFor,
+    readWorkspace: findWorkspace,
     syncWorkspaceSharedChannels, syncSharedChannelsForChatTarget,
     syncRendererWorkspaceSharedChannels, withRendererWorkspaceOperation, resolveEngineFiles,
     activity, desktopChatBookmarks, notifyRenderer,

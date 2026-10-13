@@ -1,3 +1,4 @@
+import { identityHues } from "../tokens";
 import { Awareness, applyAwarenessUpdate, encodeAwarenessUpdate } from "y-protocols/awareness";
 import { describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
@@ -98,6 +99,7 @@ describe("bindDocPresence", () => {
 
     // Alice sees Bob among the doc's editors, via the Yjs Awareness states.
     expect(a.awareness.getStates().size).toBeGreaterThanOrEqual(2);
+    expect(a.awareness.getStates().get(docB.clientID)?.user.color).toBe(identityHues.light.rust);
     expect(namesA.mock.calls.at(-1)?.[0]).toEqual(["Bob"]);
     expect(namesB.mock.calls.at(-1)?.[0]).toEqual(["Alice"]);
     const probeDoc = new Y.Doc();

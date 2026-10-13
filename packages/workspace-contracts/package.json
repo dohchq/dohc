@@ -5,6 +5,7 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
+    "./actor-presentation": "./src/actorPresentation.ts",
     "./actor-identity": "./src/actorIdentity.ts",
     "./access": "./src/access.ts",
     "./share-copy": "./src/share-copy.ts",

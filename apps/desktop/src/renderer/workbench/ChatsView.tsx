@@ -19,6 +19,7 @@ import {
 } from "./PostCard";
 import { useIsOwnAuthor } from "./AgentBadge";
 import { ChatAvatar } from "./ChatAvatar";
+import { neutralPresentation, ownPresentation } from "./actorPresentation";
 import { ChatLane } from "./ChatLane";
 import { usePersonalChatFeed } from "./usePersonalChatFeed";
 import { useReactions, type ReactionView } from "./reactionStore";
@@ -1527,6 +1528,7 @@ export function ChatsView(props: {
               {
                 openingMessage: preview
                   ? {
+                      presentation: preview.presentation,
                       id: preview.id,
                       authorKind: preview.authorKind,
                       authorDisplayName: preview.authorDisplayName,
@@ -3794,10 +3796,9 @@ export function ChatsView(props: {
                       onClick={open}
                       className="flex w-full cursor-pointer gap-3 text-left dohc-focus-visible"
                     >
-                      <ChatAvatar
+                      <ChatAvatar presentation={item.message.presentation}
                         name={item.message.authorDisplayName}
                         kind={isAgent ? "agent" : "human"}
-                        own={isOwn(isAgent ? "agent" : "human", item.message, itemViewer)}
                         size="row"
                       />
                       <span className="min-w-0 flex-1">
@@ -4406,7 +4407,7 @@ export function ChatsView(props: {
                   {channelGrants.length > 0 ? (
                     <span className="flex items-center -space-x-1.5">
                       {channelGrants.slice(0, 3).map((grant) => (
-                        <ChatAvatar
+                        <ChatAvatar presentation={neutralPresentation}
                           key={grant.shareId}
                           name={grant.recipientEmail ?? "?"}
                           kind="human"
@@ -4473,7 +4474,7 @@ export function ChatsView(props: {
             data-testid="chats-joined-banner"
             className="flex shrink-0 items-center gap-1.5 border-b border-line bg-panel-2/40 px-3 py-1.5"
           >
-            <ChatAvatar name={channelJoined.granterEmail ?? "?"} kind="human" size="strip" />
+            <ChatAvatar presentation={neutralPresentation} name={channelJoined.granterEmail ?? "?"} kind="human" size="strip" />
             <span className="min-w-0 flex-1 truncate text-[11px] text-muted">
               {joinedChannelLabel(channelJoined, ownerRemoved(channelJoined.shareId))}
             </span>
@@ -4511,7 +4512,7 @@ export function ChatsView(props: {
                     data-testid="chats-share-member"
                     className="flex h-7 items-center gap-2"
                   >
-                    <ChatAvatar name={grant.recipientEmail ?? "?"} kind="human" size="strip" />
+                    <ChatAvatar presentation={neutralPresentation} name={grant.recipientEmail ?? "?"} kind="human" size="strip" />
                     <span className="min-w-0 flex-1 truncate text-[12px] text-ink">
                       {grant.recipientEmail ?? "Invited"}
                     </span>
@@ -4869,7 +4870,7 @@ export function ChatsView(props: {
                       data={{ "data-channel-id": dm.channelId }}
                       active={selectedDmId === dm.channelId}
                       onClick={() => openConversation({ level: "dm", dm })}
-                      icon={<ChatAvatar name={dm.peerLabel} kind="human" size="strip" />}
+                      icon={<ChatAvatar presentation={neutralPresentation} name={dm.peerLabel} kind="human" size="strip" />}
                       label={dm.peerLabel}
                       labelTestId="chats-dm-name"
                       muted={!dm.connected}
@@ -4967,7 +4968,7 @@ export function ChatsView(props: {
                   data={{ "data-channel-id": agentChannel.id }}
                   active={selectedChannelId === agentChannel.id}
                   onClick={() => openConversation({ level: "channel", channel: agentChannel })}
-                  icon={<ChatAvatar name={agentLabel} kind="agent" own size="strip" />}
+                  icon={<ChatAvatar presentation={ownPresentation} name={agentLabel} kind="agent" size="strip" />}
                   label={agentLabel}
                   labelTestId="chats-my-agent-name"
                   trailing={
@@ -5003,7 +5004,7 @@ export function ChatsView(props: {
                         data={{ "data-owner": agent.owner }}
                         active={false}
                         onClick={agent.open}
-                        icon={<ChatAvatar name={agent.label} kind="agent" size="strip" />}
+                        icon={<ChatAvatar presentation={neutralPresentation} name={agent.label} kind="agent" size="strip" />}
                         label={agent.label}
                         labelTestId="chats-other-agent-name"
                         muted

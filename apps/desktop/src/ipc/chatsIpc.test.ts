@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { ChatBookmark, ChatMessage, ChatThread } from "@dohc/workspace-contracts/engine";
 import { CHANNELS } from "./channels";
 import { createChatScopeCapability } from "./chatScope";
+import { neutralPresentation } from "../renderer/workbench/actorPresentation";
 import { chatMessageForIpc, registerChatsIpcHandlers } from "./chatsIpc";
 import { ChatMessageRecord } from "./bridgeContract";
 import { createChatWrites } from "../workspaces/chatWrites";
@@ -60,6 +61,7 @@ function fixture(kind: ScopeKind = "local") {
     listThreadsForFile: vi.fn<DesktopLinkedChatStore["listThreadsForFile"]>(async () => [thread]),
     listFileMentions: vi.fn<DesktopLinkedChatStore["listFileMentions"]>(async () => []),
     getThreadRevision: vi.fn<DesktopLinkedChatStore["getThreadRevision"]>(async () => 7),
+    listChannelThreads: vi.fn<DesktopLinkedChatStore["listChannelThreads"]>(async () => []),
     listChannels: vi.fn<DesktopLinkedChatStore["listChannels"]>(async () => []),
     ensureGeneralChannel: vi.fn<DesktopLinkedChatStore["ensureGeneralChannel"]>(async () => ({ id: "general", workspaceId: "workspace", name: "General", slug: "general", kind: "channel", type: "posts", purpose: "", createdAtMs: 1, updatedAtMs: 1 })),
     findThreadChannelId: vi.fn<DesktopLinkedChatStore["findThreadChannelId"]>(async () => "channel"),
@@ -152,6 +154,7 @@ function fixture(kind: ScopeKind = "local") {
     registerHandler: (channel, handler) => handlers.set(channel, handler),
     assertTrustedSender, chatScope, requireEngineCapture, linkedChatStoreFor, chatWrites,
     assertWritableWorkspace: value => { if (shareViewIsPresent(value.shareView)) throw new Error("Read-only workspace"); },
+    readWorkspace: () => workspace,
     warmCredentialCache, localUserId: () => "owner",
     localInstallationId: () => "local-owner", currentCredentials: () => null,
     chatRelayIdentityFor,
@@ -225,9 +228,9 @@ describe("the personal feed names each item's viewer", () => {
 describe("chat message IPC identity", () => {
   it("preserves an optional author identity through the bridge contract", () => {
     const { message } = fixture();
-    expect(ChatMessageRecord.parse(chatMessageForIpc({ ...message, authorUserId: "person-1" }, () => null)))
+    expect(ChatMessageRecord.parse(chatMessageForIpc({ ...message, authorUserId: "person-1" }, () => null, neutralPresentation)))
       .toMatchObject({ authorUserId: "person-1" });
-    expect(ChatMessageRecord.parse(chatMessageForIpc(message, () => null))).not.toHaveProperty("authorUserId");
+    expect(ChatMessageRecord.parse(chatMessageForIpc(message, () => null, neutralPresentation))).not.toHaveProperty("authorUserId");
   });
 
   it("carries an automation author, the automation that wrote the message, and where its Collection is now", () => {
@@ -239,19 +242,19 @@ describe("chat message IPC identity", () => {
       automation: { automationId: "collection:object-tasks#stamp" },
     };
     const movedTo = (automationId: string) => (automationId === "collection:object-tasks#stamp" ? "Voyage/Tasks" : null);
-    expect(ChatMessageRecord.parse(chatMessageForIpc(automated, movedTo))).toMatchObject({
+    expect(ChatMessageRecord.parse(chatMessageForIpc(automated, movedTo, neutralPresentation))).toMatchObject({
       authorKind: "automation",
       authorDisplayName: "Stamp the finish date",
       authorOwnerDisplayName: "Ice",
       automation: { automationId: "collection:object-tasks#stamp", collectionPath: "Voyage/Tasks" },
     });
     // A Collection this computer no longer has still names its automation.
-    expect(ChatMessageRecord.parse(chatMessageForIpc(automated, () => null))).toMatchObject({
+    expect(ChatMessageRecord.parse(chatMessageForIpc(automated, () => null, neutralPresentation))).toMatchObject({
       automation: { automationId: "collection:object-tasks#stamp", collectionPath: null },
     });
     // Another computer's automation arrives without the automation.
     const { automation: _automation, ...remote } = automated;
-    expect(ChatMessageRecord.parse(chatMessageForIpc(remote, movedTo))).not.toHaveProperty("automation");
+    expect(ChatMessageRecord.parse(chatMessageForIpc(remote, movedTo, neutralPresentation))).not.toHaveProperty("automation");
   });
 });
 
@@ -498,3 +501,19 @@ describe("targeted file resolution", () => {
     expect(test.resolveEngineFiles).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: "workspace" }), [{ objectId: "object" }, { objectId: "gone" }]);
   });
 });
+
+ it("gives the feed opening the same token as its thread without bridging a stored key", async () => {
+   const h = fixture();
+   const row = { ...h.message, authorActorKey: '{"kind":"installation","installationId":"local-owner"}', origin: "cli" as const };
+   h.storeMethods.listMessages.mockResolvedValueOnce([row]);
+   h.storeMethods.listChannelThreads.mockResolvedValueOnce([{
+     thread: { ...h.thread, channelId: "channel" }, messageCount: 1, lastReadSequence: 0, unreadCount: 1, openDecisionCount: 0,
+     openingMessage: { ...row, bodySnippet: row.body, reactions: [] },
+   }]);
+   const listed = await h.invoke(CHANNELS.listChatMessages, { workspaceId: "workspace", threadId: "thread" }) as { messages: ChatMessageRecord[] };
+   const feed = await h.invoke(CHANNELS.listChannelThreads, { workspaceId: "workspace", channelId: "channel" }) as { threads: { openingMessage: { presentation: ChatMessageRecord["presentation"] } }[] };
+   expect(feed.threads[0]!.openingMessage.presentation).toEqual(listed.messages[0]!.presentation);
+   expect(listed.messages[0]!.presentation.self).toBe(true);
+   expect(JSON.stringify(listed)).not.toContain("authorActorKey");
+   expect(JSON.stringify(feed)).not.toContain("authorActorKey");
+ });

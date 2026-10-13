@@ -10,6 +10,7 @@ import { agentRosterPickIsPresent, mapAgentRosterPick, type AgentRosterPick } fr
 import type { WorkspaceHeadingRecord } from "../../ipc/bridgeContract";
 import { formatChatFileReferenceToken } from "./chatFileMentions";
 import { ChatAvatar } from "./ChatAvatar";
+import { ownPresentation } from "./actorPresentation";
 import { ComposerSendButton } from "./ComposerSendButton";
 import { SkeletonRows } from "../ui/SkeletonRows";
 import {
@@ -392,7 +393,7 @@ export function MentionComposer(props: {
     >
       {isPost && props.authorName ? (
         <div className={`flex items-center gap-2.5 ${expanded ? "mb-2" : ""}`}>
-          <ChatAvatar name={props.authorName} kind={props.authorKind ?? "human"} own />
+          <ChatAvatar presentation={ownPresentation} name={props.authorName} kind={props.authorKind ?? "human"} />
           {expanded ? (
             <span className="text-[14px] font-semibold text-ink">{props.authorName}</span>
           ) : (

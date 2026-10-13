@@ -45,6 +45,7 @@ import { AppRows } from "../workbench/AppsView";
 import { siteTabPath, VIEW_IDS } from "../workbench/workbenchState";
 import { AutomationBadge } from "../workbench/AutomationBadge";
 import { ChatAvatar } from "../workbench/ChatAvatar";
+import { neutralPresentation } from "../workbench/actorPresentation";
 import { ThreadMessages } from "../workbench/ChatPosts";
 import { ChatComposer, type ChatReactionControls } from "../workbench/chatMessages";
 import { MentionComposer } from "../workbench/MentionComposer";
@@ -501,7 +502,7 @@ const chatPost = (
     id, title, createdAtMs: CHAT_AT, updatedAtMs: CHAT_AT, channelId: CHAT_CHANNEL.id,
     messageCount: 1, lastReadSequence: 0, unreadCount: 0, ...counts,
   },
-  data: { openingMessage: { id: `${id}-opening`, createdAtMs: CHAT_AT, bodySnippet, ...author }, reactions: [], viewerAuthorId: "you" },
+  data: { openingMessage: { presentation: neutralPresentation, id: `${id}-opening`, createdAtMs: CHAT_AT, bodySnippet, ...author }, reactions: [], viewerAuthorId: "you" },
 });
 const SAM = { authorKind: "human", authorDisplayName: "Sam" } as const;
 const CHAT_POSTS = [
@@ -521,7 +522,7 @@ const CHAT_FEED_SPECIMENS: { key: string; post: (typeof CHAT_POSTS)[number]; for
   { key: "toolbar-focus", post: CHAT_POSTS[0]!, force: { row: "focus-within", button: "focus focus-visible" }, last: true },
 ];
 const chatMessage = (id: string, body: string, minutes: number, parentMessageId?: string): ChatMessageRecord => ({
-  id, threadId: "post-plain", ...SAM, body, createdAtMs: CHAT_AT + minutes * 60_000,
+  presentation: neutralPresentation, id, threadId: "post-plain", ...SAM, body, createdAtMs: CHAT_AT + minutes * 60_000,
   ...(parentMessageId ? { parentMessageId } : {}),
 });
 const CHAT_THREAD_MESSAGES = [
@@ -1034,17 +1035,17 @@ function Pane(props: { theme: "light" | "dark" }) {
       <Section part="avatars" title="Avatars">
         <Specimen label="human: post, row, comment, strip">
           {avatarSizes.map((size) => (
-            <ChatAvatar key={size} name="Ice de Vera" kind="human" size={size} />
+            <ChatAvatar presentation={neutralPresentation} key={size} name="Ice de Vera" kind="human" size={size} />
           ))}
         </Specimen>
         <Specimen label="agent: post, row, comment, strip">
           {avatarSizes.map((size) => (
-            <ChatAvatar key={size} name="Agent" kind="agent" size={size} />
+            <ChatAvatar presentation={neutralPresentation} key={size} name="Agent" kind="agent" size={size} />
           ))}
         </Specimen>
         <Specimen label="automation: post, row, comment, strip">
           {avatarSizes.map((size) => (
-            <ChatAvatar key={size} name="Nightly digest" kind="automation" size={size} />
+            <ChatAvatar presentation={neutralPresentation} key={size} name="Nightly digest" kind="automation" size={size} />
           ))}
         </Specimen>
       </Section>

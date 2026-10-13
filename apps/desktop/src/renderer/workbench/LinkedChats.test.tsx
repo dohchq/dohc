@@ -434,7 +434,7 @@ describe("LinkedChatsPanel initialThread consumption", () => {
     const onOpenPath = vi.fn();
     bridgeMock.listChatMessages.mockResolvedValue({
       messages: [
-        {
+        { presentation: { group: "fixture", hue: null, self: false },
           id: "message-file",
           threadId: searchThread.id,
           authorKind: "human",
@@ -474,7 +474,7 @@ describe("LinkedChatsPanel initialThread consumption", () => {
   it("lands on a focused message and honors a repeated open of the same thread", async () => {
     bridgeMock.listChatMessages.mockResolvedValue({
       messages: [
-        {
+        { presentation: { group: "fixture", hue: null, self: false },
           id: "message-1",
           threadId: searchThread.id,
           authorKind: "human",
@@ -482,7 +482,7 @@ describe("LinkedChatsPanel initialThread consumption", () => {
           body: "First update",
           createdAtMs: 1_700_000_000_000,
         },
-        {
+        { presentation: { group: "fixture", hue: null, self: false },
           id: "message-2",
           threadId: searchThread.id,
           authorKind: "human",
@@ -536,7 +536,7 @@ describe("LinkedChatsPanel initialThread consumption", () => {
     bridgeMock.listChatMessages.mockImplementation(
       async ({ threadId }: { threadId: string }) => ({
         messages: threadId === searchThread.id
-          ? [{
+          ? [{ presentation: { group: "fixture", hue: null, self: false },
               id: "shared-message",
               threadId,
               authorKind: "human" as const,
@@ -545,7 +545,7 @@ describe("LinkedChatsPanel initialThread consumption", () => {
               createdAtMs: 1,
             }]
           : [
-              {
+              { presentation: { group: "fixture", hue: null, self: false },
                 id: "shared-message",
                 threadId,
                 authorKind: "human" as const,
@@ -553,7 +553,7 @@ describe("LinkedChatsPanel initialThread consumption", () => {
                 body: "Same id in the new DOM",
                 createdAtMs: 2,
               },
-              {
+              { presentation: { group: "fixture", hue: null, self: false },
                 id: "new-focus",
                 threadId,
                 authorKind: "human" as const,
@@ -610,7 +610,7 @@ describe("LinkedChatsPanel initialThread consumption", () => {
 // A search result opens its thread while this file's Chats are still being
 // read. The two reads answer to different owners, so neither drops the other.
 describe("LinkedChatsPanel thread and file reads", () => {
-  const message = {
+  const message = { presentation: { group: "fixture", hue: null, self: false },
     id: "message-1",
     threadId: searchThread.id,
     authorKind: "human" as const,
@@ -708,7 +708,7 @@ describe("LinkedChatsPanel read cursor", () => {
   it("marks the opened thread read up to the last message it showed", async () => {
     bridgeMock.listChatMessages.mockResolvedValue({
       messages: [
-        {
+        { presentation: { group: "fixture", hue: null, self: false },
           id: "message-1",
           threadId: searchThread.id,
           authorKind: "human",
@@ -716,7 +716,7 @@ describe("LinkedChatsPanel read cursor", () => {
           body: "First.",
           createdAtMs: 1_700_000_000_000,
         },
-        {
+        { presentation: { group: "fixture", hue: null, self: false },
           id: "message-2",
           threadId: searchThread.id,
           authorKind: "human",
@@ -884,7 +884,7 @@ describe("LinkedChatsPanel share level", () => {
   it("shows existing reactions but no picker when the share refuses writes", async () => {
     bridgeMock.listChatMessages.mockResolvedValue({
       messages: [
-        {
+        { presentation: { group: "fixture", hue: null, self: false },
           id: "message-1",
           threadId: "thread-1",
           authorKind: "human",
@@ -936,7 +936,7 @@ describe("LinkedChatsPanel share level", () => {
 // every Chats surface does under the shell: one write chain per cell, one
 // set of rows, and errors only for a panel still showing the thread.
 describe("LinkedChats reactions through the workspace store", () => {
-  const note = {
+  const note = { presentation: { group: "fixture", hue: null, self: false },
     id: "message-1",
     threadId: "thread-1",
     authorKind: "human" as const,

@@ -1831,9 +1831,18 @@ const CHAT_MESSAGE_AUTOMATION = z.object({
   collectionPath: SAFE_RELATIVE_PATH.nullable(),
 });
 
+// Display only. This token grants no workspace or author authority.
+export const ActorPresentation = z.object({
+  group: z.string(),
+  hue: z.enum(["rust", "amber", "teal", "blue", "indigo", "plum", "rose", "olive"]).nullable(),
+  self: z.boolean(),
+});
+export type ActorPresentation = z.infer<typeof ActorPresentation>;
+
 export const ChatMessageRecord = z.object({
   id: OPAQUE_ID,
   threadId: OPAQUE_ID,
+  presentation: ActorPresentation,
   authorKind: CHAT_MESSAGE_AUTHOR_KIND,
   authorDisplayName: z.string().min(1).max(200),
   authorOwnerDisplayName: z.string().min(1).max(200).optional(),
@@ -2202,6 +2211,7 @@ export const ChannelThreadRecord = ChatThreadRecord.extend({
   openingMessage: z
     .object({
       id: OPAQUE_ID,
+      presentation: ActorPresentation,
       authorKind: CHAT_MESSAGE_AUTHOR_KIND,
       authorDisplayName: z.string().min(1).max(200),
       authorOwnerDisplayName: z.string().min(1).max(200).optional(),

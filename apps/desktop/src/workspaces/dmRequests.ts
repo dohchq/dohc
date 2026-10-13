@@ -1,6 +1,6 @@
 import type { SyncRelayConnection } from "@dohc/workspace-contracts/relay";
 import { resolveDmKinds, type DmPeekResult } from "./dmChats";
-import { createActorIssuer } from "@dohc/workspace-contracts/actor-identity";
+import { canonicalChatServerUrl } from "./chatRelayIdentity";
 import type { JoinedSharedChannel } from "./registryStore";
 import type { SharedChannelInfo } from "./sharedChannelInfo";
 import { mergeJoinedChannel } from "./sharedChannels";
@@ -351,7 +351,7 @@ export async function reserveAndPullSharedChannel(input: {
   });
   let serverUrl: string | undefined;
   try {
-    serverUrl = createActorIssuer(input.serverUrl);
+    serverUrl = canonicalChatServerUrl(input.serverUrl);
   } catch {
     // Invalid admission metadata leaves the issuer unknown.
   }

@@ -16,7 +16,7 @@ import {
   resolvePeerDisplayName,
 } from "./presenceChannel";
 
-import { presencePalette } from "./presencePalette";
+import { presentationColor, relayPresentation } from "../workbench/actorPresentation";
 
 type AwarenessChanges = {
   added: number[];
@@ -200,7 +200,7 @@ export function bindDocPresence(options: DocPresenceOptions): DocPresenceBinding
           if (!embedded || embedded.some((id) => id !== state.yc)) continue;
           const user = {
             name: resolvePeerDisplayName(peer),
-            color: presencePalette(peer.paletteSlot).stroke,
+            color: presentationColor(relayPresentation(peer.paletteSlot, peer.isSelf)).stroke,
             paletteSlot: peer.paletteSlot,
             sessionToken: peer.sessionToken,
           };
