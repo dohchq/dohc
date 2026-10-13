@@ -134,6 +134,8 @@ export const retryDelayMs = failures => [30_000, 120_000, 300_000][failures - 1]
  */
 export function attemptOutcome(result, grant, { stopped } = {}) {
   if (stopped === "time limit") return { outcome: "failed", cause: "time limit", reason: "The run passed its time limit. Read the last step's log for a hang." };
+  // Only machine failures lead to another attempt, so a run cut short by the shared budget gets no verdict.
+  if (stopped === "time budget") return { outcome: "error", cause: "time budget", reason: "Its attempts used the request's time limit after machine failures." };
   if (stopped === "cancelled") return { outcome: "cancelled", cause: "cancelled" };
   const matches = result?.grant && result.grant.request === grant.request && result.grant.attempt === grant.attempt
     && result.commit === grant.head && result.baseCommit === grant.base;

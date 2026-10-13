@@ -12,7 +12,7 @@ import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { setTimeout as sleep } from "node:timers/promises";
 import { git, run } from "./process.mjs";
-import { acquireVerificationSlot, freeDiskGb, resolveBuildBudget } from "../../tools/rust-engine-program/build-slot.mjs";
+import { acquireVerificationSlot, freeDiskGb, reclaimStaleSlots, resolveBuildBudget } from "../../tools/rust-engine-program/build-slot.mjs";
 import { attemptOutcome, listRequests, nextRequest, placeSubmission, protocol, queuePaths, readJson, retryDelayMs, terminalStates, writeJson } from "./queue.mjs";
 
 const verifierEntry = fileURLToPath(new URL("./verify.mjs", import.meta.url));
@@ -166,7 +166,7 @@ export async function runService({
         notBefore: new Date(Date.now() + retryDelay(failures)).toISOString(),
         waiting: `${outcome.cause}: ${outcome.reason ?? "environment failure."} Retrying.` });
     } else {
-      if (attempt) { health.environmentStreak = 0; health.pausedUntil = 0; }
+      if (attempt && outcome.outcome !== "error") { health.environmentStreak = 0; health.pausedUntil = 0; }
       await setStatus(entry.id, { ...status, state: outcome.outcome, attempts, notBefore: null, waiting: null, stopping: null,
         verdict: outcome.outcome === "passed" ? "PASS" : outcome.outcome === "failed" ? "FAIL" : null,
         result: attempt ? join(paths.attempt(entry.id, attempt.n), "result.json") : null, cause: outcome.cause, reason: outcome.reason ?? null });
@@ -192,9 +192,11 @@ export async function runService({
       try { await accept(name); }
       catch (error) {
         log(`submission ${name} could not be accepted: ${error.stack ?? error.message}`);
-        // Once its record exists the request runs, so the client is told its id, not a rejection.
-        const answer = error.acceptedId ? { id: error.acceptedId } : { rejected: `The service could not accept it: ${error.message}` };
-        try { await writeJson(join(paths.keys, name.slice(0, -5)), answer); rmSync(join(paths.inbox, name), { force: true }); }
+        // An answer is never replaced: its client may already follow the request it names.
+        // Once a request's record exists the request runs, so its client is told its id, not a rejection.
+        const key = join(paths.keys, name.slice(0, -5));
+        const answer = existsSync(key) ? null : error.acceptedId ? { id: error.acceptedId } : { rejected: `The service could not accept it: ${error.message}` };
+        try { if (answer) await writeJson(key, answer); rmSync(join(paths.inbox, name), { force: true }); }
         catch { /* It stays in the inbox and is tried again. */ }
       }
     }
@@ -210,8 +212,10 @@ export async function runService({
         try { if (Date.now() - statSync(path).mtimeMs > 60_000) rmSync(path, { force: true }); } catch { /* Gone. */ }
         return;
       }
-      const answer = async value => { await writeJson(join(paths.keys, key), value); rmSync(path, { force: true }); };
-      if (existsSync(join(paths.keys, key))) { rmSync(path, { force: true }); return; }
+      // Antivirus can hold the file for a moment; a later tick removes an answered submission.
+      const discard = () => { try { rmSync(path, { force: true }); } catch { /* Removed later. */ } };
+      const answer = async value => { await writeJson(join(paths.keys, key), value); discard(); };
+      if (existsSync(join(paths.keys, key))) { discard(); return; }
       const rejection = submission.protocol !== protocol ? `This service speaks queue protocol ${protocol}, not ${submission.protocol}. Run pnpm verify:queue upgrade from a checkout of origin/main.`
         : !sha.test(submission.head ?? "") || !sha.test(submission.base ?? "") ? "The submission has no full head and base commit."
         : !["all", "js", "rust"].includes(submission.scope) ? `Unknown scope ${submission.scope}.`
@@ -291,15 +295,16 @@ export async function runService({
   }
 
   let targetRemoval = null;
+  let targetRetryAt = 0;
   async function checkHealth(requests) {
     health.diskFreeGb = freeDisk();
     health.diskOk = !targetRemoval && (health.diskFreeGb === null || health.diskFreeGb >= floorGb);
-    if (!health.diskOk && !targetRemoval && existsSync(join(lane, "target"))) {
+    if (!health.diskOk && !targetRemoval && Date.now() >= targetRetryAt && existsSync(join(lane, "target"))) {
       // The lane's build output is the one large thing the service owns and may delete.
       // Deleting tens of GB takes minutes; it runs beside the loop so heartbeats continue.
       log(`free disk ${health.diskFreeGb.toFixed(1)} GB is under ${floorGb} GB; removing the lane's target folder`);
       targetRemoval = rm(join(lane, "target"), { recursive: true, force: true })
-        .catch(error => log(`removing the lane's target folder failed: ${error.message}`))
+        .catch(error => { targetRetryAt = Date.now() + cleanupRetryMs; log(`removing the lane's target folder failed: ${error.message}`); })
         .finally(() => { targetRemoval = null; });
     }
     if (requests.some(entry => entry.status.state === "queued" && entry.request.gates?.js) && Date.now() - health.dockerCheckedAt > 60_000) {
@@ -347,7 +352,8 @@ export async function runService({
       const now = Date.now();
       try {
       // Count only awake verification time against a run: a gap far over one tick is sleep.
-      // Preparation has its own deadline; waiting for the host lane has the slot's own wait limit.
+      // Preparation has its own deadline, but a git call that hangs blocks this loop, and the supervisor's
+      // heartbeat check restarts the service instead. Waiting for the host lane has the slot's own wait limit.
       const awake = Math.min(now - last, 3 * tickMs);
       if (running?.phase === "verifying") running.awakeMs += awake;
       if (running?.phase === "preparing") running.prepareMs += awake;
@@ -366,7 +372,10 @@ export async function runService({
           log(`stopping ${running.id}: ${running.stopped}`);
           running.stoppedAt = now;
           // Recorded first, so a restart before the run ends still honors the stop.
-          try { await setStatus(running.id, { ...readJson(statusPath(running.id)), stopping: running.stopped }); }
+          try {
+            const status = readJson(statusPath(running.id));
+            if (status) await setStatus(running.id, { ...status, stopping: running.stopped });
+          }
           finally { running.abort.abort(); }
         }
       }
@@ -424,16 +433,11 @@ async function main(argv) {
     // A dead predecessor's lane slot is this service's own; free it now instead of after the stale window.
     const previous = readJson(join(root, "service.json"));
     const slotRoot = process.env.DOHC_VERIFICATION_SLOT_ROOT ?? resolveBuildBudget()?.root;
-    const slot = slotRoot && join(slotRoot, "verification-slot-1");
-    const owner = slot ? readJson(join(slot, "owner.json")) : null;
+    // As in acquireExclusiveSlot, only a recorded dead owner frees at once; a claim still being written keeps its grace.
+    // Only the first lane: a second exists only in trials, and the normal reclaim frees it.
+    const owner = slotRoot ? readJson(join(slotRoot, "verification-slot-1", "owner.json")) : null;
     if (owner?.pid && owner.pid === previous?.pid && !alive(owner.pid)) {
-      // Move it aside and compare, so a slot another verifier claimed meanwhile goes back untouched.
-      const moved = `${slot}.tomb-${randomBytes(4).toString("hex")}`;
-      try {
-        renameSync(slot, moved);
-        if (readJson(join(moved, "owner.json"))?.pid === owner.pid) rmSync(moved, { recursive: true, force: true });
-        else renameSync(moved, slot);
-      } catch { /* Gone or busy: the normal reclaim frees it. */ }
+      reclaimStaleSlots({ root: slotRoot, slots: 1, kind: "verification-slot", staleMs: -1 });
     }
   }
   const repo = resolve(git(["rev-parse", "--git-common-dir"], here), "..");

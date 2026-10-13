@@ -81,4 +81,5 @@ public static class VerificationJob {
 '@
 
 try { exit [VerificationJob]::Run($NodeExecutable, $RelayPath, $Payload) }
-catch { [Console]::Error.WriteLine($_.Exception.ToString()); exit 1 }
+# The command never started; verify.mjs reads this exit code as a machine failure.
+catch { [Console]::Error.WriteLine($_.Exception.ToString()); exit 0xD0C5 }

@@ -18,10 +18,11 @@ import { clippy, fmtCheck, nextest } from "../../tools/rust-engine-program/gate-
 import { finishRustEvidence, refreshRustReuse, rustIdentity } from "./rust-reuse.mjs";
 import { queueRoot, verifyThroughQueue } from "./queue.mjs";
 
-// Windows reports a console program that could not start as STATUS_DLL_INIT_FAILED.
-const startupFailures = new Set([3221225794, -1073741502]);
+// Windows reports a console program that could not start as STATUS_DLL_INIT_FAILED. The job relay
+// (windows-job.ps1 and windows-command.mjs) exits with 0xD0C5 when its command never started.
+const startupFailures = new Set([3221225794, -1073741502, 0xD0C5]);
 // Phases that test the host, not the change. A failure there says nothing about the commit.
-const hostPhases = new Set(["selection", "checkout", "preflight", "preflight:admission", "source-fingerprints:start", "electron-install", "doctor", "postgres-start", "browser-install"]);
+const hostPhases = new Set(["selection", "checkout", "preflight", "preflight:admission", "source-fingerprints:start", "electron-install", "doctor", "postgres-start", "browser-install", "queue"]);
 
 /** Whether a failure is the change's fault ("check") or the machine's ("environment"). The queue retries only the second. */
 export function failureKind(error) {
@@ -29,8 +30,8 @@ export function failureKind(error) {
   // The queue also measures the host after a failure: low disk or a silent Docker makes it a machine failure.
   if (error?.environment) return { kind: "environment", cause: error.environment };
   // A program that could not start ran no check, whatever the reason.
-  if (String(error?.syscall ?? "").startsWith("spawn")) return { kind: "environment", cause: `${error.code ?? "failure"} starting a program` };
-  if (startupFailures.has(error?.exitCode) || startupFailures.has(error?.status)) return { kind: "environment", cause: "a program could not start (0xC0000142)" };
+  if (String(error?.syscall ?? error?.cause?.syscall ?? "").startsWith("spawn")) return { kind: "environment", cause: `${error.code ?? "failure"} starting a program` };
+  if (startupFailures.has(error?.exitCode) || startupFailures.has(error?.status)) return { kind: "environment", cause: "a program could not start" };
   if (/^refusing to run the gate: [\d.]+ GB free/mu.test(String(error?.stdout ?? "").slice(-65536) + String(error?.stderr ?? "").slice(-65536))) return { kind: "environment", cause: "disk space" };
   if (hostPhases.has(error?.step)) return { kind: "environment", cause: error.step };
   if (error?.step === "install" && !/ERR_PNPM_(OUTDATED_LOCKFILE|LOCKFILE|PEER)/u.test(`${error?.message ?? ""}\n${String(error?.stderr ?? "").slice(-65536)}`)) return { kind: "environment", cause: "install" };

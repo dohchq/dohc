@@ -11,6 +11,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { attemptOutcome, cancel, listRequests, nextRequest, placeSubmission, position, queuePaths, readJson, submit, terminalStates, writeJson } from "./queue.mjs";
 import { runService } from "./queue-service.mjs";
 import { failureKind, takeGrant } from "./verify.mjs";
+import { run } from "./process.mjs";
 
 const entry = (id, request, state = "queued", extra = {}) => ({ id, request: { sequence: Number(id.slice(0, 9)), scope: "all", gates: { rust: true, js: true }, checkout: "C:\\w\\a", branch: "refs/heads/a", ...request }, status: { state, attempts: [], ...extra } });
 
@@ -52,6 +53,7 @@ test("only a receipt for this exact attempt counts", () => {
   assert.equal(attemptOutcome(null, grant).outcome, "environment");
   assert.equal(attemptOutcome(receipt({ verdict: "PASS" }), grant, { stopped: "time limit" }).outcome, "failed");
   assert.equal(attemptOutcome(null, grant, { stopped: "cancelled" }).outcome, "cancelled");
+  assert.equal(attemptOutcome(null, grant, { stopped: "time budget" }).outcome, "error", "a run cut short by the shared budget gets no verdict");
 });
 
 test("machine failures are told apart from failures of the change", () => {
@@ -59,6 +61,8 @@ test("machine failures are told apart from failures of the change", () => {
   assert.equal(kind({ status: 3221225794 }), "environment", "a program that could not start");
   assert.equal(kind({ code: "ENOENT", syscall: "spawn git" }), "environment");
   assert.equal(kind({ code: "ENOMEM", syscall: "spawn node" }), "environment", "any failure to start a program ran no check");
+  assert.equal(kind({ code: "ENOENT", cause: Object.assign(new Error("spawnSync git ENOENT"), { code: "ENOENT", syscall: "spawnSync git" }) }), "environment", "the git helper keeps the spawn error as its cause");
+  assert.equal(kind({ step: "queue", message: "The verification queue service is not installed." }), "environment");
   assert.equal(kind({ code: "ENOENT", syscall: "open", step: "desktop" }), "check", "a missing report is the run's own failure");
   assert.equal(kind({ step: "postgres-start", message: "Verification Postgres did not become healthy." }), "environment");
   assert.equal(kind({ step: "install", stderr: "ERR_PNPM_OUTDATED_LOCKFILE" }), "check");
@@ -66,6 +70,12 @@ test("machine failures are told apart from failures of the change", () => {
   assert.equal(kind({ step: "tests", commandExitFailure: true }), "check");
   assert.equal(kind({ step: "tests", stderr: "expected ENOSPC: no space left on device", stdout: "0xC0000142" }), "check", "text in test output proves nothing");
   assert.equal(kind({ step: "rust", stdout: "refusing to run the gate: 38.2 GB free on the worktree volume is below the 40 GB floor" }), "environment");
+});
+
+test("a command the Windows job relay cannot start is a machine failure", { skip: process.platform !== "win32" && "the job relay is Windows-only" }, async () => {
+  const error = await run("dohc-no-such-program", [], { quietStdout: true }).then(() => null, failure => failure);
+  assert.equal(error?.exitCode, 0xD0C5, "the relay's exit code for a command that never started");
+  assert.equal(failureKind(error).kind, "environment");
 });
 
 test("a verifier takes its grant out of the environment its children inherit", () => {
@@ -287,6 +297,7 @@ test("retries share one time budget, so a request the host keeps failing late en
   assert.equal(ended.status.state, "error", "only machine failures retry, so a spent budget gives no verdict");
   assert.equal(ended.status.verdict, null);
   assert.equal(ended.status.cause, "time budget");
+  assert.equal(ended.status.attempts.at(-1).outcome, "error", "the attempt the budget cut short ends the request itself");
   assert.ok(ended.status.attempts.length <= 4, `${ended.status.attempts.length} attempts`);
 });
 

@@ -632,7 +632,7 @@ for (const waitForRelay of [false, true]) {
         encoding: "utf8", windowsHide: true, timeout: 20_000,
       });
       assert.equal(result.error, undefined, result.stderr);
-      assert.equal(result.status, 1, result.stderr);
+      assert.equal(result.status, 0xD0C5, "the relay's exit code for a command that never started");
       assert.match(result.stderr, /Win32Exception/);
       assert.equal(existsSync(marker), false);
       assert.equal(existsSync(join(root, "preloads.jsonl")), false, "preloads must not run even if the relay starts before assignment fails");
