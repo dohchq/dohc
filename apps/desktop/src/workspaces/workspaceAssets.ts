@@ -21,6 +21,7 @@ import {
 } from "node:fs/promises";
 import { dirname, join, relative, resolve } from "node:path";
 import { TextDecoder } from "node:util";
+import { renameWithRetry } from "../atomicReplaceFile";
 import { isInside } from "../security/pathContainment";
 import {
   BoundedFileReadChangedError,
@@ -551,6 +552,8 @@ export function createAtomicTextWriter(deps: {
   uniqueId: () => string;
   writeFile: (temp: string, text: string) => Promise<void>;
   rename: (temp: string, target: string) => Promise<void>;
+  wait?: (milliseconds: number) => Promise<void>;
+  platform?: NodeJS.Platform;
   remove: (temp: string) => Promise<void>;
   readCurrentContentHash: (target: string) => Promise<string | null>;
 }) {
@@ -573,7 +576,7 @@ export function createAtomicTextWriter(deps: {
       if (currentContentHash !== expectedContentHash) {
         return { status: "conflict", currentContentHash };
       }
-      await deps.rename(temp, target);
+      await renameWithRetry(temp, target, deps);
       committed = true;
       return { status: "written", contentHash: hashContent(text) };
     } finally {

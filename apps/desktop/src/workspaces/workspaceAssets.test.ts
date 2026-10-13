@@ -321,6 +321,76 @@ describe("writeWorkspaceText atomic replacement + optimistic conflicts", () => {
     expect(committed).toEqual(staged.map((entry) => entry.temp));
   });
 
+  it.each([undefined, "EPERM", "EBUSY", "EACCES"])("writes after transient Windows rename errors (%s) without rechecking the preimage", async (code) => {
+    const error = Object.assign(new Error("target locked"), { code });
+    const rename = vi.fn(async (_source: string, _destination: string) => {
+      if (code && rename.mock.calls.length <= 3) throw error;
+    });
+    const writeFile = vi.fn(async (_temp: string, _text: string) => undefined);
+    const remove = vi.fn(async (_temp: string) => undefined);
+    const wait = vi.fn(async (_milliseconds: number) => undefined);
+    const readCurrentContentHash = vi.fn()
+      .mockResolvedValueOnce(INITIAL_CONTENT_HASH)
+      .mockResolvedValue(contentHash("external"));
+    const writer = createAtomicTextWriter({
+      now: () => 1_000, uniqueId: () => "fixed-id",
+      writeFile, rename, remove, readCurrentContentHash, wait, platform: "win32",
+    });
+
+    await expect(writer("C:/workspace/notes/a.md", "local", INITIAL_CONTENT_HASH))
+      .resolves.toEqual({ status: "written", contentHash: contentHash("local") });
+
+    expect(rename).toHaveBeenCalledTimes(code ? 4 : 1);
+    expect(wait.mock.calls).toEqual(code ? [[8], [16], [32]] : []);
+    expect(writeFile).toHaveBeenCalledTimes(1);
+    expect(readCurrentContentHash).toHaveBeenCalledTimes(1);
+    expect(remove).not.toHaveBeenCalled();
+    for (const call of rename.mock.calls) {
+      expect(call).toEqual([writeFile.mock.calls[0][0], "C:/workspace/notes/a.md"]);
+    }
+  });
+
+  it.each([
+    ["linux", "EPERM"], ["darwin", "EBUSY"], ["linux", "EACCES"], ["win32", "ENOENT"],
+  ] as const)("fails immediately for %s rename errors with code %s", async (platform, code) => {
+    const error = Object.assign(new Error("rename failed"), { code });
+    const rename = vi.fn(async (_source: string, _destination: string) => { throw error; });
+    const wait = vi.fn(async (_milliseconds: number) => undefined);
+    const remove = vi.fn(async (_temp: string) => undefined);
+    const writer = createAtomicTextWriter({
+      now: () => 1_000, uniqueId: () => "fixed-id",
+      writeFile: async () => undefined, rename, remove,
+      readCurrentContentHash: async () => INITIAL_CONTENT_HASH, wait, platform,
+    });
+
+    await expect(writer("C:/workspace/notes/a.md", "local", INITIAL_CONTENT_HASH)).rejects.toBe(error);
+    expect(rename).toHaveBeenCalledTimes(1);
+    expect(wait).not.toHaveBeenCalled();
+    expect(remove).toHaveBeenCalledTimes(1);
+    expect(remove).toHaveBeenCalledWith(rename.mock.calls[0][0]);
+  });
+
+  it("cleans the staged text after exhausting Windows rename retries", async () => {
+    const errors = Array.from({ length: 6 }, (_, attempt) =>
+      Object.assign(new Error(`locked on attempt ${attempt}`), { code: "EPERM" }));
+    const rename = vi.fn(async (_source: string, _destination: string) => { throw errors[rename.mock.calls.length - 1]; });
+    const wait = vi.fn(async (_milliseconds: number) => undefined);
+    const remove = vi.fn(async (_temp: string) => undefined);
+    const readCurrentContentHash = vi.fn(async () => INITIAL_CONTENT_HASH);
+    const writer = createAtomicTextWriter({
+      now: () => 1_000, uniqueId: () => "fixed-id",
+      writeFile: async () => undefined, rename, remove, readCurrentContentHash,
+      wait, platform: "win32",
+    });
+
+    await expect(writer("C:/workspace/notes/a.md", "local", INITIAL_CONTENT_HASH)).rejects.toBe(errors[5]);
+    expect(rename).toHaveBeenCalledTimes(6);
+    expect(wait.mock.calls).toEqual([[8], [16], [32], [64], [128]]);
+    expect(readCurrentContentHash).toHaveBeenCalledTimes(1);
+    expect(remove).toHaveBeenCalledTimes(1);
+    expect(remove).toHaveBeenCalledWith(rename.mock.calls[0][0]);
+  });
+
   it("cleans the staged temp without renaming when the content hash changed", async () => {
     const staged: string[] = [];
     const committed: string[] = [];
