@@ -120,6 +120,34 @@ describe("Explorer kind glyphs", () => {
     }
   });
 
+  it("draws an app folder's glyph in the folder glyph's box and keeps it a tree row", () => {
+    render(
+      <Explorer
+        {...explorerProps({
+          files: [file("site/index.html"), file("notes/plan.md")],
+          folders: ["site", "notes"],
+          pinned: ["site"],
+          expandedFolders: ["site"],
+          collectionFolders: new Set(["site"]),
+          appFolders: new Set(["site"]),
+        })}
+      />,
+    );
+    const app = treeRow("site");
+    expect(app.dataset.app).toBe("true");
+    expect(app.dataset.collection).toBe("true");
+    expect(app.getAttribute("aria-expanded")).toBe("true");
+    expect(screen.getByRole("treeitem", { name: "site" })).toBe(app);
+    for (const row of [app, screen.getByTestId("pinned-row")]) {
+      const glyph = row.querySelector(".lucide-app-window");
+      expect(glyph?.getAttribute("width")).toBe("15");
+      expect(glyph?.getAttribute("aria-hidden")).toBe("true");
+      expect(row.querySelector(".lucide-folder, .lucide-folder-open")).toBeNull();
+    }
+    expect(treeRow("notes").dataset.app).toBeUndefined();
+    expect(treeRow("notes").querySelector(".lucide-folder")).not.toBeNull();
+  });
+
   it("draws every section's glyph at one size, ink on the selected fill and subtle elsewhere", () => {
     render(
       <Explorer
@@ -153,6 +181,7 @@ describe("Explorer kind glyphs", () => {
         <TreeRow
           row={{ fullPath: "plan.md", isFolder: false, isExpanded: false, depth: 0, parentPath: null, kind: "file", positionInSet: 1, setSize: 1 }}
           collection={false}
+          app={false}
           selected
           active={false}
           tabbable={false}
