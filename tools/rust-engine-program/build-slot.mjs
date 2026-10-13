@@ -29,6 +29,7 @@ import {
   realpathSync,
   readdirSync,
   renameSync,
+  rmdirSync,
   rmSync,
   statSync,
   statfsSync,
@@ -143,14 +144,14 @@ export function processCreation(pid) {
 // finished process alive.
 let ownCreation;
 let ownCreationValue = null;
+function linuxOwnCreation() {
+  if (platform() !== "linux") return null;
+  try { return ownCreationValue ??= linuxCreation(process.pid); } catch { return null; }
+}
 function resolveOwnCreation() {
   if (ownCreation) return ownCreation;
-  const os = platform();
-  const query = creationQuery(process.pid, os);
-  if (os === "linux" || !query) {
-    try { ownCreationValue = os === "linux" ? linuxCreation(process.pid) : null; } catch { /* Unknown identity. */ }
-    return ownCreation = Promise.resolve(ownCreationValue);
-  }
+  const query = creationQuery(process.pid, platform());
+  if (!query) return ownCreation = Promise.resolve(linuxOwnCreation());
   return ownCreation = new Promise(done => {
     const finish = value => { ownCreationValue = value; done(value); };
     try {
@@ -222,8 +223,9 @@ function holders(root, slots, kind) {
       const detail = [status.purpose, status.checkout, status.commit?.slice(0, 12), status.phase].filter(Boolean).join(", ");
       const elapsed = Math.max(0, Date.now() - Date.parse(owner.start));
       const heartbeat = Math.max(0, Date.now() - statSync(join(dir, "owner.json")).mtimeMs);
-      held.push(`${kind}-${i}: pid ${owner.pid} since ${owner.start}, elapsed ${Math.round(elapsed / 1000)}s, ` +
-        `last heartbeat ${Math.round(heartbeat / 1000)}s ago${detail ? ` (${detail})` : ""}`);
+      // Without an identity, a reused pid keeps the slot until that other process exits.
+      held.push(`${kind}-${i}: pid ${owner.pid}${owner.created ? "" : " (no process identity)"} since ${owner.start}, ` +
+        `elapsed ${Math.round(elapsed / 1000)}s, last heartbeat ${Math.round(heartbeat / 1000)}s ago${detail ? ` (${detail})` : ""}`);
     } catch {
       if (existsSync(dir)) held.push(`${kind}-${i}: owner unreadable`);
     }
@@ -356,23 +358,26 @@ function withSweepLock(root, sweep) {
     }
   }
   // A sweep suspended past the takeover window loses its lock to a successor.
-  // The token lets it notice, stop mutating, and leave the successor's lock.
-  const token = randomBytes(8).toString("hex");
-  const tokenPath = join(sweepLock, "owner");
-  const owns = () => {
-    try { return readFileSync(tokenPath, "utf8") === token; }
-    catch { return false; }
+  // Its own token file lets it notice and stop mutating. Release removes only
+  // that file and then an empty directory, so a successor's lock, which holds
+  // the successor's token, always survives.
+  const tokenPath = join(sweepLock, `owner-${randomBytes(8).toString("hex")}`);
+  const owns = () => existsSync(tokenPath);
+  const release = () => {
+    try { rmSync(tokenPath, { force: true }); rmdirSync(sweepLock); }
+    catch { /* Not empty, or already gone: not ours to remove. */ }
   };
   try {
-    writeFileSync(tokenPath, token, { flag: "wx" });
+    writeFileSync(tokenPath, "", { flag: "wx" });
   } catch (error) {
-    rmSync(sweepLock, { recursive: true, force: true });
+    release();
+    if (error.code === "ENOENT") return null; // A takeover removed the lock first.
     throw error;
   }
   try {
     return sweep(owns);
   } finally {
-    if (owns()) rmSync(sweepLock, { recursive: true, force: true });
+    release();
   }
 }
 
@@ -380,15 +385,17 @@ function withSweepLock(root, sweep) {
  * Reclaim slots whose owner is gone. The owner file's mtime IS the heartbeat:
  * a live owner refreshes it every minute whatever its content.
  *
- * A readable owner is reclaimed after two missed heartbeats (sooner when
- * `staleMs` is shorter) once its pid is dead, or once the pid belongs to a
- * different process than the one that claimed: owners record the OS creation
- * identity of their process, and a different identity behind the same pid
- * proves reuse. A live owner with its own identity keeps its slot even when
- * its heartbeat stops; stopping it safely needs process ownership this sweep
- * does not have. A slot whose owner file is missing or unreadable for
- * `staleMs` has no working heartbeat by construction (a crash between mkdir
- * and the owner write, or a torn write) and is reclaimed too.
+ * A readable owner is reclaimed once its heartbeat is `goneMs` old (at most
+ * `staleMs`) and its pid is dead, or once the pid belongs to a different
+ * process than the one that claimed. Owners record the OS creation identity
+ * of their process; a different identity behind the same pid proves reuse,
+ * and is trusted only after two missed heartbeats, because a fresh heartbeat
+ * proves the claimer lives. A live owner with its own or an unknown identity
+ * keeps its slot even when its heartbeat stops; stopping it safely needs
+ * process ownership this sweep does not have. A slot whose owner file is
+ * missing or unreadable for `staleMs` has no working heartbeat by
+ * construction (a crash between mkdir and the owner write, or a torn write)
+ * and is reclaimed too.
  *
  * Sweeps are serialized through a `reclaim.lock` directory: two concurrent
  * sweepers could otherwise both judge one slot dead, and the slower rename
@@ -396,11 +403,11 @@ function withSweepLock(root, sweep) {
  * re-claimed. The lock is held for milliseconds; one left by a dead sweeper
  * is removed after 5 minutes. Returns how many slots were freed.
  */
-export function reclaimStaleSlots({ root, slots, staleMs, kind = "build-slot", identify = cachedCreation }) {
+export function reclaimStaleSlots({ root, slots, staleMs, kind = "build-slot", goneMs = 2 * defaultHeartbeatMs, identify = processCreation }) {
   try {
     return withSweepLock(root, owns => {
       reclaimStaleTickets({ root, kind, owns });
-      return reclaimSlots({ root, slots, kind, staleMs, identify, owns });
+      return reclaimSlots({ root, slots, kind, staleMs, goneMs, identify, owns });
     }) ?? 0;
   } catch (error) {
     if (!transientFilesystemError(error, root, kind)) throw error;
@@ -408,15 +415,15 @@ export function reclaimStaleSlots({ root, slots, staleMs, kind = "build-slot", i
   }
 }
 
-// A live process keeps its identity, so one answer serves repeated sweeps.
-// A reused pid is caught on the first sweep after the cached answer expires.
-const creationCache = new Map();
-function cachedCreation(pid) {
-  const cached = creationCache.get(pid);
-  if (cached && Date.now() - cached.at < 5 * 60_000) return cached.value;
-  const value = processCreation(pid);
-  creationCache.set(pid, { value, at: Date.now() });
-  return value;
+// A matching identity only keeps a slot, so it is cached to spare repeated
+// sweeps a PowerShell start. A mismatch frees a slot, so it is never cached.
+const sameCreation = new Map();
+function confirmsOwner(pid, created, identify) {
+  const cached = sameCreation.get(pid);
+  if (cached?.created === created && Date.now() - cached.at < 5 * 60_000) return { same: true };
+  const current = identify(pid);
+  if (current === created) sameCreation.set(pid, { created, at: Date.now() });
+  return { same: current === null || current === created, current };
 }
 
 function heartbeatOf(dir) {
@@ -424,7 +431,9 @@ function heartbeatOf(dir) {
     ?? statSync(dir, { throwIfNoEntry: false })?.mtimeMs;
 }
 
-function reclaimSlots({ root, slots, staleMs, kind, identify = cachedCreation, owns = () => true }) {
+function reclaimSlots({ root, slots, staleMs, goneMs = 2 * defaultHeartbeatMs, kind, identify = processCreation, owns = () => true }) {
+  const deadAfter = Math.min(staleMs, goneMs);
+  const reusedAfter = Math.max(deadAfter, 2 * defaultHeartbeatMs);
   let reclaimed = 0;
   for (let i = 1; i <= slots; i += 1) {
     const dir = slotDir(root, i, kind);
@@ -442,7 +451,7 @@ function reclaimSlots({ root, slots, staleMs, kind, identify = cachedCreation, o
       }
     }
     const age = Date.now() - heartbeatAt;
-    if (age <= Math.min(staleMs, 2 * defaultHeartbeatMs)) continue;
+    if (age <= deadAfter) continue;
     let inspectedOwner = null;
     try {
       inspectedOwner = readFileSync(ownerPath, "utf8");
@@ -450,6 +459,8 @@ function reclaimSlots({ root, slots, staleMs, kind, identify = cachedCreation, o
       if (error.code !== "ENOENT" && transientFilesystemError(error, root, kind)) continue;
       // A missing owner file is judged by `why` below.
     }
+    // Without a readable pid, only the heartbeat speaks for the owner.
+    let ownerGone = false;
     if (why === undefined) {
       let owner;
       try {
@@ -464,16 +475,17 @@ function reclaimSlots({ root, slots, staleMs, kind, identify = cachedCreation, o
         why = `owner pid invalid (${pid})`;
       } else if (!pidAlive(pid)) {
         why = `pid ${pid} dead`;
-      } else if (typeof owner.created === "string") {
-        const current = identify(pid);
-        if (current === null || current === owner.created) continue;
+        ownerGone = true;
+      } else if (typeof owner.created === "string" && age > reusedAfter) {
+        const { same, current } = confirmsOwner(pid, owner.created, identify);
+        if (same) continue;
         why = `pid ${pid} reused (claimed by process created ${owner.created}, now ${current})`;
+        ownerGone = true;
       } else {
-        continue; // Live, and no recorded identity to prove reuse.
+        continue; // Live, and nothing proves the pid changed hands.
       }
     }
-    // Without a readable pid, only the heartbeat speaks for the owner.
-    if (!why.startsWith("pid ") && age <= staleMs) continue;
+    if (!ownerGone && age <= staleMs) continue;
     // The identity probe can take seconds. A heartbeat during it, or a sweep
     // takeover while this one was suspended, cancels the decision.
     if (heartbeatOf(dir) !== heartbeatAt || !owns()) continue;
@@ -489,14 +501,12 @@ function reclaimSlots({ root, slots, staleMs, kind, identify = cachedCreation, o
     // holds the owner it actually moved; if that is not the owner this
     // sweep inspected, or that owner heartbeated after the check, put it back.
     let movedOwner = null;
-    let movedHeartbeat = heartbeatAt;
     try {
       movedOwner = readFileSync(join(tomb, "owner.json"), "utf8");
-      movedHeartbeat = statSync(join(tomb, "owner.json")).mtimeMs;
     } catch {
-      // Both null when neither had an owner file: identical claims.
+      // Both null when neither had an owner file; the heartbeat still tells them apart.
     }
-    if (movedOwner !== inspectedOwner || movedHeartbeat !== heartbeatAt) {
+    if (movedOwner !== inspectedOwner || heartbeatOf(tomb) !== heartbeatAt) {
       try {
         renameSync(tomb, dir);
       } catch {
@@ -619,7 +629,7 @@ function claimSlot(dir, name, heartbeatMs, cooperativeCancellation, removeTicket
   let ownerRecord = JSON.stringify({
     pid: process.pid,
     // Lets a sweep tell this process from a later one that reuses its pid.
-    created: ownCreationValue,
+    created: ownCreationValue ?? linuxOwnCreation(),
     start: new Date().toISOString(),
     ...metadataFields(metadata),
   });
@@ -655,12 +665,15 @@ function claimSlot(dir, name, heartbeatMs, cooperativeCancellation, removeTicket
   // Only a held slot needs an identity; claims released within seconds never
   // pay the lookup. A sweep that read the identity-less record sees new bytes
   // and backs off.
-  const identify = ownCreationValue === null ? setTimeout(() => resolveOwnCreation().then(created => {
+  const identify = identityDelayMs !== null && JSON.parse(ownerRecord).created === null ? setTimeout(() => resolveOwnCreation().then(created => {
     if (released || created === null) return;
     try {
       if (readFileSync(ownerPath, "utf8") !== ownerRecord) return;
       const record = JSON.stringify({ ...JSON.parse(ownerRecord), created });
-      writeFileSync(ownerPath, record);
+      // Rename, so a failed write leaves the old record and release still matches it.
+      const temporary = `${ownerPath}.${randomBytes(4).toString("hex")}.tmp`;
+      writeFileSync(temporary, record);
+      renameSync(temporary, ownerPath);
       ownerRecord = record;
       update({});
     } catch { /* The slot keeps its pid-only record. */ }
@@ -716,7 +729,8 @@ function claimSlot(dir, name, heartbeatMs, cooperativeCancellation, removeTicket
  * Take one of the host's four cargo lanes for a build or test run.
  */
 export function acquireBuildSlot(options) {
-  return acquireSlot({ ...options, kind: "build-slot", lanes: "cargo lanes" });
+  // A dead holder's compilers can outlive it, so a cargo lane keeps the long grace.
+  return acquireSlot({ goneMs: 30 * 60_000, ...options, kind: "build-slot", lanes: "cargo lanes" });
 }
 
 /** Fail-fast ownership for mutable local resources; this creates no waiter queue. */
@@ -738,7 +752,8 @@ export function acquireExclusiveSlot({ root, kind, metadata, cooperativeCancella
       reclaimStaleSlots({ root, slots: 1, kind, staleMs });
       continue;
     }
-    return claimSlot(dir, `${kind}-1`, defaultHeartbeatMs, cooperativeCancellation, () => {}, root, kind, metadata);
+    // An exclusive holder frees immediately once dead, and a lookup would start mid-run (profiling measures then).
+    return claimSlot(dir, `${kind}-1`, defaultHeartbeatMs, cooperativeCancellation, () => {}, root, kind, metadata, null);
   }
 }
 
@@ -803,6 +818,7 @@ async function acquireSlot({
   metadata,
   observeTicket,
   identityDelayMs,
+  goneMs,
 }) {
   mkdirSync(root, { recursive: true });
   const label = kind.replace("-", " ");
@@ -858,7 +874,7 @@ async function acquireSlot({
       const sweepMs = reserved ? Math.min(pollMs, 1000) : pollMs;
       if (Date.now() - lastSweepAt >= sweepMs) {
         lastSweepAt = Date.now();
-        reclaimStaleSlots({ root, slots, staleMs, kind });
+        reclaimStaleSlots({ root, slots, staleMs, goneMs, kind });
         refreshQueue();
       }
       if (ahead < 0) {
@@ -884,6 +900,8 @@ async function acquireSlot({
       ahead = -1; // This snapshot cannot grant admission; retry after the sleep.
     }
     if (!denied) {
+      // A waiter has time to learn its identity before it claims.
+      resolveOwnCreation();
       denied = true;
       logEvent(root, free.length === 0
         ? `denied: pid ${process.pid} found all ${slots} slots held`

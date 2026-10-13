@@ -1424,15 +1424,47 @@ test("a dead owner frees its slot after two missed heartbeats, not the whole sta
 test("a pid now owned by another process frees the slot; the claimer's own identity keeps it", () => {
   const root = slotRoot();
   try {
-    const identities = { 1: "claimer", 2: "claimer", 3: "claimer" };
-    plantOwner(root, 1, { pid: process.pid, created: "claimer" }, 3 * 60_000);
-    assert.equal(reclaimStaleSlots({ root, slots: 1, staleMs: 30 * 60_000, identify: () => identities[1] }), 0,
-      "a silent owner that is still the claiming process keeps its slot");
+    const owner = { pid: process.pid, created: "reuse-test-claimer" };
+    plantOwner(root, 1, owner, 3 * 60_000);
     assert.equal(reclaimStaleSlots({ root, slots: 1, staleMs: 30 * 60_000, identify: () => null }), 0,
       "an unknown identity proves nothing");
     assert.equal(reclaimStaleSlots({ root, slots: 1, staleMs: 30 * 60_000, identify: () => "later process" }), 1);
     assert.equal(existsSync(join(root, "build-slot-1")), false);
-    assert.match(readFileSync(join(root, "events.log"), "utf8"), /reclaimed build-slot-1: pid \d+ reused \(claimed by process created claimer, now later process\)/);
+    assert.match(readFileSync(join(root, "events.log"), "utf8"), /reclaimed build-slot-1: pid \d+ reused \(claimed by process created reuse-test-claimer, now later process\)/);
+    plantOwner(root, 1, owner, 3 * 60_000);
+    assert.equal(reclaimStaleSlots({ root, slots: 1, staleMs: 30 * 60_000, identify: () => owner.created }), 0,
+      "a silent owner that is still the claiming process keeps its slot");
+    // A confirmed match is remembered for five minutes. It can delay a reclaim, never cause one.
+    assert.equal(reclaimStaleSlots({ root, slots: 1, staleMs: 30 * 60_000, identify: () => "later process" }), 0);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a fresh heartbeat outweighs any identity answer, even for exclusive slots", () => {
+  const root = slotRoot();
+  try {
+    plantOwner(root, 1, { pid: process.pid, created: "fresh-test-claimer" }, 0, "checkout");
+    plantOwner(root, 1, { pid: process.pid, created: "fresh-test-claimer" }, 90_000);
+    let probes = 0;
+    const identify = () => { probes += 1; return "other"; };
+    assert.equal(reclaimStaleSlots({ root, slots: 1, kind: "checkout", staleMs: -1, identify }), 0);
+    assert.equal(reclaimStaleSlots({ root, slots: 1, staleMs: 30 * 60_000, identify }), 0);
+    assert.equal(probes, 0, "no lookup runs before two heartbeats are missed");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a cargo lane keeps its long grace for a dead holder; the verification lane frees in minutes", async () => {
+  const root = slotRoot();
+  try {
+    plantSlot(root, 1, { pid: deadPid(), heartbeatAgeMs: 3 * 60_000 });
+    await assert.rejects(acquireBuildSlot({ root, slots: 1, waitMs: 0 }), /all 1 slots are held/);
+    plantSlot(root, 1, { pid: deadPid(), heartbeatAgeMs: 3 * 60_000, kind: "verification-slot" });
+    const lane = await acquireVerificationSlot({ DOHC_BUILD_SLOT_ROOT: root });
+    assert.equal(lane.name, "verification-slot-1");
+    lane.release();
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -1476,12 +1508,12 @@ test("a sweep that lost its lock stops and leaves the successor's lock", () => {
       // A successor takes the lock over while this sweep is suspended in its probe.
       rmSync(lock, { recursive: true, force: true });
       mkdirSync(lock);
-      writeFileSync(join(lock, "owner"), "successor");
+      writeFileSync(join(lock, "owner-successor"), "");
       return "later process";
     };
     assert.equal(reclaimStaleSlots({ root, slots: 1, staleMs: 30 * 60_000, identify }), 0);
     assert.equal(existsSync(join(root, "build-slot-1")), true);
-    assert.equal(readFileSync(join(lock, "owner"), "utf8"), "successor");
+    assert.deepEqual(readdirSync(lock), ["owner-successor"]);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
