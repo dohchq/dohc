@@ -1,6 +1,7 @@
 import { createShareSummaries } from "./shareSummaries";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { MAX_BROWSER_CHAT_FOLLOWS_PER_WORKSPACE } from "./namedRecipientChat";
+import type { StorageContext } from "./storage/context";
 import { CHAT_HISTORY_SCAN_WINDOW } from "./storage/log";
 import { linkLogWaitGroup, DiscussionActivityHub } from "./discussionActivity";
 import { RELAY_EXCHANGE_KEY, SHARE_WEB_ORIGIN, chatChannelCreate, chatMessageAppend, chatThreadCreate,
@@ -31,7 +32,8 @@ async function fixture(activity = new DiscussionActivityHub(), maxResponseBytes 
   addGrant(storage, grant("read", "reader", "read-only"));
   let clock = 2000;
   const lookupUserEmail = vi.fn((userId: string) => `${userId}@dohc.test`);
-  const handler = testHandler(storage, {lookupVerifiedUserEmail: lookupUserEmail, nowMs: () => ++clock, discussionActivity: activity, namedBrowserSessionLimits: {...limits, maxResponseBytes, maxPendingRequests}, relayExchangeKey: RELAY_EXCHANGE_KEY,
+  const responseLimits = {...limits, maxResponseBytes, maxPendingRequests};
+  const handler = testHandler(storage, {lookupVerifiedUserEmail: lookupUserEmail, nowMs: () => ++clock, discussionActivity: activity, namedBrowserSessionLimits: responseLimits, relayExchangeKey: RELAY_EXCHANGE_KEY,
     resolveActor: (incoming, workspaceId) => {
       if (incoming.headers.has("cookie")) {
         expect([...incoming.headers.keys()]).toEqual(["cookie"]);
@@ -48,7 +50,7 @@ async function fixture(activity = new DiscussionActivityHub(), maxResponseBytes 
   const post = (changes: Record<string, unknown> = {}, user = "alice") => call("messages", user, jsonBody({
     shareId, channelWireId, id: "request-1", body: "hello from browser", authorKind: "human", authorDisplayName: "Alice", ...changes,
   }));
-  return {storage, handler, call, post, activity, lookupUserEmail};
+  return {storage, handler, call, post, activity, lookupUserEmail, responseLimits};
 }
 function addGrant(storage: SyncRelayStorage, value: SyncRelayShareGrantRow) {
   const db = inspectDatabase(storagePath(storage));
@@ -530,4 +532,112 @@ it("releases the waiter when access changes before the registered park check", a
   });
   expect((await f.call(history + "&since=7&hold=30000")).status).toBe(404);
   expect(f.activity.stats().waiters).toBe(0);
+});
+
+it("seeks only window thread bindings in a workspace with 20k single-message threads", async () => {
+  const f = await fixture();
+  f.storage.appendLogBatch({workspaceId, originId: "single-message-threads", ops: sequenced(
+    Array.from({length: 20_000}, (_, index) => [chatThreadCreate(`single-${index}`, "wire-private"),
+      chatMessageAppend(`single-message-${index}`, `single-${index}`, "private")]).flat(),
+  ).map(({payload, ...op}) => ({...op, payloadJson: JSON.stringify(payload)}))});
+  const db = inspectDatabase(storagePath(f.storage));
+  const context = f.storage as StorageContext, prepare = context.db.prepare.bind(context.db);
+  const plans: Array<Array<Record<string, unknown>>> = [];
+  const spy = vi.spyOn(context.db, "prepare").mockImplementation(sql => {
+    const statement = prepare(sql);
+    if (sql.includes("channel_threads")) {
+      const all = statement.all.bind(statement);
+      vi.spyOn(statement, "all").mockImplementation((...params) => {
+        plans.push(db.prepare(`EXPLAIN QUERY PLAN ${sql}`).all(...params));
+        return all(...params);
+      });
+    }
+    return statement;
+  });
+  try {
+    for (const direction of ["older", "newer"] as const) {
+      const page = f.storage.fetchChatMessages({workspaceId, channelWireId, cursor: direction === "older" ? null : 7, direction, limit: 100});
+      expect(page.rows).toEqual([]);
+      expect(page.nextCursor).toBe(direction === "older" ? 40007 - CHAT_HISTORY_SCAN_WINDOW + 1 : 7 + CHAT_HISTORY_SCAN_WINDOW);
+      expect(page.hasMore).toBe(true);
+    }
+    expect(plans).toHaveLength(2);
+    for (const plan of plans) {
+      expect(plan.map(row => row.detail)).toContainEqual(expect.stringMatching(/SEARCH t USING INDEX idx_sync_relay_log_thread_id .*workspace_id=\? AND <expr>=\?/u));
+      expect(plan.map(row => row.detail)).toContainEqual(expect.stringMatching(/SEARCH m USING INDEX idx_sync_relay_log_page .*relay_seq>\? AND relay_seq<\?/u));
+    }
+  } finally {spy.mockRestore(); db.close();}
+});
+
+it.each([["older", "wire-private"], ["newer", "wire-private"], ["older", channelWireId], ["newer", channelWireId]] as const)(
+  "bounds payload bytes before JSON filtering, direction=%s, channel=%s", async (direction, targetChannel) => {
+  const f = await fixture(), budget = 4 * 1024 * 1024;
+  const ops = sequenced(Array.from({length: 40}, (_, index) =>
+    chatMessageAppend(`large-private-${index}`, targetChannel === channelWireId ? "thread-team" : "thread-private", "名".repeat(87_000))))
+    .map(({payload, ...op}) => ({...op, payloadJson: JSON.stringify(payload)}));
+  f.storage.appendLogBatch({workspaceId, originId: "large-private", ops});
+  const ordered = direction === "older" ? [...ops].reverse() : ops;
+  let count = 0, bytes = 0;
+  for (const op of ordered) {
+    const length = Buffer.byteLength(op.payloadJson);
+    if (bytes + length > budget) break;
+    bytes += length; count++;
+  }
+  const page = f.storage.fetchChatMessages({workspaceId, channelWireId, cursor: direction === "older" ? null : 7, direction, limit: 100});
+  expect(page.rows.map(row => JSON.parse(row.payloadJson).messageId as string)).toEqual(
+    targetChannel === channelWireId ? ordered.slice(0, count).map(op => JSON.parse(op.payloadJson).messageId as string) : []);
+  expect(page.nextCursor).toBe(direction === "older" ? 47 - count + 1 : 7 + count);
+  expect(page.hasMore).toBe(true);
+  const next = f.storage.fetchChatMessages({workspaceId, channelWireId, cursor: page.nextCursor, direction, limit: 100});
+  expect(next.nextCursor).toBe(direction === "older" ? 47 - count * 2 + 1 : 7 + count * 2);
+  expect(next.rows.map(row => JSON.parse(row.payloadJson).messageId as string)).toEqual(
+    targetChannel === channelWireId ? ordered.slice(count, count * 2).map(op => JSON.parse(op.payloadJson).messageId as string) : []);
+});
+
+it.each([false, true])("falls back when the final envelope exceeds the exact byte boundary, following=%s", async following => {
+  const seed = (storage: SyncRelayStorage) => storage.appendLogBatch({workspaceId, originId: "boundary", ops: sequenced([
+    chatMessageAppend("boundary", "thread-team", "x".repeat(5000)),
+    ...Array.from({length: 100}, (_, index) => chatMessageAppend(`tail-${index}`, "thread-private", "private")),
+  ]).map(({payload, ...op}) => ({...op, payloadJson: JSON.stringify(payload)}))});
+  const baseline = await fixture(); seed(baseline.storage);
+  const path = history + (following ? "&since=0" : "");
+  const full = await json(await baseline.call(path));
+  const budget = Buffer.byteLength(JSON.stringify(full)) - 1;
+  const f = await fixture(new DiscussionActivityHub(), budget); seed(f.storage);
+  const response = await f.call(path), page = await json(response);
+  expect(response.status).toBe(200);
+  expect(page.messages).toEqual(full.messages);
+  expect(Buffer.byteLength(JSON.stringify(page))).toBeLessThanOrEqual(budget);
+  expect(following ? page.hasMore : page.olderCursor).toBe(following ? true : 3);
+  if (following) {
+    expect(full.nextCursor).toBe(108);
+    expect(page.nextCursor).toBe(8);
+    const nextResponse = await f.call(path.replace("since=0", "since=8"));
+    expect(nextResponse.status).toBe(200);
+    expect(await json(nextResponse)).toMatchObject({messages: [], nextCursor: 108, hasMore: false});
+  }
+});
+
+it.each([false, true])("advances an empty partial when a bare marker cannot fit, following=%s", async following => {
+  const f = await fixture();
+  f.responseLimits.maxResponseBytes = 160;
+  const response = await f.call(history + (following ? "&since=0" : "")), page = await json(response);
+  expect(response.status).toBe(200);
+  expect(page.messages).toEqual([]);
+  expect(Buffer.byteLength(JSON.stringify(page))).toBeLessThanOrEqual(160);
+  expect(following ? page.nextCursor : page.olderCursor).toBe(following ? 3 : 7);
+  const next = await json(await f.call(history + (following ? `&since=${page.nextCursor}` : `&before=${page.olderCursor}`)));
+  expect(following ? next.nextCursor : next.olderCursor).toBe(following ? 7 : 3);
+});
+
+it.each(["older", "newer"] as const)("retains earliest thread bindings after a later re-create, direction=%s", async direction => {
+  const f = await fixture();
+  f.storage.appendLogBatch({workspaceId, originId: "recreated", ops: sequenced([
+    chatThreadCreate("thread-private", channelWireId), chatThreadCreate("thread-team", "wire-private"),
+    chatMessageAppend("still-private", "thread-private", "SENTINEL"),
+    chatMessageAppend("still-shared", "thread-team", "visible"),
+  ]).map(({payload, ...op}) => ({...op, payloadJson: JSON.stringify(payload)}))});
+  const page = f.storage.fetchChatMessages({workspaceId, channelWireId, cursor: direction === "older" ? 12 : 7, direction, limit: 100});
+  expect(page.rows.map(row => JSON.parse(row.payloadJson).messageId as string)).toEqual(
+    direction === "older" ? ["still-shared", "owner-second", "owner-first"] : ["still-shared"]);
 });

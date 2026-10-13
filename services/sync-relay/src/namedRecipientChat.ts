@@ -249,9 +249,10 @@ export function createNamedRecipientChat(options: {
         recheck();
         const envelope = {shareId, channelWireId, ...page};
         const messages: NamedChatMessage[] = [];
+        let skippedCursor: number | undefined;
         const partial = (selected: NamedChatMessage[]) => ({...envelope, messages: selected,
-          ...(following ? {nextCursor: selected[selected.length - 1]!.relaySeq, hasMore: true} :
-            {olderCursor: selected[selected.length - 1]!.relaySeq})});
+          ...(following ? {nextCursor: (selected[selected.length - 1]?.relaySeq ?? skippedCursor ?? position ?? page.nextCursor), hasMore: true} :
+            {olderCursor: (selected[selected.length - 1]?.relaySeq ?? skippedCursor ?? position ?? page.nextCursor)})});
         const fits = (value: unknown) => Buffer.byteLength(JSON.stringify(value)) <= limits.maxResponseBytes;
         let truncated = false;
         for (const message of page.messages) {
@@ -260,10 +261,14 @@ export function createNamedRecipientChat(options: {
             omitted = {...omitted, messageId: `omitted:${message.relaySeq}`, threadId: "",
               authorUserId: null, authorDisplayName: "", authorOwnerDisplayName: null};
           }
-          if (!fits(partial([...messages, omitted]))) {truncated = true; break;}
+          if (!fits(partial([...messages, omitted]))) {
+            if (messages.length === 0) skippedCursor = message.relaySeq;
+            truncated = true; break;
+          }
           messages.push(fits(partial([...messages, message])) ? message : omitted);
         }
-        return json(truncated ? partial(messages) : {...envelope, messages});
+        const complete = {...envelope, messages};
+        return json(truncated || !fits(complete) ? partial(messages) : complete);
       } catch (error) {return controller.signal.aborted ? refuse() : errorResponse(error);}
       finally {
         if (following) pendingFollows--; else pending--;
