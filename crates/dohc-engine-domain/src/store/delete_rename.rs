@@ -207,6 +207,18 @@ impl<'a> VersionedTextStore<'a> {
                 params![ws, input.version_id, input.to_path, before.object_id],
             )
             .map_err(DomainError::sql_persist)?;
+            dohc_engine_storage::capture_file_holds::clear_orphaned_in(
+                tx,
+                ws,
+                &input.version_id,
+                &input.from_path,
+            )?;
+            dohc_engine_storage::capture_file_holds::clear_orphaned_in(
+                tx,
+                ws,
+                &input.version_id,
+                &input.to_path,
+            )?;
             upsert_snapshot(tx, &after_snapshot)?;
             // The alias has left `from_path`. A write still pending there
             // would put a file back under the old name on replay. Same gate
@@ -556,6 +568,12 @@ fn delete_text_in_tx_prepared(
             params![ws, input.version_id, before.object_id],
         )
         .map_err(DomainError::sql_persist)?;
+        dohc_engine_storage::capture_file_holds::clear_orphaned_in(
+            tx,
+            ws,
+            &input.version_id,
+            &input.path,
+        )?;
         // Must run in this same transaction as the path_aliases removal
         // above — see `cancel_pending_jobs_for_path` for why. Materialization
         // jobs carry no version identity — they mirror the active version's
@@ -606,6 +624,12 @@ pub fn finish_checked_delete_in_tx(
             ],
         )
         .map_err(DomainError::sql_persist)?;
+        dohc_engine_storage::capture_file_holds::clear_orphaned_in(
+            tx,
+            workspace_id,
+            &result.moment.version_id,
+            &result.moment.path,
+        )?;
         crate::collections::index_historical_record_owner_moment_in_tx(
             tx,
             workspace_id,

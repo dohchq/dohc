@@ -15,7 +15,7 @@ import {
 } from "./fileInspectorUi";
 import { TextEditorView } from "./TextEditorView";
 import type { PendingFileUndo } from "./fileEditorUndo";
-import { CsvView } from "./CsvView";
+import { CsvControls, CsvView } from "./CsvView";
 import { ImageView } from "./ImageView";
 import { extensionOf } from "./path";
 import { fileKindForPath } from "@dohc/workspace-contracts/kinds";
@@ -625,6 +625,8 @@ export const FileInspector = memo(function FileInspector(
           disabled: !opening,
         }}
       />
+    ) : kind === "csv" ? (
+      <CsvControls mode="table" importable={props.onOpenPath !== undefined} disabled />
     ) : undefined;
 
   if (notInVersion) {
@@ -799,8 +801,9 @@ export const FileInspector = memo(function FileInspector(
       );
     case "csv":
       return (
+        // CsvView and TextEditorView render their ViewActions themselves: the
+        // save state and the view's controls sit with Share in the tab row.
         <div className="flex min-h-0 flex-1 flex-col bg-bg" data-testid="file-inspector">
-          <ViewActions onShare={onShareCurrentPath} />
           {truncatedNotice}
           {recoveryNotices}
           <CsvView
@@ -821,6 +824,8 @@ export const FileInspector = memo(function FileInspector(
             onSaveStateChange={props.onSaveStateChange}
             registerDraftFlush={props.registerDraftFlush}
             localBuffer={localBuffer}
+            onShare={onShareCurrentPath}
+            onError={props.onButtonError}
           />
         </div>
       );
@@ -829,7 +834,6 @@ export const FileInspector = memo(function FileInspector(
     case "code":
       return (
         <div className="flex min-h-0 flex-1 flex-col bg-bg" data-testid="file-inspector">
-          <ViewActions onShare={onShareCurrentPath} onRun={runApp} />
           {truncatedNotice}
           {recoveryNotices}
           <TextEditorView
@@ -858,6 +862,8 @@ export const FileInspector = memo(function FileInspector(
             pendingUndo={pendingTextUndo}
             onPendingUndoConsumed={props.onPendingUndoConsumed}
             localBuffer={localBuffer}
+            onShare={onShareCurrentPath}
+            onRun={runApp}
           />
         </div>
       );

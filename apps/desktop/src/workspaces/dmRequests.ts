@@ -1,5 +1,6 @@
 import type { SyncRelayConnection } from "@dohc/workspace-contracts/relay";
 import { resolveDmKinds, type DmPeekResult } from "./dmChats";
+import { createActorIssuer } from "@dohc/workspace-contracts/actor-identity";
 import type { JoinedSharedChannel } from "./registryStore";
 import type { SharedChannelInfo } from "./sharedChannelInfo";
 import { mergeJoinedChannel } from "./sharedChannels";
@@ -316,6 +317,7 @@ export async function reserveAndPullSharedChannel(input: {
   rootPath: string;
   recipientUserId: string;
   relayUrl: string;
+  serverUrl: string;
   // Stores `update` applied to the channels as they stand when written.
   updateSharedChannels: (
     workspaceId: string,
@@ -347,12 +349,19 @@ export async function reserveAndPullSharedChannel(input: {
     relay: input.relay,
     shareId: input.shareId,
   });
+  let serverUrl: string | undefined;
+  try {
+    serverUrl = createActorIssuer(input.serverUrl);
+  } catch {
+    // Invalid admission metadata leaves the issuer unknown.
+  }
   const joined: JoinedSharedChannel = {
     shareId: info.shareId,
     channelWireId: info.channelWireId,
     access: info.access,
     granterEmail: info.granterEmail,
     relayUrl: input.relayUrl,
+    ...(serverUrl !== undefined ? { serverUrl } : {}),
     recipientUserId: input.recipientUserId,
   };
 

@@ -6,6 +6,9 @@ use dohc_engine_sync::{ReplicationEnvelope, journal_moment_append_in_tx, read_pu
 use dohc_engine_testkit::{ScratchDir, engine_db_path};
 use std::collections::{BTreeMap, BTreeSet};
 
+#[path = "relay_cache_tests.rs"]
+mod cache_tests;
+
 const WORKSPACE: &str = "ws";
 const ORIGIN: &str = "local";
 const PREFIX_OPS: usize = dohc_engine_sync::MAX_PUSH_OPS_PER_BATCH;

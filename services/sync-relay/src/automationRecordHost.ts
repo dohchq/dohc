@@ -27,6 +27,8 @@ export function createAutomationRecordHost(options: {
       const wait = () => new AutomationRunWait(mode === "device" ? "Waiting for the owner's device" : "Waiting for the shared file host");
       if (!host) throw wait();
       let native: NamedFrameNativeHost;
+      // A write restarts the document's idle period but is not a live connection.
+      // An idle unload that lands first makes the write fail visibly; no data is lost.
       try {native = await host.captureNative(binding, signal);}
       catch (error) {
         signal.throwIfAborted();
