@@ -139,6 +139,11 @@ export function CloudLogin(props: {
   const recheckRef = useRef(false);
   const serverUrlInput = useRef<HTMLInputElement | null>(null);
   const sessionRef = useRequestSequence();
+  const statusReads = useRequestSequence();
+  // Set while a deletion review is open. The review answers a session change
+  // itself: it closes, or reports the deletion it already sent. The panel
+  // reads the session once the review ends.
+  const openReview = useRef<{ sessionChanged: boolean } | null>(null);
   // Used only when nothing above this panel owns connection notices, so a
   // panel rendered on its own still reaches the same toast and Notices row.
   const ownNotices = useConnectionNotices();
@@ -184,6 +189,14 @@ export function CloudLogin(props: {
     };
   }
 
+  // Every status read in the panel takes the next turn, so only the newest
+  // answer applies: a slow read from before a session change never repaints
+  // after it.
+  function nextStatusRead(session: number): () => boolean {
+    const read = statusReads.next();
+    return () => sessionRef.isCurrent(session) && statusReads.isCurrent(read);
+  }
+
   // Main owns the truth about the session. The address and relay only move
   // when main reports them, so a status without them leaves what the user
   // typed in place to retry with.
@@ -216,20 +229,22 @@ export function CloudLogin(props: {
     setPassphrase("");
     setAddressProblem(null);
     setDisconnectBusy(false);
+    openReview.current = null;
     setDeleteReview(null);
     setServerUrl(props.initialServerUrl ?? "");
     setRelayUrl("");
     setServerName("");
     setNetworkAccess(null);
+    const current = nextStatusRead(session);
     void bridge()
       .cloudStatus(statusQuery())
       .then((status) => {
-        if (!sessionRef.isCurrent(session)) return;
+        if (!current()) return;
         applyStatus(status);
         if (announceSession && status.connected) props.onConnected?.();
       })
       .catch((cause: unknown) => {
-        if (!sessionRef.isCurrent(session)) return;
+        if (!current()) return;
         // Nothing on screen can recover this one, so the notice carries the
         // only way back: run the check again.
         setPhase({ kind: "unknown" });
@@ -254,13 +269,19 @@ export function CloudLogin(props: {
   // running alone: its poll reads the session when it finishes.
   const phaseRef = useRef(phase);
   phaseRef.current = phase;
-  const refreshRequests = useRequestSequence();
   useEffect(() => bridge().onCloudSessionChanged(({ phase: transition }) => {
     const signingIn = phaseRef.current.kind === "connecting" || phaseRef.current.kind === "code";
     if (transition !== "ready" || signingIn) return;
+    if (openReview.current) {
+      openReview.current.sessionChanged = true;
+      return;
+    }
+    refreshStatus();
+  }), [props.workspaceId]);
+
+  function refreshStatus() {
     const session = sessionRef.current();
-    const refresh = refreshRequests.next();
-    const current = () => sessionRef.isCurrent(session) && refreshRequests.isCurrent(refresh);
+    const current = nextStatusRead(session);
     void bridge()
       .cloudStatus(statusQuery())
       .then((status) => {
@@ -276,7 +297,7 @@ export function CloudLogin(props: {
           retry: retryFor(session, recheckStatus),
         });
       });
-  }), [props.workspaceId]);
+  }
 
   async function enableSync() {
     if (!props.workspaceId || syncBusy) return;
@@ -347,10 +368,11 @@ export function CloudLogin(props: {
           if (!sessionRef.isCurrent(session)) return;
           if (result.status === "pending") return pollUntilDone(session, origin);
           if (result.status === "complete") {
+            const current = nextStatusRead(session);
             void bridge()
               .cloudStatus(statusQuery())
               .then((status) => {
-                if (!sessionRef.isCurrent(session)) return;
+                if (!current()) return;
                 // Main owns the session, and this answer is newer than the
                 // poll. A browser approval that did not leave a session on
                 // this machine has to read as disconnected.
@@ -358,7 +380,7 @@ export function CloudLogin(props: {
                 if (status.connected) props.onConnected?.();
               })
               .catch((cause: unknown) => {
-                if (!sessionRef.isCurrent(session)) return;
+                if (!current()) return;
                 // The approval happened, but nothing here can say what the
                 // session is now. Do not announce a connection main has not
                 // confirmed; the notice carries the way to ask again.
@@ -489,14 +511,15 @@ export function CloudLogin(props: {
         serverUrl: null,
         retry: retryFor(session, () => void disconnect()),
       });
+      const current = nextStatusRead(session);
       try {
         const status = await bridge().cloudStatus(statusQuery());
-        if (sessionRef.isCurrent(session)) applyStatus(status);
+        if (current()) applyStatus(status);
       } catch {
         // The disconnect failure is already reported. A second notice for the
         // recheck would say the same thing twice, so the panel just stops
         // claiming to know.
-        if (sessionRef.isCurrent(session)) setPhase({ kind: "unknown" });
+        if (current()) setPhase({ kind: "unknown" });
       }
     } finally {
       if (sessionRef.isCurrent(session)) setDisconnectBusy(false);
@@ -513,8 +536,20 @@ export function CloudLogin(props: {
     setStatusAttempt((attempt) => attempt + 1);
   }
 
+  function startReview() {
+    openReview.current ??= { sessionChanged: false };
+    setDeleteReview((review) => (review ?? 0) + 1);
+  }
+
+  function endReview() {
+    const ended = openReview.current;
+    openReview.current = null;
+    setDeleteReview(null);
+    if (ended?.sessionChanged) refreshStatus();
+  }
+
   function reviewDeletionAgain(session: number): () => boolean {
-    return retryFor(session, () => setDeleteReview((review) => (review ?? 0) + 1));
+    return retryFor(session, startReview);
   }
 
   const panel = (
@@ -850,7 +885,7 @@ export function CloudLogin(props: {
               type="button"
               data-testid="cloud-delete-account"
               disabled={disconnectBusy}
-              onClick={() => setDeleteReview((review) => (review ?? 0) + 1)}
+              onClick={startReview}
               className="mt-4 flex items-center gap-1.5 rounded-lg border border-line bg-transparent px-3 py-1.5 text-xs text-danger transition-colors hover:bg-hover disabled:opacity-50"
             >
               <Trash2 size={12} aria-hidden />
@@ -862,12 +897,11 @@ export function CloudLogin(props: {
               key={deleteReview}
               email={phase.email}
               server={connectedServer}
-              onClose={() => setDeleteReview(null)}
+              onClose={endReview}
               onDeleted={accountDeleted}
               onError={(message, cause) => {
-                const session = sessionRef.current();
-                setDeleteReview(null);
-                reportConnectionError({ message, cause, serverUrl: null, retry: reviewDeletionAgain(session) });
+                reportConnectionError({ message, cause, serverUrl: null, retry: reviewDeletionAgain(sessionRef.current()) });
+                endReview();
               }}
             />
           ) : null}

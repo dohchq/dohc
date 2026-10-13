@@ -213,7 +213,9 @@ export function createCloudCredentialStore(options: {
     },
 
     // Accounts deleted from this computer. A server never reuses a user ID,
-    // so the list only grows, and a sign-in to any of them is refused.
+    // so the list only grows, and a sign-in to any of them is refused. A
+    // missing or unreadable file reads as empty: the server still refuses a
+    // deleted account.
     async loadDeletedAccounts(): Promise<DeletedAccount[]> {
       let parsed: unknown;
       try {

@@ -225,6 +225,8 @@ export function createCloudLogin(options: CloudLoginOptions): CloudLogin {
   }
   // Loaded once; invalidateAccount keeps it current.
   let deletedAccounts: Promise<DeletedAccount[]> | null = null;
+  // False while the list holds an account its file does not.
+  let deletedAccountsSaved = true;
   function knownDeletedAccounts(): Promise<DeletedAccount[]> {
     deletedAccounts ??= options.store.loadDeletedAccounts();
     return deletedAccounts;
@@ -236,13 +238,17 @@ export function createCloudLogin(options: CloudLoginOptions): CloudLogin {
     return (await knownDeletedAccounts()).some((deleted) => sameAccount(deleted, account));
   }
   // Refuses the account in memory first, so this process refuses it even
-  // when the record cannot be written.
+  // when the record cannot be written. A later call writes it again.
   async function recordDeletedAccount(account: DeletedAccount): Promise<void> {
-    const known = await knownDeletedAccounts();
-    if (known.some((deleted) => sameAccount(deleted, account))) return;
-    const next = [...known, { serverUrl: account.serverUrl, userId: account.userId }];
-    deletedAccounts = Promise.resolve(next);
-    await options.store.saveDeletedAccounts(next);
+    let known = await knownDeletedAccounts();
+    if (!known.some((deleted) => sameAccount(deleted, account))) {
+      known = [...known, { serverUrl: account.serverUrl, userId: account.userId }];
+      deletedAccounts = Promise.resolve(known);
+      deletedAccountsSaved = false;
+    }
+    if (deletedAccountsSaved) return;
+    await options.store.saveDeletedAccounts(known);
+    deletedAccountsSaved = true;
   }
   // Dead by the in-memory tombstone, the persisted marker, or a deleted
   // account — the marker is what survives a restart while the store still

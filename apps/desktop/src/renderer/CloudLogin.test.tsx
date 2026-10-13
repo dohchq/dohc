@@ -827,6 +827,23 @@ describe("CloudLogin", () => {
     expect(bridgeMock.cloudStatus).toHaveBeenLastCalledWith({ workspaceId: "ws-1" });
   });
 
+  it("keeps the newest status when an older read answers after it", async () => {
+    const older = deferred<CloudStatusResult>();
+    bridgeMock.cloudStatus
+      .mockImplementationOnce(() => older.promise)
+      .mockResolvedValueOnce({ connected: false, workspaceSynced: false });
+    render(<CloudLogin workspaceId="ws-1" />);
+
+    changeSession(null);
+    expect(await screen.findByTestId("cloud-server-url")).toBeTruthy();
+
+    await act(async () => {
+      older.resolve({ connected: true, email: "ice@dohc.dev", serverUrl: "https://dohc.example.test", workspaceSynced: false });
+    });
+    expect(screen.getByTestId("cloud-server-url")).toBeTruthy();
+    expect(screen.queryByTestId("cloud-connected")).toBeNull();
+  });
+
   it("finishes its own sign-in when another window changes the session", async () => {
     vi.useFakeTimers();
     const onConnected = vi.fn();

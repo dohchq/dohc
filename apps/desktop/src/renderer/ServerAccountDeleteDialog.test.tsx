@@ -315,6 +315,42 @@ describe("CloudLogin account deletion", () => {
     expect((screen.getByTestId("server-account-delete-password") as HTMLInputElement).value).toBe("");
   });
 
+  // Main announces the deletion's own disconnect before the delete answers.
+  it.each([
+    [true, `Deleted ice@dohc.dev on ${server}. Workspaces on this computer stay.`],
+    [false, `${server} blocked ice@dohc.dev and will finish deleting its data. Workspaces on this computer stay.`],
+  ])("reports a pending delete whose disconnect arrives first (finished: %s)", async (finished, notice) => {
+    const slow = deferred<{ ok: true; finished: boolean; email: string; server: string }>();
+    bridgeMock.deleteServerAccount.mockReturnValue(slow.promise);
+    bridgeMock.cloudStatus.mockResolvedValueOnce(connected).mockResolvedValue({ connected: false, workspaceSynced: false });
+    await openAndDelete();
+    await waitFor(() => expect(bridgeMock.deleteServerAccount).toHaveBeenCalledOnce());
+
+    changeSession(null);
+    await act(async () => {});
+    expect(screen.getByTestId("server-account-delete")).toBeTruthy();
+    expect(bridgeMock.cloudStatus).toHaveBeenCalledOnce();
+
+    await act(async () => { slow.resolve({ ok: true, finished, email: "ice@dohc.dev", server }); });
+    expect(await noticesText()).toContain(notice);
+    expect(await screen.findByTestId("cloud-server-url")).toBeTruthy();
+    expect(bridgeMock.cloudStatus).toHaveBeenCalledTimes(2);
+  });
+
+  it("reads the session after a failed delete whose disconnect arrived first", async () => {
+    const slow = deferred<never>();
+    bridgeMock.deleteServerAccount.mockReturnValue(slow.promise);
+    bridgeMock.cloudStatus.mockResolvedValueOnce(connected).mockResolvedValue({ connected: false, workspaceSynced: false });
+    await openAndDelete();
+    await waitFor(() => expect(bridgeMock.deleteServerAccount).toHaveBeenCalledOnce());
+
+    changeSession(null);
+    await act(async () => { slow.reject(new Error("dohc could not reach this server.")); });
+    expect((await screen.findByTestId("workspace-shell-error")).textContent).toContain("dohc could not reach this server.");
+    expect(await screen.findByTestId("cloud-server-url")).toBeTruthy();
+    expect(bridgeMock.cloudStatus).toHaveBeenCalledTimes(2);
+  });
+
   it("closes an open review when another window changes the session", async () => {
     const slow = deferred<ServerAccountDeletionPreview>();
     bridgeMock.previewServerAccountDeletion.mockReturnValueOnce(slow.promise);

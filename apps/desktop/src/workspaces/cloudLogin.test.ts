@@ -1201,6 +1201,25 @@ describe("invalidateAccount", () => {
     expect(store.saved).toBeNull();
   });
 
+  it("writes the record again on the next deletion of the same account, so a restart refuses it", async () => {
+    const store = memoryStore();
+    const save = store.saveDeletedAccounts;
+    store.saveDeletedAccounts = async () => {
+      throw new Error("disk full");
+    };
+    const login = createCloudLogin({ store, fetch: fakeFetch({}).impl });
+    await expect(login.invalidateAccount(ACCOUNT_A)).rejects.toThrow("disk full");
+    expect(store.deletedAccounts).toEqual([]);
+
+    store.saveDeletedAccounts = save;
+    await login.invalidateAccount(ACCOUNT_A);
+    expect(store.deletedAccounts).toEqual([ACCOUNT_A]);
+
+    store.saved = SESSION_A;
+    const restarted = createCloudLogin({ store, fetch: fakeFetch({}).impl });
+    await expect(restarted.status()).resolves.toEqual({ connected: false });
+  });
+
   it("tombstones the account's current token when the clear fails", async () => {
     const store = memoryStore();
     store.saved = { ...SESSION_A, token: "token-a2" };
