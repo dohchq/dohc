@@ -103,6 +103,18 @@ describe("usage record in Privacy", () => {
     expect((await screen.findByTestId("usage-record-empty")).textContent).toContain("Turn the record on");
   });
 
+  it("offers no Clear and claims no saved counts while Off with nothing saved", async () => {
+    bridge.readUsageRecord.mockResolvedValueOnce({ ...EMPTY, enabled: false });
+    render(<UsageRecordSettings />);
+    expect((await screen.findByTestId("usage-record-empty")).textContent).toBe(
+      "No counts saved.Turn the record on to count what you do in dohc.");
+    expect(card().dataset.state).toBe("off");
+    expect(screen.queryByTestId("usage-record-clear")).toBeNull();
+    expect(screen.queryByTestId("usage-record-off")).toBeNull();
+    expect(card().textContent).not.toContain("keeps the saved counts");
+    expect(toggle().getAttribute("aria-checked")).toBe("false");
+  });
+
   it("keeps saved counts while Off, says so with Clear beside the switch, and turns On again", async () => {
     bridge.readUsageRecord.mockResolvedValueOnce({ ...RECORD, enabled: false });
     render(<UsageRecordSettings />);

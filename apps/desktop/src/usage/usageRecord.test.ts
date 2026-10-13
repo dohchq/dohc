@@ -27,8 +27,12 @@ function setup(options: { readError?: NodeJS.ErrnoException } = {}) {
     }),
     readdir: vi.fn(async (directory: string) => [...disk.keys()].filter(file => dirname(file) === directory).map(file => basename(file))),
     mkdir: vi.fn(async () => {}),
+    copyFile: vi.fn(async (from: string, to: string) => { disk.set(to, disk.get(from)!); }),
     writeFile: vi.fn(async (path: string, data: string) => { disk.set(path, data); }),
-    rename: vi.fn(async (from: string, to: string) => { disk.set(to, disk.get(from)!); disk.delete(from); }),
+    rename: vi.fn(async (from: string, to: string) => {
+      if (!disk.has(from)) throw Object.assign(new Error("missing"), { code: "ENOENT" });
+      disk.set(to, disk.get(from)!); disk.delete(from);
+    }),
     rm: vi.fn(async (path: string) => { disk.delete(path); }),
   } satisfies UsageFileSystem;
   const store = createUsageStore({ stateDir: () => "state", appVersion: "0.1.0", coverage: DESKTOP_USAGE_COVERAGE, io });

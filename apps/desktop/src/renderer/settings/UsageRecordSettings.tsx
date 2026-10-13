@@ -160,7 +160,9 @@ export function UsageRecordCard(props: {
   const titleId = useId();
   const readable = view.status === "readable" ? view : null;
   const used = readable ? readable.rows.some((row) => total(row) > 0) : false;
-  const clear = (
+  // Off with nothing saved has nothing to keep or clear; the empty state says so.
+  const keptOff = readable && !readable.enabled && used;
+  const clear = used && (
     <SecondaryButton size="row" data-testid="usage-record-clear" disabled={props.busy} aria-disabled={props.busy}
       onClick={props.onClear}>
       Clear
@@ -176,7 +178,7 @@ export function UsageRecordCard(props: {
           <span className="font-mono text-[11px] text-subtle">since {dayWords(readable.since, props.today)}</span>
         ) : null}
         <span className="ml-auto flex items-center gap-2">
-          {readable && !readable.enabled ? clear : null}
+          {keptOff ? clear : null}
           {readable ? (
             <SwitchControl label={SWITCH_LABEL} checked={readable.enabled} disabled={props.busy} onChange={props.onSwitch} />
           ) : (
@@ -184,7 +186,7 @@ export function UsageRecordCard(props: {
           )}
         </span>
       </header>
-      {readable && !readable.enabled ? (
+      {keptOff ? (
         <p data-testid="usage-record-off" className="m-0 border-b border-line bg-panel-2 px-4 py-2 text-[12px] text-muted">
           Off. dohc keeps the saved counts and adds none. Clear removes them.
         </p>

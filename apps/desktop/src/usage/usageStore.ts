@@ -1,5 +1,5 @@
 import * as fs from "node:fs/promises";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import {
   UsageAppVersion, UsageInvocation, UsageVersionCoverage, decodeUsageSnapshot,
   USAGE_MAX_COUNT, USAGE_RETENTION_DAYS, localUsageDay, queryUsage, usageRowKey,
@@ -11,11 +11,15 @@ export const USAGE_WRITE_INTERVAL_MS = 30_000;
 export const USAGE_PENDING_LIMIT = 256;
 export const USAGE_SNAPSHOT_NAME = "dohc-usage.json";
 // A record set aside keeps its bytes under the next unused number.
-const ASIDE_NAME = /^dohc-usage\.set-aside-(\d+)\.json$/;
+const ASIDE_NAME = /^dohc-usage\.set-aside-([1-9]\d*)\.json$/;
 export const usageAsideName = (number: number) => `dohc-usage.set-aside-${number}.json`;
+// The record that replaces the active one waits under this suffix until the
+// active one has moved aside.
+const INCOMING = ".incoming";
 export interface UsageFileSystem {
   readFile(path: string, encoding: "utf8"): Promise<string>;
   readdir(path: string): Promise<string[]>;
+  copyFile(from: string, to: string): Promise<unknown>;
   mkdir(path: string, options: { recursive: true }): Promise<unknown>;
   writeFile(path: string, data: string, options: { mode: number }): Promise<unknown>;
   rename(from: string, to: string): Promise<unknown>;
@@ -43,10 +47,9 @@ export function createUsageStore(deps: {
   const pending: UsageCount[] = [];
   let pendingOverflow = false;
   let enabled = true;
-  // A record started in place of one set aside starts Off, because dohc
-  // could not read the person's choice.
-  let startEnabled = true;
   let loaded = false;
+  // The file's text as dohc last read or wrote it.
+  let lastBytes: string | undefined;
   let admissionReady = false;
   let unreadable: { error: unknown } | undefined;
   let activeDay: string | undefined;
@@ -174,9 +177,18 @@ export function createUsageStore(deps: {
           pause(error);
           return;
         }
+        // A swap that stopped after moving the record aside left its
+        // replacement beside it. Finish the swap.
+        try {
+          await io.rename(path + INCOMING, path);
+          raw = await io.readFile(path, "utf8");
+        } catch (finish) {
+          if (errorCode(finish) !== "ENOENT") { pause(finish); return; }
+        }
       }
+      lastBytes = raw;
       unreadable = undefined;
-      enabled = startEnabled;
+      enabled = true;
       let restored: UsageSnapshot | undefined;
       if (raw !== undefined) {
         try { restored = decodeUsageSnapshot(JSON.parse(raw)); }
@@ -204,7 +216,7 @@ export function createUsageStore(deps: {
       }
       loaded = true;
       // Invalidate the clean marker before admitting counts, even on an idle launch.
-      await write().catch(() => {});
+      await write(false, true).catch(() => {});
       scheduleDay();
     })();
     return loading;
@@ -217,7 +229,8 @@ export function createUsageStore(deps: {
         pairs: version.pairs.map(pair => ({ capabilityId: pair.capabilityId, door: pair.door, status: pair.status })) })),
     };
   }
-  async function write(cleanExit = false) {
+  // `justRead` skips the check for a file load read a moment ago.
+  async function write(cleanExit = false, justRead = false) {
     if (!loaded) return;
     refreshDay();
     if (cleanExit) applyPending();
@@ -227,11 +240,19 @@ export function createUsageStore(deps: {
     const writingRevision = revision;
     lastWriteAt = now().getTime();
     try {
+      if (!justRead && await onDisk() !== lastBytes) {
+        // Someone replaced or removed the file. Count nothing until it is read again.
+        loaded = false;
+        const error = new Error("The usage record changed outside dohc.");
+        pause(error);
+        throw error;
+      }
       // Maps contain only validated aggregates; avoid re-validating the whole store.
       const data = JSON.stringify(snapshot(cleanExit));
       await io.mkdir(directory, { recursive: true });
       await io.writeFile(path + ".tmp", data, { mode: 0o600 });
       await io.rename(path + ".tmp", path);
+      lastBytes = data;
       savedRevision = writingRevision;
       committedCleanExit = cleanExit;
       admissionReady = !cleanExit;
@@ -245,10 +266,20 @@ export function createUsageStore(deps: {
   function requireReadable() {
     if (unreadable) throw unreadable.error;
   }
-  // A failed load stays failed until someone asks again.
-  function reload() {
-    if (unreadable) loading = undefined;
-    return load();
+  async function onDisk(): Promise<string | undefined> {
+    try { return await io.readFile(path, "utf8"); }
+    catch (error) { if (errorCode(error) === "ENOENT") return undefined; throw error; }
+  }
+  // Reads the file again unless it still holds what dohc last read or wrote,
+  // so a person's repair, replacement or removal shows.
+  async function refresh() {
+    if (!loaded && !unreadable) return load();
+    if (loaded) {
+      try { if (await onDisk() === lastBytes) return; }
+      catch { /* The load below records why. */ }
+    }
+    forget();
+    await load();
   }
   // No count lands while a control runs.
   function exclusive(task: () => Promise<void>): Promise<void> {
@@ -257,14 +288,47 @@ export function createUsageStore(deps: {
     return enqueue(task).finally(() => { controls--; });
   }
   function control(change: () => Promise<void>): Promise<void> {
-    return exclusive(async () => { await reload(); requireReadable(); refreshDay(); await change(); });
+    return exclusive(async () => { await refresh(); requireReadable(); refreshDay(); await change(); });
   }
   async function asideNumbers(): Promise<number[]> {
     let names: string[];
     try { names = await io.readdir(directory); }
     catch (error) { if (errorCode(error) === "ENOENT") return []; throw error; }
-    return names.flatMap(name => { const match = ASIDE_NAME.exec(name); return match ? [Number(match[1])] : []; })
-      .sort((a, b) => a - b);
+    // A number too large to add one to cannot name the next file.
+    return names.flatMap(name => {
+      const number = Number(ASIDE_NAME.exec(name)?.[1]);
+      return Number.isSafeInteger(number) && number < Number.MAX_SAFE_INTEGER ? [number] : [];
+    }).sort((a, b) => a - b);
+  }
+  // Rename replaces an existing target, so look first and refuse.
+  async function moveTo(from: string, to: string) {
+    const name = basename(to).toLowerCase();
+    if ((await io.readdir(directory)).some(other => other.toLowerCase() === name)) {
+      throw Object.assign(new Error(`dohc did not replace ${basename(to)}, because it already exists.`), { code: "EEXIST" });
+    }
+    await io.rename(from, to);
+  }
+  // Puts a record in place of the active one, which moves aside. The new
+  // record is written in full before anything moves, and a launch finishes
+  // a swap that stopped between the moves.
+  async function swapIn(prepare: (incoming: string) => Promise<unknown>): Promise<void> {
+    const incoming = path + INCOMING;
+    await prepare(incoming);
+    const aside = join(directory, usageAsideName(((await asideNumbers()).at(-1) ?? 0) + 1));
+    await moveTo(path, aside);
+    try {
+      await moveTo(incoming, path);
+    } catch (error) {
+      try {
+        await io.rename(aside, path);
+      } catch (rollback) {
+        // No record has the record's name. Count nothing until one reads again.
+        loaded = false;
+        pause(rollback);
+        throw new AggregateError([error, rollback], "dohc could not put either usage record back in place.");
+      }
+      throw error;
+    }
   }
   // Drops the loaded record so the next load reads the file again.
   function forget() {
@@ -274,7 +338,7 @@ export function createUsageStore(deps: {
     days.clear(); counts.clear(); coverage.clear();
     pending.length = 0; pendingOverflow = false;
     loaded = false; admissionReady = false; unreadable = undefined; loading = undefined; activeDay = undefined;
-    revision = 0; savedRevision = 0; committedCleanExit = true;
+    revision = 0; savedRevision = 0; committedCleanExit = true; lastBytes = undefined;
   }
   return {
     load: () => closing ? Promise.reject(new Error("Usage store is closed")) : load(),
@@ -298,7 +362,7 @@ export function createUsageStore(deps: {
     },
     async read(): Promise<UsageSnapshot> {
       if (closing) throw new Error("Usage store is closed");
-      await (unreadable ? enqueue(reload) : load()); requireReadable(); refreshDay();
+      await enqueue(refresh); requireReadable(); refreshDay();
       return snapshot();
     },
     // The newest record set aside in the record's folder, by file name.
@@ -308,41 +372,35 @@ export function createUsageStore(deps: {
       const newest = (await asideNumbers()).at(-1);
       return newest === undefined ? null : usageAsideName(newest);
     },
-    // Sets a record dohc cannot decode aside, never over another file, and
-    // starts an empty record that is Off until the person turns it on.
+    // Sets a record dohc cannot decode aside and starts an empty one. The new
+    // record is Off on disk, because dohc could not read the person's choice.
     startNewRecord(): Promise<void> {
       return exclusive(async () => {
-        await reload();
+        await refresh();
         if (!unreadable) return;
         if (errorCode(unreadable.error) !== INVALID_USAGE_RECORD) throw unreadable.error;
-        // Rename replaces an existing target, so take a number after every one set aside.
-        await io.rename(path, join(directory, usageAsideName(((await asideNumbers()).at(-1) ?? 0) + 1)));
+        const empty: UsageSnapshot = { version: 1, enabled: false, cleanExit: true, days: [], counts: [], coverage: [] };
+        await swapIn(incoming => io.writeFile(incoming, JSON.stringify(empty), { mode: 0o600 }));
         forget();
-        startEnabled = false;
         await load();
       });
     },
-    // Swaps the record with the newest one set aside, keeping the newer
-    // record aside under the next unused number.
+    // Swaps the record with the newest one set aside. The active record
+    // moves aside under the next unused number.
     restoreSetAside(): Promise<void> {
       return exclusive(async () => {
-        await reload();
+        await refresh();
         if (unreadable && errorCode(unreadable.error) !== INVALID_USAGE_RECORD) throw unreadable.error;
         const newest = (await asideNumbers()).at(-1);
         if (newest === undefined) throw new Error("dohc has no usage record set aside.");
-        // The newer record leaves with its last counts.
+        // The active record leaves with its last counts.
         await write();
-        const aside = join(directory, usageAsideName(newest + 1));
-        await io.rename(path, aside);
-        try {
-          await io.rename(join(directory, usageAsideName(newest)), path);
-        } catch (error) {
-          // Put the newer record back, so each file keeps its name.
-          await io.rename(aside, path).catch(() => {});
-          throw error;
-        }
+        const source = join(directory, usageAsideName(newest));
+        await swapIn(incoming => io.copyFile(source, incoming));
         forget();
         await load();
+        // Its copy is the record now. A copy left behind loses nothing.
+        await io.rm(source, { force: true }).catch(() => {});
       });
     },
     setEnabled(value: boolean): Promise<void> {
