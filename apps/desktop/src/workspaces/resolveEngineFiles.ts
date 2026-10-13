@@ -19,7 +19,7 @@ export function workspaceFileRef(workspaceId: string, objectId: string, path?: s
 
 export type EngineFileReferenceTarget = { path: string } | WorkspaceFileRef;
 export type WorkspaceFileResolution = Exclude<FileResolution, { status: "found" }> |
-  (Extract<FileResolution, { status: "found" }> & { ref: WorkspaceFileRef | null });
+  (Extract<FileResolution, { status: "found" }> & { ref: WorkspaceFileRef });
 
 export type EngineFileResolver<Workspace> = (
   workspace: Workspace,

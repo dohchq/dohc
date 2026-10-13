@@ -155,9 +155,9 @@ export function registerWorkspaceGraphIpcHandlers<
           objectIdByPath: new Map<string, string>(),
         };
         for (const file of resolvedFiles) {
-          if (file.status !== "found" || !file.ref || !basePaths.has(file.path)) continue;
-          activeFiles.pathByObjectId.set(file.ref.target.objectId, file.path);
-          activeFiles.objectIdByPath.set(file.path, file.ref.target.objectId);
+          if (file.status !== "found" || !basePaths.has(file.path)) continue;
+          activeFiles.pathByObjectId.set(file.objectId, file.path);
+          activeFiles.objectIdByPath.set(file.path, file.objectId);
         }
         const authorizedMentions = (
           await Promise.all(

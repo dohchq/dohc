@@ -12,4 +12,3 @@ export type {
 } from "./engine";
 export * from "./kinds";
 export * from "./saveState";
-export * from "./workspaceRef";

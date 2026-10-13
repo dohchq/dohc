@@ -1,4 +1,4 @@
-import { workspaceFileRef, type EngineFileResolver } from "../workspaces/resolveEngineFiles";
+import { workspaceFileRef, type EngineFileResolver, type WorkspaceFileResolution } from "../workspaces/resolveEngineFiles";
 import { nameSlug } from "@dohc/workspace-contracts/names";
 import {
   ListFileChatsPayload,
@@ -643,14 +643,12 @@ export function registerChatsIpcHandlers<
         });
         operation.assertCurrent();
         const fileThreads = threads.filter((thread) => thread.linkedFile);
-        let pathByObjectId = new Map<string, string>();
-        let refByObjectId = new Map<string, import("@dohc/workspace-contracts/workspace-ref").WorkspaceFileRef>();
+        let fileByObjectId = new Map<string, Extract<WorkspaceFileResolution, { status: "found" }>>();
         if (fileThreads.length > 0) {
           try {
             const ids = [...new Set(fileThreads.map(thread => thread.linkedFile!.objectId))];
             const resolved = await resolveEngineFiles(workspace, ids.map(objectId => workspaceFileRef(workspace.workspaceId, objectId)));
-            pathByObjectId = new Map(resolved.flatMap(file => file.status === "found" ? [[file.objectId, file.path] as const] : []));
-            refByObjectId = new Map(resolved.flatMap(file => file.status === "found" && file.ref ? [[file.ref.target.objectId, file.ref] as const] : []));
+            fileByObjectId = new Map(resolved.flatMap(file => file.status === "found" ? [[file.objectId, file] as const] : []));
           } catch {
             // Path resolution is display-only; the hint fallback keeps the
             // listing honest enough.
@@ -667,10 +665,10 @@ export function registerChatsIpcHandlers<
           })),
           fileThreads: fileThreads.map((thread) => ({
             ...chatThreadForIpc(thread),
-            ref: refByObjectId.get(thread.linkedFile!.objectId) ?? null,
+            ref: fileByObjectId.get(thread.linkedFile!.objectId)?.ref ?? null,
             path:
               (thread.linkedFile
-                ? (pathByObjectId.get(thread.linkedFile.objectId) ??
+                ? (fileByObjectId.get(thread.linkedFile.objectId)?.path ??
                   thread.linkedFile.pathHint)
                 : undefined) ?? null,
           })),
