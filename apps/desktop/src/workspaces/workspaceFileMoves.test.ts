@@ -1231,6 +1231,7 @@ describe("WorkspaceRef move identity", () => {
       expect(await f.move("dir", "moved")).toMatchObject({ ok: false });
       await f.settle();
       const results = await f.resolve(refs);
+      expect(results[0]).toMatchObject({ status: "found", path: "dir/1.txt", objectId: refs[0]!.target.objectId });
       expect(results.every(file => file.status === "absent" || (file.status === "found" && file.path.startsWith("dir/")))).toBe(true);
       expect(await f.engine().fileObjectIdForPath("moved/1.txt")).toBeNull();
     } finally { await f.engine().stop(); }
