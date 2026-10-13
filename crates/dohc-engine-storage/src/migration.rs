@@ -3224,6 +3224,17 @@ CREATE TABLE hosted_documents (
     scope_generation INTEGER NOT NULL CHECK (scope_generation >= 0),
     PRIMARY KEY (workspace_id, object_id)
 ) STRICT;
+CREATE TABLE hosted_withheld_befores (
+    workspace_id TEXT NOT NULL REFERENCES hosted_replicas(workspace_id) ON DELETE CASCADE,
+    moment_id TEXT NOT NULL,
+    before_object_id TEXT NOT NULL,
+    before_path TEXT NOT NULL,
+    before_sha256 TEXT NOT NULL,
+    before_content_kind TEXT NOT NULL CHECK (before_content_kind IN ('text','binary')),
+    PRIMARY KEY (workspace_id, moment_id),
+    FOREIGN KEY (workspace_id, moment_id)
+      REFERENCES moments(workspace_id, moment_id) ON DELETE CASCADE
+) STRICT;
 ";
 
 const V2_OPEN_DOCUMENT_ARTIFACTS_DDL: &str = "\
@@ -3893,7 +3904,7 @@ mod tests {
             ),
             (
                 "v2-hosted-replica",
-                "e804ae6167aa2b169a600e156d43fb2c39362db82d3428b10eb2eebfb77a2b51",
+                "dbefd4305927b9c750e5b6ed4837a8bdf0790a25340d6ed6cff150165d348ab9",
             ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());
@@ -3956,6 +3967,9 @@ mod tests {
                 "UPDATE hosted_documents SET state='retired'",
                 "UPDATE hosted_replicas SET scope_token=''",
                 "UPDATE hosted_replicas SET last_outbound_seq=-2",
+                "INSERT INTO hosted_withheld_befores (workspace_id,moment_id,before_object_id,\
+                 before_path,before_sha256,before_content_kind) \
+                 VALUES ('hosted','no-moment','private','a.md','sha','text')",
             ] {
                 assert!(conn.execute(invalid, []).is_err(), "{invalid}");
             }

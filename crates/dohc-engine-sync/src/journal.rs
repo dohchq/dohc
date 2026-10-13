@@ -207,7 +207,7 @@ pub(crate) fn journal_local_payload_json_in_tx(
         .ok_or(SyncError::InvalidInput {
             reason: "no sync identity for a replicated journal append",
         })?;
-    let origin_seq = next_local_origin_seq(tx, workspace_id, &origin_id)?;
+    let origin_seq = next_local_origin_seq(tx, workspace_id, &origin_id, op_kind, payload_json)?;
     tx.execute(
         "INSERT INTO replication_log          (workspace_id, origin_id, origin_seq, op_kind, payload_json, recorded_at_ms, imported)          VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0)",
         params![workspace_id, origin_id, origin_seq, op_kind, payload_json, now_ms],
@@ -217,13 +217,18 @@ pub(crate) fn journal_local_payload_json_in_tx(
 }
 
 /// The sequence of this replica's next own op. A hosted replica counts in its
-/// row; any other replica continues its journal.
+/// row, and refuses an op it may not write; any other replica continues its
+/// journal.
 fn next_local_origin_seq(
     tx: &Transaction<'_>,
     workspace_id: &str,
     origin_id: &str,
+    op_kind: &str,
+    payload_json: &str,
 ) -> Result<i64, SyncError> {
-    if let Some(origin_seq) = crate::hosted::allocate_outbound_seq_in_tx(tx, workspace_id)? {
+    if let Some(origin_seq) =
+        crate::hosted::allocate_outbound_seq_in_tx(tx, workspace_id, op_kind, payload_json)?
+    {
         return Ok(origin_seq);
     }
     let previous: i64 = tx
@@ -324,7 +329,8 @@ pub fn journal_local_replication_op(
         if identity != (origin_id.to_owned(), replication_epoch.to_owned(), stream_identity.to_owned()) {
             return Err(SyncError::CoordinateDiverged);
         }
-        let origin_seq = next_local_origin_seq(tx, workspace_id, origin_id)?;
+        let origin_seq =
+            next_local_origin_seq(tx, workspace_id, origin_id, op_kind, &payload_json)?;
         tx.execute(
             "INSERT INTO replication_log \
              (workspace_id, origin_id, origin_seq, op_kind, payload_json, recorded_at_ms, imported) \

@@ -26,6 +26,8 @@ pub const SERVICE_HOST_ORIGIN_PREFIX: &str = "service-host:";
 /// child waits in deferred work until the relay serves what it needs.
 pub(crate) const CONFLICT_PARENT_WITHHELD: &str = "hosted-conflict-parent-withheld";
 
+const HOSTED_WRITES_ONLY_ITS_DOCUMENTS: &str = "a hosted replica writes only its hosted documents";
+
 pub(crate) fn is_hosted(conn: &Connection, workspace_id: &str) -> Result<bool, SyncError> {
     conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM hosted_replicas WHERE workspace_id=?1)",
@@ -38,9 +40,16 @@ pub(crate) fn is_hosted(conn: &Connection, workspace_id: &str) -> Result<bool, S
 /// The next sequence a hosted replica writes under its own origin, or `None`
 /// for any other replica. The count lives in the replica's row because the
 /// relay never forgets a coordinate, while this store's journal rows can go.
+///
+/// A hosted replica writes only what a session host does for a document it
+/// hosts: live `ydoc.update`, settlement `moment.append` and `live.audit.*`.
+/// The relay refuses anything else from a host, so it is refused here, before
+/// it commits a coordinate nothing could push.
 pub(crate) fn allocate_outbound_seq_in_tx(
     tx: &rusqlite::Transaction<'_>,
     workspace_id: &str,
+    op_kind: &str,
+    payload_json: &str,
 ) -> Result<Option<i64>, SyncError> {
     let last: Option<i64> = tx
         .query_row(
@@ -51,6 +60,25 @@ pub(crate) fn allocate_outbound_seq_in_tx(
         .optional()
         .map_err(SyncError::corrupt)?;
     let Some(last) = last else { return Ok(None) };
+    let payload = serde_json::from_str(payload_json).map_err(|_| SyncError::InvalidInput {
+        reason: "payload is not valid JSON",
+    })?;
+    let hosted = match document_named(op_kind, &payload) {
+        Some(object_id) => tx
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM hosted_documents \
+                 WHERE workspace_id=?1 AND object_id=?2)",
+                params![workspace_id, object_id],
+                |row| row.get(0),
+            )
+            .map_err(SyncError::corrupt)?,
+        None => false,
+    };
+    if !hosted {
+        return Err(SyncError::InvalidInput {
+            reason: HOSTED_WRITES_ONLY_ITS_DOCUMENTS,
+        });
+    }
     if !(-1..crate::MAX_WIRE_INTEGER).contains(&last) {
         return Err(SyncError::CoordinateDiverged);
     }
@@ -66,14 +94,115 @@ pub(crate) fn allocate_outbound_seq_in_tx(
 /// The hosted document an op names, read where each kind states it, as the
 /// relay's scoped feed reads it. `None` for an op that names no document.
 pub(crate) fn hosted_document(op: &ReplicationEnvelope) -> Option<&str> {
-    let payload = &op.payload;
-    match op.op_kind.as_str() {
+    document_named(&op.op_kind, &op.payload)
+}
+
+fn document_named<'a>(op_kind: &str, payload: &'a serde_json::Value) -> Option<&'a str> {
+    match op_kind {
         "moment.append" | "ydoc.update" | "live.audit.application" => &payload["objectId"],
         "live.audit.settlement" => &payload["record"]["binding"]["objectId"],
         "live.audit.base" => &payload["record"]["checkpoint"]["binding"]["objectId"],
         _ => return None,
     }
     .as_str()
+}
+
+/// The before side of a hosted moment that replaced an object the feed
+/// withholds, as the moment's row states it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct WithheldBefore {
+    pub(crate) object_id: String,
+    pub(crate) path: String,
+    pub(crate) sha256: String,
+    pub(crate) content_kind: crate::moment_apply::ContentKind,
+}
+
+/// The before side of `op` this replica can never hold, or `None`.
+///
+/// The feed serves a moment whose before side names another object with its
+/// after blob alone, and serves no row of an object outside the scope. So on
+/// a hosted replica, a `moment.append` that replaced an object outside the
+/// current scope replaced content this replica never sees: that object never
+/// existed here. Both facts come from the row and the stored scope.
+pub(crate) fn withheld_before(
+    conn: &Connection,
+    op: &ReplicationEnvelope,
+) -> Result<Option<WithheldBefore>, SyncError> {
+    let payload = &op.payload;
+    let field = |name: &str| payload.get(name).and_then(serde_json::Value::as_str);
+    let Some(before_object_id) = field("beforeObjectId") else {
+        return Ok(None);
+    };
+    if op.op_kind != "moment.append"
+        || field("beforePresent") != Some("present")
+        || field("objectId") == Some(before_object_id)
+    {
+        return Ok(None);
+    }
+    let in_scope: Option<bool> = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM hosted_documents d WHERE d.workspace_id=h.workspace_id \
+               AND d.object_id=?2 AND d.scope_generation=h.scope_generation) \
+             FROM hosted_replicas h WHERE h.workspace_id=?1",
+            params![op.workspace_id, before_object_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(SyncError::corrupt)?;
+    if in_scope != Some(false) {
+        return Ok(None);
+    }
+    let (Some(path), Some(sha256)) = (field("beforePath"), field("beforeBlobSha256")) else {
+        return Err(SyncError::InvalidInput {
+            reason: "moment.append before side is incomplete",
+        });
+    };
+    Ok(Some(WithheldBefore {
+        object_id: before_object_id.to_owned(),
+        path: path.to_owned(),
+        sha256: sha256.to_owned(),
+        content_kind: crate::moment_apply::ContentKind::from_wire(field("beforeContentKind")),
+    }))
+}
+
+/// `payload` as a hosted replica applies a moment whose before side it
+/// withholds: as if the path held nothing.
+pub(crate) fn forget_before(payload: &mut serde_json::Value) {
+    let Some(fields) = payload.as_object_mut() else {
+        return;
+    };
+    for (name, value) in fields.iter_mut() {
+        if name.starts_with("before") || name.starts_with("payloadBefore") {
+            *value = serde_json::Value::Null;
+        }
+    }
+    fields.insert("beforePresent".to_owned(), "null".into());
+}
+
+/// Record the withheld before side of a moment this transaction applied. A
+/// moment the apply only deferred has no row yet and records on its replay.
+pub(crate) fn record_withheld_before_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    workspace_id: &str,
+    moment_id: &str,
+    before: &WithheldBefore,
+) -> Result<(), SyncError> {
+    tx.execute(
+        "INSERT INTO hosted_withheld_befores \
+         (workspace_id,moment_id,before_object_id,before_path,before_sha256,before_content_kind) \
+         SELECT ?1,?2,?3,?4,?5,?6 \
+         WHERE EXISTS(SELECT 1 FROM moments WHERE workspace_id=?1 AND moment_id=?2)",
+        params![
+            workspace_id,
+            moment_id,
+            before.object_id,
+            before.path,
+            before.sha256,
+            before.content_kind.as_str()
+        ],
+    )
+    .map_err(SyncError::persist)?;
+    Ok(())
 }
 
 /// What a hosted replica knows of its scope and position.

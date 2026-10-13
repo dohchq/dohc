@@ -197,6 +197,7 @@ const REQUIRED_TABLES: &[&str] = &[
     "share_view_cursors",
     "hosted_replicas",
     "hosted_documents",
+    "hosted_withheld_befores",
     // #646 PR3a proposal scan position.
     "share_proposal_push_state",
     // Item 12: the direct lane's position and per-file decisions.

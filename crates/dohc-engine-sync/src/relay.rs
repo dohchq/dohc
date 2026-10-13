@@ -3309,7 +3309,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         }
 
         let mut pending = Vec::new();
-        for (sha256, kinds) in collect_blob_refs(ops)? {
+        for (sha256, kinds) in blob_refs_to_apply(store, ops)? {
             let mut missing = Vec::new();
             for kind in kinds {
                 if !local_blob_present(store, &sha256, kind)? {
@@ -3410,6 +3410,27 @@ fn relabel_ceiling(error: RelayError, constraint: &'static str, limit_bytes: usi
         },
         other => other,
     }
+}
+
+/// The blobs this replica needs to apply `ops`. A hosted replica never needs,
+/// and so never requests, a before side the feed withholds.
+pub(crate) fn blob_refs_to_apply(
+    store: &EngineStore,
+    ops: &[ReplicationEnvelope],
+) -> Result<BTreeMap<String, BTreeSet<BlobKind>>, RelayError> {
+    let mut forgotten: Option<Vec<ReplicationEnvelope>> = None;
+    for (index, op) in ops.iter().enumerate() {
+        if op.op_kind == "moment.append"
+            && store
+                .read_with(|conn| crate::hosted::withheld_before(conn, op))
+                .map_err(local)?
+                .is_some()
+        {
+            let forgotten = forgotten.get_or_insert_with(|| ops.to_vec());
+            crate::hosted::forget_before(&mut forgotten[index].payload);
+        }
+    }
+    collect_blob_refs(forgotten.as_deref().unwrap_or(ops))
 }
 
 pub(crate) fn collect_blob_refs(
@@ -4156,6 +4177,8 @@ fn list_workspace_origins(
     })
 }
 
+/// The highest sequence `origin_id` wrote here. A hosted replica's own origin
+/// reads its counter too, which outlives the journal rows it numbered.
 fn local_max_origin_seq(
     store: &EngineStore,
     workspace_id: &str,
@@ -4163,8 +4186,11 @@ fn local_max_origin_seq(
 ) -> Result<i64, SyncError> {
     store.read_with(|conn| {
         conn.query_row(
-            "SELECT COALESCE(MAX(origin_seq),-1) FROM replication_log \
-             WHERE workspace_id=?1 AND origin_id=?2",
+            "SELECT MAX(COALESCE((SELECT MAX(origin_seq) FROM replication_log \
+               WHERE workspace_id=?1 AND origin_id=?2),-1), \
+             COALESCE((SELECT h.last_outbound_seq FROM hosted_replicas h \
+               JOIN sync_identity i ON i.workspace_id=h.workspace_id \
+               WHERE h.workspace_id=?1 AND i.origin_id=?2),-1))",
             params![workspace_id, origin_id],
             |row| row.get(0),
         )

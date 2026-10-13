@@ -126,7 +126,7 @@ pub(crate) fn retain(
     }
     let blobs = ops
         .iter()
-        .map(|op| crate::relay::collect_blob_refs(std::slice::from_ref(*op)))
+        .map(|op| crate::relay::blob_refs_to_apply(store, std::slice::from_ref(*op)))
         .collect::<Result<Vec<_>, _>>()?;
     let outcome = store.write_with(faults, |tx| {
         let hosted = crate::hosted::is_hosted(tx, &ops[0].workspace_id)?;

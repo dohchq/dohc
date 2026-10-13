@@ -376,10 +376,7 @@ pub fn apply_moment_envelope_detailed(
     envelope.validate()?;
     let search_policy = search_policy_for_store(store);
     apply_envelope_with(store, envelope, faults, |tx, envelope| {
-        let mut payload: MomentAppendPayload = Deserialize::deserialize(&envelope.payload)
-            .map_err(|_| SyncError::InvalidInput {
-                reason: "moment.append payload is malformed",
-            })?;
+        let (mut payload, withheld) = applied_payload(tx, envelope)?;
         if matches!(
             envelope.settlement_admission,
             Some(crate::SettlementAdmission::Accepted { .. })
@@ -437,7 +434,7 @@ pub fn apply_moment_envelope_detailed(
             && !(payload.operation == "write"
                 && is_ydoc_settlement_moment_id(&payload.moment_id)
                 && is_bound_owner(tx, &key));
-        apply_moment_append(
+        let applied = apply_moment_append(
             tx,
             envelope,
             &payload,
@@ -448,8 +445,37 @@ pub fn apply_moment_envelope_detailed(
                 .then(|| leases.bound_claim(&key))
                 .flatten()
                 .as_deref(),
-        )
+        )?;
+        if let Some(before) = &withheld {
+            crate::hosted::record_withheld_before_in_tx(
+                tx,
+                &envelope.workspace_id,
+                &payload.moment_id,
+                before,
+            )?;
+        }
+        Ok(applied)
     })
+}
+
+/// The moment as this replica applies it, and the before side it withholds.
+/// The journal keeps the row as sent; only a hosted replica's history forgets
+/// an object the feed withholds.
+fn applied_payload(
+    tx: &Transaction<'_>,
+    envelope: &ReplicationEnvelope,
+) -> Result<(MomentAppendPayload, Option<crate::hosted::WithheldBefore>), SyncError> {
+    let withheld = crate::hosted::withheld_before(tx, envelope)?;
+    let forgotten = withheld.as_ref().map(|_| {
+        let mut payload = envelope.payload.clone();
+        crate::hosted::forget_before(&mut payload);
+        payload
+    });
+    let payload = Deserialize::deserialize(forgotten.as_ref().unwrap_or(&envelope.payload))
+        .map_err(|_| SyncError::InvalidInput {
+            reason: "moment.append payload is malformed",
+        })?;
+    Ok((payload, withheld))
 }
 
 pub(crate) fn redelivered_materialization_changes(
@@ -2179,10 +2205,7 @@ pub(crate) fn retain_refused_moment_blobs(
     tx: &Transaction<'_>,
     envelope: &ReplicationEnvelope,
 ) -> Result<(), SyncError> {
-    let payload: MomentAppendPayload =
-        Deserialize::deserialize(&envelope.payload).map_err(|_| SyncError::InvalidInput {
-            reason: "moment.append payload is malformed",
-        })?;
+    let (payload, _) = applied_payload(tx, envelope)?;
     for (role, digest, kind) in [
         (
             "payload-before",

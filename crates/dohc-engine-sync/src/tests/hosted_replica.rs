@@ -193,17 +193,41 @@ fn hosted_deferred_work_replays_by_coordinate_membership() {
     );
 }
 
+/// Make `object_id` a document of the replica's current scope.
+fn host_document(store: &mut EngineStore, object_id: &str) {
+    store
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT INTO hosted_documents (workspace_id,object_id,state,scope_generation) \
+                 SELECT workspace_id,?1,'ready',scope_generation FROM hosted_replicas \
+                 WHERE workspace_id='ws'",
+                [object_id],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .unwrap();
+}
+
+fn last_outbound_seq(store: &EngineStore) -> i64 {
+    count(
+        store,
+        "SELECT last_outbound_seq FROM hosted_replicas WHERE workspace_id='ws'",
+    )
+}
+
 #[test]
 fn hosted_outbound_sequences_survive_purged_journal_rows_and_reopen() {
     let (_scratch, path, mut store) = hosted_store();
+    host_document(&mut store, "doc-a");
     let journal = |store: &mut EngineStore| match journal_local_replication_op(
         store,
         "ws",
         HOST,
         "epoch-1",
         "stream-1",
-        "probe.local",
-        &json!({}),
+        "live.audit.application",
+        &json!({"objectId": "doc-a"}),
         1_000,
         &NoFaults,
     )
@@ -226,7 +250,13 @@ fn hosted_outbound_sequences_survive_purged_journal_rows_and_reopen() {
     written.push(journal(&mut store));
     let TxnOutcome::Committed(in_tx) = store
         .write_with(&NoFaults, |tx| {
-            journal_local_op_in_tx(tx, "ws", "probe.local", &json!({}), 2_000)
+            journal_local_op_in_tx(
+                tx,
+                "ws",
+                "live.audit.application",
+                &json!({"objectId": "doc-a"}),
+                2_000,
+            )
         })
         .unwrap()
     else {
@@ -234,6 +264,122 @@ fn hosted_outbound_sequences_survive_purged_journal_rows_and_reopen() {
     };
     written.push(in_tx);
     assert_eq!(written, [0, 1, 2, 3]);
+    assert_eq!(last_outbound_seq(&store), 3);
+}
+
+/// The slice-1 review's reproduction: chat on a hosted replica allocated from
+/// the journal's maximum while the sync journal allocated from the counter, so
+/// the next sync append collided with a chat coordinate.
+#[test]
+fn a_hosted_replica_writes_no_chat_and_its_journal_keeps_one_counter() {
+    let (_scratch, path, mut store) = hosted_store_with_main();
+    host_document(&mut store, "doc-a");
+    {
+        let mut chats = LinkedChatStore::new(&mut store);
+        for refused in [
+            chats.ensure_general_channel("ws", "general-local", 2_000, &NoFaults),
+            chats.ensure_agent_channel("ws", "agent-local", 2_000, &NoFaults),
+        ] {
+            assert!(matches!(
+                refused,
+                Err(dohc_engine_domain::DomainError::InvalidInput { .. })
+            ));
+        }
+    }
+    for table in ["replication_log", "chat_channels", "chat_channel_wire_ids"] {
+        assert_eq!(
+            count(&store, &format!("SELECT COUNT(*) FROM {table}")),
+            0,
+            "{table} stays empty"
+        );
+    }
+    assert_eq!(last_outbound_seq(&store), -1);
+
+    let append = |store: &mut EngineStore| {
+        store
+            .write_with(&NoFaults, |tx| {
+                journal_local_op_in_tx(
+                    tx,
+                    "ws",
+                    "ydoc.update",
+                    &json!({"objectId": "doc-a"}),
+                    3_000,
+                )
+            })
+            .unwrap()
+    };
+    assert_eq!(append(&mut store), TxnOutcome::Committed(0));
+    drop(store);
+    let mut store = EngineStore::open(&path, 4_000).unwrap();
+    assert_eq!(append(&mut store), TxnOutcome::Committed(1));
+    assert_eq!(
+        coordinates(&store),
+        [(HOST.to_owned(), 0), (HOST.to_owned(), 1)]
+    );
+}
+
+/// Every kind the session host does not write is refused before it takes a
+/// sequence, through both journal paths; every kind it writes, for a document
+/// it hosts, takes the next one from the counter.
+#[test]
+fn a_hosted_replica_journals_only_its_documents_live_work() {
+    let (_scratch, _path, mut store) = hosted_store();
+    host_document(&mut store, "doc-a");
+    let in_tx = |store: &mut EngineStore, kind: &str, payload: serde_json::Value| {
+        store.write_with(&NoFaults, |tx| {
+            journal_local_op_in_tx(tx, "ws", kind, &payload, 2_000)
+        })
+    };
+    for (kind, payload) in [
+        ("chat.message.create", json!({"threadId": "thread"})),
+        ("secret.file.put", json!({"objectId": "doc-a"})),
+        ("version.create", json!({"versionId": "fork"})),
+        ("conflict.resolve", json!({"conflictId": "conflict"})),
+        ("workspace.init", json!({})),
+        ("moment.append", json!({"objectId": "private"})),
+        ("ydoc.update", json!({"objectId": "private"})),
+        ("moment.append", json!({})),
+    ] {
+        assert!(
+            matches!(
+                in_tx(&mut store, kind, payload.clone()),
+                Err(SyncError::InvalidInput {
+                    reason: "a hosted replica writes only its hosted documents"
+                })
+            ),
+            "{kind} {payload}"
+        );
+        assert!(matches!(
+            journal_local_replication_op(
+                &mut store, "ws", HOST, "epoch-1", "stream-1", kind, &payload, 2_000, &NoFaults
+            ),
+            Err(SyncError::InvalidInput { .. })
+        ));
+    }
+    assert_eq!(count(&store, "SELECT COUNT(*) FROM replication_log"), 0);
+    assert_eq!(last_outbound_seq(&store), -1, "a refusal takes no sequence");
+
+    let mut written = Vec::new();
+    for (kind, payload) in [
+        ("ydoc.update", json!({"objectId": "doc-a"})),
+        ("moment.append", json!({"objectId": "doc-a"})),
+        ("live.audit.application", json!({"objectId": "doc-a"})),
+        (
+            "live.audit.settlement",
+            json!({"record": {"binding": {"objectId": "doc-a"}}}),
+        ),
+        (
+            "live.audit.base",
+            json!({"record": {"checkpoint": {"binding": {"objectId": "doc-a"}}}}),
+        ),
+    ] {
+        let TxnOutcome::Committed(seq) = in_tx(&mut store, kind, payload).unwrap() else {
+            panic!("no fault was injected");
+        };
+        written.push(seq);
+    }
+    assert_eq!(written, [0, 1, 2, 3, 4]);
+    assert_eq!(last_outbound_seq(&store), 4);
 }
 
 /// The relay's scoped feed, in memory. It serves `workspace.init` and the
@@ -251,6 +397,8 @@ struct HostedFeed {
     share_at_pull: Mutex<Option<(usize, String, String)>>,
     pulls: Mutex<Vec<HostedPullRequest>>,
     pushes: Mutex<Vec<PushRequest>>,
+    /// Every blob a download asked for.
+    downloads: Mutex<Vec<String>>,
 }
 
 impl HostedFeed {
@@ -264,6 +412,7 @@ impl HostedFeed {
             share_at_pull: Mutex::new(None),
             pulls: Mutex::new(Vec::new()),
             pushes: Mutex::new(Vec::new()),
+            downloads: Mutex::new(Vec::new()),
         }
     }
 
@@ -314,8 +463,61 @@ impl HostedFeed {
         ));
     }
 
+    /// A text write of `object_id` whose before side is an object's head at
+    /// the same path: its id, text and latest moment. The relay holds only the
+    /// after bytes.
+    fn replace(
+        &self,
+        origin: &str,
+        seq: i64,
+        object_id: &str,
+        path: &str,
+        text: &str,
+        before: (&str, &str, &str),
+    ) {
+        let (before_object_id, before_text, before_moment_id) = before;
+        let sha = dohc_engine_storage::hex_sha256(text.as_bytes());
+        let before_sha = dohc_engine_storage::hex_sha256(before_text.as_bytes());
+        self.blobs
+            .lock()
+            .unwrap()
+            .insert(sha.clone(), text.as_bytes().to_vec());
+        self.append(envelope(
+            origin,
+            seq,
+            "moment.append",
+            json!({
+                "momentId": format!("moment-{origin}-{seq}"),
+                "versionId": "main",
+                "objectId": object_id,
+                "objectCreatedAtMs": 1,
+                "path": path,
+                "recordedAtMs": 2_000,
+                "operation": "write",
+                "payloadBeforeBlobSha256": before_sha,
+                "payloadBeforePath": path,
+                "payloadAfterBlobSha256": sha,
+                "payloadAfterPath": path,
+                "metadata": {"origin": "sync"},
+                "beforePresent": "present",
+                "beforeObjectId": before_object_id,
+                "beforeVersionId": "main",
+                "beforePath": path,
+                "beforeBlobSha256": before_sha,
+                "beforeContentKind": "text",
+                "beforeUpdatedAtMs": 1_500,
+                "beforeLatestMomentId": before_moment_id,
+                "beforeMetadata": {"origin": "sync"}
+            }),
+        ));
+    }
+
     fn pull_requests(&self) -> Vec<HostedPullRequest> {
         self.pulls.lock().unwrap().clone()
+    }
+
+    fn downloaded(&self) -> Vec<String> {
+        self.downloads.lock().unwrap().clone()
     }
 }
 
@@ -490,6 +692,10 @@ impl RelayTransport for HostedFeed {
         req: BlobDownloadBatchRequest,
     ) -> Result<BlobDownloadBatchResponse, RelayError> {
         let blobs = self.blobs.lock().unwrap();
+        self.downloads
+            .lock()
+            .unwrap()
+            .extend(req.blobs.iter().map(|blob| blob.sha256.clone()));
         Ok(BlobDownloadBatchResponse {
             results: req
                 .blobs
@@ -1107,6 +1313,7 @@ fn a_held_op_holds_later_ops_of_its_document_but_not_of_its_origin() {
 #[test]
 fn live_writes_journal_and_push_under_the_service_host_origin() {
     let (_scratch, _path, mut store) = hosted_store_with_main();
+    host_document(&mut store, "doc-a");
     assert!(
         store
             .read_with(|conn| workspace_replicates_with_relay(conn, "ws"))
@@ -1246,4 +1453,202 @@ fn ordinary_only_machinery_stays_off_a_hosted_replica() {
             .is_err()
     );
     assert_eq!(count(&store, "SELECT COUNT(*) FROM sync_relay_cursors"), 0);
+}
+
+fn text_sha(text: &str) -> String {
+    dohc_engine_storage::hex_sha256(text.as_bytes())
+}
+
+/// A moment's stored before side: presence, text digest, object, and the
+/// payload-before digest.
+type StoredBefore = (i64, Option<String>, Option<String>, Option<String>);
+
+fn stored_before(store: &EngineStore, moment_id: &str) -> StoredBefore {
+    store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT before_present,before_blob_sha256,before_object_id, \
+                 payload_before_blob_sha256 FROM moments \
+                 WHERE workspace_id='ws' AND moment_id=?1",
+                [moment_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+        })
+        .unwrap()
+}
+
+fn withheld_befores(store: &EngineStore) -> Vec<(String, String, String, String, String)> {
+    store
+        .read_with(|conn| {
+            let mut statement = conn.prepare(
+                "SELECT moment_id,before_object_id,before_path,before_sha256,before_content_kind \
+                 FROM hosted_withheld_befores WHERE workspace_id='ws' ORDER BY moment_id",
+            )?;
+            statement
+                .query_map([], |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                })?
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .unwrap()
+}
+
+/// The owner's private file held `a.md` until the hosted document replaced
+/// it. The feed serves that moment but withholds the private file's row and
+/// bytes, so on the host the private file never existed.
+#[test]
+fn a_moment_that_replaced_a_withheld_object_applies_as_a_create() {
+    let (_scratch, _path, mut store) = hosted_store_with_main();
+    let feed = HostedFeed::new();
+    feed.append(envelope("owner", 0, "workspace.init", json!({})));
+    feed.create("owner", 1, "private", "a.md", "private text");
+    feed.replace(
+        "owner",
+        2,
+        "doc-a",
+        "a.md",
+        "hosted text",
+        ("private", "private text", "moment-owner-1"),
+    );
+    feed.blobs.lock().unwrap().remove(&text_sha("private text"));
+    feed.share("doc-a", "a.md");
+    let client = RelaySyncClient::new(feed);
+    sync(&client, &mut store);
+
+    let (heads, moments) = content(&store);
+    assert_eq!(
+        heads,
+        BTreeMap::from([("doc-a".to_owned(), "hosted text".to_owned())])
+    );
+    assert_eq!(moments, BTreeMap::from([("moment-owner-2".to_owned(), 1)]));
+    let downloaded = client.transport().downloaded();
+    assert!(downloaded.contains(&text_sha("hosted text")));
+    assert!(
+        !downloaded.contains(&text_sha("private text")),
+        "the withheld before-image is never requested"
+    );
+    assert_eq!(
+        stored_before(&store, "moment-owner-2"),
+        (1, None, None, None),
+        "the host's history records a create"
+    );
+    let history = VersionedTextStore::new(&mut store)
+        .list_moments(&dohc_engine_domain::ListMomentsQuery {
+            workspace_id: "ws".to_owned(),
+            version_id: Some("main".to_owned()),
+            object_id: Some("doc-a".to_owned()),
+            limit: 10,
+            before_moment_order: None,
+        })
+        .unwrap();
+    assert_eq!(history.moments.len(), 1);
+    assert!(!history.moments[0].before_present);
+    assert_eq!(history.moments[0].before_blob_sha256, None);
+    assert_eq!(
+        withheld_befores(&store),
+        [(
+            "moment-owner-2".to_owned(),
+            "private".to_owned(),
+            "a.md".to_owned(),
+            text_sha("private text"),
+            "text".to_owned()
+        )]
+    );
+    assert_eq!(
+        coordinates(&store),
+        [("owner".to_owned(), 0), ("owner".to_owned(), 2)],
+        "the journal keeps the row as sent"
+    );
+
+    store
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "DELETE FROM moments WHERE workspace_id='ws' AND moment_id='moment-owner-2'",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .unwrap();
+    assert!(
+        withheld_befores(&store).is_empty(),
+        "it leaves with its moment"
+    );
+}
+
+/// A before side the feed serves is fetched and kept: the document's own
+/// earlier content, or another document the replica hosts. An ordinary
+/// replica fetches every before side.
+#[test]
+fn a_before_side_the_feed_serves_is_fetched_and_kept() {
+    let (_scratch, _path, mut store) = hosted_store_with_main();
+    let feed = HostedFeed::new();
+    feed.append(envelope("owner", 0, "workspace.init", json!({})));
+    feed.create("owner", 1, "doc-a", "a.md", "first");
+    feed.replace(
+        "owner",
+        2,
+        "doc-a",
+        "a.md",
+        "second",
+        ("doc-a", "first", "moment-owner-1"),
+    );
+    feed.share("doc-a", "a.md");
+    let client = RelaySyncClient::new(feed);
+    sync(&client, &mut store);
+    assert_eq!(
+        stored_before(&store, "moment-owner-2"),
+        (
+            2,
+            Some(text_sha("first")),
+            Some("doc-a".to_owned()),
+            Some(text_sha("first"))
+        )
+    );
+    assert_eq!(
+        content(&store).0,
+        BTreeMap::from([("doc-a".to_owned(), "second".to_owned())])
+    );
+    assert!(withheld_befores(&store).is_empty());
+
+    // Which before sides a pass would request, before any is local.
+    let foreign = |before_object_id: &str| {
+        let feed = HostedFeed::new();
+        feed.replace(
+            "owner",
+            3,
+            "doc-a",
+            "a.md",
+            "third",
+            (before_object_id, "replaced", "moment-owner-2"),
+        );
+        feed.log.lock().unwrap().remove(0)
+    };
+    let requested = |store: &EngineStore, op: &ReplicationEnvelope| {
+        crate::relay::blob_refs_to_apply(store, std::slice::from_ref(op))
+            .unwrap()
+            .contains_key(&text_sha("replaced"))
+    };
+    host_document(&mut store, "doc-b");
+    assert!(requested(&store, &foreign("doc-b")), "a hosted document");
+    assert!(!requested(&store, &foreign("private")), "a withheld object");
+
+    let (_ordinary_scratch, _ordinary_path, mut ordinary) = open_store();
+    seed_identity(&mut ordinary);
+    assert!(
+        requested(&ordinary, &foreign("private")),
+        "an ordinary replica"
+    );
+    assert!(
+        ordinary
+            .read_with(|conn| crate::hosted::withheld_before(conn, &foreign("private")))
+            .unwrap()
+            .is_none()
+    );
 }
