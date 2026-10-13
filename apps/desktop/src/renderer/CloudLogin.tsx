@@ -141,9 +141,14 @@ export function CloudLogin(props: {
   const sessionRef = useRequestSequence();
   const statusReads = useRequestSequence();
   // Set while a deletion review is open. The review answers a session change
-  // itself: it closes, or reports the deletion it already sent. The panel
-  // reads the session once the review ends.
-  const openReview = useRef<{ sessionChanged: boolean } | null>(null);
+  // itself: it closes, or reports the deletion it already sent. No status
+  // read applies while it is open, and the panel reads the session once it
+  // ends.
+  const reviewOpen = useRef(false);
+  // Whether the host already knows this machine is connected. A mount or a
+  // workspace switch is not news: the host ran its own check. After that,
+  // the host hears each time the panel turns connected.
+  const hostKnowsConnected = useRef(true);
   // Used only when nothing above this panel owns connection notices, so a
   // panel rendered on its own still reaches the same toast and Notices row.
   const ownNotices = useConnectionNotices();
@@ -172,7 +177,8 @@ export function CloudLogin(props: {
   }
 
   // Runs the status check again. The ref is what tells that run it was asked
-  // for, so a session it finds reaches the host like a fresh sign-in does.
+  // for, so a session the panel then shows reaches the host like a fresh
+  // sign-in does.
   function recheckStatus() {
     recheckRef.current = true;
     setStatusAttempt((attempt) => attempt + 1);
@@ -191,10 +197,11 @@ export function CloudLogin(props: {
 
   // Every status read in the panel takes the next turn, so only the newest
   // answer applies: a slow read from before a session change never repaints
-  // after it.
+  // after it. None applies under an open deletion review, whose close reads
+  // again.
   function nextStatusRead(session: number): () => boolean {
     const read = statusReads.next();
-    return () => sessionRef.isCurrent(session) && statusReads.isCurrent(read);
+    return () => sessionRef.isCurrent(session) && statusReads.isCurrent(read) && !reviewOpen.current;
   }
 
   // Main owns the truth about the session. The address and relay only move
@@ -215,9 +222,7 @@ export function CloudLogin(props: {
 
   useEffect(() => {
     const session = sessionRef.next();
-    // Only a user-asked recheck tells the host about a session it found. A
-    // mount or a workspace switch is not news: the host ran its own check.
-    const announceSession = recheckRef.current;
+    hostKnowsConnected.current = !recheckRef.current;
     recheckRef.current = false;
     clearPollTimer();
     setPhase({ kind: "loading" });
@@ -229,7 +234,7 @@ export function CloudLogin(props: {
     setPassphrase("");
     setAddressProblem(null);
     setDisconnectBusy(false);
-    openReview.current = null;
+    reviewOpen.current = false;
     setDeleteReview(null);
     setServerUrl(props.initialServerUrl ?? "");
     setRelayUrl("");
@@ -239,9 +244,7 @@ export function CloudLogin(props: {
     void bridge()
       .cloudStatus(statusQuery())
       .then((status) => {
-        if (!current()) return;
-        applyStatus(status);
-        if (announceSession && status.connected) props.onConnected?.();
+        if (current()) applyStatus(status);
       })
       .catch((cause: unknown) => {
         if (!current()) return;
@@ -271,13 +274,20 @@ export function CloudLogin(props: {
   phaseRef.current = phase;
   useEffect(() => bridge().onCloudSessionChanged(({ phase: transition }) => {
     const signingIn = phaseRef.current.kind === "connecting" || phaseRef.current.kind === "code";
-    if (transition !== "ready" || signingIn) return;
-    if (openReview.current) {
-      openReview.current.sessionChanged = true;
-      return;
-    }
+    if (transition !== "ready" || signingIn || reviewOpen.current) return;
     refreshStatus();
   }), [props.workspaceId]);
+
+  // The host hears about the connection the panel shows, whichever read
+  // found it.
+  useEffect(() => {
+    if (phase.kind === "connected") {
+      if (!hostKnowsConnected.current) props.onConnected?.();
+      hostKnowsConnected.current = true;
+    } else if (phase.kind !== "loading") {
+      hostKnowsConnected.current = false;
+    }
+  }, [phase]);
 
   function refreshStatus() {
     const session = sessionRef.current();
@@ -377,7 +387,6 @@ export function CloudLogin(props: {
                 // poll. A browser approval that did not leave a session on
                 // this machine has to read as disconnected.
                 applyStatus(status, result.email ?? status.email ?? "");
-                if (status.connected) props.onConnected?.();
               })
               .catch((cause: unknown) => {
                 if (!current()) return;
@@ -527,29 +536,31 @@ export function CloudLogin(props: {
   }
 
   // Main already disconnected from the deleted account, if this computer was
-  // still connected to it. Ask main what the session is now.
+  // still connected to it. Closing the review asks main what the session is
+  // now.
   function accountDeleted(deleted: ServerAccountDeleted) {
-    setDeleteReview(null);
     reportConnectionNotice(deleted.finished
       ? { tone: "success", message: `Deleted ${deleted.email} on ${deleted.server}. Workspaces on this computer stay.` }
       : { tone: "warning", message: `${deleted.server} blocked ${deleted.email} and will finish deleting its data. Workspaces on this computer stay.` });
-    setStatusAttempt((attempt) => attempt + 1);
+    endReview();
   }
 
   function startReview() {
-    openReview.current ??= { sessionChanged: false };
+    reviewOpen.current = true;
     setDeleteReview((review) => (review ?? 0) + 1);
   }
 
   function endReview() {
-    const ended = openReview.current;
-    openReview.current = null;
+    reviewOpen.current = false;
     setDeleteReview(null);
-    if (ended?.sessionChanged) refreshStatus();
+    refreshStatus();
   }
 
+  // A review needs the connected account it reviews. Without one, the owner
+  // reopens the panel, which shows what the session is now.
   function reviewDeletionAgain(session: number): () => boolean {
-    return retryFor(session, startReview);
+    const retry = retryFor(session, startReview);
+    return () => phaseRef.current.kind === "connected" && retry();
   }
 
   const panel = (

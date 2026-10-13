@@ -2,7 +2,7 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ServerAccountDeletionPreview } from "@dohc/cli/account";
-import type { DohcDesktopBridge } from "../ipc/bridgeContract";
+import type { CloudStatusResult, DohcDesktopBridge } from "../ipc/bridgeContract";
 import { CloudLogin } from "./CloudLogin";
 import { ServerAccountDeleteDialog } from "./ServerAccountDeleteDialog";
 import { deferred } from "../testing/deferred";
@@ -349,6 +349,68 @@ describe("CloudLogin account deletion", () => {
     expect((await screen.findByTestId("workspace-shell-error")).textContent).toContain("dohc could not reach this server.");
     expect(await screen.findByTestId("cloud-server-url")).toBeTruthy();
     expect(bridgeMock.cloudStatus).toHaveBeenCalledTimes(2);
+  });
+
+  // Another window changed the session before the review opened, and that
+  // read answers while the delete is still pending.
+  it.each(["fails", "finds no session"] as const)("keeps a pending delete when an earlier read %s", async (outcome) => {
+    const earlier = deferred<CloudStatusResult>();
+    const slow = deferred<{ ok: true; finished: boolean; email: string; server: string }>();
+    bridgeMock.deleteServerAccount.mockReturnValue(slow.promise);
+    bridgeMock.cloudStatus
+      .mockResolvedValueOnce(connected)
+      .mockImplementationOnce(() => earlier.promise)
+      .mockResolvedValue({ connected: false, workspaceSynced: false });
+    render(<CloudLogin workspaceId="ws-1" />);
+    await screen.findByTestId("cloud-connected");
+    changeSession("https://dohc.example.test##usr_a");
+    fireEvent.click(screen.getByTestId("cloud-delete-account"));
+    await screen.findByTestId("server-account-delete-scope");
+    typePassword("correct horse");
+    fireEvent.click(screen.getByTestId("server-account-delete-confirm"));
+    await waitFor(() => expect(bridgeMock.deleteServerAccount).toHaveBeenCalledOnce());
+
+    await act(async () => {
+      if (outcome === "fails") earlier.reject(new Error("engine unavailable"));
+      else earlier.resolve({ connected: false, workspaceSynced: false });
+    });
+    expect(screen.getByTestId("server-account-delete")).toBeTruthy();
+    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+
+    await act(async () => { slow.resolve({ ok: true, finished: true, email: "ice@dohc.dev", server }); });
+    expect(await noticesText()).toContain(`Deleted ice@dohc.dev on ${server}. Workspaces on this computer stay.`);
+    expect(await screen.findByTestId("cloud-server-url")).toBeTruthy();
+    expect(bridgeMock.cloudStatus).toHaveBeenCalledTimes(3);
+  });
+
+  it("reads the session again when the review is cancelled", async () => {
+    bridgeMock.cloudStatus.mockResolvedValueOnce(connected).mockResolvedValueOnce({ connected: false, workspaceSynced: false });
+    render(<CloudLogin workspaceId="ws-1" />);
+    fireEvent.click(await screen.findByTestId("cloud-delete-account"));
+    await screen.findByTestId("server-account-delete-scope");
+
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(await screen.findByTestId("cloud-server-url")).toBeTruthy();
+    expect(screen.queryByTestId("server-account-delete")).toBeNull();
+    expect(bridgeMock.cloudStatus).toHaveBeenCalledTimes(2);
+  });
+
+  it("reads the session again after a failed delete, and reviews only a connected account", async () => {
+    bridgeMock.deleteServerAccount.mockRejectedValue(new Error("dohc could not reach this server."));
+    bridgeMock.cloudStatus.mockResolvedValueOnce(connected).mockResolvedValueOnce({ connected: false, workspaceSynced: false });
+    await openAndDelete();
+
+    expect((await screen.findByTestId("workspace-shell-error")).textContent).toContain("dohc could not reach this server.");
+    expect(await screen.findByTestId("cloud-server-url")).toBeTruthy();
+    expect(bridgeMock.cloudStatus).toHaveBeenCalledTimes(2);
+
+    // Try again has no account to review, and leaves the panel following
+    // the session.
+    fireEvent.click(screen.getByTestId("workspace-shell-error-retry"));
+    changeSession("https://dohc.example.test##usr_a");
+    expect(await screen.findByTestId("cloud-connected")).toBeTruthy();
+    expect(screen.queryByTestId("server-account-delete")).toBeNull();
+    expect(bridgeMock.previewServerAccountDeletion).toHaveBeenCalledOnce();
   });
 
   it("closes an open review when another window changes the session", async () => {

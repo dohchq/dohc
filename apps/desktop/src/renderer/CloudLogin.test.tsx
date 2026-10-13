@@ -844,6 +844,26 @@ describe("CloudLogin", () => {
     expect(screen.queryByTestId("cloud-connected")).toBeNull();
   });
 
+  it("tells the host about a session a newer read found while a recheck was pending", async () => {
+    const recheck = deferred<CloudStatusResult>();
+    const onConnected = vi.fn();
+    const session = { connected: true, email: "ice@dohc.dev", serverUrl: "https://dohc.example.test", workspaceSynced: false };
+    bridgeMock.cloudStatus
+      .mockRejectedValueOnce(new Error("engine unavailable"))
+      .mockImplementationOnce(() => recheck.promise)
+      .mockResolvedValueOnce(session);
+    render(<CloudLogin workspaceId="ws-1" onConnected={onConnected} />);
+    fireEvent.click(await screen.findByTestId("workspace-shell-error-retry"));
+    await waitFor(() => expect(bridgeMock.cloudStatus).toHaveBeenCalledTimes(2));
+
+    changeSession("https://dohc.example.test##usr_a");
+    expect(await screen.findByTestId("cloud-connected")).toBeTruthy();
+    expect(onConnected).toHaveBeenCalledOnce();
+
+    await act(async () => { recheck.resolve(session); });
+    expect(onConnected).toHaveBeenCalledOnce();
+  });
+
   it("finishes its own sign-in when another window changes the session", async () => {
     vi.useFakeTimers();
     const onConnected = vi.fn();
