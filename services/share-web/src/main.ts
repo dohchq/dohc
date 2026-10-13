@@ -45,6 +45,7 @@ const application = createShareWebApplication({
   publicRelayUrl: config.publicRelayUrl,
   relayExchangeKey: config.relayExchangeKey,
   publicHosts: config.publicHosts,
+  internalHosts: config.internalHosts,
   viewerAssetsDir,
   accountAuth: config.accountAuth,
   namedBrowserSessionLimits: config.namedBrowserSessionLimits,

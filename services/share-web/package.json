@@ -25,7 +25,6 @@
     "@dohc/live-session-contract": "workspace:*",
     "@dohc/security-contract": "workspace:*",
     "@dohc/service-http": "workspace:*",
-    "@dohc/workspace-auth": "workspace:*",
     "@dohc/workspace-contracts": "workspace:*",
     "@dohc/workspace-core": "workspace:*",
     "@dohc/ydoc-projection": "workspace:*",
@@ -42,6 +41,7 @@
     "zod": "4.4.3"
   },
   "devDependencies": {
+    "@dohc/workspace-auth": "workspace:*",
     "@dohc/app-backend-runtime": "workspace:*",
     "@dohc/sync-relay": "workspace:*",
     "@modelcontextprotocol/client": "2.0.0",

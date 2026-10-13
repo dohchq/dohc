@@ -1,4 +1,4 @@
-import { createHash, createHmac, randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { APP_PUBLICATION_MAX_BUNDLE_BYTES, APP_PUBLICATION_MAX_DOCUMENT_BYTES, APP_PUBLICATION_MAX_BLOB_BYTES } from "@dohc/security-contract/app-publication";
 import { readBoundedJson, TokenBucketLimiter } from "@dohc/service-http";
 import { APP_BUNDLE_CONTENT_TYPES, createAppDocument, type AppDocumentFile } from "@dohc/app-browser/document";
@@ -49,10 +49,7 @@ export function createAppLaunchHandler(options: { config: AppLaunchConfig; relay
   resolveNamedMaterial?(workspaceId: string, publicationId: string, cookie: string | null, signal: AbortSignal): Promise<AppNamedBrowserMaterial> }) {
   const config = parseAppLaunchConfig(options.config), viewerHost = new URL(config.viewerOrigin).host;
   const now = options.nowMs ?? Date.now, launches = new Map<string, Launch>();
-  const deletionKey = randomBytes(32);
-  const userFence = (id: string) => createHmac("sha256",deletionKey).update(id).digest("hex");
-  const deletedUsers = new Set<string>(), deletedGrants = new Set<string>(), deletedPublications = new Set<string>();
-  const deleted = (publicationId: string, material: LaunchMaterial) => deletedPublications.has(publicationId) || (namedMaterial(material) ? !!material.userId && deletedUsers.has(userFence(material.userId)) : !!material.grantId && deletedGrants.has(material.grantId));
+  const requests = new Set<{publicationId: string; material?: LaunchMaterial; abort: AbortController}>();
   const stagedSlots = new Set<Launch>();
   const issueRate = new TokenBucketLimiter(12, 0.2, 2048), sessionRate = new TokenBucketLimiter(12, 0.2, MAX_LAUNCHES);
   const issueAddressRate = new TokenBucketLimiter(600, 10, 10_000), issueGlobalRate = new TokenBucketLimiter(2400, 40, 1);
@@ -128,8 +125,10 @@ export function createAppLaunchHandler(options: { config: AppLaunchConfig; relay
   } }
   return {
     deleteAccount(userId: string, grantIds: readonly string[], publicationIds: readonly string[]) {
-      deletedUsers.add(userFence(userId)); for (const id of grantIds) deletedGrants.add(id); for (const id of publicationIds) deletedPublications.add(id);
-      for (const [host, launch] of launches) if (deleted(launch.publicationId, launch.material)) {launch.staged = undefined; stagedSlots.delete(launch); launches.delete(host);}
+      const matches = (publicationId: string, material?: LaunchMaterial) => publicationIds.includes(publicationId) ||
+        (material && (namedMaterial(material) ? material.userId === userId : !!material.grantId && grantIds.includes(material.grantId)));
+      for (const request of requests) if (matches(request.publicationId, request.material)) request.abort.abort();
+      for (const [host, launch] of launches) if (matches(launch.publicationId, launch.material)) {launch.staged = undefined; stagedSlots.delete(launch); launches.delete(host);}
     },
     matches(request: Request) { return appHost(request.headers.get("host") ?? "") || ["/api/apps/launch", "/api/apps/summary"].includes(new URL(request.url).pathname); },
     async handle(request: Request): Promise<Response> {
@@ -151,13 +150,16 @@ export function createAppLaunchHandler(options: { config: AppLaunchConfig; relay
         if (statusRequest ? statusPending >= 64 : collectionRequest ? collectionPending >= 16 : pending >= MAX_PENDING) return refusal();
         if (statusRequest) statusPending++; else if (collectionRequest) collectionPending++; else pending++;
       }
-      const signal = AbortSignal.any([request.signal, AbortSignal.timeout(15_000)]);
+      const abort = new AbortController();
+      const signal = AbortSignal.any([request.signal, abort.signal, AbortSignal.timeout(15_000)]);
+      let scope: {publicationId: string; material?: LaunchMaterial; abort: AbortController} | undefined;
       let namedIssue = false;
       try {
         if (issue) {
           if (request.headers.get("origin") !== config.viewerOrigin || request.headers.get("content-type") !== "application/json" || launches.size >= MAX_LAUNCHES) return refusal();
           const body = await readBoundedJson(request, 1024, signal);
           if (!body || typeof body !== "object" || Array.isArray(body) || !("publicationId" in body) || typeof body.publicationId !== "string" || body.publicationId.length !== 64 || !PUBLICATION.test(body.publicationId)) return refusal();
+          scope = {publicationId: body.publicationId, abort}; requests.add(scope);
           const issueBody = body as Record<string, unknown>;
           let material: LinkBrowserMaterial | AppNamedBrowserMaterial;
           if (exact(issueBody, "discriminator,publicationId") && typeof issueBody.discriminator === "string" && isSessionDiscriminator(issueBody.discriminator)) {
@@ -166,8 +168,8 @@ export function createAppLaunchHandler(options: { config: AppLaunchConfig; relay
             namedIssue = true;
             material = await options.resolveNamedMaterial(issueBody.workspaceId, issueBody.publicationId as string, request.headers.get("cookie"), signal);
           } else return refusal();
-          if (material.ok && deleted(body.publicationId, material)) return refusal();
           if (!material.ok) return namedIssue && material.status === 503 ? unavailable() : refusal();
+          scope.material = material; signal.throwIfAborted();
           if (summaryRequest) {
             if (!namedMaterial(material)) return refusal();
             const response = await relay({publicationId: body.publicationId, material}, "/summary", signal);
@@ -184,13 +186,13 @@ export function createAppLaunchHandler(options: { config: AppLaunchConfig; relay
           // The relay authorizes the resolved profile/account cookies before they get a budget.
           const identity = namedMaterial(material) ? `named:${material.admissionKey}` : `link:${hash(material.profileSecret)}`;
           if (!issueRate.allow(identity, now())) return namedMaterial(material) ? rateLimited() : Response.json(linkRefusalBody("link_read_rate_limited"), {status: 429, headers});
-          signal.throwIfAborted(); if (deleted(body.publicationId, material)) return refusal(); if (launches.size >= MAX_LAUNCHES) return refusal(); const handoff = token(), launchHost = `${randomBytes(24).toString("hex")}.${config.appDomain}`;
+          signal.throwIfAborted(); if (launches.size >= MAX_LAUNCHES) return refusal(); const handoff = token(), launchHost = `${randomBytes(24).toString("hex")}.${config.appDomain}`;
           launches.set(launchHost, { origin: `https://${launchHost}`, publicationId: body.publicationId, material,
             revision: current.authorityRevision, expires: now() + HANDOFF_MS, handoffHash: hash(handoff) });
           return Response.json({ action: `https://${launchHost}/bootstrap`, handoff }, { headers: { ...headers, ...(material.setCookie ? { "set-cookie": material.setCookie } : {}) } });
         }
         const launch = launches.get(host); if (!launch) return refusal();
-        if (deleted(launch.publicationId, launch.material)) return refusal();
+        scope = {publicationId: launch.publicationId, material: launch.material, abort}; requests.add(scope);
         if (url.pathname === "/bootstrap") {
           let cookie: string;
           if (request.method === "GET") {
@@ -250,6 +252,7 @@ export function createAppLaunchHandler(options: { config: AppLaunchConfig; relay
         if (error instanceof RelayRateLimited) return rateLimited();
         return (namedIssue || (launch && namedMaterial(launch.material))) && error instanceof RelayUnavailable ? unavailable() : refusal();
       } finally {
+        if (scope) requests.delete(scope);
         if (issue) {
           issuePending--; const remaining = issueByAddress.get(address)! - 1;
           if (remaining) issueByAddress.set(address, remaining); else issueByAddress.delete(address);

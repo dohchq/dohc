@@ -59,7 +59,6 @@ interface LiveRouteOptions {
   captureNative(binding: LiveObjectBinding, signal: AbortSignal): Promise<NamedFrameNativeHost>;
   validate: OwnerOutboxAdmission["validate"];
   lookupUserDisplayName?: (userId: string) => Promise<string | null> | string | null;
-  admitAccountWork?<T>(run: () => Promise<T>): Promise<T>;
   admission?: ReturnType<typeof createLiveConnectionAdmission>;
 }
 type BrowserRouteOptions = LiveRouteOptions & {
@@ -100,7 +99,6 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions) {
   const server = new WebSocketServer(wsOptions);
   const connections = new Set<() => void>(), admission = options.admission ?? createLiveConnectionAdmission();
   const connectionScopes = new Map<() => void, {userId?: string; workspaceId: string}>();
-  const admit = options.admitAccountWork ?? (<T>(run: () => Promise<T>) => run());
   const shutdown = new AbortController();
   const storage = options.storage;
   const captureNative = options.captureNative.bind(options), validate = options.validate;
@@ -277,8 +275,6 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions) {
         host.assertCurrent();
         membership = options.membership?.join({ ticket, invalidated: host.invalidated, assertCurrent: host.assertCurrent.bind(host) });
       }
-      const submit = host.submit.bind(host);
-      host.submit = input => admit(() => submit(input, signal));
       host.invalidated.addEventListener("abort", stop, { once: true });
       host.assertCurrent();
       membership?.invalidated.addEventListener("abort", stop, { once: true });
@@ -297,12 +293,10 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions) {
         session = createNamedLiveFrameSession({ host: host!, frames, membership, transport: {
           send(bytes) {
             if (done || accepted.readyState !== WebSocket.OPEN || accepted.bufferedAmount > limits.maxPendingBytes - bytes.length) return Promise.reject(new Error("Named transport unavailable."));
-            return admit(() => {
-              host!.assertCurrent();
-              return new Promise<void>((resolve, reject) => accepted.send(bytes, { binary: true, compress: false }, error => {
+            host!.assertCurrent();
+            return new Promise<void>((resolve, reject) => accepted.send(bytes, { binary: true, compress: false }, error => {
               if (error) reject(error); else { touch(); resolve(); }
               }));
-            });
           }, close: stop,
         } });
         accepted.on("message", (bytes, binary) => {
@@ -319,7 +313,7 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions) {
     deleteAccount(userId: string, workspaceIds: readonly string[]) {
       for (const stop of connections) {
         const scope = connectionScopes.get(stop);
-        if (!scope || scope.userId === userId || workspaceIds.includes(scope.workspaceId)) stop();
+        if (scope && (scope.userId === userId || workspaceIds.includes(scope.workspaceId))) stop();
       }
     },
     close() { if (closed) return; closed = true; shutdown.abort(); for (const stop of [...connections]) stop(); server.close(); },

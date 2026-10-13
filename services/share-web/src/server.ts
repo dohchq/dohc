@@ -1,5 +1,4 @@
-import {accountDeletionKey, ACCOUNT_DELETION_KEY_HEADER, ACCOUNT_DELETION_PATH} from "@dohc/workspace-auth/accountDeletion";
-import {presentsSignUpInviteKey} from "@dohc/workspace-auth/signUp";
+import {accountDeletionKey, presentsAccountDeletionKey, ACCOUNT_DELETION_KEY_HEADER, ACCOUNT_DELETION_PATH} from "@dohc/security-contract/account-deletion";
 import { createAppLaunchHandler } from "./appLaunch";
 import { createNamedAppMaterialResolver } from "./namedAppMaterial";
 import { createAppDiscovery } from "./appDiscovery";
@@ -120,6 +119,7 @@ export interface CreateShareWebApplicationOptions {
   publicRelayUrl: string;
   relayExchangeKey?: string;
   publicHosts: ReadonlySet<string>;
+  internalHosts?: ReadonlySet<string>;
   fetchRelay?: RelayFetch;
   nowMs?: () => number;
   newSessionToken?: () => string;
@@ -866,6 +866,7 @@ export function createShareWebApplication({
   publicRelayUrl,
   relayExchangeKey,
   publicHosts,
+  internalHosts,
   fetchRelay: sendToRelay = (request) => fetch(request),
   nowMs = () => Date.now(),
   newSessionToken = () => randomBytes(32).toString("base64url"),
@@ -1211,7 +1212,7 @@ export function createShareWebApplication({
   const discoverApps = createAppDiscovery({viewerOrigin: appLaunchConfig?.viewerOrigin, relayUrl, fetchRelay, resolveMaterial: resolveLinkBrowserMaterial});
   const handle = async (request: Request): Promise<Response> => {
     if (new URL(request.url).pathname === ACCOUNT_DELETION_PATH) {
-      if (request.method !== "POST" || !relayExchangeKey || !presentsSignUpInviteKey(request.headers.get(ACCOUNT_DELETION_KEY_HEADER),accountDeletionKey(relayExchangeKey))) return refused();
+      if (!internalHosts?.has((request.headers.get("host") ?? "").toLowerCase()) || request.method !== "POST" || !relayExchangeKey || relayExchangeKey.length < 32 || !presentsAccountDeletionKey(request.headers.get(ACCOUNT_DELETION_KEY_HEADER),accountDeletionKey(relayExchangeKey))) return refused();
       const body: unknown = await request.json().catch(() => null);
       if (!body || typeof body !== "object" || !("userId" in body) || typeof body.userId !== "string" || body.userId.length > 1024) return refused();
       const list = (name: string): string[] | null => {const value = (body as Record<string, unknown>)[name]; return Array.isArray(value) && value.length <= 8 && value.every(id => typeof id === "string" && id.length <= 1024) ? value : null;};

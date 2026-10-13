@@ -1,9 +1,6 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
-import type { Pool } from "pg";
 
-export const ACCOUNT_DELETION_ADMISSION_LOCK = 1888001;
-export const ACCOUNT_DELETION_PATH = "/internal/account-deletion";
-export const ACCOUNT_DELETION_KEY_HEADER = "x-dohc-account-deletion-key";
+export { ACCOUNT_DELETION_PATH, ACCOUNT_DELETION_KEY_HEADER, accountDeletionKey } from "@dohc/security-contract/account-deletion";
 export const ACCOUNT_DELETION_PREVIEW_TTL_MS = 5 * 60 * 1000;
 
 export interface AccountDeletionScope {
@@ -17,29 +14,36 @@ export interface AccountDeletionPreview extends AccountDeletionScope {
   email: string;
   serverOrigin: string;
 }
-export function accountDeletionKey(secret: string): string {
-  return createHmac("sha256", secret).update("dohc account deletion internal v1").digest("base64url");
+export const ACCOUNT_DELETION_FRESH_AGE_MS = 15 * 60 * 1000;
+export function accountDeletionPreviewKey(secret: string): string {
+  return createHmac("sha256", secret).update("dohc account deletion preview v1").digest("base64url");
+}
+export function accountDeletionFenceKey(secret: string): string {
+  return createHmac("sha256", secret).update("dohc account deletion fence v1").digest("base64url");
 }
 export function accountDeletionIdentity(key: string, userId: string): string {
   return createHmac("sha256", key).update(JSON.stringify(["account-fence", userId])).digest("hex");
 }
 export function deletionPreviewDigest(key: string, userId: string, preview: AccountDeletionPreview): string {
-  return createHmac("sha256", key).update(JSON.stringify(["preview", userId, preview])).digest("base64url");
+  return createHmac("sha256", key).update(JSON.stringify(["preview", userId, preview.email, preview.serverOrigin, [...preview.workspaceIds].sort(), preview.workspaceCount, preview.ownedShareCount, preview.heldGrantCount])).digest("base64url");
 }
 export function mintDeletionPreviewToken(key: string, userId: string, preview: AccountDeletionPreview, nowMs = Date.now()): string {
   const expiry = nowMs + ACCOUNT_DELETION_PREVIEW_TTL_MS;
   const digest = deletionPreviewDigest(key, userId, preview);
-  const signature = createHmac("sha256", key).update(JSON.stringify(["preview-token", expiry, digest])).digest("base64url");
+  const signature = createHmac("sha256", key).update(JSON.stringify(["preview-token", userId, expiry, digest])).digest("base64url");
   return [expiry, digest, signature].join(".");
 }
-export function matchesDeletionPreviewToken(key: string, token: string, userId: string, preview: AccountDeletionPreview, nowMs = Date.now()): boolean {
+export function verifiesDeletionPreviewToken(key: string, token: string, userId: string, nowMs = Date.now()): boolean {
   const [expiry, digest, signature, extra] = token.split(".");
   const expiresAtMs = Number(expiry);
-  if (extra !== undefined || !Number.isSafeInteger(expiresAtMs) || expiresAtMs <= nowMs || expiresAtMs > nowMs + ACCOUNT_DELETION_PREVIEW_TTL_MS) return false;
-  const expected = createHmac("sha256", key).update(JSON.stringify(["preview-token", expiresAtMs, deletionPreviewDigest(key, userId, preview)])).digest("base64url");
+  if (extra !== undefined || !digest || !Number.isSafeInteger(expiresAtMs) || expiresAtMs <= nowMs || expiresAtMs > nowMs + ACCOUNT_DELETION_PREVIEW_TTL_MS) return false;
+  const expected = createHmac("sha256", key).update(JSON.stringify(["preview-token", userId, expiresAtMs, digest])).digest("base64url");
   const given = Buffer.from(signature ?? "");
-  return digest === deletionPreviewDigest(key, userId, preview) && given.length === expected.length && timingSafeEqual(given, Buffer.from(expected));
+  return given.length === expected.length && timingSafeEqual(given, Buffer.from(expected));
 }
-export async function accountIsDeleting(pool: Pool, userId: string): Promise<boolean> {
-  return (await pool.query('SELECT 1 FROM account_deletion_jobs WHERE user_id = $1', [userId])).rows.length > 0;
+export function matchesDeletionPreviewToken(key: string, token: string, userId: string, preview: AccountDeletionPreview, nowMs = Date.now()): boolean {
+  if (!verifiesDeletionPreviewToken(key, token, userId, nowMs)) return false;
+  const given = Buffer.from(token.split(".")[1]);
+  const expected = Buffer.from(deletionPreviewDigest(key, userId, preview));
+  return given.length === expected.length && timingSafeEqual(given, expected);
 }

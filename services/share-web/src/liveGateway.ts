@@ -270,7 +270,7 @@ export function createLiveGateway(options: LiveGatewayOptions) {
     deleteAccount(userId: string, workspaceIds: readonly string[]) {
       for (const stop of connections.keys()) {
         const session = scopes.get(stop);
-        if (!session || workspaceIds.includes(session.workspaceId) || (session.kind === "named" && session.userId === userId)) stop();
+        if (session && (workspaceIds.includes(session.workspaceId) || (session.kind === "named" && session.userId === userId))) stop();
       }
     },
     close() {

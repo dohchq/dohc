@@ -1,7 +1,6 @@
 create table if not exists account_deletion_jobs (
   user_id text primary key,
   email text not null,
-  phase text not null default 'relay' check (phase in ('relay', 'auth')),
   created_at timestamptz not null default current_timestamp
 );
 
@@ -26,11 +25,3 @@ create or replace trigger account_deletion_session before insert or update on "s
 create or replace trigger account_deletion_account before insert or update on "account" for each row execute function refuse_deleting_account();
 create or replace trigger account_deletion_device before insert or update on "deviceCode" for each row execute function refuse_deleting_account();
 create or replace trigger account_deletion_verification before insert or update on "verification" for each row execute function refuse_deleting_account();
-
-create or replace function notify_account_deletion() returns trigger language plpgsql as $$
-begin
-  perform pg_notify('dohc_account_deletion', json_build_object('schema', TG_TABLE_SCHEMA, 'userId', NEW.user_id, 'email', NEW.email)::text);
-  return NEW;
-end;
-$$;
-create or replace trigger account_deletion_notify after insert on account_deletion_jobs for each row execute function notify_account_deletion();

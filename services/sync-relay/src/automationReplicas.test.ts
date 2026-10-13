@@ -1,3 +1,6 @@
+import {createAccountDeletionRoute} from "./accountDeletionRoute";
+import {initializeAccountDeletion} from "./storage/accountDeletion";
+import type {StorageContext} from "./storage/context";
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
@@ -9,7 +12,7 @@ import { createServiceHostReplication } from "./serviceHostReplication";
 import { deriveServiceHostBearer } from "./serviceHostCredential";
 import type { SyncRelayStorage } from "./storage";
 import { AUTOMATION_WORKSPACE_KEEP_AFTER_LEAVING_MS, AUTOMATION_WORKSPACE_LEAVE_AFTER_MS } from "./storage/automationWorkspaces";
-import { closeTestStorages, inspectDatabase, storagePath, testStorage } from "./testing";
+import { closeTestStorages, inspectDatabase, storagePath, testStorage, closeTestStorage, reopenTestStorage } from "./testing";
 import { notifyRelayWrite } from "./relayWriteChanges";
 
 const spawn = vi.hoisted(() => vi.fn());
@@ -290,6 +293,8 @@ describe("the automation replicas", () => {
     const {replicas: running} = await replicas(storage, () => [WORKSPACE, "survivor"], {ms: 0});
     const deletedRoot = running.replica(WORKSPACE)!.root;
     const survivorRoot = running.replica("survivor")!.root;
+    const deletion=createAccountDeletionRoute({storage:storage as StorageContext,key:"bearer",fenceKey:"fence",invalidate(){},deleteRuntime:async()=>running.deleteWorkspaces([WORKSPACE])});
+    deletion.fence("owner","owner@example.test");
     await running.deleteWorkspaces([WORKSPACE]);
     expect(running.replica(WORKSPACE)).toBeUndefined();
     expect(existsSync(deletedRoot)).toBe(false);
@@ -303,6 +308,23 @@ describe("the automation replicas", () => {
     expect(running.replica("survivor")).toBeDefined();
   });
 
+  it("does not recreate a copy after a restart between runtime and SQL deletion",async()=>{
+    const {storage}=await relay();fakeEngine();
+    const {replicas:running,root}=await replicas(storage,()=>[WORKSPACE],{ms:0});
+    const deletedRoot=running.replica(WORKSPACE)!.root;
+    const deletion=createAccountDeletionRoute({storage:storage as StorageContext,key:"bearer",fenceKey:"fence",invalidate(){},deleteRuntime:async()=>running.deleteWorkspaces([WORKSPACE]),afterPhase(phase){if(phase==="runtime")throw Error("crash after runtime");}});
+    await expect(deletion.purge("owner","owner@example.test")).rejects.toThrow("crash after runtime");
+    expect(storage.listAutomationWorkspaces()).toHaveLength(1);
+    expect(existsSync(deletedRoot)).toBe(false);
+    await running.close();const path=storagePath(storage);closeTestStorage(storage);
+    const restartedStorage=reopenTestStorage(path) as StorageContext;
+    initializeAccountDeletion(restartedStorage,"fence");
+    const restarted=await startAutomationReplicas({storage:restartedStorage,root,engineExecutable:process.execPath,relayOrigin:"https://relay.example",key,namespace,wanted:()=>[WORKSPACE],onError:unexpectedErrors()});
+    cleanup.push(()=>restarted.close());await restarted.settled();
+    expect(restarted.replica(WORKSPACE)).toBeUndefined();expect(existsSync(deletedRoot)).toBe(false);
+    const resume=createAccountDeletionRoute({storage:restartedStorage,key:"bearer",fenceKey:"fence",invalidate(){},deleteRuntime:async()=>{throw Error("runtime must not repeat");}});
+    await resume.purge("owner","owner@example.test");expect(restartedStorage.listAutomationWorkspaces()).toEqual([]);
+  });
   it("checks the daemon even without workspaces, and reports its exit until it restarts", async () => {
     const { storage } = await relay();
     const engine = fakeEngine();

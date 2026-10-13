@@ -12,6 +12,13 @@ describe("share-web configuration", () => {
     DOHC_SHARE_WEB_AUTH_URL: "http://workspace-api:1786",
   };
 
+  it("keeps internal deletion hosts separate from public hosts",()=>{
+    expect(loadShareWebConfig(accountEnvironment).internalHosts.size).toBe(0);
+    const config=loadShareWebConfig({...accountEnvironment,DOHC_SHARE_WEB_INTERNAL_HOSTS:"share-web:1790"});
+    expect([...config.internalHosts]).toEqual(["share-web:1790"]);
+    expect(config.publicHosts.has("share-web:1790")).toBe(false);
+    expect(()=>loadShareWebConfig({...accountEnvironment,DOHC_SHARE_WEB_INTERNAL_HOSTS:"share-web:1790,"})).toThrow(/INTERNAL_HOSTS/);
+  });
   it("uses the supported self-host live profile while retaining explicit deployment requirements", () => {
     const env = {...accountEnvironment, DOHC_SELF_HOST_LIVE: "1", DOHC_SHARE_WEB_RELAY_EXCHANGE_KEY: "x".repeat(32)};
     const config = loadShareWebConfig(env);

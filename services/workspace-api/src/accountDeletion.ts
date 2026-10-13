@@ -1,16 +1,13 @@
 import { APIError } from "better-auth/api";
 import type { Pool } from "pg";
 import {
-  ACCOUNT_DELETION_ADMISSION_LOCK, ACCOUNT_DELETION_KEY_HEADER, ACCOUNT_DELETION_PATH, accountDeletionKey,
-  mintDeletionPreviewToken, matchesDeletionPreviewToken,
+  ACCOUNT_DELETION_KEY_HEADER, ACCOUNT_DELETION_PATH, accountDeletionKey,
+  mintDeletionPreviewToken, matchesDeletionPreviewToken, verifiesDeletionPreviewToken, accountDeletionPreviewKey, ACCOUNT_DELETION_FRESH_AGE_MS,
   type AccountDeletionPreview, type AccountDeletionScope,
 } from "@dohc/workspace-auth/accountDeletion";
 
-// Shared with relay request admission. Normal requests hold the shared lock;
-// confirming deletion takes the exclusive lock through the preview and fence.
-
 export function createAccountDeletion(options: {pool: Pool; secret: string; serverOrigin: string; relayUrl: string | null; fetch?: typeof fetch}) {
-  const {pool} = options, key = accountDeletionKey(options.secret);
+  const {pool} = options, key = accountDeletionKey(options.secret), previewKey = accountDeletionPreviewKey(options.secret);
   const call = async (operation: "preview" | "purge", user: {id: string; email: string}): Promise<unknown> => {
     if (!options.relayUrl) throw new APIError("SERVICE_UNAVAILABLE", {code: "DELETION_UNAVAILABLE", message: "This server cannot delete accounts yet. Contact the server owner."});
     const response = await (options.fetch ?? fetch)(new URL(ACCOUNT_DELETION_PATH, options.relayUrl), {
@@ -32,14 +29,15 @@ export function createAccountDeletion(options: {pool: Pool; secret: string; serv
   async function finish(user: {id: string; email: string}): Promise<void> {
     const result = await call("purge", user);
     if (!result || typeof result !== "object" || !("finished" in result) || result.finished !== true) throw new Error("Relay account deletion is unfinished.");
-    await pool.query("UPDATE account_deletion_jobs SET phase='auth' WHERE user_id=$1", [user.id]);
     const client = await pool.connect();
     try {
       await client.query("BEGIN");
       await client.query('DELETE FROM "verification" WHERE value=$1 OR lower(identifier)=lower($2)', [user.id, user.email]);
       await client.query('DELETE FROM "invitation" WHERE "inviterId"=$1 OR lower(email)=lower($2)', [user.id, user.email]);
       await client.query('DELETE FROM "deviceCode" WHERE "userId"=$1', [user.id]);
+      const organizations = await client.query<{organizationId: string}>('SELECT o.id AS "organizationId" FROM "organization" o WHERE o.id IN (SELECT "organizationId" FROM "member" WHERE "userId"=$1) ORDER BY o.id FOR UPDATE', [user.id]);
       await client.query('DELETE FROM "user" WHERE id=$1', [user.id]);
+      for (const row of organizations.rows) await client.query('DELETE FROM "organization" WHERE id=$1 AND NOT EXISTS (SELECT 1 FROM "member" WHERE "organizationId"=$1)', [row.organizationId]);
       await client.query('DELETE FROM account_deletion_jobs WHERE user_id=$1', [user.id]);
       await client.query("COMMIT");
     } catch (error) {await client.query("ROLLBACK"); throw error;} finally {client.release();}
@@ -47,17 +45,19 @@ export function createAccountDeletion(options: {pool: Pool; secret: string; serv
   return {
     async preview(user: {id: string; email: string}): Promise<Record<string, unknown>> {
       const preview = await previewFor(user);
-      return {...preview, previewToken: mintDeletionPreviewToken(key, user.id, preview)};
+      return {...preview, signInMaxAgeMs: ACCOUNT_DELETION_FRESH_AGE_MS, previewToken: mintDeletionPreviewToken(previewKey, user.id, preview)};
     },
     async delete(user: {id: string; email: string}, token: string): Promise<Record<string, unknown>> {
+      const changed = () => new APIError("CONFLICT", {code: "PREVIEW_CHANGED", message: "Account deletion changed or the preview expired. Review it again."});
+      if (!verifiesDeletionPreviewToken(previewKey, token, user.id)) throw changed();
+      const preview = await previewFor(user);
+      if (!matchesDeletionPreviewToken(previewKey, token, user.id, preview)) throw changed();
       const client = await pool.connect();
       try {
         await client.query("BEGIN");
-        await client.query("SELECT pg_advisory_xact_lock($1)", [ACCOUNT_DELETION_ADMISSION_LOCK]);
         const account = await client.query('SELECT email FROM "user" WHERE id=$1 FOR UPDATE', [user.id]);
         if (account.rows.length !== 1 || account.rows[0].email !== user.email) throw new APIError("UNAUTHORIZED");
-        const preview = await previewFor(user);
-        if (!matchesDeletionPreviewToken(key, token, user.id, preview)) throw new APIError("CONFLICT", {code: "PREVIEW_CHANGED", message: "Account deletion changed or the preview expired. Review it again."});
+        if (!verifiesDeletionPreviewToken(previewKey, token, user.id)) throw changed();
         await client.query('INSERT INTO account_deletion_jobs(user_id,email) VALUES($1,$2)', [user.id, user.email]);
         await client.query('DELETE FROM "session" WHERE "userId"=$1', [user.id]);
         await client.query('DELETE FROM "deviceCode" WHERE "userId"=$1', [user.id]);

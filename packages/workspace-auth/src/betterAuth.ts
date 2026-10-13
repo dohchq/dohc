@@ -1,6 +1,6 @@
 import { betterAuth } from "better-auth";
-import { APIError, createAuthEndpoint, createAuthMiddleware, freshSessionMiddleware, sessionMiddleware } from "better-auth/api";
-import { accountIsDeleting } from "./accountDeletion";
+import { APIError, createAuthEndpoint, sessionMiddleware } from "better-auth/api";
+import { ACCOUNT_DELETION_FRESH_AGE_MS } from "./accountDeletion";
 import { bearer, deviceAuthorization, organization } from "better-auth/plugins";
 import type { Pool } from "pg";
 import type { SignUpAdmission } from "./signUp";
@@ -180,12 +180,6 @@ export function createWorkspaceAuth(options: WorkspaceAuthOptions) {
         "/reset-password": { window: 3600, max: 10 },
       },
     },
-    hooks: { after: createAuthMiddleware(async ctx => {
-      const session = ctx.context.newSession ?? ctx.context.session;
-      if (ctx.path !== "/account/delete" && session && await accountIsDeleting(options.pool, session.user.id)) {
-        throw new APIError("UNAUTHORIZED", { code: "ACCOUNT_DELETING", message: "This server account is being deleted." });
-      }
-    }) },
     plugins: [
       ...(options.accountDeletion ? [{
         id: "dohc-account-deletion",
@@ -193,7 +187,8 @@ export function createWorkspaceAuth(options: WorkspaceAuthOptions) {
           accountDeletionPreview: createAuthEndpoint("/account/deletion-preview", {method: "POST", use: [sessionMiddleware], requireHeaders: true}, async ctx => {
             return ctx.json(await options.accountDeletion!.preview(ctx.context.session.user));
           }),
-          deleteServerAccount: createAuthEndpoint("/account/delete", {method: "POST", use: [freshSessionMiddleware], requireHeaders: true}, async ctx => {
+          deleteServerAccount: createAuthEndpoint("/account/delete", {method: "POST", use: [sessionMiddleware], requireHeaders: true}, async ctx => {
+            if (Date.now() - new Date(ctx.context.session.session.createdAt).getTime() > ACCOUNT_DELETION_FRESH_AGE_MS) throw new APIError("FORBIDDEN", {code: "FRESH_SESSION_REQUIRED", message: "Sign in again before deleting this server account."});
             const body: unknown = ctx.body;
             const token = body && typeof body === "object" && "previewToken" in body ? body.previewToken : undefined;
             if (typeof token !== "string" || token.length > 512) throw new APIError("BAD_REQUEST", {code: "PREVIEW_REQUIRED", message: "Review account deletion before continuing."});

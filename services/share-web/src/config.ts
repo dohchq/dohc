@@ -15,6 +15,7 @@ export interface ShareWebConfig {
   publicRelayUrl: string;
   relayExchangeKey?: string;
   publicHosts: Set<string>;
+  internalHosts: Set<string>;
   trustedProxies: Set<string>;
   port: number;
   bind: string;
@@ -185,6 +186,7 @@ export function loadShareWebConfig(env: NodeJS.ProcessEnv): ShareWebConfig {
     publicRelayUrl,
     relayExchangeKey,
     publicHosts: new Set(hosts),
+    internalHosts: new Set(env.DOHC_SHARE_WEB_INTERNAL_HOSTS ? exactList(env.DOHC_SHARE_WEB_INTERNAL_HOSTS, "DOHC_SHARE_WEB_INTERNAL_HOSTS must contain exact comma-separated Host values.").map(host => host.toLowerCase()) : []),
     trustedProxies,
     port,
     bind: env.DOHC_SHARE_WEB_BIND ?? (devMode ? "127.0.0.1" : "0.0.0.0"),

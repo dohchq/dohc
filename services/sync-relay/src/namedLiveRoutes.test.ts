@@ -773,3 +773,12 @@ it.each(["named", "link", "owner", "desktop"])("deletion closes a running %s liv
   await closed;
   expect(connection.ws.readyState).toBe(WebSocket.CLOSED);
 });
+
+it("keeps an unrelated desktop connection that is still resolving its account",async()=>{
+  const f=await fixture(limits,false,undefined,false,true),ticket=await f.mint();
+  const entered=deferred<void>(),resume=deferred<void>(),resolve=f.actor.getMockImplementation()!;
+  f.actor.mockImplementation(async(...args)=>{entered.resolve();await resume.promise;return resolve(...args);});
+  const socket=f.connect(ticket.token);await entered.promise;
+  f.routes.deleteAccount("unrelated",["unrelated-workspace"]);resume.resolve();
+  expect(await socket.status).toBe(101);
+});

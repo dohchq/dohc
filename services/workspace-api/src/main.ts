@@ -69,8 +69,6 @@ if (config.signUp) {
   }
 }
 
-await accountDeletion.resume();
-setInterval(() => {void accountDeletion.resume().catch(() => console.error("[workspace-api] Resuming account deletion failed."));}, 60_000).unref();
 
 const gateway: AuthGateway = {
   handler: (request) => email.handle(request, (forwarded) => auth.handler(forwarded), async () => (await auth.api.getSession({ headers: request.headers }))?.user.email ?? null),
@@ -150,6 +148,9 @@ const server = createServer((request, response) => {
   return handler(request, response);
 });
 server.listen(config.port, config.bindHost, () => {
+  const resume = () => {void accountDeletion.resume().catch(() => console.error("[workspace-api] Resuming account deletion failed."));};
+  resume();
+  setInterval(resume, 60_000).unref();
   console.log(`[workspace-api] listening on ${config.bindHost}:${config.port} (auth at /api/auth)`);
   console.log(`[workspace-api] email transport: ${config.emailTransport}`);
   if (config.testAuthSeam) console.log("[workspace-api] DOHC_TEST_AUTH seam ENABLED (dev/test only)");

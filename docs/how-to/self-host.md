@@ -135,7 +135,8 @@ The preview lists the email, server origin, owned workspace IDs, stored bytes, a
 It returns a preview token that expires after five minutes.
 
 Send that token as `{"previewToken":"..."}` to `POST /api/auth/account/delete`.
-The request needs a fresh Better Auth session.
+The request needs a session created by a sign-in within the last 15 minutes.
+The preview returns this limit as `signInMaxAgeMs`.
 If the preview changed, request another preview before continuing.
 Share-link and app credentials cannot delete a server account.
 
@@ -145,18 +146,19 @@ Received shares end, and their local copies remain readable.
 Contributions to another person's workspace stay in that workspace's history and discussion, including their stored authorship snapshots.
 
 Deletion first blocks account access, then removes server data.
-If another service is unavailable, deletion stays pending and access remains blocked.
+If another service is unavailable, deletion stays pending and account sessions remain blocked.
+After the account-session fence commits, share links and server automation access can remain active until the relay receives its fence, especially during a relay outage.
 The server resumes pending deletion after a restart.
 The response reports `finished: true` only after the relay purge and account cleanup finish.
 
 Account deletion does not edit backups.
 Backups remain until the 30-day retention period ends.
 Remove the person's email from `DOHC_SIGN_UP_EMAILS` yourself; the API does not change operator configuration.
-An empty allowlist keeps sign-up closed.
+An empty list opens sign-up; keep at least one address if you want sign-up closed.
 
 ## Choose who can create an account
 
-The deployment bundle keeps sign-up closed to approved email addresses and pending invites.
+A nonempty `DOHC_SIGN_UP_EMAILS` list keeps sign-up closed to approved email addresses and pending invites.
 Add your email before the first start.
 To close sign-up, list the approved email addresses in `.env.self-host`, separated by commas:
 

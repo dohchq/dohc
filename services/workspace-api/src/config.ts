@@ -137,7 +137,7 @@ export function readConfig(env: NodeJS.ProcessEnv): WorkspaceApiConfig {
 
 function readSignUp(emails: string | undefined, relayUrl: string | undefined): ClosedSignUp | null {
   const listed = (emails ?? "").split(",").map(normalizeEmail).filter((email) => email.length > 0);
-  if (emails === undefined) return null;
+  if (listed.length === 0) return null;
   const invalid = listed.find((email) => !/^[^\s@]+@[^\s@]+$/.test(email));
   if (invalid !== undefined) {
     throw new ConfigError(`DOHC_SIGN_UP_EMAILS must list email addresses separated by commas, got "${invalid}".`);

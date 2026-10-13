@@ -14,7 +14,7 @@ export function initializeAccountDeletion(storage: StorageContext, key: string):
     manifest_json TEXT CHECK (manifest_json IS NULL OR json_valid(manifest_json))
   ) STRICT;
   CREATE TABLE IF NOT EXISTS sync_relay_deleted_workspaces (workspace_hash TEXT PRIMARY KEY) STRICT;
-  CREATE TABLE IF NOT EXISTS sync_relay_ended_shares (share_id TEXT PRIMARY KEY) STRICT;`));
+  CREATE TABLE IF NOT EXISTS sync_relay_ended_shares (share_id TEXT NOT NULL, recipient_user_id TEXT NOT NULL, ended_at_ms INTEGER NOT NULL, PRIMARY KEY (share_id, recipient_user_id)) STRICT;`));
 }
 export function accountIsFenced(storage: SyncRelayStorage, userId: string): boolean {
   const key = keys.get(storage);
@@ -64,7 +64,8 @@ export function fenceAccount(storage: StorageContext, key: string, userId: strin
     const manifest = {workspaces, shareIds, datasets, grantIds, publicationIds};
     for (const row of workspaces) storage.db.prepare("INSERT OR IGNORE INTO sync_relay_deleted_workspaces VALUES(?)").run(accountDeletionIdentity(key,"workspace:"+row.workspaceId));
     for (const shareId of shareIds) {
-      storage.db.prepare("INSERT OR IGNORE INTO sync_relay_ended_shares VALUES(?)").run(shareId);
+      const recipients = storage.db.prepare("SELECT DISTINCT principal_user_id FROM sync_relay_share_grants WHERE share_id=? AND principal_kind='user' AND principal_user_id<>?").all(shareId,userId);
+      for (const recipient of recipients) storage.db.prepare("INSERT OR IGNORE INTO sync_relay_ended_shares VALUES(?,?,?)").run(shareId,String(recipient.principal_user_id),Date.now());
       revokeShareInTransaction(storage, shareId, Date.now());
     }
     storage.db.prepare("UPDATE sync_relay_share_grants SET status='revoked',revoked_at_ms=?,generation=generation+1 WHERE status='active' AND (principal_user_id=? OR lower(principal_email)=?)").run(Date.now(), userId, normalizeEmail(email));
@@ -103,6 +104,7 @@ export function purgeAccountRows(storage: StorageContext, userId: string, email:
         storage.db.prepare("UPDATE sync_relay_workspace_usage SET usage_bytes=usage_bytes-? WHERE workspace_id=?").run(Number(row.storage_bytes),String(row.workspace_id));
       }
     }
+    storage.db.prepare("DELETE FROM sync_relay_ended_shares WHERE recipient_user_id=?").run(userId);
     const tables = storage.db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").all().map(row => String(row.name));
     // All authoritative dataset tables carry workspace_id, including tables
     // without a workspace foreign key. Defer constraints across this purge.

@@ -1,5 +1,6 @@
+import { workspaceIsDeleted, accountIsFenced } from "./storage/accountDeletion";
 import {isDeepStrictEqual} from "node:util";
-import { createHash, createHmac, randomBytes } from "node:crypto";
+import { createHash } from "node:crypto";
 import { posix } from "node:path";
 import { AutomationScheduler, type SchedulerClock, type ScheduleRecord } from "@dohc/automation-executor/automation-scheduler";
 import { createAutomationFormulaEvaluator } from "@dohc/automation-executor/automation-evaluator-host";
@@ -208,11 +209,6 @@ export async function startAutomationServer(options: AutomationServerOptions) {
   const { storage, server } = options;
   const nowMs = options.nowMs ?? Date.now;
   const hosted = new Map<string, Hosted>();
-  const deletedWorkspaces = new Set<string>();
-  const deletionWorkspaceKey = (id: string) => createHash("sha256").update(id).digest("hex");
-  const deletionLabelKey = randomBytes(32);
-  const deletedAccounts = new Set<string>();
-  const accountKey = (id: string) => createHmac("sha256", deletionLabelKey).update(id).digest("hex");
   // Copies owners' actions hold open, with how many actions still use each,
   // and when a copy nothing else needed stopped being needed and left.
   const visits = new Map<string, { actions: number; times: { incarnation: number; unwantedSinceMs: number; leftAtMs: number | null } | null }>();
@@ -423,11 +419,11 @@ export async function startAutomationServer(options: AutomationServerOptions) {
   }
 
   async function nameOf(ws: WorkspaceState, userId: string): Promise<string | null> {
-    if (deletedAccounts.has(accountKey(userId))) return null;
+    if (accountIsFenced(storage, userId)) return null;
     const known = ws.names.get(userId);
     if (known !== undefined) return known;
     const name = (await options.lookupUserDisplayName(userId))?.trim() || null;
-    if (name !== null && !deletedAccounts.has(accountKey(userId)) && !ws.closed) ws.names.set(userId, cutText(name, 40));
+    if (name !== null && !accountIsFenced(storage, userId) && !ws.closed) ws.names.set(userId, cutText(name, 40));
     return ws.names.get(userId) ?? null;
   }
 
@@ -933,7 +929,7 @@ export async function startAutomationServer(options: AutomationServerOptions) {
     if (current && current.replica === replica) return;
     const opening = current ? close(current) : Promise.resolve();
     void opening.then(() => {
-      if (!closed && !deletedWorkspaces.has(deletionWorkspaceKey(workspaceId)) && replica && replicas.replica(workspaceId) === replica && !hosted.has(workspaceId)) open(replica);
+      if (!closed && !workspaceIsDeleted(storage, workspaceId) && replica && replicas.replica(workspaceId) === replica && !hosted.has(workspaceId)) open(replica);
     }).catch((error: unknown) => options.onError(`close the automations of workspace "${workspaceId}"`, error));
   }
 
@@ -951,7 +947,7 @@ export async function startAutomationServer(options: AutomationServerOptions) {
 
   let capacityReporting = Promise.resolve();
   const excluded = new Map<string, { ownerUserId: string; noticeId: string }>();
-  const allWantedWorkspaces = () => [...new Set([...storage.serverHostedWorkspaces(), ...(options.live?.workspaces() ?? []), ...(options.datasetHost?.automations.wantedWorkspaces() ?? [])])].filter(id => !deletedWorkspaces.has(deletionWorkspaceKey(id)));
+  const allWantedWorkspaces = () => [...new Set([...storage.serverHostedWorkspaces(), ...(options.live?.workspaces() ?? []), ...(options.datasetHost?.automations.wantedWorkspaces() ?? [])])].filter(id => !workspaceIsDeleted(storage, id));
   function wantedWorkspaces(): string[] {
     const running = runningWorkspaces();
     // A copy an owner's action reopened stays open while the action runs,
@@ -1178,11 +1174,9 @@ export async function startAutomationServer(options: AutomationServerOptions) {
 
   return {
     deleteAccount(userId: string) {
-      deletedAccounts.add(accountKey(userId));
       for (const ws of hosted.values()) ws.names.delete(userId);
     },
     async deleteWorkspaces(workspaceIds: readonly string[]) {
-      for (const id of workspaceIds) deletedWorkspaces.add(deletionWorkspaceKey(id));
       for (const id of workspaceIds) {const ws = hosted.get(id); if (ws) await close(ws); visits.delete(id); excluded.delete(id); toldOverBudget.delete(id); gate.forgetWorkspace(id);}
       await replicas.deleteWorkspaces(workspaceIds);
     },

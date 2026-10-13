@@ -1,3 +1,4 @@
+import { workspaceIsDeleted } from "./storage/accountDeletion";
 import {createHash, randomBytes} from "node:crypto";
 import {mkdir, readdir, rm, writeFile} from "node:fs/promises";
 import {join} from "node:path";
@@ -162,10 +163,9 @@ export async function startAutomationReplicas(options: {
 
   const logHead = (workspaceId: string) => storage.automationWorkspaceLogHead(workspaceId);
 
-  const purged = new Set<string>();
   let runningPass: Promise<boolean> | undefined;
   async function open(row: AutomationWorkspace): Promise<void> {
-    if (purged.has(folderOf(row.workspaceId))) return;
+    if (workspaceIsDeleted(storage, row.workspaceId)) return;
     const folder = folderOf(row.workspaceId);
     const home = join(folder, String(row.incarnation));
     const root = join(home, "workspace"), metadataDir = join(home, "metadata");
@@ -284,7 +284,7 @@ export async function startAutomationReplicas(options: {
       await release();
       throw error;
     }
-    if (purged.has(folderOf(row.workspaceId))) {await release(); return;}
+    if (workspaceIsDeleted(storage, row.workspaceId)) {await release(); return;}
     replicas.set(row.workspaceId, replica);
     options.onChanged?.(row.workspaceId);
   }
@@ -331,7 +331,7 @@ export async function startAutomationReplicas(options: {
     let ok = true;
     let passFailure: unknown = null;
     await engine();
-    const wanted = new Set(options.wanted().filter(id => !purged.has(folderOf(id))));
+    const wanted = new Set(options.wanted().filter(id => !workspaceIsDeleted(storage, id)));
     for (const workspaceId of wanted) {
       ok = await each(workspaceId, async () => {
         const row = storage.joinAutomationWorkspace({workspaceId, nowMs: nowMs()});
@@ -358,7 +358,7 @@ export async function startAutomationReplicas(options: {
       }) && ok;
     }
     for (const row of storage.listAutomationWorkspaces()) {
-      if (purged.has(folderOf(row.workspaceId))) continue;
+      if (workspaceIsDeleted(storage, row.workspaceId)) continue;
       if (wanted.has(row.workspaceId)) continue;
       syncRetries.delete(row.workspaceId);
       ok = await each(row.workspaceId, async () => {
@@ -554,7 +554,6 @@ export async function startAutomationReplicas(options: {
   else storage.unavailable.addEventListener("abort", closeUnavailable, {once: true});
   return {
     async deleteWorkspaces(workspaceIds: readonly string[]) {
-      for (const id of workspaceIds) purged.add(folderOf(id));
       await runningPass?.catch(() => undefined);
       for (const id of workspaceIds) {
         await replicas.get(id)?.close();
