@@ -5,17 +5,23 @@ import {
   USAGE_MAX_COUNT, USAGE_RETENTION_DAYS, localUsageDay, queryUsage, usageRowKey,
   type UsageBuildPair, type UsageCount, type UsageDayRecord, type UsageQuery, type UsageSnapshot,
 } from "@dohc/workspace-contracts/usage";
+import { INVALID_USAGE_RECORD } from "../ipc/bridgeContract";
 
 export const USAGE_WRITE_INTERVAL_MS = 30_000;
 export const USAGE_PENDING_LIMIT = 256;
 export const USAGE_SNAPSHOT_NAME = "dohc-usage.json";
+// A record set aside keeps its bytes under the next unused number.
+const ASIDE_NAME = /^dohc-usage\.set-aside-(\d+)\.json$/;
+export const usageAsideName = (number: number) => `dohc-usage.set-aside-${number}.json`;
 export interface UsageFileSystem {
   readFile(path: string, encoding: "utf8"): Promise<string>;
+  readdir(path: string): Promise<string[]>;
   mkdir(path: string, options: { recursive: true }): Promise<unknown>;
   writeFile(path: string, data: string, options: { mode: number }): Promise<unknown>;
   rename(from: string, to: string): Promise<unknown>;
   rm(path: string, options: { force: true }): Promise<unknown>;
 }
+const errorCode = (error: unknown) => (error as NodeJS.ErrnoException | null)?.code;
 
 // Main supplies the fixed coverage mapping for this build.
 // Early successes queue only aggregates until the saved setting is loaded.
@@ -37,6 +43,9 @@ export function createUsageStore(deps: {
   const pending: UsageCount[] = [];
   let pendingOverflow = false;
   let enabled = true;
+  // A record started in place of one set aside starts Off, because dohc
+  // could not read the person's choice.
+  let startEnabled = true;
   let loaded = false;
   let admissionReady = false;
   let unreadable: { error: unknown } | undefined;
@@ -159,21 +168,21 @@ export function createUsageStore(deps: {
       try {
         raw = await io.readFile(path, "utf8");
       } catch (error) {
-        if ((error as NodeJS.ErrnoException)?.code !== "ENOENT") {
-          // Stay inert until a control retries the read. Never replace
+        if (errorCode(error) !== "ENOENT") {
+          // Stay inert until a read or control retries. Never replace
           // a record whose contents and saved setting we could not inspect.
           pause(error);
           return;
         }
       }
       unreadable = undefined;
-      enabled = true;
+      enabled = startEnabled;
       let restored: UsageSnapshot | undefined;
       if (raw !== undefined) {
         try { restored = decodeUsageSnapshot(JSON.parse(raw)); }
         catch (error) {
           pause(Object.assign(new Error("Usage record could not be decoded", { cause: error }),
-            { code: "INVALID_USAGE_RECORD" }));
+            { code: INVALID_USAGE_RECORD }));
           return;
         }
       }
@@ -236,14 +245,36 @@ export function createUsageStore(deps: {
   function requireReadable() {
     if (unreadable) throw unreadable.error;
   }
-  function control(change: () => Promise<void>): Promise<void> {
+  // A failed load stays failed until someone asks again.
+  function reload() {
+    if (unreadable) loading = undefined;
+    return load();
+  }
+  // No count lands while a control runs.
+  function exclusive(task: () => Promise<void>): Promise<void> {
     if (closing) return Promise.reject(new Error("Usage store is closed"));
     controls++;
-    return enqueue(async () => {
-      if (unreadable) loading = undefined;
-      await load(); requireReadable(); refreshDay(); await change();
-    })
-      .finally(() => { controls--; });
+    return enqueue(task).finally(() => { controls--; });
+  }
+  function control(change: () => Promise<void>): Promise<void> {
+    return exclusive(async () => { await reload(); requireReadable(); refreshDay(); await change(); });
+  }
+  async function asideNumbers(): Promise<number[]> {
+    let names: string[];
+    try { names = await io.readdir(directory); }
+    catch (error) { if (errorCode(error) === "ENOENT") return []; throw error; }
+    return names.flatMap(name => { const match = ASIDE_NAME.exec(name); return match ? [Number(match[1])] : []; })
+      .sort((a, b) => a - b);
+  }
+  // Drops the loaded record so the next load reads the file again.
+  function forget() {
+    if (writeTimer) clearTimeout(writeTimer);
+    if (dayTimer) clearTimeout(dayTimer);
+    writeTimer = undefined; dayTimer = undefined;
+    days.clear(); counts.clear(); coverage.clear();
+    pending.length = 0; pendingOverflow = false;
+    loaded = false; admissionReady = false; unreadable = undefined; loading = undefined; activeDay = undefined;
+    revision = 0; savedRevision = 0; committedCleanExit = true;
   }
   return {
     load: () => closing ? Promise.reject(new Error("Usage store is closed")) : load(),
@@ -267,8 +298,52 @@ export function createUsageStore(deps: {
     },
     async read(): Promise<UsageSnapshot> {
       if (closing) throw new Error("Usage store is closed");
-      await load(); requireReadable(); refreshDay();
+      await (unreadable ? enqueue(reload) : load()); requireReadable(); refreshDay();
       return snapshot();
+    },
+    // The newest record set aside in the record's folder, by file name.
+    async newestAside(): Promise<string | null> {
+      if (closing) throw new Error("Usage store is closed");
+      await load();
+      const newest = (await asideNumbers()).at(-1);
+      return newest === undefined ? null : usageAsideName(newest);
+    },
+    // Sets a record dohc cannot decode aside, never over another file, and
+    // starts an empty record that is Off until the person turns it on.
+    startNewRecord(): Promise<void> {
+      return exclusive(async () => {
+        await reload();
+        if (!unreadable) return;
+        if (errorCode(unreadable.error) !== INVALID_USAGE_RECORD) throw unreadable.error;
+        // Rename replaces an existing target, so take a number after every one set aside.
+        await io.rename(path, join(directory, usageAsideName(((await asideNumbers()).at(-1) ?? 0) + 1)));
+        forget();
+        startEnabled = false;
+        await load();
+      });
+    },
+    // Swaps the record with the newest one set aside, keeping the newer
+    // record aside under the next unused number.
+    restoreSetAside(): Promise<void> {
+      return exclusive(async () => {
+        await reload();
+        if (unreadable && errorCode(unreadable.error) !== INVALID_USAGE_RECORD) throw unreadable.error;
+        const newest = (await asideNumbers()).at(-1);
+        if (newest === undefined) throw new Error("dohc has no usage record set aside.");
+        // The newer record leaves with its last counts.
+        await write();
+        const aside = join(directory, usageAsideName(newest + 1));
+        await io.rename(path, aside);
+        try {
+          await io.rename(join(directory, usageAsideName(newest)), path);
+        } catch (error) {
+          // Put the newer record back, so each file keeps its name.
+          await io.rename(aside, path).catch(() => {});
+          throw error;
+        }
+        forget();
+        await load();
+      });
     },
     setEnabled(value: boolean): Promise<void> {
       if (typeof value !== "boolean") return Promise.reject(new Error("Invalid usage setting"));

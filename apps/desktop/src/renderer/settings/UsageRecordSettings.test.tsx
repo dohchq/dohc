@@ -17,7 +17,7 @@ const ROWS = [
   row("version.try", "Try changes in a workspace version", { renderer: cell(0) }),
 ];
 const RECORD: Readable = { status: "readable", enabled: true, file: "C:\\Users\\a\\AppData\\Roaming\\dohc\\dohc-usage.json",
-  since: "2026-09-12", incompleteDays: 1, rows: ROWS };
+  since: "2026-09-12", incompleteDays: 1, rows: ROWS, setAside: null };
 const EMPTY: Readable = { ...RECORD, since: "2026-10-07", incompleteDays: 0, rows: ROWS.map(r => ({ ...r, lastUsed: null,
   doors: { ...r.doors, renderer: { ...r.doors.renderer, count: 0 }, cli: { ...r.doors.cli, count: 0 } } })) };
 
@@ -32,6 +32,8 @@ const bridge = {
   readUsageRecord: vi.fn(async (_payload: Record<string, never>): Promise<UsageRecordResult> => RECORD),
   clearUsageRecord: vi.fn(async (_payload: Record<string, never>) => undefined),
   setUsageRecordEnabled: vi.fn(async (_payload: { enabled: boolean }) => undefined),
+  startUsageRecord: vi.fn(async (_payload: Record<string, never>) => undefined),
+  restoreUsageRecord: vi.fn(async (_payload: Record<string, never>) => undefined),
 };
 const writeText = vi.fn(async (_text: string) => undefined);
 
@@ -206,20 +208,84 @@ describe("usage record in Privacy", () => {
     expect(screen.getAllByRole("row")).toHaveLength(ROWS.length + 1);
   });
 
-  it.each(["EACCES", "INVALID_USAGE_RECORD"])("reports %s once and offers nothing that would write the unreadable record", async code => {
+  it.each([
+    ["EACCES", "usage-record-retry", "Fix the file or its permissions at the path below, then try again.",
+      "dohc could not read the usage record (EACCES). Fix the file or its permissions, then try again."],
+    ["INVALID_USAGE_RECORD", "usage-record-start", "Start a new record, and dohc keeps this file in the same folder.",
+      "dohc could not read the usage record (INVALID_USAGE_RECORD). Start a new record in Privacy, or fix the file and try again."],
+  ])("reports %s once with Try again, and offers only its way out", async (code, action, hint, notice) => {
     const onError = vi.fn();
-    bridge.readUsageRecord.mockResolvedValueOnce({ status: "unreadable", file: RECORD.file, code });
+    bridge.readUsageRecord.mockResolvedValueOnce({ status: "unreadable", file: RECORD.file, code, setAside: null });
     render(<UsageRecordSettings onError={onError} />);
     const unreadable = await screen.findByTestId("usage-record-unreadable");
     expect(onError).toHaveBeenCalledTimes(1);
-    expect(onError).toHaveBeenCalledWith(
-      `dohc could not read the usage record (${code}). dohc leaves the file as it is and counts nothing. Restart dohc to try again.`);
+    expect(onError).toHaveBeenCalledWith(notice, undefined, expect.any(Function));
     expect(unreadable.textContent).toContain(`dohc could not read the usage record (${code}).`);
-    expect(unreadable.textContent).toContain("dohc leaves the file as it is and counts nothing.");
+    expect(unreadable.textContent).toContain(hint);
+    expect(unreadable.textContent).not.toMatch(/cannot be (recovered|restored|undone)/i);
+    expect(within(unreadable).getAllByRole("button").map(button => button.dataset.testid)).toEqual([action]);
     expect(screen.queryByRole("switch")).toBeNull();
     expect(screen.queryByTestId("usage-record-clear")).toBeNull();
     expect(screen.queryByTestId("usage-record-copy")).toBeNull();
     expect(screen.getByTestId("usage-record-file").textContent).toBe(RECORD.file);
+  });
+
+  it("reads again from the card's Try again, and from Notices' after Privacy closed", async () => {
+    const onError = vi.fn();
+    const unreadable: UsageRecordResult = { status: "unreadable", file: RECORD.file, code: "EACCES", setAside: null };
+    bridge.readUsageRecord.mockResolvedValueOnce(unreadable);
+    const view = render(<UsageRecordSettings onError={onError} />);
+    fireEvent.click(await screen.findByTestId("usage-record-retry"));
+    await waitFor(() => expect(card().dataset.state).toBe("on"));
+    expect(bridge.readUsageRecord).toHaveBeenCalledTimes(2);
+    const retry = onError.mock.calls[0]![2] as () => Promise<void>;
+    view.unmount();
+    bridge.readUsageRecord.mockResolvedValueOnce(unreadable);
+    await act(retry);
+    expect(onError).toHaveBeenCalledTimes(2);
+    expect(onError.mock.calls[1]![0]).toContain("(EACCES)");
+  });
+
+  it("starts a new record from the card and shows the one set aside with Copy and Restore", async () => {
+    bridge.readUsageRecord
+      .mockResolvedValueOnce({ status: "unreadable", file: RECORD.file, code: "INVALID_USAGE_RECORD", setAside: null })
+      .mockResolvedValueOnce({ ...EMPTY, enabled: false, setAside: "dohc-usage.set-aside-1.json" });
+    render(<UsageRecordSettings />);
+    fireEvent.click(await screen.findByTestId("usage-record-start"));
+    await waitFor(() => expect(card().dataset.state).toBe("off"));
+    expect(bridge.startUsageRecord).toHaveBeenCalledWith({});
+    expect(toggle().getAttribute("aria-checked")).toBe("false");
+    const aside = screen.getByTestId("usage-record-set-aside");
+    expect(aside.textContent).toContain("dohc-usage.set-aside-1.json");
+    fireEvent.click(within(aside).getByTestId("usage-record-set-aside-copy"));
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith("dohc-usage.set-aside-1.json"));
+    bridge.readUsageRecord.mockResolvedValueOnce({ ...RECORD, setAside: "dohc-usage.set-aside-2.json" });
+    fireEvent.click(within(aside).getByTestId("usage-record-restore"));
+    await waitFor(() => expect(card().dataset.state).toBe("on"));
+    expect(bridge.restoreUsageRecord).toHaveBeenCalledWith({});
+    expect(screen.queryByTestId("usage-record-clear-confirm")).toBeNull();
+    expect(screen.getByTestId("usage-record-set-aside").textContent).toContain("dohc-usage.set-aside-2.json");
+  });
+
+  it.each([
+    ["start", "usage-record-start", "dohc could not start a new usage record. file in use"],
+    ["restore", "usage-record-restore", "dohc could not restore the usage record set aside. file in use"],
+  ] as const)("reports a %s that failed with Try again, even after Privacy closed", async (name, testId, words) => {
+    const onError = vi.fn();
+    const operation = name === "start" ? bridge.startUsageRecord : bridge.restoreUsageRecord;
+    const running = deferred<undefined>();
+    operation.mockImplementationOnce(() => running.promise);
+    bridge.readUsageRecord.mockResolvedValue({ status: "unreadable", file: RECORD.file, code: "INVALID_USAGE_RECORD",
+      setAside: "dohc-usage.set-aside-1.json" });
+    const view = render(<UsageRecordSettings onError={onError} />);
+    fireEvent.click(await screen.findByTestId(testId));
+    view.unmount();
+    await act(async () => running.reject(new Error("file in use")));
+    // The unreadable read's own notice comes first.
+    const failure = onError.mock.calls.find(call => call[0] === words)!;
+    expect(failure).toEqual([words, expect.any(Error), expect.any(Function)]);
+    await act(failure[2]);
+    expect(operation).toHaveBeenCalledTimes(2);
   });
 
   it("reports a read that failed and reads again on Try again", async () => {
@@ -227,7 +293,7 @@ describe("usage record in Privacy", () => {
     bridge.readUsageRecord.mockRejectedValueOnce(new Error("main went away"));
     render(<UsageRecordSettings onError={onError} />);
     const failed = await screen.findByTestId("usage-record-failed");
-    expect(onError).toHaveBeenCalledWith(expect.stringContaining("main went away"), expect.any(Error));
+    expect(onError).toHaveBeenCalledWith(expect.stringContaining("main went away"), expect.any(Error), expect.any(Function));
     fireEvent.click(within(failed).getByRole("button", { name: "Try again" }));
     await waitFor(() => expect(card().dataset.state).toBe("on"));
     expect(bridge.readUsageRecord).toHaveBeenCalledTimes(2);

@@ -6089,6 +6089,9 @@ export const reportingOperations = {
 // Privacy reads or changes it; no CLI, MCP or share-link door does. `counted`
 // is false where this build does not count that door, so a zero there means
 // nothing. `file` is for this computer's screen only, never for a copy.
+// `setAside` names the newest record set aside in the same folder.
+export const INVALID_USAGE_RECORD = "INVALID_USAGE_RECORD";
+const UsageRecordSetAside = z.string().max(255).nullable();
 const UsageRecordCell = z.strictObject({ count: z.number().int().nonnegative(), counted: z.boolean() });
 export const UsageRecordRow = z.strictObject({
   capabilityId: z.string().max(128),
@@ -6105,9 +6108,10 @@ export const UsageRecordResult = z.discriminatedUnion("status", [
     since: z.iso.date().nullable(),
     incompleteDays: z.number().int().nonnegative(),
     rows: z.array(UsageRecordRow).max(500),
+    setAside: UsageRecordSetAside,
   }),
   // dohc leaves a record it cannot read as it is, and counts nothing.
-  z.strictObject({ status: z.literal("unreadable"), file: z.string().max(4096), code: z.string().max(64) }),
+  z.strictObject({ status: z.literal("unreadable"), file: z.string().max(4096), code: z.string().max(64), setAside: UsageRecordSetAside }),
 ]);
 export type UsageRecordResult = z.infer<typeof UsageRecordResult>;
 
@@ -6129,6 +6133,18 @@ export const usageRecordOperations = {
     scope: "device",
     channel: "desktop:set-usage-record-enabled",
     payload: z.strictObject({ enabled: z.boolean() }), guard: "trusted-sender",
+  },
+  startUsageRecord: {
+    capabilityId: "usage.start",
+    scope: "device",
+    channel: "desktop:start-usage-record",
+    payload: z.strictObject({}), guard: "trusted-sender",
+  },
+  restoreUsageRecord: {
+    capabilityId: "usage.restore",
+    scope: "device",
+    channel: "desktop:restore-usage-record",
+    payload: z.strictObject({}), guard: "trusted-sender",
   },
 } satisfies OperationTable;
 

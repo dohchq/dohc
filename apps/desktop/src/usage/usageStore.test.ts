@@ -1,10 +1,10 @@
 import * as fs from "node:fs/promises";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { localUsageDay, UsageSnapshot, type UsageBuildPair, type UsageSnapshot as Snapshot } from "@dohc/workspace-contracts/usage";
 import { deferred } from "../testing/deferred";
 import { createTestScratch } from "../workspaces/testTemp";
-import { createUsageStore, USAGE_PENDING_LIMIT, USAGE_SNAPSHOT_NAME, USAGE_WRITE_INTERVAL_MS, type UsageFileSystem } from "./usageStore";
+import { createUsageStore, usageAsideName, USAGE_PENDING_LIMIT, USAGE_SNAPSHOT_NAME, USAGE_WRITE_INTERVAL_MS, type UsageFileSystem } from "./usageStore";
 
 const pair = { capabilityId: "version.try", door: "renderer" } as const;
 const mapping: UsageBuildPair[] = [{ ...pair, status: "covered" }];
@@ -25,6 +25,7 @@ function memoryStore(initial: unknown = seed(), buildMapping = mapping) {
       if (text === undefined) throw Object.assign(new Error("missing"), { code: "ENOENT" });
       return text;
     }),
+    readdir: vi.fn(async (directory: string) => [...disk.keys()].filter(file => dirname(file) === directory).map(file => basename(file))),
     mkdir: vi.fn(async () => {}),
     writeFile: vi.fn(async (path: string, data: string) => { disk.set(path, data); }),
     rename: vi.fn(async (from: string, to: string) => { disk.set(to, disk.get(from)!); disk.delete(from); }),
@@ -233,7 +234,8 @@ describe("local usage store", () => {
     await store.load();
     await vi.advanceTimersByTimeAsync(86_400_000);
     await store.close();
-    expect(io.readFile).toHaveBeenCalledTimes(4);
+    // The launch, then the read and three controls that each retry it.
+    expect(io.readFile).toHaveBeenCalledTimes(5);
     expect(io.writeFile).not.toHaveBeenCalled();
     expect(io.rename).not.toHaveBeenCalled();
     expect(io.rm).not.toHaveBeenCalled();
@@ -304,6 +306,108 @@ describe("local usage store", () => {
     expect(saved()).toMatchObject({ enabled: true, counts: repaired.counts });
     expect((await store.read()).counts).toEqual(repaired.counts);
     expect(store.recordSuccess(pair)).toBe(true);
+  });
+  it("reads a record again once the person fixes what kept dohc from opening it", async () => {
+    const { store, io } = memoryStore();
+    const readError = Object.assign(new Error("denied"), { code: "EACCES" });
+    io.readFile.mockRejectedValueOnce(readError).mockRejectedValueOnce(readError);
+    await store.load();
+    await expect(store.read()).rejects.toBe(readError);
+    expect((await store.read()).enabled).toBe(true);
+    expect(store.recordSuccess(pair)).toBe(true);
+    expect(io.readFile).toHaveBeenCalledTimes(3);
+  });
+  it("refuses to set aside or restore over a record it cannot open", async () => {
+    const { store, io, disk } = memoryStore();
+    disk.set(join("isolated-state", usageAsideName(1)), "older");
+    const readError = Object.assign(new Error("denied"), { code: "EACCES" });
+    io.readFile.mockRejectedValue(readError);
+    await store.load();
+    await expect(store.startNewRecord()).rejects.toBe(readError);
+    await expect(store.restoreSetAside()).rejects.toBe(readError);
+    expect(io.rename).not.toHaveBeenCalled();
+    expect(io.writeFile).not.toHaveBeenCalled();
+  });
+  it("sets an undecodable record aside and starts one that counts only after the person turns it on", async () => {
+    const { store, disk, path, saved, restart } = memoryStore();
+    disk.set(path, "not JSON");
+    await store.load();
+    expect(await store.newestAside()).toBeNull();
+    await store.startNewRecord();
+    expect(disk.get(join("isolated-state", usageAsideName(1)))).toBe("not JSON");
+    expect(await store.newestAside()).toBe(usageAsideName(1));
+    expect(saved()).toMatchObject({ enabled: false, counts: [] });
+    expect(store.recordSuccess(pair)).toBe(false);
+    await store.close();
+    const next = restart();
+    expect((await next.read()).enabled).toBe(false);
+    await next.setEnabled(true);
+    expect(next.recordSuccess(pair)).toBe(true);
+    await next.flush();
+    expect(saved()).toMatchObject({ enabled: true, counts: [{ count: 1 }] });
+  });
+  it("sets a record aside under the next unused number, never over another file", async () => {
+    const { store, disk, path } = memoryStore();
+    const at = (name: string) => join("isolated-state", name);
+    disk.set(at(usageAsideName(1)), "first");
+    disk.set(at(usageAsideName(3)), "third");
+    disk.set(at("dohc-usage.set-aside-x.json"), "not one of ours");
+    disk.set(path, "not JSON");
+    await store.load();
+    await store.startNewRecord();
+    expect(disk.get(at(usageAsideName(1)))).toBe("first");
+    expect(disk.get(at(usageAsideName(3)))).toBe("third");
+    expect(disk.get(at("dohc-usage.set-aside-x.json"))).toBe("not one of ours");
+    expect(disk.get(at(usageAsideName(4)))).toBe("not JSON");
+    expect(await store.newestAside()).toBe(usageAsideName(4));
+  });
+  it("restores by swapping the files, keeps the newer record's last counts, and swaps back", async () => {
+    const { store, disk, path, saved } = memoryStore();
+    const at = (number: number) => join("isolated-state", usageAsideName(number));
+    disk.set(path, "not JSON");
+    await store.load();
+    await store.startNewRecord();
+    await store.setEnabled(true);
+    expect(store.recordSuccess(pair)).toBe(true);
+    await store.restoreSetAside();
+    expect(disk.get(path)).toBe("not JSON");
+    expect(disk.has(at(1))).toBe(false);
+    expect(JSON.parse(disk.get(at(2))!)).toMatchObject({ enabled: true, counts: [{ count: 1 }] });
+    await expect(store.read()).rejects.toMatchObject({ code: "INVALID_USAGE_RECORD" });
+    expect(await store.newestAside()).toBe(usageAsideName(2));
+    expect(store.recordSuccess(pair)).toBe(false);
+    await store.restoreSetAside();
+    expect(disk.get(at(3))).toBe("not JSON");
+    expect(saved()).toMatchObject({ enabled: true, counts: [{ count: 1 }] });
+    expect((await store.read()).counts).toEqual([{ ...pair, day: today(), count: 1 }]);
+    expect(store.recordSuccess(pair)).toBe(true);
+  });
+  it("leaves both files under their names when a rename fails, and reports it", async () => {
+    const { store, io, disk, path } = memoryStore();
+    const at = (number: number) => join("isolated-state", usageAsideName(number));
+    disk.set(path, "not JSON");
+    await store.load();
+    io.rename.mockRejectedValueOnce(new Error("file in use"));
+    await expect(store.startNewRecord()).rejects.toThrow("file in use");
+    expect(disk.get(path)).toBe("not JSON");
+    expect(disk.has(at(1))).toBe(false);
+    await expect(store.read()).rejects.toMatchObject({ code: "INVALID_USAGE_RECORD" });
+
+    await store.startNewRecord();
+    await store.flush();
+    const newer = disk.get(path);
+    const rename = io.rename.getMockImplementation()!;
+    // The newer record moves aside, the older one cannot move back, so the newer returns.
+    io.rename.mockImplementationOnce(rename).mockRejectedValueOnce(new Error("file in use"));
+    await expect(store.restoreSetAside()).rejects.toThrow("file in use");
+    expect(disk.get(path)).toBe(newer);
+    expect(disk.get(at(1))).toBe("not JSON");
+    expect(disk.has(at(2))).toBe(false);
+    io.rename.mockRejectedValueOnce(new Error("file in use"));
+    await expect(store.restoreSetAside()).rejects.toThrow("file in use");
+    expect(disk.get(path)).toBe(newer);
+    expect(disk.get(at(1))).toBe("not JSON");
+    expect((await store.read()).enabled).toBe(false);
   });
   it("ignores interrupted temporary snapshots and can retry a failed Clear", async () => {
     const { store, io, saved, disk, path } = memoryStore();

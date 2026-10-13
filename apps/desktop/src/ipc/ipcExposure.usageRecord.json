@@ -2,6 +2,8 @@
   "nameAdditions": [
     "desktop:clear-usage-record",
     "desktop:read-usage-record",
-    "desktop:set-usage-record-enabled"
+    "desktop:restore-usage-record",
+    "desktop:set-usage-record-enabled",
+    "desktop:start-usage-record"
   ]
 }
