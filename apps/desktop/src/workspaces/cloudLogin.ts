@@ -55,6 +55,10 @@ export interface CloudLogin {
     userId: string;
     token: string;
   }): Promise<void>;
+  // The same, matched by account instead of token: every session of a deleted
+  // account is dead, including one saved after the deletion began. Another
+  // account's session stays.
+  invalidateAccount(account: { serverUrl: string; userId: string }): Promise<void>;
   // The persisted token for the sync engine (main-process only — never IPC).
   credentials(): Promise<CloudCredentials | null>;
 }
@@ -242,6 +246,33 @@ export function createCloudLogin(options: CloudLoginOptions): CloudLogin {
       await options.store.clear();
       invalidatedSession = null;
       await options.store.clearInvalidMarker().catch(() => undefined);
+    });
+  }
+  // Compares and clears inside the store's mutation queue, so a login save
+  // cannot land between the two.
+  async function invalidateSaved(
+    matches: (saved: CloudCredentials) => boolean,
+  ): Promise<void> {
+    await mutateStore(async () => {
+      const saved = await options.store.load();
+      if (saved === null || !matches(saved)) return;
+      const dead = { serverUrl: saved.serverUrl, userId: saved.userId, token: saved.token };
+      try {
+        await options.store.clear();
+        invalidatedSession = null;
+        await options.store.clearInvalidMarker().catch(() => undefined);
+      } catch (error) {
+        // Deletion failed, but the session is still dead: hold the
+        // in-memory tombstone and persist the marker (best-effort), so
+        // even a restart cannot read the dead record back as connected.
+        // Fail loudly — the next read or invalidation retries the
+        // deletion.
+        invalidatedSession = dead;
+        await options.store
+          .saveInvalidMarker(markerFor(dead))
+          .catch(() => undefined);
+        throw error;
+      }
     });
   }
   let pollInFlight: {
@@ -448,33 +479,17 @@ export function createCloudLogin(options: CloudLoginOptions): CloudLogin {
     },
 
     async invalidateSessionIf(expected) {
-      await mutateStore(async () => {
-        const saved = await options.store.load();
-        if (
-          saved === null ||
-          saved.token !== expected.token ||
-          saved.serverUrl !== expected.serverUrl ||
-          saved.userId !== expected.userId
-        ) {
-          return;
-        }
-        try {
-          await options.store.clear();
-          invalidatedSession = null;
-          await options.store.clearInvalidMarker().catch(() => undefined);
-        } catch (error) {
-          // Deletion failed, but the session is still dead: hold the
-          // in-memory tombstone and persist the marker (best-effort), so
-          // even a restart cannot read the dead record back as connected.
-          // Fail loudly — the next read or invalidation retries the
-          // deletion.
-          invalidatedSession = expected;
-          await options.store
-            .saveInvalidMarker(markerFor(expected))
-            .catch(() => undefined);
-          throw error;
-        }
-      });
+      await invalidateSaved((saved) =>
+        saved.token === expected.token &&
+        saved.serverUrl === expected.serverUrl &&
+        saved.userId === expected.userId,
+      );
+    },
+
+    async invalidateAccount(account) {
+      await invalidateSaved((saved) =>
+        saved.serverUrl === account.serverUrl && saved.userId === account.userId,
+      );
     },
 
     async credentials() {

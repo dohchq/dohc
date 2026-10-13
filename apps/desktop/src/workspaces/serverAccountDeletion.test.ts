@@ -39,6 +39,16 @@ function harness(answer: (path: string, body: Record<string, unknown>) => Respon
 
 const deleteInput = { server: credentials.serverUrl, previewToken: scope.previewToken, password: "correct horse" };
 
+// A harness whose session already reviewed the preview; `answer` answers the
+// delete call, the only call it records.
+async function reviewed(answer: () => Response | Promise<Response>) {
+  const h = harness((path) => (path.endsWith("/deletion-preview") ? json(200, scope) : answer()));
+  await h.deletion.preview();
+  h.calls.length = 0;
+  h.fetch.mockClear();
+  return h;
+}
+
 describe("server account deletion", () => {
   it("previews with the stored session and names the owned workspaces this computer has", async () => {
     const h = harness(() => json(200, scope));
@@ -82,7 +92,7 @@ describe("server account deletion", () => {
   });
 
   it("sends the token and password only to the reviewed server, then disconnects that account", async () => {
-    const h = harness(() => json(200, { finished: true }));
+    const h = await reviewed(() => json(200, { finished: true }));
     await expect(h.deletion.delete(deleteInput)).resolves.toEqual({
       ok: true, finished: true, email: credentials.email, server: credentials.serverUrl,
     });
@@ -94,23 +104,63 @@ describe("server account deletion", () => {
   });
 
   it("reports a pending deletion as unfinished and still disconnects", async () => {
-    const h = harness(() => json(200, { finished: false, pending: true }));
+    const h = await reviewed(() => json(200, { finished: false, pending: true }));
     await expect(h.deletion.delete(deleteInput)).resolves.toMatchObject({ ok: true, finished: false });
     expect(h.disconnect).toHaveBeenCalledOnce();
   });
 
+  it.each([
+    ["an empty object", () => json(200, {})],
+    ["unfinished without pending", () => json(200, { finished: false })],
+    ["a non-boolean finished", () => json(200, { finished: "yes" })],
+    ["a body that is not JSON", () => new Response("<html>ok</html>", { status: 200 })],
+  ])("treats a success with %s as an error and keeps the session", async (_name, answer) => {
+    const h = await reviewed(answer);
+    await expect(h.deletion.delete(deleteInput)).rejects.toThrow("invalid answer to deletion");
+    expect(h.disconnect).not.toHaveBeenCalled();
+  });
+
   it("keeps a completed deletion when the disconnect fails", async () => {
-    const h = harness(() => json(200, { finished: true }));
+    const h = await reviewed(() => json(200, { finished: true }));
     h.disconnect.mockRejectedValueOnce(new Error("store failed"));
     await expect(h.deletion.delete(deleteInput)).resolves.toMatchObject({ ok: true, finished: true });
   });
 
   it("never sends the password after the session moved to another server", async () => {
-    const h = harness(() => json(200, { finished: true }));
+    const h = await reviewed(() => json(200, { finished: true }));
     h.switchTo({ ...credentials, serverUrl: "https://other.example.test" });
     await expect(h.deletion.delete(deleteInput)).resolves.toMatchObject({ ok: false, code: "preview-changed" });
     expect(h.fetch).not.toHaveBeenCalled();
     expect(h.disconnect).not.toHaveBeenCalled();
+  });
+
+  it("never sends the password after the session moved to another account on the same server", async () => {
+    const h = await reviewed(() => json(200, { finished: true }));
+    h.switchTo({ ...credentials, userId: "someone-else", email: "someone@example.test", token: "other-token" });
+    await expect(h.deletion.delete(deleteInput)).resolves.toEqual({
+      ok: false, code: "preview-changed", reason: "This computer is now connected to another account. Review deletion again.",
+    });
+    expect(h.fetch).not.toHaveBeenCalled();
+    expect(h.disconnect).not.toHaveBeenCalled();
+  });
+
+  it("deletes after a same-account token rotation", async () => {
+    const h = await reviewed(() => json(200, { finished: true }));
+    h.switchTo({ ...credentials, token: "rotated-token" });
+    await expect(h.deletion.delete(deleteInput)).resolves.toMatchObject({ ok: true, finished: true });
+    expect((h.calls[0]!.init.headers as Record<string, string>).authorization).toBe("Bearer rotated-token");
+  });
+
+  it("refuses a token this app did not review, or one past its five minutes", async () => {
+    const h = await reviewed(() => json(200, { finished: true }));
+    await expect(h.deletion.delete({ ...deleteInput, previewToken: "someone.else.s" })).resolves.toMatchObject({ ok: false, code: "preview-changed" });
+    vi.useFakeTimers({ now: Date.now() + 5 * 60_000 });
+    try {
+      await expect(h.deletion.delete(deleteInput)).resolves.toMatchObject({ ok: false, code: "preview-changed" });
+    } finally {
+      vi.useRealTimers();
+    }
+    expect(h.fetch).not.toHaveBeenCalled();
   });
 
   it.each([
@@ -120,7 +170,7 @@ describe("server account deletion", () => {
     [400, { code: "PASSWORD_REQUIRED" }, "wrong-password"],
     [429, {}, "rate-limited"],
   ] as const)("refuses a delete the server answered %i %j", async (status, body, code) => {
-    const h = harness(() => json(status, body));
+    const h = await reviewed(() => json(status, body));
     await expect(h.deletion.delete(deleteInput)).resolves.toMatchObject({ ok: false, code });
     expect(h.disconnect).not.toHaveBeenCalled();
   });
@@ -130,7 +180,7 @@ describe("server account deletion", () => {
     [503, { code: "DELETION_PENDING", message: "Account deletion is waiting for the server. Try again later." }, "waiting for the server"],
     [502, {}, "could not delete this account"],
   ])("fails a delete the server answered %i", async (status, body, words) => {
-    const h = harness(() => json(status, body));
+    const h = await reviewed(() => json(status, body));
     await expect(h.deletion.delete(deleteInput)).rejects.toThrow(words);
     expect(h.disconnect).not.toHaveBeenCalled();
   });
@@ -149,6 +199,10 @@ describe("server account IPC", () => {
       serverAccountOperations.previewServerAccountDeletion.channel,
       serverAccountOperations.deleteServerAccount.channel,
     ]);
+    const preview = handlers.get(serverAccountOperations.previewServerAccountDeletion.channel)!;
+    await expect(preview(false, {})).rejects.toThrow("Untrusted sender");
+    await expect(preview(true, { server: "https://other.example.test" })).rejects.toThrow();
+    expect(deletion.preview).not.toHaveBeenCalled();
     const remove = handlers.get(serverAccountOperations.deleteServerAccount.channel)!;
     await expect(remove(false, deleteInput)).rejects.toThrow("Untrusted sender");
     await expect(remove(true, { ...deleteInput, password: "" })).rejects.toThrow();

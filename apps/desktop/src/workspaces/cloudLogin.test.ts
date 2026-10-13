@@ -1031,3 +1031,77 @@ describe("invalidateSessionIf", () => {
     });
   });
 });
+
+// A deleted account: every session of it is dead, whatever its token.
+describe("invalidateAccount", () => {
+  const SESSION_A: CloudCredentials = {
+    serverUrl: "https://cloud.test",
+    email: "a@dohc.test",
+    userId: "usr_a",
+    token: "token-a",
+  };
+  const ACCOUNT_A = { serverUrl: SESSION_A.serverUrl, userId: SESSION_A.userId };
+
+  it("clears the account's session after another window signed it in again", async () => {
+    const store = memoryStore();
+    store.saved = { ...SESSION_A, token: "token-a2" };
+    const login = createCloudLogin({ store, fetch: fakeFetch({}).impl });
+    await login.invalidateAccount(ACCOUNT_A);
+    expect(store.saved).toBeNull();
+    await expect(login.status()).resolves.toEqual({ connected: false });
+  });
+
+  it.each([
+    ["another account on the same server", { ...SESSION_A, userId: "usr_b", email: "b@dohc.test", token: "token-b" }],
+    ["the same user id on another server", { ...SESSION_A, serverUrl: "https://other.test", token: "token-o" }],
+  ])("keeps %s", async (_name, other) => {
+    const store = memoryStore();
+    store.saved = other;
+    const login = createCloudLogin({ store, fetch: fakeFetch({}).impl });
+    await login.invalidateAccount(ACCOUNT_A);
+    expect(store.saved).toEqual(other);
+    await expect(login.status()).resolves.toMatchObject({ connected: true });
+  });
+
+  it("clears a same-account sign-in whose save is in flight when deletion finishes", async () => {
+    const saveStarted = deferred<void>();
+    const releaseSave = deferred<void>();
+    const store = memoryStore();
+    store.saved = SESSION_A;
+    store.save = async (credentials) => {
+      saveStarted.resolve(undefined);
+      await releaseSave.promise;
+      store.saved = credentials;
+    };
+    const { impl } = fakeFetch({
+      "/api/auth/device/code": () => ({ body: DEVICE }),
+      "/api/auth/device/token": () => ({ body: { access_token: "token-a2" } }),
+      "/api/auth/get-session": () => ({ body: { user: { email: SESSION_A.email, id: SESSION_A.userId } } }),
+    });
+    const login = createCloudLogin({ store, fetch: impl });
+
+    await login.start("https://cloud.test");
+    const polling = login.poll();
+    await saveStarted.promise;
+    const invalidating = login.invalidateAccount(ACCOUNT_A);
+    releaseSave.resolve(undefined);
+
+    await expect(polling).resolves.toMatchObject({ status: "complete" });
+    await invalidating;
+    expect(store.saved).toBeNull();
+    await expect(login.credentials()).resolves.toBeNull();
+  });
+
+  it("tombstones the account's current token when the clear fails", async () => {
+    const store = memoryStore();
+    store.saved = { ...SESSION_A, token: "token-a2" };
+    store.clear = async () => {
+      throw new Error("store unavailable");
+    };
+    const login = createCloudLogin({ store, fetch: fakeFetch({}).impl });
+    await expect(login.invalidateAccount(ACCOUNT_A)).rejects.toThrow("store unavailable");
+    expect(store.invalidMarker).toMatchObject(ACCOUNT_A);
+    await expect(login.status()).resolves.toEqual({ connected: false });
+    await expect(login.credentials()).resolves.toBeNull();
+  });
+});

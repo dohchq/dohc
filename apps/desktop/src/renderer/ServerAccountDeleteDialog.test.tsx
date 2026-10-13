@@ -2,10 +2,13 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ServerAccountDeletionPreview } from "@dohc/cli/account";
+import type { DohcDesktopBridge } from "../ipc/bridgeContract";
 import { CloudLogin } from "./CloudLogin";
 import { ServerAccountDeleteDialog } from "./ServerAccountDeleteDialog";
 import { deferred } from "../testing/deferred";
 
+type SessionListener = Parameters<DohcDesktopBridge["onCloudSessionChanged"]>[0];
+const sessionListeners = new Set<SessionListener>();
 const bridgeMock = {
   cloudStatus: vi.fn(),
   cloudLogout: vi.fn(),
@@ -14,7 +17,18 @@ const bridgeMock = {
   platform: "linux",
   getUpdateState: vi.fn(),
   onUpdateState: vi.fn(),
+  onCloudSessionChanged: (listener: SessionListener) => {
+    sessionListeners.add(listener);
+    return () => { sessionListeners.delete(listener); };
+  },
 };
+
+// What main broadcasts when another window signs in, switches, or disconnects.
+function changeSession(sessionKey: string | null) {
+  act(() => {
+    for (const listener of [...sessionListeners]) listener({ sessionKey, phase: "ready" });
+  });
+}
 
 vi.mock("./bridge", () => ({
   bridge: () => bridgeMock,
@@ -39,6 +53,7 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+  sessionListeners.clear();
 });
 
 function renderDialog(overrides: Partial<Parameters<typeof ServerAccountDeleteDialog>[0]> = {}) {
@@ -69,7 +84,8 @@ describe("ServerAccountDeleteDialog", () => {
     expect(screen.getByTestId("server-account-delete-shares").textContent).toBe(
       "3 shares you own end. People you shared with lose access and keep their copies.",
     );
-    expect(screen.getByTestId("server-account-delete-grants").textContent).toBe("Your access to 1 share others gave you ends.");
+    // The server counts revoked grants too, so the dialog names no number.
+    expect(screen.getByTestId("server-account-delete-grants").textContent).toBe("Your access to shares others gave you ends.");
     expect(dialog.textContent).toContain("Workspaces on this computer stay, with their files.");
     expect(dialog.textContent).toContain(
       "This cannot be undone. If you create an account again later, this server will not accept your old copies of these workspaces.",
@@ -118,6 +134,27 @@ describe("ServerAccountDeleteDialog", () => {
     await waitFor(() => expect(bridgeMock.deleteServerAccount).toHaveBeenLastCalledWith({ server, previewToken: "token-2", password: "correct horse" }));
   });
 
+  it("can be cancelled after a refreshed review", async () => {
+    bridgeMock.previewServerAccountDeletion
+      .mockResolvedValueOnce(preview)
+      .mockResolvedValueOnce({ ...preview, previewToken: "token-2" });
+    bridgeMock.deleteServerAccount.mockResolvedValue({ ok: false, code: "preview-changed", reason: "Review it again." });
+    const { props } = renderDialog();
+    await screen.findByTestId("server-account-delete-scope");
+    typePassword("correct horse");
+    fireEvent.click(screen.getByTestId("server-account-delete-confirm"));
+    await screen.findByTestId("server-account-delete-changed");
+    await screen.findByTestId("server-account-delete-scope");
+
+    expect(screen.getByTestId("server-account-delete-confirm").textContent).toBe("Delete account");
+    const cancel = screen.getByRole("button", { name: "Cancel" }) as HTMLButtonElement;
+    expect(cancel.disabled).toBe(false);
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(props.onClose).toHaveBeenCalledTimes(1);
+    fireEvent.click(cancel);
+    expect(props.onClose).toHaveBeenCalledTimes(2);
+  });
+
   it("keeps a wrong password beside the field and the dialog open", async () => {
     bridgeMock.deleteServerAccount.mockResolvedValue({ ok: false, code: "wrong-password", reason: "The password is incorrect." });
     const { props } = renderDialog();
@@ -133,18 +170,66 @@ describe("ServerAccountDeleteDialog", () => {
     expect(props.onClose).not.toHaveBeenCalled();
   });
 
-  it("says plainly when the server paused attempts", async () => {
-    bridgeMock.deleteServerAccount.mockResolvedValue({
-      ok: false, code: "rate-limited", reason: "The server paused deletion after too many attempts. Wait a few minutes, then try again.",
-    });
-    renderDialog();
+  it("hands a paused attempt to the owner's error notice", async () => {
+    const reason = "The server paused deletion after too many attempts. Wait a few minutes, then try again.";
+    bridgeMock.deleteServerAccount.mockResolvedValue({ ok: false, code: "rate-limited", reason });
+    const { props } = renderDialog();
     await screen.findByTestId("server-account-delete-scope");
     typePassword("correct horse");
     fireEvent.click(screen.getByTestId("server-account-delete-confirm"));
 
-    expect((await screen.findByTestId("server-account-delete-paused")).textContent).toBe(
-      "The server paused deletion after too many attempts. Wait a few minutes, then try again.",
-    );
+    await waitFor(() => expect(props.onError).toHaveBeenCalledWith(reason, expect.any(Error)));
+    expect(screen.queryByTestId("server-account-delete-password-problem")).toBeNull();
+  });
+
+  it("ends a review whose preview is still loading when the session changes", async () => {
+    const slow = deferred<ServerAccountDeletionPreview>();
+    bridgeMock.previewServerAccountDeletion.mockReturnValueOnce(slow.promise);
+    const { props } = renderDialog();
+    changeSession("https://other.example.test##usr_b");
+    expect(props.onClose).toHaveBeenCalledOnce();
+
+    await act(async () => { slow.resolve(preview); });
+    expect(screen.queryByTestId("server-account-delete-scope")).toBeNull();
+    expect(props.onError).not.toHaveBeenCalled();
+  });
+
+  it("ends a shown review when the session changes", async () => {
+    const { props } = renderDialog();
+    await screen.findByTestId("server-account-delete-scope");
+    changeSession(null);
+    expect(props.onClose).toHaveBeenCalledOnce();
+    expect(bridgeMock.deleteServerAccount).not.toHaveBeenCalled();
+  });
+
+  it("still reports a sent delete whose own disconnect changed the session", async () => {
+    const slow = deferred<{ ok: true; finished: boolean; email: string; server: string }>();
+    bridgeMock.deleteServerAccount.mockReturnValue(slow.promise);
+    const { props } = renderDialog();
+    await screen.findByTestId("server-account-delete-scope");
+    typePassword("correct horse");
+    fireEvent.click(screen.getByTestId("server-account-delete-confirm"));
+    await waitFor(() => expect(bridgeMock.deleteServerAccount).toHaveBeenCalledOnce());
+    changeSession(null);
+
+    await act(async () => { slow.resolve({ ok: true, finished: true, email: "ice@dohc.dev", server }); });
+    expect(props.onDeleted).toHaveBeenCalledWith({ finished: true, email: "ice@dohc.dev", server });
+    expect(props.onClose).not.toHaveBeenCalled();
+  });
+
+  it("does not review another session again after a refused delete", async () => {
+    const slow = deferred<{ ok: false; code: "preview-changed"; reason: string }>();
+    bridgeMock.deleteServerAccount.mockReturnValue(slow.promise);
+    const { props } = renderDialog();
+    await screen.findByTestId("server-account-delete-scope");
+    typePassword("correct horse");
+    fireEvent.click(screen.getByTestId("server-account-delete-confirm"));
+    await waitFor(() => expect(bridgeMock.deleteServerAccount).toHaveBeenCalledOnce());
+    changeSession("https://dohc.example.test##usr_b");
+
+    await act(async () => { slow.resolve({ ok: false, code: "preview-changed", reason: "Review it again." }); });
+    expect(props.onClose).toHaveBeenCalledOnce();
+    expect(bridgeMock.previewServerAccountDeletion).toHaveBeenCalledOnce();
   });
 
   it("ignores a slow preview for an account the dialog no longer shows", async () => {
@@ -228,6 +313,29 @@ describe("CloudLogin account deletion", () => {
     await screen.findByTestId("server-account-delete-scope");
     expect(bridgeMock.previewServerAccountDeletion).toHaveBeenCalledTimes(2);
     expect((screen.getByTestId("server-account-delete-password") as HTMLInputElement).value).toBe("");
+  });
+
+  it("closes an open review when another window changes the session", async () => {
+    const slow = deferred<ServerAccountDeletionPreview>();
+    bridgeMock.previewServerAccountDeletion.mockReturnValueOnce(slow.promise);
+    render(<CloudLogin workspaceId="ws-1" />);
+    fireEvent.click(await screen.findByTestId("cloud-delete-account"));
+    expect(screen.getByTestId("server-account-delete")).toBeTruthy();
+
+    changeSession("https://dohc.example.test##usr_b");
+    expect(screen.queryByTestId("server-account-delete")).toBeNull();
+    await act(async () => { slow.resolve(preview); });
+    expect(screen.queryByTestId("server-account-delete")).toBeNull();
+  });
+
+  it("sends a paused attempt to the toast and Notices", async () => {
+    const reason = "The server paused deletion after too many attempts. Wait a few minutes, then try again.";
+    bridgeMock.deleteServerAccount.mockResolvedValue({ ok: false, code: "rate-limited", reason });
+    await openAndDelete();
+
+    expect((await screen.findByTestId("workspace-shell-error")).textContent).toContain(reason);
+    expect(await noticesText()).toContain(reason);
+    expect(screen.getByTestId("cloud-connected")).toBeTruthy();
   });
 
   it("offers deletion only in the standalone panel", async () => {

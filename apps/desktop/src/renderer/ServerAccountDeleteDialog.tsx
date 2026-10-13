@@ -40,18 +40,22 @@ function Delete(props: ServerAccountDeleteDialogProps) {
   // Inline only for what the person can act on in this dialog.
   const [passwordProblem, setPasswordProblem] = useState<string | null>(null);
   const [changed, setChanged] = useState<string | null>(null);
-  const [paused, setPaused] = useState<string | null>(null);
   // Every response checks that it answers the newest request of a dialog
   // still open, so a slow answer never repaints a later one.
   const alive = useRef(true), request = useRef(0);
+  // A review belongs to the session that produced it, so a session change
+  // ends it. A sent delete still answers: the answer names the account it
+  // deleted, and that deletion's own disconnect changes the session.
+  const sent = useRef(false), sessionChanged = useRef(false);
 
   async function load(changedReason?: string) {
     const token = ++request.current;
+    sent.current = false;
     setBusy(true);
+    setDeleting(false);
     setPreview(null);
     setPassword("");
     setPasswordProblem(null);
-    setPaused(null);
     setChanged(changedReason ?? null);
     try {
       const result = await bridge().previewServerAccountDeletion({});
@@ -71,13 +75,23 @@ function Delete(props: ServerAccountDeleteDialogProps) {
     return () => { alive.current = false; request.current++; };
   }, []);
 
+  useEffect(() => bridge().onCloudSessionChanged(() => {
+    if (sent.current) {
+      sessionChanged.current = true;
+      return;
+    }
+    request.current++;
+    props.onClose();
+  }), []);
+
   async function deleteAccount() {
     if (!preview || busy || !password) return;
     const token = ++request.current;
+    sent.current = true;
+    sessionChanged.current = false;
     setBusy(true);
     setDeleting(true);
     setPasswordProblem(null);
-    setPaused(null);
     try {
       const result = await bridge().deleteServerAccount({ server: preview.server, previewToken: preview.previewToken, password });
       if (!alive.current || request.current !== token) return;
@@ -85,21 +99,26 @@ function Delete(props: ServerAccountDeleteDialogProps) {
         props.onDeleted({ finished: result.finished, email: result.email, server: result.server });
         return;
       }
+      if (sessionChanged.current) {
+        props.onClose();
+        return;
+      }
       if (result.code === "preview-changed") {
         void load("What deletion removes changed, or the review expired. Check it again.");
         return;
       }
-      if (result.code === "wrong-password") {
-        setPassword("");
-        setPasswordProblem("The password is incorrect.");
-      } else {
-        setPaused(result.reason);
+      if (result.code === "rate-limited") {
+        props.onError(result.reason, new Error(result.reason));
+        return;
       }
+      setPassword("");
+      setPasswordProblem("The password is incorrect.");
     } catch (cause) {
       if (!alive.current || request.current !== token) return;
       props.onError(ipcErrorMessage(cause, "dohc could not delete this account."), cause);
     } finally {
       if (alive.current && request.current === token) {
+        sent.current = false;
         setBusy(false);
         setDeleting(false);
       }
@@ -161,7 +180,7 @@ function Delete(props: ServerAccountDeleteDialogProps) {
                 {counted(preview.ownedShareCount, "share", "shares")} you own end. People you shared with lose access and keep their copies.
               </p>
               <p className="m-0 text-muted" data-testid="server-account-delete-grants">
-                Your access to {counted(preview.heldGrantCount, "share", "shares")} others gave you ends.
+                Your access to shares others gave you ends.
               </p>
             </section>
             <p className="m-0 text-[13px] text-muted">Workspaces on this computer stay, with their files.</p>
@@ -190,9 +209,6 @@ function Delete(props: ServerAccountDeleteDialogProps) {
               <p id="server-account-delete-password-problem" role="alert" data-testid="server-account-delete-password-problem" className="m-0 -mt-2 text-xs text-danger">
                 {passwordProblem}
               </p>
-            ) : null}
-            {paused ? (
-              <p role="alert" data-testid="server-account-delete-paused" className="m-0 text-xs text-danger">{paused}</p>
             ) : null}
           </>
         )}

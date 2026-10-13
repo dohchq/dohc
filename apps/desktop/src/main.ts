@@ -4547,16 +4547,24 @@ const chatWrites = createChatWrites({
 let ownerAppPublicationForCli: ((input: OwnerAppPublicationRequest, agent: import("@dohc/security-contract/approval-provenance").ApprovalAgent | null) => Promise<OwnerAppPublicationResult>) | undefined;
 let ownerAppResponsesForCli:((input:import("@dohc/cli/app-responses").OwnerAppResponsesRequest)=>Promise<import("@dohc/cli/app-responses").OwnerAppResponsesResult>)|undefined;
 // The desktop window and the CLI delete the account through this one client.
-// Afterwards this computer disconnects only if it is still connected to the
-// deleted account. Local workspaces stay.
+// Afterwards this computer forgets every session of the deleted account, even
+// one another window signed in with while deletion ran, and keeps another
+// account's. Local workspaces stay.
 const serverAccountDeletion = createServerAccountDeletion({
   credentials: loadAndCacheCurrentCredentials,
   workspaces: listWorkspaces,
   disconnect: async (deleted) => {
-    if (cachedCredentials?.serverUrl !== deleted.serverUrl || cachedCredentials.userId !== deleted.userId) return;
+    if (cachedCredentials?.serverUrl !== deleted.serverUrl || cachedCredentials.userId !== deleted.userId) {
+      try {
+        await cloudLogin().invalidateAccount(deleted);
+      } finally {
+        notifyCloudSessionChanged("ready");
+      }
+      return;
+    }
     await runCloudLogoutTransition({
       clearCachedCredentials: () => clearCachedCredentials(),
-      logout: () => cloudLogin().invalidateSessionIf(deleted),
+      logout: () => cloudLogin().invalidateAccount(deleted),
       stopEngines: () => activity.stopEngines(),
       closeRelayTransportWorkspaces: () => closeAllRelayTransportWorkspaces({ accountChanged: true }),
       notifyWorkspaceActivity: () => notifyRenderer(),

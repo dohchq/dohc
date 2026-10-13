@@ -1,3 +1,4 @@
+import { z } from "zod";
 import {
   ServerAccountDeletionPreview,
   ServerAccountDeleteResult,
@@ -26,8 +27,14 @@ const DELETE_TIMEOUT_MS = 90_000;
 const UNREACHABLE = "dohc could not reach this server. Check your connection, then try again.";
 const SESSION_EXPIRED = "Your server session expired. Sign in again, then retry.";
 const RATE_LIMITED = "The server paused deletion after too many attempts. Wait a few minutes, then try again.";
+// The server's preview token lives five minutes.
+const REVIEW_MS = 5 * 60_000;
 // Server codes whose message is written for the person deleting.
 const SERVER_WORDS = new Set(["DELETION_UNAVAILABLE", "DELETION_PENDING"]);
+const Deleted = z.union([
+  z.object({ finished: z.literal(true) }),
+  z.object({ finished: z.literal(false), pending: z.literal(true) }),
+]);
 
 function sameServer(left: string, right: string): boolean {
   return left.replace(/\/+$/u, "") === right.replace(/\/+$/u, "");
@@ -60,6 +67,9 @@ function failure(status: number, body: { code?: string; message?: string }, fail
 
 export function createServerAccountDeletion(options: ServerAccountDeletionOptions) {
   const fetchImpl = options.fetch ?? fetch;
+  // The account each preview token was issued to, so the password only goes
+  // with the session that the person reviewed.
+  const reviews = new Map<string, { serverUrl: string; userId: string; at: number }>();
 
   async function session(): Promise<CloudCredentials> {
     const credentials = await options.credentials();
@@ -110,14 +120,24 @@ export function createServerAccountDeletion(options: ServerAccountDeletionOption
         previewToken: scope.previewToken,
       });
       if (!parsed.success) throw new Error("The server returned an invalid deletion preview. Contact the server owner.");
+      const now = Date.now();
+      for (const [token, review] of reviews) if (now - review.at >= REVIEW_MS) reviews.delete(token);
+      reviews.set(parsed.data.previewToken, { serverUrl: credentials.serverUrl, userId: credentials.userId, at: now });
       return parsed.data;
     },
 
     async delete(input: ServerAccountDeleteRequest): Promise<ServerAccountDeleteResult> {
       const credentials = await session();
-      // The password goes only to the server the person reviewed.
+      // The password goes only to the server and account the person reviewed.
       if (!sameServer(input.server, credentials.serverUrl)) {
         return { ok: false, code: "preview-changed", reason: "This computer is now connected to another server. Review deletion again." };
+      }
+      const review = reviews.get(input.previewToken);
+      if (!review || Date.now() - review.at >= REVIEW_MS) {
+        return { ok: false, code: "preview-changed", reason: "The review expired, or what deletion removes changed. Review it again." };
+      }
+      if (!sameServer(review.serverUrl, credentials.serverUrl) || review.userId !== credentials.userId) {
+        return { ok: false, code: "preview-changed", reason: "This computer is now connected to another account. Review deletion again." };
       }
       const response = await post(credentials, "delete", { previewToken: input.previewToken, password: input.password }, DELETE_TIMEOUT_MS);
       if (response.status === 429) return { ok: false, code: "rate-limited", reason: RATE_LIMITED };
@@ -131,13 +151,15 @@ export function createServerAccountDeletion(options: ServerAccountDeletionOption
         }
         throw failure(response.status, body, "The server could not delete this account.");
       }
-      const body: unknown = await response.json().catch(() => null);
-      const finished = !!body && typeof body === "object" && "finished" in body && body.finished === true;
+      // Only an answer that says finished or pending means the account is
+      // gone. Anything else leaves the session alone.
+      const deleted = Deleted.safeParse(await response.json().catch(() => null));
+      if (!deleted.success) throw new Error("The server returned an invalid answer to deletion. Contact the server owner.");
       // The server already ended every session of the account, finished or
       // not. The disconnect clears the cached session before anything that
       // can fail, so a failure here must not hide the deletion.
       await options.disconnect(credentials).catch(() => undefined);
-      return ServerAccountDeleteResult.parse({ ok: true, finished, email: credentials.email, server: credentials.serverUrl });
+      return ServerAccountDeleteResult.parse({ ok: true, finished: deleted.data.finished, email: credentials.email, server: credentials.serverUrl });
     },
   };
 }

@@ -11,7 +11,7 @@ const PASSWORD = "correct horse battery";
 const preview: ServerAccountDeletionPreview = {
   email: "ice@dohc.dev", server,
   workspaces: [{ workspaceId: "ws-notes", name: "Notes" }],
-  workspacesElsewhere: 2, storedBytes: 1536, ownedShareCount: 1, heldGrantCount: 0,
+  workspacesElsewhere: 2, storedBytes: 1536, ownedShareCount: 1, heldGrantCount: 4,
   previewToken: "expiry.digest.signature",
 };
 const deleteArgv = ["account", "delete", "--server", server, "--preview-token", preview.previewToken];
@@ -34,7 +34,7 @@ describe("dohc account deletePreview", () => {
       "  2 workspaces not on this computer",
       "  1.5 KB of stored files, data, apps, chats, and history",
       "  1 share you own. People you shared with lose access and keep their copies.",
-      "  your access to 0 shares others gave you",
+      "  your access to shares others gave you",
       "Copies on this computer stay. This cannot be undone.",
       "If you create an account again later, this server will not accept your old copies of these workspaces.",
       "The server's backups keep the data until they expire.",
@@ -103,9 +103,12 @@ describe("dohc account delete", () => {
     expectNoPassword(result);
   });
 
+  const stray = "account delete takes only --server and --preview-token; dohc reads the password from stdin or asks for it";
   it.each([
-    [["account", "delete", "--server", server, "--preview-token", "token", "--password", PASSWORD], "unknown account delete option '--password'"],
-    [["account", "delete", PASSWORD, "--server", server, "--preview-token", "token"], `account delete does not accept '${PASSWORD}'`],
+    [["account", "delete", "--server", server, "--preview-token", "token", "--password", PASSWORD], stray],
+    [["account", "delete", "--server", server, "--preview-token", "token", `--password=${PASSWORD}`], stray],
+    [["account", "delete", PASSWORD, "--server", server, "--preview-token", "token"], stray],
+    [["account", "delete", "--server", server, "--preview-token", "token", "-p", PASSWORD], stray],
     [["account", "delete", "--preview-token", "token"], "account delete requires --server <address> from deletePreview"],
     [["account", "delete", "--server", server], "account delete requires --preview-token <token> from deletePreview"],
   ])("refuses %j before reading a password or calling the app", async (argv, message) => {
@@ -113,6 +116,7 @@ describe("dohc account delete", () => {
     const readPasswordInput = vi.fn(async () => PASSWORD);
     const result = await executeCli({ argv, env: {}, request, readPassword: readPasswordInput });
     expect(result).toEqual({ exitCode: 1, stdout: "", stderr: `dohc: ${message}\n` });
+    expectNoPassword(result);
     expect(readPasswordInput).not.toHaveBeenCalled();
     expect(request).not.toHaveBeenCalled();
   });

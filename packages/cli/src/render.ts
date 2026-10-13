@@ -33,7 +33,7 @@ function renderAccountDeletionPreview(preview: CliResultByVerb["accountDeletePre
     `  ${counted(preview.workspacesElsewhere, "workspace", "workspaces")} not on this computer`,
     `  ${formatStoredBytes(preview.storedBytes)} of stored files, data, apps, chats, and history`,
     `  ${counted(preview.ownedShareCount, "share", "shares")} you own. People you shared with lose access and keep their copies.`,
-    `  your access to ${counted(preview.heldGrantCount, "share", "shares")} others gave you`,
+    "  your access to shares others gave you",
     "Copies on this computer stay. This cannot be undone.",
     "If you create an account again later, this server will not accept your old copies of these workspaces.",
     "The server's backups keep the data until they expire.",

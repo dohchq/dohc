@@ -118,6 +118,8 @@ export interface CliVerbSpec {
   freeText?: boolean;
   /** Request fields copied from an earlier verb's result. */
   take?: readonly CliFieldSource[];
+  /** A stray argument can be a secret, so refusing one never repeats it. */
+  strayRefusal?: string;
   parse(input: VerbInput): CliCommandBody;
 }
 
@@ -185,7 +187,7 @@ function readVerbInput(name: string, verb: CliVerbSpec, tokens: readonly string[
     } else if (!optionsEnded && token === "--") {
       optionsEnded = true;
     } else if (!optionsEnded && token.startsWith("--")) {
-      fail(`unknown ${name} option '${token}'${verb.freeText ? `; put ${DASH_RULE}` : ""}`);
+      fail(verb.strayRefusal ?? `unknown ${name} option '${token}'${verb.freeText ? `; put ${DASH_RULE}` : ""}`);
     } else {
       operands.push(token);
     }
@@ -654,6 +656,9 @@ const AUTOMATION_VERBS = {
   },
 } satisfies Record<string, CliVerbSpec>;
 
+const ACCOUNT_DELETE_STRAY =
+  "account delete takes only --server and --preview-token; dohc reads the password from stdin or asks for it";
+
 const ACCOUNT_VERBS = {
   deletePreview: {
     capabilityId: "account.delete.preview",
@@ -680,8 +685,9 @@ const ACCOUNT_VERBS = {
       "When the server cannot finish at once, the account stays blocked and the server finishes later. Either way, the dohc app disconnects from the server.",
       "If the preview expired or changed, run deletePreview again.",
     ],
+    strayRefusal: ACCOUNT_DELETE_STRAY,
     parse: (input) => {
-      noExtraArgs(input.operands, "account delete");
+      if (input.operands.length > 0) fail(ACCOUNT_DELETE_STRAY);
       const server = lastValue(input, "--server");
       const previewToken = lastValue(input, "--preview-token");
       if (!server) fail("account delete requires --server <address> from deletePreview");
