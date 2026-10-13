@@ -56,6 +56,20 @@ test("only a receipt for this exact attempt counts", () => {
   assert.equal(attemptOutcome(null, grant, { stopped: "time budget" }).outcome, "error", "a run cut short by the shared budget gets no verdict");
 });
 
+test("a request whose status cannot be read is skipped, never taken for a new one", () => {
+  const root = mkdtempSync(join(tmpdir(), "dohc-queue-status-"));
+  try {
+    const paths = queuePaths(root);
+    for (const id of ["000000001-aaaaaa", "000000002-bbbbbb"]) {
+      mkdirSync(paths.request(id), { recursive: true });
+      writeFileSync(join(paths.request(id), "request.json"), JSON.stringify({ id, sequence: Number(id.slice(0, 9)) }));
+    }
+    // A directory where the status belongs cannot be read, as a file antivirus holds cannot.
+    mkdirSync(join(paths.request("000000002-bbbbbb"), "status.json"));
+    assert.deepEqual(listRequests(root).map(entry => [entry.id, entry.status.state]), [["000000001-aaaaaa", "queued"]]);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
 test("machine failures are told apart from failures of the change", () => {
   const kind = fields => failureKind(Object.assign(new Error(fields.message ?? "failed"), fields)).kind;
   assert.equal(kind({ status: 3221225794 }), "environment", "a program that could not start");

@@ -391,8 +391,11 @@ export async function runService({
           lastCleanup = now;
           for (const id of [...cleanupPending]) {
             if (await cleanUp(id)) break;
+            // A verdict is never rewritten from a failed read; the next retry records the cleanup instead.
+            const status = readJson(statusPath(id));
+            if (!status) { cleanupPending.add(id); continue; }
             finished.delete(id);
-            await setStatus(id, { ...readJson(statusPath(id)), cleanupPending: false });
+            await setStatus(id, { ...status, cleanupPending: false });
           }
         }
         await checkHealth(requests);

@@ -93,7 +93,12 @@ export function listRequests(root, finished = new Map()) {
   return names(paths.requests).sort().flatMap(id => {
     if (finished.has(id)) return [finished.get(id)];
     const request = readJson(join(paths.request(id), "request.json"));
-    return request ? [{ id, request, status: readJson(join(paths.request(id), "status.json")) ?? { state: "queued", attempts: [] } }] : [];
+    // A status not written yet belongs to a request just accepted. One that exists but cannot be read
+    // now, held by antivirus for example, is skipped this time: read as new, it would run again from attempt 1.
+    let status;
+    try { status = JSON.parse(readFileSync(join(paths.request(id), "status.json"), "utf8")); }
+    catch (error) { status = error.code === "ENOENT" ? { state: "queued", attempts: [] } : null; }
+    return request && status ? [{ id, request, status }] : [];
   });
 }
 
