@@ -42,7 +42,7 @@ export function createServiceHostReplication(options: {
         const after = replicaJournalQueryInteger(url.searchParams, "after", 0, 0);
         const limit = Math.min(replicaJournalQueryInteger(url.searchParams, "limit", 100, 1), REPLICA_LIVE_JOURNAL_MAX_ROWS);
         guard();
-        const page = await options.storage.readReplicaLiveJournal({workspaceId, after, limit, signal: request.signal});
+        const page = await options.storage.readReplicaLiveJournal({workspaceId, after, limit, signal: request.signal, guard});
         guard();
         return jsonResponse({ok: true, ...page});
       }
