@@ -31,7 +31,7 @@ import { StateMark } from "../ui/StateMark";
 import { PresenceFaces } from "../collab/PresenceIndicators";
 import type { AboutConversation } from "./aboutConversation";
 import { ChatAvatar } from "./ChatAvatar";
-import { neutralPresentation, ownPresentation } from "./actorPresentation";
+import { neutralPresentation, ownPresentation, ownAgentPresentation } from "./actorPresentation";
 import { engineMomentSourceLabel, engineMomentSummary } from "./EngineHistory";
 import { historyHiddenWords } from "./HistoryPolicyStates";
 
@@ -117,7 +117,7 @@ export function AboutHeader(props: { subject: { path: string } | AboutConversati
       ) : subject.kind === "group" ? (
         <Hash size={14} aria-hidden className="shrink-0 text-muted" />
       ) : (
-        <ChatAvatar presentation={subject.kind === "agent" ? ownPresentation : neutralPresentation} name={subject.name} kind={subject.kind === "agent" ? "agent" : "human"} size="strip" />
+        <ChatAvatar presentation={subject.kind === "agent" ? ownAgentPresentation : neutralPresentation} name={subject.name} kind={subject.kind === "agent" ? "agent" : "human"} size="strip" />
       )}
       <span title={"path" in subject ? subject.path : subject.name} className="min-w-0 truncate font-semibold text-ink">
         {name}

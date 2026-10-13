@@ -1,5 +1,5 @@
 import { actorHueInput, createActorIssuer, deriveLocalActor, deriveRelayChatActor, serializeActorKey } from "@dohc/workspace-contracts/actor-identity";
-import type { ActorIssuer, ActorRef } from "@dohc/workspace-contracts/actor-identity";
+import type { ActorIssuer, ActorRef, ActorKey } from "@dohc/workspace-contracts/actor-identity";
 import { ACTOR_HUES, actorHueSlot } from "@dohc/workspace-contracts/actor-presentation";
 import type { ChatMessage } from "@dohc/workspace-contracts/engine";
 import type { ActorPresentation } from "../ipc/bridgeContract";
@@ -7,7 +7,30 @@ import type { CloudCredentials } from "./cloudCredentialStore";
 import { readLocalChatActor, resolveThreadActorIssuer } from "./chatRelayIdentity";
 
 type DisplayMessage = Pick<ChatMessage, "author" | "authorActorKey" | "authorUserId" | "origin">;
-const groups = new Map<string, string>();
+const groups = new Map<string, Map<string, string>>();
+let nextGroup = 0;
+
+export function forgetWorkspacePresentation(workspaceId: string): void {
+  groups.delete(workspaceId);
+}
+function groupFor(workspaceId: string, identity: string): string {
+  let workspace = groups.get(workspaceId);
+  if (!workspace) { workspace = new Map(); groups.set(workspaceId, workspace); }
+  let group = workspace.get(identity);
+  if (group === undefined) { group = String(nextGroup++); workspace.set(identity, group); }
+  return group;
+}
+function humanHue(key: ActorKey): ActorPresentation["hue"] {
+  const human = key.kind === "account" || key.kind === "installation" || key.kind === "legacy-human";
+  const input = human ? actorHueInput(key) : null;
+  return input ? ACTOR_HUES[actorHueSlot(input.value)]! : null;
+}
+export function ownActorPresentation(installationId: string, credentials: CloudCredentials | null): ActorPresentation {
+  const key = deriveLocalActor({ identity: { installationId, account: credentials ? {
+    issuer: createActorIssuer(credentials.serverUrl), userId: credentials.userId,
+  } : null }, workspaceId: "", author: { kind: "human" }, displayName: "", origin: "renderer" }).key;
+  return { group: "own", hue: humanHue(key), self: true };
+}
 
 export function chatActorForPresentation(message: DisplayMessage, issuer: ActorIssuer | null): ActorRef {
   return readLocalChatActor(message) ?? deriveRelayChatActor({
@@ -54,12 +77,14 @@ export function createActorPresentationRequest(input: Omit<Parameters<typeof res
     input.assertCurrent?.();
     const { key } = chatActorForPresentation(message, issuer);
     const serialized = serializeActorKey(key);
-    let group = groups.get(serialized);
-    if (group === undefined) { group = String(groups.size); groups.set(serialized, group); }
+    const identity = key.kind === "unknown"
+      ? JSON.stringify(["unknown", message.authorUserId ?? null, message.author.displayName]) : serialized;
+    const workspaceId = input.readWorkspace()?.workspaceId;
+    if (workspaceId === undefined) throw new Error("Chat workspace closed.");
+    const group = groupFor(workspaceId, identity);
     const ownerKey = key.kind === "agent" ? serializeActorKey(key.ownerKey) : serialized;
     const human = key.kind === "account" || key.kind === "installation" || key.kind === "legacy-human";
-    const hueInput = human ? actorHueInput(key) : null;
-    return { group, hue: hueInput ? ACTOR_HUES[actorHueSlot(hueInput.value)]! : null,
+    return { group, hue: humanHue(key),
       self: (human || key.kind === "agent") && (ownerKey === installationKey || ownerKey === account) };
   };
 }

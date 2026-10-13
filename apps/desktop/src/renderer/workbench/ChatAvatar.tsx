@@ -1,8 +1,7 @@
 import { useSyncExternalStore } from "react";
 import { Sparkles, Zap } from "lucide-react";
 import type { ActorPresentation } from "../../ipc/bridgeContract";
-import { presentationClasses } from "./actorPresentation";
-import { subscribeChosenColors } from "./chosenColors";
+import { presentationClasses, subscribePresentation } from "./actorPresentation";
 
 // One avatar for every chat surface: a person's initials on a tint of their
 // admitted hue, the agent's sparkle in the agent voice, or an automation's bare
@@ -44,7 +43,7 @@ export function ChatAvatar(props: {
 }) {
   const size = props.size ?? "post";
   const kind = props.kind;
-  const classes = useSyncExternalStore(subscribeChosenColors, () =>
+  const classes = useSyncExternalStore(subscribePresentation, () =>
     presentationClasses(props.presentation, kind === "agent" ? "agent" : "human"));
   if (kind === "automation") {
     // No border, fill, or identity color: an automation is not a person or an agent.

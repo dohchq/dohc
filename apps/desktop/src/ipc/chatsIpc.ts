@@ -580,11 +580,11 @@ export function registerChatsIpcHandlers<
   function channelThreadForIpc(
     summary: ChannelThreadSummary,
     collectionOf: AutomationCollectionOf,
-    reactionViewer?: {
+    reactionViewer: {
       viewerAuthorId: string;
       localFallbackAuthorId: string;
-    },
-    presentation?: ActorPresentation,
+    } | undefined,
+    presentation: ActorPresentation | null,
   ) {
     const openingReactions =
       summary.openingMessage?.reactions.map(chatReactionForIpc) ?? [];
@@ -993,7 +993,7 @@ export function registerChatsIpcHandlers<
         channelThreadForIpc(thread, automationCollectionOf(workspace.workspaceId), {
           viewerAuthorId,
           localFallbackAuthorId,
-        }, thread.openingMessage ? await presentation(thread.openingMessage, thread.thread.id) : undefined),
+        }, thread.openingMessage ? await presentation(thread.openingMessage, thread.thread.id) : null),
       )),
       viewerAuthorId,
     });
@@ -1025,7 +1025,7 @@ export function registerChatsIpcHandlers<
         lastReadSequence: 1,
         unreadCount: 0,
         openDecisionCount: 0,
-      }, automationCollectionOf(workspace.workspaceId)),
+      }, automationCollectionOf(workspace.workspaceId), undefined, null),
       message: chatMessageForIpc(started.message, automationCollectionOf(workspace.workspaceId), await presentation(started.message, started.message.threadId)),
       viewerAuthorId:
         started.message.authorUserId ?? localInstallationId(),

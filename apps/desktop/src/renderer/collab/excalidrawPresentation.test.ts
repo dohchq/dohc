@@ -7,9 +7,10 @@ import { bindDocPresence } from "./docPresence";
 vi.mock("./docPresence", { spy: true });
 import { bindExcalidrawPresence } from "./excalidrawPresence";
 import { identityHues } from "../tokens";
+import { setOwnPresentation } from "../workbench/actorPresentation";
 import { setChosenColors } from "../workbench/chosenColors";
 import { DEFAULT_USER_SETTINGS } from "../../settings/userSettings";
-afterEach(() => { delete document.documentElement.dataset.theme; setChosenColors(DEFAULT_USER_SETTINGS.appearance); });
+afterEach(() => { delete document.documentElement.dataset.theme; setChosenColors(DEFAULT_USER_SETTINGS.appearance); setOwnPresentation(undefined); });
 it("uses disclosed drawing slots, the own colour and repaints on a theme change", async () => {
   const localDoc = new Y.Doc(); const remoteDoc = new Y.Doc(); const awareness = new Awareness(remoteDoc);
   awareness.setLocalState({ pointer: { x: 1, y: 2, tool: "pointer" } });
@@ -35,5 +36,8 @@ it("uses disclosed drawing slots, the own colour and repaints on a theme change"
     document.documentElement.dataset.theme = "dark";
     await expect.poll(stroke).toBe(identityHues.dark.indigo);
     expect(local.awareness.getLocalState()?.user.color).toBe(identityHues.dark.blue);
+    setOwnPresentation({ group: "own", hue: "rose", self: true });
+    setChosenColors(DEFAULT_USER_SETTINGS.appearance);
+    expect(local.awareness.getLocalState()?.user.color).toBe(identityHues.dark.rose);
   } finally { await binding.destroy(); awareness.destroy(); localDoc.destroy(); remoteDoc.destroy(); }
 });

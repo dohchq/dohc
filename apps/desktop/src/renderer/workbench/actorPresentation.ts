@@ -1,10 +1,23 @@
-import type { ActorPresentation } from "../../ipc/bridgeContract";
+import type { ActorPresentation, DohcDesktopBridge } from "../../ipc/bridgeContract";
 import { ACTOR_HUES } from "@dohc/workspace-contracts/actor-presentation";
 import { palette, identityHues, type IdentityHue } from "../tokens";
 import { chosenHue, subscribeChosenColors } from "./chosenColors";
 
 export const neutralPresentation: ActorPresentation = { group: "", hue: null, self: false };
 export const ownPresentation: ActorPresentation = { group: "own", hue: null, self: true };
+export const ownAgentPresentation: ActorPresentation = { group: "own-agent", hue: null, self: true };
+const listeners = new Set<() => void>();
+export function setOwnPresentation(token: ActorPresentation | undefined): void {
+  const hue = token?.hue ?? null;
+  if (ownPresentation.hue === hue) return;
+  ownPresentation.hue = hue;
+  for (const listener of listeners) listener();
+}
+export function subscribePresentation(listener: () => void): () => void {
+  listeners.add(listener);
+  const unsubscribe = subscribeChosenColors(listener);
+  return () => { listeners.delete(listener); unsubscribe(); };
+}
 export function relayPresentation(slot: number, self = false): ActorPresentation {
   return { group: "", hue: ACTOR_HUES[slot] ?? null, self };
 }
@@ -38,8 +51,27 @@ export function presentationColor(token: ActorPresentation, kind: "human" | "age
   return { stroke, background: "rgba(" + rgb.join(", ") + ", 0.15)" };
 }
 export function subscribePresentationColors(listener: () => void): () => void {
-  const unsubscribe = subscribeChosenColors(listener);
+  const unsubscribe = subscribePresentation(listener);
   const observer = typeof MutationObserver === "undefined" ? null : new MutationObserver(listener);
   observer?.observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
   return () => { observer?.disconnect(); unsubscribe(); };
+}
+
+// The account token applies before a workspace opens, including manager settings.
+export function bindOwnPresentation(api: Pick<DohcDesktopBridge, "cloudStatus" | "onCloudSessionChanged">): () => void {
+  let active = true;
+  let revision = 0;
+  const refresh = () => {
+    const request = ++revision;
+    void api.cloudStatus().then(status => {
+      if (active && request === revision) setOwnPresentation(status.ownPresentation);
+    }).catch(() => undefined);
+  };
+  const unsubscribe = api.onCloudSessionChanged(event => {
+    revision += 1;
+    setOwnPresentation(undefined);
+    if (event.phase === "ready") refresh();
+  });
+  refresh();
+  return () => { active = false; revision += 1; unsubscribe(); };
 }

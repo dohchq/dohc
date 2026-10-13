@@ -235,5 +235,3 @@ export async function resolveThreadActorIssuer(input: {
     throw error;
   }
 }
-
-export function canonicalChatServerUrl(serverUrl: string): string { return createActorIssuer(serverUrl); }

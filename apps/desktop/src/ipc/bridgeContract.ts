@@ -3438,6 +3438,7 @@ export const CloudStatusPayload = z.object({
 export type CloudStatusPayload = z.infer<typeof CloudStatusPayload>;
 
 export const CloudStatusResult = z.object({
+  ownPresentation: ActorPresentation.optional(),
   connected: z.boolean(),
   email: z.string().optional(),
   serverUrl: z.string().optional(),

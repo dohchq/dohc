@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { act, cleanup, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { neutralPresentation, ownPresentation } from "./actorPresentation";
+import { neutralPresentation, ownPresentation, setOwnPresentation } from "./actorPresentation";
 import { DEFAULT_USER_SETTINGS } from "../../settings/userSettings";
 import { ChatAvatar } from "./ChatAvatar";
 import { setChosenColors } from "./chosenColors";
@@ -64,4 +64,11 @@ describe("ChatAvatar presentation", () => {
     expect(screen.getByTitle("You").className).toContain("text-hue-teal");
     expect(screen.getByTitle("Agent").className).toContain("text-agent");
   });
+});
+
+it("repaints an own avatar when main supplies its default hue", () => {
+  render(<ChatAvatar name="Own preview" kind="human" presentation={ownPresentation} />);
+  act(() => setOwnPresentation({ group: "own", hue: "rose", self: true }));
+  expect(screen.getByTitle("Own preview").className).toContain("text-hue-rose");
+  act(() => setOwnPresentation(undefined));
 });

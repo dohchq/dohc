@@ -4,7 +4,7 @@ import { ACTOR_HUES, actorHueSlot } from "@dohc/workspace-contracts/actor-presen
 import type { ChatMessage } from "@dohc/workspace-contracts/engine";
 import type { RegistryEntry } from "./registryStore";
 import type { CloudCredentials } from "./cloudCredentialStore";
-import { chatActorForPresentation, createActorPresentationRequest } from "./actorPresentation";
+import { chatActorForPresentation, createActorPresentationRequest, forgetWorkspacePresentation, ownActorPresentation } from "./actorPresentation";
 
 const issuer = createActorIssuer("https://account.test");
 const credentials: CloudCredentials = { serverUrl: issuer, email: "alice@example.test", userId: "alice", token: "token", relayUrl: "https://relay.test" };
@@ -18,8 +18,8 @@ function local(kind: "human" | "agent" | "automation", origin: "renderer" | "cli
     author: kind === "agent" ? { kind, claimedName: "handshake" } : kind === "automation" ? { kind, automationId: "job" } : { kind } });
   return message({ author: { kind, displayName: "Renamed" }, authorActorKey: serializeActorKey(actor.key), ...(origin === "cli" ? { origin } : {}) });
 }
-function request(remote = true) {
-  let workspace: RegistryEntry = { workspaceId: "w", rootPath: "C:/w", kind: "personal", mode: "local-first", lastOpenedAt: 0,
+function request(remote = true, workspaceId = "w") {
+  let workspace: RegistryEntry = { workspaceId, rootPath: "C:/w", kind: "personal", mode: "local-first", lastOpenedAt: 0,
     sharedChannels: [{ shareId: "s", channelWireId: "wire", access: "read-write", granterEmail: null,
       relayUrl: "https://relay.test", recipientUserId: "alice", ...(remote ? { serverUrl: issuer } : {}) }],
     ...(remote ? { remote: { serverUrl: issuer, ownerUserId: "alice" } } : {}) };
@@ -76,6 +76,32 @@ describe("chat presentation admission", () => {
     const foreign = local("human", "renderer", { issuer: createActorIssuer("https://other.test"), userId: "alice" });
     expect(await r.present(foreign, "t")).toMatchObject({ self: false });
     expect((await r.present(message({ author: { kind: "human", displayName: "A different label" } }), "t")).group).toBe(account.group);
+  });
+  it.each([credentials, null])("uses the own message hue for the own token %#", async (account) => {
+    const r = request();
+    const own = ownActorPresentation("device", account);
+    const row = await r.present(local("human", "renderer", account ? identity.account : null), "t");
+    expect(own.hue).toBe(row.hue);
+    expect(own.self).toBe(true);
+  });
+  it("groups unknowns by author id and visible name", async () => {
+    const r = request(false);
+    const alice = message({ authorUserId: undefined, author: { kind: "human", displayName: "Alice" } });
+    const first = await r.present(alice, "t");
+    expect(await r.present(alice, "t")).toEqual(first);
+    expect((await r.present({ ...alice, author: { kind: "human", displayName: "Bob" } }, "t")).group).not.toBe(first.group);
+    expect((await r.present({ ...alice, authorUserId: "other" }, "t")).group).not.toBe(first.group);
+    expect((await r.present({ ...alice, authorActorKey: '{"kind":"unknown"}' }, "t")).group).toBe(first.group);
+  });
+  it("scopes groups to a workspace and releases them on close", async () => {
+    const first = request(true, "group-first");
+    const second = request(true, "group-second");
+    const a = await first.present(message(), "t");
+    const b = await second.present(message(), "t");
+    expect(a.group).not.toBe(b.group);
+    forgetWorkspacePresentation("group-first");
+    expect((await request(true, "group-first").present(message(), "t")).group).not.toBe(a.group);
+    expect((await second.present(message(), "t")).group).toBe(b.group);
   });
   it("never hashes a human into olive", async () => {
     const r = request();

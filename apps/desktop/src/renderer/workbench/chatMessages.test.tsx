@@ -113,12 +113,12 @@ describe("chat authorship display", () => {
     { name: "only the earlier identity known", firstId: "a", continues: false },
     { name: "only the later identity known", secondId: "a", continues: false },
     { name: "neither identity known", continues: true },
-    { name: "different names in the same group", secondName: "Other", continues: true },
+    { name: "different unknown authors", secondName: "Other", continues: false },
     { name: "different author kinds", firstId: "a", secondId: "a", secondKind: "agent" as const, continues: false },
     { name: "five minutes apart", firstId: "a", secondId: "a", gap: 300_000, continues: false },
     { name: "different days", gap: 120_000, start: new Date(2026, 8, 17, 23, 59).getTime(), continues: false },
   ])("groups messages by identity: $name", (test) => {
-    const first: ChatMessageRecord = { presentation: { group: test.firstId ?? "unknown", hue: null, self: false },
+    const first: ChatMessageRecord = { presentation: { group: test.firstId ?? "unknown-Sam", hue: null, self: false },
       id: "first", threadId: "thread", authorKind: "human", authorDisplayName: "Sam",
       authorUserId: test.firstId, body: "First", createdAtMs: test.start ?? new Date(2026, 8, 17, 12).getTime(),
     };
@@ -127,7 +127,7 @@ describe("chat authorship display", () => {
         testIdPrefix="test-chat"
         messages={[first, {
           ...first, id: "second", authorUserId: test.secondId,
-          presentation: { ...first.presentation, group: test.secondId ?? "unknown" },
+          presentation: { ...first.presentation, group: test.secondId ?? "unknown-" + (test.secondName ?? "Sam") },
           authorDisplayName: test.secondName ?? first.authorDisplayName,
           authorKind: test.secondKind ?? first.authorKind,
           createdAtMs: first.createdAtMs + (test.gap ?? 60_000),

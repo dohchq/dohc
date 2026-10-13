@@ -19,7 +19,7 @@ import {
 } from "./PostCard";
 import { useIsOwnAuthor } from "./AgentBadge";
 import { ChatAvatar } from "./ChatAvatar";
-import { neutralPresentation, ownPresentation } from "./actorPresentation";
+import { neutralPresentation, ownAgentPresentation } from "./actorPresentation";
 import { ChatLane } from "./ChatLane";
 import { usePersonalChatFeed } from "./usePersonalChatFeed";
 import { useReactions, type ReactionView } from "./reactionStore";
@@ -4968,7 +4968,7 @@ export function ChatsView(props: {
                   data={{ "data-channel-id": agentChannel.id }}
                   active={selectedChannelId === agentChannel.id}
                   onClick={() => openConversation({ level: "channel", channel: agentChannel })}
-                  icon={<ChatAvatar presentation={ownPresentation} name={agentLabel} kind="agent" size="strip" />}
+                  icon={<ChatAvatar presentation={ownAgentPresentation} name={agentLabel} kind="agent" size="strip" />}
                   label={agentLabel}
                   labelTestId="chats-my-agent-name"
                   trailing={

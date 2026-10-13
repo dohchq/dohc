@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { ChatBookmark, ChatMessage, ChatThread } from "@dohc/workspace-contracts/engine";
 import { CHANNELS } from "./channels";
 import { createChatScopeCapability } from "./chatScope";
-import { neutralPresentation } from "../renderer/workbench/actorPresentation";
+const neutralPresentation = { group: "neutral", hue: null, self: false };
 import { chatMessageForIpc, registerChatsIpcHandlers } from "./chatsIpc";
 import { ChatMessageRecord } from "./bridgeContract";
 import { createChatWrites } from "../workspaces/chatWrites";
@@ -517,3 +517,15 @@ describe("targeted file resolution", () => {
    expect(JSON.stringify(listed)).not.toContain("authorActorKey");
    expect(JSON.stringify(feed)).not.toContain("authorActorKey");
  });
+
+it("keeps two unknown authors distinct in a received share view", async () => {
+  const h = fixture("view");
+  const alice = { ...h.message, author: { kind: "human" as const, displayName: "Alice" }, authorUserId: "alice" };
+  const bob = { ...alice, id: "bob", author: { kind: "human" as const, displayName: "Bob" }, authorUserId: "bob" };
+  h.storeMethods.listMessages.mockResolvedValueOnce([alice, bob, { ...alice, id: "alice-again" }]);
+  const result = await h.invoke(CHANNELS.listChatMessages, { workspaceId: "workspace", threadId: "thread" }) as { messages: ChatMessageRecord[] };
+  const tokens = result.messages.map(row => row.presentation);
+  expect(tokens[0]).toMatchObject({ hue: null, self: false });
+  expect(tokens[1]!.group).not.toBe(tokens[0]!.group);
+  expect(tokens[2]!.group).toBe(tokens[0]!.group);
+});
