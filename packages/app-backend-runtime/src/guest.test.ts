@@ -282,7 +282,9 @@ describe("guest memory", () => {
         let held = [];
         try { for (;;) held.push(new Uint8Array(1 << 20)); } catch {}
         try { for (;;) held.push(new Uint8Array(4096)); } catch {}
-        try { for (;;) held.push([1]); } catch {}
+        // Fill the last bytes too, so early steps leave less than the 1 KiB message free.
+        // Smaller objects can leave the operation's own code no room to finish.
+        try { for (;;) held.push(new Uint8Array(64)); } catch {}
         for (; steps < 100 && held.length; steps++) {
           held.length -= 1;
           // The operation's own code can run out of memory too, so only a query's error is counted.

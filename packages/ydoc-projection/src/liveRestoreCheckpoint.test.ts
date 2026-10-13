@@ -72,9 +72,14 @@ it("checkpoints exactly the 4095th real delivery including no-ops, restores its 
     const drain = f.open(), first = f.store.nextStopRestoreCut(drain);
     if (first.kind !== "bootstrap") throw Error(first.kind);
     f.store.acknowledgeStopRestoreBootstrap(drain, bootstrapAck(first.baseline));
-    // Each acknowledgement is its own durable transaction, which sets this test's timeout.
-    for (const [index, receipt] of receipts.entries()) {
-      f.store.acknowledgeStopRestoreApplication(drain, receipts[index - 1] ?? null, applicationAck(receipt, index + 1));
+    // This loop checks the receipt chain; restart durability has separate coverage.
+    f.context.db.exec("PRAGMA synchronous=OFF");
+    try {
+      for (const [index, receipt] of receipts.entries()) {
+        f.store.acknowledgeStopRestoreApplication(drain, receipts[index - 1] ?? null, applicationAck(receipt, index + 1));
+      }
+    } finally {
+      f.context.db.exec("PRAGMA synchronous=FULL");
     }
     f.store.completeStopRestoreCut(drain);
     const nativeReceipt = {operation: f.store.pendingStopRestoreFence(f.lookup).operation, localHeadSequence: receipts.length, recordedAtMs: 100};

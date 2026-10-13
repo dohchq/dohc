@@ -25,6 +25,7 @@ import {readOwnerRestoreResponse} from "./ipc/readOwnerRestoreResponse";
 import { readDatasetResponse } from "./ipc/readDatasetResponse";
 import { ipcWireError } from "./ipc/errorWords";
 import { createUpdateInstall, registerUpdatesIpcHandlers } from "./ipc/updatesIpc";
+import { registerSystemMotionIpc } from "./ipc/systemMotionIpc";
 import { createWindowIpc } from "./ipc/windowIpc";
 import {
   devToolsEnabled,
@@ -117,6 +118,7 @@ import {
   powerMonitor,
   protocol,
   safeStorage,
+  systemPreferences,
   session,
   shell,
   Tray,
@@ -128,7 +130,7 @@ import {
   type WebContents,
 } from "electron";
 import { watch, existsSync, realpathSync, statSync } from "node:fs";
-import { lstat, mkdir, readdir, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import { hostname, release as osRelease, type as osType } from "node:os";
 import { dirname, join } from "node:path";
 import {
@@ -555,16 +557,14 @@ const crashReportPreview = createCrashReportPreview({
   openPath: (path) => shell.openPath(path),
 });
 void crashReportPreview.remove();
-// Usage and short error reports. Only a packaged build that names a report
-// service sends them, and only as the switches in Privacy allow.
+// Usage and short error reports. Only a packaged build that names a PostHog
+// project sends them, and only as the switches in Privacy allow.
 const telemetry = createTelemetry({
   reporting: resolveReporting({
     build: REPORTING_BUILD,
     packaged: app.isPackaged,
     env: process.env,
     argv: process.argv,
-    version: app.getVersion(),
-    channel: resolveUpdateChannel(app.getVersion()),
   }),
   statePath: join(stateDir(), "reporting.json"),
   facts: () => ({
@@ -577,6 +577,7 @@ const telemetry = createTelemetry({
     electron: process.versions.electron ?? "unknown",
   }),
   locate: createCodeLocations(codeRoots, process.platform),
+  readCode: (path) => readFile(join(codeRoots[0]!, path), "utf8"),
 });
 // The report switches as the settings file sets them. A file main cannot
 // read turns both off.
@@ -5742,6 +5743,7 @@ async function currentDiagnostics(): Promise<string> {
 }
 
 function registerIpcHandlers(): void {
+  registerSystemMotionIpc(operationBoundary, () => systemPreferences.getAnimationSettings());
   shareDirectWriteDelivery.register(operationBoundary);
   const shareCopyHandler = createShareCopyHandler<WebContents, RegistryEntry, DesktopRendererWorkspaceOperation>({
     currentSession: sender => rendererWorkspaceSessions.current(sender) ?? null,

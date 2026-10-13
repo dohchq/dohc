@@ -64,7 +64,7 @@ use std::sync::MutexGuard;
 pub struct EngineService {
     supervisor: &'static WorkspaceSupervisor,
     handles: Mutex<HashMap<WorkspaceHandle, Arc<OpenWorkspace>>>,
-    live_applications: Mutex<rpc::live_application::Registry>,
+    live_applications: Arc<Mutex<rpc::live_application::Registry>>,
     configured_live_host: std::sync::OnceLock<rpc::configured_live_host::Discovery>,
     ordinary_live_host: std::sync::OnceLock<rpc::ordinary_live_host::OrdinaryHost>,
     pending_cursors: Mutex<HashMap<String, PendingCursor>>,
@@ -155,7 +155,7 @@ impl EngineService {
         EngineService {
             supervisor,
             handles: Mutex::new(HashMap::new()),
-            live_applications: Mutex::new(rpc::live_application::Registry::default()),
+            live_applications: Arc::new(Mutex::new(rpc::live_application::Registry::default())),
             configured_live_host: std::sync::OnceLock::new(),
             ordinary_live_host: std::sync::OnceLock::new(),
             pending_cursors: Mutex::new(HashMap::new()),

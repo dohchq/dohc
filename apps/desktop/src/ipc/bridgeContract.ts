@@ -6711,8 +6711,22 @@ export const LaunchMarksResult = z.object({
 });
 export type LaunchMarksResult = z.infer<typeof LaunchMarksResult>;
 
+export const SystemReducedMotionResult = z.boolean();
+
+export const systemMotionOperations = {
+  getSystemReducedMotion: {
+    capabilityId: "device.motion.read",
+    scope: "device",
+    channel: "desktop:get-system-reduced-motion",
+    payload: z.object({}),
+    result: SystemReducedMotionResult,
+    guard: "trusted-sender",
+  },
+} as const satisfies OperationTable;
+
 export interface DohcDesktopBridge
   extends OperationBridge<typeof shareCopyOperations>,
+    OperationBridge<typeof systemMotionOperations>,
     OperationBridge<typeof accessOperations>,
     OperationBridge<typeof workspaceVersionOperations>,
     OperationBridge<typeof captureRecoveryOperations>,

@@ -360,6 +360,11 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         faults: &dyn FaultInjector,
         max_read_bytes: usize,
     ) -> Result<DirectWritePushOutcome, RelayError> {
+        if store.is_passive() {
+            return Err(super::local(SyncError::InvalidInput {
+                reason: "passive store cannot write to the relay",
+            }));
+        }
         if granted.access != crate::ShareAccess::Edit || granted.version_id.is_some() {
             return Ok(DirectWritePushOutcome::default());
         }

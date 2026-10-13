@@ -8,6 +8,7 @@ import { afterEach, expect, it, vi } from "vitest";
 import { createDatasetJournal, type DatasetJournal } from "./journal.ts";
 import { createDatasetSupervisor, DatasetReopenWaitError, type DatasetInvocation, type DatasetMigration, type DatasetSupervisorOptions } from "./supervisor.ts";
 import { DEFAULT_LIMITS, type AppRuntimeLauncher } from "./protocol.ts";
+import { replayConstraintLauncher } from "./replay-constraint.test-helper.ts";
 
 // These waits cover one worker command at the product deadline plus durable journal writes around it.
 const workerWait = { timeout: 2 * DEFAULT_LIMITS.deadlineMs };
@@ -448,13 +449,13 @@ it("caches a replay that rebuilt the dataset so the next reopen does not repeat 
   const storage={authorize(){},account(){}};
   const f=await fixture({schemaSql:"CREATE TABLE items(id TEXT PRIMARY KEY NOT NULL,value TEXT NOT NULL UNIQUE);",source:swapSource,maintenanceStorage:storage});
   await f.invoke({id:"a",value:"x"},{idempotencyKey:"a"});await f.invoke({id:"b",value:"y"},{idempotencyKey:"b"});
-  // Replaying the swap row by row breaks the UNIQUE index, so the worker rebuilds the dataset.
+  // The recovery launcher forces a constraint conflict at the swap, then runs the real rebuild.
   await f.invoke({swap:true},{idempotencyKey:"swap"});
   await f.supervisor.close();
   const time=vi.spyOn(performance,'now').mockReturnValue(0);
   cleanups.push(async()=>{time.mockRestore();});
   const opened:number[]=[],replayed:number[]=[],steps:string[]=[],batches=new Map<number,number[]>();
-  const launch=launcher((command,controls)=>{
+  const launch=replayConstraintLauncher(launcher((command,controls)=>{
     if(command.command.kind==="open")opened.push(command.command.input.cursor.revision);
     if(command.command.kind==="applyBatch")batches.set(command.id,command.command.input.map((event:{revision:number})=>event.revision));
     controls.deliver();
@@ -462,7 +463,7 @@ it("caches a replay that rebuilt the dataset so the next reopen does not repeat 
     const reply=message as {id:number;ok?:boolean;result?:{revision:number};progress?:unknown};
     if(typeof reply.progress==="string")steps.push(reply.progress);
     if(reply.ok&&batches.has(reply.id)){replayed.push(...batches.get(reply.id)!.filter(revision=>revision<=reply.result!.revision));batches.delete(reply.id);}
-  });
+  }),2);
   const read={scope:f.scope,tables:["items"],operation:"run",caller:{kind:"owner"},callerKey:"owner",input:{},idempotencyKey:"read",payloadSha256:hash("{}"),readOnly:true,authorize:f.authorize};
   const swapped=[{id:"a",value:"y"},{id:"b",value:"x"}];
   for(const round of [1,2]) {
