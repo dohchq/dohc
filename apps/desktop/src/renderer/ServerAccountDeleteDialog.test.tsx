@@ -13,6 +13,7 @@ const bridgeMock = {
   cloudStatus: vi.fn(),
   cloudLogout: vi.fn(),
   cloudLoginStart: vi.fn(),
+  cloudLoginPoll: vi.fn(),
   previewServerAccountDeletion: vi.fn(),
   deleteServerAccount: vi.fn(),
   platform: "linux",
@@ -55,6 +56,7 @@ beforeEach(() => {
 afterEach(() => {
   cleanup();
   sessionListeners.clear();
+  vi.useRealTimers();
 });
 
 function renderDialog(overrides: Partial<Parameters<typeof ServerAccountDeleteDialog>[0]> = {}) {
@@ -421,6 +423,51 @@ describe("CloudLogin account deletion", () => {
 
     expect(signInAgain()).toBe(false);
     expect(bridgeMock.cloudLoginStart).toHaveBeenCalledOnce();
+  });
+
+  // The panel's own form signed in after the failure, so the old notice's
+  // attempt is no longer the panel's newest.
+  it("keeps a pending delete through a sign-in Try again that a newer sign-in here made stale", async () => {
+    vi.useFakeTimers();
+    const onConnectionError = vi.fn();
+    const onConnectionNotice = vi.fn();
+    const slow = deferred<{ ok: true; finished: boolean; email: string; server: string }>();
+    bridgeMock.cloudLoginStart
+      .mockRejectedValueOnce(new Error("dohc could not reach this server."))
+      .mockResolvedValueOnce({ userCode: "ABCD", verificationUri: `${server}/device` });
+    bridgeMock.cloudLoginPoll.mockResolvedValueOnce({ status: "complete", email: "ice@dohc.dev" });
+    bridgeMock.deleteServerAccount.mockReturnValue(slow.promise);
+    bridgeMock.cloudStatus
+      .mockResolvedValueOnce({ connected: false, workspaceSynced: false })
+      .mockResolvedValueOnce(connected)
+      .mockResolvedValue({ connected: false, workspaceSynced: false });
+    render(<CloudLogin workspaceId="ws-1" onConnectionError={onConnectionError} onConnectionNotice={onConnectionNotice} />);
+    await act(async () => {});
+    fireEvent.change(screen.getByTestId("cloud-server-url"), { target: { value: server } });
+    fireEvent.click(screen.getByTestId("cloud-connect-start"));
+    await act(async () => {});
+    expect(onConnectionError).toHaveBeenCalledOnce();
+    const signInAgain: () => boolean = onConnectionError.mock.calls[0]![0].retry;
+
+    fireEvent.click(screen.getByTestId("cloud-connect-start"));
+    await act(async () => {});
+    await act(async () => { await vi.advanceTimersByTimeAsync(3000); });
+    vi.useRealTimers();
+    fireEvent.click(await screen.findByTestId("cloud-delete-account"));
+    await screen.findByTestId("server-account-delete-scope");
+    typePassword("correct horse");
+    fireEvent.click(screen.getByTestId("server-account-delete-confirm"));
+    await waitFor(() => expect(bridgeMock.deleteServerAccount).toHaveBeenCalledOnce());
+
+    expect(signInAgain()).toBe(true);
+    expect(bridgeMock.cloudLoginStart).toHaveBeenCalledTimes(2);
+    expect(screen.getByTestId("server-account-delete")).toBeTruthy();
+
+    await act(async () => { slow.resolve({ ok: true, finished: true, email: "ice@dohc.dev", server }); });
+    expect(onConnectionNotice).toHaveBeenCalledWith({
+      tone: "success", message: `Deleted ice@dohc.dev on ${server}. Workspaces on this computer stay.`,
+    });
+    expect(await screen.findByTestId("cloud-server-url")).toBeTruthy();
   });
 
   it("keeps a pending delete when a failed disconnect's Try again is chosen during the review", async () => {

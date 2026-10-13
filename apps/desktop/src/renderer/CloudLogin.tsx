@@ -193,8 +193,8 @@ export function CloudLogin(props: {
   // reset the panel and drop the review's pending result.
   function retryFor(session: number, run: () => void, wanted = () => true): () => boolean {
     return () => {
-      if (!sessionRef.isCurrent(session)) return false;
       if (reviewOpen.current) return true;
+      if (!sessionRef.isCurrent(session)) return false;
       if (!wanted()) return false;
       run();
       return true;
@@ -275,6 +275,7 @@ export function CloudLogin(props: {
       });
     return () => {
       if (sessionRef.isCurrent(session)) sessionRef.next();
+      reviewOpen.current = false;
       clearPollTimer();
     };
     // A notice can retry a different address while this panel is already open.
