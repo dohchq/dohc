@@ -16,6 +16,31 @@ afterEach(() => {vi.restoreAllMocks(); cleanupLiveDeliveryFixtures();});
 
 const deliveryId = (row: journal.ReplicaLiveJournalRow) => row.admitted.metadata.accepted.receipt.deliveryId;
 
+function spyCapture(context: StorageContext, onRow?: (row: Record<string, unknown>) => void) {
+  const prepare = context.db.prepare.bind(context.db);
+  const captured: string[] = [], provenanceThrough: number[] = [], proofQueries: string[] = [];
+  vi.spyOn(context.db, "prepare").mockImplementation(sql => {
+    const statement = prepare(sql);
+    if (/^SELECT \* FROM sync_relay_live_update_journal\s+WHERE workspace_id=\? AND journal_cursor>\? AND journal_cursor<=\?/.test(sql)) {
+      const all = statement.all.bind(statement), iterate = statement.iterate.bind(statement);
+      Object.assign(statement, {all: (...args: unknown[]) => {
+        const rows = all(...args);
+        for (const row of rows) {onRow?.(row); captured.push(String(row.delivery_id));}
+        return rows;
+      }, iterate: function* (...args: unknown[]) {
+        for (const row of iterate(...args)) {onRow?.(row); captured.push(String(row.delivery_id)); yield row;}
+      }});
+    }
+    if (/SELECT \* FROM sync_relay_live_update_struct_provenance/.test(sql)) {
+      const all = statement.all.bind(statement);
+      Object.assign(statement, {all: (...args: unknown[]) => {provenanceThrough.push(Number(args[2])); return all(...args);}});
+    }
+    if (/SELECT .*admission_json/.test(sql)) proofQueries.push(sql);
+    return statement;
+  });
+  return {captured, provenanceThrough, proofQueries};
+}
+
 function fixture() {
   const f = registered({deployment: true});
   f.storage.claimWorkspaceIdentity({workspaceId: "workspace", replicationEpoch: "epoch", streamIdentity: "stream"});
@@ -222,45 +247,108 @@ it("bounds rows and complete response bytes without skipping the next row", asyn
   } finally {f.close();}
 });
 
-it("prices metadata before capturing rows, so a page never loads rows it cannot serve", async () => {
+it("prices metadata while capturing rows and loads at most one unserved row", async () => {
   const f = fixture();
   try {
     f.append("a"); f.append("b"); f.append("c");
     const first = await f.readStorage(0, 1);
     const bytes = Buffer.byteLength(JSON.stringify({ok: true, ...first, hasMore: false}));
-    const context = f.storage as StorageContext;
-    const prepare = context.db.prepare.bind(context.db);
-    const captured: number[] = [];
-    vi.spyOn(context.db, "prepare").mockImplementation(sql => {
-      const statement = prepare(sql);
-      if (/^SELECT \* FROM sync_relay_live_update_journal\s+WHERE workspace_id=\? AND journal_cursor>\? AND journal_cursor<=\?/.test(sql)) {
-        const all = statement.all.bind(statement);
-        Object.assign(statement, {all: (...args: unknown[]) => {
-          const rows = all(...args);
-          captured.push(rows.length);
-          return rows;
-        }});
-      }
-      return statement;
-    });
+    const capture = spyCapture(f.storage as StorageContext);
     const page = await f.readStorage(0, 500, bytes);
     expect(page.rows.map(deliveryId)).toEqual(["a"]);
-    expect(captured).toEqual([1]);
+    expect(capture.captured).toEqual(["a", "b"]);
+    expect(capture.provenanceThrough).toEqual([first.nextCursor]);
   } finally {f.close();}
 });
 
-it("counts metadata stored beside the accepted record before capturing rows", async () => {
+it("counts metadata stored beside the accepted record while capturing rows", async () => {
   const f = fixture();
   try {
     f.append("a"); f.append("b"); f.append("c");
     const first = await f.readStorage(0, 1);
     const bytes = Buffer.byteLength(JSON.stringify({ok: true, ...first, hasMore: false}));
-    // Only the deleted-ranges column is heavy; the page must stop before capturing that row.
+    // Only the deleted-ranges column is heavy; the page must stop before retaining that row.
     const deletes = JSON.stringify(Array.from({length: 2000}, (_, index) => ({clientId: 1, startClock: 2 * index, endClock: 2 * index + 1})));
     f.write(db => db.prepare("UPDATE sync_relay_live_update_journal SET first_seen_deletes_json=? WHERE delivery_id='b'").run(deletes));
+    const capture = spyCapture(f.storage as StorageContext);
     const page = await f.readStorage(0, 500, bytes * 2);
     expect(page.rows.map(deliveryId)).toEqual(["a"]);
     expect(page.hasMore).toBe(true);
+    expect(capture.captured).toEqual(["a", "b"]);
+    expect(capture.provenanceThrough).toEqual([first.nextCursor]);
+  } finally {f.close();}
+});
+
+
+it("stops capture before a non-first restore checkpoint exceeds the response cap", async () => {
+  const f = fixture();
+  try {
+    f.append("a"); f.append("b"); f.append("c");
+    const first = await f.readStorage(0, 1);
+    const bytes = Buffer.byteLength(JSON.stringify({ok: true, ...first, hasMore: false}));
+    // A proof or decode of this excluded row would fail. Its checkpoint must stop capture first.
+    const capture = spyCapture(f.storage as StorageContext, raw => {
+      if (raw.delivery_id === "b") {
+        raw.validation_checkpoint_bytes = new Uint8Array(1024 * 1024);
+        raw.restore_operation_id = "excluded-restore";
+      }
+    });
+    const result = await f.readStorage(0, 500, bytes * 4);
+    expect(result.rows.map(deliveryId)).toEqual(["a"]);
+    expect(result.hasMore).toBe(true);
+    expect(capture.captured).toEqual(["a", "b"]);
+    expect(capture.provenanceThrough).toEqual([first.nextCursor]);
+    expect(capture.proofQueries).toEqual([]);
+  } finally {f.close();}
+});
+
+it("keeps the header query before the blob overflow chains", async () => {
+  const f = fixture();
+  try {
+    f.append("a");
+    const columns = f.raw.prepare("PRAGMA table_info(sync_relay_live_update_journal)").all().map(row => String(row.name));
+    const forbidden = columns.slice(columns.indexOf("validation_checkpoint_bytes") + 1);
+    const context = f.storage as StorageContext, prepare = context.db.prepare.bind(context.db), headers: string[] = [];
+    vi.spyOn(context.db, "prepare").mockImplementation(sql => {
+      if (/SELECT journal_cursor,workspace_id/.test(sql)) headers.push(sql);
+      return prepare(sql);
+    });
+    await f.readStorage();
+    expect(headers).toHaveLength(1);
+    for (const column of forbidden) expect(headers[0]).not.toMatch(new RegExp("\\b" + column + "\\b"));
+    expect(headers[0]).toContain("length(update_bytes)");
+    expect(headers[0]).toContain("length(validation_checkpoint_bytes)");
+  } finally {f.close();}
+});
+
+it("yields before decoding a heavy metadata row and stops after the guard revokes", async () => {
+  const f = fixture();
+  try {
+    f.append("a"); f.append("b");
+    f.write(db => db.prepare("UPDATE sync_relay_live_update_journal SET author_snapshot_json=? WHERE delivery_id='b'")
+      .run(JSON.stringify({damaged: "x".repeat(1024 * 1024)})));
+    const guard = vi.fn(() => {if (guard.mock.calls.length === 3) throw new Error("revoked before metadata decode");});
+    await expect(journal.readReplicaLiveJournal(f.storage as StorageContext,
+      {workspaceId: "workspace", after: 0, limit: 500, guard})).rejects.toThrow("revoked before metadata decode");
+    expect(guard).toHaveBeenCalledTimes(3);
+  } finally {f.close();}
+});
+
+it("checks the exact response budget before hashing an unserved row", async () => {
+  const f = fixture();
+  try {
+    f.append("a"); f.append("b");
+    const first = await f.readStorage(0, 1), second = await f.readStorage(first.nextCursor, 1);
+    const bytes = Buffer.byteLength(JSON.stringify({ok: true, rows: [...first.rows, ...second.rows],
+      nextCursor: second.nextCursor, hasMore: false})) - 1;
+    const damaged = Uint8Array.from(f.raw.prepare("SELECT update_bytes FROM sync_relay_live_update_journal WHERE delivery_id='b'").get()!.update_bytes as Uint8Array);
+    damaged[0] = damaged[0]! ^ 1;
+    f.write(db => db.prepare("UPDATE sync_relay_live_update_journal SET update_bytes=? WHERE delivery_id='b'").run(damaged));
+    const capture = spyCapture(f.storage as StorageContext);
+    const result = await f.readStorage(0, 500, bytes);
+    expect(result.rows.map(deliveryId)).toEqual(["a"]);
+    expect(result.hasMore).toBe(true);
+    expect(capture.provenanceThrough).toEqual([second.nextCursor]);
   } finally {f.close();}
 });
 

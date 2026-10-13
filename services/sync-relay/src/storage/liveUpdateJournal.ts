@@ -250,12 +250,11 @@ export function verifyJournalRow(row: DecodedJournalRow): void {
 }
 
 export const REPLICA_LIVE_JOURNAL_MAX_ROWS = 500;
-// accepted_metadata_bytes covers the accepted record and first-seen ranges; the rest of the metadata is stored beside it.
+// The accepted record and the stored JSON columns bound metadata work conservatively.
 const REPLICA_METADATA_JSON_COLUMNS = ["author_snapshot_json", "author_context_json", "first_seen_deletes_json", "checkpoint_coverage_json", "seed_first_seen_json"] as const;
-const REPLICA_METADATA_BYTES_SQL = ["accepted_metadata_bytes",
-  ...REPLICA_METADATA_JSON_COLUMNS.map(column => `COALESCE(length(CAST(${column} AS BLOB)),0)`)].join("+");
-function replicaMetadataBytes(raw: Record<string, unknown>): number {
+function replicaMetadataBytes(raw: Record<string, unknown>, retained = true): number {
   return REPLICA_METADATA_JSON_COLUMNS.reduce((total, column) => {
+    if (!retained && (column === "author_context_json" || column === "seed_first_seen_json")) return total;
     const value = raw[column];
     return total + (typeof value === "string" ? Buffer.byteLength(value) : 0);
   }, authorityInteger(raw.accepted_metadata_bytes, 1));
@@ -311,16 +310,40 @@ interface ReplicaJournalProjection {
 }
 
 function captureReplicaJournalRows(storage: StorageContext, workspaceId: string, after: number,
-  projected: readonly ReplicaJournalProjection[]): ReplicaJournalSnapshotRow[] {
+  projected: readonly ReplicaJournalProjection[], maxBytes: number): ReplicaJournalSnapshotRow[] {
   if (projected.length === 0) return [];
   const through = projected.at(-1)!.journalCursor;
-  const rawRows = storage.db.prepare(`SELECT * FROM ${LIVE_JOURNAL_TABLE}
-    WHERE workspace_id=? AND journal_cursor>? AND journal_cursor<=? ORDER BY journal_cursor`).all(workspaceId, after, through);
-  journalIntegrity(rawRows.length === projected.length);
+  const rawRows: Record<string, unknown>[] = [];
+  let rowBytes = 0, captureBytes = 0;
+  const fits = (encodedBytes: number, retainedBytes: number, cursor: number) => rawRows.length === 0 ||
+    (replicaJournalResponseBytes(rowBytes + encodedBytes, rawRows.length + 1, cursor, false) <= maxBytes &&
+      captureBytes + retainedBytes <= REPLICA_LIVE_JOURNAL_MAX_CAPTURE_BYTES);
+  for (const raw of storage.db.prepare(`SELECT * FROM ${LIVE_JOURNAL_TABLE}
+    WHERE workspace_id=? AND journal_cursor>? AND journal_cursor<=? ORDER BY journal_cursor`).iterate(workspaceId, after, through)) {
+    const updateLength = (raw.update_bytes as Uint8Array).byteLength;
+    const checkpointLength = (raw.validation_checkpoint_bytes as Uint8Array | null)?.byteLength ?? 0;
+    let retainedBytes = updateLength + checkpointLength + replicaMetadataBytes(raw);
+    let encodedBytes = 4 * Math.ceil(updateLength / 3) + replicaMetadataBytes(raw, false) +
+      (raw.restore_operation_id === null ? 0 : 4 * Math.ceil(checkpointLength / 3));
+    const cursor = authorityInteger(raw.journal_cursor, 1);
+    // Keep the first admitted row even when it exceeds a cap.
+    if (!fits(encodedBytes, retainedBytes, cursor)) break;
+    const proofBytes = raw.restore_operation_id === null ? 0 : authorityInteger(storage.db.prepare(
+      "SELECT length(CAST(admission_json AS BLOB)) AS bytes FROM sync_relay_live_restore_lifecycles WHERE relay_database_namespace=? AND operation_id=?")
+      .get(raw.relay_database_namespace, raw.restore_operation_id)?.bytes, 1);
+    encodedBytes += proofBytes;
+    retainedBytes += proofBytes;
+    if (!fits(encodedBytes, retainedBytes, cursor)) break;
+    rawRows.push(raw);
+    rowBytes += encodedBytes;
+    captureBytes += retainedBytes;
+  }
+  journalIntegrity(rawRows.length > 0);
+  const keptThrough = authorityInteger(rawRows.at(-1)!.journal_cursor, 1);
   const provenance = new Map<number, Record<string, unknown>[]>();
   const ranges = storage.db.prepare(`SELECT * FROM ${LIVE_JOURNAL_PROVENANCE}
     WHERE +workspace_id=? AND journal_cursor>? AND journal_cursor<=? ORDER BY journal_cursor,client_id,start_clock`)
-    .all(workspaceId, after, through);
+    .all(workspaceId, after, keptThrough);
   for (const raw of ranges) {
     const cursor = authorityInteger(raw.journal_cursor, 1);
     const rows = provenance.get(cursor) ?? [];
@@ -380,9 +403,9 @@ export async function readReplicaLiveJournal(storage: StorageContext, input: Rep
     const authorities = new Map<string, ReplicaLiveJournalAuthority | null>();
     const currentAuthority = storage.db.prepare(`SELECT lineage_claim_id,baseline_moment_relay_seq,restore_fence_generation
       FROM sync_relay_live_documents WHERE workspace_id=? AND main_version_id=? AND object_id=? AND lineage_state='current'`);
-    // Use base64 and metadata sizes before fetching rows; price complete rows after verification.
+    // Lengths avoid walking either blob; price stored metadata while capturing full rows.
     const headers = storage.db.prepare(`SELECT journal_cursor,workspace_id,main_version_id,object_id,lineage_claim_id,
-      ${REPLICA_METADATA_BYTES_SQL} AS metadata_bytes,length(update_bytes) AS update_length,length(validation_checkpoint_bytes) AS checkpoint_length
+      length(update_bytes) AS update_length,length(validation_checkpoint_bytes) AS checkpoint_length
       FROM ${LIVE_JOURNAL_TABLE} WHERE workspace_id=? AND journal_cursor>? ORDER BY journal_cursor LIMIT ?`)
       .iterate(workspaceId, after, limit + 1);
     let rowBytes = 0, captureBytes = 0, nextCursor = after, hasMore = false;
@@ -400,9 +423,8 @@ export async function readReplicaLiveJournal(storage: StorageContext, input: Rep
       journalIntegrity(updateLength <= 20_971_520);
       const checkpointLength = header.checkpoint_length === null ? 0 : authorityInteger(header.checkpoint_length, 1);
       journalIntegrity(checkpointLength <= 20_971_520);
-      const metadataBytes = authorityInteger(header.metadata_bytes, 1);
-      const retainedBytes = updateLength + checkpointLength + metadataBytes;
-      const encodedBytes = 4 * Math.ceil(updateLength / 3) + metadataBytes;
+      const retainedBytes = updateLength + checkpointLength;
+      const encodedBytes = 4 * Math.ceil(updateLength / 3);
       // The first row is always served: the relay admitted it, so the replica must be able to read it.
       if (projectedRows.length > 0 && (replicaJournalResponseBytes(rowBytes + encodedBytes, projectedRows.length + 1, projected.journalCursor, false) > maxBytes ||
           captureBytes + retainedBytes > REPLICA_LIVE_JOURNAL_MAX_CAPTURE_BYTES)) {
@@ -413,7 +435,8 @@ export async function readReplicaLiveJournal(storage: StorageContext, input: Rep
       rowBytes += encodedBytes;
       nextCursor = projected.journalCursor;
     }
-    return {captured: captureReplicaJournalRows(storage, workspaceId, after, projectedRows), nextCursor, hasMore};
+    const captured = captureReplicaJournalRows(storage, workspaceId, after, projectedRows, maxBytes);
+    return {captured, hasMore: hasMore || captured.length < projectedRows.length};
   });
   const rows: ReplicaLiveJournalRow[] = [];
   let workBytes = 0, rowBytes = 0, nextCursor = after, hasMore = snapshot.hasMore;
@@ -431,30 +454,32 @@ export async function readReplicaLiveJournal(storage: StorageContext, input: Rep
       workBytes += chunk.byteLength;
     }
     journalIntegrity(hash.digest("hex") === digest);
-    return {bytes: encoded.join(""), jsonBytes: encode ? 4 * Math.ceil(bytes.byteLength / 3) : 0};
+    return encoded.join("");
   };
   for (const [index, entry] of snapshot.captured.entries()) {
     // Verification and encoding do not hold a SQLite transaction or monopolize pushes.
     if (index % 16 === 0) await yieldWork();
+    const metadataBytes = replicaMetadataBytes(entry.raw);
+    if (workBytes + metadataBytes > chunkBytes) await yieldWork();
+    workBytes += metadataBytes;
     const decoded = decodeJournalRow(storage.db, entry.raw, entry.provenance);
-    workBytes += replicaMetadataBytes(entry.raw);
-    if (workBytes > chunkBytes) await yieldWork();
-    verifyJournalHistoryLink(decoded.admitted.metadata, decoded.history, entry.predecessor);
-    const update = await verifyAndEncode(decoded.admitted.updateBytes, decoded.admitted.metadata.accepted.receipt.updateDigest, true);
-    const checkpoint = decoded.checkpoint ? await verifyAndEncode(decoded.checkpoint.bytes, decoded.checkpoint.digest, decoded.restoreOperationId !== null) : null;
-    if (entry.restoreProof) journalIntegrity(decoded.checkpoint && decoded.checkpoint.digest === entry.restoreProof.checkpointDigest &&
-      isDeepStrictEqual(decoded.admitted.metadata, entry.restoreProof.admitted));
     const row: ReplicaLiveJournalRow = {admitted: {metadata: decoded.admitted.metadata, updateBytes: ""},
       relayDatabaseNamespace: decoded.history.namespace, evidenceDigest: decoded.history.evidenceDigest,
       journalCursor: entry.projected.journalCursor, authority: entry.projected.authority,
       restore: entry.restoreProof ? {operationId: decoded.restoreOperationId!,
         checkpoint: {digest: decoded.checkpoint!.digest, bytes: ""}, proof: entry.restoreProof} : null};
-    const encodedBytes = Buffer.byteLength(JSON.stringify(row)) + update.jsonBytes + (row.restore ? checkpoint!.jsonBytes : 0);
+    const encodedBytes = Buffer.byteLength(JSON.stringify(row)) + 4 * Math.ceil(decoded.admitted.updateBytes.byteLength / 3) +
+      (row.restore ? 4 * Math.ceil(decoded.checkpoint!.bytes.byteLength / 3) : 0);
     if (rows.length > 0 && replicaJournalResponseBytes(rowBytes + encodedBytes, rows.length + 1, row.journalCursor, false) > maxBytes) {
       hasMore = true; break;
     }
-    rows.push({...row, admitted: {...row.admitted, updateBytes: update.bytes},
-      restore: row.restore ? {...row.restore, checkpoint: {...row.restore.checkpoint, bytes: checkpoint!.bytes}} : null});
+    verifyJournalHistoryLink(decoded.admitted.metadata, decoded.history, entry.predecessor);
+    if (entry.restoreProof) journalIntegrity(decoded.checkpoint && decoded.checkpoint.digest === entry.restoreProof.checkpointDigest &&
+      isDeepStrictEqual(decoded.admitted.metadata, entry.restoreProof.admitted));
+    const update = await verifyAndEncode(decoded.admitted.updateBytes, decoded.admitted.metadata.accepted.receipt.updateDigest, true);
+    const checkpoint = decoded.checkpoint ? await verifyAndEncode(decoded.checkpoint.bytes, decoded.checkpoint.digest, decoded.restoreOperationId !== null) : null;
+    rows.push({...row, admitted: {...row.admitted, updateBytes: update},
+      restore: row.restore ? {...row.restore, checkpoint: {...row.restore.checkpoint, bytes: checkpoint!}} : null});
     rowBytes += encodedBytes;
     nextCursor = row.journalCursor;
   }
