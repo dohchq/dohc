@@ -1,4 +1,4 @@
-import { Suspense, lazy, memo, type ComponentProps } from "react";
+import { Suspense, lazy, memo, useState, type ComponentProps } from "react";
 import type {
   ChatThreadRecord,
   SyncStatusResult,
@@ -7,7 +7,8 @@ import type {
 import { ErrorBoundary } from "../ErrorBoundary";
 import { AboutRail } from "../workbench/AboutRail";
 import { SkeletonRows, SkeletonSlot } from "../ui/SkeletonRows";
-import { setAboutWidth, type WorkbenchState } from "../workbench/workbenchState";
+import { parseChatTabPath, setAboutWidth, type WorkbenchState } from "../workbench/workbenchState";
+import { useAboutConversation } from "../workbench/aboutConversation";
 import { chatsOffCopy } from "./capabilityOffCopy";
 
 const LazyLinkedChatsPanel = lazy(() =>
@@ -16,10 +17,29 @@ const LazyLinkedChatsPanel = lazy(() =>
   })),
 );
 
+const LazyAboutConversationPanel = lazy(() =>
+  import("../workbench/AboutConversationPanel").then((mod) => ({
+    default: mod.AboutConversationPanel,
+  })),
+);
+
 type LinkedChatsPanelProps = ComponentProps<typeof LazyLinkedChatsPanel>;
 
-// The right side panel: About the active file. Every input is state or a
-// stable callback, so a shell render that changes none of them skips it.
+// A file's chat opened from search, a mention or the graph. The shell mints
+// one per hit and names the tab it belongs to, so the hit lives with the
+// shell, not with this rail, and survives About being closed.
+export type AboutSearchHit = {
+  thread: ChatThreadRecord;
+  focusMessageId?: string;
+  tab: string | null;
+  // Read by About's file panel. The shell drops a read hit once that panel
+  // stops showing its thread, so it never hides the tab's own About after.
+  read: boolean;
+};
+
+// The right side panel: About the active file or conversation. Every input is
+// state or a stable callback, so a shell render that changes none of them
+// skips it.
 export const ShellAboutRail = memo(function ShellAboutRail(props: {
   wb: WorkbenchState;
   mutateWb: (updater: (state: WorkbenchState) => WorkbenchState) => void;
@@ -29,10 +49,11 @@ export const ShellAboutRail = memo(function ShellAboutRail(props: {
   syncStatus: SyncStatusResult | null;
   workspaceId: string;
   activeDocumentPath: string | null;
-  fileTabOpen: boolean;
+  aboutTabOpen: boolean;
   shareView: NonNullable<WorkspaceSummary["shareView"]> | null;
-  searchChatTarget: { thread: ChatThreadRecord; focusMessageId?: string } | null;
-  setSearchChatTarget: (target: null) => void;
+  searchChatTarget: AboutSearchHit | null;
+  onSearchHitRead: () => void;
+  onSearchHitClosed: () => void;
   openPathWithHeading: LinkedChatsPanelProps["onOpenPath"];
   onChatsThreadRead: LinkedChatsPanelProps["onThreadRead"];
   reportFailureMessage: LinkedChatsPanelProps["onError"];
@@ -50,10 +71,11 @@ export const ShellAboutRail = memo(function ShellAboutRail(props: {
     syncStatus,
     workspaceId,
     activeDocumentPath,
-    fileTabOpen,
+    aboutTabOpen,
     shareView,
     searchChatTarget,
-    setSearchChatTarget,
+    onSearchHitRead,
+    onSearchHitClosed,
     openPathWithHeading,
     onChatsThreadRead,
     reportFailureMessage,
@@ -62,6 +84,21 @@ export const ShellAboutRail = memo(function ShellAboutRail(props: {
     aboutNotices,
     accessContext,
   } = props;
+  // A conversation tab's page says what About shows for it. A shared view
+  // has no conversations, so its About stays on files. A chat search hit
+  // opens its file's chat here, on the tab it belongs to, which the shell
+  // names and drops once focus leaves it. Only that tab's About shows the hit,
+  // and the file panel reads it once.
+  const showsSearchHit = searchChatTarget !== null && searchChatTarget.tab === focusedTabPath;
+  const pendingHit = showsSearchHit && !searchChatTarget.read ? searchChatTarget : null;
+  const chatTab = parseChatTabPath(focusedTabPath);
+  const conversationTab = !shareView && !showsSearchHit &&
+    (chatTab?.kind === "channel" || chatTab?.kind === "dm");
+  // Null for a tab that is not a conversation's.
+  const published = useAboutConversation(workspaceId, conversationTab ? focusedTabPath : null);
+  const conversation = conversationTab ? published : null;
+  const [conversationAccessOpen, setConversationAccessOpen] = useState(false);
+  const loading = <SkeletonRows inSlot layout="panel" label="Loading About..." />;
   return (
     <AboutRail
       width={wb.aboutWidth}
@@ -83,7 +120,7 @@ export const ShellAboutRail = memo(function ShellAboutRail(props: {
           // A shared view needs no capture and waits for no decision: main
           // answers its per-file chat from the share scope.
           !captureDecided ? (
-            <SkeletonRows inSlot layout="panel" label="Loading About..." />
+            loading
           ) : (
             <div
               data-testid="about-rail-off"
@@ -92,18 +129,33 @@ export const ShellAboutRail = memo(function ShellAboutRail(props: {
               {chatsOffCopy(syncStatus)}
             </div>
           )
+        ) : conversation === undefined ? (
+          loading
+        ) : conversation !== null && conversation !== "none" ? (
+          <Suspense fallback={loading}>
+            <LazyAboutConversationPanel
+              workspaceId={workspaceId}
+              conversation={conversation}
+              accessOpen={conversationAccessOpen}
+              onToggleAccess={() => setConversationAccessOpen((open) => !open)}
+              notices={aboutNotices}
+              accessContext={accessContext}
+            />
+          </Suspense>
         ) : (
-          <Suspense fallback={<SkeletonRows inSlot layout="panel" label="Loading About..." />}>
+          <Suspense fallback={loading}>
             <LazyLinkedChatsPanel
               workspaceId={workspaceId}
               filePath={activeDocumentPath}
-              fileTabOpen={fileTabOpen}
+              tabPath={focusedTabPath}
+              aboutTabOpen={aboutTabOpen}
               {...(shareView
                 ? { shareReadOnly: true }
                 : { history: { revision: historyRevision, onOpenMoment: openMoment } })}
-              initialThread={searchChatTarget?.thread ?? null}
-              initialFocusMessageId={searchChatTarget?.focusMessageId}
-              onInitialThreadConsumed={() => setSearchChatTarget(null)}
+              initialThread={pendingHit?.thread ?? null}
+              initialFocusMessageId={pendingHit?.focusMessageId}
+              onInitialThreadConsumed={onSearchHitRead}
+              onInitialThreadClosed={onSearchHitClosed}
               onOpenPath={openPathWithHeading}
               onThreadRead={onChatsThreadRead}
               onError={reportFailureMessage}

@@ -105,9 +105,8 @@ export interface ToolContext {
   // Desktop state/home dir (the --home arg): holds dohc-workspaces.json.
   home: string;
   // The share level this server was launched for, from the
-  // --share-access flag. Absent means a local workspace: every tool registers.
-  // A level narrows the write surface — see createDohcMcpServer, which decides
-  // which write tools exist for it.
+  // --share-access flag. Absent means a local workspace at the Owner level.
+  // The capability table decides the levels at which each tool registers.
   shareAccess?: ShareAccess;
   // Injectable CLI transport for tests. Production uses sendCliRequest with
   // the explicit desktop state dir supplied by --home.

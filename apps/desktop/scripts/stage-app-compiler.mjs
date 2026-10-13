@@ -12,12 +12,20 @@ const nodeUrl = `https://nodejs.org/dist/v${NODE_VERSION}/win-x64/node.exe`;
 const maxNodeBytes = 128 * 1024 * 1024;
 const desktopRoot = fileURLToPath(new URL("..", import.meta.url));
 const sha256 = bytes => createHash("sha256").update(bytes).digest("hex");
-const files = [
-  "node.exe", "adapter.mjs", "worker.mjs", "compilerProcessRelay.mjs", "windowsCompilerJob.ps1",
-  "node_modules/esbuild/package.json", "node_modules/esbuild/lib/main.js", "node_modules/esbuild/LICENSE.md",
-  "node_modules/@esbuild/win32-x64/package.json", "node_modules/@esbuild/win32-x64/esbuild.exe",
-  "licenses/node.txt", "licenses/acorn.txt", "licenses/parse5.txt", "licenses/entities.txt",
-];
+// Linux x64 ships only the esbuild binary Collection actions compile with.
+// Publishing apps needs the Windows compiler process and its job limits.
+const stagedFiles = {
+  win32: [
+    "node.exe", "adapter.mjs", "worker.mjs", "compilerProcessRelay.mjs", "windowsCompilerJob.ps1",
+    "node_modules/esbuild/package.json", "node_modules/esbuild/lib/main.js", "node_modules/esbuild/LICENSE.md",
+    "node_modules/@esbuild/win32-x64/package.json", "node_modules/@esbuild/win32-x64/esbuild.exe",
+    "licenses/node.txt", "licenses/acorn.txt", "licenses/parse5.txt", "licenses/entities.txt",
+  ],
+  linux: [
+    "node_modules/esbuild/LICENSE.md",
+    "node_modules/@esbuild/linux-x64/package.json", "node_modules/@esbuild/linux-x64/bin/esbuild",
+  ],
+};
 
 async function packageRoot(resolve, name) {
   for (let directory = dirname(resolve(name)); directory !== dirname(directory); directory = dirname(directory)) {
@@ -28,11 +36,12 @@ async function packageRoot(resolve, name) {
 }
 
 export async function requireAppCompiler(root = join(desktopRoot, "resources/app-compiler"), platform = process.platform, arch = process.arch) {
-  if (platform !== "win32") return;
+  const files = stagedFiles[platform];
+  if (!files || platform === "linux" && arch !== "x64") return;
   if (arch !== "x64") throw new Error("The packaged app compiler currently requires Windows x64.");
   const manifest = JSON.parse(await readFile(join(root, "manifest.json"), "utf8"));
-  if (manifest.nodeVersion !== NODE_VERSION || manifest.nodeSha256 !== NODE_SHA256 ||
-      manifest.platform !== "win32" || manifest.arch !== "x64" ||
+  if (platform === "win32" && (manifest.nodeVersion !== NODE_VERSION || manifest.nodeSha256 !== NODE_SHA256) ||
+      manifest.platform !== platform || manifest.arch !== "x64" ||
       JSON.stringify(Object.keys(manifest.files).sort()) !== JSON.stringify([...files].sort())) {
     throw new Error("App compiler staging manifest does not match this build.");
   }
@@ -40,7 +49,7 @@ export async function requireAppCompiler(root = join(desktopRoot, "resources/app
     const bytes = await readFile(join(root, path));
     if (sha256(bytes) !== manifest.files[path]) throw new Error(`App compiler asset changed: ${path}`);
   }
-  if (manifest.files["node.exe"] !== NODE_SHA256) throw new Error("App compiler Node identity changed.");
+  if (platform === "win32" && manifest.files["node.exe"] !== NODE_SHA256) throw new Error("App compiler Node identity changed.");
 }
 
 /** Build preparation may fetch this fixed release. Packaged execution never resolves Node from PATH. */
@@ -75,38 +84,46 @@ export async function readPinnedCompilerNode(options = {}) {
 /** Stage only trusted build inputs, without running dependency install scripts. */
 export async function stageAppCompiler(options = {}) {
   const platform = options.platform ?? process.platform, arch = options.arch ?? process.arch;
-  if (platform !== "win32" || arch !== "x64") return { supported: false };
+  const files = stagedFiles[platform];
+  if (!files || arch !== "x64") return { supported: false };
   const destination = resolve(options.destination ?? join(desktopRoot, "resources/app-compiler"));
   const sourceRoot = resolve(options.desktopRoot ?? desktopRoot);
-  const node = await readPinnedCompilerNode({ nodeExecutable: options.nodeExecutable, stagedNodePath: join(destination, "node.exe") });
+  const node = platform === "win32" ? await readPinnedCompilerNode({ nodeExecutable: options.nodeExecutable, stagedNodePath: join(destination, "node.exe") }) : null;
   const require = createRequire(join(sourceRoot, "package.json"));
   const esbuildRoot = dirname(require.resolve("esbuild/package.json"));
   if (JSON.parse(await readFile(join(esbuildRoot, "package.json"), "utf8")).version !== "0.28.1") throw new Error("App compiler requires esbuild 0.28.1.");
   const esbuildRequire = createRequire(join(esbuildRoot, "package.json"));
-  const platformRoot = dirname(esbuildRequire.resolve("@esbuild/win32-x64/package.json"));
-  if (JSON.parse(await readFile(join(platformRoot, "package.json"), "utf8")).version !== "0.28.1") throw new Error("App compiler requires esbuild 0.28.1 Windows x64.");
-  const acornRoot = dirname(require.resolve("acorn/package.json"));
-  const parse5Root = await packageRoot(require.resolve, "parse5");
-  const entitiesRoot = await packageRoot(createRequire(join(parse5Root, "package.json")).resolve, "entities");
+  const nativePackage = `@esbuild/${platform}-x64`;
+  const platformRoot = dirname(esbuildRequire.resolve(`${nativePackage}/package.json`));
+  if (JSON.parse(await readFile(join(platformRoot, "package.json"), "utf8")).version !== "0.28.1") throw new Error(`App compiler requires ${nativePackage} 0.28.1.`);
   await mkdir(dirname(destination), { recursive: true });
   const staging = await mkdtemp(`${destination}.staging-`);
   try {
     for (const path of files) await mkdir(dirname(join(staging, path)), { recursive: true });
-    await writeFile(join(staging, "node.exe"), node);
-    for (const file of ["package.json", "lib/main.js", "LICENSE.md"]) await cp(join(esbuildRoot, file), join(staging, "node_modules/esbuild", file));
-    for (const file of ["package.json", "esbuild.exe"]) await cp(join(platformRoot, file), join(staging, "node_modules/@esbuild/win32-x64", file));
-    for (const file of ["compilerProcessRelay.mjs", "windowsCompilerJob.ps1"]) await cp(join(sourceRoot, "src/workspaces", file), join(staging, file));
-    await cp(join(sourceRoot, "scripts/compiler-node-LICENSE.txt"), join(staging, "licenses/node.txt"));
-    await cp(join(acornRoot, "LICENSE"), join(staging, "licenses/acorn.txt"));
-    await cp(join(parse5Root, "LICENSE"), join(staging, "licenses/parse5.txt"));
-    await cp(join(entitiesRoot, "LICENSE"), join(staging, "licenses/entities.txt"));
-    for (const [source, output] of [["closedAppCompilerProcess.ts", "adapter.mjs"], ["closedAppCompilerWorker.ts", "worker.mjs"]]) {
-      await build({ entryPoints: [join(sourceRoot, "src/workspaces", source)], outfile: join(staging, output),
-        bundle: true, platform: "node", target: "node24", format: "esm", external: ["esbuild"], logLevel: "silent" });
+    if (platform === "linux") {
+      await cp(join(esbuildRoot, "LICENSE.md"), join(staging, "node_modules/esbuild/LICENSE.md"));
+      for (const file of ["package.json", "bin/esbuild"]) await cp(join(platformRoot, file), join(staging, "node_modules", nativePackage, file));
+    } else {
+      const acornRoot = dirname(require.resolve("acorn/package.json"));
+      const parse5Root = await packageRoot(require.resolve, "parse5");
+      const entitiesRoot = await packageRoot(createRequire(join(parse5Root, "package.json")).resolve, "entities");
+      await writeFile(join(staging, "node.exe"), node);
+      for (const file of ["package.json", "lib/main.js", "LICENSE.md"]) await cp(join(esbuildRoot, file), join(staging, "node_modules/esbuild", file));
+      for (const file of ["package.json", "esbuild.exe"]) await cp(join(platformRoot, file), join(staging, "node_modules", nativePackage, file));
+      for (const file of ["compilerProcessRelay.mjs", "windowsCompilerJob.ps1"]) await cp(join(sourceRoot, "src/workspaces", file), join(staging, file));
+      await cp(join(sourceRoot, "scripts/compiler-node-LICENSE.txt"), join(staging, "licenses/node.txt"));
+      await cp(join(acornRoot, "LICENSE"), join(staging, "licenses/acorn.txt"));
+      await cp(join(parse5Root, "LICENSE"), join(staging, "licenses/parse5.txt"));
+      await cp(join(entitiesRoot, "LICENSE"), join(staging, "licenses/entities.txt"));
+      for (const [source, output] of [["closedAppCompilerProcess.ts", "adapter.mjs"], ["closedAppCompilerWorker.ts", "worker.mjs"]]) {
+        await build({ entryPoints: [join(sourceRoot, "src/workspaces", source)], outfile: join(staging, output),
+          bundle: true, platform: "node", target: "node24", format: "esm", external: ["esbuild"], logLevel: "silent" });
+      }
     }
     const identities = {};
     for (const path of files) identities[path] = sha256(await readFile(join(staging, path)));
-    await writeFile(join(staging, "manifest.json"), JSON.stringify({ nodeVersion: NODE_VERSION, nodeSha256: NODE_SHA256, platform, arch, files: identities }, null, 2));
+    const runtime = node ? { nodeVersion: NODE_VERSION, nodeSha256: NODE_SHA256 } : {};
+    await writeFile(join(staging, "manifest.json"), JSON.stringify({ ...runtime, platform, arch, files: identities }, null, 2));
     await requireAppCompiler(staging, platform, arch);
     const current = await readFile(join(destination, "manifest.json"), "utf8").catch(error => { if (error.code === "ENOENT") return null; throw error; });
     if (current === await readFile(join(staging, "manifest.json"), "utf8")) {

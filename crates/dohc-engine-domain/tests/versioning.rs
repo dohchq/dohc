@@ -1946,3 +1946,189 @@ fn rollback_of_unrecorded_moment_is_rejected() {
         "invalid-input"
     );
 }
+
+#[test]
+fn file_resolution_tracks_rename_delete_reuse_versions_and_restart() {
+    use dohc_engine_domain::{FileResolution as R, FileResolveTarget as T};
+    let scratch = ScratchDir::new().unwrap();
+    let db = engine_db_path(&scratch).unwrap();
+    {
+        let mut store = EngineStore::open(&db, 1).unwrap();
+        bootstrap(&mut store);
+        let mut domain = VersionedTextStore::new(&mut store);
+        domain
+            .write_text(&write("main", " a.md ", "body", "m1", "o1", 2), &NO_FAULTS)
+            .unwrap();
+        assert_eq!(
+            domain
+                .resolve_files(
+                    WS,
+                    None,
+                    &[
+                        T::Path(" a.md ".into()),
+                        T::Path("missing.md".into()),
+                        T::Path("../bad".into()),
+                        T::ObjectId("".into()),
+                        T::Invalid
+                    ]
+                )
+                .unwrap()
+                .1,
+            vec![
+                R::Found {
+                    object_id: "o1".into(),
+                    path: " a.md ".into()
+                },
+                R::Absent,
+                R::Invalid,
+                R::Invalid,
+                R::Invalid
+            ]
+        );
+        assert_eq!(
+            domain
+                .resolve_files(WS, Some("unknown"), &[T::Invalid])
+                .unwrap_err()
+                .code(),
+            "version-not-found"
+        );
+        assert!(domain.resolve_files("foreign", Some("main"), &[]).is_err());
+        domain
+            .write_binary(
+                &dohc_engine_domain::WriteBinary {
+                    workspace_id: WS.into(),
+                    version_id: "main".into(),
+                    object_id: "binary".into(),
+                    path: "photo.png".into(),
+                    bytes: vec![1, 2],
+                    moment_id: "binary-m".into(),
+                    metadata_origin: "api".into(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    now_ms: 3,
+                    request_id: None,
+                },
+                &NO_FAULTS,
+            )
+            .unwrap();
+        assert_eq!(
+            domain
+                .resolve_files(
+                    WS,
+                    None,
+                    &[T::Path("photo.png".into()), T::ObjectId("binary".into())]
+                )
+                .unwrap()
+                .1,
+            vec![
+                R::Found {
+                    object_id: "binary".into(),
+                    path: "photo.png".into()
+                };
+                2
+            ]
+        );
+        domain
+            .create_named_version(
+                &CreateNamedVersion {
+                    workspace_id: WS.into(),
+                    new_version_id: "draft".into(),
+                    name: "Draft".into(),
+                    from_version_id: "main".into(),
+                    now_ms: 3,
+                    request_id: None,
+                },
+                &NO_FAULTS,
+            )
+            .unwrap();
+        domain
+            .rename_text_file(
+                &RenameTextFile {
+                    workspace_id: WS.into(),
+                    version_id: "main".into(),
+                    from_path: " a.md ".into(),
+                    to_path: "moved.md".into(),
+                    moment_id: "m2".into(),
+                    request_id: None,
+                    metadata_origin: "api".into(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    now_ms: 4,
+                },
+                &NO_FAULTS,
+            )
+            .unwrap();
+        assert_eq!(
+            domain
+                .resolve_files(
+                    WS,
+                    Some("main"),
+                    &[T::Path(" a.md ".into()), T::ObjectId("o1".into())]
+                )
+                .unwrap()
+                .1,
+            vec![
+                R::Absent,
+                R::Found {
+                    object_id: "o1".into(),
+                    path: "moved.md".into()
+                }
+            ]
+        );
+        domain
+            .delete_text_file(
+                &DeleteTextFile {
+                    workspace_id: WS.into(),
+                    version_id: "main".into(),
+                    path: "moved.md".into(),
+                    moment_id: "m3".into(),
+                    request_id: None,
+                    metadata_origin: "api".into(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    now_ms: 5,
+                },
+                &NO_FAULTS,
+            )
+            .unwrap();
+        domain
+            .write_text(&write("main", "moved.md", "new", "m4", "o2", 6), &NO_FAULTS)
+            .unwrap();
+        domain.set_active_version(WS, "draft", &NO_FAULTS).unwrap();
+        assert_eq!(
+            domain
+                .resolve_files(WS, None, &[T::ObjectId("o1".into())])
+                .unwrap(),
+            (
+                "draft".into(),
+                vec![R::Found {
+                    object_id: "o1".into(),
+                    path: " a.md ".into()
+                }]
+            )
+        );
+    }
+    let mut store = EngineStore::open(&db, 7).unwrap();
+    let domain = VersionedTextStore::new(&mut store);
+    assert_eq!(
+        domain
+            .resolve_files(
+                WS,
+                Some("main"),
+                &[T::ObjectId("o1".into()), T::Path("moved.md".into())]
+            )
+            .unwrap()
+            .1,
+        vec![
+            R::Absent,
+            R::Found {
+                object_id: "o2".into(),
+                path: "moved.md".into()
+            }
+        ]
+    );
+    assert_eq!(domain.resolve_files(WS, None, &[]).unwrap().0, "draft");
+}

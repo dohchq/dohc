@@ -106,6 +106,35 @@ describe("readConfig", () => {
     expect(() => readConfig(env({ DOHC_SMTP_HOST: "smtp.example.com" }))).toThrow(ConfigError);
   });
 
+  it("keeps sign-up open when no approved address is listed", () => {
+    expect(readConfig(env()).signUp).toBeNull();
+    expect(readConfig(env({ DOHC_SIGN_UP_EMAILS: "" })).signUp).toBeNull();
+    expect(readConfig(env({ DOHC_SIGN_UP_EMAILS: " , " })).signUp).toBeNull();
+  });
+
+  it("closes sign-up to the normalized approved list and the relay's pending invites", () => {
+    const config = readConfig(
+      env({ DOHC_SIGN_UP_EMAILS: " Owner@Example.com ,friend@example.com,", WORKSPACE_API_RELAY_URL: "http://sync-relay:1788" }),
+    );
+    expect(config.signUp).toEqual({
+      emails: new Set(["owner@example.com", "friend@example.com"]),
+      relayUrl: "http://sync-relay:1788",
+    });
+  });
+
+  it("refuses a closed sign-up it cannot run", () => {
+    expect(() => readConfig(env({ DOHC_SIGN_UP_EMAILS: "owner@example.com" }))).toThrow(/WORKSPACE_API_RELAY_URL/);
+    expect(() =>
+      readConfig(env({ DOHC_SIGN_UP_EMAILS: "owner@example.com; friend@example.com", WORKSPACE_API_RELAY_URL: "http://sync-relay:1788" })),
+    ).toThrow(/separated by commas/);
+    expect(() =>
+      readConfig(env({ DOHC_SIGN_UP_EMAILS: "owner", WORKSPACE_API_RELAY_URL: "http://sync-relay:1788" })),
+    ).toThrow(/separated by commas/);
+    expect(() =>
+      readConfig(env({ DOHC_SIGN_UP_EMAILS: "owner@example.com", WORKSPACE_API_RELAY_URL: "http://sync-relay:1788/sync" })),
+    ).toThrow(/no path or credentials/);
+  });
+
   it("takes crash reports only when the operator sets DOHC_CRASH_REPORTS=1", () => {
     expect(readConfig(env()).crashReports).toBe(false);
     expect(readConfig(env({ DOHC_CRASH_REPORTS: "0" })).crashReports).toBe(false);

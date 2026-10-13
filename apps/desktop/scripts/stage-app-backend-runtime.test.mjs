@@ -4,7 +4,7 @@ import { createRequire } from 'node:module';
 import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { load } from 'js-yaml';
 import { stageAppBackendRuntime, requireAppBackendRuntime } from './stage-app-backend-runtime.mjs';
@@ -29,11 +29,12 @@ test('packaging preserves the relocated child and Wasm closure and rejects resou
   await rm(source, { recursive: true, force: true });
   const staged = join(resources, 'app-backend-runtime');
   await requireAppBackendRuntime(staged);
-  if (process.platform === 'win32' && process.arch === 'x64') {
-    const binaryDirectory = join(resources, 'app-compiler/node_modules/@esbuild/win32-x64');
-    await mkdir(binaryDirectory, { recursive: true });
+  const native = { 'win32-x64': 'win32-x64/esbuild.exe', 'linux-x64': 'linux-x64/bin/esbuild' }[`${process.platform}-${process.arch}`];
+  if (native) {
+    const binary = join(resources, 'app-compiler/node_modules/@esbuild', native);
+    await mkdir(dirname(binary), { recursive: true });
     const compilerRequire = createRequire(require.resolve('esbuild'));
-    await cp(compilerRequire.resolve('@esbuild/win32-x64/esbuild.exe'), join(binaryDirectory, 'esbuild.exe'));
+    await cp(compilerRequire.resolve(`@esbuild/${native}`), binary);
     const compile = await createInstalledDatasetCompiler(resources);
     const source = 'type Value=number;globalThis.operations={read(){const value:Value=42;return {value};}};';
     const installedOutput = await compile(source, 'data/operations.ts', new AbortController().signal);

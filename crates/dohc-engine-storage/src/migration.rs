@@ -3190,6 +3190,12 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         sql: "CREATE INDEX idx_moments_history_time ON moments(workspace_id, version_id, recorded_at_ms, moment_order); CREATE INDEX idx_moments_object_history_time ON moments(workspace_id, version_id, object_id, recorded_at_ms, moment_order);",
         sets_user_version: None,
     },
+    Migration {
+        ordinal: 47,
+        id: "v2-engine-store-role",
+        sql: "ALTER TABLE engine_ownership ADD COLUMN store_role TEXT NOT NULL DEFAULT 'owner' CHECK (store_role IN ('owner','passive'));",
+        sets_user_version: None,
+    },
 ];
 
 const V2_OPEN_DOCUMENT_ARTIFACTS_DDL: &str = "\
@@ -3852,6 +3858,10 @@ mod tests {
             (
                 "v2-moments-history-time",
                 "5aa8707d5659bbfb8e3e0076c812d1d723a011e6cfb32fefe490f8b1066b2c39",
+            ),
+            (
+                "v2-engine-store-role",
+                "8d75962511b05d48c91ea5c041ed69c8ab6b181212aee4c0cad4c7e16f61a54b",
             ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());

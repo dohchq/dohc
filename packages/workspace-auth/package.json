@@ -6,6 +6,7 @@
   "exports": {
     "./betterAuth": "./src/betterAuth.ts",
     "./session": "./src/session.ts",
+    "./signUp": "./src/signUp.ts",
     "./smtp": "./src/smtp.ts"
   },
   "scripts": {

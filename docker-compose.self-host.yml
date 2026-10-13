@@ -67,6 +67,8 @@ services:
       DOHC_SMTP_USER: ${DOHC_SMTP_USER:-}
       DOHC_SMTP_PASSWORD: ${DOHC_SMTP_PASSWORD:-}
       DOHC_SMTP_FROM: ${DOHC_SMTP_FROM:?Set DOHC_SMTP_FROM}
+      DOHC_SIGN_UP_EMAILS: ${DOHC_SIGN_UP_EMAILS:-}
+      WORKSPACE_API_RELAY_URL: http://sync-relay:1788
     depends_on:
       postgres-migrate: {condition: service_completed_successfully}
     healthcheck:

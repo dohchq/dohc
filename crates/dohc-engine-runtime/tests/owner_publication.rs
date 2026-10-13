@@ -2344,3 +2344,137 @@ async fn refused_native_publications_continue(queued: i64, neutral: bool) {
     owner.close().await.unwrap();
     supervisor.close_all().unwrap();
 }
+
+#[tokio::test]
+async fn unload_waits_for_an_owner_edit_adopted_before_its_first_settlement() {
+    let mut f = Fixture::new();
+    let key = DocKey::new("workspace", "main", "object").unwrap();
+    let limits = dohc_engine_collab::OwnerOutboxLimits {
+        max_pending_bytes: 1_000_000,
+        max_pending_age_ms: 100_000,
+    };
+    // The relay accepted the owner's edit and the outbox drained before adoption.
+    f.doc
+        .rewrite_content_to_markdown(ContentKind::Richdoc, "owner edit")
+        .unwrap();
+    let update = f.doc.encode_full_state();
+    let dohc_engine_storage::TxnOutcome::Committed(recorded) =
+        dohc_engine_collab::record_local_update(
+            &mut f.store,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &key,
+            &update,
+            dohc_engine_collab::LocalAppend::default(),
+            &NoFaults,
+            4,
+            |_, _, _| Ok(()),
+        )
+        .unwrap()
+    else {
+        panic!("record crash")
+    };
+    let entry = dohc_engine_collab::append_owner_outbox(
+        &mut f.store,
+        "workspace",
+        dohc_engine_collab::OwnerOutboxAppendInput {
+            binding: f.binding.clone(),
+            base_update: f.bytes.clone(),
+            append_key: "edit".into(),
+            update: update.clone(),
+            limits: limits.clone(),
+            created_at_ms: 4,
+        },
+    )
+    .unwrap();
+    let receipt = LiveUpdateReceipt {
+        delivery_id: entry.delivery_id.clone(),
+        update_digest: entry.update_digest.clone(),
+        journal_cursor: 7,
+        accepting_host_epoch: 1,
+    };
+    dohc_engine_collab::acknowledge_owner_outbox(
+        &mut f.store,
+        "workspace",
+        &entry.outbox_id,
+        &[dohc_engine_collab::OwnerDeliveryReceipt {
+            delivery_id: entry.delivery_id,
+            update_digest: entry.update_digest,
+            journal_cursor: 7,
+            accepting_host_epoch: 1,
+        }],
+    )
+    .unwrap();
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&f.db, 3).unwrap().actor;
+    let owner = actor
+        .live_application_owner("workspace".into())
+        .await
+        .unwrap();
+    let handle = owner
+        .register(
+            "relay".into(),
+            ApplicationHostCoordinate {
+                host_id: "host".into(),
+                host_epoch: 1,
+                instance_id: "instance".into(),
+                connection_id: "connection".into(),
+            },
+            f.binding.clone(),
+        )
+        .await
+        .unwrap();
+    handle
+        .adopt_owner(
+            OwnerAdoptionCut {
+                relay_database_namespace: "relay".into(),
+                adoption_id: "adoption".into(),
+                source_moment_id: "original".into(),
+                source_digest: hex_sha256(f.text.as_bytes()),
+                source_byte_length: f.text.len() as i64,
+                baseline_moment_relay_sequence: 1,
+                baseline_registered_at_ms: 3,
+                baseline_bytes: f.bytes.clone(),
+                expected_local_sequence: recorded.seq,
+                events: vec![AdmittedLiveUpdate {
+                    metadata: AdmittedLiveUpdateMetadata {
+                        accepted: RelayAcceptedLiveUpdate {
+                            receipt: receipt.clone(),
+                            binding: f.binding.clone(),
+                            authority: ServerDerivedLiveUpdateAuthority::Owner {
+                                principal_id: "owner".into(),
+                            },
+                            received_at_ms: 4,
+                        },
+                        first_seen: vec![],
+                        canonical_version: None,
+                        author_snapshot: None,
+                        first_seen_deletes: None,
+                        checkpoint_coverage: None,
+                    },
+                    update_bytes: update,
+                }],
+                terminal_receipt: Some(receipt.clone()),
+                outbox_limits: limits,
+            },
+            1_000_000,
+            100,
+            Arc::new(NoFaults),
+            Arc::new(()),
+        )
+        .await
+        .unwrap();
+    let unload = || {
+        owner.unload(
+            "object".into(),
+            vec![key.clone()],
+            f.root.path().to_owned(),
+            40,
+        )
+    };
+    // The adoption cursor covers the edit, but the file does not hold it yet.
+    assert_eq!(unload().await.unwrap(), Some(UnloadPending::Settlement));
+    assert!(f.settle(&handle, Some(receipt)).await.materialized);
+    assert_eq!(unload().await.unwrap(), None);
+    owner.close().await.unwrap();
+    supervisor.close_all().unwrap();
+}

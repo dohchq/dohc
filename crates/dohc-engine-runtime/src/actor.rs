@@ -27,6 +27,7 @@
 mod automations;
 mod capture;
 mod recovery_import;
+use crate::supervisor::ActorOpenMode;
 pub use recovery_import::{
     RecoveryImport, RecoveryImportOutcome, RecoveryImportResult, RecoveryUpdate,
 };
@@ -172,6 +173,7 @@ enum Command {
 pub struct WorkspaceActor {
     identity: EngineDbIdentity,
     generation: u64,
+    mode: ActorOpenMode,
     /// Authoritative open disposition reported by [`EngineStore`]. This is
     /// true only when this actor created a brand-new schema; opening an
     /// existing, migrated, or recovered database always reports false.
@@ -204,7 +206,15 @@ impl WorkspaceActor {
         now_ms: i64,
         work: Option<Arc<AtomicU64>>,
     ) -> Result<Self, RuntimeError> {
-        Self::spawn_with_mode(db_path, identity, generation, now_ms, false, None, work)
+        Self::spawn_with_mode(
+            db_path,
+            identity,
+            generation,
+            now_ms,
+            ActorOpenMode::ReadWrite,
+            None,
+            work,
+        )
     }
 
     pub(crate) fn spawn_root_bound(
@@ -220,7 +230,7 @@ impl WorkspaceActor {
             identity,
             generation,
             now_ms,
-            false,
+            ActorOpenMode::ReadWrite,
             Some(root_token),
             work,
         )
@@ -234,19 +244,46 @@ impl WorkspaceActor {
         generation: u64,
         work: Option<Arc<AtomicU64>>,
     ) -> Result<Self, RuntimeError> {
-        Self::spawn_with_mode(db_path, identity, generation, 0, true, None, work)
+        Self::spawn_with_mode(
+            db_path,
+            identity,
+            generation,
+            0,
+            ActorOpenMode::ReadOnly,
+            None,
+            work,
+        )
     }
 
-    fn spawn_with_mode(
+    pub(crate) fn spawn_passive(
         db_path: PathBuf,
         identity: EngineDbIdentity,
         generation: u64,
         now_ms: i64,
-        read_only: bool,
         root_token: Option<String>,
         work: Option<Arc<AtomicU64>>,
     ) -> Result<Self, RuntimeError> {
-        let writer_lock = if read_only {
+        Self::spawn_with_mode(
+            db_path,
+            identity,
+            generation,
+            now_ms,
+            ActorOpenMode::Passive,
+            root_token,
+            work,
+        )
+    }
+
+    pub(crate) fn spawn_with_mode(
+        db_path: PathBuf,
+        identity: EngineDbIdentity,
+        generation: u64,
+        now_ms: i64,
+        mode: ActorOpenMode,
+        root_token: Option<String>,
+        work: Option<Arc<AtomicU64>>,
+    ) -> Result<Self, RuntimeError> {
+        let writer_lock = if matches!(mode, ActorOpenMode::ReadOnly) {
             let file = std::fs::File::open(&db_path).map_err(|error| RuntimeError::Identity {
                 reason: "could not inspect workspace database links",
                 source: Some(error),
@@ -275,7 +312,7 @@ impl WorkspaceActor {
                 worker_main(
                     db_path,
                     now_ms,
-                    read_only,
+                    mode,
                     root_token,
                     rx,
                     worker_state,
@@ -290,6 +327,7 @@ impl WorkspaceActor {
             Ok(Ok(store_freshly_created)) => Ok(WorkspaceActor {
                 identity,
                 generation,
+                mode,
                 store_freshly_created,
                 tx,
                 close_permit,
@@ -326,6 +364,10 @@ impl WorkspaceActor {
     /// The session generation (incremented on restart).
     pub fn generation(&self) -> u64 {
         self.generation
+    }
+
+    pub(crate) fn open_mode(&self) -> ActorOpenMode {
+        self.mode
     }
 
     /// Whether this actor's store open created a brand-new database schema.
@@ -529,7 +571,7 @@ fn debug_assert_sync_context() {
 fn worker_main(
     db_path: PathBuf,
     now_ms: i64,
-    read_only: bool,
+    mode: ActorOpenMode,
     root_token: Option<String>,
     mut rx: mpsc::Receiver<Command>,
     state: Arc<AtomicU8>,
@@ -552,8 +594,18 @@ fn worker_main(
     // Drop SQLite first, then its owner lock, then publish Closed, including unwind.
     let _writer_lock = writer_lock;
 
-    let mut store = match if read_only {
-        EngineStore::open_read_only_counting(&db_path, work_count.clone())
+    let mut store = match if matches!(mode, ActorOpenMode::Passive) {
+        EngineStore::open_passive(&db_path, now_ms, root_token.as_deref(), work_count.clone())
+    } else if matches!(mode, ActorOpenMode::ReadOnly) {
+        EngineStore::open_read_only_counting(&db_path, work_count.clone()).and_then(|store| {
+            if store.is_passive() {
+                Err(dohc_engine_storage::StorageError::InvalidInput {
+                    reason: "engine store role mismatch",
+                })
+            } else {
+                Ok(store)
+            }
+        })
     } else if let Some(token) = &root_token {
         EngineStore::open_with_root_token(&db_path, now_ms, token, work_count.clone())
     } else {
@@ -711,6 +763,49 @@ mod saturation_tests {
     use std::task::Poll;
     use std::time::{Duration, Instant};
     use tokio::sync::Semaphore;
+
+    #[test]
+    fn passive_store_restart_without_active_slot_fails_closed() {
+        let scratch = ScratchDir::new().unwrap();
+        let db = engine_db_path(&scratch).unwrap();
+        let supervisor = crate::WorkspaceSupervisor::new();
+        supervisor
+            .open_passive_root_bound(&db, 1, "passive-root", None)
+            .unwrap();
+        supervisor.close(&db).unwrap();
+        assert!(
+            supervisor.restart(&db, 2).is_err(),
+            "restart without a passive mode must fail closed"
+        );
+    }
+
+    #[tokio::test]
+    async fn passive_store_supervisor_restart_still_refuses_origination() {
+        let scratch = ScratchDir::new().unwrap();
+        let db = engine_db_path(&scratch).unwrap();
+        let supervisor = crate::WorkspaceSupervisor::new();
+        supervisor
+            .open_passive_root_bound(&db, 1, "passive-root", None)
+            .unwrap();
+        let actor = supervisor.restart(&db, 2).unwrap();
+        let refused = actor
+            .run(|store, _cache| {
+                Ok(dohc_engine_sync::create_claim_identity(
+                    store,
+                    "ws",
+                    "local",
+                    "epoch",
+                    "stream",
+                    2,
+                    &dohc_engine_storage::NoFaults,
+                )
+                .is_err())
+            })
+            .await
+            .unwrap();
+        supervisor.close(&db).unwrap();
+        assert!(refused, "a restart must keep local origination disabled");
+    }
 
     #[test]
     fn writer_lock_survives_sqlite_descriptor_close_and_hard_link_aliases() {
