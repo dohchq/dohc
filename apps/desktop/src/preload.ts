@@ -20,6 +20,7 @@ import type {
   WorkspaceActivityEvent,
 } from "./ipc/bridgeContract";
 import {
+  systemMotionOperations,
   SitePreviewReplacedEvent,
   ListOwnerLiveDocumentsPayload,
   ListOwnerLiveRefusalsPayload,
@@ -112,6 +113,7 @@ async function invokeParsed<Schema extends z.ZodType>(
 const rendererDocumentId = crypto.randomUUID();
 
 const bridge: DohcDesktopBridge = {
+  ...operationBridge(systemMotionOperations, invoke),
   ...operationBridge(shareDirectWriteDeliveryOperations, invoke),
   ...operationBridge(shareCopyOperations, invoke),
   ...operationBridge(accessOperations, invoke),

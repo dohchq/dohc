@@ -142,5 +142,6 @@
   "usage.switch",
   "share.copy.read",
   "document.typing.recovery",
-  "app.recognition.read"
+  "app.recognition.read",
+  "device.motion.read"
 ]

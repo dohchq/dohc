@@ -70,6 +70,8 @@ import {
   type AccessSetup,
   type AccessView,
 } from "../workbench/About";
+import type { AboutConversation } from "../workbench/aboutConversation";
+import type { PresencePeer } from "../collab/presenceChannel";
 import { SharingPanel, type ShareMount, type SharingActions, type SkipView } from "../workbench/SharingView";
 import { CAPTURE_RECOVERY_TITLE, captureRecoveryMessage } from "../shell/useCaptureRecoveryNotices";
 import { WorkspaceSyncStatus } from "../workbench/WorkspaceSyncStatus";
@@ -506,6 +508,25 @@ const ABOUT_ACCESS_UNKNOWN: AccessAnswer = {
   coverage: { kind: "unavailable", complete: false, observation: "interval" },
   checkedAtMs: null,
   freshness: "unknown",
+};
+
+// About for the drawing's #general: Sam and Nova here, and the Group's grants.
+const aboutPeer = (faceToken: string, displayName: string, paletteSlot: number): PresencePeer => ({
+  faceToken, sessionToken: `${faceToken}-session`, isSelf: false, displayName, paletteSlot, state: null, updatedAtMs: 0,
+});
+const ABOUT_PRESENT = [aboutPeer("face-sam", "Sam Rivera", 1), aboutPeer("face-nova", "Nova", 4)];
+const ABOUT_GROUP: AboutConversation = {
+  kind: "group", name: "general", channelWireId: "wire-general", received: false, present: ABOUT_PRESENT,
+};
+const ABOUT_CHAT_ACCESS: AccessAnswer = {
+  ...ABOUT_ACCESS,
+  ref: { kind: "chat", channelWireId: "wire-general" },
+  rows: [
+    aboutGrant({ shareId: "share-general", grantId: "grant-sam", recipientUserId: "sam", recipientEmail: "sam@example.com",
+      selector: { kind: "chat", channelWireId: "wire-general" }, access: "read-write" }),
+    aboutGrant({ shareId: "share-general", grantId: "grant-kim", recipientUserId: "kim", recipientEmail: "kim@example.com",
+      selector: { kind: "chat", channelWireId: "wire-general" }, access: "read-only" }),
+  ],
 };
 
 // A group's feed and a thread, from the drawing's #general.
@@ -1567,7 +1588,7 @@ function Pane(props: { theme: "light" | "dark" }) {
       <Section part="about" title="About">
         <Specimen label="a document: chats, history, access checked">
           <AboutPanelSpecimen>
-            <AboutHeader path={ABOUT_PATH} />
+            <AboutHeader subject={{ path: ABOUT_PATH }} />
             <AboutSection id="chats" icon={MessageSquare} label="Chats" count="2" expanded onToggle={noop}>
               <ul className="m-0 list-none p-0">
                 {ABOUT_THREADS.map((thread) => (
@@ -1906,6 +1927,39 @@ function Pane(props: { theme: "light" | "dark" }) {
             <ChatComposer testIdPrefix={`states-composer-about-${theme}`} composerId={`states-composer-about-${theme}`}
               value={COMPOSER_DRAFT} sending placeholder="Write a message…" sendLabel="Send message"
               onChange={noop} onSend={noop} />
+          </AboutPanelSpecimen>
+        </Specimen>
+      </Section>
+
+      {/* Last, so the parts above keep their places. */}
+      <Section part="about-conversation" title="About a conversation">
+        <Specimen label="a Group: who is here, and its access checked">
+          <AboutPanelSpecimen>
+            <AboutHeader subject={ABOUT_GROUP} />
+            <AboutAccessView view={{ status: "ready", answer: ABOUT_CHAT_ACCESS }} expanded onToggle={noop} onRetry={noop}
+              onMore={noop} setup={ACCESS_UNEXPLAINED} noun="chat" />
+          </AboutPanelSpecimen>
+        </Specimen>
+        <Specimen label="a person, with Access closed">
+          <AboutPanelSpecimen>
+            <AboutHeader subject={{ ...ABOUT_GROUP, kind: "person", name: "Sam Rivera", present: ABOUT_PRESENT.slice(0, 1) }} />
+            <AboutAccessView view={{ status: "loading" }} expanded={false} onToggle={noop} onRetry={noop} onMore={noop}
+              setup={ACCESS_UNEXPLAINED} noun="chat" />
+          </AboutPanelSpecimen>
+        </Specimen>
+        <Specimen label="an agent, alone: no share includes it">
+          <AboutPanelSpecimen>
+            <AboutHeader subject={{ ...ABOUT_GROUP, kind: "agent", name: "Nova", present: [] }} />
+            <AboutAccessView view={{ status: "ready", answer: { ...ABOUT_CHAT_ACCESS, rows: [] } }} expanded onToggle={noop}
+              onRetry={noop} onMore={noop} setup={ACCESS_UNEXPLAINED} noun="chat" />
+          </AboutPanelSpecimen>
+        </Specimen>
+        <Specimen label="unknown, then gone">
+          <AboutPanelSpecimen>
+            <AboutAccessView view={{ status: "ready", answer: ABOUT_ACCESS_UNKNOWN }} expanded onToggle={noop} onRetry={noop}
+              onMore={noop} setup={ACCESS_UNEXPLAINED} noun="chat" />
+            <AboutAccessView view={{ status: "ready", answer: { ...ABOUT_ACCESS_UNKNOWN, visibility: "missing" } }} expanded
+              onToggle={noop} onRetry={noop} onMore={noop} setup={ACCESS_UNEXPLAINED} noun="chat" />
           </AboutPanelSpecimen>
         </Specimen>
       </Section>

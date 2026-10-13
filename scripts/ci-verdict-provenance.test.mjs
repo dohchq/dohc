@@ -789,6 +789,7 @@ function scratchRepo(detached) {
   git("init", "-q", "-b", "main");
   git("config", "user.email", "gate@dohc.ai");
   git("config", "user.name", "gate");
+  git("config", "commit.gpgsign", "false");
   for (const body of ["one", "two", "three"]) {
     writeFileSync(join(repo, "a.txt"), `${body}\n`);
     git("add", "a.txt");

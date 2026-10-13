@@ -16,6 +16,8 @@ mod binary_write;
 mod capture_recovery;
 mod capture_write;
 mod delete_rename;
+mod file_resolution;
+pub use file_resolution::{FileResolution, FileResolveTarget};
 mod history;
 pub use history::{
     HistoryCursor, HistoryMarkerPosition, HistoryMomentMetadata, HistoryMomentPosition,
@@ -1666,6 +1668,9 @@ fn blob_text(conn: &Connection, sha256: &str) -> Result<Option<String>, DomainEr
     .map_err(DomainError::sql_corrupt)
 }
 
+const ALIAS_OBJECT_ID_SQL: &str =
+    "SELECT object_id FROM path_aliases WHERE workspace_id = ?1 AND version_id = ?2 AND path = ?3";
+
 fn alias_object_id(
     conn: &Connection,
     workspace_id: &str,
@@ -1673,7 +1678,7 @@ fn alias_object_id(
     path: &str,
 ) -> Result<Option<String>, DomainError> {
     conn.query_row(
-        "SELECT object_id FROM path_aliases WHERE workspace_id = ?1 AND version_id = ?2 AND path = ?3",
+        ALIAS_OBJECT_ID_SQL,
         params![workspace_id, version_id, path],
         |row| row.get(0),
     )

@@ -9,9 +9,9 @@ use dohc_engine_collab::live_update_application::{
     LiveUpdateHostApplicationAck, LiveUpdateReceipt, NativeRestoreApplication,
     NativeRestoreApplicationReceipt, NativeRestoreFence, NativeRestoreFenceReceipt,
     NativeRestorePreparation, NativeRestoreProposal, NativeRestoreResume,
-    NativeRestoreResumeReceipt, OwnerAdoptionAck, OwnerAdoptionCut, adopt_owner_committed,
-    apply_committed, bootstrap_committed, read_application_ack, validate_application_binding,
-    with_settlement,
+    NativeRestoreResumeReceipt, OwnerAdoptionAck, OwnerAdoptionCut, UnloadPending,
+    adopt_owner_committed, apply_committed, bootstrap_committed, read_application_ack,
+    unload_pending, validate_application_binding, with_settlement,
 };
 use dohc_engine_collab::live_update_application::{
     AppliedPosition, AppliedSyncCut, AppliedSyncPolicy, NextAppliedUpdate,
@@ -420,6 +420,34 @@ impl ActorLiveApplicationOwner {
             token: self.token.clone(),
             application,
         })
+    }
+
+    /// Release one document's registration and cached state on the writer queue.
+    /// Returns the incomplete work instead, with nothing released. Work is
+    /// complete once every applied update is settled and `root` holds the head.
+    pub async fn unload(
+        &self,
+        object_id: String,
+        keys: Vec<dohc_engine_collab::DocKey>,
+        root: std::path::PathBuf,
+        now_ms: i64,
+    ) -> Result<Option<UnloadPending>, RuntimeError> {
+        current(&self.actor, &self.token)?;
+        let (reply, receive) = oneshot::channel();
+        self.actor
+            .tx
+            .send(Command::LiveApplication(Box::new(Request::Unload {
+                workspace_id: self.workspace_id.clone(),
+                token: self.token.clone(),
+                object_id,
+                keys,
+                root,
+                now_ms,
+                reply,
+            })))
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        receive.await.map_err(|_| RuntimeError::ActorUnavailable)?
     }
 
     /// Retire captured handles immediately and await durable invalidation.
@@ -864,6 +892,15 @@ pub(super) enum Request {
         working_reserve_bytes: usize,
         reply: Reply<ApplicationResult>,
     },
+    Unload {
+        workspace_id: String,
+        token: Token,
+        object_id: String,
+        keys: Vec<dohc_engine_collab::DocKey>,
+        root: std::path::PathBuf,
+        now_ms: i64,
+        reply: Reply<Option<UnloadPending>>,
+    },
     Close {
         workspace_id: String,
         token: Token,
@@ -1290,6 +1327,36 @@ impl Request {
                         },
                     )
                     .map_err(Into::into)
+                });
+                let _ = reply.send(result);
+            }
+            Self::Unload {
+                workspace_id,
+                token,
+                object_id,
+                keys,
+                root,
+                now_ms,
+                reply,
+            } => {
+                let result = registry.owner(&workspace_id, &token).and_then(|owner| {
+                    let mut pending =
+                        store.read_with(|conn| unload_pending(conn, &workspace_id, &object_id))?;
+                    for key in &keys {
+                        if pending.is_some() {
+                            break;
+                        }
+                        pending = super::ydoc::ydoc_unload_pending(store, key, &root, now_ms)?;
+                    }
+                    if pending.is_some() {
+                        return Ok(pending);
+                    }
+                    owner.unregister(store, &object_id)?;
+                    for key in &keys {
+                        cache.remove(key);
+                        cache.unpin(key);
+                    }
+                    Ok(None)
                 });
                 let _ = reply.send(result);
             }

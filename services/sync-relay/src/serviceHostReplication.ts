@@ -1,6 +1,6 @@
 import {createWorkspaceReplicationRoutes} from "./workspaceReplicationRoutes";
 import {createWorkspaceBlobRoutes} from "./workspaceBlobRoutes";
-import type {SyncRelayStorage} from "./storage";
+import type {SyncRelayLogRow, SyncRelayStorage} from "./storage";
 import {errorResponse, notFound} from "./errors";
 
 /**
@@ -13,9 +13,13 @@ export function createServiceHostReplication(options: {
   storage: SyncRelayStorage;
   prefix: string;
   authorize(input: {workspaceId: string; bearer: string; method: string; pathname: string}): string | null;
+  revalidate?: (input: {workspaceId: string; bearer: string; method: string; pathname: string}) => string | null;
+  onLogRead?: (input: {workspaceId: string; bearer: string}, rows: readonly SyncRelayLogRow[]) => void;
 }) {
   // It passes no session reauthentication, so a held log read answers at once.
-  const replication = createWorkspaceReplicationRoutes(options.storage, Date.now, {wakeLog() {}, wait: async () => {}});
+  const replication = createWorkspaceReplicationRoutes(options.storage, Date.now, {wakeLog() {}, wait: async () => {}},
+    undefined, (request, workspaceId, rows) => options.onLogRead?.({workspaceId,
+      bearer: (request.headers.get("authorization") ?? "").slice(7)}, rows));
   const blobs = createWorkspaceBlobRoutes(options.storage, Date.now);
   return async (request: Request): Promise<Response> => {
     try {
@@ -27,7 +31,7 @@ export function createServiceHostReplication(options: {
       const credential = {workspaceId, bearer: authorization.slice(7), method: request.method, pathname: url.pathname};
       const ownerUserId = options.authorize(credential);
       if (!ownerUserId) throw notFound();
-      const guard = () => {request.signal.throwIfAborted(); if (options.authorize(credential) !== ownerUserId) throw notFound();};
+      const guard = () => {request.signal.throwIfAborted(); if ((options.revalidate ?? options.authorize)(credential) !== ownerUserId) throw notFound();};
       const actor = {userId: ownerUserId};
       if (parts[3] === "bootstrap") return await replication.respondToWorkspaceReplication(request, {route: "bootstrap", workspaceId}, actor, guard);
       if (parts[3] === "log" && parts.length === 4) return await replication.respondToWorkspaceReplication(request, {route: "log", workspaceId}, actor, guard);

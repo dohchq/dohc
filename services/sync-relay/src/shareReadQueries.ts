@@ -1,7 +1,7 @@
 import { visibleSharePath } from "@dohc/security-contract/share-selector";
 import { createAccountlessPathProjection } from "./accountlessPathProjection";
 import { createHmac } from "node:crypto";
-import { COLLECTION_FILE_ORIGIN_PREFIX } from "./relayLogInputs";
+import { COLLECTION_CREATE_ORIGIN_PREFIX, COLLECTION_FILE_ORIGIN_PREFIX } from "./relayLogInputs";
 import {
   filterOpForShare,
   groupChannelIsOrdinary,
@@ -260,10 +260,12 @@ export function createShareReadQueries(
             }
           }
         }
+        const collectionOriginPrefix = row.originId.startsWith(COLLECTION_FILE_ORIGIN_PREFIX) ? COLLECTION_FILE_ORIGIN_PREFIX
+          : row.originId.startsWith(COLLECTION_CREATE_ORIGIN_PREFIX) ? COLLECTION_CREATE_ORIGIN_PREFIX : undefined;
         ops.push({
           relaySeq: row.relaySeq,
-          ...(audience === "authenticated" ? { originId: row.originId.startsWith(COLLECTION_FILE_ORIGIN_PREFIX)
-            ? `${COLLECTION_FILE_ORIGIN_PREFIX}${createHmac("sha256", shareId).update(row.originId).digest("hex")}`
+          ...(audience === "authenticated" ? { originId: collectionOriginPrefix !== undefined
+            ? `${collectionOriginPrefix}${createHmac("sha256", shareId).update(row.originId).digest("hex")}`
             : row.originId } : {}),
           originSeq: row.originSeq,
           opKind: row.opKind,

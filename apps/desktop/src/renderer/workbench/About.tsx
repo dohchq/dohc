@@ -1,4 +1,4 @@
-import type { AccessAnswer } from "@dohc/workspace-contracts/access";
+import type { AccessAnswer, AccessObjectRef } from "@dohc/workspace-contracts/access";
 import { fileKindForPath } from "@dohc/workspace-contracts/kinds";
 import { isSharedWithMePath } from "@dohc/workspace-core/paths";
 import {
@@ -9,6 +9,7 @@ import {
   EyeOff,
   FileText,
   FileX,
+  Hash,
   History,
   Link2,
   LogIn,
@@ -27,13 +28,15 @@ import { RetryRow, SecondaryButton } from "../ui/controls";
 import { AppGlyph, KindGlyph } from "../ui/KindGlyph";
 import { SkeletonLines } from "../ui/SkeletonRows";
 import { StateMark } from "../ui/StateMark";
+import { PresenceFaces } from "../collab/PresenceIndicators";
+import type { AboutConversation } from "./aboutConversation";
 import { ChatAvatar } from "./ChatAvatar";
 import { engineMomentSourceLabel, engineMomentSummary } from "./EngineHistory";
 import { historyHiddenWords } from "./HistoryPolicyStates";
 
-// The About tab: everything about the open file, one section each. A section
-// shows only what its own query answers, and every answer is held to the
-// workspace and file it was asked for, so a slow answer for one file never
+// The About tab: everything about the open file or chat, one section each. A
+// section shows only what its own query answers, and every answer is held to
+// the workspace and object it was asked for, so a slow answer for one never
 // lands under another.
 
 export type AboutSectionId = "chats" | "history" | "access";
@@ -99,16 +102,28 @@ export const ABOUT_ROW =
   "flex w-full items-center gap-2 rounded-md px-2 text-left text-[13px] text-muted transition-colors duration-75";
 export const ABOUT_ROW_BUTTON = `${ABOUT_ROW} cursor-pointer hover:bg-hover hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent`;
 
-export function AboutHeader(props: { path: string }) {
+// The open object: its mark, its name, then who is here.
+export function AboutHeader(props: { subject: { path: string } | AboutConversation }) {
+  const { subject } = props;
+  const name = "path" in subject ? basenameOf(subject.path) : subject.name;
   return (
     <div
       data-testid="about-header"
       className="flex h-9 shrink-0 items-center gap-2 border-b border-line px-3.5 text-[13px]"
     >
-      <KindGlyph kind={fileKindForPath(props.path)} size={14} className="text-muted" />
-      <span title={props.path} className="min-w-0 truncate font-semibold text-ink">
-        {basenameOf(props.path)}
+      {"path" in subject ? (
+        <KindGlyph kind={fileKindForPath(subject.path)} size={14} className="text-muted" />
+      ) : subject.kind === "group" ? (
+        <Hash size={14} aria-hidden className="shrink-0 text-muted" />
+      ) : (
+        <ChatAvatar name={subject.name} kind={subject.kind === "agent" ? "agent" : "human"} own={subject.kind === "agent"} size="strip" />
+      )}
+      <span title={"path" in subject ? subject.path : subject.name} className="min-w-0 truncate font-semibold text-ink">
+        {name}
       </span>
+      {/* The conversation's own header announces who arrives; this copy
+          only shows them. */}
+      {"path" in subject ? null : <PresenceFaces others={subject.present} live={false} className="ml-auto" />}
     </div>
   );
 }
@@ -425,18 +440,21 @@ export const LEVELS: Record<ShareLevel, { icon: LucideIcon; label: string }> = {
   "read-write": { icon: Pencil, label: "Edit" },
 };
 
+// What Access is about, in the words its notes use.
+export type AccessNoun = "file" | "chat";
+
 // What an empty list means, within what it covers. Never "no access": an
 // answer with no coverage is unknown, not empty.
-const EMPTY_WITHIN: Record<Exclude<AccessAnswer["coverage"]["kind"], "unavailable">, string> = {
-  granted: "No share from this workspace includes this file.",
-  "received-own-grant": "No grant to you includes this file.",
-  "received-account": "No share to you includes this file.",
-  collection: "No app or person has permissions on this Collection.",
+const EMPTY_WITHIN: Record<Exclude<AccessAnswer["coverage"]["kind"], "unavailable">, (noun: AccessNoun) => string> = {
+  granted: (noun) => `No share from this workspace includes this ${noun}.`,
+  "received-own-grant": (noun) => `No grant to you includes this ${noun}.`,
+  "received-account": (noun) => `No share to you includes this ${noun}.`,
+  collection: () => "No app or person has permissions on this Collection.",
 };
 
-function emptyWithin(answer: AccessAnswer): string | null {
+function emptyWithin(answer: AccessAnswer, noun: AccessNoun): string | null {
   const kind = answer.coverage.kind;
-  return answer.freshness === "unknown" || kind === "unavailable" ? null : EMPTY_WITHIN[kind];
+  return answer.freshness === "unknown" || kind === "unavailable" ? null : EMPTY_WITHIN[kind](noun);
 }
 
 // The count is who has access now: ended and damaged grants stay listed, but
@@ -495,24 +513,40 @@ function AccessRowView(props: { row: AccessRow }) {
   );
 }
 
+// What Access asks about: a file by its path, or a chat by its wire identity.
+export type AccessSubject = { kind: "path"; path: string } | { kind: "chat"; channelWireId: string };
+
 export function AboutAccess(props: {
   workspaceId: string;
-  path: string;
+  subject: AccessSubject;
+  // For a chat: whether this workspace reads it through someone else's
+  // share. Null until the Chats page knows, which explains nothing.
+  received?: boolean | null;
   expanded: boolean;
   onToggle: () => void;
   notices: AboutNotices;
   context: AccessContext;
 }) {
-  const { workspaceId, path } = props;
+  const { workspaceId, subject } = props;
   const { facts, openSyncSettings, connect } = props.context;
-  const reason = accessReasonFor(facts, path);
+  const noun = subject.kind === "path" ? "file" : "chat";
+  const reason: AccessReason =
+    subject.kind === "path" ? accessReasonFor(facts, subject.path)
+    : props.received == null ? "unexplained"
+    : accessReasonForLane(facts, props.received ? "received" : "granted");
+  // The key names the subject in full, kind first so a path never reads as a
+  // wire id, and a read keyed on it asks about the ref it was built from.
+  const subjectKey = subject.kind === "path" ? `file:${subject.path}` : `chat:${subject.channelWireId}`;
+  const ref: AccessObjectRef = subject.kind === "path"
+    ? { kind: "path", path: subject.path, versionId: null }
+    : { kind: "chat", channelWireId: subject.channelWireId };
   // The server connection the last refresh was asked under. A new one, such
   // as a Connect server that signed in, refreshes and reads again. A session
   // change reads the status twice, passing through "checking" each time, so
   // only a connection that was read counts.
   const connection = typeof facts.cloud === "string" ? facts.cloud
     : `${facts.cloud.connected}:${facts.cloud.workspaceSynced}:${facts.cloud.workspaceSyncConnected}`;
-  const read = useSectionRead<AccessView>(`${workspaceId}\0${path}`, `about-access:${path}`, props.notices);
+  const read = useSectionRead<AccessView>(`${workspaceId}\0${subjectKey}`, `about-access:${subjectKey}`, props.notices);
   const { begin, cancel } = read;
   // One read: from the start, or the page after `after`. Asking main to
   // check again happens when a person opens the section or tries again, not
@@ -530,7 +564,7 @@ export function AboutAccess(props: {
         const cursor = options.after?.nextCursor ?? undefined;
         const answer = await bridge().getObjectAccess({
           workspaceId,
-          ref: { kind: "path", path, versionId: null },
+          ref,
           ...(cursor ? { cursor } : {}),
         });
         // A page cursor belongs to the listing it came from. When that
@@ -544,10 +578,11 @@ export function AboutAccess(props: {
           answer: options.after ? { ...answer, rows: [...options.after.rows, ...answer.rows] } : answer,
         });
       } catch (error) {
-        request.fail({ status: "failed" }, ipcErrorMessage(error, "Could not check who has access to this file."), error, retry);
+        request.fail({ status: "failed" }, ipcErrorMessage(error, `Could not check who has access to this ${noun}.`), error, retry);
       }
     },
-    [begin, path, workspaceId],
+    // `ref` follows `subjectKey`.
+    [begin, noun, subjectKey, workspaceId],
   );
   const refreshedUnder = useRef<string | null>(null);
   useEffect(() => {
@@ -571,6 +606,7 @@ export function AboutAccess(props: {
       onRetry={() => void load({ refresh: true })}
       onMore={(answer) => void load({ after: answer })}
       setup={setup}
+      noun={noun}
     />
   );
 }
@@ -599,7 +635,12 @@ export function AccessChecked(props: { testId: string; answer: AccessAnswer; sco
   );
 }
 
-const UNEXPLAINED_FILE = "Access information is unavailable for this file. This does not mean that no one has access.";
+const unexplainedFor = (noun: AccessNoun) =>
+  `Access information is unavailable for this ${noun}. This does not mean that no one has access.`;
+const MISSING: Record<AccessNoun, string> = {
+  file: "This file is no longer available at this path.",
+  chat: "This chat is no longer in this workspace.",
+};
 
 // Why an answer covers nothing, in the words and the one action that can
 // change it. Only a cause dohc cannot name offers Try again. `testId` names
@@ -610,6 +651,7 @@ export function AccessUnknown(props: {
   answer: AccessAnswer;
   setup: AccessSetup;
   onRetry: () => void;
+  noun?: AccessNoun;
 }) {
   const { answer, setup, testId } = props;
   if (answer.visibility === "hidden") {
@@ -618,7 +660,7 @@ export function AccessUnknown(props: {
   if (answer.visibility === "missing") {
     return (
       <AboutNote testId={`${testId}-unknown`} reason="missing" icon={FileX}>
-        This file is no longer available at this path.
+        {MISSING[props.noun ?? "file"]}
       </AboutNote>
     );
   }
@@ -670,9 +712,11 @@ export function AboutAccessView(props: {
   onRetry: () => void;
   onMore: (answer: AccessAnswer) => void;
   setup: AccessSetup;
+  noun?: AccessNoun;
 }) {
   const { view } = props;
-  const empty = view.status === "ready" ? emptyWithin(view.answer) : null;
+  const noun = props.noun ?? "file";
+  const empty = view.status === "ready" ? emptyWithin(view.answer, noun) : null;
   return (
     <AboutSection
       id="access"
@@ -694,7 +738,7 @@ export function AboutAccessView(props: {
           data-visibility={view.answer.visibility}
         >
           {empty === null ? (
-            <AccessUnknown testId="about-access" unexplained={UNEXPLAINED_FILE}
+            <AccessUnknown testId="about-access" unexplained={unexplainedFor(noun)} noun={noun}
               answer={view.answer} setup={props.setup} onRetry={props.onRetry} />
           ) : (
             <>

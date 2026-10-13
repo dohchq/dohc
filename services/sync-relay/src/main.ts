@@ -3,6 +3,7 @@ import {accountDisplayName} from "./discussionRoutes";
 import { APP_PUBLICATION_MAX_FILES, APP_PUBLICATION_MAX_METADATA_BYTES, APP_PUBLICATION_MAX_BUNDLE_BYTES } from "@dohc/security-contract/app-publication";
 import { createWorkspaceAuth } from "@dohc/workspace-auth/betterAuth";
 import { createSessionActorResolver, UnauthorizedError, type ResolveActor } from "@dohc/workspace-auth/session";
+import { SIGN_UP_INVITE_PATH, signUpInviteKey } from "@dohc/workspace-auth/signUp";
 import { tmpdir } from "node:os";
 import { mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
@@ -16,6 +17,7 @@ import {
 import { Pool } from "pg";
 import { compileDatasetOperations } from "./datasetCompiler";
 import { createVerifiedEmailLookups } from "./verifiedEmailLookups";
+import { createSignUpInviteRoute } from "./signUpInviteRoute";
 import { errorBody, errorResponse, notFound } from "./errors";
 import { RELAY_API_VERSIONS, relayApiVersionRefusal } from "./apiVersion";
 import { hashRelayExchangeKey, verifyRelayExchangeKey } from "./linkSecurity";
@@ -410,7 +412,9 @@ const relayHandler = guardRelayResponses(storage, request => {
   if (isLinkLivePath(path)) return (path === "/sync/live/link-tickets" ? linkLive?.handle(request) : linkLiveHttp?.(request)) ?? Promise.resolve(Response.json({ok: false, error: "not found"}, {status: 404}));
   return relayApplication(request);
 });
+const signUpInvites = secret.length >= 32 ? createSignUpInviteRoute({storage, key: signUpInviteKey(secret)}) : undefined;
 const fetchHandler = async (request: Request): Promise<Response> => {
+  if (signUpInvites && new URL(request.url).pathname === SIGN_UP_INVITE_PATH) return signUpInvites(request);
   if (new URL(request.url).pathname === "/ready") {
     const ready = !storage.unavailable.aborted && (!selfHostedLive || (!!selfHost && !selfHost.unavailable));
     return Response.json({ok: ready, service: "sync-relay", selfHostedLive: selfHostedLive && ready, apiVersions: RELAY_API_VERSIONS,

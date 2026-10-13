@@ -330,8 +330,8 @@ describe("RecordButtonsRow in an Edit share view", () => {
     expect(checkAgain()).toBeNull();
     // The mark turns only where motion is allowed, so with reduced motion it stays still beside the words.
     const mark = loaderIn(button)!.getAttribute("class")!.split(/\s+/);
-    expect(mark).toContain("motion-safe:animate-spin");
-    expect(mark).not.toContain("animate-spin");
+    expect(mark).toContain("animate-spin");
+    expect(mark).not.toContain("motion-safe:animate-spin");
     bridge.listAutomationButtons.mockResolvedValue(bridge.listed([{ field: "Mark paid", state: READY }]));
     act(() => bridge.emitChanged({ workspaceId: "ws-2" }));
     expect(bridge.listAutomationButtons).toHaveBeenCalledTimes(1);

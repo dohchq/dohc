@@ -13,8 +13,8 @@ use dohc_engine_sync::{
     ShareCollectionWriteRequest, ShareCollectionWriteResponse, ShareCursor, ShareLogPushRequest,
     ShareProposalSubmitOutcome, ShareProposalSubmitRequest, ShareProposalSubmitResponse,
     ShareViewPullOutcome, ShareViewRequest, ShareViewResponse, SharedChannelPullOutcome,
-    SharedChannelPushOutcome, SharedChannelRequest, SharedChannelResponse, SyncPassOutcome,
-    adopt_join_identity, create_claim_identity, read_sync_identity,
+    SharedChannelPushOutcome, SharedChannelRequest, SharedChannelResponse, SyncError,
+    SyncPassOutcome, adopt_join_identity, create_claim_identity, read_sync_identity,
 };
 use dohc_engine_sync_http::HttpRelayTransport;
 use std::sync::{Arc, Mutex};
@@ -2137,6 +2137,18 @@ fn run_relay_operation(
     operation: RelayOperation,
     leases: &LeaseRegistry,
 ) -> Result<RelayOperationOutcome, RuntimeError> {
+    if store.is_passive()
+        && !matches!(
+            &operation,
+            RelayOperation::Pull { .. }
+                | RelayOperation::CommitCursor { .. }
+                | RelayOperation::AdoptJoinIdentity { .. }
+        )
+    {
+        return Err(RuntimeError::Sync(SyncError::InvalidInput {
+            reason: "passive store cannot execute this relay operation",
+        }));
+    }
     match operation {
         RelayOperation::Push {
             workspace_id,
