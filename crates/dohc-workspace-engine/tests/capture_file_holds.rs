@@ -32,6 +32,9 @@ struct Fixture {
 
 impl Fixture {
     async fn new() -> Self {
+        Self::with_target(None).await
+    }
+    async fn with_target(target_path: Option<&str>) -> Self {
         let scratch = ScratchDir::new().unwrap();
         write_root_binding(scratch.path(), TOKEN).unwrap();
         let db = engine_db_path(&scratch).unwrap();
@@ -86,6 +89,26 @@ impl Fixture {
         store.write_with(&NoFaults, |tx| tx.execute(
             "INSERT INTO versions(workspace_id,version_id,kind,name,created_at_ms) VALUES (?1,'later','named','Later',4)",
             [WS]).map_err(dohc_engine_storage::StorageError::persist_public)).unwrap();
+        if let Some(path) = target_path {
+            VersionedTextStore::new(&mut store)
+                .capture_ingest(
+                    &CaptureIngest {
+                        workspace_id: WS.into(),
+                        version_id: "later".into(),
+                        path: path.into(),
+                        text: "Target version.\n".into(),
+                        metadata_origin: "capture".into(),
+                        metadata_summary: None,
+                        metadata_correlation_id: None,
+                        author_json: None,
+                        now_ms: 5,
+                        request_id: None,
+                        claim_foreign_head: false,
+                    },
+                    &NoFaults,
+                )
+                .unwrap();
+        }
         drop(store);
         write_file(scratch.path(), HELD, outside().as_bytes());
         write_file(scratch.path(), "sibling.txt", b"Sibling.\n");
@@ -323,9 +346,9 @@ async fn capture_hold_refuses_live_open() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn capture_hold_switch_refusal_names_the_file() {
+async fn capture_hold_named_version_keeps_the_outside_edit_pinned() {
     let f = Fixture::new().await;
-    let error = call_error(
+    let result = call(
         &f.transport,
         &f.handle,
         30,
@@ -333,14 +356,20 @@ async fn capture_hold_switch_refusal_names_the_file() {
         json!({"workspaceId":WS,"name":"Held fork","fromVersionId":"main"}),
     )
     .await;
-    assert!(error.message.contains(HELD), "{error:?}");
+    assert!(result.is_object(), "{result}");
+    assert_eq!(f.status().await["heldFiles"][0]["path"], HELD);
+    assert_eq!(
+        std::fs::read_to_string(f.scratch.path().join(HELD)).unwrap(),
+        outside()
+    );
     f.close().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn capture_hold_active_switch_refusal_names_the_file() {
+async fn capture_hold_switches_away_and_back_without_adopting_outside_bytes() {
     let f = Fixture::new().await;
-    let error = call_error(
+    let before = f.status().await["heldFiles"].clone();
+    let result = call(
         &f.transport,
         &f.handle,
         31,
@@ -348,7 +377,7 @@ async fn capture_hold_active_switch_refusal_names_the_file() {
         json!({"workspaceId":WS,"versionId":"later"}),
     )
     .await;
-    assert!(error.message.contains(HELD), "{error:?}");
+    assert!(result.is_object(), "{result}");
     let db = rusqlite::Connection::open(engine_db_path(&f.scratch).unwrap()).unwrap();
     let active: String = db
         .query_row(
@@ -357,7 +386,22 @@ async fn capture_hold_active_switch_refusal_names_the_file() {
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(active, "main");
+    assert_eq!(active, "later");
+    f.scan().await;
+    assert_eq!(f.status().await["heldFiles"], before);
+    let adopted: i64 = db.query_row("SELECT COUNT(*) FROM snapshots WHERE workspace_id=?1 AND version_id='later' AND path=?2", [WS, HELD], |r| r.get(0)).unwrap();
+    assert_eq!(adopted, 0);
+    assert_eq!(
+        std::fs::read_to_string(f.scratch.path().join(HELD)).unwrap(),
+        outside()
+    );
+    f.call(
+        "versions.setActive",
+        json!({"workspaceId":WS,"versionId":"main"}),
+    )
+    .await;
+    f.scan().await;
+    assert_eq!(f.status().await["heldFiles"], before);
     assert_eq!(
         std::fs::read_to_string(f.scratch.path().join(HELD)).unwrap(),
         outside()
@@ -407,4 +451,152 @@ async fn fix1_released_path_drains_despite_sibling_io_failure() {
         "released path's parked job remained {status}"
     );
     assert_eq!(disk, "Representable.\n");
+}
+
+async fn switch_hold_release(action: &str) {
+    let f = Fixture::new().await;
+    f.call(
+        "versions.setActive",
+        json!({"workspaceId":WS,"versionId":"later"}),
+    )
+    .await;
+    let repaired = "Repaired in the source version.\n";
+    match action {
+        "delete" => std::fs::remove_file(f.scratch.path().join(HELD)).unwrap(),
+        "rename" => std::fs::rename(
+            f.scratch.path().join(HELD),
+            f.scratch.path().join("renamed.md"),
+        )
+        .unwrap(),
+        _ => {
+            std::fs::write(f.scratch.path().join(HELD), repaired).unwrap();
+            if action == "retry" {
+                f.call("capture.retryHeld", json!({"path":HELD})).await;
+            }
+        }
+    }
+    f.scan().await;
+    assert_eq!(f.status().await["heldFiles"], json!([]));
+    let conn = rusqlite::Connection::open(engine_db_path(&f.scratch).unwrap()).unwrap();
+    let texts: Vec<(String, String)> = conn.prepare("SELECT s.version_id,b.text FROM snapshots s JOIN blobs b ON b.sha256=s.blob_sha256 WHERE s.workspace_id=?1 AND s.path=?2 ORDER BY s.version_id").unwrap()
+        .query_map([WS,HELD], |r| Ok((r.get(0)?,r.get(1)?))).unwrap().collect::<Result<_,_>>().unwrap();
+    if action == "delete" || action == "rename" {
+        assert!(texts.is_empty(), "{texts:?}");
+    } else {
+        assert_eq!(texts, vec![("main".to_owned(), repaired.to_owned())]);
+    }
+    let pending: i64 = conn.query_row("SELECT COUNT(*) FROM materialization_jobs WHERE workspace_id=?1 AND target_path=?2 AND status='pending'", [WS,HELD], |r| r.get(0)).unwrap();
+    assert_eq!(pending, 0, "release must drain the parked delete");
+    f.call(
+        "versions.setActive",
+        json!({"workspaceId":WS,"versionId":"main"}),
+    )
+    .await;
+    if action == "change" || action == "retry" {
+        assert_eq!(
+            std::fs::read_to_string(f.scratch.path().join(HELD)).unwrap(),
+            repaired
+        );
+    }
+    f.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn switch_hold_change_recovers_the_source_version() {
+    switch_hold_release("change").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn switch_hold_delete_recovers_the_source_version() {
+    switch_hold_release("delete").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn switch_hold_rename_recovers_the_source_version() {
+    switch_hold_release("rename").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn switch_hold_retry_recovers_the_source_version() {
+    switch_hold_release("retry").await;
+}
+
+async fn switch_hold_rewrite_release(target_path: &str) {
+    let f = Fixture::with_target(Some(target_path)).await;
+    let before = f.status().await["heldFiles"].clone();
+    f.call(
+        "versions.setActive",
+        json!({"workspaceId":WS,"versionId":"later"}),
+    )
+    .await;
+    f.scan().await;
+    assert_eq!(f.status().await["heldFiles"], before);
+    assert_eq!(
+        std::fs::read_to_string(f.scratch.path().join(HELD)).unwrap(),
+        outside()
+    );
+    f.call(
+        "versions.setActive",
+        json!({"workspaceId":WS,"versionId":"main"}),
+    )
+    .await;
+    assert_eq!(f.status().await["heldFiles"], before);
+    assert_eq!(
+        std::fs::read_to_string(f.scratch.path().join(HELD)).unwrap(),
+        outside()
+    );
+    f.call(
+        "versions.setActive",
+        json!({"workspaceId":WS,"versionId":"later"}),
+    )
+    .await;
+    let repaired = "Repaired outside edit.\n";
+    std::fs::write(f.scratch.path().join(HELD), repaired).unwrap();
+    f.scan().await;
+    assert_eq!(f.status().await["heldFiles"], json!([]));
+    assert_eq!(
+        std::fs::read_to_string(f.scratch.path().join(HELD)).unwrap(),
+        repaired
+    );
+    let conn = rusqlite::Connection::open(engine_db_path(&f.scratch).unwrap()).unwrap();
+    let source: String = conn.query_row("SELECT b.text FROM snapshots s JOIN blobs b ON b.sha256=s.blob_sha256 WHERE s.workspace_id=?1 AND s.version_id='main' AND s.path=?2", [WS,HELD], |r| r.get(0)).unwrap();
+    let target: String = conn.query_row("SELECT b.text FROM snapshots s JOIN blobs b ON b.sha256=s.blob_sha256 WHERE s.workspace_id=?1 AND s.version_id='later' AND s.path=?2", [WS,target_path], |r| r.get(0)).unwrap();
+    assert_eq!(source, repaired);
+    assert_eq!(target, "Target version.\n");
+    let pending: i64 = conn.query_row("SELECT COUNT(*) FROM materialization_jobs WHERE workspace_id=?1 AND status='pending' AND job_id GLOB 'version-switch-mat_*'", [WS], |r| r.get(0)).unwrap();
+    assert_eq!(pending, 0);
+    let mut conflicts = Vec::new();
+    for entry in std::fs::read_dir(f.scratch.path()).unwrap() {
+        let entry = entry.unwrap();
+        if entry.file_name().to_string_lossy().contains("conflict") {
+            conflicts.push(std::fs::read_to_string(entry.path()).unwrap());
+        }
+    }
+    assert!(
+        conflicts.iter().any(|text| text == "Target version.\n"),
+        "unseen target bytes need a conflict copy: {conflicts:?}"
+    );
+    if target_path == HELD {
+        f.call(
+            "versions.setActive",
+            json!({"workspaceId":WS,"versionId":"main"}),
+        )
+        .await;
+        assert_eq!(
+            std::fs::read_to_string(f.scratch.path().join(HELD)).unwrap(),
+            repaired
+        );
+    }
+    f.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn switch_hold_rewrite_release_preserves_both_versions() {
+    switch_hold_rewrite_release(HELD).await;
+}
+
+#[cfg(windows)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn switch_hold_case_alias_release_preserves_both_versions() {
+    switch_hold_rewrite_release("HELD.MD").await;
 }

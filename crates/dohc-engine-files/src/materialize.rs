@@ -763,6 +763,89 @@ pub struct MaterializeOptions<'a> {
     pub backoff: &'a dyn ReplaceBackoff,
     pub now_ms: i64,
     pub faults: &'a dyn FaultInjector,
+    /// A snapshot valid for this serialized writer operation. Other callers
+    /// check the durable hold at each placement boundary.
+    pub holds: Option<&'a PlacementHolds>,
+}
+
+/// One indexed workspace read, reused throughout a serialized placement batch.
+pub struct PlacementHolds {
+    workspace_id: String,
+    paths: std::collections::HashMap<String, String>,
+    #[cfg(windows)]
+    case_aliases: std::collections::HashMap<String, String>,
+}
+
+impl PlacementHolds {
+    pub fn load(store: &EngineStore, workspace_id: &str) -> Result<Self, StorageError> {
+        let holds = store.read_with(|conn| {
+            dohc_engine_storage::capture_file_holds::list_in(conn, workspace_id)
+        })?;
+        Ok(Self::from_holds(workspace_id, &holds))
+    }
+
+    pub fn from_holds(
+        workspace_id: &str,
+        holds: &[dohc_engine_storage::capture_file_holds::CaptureFileHold],
+    ) -> Self {
+        Self {
+            workspace_id: workspace_id.to_owned(),
+            paths: holds
+                .iter()
+                .map(|hold| (hold.path.clone(), hold.observed_sha256.clone()))
+                .collect(),
+            #[cfg(windows)]
+            case_aliases: holds
+                .iter()
+                .map(|hold| (hold.path.to_lowercase(), hold.path.clone()))
+                .collect(),
+        }
+    }
+
+    fn lexical(&self, path: &str) -> Option<(&str, &str)> {
+        if let Some((path, digest)) = self.paths.get_key_value(path) {
+            return Some((path.as_str(), digest.as_str()));
+        }
+        #[cfg(windows)]
+        if !self.case_aliases.is_empty() {
+            let stored = self.case_aliases.get(&path.to_lowercase())?;
+            let (path, digest) = self.paths.get_key_value(stored)?;
+            return Some((path.as_str(), digest.as_str()));
+        }
+        None
+    }
+
+    /// Return the stored spelling and observed digest, including Windows aliases.
+    /// An empty snapshot needs no filesystem lookup.
+    pub fn get(&self, root: &Path, path: &str) -> Result<Option<(&str, &str)>, MaterializeError> {
+        // Case aliases remain held even after the file disappears, before
+        // capture has recorded its deletion and released the hold.
+        if let Some(held) = self.lexical(path) {
+            return Ok(Some(held));
+        }
+        #[cfg(windows)]
+        if !self.paths.is_empty() {
+            let root =
+                std::fs::canonicalize(root).map_err(|error| MaterializeError::io(root, &error))?;
+            let target = resolve_target(&root, path)?;
+            return Ok(self.resolved(&root, &target));
+        }
+        #[cfg(not(windows))]
+        let _ = root;
+        Ok(None)
+    }
+
+    #[cfg(windows)]
+    fn resolved(&self, root: &Path, target: &Path) -> Option<(&str, &str)> {
+        let path = target
+            .strip_prefix(root)
+            .ok()?
+            .to_string_lossy()
+            .replace('\\', "/");
+        self.paths
+            .get_key_value(&path)
+            .map(|(path, digest)| (path.as_str(), digest.as_str()))
+    }
 }
 
 /// Execute every pending job (oldest first), after resolving every
@@ -839,6 +922,7 @@ fn materialize_one_ordinary_with(
         &job.workspace_id,
         &job.target_path,
         Some(&target),
+        options.holds,
     )? {
         return Ok(JobOutcome::Parked);
     }
@@ -960,6 +1044,7 @@ fn materialize_secret_one_with_remover(
         &job.workspace_id,
         &job.target_path,
         Some(&target),
+        options.holds,
     )? {
         return Ok(JobOutcome::Parked);
     }
@@ -1031,6 +1116,7 @@ pub fn materialize_secret_delete_one(
         &job.workspace_id,
         &job.target_path,
         Some(&target),
+        options.holds,
     )? {
         return Ok(JobOutcome::Parked);
     }
@@ -1157,6 +1243,7 @@ fn materialize_secret_write(
         backoff,
         now_ms,
         faults,
+        ..
     } = *options;
     ensure_target_symlink_free(root, target)?;
     // Step 1 (idempotent replay): the target already equals the desired content.
@@ -2552,7 +2639,8 @@ impl RecoveryEntry {
         };
         if let Some(path) = path
             && !path.is_empty()
-            && match placement_is_held(store, root, self.workspace_id(), path, None) {
+            && match placement_is_held(store, root, self.workspace_id(), path, None, options.holds)
+            {
                 Ok(held) => held,
                 Err(error @ MaterializeError::Storage(_)) => return Err(error),
                 // Recovery inspects staging before it needs a resolvable target.
@@ -3427,7 +3515,21 @@ fn placement_is_held(
     workspace: &str,
     path: &str,
     target: Option<&Path>,
+    holds: Option<&PlacementHolds>,
 ) -> Result<bool, MaterializeError> {
+    if let Some(holds) = holds.filter(|holds| holds.workspace_id == workspace) {
+        if holds.lexical(path).is_some() {
+            return Ok(true);
+        }
+        #[cfg(windows)]
+        if !holds.paths.is_empty() {
+            return match target {
+                Some(target) => Ok(holds.resolved(root, target).is_some()),
+                None => Ok(holds.get(root, path)?.is_some()),
+            };
+        }
+        return Ok(false);
+    }
     if store.placement_is_held(workspace, path)? {
         return Ok(true);
     }
@@ -4712,6 +4814,7 @@ mod tests {
 
     fn options_with(replacer: &dyn AtomicReplacer) -> MaterializeOptions<'_> {
         MaterializeOptions {
+            holds: None,
             policy: DurabilityPolicy::none(),
             replacer,
             backoff: &NoBackoff,
@@ -5974,6 +6077,7 @@ mod tests {
                 &scratch.root,
                 &job,
                 &MaterializeOptions {
+                    holds: None,
                     policy: DurabilityPolicy::none(),
                     replacer: &StdReplacer,
                     backoff: &NoBackoff,
@@ -6001,6 +6105,7 @@ mod tests {
             &scratch.root,
             &job,
             &MaterializeOptions {
+                holds: None,
                 policy: DurabilityPolicy::none(),
                 replacer: &ContendedOnce(AtomicUsize::new(0)),
                 backoff: &ExternalEditDuringBackoff(target.clone()),
@@ -6036,6 +6141,7 @@ mod tests {
             &job,
             b"SECRET=intended",
             &MaterializeOptions {
+                holds: None,
                 policy: DurabilityPolicy::none(),
                 replacer: &ContendedOnce(AtomicUsize::new(0)),
                 backoff: &ExternalEditDuringBackoff(target.clone()),
@@ -6246,6 +6352,7 @@ mod tests {
             &store,
             &scratch.root,
             &MaterializeOptions {
+                holds: None,
                 policy: DurabilityPolicy::none(),
                 replacer: &StdReplacer,
                 backoff: &NoBackoff,
@@ -6303,6 +6410,7 @@ mod tests {
             &target,
             &job,
             &MaterializeOptions {
+                holds: None,
                 policy: DurabilityPolicy::none(),
                 replacer: &StdReplacer,
                 backoff: &NoBackoff,
@@ -6348,6 +6456,7 @@ mod tests {
             &job,
             b"SECRET=ancestor\n",
             &MaterializeOptions {
+                holds: None,
                 policy: DurabilityPolicy::none(),
                 replacer: &StdReplacer,
                 backoff: &NoBackoff,
@@ -6378,6 +6487,7 @@ mod tests {
             &job,
             b"SECRET=final\n",
             &MaterializeOptions {
+                holds: None,
                 policy: DurabilityPolicy::none(),
                 replacer: &StdReplacer,
                 backoff: &NoBackoff,
@@ -6408,6 +6518,7 @@ mod tests {
             &job,
             b"SECRET=recovered\n",
             &MaterializeOptions {
+                holds: None,
                 policy: DurabilityPolicy::none(),
                 replacer: &StdReplacer,
                 backoff: &NoBackoff,
@@ -6443,6 +6554,7 @@ mod tests {
             &job,
             b"SECRET=must-not-write\n",
             &MaterializeOptions {
+                holds: None,
                 policy: DurabilityPolicy::none(),
                 replacer: &StdReplacer,
                 backoff: &NoBackoff,
@@ -6473,6 +6585,7 @@ mod tests {
             &job,
             plaintext,
             &MaterializeOptions {
+                holds: None,
                 policy: DurabilityPolicy::none(),
                 replacer: &StdReplacer,
                 backoff: &NoBackoff,
@@ -6536,6 +6649,7 @@ mod tests {
             &job,
             b"SECRET=pinned\n",
             &MaterializeOptions {
+                holds: None,
                 policy: DurabilityPolicy::none(),
                 replacer: &SwapAncestorBeforePinnedRename {
                     visible_parent,
@@ -6596,6 +6710,7 @@ mod tests {
             &job,
             b"SECRET=locked\n",
             &MaterializeOptions {
+                holds: None,
                 policy: DurabilityPolicy::none(),
                 replacer: &AssertAncestorLockedBeforeRename {
                     visible_parent: visible_parent.clone(),
@@ -6678,6 +6793,7 @@ mod tests {
             &job,
             b"SECRET=grandparent-locked\n",
             &MaterializeOptions {
+                holds: None,
                 policy: DurabilityPolicy::none(),
                 replacer: &AssertGrandparentLockedBeforeRename {
                     grandparent: grandparent.clone(),
@@ -6845,6 +6961,7 @@ mod tests {
             &job,
             b"SECRET=plaintext\n",
             &MaterializeOptions {
+                holds: None,
                 policy: DurabilityPolicy::none(),
                 replacer: &StdReplacer,
                 backoff: &NoBackoff,

@@ -139,13 +139,3 @@ pub fn pin_in(
         None => Ok(None),
     }
 }
-
-pub fn first_path_in(conn: &Connection, workspace: &str) -> Result<Option<String>, StorageError> {
-    conn.prepare_cached(
-        "SELECT path FROM capture_file_holds WHERE workspace_id=?1 ORDER BY path LIMIT 1",
-    )
-    .map_err(StorageError::corrupt_public)?
-    .query_row([workspace], |r| r.get(0))
-    .optional()
-    .map_err(StorageError::corrupt_public)
-}

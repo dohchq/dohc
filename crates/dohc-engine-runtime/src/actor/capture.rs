@@ -410,6 +410,7 @@ mod capture_file_hold_tests {
                     scratch.path(),
                     &job,
                     &dohc_engine_files::MaterializeOptions {
+                        holds: None,
                         policy: dohc_engine_files::DurabilityPolicy::per_os(),
                         replacer: &dohc_engine_files::StdReplacer,
                         backoff: &dohc_engine_files::NoBackoff,
@@ -751,6 +752,7 @@ impl ActorHandle {
                     store,
                     &root_dir,
                     super::materialization::MaterializationReplayScope {
+                        holds: None,
                         workspace_id: &workspace_id,
                         self_writes: Some(self_writes.as_ref()),
                         progress: None,
@@ -1041,13 +1043,19 @@ impl ActorHandle {
         &self,
         workspace_id: String,
         version_id: String,
+        root_dir: PathBuf,
     ) -> Result<Vec<CaptureManifestSeedEntry>, RuntimeError> {
         self.run(move |store, _| {
             let mut entries = capture_manifest_seed(store, &workspace_id, &version_id)?;
             let holds = store.read_with(|conn| capture_file_holds::list_in(conn, &workspace_id))?;
-            let held_paths: std::collections::HashSet<_> =
-                holds.iter().map(|hold| hold.path.as_str()).collect();
-            entries.retain(|entry| !held_paths.contains(entry.path.as_str()));
+            let held_paths = dohc_engine_files::PlacementHolds::from_holds(&workspace_id, &holds);
+            entries.retain(|entry| {
+                held_paths
+                    .get(&root_dir, &entry.path)
+                    .ok()
+                    .flatten()
+                    .is_none()
+            });
             for hold in holds {
                 entries.push(CaptureManifestSeedEntry {
                     path: hold.path,
@@ -2094,6 +2102,7 @@ pub(super) fn confirm_absent_on_disk(
             workspace_id,
             path,
             &dohc_engine_files::MaterializeOptions {
+                holds: None,
                 policy: dohc_engine_files::DurabilityPolicy::per_os(),
                 replacer: &dohc_engine_files::StdReplacer,
                 backoff: &dohc_engine_files::NoBackoff,
@@ -2248,6 +2257,7 @@ fn capture_retire_on_store(
                 self_writes,
                 faults,
                 Some(root_guard),
+                None,
             )?;
             Ok(result)
         }

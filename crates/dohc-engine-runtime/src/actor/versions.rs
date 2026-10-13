@@ -13,7 +13,7 @@ use dohc_engine_domain::{
     VersionedTextStore, list_secret_files_keyless,
 };
 use dohc_engine_files::{
-    ProjectionTargetKind, ProjectionTargetState, probe_projection_target,
+    PlacementHolds, ProjectionTargetKind, ProjectionTargetState, probe_projection_target,
     remove_empty_directory_target,
 };
 use dohc_engine_storage::{
@@ -363,6 +363,7 @@ fn run_relay_batch(
         store,
         root_dir,
         MaterializationReplayScope {
+            holds: None,
             workspace_id,
             self_writes: Some(self_writes),
             progress: None,
@@ -432,6 +433,7 @@ fn plan_plaintext_switch(
     root_dir: &std::path::Path,
     now_ms: i64,
     token: &CancellationToken,
+    holds: &PlacementHolds,
 ) -> Result<Vec<SwitchProjection>, RuntimeError> {
     let target = VersionedTextStore::new(store)
         .list_snapshots(workspace_id, target_version_id)
@@ -462,9 +464,16 @@ fn plan_plaintext_switch(
             {
                 continue;
             }
-            let state =
-                probe_projection_target(root_dir, &snapshot.path, ProjectionTargetKind::Plaintext);
-            let Some(preimage) = projection_preimage(&state) else {
+            let held = holds.get(root_dir, &snapshot.path).ok().flatten();
+            let state = if held.is_some() {
+                ProjectionTargetState::UntrackedContent
+            } else {
+                probe_projection_target(root_dir, &snapshot.path, ProjectionTargetKind::Plaintext)
+            };
+            let Some(preimage) = held
+                .map(|(_, sha)| Preimage::Present(sha.to_owned()))
+                .or_else(|| projection_preimage(&state))
+            else {
                 continue;
             };
             let (desired_sha256, inline_content) = match &snapshot.content {
@@ -479,7 +488,7 @@ fn plan_plaintext_switch(
             projections.push(planned_projection(
                 workspace_id,
                 target_version_id,
-                snapshot.path.clone(),
+                held.map_or_else(|| snapshot.path.clone(), |(path, _)| path.to_owned()),
                 MaterializationOperation::Write,
                 desired_sha256,
                 preimage,
@@ -521,14 +530,22 @@ fn plan_plaintext_switch(
             {
                 continue;
             }
-            let state = probe_projection_target(root_dir, &path, ProjectionTargetKind::Plaintext);
-            let Some(preimage @ Preimage::Present(_)) = projection_preimage(&state) else {
+            let held = holds.get(root_dir, &path).ok().flatten();
+            let state = if held.is_some() {
+                ProjectionTargetState::UntrackedContent
+            } else {
+                probe_projection_target(root_dir, &path, ProjectionTargetKind::Plaintext)
+            };
+            let Some(preimage @ Preimage::Present(_)) = held
+                .map(|(_, sha)| Preimage::Present(sha.to_owned()))
+                .or_else(|| projection_preimage(&state))
+            else {
                 continue;
             };
             projections.push(planned_projection(
                 workspace_id,
                 target_version_id,
-                path,
+                held.map_or(path, |(path, _)| path.to_owned()),
                 MaterializationOperation::Delete,
                 empty_sha.clone(),
                 preimage,
@@ -589,6 +606,7 @@ fn plan_secret_switch(
     now_ms: i64,
     token: &CancellationToken,
     secret_key: &mut Option<SecretDataKey>,
+    holds: &PlacementHolds,
 ) -> Result<Vec<SwitchProjection>, RuntimeError> {
     let target = list_secret_files_keyless(store, workspace_id, target_version_id)?;
     let target_paths: HashSet<&str> = target.iter().map(|stat| stat.path.as_str()).collect();
@@ -597,8 +615,16 @@ fn plan_secret_switch(
         if token.is_cancelled() {
             return Err(RuntimeError::Cancelled);
         }
-        let state = probe_projection_target(root_dir, &stat.path, ProjectionTargetKind::Secret);
-        let Some(preimage) = projection_preimage(&state) else {
+        let held = holds.get(root_dir, &stat.path).ok().flatten();
+        let state = if held.is_some() {
+            ProjectionTargetState::UntrackedContent
+        } else {
+            probe_projection_target(root_dir, &stat.path, ProjectionTargetKind::Secret)
+        };
+        let Some(preimage) = held
+            .map(|(_, sha)| Preimage::Present(sha.to_owned()))
+            .or_else(|| projection_preimage(&state))
+        else {
             continue;
         };
         if secret_key.is_none() {
@@ -624,7 +650,7 @@ fn plan_secret_switch(
         projections.push(planned_projection(
             workspace_id,
             target_version_id,
-            stat.path.clone(),
+            held.map_or_else(|| stat.path.clone(), |(path, _)| path.to_owned()),
             MaterializationOperation::Write,
             ciphertext_sha,
             preimage,
@@ -643,14 +669,22 @@ fn plan_secret_switch(
         if target_paths.contains(stat.path.as_str()) {
             continue;
         }
-        let state = probe_projection_target(root_dir, &stat.path, ProjectionTargetKind::Secret);
-        let Some(preimage @ Preimage::Present(_)) = projection_preimage(&state) else {
+        let held = holds.get(root_dir, &stat.path).ok().flatten();
+        let state = if held.is_some() {
+            ProjectionTargetState::UntrackedContent
+        } else {
+            probe_projection_target(root_dir, &stat.path, ProjectionTargetKind::Secret)
+        };
+        let Some(preimage @ Preimage::Present(_)) = held
+            .map(|(_, sha)| Preimage::Present(sha.to_owned()))
+            .or_else(|| projection_preimage(&state))
+        else {
             continue;
         };
         projections.push(planned_projection(
             workspace_id,
             target_version_id,
-            stat.path,
+            held.map_or(stat.path, |(path, _)| path.to_owned()),
             MaterializationOperation::Delete,
             empty_sha.clone(),
             preimage,
@@ -679,6 +713,7 @@ pub(super) fn reconcile_active_plaintext_projection_on_store(
     faults: &dyn FaultInjector,
     token: &CancellationToken,
 ) -> Result<(), RuntimeError> {
+    let holds = PlacementHolds::load(store, workspace_id)?;
     let projections = plan_plaintext_switch(
         store,
         workspace_id,
@@ -688,6 +723,7 @@ pub(super) fn reconcile_active_plaintext_projection_on_store(
         root_dir,
         now_ms,
         token,
+        &holds,
     )?;
     if projections.is_empty() {
         return Ok(());
@@ -715,6 +751,7 @@ pub(super) fn reconcile_active_plaintext_projection_on_store(
         store,
         root_dir,
         MaterializationReplayScope {
+            holds: Some(&holds),
             workspace_id,
             self_writes: Some(self_writes),
             progress: None,
@@ -759,11 +796,7 @@ pub(super) fn switch_active_version_on_store(
     if previous.version_id == version_id {
         return Ok(target);
     }
-    if let Some(path) = store.read_with(|conn| {
-        dohc_engine_storage::capture_file_holds::first_path_in(conn, workspace_id)
-    })? {
-        return Err(RuntimeError::CaptureFileHeld { path });
-    }
+    let holds = PlacementHolds::load(store, workspace_id)?;
     let mut secret_key = None;
     let mut projections = plan_plaintext_switch(
         store,
@@ -774,6 +807,7 @@ pub(super) fn switch_active_version_on_store(
         root_dir,
         now_ms,
         token,
+        &holds,
     )?;
     projections.extend(plan_secret_switch(
         store,
@@ -784,6 +818,7 @@ pub(super) fn switch_active_version_on_store(
         now_ms,
         token,
         &mut secret_key,
+        &holds,
     )?);
     if token.is_cancelled() {
         return Err(RuntimeError::Cancelled);
@@ -818,6 +853,7 @@ pub(super) fn switch_active_version_on_store(
         store,
         root_dir,
         MaterializationReplayScope {
+            holds: Some(&holds),
             workspace_id,
             self_writes: Some(self_writes),
             progress: None,
@@ -854,6 +890,7 @@ pub(super) fn switch_active_version_on_store(
             store,
             root_dir,
             MaterializationReplayScope {
+                holds: Some(&holds),
                 workspace_id,
                 self_writes: Some(self_writes),
                 progress: None,

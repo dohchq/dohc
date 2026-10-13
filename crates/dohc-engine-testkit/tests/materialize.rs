@@ -111,6 +111,7 @@ fn materializes_a_new_file_and_marks_complete() {
         &store,
         sc.workspace(),
         &MaterializeOptions {
+            holds: None,
             policy: DurabilityPolicy::per_os(),
             replacer: &StdReplacer,
             backoff: &NoBackoff,
@@ -176,6 +177,7 @@ fn ordinary_write_refuses_symlinked_ancestor_then_recovers_with_real_directory()
         &store,
         sc.workspace(),
         &MaterializeOptions {
+            holds: None,
             policy: DurabilityPolicy::none(),
             replacer: &StdReplacer,
             backoff: &NoBackoff,
@@ -206,6 +208,7 @@ fn ordinary_write_refuses_symlinked_ancestor_then_recovers_with_real_directory()
         &store,
         sc.workspace(),
         &MaterializeOptions {
+            holds: None,
             policy: DurabilityPolicy::none(),
             replacer: &StdReplacer,
             backoff: &NoBackoff,
@@ -262,6 +265,7 @@ fn ordinary_write_temp_symlink_blocks_only_that_job_then_recovers() {
         &store,
         sc.workspace(),
         &MaterializeOptions {
+            holds: None,
             policy: DurabilityPolicy::none(),
             replacer: &StdReplacer,
             backoff: &NoBackoff,
@@ -294,6 +298,7 @@ fn ordinary_write_temp_symlink_blocks_only_that_job_then_recovers() {
         &store,
         sc.workspace(),
         &MaterializeOptions {
+            holds: None,
             policy: DurabilityPolicy::none(),
             replacer: &StdReplacer,
             backoff: &NoBackoff,
@@ -348,6 +353,7 @@ fn ordinary_delete_refuses_symlinked_ancestor_then_recovers_with_real_directory(
         &store,
         sc.workspace(),
         &MaterializeOptions {
+            holds: None,
             policy: DurabilityPolicy::none(),
             replacer: &StdReplacer,
             backoff: &NoBackoff,
@@ -367,6 +373,7 @@ fn ordinary_delete_refuses_symlinked_ancestor_then_recovers_with_real_directory(
         &store,
         sc.workspace(),
         &MaterializeOptions {
+            holds: None,
             policy: DurabilityPolicy::none(),
             replacer: &StdReplacer,
             backoff: &NoBackoff,
@@ -409,6 +416,7 @@ fn ordinary_conflict_sibling_refuses_symlinked_ancestor_then_recovers() {
         &store,
         sc.workspace(),
         &MaterializeOptions {
+            holds: None,
             policy: DurabilityPolicy::none(),
             replacer: &StdReplacer,
             backoff: &NoBackoff,
@@ -432,6 +440,7 @@ fn ordinary_conflict_sibling_refuses_symlinked_ancestor_then_recovers() {
         &store,
         sc.workspace(),
         &MaterializeOptions {
+            holds: None,
             policy: DurabilityPolicy::none(),
             replacer: &StdReplacer,
             backoff: &NoBackoff,
@@ -479,6 +488,7 @@ fn job_committed_but_pipeline_unrun_replays_after_restart() {
             &store,
             sc.workspace(),
             &MaterializeOptions {
+                holds: None,
                 policy: DurabilityPolicy::none(),
                 replacer: &StdReplacer,
                 backoff: &NoBackoff,
@@ -500,6 +510,7 @@ fn job_committed_but_pipeline_unrun_replays_after_restart() {
         &store,
         sc.workspace(),
         &MaterializeOptions {
+            holds: None,
             policy: DurabilityPolicy::none(),
             replacer: &StdReplacer,
             backoff: &NoBackoff,
@@ -529,6 +540,7 @@ fn crash_after_temp_write_leaves_no_torn_target_and_replay_completes() {
         &store,
         sc.workspace(),
         &MaterializeOptions {
+            holds: None,
             policy: DurabilityPolicy::none(),
             replacer: &StdReplacer,
             backoff: &NoBackoff,
@@ -550,6 +562,7 @@ fn crash_after_temp_write_leaves_no_torn_target_and_replay_completes() {
         &store,
         sc.workspace(),
         &MaterializeOptions {
+            holds: None,
             policy: DurabilityPolicy::none(),
             replacer: &StdReplacer,
             backoff: &NoBackoff,
@@ -576,6 +589,7 @@ fn crash_after_flush_before_rename_replays_to_completion() {
         &store,
         sc.workspace(),
         &MaterializeOptions {
+            holds: None,
             policy: DurabilityPolicy::per_os(),
             replacer: &StdReplacer,
             backoff: &NoBackoff,
@@ -594,6 +608,7 @@ fn crash_after_flush_before_rename_replays_to_completion() {
         &store,
         sc.workspace(),
         &MaterializeOptions {
+            holds: None,
             policy: DurabilityPolicy::none(),
             replacer: &StdReplacer,
             backoff: &NoBackoff,
@@ -619,6 +634,7 @@ fn crash_after_rename_before_complete_replays_exactly_once() {
         &store,
         sc.workspace(),
         &MaterializeOptions {
+            holds: None,
             policy: DurabilityPolicy::none(),
             replacer: &StdReplacer,
             backoff: &NoBackoff,
@@ -637,6 +653,7 @@ fn crash_after_rename_before_complete_replays_exactly_once() {
         &store,
         sc.workspace(),
         &MaterializeOptions {
+            holds: None,
             policy: DurabilityPolicy::none(),
             replacer: &StdReplacer,
             backoff: &NoBackoff,
@@ -674,6 +691,7 @@ fn external_newer_content_is_preserved_not_clobbered() {
         &store,
         sc.workspace(),
         &MaterializeOptions {
+            holds: None,
             policy: DurabilityPolicy::none(),
             replacer: &StdReplacer,
             backoff: &NoBackoff,
@@ -726,6 +744,7 @@ fn delete_job_replays_after_remove_before_complete() {
         &store,
         sc.workspace(),
         &MaterializeOptions {
+            holds: None,
             policy: DurabilityPolicy::none(),
             replacer: &StdReplacer,
             backoff: &NoBackoff,
@@ -744,6 +763,7 @@ fn delete_job_replays_after_remove_before_complete() {
         &store,
         sc.workspace(),
         &MaterializeOptions {
+            holds: None,
             policy: DurabilityPolicy::none(),
             replacer: &StdReplacer,
             backoff: &NoBackoff,
@@ -792,6 +812,7 @@ fn delete_job_syncs_parent_dir_before_marking_complete() {
         &store,
         sc.workspace(),
         &MaterializeOptions {
+            holds: None,
             policy: DurabilityPolicy::per_os(),
             replacer: &StdReplacer,
             backoff: &NoBackoff,
@@ -810,6 +831,7 @@ fn delete_job_syncs_parent_dir_before_marking_complete() {
         &store,
         sc.workspace(),
         &MaterializeOptions {
+            holds: None,
             policy: DurabilityPolicy::per_os(),
             replacer: &StdReplacer,
             backoff: &NoBackoff,
@@ -846,6 +868,7 @@ fn superseded_lower_generation_job_is_skipped() {
         &store,
         sc.workspace(),
         &MaterializeOptions {
+            holds: None,
             policy: DurabilityPolicy::none(),
             replacer: &StdReplacer,
             backoff: &NoBackoff,
@@ -863,6 +886,7 @@ fn superseded_lower_generation_job_is_skipped() {
         &store,
         sc.workspace(),
         &MaterializeOptions {
+            holds: None,
             policy: DurabilityPolicy::none(),
             replacer: &StdReplacer,
             backoff: &NoBackoff,
@@ -978,6 +1002,7 @@ fn secret_non_transient_replace_error_removes_plaintext_temp() {
         &job,
         b"SECRET=plaintext",
         &MaterializeOptions {
+            holds: None,
             policy: DurabilityPolicy::none(),
             replacer: &NonTransientFailingReplacer,
             backoff: &NoBackoff,
@@ -1035,6 +1060,7 @@ fn bounded_retry_succeeds_below_the_cap_with_exact_attempt_count_and_backoff() {
         &store,
         sc.workspace(),
         &MaterializeOptions {
+            holds: None,
             policy: DurabilityPolicy::none(),
             replacer: &replacer,
             backoff: &backoff,
@@ -1074,6 +1100,7 @@ fn bounded_retry_fails_closed_at_the_cap_and_leaves_job_pending() {
         &store,
         sc.workspace(),
         &MaterializeOptions {
+            holds: None,
             policy: DurabilityPolicy::none(),
             replacer: &replacer,
             backoff: &backoff,
@@ -1165,6 +1192,7 @@ fn every_materialize_fault_point_has_a_live_call_site() {
             &store,
             sc.workspace(),
             &MaterializeOptions {
+                holds: None,
                 policy: DurabilityPolicy::none(),
                 replacer: if point == FaultPoint::MaterializeAfterKnownCopyDeletion {
                     &StdReplacer
@@ -1203,6 +1231,7 @@ fn drain(
         store,
         sc.workspace(),
         &MaterializeOptions {
+            holds: None,
             policy: DurabilityPolicy::none(),
             replacer,
             backoff: &NoBackoff,
@@ -1510,6 +1539,7 @@ fn a_kept_file_is_saved_as_a_visible_copy() {
     assert_eq!(kept.len(), 1, "{kept:?}");
     std::fs::write(sc.target("a (kept copy).md"), b"taken").expect("occupy the first name");
     let options = MaterializeOptions {
+        holds: None,
         policy: DurabilityPolicy::none(),
         replacer: &StdReplacer,
         backoff: &NoBackoff,
@@ -1600,6 +1630,7 @@ fn keep_displaced(sc: &Scratch, store: &EngineStore, rel: &str, bytes: &[u8]) ->
 
 fn kept_copy_options() -> MaterializeOptions<'static> {
     MaterializeOptions {
+        holds: None,
         policy: DurabilityPolicy::none(),
         replacer: &StdReplacer,
         backoff: &NoBackoff,
@@ -1682,6 +1713,7 @@ fn a_kept_copy_fits_the_workspace_path_limit_or_stays_kept() {
     let sc = Scratch::new("kept-copy-path-limit");
     let store = EngineStore::open(&sc.db(), 1).expect("open");
     let options = MaterializeOptions {
+        holds: None,
         policy: DurabilityPolicy::none(),
         replacer: &StdReplacer,
         backoff: &NoBackoff,
@@ -2244,6 +2276,7 @@ fn a_handle_without_delete_sharing_fails_closed_without_moving_anything() {
         &store,
         sc.workspace(),
         &MaterializeOptions {
+            holds: None,
             policy: DurabilityPolicy::none(),
             replacer: &StdReplacer,
             backoff: &NoBackoff,
@@ -2468,6 +2501,7 @@ fn a_failed_return_is_retried_and_the_file_comes_back() {
         &store,
         sc.workspace(),
         &MaterializeOptions {
+            holds: None,
             policy: DurabilityPolicy::none(),
             replacer: &failing,
             backoff: &NoBackoff,
@@ -2485,6 +2519,7 @@ fn a_failed_return_is_retried_and_the_file_comes_back() {
         "ws",
         "a.md",
         &MaterializeOptions {
+            holds: None,
             policy: DurabilityPolicy::none(),
             replacer: &StdReplacer,
             backoff: &NoBackoff,
@@ -2863,6 +2898,7 @@ fn a_locked_put_back_of_a_newer_save_returns_it_on_the_next_run() {
         &store,
         sc.workspace(),
         &MaterializeOptions {
+            holds: None,
             policy: DurabilityPolicy::none(),
             replacer: &TwoSaves::new(false, true),
             backoff: &NoBackoff,
@@ -2903,6 +2939,7 @@ fn a_power_loss_after_the_synced_row_still_returns_the_newer_save() {
             &store,
             sc.workspace(),
             &MaterializeOptions {
+                holds: None,
                 policy: DurabilityPolicy::none(),
                 replacer: &replacer,
                 backoff: &NoBackoff,
@@ -3008,6 +3045,7 @@ fn recovery_after_a_restart_on_a_drive_without_atomic_renames_reports_the_limit(
         sc.workspace(),
         None,
         &MaterializeOptions {
+            holds: None,
             policy: DurabilityPolicy::none(),
             replacer: &NoAtomicRename,
             backoff: &NoBackoff,
@@ -3089,6 +3127,7 @@ fn a_fallback_rename_that_reports_failure_after_moving_still_reports_the_limit()
         &store,
         sc.workspace(),
         &MaterializeOptions {
+            holds: None,
             policy: DurabilityPolicy::none(),
             replacer: &FallbackRenameFailsAfterMoving,
             backoff: &NoBackoff,
@@ -3212,6 +3251,7 @@ fn a_crash_mid_batch_recovers_every_job() {
 
 fn sweep_options() -> MaterializeOptions<'static> {
     MaterializeOptions {
+        holds: None,
         policy: DurabilityPolicy::none(),
         replacer: &StdReplacer,
         backoff: &NoBackoff,
@@ -3661,6 +3701,7 @@ fn newest_staged_copy_returns_first_after_a_crash_during_adoption() {
             put_staged(&sc, "6a31.1", OUTSIDE);
             let faults = ScriptedFaults::crash_at(FaultPoint::MaterializeAfterDisplacementJournal);
             let options = MaterializeOptions {
+                holds: None,
                 faults: faults.as_ref(),
                 ..sweep_options()
             };
