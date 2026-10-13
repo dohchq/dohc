@@ -321,7 +321,7 @@ describe("writeWorkspaceText atomic replacement + optimistic conflicts", () => {
     expect(committed).toEqual(staged.map((entry) => entry.temp));
   });
 
-  it.each([undefined, "EPERM", "EBUSY", "EACCES"])("writes after transient Windows rename errors (%s) without rechecking the preimage", async (code) => {
+  it.each([undefined, "EPERM", "EBUSY", "EACCES"])("writes after transient Windows rename errors (%s) when the preimage is unchanged", async (code) => {
     const error = Object.assign(new Error("target locked"), { code });
     const rename = vi.fn(async (_source: string, _destination: string) => {
       if (code && rename.mock.calls.length <= 3) throw error;
@@ -329,9 +329,7 @@ describe("writeWorkspaceText atomic replacement + optimistic conflicts", () => {
     const writeFile = vi.fn(async (_temp: string, _text: string) => undefined);
     const remove = vi.fn(async (_temp: string) => undefined);
     const wait = vi.fn(async (_milliseconds: number) => undefined);
-    const readCurrentContentHash = vi.fn()
-      .mockResolvedValueOnce(INITIAL_CONTENT_HASH)
-      .mockResolvedValue(contentHash("external"));
+    const readCurrentContentHash = vi.fn(async () => INITIAL_CONTENT_HASH);
     const writer = createAtomicTextWriter({
       now: () => 1_000, uniqueId: () => "fixed-id",
       writeFile, rename, remove, readCurrentContentHash, wait, platform: "win32",
@@ -343,11 +341,43 @@ describe("writeWorkspaceText atomic replacement + optimistic conflicts", () => {
     expect(rename).toHaveBeenCalledTimes(code ? 4 : 1);
     expect(wait.mock.calls).toEqual(code ? [[8], [16], [32]] : []);
     expect(writeFile).toHaveBeenCalledTimes(1);
-    expect(readCurrentContentHash).toHaveBeenCalledTimes(1);
+    expect(readCurrentContentHash).toHaveBeenCalledTimes(code ? 4 : 1);
     expect(remove).not.toHaveBeenCalled();
     for (const call of rename.mock.calls) {
       expect(call).toEqual([writeFile.mock.calls[0][0], "C:/workspace/notes/a.md"]);
     }
+  });
+
+  it.each(["EPERM", "EBUSY", "EACCES"])("preserves an external save and removes the temp when the preimage changes during a %s retry", async (code) => {
+    const root = await makeWorkspace();
+    const target = join(root, "notes", "a.md");
+    const external = "external save\n";
+    const error = Object.assign(new Error("target locked"), { code });
+    const replace = vi.fn(async (temp: string, destination: string) => {
+      if (replace.mock.calls.length === 1) throw error;
+      await rename(temp, destination);
+    });
+    const wait = vi.fn(async (_milliseconds: number) => {
+      await writeFile(target, external);
+    });
+    const remove = vi.fn(async (temp: string) => rm(temp, { force: true }));
+    const readCurrentContentHash = vi.fn(async (path: string) => contentHash(await readFile(path, "utf8")));
+    const writer = createAtomicTextWriter({
+      now: () => 1_000, uniqueId: () => "fixed-id",
+      writeFile: async (temp, text) => writeFile(temp, text),
+      rename: replace, remove, readCurrentContentHash, wait, platform: "win32",
+    });
+
+    await expect(writer(target, "local", INITIAL_CONTENT_HASH)).resolves.toEqual({
+      status: "conflict", currentContentHash: contentHash(external),
+    });
+    expect(await readFile(target, "utf8")).toBe(external);
+    expect(await readdir(dirname(target))).toEqual(["a.md"]);
+    expect(replace).toHaveBeenCalledTimes(1);
+    expect(wait.mock.calls).toEqual([[8]]);
+    expect(readCurrentContentHash).toHaveBeenCalledTimes(2);
+    expect(remove).toHaveBeenCalledOnce();
+    expect(remove).toHaveBeenCalledWith(replace.mock.calls[0][0]);
   });
 
   it.each([
@@ -386,7 +416,7 @@ describe("writeWorkspaceText atomic replacement + optimistic conflicts", () => {
     await expect(writer("C:/workspace/notes/a.md", "local", INITIAL_CONTENT_HASH)).rejects.toBe(errors[5]);
     expect(rename).toHaveBeenCalledTimes(6);
     expect(wait.mock.calls).toEqual([[8], [16], [32], [64], [128]]);
-    expect(readCurrentContentHash).toHaveBeenCalledTimes(1);
+    expect(readCurrentContentHash).toHaveBeenCalledTimes(6);
     expect(remove).toHaveBeenCalledTimes(1);
     expect(remove).toHaveBeenCalledWith(rename.mock.calls[0][0]);
   });

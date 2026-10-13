@@ -116,6 +116,7 @@ export async function renameWithRetry(
     wait = waitAsync,
     platform = process.platform,
   }: AsyncReplaceDependencies = {},
+  beforeRetry?: () => Promise<void>,
 ): Promise<void> {
   for (let attempt = 0; ; attempt += 1) {
     try {
@@ -125,6 +126,7 @@ export async function renameWithRetry(
       const delay = retryDelay(error, attempt, platform);
       if (delay === undefined) throw error;
       await wait(delay);
+      if (beforeRetry) await beforeRetry();
     }
   }
 }

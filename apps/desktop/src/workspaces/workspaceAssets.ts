@@ -540,6 +540,12 @@ function isMissingTargetError(error: unknown): boolean {
 
 class WorkspaceTextTargetMissingError extends Error {}
 
+class WorkspaceTextRetryConflictError extends Error {
+  constructor(readonly currentContentHash: string | null) {
+    super("Text changed before rename retry");
+  }
+}
+
 function siblingTempPath(target: string, now: number, uniqueId: string): string {
   return join(
     dirname(target),
@@ -576,7 +582,19 @@ export function createAtomicTextWriter(deps: {
       if (currentContentHash !== expectedContentHash) {
         return { status: "conflict", currentContentHash };
       }
-      await renameWithRetry(temp, target, deps);
+      try {
+        await renameWithRetry(temp, target, deps, async () => {
+          const currentContentHash = await deps.readCurrentContentHash(target);
+          if (currentContentHash !== expectedContentHash) {
+            throw new WorkspaceTextRetryConflictError(currentContentHash);
+          }
+        });
+      } catch (error) {
+        if (error instanceof WorkspaceTextRetryConflictError) {
+          return { status: "conflict", currentContentHash: error.currentContentHash };
+        }
+        throw error;
+      }
       committed = true;
       return { status: "written", contentHash: hashContent(text) };
     } finally {
