@@ -566,6 +566,7 @@ impl Host {
             if pass["pendingCursor"].is_object() {
                 let commit = self.commit_answer(&pass["pendingCursor"]).await;
                 assert_eq!(commit["committed"], true);
+                assert_eq!(commit["retirement"], Value::Null, "{commit}");
                 more |= commit["hasMore"] == true;
             }
             if !more {
@@ -853,6 +854,31 @@ async fn a_departed_document_retires_and_frees_its_file_for_its_replacement() {
         "not the head"
     );
 
+    // The durability review: a commit lands whether or not retirement after
+    // it fails, and says both.
+    let commits = || {
+        Connection::open(engine_db_path(&scratch).expect("db path"))
+            .expect("open db")
+            .query_row("SELECT cursor_commits FROM hosted_replicas", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .expect("cursor commits")
+    };
+    let before = commits();
+    for _ in 0..2 {
+        let pass = host.pull().await;
+        let commit = host.commit_answer(&pass["pendingCursor"]).await;
+        assert_eq!(commit["committed"], true, "{commit}");
+        assert_eq!(commit["retirement"]["code"], json!(ErrorCode::Internal));
+        assert!(
+            commit["retirement"]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("hosted-file-unexpected: a.md")),
+            "{commit}"
+        );
+    }
+    assert_eq!(commits(), before + 2);
+
     // With its head back on disk, doc-b retires after the next commit, and
     // doc-a's waiting write applies and takes the path.
     std::fs::write(&file, "hosted b").expect("write a.md");
@@ -934,18 +960,9 @@ async fn a_retired_file_that_could_not_go_holds_its_path_until_it_goes() {
         id: 1,
     };
     let pass = host.pull().await;
-    let params = json!({"workspaceId": WORKSPACE, "pendingCursor": pass["pendingCursor"]});
-    host.call("sync.materializePendingCursor", params.clone())
-        .await;
-    host.id += 1;
-    call_error(
-        &host.transport,
-        &host.handle,
-        host.id,
-        "sync.commitCursor",
-        params,
-    )
-    .await;
+    let commit = host.commit_answer(&pass["pendingCursor"]).await;
+    assert_eq!(commit["committed"], true);
+    assert!(commit["retirement"].is_object(), "{commit}");
     assert_eq!(std::fs::read_to_string(&file).expect("a.md"), "hosted b");
     let conn = Connection::open(engine_db_path(&scratch).expect("db path")).expect("open db");
     let (heads, retired): (i64, i64) = conn

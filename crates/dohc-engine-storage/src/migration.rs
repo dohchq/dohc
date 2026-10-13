@@ -3223,16 +3223,20 @@ CREATE TABLE hosted_documents (
     path TEXT NOT NULL CHECK (length(path) > 0),
     state TEXT NOT NULL CHECK (state IN ('backfilling','held','ready')),
     held_reason TEXT CHECK (held_reason IN
-      ('hosted-backfill-path-held','hosted-backfill-work-waiting','hosted-scope-path-mismatch')),
+      ('hosted-backfill-path-held','hosted-backfill-work-waiting','hosted-scope-path-mismatch',
+       'hosted-conflict-parent-withheld')),
     held_path TEXT CHECK (length(held_path) > 0),
     held_by TEXT CHECK (length(held_by) > 0),
+    held_conflict_id TEXT CHECK (length(held_conflict_id) > 0),
     backfill_cursor INTEGER NOT NULL DEFAULT 0 CHECK (backfill_cursor >= 0),
     scope_generation INTEGER NOT NULL CHECK (scope_generation >= 0),
     PRIMARY KEY (workspace_id, object_id),
     CHECK ((state = 'held') = (held_reason IS NOT NULL)),
     CHECK ((held_by IS NOT NULL) = (held_reason IS 'hosted-backfill-path-held')),
+    CHECK ((held_conflict_id IS NOT NULL) = (held_reason IS 'hosted-conflict-parent-withheld')),
     CHECK (held_reason IS NOT 'hosted-backfill-path-held' OR held_path IS NOT NULL),
-    CHECK (held_reason IS NOT 'hosted-backfill-work-waiting' OR held_path IS NULL)
+    CHECK (held_reason NOT IN ('hosted-backfill-work-waiting','hosted-conflict-parent-withheld')
+      OR held_path IS NULL)
 ) STRICT;
 CREATE TABLE hosted_withheld_befores (
     workspace_id TEXT NOT NULL REFERENCES hosted_replicas(workspace_id) ON DELETE CASCADE,
@@ -3931,7 +3935,7 @@ mod tests {
             ),
             (
                 "v2-hosted-replica",
-                "dfd15555dc7d6508a04281f2cdd2301de8e18343d001aa0d8e614b6aefe7376c",
+                "332fbe3728b51bdb26a1cc9cc0d8d1da4decd311aa991687be899f4def7c7468",
             ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());
@@ -4000,6 +4004,9 @@ mod tests {
                 "UPDATE hosted_documents SET held_reason='hosted-backfill-work-waiting'",
                 "UPDATE hosted_documents SET state='held',held_reason='hosted-backfill-path-held',\
                  held_path='a.md'",
+                "UPDATE hosted_documents SET state='held',held_reason='hosted-conflict-parent-withheld'",
+                "UPDATE hosted_documents SET state='held',held_reason='hosted-backfill-work-waiting',\
+                 held_conflict_id='conflict'",
                 "UPDATE hosted_documents SET path=''",
                 "INSERT INTO hosted_deferred_ops (workspace_id,origin_id,origin_seq,object_id,relay_seq) \
                  VALUES ('hosted','origin:a',0,'doc',1)",

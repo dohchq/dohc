@@ -1702,9 +1702,10 @@ pub enum RelayOperationOutcome {
         /// `false` when the scope moved since the pass fetched; nothing
         /// committed.
         committed: bool,
-        /// A document that left the scope retired, so work that waited for
-        /// its path can apply: pull again.
-        retired: bool,
+        /// Retirement after the commit: `Ok(true)` when a document that left
+        /// the scope retired, so work that waited for its path can apply and
+        /// the caller pulls again. Its failure leaves the commit standing.
+        retirement: Result<bool, RuntimeError>,
     },
 }
 
@@ -2594,14 +2595,14 @@ fn run_relay_operation(
         } => match client.commit_hosted_cursor(store, &workspace_id, &cursor, &NoFaults)? {
             TxnOutcome::Committed(committed) => Ok(RelayOperationOutcome::HostedCursorCommitted {
                 committed,
-                retired: retire_departed_hosted(
+                retirement: retire_departed_hosted(
                     store,
                     doc_cache,
                     leases,
                     &workspace_id,
                     &root,
                     now_ms,
-                )?,
+                ),
             }),
             TxnOutcome::Crashed { .. } => Err(RuntimeError::OperationCrashed),
         },

@@ -400,10 +400,11 @@ pub fn adopt_join_identity(
 }
 
 /// Make a pristine workspace a hosted replica under the relay's existing
-/// coordinate. Its origin must carry [`SERVICE_HOST_ORIGIN_PREFIX`], and no
-/// other replica may: the relay accepts that prefix only on the hosted feed.
-/// An ordinary replica never becomes hosted, nor the reverse. It creates the
-/// main version too, as opening a passive store does.
+/// coordinate: one with no replication state, files, history or chats. Its
+/// origin must carry [`SERVICE_HOST_ORIGIN_PREFIX`], and no other replica
+/// may: the relay accepts that prefix only on the hosted feed. An ordinary
+/// replica never becomes hosted, nor the reverse. It creates the main version
+/// too, as opening a passive store does.
 ///
 /// [`SERVICE_HOST_ORIGIN_PREFIX`]: crate::SERVICE_HOST_ORIGIN_PREFIX
 pub fn create_hosted_replica(
@@ -550,6 +551,26 @@ fn create_sync_identity(
             return Err(SyncError::InvalidInput {
                 reason: "join identity adoption requires pristine local replication state",
             });
+        }
+        // A hosted replica refuses every local write, so local work in it
+        // could never change again.
+        if hosted {
+            let holds_work: bool = tx
+                .query_row(
+                    "SELECT \
+                       EXISTS(SELECT 1 FROM file_objects WHERE workspace_id = ?1) OR \
+                       EXISTS(SELECT 1 FROM moments WHERE workspace_id = ?1) OR \
+                       EXISTS(SELECT 1 FROM secret_moments WHERE workspace_id = ?1) OR \
+                       EXISTS(SELECT 1 FROM chat_channels WHERE workspace_id = ?1)",
+                    [workspace_id],
+                    |row| row.get(0),
+                )
+                .map_err(SyncError::corrupt)?;
+            if holds_work {
+                return Err(SyncError::InvalidInput {
+                    reason: crate::HOSTED_REPLICA_NOT_PRISTINE,
+                });
+            }
         }
 
         tx.execute(

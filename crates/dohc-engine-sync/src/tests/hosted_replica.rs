@@ -107,6 +107,65 @@ fn a_replica_is_hosted_only_by_its_row() {
     );
 }
 
+/// The durability review: a local-only workspace with work in it became a
+/// hosted replica, which then refuses every write to that work. Neither has
+/// a sync identity, so only the work refuses it.
+#[test]
+fn only_a_workspace_without_work_becomes_a_hosted_replica() {
+    let with_file: fn(&mut EngineStore) = |store| {
+        let mut files = VersionedTextStore::new(store);
+        files
+            .ensure_main_version("ws", "main", 1, &NoFaults)
+            .unwrap();
+        files
+            .write_text(
+                &dohc_engine_domain::WriteText {
+                    workspace_id: "ws".to_owned(),
+                    version_id: "main".to_owned(),
+                    object_id: "local-object".to_owned(),
+                    path: "notes.md".to_owned(),
+                    text: "local work".to_owned(),
+                    moment_id: "local-moment".to_owned(),
+                    metadata_origin: "user".to_owned(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    now_ms: 10,
+                    request_id: None,
+                },
+                &NoFaults,
+            )
+            .unwrap();
+    };
+    let with_chat: fn(&mut EngineStore) = |store| {
+        store
+            .write_with(&NoFaults, |tx| {
+                tx.execute(
+                    "INSERT INTO chat_channels \
+                     (workspace_id,channel_id,name,slug,kind,created_at_ms,updated_at_ms) \
+                     VALUES ('ws','channel','Channel','channel','channel',1,1)",
+                    [],
+                )
+                .map_err(SyncError::persist)?;
+                Ok::<_, SyncError>(())
+            })
+            .unwrap();
+    };
+    for seed in [with_file, with_chat] {
+        let (_scratch, _path, mut store) = open_store();
+        seed(&mut store);
+        assert!(read_sync_identity(&store, "ws").unwrap().is_none());
+        assert!(matches!(
+            create_hosted_replica(&mut store, "ws", HOST, "epoch-1", "stream-1", 1, &NoFaults),
+            Err(SyncError::InvalidInput {
+                reason: crate::HOSTED_REPLICA_NOT_PRISTINE
+            })
+        ));
+        assert!(!is_hosted_replica(&store, "ws").unwrap());
+        assert!(read_sync_identity(&store, "ws").unwrap().is_none());
+    }
+}
+
 #[test]
 fn hosted_admission_takes_sparse_origins_that_ordinary_admission_refuses() {
     let mutations = Cell::new(0);
@@ -1682,7 +1741,7 @@ fn a_held_op_holds_later_ops_of_its_document_but_not_of_its_origin() {
     let held = pass(&client, &mut store, &NoFaults).unwrap();
     assert_eq!(held.applied, 1);
     assert!(commit(&client, &mut store, &held));
-    assert_eq!(hold(&store, "hosted-object"), Some(HostedHold::WorkWaiting));
+    assert_eq!(hold(&store, "hosted-object"), Some(parent_withheld()));
     assert_eq!(
         retained(&store),
         0,
@@ -1721,6 +1780,71 @@ fn a_held_op_holds_later_ops_of_its_document_but_not_of_its_origin() {
         ),
         1,
         "the resolution applies once, through its parent"
+    );
+}
+
+/// What holds a document at the child of [`withheld_conflict`].
+fn parent_withheld() -> HostedHold {
+    HostedHold::ConflictParentWithheld {
+        conflict_id: "owner-conflict".to_owned(),
+    }
+}
+
+/// The durability review: a ready document's conflict child whose parent the
+/// feed withholds was retained, with every later row of its document behind
+/// it, until retained work reached its workspace-wide cap and every pass
+/// failed. The document is held at the child instead, naming the conflict,
+/// and retains nothing; another document syncs past the cap.
+#[test]
+fn a_ready_document_holds_at_a_withheld_conflict_parent_and_retains_nothing() {
+    let (_scratch, _path, mut store) = hosted_store();
+    let (_parent, child, _) = withheld_conflict(&mut store);
+    let feed = HostedFeed::new();
+    feed.append(envelope("owner", 2, "workspace.init", json!({})));
+    feed.create("peer", 0, "hosted-object", "hosted.md", "before the conflict");
+    feed.share("hosted-object", "hosted.md");
+    feed.share("other-object", "other.md");
+    let client = RelaySyncClient::new(feed);
+    sync(&client, &mut store);
+    assert!(ready(&store, "hosted-object"));
+
+    let feed = client.transport();
+    feed.append(child);
+    let child_seq = feed.log.lock().unwrap().len() as i64;
+    // More live rows of the document than the cap on retained work.
+    for seq in 0..10_001 {
+        feed.append(envelope(
+            "live",
+            seq,
+            "live.audit.application",
+            json!({"objectId": "hosted-object"}),
+        ));
+    }
+    feed.create("peer", 1, "other-object", "other.md", "independent");
+    sync(&client, &mut store);
+    assert_eq!(hold(&store, "hosted-object"), Some(parent_withheld()));
+    assert_eq!(retained(&store), 0);
+    assert_eq!(
+        document(&store, "hosted-object").unwrap().backfill_cursor,
+        child_seq - 1,
+        "its own read starts at the child"
+    );
+    assert!(ready(&store, "other-object"));
+    assert_eq!(
+        content(&store).0.get("other-object").map(String::as_str),
+        Some("independent")
+    );
+
+    let again = pass(&client, &mut store, &NoFaults).unwrap();
+    assert_eq!(again.held.get("hosted-object"), Some(&parent_withheld()));
+    assert!(
+        client
+            .transport()
+            .pull_requests()
+            .iter()
+            .rev()
+            .any(|request| request.object_id.as_deref() == Some("hosted-object")
+                && request.cursor == child_seq - 1)
     );
 }
 
@@ -2440,11 +2564,13 @@ fn sync_changes(
     panic!("the hosted replica did not catch up");
 }
 
+type Pairs = Vec<(String, String)>;
+
 /// Each object's head path, and the object each path names.
-fn paths(store: &EngineStore) -> (Vec<(String, String)>, Vec<(String, String)>) {
+fn paths(store: &EngineStore) -> (Pairs, Pairs) {
     store
         .read_with(|conn| {
-            let pairs = |sql: &str| -> rusqlite::Result<Vec<(String, String)>> {
+            let pairs = |sql: &str| -> rusqlite::Result<Pairs> {
                 conn.prepare(sql)?
                     .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
                     .collect()

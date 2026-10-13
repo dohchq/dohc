@@ -6,6 +6,7 @@ const CHECKED_DELETE_DISCARD: &str = "dohc-engine-domain/src/store/delete_rename
 const CHECKED_DELETE_DISCARD_SQL: &str =
     "DELETE FROM moments WHERE workspace_id=?1 AND moment_id=?2";
 const PROJECTION: &str = "dohc-engine-domain/src/collections/projection.rs";
+const HOSTED_RETIREMENT: &str = "dohc-engine-sync/src/hosted/retirement.rs";
 const RETAINED_TABLES: [&str; 4] = [
     "moments",
     "versions",
@@ -140,6 +141,13 @@ fn audit(directory: &Path, crates: &Path, found: &mut Vec<(String, String)>) {
                     // when no export or pending conflict shadow references it.
                     assert_checked_delete_discard_site(&source);
                 }
+                if relative == HOSTED_RETIREMENT && statement == "dynamic deletion" {
+                    // A hosted replica's moments are derived copies: the relay
+                    // and the owner's devices keep the published history. Only a
+                    // document that left the scope, once the relay holds all
+                    // its host wrote and no export pins it, loses its own rows.
+                    assert_hosted_retirement_site(&source);
+                }
                 if relative == PROJECTION && statement == "dynamic deletion" {
                     assert!(
                         !RETAINED_TABLES
@@ -174,6 +182,91 @@ fn assert_checked_delete_discard_site(source: &str) {
     );
 }
 
+/// The body of `name`, a function in `source`, as tokens.
+fn function_body(source: &str, name: &str) -> String {
+    syn::parse_file(source)
+        .unwrap()
+        .items
+        .into_iter()
+        .find_map(|item| match item {
+            syn::Item::Fn(function) if function.sig.ident == name => {
+                Some(function.block.into_token_stream().to_string())
+            }
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("hosted retirement must keep `{name}`"))
+}
+
+fn assert_hosted_retirement_site(source: &str) {
+    let retire = function_body(source, "retire_hosted_document");
+    assert_eq!(destructive_statements(&retire), ["dynamic deletion"]);
+    let guard = retire
+        .find("retirable (tx , workspace_id , object_id)")
+        .expect("retirement must be guarded by `retirable`");
+    assert!(
+        retire.find("execute").is_some_and(|first| guard < first),
+        "retirement must check `retirable` before it writes"
+    );
+    assert!(
+        function_body(source, "retirable").contains("d.scope_generation<>h.scope_generation"),
+        "only a document that left a hosted replica's scope retires"
+    );
+    assert!(
+        source.contains(r#"const OBJECT: &str = "workspace_id=?1 AND object_id=?2";"#),
+        "retirement must select rows of the one document"
+    );
+    let rows = function_body(source, "retired_rows");
+    for table in RETAINED_TABLES {
+        let named = format!("\"{table}\"");
+        let deleted = matches!(table, "moments" | "file_objects");
+        assert_eq!(rows.matches(&named).count(), usize::from(deleted), "{table}");
+        assert!(
+            !deleted || rows.contains(&format!("object ({named})")),
+            "retirement must delete only the document's own {table}"
+        );
+    }
+}
+
+#[test]
+fn hosted_retirement_entry_rejects_an_unguarded_or_wider_deletion() {
+    let guarded = r#"
+        const OBJECT: &str = "workspace_id=?1 AND object_id=?2";
+        fn retire_hosted_document() {
+            store.write_with(faults, |tx| {
+                if !retirable(tx, workspace_id, object_id)? { return Ok(false); }
+                for (table, rows) in retired_rows() {
+                    execute(tx, &format!("DELETE FROM {table} WHERE {rows}"), &bound)?;
+                }
+                Ok(true)
+            })
+        }
+        fn retirable() {
+            query("SELECT EXISTS(SELECT 1 FROM hosted_documents d JOIN hosted_replicas h \
+                WHERE d.scope_generation<>h.scope_generation)")
+        }
+        fn retired_rows() {
+            let object = |table| (table, OBJECT.to_owned());
+            vec![object("moments"), object("file_objects")]
+        }
+    "#;
+    assert_hosted_retirement_site(guarded);
+    for (from, to) in [
+        ("if !retirable(tx, workspace_id, object_id)? { return Ok(false); }", ""),
+        ("d.scope_generation<>h.scope_generation", "1"),
+        ("workspace_id=?1 AND object_id=?2", "workspace_id=?1"),
+        (r#"object("moments")"#, r#"("moments", "workspace_id=?1".to_owned())"#),
+        (r#"object("file_objects")"#, r#"object("file_objects"), object("versions")"#),
+        ("Ok(true)", r#"execute(tx, "DELETE FROM moments", &[])?; Ok(true)"#),
+    ] {
+        let source = guarded.replace(from, to);
+        assert_ne!(source, guarded, "{from}");
+        assert!(
+            std::panic::catch_unwind(|| assert_hosted_retirement_site(&source)).is_err(),
+            "accepted {from} -> {to}"
+        );
+    }
+}
+
 #[test]
 fn production_moment_deleters_preserve_published_and_pinned_history() {
     let crates = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
@@ -193,7 +286,8 @@ fn production_moment_deleters_preserve_published_and_pinned_history() {
                 "delete moments".to_owned()
             ),
             (ROLLBACK.to_owned(), "delete file_objects".to_owned()),
-            (ROLLBACK.to_owned(), "delete moments".to_owned())
+            (ROLLBACK.to_owned(), "delete moments".to_owned()),
+            (HOSTED_RETIREMENT.to_owned(), "dynamic deletion".to_owned())
         ]
     );
 }

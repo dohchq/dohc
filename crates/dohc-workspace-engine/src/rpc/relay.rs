@@ -330,6 +330,9 @@ fn hosted_hold_json(object_id: &str, hold: &dohc_engine_sync::HostedHold) -> Val
             held["path"] = json!(path);
             held["heldBy"] = json!(held_by);
         }
+        HostedHold::ConflictParentWithheld { conflict_id } => {
+            held["conflictId"] = json!(conflict_id);
+        }
         HostedHold::WorkWaiting => {}
         HostedHold::ScopePathMismatch {
             scope_path,
@@ -510,10 +513,15 @@ fn relay_outcome_json(outcome: RelayOperationOutcome) -> Result<Value, WireError
         RelayOperationOutcome::HostedPass(pass) => hosted_pass_json(pass),
         // A pass fetched under a scope that has since moved commits nothing.
         // A commit that retired a departed document has more to pull: work
-        // that waited for its path.
-        RelayOperationOutcome::HostedCursorCommitted { committed, retired } => json!({
+        // that waited for its path. A retirement that failed is reported as
+        // the error it would have been, beside the commit that stands.
+        RelayOperationOutcome::HostedCursorCommitted {
+            committed,
+            retirement,
+        } => json!({
             "committed": committed,
-            "hasMore": retired,
+            "hasMore": matches!(retirement, Ok(true)),
+            "retirement": retirement.err().map(map_runtime),
             "sharingDeclined": [],
         }),
         RelayOperationOutcome::ShareViewPulled(outcome) => json!({

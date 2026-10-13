@@ -39,8 +39,12 @@ pub(crate) const NOT_A_HOSTED_REPLICA: &str = "workspace is not a hosted replica
 /// Why a passive store refuses every hosted operation.
 pub const PASSIVE_STORE_CANNOT_HOST: &str = "a passive store cannot host documents";
 
-/// A conflict child whose `conflict.resolve` parent the feed withheld. The
-/// child waits in deferred work until the relay serves what it needs.
+/// Why a workspace with files, history or chats cannot become a hosted replica.
+pub const HOSTED_REPLICA_NOT_PRISTINE: &str =
+    "a hosted replica starts from a workspace with no files, history or chats";
+
+/// A conflict child whose `conflict.resolve` parent the feed withheld. Its
+/// document is held at the child until the relay serves what it needs.
 pub(crate) const CONFLICT_PARENT_WITHHELD: &str = "hosted-conflict-parent-withheld";
 
 /// A moment or Y.Doc row whose path a document outside the scope, or the file
@@ -409,9 +413,11 @@ pub enum HostedHold {
     /// Its history reaches `path`, which `held_by`, another document in the
     /// scope, holds here. Its work waits until `held_by` moves.
     PathHeld { path: String, held_by: String },
-    /// Its work waits for another reason: a live session, a conflict parent
-    /// the feed withheld, or a departed document or retired file still
-    /// holding its path.
+    /// Its next row resolves `conflict_id`, whose `conflict.resolve` the feed
+    /// withholds. Its work waits until the relay serves it.
+    ConflictParentWithheld { conflict_id: String },
+    /// Its work waits for another reason: a live session, or a departed
+    /// document or retired file still holding its path.
     WorkWaiting,
     /// Its history leaves it at `head_path`, or at no path, while the scope
     /// names it at `scope_path`. It waits for the row that moves it there.
@@ -426,6 +432,7 @@ impl HostedHold {
     pub const fn reason(&self) -> &'static str {
         match self {
             Self::PathHeld { .. } => BACKFILL_PATH_HELD,
+            Self::ConflictParentWithheld { .. } => CONFLICT_PARENT_WITHHELD,
             Self::WorkWaiting => "hosted-backfill-work-waiting",
             Self::ScopePathMismatch { .. } => SCOPE_PATH_MISMATCH,
         }
@@ -434,7 +441,7 @@ impl HostedHold {
     fn held_path(&self) -> Option<&str> {
         match self {
             Self::PathHeld { path, .. } => Some(path),
-            Self::WorkWaiting => None,
+            Self::ConflictParentWithheld { .. } | Self::WorkWaiting => None,
             Self::ScopePathMismatch { head_path, .. } => head_path.as_deref(),
         }
     }
@@ -442,32 +449,45 @@ impl HostedHold {
     fn held_by(&self) -> Option<&str> {
         match self {
             Self::PathHeld { held_by, .. } => Some(held_by),
-            Self::WorkWaiting | Self::ScopePathMismatch { .. } => None,
+            Self::ConflictParentWithheld { .. }
+            | Self::WorkWaiting
+            | Self::ScopePathMismatch { .. } => None,
+        }
+    }
+
+    fn held_conflict_id(&self) -> Option<&str> {
+        match self {
+            Self::ConflictParentWithheld { conflict_id } => Some(conflict_id),
+            Self::PathHeld { .. } | Self::WorkWaiting | Self::ScopePathMismatch { .. } => None,
         }
     }
 }
 
 const SCOPE_PATH_MISMATCH: &str = "hosted-scope-path-mismatch";
 
-/// A `hosted_documents` row's state, held reason, held path and held-by
-/// columns, with `scope_path` its `path`.
+/// A `hosted_documents` row's state, held reason, held path, held-by and
+/// held conflict columns, with `scope_path` its `path`.
 fn decode_status(
     scope_path: &str,
     state: &str,
     reason: Option<&str>,
     held_path: Option<String>,
     held_by: Option<String>,
+    held_conflict_id: Option<String>,
 ) -> Result<HostedDocumentStatus, SyncError> {
-    Ok(match (state, reason, held_path, held_by) {
-        ("backfilling", None, None, None) => HostedDocumentStatus::Backfilling,
-        ("ready", None, None, None) => HostedDocumentStatus::Ready,
-        ("held", Some("hosted-backfill-path-held"), Some(path), Some(held_by)) => {
+    Ok(match (state, reason, held_path, held_by, held_conflict_id) {
+        ("backfilling", None, None, None, None) => HostedDocumentStatus::Backfilling,
+        ("ready", None, None, None, None) => HostedDocumentStatus::Ready,
+        ("held", Some("hosted-backfill-path-held"), Some(path), Some(held_by), None) => {
             HostedDocumentStatus::Held(HostedHold::PathHeld { path, held_by })
         }
-        ("held", Some("hosted-backfill-work-waiting"), None, None) => {
+        ("held", Some("hosted-conflict-parent-withheld"), None, None, Some(conflict_id)) => {
+            HostedDocumentStatus::Held(HostedHold::ConflictParentWithheld { conflict_id })
+        }
+        ("held", Some("hosted-backfill-work-waiting"), None, None, None) => {
             HostedDocumentStatus::Held(HostedHold::WorkWaiting)
         }
-        ("held", Some("hosted-scope-path-mismatch"), head_path, None) => {
+        ("held", Some("hosted-scope-path-mismatch"), head_path, None, None) => {
             HostedDocumentStatus::Held(HostedHold::ScopePathMismatch {
                 scope_path: scope_path.to_owned(),
                 head_path,
@@ -501,8 +521,8 @@ pub fn read_hosted_replica(
         };
         let mut statement = conn
             .prepare(
-                "SELECT object_id,path,state,held_reason,held_path,held_by,backfill_cursor \
-                 FROM hosted_documents WHERE workspace_id=?1 AND scope_generation=?2",
+                "SELECT object_id,path,state,held_reason,held_path,held_by,held_conflict_id, \
+                 backfill_cursor FROM hosted_documents WHERE workspace_id=?1 AND scope_generation=?2",
             )
             .map_err(SyncError::corrupt)?;
         let rows = statement
@@ -515,6 +535,7 @@ pub fn read_hosted_replica(
                     row.get(4)?,
                     row.get(5)?,
                     row.get(6)?,
+                    row.get(7)?,
                 ))
             })
             .map_err(SyncError::corrupt)?
@@ -523,9 +544,15 @@ pub fn read_hosted_replica(
         let documents = rows
             .into_iter()
             .map(
-                |(object_id, path, state, reason, held_path, held_by, cursor)| {
-                    let status =
-                        decode_status(&path, &state, reason.as_deref(), held_path, held_by)?;
+                |(object_id, path, state, reason, held_path, held_by, conflict_id, cursor)| {
+                    let status = decode_status(
+                        &path,
+                        &state,
+                        reason.as_deref(),
+                        held_path,
+                        held_by,
+                        conflict_id,
+                    )?;
                     Ok((
                         object_id,
                         HostedDocumentState {
@@ -597,6 +624,7 @@ pub(crate) fn adopt_scope(
                  held_reason=CASE WHEN scope_generation=?3 THEN held_reason END, \
                  held_path=CASE WHEN scope_generation=?3 THEN held_path END, \
                  held_by=CASE WHEN scope_generation=?3 THEN held_by END, \
+                 held_conflict_id=CASE WHEN scope_generation=?3 THEN held_conflict_id END, \
                  backfill_cursor=CASE WHEN scope_generation=?3 THEN backfill_cursor ELSE 0 END, \
                  scope_generation=excluded.scope_generation",
                 params![workspace_id, object_id, previous, generation, path],
@@ -631,7 +659,8 @@ pub struct HostedCursor {
     /// The main feed's position, or `None` when a document backfilled instead.
     pub main_cursor: Option<i64>,
     /// Each document whose own rows the pass read, by object id: the one
-    /// backfilling, if any, and every held one.
+    /// backfilling, if any, every held one, and every ready one that stopped
+    /// at a conflict child whose parent the feed withholds.
     pub reads: BTreeMap<String, HostedRead>,
     /// Local-only ownership token for applied settlements and deferred relay work.
     pub settlement_report_id: Option<String>,
@@ -726,7 +755,8 @@ pub fn commit_hosted_cursor(
             };
             tx.execute(
                 "UPDATE hosted_documents SET backfill_cursor=MAX(backfill_cursor,?3),state=?4, \
-                 held_reason=?5,held_path=?6,held_by=?7 WHERE workspace_id=?1 AND object_id=?2",
+                 held_reason=?5,held_path=?6,held_by=?7,held_conflict_id=?8 \
+                 WHERE workspace_id=?1 AND object_id=?2",
                 params![
                     workspace_id,
                     object_id,
@@ -734,7 +764,8 @@ pub fn commit_hosted_cursor(
                     state,
                     hold.as_ref().map(HostedHold::reason),
                     hold.as_ref().and_then(HostedHold::held_path),
-                    hold.as_ref().and_then(HostedHold::held_by)
+                    hold.as_ref().and_then(HostedHold::held_by),
+                    hold.as_ref().and_then(HostedHold::held_conflict_id)
                 ],
             )
             .map_err(SyncError::persist)?;
@@ -754,7 +785,15 @@ pub(crate) fn stopped_hold(
     op: &ReplicationEnvelope,
 ) -> Result<HostedHold, SyncError> {
     let unready = BTreeSet::from([object_id.to_owned()]);
-    Ok(backfill_path_held(conn, &unready, op)?.unwrap_or(HostedHold::WorkWaiting))
+    if let Some(hold) = backfill_path_held(conn, &unready, op)? {
+        return Ok(hold);
+    }
+    Ok(
+        match crate::conflict_resolve_v1::withheld_parent_conflict(conn, op)? {
+            Some(conflict_id) => HostedHold::ConflictParentWithheld { conflict_id },
+            None => HostedHold::WorkWaiting,
+        },
+    )
 }
 
 /// What holds a document whose read reached the end of its rows from being

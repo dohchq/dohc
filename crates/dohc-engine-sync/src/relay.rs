@@ -2070,6 +2070,18 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             faults,
             leases,
         )?;
+        // A ready document that stopped at a conflict child whose parent the
+        // feed withholds is held from there and reads its own rows.
+        for (object_id, op) in &pass.stopped {
+            if replica
+                .documents
+                .get(object_id)
+                .is_some_and(|document| document.status == crate::HostedDocumentStatus::Ready)
+            {
+                let at = op.relay_seq.map_or(0, |seq| seq.saturating_sub(1));
+                reads.insert(object_id.clone(), (at, true));
+            }
+        }
         // A read stops before its document's first row that did not apply;
         // nothing of it was retained, so its next read fetches it again.
         let (reads, held) = store
@@ -2234,7 +2246,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         queued: &[ReplicationEnvelope],
         ordered: &[ReplicationEnvelope],
         mut durable: BTreeSet<String>,
-        holding: Holding,
+        mut holding: Holding,
         faults: &dyn FaultInjector,
         leases: &dyn crate::LeaseProbe,
     ) -> Result<AppliedPass, RelayError> {
@@ -2282,6 +2294,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 };
                 match routed {
                     Err(SyncError::RetryableState { reason }) => {
+                        holding.stop_at_withheld_parent(op, reason);
                         if let Some(key) = key {
                             if retained_while_held(op, reason) {
                                 durable.insert(key.clone());
@@ -4209,14 +4222,13 @@ pub(crate) fn take_canonical_json_call_count() -> usize {
 }
 
 /// Whether a held op is retained across passes, so the cursor can move past
-/// it: work behind a live session, a hosted conflict child whose parent the
-/// feed withheld, and a hosted moment or Y.Doc row whose path waits for a
-/// departed document to retire. A hosted document that is not ready retains
-/// nothing.
+/// it: work behind a live session, and a hosted moment or Y.Doc row whose
+/// path waits for a departed document to retire. A hosted document that is
+/// not ready retains nothing.
 fn retained_while_held(op: &ReplicationEnvelope, reason: &str) -> bool {
     match reason {
         crate::hosted::PATH_HELD_BY_DEPARTED => true,
-        "ydoc-session-live" | crate::hosted::CONFLICT_PARENT_WITHHELD => {
+        "ydoc-session-live" => {
             matches!(op.op_kind.as_str(), "conflict.resolve" | "moment.append")
         }
         _ => false,
@@ -4269,6 +4281,18 @@ impl Holding {
         };
         crate::hosted::hosted_document(op).filter(|object_id| unready.contains(*object_id))
     }
+
+    /// Stop a ready hosted document at `op`, whose conflict parent the feed
+    /// withholds: it can wait indefinitely, so the document is held there
+    /// and retains nothing, as one that is not ready.
+    fn stop_at_withheld_parent(&mut self, op: &ReplicationEnvelope, reason: &str) {
+        if let Self::ByDocument { unready, .. } = self
+            && reason == crate::hosted::CONFLICT_PARENT_WITHHELD
+            && let Some(object_id) = crate::hosted::hosted_document(op)
+        {
+            unready.insert(object_id.to_owned());
+        }
+    }
 }
 
 #[derive(Default)]
@@ -4284,8 +4308,9 @@ struct AppliedPass {
     settlement_report_id: Option<String>,
     /// Settlement or deferred replay left work for another pass.
     has_more: bool,
-    /// Each hosted document that is not ready whose ops did not all apply,
-    /// with the first that did not.
+    /// Each hosted document that is not ready, or that stopped at a withheld
+    /// conflict parent, whose ops did not all apply, with the first that did
+    /// not.
     stopped: BTreeMap<String, ReplicationEnvelope>,
 }
 

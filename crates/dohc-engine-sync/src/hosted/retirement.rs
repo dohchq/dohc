@@ -196,12 +196,11 @@ pub fn retire_hosted_document(
                  UNION SELECT update_sha256 FROM live_audit_record_manifests WHERE record_digest=?1",
                 &[&digest],
             )?);
-            for table in ["live_audit_record_chunks", "live_audit_record_manifests"] {
-                tx.execute(
-                    &format!("DELETE FROM {table} WHERE record_digest=?1"),
-                    [&digest],
-                )
-                .map_err(SyncError::persist)?;
+            for sql in [
+                "DELETE FROM live_audit_record_chunks WHERE record_digest=?1",
+                "DELETE FROM live_audit_record_manifests WHERE record_digest=?1",
+            ] {
+                tx.execute(sql, [&digest]).map_err(SyncError::persist)?;
             }
         }
         for sha256 in blobs {
@@ -426,14 +425,13 @@ fn retired_rows() -> Vec<(&'static str, String)> {
         ),
         (
             "automation_claims",
-            format!(
-                "workspace_id=?1 AND (record_id IN (SELECT record_id FROM collection_records \
-                   WHERE workspace_id=?1 AND object_id=?2) \
-                 OR trigger_moment_order IN (SELECT moment_order FROM moments \
-                   WHERE workspace_id=?1 AND object_id=?2) \
-                 OR (trigger_origin_id,trigger_origin_seq) IN (SELECT json_extract(value,'$[0]'), \
-                   json_extract(value,'$[1]') FROM json_each(?3)))"
-            ),
+            "workspace_id=?1 AND (record_id IN (SELECT record_id FROM collection_records \
+               WHERE workspace_id=?1 AND object_id=?2) \
+             OR trigger_moment_order IN (SELECT moment_order FROM moments \
+               WHERE workspace_id=?1 AND object_id=?2) \
+             OR (trigger_origin_id,trigger_origin_seq) IN (SELECT json_extract(value,'$[0]'), \
+               json_extract(value,'$[1]') FROM json_each(?3)))"
+                .to_owned(),
         ),
         object("collection_records"),
         object("collection_historical_record_owners"),
@@ -479,8 +477,11 @@ fn release_blob(tx: &Transaction<'_>, sha256: &str) -> Result<(), SyncError> {
     if seeds {
         return Ok(());
     }
-    for table in ["blobs", "binary_blobs"] {
-        match tx.execute(&format!("DELETE FROM {table} WHERE sha256=?1"), [sha256]) {
+    for sql in [
+        "DELETE FROM blobs WHERE sha256=?1",
+        "DELETE FROM binary_blobs WHERE sha256=?1",
+    ] {
+        match tx.execute(sql, [sha256]) {
             Ok(_) => {}
             Err(rusqlite::Error::SqliteFailure(error, message))
                 if error.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_FOREIGNKEY
