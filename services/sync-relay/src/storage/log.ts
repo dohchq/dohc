@@ -330,3 +330,58 @@ export function hasRefusedSettlement(storage: StorageContext, input: {
       AND json_extract(payload_json,'$.momentId')=? LIMIT 1`)
     .get(input.workspaceId,input.originId,input.originSeq,input.settlementId,input.reason,input.momentId) !== undefined;
 }
+
+export function fetchChatMessages(storage: StorageContext, input: {
+  workspaceId: string; channelWireId: string; cursor: number | null; direction: "older" | "newer"; limit: number;
+}): SyncRelayLogRow[] {
+  const older = input.direction === "older";
+  return storage.db.prepare(`SELECT m.* FROM sync_relay_log m
+    WHERE m.workspace_id = ? AND m.op_kind = 'chat.message.append'
+      AND json_valid(m.payload_json)
+      AND (? IS NULL OR m.relay_seq ${older ? "<" : ">"} ?)
+      AND (SELECT json_extract(t.payload_json, '$.channelWireId') FROM sync_relay_log t
+        WHERE t.workspace_id = m.workspace_id AND t.op_kind = 'chat.thread.create'
+          AND json_valid(t.payload_json)
+          AND json_extract(t.payload_json, '$.threadId') = json_extract(m.payload_json, '$.threadId')
+        ORDER BY t.relay_seq LIMIT 1) = ?
+    ORDER BY m.relay_seq ${older ? "DESC" : "ASC"} LIMIT ?`)
+    .all(input.workspaceId, input.cursor, input.cursor, input.channelWireId, input.limit).map(rowToLogRow);
+}
+
+export function fetchChatMessage(storage: StorageContext, input: {
+  workspaceId: string; originId: string; messageId: string;
+}): SyncRelayLogRow | null {
+  const row = storage.db.prepare(`SELECT * FROM sync_relay_log
+    WHERE workspace_id = ? AND origin_id = ? AND op_kind = 'chat.message.append'
+      AND json_extract(payload_json, '$.messageId') = ? ORDER BY relay_seq LIMIT 1`)
+    .get(input.workspaceId, input.originId, input.messageId);
+  return row ? rowToLogRow(row) : null;
+}
+
+export function appendBrowserChatBatch(storage: StorageContext, input: {
+  workspaceId: string; originId: string; messageId: string; ops: SyncRelayLogInput[];
+  guard?: (context: AppendLogBatchGuardContext) => void;
+}): AppendLogBatchResult {
+  return storage.tx(() => {
+    const existing = fetchChatMessage(storage, input);
+    if (existing) {
+      const previous = fetchLogCoordinate(storage, {...input, originSeq: existing.originSeq - 1});
+      const createdThread = previous?.opKind === "chat.thread.create" &&
+        (JSON.parse(previous.payloadJson) as {threadId?: unknown}).threadId ===
+        (JSON.parse(existing.payloadJson) as {threadId?: unknown}).threadId;
+      if (input.ops.length !== (createdThread ? 2 : 1)) {
+        throw new SyncRelayConflictError("retry changes thread creation");
+      }
+    }
+    const firstSequence = existing ? existing.originSeq - input.ops.length + 1 : Number(storage.db.prepare(
+      `SELECT COALESCE(MAX(origin_seq), -1) AS seq FROM sync_relay_log WHERE workspace_id = ? AND origin_id = ?`,
+    ).get(input.workspaceId, input.originId)?.seq ?? -1) + 1;
+    const ops = input.ops.map((op, index) => {
+      const payload = JSON.parse(op.payloadJson) as Record<string, unknown>;
+      const recordedAtMs = existing?.recordedAtMs ?? op.recordedAtMs;
+      return {...op, originSeq: firstSequence + index, recordedAtMs,
+        payloadJson: JSON.stringify({...payload, createdAtMs: recordedAtMs})};
+    });
+    return appendLogBatchInTransaction(storage, {...input, ops});
+  });
+}

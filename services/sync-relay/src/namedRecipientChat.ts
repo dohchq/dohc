@@ -1,21 +1,21 @@
+import { MAX_NAMED_CHAT_FOLLOW_REQUESTS } from "@dohc/security-contract/share-discussion";
 import { readBoundedJson } from "@dohc/service-http";
 import { parseLiveUpdateIdentifier } from "@dohc/live-session-contract/live-update-admission";
 import type { ResolveActor } from "@dohc/workspace-auth/session";
 import { sha256Hex } from "@dohc/workspace-core/hash";
-import { badRequest, errorResponse, notFound, RelayError, relayError } from "./errors";
+import { badRequest, errorResponse, notFound, relayError } from "./errors";
 import { hashRelayExchangeKey, verifyRelayExchangeKey } from "./linkSecurity";
-import { parseLinkLogHold } from "./linkReadRoutes";
+import { DiscussionActivityCapacityError, linkLogWaitGroup, type DiscussionActivityHub } from "./discussionActivity";
 import type { NamedLiveBrowserHttpLimits } from "./namedLiveBrowserHttp";
 import type { createNamedShareTransportRoutes } from "./namedShareTransportRoutes";
 import { namedShareOrigin } from "./relayLogInputs";
-import { parseLimit, parseString } from "./requestInputs";
+import { parseLimit, parseString, parseLinkLogHold } from "./requestInputs";
 import type { AuthorizedShareAction } from "./shareAuthorization";
 import { chatSideOf, filterOpForShare } from "./shareFilter";
 import type { createShareReadQueries } from "./shareReadQueries";
 import type { SyncRelayStorage } from "./storage";
 import { MAX_DISCUSSION_ACTIVITY_HOLD_MS } from "./wireLimits";
 
-const MAX_HISTORY_ROWS = 2_000;
 const MAX_MESSAGE_BODY_BYTES = 64 * 1024;
 const cacheHeaders = {"cache-control": "private, no-store"};
 
@@ -23,24 +23,25 @@ export interface NamedChatMessage {
   relaySeq: number;
   messageId: string;
   threadId: string;
-  authorUserId: string;
+  authorUserId: string | null;
   authorDisplayName: string;
   authorKind: "human" | "agent" | "automation";
   authorOwnerDisplayName: string | null;
   createdAtMs: number;
-  body: string;
+  body: string | null;
+  bodyTooLarge: boolean;
 }
 
 function messageFromOp(op: Record<string, unknown>): NamedChatMessage | null {
   if (op.opKind !== "chat.message.append" || !op.payload || typeof op.payload !== "object") return null;
   const p = op.payload as Record<string, unknown>;
   if (typeof op.relaySeq !== "number" || typeof p.messageId !== "string" || typeof p.threadId !== "string" ||
-      typeof p.authorUserId !== "string" || typeof p.authorDisplayName !== "string" || typeof p.body !== "string" ||
+      typeof p.authorDisplayName !== "string" || typeof p.body !== "string" ||
       typeof p.createdAtMs !== "number" || !["human", "agent", "automation"].includes(String(p.authorKind))) return null;
-  return {relaySeq: op.relaySeq, messageId: p.messageId, threadId: p.threadId, authorUserId: p.authorUserId,
+  return {relaySeq: op.relaySeq, messageId: p.messageId, threadId: p.threadId, authorUserId: typeof p.authorUserId === "string" ? p.authorUserId : null,
     authorDisplayName: p.authorDisplayName, authorKind: p.authorKind as NamedChatMessage["authorKind"],
     authorOwnerDisplayName: typeof p.authorOwnerDisplayName === "string" ? p.authorOwnerDisplayName : null,
-    createdAtMs: p.createdAtMs, body: p.body};
+    createdAtMs: p.createdAtMs, body: p.body, bodyTooLarge: false};
 }
 
 function displayName(value: unknown): string {
@@ -63,6 +64,8 @@ function cursor(value: string | null): number {
 export function createNamedRecipientChat(options: {
   storage: SyncRelayStorage;
   resolveActor: ResolveActor;
+  claimPendingShares(userId: string, signal?: AbortSignal): Promise<void>;
+  activity: Pick<DiscussionActivityHub, "wait">;
   publicOrigin: string;
   exchangeKey: string;
   limits: NamedLiveBrowserHttpLimits;
@@ -73,7 +76,8 @@ export function createNamedRecipientChat(options: {
 }) {
   const {storage, limits, requireShareAction} = options;
   const exchangeHash = hashRelayExchangeKey(options.exchangeKey);
-  let pending = 0;
+  let pending = 0, pendingFollows = 0;
+  const followsByUser = new Map<string, number>();
   const refuse = () => Response.json({ok: false, error: "not found"}, {status: 404, headers: cacheHeaders});
   const boundedJson = (body: unknown) => {
     const bytes = JSON.stringify(body);
@@ -88,8 +92,12 @@ export function createNamedRecipientChat(options: {
         (request.method !== "GET" && (channels || request.method !== "POST")) ||
         request.signal.aborted || request.headers.get("origin") !== options.publicOrigin ||
         !verifyRelayExchangeKey(request.headers.get("x-dohc-relay-exchange-key"), exchangeHash)) return refuse();
-    if (pending >= limits.maxPendingRequests) return errorResponse(relayError("share_access_rate_limited"));
-    pending++;
+    const following = !channels && request.method === "GET" && url.searchParams.has("since");
+    if (following ? pendingFollows >= MAX_NAMED_CHAT_FOLLOW_REQUESTS : pending >= limits.maxPendingRequests) {
+      return errorResponse(relayError("share_access_rate_limited"));
+    }
+    if (following) pendingFollows++; else pending++;
+    let followUser: string | undefined;
     const controller = new AbortController(), abort = () => controller.abort();
     const cancelled = new Promise<Response>(resolve => controller.signal.addEventListener("abort", () => resolve(refuse()), {once: true}));
     request.signal.addEventListener("abort", abort, {once: true});
@@ -118,13 +126,19 @@ export function createNamedRecipientChat(options: {
         const grant = grantId ? storage.getShareGrant(grantId) : undefined;
         const shareId = channels ? grant?.shareId : parseString(request.method === "POST" ? input.shareId : url.searchParams.get("shareId"), "shareId", 256);
         const share = shareId && storage.getShare(shareId);
-        if (!share || !shareId) throw notFound();
-        // Forward only the account session. Route coordinates and payload identity never authenticate a caller.
+        // Authenticate before answering either missing or existing coordinates.
         const actor = await options.resolveActor(new Request(request.url, {
           headers: {cookie: request.headers.get("cookie") ?? ""}, signal: controller.signal,
-        }), share.workspaceId);
+        }), share ? share.workspaceId : "");
         controller.signal.throwIfAborted();
-        if (actor.workspaceId !== share.workspaceId) throw notFound();
+        if (channels) await options.claimPendingShares(actor.userId, controller.signal);
+        if (!share || !shareId || actor.workspaceId !== share.workspaceId) throw notFound();
+        if (following) {
+          const count = followsByUser.get(actor.userId) ?? 0;
+          if (count >= limits.maxPendingRequests) throw relayError("share_access_rate_limited");
+          followsByUser.set(actor.userId, count + 1);
+          followUser = actor.userId;
+        }
         const authority = requireShareAction(shareId, actor.userId, "read");
         const chat = chatSideOf(authority.effectiveSelector);
         if (!chat || authority.share.workspaceId !== share.workspaceId) throw notFound();
@@ -134,10 +148,7 @@ export function createNamedRecipientChat(options: {
           controller.signal.throwIfAborted();
         };
         if (channels) {
-          const writable = (() => {
-            try {requireShareAction(shareId, actor.userId, "append"); return true;}
-            catch (error) {if (error instanceof RelayError && error.code === "share_read_only") return false; throw error;}
-          })();
+          const writable = chat.access === "read-write" && authority.grant.parentGrantId === null;
           const labels = storage.getShareLabels(shareId);
           recheck();
           return json({shareId, userId: actor.userId, channels: [{channelWireId: chat.channelWireId, name: labels.subjectName,
@@ -159,15 +170,15 @@ export function createNamedRecipientChat(options: {
           if (typeof input.body !== "string" || !input.body.isWellFormed()) throw badRequest("invalid body");
           const body = input.body.replace(/\r\n?/gu, "\n").trimEnd();
           if (!body || Buffer.byteLength(body) > MAX_MESSAGE_BODY_BYTES) throw badRequest("invalid body");
-          const digest = sha256Hex(id), originId = `browser-chat:${digest}`;
+          const originId = "browser-chat";
           const storedOrigin = namedShareOrigin(shareId, actor.userId, originId);
           const messageId = `browser-message:${sha256Hex(JSON.stringify([shareId, actor.userId, id]))}`;
           const createThread = input.threadId === undefined;
           const threadId = createThread ? `browser-thread:${sha256Hex(JSON.stringify([shareId, actor.userId, id]))}` : parseString(input.threadId, "threadId", 256);
           if (!threadId.isWellFormed()) throw badRequest("invalid thread id");
-          const coordinate = (originSeq: number) => storage.fetchLogCoordinate({workspaceId: share.workspaceId, originId: storedOrigin, originSeq});
+
           const append = async () => {
-            const createdAtMs = coordinate(0)?.recordedAtMs ?? options.nowMs();
+            const createdAtMs = options.nowMs();
             const ops = [
               ...(createThread ? [{opKind: "chat.thread.create", payload: {threadId, title: "", channelWireId, lane: "chat", createdAtMs}}] : []),
               {opKind: "chat.message.append", payload: {messageId, threadId, body, authorKind, authorDisplayName,
@@ -176,58 +187,86 @@ export function createNamedRecipientChat(options: {
             boundedJson({shareId, channelWireId, message: messageFromOp({relaySeq: Number.MAX_SAFE_INTEGER,
               opKind: "chat.message.append", payload: ops[ops.length - 1]!.payload})});
             return options.transport(new Request(request.url, {method: "POST", signal: controller.signal,
-              headers: {"content-type": "application/json"}, body: JSON.stringify({originId, ops})}), {route: "share-log", shareId}, actor);
+              headers: {"content-type": "application/json"}, body: JSON.stringify({originId, ops})}), {route: "share-log", shareId}, actor, messageId);
           };
-          let result: Response;
-          try {result = await append();}
-          catch (error) {
-            // A concurrent retry may have won with a different server timestamp.
-            if (!(error instanceof RelayError) || error.code !== "conflict" || !coordinate(0)) throw error;
-            result = await append();
-          }
+          const result = await append();
           if (!result.ok) return result;
           await result.body?.cancel();
-          const row = coordinate(createThread ? 1 : 0);
+          const row = storage.fetchChatMessage({workspaceId: share.workspaceId, originId: storedOrigin, messageId});
           if (!row) throw notFound();
           recheck();
           return json({shareId, channelWireId, message: messageFromOp({relaySeq: row.relaySeq, opKind: row.opKind, payload: JSON.parse(row.payloadJson)})});
         }
         const limit = Math.min(parseLimit(url.searchParams.get("limit")), 100);
-        if (url.searchParams.has("since")) {
-          if (url.searchParams.has("before")) throw badRequest("invalid query");
-          const since = cursor(url.searchParams.get("since")), hold = parseLinkLogHold(url.searchParams.get("hold"));
-          const logUrl = new URL(request.url);
-          logUrl.search = new URLSearchParams({channelWireId, since: String(since), limit: String(limit), hold: String(hold)}).toString();
-          const response = await options.transport(new Request(logUrl, {signal: controller.signal}), {route: "share-log", shareId}, actor);
-          if (!response.ok) return response;
-          const page = await response.json() as {ops: Record<string, unknown>[]; nextCursor: number; hasMore: boolean};
-          recheck();
-          return json({shareId, channelWireId, messages: page.ops.flatMap(op => messageFromOp(op) ?? []), nextCursor: page.nextCursor, hasMore: page.hasMore});
-        }
-        if (url.searchParams.has("hold")) throw badRequest("hold requires since");
-        let before = url.searchParams.has("before") ? cursor(url.searchParams.get("before")) : null;
-        const messages: NamedChatMessage[] = [];
+        const since = following ? cursor(url.searchParams.get("since")) : null;
+        if (following && url.searchParams.has("before")) throw badRequest("invalid query");
+        if (!following && url.searchParams.has("hold")) throw badRequest("hold requires since");
+        const hold = following ? parseLinkLogHold(url.searchParams.get("hold")) : 0;
+        let position = following ? since : url.searchParams.has("before") ? cursor(url.searchParams.get("before")) : null;
         const resolver = options.reads.chatResolverFor(share.workspaceId);
-        let scanned = 0, nextCursor: number | undefined, hasOlder = true;
-        while (scanned < MAX_HISTORY_ROWS && messages.length < limit) {
-          const rows = storage.fetchLogPageDescending({workspaceId: share.workspaceId, beforeRelaySeq: before, limit: Math.min(100, MAX_HISTORY_ROWS - scanned)});
-          if (!rows.length) {hasOlder = false; break;}
-          for (const row of rows) {
-            nextCursor ??= row.relaySeq;
-            before = row.relaySeq;
-            scanned++;
-            if (row.opKind === "chat.message.append" && row.settlementAdmission?.status !== "refused") {
+        const readPage = () => {
+          recheck();
+          const messages: NamedChatMessage[] = [];
+          let more = false, newest: number | undefined;
+          for (;;) {
+            const rows = storage.fetchChatMessages({workspaceId: share.workspaceId, channelWireId,
+              cursor: position, direction: following ? "newer" : "older", limit: limit + 1});
+            for (const row of rows) {
+              if (row.settlementAdmission?.status === "refused") {position = row.relaySeq; continue;}
               const decision = filterOpForShare(authority.effectiveSelector, row.opKind, row.payloadJson, resolver, "chat");
               const message = decision.allowed ? messageFromOp({relaySeq: row.relaySeq, opKind: row.opKind, payload: decision.payload}) : null;
-              if (message) messages.push(message);
+              if (message && messages.length === limit) {more = true; break;}
+              position = row.relaySeq;
+              if (message) {newest ??= row.relaySeq; messages.push(message);}
             }
-            if (messages.length === limit) break;
+            if (more || rows.length < limit + 1) break;
+          }
+          return {messages, nextCursor: following ? position ?? since ?? 0 : newest ?? position ?? 0,
+            ...(following ? {hasMore: more} : {olderCursor: more ? position : null})};
+        };
+        let page = readPage();
+        if (following && hold > 0 && page.messages.length === 0) {
+          const deadline = Date.now() + hold;
+          while (!controller.signal.aborted && Date.now() < deadline) {
+            try {
+              await options.activity.wait(linkLogWaitGroup(share.workspaceId), `named:${actor.userId}`, {
+                holdMs: Math.max(1, deadline - Date.now()), signal: controller.signal,
+                shouldPark: () => {
+                  try {page = readPage(); return page.messages.length === 0;}
+                  catch {return false;}
+                },
+              });
+            } catch (error) {
+              if (error instanceof DiscussionActivityCapacityError) throw relayError("share_access_rate_limited");
+              throw error;
+            }
+            if (page.messages.length === 0) page = readPage();
+            if (page.messages.length > 0) break;
           }
         }
         recheck();
-        return json({shareId, channelWireId, messages, nextCursor: nextCursor ?? before ?? 0, olderCursor: hasOlder ? before : null});
+        const envelope = {shareId, channelWireId, ...page};
+        // Reserve the page's envelope and metadata before admitting each body.
+        const minimum = {...envelope, messages: page.messages.map(message => ({...message, body: null, bodyTooLarge: true}))};
+        let remaining = limits.maxResponseBytes - Buffer.byteLength(JSON.stringify(minimum));
+        if (remaining < 0) throw relayError("payload_too_large");
+        const messages = page.messages.map(message => {
+          const omitted = {...message, body: null, bodyTooLarge: true};
+          const bytes = Buffer.byteLength(JSON.stringify(message)) - Buffer.byteLength(JSON.stringify(omitted));
+          if (bytes > remaining) return omitted;
+          remaining -= bytes;
+          return message;
+        });
+        return json({...envelope, messages});
       } catch (error) {return controller.signal.aborted ? refuse() : errorResponse(error);}
-      finally {pending--; clearTimeout(timer); request.signal.removeEventListener("abort", abort);}
+      finally {
+        if (following) pendingFollows--; else pending--;
+        if (followUser !== undefined) {
+          const count = (followsByUser.get(followUser) ?? 1) - 1;
+          if (count === 0) followsByUser.delete(followUser); else followsByUser.set(followUser, count);
+        }
+        clearTimeout(timer); request.signal.removeEventListener("abort", abort);
+      }
     })();
     return Promise.race([work, cancelled]);
   };

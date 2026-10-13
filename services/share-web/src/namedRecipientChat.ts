@@ -1,9 +1,9 @@
+import { MAX_DISCUSSION_ACTIVITY_HOLD_MS, MAX_NAMED_CHAT_FOLLOW_REQUESTS } from "@dohc/security-contract/share-discussion";
 import { readBoundedJson } from "@dohc/service-http";
 import { namedAccountCookie } from "./namedAccountCookie";
 import { parseNamedLiveBrowserClientLimits, type NamedLiveBrowserClientLimits } from "./namedLiveBrowserClient";
 import { createNamedRelayCalls } from "./namedRelayCalls";
 
-const MAX_HOLD_MS = 30_000;
 const cacheHeaders = {"cache-control": "private, no-store"};
 
 function record(value: unknown): value is Record<string, unknown> {
@@ -11,8 +11,10 @@ function record(value: unknown): value is Record<string, unknown> {
 }
 
 function message(value: unknown): boolean {
-  if (!record(value) || Object.keys(value).sort().join() !== "authorDisplayName,authorKind,authorOwnerDisplayName,authorUserId,body,createdAtMs,messageId,relaySeq,threadId") return false;
-  return ["messageId", "threadId", "authorUserId", "authorDisplayName", "body"].every(key => typeof value[key] === "string") &&
+  if (!record(value) || Object.keys(value).sort().join() !== "authorDisplayName,authorKind,authorOwnerDisplayName,authorUserId,body,bodyTooLarge,createdAtMs,messageId,relaySeq,threadId") return false;
+  return ["messageId", "threadId", "authorDisplayName"].every(key => typeof value[key] === "string") &&
+    (value.authorUserId === null || typeof value.authorUserId === "string") &&
+    ((value.bodyTooLarge === true && value.body === null) || (value.bodyTooLarge === false && typeof value.body === "string")) &&
     ["human", "agent", "automation"].includes(String(value.authorKind)) &&
     (value.authorOwnerDisplayName === null || typeof value.authorOwnerDisplayName === "string") &&
     Number.isSafeInteger(value.createdAtMs) && Number.isSafeInteger(value.relaySeq) && Number(value.relaySeq) > 0;
@@ -44,37 +46,55 @@ export function createNamedRecipientChatClient(options: {
   const refuse = () => Response.json({ok: false, error: "not found"}, {status: 404, headers: cacheHeaders});
   const calls = createNamedRelayCalls({maxPending: limits.maxPendingRequests, timeoutMs: limits.timeoutMs,
     unrefDeadline: false, refuse, fetchRelay: options.fetchRelay});
+  const followCalls = createNamedRelayCalls({maxPending: MAX_NAMED_CHAT_FOLLOW_REQUESTS, timeoutMs: limits.timeoutMs,
+    unrefDeadline: false, refuse, fetchRelay: options.fetchRelay});
+  const followsByCookie = new Map<string, number>();
+  const rateLimited = () => Response.json({ok: false, error: "too many follow requests", code: "share_access_rate_limited"},
+    {status: 429, headers: cacheHeaders});
   return async (request: Request): Promise<Response> => {
     const url = new URL(request.url), write = request.method === "POST";
+    const following = !write && url.pathname.endsWith("/messages") && url.searchParams.has("since");
+    const pool = following ? followCalls : calls;
     if (!["/api/named-chat/channels", "/api/named-chat/messages"].includes(url.pathname) ||
         (request.method !== "GET" && (!write || url.pathname !== "/api/named-chat/messages")) ||
         request.signal.aborted || request.headers.get("host") !== origin.host ||
-        request.headers.get("sec-fetch-site") === "cross-site" || calls.full ||
+        request.headers.get("sec-fetch-site") === "cross-site" ||
         (write && (url.search || request.headers.get("origin") !== options.publicOrigin ||
           request.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase() !== "application/json")) ||
         (!write && request.headers.has("origin") && request.headers.get("origin") !== options.publicOrigin)) return refuse();
     const cookie = namedAccountCookie(request.headers.get("cookie"), options.publicOrigin);
     if (!cookie) return refuse();
-    return calls.run(request, async (signal, relay) => {
-      const body = write ? JSON.stringify(await readBoundedJson(request, limits.maxRequestBytes, signal)) : undefined;
-      const relayUrl = new URL(url.pathname.replace("/api/", "/sync/"), options.relayUrl);
-      relayUrl.search = url.search;
-      const response = await relay(new Request(relayUrl, {
-        method: request.method, redirect: "manual", signal, ...(body === undefined ? {} : {body}),
-        headers: {cookie, origin: options.publicOrigin, "x-dohc-relay-exchange-key": options.exchangeKey,
-          ...(write ? {"content-type": "application/json"} : {})},
-      }));
-      if (response.redirected || response.headers.has("location") ||
-          response.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase() !== "application/json" ||
-          ![200, 400, 401, 403, 404, 409, 413, 429, 503].includes(response.status)) return refuse();
-      const result = await readBoundedJson(response, limits.maxResponseBytes, signal);
-      if (!record(result)) return refuse();
-      if (response.status === 200) {
-        if (!resultMatches(result, url.pathname.endsWith("/channels"), write, url.searchParams.has("since"))) return refuse();
-        if (!write && !url.pathname.endsWith("/channels") && (result.shareId !== url.searchParams.get("shareId") ||
-            result.channelWireId !== url.searchParams.get("channelWireId"))) return refuse();
-      } else if (result.ok !== false || typeof result.error !== "string" || (result.code !== undefined && typeof result.code !== "string")) return refuse();
-      return Response.json(result, {status: response.status, headers: cacheHeaders});
-    }, Math.min(2_147_483_647, limits.timeoutMs + (!write && url.searchParams.has("since") ? MAX_HOLD_MS : 0)));
+    if (pool.full || (following && (followsByCookie.get(cookie) ?? 0) >= limits.maxPendingRequests)) {
+      return following ? rateLimited() : refuse();
+    }
+    if (following) followsByCookie.set(cookie, (followsByCookie.get(cookie) ?? 0) + 1);
+    return pool.run(request, async (signal, relay) => {
+      try {
+        const body = write ? JSON.stringify(await readBoundedJson(request, limits.maxRequestBytes, signal)) : undefined;
+        const relayUrl = new URL(url.pathname.replace("/api/", "/sync/"), options.relayUrl);
+        relayUrl.search = url.search;
+        const response = await relay(new Request(relayUrl, {
+          method: request.method, redirect: "manual", signal, ...(body === undefined ? {} : {body}),
+          headers: {cookie, origin: options.publicOrigin, "x-dohc-relay-exchange-key": options.exchangeKey,
+            ...(write ? {"content-type": "application/json"} : {})},
+        }));
+        if (response.redirected || response.headers.has("location") ||
+            response.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase() !== "application/json" ||
+            ![200, 400, 401, 403, 404, 409, 413, 429, 503].includes(response.status)) return refuse();
+        const result = await readBoundedJson(response, limits.maxResponseBytes, signal);
+        if (!record(result)) return refuse();
+        if (response.status === 200) {
+          if (!resultMatches(result, url.pathname.endsWith("/channels"), write, url.searchParams.has("since"))) return refuse();
+          if (!write && !url.pathname.endsWith("/channels") && (result.shareId !== url.searchParams.get("shareId") ||
+              result.channelWireId !== url.searchParams.get("channelWireId"))) return refuse();
+        } else if (result.ok !== false || typeof result.error !== "string" || (result.code !== undefined && typeof result.code !== "string")) return refuse();
+        return Response.json(result, {status: response.status, headers: cacheHeaders});
+      } finally {
+        if (following) {
+          const count = (followsByCookie.get(cookie) ?? 1) - 1;
+          if (count === 0) followsByCookie.delete(cookie); else followsByCookie.set(cookie, count);
+        }
+      }
+    }, Math.min(2_147_483_647, limits.timeoutMs + (!write && url.searchParams.has("since") ? MAX_DISCUSSION_ACTIVITY_HOLD_MS : 0)));
   };
 }

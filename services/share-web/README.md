@@ -220,7 +220,6 @@ They require the named browser session limits, account authentication, and relay
 Chat does not require live tickets, a document host, or editor limits.
 
 Named chat invitations use `/s/chat/<encoded-grantId>`.
-The HTTP endpoints are available before the browser chat view.
 The URL identifies a share. It carries no credential.
 The relay resolves the signed-in account and uses the same grants as the recipient desktop.
 A recipient with several grants gets the highest permitted access on that share.
@@ -239,15 +238,18 @@ Share-web forwards only recognized account cookies and its trusted relay exchang
   Messages appear in descending relay sequence order. The limit defaults to 100 and cannot exceed 100.
   Save the first page's `nextCursor` to follow new messages.
   Pass `before=<olderCursor>` to read older pages. Stop when `olderCursor` is null.
-  Each history request scans at most 2,000 log rows. A page can be empty and still have an older cursor.
+  The relay selects channel messages in SQL and applies the share filter before returning them.
   Older-page watermarks must not replace the saved following cursor.
 - `GET /api/named-chat/messages?shareId=<id>&channelWireId=<wire-id>&since=<nextCursor>&hold=30000&limit=50` follows new messages.
   The response is `{shareId, channelWireId, messages, nextCursor, hasMore}`.
   Messages appear in ascending relay sequence order. Save each returned cursor, including on empty pages.
   If `hasMore` is true, read the next page immediately.
   Hold defaults to zero and accepts integer milliseconds from zero through 30,000.
-  A caught-up read waits for a log change or the timeout. Unrelated rows can advance an empty page's cursor.
-  Cancellation releases the parked waiter. The existing relay hub bounds waiter counts.
+  A caught-up read waits for a channel message or the timeout.
+  Cancellation releases the parked waiter. The relay hub bounds waiter counts.
+  Follow reads use a separate pool at both services, leaving other requests available.
+  The relay caps follow requests per account at the configured `maxPendingRequests`.
+  Share-web applies the same cap per account cookie; each service also caps total follow requests at 4,096.
 - `POST /api/named-chat/messages` accepts this body:
 
   ```json
@@ -271,7 +273,9 @@ Author kind accepts `human`, `agent`, or `automation`.
 Display names follow desktop payload rules: trimmed, non-empty, and at most 200 UTF-16 code units.
 Agents and automations can also supply `authorOwnerDisplayName`.
 These names and kinds are payload descriptions; they do not authenticate an account.
-The body normalizes CRLF and CR to LF, trims its end, and must contain 1 to 65,536 UTF-8 bytes.
+The body normalizes CRLF and CR to LF, trims its end, and must be non-empty.
+The complete POST JSON must fit the relay's `maxRequestBytes`, 16 KiB in the self-hosted profile.
+JSON escaping and metadata count toward that limit.
 
 A successful post returns `{shareId, channelWireId, message}`.
 Reuse the client ID and normalized request fields on retry.
@@ -281,8 +285,11 @@ The thread and message use the existing named log append, including its transact
 The relay refuses reactions, decisions, attachments, channel creation, and extra body fields.
 
 Every message contains `relaySeq`, `messageId`, `threadId`, `authorUserId`,
-`authorDisplayName`, `authorKind`, `authorOwnerDisplayName`, `createdAtMs`, and `body`.
-The owner name is null when absent. No engine is needed to read this JSON.
+`authorDisplayName`, `authorKind`, `authorOwnerDisplayName`, `createdAtMs`, `body`, and `bodyTooLarge`.
+The user ID and owner name are null when absent.
+If a body cannot fit the response budget, `body` is null and `bodyTooLarge` is true.
+The message still carries its metadata and cursor. Other messages and later pages remain readable.
+No engine is needed to read this JSON.
 
 Responses are private and never cached.
 Read-only posts receive 403 at the relay, even when share-web is bypassed.

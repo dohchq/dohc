@@ -104,6 +104,9 @@ it("enforces same-origin writes, account cookie selection, and request bounds be
   }
   expect((await f.web.handle(request("messages", "alice", {...message, body: "x".repeat(limits.maxRequestBytes)}))).status).toBe(404);
   expect(f.forwarded).toHaveLength(0);
+  const foreignRead = request(); foreignRead.headers.set("origin", "https://other.test");
+  expect((await f.web.handle(foreignRead)).status).toBe(404);
+  expect(f.forwarded).toHaveLength(0);
   const agentRead = request(); agentRead.headers.delete("origin");
   expect((await f.web.handle(agentRead)).status).toBe(200);
 });
@@ -185,4 +188,50 @@ it("releases a relay waiter after a real share-web socket disconnect", async () 
     server.closeAllConnections();
     await new Promise<void>((resolve, reject) => {server.close(error => error ? reject(error) : resolve());});
   }
+});
+
+it("validates nullable desktop authors and oversized-body markers from the relay", async () => {
+  const f = await fixture();
+  f.storage.appendLogBatch({workspaceId: "workspace", originId: "desktop", ops: sequenced([
+    chatMessageAppend("oversized", "thread", "x".repeat(limits.maxResponseBytes + 1)),
+    chatMessageAppend("next", "thread", "readable"),
+  ]).map(({payload, ...op}) => ({...op, payloadJson: JSON.stringify(payload)}))});
+  const followed = await f.web.handle(request(history + "&since=3&limit=1"));
+  expect(followed.status).toBe(200);
+  expect(await followed.json()).toMatchObject({messages: [{messageId: "oversized", authorUserId: null, body: null, bodyTooLarge: true}], nextCursor: 4, hasMore: true});
+  const read = await f.web.handle(request(history + "&since=4&limit=1"));
+  expect(read.status).toBe(200);
+  expect(await read.json()).toMatchObject({messages: [{messageId: "next", body: "readable", bodyTooLarge: false}], nextCursor: 5});
+});
+
+it("isolates a full account follow pool from another account's lists, history and posts", async () => {
+  const f = await fixture();
+  f.storage.createShare({share: {shareId: "bob-share", workspaceId: "workspace", granterUserId: "owner", createdAtMs: 1,
+    selectorJson: JSON.stringify({kind: "chat", channelWireId: "wire"})},
+    grant: {shareId: "bob-share", grantId: "bob-grant", principalKind: "user", principalUserId: "bob", principalEmail: null,
+      access: "read-write", generation: 1, status: "active", createdAtMs: 1, revokedAtMs: null, parentGrantId: null}});
+  const controllers = [new AbortController(), new AbortController()], polls: Promise<Response>[] = [];
+  try {
+    for (const controller of controllers) {
+      let entered!: () => void;
+      const parked = new Promise<void>(resolve => {entered = resolve;}), wait = f.activity.wait.bind(f.activity);
+      const spy = vi.spyOn(f.activity, "wait").mockImplementation((group, actor, options) => {
+        const result = wait(group, actor, options); entered(); return result;
+      });
+      polls.push(f.web.handle(new Request(request(history + "&since=3&hold=30000"), {signal: controller.signal})));
+      await parked; spy.mockRestore();
+    }
+    expect(f.activity.stats().waiters).toBe(2);
+    const overflow = await f.web.handle(request(history + "&since=3&hold=30000"));
+    expect(overflow.status).toBe(429);
+    expect(await overflow.json()).toMatchObject({code: "share_access_rate_limited"});
+    expect((await f.web.handle(request("channels?grantId=bob-grant", "bob"))).status).toBe(200);
+    expect((await f.web.handle(request(history.replace("shareId=share", "shareId=bob-share"), "bob"))).status).toBe(200);
+    expect((await f.web.handle(request("messages", "bob", {...message, shareId: "bob-share", threadId: "thread"}))).status).toBe(200);
+    expect((await Promise.all(polls)).every(response => response.status === 200)).toBe(true);
+  } finally {
+    controllers.forEach(controller => controller.abort());
+    await Promise.all(polls);
+  }
+  expect(f.activity.stats().waiters).toBe(0);
 });

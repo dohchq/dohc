@@ -443,7 +443,7 @@ export function createSyncRelayHandler({
 
   const namedChat = namedBrowserSessionLimits ? createNamedRecipientChat({
     storage, publicOrigin: shareWebOrigin!, exchangeKey: relayExchangeKey!, limits: namedBrowserSessionLimits,
-    resolveActor: resolveNamedActor, nowMs, requireShareAction, transport: respondToNamedShareTransport, reads: {chatResolverFor},
+    resolveActor, claimPendingShares, activity: discussionActivity, nowMs, requireShareAction, transport: respondToNamedShareTransport, reads: {chatResolverFor},
   }) : undefined;
 
   const { respondToShareProposals, respondToWorkspaceProposals } = createProposalRoutes(

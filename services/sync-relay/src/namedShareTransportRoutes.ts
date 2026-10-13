@@ -1,11 +1,10 @@
 import { jsonResponse } from "@dohc/service-http";
 import { sha256Hex } from "@dohc/workspace-core/hash";
 import { DiscussionActivityCapacityError, linkLogWaitGroup, type DiscussionActivityHub } from "./discussionActivity";
-import { parseLinkLogHold } from "./linkReadRoutes";
 import { badRequest, notFound, RelayError, relayError } from "./errors";
 import { arrayBufferForBytes, readBytes } from "./relayBytes";
 import { assertChatAuthorship, assertClientLogProvenance, namedShareOrigin, parseAuthenticatedLogOps, type LogAuthorNameLookup } from "./relayLogInputs";
-import { assertSha256, parseCursor, parseLimit, parseString, readJsonObject } from "./requestInputs";
+import { assertSha256, parseCursor, parseLimit, parseLinkLogHold, parseString, readJsonObject } from "./requestInputs";
 import type { AuthorizedShareAction } from "./shareAuthorization";
 import {
   chatSideOf,
@@ -32,6 +31,7 @@ export function createNamedShareTransportRoutes(
     | "objectCurrentPath"
     | "objectIdAtPath"
     | "appendLogBatch"
+    | "appendBrowserChatBatch"
     | "putBlob"
   >,
   nowMs: () => number,
@@ -56,6 +56,7 @@ export function createNamedShareTransportRoutes(
     request: Request,
     route: NamedShareTransportRoute,
     actor: { userId: string },
+    browserMessageId?: string,
   ): Promise<Response> {
     if (route.route === "share-log" && request.method === "GET") {
       let authorized: AuthorizedShareAction;
@@ -175,7 +176,7 @@ export function createNamedShareTransportRoutes(
     // share-namespaced appends are governed by the fail-closed share/channel
     // filter, so workspace epoch enforcement does not apply on this route.
     if (route.route === "share-log" && request.method === "POST") {
-      await claimPendingShares(actor.userId);
+      if (browserMessageId === undefined) await claimPendingShares(actor.userId);
       const authorized = requireShareAction(route.shareId, actor.userId, "append");
       const share = { ...authorized.share, selector: authorized.effectiveSelector };
       const input = await readJsonObject(request);
@@ -284,7 +285,7 @@ export function createNamedShareTransportRoutes(
           }
         }
       }
-      const result = storage.appendLogBatch({
+      const batch = {
         workspaceId: share.workspaceId,
         // Authentication, not the caller, selects the member sequence space.
         originId: namedShareOrigin(share.shareId, actor.userId, originId),
@@ -304,7 +305,9 @@ export function createNamedShareTransportRoutes(
           "append",
           share.workspaceId,
         ),
-      });
+      };
+      const result = browserMessageId === undefined ? storage.appendLogBatch(batch) :
+        storage.appendBrowserChatBatch({...batch, messageId: browserMessageId});
       if (result.inserted > 0) {
         discussionActivity.wakeLog(share.workspaceId);
       }

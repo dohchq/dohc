@@ -1407,6 +1407,18 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     return logStorage.fetchLogPageDescending(this, input);
   }
 
+  fetchChatMessages(input: Parameters<typeof logStorage.fetchChatMessages>[1]): SyncRelayLogRow[] {
+    return logStorage.fetchChatMessages(this, input);
+  }
+
+  fetchChatMessage(input: Parameters<typeof logStorage.fetchChatMessage>[1]): SyncRelayLogRow | null {
+    return logStorage.fetchChatMessage(this, input);
+  }
+
+  appendBrowserChatBatch(input: Parameters<typeof logStorage.appendBrowserChatBatch>[1]): AppendLogBatchResult {
+    return logStorage.appendBrowserChatBatch(this, input);
+  }
+
   fetchLogCoordinate(input: {
     workspaceId: string;
     originId: string;
