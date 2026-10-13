@@ -3,11 +3,24 @@ import { act, cleanup, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { DohcDesktopBridge } from "../ipc/bridgeContract";
-import { CsvTable, CsvView, numericColumns } from "./CsvView";
+import { columnTexts, CsvTable, CsvView, numericColumns } from "./CsvView";
 import { documentVersionKey } from "./documentVersionKey";
 import { MAX_CSV_PREVIEW_ROWS } from "./offers/csvBound";
 import { resetOrphanedDrafts } from "./orphanedDrafts";
 import { acquireSharedLocalDocument, resetSharedLocalDocumentsForTests } from "./sharedLocalDocument";
+
+// Each row's gutter, by row number, every time a row renders.
+const gutterRenders = vi.hoisted(() => [] as Array<number | undefined>);
+vi.mock("./ui/DataGrid", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./ui/DataGrid")>();
+  return {
+    ...actual,
+    DataGridGutter: (props: Parameters<typeof actual.DataGridGutter>[0]) => {
+      gutterRenders.push(props.number);
+      return actual.DataGridGutter(props);
+    },
+  };
+});
 
 const writeWorkspaceText = vi.fn<DohcDesktopBridge["writeWorkspaceText"]>();
 const releases: Array<() => void> = [];
@@ -46,8 +59,10 @@ const table = (rows: string[][], locked = false) =>
     <CsvTable
       rows={rows}
       numeric={numericColumns(rows)}
+      widths={columnTexts(rows)}
       locked={locked}
       onUpdateCell={vi.fn()}
+      onEndEdit={vi.fn()}
       onDeleteRow={vi.fn()}
       onDeleteColumn={vi.fn()}
       onAddRow={vi.fn()}
@@ -55,8 +70,12 @@ const table = (rows: string[][], locked = false) =>
     />,
   );
 const cell = (label: string) => screen.getByLabelText(label).closest("td, th") as HTMLElement;
-const isNumber = (label: string) =>
-  cell(label).className.includes("text-right") && screen.getByLabelText(label).className.includes("text-right");
+// Whether the table sets a column, counted from 0, as numbers.
+const isNumber = (column: number) =>
+  screen.getByRole("table").style.getPropertyValue(`--data-grid-align-${column}`) === "right";
+// The text that sets a column's width.
+const widthText = (column: number) =>
+  screen.getByTestId("data-grid-widths").querySelectorAll("td")[column + 1]!.textContent;
 
 describe("CSV numeric columns", () => {
   it("finds a column numeric when every non-empty preview cell is a finite number", () => {
@@ -83,23 +102,34 @@ describe("CSV numeric columns", () => {
     const flipped = numericColumns([["a", "b"], ["one", "x"]], previous, 0);
     expect(flipped).toEqual([false, true]);
     expect(flipped).not.toBe(previous);
-    // A changed width, or no edited column, reads every column again.
-    expect(numericColumns([["a", "b", "c"], ["1", "x", "2"]], previous, 0)).toEqual([true, false, true]);
+    // An edit past the last column, or no edited column, reads every column again.
+    expect(numericColumns([["a", "b", "c"], ["1", "x", "2"]], previous, 2)).toEqual([true, false, true]);
     expect(numericColumns(rows, previous)).toEqual([true, false]);
+  });
+});
+
+describe("CSV column widths", () => {
+  it("takes each column's header and its widest preview cell, counting a wide character as two", () => {
+    expect(columnTexts([
+      ["stage", "note"],
+      ["Visited", "東京駅"],
+      ["Signed up", "Tokyo"],
+    ])).toEqual([{ header: "stage", cell: "Signed up" }, { header: "note", cell: "東京駅" }]);
   });
 });
 
 describe("CSV grid", () => {
   afterEach(cleanup);
 
-  it("right-aligns a number column's cells and header in mono", () => {
+  it("sets number columns right-aligned in mono on the table, and each cell reads its own column", () => {
     table(FUNNEL);
-    expect(isNumber("Row 1 column 1")).toBe(false);
-    expect(isNumber("Row 1 column 2")).toBe(true);
-    expect(isNumber("Row 2 column 3")).toBe(true);
-    expect(cell("Row 1 column 2").className).toContain("font-mono");
-    expect(isNumber("Header column 2")).toBe(true);
-    expect(cell("Header column 2").className).not.toContain("font-mono");
+    expect([0, 1, 2].map(isNumber)).toEqual([false, true, true]);
+    expect(screen.getByRole("table").style.getPropertyValue("--data-grid-font-1")).toBe("var(--font-mono)");
+    expect(cell("Row 1 column 2").style.textAlign).toBe("var(--data-grid-align-1)");
+    expect(cell("Row 1 column 2").style.fontFamily).toBe("var(--data-grid-font-1)");
+    expect(cell("Header column 2").style.textAlign).toBe("var(--data-grid-align-1)");
+    expect(cell("Header column 2").style.fontFamily).toBe("");
+    expect(screen.getByLabelText("Row 1 column 2").className).toContain("[text-align:inherit]");
   });
 
   it("puts each row's number and its Delete row in one gutter box, swapped on hover or focus", () => {
@@ -150,14 +180,20 @@ describe("CSV grid", () => {
     expect(screen.queryByTestId("csv-add-row")).toBeNull();
   });
 
-  it("sizes its columns to their content instead of the pane", () => {
+  it("sizes its columns from their text instead of the pane or the inputs", () => {
     table(FUNNEL);
     expect(screen.getByRole("table").className).not.toContain("w-full");
-    expect(screen.getByLabelText("Row 1 column 1").className).toContain("field-sizing-content");
+    const input = screen.getByLabelText("Row 1 column 1");
+    expect(input.getAttribute("size")).toBe("1");
+    expect(input.className).not.toContain("field-sizing");
+    expect([0, 1, 2].map(widthText)).toEqual(["stageSigned up", "count4820", "conversion1.00"]);
+    // The widths row holds no control and is hidden from assistive technology.
+    expect(screen.getByTestId("data-grid-widths").getAttribute("aria-hidden")).toBe("true");
+    expect(screen.getByTestId("data-grid-widths").querySelector("input, button")).toBeNull();
   });
 });
 
-describe("CSV view alignment", () => {
+describe("CSV view while typing", () => {
   beforeEach(() => {
     writeWorkspaceText.mockResolvedValue({ status: "written", contentHash: "hash-2" });
     vi.stubGlobal("dohcDesktop", {
@@ -179,17 +215,43 @@ describe("CSV view alignment", () => {
     writeWorkspaceText.mockReset();
   });
 
-  it("realigns a column when an edit makes it hold a word or only numbers", async () => {
+  it("keeps a column's width while a cell's text grows, and sets it when the edit ends", async () => {
     const user = userEvent.setup();
     render(<CsvView {...csvFile("stage,count\nVisited,4820\nSigned up,1290")} />);
-    expect(isNumber("Row 2 column 2")).toBe(true);
+    expect(widthText(0)).toBe("stageSigned up");
 
-    await user.type(screen.getByLabelText("Row 2 column 2"), "x");
-    expect(isNumber("Row 1 column 2")).toBe(false);
-    expect(isNumber("Row 2 column 2")).toBe(false);
+    await user.type(screen.getByLabelText("Row 1 column 1"), " the pricing page");
+    expect((screen.getByLabelText("Row 1 column 1") as HTMLInputElement).value).toBe("Visited the pricing page");
+    expect(widthText(0)).toBe("stageSigned up");
 
-    await user.type(screen.getByLabelText("Row 2 column 2"), "{Backspace}");
-    expect(isNumber("Row 2 column 2")).toBe(true);
-    expect(isNumber("Row 2 column 1")).toBe(false);
+    // Moving to the header ends the cell's edit; the header's own edit then
+    // keeps the width until it ends too.
+    await user.type(screen.getByLabelText("Header column 1"), " name");
+    expect(widthText(0)).toBe("stageVisited the pricing page");
+    await user.tab();
+    expect(widthText(0)).toBe("stage nameVisited the pricing page");
+    expect(widthText(1)).toBe("count4820");
+  });
+
+  it("realigns a column when an edit flips it, and renders only the edited row again", async () => {
+    const user = userEvent.setup();
+    const body = ["stage,count", ...Array.from({ length: 20 }, (_, index) => `step ${index + 1},${index + 1}`)].join("\n");
+    render(<CsvView {...csvFile(body)} />);
+    const input = screen.getByLabelText("Row 3 column 2");
+    input.focus();
+    gutterRenders.length = 0;
+
+    // Numbers, then a word, then numbers again.
+    await user.keyboard("e");
+    const flippedOff = new Set(gutterRenders);
+    await user.keyboard("3");
+    expect((input as HTMLInputElement).value).toBe("3e3");
+    expect(flippedOff).toEqual(new Set([3]));
+    expect(new Set(gutterRenders)).toEqual(new Set([3]));
+
+    expect(isNumber(1)).toBe(true);
+    expect(isNumber(0)).toBe(false);
+    await user.keyboard("x");
+    expect(isNumber(1)).toBe(false);
   });
 });

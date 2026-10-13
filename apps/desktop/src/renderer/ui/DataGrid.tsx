@@ -1,17 +1,51 @@
-import type { ComponentPropsWithoutRef, ReactNode } from "react";
+import { memo, type CSSProperties, type ComponentPropsWithoutRef, type ReactNode } from "react";
 
 // One grid for a table of rows and columns: a CSV file or a database table.
 // It draws the frame, the row-number gutter, the header, number alignment,
-// row hover and the focused cell. Each view supplies its cells' content.
+// column widths, row hover and the focused cell. Each view supplies its
+// cells' content.
 
-// Numbers read down a column: right-aligned, mono, tabular.
-const NUMBER = "text-right font-mono text-[12px] tabular-nums";
+// Numbers read down a column: right-aligned, mono, tabular. The table sets
+// these per number column, and each cell reads its own column's values, so a
+// column that starts or stops holding numbers changes one table style and
+// renders no row again. An unset value inherits the table's.
+const columnVar = (name: string, column: number) => `--data-grid-${name}-${column}`;
+
+function numberColumns(numeric: readonly boolean[]): CSSProperties {
+  const style: Record<string, string> = {};
+  numeric.forEach((isNumber, column) => {
+    if (!isNumber) return;
+    style[columnVar("align", column)] = "right";
+    style[columnVar("font", column)] = "var(--font-mono)";
+    style[columnVar("size", column)] = "12px";
+    style[columnVar("figures", column)] = "tabular-nums";
+  });
+  return style;
+}
+
+const headerStyles: CSSProperties[] = [];
+const cellStyles: CSSProperties[] = [];
+const headerStyle = (column: number) =>
+  (headerStyles[column] ??= { textAlign: `var(${columnVar("align", column)})` as CSSProperties["textAlign"] });
+const cellStyle = (column: number) =>
+  (cellStyles[column] ??= {
+    textAlign: `var(${columnVar("align", column)})` as CSSProperties["textAlign"],
+    fontFamily: `var(${columnVar("font", column)})`,
+    fontSize: `var(${columnVar("size", column)})`,
+    fontVariantNumeric: `var(${columnVar("figures", column)})`,
+  });
 
 // A grid's columns take their content's width, not the pane's.
-export function DataGrid({ className, ...props }: ComponentPropsWithoutRef<"table">) {
+export function DataGrid({
+  numeric,
+  className,
+  style,
+  ...props
+}: ComponentPropsWithoutRef<"table"> & { numeric: readonly boolean[] }) {
   return (
     <table
       {...props}
+      style={{ ...numberColumns(numeric), ...style }}
       className={`border-separate border-spacing-0 overflow-hidden rounded-lg border border-line text-[13px] ${className ?? ""}`}
     />
   );
@@ -26,16 +60,15 @@ export function DataGridGutterHeader({ wide, className, ...props }: ComponentPro
 // A header whose name is being edited draws the focused cell's outline; its
 // buttons keep their own focus ring.
 export function DataGridHeaderCell({
-  numeric,
+  column,
   className,
   ...props
-}: ComponentPropsWithoutRef<"th"> & { numeric?: boolean }) {
+}: ComponentPropsWithoutRef<"th"> & { column: number }) {
   return (
     <th
       {...props}
-      className={`group/column h-7 bg-panel-2 px-2.5 text-[12px] font-medium text-muted has-[input:focus]:outline-2 has-[input:focus]:-outline-offset-2 has-[input:focus]:outline-accent ${
-        numeric ? "text-right" : "text-left"
-      } ${className ?? ""}`}
+      style={headerStyle(column)}
+      className={`group/column h-7 bg-panel-2 px-2.5 text-[12px] font-medium text-muted has-[input:focus]:outline-2 has-[input:focus]:-outline-offset-2 has-[input:focus]:outline-accent ${className ?? ""}`}
     />
   );
 }
@@ -85,18 +118,57 @@ export function DataGridGutter({
 }
 
 // A cell. The cell holding focus draws the accent outline inside its edges,
-// so its own input can drop the focus ring without losing the mark.
+// so its own input can drop the focus ring without losing the mark. An input
+// in it takes the cell's alignment with `[text-align:inherit]`.
 export function DataGridCell({
-  numeric,
+  column,
   className,
   ...props
-}: ComponentPropsWithoutRef<"td"> & { numeric?: boolean }) {
+}: ComponentPropsWithoutRef<"td"> & { column: number }) {
   return (
     <td
       {...props}
-      className={`h-7 border-t border-line px-2.5 py-0 focus-within:outline-2 focus-within:-outline-offset-2 focus-within:outline-accent ${
-        numeric ? NUMBER : ""
-      } ${className ?? ""}`}
+      style={cellStyle(column)}
+      className={`h-7 border-t border-line px-2.5 py-0 focus-within:outline-2 focus-within:-outline-offset-2 focus-within:outline-accent ${className ?? ""}`}
     />
   );
 }
+
+// The text that sets a column's width: its header, and its widest cell.
+export interface DataGridColumnText {
+  header: string;
+  cell: string;
+}
+
+// Sets each column's width from its text, at least 64px and at most 320px,
+// in a row of no height after the last. Cells then fill their column, so a
+// cell's text never moves the table while it changes; the view hands new
+// text only when an edit ends.
+export const DataGridColumnWidths = memo(function DataGridColumnWidths(props: {
+  columns: readonly DataGridColumnText[];
+  // Room in each header for an action beside its name.
+  headerAction?: boolean;
+  // A last column after the data's, such as Add column.
+  trailing?: boolean;
+}) {
+  return (
+    <tfoot aria-hidden data-testid="data-grid-widths">
+      <tr>
+        <td className="p-0" />
+        {props.columns.map((text, column) => (
+          <td key={column} className="p-0" style={cellStyle(column)}>
+            <div
+              className={`box-content h-0 max-w-80 overflow-hidden whitespace-pre pl-2.5 font-sans text-[12px] font-medium ${
+                props.headerAction ? "pr-[34px]" : "pr-2.5"
+              }`}
+            >
+              {text.header}
+            </div>
+            <div className="box-content h-0 min-w-16 max-w-80 overflow-hidden whitespace-pre px-2.5">{text.cell}</div>
+          </td>
+        ))}
+        {props.trailing ? <td className="p-0" /> : null}
+      </tr>
+    </tfoot>
+  );
+});
