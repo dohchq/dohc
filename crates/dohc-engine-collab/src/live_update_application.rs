@@ -1014,7 +1014,88 @@ impl ApplicationOwner {
         self.current.clear();
         Ok(())
     }
+    /// Release one document's registration. Its durable application state stays.
+    pub fn unregister(
+        &mut self,
+        store: &mut EngineStore,
+        object_id: &str,
+    ) -> Result<(), ApplicationError> {
+        let mut found = None;
+        for (index, current) in self.current.iter().enumerate() {
+            let held = current.lock().map_err(|_| ApplicationError::Interrupted)?;
+            if held.binding.object_id == object_id {
+                found = Some(index);
+                break;
+            }
+        }
+        if let Some(index) = found {
+            invalidate_registration(store, &self.current[index])?;
+            self.current.remove(index);
+        }
+        Ok(())
+    }
 }
+
+/// Work a host must finish before it unloads a document.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnloadPending {
+    /// A restore fence for the document has not resumed.
+    Restore,
+    /// Owner updates or deferred replicated updates have not been delivered.
+    Delivery,
+    /// Applied updates on the current lineage are past its last settlement,
+    /// or the Markdown artifact does not hold the document's head.
+    Settlement,
+    /// A settlement committed but its Markdown artifact is not written yet.
+    Materialization,
+}
+
+/// The settlement clause reads only the binding's current lineage: a restore
+/// replaces the lineage, and the replaced one never settles again.
+const UNLOAD_PENDING: &str = "SELECT
+    EXISTS(SELECT 1 FROM live_restore_fences
+        WHERE workspace_id=?1 AND object_id=?2 AND resume_receipt_json IS NULL),
+    EXISTS(SELECT 1 FROM ydoc_deferred_updates WHERE workspace_id=?1 AND object_id=?2)
+        OR EXISTS(SELECT 1 FROM owner_ydoc_outboxes
+            WHERE workspace_id=?1 AND object_id=?2 AND pending_bytes>0 AND state<>'quarantined'),
+    EXISTS(SELECT 1 FROM live_device_update_applications a
+        JOIN live_device_application_bindings b
+            ON b.relay_database_namespace=a.relay_database_namespace AND b.workspace_id=a.workspace_id
+            AND b.main_version_id=a.main_version_id AND b.object_id=a.object_id
+            AND b.lineage_claim_id=a.lineage_claim_id
+        WHERE a.workspace_id=?1 AND a.object_id=?2 AND a.journal_cursor>max(
+            COALESCE((SELECT max(s.terminal_cursor) FROM live_device_settlements s
+                WHERE s.relay_database_namespace=a.relay_database_namespace AND s.workspace_id=a.workspace_id
+                AND s.main_version_id=a.main_version_id AND s.object_id=a.object_id
+                AND s.lineage_claim_id=a.lineage_claim_id),0),
+            COALESCE((SELECT o.terminal_cursor FROM live_owner_adoptions o
+                WHERE o.relay_database_namespace=a.relay_database_namespace AND o.workspace_id=a.workspace_id
+                AND o.main_version_id=a.main_version_id AND o.object_id=a.object_id
+                AND o.lineage_claim_id=a.lineage_claim_id),0)))";
+
+/// Name the first incomplete restore, delivery, or settlement record for one
+/// document. The caller still proves the artifact holds the head.
+pub fn unload_pending(
+    conn: &Connection,
+    workspace_id: &str,
+    object_id: &str,
+) -> Result<Option<UnloadPending>, ApplicationError> {
+    let (restore, delivery, settlement): (bool, bool, bool) = conn
+        .query_row(UNLOAD_PENDING, params![workspace_id, object_id], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })
+        .map_err(read_sql)?;
+    Ok(if restore {
+        Some(UnloadPending::Restore)
+    } else if delivery {
+        Some(UnloadPending::Delivery)
+    } else if settlement {
+        Some(UnloadPending::Settlement)
+    } else {
+        None
+    })
+}
+
 fn invalidate_registration(
     store: &mut EngineStore,
     current: &Arc<Mutex<Registration>>,
