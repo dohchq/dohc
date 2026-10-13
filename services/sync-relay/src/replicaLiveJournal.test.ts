@@ -307,7 +307,7 @@ it("keeps the header query before the blob overflow chains", async () => {
   try {
     f.append("a");
     const columns = f.raw.prepare("PRAGMA table_info(sync_relay_live_update_journal)").all().map(row => String(row.name));
-    const forbidden = columns.slice(columns.indexOf("validation_checkpoint_bytes") + 1);
+    const forbidden = columns.slice(columns.indexOf("update_bytes") + 1).filter(column => column !== "validation_checkpoint_bytes");
     const context = f.storage as StorageContext, prepare = context.db.prepare.bind(context.db), headers: string[] = [];
     vi.spyOn(context.db, "prepare").mockImplementation(sql => {
       if (/SELECT journal_cursor,workspace_id/.test(sql)) headers.push(sql);
@@ -334,7 +334,7 @@ it("yields before decoding a heavy metadata row and stops after the guard revoke
   } finally {f.close();}
 });
 
-it("checks the exact response budget before hashing an unserved row", async () => {
+it("stops capture before a row the exact response budget would drop", async () => {
   const f = fixture();
   try {
     f.append("a"); f.append("b");
@@ -348,7 +348,7 @@ it("checks the exact response budget before hashing an unserved row", async () =
     const result = await f.readStorage(0, 500, bytes);
     expect(result.rows.map(deliveryId)).toEqual(["a"]);
     expect(result.hasMore).toBe(true);
-    expect(capture.provenanceThrough).toEqual([second.nextCursor]);
+    expect(capture.provenanceThrough).toEqual([first.nextCursor]);
   } finally {f.close();}
 });
 

@@ -309,6 +309,9 @@ interface ReplicaJournalProjection {
   authority: ReplicaLiveJournalAuthority | null;
 }
 
+// Field names, digests, cursor and authority around each served row; phase 2 checks the exact size again.
+const REPLICA_JOURNAL_ROW_FRAME_BYTES = 1024;
+
 function captureReplicaJournalRows(storage: StorageContext, workspaceId: string, after: number,
   projected: readonly ReplicaJournalProjection[], maxBytes: number): ReplicaJournalSnapshotRow[] {
   if (projected.length === 0) return [];
@@ -323,8 +326,9 @@ function captureReplicaJournalRows(storage: StorageContext, workspaceId: string,
     const updateLength = (raw.update_bytes as Uint8Array).byteLength;
     const checkpointLength = (raw.validation_checkpoint_bytes as Uint8Array | null)?.byteLength ?? 0;
     let retainedBytes = updateLength + checkpointLength + replicaMetadataBytes(raw);
-    let encodedBytes = 4 * Math.ceil(updateLength / 3) + replicaMetadataBytes(raw, false) +
-      (raw.restore_operation_id === null ? 0 : 4 * Math.ceil(checkpointLength / 3));
+    let encodedBytes = 4 * Math.ceil(updateLength / 3) + replicaMetadataBytes(raw, false) + REPLICA_JOURNAL_ROW_FRAME_BYTES +
+      Buffer.byteLength(String(raw.relay_database_namespace)) +
+      (raw.restore_operation_id === null ? 0 : 4 * Math.ceil(checkpointLength / 3) + Buffer.byteLength(String(raw.restore_operation_id)));
     const cursor = authorityInteger(raw.journal_cursor, 1);
     // Keep the first admitted row even when it exceeds a cap.
     if (!fits(encodedBytes, retainedBytes, cursor)) break;
