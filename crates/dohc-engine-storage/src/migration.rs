@@ -3632,6 +3632,34 @@ fn apply_transactional(
 mod tests {
     use super::*;
     #[test]
+    fn p0_passive_upgrade_adds_empty_retention_without_originating_work() {
+        let dir = tempdir();
+        let mut conn = open_bare(&dir.join("engine.db"));
+        let ctx = MigrationContext::current(1);
+        let before = migration_index("v2-retained-materialization-displacements");
+        assert_eq!(BASELINE_MIGRATIONS[before - 1].id, "v2-engine-store-role");
+        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..before], &ctx, &NoFaults).unwrap();
+        conn.execute("UPDATE engine_ownership SET store_role='passive'", [])
+            .unwrap();
+        run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).unwrap();
+        assert!(crate::schema::store_is_passive(&conn).unwrap());
+        for table in [
+            "materialization_retained",
+            "materialization_staging_locations",
+            "materialization_displacement_reads",
+            "materialization_jobs",
+            "replication_log",
+        ] {
+            let count: i64 = conn
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(count, 0, "{table}");
+        }
+    }
+
+    #[test]
     fn p0_upgrade_adds_retention_without_changing_jobs() {
         let dir = tempdir();
         let mut conn = open_bare(&dir.join("engine.db"));

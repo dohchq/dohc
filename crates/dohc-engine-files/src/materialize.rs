@@ -777,6 +777,16 @@ pub struct MaterializeOptions<'a> {
     pub faults: &'a dyn FaultInjector,
 }
 
+fn require_materialization_owner(store: &EngineStore) -> Result<(), MaterializeError> {
+    if store.is_passive() {
+        return Err(StorageError::InvalidInput {
+            reason: "passive store cannot materialize",
+        }
+        .into());
+    }
+    Ok(())
+}
+
 /// Execute every pending job (oldest first), after resolving every
 /// displacement a crash left open. Stops at the first job that crashes
 /// (simulating process death), returning the results accumulated so far; the
@@ -786,6 +796,9 @@ pub fn run_pending_jobs(
     root: &Path,
     options: &MaterializeOptions<'_>,
 ) -> Result<Vec<JobResult>, MaterializeError> {
+    if store.is_passive() {
+        return Ok(Vec::new());
+    }
     recover_displacements(store, root, None, options)?;
     let jobs = store.list_pending_materialization_jobs()?;
     let mut results = Vec::with_capacity(jobs.len());
@@ -828,6 +841,7 @@ pub fn materialize_one_ordinary(
     job: &MaterializationJob,
     options: &MaterializeOptions<'_>,
 ) -> Result<JobOutcome, MaterializeError> {
+    require_materialization_owner(store)?;
     let result = materialize_one_inner(store, root, job, options);
     if matches!(&result, Ok(outcome) if !matches!(outcome, JobOutcome::Crashed(_)))
         || matches!(
@@ -946,6 +960,7 @@ fn materialize_secret_one_with_remover(
     options: &MaterializeOptions<'_>,
     secret_temp_remover: &dyn SecretTempRemover,
 ) -> Result<JobOutcome, MaterializeError> {
+    require_materialization_owner(store)?;
     let MaterializeOptions { now_ms, faults, .. } = *options;
     let canonical_root =
         std::fs::canonicalize(root).map_err(|err| MaterializeError::io(root, &err))?;
@@ -1008,6 +1023,7 @@ pub fn materialize_secret_delete_one(
     job: &MaterializationJob,
     options: &MaterializeOptions<'_>,
 ) -> Result<JobOutcome, MaterializeError> {
+    require_materialization_owner(store)?;
     let MaterializeOptions { faults, .. } = *options;
     let canonical_root =
         std::fs::canonicalize(root).map_err(|err| MaterializeError::io(root, &err))?;
@@ -1937,6 +1953,9 @@ fn cleanup_staging_directory_with_sync(
     directory: &Path,
     sync: impl FnOnce(&Path) -> Result<(), MaterializeError>,
 ) -> Result<(), MaterializeError> {
+    if store.is_passive() {
+        return Ok(());
+    }
     if directory.file_name() != Some(OsStr::new(".dohc-write-displaced")) {
         return Ok(());
     }
@@ -2879,6 +2898,9 @@ pub fn recover_displacements(
     workspace_id: Option<&str>,
     options: &MaterializeOptions<'_>,
 ) -> Result<(), MaterializeError> {
+    if store.is_passive() {
+        return Ok(());
+    }
     let canonical_root =
         std::fs::canonicalize(root).map_err(|err| MaterializeError::io(root, &err))?;
     let (dirs, mut unavailable) = all_staging_dirs(store, &canonical_root)?;
@@ -3059,6 +3081,9 @@ pub fn recover_path_displacements(
     path: &str,
     options: &MaterializeOptions<'_>,
 ) -> Result<(), MaterializeError> {
+    if store.is_passive() {
+        return Ok(());
+    }
     let canonical_root =
         std::fs::canonicalize(root).map_err(|err| MaterializeError::io(root, &err))?;
     let staging = staging_dir(&canonical_root, false)?;
@@ -3128,6 +3153,7 @@ fn save_kept_displacement_with_cleanup(
     options: &MaterializeOptions<'_>,
     cleanup: impl FnOnce(&EngineStore, &Path, &Path) -> Result<(), MaterializeError>,
 ) -> Result<KeptCopySave, MaterializeError> {
+    require_materialization_owner(store)?;
     let Some(row) = store
         .list_kept_displacements(workspace_id)?
         .into_iter()

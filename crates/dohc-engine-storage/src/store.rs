@@ -633,6 +633,15 @@ impl EngineStore {
 }
 
 impl EngineStore {
+    fn require_materialization_owner(&self) -> Result<(), StorageError> {
+        if self.is_passive() {
+            return Err(StorageError::InvalidInput {
+                reason: "passive store cannot materialize",
+            });
+        }
+        Ok(())
+    }
+
     /// Read at most 128 retained originals after the stable cursor.
     pub fn retained_displacements_after(
         &self,
@@ -644,6 +653,7 @@ impl EngineStore {
         &self,
         row: &crate::RetainedDisplacement,
     ) -> Result<i64, StorageError> {
+        self.require_materialization_owner()?;
         materialize::retain(&self.conn, row)
     }
     /// FULL-commit exact changed bytes and their new quiet-period baseline together.
@@ -654,9 +664,11 @@ impl EngineStore {
         bytes: &[u8],
         now_ms: i64,
     ) -> Result<(), StorageError> {
+        self.require_materialization_owner()?;
         materialize::record_retained_read(&self.conn, old, new, bytes, now_ms)
     }
     pub fn release_retained(&self, id: i64) -> Result<(), StorageError> {
+        self.require_materialization_owner()?;
         self.conn
             .execute(
                 "DELETE FROM materialization_retained WHERE displacement_id=?1",
@@ -668,6 +680,7 @@ impl EngineStore {
     /// FULL precedes a rename outside the default staging tree. Without this
     /// location recovery cannot find the surviving source after a power loss.
     pub fn remember_staging(&self, job_id: &str, directory: &str) -> Result<(), StorageError> {
+        self.require_materialization_owner()?;
         materialize::with_full_commit(&self.conn, |tx| {
             tx.execute("INSERT INTO materialization_staging_locations(job_id,directory) VALUES(?1,?2) ON CONFLICT(job_id) DO UPDATE SET directory=excluded.directory",rusqlite::params![job_id,directory]).map_err(StorageError::persist)?;
             Ok(())
@@ -731,6 +744,7 @@ impl EngineStore {
         row: &crate::RetainedDisplacement,
         now_ms: i64,
     ) -> Result<(), StorageError> {
+        self.require_materialization_owner()?;
         let name = row
             .source_path
             .rsplit('/')
@@ -749,6 +763,7 @@ impl EngineStore {
         })
     }
     pub fn forget_staging_directory(&self, directory: &str) -> Result<(), StorageError> {
+        self.require_materialization_owner()?;
         self.conn
             .execute(
                 "DELETE FROM materialization_staging_locations WHERE directory=?1",

@@ -1264,3 +1264,125 @@ fn checked_delete_rollback_stat_failure_preserves_receipt_error() {
     );
     assert!(!target.exists());
 }
+#[test]
+fn passive_store_materialization_leaves_sources_rows_and_sibling_cleanup_untouched() {
+    use dohc_engine_storage::RetainedDisplacement;
+    let scratch = ScratchDir::new_named("passive-materialization-retention").unwrap();
+    let root = scratch.path();
+    let db = root.join("engine.db");
+    let mut store = EngineStore::open(&db, 0).unwrap();
+    std::fs::write(root.join("notes.md"), b"before").unwrap();
+    let write = job(
+        &mut store,
+        "passive-write",
+        "notes.md",
+        b"before",
+        b"after",
+        1,
+    );
+    store
+        .read_with(|conn| {
+            conn.execute_batch(
+                "UPDATE materialization_jobs SET operation='delete' WHERE job_id='passive-write'",
+            )
+        })
+        .unwrap();
+    let delete = store
+        .load_materialization_job(&write.job_id)
+        .unwrap()
+        .unwrap();
+    let staging = staging_dir(root, true).unwrap();
+    let name = staged_name(&write.job_id, 0);
+    let source = staging.join(&name);
+    std::fs::write(&source, b"late outside bytes").unwrap();
+    let mut retained = RetainedDisplacement {
+        displacement_id: 0,
+        job_id: write.job_id.clone(),
+        workspace_id: "ws".into(),
+        target_path: "notes.md".into(),
+        source_path: format!("{STAGING_DIR}/{name}"),
+        device: "1".into(),
+        inode: "1".into(),
+        digest: hex_sha256(b"before"),
+        size: 6,
+        mtime: "0:0".into(),
+        ctime: "0:0".into(),
+        changed_at_ms: 0,
+    };
+    retained.displacement_id = store.retain_displacement(&retained).unwrap();
+    let sibling = root.join(".dohc-write-displaced");
+    std::fs::create_dir(&sibling).unwrap();
+    store
+        .remember_staging(&write.job_id, ".dohc-write-displaced")
+        .unwrap();
+    // Simulate leftover owner work in a passive database, as startup recovery can find it.
+    store
+        .read_with(|conn| conn.execute_batch("UPDATE engine_ownership SET store_role='passive'"))
+        .unwrap();
+    drop(store);
+    let store = EngineStore::open_passive(&db, 1, None, None).unwrap();
+    let settings = options(60_000, &StdReplacer);
+    assert!(
+        run_pending_jobs(&store, root, &settings)
+            .unwrap()
+            .is_empty()
+    );
+    recover_displacements(&store, root, None, &settings).unwrap();
+    recover_path_displacements(&store, root, "ws", "notes.md", &settings).unwrap();
+    cleanup_staging_directory(&store, root, &sibling).unwrap();
+    for job in [&write, &delete] {
+        assert!(materialize_one(&store, root, job, &settings).is_err());
+        assert!(materialize_one_ordinary(&store, root, job, &settings).is_err());
+    }
+    assert!(materialize_secret_one(&store, root, &write, b"after", &settings).is_err());
+    assert!(materialize_secret_delete_one(&store, root, &delete, &settings).is_err());
+    assert!(save_kept_displacement(&store, root, "ws", 1, &settings).is_err());
+    assert!(store.retain_displacement(&retained).is_err());
+    assert!(
+        store
+            .record_retained_read(&retained, &retained, b"before", 2)
+            .is_err()
+    );
+    assert!(store.release_retained(retained.displacement_id).is_err());
+    assert!(store.keep_oversized_retained(&retained, 2).is_err());
+    assert!(
+        store
+            .remember_staging("new-job", ".dohc-write-displaced")
+            .is_err()
+    );
+    assert!(
+        store
+            .forget_staging_directory(".dohc-write-displaced")
+            .is_err()
+    );
+    assert_eq!(
+        store.retained_displacements_after(0).unwrap(),
+        vec![retained]
+    );
+    assert_eq!(
+        store
+            .table_row_count("materialization_displacement_reads")
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        store
+            .table_row_count("materialization_displacements")
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        store.staging_locations().unwrap(),
+        vec![".dohc-write-displaced"]
+    );
+    assert_eq!(
+        store
+            .load_materialization_job(&write.job_id)
+            .unwrap()
+            .unwrap(),
+        delete
+    );
+    assert_eq!(std::fs::read(root.join("notes.md")).unwrap(), b"before");
+    assert_eq!(std::fs::read(source).unwrap(), b"late outside bytes");
+    assert!(sibling.is_dir());
+}

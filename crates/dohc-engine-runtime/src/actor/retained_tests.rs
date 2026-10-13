@@ -251,3 +251,24 @@ fn close_finishes_an_inflight_changed_read_before_closing_the_writer() {
         .unwrap();
     assert_eq!(bytes, b"last outside version");
 }
+#[test]
+fn passive_store_never_spawns_a_retention_worker_even_after_root_binding() {
+    let scratch = ScratchDir::new().unwrap();
+    let db = scratch.path().join("engine.db");
+    drop(EngineStore::open_passive(&db, 0, None, None).unwrap());
+    let mut actor = WorkspaceActor::spawn_passive(
+        db.clone(),
+        EngineDbIdentity::of_existing(&db).unwrap(),
+        1,
+        0,
+        None,
+        None,
+    )
+    .unwrap();
+    assert!(actor.retention.is_none());
+    bind(&actor, &scratch);
+    assert!(actor.retention.is_none());
+    assert!(actor.retention_root.0.0.lock().unwrap().passes.is_empty());
+    actor.close().unwrap();
+    assert_eq!(actor.lifecycle(), LifecycleState::Closed);
+}
