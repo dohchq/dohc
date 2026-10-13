@@ -111,6 +111,7 @@ export function createLiveGateway(options: LiveGatewayOptions) {
   };
   const server = new WebSocketServer(wsOptions);
   const connections = new Map<() => void, () => void>();
+  const scopes = new Map<() => void, LiveGatewaySession>();
   const heldSockets = new WeakSet<Duplex>();
   const refusedSockets = new WeakSet<Duplex>();
   const counts = new Map<string, number>();
@@ -162,7 +163,7 @@ export function createLiveGateway(options: LiveGatewayOptions) {
       abort.abort();
       route?.invalidated.removeEventListener("abort", stop);
       release?.();
-      connections.delete(stop);
+      connections.delete(stop); scopes.delete(stop);
       // Refusal and fencing discard queued work. No successful frame is synthesized.
       route?.socket.terminate();
       if (browser) browser.terminate(); else refuse(socket);
@@ -191,6 +192,7 @@ export function createLiveGateway(options: LiveGatewayOptions) {
       if (done) return;
       if (resolved === null) { stop(); return; }
       const session = copiedSession(resolved);
+      scopes.set(stop, session);
       release = reserve([
         [JSON.stringify(["session", session.kind, session.kind === "named" ? session.userId : session.sessionId,
           session.workspaceId, session.grantId, parsed.session]), limits.maxConnectionsPerSession],
@@ -265,6 +267,12 @@ export function createLiveGateway(options: LiveGatewayOptions) {
 
   return {
     handleUpgrade,
+    deleteAccount(userId: string, workspaceIds: readonly string[]) {
+      for (const stop of connections.keys()) {
+        const session = scopes.get(stop);
+        if (!session || workspaceIds.includes(session.workspaceId) || (session.kind === "named" && session.userId === userId)) stop();
+      }
+    },
     close() {
       if (closed) return;
       closed = true;

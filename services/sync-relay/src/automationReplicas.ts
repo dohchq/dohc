@@ -162,7 +162,10 @@ export async function startAutomationReplicas(options: {
 
   const logHead = (workspaceId: string) => storage.automationWorkspaceLogHead(workspaceId);
 
+  const purged = new Set<string>();
+  let runningPass: Promise<boolean> | undefined;
   async function open(row: AutomationWorkspace): Promise<void> {
+    if (purged.has(folderOf(row.workspaceId))) return;
     const folder = folderOf(row.workspaceId);
     const home = join(folder, String(row.incarnation));
     const root = join(home, "workspace"), metadataDir = join(home, "metadata");
@@ -281,6 +284,7 @@ export async function startAutomationReplicas(options: {
       await release();
       throw error;
     }
+    if (purged.has(folderOf(row.workspaceId))) {await release(); return;}
     replicas.set(row.workspaceId, replica);
     options.onChanged?.(row.workspaceId);
   }
@@ -327,7 +331,7 @@ export async function startAutomationReplicas(options: {
     let ok = true;
     let passFailure: unknown = null;
     await engine();
-    const wanted = new Set(options.wanted());
+    const wanted = new Set(options.wanted().filter(id => !purged.has(folderOf(id))));
     for (const workspaceId of wanted) {
       ok = await each(workspaceId, async () => {
         const row = storage.joinAutomationWorkspace({workspaceId, nowMs: nowMs()});
@@ -354,6 +358,7 @@ export async function startAutomationReplicas(options: {
       }) && ok;
     }
     for (const row of storage.listAutomationWorkspaces()) {
+      if (purged.has(folderOf(row.workspaceId))) continue;
       if (wanted.has(row.workspaceId)) continue;
       syncRetries.delete(row.workspaceId);
       ok = await each(row.workspaceId, async () => {
@@ -453,7 +458,7 @@ export async function startAutomationReplicas(options: {
 
   // A pass, then its look for the nearest deadline. Either failing fails the
   // pass; when both do, the pass's own failure is the one reported.
-  async function pass(): Promise<boolean> {
+  async function passOnce(): Promise<boolean> {
     deadline = undefined;
     let ok: boolean;
     try {
@@ -465,6 +470,8 @@ export async function startAutomationReplicas(options: {
     deadline = untilDeadline();
     return ok;
   }
+
+  const pass = () => runningPass = passOnce();
 
   // One pass at a time, each after the wait the one before it left. A pass
   // that fails runs again after a delay that doubles up to a minute.
@@ -546,6 +553,15 @@ export async function startAutomationReplicas(options: {
   if (storage.unavailable.aborted) closeUnavailable();
   else storage.unavailable.addEventListener("abort", closeUnavailable, {once: true});
   return {
+    async deleteWorkspaces(workspaceIds: readonly string[]) {
+      for (const id of workspaceIds) purged.add(folderOf(id));
+      await runningPass?.catch(() => undefined);
+      for (const id of workspaceIds) {
+        await replicas.get(id)?.close();
+        await rm(folderOf(id), {recursive: true, force: true});
+        failedSyncs.delete(id); syncRetries.delete(id);
+      }
+    },
     /** The daemon is running and a pass completed, even if individual workspaces failed. */
     get unavailable(): boolean {
       return signal.aborted || !reconciled || !client || client.exited.signal.aborted;

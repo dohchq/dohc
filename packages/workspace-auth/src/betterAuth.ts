@@ -1,5 +1,6 @@
 import { betterAuth } from "better-auth";
-import { APIError } from "better-auth/api";
+import { APIError, createAuthEndpoint, createAuthMiddleware, freshSessionMiddleware, sessionMiddleware } from "better-auth/api";
+import { accountIsDeleting } from "./accountDeletion";
 import { bearer, deviceAuthorization, organization } from "better-auth/plugins";
 import type { Pool } from "pg";
 import type { SignUpAdmission } from "./signUp";
@@ -39,6 +40,10 @@ interface WorkspaceAuthOptions {
   // sign-up password, so on a closed server no password works until someone
   // opens the emailed link and chooses one there.
   admitAccount?: (email: string) => Promise<SignUpAdmission>;
+  accountDeletion?: {
+    preview(user: { id: string; email: string }): Promise<Record<string, unknown>>;
+    delete(user: { id: string; email: string }, token: string): Promise<Record<string, unknown>>;
+  };
 }
 
 export function createWorkspaceAuth(options: WorkspaceAuthOptions) {
@@ -175,7 +180,27 @@ export function createWorkspaceAuth(options: WorkspaceAuthOptions) {
         "/reset-password": { window: 3600, max: 10 },
       },
     },
+    hooks: { after: createAuthMiddleware(async ctx => {
+      const session = ctx.context.newSession ?? ctx.context.session;
+      if (ctx.path !== "/account/delete" && session && await accountIsDeleting(options.pool, session.user.id)) {
+        throw new APIError("UNAUTHORIZED", { code: "ACCOUNT_DELETING", message: "This server account is being deleted." });
+      }
+    }) },
     plugins: [
+      ...(options.accountDeletion ? [{
+        id: "dohc-account-deletion",
+        endpoints: {
+          accountDeletionPreview: createAuthEndpoint("/account/deletion-preview", {method: "POST", use: [sessionMiddleware], requireHeaders: true}, async ctx => {
+            return ctx.json(await options.accountDeletion!.preview(ctx.context.session.user));
+          }),
+          deleteServerAccount: createAuthEndpoint("/account/delete", {method: "POST", use: [freshSessionMiddleware], requireHeaders: true}, async ctx => {
+            const body: unknown = ctx.body;
+            const token = body && typeof body === "object" && "previewToken" in body ? body.previewToken : undefined;
+            if (typeof token !== "string" || token.length > 512) throw new APIError("BAD_REQUEST", {code: "PREVIEW_REQUIRED", message: "Review account deletion before continuing."});
+            return ctx.json(await options.accountDeletion!.delete(ctx.context.session.user, token));
+          }),
+        },
+      }] : []),
       // The desktop authenticates API calls with `Authorization: Bearer
       // <session token>` (the device flow's access_token IS a session token).
       bearer(),

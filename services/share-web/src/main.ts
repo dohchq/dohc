@@ -39,6 +39,7 @@ try {
 }
 
 const application = createShareWebApplication({
+  deleteAccountGateways(userId, workspaceIds) {namedGateway?.deleteAccount(userId,workspaceIds); linkGateway?.deleteAccount(userId,workspaceIds);},
   appLaunch: config.appLaunch,
   relayUrl: config.relayUrl,
   publicRelayUrl: config.publicRelayUrl,

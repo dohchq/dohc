@@ -1,9 +1,10 @@
-import {mkdtemp, mkdir, readFile, rm} from "node:fs/promises";
+import {mkdtemp, mkdir, readFile, rm, stat, writeFile} from "node:fs/promises";
+import {createHash} from "node:crypto";
 import {join} from "node:path";
 import {tmpdir} from "node:os";
 import {isDeepStrictEqual} from "node:util";
 import {afterEach, expect, it, vi} from "vitest";
-import {startSelfHostedLiveHost} from "./selfHostedLiveHost";
+import {startSelfHostedLiveHost, deleteSelfHostedWorkspaceRoots} from "./selfHostedLiveHost";
 import type {ServiceHostedSet} from "./serviceLiveHost";
 import {fixture as ticketFixture, binding, scope} from "./liveTickets.test-helper";
 import {createLiveJournalHistoryAuthority} from "./storage/liveJournalHistory";
@@ -574,4 +575,17 @@ it("omits a renamed document without stopping live hosting for the other documen
   f.host.reconcile(); await f.waitUpdate(["docs/b.md"]);
   expect(f.starts[0]!.close).not.toHaveBeenCalled(); expect(f.starts).toHaveLength(1);
   expect(f.storage.listServiceHostEnrollments()).toHaveLength(2);
+});
+
+it("deletes old engine roots while the session host is disabled, idempotently", async () => {
+  const root = await mkdtemp(join(tmpdir(), "dohc-deleted-live-root-"));
+  cleanup.push(() => rm(root, {recursive:true, force:true}));
+  const scope = {workspaceId:"deleted-workspace", replicationEpoch:"epoch", streamIdentity:"stream"};
+  const folder = join(root, createHash("sha256").update(JSON.stringify(["namespace",scope.workspaceId,scope.replicationEpoch,scope.streamIdentity])).digest("hex"));
+  await mkdir(folder); await writeFile(join(folder,"identity"),"deleted-person");
+  await mkdir(join(root,"unrelated"));
+  await deleteSelfHostedWorkspaceRoots(root,"namespace",[scope]);
+  await deleteSelfHostedWorkspaceRoots(root,"namespace",[scope]);
+  await expect(stat(folder)).rejects.toMatchObject({code:"ENOENT"});
+  expect((await stat(join(root,"unrelated"))).isDirectory()).toBe(true);
 });

@@ -762,3 +762,14 @@ it("projects file-only link sync metadata before it reaches the browser provider
   expect(JSON.stringify(provider.state().binding)).not.toContain("docs/");
   expect(f.native.client.openLiveAppliedSync).toHaveBeenCalled();
 });
+
+it.each(["named", "link", "owner", "desktop"])("deletion closes a running %s live connection", async kind => {
+  const f = await fixture(limits, kind === "link", undefined, kind === "owner", kind === "desktop");
+  const minted = kind === "owner" ? {token: ""} : await f.mint();
+  const connection = f.connect(minted.token);
+  expect(await connection.status).toBe(101);
+  const closed = once(connection.ws, "close");
+  f.routes.deleteAccount("owner-1", [binding.workspaceId]);
+  await closed;
+  expect(connection.ws.readyState).toBe(WebSocket.CLOSED);
+});

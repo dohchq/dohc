@@ -1,4 +1,4 @@
-import { createHash, randomBytes } from "node:crypto";
+import { createHash, createHmac, randomBytes } from "node:crypto";
 import { APP_PUBLICATION_MAX_BUNDLE_BYTES, APP_PUBLICATION_MAX_DOCUMENT_BYTES, APP_PUBLICATION_MAX_BLOB_BYTES } from "@dohc/security-contract/app-publication";
 import { readBoundedJson, TokenBucketLimiter } from "@dohc/service-http";
 import { APP_BUNDLE_CONTENT_TYPES, createAppDocument, type AppDocumentFile } from "@dohc/app-browser/document";
@@ -26,7 +26,7 @@ const token = () => randomBytes(32).toString("base64url");
 const exact = (v: unknown, keys: string): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v) && Object.keys(v).sort().join() === keys;
 interface Descriptor { publicationId: string; authorityRevision: number; files: Omit<AppDocumentFile, "bytes">[] }
 export type AppNamedBrowserMaterial =
-  | { ok: true; kind: "named"; admissionKey: string; setCookie: string | null; fetchRelay(request: Request): Promise<Response> }
+  | { ok: true; kind: "named"; userId?: string; admissionKey: string; setCookie: string | null; fetchRelay(request: Request): Promise<Response> }
   | { ok: false; status: 401 | 403 | 404 | 503 };
 type LaunchMaterial = Extract<LinkBrowserMaterial | AppNamedBrowserMaterial, { ok: true }>;
 const namedMaterial = (material: LaunchMaterial): material is Extract<AppNamedBrowserMaterial, { ok: true }> => "kind" in material && material.kind === "named";
@@ -49,6 +49,10 @@ export function createAppLaunchHandler(options: { config: AppLaunchConfig; relay
   resolveNamedMaterial?(workspaceId: string, publicationId: string, cookie: string | null, signal: AbortSignal): Promise<AppNamedBrowserMaterial> }) {
   const config = parseAppLaunchConfig(options.config), viewerHost = new URL(config.viewerOrigin).host;
   const now = options.nowMs ?? Date.now, launches = new Map<string, Launch>();
+  const deletionKey = randomBytes(32);
+  const userFence = (id: string) => createHmac("sha256",deletionKey).update(id).digest("hex");
+  const deletedUsers = new Set<string>(), deletedGrants = new Set<string>(), deletedPublications = new Set<string>();
+  const deleted = (publicationId: string, material: LaunchMaterial) => deletedPublications.has(publicationId) || (namedMaterial(material) ? !!material.userId && deletedUsers.has(userFence(material.userId)) : !!material.grantId && deletedGrants.has(material.grantId));
   const stagedSlots = new Set<Launch>();
   const issueRate = new TokenBucketLimiter(12, 0.2, 2048), sessionRate = new TokenBucketLimiter(12, 0.2, MAX_LAUNCHES);
   const issueAddressRate = new TokenBucketLimiter(600, 10, 10_000), issueGlobalRate = new TokenBucketLimiter(2400, 40, 1);
@@ -122,7 +126,12 @@ export function createAppLaunchHandler(options: { config: AppLaunchConfig; relay
     if (launch.stagedExpires !== undefined && launch.stagedExpires <= now()) {launch.staged = undefined; stagedSlots.delete(launch);}
     if (launch.expires <= now()) {launch.staged = undefined; stagedSlots.delete(launch); launches.delete(host);}
   } }
-  return { matches(request: Request) { return appHost(request.headers.get("host") ?? "") || ["/api/apps/launch", "/api/apps/summary"].includes(new URL(request.url).pathname); },
+  return {
+    deleteAccount(userId: string, grantIds: readonly string[], publicationIds: readonly string[]) {
+      deletedUsers.add(userFence(userId)); for (const id of grantIds) deletedGrants.add(id); for (const id of publicationIds) deletedPublications.add(id);
+      for (const [host, launch] of launches) if (deleted(launch.publicationId, launch.material)) {launch.staged = undefined; stagedSlots.delete(launch); launches.delete(host);}
+    },
+    matches(request: Request) { return appHost(request.headers.get("host") ?? "") || ["/api/apps/launch", "/api/apps/summary"].includes(new URL(request.url).pathname); },
     async handle(request: Request): Promise<Response> {
       const url = new URL(request.url), host = request.headers.get("host") ?? ""; prune();
       const statusRequest = url.pathname === "/status" && appHost(host);
@@ -157,6 +166,7 @@ export function createAppLaunchHandler(options: { config: AppLaunchConfig; relay
             namedIssue = true;
             material = await options.resolveNamedMaterial(issueBody.workspaceId, issueBody.publicationId as string, request.headers.get("cookie"), signal);
           } else return refusal();
+          if (material.ok && deleted(body.publicationId, material)) return refusal();
           if (!material.ok) return namedIssue && material.status === 503 ? unavailable() : refusal();
           if (summaryRequest) {
             if (!namedMaterial(material)) return refusal();
@@ -174,12 +184,13 @@ export function createAppLaunchHandler(options: { config: AppLaunchConfig; relay
           // The relay authorizes the resolved profile/account cookies before they get a budget.
           const identity = namedMaterial(material) ? `named:${material.admissionKey}` : `link:${hash(material.profileSecret)}`;
           if (!issueRate.allow(identity, now())) return namedMaterial(material) ? rateLimited() : Response.json(linkRefusalBody("link_read_rate_limited"), {status: 429, headers});
-          signal.throwIfAborted(); if (launches.size >= MAX_LAUNCHES) return refusal(); const handoff = token(), launchHost = `${randomBytes(24).toString("hex")}.${config.appDomain}`;
+          signal.throwIfAborted(); if (deleted(body.publicationId, material)) return refusal(); if (launches.size >= MAX_LAUNCHES) return refusal(); const handoff = token(), launchHost = `${randomBytes(24).toString("hex")}.${config.appDomain}`;
           launches.set(launchHost, { origin: `https://${launchHost}`, publicationId: body.publicationId, material,
             revision: current.authorityRevision, expires: now() + HANDOFF_MS, handoffHash: hash(handoff) });
           return Response.json({ action: `https://${launchHost}/bootstrap`, handoff }, { headers: { ...headers, ...(material.setCookie ? { "set-cookie": material.setCookie } : {}) } });
         }
         const launch = launches.get(host); if (!launch) return refusal();
+        if (deleted(launch.publicationId, launch.material)) return refusal();
         if (url.pathname === "/bootstrap") {
           let cookie: string;
           if (request.method === "GET") {
@@ -209,6 +220,7 @@ export function createAppLaunchHandler(options: { config: AppLaunchConfig; relay
           catch (error) {stagedSlots.delete(launch); throw error;}
           finally {launch.rebuilding = false;}
           launch.staged = doc; launch.stagedExpires = now() + HANDOFF_MS;
+          if (launches.get(host) !== launch) {launch.staged = undefined; stagedSlots.delete(launch); return refusal();}
           if (launch.expires <= now()) { launch.staged = undefined; stagedSlots.delete(launch); launches.delete(host); return refusal(); }
           const proof = token(); launch.cookieHash = hash(cookie); launch.proofHash = hash(proof); if (request.method === "POST") launch.expires = now() + SESSION_MS;
           const script = `(()=>{history.replaceState(null,'','/bootstrap');const proof=${JSON.stringify(proof)};let stopped=false;const frame=document.createElement('iframe');frame.title='Shared app';frame.sandbox='allow-scripts allow-forms allow-downloads';frame.style='display:block;border:0;width:100%;height:100vh';const lifetime=new AbortController();(${attachAppCollectionBroker.toString()})(frame,(body,signal)=>fetch(body.op.startsWith('backend.')?'/backend':'/collection',{method:'POST',headers:{'content-type':'application/json','x-dohc-app-proof':proof},credentials:'same-origin',cache:'no-store',body:JSON.stringify(body),signal}),lifetime.signal);const stop=()=>{stopped=true;lifetime.abort();frame.remove();document.getElementById('status').textContent='This app session ended. Reopen the share link.';};const call=path=>fetch(path,{method:'POST',headers:{'x-dohc-app-proof':proof},credentials:'same-origin',cache:'no-store'});const readDocument=async()=>{let r=await call('/document');if(r.status===503)r=await call('/document');return r;};readDocument().then(async r=>{if(!r.ok)throw Error();const html=await r.text();if(stopped)return;frame.srcdoc=html;document.body.append(frame);document.getElementById('status').textContent='';}).catch(stop);let misses=0;const poll=async()=>{if(stopped)return;try{const r=await call('/status');if(r.status===404){stop();return;}if(!r.ok)throw Error();misses=0;}catch{if(++misses>=2)stop();}if(!stopped)setTimeout(poll,15000);};setTimeout(poll,15000);setTimeout(stop,${Math.max(1, launch.expires - now())});addEventListener('pagehide',stop,{once:true});})();`;
@@ -231,6 +243,7 @@ export function createAppLaunchHandler(options: { config: AppLaunchConfig; relay
         const doc = launch.staged; launch.staged = undefined; stagedSlots.delete(launch);
         if (!doc) return refusal();
         if (launch.expires <= now()) return refusal();
+        if (launches.get(host) !== launch) return refusal();
         return new Response(doc.html, { headers: { ...headers, "content-type": "text/html; charset=utf-8" } });
       } catch (error) {
         const launch = launches.get(host);

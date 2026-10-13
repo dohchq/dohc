@@ -17,6 +17,9 @@ import {
 import { Pool } from "pg";
 import { compileDatasetOperations } from "./datasetCompiler";
 import { createVerifiedEmailLookups } from "./verifiedEmailLookups";
+import {ACCOUNT_DELETION_PATH, ACCOUNT_DELETION_KEY_HEADER, accountDeletionKey} from "@dohc/workspace-auth/accountDeletion";
+import {createAccountDeletionRoute, accountDeletionAdmission, admitAccountDeletionWork, watchAccountDeletionJobs} from "./accountDeletionRoute";
+import type {StorageContext} from "./storage/context";
 import { createSignUpInviteRoute } from "./signUpInviteRoute";
 import { errorBody, errorResponse, notFound } from "./errors";
 import { RELAY_API_VERSIONS, relayApiVersionRefusal } from "./apiVersion";
@@ -37,7 +40,7 @@ import {readRelayDeviceDeliveryConfig} from "./deviceLiveHostConfig";
 import {parseDeviceControlLimits} from "@dohc/live-session-contract/device-control";
 import { openRelayDeployment } from "./relayDeployment";
 import { guardRelayResponses } from "./relayResponseStanding";
-import { startServiceLiveHost } from "./serviceLiveHost";
+import { startServiceLiveHost, deleteConfiguredServiceWorkspaceRoots } from "./serviceLiveHost";
 import { startEngineProjection } from "./engineProjection";
 import { parseNamedLiveConfig } from "./namedLiveConfig";
 import { readAppBackendParticipantLimit, readAppCollectionPolicy, readAppPublicationConfig } from "./appPublicationConfig";
@@ -57,7 +60,7 @@ import type {NamedFrameNativeHost} from "./namedLiveFrameHost";
 import {createAutomationRecordHost} from "./automationRecordHost";
 import type { LiveObjectBinding } from "@dohc/live-session-contract/live-object-binding";
 import {selfHostLiveProfile} from "./selfHostLiveProfile";
-import {startSelfHostedLiveHost} from "./selfHostedLiveHost";
+import {startSelfHostedLiveHost, deleteSelfHostedWorkspaceRoots} from "./selfHostedLiveHost";
 import {createServiceHostEnrollmentRoutes} from "./serviceHostEnrollmentRoutes";
 import {createServiceHostReplication} from "./serviceHostReplication";
 import {authorizeServiceHostReplication} from "./serviceHostCredential";
@@ -396,6 +399,7 @@ const relayApplication = createSyncRelayHandler({
   noticePostRateLimiter,
   ...(automationServer ? {automationServer} : {}),
 });
+let ownerLive: ReturnType<typeof createOwnerLiveRoutes> | undefined;
 let namedLive: ReturnType<typeof createNamedLiveRoutes> | undefined;
 let linkLive: ReturnType<typeof createNamedLiveRoutes> | undefined;
 let linkLiveHttp: ReturnType<typeof createLinkLiveHttp> | undefined;
@@ -412,8 +416,50 @@ const relayHandler = guardRelayResponses(storage, request => {
   if (isLinkLivePath(path)) return (path === "/sync/live/link-tickets" ? linkLive?.handle(request) : linkLiveHttp?.(request)) ?? Promise.resolve(Response.json({ok: false, error: "not found"}, {status: 404}));
   return relayApplication(request);
 });
+const deletions = createAccountDeletionRoute({storage: storage as StorageContext, key: accountDeletionKey(secret),
+  invalidate(userId, manifest) {
+    const ids = manifest.workspaces.map(row => row.workspaceId);
+    relayApplication.deleteAccount(userId,ids,manifest.shareIds);
+    namedLive?.deleteAccount(userId,ids); linkLive?.deleteAccount(userId,ids); desktopLive?.deleteAccount(userId,ids); ownerLive?.deleteAccount(userId,ids);
+    automations?.deleteAccount(userId);
+  },
+  async deleteRuntime(userId, manifest) {
+    const ids = manifest.workspaces.map(row => row.workspaceId);
+    if (shareWebOrigin) {
+      const origin = process.env.DOHC_RELAY_SHARE_WEB_URL;
+      if (!origin || !relayExchangeKey) throw new Error("Share-web deletion is unavailable.");
+      const batches = Math.max(1, Math.ceil(Math.max(ids.length,manifest.grantIds.length,manifest.publicationIds.length)/8));
+      for (let i=0;i<batches;i++) {
+        const response = await fetch(new URL(ACCOUNT_DELETION_PATH,origin), {method: "POST", redirect: "error", signal: AbortSignal.timeout(10_000),
+          headers: {"content-type":"application/json", [ACCOUNT_DELETION_KEY_HEADER]: accountDeletionKey(relayExchangeKey)},
+          body: JSON.stringify({userId,workspaceIds:ids.slice(i*8,i*8+8),grantIds:manifest.grantIds.slice(i*8,i*8+8),publicationIds:manifest.publicationIds.slice(i*8,i*8+8)})});
+        const result: unknown = await response.json();
+        if (!response.ok || !result || typeof result !== "object" || !("finished" in result) || result.finished !== true) throw new Error("Share-web deletion is unfinished.");
+      }
+    }
+    await automations?.deleteWorkspaces(ids);
+    if (selfHost) await selfHost.deleteWorkspaces(manifest.workspaces);
+    else if (deployment && process.env.DOHC_RELAY_SERVICE_HOST_ROOT) await deleteSelfHostedWorkspaceRoots(process.env.DOHC_RELAY_SERVICE_HOST_ROOT, deployment.history.namespace, manifest.workspaces);
+    await configuredServiceHost?.deleteWorkspaces(ids);
+    if (serviceHostConfig) await deleteConfiguredServiceWorkspaceRoots(serviceHostConfig, ids);
+    await datasetHost.deleteWorkspaces(manifest.datasets);
+  },
+});
+// Keep request-admission connections separate from the auth pool: a request
+// holds admission while Better Auth resolves its session on the auth pool.
+const deletionPool = pool ? new Pool({connectionString: process.env.POSTGRES_URL ?? defaultPostgresUrl, max: 4, connectionTimeoutMillis: 3000, query_timeout: 35_000}) : undefined;
+const admitAccountWork = <T>(run: () => Promise<T>) => deletionPool ? admitAccountDeletionWork(deletionPool,deletions,run) : run();
+const admittedRelayHandler = deletionPool ? accountDeletionAdmission(deletionPool,deletions,relayHandler) : relayHandler;
+const refreshDeletionFences = async () => {
+  if (!pool) return;
+  const jobs = await pool.query<{user_id: string; email: string}>("SELECT user_id,email FROM account_deletion_jobs");
+  for (const job of jobs.rows) deletions.fence(job.user_id,job.email);
+};
+const deletionWatcher = pool ? await watchAccountDeletionJobs({connectionString:process.env.POSTGRES_URL ?? defaultPostgresUrl, deletions, unavailable:() => {storage.invalidate(); console.error("[sync-relay] Account deletion fencing became unavailable. Restart the relay.");}}) : undefined;
+await refreshDeletionFences();
 const signUpInvites = secret.length >= 32 ? createSignUpInviteRoute({storage, key: signUpInviteKey(secret)}) : undefined;
 const fetchHandler = async (request: Request): Promise<Response> => {
+  if (new URL(request.url).pathname === ACCOUNT_DELETION_PATH) return deletions.handle(request);
   if (signUpInvites && new URL(request.url).pathname === SIGN_UP_INVITE_PATH) return signUpInvites(request);
   if (new URL(request.url).pathname === "/ready") {
     const ready = !storage.unavailable.aborted && (!selfHostedLive || (!!selfHost && !selfHost.unavailable));
@@ -432,7 +478,7 @@ const fetchHandler = async (request: Request): Promise<Response> => {
     }, { status: storage.unavailable.aborted ? 503 : 200 });
   }
   const refusal = relayApiVersionRefusal(request.headers);
-  const result = refusal ? errorResponse(refusal) : await relayHandler(request);
+  const result = refusal ? errorResponse(refusal) : await admittedRelayHandler(request);
   const path = new URL(request.url).pathname;
   return normalizeLinkRefusal(result, path, isLinkLivePath(path));
 };
@@ -610,12 +656,12 @@ if (namedLiveConfig) {
     maxSnapshotBytes: namedLiveConfig.frames.receive.maxFrameBytes}, storage.readLiveAuthority.bind(storage));
   namedLive = createNamedLiveRoutes({ kind: "named", storage, lookupUserDisplayName, hosts: new Set(process.env.DOHC_RELAY_NAMED_LIVE_HOSTS!.split(",")),
     publicOrigin: shareWebOrigin!, exchangeKey: relayExchangeKey!, limits: namedLiveConfig.transport,
-    frames: namedLiveConfig.frames, bounds: namedLiveConfig.host, validate: namedLiveConfig.validate,
+    admitAccountWork, frames: namedLiveConfig.frames, bounds: namedLiveConfig.host, validate: namedLiveConfig.validate,
     sessions: { resolve: relayApplication.resolveNamedBrowserSession }, tickets, captureNative, membership, admission });
   if (linkLiveEnabled && publicEditRelease) {
     const hosts = new Set(process.env.DOHC_RELAY_NAMED_LIVE_HOSTS!.split(","));
     linkLive = createNamedLiveRoutes({kind: "link", storage, hosts, publicOrigin: shareWebOrigin!, exchangeKey: relayExchangeKey!, limits: namedLiveConfig.transport,
-      frames: namedLiveConfig.frames, bounds: namedLiveConfig.host, validate: namedLiveConfig.validate,
+      admitAccountWork, frames: namedLiveConfig.frames, bounds: namedLiveConfig.host, validate: namedLiveConfig.validate,
       sessions: createLinkLiveBrowserResolver({storage, linkKey: linkKey!}), tickets, captureNative, membership, admission});
     linkLiveHttp = createLinkLiveHttp({storage, hosts, publicOrigin: shareWebOrigin!, exchangeKey: relayExchangeKey!, limits: namedLiveConfig.transport, linkKey: linkKey!});
     server.once("close", linkLive.close); process.once("SIGINT", linkLive.close); process.once("SIGTERM", linkLive.close);
@@ -627,32 +673,26 @@ if (namedLiveConfig) {
       readinessLimits: selfHostLiveProfile().desktopReadiness});
     desktopLive = createNamedLiveRoutes({kind: "named", desktopBearer: true, storage, lookupUserDisplayName, hosts,
       publicOrigin: shareWebOrigin!, exchangeKey: relayExchangeKey!, limits: namedLiveConfig.transport,
-      frames: namedLiveConfig.frames, bounds: namedLiveConfig.host, validate: namedLiveConfig.validate,
+      admitAccountWork, frames: namedLiveConfig.frames, bounds: namedLiveConfig.host, validate: namedLiveConfig.validate,
       sessions: desktopAdmission, tickets, captureNative, membership, admission});
     server.once("close", desktopLive.close); process.once("SIGINT", desktopLive.close); process.once("SIGTERM", desktopLive.close);
   }
-  const ownerLive = createOwnerLiveRoutes({ storage, resolveActor, lookupUserDisplayName, hosts: new Set(process.env.DOHC_RELAY_NAMED_LIVE_HOSTS!.split(",")),
+  ownerLive = createOwnerLiveRoutes({ storage, resolveActor, lookupUserDisplayName, hosts: new Set(process.env.DOHC_RELAY_NAMED_LIVE_HOSTS!.split(",")),
     publicOrigin: shareWebOrigin!, exchangeKey: relayExchangeKey!, limits: namedLiveConfig.transport,
-    frames: namedLiveConfig.frames, bounds: namedLiveConfig.host, validate: namedLiveConfig.validate, captureNative, admission });
+    admitAccountWork, frames: namedLiveConfig.frames, bounds: namedLiveConfig.host, validate: namedLiveConfig.validate, captureNative, admission });
   server.once("close", ownerLive.close);
   process.once("SIGINT", ownerLive.close); process.once("SIGTERM", ownerLive.close);
   server.on("upgrade", (request, socket, head) => {
-    if (/^\/sync\/workspaces\/[^/]+\/live\/owner(?:\?|$)/.test(request.url ?? "")) void ownerLive.handleUpgrade(request, socket, head);
-    else if (request.url?.startsWith("/sync/live/named?")) void namedLive!.handleUpgrade(request, socket, head);
-    else if (request.url?.startsWith("/sync/live/link?")) {if (linkLive) void linkLive.handleUpgrade(request, socket, head); else socket.destroy();}
-    else if (request.url?.startsWith("/sync/live/desktop?")) {if (desktopLive) void desktopLive.handleUpgrade(request, socket, head); else socket.destroy();}
+    if (/^\/sync\/workspaces\/[^/]+\/live\/owner(?:\?|$)/.test(request.url ?? "")) void admitAccountWork(() => ownerLive!.handleUpgrade(request, socket, head)).catch(() => socket.destroy());
+    else if (request.url?.startsWith("/sync/live/named?")) void admitAccountWork(() => namedLive!.handleUpgrade(request, socket, head)).catch(() => socket.destroy());
+    else if (request.url?.startsWith("/sync/live/link?")) {if (linkLive) void admitAccountWork(() => linkLive!.handleUpgrade(request, socket, head)).catch(() => socket.destroy()); else socket.destroy();}
+    else if (request.url?.startsWith("/sync/live/desktop?")) {if (desktopLive) void admitAccountWork(() => desktopLive!.handleUpgrade(request, socket, head)).catch(() => socket.destroy()); else socket.destroy();}
     else if (!deviceControl) socket.destroy();
   });
   server.once("close", namedLive.close);
   process.once("SIGINT", namedLive.close); process.once("SIGTERM", namedLive.close);
 }
-server.listen(requestedPort, host, () => {
-  const address = server.address();
-  const actualPort = typeof address === "object" && address ? address.port : requestedPort;
-  console.log(`[sync-relay] listening on ${host}:${actualPort}`);
-  console.log(`SYNC_RELAY_LISTENING host=${host} port=${actualPort}`);
-  if (testAuthSeam) console.log("[sync-relay] SYNC_RELAY_TEST_AUTH seam ENABLED (dev/test only)");
-});
+
 
 // A server that does not run automations keeps no copies of workspaces.
 const automationRoot = process.env.DOHC_RELAY_SERVICE_HOST_ROOT ? join(process.env.DOHC_RELAY_SERVICE_HOST_ROOT, "automations") : undefined;
@@ -673,9 +713,23 @@ automations = automationServer && automationReplicaKey && automationRoot ? await
   onError: (context, error) => console.error(`[sync-relay] automations: ${context}:`, error),
 }) : undefined;
 
+if (pool) {
+  const jobs = await pool.query<{user_id: string; email: string}>("SELECT user_id,email FROM account_deletion_jobs");
+  for (const job of jobs.rows) await deletions.purge(job.user_id,job.email).catch(() => console.error("[sync-relay] Account deletion remains pending."));
+}
+
+server.listen(requestedPort, host, () => {
+  const address = server.address();
+  const actualPort = typeof address === "object" && address ? address.port : requestedPort;
+  console.log(`[sync-relay] listening on ${host}:${actualPort}`);
+  console.log(`SYNC_RELAY_LISTENING host=${host} port=${actualPort}`);
+  if (testAuthSeam) console.log("[sync-relay] SYNC_RELAY_TEST_AUTH seam ENABLED (dev/test only)");
+});
+
 installShutdown(server, {
   gracePeriodMs: SHUTDOWN_GRACE_PERIOD_MS,
   onClosed: async () => {
+    await deletionWatcher?.close();
     await documentProjection?.close();
     await ownerAdmissionRun?.close();
     await automations?.close();
@@ -686,6 +740,7 @@ installShutdown(server, {
     if (!deployment) await rm(datasetDirectory, {recursive: true, force: true, maxRetries: 8, retryDelay: 25});
     storage.close();
     try {
+      await deletionPool?.end();
       await pool?.end();
     } finally {
       process.exit(0);

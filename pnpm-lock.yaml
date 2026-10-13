@@ -928,6 +928,9 @@ importers:
       '@dohc/service-http':
         specifier: workspace:*
         version: link:../../packages/service-http
+      '@dohc/workspace-auth':
+        specifier: workspace:*
+        version: link:../../packages/workspace-auth
       '@dohc/workspace-contracts':
         specifier: workspace:*
         version: link:../../packages/workspace-contracts
@@ -977,9 +980,6 @@ importers:
       '@dohc/sync-relay':
         specifier: workspace:*
         version: link:../sync-relay
-      '@dohc/workspace-auth':
-        specifier: workspace:*
-        version: link:../../packages/workspace-auth
       '@modelcontextprotocol/client':
         specifier: 2.0.0
         version: 2.0.0

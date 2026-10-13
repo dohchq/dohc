@@ -183,7 +183,7 @@ export function createPresenceProjection(
     labels.set(userId, { expiresAtMs: now + ACCOUNT_LABEL_TTL_MS, value });
     return value;
   };
-  return async (
+  const project = async (
     snapshot: PresenceSnapshot,
     input: {
       scopeKey: string;
@@ -235,4 +235,5 @@ export function createPresenceProjection(
     });
     return { version: snapshot.version, peers };
   };
+  return Object.assign(project, {deleteAccount(userId: string) {labels.delete(userId);}});
 }

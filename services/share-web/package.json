@@ -25,6 +25,7 @@
     "@dohc/live-session-contract": "workspace:*",
     "@dohc/security-contract": "workspace:*",
     "@dohc/service-http": "workspace:*",
+    "@dohc/workspace-auth": "workspace:*",
     "@dohc/workspace-contracts": "workspace:*",
     "@dohc/workspace-core": "workspace:*",
     "@dohc/ydoc-projection": "workspace:*",
@@ -43,7 +44,6 @@
   "devDependencies": {
     "@dohc/app-backend-runtime": "workspace:*",
     "@dohc/sync-relay": "workspace:*",
-    "@dohc/workspace-auth": "workspace:*",
     "@modelcontextprotocol/client": "2.0.0",
     "@peculiar/x509": "^2.1.0",
     "@playwright/test": "^1.62.1",

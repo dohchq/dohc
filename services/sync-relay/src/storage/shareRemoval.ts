@@ -176,6 +176,10 @@ export function listRemovedSharesForRecipient(storage: StorageContext, userId: s
     GROUP BY g.share_id
     ORDER BY revoked_at_ms DESC, g.grant_id LIMIT 1000`).all(...(shareId === undefined ? [userId, userId] : [userId, shareId, userId])) as
     { share_id: string; grant_id: string; revoked_at_ms: number }[];
+  if (shareId !== undefined && storage.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='sync_relay_ended_shares'").get() &&
+      storage.db.prepare("SELECT 1 FROM sync_relay_ended_shares WHERE share_id=?").get(shareId)) {
+    return [{shareId, grantId: shareId, message: "The owner removed your access." as const, removedAtMs: 0}];
+  }
   return rows.map(row => ({ shareId: row.share_id, grantId: row.grant_id,
     message: "The owner removed your access." as const, removedAtMs: row.revoked_at_ms }));
 }

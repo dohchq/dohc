@@ -83,6 +83,7 @@ services:
     environment:
       <<: *auth
       DOHC_RELAY_LINK_KEY: ${DOHC_RELAY_LINK_KEY:?Run the self-host bootstrap to generate secrets}
+      DOHC_RELAY_SHARE_WEB_URL: http://share-web:1790
       DOHC_RELAY_EXCHANGE_KEY: ${DOHC_RELAY_EXCHANGE_KEY:?Run the self-host bootstrap to generate secrets}
       DOHC_RELAY_SHARE_WEB_ORIGIN: ${DOHC_PUBLIC_ORIGIN:?Set DOHC_PUBLIC_ORIGIN}
       SYNC_RELAY_AUTH_BASE_URL: ${DOHC_PUBLIC_ORIGIN:?Set DOHC_PUBLIC_ORIGIN}

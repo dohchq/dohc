@@ -894,5 +894,12 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
       });
     },
   };
-  return host;
+  return Object.assign(host, {
+    async retireScope(key: DatasetScope): Promise<void> {
+      await options.supervisor.retire?.(key);
+      for (const [id, saved] of migrationCandidates) {
+        if (saved.candidate.expected.workspaceId === key.workspaceId && saved.candidate.expected.datasetId === key.datasetId) migrationCandidates.delete(id);
+      }
+    },
+  });
 }

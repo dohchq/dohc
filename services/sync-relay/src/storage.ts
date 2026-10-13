@@ -1,3 +1,4 @@
+import {accountIsFenced} from "./storage/accountDeletion";
 import {prepareLiveApplications} from "./storage/liveApplicationAuthorship";
 import {prepareHostedSettlements} from "./storage/hostedSettlement";
 import * as shareLabelsStorage from "./storage/shareLabels";
@@ -357,6 +358,8 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     this.newDiscussionId = options.newDiscussionId;
   }
 
+  invalidate(): void {this.owner.invalidate();}
+
   close(): void {
     this.owner.close();
   }
@@ -387,7 +390,8 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     return serviceHostEnrollmentStorage.listRetiredServiceHostEnrollments(this, workspaceId, after);
   }
   currentServiceHostWorkspace(workspaceId: string) {
-    return serviceHostEnrollmentStorage.currentServiceHostWorkspace(this, workspaceId);
+    const row = serviceHostEnrollmentStorage.currentServiceHostWorkspace(this, workspaceId);
+    return row && !accountIsFenced(this, row.ownerUserId) ? row : null;
   }
   scanServiceHostCandidateShares(after?: serviceHostEnrollmentStorage.ServiceHostCandidateCursor, workspaceId?: string) {
     return serviceHostEnrollmentStorage.scanServiceHostCandidateShares(this, after, workspaceId);
@@ -574,7 +578,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
   }
 
   workspaceIsOwnedBy(workspaceId: string, ownerUserId: string): boolean {
-    return workspacesStorage.workspaceIsOwnedBy(this, workspaceId, ownerUserId);
+    return !accountIsFenced(this, ownerUserId) && workspacesStorage.workspaceIsOwnedBy(this, workspaceId, ownerUserId);
   }
 
   readReplicaStanding(workspaceId: string, shareGrantBindings?: string) { return replicaReads.readReplicaStanding(this, workspaceId, shareGrantBindings); }
@@ -676,7 +680,8 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
   }
 
   currentAutomationWorkspace(workspaceId: string) {
-    return automationWorkspaceStorage.currentAutomationWorkspace(this, workspaceId);
+    const row = automationWorkspaceStorage.currentAutomationWorkspace(this, workspaceId);
+    return row && !accountIsFenced(this, row.ownerUserId) ? row : null;
   }
 
   liveClaimLogSeq(input: { workspaceId: string; liveCursor: number }) {

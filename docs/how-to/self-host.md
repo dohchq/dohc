@@ -83,7 +83,7 @@ The command creates `.env.self-host` and generates the deployment secrets.
 It refuses to replace an existing configuration.
 Restrict access to this file; it contains credentials.
 
-Edit these SMTP settings in `.env.self-host`:
+Edit these SMTP settings and your approved email in `.env.self-host`:
 
 ```dotenv
 DOHC_SMTP_HOST=smtp.your-provider.com
@@ -92,6 +92,7 @@ DOHC_SMTP_SECURE=false
 DOHC_SMTP_USER=your-smtp-user
 DOHC_SMTP_PASSWORD=your-smtp-password
 DOHC_SMTP_FROM=dohc <dohc@your-domain.com>
+DOHC_SIGN_UP_EMAILS=you@your-domain.com
 ```
 
 Port 587 uses STARTTLS. For implicit TLS, use port 465 and `DOHC_SMTP_SECURE=true`.
@@ -127,9 +128,36 @@ It uses the peer address instead when the header is missing, is longer than 4,09
 It answers 400 to a connection without an IP address.
 The [proxy section of the share-web operations reference](../../services/share-web/README.md#public-origin-and-proxy) describes the `share-web` rules.
 
+## Delete a server account
+
+A signed-in person can preview deletion with `POST /api/auth/account/deletion-preview`.
+The preview lists the email, server origin, owned workspace IDs, stored bytes, and counts of shares and grants.
+It returns a preview token that expires after five minutes.
+
+Send that token as `{"previewToken":"..."}` to `POST /api/auth/account/delete`.
+The request needs a fresh Better Auth session.
+If the preview changed, request another preview before continuing.
+Share-link and app credentials cannot delete a server account.
+
+Deletion removes the server account, its owned workspaces, and their files, data, shares, apps, chats, and history.
+Local copies remain on each device.
+Received shares end, and their local copies remain readable.
+Contributions to another person's workspace stay in that workspace's history and discussion, including their stored authorship snapshots.
+
+Deletion first blocks account access, then removes server data.
+If another service is unavailable, deletion stays pending and access remains blocked.
+The server resumes pending deletion after a restart.
+The response reports `finished: true` only after the relay purge and account cleanup finish.
+
+Account deletion does not edit backups.
+Backups remain until the 30-day retention period ends.
+Remove the person's email from `DOHC_SIGN_UP_EMAILS` yourself; the API does not change operator configuration.
+An empty allowlist keeps sign-up closed.
+
 ## Choose who can create an account
 
-By default, anyone who can reach the server can create an account on it.
+The deployment bundle keeps sign-up closed to approved email addresses and pending invites.
+Add your email before the first start.
 To close sign-up, list the approved email addresses in `.env.self-host`, separated by commas:
 
 ```dotenv
@@ -158,7 +186,8 @@ The server checks eligibility when it creates the account.
 Removing an address from the list later does not remove its account.
 Revoking an invite after its account exists does not remove that account either.
 Stop and start the deployment to apply a changed list.
-Leave `DOHC_SIGN_UP_EMAILS` empty to open sign-up again.
+An empty `DOHC_SIGN_UP_EMAILS` allows only pending invites.
+For open sign-up, remove the `DOHC_SIGN_UP_EMAILS` environment entry from your deployment configuration.
 
 `workspace-api` asks `sync-relay` about pending invites over the internal Docker network.
 If the relay does not answer, an address outside the list gets a message to try again.

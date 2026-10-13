@@ -282,6 +282,27 @@ describe("the automation replicas", () => {
     return { replicas: started, root };
   }
 
+  it("deletes an account's replica immediately and never reopens it", async () => {
+    const {storage} = await relay();
+    storage.claimWorkspace({workspaceId: "survivor", ownerUserId: "other", createdAtMs: 1});
+    storage.claimWorkspaceIdentity({workspaceId: "survivor", replicationEpoch: "epoch", streamIdentity: "stream"});
+    const engine = fakeEngine();
+    const {replicas: running} = await replicas(storage, () => [WORKSPACE, "survivor"], {ms: 0});
+    const deletedRoot = running.replica(WORKSPACE)!.root;
+    const survivorRoot = running.replica("survivor")!.root;
+    await running.deleteWorkspaces([WORKSPACE]);
+    expect(running.replica(WORKSPACE)).toBeUndefined();
+    expect(existsSync(deletedRoot)).toBe(false);
+    expect(existsSync(survivorRoot)).toBe(true);
+    const opens = engine.methods().filter(method => method === "workspace.open").length;
+    running.reconcile();
+    await running.settled();
+    expect(engine.methods().filter(method => method === "workspace.open")).toHaveLength(opens);
+    expect(existsSync(deletedRoot)).toBe(false);
+    await running.deleteWorkspaces([WORKSPACE]);
+    expect(running.replica("survivor")).toBeDefined();
+  });
+
   it("checks the daemon even without workspaces, and reports its exit until it restarts", async () => {
     const { storage } = await relay();
     const engine = fakeEngine();

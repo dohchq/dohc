@@ -440,7 +440,8 @@ it.skipIf(engine.missing).each(["write", "undo"] as const)("delivers a server re
     recordDelivery: {namespace, capture}, readOwnerShares: relay.readOwnerShares, lookupUserDisplayName: () => "Owner",
     noticeLimiter: new TokenBucketLimiter(10, 1, 100), onError: (context, error) => errors.push(`${context}: ${String(error)}`),
     startReplicas: async options => {hooks = options; const stop = hostedReplica.client.onEvent(event => options.onEngineEvent?.(event));
-      return {unavailable: false, replica: () => hostedReplica, reconcile: () => undefined, failedSyncs: () => new Map(), settled: async () => undefined, close: async () => stop()};},
+      return {unavailable: false, replica: () => hostedReplica, reconcile: () => undefined, deleteWorkspaces: async () => undefined,
+      failedSyncs: () => new Map(), settled: async () => undefined, close: async () => stop()};},
   };
   let running = await startAutomationServer(serverOptions);
   cleanup.push(() => running.close());
@@ -750,7 +751,8 @@ it.skipIf(engine.missing)("finds one filtered record among 5000 without refreshi
     recordDelivery: {namespace: "find-5000", capture}, readOwnerShares: relay.readOwnerShares, lookupUserDisplayName: () => "Owner",
     noticeLimiter: new TokenBucketLimiter(10, 1, 100), onError: (_context, error) => {throw error;},
     createExecutor: input => {options = input; return new CollectionAutomations(input);},
-    startReplicas: async input => {hooks = input; return {unavailable: false, replica: () => replica, reconcile: () => undefined, failedSyncs: () => new Map(), settled: async () => undefined, close: async () => undefined};}});
+    startReplicas: async input => {hooks = input; return {unavailable: false, replica: () => replica, reconcile: () => undefined, deleteWorkspaces: async () => undefined,
+      failedSyncs: () => new Map(), settled: async () => undefined, close: async () => undefined};}});
   cleanup.push(() => running.close());
   hooks!.onChanged?.(WORKSPACE);
   await vi.waitFor(() => expect(options).toBeDefined(), {timeout: DEADLINE_MS});
