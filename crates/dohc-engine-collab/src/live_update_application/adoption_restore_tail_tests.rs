@@ -689,7 +689,7 @@ fn native_restore_classifies_a_lost_ack_before_the_accepted_checkpoint() {
                     },
                     update_bytes: vec![0, 0],
                 };
-                accepted_history::append(tx, &held, &event, 100_000_000)?;
+                accepted_history::append_native(tx, &held, &event, 100_000_000)?;
                 insert_application(tx, &held, &event, ack.local_ydoc_sequence)?;
                 terminal = event.metadata.accepted.receipt;
             }
@@ -1397,7 +1397,7 @@ fn native_restore_keeps_enrolled_owner_drafts_as_truthful_sources() {
             f.store
                 .write_with(&NoFaults, |tx| {
                     durable::record_authorized_update_in_tx(
-                        tx, &key, &update, true, None, None, false, 11,
+                        tx, &key, &update, true, None, None, false, true, 11,
                     )
                 })
                 .unwrap();
@@ -1551,7 +1551,7 @@ fn native_restore_tail_accepts_trusted_deduped_pre_adoption_source_as_overlappin
         .store
         .write_with(&NoFaults, |tx| {
             let outcome = durable::record_authorized_update_in_tx(
-                tx, &key, &original, true, None, None, false, 11,
+                tx, &key, &original, true, None, None, false, true, 11,
             )?;
             owner_outbox::append_adopted_local_update_in_tx(
                 tx,

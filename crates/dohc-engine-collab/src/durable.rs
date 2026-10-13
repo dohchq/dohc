@@ -919,6 +919,7 @@ fn append_local_update(
     actor_origin_id: Option<&str>,
     attribution: Option<&ChangeAttribution>,
     authors_admitted: bool,
+    local_edit: bool,
     now_ms: i64,
 ) -> Result<AppendOutcome, CollabError> {
     if let Some(actor_origin_id) = actor_origin_id {
@@ -937,24 +938,28 @@ fn append_local_update(
     let settlement_requested = !authors_admitted
         && crate::author_coverage::check_admission_in(conn, key, actor_origin_id, attribution)?;
     let base = load_doc_in(conn, key)?;
-    let (_, seq, record_facts) = append_and_index_update(
+    let projection = crate::validate_replay_parity_with_scratch(&base, update)?;
+    let (seq, record_facts) = append_validated_and_index_update(
         conn,
         key,
         marker.content_kind,
         &base,
+        Some(&projection),
         update,
         sha,
         index_frontmatter,
         actor_origin_id,
         attribution,
         None,
+        local_edit,
         now_ms,
     )?;
     Ok(AppendOutcome {
         settlement_requested,
         seq,
         deduped: false,
-        emit_outbound: marker.regime == Regime::Replicated
+        emit_outbound: local_edit
+            && marker.regime == Regime::Replicated
             && marker.lineage_claim_status == LineageClaimStatus::Exact,
         record_facts,
     })
@@ -2231,6 +2236,7 @@ pub fn record_update_in_tx(
         actor_origin_id,
         attribution,
         false,
+        true,
         now_ms,
     )
 }
@@ -2246,6 +2252,7 @@ pub(crate) fn record_authorized_update_in_tx(
     actor_origin_id: Option<&str>,
     attribution: Option<&ChangeAttribution>,
     authors_admitted: bool,
+    local_edit: bool,
     now_ms: i64,
 ) -> Result<AppendOutcome, CollabError> {
     validate_update_bytes(update)?;
@@ -2261,6 +2268,7 @@ pub(crate) fn record_authorized_update_in_tx(
         actor_origin_id,
         attribution,
         authors_admitted,
+        local_edit,
         now_ms,
     )
 }

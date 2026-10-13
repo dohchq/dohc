@@ -20,7 +20,9 @@ use dohc_engine_protocol::{
 use dohc_engine_runtime::{RuntimeError, WorkspaceSupervisor};
 #[cfg(test)]
 use dohc_workspace_engine::EngineEventNotice;
-use dohc_workspace_engine::live_application_ingress::{LiveApplicationIngress, UploadCompletion};
+use dohc_workspace_engine::live_application_ingress::{
+    LiveApplicationIngress, LiveApplicationIngressConfig, UploadCompletion,
+};
 use dohc_workspace_engine::{ConfiguredLiveHostConfig, EngineService, LiveApplicationInput};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::{
@@ -121,7 +123,19 @@ async fn run_stdio(auth_token: String) -> Result<(), Box<dyn Error>> {
                 let (service, owner, ingress) = EngineService::ordinary_live_host(config)?;
                 (service, Some((owner, ingress)))
             }
-            None => (Arc::new(EngineService::new()), None),
+            None => {
+                let service = Arc::new(EngineService::new());
+                let ingress = LiveApplicationIngress::new(
+                    service.clone(),
+                    LiveApplicationIngressConfig {
+                        aggregate_bytes: 2 * 1024 * 1024 * 1024,
+                        application_working_reserve_bytes: 32 * 1024 * 1024,
+                        max_uploads: 1,
+                        upload_deadline: std::time::Duration::from_secs(120),
+                    },
+                )?;
+                (service, Some((ConnectionOwner::authenticated(), ingress)))
+            }
         },
     };
     let supervisor = Arc::new(Supervisor::new(
@@ -463,7 +477,8 @@ where
                         Envelope::Request(request)
                             if matches!(
                                 request.method.as_str(),
-                                "liveApplication.apply"
+                                "replica.applyJournalPage"
+                                    | "liveApplication.apply"
                                     | "ydoc.ownerDelivery.applyAcceptedFrame"
                                     | "ydoc.ownerDelivery.applyInitialSync"
                                     | "ydoc.ownerDelivery.enroll"

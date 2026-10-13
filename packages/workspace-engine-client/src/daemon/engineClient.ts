@@ -9,6 +9,7 @@ import type { BlobStart, Envelope, Event, Request, Response, WireError } from ".
 import type { EngineTransport } from "../ydoc/ydocLiveAdapter";
 import type { OwnerYDocOutboxAppendResult } from "../ydoc/ownerYDocOutbox";
 import { decodeOwnerYDocOutboxAppendResult, decodeOwnerYDocDraftDescriptor, type YdocOwnerDraft } from "../ydoc/ydocWireContract";
+import { encodeReplicaJournalPage, replicaPageResult, type ReplicaJournalRow, type ReplicaPageResult } from "./replicaJournal";
 import { parseNativeOwnerActivation, type NativeOwnerActivation } from "./nativeOwnerActivation";
 
 const FRAME_MAGIC = Buffer.from("DOP1", "ascii");
@@ -1487,6 +1488,17 @@ export class EngineClient implements EngineTransport {
     return { response, bytes: output.blob!.bytes };
   }
 
+  async applyReplicaJournalPage(request: Omit<LiveApplicationRequest, "registrationId">, after: number, epochLogFloor: number, rows: readonly ReplicaJournalRow[], signal?: AbortSignal): Promise<ReplicaPageResult> {
+    if (!Number.isSafeInteger(after) || after < 0) throw new TypeError("Invalid replica cursor.");
+    if (!Number.isSafeInteger(epochLogFloor) || epochLogFloor < 0) throw new TypeError("Invalid replica epoch floor.");
+    const bytes = encodeReplicaJournalPage(rows);
+    const response = await this.sendLiveUpload(request, "replica.applyJournalPage", bytes.length * 3 + 3 * 1024 * 1024, () => {
+      const streamId = this.nextLiveStreamId++, digest = createHash("sha256").update(bytes).digest("hex");
+      return {params: {after, epochLogFloor, streamId, byteLength: bytes.length, digest}, streams: [{streamId, bytes, digest}]};
+    }, signal);
+    return replicaPageResult(response.result);
+  }
+
   private async sendLiveUpload(
     request: Omit<LiveApplicationRequest, "registrationId"> & { registrationId?: number },
     method: string,
@@ -1508,7 +1520,7 @@ export class EngineClient implements EngineTransport {
       throw new TypeError("Private live application uploads require a positive blob chunk limit.");
     }
     if (
-      (!restoreOutput && !["ydoc.ownerDelivery.applyAcceptedFrame","ydoc.ownerDelivery.applyInitialSync","ydoc.ownerDelivery.isReceiptApplied","ydoc.ownerDelivery.listDrafts","ydoc.ownerDelivery.appendDraft","ydoc.ownerDelivery.prepareEnrollment","ydoc.ownerDelivery.enroll","ydoc.ownerDelivery.refuseEntry"].includes(method) && (!Number.isSafeInteger(request.registrationId) ||
+      (!restoreOutput && !["replica.applyJournalPage","ydoc.ownerDelivery.applyAcceptedFrame","ydoc.ownerDelivery.applyInitialSync","ydoc.ownerDelivery.isReceiptApplied","ydoc.ownerDelivery.listDrafts","ydoc.ownerDelivery.appendDraft","ydoc.ownerDelivery.prepareEnrollment","ydoc.ownerDelivery.enroll","ydoc.ownerDelivery.refuseEntry"].includes(method) && (!Number.isSafeInteger(request.registrationId) ||
       request.registrationId! < 1)) ||
       !Number.isSafeInteger(request.deadlineMs) ||
       request.deadlineMs < 1 ||

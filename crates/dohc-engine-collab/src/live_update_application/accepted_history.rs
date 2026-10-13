@@ -572,7 +572,7 @@ fn segment_position(
 
 /// A full accepted history is initialized only by verified bootstrap or adoption.
 /// Other application users can keep applying without gaining restore authority.
-pub(super) fn append(
+pub(super) fn append_native(
     tx: &Transaction<'_>,
     held: &Registration,
     event: &AdmittedLiveUpdate,
@@ -709,26 +709,16 @@ fn append_inner(
     };
     let count = count + 1;
     let evidence = next_digest(&previous, count, &event.metadata)?;
-    let update = put_binary_blob(tx, &event.update_bytes)?;
-    tx.execute(
-        "INSERT INTO live_accepted_updates VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",
-        params![
-            p[0],
-            p[1],
-            p[2],
-            p[3],
-            p[4],
-            count,
-            event.metadata.accepted.receipt.journal_cursor,
-            event.metadata.accepted.receipt.delivery_id,
-            native_state::json(&event.metadata)?,
-            update,
-            events,
-            bytes,
-            evidence
-        ],
-    )
-    .map_err(write_sql)?;
+    append(
+        tx,
+        &held.namespace,
+        &held.binding,
+        event,
+        count,
+        events,
+        bytes,
+        &evidence,
+    )?;
     if restored.is_some()
         || events == CHECKPOINT_EVENTS
         || bytes >= CHECKPOINT_BYTES
@@ -780,6 +770,47 @@ fn append_inner(
             budget,
         )?;
     }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn append(
+    tx: &Transaction<'_>,
+    namespace: &str,
+    binding: &LiveObjectBinding,
+    event: &AdmittedLiveUpdate,
+    count: i64,
+    events: i64,
+    bytes: i64,
+    evidence: &str,
+) -> Result<(), ApplicationError> {
+    let p = [
+        namespace,
+        &binding.workspace_id,
+        &binding.main_version_id,
+        &binding.object_id,
+        &binding.lineage_claim_id,
+    ];
+    let update = put_binary_blob(tx, &event.update_bytes)?;
+    tx.execute(
+        "INSERT INTO live_accepted_updates VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",
+        params![
+            p[0],
+            p[1],
+            p[2],
+            p[3],
+            p[4],
+            count,
+            event.metadata.accepted.receipt.journal_cursor,
+            event.metadata.accepted.receipt.delivery_id,
+            native_state::json(&event.metadata)?,
+            update,
+            events,
+            bytes,
+            evidence
+        ],
+    )
+    .map_err(write_sql)?;
     Ok(())
 }
 

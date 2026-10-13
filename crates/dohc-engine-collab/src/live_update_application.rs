@@ -30,6 +30,7 @@ pub(crate) use publication::{
     read_native_accepted_in, read_restore_predecessor_in, require_restore_registration_in,
 };
 mod ack_read;
+pub mod passive;
 mod sync;
 pub use ack_read::{read_application_ack, LiveApplicationAckIdentity};
 pub use sync::{
@@ -728,7 +729,8 @@ pub struct AdmittedNativeHistoryReconstruction {
     pub reservation: std::sync::Arc<dyn Send + Sync>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AdmittedLiveUpdate {
     pub metadata: AdmittedLiveUpdateMetadata,
     pub update_bytes: Vec<u8>,
@@ -1289,7 +1291,7 @@ pub fn apply_committed(
                     Vec::new(),
                 ));
             }
-            check_provenance(tx, &held.namespace, &event)?;
+            check_provenance(tx, &held.namespace, &event, false)?;
             if adoption::read_origin(tx, &held)?.is_some_and(|origin| {
                 event.metadata.accepted.receipt.journal_cursor
                     <= origin
@@ -1369,6 +1371,7 @@ pub fn apply_committed(
                 true,
                 native_actor.and_then(|(actor, _)| actor.as_deref()),
                 native_actor.and_then(|(_, attribution)| attribution.as_ref()),
+                true,
                 true,
                 event.metadata.accepted.received_at_ms,
             )?;
@@ -1467,7 +1470,7 @@ pub fn apply_committed(
                     })
                 })?;
             }
-            accepted_history::append(tx, &held, &event, working_reserve_bytes)?;
+            accepted_history::append_native(tx, &held, &event, working_reserve_bytes)?;
             let readback = read_application(tx, &held.namespace, &event.metadata.accepted.receipt)?
                 .ok_or(ApplicationError::Corrupt)?;
             if readback.event != event
@@ -1707,11 +1710,16 @@ fn check_provenance(
     conn: &Connection,
     namespace: &str,
     event: &AdmittedLiveUpdate,
+    passive: bool,
 ) -> Result<(), ApplicationError> {
     let b = &event.metadata.accepted.binding;
     // Join by the namespace-wide delivery identity, then check the child's raw
     // workspace. A damaged child must not disappear behind a workspace filter.
-    let mut query = conn.prepare("SELECT a.delivery_id,a.first_seen_count,f.workspace_id,f.ordinal,f.client_id,f.start_clock,f.end_clock FROM live_device_update_applications a LEFT JOIN live_device_application_first_seen f ON f.relay_database_namespace=a.relay_database_namespace AND f.delivery_id=a.delivery_id WHERE a.relay_database_namespace=?1 AND a.workspace_id=?2 AND a.main_version_id=?3 AND a.object_id=?4 AND a.lineage_claim_id=?5 ORDER BY f.client_id,f.start_clock,a.delivery_id,f.ordinal").map_err(read_sql)?;
+    let passive_sql = "SELECT a.delivery_id,json_array_length(a.metadata_json,'$.firstSeen'),CASE WHEN f.key IS NOT NULL THEN a.workspace_id END,f.key,json_extract(f.value,'$.clientId'),json_extract(f.value,'$.startClock'),json_extract(f.value,'$.endClock') FROM live_accepted_updates a LEFT JOIN json_each(a.metadata_json,'$.firstSeen') f WHERE a.relay_database_namespace=?1 AND a.workspace_id=?2 AND a.main_version_id=?3 AND a.object_id=?4 AND a.lineage_claim_id=?5 ORDER BY json_extract(f.value,'$.clientId'),json_extract(f.value,'$.startClock'),a.delivery_id,f.key";
+    let native_sql = "SELECT a.delivery_id,a.first_seen_count,f.workspace_id,f.ordinal,f.client_id,f.start_clock,f.end_clock FROM live_device_update_applications a LEFT JOIN live_device_application_first_seen f ON f.relay_database_namespace=a.relay_database_namespace AND f.delivery_id=a.delivery_id WHERE a.relay_database_namespace=?1 AND a.workspace_id=?2 AND a.main_version_id=?3 AND a.object_id=?4 AND a.lineage_claim_id=?5 ORDER BY f.client_id,f.start_clock,a.delivery_id,f.ordinal";
+    let mut query = conn
+        .prepare(if passive { passive_sql } else { native_sql })
+        .map_err(read_sql)?;
     let mut rows = query
         .query(params![
             namespace,

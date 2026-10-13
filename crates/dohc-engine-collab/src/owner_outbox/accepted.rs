@@ -224,6 +224,7 @@ fn apply_ordered_in_tx(
         None,
         None,
         false,
+        true,
         now_ms,
     )
     .map_err(collab)?;
