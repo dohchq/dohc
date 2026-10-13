@@ -128,7 +128,7 @@ async function fixture(options: {
   const reference = async (path: string) => {
     const objectId = await engine().fileObjectIdForPath(path);
     if (!objectId) throw new Error("Fixture path is untracked: " + path);
-    return workspaceFileRef(workspaceId, objectId, path);
+    return workspaceFileRef(workspaceId, objectId);
   };
   return { reference, resolve: (refs: WorkspaceFileRef[]) => resolveRefs({ workspaceId, rootPath, attachmentId }, refs), rootPath, systemTrash, systemTrashed, operation, engine, trashItem, markDeleted, settle, rows, start, added, workspaceTrash,
     move: (fromPath: string, toPath: string, by: MomentWriteAuthor = named, overwrite?: boolean) =>

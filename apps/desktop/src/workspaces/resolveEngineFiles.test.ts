@@ -70,7 +70,7 @@ it("counts UTF-8 bytes, JSON escapes, commas, and the pinned version across requ
 it("keeps foreign workspace references absent without querying their ids", async () => {
   const resolveFiles = vi.fn(async () => ({ versionId: "main", results: [] }));
   const resolve = createEngineFileResolver(async (_workspace, work) => work({ resolveFiles } as unknown as VersionedLiveAdapter));
-  expect(await resolve({ workspaceId: "local" }, [workspaceFileRef("source", "object", "a.md")])).toEqual([{ status: "absent" }]);
+  expect(await resolve({ workspaceId: "local" }, [workspaceFileRef("source", "object")])).toEqual([{ status: "absent" }]);
   expect(resolveFiles).not.toHaveBeenCalled();
 });
 

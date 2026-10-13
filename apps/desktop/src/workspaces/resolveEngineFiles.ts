@@ -7,13 +7,11 @@ import {
 import type { VersionedLiveAdapter } from "@dohc/workspace-engine-client";
 
 import type { WorkspaceFileRef } from "@dohc/workspace-contracts/workspace-ref";
-import { fileKindForPath } from "@dohc/workspace-contracts/kinds";
-import { posix } from "node:path";
 
-export function workspaceFileRef(workspaceId: string, objectId: string, path?: string): WorkspaceFileRef {
+export function workspaceFileRef(workspaceId: string, objectId: string): WorkspaceFileRef {
   return {
     workspaceId, target: { kind: "file", objectId },
-    labels: { ...(path !== undefined ? { path } : {}), name: path ? posix.basename(path) : "", displayKind: fileKindForPath(path ?? "").displayKind },
+    labels: { name: "", displayKind: "binary" },
   };
 }
 
