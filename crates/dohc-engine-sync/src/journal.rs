@@ -92,6 +92,9 @@ pub(crate) fn crashes(_faults: &dyn FaultInjector, _point: FaultPoint) -> bool {
 /// [`journal_local_op_in_tx`] refuses without one, and that refusal would roll
 /// the user's edit back with it.
 ///
+/// A hosted replica answers `true` from its creation: the session host
+/// exists only to replicate, and its position lives in `hosted_replicas`.
+///
 /// This reads past contact, not current enrolment. A freshly enrolled
 /// workspace answers `false` until its first push or pull commits; the
 /// deferred drain, the non-leased apply path, and the enrolment backfill retry
@@ -114,7 +117,8 @@ pub fn workspace_replicates_with_relay(
     conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM sync_identity WHERE workspace_id = ?1) \
            AND (EXISTS(SELECT 1 FROM sync_relay_cursors WHERE workspace_id = ?1) \
-             OR EXISTS(SELECT 1 FROM sync_relay_push_state WHERE workspace_id = ?1))",
+             OR EXISTS(SELECT 1 FROM sync_relay_push_state WHERE workspace_id = ?1) \
+             OR EXISTS(SELECT 1 FROM hosted_replicas WHERE workspace_id = ?1))",
         [workspace_id],
         |row| row.get(0),
     )

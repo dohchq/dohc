@@ -86,6 +86,62 @@ pub struct PullResponse {
     pub has_more: bool,
 }
 
+/// A read of the session host's scoped feed, `GET /sync/:workspace/hosted/log`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostedPullRequest {
+    pub workspace_id: String,
+    pub replication_epoch: String,
+    pub stream_identity: String,
+    /// The scope the host last adopted, sent as `scope`. `None` before the first.
+    pub scope_token: Option<String>,
+    /// One document's backfill, sent as `object`. `None` reads the main feed.
+    pub object_id: Option<String>,
+    pub cursor: i64,
+    pub limit: usize,
+}
+
+/// One scoped feed page. Its cursor may pass rows the feed withholds. When the
+/// request's scope token is stale, it carries no ops and the request's cursor,
+/// and its scope is the one the host must adopt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostedPullResponse {
+    pub scope: HostedScope,
+    pub ops: Vec<ReplicationEnvelope>,
+    pub next_cursor: i64,
+    pub has_more: bool,
+}
+
+/// The documents the host may read, under the token that names them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostedScope {
+    pub token: String,
+    pub documents: Vec<HostedScopeDocument>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostedScopeDocument {
+    pub object_id: String,
+    pub path: String,
+}
+
+/// One hosted pull pass. Its cursor stays pending until the caller
+/// materializes the pass and commits it with [`RelaySyncClient::commit_hosted_cursor`].
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct HostedPassOutcome {
+    pub fetched: usize,
+    pub has_more: bool,
+    pub applied: usize,
+    pub refused: usize,
+    pub skipped: usize,
+    pub conflicts_opened: i64,
+    /// `None` when the pass adopted a new scope and applied nothing.
+    pub pending_cursor: Option<crate::HostedCursor>,
+    pub changed_paths: Vec<crate::MomentMaterializationChange>,
+    pub refusals: Vec<crate::ReplicationRefusal>,
+    pub sharing_declined: Vec<crate::SharingDeclined>,
+    pub record_facts: Vec<dohc_engine_domain::CollectionRecordApplyFacts>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LogCoordinateRequest {
     pub workspace_id: String,
@@ -567,6 +623,15 @@ pub trait RelayTransport {
     }
     fn push(&self, req: PushRequest) -> Result<PushResponse, RelayError>;
     fn pull(&self, req: PullRequest) -> Result<PullResponse, RelayError>;
+    /// GET the session host's scoped feed. Only a hosted replica's transport serves it.
+    fn pull_hosted(&self, _req: HostedPullRequest) -> Result<HostedPullResponse, RelayError> {
+        Err(no_hosted_feed())
+    }
+    /// POST to the scoped feed's log under the host's `service-host:` origin.
+    /// It answers as [`RelayTransport::push`] does.
+    fn push_hosted(&self, _req: PushRequest) -> Result<PushResponse, RelayError> {
+        Err(no_hosted_feed())
+    }
     fn lookup_log_coordinate(
         &self,
         req: LogCoordinateRequest,
@@ -810,6 +875,15 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         &self.transport
     }
 
+    /// A hosted replica writes to the scoped feed's log; any other to the workspace log.
+    fn push_log(&self, hosted: bool, req: PushRequest) -> Result<PushResponse, RelayError> {
+        if hosted {
+            self.transport.push_hosted(req)
+        } else {
+            self.transport.push(req)
+        }
+    }
+
     pub(crate) fn repair_pending_ydoc_base_orders(
         &self,
         store: &mut EngineStore,
@@ -968,13 +1042,14 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             origin_id == &identity.origin_id && *origin_seq > local_pushed_seq
         });
         let relay_origin_max = if needs_confirmation && !passive {
+            let hosted = store
+                .read_with(|conn| crate::hosted::is_hosted(conn, workspace_id))
+                .map_err(local)?;
             // Empty pushes ignore the cursor; keep the request stable across deferred-I/O replay.
-            let probe = self.transport.push(push_probe_request(
-                workspace_id,
-                identity,
-                &identity.origin_id,
-                -1,
-            ))?;
+            let probe = self.push_log(
+                hosted,
+                push_probe_request(workspace_id, identity, &identity.origin_id, -1),
+            )?;
             validate_probe_response(&probe)?;
             probe.current_max_origin_seq
         } else {
@@ -1305,20 +1380,28 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 .ok_or(RelayError::InvalidResponse)?;
             return Err(RelayError::ClaimRefused(Box::new(refusal.clone())));
         }
-        let mut sharing_declined = crate::live_audit::enrollment::prepare_exports(
-            store,
-            workspace_id,
-            faults,
-            leases,
-            now_ms,
-        )
-        .map_err(local)?;
-        select_file_versions(
-            &mut progress.file_versions_selected,
-            store,
-            workspace_id,
-            faults,
-        )?;
+        // A hosted replica holds the owner's documents, not its own: it
+        // enrolls nothing and only sends what its live sessions journal.
+        let hosted = store
+            .read_with(|conn| crate::hosted::is_hosted(conn, workspace_id))
+            .map_err(local)?;
+        let mut sharing_declined = Vec::new();
+        if !hosted {
+            sharing_declined = crate::live_audit::enrollment::prepare_exports(
+                store,
+                workspace_id,
+                faults,
+                leases,
+                now_ms,
+            )
+            .map_err(local)?;
+            select_file_versions(
+                &mut progress.file_versions_selected,
+                store,
+                workspace_id,
+                faults,
+            )?;
+        }
         let mut origins = list_workspace_origins(store, workspace_id).map_err(local)?;
         let mut pushed = 0_usize;
         let mut owner_admission_pending = Vec::new();
@@ -1328,8 +1411,8 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         let has_position = store
             .read_with(|conn| has_relay_position(conn, workspace_id))
             .map_err(local)?;
-        let mut enrollment_prepared = has_position;
-        if origins.is_empty() && !has_position {
+        let mut enrollment_prepared = has_position || hosted;
+        if origins.is_empty() && !enrollment_prepared {
             let response = self.transport.push(push_probe_request(
                 workspace_id,
                 &identity,
@@ -1478,14 +1561,17 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 while batch_start < ops.len() {
                     let batch =
                         &ops[batch_start..(batch_start + progress.batch_size).min(ops.len())];
-                    let response = match self.transport.push(PushRequest {
-                        workspace_id: workspace_id.to_owned(),
-                        replication_epoch: identity.replication_epoch.clone(),
-                        stream_identity: identity.stream_identity.clone(),
-                        origin_id: origin_id.clone(),
-                        after_seq: cursor,
-                        ops: batch.to_vec(),
-                    }) {
+                    let response = match self.push_log(
+                        hosted,
+                        PushRequest {
+                            workspace_id: workspace_id.to_owned(),
+                            replication_epoch: identity.replication_epoch.clone(),
+                            stream_identity: identity.stream_identity.clone(),
+                            origin_id: origin_id.clone(),
+                            after_seq: cursor,
+                            ops: batch.to_vec(),
+                        },
+                    ) {
                         Ok(response) => response,
                         Err(RelayError::SettlementProofBudget) if batch.len() > 1 => {
                             progress.batch_size = (batch.len() / 2).max(1);
@@ -1574,12 +1660,10 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                     continue;
                 }
 
-                let probe = self.transport.push(push_probe_request(
-                    workspace_id,
-                    &identity,
-                    &origin_id,
-                    cursor,
-                ))?;
+                let probe = self.push_log(
+                    hosted,
+                    push_probe_request(workspace_id, &identity, &origin_id, cursor),
+                )?;
                 validate_probe_response(&probe)?;
                 if probe.current_max_origin_seq > local_max
                     || probe.current_max_origin_seq >= cursor
@@ -1642,7 +1726,15 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         let identity = read_sync_identity(store, workspace_id)
             .map_err(local)?
             .ok_or(RelayError::InvalidResponse)?;
-        let (queued, mut durable_origins) = crate::deferred::read(store, workspace_id, &identity)?;
+        if store
+            .read_with(|conn| crate::hosted::is_hosted(conn, workspace_id))
+            .map_err(local)?
+        {
+            return Err(local(SyncError::InvalidInput {
+                reason: "a hosted replica pulls with pull_hosted_workspace",
+            }));
+        }
+        let (queued, durable_origins) = crate::deferred::read(store, workspace_id, &identity)?;
         let current = crate::read_relay_cursor(store, workspace_id).map_err(local)?;
         if let Some(cursor) = &current {
             if cursor.replication_epoch != identity.replication_epoch
@@ -1715,169 +1807,30 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         )?;
         self.hydrate_missing_blobs(store, workspace_id, &identity, &ops, faults)?;
         let ordered = merge_by_origin(ops);
-        let mut applied = 0_usize;
-        let mut refused = 0_usize;
-        let mut skipped = 0_usize;
-        let mut conflicts_opened = 0_i64;
-        let mut refusals = Vec::new();
-        let mut sharing_declined = Vec::new();
-        let mut changed_paths = BTreeMap::new();
-        let mut record_facts = Vec::new();
-        let mut retryable = Vec::new();
-        let mut completed = Vec::new();
-        let recovered =
-            crate::drain_open_document_artifacts(store, cache, workspace_id, leases, faults)
-                .map_err(local)?;
-        for change in recovered.changes {
-            insert_changed_path(&mut changed_paths, change);
-        }
-        record_facts.extend(recovered.record_facts);
-        refusals.extend(recovered.refusals);
-        sharing_declined.extend(recovered.sharing_declined);
-        conflicts_opened += recovered.conflicts_opened;
-        let mut deferred_origins = durable_origins.clone();
-        for op in &ordered {
-            if op.op_kind != "ydoc.update" || op.payload["isBaseState"] == true {
-                crate::ydoc_apply::drain_inactive_ydoc_updates(store, workspace_id, faults)
-                    .map_err(local)?;
-            }
-            let routed = crate::router::apply_replication_envelope_in_batch(
-                store, cache, op, faults, leases, true,
-            );
-            match routed {
-                Err(SyncError::RetryableState { reason }) => {
-                    if retained_while_held(op, reason) {
-                        durable_origins.insert(op.origin_id.clone());
-                    }
-                    deferred_origins.insert(op.origin_id.clone());
-                    retryable.push(op);
-                }
-                Err(SyncError::SequenceGap) if deferred_origins.contains(&op.origin_id) => {
-                    retryable.push(op);
-                }
-                Err(error) => return Err(local(error)),
-                Ok(outcome) => {
-                    completed.push(op);
-                    accumulate_pull_outcome(
-                        store,
-                        op,
-                        outcome,
-                        &mut applied,
-                        &mut refused,
-                        &mut skipped,
-                        &mut conflicts_opened,
-                        &mut changed_paths,
-                        &mut refusals,
-                        &mut sharing_declined,
-                        &mut record_facts,
-                        |claims| self.keep_automation_claims(claims),
-                    )?;
-                }
-            }
-        }
-        while !retryable.is_empty() {
-            let mut still_retryable = Vec::new();
-            let mut still_deferred_origins = durable_origins.clone();
-            let mut made_progress = false;
-            for op in retryable {
-                if op.op_kind != "ydoc.update" || op.payload["isBaseState"] == true {
-                    crate::ydoc_apply::drain_inactive_ydoc_updates(store, workspace_id, faults)
-                        .map_err(local)?;
-                }
-                let routed = crate::router::apply_replication_envelope_in_batch(
-                    store, cache, op, faults, leases, true,
-                );
-                match routed {
-                    Err(SyncError::RetryableState { reason }) => {
-                        if retained_while_held(op, reason) {
-                            durable_origins.insert(op.origin_id.clone());
-                        }
-                        still_deferred_origins.insert(op.origin_id.clone());
-                        still_retryable.push(op);
-                    }
-                    Err(SyncError::SequenceGap)
-                        if still_deferred_origins.contains(&op.origin_id) =>
-                    {
-                        still_retryable.push(op);
-                    }
-                    Err(error) => return Err(local(error)),
-                    Ok(outcome) => {
-                        made_progress = true;
-                        completed.push(op);
-                        accumulate_pull_outcome(
-                            store,
-                            op,
-                            outcome,
-                            &mut applied,
-                            &mut refused,
-                            &mut skipped,
-                            &mut conflicts_opened,
-                            &mut changed_paths,
-                            &mut refusals,
-                            &mut sharing_declined,
-                            &mut record_facts,
-                            |claims| self.keep_automation_claims(claims),
-                        )?;
-                    }
-                }
-            }
-            if still_retryable.is_empty() {
-                break;
-            }
-            if !made_progress {
-                if still_retryable
-                    .iter()
-                    .any(|op| !durable_origins.contains(&op.origin_id))
-                {
-                    return Err(RelayError::Local("retryable-state".to_owned()));
-                }
-                crate::deferred::retain(store, &identity, &still_retryable, faults)?;
-                break;
-            }
-            retryable = still_retryable;
-        }
-        crate::ydoc_apply::drain_inactive_ydoc_updates(store, workspace_id, faults)
-            .map_err(local)?;
-        let mut settlements = match crate::moment_apply::pending::drain_and_claim(
+        let AppliedPass {
+            applied,
+            refused,
+            skipped,
+            conflicts_opened,
+            changed_paths,
+            refusals,
+            mut sharing_declined,
+            record_facts,
+            settlement_report_id,
+            has_more: settled_more,
+        } = self.apply_pulled(
             store,
+            cache,
             workspace_id,
+            &identity,
+            &queued,
+            &ordered,
+            durable_origins,
+            Holding::ByOrigin,
             faults,
             leases,
-        ) {
-            Ok(settlements) => settlements,
-            Err(error) => {
-                // A fault can report failure after the transaction commits.
-                cache.clear();
-                return Err(local(error));
-            }
-        };
-        if settlements.report_id.is_some() {
-            cache.clear();
-        }
-        let replay_more = crate::deferred::claim_report(
-            store,
-            workspace_id,
-            &queued,
-            &completed,
-            &mut settlements.report_id,
-            faults,
         )?;
-        let has_more = has_more || settlements.has_more || replay_more;
-        for change in settlements.changes {
-            insert_changed_path(&mut changed_paths, change);
-        }
-        record_facts.extend(settlements.record_facts);
-        // A drain refusal can commit before a later envelope fails hard, or
-        // outside a pull during open/resync/close. Claim every relay-owned
-        // pending sidecar under a unique local report token and return it here.
-        // Direct-RPC retry rows retain their sentinel. Cursor commit clears only
-        // the claimed token; a later drain remains unowned, while a newer pull
-        // retags relay rows so a stale cursor cannot destroy an unread refusal.
-        let pending_refusals =
-            crate::apply::read_pending_refusals(store, workspace_id).map_err(local)?;
-        for refusal in pending_refusals {
-            push_refusal_once(&mut refusals, refusal);
-        }
+        let has_more = has_more || settled_more;
 
         let mut pulled_foreign_max = BTreeMap::<String, i64>::new();
         for op in &ordered {
@@ -1915,7 +1868,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 || (!has_more && !crate::deferred::has_unapplied(store, workspace_id)?),
             replication_epoch: identity.replication_epoch,
             stream_identity: identity.stream_identity,
-            settlement_report_id: settlements.report_id,
+            settlement_report_id,
         };
         if crashes(faults, FaultPoint::SyncBetweenApplyAndCursorCommit) {
             return Ok(SyncPassOutcome::CrashedAfterApply {
@@ -1945,6 +1898,361 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             sharing_declined,
             record_facts,
         })
+    }
+
+    /// Pull one hosted pass: the first document still backfilling reads its
+    /// own rows from its backfill cursor, and only when none is left does the
+    /// main feed move. A response under a new scope applies nothing; the pass
+    /// adopts the scope and returns no cursor. The returned cursor stays
+    /// pending until the caller materializes the pass and commits it.
+    pub fn pull_hosted_workspace(
+        &self,
+        store: &mut EngineStore,
+        cache: &mut dohc_engine_collab::WriterDocCache,
+        workspace_id: &str,
+        faults: &dyn FaultInjector,
+        leases: &dyn crate::LeaseProbe,
+    ) -> Result<HostedPassOutcome, RelayError> {
+        let identity = read_sync_identity(store, workspace_id)
+            .map_err(local)?
+            .ok_or(RelayError::InvalidResponse)?;
+        let replica = crate::read_hosted_replica(store, workspace_id)
+            .map_err(local)?
+            .ok_or_else(|| {
+                local(SyncError::InvalidInput {
+                    reason: "workspace is not a hosted replica",
+                })
+            })?;
+        let backfill = replica
+            .documents
+            .iter()
+            .find(|(_, document)| !document.ready)
+            .map(|(object_id, document)| (object_id.clone(), document.backfill_cursor));
+        let mut cursor = backfill
+            .as_ref()
+            .map_or(replica.main_cursor, |(_, cursor)| *cursor);
+        let mut fetched = 0_usize;
+        let mut pages = 0_usize;
+        let mut ops = Vec::new();
+        let has_more = loop {
+            let remaining = crate::model::MAX_PULL_OPS_PER_PASS
+                .checked_sub(fetched)
+                .ok_or(RelayError::InvalidResponse)?;
+            let limit = remaining.min(crate::MAX_PULL_OPS);
+            let response = self.transport.pull_hosted(HostedPullRequest {
+                workspace_id: workspace_id.to_owned(),
+                replication_epoch: identity.replication_epoch.clone(),
+                stream_identity: identity.stream_identity.clone(),
+                scope_token: replica.scope_token.clone(),
+                object_id: backfill.as_ref().map(|(object_id, _)| object_id.clone()),
+                cursor,
+                limit,
+            })?;
+            validate_hosted_page(&response, workspace_id, cursor)?;
+            if response.ops.len() > limit {
+                return Err(RelayError::InvalidResponse);
+            }
+            let objects = hosted_scope_objects(&response.scope)?;
+            if replica.scope_token.as_deref() != Some(response.scope.token.as_str()) {
+                // The feed serves nothing under a stale scope. What earlier
+                // pages fetched under it is dropped too: it cannot commit.
+                if !response.ops.is_empty() || response.next_cursor != cursor {
+                    return Err(RelayError::InvalidResponse);
+                }
+                match crate::hosted::adopt_scope(
+                    store,
+                    workspace_id,
+                    &response.scope.token,
+                    &objects,
+                    faults,
+                )
+                .map_err(local)?
+                {
+                    TxnOutcome::Committed(()) => {}
+                    TxnOutcome::Crashed { .. } => return Err(local(SyncError::FaultCrash)),
+                }
+                return Ok(HostedPassOutcome {
+                    has_more: true,
+                    ..HostedPassOutcome::default()
+                });
+            }
+            if !objects.iter().eq(replica.documents.keys()) {
+                return Err(RelayError::InvalidResponse);
+            }
+            for op in &response.ops {
+                let admitted = match (crate::hosted::hosted_document(op), &backfill) {
+                    (Some(object_id), Some((backfilled, _))) => object_id == backfilled.as_str(),
+                    (Some(object_id), None) => replica.documents.contains_key(object_id),
+                    (None, None) => op.op_kind == "workspace.init",
+                    (None, Some(_)) => false,
+                };
+                if !admitted {
+                    return Err(RelayError::InvalidResponse);
+                }
+            }
+            fetched = fetched
+                .checked_add(response.ops.len())
+                .ok_or(RelayError::InvalidResponse)?;
+            ops.extend(response.ops);
+            cursor = response.next_cursor;
+            let has_more = response.has_more;
+            pages = pages.checked_add(1).ok_or(RelayError::InvalidResponse)?;
+            if !has_more
+                || fetched >= crate::model::MAX_PULL_OPS_PER_PASS
+                || pages >= crate::model::MAX_PULL_PAGES_PER_PASS
+            {
+                break has_more;
+            }
+        };
+
+        // Retained work of a document that left the scope stays for its removal.
+        let (queued, _) = crate::deferred::read(store, workspace_id, &identity)?;
+        let queued = queued
+            .into_iter()
+            .filter(|op| {
+                crate::hosted::hosted_document(op)
+                    .is_none_or(|object_id| replica.documents.contains_key(object_id))
+            })
+            .collect::<Vec<_>>();
+        // Every document with retained work may retain more behind it; one
+        // whose retained work this pass does not replay holds from the start.
+        let replayed: BTreeSet<_> = queued
+            .iter()
+            .map(|op| (op.origin_id.as_str(), op.origin_seq))
+            .collect();
+        let mut durable = BTreeSet::new();
+        let mut outside = BTreeSet::new();
+        for (object_id, origin_id, origin_seq) in
+            crate::deferred::unapplied_documents(store, workspace_id)?
+        {
+            let Some(object_id) = object_id else { continue };
+            if !replayed.contains(&(origin_id.as_str(), origin_seq)) {
+                outside.insert(object_id.clone());
+            }
+            durable.insert(object_id);
+        }
+        if !queued.is_empty() {
+            crate::deferred::check_redelivery(store, &ops)?;
+        }
+        let fetched_coordinates: BTreeSet<_> = ops
+            .iter()
+            .map(|op| (op.origin_id.clone(), op.origin_seq))
+            .collect();
+        let fetched_op_count = ops.len();
+        ops.extend(
+            queued
+                .iter()
+                .filter(|op| !fetched_coordinates.contains(&(op.origin_id.clone(), op.origin_seq)))
+                .cloned(),
+        );
+        preflight_collisions(store, workspace_id, &identity.origin_id, &ops)?;
+        self.repair_pending_ydoc_base_orders(
+            store,
+            workspace_id,
+            &identity,
+            faults,
+            &ops[..fetched_op_count],
+        )?;
+        self.hydrate_missing_blobs(store, workspace_id, &identity, &ops, faults)?;
+        // Relay order is each document's order, across origins.
+        ops.sort_by_key(|op| op.relay_seq);
+        let pass = self.apply_pulled(
+            store,
+            cache,
+            workspace_id,
+            &identity,
+            &queued,
+            &ops,
+            durable,
+            Holding::ByDocument { outside },
+            faults,
+            leases,
+        )?;
+        let backfill_object_id = backfill.map(|(object_id, _)| object_id);
+        Ok(HostedPassOutcome {
+            fetched,
+            // A finished backfill still leaves the main feed or another document.
+            has_more: has_more || pass.has_more || backfill_object_id.is_some(),
+            applied: pass.applied,
+            refused: pass.refused,
+            skipped: pass.skipped,
+            conflicts_opened: pass.conflicts_opened,
+            pending_cursor: Some(crate::HostedCursor {
+                scope_generation: replica.scope_generation,
+                backfill_complete: backfill_object_id.is_some() && !has_more,
+                backfill_object_id,
+                cursor,
+                settlement_report_id: pass.settlement_report_id,
+            }),
+            changed_paths: pass.changed_paths.into_values().collect(),
+            refusals: pass.refusals,
+            sharing_declined: pass.sharing_declined,
+            record_facts: pass.record_facts,
+        })
+    }
+
+    /// Commit a hosted pass's cursor after its work materialized. Answers
+    /// `false`, committing nothing, when the scope moved since its fetch.
+    pub fn commit_hosted_cursor(
+        &self,
+        store: &mut EngineStore,
+        workspace_id: &str,
+        cursor: &crate::HostedCursor,
+        faults: &dyn FaultInjector,
+    ) -> Result<TxnOutcome<bool>, RelayError> {
+        crate::commit_hosted_cursor(store, workspace_id, cursor, faults).map_err(local)
+    }
+
+    /// Apply a pass's ops in order and settle what they left pending. An op
+    /// that cannot apply yet holds the ops behind it; when a round makes no
+    /// progress, work held for a durable reason is retained so the cursor can
+    /// move past it, and any other hold fails the pass.
+    #[allow(clippy::too_many_arguments)]
+    fn apply_pulled(
+        &self,
+        store: &mut EngineStore,
+        cache: &mut dohc_engine_collab::WriterDocCache,
+        workspace_id: &str,
+        identity: &crate::SyncIdentity,
+        queued: &[ReplicationEnvelope],
+        ordered: &[ReplicationEnvelope],
+        mut durable: BTreeSet<String>,
+        holding: Holding,
+        faults: &dyn FaultInjector,
+        leases: &dyn crate::LeaseProbe,
+    ) -> Result<AppliedPass, RelayError> {
+        let mut pass = AppliedPass::default();
+        let mut completed = Vec::new();
+        let recovered =
+            crate::drain_open_document_artifacts(store, cache, workspace_id, leases, faults)
+                .map_err(local)?;
+        for change in recovered.changes {
+            insert_changed_path(&mut pass.changed_paths, change);
+        }
+        pass.record_facts.extend(recovered.record_facts);
+        pass.refusals.extend(recovered.refusals);
+        pass.sharing_declined.extend(recovered.sharing_declined);
+        pass.conflicts_opened += recovered.conflicts_opened;
+        let mut round = ordered.iter().collect::<Vec<_>>();
+        let mut first = true;
+        loop {
+            let mut held = match &holding {
+                Holding::ByOrigin => durable.clone(),
+                Holding::ByDocument { outside } => outside.clone(),
+            };
+            let mut still_retryable = Vec::new();
+            let mut made_progress = false;
+            for op in round {
+                let key = holding.key(op);
+                if matches!(holding, Holding::ByDocument { .. })
+                    && key.as_ref().is_some_and(|key| held.contains(key))
+                {
+                    still_retryable.push(op);
+                    continue;
+                }
+                if op.op_kind != "ydoc.update" || op.payload["isBaseState"] == true {
+                    crate::ydoc_apply::drain_inactive_ydoc_updates(store, workspace_id, faults)
+                        .map_err(local)?;
+                }
+                let routed = crate::router::apply_replication_envelope_in_batch(
+                    store, cache, op, faults, leases, true,
+                );
+                match routed {
+                    Err(SyncError::RetryableState { reason }) => {
+                        if let Some(key) = key {
+                            if retained_while_held(op, reason) {
+                                durable.insert(key.clone());
+                            }
+                            held.insert(key);
+                        }
+                        still_retryable.push(op);
+                    }
+                    Err(SyncError::SequenceGap)
+                        if matches!(holding, Holding::ByOrigin) && held.contains(&op.origin_id) =>
+                    {
+                        still_retryable.push(op);
+                    }
+                    Err(error) => return Err(local(error)),
+                    Ok(outcome) => {
+                        made_progress = true;
+                        completed.push(op);
+                        accumulate_pull_outcome(
+                            store,
+                            op,
+                            outcome,
+                            &mut pass.applied,
+                            &mut pass.refused,
+                            &mut pass.skipped,
+                            &mut pass.conflicts_opened,
+                            &mut pass.changed_paths,
+                            &mut pass.refusals,
+                            &mut pass.sharing_declined,
+                            &mut pass.record_facts,
+                            |claims| self.keep_automation_claims(claims),
+                        )?;
+                    }
+                }
+            }
+            if still_retryable.is_empty() {
+                break;
+            }
+            if !first && !made_progress {
+                if still_retryable
+                    .iter()
+                    .any(|op| !holding.key(op).is_some_and(|key| durable.contains(&key)))
+                {
+                    return Err(RelayError::Local("retryable-state".to_owned()));
+                }
+                crate::deferred::retain(store, identity, &still_retryable, faults)?;
+                break;
+            }
+            first = false;
+            round = still_retryable;
+        }
+        crate::ydoc_apply::drain_inactive_ydoc_updates(store, workspace_id, faults)
+            .map_err(local)?;
+        let mut settlements = match crate::moment_apply::pending::drain_and_claim(
+            store,
+            workspace_id,
+            faults,
+            leases,
+        ) {
+            Ok(settlements) => settlements,
+            Err(error) => {
+                // A fault can report failure after the transaction commits.
+                cache.clear();
+                return Err(local(error));
+            }
+        };
+        if settlements.report_id.is_some() {
+            cache.clear();
+        }
+        let replay_more = crate::deferred::claim_report(
+            store,
+            workspace_id,
+            queued,
+            &completed,
+            &mut settlements.report_id,
+            faults,
+        )?;
+        pass.has_more = settlements.has_more || replay_more;
+        for change in settlements.changes {
+            insert_changed_path(&mut pass.changed_paths, change);
+        }
+        pass.record_facts.extend(settlements.record_facts);
+        // A drain refusal can commit before a later envelope fails hard, or
+        // outside a pull during open/resync/close. Claim every relay-owned
+        // pending sidecar under a unique local report token and return it here.
+        // Direct-RPC retry rows retain their sentinel. Cursor commit clears only
+        // the claimed token; a later drain remains unowned, while a newer pull
+        // retags relay rows so a stale cursor cannot destroy an unread refusal.
+        let pending_refusals =
+            crate::apply::read_pending_refusals(store, workspace_id).map_err(local)?;
+        for refusal in pending_refusals {
+            push_refusal_once(&mut pass.refusals, refusal);
+        }
+        pass.settlement_report_id = settlements.report_id;
+        Ok(pass)
     }
 
     pub fn commit_pull_cursor(
@@ -2077,6 +2385,16 @@ impl<T: RelayTransport> RelaySyncClient<T> {
     ) -> Result<RecoverResponse, RelayError> {
         crate::model::bounded(new_origin_id, "origin_id must be non-empty and bounded")
             .map_err(local)?;
+        // The rebase rewrites this origin's coordinates and resets acks the
+        // hosted journal does not keep. A hosted origin is the relay's to name.
+        if store
+            .read_with(|conn| crate::hosted::is_hosted(conn, workspace_id))
+            .map_err(local)?
+        {
+            return Err(local(SyncError::InvalidInput {
+                reason: "a hosted replica never rebases its origin",
+            }));
+        }
         let identity = read_sync_identity(store, workspace_id)
             .map_err(local)?
             .ok_or(RelayError::InvalidResponse)?;
@@ -3732,6 +4050,61 @@ fn retained_while_held(op: &ReplicationEnvelope, reason: &str) -> bool {
         )
 }
 
+/// How a pass holds later work behind an op that cannot apply yet.
+enum Holding {
+    /// Admission takes each origin in sequence, so it refuses later ops of a
+    /// held origin with a gap.
+    ByOrigin,
+    /// A hosted replica admits sparsely, so the pass itself holds later ops of
+    /// a held document. `outside` names documents whose retained work this
+    /// pass does not replay, which hold from the start.
+    ByDocument { outside: BTreeSet<String> },
+}
+
+impl Holding {
+    fn key(&self, op: &ReplicationEnvelope) -> Option<String> {
+        match self {
+            Self::ByOrigin => Some(op.origin_id.clone()),
+            Self::ByDocument { .. } => crate::hosted::hosted_document(op).map(str::to_owned),
+        }
+    }
+}
+
+#[derive(Default)]
+struct AppliedPass {
+    applied: usize,
+    refused: usize,
+    skipped: usize,
+    conflicts_opened: i64,
+    changed_paths: BTreeMap<(String, String), crate::MomentMaterializationChange>,
+    refusals: Vec<crate::ReplicationRefusal>,
+    sharing_declined: Vec<crate::SharingDeclined>,
+    record_facts: Vec<dohc_engine_domain::CollectionRecordApplyFacts>,
+    settlement_report_id: Option<String>,
+    /// Settlement or deferred replay left work for another pass.
+    has_more: bool,
+}
+
+/// The documents a scope names, each once.
+fn hosted_scope_objects(scope: &HostedScope) -> Result<BTreeSet<String>, RelayError> {
+    let bounded = |value: &str| {
+        crate::model::bounded(value, "hosted scope fields must be non-empty and bounded").is_ok()
+    };
+    let mut objects = BTreeSet::new();
+    if !bounded(&scope.token) {
+        return Err(RelayError::InvalidResponse);
+    }
+    for document in &scope.documents {
+        if !bounded(&document.object_id)
+            || !bounded(&document.path)
+            || !objects.insert(document.object_id.clone())
+        {
+            return Err(RelayError::InvalidResponse);
+        }
+    }
+    Ok(objects)
+}
+
 fn merge_by_origin(ops: Vec<ReplicationEnvelope>) -> Vec<ReplicationEnvelope> {
     let mut queues = BTreeMap::<String, Vec<ReplicationEnvelope>>::new();
     for op in ops {
@@ -3858,27 +4231,62 @@ fn validate_pull_page(
     workspace_id: &str,
     cursor: i64,
 ) -> Result<(), RelayError> {
-    if response.ops.len() > crate::MAX_PULL_OPS
-        || !(0..=crate::MAX_WIRE_INTEGER).contains(&response.next_cursor)
-        || (!response.has_more && response.next_cursor < cursor)
+    validate_log_page(
+        &response.ops,
+        response.next_cursor,
+        response.has_more,
+        workspace_id,
+        cursor,
+        false,
+    )
+}
+
+/// A hosted page may end past its last op: the scoped feed's cursor passes
+/// the rows it withholds.
+fn validate_hosted_page(
+    response: &HostedPullResponse,
+    workspace_id: &str,
+    cursor: i64,
+) -> Result<(), RelayError> {
+    validate_log_page(
+        &response.ops,
+        response.next_cursor,
+        response.has_more,
+        workspace_id,
+        cursor,
+        true,
+    )
+}
+
+fn validate_log_page(
+    ops: &[ReplicationEnvelope],
+    next_cursor: i64,
+    has_more: bool,
+    workspace_id: &str,
+    cursor: i64,
+    passes_withheld_rows: bool,
+) -> Result<(), RelayError> {
+    if ops.len() > crate::MAX_PULL_OPS
+        || !(0..=crate::MAX_WIRE_INTEGER).contains(&next_cursor)
+        || (!has_more && next_cursor < cursor)
     {
         return Err(RelayError::InvalidResponse);
     }
-    if response.has_more && response.next_cursor <= cursor {
+    if has_more && next_cursor <= cursor {
         return Err(RelayError::NoProgress);
     }
     let mut previous = cursor;
-    for op in &response.ops {
+    for op in ops {
         if op.workspace_id != workspace_id || op.validate().is_err() {
             return Err(RelayError::InvalidResponse);
         }
         let relay_seq = op.relay_seq.ok_or(RelayError::InvalidResponse)?;
-        if relay_seq <= previous || relay_seq > response.next_cursor {
+        if relay_seq <= previous || relay_seq > next_cursor {
             return Err(RelayError::InvalidResponse);
         }
         previous = relay_seq;
     }
-    if previous != response.next_cursor {
+    if !passes_withheld_rows && previous != next_cursor {
         return Err(RelayError::InvalidResponse);
     }
     Ok(())
@@ -5329,6 +5737,10 @@ fn local(error: SyncError) -> RelayError {
     RelayError::Local(error.code().to_owned())
 }
 
+fn no_hosted_feed() -> RelayError {
+    RelayError::Local("relay transport serves no hosted feed".to_owned())
+}
+
 #[cfg(test)]
 mod push_budget_tests {
     use super::*;
@@ -5528,6 +5940,58 @@ mod pull_page_validation_tests {
         ] {
             assert_eq!(
                 validate_pull_page(&invalid, "ws", 10),
+                Err(RelayError::InvalidResponse)
+            );
+        }
+    }
+
+    #[test]
+    fn only_a_hosted_page_may_end_past_its_last_op() {
+        let scope = super::HostedScope {
+            token: "scope".to_owned(),
+            documents: Vec::new(),
+        };
+        for (ops, next_cursor) in [(vec![op(Some(12))], 15), (Vec::new(), 15)] {
+            let hosted = super::HostedPullResponse {
+                scope: scope.clone(),
+                ops: ops.clone(),
+                next_cursor,
+                has_more: false,
+            };
+            super::validate_hosted_page(&hosted, "ws", 10)
+                .expect("the scoped feed's cursor passes rows it withholds");
+            let ordinary = PullResponse {
+                ops,
+                next_cursor,
+                has_more: false,
+            };
+            assert_eq!(
+                validate_pull_page(&ordinary, "ws", 10),
+                Err(RelayError::InvalidResponse)
+            );
+        }
+        for invalid in [
+            super::HostedPullResponse {
+                scope: scope.clone(),
+                ops: vec![op(Some(16))],
+                next_cursor: 15,
+                has_more: false,
+            },
+            super::HostedPullResponse {
+                scope: scope.clone(),
+                ops: vec![op(Some(10))],
+                next_cursor: 15,
+                has_more: false,
+            },
+            super::HostedPullResponse {
+                scope,
+                ops: Vec::new(),
+                next_cursor: 9,
+                has_more: false,
+            },
+        ] {
+            assert_eq!(
+                super::validate_hosted_page(&invalid, "ws", 10),
                 Err(RelayError::InvalidResponse)
             );
         }

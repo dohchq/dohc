@@ -95,6 +95,11 @@ pub fn commit_relay_cursor(
     let passive = store.is_passive();
     store
         .write_with(faults, |tx| {
+            if crate::hosted::is_hosted(tx, workspace_id)? {
+                return Err(SyncError::InvalidInput {
+                    reason: "a hosted replica commits its position with commit_hosted_cursor",
+                });
+            }
             let was_enrolled =
                 crate::workspace_replicates_with_relay_in_tx(tx, workspace_id)?;
             tx.execute(
@@ -140,19 +145,30 @@ pub fn commit_relay_cursor(
                 )?
             };
             if let Some(report_id) = &cursor.settlement_report_id {
-                tx.execute(
-                    "DELETE FROM relay_deferred_ops WHERE workspace_id=?1 AND report_id=?2",
-                    params![workspace_id, report_id],
-                ).map_err(SyncError::persist)?;
-                tx.execute(
-                    "DELETE FROM owner_pending_settlements \
-                     WHERE workspace_id=?1 AND report_id=?2 AND applied=1",
-                    params![workspace_id, report_id],
-                )
-                .map_err(SyncError::persist)?;
+                release_settlement_report_in_tx(tx, workspace_id, report_id)?;
             }
             Ok::<_, SyncError>(sharing_declined)
     })
+}
+
+/// Drop the deferred work and applied settlements a committed pass reported.
+pub(crate) fn release_settlement_report_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    workspace_id: &str,
+    report_id: &str,
+) -> Result<(), SyncError> {
+    tx.execute(
+        "DELETE FROM relay_deferred_ops WHERE workspace_id=?1 AND report_id=?2",
+        params![workspace_id, report_id],
+    )
+    .map_err(SyncError::persist)?;
+    tx.execute(
+        "DELETE FROM owner_pending_settlements \
+         WHERE workspace_id=?1 AND report_id=?2 AND applied=1",
+        params![workspace_id, report_id],
+    )
+    .map_err(SyncError::persist)?;
+    Ok(())
 }
 
 fn parse_relay_cursor(value: &str) -> Result<i64, SyncError> {

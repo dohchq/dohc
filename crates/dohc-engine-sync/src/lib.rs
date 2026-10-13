@@ -65,7 +65,10 @@ pub use cursor::{
 pub use enrolment::{originate_closing_ydoc_base_in_tx, originate_live_ydoc_base_in_tx};
 use error::ShareDisposition;
 pub use error::{ObservedBytes, RelayError, SyncError};
-pub use hosted::SERVICE_HOST_ORIGIN_PREFIX;
+pub use hosted::{
+    HostedCursor, HostedDocumentState, HostedReplicaState, SERVICE_HOST_ORIGIN_PREFIX,
+    commit_hosted_cursor, read_hosted_replica,
+};
 pub use hydration::{
     BlobContent, BlobHydration, BlobKind, MAX_INGEST_BLOB_BYTES, blob_ceiling, hydrate_blob_content,
 };
@@ -98,7 +101,8 @@ pub use relay::{
     BlobDownloadBatchRequest, BlobDownloadBatchResponse, BlobDownloadResponse, BlobDownloadSpec,
     BlobHaveRequest, BlobHaveResponse, BlobUploadRequest, ClaimRequest, ClaimResponse,
     DirectWritePushOutcome, DirectWriteReport, DirectWriteResult, DirectWriteState,
-    DirectWriteStatus, EpochRequest, EpochResponse, KeyEnvelopeDownloadRequest,
+    DirectWriteStatus, EpochRequest, EpochResponse, HostedPassOutcome, HostedPullRequest,
+    HostedPullResponse, HostedScope, HostedScopeDocument, KeyEnvelopeDownloadRequest,
     KeyEnvelopeDownloadResponse, KeyEnvelopeRequest, KeyEnvelopeResponse, LogCoordinateRequest,
     LogCoordinateResponse, MAX_BASE_REPAIR_LOOKUPS, MAX_BLOB_DOWNLOAD_BATCH, ProbeRequest,
     ProbeResponse, PullRequest, PullResponse, PushRequest, PushResponse, PushWorkspaceProgress,

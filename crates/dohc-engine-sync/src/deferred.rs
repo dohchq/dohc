@@ -72,6 +72,30 @@ pub(crate) fn has_unapplied(store: &EngineStore, workspace: &str) -> Result<bool
         .map_err(local)
 }
 
+/// The document each unapplied retained op names, with its coordinate, read
+/// as [`crate::hosted::hosted_document`] reads it. A hosted pass holds a
+/// document behind retained work it does not replay.
+pub(crate) fn unapplied_documents(
+    store: &EngineStore,
+    workspace: &str,
+) -> Result<Vec<(Option<String>, String, i64)>, RelayError> {
+    store
+        .read_with(|conn| {
+            let mut stmt = conn.prepare(&format!(
+                "SELECT CASE json_extract(d.envelope_json,'$.opKind')
+                   WHEN 'live.audit.settlement' THEN json_extract(d.envelope_json,'$.payload.record.binding.objectId')
+                   WHEN 'live.audit.base' THEN json_extract(d.envelope_json,'$.payload.record.checkpoint.binding.objectId')
+                   WHEN 'moment.append' THEN json_extract(d.envelope_json,'$.payload.objectId')
+                   WHEN 'ydoc.update' THEN json_extract(d.envelope_json,'$.payload.objectId')
+                   WHEN 'live.audit.application' THEN json_extract(d.envelope_json,'$.payload.objectId') END,
+                 d.origin_id,d.origin_seq
+                 FROM relay_deferred_ops d WHERE d.workspace_id=?1 AND {UNAPPLIED}"))?;
+            stmt.query_map([workspace], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .map_err(local)
+}
+
 pub(crate) fn check_redelivery(
     store: &EngineStore,
     ops: &[ReplicationEnvelope],
