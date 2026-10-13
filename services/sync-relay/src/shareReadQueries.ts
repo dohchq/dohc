@@ -1,3 +1,4 @@
+import { createReceivedIdentity, tokenizeReceivedPayload, type ReceivedRecipient } from "./receivedIdentity";
 import { visibleSharePath } from "@dohc/security-contract/share-selector";
 import { createAccountlessPathProjection } from "./accountlessPathProjection";
 import { createHmac } from "node:crypto";
@@ -56,7 +57,9 @@ export function createShareReadQueries(
     | "listLinkRevisionLogRows"
   >,
   linkFreshnessPageSize: number,
+  linkKey?: string | Uint8Array,
 ) {
+  const identity = createReceivedIdentity(linkKey);
   // MU-C4: the thread→channel resolver the chat share filter scopes by. Backed
   // by the shared workspace's own log (earliest chat.thread.create wins), so a
   // member-pushed forgery can never re-bind an existing thread. Memoized per
@@ -187,6 +190,7 @@ export function createShareReadQueries(
     limit: number,
     audience: "authenticated" | "accountless",
     half?: "chat" | "files",
+    recipient?: ReceivedRecipient,
   ): {
     ops: Array<Record<string, unknown>>;
     nextCursor: number;
@@ -246,6 +250,9 @@ export function createShareReadQueries(
               )
             : null;
         if (payload === null) continue;
+        if (recipient) tokenizeReceivedPayload({ identity, recipient, workspaceId, selector, chat: chatResolver,
+          opKind: row.opKind, original: JSON.parse(row.payloadJson), served: payload as Record<string, unknown>,
+          ...(accountlessProjection ? { projectPath: accountlessProjection.projectPath } : {}) });
         if (audience === "authenticated" && row.opKind === "moment.append") {
           (payload as Record<string, unknown>).authors = sharedMomentAuthors(row.admittedAuthorSnapshot);
           const original = JSON.parse(row.payloadJson) as Record<string, unknown>;

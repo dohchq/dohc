@@ -52,6 +52,19 @@ function retiringCaller() {
   };
 }
 
+it("never stores a received pin when credentials change during share metadata lookup", async () => {
+  const h = harness();
+  let generation = 1;
+  h.dependencies.currentCredentialGeneration = () => generation;
+  h.dependencies.fetchInfo = async () => {
+    generation += 1;
+    return { granterEmail: null, selector: SELECTOR, receivedIdentity: { receivedSource: "share-source:v1:" + "a".repeat(64), grantId: "grant", generation: 1 } };
+  };
+  await expect(h.commands.mount({ workspace: WORKSPACE, shareCode: SHARE_CODE, assertCurrent })).rejects.toThrow("The server session changed.");
+  expect(h.mounts).toEqual([]);
+  expect(h.events).not.toContain("lease:start");
+});
+
 const LIVE_OWNER_COMPLETE = Symbol("live owner complete");
 
 async function withLiveMountOwner<T>(
@@ -198,6 +211,7 @@ function harness() {
       events.push(`registry:${next.length}`);
       mounts = [...next];
     },
+    currentCredentialGeneration: () => 0,
     loadCredentials: async () => {
       events.push("credentials");
       return {

@@ -1,4 +1,7 @@
-import { workspaceFileRef, type EngineFileResolver } from "../workspaces/resolveEngineFiles";
+import { isReceivedObject } from "@dohc/workspace-contracts/workspace-ref";
+import { workspaceFileRefs } from "../workspaces/workspaceFileReferenceScopes";
+import { shareViewIsPresent } from "../workspaces/shareViewMarker";
+import { type EngineFileResolver } from "../workspaces/resolveEngineFiles";
 import { nameSlug } from "@dohc/workspace-contracts/names";
 import {
   ListFileChatsPayload,
@@ -600,10 +603,7 @@ export function registerChatsIpcHandlers<
       input.workspaceId,
       "Chats stopped because this window changed workspaces.",
       async (operation) => {
-        const { workspace } = await requireEngineCapture(
-          operation.workspace,
-          "Chats",
-        );
+        const { workspace, store, kind } = await requireChatScope(operation.workspace.workspaceId);
         operation.assertCurrent();
         // MU-C4: refresh joined shared channels before reading, so opening
         // Chats shows other members' latest messages. Offline, local rows
@@ -611,9 +611,8 @@ export function registerChatsIpcHandlers<
         const rowsUncovered =
           await syncRendererWorkspaceSharedChannels(operation);
         operation.assertCurrent();
-        const store = linkedChatStoreFor(workspace);
         // First chat use auto-creates General.
-        await store.ensureGeneralChannel({
+        if (kind === "workspace") await store.ensureGeneralChannel({
           workspaceId: workspace.workspaceId,
         });
         operation.assertCurrent();
@@ -647,7 +646,7 @@ export function registerChatsIpcHandlers<
         if (fileThreads.length > 0) {
           try {
             const ids = [...new Set(fileThreads.map(thread => thread.linkedFile!.objectId))];
-            const resolved = await resolveEngineFiles(workspace, ids.map(objectId => workspaceFileRef(workspace.workspaceId, objectId)));
+            const resolved = await resolveEngineFiles(workspace, ids.flatMap(objectId => workspaceFileRefs(workspace, objectId)));
             pathByObjectId = new Map(resolved.flatMap(file => file.status === "found" ? [[file.objectId, file.path] as const] : []));
           } catch {
             // Path resolution is display-only; the hint fallback keeps the
@@ -668,7 +667,7 @@ export function registerChatsIpcHandlers<
             path:
               (thread.linkedFile
                 ? (pathByObjectId.get(thread.linkedFile.objectId) ??
-                  thread.linkedFile.pathHint)
+                  (!shareViewIsPresent(workspace.shareView) && !isReceivedObject(thread.linkedFile.objectId) ? thread.linkedFile.pathHint : undefined))
                 : undefined) ?? null,
           })),
         });

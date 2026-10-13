@@ -1581,7 +1581,8 @@ fn write_normalized_text_in_tx(
                     if object_exists(tx, ws, input.object_id)? {
                         let bare_preallocation = allow_preallocated_object
                             && !object_has_any_binding(tx, ws, input.object_id)?;
-                        let dormant_history_object = history_source.is_some()
+                        let dormant_history_object = (history_source.is_some() ||
+                            (input.metadata_origin == "sync" && crate::received_object_token(input.object_id)))
                             && !tx.query_row(
                                 "SELECT EXISTS (SELECT 1 FROM path_aliases WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3) OR EXISTS (SELECT 1 FROM snapshots WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3)",
                                 params![ws, input.version_id, input.object_id], |row| row.get::<_, bool>(0),

@@ -79,7 +79,13 @@ _Avoid_: private step, owner step
 ### References
 
 **WorkspaceRef**:
-A source workspace id and native object identity with display labels. Labels do not affect equality. A reference grants no authority.
+An exclusive source identity, either a workspace id or a recipient source handle, and native object identity with display labels. Labels do not affect equality. A reference grants no authority.
+
+**Received source handle**:
+A relay-derived identity for one source workspace within a recipient namespace. Named recipients share it across grants; link holders share it only within one link grant.
+
+**Received object token**:
+A relay-derived file identity within the same recipient namespace. It survives source renames and never exposes the source object id.
 
 ### Chat
 

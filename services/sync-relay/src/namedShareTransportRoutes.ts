@@ -104,6 +104,7 @@ export function createNamedShareTransportRoutes(
         limit,
         "authenticated",
         half,
+        ["user", actor.userId],
       );
       // Re-check revocation immediately before returning the body: a revoke
       // that raced with this in-flight read (after the entry check, while

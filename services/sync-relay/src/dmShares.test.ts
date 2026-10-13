@@ -510,7 +510,7 @@ describe("DM grants over the relay", () => {
       await h(request(MEMBER, "/sync/shares/never-existed/log?since=0")),
     );
     const removed = `404:${JSON.stringify({ok: false, error: "The owner removed your access.", code: "share_access_removed"})}`;
-    expect(await denialBytes(await h(request(MEMBER, `/sync/shares/${shareId}`)))).toBe(removed);
+    expect(await denialBytes(await h(request(MEMBER, `/sync/shares/${shareId}`)))).toBe(absent);
     expect(await denialBytes(await h(request(STRANGER, `/sync/shares/${shareId}`)))).toBe(absent);
     expect(await denialBytes(await h(request(MEMBER, `/sync/shares/${shareId}/log?since=0`)))).toBe(
       removed,

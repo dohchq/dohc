@@ -824,7 +824,7 @@ fn share_view_replay_keeps_declared_agents_in_list_and_detail_through_replay_and
             &NoFaults,
         )
         .unwrap();
-    assert_eq!((first.applied, first.skipped), (5, 2));
+    assert_eq!((first.applied, first.skipped), (4, 2));
     let read = |store: &mut EngineStore| {
         let versioned = VersionedTextStore::new(store);
         let page = versioned
@@ -836,7 +836,7 @@ fn share_view_replay_keeps_declared_agents_in_list_and_detail_through_replay_and
                 before_moment_order: None,
             })
             .unwrap();
-        assert_eq!(page.moments.len(), 5);
+        assert_eq!(page.moments.len(), 4);
         assert!(
             page.moments
                 .iter()
@@ -3140,7 +3140,7 @@ fn one_refused_snapshot_does_not_drop_the_rest_of_a_shared_version() {
     );
 }
 
-/// A rename replays as a write of the new path then a delete of the old one.
+/// A received rename preserves the old path when its replacement is refused.
 /// Skipping per blob must not let the delete run alone: the old path would go
 /// while its replacement never arrived, which loses the file outright — worse
 /// than not renaming it and worse than the freeze this change removes.
@@ -5752,4 +5752,181 @@ fn recovered_share_file_moment_survives_restart_and_submits_within_its_grant() {
             assert!(local_lane_ops(&engine, "ydoc.update").is_empty());
         }
     }
+}
+
+#[test]
+fn received_token_survives_rename_delete_restore_and_visible_half_reentry() {
+    for binary in [false, true] {
+        let (_scratch, _path, mut engine) = open_store();
+        let token = format!("share-object:v1:{}", "a".repeat(64));
+        let body = b"received body".to_vec();
+        let sha = dohc_engine_storage::hex_sha256(&body);
+        let write = |seq, path| {
+            let mut op = if binary {
+                share_view_binary_write_op(seq, path, &sha)
+            } else {
+                share_view_write_op(seq, path, &sha)
+            };
+            op.payload["objectId"] = json!(token);
+            op
+        };
+        let mut rename = write(1, "docs/b.md");
+        rename.payload["operation"] = json!("rename");
+        rename.payload["payloadBeforePath"] = json!("docs/a.md");
+        let delete = |seq| {
+            let mut op = write(seq, "docs/b.md");
+            op.payload = json!({"versionId":"main","objectId":token,"operation":"delete","path":"docs/b.md"});
+            op
+        };
+        // A move out is the visible delete; a move back is the visible create.
+        let pages = [
+            vec![write(0, "docs/a.md"), rename],
+            vec![delete(2)],
+            vec![write(3, "docs/b.md")],
+            vec![delete(4)],
+            vec![write(5, "docs/b.md")],
+        ];
+        let mut cursor = 0;
+        let responses = pages
+            .into_iter()
+            .map(|ops| {
+                let since = cursor;
+                cursor += ops.len() as i64;
+                (
+                    since,
+                    ShareViewResponse {
+                        ops,
+                        next_cursor: cursor,
+                        has_more: false,
+                    },
+                )
+            })
+            .collect::<Vec<_>>();
+        let client = RelaySyncClient::new(
+            PagedShareRelay::new([], responses).with_view_blobs([(sha.clone(), body)]),
+        );
+        for expected in [
+            Some("docs/b.md"),
+            None,
+            Some("docs/b.md"),
+            None,
+            Some("docs/b.md"),
+        ] {
+            let pull = client
+                .pull_share_view(
+                    &mut engine,
+                    "ws",
+                    "share",
+                    &tracked_grant(["docs"]),
+                    &NoFaults,
+                )
+                .unwrap();
+            assert_eq!(pull.skipped, 0);
+            engine.read_with(|conn| {
+                let path: Option<String> = conn.query_row("SELECT path FROM path_aliases WHERE workspace_id='ws' AND object_id=?1", [&token], |row|row.get(0)).optional()?;
+                assert_eq!(path.as_deref(),expected);
+                assert_eq!(conn.query_row("SELECT COUNT(*) FROM file_objects WHERE workspace_id='ws'",[],|row|row.get::<_,i64>(0))?,1);
+                Ok::<_,rusqlite::Error>(())
+            }).unwrap();
+            let retry = client
+                .pull_share_view(
+                    &mut engine,
+                    "ws",
+                    "share",
+                    &tracked_grant(["docs"]),
+                    &NoFaults,
+                )
+                .unwrap();
+            assert_eq!(retry.applied, 0);
+            client
+                .commit_share_view_cursor(&mut engine, "ws", &pull.pending_cursor, &NoFaults)
+                .unwrap();
+        }
+    }
+}
+
+#[test]
+fn received_accepted_proposal_and_version_snapshot_get_tokens() {
+    let (_scratch, _path, mut engine) = open_store();
+    seed_replication_version(&mut engine, "main", "main");
+    VersionedTextStore::new(&mut engine)
+        .write_text(
+            &dohc_engine_domain::WriteText {
+                workspace_id: "ws".into(),
+                version_id: "main".into(),
+                object_id: "local-proposal".into(),
+                path: "docs/a.md".into(),
+                text: "draft".into(),
+                moment_id: "local-draft".into(),
+                metadata_origin: "user".into(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 1,
+                request_id: None,
+            },
+            &NoFaults,
+        )
+        .unwrap();
+    let token = format!("share-object:v1:{}", "a".repeat(64));
+    let body = b"accepted".to_vec();
+    let sha = dohc_engine_storage::hex_sha256(&body);
+    let mut op = share_view_write_op(0, "docs/a.md", &sha);
+    op.payload["objectId"] = json!(token);
+    let client = RelaySyncClient::new(
+        PagedShareRelay::new(
+            [],
+            [(
+                0,
+                ShareViewResponse {
+                    ops: vec![op],
+                    next_cursor: 1,
+                    has_more: false,
+                },
+            )],
+        )
+        .with_view_blobs([(sha.clone(), body.clone())]),
+    );
+    client
+        .pull_share_view(
+            &mut engine,
+            "ws",
+            "share",
+            &tracked_grant(["docs"]),
+            &NoFaults,
+        )
+        .unwrap();
+    engine.read_with(|conn| {assert_eq!(conn.query_row("SELECT object_id FROM path_aliases WHERE workspace_id='ws' AND path='docs/a.md'",[],|row|row.get::<_,String>(0))?,token);Ok::<_,rusqlite::Error>(())}).unwrap();
+    let (_scratch2, _path2, mut version_engine) = open_store();
+    let mut snapshot = share_view_write_op(0, "docs/a.md", &sha);
+    snapshot.op_kind = "version.create".into();
+    snapshot.payload = json!({"versionId":"v","forkSnapshots":[{"path":"docs/a.md","objectId":token,"blobSha256":sha}]});
+    let client = RelaySyncClient::new(
+        PagedShareRelay::new(
+            [],
+            [(
+                0,
+                ShareViewResponse {
+                    ops: vec![snapshot],
+                    next_cursor: 1,
+                    has_more: false,
+                },
+            )],
+        )
+        .with_view_blobs([(sha, body)]),
+    );
+    client
+        .pull_share_view(
+            &mut version_engine,
+            "ws",
+            "share",
+            &ShareGrant {
+                paths: vec!["docs".into()],
+                version_id: Some("v".into()),
+                access: ShareAccess::View,
+            },
+            &NoFaults,
+        )
+        .unwrap();
+    version_engine.read_with(|conn| {assert_eq!(conn.query_row("SELECT object_id FROM path_aliases WHERE workspace_id='ws' AND path='docs/a.md'",[],|row|row.get::<_,String>(0))?,token);Ok::<_,rusqlite::Error>(())}).unwrap();
 }

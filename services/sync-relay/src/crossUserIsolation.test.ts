@@ -516,7 +516,7 @@ describe("MU-C5 · revocation closes read and append with a recipient removal me
       await h(request(MEMBER, "/sync/shares/never-existed/log", jsonBody({ originId: "o", ops: [] }))),
     );
     const removed = `404:${JSON.stringify({ok: false, error: "The owner removed your access.", code: "share_access_removed"})}`;
-    expect(await denialBytes(await h(request(MEMBER, `/sync/shares/${shareId}`)))).toBe(removed);
+    expect(await denialBytes(await h(request(MEMBER, `/sync/shares/${shareId}`)))).toBe(absentRead);
     expect(await denialBytes(await h(request(STRANGER, `/sync/shares/${shareId}`)))).toBe(absentRead);
     expect(await denialBytes(await h(request(STRANGER, `/sync/shares/${shareId}/log`, jsonBody({ originId: "o", ops: [] }))))).toBe(absentAppend);
     expect(

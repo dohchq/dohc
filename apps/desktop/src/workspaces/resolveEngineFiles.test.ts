@@ -84,3 +84,66 @@ it("rejects a binding changed during a file resolution await", async () => {
   const resolve = createEngineFileResolver(async (_workspace, work) => work({ resolveFiles } as unknown as VersionedLiveAdapter, assertCurrent));
   await expect(resolve({ workspaceId: "local" }, [workspaceFileRef("local", "a")])).rejects.toThrow("Binding changed");
 });
+
+it("resolves a token through a second admitted share and keeps outside/deleted/missing objects equally absent",async()=>{
+  const {workspaceFileRefs}=await import("./workspaceFileReferenceScopes");
+  const token="share-object:v1:"+"a".repeat(64), source="share-source:v1:"+"b".repeat(64);
+  const pin={receivedSource:source,grantId:"grant",generation:2};
+  const workspace={workspaceId:"local",shareView:{receivedIdentity:pin,grantedSelector:{paths:["docs"],versionId:null,access:"view"}}};
+  const refs=workspaceFileRefs(workspace,token);
+  const engine=new VersionedLoopbackEngine();
+  engine.seedTextFile({workspace:"second-share",path:"docs/renamed.md",text:"a",objectId:token});
+  const adapter=new VersionedLiveAdapter({close(){},sendRequest:request=>engine.sendRequest(request)},"second-share",{workspaceId:"second-share"});
+  const resolve=createEngineFileResolver(async (_workspace,work)=>work(adapter),async()=>[{workspace:{workspaceId:"second-share"},pin,selector:{paths:["docs"],versionId:null,access:"view"},assertCurrent(){}}]);
+  expect(await resolve(workspace,refs)).toEqual([{status:"found",objectId:token,path:"docs/renamed.md"}]);
+  const gone=workspaceFileRefs(workspace,"share-object:v1:"+"c".repeat(64));
+  expect(await resolve(workspace,gone)).toEqual([{status:"absent"}]);
+  const outside=createEngineFileResolver(async (_workspace,work)=>work(adapter),async()=>[{workspace:{workspaceId:"second-share"},pin,selector:{paths:["other"],versionId:null,access:"view"},assertCurrent(){}}]);
+  expect(await outside(workspace,refs)).toEqual([{status:"absent"}]);
+});
+it.each(["selector","version","generation","session","attachment"])("fences %s changes during received resolution",async()=>{
+  const {workspaceFileRefs}=await import("./workspaceFileReferenceScopes");
+  const pin={receivedSource:"share-source:v1:"+"b".repeat(64),grantId:"grant",generation:2};
+  const workspace={workspaceId:"local",shareView:{receivedIdentity:pin,grantedSelector:{paths:["docs"],versionId:null,access:"view"}}};
+  let current=true; const assertCurrent=()=>{if(!current)throw Error("Retired projection");};
+  const adapter={resolveFiles:async()=>{current=false;return {versionId:"main",results:[{status:"found",path:"docs/a.md",objectId:"share-object:v1:"+"a".repeat(64)}]};}} as unknown as VersionedLiveAdapter;
+  const resolve=createEngineFileResolver(async (_workspace,work)=>work(adapter),async()=>[{workspace:{workspaceId:"second"},pin,selector:{paths:["docs"],versionId:null,access:"view"},assertCurrent}]);
+  await expect(resolve(workspace,workspaceFileRefs(workspace,"share-object:v1:"+"a".repeat(64)))).rejects.toThrow("Retired projection");
+});
+it("old handle refs answer absent after rotation without querying old tokens", async () => {
+  const { workspaceFileRefs } = await import("./workspaceFileReferenceScopes");
+  const oldPin = { receivedSource: "share-source:v1:" + "a".repeat(64), grantId: "grant", generation: 2 };
+  const nextPin = { ...oldPin, receivedSource: "share-source:v1:" + "b".repeat(64) };
+  const selector = { paths: ["docs"], versionId: null, access: "view" as const };
+  const workspace = { workspaceId: "local", shareView: { receivedIdentity: oldPin, grantedSelector: selector } };
+  const refs = workspaceFileRefs(workspace, "share-object:v1:" + "c".repeat(64));
+  const resolveFiles = vi.fn(async () => ({ versionId: "main", results: [] }));
+  const resolve = createEngineFileResolver(async (_workspace, work) => work({ resolveFiles } as unknown as VersionedLiveAdapter), async () => [{ workspace, pin: nextPin, selector, assertCurrent() {} }]);
+  expect(await resolve(workspace, refs)).toEqual([{ status: "absent" }]);
+  expect(resolveFiles).not.toHaveBeenCalled();
+});
+it("rechecks an earlier projection after another projection's resolution await", async () => {
+  const { workspaceFileRefs } = await import("./workspaceFileReferenceScopes");
+  const pin = { receivedSource: "share-source:v1:" + "a".repeat(64), grantId: "grant", generation: 2 };
+  const selector = { paths: ["docs"], versionId: null, access: "view" as const };
+  const workspace = { workspaceId: "local", shareView: { receivedIdentity: pin, grantedSelector: selector } };
+  let firstCurrent = true;
+  const adapter = { resolveFiles: async () => { firstCurrent = false; return { versionId: "main", results: [{ status: "absent" }] }; } } as unknown as VersionedLiveAdapter;
+  const resolve = createEngineFileResolver(async (selected, work) => work(selected.workspaceId === "second" ? adapter : { resolveFiles: async () => ({ versionId: "main", results: [{ status: "absent" }] }) } as unknown as VersionedLiveAdapter), async () => [
+    { workspace: { workspaceId: "first" }, pin, selector, assertCurrent() { if (!firstCurrent) throw Error("First projection retired"); } },
+    { workspace: { workspaceId: "second" }, pin, selector, assertCurrent() {} },
+  ]);
+  await expect(resolve(workspace, workspaceFileRefs(workspace, "share-object:v1:" + "c".repeat(64)))).rejects.toThrow("First projection retired");
+});
+it("damaged pins, lowered generations, rotation, and pre-token stores never create a received ref",async()=>{
+  const {workspaceFileRefs,refreshReceivedReferencePin}=await import("./workspaceFileReferenceScopes");
+  const pin={receivedSource:"share-source:v1:"+"b".repeat(64),grantId:"g",generation:2};
+  expect(() => refreshReceivedReferencePin(pin,{receivedIdentity:{...pin,generation:1}})).toThrow("older access details");
+  expect(refreshReceivedReferencePin(pin,{receivedIdentity:{...pin,receivedSource:"share-source:v1:"+"c".repeat(64)}})?.receivedSource).not.toBe(pin.receivedSource);
+  const view={grantedSelector:{paths:["docs"],versionId:null,access:"view"}};
+  for(const receivedIdentity of [undefined,{...pin,receivedSource:"real-workspace"}, {...pin,generation:-1}]) expect(workspaceFileRefs({workspaceId:"local",shareView:{...view,receivedIdentity}},"share-object:v1:"+"a".repeat(64))).toEqual([]);
+  expect(workspaceFileRefs({workspaceId:"local",shareView:{...view,receivedIdentity:pin}},"object-share-old")).toEqual([]);
+  for (const shareView of [null, false, "damaged"]) {
+    expect(workspaceFileRefs({ workspaceId: "local", shareView }, "object-share-old")).toEqual([]);
+  }
+});

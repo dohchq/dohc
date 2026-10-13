@@ -7,6 +7,7 @@ import { engineStoreRefusalDetailOf, engineStoreRefusalOf, type EngineStoreRefus
 import { credentialScopedOperation, requireCredentials } from "../workspaces/credentialScopedOperation";
 import { parseShareCode, relayUrlsMatch } from "../workspaces/syncCode";
 import { RelayUnauthorizedError, ShareUnavailableError } from "@dohc/workspace-contracts/relay";
+import { refreshReceivedReferencePin } from "../workspaces/workspaceFileReferenceScopes";
 import { ShareSelectorInvalidError, type fetchShareViewInfo, type fetchShareViewAccess, type probeShareViewLog } from "../workspaces/shareViewInfo";
 import type { RendererWorkspaceOperationSession } from "../window/rendererWorkspaceOperation";
 import { assertMountableSelector } from "../workspaces/shareMounts";
@@ -166,6 +167,10 @@ export function registerSharedViewsIpcHandlers<
           "Connect to the server that hosts this share, then try again.",
       );
     }
+    const openGeneration = dependencies.currentCredentialGeneration();
+    const assertOpenIdentity = () => {
+      if (openGeneration !== dependencies.currentCredentialGeneration()) throw new Error("The server session changed.");
+    };
     const relay = { baseUrl: credentials.relayUrl, token: credentials.token };
     // Pre-flight against the relay before creating anything locally; also
     // learns who shared it for the honest read-only copy.
@@ -194,6 +199,7 @@ export function registerSharedViewsIpcHandlers<
     // enforce and nothing to project. Refuse it here rather than record a
     // grant of "everything" (the mount path says the same through
     // assertMountableSelector).
+    assertOpenIdentity();
     assertMountableSelector(info.selector);
     const grantedSelector = info.selector;
     const rootPath = usableRoot(input.rootPath);
@@ -214,6 +220,7 @@ export function registerSharedViewsIpcHandlers<
       workspaceId: randomUUID(),
       rootPath,
       populate: async (created, authorityBinding) => {
+        assertOpenIdentity();
         await setWorkspaceShareView(created.workspaceId, {
           shareId: parsed.shareId,
           ...(info.granterUserId ? { granterUserId: info.granterUserId } : {}),
@@ -224,6 +231,7 @@ export function registerSharedViewsIpcHandlers<
           // Pin the selector the relay just stated, so later pulls enforce it
           // instead of trusting the relay's selection each time.
           grantedSelector,
+          receivedIdentity: info.receivedIdentity,
           // Persist the origin relay so a later refresh signed into a different
           // relay is skipped instead of misreading a 404 as "share ended".
           relayUrl: credentials.relayUrl,
@@ -474,11 +482,13 @@ export function registerSharedViewsIpcHandlers<
                 shareId: workspace.shareView.shareId,
               });
               operation.assertCurrent();
+              if (credentialGeneration !== dependencies.currentCredentialGeneration()) throw new Error("The server session changed.");
               const current = currentShareViewWorkspace();
               if (current.shareView.shareId !== workspace.shareView.shareId) throw new Error("Shared view changed during refresh.");
               const nextShareView = {
                 ...current.shareView,
                 ...(info.granterUserId ? { granterUserId: info.granterUserId } : {}),
+                receivedIdentity: refreshReceivedReferencePin(current.shareView.receivedIdentity, info),
                 genericChatWritable: info.genericChatWritable,
                 subjectName: info.subjectName,
                 sharerName: info.sharerName,

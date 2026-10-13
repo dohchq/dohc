@@ -301,7 +301,7 @@ export function createSyncRelayHandler({
     newestFilteredOpFreshness,
     historicalSharedBlob,
     linkRevisionByteLength,
-  } = createShareReadQueries(storage, linkFreshnessPageSize);
+  } = createShareReadQueries(storage, linkFreshnessPageSize, linkKey);
 
   async function shareSenderLabel(granterUserId: string, knownEmail?: string | null): Promise<string> {
     const name = await accountDisplayName(lookupUserDisplayName, granterUserId);
@@ -487,6 +487,7 @@ export function createSyncRelayHandler({
     shareSenderLabel,
     undefined,
     lookupUserEmails,
+    linkKey,
   );
   const { respondToShareInventory, respondToWorkspaceLinkInventory } = shareInventoryRoutes(claimPendingShares);
   // The server reads the owner's shares without the owner there, so it
@@ -672,6 +673,7 @@ export function createSyncRelayHandler({
     discussionActivity,
     admitLinkBlobBytes,
     respondWithLinkBytes,
+    linkKey,
   );
 
   const respondToOwnerRestore = createOwnerRestoreRoutes({storage, host: ownerRestoreHost, nowMs, newId, lookupUserEmail});

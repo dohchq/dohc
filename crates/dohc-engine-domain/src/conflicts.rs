@@ -1327,13 +1327,16 @@ pub fn write_binary_file_in_tx(
             )
             .optional()
             .map_err(DomainError::sql_corrupt)?;
-        if object_exists.is_some() {
+        let dormant_received = input.metadata_origin == "sync" && crate::received_object_token(&input.object_id)
+            && tx.query_row("SELECT EXISTS(SELECT 1 FROM file_objects WHERE workspace_id=?1 AND object_id=?3) AND NOT EXISTS(SELECT 1 FROM path_aliases WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3) AND NOT EXISTS(SELECT 1 FROM snapshots WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3)",
+                params![input.workspace_id, input.version_id, input.object_id], |row| row.get::<_, bool>(0)).map_err(DomainError::sql_corrupt)?;
+        if object_exists.is_some() && !dormant_received {
             return Err(DomainError::InvalidInput {
                 reason: "object_id is already bound to another object",
             });
         }
         tx.execute(
-            "INSERT INTO file_objects (workspace_id, object_id, created_at_ms) \
+            "INSERT OR IGNORE INTO file_objects (workspace_id, object_id, created_at_ms) \
              VALUES (?1, ?2, ?3)",
             params![input.workspace_id, input.object_id, input.now_ms],
         )

@@ -1,7 +1,9 @@
+import { createReceivedIdentity } from "./receivedIdentity";
 import { afterEach, describe, expect, it } from "vitest";
 import type { SyncRelayHandler } from "./server";
 import type { SyncRelayStorage } from "./storage";
 import {
+  LINK_KEY,
   claimWorkspace as claim,
   closeTestStorages,
   createShare as mint,
@@ -174,7 +176,7 @@ async function seedWorkspace(h: SyncRelayHandler): Promise<OwnerLog> {
 }
 
 describe("chat over a file share", () => {
-  it("serves the in-selector thread as a path and leaks no sentinel from the outside one", async () => {
+  it("serves the in-selector thread with a token and path hint and leaks no sentinel from the outside one", async () => {
     const storage = await testStorage();
     const h = handler(storage);
     await seedWorkspace(h);
@@ -207,7 +209,8 @@ describe("chat over a file share", () => {
       title: "About the shared file",
       createdAtMs: 100,
       linkedAtMs: 101,
-      linkedPath: "docs/in.md",
+      linkedObjectId: createReceivedIdentity(LINK_KEY).object(["user", RECIPIENT], WORKSPACE, "object-in"),
+      linkedPathHint: "docs/in.md",
     });
   });
 
@@ -248,7 +251,7 @@ describe("chat over a file share", () => {
     expect(
       served
         .filter((op) => op.opKind === "chat.thread.create")
-        .map((op) => op.payload.linkedPath),
+        .map((op) => op.payload.linkedPathHint),
     ).toEqual(["docs/in.md", "docs/arrived.md"]);
   });
 
@@ -815,7 +818,7 @@ describe("chat over a file share", () => {
     // Both threads are about docs/in.md before the rename.
     const before = chatOps(await readShareLog(h, shareId))
       .filter((op) => op.opKind === "chat.thread.create")
-      .map((op) => op.payload.linkedPath);
+      .map((op) => op.payload.linkedPathHint);
     expect(before).toEqual(["docs/in.md", "docs/in.md"]);
 
     // A rename that stays inside the shared folder.
@@ -823,7 +826,7 @@ describe("chat over a file share", () => {
 
     const after = chatOps(await readShareLog(h, shareId))
       .filter((op) => op.opKind === "chat.thread.create")
-      .map((op) => op.payload.linkedPath);
+      .map((op) => op.payload.linkedPathHint);
     expect(
       after,
       "a recipient's thread must follow its file inside the share, exactly as the granter's does",

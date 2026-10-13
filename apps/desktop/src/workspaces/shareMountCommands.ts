@@ -19,6 +19,7 @@ import {
   usableShareMountRecord,
   withoutShareMountRecords,
 } from "./shareMounts";
+import { refreshReceivedReferencePin } from "./workspaceFileReferenceScopes";
 import type { ShareViewInfo } from "./shareViewInfo";
 import {
   ShareViewMountRollbackError,
@@ -38,6 +39,7 @@ export interface ShareMountCommandWorkspace {
 export interface ShareMountCommandCredentials {
   relayUrl?: string | null;
   token: string;
+  userId?: string;
   email?: string | null;
 }
 
@@ -54,10 +56,11 @@ export interface ShareMountCommandDependencies<WorkspaceSummary> {
     update: (mounts: readonly ShareMountRecord[]) => readonly ShareMountRecord[],
   ): Promise<void>;
   loadCredentials(): Promise<ShareMountCommandCredentials | null>;
+  currentCredentialGeneration(): number;
   fetchInfo(
     relay: SyncRelayConnection,
     shareId: string,
-  ): Promise<Pick<ShareViewInfo, "granterEmail" | "selector">>;
+  ): Promise<Pick<ShareViewInfo, "granterEmail" | "selector" | "receivedIdentity">>;
   listDirectory(absolutePath: string): Promise<string[]>;
   withWorkspaceOperation<T>(
     workspaceRoot: string,
@@ -280,6 +283,11 @@ export function createShareMountCommands<WorkspaceSummary>(
         }
         const credentials = await dependencies.loadCredentials();
         assertCurrent();
+        const generation = dependencies.currentCredentialGeneration();
+        const assertIdentityCurrent = () => {
+          assertCurrent();
+          if (generation !== dependencies.currentCredentialGeneration()) throw new Error("The server session changed.");
+        };
         if (!credentials) throw new Error("Sign in to your server first.");
         const relayUrl = credentials.relayUrl;
         if (!relayUrl || !relayUrlsMatch(relayUrl, parsed.relayUrl)) {
@@ -294,11 +302,11 @@ export function createShareMountCommands<WorkspaceSummary>(
           throw new Error("This share is already added to this workspace.");
         }
         const relay = { baseUrl: relayUrl, token: credentials.token };
-        let info: Pick<ShareViewInfo, "granterEmail" | "selector">;
+        let info: Pick<ShareViewInfo, "granterEmail" | "selector" | "receivedIdentity">;
         try {
           assertCurrent();
           info = await dependencies.fetchInfo(relay, parsed.shareId);
-          assertCurrent();
+          assertIdentityCurrent();
         } catch (error) {
           if (error instanceof ShareUnavailableError) {
             throw new Error(
@@ -324,6 +332,7 @@ export function createShareMountCommands<WorkspaceSummary>(
               join(workspace.rootPath, SHARED_WITH_ME_FOLDER),
             );
             assertCurrent();
+            assertIdentityCurrent();
             const mount = {
               shareId: parsed.shareId,
               label: allocateShareMountLabel({
@@ -336,6 +345,8 @@ export function createShareMountCommands<WorkspaceSummary>(
               relayUrl,
               recipientEmail: credentials.email ?? null,
               grantedSelector,
+              recipientUserId: credentials.userId,
+              receivedIdentity: info.receivedIdentity,
             };
             const prepared: PreparedShareViewFilesMount = {
               kind: "mount",
@@ -440,6 +451,13 @@ export function createShareMountCommands<WorkspaceSummary>(
           assertCurrent();
           mounts = dependencies.readMounts(workspace.workspaceId);
         }
+        const credentials = mounts.some(mount => record(mount) && mount.recipientUserId) ? await dependencies.loadCredentials() : null;
+        assertCurrent();
+        const generation = dependencies.currentCredentialGeneration();
+        const assertIdentityCurrent = () => {
+          assertCurrent();
+          if (generation !== dependencies.currentCredentialGeneration()) throw new Error("The server session changed.");
+        };
         const results: ShareMountStatusRow[] = [];
         const pushResult = (
           mount: unknown,
@@ -463,6 +481,12 @@ export function createShareMountCommands<WorkspaceSummary>(
             }
             assertCurrent();
             try {
+              if (mount.recipientUserId && credentials?.userId === mount.recipientUserId && credentials.relayUrl && relayUrlsMatch(credentials.relayUrl, mount.relayUrl)) {
+                const info = await dependencies.fetchInfo({ baseUrl: credentials.relayUrl, token: credentials.token }, mount.shareId);
+                assertIdentityCurrent();
+                await dependencies.updateMounts(workspace.workspaceId, rows => rows.map(row => row.shareId === mount.shareId ? { ...row, receivedIdentity: refreshReceivedReferencePin(row.receivedIdentity, info) } : row));
+                assertCurrent();
+              }
               // A slow relay holds only this mount's workspace transaction,
               // never one lease across the complete refresh pass.
               const reconciled = await dependencies.withWorkspaceOperation(

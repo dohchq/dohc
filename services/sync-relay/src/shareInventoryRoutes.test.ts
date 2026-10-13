@@ -267,3 +267,22 @@ describe("account received pages", () => {
     expect(last.removed).toEqual([]);
   });
 });
+
+it("returns one source per recipient and source only on admitted detail, never inventories or refusals", async () => {
+  const storage=await testStorage(); claim(storage); claim(storage,"workspace-b");
+  seed(storage,"one"); seed(storage,"two"); seed(storage,"other","workspace-b");
+  const h=testHandler(storage);
+  const details=await Promise.all(["one","two","other"].map(async id=>(await h(request("recipient","/sync/shares/"+id))).json()));
+  expect(details[0].receivedSource).toMatch(/^share-source:v1:[0-9a-f]{64}$/u);
+  expect(details[0].receivedSource).toBe(details[1].receivedSource); expect(details[0].receivedSource).not.toBe(details[2].receivedSource);
+  expect(JSON.stringify(details)).not.toContain(WORKSPACE);
+  expect(await (await h(request("recipient","/sync/shares?received=true"))).text()).not.toContain("receivedSource");
+  const withoutKey=testHandler(storage,{linkKey:undefined});
+  const body=await (await withoutKey(request("recipient","/sync/shares/one"))).json();
+  expect(body).not.toHaveProperty("receivedSource"); expect(body).not.toHaveProperty("workspaceId");
+  const stranger=await h(request("stranger","/sync/shares/one"));
+  storage.revokeShareGrant({shareId:"one",grantId:"grant-one",revokedAtMs:2});
+  const revoked=await h(request("recipient","/sync/shares/one"));
+  expect([revoked.status,await revoked.text()]).toEqual([stranger.status,await stranger.text()]);
+  expect((await h(request("recipient","/sync/"+details[0].receivedSource+"/log?since=0&limit=100"))).status).toBe(404);
+});

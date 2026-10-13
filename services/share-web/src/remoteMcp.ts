@@ -62,9 +62,10 @@ const collectionWriteSchema = z.object({
   "The files' content exceeds 4 MiB in all.");
 export const fileInventorySchema = z.object({
   ok: z.literal(true),
-  files: z.array(z.object({path: z.string(), blobSha256: z.string(), contentKind: z.enum(["text", "binary"]), automationSwitchable: z.boolean().optional()})),
+  files: z.array(z.object({path: z.string(), objectId: z.string().regex(/^share-object:v1:[0-9a-f]{64}$/u).optional(), blobSha256: z.string(), contentKind: z.enum(["text", "binary"]), automationSwitchable: z.boolean().optional()})),
 });
 
+const receivedObject = z.string().regex(/^share-object:v1:[0-9a-f]{64}$/u).optional();
 const logSha = z.string().regex(/^[0-9a-f]{64}$/u);
 const logPath = z.string().min(1);
 const linkLogSchema = z.object({
@@ -72,12 +73,12 @@ const linkLogSchema = z.object({
   ops: z.array(z.discriminatedUnion("opKind", [
     z.object({opKind: z.literal("workspace.init")}),
     z.object({opKind: z.literal("moment.append"), recordedAtMs: z.number(), payload: z.object({
-      operation: z.enum(["write", "rename", "delete"]), payloadBeforePath: logPath.optional(),
+      objectId: receivedObject, operation: z.enum(["write", "rename", "delete"]), payloadBeforePath: logPath.optional(),
       payloadAfterPath: logPath.optional(), payloadBeforeBlobSha256: logSha.nullable().optional(),
       payloadAfterBlobSha256: logSha.optional(), payloadAfterContentKind: z.literal("binary").optional(),
     })}),
     z.object({opKind: z.literal("version.create"), recordedAtMs: z.number(), payload: z.object({
-      versionId: z.string(), forkSnapshots: z.array(z.object({path: logPath, blobSha256: logSha.optional(), contentKind: z.literal("binary").optional()})),
+      versionId: z.string(), forkSnapshots: z.array(z.object({path: logPath, objectId: receivedObject, blobSha256: logSha.optional(), contentKind: z.literal("binary").optional()})),
     })}),
   ])),
   nextCursor: z.number().int().nonnegative(),
@@ -91,11 +92,11 @@ type LinkLogOp = z.infer<typeof linkLogSchema>["ops"][number];
 function linkChange(op: LinkLogOp): Record<string, unknown> | null {
   if (op.opKind === "workspace.init") return null;
   if (op.opKind === "version.create") return {recordedAtMs: op.recordedAtMs, operation: "version", versionId: op.payload.versionId,
-    files: op.payload.forkSnapshots.map(file => ({path: file.path, ...(file.blobSha256 ? {blobSha256: file.blobSha256} : {}), contentKind: file.contentKind ?? "text"}))};
+    files: op.payload.forkSnapshots.map(file => ({path: file.path, ...(file.objectId ? {objectId: file.objectId} : {}), ...(file.blobSha256 ? {blobSha256: file.blobSha256} : {}), contentKind: file.contentKind ?? "text"}))};
   const {operation, payloadBeforePath: beforePath, payloadAfterPath: afterPath, payloadBeforeBlobSha256: beforeBlobSha256, payloadAfterBlobSha256: afterBlobSha256} = op.payload;
   const path = operation === "delete" ? beforePath : afterPath;
   if (!path) return null;
-  return {recordedAtMs: op.recordedAtMs, operation, path, ...(operation === "rename" && beforePath ? {beforePath} : {}),
+  return {recordedAtMs: op.recordedAtMs, operation, path, ...(op.payload.objectId ? {objectId: op.payload.objectId} : {}), ...(operation === "rename" && beforePath ? {beforePath} : {}),
     ...(operation !== "delete" && afterBlobSha256 ? {afterBlobSha256, contentKind: op.payload.payloadAfterContentKind ?? "text"} : {}),
     ...(beforeBlobSha256 ? {beforeBlobSha256} : {})};
 }

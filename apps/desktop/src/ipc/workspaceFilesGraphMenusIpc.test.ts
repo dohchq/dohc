@@ -1,4 +1,6 @@
-import { workspaceFileRef } from "../workspaces/resolveEngineFiles";
+import { createEngineFileResolver, workspaceFileRef } from "../workspaces/resolveEngineFiles";
+import { VersionedLiveAdapter } from "@dohc/workspace-engine-client";
+import { VersionedLoopbackEngine } from "@dohc/workspace-engine-client/testing";
 import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -411,6 +413,28 @@ describe("registered graph and heading handlers", () => {
     expect(graph.edges).toHaveLength(1);
     expect(h.capture).toHaveBeenCalledWith("workspace", "Chat mentions");
     expect(h.resolveFiles).toHaveBeenCalledWith(h.workspace, [workspaceFileRef("workspace", "present"), workspaceFileRef("workspace", "removed"), { path: "../outside.md" }, { path: "shared-with-me/Shared/a.md" }]);
+  });
+
+  it("received graph mentions follow token identity after rename and omit deleted tokens", async () => {
+    const h = await harness();
+    const objectId = "share-object:v1:" + "a".repeat(64), receivedSource = "share-source:v1:" + "b".repeat(64);
+    h.workspace.shareView = { shareId: "share", granterEmail: null, genericChatWritable: false, grantedSelector: { paths: ["current.md"], versionId: null, access: "view" }, receivedIdentity: { receivedSource, grantId: "grant", generation: 1 } };
+    await writeFile(join(h.workspace.rootPath, "current.md"), "# Current\n");
+    vi.mocked(h.store.listThreads).mockResolvedValue([{ id: "thread", workspaceId: "workspace", title: "Chat", createdAtMs: 1, updatedAtMs: 1 }]);
+    vi.mocked(h.store.listThreadAttachments).mockResolvedValue([{ messageId: "message", objectId, pathHint: "old.md" } as Awaited<ReturnType<typeof h.store.listThreadAttachments>>[number]]);
+    const engine = new VersionedLoopbackEngine();
+    engine.seedTextFile({ workspace: "workspace", path: "current.md", text: "# Current", objectId });
+    const adapter = new VersionedLiveAdapter({ close() {}, sendRequest: request => engine.sendRequest(request) }, "workspace", { workspaceId: "workspace" });
+    h.resolveFiles.mockImplementation(createEngineFileResolver(async (_workspace: { workspaceId: string; shareView?: unknown }, work) => work(adapter), async () => [{
+      workspace: h.workspace, pin: h.workspace.shareView!.receivedIdentity!,
+      selector: { paths: ["current.md"], versionId: null, access: "view" as const }, assertCurrent() {},
+    }]));
+    const input = { workspaceId: "workspace", includeChatMentions: true };
+    await expect(h.invoke(CHANNELS.readWorkspaceGraph, input)).resolves.toMatchObject({ edges: [expect.objectContaining({ target: "current.md" })] });
+    expect(h.resolveFiles).toHaveBeenCalledWith(h.workspace, [{ source: { receivedSource }, target: { kind: "file", objectId }, labels: { name: "", displayKind: "binary" } }]);
+    expect(h.capture).not.toHaveBeenCalled();
+    h.resolveFiles.mockResolvedValue([{ status: "absent" }]);
+    await expect(h.invoke(CHANNELS.readWorkspaceGraph, input)).resolves.toMatchObject({ edges: [] });
   });
 
   it("rejects a heading response after renderer retirement", async () => {

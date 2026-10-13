@@ -1,3 +1,4 @@
+import { createReceivedIdentity } from "./receivedIdentity";
 import { readCurrentShareGrant } from "./storage/currentShareGrant";
 import { RelayShareCopyResult } from "@dohc/workspace-contracts/share-copy";
 import {normalizeShareLabel} from "@dohc/security-contract/share-labels";
@@ -48,6 +49,7 @@ export function createShareInventoryRoutes(
   senderLabel?: (userId: string, email: string | null) => Promise<string>,
   accessRateLimiter = new TokenBucketLimiter(30, 1, 10_000),
   lookupUserEmails?: (userIds: readonly string[]) => Promise<ReadonlyMap<string, string>>,
+  linkKey?: string | Uint8Array,
 ) {
   async function receivedSummaries(rows: readonly SyncRelayShareWithGrantRow[], actorUserId: string) {
     const receivedLookups = await Promise.all(rows.map(async fallback => {
@@ -162,7 +164,8 @@ export function createShareInventoryRoutes(
     }
     if (route.route === "share" && request.method === "GET") {
       await claimPendingShares(actor.userId);
-      const initial = requireShareAction(route.shareId, actor.userId, "read");
+      const initial = resolveReceivedShareAuthority({ storage, actorUserId: actor.userId, shareId: route.shareId });
+      if (!initial.ok) throw notFound();
       const granterEmail = lookupUserEmail
         ? await lookupUserEmail(initial.share.granterUserId)
         : null;
@@ -172,14 +175,15 @@ export function createShareInventoryRoutes(
         actorUserId: actor.userId,
         shareId: route.shareId,
       });
-      if (!authorized.ok) { requireShareAction(route.shareId, actor.userId, "read"); throw notFound(); }
+      if (!authorized.ok) throw notFound();
       const summary = receivedShareSummary(
         { share: authorized.share, grant: authorized.grant },
         granterEmail,
         authorized.genericChatWritable,
         sharerName,
       );
-      return jsonResponse({ ok: true, ...summary });
+      const receivedSource = createReceivedIdentity(linkKey).source(["user", actor.userId], authorized.share.workspaceId);
+      return jsonResponse({ ok: true, ...summary, ...(receivedSource ? { receivedSource } : {}) });
     }
     throw relayError("method_not_allowed");
   }

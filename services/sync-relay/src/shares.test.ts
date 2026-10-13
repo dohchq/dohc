@@ -256,8 +256,8 @@ describe("share grants", () => {
 
     const removed = await pending;
     expect(removed.status).toBe(404);
-    expect(await removed.json()).toMatchObject({code: "share_access_removed", error: "The owner removed your access."});
-    expect(counted.scansForShare("share-post-await")).toBe(3);
+    expect(await removed.json()).toMatchObject({code: "not_found"});
+    expect(counted.scansForShare("share-post-await")).toBe(2);
   });
 
   it("omits a received-list row revoked during the granter email lookup", async () => {
@@ -982,7 +982,7 @@ describe("share grants", () => {
     for (const path of ["/sync/shares/share-0/log?since=0", "/sync/shares/share-0", `/sync/shares/share-0/blobs/${sharedSha}`]) {
       const response = await h(request(RECIPIENT, path));
       expect(response.status).toBe(404);
-      expect(await response.json()).toMatchObject({code: "share_access_removed"});
+      expect(await response.json()).toMatchObject({code: path === "/sync/shares/share-0" ? "not_found" : "share_access_removed"});
       expect(await denialBytes(await h(request(STRANGER, path)))).toContain('"code":"not_found"');
     }
 

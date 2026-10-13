@@ -1,3 +1,4 @@
+import { createReceivedIdentity } from "./receivedIdentity";
 import type { TokenBucketLimiter } from "@dohc/service-http";
 import { createAccountlessPathProjection } from "./accountlessPathProjection";
 import {
@@ -30,6 +31,7 @@ export function createLinkReadRoutes(
     | "currentFileBlobByteLength"
     | "getBlob"
     | "automationSwitchableFolder"
+    | "objectIdAtPathInVersion"
   >,
   nowMs: () => number,
   linkCurrentFileLimit: number,
@@ -54,7 +56,9 @@ export function createLinkReadRoutes(
   discussionActivity: Pick<DiscussionActivityHub, "wait">,
   admitLinkBlobBytes: (grantId: string, byteLength: number) => (() => void) | null,
   respondWithLinkBytes: ReturnType<typeof createLinkResponseStreams>["respondWithLinkBytes"],
+  linkKey?: string | Uint8Array,
 ) {
+  const identity = createReceivedIdentity(linkKey);
   return async function respondToLinkRead(
     request: Request,
     route: LinkReadRoute,
@@ -87,6 +91,7 @@ export function createLinkReadRoutes(
       );
       return linkJsonResponse(fresh.shareId, fresh.grantId, {
         ok: true,
+        receivedSource: identity.source(["link", fresh.grantId], share.workspaceId),
         effectiveSelector: presentation.selector,
         access: fresh.access,
         subjectName: storage.getShareLabels(fresh.shareId).subjectName,
@@ -117,6 +122,7 @@ export function createLinkReadRoutes(
         if (path === null) throw notFound();
         return {
           path,
+          objectId: identity.object(["link", fresh.grantId], share.workspaceId, storage.objectIdAtPathInVersion({ workspaceId: share.workspaceId, versionId: targetVersionId(fresh.effectiveSelector), path: file.path })),
           blobSha256: file.blobSha256,
           contentKind: file.contentKind,
           ...(requestedFolder !== null && path === `${requestedFolder}/automations.yaml` ? { automationSwitchable: fresh.access === "edit"
@@ -152,6 +158,10 @@ export function createLinkReadRoutes(
         since,
         limit,
         "accountless",
+
+        undefined,
+
+        ["link", capability.grantId],
       );
       if (
         hold > 0 &&
@@ -189,6 +199,10 @@ export function createLinkReadRoutes(
                       scanSince,
                       limit,
                       "accountless",
+
+                      undefined,
+
+                      ["link", capability.grantId],
                     );
                     if (checked.ops.length > 0 || checked.hasMore) return false;
                     scanSince = checked.nextCursor;
@@ -217,6 +231,10 @@ export function createLinkReadRoutes(
             Math.max(scanSince, currentEpochLogFloor),
             limit,
             "accountless",
+
+            undefined,
+
+            ["link", capability.grantId],
           );
           scanSince = page.nextCursor;
           if (
@@ -245,6 +263,10 @@ export function createLinkReadRoutes(
           Math.max(scanSince, currentEpochLogFloor),
           limit,
           "accountless",
+
+          undefined,
+
+          ["link", capability.grantId],
         );
         requireFreshLinkRead(capabilityToken, capability);
         return linkJsonResponse(capability.shareId, capability.grantId, {
