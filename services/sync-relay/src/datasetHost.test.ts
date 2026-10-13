@@ -1,3 +1,4 @@
+import * as supervisorRuntime from "@dohc/app-backend-runtime/supervisor";
 import { mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -137,6 +138,12 @@ it("creates standalone data on the relay connection and recovers app writes afte
 });
 
 it("charges only the current replay cache and retains retries across relay restart", async () => {
+  // This test measures event-threshold caches; seeded replay must not move their boundary.
+  // The interval exceeds the test budget, including on a loaded host.
+  const createSupervisor = supervisorRuntime.createDatasetSupervisor;
+  const replayInterval = vi.spyOn(supervisorRuntime, "createDatasetSupervisor")
+    .mockImplementation(options => createSupervisor({...options, replayCacheMs: 60_000}));
+  cleanups.push(async () => {replayInterval.mockRestore();});
   const f = await fixture(true); await f.activate();
   const db = f.storage.db;
   const usage = () => Number(db.prepare("SELECT storage_bytes FROM sync_relay_dataset_usage WHERE workspace_id=? AND dataset_id=?")

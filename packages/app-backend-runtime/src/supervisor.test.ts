@@ -29,10 +29,10 @@ const source = `globalThis.operations = { run(ctx,input) {
   return ctx.db.query('SELECT * FROM items ORDER BY id');
 }}`;
 
-async function fixture(options: { transform?: (journal: DatasetJournal) => DatasetJournal; launch?: AppRuntimeLauncher; maxWorkers?: number; seedSql?:string; schemaSql?:string; source?:string; tables?:string[];maintenanceStorage?:DatasetSupervisorOptions["maintenanceStorage"];nowMs?:()=>number; materializationEvents?:number; idleMs?:number; queueMs?:number; onMaintenanceError?:DatasetSupervisorOptions["onMaintenanceError"] } = {}) {
+async function fixture(options: { transform?: (journal: DatasetJournal) => DatasetJournal; launch?: AppRuntimeLauncher; maxWorkers?: number; schemaSql?:string; source?:string; tables?:string[];maintenanceStorage?:DatasetSupervisorOptions["maintenanceStorage"];nowMs?:()=>number; materializationEvents?:number; idleMs?:number; queueMs?:number; onMaintenanceError?:DatasetSupervisorOptions["onMaintenanceError"] } = {}) {
   const approvedSchema=options.schemaSql ?? schemaSql, approvedSource=options.source ?? source;
   const directory = await mkdtemp(join(tmpdir(), "dohc-supervisor-"));
-  const seed = new DatabaseSync(join(directory, "seed.sqlite")); seed.exec(approvedSchema); if(options.seedSql) seed.exec(options.seedSql); seed.close();
+  const seed = new DatabaseSync(join(directory, "seed.sqlite")); seed.exec(approvedSchema); seed.close();
   const checkpoint = await readFile(join(directory, "seed.sqlite"));
   const db = new DatabaseSync(join(directory, "authority.sqlite"));
   db.exec("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; BEGIN IMMEDIATE; CREATE TABLE grants(allowed INTEGER); INSERT INTO grants VALUES(1); CREATE TABLE files(attached INTEGER); INSERT INTO files VALUES(0); COMMIT;");
@@ -447,8 +447,8 @@ it("caches a replay that rebuilt the dataset so the next reopen does not repeat 
     return ctx.db.query('SELECT * FROM items ORDER BY id');
   }}`;
   const storage={authorize(){},account(){}};
-  const f=await fixture({schemaSql:"CREATE TABLE items(id TEXT PRIMARY KEY NOT NULL,value TEXT NOT NULL UNIQUE);",source:swapSource,seedSql:"INSERT INTO items VALUES('a','x'),('b','y');",maintenanceStorage:storage});
-  // The checkpoint holds the prerequisite rows; only the swap needs replay.
+  const f=await fixture({schemaSql:"CREATE TABLE items(id TEXT PRIMARY KEY NOT NULL,value TEXT NOT NULL UNIQUE);",source:swapSource,maintenanceStorage:storage});
+  await f.invoke({id:"a",value:"x"},{idempotencyKey:"a"});await f.invoke({id:"b",value:"y"},{idempotencyKey:"b"});
   // The recovery launcher forces a constraint conflict at the swap, then runs the real rebuild.
   await f.invoke({swap:true},{idempotencyKey:"swap"});
   await f.supervisor.close();
@@ -463,7 +463,7 @@ it("caches a replay that rebuilt the dataset so the next reopen does not repeat 
     const reply=message as {id:number;ok?:boolean;result?:{revision:number};progress?:unknown};
     if(typeof reply.progress==="string")steps.push(reply.progress);
     if(reply.ok&&batches.has(reply.id)){replayed.push(...batches.get(reply.id)!.filter(revision=>revision<=reply.result!.revision));batches.delete(reply.id);}
-  }),0);
+  }),2);
   const read={scope:f.scope,tables:["items"],operation:"run",caller:{kind:"owner"},callerKey:"owner",input:{},idempotencyKey:"read",payloadSha256:hash("{}"),readOnly:true,authorize:f.authorize};
   const swapped=[{id:"a",value:"y"},{id:"b",value:"x"}];
   for(const round of [1,2]) {
@@ -471,11 +471,11 @@ it("caches a replay that rebuilt the dataset so the next reopen does not repeat 
     try {
       expect((await supervisor.invoke(read)).result).toEqual(swapped);
       // The request returns only once the replay's cache is installed.
-      if(round===1) expect(f.journal.materialization({scope:f.scope,authorize:f.authorize})?.cursor.revision).toBe(1);
+      if(round===1) expect(f.journal.materialization({scope:f.scope,authorize:f.authorize})?.cursor.revision).toBe(3);
     } finally {await supervisor.close();}
   }
   expect(steps).toContain("rebuilding the dataset from the replay copy");
-  expect(opened).toEqual([0,1]);expect(replayed).toEqual([1]);
+  expect(opened).toEqual([0,3]);expect(replayed).toEqual([1,2,3]);
 });
 
 // A dataset with one committed event, reopened by a supervisor whose worker
