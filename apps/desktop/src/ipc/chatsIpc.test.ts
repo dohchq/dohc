@@ -1,3 +1,4 @@
+import { workspaceFileRef } from "../workspaces/resolveEngineFiles";
 import { describe, expect, it, vi } from "vitest";
 import type { ChatBookmark, ChatMessage, ChatThread } from "@dohc/workspace-contracts/engine";
 import { CHANNELS } from "./channels";
@@ -108,7 +109,7 @@ function fixture(kind: ScopeKind = "local") {
   const activity = { queueCloudSync: vi.fn() };
   const syncSharedChannelsForChatTarget = vi.fn(async () => 0);
   const resolveEngineFiles = vi.fn<import("../workspaces/resolveEngineFiles").EngineFileResolver<import("@dohc/workspace-engine-client/daemon").EngineWorkspace>>(async (_workspace, targets) => targets.map(target =>
-    ("path" in target ? target.path === "notes/a.md" : target.objectId === "object")
+    ("path" in target ? target.path === "notes/a.md" : target.target.objectId === "object")
       ? { status: "found", objectId: "object", path: "notes/a.md" } : { status: "absent" }));
   const readOwnedWorkspaceText = vi.fn(async () => ({ text: "# Section\n" }));
   const chatScope = createChatScopeCapability({
@@ -473,6 +474,15 @@ describe("registered channels and personal chat projections", () => {
 
 
 describe("targeted file resolution", () => {
+  it.each(["resolution failure", "deleted file"])("retains the file-chat hint after %s", async outcome => {
+    const test = fixture();
+    if (outcome === "resolution failure") test.resolveEngineFiles.mockRejectedValue(new Error("Engine unavailable"));
+    else test.resolveEngineFiles.mockResolvedValue([{ status: "absent" }]);
+    expect(await test.invoke(CHANNELS.listChatChannels, { workspaceId: "workspace" })).toMatchObject({
+      fileThreads: [{ id: "thread", path: "notes/a.md" }],
+    });
+  });
+
   it("keeps mention attachment identity when a path is reused", async () => {
     const test = fixture();
     test.captureMethods.resolveFileForPath.mockResolvedValue({ objectId: "replacement", path: "notes/a.md" });
@@ -498,7 +508,7 @@ describe("targeted file resolution", () => {
     expect(await test.invoke(CHANNELS.listChatChannels, { workspaceId: "workspace" })).toMatchObject({ fileThreads: [
       { id: "thread", path: "moved.md" }, { id: "duplicate", path: "moved.md" }, { id: "gone", path: "../legacy display hint" },
     ] });
-    expect(test.resolveEngineFiles).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: "workspace" }), [{ objectId: "object" }, { objectId: "gone" }]);
+    expect(test.resolveEngineFiles).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: "workspace" }), [workspaceFileRef("workspace", "object"), workspaceFileRef("workspace", "gone")]);
   });
 });
 
