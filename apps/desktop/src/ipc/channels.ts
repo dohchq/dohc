@@ -1,5 +1,7 @@
+import type { CommandId } from "../renderer/commands/commandRows";
+
 // Closed tuples and channel names shared by main, the bridge contract, and the
-// preload. This module imports nothing so main-side modules can read a tuple
+// preload. This module has no runtime imports so main-side modules can read a tuple
 // without loading the whole contract.
 
 export const MENU_COMMANDS = [
@@ -20,7 +22,7 @@ export const MENU_COMMANDS = [
   "install-update",
   "new-editor-group-right",
   "close-tab",
-] as const;
+] as const satisfies readonly (CommandId | "command-palette")[];
 
 // Explorer context menu: the renderer names what was right-clicked, main pops
 // a native menu built from main-owned labels over this closed set, and the
@@ -57,6 +59,12 @@ export const WORKBENCH_MENU_COMMANDS = [
   "toggle-theme",
   "unpin-app",
 ] as const;
+
+// These global workbench actions are checked against the command registry.
+// The contextual dispatch stays in the shell until ObjectMenu replaces it.
+export const WORKBENCH_GLOBAL_COMMANDS = [
+  "open-history", "connect-cloud", "settings", "check-updates", "install-update", "toggle-theme",
+] as const satisfies readonly (CommandId & (typeof WORKBENCH_MENU_COMMANDS)[number])[];
 
 // Workspace content search streams batches main→renderer. The bounds mirror
 // workspaceSearch.ts (the producer); bridgeContract's SearchResultsEvent

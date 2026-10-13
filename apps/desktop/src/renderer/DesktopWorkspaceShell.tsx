@@ -127,6 +127,13 @@ import { CloudLogin } from "./CloudLogin";
 import { ErrorBoundary } from "./ErrorBoundary";
 import { ExternalLinkConfirm } from "./ExternalLinkConfirm";
 import { CommandPalette, type Command } from "./CommandPalette";
+import {
+  isCommandAvailable,
+  paletteCommandRows,
+  pinnedAppCommandId,
+  type CommandContext,
+  type CommandHandlers,
+} from "./commands/commandRows";
 import { QuickOpenPalette } from "./QuickOpenPalette";
 import { FileInspector } from "./FileInspector";
 import { fileKindForPath } from "@dohc/workspace-contracts/kinds";
@@ -254,7 +261,6 @@ import {
   togglePinned,
   toggleSidebarOnRail,
   SHARING_VIEW_ID,
-  VIEW_IDS,
   type ActivityViewId,
   type EditorGroup,
   type WorkbenchState,
@@ -3841,168 +3847,66 @@ export function DesktopWorkspaceShell(props: {
 
   // The command registry: the palette renders it and the application menu
   // routes through it (onMenuCommand below) — one definition per action.
-  const commands = useMemo<Command[]>(
-    () => [
-      {
-        id: "new-file",
-        label: "New file",
-        run: () => setNewFileOpen(true),
-      },
-      {
-        id: "new-drawing",
-        label: "New drawing",
-        run: () => void createUntitledDrawing(),
-      },
-      {
-        id: "new-folder",
-        label: "New folder",
-        run: () => requestExplorerCreate("folder"),
-      },
-      // Creating a collection writes collection.yaml and immediately opens
-      // an engine-backed surface. Shared views therefore get neither the
-      // application-menu action nor the palette entry.
-      ...(props.workspace.shareView && !shareViewWritable
-        ? []
-        : [
-            {
-              id: "new-collection",
-              label: "New collection",
-              run: () => setNewCollectionFolder(""),
-            },
-          ]),
-      {
-        id: "quick-open",
-        label: "Go to",
-        run: () => setQuickOpenOpen(true),
-      },
-      {
-        id: "open-workspace",
-        label: "Open workspace folder…",
-        run: () => void openWorkspaceFolder(),
-      },
-      {
-        id: "import-files",
-        label: "Import files",
-        run: () => void importFiles(),
-      },
-      {
-        id: "export-workspace",
-        label: "Export workspace as zip",
-        run: () =>
-          void bridge().exportWorkspaceZip({ workspaceId }).catch((error) =>
-            reportShellError("Could not export this workspace.", error),
-          ),
-      },
-      {
-        id: "toggle-sidebar",
-        label: "Toggle sidebar",
-        run: toggleSidePanel,
-      },
-      {
-        id: "close-tab",
-        label: "Close tab",
-        run: closeActiveTab,
-      },
-      {
-        id: "new-editor-group-right",
-        label: "New editor group right",
-        run: () => openEditorGroupRight(),
-      },
-      // Only offered while a markdown document is the active tab — on every
-      // other tab the toggle has nothing to act on, so the palette hides it.
-      ...(activeDocumentPath && fileKindForPath(activeDocumentPath).displayKind === "markdown"
-        ? [
-            {
-              id: "toggle-markdown-source",
-              label: "Toggle markdown source view",
-              run: () => toggleSource(wbRef.current.activeEditorGroup),
-            },
-          ]
-        : []),
-      // Every workspace has the About rail, shared views included. A
-      // workspace whose capture cannot serve it keeps the command: the rail
-      // is still there, stating what dohc cannot do.
-      {
-        id: "toggle-about",
-        label: "Toggle About",
-        run: () => mutateWb(toggleAbout),
-      },
-      // Every view of dohc's, hidden from the rail or not: a command shows it
-      // and never hides it. A shared view has no Chats view to show, so it
-      // offers no command for one, and View > Chats finds nothing to run.
-      ...VIEW_IDS.filter((view) => !(isShareView && view === "chats")).map((view) => ({
-        id: `show-${view}`,
-        label: `View: ${SIDE_PANEL_VIEWS[view].label}`,
-        run: () => mutateWb((state) => showView(state, view)),
-      })),
-      ...pinnedApps.map((app) => ({
-        id: `show-${appViewId(app.root)}`,
-        label: `View: ${app.label}`,
-        run: () => mutateWb((state) => showView(state, appViewId(app.root))),
-      })),
-      {
-        id: "connect-cloud",
-        label: "Connect server",
-        run: openCloud,
-      },
-      {
-        id: "settings",
-        label: "Settings",
-        run: () => openSettings(),
-      },
-      {
-        id: "settings-appearance",
-        label: "Settings: Open Appearance",
-        run: () => openSettings("appearance"),
-      },
-      {
-        id: "settings-agents",
-        label: "Settings: Open Agents (MCP)",
-        run: () => openSettings("agents"),
-      },
-      {
-        id: "check-updates",
-        label: "Check for updates",
-        run: () => void checkForDesktopUpdates(),
-      },
-      {
-        id: "install-update",
-        label: "Update and restart",
-        run: () => void installDesktopUpdate(),
-      },
-      {
-        id: "toggle-theme",
-        label: "Toggle light/dark theme",
-        run: toggleTheme,
-      },
-      {
-        id: "zoom-in",
-        label: "Zoom in",
-        run: () =>
-          void bridge().stepWindowZoom({ step: "in" }).catch((error) =>
-            reportShellError("Could not change the window zoom.", error),
-          ),
-      },
-      {
-        id: "zoom-out",
-        label: "Zoom out",
-        run: () =>
-          void bridge().stepWindowZoom({ step: "out" }).catch((error) =>
-            reportShellError("Could not change the window zoom.", error),
-          ),
-      },
-      {
-        id: "zoom-reset",
-        label: "Reset zoom",
-        run: () =>
-          void bridge().stepWindowZoom({ step: "reset" }).catch((error) =>
-            reportShellError("Could not change the window zoom.", error),
-          ),
-      },
-    ],
-    [
-      activeDocumentPath,
+  const commandContext = useMemo<CommandContext>(
+    () => ({
+      isShareView,
+      shareViewWritable,
+      activeDocumentKind: activeDocumentPath ? fileKindForPath(activeDocumentPath).displayKind : null,
       pinnedApps,
+    }),
+    [isShareView, shareViewWritable, activeDocumentPath, pinnedApps],
+  );
+  const commandHandlers = useMemo<CommandHandlers>(
+    () => ({
+      "new-file": () => setNewFileOpen(true),
+      "new-drawing": () => void createUntitledDrawing(),
+      "new-folder": () => requestExplorerCreate("folder"),
+      "new-collection": () => setNewCollectionFolder(""),
+      "quick-open": () => setQuickOpenOpen(true),
+      "open-workspace": () => void openWorkspaceFolder(),
+      "import-files": () => void importFiles(),
+      "export-workspace": () =>
+        void bridge().exportWorkspaceZip({ workspaceId }).catch((error) =>
+          reportShellError("Could not export this workspace.", error),
+        ),
+      "toggle-sidebar": toggleSidePanel,
+      "close-tab": closeActiveTab,
+      "new-editor-group-right": () => openEditorGroupRight(),
+      "toggle-markdown-source": () => toggleSource(wbRef.current.activeEditorGroup),
+      "toggle-about": () => mutateWb(toggleAbout),
+      "show-explorer": () => mutateWb((state) => showView(state, "explorer")),
+      "show-chats": () => mutateWb((state) => showView(state, "chats")),
+      "show-search": () => mutateWb((state) => showView(state, "search")),
+      "show-graph": () => mutateWb((state) => showView(state, "graph")),
+      "show-sites": () => mutateWb((state) => showView(state, "sites")),
+      "show-history": () => mutateWb((state) => showView(state, "history")),
+      "connect-cloud": openCloud,
+      "settings": () => openSettings(),
+      "settings-appearance": () => openSettings("appearance"),
+      "settings-agents": () => openSettings("agents"),
+      "check-updates": () => void checkForDesktopUpdates(),
+      "install-update": () => void installDesktopUpdate(),
+      "toggle-theme": toggleTheme,
+      "zoom-in": () =>
+        void bridge().stepWindowZoom({ step: "in" }).catch((error) =>
+          reportShellError("Could not change the window zoom.", error),
+        ),
+      "zoom-out": () =>
+        void bridge().stepWindowZoom({ step: "out" }).catch((error) =>
+          reportShellError("Could not change the window zoom.", error),
+        ),
+      "zoom-reset": () =>
+        void bridge().stepWindowZoom({ step: "reset" }).catch((error) =>
+          reportShellError("Could not change the window zoom.", error),
+        ),
+      "open-history": openHistoryView,
+      ...Object.fromEntries(pinnedApps.map((app) => [
+        pinnedAppCommandId(app.root),
+        () => mutateWb((state) => showView(state, appViewId(app.root))),
+      ] as const)),
+    }),
+    [
+      commandContext,
       toggleSidePanel,
       createUntitledDrawing,
       openWorkspaceFolder,
@@ -4013,23 +3917,25 @@ export function DesktopWorkspaceShell(props: {
       checkForDesktopUpdates,
       installDesktopUpdate,
       openCloud,
+      openHistoryView,
       openEditorGroupRight,
       openSettings,
       reportShellError,
       toggleSource,
       workspaceId,
-      isShareView,
-      props.workspace.shareView,
-      shareViewWritable,
     ],
+  );
+  const commands = useMemo<Command[]>(
+    () => paletteCommandRows(commandContext).map((row) => ({ ...row, run: commandHandlers[row.id] })),
+    [commandContext, commandHandlers],
   );
 
   useEffect(() => {
     return bridge().onMenuCommand((command) => {
       if (command === "command-palette") setPaletteOpen(true);
-      else commands.find((entry) => entry.id === command)?.run();
+      else if (isCommandAvailable(command, commandContext)) commandHandlers[command]();
     });
-  }, [commands]);
+  }, [commandContext, commandHandlers]);
 
   // Received workspaces refresh on open and on demand; ended copies stay local.
   // The relay-derived generic chat fact selects the Comment banner's next
