@@ -1,4 +1,5 @@
 import { useTypingRecoveryNotices } from "./shell/useTypingRecoveryNotices";
+import { useFolderAppOffers } from "./offers/useFolderAppOffers";
 import { CreationPartialError } from "@dohc/cli/creation";
 import {shareSenderLabel} from "@dohc/security-contract/share-labels";
 import { AgentSettingsProvider } from "./workbench/AgentBadge";
@@ -207,6 +208,8 @@ import type {
   ChatsNav,
 } from "./workbench/ChatsView";
 import {
+  parseTab,
+  TAB_KINDS,
   activeGroup,
   activeTabPath,
   activateTab,
@@ -215,28 +218,14 @@ import {
   closeEditorGroup,
   createEditorGroupRight,
   focusEditorGroup,
-  isVersionCompareTabPath,
-  parseVersionCompareTabPath,
   versionCompareTabPath,
-  isMomentDiffTabPath,
   momentDiffTabPath,
-  parseMomentDiffTabPath,
   collectionTabPath,
   transactionalCollectionTabPath,
-  parseTransactionalCollectionTabPath,
-  isCollectionTabPath,
-  parseCollectionTabPath,
   defaultWorkbenchState,
   GRAPH_TAB_PATH,
   HISTORY_TAB_PATH,
-  isChatsTabPath,
-  parseChatTabPath,
-  isGraphTabPath,
-  isHistoryTabPath,
-  isSingletonEditorTabPath,
-  isSiteTabPath,
   isViewId,
-  isVirtualTabPath,
   MAX_OPEN_TABS,
   moveTab,
   moveTabToGroup,
@@ -248,7 +237,6 @@ import {
   keepActiveViewShown,
   parseAppViewId,
   sidebarViews,
-  parseSiteTabPath,
   parseUiState,
   recordRecentFile,
   remapWorkbenchPaths,
@@ -294,7 +282,7 @@ function groupsMountingNewDocument(
     const before = current.editorGroups.find((group) => group.id === after.id);
     return after.activeTab !== before?.activeTab &&
       after.activeTab !== null &&
-      !isVirtualTabPath(after.activeTab)
+      !TAB_KINDS[parseTab(after.activeTab).kind].virtual
       ? [after.id]
       : [];
   });
@@ -1006,7 +994,7 @@ export function DesktopWorkspaceShell(props: {
     resolveMomentDiffPath,
   } = useTabTitles(workspaceId);
   const anyTabDirty = dirtyPaths.size > 0;
-  const activeDocumentPath = isVirtualTabPath(focusedTabPath)
+  const activeDocumentPath = TAB_KINDS[parseTab(focusedTabPath)?.kind ?? "removed"].virtual
     ? null
     : focusedTabPath;
   // Whether some tab holds what About covers, so its empty state says to
@@ -1015,9 +1003,10 @@ export function DesktopWorkspaceShell(props: {
   const sharedView = props.workspace.shareView != null;
   const aboutTabOpen = useMemo(
     () => wb.editorGroups.some((group) => group.tabs.some((tab) => {
-      if (!isVirtualTabPath(tab.path)) return true;
-      const chat = sharedView || tab.path === focusedTabPath ? null : parseChatTabPath(tab.path);
-      return chat?.kind === "channel" || chat?.kind === "dm";
+      const parsed = parseTab(tab.path);
+      if (!TAB_KINDS[parsed.kind].virtual) return true;
+      return !sharedView && tab.path !== focusedTabPath && parsed.kind === "chat" &&
+        (parsed.target.kind === "channel" || parsed.target.kind === "dm");
     })),
     [focusedTabPath, sharedView, wb.editorGroups],
   );
@@ -1271,7 +1260,7 @@ export function DesktopWorkspaceShell(props: {
           const restoredGroup = activeGroup(parsed);
           if (
             restoredGroup.activeTab !== null &&
-            !isVirtualTabPath(restoredGroup.activeTab)
+            !TAB_KINDS[parseTab(restoredGroup.activeTab).kind].virtual
           ) {
             restoredFileSurface = {
               selectionGeneration: workspaceSelectionGeneration,
@@ -1544,6 +1533,26 @@ export function DesktopWorkspaceShell(props: {
     shareViewReadsCollections,
     shareViewEnded,
   );
+  const folderApps = useFolderAppOffers({
+    workspaceId,
+    enabled: workspaceIsReady && !shareViewEnded,
+    expandedFolders: wb.expandedFolders,
+    activePath: wb.editorGroups.find((group) => group.id === wb.activeEditorGroup)?.activeTab ?? null,
+    onError: (folder, error, retry, quiet) => reportShellFailure({
+      message: `dohc could not read the folder ${folder}.`,
+      cause: error,
+      retry,
+      identity: `folder-app:${folder}`,
+      quiet,
+    }),
+  });
+  const appFolders = useMemo(() => new Set(folderApps.keys()), [folderApps]);
+  // The app folder of each entry file, so a file view shows Run.
+  const appEntries = useMemo(() => {
+    const entries = new Map<string, string>();
+    for (const app of folderApps.values()) if (app.run?.entryPath) entries.set(app.run.entryPath, app.run.path);
+    return entries;
+  }, [folderApps]);
   useEffect(() => {
     if (!workspaceIsReady || shareViewEnded) return;
     const refresh = () => {
@@ -2424,7 +2433,7 @@ export function DesktopWorkspaceShell(props: {
     openVirtualTab(HISTORY_TAB_PATH);
   }, [openVirtualTab]);
   const cancelDmNavigation = useCallback(() => invalidateDmNavigation(dmNavigationRequest), []);
-  const chatPaths = useMemo(() => allTabs(wb).map((tab) => tab.path).filter(isChatsTabPath), [wb.editorGroups]);
+  const chatPaths = useMemo(() => allTabs(wb).map((tab) => tab.path).filter((path) => parseTab(path).kind === "chat"), [wb.editorGroups]);
   const chatEditors = useChatEditorTabs({
     workspaceId, onOpen: openVirtualTab, onNavigate: cancelDmNavigation,
     paths: chatPaths,
@@ -2432,7 +2441,7 @@ export function DesktopWorkspaceShell(props: {
     enabled: captureAvailable,
     agentName: agentSetup?.agentName,
   });
-  const selectedChatsNav = focusedTabPath && isChatsTabPath(focusedTabPath)
+  const selectedChatsNav = focusedTabPath && (parseTab(focusedTabPath)?.kind === "chat")
     ? chatEditors.get(focusedTabPath).nav : undefined;
   const dataCollections = useMemo(() => datasets.flatMap(dataset => dataset.tables.map(table => ({ datasetId: dataset.datasetId, datasetPath: dataset.datasetPath, tableId: table.tableId, name: table.name, archived: dataset.archived }))), [datasets]);
   const tabLabels = useMemo(() => new Map([...knownTabLabels, ...chatEditors.titles,
@@ -2672,7 +2681,7 @@ export function DesktopWorkspaceShell(props: {
         current.activeEditorGroup,
         groupId,
       );
-      if (isVirtualTabPath(path)) {
+      if (TAB_KINDS[parseTab(path).kind].virtual) {
         mutateWb((state) => activateTab(state, groupId, path));
         return;
       }
@@ -3314,7 +3323,7 @@ export function DesktopWorkspaceShell(props: {
         (candidate) => candidate.path === group.activeTab,
       );
       if (!group || !tab) return;
-      if (isSingletonEditorTabPath(tab.path)) {
+      if (TAB_KINDS[parseTab(tab.path).kind].singleton) {
         showSingletonTabSplitError();
         return;
       }
@@ -3403,12 +3412,13 @@ export function DesktopWorkspaceShell(props: {
         moveTabIntoNewGroup(targetGroupId, path);
       } else if (command === "close-editor-group") {
         closeGroupAfterFlush(targetGroupId);
-      } else if (command === "copy-path" && path && !isVirtualTabPath(path)) {
+      } else if (command === "copy-path" && path && !TAB_KINDS[parseTab(path).kind].virtual) {
         void navigator.clipboard?.writeText(path);
       } else if (command === "show-in-explorer" && path) {
-        const appRoot = parseSiteTabPath(path);
+        const tab = parseTab(path);
+        const appRoot = tab.kind === "site" ? tab.siteRoot : null;
         if (appRoot !== null) showPathInExplorer(appRoot, true);
-        else if (!isVirtualTabPath(path)) showPathInExplorer(path);
+        else if (!TAB_KINDS[tab.kind].virtual) showPathInExplorer(path);
       } else if (command === "open-history") {
         openHistoryView();
       } else if (command === "connect-cloud") {
@@ -4538,6 +4548,7 @@ export function DesktopWorkspaceShell(props: {
         onToggleFolder={toggleExplorerFolder}
         onTogglePin={toggleExplorerPin}
         collectionFolders={collectionFolders}
+        appFolders={appFolders}
         onOpenCollection={openCollectionTab}
         dataCollections={dataCollections}
         includeArchivedCollections={includeArchived}
@@ -4608,7 +4619,7 @@ export function DesktopWorkspaceShell(props: {
   // reads still reach the navigator through their local-thread and DM
   // revisions.
   const chatsTabIsLive = wb.editorGroups.some((group) =>
-    isChatsTabPath(group.activeTab),
+    (parseTab(group.activeTab)?.kind === "chat"),
   );
   // The Chats view is a navigator, like the Explorer: it lists Home, the groups,
   // people and agents, and every click opens that conversation's editor tab.
@@ -5323,9 +5334,9 @@ export function DesktopWorkspaceShell(props: {
               const editorCallbacks = tab
                 ? callbacksForEditor(editorGroup.id, tab)
                 : null;
-              const groupSiteRoot = parseSiteTabPath(tabPath);
-              const groupCollectionPath = parseCollectionTabPath(tabPath);
-              const groupDataCollection = parseTransactionalCollectionTabPath(tabPath);
+              const groupTab = parseTab(tabPath);
+              const groupSiteRoot = groupTab?.kind === "site" ? groupTab.siteRoot : null;
+              const groupCollectionPath = groupTab?.kind === "collection" ? groupTab.collectionPath : null;
               const groupScrollTarget =
                 searchScrollTarget?.groupId === editorGroup.id &&
                 searchScrollTarget.path === tabPath
@@ -5371,7 +5382,9 @@ export function DesktopWorkspaceShell(props: {
               scope="editor"
               resetKeys={[tabPath, workspaceId, versionEpoch]}
             >
-            {isGraphTabPath(tabPath) ? (
+            {(() => {
+              switch (groupTab?.kind) {
+                case "graph": return (
               <Suspense fallback={<SkeletonRows layout="panel" label="Loading graph..." />}>
                 <LazyGraphView
                   workspaceId={workspaceId}
@@ -5383,14 +5396,16 @@ export function DesktopWorkspaceShell(props: {
                   variant="page"
                 />
               </Suspense>
-            ) : isHistoryTabPath(tabPath) ? (
+            );
+                case "history": return (
               <div
                 data-testid="history-page"
                 className="flex min-h-0 flex-1 flex-col bg-bg"
               >
                 {historyTimeline}
               </div>
-            ) : isMomentDiffTabPath(tabPath) ? (
+            );
+                case "momentDiff": return (
               // A persisted moment-diff tab reads the capture capability,
               // like every other surface main's capture serves. Gating it on
               // the share fact alone left the failed-build cause open: the
@@ -5434,12 +5449,13 @@ export function DesktopWorkspaceShell(props: {
                   onReopenRestore={reopenRestore}
                   restoreRequested={
                     restoreRequest?.workspaceId === workspaceId &&
-                    restoreRequest.momentId === parseMomentDiffTabPath(tabPath ?? "")
+                    restoreRequest.momentId === groupTab.momentId
                   }
                   onRestoreRequestTaken={takeRestoreRequest}
                 />
               )
-            ) : isVersionCompareTabPath(tabPath) ? (
+            );
+                case "versionCompare": return (
               // A persisted compare tab reads the version capability, like
               // every other version entry point. Gating it on the share fact
               // alone left the whole #620 cause open: on a workspace whose
@@ -5483,24 +5499,25 @@ export function DesktopWorkspaceShell(props: {
                   // always reflects the latest disk/engine state.
                   key={`${tabPath}:${versionEpoch}`}
                   workspaceId={workspaceId}
-                  versionId={parseVersionCompareTabPath(tabPath) ?? "main"}
+                  versionId={groupTab.versionId ?? "main"}
                 />
               )
-            ) : isChatsTabPath(tabPath) ? (
+            );
+                case "chat": return (
               // Each loading state of the tab puts its lines at the top, so
               // each one takes over from the last without blinking.
               <SkeletonSlot>{captureAvailable ? (
                 <Suspense fallback={<SkeletonRows inSlot layout="panel" label="Loading Chats..." />}>
                   <LazyChatsView
-                    key={`${workspaceId}:${tabPath}:${chatEditors.get(tabPath).generation}:${chatEditors.get(tabPath).revision}`}
+                    key={`${workspaceId}:${tabPath}:${chatEditors.get(groupTab.path).generation}:${chatEditors.get(groupTab.path).revision}`}
                     {...chatsViewProps}
-                    onNavChange={chatEditors.get(tabPath).onNavChange}
-                    onNavCommand={chatEditors.get(tabPath).onNavCommand}
-                    onDraftsChange={chatEditors.get(tabPath).onDraftsChange}
-                    initialNav={chatEditors.get(tabPath).nav}
-                    initialDrafts={chatEditors.get(tabPath).drafts}
-                    focusNewPost={chatEditors.get(tabPath).focusNewPost}
-                    editorTabPath={tabPath}
+                    onNavChange={chatEditors.get(groupTab.path).onNavChange}
+                    onNavCommand={chatEditors.get(groupTab.path).onNavCommand}
+                    onDraftsChange={chatEditors.get(groupTab.path).onDraftsChange}
+                    initialNav={chatEditors.get(groupTab.path).nav}
+                    initialDrafts={chatEditors.get(groupTab.path).drafts}
+                    focusNewPost={chatEditors.get(groupTab.path).focusNewPost}
+                    editorTabPath={groupTab.path}
                     onOpenInTab={openChatsNavInTab}
                     variant="page"
                   />
@@ -5535,7 +5552,8 @@ export function DesktopWorkspaceShell(props: {
                   {chatsOffCopy(syncStatus)}
                 </div>
               )}</SkeletonSlot>
-            ) : isSiteTabPath(tabPath) ? (
+            );
+                case "site": return (
               groupSiteRoot ? (
                 <Suspense fallback={<SkeletonRows layout="panel" label="Loading app..." />}>
                   <LazySitePreviewPage
@@ -5558,13 +5576,14 @@ export function DesktopWorkspaceShell(props: {
                   }}
                 />
               )
-            ) : groupDataCollection ? (
+            );
+                case "transactionalCollection": return (
               // The view opens its Collection at the same place its fallback
               // stands, so those lines take over without blinking.
               <SkeletonSlot>
               <Suspense fallback={<SkeletonRows inSlot layout="panel" label="Loading collection..." />}>
                 <LazyTransactionalCollection key={`${workspaceId}:${tabPath}`} workspaceId={workspaceId}
-                  datasetPath={groupDataCollection.datasetPath} tableId={groupDataCollection.tableId}
+                  datasetPath={groupTab.datasetPath} tableId={groupTab.tableId}
                   onOpenFile={(path) => openFile(path)}
                   onOpenScheduleSettings={() => openSettings("advanced")}
                   owner={!shareView}
@@ -5578,7 +5597,8 @@ export function DesktopWorkspaceShell(props: {
                   }} />
               </Suspense>
               </SkeletonSlot>
-            ) : isCollectionTabPath(tabPath) ? (
+            );
+                case "collection": return (
               groupCollectionPath ? (
                 <SkeletonSlot>
                 <Suspense fallback={<SkeletonRows inSlot layout="panel" label="Loading collection..." />}>
@@ -5626,7 +5646,10 @@ export function DesktopWorkspaceShell(props: {
                   </button>
                 </div>
               )
-            ) : tabPath && tab && editorCallbacks ? (
+            );
+                case "removed":
+                case undefined:
+                case "file": return tabPath && tab && editorCallbacks ? (
               <FileInspector
                 key={tabPath}
                 workspaceId={workspaceId}
@@ -5665,6 +5688,8 @@ export function DesktopWorkspaceShell(props: {
                 registerSourceToggle={editorCallbacks.registerSourceToggle}
                 autoFocus={wb.activeEditorGroup === editorGroup.id}
                 knownMarkdownFiles={markdownWikilinkFiles}
+                appFolder={appEntries.get(tabPath) ?? null}
+                onRunApp={openAppTab}
                 onButtonError={reportShellError}
                 onButtonNotice={showSuccessNotice}
                 onOpenRecordHistory={recordHistory.open}
@@ -5707,7 +5732,11 @@ export function DesktopWorkspaceShell(props: {
                   </button>
                 </div>
               </div>
-            )}
+            );
+              }
+              const unhandled: never = groupTab;
+              return unhandled;
+            })()}
             </ErrorBoundary>
                     </div>
                   </EditorGroupFrame>

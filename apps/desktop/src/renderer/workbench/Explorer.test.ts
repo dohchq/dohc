@@ -1,11 +1,19 @@
 import { describe, expect, it } from "vitest";
 import { editorTitle } from "./Explorer";
-import { versionCompareTabPath } from "./workbenchState";
+import { collectionTabPath, siteTabPath, versionCompareTabPath } from "./workbenchState";
 
 // Open-editor rows must show product names for virtual tabs, never internal
 // ids. The compare tab regressed to its raw `version_<id>` leaf until the
 // PR 0M manual drive caught it.
 describe("editorTitle", () => {
+  it.each([
+    [siteTabPath("apps/trip"), "App: apps/trip"],
+    [collectionTabPath("notes/旅"), "旅"],
+  ])("keeps the Explorer title for %s", (path, title) => {
+    expect(editorTitle(path)).toBe(title);
+    expect(editorTitle(path, "Discovered name")).toBe(title);
+  });
+
   it("names the version compare tab instead of leaking the version id", () => {
     expect(editorTitle(versionCompareTabPath("98ece0ac-1234"))).toBe(
       "Compare with Main",

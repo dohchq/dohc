@@ -68,6 +68,7 @@ const PARTS = [
   "composer-sending",
   "about-conversation",
   "file-view-actions",
+  "offers",
   "page-identity",
 ];
 // A fixed instant for the page's clock. The capture pauses the clock an
