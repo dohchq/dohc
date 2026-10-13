@@ -3247,6 +3247,12 @@ CREATE TABLE hosted_deferred_ops (
       REFERENCES relay_deferred_ops(workspace_id, origin_id, origin_seq) ON DELETE CASCADE
 ) STRICT;
 CREATE INDEX hosted_deferred_ops_by_document ON hosted_deferred_ops(workspace_id, object_id, relay_seq);
+CREATE TABLE hosted_retired_files (
+    workspace_id TEXT NOT NULL REFERENCES hosted_replicas(workspace_id) ON DELETE CASCADE,
+    path TEXT NOT NULL CHECK (length(path) > 0),
+    sha256 TEXT NOT NULL CHECK (length(sha256) = 64),
+    PRIMARY KEY (workspace_id, path)
+) STRICT;
 ";
 
 const V2_OPEN_DOCUMENT_ARTIFACTS_DDL: &str = "\
@@ -3916,7 +3922,7 @@ mod tests {
             ),
             (
                 "v2-hosted-replica",
-                "8e64ca75ed1742397c4d098b5d9af7532a5c71337d191268996524283ba87847",
+                "fc917d758790d167d637695a74c732c6abde597fbb33ef1581885da81ea79093",
             ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());
@@ -3954,7 +3960,9 @@ mod tests {
                  VALUES ('hosted','service-host:a','epoch','stream',1); \
                  INSERT INTO hosted_replicas (workspace_id,created_at_ms) VALUES ('hosted',1); \
                  INSERT INTO hosted_documents (workspace_id,object_id,path,state,scope_generation) \
-                 VALUES ('hosted','doc','doc.md','backfilling',0);",
+                 VALUES ('hosted','doc','doc.md','backfilling',0); \
+                 INSERT INTO hosted_retired_files (workspace_id,path,sha256) \
+                 VALUES ('hosted','gone.md',printf('%064d',0));",
             )
             .unwrap();
             let state: (Option<String>, i64, i64, i64, i64) = conn
@@ -3985,16 +3993,25 @@ mod tests {
                 "INSERT INTO hosted_withheld_befores (workspace_id,moment_id,before_object_id,\
                  before_path,before_sha256,before_content_kind) \
                  VALUES ('hosted','no-moment','private','a.md','sha','text')",
+                "INSERT INTO hosted_retired_files (workspace_id,path,sha256) VALUES ('hosted','a.md','sha')",
+                "INSERT INTO hosted_retired_files (workspace_id,path,sha256) \
+                 VALUES ('ordinary','a.md',printf('%064d',0))",
             ] {
                 assert!(conn.execute(invalid, []).is_err(), "{invalid}");
             }
             conn.execute("DELETE FROM hosted_replicas", []).unwrap();
             let documents: i64 = conn
-                .query_row("SELECT COUNT(*) FROM hosted_documents", [], |row| {
-                    row.get(0)
-                })
+                .query_row(
+                    "SELECT (SELECT COUNT(*) FROM hosted_documents) \
+                     + (SELECT COUNT(*) FROM hosted_retired_files)",
+                    [],
+                    |row| row.get(0),
+                )
                 .unwrap();
-            assert_eq!(documents, 0, "documents leave with their replica");
+            assert_eq!(
+                documents, 0,
+                "documents and their files leave with their replica"
+            );
         };
         let ctx = MigrationContext::current(1);
         let dir = tempdir();

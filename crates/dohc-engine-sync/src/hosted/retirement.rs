@@ -1,8 +1,9 @@
 //! Retiring a hosted document that left the scope. Everything this replica
-//! holds for it goes in one transaction, so a path it held is free for the
-//! documents in scope, and a return backfills it from the start like a
-//! document that never was here. The host's copies are derived: the relay and
-//! the owner's devices keep the authoritative history and provenance.
+//! holds for it goes in one transaction, so a return backfills it from the
+//! start like a document that never was here. The same transaction records
+//! its file as a [retired file](RetiredFile), which holds its path until the
+//! file is gone. The host's copies are derived: the relay and the owner's
+//! devices keep the authoritative history and provenance.
 
 use std::collections::BTreeSet;
 
@@ -82,18 +83,27 @@ pub fn departed_hosted_documents(
 /// Retire `object_id`, a hosted document that left the scope. Answers
 /// `false`, removing nothing, while it is not
 /// [retirable](hosted_document_retirable). The caller first proves that its
-/// Y.Doc settled into its head and that its file holds nothing else, and
-/// removes that file after.
+/// Y.Doc settled into its head and that its file holds nothing else. Its head
+/// in `version_id`, the version the root holds, becomes a retired file for
+/// the caller to remove.
 pub fn retire_hosted_document(
     store: &mut EngineStore,
     workspace_id: &str,
     object_id: &str,
+    version_id: &str,
     faults: &dyn FaultInjector,
 ) -> Result<TxnOutcome<bool>, SyncError> {
     store.write_with(faults, |tx| {
         if !retirable(tx, workspace_id, object_id)? {
             return Ok(false);
         }
+        tx.execute(
+            "INSERT INTO hosted_retired_files (workspace_id,path,sha256) \
+             SELECT workspace_id,path,COALESCE(blob_sha256,binary_sha256) FROM snapshots \
+             WHERE workspace_id=?1 AND object_id=?2 AND version_id=?3",
+            params![workspace_id, object_id, version_id],
+        )
+        .map_err(SyncError::persist)?;
         let journal = tx
             .prepare(&format!(
                 "SELECT origin_id,origin_seq FROM replication_log \
@@ -212,6 +222,54 @@ pub fn hosted_document_retirable(
     store.read_with(|conn| retirable(conn, workspace_id, object_id))
 }
 
+/// A file a retired document left in the root: its path, and the digest of
+/// the head it held. No moment takes the path until the file is forgotten.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RetiredFile {
+    pub path: String,
+    pub sha256: String,
+}
+
+/// The retired files still to remove, by path.
+pub fn retired_hosted_files(
+    store: &EngineStore,
+    workspace_id: &str,
+) -> Result<Vec<RetiredFile>, SyncError> {
+    store.read_with(|conn| {
+        conn.prepare(
+            "SELECT path,sha256 FROM hosted_retired_files WHERE workspace_id=?1 ORDER BY path",
+        )
+        .map_err(SyncError::corrupt)?
+        .query_map([workspace_id], |row| {
+            Ok(RetiredFile {
+                path: row.get(0)?,
+                sha256: row.get(1)?,
+            })
+        })
+        .map_err(SyncError::corrupt)?
+        .collect::<Result<_, _>>()
+        .map_err(SyncError::corrupt)
+    })
+}
+
+/// Forget the retired file at `path` once it is gone, or is left alone
+/// because it holds something else. Its path is free again.
+pub fn forget_retired_hosted_file(
+    store: &mut EngineStore,
+    workspace_id: &str,
+    path: &str,
+    faults: &dyn FaultInjector,
+) -> Result<TxnOutcome<()>, SyncError> {
+    store.write_with(faults, |tx| {
+        tx.execute(
+            "DELETE FROM hosted_retired_files WHERE workspace_id=?1 AND path=?2",
+            params![workspace_id, path],
+        )
+        .map_err(SyncError::persist)?;
+        Ok(())
+    })
+}
+
 fn retirable(conn: &Connection, workspace_id: &str, object_id: &str) -> Result<bool, SyncError> {
     let quiet: bool = conn
         .query_row(
@@ -255,8 +313,14 @@ fn retired_rows() -> Vec<(&'static str, String)> {
     let moments = "SELECT moment_id FROM moments WHERE workspace_id=?1 AND object_id=?2";
     let records = "SELECT version_id,record_id FROM collection_records \
                    WHERE workspace_id=?1 AND object_id=?2";
-    let conflicts = "SELECT conflict_id FROM conflicts WHERE workspace_id=?1 \
-                     AND ?2 IN (base_object_id,current_object_id,incoming_object_id)";
+    // A conflict that also names another document hosted here is that
+    // document's to resolve, so it stays, with the blobs its sides reference.
+    // The last of its documents to retire takes it.
+    let conflicts = "SELECT conflict_id FROM conflicts c WHERE c.workspace_id=?1 \
+                     AND ?2 IN (c.base_object_id,c.current_object_id,c.incoming_object_id) \
+                     AND NOT EXISTS(SELECT 1 FROM hosted_documents d \
+                       WHERE d.workspace_id=?1 AND d.object_id<>?2 AND d.object_id IN \
+                         (c.base_object_id,c.current_object_id,c.incoming_object_id))";
     let bundles = format!(
         "bundle_order IN (SELECT bundle_order FROM replication_pending_conflict_bundles \
          WHERE workspace_id=?1 AND conflict_id IN ({conflicts}))"
@@ -342,8 +406,7 @@ fn retired_rows() -> Vec<(&'static str, String)> {
         ),
         (
             "conflicts",
-            "workspace_id=?1 AND ?2 IN (base_object_id,current_object_id,incoming_object_id)"
-                .to_owned(),
+            format!("workspace_id=?1 AND conflict_id IN ({conflicts})"),
         ),
         (
             "scene_asset_delete_authorities",

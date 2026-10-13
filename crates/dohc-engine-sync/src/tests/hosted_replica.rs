@@ -905,12 +905,19 @@ fn sync(client: &RelaySyncClient<HostedFeed>, store: &mut EngineStore) {
     panic!("the hosted replica did not catch up");
 }
 
-/// Retire every departed document that can retire. Answers whether one did.
+/// Retire every departed document that can retire, and forget each retired
+/// file as the runtime does once the file is gone. Answers whether one
+/// retired or a path came free.
 fn retire(store: &mut EngineStore) -> bool {
     let mut retired = false;
     for document in departed_hosted_documents(store, "ws").unwrap() {
-        retired |= retire_hosted_document(store, "ws", &document.object_id, &NoFaults).unwrap()
+        retired |= retire_hosted_document(store, "ws", &document.object_id, "main", &NoFaults)
+            .unwrap()
             == TxnOutcome::Committed(true);
+    }
+    for file in retired_hosted_files(store, "ws").unwrap() {
+        forget_retired_hosted_file(store, "ws", &file.path, &NoFaults).unwrap();
+        retired = true;
     }
     retired
 }
@@ -2209,7 +2216,7 @@ fn retirement_is_all_or_nothing_and_idempotent() {
 
     let crash = ScriptedFaults::crash_at(FaultPoint::StorageBeforePersist);
     assert_eq!(
-        retire_hosted_document(&mut store, "ws", "doc-b", crash.as_ref()).unwrap(),
+        retire_hosted_document(&mut store, "ws", "doc-b", "main", crash.as_ref()).unwrap(),
         TxnOutcome::Crashed { committed: false }
     );
     drop(store);
@@ -2222,18 +2229,94 @@ fn retirement_is_all_or_nothing_and_idempotent() {
         ),
         before
     );
+    assert!(retired_hosted_files(&store, "ws").unwrap().is_empty());
 
     assert_eq!(
-        retire_hosted_document(&mut store, "ws", "doc-b", &NoFaults).unwrap(),
+        retire_hosted_document(&mut store, "ws", "doc-b", "main", &NoFaults).unwrap(),
         TxnOutcome::Committed(true)
     );
     assert!(holding(&store, "doc-b").is_empty());
     assert_eq!(
-        retire_hosted_document(&mut store, "ws", "doc-b", &NoFaults).unwrap(),
+        retired_hosted_files(&store, "ws").unwrap(),
+        [RetiredFile {
+            path: "a.md".to_owned(),
+            sha256: text_sha("hosted b")
+        }],
+        "its file is recorded with its rows' removal"
+    );
+    assert_eq!(
+        retire_hosted_document(&mut store, "ws", "doc-b", "main", &NoFaults).unwrap(),
         TxnOutcome::Committed(false),
         "nothing is left to retire"
     );
+    assert!(retire(&mut store), "its file's path comes free");
     assert!(!retire(&mut store));
+}
+
+/// Sol's retirement review: a file that did not go after its document
+/// retired, because the process stopped or the file was locked, stayed
+/// forever. Its path now stays held, across a restart, until the file is
+/// gone and forgotten; only then does `doc-a`'s waiting write take it.
+#[test]
+fn a_retired_file_holds_its_path_until_it_is_forgotten() {
+    let (_scratch, path, mut store, client) = departing_b();
+    replace_b_with_a(client.transport());
+    sync(&client, &mut store);
+    assert_eq!(
+        retire_hosted_document(&mut store, "ws", "doc-b", "main", &NoFaults).unwrap(),
+        TxnOutcome::Committed(true)
+    );
+    drop(store);
+    let mut store = EngineStore::open(&path, 3_000).unwrap();
+
+    sync(&client, &mut store);
+    assert!(content(&store).0.is_empty());
+    assert_eq!(retained(&store), 1, "doc-a waits for the file");
+    assert_eq!(retired_hosted_files(&store, "ws").unwrap().len(), 1);
+
+    assert_eq!(
+        forget_retired_hosted_file(&mut store, "ws", "a.md", &NoFaults).unwrap(),
+        TxnOutcome::Committed(())
+    );
+    sync(&client, &mut store);
+    assert_eq!(content(&store).0, heads(&[("doc-a", "hosted a")]));
+    assert_eq!(retained(&store), 0);
+}
+
+/// Sol's retirement review: retiring a document deleted every conflict that
+/// named it, including one another hosted document still needs. `doc-b`'s
+/// backfill left a conflict against `doc-a` at `b.md`; `doc-a` retires and
+/// the conflict stays, with the bytes of both sides, until `doc-b` retires too.
+#[test]
+fn retirement_keeps_a_conflict_another_hosted_document_holds() {
+    let (_scratch, _path, mut store) = hosted_store();
+    let client = RelaySyncClient::new(HostedFeed::new());
+    let feed = client.transport();
+    feed.append(envelope("owner", 0, "workspace.init", json!({})));
+    feed.create("owner", 1, "doc-a", "b.md", "hosted a");
+    feed.create("peer", 0, "doc-b", "b.md", "hosted b");
+    feed.share("doc-a", "b.md");
+    sync(&client, &mut store);
+    feed.share("doc-b", "b.md");
+    sync(&client, &mut store);
+    let conflict = "SELECT COUNT(*) FROM conflicts WHERE current_object_id='doc-a' \
+                    AND incoming_object_id='doc-b'";
+    assert_eq!(count(&store, conflict), 1);
+
+    feed.unshare("doc-a");
+    sync_retiring(&client, &mut store);
+    assert!(holding(&store, "doc-a").is_empty());
+    assert!(document(&store, "doc-b").is_some());
+    assert_eq!(count(&store, conflict), 1, "doc-b still has it to resolve");
+    assert!(has_blob(&store, &text_sha("hosted a")));
+    assert!(has_blob(&store, &text_sha("hosted b")));
+
+    feed.unshare("doc-b");
+    sync_retiring(&client, &mut store);
+    assert!(holding(&store, "doc-b").is_empty());
+    assert_eq!(count(&store, "SELECT COUNT(*) FROM conflicts"), 0);
+    assert!(!has_blob(&store, &text_sha("hosted a")));
+    assert!(!has_blob(&store, &text_sha("hosted b")));
 }
 
 #[test]
@@ -2491,7 +2574,7 @@ fn an_ordinary_replica_has_nothing_to_retire() {
             .is_empty()
     );
     assert_eq!(
-        retire_hosted_document(&mut ordinary, "ws", "doc-b", &NoFaults).unwrap(),
+        retire_hosted_document(&mut ordinary, "ws", "doc-b", "main", &NoFaults).unwrap(),
         TxnOutcome::Committed(false)
     );
 }

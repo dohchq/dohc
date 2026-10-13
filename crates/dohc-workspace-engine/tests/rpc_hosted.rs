@@ -872,6 +872,102 @@ async fn a_departed_document_retires_and_frees_its_file_for_its_replacement() {
     assert_eq!((objects, conflicts), (0, 0));
 }
 
+/// Sol's retirement review: a file that could not go after its document
+/// retired stayed forever. `a.md` is locked when `doc-b` retires, and the
+/// host restarts. `doc-b`'s file keeps `a.md` held, so `doc-a`'s write
+/// waits; once the lock goes, a later pass removes the file and `doc-a`
+/// takes the path.
+#[cfg(windows)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_retired_file_that_could_not_go_holds_its_path_until_it_goes() {
+    use std::os::windows::fs::OpenOptionsExt;
+    let mut relay = HostedRelay::default();
+    relay.log.push(json!({
+        "relaySeq": 1, "workspaceId": WORKSPACE, "originId": "owner", "originSeq": 0,
+        "opKind": "workspace.init", "payload": {}, "recordedAtMs": 1_001,
+    }));
+    relay.create("owner", 1, "doc-b", "a.md", "hosted b");
+    relay.share("doc-b", "a.md");
+    let relay = FakeRelay::start(relay);
+    let scratch = ScratchDir::new().expect("scratch");
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let handle = open_workspace(&transport, &scratch, &relay).await;
+    let mut host = Host {
+        transport,
+        handle,
+        id: 1,
+    };
+    host.create().await;
+    host.sync().await;
+    {
+        let mut relay = relay.relay();
+        relay.unshare("doc-b");
+        relay.replace(
+            "owner",
+            2,
+            "doc-a",
+            "a.md",
+            "hosted a",
+            ("doc-b", "hosted b", "moment-owner-1"),
+        );
+        relay.share("doc-a", "a.md");
+    }
+    let file = scratch.path().join("a.md");
+    let lock = std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(0x1 | 0x2) // read | write, no delete
+        .open(&file)
+        .expect("lock a.md");
+
+    // doc-b retires; its file cannot go.
+    let (_, message) = host.error("sync.pullHosted").await;
+    assert!(!message.contains("hosted-file-unexpected"), "{message}");
+    assert_eq!(document_state(&scratch, "doc-b"), None);
+    host.call("workspace.close", json!({})).await;
+    drop(host);
+
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let handle = open_workspace(&transport, &scratch, &relay).await;
+    let mut host = Host {
+        transport,
+        handle,
+        id: 1,
+    };
+    let pass = host.pull().await;
+    let params = json!({"workspaceId": WORKSPACE, "pendingCursor": pass["pendingCursor"]});
+    host.call("sync.materializePendingCursor", params.clone())
+        .await;
+    host.id += 1;
+    call_error(
+        &host.transport,
+        &host.handle,
+        host.id,
+        "sync.commitCursor",
+        params,
+    )
+    .await;
+    assert_eq!(std::fs::read_to_string(&file).expect("a.md"), "hosted b");
+    let conn = Connection::open(engine_db_path(&scratch).expect("db path")).expect("open db");
+    let (heads, retired): (i64, i64) = conn
+        .query_row(
+            "SELECT (SELECT COUNT(*) FROM snapshots), (SELECT COUNT(*) FROM hosted_retired_files)",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("count");
+    assert_eq!((heads, retired), (0, 1), "doc-a's write waits for the file");
+
+    drop(lock);
+    host.sync().await;
+    assert_eq!(std::fs::read_to_string(&file).expect("a.md"), "hosted a");
+    let retired: i64 = conn
+        .query_row("SELECT COUNT(*) FROM hosted_retired_files", [], |row| {
+            row.get(0)
+        })
+        .expect("count");
+    assert_eq!(retired, 0);
+}
+
 /// The retirement round's open case, on disk: `doc-b` left the scope at
 /// `a.md`, the owner moved it to `b.md`, and `doc-a` took `a.md`. When
 /// `doc-b` returns, its backfill passes through `a.md` without touching

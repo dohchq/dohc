@@ -2611,9 +2611,11 @@ fn run_relay_operation(
 /// Retire each hosted document that left the scope once nothing of it is
 /// left to settle, deliver or push: no live session holds it, the unload
 /// checks pass, and its file holds its head or nothing. Each retires in its
-/// own transaction; its file goes after. A file holding anything else is a
-/// bug in a service root nothing else writes to, so retirement stops and
-/// names it. Answers whether any document retired.
+/// own transaction, which records its file as retired; the file goes after,
+/// and a file an earlier pass could not remove goes first. A file holding
+/// anything else is a bug in a service root nothing else writes to, so
+/// retirement stops and names it. Answers whether any document retired or
+/// any path came free.
 fn retire_departed_hosted(
     store: &mut EngineStore,
     doc_cache: &mut WriterDocCache,
@@ -2625,7 +2627,7 @@ fn retire_departed_hosted(
     let active = dohc_engine_domain::VersionedTextStore::new(store)
         .get_active_version(workspace_id)?
         .version_id;
-    let mut retired = false;
+    let mut retired = remove_retired_files(store, workspace_id, root)?;
     'departed: for document in dohc_engine_sync::departed_hosted_documents(store, workspace_id)? {
         let versions = document
             .heads
@@ -2678,6 +2680,7 @@ fn retire_departed_hosted(
             store,
             workspace_id,
             &document.object_id,
+            &active,
             &NoFaults,
         )? {
             TxnOutcome::Committed(true) => {}
@@ -2689,15 +2692,38 @@ fn retire_departed_hosted(
             doc_cache.remove(key);
             doc_cache.unpin(key);
         }
-        for head in files {
-            if !dohc_engine_files::remove_file_holding(root, &head.path, &head.sha256)? {
-                return Err(RuntimeError::HostedFileUnexpected {
-                    path: head.path.clone(),
-                });
-            }
-        }
+        remove_retired_files(store, workspace_id, root)?;
     }
     Ok(retired)
+}
+
+/// Remove each retired file that still holds its document's head, and free
+/// its path. One that holds anything else stays on disk, its path is freed,
+/// and it is named. A removal that fails keeps the path held for the next
+/// pass. Answers whether any path came free.
+fn remove_retired_files(
+    store: &mut EngineStore,
+    workspace_id: &str,
+    root: &std::path::Path,
+) -> Result<bool, RuntimeError> {
+    let files = dohc_engine_sync::retired_hosted_files(store, workspace_id)?;
+    let freed = !files.is_empty();
+    for file in files {
+        let removed = dohc_engine_files::remove_file_holding(root, &file.path, &file.sha256)?;
+        match dohc_engine_sync::forget_retired_hosted_file(
+            store,
+            workspace_id,
+            &file.path,
+            &NoFaults,
+        )? {
+            TxnOutcome::Committed(()) => {}
+            TxnOutcome::Crashed { .. } => return Err(RuntimeError::OperationCrashed),
+        }
+        if !removed {
+            return Err(RuntimeError::HostedFileUnexpected { path: file.path });
+        }
+    }
+    Ok(freed)
 }
 
 /// The level gate on share-view enrolment, read at the one place

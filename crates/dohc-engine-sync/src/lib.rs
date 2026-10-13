@@ -67,9 +67,9 @@ use error::ShareDisposition;
 pub use error::{ObservedBytes, RelayError, SyncError};
 pub use hosted::{
     DepartedDocument, DepartedHead, HostedCursor, HostedDocumentState, HostedReplicaState,
-    PASSIVE_STORE_CANNOT_HOST, SERVICE_HOST_ORIGIN_PREFIX, commit_hosted_cursor,
-    departed_hosted_documents, hosted_document_retirable, is_hosted_replica, read_hosted_replica,
-    retire_hosted_document,
+    PASSIVE_STORE_CANNOT_HOST, RetiredFile, SERVICE_HOST_ORIGIN_PREFIX, commit_hosted_cursor,
+    departed_hosted_documents, forget_retired_hosted_file, hosted_document_retirable,
+    is_hosted_replica, read_hosted_replica, retire_hosted_document, retired_hosted_files,
 };
 pub use hydration::{
     BlobContent, BlobHydration, BlobKind, MAX_INGEST_BLOB_BYTES, blob_ceiling, hydrate_blob_content,

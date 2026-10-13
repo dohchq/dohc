@@ -22,8 +22,9 @@ use rusqlite::{Connection, OptionalExtension, params};
 use crate::{ReplicationEnvelope, SyncError};
 
 pub use retirement::{
-    DepartedDocument, DepartedHead, departed_hosted_documents, hosted_document_retirable,
-    retire_hosted_document,
+    DepartedDocument, DepartedHead, RetiredFile, departed_hosted_documents,
+    forget_retired_hosted_file, hosted_document_retirable, retire_hosted_document,
+    retired_hosted_files,
 };
 
 /// The origin prefix the relay reserves for a service host's writes.
@@ -210,9 +211,9 @@ pub(crate) fn forget_before(payload: &mut serde_json::Value) {
 
 /// Hold back a moment that would take `path` while a hosted document that
 /// left the scope still holds it here. That document may still settle work
-/// against its head there, so the path stays its own until it retires; the
-/// moment waits in deferred work and applies after. An ordinary replica
-/// holds nothing back.
+/// against its head there, so the path stays its own until it retires and
+/// its file is gone; the moment waits in deferred work and applies after. An
+/// ordinary replica holds nothing back.
 pub(crate) fn wait_for_departed_occupant_in_tx(
     tx: &rusqlite::Transaction<'_>,
     workspace_id: &str,
@@ -226,7 +227,8 @@ pub(crate) fn wait_for_departed_occupant_in_tx(
              JOIN hosted_documents d ON d.workspace_id=s.workspace_id AND d.object_id=s.object_id \
              JOIN hosted_replicas h ON h.workspace_id=d.workspace_id \
              WHERE s.workspace_id=?1 AND s.version_id=?2 AND s.path=?3 AND s.object_id<>?4 \
-               AND d.scope_generation<>h.scope_generation)",
+               AND d.scope_generation<>h.scope_generation) \
+             OR EXISTS(SELECT 1 FROM hosted_retired_files WHERE workspace_id=?1 AND path=?3)",
             params![workspace_id, version_id, path, object_id],
             |row| row.get(0),
         )
