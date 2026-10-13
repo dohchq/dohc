@@ -29,10 +29,10 @@ describe("useShellError", () => {
     if (!(failure instanceof Error)) throw Error("Expected a held source refusal");
     const retry = vi.fn();
     const { result } = renderHook(() => useShellError("ws-a"));
-    act(() => result.current.reportShellError("dohc could not prepare this Collection.",
+    act(() => result.current.reportShellError("dohc could not prepare this Collection change.",
       new Error(`Error invoking remote method 'dataset': Error: ${failure.message}`), retry));
     const notice = result.current.shellErrors[0]!;
-    expect(notice.message).toBe("dohc could not prepare this Collection. dohc cannot use the content in sources/note.md. The file is still on disk. Edit it in another editor. Try again.");
+    expect(notice.message).toBe("dohc could not prepare this Collection change. dohc cannot use the content in sources/note.md. The file is still on this computer. Edit it in another editor.");
     expect(notice.seen).toBe(false);
     expect(notice.retry).toBe(retry);
     act(() => result.current.hideShellError(notice.id));

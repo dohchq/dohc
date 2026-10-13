@@ -13,7 +13,7 @@ function fixture() {
 it("refuses a held source before review with its path and a repair action", async () => {
   const f = fixture();
   await expect(flushDatasetSourceCapture(f.adapter, f.signal)).rejects.toThrow(
-    "dohc cannot use the content in sources/note.md. The file is still on disk. Edit it in another editor. Try again.");
+    "dohc cannot use the content in sources/note.md. The file is still on this computer. Edit it in another editor.");
 });
 
 it("refuses a just-written source held by the final flush", async () => {

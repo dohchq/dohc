@@ -14,10 +14,10 @@ export async function flushDatasetSourceCapture(
   }
   signal.throwIfAborted();
   if (!capture.settled || !capture.running || capture.degraded) {
-    throw new Error("dohc could not capture these Collection files. Reopen the workspace and try again.");
+    throw new Error("dohc could not capture these files. Reopen the workspace and try again.");
   }
   const held = capture.heldFiles.find(file => !paths || paths.includes(file.path));
   if (held) {
-    throw new Error(`dohc cannot use the content in ${held.path}. The file is still on disk. Edit it in another editor. Try again.`);
+    throw new Error(`dohc cannot use the content in ${held.path}. The file is still on this computer. Edit it in another editor.`);
   }
 }
