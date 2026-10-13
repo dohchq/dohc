@@ -426,7 +426,7 @@ it.each(["visible", "includedRevision"] as const)("budgets collection and old-or
   update(index, { listing: source });
   let time = 0;
   // Instrument work independently of the loop's yield or operation counter.
-  const workRows = (index as unknown as { completeWorkRows: PreparedGoToRow[] }).completeWorkRows;
+  const workRows = (index as unknown as { completeRows: PreparedGoToRow[] }).completeRows;
   for (const row of workRows) {
     let value = row[property];
     Object.defineProperty(row, property, { get: () => { time += .002; return value; }, set: next => { value = next; }, enumerable: true });
@@ -516,4 +516,55 @@ it("does not let an abandoned removal view discard cached match indices", () => 
   expect(index.query("Channel", 50, removed)).toEqual([]);
   expect(index.query("Channel")).toHaveLength(50);
   expect(index.query("Channel 69").map(row => row.id)).toEqual(["group:69"]);
+});
+
+it("reuses every unchanged row when creating and deleting near the source start", () => {
+  const index = new GoToIndex("workspace");
+  const source = listing(Array.from({ length: 3_000 }, (_, n) => "docs/file-" + n + ".ts"));
+  update(index, { listing: source });
+  const previous = new Map(index.rows.map(row => [row.path, row]));
+  const created = { ...source, files: [{ path: "docs/created.ts", kind: "file" as const }, ...source.files.map(file => ({ ...file }))] };
+  update(index, { listing: created });
+  for (const row of index.rows) if (previous.has(row.path)) expect(row).toBe(previous.get(row.path));
+  update(index, { listing: { ...created, files: created.files.slice(1) } });
+  for (const row of index.rows) expect(row).toBe(previous.get(row.path));
+  const old = index.rows[100];
+  update(index, {}, { pinned: [old.path], recent: [old.path] });
+  expect(old.pinnedRank).toBe(1);
+  expect(index.rows[100]).not.toBe(old);
+  expect(index.rows[101]).toBe(previous.get(index.rows[101].path));
+});
+it("caches filtered rows by published revision and removed set", () => {
+  const index = new GoToIndex("workspace");
+  update(index, { groups: [{ id: "removed", name: "Removed", kind: "channel" }, { id: "kept", name: "Kept", kind: "channel" }] });
+  const removed = index.removedKeys({ groups: [{ id: "kept", name: "Kept", kind: "channel" }] });
+  const rows = index.rowsWithout(removed);
+  expect(rows.map(row => row.id)).toEqual(["group:kept"]);
+  expect(index.rowsWithout(removed)).toBe(rows);
+  expect(index.rowsWithout(new Set(["group:kept"])).map(row => row.id)).toEqual(["group:removed"]);
+  update(index, { groups: [{ id: "kept", name: "Renamed", kind: "channel" }] });
+  expect(index.rowsWithout(removed)).not.toBe(rows);
+  expect(index.rowsWithout(removed)[0].label).toBe("Renamed");
+});
+it("keeps requested removals when every non-file source is undefined during reload", () => {
+  const index = new GoToIndex("workspace");
+  update(index, { listing: listing([]), groups: [{ id: "x", name: "Channel X", kind: "channel" }], collections: [{ path: "records", objectId: "records" }], apps: [{ root: "planner", title: "Planner" }], versions: [{ id: "main", name: "Main" }] });
+  const run = index.update({ groups: [], collections: [], apps: [], versions: [] });
+  const removed = index.removedKeys({ groups: undefined, collections: undefined, apps: undefined, versions: undefined });
+  for (const word of ["Channel", "records", "Planner", "Main"]) expect(index.query(word, 50, removed)).toEqual([]);
+  drain(run);
+});
+it("reorders only the changed rows after superseding a safe rename", () => {
+  const index = new GoToIndex("workspace");
+  const source = listing(Array.from({ length: 3_000 }, (_, n) => "docs/file-" + n + ".ts"));
+  update(index, { listing: source });
+  const first = { ...source, files: source.files.map((file, n) => n === 200 ? { ...file, path: "docs/first.ts" } : file) };
+  const obsolete = index.update({ listing: first });
+  let ticks = 0;
+  expect(obsolete!.step(() => ++ticks)).toBe(false);
+  const second = { ...first, files: first.files.map((file, n) => n === 300 ? { ...file, path: "docs/second.ts" } : file) };
+  update(index, { listing: second });
+  expect(index.lastReorderedCount).toBe(2);
+  expect(index.query("first")).toHaveLength(1);
+  expect(index.query("second")).toHaveLength(1);
 });

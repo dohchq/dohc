@@ -202,19 +202,40 @@ export interface PreparedGoToRow extends PreparedQuickOpenPath {
   characterMaskHigh: number;
   boundaryMask: number;
   boundaryMaskHigh: number;
+  // Preparation bookkeeping may change; queries read ranking metadata instead.
   includedRevision: number;
   listingGeneration: number;
 }
 
-function* applyGoToPathState(row: PreparedGoToRow, listing: GoToListing, work: { operations: number }): Generator<void> {
+function goToRowKey(row: PreparedGoToRow): string {
+  return row.target.kind === "version" || row.target.kind === "group" ? row.target.id : row.path;
+}
+function sameGoToRecord(kind: GoToKind, previous: PreparedGoToRow["record"], next: PreparedGoToRow["record"]): boolean {
+  if (previous === next) return true;
+  switch (kind) {
+    case "file": { const a = previous as GoToFile, b = next as GoToFile; return a.path === b.path && a.kind === b.kind && a.icon === b.icon; }
+    case "folder": return previous === next;
+    case "collection": { const a = previous as GoToCollection, b = next as GoToCollection; return a.path === b.path && a.objectId === b.objectId; }
+    case "app": { const a = previous as GoToApp, b = next as GoToApp; return a.root === b.root && a.title === b.title; }
+    case "version": { const a = previous as GoToVersion, b = next as GoToVersion; return a.id === b.id && a.name === b.name; }
+    case "group": { const a = previous as GoToGroup, b = next as GoToGroup; return a.id === b.id && a.name === b.name && a.kind === b.kind; }
+  }
+}
+function withGoToRanks(row: PreparedGoToRow, pinned: ReadonlySet<string>, recent: ReadonlyMap<string, number>): PreparedGoToRow {
+  const pinnedRank = pinned.has(row.path) ? 0 : 1, recentRank = recent.get(row.path) ?? Number.MAX_SAFE_INTEGER;
+  return row.pinnedRank === pinnedRank && row.recentRank === recentRank ? row : { ...row, pinnedRank, recentRank, includedRevision: -1 };
+}
+
+function* applyGoToPathState(row: PreparedGoToRow, listing: GoToListing, work: { operations: number }): Generator<void, PreparedGoToRow> {
   let share: GoToListing["receivedRoots"][number] | undefined;
   for (const root of listing.receivedRoots) {
     if (root.path === "" || row.path === root.path || row.path.startsWith(root.path + "/")) { share = root; break; }
     if (++work.operations % GO_TO_CHUNK_SIZE === 0) yield;
   }
-  row.ended = share?.ended ?? false;
-  row.visible = share ? !share.damaged : listing.visibility.status === "ready" &&
+  const ended = share?.ended ?? false;
+  const visible = share ? !share.damaged : listing.visibility.status === "ready" &&
     !listing.visibility.hiddenHostPaths.has(row.path);
+  return row.ended === ended && row.visible === visible ? row : { ...row, ended, visible, includedRevision: -1 };
 }
 
 function samePathVerdicts(a: GoToListing | undefined, b: GoToListing | undefined): boolean {
@@ -319,15 +340,19 @@ export class GoToIndex {
   private completeRows: readonly PreparedGoToRow[] = [];
   private orderedRows: readonly PreparedGoToRow[] = [];
   private queryMetadata = new Int32Array(0);
-  private completeWorkRows: readonly PreparedGoToRow[] = [];
-  private orderedWorkRows: readonly PreparedGoToRow[] = [];
-  private readonly rowSnapshots = new WeakMap<PreparedGoToRow, PreparedGoToRow>();
+  private filteredRows: { revision: number; removed: ReadonlySet<string>; rows: readonly PreparedGoToRow[] } | undefined;
+  lastReorderedCount = 0;
   private removed = new Set<string>();
   get rows(): readonly PreparedGoToRow[] { return this.rowsWithout(this.removed); }
   rowsWithout(removed: ReadonlySet<string>): readonly PreparedGoToRow[] {
-    return this.withholding ? [] : removed.size ? this.completeRows.filter(row => !removed.has(row.id)) : this.completeRows;
+    if (this.withholding) return [];
+    if (!removed.size) return this.completeRows;
+    if (this.filteredRows?.revision !== this.revision || this.filteredRows.removed !== removed) {
+      this.filteredRows = { revision: this.revision, removed, rows: this.completeRows.filter(row => !removed.has(row.id)) };
+    }
+    return this.filteredRows.rows;
   }
-  private files: readonly PreparedGoToRow[] = [];
+  private files: readonly string[] = [];
   private listingGeneration = 0;
   private readonly subsets = new Map<GoToKind, Map<string, PreparedGoToRow>>();
   private sources: GoToSources = {};
@@ -372,6 +397,7 @@ export class GoToIndex {
             this.active = null;
             this.preparing = false;
             this.withholding = false;
+            this.filteredRows = undefined;
             return true;
           }
         } while (now() < deadline);
@@ -382,7 +408,7 @@ export class GoToIndex {
         work.return(undefined);
         this.active = null;
         this.interrupted = true;
-        // Published snapshots remain usable after a safe cancellation.
+        // Published rows remain usable after a safe cancellation.
       },
     };
     this.active = run;
@@ -400,34 +426,25 @@ export class GoToIndex {
       const keys = new Set(next.map(key));
       for (const entry of previous) if (!keys.has(key(entry))) removed.add(kind + ":" + key(entry));
     };
-    compare("collection", sources.collections, this.sources.collections, entry => entry.path);
-    compare("app", sources.apps, this.sources.apps, entry => entry.root);
-    compare("version", sources.versions, this.sources.versions, entry => entry.id);
-    if (sources.groups !== this.sources.groups) compare("group", sources.groups?.filter(entry => entry.kind === "channel"), this.sources.groups?.filter(entry => entry.kind === "channel"), entry => entry.id);
+    compare("collection", sources.collections ?? this.requestedSources.collections, this.sources.collections, entry => entry.path);
+    compare("app", sources.apps ?? this.requestedSources.apps, this.sources.apps, entry => entry.root);
+    compare("version", sources.versions ?? this.requestedSources.versions, this.sources.versions, entry => entry.id);
+    const groups = sources.groups ?? this.requestedSources.groups;
+    if (groups !== this.sources.groups) compare("group", groups?.filter(entry => entry.kind === "channel"), this.sources.groups?.filter(entry => entry.kind === "channel"), entry => entry.id);
     return removed;
-  }
-
-  private snapshotRow(row: PreparedGoToRow): PreparedGoToRow {
-    const previous = this.rowSnapshots.get(row);
-    const file = row.record as GoToFile, oldFile = previous?.record as GoToFile | undefined;
-    const sameRecord = previous?.record === row.record || row.kind === "file" && oldFile?.path === file.path && oldFile.kind === file.kind && oldFile.icon === file.icon;
-    if (previous && sameRecord && previous.glyphId === row.glyphId && previous.pinnedRank === row.pinnedRank &&
-      previous.recentRank === row.recentRank && previous.visible === row.visible && previous.ended === row.ended && previous.sourceIndex === row.sourceIndex) return previous;
-    const snapshot = { ...row, record: sameRecord && previous ? previous.record : row.record };
-    this.rowSnapshots.set(row, snapshot);
-    return snapshot;
   }
 
   cancel(): void { this.active?.cancel(); }
 
   private *prepare(sources: GoToSources, context: QuickOpenContext, work: { operations: number }): Generator<void> {
     this.lastPreparationCount = 0;
+    this.lastReorderedCount = 0;
     const force = this.interrupted;
     const forceVerdicts = force && this.withholding;
     if (force && !forceVerdicts) {
       // Repair positions and admission markers without sorting the completed order.
-      for (let i = 0; i < this.completeWorkRows.length; i++) {
-        const row = this.completeWorkRows[i];
+      for (let i = 0; i < this.completeRows.length; i++) {
+        const row = this.completeRows[i];
         row.sourceIndex = i;
         row.includedRevision = this.revision;
         if (++work.operations % GO_TO_CHUNK_SIZE === 0) yield;
@@ -442,20 +459,20 @@ export class GoToIndex {
     // Context updates keep the path order and copy only query ranking metadata.
     if (!force && sameSources(sources, this.sources)) {
       const metadata = this.queryMetadata.slice();
-      const views: PreparedGoToRow[] = [], complete: PreparedGoToRow[] = [];
-      for (let i = 0; i < this.orderedWorkRows.length; i++) {
-        const row = this.orderedWorkRows[i];
-        row.pinnedRank = pinned.has(row.path) ? 0 : 1;
-        row.recentRank = recent.get(row.path) ?? Number.MAX_SAFE_INTEGER;
+      const ordered = this.orderedRows.slice(), complete = this.completeRows.slice();
+      for (let i = 0; i < this.orderedRows.length; i++) {
+        const previous = this.orderedRows[i];
+        const row = withGoToRanks(previous, pinned, recent);
+        if (row !== previous) this.subsets.get(row.kind)!.set(goToRowKey(row), row);
         row.includedRevision = this.revision + 1;
         metadata[i * 8 + 5] = row.pinnedRank;
         metadata[i * 8 + 7] = recent.get(row.path) ?? -1;
-        views.push(this.snapshotRow(row));
-        complete[row.sourceIndex] = views[i];
+        ordered[i] = row;
+        complete[row.sourceIndex] = row;
         if (++work.operations % GO_TO_CHUNK_SIZE === 0) yield;
       }
       this.queryMetadata = metadata;
-      this.orderedRows = views;
+      this.orderedRows = ordered;
       this.completeRows = complete;
       this.context = context;
       this.sources = sources;
@@ -471,12 +488,12 @@ export class GoToIndex {
       const previous = index.subsets.get(kind);
       const next = kind === "file" ? previous ?? new Map<string, PreparedGoToRow>() : new Map<string, PreparedGoToRow>();
       const generation = kind === "file" ? ++index.listingGeneration : 0;
-      const files: PreparedGoToRow[] = [];
-      const removed: PreparedGoToRow[] = [];
+      const files: string[] = [];
+      const removed: string[] = [];
       for (const entry of entries) {
         if (!entry) { if (++work.operations % GO_TO_CHUNK_SIZE === 0) yield; continue; }
-        const positional = kind === "file" ? index.files[files.length] : undefined;
-        let row = positional?.path === entry.path ? positional : kind === "file" ? next.get(entry.key) : previous?.get(entry.key);
+        let row = kind === "file" ? next.get(entry.key) : previous?.get(entry.key);
+        const existing = row;
         if (kind === "file" && row?.listingGeneration === generation) { if (++work.operations % GO_TO_CHUNK_SIZE === 0) yield; continue; }
         const isNew = !row || row.path !== entry.path || row.label !== entry.label;
         if (!row || row.path !== entry.path || row.label !== entry.label) {
@@ -498,27 +515,28 @@ export class GoToIndex {
           };
           index.lastPreparationCount += 1;
         }
-        row.record = entry.record;
-        row.glyphId = entry.glyphId;
+        if (row.glyphId !== entry.glyphId || !sameGoToRecord(kind, row.record, entry.record)) {
+          row = { ...row, record: entry.record, glyphId: entry.glyphId, includedRevision: -1 };
+        }
         if (kind === "file" || kind === "folder" || kind === "collection" || kind === "app") {
           if (isNew || verdictsChanged) {
-            if (sources.listing) yield* applyGoToPathState(row, sources.listing, work);
-            else row.visible = false;
+            if (sources.listing) row = yield* applyGoToPathState(row, sources.listing, work);
+            else if (row.visible) row = { ...row, visible: false, includedRevision: -1 };
           }
         }
-        if (isNew || kind !== "file") next.set(entry.key, row);
+        if (row !== existing || kind !== "file") next.set(entry.key, row);
         if (kind === "file") {
           const old = index.files[files.length];
-          if (old && old !== row) removed.push(old);
-          row.listingGeneration = generation; files.push(row);
+          if (old && old !== row.path) removed.push(old);
+          row.listingGeneration = generation; files.push(row.path);
         }
         if (++work.operations % GO_TO_CHUNK_SIZE === 0) yield;
       }
       if (kind === "file") {
         for (let i = files.length; i < index.files.length; i++) { removed.push(index.files[i]); if (++work.operations % GO_TO_CHUNK_SIZE === 0) yield; }
         // Interrupted passes can add entries before publishing their file array.
-        for (const row of force ? next.values() : removed) {
-          if (row.listingGeneration !== generation) next.delete(row.path);
+        for (const key of force ? next.keys() : removed) {
+          if (next.get(key)?.listingGeneration !== generation) next.delete(key);
           if (++work.operations % GO_TO_CHUNK_SIZE === 0) yield;
         }
         index.files = files;
@@ -532,10 +550,8 @@ export class GoToIndex {
       if (force || snapshot.files !== this.sources.listing?.files || verdictsChanged) yield* replace("file", (function* () {
         const previous = index.subsets.get("file");
         let entry: { key: string; path: string; label: string; record: GoToFile; glyphId: PreparedGoToRow["glyphId"] } | undefined;
-        let position = 0;
         for (const file of snapshot.files) {
-          const candidate = index.files[position++];
-          const row = candidate?.path === file.path ? candidate : previous?.get(file.path);
+          const row = previous?.get(file.path);
           const glyphId = row && (row.record as GoToFile).kind === file.kind ? row.glyphId :
             file.kind === "database" ? FILE_KIND_RECORDS.database.glyphId : fileKindForPath(file.path).glyphId;
           if (!entry) entry = { key: file.path, path: file.path, label: row?.label ?? basenameOf(file.path), record: file, glyphId };
@@ -578,15 +594,15 @@ export class GoToIndex {
     if (!changed && !contextChanged) return;
     const rows: PreparedGoToRow[] = [];
     const addedRows: PreparedGoToRow[] = [];
-    for (const [kind, subset] of this.subsets) for (const row of kind === "file" ? this.files : subset.values()) {
-      if (contextChanged) {
-        row.pinnedRank = pinned.has(row.path) ? 0 : 1;
-        row.recentRank = recent.get(row.path) ?? Number.MAX_SAFE_INTEGER;
-      }
+    for (const [kind, subset] of this.subsets) for (const entry of kind === "file" ? this.files : subset.values()) {
+      const previous = typeof entry === "string" ? subset.get(entry)! : entry;
+      let row = previous;
+      if (contextChanged) row = withGoToRanks(row, pinned, recent);
       if (kind === "folder" || kind === "collection" || kind === "app") {
-        if (sources.listing) yield* applyGoToPathState(row, sources.listing, work);
-        else row.visible = false;
+        if (sources.listing) row = yield* applyGoToPathState(row, sources.listing, work);
+        else if (row.visible) row = { ...row, visible: false, includedRevision: -1 };
       }
+      if (row !== previous) subset.set(goToRowKey(row), row);
       if (row.visible && !(kind === "folder" && this.subsets.get("collection")?.has(row.path))) {
         if (forceVerdicts || row.includedRevision !== this.revision || row.sourceIndex !== rows.length) {
           addedRows.push(row);
@@ -599,8 +615,9 @@ export class GoToIndex {
     }
     // Sort only newly admitted rows, then merge them into the previous order.
     // Bounded native sorts handle small runs; merge copies yield in chunks.
+    this.lastReorderedCount = addedRows.length;
     let added = addedRows;
-    let buffer: PreparedGoToRow[] = [];
+    let buffer = new Array<PreparedGoToRow>(addedRows.length);
     const sortRunSize = 32;
     for (let left = 0; left < added.length; left += sortRunSize) {
       const run = added.slice(left, left + sortRunSize).sort(compareGoToOrder);
@@ -623,7 +640,7 @@ export class GoToIndex {
     }
     const ordered: PreparedGoToRow[] = [];
     let at = 0;
-    for (const row of forceVerdicts ? [] : this.orderedWorkRows) {
+    for (const row of forceVerdicts ? [] : this.orderedRows) {
       if (rows[row.sourceIndex] === row && row.includedRevision === this.revision) {
         while (at < added.length && compareGoToOrder(added[at], row) <= 0) {
           ordered.push(added[at++]);
@@ -635,7 +652,6 @@ export class GoToIndex {
     }
     while (at < added.length) { ordered.push(added[at++]); if (++work.operations % GO_TO_CHUNK_SIZE === 0) yield; }
     const metadata = new Int32Array(ordered.length * 8);
-    const views: PreparedGoToRow[] = [], complete: PreparedGoToRow[] = [];
     for (let i = 0; i < ordered.length; i++) {
       const row = ordered[i];
       const offset = i * 8;
@@ -648,18 +664,14 @@ export class GoToIndex {
       metadata[offset + 6] = row.kind === "file" ? 0 : row.kind === "app" ? 3 : 1;
       metadata[offset + 7] = recent.get(row.path) ?? -1;
       row.includedRevision = this.revision + 1;
-      views.push(this.snapshotRow(row));
-      complete[row.sourceIndex] = views[i];
       if (++work.operations % GO_TO_CHUNK_SIZE === 0) yield;
     }
-    this.orderedWorkRows = ordered;
-    this.completeWorkRows = rows;
-    this.orderedRows = views;
+    this.orderedRows = ordered;
     this.queryMetadata = metadata;
     this.sources = sources;
     this.context = context;
     this.interrupted = false;
-    this.completeRows = complete;
+    this.completeRows = rows;
     this.revision += 1;
     this.matches = null;
   }

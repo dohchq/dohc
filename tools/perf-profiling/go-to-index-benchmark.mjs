@@ -139,7 +139,7 @@ try {
       const measurement = await prepare(index, {}, slices, { pinned: [], recent: [sources.listing.files[n % count].path] }, "c");
       recentPreparations.push(measurement.elapsedMs); recentWork.push(measurement.workMs); recentWithholding.push(measurement.withheldMs);
     }
-    const supersededWork = [], supersededWithholding = [], supersededFirstResults = [];
+    const supersededWork = [], supersededWithholding = [], supersededFirstResults = [], supersededReordered = [];
     for (let n = 0; n < samples; n++) {
       const firstAt = Math.min(4242, count - 2), secondAt = Math.min(500, count - 1);
       const first = { ...sources.listing, files: sources.listing.files.map((file, i) => i === firstAt ? { ...file, path: file.path + ".first-" + n } : file) };
@@ -157,12 +157,27 @@ try {
       supersededWork.push(workMs + measurement.workMs);
       supersededWithholding.push(measurement.withheldMs);
       supersededFirstResults.push(measurement.firstResultsMs);
+      if (index.lastReorderedCount !== undefined) supersededReordered.push(index.lastReorderedCount);
       if (!index.query(first.files[firstAt].path).some(row => row.path === first.files[firstAt].path) || !index.query(second.files[secondAt].path).some(row => row.path === second.files[secondAt].path)) throw Error("superseded rename lost a changed path");
+    }
+    const createWork = [], deleteWork = [], createWithholding = [], deleteWithholding = [];
+    for (let n = 0; n < samples; n++) {
+      const path = sources.listing.files[0].path + ".created-" + n;
+      const created = { ...sources.listing, files: [{ path, kind: "file" }, ...sources.listing.files] };
+      const creation = await prepare(index, { listing: created }, slices, undefined, "c");
+      createWork.push(creation.workMs); createWithholding.push(creation.withheldMs);
+      if (!index.query(path).some(row => row.path === path)) throw Error("creation lost the inserted path");
+      const deletion = await prepare(index, { listing: sources.listing }, slices, undefined, "c");
+      deleteWork.push(deletion.workMs); deleteWithholding.push(deletion.withheldMs);
+      if (index.query(path).some(row => row.path === path)) throw Error("deletion retained the removed path");
     }
     const lengths = sources.listing.files.map(file => file.path.length);
     receipt.measurements.push({ files: count, rows: index.rows.length, pathLength: summarize(lengths), initialPreparationMs: summarize(initialPreparations), initialPreparationSamplesMs: initialPreparations, initialPreparationWorkMs: summarize(initialWork), initialPreparationWorkSamplesMs: initialWork,
       timeToFirstResultsMs: summarize(firstResults), timeToFirstResultsSamplesMs: firstResults,
       supersededRenameWorkMs: summarize(supersededWork), supersededRenameWorkSamplesMs: supersededWork, supersededRenameWithholdingMs: summarize(supersededWithholding), supersededRenameWithholdingSamplesMs: supersededWithholding, supersededRenameFirstResultsMs: summarize(supersededFirstResults),
+      createPreparationWorkMs: summarize(createWork), createPreparationWorkSamplesMs: createWork, createWithholdingMs: summarize(createWithholding),
+      deletePreparationWorkMs: summarize(deleteWork), deletePreparationWorkSamplesMs: deleteWork, deleteWithholdingMs: summarize(deleteWithholding),
+      supersededRenameReorderedRows: supersededReordered.length ? summarize(supersededReordered) : undefined,
       sliceMs: summarize(slices), longestPreparationSliceMs: slices.reduce((longest, slice) => Math.max(longest, slice), 0), sliceCount: slices.length, queries,
       renamePreparationMs: summarize(preparations), renamePreparationWorkMs: summarize(preparationWork), renamePreparationWorkSamplesMs: preparationWork, renames,
       renameWithholdingMs: summarize(renameWithholding), recentPreparationMs: summarize(recentPreparations), recentPreparationWorkMs: summarize(recentWork), recentPreparationWorkSamplesMs: recentWork, recentWithholdingMs: summarize(recentWithholding),

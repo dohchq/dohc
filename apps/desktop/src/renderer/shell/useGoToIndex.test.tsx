@@ -256,3 +256,21 @@ it("yields through MessageChannel when background postTask is unavailable", () =
   expect(channels[0].port1.close).toHaveBeenCalled();
   expect(channels[0].port2.close).toHaveBeenCalled();
 });
+
+it("keeps a pending channel removal hidden through an undefined reload source", () => {
+  const queue = taskQueue();
+  const answers: string[][] = [];
+  function Groups(props: { groups?: { id: string; name: string; kind: "channel" }[] }) {
+    const index = useGoToIndex("workspace", { groups: props.groups }, context);
+    answers.push(index.query("Channel").map(row => row.id));
+    return null;
+  }
+  const view = render(<Groups groups={Array.from({ length: 2_000 }, (_, n) => ({ id: String(n), name: "Channel " + n, kind: "channel" }))} />);
+  queue.drain();
+  view.rerender(<Groups groups={[]} />);
+  expect(queue.tasks.size).toBe(1);
+  answers.length = 0;
+  view.rerender(<Groups groups={undefined} />);
+  expect(answers.every(answer => answer.length === 0)).toBe(true);
+  queue.drain();
+});

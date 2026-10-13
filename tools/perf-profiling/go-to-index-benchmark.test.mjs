@@ -17,6 +17,11 @@ test("the pure benchmark exercises first scans, narrowings, slices, and memory",
     assert.ok(measurement.timeToFirstResultsMs.median > 0);
     assert.equal(measurement.supersededRenameWithholdingMs.max, 0);
     assert.equal(measurement.supersededRenameWorkSamplesMs.length, 2);
+    assert.ok(measurement.supersededRenameReorderedRows.max < 10);
+    assert.equal(measurement.createPreparationWorkSamplesMs.length, 2);
+    assert.equal(measurement.deletePreparationWorkSamplesMs.length, 2);
+    assert.equal(measurement.createWithholdingMs.max, 0);
+    assert.equal(measurement.deleteWithholdingMs.max, 0);
     assert.ok(measurement.initialPreparationMs.p95 >= measurement.initialPreparationMs.median);
     assert.ok(measurement.longestPreparationSliceMs > 0);
     assert.equal(measurement.renameWithholdingMs.max, 0);
