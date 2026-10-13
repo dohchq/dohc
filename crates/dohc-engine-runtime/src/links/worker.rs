@@ -12,6 +12,10 @@ use std::time::{Duration, Instant};
 pub struct LinkDrainMetrics {
     #[cfg(test)]
     pub(crate) worker_starts: u64,
+    #[cfg(test)]
+    pub(crate) worker_starts_at_publication: Option<u64>,
+    #[cfg(test)]
+    pub(crate) actor_batches_at_publication: Option<u64>,
     pub actor_batches: u64,
     pub max_actor_us: u64,
     pub total_actor_us: u64,

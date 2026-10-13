@@ -687,6 +687,12 @@ fn worker_main(
     // successful open also observes Ready. The same handshake carries the
     // store's authoritative freshness disposition; no caller infers it from
     // file existence or actor-registry ownership.
+    #[cfg(test)]
+    {
+        let mut metrics = link_metrics.lock().unwrap();
+        metrics.worker_starts_at_publication = Some(metrics.worker_starts);
+        metrics.actor_batches_at_publication = Some(metrics.actor_batches);
+    }
     state.store(LifecycleState::Ready.as_u8(), Ordering::Release);
     if startup_tx.send(Ok(store_freshly_created)).is_err() {
         // The spawner unwound before the actor was built; nothing to serve.
@@ -704,68 +710,73 @@ fn worker_main(
     // Blocking recv on the tokio channel keeps the SQLite work on this
     // dedicated thread, off the async runtime. `blocking_recv` returns `None`
     // once every sender is dropped.
-    let mut links = if !matches!(mode, ActorOpenMode::ReadWrite) {
-        None
-    } else {
-        match DrainWorker::new(link_metrics) {
-            Ok(worker) => Some(worker),
-            Err(_) => {
-                eprintln!("links parser could not start; pending work retained");
-                None
-            }
-        }
-    };
-    let timer = if links.is_some() {
-        tokio::runtime::Builder::new_current_thread()
-            .enable_time()
-            .build()
-            .ok()
-    } else {
-        None
-    };
+    // Publish before link startup, then let queued foreground commands win.
+    // An idle reopened store must also resume its durable drain without a
+    // foreground request; capture holds still postpone startup and slices.
+    let mut links_started = false;
+    let mut links = None;
+    let mut timer = None;
     loop {
         // Serve a queued foreground command before each background slice.
         // The timer runtime ends before synchronous commands execute.
         let cmd = match rx.try_recv() {
             Ok(cmd) => Some(cmd),
             Err(mpsc::error::TryRecvError::Disconnected) => break,
-            Err(mpsc::error::TryRecvError::Empty) => match (&mut links, &timer) {
-                (Some(worker), Some(timer)) if capture_holds.load(Ordering::Acquire) == 0 => {
-                    #[cfg(feature = "fault-injection")]
-                    let mut phase = dohc_engine_storage::capture_phase::Phase::new(
-                        "actor_background_slice",
-                        None,
-                        0,
-                        true,
-                    );
-                    #[cfg(feature = "fault-injection")]
-                    phase.field("capture_holds", capture_holds.load(Ordering::Acquire));
-                    let delay = worker.tick(&mut store);
-                    #[cfg(feature = "fault-injection")]
-                    {
-                        phase.finish("completed");
-                        drop(phase);
-                    }
-                    let parser_pending = worker.waiting_for_parser();
-                    if delay == std::time::Duration::MAX && !parser_pending {
-                        rx.blocking_recv()
-                    } else {
-                        if delay.is_zero() {
-                            continue;
+            Err(mpsc::error::TryRecvError::Empty) => {
+                if !links_started
+                    && matches!(mode, ActorOpenMode::ReadWrite)
+                    && capture_holds.load(Ordering::Acquire) == 0
+                {
+                    links_started = true;
+                    match DrainWorker::new(Arc::clone(&link_metrics)) {
+                        Ok(worker) => {
+                            links = Some(worker);
+                            timer = tokio::runtime::Builder::new_current_thread()
+                                .enable_time()
+                                .build()
+                                .ok();
                         }
-                        timer.block_on(async {
-                            tokio::select! {
-                                biased;
-                                cmd = rx.recv() => cmd,
-                                () = worker.parser_finished(), if parser_pending => None,
-                                () = async { tokio::time::sleep(delay).await },
-                                    if delay != std::time::Duration::MAX => None,
-                            }
-                        })
+                        Err(_) => eprintln!("links parser could not start; pending work retained"),
                     }
                 }
-                _ => rx.blocking_recv(),
-            },
+                match (&mut links, &timer) {
+                    (Some(worker), Some(timer)) if capture_holds.load(Ordering::Acquire) == 0 => {
+                        #[cfg(feature = "fault-injection")]
+                        let mut phase = dohc_engine_storage::capture_phase::Phase::new(
+                            "actor_background_slice",
+                            None,
+                            0,
+                            true,
+                        );
+                        #[cfg(feature = "fault-injection")]
+                        phase.field("capture_holds", capture_holds.load(Ordering::Acquire));
+                        let delay = worker.tick(&mut store);
+                        #[cfg(feature = "fault-injection")]
+                        {
+                            phase.finish("completed");
+                            drop(phase);
+                        }
+                        let parser_pending = worker.waiting_for_parser();
+                        if delay == std::time::Duration::MAX && !parser_pending {
+                            rx.blocking_recv()
+                        } else {
+                            if delay.is_zero() {
+                                continue;
+                            }
+                            timer.block_on(async {
+                                tokio::select! {
+                                    biased;
+                                    cmd = rx.recv() => cmd,
+                                    () = worker.parser_finished(), if parser_pending => None,
+                                    () = async { tokio::time::sleep(delay).await },
+                                        if delay != std::time::Duration::MAX => None,
+                                }
+                            })
+                        }
+                    }
+                    _ => rx.blocking_recv(),
+                }
+            }
         };
         let Some(cmd) = cmd else {
             if rx.is_closed() {
@@ -889,6 +900,53 @@ mod saturation_tests {
     use std::task::Poll;
     use std::time::{Duration, Instant};
     use tokio::sync::Semaphore;
+
+    #[tokio::test]
+    async fn reopened_actor_publishes_before_link_work_and_resumes_while_idle() {
+        use dohc_engine_domain::VersionedTextStore;
+        let scratch = ScratchDir::new().unwrap();
+        let db = engine_db_path(&scratch).unwrap();
+        let mut store = EngineStore::open(&db, 1).unwrap();
+        VersionedTextStore::new(&mut store)
+            .ensure_main_version("ws", "main", 1, &dohc_engine_storage::NoFaults)
+            .unwrap();
+        drop(store);
+        let supervisor = crate::WorkspaceSupervisor::new();
+        let actor = supervisor.open(&db, 2).unwrap().actor;
+        assert_eq!(
+            actor.state.load(Ordering::Acquire),
+            LifecycleState::Ready.as_u8()
+        );
+        {
+            let metrics = actor.link_metrics.lock().unwrap();
+            assert_eq!(
+                metrics.worker_starts_at_publication,
+                Some(0),
+                "no link startup before publication"
+            );
+            assert_eq!(
+                metrics.actor_batches_at_publication,
+                Some(0),
+                "no link writes before publication"
+            );
+        }
+        // No actor command follows open: a reader observes autonomous resume.
+        let reader =
+            rusqlite::Connection::open_with_flags(&db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+                .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let ready: bool = reader.query_row(
+                    "SELECT seed_phase='ready' FROM link_index_state WHERE workspace_id='ws' AND version_id='main'",
+                    [], |r| r.get(0),
+                ).unwrap();
+                if ready { break; }
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        }).await.unwrap();
+        drop(reader);
+        supervisor.close(&db).unwrap();
+    }
 
     #[test]
     fn passive_store_restart_without_active_slot_fails_closed() {
