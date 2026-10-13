@@ -24,7 +24,7 @@ describe("useShellError", () => {
       observedAtMs: 1, attemptCount: 1, retryRequested: false,
     }] };
     const adapter = { reconcileCapture: async () => capture, flushCapture: async () => capture };
-    const failure = await flushDatasetSourceCapture(adapter, new AbortController().signal).catch(error => error as Error);
+    const failure = await flushDatasetSourceCapture(adapter, new AbortController().signal, ["sources/note.md"]).catch(error => error as Error);
     expect(failure).toBeInstanceOf(Error);
     if (!(failure instanceof Error)) throw Error("Expected a held source refusal");
     const retry = vi.fn();

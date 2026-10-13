@@ -24,7 +24,7 @@ const DOC_MARKDOWN = "# Plan\n\nBody from the last read.\n";
 
 function engineBridge(
   markdown: string,
-  options?: { available?: boolean; engineMayHoldDocument?: boolean },
+  options?: { available?: boolean; engineMayHoldDocument?: boolean; captureHeld?: boolean },
 ) {
   const serverDoc = markdownToYDoc(markdown);
   return {
@@ -41,6 +41,7 @@ function engineBridge(
       source: "default" as const,
     })),
     openEngineYDocSession: vi.fn(async () => {
+      if (options?.captureHeld) return { available: false, captureHeld: true };
       if (options?.engineMayHoldDocument === true) {
         return { available: false, engineMayHoldDocument: true };
       }
@@ -97,6 +98,15 @@ afterEach(async () => {
 // Exporting it while the only serializer of the canonical doc is
 // unmounted writes a file that is not the user's document, and says it saved.
 describe("engine-mode export with no mounted serializer", () => {
+  it("keeps a held file read-only and explains why live editing is unavailable", async () => {
+    const bridge = engineBridge(DOC_MARKDOWN, { captureHeld: true });
+    vi.stubGlobal("dohcDesktop", bridge);
+    render(<FileInspector workspaceId="ws-1" path="a.md" />);
+    expect(await screen.findByText('dohc cannot open "a.md" for live editing because it cannot read the outside edit. This file is still on this computer. Edit it in another editor, then try again.')).toBeTruthy();
+    expect(screen.queryByTestId("markdown-source-toggle")).toBeNull();
+    expect(bridge.writeWorkspaceText).not.toHaveBeenCalled();
+    expect(bridge.applyEngineYDocUpdate).not.toHaveBeenCalled();
+  });
   it.each([
     ["plain", DOC_MARKDOWN],
     ["shared-type frontmatter", EDGE_MARKDOWN],

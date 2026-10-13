@@ -53,6 +53,7 @@ export interface EngineYDocTransport {
     notInVersion?: boolean;
     // Main could no longer resolve the live file at the path the renderer read.
     documentUnavailable?: boolean;
+    captureHeld?: boolean;
     liveHostUnavailable?: boolean;
     sharedWaiting?: SharedDocumentOpenState;
     // A session for this document may still be the engine's —
@@ -212,6 +213,7 @@ export interface EngineYDocBinding {
   readonly notInVersion: boolean;
   // Main could no longer resolve the live file at the path the renderer read.
   readonly documentUnavailable: boolean;
+  readonly captureHeld?: boolean;
   readonly liveHostUnavailable: boolean;
   readonly sharedWaiting: SharedDocumentOpenState | null;
   // A session for this document may still be the engine's. The
@@ -283,6 +285,7 @@ export async function bindEngineYDoc(
       versionId: null,
       notInVersion: opened.notInVersion === true,
       documentUnavailable: opened.documentUnavailable === true,
+      captureHeld: opened.captureHeld === true,
       liveHostUnavailable: opened.liveHostUnavailable === true,
       sharedWaiting: opened.sharedWaiting ?? null,
       engineMayHoldDocument: opened.engineMayHoldDocument === true,

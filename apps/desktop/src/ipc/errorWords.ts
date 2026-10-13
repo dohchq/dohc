@@ -74,6 +74,7 @@ export const ERROR_WORDS: Readonly<Record<string, Readonly<Record<string, Words>
     "file-locked": "Another program has this file open. Close it there, then try again.",
     "workspace-owned": "Another copy of dohc has this workspace open. Close it there, then try again.",
     "share-read-only": ENGINE_CODE_WORDS.SHARE_READ_ONLY,
+    "capture-file-held": "dohc cannot read the outside edit. This file is still on this computer. Edit it in another editor, then try again.",
     "relay-origin-diverged": ENGINE_CODE_WORDS.ORIGIN_DIVERGED,
     "*": null,
   },
@@ -227,6 +228,10 @@ export interface ReadError {
 
 export function readError(error: unknown): ReadError {
   const { text, name, code, message } = parse(error);
+  if (name === "DaemonRefusalError" && message.startsWith("capture-file-held: ")) {
+    const path = message.slice("capture-file-held: ".length);
+    return { words: `dohc cannot read the outside edit to "${path}". This file is still on this computer. Edit it in another editor, then try again.`, mapped: false, cause: text };
+  }
   if (name === "ReservedWorkspaceIdError") {
     return { title: RESERVED_WORKSPACE_ID_TITLE, words: message, mapped: false, cause: text };
   }
@@ -283,6 +288,15 @@ export function isShareReadOnlyRefusal(error: unknown): boolean {
 /** The engine refuses to move, delete or restore a shared live file this way. */
 export function isSharedLiveFileRefusal(error: unknown): boolean {
   return parse(error).name === "LiveDocumentMutationError";
+}
+
+export function isCaptureFileHeldRefusal(error: unknown): boolean {
+  const { name, code, message } = parse(error);
+  return name === "DaemonRefusalError" && code === "CONFLICT" && message.startsWith("capture-file-held: ");
+}
+
+export function captureHeldLiveMessage(path: string): string {
+  return `dohc cannot open "${path}" for live editing because it cannot read the outside edit. This file is still on this computer. Edit it in another editor, then try again.`;
 }
 
 /** Access and connection failures can hide a changed grant behind an IPC error. */

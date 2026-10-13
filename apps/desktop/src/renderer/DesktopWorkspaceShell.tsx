@@ -92,6 +92,7 @@ import { useEditorRegistry } from "./shell/useEditorRegistry";
 import { useSettingsFileNotices } from "./shell/useSettingsFileNotices";
 import { useKeptCopyNotices } from "./shell/useKeptCopyNotices";
 import { useCaptureRecoveryNotices } from "./shell/useCaptureRecoveryNotices";
+import { useCaptureHoldNotices } from "./shell/useCaptureHoldNotices";
 import { ShellErrorReporter, useShellError } from "./shell/useShellError";
 import { useDocumentSaveNotices } from "./shell/useDocumentSaveNotices";
 import { useReportsNotice } from "./shell/useReportsNotice";
@@ -817,6 +818,7 @@ export function DesktopWorkspaceShell(props: {
     showKeptCopies,
     showKeptCopySaved,
     showCaptureRecoveries,
+    showCaptureHolds,
     showDirectWriteNotice,
     dismissShellError,
     retryShellError,
@@ -2633,6 +2635,16 @@ export function DesktopWorkspaceShell(props: {
     reportShellError,
     openRecovery: openCaptureRecovery,
   });
+  useCaptureHoldNotices({ workspaceId, heldFiles: syncStatus?.heldFiles, show: showCaptureHolds, reportShellError });
+  useEffect(() => {
+    if (!workspaceIsReady) return;
+    return bridge().onCaptureHolds(event => {
+      if (event.workspaceId !== workspaceId || workspaceAdmission.superseded) return;
+      const status = syncStatusLane.latest();
+      // The poll's answer outranks status reads already in flight.
+      if (status) syncStatusLane.set({ ...status, heldFiles: event.heldFiles });
+    });
+  }, [workspaceId, workspaceIsReady, workspaceAdmission, syncStatusLane]);
   // Restore resolves this change's notice, including a Copy fallback that
   // the engine no longer lists.
   const onHistoryRestored = useCallback((momentId?: string) => {

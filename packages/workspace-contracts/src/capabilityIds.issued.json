@@ -127,6 +127,7 @@
   "share.capture.notice.dismiss",
   "document.save.retry",
   "capture.recovery.read",
+  "capture.held.retry",
   "capture.recovery.clear",
   "access.object.read",
   "access.sharing.read",
