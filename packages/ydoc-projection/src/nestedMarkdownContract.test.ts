@@ -3,7 +3,7 @@ import { expect, it } from 'vitest'
 import * as Y from 'yjs'
 import { createHash } from 'node:crypto'
 import { createLiveMarkdownJournalValidator, createLiveMarkdownRegistrationValidator } from './liveDocumentValidation.js'
-import { markdownToYDoc, yDocToMarkdown, serializeRichdocBody } from './import-export.js'
+import { markdownToYDoc, yDocToMarkdown, serializeRichdocBody, parseRichdocMarkdown } from './import-export.js'
 
 const corpus = JSON.parse(readFileSync(new URL('../../../tools/rust-engine-program/nested-markdown-contract.json', import.meta.url), 'utf8')) as {
   cases: Array<{ name: string; source: string; canonical?: string; sourceCanonical?: string; foldRefuse?: boolean; refuse?: boolean; projected?: boolean; rustBase64?: string }>
@@ -74,4 +74,10 @@ it.each(corpus.cases.filter(item => !item.refuse))('fix1 accepts its canonical o
 it.each(['- Mr. Smith arrived.', '- I. Overview', '- a. child'])('accepts projected item prose unchanged: %s', source => {
   const doc = markdownToYDoc(source, { reading: 'projection' })
   try { expect(yDocToMarkdown(doc)).toBe(source) } finally { doc.destroy() }
+})
+
+it.each(corpus.cases.filter(item => item.name.startsWith('empty-parent-')))('rebuilds $name from the file with its child inside the item', item => {
+  const original = parseRichdocMarkdown(item.source)
+  const file = serializeRichdocBody(original)
+  expect(parseRichdocMarkdown(file, 'projection')).toEqual(original)
 })

@@ -2180,6 +2180,14 @@ fn read_text(text: &str, place: TextPlace) -> (String, Vec<String>) {
         // definition can open it.
         for (index, line) in text.split('\n').enumerate() {
             let starts = index == 0;
+            if !starts
+                && !line.trim_start().starts_with('-')
+                && list_marker(line.trim_start(), MarkdownReading::ProjectedSource).is_some_and(
+                    |m| m.text.trim().is_empty() && !matches!(m.kind, ListKind::Task(_)),
+                )
+            {
+                continue;
+            }
             if let Some(kind) = block_start(line, starts, starts) {
                 syntax.push(format!("line {index}: {kind}"));
             }
@@ -2610,6 +2618,37 @@ fn markdown_fence(line: &str, source: bool) -> Option<(u8, usize, &str)> {
     (width >= 3).then(|| (delimiter, width, &line[width..]))
 }
 
+fn inline_code_spans(text: &str) -> Vec<std::ops::Range<usize>> {
+    let bytes = text.as_bytes();
+    let mut spans = Vec::new();
+    let mut at = 0;
+    'outside: while at < bytes.len() {
+        if bytes[at] == b'\\' {
+            at += 2;
+        } else if bytes[at] == b'`' {
+            let width = bytes[at..].iter().take_while(|&&b| b == b'`').count();
+            let mut close = at + width;
+            while close < bytes.len() {
+                if bytes[close] != b'`' {
+                    close += 1;
+                    continue;
+                }
+                let run = bytes[close..].iter().take_while(|&&b| b == b'`').count();
+                close += run;
+                if run == width {
+                    spans.push(at..close);
+                    at = close;
+                    continue 'outside;
+                }
+            }
+            at += width;
+        } else {
+            at += 1;
+        }
+    }
+    spans
+}
+
 /// `depth` counts XML levels; `quote_depth` enforces the separate quote cap.
 fn parse_markdown_blocks_at<'src>(
     lines: &[&'src str],
@@ -2732,7 +2771,14 @@ fn parse_markdown_blocks_at<'src>(
             }
             continue;
         }
-        if let Some(first) = list_marker(line, reading) {
+        if let Some(first) = list_marker(
+            line,
+            if in_list {
+                MarkdownReading::ProjectedSource
+            } else {
+                reading
+            },
+        ) {
             if let Some((list, next)) =
                 parse_list(lines, index, first, depth, quote_depth, reading, refused)
             {
@@ -2755,6 +2801,11 @@ fn parse_markdown_blocks_at<'src>(
         // line. Interior single newlines stay inside one text run, which the
         // projector re-emits verbatim. Only a numbered list that starts at 1
         // interrupts a paragraph.
+        let paragraph_reading = if in_list {
+            reading
+        } else {
+            MarkdownReading::Source
+        };
         let mut para = vec![line];
         index += 1;
         while index < lines.len() {
@@ -2764,8 +2815,10 @@ fn parse_markdown_blocks_at<'src>(
                 || markdown_fence(next, source_fences).is_some()
                 || next == ">"
                 || next.starts_with("> ")
-                || list_marker(next, reading).is_some_and(|marker| {
-                    !matches!(marker.kind, ListKind::Ordered(_)) || marker.start == 1
+                || (in_list && next.trim_end_matches([' ', '\t']) == "-")
+                || list_marker(next, paragraph_reading).is_some_and(|marker| {
+                    (!marker.text.trim().is_empty() || matches!(marker.kind, ListKind::Task(_)))
+                        && (!matches!(marker.kind, ListKind::Ordered(_)) || marker.start == 1)
                 })
                 || parse_heading(next).is_some()
                 || (tables && table_starts(&lines[index..]))
@@ -2776,13 +2829,39 @@ fn parse_markdown_blocks_at<'src>(
             para.push(next);
             index += 1;
         }
+        if in_list
+            && lines
+                .get(index)
+                .is_some_and(|line| line.trim_end_matches([' ', '\t']) == "-")
+        {
+            blocks.push(MdBlock::Heading {
+                level: 2,
+                text: para.join("\n"),
+            });
+            index += 1;
+            continue;
+        }
         let mut paragraph = para.join("\n");
+        if in_list {
+            paragraph.truncate(paragraph.trim_end_matches([' ', '\t']).len());
+        }
         if reading != MarkdownReading::Source {
             if paragraph.contains("&#") {
+                let code_spans = inline_code_spans(&paragraph);
                 paragraph = paragraph
                     .split('\n')
-                    .enumerate()
+                    .scan(0, |offset, line| {
+                        let at = *offset;
+                        *offset += line.len() + 1;
+                        Some((at, line))
+                    })
                     .map(|(index, line)| {
+                        if code_spans.iter().any(|span| span.contains(&index)) {
+                            return line.to_owned();
+                        }
+                        if index > 0 && line == "&#42;" {
+                            return "*".to_owned();
+                        }
                         let digits = line.bytes().take_while(u8::is_ascii_digit).count();
                         let marker = line[digits..]
                             .strip_prefix("&#46;")
@@ -2808,6 +2887,12 @@ fn parse_markdown_blocks_at<'src>(
                 paragraph = format!(" {rest}");
             } else if let Some(rest) = paragraph.strip_prefix("&#9;") {
                 paragraph = format!("\t{rest}");
+            }
+        }
+        if paragraph.contains("&#") {
+            for span in inline_code_spans(&paragraph).into_iter().rev() {
+                let normalized = paragraph[span.clone()].replace('\n', " ");
+                paragraph.replace_range(span, &normalized);
             }
         }
         blocks.push(MdBlock::Paragraph(paragraph));
@@ -3372,7 +3457,7 @@ fn parse_list<'src>(
             let mut blocks = blocks.into_iter();
             let first_block = blocks.next();
             match first_block {
-                Some(MdBlock::Paragraph(paragraph)) => {
+                Some(MdBlock::Paragraph(paragraph)) if !marker.text.trim().is_empty() => {
                     let following: Vec<_> = blocks.collect();
                     MdListItem {
                         paragraph: paragraph.into_boxed_str(),
@@ -3416,9 +3501,42 @@ fn insert_md_paragraph<F: XmlFragment>(
     text: &str,
 ) {
     let el = parent.insert(txn, index, XmlElementPrelim::empty("paragraph"));
-    if !text.is_empty() {
-        el.insert(txn, 0, XmlTextPrelim::new(text));
+    let spans = if text.contains("&#") {
+        inline_code_spans(text)
+    } else {
+        Vec::new()
+    };
+    if spans.is_empty() {
+        if !text.is_empty() {
+            el.insert(txn, 0, XmlTextPrelim::new(text));
+        }
+        return;
     }
+    let target = el.insert(txn, 0, XmlTextPrelim::new(""));
+    let mut cursor = 0;
+    let mut offset = 0;
+    for span in spans {
+        let prefix = &text[cursor..span.start];
+        target.insert(txn, offset, prefix);
+        offset += utf16_len(prefix) as u32;
+        let width = text[span.clone()]
+            .bytes()
+            .take_while(|b| *b == b'`')
+            .count();
+        let mut value = &text[span.start + width..span.end - width];
+        if value.starts_with(' ') && value.ends_with(' ') && !value.bytes().all(|b| b == b' ') {
+            value = &value[1..value.len() - 1];
+        }
+        target.insert_with_attributes(
+            txn,
+            offset,
+            value,
+            [("code".into(), Any::Map(Default::default()))].into(),
+        );
+        offset += utf16_len(value) as u32;
+        cursor = span.end;
+    }
+    target.insert(txn, offset, &text[cursor..]);
 }
 
 fn insert_md_list_item<F: XmlFragment, const WIRE_DEFAULTS: bool>(
@@ -5738,8 +5856,22 @@ fn render_list_item(
         ProjectionBuffer::with_capacity(prefix.len().saturating_add(first_rendered.len()))?;
     output.push_str(prefix)?;
     if !first_rendered.trim_matches([' ', '\t']).is_empty() {
-        output.push_str(&first_rendered)?;
+        for (index, line) in first_rendered.split('\n').enumerate() {
+            if index != 0 {
+                output.push('\n')?;
+                output.push_repeat(
+                    ' ',
+                    if task_prefix.is_some() {
+                        2
+                    } else {
+                        prefix.len()
+                    },
+                )?;
+            }
+            output.push_str(line)?;
+        }
     }
+    let empty_marker = task_prefix.is_none() && first_rendered.trim_matches([' ', '\t']).is_empty();
     for (index, child) in nested.iter().enumerate() {
         let child_rendered = render_node(
             child,
@@ -5755,6 +5887,11 @@ fn render_list_item(
                 table_cell: context.table_cell,
             },
         )?;
+        let child_rendered = if index == 0 && empty_marker {
+            child_rendered.trim_start_matches('\n')
+        } else {
+            &child_rendered
+        };
         let mut indented = ProjectionBuffer::new();
         for (line_index, line) in child_rendered.split('\n').enumerate() {
             if line_index != 0 {
@@ -5779,13 +5916,22 @@ fn render_list_item(
             Some("bulletList") => first_line.trim_end_matches([' ', '\t']) != "-",
             _ => true,
         };
-        if matches!(
+        if index == 0 && empty_marker {
+            output.push('\n')?;
+        } else if matches!(
             element_tag(child),
             Some("paragraph" | "horizontalRule" | "mathBlock")
         ) || (matches!(
             element_tag(previous),
-            Some("paragraph" | "mathBlock" | "table")
+            Some("paragraph" | "mathBlock" | "table" | "blockquote" | "callout")
         ) && !list_interrupts)
+            || (matches!(element_tag(previous), Some("blockquote" | "callout"))
+                && matches!(element_tag(child), Some("blockquote" | "callout")))
+            || (element_tag(previous) == element_tag(child)
+                && matches!(
+                    element_tag(child),
+                    Some("bulletList" | "orderedList" | "taskList")
+                ))
         {
             output.push_str("\n\n")?;
         } else {

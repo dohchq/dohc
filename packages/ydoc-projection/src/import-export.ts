@@ -485,6 +485,10 @@ function assertSupportedListMarkdown(markdown: string): string {
   const refuse = () => { throw new Error('Markdown is not representable by the live document contract') }
   for (let at = 0; at < lines.length; at += 1) {
     const line = lines[at].replace(/\r$/u, '')
+    if (line && !' \t>_-+*0123456789`~#'.includes(line[0])) {
+      if (!fence) { if (blank) parents.length = 0; blank = false }
+      continue
+    }
     if (/^[ \t]*$/u.test(line)) { blank = true; continue }
     let indent = /^ */u.exec(line)![0].length
     let rest = line.slice(indent)
@@ -615,7 +619,9 @@ export function parseRichdocMarkdown(markdown: string, reading: 'source' | 'proj
     writtenLinks = { openers: new Set(), runs: new Map(), length: -1, sentinels: new WeakMap() }
   }
   return ensureListItemParagraphs(
-    restoreBlockEntityParseSentinels(parsed, { decodedEntities, encodedEntities, tagEntities }),
+    entitySentinels.size || markdown.includes('<')
+      ? restoreBlockEntityParseSentinels(parsed, { decodedEntities, encodedEntities, tagEntities })
+      : parsed,
   )
 }
 
@@ -626,11 +632,14 @@ export function parseRichdocMarkdown(markdown: string, reading: 'source' | 'proj
 function ensureListItemParagraphs(node: JSONContent, depth = -1, quoteDepth = 0): JSONContent {
   const quotes = quoteDepth + (node.type === 'blockquote' ? 1 : 0)
   if (depth > 128 || quotes > 120) throw new Error('Markdown is not representable by the live document contract')
-  const content = node.content?.map(child => ensureListItemParagraphs(child, depth + 1, quotes))
+  if (node.type === 'image' && node.attrs) node.attrs.src = sanitizeImageSrc(String(node.attrs.src ?? ''))
+  const content = node.content
   if (!content) return node
+  for (const child of content) ensureListItemParagraphs(child, depth + 1, quotes)
   const needsParagraph = (node.type === 'listItem' || node.type === 'taskItem')
     && content[0]?.type !== 'paragraph'
-  return { ...node, content: needsParagraph ? [{ type: 'paragraph' }, ...content] : content }
+  if (needsParagraph) content.unshift({ type: 'paragraph' })
+  return node
 }
 
 function markdownCharacterIsEscaped(source: string, index: number): boolean {
@@ -671,7 +680,7 @@ function restoreBlockEntityParseSentinels(
   span?: TextSpan,
 ): JSONContent {
   const { decodedEntities, encodedEntities, tagEntities } = references
-  const restored: JSONContent = { ...node }
+  const restored = node
   const insideCode = insideCodeBlock
     || node.type === 'codeBlock'
     || node.marks?.some(mark => mark.type === 'code')

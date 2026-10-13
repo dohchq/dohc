@@ -987,8 +987,24 @@ export const DohcCodeBlock = Extension.create({
     ),
 })
 
-function markdownLists(projected = false) { return Extension.create({
+function markdownLists(projected = false) {
+  const tokenizer = new Tokenizer()
+  tokenizer.lexer = new Lexer({ ...getDefaults(), tokenizer })
+  tokenizer.lexer.blockTokens = () => Object.assign([], { links: {} })
+  return Extension.create({
   name: 'dohcMarkdownLists', priority: 1001, markdownTokenName: 'list',
+  markdownTokenizer: { name: 'list', level: 'block', start: () => -1, tokenize(src, _tokens, helpers) {
+    if (!' -+*0123456789'.includes(src[0]) || !/^ {0,3}(?:[-+*]|[0-9]{1,9}[.)])(?:[ \t]|\n|$)/u.test(src)) return undefined
+    if (/^(?:(?:[-+*]|[0-9]{1,9}[.)]) (?![ \t]*(?:\n|$)|\[[ xX]\][ \t]*(?:\n|$))[^\n]+(?:\n|$))+(?:\n|$)(?![ \t\n0-9*+-])/u.test(src)) return undefined
+    const list = tokenizer.list(src)
+    if (!list) return undefined
+    for (const item of list.items) {
+      const task = /^\[([ xX])\][ \t]*(?:\n|$)/u.exec(item.text)
+      if (task) { item.task = true; item.checked = task[1].toLowerCase() === 'x'; item.text = item.text.slice(task[0].length) }
+      item.tokens = helpers.blockTokens(item.text) as Tokens.ListItem['tokens']
+    }
+    return list
+  } },
   parseMarkdown: (token, helpers) => {
     if (token.type !== 'list') return []
     const lists: JSONContent[] = []
@@ -1006,7 +1022,7 @@ function markdownLists(projected = false) { return Extension.create({
       const tokens = (emptyTask ? [] : item.tokens ?? []).map(block => block.type === 'text'
         ? { ...block, type: 'paragraph' } : block)
       const content = (helpers.parseBlockChildren ?? helpers.parseChildren)(tokens)
-      if (content[0]?.type !== 'paragraph') content.unshift({ type: 'paragraph' })
+      if (content[0]?.type !== 'paragraph' || (/^[ \t]*\n/u.test(item.text ?? '') && /^[ ]*(?:[-+*]|[0-9]{1,9}[.)])(?: \[([ xX])\])? *\n/u.test(item.raw ?? ''))) content.unshift({ type: 'paragraph' })
       list.content!.push({
         type: task ? 'taskItem' : 'listItem',
         ...(task ? { attrs: { checked: emptyTask ? emptyTask[1].toLowerCase() === 'x' : !!item.checked } } : {}), content,
@@ -1083,17 +1099,22 @@ export const MarkdownListItem = ListItem.extend({
 
 function renderItemBlocks(node: JSONContent, helpers: MarkdownRendererHelpers, prefix: string, indent: number): string {
   const [first, ...children] = node.content ?? []
-  let output = prefix + helpers.renderChildren(first ? [first] : []).replace(/^[ \t]*$/u, '')
+  const firstText = helpers.renderChildren(first ? [first] : []).replace(/^[ \t]*$/u, '')
+  const emptyMarker = node.type === 'listItem' && firstText === ''
+  let output = prefix + firstText.replaceAll('\n', '\n' + ' '.repeat(indent))
   children.forEach((child, index) => {
-    const content = (helpers.renderChild?.(child, index + 1) ?? helpers.renderChildren([child]))
+    let content = (helpers.renderChild?.(child, index + 1) ?? helpers.renderChildren([child]))
+    if (index === 0 && emptyMarker) content = content.replace(/^\n/u, '')
     const rendered = content.split('\n').map(line => ' '.repeat(indent) + line).join('\n')
     const firstLine = content.split('\n', 1)[0]
     const previous = index === 0 ? first : children[index - 1]
     const interrupts = child.type === 'orderedList' ? /^1\. [ \t]*[^ \t]/u.test(firstLine)
       : child.type !== 'bulletList' || firstLine.replace(/[ \t]+$/u, '') !== '-'
     const separate = child.type === 'paragraph' || child.type === 'horizontalRule' || child.type === 'mathBlock'
-      || (['paragraph', 'mathBlock', 'table'].includes(previous?.type ?? '') && !interrupts)
-    output += (separate ? '\n\n' : '\n') + rendered
+      || (['paragraph', 'mathBlock', 'table', 'blockquote', 'callout'].includes(previous?.type ?? '') && !interrupts)
+    const boundary = separate || (['blockquote', 'callout'].includes(previous?.type ?? '') && ['blockquote', 'callout'].includes(child.type ?? ''))
+      || (previous?.type === child.type && ['bulletList', 'orderedList', 'taskList'].includes(child.type ?? ''))
+    output += (boundary && !(index === 0 && emptyMarker) ? '\n\n' : '\n') + rendered
   })
   return output
 }

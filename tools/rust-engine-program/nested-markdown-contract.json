@@ -73,7 +73,7 @@
       "source": "- a\n   \n  - b\n \n- c\n"
     },
     {
-      "canonical": "- a\ncontinued\n- b",
+      "canonical": "- a\n  continued\n- b",
       "name": "lazy-continuation",
       "rustBase64": "AQr6jNzH27DLCQAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwD6jNzH27DLCQEDCGxpc3RJdGVtBwD6jNzH27DLCQIDCXBhcmFncmFwaAcA+ozcx9uwywkDBgQA+ozcx9uwywkEC2EKY29udGludWVkh/qM3MfbsMsJAgMIbGlzdEl0ZW0HAPqM3MfbsMsJEAMJcGFyYWdyYXBoBwD6jNzH27DLCREGBAD6jNzH27DLCRIBYgA=",
       "source": "- a\ncontinued\n- b"
@@ -124,13 +124,13 @@
       "source": "1. a\n\n  next paragraph"
     },
     {
-      "canonical": "1. a\na. b",
+      "canonical": "1. a\n   a. b",
       "name": "letter-item",
       "rustBase64": "AQfzv8/Qxvi2AgAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwtvcmRlcmVkTGlzdCgA87/P0Mb4tgIBBXN0YXJ0AX0BBwDzv8/Qxvi2AgEDCGxpc3RJdGVtBwDzv8/Qxvi2AgMDCXBhcmFncmFwaAcA87/P0Mb4tgIEBgQA87/P0Mb4tgIFBmEKYS4gYgA=",
       "source": "1. a\n   a. b"
     },
     {
-      "canonical": "1. a\niv) b",
+      "canonical": "1. a\n   iv) b",
       "name": "roman-item",
       "rustBase64": "AQe70Kzxl9+tAgAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwtvcmRlcmVkTGlzdCgAu9Cs8ZffrQIBBXN0YXJ0AX0BBwC70Kzxl9+tAgEDCGxpc3RJdGVtBwC70Kzxl9+tAgMDCXBhcmFncmFwaAcAu9Cs8ZffrQIEBgQAu9Cs8ZffrQIFB2EKaXYpIGIA",
       "source": "1. a\n   iv) b"
@@ -398,7 +398,7 @@
       "source": "- a. first"
     },
     {
-      "canonical": "- item\nii. note",
+      "canonical": "- item\n  ii. note",
       "fileFold": true,
       "name": "roman-continuation",
       "rustBase64": "AQbP3Y+Q0q7nDQAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwDP3Y+Q0q7nDQEDCGxpc3RJdGVtBwDP3Y+Q0q7nDQIDCXBhcmFncmFwaAcAz92PkNKu5w0DBgQAz92PkNKu5w0EDWl0ZW0KaWkuIG5vdGUA",
@@ -542,71 +542,190 @@
       "source": "* * *\n\nAuthor: Jane\n\n* * *\n\nIt was dark."
     },
     {
-      "name": "item-ordered-non-one",
-      "source": "- a\n\n  2. child",
       "canonical": "- a\n\n  2. child",
       "foldRefuse": true,
+      "name": "item-ordered-non-one",
+      "note": "CommonMark 0.31.2 reads the blank-separated source and projection as an ordered child starting at 2.",
       "rustBase64": "AQz4juDA98eIDQAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwD4juDA98eIDQEDCGxpc3RJdGVtBwD4juDA98eIDQIDCXBhcmFncmFwaAcA+I7gwPfHiA0DBgQA+I7gwPfHiA0EAWGH+I7gwPfHiA0DAwtvcmRlcmVkTGlzdCgA+I7gwPfHiA0GBXN0YXJ0AX0CBwD4juDA98eIDQYDCGxpc3RJdGVtBwD4juDA98eIDQgDCXBhcmFncmFwaAcA+I7gwPfHiA0JBgQA+I7gwPfHiA0KBWNoaWxkAA==",
-      "note": "CommonMark 0.31.2 reads the blank-separated source and projection as an ordered child starting at 2."
+      "source": "- a\n\n  2. child"
     },
     {
+      "canonical": "- a\n\n  -",
+      "foldRefuse": true,
       "name": "item-empty-bullet",
-      "source": "- a\n\n  - ",
-      "canonical": "- a\n\n  -",
-      "foldRefuse": true,
+      "note": "CommonMark 0.31.2 reads the blank-separated source and projection as an empty bullet child.",
       "rustBase64": "AQmp9LuessFSACgBBG1ldGENc2NoZW1hVmVyc2lvbgF9AQcBBGJvZHkDCmJ1bGxldExpc3QHAKn0u56ywVIBAwhsaXN0SXRlbQcAqfS7nrLBUgIDCXBhcmFncmFwaAcAqfS7nrLBUgMGBACp9LuessFSBAFhh6n0u56ywVIDAwpidWxsZXRMaXN0BwCp9LuessFSBgMIbGlzdEl0ZW0HAKn0u56ywVIHAwlwYXJhZ3JhcGgA",
-      "note": "CommonMark 0.31.2 reads the blank-separated source and projection as an empty bullet child."
+      "source": "- a\n\n  - "
     },
     {
+      "canonical": "- a\n\n  1.",
+      "foldRefuse": true,
       "name": "item-empty-ordered",
-      "source": "- a\n\n  1. ",
-      "canonical": "- a\n\n  1.",
-      "foldRefuse": true,
+      "note": "CommonMark 0.31.2 reads the blank-separated source and projection as an empty ordered child.",
       "rustBase64": "AQrXpKL56sutAgAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwDXpKL56sutAgEDCGxpc3RJdGVtBwDXpKL56sutAgIDCXBhcmFncmFwaAcA16Si+erLrQIDBgQA16Si+erLrQIEAWGH16Si+erLrQIDAwtvcmRlcmVkTGlzdCgA16Si+erLrQIGBXN0YXJ0AX0BBwDXpKL56sutAgYDCGxpc3RJdGVtBwDXpKL56sutAggDCXBhcmFncmFwaAA=",
-      "note": "CommonMark 0.31.2 reads the blank-separated source and projection as an empty ordered child."
+      "source": "- a\n\n  1. "
     },
     {
+      "canonical": "- a\n  2&#46; child",
+      "fileFold": true,
       "name": "item-ordered-non-one-tight",
-      "source": "- a\n  2. child",
-      "canonical": "- a\n2&#46; child",
-      "sourceCanonical": "- a\n\n  2. child",
-      "note": "CommonMark 0.31.2 and Rust read source as paragraph text; TypeScript reads a child list. Both canonical readings keep their own structure.",
+      "note": "CommonMark 0.31.2 and both readers keep the non-one ordered continuation as paragraph text.",
       "rustBase64": "AQaK9MGRmo7dCwAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwCK9MGRmo7dCwEDCGxpc3RJdGVtBwCK9MGRmo7dCwIDCXBhcmFncmFwaAcAivTBkZqO3QsDBgQAivTBkZqO3QsECmEKMi4gY2hpbGQA",
-      "fileFold": true
+      "source": "- a\n  2. child"
     },
     {
+      "canonical": "- \n  ## a",
+      "foldRefuse": true,
       "name": "item-empty-bullet-tight",
-      "source": "- a\n  - ",
-      "canonical": "- a\n\n  -",
-      "sourceCanonical": "- \n  ## a",
-      "note": "CommonMark 0.31.2 and TypeScript read source as an item heading; Rust reads an empty child list. Blank-separated projection keeps the child list.",
-      "foldRefuse": true,
-      "rustBase64": "AQmW48uSx+DhBgAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwCW48uSx+DhBgEDCGxpc3RJdGVtBwCW48uSx+DhBgIDCXBhcmFncmFwaAcAluPLksfg4QYDBgQAluPLksfg4QYEAWGHluPLksfg4QYDAwpidWxsZXRMaXN0BwCW48uSx+DhBgYDCGxpc3RJdGVtBwCW48uSx+DhBgcDCXBhcmFncmFwaAA="
+      "note": "CommonMark 0.31.2 and both readers read the dash as an item setext underline.",
+      "rustBase64": "AQj427a8qMWmDQAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwD427a8qMWmDQEDCGxpc3RJdGVtBwD427a8qMWmDQIDCXBhcmFncmFwaIf427a8qMWmDQMDB2hlYWRpbmcoAPjbtryoxaYNBAVsZXZlbAF9AgcA+Nu2vKjFpg0EBgQA+Nu2vKjFpg0GAWEA",
+      "source": "- a\n  - "
     },
     {
+      "canonical": "- a\n  1&#46;",
+      "fileFold": true,
       "name": "item-empty-ordered-tight",
-      "source": "- a\n  1. ",
-      "canonical": "- a\n\n  1.",
-      "note": "CommonMark 0.31.2 reads source as paragraph text; both dohc readers read an empty ordered child. Blank-separated projection keeps the child list.",
-      "foldRefuse": true,
-      "rustBase64": "AQr7gaHus4zZDAAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwD7gaHus4zZDAEDCGxpc3RJdGVtBwD7gaHus4zZDAIDCXBhcmFncmFwaAcA+4Gh7rOM2QwDBgQA+4Gh7rOM2QwEAWGH+4Gh7rOM2QwDAwtvcmRlcmVkTGlzdCgA+4Gh7rOM2QwGBXN0YXJ0AX0BBwD7gaHus4zZDAYDCGxpc3RJdGVtBwD7gaHus4zZDAgDCXBhcmFncmFwaAA="
+      "note": "CommonMark 0.31.2 and both readers keep the empty ordered continuation as paragraph text.",
+      "rustBase64": "AQaToanOxMPMBgAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwCToanOxMPMBgEDCGxpc3RJdGVtBwCToanOxMPMBgIDCXBhcmFncmFwaAcAk6GpzsTDzAYDBgQAk6GpzsTDzAYEBGEKMS4A",
+      "source": "- a\n  1. "
     },
     {
-      "name": "item-empty-whitespace-markers",
-      "source": "- a\n\n  -  \n  2.  ",
       "canonical": "- a\n\n  - \n  2.",
-      "note": "CommonMark 0.31.2 reads whitespace-only bullet and ordered markers as empty child lists when separated from the preceding paragraph.",
       "foldRefuse": true,
-      "rustBase64": "AQ2Yo5a+vPbdDAAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwCYo5a+vPbdDAEDCGxpc3RJdGVtBwCYo5a+vPbdDAIDCXBhcmFncmFwaAcAmKOWvrz23QwDBgQAmKOWvrz23QwEAWGHmKOWvrz23QwDAwpidWxsZXRMaXN0BwCYo5a+vPbdDAYDCGxpc3RJdGVtBwCYo5a+vPbdDAcDCXBhcmFncmFwaIeYo5a+vPbdDAYDC29yZGVyZWRMaXN0KACYo5a+vPbdDAkFc3RhcnQBfQIHAJijlr689t0MCQMIbGlzdEl0ZW0HAJijlr689t0MCwMJcGFyYWdyYXBoAA=="
+      "name": "item-empty-whitespace-markers",
+      "note": "CommonMark 0.31.2 reads whitespace-only bullet and ordered markers as empty child lists when separated from the preceding paragraph.",
+      "rustBase64": "AQ2Yo5a+vPbdDAAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwCYo5a+vPbdDAEDCGxpc3RJdGVtBwCYo5a+vPbdDAIDCXBhcmFncmFwaAcAmKOWvrz23QwDBgQAmKOWvrz23QwEAWGHmKOWvrz23QwDAwpidWxsZXRMaXN0BwCYo5a+vPbdDAYDCGxpc3RJdGVtBwCYo5a+vPbdDAcDCXBhcmFncmFwaIeYo5a+vPbdDAYDC29yZGVyZWRMaXN0KACYo5a+vPbdDAkFc3RhcnQBfQIHAJijlr689t0MCQMIbGlzdEl0ZW0HAJijlr689t0MCwMJcGFyYWdyYXBoAA==",
+      "source": "- a\n\n  -  \n  2.  "
     },
     {
-      "name": "item-math-table-before-ordered",
-      "source": "- a\n\n  $$x$$\n\n  2. child\n\n  | cell |\n  | ---- |\n  | cell |\n\n  2. child",
       "canonical": "- a\n\n  \\$\\$x$$\n\n  2. child\n  \n  | cell |\n  | ---- |\n  | cell |\n\n  2. child",
-      "sourceCanonical": "- a\n\n  $$x$$\n\n  2. child\n  \n  | cell |\n  | ---- |\n  | cell |\n\n  2. child",
-      "note": "CommonMark 0.31.2 reads math and GFM table syntax as separate paragraphs. Ordered children remain separate after each. Rust keeps math as literal text; TypeScript reads a math block.",
       "foldRefuse": true,
-      "rustBase64": "ASSbrZf2pK1VACgBBG1ldGENc2NoZW1hVmVyc2lvbgF9AQcBBGJvZHkDCmJ1bGxldExpc3QHAJutl/akrVUBAwhsaXN0SXRlbQcAm62X9qStVQIDCXBhcmFncmFwaAcAm62X9qStVQMGBACbrZf2pK1VBAFhh5utl/akrVUDAwlwYXJhZ3JhcGgHAJutl/akrVUGBgQAm62X9qStVQcFJCR4JCSHm62X9qStVQYDC29yZGVyZWRMaXN0KACbrZf2pK1VDQVzdGFydAF9AgcAm62X9qStVQ0DCGxpc3RJdGVtBwCbrZf2pK1VDwMJcGFyYWdyYXBoBwCbrZf2pK1VEAYEAJutl/akrVURBWNoaWxkh5utl/akrVUNAwV0YWJsZQcAm62X9qStVRcDCHRhYmxlUm93BwCbrZf2pK1VGAMLdGFibGVIZWFkZXIoAJutl/akrVUZB2NvbHNwYW4BfQEoAJutl/akrVUZB3Jvd3NwYW4BfQEHAJutl/akrVUZAwlwYXJhZ3JhcGgHAJutl/akrVUcBgQAm62X9qStVR0EY2VsbIebrZf2pK1VGAMIdGFibGVSb3cHAJutl/akrVUiAwl0YWJsZUNlbGwoAJutl/akrVUjB2NvbHNwYW4BfQEoAJutl/akrVUjB3Jvd3NwYW4BfQEHAJutl/akrVUjAwlwYXJhZ3JhcGgHAJutl/akrVUmBgQAm62X9qStVScEY2VsbIebrZf2pK1VFwMLb3JkZXJlZExpc3QoAJutl/akrVUsBXN0YXJ0AX0CBwCbrZf2pK1VLAMIbGlzdEl0ZW0HAJutl/akrVUuAwlwYXJhZ3JhcGgHAJutl/akrVUvBgQAm62X9qStVTAFY2hpbGQA"
+      "name": "item-math-table-before-ordered",
+      "note": "CommonMark 0.31.2 reads math and GFM table syntax as separate paragraphs. Ordered children remain separate after each. Rust keeps math as literal text; TypeScript reads a math block.",
+      "rustBase64": "ASSbrZf2pK1VACgBBG1ldGENc2NoZW1hVmVyc2lvbgF9AQcBBGJvZHkDCmJ1bGxldExpc3QHAJutl/akrVUBAwhsaXN0SXRlbQcAm62X9qStVQIDCXBhcmFncmFwaAcAm62X9qStVQMGBACbrZf2pK1VBAFhh5utl/akrVUDAwlwYXJhZ3JhcGgHAJutl/akrVUGBgQAm62X9qStVQcFJCR4JCSHm62X9qStVQYDC29yZGVyZWRMaXN0KACbrZf2pK1VDQVzdGFydAF9AgcAm62X9qStVQ0DCGxpc3RJdGVtBwCbrZf2pK1VDwMJcGFyYWdyYXBoBwCbrZf2pK1VEAYEAJutl/akrVURBWNoaWxkh5utl/akrVUNAwV0YWJsZQcAm62X9qStVRcDCHRhYmxlUm93BwCbrZf2pK1VGAMLdGFibGVIZWFkZXIoAJutl/akrVUZB2NvbHNwYW4BfQEoAJutl/akrVUZB3Jvd3NwYW4BfQEHAJutl/akrVUZAwlwYXJhZ3JhcGgHAJutl/akrVUcBgQAm62X9qStVR0EY2VsbIebrZf2pK1VGAMIdGFibGVSb3cHAJutl/akrVUiAwl0YWJsZUNlbGwoAJutl/akrVUjB2NvbHNwYW4BfQEoAJutl/akrVUjB3Jvd3NwYW4BfQEHAJutl/akrVUjAwlwYXJhZ3JhcGgHAJutl/akrVUmBgQAm62X9qStVScEY2VsbIebrZf2pK1VFwMLb3JkZXJlZExpc3QoAJutl/akrVUsBXN0YXJ0AX0CBwCbrZf2pK1VLAMIbGlzdEl0ZW0HAJutl/akrVUuAwlwYXJhZ3JhcGgHAJutl/akrVUvBgQAm62X9qStVTAFY2hpbGQA",
+      "source": "- a\n\n  $$x$$\n\n  2. child\n\n  | cell |\n  | ---- |\n  | cell |\n\n  2. child",
+      "sourceCanonical": "- a\n\n  $$x$$\n\n  2. child\n  \n  | cell |\n  | ---- |\n  | cell |\n\n  2. child"
+    },
+    {
+      "canonical": "- \n  ---",
+      "foldRefuse": true,
+      "name": "empty-parent-rule",
+      "note": "CommonMark 0.31.2 keeps the child in its item.",
+      "rustBase64": "AQXvte2c98JmACgBBG1ldGENc2NoZW1hVmVyc2lvbgF9AQcBBGJvZHkDCmJ1bGxldExpc3QHAO+17Zz3wmYBAwhsaXN0SXRlbQcA77XtnPfCZgIDCXBhcmFncmFwaIfvte2c98JmAwMOaG9yaXpvbnRhbFJ1bGUA",
+      "source": "- \n  ---"
+    },
+    {
+      "canonical": "- \n  \\$\\$x$$",
+      "foldRefuse": true,
+      "name": "empty-parent-math",
+      "note": "CommonMark 0.31.2 keeps the child in its item.",
+      "rustBase64": "AQeW5d6dtLGeAwAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwCW5d6dtLGeAwEDCGxpc3RJdGVtBwCW5d6dtLGeAwIDCXBhcmFncmFwaIeW5d6dtLGeAwMDCXBhcmFncmFwaAcAluXenbSxngMEBgQAluXenbSxngMFBSQkeCQkAA==",
+      "source": "- \n  $$x$$",
+      "sourceCanonical": "- \n  $$x$$"
+    },
+    {
+      "canonical": "- \n  -",
+      "foldRefuse": true,
+      "name": "empty-parent-bullet",
+      "note": "CommonMark 0.31.2 keeps the child in its item.",
+      "rustBase64": "AQeNu7bxjPK5BAAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwCNu7bxjPK5BAEDCGxpc3RJdGVtBwCNu7bxjPK5BAIDCXBhcmFncmFwaIeNu7bxjPK5BAMDCmJ1bGxldExpc3QHAI27tvGM8rkEBAMIbGlzdEl0ZW0HAI27tvGM8rkEBQMJcGFyYWdyYXBoAA==",
+      "source": "- \n  -"
+    },
+    {
+      "canonical": "1. \n   2. x",
+      "foldRefuse": true,
+      "name": "empty-parent-ordered",
+      "note": "CommonMark 0.31.2 keeps the child in its item.",
+      "rustBase64": "AQuLqI6Z48P0BgAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwtvcmRlcmVkTGlzdCgAi6iOmePD9AYBBXN0YXJ0AX0BBwCLqI6Z48P0BgEDCGxpc3RJdGVtBwCLqI6Z48P0BgMDCXBhcmFncmFwaIeLqI6Z48P0BgQDC29yZGVyZWRMaXN0KACLqI6Z48P0BgUFc3RhcnQBfQIHAIuojpnjw/QGBQMIbGlzdEl0ZW0HAIuojpnjw/QGBwMJcGFyYWdyYXBoBwCLqI6Z48P0BggGBACLqI6Z48P0BgkBeAA=",
+      "source": "1. \n   2. x"
+    },
+    {
+      "canonical": "- a\n  > q\n\n  3. x\n  > q\n\n  - \n  > q\n\n  1.",
+      "foldRefuse": true,
+      "name": "quote-before-child-lists",
+      "note": "CommonMark 0.31.2 keeps the list outside the quote.",
+      "rustBase64": "AR+ajL2Stph2ACgBBG1ldGENc2NoZW1hVmVyc2lvbgF9AQcBBGJvZHkDCmJ1bGxldExpc3QHAJqMvZK2mHYBAwhsaXN0SXRlbQcAmoy9kraYdgIDCXBhcmFncmFwaAcAmoy9kraYdgMGBACajL2Stph2BAFhh5qMvZK2mHYDAwpibG9ja3F1b3RlBwCajL2Stph2BgMJcGFyYWdyYXBoBwCajL2Stph2BwYEAJqMvZK2mHYIAXGHmoy9kraYdgYDC29yZGVyZWRMaXN0KACajL2Stph2CgVzdGFydAF9AwcAmoy9kraYdgoDCGxpc3RJdGVtBwCajL2Stph2DAMJcGFyYWdyYXBoBwCajL2Stph2DQYEAJqMvZK2mHYOAXiHmoy9kraYdgoDCmJsb2NrcXVvdGUHAJqMvZK2mHYQAwlwYXJhZ3JhcGgHAJqMvZK2mHYRBgQAmoy9kraYdhIBcYeajL2Stph2EAMKYnVsbGV0TGlzdAcAmoy9kraYdhQDCGxpc3RJdGVtBwCajL2Stph2FQMJcGFyYWdyYXBoh5qMvZK2mHYUAwpibG9ja3F1b3RlBwCajL2Stph2FwMJcGFyYWdyYXBoBwCajL2Stph2GAYEAJqMvZK2mHYZAXGHmoy9kraYdhcDC29yZGVyZWRMaXN0KACajL2Stph2GwVzdGFydAF9AQcAmoy9kraYdhsDCGxpc3RJdGVtBwCajL2Stph2HQMJcGFyYWdyYXBoAA==",
+      "source": "- a\n  > q\n\n  3. x\n  > q\n\n  -\n  > q\n\n  1."
+    },
+    {
+      "canonical": "Total\n&#42;",
+      "fileFold": true,
+      "name": "fold-bare-bullet",
+      "note": "CommonMark 0.31.2 keeps the bare marker in the paragraph.",
+      "rustBase64": "AQSy/MWj6aXnAQAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwlwYXJhZ3JhcGgHALL8xaPppecBAQYEALL8xaPppecBAgdUb3RhbAoqAA==",
+      "source": "Total\n*"
+    },
+    {
+      "canonical": "Total\n1&#46;",
+      "fileFold": true,
+      "name": "fold-bare-ordered",
+      "note": "CommonMark 0.31.2 keeps the bare marker in the paragraph.",
+      "rustBase64": "AQSihPf8x99BACgBBG1ldGENc2NoZW1hVmVyc2lvbgF9AQcBBGJvZHkDCXBhcmFncmFwaAcAooT3/MffQQEGBACihPf8x99BAghUb3RhbAoxLgA=",
+      "source": "Total\n1."
+    },
+    {
+      "canonical": "> Note\n> &#42;",
+      "fileFold": true,
+      "name": "fold-quote-bare-bullet",
+      "note": "CommonMark 0.31.2 keeps the bare marker in the paragraph.",
+      "rustBase64": "AQWOg5WBz+m8BgAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpibG9ja3F1b3RlBwCOg5WBz+m8BgEDCXBhcmFncmFwaAcAjoOVgc/pvAYCBgQAjoOVgc/pvAYDBk5vdGUKKgA=",
+      "source": "> Note\n> *"
+    },
+    {
+      "canonical": "`x 2&#46; y`",
+      "fileFold": true,
+      "name": "code-span-ordinal-entity",
+      "note": "CommonMark 0.31.2 reads the soft break as a code space and keeps the entity literal.",
+      "rustBase64": "AQbui9jsxKUxACgBBG1ldGENc2NoZW1hVmVyc2lvbgF9AQcBBGJvZHkDCXBhcmFncmFwaAcA7ovY7MSlMQEGBgDui9jsxKUxAgRjb2RlAnt9hO6L2OzEpTEDCnggMiYjNDY7IHmG7ovY7MSlMQ0EY29kZQRudWxsAA==",
+      "source": "`x\n2&#46; y`"
+    },
+    {
+      "canonical": "`literal\n2&#46; y",
+      "fileFold": true,
+      "name": "literal-backtick-ordinal",
+      "note": "CommonMark 0.31.2 keeps the unmatched backtick and non-one ordinal in one paragraph.",
+      "rustBase64": "AQS1otOhrLuQBwAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwlwYXJhZ3JhcGgHALWi06Gsu5AHAQYEALWi06Gsu5AHAg1gbGl0ZXJhbAoyLiB5AA==",
+      "source": "`literal\n2. y"
+    },
+    {
+      "canonical": "x [](u \"a\n2. b\") y\n2&#46; not",
+      "fileFold": true,
+      "name": "literal-link-root",
+      "note": "CommonMark 0.31.2 keeps the empty link inline in one paragraph, within the item or quote where present. Its title contains a soft break; task checkboxes remain text.",
+      "rustBase64": "AQSYoNiw2rPzDgAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwlwYXJhZ3JhcGgHAJig2LDas/MOAQYEAJig2LDas/MOAhl4IFtdKHUgImEKMi4gYiIpIHkKMi4gbm90AA==",
+      "source": "x [](u \"a\n2. b\") y\n2. not"
+    },
+    {
+      "canonical": "> [](u \"a\n> [x] b\")",
+      "fileFold": true,
+      "name": "literal-link-quote",
+      "note": "CommonMark 0.31.2 keeps the empty link inline in one paragraph, within the item or quote where present. Its title contains a soft break; task checkboxes remain text.",
+      "rustBase64": "AQXCy6Dl3o2TBQAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpibG9ja3F1b3RlBwDCy6Dl3o2TBQEDCXBhcmFncmFwaAcAwsug5d6NkwUCBgQAwsug5d6NkwUDD1tdKHUgImEKW3hdIGIiKQA=",
+      "source": "> [](u \"a\n> [x] b\")"
+    },
+    {
+      "canonical": "- x [](u \"a\n  2. b\")",
+      "fileFold": true,
+      "name": "literal-link-bullet",
+      "note": "CommonMark 0.31.2 keeps the empty link inline in one paragraph, within the item or quote where present. Its title contains a soft break; task checkboxes remain text.",
+      "rustBase64": "AQbqhqyf+4+5AwAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwDqhqyf+4+5AwEDCGxpc3RJdGVtBwDqhqyf+4+5AwIDCXBhcmFncmFwaAcA6oasn/uPuQMDBgQA6oasn/uPuQMEEHggW10odSAiYQoyLiBiIikA",
+      "source": "- x [](u \"a\n  2. b\")"
+    },
+    {
+      "canonical": "3. x [](u \"a\n   2. b\")",
+      "fileFold": true,
+      "name": "literal-link-ordered",
+      "note": "CommonMark 0.31.2 keeps the empty link inline in one paragraph, within the item or quote where present. Its title contains a soft break; task checkboxes remain text.",
+      "rustBase64": "AQewmY3X2O/aAgAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwtvcmRlcmVkTGlzdCgAsJmN19jv2gIBBXN0YXJ0AX0DBwCwmY3X2O/aAgEDCGxpc3RJdGVtBwCwmY3X2O/aAgMDCXBhcmFncmFwaAcAsJmN19jv2gIEBgQAsJmN19jv2gIFEHggW10odSAiYQoyLiBiIikA",
+      "source": "3. x [](u \"a\n   2. b\")"
+    },
+    {
+      "canonical": "- [ ] x [](u \"a\n  2. b\")",
+      "fileFold": true,
+      "name": "literal-link-task",
+      "note": "CommonMark 0.31.2 keeps the empty link inline in one paragraph, within the item or quote where present. Its title contains a soft break; task checkboxes remain text.",
+      "rustBase64": "AQe6r6aDgcmCDwAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5Awh0YXNrTGlzdAcAuq+mg4HJgg8BAwh0YXNrSXRlbSgAuq+mg4HJgg8CB2NoZWNrZWQBeQcAuq+mg4HJgg8CAwlwYXJhZ3JhcGgHALqvpoOByYIPBAYEALqvpoOByYIPBRB4IFtdKHUgImEKMi4gYiIpAA==",
+      "source": "- [ ] x [](u \"a\n  2. b\")"
     }
   ],
   "rules": "Blank lines contain only spaces or tabs. Same-kind siblings across blanks form one loose list. An indented line after a blank starts another item paragraph; a nonblank unindented line can lazily continue the current paragraph. Children must reach their parent's marker content column. Task checkboxes are content after a two-column bullet marker. Refusals for ambiguous lines apply inside list bodies; root prose, rules and code remain accepted. Each projector output must be accepted unchanged by its projected reader. Ordered output is capped at nine digits. Letter and Roman prefixes are prose. Thematic breaks take precedence over list markers."
