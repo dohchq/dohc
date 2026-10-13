@@ -53,17 +53,13 @@ function lastStoredState(bridge: ReturnType<typeof makeBridge>): WorkspaceUiStat
 }
 
 describe("Chats in the left side panel", () => {
-  it.each(["resolution failure", "deleted file", "resolved reference"])("opens the file-chat path after %s", async outcome => {
+  it.each(["resolution failure", "deleted file"])("opens the file-chat path after %s", async outcome => {
     const user = userEvent.setup();
     const bridge = makeBridge(Promise.resolve(STORED_CHATS_STATE));
     const path = outcome === "deleted file" ? "deleted.md" : "b.md";
     const thread: FileChatThreadRecord = {
       id: "file-thread", title: "File discussion", createdAtMs: 1, updatedAtMs: 2,
-      path: outcome === "resolved reference" ? "old.md" : path,
-      ref: outcome === "resolved reference" ? {
-        workspaceId: WORKSPACE.workspaceId, target: { kind: "file" as const, objectId: "file-object" },
-        labels: { path, name: path, displayKind: "markdown" },
-      } : null,
+      path,
     };
     bridge.listChatChannels.mockResolvedValue({ channels: [], fileThreads: [thread] });
     Object.assign(bridge, {

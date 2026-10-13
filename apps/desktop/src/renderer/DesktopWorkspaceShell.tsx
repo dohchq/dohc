@@ -1,4 +1,3 @@
-import type { FileChatThreadRecord } from "../ipc/bridgeContract";
 import { useTypingRecoveryNotices } from "./shell/useTypingRecoveryNotices";
 import { CreationPartialError } from "@dohc/cli/creation";
 import {shareSenderLabel} from "@dohc/security-contract/share-labels";
@@ -2711,12 +2710,11 @@ export function DesktopWorkspaceShell(props: {
   // thread.
   const openFileChatInPanel = useCallback(
     (
-      thread: FileChatThreadRecord,
+      thread: { id: string; title: string; createdAtMs: number; updatedAtMs: number; path: string | null },
       focusMessageId?: string,
     ) => {
-      const path = thread.ref?.labels.path ?? thread.path;
-      openChatThreadInPanel(thread, focusMessageId, path ?? undefined);
-      if (path) openFile(path);
+      openChatThreadInPanel(thread, focusMessageId, thread.path ?? undefined);
+      if (thread.path) openFile(thread.path);
     },
     [openChatThreadInPanel, openFile],
   );

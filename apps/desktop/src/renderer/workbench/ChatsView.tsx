@@ -3687,7 +3687,6 @@ export function ChatsView(props: {
                   : overview.fileThreads.find((thread) => thread.id === item.thread.id) ?? {
                       ...item.thread,
                       path: null,
-                      ref: null,
                     };
                 const feedDm =
                   item.channel?.kind === "dm"

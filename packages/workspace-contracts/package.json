@@ -5,7 +5,6 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
-    "./workspace-ref-values": "./src/workspaceRefValues.ts",
     "./workspace-ref": "./src/workspaceRef.ts",
     "./actor-identity": "./src/actorIdentity.ts",
     "./access": "./src/access.ts",

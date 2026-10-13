@@ -18,13 +18,11 @@ export function workspaceFileRef(workspaceId: string, objectId: string, path?: s
 }
 
 export type EngineFileReferenceTarget = { path: string } | WorkspaceFileRef;
-export type WorkspaceFileResolution = Exclude<FileResolution, { status: "found" }> |
-  (Extract<FileResolution, { status: "found" }> & { ref: WorkspaceFileRef });
 
 export type EngineFileResolver<Workspace> = (
   workspace: Workspace,
   targets: readonly EngineFileReferenceTarget[],
-) => Promise<readonly WorkspaceFileResolution[]>;
+) => Promise<readonly FileResolution[]>;
 
 /** Pin the first version across bounded batches, including oversized legacy hints. */
 export async function resolveEngineFileTargets(
@@ -85,10 +83,9 @@ export function createEngineFileResolver<Workspace extends { workspaceId: string
     const files = await withEngineAdapter(workspace, (adapter, assertCurrent) =>
       resolveEngineFileTargets(adapter, workspace.workspaceId, selected.map(row => row.target), assertCurrent));
     if (files === null) throw new Error("Workspace engine is unavailable.");
-    const results: WorkspaceFileResolution[] = targets.map(() => ({ status: "absent" }));
+    const results: FileResolution[] = targets.map(() => ({ status: "absent" }));
     files.forEach((file, index) => {
-      results[selected[index]!.index] = file.status === "found"
-        ? { ...file, ref: workspaceFileRef(workspace.workspaceId, file.objectId, file.path) } : file;
+      results[selected[index]!.index] = file;
     });
     return results;
   };

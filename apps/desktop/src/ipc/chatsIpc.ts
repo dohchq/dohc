@@ -1,4 +1,4 @@
-import { workspaceFileRef, type EngineFileResolver, type WorkspaceFileResolution } from "../workspaces/resolveEngineFiles";
+import { workspaceFileRef, type EngineFileResolver } from "../workspaces/resolveEngineFiles";
 import { nameSlug } from "@dohc/workspace-contracts/names";
 import {
   ListFileChatsPayload,
@@ -643,12 +643,12 @@ export function registerChatsIpcHandlers<
         });
         operation.assertCurrent();
         const fileThreads = threads.filter((thread) => thread.linkedFile);
-        let fileByObjectId = new Map<string, Extract<WorkspaceFileResolution, { status: "found" }>>();
+        let pathByObjectId = new Map<string, string>();
         if (fileThreads.length > 0) {
           try {
             const ids = [...new Set(fileThreads.map(thread => thread.linkedFile!.objectId))];
             const resolved = await resolveEngineFiles(workspace, ids.map(objectId => workspaceFileRef(workspace.workspaceId, objectId)));
-            fileByObjectId = new Map(resolved.flatMap(file => file.status === "found" ? [[file.objectId, file] as const] : []));
+            pathByObjectId = new Map(resolved.flatMap(file => file.status === "found" ? [[file.objectId, file.path] as const] : []));
           } catch {
             // Path resolution is display-only; the hint fallback keeps the
             // listing honest enough.
@@ -665,10 +665,9 @@ export function registerChatsIpcHandlers<
           })),
           fileThreads: fileThreads.map((thread) => ({
             ...chatThreadForIpc(thread),
-            ref: fileByObjectId.get(thread.linkedFile!.objectId)?.ref ?? null,
             path:
               (thread.linkedFile
-                ? (fileByObjectId.get(thread.linkedFile.objectId)?.path ??
+                ? (pathByObjectId.get(thread.linkedFile.objectId) ??
                   thread.linkedFile.pathHint)
                 : undefined) ?? null,
           })),

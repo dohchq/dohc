@@ -1185,9 +1185,9 @@ describe("WorkspaceRef move identity", () => {
       const sibling = kind === "folder" ? await f.reference("dir/b.txt") : null;
       expect(await f.move(kind === "folder" ? "dir" : from, kind === "folder" ? "moved" : to)).toMatchObject({ ok: true });
       await f.settle();
-      expect(await f.resolve([original])).toMatchObject([{ status: "found", path: to, ref: { target: original.target } }]);
+      expect(await f.resolve([original])).toMatchObject([{ status: "found", path: to, objectId: original.target.objectId }]);
       expect((await f.reference(to)).target).toEqual(original.target);
-      if (sibling) expect(await f.resolve([sibling])).toMatchObject([{ status: "found", path: "moved/b.txt", ref: { target: sibling.target } }]);
+      if (sibling) expect(await f.resolve([sibling])).toMatchObject([{ status: "found", path: "moved/b.txt", objectId: sibling.target.objectId }]);
     } finally { await f.engine().stop(); }
   });
 

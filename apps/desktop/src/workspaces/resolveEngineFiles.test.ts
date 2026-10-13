@@ -37,8 +37,8 @@ it("uses the production chat and graph wrapper without listing the workspace", a
   const resolveEngineFiles = createEngineFileResolver(withAdapter);
   const workspace = { workspaceId: "w" };
   expect(await resolveEngineFiles(workspace, [{ path: "./notes//a.md" }, workspaceFileRef("w", "photo"), workspaceFileRef("w", "gone")])).toEqual([
-    { status: "found", objectId: "a", path: "notes/a.md", ref: workspaceFileRef("w", "a", "notes/a.md") },
-    { status: "found", objectId: "photo", path: "photo.png", ref: workspaceFileRef("w", "photo", "photo.png") },
+    { status: "found", objectId: "a", path: "notes/a.md" },
+    { status: "found", objectId: "photo", path: "photo.png" },
     { status: "absent" },
   ]);
   expect(adapterCalls).toHaveBeenCalledWith(workspace, expect.any(Function));

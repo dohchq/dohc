@@ -140,9 +140,9 @@ export function registerWorkspaceGraphIpcHandlers<
         );
         const threadAttachments = await Promise.all(threads.map(thread => store.listThreadAttachments(engineWorkspace.workspaceId, thread.id)));
         const mentionTargets = threadAttachments.flat().flatMap<EngineFileReferenceTarget>(attachment => attachment.objectId
-          ? [workspaceFileRef(engineWorkspace.workspaceId, attachment.objectId, attachment.pathHint)]
+          ? [workspaceFileRef(engineWorkspace.workspaceId, attachment.objectId)]
           : attachment.pathHint ? [{ path: attachment.pathHint }] : []);
-        const targets = [...new Map(mentionTargets.map(target => ["target" in target ? JSON.stringify([target.workspaceId, target.target]) : JSON.stringify(target), target])).values()];
+        const targets = [...new Map(mentionTargets.map(target => [JSON.stringify(target), target])).values()];
         const resolvedFiles = await resolveEngineFiles(engineWorkspace, targets);
         const basePaths = new Set(graph.nodes.map(node => node.path));
         const hintPaths = new Map<string, string>();
