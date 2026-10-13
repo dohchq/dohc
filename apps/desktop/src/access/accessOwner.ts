@@ -8,7 +8,7 @@ import { relayUrlsMatch } from "../workspaces/syncCode";
 import type { ReceivedObservation } from "../workspaces/receivedShareStore";
 import type { CloudCredentials } from "../workspaces/cloudCredentialStore";
 import type { RegistryEntry } from "../workspaces/registryStore";
-import { workspaceRemoteMatchesCredentials } from "../workspaces/chatRelayIdentity";
+import { serverUrlsMatch } from "../workspaces/chatRelayIdentity";
 
 export function ownerAccessRoster(
   workspace: Pick<RegistryEntry, "workspaceId" | "remote" | "shareView">,
@@ -17,11 +17,12 @@ export function ownerAccessRoster(
 ): AccessRosterObservation {
   const unavailable = (unknownReason: NonNullable<AccessAnswer["unknownReason"]>): AccessRosterObservation =>
     ({ listing: null, checkedAtMs: null, freshness: "unknown", unknownReason });
-  if (workspace.shareView || !workspace.remote) return unavailable("not-synced");
+  if (workspace.shareView) return { listing: null, checkedAtMs: null, freshness: "unknown", visibility: "hidden" };
+  if (!workspace.remote) return unavailable("not-synced");
   if (!credentials) return unavailable("signed-out");
-  if (!credentials.relayUrl) return unavailable("unreadable");
-  if (!workspaceRemoteMatchesCredentials({ ...workspace.remote, ownerUserId: credentials.userId }, credentials)) return unavailable("other-server");
+  if (!serverUrlsMatch(workspace.remote.serverUrl, credentials.serverUrl)) return unavailable("other-server");
   if (workspace.remote.ownerUserId !== credentials.userId) return unavailable("other-account");
+  if (!credentials.relayUrl) return unavailable("unreadable");
   return observation(workspace.workspaceId);
 }
 
@@ -33,7 +34,7 @@ export function createAccessOwner<Workspace>(dependencies: {
   resolve(workspace: Workspace, ref: AccessObjectRef): Promise<ResolvedAccessObject>;
   roster(workspace: Workspace): AccessRosterObservation;
   received(): ReceivedObservation;
-  account(): { userId: string; email: string; relayUrl: string; generation: number } | null;
+  account(): { userId: string; email: string; relayUrl?: string; generation: number } | null;
   scope(workspace: Workspace): string;
   assertCurrent(workspace: Workspace): void;
   permissions(workspace: Workspace, datasetId: string, after?: string): Promise<unknown>;
@@ -52,7 +53,8 @@ export function createAccessOwner<Workspace>(dependencies: {
       catch { dependencies.assertCurrent(workspace); return unknownAccess(ref, "unreadable"); }
       dependencies.assertCurrent(workspace);
       if (!accountIsCurrent()) return unknownAccess(resolved.ref, "changed");
-      if (resolved.visibility !== "visible") return unknownAccess(resolved.ref, "unreadable", resolved.visibility);
+      if (resolved.visibility === "hidden" || resolved.visibility === "missing") return unknownAccess(resolved.ref, null, resolved.visibility);
+      if (resolved.visibility === "unknown") return unknownAccess(resolved.ref, "unreadable");
       if (resolved.ref.kind === "collection") {
         const checkedAtMs = nowMs();
         const datasetId = resolved.ref.datasetId;
@@ -80,13 +82,13 @@ export function createAccessOwner<Workspace>(dependencies: {
       }
       if (resolved.shareId) {
         if (!account) return unknownAccess(resolved.ref, "signed-out");
-        if (!resolved.relayUrl) return unknownAccess(resolved.ref, "unreadable");
-        if (!relayUrlsMatch(resolved.relayUrl, account.relayUrl)) return unknownAccess(resolved.ref, "other-server");
         const recipient = resolved.recipientEmail !== undefined ? resolved.recipientEmail : resolved.recipientUserId;
         if (typeof recipient !== "string" || !recipient) return unknownAccess(resolved.ref, "unreadable");
         if (resolved.recipientEmail !== undefined
           ? recipient.toLowerCase() !== account.email.toLowerCase()
           : recipient !== account.userId) return unknownAccess(resolved.ref, "other-account");
+        if (!resolved.relayUrl || !account.relayUrl) return unknownAccess(resolved.ref, "unreadable");
+        if (!relayUrlsMatch(resolved.relayUrl, account.relayUrl)) return unknownAccess(resolved.ref, "other-server");
       }
       const answer = query.answer({ ref: resolved.ref, shareRoot: resolved.shareRoot, observation: resolved.shareId ? dependencies.received() : dependencies.roster(workspace),
         recipientUserId: account?.userId ?? "", cursorScope: capturedScope,
@@ -97,7 +99,10 @@ export function createAccessOwner<Workspace>(dependencies: {
     sharing(workspace: Workspace, input: z.infer<typeof SharingAccessInput>): AccessAnswer {
       dependencies.assertCurrent(workspace);
       const account = dependencies.account();
-      if (input.lane === "received" && !account) return unknownAccess(null, "signed-out");
+      if (input.lane === "received") {
+        if (!account) return unknownAccess(null, "signed-out");
+        if (!account.relayUrl) return unknownAccess(null, "unreadable");
+      }
       return AccessAnswer.parse(query.answer({ ref: null, observation: input.lane === "received" ? dependencies.received() : dependencies.roster(workspace),
         recipientUserId: account?.userId ?? "", cursorScope: dependencies.scope(workspace),
         coverage: input.lane === "received" ? "received-account" : "granted", cursor: input.cursor }));

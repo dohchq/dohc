@@ -440,3 +440,10 @@ it.each(["accessObject", "accessSharing"] as const)("preserves the unknown reaso
     unknownReason: "other-account", nextCursor: null, coverage: { kind: "unavailable", complete: false, observation: "interval" } });
   expect(JSON.parse(renderCliResult(verb, answer))).toHaveProperty("unknownReason", "other-account");
 });
+
+it.each(["accessObject", "accessSharing"] as const)("preserves withheld answers in %s results", verb => {
+  const answer = { ref: null, rows: [], visibility: "hidden", freshness: "unknown", checkedAtMs: null,
+    unknownReason: null, nextCursor: null, coverage: { kind: "unavailable", complete: false, observation: "interval" } };
+  expect(JSON.parse(renderCliResult(verb, parseCliResult(verb, answer)))).toMatchObject({ visibility: "hidden", unknownReason: null });
+  expect(() => parseCliResult(verb, { ...answer, unknownReason: "unreadable" })).toThrow();
+});

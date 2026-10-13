@@ -33,3 +33,16 @@ it("rejects identity and cross-workspace selectors in object references", () => 
   for (const ref of [{ kind: "path", path: "file", workspaceId: "other" }, { kind: "file", objectId: "id", userId: "owner" },
     { kind: "collection", datasetId: "not-a-dataset" }]) expect(AccessObjectRef.safeParse(ref).success).toBe(false);
 });
+
+it.each(["hidden", "missing"])("requires null reasons when visibility is %s", visibility => {
+  const answer = { ref: null, rows: [], visibility, checkedAtMs: null, freshness: "unknown", nextCursor: null,
+    coverage: { kind: "unavailable", complete: false, observation: "interval" }, unknownReason: null };
+  expect(AccessAnswer.parse(answer)).toHaveProperty("unknownReason", null);
+  for (const unknownReason of [undefined, "signed-out", "not-synced", "other-account", "other-server", "not-listed-yet", "changed", "unreadable"]) {
+    expect(AccessAnswer.safeParse({ ...answer, unknownReason }).success).toBe(false);
+  }
+  for (const kind of ["granted", "received-own-grant", "received-account", "collection"]) {
+    expect(AccessAnswer.parse({ ...answer, coverage: { ...answer.coverage, kind } })).toHaveProperty("unknownReason", null);
+    expect(AccessAnswer.safeParse({ ...answer, unknownReason: "unreadable", coverage: { ...answer.coverage, kind } }).success).toBe(false);
+  }
+});

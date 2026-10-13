@@ -31,3 +31,10 @@ it.each(["getObjectAccess", "listSharingAccess"] as const)("carries the reason t
   expect(accessOperations[name].result.parse(answer)).toHaveProperty("unknownReason", "other-account");
   expect(accessOperations[name].result.safeParse({ ...answer, unknownReason: null }).success).toBe(false);
 });
+
+it.each(["getObjectAccess", "listSharingAccess"] as const)("carries withheld answers through %s", name => {
+  const answer = { ref: null, rows: [], visibility: "hidden", checkedAtMs: null, freshness: "unknown", nextCursor: null,
+    coverage: { kind: "unavailable", complete: false, observation: "interval" }, unknownReason: null };
+  expect(accessOperations[name].result.parse(answer)).toMatchObject({ visibility: "hidden", unknownReason: null });
+  expect(accessOperations[name].result.safeParse({ ...answer, unknownReason: "unreadable" }).success).toBe(false);
+});

@@ -1912,7 +1912,7 @@ function Pane(props: { theme: "light" | "dark" }) {
           <AboutPanelSpecimen>
             <AboutAccessView view={{ status: "ready", answer: ABOUT_ACCESS_UNKNOWN }} expanded onToggle={noop} onRetry={noop}
               onMore={noop} setup={ACCESS_UNEXPLAINED} noun="chat" />
-            <AboutAccessView view={{ status: "ready", answer: { ...ABOUT_ACCESS_UNKNOWN, visibility: "missing" } }} expanded
+            <AboutAccessView view={{ status: "ready", answer: { ...ABOUT_ACCESS_UNKNOWN, visibility: "missing", unknownReason: null } }} expanded
               onToggle={noop} onRetry={noop} onMore={noop} setup={ACCESS_UNEXPLAINED} noun="chat" />
           </AboutPanelSpecimen>
         </Specimen>

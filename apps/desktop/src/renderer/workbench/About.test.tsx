@@ -286,7 +286,7 @@ describe("About Access", () => {
     ["hidden", "Shares do not include this file."],
     ["missing", "This file is no longer available at this path."],
   ] as const)("says what main found for a %s file whatever the account", async (visibility, words) => {
-    bridgeMock.getObjectAccess.mockResolvedValue({ ...UNKNOWN, visibility });
+    bridgeMock.getObjectAccess.mockResolvedValue({ ...UNKNOWN, visibility, unknownReason: null });
     render(<Access facts={SIGNED_OUT} />);
     const unknown = await screen.findByTestId("about-access-unknown");
     expect(unknown.dataset.reason).toBe(visibility);
@@ -486,7 +486,7 @@ describe("About Access", () => {
   });
 
   it("says a chat main cannot find is gone", async () => {
-    bridgeMock.getObjectAccess.mockResolvedValue({ ...UNKNOWN, visibility: "missing" });
+    bridgeMock.getObjectAccess.mockResolvedValue({ ...UNKNOWN, visibility: "missing", unknownReason: null });
     render(<ChatAccess channelWireId="wire-general" received={false} />);
     expect((await screen.findByTestId("about-access-unknown")).textContent).toBe("This chat is no longer in this workspace.");
   });

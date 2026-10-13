@@ -495,7 +495,7 @@ Both verbs return only the allowlisted AccessAnswer fields shown below, with at 
 
 Share answers use the current observation; the CLI never refreshes share inventories. `freshness` is `fresh`, `stale`, or `unknown`; `checkedAtMs` is the observation timestamp in milliseconds, or null when unknown. `coverage` names the observed scope and whether it is complete. Its `observation` is `interval`: pages do not form an atomic snapshot. `nextCursor` continues the answer, or is null at the end.
 
-`unknownReason` is null when coverage is known, and required when `coverage.kind` is `unavailable`. Its closed values are `signed-out`, `not-synced`, `other-account`, `other-server`, `not-listed-yet`, `changed`, and `unreadable`. Reasons describe only this device's records and account. They contain no account identity, email, server URL, share id, or path.
+`unknownReason` is null when coverage is known. When visibility is `hidden` or `missing`, it is null because visibility states why the answer is unavailable. Every other answer with `coverage.kind` set to `unavailable` requires one reason. Its closed values are `signed-out`, `not-synced`, `other-account`, `other-server`, `not-listed-yet`, `changed`, and `unreadable`. Reasons describe only this device's records and account. They contain no account identity, email, server URL, share id, or path.
 
 Queries use only the CLI's registered workspace, with no workspace enumeration. The granted lane contains that workspace owner's grants; the received lane contains the signed-in account's received shares. A received object's answer shows only the recipient's own grant.
 

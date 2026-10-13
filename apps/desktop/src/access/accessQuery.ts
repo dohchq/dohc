@@ -21,9 +21,12 @@ export function decodeAccessCursor(cursor: string, query: string): string | null
   } catch { return null; }
 }
 
-export type AccessRosterObservation = RosterObservation & { unknownReason?: NonNullable<AccessAnswer["unknownReason"]> };
+export type AccessRosterObservation = RosterObservation & { unknownReason?: NonNullable<AccessAnswer["unknownReason"]>; visibility?: "hidden" };
 
-export function unknownAccess(ref: AccessObjectRef | null, unknownReason: NonNullable<AccessAnswer["unknownReason"]>, visibility: AccessAnswer["visibility"] = "unknown"): AccessAnswer {
+export function unknownAccess(ref: AccessObjectRef | null, ...cause:
+  | [unknownReason: NonNullable<AccessAnswer["unknownReason"]>, visibility?: "visible" | "unknown"]
+  | [unknownReason: null, visibility: "hidden" | "missing"]): AccessAnswer {
+  const [unknownReason, visibility = "unknown"] = cause;
   return { ref, rows: [], visibility, unknownReason, coverage: { kind: "unavailable", complete: false, observation: "interval" },
     checkedAtMs: null, freshness: "unknown", nextCursor: null };
 }
@@ -132,6 +135,7 @@ export function createAccessQuery() {
   return {
     answer(input: { observation: AccessRosterObservation | ReceivedObservation; recipientUserId: string; cursorScope: string;
       ref: AccessObjectRef | null; coverage: "granted" | "received-own-grant" | "received-account"; shareId?: string; shareRoot?: boolean; cursor?: string }): AccessAnswer {
+      if ("listing" in input.observation && input.observation.visibility === "hidden") return unknownAccess(input.ref, null, "hidden");
       const index = indexFor(input.observation, input.recipientUserId);
       if (!index) {
         const reason = "listing" in input.observation

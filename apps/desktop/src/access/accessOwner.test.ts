@@ -13,16 +13,17 @@ function harness() {
   let scope = "one";
   let generation = 1;
   let signedIn = true;
+  let relayUrl: string | undefined = "https://relay.test";
   const resolve = vi.fn(async (_workspace: string, ref: AccessObjectRef): Promise<ResolvedAccessObject> => ({ ref, visibility: "visible" }));
   const permissions = vi.fn(async () => ({ permissions: [{ kind: "data", principal: "recipient", current: true,
     metadata: { revision: 1, revisionSha256: "a".repeat(64), operationIds: [operationId], discover: true } }], nextCursor: null }));
   const refresh = vi.fn(async (): Promise<void> => undefined);
   const received = vi.fn((): ReceivedObservation => ({ inventory: null, checkedAtMs: null, freshness: "unknown" }));
   const scopePort = vi.fn(() => scope);
-  const owner = createAccessOwner({ resolve, permissions, refresh, account: () => signedIn ? ({ userId: "recipient", email: "recipient@test.dev", relayUrl: "https://relay.test", generation }) : null,
+  const owner = createAccessOwner({ resolve, permissions, refresh, account: () => signedIn ? ({ userId: "recipient", email: "recipient@test.dev", relayUrl, generation }) : null,
     roster: () => ({ listing: null, checkedAtMs: null, freshness: "unknown" }),
     received, scope: scopePort, assertCurrent: () => undefined, nowMs: () => 42 });
-  return { signOut: () => { signedIn = false; }, owner, permissions, resolve, refresh, received, scopePort, change: () => { scope = "two"; generation++; } };
+  return { removeRelay: () => { relayUrl = undefined; }, signOut: () => { signedIn = false; }, owner, permissions, resolve, refresh, received, scopePort, change: () => { scope = "two"; generation++; } };
 }
 it("reads live Collection capabilities without turning them into file grants", async () => {
   const h = harness(); const ref = { kind: "collection" as const, datasetId };
@@ -171,7 +172,7 @@ it.each(["https://relay.test", "https://relay.test/"])("answers a matching recei
 });
 it.each(["hidden", "missing", "unknown"] as const)("keeps %s in visibility", async visibility => {
   const h = harness(); h.resolve.mockResolvedValue({ ref: path, visibility });
-  expect(await h.owner.object("w", { ref: path })).toMatchObject({ visibility, unknownReason: "unreadable", rows: [] });
+  expect(await h.owner.object("w", { ref: path })).toMatchObject({ visibility, unknownReason: visibility === "unknown" ? "unreadable" : null, rows: [] });
 });
 
 it("reports an unreadable received relay binding", async () => {
@@ -180,3 +181,19 @@ it("reports an unreadable received relay binding", async () => {
   expect(await h.owner.object("w", { ref: path })).toMatchObject({ unknownReason: "unreadable", rows: [] });
   expect(h.received).not.toHaveBeenCalled();
 });
+
+it("reports unreadable for a signed-in account without a relay on received objects and lists", async () => {
+  const h = harness(); h.removeRelay();
+  h.resolve.mockResolvedValue({ ref: path, visibility: "visible", shareId: "received", relayUrl: "https://relay.test", recipientUserId: "recipient" });
+  expect(await h.owner.object("w", { ref: path })).toMatchObject({ unknownReason: "unreadable", rows: [] });
+  expect(h.owner.sharing("w", { lane: "received" })).toMatchObject({ unknownReason: "unreadable", rows: [] });
+  expect(h.received).not.toHaveBeenCalled();
+});
+it.each([{ recipientUserId: "another-account" }, { recipientEmail: "another@test.dev" }])(
+  "reports another account before an unreadable relay for %j", async binding => {
+    const h = harness(); h.removeRelay();
+    h.resolve.mockResolvedValue({ ref: path, visibility: "visible", shareId: "received", ...binding });
+    expect(await h.owner.object("w", { ref: path })).toMatchObject({ unknownReason: "other-account", rows: [] });
+    expect(h.received).not.toHaveBeenCalled();
+  },
+);
