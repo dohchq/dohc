@@ -3868,7 +3868,7 @@ async fn a_refused_write_creates_no_version() {
     // `main`. Nothing asserted this, and the question is not academic: the
     // TypeScript loopback resolves its version through a helper that creates
     // `main` when absent, and it did so before validating the request — so the
-    // fake left a version behind on a refusal. That divergence (dohc-ai/dohc#439)
+    // fake left a version behind on a refusal. That divergence (dohchq/dohc#439)
     // could not be settled without knowing what the daemon does, which is this.
     //
     let (_scratch, transport, handle) = fixture("refused-write-atomicity").await;
