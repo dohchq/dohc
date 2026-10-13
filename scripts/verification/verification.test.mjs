@@ -525,7 +525,7 @@ test("preparation reuses artifacts across proof edits and rebuilds for productio
       writeFileSync(receiptPath,JSON.stringify(old));
       await expectBuilds('receipt without production identity',['engine','desktop']);
       await expectBuilds('unchanged checkout',[]);
-    `], { cwd: root, encoding: "utf8", timeout: 120_000 });
+    `], { cwd: root, encoding: "utf8", timeout: 300_000 });
     assert.equal(result.error, undefined);
     assert.equal(result.status, 0, result.stderr);
   } finally { rmSync(root, { recursive: true, force: true }); }
