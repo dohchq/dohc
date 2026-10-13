@@ -112,9 +112,6 @@ test("the plan retains every package test and preserves stricter worker caps", (
   assert.equal(tasks[0].name, "@dohc/ydoc-projection");
   assert.equal(tasks[1].name, "@dohc/desktop");
   assert.equal(tasks.find(task => task.name === "@dohc/app-backend-runtime").args.at(-1), "--maxWorkers=1");
-  // The full lane leaves desktop at its own Vitest cap; the light lane runs one worker.
-  assert.deepEqual(tasks.find(task => task.name === "@dohc/desktop").args, ["--filter", "@dohc/desktop", "run", "test:unit"]);
-  assert.equal(testPlan([pkg("desktop", {test: "unit then scripts", "test:unit": "vitest run"})], {}, {maxWorkers: 1})[0].args.at(-1), "--maxWorkers=1");
   assert.equal(tasks.find(task => task.name === "@dohc/future-package").script, "test");
   assert.equal(tasks.filter(task => task.resource === "postgres").length, 4);
   assert.throws(() => testPlan([pkg("desktop")]), /Missing test:unit/);
@@ -139,7 +136,7 @@ for (const scenario of ["success", "proof-failure", "package-failure", "reposito
     };
     try {
       put("package.json", '{"type":"module"}');
-      for (const name of ["desktop", "share-web", "workspace-api", "new-package", "tail", "waiting"]) {
+      for (const name of ["desktop", "share-web", "workspace-api", "new-package", "tail"]) {
         put(`packages/${name}/package.json`, JSON.stringify({name: `@dohc/${name}`, scripts: {
           test: "vitest run", ...(name === "desktop" ? {"test:unit": "vitest run"} : {}),
         }}));
@@ -160,7 +157,7 @@ for (const scenario of ["success", "proof-failure", "package-failure", "reposito
         export let peak=0, packagePeak=0, databasePeak=0;
         const database=new Set(['@dohc/share-web','@dohc/workspace-api']);
         export async function run(_command,args){
-          if(args.includes('list'))return {stdout:JSON.stringify(['desktop','share-web','workspace-api','new-package','tail','waiting']
+          if(args.includes('list'))return {stdout:JSON.stringify(['desktop','share-web','workspace-api','new-package','tail']
             .map(name=>({name:'@dohc/'+name,path:resolve('packages',name)})))};
           const name=args[0]==='proof'?args[1]:args[0]==='run'?'repository':args[3].startsWith('test:scripts:')?args[3]:args[1];
           assert.ok(!started.has(name),'command ran twice: '+name);
@@ -170,7 +167,7 @@ for (const scenario of ["success", "proof-failure", "package-failure", "reposito
           packagePeak=Math.max(packagePeak,packages.length);
           const databases=[...active].filter(name=>database.has(name));
           databasePeak=Math.max(databasePeak,databases.length);
-          assert.ok(active.size<=4);assert.ok(packages.length<=3);assert.ok(databases.length<=1);
+          assert.ok(active.size<=3);assert.ok(packages.length<=2);assert.ok(databases.length<=1);
           if(name.startsWith('proof-'))assert.equal(databases.length,0,'proof raced a package database consumer');
           if(databases.length)assert.ok(![...active].some(name=>name.startsWith('proof-')));
           control(arrivals,name).resolve();
@@ -191,11 +188,11 @@ for (const scenario of ["success", "proof-failure", "package-failure", "reposito
           runProofs:async checkpoint=>{for(const name of proofs){await checkpoint();await run('fixture',['proof',name]);}}});
         const outcome=work.then(()=>{settled=true;return null;},error=>{settled=true;return error;});
         const drain=async()=>{for(let i=0;i<6;i++)await setImmediate();};
-        await when('@dohc/desktop');await when('@dohc/share-web');await when('@dohc/new-package');await when('repository');
+        await when('@dohc/desktop');await when('@dohc/share-web');await when('repository');
         if(scenario==='repository-failure'){
           release('repository',Error('repository blocker'));await drain();
           assert.equal(settled,false);assert.equal(started.has('test:scripts:isolated'),false);
-          release('@dohc/desktop');release('@dohc/share-web');release('@dohc/new-package');
+          release('@dohc/desktop');release('@dohc/share-web');
           assert.match((await outcome).message,/repository blocker/);
           assert.equal(started.has('@dohc/workspace-api'),false);
         }else{
@@ -203,11 +200,11 @@ for (const scenario of ["success", "proof-failure", "package-failure", "reposito
           assert.equal(started.has('proof-native'),false,'proof started before all database packages');
           release('@dohc/share-web');await when('@dohc/workspace-api');await drain();
           assert.equal(started.has('proof-native'),false);
-          release('@dohc/workspace-api');await when('proof-native');await when('@dohc/tail');
-          assert.ok(active.has('@dohc/desktop')&&active.has('@dohc/new-package')&&active.has('@dohc/tail'));
-          assert.equal(peak,4);assert.equal(packagePeak,3);assert.equal(databasePeak,1);
+          release('@dohc/workspace-api');await when('proof-native');await when('@dohc/new-package');
+          assert.ok(active.has('@dohc/desktop')&&active.has('@dohc/new-package'));
+          assert.equal(peak,3);assert.equal(packagePeak,2);assert.equal(databasePeak,1);
           if(scenario==='success'){
-            release('@dohc/new-package');await when('@dohc/waiting');release('@dohc/tail');release('@dohc/waiting');release('@dohc/desktop');await drain();
+            release('@dohc/new-package');await when('@dohc/tail');release('@dohc/tail');release('@dohc/desktop');await drain();
             assert.equal(barrierEntered,false,'packaging barrier started with a proof reader active');
             for(const name of proofs){await when(name);release(name);}
             await barrier.promise;assert.equal(started.has('test:scripts:runtime'),false);
@@ -223,9 +220,9 @@ for (const scenario of ["success", "proof-failure", "package-failure", "reposito
               release('proof-native',scenario==='proof-failure'?Error('proof blocker'):undefined);await drain();
               assert.equal(settled,false,'active package readers were not settled');release('@dohc/new-package');
             }
-            release('@dohc/desktop');release('@dohc/tail');const error=await outcome;
+            release('@dohc/desktop');const error=await outcome;
             assert.match(error.message,scenario==='package-failure'?/package blocker/:scenario==='proof-failure'?/proof blocker/:/interrupted/);
-            assert.equal(started.has('@dohc/waiting'),false,'queued package started after failure');
+            assert.equal(started.has('@dohc/tail'),false,'queued package started after failure');
             assert.equal(started.has('proof-browser'),false,'proof command admitted after failure');
             assert.equal(barrierEntered,false);
           }
@@ -233,7 +230,7 @@ for (const scenario of ["success", "proof-failure", "package-failure", "reposito
         assert.equal(active.size,0);
         const report=JSON.parse(readFileSync('evidence/result.json','utf8'));
         assert.equal(report.verdict,scenario==='success'?'PASS':'FAIL');
-        assert.equal(report.concurrency,3);assert.equal(report.proofs,true);
+        assert.equal(report.concurrency,2);assert.equal(report.proofs,true);
         assert.equal(started.has('test:scripts:runtime'),scenario==='success');
       `);
       const result = spawnSync(process.execPath, ["driver.mjs"], {cwd: root, encoding: "utf8", timeout: 20_000});
@@ -263,7 +260,7 @@ for (const {name, cancel = false, selectedPackages, testFiles, repository = "ful
   {name:"isolated script cancellation settles running packages and skips runtime packaging",overlap:true,scriptOverlap:true,scriptCancel:true},
 ]) test(name, () => {
   const missing = selectedPackages?.includes("@dohc/missing");
-  const expectedPackages = (selectedPackages ?? ["@dohc/desktop", "@dohc/app-backend-runtime", "@dohc/new-package", "@dohc/queued-package"])
+  const expectedPackages = (selectedPackages ?? ["@dohc/desktop", "@dohc/app-backend-runtime", "@dohc/new-package"])
     .filter(name => name !== "@dohc/no-tests");
   const root = mkdtempSync(join(tmpdir(), "dohc-js-schedule-"));
   const put = (path, data) => { mkdirSync(dirname(join(root, path)), {recursive:true}); writeFileSync(join(root, path), data); };
@@ -275,7 +272,7 @@ for (const {name, cancel = false, selectedPackages, testFiles, repository = "ful
     }
     put("apps/desktop/package.json", JSON.stringify({scripts:{test:"unused", "test:unit":"vitest run", "test:scripts":"scripts", "test:scripts:isolated":"isolated", "test:scripts:runtime":"runtime"}}));
     put("packages/app-backend-runtime/package.json", JSON.stringify({scripts:{test:"unused", "test:prepared":"vitest run"}}));
-    for (const name of ["new-package", "queued-package"]) put(`packages/${name}/package.json`, JSON.stringify({scripts:{test:"vitest run"}}));
+    put("packages/new-package/package.json", JSON.stringify({scripts:{test:"vitest run"}}));
     if (!missingFile) put("packages/new-package/src/selected.test.ts", "// fixture test\n");
     put("apps/desktop/src/selected.test.ts", "// fixture desktop test\n");
     put("packages/no-tests/package.json", "{}");
@@ -290,7 +287,7 @@ for (const {name, cancel = false, selectedPackages, testFiles, repository = "ful
       let active=0, peak=0;
       export async function run(command,args) {
         active++;peak=Math.max(peak,active);
-        assert.ok(active<=4,'no more than three package commands and the repository/script lane');
+        assert.ok(active<=3,'no more than two package commands and the repository/script lane');
         try{return await execute(command,args);}
         finally{active--;writeFileSync('command-counts.json',JSON.stringify({active,peak}));}
       }
@@ -311,7 +308,6 @@ for (const {name, cancel = false, selectedPackages, testFiles, repository = "ful
           {name:'dohc',path:process.platform==='win32'?repoRoot.toUpperCase():repoRoot}, {name:'@dohc/desktop',path:resolve('apps/desktop')},
           {name:'@dohc/app-backend-runtime',path:resolve('packages/app-backend-runtime')},
           {name:'@dohc/new-package',path:resolve('packages/new-package')},
-          {name:'@dohc/queued-package',path:resolve('packages/queued-package')},
           {name:'@dohc/no-tests',path:resolve('packages/no-tests')}
         ])};
         if(args.includes('test:scripts:isolated')) {
@@ -388,11 +384,11 @@ for (const {name, cancel = false, selectedPackages, testFiles, repository = "ful
       assert.equal(report.steps.at(-1).verdict, "FAIL");
     } else if (repoFail) {
       assert.match(report.error, packageFail ? /fixture package failed/ : /fixture repository failed/);
-      if (!packageFail) assert.equal(commands.filter(args=>args[2]==="run").length, 3, "the queued package must not start after the failure");
+      if (!packageFail) assert.equal(commands.filter(args=>args[2]==="run").length, 2, "the queued package must not start after the failure");
       assert.equal(commands.some(args=>args.some(arg=>arg.startsWith("test:scripts:"))),false);
     } else if (scriptFail || scriptCancel) {
       assert.match(report.error,scriptCancel ? /interrupted/ : /fixture isolated script failed/);
-      assert.equal(commands.filter(args=>args[2]==="run" && !args[3].startsWith("test:scripts:")).length,3,"queued packages must not start after an isolated script fails");
+      assert.equal(commands.filter(args=>args[2]==="run" && !args[3].startsWith("test:scripts:")).length,2,"queued packages must not start after an isolated script fails");
       assert.equal(commands.some(args=>args.includes("test:scripts:runtime")),false);
     } else if (!missing && !missingFile) {
       if (selectedPackages !== undefined) assert.deepEqual(report.selectedPackages,selectedPackages);

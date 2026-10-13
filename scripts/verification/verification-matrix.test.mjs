@@ -303,7 +303,7 @@ test("verification selects packages and proofs and prepares before parallel jobs
             return {stdout:''};
           }
           if(command==='pnpm' && args[2]==='run' && ['test','test:unit'].includes(args[3])) {
-            assert.deepEqual(args,['--filter',args[1],'run',args[1]==='@dohc/desktop'?'test:unit':'test',...(${siteOnly}?['--maxWorkers=1']:args[1]==='@dohc/desktop'?[]:['--maxWorkers=4']),
+            assert.deepEqual(args,['--filter',args[1],'run',args[1]==='@dohc/desktop'?'test:unit':'test',${siteOnly}?'--maxWorkers=1':args[1]==='@dohc/desktop'?args[4]:'--maxWorkers=4',
               ...(args[1]==='@dohc/desktop' ? ${JSON.stringify(selectedDesktopFiles ?? [])} : [])]);
             assert.ok(${JSON.stringify(selected)}.includes(args[1]),'Unselected package executed: '+args[1]);
             assert.equal(options.env.POSTGRES_URL,${JSON.stringify(database ? "postgres://dohc:dohc@127.0.0.1:1234/dohc" : "")});

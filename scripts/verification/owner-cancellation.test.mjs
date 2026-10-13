@@ -16,13 +16,13 @@ test("Linux verification stops stubborn package groups before removing Postgres"
     assert.equal(result.error, undefined, result.stderr);
     assert.equal(result.owner.signal, null);
     assert.equal(result.owner.code, 143, result.stderr);
-    assert.equal(result.workers.length, 3);
-    assert.equal(result.terms.length, 3);
+    assert.equal(result.workers.length, 2);
+    assert.equal(result.terms.length, 2);
     assert.deepEqual(result.cleanup.alive, [], "package groups must close before database cleanup");
     assert.equal(result.verification.verdict, "FAIL");
     assert.equal(result.scheduler.verdict, "FAIL");
     const packages = result.scheduler.steps.filter(step => step.name.startsWith("@dohc/"));
-    assert.equal(packages.length, 3);
+    assert.equal(packages.length, 2);
     assert.ok(packages.every(step => step.verdict === "FAIL" && step.finishedAt && step.seconds >= 0));
     assert.ok(result.scheduler.finishedAt && result.verification.finishedAt);
     assert.equal(result.queuedStarted, false);

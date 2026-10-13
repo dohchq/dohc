@@ -1,4 +1,5 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { availableParallelism } from "node:os";
 import { join, relative, resolve } from "node:path";
 import { cancellationScope } from "./cancellation.mjs";
 import { pnpm, repoRoot, run } from "./process.mjs";
@@ -14,16 +15,16 @@ export function testPlan(packages, testFiles = {}, { maxWorkers } = {}) {
   return packages.filter(({ manifest }) => manifest.scripts?.test).map(({ name, manifest }) => {
     const script = name === "@dohc/desktop" ? "test:unit" : name === "@dohc/app-backend-runtime" ? "test:prepared" : "test";
     if (!manifest.scripts[script]) throw new Error(`Missing ${script} in ${name}.`);
-    // Desktop keeps its own Vitest cap, which stops at eight workers for filesystem contention (#392).
-    const workers = maxWorkers ?? (name === "@dohc/app-backend-runtime" ? 1 : name === "@dohc/desktop" ? null : 4);
-    if (workers !== null && (!Number.isInteger(workers) || workers < 1 || workers > 4)) throw new Error("Test workers must be between 1 and 4.");
+    const workers = maxWorkers ?? (name === "@dohc/app-backend-runtime" ? 1
+      : name === "@dohc/desktop" ? Math.min(4, Math.max(2, Math.floor(availableParallelism() / 4))) : 4);
+    if (!Number.isInteger(workers) || workers < 1 || workers > 4) throw new Error("Test workers must be between 1 and 4.");
     const vitest = /^vitest run(?: |$)/u.test(manifest.scripts[script]);
     const files = testFiles[name];
     if (files && (!vitest || !files.length)) {
       throw new Error(`Invalid test file selection for ${name}.`);
     }
     return { name, script, ...(files ? {files} : {}), resource: databasePackages.has(name) ? "postgres" : null,
-      args: ["--filter", name, "run", script, ...(vitest && workers ? [`--maxWorkers=${workers}`] : []), ...(files ?? [])] };
+      args: ["--filter", name, "run", script, ...(vitest ? [`--maxWorkers=${workers}`] : []), ...(files ?? [])] };
   }).sort((a, b) => {
     const priority = name => longestFirst.includes(name) ? longestFirst.indexOf(name) : longestFirst.length;
     return priority(a.name) - priority(b.name) || a.name.localeCompare(b.name);
@@ -59,7 +60,7 @@ export async function testWorkspace({ prepared = false, output = join(repoRoot, 
   if (runProofs !== undefined && typeof runProofs !== "function") throw new Error("Proof selection must provide a function.");
   if (bounded && (!prepared || repository !== "source" || desktopScripts || runProofs || !selectedPackages?.length || selectedPackages.length > 2)) throw new Error("Bounded tests require prepared inputs, source guards, at most two packages, and no desktop scripts or proofs.");
   mkdirSync(output, { recursive: true });
-  const report = { version: 1, concurrency: bounded ? 1 : 3, bounded, repository, desktopScripts, proofs: Boolean(runProofs), steps: [], verdict: "RUNNING" };
+  const report = { version: 1, concurrency: bounded ? 1 : 2, bounded, repository, desktopScripts, proofs: Boolean(runProofs), steps: [], verdict: "RUNNING" };
   const finish = startTiming(report);
   const save = () => writeFileSync(join(output, "result.json"), JSON.stringify(report, null, 2) + "\n");
   const cancellation = cancellationScope("Workspace tests");
@@ -114,7 +115,7 @@ export async function testWorkspace({ prepared = false, output = join(repoRoot, 
       for (const task of tasks) if (task.resource === "postgres") databasePending.add(task.name);
       if (!databasePending.size) databaseFinished.resolve();
       // Complete the shared database consumers before the repository lane's
-      // proofs, while the longest desktop package occupies another slot.
+      // proofs, while the longest desktop package occupies the other slot.
       const priority = task => task.name === "@dohc/desktop" ? 0 : task.resource === "postgres" ? 1 : 2;
       const scheduled = runProofs ? tasks.toSorted((a, b) => priority(a) - priority(b)) : tasks;
       await runBounded(scheduled, async task => {
