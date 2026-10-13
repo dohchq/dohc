@@ -225,6 +225,16 @@ export default {
     // Durable Objects default to the first caller's region; pin them next to their EU containers.
     const cells = env.CELL.jurisdiction("eu"), workspaces = env.WORKSPACE.jurisdiction("eu");
     const home = getContainer(cells, env.HOME_CELL);
+    // Teardown: R2 refuses to delete a bucket that still holds objects.
+    if (url.pathname === "/__trial/purge" && request.method === "POST") {
+      let deleted = 0;
+      for (let listed = await env.STATE.list({ limit: 1000 }); ; listed = await env.STATE.list({ limit: 1000 })) {
+        if (!listed.objects.length) break;
+        await env.STATE.delete(listed.objects.map(object => object.key));
+        deleted += listed.objects.length;
+      }
+      return Response.json({ deleted });
+    }
     // Trial controls talk to a Durable Object without waking its container.
     const control = /^\/__trial\/control\/(stop|kill|state|reset)(?:\/([0-9a-f-]{36}))?$/.exec(url.pathname);
     if (control && request.method === "POST") {
