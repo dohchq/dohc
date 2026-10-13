@@ -69,6 +69,7 @@ const PARTS = [
   "about-conversation",
   "file-view-actions",
   "offers",
+  "page-identity",
   "settings-sync",
 ];
 // A fixed instant for the page's clock. The capture pauses the clock an

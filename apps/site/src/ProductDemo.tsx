@@ -626,7 +626,7 @@ export function ProductDemo() {
             data-dohc-doc-pane=""
             hidden={showSource}
           >
-            <div className="dohc-page-topmatter">
+            <div className="group/topmatter">
               <PageIdentity
                 body={activeFullText}
                 onChange={updateIdentity}
