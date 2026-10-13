@@ -33,7 +33,7 @@ export const CAPABILITIES = {
   "access.object.read": capability("Read observed grants covering an object.", {ipc: ["getObjectAccess"]}),
   "access.sharing.read": capability("Page observed granted and received shares.", {ipc: ["listSharingAccess"]}),
   "access.refresh": capability("Request paced observations when Sharing opens or Access expands.", {ipc: ["requestAccessRefresh"]}),
-  "share.copy.read": capability("Read one owned grant's copy details on an explicit renderer action.", {ipc: ["getShareCopyDetails"], mcpReason: "Invitation reads remain renderer-only pending Ice's decision on agent exposure."}),
+  "share.copy.read": capability("Read one owned grant's share code and named-account invite link.", {ipc: ["getShareCopyDetails"], mcp: {owner: ["dohc_get_share_copy_details"]}, mcpReason: "Only the owning workspace offers copy details. Shared profiles omit this read; socket admission and owner-account checks remain the gates."}),
   "share.access.read": capability("Check the current user's received share access.", {ipc: ["checkSharedViewAccess"]}),
   "share.direct.writes.feedback": capability("Subscribe to and acknowledge shared-view write feedback.", {ipc: ["updateShareDirectWriteDelivery"]}),
   "share.view.refresh": capability("Pull changes into a received share.", {ipc: ["refreshSharedView"]}),

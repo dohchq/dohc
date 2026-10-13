@@ -10,6 +10,7 @@ import { McpServer, type ToolCallback } from "@modelcontextprotocol/sdk/server/m
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { pathToFileURL } from "node:url";
 import { z } from "zod";
+import { ShareCopyInput } from "@dohc/workspace-contracts/share-copy";
 import { MCP_TOOL_LEVELS } from "./mcpAdvertisement";
 import { OwnerAppPublicationRequest } from "@dohc/cli/app-publication";
 import { DatasetRequest } from "@dohc/cli/dataset";
@@ -21,6 +22,7 @@ import {
 } from "@dohc/security-contract/share-selector";
 import {
   MCP_TOOL_CAPABILITIES,
+  getShareCopyDetails,
   createDocument,
   createRecord,
   dataset, publishApp,
@@ -113,6 +115,11 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
   ) {
     if (MCP_TOOL_LEVELS[name].includes(level)) server.registerTool(name, config, handler);
   }
+
+  register("dohc_get_share_copy_details", {
+    description: "Read one owned grant's share code and named-account invite link. Requires the original workspace and its signed-in owner account. Ended grants return only status; unknown and link grants are refused.",
+    inputSchema: ShareCopyInput.shape,
+  }, async args => text(await getShareCopyDetails(ctx, args)));
 
   register("dohc_list_automations", {
     description: "Read automation definitions and on/off file state in a Collection, including shares. Shared run history and host runtime are unavailable.",

@@ -98,7 +98,7 @@ import { normalizeAbsolutePath } from "@dohc/workspace-core";
 import { randomUUID } from "node:crypto";
 import { accessCliQueries, createAccessAcquisition, createAccessOwner, ownerAccessRoster } from "./access/accessOwner";
 import { hasAccessChat, locateAccessVersionPath, resolveAccessFileObject, resolveAccessObject } from "./access/accessObjectResolution";
-import { createShareCopyHandler } from "./ipc/shareCopyHandler";
+import { createShareCopyHandler, createShareCopyReader } from "./ipc/shareCopyHandler";
 import { shareCopyOperations } from "./ipc/shareCopyOperations";
 import { accessOperations } from "./ipc/accessOperations";
 import { assertResolvedWorkspacePath } from "./workspaces/workspaceRealPath";
@@ -4544,7 +4544,12 @@ const chatWrites = createChatWrites({
 
 let ownerAppPublicationForCli: ((input: OwnerAppPublicationRequest, agent: import("@dohc/security-contract/approval-provenance").ApprovalAgent | null) => Promise<OwnerAppPublicationResult>) | undefined;
 let ownerAppResponsesForCli:((input:import("@dohc/cli/app-responses").OwnerAppResponsesRequest)=>Promise<import("@dohc/cli/app-responses").OwnerAppResponsesResult>)|undefined;
+const shareCopyReader = createShareCopyReader<RegistryEntry>({
+  remoteForWorkspace, currentCredentialGeneration: () => credentialCacheGeneration,
+  relayJson: (credentials, path) => relayShareJsonWithCredentials(credentials, path),
+});
 const { startDesktopCliServer } = createDesktopCliServer({
+  shareCopy: shareCopyReader,
   access: workspaceId => accessCliQueries(accessOwner, work => withPhysicalWorkspaceOperation(workspaceId, work)),
   recordSuccess: invocation => usageStore?.recordSuccess(invocation),
   dataset: (input, agent) => {
