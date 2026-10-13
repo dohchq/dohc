@@ -3222,7 +3222,7 @@ CREATE TABLE hosted_documents (
     path TEXT NOT NULL CHECK (length(path) > 0),
     state TEXT NOT NULL CHECK (state IN ('backfilling','held','ready')),
     held_reason TEXT CHECK (held_reason IN
-      ('hosted-backfill-path-held','hosted-backfill-work-retained','hosted-scope-path-mismatch')),
+      ('hosted-backfill-path-held','hosted-backfill-work-waiting','hosted-scope-path-mismatch')),
     held_path TEXT CHECK (length(held_path) > 0),
     held_by TEXT CHECK (length(held_by) > 0),
     backfill_cursor INTEGER NOT NULL DEFAULT 0 CHECK (backfill_cursor >= 0),
@@ -3231,7 +3231,7 @@ CREATE TABLE hosted_documents (
     CHECK ((state = 'held') = (held_reason IS NOT NULL)),
     CHECK ((held_by IS NOT NULL) = (held_reason IS 'hosted-backfill-path-held')),
     CHECK (held_reason IS NOT 'hosted-backfill-path-held' OR held_path IS NOT NULL),
-    CHECK (held_reason IS NOT 'hosted-backfill-work-retained' OR held_path IS NULL)
+    CHECK (held_reason IS NOT 'hosted-backfill-work-waiting' OR held_path IS NULL)
 ) STRICT;
 CREATE TABLE hosted_withheld_befores (
     workspace_id TEXT NOT NULL REFERENCES hosted_replicas(workspace_id) ON DELETE CASCADE,
@@ -3930,7 +3930,7 @@ mod tests {
             ),
             (
                 "v2-hosted-replica",
-                "55eed5b534704115ae1b591b4d74f4ddac53b031ed7fdcb96ddd13764eb622db",
+                "e7839708625dfb61784b2ed3bdfc1fc966ae26e829473138714d91539d9d98fc",
             ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());
@@ -3994,7 +3994,7 @@ mod tests {
                 "INSERT INTO hosted_replicas (workspace_id,created_at_ms) VALUES ('no-identity',1)",
                 "UPDATE hosted_documents SET state='retired'",
                 "UPDATE hosted_documents SET state='held'",
-                "UPDATE hosted_documents SET held_reason='hosted-backfill-work-retained'",
+                "UPDATE hosted_documents SET held_reason='hosted-backfill-work-waiting'",
                 "UPDATE hosted_documents SET state='held',held_reason='hosted-backfill-path-held',\
                  held_path='a.md'",
                 "UPDATE hosted_documents SET path=''",

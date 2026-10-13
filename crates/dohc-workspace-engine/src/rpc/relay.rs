@@ -330,7 +330,7 @@ fn hosted_hold_json(object_id: &str, hold: &dohc_engine_sync::HostedHold) -> Val
             held["path"] = json!(path);
             held["heldBy"] = json!(held_by);
         }
-        HostedHold::WorkRetained => {}
+        HostedHold::WorkWaiting => {}
         HostedHold::ScopePathMismatch {
             scope_path,
             head_path,
