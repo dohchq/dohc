@@ -100,7 +100,7 @@ export function listRequests(root, finished = new Map()) {
 /** The identity two submissions share when one can stand in for the other. */
 export const lineKey = request => `${(request.branch ?? request.checkout).toLowerCase()}\n${request.scope}`;
 const sameWork = (a, b) => a.head === b.head && a.scope === b.scope && Boolean(a.full) === Boolean(b.full)
-  && (a.reuseRust ?? null) === (b.reuseRust ?? null) && a.gates?.rust === b.gates?.rust && a.gates?.js === b.gates?.js;
+  && a.gates?.rust === b.gates?.rust && a.gates?.js === b.gates?.js;
 
 /**
  * Where a submission goes. A live request on the same branch for the same
@@ -111,7 +111,7 @@ const sameWork = (a, b) => a.head === b.head && a.scope === b.scope && Boolean(a
 export function placeSubmission(requests, submission) {
   const live = requests.filter(entry => !terminalStates.has(entry.status.state));
   const attach = live.find(entry => lineKey(entry.request) === lineKey(submission) && sameWork(entry.request, submission))
-    ?? requests.findLast(entry => entry.status.state === "passed" && sameWork(entry.request, submission) && !submission.reuseRust);
+    ?? requests.findLast(entry => entry.status.state === "passed" && sameWork(entry.request, submission));
   if (attach) return { attach: attach.id };
   const replaced = live.filter(entry => entry.status.state === "queued" && lineKey(entry.request) === lineKey(submission));
   return { supersede: replaced.map(entry => entry.id), sequence: replaced[0]?.request.sequence ?? null };

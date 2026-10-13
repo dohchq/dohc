@@ -82,6 +82,7 @@ while ($true) {
     $service = Join-Path $rootPath "service\$current"
     $job = [QueueJob]::Create()
     $process = $null
+    $assigned = $false
     $reason = 'exited'
     $started = [DateTime]::UtcNow
     try {
@@ -94,6 +95,7 @@ while ($true) {
         $process = [Diagnostics.Process]::Start($start)
         # The service waits for "go", so nothing it starts can escape the job.
         [QueueJob]::Assign($job, $process.Handle)
+        $assigned = $true
         $process.StandardInput.WriteLine('go')
         $process.StandardInput.Flush()
         $beat = Join-Path $rootPath 'service.json'
@@ -102,14 +104,15 @@ while ($true) {
         $lastBeat = $null
         $quiet = 0
         while (-not $process.WaitForExit(5000)) {
-            $seen = if (Test-Path $beat) { (Get-Item $beat).LastWriteTimeUtc } else { $null }
+            # A file locked for a moment reads as unchanged, never as a reason to stop the service.
+            $seen = try { if (Test-Path $beat) { (Get-Item $beat).LastWriteTimeUtc } else { $null } } catch { $lastBeat }
             if ($seen -ne $lastBeat) { $lastBeat = $seen; $quiet = 0 } else { $quiet += 1 }
             if ($quiet -ge 24) { $reason = 'heartbeat stopped for 24 polls'; break }
         }
     } catch {
         $reason = "failed to start: $($_.Exception.Message)"
         # A service that never entered the job must not run unsupervised.
-        if ($process -and -not $process.HasExited) { $process.Kill($true) }
+        if (-not $assigned -and $process -and -not $process.HasExited) { $process.Kill($true) }
     } finally {
         [QueueJob]::Close($job)
     }

@@ -20,7 +20,6 @@ import { queueRoot, verifyThroughQueue } from "./queue.mjs";
 
 // Windows reports a console program that could not start as STATUS_DLL_INIT_FAILED.
 const startupFailures = new Set([3221225794, -1073741502]);
-const environmentCodes = new Set(["ENOENT", "EACCES", "EPERM", "ETIMEDOUT", "EMFILE", "ENFILE", "ENOSPC", "EBUSY", "EAGAIN"]);
 // Phases that test the host, not the change. A failure there says nothing about the commit.
 const hostPhases = new Set(["selection", "checkout", "preflight", "preflight:admission", "source-fingerprints:start", "electron-install", "doctor", "postgres-start", "browser-install"]);
 
@@ -29,7 +28,8 @@ export function failureKind(error) {
   // Test output can contain any text, so only structured causes and the gate's own refusal count.
   // The queue also measures the host after a failure: low disk or a silent Docker makes it a machine failure.
   if (error?.environment) return { kind: "environment", cause: error.environment };
-  if (String(error?.syscall ?? "").startsWith("spawn") && environmentCodes.has(error.code)) return { kind: "environment", cause: `${error.code} starting a program` };
+  // A program that could not start ran no check, whatever the reason.
+  if (String(error?.syscall ?? "").startsWith("spawn")) return { kind: "environment", cause: `${error.code ?? "failure"} starting a program` };
   if (startupFailures.has(error?.exitCode) || startupFailures.has(error?.status)) return { kind: "environment", cause: "a program could not start (0xC0000142)" };
   if (/^refusing to run the gate: [\d.]+ GB free/mu.test(String(error?.stdout ?? "").slice(-65536) + String(error?.stderr ?? "").slice(-65536))) return { kind: "environment", cause: "disk space" };
   if (hostPhases.has(error?.step)) return { kind: "environment", cause: error.step };
@@ -309,11 +309,11 @@ export async function verify(args) {
         checkoutOwner.release();
         const branch = (() => { try { return git(["symbolic-ref", "-q", "HEAD"]); } catch { return null; } })();
         const outcome = await measure("queue", () => verifyThroughQueue({ root: queue, detach, checkpoint: () => cancellation.checkpoint(), submission: {
-          head: report.commit, base: report.baseCommit, baseRef: base, scope: report.scope, full, reuseRust: reuseRust && resolve(reuseRust),
+          head: report.commit, base: report.baseCommit, baseRef: base, scope: report.scope, full,
           gates, branch, checkout: repoRoot, requester: { pid: process.pid } } }));
         report.queue = outcome; save();
         if (detach) { report.verdict = "QUEUED"; return report; }
-        if (outcome.verdict !== "PASS") throw Object.assign(new Error(outcome.reason ?? `The queued run ended ${outcome.state}.`), { queued: true });
+        if (outcome.verdict !== "PASS") throw Object.assign(new Error(outcome.reason ?? `The queued run ended ${outcome.state}.`), { queued: outcome.state });
         report.verdict = "PASS";
         return report;
       }
@@ -436,7 +436,9 @@ export async function verify(args) {
     report.verdict = "PASS";
   } catch (error) {
     report.verdict = "FAIL"; report.error = error.message;
+    // A queued "error" is the host's failure; a queued FAIL was classified in the lane.
     if (!error.queued) report.failure = failureKind(error);
+    else if (error.queued === "error") report.failure = { kind: "environment", cause: "queue error" };
     if (error.cleanupError) report.cleanupError = error.cleanupError;
     throw error;
   }

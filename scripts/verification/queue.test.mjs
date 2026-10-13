@@ -58,6 +58,7 @@ test("machine failures are told apart from failures of the change", () => {
   const kind = fields => failureKind(Object.assign(new Error(fields.message ?? "failed"), fields)).kind;
   assert.equal(kind({ status: 3221225794 }), "environment", "a program that could not start");
   assert.equal(kind({ code: "ENOENT", syscall: "spawn git" }), "environment");
+  assert.equal(kind({ code: "ENOMEM", syscall: "spawn node" }), "environment", "any failure to start a program ran no check");
   assert.equal(kind({ code: "ENOENT", syscall: "open", step: "desktop" }), "check", "a missing report is the run's own failure");
   assert.equal(kind({ step: "postgres-start", message: "Verification Postgres did not become healthy." }), "environment");
   assert.equal(kind({ step: "install", stderr: "ERR_PNPM_OUTDATED_LOCKFILE" }), "check");
@@ -85,7 +86,7 @@ function fixtureRepo() {
 }
 
 /** A service on a private root with a stub verifier: request.checkout names its behavior. */
-function harness(t, { timeLimitMs = 60_000, docker = async () => true, sweep = async () => 0, hostFails = () => {}, holdLane = async () => ({ release() {} }) } = {}) {
+function harness(t, { timeLimitMs = 60_000, docker = async () => true, sweep = async () => 0, hostFails = () => {}, holdLane = async () => ({ release() {} }), prepare = async () => {}, prepareLimitMs } = {}) {
   const root = mkdtempSync(join(tmpdir(), "dohc-queue-"));
   const fixture = fixtureRepo();
   const calls = [];
@@ -105,7 +106,7 @@ function harness(t, { timeLimitMs = 60_000, docker = async () => true, sweep = a
     else if (behavior === "slow-host") { await sleep(250); receipt({ verdict: "FAIL", error: "Docker did not answer", failure: { kind: "environment", cause: "postgres-start" } }); }
   };
   const service = runService({ root, repo: fixture.repo, lane: join(root, "lane"), tickMs: 20, timeLimitMs, floorGb: 1,
-    freeDisk: () => 100, docker, prepare: async () => {}, sweep,
+    freeDisk: () => 100, docker, prepare, sweep, prepareLimitMs,
     holdLane, worker, retryDelay: () => 50, cleanupRetryMs: 50, stop: stop.signal, log: () => {} });
   t.after(async () => { stop.abort(); await service; rmSync(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 }); rmSync(fixture.repo, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 }); });
   const request = async (behavior, fields = {}) => {
@@ -279,12 +280,13 @@ test("a check that fails while Docker stops answering is retried, and fails on a
   assert.equal(final.status.state, "failed", "on a healthy host the same failure is the change's");
 });
 
-test("retries share one time budget, so a request that keeps failing late ends", async t => {
+test("retries share one time budget, so a request the host keeps failing late ends in error", async t => {
   const { request, settled } = harness(t, { timeLimitMs: 300 });
   const slow = await request("slow-host");
   const ended = await settled(slow.id);
-  assert.equal(ended.status.state, "failed");
-  assert.match(ended.status.cause, /^time (limit|budget)$/u);
+  assert.equal(ended.status.state, "error", "only machine failures retry, so a spent budget gives no verdict");
+  assert.equal(ended.status.verdict, null);
+  assert.equal(ended.status.cause, "time budget");
   assert.ok(ended.status.attempts.length <= 4, `${ended.status.attempts.length} attempts`);
 });
 
@@ -349,4 +351,30 @@ test("a stop decided before a restart is honored after it", async t => {
   assert.equal(ended.status.state, "failed");
   assert.equal(ended.status.cause, "time limit");
   assert.deepEqual(calls, [], "a run stopped for its time limit is not run again");
+});
+
+test("a preparation that hangs is stopped at its deadline and retried, and the line moves on", async t => {
+  let preparations = 0;
+  const { request, settled, calls } = harness(t, { prepareLimitMs: 200, prepare: ({ signal }) => {
+    preparations += 1;
+    // The first preparation hangs until it is stopped; later ones finish.
+    if (preparations > 1) return Promise.resolve();
+    return new Promise((_, fail) => signal.addEventListener("abort", () => fail(signal.reason), { once: true }));
+  } });
+  const first = await request("pass");
+  const second = await request("pass", { branch: "refs/heads/second" });
+  const done = await settled(first.id);
+  assert.deepEqual(done.status.attempts.map(attempt => [attempt.outcome, attempt.cause]), [["environment", "preparation limit"], ["passed", "pass"]]);
+  assert.equal((await settled(second.id)).status.verdict, "PASS");
+  assert.equal(calls.length, 2, "the hung preparation never reached the verifier");
+});
+
+test("a Rust-only request never asks Docker to clean up after it", async t => {
+  const swept = [];
+  const { request, settled } = harness(t, { sweep: async ({ request: id }) => { if (id) swept.push(id); return 0; } });
+  const rust = await request("pass", { scope: "rust", gates: { rust: true, js: false } });
+  const js = await request("pass", { branch: "refs/heads/js" });
+  await settled(rust.id);
+  await settled(js.id);
+  assert.deepEqual(swept, [js.id]);
 });
