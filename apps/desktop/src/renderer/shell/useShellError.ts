@@ -127,8 +127,11 @@ export function useShellError(workspaceId: string) {
   // the row of its kind it replaces, so an open toast stays open, and files
   // it quietly when there is none.
   // "repeat" keeps an unchanged message's toast, and toasts a new message.
+  // "quiet" updates the row it replaces where it stands, with its id, time
+  // and toast, so it never takes the toast from a newer row; with no row to
+  // replace it files one without a toast.
   const push = useCallback(
-    (error: Omit<ShellError, "id" | "atMs" | "seen">, seen: boolean | "keep" | "repeat" = false) => {
+    (error: Omit<ShellError, "id" | "atMs" | "seen">, seen: boolean | "keep" | "repeat" | "quiet" = false) => {
       nextId.current += 1;
       const id = `shell-error-${nextId.current}`;
       const atMs = Date.now();
@@ -142,13 +145,17 @@ export function useShellError(workspaceId: string) {
             ? error.identity === existing.identity
             : existing.message === message || (error.kind !== undefined && existing.kind === error.kind);
         const replaced = current.find(matches);
+        if (seen === "quiet" && replaced) {
+          const updated: ShellError = { ...error, message, id: replaced.id, atMs: replaced.atMs, seen: replaced.seen };
+          return current.flatMap((existing) => existing === replaced ? [updated] : matches(existing) ? [] : [existing]);
+        }
         const repeated = seen === "repeat" && replaced?.message === message ? replaced : undefined;
         const next: ShellError = {
           ...error,
           message,
           id: repeated?.id ?? id,
           atMs: repeated?.atMs ?? atMs,
-          seen: seen === "repeat" ? (repeated?.seen ?? false) : seen === "keep" ? (replaced?.seen ?? true) : seen,
+          seen: seen === "repeat" ? (repeated?.seen ?? false) : seen === "keep" || seen === "quiet" ? (replaced?.seen ?? true) : seen,
         };
         return [
           ...current.filter((existing) => !matches(existing)),
@@ -278,10 +285,13 @@ export function useShellError(workspaceId: string) {
   // import's result replacing the last; an identity does the same for one
   // thing, such as one folder. `repeat` keeps an unchanged message's row
   // and toast state. A changed message, or a missing row, toasts again.
+  // `quiet` files the row without a new toast, for a failure the person was
+  // already told about; a toast still open stays open.
   const reportShellFailure = useCallback(
     (failure: {
       title?: string;
       repeat?: boolean;
+      quiet?: boolean;
       message: string;
       cause?: unknown;
       details?: ReadonlyArray<ErrorDetailField>;
@@ -306,7 +316,7 @@ export function useShellError(workspaceId: string) {
         ...(failure.action ? { action: failure.action } : {}),
         ...(failure.kind ? { kind: failure.kind } : {}),
         ...(failure.identity !== undefined ? { identity: failure.identity } : {}),
-      }, failure.repeat ? "repeat" : false);
+      }, failure.quiet ? "quiet" : failure.repeat ? "repeat" : false);
     },
     [push],
   );
