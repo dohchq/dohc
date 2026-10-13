@@ -5207,13 +5207,10 @@ mod tests {
     }
 
     #[test]
-    fn owner_person_marker_migration_upgrades_populated_ordinal_46_without_crediting_old_work() {
+    fn owner_person_marker_migration_upgrades_a_populated_store_without_crediting_old_work() {
         let mut conn = Connection::open_in_memory().unwrap();
         let ctx = MigrationContext::current(1_000);
-        let before = BASELINE_MIGRATIONS
-            .iter()
-            .take_while(|m| m.ordinal <= 46)
-            .count();
+        let before = migration_index("v2-owner-outbox-person-edit");
         run_migrations(&mut conn, &BASELINE_MIGRATIONS[..before], &ctx, &NoFaults).unwrap();
         conn.execute_batch("INSERT INTO binary_blobs VALUES ('base',1,X'58'); \
             INSERT INTO owner_ydoc_outboxes(outbox_id,workspace_id,main_version_id,object_id,lineage_claim_id,current_path,selector_paths_json,restore_fence_generation,base_update_digest,base_blob_digest,base_byte_length,state,pending_bytes,oldest_entry_at_ms,next_sequence,created_at_ms) \
