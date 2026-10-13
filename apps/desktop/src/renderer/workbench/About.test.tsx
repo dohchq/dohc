@@ -8,7 +8,7 @@ import type { EngineMomentRecord, ListEngineMomentsResponse } from "../../ipc/br
 import { deferred } from "../../testing/deferred";
 import { historyCursor, historyPageFields } from "../../testing/historyPageFixture";
 import { formatShortTime } from "../time";
-import { AboutAccess, AboutHistory, accessReasonFor, type AboutFile, type AccessFacts } from "./About";
+import { AboutAccess, AboutHistory, AboutHeader, accessReasonFor, type AboutFile, type AccessFacts } from "./About";
 
 const bridgeMock = {
   getObjectAccess: vi.fn<(input: { workspaceId: string; ref: unknown; cursor?: string }) => Promise<AccessAnswer>>(),
@@ -697,4 +697,21 @@ describe("About History", () => {
     await act(async () => next.resolve(page([moment({ id: "moment-new", summary: "Newer" }), moment({ summary: "Older" })])));
     expect(screen.getAllByTestId("about-history-open")).toHaveLength(2);
   });
+});
+
+it.each(["light", "dark"])("matches a person's About avatar to their face in %s theme", (theme) => {
+  const peer = { faceToken: "sam", sessionToken: "sam-session", isSelf: false, displayName: "Sam Rivera", paletteSlot: 4, state: null, updatedAtMs: 0 };
+  const subject = { kind: "person" as const, name: "Sam Rivera", channelWireId: "dm", received: false, present: [
+    { ...peer, faceToken: "you", isSelf: true, paletteSlot: 0 }, peer,
+  ] };
+  const view = render(<div data-theme={theme}><AboutHeader subject={subject} /></div>);
+  const header = screen.getByTestId("about-header");
+  const avatar = header.querySelector('[title="Sam Rivera"]');
+  const face = header.querySelectorAll(".dohc-presence-faces > span")[1];
+  for (const mark of [avatar, face]) {
+    expect(mark?.className).toContain("text-hue-indigo");
+    expect(mark?.className).toContain("bg-hue-indigo/15");
+  }
+  view.rerender(<AboutHeader subject={{ ...subject, present: [] }} />);
+  expect(screen.getByTestId("about-header").querySelector('[title="Sam Rivera"]')?.className).toContain("bg-panel-2");
 });

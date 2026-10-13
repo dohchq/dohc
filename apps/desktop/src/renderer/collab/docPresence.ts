@@ -16,7 +16,7 @@ import {
   resolvePeerDisplayName,
 } from "./presenceChannel";
 
-import { presentationColor, relayPresentation } from "../workbench/actorPresentation";
+import { presentationColor, relayPresentation, subscribePresentationColors } from "../workbench/actorPresentation";
 
 type AwarenessChanges = {
   added: number[];
@@ -97,7 +97,7 @@ interface DocPresenceOptions {
   transport: PresenceTransport;
   topic: string;
   clientId: string;
-  user: DocPresenceUser;
+  user: Omit<DocPresenceUser, "color"> & { color?: string };
   // Called with the display names of other editors whenever the set changes.
   onPeers: (names: string[]) => void;
 }
@@ -266,9 +266,25 @@ export function bindDocPresence(options: DocPresenceOptions): DocPresenceBinding
   };
   awareness.on("update", onLocalChange);
 
+  const refreshColors = (): void => {
+    const updated: number[] = [];
+    for (const id of remoteClients) {
+      const state = awareness.getStates().get(id);
+      if (!state?.user) continue;
+      const color = presentationColor(relayPresentation(state.user.paletteSlot)).stroke;
+      if (state.user.color === color) continue;
+      state.user.color = color;
+      updated.push(id);
+    }
+    if (updated.length) awareness.emit("change", [{ added: [], updated, removed: [] }, "presence-remote"]);
+  };
+  // Drawing users omit colour; document carets need the live theme value.
+  const unsubscribeColors = options.user.color === undefined ? () => {} : subscribePresentationColors(refreshColors);
+
   return {
     awareness,
     destroy() {
+      unsubscribeColors();
       awareness.off("update", onLocalChange);
       const stopped = channel?.stop() ?? Promise.resolve();
       channel = null;

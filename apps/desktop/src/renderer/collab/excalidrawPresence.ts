@@ -1,4 +1,3 @@
-import { ownPresentation, presentationColor, relayPresentation, subscribePresentationColors } from "../workbench/actorPresentation";
 import type {
   Collaborator,
   ExcalidrawImperativeAPI,
@@ -182,12 +181,10 @@ function collaboratorsFromAwareness(
         ? state.button
         : undefined;
     const selectedElementIds = cleanSelection(state.selectedElementIds);
-    const color = presentationColor(relayPresentation(typeof rawUser.paletteSlot === "number" ? rawUser.paletteSlot : -1));
     collaborators.set(socketId, {
       socketId,
       id: socketId,
       username: cleanName(rawUser.name),
-      color: { ...color },
       ...(pointer ? { pointer } : {}),
       ...(button ? { button } : {}),
       ...(selectedElementIds ? { selectedElementIds } : {}),
@@ -219,7 +216,6 @@ export function bindExcalidrawPresence(options: {
     clientId: options.clientId,
     user: {
       name: cleanName(options.displayName),
-      color: presentationColor(ownPresentation).stroke,
     },
     onPeers: () => undefined,
   });
@@ -236,13 +232,6 @@ export function bindExcalidrawPresence(options: {
   };
   binding.awareness.on("change", renderCollaborators);
   renderCollaborators();
-  const unsubscribeColors = subscribePresentationColors(() => {
-    if (destroyed) return;
-    binding.awareness.setLocalStateField("user", {
-      name: cleanName(options.displayName), color: presentationColor(ownPresentation).stroke,
-    });
-    renderCollaborators();
-  });
 
   const publishPointer = (): void => {
     pointerTimer = null;
@@ -299,7 +288,6 @@ export function bindExcalidrawPresence(options: {
       if (pointerTimer !== null) scheduler.cancel(pointerTimer);
       pointerTimer = null;
       pendingPointer = null;
-      unsubscribeColors();
       binding.awareness.off("change", renderCollaborators);
       try {
         options.getApi()?.updateScene({ collaborators: new Map() });

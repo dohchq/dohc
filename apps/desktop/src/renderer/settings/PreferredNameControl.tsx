@@ -3,6 +3,7 @@ import {
   MAX_PREFERRED_NAME_LENGTH,
   preferredNameFromInput,
 } from "@dohc/workspace-contracts/chat-identity-values";
+import type { ActorPresentation } from "../../ipc/bridgeContract";
 import { ChatAvatar } from "../workbench/ChatAvatar";
 import { ownPresentation } from "../workbench/actorPresentation";
 
@@ -10,6 +11,7 @@ export function PreferredNameControl(props: {
   value?: string;
   onChange: (preferredName: string | undefined) => Promise<void>;
   testIdPrefix?: string;
+  presentation?: ActorPresentation;
 }) {
   const prefix = props.testIdPrefix ?? "preferred-name";
   const [draft, setDraft] = useState(props.value ?? "");
@@ -74,7 +76,7 @@ export function PreferredNameControl(props: {
       />
       {/* Your next chat message, as chat will draw it. */}
       <span data-testid={`${prefix}-preview`} className="flex min-w-0 items-center gap-2 px-0.5">
-        <ChatAvatar presentation={ownPresentation} name={preview} kind="human" size="strip" />
+        <ChatAvatar presentation={props.presentation ?? ownPresentation} name={preview} kind="human" size="strip" />
         <span className="sr-only">Your messages appear as</span>
         <span className="min-w-0 truncate text-[12px] font-medium text-ink">{preview}</span>
         <span aria-hidden className="h-1.5 w-[84px] shrink-0 rounded-sm bg-line" />

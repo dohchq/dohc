@@ -1,7 +1,10 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ObserverStub } from "../DesktopWorkspaceShell.testSupport";
+import { setOwnPresentation } from "../workbench/actorPresentation";
+import { setChosenColors } from "../workbench/chosenColors";
+import { DEFAULT_USER_SETTINGS } from "../../settings/userSettings";
 import { StatesPage } from "./StatesPage";
 import { STATES_PAGE_HASH, statesPageRequested } from "./statesRoute";
 
@@ -21,7 +24,22 @@ describe("states page", () => {
     vi.stubGlobal("ResizeObserver", ObserverStub);
     try {
     document.documentElement.dataset.theme = "dark";
+    setOwnPresentation({ group: "own", hue: "plum", self: true });
     const { unmount } = render(<StatesPage />);
+    const expectPinnedHues = () => {
+      for (const avatar of screen.getAllByTitle("Ada")) expect(avatar.className).toContain("text-hue-teal");
+      for (const part of document.querySelectorAll('[data-part="avatars"]')) {
+        const coloured = part.querySelectorAll('[title="Sam Rivera"]');
+        expect(coloured).toHaveLength(4);
+        for (const avatar of coloured) expect(avatar.className).toContain("text-hue-teal");
+      }
+    };
+    expectPinnedHues();
+    act(() => {
+      setOwnPresentation({ group: "own", hue: "amber", self: true });
+      setChosenColors({ ...DEFAULT_USER_SETTINGS.appearance, yourColor: "rose" });
+    });
+    expectPinnedHues();
 
     expect(screen.getByTestId("states-light").getAttribute("data-theme")).toBe("light");
     expect(screen.getByTestId("states-dark").getAttribute("data-theme")).toBe("dark");
@@ -44,6 +62,8 @@ describe("states page", () => {
     expect(document.documentElement.dataset.theme).toBe("dark");
     } finally {
       vi.unstubAllGlobals();
+      setOwnPresentation(undefined);
+      setChosenColors(DEFAULT_USER_SETTINGS.appearance);
     }
   });
 });

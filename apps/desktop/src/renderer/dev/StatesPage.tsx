@@ -4,6 +4,7 @@ import { AlertTriangle, Bot, CheckCircle2, Globe2, MessageSquare, MoreHorizontal
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import type {
+  ActorPresentation,
   ChannelThreadRecord,
   ChatChannelRecord,
   ChatMessageRecord,
@@ -93,6 +94,9 @@ import { closeStatesPage } from "./statesRoute";
 // used (a menu open, a copy acknowledged) is reached that way: the capture
 // opens the menu or presses the button. On the page itself, hover and press
 // the parts.
+
+// Specimens ignore this installation and live account colour choices.
+const SAMPLE_PERSON: ActorPresentation = { group: "states-person", hue: "teal", self: false };
 
 const KBD = "rounded border border-line bg-bg px-1 font-mono text-[10px] text-subtle";
 
@@ -1038,6 +1042,11 @@ function Pane(props: { theme: "light" | "dark" }) {
             <ChatAvatar presentation={neutralPresentation} key={size} name="Ice de Vera" kind="human" size={size} />
           ))}
         </Specimen>
+        <Specimen label="coloured person: post, row, comment, strip">
+          {avatarSizes.map((size) => (
+            <ChatAvatar presentation={SAMPLE_PERSON} key={size} name="Sam Rivera" kind="human" size={size} />
+          ))}
+        </Specimen>
         <Specimen label="agent: post, row, comment, strip">
           {avatarSizes.map((size) => (
             <ChatAvatar presentation={neutralPresentation} key={size} name="Agent" kind="agent" size={size} />
@@ -1763,7 +1772,7 @@ function Pane(props: { theme: "light" | "dark" }) {
             <div className="min-w-0 flex-1 px-8 py-7">
               <div className="max-w-[640px]">
                 <SettingRow title="Your name">
-                  <PreferredNameControl value="Ada" onChange={async () => undefined} testIdPrefix={`states-name-${theme}`} />
+                  <PreferredNameControl presentation={SAMPLE_PERSON} value="Ada" onChange={async () => undefined} testIdPrefix={`states-name-${theme}`} />
                 </SettingRow>
                 <SettingRow title="Editor font" modified onReset={noop}>
                   <SegmentedControl label="Editor font" value="serif" options={EDITOR_FONT_OPTIONS} onChange={noop} />
@@ -1873,7 +1882,7 @@ function Pane(props: { theme: "light" | "dark" }) {
         <Specimen label="sending, after a second: a new post">
           <div className="w-[560px]">
             <MentionComposer testIdPrefix={`states-composer-post-${theme}`} composerId={`states-composer-post-${theme}`}
-              value={COMPOSER_DRAFT} sending surface="post" authorName="Ada" placeholder="What's happening in #general?"
+              value={COMPOSER_DRAFT} sending surface="post" authorName="Ada" authorPresentation={SAMPLE_PERSON} placeholder="What's happening in #general?"
               sendLabel="Start post" candidates={[]} onChange={noop} onSend={noop} />
           </div>
         </Specimen>
