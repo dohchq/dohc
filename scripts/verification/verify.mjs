@@ -28,9 +28,10 @@ export function desktopProofCommand(args, { platform = process.platform, env = p
 export function desktopProofTags(proofs, {platform = process.platform} = {}) {
   const gallery = proofs.statesPage && platform === "win32";
   const smoke = proofs.desktop || proofs.smoke;
+  const restart = smoke ? ["@restart-durability-idle-external", "@restart-durability-overlapping-typing", "@restart-durability-capture-before-reopen", "@restart-durability-person-agent"] : [];
   return {
-    selected: [...(smoke ? ["@verification-smoke", "@restart-durability"] : []), ...(proofs.desktop ? ["@self-host-onboarding"] : []), ...(gallery ? ["@states-page"] : [])],
-    required: [...(smoke ? ["@verification-smoke", "@restart-durability"] : []), ...(proofs.desktop ? ["@self-host-onboarding"] : []), ...(gallery ? ["@states-baselines"] : [])],
+    selected: [...(smoke ? ["@verification-smoke"] : []), ...restart, ...(proofs.desktop ? ["@self-host-onboarding"] : []), ...(gallery ? ["@states-page"] : [])],
+    required: [...(smoke ? ["@verification-smoke"] : []), ...restart, ...(proofs.desktop ? ["@self-host-onboarding"] : []), ...(gallery ? ["@states-baselines"] : [])],
   };
 }
 

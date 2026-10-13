@@ -65,7 +65,7 @@ test("verification selects packages and proofs and prepares before parallel jobs
     ["pr", null, "rust"], ["pr", null, "rust-and-js"], ["pr", "rust", "rust"], ["pr", "js", "js"], ["pr", null, "js"],
     ["pr", null, "rust-source"], ["pr", null, "rust-cancel"],
     ["pr", "js", "accounts-skipped"], ["pr", "js", "desktop-skipped"], ["pr", "js", "onboarding-missing"],
-    ["pr", "js", "restart-missing"], ["pr", "js", "restart-skipped"],
+    ["pr", "js", "restart-missing"], ["pr", "js", "restart-one-missing"], ["pr", "js", "restart-skipped"],
     ["pr", "js", "native-skipped"], ["pr", "js", "accounts-cancelled"], ["pr", "js", "desktop-cancelled"],
     // The gallery is required only where it runs, so its missing-proof case exists only there.
     ...(process.platform === "win32" ? [["pr", "js", "gallery-missing"]] : []),
@@ -78,6 +78,7 @@ test("verification selects packages and proofs and prepares before parallel jobs
     ["pr", "js", "desktop-skipped", "apps/desktop/src/renderer/Widget.tsx"],
     ["pr", "js", "smoke-missing", "apps/desktop/src/renderer/Widget.tsx"],
     ["pr", "js", "restart-missing", "apps/desktop/src/renderer/Widget.tsx"],
+    ["pr", "js", "restart-one-missing", "apps/desktop/src/renderer/Widget.tsx"],
     ["pr", "js", "restart-skipped", "apps/desktop/src/renderer/Widget.tsx"],
     ["pr", null, null, "apps/desktop/src/renderer/Widget.tsx", true],
     ...(process.platform === "win32" ? [["pr", "js", "gallery-missing", "apps/desktop/src/renderer/Widget.tsx"]] : []),
@@ -331,13 +332,15 @@ test("verification selects packages and proofs and prepares before parallel jobs
               return {stdout:''};
             }
             assert.ok(${desktop},'Unselected desktop proof');
-            const expected=process.env.FIXTURE_MODE==='e2e'?['--project','fixture']:['--grep',pr?'@verification-smoke|@restart-durability'+(${desktopProof}?'|@self-host-onboarding':'')+(${gallery}?'|@states-page':''):'@verification-smoke'];
+            const restartTags=['@restart-durability-idle-external','@restart-durability-overlapping-typing','@restart-durability-capture-before-reopen','@restart-durability-person-agent'];
+            const expected=process.env.FIXTURE_MODE==='e2e'?['--project','fixture']:['--grep',pr?'@verification-smoke|'+restartTags.join('|')+(${desktopProof}?'|@self-host-onboarding':'')+(${gallery}?'|@states-page':''):'@verification-smoke'];
             assert.ok(args.some((arg,index)=>arg===expected[0] && args[index+1]===expected[1]));
-            const titles=[process.env.FIXTURE_FAULT==='smoke-missing'?'unrelated passing spec':'@verification-smoke persistence',...(pr?[process.env.FIXTURE_FAULT==='restart-missing'?'unrelated restart spec':'@restart-durability typing and outside edits']:[]),...(pr && ${desktopProof}?[process.env.FIXTURE_FAULT==='onboarding-missing'?'@verification-smoke another persistence':'@self-host-onboarding account and sync']:[]),...(${gallery}?[process.env.FIXTURE_FAULT==='gallery-missing'?'@states-page the page stays closed':'@states-page @states-baselines every shared part']:[])];
+            const restartTitles=restartTags.map((tag,index)=>process.env.FIXTURE_FAULT==='restart-missing'||process.env.FIXTURE_FAULT==='restart-one-missing'&&index===3?'unrelated restart spec':tag+' restart proof');
+            const titles=[process.env.FIXTURE_FAULT==='smoke-missing'?'unrelated passing spec':'@verification-smoke persistence',...(pr?restartTitles:[]),...(pr && ${desktopProof}?[process.env.FIXTURE_FAULT==='onboarding-missing'?'@verification-smoke another persistence':'@self-host-onboarding account and sync']:[]),...(${gallery}?[process.env.FIXTURE_FAULT==='gallery-missing'?'@states-page the page stays closed':'@states-page @states-baselines every shared part']:[])];
             const restartSkipped=process.env.FIXTURE_FAULT==='restart-skipped';
             writeFileSync(options.env.PLAYWRIGHT_JSON_OUTPUT_NAME,JSON.stringify({
               stats:{expected:titles.length-(restartSkipped?1:0),unexpected:process.env.FIXTURE_FAULT==='desktop-cancelled'?1:0,flaky:0,skipped:process.env.FIXTURE_FAULT==='desktop-skipped'||restartSkipped?1:0},
-              suites:[{suites:[{specs:titles.map(title=>({title,ok:true,tests:[{results:[{status:restartSkipped&&title.startsWith('@restart-durability ')?'skipped':'passed'}]}]}))}]}],
+              suites:[{suites:[{specs:titles.map(title=>({title,ok:true,tests:[{results:[{status:restartSkipped&&title.startsWith('@restart-durability-person-agent ')?'skipped':'passed'}]}]}))}]}],
             }));
             return {stdout:''};
           }
@@ -407,12 +410,19 @@ test("verification selects packages and proofs and prepares before parallel jobs
           "desktop-cancelled": /Desktop verification did not complete a passing test run/,
           "desktop-skipped": /A mandatory desktop smoke test was skipped/,
           "smoke-missing": /did not pass every required proof: @verification-smoke/,
-          "onboarding-missing": /did not pass every required proof: @verification-smoke, @restart-durability, @self-host-onboarding/,
+          "onboarding-missing": /did not pass every required proof: @verification-smoke, .*@self-host-onboarding/,
           "restart-missing": /did not pass every required proof: .*@restart-durability/,
+          "restart-one-missing": /did not pass every required proof: .*@restart-durability-person-agent/,
           "restart-skipped": /A mandatory desktop smoke test was skipped/,
           "gallery-missing": /did not pass every required proof: .*@states-baselines/,
         };
         assert.match(result.stderr, messages[fault]);
+        if (fault === "restart-one-missing") {
+          for (const tag of ["@restart-durability-idle-external", "@restart-durability-overlapping-typing", "@restart-durability-capture-before-reopen"]) {
+            assert.ok(report.desktopProofs.some(title => title.split(/\s+/u).includes(tag)), `${tag} passed`);
+          }
+          assert.ok(!report.desktopProofs.some(title => title.split(/\s+/u).includes("@restart-durability-person-agent")));
+        }
         const ranJs = js;
         assert.equal(existsSync(join(root, ".dohc-dev/verification/build.json")), prepare);
         assert.equal(existsSync(join(root, ".dohc-dev/database-stopped")), database);

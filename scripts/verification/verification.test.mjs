@@ -41,16 +41,17 @@ test("desktop proof gets an isolated display only on headless Linux", () => {
 
 test("desktop proofs require restart durability alongside persistence and platform proofs", () => {
   const proofs = {smoke: true, statesPage: true};
+  const restart = ["@restart-durability-idle-external", "@restart-durability-overlapping-typing", "@restart-durability-capture-before-reopen", "@restart-durability-person-agent"];
   assert.deepEqual(desktopProofTags(proofs, {platform: "win32"}), {
-    selected: ["@verification-smoke", "@restart-durability", "@states-page"], required: ["@verification-smoke", "@restart-durability", "@states-baselines"],
+    selected: ["@verification-smoke", ...restart, "@states-page"], required: ["@verification-smoke", ...restart, "@states-baselines"],
   });
   for (const platform of ["linux", "darwin"]) {
     assert.deepEqual(desktopProofTags(proofs, {platform}), {
-      selected: ["@verification-smoke", "@restart-durability"], required: ["@verification-smoke", "@restart-durability"],
+      selected: ["@verification-smoke", ...restart], required: ["@verification-smoke", ...restart],
     });
   }
   assert.deepEqual(desktopProofTags({desktop: true}, {platform: "win32"}), {
-    selected: ["@verification-smoke", "@restart-durability", "@self-host-onboarding"], required: ["@verification-smoke", "@restart-durability", "@self-host-onboarding"],
+    selected: ["@verification-smoke", ...restart, "@self-host-onboarding"], required: ["@verification-smoke", ...restart, "@self-host-onboarding"],
   });
   assert.deepEqual(desktopProofTags({}, {platform: "win32"}), {selected: [], required: []});
 });
