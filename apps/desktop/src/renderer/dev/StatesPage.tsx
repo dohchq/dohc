@@ -9,6 +9,7 @@ import type {
   ChatChannelRecord,
   ChatMessageRecord,
   ChatThreadRecord,
+  CloudStatusResult,
   EngineMomentRecord,
   HistoryPolicyUnreadableResult,
   SitePackageInfo,
@@ -30,6 +31,7 @@ import { SlashCommandMenu, type SlashCommandState } from "../editor/slashCommand
 import { buildTableMenu, type TableMenuRow } from "../editor/tableControls";
 import { OverlayFrame } from "../Overlay";
 import { CollectionUnavailable } from "../TransactionalCollectionPage";
+import { CloudSyncSettings, ProtectedFilesRow, type CloudSettings } from "../settings/CloudSyncSettings";
 import { ColorControl, HueControl, SettingRow, StepperControl, SwitchControl, TextControl, ThemeControl } from "../settings/SettingRow";
 import { PreferredNameControl } from "../settings/PreferredNameControl";
 import { SettingsNav } from "../settings/SettingsNav";
@@ -2171,6 +2173,59 @@ function Pane(props: { theme: "light" | "dark" }) {
           </div>
         </Specimen>
       </Section>
+
+      {/* Last, so the parts above keep their places. */}
+      <Section part="settings-sync" title="Settings: Sync and sharing">
+        <Specimen label="signed in, syncing, on a private server; keyboard focus on Disconnect">
+          <div className="w-[640px]" data-force-state="focus focus-visible" data-force-target='[data-testid="cloud-disconnect"]'>
+            <CloudSyncSettings workspaceId="ws-trip" cloud={settingsCloud({ ...CLOUD_SIGNED_IN, networkAccess: "private", workspaceSynced: true, workspaceSyncConnected: true })} />
+          </div>
+        </Specimen>
+        <Specimen label="signed in, not syncing">
+          <div className="w-[640px]">
+            <CloudSyncSettings workspaceId="ws-trip" cloud={settingsCloud(CLOUD_SIGNED_IN)} />
+          </div>
+        </Specimen>
+        <Specimen label="sync paused: dohc could not confirm this workspace's account, with Try again">
+          <div className="w-[640px]">
+            <CloudSyncSettings workspaceId="ws-trip" cloud={settingsCloud({ ...CLOUD_SIGNED_IN, workspaceSynced: true })} />
+          </div>
+        </Specimen>
+        <Specimen label="protected files: the passphrase field and its error">
+          <div className="w-[640px]">
+            <ProtectedFilesRow
+              secretState="protected-key-present"
+              purpose="protect"
+              passphrase="1234567"
+              error="Enter at least 8 characters to protect synced secrets."
+              busy={false}
+              onStart={noop}
+              onPassphrase={noop}
+              onSubmit={noop}
+            />
+          </div>
+        </Specimen>
+        <Specimen label="a shared view: the account, no switch">
+          <div className="w-[640px]">
+            <CloudSyncSettings workspaceId="ws-trip" sharedView cloud={settingsCloud(CLOUD_SIGNED_IN)} />
+          </div>
+        </Specimen>
+        <Specimen label="signed out">
+          <div className="w-[640px]">
+            <CloudSyncSettings workspaceId="ws-trip" cloud={settingsCloud({ connected: false })} />
+          </div>
+        </Specimen>
+        <Specimen label="the status still loading">
+          <div className="w-[640px]">
+            <CloudSyncSettings workspaceId="ws-trip" cloud={settingsCloud(null)} />
+          </div>
+        </Specimen>
+        <Specimen label="the status unreadable">
+          <div className="w-[640px]">
+            <CloudSyncSettings workspaceId="ws-trip" cloud={{ ...settingsCloud(null), unreadable: true }} />
+          </div>
+        </Specimen>
+      </Section>
     </section>
   );
 }
@@ -2194,6 +2249,18 @@ const FILE_VIEW_TEXT_STATES: { label: string; saveState: SaveState }[] = [
   { label: "saved", saveState: SAVED_HERE },
   { label: "failed", saveState: FILE_VIEW_FAILED },
 ];
+
+const CLOUD_SIGNED_IN: CloudStatusResult = {
+  connected: true,
+  email: "sam@hollis.studio",
+  serverUrl: "https://dohc.hollis.studio",
+  relayUrl: "https://relay.hollis.studio",
+  workspaceSynced: false,
+  workspaceSyncConnected: false,
+};
+const settingsCloud = (status: CloudStatusResult | null): CloudSettings => ({
+  status, unreadable: false, onChanged: noop, onConnect: noop, onError: noop, onAccountError: noop,
+});
 
 const SETTINGS_WORKSPACE = "C:\\Users\\ada\\Documents\\trip";
 const EDITOR_FONT_OPTIONS = [
