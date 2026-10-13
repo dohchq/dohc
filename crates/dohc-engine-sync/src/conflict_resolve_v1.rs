@@ -1803,6 +1803,13 @@ pub(crate) fn verify_imported_conflict_effect_in_tx(
         .optional()
         .map_err(SyncError::corrupt)?;
     let Some((parent_json, parent_recorded_at_ms, parent_disposition)) = parent else {
+        // A hosted replica is never served the parent, so its absence proves
+        // nothing there; the child waits instead of applying half a resolution.
+        if crate::hosted::is_hosted(tx, &envelope.workspace_id)? {
+            return Err(SyncError::RetryableState {
+                reason: crate::hosted::CONFLICT_PARENT_WITHHELD,
+            });
+        }
         return Err(SyncError::CoordinateDiverged);
     };
     let parent_value: Value =

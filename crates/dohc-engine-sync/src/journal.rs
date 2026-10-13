@@ -203,9 +203,29 @@ pub(crate) fn journal_local_payload_json_in_tx(
         .ok_or(SyncError::InvalidInput {
             reason: "no sync identity for a replicated journal append",
         })?;
+    let origin_seq = next_local_origin_seq(tx, workspace_id, &origin_id)?;
+    tx.execute(
+        "INSERT INTO replication_log          (workspace_id, origin_id, origin_seq, op_kind, payload_json, recorded_at_ms, imported)          VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0)",
+        params![workspace_id, origin_id, origin_seq, op_kind, payload_json, now_ms],
+    )
+    .map_err(SyncError::persist)?;
+    Ok(origin_seq)
+}
+
+/// The sequence of this replica's next own op. A hosted replica counts in its
+/// row; any other replica continues its journal.
+fn next_local_origin_seq(
+    tx: &Transaction<'_>,
+    workspace_id: &str,
+    origin_id: &str,
+) -> Result<i64, SyncError> {
+    if let Some(origin_seq) = crate::hosted::allocate_outbound_seq_in_tx(tx, workspace_id)? {
+        return Ok(origin_seq);
+    }
     let previous: i64 = tx
         .query_row(
-            "SELECT COALESCE(MAX(origin_seq), -1) FROM replication_log              WHERE workspace_id = ?1 AND origin_id = ?2",
+            "SELECT COALESCE(MAX(origin_seq), -1) FROM replication_log \
+             WHERE workspace_id = ?1 AND origin_id = ?2",
             params![workspace_id, origin_id],
             |row| row.get(0),
         )
@@ -213,15 +233,7 @@ pub(crate) fn journal_local_payload_json_in_tx(
     if !(-1..crate::MAX_WIRE_INTEGER).contains(&previous) {
         return Err(SyncError::CoordinateDiverged);
     }
-    let origin_seq = previous
-        .checked_add(1)
-        .ok_or(SyncError::CoordinateDiverged)?;
-    tx.execute(
-        "INSERT INTO replication_log          (workspace_id, origin_id, origin_seq, op_kind, payload_json, recorded_at_ms, imported)          VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0)",
-        params![workspace_id, origin_id, origin_seq, op_kind, payload_json, now_ms],
-    )
-    .map_err(SyncError::persist)?;
-    Ok(origin_seq)
+    previous.checked_add(1).ok_or(SyncError::CoordinateDiverged)
 }
 
 pub(crate) fn validate_local_payload_json(
@@ -308,18 +320,7 @@ pub fn journal_local_replication_op(
         if identity != (origin_id.to_owned(), replication_epoch.to_owned(), stream_identity.to_owned()) {
             return Err(SyncError::CoordinateDiverged);
         }
-        let previous: i64 = tx
-            .query_row(
-                "SELECT COALESCE(MAX(origin_seq), -1) FROM replication_log \
-                 WHERE workspace_id = ?1 AND origin_id = ?2",
-                params![workspace_id, origin_id],
-                |row| row.get(0),
-            )
-            .map_err(SyncError::corrupt)?;
-        if !(-1..crate::MAX_WIRE_INTEGER).contains(&previous) {
-            return Err(SyncError::CoordinateDiverged);
-        }
-        let origin_seq = previous.checked_add(1).ok_or(SyncError::CoordinateDiverged)?;
+        let origin_seq = next_local_origin_seq(tx, workspace_id, origin_id)?;
         tx.execute(
             "INSERT INTO replication_log \
              (workspace_id, origin_id, origin_seq, op_kind, payload_json, recorded_at_ms, imported) \
@@ -383,7 +384,39 @@ pub fn adopt_join_identity(
         replication_epoch,
         stream_identity,
         created_at_ms,
-        None,
+        IdentityKind::Join,
+        faults,
+    )
+}
+
+/// Make a pristine workspace a hosted replica under the relay's existing
+/// coordinate. Its origin must carry [`SERVICE_HOST_ORIGIN_PREFIX`], and no
+/// other replica may: the relay accepts that prefix only on the hosted feed.
+/// An ordinary replica never becomes hosted, nor the reverse.
+///
+/// [`SERVICE_HOST_ORIGIN_PREFIX`]: crate::SERVICE_HOST_ORIGIN_PREFIX
+pub fn create_hosted_replica(
+    store: &mut EngineStore,
+    workspace_id: &str,
+    new_origin_id: &str,
+    replication_epoch: &str,
+    stream_identity: &str,
+    created_at_ms: i64,
+    faults: &dyn FaultInjector,
+) -> Result<TxnOutcome<AdoptJoinIdentityOutcome>, SyncError> {
+    if store.is_passive() {
+        return Err(SyncError::InvalidInput {
+            reason: "a passive store cannot host documents",
+        });
+    }
+    create_sync_identity(
+        store,
+        workspace_id,
+        new_origin_id,
+        replication_epoch,
+        stream_identity,
+        created_at_ms,
+        IdentityKind::Hosted,
         faults,
     )
 }
@@ -410,9 +443,16 @@ pub fn create_claim_identity(
         replication_epoch,
         stream_identity,
         created_at_ms,
-        Some("pending"),
+        IdentityKind::Claim,
         faults,
     )
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum IdentityKind {
+    Join,
+    Claim,
+    Hosted,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -423,9 +463,15 @@ fn create_sync_identity(
     replication_epoch: &str,
     stream_identity: &str,
     created_at_ms: i64,
-    claim_state: Option<&str>,
+    kind: IdentityKind,
     faults: &dyn FaultInjector,
 ) -> Result<TxnOutcome<AdoptJoinIdentityOutcome>, SyncError> {
+    let hosted = kind == IdentityKind::Hosted;
+    if new_origin_id.starts_with(crate::SERVICE_HOST_ORIGIN_PREFIX) != hosted {
+        return Err(SyncError::InvalidInput {
+            reason: "only a hosted replica writes under a service-host origin",
+        });
+    }
     bounded(workspace_id, "workspace_id must be non-empty and bounded")?;
     relay_identity_component(
         new_origin_id,
@@ -452,7 +498,12 @@ fn create_sync_identity(
             .map_err(SyncError::corrupt)?;
         if let Some((_, epoch, stream)) = current {
             if epoch == replication_epoch && stream == stream_identity {
-                if claim_state.is_none() {
+                if crate::hosted::is_hosted(tx, workspace_id)? != hosted {
+                    return Err(SyncError::InvalidInput {
+                        reason: "a replica cannot change between hosted and ordinary",
+                    });
+                }
+                if kind == IdentityKind::Join {
                     tx.execute("UPDATE sync_identity SET claim_state=NULL, claim_account_id=NULL WHERE workspace_id=?1", [workspace_id])
                         .map_err(SyncError::persist)?;
                 }
@@ -500,10 +551,17 @@ fn create_sync_identity(
                 replication_epoch,
                 stream_identity,
                 created_at_ms,
-                claim_state
+                (kind == IdentityKind::Claim).then_some("pending")
             ],
         )
         .map_err(SyncError::persist)?;
+        if hosted {
+            tx.execute(
+                "INSERT INTO hosted_replicas (workspace_id, created_at_ms) VALUES (?1, ?2)",
+                params![workspace_id, created_at_ms],
+            )
+            .map_err(SyncError::persist)?;
+        }
         Ok(AdoptJoinIdentityOutcome::Adopted)
     })
 }

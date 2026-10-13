@@ -3196,7 +3196,35 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         sql: "ALTER TABLE engine_ownership ADD COLUMN store_role TEXT NOT NULL DEFAULT 'owner' CHECK (store_role IN ('owner','passive'));",
         sets_user_version: None,
     },
+    Migration {
+        ordinal: 48,
+        id: "v2-hosted-replica",
+        sql: V2_HOSTED_REPLICA_DDL,
+        sets_user_version: None,
+    },
 ];
+
+/// A session host's replica of the documents the relay's scoped feed serves
+/// it. The row is the replica kind: admission, deferred replay and outbound
+/// sequences read it, never an inference from other state.
+const V2_HOSTED_REPLICA_DDL: &str = "\
+CREATE TABLE hosted_replicas (
+    workspace_id TEXT NOT NULL PRIMARY KEY REFERENCES sync_identity(workspace_id),
+    scope_token TEXT CHECK (scope_token IS NULL OR length(scope_token) > 0),
+    scope_generation INTEGER NOT NULL DEFAULT 0 CHECK (scope_generation >= 0),
+    main_cursor INTEGER NOT NULL DEFAULT 0 CHECK (main_cursor >= 0),
+    last_outbound_seq INTEGER NOT NULL DEFAULT -1 CHECK (last_outbound_seq >= -1),
+    created_at_ms INTEGER NOT NULL
+) STRICT;
+CREATE TABLE hosted_documents (
+    workspace_id TEXT NOT NULL REFERENCES hosted_replicas(workspace_id) ON DELETE CASCADE,
+    object_id TEXT NOT NULL,
+    state TEXT NOT NULL CHECK (state IN ('backfilling','ready')),
+    backfill_cursor INTEGER NOT NULL DEFAULT 0 CHECK (backfill_cursor >= 0),
+    scope_generation INTEGER NOT NULL CHECK (scope_generation >= 0),
+    PRIMARY KEY (workspace_id, object_id)
+) STRICT;
+";
 
 const V2_OPEN_DOCUMENT_ARTIFACTS_DDL: &str = "\
 CREATE TABLE replication_pending_refusals_next (
@@ -3863,6 +3891,10 @@ mod tests {
                 "v2-engine-store-role",
                 "8d75962511b05d48c91ea5c041ed69c8ab6b181212aee4c0cad4c7e16f61a54b",
             ),
+            (
+                "v2-hosted-replica",
+                "e804ae6167aa2b169a600e156d43fb2c39362db82d3428b10eb2eebfb77a2b51",
+            ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());
         for (migration, (id, checksum)) in BASELINE_MIGRATIONS.iter().zip(pinned) {
@@ -3889,6 +3921,85 @@ mod tests {
             [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         ).unwrap();
         assert_eq!(state, (1, 0, 100));
+    }
+
+    #[test]
+    fn hosted_replica_applies_fresh_and_upgrades_a_store_at_the_store_role() {
+        let hosted = |conn: &Connection| {
+            conn.execute_batch(
+                "INSERT INTO sync_identity (workspace_id,origin_id,replication_epoch,stream_identity,created_at_ms) \
+                 VALUES ('hosted','service-host:a','epoch','stream',1); \
+                 INSERT INTO hosted_replicas (workspace_id,created_at_ms) VALUES ('hosted',1); \
+                 INSERT INTO hosted_documents (workspace_id,object_id,state,scope_generation) \
+                 VALUES ('hosted','doc','backfilling',0);",
+            )
+            .unwrap();
+            let state: (Option<String>, i64, i64, i64, i64) = conn
+                .query_row(
+                    "SELECT scope_token,scope_generation,main_cursor,last_outbound_seq, \
+                     (SELECT backfill_cursor FROM hosted_documents) FROM hosted_replicas",
+                    [],
+                    |row| {
+                        Ok((
+                            row.get(0)?,
+                            row.get(1)?,
+                            row.get(2)?,
+                            row.get(3)?,
+                            row.get(4)?,
+                        ))
+                    },
+                )
+                .unwrap();
+            assert_eq!(state, (None, 0, 0, -1, 0));
+            for invalid in [
+                "INSERT INTO hosted_replicas (workspace_id,created_at_ms) VALUES ('no-identity',1)",
+                "UPDATE hosted_documents SET state='retired'",
+                "UPDATE hosted_replicas SET scope_token=''",
+                "UPDATE hosted_replicas SET last_outbound_seq=-2",
+            ] {
+                assert!(conn.execute(invalid, []).is_err(), "{invalid}");
+            }
+            conn.execute("DELETE FROM hosted_replicas", []).unwrap();
+            let documents: i64 = conn
+                .query_row("SELECT COUNT(*) FROM hosted_documents", [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(documents, 0, "documents leave with their replica");
+        };
+        let ctx = MigrationContext::current(1);
+        let dir = tempdir();
+        let mut fresh = open_bare(&dir.join("fresh.db"));
+        fresh.pragma_update(None, "foreign_keys", true).unwrap();
+        run_migrations(&mut fresh, BASELINE_MIGRATIONS, &ctx, &NoFaults).unwrap();
+        hosted(&fresh);
+
+        let mut upgraded = open_bare(&dir.join("upgraded.db"));
+        upgraded.pragma_update(None, "foreign_keys", true).unwrap();
+        let before = migration_index("v2-hosted-replica");
+        assert_eq!(BASELINE_MIGRATIONS[before - 1].id, "v2-engine-store-role");
+        run_migrations(
+            &mut upgraded,
+            &BASELINE_MIGRATIONS[..before],
+            &ctx,
+            &NoFaults,
+        )
+        .unwrap();
+        upgraded
+            .execute_batch(
+                "INSERT INTO sync_identity (workspace_id,origin_id,replication_epoch,stream_identity,created_at_ms) \
+                 VALUES ('ordinary','origin:a','epoch','stream',1);",
+            )
+            .unwrap();
+        assert!(matches!(
+            run_migrations(&mut upgraded, BASELINE_MIGRATIONS, &ctx, &NoFaults).unwrap(),
+            MigrationOutcome::Applied { newly_applied: 1 }
+        ));
+        let replicas: i64 = upgraded
+            .query_row("SELECT COUNT(*) FROM hosted_replicas", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(replicas, 0, "an existing replica stays ordinary");
+        hosted(&upgraded);
     }
 
     #[test]

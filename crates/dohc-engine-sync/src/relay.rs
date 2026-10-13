@@ -1746,9 +1746,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             );
             match routed {
                 Err(SyncError::RetryableState { reason }) => {
-                    if matches!(op.op_kind.as_str(), "conflict.resolve" | "moment.append")
-                        && reason == "ydoc-session-live"
-                    {
+                    if retained_while_held(op, reason) {
                         durable_origins.insert(op.origin_id.clone());
                     }
                     deferred_origins.insert(op.origin_id.clone());
@@ -1791,9 +1789,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 );
                 match routed {
                     Err(SyncError::RetryableState { reason }) => {
-                        if matches!(op.op_kind.as_str(), "conflict.resolve" | "moment.append")
-                            && reason == "ydoc-session-live"
-                        {
+                        if retained_while_held(op, reason) {
                             durable_origins.insert(op.origin_id.clone());
                         }
                         still_deferred_origins.insert(op.origin_id.clone());
@@ -3723,6 +3719,17 @@ pub(crate) fn take_canonical_json_call_count() -> usize {
         calls.set(0);
         count
     })
+}
+
+/// Whether a held op is retained across passes, so the cursor can move past
+/// it: work behind a live session, and a hosted conflict child whose parent
+/// the feed withheld.
+fn retained_while_held(op: &ReplicationEnvelope, reason: &str) -> bool {
+    matches!(op.op_kind.as_str(), "conflict.resolve" | "moment.append")
+        && matches!(
+            reason,
+            "ydoc-session-live" | crate::hosted::CONFLICT_PARENT_WITHHELD
+        )
 }
 
 fn merge_by_origin(ops: Vec<ReplicationEnvelope>) -> Vec<ReplicationEnvelope> {

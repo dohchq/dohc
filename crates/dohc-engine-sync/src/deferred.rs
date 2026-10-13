@@ -13,6 +13,16 @@ const MAX_PENDING_OPS: i64 = 10_000;
 const MAX_PENDING_BYTES: i64 = 512 * 1024 * 1024;
 const REPLAY_PAGE: i64 = 500;
 
+/// Whether retained op `d` has yet to apply. An ordinary replica admits each
+/// origin contiguously, so its ack answers; a hosted replica admits sparsely,
+/// so only its journal does.
+const UNAPPLIED: &str =
+    "CASE WHEN EXISTS(SELECT 1 FROM hosted_replicas h WHERE h.workspace_id=d.workspace_id)
+    THEN NOT EXISTS(SELECT 1 FROM replication_log l WHERE l.workspace_id=d.workspace_id
+        AND l.origin_id=d.origin_id AND l.origin_seq=d.origin_seq)
+    ELSE d.origin_seq>COALESCE((SELECT a.acked_seq FROM replication_peers a
+        WHERE a.workspace_id=d.workspace_id AND a.origin_id=d.origin_id),-1) END";
+
 fn local(error: impl std::fmt::Display) -> RelayError {
     RelayError::Local(error.to_string())
 }
@@ -28,10 +38,8 @@ pub(crate) fn read(
              AND (replication_epoch!=?2 OR stream_identity!=?3))",
             params![workspace, identity.replication_epoch, identity.stream_identity], |r| r.get(0))?;
 
-        let mut stmt = conn.prepare(
-            "SELECT DISTINCT d.origin_id FROM relay_deferred_ops d
-             LEFT JOIN replication_peers a ON a.workspace_id=d.workspace_id AND a.origin_id=d.origin_id
-             WHERE d.workspace_id=?1 AND d.origin_seq>COALESCE(a.acked_seq,-1)")?;
+        let mut stmt = conn.prepare(&format!(
+            "SELECT DISTINCT d.origin_id FROM relay_deferred_ops d WHERE d.workspace_id=?1 AND {UNAPPLIED}"))?;
         let origins = stmt.query_map([workspace], |r| r.get(0))?
             .collect::<Result<BTreeSet<String>, _>>()?;
         let mut stmt = conn.prepare(
@@ -54,9 +62,9 @@ pub(crate) fn has_unapplied(store: &EngineStore, workspace: &str) -> Result<bool
     store
         .read_with(|conn| {
             conn.query_row(
-                "SELECT EXISTS(SELECT 1 FROM relay_deferred_ops d
-         LEFT JOIN replication_peers a ON a.workspace_id=d.workspace_id AND a.origin_id=d.origin_id
-         WHERE d.workspace_id=?1 AND d.origin_seq>COALESCE(a.acked_seq,-1))",
+                &format!(
+                    "SELECT EXISTS(SELECT 1 FROM relay_deferred_ops d WHERE d.workspace_id=?1 AND {UNAPPLIED})"
+                ),
                 [workspace],
                 |row| row.get(0),
             )
@@ -97,6 +105,7 @@ pub(crate) fn retain(
         .map(|op| crate::relay::collect_blob_refs(std::slice::from_ref(*op)))
         .collect::<Result<Vec<_>, _>>()?;
     let outcome = store.write_with(faults, |tx| {
+        let hosted = crate::hosted::is_hosted(tx, &ops[0].workspace_id)?;
         for (op, blobs) in ops.iter().zip(&blobs) {
             op.validate()?;
             let json = serde_json::to_string(op).map_err(SyncError::corrupt)?;
@@ -108,11 +117,15 @@ pub(crate) fn retain(
                 if saved != **op { return Err(SyncError::CoordinateDiverged); }
                 continue;
             }
-            let last: i64 = tx.query_row(
-                "SELECT MAX(COALESCE((SELECT MAX(origin_seq) FROM relay_deferred_ops WHERE workspace_id=?1 AND origin_id=?2),-1),
-                 COALESCE((SELECT acked_seq FROM replication_peers WHERE workspace_id=?1 AND origin_id=?2),-1))",
-                params![op.workspace_id,op.origin_id], |r| r.get(0)).map_err(SyncError::corrupt)?;
-            if last.checked_add(1) != Some(op.origin_seq) { return Err(SyncError::SequenceGap); }
+            // A hosted replica's origins arrive sparse, and the journal, not a
+            // sequence, says what applied.
+            if !hosted {
+                let last: i64 = tx.query_row(
+                    "SELECT MAX(COALESCE((SELECT MAX(origin_seq) FROM relay_deferred_ops WHERE workspace_id=?1 AND origin_id=?2),-1),
+                     COALESCE((SELECT acked_seq FROM replication_peers WHERE workspace_id=?1 AND origin_id=?2),-1))",
+                    params![op.workspace_id,op.origin_id], |r| r.get(0)).map_err(SyncError::corrupt)?;
+                if last.checked_add(1) != Some(op.origin_seq) { return Err(SyncError::SequenceGap); }
+            }
             let inserted = tx.execute(
                 "INSERT OR IGNORE INTO relay_deferred_ops
                  (workspace_id,origin_id,origin_seq,replication_epoch,stream_identity,envelope_json,retained_bytes,checked_sequence)
