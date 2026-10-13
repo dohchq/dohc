@@ -993,6 +993,46 @@ it("brings a dormant document back into passes for stop-access work that reloads
   await vi.waitFor(() => expect(o.unloaded()).toBe(2));
 });
 
+it("brings a dormant document back into passes when its restore capture loads it but the stop is cancelled, which settle and unload it again", async () => {
+  const o = await idleHost();
+  o.advance(600_000);
+  await vi.waitFor(() => expect(o.unloaded()).toBe(1));
+  o.restore();
+  o.hold(true);
+  // The engine loads the session, then the caller cancels before the reply is used.
+  const abort = new AbortController(), reason = new Error("Caller cancelled."), captureOwnerActivation = o.client().captureOwnerActivation;
+  const loads = captureOwnerActivation.getMockImplementation() as (...args: unknown[]) => Promise<unknown>;
+  captureOwnerActivation.mockImplementationOnce(async (...args: unknown[]) => {const loaded = await loads(...args); abort.abort(reason); return loaded;});
+  await expect(o.host.stopRestore(stopLookup, abort.signal)).rejects.toBe(reason);
+  expect(o.host.settled(o.sibling)).toBe(false);
+  const visits = o.visits(o.sibling.path);
+  await o.passes();
+  expect(o.visits(o.sibling.path)).toBeGreaterThan(visits);
+  // Passes resume the loaded session and settle it once the fence lifts on the same binding.
+  o.raw.exec("UPDATE sync_relay_live_documents SET admission_state='open',restore_fence_generation=restore_fence_generation-1");
+  o.hold(false);
+  await vi.waitFor(() => expect(o.host.settled(o.sibling)).toBe(true));
+  o.advance(600_000);
+  await vi.waitFor(() => expect(o.unloaded()).toBe(2));
+  const native = await o.host.captureNative(o.binding());
+  expect(native.invalidated.aborted).toBe(false);
+  await expect(o.host.drain(o.document)).resolves.toMatchObject({kind: "done"});
+});
+
+it("keeps a dormant document dormant when the engine refuses its restore capture", async () => {
+  const o = await idleHost();
+  o.advance(600_000);
+  await vi.waitFor(() => expect(o.unloaded()).toBe(1));
+  o.restore();
+  o.refuseCapture(conflictOpen());
+  await expect(o.host.stopRestore(stopLookup)).rejects.toThrow("ydoc-conflict-open");
+  expect(o.host.settled(o.sibling)).toBe(true);
+  const captures = o.client().captureOwnerActivation.mock.calls.length, visits = o.visits(o.sibling.path);
+  await o.passes();
+  expect(o.visits(o.sibling.path)).toBe(visits);
+  expect(o.client().captureOwnerActivation.mock.calls.length).toBe(captures);
+});
+
 // Stops access to the dormant document and expects its reloaded native adoption
 // to register the stop's binding alone, then reach the native fence.
 async function stopDormant(o: Awaited<ReturnType<typeof idleHost>>) {

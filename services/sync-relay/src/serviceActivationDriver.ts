@@ -1,6 +1,6 @@
 import type {LiveObjectBinding} from "@dohc/live-session-contract/live-object-binding";
 import {isDeepStrictEqual} from "node:util";
-import type {EngineClient,NativeOwnerActivation} from "@dohc/workspace-engine-client/daemon";
+import {EngineRequestError,type EngineClient,type NativeOwnerActivation} from "@dohc/workspace-engine-client/daemon";
 import {parseLiveDocumentKey,parseLiveUpdateIdentifier,type LiveDocumentKey} from "@dohc/live-session-contract/live-update-admission";
 import {validateUserWritePath} from "@dohc/workspace-core";
 import {liveDocumentKindForPath} from "@dohc/workspace-contracts/live-documents";
@@ -137,13 +137,22 @@ export class ServiceActivationDriver {
       operation.intent.shareId!==saved.shareId || operation.intent.ownerUserId!==saved.ownerUserId || !origin ||
       JSON.parse(origin)?.adoptionId!==saved.activationId)throw new Error("Service restore owner adoption is unavailable.");
     const owner:Owner=this.#owner(target,async signal=>{
-      this.#loaded.add(targetKey(target));
-      const capture=await o.client.captureOwnerActivation({id:o.nextRequestId(),workspace:workspace.handle,deadlineMs:o.deadlineMs},
-        target.path,o.config.maxCaptureBytes,signal,saved.activationId);
+      const slot=targetKey(target),sleeping=this.#dormant.get(slot);
+      // Once sent, the capture may load the session whatever its reply, so a dormant target
+      // rejoins passes, which settle it and resume its session as for an awake document.
+      // Only the engine's refusal, which loads nothing, leaves it dormant.
+      this.#loaded.add(slot);this.#dormant.delete(slot);
+      let capture:NativeOwnerActivation;
+      try{
+        capture=await o.client.captureOwnerActivation({id:o.nextRequestId(),workspace:workspace.handle,deadlineMs:o.deadlineMs},
+          target.path,o.config.maxCaptureBytes,signal,saved.activationId);
+      }catch(error){
+        if(sleeping!==undefined && error instanceof EngineRequestError && error.wireError?.code==="INVALID_PARAMS")this.#dormant.set(slot,sleeping);
+        throw error;
+      }
       signal?.throwIfAborted();o.assertCurrent();
       if(capture.activationId!==saved.activationId || !isDeepStrictEqual(capture.source,saved.source))throw new Error("Native service activation source changed.");
-      // A dormant target rejoins passes, which settle the restore work as for an awake document.
-      this.#owners.set(key,owner);this.#dormant.delete(targetKey(target));
+      this.#owners.set(key,owner);
       return capture;
     },{binding:operation.basis.ownerBinding,activationPending:false,actor:{ownerUserId:saved.ownerUserId,shareId:saved.shareId}});
     return owner.consumer;
