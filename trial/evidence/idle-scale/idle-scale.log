@@ -1,0 +1,126 @@
+start count 391
+391 seeded gateway=21MiB/21.63s share-web=59.3MiB/27.96s mailpit=13.8MiB/5.89s workspace-api=50.8MiB/28.06s sync-relay=91.3MiB/5.06s postgres=9.7MiB/23.97s | relay 1:node=0.7MiB/0.03s 33:engine=9MiB/0.01s 7:node=145.7MiB/1.87s | data=70.4MiB host=0.0MiB pg=7.8MiB
+ Container dohc-idle-scale-sync-relay-1 Restarting 
+ Container dohc-idle-scale-sync-relay-1 Started 
+{"at":"2026-10-13T07:04:22Z","stage":391,"restartMs":3773}
+391 cold-idle gateway=19.8MiB/21.73s share-web=59.1MiB/30.09s mailpit=13.8MiB/6.56s workspace-api=50.8MiB/30.09s sync-relay=91.3MiB/4.16s postgres=10.1MiB/24.82s | relay 1:node=0.7MiB/0.03s 46:engine=8.7MiB/0.01s 7:node=145.5MiB/1.82s | data=70.4MiB host=0.0MiB pg=7.8MiB
+{"at":"2026-10-13T07:05:40.219Z","event":"verify","workspaces":391,"ops":7820,"missing":0,"compared":375,"changed":[]}
+{"at":"2026-10-13T07:05:41Z","stage":391,"readAllMs":10813}
+391 after-read gateway=21.3MiB/22.79s share-web=59.4MiB/30.87s mailpit=13.8MiB/6.84s workspace-api=51.1MiB/30.61s sync-relay=102.9MiB/9.05s postgres=11.2MiB/25.71s | relay 1:node=0.7MiB/0.03s 46:engine=8.7MiB/0.01s 7:node=157.5MiB/6.09s | data=70.4MiB host=0.0MiB pg=7.8MiB
+{"at":"2026-10-13T07:05:50Z","stage":391,"backupMs":1225,"backupBytes":70799360,"dbBytes":73789440}
+{"at":"2026-10-13T07:07:16.155Z","event":"seed-failed","lane":2,"error":"Error: Engine sync.push failed","cause":"EngineRequestError: workspace operation failed"}
+{"at":"2026-10-13T07:07:44.218Z","event":"seed-failed","lane":2,"error":"Error: Engine sync.claim failed","cause":"EngineRequestError: workspace operation failed"}
+{"at":"2026-10-13T07:10:28.933Z","event":"seed-failed","lane":11,"error":"Error: Engine sync.push failed","cause":"EngineRequestError: workspace operation failed"}
+{"at":"2026-10-13T07:11:47.771Z","event":"seed-failed","lane":12,"error":"Error: Engine sync.push failed","cause":"EngineRequestError: workspace operation failed"}
+{"at":"2026-10-13T07:11:47.773Z","event":"seed-failed","lane":14,"error":"Error: Engine sync.push failed","cause":"EngineRequestError: workspace operation failed"}
+{"at":"2026-10-13T07:11:47.777Z","event":"seed-failed","lane":10,"error":"Error: Engine sync.push failed","cause":"EngineRequestError: workspace operation failed"}
+{"at":"2026-10-13T07:11:47.780Z","event":"seed-failed","lane":13,"error":"Error: Engine sync.push failed","cause":"EngineRequestError: workspace operation failed"}
+{"at":"2026-10-13T07:11:47.781Z","event":"seed-failed","lane":2,"error":"Error: Engine sync.push failed","cause":"EngineRequestError: workspace operation failed"}
+{"at":"2026-10-13T07:12:52.014Z","event":"seed-failed","lane":13,"error":"Error: Engine sync.claim failed","cause":"EngineRequestError: workspace operation failed"}
+{"at":"2026-10-13T07:12:52.015Z","event":"seed-failed","lane":15,"error":"Error: Engine sync.push failed","cause":"EngineRequestError: workspace operation failed"}
+{"at":"2026-10-13T07:12:52.015Z","event":"seed-failed","lane":6,"error":"Error: Engine sync.push failed","cause":"EngineRequestError: workspace operation failed"}
+{"at":"2026-10-13T07:12:52.015Z","event":"seed-failed","lane":4,"error":"Error: Engine sync.push failed","cause":"EngineRequestError: workspace operation failed"}
+{"at":"2026-10-13T07:12:52.015Z","event":"seed-failed","lane":3,"error":"Error: Engine sync.push failed","cause":"EngineRequestError: workspace operation failed"}
+{"at":"2026-10-13T07:12:52.016Z","event":"seed-failed","lane":11,"error":"Error: Engine sync.push failed","cause":"EngineRequestError: workspace operation failed"}
+{"at":"2026-10-13T07:12:52.016Z","event":"seed-failed","lane":9,"error":"Error: Engine sync.push failed","cause":"EngineRequestError: workspace operation failed"}
+{"at":"2026-10-13T07:12:56Z","stage":1000,"requested":609,"workspaces":985,"seedMs":424701,"concurrency":16,"files":5}
+1000 seeded gateway=23.2MiB/30.21s share-web=60.2MiB/39.57s mailpit=13.8MiB/8.23s workspace-api=51.4MiB/38.87s sync-relay=272.6MiB/43.32s postgres=22.9MiB/32.51s | relay 1:node=0.7MiB/0.04s 46:engine=8.7MiB/0.01s 7:node=327.2MiB/32.91s | data=99.4MiB host=0.0MiB pg=7.8MiB
+ Container dohc-idle-scale-sync-relay-1 Restarting 
+ Container dohc-idle-scale-sync-relay-1 Started 
+{"at":"2026-10-13T07:13:03Z","stage":1000,"restartMs":2014}
+1000 cold-idle gateway=23.2MiB/30.28s share-web=60.7MiB/40.69s mailpit=13.8MiB/8.5s workspace-api=51.2MiB/40.01s sync-relay=90.7MiB/2.44s postgres=10MiB/33.05s | relay 1:node=0.7MiB/0.02s 33:engine=8.7MiB/0.01s 7:node=145.4MiB/1.14s | data=95.3MiB host=0.0MiB pg=7.8MiB
+{"at":"2026-10-13T07:14:25.841Z","event":"verify","workspaces":985,"ops":10790,"missing":0,"compared":391,"changed":[]}
+{"at":"2026-10-13T07:14:25Z","stage":1000,"readAllMs":18178}
+1000 after-read gateway=21.2MiB/32.73s share-web=60.8MiB/41.32s mailpit=13.5MiB/8.66s workspace-api=51.6MiB/40.65s sync-relay=102.5MiB/11.57s postgres=11.5MiB/34.75s | relay 1:node=0.7MiB/0.02s 33:engine=8.7MiB/0.01s 7:node=157.1MiB/9.65s | data=95.3MiB host=0.0MiB pg=7.8MiB
+{"at":"2026-10-13T07:14:32Z","stage":1000,"backupMs":504,"backupBytes":96432128,"dbBytes":99901440}
+{"at":"2026-10-13T07:16:36.998Z","event":"seed-failed","lane":3,"error":"Error: Engine sync.claim failed","cause":"EngineRequestError: workspace operation failed"}
+{"at":"2026-10-13T07:17:19.581Z","event":"seed-failed","lane":8,"error":"Error: Engine sync.push failed","cause":"EngineRequestError: workspace operation failed"}
+{"at":"2026-10-13T07:21:47.083Z","event":"seed-failed","lane":5,"error":"Error: Engine sync.claim failed","cause":"EngineRequestError: workspace operation failed"}
+{"at":"2026-10-13T07:23:40.031Z","event":"seed-failed","lane":14,"error":"Error: Engine sync.push failed","cause":"EngineRequestError: workspace operation failed"}
+{"at":"2026-10-13T07:24:56.816Z","event":"seed-failed","lane":6,"error":"Error: Engine sync.push failed","cause":"EngineRequestError: workspace operation failed"}
+{"at":"2026-10-13T07:25:54.652Z","event":"seed-failed","lane":13,"error":"Error: Engine sync.push failed","cause":"EngineRequestError: workspace operation failed"}
+{"at":"2026-10-13T07:27:36.000Z","event":"seed-failed","lane":4,"error":"Error: Engine sync.push failed","cause":"EngineRequestError: workspace operation failed"}
+{"at":"2026-10-13T07:28:58.198Z","event":"seed-failed","lane":15,"error":"Error: Engine sync.push failed","cause":"EngineRequestError: workspace operation failed"}
+{"at":"2026-10-13T07:29:54.914Z","event":"seed-failed","lane":11,"error":"Error: Engine sync.push failed","cause":"EngineRequestError: workspace operation failed"}
+{"at":"2026-10-13T07:31:00.043Z","event":"seed-failed","lane":5,"error":"Error: Engine sync.claim failed","cause":"EngineRequestError: workspace operation failed"}
+{"at":"2026-10-13T07:31:14.167Z","event":"seed-failed","lane":10,"error":"Error: Engine sync.claim failed","cause":"EngineRequestError: workspace operation failed"}
+{"at":"2026-10-13T07:31:14.168Z","event":"seed-failed","lane":11,"error":"Error: Engine sync.push failed","cause":"EngineRequestError: workspace operation failed"}
+{"at":"2026-10-13T07:31:30.802Z","event":"seed-failed","lane":10,"error":"Error: Engine sync.push failed","cause":"EngineRequestError: workspace operation failed"}
+{"at":"2026-10-13T07:32:33.255Z","event":"seed-failed","lane":12,"error":"Error: Engine sync.push failed","cause":"EngineRequestError: workspace operation failed"}
+{"at":"2026-10-13T07:35:44.898Z","event":"seed-failed","lane":5,"error":"Error: Engine sync.push failed","cause":"EngineRequestError: workspace operation failed"}
+{"at":"2026-10-13T07:43:10.519Z","event":"seed-failed","lane":3,"error":"Error: Engine sync.claim failed","cause":"EngineRequestError: workspace operation failed"}
+{"at":"2026-10-13T07:43:40.967Z","event":"seed-failed","lane":6,"error":"Error: Engine sync.push failed","cause":"EngineRequestError: workspace operation failed"}
+{"at":"2026-10-13T07:44:07.838Z","event":"seed-failed","lane":11,"error":"Error: Engine sync.push failed","cause":"EngineRequestError: workspace operation failed"}
+{"at":"2026-10-13T07:44:20.483Z","event":"seed-failed","lane":3,"error":"Error: Engine sync.push failed","cause":"EngineRequestError: workspace operation failed"}
+{"at":"2026-10-13T07:45:16.414Z","event":"seed-failed","lane":12,"error":"Error: Engine sync.push failed","cause":"EngineRequestError: workspace operation failed"}
+{"at":"2026-10-13T07:47:10.879Z","event":"seed-failed","lane":2,"error":"Error: Engine sync.claim failed","cause":"EngineRequestError: workspace operation failed"}
+{"at":"2026-10-13T07:49:14.576Z","event":"seed-failed","lane":6,"error":"Error: Engine sync.push failed","cause":"EngineRequestError: workspace operation failed"}
+{"at":"2026-10-13T07:51:49.302Z","event":"seed-failed","lane":15,"error":"Error: Engine sync.claim failed","cause":"EngineRequestError: workspace operation failed"}
+{"at":"2026-10-13T07:58:24Z","stage":5000,"requested":4015,"workspaces":4977,"seedMs":2630390,"concurrency":16,"files":5}
+5000 seeded gateway=23MiB/89.67s share-web=75.8MiB/106.89s mailpit=13.9MiB/21.14s workspace-api=65.4MiB/103.31s sync-relay=251.6MiB/250.36s postgres=18.9MiB/86.18s | relay 1:node=0.7MiB/0.12s 33:engine=8.7MiB/0.01s 7:node=306.5MiB/194.82s | data=269.0MiB host=0.0MiB pg=7.8MiB
+ Container dohc-idle-scale-sync-relay-1 Restarting 
+ Container dohc-idle-scale-sync-relay-1 Started 
+{"at":"2026-10-13T07:58:44Z","stage":5000,"restartMs":12953}
+5000 cold-idle gateway=23MiB/89.77s share-web=88.8MiB/108.85s mailpit=13.9MiB/21.46s workspace-api=65.1MiB/105.28s sync-relay=90.9MiB/3.92s postgres=9.7MiB/87s | relay 1:node=0.7MiB/0.03s 46:engine=9MiB/0.01s 7:node=145MiB/1.91s | data=264.8MiB host=0.0MiB pg=7.8MiB
+{"at":"2026-10-13T08:01:02.073Z","event":"verify","workspaces":4977,"ops":30750,"missing":0,"compared":985,"changed":[]}
+{"at":"2026-10-13T08:01:02Z","stage":5000,"readAllMs":71531}
+5000 after-read gateway=21.4MiB/100.58s share-web=76.1MiB/110.63s mailpit=13.6MiB/21.79s workspace-api=65.4MiB/106.95s sync-relay=362.4MiB/38.75s postgres=11.5MiB/94.45s | relay 1:node=0.7MiB/0.03s 46:engine=9MiB/0.01s 7:node=416.7MiB/34.92s | data=264.8MiB host=0.0MiB pg=7.8MiB
+{"at":"2026-10-13T08:01:09Z","stage":5000,"backupMs":1475,"backupBytes":268029952,"dbBytes":277573632}
+idle-scale-complete
+exit=0 2026-10-13T08:01:09Z
+== stage 10000 run 2026-10-13T08:01:35Z
+{"at":"2026-10-13T08:02:30.820Z","event":"seed-failed","lane":4,"error":"Error: Engine sync.push failed","cause":"EngineRequestError: workspace operation failed"}
+{"at":"2026-10-13T08:04:37.392Z","event":"seed-failed","lane":1,"error":"Error: Engine sync.push failed","cause":"EngineRequestError: workspace operation failed"}
+{"at":"2026-10-13T08:04:55.449Z","event":"seed-failed","lane":10,"error":"Error: Engine sync.push failed","cause":"EngineRequestError: workspace operation failed"}
+{"at":"2026-10-13T08:05:53.318Z","event":"seed-failed","lane":11,"error":"Error: Engine sync.push failed","cause":"EngineRequestError: workspace operation failed"}
+{"at":"2026-10-13T08:18:00.276Z","event":"seed-failed","lane":11,"error":"Error: Engine sync.push failed","cause":"EngineRequestError: workspace operation failed"}
+{"at":"2026-10-13T08:20:00.284Z","event":"seed-failed","lane":11,"error":"Error: Engine sync.claim failed","cause":"EngineRequestError: workspace operation failed"}
+{"at":"2026-10-13T08:22:37.688Z","event":"seed-failed","lane":9,"error":"Error: Engine sync.push failed","cause":"EngineRequestError: workspace operation failed"}
+{"at":"2026-10-13T08:22:37.690Z","event":"seed-failed","lane":14,"error":"Error: Engine sync.claim failed","cause":"EngineRequestError: workspace operation failed"}
+{"at":"2026-10-13T08:22:37.698Z","event":"seed-failed","lane":10,"error":"Error: Engine sync.push failed","cause":"EngineRequestError: workspace operation failed"}
+{"at":"2026-10-13T08:22:37.703Z","event":"seed-failed","lane":8,"error":"Error: Engine sync.claim failed","cause":"EngineRequestError: workspace operation failed"}
+{"at":"2026-10-13T08:22:37.705Z","event":"seed-failed","lane":12,"error":"Error: Engine sync.push failed","cause":"EngineRequestError: workspace operation failed"}
+{"at":"2026-10-13T08:22:37.708Z","event":"seed-failed","lane":3,"error":"Error: Engine sync.push failed","cause":"EngineRequestError: workspace operation failed"}
+{"at":"2026-10-13T08:22:38.421Z","event":"seed-failed","lane":13,"error":"Error: Engine sync.claim failed","cause":"EngineRequestError: relay-unreachable"}
+{"at":"2026-10-13T08:22:38.425Z","event":"seed-failed","lane":4,"error":"Error: Engine sync.claim failed","cause":"EngineRequestError: relay-unreachable"}
+{"at":"2026-10-13T08:22:50.123Z","event":"seed-failed","lane":6,"error":"Error: Engine sync.push failed","cause":"EngineRequestError: workspace operation failed"}
+{"at":"2026-10-13T08:22:50.128Z","event":"seed-failed","lane":0,"error":"Error: Engine sync.push failed","cause":"EngineRequestError: workspace operation failed"}
+{"at":"2026-10-13T08:24:34.484Z","event":"seed-failed","lane":0,"error":"Error: Engine sync.claim failed","cause":"EngineRequestError: workspace operation failed"}
+{"at":"2026-10-13T08:27:58.758Z","event":"seed-failed","lane":5,"error":"Error: Engine sync.push failed","cause":"EngineRequestError: workspace operation failed"}
+{"at":"2026-10-13T08:27:58.762Z","event":"seed-failed","lane":11,"error":"Error: Engine sync.push failed","cause":"EngineRequestError: workspace operation failed"}
+{"at":"2026-10-13T08:27:58.764Z","event":"seed-failed","lane":15,"error":"Error: Engine sync.push failed","cause":"EngineRequestError: workspace operation failed"}
+{"at":"2026-10-13T08:27:58.764Z","event":"seed-failed","lane":1,"error":"Error: Engine sync.push failed","cause":"EngineRequestError: workspace operation failed"}
+{"at":"2026-10-13T08:27:58.767Z","event":"seed-failed","lane":0,"error":"Error: Engine sync.push failed","cause":"EngineRequestError: workspace operation failed"}
+{"at":"2026-10-13T08:27:58.769Z","event":"seed-failed","lane":13,"error":"Error: Engine sync.push failed","cause":"EngineRequestError: workspace operation failed"}
+{"at":"2026-10-13T08:29:16.493Z","event":"seed-failed","lane":0,"error":"Error: Engine sync.push failed","cause":"EngineRequestError: workspace operation failed"}
+{"at":"2026-10-13T08:31:13.291Z","event":"seed-failed","lane":11,"error":"Error: Engine sync.claim failed","cause":"EngineRequestError: workspace operation failed"}
+{"at":"2026-10-13T08:34:03.868Z","event":"seed-failed","lane":6,"error":"Error: Engine sync.push failed","cause":"EngineRequestError: workspace operation failed"}
+{"at":"2026-10-13T08:38:47.525Z","event":"seed-failed","lane":3,"error":"Error: Engine sync.claim failed","cause":"EngineRequestError: workspace operation failed"}
+{"at":"2026-10-13T08:39:29.413Z","event":"seed-failed","lane":8,"error":"Error: Engine sync.claim failed","cause":"EngineRequestError: workspace operation failed"}
+{"at":"2026-10-13T08:39:29.422Z","event":"seed-failed","lane":9,"error":"Error: Engine sync.push failed","cause":"EngineRequestError: workspace operation failed"}
+{"at":"2026-10-13T08:39:29.424Z","event":"seed-failed","lane":2,"error":"Error: Engine sync.push failed","cause":"EngineRequestError: workspace operation failed"}
+{"at":"2026-10-13T08:39:29.426Z","event":"seed-failed","lane":6,"error":"Error: Engine sync.push failed","cause":"EngineRequestError: workspace operation failed"}
+{"at":"2026-10-13T08:39:29.427Z","event":"seed-failed","lane":0,"error":"Error: Engine sync.push failed","cause":"EngineRequestError: workspace operation failed"}
+{"at":"2026-10-13T08:39:29.434Z","event":"seed-failed","lane":10,"error":"Error: Engine sync.push failed","cause":"EngineRequestError: workspace operation failed"}
+{"at":"2026-10-13T08:40:07.442Z","event":"seed-failed","lane":4,"error":"Error: Engine sync.push failed","cause":"EngineRequestError: workspace operation failed"}
+{"at":"2026-10-13T08:40:55.173Z","event":"seed-failed","lane":5,"error":"Error: Engine sync.push failed","cause":"EngineRequestError: workspace operation failed"}
+{"at":"2026-10-13T08:42:15.987Z","event":"seed-failed","lane":9,"error":"Error: Engine sync.push failed","cause":"EngineRequestError: workspace operation failed"}
+{"at":"2026-10-13T08:43:17.463Z","event":"seed-failed","lane":6,"error":"Error: Engine sync.claim failed","cause":"EngineRequestError: workspace operation failed"}
+{"at":"2026-10-13T08:49:12.260Z","event":"seed-failed","lane":9,"error":"Error: Engine sync.push failed","cause":"EngineRequestError: workspace operation failed"}
+{"at":"2026-10-13T08:49:52.130Z","event":"seed-failed","lane":13,"error":"Error: Engine sync.push failed","cause":"EngineRequestError: workspace operation failed"}
+{"at":"2026-10-13T08:51:07.747Z","event":"seed-failed","lane":15,"error":"Error: Engine sync.claim failed","cause":"EngineRequestError: workspace operation failed"}
+{"at":"2026-10-13T08:51:47.918Z","event":"seed-failed","lane":3,"error":"Error: Engine sync.claim failed","cause":"EngineRequestError: workspace operation failed"}
+{"at":"2026-10-13T08:52:50.955Z","event":"seed-failed","lane":14,"error":"Error: Engine sync.claim failed","cause":"EngineRequestError: workspace operation failed"}
+{"at":"2026-10-13T08:53:17.332Z","event":"seed-failed","lane":12,"error":"Error: Engine sync.claim failed","cause":"EngineRequestError: workspace operation failed"}
+{"at":"2026-10-13T08:54:50Z","stage":10000,"requested":5023,"workspaces":9957,"seedMs":3192651,"concurrency":16,"files":5}
+10000 seeded gateway=23.4MiB/175.51s share-web=78.6MiB/206.4s mailpit=13.7MiB/45.77s workspace-api=68.2MiB/198.42s sync-relay=259.1MiB/355.23s postgres=17.1MiB/165.9s | relay 1:node=0.7MiB/0.18s 46:engine=9MiB/0.01s 7:node=312.6MiB/274.74s | data=481.1MiB host=0.0MiB pg=7.8MiB
+ Container dohc-idle-scale-sync-relay-1 Restarting 
+ Container dohc-idle-scale-sync-relay-1 Started 
+{"at":"2026-10-13T08:55:03Z","stage":10000,"restartMs":6775}
+10000 cold-idle gateway=19.6MiB/175.64s share-web=78.6MiB/209.95s mailpit=13.7MiB/46.98s workspace-api=68.5MiB/201.91s sync-relay=91MiB/5.67s postgres=10MiB/167.59s | relay 1:node=0.7MiB/0.04s 46:engine=8.9MiB/0.01s 7:node=145.7MiB/2.37s | data=477.1MiB host=0.0MiB pg=7.8MiB
+{"at":"2026-10-13T08:59:14.274Z","event":"verify","workspaces":9957,"ops":55650,"missing":0,"compared":4977,"changed":[]}
+{"at":"2026-10-13T08:59:17Z","stage":10000,"readAllMs":166721}
+10000 after-read gateway=22.1MiB/200.13s share-web=79.1MiB/216.44s mailpit=14MiB/48.15s workspace-api=68.2MiB/207.22s sync-relay=376.3MiB/83.97s postgres=10MiB/184.35s | relay 1:node=0.7MiB/0.05s 46:engine=8.9MiB/0.01s 7:node=431.1MiB/74.78s | data=477.1MiB host=0.0MiB pg=7.8MiB
+{"at":"2026-10-13T08:59:35Z","stage":10000,"backupMs":6175,"backupBytes":482856960,"dbBytes":500260864}
+idle-scale-complete
+exit=0 2026-10-13T08:59:35Z

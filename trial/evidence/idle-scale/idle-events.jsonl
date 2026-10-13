@@ -1,0 +1,15 @@
+{"at":"2026-10-13T07:04:22Z","stage":391,"restartMs":3773}
+{"at":"2026-10-13T07:05:41Z","stage":391,"readAllMs":10813}
+{"at":"2026-10-13T07:05:50Z","stage":391,"backupMs":1225,"backupBytes":70799360,"dbBytes":73789440}
+{"at":"2026-10-13T07:12:56Z","stage":1000,"requested":609,"workspaces":985,"seedMs":424701,"concurrency":16,"files":5}
+{"at":"2026-10-13T07:13:03Z","stage":1000,"restartMs":2014}
+{"at":"2026-10-13T07:14:25Z","stage":1000,"readAllMs":18178}
+{"at":"2026-10-13T07:14:32Z","stage":1000,"backupMs":504,"backupBytes":96432128,"dbBytes":99901440}
+{"at":"2026-10-13T07:58:24Z","stage":5000,"requested":4015,"workspaces":4977,"seedMs":2630390,"concurrency":16,"files":5}
+{"at":"2026-10-13T07:58:44Z","stage":5000,"restartMs":12953}
+{"at":"2026-10-13T08:01:02Z","stage":5000,"readAllMs":71531}
+{"at":"2026-10-13T08:01:09Z","stage":5000,"backupMs":1475,"backupBytes":268029952,"dbBytes":277573632}
+{"at":"2026-10-13T08:54:50Z","stage":10000,"requested":5023,"workspaces":9957,"seedMs":3192651,"concurrency":16,"files":5}
+{"at":"2026-10-13T08:55:03Z","stage":10000,"restartMs":6775}
+{"at":"2026-10-13T08:59:17Z","stage":10000,"readAllMs":166721}
+{"at":"2026-10-13T08:59:35Z","stage":10000,"backupMs":6175,"backupBytes":482856960,"dbBytes":500260864}

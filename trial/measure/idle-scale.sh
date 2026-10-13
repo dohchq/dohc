@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Idle-scale test of option A: how relay memory, startup, disk, backup, and read
 # latency change as idle workspaces grow. Stages are cumulative targets.
-# Usage: ORIGIN=https://... trial/measure/idle-scale.sh 1000 5000 10000
+# Usage: ORIGIN=https://... [SEED_FILES=5] trial/measure/idle-scale.sh 1000 5000 10000
+# Run one instance at a time: a second run would restart the relay under the first.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 export PROJECT=dohc-idle-scale SEED_CONCURRENCY=${SEED_CONCURRENCY:-16}
@@ -41,8 +42,8 @@ backup() {
 for target in "$@"; do
   have=$(count)
   if [ "$have" -lt "$target" ]; then
-    begun=$(ms); driver seed $(( target - have )) 20 4096 0
-    event "\"stage\":$target,\"seeded\":$(( target - have )),\"seedMs\":$(( $(ms) - begun )),\"concurrency\":$SEED_CONCURRENCY"
+    begun=$(ms); driver seed $(( target - have )) ${SEED_FILES:-5} 4096 0
+    event "\"stage\":$target,\"requested\":$(( target - have )),\"workspaces\":$(count),\"seedMs\":$(( $(ms) - begun )),\"concurrency\":$SEED_CONCURRENCY,\"files\":${SEED_FILES:-5}"
   fi
   snap "$target seeded"
   cold_restart "$target"

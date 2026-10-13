@@ -110,7 +110,7 @@ async function seedLane(state: State, lane: number, take: () => boolean, owners:
       // One failed workspace is logged and skipped; its engine is replaced in case it is wedged.
       try { await seedOne(owner); } catch (error) {
         log("seed-failed", { lane, error: String(error), cause: String((error as { cause?: unknown }).cause ?? "") });
-        await engines.get(owner.userId)?.engine.close().catch(() => {});
+        try { await engines.get(owner.userId)?.engine.close(); } catch {}
         engines.delete(owner.userId);
       }
     }
