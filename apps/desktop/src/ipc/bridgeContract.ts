@@ -468,7 +468,11 @@ export type WorkspacePathListing = z.infer<typeof WorkspacePathListing>;
 
 export const WorkspaceListingVisibility = z.object({
   status: z.enum(["ready", "degraded", "unavailable"]),
-  hiddenHostPaths: z.array(PATH_STRING),
+  rules: z.array(z.object({
+    path: z.string().min(1),
+    visibility: z.enum(["visible", "hidden"]).optional(),
+    export: z.enum(["included", "excluded", "redacted"]).optional(),
+  })),
 });
 export type WorkspaceListingVisibility = z.infer<typeof WorkspaceListingVisibility>;
 

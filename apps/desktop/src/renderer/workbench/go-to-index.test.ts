@@ -3,7 +3,7 @@ import { GoToIndex, isGoToPathQuery, prepareQuickOpenPaths, rankPreparedQuickOpe
 const context = { pinned: [], recent: [] };
 const listing = (paths: string[]): GoToListing => ({
   files: paths.map((path) => ({ path, kind: "file" })), folders: [],
-  visibility: { status: "ready", hiddenHostPaths: new Set() }, receivedRoots: [],
+  visibility: { status: "ready", rules: [] }, receivedRoots: [],
 });
 describe("Go to names", () => {
   it("prepares one new row for a rename and reuses the other 29,999 rows", () => {
@@ -150,7 +150,7 @@ it("subtracts only host rule verdicts, leaving .env and mounted names findable a
   index.update({ listing: snapshot });
   expect(index.query(".env")[0].path).toBe(".env");
   expect(index.query("budget")).toHaveLength(2);
-  index.update({ listing: { ...snapshot, visibility: { status: "ready", hiddenHostPaths: new Set(["private", "private/budget.md", "shared-with-me/team/budget.md"]) } } });
+  index.update({ listing: { ...snapshot, visibility: { status: "ready", rules: [{ path: "private", visibility: "hidden" }, { path: "private/budget.md", visibility: "hidden" }, { path: "shared-with-me/team/budget.md", visibility: "hidden" }] } } });
   expect(index.query("budget").map(row => row.path)).toEqual(["shared-with-me/team/budget.md"]);
   expect(index.rows.some(row => row.path === "private")).toBe(false);
   expect(index.query(".env")[0].path).toBe(".env");
@@ -161,7 +161,7 @@ for (const status of ["degraded", "unavailable"] as const) {
     const snapshot = listing(["host.md", "shared-with-me/team/shared.md"]);
     snapshot.folders = ["host-folder", "host-records", "shared-with-me/team/folder"];
     snapshot.receivedRoots = [{ path: "shared-with-me/team", ended: false, damaged: false }];
-    index.update({ listing: { ...snapshot, visibility: { status, hiddenHostPaths: new Set() } },
+    index.update({ listing: { ...snapshot, visibility: { status, rules: [] } },
       collections: [{ path: "host-records", objectId: "host" }, { path: "shared-with-me/team/records", objectId: "shared" }],
       apps: [{ root: "host-app", title: "Host app" }, { root: "shared-with-me/team/app", title: "Shared app" }],
       versions: [{ id: "main", name: "Main" }], groups: [{ id: "general", name: "General", kind: "channel" }],
@@ -171,7 +171,7 @@ for (const status of ["degraded", "unavailable"] as const) {
     index.update({ listing: snapshot });
     expect(index.query("host")).toHaveLength(4);
     index.update({ listing: { ...snapshot, visibility: { status: "ready",
-      hiddenHostPaths: new Set(["host.md", "host-folder", "host-records", "host-app"]) } } });
+      rules: [{ path: "host.md", visibility: "hidden" }, { path: "host-folder", visibility: "hidden" }, { path: "host-records", visibility: "hidden" }, { path: "host-app", visibility: "hidden" }] } } });
     expect(index.query("host")).toEqual([]);
     // Selector narrowing and Remove/Leave arrive through the canonical listing.
     index.update({ listing: { ...snapshot, files: snapshot.files.slice(0, 1), receivedRoots: [] } });
@@ -189,20 +189,18 @@ it("withholds path-backed names until a listing supplies ready rule verdicts", (
 it("compares fresh policy and mount contents before reapplying file verdicts", () => {
   const index = new GoToIndex("workspace");
   const snapshot = listing(["a.md", "b.md", "shared-with-me/team/shared.md"]);
-  snapshot.visibility.hiddenHostPaths = new Set(["private"]);
+  snapshot.visibility.rules = [{ path: "private", visibility: "hidden" }];
   snapshot.receivedRoots = [{ path: "shared-with-me/team", ended: false, damaged: false }];
   index.update({ listing: snapshot });
   const previous = index.rows[0];
-  const hiddenHostPaths = new Set(["private"]);
-  const has = vi.spyOn(hiddenHostPaths, "has");
+  const rules = [{ path: "private", visibility: "hidden" as const }];
   index.update({ listing: { ...snapshot, files: [...snapshot.files, { path: "new.md", kind: "file" }],
-    visibility: { ...snapshot.visibility, hiddenHostPaths },
+    visibility: { ...snapshot.visibility, rules },
     receivedRoots: snapshot.receivedRoots.map(root => ({ ...root })) } });
   expect(index.lastPreparationCount).toBe(1);
   expect(index.rows[0]).toBe(previous);
-  expect(has).toHaveBeenCalledTimes(1);
-  expect(has).toHaveBeenCalledWith("new.md");
-  index.update({ listing: { ...snapshot, visibility: { status: "ready", hiddenHostPaths: new Set(["a.md"]) } } });
+  expect(index.lastVisibilityCheckCount).toBe(1);
+  index.update({ listing: { ...snapshot, visibility: { status: "ready", rules: [{ path: "a.md", visibility: "hidden" }] } } });
   expect(index.query("a.md").some(row => row.path === "a.md")).toBe(false);
   expect(index.query("b.md")).toHaveLength(1);
 });
@@ -270,10 +268,26 @@ it("applies share status and explicit rule verdicts to Collection and app names"
     apps: [{ root: "shared-with-me/team/app", title: "Shared app" }, { root: "private", title: "Private app" }] });
   expect(index.query("Shared app")[0].ended).toBe(true);
   expect(index.query("records")[0].ended).toBe(true);
-  index.update({ listing: { ...snapshot, visibility: { status: "ready", hiddenHostPaths: new Set(["private", "shared-with-me/team/records"]) } } });
+  index.update({ listing: { ...snapshot, visibility: { status: "ready", rules: [{ path: "private", visibility: "hidden" }, { path: "shared-with-me/team/records", visibility: "hidden" }] } } });
   expect(index.query("Private app")).toEqual([]);
   expect(index.query("records")).toHaveLength(1);
   index.update({ listing: { ...snapshot, receivedRoots: [{ ...snapshot.receivedRoots[0], damaged: true }] } });
   expect(index.query("Shared app")).toEqual([]);
   expect(index.query("records")).toEqual([]);
 });
+
+ it("does no visibility work for equal listing/rules or ranking-only changes", () => {
+  const index = new GoToIndex("workspace");
+  const snapshot = listing(["one.md", "private/two.md"]);
+  snapshot.visibility.rules = [{ path: "private/**", visibility: "hidden" }];
+  index.update({ listing: snapshot, collections: [{ path: "private/crm", objectId: "crm" }], apps: [{ root: "app", title: "App" }] });
+  const revision = index.revision;
+  index.update({ listing: { ...snapshot, visibility: { ...snapshot.visibility, rules: snapshot.visibility.rules.map(rule => ({ ...rule })) } } });
+  expect(index.lastVisibilityCheckCount).toBe(0);
+  expect(index.revision).toBe(revision);
+  index.update({}, { pinned: ["one.md"], recent: [] });
+  expect(index.lastVisibilityCheckCount).toBe(0);
+  index.update({ collections: [{ path: "private/crm", objectId: "crm" }, { path: "private/new", objectId: "new" }] });
+  expect(index.lastVisibilityCheckCount).toBe(1);
+  expect(index.query("new")).toEqual([]);
+ });

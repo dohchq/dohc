@@ -287,7 +287,7 @@ describe("WorkspaceFileListingCache", () => {
   });
 });
 
- it("refreshes visibility policy edits even when the ordinary path set did not change", async () => {
+ it("reuses the path listing through policy edits, creation and deletion", async () => {
   const cache = new WorkspaceFileListingCache("win32");
   const load = vi.fn(async () => listing("kept.md"));
   const read = () => cache.list({ workspaceId: "ws-a", attachmentId: ATTACHMENT_A, allowCached: true, load });
@@ -297,5 +297,12 @@ describe("WorkspaceFileListingCache", () => {
   expect(load).toHaveBeenCalledOnce();
   cache.invalidate({ workspaceId: "ws-a", paths: [".DOHC/VISIBILITY.TOML"], pathSetChanged: false });
   await read();
-  expect(load).toHaveBeenCalledTimes(2);
+  expect(load).toHaveBeenCalledTimes(1);
+  cache.invalidate({ workspaceId: "ws-a", paths: [".dohc/visibility.toml"], pathSetChanged: true });
+  await read();
+  for (const kind of ["appeared", "changed", "disappeared"] as const) {
+    cache.observe("ws-a", ATTACHMENT_A, [{ path: ".dohc/visibility.toml", kind }]);
+    await read();
+  }
+  expect(load).toHaveBeenCalledTimes(1);
 });

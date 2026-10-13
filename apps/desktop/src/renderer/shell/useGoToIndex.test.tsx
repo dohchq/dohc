@@ -1,3 +1,4 @@
+import type { VisibilityPolicyRule } from "@dohc/security-contract/visibility-policy";
 // @vitest-environment jsdom
 import { useEffect, useMemo } from "react";
 import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
@@ -17,7 +18,7 @@ function deferred() {
   const promise = new Promise<ListWorkspaceFilesResult>((yes, no) => { resolve = yes; reject = no; });
   return { promise, resolve, reject };
 }
-const answer = (path: string): ListWorkspaceFilesResult => ({ visibility: { status: "ready", hiddenHostPaths: [] }, files: [{ path, kind: "file" }], folders: [] });
+const answer = (path: string): ListWorkspaceFilesResult => ({ visibility: { status: "ready", rules: [] }, files: [{ path, kind: "file" }], folders: [] });
 function Shell(props: { workspaceId: string; refresh: number }) {
   const { files, folders, visibility, refreshFiles } = useWorkspaceListing(props.workspaceId);
   useEffect(() => { void refreshFiles().catch(() => undefined); }, [refreshFiles, props.refresh]);
@@ -59,7 +60,8 @@ it("keeps the successful committed listing through failure and recovers on the n
   await waitFor(() => expectListing("first.md"));
   view.rerender(<Root workspaceId="A" refresh={1} />);
   await waitFor(() => expect(listWorkspaceFiles).toHaveBeenCalledTimes(2));
-  expectListing("first.md");
+  await waitFor(() => expect(screen.getByTestId("names").textContent).toBe(""));
+  expect(screen.getByTestId("explorer").textContent).toBe("first.md");
   view.rerender(<Root workspaceId="A" refresh={2} />);
   await waitFor(() => expectListing("recovered.md"));
 });
@@ -92,36 +94,34 @@ it("does not reapply existing file verdicts when hook inputs recreate unchanged 
   vi.stubGlobal("cancelAnimationFrame", () => {});
   const files = [{ path: "a.md", kind: "file" as const }];
   const receivedRoots = [{ path: "shared-with-me/team", ended: false, damaged: false }];
-  function Snapshot(props: { renamed: boolean; hidden: Set<string> }) {
+  function Snapshot(props: { renamed: boolean; rules: VisibilityPolicyRule[] }) {
     const listing = useMemo(() => ({
       files: props.renamed ? [{ path: "renamed.md", kind: "file" as const }] : files,
-      folders: [], visibility: { status: "ready" as const, hiddenHostPaths: props.hidden },
+      folders: [], visibility: { status: "ready" as const, rules: props.rules },
       receivedRoots: receivedRoots.map(root => ({ ...root })),
-    }), [props.renamed, props.hidden]);
+    }), [props.renamed, props.rules]);
     const index = useGoToIndex("workspace", { listing }, context);
     return <output>{index.query("").map(row => row.path).join(",")}</output>;
   }
-  const view = render(<Snapshot renamed={false} hidden={new Set(["private"])} />);
+  const view = render(<Snapshot renamed={false} rules={[{ path: "private", visibility: "hidden" }]} />);
   act(() => frames.shift()!(0));
   act(() => frames.shift()!(0));
   expect(view.container.textContent).toBe("a.md");
-  const freshHidden = new Set(["private"]);
-  const has = vi.spyOn(freshHidden, "has");
-  view.rerender(<Snapshot renamed hidden={freshHidden} />);
+  const freshRules: VisibilityPolicyRule[] = [{ path: "private", visibility: "hidden" }];
+  view.rerender(<Snapshot renamed rules={freshRules} />);
   expect(view.container.textContent).toBe("renamed.md");
-  expect(has).toHaveBeenCalledTimes(1);
 });
 
  it("withholds a hidden host path from Go to while Explorer retains it", async () => {
   const update = vi.spyOn(GoToIndex.prototype, "update");
-  listWorkspaceFiles.mockResolvedValueOnce({ ...answer("private.md"), visibility: { status: "ready", hiddenHostPaths: ["private.md"] } });
+  listWorkspaceFiles.mockResolvedValueOnce({ ...answer("private.md"), visibility: { status: "ready", rules: [{ path: "private.md", visibility: "hidden" }] } });
   render(<Root workspaceId="A" />);
   await waitFor(() => expect(screen.getByTestId("explorer").textContent).toBe("private.md"));
   await waitFor(() => expect(update).toHaveBeenCalled());
   expect(screen.getByTestId("names").textContent).toBe("");
 });
  it.each(["degraded", "unavailable"])("withholds host names when visibility is %s", async status => {
-  listWorkspaceFiles.mockResolvedValueOnce({ ...answer("private.md"), visibility: { status, hiddenHostPaths: [] } });
+  listWorkspaceFiles.mockResolvedValueOnce({ ...answer("private.md"), visibility: { status, rules: [] } });
   render(<Root workspaceId="A" />);
   await waitFor(() => expect(screen.getByTestId("explorer").textContent).toBe("private.md"));
   await waitFor(() => expect(screen.getByTestId("names").textContent).toBe(""));

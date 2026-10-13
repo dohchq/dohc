@@ -32,10 +32,10 @@ describe("workspace listing revalidation", () => {
     const folders = result.current.folders;
     const restored = new Set(["gone.md"]);
     const dirty = new Set<string>();
-    listWorkspaceFiles.mockResolvedValueOnce({ visibility: { status: "ready", hiddenHostPaths: [] }, files: [], cached: true });
+    listWorkspaceFiles.mockResolvedValueOnce({ visibility: { status: "ready", rules: [] }, files: [], cached: true });
     await act(async () => { await result.current.refreshFiles({ allowCached: true }); });
     expect(result.current.prepareRestoredTabPruning(restored, dirty)).toBeNull();
-    listWorkspaceFiles.mockResolvedValueOnce({ visibility: { status: "ready", hiddenHostPaths: [] }, files: [], folders: [] });
+    listWorkspaceFiles.mockResolvedValueOnce({ visibility: { status: "ready", rules: [] }, files: [], folders: [] });
     await act(async () => { await result.current.refreshFiles(); });
     expect(result.current.files).toBe(files);
     expect(result.current.folders).toBe(folders);
@@ -52,9 +52,9 @@ describe("workspace listing revalidation", () => {
     { path: "a.md", kind: "file" as const },
   ])("commits changed file metadata: %j", async (next) => {
     const { result } = renderHook(() => useWorkspaceListing("workspace-1"));
-    listWorkspaceFiles.mockResolvedValueOnce({ visibility: { status: "ready", hiddenHostPaths: [] }, files: [{ path: "a.md", kind: "file", icon: "🍎" }] });
+    listWorkspaceFiles.mockResolvedValueOnce({ visibility: { status: "ready", rules: [] }, files: [{ path: "a.md", kind: "file", icon: "🍎" }] });
     await act(async () => { await result.current.refreshFiles(); });
-    listWorkspaceFiles.mockResolvedValueOnce({ visibility: { status: "ready", hiddenHostPaths: [] }, files: [next] });
+    listWorkspaceFiles.mockResolvedValueOnce({ visibility: { status: "ready", rules: [] }, files: [next] });
     await act(async () => { await result.current.refreshFiles(); });
     expect(result.current.files).toEqual([next]);
     expect(result.current.fileIndex.presentPaths.has(next.path)).toBe(true);
@@ -64,7 +64,7 @@ describe("workspace listing revalidation", () => {
     const { result } = renderHook(() => useWorkspaceListing("workspace-1"));
     const files = result.current.files;
     for (const folders of [["empty"], ["empty", "other"], ["other", "empty"], []]) {
-      listWorkspaceFiles.mockResolvedValueOnce({ visibility: { status: "ready", hiddenHostPaths: [] }, files: [], folders });
+      listWorkspaceFiles.mockResolvedValueOnce({ visibility: { status: "ready", rules: [] }, files: [], folders });
       await act(async () => { await result.current.refreshFiles(); });
       expect(result.current.folders).toEqual(folders);
       expect(result.current.files).toBe(files);
@@ -73,16 +73,16 @@ describe("workspace listing revalidation", () => {
 
   it("does not let a delayed different listing replace a newer equal answer", async () => {
     const { result } = renderHook(() => useWorkspaceListing("workspace-1"));
-    const snapshot: ListWorkspaceFilesResult = { visibility: { status: "ready", hiddenHostPaths: [] }, files: [{ path: "a.md", kind: "file" }], folders: [] };
+    const snapshot: ListWorkspaceFilesResult = { visibility: { status: "ready", rules: [] }, files: [{ path: "a.md", kind: "file" }], folders: [] };
     listWorkspaceFiles.mockResolvedValueOnce(snapshot);
     await act(async () => { await result.current.refreshFiles(); });
     const stale = deferred<ListWorkspaceFilesResult>();
     listWorkspaceFiles.mockReturnValueOnce(stale.promise);
     const pending = result.current.refreshFiles();
-    listWorkspaceFiles.mockResolvedValueOnce({ visibility: { status: "ready", hiddenHostPaths: [] }, files: [{ ...snapshot.files[0] }], folders: [] });
+    listWorkspaceFiles.mockResolvedValueOnce({ visibility: { status: "ready", rules: [] }, files: [{ ...snapshot.files[0] }], folders: [] });
     await act(async () => { await result.current.refreshFiles(); });
     await act(async () => {
-      stale.resolve({ visibility: { status: "ready", hiddenHostPaths: [] }, files: [{ path: "stale.md", kind: "file" }], cached: true });
+      stale.resolve({ visibility: { status: "ready", rules: [] }, files: [{ path: "stale.md", kind: "file" }], cached: true });
       await pending;
     });
     expect(result.current.files).toBe(snapshot.files);
@@ -93,32 +93,91 @@ describe("workspace listing revalidation", () => {
 
  it("commits policy-only changes while keeping file and folder indexes", async () => {
   const { result } = renderHook(() => useWorkspaceListing("A"));
-  const answer: ListWorkspaceFilesResult = { files: [{ path: "private.md", kind: "file" }], folders: [], visibility: { status: "ready", hiddenHostPaths: [] } };
+  const answer: ListWorkspaceFilesResult = { files: [{ path: "private.md", kind: "file" }], folders: [], visibility: { status: "ready", rules: [] } };
   listWorkspaceFiles.mockResolvedValueOnce(answer);
   await act(async () => { await result.current.refreshFiles(); });
   const files = result.current.files;
   const old = deferred<ListWorkspaceFilesResult>();
   listWorkspaceFiles.mockReturnValueOnce(old.promise);
   const pending = result.current.refreshFiles();
-  listWorkspaceFiles.mockResolvedValueOnce({ ...answer, visibility: { status: "ready", hiddenHostPaths: ["private.md"] } });
+  listWorkspaceFiles.mockResolvedValueOnce({ ...answer, visibility: { status: "ready", rules: [{ path: "private.md", visibility: "hidden" }] } });
   await act(async () => { await result.current.refreshFiles(); });
-  expect(result.current.visibility.hiddenHostPaths.has("private.md")).toBe(true);
+  expect(result.current.visibility.rules).toEqual([{ path: "private.md", visibility: "hidden" }]);
   await act(async () => { old.resolve(answer); await pending; });
-  expect(result.current.visibility.hiddenHostPaths.has("private.md")).toBe(true);
+  expect(result.current.visibility.rules).toEqual([{ path: "private.md", visibility: "hidden" }]);
   expect(result.current.files).toBe(files);
  });
  it("cannot deliver A's verdicts into B, including a reused hook", async () => {
   const { result, rerender } = renderHook(({ workspaceId }) => useWorkspaceListing(workspaceId), { initialProps: { workspaceId: "A" } });
-  listWorkspaceFiles.mockResolvedValueOnce({ files: [], visibility: { status: "ready", hiddenHostPaths: ["B.md"] } });
+  listWorkspaceFiles.mockResolvedValueOnce({ files: [], visibility: { status: "ready", rules: [{ path: "B.md", visibility: "hidden" }] } });
   await act(async () => { await result.current.refreshFiles(); });
   const old = deferred<ListWorkspaceFilesResult>();
   listWorkspaceFiles.mockReturnValueOnce(old.promise);
   const pending = result.current.refreshFiles();
   rerender({ workspaceId: "B" });
   expect(result.current.visibility.status).toBe("unavailable");
-  listWorkspaceFiles.mockResolvedValueOnce({ files: [{ path: "B.md", kind: "file" }], visibility: { status: "ready", hiddenHostPaths: [] } });
+  listWorkspaceFiles.mockResolvedValueOnce({ files: [{ path: "B.md", kind: "file" }], visibility: { status: "ready", rules: [] } });
   await act(async () => { await result.current.refreshFiles(); });
-  await act(async () => { old.resolve({ files: [], visibility: { status: "ready", hiddenHostPaths: ["B.md"] } }); await pending; });
+  await act(async () => { old.resolve({ files: [], visibility: { status: "ready", rules: [{ path: "B.md", visibility: "hidden" }] } }); await pending; });
   expect(result.current.files[0]?.path).toBe("B.md");
-  expect(result.current.visibility.hiddenHostPaths.size).toBe(0);
+  expect(result.current.visibility.rules).toEqual([]);
+ });
+
+ it("round2 withholds a stale ready verdict after refresh failure and rejects earlier recovery", async () => {
+  const { result } = renderHook(() => useWorkspaceListing("A"));
+  const answer: ListWorkspaceFilesResult = { files: [{ path: "private.md", kind: "file" }], visibility: { status: "ready", rules: [] } };
+  listWorkspaceFiles.mockResolvedValueOnce(answer);
+  await act(async () => { await result.current.refreshFiles(); });
+  const old = deferred<ListWorkspaceFilesResult>();
+  listWorkspaceFiles.mockReturnValueOnce(old.promise);
+  const pending = result.current.refreshFiles();
+  listWorkspaceFiles.mockRejectedValueOnce(new Error("policy refresh failed"));
+  await act(async () => { await expect(result.current.refreshFiles()).rejects.toThrow("policy refresh failed"); });
+  expect(result.current.visibility.status).toBe("unavailable");
+  await act(async () => { old.resolve(answer); await pending; });
+  expect(result.current.visibility.status).toBe("unavailable");
+  listWorkspaceFiles.mockResolvedValueOnce(answer);
+  await act(async () => { await result.current.refreshFiles(); });
+  expect(result.current.visibility.status).toBe("ready");
+ });
+ it("round2 settles B after the last outstanding request from A finishes", async () => {
+  const { result, rerender } = renderHook(({ workspaceId }) => useWorkspaceListing(workspaceId), { initialProps: { workspaceId: "A" } });
+  const old = deferred<ListWorkspaceFilesResult>();
+  listWorkspaceFiles.mockReturnValueOnce(old.promise);
+  const pending = result.current.refreshFiles();
+  rerender({ workspaceId: "B" });
+  const answer: ListWorkspaceFilesResult = { files: [], visibility: { status: "ready", rules: [] } };
+  listWorkspaceFiles.mockResolvedValueOnce(answer);
+  await act(async () => { await result.current.refreshFiles(); });
+  const settled = result.current.listingsSettled;
+  await act(async () => { old.resolve(answer); await pending; });
+  expect(result.current.listingsSettled).toBe(settled + 1);
+ });
+
+ it("preserves equal rule references across repeated reads", async () => {
+  const { result } = renderHook(() => useWorkspaceListing("A"));
+  const answer: ListWorkspaceFilesResult = { files: [], visibility: { status: "ready", rules: [{ path: "private/**", visibility: "hidden" }] } };
+  listWorkspaceFiles.mockResolvedValueOnce(answer);
+  await act(async () => { await result.current.refreshFiles(); });
+  const visibility = result.current.visibility;
+  listWorkspaceFiles.mockResolvedValueOnce({ ...answer, visibility: { ...answer.visibility, rules: answer.visibility.rules.map(rule => ({ ...rule })) } });
+  await act(async () => { await result.current.refreshFiles(); });
+  expect(result.current.visibility).toBe(visibility);
+ });
+
+ it("withholds immediately after a policy event and cannot accept pre-event rules", async () => {
+  const { result } = renderHook(() => useWorkspaceListing("A"));
+  const answer: ListWorkspaceFilesResult = { files: [], visibility: { status: "ready", rules: [] } };
+  listWorkspaceFiles.mockResolvedValueOnce(answer);
+  await act(async () => { await result.current.refreshFiles(); });
+  const old = deferred<ListWorkspaceFilesResult>();
+  listWorkspaceFiles.mockReturnValueOnce(old.promise);
+  const pending = result.current.refreshFiles();
+  act(() => { result.current.invalidateVisibility(); });
+  expect(result.current.visibility.status).toBe("unavailable");
+  await act(async () => { old.resolve(answer); await pending; });
+  expect(result.current.visibility.status).toBe("unavailable");
+  listWorkspaceFiles.mockResolvedValueOnce(answer);
+  await act(async () => { await result.current.refreshFiles(); });
+  expect(result.current.visibility.status).toBe("ready");
  });

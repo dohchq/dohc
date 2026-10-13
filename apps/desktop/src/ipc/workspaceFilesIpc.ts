@@ -292,7 +292,7 @@ export function createWorkspaceFilesIpc<
             allowCached: input.allowCached === true,
             load: async () => await listOwnedWorkspaceFilesFor(workspace),
           });
-          const visibility = await readWorkspaceListingVisibility(workspace, listing);
+          const visibility = await readWorkspaceListingVisibility(workspace);
           return ListWorkspaceFilesResult.parse({ ...listing, visibility });
         },
       );

@@ -1,3 +1,4 @@
+import { sameVisibilityPolicy, type VisibilityPolicyRule } from "@dohc/security-contract/visibility-policy";
 import { useCallback, useMemo, useRef, useState } from "react";
 import type { WorkspaceFileEntry, WorkspaceListingVisibility } from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
@@ -7,15 +8,20 @@ import {
   type WorkbenchState,
 } from "../workbench/workbenchState";
 
-type ListingVisibility = { status: WorkspaceListingVisibility["status"]; hiddenHostPaths: ReadonlySet<string> };
-const unavailableVisibility: ListingVisibility = { status: "unavailable", hiddenHostPaths: new Set<string>() };
+type ListingVisibility = { status: WorkspaceListingVisibility["status"]; rules: readonly VisibilityPolicyRule[] };
+const unavailableVisibility: ListingVisibility = { status: "unavailable", rules: [] };
 
 export function useWorkspaceListing(workspaceId: string) {
-  const workspaceToken = useRef({ workspaceId });
-  if (workspaceToken.current.workspaceId !== workspaceId) workspaceToken.current = { workspaceId };
+  const workspaceToken = useRef({ workspaceId, visibilityGeneration: 0 });
+  if (workspaceToken.current.workspaceId !== workspaceId) workspaceToken.current = { workspaceId, visibilityGeneration: 0 };
   const token = workspaceToken.current;
   const [visibilitySnapshot, setVisibility] = useState({ token, verdict: unavailableVisibility });
   const visibility = visibilitySnapshot.token === token ? visibilitySnapshot.verdict : unavailableVisibility;
+  const invalidateVisibility = useCallback(() => {
+    if (workspaceToken.current !== token) return;
+    token.visibilityGeneration += 1;
+    setVisibility({ token, verdict: unavailableVisibility });
+  }, [token]);
   const [files, setFiles] = useState<WorkspaceFileEntry[]>([]);
   // An empty workspace also lists zero files, so freshness needs its own flag.
   // A completed main-process cache hit can paint the explorer immediately,
@@ -56,6 +62,7 @@ export function useWorkspaceListing(workspaceId: string) {
   const refreshFiles = useCallback(
     async (options: { allowCached?: true } = {}) => {
       const request = ++filesRequest.current;
+      const visibilityGeneration = token.visibilityGeneration;
       pendingFilesRequests.current += 1;
       try {
         const result = await bridge().listWorkspaceFiles({
@@ -84,12 +91,11 @@ export function useWorkspaceListing(workspaceId: string) {
             ? current
             : nextFolders,
         );
-        setVisibility(current => {
+        if (visibilityGeneration === token.visibilityGeneration && request > failedFilesRequest.current) setVisibility(current => {
           const next = result.visibility;
           return current.token === token && current.verdict.status === next.status &&
-            current.verdict.hiddenHostPaths.size === next.hiddenHostPaths.length &&
-            next.hiddenHostPaths.every(path => current.verdict.hiddenHostPaths.has(path))
-            ? current : { token, verdict: { status: next.status, hiddenHostPaths: new Set(next.hiddenHostPaths) } };
+            sameVisibilityPolicy(current.verdict.rules, next.rules)
+            ? current : { token, verdict: { status: next.status, rules: next.rules } };
         });
         setFilesRevalidated(result.cached !== true);
         setFileListingCommit({
@@ -100,11 +106,12 @@ export function useWorkspaceListing(workspaceId: string) {
       } catch (error) {
         if (workspaceToken.current === token && request > failedFilesRequest.current) {
           failedFilesRequest.current = request;
+          if (request > committedFilesRequest.current) setVisibility({ token, verdict: unavailableVisibility });
         }
         throw error;
       } finally {
         pendingFilesRequests.current -= 1;
-        if (workspaceToken.current === token && pendingFilesRequests.current === 0) {
+        if (pendingFilesRequests.current === 0) {
           setListingsSettled((settled) => settled + 1);
         }
       }
@@ -155,6 +162,7 @@ export function useWorkspaceListing(workspaceId: string) {
     files,
     folders,
     visibility,
+    invalidateVisibility,
     fileIndex,
     filesRevalidated,
     listingsSettled,

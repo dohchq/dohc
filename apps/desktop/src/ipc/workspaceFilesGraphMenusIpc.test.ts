@@ -499,14 +499,14 @@ describe("registered native menu handlers", () => {
   const h = await harness();
   await writeFile(join(h.workspace.rootPath, "private.md"), "private");
   const first = await h.invoke(CHANNELS.listWorkspaceFiles);
-  expect(first).toMatchObject({ visibility: { status: "ready", hiddenHostPaths: [] } });
+  expect(first).toMatchObject({ visibility: { status: "ready", rules: [] } });
   await mkdir(join(h.workspace.rootPath, ".dohc"), { recursive: true });
   await writeFile(join(h.workspace.rootPath, ".dohc/visibility.toml"), '[[rule]]\npath = "private.md"\nvisibility = "hidden"');
   h.listings.invalidate({ workspaceId: "workspace", paths: [".dohc/visibility.toml"], pathSetChanged: false });
   expect(await h.invoke(CHANNELS.listWorkspaceFiles, { workspaceId: "workspace", allowCached: true })).toMatchObject({
-    files: [{ path: "private.md" }], visibility: { status: "ready", hiddenHostPaths: ["private.md"] },
+    files: [{ path: "private.md" }], visibility: { status: "ready", rules: [{ path: "private.md", visibility: "hidden" }] },
   });
-  expect(h.listing).toHaveBeenCalledTimes(2);
+  expect(h.listing).toHaveBeenCalledTimes(1);
 });
 
  it.each(["retireRenderer", "retirePhysical", "reenterWorkspace"] as const)("rejects %s while visibility verdicts are in flight", async invalidate => {
@@ -518,7 +518,7 @@ describe("registered native menu handlers", () => {
     const reading = h.invoke(CHANNELS.listWorkspaceFiles);
     await started.promise;
     h[invalidate]();
-    verdict.resolve({ status: "ready", hiddenHostPaths: ["A.md"] });
+    verdict.resolve({ status: "ready", rules: [{ path: "A.md", visibility: "hidden" }] });
     await expect(reading).rejects.toThrow();
   } finally { spy.mockRestore(); }
  });

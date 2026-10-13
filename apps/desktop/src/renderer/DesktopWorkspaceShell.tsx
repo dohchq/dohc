@@ -43,6 +43,7 @@ import type {
 } from "../ipc/bridgeContract";
 import {
   activityPathsAffectWorkspaceListing,
+  isWorkspaceVisibilityPolicyPath,
   ENGINE_STORE_BACKUP_DIR,
   engineStoreRefusalRecovery,
   engineStoreRefusalSentence,
@@ -532,6 +533,7 @@ export function DesktopWorkspaceShell(props: {
     filesRevalidated,
     listingsSettled,
     fileListingCommit,
+    invalidateVisibility,
     refreshFiles,
     hasCommittedListing,
     prepareRestoredTabPruning,
@@ -3661,6 +3663,7 @@ export function DesktopWorkspaceShell(props: {
       (event: WorkspaceActivityEvent) => {
         const paths =
           event.workspaceId === workspaceId ? event.paths : undefined;
+        if (paths?.some(path => isWorkspaceVisibilityPolicyPath(path, bridge().platform))) invalidateVisibility();
         if (event.workspaceId === workspaceId && event.pathSetChanged === false &&
           (!paths?.length || activityPathsAffectWorkspaceListing(paths, bridge().platform))) {
           if (filesRefreshMode !== "full") filesRefreshMode = "cached";
@@ -3693,6 +3696,7 @@ export function DesktopWorkspaceShell(props: {
     refreshKeptCopies,
     captureRecoveries,
     hasCommittedListing,
+    invalidateVisibility,
   ]);
 
   useEffect(() => {

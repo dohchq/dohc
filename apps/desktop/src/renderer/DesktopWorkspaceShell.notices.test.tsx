@@ -1480,7 +1480,7 @@ describe("file transfers", () => {
 
   function sharedViewBridge(refreshOk: boolean[]) {
     const bridge = makeBridge(Promise.resolve(null));
-    bridge.listWorkspaceFiles.mockResolvedValue({ visibility: { status: "ready" as const, hiddenHostPaths: [] }, files: [{ path: "notes/a.md", kind: "file" }], folders: ["notes"] });
+    bridge.listWorkspaceFiles.mockResolvedValue({ visibility: { status: "ready" as const, rules: [] }, files: [{ path: "notes/a.md", kind: "file" }], folders: ["notes"] });
     bridge.showExplorerMenu.mockResolvedValue("import-files");
     bridge.refreshSharedView = vi.fn(async () =>
       refreshOk.shift() === false
@@ -1545,7 +1545,7 @@ describe("file transfers", () => {
 
   it("names what landed and why an ordinary import stopped, keeps the raw error for Copy, and Try again asks for files for the same folder", async () => {
     const bridge = makeBridge(Promise.resolve(null));
-    bridge.listWorkspaceFiles.mockResolvedValue({ visibility: { status: "ready" as const, hiddenHostPaths: [] }, files: [{ path: "notes/a.md", kind: "file" }], folders: ["notes"] });
+    bridge.listWorkspaceFiles.mockResolvedValue({ visibility: { status: "ready" as const, rules: [] }, files: [{ path: "notes/a.md", kind: "file" }], folders: ["notes"] });
     bridge.showExplorerMenu.mockResolvedValue("import-files");
     bridge.importWorkspaceFiles.mockResolvedValueOnce({
       imported: ["notes/one.md"],

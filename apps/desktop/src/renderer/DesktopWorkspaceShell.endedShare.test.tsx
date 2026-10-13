@@ -37,7 +37,7 @@ const ENDED_SENTENCE = "This share was ended by granter@dohc.test. Your copy sta
 
 function collectionBridge() {
   const bridge = makeShareBridge(Promise.resolve(storedStateWithTabs([collectionTabPath("tasks")])));
-  bridge.listWorkspaceFiles.mockResolvedValue({ visibility: { status: "ready" as const, hiddenHostPaths: [] }, files: [{ path: "tasks/retained.md", kind: "file" }], folders: ["tasks"] });
+  bridge.listWorkspaceFiles.mockResolvedValue({ visibility: { status: "ready" as const, rules: [] }, files: [{ path: "tasks/retained.md", kind: "file" }], folders: ["tasks"] });
   bridge.listCollections.mockResolvedValue({ collections: [{ path: "tasks", objectId: "schema", status: "valid", reasons: [] }] });
   bridge.getCollection.mockResolvedValue({
     path: "tasks", objectId: "schema", status: "valid", reasons: [], recordCount: 1,

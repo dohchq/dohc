@@ -109,6 +109,8 @@ export class WorkspaceFileListingCache {
     const entry = this.#listings.get(workspaceId);
     if (!entry || entry.attachmentId !== attachmentId) return;
     for (const fact of facts) {
+      // Rules are read separately on every IPC response; they cannot change this path cache.
+      if (isWorkspaceVisibilityPolicyPath(fact.path, this.platform)) continue;
       if (fact.kind !== "changed") { this.#listings.delete(workspaceId); return; }
       entry.changed.add(fact.path);
       const file = entry.files.get(fact.path);
@@ -124,10 +126,10 @@ export class WorkspaceFileListingCache {
       this.#listings.clear();
       return;
     }
-    if (event.pathSetChanged === false && !event.paths?.some(path => isWorkspaceVisibilityPolicyPath(path, this.platform))) return;
+    if (event.pathSetChanged === false) return;
     if (
       !event.paths?.length ||
-      activityPathsAffectWorkspaceListing(event.paths, this.platform)
+      activityPathsAffectWorkspaceListing(event.paths.filter(path => !isWorkspaceVisibilityPolicyPath(path, this.platform)), this.platform)
     ) {
       this.#listings.delete(event.workspaceId);
     }

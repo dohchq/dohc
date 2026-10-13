@@ -318,7 +318,7 @@ describe("collection folders", () => {
 
   it("reserves pending record names and retries the same partial identity", async () => {
     const bridge = makeBridge(Promise.resolve(null));
-    bridge.listWorkspaceFiles = vi.fn(async () => ({ visibility: { status: "ready" as const, hiddenHostPaths: [] }, files: [], folders: ["tasks"] }));
+    bridge.listWorkspaceFiles = vi.fn(async () => ({ visibility: { status: "ready" as const, rules: [] }, files: [], folders: ["tasks"] }));
     bridge.listCollections = vi.fn(async () => ({ collections: [{ path: "tasks", objectId: "object-test", status: "valid" as const, reasons: [] }] }));
     const pending = deferred<Awaited<ReturnType<typeof bridge.createCollectionRecord>>>();
     bridge.createCollectionRecord.mockImplementationOnce(() => pending.promise);
@@ -347,7 +347,7 @@ describe("collection folders", () => {
 
   it("opens a collection folder as its views tab with the settled empty state", async () => {
     const bridge = makeBridge(Promise.resolve(null));
-    bridge.listWorkspaceFiles = vi.fn(async () => ({ visibility: { status: "ready" as const, hiddenHostPaths: [] },
+    bridge.listWorkspaceFiles = vi.fn(async () => ({ visibility: { status: "ready" as const, rules: [] },
       files: [{ path: "tasks/one.md", kind: "file" as const }],
       folders: ["tasks"],
     }));
@@ -397,7 +397,7 @@ describe("collection folders", () => {
   it("keeps a queued record edit when a file opens while the first save is pending", async () => {
     const user = userEvent.setup();
     const bridge = makeBridge(Promise.resolve(null));
-    bridge.listWorkspaceFiles = vi.fn(async () => ({ visibility: { status: "ready" as const, hiddenHostPaths: [] },
+    bridge.listWorkspaceFiles = vi.fn(async () => ({ visibility: { status: "ready" as const, rules: [] },
       files: [
         { path: "tasks/one.md", kind: "file" as const },
         { path: "tasks/two.md", kind: "file" as const },
@@ -804,7 +804,7 @@ describe("file tree drag preview", () => {
 
   it("highlights a hovered folder and its visible contents", async () => {
     const bridge = makeBridge(Promise.resolve(null));
-    bridge.listWorkspaceFiles.mockResolvedValue({ visibility: { status: "ready" as const, hiddenHostPaths: [] },
+    bridge.listWorkspaceFiles.mockResolvedValue({ visibility: { status: "ready" as const, rules: [] },
       files: [
         { path: "docs/a.md", kind: "file" as const },
         { path: "docs/b.md", kind: "file" as const },
@@ -1090,7 +1090,7 @@ describe("open editors", () => {
 
   it("numbers untitled text files after case-insensitive file and folder matches", async () => {
     const bridge = makeBridge(Promise.resolve(null));
-    bridge.listWorkspaceFiles.mockResolvedValue({ visibility: { status: "ready" as const, hiddenHostPaths: [] },
+    bridge.listWorkspaceFiles.mockResolvedValue({ visibility: { status: "ready" as const, rules: [] },
       files: [{ path: "untitled.txt", kind: "file" as const }],
       folders: ["UNTITLED 2.TXT"],
     });
@@ -1133,7 +1133,7 @@ describe("open editors", () => {
 
   it("creates files and folders from the files title actions at the focused tree context", async () => {
     const bridge = makeBridge(Promise.resolve(null));
-    bridge.listWorkspaceFiles.mockResolvedValue({ visibility: { status: "ready" as const, hiddenHostPaths: [] },
+    bridge.listWorkspaceFiles.mockResolvedValue({ visibility: { status: "ready" as const, rules: [] },
       files: [{ path: "docs/a.md", kind: "file" as const }],
       folders: ["docs"],
     });
@@ -1166,7 +1166,7 @@ describe("open editors", () => {
 
   it("collapses all expanded folders from the files title action", async () => {
     const bridge = makeBridge(Promise.resolve(null));
-    bridge.listWorkspaceFiles.mockResolvedValue({ visibility: { status: "ready" as const, hiddenHostPaths: [] },
+    bridge.listWorkspaceFiles.mockResolvedValue({ visibility: { status: "ready" as const, rules: [] },
       files: [{ path: "docs/a.md", kind: "file" as const }],
       folders: ["docs"],
     });
@@ -1549,7 +1549,7 @@ describe("drawing entry point", () => {
 
   it("numbers drawings after case-insensitive file and folder matches", async () => {
     const bridge = makeBridge(Promise.resolve(null));
-    bridge.listWorkspaceFiles.mockResolvedValue({ visibility: { status: "ready" as const, hiddenHostPaths: [] },
+    bridge.listWorkspaceFiles.mockResolvedValue({ visibility: { status: "ready" as const, rules: [] },
       files: [{ path: "UNTITLED 2.EXCALIDRAW", kind: "file" as const }],
       folders: ["untitled.excalidraw"],
     });
@@ -1899,7 +1899,7 @@ describe("workbench render cost", () => {
   });
 
   it("does not skip an all-hidden window before the first listing commits", async () => {
-    const pending = deferred<{ visibility: { status: "ready"; hiddenHostPaths: string[] };
+    const pending = deferred<{ visibility: { status: "ready"; rules: [] };
       files: { path: string; kind: "file" }[];
       folders: string[];
     }>();
@@ -1932,7 +1932,7 @@ describe("workbench render cost", () => {
       });
     } finally {
       await act(async () => {
-        pending.resolve({ visibility: { status: "ready" as const, hiddenHostPaths: [] },
+        pending.resolve({ visibility: { status: "ready" as const, rules: [] },
           files: [{ path: "a.md", kind: "file" }],
           folders: [],
         });
