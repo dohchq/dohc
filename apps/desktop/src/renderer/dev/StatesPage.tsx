@@ -17,7 +17,7 @@ import type {
   UsageRecordRow,
 } from "../../ipc/bridgeContract";
 import { readError, withErrorWords } from "../../ipc/errorWords";
-import { CsvViewActions } from "../CsvView";
+import { CsvPreviewBound, CsvTable, CsvViewActions, numericColumns } from "../CsvView";
 import { DocumentMenu } from "../DocumentMenu";
 import { FrontmatterAsWritten } from "../FrontmatterAsWritten";
 import { TextViewActions } from "../TextEditorView";
@@ -1992,7 +1992,62 @@ function Pane(props: { theme: "light" | "dark" }) {
           />
         </Specimen>
       </Section>
+
+      {/* Last, so the parts above keep their places. A CSV's rows and
+          columns: numbers at the right in mono, row numbers in the gutter,
+          and each row's and column's actions only on hover or focus. */}
+      <Section part="data-grid" title="Data grid">
+        <Specimen label="CSV at rest: numbers, Add row and Add column">
+          <CsvGridSpecimen />
+        </Specimen>
+        <Specimen label="CSV a hovered row, pointer on Delete row">
+          <div data-force-state="hover" data-force-target="tbody tr:nth-child(2)">
+            <div data-force-state="hover" data-force-target="tbody tr:nth-child(2) [data-testid=csv-delete-row]">
+              <CsvGridSpecimen />
+            </div>
+          </div>
+        </Specimen>
+        <Specimen label="CSV a hovered header">
+          <div data-force-state="hover" data-force-target="thead th:nth-child(2)">
+            <CsvGridSpecimen />
+          </div>
+        </Specimen>
+        <Specimen label="CSV a focused cell">
+          <div data-force-state="focus-within" data-force-target="tbody tr:nth-child(1)">
+            <div data-force-state="focus-within" data-force-target="tbody tr:nth-child(1) td:nth-child(2)">
+              <CsvGridSpecimen />
+            </div>
+          </div>
+        </Specimen>
+        <Specimen label="CSV read-only">
+          <CsvGridSpecimen locked />
+        </Specimen>
+        <Specimen label="CSV empty">
+          <div className="flex h-44 w-80 flex-col">
+            <CsvGridSpecimen rows={[]} />
+          </div>
+        </Specimen>
+        <Specimen label="CSV the preview's bound">
+          <CsvPreviewBound rowCount={1240} />
+        </Specimen>
+      </Section>
     </section>
+  );
+}
+
+const GRID_FUNNEL = [
+  ["stage", "count", "conversion"],
+  ["Visited", "4820", "1.00"],
+  ["Signed up", "1290", "0.27"],
+  ["Created doc", "860", "0.18"],
+  ["Invited agent", "340", "0.07"],
+];
+
+function CsvGridSpecimen(props: { rows?: string[][]; locked?: boolean }) {
+  const rows = props.rows ?? GRID_FUNNEL;
+  return (
+    <CsvTable rows={rows} numeric={numericColumns(rows)} locked={props.locked ?? false} onUpdateCell={noop}
+      onDeleteRow={noop} onDeleteColumn={noop} onAddRow={noop} onAddColumn={noop} />
   );
 }
 
