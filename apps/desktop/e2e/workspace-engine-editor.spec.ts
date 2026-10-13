@@ -232,7 +232,7 @@ async function quitDesktop(desktop: Awaited<ReturnType<typeof launchDesktopApp>>
   await desktop.close();
 }
 
-test("an external edit to an idle open document is imported after restart", async () => {
+test("@restart-durability an external edit to an idle open document is imported after restart", async () => {
   test.setTimeout(120_000);
   const temp = await createTempWorkspace();
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
@@ -258,7 +258,7 @@ async function recoveredSiblings(rootPath: string, folder: string, stem: string)
   return names.filter(name => name.startsWith(prefix) && name.endsWith(".md")).map(name => `${folder}/${name}`);
 }
 
-test("overlapping typing on an externally edited document survives restart as a recovered copy", async () => {
+test("@restart-durability overlapping typing on an externally edited document survives restart as a recovered copy", async () => {
   test.setTimeout(120_000);
   const temp = await createTempWorkspace();
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
@@ -309,7 +309,7 @@ test("overlapping typing on an externally edited document survives restart as a 
   } finally {await cleanupDesktopWorkspace(desktop, temp);}
 });
 
-test("kept typing survives capture before the renderer reopens after restart", async () => {
+test("@restart-durability kept typing survives capture before the renderer reopens after restart", async () => {
   test.setTimeout(120_000);
   const temp = await createTempWorkspace();
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;

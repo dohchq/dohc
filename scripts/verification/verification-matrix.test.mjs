@@ -65,6 +65,7 @@ test("verification selects packages and proofs and prepares before parallel jobs
     ["pr", null, "rust"], ["pr", null, "rust-and-js"], ["pr", "rust", "rust"], ["pr", "js", "js"], ["pr", null, "js"],
     ["pr", null, "rust-source"], ["pr", null, "rust-cancel"],
     ["pr", "js", "accounts-skipped"], ["pr", "js", "desktop-skipped"], ["pr", "js", "onboarding-missing"],
+    ["pr", "js", "restart-missing"], ["pr", "js", "restart-skipped"],
     ["pr", "js", "native-skipped"], ["pr", "js", "accounts-cancelled"], ["pr", "js", "desktop-cancelled"],
     // The gallery is required only where it runs, so its missing-proof case exists only there.
     ...(process.platform === "win32" ? [["pr", "js", "gallery-missing"]] : []),
@@ -76,6 +77,8 @@ test("verification selects packages and proofs and prepares before parallel jobs
     ["pr", "js", "onboarding-missing", "apps/desktop/src/renderer/Widget.tsx"],
     ["pr", "js", "desktop-skipped", "apps/desktop/src/renderer/Widget.tsx"],
     ["pr", "js", "smoke-missing", "apps/desktop/src/renderer/Widget.tsx"],
+    ["pr", "js", "restart-missing", "apps/desktop/src/renderer/Widget.tsx"],
+    ["pr", "js", "restart-skipped", "apps/desktop/src/renderer/Widget.tsx"],
     ["pr", null, null, "apps/desktop/src/renderer/Widget.tsx", true],
     ...(process.platform === "win32" ? [["pr", "js", "gallery-missing", "apps/desktop/src/renderer/Widget.tsx"]] : []),
     ["pr", null, null, null, true], ["pr", "js", null, null, true], ["pr", "rust", null, null, true],
@@ -328,12 +331,13 @@ test("verification selects packages and proofs and prepares before parallel jobs
               return {stdout:''};
             }
             assert.ok(${desktop},'Unselected desktop proof');
-            const expected=process.env.FIXTURE_MODE==='e2e'?['--project','fixture']:['--grep',pr?'@verification-smoke'+(${desktopProof}?'|@self-host-onboarding':'')+(${gallery}?'|@states-page':''):'@verification-smoke'];
+            const expected=process.env.FIXTURE_MODE==='e2e'?['--project','fixture']:['--grep',pr?'@verification-smoke|@restart-durability'+(${desktopProof}?'|@self-host-onboarding':'')+(${gallery}?'|@states-page':''):'@verification-smoke'];
             assert.ok(args.some((arg,index)=>arg===expected[0] && args[index+1]===expected[1]));
-            const titles=[process.env.FIXTURE_FAULT==='smoke-missing'?'unrelated passing spec':'@verification-smoke persistence',...(pr && ${desktopProof}?[process.env.FIXTURE_FAULT==='onboarding-missing'?'@verification-smoke another persistence':'@self-host-onboarding account and sync']:[]),...(${gallery}?[process.env.FIXTURE_FAULT==='gallery-missing'?'@states-page the page stays closed':'@states-page @states-baselines every shared part']:[])];
+            const titles=[process.env.FIXTURE_FAULT==='smoke-missing'?'unrelated passing spec':'@verification-smoke persistence',...(pr?[process.env.FIXTURE_FAULT==='restart-missing'?'unrelated restart spec':'@restart-durability typing and outside edits']:[]),...(pr && ${desktopProof}?[process.env.FIXTURE_FAULT==='onboarding-missing'?'@verification-smoke another persistence':'@self-host-onboarding account and sync']:[]),...(${gallery}?[process.env.FIXTURE_FAULT==='gallery-missing'?'@states-page the page stays closed':'@states-page @states-baselines every shared part']:[])];
+            const restartSkipped=process.env.FIXTURE_FAULT==='restart-skipped';
             writeFileSync(options.env.PLAYWRIGHT_JSON_OUTPUT_NAME,JSON.stringify({
-              stats:{expected:pr?2:1,unexpected:process.env.FIXTURE_FAULT==='desktop-cancelled'?1:0,flaky:0,skipped:process.env.FIXTURE_FAULT==='desktop-skipped'?1:0},
-              suites:[{suites:[{specs:titles.map(title=>({title,ok:true,tests:[{results:[{status:'passed'}]}]}))}]}],
+              stats:{expected:titles.length-(restartSkipped?1:0),unexpected:process.env.FIXTURE_FAULT==='desktop-cancelled'?1:0,flaky:0,skipped:process.env.FIXTURE_FAULT==='desktop-skipped'||restartSkipped?1:0},
+              suites:[{suites:[{specs:titles.map(title=>({title,ok:true,tests:[{results:[{status:restartSkipped&&title.startsWith('@restart-durability ')?'skipped':'passed'}]}]}))}]}],
             }));
             return {stdout:''};
           }
@@ -403,7 +407,9 @@ test("verification selects packages and proofs and prepares before parallel jobs
           "desktop-cancelled": /Desktop verification did not complete a passing test run/,
           "desktop-skipped": /A mandatory desktop smoke test was skipped/,
           "smoke-missing": /did not pass every required proof: @verification-smoke/,
-          "onboarding-missing": /did not pass every required proof: @verification-smoke, @self-host-onboarding/,
+          "onboarding-missing": /did not pass every required proof: @verification-smoke, @restart-durability, @self-host-onboarding/,
+          "restart-missing": /did not pass every required proof: .*@restart-durability/,
+          "restart-skipped": /A mandatory desktop smoke test was skipped/,
           "gallery-missing": /did not pass every required proof: .*@states-baselines/,
         };
         assert.match(result.stderr, messages[fault]);

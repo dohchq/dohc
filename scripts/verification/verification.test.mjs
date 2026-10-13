@@ -39,18 +39,18 @@ test("desktop proof gets an isolated display only on headless Linux", () => {
   assert.deepEqual(desktopProofCommand(args, {platform: "linux", env: {WAYLAND_DISPLAY: "wayland-0"}}), direct);
 });
 
-test("renderer proofs require persistence smoke and the Windows pixel baseline without onboarding", () => {
+test("desktop proofs require restart durability alongside persistence and platform proofs", () => {
   const proofs = {smoke: true, statesPage: true};
   assert.deepEqual(desktopProofTags(proofs, {platform: "win32"}), {
-    selected: ["@verification-smoke", "@states-page"], required: ["@verification-smoke", "@states-baselines"],
+    selected: ["@verification-smoke", "@restart-durability", "@states-page"], required: ["@verification-smoke", "@restart-durability", "@states-baselines"],
   });
   for (const platform of ["linux", "darwin"]) {
     assert.deepEqual(desktopProofTags(proofs, {platform}), {
-      selected: ["@verification-smoke"], required: ["@verification-smoke"],
+      selected: ["@verification-smoke", "@restart-durability"], required: ["@verification-smoke", "@restart-durability"],
     });
   }
   assert.deepEqual(desktopProofTags({desktop: true}, {platform: "win32"}), {
-    selected: ["@verification-smoke", "@self-host-onboarding"], required: ["@verification-smoke", "@self-host-onboarding"],
+    selected: ["@verification-smoke", "@restart-durability", "@self-host-onboarding"], required: ["@verification-smoke", "@restart-durability", "@self-host-onboarding"],
   });
   assert.deepEqual(desktopProofTags({}, {platform: "win32"}), {selected: [], required: []});
 });
