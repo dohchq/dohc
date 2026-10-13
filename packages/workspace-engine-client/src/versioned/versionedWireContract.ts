@@ -306,6 +306,7 @@ type PublicationAppliedParams = JsonObject & { requestId: string; momentId: stri
 
 type HistoryPageParams = JsonObject & {
   workspaceId: string;
+  operationId?: string;
   versionId?: string;
   objectId?: string;
   limit?: number;
@@ -1009,7 +1010,7 @@ const HistoryMomentPositionSchema = mutableStruct({ recordedAtMs: Schema.Int, mo
 const HistoryMarkerPositionSchema = mutableStruct({ createdAtMs: Schema.Int, versionId: Schema.String });
 const HistoryCursorSchema = mutableStruct({
   format: Schema.Literal(1), engineUuid: Schema.String, workspaceId: Schema.String,
-  versionId: Schema.String, objectId: NullableString,
+  versionId: Schema.String, objectId: NullableString, operationId: NullableString,
   textFence: Schema.Int, protectedFence: Schema.Int, markerFence: Schema.Int,
   text: Schema.NullOr(HistoryMomentPositionSchema), protected: Schema.NullOr(HistoryMomentPositionSchema),
   marker: Schema.NullOr(HistoryMarkerPositionSchema),
@@ -1017,18 +1018,14 @@ const HistoryCursorSchema = mutableStruct({
 export type HistoryCursor = typeof HistoryCursorSchema.Type;
 const HistoryMomentMetadataSchema = mutableStruct({
   momentOrder: Schema.Int, momentId: Schema.String, versionId: Schema.String, objectId: Schema.String,
-  path: Schema.String, recordedAtMs: Schema.Int, operation: Schema.Literals(["write", "delete", "rename"]),
+  path: Schema.String, beforePath: NullableString, recordedAtMs: Schema.Int, operation: Schema.Literals(["write", "delete", "rename"]),
   afterContentKind: ContentKindSchema, afterByteLength: NullableInt, metadataOrigin: Schema.String,
   metadataSummary: Schema.optionalKey(NullableString), metadataCorrelationId: Schema.optionalKey(NullableString),
   authors: MomentAuthorsSchema, syncRecordOnly: Schema.Boolean,
 });
 export type HistoryMomentMetadata = typeof HistoryMomentMetadataSchema.Type;
-const OperationMomentSchema = mutableStruct({
-  momentId: Schema.String, objectId: Schema.String, operation: Schema.Literals(["write", "rename", "delete"]),
-  path: Schema.String, beforePath: NullableString, momentOrder: Schema.Int,
-});
-const HistoryOperationSchema = mutableStruct({operationId: Schema.String, versionId: Schema.String, moments: Schema.mutable(Schema.Array(OperationMomentSchema))});
-const HistoryUndoSchema = mutableStruct({...HistoryOperationSchema.fields, deduped: Schema.Boolean, materialized: Schema.Boolean});
+const HistoryOperationSchema = mutableStruct({operationId: Schema.String, versionId: Schema.String, momentCount: Schema.Int});
+const HistoryUndoSchema = mutableStruct({...HistoryOperationSchema.fields, compensationOperationId: Schema.String, deduped: Schema.Boolean, materialized: Schema.Boolean});
 const HistoryPageResultSchema = mutableStruct({
   activeVersion: VersionRecordSchema,
   moments: Schema.mutable(Schema.Array(HistoryMomentMetadataSchema)),

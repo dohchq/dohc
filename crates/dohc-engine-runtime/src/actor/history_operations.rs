@@ -10,7 +10,8 @@ use crate::RuntimeError;
 use dohc_engine_domain::{
     DomainError, OperationMoment, VersionedTextStore, binary_rename_delete_job_id,
     binary_rename_write_job_id, binary_rollback_job_identity, operation_moments_in,
-    undo_operation_in_tx,
+    preflight_undo_operation_in, undo_correlation_id, undo_operation_in_tx,
+    undo_request_is_replay_in, validate_operation_id,
 };
 use dohc_engine_storage::{
     EngineStore, FaultInjector, JobStatus, MaterializationJobSpec, Preimage, StorageError,
@@ -34,11 +35,53 @@ pub struct HistoryUndoResult {
     pub operation_id: String,
     pub version_id: String,
     pub moments: Vec<OperationMoment>,
+    pub compensation_operation_id: String,
     pub deduped: bool,
     pub materialized: bool,
 }
 
 impl ActorHandle {
+    pub async fn preflight_history_undo(
+        &self,
+        ws: String,
+        operation: String,
+        request: String,
+        author: Option<String>,
+    ) -> Result<(), RuntimeError> {
+        self.run(move |store, _| {
+            validate_operation_id(&operation)?;
+            let version = VersionedTextStore::new(store)
+                .get_active_version(&ws)?
+                .version_id;
+            let available = store.read_with(|conn| -> Result<bool, DomainError> {
+                if undo_request_is_replay_in(conn, &ws, &operation, &request, author.as_deref())? {
+                    return Ok(true);
+                }
+                conn.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM moments m WHERE m.workspace_id=?1
+                        AND m.version_id=?2 AND m.metadata_correlation_id=?3
+                        AND coalesce(m.sync_record_only,0)=0
+                        AND NOT EXISTS(SELECT 1 FROM replication_log r
+                            WHERE r.workspace_id=m.workspace_id AND r.imported=1
+                            AND r.op_kind='moment.append'
+                            AND json_extract(r.payload_json,'$.momentId')=m.moment_id))",
+                    params![ws, version, operation],
+                    |r| r.get(0),
+                )
+                .map_err(|e| DomainError::Storage(StorageError::corrupt_public(e)))
+            })?;
+            if !available {
+                return Err(DomainError::UndoRefused {
+                    path: operation,
+                    reason: "operation unavailable",
+                }
+                .into());
+            }
+            Ok(())
+        })
+        .await
+    }
+
     pub async fn admit_history_operation(
         &self,
         ws: String,
@@ -128,6 +171,69 @@ fn undo_job_ids(ws: &str, version: &str, m: &OperationMoment) -> Vec<String> {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    static UNDO_PROBE_OBSERVER: std::cell::RefCell<Option<Box<dyn Fn()>>> = std::cell::RefCell::new(None);
+}
+
+fn probe_undo_source(root: &Path, path: &str) -> dohc_engine_files::ProjectionTargetState {
+    #[cfg(test)]
+    UNDO_PROBE_OBSERVER.with(|observer| {
+        if let Some(observer) = observer.borrow().as_ref() {
+            observer();
+        }
+    });
+    dohc_engine_files::probe_projection_target(
+        root,
+        path,
+        dohc_engine_files::ProjectionTargetKind::Plaintext,
+    )
+}
+
+fn check_undo_ownership(
+    conn: &rusqlite::Connection,
+    ws: &str,
+    version: &str,
+    m: &OperationMoment,
+) -> Result<(), RuntimeError> {
+    for path in std::iter::once(m.path.as_str()).chain(m.before_path.as_deref()) {
+        let held: Option<String> = conn
+            .query_row(
+                "SELECT path FROM capture_file_holds
+             WHERE workspace_id=?1 AND (path=?2 OR object_id=?3) LIMIT 1",
+                params![ws, path, m.object_id],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(StorageError::corrupt_public)?;
+        if let Some(path) = held {
+            return Err(DomainError::UndoRefused {
+                path,
+                reason: "capture hold",
+            }
+            .into());
+        }
+        dohc_engine_sync::ensure_no_adopted_owner_under_path(conn, ws, version, path)?;
+    }
+    Ok(())
+}
+
+fn rename_head_sha(
+    conn: &rusqlite::Connection,
+    ws: &str,
+    version: &str,
+    object: &str,
+) -> Result<String, RuntimeError> {
+    conn.query_row(
+        "SELECT CASE content_kind WHEN 'binary' THEN binary_sha256 ELSE blob_sha256 END
+         FROM snapshots WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+        params![ws, version, object],
+        |r| r.get(0),
+    )
+    .map_err(StorageError::corrupt_public)
+    .map_err(RuntimeError::from)
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn history_undo_on_store(
     store: &mut EngineStore,
@@ -143,43 +249,159 @@ pub(super) fn history_undo_on_store(
     let version_id = VersionedTextStore::new(store)
         .get_active_version(ws)?
         .version_id;
-    let result=store.write_with(faults,|tx| {
-        let replay:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM engine_requests WHERE request_id=?1)",[request],|r|r.get(0)).map_err(StorageError::corrupt_public)?;
-        if !replay {
-            for m in operation_moments_in(tx,ws,&version_id,operation)? {
-                for path in std::iter::once(m.path.as_str()).chain(m.before_path.as_deref()) {
-                    let held:Option<String>=tx.query_row("SELECT path FROM capture_file_holds WHERE workspace_id=?1 AND (path=?2 OR object_id=?3) LIMIT 1",params![ws,path,m.object_id],|r|r.get(0)).optional().map_err(StorageError::corrupt_public)?;
-                    if let Some(path)=held {return Err(DomainError::UndoRefused {path,reason:"capture hold"}.into());}
-                    dohc_engine_sync::ensure_no_adopted_owner_under_path(tx,ws,&version_id,path)?;
+    // The actor and workspace fence stay held, but disk reads do not hold SQLite's writer.
+    let proofs = store.read_with(|conn| -> Result<_, RuntimeError> {
+        let replay = undo_request_is_replay_in(conn, ws, operation, request, author)?;
+        if replay {
+            return Ok(Vec::new());
+        }
+        for m in operation_moments_in(conn, ws, &version_id, operation)? {
+            check_undo_ownership(conn, ws, &version_id, &m)?;
+        }
+        let originals = preflight_undo_operation_in(conn, ws, &version_id, operation)?;
+        originals
+            .into_iter()
+            .map(|m| {
+                let source = if m.operation == "rename" {
+                    let sha = rename_head_sha(conn, ws, &version_id, &m.object_id)?;
+                    let stamp = dohc_engine_files::projection_target_stamp(root, &m.path);
+                    let digest = probe_undo_source(root, &m.path);
+                    if !matches!(stamp, dohc_engine_files::ProjectionTargetStamp::File { .. })
+                        || dohc_engine_files::projection_target_stamp(root, &m.path) != stamp
+                        || !matches!(digest,
+                            dohc_engine_files::ProjectionTargetState::Text { sha256 }
+                            | dohc_engine_files::ProjectionTargetState::Binary { sha256 }
+                            if sha256 == sha)
+                    {
+                        return Err(DomainError::UndoRefused {
+                            path: m.path.clone(),
+                            reason: "source changed on disk",
+                        }
+                        .into());
+                    }
+                    Some((sha, stamp))
+                } else {
+                    None
+                };
+                Ok((m, source))
+            })
+            .collect::<Result<Vec<_>, RuntimeError>>()
+    })?;
+    let result = store.write_with(faults, |tx| {
+        for (m, source) in &proofs {
+            check_undo_ownership(tx, ws, &version_id, m)?;
+            if let Some((sha, stamp)) = source {
+                if rename_head_sha(tx, ws, &version_id, &m.object_id)? != *sha
+                    || dohc_engine_files::projection_target_stamp(root, &m.path) != *stamp
+                {
+                    return Err(DomainError::UndoRefused {
+                        path: m.path.clone(),
+                        reason: "source changed on disk",
+                    }
+                    .into());
                 }
-                if m.operation=="rename" {
-                    let head:Option<(String,String)>=tx.query_row("SELECT path,CASE content_kind WHEN 'binary' THEN binary_sha256 ELSE blob_sha256 END FROM snapshots WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",params![ws,version_id,m.object_id],|r|Ok((r.get(0)?,r.get(1)?))).optional().map_err(StorageError::corrupt_public)?;
-                    let (path,sha)=head.ok_or_else(||DomainError::UndoRefused {path:m.path.clone(),reason:"object moved or removed"})?;
-                    if path!=m.path {return Err(DomainError::UndoRefused {path,reason:"object moved or removed"}.into());}
-                    if !matches!(dohc_engine_files::probe_projection_target(root,&m.path,dohc_engine_files::ProjectionTargetKind::Plaintext),dohc_engine_files::ProjectionTargetState::Text {sha256} | dohc_engine_files::ProjectionTargetState::Binary {sha256} if sha256==sha) {return Err(DomainError::UndoRefused {path:m.path.clone(),reason:"source changed on disk"}.into());}
+            }
+            let target = m.before_path.as_deref().unwrap_or(&m.path);
+            if dohc_engine_files::projection_target_stamp(root, target)
+                != dohc_engine_files::ProjectionTargetStamp::Absent
+            {
+                return Err(DomainError::UndoRefused {
+                    path: target.into(),
+                    reason: "old path occupied on disk",
                 }
-                let target=m.before_path.as_deref().unwrap_or(&m.path);
-                if !matches!(dohc_engine_files::probe_projection_target(root,target,dohc_engine_files::ProjectionTargetKind::Plaintext),dohc_engine_files::ProjectionTargetState::Absent) {
-                    return Err(DomainError::UndoRefused {path:target.into(),reason:"old path occupied on disk"}.into());
-                }
+                .into());
             }
         }
-        undo_operation_in_tx(tx,ws,&version_id,operation,request,author,now,|tx,m| {
-            let (path,text,kind,sha):(String,Option<String>,String,String)=tx.query_row("SELECT s.path,b.text,s.content_kind,CASE s.content_kind WHEN 'binary' THEN s.binary_sha256 ELSE s.blob_sha256 END FROM snapshots s LEFT JOIN blobs b ON b.sha256=s.blob_sha256 WHERE s.workspace_id=?1 AND s.version_id=?2 AND s.object_id=?3",params![ws,version_id,m.object_id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).map_err(StorageError::corrupt_public)?;
-            let head=if kind=="text" {dohc_engine_sync::ResultingHead::Text {path:&path,text:text.as_deref().unwrap_or("")}} else {dohc_engine_sync::ResultingHead::BinaryOrAbsent};
-            dohc_engine_sync::reconcile_local_resulting_head_in_tx(tx,ws,&version_id,&m.object_id,head,None,None,now).map_err(|e|DomainError::Storage(StorageError::persist_public(std::io::Error::other(e))))?;
-            crate::search::delete_file_search_index(tx,ws,&version_id,&m.object_id).map_err(super::search::search_domain)?;
-            if let Some(text)=text.as_deref() {crate::search::upsert_file_search_index(tx,root,ws,&version_id,&m.object_id,&path,&text).map_err(super::search::search_domain)?;}
-            let rename=m.operation==dohc_engine_domain::MomentOp::Rename;
-            {
-                let job_identity=binary_rollback_job_identity(ws,&version_id,&m.moment_id);
-                let spec=MaterializationJobSpec {job_id:if rename {binary_rename_write_job_id(&job_identity)} else {job_identity.clone()},workspace_id:ws.into(),target_path:path,content_sha256:sha.clone(),preimage:Preimage::Absent,target_generation:m.moment_order,now_ms:now};
-                enqueue_job(tx,&spec)?;
-                if rename {enqueue_delete_job(tx,&MaterializationJobSpec {job_id:binary_rename_delete_job_id(&job_identity),target_path:m.before_path.clone().ok_or(DomainError::StateCorrupt {reason:"inverse rename lost path"})?,preimage:Preimage::Present(sha),..spec})?;}
-            }
-            journal_moment_outbound_in_tx(tx,ws,&m.moment_id,false)?;
-            Ok(())
-        }).map_err(RuntimeError::from)
+        undo_operation_in_tx(
+            tx,
+            ws,
+            &version_id,
+            operation,
+            request,
+            author,
+            now,
+            |tx, m| {
+                let (path, text, kind, sha): (String, Option<String>, String, String) = tx
+                    .query_row(
+                        "SELECT s.path,b.text,s.content_kind,
+                    CASE s.content_kind WHEN 'binary' THEN s.binary_sha256 ELSE s.blob_sha256 END
+                 FROM snapshots s LEFT JOIN blobs b ON b.sha256=s.blob_sha256
+                 WHERE s.workspace_id=?1 AND s.version_id=?2 AND s.object_id=?3",
+                        params![ws, version_id, m.object_id],
+                        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                    )
+                    .map_err(StorageError::corrupt_public)?;
+                let head = if kind == "text" {
+                    dohc_engine_sync::ResultingHead::Text {
+                        path: &path,
+                        text: text.as_deref().unwrap_or(""),
+                    }
+                } else {
+                    dohc_engine_sync::ResultingHead::BinaryOrAbsent
+                };
+                dohc_engine_sync::reconcile_local_resulting_head_in_tx(
+                    tx,
+                    ws,
+                    &version_id,
+                    &m.object_id,
+                    head,
+                    None,
+                    None,
+                    now,
+                )
+                .map_err(|e| {
+                    DomainError::Storage(StorageError::persist_public(std::io::Error::other(e)))
+                })?;
+                crate::search::delete_file_search_index(tx, ws, &version_id, &m.object_id)
+                    .map_err(super::search::search_domain)?;
+                if let Some(text) = text.as_deref() {
+                    crate::search::upsert_file_search_index(
+                        tx,
+                        root,
+                        ws,
+                        &version_id,
+                        &m.object_id,
+                        &path,
+                        text,
+                    )
+                    .map_err(super::search::search_domain)?;
+                }
+                let rename = m.operation == dohc_engine_domain::MomentOp::Rename;
+                let job_identity = binary_rollback_job_identity(ws, &version_id, &m.moment_id);
+                let spec = MaterializationJobSpec {
+                    job_id: if rename {
+                        binary_rename_write_job_id(&job_identity)
+                    } else {
+                        job_identity.clone()
+                    },
+                    workspace_id: ws.into(),
+                    target_path: path,
+                    content_sha256: sha.clone(),
+                    preimage: Preimage::Absent,
+                    target_generation: m.moment_order,
+                    now_ms: now,
+                };
+                enqueue_job(tx, &spec)?;
+                if rename {
+                    enqueue_delete_job(
+                        tx,
+                        &MaterializationJobSpec {
+                            job_id: binary_rename_delete_job_id(&job_identity),
+                            target_path: m.before_path.clone().ok_or(
+                                DomainError::StateCorrupt {
+                                    reason: "inverse rename lost path",
+                                },
+                            )?,
+                            preimage: Preimage::Present(sha),
+                            ..spec
+                        },
+                    )?;
+                }
+                journal_moment_outbound_in_tx(tx, ws, &m.moment_id, false)?;
+                Ok(())
+            },
+        )
+        .map_err(RuntimeError::from)
     })?;
     let (moments, deduped) = match result {
         TxnOutcome::Committed(r) => r,
@@ -202,6 +424,7 @@ pub(super) fn history_undo_on_store(
             operation_id: operation.into(),
             version_id,
             moments,
+            compensation_operation_id: undo_correlation_id(ws, operation, request),
             deduped,
             materialized: false,
         });
@@ -235,6 +458,7 @@ pub(super) fn history_undo_on_store(
         operation_id: operation.into(),
         version_id,
         moments,
+        compensation_operation_id: undo_correlation_id(ws, operation, request),
         deduped,
         materialized,
     })
@@ -454,6 +678,212 @@ mod tests {
         );
     }
     #[test]
+    fn history_operation_member_cursor_keeps_its_fence_and_scope() {
+        let (root, mut store) = fixture();
+        for i in 0..3 {
+            let old = format!("old-{i}.md");
+            let new = format!("new-{i}.md");
+            seed(
+                &mut store,
+                root.path(),
+                &old,
+                &format!("object-{i}"),
+                "Content",
+            );
+            rename(
+                &mut store,
+                root.path(),
+                &old,
+                &new,
+                &format!("move-{i}"),
+                OP,
+            );
+        }
+        let first = VersionedTextStore::new(&mut store)
+            .history_page(WS, None, None, Some(OP), 1, None)
+            .unwrap();
+        let mut cursor = first.cursor.clone();
+        let m = &first.moments[0];
+        cursor.text = Some(dohc_engine_domain::HistoryMomentPosition {
+            recorded_at_ms: m.recorded_at_ms,
+            moment_order: m.moment_order,
+        });
+        seed(&mut store, root.path(), "late-old.md", "late", "Late");
+        rename(
+            &mut store,
+            root.path(),
+            "late-old.md",
+            "late-new.md",
+            "late-move",
+            OP,
+        );
+        let rest = VersionedTextStore::new(&mut store)
+            .history_page(WS, None, None, Some(OP), 50, Some(cursor.clone()))
+            .unwrap();
+        assert_eq!(rest.moments.len(), 2);
+        assert!(rest.protected_moments.is_empty());
+        assert!(rest.version_markers.is_empty());
+        assert!(rest.moments.iter().all(|m| m.moment_id != "late-move"));
+        assert!(matches!(
+            VersionedTextStore::new(&mut store).history_page(
+                WS,
+                None,
+                None,
+                Some("dohc-operation:another"),
+                50,
+                Some(cursor)
+            ),
+            Err(DomainError::InvalidInput { .. })
+        ));
+    }
+    #[test]
+    fn history_operation_disk_probe_does_not_hold_write_transaction() {
+        let (root, mut store) = fixture();
+        seed(&mut store, root.path(), "old.md", "one", "One");
+        rename(&mut store, root.path(), "old.md", "new.md", "move", OP);
+        let conn = rusqlite::Connection::open(engine_db_path(&root).unwrap()).unwrap();
+        conn.busy_timeout(std::time::Duration::ZERO).unwrap();
+        let observed = std::rc::Rc::new(std::cell::Cell::new(false));
+        let flag = observed.clone();
+        UNDO_PROBE_OBSERVER.with(|slot| {
+            *slot.borrow_mut() = Some(Box::new(move || {
+                flag.set(conn.execute_batch("BEGIN IMMEDIATE; ROLLBACK;").is_ok());
+            }))
+        });
+        let result = undo(&mut store, root.path(), "undo", &NoFaults);
+        UNDO_PROBE_OBSERVER.with(|slot| *slot.borrow_mut() = None);
+        assert!(result.unwrap().materialized);
+        assert!(observed.get());
+    }
+    #[test]
+    fn history_operation_old_delete_cannot_restore_over_a_newer_delete() {
+        let (root, mut store) = fixture();
+        seed(&mut store, root.path(), "notes.md", "one", "v1");
+        remove(&mut store, root.path(), "notes.md", "delete-v1");
+        assert!(
+            undo(&mut store, root.path(), "undo-v1", &NoFaults)
+                .unwrap()
+                .materialized
+        );
+        let mut input = text("notes.md", "one", "v2");
+        input.moment_id = "edit-v2".into();
+        VersionedTextStore::new(&mut store)
+            .write_text(&input, &NoFaults)
+            .unwrap();
+        std::fs::write(root.path().join("notes.md"), "v2").unwrap();
+        VersionedTextStore::new(&mut store)
+            .delete_text_file(
+                &DeleteTextFile {
+                    workspace_id: WS.into(),
+                    version_id: "main".into(),
+                    path: "notes.md".into(),
+                    moment_id: "delete-v2".into(),
+                    request_id: None,
+                    metadata_origin: "api".into(),
+                    metadata_summary: None,
+                    metadata_correlation_id: Some("dohc-operation:agent-delete".into()),
+                    author_json: Some(
+                        r#"[{"kind":"agent","agentId":"agent","onBehalfOf":"person"}]"#.into(),
+                    ),
+                    now_ms: 11,
+                },
+                &NoFaults,
+            )
+            .unwrap();
+        std::fs::remove_file(root.path().join("notes.md")).unwrap();
+        let n = count(&store);
+        assert!(
+            matches!(
+                undo(&mut store, root.path(), "fresh-undo-v1", &NoFaults),
+                Err(RuntimeError::Domain(DomainError::UndoRefused { .. }))
+            ),
+            "an old delete must not restore v1 over the newer deletion of v2"
+        );
+        assert_eq!(count(&store), n);
+        assert!(!root.path().join("notes.md").exists());
+        assert!(
+            history_undo_on_store(
+                &mut store,
+                WS,
+                "dohc-operation:agent-delete",
+                "undo-v2",
+                None,
+                root.path(),
+                &(),
+                &NoFaults,
+                12
+            )
+            .unwrap()
+            .materialized
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("notes.md")).unwrap(),
+            "v2"
+        );
+    }
+    #[test]
+    fn history_operation_pending_member_refuses_entire_group() {
+        let (root, mut store) = fixture();
+        seed(&mut store, root.path(), "published.md", "one", "One");
+        seed(&mut store, root.path(), "pending.md", "two", "Two");
+        remove(&mut store, root.path(), "published.md", "published-delete");
+        let sha = dohc_engine_storage::hex_sha256(b"Two");
+        store
+            .write_with(&NoFaults, |tx| {
+                let deletion = dohc_engine_domain::prepare_checked_delete_in_tx(
+                    tx,
+                    &DeleteTextFile {
+                        workspace_id: WS.into(),
+                        version_id: "main".into(),
+                        path: "pending.md".into(),
+                        moment_id: "pending-delete".into(),
+                        request_id: None,
+                        metadata_origin: "api".into(),
+                        metadata_summary: None,
+                        metadata_correlation_id: Some(OP.into()),
+                        author_json: None,
+                        now_ms: 3,
+                    },
+                    Some("two"),
+                    &sha,
+                )?;
+                enqueue_delete_job(
+                    tx,
+                    &MaterializationJobSpec {
+                        job_id: "restore-delete-mat_pending-delete".into(),
+                        workspace_id: WS.into(),
+                        target_path: "pending.md".into(),
+                        content_sha256: sha.clone(),
+                        preimage: Preimage::Present(sha.clone()),
+                        target_generation: deletion.moment.moment_order,
+                        now_ms: 3,
+                    },
+                )?;
+                Ok::<_, DomainError>(())
+            })
+            .unwrap();
+        let n = count(&store);
+        assert!(
+            matches!(
+                undo(&mut store, root.path(), "undo", &NoFaults),
+                Err(RuntimeError::Domain(DomainError::UndoRefused { .. }))
+            ),
+            "a hidden pending member must not produce a partial Undo"
+        );
+        assert_eq!(count(&store), n);
+        assert!(!root.path().join("published.md").exists());
+        assert_eq!(
+            std::fs::read(root.path().join("pending.md")).unwrap(),
+            b"Two"
+        );
+        assert!(
+            store
+                .load_materialization_job("restore-delete-mat_pending-delete")
+                .unwrap()
+                .is_some()
+        );
+    }
+    #[test]
     fn history_operation_peer_moment_cannot_be_reversed() {
         let (root, mut store) = fixture();
         seed(&mut store, root.path(), "old.md", "one", "One");
@@ -523,7 +953,7 @@ mod tests {
         assert!(matches!(
             undo(&mut store, root.path(), "undo", &NoFaults),
             Err(RuntimeError::Domain(DomainError::UndoRefused {
-                reason: "operation unavailable",
+                reason: "operation publication pending",
                 ..
             }))
         ));

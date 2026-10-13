@@ -73,6 +73,8 @@ struct HistoryPageParams {
     #[serde(default)]
     object_id: Option<String>,
     #[serde(default)]
+    operation_id: Option<String>,
+    #[serde(default)]
     limit: Option<i64>,
     #[serde(default)]
     cursor: Option<HistoryCursor>,
@@ -225,7 +227,7 @@ fn encode_moment_page(page: &MomentPage) -> Result<EncodedMomentPage, WireError>
 fn history_moment_json(moment: &HistoryMomentMetadata) -> Value {
     json!({
         "momentOrder":moment.moment_order,"momentId":moment.moment_id,"versionId":moment.version_id,
-        "objectId":moment.object_id,"path":moment.path,"recordedAtMs":moment.recorded_at_ms,
+        "objectId":moment.object_id,"path":moment.path,"beforePath":moment.before_path,"recordedAtMs":moment.recorded_at_ms,
         "operation":moment.operation.as_str(),"afterContentKind":moment.after_content_kind,
         "afterByteLength":moment.after_byte_length,"metadataOrigin":moment.metadata_origin,
         "metadataSummary":moment.metadata_summary,"metadataCorrelationId":moment.metadata_correlation_id,
@@ -558,7 +560,7 @@ impl EngineService {
         )
         .await?;
         Ok(
-            json!({"operationId":result.operation_id,"versionId":result.version_id,"moments":result.moments}),
+            json!({"operationId":result.operation_id,"versionId":result.version_id,"momentCount":result.moments.len()}),
         )
     }
 
@@ -615,6 +617,7 @@ impl EngineService {
                 open.workspace_id.clone(),
                 params.version_id,
                 params.object_id,
+                params.operation_id,
                 limit,
                 params.cursor,
             ),

@@ -3908,13 +3908,12 @@ mod tests {
                 "v2-live-restore-resumed-lookup",
                 "ccc7e17969beb6ae6259e9ce174863fa91d15c2bdad66c3f8232e8b236ff8b8c",
             ),
+            (
+                "v2-history-operation-correlation",
+                "c0f4d24b926a03be07f0999f3aab707da566b2de18654243031f0cb1b80a4819",
+            ),
         ];
-        assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len() + 1);
-        assert_eq!(BASELINE_MIGRATIONS.last().unwrap().ordinal, 53);
-        assert_eq!(
-            migration_checksum(BASELINE_MIGRATIONS.last().unwrap().sql),
-            "c0f4d24b926a03be07f0999f3aab707da566b2de18654243031f0cb1b80a4819"
-        );
+        assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());
         for (migration, (id, checksum)) in BASELINE_MIGRATIONS.iter().zip(pinned) {
             assert_eq!(migration.id, id);
             assert_eq!(

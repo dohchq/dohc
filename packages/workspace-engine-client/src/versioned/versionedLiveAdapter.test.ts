@@ -1,5 +1,5 @@
 import type { HistoryCursor } from "./versionedWireContract";
-function historyCursor(): HistoryCursor { return { format: 1, engineUuid: "test", workspaceId: "workspace", versionId: "main", objectId: null, textFence: 41, protectedFence: -1, markerFence: -1, text: null, protected: null, marker: null }; }
+function historyCursor(): HistoryCursor { return { format: 1, engineUuid: "test", workspaceId: "workspace", versionId: "main", objectId: null, operationId: null, textFence: 41, protectedFence: -1, markerFence: -1, text: null, protected: null, marker: null }; }
 import { ProtocolShapeError } from "../wireSchema";
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
@@ -2154,7 +2154,7 @@ it("sends Undo retry identity in the request envelope and reads body-free operat
   const requests: Request[]=[];
   const client:MinimalDaemonClient={close:()=>undefined,sendRequest:async request=>{
     requests.push(request);
-    return {id:request.id,result:{operationId:"dohc-operation:minted",versionId:"main",moments:[],...(request.method===VERSIONED_METHOD.historyUndo?{deduped:true,materialized:false}:{})}};
+    return {id:request.id,result:{operationId:"dohc-operation:minted",versionId:"main",momentCount:0,...(request.method===VERSIONED_METHOD.historyUndo?{compensationOperationId:"dohc-operation:undo:replayed",deduped:true,materialized:false}:{})}};
   }};
   const adapter=new VersionedLiveAdapter(client,WORKSPACE,{workspaceId:WORKSPACE});
   await adapter.holdCapture({operationId:"dohc-operation:minted"}).catch(()=>undefined);

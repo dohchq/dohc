@@ -561,6 +561,42 @@ pub enum ProjectionTargetKind {
     Secret,
 }
 
+/// Metadata-only proof for rechecking a hashed projection under a write lock.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProjectionTargetStamp {
+    Absent,
+    File {
+        byte_length: u64,
+        modified: std::time::SystemTime,
+    },
+    Unavailable,
+}
+
+pub fn projection_target_stamp(root: &Path, rel: &str) -> ProjectionTargetStamp {
+    let Ok(root) = std::fs::canonicalize(root) else {
+        return ProjectionTargetStamp::Unavailable;
+    };
+    let Ok(target) = resolve_target(&root, rel) else {
+        return ProjectionTargetStamp::Unavailable;
+    };
+    if !matches!(projection_has_file_ancestor(&root, &target), Ok(false))
+        || !existing_ancestor_is_contained(&root, &target)
+    {
+        return ProjectionTargetStamp::Unavailable;
+    }
+    match std::fs::symlink_metadata(target) {
+        Err(e) if e.kind() == ErrorKind::NotFound => ProjectionTargetStamp::Absent,
+        Ok(m) if m.file_type().is_file() && !m.file_type().is_symlink() => match m.modified() {
+            Ok(modified) => ProjectionTargetStamp::File {
+                byte_length: m.len(),
+                modified,
+            },
+            Err(_) => ProjectionTargetStamp::Unavailable,
+        },
+        _ => ProjectionTargetStamp::Unavailable,
+    }
+}
+
 /// Read a prospective projection target without treating foreign or
 /// transiently unreadable content as an overwrite preimage.
 pub fn probe_projection_target(

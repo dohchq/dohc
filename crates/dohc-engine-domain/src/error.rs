@@ -77,10 +77,10 @@ pub enum DomainError {
     #[error("capture does not own this path current head")]
     CaptureNotOwned,
 
-    /// A rename/rollback restore path is already occupied by another object.
     #[error("Undo refused: {reason}: {path}")]
     UndoRefused { path: String, reason: &'static str },
 
+    /// A rename/rollback restore path is already occupied by another object.
     #[error("target path already exists")]
     TargetPathExists,
 

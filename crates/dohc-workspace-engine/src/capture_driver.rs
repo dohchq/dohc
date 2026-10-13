@@ -1385,7 +1385,7 @@ async fn manifest_seed(
         .capture_manifest_seed(workspace_id.to_owned(), version_id)
         .await?;
     if let Some(operation) = operation_id {
-        // Authored heads must enter as Changed so outside edits can be captured.
+        // Undo seeds its authored heads as Changed so outside edits reconcile into those objects.
         entries.extend(
             actor
                 .history_operation_capture_seed(workspace_id.to_owned(), operation.to_owned())

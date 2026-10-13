@@ -341,14 +341,20 @@ async fn history_operation_minted_group_refuses_forged_and_reused_ids() {
         json!({"operationId":op}),
     )
     .await;
-    assert_eq!(
-        group["moments"].as_array().unwrap().len(),
-        1,
-        "caller id must not form a group"
-    );
-    assert_eq!(group["moments"][0]["operation"], "rename");
-    assert!(group["moments"][0].get("beforeText").is_none());
-    assert!(group["moments"][0].get("afterText").is_none());
+    assert_eq!(group["momentCount"], 1, "caller id must not form a group");
+    assert!(group.get("moments").is_none());
+    let members = call(
+        &transport,
+        &handle,
+        109,
+        "history.page",
+        json!({"workspaceId":WORKSPACE_ID,"operationId":op}),
+    )
+    .await;
+    assert_eq!(members["moments"][0]["operation"], "rename");
+    assert_eq!(members["moments"][0]["beforePath"], "old.md");
+    assert!(members["moments"][0].get("beforeText").is_none());
+    assert!(members["moments"][0].get("afterText").is_none());
     call(&transport, &handle, 108, "workspace.close", json!({})).await;
 }
 
@@ -426,6 +432,10 @@ async fn history_operation_rpc_fence_reconciles_typing_and_uses_envelope_key() {
     )
     .await;
     assert_eq!(replay["deduped"], true);
-    assert_eq!(replay["moments"], result["moments"]);
+    assert_eq!(replay["momentCount"], result["momentCount"]);
+    assert_eq!(
+        replay["compensationOperationId"],
+        result["compensationOperationId"]
+    );
     call(&transport, &handle, 107, "workspace.close", json!({})).await;
 }

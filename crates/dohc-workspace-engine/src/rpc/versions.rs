@@ -510,6 +510,17 @@ impl EngineService {
         let request_id = crate::rpc::request::required_idempotency_key(request.idempotency_key)?;
         let author_json = crate::rpc::request::validated_author(params.author.as_ref())?;
         let cancellation = OperationCancellation::new(ctx);
+        Self::read_under_ctx(
+            &cancellation,
+            "history.undo (availability)",
+            open.actor.preflight_history_undo(
+                open.workspace_id.clone(),
+                params.operation_id.clone(),
+                request_id.clone(),
+                author_json.clone(),
+            ),
+        )
+        .await?;
         let result = self
             .fence_version_snapshot(
                 &cancellation,
@@ -526,7 +537,7 @@ impl EngineService {
             .await?;
         match result {
             VersionFenceOutcome::UndoCommitted(result) => Ok(
-                json!({"operationId":result.operation_id,"versionId":result.version_id,"moments":result.moments,"deduped":result.deduped,"materialized":result.materialized}),
+                json!({"operationId":result.operation_id,"versionId":result.version_id,"momentCount":result.moments.len(),"compensationOperationId":result.compensation_operation_id,"deduped":result.deduped,"materialized":result.materialized}),
             ),
             _ => unreachable!("Undo fence returns its own result"),
         }
@@ -782,10 +793,9 @@ impl EngineService {
                         )
                         .await
                         .map_err(map_runtime)?;
-                    lock(&open.capture)
-                        .as_ref()
-                        .unwrap()
-                        .request_manifest_refresh();
+                    if let Some(driver) = lock(&open.capture).as_ref() {
+                        driver.request_manifest_refresh();
+                    }
                     return Ok(VersionFenceOutcome::UndoCommitted(result));
                 }
                 VersionFenceIntent::Fork { input } => open

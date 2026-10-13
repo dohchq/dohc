@@ -272,9 +272,9 @@ describe("versionedText.list hasYdocMarker", () => {
 
 
 describe("metadata-only History pages", () => {
-  const cursor = { format: 1, engineUuid: "store", workspaceId: "ws", versionId: "main", objectId: null,
+  const cursor = { format: 1, engineUuid: "store", workspaceId: "ws", versionId: "main", objectId: null, operationId: null,
     textFence: 1, protectedFence: -1, markerFence: 1, text: null, protected: null, marker: null };
-  const metadata = { momentOrder: 1, momentId: "m", versionId: "main", objectId: "o", path: "a.md", recordedAtMs: 10,
+  const metadata = { momentOrder: 1, momentId: "m", versionId: "main", objectId: "o", path: "a.md", beforePath: null, recordedAtMs: 10,
     operation: "write", afterContentKind: "text", afterByteLength: 1, metadataOrigin: "api", authors: null, syncRecordOnly: false };
   const page = { activeVersion: { id: "main", workspaceId: "ws", kind: "main", name: "Main", createdAtMs: 1 },
     moments: [metadata], protectedMoments: [], versionMarkers: [], startCursor: cursor, nextCursor: null, latestMomentOrder: 1 };
@@ -286,12 +286,9 @@ describe("metadata-only History pages", () => {
   });
 });
 
-const operationMoment = {momentId:"inverse", objectId:"file", operation:"rename", path:"old.md", beforePath:"new.md", momentOrder:3};
-const operationResult = {operationId:"dohc-operation:minted", versionId:"main", moments:[operationMoment]};
-it.each([VERSIONED_METHOD.historyOperations, VERSIONED_METHOD.historyUndo])("decodes %s as references and outcomes only", method => {
-  const result = method===VERSIONED_METHOD.historyUndo ? {...operationResult,deduped:true,materialized:false} : operationResult;
+const operationResult = {operationId:"dohc-operation:minted", versionId:"main", momentCount:15000};
+it.each([VERSIONED_METHOD.historyOperations, VERSIONED_METHOD.historyUndo])("decodes %s as a bounded summary", method => {
+  const result = method===VERSIONED_METHOD.historyUndo ? {...operationResult,compensationOperationId:"dohc-operation:undo:committed",deduped:true,materialized:false} : operationResult;
   expect(decodeVersionedResult(method,result)).toEqual(result);
-  for (const field of ["beforeText","afterText","payload","bytes"]) {
-    expect(()=>decodeVersionedResult(method,{...result,moments:[{...operationMoment,[field]:"retained body"}]})).toThrow(ProtocolShapeError);
-  }
+  expect(()=>decodeVersionedResult(method,{...result,moments:[]})).toThrow(ProtocolShapeError);
 });

@@ -1200,7 +1200,7 @@ export function createCaptureLiveStores(
       return {
         ...page,
         moments: page.moments.map((moment) =>
-          momentSummaryFromWire(input.workspaceId, moment),
+          momentSummaryFromWire(input.workspaceId, {...moment, beforePath: moment.beforePath ?? null}),
         ),
       };
     },
