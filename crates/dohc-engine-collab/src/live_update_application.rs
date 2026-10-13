@@ -1372,9 +1372,7 @@ pub fn apply_committed(
                 native_actor.and_then(|(actor, _)| actor.as_deref()),
                 native_actor.and_then(|(_, attribution)| attribution.as_ref()),
                 true,
-                true,
                 event.metadata.accepted.received_at_ms,
-                None,
             )?;
             // Keep canonical snapshot names in coverage instead of synthesizing
             // native authors. Only the field rows created by this append change.

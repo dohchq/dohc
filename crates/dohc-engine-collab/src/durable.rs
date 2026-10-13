@@ -22,7 +22,7 @@ use dohc_engine_storage::{
 };
 use rusqlite::{Connection, OptionalExtension, Transaction};
 
-use crate::doc_cache::{CacheTuple, GateBaseProbe, GateBaseSource, ServedGateBase, WriterDocCache};
+use crate::doc_cache::{GateBaseProbe, GateBaseSource, ServedGateBase, WriterDocCache};
 use crate::error::CollabError;
 use crate::limits::{DEFAULT_COMPACTION_THRESHOLD, MAX_YDOC_UPDATE_BYTES};
 use crate::ydoc::{ContentKind, Projection, SuccessorBase, Ydoc};
@@ -919,7 +919,6 @@ fn append_local_update(
     actor_origin_id: Option<&str>,
     attribution: Option<&ChangeAttribution>,
     authors_admitted: bool,
-    local_edit: bool,
     now_ms: i64,
 ) -> Result<AppendOutcome, CollabError> {
     if let Some(actor_origin_id) = actor_origin_id {
@@ -938,28 +937,24 @@ fn append_local_update(
     let settlement_requested = !authors_admitted
         && crate::author_coverage::check_admission_in(conn, key, actor_origin_id, attribution)?;
     let base = load_doc_in(conn, key)?;
-    let projection = crate::validate_replay_parity_with_scratch(&base, update)?;
-    let (seq, record_facts) = append_validated_and_index_update(
+    let (_, seq, record_facts) = append_and_index_update(
         conn,
         key,
         marker.content_kind,
         &base,
-        Some(&projection),
         update,
         sha,
         index_frontmatter,
         actor_origin_id,
         attribution,
         None,
-        local_edit,
         now_ms,
     )?;
     Ok(AppendOutcome {
         settlement_requested,
         seq,
         deduped: false,
-        emit_outbound: local_edit
-            && marker.regime == Regime::Replicated
+        emit_outbound: marker.regime == Regime::Replicated
             && marker.lineage_claim_status == LineageClaimStatus::Exact,
         record_facts,
     })
@@ -2215,8 +2210,6 @@ fn validate_successor_base(
 pub(crate) struct TransactionDocCache<'tx, 'conn> {
     tx: &'tx Transaction<'conn>,
     docs: WriterDocCache,
-    // At most one inexpensive flag per document in the bounded journal page.
-    dependency_checks: std::collections::HashMap<DocKey, (CacheTuple, bool)>,
 }
 
 impl<'tx, 'conn> TransactionDocCache<'tx, 'conn> {
@@ -2224,34 +2217,44 @@ impl<'tx, 'conn> TransactionDocCache<'tx, 'conn> {
         Self {
             tx,
             docs: WriterDocCache::new(),
-            dependency_checks: std::collections::HashMap::new(),
         }
     }
 
-    pub(crate) fn has_missing_updates(&mut self, key: &DocKey) -> Result<bool, CollabError> {
-        let tuple = CacheTuple::read_current(self.tx, key)?;
-        if let Some(tuple) = &tuple {
-            if let Some((saved, missing)) = self.dependency_checks.get(key) {
-                if saved == tuple {
-                    #[cfg(any(test, debug_assertions))]
-                    assert_eq!(load_doc_in(self.tx, key)?.has_missing_updates(), *missing);
-                    return Ok(*missing);
-                }
-            }
-        }
-        let missing = match self.docs.doc_for_consumer(self.tx, key)? {
+    pub(crate) fn append(
+        &mut self,
+        key: &DocKey,
+        update: &[u8],
+        now_ms: i64,
+    ) -> Result<AppendOutcome, CollabError> {
+        validate_update_bytes(update)?;
+        let marker = read_marker_in(self.tx, key)?.ok_or(CollabError::NoMarker)?;
+        let sha = crate::hex_sha256(update);
+        let mut probe = GateBaseProbe::default();
+        let mut append = append_local_update_cached(
+            self.tx, key, &marker, update, &sha, false, None, None, true, now_ms, false,
+            &self.docs, &mut probe,
+        )?;
+        append.emit_outbound = false;
+        probe.capture_commit(self.tx, key);
+        // Only this transaction's private cache advances before commit.
+        // Rollback discards every entry.
+        self.docs.finish_local_append(
+            key,
+            &TxnOutcome::Committed(append.clone()),
+            update,
+            &sha,
+            probe,
+        );
+        Ok(append)
+    }
+
+    pub(crate) fn has_missing_updates(&self, key: &DocKey) -> Result<bool, CollabError> {
+        Ok(match self.docs.doc_for_consumer(self.tx, key)? {
             Some(doc) => doc.has_missing_updates(),
             None => load_doc_in(self.tx, key)?.has_missing_updates(),
-        };
-        if let Some(tuple) = tuple {
-            self.dependency_checks.insert(key.clone(), (tuple, missing));
-        }
-        Ok(missing)
+        })
     }
 }
-
-#[cfg(test)]
-mod transaction_cache_tests;
 
 /// Append one locally-produced update inside the caller's transaction — the
 /// transaction-composable core of [`record_local_update`]. Validates the
@@ -2278,9 +2281,7 @@ pub fn record_update_in_tx(
         actor_origin_id,
         attribution,
         false,
-        true,
         now_ms,
-        None,
     )
 }
 
@@ -2295,54 +2296,11 @@ pub(crate) fn record_authorized_update_in_tx(
     actor_origin_id: Option<&str>,
     attribution: Option<&ChangeAttribution>,
     authors_admitted: bool,
-    local_edit: bool,
     now_ms: i64,
-    page_cache: Option<&mut TransactionDocCache<'_, '_>>,
 ) -> Result<AppendOutcome, CollabError> {
     validate_update_bytes(update)?;
     let marker = read_marker_in(tx, key)?.ok_or(CollabError::NoMarker)?;
     let sha = crate::hex_sha256(update);
-    if let Some(cache) = page_cache {
-        if !std::ptr::eq(cache.tx, tx)
-            || index_frontmatter
-            || actor_origin_id.is_some()
-            || attribution.is_some()
-            || !authors_admitted
-            || local_edit
-        {
-            return Err(CollabError::Corrupt {
-                reason: "invalid transaction cache authorization".into(),
-            });
-        }
-        let mut probe = GateBaseProbe::default();
-        let mut append = append_local_update_cached(
-            tx,
-            key,
-            &marker,
-            update,
-            &sha,
-            false,
-            None,
-            None,
-            true,
-            now_ms,
-            false,
-            &cache.docs,
-            &mut probe,
-        )?;
-        append.emit_outbound = false;
-        probe.capture_commit(tx, key);
-        // Only this transaction's private cache advances before commit. It
-        // cannot escape the transaction and rollback discards every entry.
-        cache.docs.finish_local_append(
-            key,
-            &TxnOutcome::Committed(append.clone()),
-            update,
-            &sha,
-            probe,
-        );
-        return Ok(append);
-    }
     append_local_update(
         tx,
         key,
@@ -2353,7 +2311,6 @@ pub(crate) fn record_authorized_update_in_tx(
         actor_origin_id,
         attribution,
         authors_admitted,
-        local_edit,
         now_ms,
     )
 }

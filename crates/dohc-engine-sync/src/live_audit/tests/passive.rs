@@ -306,6 +306,110 @@ fn passive_audit_without_content_still_applies_the_update() {
     assert_eq!(result.applied, 1);
 }
 
+fn row_with_bytes(
+    template: &ReplicaJournalRow,
+    cursor: i64,
+    previous: &str,
+    bytes: Vec<u8>,
+) -> ReplicaJournalRow {
+    let mut next = template.clone();
+    next.admitted.update_bytes = bytes;
+    let accepted = &mut next.admitted.metadata.accepted;
+    accepted.receipt.delivery_id = format!("row-{cursor}");
+    accepted.receipt.journal_cursor = cursor;
+    accepted.receipt.update_digest = hex_sha256(&next.admitted.update_bytes);
+    accepted.received_at_ms = cursor;
+    next.journal_cursor = cursor;
+    next.evidence_digest = hex_sha256(
+        &serde_json::to_vec(&(
+            "accepted-event-v1",
+            previous,
+            cursor,
+            &next.admitted.metadata,
+        ))
+        .unwrap(),
+    );
+    next
+}
+
+#[test]
+fn passive_new_append_with_missing_predecessor_refuses_and_rolls_back_the_page() {
+    let mut source = fixture_with_binding_generation(true, None, 1);
+    bootstrap(&mut source, false).unwrap();
+    let (_scratch, _path, mut replica) = receiver(&source);
+    let before = state(&replica);
+    let frontier_before = replica
+        .read_with(|c| dohc_engine_storage::replica::read_frontiers(c, "ws"))
+        .unwrap();
+    let doc = dohc_engine_collab::Ydoc::wire();
+    doc.apply(&source.bytes).unwrap();
+    let previous = initial(&source);
+    let first = row(&mut source, 1, &previous, &doc);
+    doc.richdoc_append_paragraph("Predecessor the replica never received.");
+    let pending = doc.richdoc_append_paragraph("Successor waiting for that predecessor.");
+    let second = row_with_bytes(&first, 2, &first.evidence_digest, pending);
+    let probe = dohc_engine_collab::Ydoc::wire();
+    probe.apply(&source.bytes).unwrap();
+    probe.apply(&first.admitted.update_bytes).unwrap();
+    probe.apply(&second.admitted.update_bytes).unwrap();
+    assert_ne!(probe.encode_state_vector(), doc.encode_state_vector());
+    assert!(
+        !probe
+            .project(ContentKind::Richdoc)
+            .unwrap()
+            .content
+            .contains("Successor waiting")
+    );
+    assert!(matches!(
+        apply_page(&mut replica, "ws", 0, &[first, second], &NoFaults),
+        Err(ApplicationError::Conflict)
+    ));
+    assert_eq!(state(&replica), before);
+    for table in [
+        "live_accepted_updates",
+        "replica_documents",
+        "replica_first_seen",
+    ] {
+        assert_eq!(count(&replica, table), 0, "rollback {table}");
+    }
+    assert_eq!(
+        replica
+            .read_with(|c| dohc_engine_storage::replica::read_frontiers(c, "ws"))
+            .unwrap(),
+        frontier_before
+    );
+}
+
+#[test]
+fn passive_page_checks_dependencies_after_a_later_row_supplies_the_predecessor() {
+    let mut source = fixture_with_binding_generation(true, None, 1);
+    bootstrap(&mut source, false).unwrap();
+    let (_scratch, _path, mut replica) = receiver(&source);
+    let frontier_before = replica
+        .read_with(|c| dohc_engine_storage::replica::read_frontiers(c, "ws"))
+        .unwrap();
+    let doc = dohc_engine_collab::Ydoc::wire();
+    doc.apply(&source.bytes).unwrap();
+    let initial = initial(&source);
+    let template = row(&mut source, 1, &initial, &doc);
+    let causal = dohc_engine_collab::Ydoc::wire();
+    causal.apply(&source.bytes).unwrap();
+    let predecessor = causal.richdoc_append_paragraph("Predecessor supplied later in this page.");
+    let successor = causal.richdoc_append_paragraph("Successor delivered first.");
+    let first = row_with_bytes(&template, 1, &initial, successor);
+    let second = row_with_bytes(&template, 2, &first.evidence_digest, predecessor);
+    let result = apply_page(&mut replica, "ws", 0, &[first, second], &NoFaults).unwrap();
+    assert_eq!(result.applied, 2);
+    assert_eq!(result.journal_cursor, 2);
+    assert_eq!(result.revision, frontier_before.revision + 1);
+    assert_eq!(count(&replica, "live_accepted_updates"), 2);
+    let expected = (
+        causal.encode_state_vector(),
+        causal.project(ContentKind::Richdoc).unwrap().content,
+    );
+    assert_eq!(state(&replica), expected);
+}
+
 #[test]
 fn passive_deduplicated_content_refuses_unresolved_dependencies() {
     let mut source = fixture_with_binding_generation(true, None, 1);

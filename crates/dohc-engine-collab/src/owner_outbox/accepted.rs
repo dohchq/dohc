@@ -224,9 +224,7 @@ fn apply_ordered_in_tx(
         None,
         None,
         false,
-        true,
         now_ms,
-        None,
     )
     .map_err(collab)?;
     let marker = crate::read_marker_in(tx, &key)

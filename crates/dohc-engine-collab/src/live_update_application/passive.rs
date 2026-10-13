@@ -60,6 +60,7 @@ pub fn apply_page(
     let mut appended = std::collections::HashMap::<DocKey, i64>::new();
     let result = store.write_with(faults, |tx| -> Result<ReplicaPageResult, ApplicationError> {
         let mut cache = durable::TransactionDocCache::new(tx);
+        let mut touched = std::collections::HashSet::new();
         let frontier = read_frontiers(tx, workspace)?;
         if after > frontier.journal_cursor { return Err(ApplicationError::Conflict); }
         let mut result = ReplicaPageResult {revision:frontier.revision, log_cursor:frontier.log_cursor,
@@ -109,13 +110,18 @@ pub fn apply_page(
                 result.blocked_cursor = Some(row.journal_cursor);
                 break;
             } else {
-                if apply_row(tx, row, &key, retained.audit, &mut cache)? {
+                let did_append = apply_row(tx, row, &key, retained.audit, &mut cache)?;
+                touched.insert(key.clone());
+                if did_append {
                     appended.insert(key, event.metadata.accepted.received_at_ms);
                 }
                 result.applied += 1;
             }
             if faults.poll(FaultPoint::SyncBeforeApplyCommit)==FaultAction::Crash { return Err(ApplicationError::Interrupted); }
             result.journal_cursor = result.journal_cursor.max(row.journal_cursor);
+        }
+        for key in touched {
+            if cache.has_missing_updates(&key)? { return Err(ApplicationError::Conflict); }
         }
         advance_frontiers(tx, workspace, frontier.log_cursor, result.journal_cursor)?;
         let frontier = read_frontiers(tx, workspace)?;
@@ -238,11 +244,9 @@ fn apply_row(
     if b.restore_fence_generation > generation && row.restore.is_none() {
         return Err(ApplicationError::Conflict);
     }
-    let checkpoint = row
-        .restore
-        .as_ref()
-        .map(|restore| validate_restore(row, restore, generation))
-        .transpose()?;
+    if let Some(restore) = &row.restore {
+        validate_restore(row, restore, generation)?;
+    }
     let count = count
         .checked_add(1)
         .filter(|n| *n <= SAFE)
@@ -259,44 +263,23 @@ fn apply_row(
     }
     record_provenance(tx, namespace, event)?;
     let mut appended = false;
-    if checkpoint.is_some() {
+    if let Some(restore) = &row.restore {
         // Restore admissions can include native sources absent from the journal,
         // including delete-only updates with no new clock ranges. Their retained
         // proof contains digests, not bytes, so the checkpoint supplies that state.
-        let bytes = &row
-            .restore
-            .as_ref()
-            .ok_or(ApplicationError::Conflict)?
-            .checkpoint_bytes;
-        appended = !durable::record_authorized_update_in_tx(
-            tx,
-            key,
-            bytes,
-            false,
-            None,
-            None,
-            true,
-            false,
-            event.metadata.accepted.received_at_ms,
-            Some(cache),
-        )?
-        .deduped;
+        appended = !cache
+            .append(
+                key,
+                &restore.checkpoint_bytes,
+                event.metadata.accepted.received_at_ms,
+            )?
+            .deduped;
     }
-    let append = durable::record_authorized_update_in_tx(
-        tx,
+    let append = cache.append(
         key,
         &event.update_bytes,
-        false,
-        None,
-        None,
-        true,
-        false,
         event.metadata.accepted.received_at_ms,
-        Some(cache),
     )?;
-    if append.deduped && cache.has_missing_updates(key)? {
-        return Err(ApplicationError::Conflict);
-    }
     accepted_history::append(
         tx,
         namespace,
@@ -363,7 +346,7 @@ fn validate_restore(
     row: &ReplicaJournalRow,
     restore: &ReplicaRestore,
     generation: i64,
-) -> Result<crate::Ydoc, ApplicationError> {
+) -> Result<(), ApplicationError> {
     identifier(&restore.operation_id, 512)?;
     let proof = &restore.proof;
     let admitted: AdmittedLiveUpdateMetadata = serde_json::from_value(proof["admitted"].clone())
@@ -397,5 +380,5 @@ fn validate_restore(
     let checkpoint = crate::Ydoc::wire();
     checkpoint.apply(&restore.checkpoint_bytes)?;
     checkpoint.validate_public_baseline(&restore.checkpoint_bytes)?;
-    Ok(checkpoint)
+    Ok(())
 }

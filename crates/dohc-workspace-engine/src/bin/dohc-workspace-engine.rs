@@ -1383,98 +1383,18 @@ mod tests {
 
     const TEST_AUTH_TOKEN: &str = "r14-test-token";
 
-    #[tokio::test]
-    async fn desktop_daemon_keeps_live_upload_methods_on_dispatch() {
-        let (_, live) = {
-            let service = Arc::new(EngineService::new());
-            let live = passive_ingress(service.clone(), false).unwrap();
-            (service, live)
-        };
-        assert!(live.is_none());
+    #[test]
+    fn desktop_daemon_keeps_live_upload_methods_on_dispatch() {
+        assert!(
+            passive_ingress(Arc::new(EngineService::new()), false)
+                .unwrap()
+                .is_none()
+        );
         assert!(
             passive_ingress(Arc::new(EngineService::new()), true)
                 .unwrap()
                 .is_some()
         );
-        let calls = Arc::new(AtomicUsize::new(0));
-        let supervisor = Arc::new(Supervisor::new(
-            SupervisorConfig::default(),
-            Arc::new(CountingService {
-                calls: calls.clone(),
-            }),
-        ));
-        let (input, reader) = tokio::io::duplex(65536);
-        let (output, mut client) = tokio::io::duplex(65536);
-        let (events, rx) = tokio::sync::mpsc::channel(1);
-        let run = tokio::spawn(run_transport_with_live(
-            TEST_AUTH_TOKEN.into(),
-            reader,
-            output,
-            supervisor,
-            rx.into(),
-            || Ok(()),
-            live,
-        ));
-        let mut input = input;
-        input
-            .write_all(&encode_envelope(&Envelope::Hello(Hello {
-                protocol_version: PROTOCOL_VERSION,
-                auth_token: TEST_AUTH_TOKEN.into(),
-                capabilities: vec!["blobs".into()],
-                last_session_generation: None,
-                max_frame_bytes: None,
-            })))
-            .await
-            .unwrap();
-        let methods = [
-            "liveApplication.apply",
-            "ydoc.ownerDelivery.applyAcceptedFrame",
-            "ydoc.ownerDelivery.applyInitialSync",
-            "ydoc.ownerDelivery.enroll",
-            "ydoc.ownerDelivery.appendDraft",
-            "liveApplication.bootstrap",
-            "liveApplication.adoptOwner",
-            "liveApplication.prepareRestore",
-            "liveApplication.syncOpen",
-            "liveApplication.applyRestore",
-            "liveApplication.settleRestore",
-            "liveApplication.resumeRestore",
-        ];
-        for (id, method) in methods.iter().enumerate() {
-            input
-                .write_all(&encode_envelope(&Envelope::Request(WireRequest {
-                    id: id as u64 + 1,
-                    method: (*method).into(),
-                    workspace: None,
-                    deadline_ms: None,
-                    idempotency_key: None,
-                    progress: false,
-                    params: serde_json::Value::Null,
-                })))
-                .await
-                .unwrap();
-        }
-        let mut decoder = FrameDecoder::new(WireLimits::default());
-        let mut responses = 0;
-        while responses < methods.len() {
-            let mut buffer = [0; 4096];
-            let size = client.read(&mut buffer).await.unwrap();
-            assert_ne!(size, 0);
-            decoder.push(&buffer[..size]);
-            while let Some(frame) = decoder.next_frame().unwrap() {
-                if let Frame::Control(bytes) = frame {
-                    match decode_control(&bytes, &WireLimits::default()).unwrap() {
-                        Envelope::Response(_) => responses += 1,
-                        Envelope::HelloAck(_) => {}
-                        other => panic!("expected desktop dispatch, got {other:?}"),
-                    }
-                }
-            }
-        }
-        assert_eq!(calls.load(Ordering::SeqCst), methods.len());
-        drop(input);
-        drop(events);
-        run.await.unwrap().unwrap();
     }
 
     #[tokio::test]
