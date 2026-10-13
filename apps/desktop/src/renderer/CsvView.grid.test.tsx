@@ -8,6 +8,7 @@ import { documentVersionKey } from "./documentVersionKey";
 import { MAX_CSV_PREVIEW_ROWS } from "./offers/csvBound";
 import { resetOrphanedDrafts } from "./orphanedDrafts";
 import { acquireSharedLocalDocument, resetSharedLocalDocumentsForTests } from "./sharedLocalDocument";
+import css from "./styles.css?raw";
 
 // Each row's gutter, by row number, every time a row renders.
 const gutterRenders = vi.hoisted(() => [] as Array<number | undefined>);
@@ -160,10 +161,31 @@ describe("CSV grid", () => {
     expect(screen.getByLabelText("Row 1 column 1").className).toContain("outline-none");
   });
 
-  it("numbers a read-only table's rows without row or column actions", () => {
+  it("gives a focused cell or header no second mark from the text fields' focus underline", () => {
+    // The unlayered rule that underlines every focused text field.
+    const underline = /\n(:is\(input[^{]*):focus\s*\{\s*outline: none;[^}]*box-shadow: inset 0 -1px/.exec(css)?.[1];
+    expect(underline).toBeTruthy();
+    table(FUNNEL);
+    const other = document.body.appendChild(document.createElement("input"));
+    expect(other.matches(underline!)).toBe(true);
+    for (const label of ["Row 1 column 1", "Header column 2"]) {
+      expect(screen.getByLabelText(label).matches(underline!)).toBe(false);
+    }
+    other.remove();
+  });
+
+  it("draws Delete row and Delete column at 12px", () => {
+    table(FUNNEL);
+    for (const button of [...screen.getAllByTestId("csv-delete-row"), ...screen.getAllByTestId("csv-delete-column")]) {
+      expect(button.querySelector("svg")!.getAttribute("width")).toBe("12");
+    }
+  });
+
+  it("numbers a read-only table's rows at full colour, without row or column actions", () => {
     table(FUNNEL, true);
     const gutter = screen.getByLabelText("Row 2 column 1").closest("tr")!.querySelector("td")!;
     expect(gutter.textContent).toBe("2");
+    expect(screen.getByLabelText("Row 2 column 1").className).not.toMatch(/text-muted/);
     expect(screen.queryByTestId("csv-delete-row")).toBeNull();
     expect(screen.queryByTestId("csv-delete-column")).toBeNull();
     expect(screen.queryByTestId("csv-add-row")).toBeNull();

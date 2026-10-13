@@ -273,7 +273,7 @@ const CsvTableHeader = memo(function CsvTableHeader({
                     onClick={() => onDeleteColumn(index)}
                     className={DELETE_BUTTON}
                   >
-                    <Trash2 size={11} aria-hidden />
+                    <Trash2 size={12} aria-hidden />
                   </button>
                 </DataGridColumnAction>
               ) : null}
@@ -329,7 +329,7 @@ const CsvTableRow = memo(function CsvTableRow({
               onClick={() => onDeleteRow(rowIndex)}
               className={DELETE_BUTTON}
             >
-              <Trash2 size={11} aria-hidden />
+              <Trash2 size={12} aria-hidden />
             </button>
           ) : undefined
         }
@@ -347,7 +347,7 @@ const CsvTableRow = memo(function CsvTableRow({
             }
             onKeyDown={endEditOnEnter(onEndEdit, cellIndex)}
             onBlur={() => onEndEdit(cellIndex)}
-            className={`${CELL_INPUT} text-ink read-only:text-muted`}
+            className={`${CELL_INPUT} text-ink`}
           />
         </DataGridCell>
       ))}
@@ -358,10 +358,12 @@ const CsvTableRow = memo(function CsvTableRow({
 });
 
 // The table's quiet last row: Add row in the gutter, under the row numbers.
+// Its 20px button sits 4px from the edge, so its 12px + ends where the
+// numbers do, 8px in.
 function CsvAddRow(props: { columnCount: number; onAddRow: () => void }) {
   return (
     <tr>
-      <td className="h-7 border-t border-line pr-2 text-right">
+      <td className="h-7 border-t border-line pr-1 text-right">
         <button
           type="button"
           data-testid="csv-add-row"

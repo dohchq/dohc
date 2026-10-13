@@ -88,6 +88,7 @@ export function DataGridHeaderCell({
   return (
     <th
       {...props}
+      data-grid-cell=""
       style={headerStyle(column)}
       className={`group/column h-7 bg-panel-2 px-2.5 text-[12px] font-medium text-muted has-[input:focus]:outline-2 has-[input:focus]:-outline-offset-2 has-[input:focus]:outline-accent ${className ?? ""}`}
     />
@@ -139,8 +140,9 @@ export function DataGridGutter({
 }
 
 // A cell. The cell holding focus draws the accent outline inside its edges,
-// so its own input can drop the focus ring without losing the mark. An input
-// in it takes the cell's alignment with `[text-align:inherit]`.
+// and that is its one focus mark: `data-grid-cell` exempts its input from the
+// text fields' focus underline (styles.css), and the input drops its own
+// ring. An input in it takes the cell's alignment with `[text-align:inherit]`.
 export function DataGridCell({
   column,
   className,
@@ -149,6 +151,7 @@ export function DataGridCell({
   return (
     <td
       {...props}
+      data-grid-cell=""
       style={cellStyle(column)}
       className={`h-7 border-t border-line px-2.5 py-0 focus-within:outline-2 focus-within:-outline-offset-2 focus-within:outline-accent ${className ?? ""}`}
     />

@@ -2061,10 +2061,14 @@ function Pane(props: { theme: "light" | "dark" }) {
             <CsvGridSpecimen />
           </div>
         </Specimen>
+        {/* The input holds focus, so its row and cell hold it within: the
+            same three states a person's click or Tab gives. */}
         <Specimen label="CSV a focused cell">
           <div data-force-state="focus-within" data-force-target="tbody tr:nth-child(1)">
             <div data-force-state="focus-within" data-force-target="tbody tr:nth-child(1) td:nth-child(2)">
-              <CsvGridSpecimen />
+              <div data-force-state="focus focus-visible" data-force-target="tbody tr:nth-child(1) td:nth-child(2) input">
+                <CsvGridSpecimen />
+              </div>
             </div>
           </div>
         </Specimen>
