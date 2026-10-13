@@ -2248,12 +2248,14 @@ impl<'tx, 'conn> TransactionDocCache<'tx, 'conn> {
             probe,
         );
         if !append.deduped {
-            // Keep the last new append's result even if its document is evicted.
-            let missing = match self.docs.missing_updates_after_append(key) {
-                Some(missing) => missing,
-                None => load_doc_in(self.tx, key)?.has_missing_updates(),
-            };
-            self.missing_after_append.insert(key.clone(), missing);
+            match self.docs.missing_updates_after_append(key) {
+                Some(missing) => {
+                    self.missing_after_append.insert(key.clone(), missing);
+                }
+                None => {
+                    self.missing_after_append.remove(key);
+                }
+            }
         }
         Ok(append)
     }
@@ -2261,7 +2263,7 @@ impl<'tx, 'conn> TransactionDocCache<'tx, 'conn> {
     pub(crate) fn has_missing_updates(&self, key: &DocKey) -> Result<bool, CollabError> {
         match self.missing_after_append.get(key) {
             Some(missing) => Ok(*missing),
-            // Dedupe-only documents never installed a new replay state.
+            // Dedupe-only documents and removed entries need a page-end read.
             None => self.read_missing_updates(key),
         }
     }
@@ -2735,6 +2737,8 @@ pub(crate) fn validate_update_bytes(update: &[u8]) -> Result<(), CollabError> {
 /// Supply an existing transaction to read the marker, snapshot, and updates from
 /// one snapshot. Appends and lineage changes must use that same transaction.
 pub fn load_doc_in(conn: &Connection, key: &DocKey) -> Result<Ydoc, CollabError> {
+    #[cfg(test)]
+    passive_cache_tests::record_reconstruction();
     read_marker_in(conn, key)?.ok_or(CollabError::NoMarker)?;
     let snapshot = latest_snapshot(conn, key)?;
     let from_seq = snapshot.as_ref().map_or(0, |(seq, _)| *seq);

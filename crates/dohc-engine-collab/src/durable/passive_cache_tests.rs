@@ -2,6 +2,22 @@ use super::*;
 use dohc_engine_storage::NoFaults;
 use dohc_test_scratch::ScratchDir;
 
+thread_local! {
+    static RECONSTRUCTIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+pub(super) fn record_reconstruction() {
+    RECONSTRUCTIONS.with(|count| count.set(count.get() + 1));
+}
+
+fn reset_reconstructions() {
+    RECONSTRUCTIONS.with(|count| count.set(0));
+}
+
+fn reconstructions() -> usize {
+    RECONSTRUCTIONS.with(std::cell::Cell::get)
+}
+
 fn setup(count: usize) -> (ScratchDir, EngineStore, Vec<DocKey>) {
     let scratch = ScratchDir::new_named("passive-transaction-cache").unwrap();
     let mut store = EngineStore::open_passive(&scratch.join("engine.db"), 0, None, None).unwrap();
@@ -105,4 +121,42 @@ fn dedupe_only_document_rebuilds_and_detects_missing_dependencies() {
             Ok::<_, CollabError>(())
         })
         .unwrap();
+}
+
+#[test]
+fn removed_entry_defers_dependency_reconstruction_until_page_end() {
+    let (_scratch, mut store, keys) = setup(1);
+    let key = &keys[0];
+    let doc = Ydoc::wire();
+    doc.plaintext_insert(0, "unreceived");
+    let pending: Vec<_> = (0..3).map(|i| doc.plaintext_insert(10 + i, "x")).collect();
+    let outcome = store
+        .write_with(&NoFaults, |tx| {
+            let mut cache = TransactionDocCache::new(tx);
+            cache.append(key, &Ydoc::wire().plaintext_insert(0, "resident"), 1)?;
+            assert!(!cache.has_missing_updates(key)?);
+            // Model a document larger than the byte budget, including a stale
+            // dependency result from its earlier resident append.
+            cache.docs = WriterDocCache::with_limits_for_test(16, 0);
+            for update in &pending {
+                reset_reconstructions();
+                assert!(!cache.append(key, update, 1)?.deduped);
+                assert!(!cache.docs.contains_for_test(key));
+                assert_eq!(
+                    reconstructions(),
+                    1,
+                    "only the append gate reconstructs; dependency checking waits"
+                );
+            }
+            reset_reconstructions();
+            assert!(cache.has_missing_updates(key)?);
+            assert_eq!(reconstructions(), 1, "page end reconstructs once");
+            Err::<(), _>(CollabError::MissingDependencies)
+        })
+        .unwrap_err();
+    assert!(matches!(outcome, CollabError::MissingDependencies));
+    assert_eq!(
+        read_marker(&store, key).unwrap().unwrap().head_update_seq,
+        0
+    );
 }
