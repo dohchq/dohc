@@ -932,6 +932,11 @@ mod saturation_tests {
         supervisor.close(&db).unwrap();
         assert!(refused, "a restart must keep local origination disabled");
         assert_eq!(
+            actor.link_drain_metrics().worker_starts,
+            0,
+            "passive actors must never create a DrainWorker, even without queued work"
+        );
+        assert_eq!(
             actor.link_drain_metrics().actor_batches,
             0,
             "passive actors must never run the link drain"

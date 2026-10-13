@@ -109,7 +109,7 @@ it.skipIf(engineBinary.missing)("supervised passive child converges through the 
   const untouched = () => {
     expect(readdirSync(stores.get(workspaceId)!.dir)).toEqual([".dohc"]);
     inspect(workspaceId, db => {
-      for (const table of ["materialization_jobs", "automation_claims"]) expect(db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get()!.n).toBe(0);
+      for (const table of ["materialization_jobs", "automation_claims", "link_pending", "link_index_state"]) expect(db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get()!.n).toBe(0);
       expect(db.prepare("SELECT COUNT(*) AS n FROM replication_log WHERE imported=0").get()!.n).toBe(0);
       expect(db.prepare("SELECT COUNT(*) AS n FROM conflicts WHERE status='open'").get()!.n).toBe(0);
     });

@@ -10,6 +10,8 @@ use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, Default)]
 pub struct LinkDrainMetrics {
+    #[cfg(test)]
+    pub(crate) worker_starts: u64,
     pub actor_batches: u64,
     pub max_actor_us: u64,
     pub total_actor_us: u64,
@@ -59,6 +61,10 @@ impl DrainWorker {
                     }
                 }
             })?;
+        #[cfg(test)]
+        {
+            metrics.lock().unwrap().worker_starts += 1;
+        }
         Ok(Self {
             jobs: Some(jobs),
             results,

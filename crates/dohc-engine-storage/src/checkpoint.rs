@@ -527,6 +527,89 @@ mod tests {
         assert_eq!(skipped["ending_log"], skipped["starting_log"]);
     }
 
+    #[cfg(feature = "fault-injection")]
+    #[test]
+    fn startup_checkpoint_spans_report_pinned_reader_and_error() {
+        const CHILD: &str = "DOHC_PINNED_CHECKPOINT_PHASE_TEST_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            let scratch = ScratchDir::new().unwrap();
+            let path = scratch.path().join("engine.db");
+            let mut s = store(&path);
+            s.stop_checkpoint_worker_for_test();
+            write(&mut s, 0, 1024);
+            s.read_with(|conn| conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)"))
+                .unwrap();
+            let reader =
+                Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+            reader
+                .execute_batch("BEGIN; SELECT * FROM checkpoint_load")
+                .unwrap();
+            write(&mut s, 1, 1024);
+            let checkpoints = Checkpoints::start(&path).unwrap();
+            s.read_with(|conn| {
+                let mut phase =
+                    crate::capture_phase::Phase::new("pinned_reader_PASSIVE", None, 0, true);
+                checkpoints.checkpoint_tail(conn, 0, MAX_WRITER_BACKFILL_FRAMES, Some(&mut phase));
+                let (log, backfilled) = frames(conn)?;
+                assert!(log > backfilled);
+                Ok::<_, rusqlite::Error>(())
+            })
+            .unwrap();
+            reader.execute_batch("ROLLBACK").unwrap();
+            s.read_with(|conn| {
+                conn.execute_batch(
+                    "BEGIN IMMEDIATE; INSERT INTO checkpoint_load VALUES(2, X'01')",
+                )?;
+                {
+                    let mut phase =
+                        crate::capture_phase::Phase::new("error_PASSIVE", None, 0, true);
+                    checkpoints.checkpoint_tail(
+                        conn,
+                        0,
+                        MAX_WRITER_BACKFILL_FRAMES,
+                        Some(&mut phase),
+                    );
+                }
+                conn.execute_batch("ROLLBACK")
+            })
+            .unwrap();
+            return;
+        }
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "checkpoint::tests::startup_checkpoint_spans_report_pinned_reader_and_error",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .env("DOHC_CAPTURE_PHASE_DIAGNOSTICS", "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let phases: Vec<serde_json::Value> = String::from_utf8_lossy(&output.stderr)
+            .lines()
+            .filter_map(|line| line.strip_prefix("R16_CAPTURE_PHASE "))
+            .map(|json| serde_json::from_str(json).unwrap())
+            .collect();
+        let pinned = phases
+            .iter()
+            .find(|p| p["phase"] == "pinned_reader_PASSIVE")
+            .unwrap();
+        assert_eq!(pinned["outcome"], "skipped");
+        assert!(
+            pinned["ending_log"].as_i64().unwrap() > pinned["frames_finished"].as_i64().unwrap()
+        );
+        let error = phases
+            .iter()
+            .find(|p| p["phase"] == "error_PASSIVE")
+            .unwrap();
+        assert_eq!(error["outcome"], "error");
+    }
+
     #[test]
     fn passive_store_open_and_upgrade_do_no_startup_checkpoint_work() {
         use crate::migration::{BASELINE_MIGRATIONS, MigrationContext, run_migrations};

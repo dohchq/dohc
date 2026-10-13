@@ -373,6 +373,8 @@ fn open_engine_db_configured(
     }
     let no_faults = NoFaults;
     // Migrations must not originate operations or queue work for passive stores.
+    // Fresh passive stores migrate as owner before the role switch below. They
+    // contain no versions; migrations must not seed versions or local work there.
     let newly_applied = match run_migrations(
         &mut conn,
         BASELINE_MIGRATIONS,
@@ -631,6 +633,22 @@ fn integrity_check(conn: &Connection) -> Result<(), StorageError> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn passive_role_overrides_background_checkpoint_opt_in() {
+        let scratch =
+            dohc_test_scratch::ScratchDir::new_named("passive-checkpoint-opt-in").unwrap();
+        let path = scratch.path().join("engine.db");
+        for now_ms in [1, 2] {
+            let opened =
+                super::open_engine_db_configured(&path, now_ms, None, None, true, true).unwrap();
+            assert!(super::store_is_passive(&opened.conn).unwrap());
+            assert!(
+                opened.checkpoints.is_none(),
+                "passive role must override checkpoint opt-in"
+            );
+        }
+    }
+
     use super::REQUIRED_TABLES;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU64, Ordering};
