@@ -726,6 +726,81 @@
       "note": "CommonMark 0.31.2 keeps the empty link inline in one paragraph, within the item or quote where present. Its title contains a soft break; task checkboxes remain text.",
       "rustBase64": "AQe6r6aDgcmCDwAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5Awh0YXNrTGlzdAcAuq+mg4HJgg8BAwh0YXNrSXRlbSgAuq+mg4HJgg8CB2NoZWNrZWQBeQcAuq+mg4HJgg8CAwlwYXJhZ3JhcGgHALqvpoOByYIPBAYEALqvpoOByYIPBRB4IFtdKHUgImEKMi4gYiIpAA==",
       "source": "- [ ] x [](u \"a\n  2. b\")"
+    },
+    {
+      "canonical": "- [ ] foo",
+      "fileFold": true,
+      "name": "task-first-continuation",
+      "note": "CommonMark 0.31.2: <ul> <li>[ ] foo</li> </ul>",
+      "rustBase64": "AQfW8svM/pfBBAAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5Awh0YXNrTGlzdAcA1vLLzP6XwQQBAwh0YXNrSXRlbSgA1vLLzP6XwQQCB2NoZWNrZWQBeQcA1vLLzP6XwQQCAwlwYXJhZ3JhcGgHANbyy8z+l8EEBAYEANbyy8z+l8EEBQNmb28A",
+      "source": "- [ ]\n  foo"
+    },
+    {
+      "canonical": "- [ ] \n\n  foo",
+      "foldRefuse": true,
+      "name": "task-blank-continuation",
+      "note": "CommonMark 0.31.2: <ul> <li> <p>[ ]</p> <p>foo</p> </li> </ul>",
+      "rustBase64": "AQjvpMCsyZzLCgAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5Awh0YXNrTGlzdAcA76TArMmcywoBAwh0YXNrSXRlbSgA76TArMmcywoCB2NoZWNrZWQBeQcA76TArMmcywoCAwlwYXJhZ3JhcGiH76TArMmcywoEAwlwYXJhZ3JhcGgHAO+kwKzJnMsKBQYEAO+kwKzJnMsKBgNmb28A",
+      "source": "- [ ]\n\n  foo"
+    },
+    {
+      "canonical": "- [ ] Call Bob",
+      "fileFold": true,
+      "name": "task-lazy-continuation",
+      "note": "CommonMark 0.31.2: <ul> <li>[ ] Call Bob</li> </ul>",
+      "rustBase64": "AQfwm+Hprb/9BQAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5Awh0YXNrTGlzdAcA8Jvh6a2//QUBAwh0YXNrSXRlbSgA8Jvh6a2//QUCB2NoZWNrZWQBeQcA8Jvh6a2//QUCAwlwYXJhZ3JhcGgHAPCb4emtv/0FBAYEAPCb4emtv/0FBQhDYWxsIEJvYgA=",
+      "source": "- [ ] \nCall Bob"
+    },
+    {
+      "canonical": "- \n\nSome text",
+      "fileFold": true,
+      "name": "empty-bullet-root-text",
+      "note": "CommonMark 0.31.2: <ul> <li></li> </ul> <p>Some text</p>",
+      "rustBase64": "AQf4lofI3ZK+CAAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwD4lofI3ZK+CAEDCGxpc3RJdGVtBwD4lofI3ZK+CAIDCXBhcmFncmFwaIf4lofI3ZK+CAEDCXBhcmFncmFwaAcA+JaHyN2SvggEBgQA+JaHyN2SvggFCVNvbWUgdGV4dAA=",
+      "source": "- \nSome text"
+    },
+    {
+      "canonical": "1. \n\nx",
+      "fileFold": true,
+      "name": "empty-ordered-root-text",
+      "note": "CommonMark 0.31.2: <ol> <li></li> </ol> <p>x</p>",
+      "projected": true,
+      "rustBase64": "AQiJiuCenKujBgAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwtvcmRlcmVkTGlzdCgAiYrgnpyrowYBBXN0YXJ0AX0BBwCJiuCenKujBgEDCGxpc3RJdGVtBwCJiuCenKujBgMDCXBhcmFncmFwaIeJiuCenKujBgEDCXBhcmFncmFwaAcAiYrgnpyrowYFBgQAiYrgnpyrowYGAXgA",
+      "source": "1.\nx"
+    },
+    {
+      "canonical": "- \n\n&#32; x",
+      "fileFold": true,
+      "name": "empty-bullet-blank-root-text",
+      "note": "CommonMark 0.31.2: <ul> <li></li> </ul> <p>x</p>",
+      "rustBase64": "AQeAvoTq3bigDgAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwCAvoTq3bigDgEDCGxpc3RJdGVtBwCAvoTq3bigDgIDCXBhcmFncmFwaIeAvoTq3bigDgEDCXBhcmFncmFwaAcAgL6E6t24oA4EBgQAgL6E6t24oA4FAyAgeAA=",
+      "source": "- \n\n  x"
+    },
+    {
+      "canonical": "- \n  foo",
+      "foldRefuse": true,
+      "name": "bare-bullet-indented-text",
+      "note": "CommonMark 0.31.2: <ul> <li>foo</li> </ul>",
+      "projected": true,
+      "rustBase64": "AQfmtriZxvDJDQAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwDmtriZxvDJDQEDCGxpc3RJdGVtBwDmtriZxvDJDQIDCXBhcmFncmFwaIfmtriZxvDJDQMDCXBhcmFncmFwaAcA5ra4mcbwyQ0EBgQA5ra4mcbwyQ0FA2ZvbwA=",
+      "source": "-\n  foo"
+    },
+    {
+      "canonical": "1. \n   foo",
+      "foldRefuse": true,
+      "name": "bare-ordered-indented-text",
+      "note": "CommonMark 0.31.2: <ol> <li>foo</li> </ol>",
+      "projected": true,
+      "rustBase64": "AQiTgPyLhc2ABgAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwtvcmRlcmVkTGlzdCgAk4D8i4XNgAYBBXN0YXJ0AX0BBwCTgPyLhc2ABgEDCGxpc3RJdGVtBwCTgPyLhc2ABgMDCXBhcmFncmFwaIeTgPyLhc2ABgQDCXBhcmFncmFwaAcAk4D8i4XNgAYFBgQAk4D8i4XNgAYGA2ZvbwA=",
+      "source": "1.\n   foo"
+    },
+    {
+      "canonical": "- x\n\n  - \n  -",
+      "foldRefuse": true,
+      "name": "item-bare-bullet-siblings",
+      "note": "CommonMark 0.31.2: <ul> <li> <p>x</p> <ul> <li></li> <li></li> </ul> </li> </ul>",
+      "rustBase64": "AQvNsJHZs7CDDQAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwDNsJHZs7CDDQEDCGxpc3RJdGVtBwDNsJHZs7CDDQIDCXBhcmFncmFwaAcAzbCR2bOwgw0DBgQAzbCR2bOwgw0EAXiHzbCR2bOwgw0DAwpidWxsZXRMaXN0BwDNsJHZs7CDDQYDCGxpc3RJdGVtBwDNsJHZs7CDDQcDCXBhcmFncmFwaIfNsJHZs7CDDQcDCGxpc3RJdGVtBwDNsJHZs7CDDQkDCXBhcmFncmFwaAA=",
+      "source": "- x\n\n  -\n  -"
     }
   ],
   "rules": "Blank lines contain only spaces or tabs. Same-kind siblings across blanks form one loose list. An indented line after a blank starts another item paragraph; a nonblank unindented line can lazily continue the current paragraph. Children must reach their parent's marker content column. Task checkboxes are content after a two-column bullet marker. Refusals for ambiguous lines apply inside list bodies; root prose, rules and code remain accepted. Each projector output must be accepted unchanged by its projected reader. Ordered output is capped at nine digits. Letter and Roman prefixes are prose. Thematic breaks take precedence over list markers."

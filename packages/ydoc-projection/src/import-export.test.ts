@@ -4598,3 +4598,13 @@ describe('indented code fences', () => {
     expect(yDocToMarkdown(markdownToYDoc(input))).toBe(input)
   })
 })
+
+for (const reading of ['source', 'projection'] as const) {
+  it.each(['a > b', 'x -> y', '- step 1 -> step 2', '| cell |\n| --- |\n| x>y |', 'x => y\n\n> q'])(`restores literal angles in ${reading}: %s`, source => {
+    const document = parseRichdocMarkdown(source, reading)
+    expect(JSON.stringify(document)).not.toContain('DOHC_PARSE_')
+    const saved = serializeRichdocBody(document)
+    expect(saved).toContain('&gt;')
+    expect(parseRichdocMarkdown(saved, reading)).toEqual(document)
+  })
+}

@@ -2771,17 +2771,21 @@ fn parse_markdown_blocks_at<'src>(
             }
             continue;
         }
-        if let Some(first) = list_marker(
-            line,
-            if in_list {
-                MarkdownReading::ProjectedSource
-            } else {
-                reading
-            },
-        ) {
-            if let Some((list, next)) =
-                parse_list(lines, index, first, depth, quote_depth, reading, refused)
-            {
+        let list_reading = if in_list {
+            MarkdownReading::ProjectedSource
+        } else {
+            reading
+        };
+        if let Some(first) = list_marker(line, list_reading) {
+            if let Some((list, next)) = parse_list(
+                lines,
+                index,
+                first,
+                depth,
+                quote_depth,
+                list_reading,
+                refused,
+            ) {
                 blocks.push(list);
                 index = next;
                 continue;
@@ -3409,6 +3413,14 @@ fn parse_list<'src>(
                 next_marker = Some(next);
                 break;
             }
+            if continued.is_empty()
+                && marker.text.trim().is_empty()
+                && !matches!(marker.kind, ListKind::Task(_))
+                && (blank_line(line)
+                    || line.bytes().take_while(|byte| *byte == b' ').count() < content_indent)
+            {
+                break;
+            }
             if blank_line(line) {
                 let next = (at..lines.len()).find(|&index| !blank_line(lines[index]));
                 if let Some(next) = next.filter(|&index| {
@@ -3457,7 +3469,11 @@ fn parse_list<'src>(
             let mut blocks = blocks.into_iter();
             let first_block = blocks.next();
             match first_block {
-                Some(MdBlock::Paragraph(paragraph)) if !marker.text.trim().is_empty() => {
+                Some(MdBlock::Paragraph(paragraph))
+                    if !marker.text.trim().is_empty()
+                        || (matches!(marker.kind, ListKind::Task(_))
+                            && body.get(1).is_some_and(|line| !blank_line(line))) =>
+                {
                     let following: Vec<_> = blocks.collect();
                     MdListItem {
                         paragraph: paragraph.into_boxed_str(),

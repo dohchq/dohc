@@ -60,7 +60,7 @@ const PARSE_REFERENCE_RE = new RegExp(
 // until its tag spans are read, so only the serializer's `&lt;` and `&gt;`
 // open and close one.
 let parseReferences: ReadonlyMap<string, string> = new Map()
-let rawHtmlMarkup: { lt: string; gt: string } = { lt: '<', gt: '>' }
+let rawHtmlMarkup = { lt: '<', gt: '>', used: false }
 
 // Raw HTML stays the text the file holds, references and all. Tiptap keeps it
 // as text where there is no DOM, as in the engine, but reads it through the DOM
@@ -309,7 +309,9 @@ function sourceText(source: string): string {
 // wrote, so it opens and closes no tag span. Tiptap reads `&lt;` and `&gt;`
 // as the only `<` and `>` left, and those are the ones that do.
 function fileAngles(text: string): string {
-  return text.replaceAll('<', rawHtmlMarkup.lt).replaceAll('>', rawHtmlMarkup.gt)
+  const replaced = text.replaceAll('<', rawHtmlMarkup.lt).replaceAll('>', rawHtmlMarkup.gt)
+  rawHtmlMarkup.used ||= replaced !== text
+  return replaced
 }
 
 // A token's source in a gathered HTML run. A gathered run keeps its whole
@@ -586,7 +588,7 @@ export function parseRichdocMarkdown(markdown: string, reading: 'source' | 'proj
       return sentinel
     },
   )
-  const markup = { lt: reserveSentinel(), gt: reserveSentinel() }
+  const markup = { lt: reserveSentinel(), gt: reserveSentinel(), used: false }
   const markupEntities = [[markup.lt, '<'], [markup.gt, '>']] as const
   const encodedEntities = new Map([...entitySentinels, ...markupEntities])
   const tagEntities = new Map([
@@ -615,11 +617,11 @@ export function parseRichdocMarkdown(markdown: string, reading: 'source' | 'proj
     parsed = (reading === 'projection' ? projectedMarkdownManager() : markdownManager).parse(prepared)
   } finally {
     parseReferences = new Map()
-    rawHtmlMarkup = { lt: '<', gt: '>' }
+    rawHtmlMarkup = { lt: '<', gt: '>', used: false }
     writtenLinks = { openers: new Set(), runs: new Map(), length: -1, sentinels: new WeakMap() }
   }
   return ensureListItemParagraphs(
-    entitySentinels.size || markdown.includes('<')
+    entitySentinels.size || markup.used
       ? restoreBlockEntityParseSentinels(parsed, { decodedEntities, encodedEntities, tagEntities })
       : parsed,
   )
