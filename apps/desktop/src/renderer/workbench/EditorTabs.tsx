@@ -1,6 +1,9 @@
+import { FILE_KIND_RECORDS, type FileDisplayKind } from "@dohc/workspace-contracts/kinds";
 import { parseTab, TAB_KINDS } from "./workbenchState";
+import type { WorkspaceFileEntry } from "../../ipc/bridgeContract";
 import { editorTabTestId } from "../../testPins";
 import { focusSurface, useFocusSurface } from "../ui/focusReturn";
+import { isObjectKind, KindGlyph, listedFileKind, ObjectGlyph, PageIcon, type ObjectKind } from "../ui/KindGlyph";
 import { Menu } from "../ui/Menu";
 import { ChevronDown, Columns2, X } from "lucide-react";
 import {
@@ -21,6 +24,28 @@ function fileName(path: string, label?: string): string {
 function tabTitle(path: string, label?: string): string {
   const tab = parseTab(path);
   return TAB_KINDS[tab.kind].tooltip(tab, label);
+}
+
+// A tab's mark, as primitives so the memoized tab compares them by value: a
+// file draws its listed kind, or its page emoji as Explorer does; every other
+// tab draws its object's glyph.
+type TabMark = { glyph: FileDisplayKind | ObjectKind; icon: string | undefined };
+
+function tabMark(path: string, files: ReadonlyMap<string, WorkspaceFileEntry> | undefined): TabMark {
+  const tab = parseTab(path);
+  const object = TAB_KINDS[tab.kind].glyph(tab);
+  if (object) return { glyph: object, icon: undefined };
+  const entry = files?.get(path);
+  return { glyph: listedFileKind(path, entry?.kind).displayKind, icon: entry?.icon };
+}
+
+const TAB_GLYPH_SIZE = 14;
+
+function TabGlyph(props: TabMark & { className?: string }) {
+  if (props.icon) return <PageIcon icon={props.icon} size={TAB_GLYPH_SIZE} />;
+  return isObjectKind(props.glyph)
+    ? <ObjectGlyph kind={props.glyph} size={TAB_GLYPH_SIZE} className={props.className} />
+    : <KindGlyph kind={FILE_KIND_RECORDS[props.glyph]} size={TAB_GLYPH_SIZE} className={props.className} />;
 }
 
 // The active tab and the editor body below it share one surface. The tab's
@@ -94,6 +119,8 @@ const Tab = memo(function Tab(props: {
   /** The tab's display name when the path alone cannot supply it. A string,
    * not a lookup: this component is memoized on its props. */
   label?: string;
+  glyph: TabMark["glyph"];
+  icon: string | undefined;
   active: boolean;
   dirty: boolean;
   onActivate: (groupId: string, path: string) => void;
@@ -186,7 +213,12 @@ const Tab = memo(function Tab(props: {
           className="h-1.5 w-1.5 shrink-0 rounded-full bg-ink"
         />
       ) : null}
-      <span className="max-w-44 truncate">{name}</span>
+      {/* The drawing's 8px from glyph to name; the glyph is muted on the
+          active tab and subtle on the rest. */}
+      <span className="flex items-center gap-2">
+        <TabGlyph glyph={props.glyph} icon={props.icon} className={props.active ? "text-muted" : "text-subtle"} />
+        <span className="max-w-44 truncate">{name}</span>
+      </span>
       <button
         type="button"
         aria-label={`Close ${name}`}
@@ -649,6 +681,8 @@ export const EditorTabs = memo(function EditorTabs(props: {
   /** Display names the tab path cannot supply, keyed by path: moment paths
    * from history records. */
   tabLabels?: ReadonlyMap<string, string>;
+  /** The listing by path: a file tab's header-checked kind and page emoji. */
+  files?: ReadonlyMap<string, WorkspaceFileEntry>;
   // Paths with a set-aside draft. Unlike `activeTabDirty`, this is
   // knowable for every tab — the store outlives the keyed inspectors — so an
   // inactive tab keeps its marker.
@@ -871,6 +905,7 @@ export const EditorTabs = memo(function EditorTabs(props: {
             groupId={props.groupId}
             path={tab.path}
             label={props.tabLabels?.get(tab.path)}
+            {...tabMark(tab.path, props.files)}
             active={tab.path === props.activeTab}
             dirty={
               (tab.path === props.activeTab && props.activeTabDirty) ||
@@ -1031,6 +1066,7 @@ export const EditorTabs = memo(function EditorTabs(props: {
             id: tab.path,
             label: fileName(tab.path, props.tabLabels?.get(tab.path)),
             title: tab.path,
+            icon: <TabGlyph {...tabMark(tab.path, props.files)} />,
             current: tab.path === props.activeTab,
             onSelect: () => props.onActivate(props.groupId, tab.path),
           }))}

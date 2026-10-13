@@ -9,7 +9,6 @@ import {
   EyeOff,
   FileText,
   FileX,
-  Hash,
   History,
   Link2,
   LogIn,
@@ -25,7 +24,7 @@ import { ipcErrorMessage } from "../ipcError";
 import { basenameOf } from "../path";
 import { formatChatTime, formatShortTime } from "../time";
 import { RetryRow, SecondaryButton } from "../ui/controls";
-import { AppGlyph, KindGlyph } from "../ui/KindGlyph";
+import { KindGlyph, ObjectGlyph } from "../ui/KindGlyph";
 import { SkeletonLines } from "../ui/SkeletonRows";
 import { StateMark } from "../ui/StateMark";
 import { PresenceFaces } from "../collab/PresenceIndicators";
@@ -114,7 +113,7 @@ export function AboutHeader(props: { subject: { path: string } | AboutConversati
       {"path" in subject ? (
         <KindGlyph kind={fileKindForPath(subject.path)} size={14} className="text-muted" />
       ) : subject.kind === "group" ? (
-        <Hash size={14} aria-hidden className="shrink-0 text-muted" />
+        <ObjectGlyph kind="group" size={14} className="text-muted" />
       ) : (
         <ChatAvatar name={subject.name} kind={subject.kind === "agent" ? "agent" : "human"} own={subject.kind === "agent"} size="strip" />
       )}
@@ -472,7 +471,7 @@ function AccessRowView(props: { row: AccessRow }) {
         {row.appId === null ? (
           <ChatAvatar name={row.principal} kind="human" size="strip" />
         ) : (
-          <AppGlyph size={14} className="text-subtle" />
+          <ObjectGlyph kind="app" size={14} className="text-subtle" />
         )}
         <span className="min-w-0 flex-1 truncate">{row.principal}</span>
       </div>

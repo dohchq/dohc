@@ -1,5 +1,23 @@
-import { AppWindow, Database, File, FileCode, FileSpreadsheet, FileText, Image, PenTool, type LucideIcon } from "lucide-react";
-import type { FileKindRecord } from "@dohc/workspace-contracts/kinds";
+import {
+  AppWindow,
+  Database,
+  File,
+  FileCode,
+  FileDiff,
+  FileSpreadsheet,
+  FileText,
+  Hash,
+  History,
+  Image,
+  Layers,
+  MessageCircle,
+  PenTool,
+  Table2,
+  Workflow,
+  type LucideIcon,
+} from "lucide-react";
+import { FILE_KIND_RECORDS, fileKindForPath, type FileKindRecord } from "@dohc/workspace-contracts/kinds";
+import type { WorkspaceFileEntry } from "../../ipc/bridgeContract";
 
 // One kind, one glyph, one name: every surface draws a file's kind through
 // this part, so the glyph comes from the kind registry and never from a
@@ -36,8 +54,50 @@ export function KindGlyph(props: {
   return <Glyph {...label} size={props.size} className={`shrink-0 ${props.className ?? ""}`} />;
 }
 
-// An app is a folder, not a file kind, so the registry has no record for it.
-// A surface that lists an app as an object draws this glyph beside its name.
-export function AppGlyph(props: { size: number; className?: string }) {
-  return <AppWindow aria-hidden size={props.size} className={`shrink-0 ${props.className ?? ""}`} />;
+// The listing, not the file name, says whether a file is a database: the kind
+// registry matches `.db` by extension alone.
+export function listedFileKind(path: string, listed: WorkspaceFileEntry["kind"] | undefined): FileKindRecord {
+  if (listed === "database") return FILE_KIND_RECORDS.database;
+  const kind = fileKindForPath(path);
+  return kind.displayKind === "database" ? FILE_KIND_RECORDS.binary : kind;
+}
+
+// A page's `icon` frontmatter emoji stands in for its kind glyph
+// (Notion-style), in a box the glyph's size so the name does not move.
+export function PageIcon(props: { icon: string; size: number }) {
+  return (
+    <span
+      aria-hidden
+      style={{ width: props.size, height: props.size, fontSize: props.size - 2 }}
+      className="grid shrink-0 place-items-center leading-none"
+    >
+      {props.icon}
+    </span>
+  );
+}
+
+// The objects a workspace holds that are not files, each with one glyph
+// wherever it is listed. A `Record` over the kinds, so a new kind is a
+// compile error here until it has its icon. Like a file's, the glyph is
+// decorative beside the object's name.
+export type ObjectKind = "app" | "collection" | "group" | "chat" | "compare" | "change" | "graph" | "history";
+
+const OBJECT_GLYPHS: Record<ObjectKind, LucideIcon> = {
+  app: AppWindow,
+  collection: Table2,
+  group: Hash,
+  chat: MessageCircle,
+  compare: Layers,
+  change: FileDiff,
+  graph: Workflow,
+  history: History,
+};
+
+export function isObjectKind(kind: string): kind is ObjectKind {
+  return Object.hasOwn(OBJECT_GLYPHS, kind);
+}
+
+export function ObjectGlyph(props: { kind: ObjectKind; size: number; className?: string }) {
+  const Glyph = OBJECT_GLYPHS[props.kind];
+  return <Glyph aria-hidden size={props.size} className={`shrink-0 ${props.className ?? ""}`} />;
 }

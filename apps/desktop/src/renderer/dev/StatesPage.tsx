@@ -35,6 +35,7 @@ import { UsageRecordCard, UsageRecordClearConfirm, type UsageRecordView } from "
 import { ConfirmDialogCard } from "../ui/ConfirmDialog";
 import { CopyButton, CopyField } from "../ui/CopyButton";
 import { DangerButton, EmptyState, IconButton, Pill, PrimaryButton, RetryRow, SecondaryButton, SectionLabel } from "../ui/controls";
+import { ObjectGlyph, type ObjectKind } from "../ui/KindGlyph";
 import { MENU_SEPARATOR, Menu, type MenuEntry } from "../ui/Menu";
 import { MoreMenu } from "../ui/MoreMenu";
 import { SegmentedControl } from "../ui/SegmentedControl";
@@ -382,7 +383,41 @@ function KindRows(props: { label: string; selected: boolean }) {
   );
 }
 
-const RELAY_ERROR = "dohc could not reach the sync relay. Check your connection.";
+// Every object that is not a file, by the name its tab shows, each glyph in
+// a row the way a list draws it. A `Record` over the kinds, so a new kind is
+// a compile error here until the page shows it.
+const OBJECT_SAMPLES: Record<ObjectKind, string> = {
+  app: "trip-planner",
+  collection: "Registrations",
+  group: "trip",
+  chat: "Home",
+  compare: "Compare with Main",
+  change: "Diff: plan.md",
+  graph: "Graph",
+  history: "History",
+};
+const OBJECTS = Object.keys(OBJECT_SAMPLES) as ObjectKind[];
+
+function ObjectRows(props: { label: string; selected: boolean }) {
+  return (
+    <ul aria-label={props.label} className="m-0 w-52 list-none rounded-lg border border-line bg-panel py-1">
+      {OBJECTS.map((kind) => (
+        <li key={kind} className="px-1">
+          <span
+            className={`flex h-7 items-center gap-1.5 rounded-md pl-7 pr-2 text-[13px] ${
+              props.selected ? "bg-selected text-ink" : "text-muted"
+            }`}
+          >
+            <ObjectGlyph kind={kind} size={15} className={props.selected ? "text-ink" : "text-subtle"} />
+            <span className="min-w-0 flex-1 truncate">{OBJECT_SAMPLES[kind]}</span>
+          </span>
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+const RELAY_ERROR ="dohc could not reach the sync relay. Check your connection.";
 const FOLDER = "C:\\Users\\ice\\Research";
 
 function toast(tone: "danger" | "success") {
@@ -1364,6 +1399,21 @@ function Pane(props: { theme: "light" | "dark" }) {
         </Specimen>
         <Specimen label="selected">
           <KindRows label="Kinds, selected" selected />
+        </Specimen>
+        <Specimen label="object">
+          <ul className="m-0 list-none border border-transparent py-1 font-mono text-[11px] text-subtle">
+            {OBJECTS.map((kind) => (
+              <li key={kind} className="flex h-7 items-center">
+                {kind}
+              </li>
+            ))}
+          </ul>
+        </Specimen>
+        <Specimen label="object, rest">
+          <ObjectRows label="Objects" selected={false} />
+        </Specimen>
+        <Specimen label="object, selected">
+          <ObjectRows label="Objects, selected" selected />
         </Specimen>
       </Section>
 
