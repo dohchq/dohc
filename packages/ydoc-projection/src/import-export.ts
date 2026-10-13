@@ -475,7 +475,7 @@ export function markdownToYDoc(
 
 // Admission is independent of canonical serialization. Code bodies are opaque;
 // blank lines end lazy continuation, but not an indented continuation block.
-function assertSupportedListMarkdown(markdown: string, reading: 'source' | 'projection'): string {
+function assertSupportedListMarkdown(markdown: string): string {
   const parents: Array<{ indent: number; column: number }> = []
   const lines = markdown.split('\n')
   let changed = false
@@ -509,8 +509,7 @@ function assertSupportedListMarkdown(markdown: string, reading: 'source' | 'proj
     if (!inList && /^(?:\*(?:[ \t]*\*){2,}|_(?:[ \t]*_){2,})[ \t]*$/u.test(rest)) { blank = false; continue }
     if ((inList || marker || /^[-+*]\t/u.test(rest))
       && (rest.startsWith('\t') || /^(?:[-+*]|[0-9]{1,9}[.)])[ \t]*\t/u.test(rest)
-        || /^(?:\*(?:[ \t]*\*){2,}|_(?:[ \t]*_){2,})[ \t]*$/u.test(rest)
-        || (reading === 'source' && /^(?:[a-zA-Z]{1,2}|[ivxlcdmIVXLCDM]+)[.)] /u.test(rest)))) refuse()
+        || /^(?:\*(?:[ \t]*\*){2,}|_(?:[ \t]*_){2,})[ \t]*$/u.test(rest))) refuse()
     if (/^[0-9]{1,9}[.)] \[[ xX]\](?: |$)/u.test(rest)) refuse()
     if (marker) {
       const itemBody = rest.slice(marker[0].length)
@@ -528,7 +527,6 @@ function assertSupportedListMarkdown(markdown: string, reading: 'source' | 'proj
         body = body.slice(child[0].length); depth += 2
       }
       if (/^(?:\*(?:[ \t]*\*){2,}|_(?:[ \t]*_){2,})[ \t]*$/u.test(body)
-        || (reading === 'source' && /^(?:[a-zA-Z]{1,2}|[ivxlcdmIVXLCDM]+)[.)] /u.test(body))
         || /^[0-9]{1,9}[.)] \[[ xX]\](?: |$)/u.test(body)) refuse()
       const itemFence = /^(?:`{3,}|~{3,})/u.exec(body)?.[0] ?? ''
       if (itemFence) { fence = itemFence; fenceInList = true }
@@ -546,7 +544,7 @@ function assertSupportedListMarkdown(markdown: string, reading: 'source' | 'proj
 }
 
 export function parseRichdocMarkdown(markdown: string, reading: 'source' | 'projection' = 'source'): JSONContent {
-  markdown = assertSupportedListMarkdown(markdown, reading)
+  markdown = assertSupportedListMarkdown(markdown)
   const reservedSentinels = new Set(
     markdown.match(PARSE_SENTINEL_RE) ?? [],
   )

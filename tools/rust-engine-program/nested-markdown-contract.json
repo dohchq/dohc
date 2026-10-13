@@ -124,13 +124,15 @@
       "source": "1. a\n\n  next paragraph"
     },
     {
+      "canonical": "1. a\na. b",
       "name": "letter-item",
-      "refuse": true,
+      "rustBase64": "AQfzv8/Qxvi2AgAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwtvcmRlcmVkTGlzdCgA87/P0Mb4tgIBBXN0YXJ0AX0BBwDzv8/Qxvi2AgEDCGxpc3RJdGVtBwDzv8/Qxvi2AgMDCXBhcmFncmFwaAcA87/P0Mb4tgIEBgQA87/P0Mb4tgIFBmEKYS4gYgA=",
       "source": "1. a\n   a. b"
     },
     {
+      "canonical": "1. a\niv) b",
       "name": "roman-item",
-      "refuse": true,
+      "rustBase64": "AQe70Kzxl9+tAgAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwtvcmRlcmVkTGlzdCgAu9Cs8ZffrQIBBXN0YXJ0AX0BBwC70Kzxl9+tAgEDCGxpc3RJdGVtBwC70Kzxl9+tAgMDCXBhcmFncmFwaAcAu9Cs8ZffrQIEBgQAu9Cs8ZffrQIFB2EKaXYpIGIA",
       "source": "1. a\n   iv) b"
     },
     {
@@ -249,8 +251,9 @@
       "source": "- 1. child\n- sibling\n"
     },
     {
+      "canonical": "- a. child\n- sibling",
       "name": "letter-first-in-bullet",
-      "refuse": true,
+      "rustBase64": "AQr0gIP+vJO6AwAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwD0gIP+vJO6AwEDCGxpc3RJdGVtBwD0gIP+vJO6AwIDCXBhcmFncmFwaAcA9ICD/ryTugMDBgQA9ICD/ryTugMECGEuIGNoaWxkh/SAg/68k7oDAgMIbGlzdEl0ZW0HAPSAg/68k7oDDQMJcGFyYWdyYXBoBwD0gIP+vJO6Aw4GBAD0gIP+vJO6Aw8Hc2libGluZwA=",
       "source": "- a. child\n- sibling\n"
     },
     {
@@ -288,7 +291,126 @@
       "name": "ordered-marker-limit",
       "rustBase64": "AQvikPH//ujjDgAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwtvcmRlcmVkTGlzdCgA4pDx//7o4w4BBXN0YXJ0AX2/p9a5BwcA4pDx//7o4w4BAwhsaXN0SXRlbQcA4pDx//7o4w4DAwlwYXJhZ3JhcGgHAOKQ8f/+6OMOBAYEAOKQ8f/+6OMOBQFhh+KQ8f/+6OMOAwMIbGlzdEl0ZW0HAOKQ8f/+6OMOBwMJcGFyYWdyYXBoBwDikPH//ujjDggGBADikPH//ujjDgkBYgA=",
       "source": "999999999. a\n999999999. b"
+    },
+    {
+      "canonical": "---\n\nfollowing",
+      "fileFold": true,
+      "name": "rule---5-text",
+      "rustBase64": "AQWZ4/Kd+PTuCwAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5Aw5ob3Jpem9udGFsUnVsZYeZ4/Kd+PTuCwEDCXBhcmFncmFwaAcAmePynfj07gsCBgQAmePynfj07gsDCWZvbGxvd2luZwA=",
+      "source": "- - -\nfollowing"
+    },
+    {
+      "canonical": "---\n\nfollowing",
+      "fileFold": true,
+      "name": "rule---5-blank",
+      "rustBase64": "AQXnyJmz1/SQBgAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5Aw5ob3Jpem9udGFsUnVsZYfnyJmz1/SQBgEDCXBhcmFncmFwaAcA58iZs9f0kAYCBgQA58iZs9f0kAYDCWZvbGxvd2luZwA=",
+      "source": "- - -\n\nfollowing"
+    },
+    {
+      "canonical": "---",
+      "fileFold": true,
+      "name": "rule---5-eof",
+      "rustBase64": "AQLw+tKx/eLeAQAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5Aw5ob3Jpem9udGFsUnVsZQA=",
+      "source": "- - -"
+    },
+    {
+      "canonical": "---\n\nfollowing",
+      "fileFold": true,
+      "name": "rule-*-5-text",
+      "rustBase64": "AQWzsJfg0/rqDwAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5Aw5ob3Jpem9udGFsUnVsZYezsJfg0/rqDwEDCXBhcmFncmFwaAcAs7CX4NP66g8CBgQAs7CX4NP66g8DCWZvbGxvd2luZwA=",
+      "source": "* * *\nfollowing"
+    },
+    {
+      "canonical": "---\n\nfollowing",
+      "fileFold": true,
+      "name": "rule-*-5-blank",
+      "rustBase64": "AQXDkcv3wYy3CwAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5Aw5ob3Jpem9udGFsUnVsZYfDkcv3wYy3CwEDCXBhcmFncmFwaAcAw5HL98GMtwsCBgQAw5HL98GMtwsDCWZvbGxvd2luZwA=",
+      "source": "* * *\n\nfollowing"
+    },
+    {
+      "canonical": "---",
+      "fileFold": true,
+      "name": "rule-*-5-eof",
+      "rustBase64": "AQLAqIva+abkDQAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5Aw5ob3Jpem9udGFsUnVsZQA=",
+      "source": "* * *"
+    },
+    {
+      "canonical": "---\n\nfollowing",
+      "fileFold": true,
+      "name": "rule-_-5-text",
+      "rustBase64": "AQWupsSHob2oBQAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5Aw5ob3Jpem9udGFsUnVsZYeupsSHob2oBQEDCXBhcmFncmFwaAcArqbEh6G9qAUCBgQArqbEh6G9qAUDCWZvbGxvd2luZwA=",
+      "source": "_ _ _\nfollowing"
+    },
+    {
+      "canonical": "---\n\nfollowing",
+      "fileFold": true,
+      "name": "rule-_-5-blank",
+      "rustBase64": "AQWqxeLt+bHoCwAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5Aw5ob3Jpem9udGFsUnVsZYeqxeLt+bHoCwEDCXBhcmFncmFwaAcAqsXi7fmx6AsCBgQAqsXi7fmx6AsDCWZvbGxvd2luZwA=",
+      "source": "_ _ _\n\nfollowing"
+    },
+    {
+      "canonical": "---",
+      "fileFold": true,
+      "name": "rule-_-5-eof",
+      "rustBase64": "AQLGi63PtdiBAgAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5Aw5ob3Jpem9udGFsUnVsZQA=",
+      "source": "_ _ _"
+    },
+    {
+      "canonical": "---\n\nfollowing",
+      "fileFold": true,
+      "name": "rule-*-3-text",
+      "rustBase64": "AQXi2IaS8Yf0BQAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5Aw5ob3Jpem9udGFsUnVsZYfi2IaS8Yf0BQEDCXBhcmFncmFwaAcA4tiGkvGH9AUCBgQA4tiGkvGH9AUDCWZvbGxvd2luZwA=",
+      "source": "***\nfollowing"
+    },
+    {
+      "canonical": "---\n\nfollowing",
+      "fileFold": true,
+      "name": "rule-*-3-blank",
+      "rustBase64": "AQWihvTQrpKMCgAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5Aw5ob3Jpem9udGFsUnVsZYeihvTQrpKMCgEDCXBhcmFncmFwaAcAoob00K6SjAoCBgQAoob00K6SjAoDCWZvbGxvd2luZwA=",
+      "source": "***\n\nfollowing"
+    },
+    {
+      "canonical": "---",
+      "fileFold": true,
+      "name": "rule-*-3-eof",
+      "rustBase64": "AQKzu4iG383QCAAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5Aw5ob3Jpem9udGFsUnVsZQA=",
+      "source": "***"
+    },
+    {
+      "canonical": "- Dr. Jones called",
+      "fileFold": true,
+      "name": "doctor",
+      "rustBase64": "AQai3P3YtIkpACgBBG1ldGENc2NoZW1hVmVyc2lvbgF9AQcBBGJvZHkDCmJ1bGxldExpc3QHAKLc/di0iSkBAwhsaXN0SXRlbQcAotz92LSJKQIDCXBhcmFncmFwaAcAotz92LSJKQMGBACi3P3YtIkpBBBEci4gSm9uZXMgY2FsbGVkAA==",
+      "source": "- Dr. Jones called"
+    },
+    {
+      "canonical": "- St. Louis",
+      "fileFold": true,
+      "name": "saint",
+      "rustBase64": "AQbIzery4e6TBAAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwDIzery4e6TBAEDCGxpc3RJdGVtBwDIzery4e6TBAIDCXBhcmFncmFwaAcAyM3q8uHukwQDBgQAyM3q8uHukwQECVN0LiBMb3VpcwA=",
+      "source": "- St. Louis"
+    },
+    {
+      "canonical": "- a. first",
+      "fileFold": true,
+      "name": "letter-prose",
+      "rustBase64": "AQar5r+jld/0CwAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwCr5r+jld/0CwEDCGxpc3RJdGVtBwCr5r+jld/0CwIDCXBhcmFncmFwaAcAq+a/o5Xf9AsDBgQAq+a/o5Xf9AsECGEuIGZpcnN0AA==",
+      "source": "- a. first"
+    },
+    {
+      "canonical": "- item\nii. note",
+      "fileFold": true,
+      "name": "roman-continuation",
+      "rustBase64": "AQbP3Y+Q0q7nDQAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwDP3Y+Q0q7nDQEDCGxpc3RJdGVtBwDP3Y+Q0q7nDQIDCXBhcmFncmFwaAcAz92PkNKu5w0DBgQAz92PkNKu5w0EDWl0ZW0KaWkuIG5vdGUA",
+      "source": "- item\n  ii. note"
+    },
+    {
+      "canonical": "1. I. Overview",
+      "fileFold": true,
+      "name": "roman-overview",
+      "rustBase64": "AQfNr96j3cfWDgAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwtvcmRlcmVkTGlzdCgAza/eo93H1g4BBXN0YXJ0AX0BBwDNr96j3cfWDgEDCGxpc3RJdGVtBwDNr96j3cfWDgMDCXBhcmFncmFwaAcAza/eo93H1g4EBgQAza/eo93H1g4FC0kuIE92ZXJ2aWV3AA==",
+      "source": "1. I. Overview"
     }
   ],
-  "rules": "Blank lines contain only spaces or tabs. Same-kind siblings across blanks form one loose list. An indented line after a blank starts another item paragraph; a nonblank unindented line can lazily continue the current paragraph. Children must reach their parent's marker content column. Task checkboxes are content after a two-column bullet marker. Refusals for ambiguous lines apply inside list bodies; root prose, rules and code remain accepted. Each projector output must be accepted unchanged by its projected reader. Ordered output is capped at nine digits."
+  "rules": "Blank lines contain only spaces or tabs. Same-kind siblings across blanks form one loose list. An indented line after a blank starts another item paragraph; a nonblank unindented line can lazily continue the current paragraph. Children must reach their parent's marker content column. Task checkboxes are content after a two-column bullet marker. Refusals for ambiguous lines apply inside list bodies; root prose, rules and code remain accepted. Each projector output must be accepted unchanged by its projected reader. Ordered output is capped at nine digits. Letter and Roman prefixes are prose. Thematic breaks take precedence over list markers."
 }

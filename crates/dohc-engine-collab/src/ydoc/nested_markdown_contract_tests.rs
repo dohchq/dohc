@@ -53,6 +53,36 @@ fn nested_contract_corpus() {
 }
 
 #[test]
+fn nested_contract_file_fold_accepts_rules_and_prose() {
+    let corpus: Value = serde_json::from_str(include_str!(
+        "../../../../tools/rust-engine-program/nested-markdown-contract.json"
+    ))
+    .unwrap();
+    for case in corpus["cases"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|case| case["fileFold"] == true)
+    {
+        let doc = Ydoc::wire();
+        let source = case["source"].as_str().unwrap();
+        doc.rewrite_content_to_markdown_for_fold(ContentKind::Richdoc, source)
+            .expect(source);
+        assert_eq!(
+            doc.project_richdoc().unwrap(),
+            case["canonical"].as_str().unwrap(),
+            "{source}"
+        );
+        doc.preserve_folded_markdown_source(source).expect(source);
+        assert_eq!(
+            doc.preserved_markdown_source(&doc.project_richdoc().unwrap())
+                .as_deref(),
+            Some(source)
+        );
+    }
+}
+
+#[test]
 fn nested_contract_combines_list_and_quote_depth() {
     let source = |quotes: usize, lists: usize| {
         let mut body = String::new();
@@ -82,11 +112,7 @@ fn nested_contract_file_fold_refuses_before_mutation() {
     doc.rewrite_content_to_markdown(ContentKind::Richdoc, "Original")
         .unwrap();
     let before = doc.encode_full_state();
-    for source in [
-        "- parent\n  - child\n",
-        "1. parent\n\n   continuation\n",
-        "- a. child\n",
-    ] {
+    for source in ["- parent\n  - child\n", "1. parent\n\n   continuation\n"] {
         assert!(doc
             .rewrite_content_to_markdown_for_fold(ContentKind::Richdoc, source)
             .is_err());
@@ -231,9 +257,7 @@ fn fix1_projected_paragraph_indent_is_accepted_unchanged() {
 #[test]
 fn fix1_spaced_rules_keep_root_acceptance() {
     let blocks = parse_markdown_blocks("* * *", MarkdownReading::Source);
-    assert!(
-        matches!(&blocks[0], MdBlock::BulletList(MdBulletItems::Plain(items)) if items == &["* *"])
-    );
+    assert!(matches!(&blocks[0], MdBlock::Rule));
     for source in ["* * *", "_ _ _"] {
         Ydoc::wire()
             .rewrite_content_to_markdown_as(ContentKind::Richdoc, source, MarkdownReading::Source)

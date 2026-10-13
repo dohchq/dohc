@@ -135,6 +135,45 @@ fn imported_activation_rejects_ordinary_projection_that_does_not_match_native_st
 }
 
 #[test]
+fn imported_activation_accepts_a_file_body_the_engine_reads_as_text() {
+    const SOURCE: &str = "# Shared\n\nHello <b>hidden</b> world\n";
+    let mut f = imported_fixture();
+    f.doc
+        .rewrite_content_to_markdown_preserving_source(ContentKind::Richdoc, SOURCE)
+        .unwrap();
+    let projection = f.doc.project(ContentKind::Richdoc).unwrap().content;
+    assert_ne!(projection, SOURCE);
+    assert_eq!(f.doc.preserved_markdown_source(&projection), None);
+    let update = f.doc.encode_full_state();
+    f.store
+        .write_with(&NoFaults, |tx| {
+            durable::record_update_in_tx(tx, &f.key, &update, None, None, 4)
+        })
+        .unwrap();
+    VersionedTextStore::new(&mut f.store)
+        .write_text(
+            &WriteText {
+                workspace_id: "workspace".into(),
+                version_id: "main".into(),
+                object_id: "object".into(),
+                path: "owner.md".into(),
+                text: SOURCE.into(),
+                moment_id: "imported-literal-html".into(),
+                metadata_origin: "sync".into(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 5,
+                request_id: None,
+            },
+            &NoFaults,
+        )
+        .unwrap();
+    let captured = capture_imported(&mut f, 1_000_000).unwrap();
+    assert_eq!(captured.source.source_digest, hex_sha256(SOURCE.as_bytes()));
+}
+
+#[test]
 fn imported_activation_rejects_main_era_flattened_nested_list_witness() {
     const SOURCE: &str = "- parent\n  - nested\n";
     let mut f = imported_fixture();

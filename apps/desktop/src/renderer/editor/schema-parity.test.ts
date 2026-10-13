@@ -534,7 +534,9 @@ describe("desktop editor schema parity", () => {
     expect(ref.current!.getMarkdown().trimEnd()).toBe(canonicalBody);
     const editor = mountedEditor();
     expect(() => editor.state.doc.check()).not.toThrow();
-    act(() => editor.commands.insertContentAt(3, "!"));
+    act(() => editor.commands.insertContentAt(editor.state.doc.content.size, {
+      type: "paragraph", content: [{ type: "text", text: "!" }],
+    }));
     expect(ref.current!.getMarkdown()).toContain("!");
   });
 

@@ -2433,12 +2433,35 @@ fn block_start(line: &str, starts_block: bool, starts_paragraph: bool) -> Option
     None
 }
 
+#[inline(always)]
 fn thematic_break(line: &str) -> bool {
-    line.chars().next().is_some_and(|marker| {
-        matches!(marker, '-' | '*' | '_')
-            && line.chars().filter(|c| *c == marker).count() >= 3
-            && line.chars().all(|c| c == marker || c == ' ' || c == '\t')
-    })
+    let bytes = line.as_bytes();
+    matches!(bytes.first(), Some(b' ' | b'-' | b'*' | b'_'))
+        && bytes
+            .get(2)
+            .is_none_or(|byte| matches!(byte, b' ' | b'\t' | b'-' | b'*' | b'_'))
+        && thematic_break_body(line)
+}
+
+#[inline(never)]
+fn thematic_break_body(line: &str) -> bool {
+    let indent = line.bytes().take_while(|byte| *byte == b' ').count();
+    if indent > 3 {
+        return false;
+    }
+    let line = &line[indent..];
+    let Some(marker @ (b'-' | b'*' | b'_')) = line.as_bytes().first().copied() else {
+        return false;
+    };
+    let mut count = 0;
+    for byte in line.bytes() {
+        if byte == marker {
+            count += 1;
+        } else if !matches!(byte, b' ' | b'\t') {
+            return false;
+        }
+    }
+    count >= 3
 }
 
 /// Split a leading `---` YAML frontmatter block, with the blank lines after
@@ -2500,7 +2523,7 @@ fn parse_markdown_blocks_checked(body: &str, reading: MarkdownReading) -> (Vec<M
     (blocks, refused)
 }
 
-fn unsupported_markdown_line(line: &str, reading: MarkdownReading) -> bool {
+fn unsupported_markdown_line(line: &str) -> bool {
     let rest = line.trim_start_matches(' ');
     if rest.starts_with('\t') || rest.starts_with("~~~") {
         return true;
@@ -2531,29 +2554,7 @@ fn unsupported_markdown_line(line: &str, reading: MarkdownReading) -> bool {
     {
         return true;
     }
-    reading == MarkdownReading::Source && unsupported_letter_marker(rest)
-}
-
-#[inline(always)]
-fn unsupported_letter_marker(rest: &str) -> bool {
-    let bytes = rest.as_bytes();
-    let ends_marker =
-        |at| matches!(bytes.get(at), Some(b'.' | b')')) && bytes.get(at + 1) == Some(&b' ');
-    if bytes.first().is_some_and(u8::is_ascii_alphabetic)
-        && (ends_marker(1) || (bytes.get(1).is_some_and(u8::is_ascii_alphabetic) && ends_marker(2)))
-    {
-        return true;
-    }
-    let roman = bytes
-        .iter()
-        .take_while(|byte| {
-            matches!(
-                byte.to_ascii_lowercase(),
-                b'i' | b'v' | b'x' | b'l' | b'c' | b'd' | b'm'
-            )
-        })
-        .count();
-    roman > 0 && ends_marker(roman)
+    false
 }
 
 /// Maximum quote nesting before the parser keeps the rest as paragraph text.
@@ -2568,21 +2569,11 @@ fn blank_line(line: &str) -> bool {
 }
 
 fn refused_fold_item_bodies(blocks: &[MdBlock<'_>]) -> bool {
-    let refused = |text: &str, body: &[MdBlock<'_>]| {
-        !body.is_empty()
-            || text
-                .lines()
-                .any(|line| unsupported_letter_marker(line.trim_start_matches(' ')))
-    };
     blocks.iter().any(|block| match block {
         MdBlock::Quote(inner) => refused_fold_item_bodies(inner),
-        MdBlock::BulletList(items) => items.iter().any(|(text, body)| refused(text, body)),
-        MdBlock::OrderedList { items, .. } => items
-            .iter()
-            .any(|item| refused(&item.paragraph, item.blocks())),
-        MdBlock::TaskList(items) => items
-            .iter()
-            .any(|(_, item)| refused(&item.paragraph, item.blocks())),
+        MdBlock::BulletList(items) => items.iter().any(|(_, body)| !body.is_empty()),
+        MdBlock::OrderedList { items, .. } => items.iter().any(|item| !item.blocks().is_empty()),
+        MdBlock::TaskList(items) => items.iter().any(|(_, item)| !item.blocks().is_empty()),
         _ => false,
     })
 }
@@ -2684,8 +2675,8 @@ fn parse_markdown_blocks_at<'src>(
                 line.trim_start_matches(' ').as_bytes(),
                 [b'-' | b'+' | b'*', b'\t', ..]
             ))
-            && unsupported_markdown_line(line, reading);
-        if line == "---" {
+            && unsupported_markdown_line(line);
+        if thematic_break(line) {
             blocks.push(MdBlock::Rule);
             index += 1;
             continue;
@@ -2768,7 +2759,7 @@ fn parse_markdown_blocks_at<'src>(
         while index < lines.len() {
             let next = lines[index];
             if blank_line(next)
-                || next == "---"
+                || thematic_break(next)
                 || markdown_fence(next, source_fences).is_some()
                 || next == ">"
                 || next.starts_with("> ")
@@ -2780,7 +2771,7 @@ fn parse_markdown_blocks_at<'src>(
             {
                 break;
             }
-            *refused |= in_list && unsupported_markdown_line(next, reading);
+            *refused |= in_list && unsupported_markdown_line(next);
             para.push(next);
             index += 1;
         }
@@ -2891,6 +2882,9 @@ fn projected_reference(value: &str) -> Option<(char, usize)> {
 /// Splits one GFM table row, such as `| a | b |` or `a | b`, into trimmed
 /// cells as written. A line without an unescaped pipe is not a row.
 fn parse_table_row(line: &str) -> Option<Vec<String>> {
+    if !line.contains('|') {
+        return None;
+    }
     let line = trim_js(line);
     let mut cells = Vec::new();
     let mut start = 0usize;
@@ -3139,6 +3133,9 @@ fn list_marker(line: &str) -> Option<ListMarker<'_>> {
         return None;
     }
     let rest = &line[indent..];
+    if thematic_break(rest) {
+        return None;
+    }
     if let Some((bullet, text)) = parse_bullet_item(rest) {
         let task = if text.starts_with('[')
             && (text.len() == 3 || text.as_bytes().get(3) == Some(&b' '))
@@ -3198,7 +3195,7 @@ fn structural_item_start(text: &str) -> bool {
                 | b'<'
                 | b'['
                 | b'0'..=b'9'
-        ) || (byte.is_ascii_alphabetic() && unsupported_letter_marker(text))
+        )
     })
 }
 
@@ -3223,9 +3220,7 @@ fn plain_bullet_prefix<'src>(
     while let Some(text) = lines
         .get(end)
         .and_then(|line| line.strip_prefix(prefix))
-        .filter(|text| {
-            !structural_item_start(text) || (bullet == '*' && thematic_break(lines[end]))
-        })
+        .filter(|text| !structural_item_start(text))
     {
         items.push(text);
         end += 1;
@@ -10301,6 +10296,43 @@ mod projection_tests {
         doc.with_delta(|txn| insert_md_paragraph(txn, &body, 0, source.trim_end()));
         let canonical = witness_source(&doc, source);
         assert_eq!(settled(&doc, &canonical, source).as_deref(), Some(source));
+    }
+
+    #[test]
+    fn a_local_settle_keeps_a_source_whose_body_is_the_files_body() {
+        // Raw HTML still reads as syntax while the document keeps it as text.
+        // A local snapshot permits retaining the unchanged file body.
+        let file = "---\nid: rec\n---\n\nHello <b>hidden</b> world\n";
+        let doc = Ydoc::wire();
+        doc.rewrite_content_to_markdown(ContentKind::Richdoc, file)
+            .expect("richdoc rewrite");
+        let canonical = witness_source(&doc, file);
+        assert_eq!(doc.preserved_markdown_source(&canonical), None);
+        // The file on disk holds that body, so a local settle keeps it, also
+        // under other frontmatter.
+        for local in [
+            file,
+            "---\nid: rec\nrelated: old\n---\n\nHello <b>hidden</b> world\n",
+        ] {
+            assert_eq!(
+                settled(&doc, &canonical, local).as_deref(),
+                Some(file),
+                "{local:?}"
+            );
+        }
+        // Any other body, or no snapshot, is dropped.
+        for local in ["---\nid: rec\n---\n\nHello world\n", "Hello\n"] {
+            assert_eq!(settled(&doc, &canonical, local), None, "{local:?}");
+        }
+        assert_eq!(
+            doc.settled_markdown_source(&canonical, || Ok::<_, ()>(None)),
+            Ok(None)
+        );
+        // A source that does not rebuild the document is dropped, even when
+        // the file holds it.
+        let forged = "---\nid: rec\n---\n\nHidden\n";
+        witness_source(&doc, forged);
+        assert_eq!(settled(&doc, &canonical, forged), None);
     }
 
     fn settled(doc: &Ydoc, canonical: &str, snapshot: &str) -> Option<String> {
