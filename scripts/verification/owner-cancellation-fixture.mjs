@@ -109,9 +109,11 @@ export function runOwnerCancellationFixture(root, sourceRoot, kind, signal, clea
   `], { cwd: root, encoding: "utf8", timeout: 20_000 });
   const json = (path) => existsSync(join(root, path)) ? JSON.parse(readFileSync(join(root, path), "utf8")) : null;
   const reports = join(root, ".agent-artifacts/verification");
+  // The blocked second run writes its own report, and a clock step can sort it first.
+  const ownerReport = () => readdirSync(reports).map(name => json(`.agent-artifacts/verification/${name}/result.json`)).find(report => report?.scope === "js") ?? null;
   return { pid: result.pid, status: result.status, signal: result.signal, error: result.error?.message, stdout: result.stdout, stderr: result.stderr,
     entered: existsSync(join(root, "sync-entered")), syncReturned: existsSync(join(root, "sync-returned")),
     lockExists: existsSync(join(root, ".dohc-dev/verification/build.json.lock")), containerExists: existsSync(join(root, "container")),
     outcome: json("outcome.json"), commands: readFileSync(join(root, "commands.jsonl"), "utf8").trim().split(/\r?\n/).map(JSON.parse),
-    report: existsSync(reports) ? json(`.agent-artifacts/verification/${readdirSync(reports)[0]}/result.json`) : null };
+    report: existsSync(reports) ? ownerReport() : null };
 }

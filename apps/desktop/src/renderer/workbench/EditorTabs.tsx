@@ -1,7 +1,7 @@
+import { parseTab, TAB_KINDS } from "./workbenchState";
 import { editorTabTestId } from "../../testPins";
 import { focusSurface, useFocusSurface } from "../ui/focusReturn";
 import { Menu } from "../ui/Menu";
-import { basenameOf } from "../path";
 import { ChevronDown, Columns2, X } from "lucide-react";
 import {
   memo,
@@ -12,44 +12,15 @@ import {
   type PointerEvent as ReactPointerEvent,
 } from "react";
 import { prefersReducedMotion } from "../reducedMotion";
-import {
-  isChatsTabPath,
-  chatTabDefaultTitle,
-  isGraphTabPath,
-  isHistoryTabPath,
-  isMomentDiffTabPath,
-  isSingletonEditorTabPath,
-  isVersionCompareTabPath,
-  parseTransactionalCollectionTabPath,
-} from "./workbenchState";
-
-export function momentDiffName(label?: string): string {
-  const name = label === undefined ? undefined : basenameOf(label);
-  return name ? `Diff: ${name}` : "History change";
-}
 
 function fileName(path: string, label?: string): string {
-  if (parseTransactionalCollectionTabPath(path)) return label ?? "Collection";
-  if (isGraphTabPath(path)) return "Graph";
-  if (isHistoryTabPath(path)) return "History";
-  if (isChatsTabPath(path)) return label ?? chatTabDefaultTitle(path);
-  if (isMomentDiffTabPath(path)) {
-    return momentDiffName(label);
-  }
-  if (isVersionCompareTabPath(path)) return "Compare with Main";
-  return basenameOf(path);
+  const tab = parseTab(path);
+  return TAB_KINDS[tab.kind].title(tab, label);
 }
 
 function tabTitle(path: string, label?: string): string {
-  if (parseTransactionalCollectionTabPath(path)) return label ? `Collection: ${label}` : "Collection";
-  if (isGraphTabPath(path)) return "Workspace graph";
-  if (isHistoryTabPath(path)) return "Workspace history";
-  if (isChatsTabPath(path)) return label ?? chatTabDefaultTitle(path);
-  if (isMomentDiffTabPath(path)) {
-    return label ? `History diff: ${label}` : "History change";
-  }
-  if (isVersionCompareTabPath(path)) return "Compare this Version with Main";
-  return path;
+  const tab = parseTab(path);
+  return TAB_KINDS[tab.kind].tooltip(tab, label);
 }
 
 // The active tab and the editor body below it share one surface. The tab's
@@ -941,7 +912,7 @@ export const EditorTabs = memo(function EditorTabs(props: {
         data-testid="create-editor-group-right"
         aria-label="New editor group right"
         title="New editor group right"
-        disabled={empty || isSingletonEditorTabPath(props.activeTab)}
+        disabled={empty || TAB_KINDS[parseTab(props.activeTab)?.kind ?? "removed"].singleton}
         onClick={() => props.onCreateGroupRight(props.groupId)}
         className="grid w-7 shrink-0 place-items-center border-b border-line text-subtle hover:bg-hover hover:text-ink disabled:cursor-default disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-subtle"
       >

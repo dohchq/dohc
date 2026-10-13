@@ -1,8 +1,9 @@
 import type { AccessAnswer, AccessShareRow } from "@dohc/workspace-contracts/access";
 import { FILE_KIND_RECORDS, type FileDisplayKind } from "@dohc/workspace-contracts/kinds";
+import { SAVED_HERE, SAVING, saveProblem, type SaveState } from "@dohc/workspace-contracts/save-state";
 import { AlertTriangle, Bot, CheckCircle2, Globe2, MessageSquare, MoreHorizontal, SearchX } from "lucide-react";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import type { ReactNode } from "react";
+import type { ComponentProps, ReactNode } from "react";
 import type {
   ActorPresentation,
   ChannelThreadRecord,
@@ -17,10 +18,13 @@ import type {
   UsageRecordRow,
 } from "../../ipc/bridgeContract";
 import { readError, withErrorWords } from "../../ipc/errorWords";
+import { CsvViewActions } from "../CsvView";
 import { DocumentMenu } from "../DocumentMenu";
 import { FrontmatterAsWritten } from "../FrontmatterAsWritten";
+import { TextViewActions } from "../TextEditorView";
 import { DocumentControls, OPENING_TITLE, OpeningState, ViewActions } from "../fileInspectorUi";
 import { BlockMenu } from "../editor/blockControls";
+import { UrlPasteOfferRow } from "../editor/UrlPasteOffer";
 import { SlashCommandMenu, type SlashCommandState } from "../editor/slashCommands";
 import { buildTableMenu, type TableMenuRow } from "../editor/tableControls";
 import { OverlayFrame } from "../Overlay";
@@ -198,10 +202,29 @@ function EditorGroupSpecimen(props: { groupId: string; groupNumber: number; tabs
   );
 }
 
+// A URL pasted on its own line, on a strip of paper, with the offer's row
+// where the editor floats it: under the line. A pasted URL is already a link,
+// so Link is pressed before a choice. Only Plain text changes it: the URL is
+// then plain text and the row offers Undo.
+function UrlOfferSpecimen(props: { force?: string; chosen?: boolean }) {
+  return (
+    <div className="w-[420px] rounded-lg border border-line bg-bg px-4 pb-10 pt-3 text-[15px] text-ink">
+      <p className={`m-0 ${props.chosen ? "" : "underline"}`}>https://example.com/trip/itinerary</p>
+      <div
+        className="mt-1"
+        data-force-state={props.force ? "focus-visible" : undefined}
+        data-force-target={props.force ? `[data-testid="${props.force}"]` : undefined}
+      >
+        <UrlPasteOfferRow form={props.chosen ? "plain" : "link"} chosen={props.chosen ?? false} />
+      </div>
+    </div>
+  );
+}
+
 // One group's tab row carrying an open document's actions, as the shell lays
 // it out, over a strip of paper.
-function TabRowActionsSpecimen(props: { width: string; testId?: string; children: ReactNode }) {
-  const path = "trip/plan.md";
+function TabRowActionsSpecimen(props: { width: string; testId?: string; path?: string; children: ReactNode }) {
+  const path = props.path ?? "trip/plan.md";
   return (
     <div data-testid={props.testId} className={`${props.width} rounded-lg border border-line`}>
       <EditorGroupFrame
@@ -226,6 +249,49 @@ function TabRowActionsSpecimen(props: { width: string; testId?: string; children
         {props.children}
         <div className="h-4 rounded-b-lg bg-bg" />
       </EditorGroupFrame>
+    </div>
+  );
+}
+
+// Two groups side by side, each with one file open and that file's actions
+// in its own tab row.
+function FileViewSplitSpecimen(props: { left: { path: string; actions: ReactNode }; right: { path: string; actions: ReactNode } }) {
+  const group = (id: string, groupNumber: number, file: { path: string; actions: ReactNode }) => ({
+    id,
+    size: 1,
+    content: (
+      <EditorGroupFrame
+        tabs={(actionsRef) => (
+          <EditorTabs
+            actionsRef={actionsRef}
+            groupId={id}
+            groupNumber={groupNumber}
+            tabs={[{ path: file.path }]}
+            activeTab={file.path}
+            activeTabDirty={false}
+            recoveryPaths={NO_RECOVERY}
+            onActivate={noop}
+            onClose={noop}
+            onContextMenu={noop}
+            onMove={noop}
+            onMoveToGroup={noop}
+            onCreateGroupRight={noop}
+          />
+        )}
+      >
+        {file.actions}
+        <div className="h-4 bg-bg" />
+      </EditorGroupFrame>
+    ),
+  });
+  return (
+    <div className="flex w-full overflow-hidden rounded-lg border border-line">
+      <EditorGroupLayout
+        groups={[group("left", 1, props.left), group("right", 2, props.right)]}
+        activeGroupId="left"
+        onFocusGroup={noop}
+        onResizeGroups={noop}
+      />
     </div>
   );
 }
@@ -281,6 +347,7 @@ const treeRowCallbacks = {
 function Row(props: {
   name: string;
   folder?: boolean;
+  app?: boolean;
   selected?: boolean;
   active?: boolean;
   drop?: boolean;
@@ -289,8 +356,9 @@ function Row(props: {
   return (
     <div data-force-state={props.force} data-force-target="button">
       <TreeRow
-        row={treeRow(props.name, props.folder)}
+        row={treeRow(props.name, props.folder || props.app)}
         collection={false}
+        app={props.app ?? false}
         selected={props.selected ?? false}
         active={props.active ?? false}
         tabbable={false}
@@ -330,6 +398,7 @@ function KindRows(props: { label: string; selected: boolean }) {
             kind: kind.displayKind === "database" ? "database" : "file",
           }}
           collection={false}
+          app={false}
           selected={props.selected}
           active={false}
           tabbable={false}
@@ -1927,9 +1996,84 @@ function Pane(props: { theme: "light" | "dark" }) {
           </AboutPanelSpecimen>
         </Specimen>
       </Section>
+
+      {/* Last, so the parts above keep their places. A CSV and a text file
+          draw their save state, Share and controls in the tab row, as a
+          document does: a calm save state says so only to screen readers. */}
+      <Section part="file-view-actions" title="File view actions" menusAtRest>
+        {FILE_VIEW_CSV_STATES.map((specimen) => (
+          <Specimen key={specimen.label} label={`CSV ${specimen.label}`} className="w-full">
+            <TabRowActionsSpecimen width="w-full" path="data/funnel.csv">
+              <CsvViewActions onShare={noop} onModeChange={noop} onImport={noop} {...specimen.view} />
+            </TabRowActionsSpecimen>
+          </Specimen>
+        ))}
+        {FILE_VIEW_TEXT_STATES.map((specimen) => (
+          <Specimen key={specimen.label} label={`text ${specimen.label}`} className="w-full">
+            <TabRowActionsSpecimen width="w-full" path="src/useFunnel.ts">
+              <TextViewActions testId="view-text" onShare={noop} saveState={specimen.saveState} />
+            </TabRowActionsSpecimen>
+          </Specimen>
+        ))}
+        <Specimen label="split: text failed beside a CSV in Raw" className="w-full">
+          <FileViewSplitSpecimen
+            left={{ path: "src/useFunnel.ts", actions: <TextViewActions testId="view-text" onShare={noop} saveState={FILE_VIEW_FAILED} /> }}
+            right={{
+              path: "data/funnel.csv",
+              actions: <CsvViewActions onShare={noop} onModeChange={noop} onImport={noop} saveState={SAVED_HERE} mode="raw" />,
+            }}
+          />
+        </Specimen>
+      </Section>
+
+      {/* Last, so the parts above keep their places. Offers sit in space
+          already there: a folder row's glyph, the tab row's end, and a row
+          floating under a pasted line. */}
+      <Section part="offers" title="Offers" menusAtRest>
+        <Specimen label="an app folder in Files: at rest, selected, focused">
+          <ul role="tree" aria-label="App folders" className="m-0 w-64 list-none rounded-lg border border-line bg-panel py-1">
+            <Row name="trip-planner" app />
+            <Row name="signup" app selected />
+            <Row name="dashboard" app force="focus-visible" />
+          </ul>
+        </Specimen>
+        <Specimen label="Run in the tab row of an app's entry file" className="w-full">
+          <TabRowActionsSpecimen width="w-full" path="trip-planner/index.html">
+            <ViewActions onShare={noop} onRun={noop} />
+          </TabRowActionsSpecimen>
+        </Specimen>
+        <Specimen label="a URL pasted on its own line, Link pressed: Link focused, Plain text focused, then Undo after Plain text">
+          <div className="flex flex-col gap-3">
+            {(["link", "plain"] as const).map((focused) => (
+              <UrlOfferSpecimen key={focused} force={focused === "link" ? "url-paste-link" : "url-paste-plain"} />
+            ))}
+            <UrlOfferSpecimen chosen />
+          </div>
+        </Specimen>
+      </Section>
     </section>
   );
 }
+
+const FILE_VIEW_FAILED = saveProblem("error", "dohc couldn't write the file.");
+
+const FILE_VIEW_CSV_STATES: {
+  label: string;
+  view: Pick<ComponentProps<typeof CsvViewActions>, "saveState" | "mode" | "readOnly" | "truncated" | "importing">;
+}[] = [
+  { label: "saved, as a table", view: { saveState: SAVED_HERE, mode: "table" } },
+  { label: "saving", view: { saveState: SAVING, mode: "table" } },
+  { label: "failed", view: { saveState: FILE_VIEW_FAILED, mode: "table" } },
+  { label: "read-only", view: { saveState: SAVED_HERE, mode: "table", readOnly: true } },
+  { label: "too large", view: { saveState: SAVED_HERE, mode: "table", truncated: true } },
+  { label: "raw", view: { saveState: SAVED_HERE, mode: "raw" } },
+  { label: "importing", view: { saveState: SAVED_HERE, mode: "table", importing: true } },
+];
+
+const FILE_VIEW_TEXT_STATES: { label: string; saveState: SaveState }[] = [
+  { label: "saved", saveState: SAVED_HERE },
+  { label: "failed", saveState: FILE_VIEW_FAILED },
+];
 
 const SETTINGS_WORKSPACE = "C:\\Users\\ada\\Documents\\trip";
 const EDITOR_FONT_OPTIONS = [

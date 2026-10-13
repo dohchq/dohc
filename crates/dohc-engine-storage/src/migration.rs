@@ -2846,6 +2846,15 @@ CREATE TABLE live_settlement_attribution_unavailable (
 ) STRICT;
 ";
 
+// A fence row also holds its restore proof, which can be tens of MiB, and SQLite
+// reaches a later column of a row only by walking the overflow pages of every
+// column before it. Each edit and live application on a restored document
+// reads its resumed fence, so answer those reads from this index instead.
+const V2_LIVE_RESTORE_RESUMED_LOOKUP_DDL: &str = "
+DROP INDEX live_restore_document_generation;
+CREATE INDEX live_restore_resumed ON live_restore_fences(workspace_id,main_version_id,object_id,new_generation,relay_database_namespace,resume_receipt_json);
+";
+
 const V2_FIELD_HISTORY_LINK_AUTHOR_DDL: &str = "
 ALTER TABLE collection_field_history ADD COLUMN link_author_json TEXT;
 ";
@@ -3206,6 +3215,12 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         ordinal: 49,
         id: "v2-local-chat-actor-key",
         sql: "ALTER TABLE chat_messages ADD COLUMN author_actor_key TEXT CHECK (author_actor_key IS NULL OR json_valid(author_actor_key));",
+        sets_user_version: None,
+    },
+    Migration {
+        ordinal: 50,
+        id: "v2-live-restore-resumed-lookup",
+        sql: V2_LIVE_RESTORE_RESUMED_LOOKUP_DDL,
         sets_user_version: None,
     },
 ];
@@ -3883,6 +3898,10 @@ mod tests {
                 "v2-local-chat-actor-key",
                 "f84d0497555ff288db36304ed0c4b41b7f61d1d7f10396b9fd08a61da0fc7219",
             ),
+            (
+                "v2-live-restore-resumed-lookup",
+                "ccc7e17969beb6ae6259e9ce174863fa91d15c2bdad66c3f8232e8b236ff8b8c",
+            ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());
         for (migration, (id, checksum)) in BASELINE_MIGRATIONS.iter().zip(pinned) {
@@ -3909,6 +3928,39 @@ mod tests {
             [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         ).unwrap();
         assert_eq!(state, (1, 0, 100));
+    }
+
+    #[test]
+    fn restore_resumed_lookup_upgrade_indexes_existing_fences() {
+        let dir = tempdir();
+        let mut conn = open_bare(&dir.join("engine.db"));
+        conn.pragma_update(None, "foreign_keys", true).unwrap();
+        let ctx = MigrationContext::current(1);
+        let before = migration_index("v2-live-restore-resumed-lookup");
+        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..before], &ctx, &NoFaults).unwrap();
+        conn.execute_batch("INSERT INTO versioned_workspaces VALUES ('ws','main'); INSERT INTO live_restore_fences(workspace_id,main_version_id,object_id,relay_database_namespace,operation_id,input_json,receipt_json) VALUES ('ws','main','doc','relay','restore','{\"newFence\":1}','{}');").unwrap();
+        run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).unwrap();
+        let indexes: Vec<String> = conn
+            .prepare("SELECT name FROM pragma_index_list('live_restore_fences')")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert!(indexes.iter().any(|name| name == "live_restore_resumed"));
+        assert!(
+            !indexes
+                .iter()
+                .any(|name| name == "live_restore_document_generation")
+        );
+        let found: (i64, String) = conn
+            .query_row(
+                "SELECT new_generation,relay_database_namespace FROM live_restore_fences INDEXED BY live_restore_resumed WHERE workspace_id='ws' AND main_version_id='main' AND object_id='doc'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(found, (1, "relay".to_owned()));
     }
 
     #[test]
