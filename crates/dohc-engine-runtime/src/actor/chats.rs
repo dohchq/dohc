@@ -6,9 +6,9 @@ use dohc_engine_domain::{
     ChatChannelSummary, ChatDecision, ChatFeedPage, ChatFeedReadState, ChatFileMention, ChatFollow,
     ChatMention, ChatMessage, ChatMessagePage, ChatProjectionFileAccess, ChatReaction, ChatThread,
     ChatThreadLane, ChatThreadProjection, ChatThreadReadState, CreateFileThread, DispatchClaim,
-    DispatchRecovery, LinkedChatStore, MentionCursor, PendingBookmarkRow, ResolveDecision,
-    RunRecordLink, SaveBookmark, SendMessage, SetFollow, SetReaction, StartChannelThread,
-    ThreadDispatchPause, UnreadFileThread,
+    DispatchRecovery, FollowTargetKind, LinkedChatStore, MentionCursor, PendingBookmarkRow,
+    ResolveDecision, RunRecordLink, SaveBookmark, SendMessage, SetFollow, SetReaction,
+    StartChannelThread, ThreadDispatchPause, UnreadFileThread,
 };
 use dohc_engine_storage::NoFaults;
 use tokio_util::sync::CancellationToken;
@@ -103,10 +103,16 @@ impl ActorHandle {
     pub async fn chat_channels_list(
         &self,
         workspace_id: String,
+        after: Option<(i64, String)>,
+        limit: i64,
     ) -> Result<Vec<ChatChannelSummary>, RuntimeError> {
         self.run_chats(move |chats| {
             chats
-                .list_channels(&workspace_id)
+                .list_channels_page(
+                    &workspace_id,
+                    after.as_ref().map(|(at, id)| (*at, id.as_str())),
+                    limit,
+                )
                 .map_err(RuntimeError::from)
         })
         .await
@@ -587,10 +593,18 @@ impl ActorHandle {
         workspace_id: String,
         owner_user_id: String,
         state: Option<String>,
+        after: Option<(FollowTargetKind, String)>,
+        limit: i64,
     ) -> Result<Vec<ChatFollow>, RuntimeError> {
         self.run_chats(move |chats| {
             chats
-                .list_follows(&workspace_id, &owner_user_id, state.as_deref())
+                .list_follows_page(
+                    &workspace_id,
+                    &owner_user_id,
+                    state.as_deref(),
+                    after.as_ref().map(|(kind, id)| (*kind, id.as_str())),
+                    limit,
+                )
                 .map_err(RuntimeError::from)
         })
         .await

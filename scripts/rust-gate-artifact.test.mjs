@@ -33,7 +33,7 @@ import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join, resolve, dirname } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { arch, platform } from "node:os";
+import { arch, platform, availableParallelism } from "node:os";
 import { RUST_ARCH, RUST_OS } from "../tools/rust-engine-program/native-target.mjs";
 import { requireCiPassVerdict } from "../tools/rust-engine-program/require-ci-pass-verdict.mjs";
 
@@ -326,17 +326,27 @@ test("the caps and the scratch root reach every cargo child", () => {
 test("split thread caps are both exported and both reported", () => {
   const stub = stubToolchain();
   try {
-    // A caller caps libtest while the budget caps nextest: the child must
-    // receive both values, and the evidence must name both instead of
-    // claiming a share one runner is not using.
-    const run = runGate(stub, { RUST_TEST_THREADS: "2" });
+    const jobs = Math.max(1, Math.floor(availableParallelism() / 4));
+    const libtest = Math.max(1, jobs - 1);
+    const run = runGate(stub, { RUST_TEST_THREADS: String(libtest), NEXTEST_TEST_THREADS: String(jobs) });
     const child = readFileSync(join(stub, "envdump.txt"), "utf8");
-    assert.match(child, /RUST_TEST_THREADS=2/);
-    assert.match(child, /NEXTEST_TEST_THREADS=\d+/);
-    assert.match(run.evidence, /, test-threads \d+ \(doctests 2\), head /);
+    assert.match(child, new RegExp(`RUST_TEST_THREADS=${libtest}`));
+    assert.match(child, new RegExp(`NEXTEST_TEST_THREADS=${jobs}`));
+    assert.match(run.evidence, new RegExp(`, test-threads ${jobs}${jobs === libtest ? "" : ` \\(doctests ${libtest}\\)`}, head `));
   } finally {
     rmSync(stub, { recursive: true, force: true });
   }
+});
+
+test("oversized inherited caps are clamped in every cargo child and the evidence", () => {
+  const stub = stubToolchain();
+  try {
+    const run = runGate(stub, { CARGO_BUILD_JOBS: "999", RUST_TEST_THREADS: "999", NEXTEST_TEST_THREADS: "999" });
+    const jobs = Math.max(1, Math.floor(availableParallelism() / 4));
+    const child = readFileSync(join(stub, "envdump.txt"), "utf8");
+    for (const name of ["CARGO_BUILD_JOBS", "RUST_TEST_THREADS", "NEXTEST_TEST_THREADS"]) assert.match(child, new RegExp(`${name}=${jobs}`));
+    assert.match(run.evidence, new RegExp(`, jobs ${jobs}, test-threads ${jobs}, head `));
+  } finally { rmSync(stub, {recursive: true, force: true}); }
 });
 
 test("the gate refuses to start under the disk floor, naming it", () => {

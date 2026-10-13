@@ -1,3 +1,4 @@
+import { visibleSharePath } from "@dohc/security-contract/share-selector";
 import { describe, expect, it } from "vitest";
 import {
   MAX_SHARE_VERSION_ID_CHARS,
@@ -17,7 +18,6 @@ import {
   validateChatShareAccess,
   validateFileShareAccess,
   validateShareSelector,
-  visibleSharePath,
   type ChatChannelShareSelector,
   type ChatShareThreadResolver,
   type ShareFileChatResolver,

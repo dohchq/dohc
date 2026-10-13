@@ -7,7 +7,7 @@ import { TableCell, TableHeader } from '@tiptap/extension-table'
 import { getExtensionField } from '@tiptap/core'
 import * as projection from './import-export.js'
 import { getDohcYDocFrontmatter, markdownToYDoc } from './import-export.js'
-import { setFrontmatterValue } from './frontmatter.js'
+import { setFrontmatterValue } from './frontmatter-map.js'
 import * as ordered from './orderedLiveUpdateCut.js'
 import { type OrderedLiveUpdateCutPolicy } from './orderedLiveUpdateCut.js'
 import { createLiveMarkdownJournalValidator, createLiveMarkdownRegistrationValidator, type LiveMarkdownRegistrationEvidence } from './liveDocumentValidation.js'
@@ -612,8 +612,10 @@ it('keeps policy constructors outside root exports and pins explicit subpaths', 
     './body-fragment': './src/body-fragment.ts',
     './browser-editor': './src/browser-editor.ts',
     './frontmatter': './src/frontmatter.ts',
+    './frontmatter-map': './src/frontmatter-map.ts',
     './live-journal-validation': './src/live-journal-validation.ts',
     './image-src': './src/image-src.ts',
+    './markdown-extensions': './src/dohc-markdown-extensions.ts',
     './restore-proof': './src/liveRestoreProof.ts',
     './named-live-provider': './src/namedLiveProvider.ts',
     './named-live-browser-transport': './src/namedLiveBrowserTransport.ts',

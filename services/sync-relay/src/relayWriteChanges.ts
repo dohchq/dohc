@@ -1,8 +1,9 @@
 import type {LiveDocumentKey} from "@dohc/live-session-contract/live-update-admission";
 export interface LiveHostChanges {
   readonly maxListeners: number;
-  subscribe(changed: () => void, document?: LiveDocumentKey): () => void;
+  subscribe(changed: () => void, document?: LiveDocumentKey | Pick<LiveDocumentKey, "workspaceId" | "objectId">): () => void;
   notify(document?: LiveDocumentKey): void;
+  notifyHost(workspaceIds: readonly string[]): void;
 }
 
 const observers = new WeakMap<object, Set<() => void>>();

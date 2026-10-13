@@ -32,6 +32,10 @@ pub(crate) const MAX_OP_KIND_BYTES: usize = 128;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ReplicationEnvelope {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settlement_admission: Option<SettlementAdmission>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub admitted_author_snapshot: Option<serde_json::Value>,
     pub workspace_id: String,
     pub origin_id: String,
     pub origin_seq: i64,
@@ -44,6 +48,19 @@ pub struct ReplicationEnvelope {
     pub recorded_at_ms: i64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "camelCase", deny_unknown_fields)]
+pub enum SettlementAdmission {
+    Accepted {
+        #[serde(rename = "settlementId")]
+        settlement_id: String,
+    },
+    Refused {
+        #[serde(rename = "settlementId")]
+        settlement_id: String,
+        reason: String,
+    },
+}
 impl ReplicationEnvelope {
     pub(crate) fn validate(&self) -> Result<(), crate::SyncError> {
         bounded(

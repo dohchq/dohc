@@ -49,14 +49,15 @@ async fn call(
     params: Value,
 ) -> Value {
     *id += 1;
-    transport
-        .call(
-            RequestContext::unbounded(),
-            request(*id, method, Some(handle.clone()), params),
-        )
-        .await
-        .unwrap_or_else(|error| panic!("{method} failed: {error:?}"))
-        .result
+    // Boxed so each await in a long scenario holds a pointer to the transport
+    // future rather than the future itself.
+    Box::pin(transport.call(
+        RequestContext::unbounded(),
+        request(*id, method, Some(handle.clone()), params),
+    ))
+    .await
+    .unwrap_or_else(|error| panic!("{method} failed: {error:?}"))
+    .result
 }
 
 async fn call_error(
@@ -67,13 +68,12 @@ async fn call_error(
     params: Value,
 ) -> dohc_engine_protocol::error::WireError {
     *id += 1;
-    transport
-        .call(
-            RequestContext::unbounded(),
-            request(*id, method, Some(handle.clone()), params),
-        )
-        .await
-        .unwrap_err()
+    Box::pin(transport.call(
+        RequestContext::unbounded(),
+        request(*id, method, Some(handle.clone()), params),
+    ))
+    .await
+    .unwrap_err()
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -878,6 +878,7 @@ async fn file_mentions_cap_at_2000_newest_and_hydrate_all_message_attachments() 
     let mut id = 10;
     let mut cursor: Option<String> = None;
     let mut mentions = Vec::new();
+    let mut checked_first_continuation = false;
     loop {
         let mut params = json!({ "objectId": "wanted", "pageLimit": 500 });
         if let Some(value) = &cursor {
@@ -899,6 +900,38 @@ async fn file_mentions_cap_at_2000_newest_and_hydrate_all_message_attachments() 
                 .cloned(),
         );
         cursor = page["nextCursor"].as_str().map(str::to_owned);
+        if !checked_first_continuation {
+            checked_first_continuation = true;
+            use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+            let encoded = cursor.as_ref().expect("first continuation");
+            let mut decoded: Value =
+                serde_json::from_slice(&URL_SAFE_NO_PAD.decode(encoded).unwrap()).unwrap();
+            assert_eq!(decoded["consumed"], json!(mentions.len()));
+            decoded["consumed"] = json!(i64::MAX);
+            let exhausted = call(
+                &transport,
+                &handle,
+                &mut id,
+                "chats.attachments.listFileMentions",
+                json!({ "objectId": "wanted", "pageLimit": 500,
+                    "cursor": URL_SAFE_NO_PAD.encode(serde_json::to_vec(&decoded).unwrap()) }),
+            )
+            .await;
+            assert_eq!(exhausted, json!({ "mentions": [], "nextCursor": null }));
+            decoded["consumed"] = json!(-1);
+            let error = call_error(
+                &transport,
+                &handle,
+                &mut id,
+                "chats.attachments.listFileMentions",
+                json!({ "objectId": "wanted", "pageLimit": 500,
+                    "cursor": URL_SAFE_NO_PAD.encode(serde_json::to_vec(&decoded).unwrap()) }),
+            )
+            .await;
+            assert_eq!(error.code, ErrorCode::InvalidParams);
+            assert_eq!(error.message, "invalid-cursor");
+        }
+
         if cursor.is_none() {
             break;
         }
@@ -1075,6 +1108,8 @@ async fn synced_negative_agent_read_cursor_round_trips_over_the_wire() {
         })
         .expect("seed local thread");
     let operation = ReplicationEnvelope {
+        settlement_admission: None,
+        admitted_author_snapshot: None,
         workspace_id: "rpc-negative-agent-read".to_owned(),
         origin_id: "peer".to_owned(),
         origin_seq: 0,
@@ -4961,6 +4996,193 @@ async fn an_automation_message_names_its_automation_over_rpc() {
     )
     .await;
     assert_eq!(reaction.code, ErrorCode::InvalidParams, "{reaction:?}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn channel_and_follow_pages_continue_past_ten_thousand_with_tied_coordinates() {
+    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+
+    let scratch = ScratchDir::new().expect("scratch");
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let handle = open_workspace(&transport, &scratch, 1, "chat-list-pages").await;
+    let mut id = 1;
+    let mut conn = rusqlite::Connection::open(engine_db_path(&scratch).expect("database path"))
+        .expect("open database");
+    let tx = conn.transaction().expect("fixture transaction");
+    let mut expected_channels = Vec::new();
+    let mut expected_follows = Vec::new();
+    for index in 0..10_005 {
+        let channel_id = format!("channel-{index:05}");
+        tx.execute(
+            "INSERT INTO chat_channels \
+             (workspace_id,channel_id,name,slug,kind,created_at_ms,updated_at_ms) \
+             VALUES ('chat-list-pages',?1,?1,?1,'channel',?2,0)",
+            rusqlite::params![channel_id, index / 5],
+        )
+        .expect("channel fixture");
+        expected_channels.push(channel_id.clone());
+        let kind = ["person", "agent", "channel", "thread"][index as usize % 4];
+        tx.execute(
+            "INSERT INTO chat_follows \
+             (workspace_id,owner_user_id,target_kind,target_id,state,updated_at_ms,origin_id,origin_seq) \
+             VALUES ('chat-list-pages','owner',?1,?2,'following',0,'fixture',0)",
+            rusqlite::params![kind, channel_id],
+        ).expect("follow fixture");
+        expected_follows.push((kind.to_owned(), channel_id));
+    }
+    tx.execute(
+        "INSERT INTO chat_follows \
+         (workspace_id,owner_user_id,target_kind,target_id,state,updated_at_ms,origin_id,origin_seq) \
+         VALUES ('chat-list-pages','owner','thread','z-tombstone','unfollowed',0,'fixture',0)",
+        [],
+    ).expect("tombstone fixture");
+    tx.commit().expect("fixture commit");
+    drop(conn);
+    expected_follows.sort();
+
+    let mut channels = Vec::new();
+    let mut cursor = None;
+    for page in 0..25 {
+        let mut params = json!({ "pageLimit": 499 });
+        if let Some(value) = cursor.take() {
+            params["cursor"] = json!(value);
+        }
+        let result = call(&transport, &handle, &mut id, "chats.channels.list", params).await;
+        let rows = result["channels"].as_array().expect("channels");
+        assert!(!rows.is_empty());
+        assert!(rows.len() <= 499);
+        channels.extend(
+            rows.iter()
+                .map(|row| row["channelId"].as_str().unwrap().to_owned()),
+        );
+        cursor = result["nextCursor"].as_str().map(str::to_owned);
+        if let Some(value) = cursor.as_mut() {
+            let mut decoded: Value =
+                serde_json::from_slice(&URL_SAFE_NO_PAD.decode(&*value).unwrap()).unwrap();
+            assert!(decoded.get("consumed").is_none());
+            if page == 0 {
+                // An editable counter must not affect an uncapped continuation or overflow.
+                decoded["consumed"] = json!(i64::MAX);
+                *value = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&decoded).unwrap());
+            }
+        } else {
+            break;
+        }
+    }
+    assert!(cursor.is_none(), "channel paging terminates");
+    assert_eq!(channels, expected_channels);
+
+    for state in [None, Some("following")] {
+        let mut follows = Vec::new();
+        let mut cursor = None;
+        for _ in 0..25 {
+            let mut params = json!({ "ownerUserId": "owner", "pageLimit": 499 });
+            if let Some(value) = state {
+                params["state"] = json!(value);
+            }
+            if let Some(value) = cursor.take() {
+                params["cursor"] = json!(value);
+            }
+            let result = call(&transport, &handle, &mut id, "chats.follows.list", params).await;
+            let rows = result["follows"].as_array().expect("follows");
+            assert!(!rows.is_empty());
+            assert!(rows.len() <= 499);
+            follows.extend(rows.iter().map(|row| {
+                (
+                    row["targetKind"].as_str().unwrap().to_owned(),
+                    row["targetId"].as_str().unwrap().to_owned(),
+                )
+            }));
+            cursor = result["nextCursor"].as_str().map(str::to_owned);
+            if cursor.is_none() {
+                break;
+            }
+        }
+        assert!(cursor.is_none(), "follow paging terminates");
+        let mut expected = expected_follows.clone();
+        if state.is_none() {
+            expected.push(("thread".to_owned(), "z-tombstone".to_owned()));
+        }
+        assert_eq!(follows, expected);
+    }
+    call(&transport, &handle, &mut id, "workspace.close", json!({})).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn pending_bookmark_pages_keep_the_advisory_total_and_refuse_oversized_counters() {
+    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+
+    let scratch = ScratchDir::new().expect("scratch");
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let handle = open_workspace(&transport, &scratch, 1, "chat-bookmark-total").await;
+    let mut id = 1;
+    call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.channels.create",
+        json!({
+            "channelId": "channel", "name": "Channel", "kind": "channel", "nowMs": 1,
+        }),
+    )
+    .await;
+    for index in 0..3 {
+        let thread_id = format!("thread-{index}");
+        call(&transport, &handle, &mut id, "chats.threads.start", json!({
+            "channelId": "channel", "threadId": thread_id, "messageId": format!("message-{index}"),
+            "authorKind": "human", "authorDisplayName": "Ada", "body": "Body", "nowMs": index + 2,
+        })).await;
+        call(&transport, &handle, &mut id, "chats.bookmarks.save", json!({
+            "ownerUserId": "owner", "targetKind": "thread", "targetId": thread_id,
+            "mode": "live", "destinationPath": format!("bookmarks/{index}.md"), "nowMs": index + 5,
+        })).await;
+    }
+    let first = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.bookmarks.listPending",
+        json!({
+            "ownerUserId": "owner", "limit": 2, "pageLimit": 1,
+        }),
+    )
+    .await;
+    assert_eq!(first["bookmarks"].as_array().unwrap().len(), 1);
+    let encoded = first["nextCursor"].as_str().expect("first continuation");
+    let mut decoded: Value =
+        serde_json::from_slice(&URL_SAFE_NO_PAD.decode(encoded).unwrap()).unwrap();
+    assert_eq!(decoded["consumed"], json!(1));
+    decoded["consumed"] = json!(i64::MAX);
+    let error = call_error(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.bookmarks.listPending",
+        json!({
+            "ownerUserId": "owner", "limit": 2, "pageLimit": 1,
+            "cursor": URL_SAFE_NO_PAD.encode(serde_json::to_vec(&decoded).unwrap()),
+        }),
+    )
+    .await;
+    assert_eq!(error.code, ErrorCode::InvalidParams);
+    assert_eq!(error.message, "invalid-cursor");
+    let second = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.bookmarks.listPending",
+        json!({
+            "ownerUserId": "owner", "limit": 2, "pageLimit": 1, "cursor": encoded,
+        }),
+    )
+    .await;
+    assert_eq!(second["bookmarks"].as_array().unwrap().len(), 1);
+    assert_ne!(
+        first["bookmarks"][0]["bookmarkId"],
+        second["bookmarks"][0]["bookmarkId"]
+    );
+    assert_eq!(second["nextCursor"], Value::Null);
+    call(&transport, &handle, &mut id, "workspace.close", json!({})).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

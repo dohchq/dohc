@@ -662,12 +662,13 @@ describe("share grants", () => {
 
   it("claims a pending email invite only for the account whose session email matches", async () => {
     const storage = await testStorage();
+    const counted = countStorageCalls(storage, "claimPendingSharesForEmail");
     // LATE_EMAIL has no @dohc.test account, so it is stored as a pending
     // invite. The reverse lookup maps the late user id to that address, so its
     // first authenticated request claims the invite — but RECIPIENT's does not.
     const LATE = "late-user";
     const LATE_EMAIL = "late@corp.example";
-    const h = handler(storage, undefined, (userId) => (userId === LATE ? LATE_EMAIL : `${userId}@dohc.test`));
+    const h = handler(counted.storage, undefined, (userId) => (userId === LATE ? LATE_EMAIL : `${userId}@dohc.test`));
     await createWorkspace(h);
     await putBlob(h, "shared body");
     await appendOps(h, [momentOp("docs/shared.md", "shared body")]);
@@ -681,15 +682,62 @@ describe("share grants", () => {
 
     // A different account (wrong session email) cannot claim or read it.
     expect((await h(request(RECIPIENT, `/sync/shares/${shareId}/log?since=0`))).status).toBe(404);
+    expect(counted.calls).toEqual([[`${RECIPIENT}@dohc.test`, RECIPIENT]]);
 
     // The invited account's first recipient request claims the invite.
     const page = await json(await h(request(LATE, `/sync/shares/${shareId}/log?since=0`)));
     const ops = page.ops as Array<{ opKind: string; payload: { path?: string } }>;
     expect(ops.map((op) => op.payload.path ?? null)).toEqual(["docs/shared.md"]);
+    expect(counted.calls).toEqual([[`${RECIPIENT}@dohc.test`, RECIPIENT], [LATE_EMAIL, LATE]]);
+    expect(storage.listActiveShareGrantsForRecipient(shareId, LATE)).toEqual([
+      expect.objectContaining({ principalKind: "user", principalUserId: LATE, principalEmail: null }),
+    ]);
+
+    const idle = await json(await h(request(LATE, `/sync/shares/${shareId}/log?since=${page.nextCursor}`)));
+    expect(idle).toMatchObject({ ops: [], nextCursor: page.nextCursor, hasMore: false });
+    expect(counted.calls).toHaveLength(2);
 
     // It now appears in the claimant's received list.
     const received = (await json(await h(request(LATE, "/sync/shares")))).received as unknown[];
     expect(received).toHaveLength(1);
+  });
+
+  it("does not look up email or claim grants on a no-change shared-log GET with existing access", async () => {
+    const storage = await testStorage();
+    claimStorageWorkspace(storage);
+    storage.createShare(directShareInput("share-idle"));
+    const counted = countStorageCalls(storage, "claimPendingSharesForEmail");
+    const emailLookups: string[] = [];
+    const h = handler(counted.storage, undefined, (userId) => {
+      emailLookups.push(userId);
+      return `${userId}@dohc.test`;
+    });
+    await putBlob(h, "shared body");
+    await appendOps(h, [momentOp("docs/shared.md", "shared body")]);
+    const page = await json(await h(request(RECIPIENT, "/sync/shares/share-idle/log?since=0")));
+    expect(page.ops).toHaveLength(1);
+
+    const idle = await json(await h(request(RECIPIENT, `/sync/shares/share-idle/log?since=${page.nextCursor}`)));
+    expect(idle).toMatchObject({ ops: [], nextCursor: page.nextCursor, hasMore: false });
+    expect(emailLookups).toEqual([]);
+    expect(counted.calls).toEqual([]);
+  });
+
+  it("retries a revoked shared-log check once after claiming and still refuses the read", async () => {
+    const storage = await testStorage();
+    claimStorageWorkspace(storage);
+    storage.createShare(directShareInput("share-revoked"));
+    expect(storage.revokeShare("share-revoked", 6000)).toBe(true);
+    const claims = countStorageCalls(storage, "claimPendingSharesForEmail");
+    const checks = countStorageCalls(claims.storage, "listActiveShareGrantsForRecipient");
+    const pages = countStorageCalls(checks.storage, "fetchLogPage");
+    const response = await handler(pages.storage)(request(RECIPIENT, "/sync/shares/share-revoked/log?since=0"));
+
+    expect(response.status).toBe(404);
+    expect(await response.json()).toMatchObject({ code: "share_access_removed" });
+    expect(claims.calls).toEqual([[`${RECIPIENT}@dohc.test`, RECIPIENT]]);
+    expect(checks.calls).toEqual([["share-revoked", RECIPIENT], ["share-revoked", RECIPIENT]]);
+    expect(pages.calls).toEqual([]);
   });
 
   it("refuses share creation on a workspace the caller does not own, byte-identically to no workspace", async () => {
@@ -820,7 +868,7 @@ describe("share grants", () => {
     expect(await denialBytes(await h(request(STRANGER, `/sync/shares/share-0/blobs/${sharedSha}`)))).toBe(unknown);
   });
 
-  it("serves only selected declared-agent provenance to the current authenticated recipient", async () => {
+  it("keeps selected ordinary declarations unattributed for the current authenticated recipient", async () => {
     const storage = await testStorage();
     const h = handler(storage);
     await createWorkspace(h);
@@ -841,8 +889,8 @@ describe("share grants", () => {
     const page = await json(response);
     const ops = page.ops as Array<{ payload: Record<string, unknown> }>;
     expect(ops).toHaveLength(1);
-    expect(ops[0]!.payload.authors).toEqual([{ kind: "agent", agentId: "trip-agent-hosted", onBehalfOf: "opaque-owner" }]);
-    for (const excluded of ["private-", "fabricated-authority", "hidden-agent", "other-version-agent", "agentRunId", "principalId"]) {
+    expect(ops[0]!.payload.authors).toEqual([{kind: "unattributed"}]);
+    for (const excluded of ["private-", "fabricated-authority", "hidden-agent", "other-version-agent", "agentRunId", "principalId", "onBehalfOf", "opaque-owner", "trip-agent-hosted"]) {
       expect(JSON.stringify(page)).not.toContain(excluded);
     }
     expect((await h(request(STRANGER, `/sync/shares/${shareId}/log?since=0`))).status).toBe(404);
@@ -1079,7 +1127,11 @@ describe("share grants", () => {
     await createShare(h);
 
     // Page size 2: first pages are all filtered out but nextCursor advances.
-    let cursor = 0;
+    const refusedPage = await json(
+      await h(request(RECIPIENT, "/sync/shares/share-0/log?since=0&limit=2")),
+    );
+    expect(refusedPage).toMatchObject({ ops: [], nextCursor: 2, hasMore: true });
+    let cursor = refusedPage.nextCursor as number;
     const collected: string[] = [];
     for (let guard = 0; guard < 10; guard += 1) {
       const page = await json(
@@ -1093,6 +1145,17 @@ describe("share grants", () => {
       if (!(page.hasMore as boolean)) break;
     }
     expect(collected).toEqual(["docs/last.md"]);
+
+    await putBlob(h, "later publication");
+    await appendOps(h, [momentOp("docs/later.md", "later publication")]);
+    const later = await json(
+      await h(request(RECIPIENT, `/sync/shares/share-0/log?since=${cursor}&limit=2`)),
+    );
+    expect(later.ops).toEqual([
+      expect.objectContaining({ payload: expect.objectContaining({ path: "docs/later.md" }) }),
+    ]);
+    expect(later.nextCursor).toBeGreaterThan(cursor);
+    expect(later.hasMore).toBe(false);
   });
 
   it("reserves the 'shares' workspace id so the namespace cannot be shadowed", async () => {

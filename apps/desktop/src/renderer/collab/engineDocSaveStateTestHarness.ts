@@ -1,3 +1,4 @@
+import { engineSaveState } from "../../workspaces/engineYDocSaveState";
 import { act } from "@testing-library/react";
 import * as Y from "yjs";
 import {
@@ -84,7 +85,7 @@ export function harnessBridge(kind: "richdoc" | "scene" = "richdoc") {
       openedSessionId = payload.sessionId;
       if (emitDeletedDuringOpen) {
         for (const listener of [...saveStateListeners]) {
-          listener({ sessionId: payload.sessionId, state: "deleted", seq: 0 });
+          listener({ sessionId: payload.sessionId, workspaceId: "ws-1", path: "notes/a.md", ...engineSaveState("deleted"), seq: 0 });
         }
       }
       if (removalInProgress) {
@@ -227,6 +228,8 @@ export function harnessBridge(kind: "richdoc" | "scene" = "richdoc") {
 
   function emit(
     state:
+      | "saved-to-host"
+      | "pending-share"
       | "settling"
       | "saved"
       | "error"
@@ -239,7 +242,7 @@ export function harnessBridge(kind: "richdoc" | "scene" = "richdoc") {
   ): void {
     const target = sessionId ?? openedSessionId;
     if (target === null) throw new Error("session not open yet");
-    const event = { sessionId: target, state, seq, authorCapacity };
+    const event = { sessionId: target, workspaceId: "ws-1", path: "notes/a.md", ...engineSaveState(state), seq, authorCapacity };
     act(() => {
       for (const listener of [...saveStateListeners]) listener(event);
     });
@@ -260,7 +263,7 @@ export function harnessBridge(kind: "richdoc" | "scene" = "richdoc") {
   ): void {
     if (openedSessionId === null) throw new Error("session not open yet");
     for (const listener of [...saveStateListeners]) {
-      listener({ sessionId: openedSessionId, state, seq });
+      listener({ sessionId: openedSessionId, workspaceId: "ws-1", path: "notes/a.md", ...engineSaveState(state), seq });
     }
   }
 

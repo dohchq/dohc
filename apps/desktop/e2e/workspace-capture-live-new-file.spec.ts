@@ -1,3 +1,4 @@
+import { activityPin } from "../src/testPins";
 import { expect, test, type Page } from "@playwright/test";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -91,7 +92,7 @@ test("a new file open in the editor keeps History, search, and its chats working
       .toBe("# Notes\n");
 
     // Search finds the new file's text.
-    await page.getByTestId("activity-search").click();
+    await page.getByTestId(activityPin("search")).click();
     await expect(page.getByTestId("search-view")).toBeVisible();
     await page.getByTestId("search-input").fill(sentinel);
     await expect(

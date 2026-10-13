@@ -1,7 +1,7 @@
 import {getCookies} from "better-auth/cookies";
 import {afterEach, beforeEach, expect, it, vi} from "vitest";
 import {createNamedLiveTicketClient} from "./namedLiveTicketClient";
-const origin = "https://share.example.test", cookieName = getCookies({baseURL: origin}).sessionToken.name;
+const origin = "https://share.example.test", accountCookies = getCookies({baseURL: origin}), cookieName = accountCookies.sessionToken.name;
 const limits = {maxPendingRequests: 1, maxRequestBytes: 2048, maxResponseBytes: 5000, timeoutMs: 1000};
 const token = "ab".repeat(32), input = {discriminator: "abcdefghijkl", objectId: "object"};
 beforeEach(() => {vi.spyOn(Date, "now").mockReturnValue(1000);});
@@ -34,6 +34,28 @@ it("refuses link-only authentication and extra upstream authority data", async (
   const f = fixture(); expect((await f.mint(request(input, "link=only"))).status).toBe(404); expect(f.fetchRelay).not.toHaveBeenCalled();
   f.fetchRelay.mockImplementationOnce(async () => Response.json({token, expiresAtMs: 1234, userId: "untrusted"}));
   expect((await f.mint(request())).status).toBe(404);
+});
+it("forwards the preference cookie with a session and refuses it alone or repeated account cookies", async () => {
+  const f = fixture(), preference = `${accountCookies.dontRememberToken.name}=true`;
+  expect((await f.mint(request(input, `${cookieName}=account-secret; ${preference}`))).status).toBe(200);
+  expect(f.fetchRelay.mock.calls[0]![0].headers.get("cookie")).toBe(`${cookieName}=account-secret; ${preference}`);
+  for (const cookie of [preference, `${cookieName}=a; ${cookieName}=b`, `${cookieName}=a; ${preference}; ${preference}`]) {
+    expect((await f.mint(request(input, cookie))).status).toBe(404);
+  }
+  expect(f.fetchRelay).toHaveBeenCalledOnce();
+});
+it("answers a cancelled request at once and cancels the late relay body before freeing its slot", async () => {
+  const f = fixture(); let finish!: (value: Response) => void, entered!: () => void, closed!: () => void;
+  const started = new Promise<void>(resolve => {entered = resolve;}), bodyClosed = new Promise<void>(resolve => {closed = resolve;});
+  f.fetchRelay.mockImplementationOnce(() => {entered(); return new Promise(resolve => {finish = resolve;});});
+  const controller = new AbortController(), cancelled = f.mint(new Request(request(), {signal: controller.signal}));
+  await started; controller.abort();
+  expect((await cancelled).status).toBe(404);
+  expect((await f.mint(request())).status).toBe(404);
+  expect(f.fetchRelay).toHaveBeenCalledOnce();
+  finish(new Response(new ReadableStream({cancel: closed}), {headers: {"content-type": "application/json"}}));
+  await bodyClosed;
+  await vi.waitFor(async () => expect((await f.mint(request())).status).toBe(200));
 });
 it("holds the pending slot until its upstream request completes", async () => {
   const f = fixture(); let finish!: (value: Response) => void, entered!: () => void;

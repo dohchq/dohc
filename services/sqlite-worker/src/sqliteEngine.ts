@@ -2,7 +2,6 @@ import { createRequire } from 'node:module'
 import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { sha256Hex } from '@dohc/workspace-core/hash'
 
 export type DatabaseColumn = {
   name: string
@@ -23,8 +22,6 @@ export type ImportDataInput = {
   mediaType: string
   body: string
   tableName: string
-  mode?: 'infer-schema' | 'provided-schema'
-  schema?: Record<string, 'text' | 'integer' | 'real' | 'boolean' | 'datetime'>
 }
 
 type SQLiteDatabase = {
@@ -147,6 +144,8 @@ async function materializeSnapshotToBytes(
     const file = join(dir, 'database.sqlite')
     const db = new DatabaseSync(file)
     try {
+      // This scratch database becomes bytes immediately; it does not need crash recovery.
+      db.exec('PRAGMA journal_mode=OFF; PRAGMA synchronous=OFF')
       createTables(db, snapshot)
       db.close()
       const bytes = await readFile(file)
@@ -188,18 +187,6 @@ function inferColumnType(rows: Array<Record<string, unknown>>, column: string): 
   return present ? type : 'TEXT'
 }
 
-function sqliteTypeForSchemaType(type: string): string {
-  switch (type) {
-    case 'integer':
-    case 'boolean':
-      return 'INTEGER'
-    case 'real':
-      return 'REAL'
-    default:
-      return 'TEXT'
-  }
-}
-
 function safeIdentifier(raw: string, fallback: string): string {
   const normalized = raw
     .trim()
@@ -239,11 +226,12 @@ function unsafeNumericText(value: unknown): boolean {
 function parseScalar(value: unknown, columnName?: string): unknown {
   if (typeof value !== 'string') return value
   const trimmed = value.trim()
-  if (columnName === 'id') return trimmed
+  if (columnName === 'id') return value
   if (trimmed === '') return null
   if (/^(true|false)$/i.test(trimmed)) return /^true$/i.test(trimmed)
-  if (NUMERIC_TEXT.test(trimmed) && !unsafeNumericText(trimmed)) return Number(trimmed)
-  return trimmed
+  // Text formats infer scalars, but leading zeros and unsafe numbers stay text.
+  if (NUMERIC_TEXT.test(trimmed) && !/^-?0\d/.test(trimmed) && !unsafeNumericText(trimmed)) return Number(trimmed)
+  return value
 }
 
 function parseCsvRecords(body: string): string[][] {
@@ -251,6 +239,7 @@ function parseCsvRecords(body: string): string[][] {
   let record: string[] = []
   let field = ''
   let inQuotes = false
+  let quoteClosed = false
 
   for (let index = 0; index < body.length; index += 1) {
     const char = body[index]
@@ -260,21 +249,27 @@ function parseCsvRecords(body: string): string[][] {
         field += '"'
         index += 1
       } else {
+        if (!inQuotes && (field !== '' || quoteClosed)) throw new Error('CSV quotes must surround the whole field.')
+        if (inQuotes) quoteClosed = true
         inQuotes = !inQuotes
       }
     } else if (char === ',' && !inQuotes) {
       record.push(field)
       field = ''
+      quoteClosed = false
     } else if ((char === '\n' || char === '\r') && !inQuotes) {
       if (char === '\r' && next === '\n') index += 1
       record.push(field)
       records.push(record)
       record = []
       field = ''
+      quoteClosed = false
     } else {
+      if (quoteClosed) throw new Error('CSV field contains text after its closing quote.')
       field += char
     }
   }
+  if (inQuotes) throw new Error('CSV field has an unfinished quote.')
   record.push(field)
   records.push(record)
 
@@ -286,7 +281,12 @@ function parseCsvRecords(body: string): string[][] {
 function rowsFromDelimitedRecords(records: string[][]): Array<Record<string, unknown>> {
   if (records.length < 1) return []
   const headers = uniqueIdentifiers(records[0].map((cell) => cell.trim()))
-  return records.slice(1).filter((row) => row.some((cell) => cell.trim() !== '')).map((row, rowIndex) => {
+  if (records.slice(1).some(row => row.length > headers.length)) {
+    throw new Error('Import row contains more cells than its header.')
+  }
+  // Missing trailing cells are empty; completely blank records are ignored.
+  const dataRecords = records.slice(1).filter((row) => row.some((cell) => cell.trim() !== ''))
+  const rows = dataRecords.map((row, rowIndex) => {
     const out: Record<string, unknown> = {}
     for (let index = 0; index < headers.length; index += 1) {
       const column = headers[index]
@@ -297,6 +297,21 @@ function rowsFromDelimitedRecords(records: string[][]): Array<Record<string, unk
     }
     return out
   })
+  // Only uniform numeric or boolean columns infer scalars; mixed kinds keep text.
+  headers.forEach((column, columnIndex) => {
+    if (column === 'id') return
+    const kinds = new Set<string>()
+    for (const row of rows) {
+      const value = row[column]
+      if (value !== null && value !== undefined) kinds.add(typeof value)
+    }
+    if (kinds.size === 1 && !kinds.has('string')) return
+    rows.forEach((row, rowIndex) => {
+      const cell = dataRecords[rowIndex][columnIndex]
+      if (cell !== undefined && cell !== '') row[column] = cell
+    })
+  })
+  return rows
 }
 
 function parseCsv(body: string): Array<Record<string, unknown>> {
@@ -334,12 +349,22 @@ function parseImportJson(body: string): unknown {
 }
 
 function splitMarkdownRow(line: string): string[] {
-  return line
-    .trim()
-    .replace(/^\|/, '')
-    .replace(/\|$/, '')
-    .split('|')
-    .map((cell) => cell.trim())
+  const text = line.trim()
+  const cells: string[] = []
+  let cell = ''
+  for (let index = 0; index < text.length; index += 1) {
+    const char = text[index]
+    if (char === '\\' && (text[index + 1] === '|' || text[index + 1] === '\\')) {
+      cell += text[++index]
+    } else if (char === '|') {
+      cells.push(cell.trim())
+      cell = ''
+    } else cell += char
+  }
+  cells.push(cell.trim())
+  if (text.startsWith('|')) cells.shift()
+  if (cells[cells.length - 1] === '' && cell === '') cells.pop()
+  return cells
 }
 
 function isMarkdownSeparator(cells: string[]) {
@@ -350,16 +375,14 @@ function parseMarkdownTable(body: string): Array<Record<string, unknown>> | null
   const lines = body
     .split(/\r?\n/)
     .map((line) => line.trim())
-    .filter((line) => line.includes('|'))
   for (let index = 0; index < lines.length - 1; index += 1) {
     const headers = splitMarkdownRow(lines[index])
     const separator = splitMarkdownRow(lines[index + 1])
-    if (!isMarkdownSeparator(separator)) continue
-    const columns = uniqueIdentifiers(headers)
-    const records: string[][] = [columns]
+    if (!lines[index].includes('|') || headers.length !== separator.length || !isMarkdownSeparator(separator)) continue
+    const records: string[][] = [headers]
     for (const line of lines.slice(index + 2)) {
+      if (!line.includes('|') || line === '') break
       const cells = splitMarkdownRow(line)
-      if (cells.length < 2) break
       records.push(cells)
     }
     return rowsFromDelimitedRecords(records)
@@ -377,7 +400,7 @@ function normalizeImportedRows(values: unknown[]): Array<Record<string, unknown>
     const row: Record<string, unknown> = {}
     Object.entries(source).forEach(([key, item]) => {
       const column = columns.get(key)!
-      row[column] = parseScalar(item, column)
+      row[column] = item
     })
     if (row.id === undefined || row.id === null || String(row.id).trim() === '') {
       row.id = `row_${index + 1}`
@@ -389,25 +412,25 @@ function normalizeImportedRows(values: unknown[]): Array<Record<string, unknown>
 }
 
 function rowsForImport(input: ImportDataInput) {
-  const mediaType = input.mediaType.toLowerCase()
+  const mediaType = input.mediaType.split(';', 1)[0].trim().toLowerCase()
   const name = input.name.toLowerCase()
+  const body = input.body.charCodeAt(0) === 0xFEFF ? input.body.slice(1) : input.body
+  if (mediaType === 'application/pdf' || name.endsWith('.pdf')) return null
   if (mediaType.includes('jsonl') || mediaType.includes('ndjson') || name.endsWith('.jsonl')) {
-    return parseJsonl(input.body)
+    return parseJsonl(body)
   }
   if (mediaType.includes('json') || name.endsWith('.json')) {
-    return parseJsonArray(input.body)
+    return parseJsonArray(body)
   }
   if (
     mediaType.includes('markdown') ||
-    mediaType === 'application/pdf' ||
     name.endsWith('.md') ||
-    name.endsWith('.markdown') ||
-    name.endsWith('.pdf')
+    name.endsWith('.markdown')
   ) {
-    return parseMarkdownTable(input.body)
+    return parseMarkdownTable(body)
   }
   if (mediaType.includes('csv') || name.endsWith('.csv') || mediaType.startsWith('text/')) {
-    return parseCsv(input.body)
+    return parseCsv(body)
   }
   return null
 }
@@ -416,17 +439,11 @@ function snapshotForImport(input: ImportDataInput, rows: Array<Record<string, un
   const tableName = safeIdentifier(input.tableName, 'rows')
   quoteIdent(tableName)
   const columns = columnNamesForRows(rows)
-  const schema = input.schema ?? {}
-  for (const column of columns) {
-    if (schema[column] && sqliteTypeForSchemaType(schema[column]) !== 'TEXT' && rows.some(row => unsafeNumericText(row[column]))) {
-      throw new Error(`Column ${column} requires text storage to preserve its numeric values.`)
-    }
-  }
   return {
     [tableName]: {
       columns: columns.map((name) => ({
         name,
-        type: schema[name] ? sqliteTypeForSchemaType(schema[name]) : inferColumnType(rows, name),
+        type: inferColumnType(rows, name),
         ...(name === 'id' ? { primaryKey: true } : {}),
       })),
       rows,
@@ -437,14 +454,19 @@ function snapshotForImport(input: ImportDataInput, rows: Array<Record<string, un
 export async function createSqliteEngine() {
   const { DatabaseSync } = await sqliteModule()
 
-  async function prepareImport(input: ImportDataInput) {
+  async function materializeImport(input: ImportDataInput) {
     const tableName = safeIdentifier(input.tableName, 'rows')
     try {
       quoteIdent(tableName)
     } catch (cause) {
       return error('invalid-table-name', cause instanceof Error ? cause.message : 'Invalid table name.')
     }
-    const rows = rowsForImport(input)
+    let rows: Array<Record<string, unknown>> | null
+    try {
+      rows = rowsForImport(input)
+    } catch (cause) {
+      return error('invalid-import-source', cause instanceof Error ? cause.message : 'Import source is invalid.')
+    }
     if (!rows) {
       return error('unsupported-import-source', 'Could not parse this import source.')
     }
@@ -460,50 +482,15 @@ export async function createSqliteEngine() {
     }
     const materialized = await materializeSnapshotToBytes(DatabaseSync, snapshot)
     if (!materialized.ok) return materialized
-    return { ok: true as const, tableName, snapshot, bytes: materialized.bytes }
+    return {
+      ok: true as const,
+      tableName,
+      rowCount: rows.length,
+      bytes: materialized.bytes,
+    }
   }
 
-  return {
-    async materializeImport(input: ImportDataInput) {
-      const result = await prepareImport(input)
-      if (!result.ok) return result
-      return {
-        ok: true as const,
-        tableName: result.tableName,
-        rowCount: result.snapshot[result.tableName].rows.length,
-        bytes: result.bytes,
-      }
-    },
-    async importData(input: ImportDataInput) {
-      const result = await prepareImport(input)
-      if (!result.ok) return result
-      const { tableName, snapshot, bytes } = result
-      const sourceHash = sha256Hex(input.body)
-      const table = snapshot[tableName]
-      try {
-        return {
-          ok: true as const,
-          tableName,
-          sourceMediaType: input.mediaType,
-          rowCount: table.rows.length,
-          sourceHash,
-          tableSchema: table.columns,
-          snapshot,
-          operation: {
-            op: 'import_data',
-            table: tableName,
-            rowCount: table.rows.length,
-            sourceHash,
-          },
-          bytesBase64: bytes.toString('base64'),
-          size: bytes.byteLength,
-          sha256: sha256Hex(bytes),
-        }
-      } catch (cause) {
-        return error('sqlite-materialize-failed', cause instanceof Error ? cause.message : 'Could not materialize SQLite database.')
-      }
-    },
-  }
+  return { materializeImport }
 }
 
 export type SqliteEngine = Awaited<ReturnType<typeof createSqliteEngine>>

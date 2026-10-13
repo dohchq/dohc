@@ -1,3 +1,4 @@
+import {parseAutomationDeclaration, type AutomationDeclaration} from "@dohc/live-session-contract/live-authorship";
 import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { parseLiveObjectBinding } from "@dohc/live-session-contract/live-object-binding";
@@ -46,6 +47,7 @@ export interface OwnerYDocOutboxEntry {
   readonly createdAtMs: number;
   /** The agent the queued edit declared; absent when it declared none. Never authority. */
   readonly agentDeclaration?: AgentDeclaration;
+  readonly automationDeclaration?: AutomationDeclaration;
 }
 
 export interface OwnerYDocOutboxPending {
@@ -354,12 +356,14 @@ export class OwnerYDocOutbox {
       if (byteLength > remaining) throw new TypeError("Owner outbox entry exceeds pending bytes.");
       const updateDigest = digestField(entry, "updateDigest");
       const update = await readPart("update", sequence, byteLength, updateDigest);
+      if (Object.hasOwn(entry, "agentDeclaration") && Object.hasOwn(entry, "automationDeclaration")) throw new TypeError("Owner draft declares two author kinds.");
       entries.push({
         sequence,
         appendKey: stringField(entry, "appendKey"),
         deliveryId: stringField(entry, "deliveryId"),
         updateDigest, update, byteLength,
         createdAtMs: wireInteger(entry, "createdAtMs"),
+        ...(Object.hasOwn(entry, "automationDeclaration") ? {automationDeclaration: parseAutomationDeclaration(entry.automationDeclaration)} : {}),
         ...(Object.hasOwn(entry, "agentDeclaration")
           ? { agentDeclaration: parseAgentDeclaration(entry.agentDeclaration) }
           : {}),

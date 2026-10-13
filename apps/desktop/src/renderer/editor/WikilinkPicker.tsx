@@ -1,10 +1,25 @@
 import { FileText } from "lucide-react";
-import { useEffect, useId, useMemo, useRef, useState } from "react";
+import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { Node as ProseMirrorNode } from "@tiptap/pm/model";
 import { TextSelection } from "@tiptap/pm/state";
 import type { EditorView } from "@tiptap/pm/view";
 import type { WikilinkFile } from "./wikilinkPlugin";
 import { resolveFloatingMenuPosition } from "./floatingMenuPosition";
+import {
+  MENU_ACTIVE_OPTION,
+  MENU_EMPTY,
+  MENU_ENTER,
+  MENU_FRAME,
+  MENU_ICON,
+  MENU_PATH,
+  MENU_ROW,
+  MENU_ROW_TONE,
+  MENU_TITLE,
+  menuEnterFrom,
+  movedPointer,
+  moveInMenu,
+  revealMenuRow,
+} from "../ui/Menu";
 
 export type WikilinkPickerState =
   | { open: false }
@@ -85,6 +100,7 @@ export function WikilinkPicker({
   onDismiss,
 }: Props) {
   const [activeIdx, setActiveIdx] = useState(0);
+  const listRef = useRef<HTMLDivElement | null>(null);
   const itemRefs = useRef<Array<HTMLButtonElement | null>>([]);
   // Stable per-instance prefix for option ids so aria-activedescendant can
   // point at the active option — the editor keeps DOM focus (onMouseDown
@@ -96,9 +112,11 @@ export function WikilinkPicker({
     setActiveIdx(0);
   }, [state.open ? state.query : ""]);
 
-  useEffect(() => {
-    if (!state.open) return;
-    itemRefs.current[activeIdx]?.scrollIntoView({ block: "nearest" });
+  // Only the list scrolls to show the active option; scrollIntoView would
+  // scroll the editor pane under it too.
+  useLayoutEffect(() => {
+    const list = listRef.current;
+    if (state.open && list) revealMenuRow(list, itemRefs.current[activeIdx]);
   }, [activeIdx, state.open]);
 
   const matches = useMemo(() => {
@@ -131,6 +149,9 @@ export function WikilinkPicker({
   useEffect(() => {
     if (!state.open) return;
     function onKey(e: KeyboardEvent) {
+      // During IME composition, Enter, Escape and the arrows work the
+      // candidate list. Some platforms mark those keys only with keyCode 229.
+      if (e.isComposing || e.keyCode === 229) return;
       if (e.key === "Escape") {
         e.preventDefault();
         e.stopPropagation();
@@ -138,14 +159,13 @@ export function WikilinkPicker({
         return;
       }
       if (matches.length === 0) return;
-      if (e.key === "ArrowDown") {
+      // The editor keeps the typed keys, Home and End for the query, so only
+      // the arrows move the active option.
+      if (e.key === "ArrowDown" || e.key === "ArrowUp") {
         e.preventDefault();
         e.stopPropagation();
-        setActiveIdx((i) => (i + 1) % matches.length);
-      } else if (e.key === "ArrowUp") {
-        e.preventDefault();
-        e.stopPropagation();
-        setActiveIdx((i) => (i - 1 + matches.length) % matches.length);
+        const next = moveInMenu(e, activeIdx, matches.map((file) => file.path));
+        if (next !== null) setActiveIdx(next);
       } else if (e.key === "Enter") {
         e.preventDefault();
         e.stopPropagation();
@@ -178,7 +198,8 @@ export function WikilinkPicker({
 
   return (
     <div
-      className="dohc-wikilink-picker"
+      ref={listRef}
+      className={`dohc-wikilink-picker ${MENU_FRAME} ${MENU_ENTER}`}
       data-placement={position.placement}
       style={{
         position: "fixed",
@@ -186,6 +207,7 @@ export function WikilinkPicker({
         top: position.y,
         maxHeight: position.maxHeight,
         zIndex: 60,
+        ...menuEnterFrom(position.placement),
       }}
       role="listbox"
       aria-label="page links"
@@ -195,9 +217,7 @@ export function WikilinkPicker({
       onMouseDown={(e) => e.preventDefault()}
     >
       {matches.length === 0 ? (
-        <div className="dohc-wikilink-picker__empty">
-          No files match "{state.query}"
-        </div>
+        <div className={MENU_EMPTY}>No files match "{state.query}"</div>
       ) : (
         <div>
           {matches.map((f, i) => {
@@ -212,18 +232,24 @@ export function WikilinkPicker({
                 }}
                 type="button"
                 role="option"
+                tabIndex={-1}
                 aria-selected={i === activeIdx}
-                className={`dohc-wikilink-picker__item${i === activeIdx ? " is-active" : ""}`}
-                onMouseEnter={() => setActiveIdx(i)}
+                data-active={i === activeIdx || undefined}
+                className={`${MENU_ROW} ${MENU_ACTIVE_OPTION} ${MENU_ROW_TONE.rest} data-active:text-ink`}
+                // Only a pointer that moves picks the active option, so a
+                // list that opens or scrolls under a still pointer keeps the
+                // keys' choice.
+                onMouseMove={(event) => {
+                  if (movedPointer(event) && i !== activeIdx) setActiveIdx(i);
+                }}
                 onClick={() => commit(f)}
               >
-                <FileText size={14} aria-hidden className="shrink-0 text-subtle" />
-                <span className="dohc-wikilink-picker__item-title">
-                  {display}
+                <span className={`${MENU_ICON} text-subtle`}>
+                  <FileText size={14} aria-hidden />
                 </span>
-                <span className="dohc-wikilink-picker__item-path">
-                  {subpath}
-                </span>
+                <span className={MENU_TITLE}>{display}</span>
+                {/* A page at the workspace root without a title: its path is its name. */}
+                {subpath === display ? null : <span className={MENU_PATH}>{subpath}</span>}
               </button>
             );
           })}

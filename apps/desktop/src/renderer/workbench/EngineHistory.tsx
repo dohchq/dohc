@@ -1,10 +1,11 @@
 import { formatChatTime } from "../time";
 import { basenameOf } from "../path";
-import { ChevronDown, ChevronRight, FileArchive, FileText, Lock, RotateCcw, Search, X, Zap } from "lucide-react";
+import { ChevronDown, ChevronRight, FileArchive, FileText, History, Lock, RotateCcw, Search, X, Zap } from "lucide-react";
+import { EmptyState } from "../ui/controls";
 import { useId, useMemo, useState } from "react";
 import { LegendList } from "@legendapp/list/react";
 import type { EngineMomentRecord } from "../../ipc/bridgeContract";
-import { chatAuthorLabel } from "./LinkedChats";
+import { chatAuthorLabel } from "./chatMessages";
 
 // Engine history timeline. Renders engine moments with their summaries
 // ("Saved latest edits", "Merged version X into Main", "Reconciled offline
@@ -54,6 +55,11 @@ export function engineOriginLabel(origin: EngineMomentRecord["origin"]): string 
       return "dohc";
     case "ydoc":
       return "Live edit";
+    // Typing capture kept when its file changed outside dohc, in the words
+    // of its notice. Dismissing or restoring it leaves the same change.
+    case "capture-recovery":
+    case "capture-recovery-cleared":
+      return "Typing kept";
     default:
       return "Unknown source";
   }
@@ -63,15 +69,22 @@ export function engineOriginLabel(origin: EngineMomentRecord["origin"]): string 
 // "the agent name" (the same formatting rule the chat rail uses via
 // chatAuthorLabel), and one a Collection automation authored as the
 // automation's name and its Collection. An Edit link's direct file write
-// names the link and a short form of the browser session that used it, so
-// it never reads like an app submission from a link holder. A restore names
-// this computer's person who made it; their other edits read as a local file
-// edit or a live edit. Everything else keeps its actor-neutral origin label.
+// names the link and a short id for its holder; an app submission names the
+// holder with the same short id, so it never reads like an Edit link's write. A
+// restore names this computer's person who made it; their other edits read as a local file
+// edit or a live edit. A live edit the relay admitted from an account or link
+// holder names them. Everything else keeps its actor-neutral origin label.
 export function engineMomentSourceLabel(
-  moment: Pick<EngineMomentRecord, "origin" | "agentAuthorName" | "personAuthorName" | "publicAuthor" | "linkAuthor" | "automationAuthor" | "namedAuthor">,
+  moment: Pick<EngineMomentRecord, "origin" | "agentAuthorName" | "personAuthorName" | "liveAuthorName" | "publicAuthor" | "linkAuthor" | "automationAuthor" | "namedAuthor" | "authorLabels">,
 ): string {
   if (moment.origin === "restore" && moment.personAuthorName !== undefined) return moment.personAuthorName;
-  if (moment.publicAuthor) return `Link holder ${moment.publicAuthor.principalId}`;
+  if (moment.authorLabels) {
+    const [first, second, third, ...rest] = moment.authorLabels;
+    const shown = [first, second, third].filter((label): label is string => label !== undefined).join(", ");
+    return rest.length ? `${shown} and ${rest.length} more` : shown;
+  }
+  if (moment.liveAuthorName) return moment.liveAuthorName;
+  if (moment.publicAuthor) return `Link holder ${moment.publicAuthor.principalId.replace(/^public_/, "").slice(0, 8)}`;
   if (moment.linkAuthor) return `Edit link · holder ${moment.linkAuthor.principalId.slice(0, 8)}`;
   if (moment.automationAuthor) {
     const { name, collection } = moment.automationAuthor;
@@ -86,7 +99,7 @@ export function engineMomentSourceLabel(
 // Where a moment came from, as one line of History. An automation's name
 // and Collection follow the ⚡ mark, in words, so nothing waits behind hover.
 export function EngineMomentSource(props: {
-  moment: Pick<EngineMomentRecord, "origin" | "agentAuthorName" | "personAuthorName" | "publicAuthor" | "linkAuthor" | "automationAuthor" | "namedAuthor">;
+  moment: Pick<EngineMomentRecord, "origin" | "agentAuthorName" | "personAuthorName" | "liveAuthorName" | "publicAuthor" | "linkAuthor" | "automationAuthor" | "namedAuthor" | "authorLabels">;
   testId: string;
   id?: string;
 }) {
@@ -162,6 +175,7 @@ function engineHistorySearchText(group: EngineHistoryGroup): string {
       moment.path,
       engineMomentSummary(moment),
       engineMomentSourceLabel(moment),
+      ...(moment.authorLabels ?? []),
     ]),
   ]
     .join("\n")
@@ -190,7 +204,8 @@ function formatDay(recordedAtMs: number): { label: string; dateTime: string } {
   };
 }
 
-function MomentRow(props: {
+// One change in the timeline. The states page renders it too.
+export function MomentRow(props: {
   moment: EngineMomentRecord;
   nested?: boolean;
   onOpenMoment: (momentId: string, filePath: string) => void;
@@ -354,7 +369,6 @@ export function EngineHistoryView(props: {
   moments: EngineMomentRecord[];
   hasMore: boolean;
   loadingMore: boolean;
-  protectedTruncated: boolean;
   onLoadMore: () => void;
   onOpenMoment: (momentId: string, filePath: string) => void;
 }) {
@@ -395,7 +409,7 @@ export function EngineHistoryView(props: {
   const retainedKeys = focusedIndex < 0
     ? []
     : rows.slice(Math.max(0, focusedIndex - 2), focusedIndex + 3).map((row) => row.key);
-  const headerItemCount = props.protectedTruncated ? 1 : 0;
+  const headerItemCount = 0;
   const listItemCount = headerItemCount + rows.length + (props.hasMore ? 1 : 0);
   const rowPresentation = useMemo(
     () => ({ expandedGroups, headerItemCount, listItemCount, onOpenMoment: props.onOpenMoment }),
@@ -407,13 +421,11 @@ export function EngineHistoryView(props: {
   // and a read still in flight or a read that failed may not state it.
   if (props.moments.length === 0 && !props.hasMore) {
     return (
-      <div className="flex flex-1 flex-col items-center justify-center gap-2 px-4 text-center">
-        <span className="text-sm text-muted">No changes yet</span>
-        <span className="max-w-xs text-[11px] leading-5 text-subtle">
-          Edits — yours or your agent's — show up here as a timeline you can
-          review.
-        </span>
-      </div>
+      <EmptyState
+        icon={History}
+        title="No changes yet"
+        hint="Edits by you or your agent appear here as a timeline you can review."
+      />
     );
   }
 
@@ -447,7 +459,9 @@ export function EngineHistoryView(props: {
       <LegendList
         role="list"
         data-testid="engine-history-list"
-        className="m-0 min-h-0 flex-1 list-none p-0"
+        // `isolate` keeps the sticky day headings' z-index inside History,
+        // under any overlay.
+        className="isolate m-0 min-h-0 flex-1 list-none p-0"
         data={rows}
         keyExtractor={(row) => row.key}
         estimatedItemSize={56}
@@ -465,16 +479,6 @@ export function EngineHistoryView(props: {
           if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setFocusedKey(null);
         }}
         extraData={rowPresentation}
-        ListHeaderComponent={props.protectedTruncated ? (
-          <li
-            role="listitem"
-            aria-posinset={1}
-            aria-setsize={listItemCount}
-            className="border-b border-line px-3 py-2 text-[11px] text-muted"
-          >
-            Some protected activity in this range is not shown.
-          </li>
-        ) : null}
         renderItem={({ item, index }) => item.day ? (
           <li
             role="listitem"

@@ -1,10 +1,12 @@
+import { visibleSharePath } from "@dohc/security-contract/share-selector";
+import { parseLiveAuthorSnapshot } from "@dohc/live-session-contract";
 import { createHash, randomUUID } from "node:crypto";
 import { parseAppPublicationCandidate, parseAppCollectionCapability, APP_COLLECTION_CURSOR_BYTES, APP_COLLECTION_PAGE_BYTES, APP_COLLECTION_FIELDS_BYTES, type AppCollectionCapability } from "@dohc/security-contract/app-publication";
 import { isRecordId, parseCollectionRecordFields, parseCollectionSchema, validateFieldValue } from "@dohc/workspace-contracts/collection-values";
 import type { CollectionSchema } from "@dohc/workspace-contracts/collection";
 import { collectionVersionError } from "@dohc/workspace-contracts/collection";
 import { notFound, badRequest, relayError } from "../errors";
-import { effectiveShareSelector, parseStoredAnyShareSelectorJson, targetVersionId, visibleSharePath } from "../shareFilter";
+import { effectiveShareSelector, parseStoredAnyShareSelectorJson, targetVersionId } from "../shareFilter";
 import type { StorageContext } from "./context";
 import { requireLinkAppPublication, type LinkAppPublicationInput, type ReadAppPublicationInput } from "./publications";
 import { appendLogBatchInTransaction, maxOriginSeq } from "./log";
@@ -142,7 +144,7 @@ export function acceptAppCollection(storage: StorageContext, input: AcceptAppCol
     const publicId = mapping ? String(mapping.public_principal_id) : `public_${randomUUID()}`;
     const acceptanceId = `accepted_${randomUUID()}`, objectId = randomUUID(), momentId = randomUUID(), path = `${capability.collectionPath}/${acceptanceId}.md`;
     const receipt: AppCollectionReceipt = {kind:"accepted",acceptanceId,objectId,path,momentId,acceptedAtMs:input.nowMs};
-    const document = Buffer.from(`---\n${JSON.stringify({...response,created_at:input.nowMs,created_by:publicId,grant_id:authority.result.grantId,acceptance_id:acceptanceId})}\n---\n`);
+    const document = Buffer.from(`---\n${JSON.stringify({...response,created_at:input.nowMs,created_by:publicId,acceptance_id:acceptanceId})}\n---\n`);
     if (document.byteLength > MAX_RECORD_BYTES) throw badRequest("Collection response is too large.");
     const blobHash = sha(document);
     const receiptJson = JSON.stringify(receipt), receiptBytes = bytes([workspaceId,authority.result.grantId,privateId,input.idempotencyKey,payloadHash,receiptJson])+256;
@@ -150,6 +152,7 @@ export function acceptAppCollection(storage: StorageContext, input: AcceptAppCol
     const principalBytes = enrollment.principal ? 0 : linkPrincipalStorageBytes(privateId,authority.result.grantId,input.profileTokenHash);
     assertWorkspaceQuota(storage,workspaceId,receiptBytes+mappingBytes+principalBytes+document.byteLength);
     const principal = commitLinkEnrollment(storage,{...input,enrollment,principalId:privateId,displayName:null,createdAtMs:input.nowMs,discussionRevision:Number(enrollment.authority.discussion_revision)});
+    const admittedAuthorSnapshot = parseLiveAuthorSnapshot([{kind:"link",publicPrincipalId:publicId,label:principal.displayName??"Anonymous"}]);
     if (!mapping) storage.db.prepare(`INSERT INTO sync_relay_app_public_principals(workspace_id,grant_id,principal_id,public_principal_id,storage_bytes) VALUES(?,?,?,?,?)`)
       .run(workspaceId,authority.result.grantId,principal.principalId,publicId,mappingBytes);
     const existing = storage.getBlob(workspaceId,blobHash);
@@ -163,7 +166,7 @@ export function acceptAppCollection(storage: StorageContext, input: AcceptAppCol
     // Insert the receipt before append so the append's quota check includes its durable charge.
     storage.db.prepare(`INSERT INTO sync_relay_app_collection_receipts(workspace_id,grant_id,principal_id,idempotency_key,payload_sha256,receipt_json,acceptance_id,storage_bytes) VALUES(?,?,?,?,?,?,?,?)`)
       .run(workspaceId,authority.result.grantId,principal.principalId,input.idempotencyKey,payloadHash,receiptJson,acceptanceId,receiptBytes);
-    appendLogBatchInTransaction(storage,{workspaceId,originId,ops:[{originSeq:maxOriginSeq(storage,workspaceId,originId)+1,opKind:"moment.append",payloadJson:JSON.stringify(payload),recordedAtMs:input.nowMs}]});
+    appendLogBatchInTransaction(storage,{workspaceId,originId,ops:[{originSeq:maxOriginSeq(storage,workspaceId,originId)+1,opKind:"moment.append",payloadJson:JSON.stringify(payload),recordedAtMs:input.nowMs,admittedAuthorSnapshot}]});
     return receipt;
   });
 }

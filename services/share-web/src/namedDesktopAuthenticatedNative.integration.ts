@@ -2,7 +2,7 @@ import { createNamedDesktopLive as createDesktopAdmission } from "../../sync-rel
 import { createLiveTickets } from "../../sync-relay/src/liveTickets.js";
 import { createLiveHostReports } from "../../sync-relay/src/namedLiveHostReports.js";
 import { createNamedDesktopLiveCapture } from "../../../apps/desktop/src/workspaces/namedDesktopLive.js";
-import { preserveNamedLiveDraft } from "../../../apps/desktop/src/workspaces/namedLiveDraftRecovery.js";
+import { preserveLiveDraft } from "../../../apps/desktop/src/workspaces/liveDraftRecovery.js";
 import { createEngineYDocSessionIpc } from "../../../apps/desktop/src/workspaces/engineYDocSessionIpc.js";
 import { bindEngineYDoc, EngineYDocDeliveryRefusedError } from "../../../apps/desktop/src/renderer/collab/engineYDocProvider.js";
 import { CHANNELS } from "../../../apps/desktop/src/ipc/channels.js";
@@ -135,7 +135,8 @@ it("edits and pauses through the desktop capture, IPC, renderer mirror and a rea
     const tickets = createLiveTickets({storage, audience, key: "desktop-proof-ticket-key-".repeat(2),
       hostReports: createLiveHostReports({storage, captureNative})});
     const hosts = new Set([new URL(audience).host]);
-    const admission = createDesktopAdmission({storage, resolveActor, publicOrigin: audience, hosts, tickets,
+    const admission = createDesktopAdmission({storage, resolveActor, publicOrigin: audience, hosts, tickets, changes: sharedChanges,
+      readinessLimits: {maxPendingRequests: 8, maxPendingPerUser: 4, timeoutMs: 30000},
       limits: {...browserLimits, maxSessions: 16, retentionMs: 120000},
       editorLimits: {provider: {frames, maxPendingUpdateBytes: 2000000, maxPendingUpdates: 4, maxDeliveryAttempts: 3},
         maxHttpResponseBytes: 8192, maxSocketBufferedBytes: 2000000, connectTimeoutMs: 30000, sendTimeoutMs: 30000, drainPollMs: 10}});
@@ -165,8 +166,9 @@ it("edits and pauses through the desktop capture, IPC, renderer mirror and a rea
       const credentials = new AbortController();
       const capture = createNamedDesktopLiveCapture({shareId: overrides.shareId ?? `share-${index}`,
         selector: {access: "edit", versionId: null, paths: ["docs"]},
+        accessEnded: () => false,
         credentials: {relayUrl: audience, token: overrides.token ?? tokens[index]!, userId: users[index]!.id, signal: credentials.signal},
-        assertCurrent, preserveDraft: draft => preserveNamedLiveDraft(join(root, "profile"), localWorkspaceId, draft)});
+        assertCurrent, preserveDraft: draft => preserveLiveDraft(join(root, "profile"), localWorkspaceId, draft)});
       const ipc = createEngineYDocSessionIpc({sessionFor: () => ({workspaceId: localWorkspaceId, generation: 1, isCurrent: () => current}),
         acquireWorkspace: () => ({workspace: {workspaceId: localWorkspaceId, rootPath: localRoot, attachmentId: Symbol.for(localWorkspaceId)}, assertCurrent, release() {}}),
         captureFor: () => {ordinaryCaptureCalls++; throw new Error("Ordinary capture must not handle shared live editing.");},
@@ -193,12 +195,12 @@ it("edits and pauses through the desktop capture, IPC, renderer mirror and a rea
       closes.push(client.close);
       return client;
     }
-    function saveWhen(client: Awaited<ReturnType<typeof desktop>>, state: EngineYDocSaveStateEvent["state"]) {
-      const previous = client.states.find(event => event.state === state);
+    function saveWhen(client: Awaited<ReturnType<typeof desktop>>, state: EngineYDocSaveStateEvent["state"]["kind"] | "read-only") {
+      const previous = client.states.find(event => (state === "read-only" ? event.access === state : event.state.kind === state));
       if (previous) return Promise.resolve(previous);
       return new Promise<EngineYDocSaveStateEvent>((resolve, reject) => {
         const timer = setTimeout(() => {client.sender.off(CHANNELS.engineYDocSaveState, receive); reject(new Error(`Missing ${state} save event.`));}, 30000);
-        const receive = (payload: unknown) => {const event = EngineYDocSaveStateEvent.parse(payload); if (event.state !== state) return;
+        const receive = (payload: unknown) => {const event = EngineYDocSaveStateEvent.parse(payload); if (state === "read-only" ? event.access !== state : event.state.kind !== state) return;
           clearTimeout(timer); client.sender.off(CHANNELS.engineYDocSaveState, receive); resolve(event);};
         client.sender.on(CHANNELS.engineYDocSaveState, receive);
       });
@@ -216,7 +218,7 @@ it("edits and pauses through the desktop capture, IPC, renderer mirror and a rea
     expect(first.mirror.available).toBe(true); expect(peer.mirror.available).toBe(true);
     if (!first.mirror.doc || !peer.mirror.doc) throw new Error("Missing live renderer mirrors.");
     expect(yDocToMarkdown(first.mirror.doc)).toBe("Hello"); expect(yDocToMarkdown(peer.mirror.doc)).toBe("Hello");
-    const peerSeen = fieldWhen(peer.mirror.doc, "title", "desktop-over-tls"), saved = saveWhen(first, "saved");
+    const peerSeen = fieldWhen(peer.mirror.doc, "title", "desktop-over-tls"), saved = saveWhen(first, "saved-to-host");
     let localUpdate!: Uint8Array;
     first.mirror.doc.once("update", update => {localUpdate = update.slice();});
     first.mirror.doc.getMap("frontmatter").set("title", "desktop-over-tls");
@@ -244,12 +246,17 @@ it("edits and pauses through the desktop capture, IPC, renderer mirror and a rea
     expect(readFileSync(join(workspace, "docs/a.md"), "utf8")).toBe(yDocToMarkdown(first.mirror.doc));
     results.edit = {saveEvent, peerMarkdown: yDocToMarkdown(peer.mirror.doc), ordinaryCaptureCalls, localMarkdown: "Hello", settlement};
     const wrong = await desktop(0, "wrong-bearer", {token: tokens[1]});
-    expect(wrong.mirror.available).toBe(false); expect(wrong.mirror.liveHostUnavailable).toBe(true);
+    const failedOpen = {state: "failed", message: "dohc could not open this file for editing."};
+    expect(wrong.mirror.available).toBe(false); expect(wrong.mirror.doc).toBeNull();
+    expect(wrong.mirror.liveHostUnavailable).toBe(false); expect(wrong.mirror.sharedWaiting).toEqual(failedOpen);
     const stale = await desktop(0, "stale", {current: false}); expect(stale.mirror.available).toBe(false);
     const paused = [saveWhen(first, "read-only"), saveWhen(peer, "read-only")];
-    await active.close(); active = undefined; await Promise.all(paused);
+    await active.close(); active = undefined;
+    const pausedEvents = await Promise.all(paused);
+    expect(pausedEvents.map(event => event.readOnlyCause)).toEqual(["reconnecting", "reconnecting"]);
     const unavailable = await desktop(0, "offline");
-    expect(unavailable.mirror.available).toBe(false); expect(unavailable.mirror.liveHostUnavailable).toBe(true);
+    expect(unavailable.mirror.available).toBe(false); expect(unavailable.mirror.doc).toBeNull();
+    expect(unavailable.mirror.liveHostUnavailable).toBe(false); expect(unavailable.mirror.sharedWaiting).toEqual(failedOpen);
     expect(readFileSync(join(unavailable.localRoot, "docs/a.md"), "utf8")).toBe("Hello");
     active = await startServiceLiveHost({configPath: serviceConfig, ...deployment, frameChanges});
     const reopened = await desktop(0, "reopened"); expect(reopened.mirror.available).toBe(true);

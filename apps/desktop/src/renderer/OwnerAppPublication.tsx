@@ -77,13 +77,25 @@ function localLaunchUrl(raw: string): string | null {
   return url.protocol === "http:" && url.hostname === "127.0.0.1" && url.port !== "" && url.username === "" && url.password === "" ? url.toString() : null;
 }
 
+/** Starts an approved app on this device and hands its loopback address to the browser. False when the caller went stale first. */
+async function openLocalApp(api: ReturnType<typeof bridge>, workspaceId: string, publicationId: string, current: () => boolean): Promise<boolean> {
+  const result = await api.publishOwnerApp({ action: "launchLocal", workspaceId, publicationId });
+  if (!current()) return false;
+  if (result.kind !== "localLaunched" || result.publicationId !== publicationId) throw new Error("dohc could not confirm which app started. Try again.");
+  const url = localLaunchUrl(result.url);
+  if (!url) throw new Error("The app address is not on this device. dohc did not open it.");
+  await api.openExternalUrl({ url });
+  return current();
+}
+
 function verifiedPrepared(result: OwnerAppPublicationResult): Prepared {
   const checked = OwnerAppPublicationResult.safeParse(result);
   if (!checked.success || checked.data.kind !== "prepared") throw new Error("dohc could not verify this app's data access. Prepare the app again.");
   return checked.data;
 }
 
-type PublicationProps = { workspaceId: string; appRoot: string; onShareSource?: () => void; reportError?: ReportError; triggerLabel?: string };
+// onLocalChange runs after anything that may change this device's approvals, so other views read them again.
+type PublicationProps = { workspaceId: string; appRoot: string; onShareSource?: () => void; reportError?: ReportError; onLocalChange?: () => void };
 
 export function OwnerAppPublication(props: PublicationProps) {
   return <PublicationControl key={`${props.workspaceId}\0${props.appRoot}`} {...props} />;
@@ -95,10 +107,82 @@ function PublicationControl(props: PublicationProps) {
     setOpen(false);
   };
   return <>
-    {props.triggerLabel ? <PrimaryButton onClick={() => setOpen(true)}>{props.triggerLabel}</PrimaryButton> : <IconButton data-testid="site-preview-publish" aria-label="Publish app" title="Publish app" className="size-7" onClick={() => setOpen(true)}>
+    <IconButton data-testid="site-preview-publish" aria-label="Publish app" title="Publish app" className="size-7" onClick={() => setOpen(true)}>
       <Upload size={13} aria-hidden />
-    </IconButton>}
+    </IconButton>
     {open ? <PublicationDialog {...props} onClose={close} onReopen={() => setOpen(true)} /> : null}
+  </>;
+}
+
+/**
+ * The app page's way in when the app has no standalone preview. An app approved on this device opens from here;
+ * otherwise the person reviews it first. A change to `reload` reads this device's approvals again.
+ */
+export function OwnerAppEntry(props: PublicationProps & { reload: number }) {
+  return <AppEntry key={`${props.workspaceId}\0${props.appRoot}`} {...props} />;
+}
+
+const CHECK_FAILED = "dohc could not check whether this app is approved on this device.";
+
+function AppEntry(props: PublicationProps & { reload: number }) {
+  // undefined while this device's approvals load; null when none is active; "failed" when dohc could not read them.
+  const [state, setState] = useState<LocalPublication | null | undefined | "failed">(undefined);
+  const [check, setCheck] = useState(0);
+  const [open, setOpen] = useState(false);
+  const [opening, setOpening] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const alive = useRef(true);
+  const request = useRef(0);
+  const report = useRef(props.reportError);
+  report.current = props.reportError;
+  useEffect(() => {
+    alive.current = true;
+    return () => { alive.current = false; request.current += 1; };
+  }, []);
+  const recheck = useCallback(() => { if (alive.current) setCheck(value => value + 1); }, []);
+  useEffect(() => {
+    let current = true;
+    void (async () => {
+      const page = await bridge().publishOwnerApp({ action: "listLocal", workspaceId: props.workspaceId, appRoot: props.appRoot });
+      if (!current) return;
+      if (page.kind !== "localListed") throw new Error(CHECK_FAILED);
+      setState(page.publications.find(row => row.appRoot === props.appRoot && row.active) ?? null);
+    })().catch(cause => {
+      if (!current) return;
+      setState("failed");
+      report.current?.(CHECK_FAILED, cause, recheck);
+    });
+    return () => { current = false; };
+  }, [props.workspaceId, props.appRoot, props.reload, check, recheck]);
+
+  const launch = async (publication: LocalPublication) => {
+    const mine = ++request.current;
+    const current = () => alive.current && mine === request.current;
+    setOpening(true); setError(null);
+    try {
+      await openLocalApp(bridge(), props.workspaceId, publication.publicationId, current);
+    } catch (cause) {
+      if (!current()) return;
+      if (props.reportError) props.reportError("dohc could not open this app in your browser.", cause, () => { if (alive.current) void launch(publication); });
+      else setError(ipcErrorMessage(cause, "dohc could not open this app in your browser."));
+      // The approval may have ended outside this page, so read it again.
+      recheck();
+    } finally { if (current()) setOpening(false); }
+  };
+
+  if (state === undefined) return <SkeletonRows rows={2} label="Loading local apps…" className="w-full max-w-sm" />;
+  const failed = state === "failed";
+  const approved = failed ? null : state;
+  return <>
+    <p role={failed && !props.reportError ? "alert" : undefined} className="m-0 max-w-sm text-sm text-muted">
+      {approved ? "Approved on this device. Later source edits need a new approval." : failed ? CHECK_FAILED : "Review this app to open it on this device or publish it to a shared link."}</p>
+    <div className="flex flex-wrap items-center justify-center gap-2">
+      {/* One button for every state, so focus returning from the dialog lands on Open in browser after approval. */}
+      <PrimaryButton disabled={opening} onClick={() => approved ? void launch(approved) : setOpen(true)}>{!approved ? "Review and open app" : opening ? "Opening…" : "Open in browser"}</PrimaryButton>
+      {approved ? <SecondaryButton disabled={opening} onClick={() => setOpen(true)}>Review app</SecondaryButton> : failed ? <SecondaryButton onClick={recheck}>Try again</SecondaryButton> : null}
+    </div>
+    {error ? <p role="alert" className="m-0 max-w-sm text-[13px] text-danger">{error}</p> : null}
+    {open ? <PublicationDialog {...props} onLocalChange={() => { recheck(); props.onLocalChange?.(); }} onClose={() => setOpen(false)} onReopen={() => setOpen(true)} /> : null}
   </>;
 }
 
@@ -144,6 +228,9 @@ function PublicationDialog(props: PublicationProps & { onClose: () => void; onRe
   const [localError, setLocalError] = useState<string | null>(null);
   const [localReload, setLocalReload] = useState(0);
   const [localPreparing, setLocalPreparing] = useState(false);
+  // Links and publications need this workspace synced; approval for this device does not. A failed check counts as
+  // synced, so the link loaders still report their own errors.
+  const [synced, setSynced] = useState<boolean | null>(null);
   const alive = useRef(true);
   const request = useRef(0);
   const candidate = useRef<Prepared | null>(null);
@@ -153,6 +240,7 @@ function PublicationDialog(props: PublicationProps & { onClose: () => void; onRe
   const committing = busy === "approve" || busy === "withdraw" || busy === "revokeCollection" || responsesBusy;
   // Backend data errors go to the shell's Notices when root passes reportShellError; otherwise this dialog's own alert line.
   const reportError: ReportError = props.reportError ?? ((fallback, cause) => setError(ipcErrorMessage(cause, fallback)));
+  const localChanged = () => { setLocalReload(value => value + 1); props.onLocalChange?.(); };
 
   useEffect(() => { heading.current?.focus(); }, [prepared]);
 
@@ -218,6 +306,15 @@ function PublicationDialog(props: PublicationProps & { onClose: () => void; onRe
       .finally(() => { if (current) setPublicationsLoading(false); });
     return () => { current = false; };
   }, [api, props.workspaceId, props.appRoot, publicationsReload]);
+
+  useEffect(() => {
+    let current = true;
+    void (async () => {
+      const status = await api.cloudStatus({ workspaceId: props.workspaceId });
+      if (current) setSynced(status.workspaceSynced !== false);
+    })().catch(() => { if (current) setSynced(true); });
+    return () => { current = false; };
+  }, [api, props.workspaceId]);
 
   useEffect(() => {
     let current = true;
@@ -290,7 +387,8 @@ function PublicationDialog(props: PublicationProps & { onClose: () => void; onRe
       if (!alive.current || mine !== request.current) return;
       if (result.kind !== "published" || (result.local === true) !== (prepared.local === true)) throw new Error("dohc could not confirm publication. Reload the app publications.");
       candidate.current = null;
-      if (prepared.local) setLocalReload(value => value + 1); else setPublicationsReload(value => value + 1);
+      // Publishing a Collection app on a link moves its data off this device, which ends any approval here.
+      localChanged(); if (!prepared.local) setPublicationsReload(value => value + 1);
       setPrepared(null);
       setNotice(prepared.local ? "App approved on this device. It is not published on any link." : reactivating ? "App republished." : "App published on the selected link.");
     } catch (error) {
@@ -298,7 +396,7 @@ function PublicationDialog(props: PublicationProps & { onClose: () => void; onRe
         cancel(prepared);
         candidate.current = null;
         setPrepared(null);
-        if (prepared.local) setLocalReload(value => value + 1); else setPublicationsReload(value => value + 1);
+        localChanged(); if (!prepared.local) setPublicationsReload(value => value + 1);
         setError(ipcErrorMessage(error, "dohc could not confirm publication. Reload the app publications."));
       }
     } finally { if (alive.current && mine === request.current) setBusy(null); }
@@ -312,9 +410,9 @@ function PublicationDialog(props: PublicationProps & { onClose: () => void; onRe
       const result = await api.publishOwnerApp({ action: "withdraw", workspaceId: props.workspaceId, publicationId: publication.publicationId, expectedAuthorityRevision: publication.authorityRevision });
       if (!alive.current || mine !== request.current) return;
       if (result.kind !== "withdrawn") throw new Error("dohc could not confirm that this publication ended. Try again.");
-      if (local) setLocalReload(value => value + 1); else setPublicationsReload(value => value + 1);
+      if (local) localChanged(); else setPublicationsReload(value => value + 1);
       setNotice(local ? "App approval removed. Prepare the app again to restore access." : "App unpublished. The share link still works for its other shared content.");
-    } catch (error) { if (alive.current && mine === request.current) { setError(ipcErrorMessage(error, "dohc could not end app access. Try again.")); if (local) setLocalReload(value => value + 1); else setPublicationsReload(value => value + 1); } }
+    } catch (error) { if (alive.current && mine === request.current) { setError(ipcErrorMessage(error, "dohc could not end app access. Try again.")); if (local) localChanged(); else setPublicationsReload(value => value + 1); } }
     finally { if (alive.current && mine === request.current) { setBusy(null); setBusyPublicationId(null); } }
   };
   const revokeCollection = async (publication: Publication) => {
@@ -337,13 +435,7 @@ function PublicationDialog(props: PublicationProps & { onClose: () => void; onRe
     const mine = ++request.current;
     setBusy("launch"); setBusyPublicationId(publication.publicationId); setError(null); setNotice(null);
     try {
-      const result = await api.publishOwnerApp({ action: "launchLocal", workspaceId: props.workspaceId, publicationId: publication.publicationId });
-      if (!alive.current || mine !== request.current) return;
-      if (result.kind !== "localLaunched" || result.publicationId !== publication.publicationId) throw new Error("dohc could not confirm which app started. Try again.");
-      const url = localLaunchUrl(result.url);
-      if (!url) throw new Error("The app address is not on this device. dohc did not open it.");
-      await api.openExternalUrl({ url });
-      if (!alive.current || mine !== request.current) return;
+      if (!await openLocalApp(api, props.workspaceId, publication.publicationId, () => alive.current && mine === request.current)) return;
       setNotice("App opened in your browser.");
     } catch (cause) {
       if (alive.current && mine === request.current) reportError("dohc could not open this app in your browser.", cause, () => void launch(publication));
@@ -364,7 +456,7 @@ function PublicationDialog(props: PublicationProps & { onClose: () => void; onRe
 
   return <><Overlay onClose={committing ? undefined : props.onClose}>
     <section role="dialog" aria-modal="true" aria-labelledby="app-publication-title" data-testid="app-publication-dialog"
-      className="dohc-elevated flex max-h-[calc(100vh-128px)] w-[min(560px,calc(100vw-32px))] flex-col gap-4 overflow-y-auto rounded-xl border border-line bg-panel p-5">
+      className="dohc-elevated flex max-h-[calc(100vh-128px)] w-[min(560px,calc(100vw-32px))] flex-col gap-4 overflow-y-auto rounded-xl border border-line bg-panel p-5 text-left">
       <header className="flex items-center gap-2">
         <h2 ref={heading} tabIndex={-1} id="app-publication-title" className="m-0 flex-1 text-sm font-semibold text-ink">{prepared?.local ? "Review app for this device" : prepared ? "Review app publication" : "Publish app"}</h2>
         <IconButton aria-label="Close publication" disabled={committing} onClick={props.onClose}><X size={14} aria-hidden /></IconButton>
@@ -415,7 +507,7 @@ function PublicationDialog(props: PublicationProps & { onClose: () => void; onRe
       </> : <>
         <div className="border-b border-line pb-4">
           <div className="flex items-center justify-between gap-3"><h3 className="m-0 text-[13px] font-medium text-ink">This device</h3>
-            <div className="flex gap-2"><SecondaryButton aria-label="Reload local apps" disabled={localLoading || !!busy || responsesBusy} onClick={() => setLocalReload(value => value + 1)}>Reload</SecondaryButton>
+            <div className="flex gap-2"><SecondaryButton aria-label="Reload local apps" disabled={localLoading || !!busy || responsesBusy} onClick={localChanged}>Reload</SecondaryButton>
               <SecondaryButton disabled={!!busy || responsesBusy} onClick={() => void prepareLocal()}>{localPreparing ? "Preparing app…" : "Prepare for this device"}</SecondaryButton></div></div>
           <p className="mb-0 mt-1 text-[12px] text-muted">Run this app with its data here. No account or link needed.</p>
           {localLoading ? <SkeletonRows rows={2} label="Loading local apps…" className="mt-3" /> : localError ?
@@ -436,10 +528,10 @@ function PublicationDialog(props: PublicationProps & { onClose: () => void; onRe
           <p className="mb-2 mt-0 break-all font-mono text-[12px] text-muted">This device · Source {publication.sourceRevision.slice(0, 12)}</p>
           <p className="text-[12px] text-muted">Open the Collection to view and manage its records.</p>
         </div>)}
-        <div className="border-b border-line pb-4">
+        {synced === false ? null : <div className="border-b border-line pb-4">
           <div className="flex items-center justify-between gap-3"><h3 className="m-0 text-[13px] font-medium text-ink">Publications</h3>
             <SecondaryButton disabled={publicationsLoading || !!busy || responsesBusy} onClick={() => setPublicationsReload(value => value + 1)}>Reload publications</SecondaryButton></div>
-          {publicationsLoading ? <SkeletonRows rows={2} label="Loading publications…" className="mt-3" /> : publicationsError ?
+          {publicationsLoading || synced === null ? <SkeletonRows rows={2} label="Loading publications…" className="mt-3" /> : publicationsError ?
             <p role="alert" className="mb-0 text-[13px] text-danger">{publicationsError}</p> : publications.length === 0 ?
               <p className="mb-0 text-[12px] text-muted">No publications.</p> : <ul className="m-0 mt-3 list-none space-y-3 p-0">
                   {publications.map(publication => <li key={publication.publicationId} className="flex items-center justify-between gap-3">
@@ -464,25 +556,27 @@ function PublicationDialog(props: PublicationProps & { onClose: () => void; onRe
                   </div>
                 </li>)}
               </ul>}
-        </div>
+        </div>}
         {[...new Set(publications.filter(publication => !publication.manifestUnavailable && publication.collectionCapability && publication.appRoot === props.appRoot).map(publication => publication.grantId))].map(grantId => <div key={grantId}>
           <p className="mb-2 mt-0 break-all font-mono text-[12px] text-muted">Link {grantId}</p>
           <OwnerAppResponses workspaceId={props.workspaceId} grantId={grantId} disabled={publicationsLoading || !!busy} onBusyChange={responseBusyChanged} />
         </div>)}
         <div><h3 className="m-0 text-[13px] font-medium text-ink">Publish on a share link</h3>
-          <p className="mb-0 mt-1 text-[12px] text-muted">Publishing on a link needs a connection to your dohc host. Approval for this device does not.</p></div>
-        <label className="text-[13px] text-ink">Share link
-          <select aria-label="Publication share link" disabled={loading || !!busy || responsesBusy} value={selected} onChange={event => setSelected(event.target.value)}
-            className="mt-2 w-full rounded-md border border-line bg-bg px-2.5 py-1.5 text-[13px] text-ink focus:border-ink">
-            <option value="">Choose a link</option>{links.map(link => <option key={link.grantId} value={link.grantId}>{linkLabel(link)}</option>)}
-          </select></label>
-        {loading ? <SkeletonRows rows={2} label="Loading links…" /> : loadError ? <div><p role="alert" className="text-[13px] text-danger">{loadError}</p><SecondaryButton onClick={() => setReload(value => value + 1)}>Reload links</SecondaryButton></div> : links.length === 0 ?
-          <p className="m-0 text-[13px] text-muted">No active links include this app's source folder.</p> : null}
+          <p className="mb-0 mt-1 text-[12px] text-muted">{synced === false ? "Sync this workspace to publish on a share link. Opening on this device does not need sync." : "Publishing on a link needs a connection to your dohc host. Approval for this device does not."}</p></div>
+        {synced === false ? null : <>
+          <label className="text-[13px] text-ink">Share link
+            <select aria-label="Publication share link" disabled={loading || !!busy || responsesBusy} value={selected} onChange={event => setSelected(event.target.value)}
+              className="mt-2 w-full rounded-md border border-line bg-bg px-2.5 py-1.5 text-[13px] text-ink focus:border-ink">
+              <option value="">Choose a link</option>{links.map(link => <option key={link.grantId} value={link.grantId}>{linkLabel(link)}</option>)}
+            </select></label>
+          {loading || synced === null ? <SkeletonRows rows={2} label="Loading links…" /> : loadError ? <div><p role="alert" className="text-[13px] text-danger">{loadError}</p><SecondaryButton onClick={() => setReload(value => value + 1)}>Reload links</SecondaryButton></div> : links.length === 0 ?
+            <p className="m-0 text-[13px] text-muted">No active links include this app's source folder.</p> : null}
+        </>}
         {props.onShareSource ? <div className="flex items-center justify-between gap-3"><p className="m-0 text-[12px] text-muted">Create a link that includes this app's source files.</p>
           <SecondaryButton disabled={!!busy || responsesBusy} onClick={() => { props.onClose(); props.onShareSource?.(); }}>Share app folder</SecondaryButton></div> : null}
-        <p className="m-0 text-[13px] text-muted">Prepare the app to review its source and data access before publishing.</p>
+        {synced === false ? null : <p className="m-0 text-[13px] text-muted">Prepare the app to review its source and data access before publishing.</p>}
         <footer className="flex justify-end gap-2"><SecondaryButton disabled={committing} onClick={props.onClose}>Cancel</SecondaryButton>
-          <PrimaryButton disabled={!!busy || responsesBusy || !selectedLink || loading || !!loadError} onClick={() => void prepare()}>{busy === "prepare" && !localPreparing ? "Preparing app…" : "Prepare app"}</PrimaryButton></footer>
+          {synced === false ? null : <PrimaryButton disabled={!!busy || responsesBusy || !selectedLink || loading || !!loadError} onClick={() => void prepare()}>{busy === "prepare" && !localPreparing ? "Preparing app…" : "Prepare app"}</PrimaryButton>}</footer>
       </>}
       </section></Overlay>
       {pendingRevoke ? <ConfirmDialog intent="danger" testId="app-collection-revoke-confirm" cancelTestId="app-collection-revoke-cancel" confirmTestId="app-collection-revoke-action" title="Revoke collection access?" confirmLabel="Revoke access" onCancel={closeRevocation} onConfirm={() => { const value = pendingRevoke; closeRevocation(); void revokeCollection(value); }}>

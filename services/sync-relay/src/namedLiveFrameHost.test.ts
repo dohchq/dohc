@@ -328,6 +328,21 @@ it.each(["applied", "missing", "ambiguous"])("requires exact native evidence for
   }));
 });
 
+it("passes only an internal owner automation's durable press binding into journal admission", async () => {
+  const f = await setup(), capture = ownerCapture(f), commit = journal(f);
+  const trustedAutomation = {automationId: "collection:Tasks#mark", attribution: {actorKind: "automation" as const,
+    onBehalfOf: scope.userId, depth: 1, run: {claimId: "claim", automationName: "Mark done"}}};
+  const trustedAutomationPress = {hostPressId: "relay-press", automationId: trustedAutomation.automationId};
+  const input = {deliveryId: ack.deliveryId, updateDigest: hash(bytes), updateBytes: bytes, trustedAutomation, trustedAutomationPress};
+  expect(await capture.submit(input, new AbortController().signal)).toEqual({result: "success", ack});
+  expect(commit).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({trustedAutomation, trustedAutomationPress}));
+  commit.mockClear();
+  expect(await f.capture.submit(input, new AbortController().signal)).toEqual({result: "refused", reason: "authority-refused"});
+  expect(await capture.submit({...input, trustedAutomation: undefined}, new AbortController().signal))
+    .toEqual({result: "refused", reason: "authority-refused"});
+  expect(commit).not.toHaveBeenCalled();
+});
+
 it.each(["owner", "selector", "restore"])("invalidates owner capture when %s changes", async kind => {
   const f = await setup(), capture = ownerCapture(f);
   if (kind === "owner") f.raw.prepare("UPDATE sync_relay_workspaces SET owner_user_id='different-owner'").run();
@@ -380,15 +395,33 @@ it("coalesces shared wakes and preserves listener bounds and independent deliver
   expect(changes.listenerCount()).toBe(1);
 });
 
-it("checks authority globally while waking native readers only for their document", async () => {
-  const changes = createNamedFrameChanges(3), authority = vi.fn(), first = vi.fn(), second = vi.fn();
+it("checks authority globally while waking native readers for their document or serving host", async () => {
+  const changes = createNamedFrameChanges(4), authority = vi.fn(), first = vi.fn(), second = vi.fn(), third = vi.fn(), waiting = vi.fn();
   changes.subscribe(authority); changes.subscribe(first, binding); changes.subscribe(second, {...binding, workspaceId: "other-workspace"});
+  changes.subscribe(third, {...binding, objectId: "other-object"});
+  changes.subscribe(waiting, {workspaceId: binding.workspaceId, objectId: "waiting-object"});
   changes.notify(); await new Promise<void>(queueMicrotask);
   expect(authority).toHaveBeenCalledOnce(); expect(first).not.toHaveBeenCalled(); expect(second).not.toHaveBeenCalled();
   changes.notify(binding); changes.notify(binding); await new Promise<void>(queueMicrotask);
   expect(authority).toHaveBeenCalledTimes(2); expect(first).toHaveBeenCalledOnce(); expect(second).not.toHaveBeenCalled();
   changes.notify({...binding, workspaceId: "other-workspace"}); await new Promise<void>(queueMicrotask);
   expect(authority).toHaveBeenCalledTimes(3); expect(first).toHaveBeenCalledOnce(); expect(second).toHaveBeenCalledOnce();
+  expect(third).not.toHaveBeenCalled(); expect(waiting).not.toHaveBeenCalled();
+  changes.notifyHost([binding.workspaceId]); changes.notifyHost([binding.workspaceId]); await new Promise<void>(queueMicrotask);
+  expect(authority).toHaveBeenCalledTimes(4); expect(first).toHaveBeenCalledTimes(2); expect(second).toHaveBeenCalledOnce();
+  expect(third).toHaveBeenCalledOnce(); expect(waiting).toHaveBeenCalledOnce();
+});
+
+it("keeps desktop object subscriptions separate from live frame listener capacity", async () => {
+  const changes = createNamedFrameChanges(1), waiting = vi.fn(), reader = vi.fn();
+  changes.subscribe(waiting, {workspaceId: binding.workspaceId, objectId: binding.objectId});
+  changes.subscribe(reader, binding);
+  changes.notify();
+  await new Promise<void>(queueMicrotask);
+  expect(waiting).not.toHaveBeenCalled(); expect(reader).not.toHaveBeenCalled();
+  changes.notify(binding);
+  await new Promise<void>(queueMicrotask);
+  expect(waiting).toHaveBeenCalledOnce(); expect(reader).toHaveBeenCalledOnce();
 });
 
 it("rechecks revocation after asynchronous validation and never commits its stale result", async () => {
@@ -410,4 +443,15 @@ it("returns transient worker saturation as retry before calling the journal comm
   expect(await capture.submit({deliveryId: "delivery", updateDigest: hash(bytes), updateBytes: bytes}, new AbortController().signal))
     .toEqual({result: "retry", reason: "admission-unavailable"});
   expect(commit).not.toHaveBeenCalled();
+});
+
+it("terminally refuses an oversized submission before validation or journal admission", async () => {
+  const f = await setup();
+  const commit = journal(f);
+  const oversized = new Uint8Array(f.bounds.maxSubmissionBytes + 1);
+  const capture = ownerCapture(f);
+  expect(await capture.submit({deliveryId: "oversized", updateDigest: hash(oversized), updateBytes: oversized}, new AbortController().signal))
+    .toEqual({result: "refused", reason: "invalid-update"});
+  expect(commit).not.toHaveBeenCalled();
+  expect(f.validate).not.toHaveBeenCalled();
 });

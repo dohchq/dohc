@@ -1,3 +1,10 @@
+import {prepareHostedSettlements} from "../../../services/sync-relay/src/storage/hostedSettlement.js";
+import {appendValidatedLiveJournal} from "../../../services/sync-relay/src/storage/liveUpdateJournal.js";
+import {stableJsonStringify} from "../../../services/sync-relay/src/canonicalJson.js";
+import {initialAcceptedHistoryDigest} from "../../../services/sync-relay/src/liveAcceptedHistory.js";
+import {createLiveMarkdownRegistrationValidator} from "./liveDocumentValidation.js";
+import {liveValidation} from "../../../services/sync-relay/src/liveValidation.js";
+import {afterAll} from "vitest";
 import {createHash} from "node:crypto";
 import { afterEach, expect, it, vi } from "vitest";
 import * as Y from "yjs";
@@ -28,10 +35,10 @@ const jsonHash = (value: unknown) => hash(Buffer.from(JSON.stringify(value)));
 const ownerOriginDigest = ({binding, cut: c}: Pick<OwnerCutCapture, "binding" | "cut">) => jsonHash([binding,
   c.relayDatabaseNamespace, c.sourceMomentId, c.sourceDigest, c.sourceByteLength, c.baselineMomentRelaySequence,
   c.baselineRegisteredAtMs, c.expectedLocalSequence, c.events.map(event => canonicalVersionedAcceptedMetadata(event.metadata))]);
-function proposalSourcesFixture(kind: "bootstrap" | "owner", mode: "service" | "device", acceptedNative = false, selectedPoint = false) {
-  const f = readyNativeFence(kind, mode, acceptedNative ? "native" : true, selectedPoint);
+function proposalSourcesFixture(kind: "bootstrap" | "owner", mode: "service" | "device", acceptedNative = false, selectedPoint = false, authorBand = 0) {
+  const f = readyNativeFence(kind, mode, authorBand || (acceptedNative ? "native" : true), selectedPoint);
   f.store.acknowledgeStopRestoreFence(f.lookup, f.receipt);
-  const input = {...f.lookup, maxBytes: 1_000_000, maxEvents: 10};
+  const input = {...f.lookup, maxBytes: authorBand ? 10_000_000 : 1_000_000, maxEvents: authorBand ? 1000 : 10};
   const selectedHistory = f.store.captureStopRestorePoint(input).proof;
   const acceptedHistory = f.store.captureStopRestoreAcceptedCut(input).proof;
   let origin: unknown;
@@ -113,8 +120,8 @@ function pendingSource(binding: NativeRestoreFenceReceipt["operation"]["oldBindi
     byteLength: bytes.byteLength, createdAtMs: 100, source, acceptedReceipt: null};
 }
 
-function contentProposalFixture(kind: "bootstrap" | "owner" = "owner", mode: "service" | "device" = "device", pending: boolean | "deleted" = false, acceptedNative = false, selectedPoint = false) {
-  return buildContentProposal(proposalSourcesFixture(kind, mode, acceptedNative, selectedPoint), pending);
+function contentProposalFixture(kind: "bootstrap" | "owner" = "owner", mode: "service" | "device" = "device", pending: boolean | "deleted" = false, acceptedNative = false, selectedPoint = false, authorBand = 0) {
+  return buildContentProposal(proposalSourcesFixture(kind, mode, acceptedNative, selectedPoint, authorBand), pending);
 }
 function buildContentProposal<F extends Pick<ReturnType<typeof proposalSourcesFixture>, "store" | "input" | "document" | "receipt" | "proposal" | "close"> & {acceptedNative?: AcceptedNative}>(f: F, pending: boolean | "deleted" = false) {
   const point = new Y.Doc({gc: false}), head = new Y.Doc({gc: false});
@@ -957,12 +964,78 @@ it("rolls back owner ACK reservation and quota changes when its progress UPDATE 
 });
 
 type AcceptedNative = {bytes: Uint8Array; source: Omit<ReturnType<typeof pendingSource>, "acceptedReceipt"> & {acceptedReceipt: ReturnType<ReturnType<typeof fixture>["add"]>}};
-function readyNativeFence(kind: "bootstrap" | "owner", mode: "service" | "device", events: boolean | "native" = false, selectedPoint = false) {
+// Seed completed prefix delivery without one durable commit per author.
+// Keep the band's final admission and application acknowledgement on the real path.
+function seedOwnerApplicationPrefix(f: ReturnType<typeof fixture>, terminal: ReturnType<ReturnType<typeof fixture>["add"]>, count: number) {
+  const where = "workspace_id=? AND main_version_id=? AND object_id=? AND lineage_claim_id=? AND host_id=?";
+  const params = [f.document.workspaceId, f.document.mainVersionId, f.document.objectId, f.document.lineageClaimId, f.coordinate.hostId];
+  const owner = f.context.db.prepare(`SELECT * FROM sync_relay_live_delivery_owners WHERE relay_database_namespace=? AND ${where}`).get("restore-test", ...params)!;
+  const tip = JSON.stringify(terminal), sequence = 9, applicationSequence = count === 1 ? 9 : 2;
+  const charge = Buffer.byteLength(JSON.stringify(["restore-test", ...params, owner.origin_json, tip, terminal.journalCursor, sequence, applicationSequence]));
+  const reserved = f.context.db.prepare(`SELECT COUNT(*) AS count, SUM(reserved_bytes + accounted_bytes) AS bytes
+    FROM sync_relay_live_delivery_reservations WHERE ${where} AND journal_cursor>0 AND journal_cursor<=?`).get(...params, terminal.journalCursor)!;
+  expect(reserved.count).toBe(count);
+  const refund = Number(reserved.bytes) + Number(owner.accounted_bytes) - charge;
+  expect(f.context.db.prepare(`UPDATE sync_relay_live_delivery_owners
+    SET tip_receipt_json=?,tip_cursor=?,tip_sequence=?,tip_application_sequence=?,accounted_bytes=? WHERE relay_database_namespace=? AND ${where}`)
+    .run(tip, terminal.journalCursor, sequence, applicationSequence, charge, "restore-test", ...params).changes).toBe(1);
+  expect(f.context.db.prepare(`DELETE FROM sync_relay_live_delivery_reservations WHERE ${where} AND journal_cursor>0 AND journal_cursor<=?`)
+    .run(...params, terminal.journalCursor).changes).toBe(count);
+  expect(f.context.db.prepare("UPDATE sync_relay_workspace_usage SET usage_bytes=usage_bytes-? WHERE workspace_id=? AND usage_bytes>=?")
+    .run(refund, f.document.workspaceId, refund).changes).toBe(1);
+}
+function readyNativeFence(kind: "bootstrap" | "owner", mode: "service" | "device", events: boolean | "native" | number = false, selectedPoint = false) {
   const f = fixture(kind, mode);
   if (kind === "owner") f.adopt();
   let acceptedNative: AcceptedNative | undefined;
+  let seededPredecessor: ReturnType<typeof f.add> | null = null;
   const receipts: ReturnType<typeof f.add>[] = [];
-  if (events === "native") {
+  if (typeof events === "number") {
+    const head = new Y.Doc();
+    try {
+      Y.applyUpdate(head, f.input.baselineBytes);
+      const current = f.storage.resolveCurrentLiveDocumentBinding({document: f.document, actor: f.actor});
+      if (current.kind !== "current") throw Error(current.kind);
+      let priorMetadata: Parameters<typeof appendValidatedLiveJournal>[1]["priorMetadata"] = null;
+      // Seed the valid prefix once; the band-crossing frame uses ordinary admission.
+      f.context.tx(() => {for (let index = 0; index < events - 1; index++) {
+        head.clientID = index + 1;
+        const vector = Y.encodeStateVector(head);
+        head.getMap("frontmatter").set(`band-${index}`, "named edit");
+        const updateBytes = Y.encodeStateAsUpdate(head, vector);
+        const row = appendValidatedLiveJournal(f.context, {document: f.document, namespace: "restore-test", host: f.coordinate,
+          current, metadata: {deliveryId: `band-${index}`, updateDigest: hash(updateBytes)}, updateBytes,
+          receivedAtMs: 30, firstSeen: [{clientId: index + 1, startClock: 0, endClock: 1}], firstSeenDeletes: [],
+          authorSnapshot: [{kind: "automation", automationId: `a${index}`, attribution: {actorKind: "automation", depth: 0}}],
+          checkpointBytes: null, checkpointDigest: null, priorMetadata});
+        priorMetadata = row.metadata;
+        receipts.push(row.metadata.accepted.receipt);
+      }
+        if (kind === "owner" && !selectedPoint && receipts.length) {
+          seededPredecessor = receipts.at(-1)!;
+          seedOwnerApplicationPrefix(f, seededPredecessor, receipts.length);
+          receipts.length = 0;
+        }
+      });
+      {
+        const index = events - 1;
+        head.clientID = index + 1;
+        const vector = Y.encodeStateVector(head);
+        head.getMap("frontmatter").set(`band-${index}`, "named edit");
+        const capture = f.journalCapture(Y.encodeStateAsUpdate(head, vector), `band-${index}`);
+        if (capture.validation.kind !== "accepted") throw Error(capture.validation.kind);
+        const result = f.storage.commitLiveUpdateJournal({...capture, validation: {...capture.validation,
+          evidence: {...capture.validation.evidence, stateUpdate: Y.encodeStateAsUpdate(head)}},
+          trustedAutomation: {automationId: `a${index}`, attribution: {actorKind: "automation", depth: 0}}});
+        if (result.result.kind !== "accepted") throw Error(JSON.stringify(result.result));
+        receipts.push(result.result.receipt);
+        if (index === 959) {
+          expect(result.admitted!.metadata.checkpointCoverage).toHaveLength(960);
+          expect(result.admitted!.metadata.checkpointCoverage!.some(entry => entry.author.kind === "unattributed")).toBe(false);
+        }
+      }
+    } catch (error) {f.close();throw error;} finally {head.destroy();}
+  } else if (events === "native") {
     const current = f.storage.resolveCurrentLiveDocumentBinding({document: f.document, actor: f.actor});
     if (current.kind !== "current") throw Error(current.kind);
     const bytes = f.update("first", "first"), source = pendingSource(current.binding, bytes, 1);
@@ -975,7 +1048,7 @@ function readyNativeFence(kind: "bootstrap" | "owner", mode: "service" | "device
     if (committed.kind !== "accepted") throw Error(committed.kind);
     receipts.push(committed.receipt); acceptedNative = {bytes, source: {...source, acceptedReceipt: committed.receipt}};
   } else if (events) receipts.push(f.add("first"));
-  if (events) receipts.push(f.add("last"));
+  if (events && typeof events !== "number") receipts.push(f.add("last"));
   if (selectedPoint) {
     f.intent.restorePointCursor = receipts[0]!.journalCursor;
     f.intent.restorePointReceiptDigest = receipts[0]!.updateDigest;
@@ -988,7 +1061,7 @@ function readyNativeFence(kind: "bootstrap" | "owner", mode: "service" | "device
     f.store.acknowledgeStopRestoreBootstrap(capture, bootstrapAck(next.baseline));
   }
   for (const [index, receipt] of receipts.entries()) {
-    f.store.acknowledgeStopRestoreApplication(capture, receipts[index - 1] ?? null, applicationAck(receipt, index === 0 ? 9 : 2));
+    f.store.acknowledgeStopRestoreApplication(capture, receipts[index - 1] ?? seededPredecessor, applicationAck(receipt, index === 0 && !seededPredecessor ? 9 : 2));
   }
   f.store.completeStopRestoreCut(capture);
   const operation = f.store.pendingStopRestoreFence(f.lookup).operation;
@@ -1336,6 +1409,9 @@ it.each([["bootstrap","service"],["bootstrap","device"],["owner","device"]] as c
     expect(row.restore_operation_id).toBe(f.input.operationId);
     expect(row.validation_checkpoint_bytes).toBeInstanceOf(Uint8Array);
     expect(admitted.admitted.firstSeen).toEqual(f.receipt.replacementRanges);
+    expect(admitted.admitted.authorSnapshot).toEqual([]);
+    expect(admitted.admitted.checkpointCoverage?.filter(entry => entry.author.kind === "unattributed"))
+      .toHaveLength(1);
     expect(f.store.admitStopRestoreProposal(f.input,proposed.proposalDigest,policy,205)).toEqual(admitted);
     const application={fence:admitted.preparation.fence,candidateDigest:admitted.candidateDigest,nativeSourceManifestDigest:admitted.nativeSourceManifestDigest,
       admitted:admitted.admitted,localHeadSequence:admitted.preparation.fence.localHeadSequence+1,
@@ -1366,6 +1442,19 @@ it.each([["bootstrap","service"],["bootstrap","device"],["owner","device"]] as c
     }
     expect(before).not.toEqual(after);
   }finally{f.close();}
+});
+
+it("starts a fresh restore author window at the 960-identity checkpoint band", () => {
+  const f = contentProposalFixture("owner", "device", false, false, false, 960);
+  try {
+    const accepted = f.store.captureStopRestoreAcceptedCut(f.input);
+    expect(accepted.checkpoint.cursor).toBe(960);
+    expect(accepted.events).toEqual([]);
+    const proposed = f.store.recordStopRestoreProposal(f.input, f.encoded, policy, 200);
+    const admitted = f.store.admitStopRestoreProposal(f.input, proposed.proposalDigest, policy, 201);
+    expect(admitted.admitted.authorSnapshot).toEqual([]);
+    expect(admitted.admitted.checkpointCoverage?.map(entry => entry.author)).toEqual([{kind: "unattributed"}]);
+  } finally {f.close();}
 });
 
 function admittedRestoreFixture(kind:"owner"|"bootstrap"="owner",pending: boolean | "deleted"=true) {
@@ -1455,23 +1544,34 @@ it("parses the complete leased storage review through the desktop owner restore 
   } finally {f.close();}
 });
 
-it("reads the selected accepted edit time from authenticated storage into the desktop review", () => {
+it("reads the selected accepted edit time and author from authenticated storage into the desktop review", () => {
   const f = contentProposalFixture("owner", "device", false, false, true);
   try {
     f.store.recordStopRestoreProposal(f.input, f.encoded, policy, 200);
     const input = {...f.input, maxOutputBytes: 1_000_000}, before = lifecycleRows(f);
     const review = OwnerRestoreReview.parse(f.store.readStopRestoreReview(input, policy));
-    const selected = f.raw.prepare("SELECT received_at_ms FROM sync_relay_live_update_journal WHERE journal_cursor=?")
-      .get(f.intent.restorePointCursor)!;
+    const selected = f.raw.prepare(`SELECT received_at_ms,principal_kind,principal_id,grant_id,grant_generation
+      FROM sync_relay_live_update_journal WHERE journal_cursor=?`).get(f.intent.restorePointCursor)!;
+    expect(review.point).toMatchObject({journalCursor: f.intent.restorePointCursor, receiptDigest: f.intent.restorePointReceiptDigest});
     expect(review.point.journalCursor).toBe(1);
     expect(review.selectedPointReceivedAtMs).toBe(selected.received_at_ms);
     expect(review.selectedPointReceivedAtMs).toBe(30);
+    // The selected point's author is the authority the relay accepted that exact delivery from.
+    expect(review.selectedPointAuthority).toEqual({principalKind: selected.principal_kind, principalId: selected.principal_id,
+      grantId: selected.grant_id, grantGeneration: selected.grant_generation});
     expect(review.recordedAtMs).toBe(200);
     expect(review.acceptedEvents.map(event => event.metadata.accepted.receipt.journalCursor)).toEqual([2]);
     expect(lifecycleRows(f)).toEqual(before);
-    f.raw.prepare("UPDATE sync_relay_live_update_journal SET received_at_ms=received_at_ms+1 WHERE journal_cursor=?")
-      .run(f.intent.restorePointCursor);
-    expect(() => f.store.readStopRestoreReview(input, policy)).toThrow();
+    for (const damage of ["UPDATE sync_relay_live_update_journal SET received_at_ms=received_at_ms+1 WHERE journal_cursor=?",
+      "UPDATE sync_relay_live_update_journal SET principal_id='another-principal' WHERE journal_cursor=?"]) {
+      const saved = f.raw.prepare("SELECT received_at_ms,principal_id FROM sync_relay_live_update_journal WHERE journal_cursor=?")
+        .get(f.intent.restorePointCursor)!;
+      f.raw.prepare(damage).run(f.intent.restorePointCursor);
+      expect(() => f.store.readStopRestoreReview(input, policy)).toThrow();
+      f.raw.prepare("UPDATE sync_relay_live_update_journal SET received_at_ms=?,principal_id=? WHERE journal_cursor=?")
+        .run(saved.received_at_ms, saved.principal_id, f.intent.restorePointCursor);
+      expect(OwnerRestoreReview.parse(f.store.readStopRestoreReview(input, policy))).toEqual(review);
+    }
   } finally {f.close();}
 });
 
@@ -1878,4 +1978,111 @@ it("keeps admission and all lifecycle ACKs free of journal blob reads, byte comp
     f.store.acknowledgeStopRestoreReplacement(f.input,application);f.store.acknowledgeStopRestoreSettlement(f.input,{...settlement,materialized:false});
     f.store.acknowledgeStopRestoreSettlement(f.input,settlement);expect(f.store.acknowledgeStopRestoreResume(f.input,resume).phase).toBe("resumed");
   }finally{hashSpy.mockRestore();compareSpy.mockRestore();sqlSpy.mockRestore();txSpy.mockRestore();f.close();}
+});
+
+
+function restorePublication(f: ReturnType<typeof admittedRestoreFixture>, bytes: Uint8Array,
+  terminal: number, id: string, previous = 0, before = String(f.raw.prepare("SELECT baseline_projected_sha256 FROM sync_relay_live_documents").get()!.baseline_projected_sha256), originSeq = 0) {
+  const document = f.document, row = f.raw.prepare("SELECT * FROM sync_relay_live_update_journal WHERE journal_cursor=?").get(terminal)!;
+  const binding = {...f.admitted.admitted.accepted.binding};
+  const normalized = createLiveMarkdownRegistrationValidator(policy)({document, currentPath: binding.currentPath, checkpoint: bytes});
+  if (normalized.kind !== "accepted") throw Error(normalized.reason);
+  const markdown = Buffer.from(normalized.evidence.projectedMarkdown), markdownDigest = hash(markdown), stateDigest = hash(bytes);
+  for (const [sha256, content] of [[stateDigest, bytes], [markdownDigest, markdown]] as const)
+    f.storage.putBlob({workspaceId: document.workspaceId, sha256, content, createdAtMs: 1});
+  const prior = previous === 0 ? null : f.raw.prepare("SELECT * FROM sync_relay_live_update_journal WHERE journal_cursor=?").get(previous)!;
+  const namespace = String(row.relay_database_namespace), key = [namespace, document.workspaceId, document.mainVersionId, document.objectId, document.lineageClaimId];
+  const record = {settlementId: `hosted-${id}`, relayDatabaseNamespace: namespace, binding, previousCursor: previous, terminalCursor: terminal,
+    acceptedEventCount: Number(row.accepted_event_count) - Number(prior?.accepted_event_count ?? 0),
+    acceptedIntervalDigest: jsonHash(["live-settlement-accepted-interval-v1", key,
+      [Number(prior?.accepted_event_count ?? 0), previous, prior?.accepted_evidence_digest ?? initialAcceptedHistoryDigest(namespace, document)],
+      [Number(row.accepted_event_count), terminal, row.accepted_evidence_digest]]),
+    momentId: id, markdownDigest, acceptedStateBlobSha256: stateDigest};
+  const payload = {momentId: id, objectId: document.objectId, versionId: "main", path: binding.currentPath, operation: "write",
+    payloadBeforePath: binding.currentPath, payloadAfterPath: binding.currentPath, payloadBeforeContentKind: "text", payloadAfterContentKind: "text",
+    payloadBeforeBlobSha256: before, payloadAfterBlobSha256: markdownDigest, payloadAfterByteLength: markdown.byteLength, recordedAtMs: 1,
+    settlementReference: {formatVersion: 1, recordDigest: hash(Buffer.from(stableJsonStringify(record))), record}};
+  return {record, payload, markdownDigest, op: {originSeq, opKind: "moment.append", payloadJson: stableJsonStringify(payload), recordedAtMs: 1}};
+}
+
+it("publishes hosted settlement at a verified closed restore fence and chains the next ordinary settlement", async () => {
+  const f = admittedRestoreFixture(), doc = new Y.Doc({gc: false});
+  try {
+    const restoreCursor = f.admitted.admitted.accepted.receipt.journalCursor;
+    const bytes = f.raw.prepare("SELECT validation_checkpoint_bytes FROM sync_relay_live_update_journal WHERE journal_cursor=?").get(restoreCursor)!.validation_checkpoint_bytes as Uint8Array;
+    const first = restorePublication(f, bytes, restoreCursor, "published-restore");
+    await prepareHostedSettlements(f.context, {workspaceId: "workspace", originId: "proof", ops: [first.op]});
+    expect(first.op).toMatchObject({settlementAdmission: {status: "accepted"}});
+    expect(f.storage.appendLogBatch({workspaceId: "workspace", originId: "proof", ops: [first.op]})).toMatchObject({inserted: 1});
+    expect(first.op).toMatchObject({settlementAdmission: {status: "accepted"}});
+    expect(f.raw.prepare("SELECT admission_state FROM sync_relay_live_documents").get()!.admission_state).toBe("closed");
+    expect(f.storage.fetchLogCoordinate({workspaceId: "workspace", originId: "proof", originSeq: 0})!.admittedAuthorSnapshot).toEqual([{kind: "unattributed"}]);
+    f.complete();
+    Y.applyUpdate(doc, bytes); doc.getMap("frontmatter").set("after", "continued work");
+    const captured = f.journalCapture(Y.encodeStateAsUpdate(doc), "post-restore");
+    const accepted = f.storage.commitLiveUpdateJournal({...captured, trustedAccount: {accountId: "owner", name: "Owner"},
+      metadata: {...captured.metadata, authorContext: {kind: "account", accountId: "owner"}}});
+    expect(accepted.result.kind).toBe("accepted");
+    const second = restorePublication(f, Y.encodeStateAsUpdate(doc), accepted.admitted!.metadata.accepted.receipt.journalCursor,
+      "published-next", restoreCursor, first.markdownDigest, 1);
+    await prepareHostedSettlements(f.context, {workspaceId: "workspace", originId: "proof", ops: [second.op]});
+    expect(f.storage.appendLogBatch({workspaceId: "workspace", originId: "proof", ops: [second.op]}).settlementRefusals).toBeUndefined();
+    expect(f.storage.fetchLogCoordinate({workspaceId: "workspace", originId: "proof", originSeq: 1})!.admittedAuthorSnapshot)
+      .toEqual([{kind: "human", humanId: "owner", humanName: "Owner"}]);
+  } finally {doc.destroy(); f.close();}
+});
+
+it.each(["old-fence", "copied-fence", "changed-admission"])("consumes invalid hosted restore proof: %s", async damage => {
+  const f = admittedRestoreFixture();
+  try {
+    const terminal = f.admitted.admitted.accepted.receipt.journalCursor;
+    const bytes = f.raw.prepare("SELECT validation_checkpoint_bytes FROM sync_relay_live_update_journal WHERE journal_cursor=?").get(terminal)!.validation_checkpoint_bytes as Uint8Array;
+    const publication = restorePublication(f, bytes, terminal, "bad-restore");
+    if (damage !== "changed-admission") {
+      publication.record.binding.restoreFenceGeneration = damage === "old-fence" ? publication.record.binding.restoreFenceGeneration - 1 : publication.record.binding.restoreFenceGeneration + 1;
+      publication.payload.settlementReference.recordDigest = hash(Buffer.from(stableJsonStringify(publication.record)));
+      publication.op.payloadJson = stableJsonStringify(publication.payload);
+    }
+    await prepareHostedSettlements(f.context, {workspaceId: "workspace", originId: "proof", ops: [publication.op]});
+    if (damage === "changed-admission") f.raw.prepare("UPDATE sync_relay_live_restore_lifecycles SET admission_sha256=?").run("a".repeat(64));
+    expect(f.storage.appendLogBatch({workspaceId: "workspace", originId: "proof", ops: [publication.op]}).settlementRefusals).toHaveLength(1);
+    expect(f.raw.prepare("SELECT COUNT(*) AS n FROM sync_relay_live_settlement_bindings").get()!.n).toBe(0);
+  } finally {f.close();}
+});
+afterAll(async () => {await liveValidation.close();});
+
+it.each(["accepted-base", "forged-before", "skipped-cut", "changed-base-admission", "damaged-base-cut"])("restarts hosted chain from authenticated recovered binding base: %s", async variant => {
+  const f = admittedRestoreFixture(), doc = new Y.Doc({gc: false});
+  try {
+    const restoreCursor = f.admitted.admitted.accepted.receipt.journalCursor;
+    const bytes = f.raw.prepare("SELECT validation_checkpoint_bytes FROM sync_relay_live_update_journal WHERE journal_cursor=?").get(restoreCursor)!.validation_checkpoint_bytes as Uint8Array;
+    const base = restorePublication(f, bytes, restoreCursor, "unpublished-recovery-base");
+    f.complete();
+    Y.applyUpdate(doc, bytes); doc.getMap("frontmatter").set("after", "recovered work");
+    const firstCapture = f.journalCapture(Y.encodeStateAsUpdate(doc), "recovered-first");
+    const first = f.storage.commitLiveUpdateJournal({...firstCapture, trustedAccount: {accountId:"owner",name:"Owner"},
+      metadata:{...firstCapture.metadata,authorContext:{kind:"account",accountId:"owner"}}});
+    expect(first.result.kind).toBe("accepted");
+    let previous = restoreCursor, before = base.markdownDigest, terminal = first.admitted!.metadata.accepted.receipt.journalCursor;
+    if (variant === "forged-before") before = "a".repeat(64);
+    if (variant === "skipped-cut") {
+      const skipped = restorePublication(f, Y.encodeStateAsUpdate(doc), terminal, "skipped", restoreCursor, before);
+      previous = terminal; before = skipped.markdownDigest;
+      doc.getMap("frontmatter").set("second", "cannot skip accepted work");
+      const captured = f.journalCapture(Y.encodeStateAsUpdate(doc), "recovered-second");
+      const accepted = f.storage.commitLiveUpdateJournal({...captured, trustedAccount:{accountId:"owner",name:"Owner"},
+        metadata:{...captured.metadata,authorContext:{kind:"account",accountId:"owner"}}});
+      expect(accepted.result.kind).toBe("accepted"); terminal = accepted.admitted!.metadata.accepted.receipt.journalCursor;
+    }
+    const publication = restorePublication(f, Y.encodeStateAsUpdate(doc), terminal, "recovered-publication", previous, before);
+    if (variant === "damaged-base-cut") f.raw.prepare("DELETE FROM sync_relay_live_settlement_cuts WHERE journal_cursor=?").run(restoreCursor);
+    await prepareHostedSettlements(f.context,{workspaceId:"workspace",originId:"proof",ops:[publication.op]});
+    if (variant === "changed-base-admission") f.raw.prepare("UPDATE sync_relay_live_restore_lifecycles SET admission_sha256=?").run("a".repeat(64));
+    const result = f.storage.appendLogBatch({workspaceId:"workspace",originId:"proof",ops:[publication.op]});
+    if (variant === "accepted-base") {
+      expect(result.settlementRefusals).toBeUndefined();
+      expect(f.storage.fetchLogCoordinate({workspaceId:"workspace",originId:"proof",originSeq:0})!.admittedAuthorSnapshot)
+        .toEqual([{kind:"human",humanId:"owner",humanName:"Owner"}]);
+    } else expect(result.settlementRefusals).toHaveLength(1);
+  } finally {doc.destroy();f.close();}
 });

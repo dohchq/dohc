@@ -11,8 +11,8 @@ import { replayThroughShadow } from "./replay.js";
 import { createMigrationPreviewReport } from "./migration-preview-report.js";
 import { acquireWorkerLease } from "./worker-ownership.js";
 import { Worker } from "node:worker_threads";
-import { armBudget, BUDGET_STATE_SLOTS, disarmBudget, watchBudget } from "./budget-watch.js";
-import { CPU_BUDGET_MARKER, databaseBytes } from "./persistent-protocol.js";
+import { armBudget, budgetMarkerName, BUDGET_STATE_SLOTS, CPU_BUDGET_MARKER_PREFIX, disarmBudget, watchBudget } from "./budget-watch.js";
+import { databaseBytes } from "./persistent-protocol.js";
 import type { CpuBudgets, DatasetCursor, OpenRequest, PersistentCommand, PersistentResult, PersistentWorkerMessage } from "./persistent-protocol.js";
 
 let db:DatabaseSync | undefined;
@@ -75,15 +75,18 @@ const [APP_CODE,DATASET_CHECK]=[1n,2n];
 const budgetWatchSource=`
 const {workerData}=require("node:worker_threads");
 const {writeFile}=require("node:fs/promises");
+const {join}=require("node:path");
+const CPU_BUDGET_MARKER_PREFIX=${JSON.stringify(CPU_BUDGET_MARKER_PREFIX)};
+const budgetMarkerName=(${budgetMarkerName.toString()});
 (${watchBudget.toString()})(new BigInt64Array(workerData.state),()=>{const used=process.cpuUsage();return BigInt(used.user+used.system);},
-  reason=>writeFile(workerData.marker,reason),()=>process.kill(process.pid,"SIGKILL"),50,250);`;
+  (kind,budgetMs)=>writeFile(join(workerData.directory,budgetMarkerName(kind,budgetMs)),"",{flag:"wx"}),()=>process.kill(process.pid,"SIGKILL"),50,250);`;
 let budgetWatch:Worker|undefined;
 let exiting=false;
 process.on("exit",()=>{exiting=true;});
 const cpuMicros=()=>{const used=process.cpuUsage();return BigInt(used.user+used.system);};
 function startBudgetWatch():void {
   if(budgetWatch) return;
-  budgetWatch=new Worker(budgetWatchSource,{eval:true,workerData:{state:budgetState.buffer,marker:join(config.directory,CPU_BUDGET_MARKER)}});
+  budgetWatch=new Worker(budgetWatchSource,{eval:true,workerData:{state:budgetState.buffer,directory:config.directory}});
   budgetWatch.unref();
   // Without the watch, app code would run unbounded. End the worker instead.
   const lost=()=>{if(!exiting) process.exit(70);};
@@ -186,8 +189,15 @@ async function handle(command:PersistentCommand):Promise<PersistentResult> {
     if(!Array.isArray(command.input)||!command.input.length||command.input.length>REPLAY_BATCH_EVENTS)reject("invalid_input","Invalid replay batch size.");
     let bytes=0;
     for(const event of command.input)if(!(event.changeset instanceof Uint8Array)||(bytes+=event.changeset.byteLength)>REPLAY_BATCH_BYTES)reject("invalid_input","Invalid replay batch bytes.");
-    // Each event retains the same validation and atomic rows/cursor commit as individual recovery.
-    for(const [index,event] of command.input.entries()){progress(`reapplying saved change ${index+1} of ${command.input.length}`);await handle({kind:"apply",input:event});}
+    if(command.chunkMs!==undefined&&(!Number.isSafeInteger(command.chunkMs)||command.chunkMs<0||command.chunkMs>60_000))reject("invalid_input","Invalid replay chunk duration.");
+    const started=performance.now();
+    // Each event commits its rows and cursor. Return a complete prefix before
+    // costly replay consumes the command cap, so the supervisor can save it.
+    for(const [index,event] of command.input.entries()){
+      progress(`reapplying saved change ${index+1} of ${command.input.length}`);
+      await handle({kind:"apply",input:event});
+      if(command.chunkMs!==undefined&&performance.now()-started>=command.chunkMs)break;
+    }
     // Only the batch's final state is ever served or copied, and a failed batch
     // closes this disposable copy, so one foreign-key check covers every event.
     progress("checking foreign keys after reapplying changes");
@@ -246,7 +256,7 @@ async function handle(command:PersistentCommand):Promise<PersistentResult> {
     } catch (error) {
       rollback();
       if(!constraintConflict || forbidden) throw error;
-      replayThroughShadow(db,{directory:config.directory,tables:config.tables,changeset,databaseBytes:config.limits.databaseBytes},()=>writeMarker(command.input),{progress,datasetCheck});
+      replayThroughShadow(db,{directory:config.directory,tables:config.tables,changeset,databaseBytes:config.limits.databaseBytes,checkForeignKeys:!batching},()=>writeMarker(command.input),{progress,datasetCheck});
       cursor={revision:command.input.revision,digest:command.input.digest};return cursor;
     }
     finally { db.exec("PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON; PRAGMA ignore_check_constraints=OFF"); }

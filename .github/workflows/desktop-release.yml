@@ -17,6 +17,16 @@ on:
         description: Stable version, for example 0.1.0 or v0.1.0
         required: false
         type: string
+      platforms:
+        description: Platforms to build
+        required: true
+        default: windows
+        type: choice
+        options:
+          - windows
+          - linux
+          - windows-linux
+          - all
       dry_run:
         description: Build and test without publishing artifacts
         required: true
@@ -36,8 +46,8 @@ jobs:
   preflight:
     name: Preflight
     if: github.ref == 'refs/heads/main'
-    runs-on: [self-hosted, linux, x64]
-    timeout-minutes: 20
+    runs-on: ${{ fromJSON(inputs.platforms == 'linux' && '["self-hosted","linux","x64"]' || '["self-hosted","windows","x64"]') }}
+    timeout-minutes: 40
     outputs:
       release_channel: ${{ steps.release.outputs.release_channel }}
       version: ${{ steps.release.outputs.version }}
@@ -46,6 +56,7 @@ jobs:
       is_prerelease: ${{ steps.release.outputs.is_prerelease }}
       make_latest: ${{ steps.release.outputs.make_latest }}
       dry_run: ${{ inputs.dry_run }}
+      matrix: ${{ steps.release.outputs.matrix }}
     steps:
       - name: Checkout
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -56,7 +67,7 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: 24.14.0
+          node-version-file: .node-version
 
       - name: Setup pnpm
         run: |
@@ -72,6 +83,7 @@ jobs:
         env:
           DISPATCH_CHANNEL: ${{ inputs.channel }}
           DISPATCH_VERSION: ${{ inputs.version }}
+          DISPATCH_PLATFORMS: ${{ inputs.platforms }}
         run: |
           set -euo pipefail
           version_arg=()
@@ -82,6 +94,7 @@ jobs:
           nightly_date="$(date -u +%Y%m%d)"
           node scripts/resolve-desktop-release.mjs \
             --channel "$DISPATCH_CHANNEL" \
+            --platforms "$DISPATCH_PLATFORMS" \
             "${version_arg[@]}" \
             --date "$nightly_date" \
             --run-number "$GITHUB_RUN_NUMBER" \
@@ -100,11 +113,22 @@ jobs:
       - name: Desktop release smoke
         run: pnpm smoke:release:desktop
 
+      - name: Prepare desktop test runtime
+        run: pnpm --filter @dohc/app-backend-runtime build
+
+      - name: Prepare native test engine
+        run: pnpm qa:prepare -- --engine-only
+
       - name: Desktop typecheck
         run: pnpm --filter @dohc/desktop typecheck
 
       - name: Desktop tests
-        run: pnpm test:desktop
+        env:
+          DOHC_REQUIRE_ENGINE_E2E: "1"
+        run: pnpm --filter @dohc/desktop test:unit --maxWorkers=4
+
+      - name: Desktop script tests
+        run: pnpm --filter @dohc/desktop test:scripts
 
   # The release action reuses an existing release with the same tag, published
   # or draft, and turns it back into a draft while it uploads. A dispatch must
@@ -112,13 +136,39 @@ jobs:
   # because only a token with push access lists draft releases, and preflight
   # runs pnpm install.
   unused-version:
-    name: Refuse a used version
+    name: Check release publication
     needs: preflight
-    runs-on: [self-hosted, linux, x64]
+    runs-on: ${{ fromJSON(inputs.platforms == 'linux' && '["self-hosted","linux","x64"]' || '["self-hosted","windows","x64"]') }}
     timeout-minutes: 5
     permissions:
       contents: write
     steps:
+      - name: Checkout release scripts
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+
+      - name: Setup Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version-file: .node-version
+
+      - name: Keep published update platforms
+        if: needs.preflight.outputs.dry_run != 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_CHANNEL: ${{ needs.preflight.outputs.release_channel }}
+          RELEASE_PLATFORMS: ${{ inputs.platforms }}
+        run: |
+          set -euo pipefail
+          gh api --paginate "repos/${GITHUB_REPOSITORY}/releases?per_page=100" \
+            --jq '.[] | {draft, assets: [.assets[] | {name}]}' > release-history.jsonl
+          node scripts/check-desktop-release-platforms.mjs \
+            --channel "$RELEASE_CHANNEL" \
+            --platforms "$RELEASE_PLATFORMS" \
+            --releases release-history.jsonl
+
       - name: Refuse a version that has a tag or release
         shell: bash
         env:
@@ -157,36 +207,10 @@ jobs:
     timeout-minutes: 40
     strategy:
       fail-fast: false
+      # Windows and WSL share the same PC for this selection.
+      max-parallel: ${{ inputs.platforms == 'windows-linux' && 1 || 4 }}
       matrix:
-        include:
-          - label: macOS x64
-            os: macOS
-            artifact_platform: mac
-            runner: [self-hosted, macos, arm64]
-            arch: x64
-            target: x86_64-apple-darwin
-            require_signing: "1"
-          - label: macOS arm64
-            os: macOS
-            artifact_platform: mac
-            runner: [self-hosted, macos, arm64]
-            arch: arm64
-            target: aarch64-apple-darwin
-            require_signing: "1"
-          - label: Windows x64
-            os: Windows
-            artifact_platform: win
-            runner: [self-hosted, windows, x64]
-            arch: x64
-            target: x86_64-pc-windows-msvc
-            require_signing: "1"
-          - label: Linux x64
-            os: Linux
-            artifact_platform: linux
-            runner: [self-hosted, linux, x64]
-            arch: x64
-            target: x86_64-unknown-linux-gnu
-            require_signing: "0"
+        include: ${{ fromJSON(needs.preflight.outputs.matrix) }}
     steps:
       - name: Checkout
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -196,7 +220,7 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: 24.14.0
+          node-version-file: .node-version
 
       - name: Setup pnpm
         shell: bash
@@ -212,14 +236,36 @@ jobs:
           DESKTOP_VERSION: ${{ needs.preflight.outputs.version }}
         run: node scripts/update-desktop-package-version.mjs
 
+      # The PostHog project is a repository variable, not a secret: the key
+      # ships inside the app. A dry run builds an app that sends nothing.
       - name: Build desktop
+        env:
+          DOHC_POSTHOG_KEY: ${{ needs.preflight.outputs.dry_run != 'true' && vars.DOHC_POSTHOG_KEY || '' }}
+          DOHC_POSTHOG_HOST: ${{ needs.preflight.outputs.dry_run != 'true' && vars.DOHC_POSTHOG_HOST || '' }}
+          DOHC_DESKTOP_DIST: ${{ matrix.artifact_platform }}-${{ matrix.arch }}
         run: pnpm build:desktop
+
+      # Error reports name frames in the minified files. This step writes a
+      # chunk ID into each file and uploads its source map, which the
+      # installer leaves out, so PostHog can show the original lines. The
+      # package ships the files with those IDs. A build with a PostHog key
+      # fails here if the upload cannot run.
+      - name: Upload source maps
+        if: needs.preflight.outputs.dry_run != 'true'
+        env:
+          DOHC_POSTHOG_KEY: ${{ needs.preflight.outputs.dry_run != 'true' && vars.DOHC_POSTHOG_KEY || '' }}
+          DOHC_DESKTOP_DIST: ${{ matrix.artifact_platform }}-${{ matrix.arch }}
+          DESKTOP_VERSION: ${{ needs.preflight.outputs.version }}
+          POSTHOG_CLI_API_KEY: ${{ needs.preflight.outputs.dry_run != 'true' && secrets.POSTHOG_CLI_API_KEY || '' }}
+          POSTHOG_CLI_PROJECT_ID: ${{ vars.POSTHOG_CLI_PROJECT_ID }}
+          POSTHOG_CLI_HOST: ${{ vars.POSTHOG_CLI_HOST }}
+        run: node scripts/upload-desktop-source-maps.mjs
 
       - name: Build workspace engine
         shell: bash
         run: |
           rustup target add "${{ matrix.target }}"
-          pnpm --filter @dohc/desktop run build:engine -- --target "${{ matrix.target }}"
+          pnpm --filter @dohc/desktop run build:engine --target "${{ matrix.target }}"
 
       - id: signing
         name: Resolve signing mode
@@ -302,6 +348,16 @@ jobs:
           DOHC_E2E_NO_CHROMIUM_SANDBOX: "1"
         run: xvfb-run -a pnpm smoke:fuses:desktop
 
+      - name: Windows packaged smoke
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          node tools/perf-profiling/packaged-benchmark.mjs `
+            --binary apps/desktop/release/win-unpacked/dohc.exe `
+            --package-commit '${{ github.sha }}' `
+            --output .agent-artifacts/release-package-smoke `
+            --label candidate --runs 1 --idle-seconds 1 --keystrokes 5 --switches 1
+
       - name: Upload packaged artifacts
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
@@ -317,7 +373,7 @@ jobs:
       - preflight
       - build
     if: ${{ needs.preflight.outputs.dry_run != 'true' }}
-    runs-on: [self-hosted, linux, x64]
+    runs-on: ${{ fromJSON(inputs.platforms == 'linux' && '["self-hosted","linux","x64"]' || '["self-hosted","windows","x64"]') }}
     timeout-minutes: 20
     permissions:
       # Required for creating GitHub releases via softprops/action-gh-release.
@@ -420,6 +476,7 @@ jobs:
           target_commitish: ${{ github.sha }}
           name: ${{ needs.preflight.outputs.release_name }}
           draft: true
+          generate_release_notes: true
           prerelease: ${{ needs.preflight.outputs.is_prerelease == 'true' }}
           make_latest: ${{ needs.preflight.outputs.make_latest == 'true' }}
           files: release-upload/**

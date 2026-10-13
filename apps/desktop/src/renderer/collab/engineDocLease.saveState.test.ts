@@ -4,10 +4,11 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import * as Y from "yjs";
 import { insertElementRevision, putSceneAsset } from "@dohc/excalidraw-scene";
 import { resetOrphanedDrafts, useOrphanedDrafts } from "../orphanedDrafts";
-import { ORPHANED_DRAFT_STORAGE_KEY } from "../orphanedDraftStorage";
+import { ORPHANED_DRAFT_STORAGE_KEY, loadStoredDrafts } from "../orphanedDraftStorage";
 import { disposeEngineDocLeasesForTests } from "./engineDocLease";
 import { retainObservedEngineDocLease } from "./engineDocLeaseTestHarness";
 import { harnessBridge, IMAGE_DESCRIPTOR } from "./engineDocSaveStateTestHarness";
+import { EngineYDocDeliveryRefusedError } from "./engineYDocProvider";
 import { parseExcalidrawDocument } from "../excalidrawDocument";
 
 const projectionGate = vi.hoisted(() => ({
@@ -140,18 +141,18 @@ it("never flips back to Saved on a timer — only a real settle report clears it
   act(() => {
     editDocument();
   });
-  expect(retained.snapshot.saveState).toBe("saving");
+  expect(retained.snapshot.saveState.kind).toBe("saving");
 
   // The old indicator flipped to "saved" 1s after the last edit regardless of
   // the engine. Run far past that: with no settle report, nothing may claim it.
   await act(async () => {
     await vi.advanceTimersByTimeAsync(10_000);
   });
-  expect(retained.snapshot.saveState).toBe("saving");
+  expect(retained.snapshot.saveState.kind).toBe("saving");
 
   // Only main's real report clears it.
   harness.emit("saved", harness.applied.at(-1)!.seq);
-  expect(retained.snapshot.saveState).toBe("saved");
+  expect(retained.snapshot.saveState.kind).toBe("saved-here");
 });
 
 it("observes unsaved edits on a replacement document", async () => {
@@ -164,7 +165,7 @@ it("observes unsaved edits on a replacement document", async () => {
   });
   await flushLocalBatch();
 
-  expect(retained.snapshot.saveState).toBe("saving");
+  expect(retained.snapshot.saveState.kind).toBe("saving");
   expect(harness.applied).toHaveLength(1);
 });
 
@@ -269,7 +270,7 @@ it("keeps deletion recovery separate from refused winner edits", async () => {
 
   harness.emitLineageReplacement("winner");
   await waitFor(() => expect(harness.acknowledgedGenerations).toEqual([2]));
-  expect(retained.snapshot.saveState).toBe("deleted");
+  expect(retained.snapshot.deletion?.cause).toBe("deleted");
 
   act(() => {
     editDocument();
@@ -279,7 +280,7 @@ it("keeps deletion recovery separate from refused winner edits", async () => {
   expect(drafts.result.current.length).toBe(2);
   expect(drafts.result.current.map((draft) => draft.text).join("|")).toContain("seed!");
   expect(drafts.result.current.map((draft) => draft.text).join("|")).toContain("winner!");
-  expect(retained.snapshot.saveState).toBe("deleted");
+  expect(retained.snapshot.deletion?.cause).toBe("deleted");
 
   cleanup();
   retained.release();
@@ -339,7 +340,7 @@ it.each([
 
     expect(retained.boundDoc().getText("plainText").toString()).toBe("winner!");
     expect(harness.applied).toHaveLength(1);
-    expect(retained.snapshot.saveState).toBe("saving");
+    expect(retained.snapshot.saveState.kind).toBe("saving");
     // The typing the replacement retired stays recoverable in this window
     // either way. Only a tracked path may reach plaintext storage.
     expect(drafts.result.current.map((draft) => draft.text)).toEqual(["seed!"]);
@@ -359,13 +360,13 @@ it("shows the failure when a settle fails, instead of reading Saved", async () =
   });
   await flushLocalBatch();
   harness.emit("error", harness.applied.at(-1)!.seq);
-  expect(retained.snapshot.saveState).toBe("error");
+  expect(retained.snapshot.saveState.kind).toBe("error");
 
   // It stays honest: no timer, no later edit-less event, walks it back.
   await act(async () => {
     await vi.advanceTimersByTimeAsync(10_000);
   });
-  expect(retained.snapshot.saveState).toBe("error");
+  expect(retained.snapshot.saveState.kind).toBe("error");
 });
 
 it("does not report Saved while an earlier delivery is still unanswered", async () => {
@@ -387,7 +388,7 @@ it("does not report Saved while an earlier delivery is still unanswered", async 
     // Main echoes a settle covering the newest seq while the first delivery has
     // not answered. It must not vouch for the whole mirror yet.
     harness.emit("saved", 2);
-    expect(retained.snapshot.saveState).toBe("saving");
+    expect(retained.snapshot.saveState.kind).toBe("saving");
 
     rejectFirst();
     await act(async () => {
@@ -398,7 +399,7 @@ it("does not report Saved while an earlier delivery is still unanswered", async 
     // Every outstanding delivery is acknowledged; the deferred settle now
     // reports the mirror durable without another event.
     await waitFor(() =>
-      expect(retained.snapshot.saveState).toBe("saved"),
+      expect(retained.snapshot.saveState.kind).toBe("saved-here"),
     );
   } finally {
     rejectFirst();
@@ -414,7 +415,7 @@ it("stays Saving until a retried delivery converges", async () => {
   });
   await flushLocalBatch();
   expect(harness.applyAttempts).toHaveLength(1);
-  expect(retained.snapshot.saveState).toBe("saving");
+  expect(retained.snapshot.saveState.kind).toBe("saving");
 
   await act(async () => {
     await vi.advanceTimersByTimeAsync(250);
@@ -428,7 +429,7 @@ it("stays Saving until a retried delivery converges", async () => {
 
   harness.emit("saved", harness.applied.at(-1)!.seq);
   await waitFor(() =>
-    expect(retained.snapshot.saveState).toBe("saved"),
+    expect(retained.snapshot.saveState.kind).toBe("saved-here"),
   );
 });
 
@@ -442,7 +443,7 @@ it("refuses transport writes synchronously after main reports deletion", async (
   const appliedAtDelete = harness.applied.length;
   harness.emit("deleted", harness.applied.at(-1)!.seq);
 
-  expect(retained.snapshot.saveState).toBe("deleted");
+  expect(retained.snapshot.deletion?.cause).toBe("deleted");
   expect(retained.snapshot.deletion?.token).toBe(boundOutcome().token);
 
   // A Y.Doc update can fire before the read-only React render commits. The
@@ -451,10 +452,10 @@ it("refuses transport writes synchronously after main reports deletion", async (
     editDocument();
   });
   expect(harness.applied).toHaveLength(appliedAtDelete);
-  expect(retained.snapshot.saveState).toBe("deleted");
+  expect(retained.snapshot.deletion?.cause).toBe("deleted");
 
   harness.emit("error", harness.applied.at(-1)!.seq);
-  expect(retained.snapshot.saveState).toBe("deleted");
+  expect(retained.snapshot.deletion?.cause).toBe("deleted");
 });
 
 it("keeps one recovery draft when deletion lands during a lineage replacement handoff", async () => {
@@ -473,7 +474,7 @@ it("keeps one recovery draft when deletion lands during a lineage replacement ha
   });
 
   await waitFor(() =>
-    expect(retained.snapshot.saveState).toBe("deleted"),
+    expect(retained.snapshot.deletion?.cause).toBe("deleted"),
   );
   expect(drafts.result.current.length).toBe(1);
   expect(drafts.result.current.at(-1)?.text).toContain("seed!");
@@ -489,12 +490,12 @@ it("sets the text aside when another file takes the document's path", async () =
 
   harness.emitNow("object-changed", 0);
 
-  await waitFor(() => expect(retained.snapshot.saveState).toBe("object-changed"));
+  await waitFor(() => expect(retained.snapshot.deletion?.cause).toBe("object-changed"));
   expect(retained.snapshot.deletion).toMatchObject({ cause: "object-changed" });
   await waitFor(() => expect(drafts.result.current.at(-1)?.text).toBe("seed!"));
   // Nothing may repaint the terminal state.
   harness.emitNow("saved", 1);
-  expect(retained.snapshot.saveState).toBe("object-changed");
+  expect(retained.snapshot.deletion?.cause).toBe("object-changed");
 });
 
 it("freezes the deleted doc's bytes at the event, immune to a remote edit that lands before serialization resolves", async () => {
@@ -552,7 +553,7 @@ it("observes deletion while the open answer is still in flight", async () => {
   retainDocument();
 
   await waitFor(() => expect(retained.snapshot.outcome?.kind).toBe("bound"));
-  expect(retained.snapshot.saveState).toBe("deleted");
+  expect(retained.snapshot.deletion?.cause).toBe("deleted");
   expect(retained.snapshot.deletion?.token).toBe(boundOutcome().token);
 });
 
@@ -567,16 +568,16 @@ it("passes a file-locked report through, and a real settle clears it", async () 
   });
   await flushLocalBatch();
   harness.emit("file-locked", harness.applied.at(-1)!.seq);
-  expect(retained.snapshot.saveState).toBe("file-locked");
+  expect(retained.snapshot.saveState.kind).toBe("file-locked");
 
   await act(async () => {
     await vi.advanceTimersByTimeAsync(10_000);
   });
-  expect(retained.snapshot.saveState).toBe("file-locked");
+  expect(retained.snapshot.saveState.kind).toBe("file-locked");
 
   // The engine's retry lands: the same real report clears it to Saved.
   harness.emit("saved", harness.applied.at(-1)!.seq);
-  expect(retained.snapshot.saveState).toBe("saved");
+  expect(retained.snapshot.saveState.kind).toBe("saved-here");
 });
 
 it("does not claim File in use for a lock refusal that predates the newest keystroke", async () => {
@@ -601,14 +602,14 @@ it("does not claim File in use for a lock refusal that predates the newest keyst
   // already guards it, so the document stays saving instead of claiming the
   // edit is safely parked under a lock.
   harness.emit("file-locked", firstSeq);
-  expect(retained.snapshot.saveState).toBe("saving");
+  expect(retained.snapshot.saveState.kind).toBe("saving");
 
   // A refusal that does cover the newest edit names the blocker.
   await flushLocalBatch();
   const secondSeq = harness.applied.at(-1)!.seq;
   expect(secondSeq).toBeGreaterThan(firstSeq);
   harness.emit("file-locked", secondSeq);
-  expect(retained.snapshot.saveState).toBe("file-locked");
+  expect(retained.snapshot.saveState.kind).toBe("file-locked");
 });
 
 it("does not claim Saved for a settle that predates the newest keystroke", async () => {
@@ -627,7 +628,7 @@ it("does not claim Saved for a settle that predates the newest keystroke", async
   // never carried that staged, not-yet-sent edit, so the indicator must keep
   // saying "saving".
   harness.emit("saved", firstSeq);
-  expect(retained.snapshot.saveState).toBe("saving");
+  expect(retained.snapshot.saveState.kind).toBe("saving");
 
   // The follow-up settle covers it.
   await flushLocalBatch();
@@ -635,7 +636,7 @@ it("does not claim Saved for a settle that predates the newest keystroke", async
   expect(secondSeq).toBeGreaterThan(firstSeq);
   harness.emit("saved", secondSeq);
   await waitFor(() =>
-    expect(retained.snapshot.saveState).toBe("saved"),
+    expect(retained.snapshot.saveState.kind).toBe("saved-here"),
   );
 });
 
@@ -647,14 +648,14 @@ it("stays Saving while a rejected transport head retries ahead of later edits", 
   await flushLocalBatch();
   expect(harness.applyAttempts.map(({ seq }) => seq)).toEqual([1]);
   expect(harness.applied).toEqual([]);
-  expect(retained.snapshot.saveState).toBe("saving");
+  expect(retained.snapshot.saveState.kind).toBe("saving");
 
   // A later edit advances the same Yjs client clock. Its batch may become
   // ready, but it cannot pass the rejected head in the provider's send chain.
   act(() => editDocument());
   await flushLocalBatch();
   expect(harness.applyAttempts.map(({ seq }) => seq)).toEqual([1]);
-  expect(retained.snapshot.saveState).toBe("saving");
+  expect(retained.snapshot.saveState.kind).toBe("saving");
 
   await act(async () => {
     await vi.advanceTimersByTimeAsync(218);
@@ -665,9 +666,9 @@ it("stays Saving while a rejected transport head retries ahead of later edits", 
   // Even after transport recovery, the first batch's settle cannot vouch for
   // the later edit. Only the acknowledgement covering sequence 2 may clear it.
   harness.emit("saved", 1);
-  expect(retained.snapshot.saveState).toBe("saving");
+  expect(retained.snapshot.saveState.kind).toBe("saving");
   harness.emit("saved", 2);
-  expect(retained.snapshot.saveState).toBe("saved");
+  expect(retained.snapshot.saveState.kind).toBe("saved-here");
 });
 
 it("ignores a save-state report addressed to a different session", async () => {
@@ -682,10 +683,168 @@ it("ignores a save-state report addressed to a different session", async () => {
   // Another document's settle must never repaint this one (the renderer
   // async-state invariant): right seq, wrong session id.
   harness.emit("saved", seq, "eyd-someone-else");
-  expect(retained.snapshot.saveState).toBe("saving");
+  expect(retained.snapshot.saveState.kind).toBe("saving");
 
   harness.emit("saved", seq);
   await waitFor(() =>
-    expect(retained.snapshot.saveState).toBe("saved"),
+    expect(retained.snapshot.saveState.kind).toBe("saved-here"),
   );
+});
+
+
+it("publishes no additional save snapshots during repeated dirty keystrokes", async () => {
+  await retainBound();
+  const notified = vi.fn();
+  const unsubscribe = retained.lease.subscribe(notified);
+  act(() => editDocument());
+  expect(notified).toHaveBeenCalledTimes(1);
+  notified.mockClear();
+  act(() => { for (let i = 0; i < 30; i++) editDocument(); });
+  expect(notified).not.toHaveBeenCalled();
+  await flushLocalBatch();
+  harness.emit("saved", harness.applied.at(-1)!.seq);
+  expect(notified).toHaveBeenCalledTimes(1);
+  notified.mockClear();
+  harness.emit("saved", harness.applied.at(-1)!.seq);
+  expect(notified).not.toHaveBeenCalled();
+  unsubscribe();
+});
+
+it("keeps generic reasons out of saveError and gives refusal text precedence over capacity", async () => {
+  const subscribe = vi.spyOn(harness.api, "onEngineYDocSaveState");
+  await retainBound();
+  const listener = subscribe.mock.calls[0]![0];
+  const sessionId = harness.sessionId()!;
+  act(() => listener({ sessionId, workspaceId: "ws-1", path: "notes/a.md", state: { kind: "error", reason: "generic reason", issueId: null }, seq: 0 }));
+  expect(retained.snapshot.saveError).toBeNull();
+  act(() => listener({ sessionId, workspaceId: "ws-1", path: "notes/a.md", state: { kind: "changed-on-disk", reason: "The file changed on disk.", issueId: null }, seq: 0 }));
+  expect(retained.snapshot.saveError).toBeNull();
+  act(() => listener({ sessionId, workspaceId: "ws-1", path: "notes/a.md", state: { kind: "error", reason: "generic reason", issueId: "refusal" }, seq: 0,
+    authorCapacity: true, editRefusal: { workspaceId: "ws-1", path: "notes/big.md", requestId: "refusal", message: "refusal message" } }));
+  expect(retained.snapshot.saveError).toBe("refusal message");
+});
+
+it("keeps main's checked save state across a delayed replacement acknowledgement", async () => {
+  await retainBound();
+  harness.emitLineageReplacement("winner");
+  harness.emit("saved", 0);
+  await waitFor(() => expect(harness.acknowledgedGenerations).toEqual([2]));
+  await waitFor(() => expect(retained.snapshot.saveState.kind).toBe("saved-here"));
+});
+
+it("ends clean share access as read-only without a recovery draft", async () => {
+  await retainBound();
+  harness.emit("saved-to-host", 0);
+  harness.emit("read-only", 0);
+
+  expect(retained.snapshot.readOnlyTransition?.token).toBe(boundOutcome().token);
+  expect(drafts.result.current).toHaveLength(0);
+  await waitFor(() => expect(harness.closed).toHaveLength(1));
+  harness.emit("saved-to-host", 0);
+  expect(retained.snapshot.readOnlyTransition?.token).toBe(boundOutcome().token);
+  expect(drafts.result.current).toHaveLength(0);
+});
+
+it("ends clean share access after acknowledged edits without a recovery draft", async () => {
+  await retainBound();
+  act(() => editDocument());
+  await boundOutcome().flushPendingLocalUpdates();
+  harness.emit("saved-to-host", harness.applied.at(-1)!.seq);
+  harness.emit("read-only", 0);
+
+  expect(retained.snapshot.readOnlyTransition?.token).toBe(boundOutcome().token);
+  await waitFor(() => expect(harness.closed).toHaveLength(1));
+  expect(drafts.result.current).toHaveLength(0);
+});
+
+it("keeps unsent edits in recovery when share access ends", async () => {
+  await retainBound();
+  act(() => editDocument());
+  harness.emit("read-only", 0);
+
+  expect(retained.snapshot.readOnlyTransition?.token).toBe(boundOutcome().token);
+  await waitFor(() => expect(drafts.result.current.at(-1)?.text).toBe("seed!"));
+  expect(harness.mainText()).toBe("seed");
+  expect(drafts.result.current).toHaveLength(1);
+});
+
+it("keeps explicitly rejected edits in recovery when share access ends", async () => {
+  vi.spyOn(harness.api, "applyEngineYDocUpdate").mockImplementationOnce(async () => {
+    throw new EngineYDocDeliveryRefusedError("read-only");
+  });
+  await retainBound();
+  act(() => editDocument());
+  await boundOutcome().flushPendingLocalUpdates();
+
+  expect(retained.snapshot.readOnlyTransition?.token).toBe(boundOutcome().token);
+  await waitFor(() => expect(drafts.result.current.at(-1)?.text).toBe("seed!"));
+  expect(harness.mainText()).toBe("seed");
+  expect(drafts.result.current).toHaveLength(1);
+});
+
+
+it("keeps delivered edits awaiting host confirmation in recovery when share access ends", async () => {
+  await retainBound();
+  act(() => editDocument());
+  await boundOutcome().flushPendingLocalUpdates();
+  harness.emit("pending-share", harness.applied.at(-1)!.seq);
+  harness.emit("read-only", 0);
+
+  await waitFor(() => expect(drafts.result.current.at(-1)?.text).toBe("seed!"));
+  expect(drafts.result.current).toHaveLength(1);
+});
+
+it("keeps a refused apply report in recovery even after delivery drains", async () => {
+  await retainBound();
+  act(() => editDocument());
+  await boundOutcome().flushPendingLocalUpdates();
+  harness.emit("saved-to-host", harness.applied.at(-1)!.seq);
+  harness.emit("read-only", harness.applied.at(-1)!.seq);
+
+  await waitFor(() => expect(drafts.result.current.at(-1)?.text).toBe("seed!"));
+  expect(drafts.result.current).toHaveLength(1);
+});
+
+it("keeps edits made before the clean read-only render commits", async () => {
+  await retainBound();
+  harness.emit("saved-to-host", 0);
+  harness.emit("read-only", 0);
+  let releaseProjection!: () => void;
+  projectionGate.pending = new Promise<void>((resolve) => { releaseProjection = resolve; });
+  try {
+    act(() => editDocument());
+    expect(loadStoredDrafts(Date.now()).at(-1)?.text).toBe("seed!");
+    expect(projectionGate.completed).toBe(0);
+  } finally {
+    releaseProjection();
+    projectionGate.pending = null;
+  }
+
+  await waitFor(() => expect(drafts.result.current.at(-1)?.text).toBe("seed!"));
+  expect(harness.mainText()).toBe("seed");
+  expect(drafts.result.current).toHaveLength(1);
+});
+
+
+it("ends clean share access after remote updates without a recovery draft", async () => {
+  const remote = vi.spyOn(harness.api, "onEngineYDocRemoteUpdate");
+  await retainBound();
+  act(() => editDocument());
+  await boundOutcome().flushPendingLocalUpdates();
+  harness.emit("saved-to-host", harness.applied.at(-1)!.seq);
+  act(() => {
+    const before = Y.encodeStateVector(harness.sourceDoc);
+    harness.sourceDoc.getText("plainText").insert(5, "+remote");
+    const event = {
+      sessionId: harness.sessionId()!,
+      update: Y.encodeStateAsUpdate(harness.sourceDoc, before),
+      lineageGeneration: 1,
+    };
+    remote.mock.calls[0]![0](event);
+  });
+  expect(retained.boundDoc().getText("plainText").toString()).toBe("seed!+remote");
+  harness.emit("read-only", 0);
+
+  await waitFor(() => expect(harness.closed).toHaveLength(1));
+  expect(drafts.result.current).toHaveLength(0);
 });

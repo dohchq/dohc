@@ -219,8 +219,7 @@ impl Stream {
 
 struct Upload {
     request: Request,
-    metadata: Metadata,
-    registration: Option<Arc<Registration>>,
+    admission: Result<AdmittedUpload, WireError>,
     update: Stream,
     ranges: Option<Stream>,
     bytes: Vec<u8>,
@@ -229,7 +228,17 @@ struct Upload {
     range_count: usize,
     metadata_bytes: Vec<u8>,
     deadline: Instant,
+}
+
+struct AdmittedUpload {
+    metadata: Metadata,
+    registration: Option<Arc<Registration>>,
     permit: Arc<Reservation>,
+}
+
+pub enum UploadCompletion {
+    Admitted(Request, LiveApplicationInput),
+    Refused(u64, WireError),
 }
 
 struct Reservation {
@@ -420,11 +429,10 @@ impl LiveApplicationIngress {
         if self.uploads.contains_key(&request.id) || self.restores.contains_key(&request.id) {
             return Err(invalid("duplicate-live-request"));
         }
-        let upload_slot = self
-            .upload_slots
-            .clone()
-            .try_acquire_owned()
-            .map_err(|_| overloaded())?;
+        // Headers remain bounded even when the body admission budget is exhausted.
+        if self.uploads.len() + self.restores.len() >= self.config.max_uploads {
+            return Err(overloaded());
+        }
         let (metadata, registration_id, update, ranges, range_count) = if request
             .method
             .starts_with("ydoc.ownerDelivery.")
@@ -572,22 +580,39 @@ impl LiveApplicationIngress {
         }
         .and_then(|bytes| u32::try_from(bytes).ok())
         .ok_or_else(overloaded)?;
-        let permit = Arc::new(Reservation {
-            _upload: upload_slot,
-            _bytes: self
-                .budget
-                .clone()
-                .try_acquire_many_owned(reserved)
-                .map_err(|_| overloaded())?,
-        });
         let mut bytes = Vec::new();
-        bytes
-            .try_reserve_exact(update.expected)
-            .map_err(|_| overloaded())?;
         let mut first_seen = Vec::new();
-        first_seen
-            .try_reserve_exact(range_count)
-            .map_err(|_| overloaded())?;
+        let admission = (|| {
+            let permit = Arc::new(Reservation {
+                _upload: self
+                    .upload_slots
+                    .clone()
+                    .try_acquire_owned()
+                    .map_err(|_| overloaded())?,
+                _bytes: self
+                    .budget
+                    .clone()
+                    .try_acquire_many_owned(reserved)
+                    .map_err(|_| overloaded())?,
+            });
+            bytes
+                .try_reserve_exact(update.expected)
+                .map_err(|_| overloaded())?;
+            first_seen
+                .try_reserve_exact(range_count)
+                .map_err(|_| overloaded())?;
+            Ok(AdmittedUpload {
+                metadata,
+                registration,
+                permit,
+            })
+        })();
+        if admission.is_err() {
+            // Discard refused input after validating its framing, length and digest.
+            // Send its single terminal error only after every declared stream finishes.
+            bytes = Vec::new();
+            first_seen = Vec::new();
+        }
         let duration = request
             .deadline_ms
             .map(|ms| Duration::from_millis(u64::from(ms)))
@@ -605,8 +630,7 @@ impl LiveApplicationIngress {
             request.id,
             Upload {
                 request,
-                metadata,
-                registration,
+                admission,
                 update,
                 ranges,
                 bytes,
@@ -615,7 +639,6 @@ impl LiveApplicationIngress {
                 range_count,
                 metadata_bytes: Vec::new(),
                 deadline,
-                permit,
             },
         );
         Ok(())
@@ -649,7 +672,7 @@ impl LiveApplicationIngress {
         stream_id: u64,
         fin: bool,
         bytes: &[u8],
-    ) -> Result<Option<(Request, LiveApplicationInput)>, WireError> {
+    ) -> Result<Option<UploadCompletion>, WireError> {
         if self
             .restores
             .values()
@@ -675,40 +698,44 @@ impl LiveApplicationIngress {
         }
         if stream_id == upload.update.id {
             upload.update.chunk(bytes, fin)?;
-            upload.bytes.extend_from_slice(bytes);
+            if upload.admission.is_ok() {
+                upload.bytes.extend_from_slice(bytes);
+            }
         } else {
             upload
                 .ranges
                 .as_mut()
                 .ok_or_else(|| invalid("unknown-live-stream"))?
                 .chunk(bytes, fin)?;
-            for byte in bytes {
-                if upload.first_seen.len() == upload.range_count {
-                    upload.metadata_bytes.push(*byte);
-                    continue;
-                }
-                upload.range_tail.push(*byte);
-                if upload.range_tail.len() == RANGE_BYTES {
-                    let raw = &upload.range_tail;
-                    let client = u64::from_le_bytes(raw[0..8].try_into().expect("eight bytes"));
-                    let start = u32::from_le_bytes(raw[8..12].try_into().expect("four bytes"));
-                    let end = u32::from_le_bytes(raw[12..16].try_into().expect("four bytes"));
-                    if client > MAX_WIRE_INTEGER
-                        || start >= end
-                        || upload.first_seen.last().is_some_and(|previous| {
-                            previous.client_id > client as i64
-                                || (previous.client_id == client as i64
-                                    && previous.end_clock >= i64::from(start))
-                        })
-                    {
-                        return Err(invalid("invalid-live-range"));
+            if upload.admission.is_ok() {
+                for byte in bytes {
+                    if upload.first_seen.len() == upload.range_count {
+                        upload.metadata_bytes.push(*byte);
+                        continue;
                     }
-                    upload.first_seen.push(LiveUpdateStructRange {
-                        client_id: client as i64,
-                        start_clock: i64::from(start),
-                        end_clock: i64::from(end),
-                    });
-                    upload.range_tail.clear();
+                    upload.range_tail.push(*byte);
+                    if upload.range_tail.len() == RANGE_BYTES {
+                        let raw = &upload.range_tail;
+                        let client = u64::from_le_bytes(raw[0..8].try_into().expect("eight bytes"));
+                        let start = u32::from_le_bytes(raw[8..12].try_into().expect("four bytes"));
+                        let end = u32::from_le_bytes(raw[12..16].try_into().expect("four bytes"));
+                        if client > MAX_WIRE_INTEGER
+                            || start >= end
+                            || upload.first_seen.last().is_some_and(|previous| {
+                                previous.client_id > client as i64
+                                    || (previous.client_id == client as i64
+                                        && previous.end_clock >= i64::from(start))
+                            })
+                        {
+                            return Err(invalid("invalid-live-range"));
+                        }
+                        upload.first_seen.push(LiveUpdateStructRange {
+                            client_id: client as i64,
+                            start_clock: i64::from(start),
+                            end_clock: i64::from(end),
+                        });
+                        upload.range_tail.clear();
+                    }
                 }
             }
         }
@@ -727,17 +754,21 @@ impl LiveApplicationIngress {
             .saturating_duration_since(Instant::now())
             .as_millis();
         upload.request.deadline_ms = Some(u32::try_from(remaining).unwrap_or(u32::MAX));
-        if let Metadata::Owner(params) = upload.metadata {
-            return Ok(Some((
+        let admitted = match upload.admission {
+            Ok(admitted) => admitted,
+            Err(error) => return Ok(Some(UploadCompletion::Refused(upload.request.id, error))),
+        };
+        if let Metadata::Owner(params) = admitted.metadata {
+            return Ok(Some(UploadCompletion::Admitted(
                 upload.request,
                 LiveApplicationInput::Owner(Box::new(crate::rpc::owner_delivery::OwnerInput {
                     params,
                     bytes: upload.bytes,
-                    reservation: upload.permit,
+                    reservation: admitted.permit,
                 })),
             )));
         }
-        let operation = match upload.metadata {
+        let operation = match admitted.metadata {
             Metadata::Owner(_) => unreachable!("owner dispatched above"),
             Metadata::Sync(policy) => LiveApplicationOperation::SyncOpen(upload.bytes, policy),
             Metadata::Apply(accepted) => {
@@ -796,14 +827,14 @@ impl LiveApplicationIngress {
             .saturating_duration_since(Instant::now())
             .as_millis();
         upload.request.deadline_ms = Some(u32::try_from(remaining).unwrap_or(u32::MAX));
-        Ok(Some((
+        Ok(Some(UploadCompletion::Admitted(
             upload.request,
             LiveApplicationInput::Admitted(Box::new(AdmittedApplicationInput {
-                registration: upload
+                registration: admitted
                     .registration
                     .expect("canonical host upload registration"),
                 operation,
-                reservation: upload.permit,
+                reservation: admitted.permit,
                 working_reserve_bytes: self.config.application_working_reserve_bytes,
             })),
         )))
@@ -886,6 +917,51 @@ pub(crate) mod tests {
             .reservation_bytes()
             .is_none()
         );
+    }
+
+    #[tokio::test]
+    async fn refused_upload_drains_before_reporting_capacity_and_preserves_admission() {
+        let (_scratch, service, owner, workspace, registration, binding) = fixture().await;
+        let mut ingress = LiveApplicationIngress::new(service, config()).unwrap();
+        let admission = ingress.settlement_admission(4).unwrap();
+        let first = admission.reserve().unwrap();
+        let second = admission.reserve().unwrap();
+        let bytes = Ydoc::wire().plaintext_insert(0, "hello");
+        ingress
+            .begin(
+                request(&workspace, registration, &binding, &bytes, &[]),
+                &owner.handle(),
+            )
+            .unwrap();
+        for (stream_id, data) in [(1, bytes.as_slice()), (2, &[][..])] {
+            ingress
+                .start(BlobStart {
+                    request_id: 3,
+                    stream_id,
+                    total_bytes: Some(data.len() as u64),
+                    sha256: Some(hex_sha256(data)),
+                })
+                .unwrap();
+            let result = ingress.chunk(stream_id, true, data).unwrap();
+            if stream_id == 1 {
+                assert!(result.is_none());
+            } else {
+                let UploadCompletion::Refused(id, error) = result.unwrap() else {
+                    panic!("unexpected admission")
+                };
+                assert_eq!(id, 3);
+                assert_eq!(error.code, ErrorCode::Overloaded);
+            }
+        }
+        assert_eq!(ingress.upload_slots.available_permits(), 0);
+        assert!(ingress.uploads.is_empty());
+        drop((first, second));
+        let mut next = request(&workspace, registration, &binding, &bytes, &[]);
+        next.id = 4;
+        next.params["updateStreamId"] = serde_json::json!(3);
+        next.params["rangeStreamId"] = serde_json::json!(4);
+        ingress.begin(next, &owner.handle()).unwrap();
+        assert!(ingress.uploads.get(&4).unwrap().admission.is_ok());
     }
 
     #[tokio::test]
@@ -1147,7 +1223,9 @@ pub(crate) mod tests {
             assert!(ingress.chunk(1, true, &bytes).unwrap().is_none());
             let decoded = ingress.chunk(2, true, &ranges);
             if allowed {
-                let (_, input) = decoded.unwrap().unwrap();
+                let UploadCompletion::Admitted(_, input) = decoded.unwrap().unwrap() else {
+                    panic!("unexpected refusal")
+                };
                 let LiveApplicationInput::Admitted(input) = input else {
                     panic!("expected admitted input")
                 };
@@ -1222,7 +1300,9 @@ pub(crate) mod tests {
                 decoded = ingress.chunk(2, fin, chunk).unwrap();
                 assert_eq!(decoded.is_some(), fin);
             }
-            let (_, input) = decoded.unwrap();
+            let UploadCompletion::Admitted(_, input) = decoded.unwrap() else {
+                panic!("unexpected refusal")
+            };
             let LiveApplicationInput::Admitted(input) = input else {
                 panic!("expected admitted input")
             };
@@ -1296,7 +1376,11 @@ pub(crate) mod tests {
                     sha256: Some(hex_sha256(&bytes)),
                 })
                 .unwrap();
-            let (request, input) = ingress.chunk(sequence, true, &bytes).unwrap().unwrap();
+            let UploadCompletion::Admitted(request, input) =
+                ingress.chunk(sequence, true, &bytes).unwrap().unwrap()
+            else {
+                panic!("unexpected refusal")
+            };
             let mut ctx = RequestContext::unbounded();
             ctx.connection = Some(owner.handle());
             let response = service
@@ -1366,7 +1450,11 @@ pub(crate) mod tests {
             })
             .unwrap();
         assert!(ingress.chunk(1, true, &bytes).unwrap().is_none());
-        let (request, input) = ingress.chunk(2, true, &[]).unwrap().unwrap();
+        let UploadCompletion::Admitted(request, input) =
+            ingress.chunk(2, true, &[]).unwrap().unwrap()
+        else {
+            panic!("unexpected refusal")
+        };
         let mut ctx = RequestContext::unbounded();
         ctx.connection = Some(owner.handle());
         let response = service
@@ -1390,8 +1478,17 @@ pub(crate) mod tests {
         third.id = 5;
         third.params["updateStreamId"] = json!(5);
         third.params["rangeStreamId"] = json!(6);
+        ingress.begin(third, &owner.handle()).unwrap();
         assert_eq!(
-            ingress.begin(third, &owner.handle()).unwrap_err().code,
+            ingress
+                .uploads
+                .get(&5)
+                .unwrap()
+                .admission
+                .as_ref()
+                .err()
+                .unwrap()
+                .code,
             ErrorCode::Overloaded
         );
         ingress.clear();

@@ -80,9 +80,9 @@ See the [app backend guide](../../docs/how-to/app-backend.md) for publication,
 runtime packaging, private uploads, and recovery.
 
 Browser launch also requires `DOHC_SHARE_WEB_APP_DOMAIN` and
-`DOHC_SHARE_WEB_PUBLIC_ORIGIN`. The app domain must be a separate configured
-registrable domain. App launch stays off when the app domain is unset. Setting
-it without a public origin stops share-web at startup.
+`DOHC_SHARE_WEB_PUBLIC_ORIGIN`. See [app domains](#app-domains) for the domain
+and isolation requirements. App launch stays off when the app domain is unset.
+Setting it without a public origin stops share-web at startup.
 
 Launch issuance allows each authorized link browser profile or signed-in account
 session a burst of 12, refilling 0.2 per second. People on the same network have
@@ -108,14 +108,25 @@ Give the viewer one public HTTPS base origin, such as
 rejects every other Host. Terminate TLS at the reverse proxy and forward the
 original Host unchanged. Do not put a caching proxy in front of `share-web`.
 
-Set `DOHC_SHARE_WEB_TRUSTED_PROXIES` to the exact network peer addresses of
-proxies that may supply `X-Forwarded-For`. Leave it empty when no trusted proxy
-connects to `share-web`. The service ignores `X-Forwarded-For` from an
-untrusted peer. For a trusted peer, it scans the list from right to left and
-uses the first address that is not a trusted proxy. The service sends that
-derived address to its internal handler as `x-dohc-share-web-client-ip` for
-pre-authentication rate limiting. The public proxy must not accept that
-internal header from clients.
+Set `DOHC_SHARE_WEB_TRUSTED_PROXIES` to the network peer addresses of proxies
+that may supply `X-Forwarded-For`. Separate entries with commas and no spaces.
+Each entry must be one IPv4 or IPv6 address. The service refuses to start on a
+hostname, CIDR range, port, bracketed address, or IPv6 zone such as `%eth0`.
+Leave the value empty when no trusted proxy connects to `share-web`.
+
+The service compares addresses in one canonical form. IPv6 addresses match
+regardless of letter case or zero compression, and an IPv4-mapped IPv6 address
+such as `::ffff:10.0.0.2` matches `10.0.0.2`.
+
+The service ignores `X-Forwarded-For` from an untrusted peer and uses the peer
+address. For a trusted peer, it scans the list from right to left, skips empty
+entries, and uses the first address that is not a trusted proxy. If it reaches
+an entry that is not an IP address first, it uses the peer address. If the
+header is missing or names only trusted proxies, it uses `unknown`. A peer
+without an IP address also uses `unknown`, and all `unknown` requests share
+one per-address allowance. The service sends the derived address to its
+internal handler as `x-dohc-share-web-client-ip` for pre-authentication rate
+limiting. The public proxy must not accept that internal header from clients.
 
 Link exchange admits valid credentials per share grant, so people on one network
 do not share the invalid-credential allowance. The relay allows a burst of 960
@@ -375,10 +386,17 @@ The command does not build Rust or select a default executable.
 
 ## App domains
 
-Use a separate registrable domain for apps. For example, a viewer at
-`https://share.example.com` can use `DOHC_SHARE_WEB_APP_DOMAIN=example.net`.
-Set the domain without a scheme, port, or wildcard. Subdomains of the viewer's
-registrable domain are refused.
+Use a registrable domain or a suffix in the private section of the Public Suffix
+List for apps. For example, a viewer at `https://share.example.com` can use
+`DOHC_SHARE_WEB_APP_DOMAIN=example.net` or a private suffix you control.
+Use an app domain you control.
+Set the domain without a scheme, port, or wildcard. The viewer must use HTTPS
+without a port. It must not be the app domain or a host under it.
+The app domain must not be the viewer's registrable domain or a host under it.
+Launch hosts must not be public suffixes.
+For example, `https://share.vercel.app` cannot be the viewer when the app domain
+is `vercel.app`.
+Accepted suffixes come from the Public Suffix List copy bundled with tldts; newly listed suffixes require a tldts update.
 
 Point wildcard DNS for `*.example.net` at the share-web proxy and install a
 matching wildcard TLS certificate. Forward those requests to the same share-web

@@ -15,16 +15,17 @@ import { Markdown } from "@tiptap/markdown";
 import { TaskList } from "@tiptap/extension-list";
 import { TableKit } from "@tiptap/extension-table";
 import { NodeSelection } from "@tiptap/pm/state";
-import { DohcTaskItem, dohcMarkdownExtensions } from "./extensions";
+import { inListView, mockListLayout } from "../ui/listLayout.testSupport";
+import { DohcTaskItem } from "@dohc/ydoc-projection/markdown-extensions";
+import { desktopMarkdownExtensions } from "./extensions";
 import {
   BlockMenu,
-  blockDragSlice,
+  CLOSED_BLOCK_MENU_STATE,
   copyBlockAsMarkdown,
   deleteBlock,
   deleteSelectedTopLevelBlock,
   duplicateBlock,
   makeBlockControlsPlugin,
-  selectBlock,
   resolveTurnIntoDropdown,
   serializeBlockToMarkdown,
   topLevelBlockPos,
@@ -39,7 +40,7 @@ function makeEditor(markdown: string): Editor {
     element: document.createElement("div"),
     extensions: [
       StarterKit.configure({ trailingNode: false }),
-      ...dohcMarkdownExtensions,
+      ...desktopMarkdownExtensions,
       TaskList,
       DohcTaskItem,
       Markdown.configure({ indentation: { style: "space", size: 2 } }),
@@ -65,10 +66,11 @@ function makeEditorWithControls(content: Record<string, unknown>): Editor {
     element: document.createElement("div"),
     extensions: [
       StarterKit.configure({ trailingNode: false }),
-      ...dohcMarkdownExtensions,
+      ...desktopMarkdownExtensions,
       TaskList,
       DohcTaskItem,
-      TableKit,
+      // MarkdownEditor's table option: the gutter selects a whole table.
+      TableKit.configure({ table: { allowTableNodeSelection: true } }),
       controls,
     ],
     content,
@@ -82,6 +84,35 @@ function topLevelBlocks(editor: Editor): { type: string; pos: number }[] {
     blocks.push({ type: node.type.name, pos: offset });
   });
   return blocks;
+}
+
+/** The gutter handle of the top-level block at `index`. */
+function blockHandle(editor: Editor, index: number): HTMLElement {
+  const handle = editor.view.dom.querySelectorAll<HTMLElement>(".dohc-block-handle")[index];
+  if (!handle) throw new Error(`block handle ${index} missing`);
+  return handle;
+}
+
+type RecordingDataTransfer = {
+  data: Map<string, string>;
+  effectAllowed: string;
+};
+
+// jsdom has no DataTransfer. The dragstart handler only writes to it, so a
+// recording stub is enough to read the payload back.
+function dragStart(handle: HTMLElement): RecordingDataTransfer {
+  const data = new Map<string, string>();
+  const dataTransfer = {
+    data,
+    effectAllowed: "none",
+    clearData: () => data.clear(),
+    setData: (type: string, value: string) => data.set(type, value),
+    setDragImage: () => {},
+  };
+  const event = new Event("dragstart", { bubbles: true, cancelable: true });
+  Object.defineProperty(event, "dataTransfer", { value: dataTransfer });
+  handle.dispatchEvent(event);
+  return dataTransfer;
 }
 
 const editors: Editor[] = [];
@@ -124,6 +155,177 @@ describe("blockControls menu keyboard deletion", () => {
       );
     },
   );
+});
+
+describe("BlockMenu on the Menu part's recipe and rule", () => {
+  function openMenu(onSelect = vi.fn(), onClose = vi.fn()) {
+    const handle = document.createElement("button");
+    handle.setAttribute("aria-label", "block actions");
+    document.body.append(handle);
+    const outside = document.createElement("button");
+    document.body.append(outside);
+    handle.focus();
+    render(
+      createElement(BlockMenu, {
+        state: { open: true, pos: 0, x: 20, y: 20, maxHeight: 400, placement: "below", trigger: handle },
+        onSelect,
+        onClose,
+      }),
+    );
+    const menu = screen.getByRole("menu", { name: "block actions" });
+    const rows = screen.getAllByRole("menuitem");
+    return { handle, outside, menu, rows, onSelect, onClose };
+  }
+  afterEach(() => {
+    document.body.replaceChildren();
+  });
+
+  it("keeps focus on its frame and names the active row, which the keys and a moving pointer move", () => {
+    const { handle, menu, rows } = openMenu();
+    expect(document.activeElement).toBe(menu);
+    expect(handle.getAttribute("aria-expanded")).toBe("true");
+    expect(menu.getAttribute("aria-activedescendant")).toBe(rows[0]?.id);
+    expect(rows[0]?.hasAttribute("data-active")).toBe(true);
+
+    fireEvent.keyDown(menu, { key: "End" });
+    expect(menu.getAttribute("aria-activedescendant")).toBe(rows.at(-1)?.id);
+    fireEvent.keyDown(menu, { key: "h" });
+    expect(menu.getAttribute("aria-activedescendant")).toBe(rows[1]?.id);
+
+    // A row that opens under a still pointer does not take the active row.
+    fireEvent.mouseMove(rows[4]!, { movementX: 0, movementY: 0 });
+    expect(rows[1]?.hasAttribute("data-active")).toBe(true);
+    fireEvent.mouseMove(rows[4]!, { movementX: 0, movementY: 2 });
+    expect(rows[4]?.hasAttribute("data-active")).toBe(true);
+    expect(rows[1]?.hasAttribute("data-active")).toBe(false);
+  });
+
+  it("returns focus to the handle before the pick runs, so an action that edits can take it", () => {
+    let focusedAtPick: Element | null = null;
+    const { handle, menu, rows } = openMenu(vi.fn(() => {
+      focusedAtPick = document.activeElement;
+    }));
+    fireEvent.keyDown(menu, { key: "ArrowDown" });
+    fireEvent.keyDown(menu, { key: " " });
+    expect(focusedAtPick).toBe(handle);
+    fireEvent.click(rows[2]!);
+    expect(focusedAtPick).toBe(handle);
+  });
+
+  it("closes on Escape without passing it on, on Tab, and on a press outside, but not on a press on its handle", () => {
+    const parentEscape = vi.fn();
+    document.addEventListener("keydown", parentEscape);
+    const { handle, outside, menu, onClose } = openMenu();
+    fireEvent.pointerDown(handle);
+    fireEvent.focusOut(menu, { relatedTarget: handle });
+    expect(onClose).not.toHaveBeenCalled();
+
+    fireEvent.keyDown(menu, { key: "Escape" });
+    expect(onClose).toHaveBeenCalledTimes(1);
+    expect(parentEscape).not.toHaveBeenCalled();
+    fireEvent.keyDown(menu, { key: "Tab" });
+    expect(onClose).toHaveBeenCalledTimes(2);
+    fireEvent.pointerDown(outside);
+    expect(onClose).toHaveBeenCalledTimes(3);
+    document.removeEventListener("keydown", parentEscape);
+  });
+
+  it("returns focus to the handle when a press on blank space that closed it ends", () => {
+    const handle = document.createElement("button");
+    document.body.append(handle);
+    handle.focus();
+    const open = { open: true, pos: 0, x: 20, y: 20, maxHeight: 400, placement: "below", trigger: handle } as const;
+    const onClose = vi.fn();
+    const { rerender } = render(createElement(BlockMenu, { state: open, onSelect: vi.fn(), onClose }));
+    fireEvent.pointerDown(document.body);
+    expect(onClose).toHaveBeenCalledOnce();
+    // The owner closes it; the browser's press puts focus on the page.
+    rerender(createElement(BlockMenu, { state: CLOSED_BLOCK_MENU_STATE, onSelect: vi.fn(), onClose }));
+    handle.blur();
+    fireEvent.pointerUp(document.body);
+    expect(document.activeElement).toBe(handle);
+  });
+
+  // The list is taller than its cap. jsdom has no layout: a 320px list over
+  // 28px rows, with the Actions label 22px tall before the ninth row.
+  it("keeps the active row inside the list's view as the keys move it past either end", () => {
+    vi.spyOn(HTMLElement.prototype, "offsetTop", "get").mockImplementation(function (this: HTMLElement) {
+      const index = Number(/-row-(\d+)$/.exec(this.id)?.[1] ?? Number.NaN);
+      if (!Number.isNaN(index)) return 26 + index * 28 + (index >= 8 ? 22 : 0);
+      if (this.getAttribute("role") === "group") return this.previousElementSibling ? 250 : 4;
+      return 0;
+    });
+    vi.spyOn(HTMLElement.prototype, "offsetHeight", "get").mockReturnValue(28);
+    vi.spyOn(HTMLElement.prototype, "clientHeight", "get").mockReturnValue(320);
+    const { menu, rows } = openMenu();
+    const inView = (row: HTMLElement) =>
+      row.offsetTop >= menu.scrollTop && row.offsetTop + row.offsetHeight <= menu.scrollTop + menu.clientHeight;
+    const remove = rows.at(-1)!;
+    expect(inView(remove)).toBe(false);
+
+    fireEvent.keyDown(menu, { key: "End" });
+    expect(inView(remove)).toBe(true);
+    fireEvent.keyDown(menu, { key: "Home" });
+    expect(inView(rows[0]!)).toBe(true);
+    // The first row brings its section label along.
+    expect(rows[0]!.parentElement!.offsetTop).toBeGreaterThanOrEqual(menu.scrollTop);
+    fireEvent.keyDown(menu, { key: "ArrowUp" });
+    expect(inView(remove)).toBe(true);
+  });
+
+  // The site's demo mounts the editor in a shadow root, where a document
+  // lookup by id finds nothing.
+  it("keeps the active row in view inside an embedded editor's shadow root", () => {
+    vi.spyOn(HTMLElement.prototype, "offsetTop", "get").mockImplementation(function (this: HTMLElement) {
+      const index = Number(/-row-(\d+)$/.exec(this.id)?.[1] ?? Number.NaN);
+      if (!Number.isNaN(index)) return 26 + index * 28 + (index >= 8 ? 22 : 0);
+      if (this.getAttribute("role") === "group") return this.previousElementSibling ? 250 : 4;
+      return 0;
+    });
+    vi.spyOn(HTMLElement.prototype, "offsetHeight", "get").mockReturnValue(28);
+    vi.spyOn(HTMLElement.prototype, "clientHeight", "get").mockReturnValue(320);
+    const host = document.createElement("div");
+    document.body.append(host);
+    const container = document.createElement("div");
+    host.attachShadow({ mode: "open" }).append(container);
+    render(
+      createElement(BlockMenu, {
+        state: { open: true, pos: 0, x: 20, y: 20, maxHeight: 400, placement: "below" },
+        onSelect: vi.fn(),
+        onClose: vi.fn(),
+      }),
+      { container },
+    );
+    const menu = container.querySelector<HTMLElement>("[role='menu']")!;
+    const remove = [...menu.querySelectorAll<HTMLElement>("[role='menuitem']")].at(-1)!;
+    fireEvent.keyDown(menu, { key: "End" });
+    expect(menu.getAttribute("aria-activedescendant")).toBe(remove.id);
+    expect(remove.offsetTop).toBeGreaterThanOrEqual(menu.scrollTop);
+    expect(remove.offsetTop + remove.offsetHeight).toBeLessThanOrEqual(menu.scrollTop + menu.clientHeight);
+  });
+
+  it("returns focus to the handle when the window loses focus", async () => {
+    const handle = document.createElement("button");
+    document.body.append(handle);
+    handle.focus();
+    const open = { open: true, pos: 0, x: 20, y: 20, maxHeight: 400, placement: "below", trigger: handle } as const;
+    const onClose = vi.fn();
+    const { rerender } = render(createElement(BlockMenu, { state: open, onSelect: vi.fn(), onClose }));
+    expect(document.activeElement).toBe(screen.getByRole("menu"));
+    fireEvent.blur(window);
+    expect(onClose).toHaveBeenCalledOnce();
+    rerender(createElement(BlockMenu, { state: CLOSED_BLOCK_MENU_STATE, onSelect: vi.fn(), onClose }));
+    await waitFor(() => expect(document.activeElement).toBe(handle));
+  });
+
+  it("shows Del beside the destructive row without adding it to the row's name", () => {
+    const { rows } = openMenu();
+    const remove = screen.getByRole("menuitem", { name: "Delete" });
+    expect(remove).toBe(rows.at(-1));
+    expect(remove.getAttribute("aria-keyshortcuts")).toBe("Delete");
+    expect(within(remove).getByText("Del").getAttribute("aria-hidden")).toBe("true");
+    expect(remove.className).toContain("text-danger");
+  });
 });
 
 describe("blockControls duplicate", () => {
@@ -207,7 +409,9 @@ describe("blockControls delete", () => {
       }),
     );
     const [, selected] = topLevelBlocks(editor);
-    selectBlock(editor, selected.pos);
+    fireEvent.click(blockHandle(editor, 1));
+    expect(editor.state.selection).toBeInstanceOf(NodeSelection);
+    expect(editor.state.selection.from).toBe(selected.pos);
 
     const event = new KeyboardEvent("keydown", { key, bubbles: true });
     editor.view.dom.dispatchEvent(event);
@@ -521,6 +725,59 @@ describe("TurnIntoMenu dropdown rendering", () => {
   });
 });
 
+describe("TurnIntoMenu on the Menu part's recipe", () => {
+  it("names its active option, moves by the Menu keys, keeps it in view, and keeps the current type's fill", () => {
+    const restore = mockListLayout(150);
+    const editor = track(makeEditor("Hello world"));
+    editor.commands.setTextSelection(3);
+    try {
+      render(createElement(TurnIntoMenu, { editor, activeId: turnIntoIdAt(editor.state.selection.$from) }));
+      fireEvent.click(screen.getByTitle("Turn into"));
+      const listbox = screen.getByRole("listbox", { name: "turn into" });
+      const options = within(listbox).getAllByRole("option");
+      const text = options[0]!;
+      expect(document.activeElement).toBe(listbox);
+      expect(listbox.getAttribute("aria-activedescendant")).toBe(text.id);
+      expect(text.className.split(" ")).toContain("bg-selected");
+
+      fireEvent.keyDown(listbox, { key: "End" });
+      const quote = options.at(-1)!;
+      expect(listbox.getAttribute("aria-activedescendant")).toBe(quote.id);
+      expect(quote.hasAttribute("data-active")).toBe(true);
+      expect(inListView(listbox, quote)).toBe(true);
+      // The block's own type keeps its fill when the active option leaves it.
+      expect(text.className.split(" ")).toContain("bg-selected");
+      fireEvent.keyDown(listbox, { key: "h" });
+      expect(listbox.getAttribute("aria-activedescendant")).toBe(options[1]!.id);
+      expect(inListView(listbox, options[1]!)).toBe(true);
+
+      fireEvent.mouseMove(options[3]!, { movementX: 0, movementY: 0 });
+      expect(listbox.getAttribute("aria-activedescendant")).toBe(options[1]!.id);
+
+      // Ctrl+N is New file and Ctrl+B the files panel. They reach the shell,
+      // which skips a prevented key, and leave the active option alone.
+      const shell = vi.fn((event: KeyboardEvent) => event.defaultPrevented);
+      window.addEventListener("keydown", shell);
+      try {
+        for (const letter of ["n", "b"]) {
+          expect(fireEvent.keyDown(listbox, { key: letter, ctrlKey: true })).toBe(true);
+          expect(fireEvent.keyDown(listbox, { key: letter, metaKey: true })).toBe(true);
+        }
+      } finally {
+        window.removeEventListener("keydown", shell);
+      }
+      expect(shell).toHaveBeenCalledTimes(4);
+      expect(shell.mock.results.every((result) => result.value === false)).toBe(true);
+      expect(listbox.getAttribute("aria-activedescendant")).toBe(options[1]!.id);
+
+      fireEvent.keyDown(listbox, { key: " " });
+      expect(editor.getJSON().content?.[0]?.attrs?.level).toBe(1);
+    } finally {
+      restore();
+    }
+  });
+});
+
 describe("blockControls copy as markdown", () => {
   it("serializes a heading block to markdown", () => {
     const editor = track(makeEditor("## Section"));
@@ -556,39 +813,41 @@ describe("blockControls copy as markdown", () => {
 });
 
 describe("blockControls drag payload", () => {
-  it("builds a slice whose single child is the dragged block", () => {
-    const editor = track(makeEditor("First\n\n## Second"));
-    const blocks = topLevelBlocks(editor);
-    const slice = blockDragSlice(editor.view, blocks[1].pos);
-    expect(slice).not.toBeNull();
-    expect(slice?.openStart).toBe(0);
-    expect(slice?.openEnd).toBe(0);
-    expect(slice?.content.childCount).toBe(1);
-    const dragged = slice?.content.firstChild;
-    expect(dragged?.type.name).toBe("heading");
-    expect(dragged?.textContent).toBe("Second");
-    // Matches the actual document node, mirroring ProseMirror's own
-    // NodeSelection.content() drag payload.
-    expect(dragged?.eq(editor.state.doc.child(1))).toBe(true);
+  it("hands the dragged block to DataTransfer and view.dragging as a move", () => {
+    const editor = track(
+      makeEditorWithControls({
+        type: "doc",
+        content: [
+          { type: "paragraph", content: [{ type: "text", text: "First" }] },
+          {
+            type: "heading",
+            attrs: { level: 2 },
+            content: [{ type: "text", text: "Second" }],
+          },
+        ],
+      }),
+    );
+    const [, second] = topLevelBlocks(editor);
+
+    const dataTransfer = dragStart(blockHandle(editor, 1));
+
+    // ProseMirror's drop deletes the selection for a move, so the dragged
+    // block must be the selection.
+    expect(editor.state.selection).toBeInstanceOf(NodeSelection);
+    expect(editor.state.selection.from).toBe(second.pos);
+    const dragging = editor.view.dragging;
+    expect(dragging?.move).toBe(true);
+    expect(dragging?.slice.openStart).toBe(0);
+    expect(dragging?.slice.openEnd).toBe(0);
+    expect(dragging?.slice.content.childCount).toBe(1);
+    expect(dragging?.slice.content.firstChild?.eq(editor.state.doc.child(1))).toBe(true);
+    expect(dataTransfer.data.get("text/plain")).toBe("Second");
+    expect(dataTransfer.data.get("text/html")).toMatch(/<h2[^>]*>Second<\/h2>/);
+    expect(dataTransfer.effectAllowed).toBe("copyMove");
   });
 });
 
 describe("blockControls drag ghost", () => {
-  // jsdom has no DataTransfer. The dragstart handler only writes to it, so a
-  // recording stub is enough to reach the ghost.
-  function dragStart(handle: HTMLElement): void {
-    const event = new Event("dragstart", { bubbles: true, cancelable: true });
-    Object.defineProperty(event, "dataTransfer", {
-      value: {
-        clearData: () => {},
-        setData: () => {},
-        setDragImage: () => {},
-        effectAllowed: "none",
-      },
-    });
-    handle.dispatchEvent(event);
-  }
-
   function parkedGhosts(): HTMLElement[] {
     return Array.from(
       document.body.querySelectorAll<HTMLElement>(".dohc-block-drag-ghost"),

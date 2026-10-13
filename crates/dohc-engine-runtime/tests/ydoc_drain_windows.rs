@@ -79,6 +79,8 @@ async fn seed_parked_update(scratch: &ScratchDir) -> DocKey {
     let base_bytes = doc.encode_full_state();
     let base_sha = store.put_binary_blob(&base_bytes).expect("base blob");
     let base = ReplicationEnvelope {
+        settlement_admission: None,
+        admitted_author_snapshot: None,
         workspace_id: WS.to_owned(),
         origin_id: "peer".to_owned(),
         origin_seq: 0,
@@ -107,6 +109,8 @@ async fn seed_parked_update(scratch: &ScratchDir) -> DocKey {
     let update_bytes = doc.plaintext_insert(6, " parked");
     let blob_sha = store.put_binary_blob(&update_bytes).expect("blob");
     let envelope = ReplicationEnvelope {
+        settlement_admission: None,
+        admitted_author_snapshot: None,
         workspace_id: WS.to_owned(),
         origin_id: "peer".to_owned(),
         origin_seq: 1,

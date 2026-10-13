@@ -2,6 +2,13 @@ import { describe, expect, it } from "vitest";
 import { parseCliArguments } from "./args";
 
 describe("parseCliArguments", () => {
+  it("parses Access references and pages without workspace or account selectors", () => {
+    expect(parseCliArguments(["access", "object", '{"kind":"path","path":"Notes/a.md"}', "--cursor", "page"], {}))
+      .toMatchObject({ verb: "accessObject", ref: { kind: "path", path: "Notes/a.md", versionId: null }, cursor: "page" });
+    expect(parseCliArguments(["access", "sharing", "received"], {})).toMatchObject({ verb: "accessSharing", lane: "received" });
+    expect(() => parseCliArguments(["access", "object", '{"kind":"path","path":"a","workspaceId":"other"}'], {})).toThrow();
+    expect(() => parseCliArguments(["access", "sharing", "other"], {})).toThrow();
+  });
   it("parses automation list and an explicit switch base, consent, and retry id", () => {
     expect(parseCliArguments(["automation", "list", "Tasks"], {})).toMatchObject({ verb: "automationList", collectionPath: "Tasks" });
     expect(parseCliArguments(["automation", "switch", "Tasks", "stamp", "off", "--base", "a".repeat(64), "--submit-id", "switch-1", "--reformat"], {}))

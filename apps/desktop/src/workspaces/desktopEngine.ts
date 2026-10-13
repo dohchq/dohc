@@ -1,3 +1,4 @@
+import { waitForEnginePublicationGate } from "./testEnginePublicationGate";
 import type { App, Dialog } from "electron";
 import {
   EngineWorkspaceSessions,
@@ -31,7 +32,7 @@ export interface ServerOwnerDelivery {
   workspaceIds(): string[];
   hasRefusals(workspaceId: string): boolean | undefined;
   connect(workspace: RegistryEntry, signal: AbortSignal): Promise<{
-    bearer: string; relayUrl: string; signal: AbortSignal;
+    bearer: string; accountId: string; relayUrl: string; signal: AbortSignal;
     assertCurrent(): void;
     refusals(attempt: AbortSignal): Promise<void>;
     documents(signal: AbortSignal): Promise<unknown>;
@@ -56,7 +57,7 @@ interface DesktopEngineDependencies<State extends EngineAuthorityState> {
   onWorkspaceOpened?(workspaceId: string): void;
   onRefusalsChanged?: () => void;
   serverOwnerDelivery?: ServerOwnerDelivery;
-  ownerDeliveryCredentials?(): {bearer: string; relayUrl: string; signal: AbortSignal} | null;
+  ownerDeliveryCredentials?(): {bearer: string; accountId: string; relayUrl: string; signal: AbortSignal} | null;
   existingOwnerFor?: ExistingOwnerDeviceConfig["ownerFor"];
   findWorkspace(workspaceId: string): RegistryEntry | null;
   app: Pick<App, "isPackaged" | "getAppPath">;
@@ -187,7 +188,7 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
                 assertCurrent();
                 return native.runNativeOwnerDeliveryPass({client, workspaceHandle: binding.workspace,
                   document, config: {...profile, relayUrl: session.relayUrl, documents},
-                  signal, bearer: session.bearer, assertCurrent});
+                  signal, bearer: session.bearer, accountId: session.accountId, assertCurrent});
               });
               check();
               if (result === "retry" || result === "frozen") failures.add(document.binding.currentPath);
@@ -227,7 +228,7 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
               };
               assertCurrent();
               const result = await native.runNativeOwnerDeliveryPass({client, workspaceHandle: binding.workspace,
-                document, config, signal, bearer: credentials.bearer, assertCurrent});
+                document, config, signal, bearer: credentials.bearer, accountId: credentials.accountId, assertCurrent});
               assertCurrent();
               if (result === "acknowledged" || result === "frozen") notifyRenderer({workspaceId: document.binding.workspaceId});
               return result;
@@ -395,6 +396,7 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
       if (hostIngress && peerIngress && (hostIngress.configPath !== peerIngress.configPath ||
         hostIngress.client.aggregateBytes !== peerIngress.client.aggregateBytes || hostIngress.client.maxUploads !== peerIngress.client.maxUploads)) throw new Error("Private owner modes require the same native ingress configuration and client budget.");
       const ingress = hostIngress ?? peerIngress ?? (serverOwnerConfig && {configPath: serverOwnerConfig.nativeConfigPath, client: serverOwnerConfig.nativeClient});
+      let publications = 0;
       rustEngineDaemon = createRustEngineDaemon({
         ...(ingress ? {privateOwnerHost: ingress} : {}),
         ...testEngineRestartOverrides(),
@@ -431,7 +433,9 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
             );
           }
         },
-        beforePublish: async () => {
+        beforePublish: async signal => {
+          const gate = process.env.DOHC_TEST_ENGINE_PUBLICATION_GATE;
+          if (publications++ > 0 && process.env.DOHC_DESKTOP_TEST === "1" && !app.isPackaged && gate) await waitForEnginePublicationGate(gate, signal);
           stopOwnerHost();
           await stopOwnerDelivery();
           await Promise.all(workspaceAuthorities.workspaceIds().map((workspaceId) =>

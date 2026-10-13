@@ -1,6 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type {
-  EngineMomentRecord,
   HistoryPolicyUnreadableResult,
   ListEngineMomentsResponse,
   ListEngineMomentsResult,
@@ -11,12 +10,7 @@ import { bridge } from "../bridge";
 // pages, and the latest order of the answer on screen. A refresh replaces
 // that order outright; the shell keeps its own floor for the open-file
 // refresh key.
-export type HistoryPage = {
-  moments: EngineMomentRecord[];
-  nextBeforeMomentOrder: number | null;
-  latestMomentOrder: number;
-  protectedTruncated: boolean;
-};
+export type HistoryPage = Pick<ListEngineMomentsResult, "moments" | "startCursor" | "nextCursor" | "versionMarkers" | "latestMomentOrder">;
 
 // Why there is no page. A null timeline is not "no changes": it is also a
 // first read still in flight, a read that failed, and a page dropped as stale
@@ -31,7 +25,16 @@ export type HistoryReadState = "loading" | "failed" | "updating";
 // flush another 1.85 seconds of breathing room without leaving the panel in
 // an unbounded spinner. After this ladder, the inline Try again remains.
 const HISTORY_UPDATING_RETRY_DELAYS_MS = [100, 250, 500, 1_000] as const;
-const HISTORY_PAGE_LIMIT = 200;
+const HISTORY_PAGE_LIMIT = 50;
+
+type MomentPosition = Pick<HistoryPage["moments"][number], "recordedAtMs" | "momentOrder" | "protected">;
+
+// Match the engine's newest-first merge: time, text before protected, then order.
+function compareMomentPositions(left: MomentPosition, right: MomentPosition): number {
+  return right.recordedAtMs - left.recordedAtMs ||
+    Number(left.protected === true) - Number(right.protected === true) ||
+    right.momentOrder - left.momentOrder;
+}
 
 function waitForHistoryRetry(delayMs: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, delayMs));
@@ -207,9 +210,10 @@ export function useHistoryPage(
         setLoadingMore(false);
         setPage({
           moments: answer.moments,
-          nextBeforeMomentOrder: answer.nextBeforeMomentOrder,
+          startCursor: answer.startCursor,
+          nextCursor: answer.nextCursor,
           latestMomentOrder: answer.latestMomentOrder,
-          protectedTruncated: answer.protectedTruncated,
+          versionMarkers: answer.versionMarkers,
         });
         // Readiness belongs to the page that actually commits. A newer
         // activity refresh can beat the workspace-open refresh; marking only
@@ -231,7 +235,7 @@ export function useHistoryPage(
     };
 
     const loadMore = async (): Promise<void> => {
-      const cursor = latestPage.current?.nextBeforeMomentOrder;
+      const cursor = latestPage.current?.nextCursor;
       if (cursor === null || cursor === undefined || loadingMoreNow.current) return;
       const token = ++issue.current;
       // The version this page belongs to: the one the displayed timeline
@@ -243,7 +247,7 @@ export function useHistoryPage(
         const answer = await bridge().listEngineMoments({
           workspaceId,
           limit: HISTORY_PAGE_LIMIT,
-          beforeMomentOrder: cursor,
+          cursor,
         });
         // The displayed page remains the honest last answer while capture is
         // settling. Releasing the button below gives the user a bounded
@@ -270,9 +274,10 @@ export function useHistoryPage(
           committed.current = token;
           setPage({
             moments: [...current.moments, ...answer.moments],
-            nextBeforeMomentOrder: answer.nextBeforeMomentOrder,
+            startCursor: current.startCursor,
+            nextCursor: answer.nextCursor,
             latestMomentOrder: Math.max(current.latestMomentOrder, answer.latestMomentOrder),
-            protectedTruncated: current.protectedTruncated || answer.protectedTruncated,
+            versionMarkers: [...current.versionMarkers, ...answer.versionMarkers],
           });
         }
       } catch (error) {
@@ -350,6 +355,64 @@ export function useHistoryPage(
     },
     [issue],
   );
+
+  const [namesRevision, setNamesRevision] = useState<{ workspaceId: string } | null>(null);
+  const namedRevision = useRef<typeof namesRevision>(null);
+  useEffect(() => bridge().onHistoryNamesChanged?.(event => {
+    if (event.workspaceId === workspaceId) setNamesRevision({ workspaceId });
+  }), [workspaceId]);
+  useEffect(() => {
+    const shown = latestPage.current;
+    if (
+      namesRevision?.workspaceId !== workspaceId || namedRevision.current === namesRevision ||
+      loadingMore || shown === null || shown.moments.length === 0
+    ) return;
+    let liveRequest = true;
+    const watermark = committed.current;
+    const version = committedVersionId.current;
+    const live = () => liveRequest && !loadingMoreNow.current && latestPage.current === shown && committed.current === watermark && committedVersionId.current === version;
+    const oldest = shown.moments.reduce((last, moment) => compareMomentPositions(moment, last) > 0 ? moment : last);
+    // Deletion can move a page cut past its original cursor. Bound the scan
+    // by position, including progress through filtered or marker-only pages.
+    // At equal times, markers follow both moment streams.
+    const reachedEnd = (cursor: NonNullable<HistoryPage["nextCursor"]>) =>
+      (cursor.text !== null && compareMomentPositions(cursor.text, oldest) >= 0) ||
+      (cursor.protected !== null && compareMomentPositions({ ...cursor.protected, protected: true }, oldest) >= 0) ||
+      (cursor.marker !== null && cursor.marker.createdAtMs <= oldest.recordedAtMs);
+    const scan = async () => {
+      const named = new Map<string, HistoryPage["moments"][number]>();
+      const remaining = new Set(shown.moments.map(moment => moment.id));
+      const seenCursors = new Set<string>();
+      let cursor = shown.startCursor;
+      do {
+        const position = JSON.stringify(cursor);
+        if (seenCursors.has(position)) return false;
+        seenCursors.add(position);
+        const response = await bridge().listEngineMoments({ workspaceId, cursor, limit: HISTORY_PAGE_LIMIT });
+        if (!live() || "status" in response || response.activeVersionId !== version) return false;
+        for (const moment of response.moments) {
+          named.set(moment.id, moment);
+          remaining.delete(moment.id);
+        }
+        if (remaining.size === 0 || response.nextCursor === null || reachedEnd(response.nextCursor)) break;
+        cursor = response.nextCursor;
+      } while (live());
+      if (!live()) return false;
+      const next = { ...shown, moments: shown.moments.map(moment => named.get(moment.id) ?? moment) };
+      latestPage.current = next;
+      // An append keeps earlier rows. Consume the event only once their
+      // names reach the page; an interrupted scan runs on the new page.
+      namedRevision.current = namesRevision;
+      setPageState(next);
+      return true;
+    };
+    void (async () => {
+      for (let attempt = 0; attempt < 2 && live(); attempt++) {
+        try { if (await scan()) return; } catch { /* Retry once while this page is still current. */ }
+      }
+    })();
+    return () => { liveRequest = false; };
+  }, [workspaceId, owner, page, loadingMore, namesRevision]);
 
   return { page, loadingMore, readState, policyError, ...owner };
 }

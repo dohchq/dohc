@@ -14,7 +14,7 @@ export const ACCOUNT_CSS = `:root {
   --muted: #55524a;
   --subtle: #7f7b6e;
   --accent: #2d342e;
-  --danger: #a6402c;
+  --danger: #a43e2a;
   --success: #38684e;
   --sans: "Inter Variable", system-ui, "Segoe UI", sans-serif;
   --mono: "IBM Plex Mono", ui-monospace, "Cascadia Mono", "SFMono-Regular", Menlo, Consolas, monospace;
@@ -199,6 +199,7 @@ a:hover { color: var(--ink); }
 `;
 
 export const ACCOUNT_JS = `const page = document.body.dataset.page || "";
+const closed = document.body.dataset.signUp === "closed";
 const byId = (id) => document.getElementById(id);
 if (byId("server-host")) byId("server-host").textContent = location.host;
 
@@ -212,6 +213,8 @@ function setStatus(kind, text) {
 function errorText(status, data) {
   const message = data && typeof data.message === "string" ? data.message.trim() : "";
   const code = data && typeof data.code === "string" ? data.code : "";
+  // Only a closed server refuses an unverified sign-in.
+  if (code === "EMAIL_NOT_VERIFIED") return "Choose a password from an emailed link before you sign in. Use Forgot your password? to get a link.";
   if (message && (status < 500 || code)) return message;
   if (status === 429) return "Too many attempts. Wait a minute, then try again.";
   return "The server could not complete this request. Try again.";
@@ -273,13 +276,20 @@ if (page === "sign-in") {
   });
 }
 
+// A closed server replaces the sign-up password when the person opens the
+// emailed link, so its form has no password field. Better Auth still requires
+// one; this value is never shown or kept.
+function unusedPassword() {
+  return Array.from(crypto.getRandomValues(new Uint8Array(32)), (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
 if (page === "sign-up") {
   const form = byId("form");
   onSubmit(form, "Creating your account\\u2026", async () => {
     await call("/api/auth/sign-up/email", {
       name: byId("name").value.trim(),
       email: byId("email").value.trim(),
-      password: byId("password").value,
+      password: byId("password") ? byId("password").value : unusedPassword(),
       callbackURL: samePath(document.body.dataset.next) || "/account",
     });
     location.assign("/account/verify-email?next=" + encodeURIComponent(samePath(document.body.dataset.next) || "/account"));
@@ -307,7 +317,7 @@ if (page === "verify-email") {
     const email = byId("email").value.trim();
     await call("/api/auth/send-verification-email", { email, callbackURL: samePath(document.body.dataset.next) || "/account" });
     form.hidden = true;
-    setStatus("done", "Check " + email + " for a verification link. If it does not arrive, contact the server owner.");
+    setStatus("done", "Check " + email + (closed ? " for a link to choose your password." : " for a verification link.") + " If it does not arrive, contact the server owner.");
   });
 }
 
@@ -377,7 +387,7 @@ if (page === "account") {
       setStatus("working", "Sending the link\\u2026");
       try {
         await call("/api/auth/send-verification-email", { email: document.body.dataset.email });
-        setStatus("done", "dohc sent a verification link to your email.");
+        setStatus("done", closed ? "dohc sent a link to your email. Open it to choose a new password." : "dohc sent a verification link to your email.");
       } catch (error) {
         setStatus("error", error.message);
         event.target.disabled = false;

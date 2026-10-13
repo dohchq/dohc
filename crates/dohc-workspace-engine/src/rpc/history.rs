@@ -2,19 +2,24 @@ use crate::EngineService;
 use crate::rpc::capture::MAX_DESKTOP_CAPTURE_TEXT_BYTES;
 use crate::rpc::reads::MAX_INBAND_CONTENT_BYTES;
 use crate::rpc::reads::byte_budget_cut_serialized;
-use crate::rpc::reads::inband_text;
 use crate::rpc::request::OperationCancellation;
 use crate::rpc::request::parse;
 use crate::rpc::secrets::secret_moment_json;
 use crate::rpc::versions::version_record_json;
 use crate::rpc::workspace::validate_workspace_param;
+use dohc_engine_domain::MAX_AUTHOR_FIELD_BYTES;
 use dohc_engine_domain::MomentPage;
-use dohc_engine_domain::SecretMomentRecord;
+use dohc_engine_domain::MomentRecord;
+use dohc_engine_domain::{
+    HistoryCursor, HistoryMarkerPosition, HistoryMomentMetadata, HistoryMomentPosition,
+    HistoryPageRead,
+};
 use dohc_engine_protocol::error::ErrorCode;
 use dohc_engine_protocol::error::WireError;
 use dohc_engine_protocol::transport::RequestContext;
 use dohc_engine_protocol::wire::WorkspaceHandle;
 use serde::Deserialize;
+use serde::Serialize;
 use serde_json::Value;
 use serde_json::json;
 use std::time::Duration;
@@ -24,8 +29,6 @@ use std::time::Duration;
 /// never bound the frame — the page cuts when the running estimate would
 /// pass this, well under the 1 MiB frame limit.
 pub(super) const MOMENTS_PAGE_BYTE_BUDGET: usize = 256 * 1024;
-
-const HISTORY_PROTECTED_MOMENT_LIMIT: usize = 500;
 
 const HISTORY_PAGE_FLUSH_RETRIES: usize = 50;
 
@@ -66,9 +69,13 @@ struct MomentsListParams {
 struct HistoryPageParams {
     workspace_id: String,
     #[serde(default)]
+    version_id: Option<String>,
+    #[serde(default)]
+    object_id: Option<String>,
+    #[serde(default)]
     limit: Option<i64>,
     #[serde(default)]
-    before_moment_order: Option<i64>,
+    cursor: Option<HistoryCursor>,
 }
 
 #[derive(Deserialize)]
@@ -77,19 +84,62 @@ struct MomentsGetParams {
     moment_id: String,
 }
 
-pub(super) fn moment_json(moment: &dohc_engine_domain::MomentRecord) -> Value {
-    let after_inband_limit = (moment.after_content_kind == "text"
-        && moment.after_text.is_none()
-        && moment
-            .after_byte_length
-            .is_some_and(|length| length as usize > MAX_DESKTOP_CAPTURE_TEXT_BYTES))
-    .then_some(MAX_DESKTOP_CAPTURE_TEXT_BYTES);
-    let before_inband_limit = (moment.before_content_kind == "text"
-        && moment.before_text.is_none()
-        && moment
-            .before_byte_length
-            .is_some_and(|length| length as usize > MAX_DESKTOP_CAPTURE_TEXT_BYTES))
-    .then_some(MAX_DESKTOP_CAPTURE_TEXT_BYTES);
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct PublicationAppliedParams {
+    request_id: String,
+    moment_id: String,
+}
+
+/// How a moment projection carries its two payload bodies.
+#[derive(Clone, Copy)]
+enum MomentBodies {
+    /// Each body under the same self-describing in-band cap as every content
+    /// read.
+    Capped,
+    /// Every body the capped form would carry, withheld at that cap.
+    Withheld,
+    /// Neither body: a first page row past `MOMENTS_PAGE_BYTE_BUDGET`, sent as
+    /// metadata so the cursor still makes progress.
+    PageDegraded,
+}
+
+impl MomentBodies {
+    /// One payload body and the in-band limit beside it.
+    fn project<'a>(
+        self,
+        content_kind: &str,
+        text: Option<&'a str>,
+        byte_length: Option<i64>,
+    ) -> (Option<&'a str>, Option<usize>) {
+        let capped = text.filter(|text| text.len() <= MAX_DESKTOP_CAPTURE_TEXT_BYTES);
+        match (self, capped) {
+            (MomentBodies::PageDegraded, _) => (None, Some(MAX_INBAND_CONTENT_BYTES)),
+            (MomentBodies::Withheld, Some(_)) => (None, Some(MAX_DESKTOP_CAPTURE_TEXT_BYTES)),
+            (_, Some(text)) => (Some(text), None),
+            // Only a text body the store left unhydrated names the limit.
+            (_, None) => {
+                let over_cap = content_kind == "text"
+                    && text.is_none()
+                    && byte_length
+                        .is_some_and(|length| length as usize > MAX_DESKTOP_CAPTURE_TEXT_BYTES);
+                (None, over_cap.then_some(MAX_DESKTOP_CAPTURE_TEXT_BYTES))
+            }
+        }
+    }
+}
+
+fn moment_wire_json(moment: &MomentRecord, bodies: MomentBodies) -> Value {
+    let (after_text, after_inband_limit_bytes) = bodies.project(
+        &moment.after_content_kind,
+        moment.after_text.as_deref(),
+        moment.after_byte_length,
+    );
+    let (before_text, before_inband_limit_bytes) = bodies.project(
+        &moment.before_content_kind,
+        moment.before_text.as_deref(),
+        moment.before_byte_length,
+    );
     json!({
         "momentOrder": moment.moment_order,
         "momentId": moment.moment_id,
@@ -114,16 +164,26 @@ pub(super) fn moment_json(moment: &dohc_engine_domain::MomentRecord) -> Value {
         // dropped and never trusted raw.
         "authors": moment.author_json.as_deref().map(parsed_moment_authors),
         "syncRecordOnly": moment.sync_record_only,
-        // Hydrated payload text (momentSelectSql parity), each body under
-        // the same self-describing in-band cap as every content read.
-        "afterText": inband_text(moment.after_text.as_deref()),
+        // Hydrated payload text (momentSelectSql parity).
+        "afterText": after_text,
         "afterByteLength": moment.after_byte_length,
-        "afterInbandLimitBytes": after_inband_limit,
-        "beforeText": inband_text(moment.before_text.as_deref()),
+        "afterInbandLimitBytes": after_inband_limit_bytes,
+        "beforeText": before_text,
         "beforeByteLength": moment.before_byte_length,
-        "beforeInbandLimitBytes": before_inband_limit,
+        "beforeInbandLimitBytes": before_inband_limit_bytes,
         "beforePath": moment.before_path,
     })
+}
+
+pub(super) fn moment_json(moment: &MomentRecord) -> Value {
+    moment_wire_json(moment, MomentBodies::Capped)
+}
+
+/// A moment with both payload bodies withheld. The digests beside them stay,
+/// so the caller hydrates through `versionedText.readBlob` — the shape an
+/// over-cap moment already arrives in.
+pub(super) fn withheld_moment_json(moment: &MomentRecord) -> Value {
+    moment_wire_json(moment, MomentBodies::Withheld)
 }
 
 fn encode_moment_page(page: &MomentPage) -> Result<EncodedMomentPage, WireError> {
@@ -134,13 +194,10 @@ fn encode_moment_page(page: &MomentPage) -> Result<EncodedMomentPage, WireError>
     // A first row may legitimately exceed the page budget. Degrade that row
     // to metadata so the cursor still makes progress, exactly as moments.list
     // did before the history aggregate existed.
-    if let Some(first) = rows.first_mut() {
-        if serde_json::to_string(first).map_or(0, |s| s.len()) > MOMENTS_PAGE_BYTE_BUDGET {
-            first["afterText"] = Value::Null;
-            first["beforeText"] = Value::Null;
-            first["afterInbandLimitBytes"] = json!(MAX_INBAND_CONTENT_BYTES);
-            first["beforeInbandLimitBytes"] = json!(MAX_INBAND_CONTENT_BYTES);
-        }
+    if let (Some(first), Some(moment)) = (rows.first_mut(), page.moments.first())
+        && serde_json::to_string(first).map_or(0, |s| s.len()) > MOMENTS_PAGE_BYTE_BUDGET
+    {
+        *first = moment_wire_json(moment, MomentBodies::PageDegraded);
     }
     let included = byte_budget_cut_serialized(&rows, MOMENTS_PAGE_BYTE_BUDGET);
     if included == 0 && !rows.is_empty() {
@@ -165,6 +222,126 @@ fn encode_moment_page(page: &MomentPage) -> Result<EncodedMomentPage, WireError>
     })
 }
 
+fn history_moment_json(moment: &HistoryMomentMetadata) -> Value {
+    json!({
+        "momentOrder":moment.moment_order,"momentId":moment.moment_id,"versionId":moment.version_id,
+        "objectId":moment.object_id,"path":moment.path,"recordedAtMs":moment.recorded_at_ms,
+        "operation":moment.operation.as_str(),"afterContentKind":moment.after_content_kind,
+        "afterByteLength":moment.after_byte_length,"metadataOrigin":moment.metadata_origin,
+        "metadataSummary":moment.metadata_summary,"metadataCorrelationId":moment.metadata_correlation_id,
+        "authors":moment.author_json.as_deref().map(parsed_moment_authors),"syncRecordOnly":moment.sync_record_only,
+    })
+}
+
+enum HistoryPosition {
+    Text(HistoryMomentPosition),
+    Protected(HistoryMomentPosition),
+    Marker(HistoryMarkerPosition),
+}
+
+fn encode_history_page(read: HistoryPageRead, limit: usize) -> Result<Value, WireError> {
+    let start_cursor = read.cursor;
+    let mut cursor = start_cursor.clone();
+    let mut rows = Vec::new();
+    for moment in read.moments {
+        let pos = HistoryMomentPosition {
+            recorded_at_ms: moment.recorded_at_ms,
+            moment_order: moment.moment_order,
+        };
+        rows.push((
+            moment.recorded_at_ms,
+            0,
+            moment.moment_order,
+            moment.moment_id.clone(),
+            history_moment_json(&moment),
+            HistoryPosition::Text(pos),
+        ));
+    }
+    for moment in read.protected_moments {
+        let pos = HistoryMomentPosition {
+            recorded_at_ms: moment.recorded_at_ms,
+            moment_order: moment.moment_order,
+        };
+        rows.push((
+            moment.recorded_at_ms,
+            1,
+            moment.moment_order,
+            moment.moment_id.clone(),
+            secret_moment_json(&moment),
+            HistoryPosition::Protected(pos),
+        ));
+    }
+    for version in read.version_markers {
+        let pos = HistoryMarkerPosition {
+            created_at_ms: version.created_at_ms,
+            version_id: version.version_id.clone(),
+        };
+        rows.push((
+            version.created_at_ms,
+            2,
+            0,
+            version.version_id.clone(),
+            version_record_json(&version),
+            HistoryPosition::Marker(pos),
+        ));
+    }
+    rows.sort_by(|a, b| {
+        b.0.cmp(&a.0)
+            .then(a.1.cmp(&b.1))
+            .then(b.2.cmp(&a.2))
+            .then(b.3.cmp(&a.3))
+    });
+    let available = rows.len();
+    let mut result = json!({"activeVersion":version_record_json(&read.active_version),"moments":[],"protectedMoments":[],"versionMarkers":[],"startCursor":start_cursor,"nextCursor":null,"latestMomentOrder":cursor.text_fence});
+    let base_bytes = serde_json::to_vec(&result)
+        .map_err(|_| WireError::new(ErrorCode::Internal, "history metadata encoding failed"))?
+        .len();
+    let mut used_bytes = 0;
+    let mut included = 0;
+    for (_, _, _, _, row, position) in rows.into_iter().take(limit) {
+        let mut next = cursor.clone();
+        let key = match position {
+            HistoryPosition::Text(position) => {
+                next.text = Some(position);
+                "moments"
+            }
+            HistoryPosition::Protected(position) => {
+                next.protected = Some(position);
+                "protectedMoments"
+            }
+            HistoryPosition::Marker(position) => {
+                next.marker = Some(position);
+                "versionMarkers"
+            }
+        };
+        let row_bytes = serde_json::to_vec(&row)
+            .map_err(|_| WireError::new(ErrorCode::Internal, "history metadata encoding failed"))?
+            .len();
+        let cursor_bytes = serde_json::to_vec(&next)
+            .map_err(|_| WireError::new(ErrorCode::Internal, "history cursor encoding failed"))?
+            .len();
+        if base_bytes + used_bytes + row_bytes + cursor_bytes + included + 16
+            > MOMENTS_PAGE_BYTE_BUDGET
+        {
+            break;
+        }
+        used_bytes += row_bytes;
+        result[key].as_array_mut().expect("history array").push(row);
+        cursor = next;
+        included += 1;
+    }
+    if included == 0 && available > 0 {
+        return Err(WireError::new(
+            ErrorCode::Internal,
+            "a history metadata row exceeds the page byte budget",
+        ));
+    }
+    if included < available {
+        result["nextCursor"] = json!(cursor);
+    }
+    Ok(result)
+}
+
 /// A moment's stored author list, entry by entry. A value that is not a
 /// nonempty list reads as one corrupt entry.
 fn parsed_moment_authors(raw: &str) -> Value {
@@ -185,17 +362,46 @@ fn parsed_moment_author(value: Value) -> Value {
     let Some(object) = value.as_object() else {
         return corrupt();
     };
+    if object.get("kind").and_then(Value::as_str) == Some("unattributed") {
+        return if object.len() == 1 { value } else { corrupt() };
+    }
     let bounded_ids = |keys: &[&str]| {
         keys.iter().all(|key| {
             object
                 .get(*key)
                 .and_then(Value::as_str)
-                .is_some_and(|v| !v.is_empty() && v.len() <= 500)
+                .is_some_and(|v| !v.is_empty() && v.len() <= MAX_AUTHOR_FIELD_BYTES)
+        })
+    };
+    // A field of a relay-admitted live author snapshot, within its admission bound.
+    let snapshot_text = |key: &str| {
+        object.get(key).and_then(Value::as_str).is_some_and(|v| {
+            !v.is_empty()
+                && v.len() <= MAX_AUTHOR_FIELD_BYTES
+                && !v.bytes().any(|b| b.is_ascii_control())
         })
     };
     let principal_ok = object
         .get("onBehalfOf")
         .is_none_or(|value| value.as_str().is_some_and(|value| !value.is_empty()));
+    // A snapshot names an account holder or a link's public principal with
+    // the name the relay stored for them.
+    let snapshot_fields = match object.get("kind").and_then(Value::as_str) {
+        Some("human") if object.contains_key("humanName") => Some(["humanId", "humanName"]),
+        Some("link") if object.contains_key("publicPrincipalId") => {
+            Some(["publicPrincipalId", "label"])
+        }
+        _ => None,
+    };
+    if let Some(fields) = snapshot_fields {
+        // The relay confirms an admitted person, never a link holder.
+        let marker = object.get("kind").and_then(Value::as_str) == Some("human")
+            && object.contains_key("relayConfirmed");
+        let valid = object.len() == 3 + usize::from(marker)
+            && fields.into_iter().all(&snapshot_text)
+            && (!marker || object.get("relayConfirmed") == Some(&Value::Bool(true)));
+        return if valid { value } else { corrupt() };
+    }
     if object.get("kind").and_then(Value::as_str) == Some("public") {
         let valid = object.len() == 3 && bounded_ids(&["principalId", "grantId"]);
         return if valid { value } else { corrupt() };
@@ -235,59 +441,58 @@ fn parsed_moment_author(value: Value) -> Value {
         return if valid { value } else { corrupt() };
     }
     if object.get("kind").and_then(Value::as_str) == Some("human") {
-        let valid = object.len() == 2 + usize::from(object.contains_key("onBehalfOf"))
+        let valid = object.len()
+            == 2 + usize::from(object.contains_key("onBehalfOf"))
+                + usize::from(object.contains_key("relayConfirmed"))
             && bounded_ids(&["humanId"])
+            && object
+                .get("relayConfirmed")
+                .is_none_or(|value| value == &Value::Bool(true))
             && principal_ok;
         return if valid { value } else { corrupt() };
     }
     let kind_ok = object.get("kind").and_then(Value::as_str) == Some("agent");
-    let nonempty = |key: &str| {
-        object
-            .get(key)
-            .and_then(Value::as_str)
-            .is_some_and(|v| !v.is_empty())
-    };
+    let agent_id = object
+        .get("agentId")
+        .and_then(Value::as_str)
+        .filter(|v| !v.is_empty());
     let run_ok = match object.get("agentRunId") {
         None => true,
         Some(Value::String(v)) => !v.is_empty(),
         Some(_) => false,
     };
-    if kind_ok && nonempty("agentId") && principal_ok && run_ok {
-        let mut author = json!({
-            "kind": "agent",
-            "agentId": object["agentId"],
-        });
-        if let Some(principal) = object.get("onBehalfOf") {
-            author["onBehalfOf"] = principal.clone();
-        }
-        // The contract field is OPTIONAL (`agentRunId?: string`), never
-        // nullable — omit it when absent, exactly as pickMomentAuthor does.
-        if let Some(run_id) = object.get("agentRunId") {
-            author["agentRunId"] = run_id.clone();
-        }
-        // Named only past 0; a depth an older build stored unchecked reads as none.
-        if let Some(depth) = dohc_engine_domain::agent_author_depth(object.get("depth")) {
-            author["depth"] = json!(depth);
-        }
-        author
-    } else {
-        corrupt()
+    let name_ok = !object.contains_key("agentName") || snapshot_text("agentName");
+    match agent_id {
+        Some(agent_id) if kind_ok && principal_ok && run_ok && name_ok => json!(AgentAuthorWire {
+            kind: "agent",
+            agent_id,
+            agent_name: object.get("agentName").and_then(Value::as_str),
+            on_behalf_of: object.get("onBehalfOf").and_then(Value::as_str),
+            agent_run_id: object.get("agentRunId").and_then(Value::as_str),
+            // Named only past 0; a depth an older build stored unchecked reads as none.
+            depth: dohc_engine_domain::agent_author_depth(object.get("depth")),
+        }),
+        _ => corrupt(),
     }
 }
 
-/// Withhold both payload bodies of one serialized moment, in place. The
-/// digests beside them stay, so the caller hydrates through
-/// `versionedText.readBlob` — the shape an over-cap moment already arrives in.
-pub(super) fn withhold_moment_texts(moment: &mut Value) {
-    for (text, limit) in [
-        ("afterText", "afterInbandLimitBytes"),
-        ("beforeText", "beforeInbandLimitBytes"),
-    ] {
-        if moment.get(text).is_some_and(|body| !body.is_null()) {
-            moment[text] = Value::Null;
-            moment[limit] = json!(MAX_DESKTOP_CAPTURE_TEXT_BYTES);
-        }
-    }
+/// An agent author, rebuilt from its checked fields so nothing else it stored
+/// rides along.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AgentAuthorWire<'a> {
+    kind: &'static str,
+    agent_id: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    agent_name: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    on_behalf_of: Option<&'a str>,
+    // The contract field is OPTIONAL (`agentRunId?: string`), never
+    // nullable — omit it when absent, exactly as pickMomentAuthor does.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    agent_run_id: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    depth: Option<u32>,
 }
 
 impl EngineService {
@@ -338,6 +543,12 @@ impl EngineService {
         params: Value,
     ) -> Result<Value, WireError> {
         let params: HistoryPageParams = parse(params)?;
+        if params.object_id.as_deref() == Some("") {
+            return Err(WireError::new(
+                ErrorCode::InvalidParams,
+                "objectId must not be empty",
+            ));
+        }
         let open = self.open(handle.as_ref())?;
         validate_workspace_param(Some(&params.workspace_id), &open.workspace_id)?;
 
@@ -369,49 +580,21 @@ impl EngineService {
             }
         }
 
+        let limit = params.limit.unwrap_or(50).clamp(1, 50) as usize;
         let cancellation = OperationCancellation::new(ctx);
         let read = Self::read_under_ctx(
             &cancellation,
             "history.page",
             open.actor.history_page(
                 open.workspace_id.clone(),
-                params.limit.unwrap_or(200).min(500),
-                params.before_moment_order,
-                HISTORY_PROTECTED_MOMENT_LIMIT + 1,
+                params.version_id,
+                params.object_id,
+                limit,
+                params.cursor,
             ),
         )
         .await?;
-        let text_page = encode_moment_page(&read.text_moment_page)?;
-        let lower_recorded_at_ms = text_page.next_before_moment_order.and_then(|_| {
-            read.text_moment_page
-                .moments
-                .get(text_page.included.saturating_sub(1))
-                .map(|moment| moment.recorded_at_ms)
-        });
-        let protected_moments: Vec<&SecretMomentRecord> = read
-            .protected_moments
-            .iter()
-            .filter(|moment| {
-                lower_recorded_at_ms.is_none_or(|lower| moment.recorded_at_ms > lower)
-                    && read
-                        .upper_recorded_at_ms
-                        .is_none_or(|upper| moment.recorded_at_ms <= upper)
-            })
-            .collect();
-        let row_truncated = protected_moments.len() > HISTORY_PROTECTED_MOMENT_LIMIT;
-        let protected_rows: Vec<Value> = protected_moments
-            .into_iter()
-            .take(HISTORY_PROTECTED_MOMENT_LIMIT)
-            .map(secret_moment_json)
-            .collect();
-        let included = byte_budget_cut_serialized(&protected_rows, MOMENTS_PAGE_BYTE_BUDGET);
-        let byte_truncated = included < protected_rows.len();
-        Ok(json!({
-            "activeVersion": version_record_json(&read.active_version),
-            "textMomentPage": text_page.into_json(),
-            "protectedMoments": &protected_rows[..included],
-            "protectedTruncated": row_truncated || byte_truncated,
-        }))
+        encode_history_page(read, limit)
     }
 
     pub(super) async fn moments_get(
@@ -444,11 +627,216 @@ impl EngineService {
             Some(moment) => moment_json(&moment),
         })
     }
+
+    pub(super) async fn publication_applied(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: PublicationAppliedParams = parse(params)?;
+        if params.request_id.is_empty() || params.moment_id.is_empty() {
+            return Err(WireError::new(
+                ErrorCode::InvalidParams,
+                "requestId and momentId must not be empty",
+            ));
+        }
+        let open = self.open(handle.as_ref())?;
+        let cancellation = OperationCancellation::new(ctx);
+        let applied = Self::read_under_ctx(
+            &cancellation,
+            "versionedText.publicationApplied",
+            open.actor.publication_applied(
+                open.workspace_id.clone(),
+                params.request_id,
+                params.moment_id,
+            ),
+        )
+        .await?;
+        Ok(json!(applied))
+    }
+}
+
+#[cfg(test)]
+mod moment_projection_tests {
+    use super::*;
+    use dohc_engine_domain::MomentOp;
+
+    const CAP: i64 = MAX_DESKTOP_CAPTURE_TEXT_BYTES as i64;
+
+    fn moment(after_text: Option<&str>, after_byte_length: Option<i64>) -> MomentRecord {
+        MomentRecord {
+            moment_order: 3,
+            moment_id: "moment".to_owned(),
+            version_id: "main".to_owned(),
+            object_id: "object".to_owned(),
+            path: "notes/a.md".to_owned(),
+            recorded_at_ms: 9,
+            operation: MomentOp::Write,
+            after_content_kind: "text".to_owned(),
+            after_blob_sha256: Some("after-digest".to_owned()),
+            after_binary_sha256: None,
+            before_present: true,
+            before_blob_sha256: None,
+            before_content_kind: "binary".to_owned(),
+            before_binary_sha256: Some("before-digest".to_owned()),
+            before_latest_moment_id: Some("earlier".to_owned()),
+            metadata_origin: "api".to_owned(),
+            metadata_summary: None,
+            metadata_correlation_id: Some("correlation".to_owned()),
+            author_json: Some(
+                json!([{"kind":"agent", "agentId":"agent", "depth":0, "model":"m"}]).to_string(),
+            ),
+            sync_record_only: false,
+            after_text: after_text.map(str::to_owned),
+            after_byte_length,
+            before_text: None,
+            before_byte_length: Some(CAP + 1),
+            before_path: Some("notes/old.md".to_owned()),
+        }
+    }
+
+    #[test]
+    fn a_moment_carries_every_field_and_both_limits() {
+        assert_eq!(
+            moment_json(&moment(Some("body"), Some(4))),
+            json!({
+                "momentOrder": 3,
+                "momentId": "moment",
+                "versionId": "main",
+                "objectId": "object",
+                "path": "notes/a.md",
+                "recordedAtMs": 9,
+                "operation": "write",
+                "afterContentKind": "text",
+                "afterBlobSha256": "after-digest",
+                "afterBinarySha256": null,
+                "beforePresent": true,
+                "beforeContentKind": "binary",
+                "beforeBlobSha256": null,
+                "beforeBinarySha256": "before-digest",
+                "beforeLatestMomentId": "earlier",
+                "metadataOrigin": "api",
+                "metadataSummary": null,
+                "metadataCorrelationId": "correlation",
+                "authors": [{"kind":"agent", "agentId":"agent"}],
+                "syncRecordOnly": false,
+                "afterText": "body",
+                "afterByteLength": 4,
+                "afterInbandLimitBytes": null,
+                // A binary preimage never names the text limit, whatever its length.
+                "beforeText": null,
+                "beforeByteLength": CAP + 1,
+                "beforeInbandLimitBytes": null,
+                "beforePath": "notes/old.md",
+            })
+        );
+    }
+
+    #[test]
+    fn a_moment_names_the_limit_only_for_an_unhydrated_text_body_past_the_cap() {
+        let at_cap = "a".repeat(MAX_DESKTOP_CAPTURE_TEXT_BYTES);
+        let past_cap = "a".repeat(MAX_DESKTOP_CAPTURE_TEXT_BYTES + 1);
+        let limit = json!(MAX_DESKTOP_CAPTURE_TEXT_BYTES);
+        // (stored body, stored length) -> (capped, withheld) as (afterText, afterInbandLimitBytes).
+        let cases = [
+            (
+                Some(at_cap.as_str()),
+                Some(CAP),
+                (json!(at_cap), Value::Null),
+                (Value::Null, limit.clone()),
+            ),
+            // A hydrated body past the cap goes out null, and names no limit.
+            (
+                Some(past_cap.as_str()),
+                Some(CAP + 1),
+                (Value::Null, Value::Null),
+                (Value::Null, Value::Null),
+            ),
+            (
+                None,
+                Some(CAP),
+                (Value::Null, Value::Null),
+                (Value::Null, Value::Null),
+            ),
+            (
+                None,
+                Some(CAP + 1),
+                (Value::Null, limit.clone()),
+                (Value::Null, limit.clone()),
+            ),
+            // A negative stored length reads as past the cap, as it always has.
+            (
+                None,
+                Some(-1),
+                (Value::Null, limit.clone()),
+                (Value::Null, limit.clone()),
+            ),
+            (
+                None,
+                None,
+                (Value::Null, Value::Null),
+                (Value::Null, Value::Null),
+            ),
+        ];
+        for (text, byte_length, capped, withheld) in cases {
+            let record = moment(text, byte_length);
+            for (projected, expected) in [
+                (moment_json(&record), capped),
+                (withheld_moment_json(&record), withheld),
+            ] {
+                assert_eq!(
+                    (
+                        projected["afterText"].clone(),
+                        projected["afterInbandLimitBytes"].clone()
+                    ),
+                    expected,
+                    "{byte_length:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn an_over_budget_first_row_degrades_to_metadata_and_the_cursor_moves_past_it() {
+        let mut heavy = moment(Some("body"), Some(4));
+        heavy.metadata_summary = Some("s".repeat(MOMENTS_PAGE_BYTE_BUDGET));
+        let mut next = moment(Some("next"), Some(4));
+        next.moment_order = 2;
+        let page = MomentPage {
+            moments: vec![heavy.clone(), next],
+            next_before_moment_order: None,
+            latest_moment_order: Some(3),
+        };
+        let encoded = encode_moment_page(&page).expect("a degraded row still ships");
+        assert_eq!(encoded.included, 1);
+        assert_eq!(encoded.next_before_moment_order, Some(3));
+        // Both bodies go, the binary preimage's too, and both name the
+        // in-band content cap rather than the per-body text cap.
+        let mut expected = moment_json(&heavy);
+        for (text, limit) in [
+            ("afterText", "afterInbandLimitBytes"),
+            ("beforeText", "beforeInbandLimitBytes"),
+        ] {
+            expected[text] = Value::Null;
+            expected[limit] = json!(MAX_INBAND_CONTENT_BYTES);
+        }
+        assert_eq!(encoded.rows[0], expected);
+
+        heavy.metadata_summary = Some("s".repeat(crate::rpc::reads::SINGLE_ROW_HARD_CAP_BYTES));
+        let refused = encode_moment_page(&MomentPage {
+            moments: vec![heavy],
+            next_before_moment_order: None,
+            latest_moment_order: Some(3),
+        });
+        assert!(refused.is_err(), "a row past the hard cap is refused");
+    }
 }
 
 #[cfg(test)]
 mod relay_author_tests {
     use super::parsed_moment_authors;
+    use dohc_engine_domain::MAX_AUTHOR_FIELD_BYTES;
     use serde_json::{Value, json};
 
     /// One stored author, read back as the entry history returns for it.
@@ -459,6 +847,39 @@ mod relay_author_tests {
             panic!("one author in, one author out: {authors}");
         };
         author.clone()
+    }
+
+    #[test]
+    fn keeps_only_a_true_relay_confirmation_marker() {
+        let confirmed = json!({"kind":"human","humanId":"reader","relayConfirmed":true});
+        assert_eq!(parsed_moment_author(&confirmed.to_string()), confirmed);
+        for marker in [json!(false), json!(null), json!("true"), json!(1)] {
+            assert_eq!(
+                parsed_moment_author(
+                    &json!({"kind":"human","humanId":"reader","relayConfirmed":marker}).to_string()
+                ),
+                json!({"corrupt":true})
+            );
+        }
+    }
+
+    #[test]
+    fn reads_live_human_and_agent_snapshot_as_native_moment_authors() {
+        let human = json!({"kind":"human", "humanId":"owner", "humanName":"Owner proof"});
+        let agent =
+            json!({"kind":"agent", "agentId":"hosted-agent", "onBehalfOf":"owner", "depth":0});
+        assert_eq!(
+            parsed_moment_authors(&json!([human, agent]).to_string()),
+            json!([{"kind":"human", "humanId":"owner", "humanName":"Owner proof"}, {"kind":"agent", "agentId":"hosted-agent", "onBehalfOf":"owner"}])
+        );
+        for name in [json!(null), json!(""), json!("x".repeat(513))] {
+            assert_eq!(
+                parsed_moment_author(
+                    &json!({"kind":"human", "humanId":"owner", "humanName":name}).to_string()
+                ),
+                json!({"corrupt":true})
+            );
+        }
     }
 
     #[test]
@@ -495,6 +916,54 @@ mod relay_author_tests {
             assert_eq!(
                 parsed_moment_author(&malformed.to_string()),
                 json!({"corrupt":true})
+            );
+        }
+    }
+
+    /// A hosted agent's live edit settles with the relay-admitted account
+    /// holder beside the declared agent, and a link holder's with its public
+    /// principal. History reads every field back.
+    #[test]
+    fn preserves_live_author_snapshots_and_refuses_malformed_ones() {
+        let human = json!({"kind":"human", "humanId":"owner", "humanName":"Sam 🐈"});
+        let agent = json!({"kind":"agent", "agentId":"writer", "agentName":"Writer", "onBehalfOf":"owner", "depth":1});
+        let link = json!({"kind":"link", "publicPrincipalId":"public_1", "label":"Anonymous"});
+        assert_eq!(
+            parsed_moment_authors(&json!([human, agent, link]).to_string()),
+            json!([human, agent, link])
+        );
+        let longest = "\"".repeat(MAX_AUTHOR_FIELD_BYTES);
+        for author in [
+            json!({"kind":"human", "humanId":longest, "humanName":longest}),
+            json!({"kind":"link", "publicPrincipalId":longest, "label":longest}),
+            json!({"kind":"agent", "agentId":"writer", "agentName":longest}),
+        ] {
+            assert_eq!(parsed_moment_author(&author.to_string()), author);
+        }
+        let over = format!("{}x", "é".repeat(MAX_AUTHOR_FIELD_BYTES / 2));
+        for malformed in [
+            json!({"kind":"human", "humanId":"owner", "humanName":""}),
+            json!({"kind":"human", "humanId":"", "humanName":"Sam"}),
+            json!({"kind":"human", "humanId":"owner", "humanName":over}),
+            json!({"kind":"human", "humanId":over, "humanName":"Sam"}),
+            json!({"kind":"human", "humanId":"owner", "humanName":"Sam\n"}),
+            json!({"kind":"human", "humanId":"owner", "humanName":42}),
+            json!({"kind":"human", "humanId":"owner", "humanName":"Sam", "onBehalfOf":"owner"}),
+            json!({"kind":"link", "publicPrincipalId":"public_1"}),
+            json!({"kind":"link", "publicPrincipalId":"public_1", "label":""}),
+            json!({"kind":"link", "publicPrincipalId":over, "label":"Anonymous"}),
+            json!({"kind":"link", "publicPrincipalId":"public_1", "label":over}),
+            json!({"kind":"link", "publicPrincipalId":"public_1", "label":"Anonymous", "grantId":"grant"}),
+            json!({"kind":"link", "grantId":"grant", "grantGeneration":2, "principalId":"holder", "publicPrincipalId":"public_1"}),
+            json!({"kind":"agent", "agentId":"writer", "agentName":""}),
+            json!({"kind":"agent", "agentId":"writer", "agentName":over}),
+            json!({"kind":"agent", "agentId":"writer", "agentName":"Writer\u{7f}"}),
+            json!({"kind":"agent", "agentId":"writer", "agentName":null}),
+        ] {
+            assert_eq!(
+                parsed_moment_author(&malformed.to_string()),
+                json!({"corrupt":true}),
+                "{malformed}"
             );
         }
     }
@@ -541,6 +1010,31 @@ mod relay_author_tests {
             let mut stored = named.clone();
             stored["depth"] = depth;
             assert_eq!(parsed_moment_author(&stored.to_string()), named, "{stored}");
+        }
+    }
+
+    #[test]
+    fn rebuilds_an_agent_author_from_its_checked_fields_only() {
+        let stored = json!({
+            "kind": "agent",
+            "agentId": "agent",
+            "onBehalfOf": "local",
+            "agentRunId": "run",
+            "depth": 2,
+            "model": "unlisted",
+        });
+        assert_eq!(
+            parsed_moment_author(&stored.to_string()),
+            json!({"kind":"agent", "agentId":"agent", "onBehalfOf":"local", "agentRunId":"run", "depth":2})
+        );
+        for run in [json!(null), json!(""), json!(7)] {
+            let mut malformed = stored.clone();
+            malformed["agentRunId"] = run;
+            assert_eq!(
+                parsed_moment_author(&malformed.to_string()),
+                json!({"corrupt":true}),
+                "{malformed}"
+            );
         }
     }
 
@@ -594,6 +1088,51 @@ mod relay_author_tests {
     }
 
     #[test]
+    fn keeps_shared_author_ids_up_to_the_author_field_bound() {
+        // A live share admits identifiers of up to 512 bytes; quotes escape
+        // to twice that in the stored JSON.
+        let longest = "\"".repeat(MAX_AUTHOR_FIELD_BYTES);
+        let named = json!({"kind":"named", "userId":longest, "grantId":longest, "grantGeneration":9_007_199_254_740_991_i64});
+        let link = json!({"kind":"link", "grantId":longest, "grantGeneration":9_007_199_254_740_991_i64, "principalId":longest});
+        assert_eq!(parsed_moment_author(&named.to_string()), named);
+        assert_eq!(parsed_moment_author(&link.to_string()), link);
+        // One byte over, from a 2-byte character, is corrupt in every field.
+        let over = format!("{}x", "é".repeat(MAX_AUTHOR_FIELD_BYTES / 2));
+        assert_eq!(over.len(), MAX_AUTHOR_FIELD_BYTES + 1);
+        for (author, field) in [
+            (&named, "userId"),
+            (&named, "grantId"),
+            (&link, "grantId"),
+            (&link, "principalId"),
+        ] {
+            let mut oversized = author.clone();
+            oversized[field] = json!(over);
+            assert_eq!(
+                parsed_moment_author(&oversized.to_string()),
+                json!({"corrupt":true}),
+                "{field}"
+            );
+        }
+    }
+
+    #[test]
+    fn preserves_live_authors_and_refuses_mixed_shapes() {
+        for author in [
+            json!({"kind":"human", "humanId":"ana", "humanName":"Ana"}),
+            json!({"kind":"unattributed"}),
+            json!({"kind":"link", "publicPrincipalId":"public-ana", "label":"Ana"}),
+        ] {
+            assert_eq!(parsed_moment_author(&author.to_string()), author);
+            let mut mixed = author.clone();
+            mixed["principalId"] = json!("private");
+            assert_eq!(
+                parsed_moment_author(&mixed.to_string()),
+                json!({"corrupt":true})
+            );
+        }
+    }
+
+    #[test]
     fn preserves_link_author_and_refuses_incomplete_or_mixed_shapes() {
         let author =
             json!({"kind":"link", "grantId":"grant", "grantGeneration":2, "principalId":"holder"});
@@ -604,7 +1143,6 @@ mod relay_author_tests {
             json!({"kind":"link", "grantId":"", "grantGeneration":2, "principalId":"holder"}),
             json!({"kind":"link", "grantId":"grant", "grantGeneration":0, "principalId":"holder"}),
             json!({"kind":"link", "grantId":"grant", "grantGeneration":"2", "principalId":"holder"}),
-            json!({"kind":"link", "grantId":"grant", "grantGeneration":2, "principalId":"p".repeat(501)}),
             // A claimed name never rides a link author, and neither does a user.
             json!({"kind":"link", "grantId":"grant", "grantGeneration":2, "principalId":"holder", "displayName":"Ana"}),
             json!({"kind":"link", "grantId":"grant", "grantGeneration":2, "principalId":"holder", "userId":"ana"}),
@@ -615,6 +1153,36 @@ mod relay_author_tests {
                 json!({"corrupt":true}),
                 "{malformed}"
             );
+        }
+    }
+}
+
+#[cfg(test)]
+mod snapshot_confirmation_tests {
+    use super::parsed_moment_author;
+    use serde_json::json;
+
+    /// The relay confirms an admitted person in either shape. Any other
+    /// marker value, extra field, or marker on a link holder reads as corrupt.
+    #[test]
+    fn reads_confirmed_people_and_refuses_malformed_markers() {
+        for author in [
+            json!({"kind":"human","humanId":"reader","humanName":"Reader","relayConfirmed":true}),
+            json!({"kind":"human","humanId":"reader","humanName":"Reader"}),
+            json!({"kind":"human","humanId":"reader","relayConfirmed":true}),
+        ] {
+            assert_eq!(parsed_moment_author(author.clone()), author);
+        }
+        for author in [
+            json!({"kind":"human","humanId":"reader","humanName":"Reader","relayConfirmed":false}),
+            json!({"kind":"human","humanId":"reader","humanName":"Reader","relayConfirmed":"true"}),
+            json!({"kind":"human","humanId":"reader","humanName":"Reader","relayConfirmed":null}),
+            json!({"kind":"human","humanId":"reader","relayConfirmed":false}),
+            json!({"kind":"human","humanId":"reader","humanName":"Re\nader","relayConfirmed":true}),
+            json!({"kind":"human","humanId":"reader","humanName":"Reader","relayConfirmed":true,"extra":1}),
+            json!({"kind":"link","publicPrincipalId":"public_1","label":"Anonymous","relayConfirmed":true}),
+        ] {
+            assert_eq!(parsed_moment_author(author), json!({"corrupt": true}));
         }
     }
 }

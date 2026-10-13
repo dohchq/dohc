@@ -7,7 +7,7 @@ import {
 import { badRequest, notFound, relayError } from "./errors";
 import { assertChatAuthorship, assertClientLogProvenance, parseAuthenticatedLogOps, type LogAuthorNameLookup } from "./relayLogInputs";
 import { parseCursor, parseLimit, parseString, parseWorkspaceId, readJsonObject } from "./requestInputs";
-import type { EnforceWorkspaceIdentityResult, SyncRelayStorage } from "./storage";
+import type { EnforceWorkspaceIdentityResult, SyncRelayLogRow, SyncRelayStorage } from "./storage";
 import { MAX_DISCUSSION_ACTIVITY_HOLD_MS, MAX_OPS_PER_REQUEST, MAX_ORIGIN_ID_CHARS } from "./wireLimits";
 
 export type WorkspaceReplicationRoute =
@@ -25,6 +25,7 @@ export function createWorkspaceReplicationRoutes(
     | "getWorkspaceBootstrap"
     | "rotateWorkspaceIdentity"
     | "appendLogBatch"
+    | "prepareLogAppend"
     | "fetchLogPage"
     | "fetchLogCoordinate"
     | "getWorkspaceIdentity"
@@ -35,6 +36,7 @@ export function createWorkspaceReplicationRoutes(
   nowMs: () => number,
   discussionActivity: Pick<DiscussionActivityHub, "wakeLog" | "wait">,
   lookupUserDisplayName?: LogAuthorNameLookup,
+  onLogRead?: (request: Request, workspaceId: string, rows: readonly SyncRelayLogRow[]) => void,
 ) {
   async function respondToWorkspaceRegistration(
     request: Request,
@@ -125,8 +127,9 @@ export function createWorkspaceReplicationRoutes(
       // parseLogOp and appendLogBatch, so the relay rejects the full batch
       // before it writes any operation.
       assertChatAuthorship(input.ops, actor.userId);
-      assertClientLogProvenance(originId, input.ops);
+      assertClientLogProvenance(originId, input.ops, true);
       const ops = await parseAuthenticatedLogOps(input.ops, actor.userId, lookupUserDisplayName);
+      await storage.prepareLogAppend({workspaceId:route.workspaceId,originId,ops},request.signal);
       const result = storage.appendLogBatch({
         workspaceId: route.workspaceId,
         originId,
@@ -153,6 +156,7 @@ export function createWorkspaceReplicationRoutes(
         inserted: result.inserted,
         skipped: result.skipped,
         currentMaxOriginSeq: result.currentMaxOriginSeq,
+        ...(result.settlementRefusals ? {settlementRefusals:result.settlementRefusals} : {}),
       });
     }
 
@@ -185,7 +189,7 @@ export function createWorkspaceReplicationRoutes(
         sinceRelaySeq: since,
         limit,
       });
-      return jsonResponse({
+      const response = jsonResponse({
         ok: true,
         ops: page.rows.map((row) => ({
           relaySeq: row.relaySeq,
@@ -196,6 +200,7 @@ export function createWorkspaceReplicationRoutes(
           payload: JSON.parse(row.payloadJson) as unknown,
           recordedAtMs: row.recordedAtMs,
           ...(row.admittedAuthorSnapshot === undefined ? {} : {admittedAuthorSnapshot: row.admittedAuthorSnapshot}),
+          ...(row.settlementAdmission === undefined ? {} : {settlementAdmission:row.settlementAdmission}),
         })),
         // A hidden epoch floor is a read filter, not a served log row. An
         // empty response therefore cannot advance the caller's cursor: the
@@ -204,6 +209,8 @@ export function createWorkspaceReplicationRoutes(
         nextCursor: page.rows.length === 0 ? requestedSince : page.nextCursor,
         hasMore: page.hasMore,
       });
+      onLogRead?.(request, route.workspaceId, page.rows);
+      return response;
     }
 
     if (route.route === "log-coordinate" && request.method === "GET") {
@@ -229,19 +236,15 @@ export function createWorkspaceReplicationRoutes(
         payload: JSON.parse(row.payloadJson) as unknown,
         recordedAtMs: row.recordedAtMs,
         ...(row.admittedAuthorSnapshot === undefined ? {} : {admittedAuthorSnapshot: row.admittedAuthorSnapshot}),
+          ...(row.settlementAdmission === undefined ? {} : {settlementAdmission:row.settlementAdmission}),
       };
-      if (row.relaySeq <= epochLogFloor) {
-        return jsonResponse({
-          ok: true,
-          status: "presentBelowEpochFloor",
-          op,
-        });
-      }
-      return jsonResponse({
+      const response = jsonResponse({
         ok: true,
-        status: "present",
+        status: row.relaySeq <= epochLogFloor ? "presentBelowEpochFloor" : "present",
         op,
       });
+      onLogRead?.(request, route.workspaceId, [row]);
+      return response;
     }
 
     throw relayError("method_not_allowed");

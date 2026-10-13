@@ -1,6 +1,6 @@
 use crate::EngineService;
 use crate::lock;
-use crate::rpc::automations::automation_claim_json;
+use crate::rpc::automations::automation_claimed_event_json;
 use dohc_engine_domain::AutomationClaim;
 use serde_json::Value;
 use serde_json::json;
@@ -200,10 +200,10 @@ pub(super) fn emit_automation_claimed(
     claims: &[AutomationClaim],
 ) {
     for claim in claims {
-        let mut payload = automation_claim_json(claim);
-        let object = payload.as_object_mut().expect("claim is an object");
-        object.insert("workspaceId".to_owned(), json!(workspace_id));
-        events.emit(AUTOMATION_CLAIMED_EVENT, payload);
+        events.emit(
+            AUTOMATION_CLAIMED_EVENT,
+            automation_claimed_event_json(workspace_id, claim),
+        );
     }
 }
 
@@ -358,6 +358,7 @@ mod tests {
         let mut rx = events.subscribe();
         let claims = vec![
             dohc_engine_domain::AutomationClaim {
+                parent_claim_id: None,
                 claim_id: "atc_one".to_owned(),
                 automation_id: "collection:tasks#triage".to_owned(),
                 trigger: dohc_engine_domain::AutomationTrigger::Coordinate {
@@ -383,6 +384,7 @@ mod tests {
                 updated_at_ms: 1_100,
             },
             dohc_engine_domain::AutomationClaim {
+                parent_claim_id: None,
                 claim_id: "atc_two".to_owned(),
                 automation_id: "collection:tasks#janitor".to_owned(),
                 trigger: dohc_engine_domain::AutomationTrigger::History { history_id: 7 },

@@ -7,14 +7,14 @@ use dohc_engine_sync::{
     BlobHaveResponse, BlobUploadRequest, ClaimRequest, ClaimResponse, DirectWritePushOutcome,
     EpochRequest, EpochResponse, KeyEnvelopeDownloadRequest, KeyEnvelopeDownloadResponse,
     KeyEnvelopeRequest, KeyEnvelopeResponse, LogCoordinateRequest, LogCoordinateResponse,
-    MAX_BLOB_DOWNLOAD_BATCH, ProbeRequest, ProbeResponse, PullRequest, PullResponse, PushRequest,
-    PushResponse, RecoverResponse, RelayCursor, RelayError, RelaySyncClient, RelayTransport,
-    ShareBlobRequest, ShareBlobUploadRequest, ShareCollectionWriteRequest,
-    ShareCollectionWriteResponse, ShareCursor, ShareLogPushRequest, ShareProposalSubmitOutcome,
-    ShareProposalSubmitRequest, ShareProposalSubmitResponse, ShareViewPullOutcome,
-    ShareViewRequest, ShareViewResponse, SharedChannelPullOutcome, SharedChannelPushOutcome,
-    SharedChannelRequest, SharedChannelResponse, SyncPassOutcome, adopt_join_identity,
-    create_claim_identity, read_sync_identity,
+    MAX_BASE_REPAIR_LOOKUPS, MAX_BLOB_DOWNLOAD_BATCH, ProbeRequest, ProbeResponse, PullRequest,
+    PullResponse, PushRequest, PushResponse, PushWorkspaceProgress, RecoverResponse, RelayCursor,
+    RelayError, RelaySyncClient, RelayTransport, ShareBlobRequest, ShareBlobUploadRequest,
+    ShareCollectionWriteRequest, ShareCollectionWriteResponse, ShareCursor, ShareLogPushRequest,
+    ShareProposalSubmitOutcome, ShareProposalSubmitRequest, ShareProposalSubmitResponse,
+    ShareViewPullOutcome, ShareViewRequest, ShareViewResponse, SharedChannelPullOutcome,
+    SharedChannelPushOutcome, SharedChannelRequest, SharedChannelResponse, SyncError,
+    SyncPassOutcome, adopt_join_identity, create_claim_identity, read_sync_identity,
 };
 use dohc_engine_sync_http::HttpRelayTransport;
 use std::sync::{Arc, Mutex};
@@ -154,7 +154,7 @@ const RELAY_IO_ABORTED: &str = "relay-io-aborted";
 enum RelayIoRequest {
     Push(PushRequest),
     Pull(PullRequest),
-    LookupCoordinate(LogCoordinateRequest),
+    LookupCoordinates(Vec<LogCoordinateRequest>),
     Probe(ProbeRequest),
     Claim(ClaimRequest),
     RotateEpoch(EpochRequest),
@@ -176,7 +176,7 @@ enum RelayIoRequest {
 enum RelayIoResponse {
     Push(PushResponse),
     Pull(PullResponse),
-    LookupCoordinate(LogCoordinateResponse),
+    LookupCoordinates(Vec<LogCoordinateResponse>),
     Probe(ProbeResponse),
     Claim(ClaimResponse),
     RotateEpoch(EpochResponse),
@@ -204,7 +204,9 @@ struct DeferredRelayState {
 
 #[derive(Clone, Default)]
 struct DeferredRelayTransport {
+    native_settlements: bool,
     state: Arc<Mutex<DeferredRelayState>>,
+    push_progress: Arc<Mutex<PushWorkspaceProgress>>,
 }
 
 impl DeferredRelayTransport {
@@ -222,31 +224,45 @@ impl DeferredRelayTransport {
             .iter()
             .position(|(completed, _)| same_io_request(completed, &request))
         {
-            let release = matches!(
-                state.completed[index].0,
-                RelayIoRequest::Push(_)
-                    | RelayIoRequest::ShareLogPush(_)
-                    | RelayIoRequest::UploadBlob(_)
-                    | RelayIoRequest::DownloadBlobs(_)
-                    | RelayIoRequest::UploadKeyEnvelope(_)
-                    | RelayIoRequest::DownloadKeyEnvelope(_)
-                    | RelayIoRequest::ShareBlob(_)
-                    | RelayIoRequest::ShareProposalSubmit(_)
-            ) || matches!(
-                &state.completed[index].1,
-                Ok(RelayIoResponse::BlobsHave(response)) if response.missing.is_empty()
-            );
-            let uploaded = matches!(state.completed[index].0, RelayIoRequest::UploadBlob(_));
+            // Only the stable repair probe must survive operation replay.
+            let release = !matches!(&state.completed[index].0, RelayIoRequest::Push(push) if push.ops.is_empty() && push.after_seq == -1)
+                && matches!(
+                    state.completed[index].0,
+                    RelayIoRequest::Push(_)
+                        | RelayIoRequest::ShareLogPush(_)
+                        | RelayIoRequest::UploadBlob(_)
+                        | RelayIoRequest::DownloadBlobs(_)
+                        | RelayIoRequest::UploadKeyEnvelope(_)
+                        | RelayIoRequest::DownloadKeyEnvelope(_)
+                        | RelayIoRequest::ShareBlob(_)
+                        | RelayIoRequest::ShareProposalSubmit(_)
+                );
+            let uploaded = match &state.completed[index].0 {
+                RelayIoRequest::UploadBlob(upload) => Some((
+                    upload.workspace_id.clone(),
+                    upload.replication_epoch.clone(),
+                    upload.stream_identity.clone(),
+                    upload.sha256.clone(),
+                )),
+                _ => None,
+            };
             let projected = match &mut state.completed[index].1 {
                 Ok(response) => project(response).ok_or(RelayError::InvalidResponse),
                 Err(error) => Err(error.clone()),
             };
             if release && projected.is_ok() {
                 let _ = state.completed.swap_remove(index);
-                if uploaded {
-                    state
-                        .completed
-                        .retain(|(request, _)| !matches!(request, RelayIoRequest::BlobsHave(_)));
+                if let Some((workspace, epoch, stream, sha)) = uploaded {
+                    for (request, result) in &mut state.completed {
+                        if let RelayIoRequest::BlobsHave(have) = request
+                            && have.workspace_id == workspace
+                            && have.replication_epoch == epoch
+                            && have.stream_identity == stream
+                            && let Ok(RelayIoResponse::BlobsHave(response)) = result
+                        {
+                            response.missing.retain(|missing| missing != &sha);
+                        }
+                    }
                 }
             }
             return projected;
@@ -315,6 +331,16 @@ impl DeferredRelayTransport {
     }
 }
 
+fn coordinate_cache_key(request: &LogCoordinateRequest) -> (&str, &str, &str, &str, i64) {
+    (
+        &request.workspace_id,
+        &request.replication_epoch,
+        &request.stream_identity,
+        &request.origin_id,
+        request.origin_seq,
+    )
+}
+
 /// Whether a completed request answers `request`. A share upload is named by
 /// its share and content hash, because its completed copy no longer holds the
 /// content.
@@ -342,15 +368,94 @@ macro_rules! relay_transport_method {
 }
 
 impl RelayTransport for DeferredRelayTransport {
+    fn publishes_native_settlements(&self) -> bool {
+        self.native_settlements
+    }
+
     relay_transport_method!(push, PushRequest, Push, PushResponse, Push);
     relay_transport_method!(pull, PullRequest, Pull, PullResponse, Pull);
-    relay_transport_method!(
-        lookup_log_coordinate,
-        LogCoordinateRequest,
-        LookupCoordinate,
-        LogCoordinateResponse,
-        LookupCoordinate
-    );
+    fn lookup_log_coordinate(
+        &self,
+        request: LogCoordinateRequest,
+    ) -> Result<LogCoordinateResponse, RelayError> {
+        self.lookup_log_coordinates(vec![request])?
+            .pop()
+            .ok_or(RelayError::InvalidResponse)
+    }
+    fn lookup_log_coordinates(
+        &self,
+        requests: Vec<LogCoordinateRequest>,
+    ) -> Result<Vec<LogCoordinateResponse>, RelayError> {
+        if requests.is_empty() || requests.len() > MAX_BASE_REPAIR_LOOKUPS {
+            return Err(RelayError::InvalidResponse);
+        }
+        // Completed groups leave the next replay's repair query. Match answers by
+        // coordinate so pending groups cannot shift and repeat a completed batch.
+        let mut answers = {
+            let state = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut known = std::collections::BTreeMap::new();
+            for (request, result) in &state.completed {
+                match (request, result) {
+                    (
+                        RelayIoRequest::LookupCoordinates(batch),
+                        Ok(RelayIoResponse::LookupCoordinates(responses)),
+                    ) => {
+                        if batch.len() != responses.len() {
+                            return Err(RelayError::InvalidResponse);
+                        }
+                        for (coordinate, response) in batch.iter().zip(responses) {
+                            known.insert(coordinate_cache_key(coordinate), response);
+                        }
+                    }
+                    (RelayIoRequest::LookupCoordinates(batch), Err(error))
+                        if requests.iter().any(|request| batch.contains(request)) =>
+                    {
+                        return Err(error.clone());
+                    }
+                    _ => {}
+                }
+            }
+            requests
+                .iter()
+                .map(|request| {
+                    known
+                        .get(&coordinate_cache_key(request))
+                        .map(|answer| (*answer).clone())
+                })
+                .collect::<Vec<_>>()
+        };
+        let missing = requests
+            .iter()
+            .zip(&answers)
+            .filter(|(_, answer)| answer.is_none())
+            .map(|(request, _)| request.clone())
+            .collect::<Vec<_>>();
+        if !missing.is_empty() {
+            let resolved = self.resolve(
+                RelayIoRequest::LookupCoordinates(missing),
+                |response| match response {
+                    RelayIoResponse::LookupCoordinates(values) => Some(values.clone()),
+                    _ => None,
+                },
+            )?;
+            let mut resolved = resolved.into_iter();
+            for answer in &mut answers {
+                if answer.is_none() {
+                    *answer = Some(resolved.next().ok_or(RelayError::InvalidResponse)?);
+                }
+            }
+            if resolved.next().is_some() {
+                return Err(RelayError::InvalidResponse);
+            }
+        }
+        answers
+            .into_iter()
+            .map(|answer| answer.ok_or(RelayError::InvalidResponse))
+            .collect()
+    }
     relay_transport_method!(probe, ProbeRequest, Probe, ProbeResponse, Probe);
     relay_transport_method!(claim_workspace, ClaimRequest, Claim, ClaimResponse, Claim);
     relay_transport_method!(
@@ -458,8 +563,387 @@ impl RelayTransport for DeferredRelayTransport {
 mod relay_bench;
 
 #[cfg(test)]
+#[path = "relay_push_tests.rs"]
+mod relay_push_tests;
+
+#[cfg(test)]
+#[path = "relay_base_repair_tests.rs"]
+mod relay_base_repair_tests;
+
+#[cfg(test)]
 mod deferred_relay_tests {
     use super::*;
+
+    #[test]
+    fn a_lane_drain_is_not_repeated_when_a_push_resumes_after_blob_io() {
+        use dohc_engine_domain::{VersionedTextStore, WriteText};
+        use dohc_engine_testkit::{ScratchDir, engine_db_path};
+        let scratch = ScratchDir::new().unwrap();
+        let path = engine_db_path(&scratch).unwrap();
+        let mut store = EngineStore::open(&path, 1).unwrap();
+        VersionedTextStore::new(&mut store)
+            .ensure_main_version("ws", "main", 1, &NoFaults)
+            .unwrap();
+        dohc_engine_sync::adopt_join_identity(
+            &mut store, "ws", "local", "epoch", "stream", 1, &NoFaults,
+        )
+        .unwrap();
+        store
+            .write_with(&NoFaults, |tx| {
+                tx.execute(
+                    "INSERT INTO sync_relay_push_state VALUES ('ws','local',-1)",
+                    [],
+                )
+                .unwrap();
+                Ok::<_, dohc_engine_storage::StorageError>(())
+            })
+            .unwrap();
+        let write = |store: &mut EngineStore, id: &str, text: &str, now| {
+            VersionedTextStore::new(store)
+                .write_text(
+                    &WriteText {
+                        workspace_id: "ws".into(),
+                        version_id: "main".into(),
+                        object_id: "doc".into(),
+                        moment_id: id.into(),
+                        path: "doc.md".into(),
+                        text: text.into(),
+                        metadata_origin: "ydoc".into(),
+                        metadata_summary: None,
+                        metadata_correlation_id: None,
+                        author_json: None,
+                        now_ms: now,
+                        request_id: None,
+                    },
+                    &NoFaults,
+                )
+                .unwrap();
+        };
+        write(&mut store, "a", "A", 10);
+        store.write_with(&NoFaults, |tx| {
+            tx.execute("INSERT INTO ydoc_docs(workspace_id,version_id,object_id,content_kind,regime,lineage_claim_status,updated_at_ms,file_export_lane,path) VALUES ('ws','main','doc','plaintext','local-only','unclaimed',1,1,'doc.md')", []).unwrap();
+            Ok::<_, dohc_engine_storage::StorageError>(())
+        }).unwrap();
+        let transport = DeferredRelayTransport::default();
+        let operation = RelayOperation::Push {
+            workspace_id: "ws".into(),
+            now_ms: 20,
+            max_read_bytes: 0,
+        };
+        let mut cache = WriterDocCache::new();
+        let run = |store: &mut EngineStore, cache: &mut WriterDocCache| {
+            execute_relay_operation(
+                store,
+                cache,
+                transport.clone(),
+                operation.clone(),
+                &LeaseRegistry::default(),
+                &ClaimAnnouncer::default(),
+            )
+        };
+        assert!(matches!(run(&mut store, &mut cache),
+            Err(RuntimeError::Relay(RelayError::Local(reason))) if reason == RELAY_IO_PENDING));
+        let pending = transport.take_pending().unwrap();
+        assert!(matches!(pending, RelayIoRequest::BlobsHave(_)));
+        write(&mut store, "b", "B", 30);
+        transport.complete(
+            pending,
+            Ok(RelayIoResponse::BlobsHave(BlobHaveResponse {
+                missing: Vec::new(),
+            })),
+        );
+        assert!(matches!(run(&mut store, &mut cache),
+            Err(RuntimeError::Relay(RelayError::Local(reason))) if reason == RELAY_IO_PENDING));
+        let exported: Vec<String> = store.read_with(|conn| {
+            conn.prepare("SELECT json_extract(payload_json,'$.momentId') FROM replication_log WHERE imported=0 AND op_kind='moment.append' ORDER BY rowid")?
+                .query_map([], |row| row.get(0))?.collect::<Result<_, rusqlite::Error>>()
+        }).unwrap();
+        assert_eq!(
+            exported,
+            ["a"],
+            "a sync continuation must not select a newer settle"
+        );
+        for continuation in 0..8 {
+            let pending = transport.take_pending().unwrap();
+            let response = match &pending {
+                RelayIoRequest::BlobsHave(_) => RelayIoResponse::BlobsHave(BlobHaveResponse {
+                    missing: Vec::new(),
+                }),
+                RelayIoRequest::Push(request) => RelayIoResponse::Push(PushResponse {
+                    settlement_refusals: Vec::new(),
+                    accepted: request.ops.len(),
+                    inserted: request.ops.len(),
+                    skipped: 0,
+                    current_max_origin_seq: request.ops.last().unwrap().origin_seq,
+                }),
+                other => panic!("unexpected I/O: {other:?}"),
+            };
+            transport.complete(pending, Ok(response));
+            match run(&mut store, &mut cache) {
+                Ok(_) => break,
+                Err(RuntimeError::Relay(RelayError::Local(reason)))
+                    if reason == RELAY_IO_PENDING =>
+                {
+                    assert!(continuation < 7, "the push did not finish");
+                }
+                other => panic!("unexpected outcome: {other:?}"),
+            }
+        }
+        let count = || {
+            store.read_with(|conn| conn.query_row(
+            "SELECT count(*) FROM replication_log WHERE imported=0 AND op_kind='moment.append'", [], |row| row.get::<_, i64>(0))).unwrap()
+        };
+        assert_eq!(count(), 1);
+        let second_phase = execute_relay_operation(
+            &mut store,
+            &mut cache,
+            transport.clone(),
+            operation.clone(),
+            &LeaseRegistry::default(),
+            &ClaimAnnouncer::default(),
+        );
+        assert!(
+            second_phase.is_ok(),
+            "a second phase must keep the same selection"
+        );
+        let next_operation = RelayOperation::Push {
+            workspace_id: "ws".into(),
+            now_ms: 40,
+            max_read_bytes: 0,
+        };
+        let next = execute_relay_operation(
+            &mut store,
+            &mut cache,
+            DeferredRelayTransport::default(),
+            next_operation,
+            &LeaseRegistry::default(),
+            &ClaimAnnouncer::default(),
+        );
+        assert!(matches!(next,
+            Err(RuntimeError::Relay(RelayError::Local(reason))) if reason == RELAY_IO_PENDING));
+        let exported: Vec<String> = store.read_with(|conn| {
+            conn.prepare("SELECT json_extract(payload_json,'$.momentId') FROM replication_log WHERE imported=0 AND op_kind='moment.append' ORDER BY rowid")?
+                .query_map([], |row| row.get(0))?.collect::<Result<_, rusqlite::Error>>()
+        }).unwrap();
+        assert_eq!(
+            exported,
+            ["a", "b"],
+            "the next pass selects the later settle"
+        );
+    }
+
+    #[test]
+    fn base_repair_probe_is_sent_once_across_pull_replays_without_cursor_advance() {
+        base_repair_probe_across_replays(false);
+    }
+
+    #[test]
+    fn base_repair_push_between_pull_replays_keeps_stale_probe_safe() {
+        base_repair_probe_across_replays(true);
+    }
+
+    fn base_repair_probe_across_replays(push_between_replays: bool) {
+        use dohc_engine_sync::{ReplicationEnvelope, SyncError};
+        use rusqlite::params;
+        let (_scratch, _path, mut store) = dohc_engine_testkit::open_store();
+        dohc_engine_domain::VersionedTextStore::new(&mut store)
+            .ensure_main_version("ws", "main", 1000, &NoFaults)
+            .unwrap();
+        dohc_engine_sync::adopt_join_identity(
+            &mut store, "ws", "local", "epoch", "stream", 1000, &NoFaults,
+        )
+        .unwrap();
+        store.write_with(&NoFaults, |tx| {
+            tx.execute("INSERT INTO file_objects (workspace_id,object_id,created_at_ms) VALUES ('ws','doc',1000)", []).map_err(|error| SyncError::Storage(dohc_engine_storage::StorageError::persist_public(error)))?;
+            tx.execute("INSERT INTO sync_relay_push_state (workspace_id,origin_id,pushed_seq) VALUES ('ws','local',-1)", []).map_err(|error| SyncError::Storage(dohc_engine_storage::StorageError::persist_public(error)))?;
+            Ok::<_,SyncError>(())
+        }).unwrap();
+        let doc = dohc_engine_collab::Ydoc::wire();
+        doc.plaintext_insert(0, "base");
+        let bytes = doc.encode_full_state();
+        let claim = dohc_engine_storage::hex_sha256(&bytes);
+        let key = dohc_engine_collab::DocKey::new("ws", "main", "doc").unwrap();
+        dohc_engine_collab::claim_base(
+            &mut store,
+            &key,
+            dohc_engine_collab::ContentKind::Plaintext,
+            &bytes,
+            &NoFaults,
+            1000,
+        )
+        .unwrap();
+        let payload = serde_json::json!({"versionId":"main","objectId":"doc","path":"doc.md","contentKind":"plaintext","lineageClaimId":claim,"updateBlobSha256":claim,"isBaseState":true});
+        store.write_with(&NoFaults, |tx| {
+            for (origin,seq) in [("local",0),("local",1),("peer",0)] {
+                tx.execute("INSERT INTO replication_log (workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms,imported,apply_disposition) VALUES ('ws',?1,?2,'ydoc.update',?3,1000,?4,'applied')",params![origin,seq,payload.to_string(),i64::from(origin!="local")]).map_err(|error| SyncError::Storage(dohc_engine_storage::StorageError::persist_public(error)))?;
+                tx.execute("INSERT INTO ydoc_base_relay_candidates (workspace_id,version_id,object_id,lineage_claim_id,origin_id,origin_seq) VALUES ('ws','main','doc',?1,?2,?3)",params![claim,origin,seq]).map_err(|error| SyncError::Storage(dohc_engine_storage::StorageError::persist_public(error)))?;
+            }
+            Ok::<_,SyncError>(())
+        }).unwrap();
+        let committed = ReplicationEnvelope {
+            settlement_admission: None,
+            admitted_author_snapshot: None,
+            workspace_id: "ws".into(),
+            origin_id: "local".into(),
+            origin_seq: 0,
+            op_kind: "ydoc.update".into(),
+            payload: payload.clone(),
+            recorded_at_ms: 1000,
+            relay_seq: Some(100),
+        };
+        let transport = DeferredRelayTransport::default();
+        let mut cache = WriterDocCache::new();
+        let operation = RelayOperation::Pull {
+            workspace_id: "ws".into(),
+            now_ms: 1200,
+        };
+        let mut probes = 0;
+        let mut lookups = 0;
+        let mut runs = 0;
+        loop {
+            runs += 1;
+            assert!(
+                runs <= 6,
+                "repair repeated a relay request: probes={probes}, lookups={lookups}"
+            );
+            match execute_relay_operation(
+                &mut store,
+                &mut cache,
+                transport.clone(),
+                operation.clone(),
+                &LeaseRegistry::default(),
+                &ClaimAnnouncer::default(),
+            ) {
+                Ok(RelayOperationOutcome::Sync(SyncPassOutcome::Complete { .. })) => break,
+                Err(RuntimeError::Relay(RelayError::Local(reason)))
+                    if reason == RELAY_IO_PENDING =>
+                {
+                    let request = transport.take_pending().unwrap();
+                    let response = match &request {
+                        RelayIoRequest::Pull(_) => RelayIoResponse::Pull(PullResponse {
+                            ops: Vec::new(),
+                            next_cursor: 0,
+                            has_more: false,
+                        }),
+                        RelayIoRequest::Push(push) => {
+                            assert!(push.ops.is_empty());
+                            probes += 1;
+                            RelayIoResponse::Push(PushResponse {
+                                settlement_refusals: Vec::new(),
+                                accepted: 0,
+                                inserted: 0,
+                                skipped: 0,
+                                current_max_origin_seq: 0,
+                            })
+                        }
+                        RelayIoRequest::LookupCoordinates(coordinates) => {
+                            lookups += coordinates.len();
+                            RelayIoResponse::LookupCoordinates(
+                                coordinates
+                                    .iter()
+                                    .map(|coordinate| {
+                                        if coordinate.origin_id == "local" {
+                                            let mut op = committed.clone();
+                                            op.origin_seq = coordinate.origin_seq;
+                                            op.relay_seq = Some(100 + coordinate.origin_seq);
+                                            LogCoordinateResponse::Present(op)
+                                        } else {
+                                            LogCoordinateResponse::Absent
+                                        }
+                                    })
+                                    .collect(),
+                            )
+                        }
+                        other => panic!("unexpected repair request: {other:?}"),
+                    };
+                    transport.complete(request, Ok(response));
+                    if push_between_replays && runs == 2 {
+                        // Complete a separate push while this pull retains the earlier maximum of zero.
+                        let push_transport = DeferredRelayTransport::default();
+                        for push_run in 0..4 {
+                            match execute_relay_operation(
+                                &mut store,
+                                &mut WriterDocCache::new(),
+                                push_transport.clone(),
+                                RelayOperation::Push {
+                                    workspace_id: "ws".into(),
+                                    now_ms: 1201,
+                                    max_read_bytes: 0,
+                                },
+                                &LeaseRegistry::default(),
+                                &ClaimAnnouncer::default(),
+                            ) {
+                                Ok(RelayOperationOutcome::Sync(SyncPassOutcome::Complete {
+                                    ..
+                                })) => break,
+                                Err(RuntimeError::Relay(RelayError::Local(reason)))
+                                    if reason == RELAY_IO_PENDING =>
+                                {
+                                    assert!(push_run < 3, "push failed to finish");
+                                    let request = push_transport.take_pending().unwrap();
+                                    let response = match &request {
+                                        RelayIoRequest::BlobsHave(_) => {
+                                            RelayIoResponse::BlobsHave(BlobHaveResponse {
+                                                missing: Vec::new(),
+                                            })
+                                        }
+                                        RelayIoRequest::Push(push) => {
+                                            assert_eq!(push.ops.len(), 2);
+                                            RelayIoResponse::Push(PushResponse {
+                                                settlement_refusals: Vec::new(),
+                                                accepted: 2,
+                                                inserted: 1,
+                                                skipped: 1,
+                                                current_max_origin_seq: 1,
+                                            })
+                                        }
+                                        other => {
+                                            panic!("unexpected concurrent push request: {other:?}")
+                                        }
+                                    };
+                                    push_transport.complete(request, Ok(response));
+                                }
+                                other => panic!("unexpected concurrent push result: {other:?}"),
+                            }
+                        }
+                        assert_eq!(
+                            dohc_engine_sync::read_pushed_seq(&store, "ws", "local").unwrap(),
+                            1
+                        );
+                        // A newly captured base still needs the cached bound when the pull resumes.
+                        store.write_with(&NoFaults, |tx| {
+                            tx.execute("INSERT INTO replication_log (workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms,imported,apply_disposition) VALUES ('ws','local',2,'ydoc.update',?1,1000,0,'applied')", [payload.to_string()]).unwrap();
+                            tx.execute("INSERT INTO ydoc_base_relay_candidates (workspace_id,version_id,object_id,lineage_claim_id,origin_id,origin_seq) VALUES ('ws','main','doc',?1,'local',2)", [&claim]).unwrap();
+                            Ok::<_,SyncError>(())
+                        }).unwrap();
+                    }
+                }
+                other => panic!("unexpected pull result: {other:?}"),
+            }
+        }
+        assert_eq!(
+            (probes, lookups, runs),
+            if push_between_replays {
+                (1, 3, 4)
+            } else {
+                (1, 2, 4)
+            }
+        );
+        assert_eq!(
+            dohc_engine_sync::read_pushed_seq(&store, "ws", "local").unwrap(),
+            if push_between_replays { 1 } else { -1 }
+        );
+        let relay_seq: Option<i64> = store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT base_relay_seq FROM ydoc_docs WHERE object_id='doc'",
+                    [],
+                    |row| row.get(0),
+                )
+            })
+            .unwrap();
+        assert_eq!(relay_seq, Some(100));
+    }
 
     /// An operation reruns from its start after each relay call. Send changes
     /// uploads each changed file's content before it submits, so a completed
@@ -631,6 +1115,8 @@ mod deferred_relay_tests {
             after_seq: -1,
             ops: (0..dohc_engine_sync::MAX_PUSH_OPS_PER_BATCH)
                 .map(|origin_seq| dohc_engine_sync::ReplicationEnvelope {
+                    settlement_admission: None,
+                    admitted_author_snapshot: None,
                     workspace_id: "workspace".to_owned(),
                     origin_id: "origin".to_owned(),
                     origin_seq: i64::try_from(origin_seq).expect("sequence"),
@@ -644,6 +1130,7 @@ mod deferred_relay_tests {
         transport.complete(
             RelayIoRequest::Push(request.clone()),
             Ok(RelayIoResponse::Push(PushResponse {
+                settlement_refusals: Vec::new(),
                 accepted: request.ops.len(),
                 inserted: request.ops.len(),
                 skipped: 0,
@@ -654,6 +1141,7 @@ mod deferred_relay_tests {
         assert_eq!(
             transport.push(request).expect("consume completed push"),
             PushResponse {
+                settlement_refusals: Vec::new(),
                 accepted: dohc_engine_sync::MAX_PUSH_OPS_PER_BATCH,
                 inserted: dohc_engine_sync::MAX_PUSH_OPS_PER_BATCH,
                 skipped: 0,
@@ -777,7 +1265,7 @@ mod deferred_relay_tests {
     }
 
     #[test]
-    fn completed_empty_blob_inventory_is_released_without_an_upload() {
+    fn completed_empty_blob_inventory_answers_later_page_replays() {
         let transport = DeferredRelayTransport::default();
         let request = BlobHaveRequest {
             workspace_id: "workspace".to_owned(),
@@ -791,22 +1279,16 @@ mod deferred_relay_tests {
                 missing: Vec::new(),
             })),
         );
-        assert!(
-            transport
-                .blobs_have(request)
-                .expect("consume inventory")
-                .missing
-                .is_empty()
-        );
-        assert!(
-            transport
-                .state
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .completed
-                .is_empty(),
-            "retaining a successful all-present inventory holds its request vector"
-        );
+        for _ in 0..2 {
+            assert!(
+                transport
+                    .blobs_have(request.clone())
+                    .expect("consume inventory")
+                    .missing
+                    .is_empty()
+            );
+        }
+        assert!(transport.take_pending().is_none());
     }
 
     #[test]
@@ -1133,6 +1615,27 @@ pub enum ShareViewIdentityRecord {
 }
 
 impl ActorHandle {
+    pub async fn share_record_creation_statuses(
+        &self,
+        workspace_id: String,
+        share_id: String,
+        paths: Vec<String>,
+        granted: dohc_engine_sync::ShareGrant,
+    ) -> Result<std::collections::BTreeMap<String, dohc_engine_sync::DirectWriteStatus>, RuntimeError>
+    {
+        self.run(move |store, _cache| {
+            dohc_engine_sync::read_record_creation_statuses(
+                store,
+                &workspace_id,
+                &share_id,
+                &paths,
+                &granted,
+            )
+            .map_err(RuntimeError::from)
+        })
+        .await
+    }
+
     pub async fn share_direct_status(
         &self,
         workspace_id: String,
@@ -1226,11 +1729,39 @@ impl ActorHandle {
         token: CancellationToken,
         reservation: Option<Arc<dyn Send + Sync>>,
     ) -> Result<RelayOperationOutcome, RuntimeError> {
-        let transport = DeferredRelayTransport::default();
         if token.is_cancelled() {
             return Err(RuntimeError::Cancelled);
         }
         let http_transport = Arc::new(build_http_transport(configuration)?);
+        // Keep the deferred I/O state out of callers' inline RPC futures.
+        Box::pin(self.relay_with_io(
+            http_transport.publishes_native_settlements(),
+            operation,
+            leases,
+            token,
+            reservation,
+            move |request, token| execute_http_request(Arc::clone(&http_transport), request, token),
+        ))
+        .await
+    }
+
+    async fn relay_with_io<F, Fut>(
+        &self,
+        native_settlements: bool,
+        operation: RelayOperation,
+        leases: LeaseRegistry,
+        token: CancellationToken,
+        reservation: Option<Arc<dyn Send + Sync>>,
+        execute_io: F,
+    ) -> Result<RelayOperationOutcome, RuntimeError>
+    where
+        F: Fn(RelayIoRequest, CancellationToken) -> Fut,
+        Fut: std::future::Future<Output = Result<RelayIoResponse, RelayError>>,
+    {
+        let transport = DeferredRelayTransport {
+            native_settlements,
+            ..DeferredRelayTransport::default()
+        };
         loop {
             if token.is_cancelled() {
                 return Err(RuntimeError::Cancelled);
@@ -1269,16 +1800,11 @@ impl ActorHandle {
                     let request = transport
                         .take_pending()
                         .ok_or(RuntimeError::Relay(RelayError::InvalidResponse))?;
-                    let http_transport = Arc::clone(&http_transport);
                     let io_request = request.clone();
                     let result = tokio::select! {
                         biased;
                         () = token.cancelled() => return Err(RuntimeError::Cancelled),
-                        result = execute_http_request(
-                            http_transport,
-                            io_request,
-                            token.clone(),
-                        ) => result,
+                        result = execute_io(io_request, token.clone()) => result,
                     };
                     transport.complete(request, result);
                 }
@@ -1357,6 +1883,7 @@ fn build_debug_http_transport(
 }
 
 const MAX_CONCURRENT_BLOB_DOWNLOADS: usize = 4;
+const MAX_CONCURRENT_COORDINATE_LOOKUPS: usize = 8;
 const RELAY_IO_CANCELLED: &str = "relay-io-cancelled";
 
 fn relay_io_aborted() -> RelayError {
@@ -1372,6 +1899,13 @@ async fn execute_http_request(
     request: RelayIoRequest,
     token: CancellationToken,
 ) -> Result<RelayIoResponse, RelayError> {
+    if let RelayIoRequest::LookupCoordinates(requests) = request {
+        return execute_coordinate_lookup_batch(requests, token, move |request, worker_token| {
+            transport.lookup_log_coordinate_cancellable(request, || worker_token.is_cancelled())
+        })
+        .await
+        .map(RelayIoResponse::LookupCoordinates);
+    }
     if let RelayIoRequest::DownloadBlobs(request) = request {
         let download_transport = Arc::clone(&transport);
         return execute_blob_download_batch(request, token, move |request, worker_token| {
@@ -1384,6 +1918,63 @@ async fn execute_http_request(
     tokio::task::spawn_blocking(move || execute_blocking_http_request(&transport, request))
         .await
         .map_err(|_| relay_io_aborted())?
+}
+
+async fn execute_coordinate_lookup_batch<F>(
+    requests: Vec<LogCoordinateRequest>,
+    token: CancellationToken,
+    lookup: F,
+) -> Result<Vec<LogCoordinateResponse>, RelayError>
+where
+    F: Fn(LogCoordinateRequest, CancellationToken) -> Result<LogCoordinateResponse, RelayError>
+        + Clone
+        + Send
+        + 'static,
+{
+    if requests.is_empty() || requests.len() > MAX_BASE_REPAIR_LOOKUPS {
+        return Err(RelayError::InvalidResponse);
+    }
+    let workers = token.child_token();
+    let _cancel_workers = workers.clone().drop_guard();
+    let mut results = vec![None; requests.len()];
+    let mut tasks = tokio::task::JoinSet::new();
+    let mut requests = requests.into_iter().enumerate();
+    loop {
+        if token.is_cancelled() {
+            return Err(relay_io_cancelled());
+        }
+        while tasks.len() < MAX_CONCURRENT_COORDINATE_LOOKUPS {
+            let Some((index, request)) = requests.next() else {
+                break;
+            };
+            let lookup = lookup.clone();
+            let worker_token = workers.clone();
+            tasks.spawn_blocking(move || {
+                let result = if worker_token.is_cancelled() {
+                    Err(relay_io_cancelled())
+                } else {
+                    lookup(request, worker_token)
+                };
+                (index, result)
+            });
+        }
+        if tasks.is_empty() {
+            break;
+        }
+        let joined = tokio::select! {
+            biased;
+            () = token.cancelled() => return Err(relay_io_cancelled()),
+            joined = tasks.join_next() => joined,
+        };
+        let (index, result) = joined
+            .ok_or(RelayError::InvalidResponse)?
+            .map_err(|_| relay_io_aborted())?;
+        results[index] = Some(result?);
+    }
+    results
+        .into_iter()
+        .map(|result| result.ok_or(RelayError::InvalidResponse))
+        .collect()
 }
 
 /// Fan one deterministic bridge request into bounded blocking GETs. At the
@@ -1477,9 +2068,7 @@ fn execute_blocking_http_request(
     match request {
         RelayIoRequest::Push(request) => transport.push(request).map(RelayIoResponse::Push),
         RelayIoRequest::Pull(request) => transport.pull(request).map(RelayIoResponse::Pull),
-        RelayIoRequest::LookupCoordinate(request) => transport
-            .lookup_log_coordinate(request)
-            .map(RelayIoResponse::LookupCoordinate),
+        RelayIoRequest::LookupCoordinates(_) => Err(RelayError::InvalidResponse),
         RelayIoRequest::Probe(request) => transport.probe(request).map(RelayIoResponse::Probe),
         RelayIoRequest::Claim(request) => transport
             .claim_workspace(request)
@@ -1548,19 +2137,36 @@ fn run_relay_operation(
     operation: RelayOperation,
     leases: &LeaseRegistry,
 ) -> Result<RelayOperationOutcome, RuntimeError> {
+    if store.is_passive()
+        && !matches!(
+            &operation,
+            RelayOperation::Pull { .. }
+                | RelayOperation::CommitCursor { .. }
+                | RelayOperation::AdoptJoinIdentity { .. }
+        )
+    {
+        return Err(RuntimeError::Sync(SyncError::InvalidInput {
+            reason: "passive store cannot execute this relay operation",
+        }));
+    }
     match operation {
         RelayOperation::Push {
             workspace_id,
             now_ms,
             max_read_bytes,
         } => client
-            .push_workspace(
+            .resume_push_workspace(
                 store,
                 &workspace_id,
                 &NoFaults,
                 leases,
                 now_ms,
                 max_read_bytes,
+                &mut client
+                    .transport()
+                    .push_progress
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner),
             )
             .map(RelayOperationOutcome::Sync)
             .map_err(RuntimeError::from),

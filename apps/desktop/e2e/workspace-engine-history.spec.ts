@@ -1,3 +1,4 @@
+import { activityPin } from "../src/testPins";
 import { expect, test } from "@playwright/test";
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
@@ -34,7 +35,7 @@ test("a workspace shows engine moments and restores a file end-to-end", async ()
     // Wait for this fixture's startup capture before editing. The next moment
     // must arrive through capture.momentRecorded and the History refresh,
     // rather than through startup reconciliation.
-    await page.getByTestId("activity-history").click();
+    await page.getByTestId(activityPin("history")).click();
     await expect(
       page
         .locator(
@@ -65,6 +66,14 @@ test("a workspace shows engine moments and restores a file end-to-end", async ()
     const diffPage = page.getByTestId("engine-moment-diff-page");
     await expect(diffPage).toBeVisible();
     await expect(page.getByTestId("engine-diff-lines")).toContainText("second draft");
+    // Word level: only the changed word is marked, as a deletion and an
+    // insertion, on lines a screen reader names as removed and added.
+    const lines = page.getByTestId("engine-diff-lines");
+    await expect(lines.locator("del")).toHaveText("first");
+    await expect(lines.locator("ins")).toHaveText("second");
+    await expect(lines.locator("[data-kind='removed'] code")).toHaveText("Removed: first draft");
+    await expect(lines.locator("[data-kind='added'] code")).toHaveText("Added: second draft");
+    await expect(page.getByTestId("engine-diff-counts")).toContainText("1 line added, 1 line removed");
 
     // Engine restore: back to the state before this change...
     await page.getByTestId("engine-diff-restore-file").click();

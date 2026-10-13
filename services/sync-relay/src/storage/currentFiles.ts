@@ -5,6 +5,36 @@ import { rowToLogRow } from "./rows";
 import { classifyEngineFilePath } from "@dohc/security-contract/engine-path-floor";
 import type { StorageContext } from "./context";
 import { pathCollisionKey } from "../pathCollisionKey";
+import { parseCollectionRecordIdentity } from "@dohc/workspace-contracts/collection-values";
+
+const RECORD_IDENTITIES_MIGRATION_ID = "current-record-identities-v1";
+const RECORD_IDENTITY_INSERT_SQL = `INSERT INTO sync_relay_current_record_ids (workspace_id, version_id, path, record_id)
+  VALUES (?, ?, ?, ?) ON CONFLICT(workspace_id, version_id, path) DO UPDATE SET record_id = excluded.record_id`;
+
+function recordIdentity(content: unknown): string | null {
+  if (!(content instanceof Uint8Array)) return null;
+  try {
+    return parseCollectionRecordIdentity(new TextDecoder().decode(content));
+  } catch { return null; }
+}
+
+function initializeRecordIdentitySchema(db: SqliteDb): void {
+  db.exec(`CREATE TABLE IF NOT EXISTS sync_relay_current_record_ids (
+    workspace_id TEXT NOT NULL, version_id TEXT NOT NULL, path TEXT NOT NULL, record_id TEXT NOT NULL,
+    PRIMARY KEY (workspace_id, version_id, path),
+    FOREIGN KEY (workspace_id, version_id, path) REFERENCES sync_relay_current_files(workspace_id, version_id, path) ON DELETE CASCADE
+  ) STRICT;
+  CREATE INDEX IF NOT EXISTS idx_sync_relay_current_record_ids_id ON sync_relay_current_record_ids(workspace_id, version_id, record_id);`);
+  if (db.prepare("SELECT 1 FROM sync_relay_migrations WHERE migration_id = ?").get(RECORD_IDENTITIES_MIGRATION_ID)) return;
+  const insert = db.prepare(RECORD_IDENTITY_INSERT_SQL);
+  for (const row of db.prepare(`SELECT f.workspace_id, f.version_id, f.path, substr(b.content, 1, 65536) AS frontmatter
+    FROM sync_relay_current_files f JOIN sync_relay_blobs b ON b.workspace_id = f.workspace_id AND b.sha256 = f.blob_sha256
+    WHERE f.content_kind = 'text'`).iterate()) {
+    const id = String(row.path).toLowerCase().endsWith(".md") ? recordIdentity(row.frontmatter) : null;
+    if (id) insert.run(String(row.workspace_id), String(row.version_id), String(row.path), id);
+  }
+  db.prepare("INSERT INTO sync_relay_migrations (migration_id, completed_at_ms) VALUES (?, ?)").run(RECORD_IDENTITIES_MIGRATION_ID, Date.now());
+}
 
 const CURRENT_FILE_KEYS_MIGRATION_ID = "current-file-collision-keys-v1";
 // A new fold needs a new migration id: the fill below then keys every
@@ -19,6 +49,7 @@ const CURRENT_FILE_KEY_INSERT_SQL = `
 // any spelling?" is an index lookup, not a scan. A row goes with its current
 // file. The first start with this table fills it from the current files.
 export function initializeCurrentFileKeySchema(db: SqliteDb): void {
+  initializeRecordIdentitySchema(db);
   db.exec(`
     CREATE TABLE IF NOT EXISTS sync_relay_current_file_keys (
       workspace_id TEXT NOT NULL,
@@ -147,6 +178,11 @@ export const VERSION_SNAPSHOT_BLOB_INSERT_SQL = `
   ON CONFLICT(workspace_id, relay_seq, blob_sha256) DO NOTHING`;
 
 interface CurrentFileStatements {
+  collection: ReturnType<SqliteDb["prepare"]>;
+  records: ReturnType<SqliteDb["prepare"]>;
+  frontmatter: ReturnType<SqliteDb["prepare"]>;
+  recordId: ReturnType<SqliteDb["prepare"]>;
+  removeRecordId: ReturnType<SqliteDb["prepare"]>;
   get: ReturnType<SqliteDb["prepare"]>;
   put: ReturnType<SqliteDb["prepare"]>;
   key: ReturnType<SqliteDb["prepare"]>;
@@ -160,10 +196,31 @@ function putCurrentFile(
 ): void {
   statements.put.run(row.workspaceId, row.versionId, row.path, row.blobSha256, row.contentKind, row.relaySeq);
   statements.key.run(row.workspaceId, row.versionId, row.path, pathCollisionKey(row.path));
+  const schemaPath = `${row.path.slice(0, row.path.lastIndexOf("/") + 1)}collection.yaml`;
+  const id = row.contentKind === "text" && row.path.toLowerCase().endsWith(".md")
+    && statements.collection.get(row.workspaceId, row.versionId, schemaPath) !== undefined
+    ? recordIdentity(statements.frontmatter.get(row.workspaceId, row.blobSha256)?.frontmatter) : null;
+  if (id) statements.recordId.run(row.workspaceId, row.versionId, row.path, id);
+  else statements.removeRecordId.run(row.workspaceId, row.versionId, row.path);
+  if (row.path.endsWith("/collection.yaml")) {
+    const folder = row.path.slice(0, -"collection.yaml".length);
+    // A manifest may arrive after its records. Read their bounded prefixes
+    // once on manifest changes, never on unrelated Markdown saves.
+    for (const record of statements.records.all(row.workspaceId, row.versionId, folder, `${folder}\uffff`, folder)) {
+      const path = String(record.path);
+      const id = recordIdentity(record.frontmatter);
+      if (id) statements.recordId.run(row.workspaceId, row.versionId, path, id);
+    }
+  }
 }
 
 export function currentFileStatements(db: SqliteDb): CurrentFileStatements {
   return {
+    records: db.prepare(`SELECT f.path, substr(b.content, 1, 65536) AS frontmatter FROM sync_relay_current_files f
+      JOIN sync_relay_blobs b ON b.workspace_id=f.workspace_id AND b.sha256=f.blob_sha256
+      WHERE f.workspace_id=? AND f.version_id=? AND f.path>=? AND f.path<?
+        AND instr(substr(f.path,length(?)+1),'/')=0 AND f.content_kind='text' AND lower(f.path) LIKE '%.md'`),
+    collection: db.prepare("SELECT 1 FROM sync_relay_current_files WHERE workspace_id = ? AND version_id = ? AND path = ?"),
     get: db.prepare(
       `SELECT blob_sha256
        FROM sync_relay_current_files
@@ -179,6 +236,9 @@ export function currentFileStatements(db: SqliteDb): CurrentFileStatements {
          state_relay_seq = excluded.state_relay_seq`,
     ),
     key: db.prepare(CURRENT_FILE_KEY_INSERT_SQL),
+    frontmatter: db.prepare("SELECT substr(content, 1, 65536) AS frontmatter FROM sync_relay_blobs WHERE workspace_id = ? AND sha256 = ?"),
+    recordId: db.prepare(RECORD_IDENTITY_INSERT_SQL),
+    removeRecordId: db.prepare("DELETE FROM sync_relay_current_record_ids WHERE workspace_id = ? AND version_id = ? AND path = ?"),
     remove: db.prepare(
       `DELETE FROM sync_relay_current_files
        WHERE workspace_id = ? AND version_id = ? AND path = ?`,
@@ -611,3 +671,17 @@ export function currentFileBlobByteLength(storage: StorageContext, input: {
       ? Number(row.byte_length)
       : null;
   }
+
+export function currentObjectPath(storage: StorageContext, input: { workspaceId: string; versionId: string; objectId: string }): string | null {
+  const row = storage.db.prepare(
+    `SELECT current.path FROM sync_relay_current_files current
+     JOIN sync_relay_object_moments moment
+       ON moment.workspace_id = current.workspace_id AND moment.version_id = current.version_id
+      AND moment.path = current.path AND moment.relay_seq = current.state_relay_seq
+     WHERE moment.workspace_id = ? AND moment.version_id = ? AND moment.object_id = ?
+       AND moment.relay_seq = (SELECT MAX(latest.relay_seq) FROM sync_relay_object_moments latest
+         WHERE latest.workspace_id = moment.workspace_id AND latest.version_id = moment.version_id AND latest.object_id = moment.object_id)
+       AND current.state_relay_seq > ?`,
+  ).get(input.workspaceId, input.versionId, input.objectId, storage.getEpochLogFloor(input.workspaceId));
+  return typeof row?.path === "string" ? row.path : null;
+}

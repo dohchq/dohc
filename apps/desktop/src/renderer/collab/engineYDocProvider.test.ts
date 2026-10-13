@@ -1,3 +1,4 @@
+import { hasPendingYDocDeliveries, settleYDocDeliveries } from "../pendingYDocDeliveries";
 import { describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
 import { EXCALIDRAW_SCENE_ROOTS } from "@dohc/workspace-contracts/live-documents";
@@ -1238,4 +1239,13 @@ describe("engine Y.Doc provider — renderer bridge", () => {
     expect(bodyText(binding.doc!)).not.toContain("First winner.");
     await binding.destroy();
   });
+});
+
+it("holds only unresolved checkpoint debt after healthy typing is delivered",async()=>{
+ const fixture=mockTransport();let unresolved=false;const checkpoint=vi.fn(async()=>{});
+ const binding=await bindEngineYDoc(fixture.transport,undefined,{hasUnresolvedCheckpoint:()=>unresolved,checkpointForExit:checkpoint});
+ try {const text=(binding.doc!.getXmlFragment("body").get(0) as Y.XmlElement).get(0) as Y.XmlText;text.insert(0,"typed ");await binding.flushPendingLocalUpdates();
+ expect(hasPendingYDocDeliveries()).toBe(false);expect(await settleYDocDeliveries()).toBe(true);expect(checkpoint).not.toHaveBeenCalled();
+ unresolved=true;expect(hasPendingYDocDeliveries()).toBe(true);expect(await settleYDocDeliveries()).toBe(true);expect(checkpoint).toHaveBeenCalledOnce();expect(hasPendingYDocDeliveries()).toBe(false);
+ }finally{await binding.destroy();fixture.mainDoc.destroy();}
 });

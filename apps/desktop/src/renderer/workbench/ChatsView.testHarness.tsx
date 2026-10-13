@@ -165,7 +165,6 @@ export const bridgeMock = {
   chatDispatchStateForThread: vi.fn(),
   stopAgentRun: vi.fn(),
   resumeThreadDispatch: vi.fn(),
-  writeClipboardText: vi.fn(),
   listChatBookmarks: vi.fn(),
   saveChatBookmark: vi.fn(),
   archiveChatBookmark: vi.fn(),
@@ -288,7 +287,6 @@ beforeEach(() => {
   bridgeMock.listChatThreadDecisions.mockResolvedValue({ decisions: [] });
   bridgeMock.listChatThreadAttachments.mockResolvedValue({ attachments: [] });
   bridgeMock.chatRunRecordsForThread.mockResolvedValue({ runs: {} });
-  bridgeMock.writeClipboardText.mockResolvedValue(undefined);
   bridgeMock.listChatBookmarks.mockResolvedValue({ bookmarks: [] });
   bridgeMock.saveChatBookmark.mockResolvedValue({
     bookmark: {

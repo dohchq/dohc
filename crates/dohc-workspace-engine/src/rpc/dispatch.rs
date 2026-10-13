@@ -25,7 +25,9 @@ fn method_requires_initial_capture_ready(method: &str) -> bool {
         || (method.starts_with("secrets.") && method != "secrets.write")
         || matches!(
             method,
-            "capture.reconcile"
+            "files.resolve"
+                | "capture.reconcile"
+                | "capture.importRecovery"
                 | "versionedText.list"
                 | "versionedText.captureSources"
                 | "versionedText.read"
@@ -36,6 +38,7 @@ fn method_requires_initial_capture_ready(method: &str) -> bool {
                 | "versionedText.delete"
                 | "versionedText.rollback"
                 | "versionedText.merge"
+                | "versionedText.publicationApplied"
                 | "versionedBinary.read"
                 | "versionedBinary.readBlob"
                 | "moments.list"
@@ -104,6 +107,9 @@ impl EngineService {
             && !matches!(
                 method,
                 "liveApplication.hosts"
+                    | "liveApplication.attachWorkspace"
+                    | "liveApplication.detachWorkspace"
+                    | "liveApplication.unloadDocument"
                     | "liveApplication.register"
                     | "liveApplication.bootstrap"
                     | "liveApplication.apply"
@@ -132,6 +138,7 @@ impl EngineService {
         request: Request,
         input: crate::LiveApplicationInput,
     ) -> Result<ServiceResponse, WireError> {
+        super::request::validate_request_ids(&request)?;
         self.ensure_configured_host_method(&ctx, &request)?;
         self.ensure_handle_allows_method(request.workspace.as_ref(), &request.method)?;
         self.require_initial_capture_ready(request.workspace.as_ref(), &request.method)?;
@@ -154,12 +161,16 @@ impl EngineService {
         request: Request,
     ) -> Result<ServiceResponse, WireError> {
         let id = request.id;
+        super::request::validate_request_ids(&request)?;
         self.ensure_admissible_author(&request)?;
         self.ensure_configured_host_method(&ctx, &request)?;
         self.ensure_handle_allows_method(request.workspace.as_ref(), &request.method)?;
         self.require_initial_capture_ready(request.workspace.as_ref(), &request.method)?;
         if request.method == "ydoc.ownerDelivery.prepareEnrollment" {
             return self.owner_delivery_prepare_enrollment(ctx, request).await;
+        }
+        if request.method == "ydoc.ownerDelivery.refuseEntry" {
+            return self.owner_delivery_refuse_entry(ctx, request).await;
         }
         if request.method == "ydoc.ownerDelivery.listDrafts" {
             return self.owner_delivery_list_drafts(ctx, request).await;
@@ -271,12 +282,26 @@ impl EngineService {
                     .await?
             }
             "liveApplication.hosts" => self.configured_live_hosts(&ctx, &request)?,
+            "liveApplication.attachWorkspace" => {
+                Box::pin(self.configured_attach_workspace(&ctx, request)).await?
+            }
+            "liveApplication.detachWorkspace" => {
+                Box::pin(self.configured_detach_workspace(&ctx, request)).await?
+            }
+            "liveApplication.unloadDocument" => {
+                Box::pin(self.live_application_unload(&ctx, request.workspace, request.params))
+                    .await?
+            }
             "liveApplication.register" => {
                 self.live_application_register(&ctx, request.workspace, request.params)
                     .await?
             }
             "engine.ping" => engine_ping(),
             "workspace.open" => Box::pin(self.workspace_open(&ctx, request.params)).await?,
+            "files.resolve" => {
+                self.files_resolve(&ctx, request.workspace, request.params)
+                    .await?
+            }
             "files.changesSince" => {
                 Box::pin(self.files_changes_since(&ctx, request.workspace, request.params, false))
                     .await?
@@ -359,42 +384,23 @@ impl EngineService {
                 self.share_direct_status(&ctx, request.workspace, request.params)
                     .await?
             }
-            "versionedText.writeBlob" => {
-                self.versioned_text_write_blob(&ctx, &request, request.params.clone())
+            "share.direct.statuses" => {
+                self.share_direct_statuses(&ctx, request.workspace, request.params)
                     .await?
             }
-            "versionedText.write" => {
-                self.versioned_text_write(&ctx, &request, request.params.clone())
+            "share.records.status" => {
+                self.share_record_creation_statuses(&ctx, request.workspace, request.params)
                     .await?
             }
-            "versionedBinary.write" => {
-                self.versioned_binary_write(&ctx, &request, request.params.clone())
-                    .await?
-            }
-            "versionedBinary.writeBlob" => {
-                self.versioned_binary_write_blob(&ctx, &request, request.params.clone())
-                    .await?
-            }
-            "versionedText.rename" => {
-                self.versioned_text_rename(&ctx, &request, request.params.clone())
-                    .await?
-            }
-            "versionedText.checkMove" => {
-                self.versioned_text_check_move(&ctx, &request, request.params.clone())
-                    .await?
-            }
-            "versionedText.delete" => {
-                self.versioned_text_delete(&ctx, &request, request.params.clone())
-                    .await?
-            }
-            "versionedText.rollback" => {
-                self.versioned_text_rollback(&ctx, &request, request.params.clone())
-                    .await?
-            }
-            "versionedText.merge" => {
-                self.versioned_text_merge(&ctx, &request, request.params.clone())
-                    .await?
-            }
+            "versionedText.writeBlob" => self.versioned_text_write_blob(&ctx, request).await?,
+            "versionedText.write" => self.versioned_text_write(&ctx, request).await?,
+            "versionedBinary.write" => self.versioned_binary_write(&ctx, request).await?,
+            "versionedBinary.writeBlob" => self.versioned_binary_write_blob(&ctx, request).await?,
+            "versionedText.rename" => self.versioned_text_rename(&ctx, request).await?,
+            "versionedText.checkMove" => self.versioned_text_check_move(&ctx, request).await?,
+            "versionedText.delete" => self.versioned_text_delete(&ctx, request).await?,
+            "versionedText.rollback" => self.versioned_text_rollback(&ctx, request).await?,
+            "versionedText.merge" => self.versioned_text_merge(&ctx, request).await?,
             "versionedText.compare" => {
                 self.versioned_text_compare(&ctx, request.workspace, request.params)
                     .await?
@@ -403,10 +409,7 @@ impl EngineService {
                 self.versions_compare_files(&ctx, request.workspace, request.params)
                     .await?
             }
-            "versions.createNamed" => {
-                self.versions_create_named(&ctx, &request, request.params.clone())
-                    .await?
-            }
+            "versions.createNamed" => self.versions_create_named(&ctx, request).await?,
             "versionedText.read" => {
                 self.versioned_text_read(&ctx, request.workspace, request.params)
                     .await?
@@ -415,8 +418,8 @@ impl EngineService {
                 self.ydoc_record_update(
                     &ctx,
                     request.workspace,
-                    request.idempotency_key.clone(),
-                    request.params.clone(),
+                    request.idempotency_key,
+                    request.params,
                 )
                 .await?
             }
@@ -461,14 +464,14 @@ impl EngineService {
                     .await?
             }
             "conflicts.resolve" => {
-                self.conflicts_resolve(
+                Box::pin(self.conflicts_resolve(
                     &ctx,
                     request.id,
                     request.deadline_ms,
                     request.workspace,
                     request.params,
                     request.idempotency_key,
-                )
+                ))
                 .await?
             }
             "search.queryPage" => {
@@ -492,6 +495,13 @@ impl EngineService {
                     .await?
             }
             "watcher.status" => self.watcher_status(request.workspace).await?,
+            "capture.importRecovery" => {
+                Box::pin(self.capture_import_recovery(request.workspace, request.params)).await?
+            }
+            "capture.clearRecovery" => {
+                self.capture_clear_recovery(request.workspace, request.params)
+                    .await?
+            }
             "keptCopies.list" => self.kept_copies_list(&ctx, request.workspace).await?,
             "keptCopies.save" => {
                 self.kept_copies_save(request.workspace, request.params)
@@ -554,6 +564,10 @@ impl EngineService {
             }
             "moments.get" => {
                 self.moments_get(&ctx, request.workspace, request.params)
+                    .await?
+            }
+            "versionedText.publicationApplied" => {
+                self.publication_applied(&ctx, request.workspace, request.params)
                     .await?
             }
             "secrets.list" => {
@@ -927,6 +941,10 @@ impl EngineService {
                 self.automations_prune_history(&ctx, request.workspace, request.params)
                     .await?
             }
+            "automations.makeDurable" => {
+                self.automations_make_durable(&ctx, request.workspace, request.params)
+                    .await?
+            }
             "automations.settle" => {
                 self.automations_settle(&ctx, request.workspace, request.params)
                     .await?
@@ -980,7 +998,7 @@ impl EngineService {
         Ok(ServiceResponse::response(Response { id, result }))
     }
 
-    fn ensure_handle_allows_method(
+    pub(super) fn ensure_handle_allows_method(
         &self,
         handle: Option<&WorkspaceHandle>,
         method: &str,
@@ -988,19 +1006,61 @@ impl EngineService {
         let Some(handle) = handle else {
             return Ok(());
         };
-        if method.starts_with("automations.")
-            && lock(&self.handles)
-                .get(handle)
-                .is_some_and(|open| open.projects_collections())
+        let (projects_collections, read_only, passive) = lock(&self.handles)
+            .get(handle)
+            .map(|open| {
+                (
+                    open.projects_collections(),
+                    open.mode == WorkspaceOpenMode::ReadOnly,
+                    open.mode == WorkspaceOpenMode::Passive,
+                )
+            })
+            .unwrap_or_default();
+        if passive
+            && !matches!(
+                method,
+                "workspace.close"
+                    | "sync.adoptJoinIdentity"
+                    | "sync.pull"
+                    | "sync.commitCursor"
+                    | "versionedText.read"
+                    | "versionedText.readBlob"
+            )
         {
             return Err(WireError::new(
                 ErrorCode::Forbidden,
-                "received shares do not execute automations",
+                "method is unavailable on a passive store",
             ));
         }
-        let read_only = lock(&self.handles)
-            .get(handle)
-            .is_some_and(|open| open.mode == WorkspaceOpenMode::ReadOnly);
+        if projects_collections {
+            if method.starts_with("automations.") {
+                return Err(WireError::new(
+                    ErrorCode::Forbidden,
+                    "received shares do not execute automations",
+                ));
+            }
+            if matches!(
+                method,
+                "ydoc.open"
+                    | "ydoc.recordUpdate"
+                    | "ydoc.resync"
+                    | "ydoc.adoptCollectionRecord"
+                    | "ydoc.settle"
+                    | "ydoc.close"
+                    | "ydoc.evict"
+            ) {
+                return Err(WireError::new(
+                    ErrorCode::Forbidden,
+                    "received shares do not open live document sessions",
+                ));
+            }
+            if method == "liveApplication.provisionOwner" {
+                return Err(WireError::new(
+                    ErrorCode::Forbidden,
+                    "received shares do not host live applications",
+                ));
+            }
+        }
         if read_only
             && !matches!(
                 method,
@@ -1055,6 +1115,34 @@ impl EngineService {
 mod tests {
     use super::*;
     use dohc_engine_protocol::transport::EngineService as _;
+
+    #[test]
+    fn dispatch_future_stays_within_stack_budget() {
+        fn future_size<F: std::future::Future>(_: impl FnOnce() -> F) -> usize {
+            std::mem::size_of::<F>()
+        }
+        let service = EngineService::new();
+        let request = || Request {
+            id: 1,
+            method: "engine.ping".into(),
+            workspace: None,
+            deadline_ms: None,
+            idempotency_key: None,
+            progress: false,
+            params: json!({}),
+        };
+        let bytes = future_size(|| service.dispatch(RequestContext::unbounded(), request()));
+        let input_bytes =
+            future_size(|| service.call_with_input(RequestContext::unbounded(), request(), None));
+        // InProcessTransport test callers carry dispatch state on the default thread stack.
+        // The supervisor spawns request futures on the heap; growth still costs memory per request.
+        println!("dispatch: {bytes} bytes; call_with_input: {input_bytes} bytes");
+        assert!(bytes <= 5 * 1024, "dispatch future uses {bytes} bytes");
+        assert!(
+            input_bytes <= 6 * 1024,
+            "call_with_input future uses {input_bytes} bytes"
+        );
+    }
 
     #[tokio::test]
     async fn configured_ordinary_methods_require_attached_handle_and_current_connection() {
@@ -1124,6 +1212,7 @@ mod tests {
         request.workspace = Some(attached_handle.clone());
         for method in [
             "workspace.open",
+            "capture.importRecovery",
             "ydoc.open",
             "sync.recoverOrigin",
             "sync.probe",
@@ -1171,6 +1260,7 @@ mod tests {
             "versions.ensureMain"
         ));
         for method in [
+            "files.resolve",
             "versions.active",
             "versions.list",
             "versions.createNamed",
@@ -1266,10 +1356,12 @@ mod tests {
             "automations.retry",
             "automations.runNow",
             "automations.scheduleMarks",
+            "automations.makeDurable",
             "automations.settle",
             "automations.subscribe",
             "automations.unsubscribe",
             "automations.watchGroups",
+            "capture.importRecovery",
             "capture.flush",
             "capture.hold",
             "capture.moveFile",
@@ -1277,6 +1369,7 @@ mod tests {
             "capture.release",
             "capture.renew",
             "capture.setAuthor",
+            "capture.clearRecovery",
             "chats.agentReadState.listUnreadThreads",
             "chats.agentReadState.markThreadRead",
             "chats.attachments.listFileMentions",
@@ -1375,6 +1468,8 @@ mod tests {
             "share.channel.push",
             "share.direct.push",
             "share.direct.status",
+            "share.direct.statuses",
+            "share.records.status",
             "share.proposal.submit",
             "share.view.pull",
             "share.view.recordIdentity",
@@ -1395,9 +1490,11 @@ mod tests {
             "versionedText.compare",
             "versionedText.checkMove",
             "versionedText.delete",
+            "files.resolve",
             "versionedText.list",
             "versionedText.captureSources",
             "versionedText.merge",
+            "versionedText.publicationApplied",
             "versionedText.read",
             "versionedText.readBlob",
             "versionedText.rename",

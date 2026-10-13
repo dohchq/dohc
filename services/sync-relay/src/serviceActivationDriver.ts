@@ -20,17 +20,21 @@ const positive=(value:unknown)=>{
   if(typeof value!=="number" || !Number.isSafeInteger(value) || value<1 || value>2_147_483_647)throw new Error("Invalid service activation budget.");
   return value;
 };
+export function parseServiceActivationTarget(value:unknown){
+  const item=configRecord(value,["workspaceId","path","shareId"]);
+  const checked=typeof item.path==="string"?validateUserWritePath(item.path):undefined;
+  if(typeof item.path!=="string" || !checked?.ok || checked.normalized!==item.path || liveDocumentKindForPath(item.path)!=="richdoc")throw new Error("Invalid service activation path.");
+  return Object.freeze({workspaceId:parseLiveUpdateIdentifier(item.workspaceId),path:item.path,shareId:parseLiveUpdateIdentifier(item.shareId)});
+}
+export type ServiceActivationTarget=ReturnType<typeof parseServiceActivationTarget>;
+const targetKey=(target:ServiceActivationTarget)=>JSON.stringify([target.workspaceId,target.path]);
+/** A host can start with no targets; the self-hosted supervisor adds them as documents are shared. */
 export function parseServiceActivationConfig(value:unknown){
   if(value===undefined)return undefined;
   const row=configRecord(value,["targets","validation","maxCaptureBytes","maxEntriesPerDrain","maxBytesPerDrain","maxDocumentsPerPass","pollIntervalMs","passDeadlineMs"]);
-  if(!Array.isArray(row.targets) || !row.targets.length || row.targets.length>64)throw new Error("Invalid service activation targets.");
-  const targets=row.targets.map(value=>{
-    const item=configRecord(value,["workspaceId","path","shareId"]);
-    const checked=typeof item.path==="string"?validateUserWritePath(item.path):undefined;
-    if(typeof item.path!=="string" || !checked?.ok || checked.normalized!==item.path || liveDocumentKindForPath(item.path)!=="richdoc")throw new Error("Invalid service activation path.");
-    return Object.freeze({workspaceId:parseLiveUpdateIdentifier(item.workspaceId),path:item.path,shareId:parseLiveUpdateIdentifier(item.shareId)});
-  });
-  if(new Set(targets.map(row=>JSON.stringify([row.workspaceId,row.path]))).size!==targets.length)throw new Error("Duplicate service activation target.");
+  if(!Array.isArray(row.targets) || row.targets.length>64)throw new Error("Invalid service activation targets.");
+  const targets=row.targets.map(parseServiceActivationTarget);
+  if(new Set(targets.map(targetKey)).size!==targets.length)throw new Error("Duplicate service activation target.");
   const policy=configRecord(row.validation,["maxStructVisits","maxValueNodeVisits","maxDecodedPayloadByteVisits","maxStructClientGroupVisits","maxDeleteClientGroupVisits","maxDeleteIntervalVisits","maxIndexOperations"]);
   for(const value of Object.values(policy))positive(value);
   const validation=Object.freeze({...policy}) as unknown as OrderedLiveUpdateCutPolicy;
@@ -46,23 +50,53 @@ const fenced={kind:"pending" as const,reason:"Service binding is fenced or unava
 
 export class ServiceActivationDriver {
   readonly #store;
+  #targets:readonly ServiceActivationTarget[];
   readonly #completedTargets=new Set<string>();
   readonly #restoreConsumers=new Map<string,OwnerCommittedDelivery>();
   readonly #staleLeases=new Map<string,{activationId:string;sessionId:string}>();
   readonly #owners=new Map<string,Owner>();
+  // Targets this driver may have loaded into the engine since it started.
+  readonly #loaded=new Set<string>();
   constructor(readonly options:{storage:SyncRelayStorage;history:LiveJournalHistoryAuthority;client:EngineClient;host:LiveHostConnectionCoordinate;
     workspaces:ReadonlyMap<string,{handle:string;ordinary:ServiceOrdinaryReplication}>;config:ServiceActivationConfig;
     adoption:{maxBytes:number;maxEvents:number};restore?:LiveRestorePreparation;nextRequestId():number;deadlineMs:number;
     assertCurrent():void;registered():void;
     runDocument<T>(document:LiveDocumentKey,signal:AbortSignal,operation:()=>Promise<T>):Promise<T>;}){
     this.#store=options.storage.createServiceActivationStore(options.history);
+    this.#targets=options.config.targets;
+  }
+  /** The documents activation passes visit, in pass order. */
+  get targets(){return this.#targets;}
+  /** Adds one document to activation passes, replacing an earlier target at its path. */
+  addTarget(target:ServiceActivationTarget){
+    this.#targets=[...this.#targets.filter(row=>targetKey(row)!==targetKey(target)),target];
+  }
+  /** Whether this driver may have loaded the document into the engine. */
+  loaded(target:ServiceActivationTarget){return this.#loaded.has(targetKey(target));}
+  /** Whether the target's last pass delivered and settled it. */
+  completed(target:ServiceActivationTarget){return this.#completedTargets.has(targetKey(target));}
+  /** The document a target's owner delivery holds, if one does. */
+  ownerDocument(target:ServiceActivationTarget){
+    for(const [document,owner] of this.#owners)if(owner.target===targetKey(target))return parseLiveDocumentKey(JSON.parse(document));
+    return undefined;
+  }
+  /** Forgets a document the engine no longer holds, so a later pass activates it from its retained source. */
+  removeTarget(target:ServiceActivationTarget,objectId:string){
+    const key=targetKey(target);
+    this.#targets=this.#targets.filter(row=>targetKey(row)!==key);
+    this.#completedTargets.delete(key);this.#staleLeases.delete(key);this.#loaded.delete(key);
+    for(const [document,owner] of this.#owners)if(owner.target===key)this.#owners.delete(document);
+    for(const document of this.#restoreConsumers.keys()){
+      const restored=parseLiveDocumentKey(JSON.parse(document));
+      if(restored.workspaceId===target.workspaceId && restored.objectId===objectId)this.#restoreConsumers.delete(document);
+    }
   }
   hasRetained(){
-    return this.options.config.targets.some(target=>this.#store.read(target.workspaceId,target.path,this.options.config.maxCaptureBytes)!==null);
+    return this.#targets.some(target=>this.#store.read(target.workspaceId,target.path,this.options.config.maxCaptureBytes)!==null);
   }
   restoreConsumer(document:LiveDocumentKey){
     const o=this.options,key=JSON.stringify(parseLiveDocumentKey(document));
-    const target=o.config.targets.find(target=>{
+    const target=this.#targets.find(target=>{
       if(target.workspaceId!==document.workspaceId)return false;
       const saved=this.#store.read(target.workspaceId,target.path,o.config.maxCaptureBytes);
       return saved?.completed && saved.shareId===target.shareId && saved.source.objectId===document.objectId && saved.source.lineageClaimId===document.lineageClaimId;
@@ -81,34 +115,34 @@ export class ServiceActivationDriver {
       publishOrdinary:signal=>workspace.ordinary.publish(signal),
       ownerAdmission:{shares:new Map([[target.workspaceId,target.shareId]]),maxEntriesPerDrain:o.config.maxEntriesPerDrain,
         maxBytesPerDrain:o.config.maxBytesPerDrain,validate:o.config.validateAdmission}});
-    this.#restoreConsumers.set(key,consumer);return consumer;
+    this.#restoreConsumers.set(key,consumer);this.#loaded.add(targetKey(target));return consumer;
   }
   workspaceReady(workspaceId:string){
-    return this.options.config.targets.filter(target=>target.workspaceId===workspaceId).every(target=>this.#completedTargets.has(JSON.stringify([target.workspaceId,target.path])));
+    return this.#targets.filter(target=>target.workspaceId===workspaceId).every(target=>this.#completedTargets.has(targetKey(target)));
   }
   consumer(value:LiveDocumentKey){
     const document=parseLiveDocumentKey(value),owner=this.#owners.get(JSON.stringify(document));
     if(!owner?.completed || this.#invalidated(owner,document))throw new Error("Service document activation is incomplete.");
     return owner;
   }
-  async activate(target:ServiceActivationConfig["targets"][number],signal:AbortSignal,
+  async activate(target:ServiceActivationTarget,signal:AbortSignal,
     settle?:(consumer:OwnerCommittedDelivery,document:LiveDocumentKey,signal:AbortSignal)=>Promise<unknown>){
     const o=this.options,c=o.config,workspace=o.workspaces.get(target.workspaceId);
     if(!workspace)throw new Error("Service activation workspace is not attached.");
     const check=()=>{signal.throwIfAborted();o.assertCurrent();};
     const request=()=>({id:o.nextRequestId(),workspace:workspace.handle,deadlineMs:o.deadlineMs});
     check();
-    const targetKey=JSON.stringify([target.workspaceId,target.path]);
+    const key=targetKey(target);
     const releaseStale=async()=>{
-      const lease=this.#staleLeases.get(targetKey);
+      const lease=this.#staleLeases.get(key);
       if(!lease)return;
       const released=await o.client.sendRequest({...request(),method:"liveApplication.releaseOwnerActivation",params:lease},signal);check();
       if(configRecord(released.result,["released"]).released!==true)throw new Error("Stale native activation lease was not released.");
-      this.#staleLeases.delete(targetKey);
+      this.#staleLeases.delete(key);
     };
     await releaseStale();
     let saved=this.#store.read(target.workspaceId,target.path,c.maxCaptureBytes);
-    if(!saved)this.#completedTargets.delete(targetKey);
+    if(!saved)this.#completedTargets.delete(key);
     if(saved && saved.shareId!==target.shareId)throw new Error("Service activation share changed.");
     let document=saved?parseLiveDocumentKey({workspaceId:saved.source.workspaceId,mainVersionId:saved.source.mainVersionId,
       objectId:saved.source.objectId,lineageClaimId:saved.source.lineageClaimId}):undefined;
@@ -123,6 +157,7 @@ export class ServiceActivationDriver {
         const pulled=await workspace.ordinary.pull(signal);check();
         if(pulled.hasMore)return {kind:"pending" as const,reason:"Ordinary replication has more pages."};
       }
+      this.#loaded.add(key);
       const capture=await o.client.captureOwnerActivation(request(),target.path,c.maxCaptureBytes,signal,saved?.activationId);check();
       if(capture.source.workspaceId!==target.workspaceId || capture.source.relayDatabaseNamespace!==o.history.namespace ||
         (saved && (capture.activationId!==saved.activationId || !isDeepStrictEqual(capture.source,saved.source)))) {
@@ -135,7 +170,7 @@ export class ServiceActivationDriver {
               maxEntriesPerDrain:c.maxEntriesPerDrain,maxBytesPerDrain:c.maxBytesPerDrain}});
         }catch(error){
           if(!(error instanceof ServiceActivationStaleCut))throw error;
-          this.#staleLeases.set(targetKey,{activationId:capture.activationId,sessionId:capture.sessionId});
+          this.#staleLeases.set(key,{activationId:capture.activationId,sessionId:capture.sessionId});
           await releaseStale();
           return {kind:"pending" as const,reason:"Ordinary replication advanced before activation."};
         }
@@ -154,7 +189,7 @@ export class ServiceActivationDriver {
         ownerAdmission:{activation:resumed.access,shares:new Map([[target.workspaceId,target.shareId]]),
           maxEntriesPerDrain:c.maxEntriesPerDrain,maxBytesPerDrain:c.maxBytesPerDrain,validate:c.validateAdmission}});
       owner={consumer,transport,binding:resumed.binding,completed:false,activationPending:!resumed.completed,
-        target:targetKey,actor:{ownerUserId:saved.ownerUserId,shareId:saved.shareId}};
+        target:key,actor:{ownerUserId:saved.ownerUserId,shareId:saved.shareId}};
       this.#owners.set(JSON.stringify(document),owner);
     }
     const held=owner;
@@ -181,7 +216,7 @@ export class ServiceActivationDriver {
     }
     check();
     if(this.#invalidated(held,document!))return fenced;
-    held.completed=true;this.#completedTargets.add(targetKey);
+    held.completed=true;this.#completedTargets.add(key);
     return {kind:"done" as const,document:document!};
     });
   }

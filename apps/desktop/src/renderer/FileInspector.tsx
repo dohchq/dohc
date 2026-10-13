@@ -1,15 +1,17 @@
+import type { SaveState } from "@dohc/workspace-contracts/save-state";
 import type { ReportButtonError } from "./collections/useAutomationButtons";
 import type { RecordHistoryTarget } from "./collections/useRecordHistory";
-import { MarkdownView, type HeadingTarget, type ScrollTarget } from "./MarkdownView";
+import { filenameStem, MarkdownView, type HeadingTarget, type ScrollTarget } from "./MarkdownView";
 import { DrawingView } from "./DrawingView";
 import {
-  AffordanceCard,
+  DocumentControls,
   EngineArtifactAssetsInvalidNotice,
   EngineMayHoldDocumentNotice,
-  ViewHeader,
-  type FileSaveState,
+  ViewActions,
   OrphanedDraftNotices,
   EngineRemovalInProgressNotice,
+  OPENING_TITLE,
+  OpenExternallyButton,
 } from "./fileInspectorUi";
 import { TextEditorView } from "./TextEditorView";
 import type { PendingFileUndo } from "./fileEditorUndo";
@@ -19,12 +21,6 @@ import { extensionOf } from "./path";
 import { fileKindForPath } from "@dohc/workspace-contracts/kinds";
 import type { DraftFlush } from "./useAutosavedTextDraft";
 import { liveDocumentKindForPath } from "@dohc/workspace-contracts/live-documents";
-import {
-  FileText,
-  Image as ImageIcon,
-  Music,
-  Table,
-} from "lucide-react";
 import {
   Suspense,
   lazy,
@@ -41,8 +37,9 @@ import { bridge } from "./bridge";
 import { useEngineDoc } from "./collab/useEngineDoc";
 import { useAuthorCapacityNotice } from "./collab/useAuthorCapacityNotice";
 import type { WikilinkFile } from "./editor/wikilinkPlugin";
-import { SecondaryButton } from "./ui/controls";
-import { SkeletonRows } from "./ui/SkeletonRows";
+import { Layers, TriangleAlert } from "lucide-react";
+import { EmptyState, SecondaryButton } from "./ui/controls";
+import { SkeletonRows, SkeletonSlot } from "./ui/SkeletonRows";
 import type { ExcalidrawPresenceFactory } from "./collab/excalidrawPresence";
 import {
   acquireSharedLocalDocument,
@@ -245,14 +242,6 @@ function useTextContent(
   };
 }
 
-function Empty({ children }: { children: React.ReactNode }) {
-  return (
-    <div className="flex flex-1 items-center justify-center text-sm text-subtle">
-      {children}
-    </div>
-  );
-}
-
 function TruncatedNotice(props: { workspaceId: string; path: string }) {
   return (
     <div
@@ -302,7 +291,9 @@ type FileInspectorProps = {
   onScrollConsumed?: (nonce: number) => void;
   // Editor save-state seam for the tab strip's dirty indicator. Editable
   // source/table/document views all report through the same small contract.
-  onSaveStateChange?: (state: FileSaveState) => void;
+  onSaveStateChange?: (state: SaveState) => void;
+  // A live document became read-only while it was open.
+  onLiveReadOnly?: () => void;
   // Registers the active editor's draft flush with the shell: explorer ops
   // await it before re-pathing files.
   registerDraftFlush?: (flush: DraftFlush | null) => void;
@@ -312,6 +303,7 @@ type FileInspectorProps = {
   onPendingUndoConsumed?: (token: number) => void;
   // Read-only shared views: every editable view refuses edits.
   readOnly?: boolean;
+  accessEnded?: boolean;
   // G2-C-3: a monotonic token that changes when the ACTIVE VERSION of this
   // workspace changes while the same file stays open (the shell's versionEpoch).
   // Threaded to the engine editor so a version switch re-binds it to the new
@@ -482,6 +474,7 @@ export const FileInspector = memo(function FileInspector(
     kind: liveDocumentKind ?? undefined,
     reopenKey: props.engineVersionKey,
     retryKey: engineRetryNonce,
+    accessEnded: props.accessEnded,
   });
   useAuthorCapacityNotice({
     workspaceId: props.workspaceId, path: props.path,
@@ -611,31 +604,50 @@ export const FileInspector = memo(function FileInspector(
     />
   );
 
+  // A document's controls stand where they will be when it opens, from the
+  // click frame: disabled as the opening view's are while it loads, and
+  // disabled when it cannot open, so nothing in the header moves between
+  // loading, ready and failed.
+  const closedDocumentControls = (opening: boolean) =>
+    kind === "markdown" ? (
+      <DocumentControls
+        toggle={{ label: "Edit", disabled: true, title: opening ? OPENING_TITLE : undefined }}
+        menu={{
+          workspaceId: props.workspaceId,
+          reportError: props.onButtonError,
+          suggestedName: filenameStem(props.path),
+          getMarkdown: () => null,
+          disabled: !opening,
+        }}
+      />
+    ) : undefined;
+
   if (notInVersion) {
     return (
       <div className="flex min-h-0 flex-1 flex-col bg-bg" data-testid="file-inspector">
-        <ViewHeader
-          icon={<FileText size={13} aria-hidden />}
-          path={props.path}
-          label="file"
+        <ViewActions
           onShare={onShareCurrentPath}
+          actions={closedDocumentControls(false)}
         />
         {/* A reopen's set-aside drafts survive this refusal in the
             module store — recovery stays visible right here, not behind a
             version switch. */}
         {recoveryNotices}
-        <div
+        <EmptyState
           data-testid="file-not-in-version"
-          className="flex flex-1 flex-col items-center justify-center gap-1 px-4 text-center text-sm text-subtle"
-        >
-          <span>This version doesn&apos;t have this file.</span>
-          {pendingDraft ? (
-            <span data-testid="file-not-in-version-discarded">
-              dohc discarded your unsaved edit.
-            </span>
-          ) : null}
-          <span>Switch to the version that has it.</span>
-        </div>
+          icon={Layers}
+          title={
+            <>
+              This version doesn&apos;t have this file.{" "}
+              {pendingDraft ? (
+                <span data-testid="file-not-in-version-discarded">
+                  dohc discarded your unsaved edit.{" "}
+                </span>
+              ) : null}
+              Switch to the version that has it.
+            </>
+          }
+        />
       </div>
     );
   }
@@ -643,22 +655,14 @@ export const FileInspector = memo(function FileInspector(
   if (engine.documentUnavailable) {
     return (
       <div className="flex min-h-0 flex-1 flex-col bg-bg" data-testid="file-inspector">
-        <ViewHeader
-          icon={<FileText size={13} aria-hidden />}
-          path={props.path}
-          label="file"
+        <ViewActions
           onShare={onShareCurrentPath}
+          actions={closedDocumentControls(false)}
         />
         {recoveryNotices}
-        <div
-          data-testid="file-unavailable"
-          className="flex flex-1 flex-col items-center justify-center gap-1 px-4 text-center text-sm text-muted"
-        >
-          <span>This file is no longer available at this path.</span>
-          <SecondaryButton className="mt-1" onClick={retryEngineOpen}>
-            Try again
-          </SecondaryButton>
-        </div>
+        <EmptyState data-testid="file-unavailable" title="This file is no longer available at this path.">
+          <SecondaryButton onClick={retryEngineOpen}>Try again</SecondaryButton>
+        </EmptyState>
       </div>
     );
   }
@@ -668,18 +672,16 @@ export const FileInspector = memo(function FileInspector(
     // is stable (and testable) rather than flickering between containers.
     return (
       <div className="flex min-h-0 flex-1 flex-col bg-bg" data-testid="file-inspector">
-        <ViewHeader
-          icon={<FileText size={13} aria-hidden />}
-          path={props.path}
-          label="file"
+        <ViewActions
           onShare={onShareCurrentPath}
+          actions={closedDocumentControls(!error)}
         />
         {engine.engineMayHoldDocument ? (
           // A failed read returns here, before
           // MarkdownView mounts — without this the timeout had no notice and
           // no retry on exactly the path where the engine session is the only
           // way back to the content.
-          <EngineMayHoldDocumentNotice onRetry={retryEngineOpen} contentShown={false} />
+          <EngineMayHoldDocumentNotice onRetry={retryEngineOpen} contentShown={false} message={engine.sharedWaiting?.message} />
         ) : null}
         {engine.artifactAssetsInvalid ? (
           <EngineArtifactAssetsInvalidNotice
@@ -698,7 +700,7 @@ export const FileInspector = memo(function FileInspector(
             branch withholds. */}
         {recoveryNotices}
         {error ? (
-          <Empty>Couldn't read this file.</Empty>
+          <EmptyState icon={TriangleAlert} tone="danger" title="Couldn't read this file." />
         ) : kind === "markdown" ? (
           // Where the title and the first lines land when the document opens:
           // in a pane that keeps its scrollbar's room, as the document's does.
@@ -714,8 +716,8 @@ export const FileInspector = memo(function FileInspector(
 
   switch (kind) {
     case "markdown":
-      // MarkdownView renders the ViewHeader itself: the edit toggle and save
-      // state live IN the document header (one bar, not two).
+      // MarkdownView renders its ViewActions itself: the edit toggle and save
+      // state sit with Share in the tab row.
       return (
         <div className="flex min-h-0 flex-1 flex-col bg-bg" data-testid="file-inspector">
           <MarkdownView
@@ -738,6 +740,7 @@ export const FileInspector = memo(function FileInspector(
             chatMentionsAvailable={props.chatMentionsAvailable}
             onSharePath={props.onSharePath}
             onSaveStateChange={props.onSaveStateChange}
+            onLiveReadOnly={props.onLiveReadOnly}
             registerDraftFlush={props.registerDraftFlush}
             knownFiles={props.knownMarkdownFiles}
             pendingUndo={pendingTextUndo}
@@ -791,12 +794,7 @@ export const FileInspector = memo(function FileInspector(
     case "csv":
       return (
         <div className="flex min-h-0 flex-1 flex-col bg-bg" data-testid="file-inspector">
-          <ViewHeader
-            icon={<Table size={13} aria-hidden />}
-            path={props.path}
-            label="data"
-            onShare={onShareCurrentPath}
-          />
+          <ViewActions onShare={onShareCurrentPath} />
           {truncatedNotice}
           {recoveryNotices}
           <CsvView
@@ -825,12 +823,7 @@ export const FileInspector = memo(function FileInspector(
     case "code":
       return (
         <div className="flex min-h-0 flex-1 flex-col bg-bg" data-testid="file-inspector">
-          <ViewHeader
-            icon={<FileText size={13} aria-hidden />}
-            path={props.path}
-            label={kind === "json" ? "json" : "text"}
-            onShare={onShareCurrentPath}
-          />
+          <ViewActions onShare={onShareCurrentPath} />
           {truncatedNotice}
           {recoveryNotices}
           <TextEditorView
@@ -865,12 +858,7 @@ export const FileInspector = memo(function FileInspector(
     case "image":
       return (
         <div className="flex min-h-0 flex-1 flex-col bg-bg" data-testid="file-inspector">
-          <ViewHeader
-            icon={<ImageIcon size={13} aria-hidden />}
-            path={props.path}
-            label="image"
-            onShare={onShareCurrentPath}
-          />
+          <ViewActions onShare={onShareCurrentPath} />
           {recoveryNotices}
           <ImageView url={url} path={props.path} />
         </div>
@@ -878,12 +866,7 @@ export const FileInspector = memo(function FileInspector(
     case "audio":
       return (
         <div className="flex min-h-0 flex-1 flex-col bg-bg" data-testid="file-inspector">
-          <ViewHeader
-            icon={<Music size={13} aria-hidden />}
-            path={props.path}
-            label="audio"
-            onShare={onShareCurrentPath}
-          />
+          <ViewActions onShare={onShareCurrentPath} />
           {recoveryNotices}
           <div className="flex flex-1 items-center justify-center p-4">
             <audio data-testid="view-audio" controls src={url} />
@@ -893,35 +876,25 @@ export const FileInspector = memo(function FileInspector(
     case "pdf":
       return (
         <div className="flex min-h-0 flex-1 flex-col bg-bg" data-testid="file-inspector">
-          <ViewHeader
-            icon={<FileText size={13} aria-hidden />}
-            path={props.path}
-            label="pdf"
-            onShare={onShareCurrentPath}
-          />
+          <ViewActions onShare={onShareCurrentPath} />
           {recoveryNotices}
-          <AffordanceCard
-            testId="view-pdf"
-            title="PDF document"
-            body="Open this PDF in your system viewer."
-            openExternally={{ workspaceId: props.workspaceId, path: props.path }}
-          />
+          <EmptyState data-testid="view-pdf" title="dohc can't preview PDF files.">
+            <OpenExternallyButton workspaceId={props.workspaceId} path={props.path} />
+          </EmptyState>
         </div>
       );
     case "database":
       return (
         <>
           {recoveryNotices}
+          {/* The view opens its database under the same header, in the
+              place these lines stand, so its own lines take over. */}
+          <SkeletonSlot>
           <Suspense
             fallback={
               <div className="flex min-h-0 flex-1 flex-col bg-bg" data-testid="file-inspector">
-                <ViewHeader
-                  icon={<FileText size={13} aria-hidden />}
-                  path={props.path}
-                  label="database"
-                  onShare={onShareCurrentPath}
-                />
-                <SkeletonRows layout="panel" label="Loading database…" />
+                <ViewActions onShare={onShareCurrentPath} />
+                <SkeletonRows inSlot layout="panel" label="Loading database…" />
               </div>
             }
           >
@@ -934,24 +907,17 @@ export const FileInspector = memo(function FileInspector(
               readOnly={props.readOnly}
             />
           </Suspense>
+          </SkeletonSlot>
         </>
       );
     default:
       return (
         <div className="flex min-h-0 flex-1 flex-col bg-bg" data-testid="file-inspector">
-          <ViewHeader
-            icon={<FileText size={13} aria-hidden />}
-            path={props.path}
-            label="file"
-            onShare={onShareCurrentPath}
-          />
+          <ViewActions onShare={onShareCurrentPath} />
           {recoveryNotices}
-          <AffordanceCard
-            testId="view-binary"
-            title="File"
-            body="This file type doesn't have a preview yet."
-            openExternally={{ workspaceId: props.workspaceId, path: props.path }}
-          />
+          <EmptyState data-testid="view-binary" title="dohc can't preview this type of file.">
+            <OpenExternallyButton workspaceId={props.workspaceId} path={props.path} />
+          </EmptyState>
         </div>
       );
   }

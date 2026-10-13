@@ -1,4 +1,5 @@
-import { expect, test, type Page } from "@playwright/test";
+import { desktopPins, activityPin, settingsNavPin } from "../src/testPins";
+import { expect, test, type Locator, type Page } from "@playwright/test";
 import { mkdir, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { DEFAULT_USER_SETTINGS } from "../src/settings/userSettings";
@@ -26,7 +27,7 @@ test("installed tool cards save profiles, Check replies through PATH, and a grou
     await openWorkspaceFromFirstRun(desktop.page, temp);
     const page = desktop.page;
     await openMyAgent(page);
-    await page.getByTestId("chats-panel").getByTestId("chats-add-agent-open").click();
+    await page.getByTestId(desktopPins.sidePanel).getByTestId("chats-add-agent-open").click();
     await page.getByTestId("chats-add-agent-agent-name").fill("Nova");
     for (const name of ["Claude Code", "Codex"]) {
       await page.getByRole("button", { name, exact: true }).click();
@@ -35,7 +36,7 @@ test("installed tool cards save profiles, Check replies through PATH, and a grou
     }
     await page.getByTestId("chats-add-agent-submit").click();
     await expect(page.getByTestId("chats-add-agent")).toHaveCount(0);
-    await page.getByTestId("chats-panel").getByTestId("chats-channel").filter({ hasText: "general" }).click();
+    await page.getByTestId(desktopPins.sidePanel).getByTestId("chats-channel").filter({ hasText: "general" }).click();
     await page.getByTestId("chats-new-thread-composer").fill("@agent check the exports");
     await page.getByTestId("chats-new-thread-composer").press("Enter");
     await expect(page.getByTestId("chats-message").filter({ hasText: REPORT })).toHaveCount(1);
@@ -95,7 +96,7 @@ async function openMyAgent(page: Page): Promise<void> {
     )
     .toBe(true);
 
-  await page.getByTestId("titlebar-chats-sidebar").click();
+  await page.getByTestId(activityPin("chats")).click();
   await expect(page.getByTestId("chats-view")).toBeVisible();
   await page.getByTestId("chats-my-agent").click();
   await expect(page.getByTestId("chats-channel-title")).toHaveText("My agent");
@@ -231,6 +232,23 @@ test("My agent posts a durable failure note when the runner exits silently", asy
   }
 });
 
+// What the pointer reaches at a toast's center: the toast, a workbench
+// modal (`data-dohc-modal` on its backdrop), something else, or nothing.
+function hitAtCenter(toast: Locator): Promise<string> {
+  return toast.evaluate((element) => {
+    const bounds = element.getBoundingClientRect();
+    const hit = document.elementFromPoint(bounds.x + bounds.width / 2, bounds.y + bounds.height / 2);
+    if (hit === null) return "none";
+    if (element.contains(hit)) return "toast";
+    if (hit.closest("[data-dohc-modal]")) return "modal";
+    return `other:${hit.tagName.toLowerCase()}`;
+  });
+}
+
+// Toasts sit above every dialog and its scrim (NoticeCenter), so a failed
+// test says so inside Settings and its reason is reachable in the toast while
+// Settings stays open. Copy and Dismiss leave Settings in place. The row stays
+// in Notices after the toast is gone.
 test("failed runner tests stay readable above Settings and remain in Notices", async () => {
   const temp = await createTempWorkspace();
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
@@ -240,35 +258,38 @@ test("failed runner tests stay readable above Settings and remain in Notices", a
     desktop = await launchDesktopApp({ workspace: temp });
     const page = desktop.page;
     await openWorkspaceFromFirstRun(page, temp);
-    await page.getByTestId("activity-settings").click();
-    await page.getByTestId("settings-nav-agents").click();
+    await page.getByTestId(activityPin("settings")).click();
+    await page.getByTestId(settingsNavPin("agents")).click();
     await page.getByTestId("runner-self-test-button").click();
     await expect(page.getByTestId("runner-self-test-result")).toHaveAttribute("data-state", "error");
     await expect(page.getByTestId("runner-self-test-result")).toHaveText("Test failed.");
     const reason = "Runner exited before reporting self-test success.";
     const toast = page.getByTestId("workspace-shell-error");
     await expect(toast).toContainText(reason);
+    const settings = page.getByTestId(desktopPins.settingsDialog);
     for (const theme of ["light", "dark"]) {
       await page.evaluate((value) => document.documentElement.setAttribute("data-theme", value), theme);
-      await expect.poll(() => toast.evaluate((element) => {
-        const bounds = element.getBoundingClientRect();
-        return element.contains(document.elementFromPoint(bounds.x + bounds.width / 2, bounds.y + bounds.height / 2));
-      })).toBe(true);
+      await expect.poll(() => hitAtCenter(toast)).toBe("toast");
+      await expect(settings).toBeVisible();
       if (process.env.UI_AUDIT_SHOT_DIR) {
         await mkdir(process.env.UI_AUDIT_SHOT_DIR, { recursive: true });
         await page.screenshot({ path: join(process.env.UI_AUDIT_SHOT_DIR, `runner-test-error-${theme}.png`) });
       }
     }
+    // Only what Copy writes here is read; the clipboard is cleared again in finally.
+    await desktop.app.evaluate(({ clipboard }) => clipboard.clear());
     await page.getByTestId("workspace-shell-error-copy").click();
     await expect.poll(() => desktop!.app.evaluate(({ clipboard }) => clipboard.readText())).toContain(reason);
-    await expect(page.getByTestId("settings-dialog")).toBeVisible();
+    await expect(settings).toBeVisible();
     await page.getByRole("button", { name: "Dismiss workspace error" }).click();
     await expect(toast).toHaveCount(0);
-    await expect(page.getByTestId("settings-dialog")).toBeVisible();
+    await expect(settings).toBeVisible();
     await page.getByRole("button", { name: "Close settings" }).click();
+    await expect(settings).toHaveCount(0);
     await page.getByTestId("notice-center-toggle").click();
     await expect(page.getByTestId("notice-center")).toContainText(reason);
   } finally {
+    await desktop?.app.evaluate(({ clipboard }) => clipboard.clear()).catch(() => undefined);
     await cleanupDesktopWorkspace(desktop, temp);
   }
 });

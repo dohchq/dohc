@@ -11,6 +11,7 @@ import type { PersistentAppBackend, PersistentOpenInput, PersistentPrepareInput,
 import type { AppRuntimeLauncher } from "./protocol.ts";
 import { acquireSupervisorOwnership } from "./worker-ownership.ts";
 import { armBudget, BUDGET_STATE_SLOTS, disarmBudget } from "./budget-watch.ts";
+import { replayConstraintLauncher } from "./replay-constraint.test-helper.ts";
 
 const hash=(bytes:Uint8Array|string)=>createHash("sha256").update(bytes).digest("hex");
 const initial={revision:0,digest:hash("initial")};
@@ -223,6 +224,37 @@ describe("persistent dataset worker",()=>{
       await expect(recovered.applyBatch([])).rejects.toMatchObject({code:'invalid_input'});
       await expect(recovered.applyBatch(Array(65).fill(second))).rejects.toMatchObject({code:'invalid_input'});
       await expect(recovered.applyBatch([second,first])).rejects.toMatchObject({code:'invalid_input'});
+    });
+  });
+
+  it("returns only a completed timed replay prefix and rejects invalid durations",async()=>{
+    await fixture(async({open})=>{
+      const writer=await open(),recovered=await open();
+      const first=event(await writer.prepare(operation(initial,{id:1,value:'first'})));await writer.finalize(first);
+      const second=event(await writer.prepare(operation(first,{id:2,value:'second'})),first);await writer.finalize(second);
+      await expect(recovered.applyBatch([first,second],-1)).rejects.toMatchObject({code:'invalid_input'});
+      await expect(recovered.applyBatch([first,second],60_001)).rejects.toMatchObject({code:'invalid_input'});
+      expect(await recovered.applyBatch([first,second],0)).toEqual({revision:1,digest:first.digest});
+      expect((await recovered.prepare({...operation(first),readOnly:true})).result).toEqual([{id:1,value:'first'}]);
+      expect(await recovered.applyBatch([second],0)).toEqual({revision:2,digest:second.digest});
+    });
+  });
+
+  it("checks foreign keys before returning a timed prefix and closes a failed copy",async()=>{
+    await fixture(async({root,open})=>{
+      const sql='CREATE TABLE parents(id INTEGER PRIMARY KEY); CREATE TABLE items(id INTEGER PRIMARY KEY,value TEXT NOT NULL,parent INTEGER REFERENCES parents(id));';
+      const raw=new DatabaseSync(join(root,'raw.sqlite'),{enableForeignKeyConstraints:false});raw.exec(sql);
+      let session=raw.createSession();raw.exec("INSERT INTO items VALUES(1,'child',1)");
+      const firstChanges=session.changeset();session.close();
+      session=raw.createSession();raw.exec('INSERT INTO parents VALUES(1)');
+      const secondChanges=session.changeset();session.close();raw.close();
+      const first={revision:1,digest:hash('first'),previousDigest:initial.digest,changeset:firstChanges,changesetSha256:hash(firstChanges)};
+      const second={revision:2,digest:hash('second'),previousDigest:first.digest,changeset:secondChanges,changesetSha256:hash(secondChanges)};
+      const input={schemaSql:sql,tables:['parents','items']};
+      const complete=await open(input);expect(await complete.applyBatch([first,second])).toMatchObject({revision:2});
+      const chunked=await open(input);
+      await expect(chunked.applyBatch([first,second],0)).rejects.toMatchObject({code:'invalid_changeset'});
+      await expect(chunked.snapshot(join(root,'invalid.sqlite'))).rejects.toThrow();
     });
   });
 
@@ -503,12 +535,14 @@ describe("persistent dataset worker",()=>{
   const cpuBudgetSchema="CREATE TABLE items(id INTEGER PRIMARY KEY, value TEXT NOT NULL); CREATE INDEX items_heavy ON items(length(printf('%.200000c',value)));";
 
   it("charges a journal replay's app work to the CPU budget",async()=>{
-    await fixture(async({open})=>{
+    await fixture(async({root,open})=>{
       const writer=await open({schemaSql:cpuBudgetSchema});
+      // Schema validation needs room before the much heavier replay spends this budget.
+      const checkpointPath=join(root,"empty.sqlite");await writer.snapshot(checkpointPath);
       const prepared=await writer.prepare({...operation(),source:insertRows(1,20_000)});
       const committed=event(prepared);
-      await expect((await open({schemaSql:cpuBudgetSchema,limits:{cpuBudgetMs:1}})).apply(committed)).rejects.toMatchObject({code:"worker_budget",
-        message:"The app's code ran too long: it used more than 1 ms of CPU time while reapplying a saved change. Try again."});
+      await expect((await open({schemaSql:cpuBudgetSchema,checkpointPath,limits:{cpuBudgetMs:100}})).apply(committed)).rejects.toMatchObject({code:"worker_budget",
+        message:"The app's code ran too long: it used more than 100 ms of CPU time while reapplying a saved change. Try again."});
       await expect((await open({schemaSql:cpuBudgetSchema})).apply(committed)).resolves.toMatchObject({revision:1});
     });
   },60_000);
@@ -550,12 +584,12 @@ describe("persistent dataset worker",()=>{
       const filled=await writer.finalize(event(await writer.prepare({...operation(),source:`globalThis.operations={run(ctx){
         ctx.db.execute("INSERT INTO items SELECT x, 'v'||x FROM (WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<2500) SELECT x FROM n)");return 1}}`})));
       const checkpointPath=join(root,"filled.sqlite");await writer.snapshot(checkpointPath);
-      // Swapping two unique values replays through the shadow copy, which rebuilds every row.
+      // Inject a secondary-constraint conflict so SQLite optimizations cannot skip the rebuild.
       const swap=event(await writer.prepare({...operation(filled),source:`globalThis.operations={run(ctx){
         ctx.db.execute("UPDATE items SET value='temp' WHERE id=1");ctx.db.execute("UPDATE items SET value='v1' WHERE id=2");ctx.db.execute("UPDATE items SET value='v2' WHERE id=1");return 1}}`}),filled);
       await writer.finalize(swap);
       const reports:{progress:string;cpuBudgetMs?:number}[]=[];
-      const launch:AppRuntimeLauncher=options=>{
+      const launch=replayConstraintLauncher(options=>{
         const child=spawn(process.execPath,[options.entryPath],{cwd:options.cwd,env:options.env,stdio:["ignore","ignore","ignore","ipc"],serialization:"advanced",windowsHide:true});
         child.on("message",message=>{
           const report=message as {progress?:unknown;cpuBudgetMs?:number};
@@ -564,7 +598,7 @@ describe("persistent dataset worker",()=>{
         });
         child.on("error",options.onError);child.on("close",options.onExit);
         return {postMessage(message){child.send(message as object);},kill(){child.kill("SIGKILL");}};
-      };
+      },filled.revision);
       await (await open({schemaSql:uniqueSchema,checkpointPath,cursor:filled},launch)).apply(swap);
       const rebuilding=reports.filter(report=>report.progress==="rebuilding the dataset from the replay copy");
       // The step starts, its check starts, rows 1,000 and 2,000 report, and the check ends.

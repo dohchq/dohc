@@ -850,7 +850,7 @@ describe("mcp tools operate on allowed paths", () => {
     await withWorkspace(async (ctx) => {
       await mkdir(join(ctx.root, "versioned"));
       await writeFile(join(ctx.root, "versioned/index.html"), "<p>App</p>");
-      await writeFile(join(ctx.root, "versioned/dohc.json"), JSON.stringify({ version, type: "site", title: "Declared title" }));
+      await writeFile(join(ctx.root, "versioned/dohc.json"), JSON.stringify({ version, type: "app", title: "Declared title" }));
       const result = await detectApps(ctx);
       expect(result.ok).toBe(true);
       if (!result.ok) return;
@@ -904,7 +904,7 @@ describe("mcp tools operate on allowed paths", () => {
           serve: "14.2.6",
         },
       });
-      expect(config).toMatchObject({ version: 1, type: "site", title: "Ledger", build: { output: "dist" } });
+      expect(config).toMatchObject({ version: 1, type: "app", title: "Ledger", build: { output: "dist" } });
       // The scaffold reports the engine as recorder; no change set.
       await expect(listChanges(ctx, { includeFiles: true })).resolves.toMatchObject({
         count: 0,
@@ -916,7 +916,12 @@ describe("mcp tools operate on allowed paths", () => {
     await withWorkspace(async (ctx) => {
       await mkdir(join(ctx.root, "existing"), { recursive: true });
       await writeFile(join(ctx.root, "existing/file.txt"), "no overwrite");
+      const request = vi.fn(ctx.request!);
+      ctx.request = request;
       await expect(createApp(ctx, { appRoot: "existing" })).resolves.toMatchObject({ ok: false });
+      expect(request).not.toHaveBeenCalled();
+      expect(await readdir(join(ctx.root, "existing"))).toEqual(["file.txt"]);
+      expect(await readFile(join(ctx.root, "existing/file.txt"), "utf8")).toBe("no overwrite");
 
       const result = await createApp(ctx, {
         appRoot: "plain-site",
@@ -925,6 +930,125 @@ describe("mcp tools operate on allowed paths", () => {
       });
       expect(result).toMatchObject({ ok: true, appRoot: "plain-site" });
       await expect(readFile(join(ctx.root, "plain-site/dohc.json"), "utf8")).rejects.toThrow();
+    });
+  });
+
+  it.each([undefined, "", "  ", "  Ledger  ", '<Ledger & "quoted">'])("dohc_create_app resolves and escapes title %s", async (title) => {
+    await withWorkspace(async (ctx) => {
+      const result = await createApp(ctx, { appRoot: "finance/my_ledger", title });
+      expect(result).toMatchObject({ ok: true });
+      const resolvedTitle = title?.trim() || "My Ledger";
+      const html = await readFile(join(ctx.root, "finance/my_ledger/index.html"), "utf8");
+      const escaped = resolvedTitle === '<Ledger & "quoted">' ? "&lt;Ledger &amp; &quot;quoted&quot;&gt;" : resolvedTitle;
+      expect(html).toContain(`<title>${escaped}</title>`);
+      expect(html).toContain(`<h1>${escaped}</h1>`);
+      const manifest = JSON.parse(await readFile(join(ctx.root, "finance/my_ledger/dohc.json"), "utf8"));
+      expect(manifest).toMatchObject({ type: "app", title: resolvedTitle });
+      const pkg = JSON.parse(await readFile(join(ctx.root, "finance/my_ledger/package.json"), "utf8"));
+      expect(pkg.name).toBe("my_ledger");
+    });
+  });
+
+  it("dohc_create_app reuses an empty folder but refuses an existing file", async () => {
+    await withWorkspace(async (ctx) => {
+      await mkdir(join(ctx.root, "empty"));
+      await expect(createApp(ctx, { appRoot: "empty" })).resolves.toMatchObject({ ok: true });
+      await writeFile(join(ctx.root, "occupied"), "keep this file");
+      await expect(createApp(ctx, { appRoot: "occupied" })).resolves.toMatchObject({
+        ok: false, reason: "appRoot is not a directory: occupied",
+      });
+      expect(await readFile(join(ctx.root, "occupied"), "utf8")).toBe("keep this file");
+    });
+  });
+
+  it.each([...TRAVERSALS, ".git/app", "shared-with-me/app", "Shared-With-Me/app"])("dohc_create_app preserves path refusal for %s", async (appRoot) => {
+    await withWorkspace(async (ctx) => {
+      const request = vi.fn<NonNullable<ToolContext["request"]>>();
+      ctx.request = request;
+      await expect(createApp(ctx, { appRoot })).resolves.toMatchObject({ ok: false });
+      expect(request).not.toHaveBeenCalled();
+      expect(await readdir(ctx.root)).toEqual([]);
+    });
+  });
+
+  it.each([
+    { appRoot: ".env/app", path: ".env/app/index.html" },
+    { appRoot: "app", path: "app/styles.css" },
+  ])("dohc_create_app preserves authored path-policy refusal for $path", async ({ appRoot, path }) => {
+    await withWorkspace(async (ctx) => {
+      const refusal = { ok: false, written: [], path,
+        reason: `History cannot record ${path}. Choose a non-secret path included by files.toml.`,
+      };
+      const request = vi.fn<NonNullable<ToolContext["request"]>>(async () => refusal);
+      ctx.request = request;
+      expect(await createApp(ctx, { appRoot }, "Client")).toEqual(refusal);
+      expect(request).toHaveBeenCalledOnce();
+      const sent = request.mock.calls[0]![0];
+      expect(sent.verb).toBe("fileWrite");
+      if (sent.verb !== "fileWrite") throw new Error("expected authored file write");
+      expect(sent.args.actor).toBe("agent");
+      expect(sent.args.agent).toBe("Client");
+      expect(sent.args.files.every((file) => file.createOnly)).toBe(true);
+      expect(await readdir(ctx.root)).toEqual([]);
+    });
+  });
+
+  it.each([".dohc", "shared-with-me"])("dohc_create_app refuses an alias into %s", async (reserved) => {
+    await withWorkspace(async (ctx) => {
+      await mkdir(join(ctx.root, reserved));
+      await symlink(join(ctx.root, reserved), join(ctx.root, "alias"), "junction");
+      const request = vi.fn<NonNullable<ToolContext["request"]>>();
+      ctx.request = request;
+      await expect(createApp(ctx, { appRoot: "alias/new-app" })).resolves.toMatchObject({ ok: false });
+      expect(request).not.toHaveBeenCalled();
+      expect(await readdir(join(ctx.root, reserved))).toEqual([]);
+    });
+  });
+
+  it("dohc_detect_apps agrees with core on app manifests, other types, and build confidence", async () => {
+    await withWorkspace(async ctx => {
+      const sources = [
+        { path: "declared/dohc.json", body: '{"version":1,"type":"app"}' },
+        { path: "publication/app.publish.json", body: '{"version":1,"entryPath":"main.ts","inputs":["main.ts"]}' },
+        { path: "workflow/dohc.json", body: '{"type":"workflow","build":{"output":"dist"}}' },
+        { path: "retired/dohc.json", body: '{"type":"site","build":{"output":"dist"}}' },
+        { path: "claimed/dohc.json", body: '{"type":"app","build":{"output":"dist"}}' },
+        { path: "empty/dohc.json", body: '{}' },
+        { path: "build-only/dist/index.html", body: '<h1>Built</h1>' },
+        { path: "other-build/dohc.json", body: '{"type":"workflow"}' },
+        { path: "other-build/dist/index.html", body: '<h1>Built</h1>' },
+        { path: "conflict/dohc.json", body: '{"type":"workflow"}' },
+        { path: "conflict/index.html", body: '<h1>Independent</h1>' },
+        { path: "published-other/dohc.json", body: '{"type":"workflow"}' },
+        { path: "published-other/app.publish.json", body: '{}' },
+        { path: "malformed/dohc.json", body: '{"type":"app",' },
+        { path: "newer/dohc.json", body: '{"version":2,"type":"app"}' },
+        { path: "invalid-version/dohc.json", body: '{"version":"1","type":"app"}' },
+        { path: "invalid-type/dohc.json", body: '{"type":42}' },
+      ];
+      for (const source of sources) {
+        await mkdir(dirname(join(ctx.root, source.path)), { recursive: true });
+        await writeFile(join(ctx.root, source.path), source.body);
+      }
+      const result = await detectApps(ctx);
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      const facts = (apps: ReadonlyArray<Pick<ReturnType<typeof discoverSites>[number], "root" | "kind" | "confidence">>) => apps.map(app => ({
+        root: app.root, kind: app.kind, confidence: app.confidence,
+      })).sort((a, b) => a.root.localeCompare(b.root));
+      expect(facts(result.apps)).toEqual(facts(discoverSites(sources)));
+      for (const root of ["workflow", "retired"]) expect(result.apps.map(app => app.root)).not.toContain(root);
+      for (const root of ["declared", "publication", "claimed", "published-other"]) {
+        expect(result.apps.find(app => app.root === root)?.confidence).toBe("high");
+      }
+      expect(result.apps.find(app => app.root === "build-only")?.confidence).toBe("medium");
+      expect(result.apps.find(app => app.root === "empty")?.confidence).toBe("low");
+      expect(result.apps.find(app => app.root === "conflict")?.diagnostics).toContainEqual(
+        expect.objectContaining({ code: "unexpected_dohc_type", message: 'dohc.json has website signals but its type is not "app".' }),
+      );
+      expect(result.apps.find(app => app.root === "invalid-type")?.diagnostics).toContainEqual(
+        expect.objectContaining({ code: "invalid-type", message: 'dohc.json type should be "app".' }),
+      );
     });
   });
 
@@ -996,7 +1120,7 @@ describe("mcp tools operate on allowed paths", () => {
       );
       await writeFile(
         join(ctx.root, "nested-output/dohc.json"),
-        JSON.stringify({ type: "site", build: { output: "public/dist" } }),
+        JSON.stringify({ type: "app", build: { output: "public/dist" } }),
       );
 
       const result = await detectApps(ctx);
@@ -1026,7 +1150,7 @@ describe("mcp tools operate on allowed paths", () => {
       );
       await writeFile(
         join(ctx.root, "dual-output/dohc.json"),
-        JSON.stringify({ type: "site", build: { output: "public/dist" } }),
+        JSON.stringify({ type: "app", build: { output: "public/dist" } }),
       );
 
       const result = await detectApps(ctx);
@@ -1043,7 +1167,7 @@ describe("mcp tools operate on allowed paths", () => {
       await writeFile(join(ctx.root, "bad-preview-mode/index.html"), "<h1>Site</h1>");
       await writeFile(
         join(ctx.root, "bad-preview-mode/dohc.json"),
-        JSON.stringify({ type: "site", preview: { mode: "invalid" } }),
+        JSON.stringify({ type: "app", preview: { mode: "invalid" } }),
       );
 
       const result = await detectApps(ctx);
@@ -1082,7 +1206,7 @@ describe("mcp tools operate on allowed paths", () => {
       // {} parses cleanly (configPath set, no error diagnostic) but
       // declares no type at all — workspace-core's siteConfidence only
       // returns "high" for a config reason when it explicitly declares
-      // type: "site"; a valid-but-empty config isn't itself a
+      // type: "app"; a valid-but-empty config isn't itself a
       // high-confidence website signal. Both detectors have to agree on
       // the same dohc.json.
       await mkdir(join(ctx.root, "empty-config"), { recursive: true });
@@ -1118,7 +1242,7 @@ describe("mcp tools operate on allowed paths", () => {
       const result = await detectApps(ctx);
       expect(result).toMatchObject({ ok: true, count: 1 });
       if (!result.ok) return;
-      // A genuinely valid dohc.json ({"type":"site"}) reads kind "configured"
+      // A genuinely valid dohc.json ({"type":"app"}) reads kind "configured"
       // and confidence "high" here (see the "finds configured, package, and
       // static sites" test above); an array parses without throwing, so
       // without the shape check this folder would misclassify the same way.
@@ -1233,7 +1357,7 @@ describe("mcp tools operate on allowed paths", () => {
       await writeFile(join(ctx.root, "portal/index.html"), "<h1>Portal</h1>");
       await writeFile(
         join(ctx.root, "portal/dohc.json"),
-        JSON.stringify({ type: "site", build: { output: "dist" } }),
+        JSON.stringify({ type: "app", build: { output: "dist" } }),
       );
       // A genuinely separate, independently detectable web project happens
       // to live at that exact claimed (but unbuilt) path — the claim alone
@@ -1264,7 +1388,7 @@ describe("mcp tools operate on allowed paths", () => {
       const padding = "x".repeat(1024 * 1024 + 1);
       await writeFile(
         join(ctx.root, "oversized-config/dohc.json"),
-        JSON.stringify({ type: "site", title: padding }),
+        JSON.stringify({ type: "app", title: padding }),
       );
 
       const result = await detectApps(ctx);
@@ -1286,7 +1410,7 @@ describe("mcp tools operate on allowed paths", () => {
       await writeFile(join(ctx.root, "site-unsafe-output/index.html"), "<h1>Site</h1>");
       await writeFile(
         join(ctx.root, "site-unsafe-output/dohc.json"),
-        JSON.stringify({ type: "site", build: { output: "../../outside" } }),
+        JSON.stringify({ type: "app", build: { output: "../../outside" } }),
       );
 
       const result = await detectApps(ctx);
@@ -1376,7 +1500,7 @@ describe("mcp tools operate on allowed paths", () => {
       await writeFile(join(ctx.root, "docs/public/index.html"), "<h1>Configured entry</h1>");
       await writeFile(
         join(ctx.root, "docs/dohc.json"),
-        JSON.stringify({ type: "site", preview: { mode: "static", entry: "public/index.html" } }),
+        JSON.stringify({ type: "app", preview: { mode: "static", entry: "public/index.html" } }),
       );
 
       const result = await detectApps(ctx);
@@ -1405,7 +1529,7 @@ describe("mcp tools operate on allowed paths", () => {
       await writeFile(join(ctx.root, "escape/index.html"), "<h1>Fallback</h1>");
       await writeFile(
         join(ctx.root, "escape/dohc.json"),
-        JSON.stringify({ type: "site", preview: { entry: "../outside/index.html" } }),
+        JSON.stringify({ type: "app", preview: { entry: "../outside/index.html" } }),
       );
 
       const result = await detectApps(ctx);
@@ -1419,6 +1543,58 @@ describe("mcp tools operate on allowed paths", () => {
           expect.objectContaining({ code: "invalid-preview-entry", severity: "warning" }),
         ]),
       });
+    });
+  });
+
+  it.each([
+    { name: 'data.csv', body: 'id,zip,x,x,x_2\na,02134,first,second,third',
+      rows: [{ id: 'a', zip: '02134', x: 'first', x_3: 'second', x_2: 'third' }] },
+    { name: 'data.json', body: '[{"id":"a","zip":"02134","flag":"true"}]',
+      rows: [{ id: 'a', zip: '02134', flag: 'true' }] },
+    { name: 'data.jsonl', body: '{"id":"a","zip":"02134","flag":"true"}',
+      rows: [{ id: 'a', zip: '02134', flag: 'true' }] },
+    { name: 'data.md', body: '| id | zip |\n| --- | --- |\n| a | 02134 |\n\n| id | zip |\n| --- | --- |\n| b | 99999 |',
+      rows: [{ id: 'a', zip: '02134' }] },
+  ])("import_data preserves source bytes and every value from $name", async ({ name, body, rows }) => {
+    await withWorkspace(async ctx => {
+      const source = Buffer.from(body);
+      await writeFile(join(ctx.root, name), source);
+      const request = vi.fn(emptyDesktopHistoryRequest);
+      const result = await importData({ ...ctx, request }, { sourcePath: name, databasePath: 'data.sqlite', tableName: 'rows' }, 'Import agent');
+      expect(result).toMatchObject({ ok: true, rowCount: rows.length });
+      expect(await queryDatabase(ctx, { databasePath: 'data.sqlite', sql: 'SELECT * FROM rows ORDER BY id' })).toMatchObject({ ok: true, rows });
+      expect(await readFile(join(ctx.root, name))).toEqual(source);
+      expect(request).toHaveBeenCalledTimes(1);
+      expect(request).toHaveBeenCalledWith(expect.objectContaining({ verb: 'fileWrite', args: expect.objectContaining({
+        agent: 'Import agent', files: [expect.objectContaining({ path: 'data.sqlite', createOnly: true })],
+      }) }));
+    });
+  });
+
+  it.each([
+    { name: 'extra.csv', body: 'id,note\na,first,discarded' },
+    { name: 'unfinished.csv', body: 'id,note\na,"unfinished' },
+    { name: 'invalid.json', body: '[{"id":' },
+    { name: 'receipt.pdf', body: '%PDF-1.7\n| id | value |\n| --- | --- |\n| a | 1 |\n%%EOF' },
+  ])("import_data refuses $name without creating a destination or changing the source", async ({ name, body }) => {
+    await withWorkspace(async ctx => {
+      const source = Buffer.from(body);
+      await writeFile(join(ctx.root, name), source);
+      const request = vi.fn(emptyDesktopHistoryRequest);
+      expect(await importData({ ...ctx, request }, { sourcePath: name, databasePath: 'data.sqlite', tableName: 'rows' })).toMatchObject({ ok: false });
+      expect(request).not.toHaveBeenCalled();
+      await expect(stat(join(ctx.root, 'data.sqlite'))).rejects.toMatchObject({ code: 'ENOENT' });
+      expect(await readFile(join(ctx.root, name))).toEqual(source);
+    });
+  });
+
+  it("import_data keeps existing destination bytes", async () => {
+    await withWorkspace(async ctx => {
+      await writeFile(join(ctx.root, 'data.csv'), 'id,note\na,first');
+      const original = Buffer.from('existing database bytes');
+      await writeFile(join(ctx.root, 'data.sqlite'), original);
+      expect(await importData(ctx, { sourcePath: 'data.csv', databasePath: 'data.sqlite', tableName: 'rows' })).toMatchObject({ ok: false });
+      expect(await readFile(join(ctx.root, 'data.sqlite'))).toEqual(original);
     });
   });
 
@@ -1453,7 +1629,7 @@ describe("mcp tools operate on allowed paths", () => {
 
       expect(imported).toMatchObject({
         ok: false,
-        reason: expect.stringContaining("EEXIST"),
+        reason: "File already exists",
       });
       await expect(readFile(join(ctx.root, "people.sqlite"), "utf8")).resolves.toBe("already here\n");
       await expect(listChanges(ctx, { limit: 10 })).resolves.toMatchObject({

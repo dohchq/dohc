@@ -6,11 +6,21 @@ import { createRequire, syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { buildEnvironment, directoryFingerprint, engineArtifactMatches, hashFile, repairOwnedEngineExecutable, sourceFingerprint } from "./build.mjs";
-import { changedFiles, desktopProofCommand, postgres, selectedGates, readSelfHostNativeProof } from "./verify.mjs";
+import { changedFiles, desktopProofCommand, desktopProofTags, postgres, readSelfHostNativeProof } from "./verify.mjs";
+import { selectedGates } from "./selection.mjs";
 import { repoRoot, run } from "./process.mjs";
 import { requireE2eEngine } from "../../apps/desktop/scripts/require-e2e-engine.mjs";
 import { createPrepareFixture } from "./prepare-fixture.mjs";
 import { runEarlyCloseDebugFixture } from "./debug-fixture.mjs";
+
+// Native tests include these files from outside crates; the daemon never does.
+const nativeTestFixtures = [
+  "packages/excalidraw-scene/fixtures/canonical-json.json", "packages/live-session-contract/src/liveObjectBinding.vectors.json",
+  "packages/live-session-contract/vectors/live-update-admission-vectors.json", "packages/security-contract/vectors/share-grant-vectors.json",
+  "packages/workspace-contracts/src/relayValues.ts", "packages/workspace-fs/text-media-cases.json",
+  "services/sync-relay/relay-error-codes.json", "tools/rust-engine-program/capture-fixtures.json", "tools/rust-engine-program/capture-goldens.json",
+  "tools/rust-engine-program/ydoc-replay-fixtures.json", "tools/rust-engine-program/ydoc-replay-goldens.json",
+];
 
 function withFixedCompilerIdentity(action) {
   const original = childProcess.execFileSync;
@@ -27,6 +37,22 @@ test("desktop proof gets an isolated display only on headless Linux", () => {
   for (const platform of ["win32", "darwin"]) assert.deepEqual(desktopProofCommand(args, {platform, env: {}}), direct);
   assert.deepEqual(desktopProofCommand(args, {platform: "linux", env: {DISPLAY: ":99"}}), direct);
   assert.deepEqual(desktopProofCommand(args, {platform: "linux", env: {WAYLAND_DISPLAY: "wayland-0"}}), direct);
+});
+
+test("renderer proofs require persistence smoke and the Windows pixel baseline without onboarding", () => {
+  const proofs = {smoke: true, statesPage: true};
+  assert.deepEqual(desktopProofTags(proofs, {platform: "win32"}), {
+    selected: ["@verification-smoke", "@states-page"], required: ["@verification-smoke", "@states-baselines"],
+  });
+  for (const platform of ["linux", "darwin"]) {
+    assert.deepEqual(desktopProofTags(proofs, {platform}), {
+      selected: ["@verification-smoke"], required: ["@verification-smoke"],
+    });
+  }
+  assert.deepEqual(desktopProofTags({desktop: true}, {platform: "win32"}), {
+    selected: ["@verification-smoke", "@self-host-onboarding"], required: ["@verification-smoke", "@self-host-onboarding"],
+  });
+  assert.deepEqual(desktopProofTags({}, {platform: "win32"}), {selected: [], required: []});
 });
 
 test("native proof evidence rejects skips, wrong binaries, and incomplete delivery", () => {
@@ -364,7 +390,6 @@ test("vendored native edits invalidate preparation and rebuild the engine", () =
       assert.equal(result.status, 0, result.stderr);
       return JSON.parse(result.stdout.trim().split(/\r?\n/).at(-1));
     };
-    // This fixture has no POSIX CLI launchers.
     const options = { platform: "win32" };
     assert.equal(run(options).enginePrepared, true);
     const original = JSON.parse(readFileSync(join(root, ".dohc-dev/verification/build.json"), "utf8")).engine.source;
@@ -378,9 +403,194 @@ test("vendored native edits invalidate preparation and rebuild the engine", () =
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
-test("prepared desktop checks staged compiler bytes only on Windows x64", () => {
-  for (const [platform, arch] of [["win32", "x64"], ["win32", "arm64"], ["linux", "x64"]]) {
-    const supported = platform === "win32" && arch === "x64";
+test("preparation reuses artifacts across proof edits and rebuilds for production inputs", () => {
+  const root = mkdtempSync(join(tmpdir(), "dohc-prepare-production-"));
+  try {
+    createPrepareFixture(root, new URL("./build.mjs", import.meta.url));
+    mkdirSync(join(root, "apps/desktop/resources/cli-bin"), { recursive: true });
+    for (const name of ["dohc", "dohc-mcp"]) writeFileSync(join(root, "apps/desktop/resources/cli-bin", name), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+    const result = spawnSync(process.execPath, ["--input-type=module", "-e", `
+      import assert from 'node:assert/strict';
+      import cp from 'node:child_process';
+      import {appendFileSync,existsSync,mkdirSync,readFileSync,rmSync,writeFileSync} from 'node:fs';
+      import {dirname} from 'node:path';
+      import {syncBuiltinESMExports} from 'node:module';
+      const exec=cp.execFileSync;
+      cp.execFileSync=(command,...args)=>command==='rustc'?Buffer.from('fixture rustc'):exec(command,...args);
+      syncBuiltinESMExports();
+      for(const name of ['CARGO_PROFILE_DEV_OPT_LEVEL','VITE_FIXTURE'])delete process.env[name];
+      const {prepare,preparedStatus,sourceFingerprint,enginePath,receiptPath}=await import('./scripts/verification/build.mjs');
+      const put=(path,text)=>{mkdirSync(dirname(path),{recursive:true});writeFileSync(path,text);};
+      const edit=path=>()=>appendFileSync(path,'// changed\\n');
+      const git=(...args)=>exec('git',['-c','core.hooksPath=no-hooks','-c','commit.gpgsign=false','-c','user.name=Fixture','-c','user.email=fixture@example.invalid',...args],{encoding:'utf8'}).trim();
+      const receipt=()=>existsSync(receiptPath)?JSON.parse(readFileSync(receiptPath,'utf8')):{};
+      const builds=()=>{
+        const calls=existsSync('.dohc-dev/calls.jsonl')?readFileSync('.dohc-dev/calls.jsonl','utf8').trim().split(/\\r?\\n/).map(JSON.parse):[];
+        return {engine:calls.filter(({command})=>command==='cargo').length,desktop:calls.filter(({args})=>args[1]==='@dohc/desktop').length};
+      };
+      async function expectBuilds(name,rebuilt){
+        const before=builds(),previous=receipt();
+        await prepare();
+        for(const kind of ['engine','desktop']){
+          assert.equal(builds()[kind]-before[kind],rebuilt.includes(kind)?1:0,name+' builds '+kind);
+          if(!rebuilt.includes(kind))assert.deepEqual(receipt()[kind],previous[kind],name+' keeps the '+kind+' receipt');
+        }
+      }
+      put('.git/info/exclude','.cargo/\\napps/desktop/.env.production.local\\n');
+      for(const path of ['crates/dohc-engine-files/src/floor.rs','crates/dohc-engine-files/src/pathFoldData.json','vendor/yrs-0.27.3/src/lib.rs',
+        'Cargo.toml','Cargo.lock','rust-toolchain.toml','packages/ydoc-projection/src/projection.test.ts','apps/desktop/src/renderer/App.tsx',
+        'packages/collection-views/src/table/Table.test.tsx','apps/desktop/scripts/stage-app-compiler.mjs','services/share-web/viewer/src/main.tsx',
+        'patches/prosemirror-view@1.42.2.patch','pnpm-workspace.yaml','scripts/verification/verification.test.mjs','tools/perf-profiling/run-profiles.mjs',
+        'scripts/verification/windows-command.mjs','scripts/verification/windows-job.ps1','tools/rust-engine-program/git-read.mjs'])put(path,'original\\n');
+      git('add','.');git('commit','-m','Inputs');
+      await expectBuilds('first preparation',['engine','desktop']);
+      const origin=receipt(),commit=git('rev-parse','HEAD');
+      for(const kind of ['engine','desktop']){
+        assert.equal(origin[kind].source,sourceFingerprint(kind));
+        assert.match(origin[kind].production,/^[a-f0-9]{64}$/);
+        assert.equal(origin[kind].commit,commit);
+      }
+
+      for(const [path,provenance] of [['scripts/verification/verification.test.mjs',['engine','desktop']],['tools/perf-profiling/run-profiles.mjs',['desktop']]]){
+        const before=Object.fromEntries(['engine','desktop'].map(kind=>[kind,sourceFingerprint(kind)]));
+        edit(path)();git('commit','-am','Edit '+path);
+        for(const kind of ['engine','desktop'])assert.equal(sourceFingerprint(kind)!==before[kind],provenance.includes(kind),path+' '+kind+' provenance');
+        await expectBuilds(path,[]);
+      }
+      assert.notEqual(git('rev-parse','HEAD'),commit);
+      assert.deepEqual(receipt(),origin,'reuse keeps the original source, commit, and build time');
+
+      // A projection test is engine provenance that no build consumes. A root
+      // lockfile is a shared production input of every build.
+      for(const [path,rebuilt] of [['packages/ydoc-projection/src/projection.test.ts',[]],['pnpm-lock.yaml',['engine','desktop']]]){
+        const before=sourceFingerprint('engine');
+        edit(path)();
+        assert.notEqual(sourceFingerprint('engine'),before,path+' engine provenance');
+        await expectBuilds(path,rebuilt);
+      }
+
+      for(const [operation,change] of [['creation',path=>put(path,'original\\n')],['edit',path=>edit(path)()],['deletion',path=>rmSync(path)]]){
+        for(const path of ${JSON.stringify(nativeTestFixtures)}){
+          const before=sourceFingerprint('engine');
+          change(path);
+          assert.notEqual(sourceFingerprint('engine'),before,path+' '+operation+' changes native proof provenance');
+          assert.equal(preparedStatus('engine'),true,path+' '+operation+' keeps the daemon');
+        }
+        // No build consumes a native test fixture; this fixture declares no
+        // package that would make one a desktop dependency.
+        await expectBuilds('native test fixture '+operation,[]);
+      }
+
+      for(const [name,change,rebuilt] of [
+        ['native source',edit('crates/dohc-engine-files/src/floor.rs'),['engine']],
+        ['embedded path folding data',edit('crates/dohc-engine-files/src/pathFoldData.json'),['engine']],
+        ['vendored source',edit('vendor/yrs-0.27.3/src/lib.rs'),['engine']],
+        ['native source creation',()=>put('crates/dohc-engine-files/src/added.rs','// added\\n'),['engine']],
+        ['native source deletion',()=>rmSync('crates/dohc-engine-files/src/added.rs'),['engine']],
+        // Root files are shared production inputs of every build.
+        ...['Cargo.toml','Cargo.lock','rust-toolchain.toml'].map(path=>[path,edit(path),['engine','desktop']]),
+        ['ignored Cargo configuration',()=>put('.cargo/config.toml','[build]\\njobs = 1\\n'),['engine']],
+        ['Rust environment',()=>{process.env.CARGO_PROFILE_DEV_OPT_LEVEL='1';},['engine']],
+        ['Rust environment removal',()=>{delete process.env.CARGO_PROFILE_DEV_OPT_LEVEL;},['engine']],
+        ['scanned renderer test creation',()=>put('apps/desktop/src/renderer/Added.test.tsx','<div className="w-[123457px]"/>\\n'),['desktop']],
+        ['scanned renderer test deletion',()=>rmSync('apps/desktop/src/renderer/Added.test.tsx'),['desktop']],
+        ['renderer source',edit('apps/desktop/src/renderer/App.tsx'),['desktop']],
+        // Only a renderer stylesheet's @source scan would retain this test; the fixture has none.
+        ['collection view test',edit('packages/collection-views/src/table/Table.test.tsx'),[]],
+        ['staging script',edit('apps/desktop/scripts/stage-app-compiler.mjs'),['desktop']],
+        ['viewer source',edit('services/share-web/viewer/src/main.tsx'),['desktop']],
+        ['ignored production environment',()=>put('apps/desktop/.env.production.local','VITE_FIXTURE=one\\n'),['desktop']],
+        ['workspace configuration',edit('pnpm-workspace.yaml'),['engine','desktop']],
+        ['Vite environment',()=>{process.env.VITE_FIXTURE='one';},['desktop']],
+        ['Vite environment removal',()=>{delete process.env.VITE_FIXTURE;},['desktop']],
+      ]){change();await expectBuilds(name,rebuilt);}
+
+      for(const path of ['scripts/verification/process.mjs','scripts/verification/windows-command.mjs','scripts/verification/windows-job.ps1',
+        'tools/rust-engine-program/build-slot.mjs','tools/rust-engine-program/git-read.mjs','apps/desktop/scripts/require-e2e-engine.mjs']){
+        const before={engine:sourceFingerprint('engine'),desktop:sourceFingerprint('desktop')};
+        edit(path)();
+        for(const kind of ['engine','desktop'])assert.notEqual(sourceFingerprint(kind),before[kind],path+' changes '+kind+' provenance');
+        await expectBuilds('preparation recipe '+path,['engine','desktop']);
+        for(const kind of ['engine','desktop'])assert.equal(receipt()[kind].source,sourceFingerprint(kind),path+' records the '+kind+' source');
+      }
+
+      const patchSources={engine:sourceFingerprint('engine'),desktop:sourceFingerprint('desktop')};
+      edit('patches/prosemirror-view@1.42.2.patch')();
+      assert.notEqual(sourceFingerprint('desktop'),patchSources.desktop,'dependency patch changes desktop provenance');
+      assert.equal(sourceFingerprint('engine'),patchSources.engine,'dependency patch leaves engine provenance');
+      // Patches are shared production inputs, so the engine rebuilds without new provenance.
+      await expectBuilds('dependency patch',['engine','desktop']);
+      assert.equal(receipt().desktop.source,sourceFingerprint('desktop'),'the rebuilt desktop records the patched source');
+
+      writeFileSync(enginePath,'corrupt engine');
+      await expectBuilds('changed engine bytes',['engine']);
+      const old=receipt();
+      for(const kind of ['engine','desktop'])delete old[kind].production;
+      writeFileSync(receiptPath,JSON.stringify(old));
+      await expectBuilds('receipt without production identity',['engine','desktop']);
+      await expectBuilds('unchanged checkout',[]);
+    `], { cwd: root, encoding: "utf8", timeout: 120_000 });
+    assert.equal(result.error, undefined);
+    assert.equal(result.status, 0, result.stderr);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("proof edits during preparation reject full source provenance", () => {
+  const root = mkdtempSync(join(tmpdir(), "dohc-prepare-provenance-"));
+  try {
+    const invoke = createPrepareFixture(root, new URL("./build.mjs", import.meta.url), { commit: false });
+    mkdirSync(join(root, "apps/desktop/resources/cli-bin"), { recursive: true });
+    for (const name of ["dohc", "dohc-mcp"]) writeFileSync(join(root, "apps/desktop/resources/cli-bin", name), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+    const adapter = join(root, "scripts/verification/process.mjs");
+    writeFileSync(adapter, readFileSync(adapter, "utf8").replace("export async function run(", "async function fixtureRun(") + `
+      import {rmSync} from 'node:fs';
+      export async function run(command,args,options) {
+        const marker=join(repoRoot,'.dohc-dev/edit-during-cargo');
+        if(command==='cargo' && existsSync(marker)) { appendFileSync(join(repoRoot,readFileSync(marker,'utf8')),'// changed\\n'); rmSync(marker); }
+        return fixtureRun(command,args,options);
+      }
+    `);
+    for (const path of ["scripts/verification/verification.test.mjs", "tools/perf-profiling/run-profiles.mjs"]) {
+      mkdirSync(dirname(join(root, path)), { recursive: true });
+      writeFileSync(join(root, path), "original\n");
+    }
+    execFileSync("git", ["add", "."], { cwd: root });
+    execFileSync("git", ["-c", "commit.gpgsign=false", "-c", `core.hooksPath=${join(root, "no-hooks")}`,
+      "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-m", "Provenance fixture"], { cwd: root, stdio: "ignore" });
+    const receiptPath = join(root, ".dohc-dev/verification/build.json");
+    const receipt = () => JSON.parse(readFileSync(receiptPath, "utf8"));
+    const cargoBuilds = () => readFileSync(join(root, ".dohc-dev/calls.jsonl"), "utf8").trim().split(/\r?\n/).map(JSON.parse)
+      .filter(({ command }) => command === "cargo").length;
+    const enginePath = join(root, "target/debug", `dohc-workspace-engine${process.platform === "win32" ? ".exe" : ""}`);
+    const first = invoke();
+    assert.equal(first.status, 0, first.stderr);
+    for (const [path, reason] of [
+      // The rebuilt engine's own source changes.
+      ["scripts/verification/verification.test.mjs", /engine inputs changed during the build/],
+      // Only the reused desktop's source changes.
+      ["tools/perf-profiling/run-profiles.mjs", /desktop inputs changed during preparation/],
+    ]) {
+      const previous = receipt(), builds = cargoBuilds();
+      writeFileSync(enginePath, "corrupt engine");
+      writeFileSync(join(root, ".dohc-dev/edit-during-cargo"), path);
+      const failed = invoke();
+      assert.notEqual(failed.status, 0, path);
+      assert.match(failed.stderr, reason);
+      assert.equal(cargoBuilds(), builds + 1, path);
+      assert.deepEqual(receipt().desktop, previous.desktop, `${path} keeps the reused desktop receipt`);
+      if (path.startsWith("scripts/")) assert.deepEqual(receipt().engine, previous.engine, `${path} records no engine receipt`);
+      // The proof edit alone leaves the rebuilt artifact reusable.
+      const reused = invoke();
+      assert.equal(reused.status, 0, reused.stderr);
+      assert.match(reused.stdout, /reuse engine[\s\S]*reuse desktop/);
+      assert.equal(cargoBuilds(), builds + 1, path);
+    }
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("prepared desktop checks staged compiler bytes on Windows and Linux x64", () => {
+  for (const [platform, arch] of [["win32", "x64"], ["win32", "arm64"], ["linux", "x64"], ["linux", "arm64"]]) {
+    const supported = arch === "x64" && ["win32", "linux"].includes(platform);
     const root = mkdtempSync(join(tmpdir(), "dohc-prepare-compiler-"));
     try {
       const invoke = createPrepareFixture(root, new URL("./build.mjs", import.meta.url));
@@ -545,7 +755,7 @@ for (const kind of ["engine", "desktop"]) test(`${kind} source identity scopes e
         engine:['RUSTFLAGS','CARGO_ENCODED_RUSTFLAGS','CARGO_BUILD_JOBS','CARGO_PROFILE_DEV_DEBUG',
           'CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS','CARGO_INCREMENTAL','RUSTC_WRAPPER','RUSTDOCFLAGS',
           'CC','CXX','AR','CFLAGS','CXXFLAGS'],
-        desktop:['VITE_FIXTURE','NODE_ENV','ESBUILD_BINARY_PATH'],
+        desktop:['VITE_FIXTURE','NODE_ENV','ESBUILD_BINARY_PATH','DOHC_POSTHOG_KEY','DOHC_POSTHOG_HOST','DOHC_DESKTOP_DIST'],
       };
       for(const [owner,names] of Object.entries(settings)) for(const name of names) {
         delete process.env[name];
@@ -762,6 +972,20 @@ test("gate selection follows workflow inputs, including shared and gate implemen
   }
 });
 
+test("gate selection covers provenance inputs without selecting Rust for ordinary scripts", () => {
+  const workflow = readFileSync(join(repoRoot, ".github/workflows/pr-checks.yml"), "utf8");
+  for (const file of ["vendor/yrs-0.27.3/src/lib.rs", "vendor/file-guard/src/lib.rs",
+    "tools/rust-engine-program/run-rust-checks.mjs"]) {
+    assert.deepEqual(selectedGates([file], workflow), { rust: true, js: true }, file);
+  }
+  assert.deepEqual(selectedGates(["scripts/check-brand.mjs"], workflow), { rust: false, js: true });
+});
+
+test("shared native test fixtures select the Rust gate", () => {
+  const workflow = readFileSync(join(repoRoot, ".github/workflows/pr-checks.yml"), "utf8");
+  for (const file of nativeTestFixtures) assert.equal(selectedGates([file], workflow).rust, true, file);
+});
+
 test("path folding data and fixtures select Rust and their TypeScript drift checks", () => {
   const workflow = readFileSync(join(repoRoot, ".github/workflows/pr-checks.yml"), "utf8");
   for (const file of [
@@ -811,16 +1035,16 @@ test("a docs-only PR records clean provenance without code tools, while dirty he
   ], { cwd: root, encoding: "utf8" }).trim();
   try {
     for (const file of [
-      "scripts/verification/verify.mjs", "scripts/verification/timing.mjs", "scripts/verification/build.mjs", "scripts/verification/process.mjs", "scripts/verification/doctor.mjs",
-      "scripts/verification/cancellation.mjs", "scripts/verification/js-tests.mjs", "scripts/verification/selection.mjs",
+      "scripts/verification/verify.mjs", "scripts/verification/ticket-evidence.mjs", "scripts/verification/timing.mjs", "scripts/verification/build.mjs", "scripts/verification/process.mjs", "scripts/verification/doctor.mjs",
+      "scripts/verification/cancellation.mjs", "scripts/verification/js-tests.mjs", "scripts/verification/selection.mjs", "scripts/verification/renderer-selection.mjs", "scripts/verification/admission.mjs", "scripts/verification/rust-reuse.mjs",
       "tools/rust-engine-program/build-slot.mjs", "tools/rust-engine-program/tree-provenance.mjs",
-      "tools/rust-engine-program/git-read.mjs",
+      "tools/rust-engine-program/git-read.mjs", "tools/rust-engine-program/require-ci-pass-verdict.mjs",
       "apps/desktop/scripts/require-e2e-engine.mjs", ".github/workflows/pr-checks.yml",
     ]) {
       mkdirSync(dirname(join(root, file)), { recursive: true });
       copyFileSync(join(repoRoot, file), join(root, file));
     }
-    writeFileSync(join(root, ".gitignore"), ".agent-artifacts/\n");
+    writeFileSync(join(root, ".gitignore"), ".agent-artifacts/\n.dohc-dev/\n");
     writeFileSync(join(root, "package.json"), '{"type":"module"}\n');
     writeFileSync(join(root, "apps/desktop/package.json"), '{}\n');
     git(["init"]); git(["config", "core.logAllRefUpdates", "true"]);
@@ -907,7 +1131,7 @@ test("a docs-only PR records clean provenance without code tools, while dirty he
     assert.deepEqual(report.gates, { rust: false, js: false });
     assert.deepEqual(report.steps, []);
     assert.ok(report.seconds >= 0 && report.startedAt && report.finishedAt);
-    assert.deepEqual(report.timings.map(phase => phase.name), ["selection", "source-check:finish"]);
+    assert.deepEqual(report.timings.map(phase => phase.name), ["selection", "checkout", "source-check:finish"]);
     assert.equal(report.doctor, undefined);
     assert.equal(report.build, undefined);
     assert.match(report.reason, /No code gate applies/);
@@ -943,7 +1167,7 @@ test("a docs-only PR records clean provenance without code tools, while dirty he
     writeFileSync(document, "Documentation only.\n");
     const forced = invoke(["--job", "rust"]);
     assert.notEqual(forced.status, 0);
-    assert.match(forced.stderr, /Unavailable code tool: rustc/);
+    assert.match(forced.stderr, process.platform === "win32" ? /Unavailable code tool: pwsh\.exe/ : /Unavailable code tool: rustc/);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 

@@ -148,6 +148,201 @@ fn delivery_status(engine: &EngineStore) -> DirectWriteStatus {
 }
 
 #[test]
+fn record_creation_is_durable_offline_and_retries_the_same_submission_after_restart() {
+    let text = "---\nid: rec_aaaaaaaaaaaaaaaaaaaaaaaaaa\n---\n";
+    let path = "shared/docs/packing/One.md";
+    let (_scratch, db, mut engine) = proposal_fixture(&[text]);
+    hold_schema(&mut engine, "shared/docs/packing");
+    VersionedTextStore::new(&mut engine)
+        .write_text(
+            &dohc_engine_domain::WriteText {
+                workspace_id: "ws".to_owned(),
+                version_id: "main".to_owned(),
+                object_id: "record-one".to_owned(),
+                path: path.to_owned(),
+                text: text.to_owned(),
+                moment_id: "create-one".to_owned(),
+                metadata_origin: "user".to_owned(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 2_000,
+                request_id: None,
+            },
+            &NoFaults,
+        )
+        .expect("record draft");
+    journal_local_moment(
+        &mut engine,
+        &create_moment("create-one", "record-one", path, text),
+        2_000,
+    );
+    let statuses = |store: &EngineStore| {
+        read_record_creation_statuses(store, "ws", SHARE, &[path.to_owned()], &edit_grant())
+            .unwrap()
+    };
+    assert_eq!(statuses(&engine)[path].state, DirectWriteState::Pending);
+    let relay = PagedShareRelay::new([], []);
+    relay
+        .collection_write_answers
+        .lock()
+        .unwrap()
+        .push_back(Err(RelayError::Partitioned));
+    let client = RelaySyncClient::new(relay);
+    assert_eq!(
+        client.push_direct_writes(&mut engine, "ws", SHARE, &edit_grant(), &NoFaults, 0),
+        Err(RelayError::Partitioned)
+    );
+    drop(engine);
+    let mut engine = EngineStore::open(&db, 0).expect("restart");
+    assert_eq!(statuses(&engine)[path].state, DirectWriteState::Pending);
+    assert!(
+        !statuses(&engine)[path].can_discard,
+        "resolve the same submission before offering discard"
+    );
+    push(&client, &mut engine);
+    let writes = client.transport().collection_writes.lock().unwrap();
+    assert_eq!(writes.len(), 2);
+    assert_eq!(writes[0], writes[1]);
+    drop(writes);
+    assert_eq!(statuses(&engine)[path].state, DirectWriteState::Accepted);
+    assert!(
+        !statuses(&engine)[path].can_discard,
+        "an accepted record is deleted normally"
+    );
+    assert!(push(&client, &mut engine).writes.is_empty());
+    assert_eq!(
+        VersionedTextStore::new(&mut engine)
+            .read_text("ws", "main", path)
+            .unwrap()
+            .unwrap()
+            .text,
+        text
+    );
+    let repaired = "---\nid: rec_bbbbbbbbbbbbbbbbbbbbbbbbbb\n---\n";
+    let sha = hex_sha256(repaired.as_bytes());
+    let owner = RelaySyncClient::new(PagedShareRelay::new([], [(0, ShareViewResponse {
+        ops: vec![ShareReplicationEnvelope {
+            origin_id: "owner-adoption".to_owned(), origin_seq: 0, op_kind: "moment.append".to_owned(), recorded_at_ms: 3_000,
+            payload: json!({ "versionId": "main", "operation": "write", "path": path,
+                "payloadAfterPath": path, "payloadAfterBlobSha256": sha, "payloadAfterContentKind": "text" }),
+        }], next_cursor: 1, has_more: false,
+    })]).with_view_blobs([(sha.clone(), repaired.as_bytes().to_vec())]));
+    assert_eq!(
+        owner
+            .pull_share_view(&mut engine, "ws", SHARE, &edit_grant(), &NoFaults)
+            .unwrap()
+            .applied,
+        1
+    );
+    assert_eq!(
+        VersionedTextStore::new(&mut engine)
+            .read_text("ws", "main", path)
+            .unwrap()
+            .unwrap()
+            .text,
+        repaired
+    );
+    assert!(
+        statuses(&engine).is_empty(),
+        "owner adoption ends creation status when it assigns a different record ID"
+    );
+}
+
+#[test]
+fn a_discarded_record_draft_is_not_sent_when_the_open_plan_retries() {
+    let text = "---\nid: rec_aaaaaaaaaaaaaaaaaaaaaaaaaa\n---\n";
+    let path = "shared/docs/packing/One.md";
+    let (_scratch, db, mut engine) = proposal_fixture(&[text]);
+    hold_schema(&mut engine, "shared/docs/packing");
+    journal_local_moment(
+        &mut engine,
+        &create_moment("create", "record", path, text),
+        2_000,
+    );
+    let relay = PagedShareRelay::new([], []);
+    relay
+        .collection_write_answers
+        .lock()
+        .unwrap()
+        .push_back(Err(RelayError::Partitioned));
+    let client = RelaySyncClient::new(relay);
+    assert_eq!(
+        client.push_direct_writes(&mut engine, "ws", SHARE, &edit_grant(), &NoFaults, 0),
+        Err(RelayError::Partitioned)
+    );
+    journal_local_moment(
+        &mut engine,
+        &local_moment_payload(
+            "discard",
+            "record",
+            "delete",
+            Some((path, text)),
+            path,
+            text,
+        ),
+        2_001,
+    );
+    drop(engine);
+    let mut engine = EngineStore::open(&db, 0).unwrap();
+    assert_eq!(
+        push(&client, &mut engine).writes[0].result,
+        DirectWriteResult::Refused {
+            reason: "local-record-draft-discarded".to_owned()
+        }
+    );
+    assert_eq!(
+        client.transport().collection_writes.lock().unwrap().len(),
+        1
+    );
+    assert!(push(&client, &mut engine).writes.is_empty());
+}
+
+#[test]
+fn record_creation_needs_a_document_collection_and_cannot_edit_an_existing_record() {
+    let text = "---\nid: rec_aaaaaaaaaaaaaaaaaaaaaaaaaa\n---\n";
+    let (_scratch, _db, mut engine) = proposal_fixture(&[text, "edit"]);
+    hold_schema(&mut engine, "shared/docs/packing");
+    for (index, path) in ["shared/docs/packing/One.md", "shared/docs/plain/One.md"]
+        .iter()
+        .enumerate()
+    {
+        journal_local_moment(
+            &mut engine,
+            &create_moment(
+                &format!("create-{index}"),
+                &format!("record-{index}"),
+                path,
+                text,
+            ),
+            2_000,
+        );
+    }
+    let client = RelaySyncClient::new(PagedShareRelay::new([], []));
+    push(&client, &mut engine);
+    assert_eq!(
+        written_paths(&client),
+        vec![vec!["shared/docs/packing/One.md".to_owned()]]
+    );
+    journal_local_moment(
+        &mut engine,
+        &edit_moment(
+            "edit-one",
+            "record-0",
+            "shared/docs/packing/One.md",
+            text,
+            "edit",
+        ),
+        3_000,
+    );
+    assert!(push(&client, &mut engine).writes.is_empty());
+    propose(&client, &mut engine, "proposal");
+    let paths = proposed_paths(&client);
+    assert!(paths.contains(&"shared/docs/packing/One.md".to_owned()));
+    assert!(paths.contains(&"shared/docs/plain/One.md".to_owned()));
+}
+
+#[test]
 fn direct_status_accepts_real_share_pull_heads_on_both_replicas() {
     let path = "shared/docs/packing/automations.yaml";
     let text = "version: 1\nautomations: []\n";
@@ -168,6 +363,9 @@ fn direct_status_accepts_real_share_pull_heads_on_both_replicas() {
             .pull_share_view(&mut engine, "ws", SHARE, &edit_grant(), &NoFaults)
             .expect("real share pull");
         assert_eq!(pulled.applied, 1);
+        client
+            .commit_share_view_cursor(&mut engine, "ws", &pulled.pending_cursor, &NoFaults)
+            .expect("commit initial share pull");
         assert_eq!(delivery_status(&engine).state, DirectWriteState::Accepted);
         assert_eq!(delivery_status(&engine).content_hash, Some(sha.clone()));
         save_status_file(
@@ -177,6 +375,36 @@ fn direct_status_accepts_real_share_pull_heads_on_both_replicas() {
             Some(text),
         );
         assert_eq!(delivery_status(&engine).state, DirectWriteState::Pending);
+        let owner_text = "version: 1\nautomations: []\n# later owner version\n";
+        let owner_sha = hex_sha256(owner_text.as_bytes());
+        let owner = RelaySyncClient::new(
+            PagedShareRelay::new([], [(1, ShareViewResponse {
+                ops: vec![ShareReplicationEnvelope {
+                    origin_id: "owner".to_owned(), origin_seq: 1,
+                    op_kind: "moment.append".to_owned(), recorded_at_ms: 3_000,
+                    payload: json!({ "versionId": "main", "operation": "write", "path": path,
+                        "payloadAfterPath": path, "payloadAfterBlobSha256": owner_sha, "payloadAfterContentKind": "text" }),
+                }], next_cursor: 2, has_more: false,
+            })]).with_view_blobs([(owner_sha, owner_text.as_bytes().to_vec())]),
+        );
+        let view_grant = proposal_grant(crate::ShareAccess::View);
+        owner
+            .pull_share_view(&mut engine, "ws", SHARE, &view_grant, &NoFaults)
+            .expect("later owner pull");
+        let history = VersionedTextStore::new(&mut engine);
+        assert_eq!(
+            history.read_text("ws", "main", path).unwrap().unwrap().text,
+            owner_text
+        );
+        assert_eq!(
+            history
+                .get_moment("ws", "local-save")
+                .unwrap()
+                .unwrap()
+                .after_text
+                .as_deref(),
+            Some("version: 1\nautomations: []\n# local\n")
+        );
     }
 }
 
@@ -375,6 +603,8 @@ fn direct_status_unknown_files_and_missing_identity_remain_pending_and_scope_is_
             content_hash: None,
             state: DirectWriteState::Accepted,
             reason: None,
+            original_record_id: None,
+            can_discard: false,
         }
     );
     save_status_file(&mut engine, "save-1", "rules", None);
@@ -482,6 +712,7 @@ fn direct_push_writes_a_schema_edit_and_send_changes_never_offers_it() {
     assert_eq!(
         outcome.writes,
         vec![DirectWriteReport {
+            recovered_draft_path: None,
             paths: vec![schema.to_owned()],
             result: DirectWriteResult::Written,
         }],
@@ -686,6 +917,59 @@ fn direct_push_sends_a_new_collection_as_one_batch_schema_first() {
 
     propose(&client, &mut engine, "submit-1");
     assert_eq!(proposed_paths(&client), vec![format!("{folder}/notes.txt")]);
+}
+
+#[test]
+fn stale_new_collection_does_not_copy_each_record_into_recovery_files() {
+    let first = "---\nid: rec_aaaaaaaaaaaaaaaaaaaaaaaaaa\n---\nFirst draft\n";
+    let second = "---\nid: rec_bbbbbbbbbbbbbbbbbbbbbbbbbb\n---\nSecond draft\n";
+    let schema = "fields:\n  Title:\n    type: text\n";
+    let (_scratch, _path, mut engine) = proposal_fixture(&[first, second, schema]);
+    let folder = "shared/docs/ideas";
+    for (index, (name, text)) in [
+        ("a.md", first),
+        ("b.md", second),
+        ("collection.yaml", schema),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        journal_local_moment(
+            &mut engine,
+            &create_moment(
+                &format!("new-{index}"),
+                &format!("object-{index}"),
+                &format!("{folder}/{name}"),
+                text,
+            ),
+            1_001 + index as i64,
+        );
+    }
+    let relay = PagedShareRelay::new([], []);
+    relay.collection_write_answers.lock().unwrap().push_back(Ok(
+        ShareCollectionWriteResponse::Stale {
+            path: folder.to_owned(),
+            current_blob_sha256: None,
+        },
+    ));
+    let client = RelaySyncClient::new(relay);
+    let outcome = push(&client, &mut engine);
+    assert_eq!(outcome.writes.len(), 1);
+    assert_eq!(outcome.writes[0].paths.len(), 3);
+    assert_eq!(outcome.writes[0].recovered_draft_path, None);
+    engine
+        .read_with(|conn| {
+            let copies: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM snapshots WHERE workspace_id='ws' AND path LIKE '%/Record draft %.txt'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(copies, 0, "a refused Collection stays available as a proposal");
+            Ok::<(), SyncError>(())
+        })
+        .unwrap();
 }
 
 #[test]
@@ -1251,5 +1535,339 @@ fn direct_push_writes_nothing_below_edit_or_on_another_version() {
             .lock()
             .expect("calls")
             .is_empty()
+    );
+}
+
+#[test]
+fn record_name_race_releases_winner_and_keeps_local_content_after_restart() {
+    let text = "---\nid: rec_aaaaaaaaaaaaaaaaaaaaaaaaaa\nTitle: My packing list\n---\nKeep my typed content.\n";
+    let latest = "---\nid: rec_aaaaaaaaaaaaaaaaaaaaaaaaaa\nTitle: My packing list\n---\nKeep my typed content, including the later edit.\n";
+    let path = "shared/docs/packing/One.md";
+    let (_scratch, db, mut engine) = proposal_fixture(&[text, latest]);
+    hold_schema(&mut engine, "shared/docs/packing");
+    VersionedTextStore::new(&mut engine)
+        .write_text(
+            &dohc_engine_domain::WriteText {
+                workspace_id: "ws".to_owned(),
+                version_id: "main".to_owned(),
+                object_id: "record-one".to_owned(),
+                path: path.to_owned(),
+                text: text.to_owned(),
+                moment_id: "create-one".to_owned(),
+                metadata_origin: "user".to_owned(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 2_000,
+                request_id: None,
+            },
+            &NoFaults,
+        )
+        .expect("record draft");
+    journal_local_moment(
+        &mut engine,
+        &create_moment("create-one", "record-one", path, text),
+        2_000,
+    );
+    let statuses = |store: &EngineStore| {
+        read_record_creation_statuses(store, "ws", SHARE, &[path.to_owned()], &edit_grant())
+            .unwrap()
+    };
+
+    let relay = PagedShareRelay::new([], []);
+    relay.collection_write_answers.lock().unwrap().extend([
+        Err(RelayError::HttpStatus(429)),
+        Ok(ShareCollectionWriteResponse::Stale {
+            path: path.to_owned(),
+            current_blob_sha256: None,
+        }),
+    ]);
+    let client = RelaySyncClient::new(relay);
+    assert_eq!(
+        client.push_direct_writes(&mut engine, "ws", SHARE, &edit_grant(), &NoFaults, 0),
+        Err(RelayError::HttpStatus(429)),
+    );
+    let submitted = client.transport().collection_writes.lock().unwrap()[0].clone();
+    let identity = hex_sha256(format!("ws\0{}\0{path}", submitted.submit_id).as_bytes());
+    let occupied_path = format!("shared/docs/packing/Record draft {}-1.txt", &identity[..12]);
+    for (object_id, moment_id, file_path, content) in [
+        (
+            "occupied-draft",
+            "occupied-draft-moment",
+            occupied_path.as_str(),
+            "Keep this existing file.",
+        ),
+        ("record-one", "edit-one", path, latest),
+    ] {
+        VersionedTextStore::new(&mut engine)
+            .write_text(
+                &dohc_engine_domain::WriteText {
+                    workspace_id: "ws".to_owned(),
+                    version_id: "main".to_owned(),
+                    object_id: object_id.to_owned(),
+                    path: file_path.to_owned(),
+                    text: content.to_owned(),
+                    moment_id: moment_id.to_owned(),
+                    metadata_origin: "local-file".to_owned(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    now_ms: 2_001,
+                    request_id: None,
+                },
+                &NoFaults,
+            )
+            .unwrap();
+    }
+    journal_local_moment(
+        &mut engine,
+        &edit_moment("edit-one", "record-one", path, text, latest),
+        2_001,
+    );
+    let outcome = push(&client, &mut engine);
+    let recovered_path = format!("shared/docs/packing/Record draft {}-2.txt", &identity[..12]);
+    assert_eq!(
+        outcome.writes[0].recovered_draft_path.as_deref(),
+        Some(recovered_path.as_str())
+    );
+    let other = "---\nid: rec_bbbbbbbbbbbbbbbbbbbbbbbbbb\n---\n";
+    VersionedTextStore::new(&mut engine)
+        .write_text(
+            &dohc_engine_domain::WriteText {
+                workspace_id: "ws".to_owned(),
+                version_id: "main".to_owned(),
+                object_id: "record-one".to_owned(),
+                path: path.to_owned(),
+                text: other.to_owned(),
+                moment_id: "moment-share-other".to_owned(),
+                metadata_origin: "sync".to_owned(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 3_000,
+                request_id: None,
+            },
+            &NoFaults,
+        )
+        .unwrap();
+    drop(engine);
+    let engine = EngineStore::open(&db, 0).unwrap();
+    assert!(
+        statuses(&engine).is_empty(),
+        "the winner is an ordinary shared record"
+    );
+    engine
+        .read_with(|conn| {
+            let kept: Vec<(String, String)> = conn.prepare(
+                "SELECT s.path,b.text FROM snapshots s JOIN blobs b ON b.sha256=s.blob_sha256 WHERE s.workspace_id='ws' AND s.path LIKE 'shared/docs/packing/Record draft %.txt'"
+            ).unwrap().query_map([], |row| Ok((row.get(0)?,row.get(1)?))).unwrap().map(Result::unwrap).collect();
+            assert_eq!(kept.len(), 2);
+            assert!(kept.iter().any(|(path, text)| path == &occupied_path && text == "Keep this existing file."));
+            let recovered_path = format!("shared/docs/packing/Record draft {}-2.txt", &identity[..12]);
+            assert!(kept.iter().any(|(path, text)| path == &recovered_path && text == latest));
+            let outbound_copies: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM replication_log WHERE workspace_id='ws' AND json_extract(payload_json,'$.payloadAfterPath')=?1",
+                [&recovered_path], |row| row.get(0),
+            ).unwrap();
+            assert_eq!(outbound_copies, 0, "the recovery copy stays on this computer");
+            let winner: String = conn.query_row("SELECT b.text FROM snapshots s JOIN blobs b ON b.sha256=s.blob_sha256 WHERE s.workspace_id='ws' AND s.path=?1",[path],|row|row.get(0)).unwrap();
+            assert_eq!(winner, other, "the draft never enters the winner's record");
+            Ok::<(), SyncError>(())
+        })
+        .unwrap();
+}
+
+fn imported_creation_fixture() -> (ScratchDir, std::path::PathBuf, EngineStore) {
+    let text = "---\nid: rec_aaaaaaaaaaaaaaaaaaaaaaaaaa\nTitle: Ready\n---\n";
+    let (scratch, db, mut engine) = proposal_fixture(&[text]);
+    seed_text_head(
+        &mut engine,
+        "object-tasks",
+        "shared/docs/tasks/collection.yaml",
+        "fields:\n  Title:\n    type: text\n",
+    );
+    engine
+        .write_with(&NoFaults, |tx| {
+            dohc_engine_domain::reconcile_collections_in_tx(tx, "ws", "main")?;
+            for (id, kinds) in [
+                (
+                    "record-added",
+                    vec![dohc_engine_domain::AutomationChangeKind::Added],
+                ),
+                (
+                    "starts-matching",
+                    vec![
+                        dohc_engine_domain::AutomationChangeKind::Added,
+                        dohc_engine_domain::AutomationChangeKind::Changed,
+                    ],
+                ),
+            ] {
+                dohc_engine_domain::subscribe_automation_in_tx(
+                    tx,
+                    "ws",
+                    &dohc_engine_domain::AutomationSubscription {
+                        automation_id: format!("collection:object-tasks#{id}"),
+                        prefix: "shared/docs/tasks".to_owned(),
+                        kinds,
+                        fields: None,
+                    },
+                    1_500,
+                )?;
+            }
+            Ok::<_, dohc_engine_domain::DomainError>(())
+        })
+        .expect("owner watches both creation triggers");
+    (scratch, db, engine)
+}
+
+fn reconcile_imported_creation(
+    engine: &mut EngineStore,
+) -> Vec<dohc_engine_domain::AutomationClaim> {
+    let outcome = engine
+        .write_with(&NoFaults, |tx| {
+            let reconciliation = dohc_engine_domain::reconcile_collections_in_tx(tx, "ws", "main")?;
+            dohc_engine_domain::claim_record_lifecycle_in_tx(
+                tx,
+                "ws",
+                "main",
+                &reconciliation.lifecycle,
+                2_100,
+            )
+        })
+        .expect("reconcile imported creation");
+    let TxnOutcome::Committed(claims) = outcome else {
+        panic!("reconcile crashed");
+    };
+    claims
+}
+
+#[test]
+fn imported_recipient_creation_claims_both_creation_triggers_with_its_actual_author() {
+    for author in [
+        json!({"kind":"named", "userId":"user-recipient", "grantId":"grant-recipient", "grantGeneration":2}),
+        json!({"kind":"link", "principalId":"link-recipient", "grantId":"grant-recipient", "grantGeneration":2}),
+    ] {
+        let (_scratch, db, mut engine) = imported_creation_fixture();
+        let text = "---\nid: rec_aaaaaaaaaaaaaaaaaaaaaaaaaa\nTitle: Ready\n---\n";
+        let mut payload = create_moment(
+            "moment-recipient-created",
+            "object-record",
+            "shared/docs/tasks/Ready.md",
+            text,
+        );
+        payload["authors"] = json!([author.clone()]);
+        let creation = envelope(
+            "relay:collection-file:grant-recipient",
+            0,
+            "moment.append",
+            payload,
+        );
+        let imported = apply_replication_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &creation,
+            &NoFaults,
+            &NoLiveLeases,
+        )
+        .expect("import recipient creation");
+        assert!(
+            matches!(imported.primary, ApplyDisposition::Applied(_)),
+            "{imported:?}"
+        );
+        let claims = reconcile_imported_creation(&mut engine);
+        assert_eq!(
+            claims
+                .iter()
+                .map(|claim| claim.automation_id.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "collection:object-tasks#record-added",
+                "collection:object-tasks#starts-matching"
+            ]
+        );
+        let expected_person = (author["kind"] == "named").then_some("user-recipient");
+        for claim in &claims {
+            assert_eq!(
+                claim.change.kind,
+                dohc_engine_domain::AutomationChangeKind::Added
+            );
+            assert_eq!(
+                claim.record_id.as_deref(),
+                Some("rec_aaaaaaaaaaaaaaaaaaaaaaaaaa")
+            );
+            assert_eq!(claim.change.on_behalf_of.as_deref(), expected_person);
+            assert_eq!(
+                serde_json::to_value(
+                    claim
+                        .change
+                        .shared_author
+                        .as_ref()
+                        .expect("actual relay author")
+                )
+                .unwrap(),
+                author
+            );
+            assert_eq!(claim.depth, 0);
+        }
+        assert!(
+            reconcile_imported_creation(&mut engine).is_empty(),
+            "reconcile does not claim a creation twice"
+        );
+        drop(engine);
+        let mut engine = EngineStore::open(&db, 0).expect("restart owner");
+        for expected in &claims {
+            let (claimed, fields) = dohc_engine_domain::claim_next_pending_automation(
+                &mut engine,
+                "ws",
+                &expected.automation_id,
+                2_200,
+                &NoFaults,
+            )
+            .unwrap()
+            .expect("durable creation claim");
+            assert_eq!(claimed.change, expected.change);
+            let title = fields
+                .fields
+                .iter()
+                .find(|field| field.field_name == "Title")
+                .expect("creation carries its matching value");
+            assert_eq!(title.previous, None);
+            assert_eq!(
+                title.next.as_ref(),
+                Some(&dohc_engine_domain::AutomationFactValue::Whole {
+                    value: json!("Ready")
+                })
+            );
+        }
+    }
+}
+
+#[test]
+fn an_ordinary_imported_creation_does_not_claim_either_creation_trigger() {
+    let (_scratch, _db, mut engine) = imported_creation_fixture();
+    let text = "---\nid: rec_aaaaaaaaaaaaaaaaaaaaaaaaaa\nTitle: Ready\n---\n";
+    let mut payload = create_moment(
+        "moment-peer-created",
+        "object-record",
+        "shared/docs/tasks/Ready.md",
+        text,
+    );
+    payload["authors"] = json!([{"kind":"human", "humanId":"user-recipient"}]);
+    let creation = envelope("another-device", 0, "moment.append", payload);
+    let imported = apply_replication_envelope(
+        &mut engine,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &creation,
+        &NoFaults,
+        &NoLiveLeases,
+    )
+    .expect("import peer creation");
+    assert!(
+        matches!(imported.primary, ApplyDisposition::Applied(_)),
+        "{imported:?}"
+    );
+    assert!(
+        reconcile_imported_creation(&mut engine).is_empty(),
+        "ordinary synced creations keep the origin-device rule"
     );
 }

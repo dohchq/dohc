@@ -1,15 +1,17 @@
 // @vitest-environment jsdom
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { ShareHandoffStatus } from "../ipc/bridgeContract";
+import type { ShareHandoffStatus, WorkspaceActivityEvent } from "../ipc/bridgeContract";
 import { DEFAULT_USER_SETTINGS } from "../settings/userSettings";
 import { DesktopRoot } from "./DesktopRoot";
+import { COPY_FAILURE } from "./ui/CopyButton";
 import type { Workspace } from "./DesktopWorkspaceShell";
 import { ObserverStub } from "./DesktopWorkspaceShell.testSupport";
 import type { ReactionStore } from "./workbench/reactionStore";
 import { deferred, type Deferred } from "../testing/deferred";
 
 const shellRenders = vi.hoisted(() => ({ count: 0 }));
+const shellCommits = vi.hoisted(() => ({ onCommit: null as ((workspace: Workspace) => void) | null }));
 // The reaction store each mounted shell received from DesktopRoot's owner.
 const shellReactions = vi.hoisted(() => ({ current: null as ReactionStore | null }));
 
@@ -45,6 +47,7 @@ vi.mock("./WorkspaceManager", () => ({
 }));
 
 vi.mock("./DesktopWorkspaceShell", async () => {
+  const { useLayoutEffect } = await import("react");
   const { useReactions } = await import("./workbench/reactionStore");
   return { DesktopWorkspaceShell: (props: {
     workspace: Workspace;
@@ -57,9 +60,13 @@ vi.mock("./DesktopWorkspaceShell", async () => {
   }) => {
     shellRenders.count += 1;
     shellReactions.current = useReactions();
+    useLayoutEffect(() => {
+      shellCommits.onCommit?.(props.workspace);
+    }, [props.workspace]);
     return (
     <div data-testid="workspace-shell">
       <span data-testid="active-workspace">{props.workspace.workspaceId}</span>
+      <span data-testid="share-summary">{JSON.stringify(props.workspace.shareView ?? null)}</span>
       <span data-testid="workspace-count">{props.workspaces.length}</span>
       <span data-testid="open-on-ready">{JSON.stringify(props.openOnReady ?? null)}</span>
       {props.workspaces.map((next) => (
@@ -89,12 +96,14 @@ vi.mock("./DesktopWorkspaceShell", async () => {
   } };
 });
 
-// The notice list DesktopRoot keeps for the window. Empty unless a test
-// says otherwise.
+// The notices DesktopRoot keeps for the window: the notice list, and folders
+// a launch could not open. Empty unless a test says otherwise.
 function noticeBridge() {
   return {
     listNotices: vi.fn(async () => ({ account: null, notices: [] })),
     onNoticesChanged: vi.fn(() => () => undefined),
+    onWorkspacePathOpenFailed: vi.fn(() => () => undefined),
+    takeWorkspacePathOpenFailures: vi.fn(async () => []),
   };
 }
 
@@ -107,6 +116,117 @@ function workspace(workspaceId: string): Workspace {
   };
 }
 
+describe("workspace summary changes", () => {
+  function setup() {
+    let registry = { workspaces: [workspace("a"), workspace("b")] };
+    let emit: ((event: WorkspaceActivityEvent) => void) | undefined;
+    const getWorkspaceRegistry = vi.fn(async () => registry);
+    vi.stubGlobal("dohcDesktop", {
+      ...noticeBridge(),
+      getWorkspaceRegistry,
+      getUserSettings: vi.fn(async () => ({ settings: DEFAULT_USER_SETTINGS, source: "default" })),
+      onUserSettingsChanged: vi.fn(() => () => undefined),
+      onWorkspaceActivity: vi.fn((listener: typeof emit) => { emit = listener; return () => undefined; }),
+      onWorkspaceActivated: vi.fn(() => () => undefined),
+      onShareHandoffStatus: vi.fn(() => () => undefined),
+      getShareHandoffStatus: vi.fn(async () => ({ status: "idle" })),
+    });
+    return { getWorkspaceRegistry, emit: (event: WorkspaceActivityEvent) => emit?.(event),
+      replace: (next: Workspace[]) => { registry = { workspaces: next }; } };
+  }
+
+  it("refreshes the registry for the active summary and skips file activity and other workspaces", async () => {
+    const h = setup();
+    render(<DesktopRoot />);
+    await screen.findByTestId("workspace-shell");
+    await act(async () => undefined);
+    const settled = shellRenders.count;
+    await act(async () => {
+      h.emit({ workspaceId: "a", paths: ["note.md"] });
+      h.emit({ workspaceId: "b", summaryChanged: true });
+    });
+    expect(h.getWorkspaceRegistry).toHaveBeenCalledOnce();
+    expect(shellRenders.count).toBe(settled);
+    const shareView = { shareId: "share", granterEmail: "owner@example.test", access: "view" as const,
+      ended: true, unsavedPaths: ["locked.md"], unconfirmedChanges: { paths: ["automations.yaml"], unchecked: false, checked: 1 } };
+    h.replace([{ ...workspace("a"), shareView }, workspace("unrelated")]);
+    await act(async () => h.emit({ workspaceId: "a", summaryChanged: true }));
+    expect(JSON.parse(screen.getByTestId("share-summary").textContent!)).toEqual(shareView);
+    expect(screen.queryByRole("button", { name: "Switch to b" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Switch to unrelated" })).toBeTruthy();
+  });
+
+  it("keeps all registry changes when a summary refresh overtakes a full refresh", async () => {
+    const h = setup();
+    render(<DesktopRoot />);
+    await screen.findByTestId("workspace-shell");
+    const read = deferred<{ workspaces: Workspace[] }>();
+    h.getWorkspaceRegistry.mockReturnValueOnce(read.promise);
+    act(() => h.emit({}));
+    const shareView = { granterEmail: null, ended: true };
+    h.replace([{ ...workspace("a"), shareView }, workspace("b"), workspace("c")]);
+    await act(async () => h.emit({ workspaceId: "a", summaryChanged: true }));
+    await act(async () => read.resolve({ workspaces: [workspace("a"), workspace("b"), workspace("c")] }));
+    expect(JSON.parse(screen.getByTestId("share-summary").textContent!)).toEqual(shareView);
+    expect(screen.getByRole("button", { name: "Switch to c" })).toBeTruthy();
+  });
+
+  it.each(["a", "b"])("accepts a summary during workspace %s's commit before passive effects", async activeId => {
+    const h = setup();
+    const shareView = { granterEmail: null, ended: true };
+    const onCommit = vi.fn((current: Workspace) => {
+      if (current.workspaceId !== activeId) return;
+      shellCommits.onCommit = null;
+      h.replace([{ ...workspace(activeId), shareView }, workspace("c")]);
+      // The shell has committed, but the root's activity effect has not run.
+      h.emit({ workspaceId: activeId, summaryChanged: true });
+    });
+    shellCommits.onCommit = onCommit;
+
+    await act(async () => { render(<DesktopRoot />); });
+    if (activeId === "b") {
+      await act(async () => {
+        fireEvent.click(screen.getByRole("button", { name: "Switch to b" }));
+      });
+    }
+
+    expect(onCommit).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: activeId }));
+    expect(JSON.parse(screen.getByTestId("share-summary").textContent!)).toEqual(shareView);
+    expect(screen.getByRole("button", { name: "Switch to c" })).toBeTruthy();
+  });
+
+  it.each([false, true])("retains a pending summary across a switch (return: %s)", async returnToA => {
+    const h = setup();
+    render(<DesktopRoot />);
+    await screen.findByTestId("workspace-shell");
+    const read = deferred<{ workspaces: Workspace[] }>();
+    h.getWorkspaceRegistry.mockReturnValueOnce(read.promise);
+    act(() => h.emit({ workspaceId: "a", summaryChanged: true }));
+    fireEvent.click(screen.getByRole("button", { name: "Switch to b" }));
+    if (returnToA) fireEvent.click(screen.getByRole("button", { name: "Switch to a" }));
+    const shareView = { granterEmail: null, ended: true };
+    await act(async () => read.resolve({ workspaces: [{ ...workspace("a"), shareView }, workspace("b")] }));
+    expect(screen.getByTestId("active-workspace").textContent).toBe(returnToA ? "a" : "b");
+    if (!returnToA) {
+      expect(screen.getByTestId("share-summary").textContent).toBe("null");
+      fireEvent.click(screen.getByRole("button", { name: "Switch to a" }));
+    }
+    expect(JSON.parse(screen.getByTestId("share-summary").textContent!)).toEqual(shareView);
+  });
+
+  it("refreshes the share's shortened recovered-path list", async () => {
+    const h = setup();
+    const shareView = { granterEmail: null, ended: true, unsavedPaths: ["recovered.md", "locked.md"] };
+    h.replace([{ ...workspace("a"), shareView }]);
+    render(<DesktopRoot />);
+    await screen.findByTestId("workspace-shell");
+    const recovered = { ...shareView, unsavedPaths: ["locked.md"] };
+    h.replace([{ ...workspace("a"), shareView: recovered }]);
+    await act(async () => h.emit({ workspaceId: "a", summaryChanged: true }));
+    expect(JSON.parse(screen.getByTestId("share-summary").textContent!)).toEqual(recovered);
+  });
+});
+
 beforeEach(() => {
   // jsdom has no ResizeObserver; the states page measures its sections.
   vi.stubGlobal("ResizeObserver", ObserverStub);
@@ -118,6 +238,7 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+  shellCommits.onCommit = null;
   vi.unstubAllGlobals();
   vi.clearAllMocks();
 });
@@ -214,6 +335,8 @@ describe("DesktopRoot", () => {
       withoutGrant.unmount();
 
       vi.stubGlobal("dohcDesktop", stub(true));
+      // Await cold transforms before the DOM wait for the granted page starts.
+      await import("./dev/StatesPage");
       render(<DesktopRoot />);
       expect(await screen.findByTestId("states-page")).toBeTruthy();
       expect(screen.queryByTestId("first-run")).toBeNull();
@@ -540,6 +663,39 @@ describe("registry read failure", () => {
     fireEvent.click(screen.getByRole("button", { name: "Copy" }));
     await waitFor(() => expect(writeText).toHaveBeenCalledTimes(1));
     expect(writeText.mock.calls[0]![0]).toContain("dohc-workspaces.json");
+  });
+
+  // No workspace shell exists yet, so the screen owns its notices: a copy the
+  // clipboard refuses still arrives as a toast with Try again.
+  it("reports a refused copy of the technical details as a toast", async () => {
+    const writeText = vi.fn(async (_text: string) => {
+      throw new Error("Document is not focused.");
+    });
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
+    vi.stubGlobal("dohcDesktop", {
+      windowRole: "workspace",
+      platform: "win32",
+      getWorkspaceRegistry: vi.fn(async () => {
+        throw new Error("Error invoking remote method 'desktop:get-workspace-registry': Error [EACCES]: EACCES: permission denied");
+      }),
+      getUserSettings: vi.fn(async () => ({ settings: DEFAULT_USER_SETTINGS, source: "default" as const })),
+      onUserSettingsChanged: vi.fn(() => () => undefined),
+      onWorkspaceActivity: vi.fn(() => () => undefined),
+      onWorkspaceActivated: vi.fn(() => () => undefined),
+      onShareHandoffStatus: vi.fn(() => () => undefined),
+      getShareHandoffStatus: vi.fn(async () => ({ status: "idle" as const })),
+      dismissShareHandoff: vi.fn(async () => undefined),
+      getUpdateState: () => new Promise(() => {}),
+      onUpdateState: () => () => {},
+      ...noticeBridge(),
+    });
+    render(<DesktopRoot />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Show technical details" }));
+    fireEvent.click(screen.getByRole("button", { name: "Copy" }));
+    const toast = await screen.findByTestId("workspace-shell-error");
+    expect(toast.textContent).toContain(COPY_FAILURE);
+    expect(within(toast).getByRole("button", { name: "Try again" })).toBeTruthy();
   });
 });
 

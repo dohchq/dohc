@@ -64,7 +64,9 @@ pub use restore_fence::{
 };
 pub use restore_fence::{NativeRestoreFence, NativeRestoreFenceReceipt, RestoreDeliveryOrigin};
 pub use restore_resume::{NativeRestoreResume, NativeRestoreResumeReceipt};
-pub use settlement::{with_settlement, LiveSettlementAudit, LiveSettlementResult};
+pub use settlement::{
+    with_settlement, LiveSettlementAudit, LiveSettlementPublicationState, LiveSettlementResult,
+};
 
 #[derive(Debug, thiserror::Error)]
 pub enum ApplicationError {
@@ -357,6 +359,11 @@ pub fn nonnull_optional<'de, D: Deserializer<'de>, T: Deserialize<'de>>(
     deny_unknown_fields
 )]
 pub enum LiveAuthorEntry {
+    Unattributed {},
+    Automation {
+        automation_id: String,
+        attribution: dohc_engine_domain::ChangeAttribution,
+    },
     Human {
         human_id: String,
         human_name: String,
@@ -400,6 +407,17 @@ impl From<AgentDeclaration> for LiveAuthorEntry {
 impl LiveAuthorEntry {
     pub fn validate(&self) -> Result<(), ApplicationError> {
         match self {
+            Self::Unattributed {} => {}
+            Self::Automation {
+                automation_id,
+                attribution,
+            } => {
+                identifier(automation_id, 512)?;
+                if attribution.actor_kind != dohc_engine_domain::ChangeActorKind::Automation {
+                    return Err(invalid("invalid automation actor"));
+                }
+                attribution.validate().map_err(invalid)?;
+            }
             Self::Human {
                 human_id,
                 human_name,
@@ -435,7 +453,7 @@ impl LiveAuthorEntry {
         if serde_json::to_vec(self)
             .map_err(|_| invalid("author JSON"))?
             .len()
-            > 2114
+            > 4096
         {
             return Err(invalid("author entry exceeds byte bound"));
         }
@@ -443,6 +461,15 @@ impl LiveAuthorEntry {
     }
     pub fn identity(&self) -> (&'static str, Option<&str>, &str) {
         match self {
+            Self::Unattributed {} => ("unattributed", None, ""),
+            Self::Automation {
+                automation_id,
+                attribution,
+            } => (
+                "automation",
+                attribution.run.as_ref().map(|run| run.claim_id.as_str()),
+                automation_id,
+            ),
             Self::Human { human_id, .. } => ("human", None, human_id),
             Self::Link {
                 public_principal_id,
@@ -518,6 +545,80 @@ pub fn validate_checkpoint_coverage(
     Ok(())
 }
 impl AdmittedLiveUpdateMetadata {
+    fn field_history_link_author(&self) -> Option<dohc_engine_domain::CollectionLiveLinkAuthor> {
+        if self.canonical_version != Some(2) {
+            return None;
+        }
+        let ServerDerivedLiveUpdateAuthority::Link {
+            grant_id,
+            grant_generation,
+            ..
+        } = &self.accepted.authority
+        else {
+            return None;
+        };
+        let public_principal_id =
+            self.author_snapshot
+                .as_ref()?
+                .iter()
+                .find_map(|author| match author {
+                    LiveAuthorEntry::Link {
+                        public_principal_id,
+                        ..
+                    } => Some(public_principal_id),
+                    _ => None,
+                })?;
+        Some(dohc_engine_domain::CollectionLiveLinkAuthor::Link {
+            grant_id: grant_id.clone(),
+            grant_generation: *grant_generation,
+            public_principal_id: public_principal_id.clone(),
+        })
+    }
+
+    fn field_history_actor(&self) -> Option<(String, dohc_engine_domain::ChangeAttribution)> {
+        use dohc_engine_domain::{ChangeActorKind, ChangeAttribution};
+        if self.canonical_version != Some(2) {
+            return None;
+        }
+        if matches!(
+            self.accepted.authority,
+            ServerDerivedLiveUpdateAuthority::Link { .. }
+        ) {
+            let agent = self.admitted_declaration()?;
+            let dohc_engine_domain::CollectionLiveLinkAuthor::Link {
+                public_principal_id,
+                ..
+            } = self.field_history_link_author()?;
+            return (agent.on_behalf_of.as_ref() == Some(&public_principal_id))
+                .then(|| (agent.agent_id.clone(), agent.attribution()));
+        }
+        let authors = self.author_snapshot.as_ref()?;
+        let (_, principal, _, _) = self.accepted.authority.fields();
+        let person = authors.iter().find_map(|author| match author {
+            LiveAuthorEntry::Human { human_id, .. } if human_id == principal => Some(human_id),
+            _ => None,
+        })?;
+        let agent = self.admitted_declaration();
+        if agent
+            .as_ref()
+            .is_some_and(|agent| agent.on_behalf_of.as_ref() != Some(person))
+        {
+            return None;
+        }
+        Some(match agent {
+            Some(agent) => (agent.agent_id.clone(), agent.attribution()),
+            None => (
+                person.clone(),
+                ChangeAttribution {
+                    actor_kind: ChangeActorKind::Human,
+                    on_behalf_of: Some(person.clone()),
+                    depth: 0,
+                    run: None,
+                },
+            ),
+        })
+    }
+
     pub fn admitted_declaration(&self) -> Option<AgentDeclaration> {
         self.author_snapshot
             .as_ref()?
@@ -538,9 +639,36 @@ impl AdmittedLiveUpdateMetadata {
     }
 
     pub fn matches_draft_declaration(&self, declaration: Option<&AgentDeclaration>) -> bool {
-        self.admitted_declaration()
-            .as_ref()
-            .is_none_or(|admitted| Some(admitted) == declaration)
+        let ServerDerivedLiveUpdateAuthority::Owner { principal_id } = &self.accepted.authority
+        else {
+            return false;
+        };
+        self.admitted_declaration().as_ref().is_none_or(|admitted| {
+            declaration.is_some_and(|draft| {
+                // Depth and name are not part of the relay's agent identity.
+                admitted.agent_id == draft.agent_id
+                    && admitted.on_behalf_of.as_deref() == Some(principal_id.as_str())
+            })
+        })
+    }
+
+    pub fn matches_automation_declaration(
+        &self,
+        declaration: Option<&dohc_engine_domain::AutomationDeclaration>,
+    ) -> bool {
+        let admitted = self.author_snapshot.as_ref().and_then(|authors| {
+            authors.iter().find_map(|author| match author {
+                LiveAuthorEntry::Automation {
+                    automation_id,
+                    attribution,
+                } => Some(dohc_engine_domain::AutomationDeclaration {
+                    automation_id: automation_id.clone(),
+                    attribution: attribution.clone(),
+                }),
+                _ => None,
+            })
+        });
+        admitted.as_ref() == declaration
     }
 
     pub fn validate_extensions(&self) -> Result<(), ApplicationError> {
@@ -553,8 +681,10 @@ impl AdmittedLiveUpdateMetadata {
             (Some(2), Some(authors), Some(deletes)) => {
                 if authors.len() > 2
                     || (authors.len() == 2
-                        && (matches!(authors[0], LiveAuthorEntry::Agent { .. })
-                            || !matches!(authors[1], LiveAuthorEntry::Agent { .. })))
+                        && (matches!(
+                            authors[0],
+                            LiveAuthorEntry::Agent { .. } | LiveAuthorEntry::Automation { .. }
+                        ) || !matches!(authors[1], LiveAuthorEntry::Agent { .. })))
                 {
                     return Err(invalid("noncanonical author snapshot"));
                 }
@@ -884,7 +1014,88 @@ impl ApplicationOwner {
         self.current.clear();
         Ok(())
     }
+    /// Release one document's registration. Its durable application state stays.
+    pub fn unregister(
+        &mut self,
+        store: &mut EngineStore,
+        object_id: &str,
+    ) -> Result<(), ApplicationError> {
+        let mut found = None;
+        for (index, current) in self.current.iter().enumerate() {
+            let held = current.lock().map_err(|_| ApplicationError::Interrupted)?;
+            if held.binding.object_id == object_id {
+                found = Some(index);
+                break;
+            }
+        }
+        if let Some(index) = found {
+            invalidate_registration(store, &self.current[index])?;
+            self.current.remove(index);
+        }
+        Ok(())
+    }
 }
+
+/// Work a host must finish before it unloads a document.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnloadPending {
+    /// A restore fence for the document has not resumed.
+    Restore,
+    /// Owner updates or deferred replicated updates have not been delivered.
+    Delivery,
+    /// Applied updates on the current lineage are past its last settlement,
+    /// or the Markdown artifact does not hold the document's head.
+    Settlement,
+    /// A settlement committed but its Markdown artifact is not written yet.
+    Materialization,
+}
+
+/// The settlement clause reads only the binding's current lineage: a restore
+/// replaces the lineage, and the replaced one never settles again.
+const UNLOAD_PENDING: &str = "SELECT
+    EXISTS(SELECT 1 FROM live_restore_fences
+        WHERE workspace_id=?1 AND object_id=?2 AND resume_receipt_json IS NULL),
+    EXISTS(SELECT 1 FROM ydoc_deferred_updates WHERE workspace_id=?1 AND object_id=?2)
+        OR EXISTS(SELECT 1 FROM owner_ydoc_outboxes
+            WHERE workspace_id=?1 AND object_id=?2 AND pending_bytes>0 AND state<>'quarantined'),
+    EXISTS(SELECT 1 FROM live_device_update_applications a
+        JOIN live_device_application_bindings b
+            ON b.relay_database_namespace=a.relay_database_namespace AND b.workspace_id=a.workspace_id
+            AND b.main_version_id=a.main_version_id AND b.object_id=a.object_id
+            AND b.lineage_claim_id=a.lineage_claim_id
+        WHERE a.workspace_id=?1 AND a.object_id=?2 AND a.journal_cursor>max(
+            COALESCE((SELECT max(s.terminal_cursor) FROM live_device_settlements s
+                WHERE s.relay_database_namespace=a.relay_database_namespace AND s.workspace_id=a.workspace_id
+                AND s.main_version_id=a.main_version_id AND s.object_id=a.object_id
+                AND s.lineage_claim_id=a.lineage_claim_id),0),
+            COALESCE((SELECT o.terminal_cursor FROM live_owner_adoptions o
+                WHERE o.relay_database_namespace=a.relay_database_namespace AND o.workspace_id=a.workspace_id
+                AND o.main_version_id=a.main_version_id AND o.object_id=a.object_id
+                AND o.lineage_claim_id=a.lineage_claim_id),0)))";
+
+/// Name the first incomplete restore, delivery, or settlement record for one
+/// document. The caller still proves the artifact holds the head.
+pub fn unload_pending(
+    conn: &Connection,
+    workspace_id: &str,
+    object_id: &str,
+) -> Result<Option<UnloadPending>, ApplicationError> {
+    let (restore, delivery, settlement): (bool, bool, bool) = conn
+        .query_row(UNLOAD_PENDING, params![workspace_id, object_id], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })
+        .map_err(read_sql)?;
+    Ok(if restore {
+        Some(UnloadPending::Restore)
+    } else if delivery {
+        Some(UnloadPending::Delivery)
+    } else if settlement {
+        Some(UnloadPending::Settlement)
+    } else {
+        None
+    })
+}
+
 fn invalidate_registration(
     store: &mut EngineStore,
     current: &Arc<Mutex<Registration>>,
@@ -1094,11 +1305,44 @@ pub fn apply_committed(
             }) {
                 return Err(ApplicationError::Conflict.into());
             }
-            let authors = event.metadata.author_snapshot.as_ref()
-                .map(|authors| authors.iter().map(|author| serde_json::to_string(&[author])).collect::<Result<Vec<_>, _>>())
-                .transpose().map_err(|_| ApplicationError::Corrupt)?
-                .unwrap_or_default();
-            match crate::author_coverage::admit_accepted_in(tx, &key, &authors) {
+            let admitted_actor = if let Some(own) = &own {
+                own.author.clone()
+            } else if event.metadata.canonical_version == Some(2) {
+                event.metadata.author_snapshot.as_ref().and_then(|authors| authors.iter().find_map(|author| match author {
+                    LiveAuthorEntry::Automation { automation_id, attribution } => Some((Some(automation_id.clone()), Some(attribution.clone()))),
+                    _ => None,
+                })).or_else(|| event.metadata.admitted_declaration().map(|declaration| (Some(declaration.agent_id.clone()), Some(declaration.attribution()))))
+            } else { None };
+            // A person the owner shared with, or an Edit share link, is named
+            // from the relay's authority, never the frame, whether or not
+            // their client sent a recording context. That entry carries the
+            // grant, so it stands in for the same principal's snapshot entry.
+            // A declared agent stays beside it.
+            let shared = event.metadata.accepted.authority.shared_author();
+            let snapshot = event.metadata.author_snapshot.as_deref().unwrap_or_default();
+            let mut authors = snapshot.iter()
+                .filter(|author| shared.is_none() || !matches!(author, LiveAuthorEntry::Human { .. } | LiveAuthorEntry::Link { .. }))
+                .map(|author| match author {
+                    LiveAuthorEntry::Automation { automation_id, attribution } => Ok(dohc_engine_domain::moment_author_json(Some(automation_id), Some(attribution)).expect("validated automation author")),
+                    _ => serde_json::to_string(&[author]),
+                })
+                .collect::<Result<Vec<_>, _>>().map_err(|_| ApplicationError::Corrupt)?;
+            // A delivery without recording context keeps that gap in coverage,
+            // even when the relay's authority names who sent it. A delivery
+            // that adds no content leaves no gap.
+            let adds_content = !event.metadata.first_seen.is_empty()
+                || event.metadata.first_seen_deletes.as_ref().is_some_and(|ranges| !ranges.is_empty());
+            if snapshot.is_empty() && adds_content {
+                authors.push(r#"[{"kind":"unattributed"}]"#.to_owned());
+            }
+            // A full interval refuses before anything is written, so nothing
+            // is truncated.
+            if let Some(shared) = shared {
+                authors.push(crate::author_coverage::shared_json(&shared)?);
+            }
+            match if authors.is_empty() { Ok(()) } else {
+                crate::author_coverage::admit_accepted_in(tx, &key, &authors)
+            } {
                 Err(CollabError::AuthorCapacity)
                     if crate::author_coverage::unresolved_in(tx, &key)? =>
                 {
@@ -1112,14 +1356,52 @@ pub fn apply_committed(
                 result => result?,
             }
             mutation_attempted = true;
+            // Canonical person and agent snapshots retain names and explicit depths.
+            let native_actor = admitted_actor.as_ref().filter(|(_, attribution)| {
+                own.is_some() || attribution.as_ref().is_some_and(|attribution| {
+                    attribution.actor_kind == dohc_engine_domain::ChangeActorKind::Automation
+                })
+            });
             let append = durable::record_authorized_update_in_tx(
                 tx,
                 &key,
                 &event.update_bytes,
-                None,
-                None,
+                true,
+                native_actor.and_then(|(actor, _)| actor.as_deref()),
+                native_actor.and_then(|(_, attribution)| attribution.as_ref()),
+                true,
                 event.metadata.accepted.received_at_ms,
             )?;
+            // Keep canonical snapshot names in coverage instead of synthesizing
+            // native authors. Only the field rows created by this append change.
+            if own.is_none() && native_actor.is_none() {
+                if let (Some(facts), Some(author)) = (
+                    append.record_facts.as_ref(), event.metadata.field_history_link_author(),
+                ) {
+                    let json = serde_json::to_string(&author).map_err(|_| ApplicationError::Corrupt)?;
+                    let mut statement = tx.prepare_cached(
+                        "UPDATE collection_field_history SET link_author_json=?1 WHERE workspace_id=?2 AND history_id=?3",
+                    ).map_err(StorageError::persist_public)?;
+                    for field in &facts.fields {
+                        statement.execute(params![json, key.workspace_id, field.history_id]).map_err(StorageError::persist_public)?;
+                    }
+                }
+                if let (Some(facts), Some((actor, attribution))) = (
+                    append.record_facts.as_ref(),
+                    event.metadata.field_history_actor(),
+                ) {
+                    let mut statement = tx.prepare_cached(
+                        "UPDATE collection_field_history SET actor_kind=?1,author_origin_id=?2,\
+                         on_behalf_of=?3,chain_depth=?4 WHERE workspace_id=?5 AND history_id=?6",
+                    ).map_err(StorageError::persist_public)?;
+                    for field in &facts.fields {
+                        statement.execute(params![
+                            attribution.actor_kind.as_str(), actor, attribution.on_behalf_of,
+                            attribution.depth, key.workspace_id, field.history_id,
+                        ]).map_err(StorageError::persist_public)?;
+                    }
+                }
+            }
             // A new delivery can reuse old bytes and an older local sequence.
             compaction_due = append.seq.max(marker.head_update_seq) - marker.head_snapshot_seq
                 >= i64::from(DEFAULT_COMPACTION_THRESHOLD);
@@ -1161,11 +1443,6 @@ pub fn apply_committed(
                 // the relay's log. The claim keeps its history-row key, so it
                 // dedupes as before, and the cursor lets the relay place it.
                 facts.live_cursor = Some(event.metadata.accepted.receipt.journal_cursor);
-                let admitted_actor = if let Some(own) = own {
-                    own.author
-                } else if event.metadata.canonical_version == Some(2) {
-                    event.metadata.admitted_declaration().map(|declaration| (Some(declaration.agent_id.clone()), Some(declaration.attribution())))
-                } else { None };
                 match admitted_actor {
                     Some((actor, attribution)) => {
                         facts.author_origin_id = actor;
@@ -1777,6 +2054,30 @@ mod tests {
     }
 
     #[test]
+    fn owner_admission_without_authorship_does_not_invent_a_human_author() {
+        for canonical in [false, true] {
+            let (_dir, mut store, mut cache, _owner, handle) = fixture();
+            let source = Ydoc::wire();
+            let mut update = event(
+                "owner-unknown-author",
+                1,
+                source.plaintext_insert(0, "text"),
+            );
+            if canonical {
+                update.metadata.canonical_version = Some(2);
+                update.metadata.author_snapshot = Some(vec![]);
+                update.metadata.first_seen_deletes = Some(vec![]);
+            }
+            ack(apply(&mut store, &mut cache, &handle, update));
+            let author: (Option<String>, Option<String>) = store.read_with(|conn| conn.query_row(
+                "SELECT actor_origin_id,actor_kind FROM ydoc_updates WHERE workspace_id='workspace-1' AND version_id='main' AND object_id='object-1' AND seq=1",
+                [], |row| Ok((row.get(0)?,row.get(1)?)),
+            )).unwrap();
+            assert_eq!(author, (None, None));
+        }
+    }
+
+    #[test]
     fn admitted_metadata_v1_bytes_and_v2_digest_versions() {
         let source = Ydoc::wire();
         let legacy = event("versioned", 1, source.plaintext_insert(0, "text"));
@@ -2233,6 +2534,38 @@ mod tests {
             .len()
     }
 
+    #[test]
+    fn empty_snapshot_credits_content_but_not_no_op_deliveries() {
+        for content in ["none", "structs", "deletes"] {
+            let (_dir, mut store, mut cache, _owner, handle) = fixture();
+            let mut update = event("empty-snapshot", 1, Ydoc::wire().encode_full_state());
+            snapshot(&mut update.metadata, None);
+            update.metadata.author_snapshot = Some(vec![]);
+            let range = LiveUpdateStructRange {
+                client_id: 7,
+                start_clock: 0,
+                end_clock: 1,
+            };
+            match content {
+                "structs" => update.metadata.first_seen.push(range),
+                "deletes" => update.metadata.first_seen_deletes = Some(vec![range]),
+                _ => {}
+            }
+            ack(apply(&mut store, &mut cache, &handle, update.clone()));
+            assert_eq!(
+                interval_len(&store),
+                usize::from(content != "none"),
+                "{content}"
+            );
+            assert!(ack(apply(&mut store, &mut cache, &handle, update)).application_replayed);
+            assert_eq!(
+                interval_len(&store),
+                usize::from(content != "none"),
+                "replay {content}"
+            );
+        }
+    }
+
     /// Accepted deliveries' declared agents and local edits' authors share
     /// one interval and its bounds. At the boundary a new identity of either
     /// kind is refused before any write, even for a delivery whose bytes
@@ -2376,6 +2709,56 @@ mod tests {
         assert!(metadata.matches_draft_declaration(declared("agent").as_ref()));
         assert!(!metadata.matches_draft_declaration(declared("other").as_ref()));
         assert!(!metadata.matches_draft_declaration(None));
+        for authority in [
+            ServerDerivedLiveUpdateAuthority::Named {
+                principal_id: "owner-1".into(),
+                grant_id: "grant".into(),
+                grant_generation: 1,
+            },
+            ServerDerivedLiveUpdateAuthority::Link {
+                principal_id: "owner-1".into(),
+                grant_id: "grant".into(),
+                grant_generation: 1,
+            },
+        ] {
+            metadata.accepted.authority = authority;
+            assert!(!metadata.matches_draft_declaration(declared("agent").as_ref()));
+            snapshot(&mut metadata, None);
+            assert!(!metadata.matches_draft_declaration(declared("agent").as_ref()));
+            snapshot(&mut metadata, declared("agent"));
+        }
+    }
+
+    #[test]
+    fn automation_snapshot_requires_exact_draft_provenance() {
+        let mut metadata = event("owner", 1, Ydoc::wire().plaintext_insert(0, "x")).metadata;
+        let declaration = dohc_engine_domain::AutomationDeclaration {
+            automation_id: "collection:Tasks#mark".into(),
+            attribution: dohc_engine_domain::ChangeAttribution {
+                actor_kind: dohc_engine_domain::ChangeActorKind::Automation,
+                on_behalf_of: Some("presser".into()),
+                depth: 1,
+                run: None,
+            },
+        };
+        snapshot(&mut metadata, None);
+        assert!(!metadata.matches_automation_declaration(Some(&declaration)));
+        metadata.author_snapshot = Some(vec![LiveAuthorEntry::Automation {
+            automation_id: declaration.automation_id.clone(),
+            attribution: declaration.attribution.clone(),
+        }]);
+        metadata.validate_extensions().unwrap();
+        assert!(metadata.matches_automation_declaration(Some(&declaration)));
+        assert!(!metadata.matches_automation_declaration(None));
+        let mut changed = declaration.clone();
+        changed.attribution.on_behalf_of = Some("other".into());
+        assert!(!metadata.matches_automation_declaration(Some(&changed)));
+        metadata
+            .author_snapshot
+            .as_mut()
+            .unwrap()
+            .push(LiveAuthorEntry::from(declared("agent").unwrap()));
+        assert!(metadata.validate_extensions().is_err());
     }
 
     fn warm_cache(store: &mut EngineStore, cache: &mut WriterDocCache) {
@@ -2668,6 +3051,45 @@ mod tests {
                 update
             ))
             .application_replayed
+        );
+    }
+
+    #[test]
+    fn live_application_ended_without_settle_preserves_local_tail() {
+        let (dir, mut store, mut cache, owner, handle) = fixture();
+        let producer = Ydoc::wire();
+        let initial = ack(apply(
+            &mut store,
+            &mut cache,
+            &handle,
+            event("unsettled", 1, producer.plaintext_insert(0, "local draft")),
+        ));
+        drop(owner);
+        store = reopen(store, &dir);
+        let (tail, settled): (i64, i64) =
+            store
+                .read_with(|conn| {
+                    conn.query_row(
+            "SELECT last_local_update_seq,COALESCE(settled_update_seq,0) FROM ydoc_docs", [],
+            |row| Ok((row.get(0)?,row.get(1)?)))
+                })
+                .unwrap();
+        assert_eq!(tail, initial.local_ydoc_sequence);
+        assert!(
+            tail > settled,
+            "recovery must wait for this device's open-time settle"
+        );
+        assert_eq!(
+            count(&store, "moments"),
+            0,
+            "the application did not publish a file"
+        );
+        assert_eq!(
+            document(&store)
+                .project(ContentKind::Plaintext)
+                .unwrap()
+                .content,
+            "local draft"
         );
     }
 
@@ -3359,6 +3781,73 @@ mod tests {
         assert_eq!(remote_changes(&store), 1, "a replayed frame counts once");
     }
 
+    /// A person the owner shared with, or a link holder, whose client sent
+    /// recording context is one author: the grant the relay accepted the
+    /// frame under. The admitted snapshot keeps their public entry, and a
+    /// declared agent is credited beside them.
+    #[test]
+    fn a_recorded_shared_principal_is_credited_once_beside_its_agent() {
+        let (_dir, mut store, mut cache, _owner, handle) = fixture();
+        let agent = serde_json::json!({"kind":"agent","agentId":"guest-agent","agentName":"Guest agent","onBehalfOf":"guest-1","depth":1});
+        let snapshot = |entries: Vec<serde_json::Value>| -> Vec<LiveAuthorEntry> {
+            entries
+                .into_iter()
+                .map(|entry| serde_json::from_value(entry).unwrap())
+                .collect()
+        };
+        let source = Ydoc::wire();
+        let frames = [
+            (
+                "named-recorded",
+                ServerDerivedLiveUpdateAuthority::Named {
+                    principal_id: "guest-1".into(),
+                    grant_id: "grant-1".into(),
+                    grant_generation: 1,
+                },
+                snapshot(vec![
+                    serde_json::json!({"kind":"human","humanId":"guest-1","humanName":"Guest"}),
+                    agent.clone(),
+                ]),
+                source.plaintext_insert(0, "a"),
+            ),
+            (
+                "link-recorded",
+                ServerDerivedLiveUpdateAuthority::Link {
+                    principal_id: "holder-1".into(),
+                    grant_id: "grant-link".into(),
+                    grant_generation: 2,
+                },
+                snapshot(vec![
+                    serde_json::json!({"kind":"link","publicPrincipalId":"public-holder-1","label":"Anonymous"}),
+                ]),
+                source.plaintext_insert(1, "b"),
+            ),
+        ];
+        for (cursor, (delivery, authority, authors, bytes)) in (1..).zip(frames) {
+            let mut update = event(delivery, cursor, bytes);
+            update.metadata.canonical_version = Some(2);
+            update.metadata.author_snapshot = Some(authors);
+            update.metadata.first_seen_deletes = Some(Vec::new());
+            update.metadata.accepted.authority = authority;
+            ack(apply(&mut store, &mut cache, &handle, update.clone()));
+            // A replay matches the stored event, admitted snapshot included.
+            assert!(ack(apply(&mut store, &mut cache, &handle, update)).application_replayed);
+        }
+        let interval = store
+            .read_with(|conn| crate::author_coverage::interval_in(conn, &key(), i64::MAX))
+            .unwrap()
+            .json();
+        // Each person is one author, by grant, beside their declared agent.
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&interval).unwrap(),
+            serde_json::json!([
+                agent,
+                {"kind":"link","grantId":"grant-link","grantGeneration":2,"principalId":"holder-1"},
+                {"kind":"named","userId":"guest-1","grantId":"grant-1","grantGeneration":1}
+            ])
+        );
+    }
+
     /// A live-shared record: the session host commits each accepted frame,
     /// the owner's and a collaborator's alike, so it claims the frame's field
     /// changes once, as the principal the relay accepted it from.
@@ -3378,8 +3867,27 @@ mod tests {
     }
 
     fn host_claims_each_accepted_field_change(canonical_version: Option<u8>, capped_agent: bool) {
+        // Each frame first sees what the source wrote since the previous
+        // frame, so the same bytes delivered again see nothing new.
+        let source = Ydoc::wire();
+        let seen = std::cell::RefCell::new(source.state_vector());
         let event = |delivery: &str, cursor: i64, bytes: Vec<u8>| {
             let mut admitted = event(delivery, cursor, bytes);
+            let after = source.state_vector();
+            let mut first_seen: Vec<_> = after
+                .iter()
+                .filter_map(|(client, clock)| {
+                    let start = seen.borrow().get(client);
+                    (*clock > start).then_some(LiveUpdateStructRange {
+                        client_id: client.get() as i64,
+                        start_clock: i64::from(start),
+                        end_clock: i64::from(*clock),
+                    })
+                })
+                .collect();
+            first_seen.sort_by_key(|range| range.client_id);
+            admitted.metadata.first_seen = first_seen;
+            *seen.borrow_mut() = after;
             admitted.metadata.canonical_version = canonical_version;
             if canonical_version == Some(2) {
                 admitted.metadata.author_snapshot = Some(if capped_agent {
@@ -3394,87 +3902,7 @@ mod tests {
             }
             admitted
         };
-        use dohc_engine_domain::{
-            AutomationChangeKind, AutomationSubscription, VersionedTextStore, WriteText,
-        };
-        let dir = ScratchDir::new_named("live-device-application-claims").unwrap();
-        let mut store = EngineStore::open(&dir.join("engine.db"), 0).unwrap();
-        let mut versions = VersionedTextStore::new(&mut store);
-        versions
-            .ensure_main_version("workspace-1", "main", 0, &NoFaults)
-            .unwrap();
-        for (object_id, path, text) in [
-            (
-                "schema-object",
-                "notes/collection.yaml",
-                "fields:\n  status:\n    type: text\n",
-            ),
-            (
-                "object-1",
-                "notes/a.md",
-                "---\nid: rec_aaaaaaaaaaaaaaaaaaaaaaaaaa\nstatus: open\n---\n",
-            ),
-        ] {
-            versions
-                .write_text(
-                    &WriteText {
-                        workspace_id: "workspace-1".into(),
-                        version_id: "main".into(),
-                        object_id: object_id.into(),
-                        path: path.into(),
-                        text: text.into(),
-                        moment_id: format!("moment:{object_id}"),
-                        metadata_origin: "test".into(),
-                        metadata_summary: None,
-                        metadata_correlation_id: None,
-                        author_json: None,
-                        now_ms: 1,
-                        request_id: None,
-                    },
-                    &NoFaults,
-                )
-                .unwrap();
-        }
-        store
-            .write_with(&NoFaults, |tx| {
-                dohc_engine_domain::reconcile_collections_in_tx(tx, "workspace-1", "main")?;
-                dohc_engine_domain::subscribe_automation_in_tx(
-                    tx,
-                    "workspace-1",
-                    &AutomationSubscription {
-                        automation_id: "collection:notes#watch".into(),
-                        prefix: "notes".into(),
-                        kinds: vec![AutomationChangeKind::Changed],
-                        fields: None,
-                    },
-                    1,
-                )
-            })
-            .unwrap();
-        durable::ensure_marker(
-            &mut store,
-            &key(),
-            ContentKind::Richdoc,
-            Regime::Replicated,
-            &NoFaults,
-            0,
-        )
-        .unwrap();
-        store.write_with(&NoFaults, |tx| {
-            put_binary_blob_with_sha(tx,&Ydoc::wire().encode_full_state(),&binding().lineage_claim_id).unwrap();
-            tx.execute("UPDATE ydoc_docs SET lineage_claim_id=?1,lineage_claim_status='exact',path='notes/a.md'",[binding().lineage_claim_id]).unwrap();
-            Ok::<_,StorageError>(())
-        }).unwrap();
-        let mut owner = ApplicationOwner::new("workspace-1".into()).unwrap();
-        let handle = owner
-            .register(
-                &mut store,
-                "relay-A".into(),
-                coordinate("connection-1"),
-                binding(),
-            )
-            .unwrap();
-        let mut cache = WriterDocCache::new();
+        let (dir, mut store, mut cache, _owner, handle) = field_history_fixture();
         let claims = |store: &EngineStore| -> Vec<(String, Option<String>)> {
             store
                 .read_with(|conn| {
@@ -3507,7 +3935,6 @@ mod tests {
                 .collect()
         };
 
-        let source = Ydoc::wire();
         let owner_edit = event(
             "owner-edit",
             1,
@@ -3547,6 +3974,13 @@ mod tests {
             grant_id: "grant-1".into(),
             grant_generation: 1,
         };
+        // Recording context names the account the relay accepted the edit from.
+        if capped_agent {
+            guest_edit.metadata.author_snapshot = Some(vec![LiveAuthorEntry::Human {
+                human_id: "guest-1".into(),
+                human_name: "Guest".into(),
+            }]);
+        }
         guest_edit.metadata.accepted.received_at_ms = 20;
         ack(apply(&mut store, &mut cache, &handle, guest_edit));
         assert_eq!(
@@ -3570,6 +4004,13 @@ mod tests {
             grant_id: "grant-link".into(),
             grant_generation: 2,
         };
+        // A link holder's context names its public principal, not the grant.
+        if capped_agent {
+            link_edit.metadata.author_snapshot = Some(vec![serde_json::from_value(
+                serde_json::json!({"kind":"link","publicPrincipalId":"public-holder-1","label":"Anonymous"}),
+            )
+            .unwrap()]);
+        }
         link_edit.metadata.accepted.received_at_ms = 25;
         ack(apply(&mut store, &mut cache, &handle, link_edit));
         assert_eq!(claims(&store).len(), 3);
@@ -3605,6 +4046,31 @@ mod tests {
         assert_eq!(
             persons(&store),
             vec![None, Some("guest-1".to_owned()), None]
+        );
+        // The moment that settles these frames names the collaborator and the
+        // link once, from the same authority, so History says who changed the
+        // file, even when their own snapshot named them too. The owner's
+        // snapshot person stays. Frames without recording context also keep
+        // the unattributed gap.
+        let interval = store
+            .read_with(|conn| crate::author_coverage::interval_in(conn, &key(), i64::MAX))
+            .unwrap()
+            .json();
+        let snapshot_author = capped_agent
+            .then(|| serde_json::json!({"kind":"human","humanId":"owner-1","humanName":"Owner"}));
+        let missing_context = (!capped_agent).then(|| serde_json::json!({"kind":"unattributed"}));
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&interval).unwrap(),
+            serde_json::Value::Array(
+                snapshot_author
+                    .into_iter()
+                    .chain([
+                        serde_json::json!({"kind":"link","grantId":"grant-link","grantGeneration":2,"principalId":"holder-1"}),
+                        serde_json::json!({"kind":"named","userId":"guest-1","grantId":"grant-1","grantGeneration":1}),
+                    ])
+                    .chain(missing_context)
+                    .collect()
+            ),
         );
 
         let body_only = event("body-only", 4, source.plaintext_insert(0, "body"));
@@ -3689,6 +4155,15 @@ mod tests {
             ),
             "the host's own draft keeps its automation author, depth and person"
         );
+        assert_eq!(
+            newest_field_author(&store),
+            (
+                Some("automation".into()),
+                Some("collection:notes#stamp".into()),
+                Some("person-1".into())
+            )
+        );
+
         // The same bytes under another delivery are not that draft.
         let restamped = source.frontmatter_set("status", "restamped").unwrap();
         own_draft(&mut store, "own-restamp", &restamped);
@@ -3739,6 +4214,547 @@ mod tests {
             cursors(&store).len(),
             6,
             "a retried or re-delivered frame claims once"
+        );
+    }
+
+    fn field_history_fixture() -> (
+        ScratchDir,
+        EngineStore,
+        WriterDocCache,
+        ApplicationOwner,
+        ApplicationHandle,
+    ) {
+        use dohc_engine_domain::{
+            AutomationChangeKind, AutomationSubscription, VersionedTextStore, WriteText,
+        };
+        let dir = ScratchDir::new_named("live-device-application-claims").unwrap();
+        let mut store = EngineStore::open(&dir.join("engine.db"), 0).unwrap();
+        let mut versions = VersionedTextStore::new(&mut store);
+        versions
+            .ensure_main_version("workspace-1", "main", 0, &NoFaults)
+            .unwrap();
+        for (object_id, path, text) in [
+            (
+                "schema-object",
+                "notes/collection.yaml",
+                "fields:\n  status:\n    type: text\n",
+            ),
+            (
+                "object-1",
+                "notes/a.md",
+                "---\nid: rec_aaaaaaaaaaaaaaaaaaaaaaaaaa\nstatus: open\n---\n",
+            ),
+        ] {
+            versions
+                .write_text(
+                    &WriteText {
+                        workspace_id: "workspace-1".into(),
+                        version_id: "main".into(),
+                        object_id: object_id.into(),
+                        path: path.into(),
+                        text: text.into(),
+                        moment_id: format!("moment:{object_id}"),
+                        metadata_origin: "test".into(),
+                        metadata_summary: None,
+                        metadata_correlation_id: None,
+                        author_json: None,
+                        now_ms: 1,
+                        request_id: None,
+                    },
+                    &NoFaults,
+                )
+                .unwrap();
+        }
+        store
+            .write_with(&NoFaults, |tx| {
+                dohc_engine_domain::reconcile_collections_in_tx(tx, "workspace-1", "main")?;
+                dohc_engine_domain::subscribe_automation_in_tx(
+                    tx,
+                    "workspace-1",
+                    &AutomationSubscription {
+                        automation_id: "collection:notes#watch".into(),
+                        prefix: "notes".into(),
+                        kinds: vec![AutomationChangeKind::Changed],
+                        fields: None,
+                    },
+                    1,
+                )
+            })
+            .unwrap();
+        durable::ensure_marker(
+            &mut store,
+            &key(),
+            ContentKind::Richdoc,
+            Regime::Replicated,
+            &NoFaults,
+            0,
+        )
+        .unwrap();
+        store.write_with(&NoFaults, |tx| {
+            put_binary_blob_with_sha(tx,&Ydoc::wire().encode_full_state(),&binding().lineage_claim_id).unwrap();
+            tx.execute("UPDATE ydoc_docs SET lineage_claim_id=?1,lineage_claim_status='exact',path='notes/a.md'",[binding().lineage_claim_id]).unwrap();
+            Ok::<_,StorageError>(())
+        }).unwrap();
+        let mut owner = ApplicationOwner::new("workspace-1".into()).unwrap();
+        let handle = owner
+            .register(
+                &mut store,
+                "relay-A".into(),
+                coordinate("connection-1"),
+                binding(),
+            )
+            .unwrap();
+        let cache = WriterDocCache::new();
+
+        (dir, store, cache, owner, handle)
+    }
+
+    fn account_frame(
+        delivery: &str,
+        cursor: i64,
+        bytes: Vec<u8>,
+        agent: bool,
+    ) -> AdmittedLiveUpdate {
+        let mut update = event(delivery, cursor, bytes);
+        update.metadata.accepted.authority = ServerDerivedLiveUpdateAuthority::Named {
+            principal_id: "guest-1".into(),
+            grant_id: "grant-1".into(),
+            grant_generation: 1,
+        };
+        update.metadata.canonical_version = Some(2);
+        update.metadata.first_seen_deletes = Some(vec![]);
+        let mut authors = vec![LiveAuthorEntry::Human {
+            human_id: "guest-1".into(),
+            human_name: "Ana".into(),
+        }];
+        if agent {
+            authors.push(LiveAuthorEntry::Agent {
+                agent_id: "agent-1".into(),
+                agent_name: Some("Helper".into()),
+                on_behalf_of: Some("guest-1".into()),
+                depth: Some(0),
+            });
+        }
+        update.metadata.author_snapshot = Some(authors);
+        update
+    }
+
+    fn newest_field_author(
+        store: &EngineStore,
+    ) -> (Option<String>, Option<String>, Option<String>) {
+        store.read_with(|conn| conn.query_row(
+            "SELECT actor_kind,author_origin_id,on_behalf_of FROM collection_field_history ORDER BY history_id DESC LIMIT 1",
+            [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )).unwrap()
+    }
+
+    fn link_frame(delivery: &str, cursor: i64, bytes: Vec<u8>) -> AdmittedLiveUpdate {
+        let mut update = account_frame(delivery, cursor, bytes, false);
+        update.metadata.accepted.authority = ServerDerivedLiveUpdateAuthority::Link {
+            principal_id: "private-holder-1".into(),
+            grant_id: "link-1".into(),
+            grant_generation: 2,
+        };
+        update.metadata.author_snapshot = Some(vec![LiveAuthorEntry::Link {
+            public_principal_id: "public-holder-1".into(),
+            label: "Self claimed".into(),
+        }]);
+        update
+    }
+
+    #[test]
+    fn field_history_names_the_accepted_link_and_preserves_duplicate_author() {
+        let (_dir, mut store, mut cache, _owner, handle) = field_history_fixture();
+        let bytes = Ydoc::wire().frontmatter_set("status", "done").unwrap();
+        let update = link_frame("link", 1, bytes.clone());
+        ack(apply(&mut store, &mut cache, &handle, update.clone()));
+        let read = |store: &EngineStore| {
+            store.read_with(|conn| conn.query_row(
+            "SELECT link_author_json FROM collection_field_history ORDER BY history_id DESC LIMIT 1",
+            [], |row| row.get::<_, Option<String>>(0),
+        )).unwrap()
+        };
+        let expected = serde_json::json!({"kind":"link","grantId":"link-1","grantGeneration":2,"publicPrincipalId":"public-holder-1"});
+        assert_eq!(
+            serde_json::from_str::<Value>(&read(&store).unwrap()).unwrap(),
+            expected
+        );
+        assert_eq!(newest_field_author(&store), (None, None, None));
+        assert!(ack(apply(&mut store, &mut cache, &handle, update)).application_replayed);
+        ack(apply(
+            &mut store,
+            &mut cache,
+            &handle,
+            account_frame("duplicate", 2, bytes, false),
+        ));
+        assert_eq!(count(&store, "collection_field_history"), 1);
+        assert_eq!(
+            serde_json::from_str::<Value>(&read(&store).unwrap()).unwrap(),
+            expected
+        );
+        for kind in ["legacy", "unattributed", "named", "owner", "link-agent"] {
+            let (_dir, mut store, mut cache, _owner, handle) = field_history_fixture();
+            let bytes = Ydoc::wire().frontmatter_set("status", "done").unwrap();
+            let mut update = if kind == "named" || kind == "owner" {
+                account_frame(kind, 1, bytes, false)
+            } else {
+                link_frame(kind, 1, bytes)
+            };
+            match kind {
+                "legacy" => {
+                    update.metadata.canonical_version = None;
+                    update.metadata.author_snapshot = None;
+                    update.metadata.first_seen_deletes = None;
+                }
+                "unattributed" => {
+                    update.metadata.author_snapshot = Some(vec![LiveAuthorEntry::Unattributed {}])
+                }
+                "owner" => {
+                    update.metadata.accepted.authority = ServerDerivedLiveUpdateAuthority::Owner {
+                        principal_id: "guest-1".into(),
+                    }
+                }
+                "link-agent" => {
+                    update
+                        .metadata
+                        .author_snapshot
+                        .as_mut()
+                        .unwrap()
+                        .push(LiveAuthorEntry::Agent {
+                            agent_id: "agent-1".into(),
+                            agent_name: None,
+                            on_behalf_of: Some("public-holder-1".into()),
+                            depth: None,
+                        })
+                }
+                _ => {}
+            }
+            ack(apply(&mut store, &mut cache, &handle, update));
+            if kind == "link-agent" {
+                assert_eq!(
+                    newest_field_author(&store),
+                    (
+                        Some("agent".into()),
+                        Some("agent-1".into()),
+                        Some("public-holder-1".into())
+                    )
+                );
+                assert_eq!(
+                    serde_json::from_str::<Value>(&read(&store).unwrap()).unwrap(),
+                    expected
+                );
+            } else {
+                assert_eq!(read(&store), None, "{kind}");
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "manual per-frame timing, 30 accepted link field edits"]
+    fn field_history_link_frame_cost() {
+        let (_dir, mut store, mut cache, _owner, handle) = field_history_fixture();
+        let source = Ydoc::wire();
+        let mut samples = Vec::new();
+        for cursor in 1..=35 {
+            let update = link_frame(
+                &format!("cost-{cursor}"),
+                cursor,
+                source
+                    .frontmatter_set("status", &format!("value-{cursor}"))
+                    .unwrap(),
+            );
+            let start = std::time::Instant::now();
+            ack(apply(&mut store, &mut cache, &handle, update));
+            if cursor > 5 {
+                samples.push(start.elapsed().as_nanos());
+            }
+        }
+        samples.sort_unstable();
+        println!(
+            "field_history_link_frame_cost: n={} median_ns={}",
+            samples.len(),
+            (samples[14] + samples[15]) / 2
+        );
+    }
+
+    #[test]
+    fn field_history_names_the_accepted_person() {
+        let (_dir, mut store, mut cache, _owner, handle) = field_history_fixture();
+        let update = account_frame(
+            "person",
+            1,
+            Ydoc::wire().frontmatter_set("status", "done").unwrap(),
+            false,
+        );
+        ack(apply(&mut store, &mut cache, &handle, update.clone()));
+        assert_eq!(
+            newest_field_author(&store),
+            (
+                Some("human".into()),
+                Some("guest-1".into()),
+                Some("guest-1".into())
+            )
+        );
+        assert!(ack(apply(&mut store, &mut cache, &handle, update)).application_replayed);
+        assert_eq!(count(&store, "collection_field_history"), 1);
+        let authors = store
+            .read_with(|conn| crate::author_coverage::interval_in(conn, &key(), 1))
+            .unwrap()
+            .json();
+        // The relay's grant names the person once, in place of their snapshot entry.
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&authors).unwrap(),
+            serde_json::json!([
+                {"kind":"named","userId":"guest-1","grantId":"grant-1","grantGeneration":1}
+            ])
+        );
+    }
+
+    #[test]
+    fn field_history_duplicate_bytes_keep_the_earlier_author() {
+        let (_dir, mut store, mut cache, _owner, handle) = field_history_fixture();
+        let bytes = Ydoc::wire().frontmatter_set("status", "done").unwrap();
+        ack(apply(
+            &mut store,
+            &mut cache,
+            &handle,
+            account_frame("first-person", 1, bytes.clone(), false),
+        ));
+        let first_author = newest_field_author(&store);
+        assert_eq!(count(&store, "collection_field_history"), 1);
+        assert_eq!(first_author.1.as_deref(), Some("guest-1"));
+
+        let mut duplicate = account_frame("other-person", 2, bytes, false);
+        duplicate.metadata.accepted.authority = ServerDerivedLiveUpdateAuthority::Named {
+            principal_id: "guest-2".into(),
+            grant_id: "grant-2".into(),
+            grant_generation: 1,
+        };
+        duplicate.metadata.author_snapshot = Some(vec![LiveAuthorEntry::Human {
+            human_id: "guest-2".into(),
+            human_name: "Ben".into(),
+        }]);
+        ack(apply(&mut store, &mut cache, &handle, duplicate));
+        assert_eq!(count(&store, "collection_field_history"), 1);
+        assert_eq!(newest_field_author(&store), first_author);
+    }
+
+    #[test]
+    fn field_history_names_the_accepted_agent_and_person() {
+        let (_dir, mut store, mut cache, _owner, handle) = field_history_fixture();
+        let update = account_frame(
+            "agent",
+            1,
+            Ydoc::wire().frontmatter_set("status", "done").unwrap(),
+            true,
+        );
+        ack(apply(&mut store, &mut cache, &handle, update));
+        assert_eq!(
+            newest_field_author(&store),
+            (
+                Some("agent".into()),
+                Some("agent-1".into()),
+                Some("guest-1".into())
+            )
+        );
+        let authors = store
+            .read_with(|conn| crate::author_coverage::interval_in(conn, &key(), 1))
+            .unwrap()
+            .json();
+        // The agent keeps its canonical name beside the person's grant.
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&authors).unwrap(),
+            serde_json::json!([
+                {"kind":"agent","agentId":"agent-1","agentName":"Helper","onBehalfOf":"guest-1","depth":0},
+                {"kind":"named","userId":"guest-1","grantId":"grant-1","grantGeneration":1}
+            ])
+        );
+    }
+
+    #[test]
+    fn field_history_without_a_confirmed_account_stays_unattributed() {
+        for kind in [
+            "empty",
+            "unattributed",
+            "agent-only",
+            "wrong-person",
+            "wrong-agent-person",
+            "legacy",
+            "wrong-link-agent-principal",
+        ] {
+            let (_dir, mut store, mut cache, _owner, handle) = field_history_fixture();
+            let mut update = account_frame(
+                kind,
+                1,
+                Ydoc::wire().frontmatter_set("status", "done").unwrap(),
+                true,
+            );
+            match kind {
+                "empty" => update.metadata.author_snapshot = Some(vec![]),
+                "unattributed" => {
+                    update.metadata.author_snapshot = Some(vec![LiveAuthorEntry::Unattributed {}])
+                }
+                "agent-only" => {
+                    update.metadata.author_snapshot.as_mut().unwrap().remove(0);
+                }
+                "wrong-person" => {
+                    update.metadata.author_snapshot = Some(vec![LiveAuthorEntry::Human {
+                        human_id: "client-declared".into(),
+                        human_name: "False name".into(),
+                    }]);
+                }
+                "wrong-agent-person" => {
+                    if let LiveAuthorEntry::Agent { on_behalf_of, .. } =
+                        &mut update.metadata.author_snapshot.as_mut().unwrap()[1]
+                    {
+                        *on_behalf_of = Some("client-declared".into());
+                    }
+                }
+                "legacy" => {
+                    update.metadata.canonical_version = None;
+                    update.metadata.author_snapshot = None;
+                    update.metadata.first_seen_deletes = None;
+                }
+                "wrong-link-agent-principal" => {
+                    update.metadata.accepted.authority = ServerDerivedLiveUpdateAuthority::Link {
+                        principal_id: "holder-1".into(),
+                        grant_id: "link-1".into(),
+                        grant_generation: 1,
+                    };
+                    update.metadata.author_snapshot = Some(vec![
+                        LiveAuthorEntry::Link {
+                            public_principal_id: "public-1".into(),
+                            label: "Self claimed".into(),
+                        },
+                        LiveAuthorEntry::Agent {
+                            agent_id: "agent-1".into(),
+                            agent_name: None,
+                            on_behalf_of: Some("holder-1".into()),
+                            depth: None,
+                        },
+                    ]);
+                }
+                _ => unreachable!(),
+            }
+            ack(apply(&mut store, &mut cache, &handle, update));
+            assert_eq!(newest_field_author(&store), (None, None, None), "{kind}");
+        }
+    }
+
+    #[test]
+    fn field_history_accepted_automation_keeps_its_attribution() {
+        let (_dir, mut store, mut cache, _owner, handle) = field_history_fixture();
+        let mut update = account_frame(
+            "automation",
+            1,
+            Ydoc::wire().frontmatter_set("status", "done").unwrap(),
+            false,
+        );
+        update.metadata.accepted.authority = ServerDerivedLiveUpdateAuthority::Owner {
+            principal_id: "owner-1".into(),
+        };
+        update.metadata.author_snapshot = Some(vec![LiveAuthorEntry::Automation {
+            automation_id: "collection:notes#stamp".into(),
+            attribution: dohc_engine_domain::ChangeAttribution {
+                actor_kind: dohc_engine_domain::ChangeActorKind::Automation,
+                on_behalf_of: Some("person-1".into()),
+                depth: 2,
+                run: None,
+            },
+        }]);
+        ack(apply(&mut store, &mut cache, &handle, update));
+        assert_eq!(
+            newest_field_author(&store),
+            (
+                Some("automation".into()),
+                Some("collection:notes#stamp".into()),
+                Some("person-1".into())
+            )
+        );
+    }
+
+    #[test]
+    fn field_history_own_human_draft_keeps_its_attribution() {
+        let (_dir, mut store, mut cache, _owner, handle) = field_history_fixture();
+        let bytes = Ydoc::wire().frontmatter_set("status", "done").unwrap();
+        let draft = crate::owner_outbox::append(
+            &mut store,
+            "workspace-1",
+            crate::owner_outbox::OwnerOutboxAppendInput {
+                binding: binding(),
+                base_update: Ydoc::wire().encode_full_state(),
+                append_key: "human-draft".into(),
+                update: bytes.clone(),
+                limits: crate::owner_outbox::OwnerOutboxLimits {
+                    max_pending_bytes: 100_000,
+                    max_pending_age_ms: 100_000,
+                },
+                created_at_ms: 1,
+            },
+        )
+        .unwrap();
+        let native = crate::owner_outbox::OwnerOutboxNativeSource {
+            binding: binding(),
+            adoption_id: "adoption-1".into(),
+            native_sequence: 1,
+            update_digest: draft.update_digest.clone(),
+            origin: crate::owner_outbox::OwnerOutboxNativeOrigin::NativeUpdate {
+                actor_origin_id: Some("local-person".into()),
+                actor_kind: Some("human".into()),
+                on_behalf_of: Some("local-person".into()),
+                chain_depth: Some(0),
+                recorded_at_ms: 1,
+            },
+        };
+        store.write_with(&NoFaults, |tx| {
+            tx.execute("UPDATE owner_ydoc_outbox_entries SET native_source_json=?1 WHERE delivery_id=?2", params![serde_json::to_string(&native).unwrap(), draft.delivery_id]).map_err(StorageError::persist_public)?;
+            Ok::<_, StorageError>(())
+        }).unwrap();
+        let mut update = account_frame(&draft.delivery_id, 1, bytes, false);
+        update.metadata.accepted.authority = ServerDerivedLiveUpdateAuthority::Owner {
+            principal_id: "owner-1".into(),
+        };
+        update.metadata.author_snapshot = Some(vec![LiveAuthorEntry::Human {
+            human_id: "owner-1".into(),
+            human_name: "Owner".into(),
+        }]);
+        ack(apply(&mut store, &mut cache, &handle, update));
+        assert_eq!(
+            newest_field_author(&store),
+            (
+                Some("human".into()),
+                Some("local-person".into()),
+                Some("local-person".into())
+            )
+        );
+    }
+
+    #[test]
+    #[ignore = "manual per-frame timing, 30 accepted field edits"]
+    fn field_history_frame_cost() {
+        let (_dir, mut store, mut cache, _owner, handle) = field_history_fixture();
+        let source = Ydoc::wire();
+        let mut samples = Vec::new();
+        for cursor in 1..=35 {
+            let update = account_frame(
+                &format!("cost-{cursor}"),
+                cursor,
+                source
+                    .frontmatter_set("status", &format!("value-{cursor}"))
+                    .unwrap(),
+                true,
+            );
+            let start = std::time::Instant::now();
+            ack(apply(&mut store, &mut cache, &handle, update));
+            if cursor > 5 {
+                samples.push(start.elapsed().as_nanos());
+            }
+        }
+        samples.sort_unstable();
+        println!(
+            "field_history_frame_cost: n={} median_ns={}",
+            samples.len(),
+            (samples[14] + samples[15]) / 2
         );
     }
 }

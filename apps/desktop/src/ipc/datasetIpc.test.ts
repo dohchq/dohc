@@ -33,7 +33,8 @@ function fixture(remote?: OwnerDatasetData, named?: Pick<OwnerDatasetData, "list
   });
   const flushSourceCapture = vi.fn(async (_workspace: typeof workspace, _signal: AbortSignal) => {});
   const sources = new Map([["data/dataset.json", JSON.stringify(definition)]]);
-  const adapter = sourceCaptureAdapter(sources, { workspaceId: "workspace" });
+  const sourceRequests: Array<{ method: string; params: Record<string, unknown> }> = [];
+  const adapter = sourceCaptureAdapter(sources, { workspaceId: "workspace", onRequest(method, params) { sourceRequests.push({ method, params }); } });
   const withAdapter = vi.fn(async (_workspace, work) => work(adapter));
   const handler = createDatasetHandler({ flushSourceCapture,
     async withWorkspaceOperation(_caller: string, workspaceId, work) {
@@ -49,7 +50,7 @@ function fixture(remote?: OwnerDatasetData, named?: Pick<OwnerDatasetData, "list
   });
   const createForm = { action: "createForm", workspaceId: "workspace", datasetPath: "data/dataset.json", revision: 1, revisionSha256: revision.revisionSha256,
     tableId: definition.tables[0]!.tableId, createOperationId: definition.operations[0]!.operationId, appRoot: "apps/form", fieldIds: definition.operations[0]!.fieldIds };
-  return { revision, sources, handler, host, workspace, abort, createSources, createForm, flushSourceCapture, withAdapter, stale() { current = false; } };
+  return { revision, sources, sourceRequests, handler, host, workspace, abort, createSources, createForm, flushSourceCapture, withAdapter, stale() { current = false; } };
 }
 
 it("uses owner authority before disclosing standalone Collections", async () => {
@@ -94,6 +95,10 @@ it("restores absent source files after recovery so the recovered dataset has an 
   const request = { action: "claimRecovery", workspaceId: "workspace", transferId: datasetId, manifestSha256: "a".repeat(64), sourceCursor, oldHostStopped: true };
   expect(await f.handler("window", request)).toMatchObject({ kind: "recovery-claimed", datasetPath: "data/dataset.json" });
   expect(f.sources.get("data/schema.sql")).toBe("keep existing source");
+  const targeted = f.sourceRequests.find(request => request.method === "files.resolve")!;
+  expect(targeted.params).toEqual({ versionId: "main", targets: [{ path: "data/schema.sql" }, { path: "data/operations.js" }, { path: "data/dataset.json" }] });
+  // Address discovery still lists descriptors; the subsequent source collision check must not list again.
+  expect(f.sourceRequests.slice(f.sourceRequests.indexOf(targeted) + 1).filter(request => request.method === "versionedText.list")).toHaveLength(0);
   expect(f.sources.get("data/operations.js")).toBe("approved operations");
   expect(JSON.parse(f.sources.get("data/dataset.json")!)).toEqual(f.revision.definition);
   await f.handler("window", request);
@@ -404,4 +409,20 @@ it.each(["approve","approveMigration"])("refuses automation and received-share %
   await expect(f.handler("agent",input,{depth:1})).rejects.toThrow("Automations cannot approve");
   f.workspace.shareView={};
   await expect(f.handler("agent",input,{depth:0})).rejects.toThrow("original workspace");
+});
+
+it.each([2, 3])("recovers revision %s to the base address", async number => {
+  const f = fixture();
+  f.sources.clear();
+  const directory = `data/revisions/${number}-00000000-0000-4000-8000-000000000099`;
+  const definition = { ...f.revision.definition, schemaPath: `${directory}/schema.sql`, operationsPath: `${directory}/operations.js` };
+  const revision = describeDatasetRevision({ definition, revision: number, schemaSql: "SCHEMA", operationSource: "OPERATIONS" });
+  const sourceCursor = { workspaceId: "workspace", datasetId, hostEpoch: "old", approvedRevisionHash: revision.revisionSha256, revision: number, digest: "b".repeat(64) };
+  f.host.claimRecovery.mockResolvedValue({ transferId: datasetId, manifestSha256: "a".repeat(64), sourceCursor, targetCursor: { ...sourceCursor, hostEpoch: "new" } });
+  f.host.approvedArtifacts.mockResolvedValue({ active: true, revision, schemaSql: "SCHEMA", operationSource: "OPERATIONS" });
+  expect(await f.handler("window", { action: "claimRecovery", workspaceId: "workspace", transferId: datasetId, manifestSha256: "a".repeat(64), sourceCursor, oldHostStopped: true })).toMatchObject({ datasetPath: "data/dataset.json" });
+  expect(JSON.parse(f.sources.get("data/dataset.json")!)).toEqual(definition);
+  expect(f.sources.get(definition.schemaPath)).toBe("SCHEMA");
+  expect(f.sources.get(definition.operationsPath)).toBe("OPERATIONS");
+  expect(f.sources.has(`${directory}/dataset.json`)).toBe(false);
 });

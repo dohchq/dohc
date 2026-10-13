@@ -51,7 +51,8 @@ export default function NamedRecipientApp({grantId}: {grantId: string | null}) {
   const open = (objectId: string, path: string) => {
     if (!files || !account) return;
     leave(() => {
-      transport.current ??= createNamedLiveBrowserTransport({publicOrigin: location.origin, limits: files.limits});
+      transport.current ??= createNamedLiveBrowserTransport({publicOrigin: location.origin, limits: files.limits,
+        recordingContext: selection => ({kind: "account", accountId: selection.accountId})});
       const session = transport.current.select({accountId: account.id, workspaceId: files.workspaceId, grantId: files.grantId, objectId});
       const value = {session, path, objectId}; currentSelection.current = value; setSelection(value); setSessionState(session.state());
       void session.reconnect();

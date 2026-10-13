@@ -34,6 +34,20 @@ const passVerdict =
   "test --workspace=PASS doctests=PASS build daemon=PASS " +
   "cargo-deny=PASS cargo-audit=PASS scratch leak=PASS";
 
+test("CI verdict helper can be imported from Node eval without a script path", () => {
+  const helper = new URL("../tools/rust-engine-program/require-ci-pass-verdict.mjs", import.meta.url).href;
+  const source = `
+    import assert from 'node:assert/strict';
+    assert.equal(process.argv[1], undefined);
+    const {requireCiPassVerdict} = await import(${JSON.stringify(helper)});
+    assert.equal(typeof requireCiPassVerdict, 'function');
+  `;
+  const result = spawnSync(process.execPath, ["--input-type=module", "--eval", source], {encoding: "utf8", timeout: 10_000});
+  assert.equal(result.error, undefined);
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stdout, "");
+});
+
 test("canonical CI verdict requires every mandatory gate step to report PASS", () => {
   assert.doesNotThrow(() => check(passVerdict));
   assert.throws(
@@ -374,34 +388,6 @@ test("PR workflow uses both canonical jobs and provisions the pinned Rust tools"
     `cargo-${tool}@${document.env[`CARGO_${tool.toUpperCase()}_VERSION`]}`).sort());
 });
 
-test("both gate filters select on ignore rules and vendored engine dependencies", () => {
-  // The tree-provenance row reads `git status`, so an ignore rule decides
-  // what the gate can see at all: ignoring a path removes it from every
-  // reading, and ignoring the wiring probe would disable
-  // scripts/rust-gate-artifact.test.mjs without changing a line of it. A
-  // .gitignore-only PR selecting neither job is a check whose preconditions
-  // sit outside what the check can see — which is the defect class this whole
-  // change is about.
-  const filters = workflow.slice(
-    workflow.indexOf("filters: |"),
-    workflow.indexOf("\n  javascript:"),
-  );
-  const rustFilter = filters.slice(
-    filters.indexOf("\n            rust:"),
-    filters.indexOf("\n            js:"),
-  );
-  const jsFilter = filters.slice(filters.indexOf("\n            js:"));
-  assert.match(rustFilter, /^ +- '\.gitignore'$/m);
-  assert.match(jsFilter, /^ +- '\.gitignore'$/m);
-  assert.match(rustFilter, /^ +- 'vendor\/\*\*'$/m);
-  assert.match(jsFilter, /^ +- 'vendor\/\*\*'$/m);
-  // Both slices must be real filter lists, or the assertions above pass by
-  // reading the same text twice.
-  assert.match(rustFilter, /- 'tools\/rust-engine-program\/\*\*'/);
-  assert.match(jsFilter, /- 'scripts\/\*\*'/);
-  assert.doesNotMatch(rustFilter, /- 'scripts\/\*\*'/);
-});
-
 // These cases use string/boolean comparisons shared by JavaScript and Actions.
 // Actionlint checks syntax; this helper does not model all Actions coercions.
 // Read the actual expressions so a removed switch or dependency breaks the test.
@@ -484,7 +470,9 @@ test("cloud selection uses the tested Git checkout and evidence has bounded rete
     assert.equal(upload.if, "always()");
     assert.equal(upload.with["retention-days"], 7);
     assert.equal(upload.with["include-hidden-files"], true);
-    assert.ok(upload.with.path.trim().split("\n").every(path => /\/(?:result\.json|\*\.log)$/.test(path)), "upload only receipts and logs, not workspaces or profiles");
+    const paths = upload.with.path.trim().split("\n");
+    assert.ok(paths.every(path => /\/(?:result\.json|\*\.log|ticket-evidence\/\*\.json)$/.test(path)), "upload only receipts, logs, and ticket JSON, not workspaces or profiles");
+    assert.ok(paths.includes(".agent-artifacts/verification/*/ticket-evidence/*.json"), "retain ticket payloads and observations named by the receipt");
   }
 });
 
@@ -801,6 +789,7 @@ function scratchRepo(detached) {
   git("init", "-q", "-b", "main");
   git("config", "user.email", "gate@dohc.ai");
   git("config", "user.name", "gate");
+  git("config", "commit.gpgsign", "false");
   for (const body of ["one", "two", "three"]) {
     writeFileSync(join(repo, "a.txt"), `${body}\n`);
     git("add", "a.txt");

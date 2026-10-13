@@ -70,7 +70,7 @@ import {
 import { z } from "zod";
 import { CHANNELS } from "./channels";
 import {OwnerRestoreRequest, OwnerRestoreActionResponse} from "./ownerRestoreContract";
-import { createOwnerRelayShareHandler } from "./ownerRelayShareHandler";
+import { assertOriginalWorkspace, createOwnerRelayShareHandler } from "./ownerRelayShareHandler";
 import { awaitCredentialGeneration, RelaySessionError } from "../mainChatIpcHandlers";
 import { requireCredentials } from "../workspaces/credentialScopedOperation";
 import type { CloudCredentials } from "../workspaces/cloudCredentialStore";
@@ -151,7 +151,7 @@ export function registerRelaySharesIpcHandlers<
   sharesChanged(workspaceId: string | null): void;
   // An authenticated account listing, applied to this machine's received
   // shares so a share the owner restored resumes.
-  reconcileReceivedShares(listing: unknown): void;
+  reconcileReceivedShares(listing: unknown): Promise<void>;
 }): void {
   const {
     registerHandler,
@@ -187,14 +187,6 @@ export function registerRelaySharesIpcHandlers<
       sharesChanged(workspaceId);
       return result;
     };
-  const assertOriginalWorkspace = (workspace: Workspace): void => {
-    if (shareViewIsPresent(workspace.shareView)) {
-      throw new Error(
-        "This is a shared view — only the original workspace can be shared.",
-      );
-    }
-  };
-
   registerHandler(CHANNELS.listOwnerLiveDocuments, async (event, payload) => {
     assertTrustedSender(event);
     const input = ListOwnerLiveDocumentsPayload.parse(payload);
@@ -379,7 +371,10 @@ export function registerRelaySharesIpcHandlers<
         removed?: unknown;
       }>("/sync/shares"),
     });
-    reconcileReceivedShares(result);
+    await awaitCredentialGeneration({
+      capturedGeneration, currentGeneration: currentCredentialGeneration,
+      run: () => reconcileReceivedShares(result),
+    });
     const relayUrl = currentCredentials()?.relayUrl;
     const withCode = (row: Record<string, unknown>) => ({
       ...row,

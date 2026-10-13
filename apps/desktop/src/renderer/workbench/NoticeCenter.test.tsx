@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act, cleanup, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type {
@@ -8,8 +8,17 @@ import type {
   UpdateActionResult,
   UpdateStateEvent,
 } from "../../ipc/bridgeContract";
-import { NoticeCenter, SENT_NOTICE_PAGE, type SentNotice } from "./NoticeCenter";
+import { NoticeCenter, WorkspaceErrorToast, SENT_NOTICE_PAGE, type SentNotice } from "./NoticeCenter";
 import { deferred } from "../../testing/deferred";
+import { useEffect, useRef } from "react";
+import { Overlay } from "../Overlay";
+import { switchModalRegion } from "../modalFocus";
+
+it("offers Discard as a separate toast action without dismissing the Notice",()=>{
+  const action=vi.fn();const hide=vi.fn();render(<WorkspaceErrorToast error={{id:"typing",message:"Kept typing",details:"",atMs:0,canRetry:false,seen:false,actionLabel:"Copy your typing",additionalActionLabels:["Discard your typing"]}} onAction={action} onHide={hide}/>);
+  fireEvent.click(screen.getByRole("button",{name:"Discard your typing"}));
+  expect(action).toHaveBeenCalledExactlyOnceWith("typing",1);expect(hide).not.toHaveBeenCalled();
+});
 
 // Captures the renderer-side update listener exactly as the preload would
 // install it — the auto-updater itself never runs in dev/test (gated on
@@ -70,6 +79,7 @@ function noticeElement(props: Partial<Parameters<typeof NoticeCenter>[0]> = {}) 
       {...(props.onDismissWorkspaceError ? { onDismissWorkspaceError: props.onDismissWorkspaceError } : {})}
       {...(props.onRetryLiveDelivery ? { onRetryLiveDelivery: props.onRetryLiveDelivery } : {})}
       {...(props.onOpenLiveDocuments ? { onOpenLiveDocuments: props.onOpenLiveDocuments } : {})}
+      {...(props.onOpenSharingDeclined ? { onOpenSharingDeclined: props.onOpenSharingDeclined } : {})}
       {...(props.automationHolds ? { automationHolds: props.automationHolds } : {})}
       {...(props.onAllowAutomationHold ? { onAllowAutomationHold: props.onAllowAutomationHold } : {})}
       {...(props.automationHoldsUnreadable ? { automationHoldsUnreadable: props.automationHoldsUnreadable } : {})}
@@ -111,6 +121,34 @@ function liveDeliveryStatus(
     historyShareView: false,
     ownerLiveDelivery,
     ...(ownerLiveDeliveryReason ? { ownerLiveDeliveryReason } : {}),
+  };
+}
+
+type SharingDeclined = NonNullable<SyncStatusResult["sharingDeclined"]>[number];
+
+function declined(overrides: Partial<SharingDeclined> = {}): SharingDeclined {
+  return {
+    path: "notes/large.md",
+    objectId: "object-1",
+    versionId: "main",
+    lineagePruned: false,
+    headBlobSha256: "a".repeat(64),
+    constraint: "MAX_YDOC_UPDATE_BYTES",
+    limitBytes: 262_144,
+    observedBytes: 280_001,
+    ...overrides,
+  };
+}
+
+function declinedStatus(...sharingDeclined: SharingDeclined[]): SyncStatusResult {
+  return {
+    state: "synced",
+    pendingChangeCount: 0,
+    lastSyncedAtMs: null,
+    liveSessionsGeneration: 0,
+    historyRecordingUnavailable: false,
+    historyShareView: false,
+    sharingDeclined,
   };
 }
 
@@ -316,6 +354,16 @@ describe("update toast", () => {
 });
 
 describe("notice center", () => {
+  it("hides empty path Copy on both the toast and the Notice row", async () => {
+    renderNotices({ workspaceErrors: [{ id: "empty-paths", title: "Share check incomplete",
+      message: "dohc couldn't check this share's files. Copy any files you changed to another workspace now.",
+      details: "", filePaths: [], copyLabel: "Copy file paths", atMs: 1, canRetry: false, seen: false }] });
+    expect(screen.getByTestId("workspace-shell-error").textContent).toContain("Share check incomplete");
+    expect(screen.queryByTestId("workspace-shell-error-copy")).toBeNull();
+    fireEvent.click(screen.getByTestId("notice-center-toggle"));
+    expect(await screen.findByTestId("notice-center")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Copy file paths" })).toBeNull();
+  });
   it("offers to repair shared files whose folder projection is pending", async () => {
     const onRefreshShareView = vi.fn();
     renderNotices({
@@ -361,37 +409,120 @@ describe("notice center", () => {
     expect(screen.queryByTestId("notice-center")).toBeNull();
   });
 
-  it("keeps a clear notice for each file that is too large to sync", async () => {
-    renderNotices({
-      syncStatus: {
-        state: "synced",
-        pendingChangeCount: 0,
-        lastSyncedAtMs: null,
-        liveSessionsGeneration: 0,
-        historyRecordingUnavailable: false,
-        historyShareView: false,
-        sharingDeclined: [
-          {
-            path: "notes/large.md",
-            constraint: "MAX_YDOC_UPDATE_BYTES",
-            limitBytes: 262_144,
-            observedBytes: 280_001,
-          },
-        ],
-      },
-    });
+  // Saved edits still reach others, never live ones. Sync cannot clear the
+  // refusal, so the notice offers the document, never Try again.
+  it("says saved edits reach others when dohc syncs and offers to open the document", async () => {
+    const onOpenSharingDeclined = vi.fn();
+    const user = userEvent.setup();
+    renderNotices({ syncStatus: declinedStatus(declined()), onOpenSharingDeclined });
 
-    await userEvent.click(screen.getByTestId("notice-center-toggle"));
-
-    const notice = screen.getByTestId(
-      "notice-sharing-declined-notes/large.md",
+    await user.click(screen.getByTestId("notice-center-toggle"));
+    const notice = screen.getByTestId("notice-sharing-declined-main:object-1");
+    expect(notice.textContent).toContain("Too large to edit live with others");
+    expect(notice.textContent).toContain(
+      "People you share large.md with get your saved edits when dohc syncs. If they have it open in dohc, they see your edits after they close it. Close large.md and open it again to fix this.",
     );
-    expect(notice.textContent).toContain("File is too large to sync");
-    expect(notice.textContent).toContain("notes/large.md");
-    expect(notice.textContent).toContain("280,001 bytes");
-    expect(notice.textContent).toContain("262,144 bytes");
-    expect(notice.textContent).toContain("Your edit is saved on this machine.");
-    expect(notice.textContent).toContain("Reduce the file to sync it.");
+    expect(within(notice).queryByRole("button", { name: "Try again" })).toBeNull();
+
+    await user.click(within(notice).getByRole("button", { name: "Copy error details" }));
+    const copied = await navigator.clipboard.readText();
+    expect(copied).toContain("Notice: Too large to edit live with others");
+    expect(copied).toContain(
+      "Detail: People you share large.md with get your saved edits when dohc syncs. If they have it open in dohc, they see your edits after they close it. Close large.md and open it again to fix this.",
+    );
+    expect(copied).toContain("File: notes/large.md");
+    expect(copied).toContain("Size: 280001 bytes");
+    expect(copied).toContain("Limit: 262144 bytes");
+    expect(copied).toContain("Object id: object-1");
+    expect(copied).toContain("Version id: main");
+    expect(copied).toContain(`Saved file sha256: ${"a".repeat(64)}`);
+
+    await user.click(within(notice).getByRole("button", { name: "Open document" }));
+    expect(onOpenSharingDeclined).toHaveBeenCalledWith("main", "object-1");
+    // Opening it from the row ends the announcement too.
+    expect(screen.queryByTestId("sharing-declined-toast")).toBeNull();
+  });
+
+  it("gives the same sharing recovery for a closed document", async () => {
+    renderNotices({ syncStatus: declinedStatus(declined({ lineagePruned: true })) });
+
+    const toast = screen.getByTestId("sharing-declined-toast");
+    expect(toast.textContent).toContain(
+      "Too large to edit live with others. People you share large.md with get your saved edits when dohc syncs. If they have it open in dohc, they see your edits after they close it. Close large.md and open it again to fix this.",
+    );
+  });
+
+  it("opens the document from its toast and keeps the row", async () => {
+    const onOpenSharingDeclined = vi.fn();
+    const user = userEvent.setup();
+    renderNotices({ syncStatus: declinedStatus(declined()), onOpenSharingDeclined });
+
+    await user.click(screen.getByTestId("sharing-declined-toast-open"));
+    expect(onOpenSharingDeclined).toHaveBeenCalledWith("main", "object-1");
+    expect(screen.queryByTestId("sharing-declined-toast")).toBeNull();
+
+    await user.click(screen.getByTestId("notice-center-toggle"));
+    expect(screen.getByTestId("notice-sharing-declined-main:object-1")).toBeTruthy();
+  });
+
+  it("closes the toast without removing the row", async () => {
+    const user = userEvent.setup();
+    const { rerender } = renderNotices({ syncStatus: declinedStatus(declined()) });
+
+    await user.click(screen.getByRole("button", { name: "Close notice for notes/large.md" }));
+    rerender(noticeElement({ syncStatus: declinedStatus(declined()) }));
+    expect(screen.queryByTestId("sharing-declined-toast")).toBeNull();
+
+    await user.click(screen.getByTestId("notice-center-toggle"));
+    expect(screen.getByTestId("notice-sharing-declined-main:object-1")).toBeTruthy();
+  });
+
+  // The row belongs to the document, not its path: a rename keeps the
+  // dismissal, and a refusal after a new save is news.
+  it("keeps a dismissal across a rename and announces a refusal after a new save", async () => {
+    const user = userEvent.setup();
+    const { rerender } = renderNotices({ syncStatus: declinedStatus(declined()) });
+
+    await user.click(screen.getByTestId("notice-center-toggle"));
+    await user.click(screen.getByTestId("notice-sharing-declined-main:object-1-dismiss"));
+    expect(screen.queryByTestId("notice-sharing-declined-main:object-1")).toBeNull();
+    await user.click(screen.getByTestId("notice-center-toggle"));
+    expect(screen.queryByTestId("sharing-declined-toast")).toBeNull();
+
+    rerender(noticeElement({ syncStatus: declinedStatus(declined({ path: "notes/renamed.md" })) }));
+    expect(screen.queryByTestId("sharing-declined-toast")).toBeNull();
+
+    rerender(
+      noticeElement({
+        syncStatus: declinedStatus(
+          declined({ path: "notes/renamed.md", headBlobSha256: "b".repeat(64) }),
+        ),
+      }),
+    );
+    expect(screen.getByTestId("sharing-declined-toast").textContent).toContain("People you share renamed.md with");
+    await user.click(screen.getByTestId("notice-center-toggle"));
+    expect(screen.getByTestId("notice-sharing-declined-main:object-1")).toBeTruthy();
+  });
+
+  it("opens and dismisses declines independently across versions of one object", async () => {
+    const onOpenSharingDeclined = vi.fn();
+    const user = userEvent.setup();
+    renderNotices({
+      syncStatus: declinedStatus(declined(), declined({ versionId: "draft" })),
+      onOpenSharingDeclined,
+    });
+    await user.click(screen.getByTestId("notice-center-toggle"));
+    const draft = screen.getByTestId("notice-sharing-declined-draft:object-1");
+    await user.click(within(draft).getByRole("button", { name: "Open document" }));
+    expect(onOpenSharingDeclined).toHaveBeenLastCalledWith("draft", "object-1");
+    await user.click(screen.getByTestId("notice-center-toggle"));
+    await user.click(within(screen.getByTestId("notice-sharing-declined-main:object-1"))
+      .getByRole("button", { name: "Open document" }));
+    expect(onOpenSharingDeclined).toHaveBeenLastCalledWith("main", "object-1");
+    await user.click(screen.getByTestId("notice-center-toggle"));
+    await user.click(screen.getByTestId("notice-sharing-declined-draft:object-1-dismiss"));
+    expect(screen.queryByTestId("notice-sharing-declined-draft:object-1")).toBeNull();
+    expect(screen.getByTestId("notice-sharing-declined-main:object-1")).toBeTruthy();
   });
 
   it("collects conflict, agent, and update notices in one popover", async () => {
@@ -525,6 +656,129 @@ describe("notice center", () => {
     expect(notice.textContent).toContain("Update dohc to continue. Your files are unchanged.");
     expect(within(notice).queryByRole("button", { name: "Rebuild" })).toBeNull();
     expect(onRebuildEngineStore).not.toHaveBeenCalled();
+  });
+
+  // A toast sits above an open dialog. When the toast that holds focus goes
+  // away, focus goes back to the control F6 left from in the dialog, not to
+  // the Notices button behind it.
+  it("hands focus back to where F6 left the dialog when the focused toast goes away", async () => {
+    const error = {
+      id: "shell-error-1",
+      message: "Could not refresh history. The engine did not answer.",
+      details: "Error: Could not refresh history.",
+      atMs: 1_000,
+      canRetry: true,
+      seen: false,
+    };
+    const props = (seen: boolean) => ({
+      workspaceErrors: [{ ...error, seen }],
+      onRetryWorkspaceError: vi.fn(),
+      onHideWorkspaceError: vi.fn(),
+    });
+    const view = (seen: boolean) => (
+      <>
+        {noticeElement(props(seen))}
+        <Overlay onClose={() => undefined}>
+          <button type="button">Close</button>
+          <button type="button">Restore file</button>
+        </Overlay>
+      </>
+    );
+    const { rerender } = render(view(false));
+    const restore = screen.getByRole("button", { name: "Restore file" });
+    restore.focus();
+    fireEvent.keyDown(restore, { key: "F6" });
+    expect(document.activeElement).toBe(
+      within(screen.getByTestId("notice-toasts")).getByRole("button", { name: "Try again" }),
+    );
+
+    rerender(view(true));
+    await waitFor(() => expect(document.activeElement).toBe(restore));
+  });
+
+  // A dialog opened over the one F6 left takes focus when the toast goes:
+  // the older dialog sits behind it, outside the trap on top.
+  it("hands focus to a newer dialog opened over the one F6 left", async () => {
+    const error = { id: "e", message: "dohc could not save the retry.", details: "", atMs: 1, canRetry: true, seen: false };
+    const view = (seen: boolean, confirming: boolean) => (
+      <>
+        {noticeElement({ workspaceErrors: [{ ...error, seen }], onRetryWorkspaceError: vi.fn(), onHideWorkspaceError: vi.fn() })}
+        <Overlay onClose={() => undefined}>
+          <button type="button">Clear retry</button>
+        </Overlay>
+        {confirming ? (
+          <Overlay onClose={() => undefined} panelProps={{ "data-testid": "confirmation" }}>
+            <button type="button">Keep the retry</button>
+          </Overlay>
+        ) : null}
+      </>
+    );
+    const { rerender } = render(view(false, false));
+    const clear = screen.getByRole("button", { name: "Clear retry" });
+    clear.focus();
+    fireEvent.keyDown(clear, { key: "F6" });
+    fireEvent.keyDown(document.activeElement!, { key: "F6" });
+    expect(document.activeElement).toBe(clear);
+
+    rerender(view(false, true));
+    within(screen.getByTestId("notice-toasts")).getByRole("button", { name: "Try again" }).focus();
+    rerender(view(true, true));
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByTestId("confirmation")));
+  });
+
+  // A bare dialog with its own trap, such as the icon picker, can sit inside
+  // an Overlay. The toast's focus goes back to the control F6 left in it.
+  it("hands focus back to a bare dialog's control inside an Overlay", async () => {
+    function BareDialog() {
+      const ref = useRef<HTMLDivElement>(null);
+      useEffect(() => {
+        const onKeyDown = (event: KeyboardEvent) => void switchModalRegion(event, ref.current);
+        document.addEventListener("keydown", onKeyDown);
+        return () => document.removeEventListener("keydown", onKeyDown);
+      }, []);
+      return (
+        <div ref={ref} role="dialog" aria-label="Choose an icon" tabIndex={-1}>
+          <button type="button">Use 📄</button>
+        </div>
+      );
+    }
+    const error = { id: "e", message: "dohc could not reach this server.", details: "", atMs: 1, canRetry: true, seen: false };
+    const view = (seen: boolean) => (
+      <>
+        {noticeElement({ workspaceErrors: [{ ...error, seen }], onRetryWorkspaceError: vi.fn(), onHideWorkspaceError: vi.fn() })}
+        <Overlay onClose={() => undefined}>
+          <BareDialog />
+        </Overlay>
+      </>
+    );
+    const { rerender } = render(view(false));
+    const emoji = screen.getByRole("button", { name: "Use 📄" });
+    emoji.focus();
+    fireEvent.keyDown(emoji, { key: "F6" });
+    expect(document.activeElement).toBe(
+      within(screen.getByTestId("notice-toasts")).getByRole("button", { name: "Try again" }),
+    );
+
+    rerender(view(true));
+    await waitFor(() => expect(document.activeElement).toBe(emoji));
+  });
+
+  // The corner host sits in a fixed wrapper, which is a stacking context of
+  // its own. Its toasts render at the body so they can rise above dialogs.
+  it("renders a corner host's toasts at the body, outside its wrapper", () => {
+    render(
+      <div data-testid="corner-wrapper" className="fixed z-30">
+        {noticeElement({
+          host: "corner",
+          workspaceErrors: [{ id: "e", message: "dohc could not reach this server.", details: "", atMs: 1, canRetry: true, seen: false }],
+          onRetryWorkspaceError: vi.fn(),
+        })}
+      </div>,
+    );
+    const stack = screen.getByTestId("notice-toasts");
+    expect(stack.parentElement).toBe(document.body);
+    expect(screen.getByTestId("corner-wrapper").contains(stack)).toBe(false);
+    expect(within(screen.getByTestId("corner-wrapper")).getByTestId("notice-center-toggle")).toBeTruthy();
   });
 
   // A workspace error arrives as a toast in the corner and stays as a row in

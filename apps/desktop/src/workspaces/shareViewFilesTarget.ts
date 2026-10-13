@@ -1,4 +1,5 @@
 import type { ShareMountRecord } from "./registryStore";
+import { ShareUnconfirmedChangesSchema } from "../ipc/bridgeContract";
 import {
   mountRootFor,
   mountStoreWorkspaceIdFor,
@@ -78,7 +79,14 @@ export function resolveRegisteredShareViewFilesTarget(
           ? shareView.granterEmail
           : null,
       grantedSelector: shareView.grantedSelector,
+      recipientUserId: typeof shareView.recipientUserId === "string" ? shareView.recipientUserId : undefined,
       ended: shareView.ended === true,
+      unconfirmedChanges: ShareUnconfirmedChangesSchema.safeParse(shareView.unconfirmedChanges).data,
+      unsavedPaths: shareView.unsavedPaths === undefined
+        ? undefined
+        : Array.isArray(shareView.unsavedPaths) && shareView.unsavedPaths.every(path => typeof path === "string")
+          ? shareView.unsavedPaths
+          : null,
       relayUrl:
         typeof shareView.relayUrl === "string" ? shareView.relayUrl : null,
     };

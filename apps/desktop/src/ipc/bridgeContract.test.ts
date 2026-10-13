@@ -1,6 +1,27 @@
+import { historyCursor, historyPageFields } from "../testing/historyPageFixture";
 import { MAX_SHARE_PROPOSAL_OPS } from "@dohc/security-contract/share-proposal-bound";
 import { describe, expect, it } from "vitest";
-import { activityPathsAffectWorkspaceListing } from "./bridgeContract";
+import { activityPathsAffectWorkspaceListing, WorkspacePathOpenFailure } from "./bridgeContract";
+import { DiscardLiveDraftRecoveryPayload, liveDraftRecoveryOperations } from "./bridgeContract";
+
+describe("live draft recovery replies", () => {
+  const record = {recordId: "a".repeat(64), path: "notes/a.md", objectId: "object", text: "Unseen copy", updateBase64: "AAA="};
+  it("declares all remaining recovery records on both list and dismiss", () => {
+    for (const operation of [liveDraftRecoveryOperations.listLiveDraftRecovery, liveDraftRecoveryOperations.discardLiveDraftRecovery]) {
+      expect(operation.result.parse([record])).toEqual([record]);
+      expect(operation.result.safeParse([{...record, recordId: "../draft"}]).success).toBe(false);
+      expect(operation.result.safeParse([{...record, path: "../outside.md"}]).success).toBe(false);
+      expect(operation.result.safeParse([{...record, text: undefined}]).success).toBe(false);
+      expect(operation.guard).toBe("active-workspace");
+    }
+  });
+  it("requires the reviewed snapshot even when naming an exact recovery record", () => {
+    const input = {workspaceId: "workspace", path: record.path, objectId: record.objectId, snapshotSha256: "b".repeat(64), discardedAtMs: 1, recordId: record.recordId};
+    expect(DiscardLiveDraftRecoveryPayload.parse(input)).toEqual(input);
+    expect(DiscardLiveDraftRecoveryPayload.safeParse({...input, snapshotSha256: undefined}).success).toBe(false);
+    expect(DiscardLiveDraftRecoveryPayload.safeParse({...input, recordId: "../draft"}).success).toBe(false);
+  });
+});
 
 import {
   ENGINE_YDOC_UPDATE_MAX_BYTES,
@@ -34,6 +55,8 @@ import {
   COLLECTION_VALUE_MAX_DEPTH,
   DesktopMarksResult,
   CreateWorkspaceFilePayload,
+  CreateWorkspaceFolderPayload,
+  DeleteWorkspacePathPayload,
   CreateFileChatPayload,
   CreateWorkspaceVersionPayload,
   EngineMomentDetailRecord,
@@ -101,7 +124,6 @@ import {
   MenuCommand,
   SearchResultsEvent,
   WorkbenchMenuCommand,
-  WriteClipboardTextPayload,
   ReadWorkspaceTextResult,
   WriteWorkspaceTextPayload,
   WriteWorkspaceTextResult,
@@ -2128,25 +2150,25 @@ describe("settings IPC contract", () => {
     expect(
       SetWorkspaceSettingsPayload.safeParse({
         workspaceId: "WS-settings",
-        settings: DEFAULT_WORKSPACE_SETTINGS,
+        patch: {},
       }).success,
     ).toBe(false);
     expect(
       SetWorkspaceSettingsPayload.safeParse({
         workspaceId: "",
-        settings: DEFAULT_WORKSPACE_SETTINGS,
+        patch: {},
       }).success,
     ).toBe(false);
     expect(
       SetWorkspaceSettingsPayload.safeParse({
         workspaceId: "ws-settings",
-        settings: {
-          ...DEFAULT_WORKSPACE_SETTINGS,
-          agents: {
-            ...DEFAULT_WORKSPACE_SETTINGS.agents,
-            mcpAutoStart: "yes",
-          },
-        },
+        patch: { privacy: { confirmExternalLinks: "yes" } },
+      }).success,
+    ).toBe(false);
+    expect(
+      SetWorkspaceSettingsPayload.safeParse({
+        workspaceId: "ws-settings",
+        patch: { agents: { mcpAutoStart: false } },
       }).success,
     ).toBe(false);
   });
@@ -2240,7 +2262,7 @@ describe("workspace UI state IPC contract", () => {
       },
     ],
     activeEditorGroup: "primary",
-    chatsVisible: true,
+    aboutVisible: true,
   };
 
   it("drops invalid open editor heights without rejecting the saved state", () => {
@@ -2479,21 +2501,6 @@ describe("workspace UI state IPC contract", () => {
       activeEditorGroup: "missing",
     };
     expect(GetWorkspaceUiStateResult.parse(stale)).toEqual(stale);
-  });
-});
-
-describe("clipboard IPC contract", () => {
-  it("accepts bounded text and rejects empty or oversized writes", () => {
-    expect(WriteClipboardTextPayload.parse({ text: "copy me" }).text).toBe(
-      "copy me",
-    );
-    expect(WriteClipboardTextPayload.safeParse({ text: "" }).success).toBe(false);
-    expect(
-      WriteClipboardTextPayload.safeParse({ text: "x".repeat(20_001) }).success,
-    ).toBe(false);
-    expect(
-      WriteClipboardTextPayload.safeParse({ text: "copy", secret: "nope" }).success,
-    ).toBe(false);
   });
 });
 
@@ -2778,8 +2785,8 @@ describe("engine Y.Doc event boundaries", () => {
 
   it("accept the deleted state that turns a live editor read-only", () => {
     expect(
-      EngineYDocSaveStateEvent.parse({ sessionId: "session-1", state: "deleted", seq: 4 }),
-    ).toEqual({ sessionId: "session-1", state: "deleted", seq: 4 });
+      EngineYDocSaveStateEvent.parse({ sessionId: "session-1", workspaceId: "ws-1", path: "notes/a.md", state: { kind: "unknown" }, access: "deleted", seq: 4 }),
+    ).toEqual({ sessionId: "session-1", workspaceId: "ws-1", path: "notes/a.md", state: { kind: "unknown" }, access: "deleted", seq: 4 });
   });
 });
 
@@ -3406,6 +3413,16 @@ describe("try-in-version IPC contract", () => {
 });
 
 describe("sync status IPC contract", () => {
+  it("preserves file-read failure separately from history availability", () => {
+    const status = { state: "synced", pendingChangeCount: 0, lastSyncedAtMs: null,
+      historyRecordingUnavailable: false, historyShareView: false, liveSessionsGeneration: 0 };
+    for (const reason of ["read-failed", "unavailable"] as const) {
+      expect(SyncStatusResult.parse({ ...status, fileObservationFailure: reason })).toMatchObject({
+        historyRecordingUnavailable: false, fileObservationFailure: reason,
+      });
+    }
+    expect(SyncStatusResult.safeParse({ ...status, fileObservationFailure: "history-off" }).success).toBe(false);
+  });
   it("refuses a status that cannot say why history is off", () => {
     const status = {
       state: "synced",
@@ -3417,6 +3434,9 @@ describe("sync status IPC contract", () => {
       sharingDeclined: [
         {
           path: "notes/large.md",
+          objectId: "notes/large.md",
+          versionId: "main",
+          lineagePruned: false, headBlobSha256: null,
           constraint: "MAX_YDOC_UPDATE_BYTES",
           limitBytes: 262_144,
           observedBytes: 280_001,
@@ -3518,10 +3538,10 @@ describe("engine history and linked Chats IPC contract", () => {
     expect(
       ListEngineMomentsPayload.parse({
         workspaceId: "ws-engine",
-        limit: 200,
-        beforeMomentOrder: 41,
+        limit: 50,
+        cursor: historyCursor(41),
       }).limit,
-    ).toBe(200);
+    ).toBe(50);
     const page = ListEngineMomentsResult.parse({
       moments: [
         {
@@ -3536,13 +3556,13 @@ describe("engine history and linked Chats IPC contract", () => {
           momentOrder: 7,
         },
       ],
-      nextBeforeMomentOrder: null,
+      nextCursor: null,
       latestMomentOrder: 7,
       activeVersionId: "main",
-      protectedTruncated: true,
+      ...historyPageFields,
     });
     expect(page.moments[0].summary).toBe("Reconciled offline edits");
-    expect(page.protectedTruncated).toBe(true);
+    expect(page.startCursor).toEqual(historyCursor());
     expect(
       EngineMomentDetailRecord.parse({
         id: "moment_2",
@@ -3564,7 +3584,7 @@ describe("engine history and linked Chats IPC contract", () => {
     ).toBe("text");
   });
 
-  it("rejects empty paths, bad limits, and oversized chat bodies", () => {
+  it("rejects empty paths, bad limits, and empty chat bodies", () => {
     // Path CONTAINMENT is enforced main-side (validateUserWritePath and the
     // engine's own path normalization); the wire schema only bounds shape.
     expect(
@@ -3603,9 +3623,9 @@ describe("engine history and linked Chats IPC contract", () => {
       SendChatMessagePayload.safeParse({
         workspaceId: "ws-engine",
         threadId: "thread-1",
-        body: "x".repeat(65_537),
+        body: "x".repeat(65_536) + "\r\n\uFEFF ",
       }).success,
-    ).toBe(false);
+    ).toBe(true);
   });
 
   it("round-trips a sent chat message with main-derived authorship", () => {
@@ -4478,4 +4498,42 @@ it("uses the engine slug byte bound in feed, mentions, and graph results", () =>
     const graph = { nodes: [{ path: "chat-thread/thread", title: "Thread", outgoing: 0, incoming: 0, kind: "chat-thread", threadId: "thread", channelSlug: slug }], edges: [], unresolvedLinks: 0, scannedFileCount: 0, omittedFileCount: 0, truncatedFileCount: 0 };
     expect(WorkspaceGraphResult.safeParse(graph).success).toBe(valid);
   }
+});
+
+describe("launch path failure event", () => {
+  it.each([null, "selected"])("retains the attempt, path, and cause for workspace %j", (workspaceId) => {
+    const event = { attemptId: "attempt-1", path: "C:\\work\\attempted",
+      cause: "ReservedWorkspaceIdError: refused", workspaceId };
+    expect(WorkspacePathOpenFailure.parse({ ...event, authority: "ignored" })).toEqual(event);
+  });
+
+  it.each([
+    { attemptId: "" },
+    { workspaceId: "" },
+    { cause: null },
+    { path: "" },
+  ])("rejects malformed failure packets %j", (change) => {
+    expect(WorkspacePathOpenFailure.safeParse({ attemptId: "attempt-1", path: "attempted", cause: "refused",
+      workspaceId: null, ...change }).success).toBe(false);
+  });
+});
+
+
+describe("exclusive app creation IPC contract", () => {
+  const path = { workspaceId: "workspace", relativePath: "app" };
+  it("retains optional exclusive file and folder admission and rejects non-booleans", () => {
+    for (const [schema, base] of [
+      [CreateWorkspaceFilePayload, { ...path, initialText: "source" }],
+      [CreateWorkspaceFolderPayload, path],
+    ] as const) {
+      expect(schema.parse(base)).toEqual(base);
+      expect(schema.parse({ ...base, exclusive: true })).toEqual({ ...base, exclusive: true });
+      expect(schema.safeParse({ ...base, exclusive: "true" }).success).toBe(false);
+    }
+  });
+  it("retains the empty-only folder rollback constraint and rejects non-booleans", () => {
+    expect(DeleteWorkspacePathPayload.parse({ ...path, emptyFolderOnly: true }))
+      .toEqual({ ...path, emptyFolderOnly: true });
+    expect(DeleteWorkspacePathPayload.safeParse({ ...path, emptyFolderOnly: "true" }).success).toBe(false);
+  });
 });

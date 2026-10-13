@@ -51,7 +51,7 @@ async fn cancelled_core_chat_mutations_leave_channels_threads_messages_and_revis
         .expect("create prerequisite thread and opening message");
 
     let channels_before = actor
-        .chat_channels_list(workspace_id.clone())
+        .chat_channels_list(workspace_id.clone(), None, 500)
         .await
         .expect("channels before cancellation");
     let threads_before = actor
@@ -164,7 +164,7 @@ async fn cancelled_core_chat_mutations_leave_channels_threads_messages_and_revis
 
     assert_eq!(
         actor
-            .chat_channels_list(workspace_id.clone())
+            .chat_channels_list(workspace_id.clone(), None, 500)
             .await
             .expect("channels after cancellation"),
         channels_before

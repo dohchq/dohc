@@ -123,6 +123,9 @@ export function useShareMounts(
 
   const mountCount = shareMounts.length;
 
+  // A failed removal's Try again runs against the mounts the shell holds at
+  // that moment, so a share removed meanwhile is not looked up stale.
+  const unmountShareRef = useRef<(path: string) => Promise<void>>(async () => undefined);
   const unmountShare = useCallback(
     async (path: string) => {
       const label = path.split("/")[1] ?? "";
@@ -136,7 +139,7 @@ export function useShareMounts(
         });
         folderLeft = result?.folderLeft === true;
       } catch (error) {
-        reportShellError("Couldn't remove the share.", error);
+        reportShellError("Couldn't remove the share.", error, () => void unmountShareRef.current(path));
         return;
       }
       // Reproject tabs/pins exactly like a folder delete — but only when the
@@ -174,24 +177,21 @@ export function useShareMounts(
     ],
   );
 
-  const onSettingsFilesChanged = (outcome?: { folderLeftShareId?: string }) => {
-    // A Settings removal that left its folder behind reports the
-    // share id here, before the reload below sees the record
-    // vanish — otherwise that reload projects a folder delete over
-    // files that are still on disk.
-    if (outcome?.folderLeftShareId) {
-      foldersLeftBehind.current.add(outcome.folderLeftShareId);
-    }
+  unmountShareRef.current = unmountShare;
+
+  // A mount was added or its record changed outside this hook.
+  const onMountsChanged = () => {
     void reloadShareMounts();
     void refreshFiles().catch(() => undefined);
   };
 
   return {
+    shareMounts,
     mountCount,
     mountContentEpoch,
     reloadShareMounts,
     refreshShareMounts,
     unmountShare,
-    onSettingsFilesChanged,
+    onMountsChanged,
   };
 }

@@ -254,7 +254,7 @@ export async function sendCliRequest<Verb extends CliVerb>(
     const endpoint = endpoints[index]!;
     try {
       const token = await readToken(endpoint.tokenPath);
-      const request: CliRequest = cliRequestSchema.parse({ ...requestWithoutToken, token });
+      const request: CliRequest = cliRequestSchema.parse({ ...requestWithoutToken, door: requestWithoutToken.door ?? "cli", token });
       const rawResponse = await (options.transport ?? readResponseLine)(
         endpoint.socketPath,
         JSON.stringify(request),

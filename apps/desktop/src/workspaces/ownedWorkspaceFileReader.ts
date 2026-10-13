@@ -65,6 +65,37 @@ export interface OwnedWorkspaceFileReader {
   ): Promise<DatabasePageView>;
 }
 
+export async function resolveOwnedWorkspaceSharePath(workspace: ShareViewFilesWorkspaceRecord, path: string): Promise<{
+    target: ShareViewFilesTarget;
+    path: string;
+  } | null> {
+    if (shareViewIsPresent(workspace.shareView)) {
+      return {
+        target: {
+          kind: "standalone",
+          workspaceId: workspace.workspaceId,
+        },
+        path,
+      };
+    }
+    const resolved = await resolveShareMountPath(
+      workspace.rootPath,
+      path,
+      storedShareMounts(workspace),
+      shareMountRegistryIsPresent(workspace),
+    );
+    return resolved === null
+      ? null
+      : {
+          target: {
+            kind: "mount",
+            workspaceId: workspace.workspaceId,
+            shareId: resolved.mount.shareId,
+          },
+          path: resolved.path,
+        };
+}
+
 /** Reads local files from disk and received-share files from their owner store. */
 export function createOwnedWorkspaceFileReader(input: {
   workspace: ShareViewFilesWorkspaceRecord;
@@ -74,37 +105,7 @@ export function createOwnedWorkspaceFileReader(input: {
   type PreparedRead =
     | { kind: "local"; source: PreparedWorkspaceFileRead }
     | { kind: "share"; target: ShareViewFilesTarget; path: string };
-
-  async function resolveShare(path: string): Promise<{
-    target: ShareViewFilesTarget;
-    path: string;
-  } | null> {
-    if (shareViewIsPresent(input.workspace.shareView)) {
-      return {
-        target: {
-          kind: "standalone",
-          workspaceId: input.workspace.workspaceId,
-        },
-        path,
-      };
-    }
-    const resolved = await resolveShareMountPath(
-      input.workspace.rootPath,
-      path,
-      storedShareMounts(input.workspace),
-      shareMountRegistryIsPresent(input.workspace),
-    );
-    return resolved === null
-      ? null
-      : {
-          target: {
-            kind: "mount",
-            workspaceId: input.workspace.workspaceId,
-            shareId: resolved.mount.shareId,
-          },
-          path: resolved.path,
-        };
-  }
+  const resolveShare = (path: string) => resolveOwnedWorkspaceSharePath(input.workspace, path);
 
   async function prepareRead(path: string): Promise<PreparedRead> {
     if (shareViewIsPresent(input.workspace.shareView)) {

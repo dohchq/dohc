@@ -13,8 +13,16 @@
 //! caller's transaction. Callers own rollback when those entry points fail.
 
 mod binary_write;
+mod capture_recovery;
 mod capture_write;
 mod delete_rename;
+mod file_resolution;
+pub use file_resolution::{FileResolution, FileResolveTarget};
+mod history;
+pub use history::{
+    HistoryCursor, HistoryMarkerPosition, HistoryMomentMetadata, HistoryMomentPosition,
+    HistoryPageRead,
+};
 mod request_ledger;
 mod rollback;
 mod source_capture;
@@ -25,6 +33,12 @@ pub use source_capture::{
 };
 
 pub use binary_write::{write_binary_in_tx, write_published_binary_in_tx};
+pub use capture_recovery::{
+    CAPTURE_RECOVERY_ORIGIN, CLEARED_CAPTURE_RECOVERY_ORIGIN, CaptureRecovery,
+    capture_recoveries_in, clear_capture_recovery_in, is_capture_recovery_origin,
+    record_capture_recovery_in_tx, record_deleted_capture_recovery_in_tx,
+    record_keyed_capture_recovery_in_tx,
+};
 pub use capture_write::{
     CAPTURE_ORIGIN, CaptureIngestBatchContext, CaptureManifestSeedEntry,
     MAX_CAPTURE_BINARY_FILE_BYTES, ProjectedWriteText, SECRET_SEED_SENTINEL_SHA, YDOC_ORIGIN,
@@ -36,7 +50,10 @@ pub use capture_write::{
     write_published_history_text_in_tx, write_published_text_in_tx, write_text_in_tx,
 };
 
-pub use delete_rename::{delete_text_in_tx, delete_text_in_tx_checked, validate_delete_input};
+pub use delete_rename::{
+    delete_text_in_tx, delete_text_in_tx_checked, finish_checked_delete_in_tx,
+    prepare_checked_delete_in_tx, validate_delete_input,
+};
 
 pub use rollback::{
     binary_rollback_job_identity, decode_binary_rollback_job_identity,
@@ -70,11 +87,21 @@ pub const MAX_TEXT_BYTES: usize = 10 * 1024 * 1024;
 pub const MAX_METADATA_FIELD_BYTES: usize = 16 * 1024;
 pub const MAX_AUTHOR_FIELD_BYTES: usize = MAX_IDENTIFIER_BYTES;
 // Without control characters, quotes and backslashes take at most 2 bytes.
-// The largest live entry is a 66-byte automation skeleton + 2 * 2 * 512
-// bytes of identity fields = 2,114 bytes.
-pub const MAX_AUTHOR_ENTRY_BYTES: usize =
-    r#"{"automationId":"","depth":64,"kind":"automation","onBehalfOf":""}"#.len()
-        + 2 * 2 * MAX_AUTHOR_FIELD_BYTES;
+// The largest live entry is a declared agent: a 71-byte skeleton + 3 * 2 * 512
+// bytes for its id, name and principal = 3,143 bytes. The largest two-field
+// entries, an 80-byte Edit link at the largest grant generation and a 66-byte
+// automation, take 2,128 and 2,114 bytes.
+pub const MAX_AUTHOR_ENTRY_BYTES: usize = larger(
+    r#"{"agentId":"","agentName":"","depth":64,"kind":"agent","onBehalfOf":""}"#.len()
+        + 3 * 2 * MAX_AUTHOR_FIELD_BYTES,
+    larger(
+        r#"{"automationId":"","depth":64,"kind":"automation","onBehalfOf":""}"#.len(),
+        r#"{"grantGeneration":9007199254740991,"grantId":"","kind":"link","principalId":""}"#.len(),
+    ) + 2 * 2 * MAX_AUTHOR_FIELD_BYTES,
+);
+const fn larger(left: usize, right: usize) -> usize {
+    if left > right { left } else { right }
+}
 const _: () = assert!(crate::MAX_CHANGE_ATTRIBUTION_DEPTH < 100);
 pub const MAX_MOMENT_AUTHORS: usize = 1_024;
 // The journal embeds authors as a JSON value, with no second string encoding.
@@ -692,7 +719,8 @@ impl<'a> VersionedTextStore<'a> {
                  FROM moments m \
                  LEFT JOIN binary_blobs after_binary ON after_binary.sha256 = m.after_binary_sha256 \
                  LEFT JOIN binary_blobs before_binary ON before_binary.sha256 = m.before_binary_sha256 \n             LEFT JOIN blobs after_text_blob ON after_text_blob.sha256 = m.after_blob_sha256 \n             LEFT JOIN blobs before_text_blob ON before_text_blob.sha256 = m.before_blob_sha256 \
-                 WHERE workspace_id = ?1",
+                 WHERE workspace_id = ?1 AND NOT EXISTS (SELECT 1 FROM materialization_jobs j \
+                 WHERE j.workspace_id=m.workspace_id AND j.job_id='restore-delete-mat_'||m.moment_id)",
             );
             let mut binds: Vec<Box<dyn rusqlite::ToSql>> =
                 vec![Box::new(query.workspace_id.clone())];
@@ -904,8 +932,21 @@ impl<'a> VersionedTextStore<'a> {
         workspace_id: &str,
         moment_id: &str,
     ) -> Result<Option<MomentRecord>, DomainError> {
-        self.store
-            .read_with(|conn| get_moment(conn, workspace_id, moment_id))
+        self.store.read_with(|conn| {
+            let staged: bool = conn
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM materialization_jobs \
+                     WHERE workspace_id=?1 AND job_id='restore-delete-mat_'||?2)",
+                    params![workspace_id, moment_id],
+                    |row| row.get(0),
+                )
+                .map_err(DomainError::sql_corrupt)?;
+            if staged {
+                Ok(None)
+            } else {
+                get_moment(conn, workspace_id, moment_id)
+            }
+        })
     }
 
     /// The workspace's active version, resolving a missing `active_versions` row
@@ -1231,6 +1272,11 @@ enum ForkPrep {
 
 /// The shared reservation check for the capture-owned metadata origin.
 fn reject_reserved_capture_origin(metadata_origin: &str) -> Result<(), DomainError> {
+    if is_capture_recovery_origin(metadata_origin) {
+        return Err(DomainError::InvalidInput {
+            reason: "capture recovery origin is reserved for autonomous capture",
+        });
+    }
     if metadata_origin == CAPTURE_ORIGIN {
         return Err(DomainError::InvalidInput {
             reason: "metadata origin 'capture' is reserved for autonomous capture",
@@ -1622,6 +1668,9 @@ fn blob_text(conn: &Connection, sha256: &str) -> Result<Option<String>, DomainEr
     .map_err(DomainError::sql_corrupt)
 }
 
+const ALIAS_OBJECT_ID_SQL: &str =
+    "SELECT object_id FROM path_aliases WHERE workspace_id = ?1 AND version_id = ?2 AND path = ?3";
+
 fn alias_object_id(
     conn: &Connection,
     workspace_id: &str,
@@ -1629,7 +1678,7 @@ fn alias_object_id(
     path: &str,
 ) -> Result<Option<String>, DomainError> {
     conn.query_row(
-        "SELECT object_id FROM path_aliases WHERE workspace_id = ?1 AND version_id = ?2 AND path = ?3",
+        ALIAS_OBJECT_ID_SQL,
         params![workspace_id, version_id, path],
         |row| row.get(0),
     )
@@ -1667,7 +1716,9 @@ fn latest_moment_order(
     conn: &Connection,
     query: &ListMomentsQuery,
 ) -> Result<Option<i64>, DomainError> {
-    let mut sql = String::from("SELECT MAX(moment_order) FROM moments WHERE workspace_id = ?1");
+    let mut sql = String::from(
+        "SELECT MAX(moment_order) FROM moments m WHERE workspace_id = ?1 AND NOT EXISTS (SELECT 1 FROM materialization_jobs j WHERE j.workspace_id=m.workspace_id AND j.job_id='restore-delete-mat_'||m.moment_id)",
+    );
     let mut binds: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(query.workspace_id.clone())];
     if let Some(version_id) = &query.version_id {
         sql.push_str(" AND version_id = ?");
@@ -1698,10 +1749,15 @@ fn latest_materialized_moment_id(
     version_id: &str,
 ) -> Result<Option<String>, DomainError> {
     conn.query_row(
-        "SELECT moment_id FROM moments \
+        concat!(
+            "SELECT moment_id FROM moments \
          WHERE workspace_id = ?1 AND version_id = ?2 \
            AND (sync_record_only IS NULL OR sync_record_only = 0) \
-         ORDER BY moment_order DESC LIMIT 1",
+           AND ",
+            crate::exclude_capture_recovery_sql!(),
+            " \
+         ORDER BY moment_order DESC LIMIT 1"
+        ),
         params![workspace_id, version_id],
         |row| row.get(0),
     )
@@ -1750,6 +1806,25 @@ fn get_snapshot_meta(
     )
     .optional()
     .map_err(DomainError::sql_corrupt)
+}
+
+/// Resolve a recovery target by object, including its current rename.
+pub fn recovery_snapshot_in(
+    conn: &Connection,
+    workspace_id: &str,
+    version_id: &str,
+    object_id: &str,
+) -> Result<Option<TextSnapshot>, DomainError> {
+    validate_identifier(workspace_id, "workspace_id")?;
+    validate_identifier(version_id, "version_id")?;
+    validate_identifier(object_id, "object_id")?;
+    let Some(snapshot) = get_snapshot(conn, workspace_id, version_id, object_id)? else {
+        return Ok(None);
+    };
+    if snapshot.content_kind == "binary" {
+        return Err(DomainError::BinaryHeadNotText);
+    }
+    Ok(Some(snapshot_text_view(&snapshot)))
 }
 
 fn get_snapshot(

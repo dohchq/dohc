@@ -3,6 +3,7 @@ export * from "./dohcGuardRefusals";
 export * from "./trashEntryName";
 export * from "./fsEntryIdentity";
 export * from "./metadata";
+export * from "./workspaceIds";
 export * from "./paths";
 export * from "./changeAuthors";
 export * from "./watcher";

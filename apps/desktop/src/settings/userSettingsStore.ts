@@ -1,5 +1,5 @@
-import { randomUUID } from "node:crypto";
-import { lstat, mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { atomicReplaceFile } from "../atomicReplaceFile";
 import { join, resolve } from "node:path";
 import {
   DEFAULT_USER_SETTINGS,
@@ -158,15 +158,19 @@ async function commitUserSettings(
   const path = settingsPath(root);
   const text = `${JSON.stringify(content, null, 2)}\n`;
   const snapshot = snapshotOfText(path, text);
-  const tmp = `${path}.tmp-${process.pid}-${randomUUID()}`;
+  const conflict = Symbol("settings changed");
   try {
-    await writeFile(tmp, text);
-    if (expected && (await textOnDisk(path)) !== expected.text) return null;
-    await rename(tmp, path);
+    await atomicReplaceFile(path, (tmp) => writeFile(tmp, text), {
+      rename: async (source, destination) => {
+        if (expected && (await textOnDisk(path)) !== expected.text) throw conflict;
+        await rename(source, destination);
+      },
+    });
     snapshots.set(root, Promise.resolve(snapshot));
     return snapshot.result;
-  } finally {
-    await unlink(tmp).catch(() => undefined);
+  } catch (error) {
+    if (error === conflict) return null;
+    throw error;
   }
 }
 

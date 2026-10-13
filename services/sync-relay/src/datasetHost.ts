@@ -1,3 +1,4 @@
+import { visibleSharePath } from "@dohc/security-contract/share-selector";
 import { createDatasetAutomations, createDatasetAutomationAuthority } from "./datasetAutomations";
 import { createHash, randomUUID } from "node:crypto";
 import { join } from "node:path";
@@ -20,7 +21,7 @@ import { requireLinkAppPublication } from "./storage/publications";
 import { readCurrentShareGrant } from "./storage/currentShareGrant";
 import { readLinkEnrollment, linkWriteRefusal } from "./storage/linkEnrollment";
 import { authorizeShareGrantAction, authorizeShareAction } from "./shareAuthorization";
-import { effectiveShareSelector, parseStoredAnyShareSelectorJson, targetVersionId, visibleSharePath } from "./shareFilter";
+import { effectiveShareSelector, parseStoredAnyShareSelectorJson, targetVersionId } from "./shareFilter";
 import { notFound, relayError } from "./errors";
 import { createDatasetFiles } from "./storage/datasetFiles";
 import { createDatasetRecoveryFiles } from "./storage/datasetRecoveryFiles";
@@ -262,6 +263,7 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
         DELETE FROM dohc_dataset_events WHERE workspace_id=OLD.workspace_id AND dataset_id=OLD.dataset_id;
         DELETE FROM dohc_dataset_materializations WHERE workspace_id=OLD.workspace_id AND dataset_id=OLD.dataset_id;
         DELETE FROM dohc_dataset_checkpoint_history WHERE workspace_id=OLD.workspace_id AND dataset_id=OLD.dataset_id;
+        DELETE FROM dohc_dataset_checkpoint_times WHERE workspace_id=OLD.workspace_id AND dataset_id=OLD.dataset_id;
         DELETE FROM dohc_dataset_journals WHERE workspace_id=OLD.workspace_id AND dataset_id=OLD.dataset_id;
         DELETE FROM dohc_dataset_checkpoint_chunks WHERE stage_id IN (
           SELECT stage_id FROM dohc_dataset_checkpoints WHERE workspace_id=OLD.workspace_id AND dataset_id=OLD.dataset_id);

@@ -1,6 +1,6 @@
 # dohc
 
-A local-first file sync and collaboration workspace for humans and agents. This glossary is the canonical vocabulary; check new names against it before defining them.
+A local-first workspace for people and their agents. This glossary is the canonical vocabulary; check new names against it before defining them.
 
 ## Language
 
@@ -17,6 +17,30 @@ _Avoid_: self-hosted Drive
 **Server connection**:
 A device's authenticated connection to a dohc server. Workspace permissions determine which work the connection can access.
 _Avoid_: Drive connection (for a self-hosted server)
+
+**Server account**:
+A person's identity on one dohc server. A dohc Drive account is a server account on Drive and carries no authority on any other server.
+_Avoid_: dohc account, global account
+
+**Cell**:
+One deployment of the dohc release behind dohc Drive, holding a set of workspaces. Each workspace lives on exactly one cell. People never see cells; to them Drive is one server.
+_Avoid_: shard, node, tenant
+
+### Privacy
+
+**Usage record**:
+Counts of finished actions per capability, way in, and day, kept on one computer. dohc never sends it. A person can see, copy, clear, or turn it off in Privacy.
+_Avoid_: usage report, telemetry, analytics
+
+**Usage report**:
+A small count of events that a packaged build sends to its report service while the person's switch in Privacy allows it.
+_Avoid_: usage record (that stays on the computer)
+
+### Offers
+
+**Offer**:
+A suggestion for a person at a relevant point in their work. Detection changes nothing; the person chooses whether to act.
+_Avoid_: Offering (what dohc sells), moment (a History term)
 
 ### Collections
 
@@ -75,11 +99,11 @@ One grantee's authority on a share, with its own level, generation, and revocati
 _Avoid_: permission, membership
 
 **Share access**:
-The level a file-share grant carries: View, Comment, or Edit. Comment adds the share's discussion. Edit adds live co-editing of the share's live documents, attributed and reversible through history. Named recipients and share links with Edit can also change a shared Collection's schema and automations, and create Collections in a shared folder. Named recipients with Edit can also send change proposals. A Group or direct message grant carries read-only or read-write instead, typed by its selector kind.
+The level a file-share grant carries: View, Comment, or Edit. Comment adds the share's discussion. Edit adds live co-editing of the share's live documents, attributed and reversible through history. Named recipients and share links with Edit can also change a shared Collection's schema and automations, and create records in document Collections and Collections in a shared folder. Named recipients with Edit can also send change proposals. A Group or direct message grant carries read-only or read-write instead, typed by its selector kind.
 _Avoid_: permission level, role
 
 **Change proposal**:
-A set of bulk or file-tree changes a named recipient submits for the granter to accept or decline. Live documents co-edit directly under Edit access. A named recipient or a share link with Edit also changes a shared Collection's schema and automations directly, and creates Collections in a shared folder; a link's grant is the author. Owner-approved app data takes link-holder writes live at any share level, because the approval, not the document level, is that lane's authority. Everything else changes at the source only through a proposal.
+A set of bulk or file-tree changes a named recipient submits for the granter to accept or decline. Live documents co-edit directly under Edit access. A named recipient or a share link with Edit also changes a shared Collection's schema and automations directly, and creates records in document Collections and Collections in a shared folder; a link's grant is the author. Owner-approved app data takes link-holder writes live at any share level, because the approval, not the document level, is that lane's authority. Everything else changes at the source only through a proposal.
 _Avoid_: pull request, patch, suggestion
 
 **Share code**:
@@ -91,7 +115,7 @@ A URL carrying the credential that authenticates a link grant: anyone holding it
 _Avoid_: public link, web share, share URL
 
 **Link holder**:
-A person using a share link without a dohc identity. Known by a link principal and an optional self-claimed, unverified name.
+A person using a share link without a server account. Known by a link principal and an optional self-claimed, unverified name.
 _Avoid_: guest (means sandboxed code in the app runtime), anonymous user, visitor
 
 **Link principal**:
@@ -99,11 +123,11 @@ The server-minted identity for one browser holding one share link. It carries pr
 _Avoid_: anonymous id, device id
 
 **Received share**:
-The recipient-side materialization of a share: either its own workspace or a mount inside a host workspace under `shared-with-me/`, constrained by the grant's access.
+The recipient-side materialization of a share: either its own workspace or a mount inside a host workspace under `shared-with-me/`, constrained by the grant's access. A mount syncs only with the share's server.
 _Avoid_: shared folder, remote workspace
 
 **Pending invite**:
-A share grant addressed to an email with no dohc account yet, claimed on the recipient's first relay contact.
+A share grant addressed to an email with no server account on the share's server yet, claimed on the recipient's first relay contact.
 _Avoid_: unclaimed share
 
 **Session host**:
@@ -117,6 +141,10 @@ _Avoid_: site, dashboard, artifact
 **Publication**:
 An immutable, owner-approved bundle of one app revision. Authority comes from the publication, never from the app's source or manifest alone.
 _Avoid_: deploy, build (for the approved object)
+
+**App domain**:
+The domain that serves app launches, on a different registrable domain from the server's share pages. Each launch gets a random subdomain. With the domain on the Public Suffix List, browsers treat every subdomain as its own site and refuse cookies set for the shared parent, so one app cannot set cookies another app reads.
+_Avoid_: publish domain, user content domain
 
 **Dataset**:
 A workspace-owned transactional data domain with its schema, operations, records, and file associations. Apps receive permission to use approved operations; they do not own a separate backend.

@@ -36,7 +36,6 @@ function HistoryFixture() {
         moments={moments}
         hasMore={hasMore}
         loadingMore={false}
-        protectedTruncated
         onOpenMoment={onOpenMoment}
         onLoadMore={() => {
           setMoments((current) => [...current, {

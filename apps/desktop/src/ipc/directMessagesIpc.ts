@@ -1,4 +1,5 @@
 import { join } from "node:path";
+import { normalizeChatMessageBody } from "@dohc/workspace-contracts/chat-message-body";
 import {
   AcceptDmPayload, AcceptDmResult, DeclineDmPayload, RequestDmAgainPayload,
   SyncDmsPayload, SyncDmsResult, StartDmPayload, StartDmResult, LeaveDmPayload,
@@ -95,7 +96,7 @@ export function registerDirectMessagesIpcHandlers<
     shareId: string; recipientUserId: string; relayUrl: string; serverUrl: string;
     preWrite?: (info: { channelWireId: string }) => void;
   }): Promise<JoinedSharedChannel>;
-  endWorkspaceJoinedChannel(operation: Operation, shareId: string): void;
+  endWorkspaceJoinedChannel(operation: Operation, shareId: string): Promise<void>;
   chatScope: Pick<ReturnType<typeof createChatScopeCapability>, "resolveChatFileReferences">;
   localUserDisplayName(): string;
   localInstallationId(): string;
@@ -452,12 +453,12 @@ export function registerDirectMessagesIpcHandlers<
       event.sender,
       input.workspaceId,
       "Leaving stopped because this window changed workspaces.",
-      (operation) => {
+      async (operation) => {
         const workspace = operation.workspace;
         const leftRow = (workspace.sharedChannels ?? []).find(
           (channel) => channel.shareId === input.shareId,
         );
-        endWorkspaceJoinedChannel(operation, input.shareId);
+        await endWorkspaceJoinedChannel(operation, input.shareId);
         operation.assertCurrent();
         // The leave is locally knowable without the relay. Keep this physical
         // attachment's fallback lanes consistent with the registry write.
@@ -479,6 +480,7 @@ export function registerDirectMessagesIpcHandlers<
   registerHandler(CHANNELS.startDm, async (event, payload) => {
     assertTrustedSender(event);
     const input = StartDmPayload.parse(payload);
+    const body = normalizeChatMessageBody(input.body);
     return withRendererWorkspaceOperation(
       event.sender,
       input.workspaceId,
@@ -659,8 +661,8 @@ export function registerDirectMessagesIpcHandlers<
                   threadId: running.thread.id,
                   author,
                   authorUserId,
-                  authorActorKey,
-                  body: input.body,
+                    authorActorKey,
+                    body,
                   ...(attachments.length > 0 ? { attachments } : {}),
                 })
               : (
@@ -670,7 +672,7 @@ export function registerDirectMessagesIpcHandlers<
                     author,
                     authorUserId,
                     authorActorKey,
-                    body: input.body,
+                    body,
                     ...(attachments.length > 0 ? { attachments } : {}),
                   })
                 ).message;

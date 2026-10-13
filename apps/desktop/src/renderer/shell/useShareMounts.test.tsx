@@ -6,7 +6,7 @@ import { useShareMounts } from "./useShareMounts";
 
 afterEach(cleanup);
 
-it.each([false, true])("keeps newer mount props when an older registry reload resolves (folder left: %s)", async (folderLeft) => {
+it("keeps newer mount props when an older registry reload resolves", async () => {
   const mounts: NonNullable<WorkspaceSummary["shareMounts"]> = [
     { shareId: "share-1", label: "alex", granterEmail: null },
   ];
@@ -28,18 +28,41 @@ it.each([false, true])("keeps newer mount props when an older registry reload re
     { initialProps: { shareMounts: mounts } },
   );
 
-  act(() => result.current.onSettingsFilesChanged(folderLeft ? { folderLeftShareId: "share-1" } : undefined));
+  act(() => result.current.onMountsChanged());
   expect(refreshWorkspaceRegistry).toHaveBeenCalledTimes(1);
   rerender({ shareMounts: [] });
   expect(result.current.mountCount).toBe(0);
-  expect(onExplorerPathsChanged).toHaveBeenCalledTimes(folderLeft ? 0 : 1);
+  expect(onExplorerPathsChanged).toHaveBeenCalledTimes(1);
 
   await act(async () => { resolve(oldRegistry); await pending; });
   expect(result.current.mountCount).toBe(0);
-  // A subsequent registry snapshot must not repeat the removal or consume a lost exemption.
+  // A subsequent registry snapshot must not repeat the removal.
   rerender({ shareMounts: [] });
-  expect(onExplorerPathsChanged).toHaveBeenCalledTimes(folderLeft ? 0 : 1);
+  expect(onExplorerPathsChanged).toHaveBeenCalledTimes(1);
   expect(reportShellError).not.toHaveBeenCalled();
+});
+
+// A failed Remove keeps Try again in Notices, and Try again removes it.
+it("reports a failed unmount with Try again", async () => {
+  const unmountShare = vi.fn()
+    .mockRejectedValueOnce(new Error("disk busy"))
+    .mockResolvedValueOnce({ folderLeft: false });
+  vi.stubGlobal("dohcDesktop", { unmountShare });
+  const reportShellError = vi.fn();
+  const showSuccessNotice = vi.fn();
+  const mounts = [{ shareId: "share-1", label: "alex", granterEmail: null }];
+  const { result } = renderHook(() => useShareMounts(
+    "ws-1", mounts, vi.fn().mockResolvedValue([]), vi.fn(),
+    vi.fn().mockResolvedValue(undefined), reportShellError, showSuccessNotice,
+  ));
+
+  await act(async () => { await result.current.unmountShare("shared-with-me/alex"); });
+  expect(reportShellError).toHaveBeenCalledWith("Couldn't remove the share.", expect.any(Error), expect.any(Function));
+  const retry = reportShellError.mock.calls[0]![2] as () => void;
+  await act(async () => { retry(); });
+  await vi.waitFor(() => expect(showSuccessNotice).toHaveBeenCalledWith("Removed alex from this workspace."));
+  expect(unmountShare).toHaveBeenNthCalledWith(2, { workspaceId: "ws-1", shareId: "share-1" });
+  vi.unstubAllGlobals();
 });
 
 // Each announced refresh's summary replaces the last one's row: a clean

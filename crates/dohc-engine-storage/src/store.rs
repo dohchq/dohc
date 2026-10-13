@@ -29,6 +29,7 @@ pub struct EngineStore {
     conn: Connection,
     freshly_created: bool,
     database_path: PathBuf,
+    passive: bool,
 }
 
 /// The outcome of a transactional unit run through
@@ -63,7 +64,42 @@ fn should_crash(_faults: &dyn FaultInjector, _point: FaultPoint) -> bool {
     false
 }
 
+pub(crate) fn install_passive_guards(conn: &Connection) -> Result<(), StorageError> {
+    conn.execute_batch(
+        "CREATE TEMP TRIGGER IF NOT EXISTS passive_no_file_jobs BEFORE INSERT ON main.materialization_jobs
+         BEGIN SELECT RAISE(IGNORE); END;
+         CREATE TEMP TRIGGER IF NOT EXISTS passive_no_automation_claims BEFORE INSERT ON main.automation_claims
+         BEGIN SELECT RAISE(IGNORE); END;
+         CREATE TEMP TRIGGER IF NOT EXISTS passive_no_local_ops BEFORE INSERT ON main.replication_log
+         WHEN NEW.imported = 0
+         BEGIN SELECT RAISE(ABORT, 'passive store cannot originate'); END;
+         CREATE TEMP TRIGGER IF NOT EXISTS passive_no_audit_exports BEFORE INSERT ON main.live_audit_pending_exports
+         BEGIN SELECT RAISE(ABORT, 'passive store cannot export live history'); END;"
+    ).map_err(StorageError::persist)
+}
+
 impl EngineStore {
+    /// Open a passive store; existing owner stores are refused.
+    pub fn open_passive(
+        path: &Path,
+        now_ms: i64,
+        root_token: Option<&str>,
+        work: Option<Arc<AtomicU64>>,
+    ) -> Result<Self, StorageError> {
+        let opened =
+            crate::schema::open_engine_db_with_store_role(path, now_ms, root_token, work, true)?;
+        Ok(Self {
+            conn: opened.conn,
+            freshly_created: opened.freshly_created,
+            database_path: path.to_path_buf(),
+            passive: true,
+        })
+    }
+
+    pub fn is_passive(&self) -> bool {
+        self.passive
+    }
+
     /// Open-or-create the store at `path`, applying the full open ritual and
     /// the v1-vs-v2 fingerprint fence (`open_engine_db`). This is the low-level
     /// writer primitive — the single-writer-per-file contract is enforced by
@@ -85,6 +121,7 @@ impl EngineStore {
             conn: opened.conn,
             freshly_created: opened.freshly_created,
             database_path: path.to_path_buf(),
+            passive: false,
         })
     }
 
@@ -103,6 +140,7 @@ impl EngineStore {
             conn: opened.conn,
             freshly_created: opened.freshly_created,
             database_path: path.to_path_buf(),
+            passive: false,
         })
     }
 
@@ -119,10 +157,12 @@ impl EngineStore {
         work: Option<Arc<AtomicU64>>,
     ) -> Result<Self, StorageError> {
         let opened = open_engine_db_read_only(path, work)?;
+        let passive = crate::schema::store_is_passive(&opened.conn)?;
         Ok(EngineStore {
             conn: opened.conn,
             freshly_created: false,
             database_path: path.to_path_buf(),
+            passive,
         })
     }
 
@@ -228,9 +268,32 @@ impl EngineStore {
     where
         E: From<StorageError>,
     {
-        let tx = self
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)
+        Self::write_on_connection(&self.conn, faults, f)
+    }
+
+    /// One FULL commit syncs this transaction and every earlier WAL commit.
+    pub fn write_durable_with<T, E>(
+        &mut self,
+        faults: &dyn FaultInjector,
+        f: impl FnOnce(&Transaction<'_>) -> Result<T, E>,
+    ) -> Result<TxnOutcome<T>, E>
+    where
+        E: From<StorageError>,
+    {
+        crate::durability::with_full_synchronous(&self.conn, |conn| {
+            Self::write_on_connection(conn, faults, f)
+        })
+    }
+
+    fn write_on_connection<T, E>(
+        conn: &Connection,
+        faults: &dyn FaultInjector,
+        f: impl FnOnce(&Transaction<'_>) -> Result<T, E>,
+    ) -> Result<TxnOutcome<T>, E>
+    where
+        E: From<StorageError>,
+    {
+        let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)
             .map_err(StorageError::persist)?;
 
         let value = match f(&tx) {
@@ -334,8 +397,8 @@ impl EngineStore {
 
     // ---- R04: materialization jobs --------------------------------------
 
-    /// Every pending materialization job, oldest first — the set the filesystem
-    /// pipeline replays at startup and executes on enqueue.
+    /// Generic pending jobs, oldest first. Checked deletes are owned by the
+    /// runtime publication state machine and must never enter generic replay.
     pub fn list_pending_materialization_jobs(
         &self,
     ) -> Result<Vec<MaterializationJob>, StorageError> {
@@ -380,6 +443,15 @@ impl EngineStore {
         now_ms: i64,
     ) -> Result<(), StorageError> {
         materialize::mark_cancelled(&self.conn, job_id, now_ms)
+    }
+
+    /// Record a superseded job's keyed write as unpublished. Call it before
+    /// the job is marked complete.
+    pub fn record_superseded_publication(
+        &self,
+        job: &MaterializationJob,
+    ) -> Result<(), StorageError> {
+        materialize::record_superseded_publication(&self.conn, job)
     }
 
     /// Mark a job in conflict (newer external content was preserved).

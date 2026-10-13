@@ -99,6 +99,10 @@ mod diagnostic_tests {
     #[test]
     fn sharing_decline_survives_a_skipped_primary_outcome() {
         let declined = crate::SharingDeclined {
+            object_id: "notes/skipped.md".to_owned(),
+            version_id: "main".to_owned(),
+            lineage_pruned: false,
+            head_blob_sha256: None,
             path: "notes/skipped.md".to_owned(),
             constraint: "MAX_YDOC_UPDATE_BYTES",
             limit_bytes: 20,
@@ -135,6 +139,10 @@ mod diagnostic_tests {
             },
         ];
         let declined = crate::SharingDeclined {
+            object_id: "notes/first.md".to_owned(),
+            version_id: "main".to_owned(),
+            lineage_pruned: false,
+            head_blob_sha256: None,
             path: "notes/first.md".to_owned(),
             constraint: "MAX_YDOC_UPDATE_BYTES",
             limit_bytes: 20,
@@ -143,6 +151,10 @@ mod diagnostic_tests {
         let declines = vec![
             declined.clone(),
             crate::SharingDeclined {
+                object_id: "notes/second.md".to_owned(),
+                version_id: "main".to_owned(),
+                lineage_pruned: false,
+                head_blob_sha256: None,
                 path: "notes/second.md".to_owned(),
                 ..declined
             },
@@ -241,6 +253,7 @@ pub(crate) fn apply_envelope_with_mutation_outcome<T>(
     ) -> Result<MutationOutcome<T>, SyncError>,
 ) -> Result<ApplyOutcome<T>, SyncError> {
     envelope.validate()?;
+    crate::settlement_publication::validate(envelope)?;
     let payload_json = envelope.payload_json()?;
     let result = store.write_with(faults, |tx| {
         let acked = read_ack_tx(tx, &envelope.workspace_id, &envelope.origin_id)?;
@@ -262,6 +275,8 @@ pub(crate) fn apply_envelope_with_mutation_outcome<T>(
                     return Err(SyncError::CoordinateDiverged);
                 }
             }
+            if let Some(refusal) = crate::settlement_publication::refresh_in_tx(tx,envelope)? { return Ok(Admission::Refused(refusal)); }
+            crate::live_audit::refresh_confirmed_application_in_tx(tx, envelope)?;
             return Ok(Admission::Skipped);
         }
         let expected = acked.checked_add(1).ok_or(SyncError::CoordinateDiverged)?;
@@ -283,6 +298,8 @@ pub(crate) fn apply_envelope_with_mutation_outcome<T>(
                 return Err(SyncError::CoordinateDiverged);
             }
             ack_tx(tx, &envelope.workspace_id, &envelope.origin_id, envelope.origin_seq)?;
+            if let Some(refusal) = crate::settlement_publication::refresh_in_tx(tx,envelope)? { return Ok(Admission::Refused(refusal)); }
+            crate::live_audit::refresh_confirmed_application_in_tx(tx, envelope)?;
             return Ok(Admission::Skipped);
         }
         tx.execute_batch("SAVEPOINT dohc_replication_mutation")
@@ -290,7 +307,12 @@ pub(crate) fn apply_envelope_with_mutation_outcome<T>(
         // Whether this op changed the workspace: it applied, or its refusal
         // kept its mutation.
         let mut mutation_committed = true;
-        let admission = match mutation(tx, envelope) {
+        let server_refusal = crate::settlement_publication::refresh_in_tx(tx,envelope)?;
+        let mutation_result = match server_refusal {
+            Some(refusal) => Ok(MutationOutcome::RefusedRetainingMutation { reason: refusal.reason.message().to_owned() }),
+            None => mutation(tx,envelope),
+        };
+        let admission = match mutation_result {
             Ok(MutationOutcome::Applied(value)) => {
                 tx.execute_batch("RELEASE dohc_replication_mutation")
                     .map_err(SyncError::persist)?;
@@ -329,7 +351,8 @@ pub(crate) fn apply_envelope_with_mutation_outcome<T>(
             }
         };
         if let Admission::Refused(refusal) = &admission {
-            persist_refusal(tx, refusal)?;
+            let exists: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM replication_pending_refusals WHERE workspace_id=?1 AND origin_id=?2 AND origin_seq=?3)",params![refusal.workspace_id,refusal.origin_id,refusal.origin_seq],|r|r.get(0)).map_err(SyncError::corrupt)?;
+            if !exists { persist_refusal(tx, refusal)?; }
         }
         let apply_disposition = if matches!(&admission, Admission::Refused(_)) {
             "refused"
@@ -374,6 +397,7 @@ pub(crate) fn apply_envelope_with_mutation_outcome<T>(
         {
             crate::ydoc_apply::retain_refused_ydoc_blob(tx, &envelope.workspace_id, &envelope.origin_id, envelope.origin_seq)?;
         }
+        crate::settlement_publication::refresh_in_tx(tx,envelope)?;
         ack_tx(tx, &envelope.workspace_id, &envelope.origin_id, envelope.origin_seq)?;
         if crashes(faults, FaultPoint::SyncBeforeApplyCommit) {
             return Err(SyncError::FaultCrash);
@@ -445,6 +469,12 @@ pub(crate) fn persist_refusal(
         ],
     )
     .map_err(SyncError::persist)?;
+    if refusal.op_kind == "ydoc.update" {
+        tx.execute(
+            "UPDATE replication_log SET apply_disposition='refused' WHERE workspace_id=?1 AND origin_id=?2 AND origin_seq=?3",
+            params![refusal.workspace_id,refusal.origin_id,refusal.origin_seq],
+        ).map_err(SyncError::persist)?;
+    }
     Ok(())
 }
 
@@ -456,7 +486,7 @@ pub fn read_replayed_refusal(
         conn.query_row(
             "SELECT op_kind, reason_code, reason_message \
              FROM replication_pending_refusals \
-             WHERE workspace_id=?1 AND origin_id=?2 AND origin_seq=?3",
+             WHERE workspace_id=?1 AND origin_id=?2 AND origin_seq=?3 AND reason_code='invalid-input'",
             params![
                 envelope.workspace_id,
                 envelope.origin_id,
@@ -515,7 +545,7 @@ pub(crate) fn read_pending_refusals(
     store.read_with(|conn| {
         let mut stmt = conn.prepare(
             "SELECT origin_id, origin_seq, op_kind, reason_message FROM replication_pending_refusals \
-             WHERE workspace_id=?1 AND COALESCE(report_id,'') != ?2 ORDER BY origin_id, origin_seq",
+             WHERE workspace_id=?1 AND reason_code='invalid-input' AND COALESCE(report_id,'') != ?2 ORDER BY origin_id, origin_seq",
         ).map_err(SyncError::corrupt)?;
         stmt.query_map(params![workspace_id, DIRECT_RPC_REFUSAL_REPORT_ID], |row| {
             Ok(ReplicationRefusal {

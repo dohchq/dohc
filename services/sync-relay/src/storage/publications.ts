@@ -1,9 +1,10 @@
+import { visibleSharePath } from "@dohc/security-contract/share-selector";
 import { parseApprovalAgent, type ApprovalAgent } from "@dohc/security-contract/approval-provenance";
 import { createHash } from "node:crypto";
 import { parseAppPublicationCandidate, parseAppCollectionCapability, type AppCollectionCapability, type AppPublicationCandidate, type AppPublicationLimits } from "@dohc/security-contract/app-publication";
 import { parseAppDatasetCapability, type AppDatasetCapability } from "@dohc/security-contract/dataset";
 
-import { effectiveShareSelector, parseStoredAnyShareSelectorJson, targetVersionId, visibleSharePath } from "../shareFilter";
+import { effectiveShareSelector, parseStoredAnyShareSelectorJson, targetVersionId } from "../shareFilter";
 import { notFound, badRequest, relayError, RelayError } from "../errors";
 import { assertWorkspaceQuota } from "./workspaces";
 import type { StorageContext } from "./context";

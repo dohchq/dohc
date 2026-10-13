@@ -68,6 +68,7 @@ export async function refreshStandaloneShareThroughOwnerForTest(input: {
       }),
     recordRefusals: async (_current, refusals) =>
       input.recordRefusals([...refusals]),
+    updateUnsavedPaths: async () => { throw new Error("Mounted shares have no unsaved paths"); },
     markEnded: async () => undefined,
     retireTarget: async () => undefined,
     assertProjectionRoot: async () => undefined,
@@ -155,6 +156,7 @@ export async function refreshShareMountThroughOwnerForTest(input: {
       }),
     recordRefusals: async (_current, refusals) =>
       input.recordRefusals([...refusals]),
+    updateUnsavedPaths: async () => { throw new Error("Mounted shares have no unsaved paths"); },
     markEnded: async () => undefined,
     retireTarget: async () => undefined,
     assertProjectionRoot: async (current) => {
@@ -229,6 +231,7 @@ function mountMutationOwner(input: {
       throw new Error("Unexpected pull");
     },
     recordRefusals: async () => undefined,
+    updateUnsavedPaths: async () => { throw new Error("Mounted shares have no unsaved paths"); },
     markEnded: async () => undefined,
     retireTarget: async () => undefined,
     assertProjectionRoot: async (current) => {

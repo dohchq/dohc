@@ -13,7 +13,6 @@ import {
   createWritableChatIpcHandler,
   type MainChatIpcHandler,
 } from "./mainChatIpcHandlers";
-import type { AwaitableLinkedChatStore } from "./workspaces/awaitableLinkedChatStore";
 import { EngineWorkspaceSessions } from "@dohc/workspace-engine-client/daemon";
 import { createDesktopLinkedChatStore } from "./workspaces/liveLinkedChatStore";
 import { createTestScratch } from "./workspaces/testTemp";
@@ -24,7 +23,7 @@ interface TestEvent {
 
 interface TestContext {
   workspace: { workspaceId: string };
-  store: AwaitableLinkedChatStore;
+  store: LinkedChatStore;
 }
 
 type RegisteredHandler = MainChatIpcHandler<TestEvent, unknown>;

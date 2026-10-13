@@ -1,3 +1,4 @@
+import {SETTLEMENT_CUTS} from "./hostedSettlementSchema";
 import {nativeSourceAuthorMatches} from "./liveNativeSourceAuthors";
 import {parseNativeRestoreApplicationReceipt,parseNativeRestoreSettlementReceipt,parseNativeRestoreResumeReceipt,type RestoreLifecycle,type NativeRestoreApplicationReceipt,type NativeRestoreSettlementReceipt,type NativeRestoreResumeReceipt} from "../liveRestoreLifecycle";
 import type { ServiceActivationAccess } from "./serviceActivationAccess";
@@ -1344,6 +1345,10 @@ export class LiveCommittedDeliveryStore {
         current:{binding,authority:{principalKind:"owner",principalId:input.ownerUserId,grantId:null,grantGeneration:null}},metadata,
         updateBytes,receivedAtMs:at,firstSeen:validated.content.replacementRanges,firstSeenDeletes:validated.content.firstSeenDeletes,
         authorSnapshot:[],checkpointCoverage:authorWindow.coverage,checkpointBytes,checkpointDigest,priorMetadata,restoreOperationId:input.operationId});
+      assertWorkspaceQuota(this.#storage,document.workspaceId,144);
+      this.#storage.db.prepare(`INSERT INTO ${SETTLEMENT_CUTS}(journal_cursor,state_sha256,markdown_sha256,state_byte_length,markdown_byte_length) VALUES(?,?,?,?,?)`).run(
+        admitted.metadata.accepted.receipt.journalCursor,validated.content.restoredStateDigest,validated.content.projectedMarkdownSha256,
+        checkpointBytes.byteLength,validated.content.projectedMarkdownByteLength);
       const admission:RestoreAdmission={proposalDigest:expectedProposalDigest,candidateDigest:proposal.candidateDigest,preparation:{fence,point},
         nativeSourceManifestDigest,admitted:admitted.metadata,checkpointDigest,sourceRanges,recordedAtMs:at};
       const admissionJson=JSON.stringify(admission);

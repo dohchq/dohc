@@ -20,7 +20,7 @@ const stamp = {
 };
 
 const run = (claimId: string, createdAtMs: number): CollectionAutomationRun => ({
-  claimId, state: "failed", error: "boom", createdAtMs, updatedAtMs: createdAtMs, trigger: { kind: "changed", recordId: "record", by: "human", depth: 0, sharedAuthor: null }, writes: [], definitionChanged: false, neverStarted: false, chainStopped: false, undone: false,
+  claimId, state: "failed", error: "boom", createdAtMs, updatedAtMs: createdAtMs, trigger: { kind: "changed", recordId: "record", by: "human", depth: 0, sharedAuthor: null }, writes: [], definitionChanged: false, neverStarted: false, chainStopped: false, undoUnfinished: false, undone: false,
 });
 
 function fixture(options: {

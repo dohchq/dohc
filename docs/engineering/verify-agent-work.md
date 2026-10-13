@@ -23,7 +23,13 @@ cargo install cargo-nextest --locked --version 0.9.143
 
 The PR verifier rejects missing tools or versions that differ from those workflow pins.
 
-Run `pnpm doctor` to inspect readiness without changing the checkout.
+On Linux, install Chromium system dependencies once with `pnpm exec playwright install-deps chromium`.
+This preparation requires administrator access.
+The verifier installs the pinned browser.
+Missing host dependencies fail the browser proofs.
+
+Run `pnpm run doctor` to inspect readiness without changing the checkout.
+`pnpm doctor` invokes pnpm's own command and does not check this repository's readiness.
 Run `pnpm qa:prepare` to build the native engine and desktop.
 Preparation reconciles the installed dependencies with the frozen lockfile before reusing or building artifacts.
 Preparation records source and artifact hashes under `.dohc-dev/verification`.
@@ -76,7 +82,13 @@ Site-only changes run the site's tests and two desktop renderer compatibility fi
 Account API and Postgres inputs retain desktop preparation and account and desktop browser proofs, without unrelated desktop unit or packaging tests.
 Share-web inputs retain desktop preparation, desktop browser proofs, and the native delivery proof.
 Combined site changes retain both renderer compatibility files and those proofs.
-Desktop production changes and shared inputs retain the complete desktop suite, packaging tests, and proofs.
+Desktop process, storage, shared, and unclassified inputs retain the complete desktop suite, packaging tests, and proofs.
+Isolated renderer changes run their tracked test consumers and the site suite.
+Pure desktop Vitest consumers outside the renderer join that selection when they declare jsdom or happy-dom and their runtime dependencies pass the same safety checks.
+External tests with undeclared or Node environments, or Node built-in dependencies, retain broader selection.
+The runner keeps persistence smoke and the Windows pixel gallery for those changes.
+Every focused renderer plan retains the onboarding proof and its Postgres setup.
+Unknown imports, native resources, uncovered sources, and other consumers outside that boundary retain broader selection.
 Desktop renderer changes, and changes to the states page itself, also run the `@states-page` pixel gallery on Windows, where its baselines were taken.
 Desktop-only changes run the Y.Doc compatibility files that import desktop code.
 Changes to Y.Doc projection or its other inputs run the complete Y.Doc suite, including the checkpoint boundary test.
@@ -95,14 +107,72 @@ It starts a dedicated Postgres container when selected tests or proofs need one.
 Selected integration suites must run; unavailable prerequisites cause failure rather than a silent skip.
 The native self-host editing proof checks the prepared engine and its complete delivery evidence when selected.
 The Rust gate uses the repository build budget and checks its summary verdict.
-On the shared Windows host, one PR verification runs at a time. A later run waits for the first to finish.
+On the shared Windows host, one full PR verification runs at a time. Full runs wait in FIFO order.
+Each PR run owns its checkout until cleanup and receipt writing finish.
+Another PR run in that checkout fails before installation or queue admission and reports the owner.
+Warm, narrow JavaScript plans can use one separate light lane beside the full lane.
+Light admission requires at most two audited Vitest suites, no Rust, native preparation, services, browser proofs, or desktop scripts.
+The site suite and its selected desktop renderer compatibility files qualify. Complete desktop suites do not.
+Unknown or custom test commands, broad repository contracts, and cold or unverifiable dependencies retain the full lane.
+The light lane keeps whole-workspace typecheck coverage, with one workspace command at a time.
+It runs repository source guards before sequential package tests, with one Vitest worker.
+`verify:plan` reports admission and the reason before a run joins either queue.
+The runner checks host tools before queueing and rechecks its source, tools, and disk after admission.
 The runner removes its Postgres container by the recorded container ID.
+
+Inspect the host's queues without joining them:
+
+```sh
+node tools/rust-engine-program/build-slot.mjs --status
+```
+
+Use `--root <directory>` to inspect another queue root. The command emits JSON and does not create directories or acquire slots.
+Each lane reports owners and waiters with their purpose, checkout, commit, phase, and elapsed time when recorded.
+Older records without that metadata have an unknown purpose.
+Wait estimates use the median duration of up to twenty completed runs in the same lane.
+A cold history has no estimate. Estimates do not reject or reorder work.
+Full runs wait up to six hours. A live holder keeps its slot even if its heartbeat stops; investigate its recorded PID before changing its resources.
+Use verification queues for PR checks. A verification slot does not provide an idle host for benchmarks.
+Performance measurements must record concurrent host work and use the shared build budget when running Cargo.
+The live-authorship profiling command uses a separate single owner and creates no PR queue ticket.
+It defers when registered gates or builds hold or wait for slots.
+If registered work arrives during measurement, it stops its own child and records the run as failed.
+Its host context covers registered lanes and does not prove that the host was otherwise idle.
+
+The full lane count defaults to one. To compare one and two lanes, use an isolated root and explicit trial flags in PowerShell:
+
+```powershell
+$env:DOHC_VERIFICATION_SLOT_ROOT = 'C:\w\_locks-verification-trial'
+$env:DOHC_VERIFICATION_TRIAL = '1'
+$env:DOHC_VERIFICATION_LANES = '2'
+pnpm verify:pr --base origin/main
+```
+
+Use that same trial root with `DOHC_VERIFICATION_LANES=1` for the comparison.
+Keep `DOHC_BUILD_SLOT_ROOT` unchanged. Cargo still uses the host's shared four-lane budget during a verification trial.
+Record other host builds and gates during the comparison; a separate outer queue does not isolate CPU, memory, or disk load.
+Compare elapsed time, queue time, failures, and peak host memory under matching work and cache conditions.
+Do not change the live queue root or remove another run's tickets to conduct a trial.
+Remove the three verification trial environment variables from the shell before returning to ordinary verification.
 
 To schedule jobs separately, use `pnpm verify:pr --base <target-ref> --job js` and `--job rust`.
 Each report states its scope. Every selected job needs passing evidence that covers the change.
 An explicit `--job` runs that job even when the filters omit it.
 Use it when a build or test step reads a changed file outside the filters.
 For a forced JavaScript job with no matching changes, the runner selects the complete JavaScript suite.
+
+After a renderer fix, reuse completed Rust evidence with `pnpm verify:pr --base <target-ref> --reuse-rust <original-result.json>`.
+The current run must select Rust. Add `--job rust` to request that job explicitly.
+The verifier accepts an original Rust pass from a completed PR run, including one whose JavaScript job failed.
+The original report must contain a Rust identity and every required passing gate check.
+Older reports without this identity require a fresh Rust run.
+The verifier compares Git content, tools, platform, environment, and Cargo configuration.
+Only renderer source changes and commits with identical inputs can reuse Rust evidence.
+All other tracked changes require a fresh Rust job, including dependencies, fixtures, and verification scripts.
+Every reuse runs the pinned tool probes, `cargo deny check`, and `cargo audit` again.
+Read the current report's `rustEvidence` reference and `rust-reuse` step to distinguish reused checks from executed checks.
+The reference keeps the original tested commit, report hash, gate log hash, and changed paths.
+Keep the original report and logs until review finishes. Reused evidence cannot become another reuse source.
 
 Run `pnpm verify:pr --base <target-ref> --full` for comprehensive verification before a release or when impact is uncertain.
 This runs both gates, every package, and every mandatory integration proof, including when the diff is empty.
@@ -121,6 +191,8 @@ Do not add step durations to estimate elapsed time.
 
 `pnpm test` builds the app runtime before testing packages.
 Repository checks run beside at most two package commands.
+The complete repository suite runs at most two independent fixture files at once.
+Repository source guards retain their sequential schedule.
 Isolated desktop script tests then use the repository lane.
 PR verification then reuses that lane for selected integration proofs after every selected database package finishes.
 When proofs are selected, desktop and database package tests start first so proofs can overlap the remaining package tests.

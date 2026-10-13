@@ -9,15 +9,20 @@ import {
   type SyncRelayLinkSessionRow,
   type SyncRelayShareWithGrantRow,
   type SyncRelayGrantedShareRow,
+  type SyncRelayGrantedInventoryCursor,
+  type SyncRelayGrantedInventoryPage,
+  type SyncRelayReceivedInventoryCursor,
+  type SyncRelayReceivedInventoryPage,
   type SyncRelayLinkInventoryCursor,
   type SyncRelayLinkInventoryPage,
   type SyncRelayLinkInventoryRow,
+  type SyncRelayHistoryAccount,
   type SyncRelayIndependentGrantInventoryCursor,
   type SyncRelayIndependentGrantInventoryPage,
 } from "./types";
 import { type StorageContext } from "./context";
 import { nextShareDiscussionRevision } from "./discussion";
-import { readCurrentShareGrant } from "./currentShareGrant";
+import { currentShareGrantSql, readCurrentShareGrant } from "./currentShareGrant";
 import {
   rowToShareGrantRow,
   rowToLinkCredentialRow,
@@ -27,7 +32,7 @@ import {
 } from "./rows";
 import { shareAccessRank } from "@dohc/security-contract/share-selector";
 import { LINK_SESSION_RENEWAL_GRACE_MS } from "../linkSecurity";
-import { RETIRED_LINK_CREDENTIAL_HISTORY_LIMIT, LINK_INVENTORY_PAGE_SIZE, LINK_INVENTORY_INDEPENDENT_GRANT_LIMIT } from "./limits";
+import { RETIRED_LINK_CREDENTIAL_HISTORY_LIMIT, GRANTED_INVENTORY_PAGE_SIZE, RECEIVED_INVENTORY_PAGE_SIZE, LINK_INVENTORY_PAGE_SIZE, LINK_INVENTORY_INDEPENDENT_GRANT_LIMIT } from "./limits";
 
 function dependentGrantIdsMatch(
   dependents: readonly SyncRelayShareGrantRow[],
@@ -687,6 +692,16 @@ export function claimPendingSharesForEmail(storage: StorageContext, email: strin
     });
   }
 
+export function hasPendingInvite(storage: StorageContext, email: string): boolean {
+    return !!storage.db
+      .prepare(
+        `SELECT 1 FROM sync_relay_share_grants AS g JOIN sync_relay_shares AS s ON s.share_id = g.share_id
+         WHERE g.principal_kind = 'email' AND g.principal_email = ? AND ${currentShareGrantSql("g", "s")}
+         LIMIT 1`,
+      )
+      .get(email.trim().toLowerCase());
+  }
+
 export function getShare(storage: StorageContext, shareId: string): SyncRelayShareRow | null {
     const row = storage.db
       .prepare(
@@ -732,6 +747,34 @@ export function listSharesGrantedBy(storage: StorageContext, granterUserId: stri
       .all(granterUserId)
       .map((row) => ({ ...rowToShareWithGrantRow(row), automationsGeneration: automationsGenerationOf(row) }));
   }
+
+export function listSharesGrantedPage(
+  storage: StorageContext,
+  granterUserId: string,
+  workspaceId: string,
+  cursor?: SyncRelayGrantedInventoryCursor,
+): SyncRelayGrantedInventoryPage {
+  const rows = storage.db.prepare(
+    `SELECT s.share_id, s.workspace_id, s.granter_user_id, s.selector_json,
+            s.created_at_ms, g.grant_id, g.share_id AS grant_share_id,
+            g.principal_kind, g.principal_user_id, g.principal_email, g.access,
+            g.generation, g.status, g.created_at_ms AS grant_created_at_ms,
+            g.revoked_at_ms, g.parent_grant_id,
+            ${AUTOMATIONS_GENERATION_SQL("g")} AS automations_generation
+     FROM sync_relay_shares s
+     JOIN sync_relay_share_grants g ON g.share_id = s.share_id
+     WHERE s.granter_user_id = ? AND s.workspace_id = ?
+       AND g.parent_grant_id IS NULL AND g.principal_kind != 'link'
+       ${cursor ? "AND g.grant_id > ?" : ""}
+     ORDER BY g.grant_id
+     LIMIT ${GRANTED_INVENTORY_PAGE_SIZE + 1}`,
+  ).all(granterUserId, workspaceId, ...(cursor ? [cursor.grantId] : []));
+  const granted = rows.slice(0, GRANTED_INVENTORY_PAGE_SIZE).map((row) => ({
+    ...rowToShareWithGrantRow(row), automationsGeneration: automationsGenerationOf(row),
+  }));
+  const last = granted.at(-1);
+  return {granted, nextCursor: rows.length > GRANTED_INVENTORY_PAGE_SIZE && last ? {grantId: last.grant.grantId} : null};
+}
 
 // The newest grant generation at which a grant wrote a Collection's
 // automations.yaml directly (ADR 0013), or null. A write names each path in
@@ -900,6 +943,27 @@ export function listLinkGrantsByWorkspace(
     };
   }
 
+// Owner-only account attribution. Primary grant ids and the account index bound the lookup.
+export function lookupHistoryAccounts(
+  storage: StorageContext, workspaceId: string, grantIds: readonly string[], userIds: readonly string[],
+): SyncRelayHistoryAccount[] {
+  if (grantIds.length + userIds.length > 200) throw new Error("History lookup exceeds its limit");
+  const join = `FROM sync_relay_share_grants dependent
+    JOIN sync_relay_share_grants link ON link.grant_id = dependent.parent_grant_id AND link.principal_kind = 'link'
+    JOIN sync_relay_shares s ON s.share_id = dependent.share_id AND s.share_id = link.share_id
+    WHERE s.workspace_id = ? AND dependent.status = 'revoked' AND dependent.principal_kind = 'user'`;
+  const rows = [
+    ...(grantIds.length ? storage.db.prepare(`SELECT dependent.grant_id, dependent.principal_user_id, dependent.parent_grant_id
+      ${join} AND dependent.grant_id IN (${grantIds.map(() => "?").join(",")})`).all(workspaceId, ...grantIds) : []),
+    ...(userIds.length ? storage.db.prepare(`SELECT MIN(dependent.grant_id) AS grant_id, dependent.principal_user_id, dependent.parent_grant_id
+      ${join} AND dependent.principal_user_id IN (${userIds.map(() => "?").join(",")})
+      GROUP BY dependent.principal_user_id`).all(workspaceId, ...userIds) : []),
+  ];
+  return [...new Map(rows.map(row => [String(row.grant_id), {
+    grantId: String(row.grant_id), recipientUserId: String(row.principal_user_id), parentGrantId: String(row.parent_grant_id),
+  }])).values()];
+}
+
 export function listActiveIndependentShareGrants(storage: StorageContext, input: {
     workspaceId: string;
     shareIds: readonly string[];
@@ -956,6 +1020,22 @@ export function listActiveIndependentShareGrants(storage: StorageContext, input:
           : null,
     };
   }
+
+/** Pages share identities, so multiple grants cannot split one received share across pages. */
+export function listReceivedShareIdsPage(storage: StorageContext, recipientUserId: string,
+  cursor?: SyncRelayReceivedInventoryCursor): SyncRelayReceivedInventoryPage {
+  const removedIds = storage.listRemovedSharesForRecipient(recipientUserId).map(row => row.shareId);
+  const rows = storage.db.prepare(`SELECT share_id FROM (SELECT DISTINCT g.share_id
+    FROM sync_relay_share_grants g JOIN sync_relay_shares s ON s.share_id = g.share_id
+    JOIN sync_relay_workspaces w ON w.workspace_id = s.workspace_id AND w.owner_user_id = s.granter_user_id
+    WHERE g.principal_kind = 'user' AND g.principal_user_id = ? AND g.status = 'active'
+    UNION SELECT value AS share_id FROM json_each(?))
+    ${cursor ? "WHERE share_id > ?" : ""}
+    ORDER BY share_id LIMIT ${RECEIVED_INVENTORY_PAGE_SIZE + 1}`)
+    .all(recipientUserId, JSON.stringify(removedIds), ...(cursor ? [cursor.shareId] : [])) as { share_id: string }[];
+  const shareIds = rows.slice(0, RECEIVED_INVENTORY_PAGE_SIZE).map(row => row.share_id);
+  return { shareIds, nextCursor: rows.length > RECEIVED_INVENTORY_PAGE_SIZE ? { shareId: shareIds.at(-1)! } : null };
+}
 
 export function listSharesReceivedBy(storage: StorageContext, recipientUserId: string): SyncRelayShareWithGrantRow[] {
     return storage.db

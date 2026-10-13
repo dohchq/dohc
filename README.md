@@ -48,7 +48,7 @@ Follow the [self-hosting guide](docs/how-to/self-host.md) to set up a server and
 
 ## Run it from source
 
-You need Node.js 24.14 or newer, pnpm 11.20.0, and the Rust toolchain pinned in [`rust-toolchain.toml`](rust-toolchain.toml).
+You need Node.js 24.16 or newer, pnpm 11.20.0, and the Rust toolchain pinned in [`rust-toolchain.toml`](rust-toolchain.toml).
 
 ```bash
 pnpm install

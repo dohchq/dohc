@@ -51,6 +51,7 @@ export function deriveLiveAuthorSnapshot(storage: StorageContext, authority: Ser
     if (!principal || principal.grantId !== authority.grantId) throw new Error("The enrolled link principal changed.");
     authors.push({kind: "link",publicPrincipalId: context.publicPrincipalId,label: principal.displayName ?? "Anonymous"});
   } else return [];
-  if (context.agent) authors.push({kind: "agent",...context.agent});
+  if (context.agent) authors.push({kind: "agent",...context.agent,
+    onBehalfOf: context.kind === "link" ? context.publicPrincipalId : authority.principalId});
   return parseLiveAuthorSnapshot(authors);
 }

@@ -31,6 +31,8 @@ export const WORKSPACE_METHOD = {
   searchQueryPage: "search.queryPage",
   searchQueryChatMessagesGranular: "search.queryChatMessagesGranular",
   watcherStatus: "watcher.status",
+  captureClearRecovery: "capture.clearRecovery",
+  captureImportRecovery: "capture.importRecovery",
   keptCopiesList: "keptCopies.list",
   keptCopiesSave: "keptCopies.save",
   captureFlush: "capture.flush",
@@ -50,6 +52,7 @@ export const WORKSPACE_METHOD = {
   automationsListClaims: "automations.listClaims",
   automationsGetClaim: "automations.getClaim",
   automationsPruneHistory: "automations.pruneHistory",
+  automationsMakeDurable: "automations.makeDurable",
   automationsSettle: "automations.settle",
   automationsRetry: "automations.retry",
   automationsRelease: "automations.release",
@@ -87,8 +90,17 @@ export type WorkspaceOpenParams = WorkspaceJsonObject & {
       })
     | null;
   captureMode?: "none";
+  storeMode?: "passive";
   recoverRunningDispatches?: boolean;
 };
+export type CaptureRecoveryImportParams = WorkspaceJsonObject & {
+  versionId: string; objectId: string; path: string;
+  expectedClaimId: string | null; expectedStateVectorSha256: string;
+  expectedDiskSha256: string | null; admittedBaseBase64: string; text: string;
+  updates: { requestId: string; updateBase64: string; actorOriginId?: string;
+    attribution?: import("../ydoc/ydocWireContract").ChangeAttributionWire }[];
+};
+export type CaptureRecoveryImportResult = WorkspaceMethodResultMap[typeof WORKSPACE_METHOD.captureImportRecovery];
 type WorkspaceEmptyParams = WorkspaceJsonObject;
 export type CollectionGetParams = WorkspaceJsonObject &
   CollectionGetContractParams;
@@ -264,6 +276,8 @@ export type AutomationClaimNextParams = WorkspaceJsonObject & {
   automationIdPrefix: string;
 };
 
+export type AutomationMakeDurableParams = WorkspaceJsonObject & { claimId?: string };
+
 export type AutomationSettleParams = WorkspaceJsonObject & {
   claimId: string;
   state: "done" | "failed";
@@ -438,6 +452,8 @@ export type WorkspaceMethodParamsMap = {
   [WORKSPACE_METHOD.searchQueryPage]: SearchQueryPageParams;
   [WORKSPACE_METHOD.searchQueryChatMessagesGranular]: SearchQueryChatMessagesGranularParams;
   [WORKSPACE_METHOD.watcherStatus]: WorkspaceEmptyParams;
+  [WORKSPACE_METHOD.captureClearRecovery]: WorkspaceJsonObject & { momentId: string };
+  [WORKSPACE_METHOD.captureImportRecovery]: CaptureRecoveryImportParams;
   [WORKSPACE_METHOD.keptCopiesList]: WorkspaceEmptyParams;
   [WORKSPACE_METHOD.keptCopiesSave]: WorkspaceJsonObject & { id: number };
   [WORKSPACE_METHOD.captureFlush]: WorkspaceEmptyParams;
@@ -457,6 +473,7 @@ export type WorkspaceMethodParamsMap = {
   [WORKSPACE_METHOD.automationsListClaims]: AutomationListClaimsParams;
   [WORKSPACE_METHOD.automationsGetClaim]: AutomationGetClaimParams;
   [WORKSPACE_METHOD.automationsPruneHistory]: AutomationPruneHistoryParams;
+  [WORKSPACE_METHOD.automationsMakeDurable]: AutomationMakeDurableParams;
   [WORKSPACE_METHOD.automationsSettle]: AutomationSettleParams;
   [WORKSPACE_METHOD.automationsRetry]: AutomationRetryParams;
   [WORKSPACE_METHOD.automationsRelease]: AutomationReleaseParams;
@@ -969,6 +986,12 @@ const CollectionGetRecordResultSchema = mutableStruct({
             automationName: Schema.String,
           }),
         ),
+        linkAuthor: Schema.NullOr(mutableStruct({
+          kind: Schema.Literal("link"),
+          grantId: Schema.String,
+          grantGeneration: Schema.Int,
+          publicPrincipalId: Schema.String,
+        })),
       }),
     ),
   ),
@@ -1014,6 +1037,8 @@ const CaptureFlushResultSchema = mutableStruct({
 });
 
 const automationClaimFields = {
+  /** The claim whose automation write triggered this run, when present. */
+  parentClaimId: Schema.optionalKey(Schema.NonEmptyString),
   claimId: Schema.NonEmptyString,
   automationId: Schema.NonEmptyString,
   /**
@@ -1252,7 +1277,18 @@ const WorkspaceResultSchemas = {
     noAtomicPlacement: Schema.Boolean,
     recoveryUnavailable: Schema.Boolean,
     keptFiles: Schema.Array(Schema.Tuple([Schema.String, Schema.String])),
+    captureRecoveries: Schema.mutable(Schema.Array(mutableStruct({
+      momentId: Schema.NonEmptyString,
+      versionId: Schema.NonEmptyString,
+      objectId: Schema.NonEmptyString,
+      path: Schema.NonEmptyString,
+      captureMomentId: Schema.NonEmptyString,
+      deleted: Schema.Boolean,
+    }))),
   }),
+  [WORKSPACE_METHOD.captureClearRecovery]: mutableStruct({ cleared: Schema.Boolean }),
+  [WORKSPACE_METHOD.captureImportRecovery]: mutableStruct({ committed: Schema.Literal(true),
+    outcome: Schema.Literals(["replayed", "imported", "covered"]), momentId: Schema.NullOr(Schema.String) }),
   [WORKSPACE_METHOD.keptCopiesList]: mutableStruct({
     keptCopies: Schema.mutable(
       Schema.Array(
@@ -1356,6 +1392,7 @@ const WorkspaceResultSchemas = {
     pruned: Schema.Int,
     more: Schema.Boolean,
   }),
+  [WORKSPACE_METHOD.automationsMakeDurable]: mutableStruct({}),
   [WORKSPACE_METHOD.automationsSettle]: AutomationClaimSummarySchema,
   [WORKSPACE_METHOD.automationsRetry]: AutomationClaimSummarySchema,
   [WORKSPACE_METHOD.automationsRelease]: AutomationClaimSummarySchema,

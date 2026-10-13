@@ -63,7 +63,10 @@ export function registerSharedChannelsIpcHandlers<
     credentials: CloudCredentials, path: string, init?: RequestInit,
   ): Promise<Result>;
   listWorkspaces(): RegistryEntry[];
-  setWorkspaceSharedChannels(workspaceId: string, channels: JoinedSharedChannel[]): unknown;
+  updateWorkspaceSharedChannels(
+    workspaceId: string,
+    update: (channels: readonly JoinedSharedChannel[]) => readonly JoinedSharedChannel[],
+  ): Promise<void>;
   relayClientForWorkspace(input: {
     workspaceId: string; rootPath: string; attachmentId?: symbol;
     accountId: string;
@@ -87,13 +90,13 @@ export function registerSharedChannelsIpcHandlers<
   sharesChanged(workspaceId: string): void;
   // An authenticated account listing, applied to this machine's received
   // shares so a share the owner restored resumes.
-  reconcileReceivedShares(listing: unknown): void;
+  reconcileReceivedShares(listing: unknown): Promise<void>;
 }) {
   const {
     registerHandler, assertTrustedSender, withRendererWorkspaceOperation,
     requireEngineCapture, assertWritableWorkspace, linkedChatStoreFor, remoteForWorkspace,
     currentCredentialGeneration, currentCredentials, warmCredentialCache,
-    relayShareJsonWithCredentials, listWorkspaces, setWorkspaceSharedChannels,
+    relayShareJsonWithCredentials, listWorkspaces, updateWorkspaceSharedChannels,
     relayClientForWorkspace, projectPendingChatBookmarksAfterPull, normalizeServerUrl,
     peekedReceivedGrantKinds, peekReceivedGrantKindForShare, acknowledgeWorkspaceShareSkips,
     notifyRenderer, mountShareFolder, unmountShareFolder, sharesChanged, reconcileReceivedShares,
@@ -310,16 +313,14 @@ export function registerSharedChannelsIpcHandlers<
       relayUrl: input.relayUrl,
       serverUrl: input.serverUrl,
       preWrite: input.preWrite,
-      readSharedChannels: () => {
-        assertCurrent();
-        return input.operation.workspace.sharedChannels ?? [];
-      },
-      writeSharedChannels: (workspaceId, channels) => {
+      updateSharedChannels: async (workspaceId, update) => {
         if (workspaceId !== workspace.workspaceId) {
           throw new Error("This write targeted a different workspace.");
         }
-        assertCurrent();
-        setWorkspaceSharedChannels(workspaceId, channels);
+        await updateWorkspaceSharedChannels(workspaceId, (channels) => {
+          assertCurrent();
+          return update(channels);
+        });
         assertCurrent();
       },
       fetchInfo: async (request) => {
@@ -413,7 +414,8 @@ export function registerSharedChannelsIpcHandlers<
             assertCurrentShareSession();
             // Before the joined answers below are read, so a row this listing
             // resumes answers as live.
-            reconcileReceivedShares(listing);
+            await reconcileReceivedShares(listing);
+            assertCurrentShareSession();
             const receivedShareIds = Array.isArray(listing.received)
               ? listing.received.flatMap((row) => {
                   const selector = row.selector as
@@ -608,16 +610,15 @@ export function registerSharedChannelsIpcHandlers<
   // leaveSharedChannel and leaveDm — a DM's accepted row IS a
   // JoinedSharedChannel row in the same registry, so ending it is the same
   // operation regardless of which surface asked.
-  function endWorkspaceJoinedChannel(
+  async function endWorkspaceJoinedChannel(
     operation: Operation,
     shareId: string,
-  ): void {
-    const workspace = operation.workspace;
-    operation.assertCurrent();
-    setWorkspaceSharedChannels(
-      workspace.workspaceId,
-      endJoinedChannel(workspace.sharedChannels ?? [], shareId),
-    );
+  ): Promise<void> {
+    const workspaceId = operation.workspace.workspaceId;
+    await updateWorkspaceSharedChannels(workspaceId, (channels) => {
+      operation.assertCurrent();
+      return endJoinedChannel(channels, shareId);
+    });
     operation.assertCurrent();
   }
 
@@ -629,7 +630,7 @@ export function registerSharedChannelsIpcHandlers<
       input.workspaceId,
       "Leaving stopped because this window changed workspaces.",
       async (operation) => {
-        endWorkspaceJoinedChannel(operation, input.shareId);
+        await endWorkspaceJoinedChannel(operation, input.shareId);
         if (shareMountRecordsForId(storedShareMounts(operation.workspace), input.shareId).length > 0) {
           let folderLeft = false;
           try {

@@ -1,4 +1,5 @@
-import { createHash } from "node:crypto";
+import type { HistoryCursor, VersionRecord } from "../versioned/versionedWireContract";
+import { createHash, randomUUID } from "node:crypto";
 import { classifyEngineFilePath } from "@dohc/security-contract/engine-path-floor";
 import { hasIgnoredSegment, validateUserWritePath } from "@dohc/workspace-core/paths";
 import type { ErrorCode, Event, JsonValue, Request, Response, WireError } from "../protocol";
@@ -52,8 +53,6 @@ const MAX_SECRET_FILE_BYTES = 1024 * 1024;
 const MAX_CAPTURE_BINARY_FILE_BYTES = 5 * 1024 * 1024;
 const COMPARE_PAGE_SIZE = 200;
 const MAX_MERGE_LINES = 2_000;
-const HISTORY_PROTECTED_MOMENT_LIMIT = 500;
-const HISTORY_PROTECTED_BYTE_BUDGET = 256 * 1024;
 // Mirrors MAX_METADATA_FIELD_BYTES in crates/dohc-workspace-engine/src/lib.rs.
 const MAX_METADATA_FIELD_BYTES = 16 * 1024;
 
@@ -155,7 +154,6 @@ const MUTATION_OPTIONAL_STRINGS = [
   "origin",
   "summary",
   "correlationId",
-  "requestId",
   "expectedSha256",
 ] as const;
 const WRITE_OPTIONAL_STRINGS = [
@@ -201,7 +199,7 @@ const VERSIONED_PARAM_SHAPES = {
   },
   [VERSIONED_METHOD.textDelete]: {
     requiredStrings: ["versionId", "path"],
-    optionalStrings: [...MUTATION_OPTIONAL_STRINGS, "expectedObjectId", "captureHoldId"],
+    optionalStrings: [...MUTATION_OPTIONAL_STRINGS, "expectedObjectId", "expectedSha256", "captureHoldId"],
     optionalI64: ["nowMs"],
     optionalJson: ["author"],
     // The engine checks the disk; a loopback has none, so it only validates.
@@ -209,7 +207,7 @@ const VERSIONED_PARAM_SHAPES = {
   },
   [VERSIONED_METHOD.textRollback]: {
     requiredStrings: ["versionId", "path", "mutationMomentId"],
-    optionalStrings: ["workspaceId", "origin", "requestId"],
+    optionalStrings: ["workspaceId", "origin"],
     optionalJson: ["author"],
   },
   [VERSIONED_METHOD.textList]: {
@@ -328,9 +326,12 @@ const VERSIONED_PARAM_SHAPES = {
     optionalI64: ["limit", "beforeMomentOrder"],
   },
   [VERSIONED_METHOD.momentsGet]: { requiredStrings: ["momentId"] },
+  [VERSIONED_METHOD.publicationApplied]: { requiredStrings: ["requestId", "momentId"] },
   [VERSIONED_METHOD.historyPage]: {
     requiredStrings: ["workspaceId"],
-    optionalI64: ["limit", "beforeMomentOrder"],
+    optionalStrings: ["versionId", "objectId"],
+    optionalI64: ["limit"],
+    optionalJson: ["cursor"],
   },
   [VERSIONED_METHOD.searchEnsureIndex]: {
     requiredStrings: ["workspaceId", "versionId"],
@@ -384,7 +385,7 @@ interface WorkspaceState {
   moments: Map<string, InternalMoment>;
   secretMoments: Map<string, InternalSecretMoment>;
   blobs: Map<string, number[]>;
-  replays: Map<string, { fingerprint: string; result: JsonObject }>;
+  replays: Map<string, { fingerprint: string; result: JsonObject; published: boolean }>;
 }
 
 interface ParsedWriteFields {
@@ -616,6 +617,11 @@ function validatePreWorkspaceSemantics(method: string, params: JsonObject): void
         throw new Error("momentId must not be empty");
       }
       break;
+    case VERSIONED_METHOD.publicationApplied:
+      if (serdeRequiredParamString(params, "requestId") === "" || serdeRequiredParamString(params, "momentId") === "") {
+        throw new Error("requestId and momentId must not be empty");
+      }
+      break;
     case VERSIONED_METHOD.secretsApply:
       if (!isSecretClassifiedPath(serdeRequiredParamString(params, "path"))) {
         throw new Error("not-secret-path");
@@ -650,7 +656,6 @@ function requestIdempotencyKey(request: Request): string | undefined {
 }
 
 function parseWriteFields(params: JsonObject, request: Request): ParsedWriteFields {
-  const idempotencyKey = requestIdempotencyKey(request);
   serdeOptionalParamString(params, "workspaceId");
   serdeOptionalParamString(params, "origin");
   serdeOptionalParamString(params, "summary");
@@ -658,7 +663,7 @@ function parseWriteFields(params: JsonObject, request: Request): ParsedWriteFiel
   return {
     objectId: serdeOptionalParamString(params, "objectId"),
     momentId: serdeOptionalParamString(params, "momentId"),
-    requestId: serdeOptionalParamString(params, "requestId") ?? idempotencyKey,
+    requestId: requestIdempotencyKey(request),
     nowMs: serdeOptionalParamNumber(params, "nowMs"),
   };
 }
@@ -703,7 +708,6 @@ function parseTextRenameFields(
   params: JsonObject,
   request: Request,
 ): ParsedTextRenameFields {
-  const idempotencyKey = requestIdempotencyKey(request);
   serdeOptionalParamString(params, "workspaceId");
   serdeOptionalParamString(params, "origin");
   serdeOptionalParamString(params, "summary");
@@ -712,7 +716,7 @@ function parseTextRenameFields(
     versionId: serdeRequiredParamString(params, "versionId"),
     fromPath: serdeRequiredParamString(params, "fromPath"),
     toPath: serdeRequiredParamString(params, "toPath"),
-    requestId: serdeOptionalParamString(params, "requestId") ?? idempotencyKey,
+    requestId: requestIdempotencyKey(request),
     nowMs: serdeOptionalParamNumber(params, "nowMs"),
   };
 }
@@ -721,7 +725,6 @@ function parseTextDeleteFields(
   params: JsonObject,
   request: Request,
 ): ParsedTextDeleteFields {
-  const idempotencyKey = requestIdempotencyKey(request);
   serdeOptionalParamString(params, "workspaceId");
   serdeOptionalParamString(params, "origin");
   serdeOptionalParamString(params, "summary");
@@ -729,7 +732,7 @@ function parseTextDeleteFields(
   return {
     versionId: serdeRequiredParamString(params, "versionId"),
     path: serdeRequiredParamString(params, "path"),
-    requestId: serdeOptionalParamString(params, "requestId") ?? idempotencyKey,
+    requestId: requestIdempotencyKey(request),
     nowMs: serdeOptionalParamNumber(params, "nowMs"),
   };
 }
@@ -983,6 +986,7 @@ function mergeMarkdown(base: string, local: string, remote: string): MarkdownMer
 }
 
 export class VersionedLoopbackEngine implements EngineTransport {
+  private readonly engineUuid = randomUUID();
   readonly requests: Request[] = [];
   readonly responses: Response[] = [];
 
@@ -1202,6 +1206,8 @@ export class VersionedLoopbackEngine implements EngineTransport {
         return this.textDelete(state, workspace, params, parsedTextDelete!);
       case VERSIONED_METHOD.textRollback:
         return this.textRollback(state, workspace, params, request);
+      case "files.resolve":
+        return this.filesResolve(state, params);
       case VERSIONED_METHOD.textList:
         return this.textList(state, params);
       case VERSIONED_METHOD.binaryRead:
@@ -1255,6 +1261,8 @@ export class VersionedLoopbackEngine implements EngineTransport {
         return this.momentsList(state, params);
       case VERSIONED_METHOD.momentsGet:
         return this.momentsGet(state, params);
+      case VERSIONED_METHOD.publicationApplied:
+        return this.publicationApplied(state, params);
       case VERSIONED_METHOD.historyPage:
         return this.historyPage(state, params);
       case VERSIONED_METHOD.searchEnsureIndex:
@@ -1778,6 +1786,8 @@ export class VersionedLoopbackEngine implements EngineTransport {
     if (replay) return replay;
     const before = this.file(version, path);
     if(params.expectedObjectId!==undefined && params.expectedObjectId!==null && before.objectId!==params.expectedObjectId)throw new Error("object-identity-mismatch");
+    if (params.expectedSha256 !== undefined && params.expectedSha256 !== null
+      && (before.binarySha ?? sha256(before.text ?? "")) !== params.expectedSha256) throw new Error("write-precondition-failed");
     this.assertFreshMoment(state, momentId);
     const now = nowMs ?? this.clock++;
     // The removed content, not an empty tombstone: a delete moment repeats it
@@ -1823,8 +1833,7 @@ export class VersionedLoopbackEngine implements EngineTransport {
     );
     const origin = requiredOrigin(params);
     const authorJson = this.writeAuthorFingerprint(params);
-    const requestId =
-      serdeOptionalString(params, "requestId") ?? requestIdempotencyKey(request);
+    const requestId = requestIdempotencyKey(request);
     const fingerprint = JSON.stringify({
       workspaceId: workspace,
       versionId: params.versionId,
@@ -1897,6 +1906,28 @@ export class VersionedLoopbackEngine implements EngineTransport {
       materializeOutcome: materializeEnqueued ? "applied" : "skipped",
     };
     this.recordReplay(state, requestId, params, result, fingerprint);
+    return result;
+  }
+
+  private filesResolve(state: WorkspaceState, params: JsonObject): JsonValue {
+    if (!Array.isArray(params.targets) || params.targets.length > 128 || utf8Length(JSON.stringify(params)) > 48 * 1024) throw new Error("files.resolve exceeds its target or byte cap");
+    const versionId = optionalString(params, "versionId") ?? state.activeVersionId;
+    if (versionId === undefined) throw new Error("workspace-not-found");
+    const version = this.version(state, versionId);
+    const results = params.targets.map(target => {
+      if (!target || typeof target !== "object" || Array.isArray(target) || Object.keys(target).length !== 1) return { status: "invalid" };
+      let entry: [string, LoopbackFile] | undefined;
+      if ("path" in target && typeof target.path === "string") {
+        let path: string;
+        try { path = normalizedEnginePath(target.path, "addressable"); } catch { return { status: "invalid" }; }
+        const file = version.files.get(path);
+        if (file) entry = [path, file];
+      } else if ("objectId" in target && typeof target.objectId === "string" && target.objectId.length > 0 && utf8Length(target.objectId) <= 512) {
+        entry = [...version.files].find(([, file]) => file.objectId === target.objectId);
+      } else return { status: "invalid" };
+      return entry ? { status: "found", objectId: entry[1].objectId, path: entry[0] } : { status: "absent" };
+    });
+    const result = { versionId, results };
     return result;
   }
 
@@ -2108,8 +2139,7 @@ export class VersionedLoopbackEngine implements EngineTransport {
     const origin = requiredOrigin(params);
     // Before every replay/dedup/unchanged return — see metadataField.
     const metadata = this.momentMetadataFields(params);
-    const requestId =
-      serdeOptionalString(params, "requestId") ?? requestIdempotencyKey(request);
+    const requestId = requestIdempotencyKey(request);
     const sourceVersionId = requiredString(params, "sourceVersionId", "merge");
     const targetVersionId = requiredString(params, "targetVersionId", "merge");
     const path = requiredString(params, "path", "merge");
@@ -2627,71 +2657,59 @@ export class VersionedLoopbackEngine implements EngineTransport {
     return moment ? this.capMoment(moment.wire) : null;
   }
 
+  // As in the daemon's request ledger, a request binds to the one moment its
+  // recorded result names.
+  private publicationApplied(state: WorkspaceState, params: JsonObject): boolean {
+    const momentId = requiredString(params, "momentId", "publication applied");
+    const recorded = state.replays.get(requiredString(params, "requestId", "publication applied"));
+    const moment = recorded?.result.moment;
+    return recorded?.published === true && state.moments.has(momentId) &&
+      typeof moment === "object" && moment !== null && !Array.isArray(moment) && moment.momentId === momentId;
+  }
+
   private historyPage(state: WorkspaceState, params: JsonObject): JsonValue {
-    const activeVersionId = state.activeVersionId;
-    if (!state.versioned || activeVersionId === undefined) {
-      throw new Error("workspace-not-found");
-    }
-    const textMomentPage = this.momentsList(state, {
-      versionId: activeVersionId,
-      ...(params.limit !== undefined ? { limit: params.limit } : {}),
-      ...(params.beforeMomentOrder !== undefined
-        ? { beforeMomentOrder: params.beforeMomentOrder }
-        : {}),
-    });
-    const textMoments = textMomentPage.moments;
-    const beforeMomentOrder = optionalNumber(params, "beforeMomentOrder");
-    const upperRecordedAtMs =
-      beforeMomentOrder === undefined
-        ? Number.POSITIVE_INFINITY
-        : [...state.moments.values()]
-            .map((moment) => moment.wire)
-            .filter(
-              (moment) =>
-                moment.versionId === activeVersionId &&
-                moment.momentOrder <= beforeMomentOrder,
-            )
-            .sort((left, right) => right.momentOrder - left.momentOrder)[0]
-            ?.recordedAtMs ?? Number.POSITIVE_INFINITY;
-    const lowerRecordedAtMs =
-      textMomentPage.nextBeforeMomentOrder === null
-        ? Number.NEGATIVE_INFINITY
-        : (textMoments.at(-1)?.recordedAtMs ?? Number.NEGATIVE_INFINITY);
-    const protectedMomentsInWindow = [...state.secretMoments.values()]
-      .map((moment) => moment.wire)
-      .filter(
-        (moment) =>
-          moment.versionId === activeVersionId &&
-          moment.recordedAtMs > lowerRecordedAtMs &&
-          moment.recordedAtMs <= upperRecordedAtMs,
-      )
-      .sort(
-        (left, right) =>
-          right.recordedAtMs - left.recordedAtMs ||
-          right.momentOrder - left.momentOrder ||
-          left.id.localeCompare(right.id),
-      );
-    const rowLimited = protectedMomentsInWindow.slice(
-      0,
-      HISTORY_PROTECTED_MOMENT_LIMIT,
-    );
-    let included = 0;
-    let remaining = HISTORY_PROTECTED_BYTE_BUDGET;
-    for (const moment of rowLimited) {
-      const bytes = utf8Length(JSON.stringify(moment));
-      if (included > 0 && bytes > remaining) break;
-      included += 1;
-      remaining -= bytes;
-    }
-    const protectedMoments = rowLimited.slice(0, included);
-    return {
-      activeVersion: this.versionJson(this.version(state, activeVersionId)),
-      textMomentPage,
-      protectedMoments,
-      protectedTruncated:
-        protectedMomentsInWindow.length > rowLimited.length ||
-        protectedMoments.length < rowLimited.length,
+    const versionId = optionalString(params, "versionId") ?? state.activeVersionId;
+    if (!state.versioned || versionId === undefined) throw new Error("workspace-not-found");
+    const objectId = optionalString(params, "objectId") ?? null;
+    if (objectId === "") throw new Error("invalid-input");
+    const limit = Math.max(1, Math.min(50, optionalNumber(params, "limit") ?? 50));
+    const text = [...state.moments.values()].map(m => m.wire).filter(m => m.versionId === versionId && (objectId === null || m.objectId === objectId));
+    const protectedRows = objectId === null ? [...state.secretMoments.values()].map(m => m.wire).filter(m => m.versionId === versionId) : [];
+    const versions = [...state.versions.values()].map(v => this.versionJson(v) as unknown as VersionRecord);
+    const startCursor: HistoryCursor = params.cursor as HistoryCursor | undefined ?? {
+      format: 1, engineUuid: this.engineUuid, workspaceId: versions[0]!.workspaceId,
+      versionId, objectId, textFence: Math.max(-1, ...text.map(m => m.momentOrder)),
+      protectedFence: Math.max(-1, ...protectedRows.map(m => m.momentOrder)), markerFence: objectId === null ? versions.length : -1,
+      text: null, protected: null, marker: null,
     };
+    const validPosition = (position: HistoryCursor["text"], fence: number) => position === null || (position.momentOrder >= 0 && position.momentOrder <= fence);
+    const objectStreamsEmpty = objectId === null || (startCursor.protectedFence === -1 && startCursor.markerFence === -1 && startCursor.protected === null && startCursor.marker === null);
+    if (startCursor.format !== 1 || startCursor.engineUuid !== this.engineUuid || startCursor.workspaceId !== versions[0]!.workspaceId ||
+      startCursor.versionId !== versionId || startCursor.objectId !== objectId || startCursor.textFence < -1 || startCursor.protectedFence < -1 || startCursor.markerFence < -1 ||
+      !validPosition(startCursor.text, startCursor.textFence) || !validPosition(startCursor.protected, startCursor.protectedFence) || !objectStreamsEmpty) throw new Error("invalid-input");
+    const cursor = structuredClone(startCursor);
+    const afterPosition = (m: {recordedAtMs: number; momentOrder: number}, p: HistoryCursor["text"]) => p === null || m.recordedAtMs < p.recordedAtMs || (m.recordedAtMs === p.recordedAtMs && m.momentOrder < p.momentOrder);
+    const rows = [
+      ...text.filter(m => m.momentOrder <= cursor.textFence && afterPosition(m, cursor.text)).map(m => ({time:m.recordedAtMs, kind:0, order:m.momentOrder, id:m.momentId, value:m})),
+      ...protectedRows.filter(m => m.momentOrder <= cursor.protectedFence && afterPosition(m, cursor.protected)).map(m => ({time:m.recordedAtMs, kind:1, order:m.momentOrder, id:m.id, value:m})),
+      ...versions.slice(0, Math.max(0,cursor.markerFence)).filter(v => cursor.marker === null || v.createdAtMs < cursor.marker.createdAtMs || (v.createdAtMs === cursor.marker.createdAtMs && v.id < cursor.marker.versionId)).map(v => ({time:v.createdAtMs, kind:2, order:0, id:v.id, value:v})),
+    ].sort((a,b) => b.time-a.time || a.kind-b.kind || b.order-a.order || (a.id > b.id ? -1 : a.id < b.id ? 1 : 0));
+    const moments: JsonValue[] = [], protectedMoments: JsonValue[] = [], versionMarkers: JsonValue[] = [];
+    let used = 0, included = 0;
+    for (const row of rows) {
+      let value: JsonValue = row.value;
+      if (row.kind === 0) {
+        const m = row.value as MomentRecord;
+        value = Object.fromEntries(["momentOrder","momentId","versionId","objectId","path","recordedAtMs","operation","afterContentKind","afterByteLength","metadataOrigin","metadataSummary","metadataCorrelationId","authors","syncRecordOnly"].filter(k => k in m).map(k => [k,(m as unknown as JsonObject)[k]!])) as JsonObject;
+      }
+      const bytes = utf8Length(JSON.stringify(value));
+      if (included >= limit || (included > 0 && used+bytes > 256*1024)) break;
+      used += bytes; included++;
+      if (row.kind === 0) { moments.push(value); cursor.text={recordedAtMs:row.time,momentOrder:row.order}; }
+      else if (row.kind === 1) { protectedMoments.push(value); cursor.protected={recordedAtMs:row.time,momentOrder:row.order}; }
+      else { versionMarkers.push(value); cursor.marker={createdAtMs:row.time,versionId:row.id}; }
+    }
+    return {activeVersion:this.versionJson(this.version(state,state.activeVersionId!)), moments,protectedMoments,versionMarkers,startCursor,nextCursor:included<rows.length?cursor:null,latestMomentOrder:startCursor.textFence};
   }
 
   private workspace(id: string): WorkspaceState {
@@ -2814,6 +2832,11 @@ export class VersionedLoopbackEngine implements EngineTransport {
       state.replays.set(requestId, {
         fingerprint,
         result,
+        // The daemon records a write's publication outcome, and confirms a
+        // checked delete once it reaches disk. This engine publishes as it records.
+        published: result.materializeOutcome === undefined
+          ? typeof params.expectedSha256 === "string"
+          : result.materializeOutcome === "applied",
       });
     }
   }
@@ -2901,6 +2924,7 @@ export class VersionedLoopbackEngine implements EngineTransport {
       metadataCorrelationId: params.correlationId ?? null,
       authorJson: this.writeAuthorFingerprint(params),
       ...(params.expectedObjectId!=null?{expectedObjectId:params.expectedObjectId}:{}),
+      ...(params.expectedSha256!=null?{expectedSha256:params.expectedSha256}:{}),
     });
   }
 

@@ -170,6 +170,8 @@ async function fixture(sourceDataset = false, targetDataset = true) {
     dataGrants: (id) => { const target = [...targets.values()].find((target) => target.kind === "dataset" && target.approved.datasetId === id); if (target?.kind !== "dataset") throw new Error("missing"); return target.grants; },
   };
   const dependencies: CollectionAutomationRunDependencies & DatasetAutomationRunDependencies = {
+    makeDurable: async () => {},
+    isButtonField: async () => true,
     collectionIdOf: (path) => collectionIds.get(path) ?? null,
     collectionPathOf: (id) => hooks.hideDatasetLocations && id.endsWith("-dataset") ? null : [...collectionIds].find(([, known]) => known === id)?.[0] ?? null,
     targets: { resolve: async (path) => hooks.hostDown && targets.get(path)?.kind === "dataset" ? { kind: "problem", code: "host-unavailable", problem: "Unavailable" } : targets.get(path) ?? { kind: "problem", code: "missing", problem: "Missing" } },
@@ -177,7 +179,7 @@ async function fixture(sourceDataset = false, targetDataset = true) {
     withHost: async (work) => hooks.hostDown ? null : work(host), cachedRoster: async () => currentRoster, checkReach: async () => false,
     evaluator: evaluator.forWorkspace("workspace"), store: { ...store, appendEffect: async (run, applied) => { if (hooks.crashAppend) { hooks.crashAppend = false; throw new Error("crash before journal append"); } await store.appendEffect(run, applied); } },
     nowMs: () => 1000, personName: (id) => id, readCode: async () => null, readMessageBody: async () => null,
-    chat: { directory: async () => null, write: async () => {} }, postNotice: async () => {}, recipientVerdicts: async () => [],
+    chat: { hasMessage: async () => false, directory: async () => null, write: async () => {} }, postNotice: async () => {}, recipientVerdicts: async () => [],
   };
   const claim = { automationId: sourceDataset ? "collection:Source-dataset#test" : "collection:Source#test", claimId: "claim", createdAtMs: 1000, run: 1, depth: 0 };
   const held: DatasetRunClaim | { source: "document"; claim: AutomationClaim } = sourceDataset ? { source: "dataset", claim: { ...claim, workspaceId: "workspace", datasetId: "Source-dataset", hostEpoch: "epoch", revision: 1,
@@ -1348,4 +1350,150 @@ it.each([false, true])("retains pre-upgrade verdict keys and accounted links acr
       }
     }
   }
+});
+
+
+it("waits for a moved source when target validation finishes mid-run", async () => {
+  const f = await fixture(false, false);
+  const reached = Promise.withResolvers<void>(), resume = Promise.withResolvers<void>();
+  let validations = 0;
+  f.dependencies.targets.validate = async target => {
+    if (++validations === 2) { reached.resolve(); await resume.promise; }
+    return f.targets.get(target.collection.path) ?? { kind: "problem", code: "missing", problem: "dohc cannot find the Collection Source." };
+  };
+  const running = f.run(automation('      - set: {Status: Closed}\n'));
+  try {
+    await reached.promise;
+    f.move("Source", "Shared/Source");
+    resume.resolve();
+    await expect(running).resolves.toEqual({ kind: "wait", reason: "moved" });
+    expect(f.docs.get("Source/same")!.status).toBe("Open");
+    expect((await f.runs()).flatMap(run => run.applied)).toEqual([]);
+  } finally { resume.resolve(); await running; }
+});
+
+
+it.each(["roster", "host", "verdicts"] as const)("does not save a stale source refusal after the %s await", async boundary => {
+  const f = await fixture(boundary === "host", false);
+  const reached = Promise.withResolvers<void>(), resume = Promise.withResolvers<void>();
+  let paused = false;
+  const pause = async () => { if (!paused) { paused = true; reached.resolve(); await resume.promise; } };
+  if (boundary === "roster") f.dependencies.cachedRoster = async () => {
+    if ((await f.runs()).length > 0) {
+      await pause();
+      return { kind: "owner", ownerUserId: "owner", grants: [{ grantId: "editor", recipientUserId: "person",
+        recipientEmail: "person@example.com", files: { paths: ["Source/automations.yaml"], access: "edit", versionId: null }, channel: null }] };
+    }
+    return roster;
+  };
+  if (boundary === "host") {
+    const withHost = f.dependencies.withHost!;
+    let savedHostReads = 0;
+    f.dependencies.withHost = async work => {
+      // The first host read after planning refreshes step permissions.
+      if ((await f.runs()).length > 0 && ++savedHostReads === 1) await pause();
+      return withHost(work);
+    };
+  }
+  if (boundary === "verdicts") f.dependencies.checkReach = async () => {
+    if ((await f.runs()).length === 0) return false;
+    await pause(); return true;
+  };
+  const running = f.run(automation((boundary === "verdicts" ? '      - set: {Status: First}\n' : '') + '      - set: {Status: Closed}\n' + (boundary === "host" ? '        operation: rows.edit\n' : '')));
+  try {
+    await reached.promise;
+    f.move("Source", "Shared/Source");
+    if (boundary === "host") {
+      const target = f.targets.get("Shared/Source")!;
+      if (target.kind !== "dataset") throw new Error("Expected a dataset");
+      f.targets.set("Shared/Source", { ...target, approved: { ...target.approved, revisionSha256: "b".repeat(64) } });
+    }
+    resume.resolve();
+    await expect(running).resolves.toEqual({ kind: "wait", reason: "moved" });
+    const runs = await f.runs();
+    expect(runs).toHaveLength(1);
+    expect(runs[0]!.outcome).toBeNull();
+    expect(runs.flatMap(run => run.applied)).toHaveLength(boundary === "verdicts" ? 1 : 0);
+  } finally { resume.resolve(); await running; }
+});
+
+it("does not save a stale destination refusal after the roster await", async () => {
+  const f = await fixture(false, false);
+  const reached = Promise.withResolvers<void>(), resume = Promise.withResolvers<void>();
+  let paused = false;
+  f.dependencies.cachedRoster = async () => {
+    if (!paused && (await f.runs()).length > 0) {
+      paused = true; reached.resolve(); await resume.promise;
+      return { kind: "owner", ownerUserId: "owner", grants: [{ grantId: "editor", recipientUserId: "person",
+        recipientEmail: "person@example.com", files: { paths: ["Source"], access: "edit", versionId: null }, channel: null }] };
+    }
+    return roster;
+  };
+  const running = f.run(automation(find("Target", false) + set(false, "found")));
+  try {
+    await reached.promise;
+    f.move("Target", "Shared/Target");
+    resume.resolve();
+    await expect(running).resolves.toEqual({ kind: "wait", reason: "moved" });
+    const runs = await f.runs();
+    expect(runs).toHaveLength(1);
+    expect(runs[0]!.outcome).toBeNull();
+    expect(runs[0]!.applied).toEqual([]);
+    expect(f.docs.get("Target/same")!.status).toBe("Open");
+  } finally { resume.resolve(); await running; }
+});
+
+it.each(["success", "roster wait", "held wait"] as const)("keeps a missing source retryable during an index read after %s", async boundary => {
+  const f = await fixture(false, false);
+  const reached = Promise.withResolvers<void>(), resume = Promise.withResolvers<void>();
+  let missing = false, paused = false;
+  const lookup = f.dependencies.collectionPathOf;
+  f.dependencies.collectionPathOf = id => missing && id === "Source" ? null : lookup(id);
+  f.dependencies.isIndexReading = () => missing;
+  const pause = async () => { if (!paused) { paused = true; reached.resolve(); await resume.promise; } };
+  if (boundary === "held wait") f.dependencies.checkReach = async () => {
+    if ((await f.runs()).length === 0) return false;
+    await pause(); return true;
+  };
+  else f.dependencies.cachedRoster = async () => {
+    if ((await f.runs()).length > 0) {
+      await pause();
+      if (boundary === "roster wait") return { kind: "unknown", problem: { kind: "unchecked", next: "Try again." } };
+    }
+    return roster;
+  };
+  const running = f.run(automation((boundary === "held wait" ? '      - set: {Status: First}\n' : '') + '      - set: {Status: Closed}\n'));
+  try {
+    await reached.promise;
+    missing = true;
+    resume.resolve();
+    await expect(running).resolves.toEqual({ kind: "wait", reason: "moved" });
+    const runs = await f.runs();
+    expect(runs).toHaveLength(1);
+    expect(runs[0]!.outcome).toBeNull();
+    expect(runs[0]!.applied).toHaveLength(boundary === "held wait" ? 1 : 0);
+  } finally { resume.resolve(); await running; }
+});
+
+it("still saves a gone source failure when no index read is active", async () => {
+  const f = await fixture(false, false);
+  const reached = Promise.withResolvers<void>(), resume = Promise.withResolvers<void>();
+  let missing = false, paused = false;
+  const lookup = f.dependencies.collectionPathOf;
+  f.dependencies.collectionPathOf = id => missing && id === "Source" ? null : lookup(id);
+  f.dependencies.isIndexReading = () => false;
+  f.dependencies.cachedRoster = async () => {
+    if (!paused && (await f.runs()).length > 0) { paused = true; reached.resolve(); await resume.promise; }
+    return roster;
+  };
+  const running = f.run(automation('      - set: {Status: Closed}\n'));
+  try {
+    await reached.promise;
+    missing = true;
+    resume.resolve();
+    await expect(running).resolves.toMatchObject({ kind: "failed", error: "This automation's Collection is gone." });
+    const runs = await f.runs();
+    expect(runs[0]!.outcome).toMatchObject({ state: "failed", error: "This automation's Collection is gone." });
+    expect(runs[0]!.applied).toEqual([]);
+  } finally { resume.resolve(); await running; }
 });

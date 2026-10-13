@@ -181,13 +181,14 @@ fn prove(
                 if accepted.has_pending_dependencies() || bounded(accepted)? != before {
                     return Ok(false);
                 }
-                Ok(hex_sha256(
-                    original
-                        .project(crate::ContentKind::Richdoc)
-                        .map_err(collab)?
-                        .content
-                        .as_bytes(),
-                ) == digest)
+                let projection = original
+                    .project(crate::ContentKind::Richdoc)
+                    .map_err(collab)?
+                    .content;
+                Ok(hex_sha256(projection.as_bytes()) == digest
+                    || original
+                        .preserved_markdown_source(&projection)
+                        .is_some_and(|source| hex_sha256(source.as_bytes()) == digest))
             }
         }
     })();

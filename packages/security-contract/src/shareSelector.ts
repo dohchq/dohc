@@ -1,6 +1,17 @@
 import { validateUserWritePath } from "@dohc/workspace-core";
 import { classifyEngineFilePath } from "./enginePathFloor";
 
+/** The normalized tracked path selected by a file scope, or null. Versions are checked by the caller. */
+export function visibleSharePath(selector: { paths: readonly string[]; versionId: string | null }, path: string): string | null {
+  const validated = validateUserWritePath(path);
+  if (!validated.ok) return null;
+  if (classifyEngineFilePath(validated.normalized).kind !== "tracked") return null;
+  const selected = selector.paths.length === 0
+    ? selector.versionId !== null
+    : selector.paths.some(granted => validated.normalized === granted || validated.normalized.startsWith(`${granted}/`));
+  return selected ? validated.normalized : null;
+}
+
 // The share selector's VERSION and ACCESS dimensions, as one rule in one
 // place.
 //

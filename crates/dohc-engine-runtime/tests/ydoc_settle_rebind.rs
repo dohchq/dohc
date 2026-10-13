@@ -94,6 +94,8 @@ async fn settle_with_parked_remote_update(queued: bool) {
         let lineage_claim_id = dohc_engine_storage::hex_sha256(&base);
         let base_sha = store.put_binary_blob(&base).expect("base update blob");
         let base_envelope = ReplicationEnvelope {
+            settlement_admission: None,
+            admitted_author_snapshot: None,
             workspace_id: WS.to_owned(),
             origin_id: "identity-refusal-peer".to_owned(),
             origin_seq: 0,
@@ -121,6 +123,8 @@ async fn settle_with_parked_remote_update(queued: bool) {
         let remote = doc.plaintext_insert(6, " remote");
         let remote_sha = store.put_binary_blob(&remote).expect("remote update blob");
         let envelope = ReplicationEnvelope {
+            settlement_admission: None,
+            admitted_author_snapshot: None,
             workspace_id: WS.to_owned(),
             origin_id: "identity-refusal-peer".to_owned(),
             origin_seq: 1,
@@ -610,26 +614,26 @@ async fn a_retired_local_only_doc_reopens_as_absent() {
     // last_settled_sha) survives. The user then deletes the file and the
     // disk-driven retire destroys the head.
     std::fs::remove_file(scratch.path().join(PATH)).expect("delete artifact");
-    handle
-        .capture_retire(
-            dohc_engine_runtime::CaptureRetire {
-                workspace_id: WS.to_owned(),
-                version_id: "main".to_owned(),
-                path: PATH.to_owned(),
-                metadata_summary: None,
-                metadata_correlation_id: None,
-                now_ms: 40,
-                request_id: Some("retire-artifact".to_owned()),
-                only_if_text_head: false,
-                only_if_capture_origin: true,
-                allow_ydoc_origin: true,
-            },
-            dohc_engine_collab::LeaseRegistry::new(),
-            Arc::new(NoFaults),
-            CancellationToken::new(),
-        )
-        .await
-        .expect("retire");
+    dohc_engine_testkit::capture::retire_captured_path(
+        &handle,
+        dohc_engine_runtime::CaptureRetire {
+            workspace_id: WS.to_owned(),
+            version_id: "main".to_owned(),
+            path: PATH.to_owned(),
+            metadata_summary: None,
+            metadata_correlation_id: None,
+            now_ms: 40,
+            request_id: Some("retire-artifact".to_owned()),
+            only_if_text_head: false,
+            only_if_capture_origin: true,
+            allow_ydoc_origin: true,
+        },
+        scratch.path(),
+        dohc_engine_collab::LeaseRegistry::new(),
+        Arc::new(NoFaults),
+    )
+    .await
+    .expect("retire");
 
     // Reopen: the deleted document must not resurrect, and the fresh
     // create-flow must settle cleanly. Mutation check: drop the

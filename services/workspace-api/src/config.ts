@@ -1,3 +1,4 @@
+import { normalizeEmail } from "@dohc/workspace-auth/signUp";
 import { smtpSettingsFromEnv, SmtpConfigError, isLoopback, type SmtpSettings } from "@dohc/workspace-auth/smtp";
 import { trustedAuthProxies } from "./clientAddress";
 
@@ -21,6 +22,14 @@ export interface ServerDescriptor {
 
 export type EmailTransport = "smtp" | "capture" | "none";
 
+/** Who may create an account when the operator closed sign-up. */
+export interface ClosedSignUp {
+  /** DOHC_SIGN_UP_EMAILS, normalized. */
+  emails: ReadonlySet<string>;
+  /** WORKSPACE_API_RELAY_URL: where this service asks about pending invites. */
+  relayUrl: string;
+}
+
 export interface WorkspaceApiConfig {
   port: number;
   /** Loopback whenever a test seam is on, so a seam is never reachable off-host. */
@@ -41,6 +50,8 @@ export interface WorkspaceApiConfig {
   testAuthSeam: boolean;
   /** Accept crash reports on POST /api/crash-reports. Off unless DOHC_CRASH_REPORTS=1. */
   crashReports: boolean;
+  /** Null when anyone who can reach the server may create an account. */
+  signUp: ClosedSignUp | null;
 }
 
 const DEFAULT_PORT = 1786;
@@ -118,7 +129,30 @@ export function readConfig(env: NodeJS.ProcessEnv): WorkspaceApiConfig {
     trustedProxies: readTrustedProxies(env.DOHC_AUTH_TRUSTED_PROXIES),
     testAuthSeam,
     crashReports: readSwitch(env.DOHC_CRASH_REPORTS, "DOHC_CRASH_REPORTS"),
+    signUp: readSignUp(env.DOHC_SIGN_UP_EMAILS, env.WORKSPACE_API_RELAY_URL),
   };
+}
+
+function readSignUp(emails: string | undefined, relayUrl: string | undefined): ClosedSignUp | null {
+  const listed = (emails ?? "").split(",").map(normalizeEmail).filter((email) => email.length > 0);
+  if (listed.length === 0) return null;
+  const invalid = listed.find((email) => !/^[^\s@]+@[^\s@]+$/.test(email));
+  if (invalid !== undefined) {
+    throw new ConfigError(`DOHC_SIGN_UP_EMAILS must list email addresses separated by commas, got "${invalid}".`);
+  }
+  if (!relayUrl?.trim()) {
+    throw new ConfigError("DOHC_SIGN_UP_EMAILS requires WORKSPACE_API_RELAY_URL, so people with a pending invite can sign up.");
+  }
+  let url: URL;
+  try {
+    url = new URL(relayUrl);
+  } catch {
+    throw new ConfigError(`WORKSPACE_API_RELAY_URL must be an absolute http(s) origin, got "${relayUrl}".`);
+  }
+  if ((url.protocol !== "http:" && url.protocol !== "https:") || url.username || url.password || url.search || url.hash || url.pathname !== "/") {
+    throw new ConfigError(`WORKSPACE_API_RELAY_URL must be an http(s) origin with no path or credentials, got "${relayUrl}".`);
+  }
+  return { emails: new Set(listed), relayUrl: url.origin };
 }
 
 function readTrustedProxies(value: string | undefined): Set<string> {

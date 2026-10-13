@@ -25,7 +25,7 @@ export function useAgentSetup(
       runnerConfigured:
         configuredRunnerCommand(userSettings.settings.runner).length > 0,
       runnerEnabled: userSettings.settings.runner.enabled,
-      mcpEnabled: agentRunStatus.mcpEnabled,
+      agentRunActive: agentRunStatus.activeRun !== null,
     };
   }, [agentRunStatus, userSettings]);
 

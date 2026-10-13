@@ -22,10 +22,6 @@ interface ResolvedMention extends MentionToken {
   candidate: MentionCandidate;
 }
 
-type MentionSegment =
-  | { type: "text"; text: string }
-  | { type: "mention"; text: string; candidate: MentionCandidate };
-
 interface MentionScanOptions {
   ignoreCode?: boolean;
 }
@@ -127,30 +123,6 @@ export function findMentions(
     if (candidate) found.push({ ...token, candidate });
   }
   return found;
-}
-
-export function toMentionSegments(
-  body: string,
-  candidates: readonly MentionCandidate[],
-  options: MentionScanOptions = {},
-): MentionSegment[] {
-  const mentions = findMentions(body, candidates, options);
-  if (mentions.length === 0) return [{ type: "text", text: body }];
-  const segments: MentionSegment[] = [];
-  let cursor = 0;
-  for (const mention of mentions) {
-    if (mention.start > cursor) {
-      segments.push({ type: "text", text: body.slice(cursor, mention.start) });
-    }
-    segments.push({
-      type: "mention",
-      text: body.slice(mention.start, mention.end),
-      candidate: mention.candidate,
-    });
-    cursor = mention.end;
-  }
-  if (cursor < body.length) segments.push({ type: "text", text: body.slice(cursor) });
-  return segments;
 }
 
 export function mentionsAnyCandidate(

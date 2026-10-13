@@ -1,9 +1,11 @@
+import type { CapabilityId } from "@dohc/workspace-contracts/capabilities";
 import type { z } from "zod";
-import { documentAgentNameSchema, documentEditTextSchema, requestIdSchema, type CliActor } from "./protocol";
+import { DATASET_CAPABILITIES, APP_PUBLICATION_CAPABILITIES, APP_RESPONSE_CAPABILITIES, documentAgentNameSchema, documentEditTextSchema, requestIdSchema, type CliActor } from "./protocol";
 import { DohcCliError } from "./errors";
 import { OwnerAppPublicationRequest } from "./appPublication";
 import { OwnerAppResponsesRequest } from "./appResponses";
 import { DatasetRequest, DatasetSchemaChange } from "./dataset";
+import { AccessObjectRef } from "@dohc/workspace-contracts/access";
 
 interface ParsedCliBase {
   actor: CliActor;
@@ -16,7 +18,10 @@ type ExportScope =
   | { kind: "thread"; thread: string };
 
 type CliCommandBody =
+  | { verb: "accessObject"; ref: AccessObjectRef; cursor?: string }
+  | { verb: "accessSharing"; lane: "granted" | "received"; cursor?: string }
   | { verb: "documentRead"; path: string }
+  | { verb: "fileChatStart"; path: string; title: string; body: string; stdin: boolean; agent?: string; requestId?: string; runId?: string }
   | { verb: "documentEdit" | "documentCreate"; path: string; text: string; stdin: boolean; find?: string; agent?: string; requestId?: string }
   | { verb: "dataset"; request: DatasetRequest }
   | { verb: "appPublication"; request: OwnerAppPublicationRequest }
@@ -98,6 +103,7 @@ interface VerbInput {
 }
 
 export interface CliVerbSpec {
+  capabilityId: CapabilityId;
   summary: string;
   operands: string;
   flags?: readonly CliFlag[];
@@ -226,6 +232,7 @@ function documentWrite(input: VerbInput, verb: "documentEdit" | "documentCreate"
 
 const DOCUMENT_VERBS = {
   read: {
+    capabilityId: "document.read",
     summary: "Read the current Markdown, including edits in an open editor.",
     operands: "<path>",
     notes: ["Read before editing. Without --json, prints the Markdown byte for byte."],
@@ -237,6 +244,7 @@ const DOCUMENT_VERBS = {
     },
   },
   edit: {
+    capabilityId: "document.edit",
     summary: "Replace matching text or append Markdown through the live document.",
     operands: "<path> [-]",
     flags: [...documentTextFlags,
@@ -249,12 +257,46 @@ const DOCUMENT_VERBS = {
     parse: (input) => documentWrite(input, "documentEdit"),
   },
   create: {
+    capabilityId: "document.create",
     summary: "Create a Markdown document without overwriting an existing file.",
     operands: "<path> [-]",
     flags: documentTextFlags,
     notes: [stdinNote, "Use --text instead to supply Markdown. With neither, create an empty document.",
       "The path must end in .md or .markdown. Frontmatter is refused."],
     parse: (input) => documentWrite(input, "documentCreate"),
+  },
+  comment: {
+    capabilityId: "file.chat.start",
+    summary: "Start a chat linked to a file with its first message.",
+    operands: "<path> [-]",
+    flags: [
+      { name: "--title", value: "title", text: "Set the chat title. Use 1 to 200 characters that are not all whitespace." },
+      { name: "--text", value: "markdown", text: "Set the first message as Markdown. The message must contain text that is not all whitespace." },
+      { name: "--agent", value: "name", text: "Record this agent name with the change." },
+      { name: "--request-id", value: "key", text: "Set a key for safe retries. Use 1 to 64 printable ASCII characters. A retry with the same key and the same payload returns the existing result. A retry with the same key and a changed payload is refused." },
+      { name: "--run-id", value: "id", text: "Set the run ID. The value must not be empty. This flag overrides DOHC_RUN_ID." },
+    ],
+    notes: [stdinNote, "The first message allows at most 64 KiB of UTF-8."],
+    parse: (input) => {
+      const [path, body, ...extra] = input.operands;
+      if (!path) fail("document requires a path");
+      noExtraArgs(extra, "document comment");
+      const title = lastValue(input, "--title");
+      if (title === undefined) fail("comment requires --title");
+      if (!title.trim() || title.length > 200) fail("invalid --title; use 1 to 200 characters that are not all whitespace");
+      const text = lastValue(input, "--text");
+      if (body !== undefined && (body !== "-" || text !== undefined)) fail("use either - for stdin or --text <markdown>");
+      if (body === undefined && text === undefined) fail("use either - for stdin or --text <markdown>");
+      const agent = lastValue(input, "--agent");
+      const requestId = lastValue(input, "--request-id");
+      const runId = lastValue(input, "--run-id");
+      if (agent !== undefined && !documentAgentNameSchema.safeParse(agent).success) fail("invalid --agent name; use 1 to 64 letters, numbers, spaces, dots, underscores, or hyphens, starting with a letter or number");
+      if (requestId !== undefined && !requestIdSchema.safeParse(requestId).success) fail("--request-id requires 1 to 64 printable ASCII characters");
+      if (runId !== undefined && !runId) fail("--run-id requires a value that is not empty");
+      return { verb: "fileChatStart", path, title, body: text ?? "", stdin: body === "-",
+        ...(agent === undefined ? {} : { agent }), ...(requestId === undefined ? {} : { requestId }),
+        ...(runId === undefined ? {} : { runId }) };
+    },
   },
 } satisfies Record<string, CliVerbSpec>;
 
@@ -268,6 +310,7 @@ function decisionFields(input: VerbInput): { needsDecision: boolean; options?: s
 
 const CHAT_VERBS = {
   groups: {
+    capabilityId: "group.list",
     summary: "List the Groups in this workspace.",
     operands: "",
     parse: ({ operands }) => {
@@ -276,6 +319,7 @@ const CHAT_VERBS = {
     },
   },
   threads: {
+    capabilityId: "chat.threads.list",
     summary: "List the threads in a Group.",
     operands: "<group>",
     parse: ({ operands }) => {
@@ -286,6 +330,7 @@ const CHAT_VERBS = {
     },
   },
   inbox: {
+    capabilityId: "chat.inbox.read",
     summary: "List unread threads. For an agent, also list its unread mentions.",
     operands: "",
     parse: ({ operands }) => {
@@ -294,6 +339,7 @@ const CHAT_VERBS = {
     },
   },
   show: {
+    capabilityId: "chat.show",
     summary: "Show a thread or message and mark the thread read.",
     operands: "<thread-or-message>",
     flags: [
@@ -307,6 +353,7 @@ const CHAT_VERBS = {
     },
   },
   post: {
+    capabilityId: "chat.post",
     summary: "Start a thread in a Group.",
     operands: "<group> <body>",
     flags: [{ name: "--title", value: "title", text: "Set the thread's title." }, attachFlag, ...decisionFlags],
@@ -329,6 +376,7 @@ const CHAT_VERBS = {
     },
   },
   reply: {
+    capabilityId: "chat.reply",
     summary: "Reply in a thread.",
     operands: "<thread> <body>",
     flags: [
@@ -362,6 +410,7 @@ const CHAT_VERBS = {
     },
   },
   react: {
+    capabilityId: "chat.react",
     summary: "Add your reaction to a message, or remove it if it is already there.",
     operands: "<message> <emoji>",
     parse: ({ operands }) => {
@@ -372,6 +421,7 @@ const CHAT_VERBS = {
     },
   },
   grep: {
+    capabilityId: "chat.search",
     summary: "Search message text and thread titles.",
     operands: "<pattern>",
     flags: [
@@ -412,6 +462,7 @@ const CHAT_VERBS = {
     },
   },
   export: {
+    capabilityId: "chat.export",
     summary: "Save threads as Markdown files, one file per thread.",
     operands: "",
     flags: [
@@ -438,6 +489,7 @@ const CHAT_VERBS = {
 
 const HISTORY_VERBS = {
   list: {
+    capabilityId: "history.list",
     summary: "List changes to files, newest first.",
     operands: "[<path>]",
     flags: [
@@ -454,6 +506,7 @@ const HISTORY_VERBS = {
     },
   },
   show: {
+    capabilityId: "history.read",
     summary: "Print a file's text as one change left it.",
     operands: "<change>",
     flags: [{ name: "--before", text: "Print the text from before the change instead." }],
@@ -478,6 +531,7 @@ function automationOperands(input: VerbInput, verb: string, takesRun: boolean): 
 
 const AUTOMATION_VERBS = {
   list: {
+    capabilityId: "automation.list",
     summary: "Read a Collection's automation definitions and on/off file state.", operands: "<collection>",
     parse: input => {
       const [collectionPath, ...extra] = input.operands;
@@ -487,6 +541,7 @@ const AUTOMATION_VERBS = {
     },
   },
   switch: {
+    capabilityId: "automation.switch",
     summary: "Switch one automation on or off in its file.", operands: "<collection> <automation> <on|off>",
     flags: [
       { name: "--base", value: "hash", text: "Use the contentHash returned by automation list." },
@@ -504,6 +559,7 @@ const AUTOMATION_VERBS = {
     },
   },
   buttons: {
+    capabilityId: "automation.buttons.inspect",
     summary: "Inspect Button fields and the actions they require you to confirm.",
     operands: "<collection>",
     flags: [{ name: "--table", value: "table", text: "Inspect the buttons in this dataset table." }],
@@ -516,6 +572,7 @@ const AUTOMATION_VERBS = {
     },
   },
   runs: {
+    capabilityId: "automation.runs.list",
     summary: "List an automation's runs on this computer, newest first.",
     operands: "<collection> <automation>",
     flags: [{ name: "--page", value: "page", text: "List the older runs the last line of an earlier listing names." }],
@@ -530,6 +587,7 @@ const AUTOMATION_VERBS = {
     },
   },
   run: {
+    capabilityId: "automation.run.read",
     summary: "Show one run: what started it, what each step changed, and why it failed.",
     operands: "<collection> <automation> <run>",
     notes: [
@@ -541,6 +599,7 @@ const AUTOMATION_VERBS = {
     },
   },
   retry: {
+    capabilityId: "automation.run.retry",
     summary: "Try a failed run again. It resumes after the last step that finished.",
     operands: "<collection> <automation> <run>",
     flags: [
@@ -556,6 +615,7 @@ const AUTOMATION_VERBS = {
     },
   },
   press: {
+    capabilityId: "automation.button.press",
     summary: "Press a Button field on one record, as a person clicks it in dohc.",
     operands: "<collection> <button> <record>",
     flags: [
@@ -600,6 +660,7 @@ interface JsonVerbHelp {
 }
 
 function jsonVerb(
+  capabilityId: CapabilityId,
   command: string,
   name: string,
   action: string,
@@ -610,6 +671,7 @@ function jsonVerb(
   const label = `${command} ${name}`;
   const invalid = `invalid ${label} arguments; run dohc ${label} --help`;
   return {
+    capabilityId,
     ...help,
     operands: "'<JSON>'",
     fields,
@@ -848,7 +910,7 @@ const DATASET_VERBS: Record<string, CliVerbSpec> = Object.fromEntries(
       const action = option.shape.action.value;
       return [
         action,
-        jsonVerb("dataset", action, action, option.shape, DATASET_HELP[action], (value) => ({
+        jsonVerb(DATASET_CAPABILITIES[action], "dataset", action, action, option.shape, DATASET_HELP[action], (value) => ({
           verb: "dataset",
           request: DatasetRequest.parse(value),
         })),
@@ -862,7 +924,7 @@ const APP_VERBS: Record<string, CliVerbSpec> = Object.fromEntries([
     const action = option.shape.action.value;
     return [
       action,
-      jsonVerb("app", action, action, option.shape, APP_HELP[action], (value) => ({
+      jsonVerb(APP_PUBLICATION_CAPABILITIES[action], "app", action, action, option.shape, APP_HELP[action], (value) => ({
         verb: "appPublication",
         request: OwnerAppPublicationRequest.parse(value),
       })),
@@ -873,7 +935,7 @@ const APP_VERBS: Record<string, CliVerbSpec> = Object.fromEntries([
     const { name, ...help } = APP_RESPONSE_VERBS[action];
     return [
       name,
-      jsonVerb("app", name, action, option.shape, help, (value) => ({
+      jsonVerb(APP_RESPONSE_CAPABILITIES[action], "app", name, action, option.shape, help, (value) => ({
         verb: "ownerAppResponses",
         request: OwnerAppResponsesRequest.parse(value),
       })),
@@ -883,8 +945,36 @@ const APP_VERBS: Record<string, CliVerbSpec> = Object.fromEntries([
 
 /** Every command and verb the CLI dispatches. Help reads this table too. */
 export const CLI_COMMANDS: Readonly<Record<string, CliCommandSpec>> = {
+  access: {
+    summary: "Read observed object grants and Sharing inventories.",
+    notes: ["Answers describe observed grants, not authorization. An empty page means no matching grants within its coverage.",
+      "Paths resolve from your current folder. Received selectors use their source workspace's coordinates."],
+    verbs: {
+      object: {
+        capabilityId: "access.object.read", summary: "Read the grants covering an object.", operands: "<reference-json>",
+        flags: [{ name: "--cursor", value: "cursor", text: "Continue the previous answer." }],
+        parse: input => {
+          const [value, ...extra] = input.operands; noExtraArgs(extra, "access object");
+          let ref: AccessObjectRef;
+          try { ref = AccessObjectRef.parse(JSON.parse(value ?? "")); } catch { return fail("Use a path, file, chat, or Collection reference as JSON."); }
+          const cursor = lastValue(input, "--cursor");
+          return { verb: "accessObject", ref, ...(cursor ? { cursor } : {}) };
+        },
+      },
+      sharing: {
+        capabilityId: "access.sharing.read", summary: "Page this workspace's granted shares or this account's received shares.", operands: "<granted|received>",
+        flags: [{ name: "--cursor", value: "cursor", text: "Continue the previous answer." }],
+        parse: input => {
+          const [lane, ...extra] = input.operands; noExtraArgs(extra, "access sharing");
+          if (lane !== "granted" && lane !== "received") return fail("Choose granted or received.");
+          const cursor = lastValue(input, "--cursor");
+          return { verb: "accessSharing", lane, ...(cursor ? { cursor } : {}) };
+        },
+      },
+    },
+  },
   document: {
-    summary: "Read, edit, and create live Markdown documents.",
+    summary: "Read, edit, and create live Markdown documents, and comment on tracked text files.",
     notes: ["Paths resolve from your current folder. Changes are recorded as an agent's, as with MCP.",
       "A refusal exits with status 1 and prints its reason to stderr, including with --json."],
     verbs: DOCUMENT_VERBS,

@@ -1,35 +1,54 @@
 import { mapWidgetOwners } from "./widgetOwnership";
 import { isEditableEditor, stopEditorMouseEvent } from "./pmHelpers";
-import { Fragment, useEffect, useRef, useState, type RefObject } from "react";
+import { useEffect, useId, useLayoutEffect, useRef, useState, type RefObject } from "react";
 import type { Editor } from "@tiptap/core";
 import { serializeRichdocBody } from "@dohc/ydoc-projection";
 import { NodeSelection, Plugin, PluginKey, TextSelection, type Transaction } from "@tiptap/pm/state";
 import { ReplaceStep } from "@tiptap/pm/transform";
-import type { Node as ProseMirrorNode, ResolvedPos, Slice } from "@tiptap/pm/model";
+import type { Node as ProseMirrorNode, ResolvedPos } from "@tiptap/pm/model";
 import { Decoration, DecorationSet, type EditorView } from "@tiptap/pm/view";
-import { ChevronDown } from "lucide-react";
+import {
+  ChevronDown,
+  ClipboardCopy,
+  Copy,
+  Heading1,
+  Heading2,
+  Heading3,
+  List,
+  ListOrdered,
+  ListTodo,
+  Pilcrow,
+  Quote,
+  X,
+  type LucideIcon,
+} from "lucide-react";
+import {
+  MENU_ACTIVE_OPTION,
+  MENU_ENTER,
+  MENU_FRAME,
+  MENU_ICON,
+  MENU_LABEL,
+  MENU_ROW,
+  MENU_ROW_TONE,
+  MENU_SECTION,
+  MENU_SHORTCUT,
+  deleteShortcut,
+  menuEnterFrom,
+  movedPointer,
+  moveInMenu,
+  revealMenuRow,
+} from "../ui/Menu";
+import { useDismiss } from "../ui/useDismiss";
 import {
   FLOATING_MENU_MAX_HEIGHT,
   resolveFloatingMenuPosition,
   type FloatingMenuPlacement,
 } from "./floatingMenuPosition";
-import { escapeHighlightMarkdown } from "./extensions";
+import { escapeHighlightMarkdown } from "@dohc/ydoc-projection/markdown-extensions";
 
 const blockControlsKey = new PluginKey("dohc-block-controls");
 
 // ── drag payload ──────────────────────────────────────────────────────────
-
-/**
- * The slice that a top-level block at `pos` contributes to a drag. Mirrors what
- * ProseMirror's own draggable-node dragstart uses: `NodeSelection.content()`,
- * i.e. a slice whose single child is the block node (openStart/openEnd 0).
- * Factored out so the drag payload can be unit-tested without a real DnD event.
- */
-export function blockDragSlice(view: EditorView, pos: number): Slice | null {
-  const node = view.state.doc.nodeAt(pos);
-  if (!node) return null;
-  return NodeSelection.create(view.state.doc, pos).content();
-}
 
 /** The ghost a plugin instance currently has parked on the document. One slot,
  * because it tracks a lifetime rather than a drag: every path that ends a
@@ -97,7 +116,7 @@ function removeBlockDragGhost(slot: DragGhostSlot): void {
 function buildBlockControlDecorations(
   doc: ProseMirrorNode,
   onInsertRef: RefObject<(pos: number) => void>,
-  onOpenMenuRef: RefObject<(pos: number, rect: DOMRect) => void>,
+  onOpenMenuRef: RefObject<(pos: number, handle: HTMLElement) => void>,
   ghostSlot: DragGhostSlot,
   owners: Map<number, string>,
   nextOwnerKey: () => string,
@@ -140,6 +159,8 @@ function buildBlockControlDecorations(
           handle.className = "dohc-block-gutter-btn dohc-block-handle";
           handle.title = "drag to move · click for actions";
           handle.setAttribute("aria-label", "block actions");
+          handle.setAttribute("aria-haspopup", "menu");
+          handle.setAttribute("aria-expanded", "false");
           handle.setAttribute("draggable", "true");
           // Only stop propagation (not preventDefault) so the native HTML5 drag
           // can still start — preventing the mousedown default cancels dragging.
@@ -187,7 +208,7 @@ function buildBlockControlDecorations(
                 ),
               );
             }
-            onOpenMenuRef.current(currentPos, handle.getBoundingClientRect());
+            onOpenMenuRef.current(currentPos, handle);
           });
 
           wrap.append(plus, handle);
@@ -269,7 +290,7 @@ export function makeBlockControlsPlugin({
   onOpenMenuRef,
 }: {
   onInsertRef: RefObject<(pos: number) => void>;
-  onOpenMenuRef: RefObject<(pos: number, rect: DOMRect) => void>;
+  onOpenMenuRef: RefObject<(pos: number, handle: HTMLElement) => void>;
 }) {
   let activeBlockIndex: string | null | undefined;
   const ghostSlot: DragGhostSlot = { current: null };
@@ -368,19 +389,6 @@ export function insertBlockAfter(
   openSlashMenuAtPosition(selectionPos);
 }
 
-export function selectBlock(editor: Editor | null, pos: number): void {
-  const view = editor?.view;
-  if (!view) return;
-  const node = view.state.doc.nodeAt(pos);
-  if (!node) return;
-  view.dispatch(
-    view.state.tr
-      .setSelection(NodeSelection.create(view.state.doc, pos))
-      .scrollIntoView(),
-  );
-  view.focus();
-}
-
 // ── block context menu ─────────────────────────────────────────────────────
 
 export type BlockMenuTurnIntoId =
@@ -396,8 +404,8 @@ export type BlockMenuTurnIntoId =
 type BlockMenuActionId = "duplicate" | "copy-markdown" | "delete";
 
 export type BlockMenuEntry =
-  | { kind: "turn-into"; id: BlockMenuTurnIntoId; label: string; glyph: string }
-  | { kind: "action"; id: BlockMenuActionId; label: string; glyph: string };
+  | { kind: "turn-into"; id: BlockMenuTurnIntoId; label: string; icon: LucideIcon }
+  | { kind: "action"; id: BlockMenuActionId; label: string; icon: LucideIcon };
 
 export type BlockMenuState =
   | { open: false }
@@ -408,6 +416,8 @@ export type BlockMenuState =
       y: number;
       maxHeight: number;
       placement: FloatingMenuPlacement;
+      /** The handle that opened the menu, where focus goes back. */
+      trigger?: HTMLElement | null;
     };
 
 export const CLOSED_BLOCK_MENU_STATE: BlockMenuState = { open: false };
@@ -416,20 +426,20 @@ export const CLOSED_BLOCK_MENU_STATE: BlockMenuState = { open: false };
 // exact same entry list/order/labels the block context menu uses, instead of
 // keeping a second copy that could drift.
 export const TURN_INTO_ENTRIES: BlockMenuEntry[] = [
-  { kind: "turn-into", id: "paragraph", label: "Text", glyph: "¶" },
-  { kind: "turn-into", id: "heading-1", label: "Heading 1", glyph: "H1" },
-  { kind: "turn-into", id: "heading-2", label: "Heading 2", glyph: "H2" },
-  { kind: "turn-into", id: "heading-3", label: "Heading 3", glyph: "H3" },
-  { kind: "turn-into", id: "bulleted-list", label: "Bulleted list", glyph: "-" },
-  { kind: "turn-into", id: "numbered-list", label: "Numbered list", glyph: "1." },
-  { kind: "turn-into", id: "task-list", label: "Todo list", glyph: "[]" },
-  { kind: "turn-into", id: "quote", label: "Quote", glyph: ">" },
+  { kind: "turn-into", id: "paragraph", label: "Text", icon: Pilcrow },
+  { kind: "turn-into", id: "heading-1", label: "Heading 1", icon: Heading1 },
+  { kind: "turn-into", id: "heading-2", label: "Heading 2", icon: Heading2 },
+  { kind: "turn-into", id: "heading-3", label: "Heading 3", icon: Heading3 },
+  { kind: "turn-into", id: "bulleted-list", label: "Bulleted list", icon: List },
+  { kind: "turn-into", id: "numbered-list", label: "Numbered list", icon: ListOrdered },
+  { kind: "turn-into", id: "task-list", label: "Todo list", icon: ListTodo },
+  { kind: "turn-into", id: "quote", label: "Quote", icon: Quote },
 ];
 
 const ACTION_ENTRIES: BlockMenuEntry[] = [
-  { kind: "action", id: "duplicate", label: "Duplicate", glyph: "⧉" },
-  { kind: "action", id: "copy-markdown", label: "Copy as markdown", glyph: "md" },
-  { kind: "action", id: "delete", label: "Delete", glyph: "✕" },
+  { kind: "action", id: "duplicate", label: "Duplicate", icon: Copy },
+  { kind: "action", id: "copy-markdown", label: "Copy as markdown", icon: ClipboardCopy },
+  { kind: "action", id: "delete", label: "Delete", icon: X },
 ];
 
 const BLOCK_MENU_ENTRIES: BlockMenuEntry[] = [
@@ -439,7 +449,8 @@ const BLOCK_MENU_ENTRIES: BlockMenuEntry[] = [
 
 const TURN_INTO_COUNT = TURN_INTO_ENTRIES.length;
 
-export function resolveBlockMenuState(pos: number, rect: DOMRect): BlockMenuState {
+export function resolveBlockMenuState(pos: number, trigger: HTMLElement): BlockMenuState {
+  const rect = trigger.getBoundingClientRect();
   const position = resolveFloatingMenuPosition({
     cursorRect: { left: rect.right + 6, top: rect.top, bottom: rect.bottom },
     menuWidth: 240,
@@ -452,6 +463,7 @@ export function resolveBlockMenuState(pos: number, rect: DOMRect): BlockMenuStat
     y: position.y,
     maxHeight: position.maxHeight,
     placement: position.placement,
+    trigger,
   };
 }
 
@@ -590,6 +602,11 @@ export async function copyBlockAsMarkdown(
   await writeClipboardText(serializeBlockToMarkdown(node));
 }
 
+// The block handle's menu, drawn from the Menu part's recipe. ProseMirror
+// owns the handle, so this cannot be the Menu component; it closes by the
+// same rule (useDismiss) and moves by the same keys (moveInMenu). Focus stays
+// on the frame and aria-activedescendant names the active row, which draws
+// the accent outline whichever of the keyboard or the pointer moved it there.
 export function BlockMenu({
   state,
   onSelect,
@@ -600,87 +617,134 @@ export function BlockMenu({
   onClose: () => void;
 }) {
   const menuRef = useRef<HTMLDivElement>(null);
-  const [selected, setSelected] = useState(0);
+  // Held directly: the editor can sit in a shadow root, where a document
+  // lookup by id finds nothing.
+  const rowElements = useRef<Array<HTMLButtonElement | null>>([]);
+  // Kept after the menu closes: a press on blank space returns focus to the
+  // handle when the press ends, which is after the close.
+  const trigger = useRef<HTMLElement | null>(null);
+  if (state.open) trigger.current = state.trigger ?? null;
+  const id = useId();
+  const [active, setActive] = useState(0);
   const open = state.open;
   const pos = state.open ? state.pos : -1;
+  useDismiss({ open, container: menuRef, trigger, onClose });
 
   useEffect(() => {
     if (!open) return;
-    setSelected(0);
-    menuRef.current?.focus();
+    setActive(0);
+    menuRef.current?.focus({ preventScroll: true });
+    const handle = trigger.current;
+    handle?.setAttribute("aria-expanded", "true");
+    return () => handle?.setAttribute("aria-expanded", "false");
   }, [open, pos]);
+
+  const rowId = (index: number) => `${id}-row-${index}`;
+  // The list is taller than its cap, so the active row is scrolled into it
+  // whenever it changes. The first row of a section brings its label along.
+  useLayoutEffect(() => {
+    const list = menuRef.current;
+    if (!open || !list) return;
+    const activeRow = rowElements.current[active];
+    const firstOfSection = active === 0 || active === TURN_INTO_COUNT;
+    revealMenuRow(list, activeRow, firstOfSection ? activeRow?.parentElement : activeRow);
+  }, [open, active]);
 
   if (!state.open) return null;
 
-  const move = (delta: number) =>
-    setSelected(
-      (current) =>
-        (current + delta + BLOCK_MENU_ENTRIES.length) % BLOCK_MENU_ENTRIES.length,
+  const shortcut = deleteShortcut();
+  const labels = BLOCK_MENU_ENTRIES.map((entry) => entry.label);
+  // Focus goes back to the handle first, as the Menu part does, and the
+  // action then moves it into the document when it edits one.
+  const pick = (entry: BlockMenuEntry) => {
+    trigger.current?.focus({ preventScroll: true });
+    onSelect(entry);
+  };
+  const row = (entry: BlockMenuEntry, index: number) => {
+    const danger = entry.kind === "action" && entry.id === "delete";
+    const Icon = entry.icon;
+    return (
+      <button
+        key={`${entry.kind}-${entry.id}`}
+        id={rowId(index)}
+        ref={(element) => {
+          rowElements.current[index] = element;
+        }}
+        type="button"
+        role="menuitem"
+        tabIndex={-1}
+        data-active={index === active || undefined}
+        aria-keyshortcuts={danger ? shortcut.keys : undefined}
+        onMouseMove={(event) => {
+          // Only a pointer that moves picks the active row, so a menu that
+          // opens under a still pointer keeps its first row.
+          if (movedPointer(event) && index !== active) setActive(index);
+        }}
+        onClick={() => pick(entry)}
+        className={`${MENU_ROW} ${MENU_ACTIVE_OPTION} ${danger ? MENU_ROW_TONE.danger : `${MENU_ROW_TONE.rest} data-active:text-ink`}`}
+      >
+        <span className={`${MENU_ICON} ${danger ? "" : "text-subtle"}`}>
+          <Icon size={14} aria-hidden />
+        </span>
+        <span className={MENU_LABEL}>{entry.label}</span>
+        {danger ? (
+          <span aria-hidden className={MENU_SHORTCUT}>
+            {shortcut.label}
+          </span>
+        ) : null}
+      </button>
     );
+  };
 
   return (
-    <>
-      <div
-        className="dohc-block-menu-backdrop"
-        onMouseDown={onClose}
-        aria-hidden="true"
-      />
-      <div
-        ref={menuRef}
-        className="dohc-block-menu"
-        role="menu"
-        aria-label="block actions"
-        tabIndex={-1}
-        data-placement={state.placement}
-        style={{ left: state.x, top: state.y, maxHeight: state.maxHeight }}
-        onMouseDown={(event) => event.preventDefault()}
-        onKeyDown={(event) => {
-          if (event.key === "ArrowDown") {
-            event.preventDefault();
-            move(1);
-          } else if (event.key === "ArrowUp") {
-            event.preventDefault();
-            move(-1);
-          } else if (event.key === "Enter") {
-            event.preventDefault();
-            onSelect(BLOCK_MENU_ENTRIES[selected] ?? BLOCK_MENU_ENTRIES[0]);
-          } else if (event.key === "Backspace" || event.key === "Delete") {
-            event.preventDefault();
-            const deleteEntry = ACTION_ENTRIES.find(
-              (entry) => entry.kind === "action" && entry.id === "delete",
-            );
-            if (deleteEntry) onSelect(deleteEntry);
-          } else if (event.key === "Escape") {
-            event.preventDefault();
-            onClose();
-          }
-        }}
-      >
-        {BLOCK_MENU_ENTRIES.map((entry, index) => (
-          <Fragment key={`${entry.kind}-${entry.id}`}>
-            {index === 0 ? (
-              <div className="dohc-block-menu__section">Turn into</div>
-            ) : null}
-            {index === TURN_INTO_COUNT ? (
-              <div className="dohc-block-menu__section">Actions</div>
-            ) : null}
-            <button
-              type="button"
-              role="menuitem"
-              aria-selected={index === selected}
-              className={`dohc-block-menu__item${
-                index === selected ? " is-selected" : ""
-              }${entry.kind === "action" && entry.id === "delete" ? " is-danger" : ""}`}
-              onMouseEnter={() => setSelected(index)}
-              onClick={() => onSelect(entry)}
-            >
-              <span className="dohc-block-menu__glyph">{entry.glyph}</span>
-              <span className="dohc-block-menu__label">{entry.label}</span>
-            </button>
-          </Fragment>
-        ))}
+    <div
+      ref={menuRef}
+      // The frame holds focus for its rows, and the active row draws the
+      // focus outline, so the frame draws none of its own.
+      className={`dohc-block-menu ${MENU_FRAME} ${MENU_ENTER} outline-none`}
+      role="menu"
+      aria-label="block actions"
+      aria-activedescendant={rowId(active)}
+      tabIndex={-1}
+      data-placement={state.placement}
+      style={{ left: state.x, top: state.y, maxHeight: state.maxHeight, ...menuEnterFrom(state.placement) }}
+      onMouseDown={(event) => event.preventDefault()}
+      onKeyDown={(event) => {
+        const next = moveInMenu(event, active, labels);
+        if (next !== null) {
+          event.preventDefault();
+          setActive(next);
+        } else if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          pick(BLOCK_MENU_ENTRIES[active] ?? BLOCK_MENU_ENTRIES[0]);
+        } else if (event.key === "Backspace" || event.key === "Delete") {
+          event.preventDefault();
+          const deleteEntry = ACTION_ENTRIES.find(
+            (entry) => entry.kind === "action" && entry.id === "delete",
+          );
+          if (deleteEntry) pick(deleteEntry);
+        } else if (event.key === "Escape") {
+          // useDismiss closed it; one Escape closes one surface.
+          event.stopPropagation();
+        } else if (event.key === "Tab") {
+          // Closed without moving focus, so the key goes where it would.
+          onClose();
+        }
+      }}
+    >
+      <div role="group" aria-labelledby={`${id}-turn-into`}>
+        <div id={`${id}-turn-into`} className={MENU_SECTION}>
+          Turn into
+        </div>
+        {TURN_INTO_ENTRIES.map((entry, index) => row(entry, index))}
       </div>
-    </>
+      <div role="group" aria-labelledby={`${id}-actions`}>
+        <div id={`${id}-actions`} className={MENU_SECTION}>
+          Actions
+        </div>
+        {ACTION_ENTRIES.map((entry, index) => row(entry, TURN_INTO_COUNT + index))}
+      </div>
+    </div>
   );
 }
 
@@ -725,6 +789,11 @@ export function resolveTurnIntoDropdown(
  * exactly the block context menu's "Turn into" section — so the labels,
  * order, and conversion behavior stay identical between the two entry
  * points; only the trigger and layout differ.
+ *
+ * The dropdown is a listbox drawn from the Menu part's recipe. It holds focus
+ * for its options and names the active one with aria-activedescendant; that
+ * option draws the accent outline, and the block's current type keeps the
+ * selected fill.
  */
 export function TurnIntoMenu({
   editor,
@@ -742,6 +811,9 @@ export function TurnIntoMenu({
   });
   const containerRef = useRef<HTMLDivElement | null>(null);
   const menuRef = useRef<HTMLDivElement | null>(null);
+  const optionRefs = useRef<Array<HTMLButtonElement | null>>([]);
+  const id = useId();
+  const optionId = (index: number) => `${id}-option-${index}`;
 
   const activeIndex = TURN_INTO_ENTRIES.findIndex((entry) => entry.id === activeId);
   const activeEntry = TURN_INTO_ENTRIES[activeIndex] ?? TURN_INTO_ENTRIES[0]!;
@@ -749,10 +821,16 @@ export function TurnIntoMenu({
   useEffect(() => {
     if (!open) return;
     setSelected(activeIndex >= 0 ? activeIndex : 0);
-    menuRef.current?.focus();
+    menuRef.current?.focus({ preventScroll: true });
     // Only reset when the dropdown opens, not on every editor selection tick.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
+
+  // Only the list scrolls to show the active option.
+  useLayoutEffect(() => {
+    const list = menuRef.current;
+    if (open && list) revealMenuRow(list, optionRefs.current[selected]);
+  }, [open, selected]);
 
   useEffect(() => {
     if (!open) return;
@@ -767,11 +845,7 @@ export function TurnIntoMenu({
 
   if (!isEditableEditor(editor)) return null;
 
-  const move = (delta: number) =>
-    setSelected(
-      (current) =>
-        (current + delta + TURN_INTO_ENTRIES.length) % TURN_INTO_ENTRIES.length,
-    );
+  const labels = TURN_INTO_ENTRIES.map((entry) => entry.label);
 
   // Measure once, at open — the dropdown is anchored to the trigger, so it
   // never repositions while open; only the flip side and max height are
@@ -811,21 +885,22 @@ export function TurnIntoMenu({
       {open ? (
         <div
           ref={menuRef}
-          className="dohc-turn-into-menu"
+          // The frame holds focus for its options, and the active option
+          // draws the focus outline, so the frame draws none of its own.
+          className={`dohc-turn-into-menu ${MENU_FRAME} ${MENU_ENTER} outline-none`}
           role="listbox"
           aria-label="turn into"
+          aria-activedescendant={optionId(selected)}
           tabIndex={-1}
           data-placement={dropdown.placement}
-          style={{ maxHeight: dropdown.maxHeight }}
+          style={{ maxHeight: dropdown.maxHeight, ...menuEnterFrom(dropdown.placement) }}
           onMouseDown={(event) => event.preventDefault()}
           onKeyDown={(event) => {
-            if (event.key === "ArrowDown") {
+            const next = moveInMenu(event, selected, labels);
+            if (next !== null) {
               event.preventDefault();
-              move(1);
-            } else if (event.key === "ArrowUp") {
-              event.preventDefault();
-              move(-1);
-            } else if (event.key === "Enter") {
+              setSelected(next);
+            } else if (event.key === "Enter" || event.key === " ") {
               event.preventDefault();
               select(TURN_INTO_ENTRIES[selected] ?? TURN_INTO_ENTRIES[0]!);
             } else if (event.key === "Escape") {
@@ -837,22 +912,38 @@ export function TurnIntoMenu({
             }
           }}
         >
-          {TURN_INTO_ENTRIES.map((entry, index) => (
-            <button
-              key={entry.id}
-              type="button"
-              role="option"
-              aria-selected={index === selected}
-              className={`dohc-turn-into-menu__item${
-                index === selected ? " is-selected" : ""
-              }`}
-              onMouseEnter={() => setSelected(index)}
-              onClick={() => select(entry)}
-            >
-              <span className="dohc-turn-into-menu__glyph">{entry.glyph}</span>
-              <span className="dohc-turn-into-menu__label">{entry.label}</span>
-            </button>
-          ))}
+          {TURN_INTO_ENTRIES.map((entry, index) => {
+            const Icon = entry.icon;
+            const current = entry.id === activeId;
+            return (
+              <button
+                key={entry.id}
+                id={optionId(index)}
+                ref={(element) => {
+                  optionRefs.current[index] = element;
+                }}
+                type="button"
+                role="option"
+                tabIndex={-1}
+                aria-selected={index === selected}
+                data-active={index === selected || undefined}
+                className={`${MENU_ROW} ${MENU_ACTIVE_OPTION} ${
+                  current ? MENU_ROW_TONE.current : `${MENU_ROW_TONE.rest} data-active:text-ink`
+                }`}
+                // Only a pointer that moves picks the active option, so a
+                // list that opens under a still pointer keeps the block's own.
+                onMouseMove={(event) => {
+                  if (movedPointer(event) && index !== selected) setSelected(index);
+                }}
+                onClick={() => select(entry)}
+              >
+                <span className={`${MENU_ICON} text-subtle`}>
+                  <Icon size={14} aria-hidden />
+                </span>
+                <span className={MENU_LABEL}>{entry.label}</span>
+              </button>
+            );
+          })}
         </div>
       ) : null}
     </div>

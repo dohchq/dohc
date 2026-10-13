@@ -1,3 +1,4 @@
+import { flushTypingCheckpointsSync } from "./workspaces/outageTypingRecovery";
 import { isAbsolute } from "node:path";
 import {
   classifyShareHandoffArguments,
@@ -56,6 +57,12 @@ export function createAppLifecycle<Window, Workspace, Settings>(dependencies: {
     // Resolves true once the window finishes its first load, and false when
     // its main frame fails to load.
     whenLoaded(window: Window): Promise<boolean>;
+    // Capture before opening. The target owns renderer readiness and rejects
+    // delivery after its window or workspace context changes.
+    openFailureTarget(window: Window): {
+      whenReady(): Promise<boolean>;
+      isCurrent(opened?: Workspace | null): boolean;
+    };
     current(): Window | undefined;
     hasWorkspace(): boolean;
     hasAny(): boolean;
@@ -64,6 +71,8 @@ export function createAppLifecycle<Window, Workspace, Settings>(dependencies: {
   };
   workspaces: {
     openPath(path: string, window?: Window): Promise<Workspace | null>;
+    recordOpenFailure(path: string, error: unknown): void;
+    reportOpenFailure(path: string, error: unknown, window: Window): void;
     refreshNativeSurfaces(): void;
   };
   bootstrap: {
@@ -99,6 +108,7 @@ export function createAppLifecycle<Window, Workspace, Settings>(dependencies: {
     finished(): void;
   };
   beforeQuit(event: QuitEvent): void;
+  beforeQuitWithoutWindows?(event: QuitEvent): void;
   shutdown: {
     budgetMs: number;
     deadlineExitCode: 0 | 1;
@@ -107,6 +117,8 @@ export function createAppLifecycle<Window, Workspace, Settings>(dependencies: {
     stopSitePreviews(): Promise<void>;
     settleYDocs(): Promise<void>;
     stopAgentIntegration(): Promise<void>;
+    // Sends the reports that wait, within its own deadline inside the budget.
+    flushReports(): Promise<void>;
     closeWorkspaces(): Promise<void>;
     disposeDatabase(): Promise<void>;
     closeRelay(): Promise<void>;
@@ -142,6 +154,8 @@ export function createAppLifecycle<Window, Workspace, Settings>(dependencies: {
     );
     const engineYDocStop = shutdown.settleYDocs();
     const agentIntegrationStop = shutdown.stopAgentIntegration().catch(() => undefined);
+    // Reports go alongside teardown, and exit waits for both within the budget.
+    const reportsFlush = shutdown.flushReports().catch(() => undefined);
     // Starting close early would let a live producer settle onto a closed store.
     const workspaceAuthorityStop = Promise.allSettled([
       engineYDocStop,
@@ -161,7 +175,7 @@ export function createAppLifecycle<Window, Workspace, Settings>(dependencies: {
     let budgetExpired = false;
     let shutdownTimer: ReturnType<typeof setTimeout>;
     void Promise.race([
-      workspaceShutdown,
+      Promise.all([workspaceShutdown, reportsFlush]),
       new Promise<void>((resolve) => {
         shutdownTimer = setTimeout(() => {
           budgetExpired = true;
@@ -202,19 +216,37 @@ export function createAppLifecycle<Window, Workspace, Settings>(dependencies: {
   async function openWorkspacePaths(
     paths: string[],
     window?: Window,
+    failureWindow = window,
   ): Promise<Workspace | null> {
     let lastOpened: Workspace | null = null;
+    const failures: { path: string; error: unknown }[] = [];
+    const target = paths.length > 0 && failureWindow ? windows.openFailureTarget(failureWindow) : undefined;
     for (const path of paths) {
-      const opened = await workspaces.openPath(path, window).catch(() => null);
-      if (opened) lastOpened = opened;
+      try {
+        const opened = await workspaces.openPath(path, window);
+        if (opened) lastOpened = opened;
+      } catch (error: unknown) {
+        workspaces.recordOpenFailure(path, error);
+        failures.push({ path, error });
+      }
+    }
+    if (failures.length && failureWindow && target) {
+      const reportWindow = failureWindow;
+      void target.whenReady().then((loaded) => {
+        if (!loaded || quitting || !target.isCurrent(lastOpened)) return;
+        for (const { path, error } of failures) {
+          if (quitting || !target.isCurrent(lastOpened)) return;
+          workspaces.reportOpenFailure(path, error, reportWindow);
+        }
+      });
     }
     return lastOpened;
   }
 
-  async function flushPendingOpenPaths(window?: Window): Promise<Workspace | null> {
+  async function flushPendingOpenPaths(window?: Window, failureWindow = window): Promise<Workspace | null> {
     if (pendingOpenPaths.length === 0) return null;
     const paths = pendingOpenPaths.splice(0);
-    return openWorkspacePaths(paths, window);
+    return openWorkspacePaths(paths, window, failureWindow);
   }
 
   async function whenReady(): Promise<void> {
@@ -266,8 +298,8 @@ export function createAppLifecycle<Window, Workspace, Settings>(dependencies: {
     });
     void services.refreshTray().catch(services.reportTrayFailure);
 
-    const launchWorkspace = await openWorkspacePaths(collectOpenWorkspaceArgs(runtime.argv));
-    const pendingWorkspace = await flushPendingOpenPaths();
+    const launchWorkspace = await openWorkspacePaths(collectOpenWorkspaceArgs(runtime.argv), undefined, window);
+    const pendingWorkspace = await flushPendingOpenPaths(undefined, window);
     const activatedWorkspace = pendingWorkspace ?? launchWorkspace;
     workspaces.refreshNativeSurfaces();
     void windowLoaded.then((loaded) => {
@@ -320,7 +352,10 @@ export function createAppLifecycle<Window, Workspace, Settings>(dependencies: {
       }
 
       app.on("browser-window-created", (_event, window) => {
-        window.on("session-end", () => launch.finished());
+        window.on("session-end", () => {
+          try {flushTypingCheckpointsSync();} catch {/* Session end cannot be cancelled. */}
+          launch.finished();
+        });
       });
 
       app.on("open-url", (event, rawArgument) => {
@@ -358,7 +393,7 @@ export function createAppLifecycle<Window, Workspace, Settings>(dependencies: {
 
       app.on("before-quit", (event) => {
         // A hidden export window cannot answer for renderer-held drafts.
-        if (!windows.hasWorkspace()) return;
+        if (!windows.hasWorkspace()) {dependencies.beforeQuitWithoutWindows?.(event); return;}
         dependencies.beforeQuit(event);
       });
 

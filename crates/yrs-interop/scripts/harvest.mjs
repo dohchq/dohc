@@ -1,16 +1,16 @@
 // Harvest real Y.Doc fixtures from a copy of a dogfood engine.db.
 //
-// SAFETY: this script must only ever be pointed at a copy (engine.db +
-// -wal/-shm copied together); it refuses paths that resolve (symlinks,
-// junctions, 8.3 short names) to a live workspace layout
-// (.dohc/engine/engine.db) and opens read-only regardless. Harvested
+// SAFETY: this script must only ever be pointed at a consistent copy, such as
+// a SQLite online backup. Never raw-copy a live engine.db or its WAL. It
+// refuses paths that resolve (symlinks, junctions, 8.3 short names) to a live
+// workspace layout (.dohc/engine/engine.db) and opens read-only regardless. Harvested
 // fixtures can contain personal content: they land in
 // crates/yrs-interop/fixtures/harvested/, which is gitignored — they stay
 // LOCAL and are never committed.
 //
 // Usage: node harvest.mjs <path-to-copied-engine.db>
 // Requires Node >= 22.13 for node:sqlite. The repo's engines range is now
-// >=24.14.0, which subsumes that floor; it used to allow Node 20, which cannot
+// >=24.16.0, which subsumes that floor; it used to allow Node 20, which cannot
 // run this script at all.
 
 import { createRequire } from "node:module";
@@ -65,11 +65,11 @@ try {
     throw new Error(`integrity_check failed: ${JSON.stringify(integrity)}`);
   }
 
-  const blob = db.prepare("SELECT content FROM binary_blobs WHERE sha256 = ?");
+  const blob = db.prepare("SELECT bytes FROM binary_blobs WHERE sha256 = ?");
   function readBlob(sha) {
     const row = blob.get(sha);
     if (!row) throw new Error(`missing blob ${sha}`);
-    return row.content;
+    return row.bytes;
   }
 
   const docs = db

@@ -3,6 +3,7 @@ import type { VersionedTextMoment } from "@dohc/workspace-contracts/engine";
 import { parseAutomationsFile } from "@dohc/workspace-contracts/automations";
 import { definitionHash } from "@dohc/automation-executor/automation-plan";
 import { restoreDirectWrites, type DirectWriteFile, type StopAndRestoreDependencies } from "./stopAndRestore";
+import { restoreRequestId } from "./restoreWriteIdentity";
 
 const KEPT = { id: "f".repeat(32), path: "trip/Tasks/Untitled.md", field: "Finished on", recordId: null };
 const SCHEMA = "name: Packing\nfields:\n  Title:\n    type: text\n";
@@ -13,6 +14,100 @@ const WIPE_TWO = "  - id: wipe\n    name: Wipe\n    when: record-added\n    do:\
 const OWNERS = "  - id: owners\n    name: Owners\n    when: record-added\n    do:\n      - set:\n          Title: mine\n";
 const automations = (...items: string[]) => `version: 1\nautomations:\n${items.join("")}`;
 const RECORD = "---\nTitle: Tent\n---\n";
+
+it("writes no file when the batch intent cannot be saved", async () => {
+  const original = moment("one", "object", "notes/one.txt", "old", "new"), e = engine([original]);
+  expect(await restoreDirectWrites({...e.dependencies, recordRestoreIntents: async () => {throw Error("intent failed");}}, [file(original.id, original.objectId, original.path)]))
+    .toMatchObject({restored: [], unfinished: {message: "intent failed"}});
+  expect(e.restored).toEqual([]);
+});
+
+it("recovers a recreated binary outside the original object's history", async () => {
+  const original = moment("deleted", "old-object", "image.png", "binary", null);
+  original.payload.before!.contentKind = "binary";
+  const key = restoreRequestId("session", original.id), e = engine([original]);
+  const recovered = {path: original.path, restoredMomentId: "binary-restore"};
+  const outcome = await restoreDirectWrites({...e.dependencies, replayRequestId: () => key,
+    findRestoreReceipt: async () => recovered}, [file(original.id, original.objectId, original.path)]);
+  expect(outcome).toMatchObject({restored: [recovered], review: [], unfinished: null});
+  expect(e.restored).toEqual([]);
+});
+
+it("removes a created Collection folder only after its schema receipt is durable, including recovery", async () => {
+  const original = moment("schema", "object", "Tasks/collection.yaml", null, SCHEMA);
+  const e = engine([original]), events: string[] = [];
+  const restore = e.dependencies.restore;
+  const key = restoreRequestId("session", original.id);
+  const deps = {...e.dependencies, folderEntries: async () => ["collection.yaml"],
+    restore: async (...args: Parameters<typeof restore>) => {events.push("write"); const result = await restore(...args);
+      if (result.kind === "restored") e.all.at(-1)!.metadata = {origin: "restore", correlationId: key}; return result;},
+    recordRestores: async () => {events.push("durable");}, removeEmptyFolder: async () => {events.push("folder");}};
+  await restoreDirectWrites(deps, [{...file(original.id, original.objectId, original.path), created: true}]);
+  expect(events).toEqual(["write", "durable", "folder"]);
+  events.length = 0;
+  await restoreDirectWrites({...deps, replayRequestId: () => key}, [{...file(original.id, original.objectId, original.path), created: true}]);
+  expect(events).toEqual(["durable", "folder"]);
+});
+
+it.each(["before barrier", "before receipts"])("recovers every restored file after a crash %s", async boundary => {
+  const originals = Array.from({length: 3}, (_, i) => moment(`m-${i}`, `o-${i}`, `notes/${i}.txt`, "old", "new"));
+  originals.forEach(m => {m.authors = [{kind: "named", userId: "ana", grantId: "grant", grantGeneration: 1}];});
+  const e = engine(originals);
+  const requestId = (id: string) => restoreRequestId("saved-session", id);
+  const restore = e.dependencies.restore;
+  const durable: string[] = [];
+  let fail = true;
+  const deps = {...e.dependencies,
+    restore: async (...args: Parameters<typeof restore>) => {
+      const result = await restore(...args);
+      if (result.kind === "restored") e.all.find(m => m.id === result.receipt.restoredMomentId)!.metadata = {origin: "restore", correlationId: requestId(args[0])};
+      return result;
+    },
+    recordRestores: async (receipts: readonly {restoredMomentId: string}[]) => {
+      if (fail && boundary === "before barrier") throw Error("crash before barrier");
+      if (fail) throw Error("crash before receipts");
+      durable.push(...receipts.map(r => r.restoredMomentId));
+    },
+  };
+  const files = originals.map(m => file(m.id, m.objectId, m.path));
+  expect(await restoreDirectWrites(deps, files)).toMatchObject({restored: [], unfinished: {step: "files"}});
+  expect(e.restored).toHaveLength(3); expect(durable).toEqual([]);
+  // A later edit is not overwritten when recovery finds the keyed restore.
+  e.all.push(moment("teammate", originals[0]!.objectId, originals[0]!.path, "old", "teammate"));
+  fail = false;
+  const result = await restoreDirectWrites({...deps, replayRequestId: requestId}, files);
+  expect(result).toMatchObject({review: [], unfinished: null});
+  expect(result.status === "restored" && result.restored).toHaveLength(3);
+  expect(durable).toHaveLength(3); expect(e.restored).toHaveLength(3);
+  expect(e.all.at(-1)?.payload.after.text).toBe("teammate");
+});
+
+it("reports a keyed restore as restored only once its publication is confirmed", async () => {
+  const original = moment("theirs", "object", "notes/file.txt", "old", "new");
+  const key = restoreRequestId("saved-session", original.id);
+  const e = engine([original]);
+  // The restore committed its moment; its publication did not reach disk.
+  e.all.push({...moment("back", "object", "notes/file.txt", "new", "old"), metadata: {origin: "restore", correlationId: key}});
+  const files = [file(original.id, original.objectId, original.path)];
+  e.dependencies.publicationApplied.mockResolvedValue(false);
+  const refused = await restoreDirectWrites({...e.dependencies, replayRequestId: () => key}, files);
+  expect(refused.status === "restored" && refused.restored).toEqual([]);
+  expect(e.dependencies.publicationApplied).toHaveBeenCalledWith("back", key);
+  expect(e.restored).toEqual([]);
+  e.dependencies.publicationApplied.mockResolvedValue(true);
+  expect(await restoreDirectWrites({...e.dependencies, replayRequestId: () => key}, files))
+    .toMatchObject({restored: [{path: "notes/file.txt", restoredMomentId: "back"}], review: []});
+  expect(e.restored).toEqual([]);
+});
+
+it("flushes earlier restore successes before reporting a later file error", async () => {
+  const originals = Array.from({length: 3}, (_, i) => moment(`m-${i}`, `o-${i}`, `notes/${i}.txt`, "old", "new"));
+  const e = engine(originals); e.failing.set("m-2", Error("disk error"));
+  const batches: number[] = [];
+  const result = await restoreDirectWrites({...e.dependencies, recordRestores: async receipts => {batches.push(receipts.length);}}, originals.map(m => file(m.id, m.objectId, m.path)));
+  expect(result).toMatchObject({restored: [{path: "notes/0.txt"}, {path: "notes/1.txt"}], unfinished: {message: "disk error"}});
+  expect(batches).toEqual([2]);
+});
 
 function moment(id: string, objectId: string, path: string, before: string | null, after: string | null): VersionedTextMoment {
   return {
@@ -50,6 +145,7 @@ function engine(moments: VersionedTextMoment[], folders: Record<string, string[]
       return mine.slice(mine.findIndex((item) => item.id === id) + 1).map((item) => item.id).reverse();
     }),
     assertCurrent: vi.fn(),
+    publicationApplied: vi.fn(async (_momentId: string, _requestId: string) => true),
     restore: vi.fn<StopAndRestoreDependencies["restore"]>(async (id, expectedHead, aloneInFolder) => {
       const target = all.find((item) => item.id === id)!;
       if (failing.has(id)) throw failing.get(id)!;
@@ -88,6 +184,164 @@ function definitionOf(text: string, id: string): string {
   if (entry?.status !== "valid") throw new Error("fixture has no such automation");
   return definitionHash(entry.automation);
 }
+
+describe("recipient record restoration", () => {
+  it("keeps a record-only settlement with a coverage gap even when its content matches", async () => {
+    const created = moment("created", "record", "trip/One.md", null, RECORD);
+    created.authors = [{ kind: "named", userId: "ana", grantId: "grant", grantGeneration: 1 }];
+    const filled = moment(`moment-ydoc-apply-${"c".repeat(64)}`, "record", created.path, RECORD, `${RECORD}\nOwner and recipient text`);
+    filled.metadata.origin = "ydoc";
+    filled.authors = [{ kind: "human", humanId: "ana" }];
+    const exported = { ...filled, id: "owner-settlement", syncRecordOnly: true,
+      authors: [{ kind: "human", humanId: "ana" }, { kind: "unattributed" }] } as VersionedTextMoment;
+    const e = engine([created, filled, exported]);
+    expect(await restoreDirectWrites(e.dependencies, [file(created.id, "record", created.path, true)]))
+      .toMatchObject({ restored: [], review: [{ path: created.path, reason: "changed-since", changedBy: "An unrecorded author" }] });
+    expect(e.dependencies.restore).not.toHaveBeenCalled();
+  });
+
+  it.each(["owner", "recipient"])("keeps a settlement containing unattributed %s text", async contributor => {
+    const created = moment("created", "record", "trip/One.md", null, RECORD);
+    created.authors = [{ kind: "named", userId: "ana", grantId: "grant", grantGeneration: 1 }];
+    const filled = moment(`moment-ydoc-${"c".repeat(64)}`, "record", created.path, RECORD, `${RECORD}\n${contributor} text`);
+    filled.metadata.origin = "local-file";
+    filled.authors = [{ kind: "human", humanId: "ana" }, { kind: "unattributed" }];
+    const e = engine([created, filled]);
+    expect(await restoreDirectWrites(e.dependencies, [file(created.id, "record", created.path, true)]))
+      .toMatchObject({ restored: [], review: [{ path: created.path, reason: "changed-since", changedBy: "An unrecorded author" }] });
+    expect(e.dependencies.restore).not.toHaveBeenCalled();
+    expect(e.all.at(-1)?.payload.after.text).toContain(`${contributor} text`);
+  });
+
+  it.each(["same", "other", "unmapped", "mixed"])("checks the relay's public participant mapping before restoring %s live link edits", async participant => {
+    const created = moment("created", "record", "trip/One.md", null, RECORD);
+    created.authors = [{ kind: "link", principalId: "internal-ana", grantId: "grant", grantGeneration: 1 }];
+    const filled = moment("filled", "record", "trip/One.md", RECORD, "Filled");
+    filled.authors = [{ kind: "link", publicPrincipalId: participant === "other" ? "public-bea" : "public-ana", label: "Ana" }];
+    if (participant === "mixed") filled.authors.push({ kind: "human", humanId: "owner", humanName: "Owner" });
+    const direct = { ...file("created", "record", "trip/One.md", true), ...(participant === "unmapped" ? {} : { publicPrincipalId: "public-ana" }) };
+    const seed = moment("seed", "record", "trip/One.md", created.payload.after.text, created.payload.after.text);
+    const e = engine([created, seed, filled]);
+    const outcome = await restoreDirectWrites(e.dependencies, [direct]);
+    if (participant === "same") {
+      expect(outcome).toMatchObject({ restored: [{ path: "trip/One.md", removed: true }], review: [] });
+      expect(e.dependencies.restore).toHaveBeenCalledWith("created", "filled", false);
+    } else {
+      expect(outcome).toMatchObject({ restored: [], review: [{ reason: "changed-since" }] });
+      expect(e.dependencies.restore).not.toHaveBeenCalled();
+    }
+  });
+
+  it("removes a record after its creator fills fields through the live session", async () => {
+    const created = moment("created", "record", "trip/One.md", null, "---\nid: rec_one\n---\n");
+    created.authors = [{ kind: "named", userId: "ana", grantId: "grant", grantGeneration: 1 }];
+    const filled = moment("filled", "record", "trip/One.md", created.payload.after.text, "---\nid: rec_one\nTitle: Tent\n---\n");
+    filled.metadata.origin = "ydoc";
+    filled.authors = [{ kind: "human", humanId: "ana", relayConfirmed: true }];
+    const seed = moment("seed", "record", "trip/One.md", created.payload.after.text, created.payload.after.text);
+    const exported = moment("exported", "record", "trip/One.md", seed.payload.after.text, filled.payload.after.text);
+    exported.syncRecordOnly = true;
+    exported.authors = filled.authors;
+    const e = engine([created, seed, filled, exported]);
+    const outcome = await restoreDirectWrites(e.dependencies, [file("created", "record", "trip/One.md", true)]);
+    expect(outcome).toMatchObject({ restored: [{ path: "trip/One.md", removed: true }], review: [] });
+    expect(e.dependencies.restore).toHaveBeenCalledWith("created", "exported", false);
+  });
+
+  it.each([
+    { id: "edit", origin: "ydoc", removes: true },
+    { id: "edit", origin: "sync", removes: false },
+    { id: "edit", origin: "local-file", removes: false },
+    { id: `moment-ydoc-${"a".repeat(64)}`, origin: "local-file", removes: true },
+    { id: `moment-ydoc-apply-${"b".repeat(64)}`, origin: "local-file", removes: true },
+    { id: "moment-ydoc-invalid", origin: "local-file", removes: false },
+    { id: `moment-ydoc-${"a".repeat(64)}`, origin: "api", removes: false },
+  ] as const)("matches recipient human edit $id with origin $origin", async ({ id, origin, removes }) => {
+    const created = moment("created", "record", "trip/One.md", null, RECORD);
+    created.authors = [{ kind: "named", userId: "ana", grantId: "grant", grantGeneration: 1 }];
+    const edit = moment(id, "record", "trip/One.md", RECORD, "Changed");
+    edit.metadata.origin = origin;
+    edit.authors = [{ kind: "human", humanId: "ana", relayConfirmed: true }];
+    const e = engine([created, edit]);
+    const outcome = await restoreDirectWrites(e.dependencies, [file("created", "record", "trip/One.md", true)]);
+    if (removes) {
+      expect(outcome).toMatchObject({ restored: [{ path: "trip/One.md", removed: true }], review: [] });
+      expect(e.dependencies.restore).toHaveBeenCalledWith("created", id, false);
+    } else {
+      expect(outcome).toMatchObject({ restored: [], review: [{ path: "trip/One.md", reason: "changed-since", changedBy: "Person ana" }] });
+      expect(e.dependencies.restore).not.toHaveBeenCalled();
+    }
+  });
+
+  it.each(["content", "path"])("keeps an unattributed change to the %s", async change => {
+    const created = moment("created", "record", "trip/One.md", null, RECORD);
+    created.authors = [{kind: "named", userId: "ana", grantId: "grant", grantGeneration: 1}];
+    const later = moment("later", "record", "trip/One.md", RECORD, change === "content" ? "Changed" : RECORD);
+    if (change === "path") later.payload.after.path = "trip/Two.md";
+    const e = engine([created, later]);
+    expect(await restoreDirectWrites(e.dependencies, [file("created", "record", "trip/One.md", true)]))
+      .toMatchObject({restored: [], review: [{reason: "changed-since"}]});
+    expect(e.dependencies.restore).not.toHaveBeenCalled();
+  });
+
+  it.each(["owner", "automation", "recipient", "agent", "unattributed", "mixed"] as const)("keeps a record changed by another %s", async kind => {
+    const created = moment("created", "record", "trip/One.md", null, RECORD);
+    created.authors = [{ kind: "named", userId: "ana", grantId: "grant", grantGeneration: 1 }];
+    const later = moment("later", "record", "trip/One.md", RECORD, "Changed");
+    later.metadata.origin = "ydoc";
+    later.authors = kind === "owner" ? [{ kind: "human", humanId: "owner" }]
+      : kind === "automation" ? [{ kind: "automation", automationId: "stamp", depth: 1 }]
+      : kind === "agent" ? [{ kind: "agent", agentId: "helper" }]
+      : kind === "unattributed" ? undefined
+      : kind === "mixed" ? [{ kind: "human", humanId: "ana" }, { kind: "human", humanId: "owner" }]
+      : [{ kind: "named", userId: "bea", grantId: "other", grantGeneration: 1 }];
+    const e = engine([created, later]);
+    const outcome = await restoreDirectWrites(e.dependencies, [file("created", "record", "trip/One.md", true)]);
+    expect(outcome).toMatchObject({ restored: [], review: [{ path: "trip/One.md", reason: "changed-since", changedBy: kind === "automation" ? "An automation" : kind === "owner" ? "Person owner" : kind === "agent" ? "Agent helper" : kind === "recipient" ? "Person bea" : "Another author" }] });
+    expect(e.dependencies.restore).not.toHaveBeenCalled();
+  });
+
+  it("removes only records named in the recipient's creation ledger", async () => {
+    const created = moment("created", "record", "trip/One.md", null, RECORD);
+    created.authors = [{ kind: "named", userId: "ana", grantId: "grant", grantGeneration: 1 }];
+    const unrelated = moment("unrelated", "other-record", "trip/Two.md", null, RECORD);
+    unrelated.authors = [{ kind: "human", humanId: "ana" }];
+    unrelated.metadata.origin = "ydoc";
+    const e = engine([created, unrelated]);
+    expect(await restoreDirectWrites(e.dependencies, [file("created", "record", "trip/One.md", true)]))
+      .toMatchObject({ restored: [{ path: "trip/One.md", removed: true }], review: [] });
+    expect(e.dependencies.restore.mock.calls).toEqual([["created", "created", false]]);
+  });
+
+  it.each(["owner", "automation", "recipient"] as const)("keeps a record whose exported settlement includes another %s", async kind => {
+    const created = moment("created", "record", "trip/One.md", null, RECORD);
+    created.authors = [{ kind: "named", userId: "ana", grantId: "grant", grantGeneration: 1 }];
+    const exported = moment("exported", "record", "trip/One.md", RECORD, "Changed");
+    exported.syncRecordOnly = true;
+    exported.authors = kind === "owner" ? [{ kind: "human", humanId: "owner" }]
+      : kind === "automation" ? [{ kind: "automation", automationId: "stamp", depth: 1 }]
+      : [{ kind: "named", userId: "bea", grantId: "other", grantGeneration: 1 }];
+    const e = engine([created, exported]);
+    expect(await restoreDirectWrites(e.dependencies, [file("created", "record", "trip/One.md", true)]))
+      .toMatchObject({ restored: [], review: [{ reason: "changed-since", changedBy: kind === "automation" ? "An automation" : kind === "owner" ? "Person owner" : "Person bea" }] });
+    expect(e.dependencies.restore).not.toHaveBeenCalled();
+  });
+
+  it.each([false, true])("compares materialized content rather than an export when already restored is %s", async restored => {
+    const original = "Original";
+    const created = moment("created", "record", "trip/One.md", original, RECORD);
+    created.authors = [{ kind: "named", userId: "ana", grantId: "grant", grantGeneration: 1 }];
+    const current = moment("current", "record", "trip/One.md", RECORD, restored ? original : "Changed");
+    current.authors = [{ kind: "human", humanId: "owner" }];
+    const exported = moment("exported", "record", "trip/One.md", RECORD, restored ? "Changed" : original);
+    exported.syncRecordOnly = true;
+    exported.authors = current.authors;
+    const e = engine([created, current, exported]);
+    expect(await restoreDirectWrites(e.dependencies, [file("created", "record", "trip/One.md")]))
+      .toMatchObject({ restored: [], review: restored ? [] : [{ reason: "changed-since", changedBy: "Person owner" }] });
+    expect(e.dependencies.restore).not.toHaveBeenCalled();
+  });
+});
 
 describe("restoring what a person wrote directly", () => {
   it("puts each file back before their first write, automations first, and undoes only the definitions each write added", async () => {
@@ -179,6 +433,14 @@ describe("restoring what a person wrote directly", () => {
     expect(later.dependencies.undoRuns).toHaveBeenCalledTimes(1);
   });
 
+  it("tells the owner that a reviewed automations file kept its runs", async () => {
+    const auto = moment("m-auto", "o-auto", "trip/packing/automations.yaml", automations(STAMP), automations(STAMP, WIPE));
+    const { dependencies } = engine([auto]);
+    const outcome = await restoreDirectWrites({...dependencies, reviewPath: () => "Changed on this device since the last saved version"}, [file("m-auto", "o-auto", auto.path)]);
+    expect(outcome).toMatchObject({review: [{detail: "Changed on this device since the last saved version. Runs from this file's automations were kept."}], wroteAutomations: true});
+    expect(dependencies.undoRuns).not.toHaveBeenCalled();
+  });
+
   it("does not blame the person for an automation the owner added between their writes", async () => {
     const theirs = moment("m-auto-1", "o-auto", "trip/packing/automations.yaml", automations(STAMP), automations(STAMP, WIPE));
     const owner = moment("m-owner", "o-auto", "trip/packing/automations.yaml", automations(STAMP, WIPE), automations(STAMP, WIPE, OWNERS));
@@ -237,6 +499,15 @@ describe("restoring what a person wrote directly", () => {
     expect(outcome).toEqual({ status: "waiting" });
     expect(dependencies.momentsAfter).not.toHaveBeenCalled();
     expect(dependencies.restore).not.toHaveBeenCalled();
+  });
+
+  it("removes a recipient-created record while preserving its existing Collection", async () => {
+    const record = moment("m-record", "o-record", "trip/packing/Socks.md", null, RECORD);
+    const { dependencies, restored } = engine([record], { "trip/packing": ["collection.yaml", "Socks.md"] });
+    const outcome = await restoreDirectWrites(dependencies, [file("m-record", "o-record", "trip/packing/Socks.md", true)]);
+    expect(restored).toEqual(["m-record"]);
+    expect(dependencies.removeEmptyFolder).not.toHaveBeenCalled();
+    expect(outcome).toMatchObject({ restored: [{ path: "trip/packing/Socks.md", removed: true }], review: [] });
   });
 
   it("removes a Collection they created, schema last, and its empty folder", async () => {

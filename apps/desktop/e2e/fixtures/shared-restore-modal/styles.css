@@ -3,5 +3,7 @@
 @source "../../../src/renderer/Overlay.tsx";
 @source "../../../src/renderer/OwnerRestoreDialog.tsx";
 @source "../../../src/renderer/ui/controls.tsx";
+@source "../../../src/renderer/workbench/EngineHistory.tsx";
 @source "../../../src/renderer/workbench/NoticeCenter.tsx";
-@source "../../../src/renderer/shell/copyDetails.tsx";
+@source "../../../src/renderer/shell/connectionNotices.tsx";
+@source "../../../src/renderer/ui/CopyButton.tsx";

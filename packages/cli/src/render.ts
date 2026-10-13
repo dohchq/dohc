@@ -124,6 +124,8 @@ function renderExport(result: ExportResult): string {
 }
 
 function renderMoments(result: CliResultByVerb["moments"]): string {
+  // A refusal exits with its reason before anything renders.
+  if (!("changes" in result)) return "";
   const lines = result.changes.map((change) => {
     const agents = (change.authors ?? [])
       .map((author) => (author.kind === "agent" ? ` · agent ${author.agentId}` : ""))
@@ -256,6 +258,9 @@ export function renderCliResult<Verb extends keyof CliResultByVerb>(
   options: { grepFilesWithMatches?: boolean; grepContext?: number; momentSide?: "before" | "after" } = {},
 ): string {
   switch (verb) {
+    case "accessObject":
+    case "accessSharing":
+      return JSON.stringify(result, null, 2);
     case "automationList":
     case "automationSwitch":
       return JSON.stringify(result, null, 2);
@@ -270,6 +275,12 @@ export function renderCliResult<Verb extends keyof CliResultByVerb>(
       if (!document.ok) throw new DohcCliError(document.reason);
       const action = "changed" in document ? document.changed ? "Updated" : "Unchanged" : "Created";
       return `${action} ${document.path}${"warning" in document && document.warning ? `\n${document.warning}` : ""}`;
+    }
+    case "fileChatStart": {
+      const comment = result as CliResultByVerb["fileChatStart"];
+      if (!comment.ok) throw new DohcCliError(comment.reason);
+      const commented = `Commented on ${lineSafe(comment.path)} in ${lineSafe(comment.threadId)}`;
+      return comment.warning ? `${commented}\nwarning: ${lineSafe(comment.warning)}` : commented;
     }
     case "groups":
       return renderGroups(result as CliResultByVerb["groups"]);

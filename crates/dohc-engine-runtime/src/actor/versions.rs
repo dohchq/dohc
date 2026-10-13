@@ -8,9 +8,9 @@ use crate::error::RuntimeError;
 use crate::search::{read_engine_search_policy, resolve_effective_policy};
 use dohc_engine_crypto::{SecretDataKey, load_key_file};
 use dohc_engine_domain::{
-    CreateNamedVersion, DomainError, ListMomentsQuery, MomentPage, MomentRecord, SecretFileStore,
-    SecretMomentRecord, SnapshotContent, SnapshotMetadata, VersionFileChangePage, VersionRecord,
-    VersionedTextStore, list_secret_files_keyless, list_secret_moments_in_time_window_keyless,
+    CreateNamedVersion, DomainError, HistoryCursor, ListMomentsQuery, MomentPage, MomentRecord,
+    SecretFileStore, SnapshotContent, SnapshotMetadata, VersionFileChangePage, VersionRecord,
+    VersionedTextStore, list_secret_files_keyless,
 };
 use dohc_engine_files::{
     ProjectionTargetKind, ProjectionTargetState, probe_projection_target,
@@ -26,17 +26,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
-/// One active-version history page read in a single actor turn.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct HistoryPageRead {
-    pub active_version: VersionRecord,
-    pub text_moment_page: MomentPage,
-    /// A limit+1 probe. The protocol layer applies the row and wire-byte cuts
-    /// and reports whether either cut omitted protected activity in the time
-    /// window.
-    pub protected_moments: Vec<SecretMomentRecord>,
-    pub upper_recorded_at_ms: Option<i64>,
-}
+pub use dohc_engine_domain::HistoryPageRead;
 
 pub struct ActiveVersionSwitch {
     pub workspace_id: String,
@@ -127,62 +117,21 @@ impl ActorHandle {
     pub async fn history_page(
         &self,
         workspace_id: String,
-        limit: i64,
-        before_moment_order: Option<i64>,
-        protected_probe_limit: usize,
+        version_id: Option<String>,
+        object_id: Option<String>,
+        limit: usize,
+        cursor: Option<HistoryCursor>,
     ) -> Result<HistoryPageRead, RuntimeError> {
         self.run(move |store, _| {
-            (|| {
-                let versioned = VersionedTextStore::new(store);
-                let active_version = versioned.get_active_version(&workspace_id)?;
-                let text_moment_page = versioned.list_moments(&ListMomentsQuery {
-                    workspace_id: workspace_id.clone(),
-                    version_id: Some(active_version.version_id.clone()),
-                    object_id: None,
-                    limit,
-                    before_moment_order,
-                })?;
-                let upper_recorded_at_ms = before_moment_order
-                    .map(|cursor| {
-                        let through_cursor =
-                            cursor.checked_add(1).ok_or(DomainError::InvalidInput {
-                                reason: "before_moment_order is too large",
-                            })?;
-                        versioned
-                            .list_moments(&ListMomentsQuery {
-                                workspace_id: workspace_id.clone(),
-                                version_id: Some(active_version.version_id.clone()),
-                                object_id: None,
-                                limit: 1,
-                                before_moment_order: Some(through_cursor),
-                            })
-                            .map(|page| page.moments.first().map(|moment| moment.recorded_at_ms))
-                    })
-                    .transpose()?
-                    .flatten();
-                let lower_recorded_at_ms =
-                    text_moment_page.next_before_moment_order.and_then(|_| {
-                        text_moment_page
-                            .moments
-                            .last()
-                            .map(|moment| moment.recorded_at_ms)
-                    });
-                let protected_moments = list_secret_moments_in_time_window_keyless(
-                    store,
+            VersionedTextStore::new(store)
+                .history_page(
                     &workspace_id,
-                    &active_version.version_id,
-                    lower_recorded_at_ms,
-                    upper_recorded_at_ms,
-                    protected_probe_limit,
-                )?;
-                Ok::<HistoryPageRead, DomainError>(HistoryPageRead {
-                    active_version,
-                    text_moment_page,
-                    protected_moments,
-                    upper_recorded_at_ms,
-                })
-            })()
-            .map_err(RuntimeError::from)
+                    version_id.as_deref(),
+                    object_id.as_deref(),
+                    limit,
+                    cursor,
+                )
+                .map_err(RuntimeError::from)
         })
         .await
     }
@@ -784,7 +733,7 @@ pub(super) fn reconcile_active_plaintext_projection_on_store(
     clippy::too_many_arguments,
     reason = "switch ordering, disk root, suppression, faults, and cancellation are independent"
 )]
-fn switch_active_version_on_store(
+pub(super) fn switch_active_version_on_store(
     store: &mut EngineStore,
     workspace_id: &str,
     version_id: &str,
@@ -943,6 +892,7 @@ impl ActorHandle {
         token: CancellationToken,
     ) -> Result<(), RuntimeError> {
         self.run(move |store, _cache| {
+            if store.is_passive() { return Ok(()); }
             if token.is_cancelled() { return Err(RuntimeError::Cancelled); }
             if changes.is_empty() { return Ok(()); }
             let active = VersionedTextStore::new(store).get_active_version(&workspace_id)?.version_id;
