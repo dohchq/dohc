@@ -141,8 +141,10 @@ describe("EditorTabs glyphs", () => {
     expect(screen.getByTestId(editorTabTestId("b.md")).dataset.dragging).toBe("");
     fireEvent.pointerUp(window, { pointerId: 1 });
     const emoji = within(screen.getByTestId(editorTabTestId("launch.md"))).getByText("🚀");
-    fireEvent.pointerDown(emoji, { button: 0, pointerId: 2 });
+    fireEvent.pointerDown(emoji, { button: 0, pointerId: 2, clientX: 0, clientY: 0 });
     expect(onActivate).toHaveBeenLastCalledWith("left", "launch.md");
+    fireEvent.pointerMove(window, { pointerId: 2, buttons: 1, clientX: 20, clientY: 0 });
+    expect(screen.getByTestId(editorTabTestId("launch.md")).dataset.dragging).toBe("");
     fireEvent.pointerUp(window, { pointerId: 2 });
   });
 
