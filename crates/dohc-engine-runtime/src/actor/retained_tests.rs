@@ -292,7 +292,9 @@ fn capture_file_hold_worker_keeps_quiet_sources_imports_late_writes_and_releases
         Ok(())
     }).unwrap();
     bind(&first, &scratch);
-    wait_for(&first.retention_root, |p| p.iter().any(|v| v.0 == 1));
+    wait_for(&first.retention_root, |p| {
+        p.iter().filter(|v| v.0 == 1).count() >= 2
+    });
     first.close().unwrap();
     assert_eq!(std::fs::read(&source).unwrap(), b"known");
     let store = EngineStore::open(&db, 0).unwrap();

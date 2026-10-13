@@ -3649,7 +3649,7 @@ mod tests {
         let mut conn = open_bare(&dir.join("engine.db"));
         let ctx = MigrationContext::current(1);
         let before = migration_index("v2-retained-materialization-displacements");
-        assert_eq!(BASELINE_MIGRATIONS[before - 1].id, "v2-capture-file-holds");
+        assert_eq!(BASELINE_MIGRATIONS[before].ordinal, 50);
         run_migrations(&mut conn, &BASELINE_MIGRATIONS[..before], &ctx, &NoFaults).unwrap();
         conn.execute("UPDATE engine_ownership SET store_role='passive'", [])
             .unwrap();

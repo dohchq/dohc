@@ -80,9 +80,17 @@ impl Worker {
                     generation = state.generation;
                     let path = state.root.clone().expect("bound root");
                     drop(state);
-                    let rows = match handle
-                        .run_blocking(move |s, _| Ok(s.retained_displacements_after(cursor)?))
-                    {
+                    let rows = match handle.run_blocking(move |s, _| {
+                        s.retained_displacements_after(cursor)?
+                            .into_iter()
+                            .map(|row| {
+                                Ok((
+                                    s.placement_is_held(&row.workspace_id, &row.target_path)?,
+                                    row,
+                                ))
+                            })
+                            .collect::<Result<Vec<_>, RuntimeError>>()
+                    }) {
                         Ok(v) => v,
                         Err(RuntimeError::ActorUnavailable) => break,
                         Err(error) => {
@@ -102,8 +110,8 @@ impl Worker {
                         cursor = 0;
                     } else {
                         delay = ACTIVE_INTERVAL;
-                        cursor = rows.last().map_or(0, |r| r.displacement_id);
-                        for row in rows {
+                        cursor = rows.last().map_or(0, |(_, r)| r.displacement_id);
+                        for (held, row) in rows {
                             if control.stopped() {
                                 break;
                             }
@@ -112,7 +120,7 @@ impl Worker {
                                 .unwrap_or_default()
                                 .as_millis()
                                 .min(i64::MAX as u128) as i64;
-                            let result = match inspect(&path, &row, now) {
+                            let result = match inspect(&path, &row, now, held) {
                                 Ok(Inspection::Changed { current, bytes }) => {
                                     #[cfg(test)]
                                     control.before_import();

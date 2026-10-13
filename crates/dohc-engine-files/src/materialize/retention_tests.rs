@@ -50,8 +50,17 @@ fn sweep(store: &EngineStore, root: &Path, now: i64) {
         }
         cursor = rows.last().unwrap().displacement_id;
         for row in rows {
-            match inspect(root, &row, now).unwrap() {
+            let held = store
+                .placement_is_held(&row.workspace_id, &row.target_path)
+                .unwrap();
+            match inspect(root, &row, now, held).unwrap() {
                 Inspection::Release(token) => {
+                    if store
+                        .placement_is_held(&row.workspace_id, &row.target_path)
+                        .unwrap()
+                    {
+                        continue;
+                    }
                     assert!(token.remove().unwrap());
                     store.release_retained(row.displacement_id).unwrap();
                     cleanup_staging_directory(
@@ -64,7 +73,14 @@ fn sweep(store: &EngineStore, root: &Path, now: i64) {
                 Inspection::Changed { current, bytes } => store
                     .record_retained_read(&row, &current, &bytes, now)
                     .unwrap(),
-                Inspection::Missing => store.release_retained(row.displacement_id).unwrap(),
+                Inspection::Missing => {
+                    if !store
+                        .placement_is_held(&row.workspace_id, &row.target_path)
+                        .unwrap()
+                    {
+                        store.release_retained(row.displacement_id).unwrap();
+                    }
+                }
                 Inspection::Oversized => store.keep_oversized_retained(&row, now).unwrap(),
                 Inspection::Keep => {}
             }
@@ -408,12 +424,12 @@ fn remounted_identity_compares_digest_and_never_keeps_forever() {
         .unwrap();
     let row = store.retained_displacements_after(0).unwrap().remove(0);
     assert!(matches!(
-        inspect(root, &row, 30_000).unwrap(),
+        inspect(root, &row, 30_000, false).unwrap(),
         Inspection::Release(_)
     ));
     let source = root.join(&row.source_path);
     std::fs::write(&source, b"outside after mount").unwrap();
-    match inspect(root, &row, 30_001).unwrap() {
+    match inspect(root, &row, 30_001, false).unwrap() {
         Inspection::Changed { current, bytes } => {
             assert_eq!(bytes, b"outside after mount");
             assert_ne!(current.device, row.device);
@@ -457,7 +473,7 @@ fn oversized_retained_source_becomes_a_recoverable_kept_copy() {
         .set_len(MAX_MATERIALIZE_BYTES as u64 + 1)
         .unwrap();
     assert!(matches!(
-        inspect(root, &row, 1).unwrap(),
+        inspect(root, &row, 1, false).unwrap(),
         Inspection::Oversized
     ));
     store.keep_oversized_retained(&row, 1).unwrap();
@@ -1077,7 +1093,7 @@ fn checked_delete_release_failure_preserves_receipt_error_and_rolls_back() {
         } else {
             assert!(!root.join(&row.source_path).exists());
             assert!(matches!(
-                crate::retained::inspect(root, &row, 1000).unwrap(),
+                crate::retained::inspect(root, &row, 1000, false).unwrap(),
                 crate::retained::Inspection::Missing
             ));
         }
@@ -1390,11 +1406,22 @@ fn passive_store_materialization_leaves_sources_rows_and_sibling_cleanup_untouch
 #[cfg(all(unix, feature = "fault-injection"))]
 #[test]
 fn capture_file_hold_parks_checked_delete_replay_and_preserves_late_retained_source() {
+    held_checked_delete_recovery(FaultPoint::MaterializeAfterKnownCopyDeletion, true);
+}
+
+#[cfg(all(unix, feature = "fault-injection"))]
+#[test]
+fn capture_file_hold_parks_rowless_checked_delete_recovery_until_clear() {
+    held_checked_delete_recovery(FaultPoint::MaterializeAfterDisplacedHash, false);
+}
+
+#[cfg(all(unix, feature = "fault-injection"))]
+fn held_checked_delete_recovery(point: FaultPoint, retained: bool) {
     use std::io::Write;
-    struct CrashAfterRetention;
-    impl FaultInjector for CrashAfterRetention {
+    struct CrashAt(FaultPoint);
+    impl FaultInjector for CrashAt {
         fn poll(&self, point: FaultPoint) -> dohc_engine_storage::FaultAction {
-            if point == FaultPoint::MaterializeAfterKnownCopyDeletion {
+            if point == self.0 {
                 dohc_engine_storage::FaultAction::Crash
             } else {
                 dohc_engine_storage::FaultAction::Continue
@@ -1412,13 +1439,21 @@ fn capture_file_hold_parks_checked_delete_replay_and_preserves_late_retained_sou
         .unwrap();
     let mut store = EngineStore::open(&db, 0).unwrap();
     let j = checked_delete_job(&mut store);
+    let crash = CrashAt(point);
     let mut settings = options(0, &StdReplacer);
-    settings.faults = &CrashAfterRetention;
+    settings.faults = &crash;
     assert_eq!(
         materialize_one_ordinary(&store, root, &j, &settings).unwrap(),
-        JobOutcome::Crashed(FaultPoint::MaterializeAfterKnownCopyDeletion)
+        JobOutcome::Crashed(point)
     );
-    let row = store.retained_displacements_after(0).unwrap().remove(0);
+    let rows = store.retained_displacements_after(0).unwrap();
+    assert_eq!(rows.len(), usize::from(retained));
+    let source = std::fs::read_dir(root.join(STAGING_DIR))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
     writer.write_all(b"late outside write").unwrap();
     drop(writer);
     std::fs::write(&target, b"held outside version").unwrap();
@@ -1429,19 +1464,10 @@ fn capture_file_hold_parks_checked_delete_replay_and_preserves_late_retained_sou
         })
     }).unwrap();
     drop(store);
-    let store = EngineStore::open(&db, 1000).unwrap();
+    let mut store = EngineStore::open(&db, 1000).unwrap();
+    // The pre-retention crash enters RecoveryEntry::recover; a retained source
+    // instead stays owned by its row and is inspected by the worker.
     recover_displacements(&store, root, Some("ws"), &options(1000, &StdReplacer)).unwrap();
-    let pending = store.load_materialization_job(&j.job_id).unwrap().unwrap();
-    assert_eq!(
-        materialize_one_ordinary(&store, root, &pending, &options(1000, &StdReplacer)).unwrap(),
-        JobOutcome::Parked
-    );
-    assert_eq!(std::fs::read(&target).unwrap(), b"held outside version");
-    assert_eq!(
-        std::fs::read(root.join(&row.source_path)).unwrap(),
-        b"late outside write"
-    );
-    assert_eq!(store.retained_displacements_after(0).unwrap(), vec![row]);
     assert_eq!(
         store
             .load_materialization_job(&j.job_id)
@@ -1450,16 +1476,76 @@ fn capture_file_hold_parks_checked_delete_replay_and_preserves_late_retained_sou
             .status,
         JobStatus::Pending
     );
+    let pending = store.load_materialization_job(&j.job_id).unwrap().unwrap();
+    assert_eq!(
+        materialize_one_ordinary(&store, root, &pending, &options(1000, &StdReplacer)).unwrap(),
+        JobOutcome::Parked
+    );
+    assert_eq!(std::fs::read(&target).unwrap(), b"held outside version");
+    assert_eq!(std::fs::read(&source).unwrap(), b"late outside write");
+    assert_eq!(store.retained_displacements_after(0).unwrap(), rows);
     sweep(&store, root, 1000);
-    let bytes: Vec<u8> = store
-        .read_with(|c| {
-            c.query_row(
-                "SELECT bytes FROM materialization_displacement_reads",
-                [],
-                |r| r.get(0),
-            )
+    sweep(&store, root, 31_000);
+    assert!(source.exists(), "a hold must fence quiet release");
+    if retained {
+        let bytes: Vec<u8> = store
+            .read_with(|c| {
+                c.query_row(
+                    "SELECT bytes FROM materialization_displacement_reads",
+                    [],
+                    |r| r.get(0),
+                )
+            })
+            .unwrap();
+        assert_eq!(bytes, b"late outside write");
+    } else {
+        let open = store.list_unsettled_displacements().unwrap();
+        assert_eq!(open.len(), 1);
+        assert_eq!(
+            open[0].state,
+            DisplacementState::Open,
+            "recovery must stop at the hold gate"
+        );
+    }
+    store
+        .write_with(&NoFaults, |tx| {
+            dohc_engine_storage::capture_file_holds::clear_in(tx, "ws", "notes.md")
         })
         .unwrap();
-    assert_eq!(bytes, b"late outside write");
+    recover_displacements(&store, root, Some("ws"), &options(31_001, &StdReplacer)).unwrap();
+    let replay = store.load_materialization_job(&j.job_id).unwrap().unwrap();
+    // New outside bytes supersede the delete preimage: terminate as conflict.
+    assert_eq!(
+        materialize_one_ordinary(&store, root, &replay, &options(31_001, &StdReplacer)).unwrap(),
+        JobOutcome::Conflict
+    );
+    assert_eq!(
+        store
+            .load_materialization_job(&j.job_id)
+            .unwrap()
+            .unwrap()
+            .status,
+        JobStatus::Conflict
+    );
+    assert_eq!(std::fs::read(&target).unwrap(), b"held outside version");
+    assert_eq!(std::fs::read(&source).unwrap(), b"late outside write");
+    if retained {
+        sweep(&store, root, 31_001);
+        assert!(!source.exists());
+        assert!(store.retained_displacements_after(0).unwrap().is_empty());
+        assert_eq!(
+            store
+                .table_row_count("materialization_displacement_reads")
+                .unwrap(),
+            1
+        );
+    } else {
+        let kept = store.list_kept_displacements("ws").unwrap();
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].state, DisplacementState::Kept);
+        recover_displacements(&store, root, Some("ws"), &options(31_002, &StdReplacer)).unwrap();
+        assert_eq!(store.list_kept_displacements("ws").unwrap(), kept);
+        assert_eq!(std::fs::read(&source).unwrap(), b"late outside write");
+    }
     assert_eq!(std::fs::read(&target).unwrap(), b"held outside version");
 }

@@ -123,6 +123,25 @@ pub fn inspect(
     root: &Path,
     row: &RetainedDisplacement,
     now_ms: i64,
+    held: bool,
+) -> Result<Inspection, MaterializeError> {
+    inspect_with_reader(root, row, now_ms, held, read_source)
+}
+
+fn read_source(file: &std::fs::File, path: &Path) -> Result<Vec<u8>, MaterializeError> {
+    let mut bytes = Vec::new();
+    file.take(MAX_MATERIALIZE_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| MaterializeError::io(path, &e))?;
+    Ok(bytes)
+}
+
+fn inspect_with_reader(
+    root: &Path,
+    row: &RetainedDisplacement,
+    now_ms: i64,
+    held: bool,
+    read: impl FnOnce(&std::fs::File, &Path) -> Result<Vec<u8>, MaterializeError>,
 ) -> Result<Inspection, MaterializeError> {
     let rel = Path::new(&row.source_path);
     if rel.is_absolute()
@@ -151,7 +170,14 @@ pub fn inspect(
     // The descriptor was reopened by path. Device numbers can change on remount;
     // compare content instead of treating the old identity as an eternal fence.
     let identity_changed = device != row.device || inode != row.inode;
-    if !identity_changed && meta.nlink() > 1 {
+    let changed = (size, mtime.as_str(), ctime.as_str())
+        != (row.size, row.mtime.as_str(), row.ctime.as_str());
+    // A hold forbids release, so an unchanged stamp needs no content read.
+    // A changed stamp still reaches the durable observation path below.
+    if held && !identity_changed && !changed {
+        return Ok(Inspection::Keep);
+    }
+    if !held && !identity_changed && meta.nlink() > 1 {
         return Ok(Inspection::Release(Release {
             path,
             file,
@@ -159,8 +185,6 @@ pub fn inspect(
         }));
     }
     let quiet = now_ms.saturating_sub(row.changed_at_ms) >= QUIET_PERIOD_MS;
-    let changed = (size, mtime.as_str(), ctime.as_str())
-        != (row.size, row.mtime.as_str(), row.ctime.as_str());
     if !identity_changed && !quiet && !changed {
         return Ok(Inspection::Keep);
     }
@@ -173,17 +197,14 @@ pub fn inspect(
     if lease_checked && writer_present(&file, &path)? {
         return Ok(Inspection::Keep);
     }
-    let mut bytes = Vec::new();
-    (&file)
-        .take(MAX_MATERIALIZE_BYTES as u64 + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|e| MaterializeError::io(&path, &e))?;
+    let bytes = read(&file, &path)?;
     if bytes.len() > MAX_MATERIALIZE_BYTES {
         return Ok(Inspection::Oversized);
     }
     let digest = hex_sha256(&bytes);
     // Even an unstable read is kept. Its new clock forces another comparison.
     if digest != row.digest
+        || (held && identity_changed)
         || (!identity_changed && changed)
         || stamp(
             &file
@@ -220,4 +241,77 @@ fn writer_present(file: &std::fs::File, path: &Path) -> Result<bool, Materialize
         dohc_linux_files::probe(file).map_err(|e| MaterializeError::io(path, &e))?
             == dohc_linux_files::LeaseProbe::WriterPresent,
     )
+}
+
+#[cfg(test)]
+#[test]
+fn materialize_held_source_reads_only_after_stamp_changes() {
+    use std::cell::Cell;
+    let scratch = dohc_test_scratch::ScratchDir::new_named("held-inspection-reads").unwrap();
+    let root = scratch.path();
+    let source = root.join("source");
+    std::fs::write(&source, b"before").unwrap();
+    let (device, inode, size, mtime, ctime) = stamp(&std::fs::metadata(&source).unwrap());
+    let mut row = RetainedDisplacement {
+        displacement_id: 1,
+        job_id: "held".into(),
+        workspace_id: "ws".into(),
+        target_path: "notes.md".into(),
+        source_path: "source".into(),
+        device,
+        inode,
+        digest: hex_sha256(b"before"),
+        size,
+        mtime,
+        ctime,
+        changed_at_ms: 0,
+    };
+    let reads = Cell::new(0);
+    let read = |file: &std::fs::File, path: &Path| {
+        reads.set(reads.get() + 1);
+        read_source(file, path)
+    };
+    for _ in 0..10 {
+        let _ = inspect_with_reader(root, &row, 60_000, true, read).unwrap();
+    }
+    println!("10 quiet held inspections: {} reads", reads.get());
+    assert_eq!(reads.get(), 0, "quiet held sources must not be read");
+    std::fs::write(&source, b"late outside write").unwrap();
+    match inspect_with_reader(root, &row, 60_000, true, read).unwrap() {
+        Inspection::Changed { current, bytes } => {
+            assert_eq!(bytes, b"late outside write");
+            row = current;
+            row.changed_at_ms = 60_000;
+        }
+        _ => panic!("held changes must still import"),
+    }
+    assert_eq!(reads.get(), 1);
+    for _ in 0..10 {
+        assert!(matches!(
+            inspect_with_reader(root, &row, 90_000, true, read).unwrap(),
+            Inspection::Keep
+        ));
+    }
+    assert_eq!(reads.get(), 1, "imported held sources must not be re-read");
+    row.device = "previous mount".into();
+    match inspect_with_reader(root, &row, 90_000, true, read).unwrap() {
+        Inspection::Changed { current, bytes } => {
+            assert_eq!(bytes, b"late outside write");
+            row = current;
+        }
+        _ => panic!("held remounts must refresh the stamp once"),
+    }
+    assert!(matches!(
+        inspect_with_reader(root, &row, 90_000, true, read).unwrap(),
+        Inspection::Keep
+    ));
+    assert_eq!(reads.get(), 2);
+    assert!(matches!(
+        inspect_with_reader(root, &row, 90_000, false, read).unwrap(),
+        Inspection::Release(_)
+    ));
+    assert_eq!(reads.get(), 3);
+    println!(
+        "20 quiet held inspections: 0 reads; changed source, remount and cleared hold: 1 read each"
+    );
 }
