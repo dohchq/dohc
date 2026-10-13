@@ -588,9 +588,9 @@ test("proof edits during preparation reject full source provenance", () => {
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
-test("prepared desktop checks staged compiler bytes only on Windows x64", () => {
-  for (const [platform, arch] of [["win32", "x64"], ["win32", "arm64"], ["linux", "x64"]]) {
-    const supported = platform === "win32" && arch === "x64";
+test("prepared desktop checks staged compiler bytes on Windows and Linux x64", () => {
+  for (const [platform, arch] of [["win32", "x64"], ["win32", "arm64"], ["linux", "x64"], ["linux", "arm64"]]) {
+    const supported = arch === "x64" && ["win32", "linux"].includes(platform);
     const root = mkdtempSync(join(tmpdir(), "dohc-prepare-compiler-"));
     try {
       const invoke = createPrepareFixture(root, new URL("./build.mjs", import.meta.url));
@@ -755,7 +755,7 @@ for (const kind of ["engine", "desktop"]) test(`${kind} source identity scopes e
         engine:['RUSTFLAGS','CARGO_ENCODED_RUSTFLAGS','CARGO_BUILD_JOBS','CARGO_PROFILE_DEV_DEBUG',
           'CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS','CARGO_INCREMENTAL','RUSTC_WRAPPER','RUSTDOCFLAGS',
           'CC','CXX','AR','CFLAGS','CXXFLAGS'],
-        desktop:['VITE_FIXTURE','NODE_ENV','ESBUILD_BINARY_PATH','DOHC_POSTHOG_KEY','DOHC_POSTHOG_HOST','DOHC_SENTRY_DSN','DOHC_SENTRY_DIST'],
+        desktop:['VITE_FIXTURE','NODE_ENV','ESBUILD_BINARY_PATH','DOHC_POSTHOG_KEY','DOHC_POSTHOG_HOST','DOHC_DESKTOP_DIST'],
       };
       for(const [owner,names] of Object.entries(settings)) for(const name of names) {
         delete process.env[name];

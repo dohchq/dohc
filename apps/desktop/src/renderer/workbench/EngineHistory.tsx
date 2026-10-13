@@ -69,9 +69,9 @@ export function engineOriginLabel(origin: EngineMomentRecord["origin"]): string 
 // "the agent name" (the same formatting rule the chat rail uses via
 // chatAuthorLabel), and one a Collection automation authored as the
 // automation's name and its Collection. An Edit link's direct file write
-// names the link and a short form of the browser session that used it, so
-// it never reads like an app submission from a link holder. A restore names
-// this computer's person who made it; their other edits read as a local file
+// names the link and a short id for its holder; an app submission names the
+// holder with the same short id, so it never reads like an Edit link's write. A
+// restore names this computer's person who made it; their other edits read as a local file
 // edit or a live edit. A live edit the relay admitted from an account or link
 // holder names them. Everything else keeps its actor-neutral origin label.
 export function engineMomentSourceLabel(
@@ -84,7 +84,7 @@ export function engineMomentSourceLabel(
     return rest.length ? `${shown} and ${rest.length} more` : shown;
   }
   if (moment.liveAuthorName) return moment.liveAuthorName;
-  if (moment.publicAuthor) return `Link holder ${moment.publicAuthor.principalId}`;
+  if (moment.publicAuthor) return `Link holder ${moment.publicAuthor.principalId.replace(/^public_/, "").slice(0, 8)}`;
   if (moment.linkAuthor) return `Edit link · holder ${moment.linkAuthor.principalId.slice(0, 8)}`;
   if (moment.automationAuthor) {
     const { name, collection } = moment.automationAuthor;
@@ -369,7 +369,6 @@ export function EngineHistoryView(props: {
   moments: EngineMomentRecord[];
   hasMore: boolean;
   loadingMore: boolean;
-  protectedTruncated: boolean;
   onLoadMore: () => void;
   onOpenMoment: (momentId: string, filePath: string) => void;
 }) {
@@ -410,7 +409,7 @@ export function EngineHistoryView(props: {
   const retainedKeys = focusedIndex < 0
     ? []
     : rows.slice(Math.max(0, focusedIndex - 2), focusedIndex + 3).map((row) => row.key);
-  const headerItemCount = props.protectedTruncated ? 1 : 0;
+  const headerItemCount = 0;
   const listItemCount = headerItemCount + rows.length + (props.hasMore ? 1 : 0);
   const rowPresentation = useMemo(
     () => ({ expandedGroups, headerItemCount, listItemCount, onOpenMoment: props.onOpenMoment }),
@@ -480,16 +479,6 @@ export function EngineHistoryView(props: {
           if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setFocusedKey(null);
         }}
         extraData={rowPresentation}
-        ListHeaderComponent={props.protectedTruncated ? (
-          <li
-            role="listitem"
-            aria-posinset={1}
-            aria-setsize={listItemCount}
-            className="border-b border-line px-3 py-2 text-[11px] text-muted"
-          >
-            Some protected activity in this range is not shown.
-          </li>
-        ) : null}
         renderItem={({ item, index }) => item.day ? (
           <li
             role="listitem"

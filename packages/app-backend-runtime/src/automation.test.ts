@@ -18,6 +18,10 @@ vi.mock("node:worker_threads", async importOriginal => {
   class CountedWorker extends actual.Worker {
     constructor(...args: ConstructorParameters<typeof actual.Worker>) { super(...args); threads.started++; }
     override terminate() { threads.terminated++; return super.terminate(); }
+    override emit(...args: Parameters<Worker["emit"]>) {
+      if (args[0] === "message" && args[1]?.testUnreadableReply === true) return super.emit("messageerror", new Error("Unreadable test reply."));
+      return super.emit(...args);
+    }
     override postMessage(...args: Parameters<Worker["postMessage"]>) {
       const message = args[0];
       threads.sent.push({ kind: message.kind, runId: message.runId, hasScope: Object.hasOwn(message, "scope") });
@@ -931,19 +935,17 @@ describe("evaluator lifetime", () => {
   });
 
   it("fails one item for a reply it cannot read, and moves on after a worker asks to restart", async () => {
-    // "deep" answers with a value too deeply nested to copy, and "restart" fails its item and asks for a new worker.
+    // The worker wrapper delivers messageerror for this marker; nesting limits vary across Node versions.
     await using worker = await standInWorker(`for (const item of items) {
-      if (item.source === "deep") {
-        let v = 1;
-        for (let i = 0; i < 3000; i++) v = [v];
-        reply({ kind: "result", result: { ok: true, value: v } });
+      if (item.source === "unreadable") {
+        reply({ testUnreadableReply: true });
       } else if (item.source === "restart") {
         return reply({ kind: "result", result: { ok: false, error: { code: "memory", message: "Broken." } }, restart: true });
       } else reply({ kind: "result", result: { ok: true, value: item.source } });
     }`);
     const standIn = createAutomationEvaluator({ entryPath: worker.entryPath });
     try {
-      expect(await standIn.evaluate(scope, ["a", "deep", "b", "restart", "c"].map(expression))).toEqual([
+      expect(await standIn.evaluate(scope, ["a", "unreadable", "b", "restart", "c"].map(expression))).toEqual([
         { ok: true, value: "a" },
         { ok: false, error: { code: "invalid_result", message: "The formula produced a value that cannot be read." } },
         { ok: true, value: "b" },

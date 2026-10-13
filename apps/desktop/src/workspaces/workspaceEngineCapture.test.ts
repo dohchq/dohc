@@ -286,14 +286,14 @@ async function liveMoments(engine: WorkspaceEngineCapture): Promise<EngineMoment
   // here is a limit rejecting valid work; paging costs nothing and removes the
   // question. (Same correction as the moments reader on #417.)
   const summaries: Awaited<ReturnType<WorkspaceEngineCapture["listMoments"]>>["moments"] = [];
-  let beforeMomentOrder: number | undefined;
+  let cursor: import("@dohc/workspace-engine-client").HistoryCursor | undefined;
   for (;;) {
     const page = await engine.listMoments({
-      ...(beforeMomentOrder === undefined ? {} : { beforeMomentOrder }),
+      ...(cursor === undefined ? {} : { cursor }),
     });
     summaries.push(...page.moments);
-    if (page.nextBeforeMomentOrder === null) break;
-    beforeMomentOrder = page.nextBeforeMomentOrder;
+    if (page.nextCursor === null) break;
+    cursor = page.nextCursor;
   }
   const rows: EngineMomentRow[] = [];
   for (const summary of [...summaries].reverse()) {
@@ -432,16 +432,22 @@ describe("workspaceEngineCapture batch capture", () => {
       rustEngineSessions: mockLiveSessions(loopback, requests),
     });
 
-    const objectId = await engine.fileObjectIdForPath("just-saved.md");
+    const resolve = engine.resolveFileForPath;
+    const file = await resolve("just-saved.md");
+    const objectId = file?.objectId;
+    expect(file?.path).toBe("just-saved.md");
     const relevant = requests
       .map((request) => request.method)
       .filter(
         (method) =>
-          method === "capture.flush" || method === VERSIONED_METHOD.textRead,
+          method === "capture.flush" || method === "files.resolve",
       );
 
     expect(objectId).toBeTruthy();
-    expect(relevant, "remove fileObjectIdForPath's flushCapture call. The read remains, making this order assertion fail on the missing first entry.").toEqual(["capture.flush", VERSIONED_METHOD.textRead]);
+    expect(await engine.filePathForObjectId(objectId!)).toBe("just-saved.md");
+    expect(requests.filter(request => request.method === VERSIONED_METHOD.textList)).toHaveLength(0);
+    expect(requests.filter(request => request.method === VERSIONED_METHOD.textRead || request.method === VERSIONED_METHOD.textReadBlob)).toHaveLength(0);
+    expect(relevant, "remove resolveFileForPath's flushCapture call. The read remains, making this order assertion fail on the missing first entry.").toEqual(["capture.flush", "files.resolve"]);
     await engine.stop();
   });
 
@@ -467,6 +473,10 @@ describe("workspaceEngineCapture batch capture", () => {
     expect(requests.filter((request) => request.method === VERSIONED_METHOD.historyPage)).toEqual([expect.objectContaining({ params: { workspaceId: WORKSPACE_ID, objectId: "object-plan", limit: 10 } })]);
     expect(requests.some((request) => request.method === VERSIONED_METHOD.momentsList)).toBe(false);
     expect((await engine.listMoments({ limit: 10 })).moments).toHaveLength(3);
+    const first = await engine.listMoments({ limit: 1, objectId: "object-plan" });
+    expect(first.nextCursor).not.toBeNull();
+    await engine.listMoments({ limit: 1, objectId: "object-plan", cursor: first.nextCursor! });
+    expect(requests.filter(request => request.method === VERSIONED_METHOD.historyPage).at(-1)?.params).toMatchObject({ versionId: "main", cursor: first.nextCursor });
     await engine.stop();
   });
 
@@ -1287,7 +1297,9 @@ describe("workspaceEngineCapture batch capture", () => {
     await write(root,"responses/moved.md","response");
     const engine=capture(root,{store,rustEngineSessions:sessions});
     const selection={acceptanceId:"accepted-a",objectId:created.object.id,momentId:created.moment.id,path:created.snapshot.path,collectionPath:"responses",versionId:"main",publicPrincipalId:"public-a",grantId:"grant",requestId:"undo-a"};
+    requests.length = 0;
     const result=await engine.undoAcceptedAppResponse(selection);
+    expect(requests.filter(request => request.method === VERSIONED_METHOD.textList)).toHaveLength(0);
     expect(result.status).toBe("deleted");expect(result.momentId).toBeTruthy();
     expect(existsSync(join(root,"responses/moved.md"))).toBe(false);
     const deletion=requests.findLast(request=>request.method==="versionedText.delete");

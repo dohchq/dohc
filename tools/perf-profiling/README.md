@@ -240,3 +240,51 @@ A missing scenario is `null`, never a pass. `complete` is true only when every
 scenario produced an artifact.
 
 React commit counts are currently `null`. The app has no production React Profiler or commit mark.
+
+
+## Measure engine History queries
+
+The ignored Rust test `history_page_benchmark` measures first pages, later pages, and a three-edit object in a 100,000-moment version.
+The fixture also contains 1,000 protected rows and 100 version markers.
+The candidate drains those streams before timing a later text cursor, so the benchmark exercises a text position as well as marker positions.
+It reports capture-inclusive reads and the first reopen after removing the candidate's History index migration.
+The reopen builds both History indexes.
+After the reads, it times 100 saves through `versionedText.write`, following ten warmup saves.
+It then imports ten batches of 100 moments through `apply_moment_envelope`, following one warmup batch.
+Each imported moment uses its own production sync transaction. Envelope preparation stays outside timing.
+`save` reports milliseconds per save. `importPerMoment` reports milliseconds per moment, averaged within each batch.
+Both paths append to the same 100,000-moment fixture. Compare their baseline and candidate values to measure the indexes' write cost.
+
+Prepare separate base and candidate checkouts before the admitted measurement window.
+Copy `crates/dohc-workspace-engine/tests/history_page_benchmark.rs` from the candidate into the base checkout.
+The harness chooses the old page cursor when `HISTORY_BENCH_MODE=baseline`.
+Keep both checkouts and build outputs within their registered task worktrees.
+
+Read the repository's `rust-gate` skill and build each executable through its build budget with these arguments:
+
+```text
+cargo test --locked --release -p dohc-workspace-engine --test history_page_benchmark --no-run -j 8
+```
+
+Use the test executable path printed by Cargo. It is platform-specific and includes a content hash.
+Record its SHA256, checkout commit, profile, fixture size, and concurrent host context.
+Both arms must use the release profile and the same fixture.
+
+Run both arms from the candidate checkout with the repository runner:
+
+```text
+node tools/perf-profiling/history-query-benchmark.mjs --exe <base-release-test-executable> --mode baseline
+node tools/perf-profiling/history-query-benchmark.mjs --exe <candidate-release-test-executable> --mode candidate
+```
+
+Use absolute executable paths for the base and candidate builds. The runner fixes the fixture size at 100,000 moments.
+The runner acquires profiling admission, monitors the owned child, and releases admission after the child exits.
+Admission refusal ends the command without launching the executable. Rerun during the scheduled window.
+Do not run the test through Cargo while holding profiling admission: its build slot conflicts with profiling admission.
+Do not bypass an admission refusal.
+
+The runner prints `HISTORY_BENCH` numbers after successful completion and a final admission check.
+After the run, it rejects results from a debug-profile build.
+It records the executable SHA256, process ownership, raw log, numbers, and admission observations under `.agent-artifacts/history-page/measurement-*`.
+TEMP, TMP, and DOHC_TEST_SCRATCH_ROOT stay inside that run's checkout.
+Preserve the printed evidence path with the comparison.

@@ -34,8 +34,9 @@ enum Slot {
 }
 
 #[derive(Clone, Copy)]
-enum ActorOpenMode {
+pub(crate) enum ActorOpenMode {
     ReadWrite,
+    Passive,
     ReadOnly,
 }
 
@@ -179,6 +180,17 @@ impl WorkspaceSupervisor {
         self.open_with_mode(db_path, 0, ActorOpenMode::ReadOnly, None, work)
     }
 
+    /// Open a writable passive store without local origination or file jobs.
+    pub fn open_passive_root_bound(
+        &self,
+        db_path: &Path,
+        now_ms: i64,
+        token: &str,
+        work: Option<Arc<AtomicU64>>,
+    ) -> Result<SupervisorOpen, RuntimeError> {
+        self.open_with_mode(db_path, now_ms, ActorOpenMode::Passive, Some(token), work)
+    }
+
     fn open_with_mode(
         &self,
         db_path: &Path,
@@ -187,7 +199,7 @@ impl WorkspaceSupervisor {
         root_token: Option<&str>,
         work: Option<Arc<AtomicU64>>,
     ) -> Result<SupervisorOpen, RuntimeError> {
-        if matches!(mode, ActorOpenMode::ReadWrite) {
+        if matches!(mode, ActorOpenMode::ReadWrite | ActorOpenMode::Passive) {
             ensure_parent_dir(db_path)?;
         }
         let mut dead: Option<WorkspaceActor> = None;
@@ -195,7 +207,9 @@ impl WorkspaceSupervisor {
         {
             let mut guard = lock(&self.registry);
             identity = match mode {
-                ActorOpenMode::ReadWrite => EngineDbIdentity::resolve_or_create(db_path)?,
+                ActorOpenMode::ReadWrite | ActorOpenMode::Passive => {
+                    EngineDbIdentity::resolve_or_create(db_path)?
+                }
                 ActorOpenMode::ReadOnly => EngineDbIdentity::of_existing(db_path)?,
             };
             loop {
@@ -213,6 +227,15 @@ impl WorkspaceSupervisor {
                 match action {
                     Action::Return => {
                         if let Some(Slot::Active(actor)) = guard.get(&identity) {
+                            if matches!(mode, ActorOpenMode::Passive)
+                                != matches!(actor.open_mode(), ActorOpenMode::Passive)
+                            {
+                                return Err(RuntimeError::Storage(
+                                    dohc_engine_storage::StorageError::InvalidInput {
+                                        reason: "engine store role mismatch",
+                                    },
+                                ));
+                            }
                             return Ok(SupervisorOpen {
                                 actor: actor.handle(),
                                 created_actor: false,
@@ -257,6 +280,14 @@ impl WorkspaceSupervisor {
                     WorkspaceActor::spawn(db_path.to_path_buf(), identity.clone(), 1, now_ms, work)
                 }
             }
+            ActorOpenMode::Passive => WorkspaceActor::spawn_passive(
+                db_path.to_path_buf(),
+                identity.clone(),
+                1,
+                now_ms,
+                root_token.map(str::to_owned),
+                work,
+            ),
             ActorOpenMode::ReadOnly => {
                 WorkspaceActor::spawn_read_only(db_path.to_path_buf(), identity.clone(), 1, work)
             }
@@ -278,7 +309,7 @@ impl WorkspaceSupervisor {
     pub fn restart(&self, db_path: &Path, now_ms: i64) -> Result<ActorHandle, RuntimeError> {
         ensure_parent_dir(db_path)?;
 
-        let (old, next_generation, identity) = {
+        let (old, next_generation, mode, identity) = {
             let mut guard = lock(&self.registry);
             let identity = EngineDbIdentity::resolve_or_create(db_path)?;
             // Wait out any in-flight reservation/close for this identity.
@@ -290,8 +321,12 @@ impl WorkspaceSupervisor {
                 Some(Slot::Active(actor)) => actor.generation().saturating_add(1),
                 _ => 1,
             };
+            let mode = match &old {
+                Some(Slot::Active(actor)) => actor.open_mode(),
+                _ => ActorOpenMode::ReadWrite,
+            };
             guard.insert(identity.clone(), Slot::Reserving);
-            (old, next_generation, identity)
+            (old, next_generation, mode, identity)
         };
 
         // Close the predecessor outside the lock; a WorkerPanicked from a dead
@@ -300,11 +335,13 @@ impl WorkspaceSupervisor {
             let _ = actor.close();
         }
 
-        let spawned = WorkspaceActor::spawn(
+        let spawned = WorkspaceActor::spawn_with_mode(
             db_path.to_path_buf(),
             identity.clone(),
             next_generation,
             now_ms,
+            mode,
+            None,
             None,
         );
         self.finalize_reservation(identity, spawned)

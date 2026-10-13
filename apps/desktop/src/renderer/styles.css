@@ -160,9 +160,18 @@ body {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  *,
-  ::before,
-  ::after {
+  :where(:root:not([data-system-reduced-motion='false'])) {
+    &, &::before, &::after, *, ::before, ::after {
+      animation-duration: 0.001ms !important;
+      animation-iteration-count: 1 !important;
+      scroll-behavior: auto !important;
+      transition-duration: 0.001ms !important;
+    }
+  }
+}
+
+:where(:root[data-system-reduced-motion='true']) {
+  &, &::before, &::after, *, ::before, ::after {
     animation-duration: 0.001ms !important;
     animation-iteration-count: 1 !important;
     scroll-behavior: auto !important;
@@ -259,10 +268,15 @@ table {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  :where(.dohc-menu-in) {
+  :where(:root:not([data-system-reduced-motion='false']) .dohc-menu-in) {
     animation-name: dohc-menu-fade !important;
     animation-duration: 60ms !important;
   }
+}
+
+:where(:root[data-system-reduced-motion='true'] .dohc-menu-in) {
+  animation-name: dohc-menu-fade !important;
+  animation-duration: 60ms !important;
 }
 
 /* Faint paper grid for brand moments (first-run) — texture, not decoration. */

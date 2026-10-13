@@ -1,3 +1,4 @@
+import { historyCursor, historyPageFields } from "../testing/historyPageFixture";
 import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { deferred } from "../testing/deferred";
@@ -191,7 +192,7 @@ describe("roster from the relay's listings", () => {
       moments: [{ id: "m-ended", workspaceId: WORKSPACE, versionId: "main", objectId: "o-1", path: "Trip/a.md", recordedAtMs: 1,
         operation: "write", metadata: { origin: "sync" }, momentOrder: 0, protected: false,
         authors: [{ kind: "named", userId: "u-ben", grantId: "g-dep", grantGeneration: 1 }] }],
-      nextBeforeMomentOrder: null, latestMomentOrder: 0, activeVersionId: "main", protectedTruncated: false,
+      nextCursor: null, latestMomentOrder: 0, activeVersionId: "main", ...historyPageFields,
     }), { agent: () => undefined, person: () => undefined, automation: () => null,
       prepare: authors => names.prepare(WORKSPACE, authors.filter(author => author.kind === "named")), named: author => names.author(WORKSPACE, author) });
     const immediate = await readHistory();
@@ -216,7 +217,7 @@ describe("roster from the relay's listings", () => {
           { kind: "agent", agentId: "agent" },
           { kind: "named", userId: "u-ben", grantId: "g-dep", grantGeneration: 1 },
         ] }],
-      nextBeforeMomentOrder: null, latestMomentOrder: 0, activeVersionId: "main", protectedTruncated: false,
+      nextCursor: null, latestMomentOrder: 0, activeVersionId: "main", ...historyPageFields,
     }), { agent: () => undefined, person: () => undefined, automation: () => null,
       prepare: authors => names.prepare(WORKSPACE, authors.filter(author => author.kind === "named")), named: author => names.author(WORKSPACE, author) });
     expect(await readHistory()).toMatchObject({ moments: [{ authorLabels: ["ana@dohc.test (Edit)", "Agent", "Someone you shared with"] }] });
@@ -1035,7 +1036,7 @@ describe("a direct write's author in History", () => {
         operation: "write", metadata: { origin: "sync" }, momentOrder: 0, protected: false,
         authors: [{ kind: "named", userId: "ana", grantId: "g-1", grantGeneration: 1 }],
       }],
-      nextBeforeMomentOrder: null, latestMomentOrder: 0, activeVersionId: "main", protectedTruncated: false,
+      nextCursor: null, latestMomentOrder: 0, activeVersionId: "main", ...historyPageFields,
     }), { agent: () => undefined, person: () => undefined, automation: () => null, named: (author) => labelFrom(saved, author) });
     expect(history).toMatchObject({ moments: [{ namedAuthor: { userId: "ana", label: "Someone you shared with" } }] });
   });

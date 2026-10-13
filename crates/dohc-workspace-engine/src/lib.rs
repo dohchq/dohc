@@ -64,7 +64,7 @@ use std::sync::MutexGuard;
 pub struct EngineService {
     supervisor: &'static WorkspaceSupervisor,
     handles: Mutex<HashMap<WorkspaceHandle, Arc<OpenWorkspace>>>,
-    live_applications: Mutex<rpc::live_application::Registry>,
+    live_applications: Arc<Mutex<rpc::live_application::Registry>>,
     configured_live_host: std::sync::OnceLock<rpc::configured_live_host::Discovery>,
     ordinary_live_host: std::sync::OnceLock<rpc::ordinary_live_host::OrdinaryHost>,
     pending_cursors: Mutex<HashMap<String, PendingCursor>>,
@@ -107,6 +107,7 @@ impl Default for EngineService {
     }
 }
 
+// Keep dispatcher state out of callers' inline RPC futures.
 impl ProtocolEngineService for EngineService {
     type Input = LiveApplicationInput;
 
@@ -118,7 +119,7 @@ impl ProtocolEngineService for EngineService {
     ) -> Result<ServiceResponse, WireError> {
         match input {
             Some(input) => self.dispatch_input(ctx, request, input).await,
-            None => self.dispatch(ctx, request).await,
+            None => Box::pin(self.dispatch(ctx, request)).await,
         }
     }
     async fn call(
@@ -126,7 +127,7 @@ impl ProtocolEngineService for EngineService {
         ctx: RequestContext,
         request: Request,
     ) -> Result<ServiceResponse, WireError> {
-        self.dispatch(ctx, request).await
+        Box::pin(self.dispatch(ctx, request)).await
     }
 }
 
@@ -154,7 +155,7 @@ impl EngineService {
         EngineService {
             supervisor,
             handles: Mutex::new(HashMap::new()),
-            live_applications: Mutex::new(rpc::live_application::Registry::default()),
+            live_applications: Arc::new(Mutex::new(rpc::live_application::Registry::default())),
             configured_live_host: std::sync::OnceLock::new(),
             ordinary_live_host: std::sync::OnceLock::new(),
             pending_cursors: Mutex::new(HashMap::new()),

@@ -1,6 +1,7 @@
 import {prepareLiveApplications} from "./storage/liveApplicationAuthorship";
 import {prepareHostedSettlements} from "./storage/hostedSettlement";
 import * as shareLabelsStorage from "./storage/shareLabels";
+import * as replicaReads from "./storage/replicaReads";
 import * as buttonInspections from "./automationButtonInspections";
 import type {ShareLabels} from "@dohc/security-contract/share-labels";
 import type { ServiceActivationAccess } from "./storage/serviceActivationAccess";
@@ -376,8 +377,8 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
   listServiceHostEnrollments(workspaceId?: string) {
     return serviceHostEnrollmentStorage.listServiceHostEnrollments(this, workspaceId);
   }
-  hasServiceHostEnrollment(workspaceId: string, path: string) {
-    return serviceHostEnrollmentStorage.hasServiceHostEnrollment(this, workspaceId, path);
+  hasKeptServiceHostEnrollment(workspaceId: string, path: string) {
+    return serviceHostEnrollmentStorage.hasKeptServiceHostEnrollment(this, workspaceId, path);
   }
   readServiceHostEnrollment(workspaceId: string, path: string) {
     return serviceHostEnrollmentStorage.readServiceHostEnrollment(this, workspaceId, path);
@@ -385,8 +386,8 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
   listRetiredServiceHostEnrollments(workspaceId: string, after?: string) {
     return serviceHostEnrollmentStorage.listRetiredServiceHostEnrollments(this, workspaceId, after);
   }
-  listCurrentServiceHostEnrollments(workspaceId: string) {
-    return serviceHostEnrollmentStorage.listCurrentServiceHostEnrollments(this, workspaceId);
+  currentServiceHostWorkspace(workspaceId: string) {
+    return serviceHostEnrollmentStorage.currentServiceHostWorkspace(this, workspaceId);
   }
   scanServiceHostCandidateShares(after?: serviceHostEnrollmentStorage.ServiceHostCandidateCursor, workspaceId?: string) {
     return serviceHostEnrollmentStorage.scanServiceHostCandidateShares(this, after, workspaceId);
@@ -396,6 +397,14 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
   }
   setServiceHostEnrollmentEnabled(input: serviceHostEnrollmentStorage.SetServiceHostEnrollmentEnabledInput) {
     const result = serviceHostEnrollmentStorage.setServiceHostEnrollmentEnabled(this, input);
+    if (result) notifyDesktopReadiness(this, {workspaceId: result.workspaceId, path: result.path});
+    return result;
+  }
+  serviceHostEnrollmentHasEditGrant(enrollment: Pick<serviceHostEnrollmentStorage.ServiceHostEnrollment, "workspaceId" | "ownerUserId" | "path">) {
+    return serviceHostEnrollmentStorage.serviceHostEnrollmentHasEditGrant(this, enrollment);
+  }
+  releaseServiceHostEnrollment(input: {workspaceId: string; objectId: string; nowMs: number}) {
+    const result = serviceHostEnrollmentStorage.releaseServiceHostEnrollment(this, input);
     if (result) notifyDesktopReadiness(this, {workspaceId: result.workspaceId, path: result.path});
     return result;
   }
@@ -567,6 +576,8 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
   workspaceIsOwnedBy(workspaceId: string, ownerUserId: string): boolean {
     return workspacesStorage.workspaceIsOwnedBy(this, workspaceId, ownerUserId);
   }
+
+  readReplicaStanding(workspaceId: string, shareGrantBindings?: string) { return replicaReads.readReplicaStanding(this, workspaceId, shareGrantBindings); }
 
   postAutomationWake(input: noticeStorage.PostAutomationWakeInput): noticeStorage.PostedAutomationWake {
     return noticeStorage.postAutomationWake(this, input);
@@ -1074,6 +1085,10 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
 
   claimPendingSharesForEmail(email: string, userId: string): number {
     return sharesStorage.claimPendingSharesForEmail(this, email, userId);
+  }
+
+  hasPendingInvite(email: string): boolean {
+    return sharesStorage.hasPendingInvite(this, email);
   }
 
   shareHasActiveGrants(shareId: string): boolean {

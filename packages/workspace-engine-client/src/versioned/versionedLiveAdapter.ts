@@ -92,6 +92,8 @@ import {
 } from "./versionedWireContract";
 import { CONFLICT_ROW_HARD_CAP_BYTES } from "./engineTextLimits";
 
+import { decodeFileResolveResult, MAX_FILE_RESOLVE_TARGETS, MAX_FILE_RESOLVE_BYTES, type FileResolveTarget, type FileResolveResult } from "../daemon/fileResolution";
+
 export class VersionedAdapterCapabilityError extends Error {
   constructor(message: string) {
     super(message);
@@ -910,6 +912,27 @@ export class VersionedLiveAdapter {
     });
   }
 
+  /** Resolve only the requested file identities without listing or reading bodies. */
+  async resolveFiles(input: {
+    workspaceId: string;
+    versionId?: string;
+    targets: readonly FileResolveTarget[];
+    signal?: AbortSignal;
+  }): Promise<FileResolveResult> {
+    this.assertWorkspace(input.workspaceId);
+    input.signal?.throwIfAborted();
+    const params = { ...(input.versionId !== undefined ? { versionId: input.versionId } : {}), targets: [...input.targets] };
+    if (params.targets.length > MAX_FILE_RESOLVE_TARGETS || Buffer.byteLength(JSON.stringify(params)) > MAX_FILE_RESOLVE_BYTES) {
+      throw new Error("files.resolve exceeds its target or byte cap.");
+    }
+    const result = decodeFileResolveResult(await this.requester.request("files.resolve", params, { workspace: this.workspace }));
+    input.signal?.throwIfAborted();
+    if (result.results.length !== input.targets.length || (input.versionId !== undefined && result.versionId !== input.versionId)) {
+      throw new DaemonProtocolError("files.resolve returned a different version or target count.");
+    }
+    return result;
+  }
+
   /**
    * Lists every file in the version, or only files under the folder `under`.
    * The engine orders paths bytewise, so a folder's files are one run that
@@ -1127,21 +1150,9 @@ export class VersionedLiveAdapter {
     });
   }
 
-  async readHistoryPage(input: {
-    workspaceId: string;
-    objectId?: string;
-    limit?: number;
-    beforeMomentOrder?: number;
-  }): Promise<VersionedMethodResultMap["history.page"]> {
+  async readHistoryPage(input: VersionedMethodParamsMap["history.page"]): Promise<VersionedMethodResultMap["history.page"]> {
     this.assertWorkspace(input.workspaceId);
-    return this.request(VERSIONED_METHOD.historyPage, {
-      workspaceId: input.workspaceId,
-      ...(input.objectId !== undefined ? { objectId: input.objectId } : {}),
-      ...(input.limit !== undefined ? { limit: input.limit } : {}),
-      ...(input.beforeMomentOrder !== undefined
-        ? { beforeMomentOrder: input.beforeMomentOrder }
-        : {}),
-    });
+    return this.request(VERSIONED_METHOD.historyPage, input);
   }
 
   async getMoment(input: {

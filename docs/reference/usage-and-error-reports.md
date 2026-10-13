@@ -29,17 +29,21 @@ location from the connection.
 
 ## Error reports
 
-Error reports describe a problem dohc met. They go to Sentry. A report holds:
+Error reports describe a problem dohc met. They also go to PostHog. A report
+holds:
 
 - the error's type, when it is one dohc knows;
 - the error's message only when dohc wrote it from a fixed template;
   every other message reads `<message withheld>`;
 - the places in dohc's own code where it happened;
 - which part of dohc failed: the app, a window, the graphics process, or the workspace engine;
-- the dohc version, operating system, processor type, and Electron version.
+- the dohc version, release channel, operating system, processor type, and Electron version.
 
-A report never holds the installation's random number. dohc sends each
-distinct problem once per launch, and at most 25 problems per launch.
+A report never holds the installation's random number. Each report carries a
+new random number of its own, so it names nothing that links it to another
+report or to usage reports. dohc asks PostHog not to build a person profile and not to look up a
+location from the connection. dohc sends each distinct problem once per
+launch, and at most 25 problems per launch.
 
 ## What reports never hold
 
@@ -62,5 +66,5 @@ and you can copy them or save them to a file.
 - Or start dohc with `DOHC_TELEMETRY=off` or `DO_NOT_TRACK=1` in its
   environment.
 
-A development build, a test run, and a build without report services send no
-reports.
+A development build, a test run, and a build without a PostHog project send
+no reports.

@@ -263,7 +263,11 @@ describe("a server that runs a workspace's automations", () => {
       vi.spyOn(engine, "readTextFile").mockResolvedValue({ versionId: "main", path: "Tasks/automations.yaml", objectId: "object", contentKind: "text",
         text: after, blobSha256: "after", workspaceId: WORKSPACE, sha256: "after", byteLength: after.length, updatedAtMs: clock,
         latestMomentId: "edited", metadataOrigin: "api" });
-      vi.spyOn(engine, "listMoments").mockResolvedValue({ moments: [moment], nextBeforeMomentOrder: null, latestMomentOrder: 1 });
+      vi.spyOn(engine, "readHistoryPage").mockResolvedValue({
+        activeVersion: { id: "main", workspaceId: WORKSPACE, kind: "main", name: "Main", createdAtMs: 0 },
+        moments: [moment], protectedMoments: [], versionMarkers: [], latestMomentOrder: 1, nextCursor: null,
+        startCursor: { format: 1, engineUuid: "test", workspaceId: WORKSPACE, versionId: "main", objectId: "object", textFence: 1, protectedFence: -1, markerFence: -1, text: null, protected: null, marker: null },
+      });
       vi.spyOn(engine, "getMoment").mockResolvedValue(moment);
     });
     const failure = { automationId: HOURLY.automationId, claimId: "third-timeout", generation: 3,
