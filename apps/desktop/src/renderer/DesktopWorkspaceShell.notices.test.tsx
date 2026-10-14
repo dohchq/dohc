@@ -2421,6 +2421,7 @@ describe("sync answers after Settings closed", () => {
 
     await startEnableThenClose(bridge);
     view.rerender(shell(OTHER_WORKSPACE));
+    await waitFor(() => expect(bridge.cloudStatus).toHaveBeenLastCalledWith({ workspaceId: OTHER_WORKSPACE.workspaceId }));
     const reads = bridge.cloudStatus.mock.calls.length;
     await act(async () => {
       enable.reject(new Error("dohc could not reach the relay."));

@@ -1,4 +1,4 @@
-import { rendererWorkspaceHandler } from "./rendererWorkspaceHandler";
+import { registerWorkspaceHandler as createRegisterWorkspaceHandler } from "./rendererWorkspaceHandler";
 import { workspaceFileRef, type EngineFileResolver } from "../workspaces/resolveEngineFiles";
 import { nameSlug } from "@dohc/workspace-contracts/names";
 import {
@@ -157,7 +157,6 @@ export function registerChatsIpcHandlers<
   syncSharedChannelsForChatTarget(
     workspaceId: string, target: ChatRelayIdentityTarget,
   ): Promise<unknown>;
-  syncRendererWorkspaceSharedChannels(operation: Operation): Promise<number>;
   withRendererWorkspaceOperation<Result>(
     sender: Sender, workspaceId: string, message: string,
     work: (operation: Operation) => Result | Promise<Result>,
@@ -183,15 +182,13 @@ export function registerChatsIpcHandlers<
     registerHandler, assertTrustedSender, requireEngineCapture, linkedChatStoreFor, chatWrites,
     assertWritableWorkspace, warmCredentialCache, localUserId, localInstallationId,
     currentCredentials, chatRelayIdentityFor, syncWorkspaceSharedChannels,
-    syncSharedChannelsForChatTarget, syncRendererWorkspaceSharedChannels,
+    syncSharedChannelsForChatTarget,
     withRendererWorkspaceOperation, resolveEngineFiles, activity, desktopChatBookmarks,
     notifyRenderer, ensureGroupFolder, automationCollectionOf,
   } = dependencies;
   const { requireChatScope, chatFileObjectId, resolveChatFileReferences } = dependencies.chatScope;
   const { materializeChatBookmark } = desktopChatBookmarks;
-  const bindWorkspace = rendererWorkspaceHandler({ assertTrustedSender, withRendererWorkspaceOperation });
-  const registerWorkspaceHandler: typeof registerHandler = (channel, handler) =>
-    registerHandler(channel, bindWorkspace(handler));
+  const registerWorkspaceHandler = createRegisterWorkspaceHandler(registerHandler, { assertTrustedSender, withRendererWorkspaceOperation });
 
   function chatThreadForIpc(thread: ChatThread): ChatThreadRecord {
     return {
@@ -220,7 +217,6 @@ export function registerChatsIpcHandlers<
   }
 
   registerWorkspaceHandler(CHANNELS.listFileChats, async (event, payload) => {
-    assertTrustedSender(event);
     const input = ListFileChatsPayload.parse(payload);
     // Reachable from a share view at every level. The file it names
     // is one the share already served, and an out-of-selector thread was
@@ -243,15 +239,11 @@ export function registerChatsIpcHandlers<
     });
   });
 
-  registerWorkspaceHandler(CHANNELS.listChatFileMentions, async (event, payload) => {
-    assertTrustedSender(event);
+  const readChatFileMentions = async (event: Event, payload: unknown, rowsUncovered: number) => {
     const input = ListChatFileMentionsPayload.parse(payload);
     const { workspace, capture } = await requireEngineCapture(
       input.workspaceId,
       "Chats",
-    );
-    const rowsUncovered = await syncWorkspaceSharedChannels(
-      workspace.workspaceId,
     );
     const requestedFile = await capture.resolveFileForPath(input.path);
     const objectId = requestedFile?.objectId ?? null;
@@ -325,10 +317,18 @@ export function registerChatsIpcHandlers<
         ];
       }),
     });
+  };
+  registerHandler(CHANNELS.listChatFileMentions, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = ListChatFileMentionsPayload.parse(payload);
+    await withRendererWorkspaceOperation(event.sender, input.workspaceId,
+      "This workspace is no longer active.", async () => undefined);
+    const rowsUncovered = await syncWorkspaceSharedChannels(input.workspaceId);
+    return withRendererWorkspaceOperation(event.sender, input.workspaceId,
+      "This workspace is no longer active.", async () => readChatFileMentions(event, payload, rowsUncovered));
   });
 
   registerWorkspaceHandler(CHANNELS.listChatBookmarks, async (event, payload) => {
-    assertTrustedSender(event);
     const input = ListChatBookmarksPayload.parse(payload);
     const { workspace } = await requireEngineCapture(
       input.workspaceId,
@@ -345,7 +345,6 @@ export function registerChatsIpcHandlers<
   });
 
   registerWorkspaceHandler(CHANNELS.saveChatBookmark, async (event, payload) => {
-    assertTrustedSender(event);
     const input = SaveChatBookmarkPayload.parse(payload);
     const { workspace, capture } = await requireEngineCapture(
       input.workspaceId,
@@ -389,7 +388,6 @@ export function registerChatsIpcHandlers<
   });
 
   registerWorkspaceHandler(CHANNELS.archiveChatBookmark, async (event, payload) => {
-    assertTrustedSender(event);
     const input = ArchiveChatBookmarkPayload.parse(payload);
     const { workspace, capture } = await requireEngineCapture(
       input.workspaceId,
@@ -408,7 +406,6 @@ export function registerChatsIpcHandlers<
   });
 
   registerWorkspaceHandler(CHANNELS.createFileChat, async (event, payload) => {
-    assertTrustedSender(event);
     const input = CreateFileChatPayload.parse(payload);
     // Reads are reachable from every received share. This mutation resolves
     // the same scope, then chatWrites refuses it before persistence.
@@ -429,7 +426,6 @@ export function registerChatsIpcHandlers<
   });
 
   registerWorkspaceHandler(CHANNELS.listChatMessages, async (event, payload) => {
-    assertTrustedSender(event);
     const input = ListChatMessagesPayload.parse(payload);
     // Reachable from a share view at every level, for a thread on
     // a file the share already served.
@@ -444,7 +440,6 @@ export function registerChatsIpcHandlers<
   });
 
   registerWorkspaceHandler(CHANNELS.getChatThreadRevision, async (event, payload) => {
-    assertTrustedSender(event);
     const input = GetChatThreadRevisionPayload.parse(payload);
     const { workspace, store } = await requireChatScope(input.workspaceId);
     const revision = await store.getThreadRevision({
@@ -455,7 +450,6 @@ export function registerChatsIpcHandlers<
   });
 
   registerWorkspaceHandler(CHANNELS.sendChatMessage, async (event, payload) => {
-    assertTrustedSender(event);
     const input = SendChatMessagePayload.parse(payload);
     // A share view resolves a scope instead of a capture so reads still work.
     // chatWrites refuses every received share before persistence.
@@ -476,7 +470,6 @@ export function registerChatsIpcHandlers<
   });
 
   registerWorkspaceHandler(CHANNELS.listChatThreadDecisions, async (event, payload) => {
-    assertTrustedSender(event);
     const input = ListChatThreadDecisionsPayload.parse(payload);
     const { workspace } = await requireEngineCapture(
       input.workspaceId,
@@ -502,7 +495,6 @@ export function registerChatsIpcHandlers<
   });
 
   registerWorkspaceHandler(CHANNELS.resolveChatDecision, async (event, payload) => {
-    assertTrustedSender(event);
     const input = ResolveChatDecisionPayload.parse(payload);
     // Reads are reachable from a share view; this mutation is not.
     const scope = await requireChatScope(input.workspaceId);
@@ -528,7 +520,6 @@ export function registerChatsIpcHandlers<
   });
 
   registerWorkspaceHandler(CHANNELS.listChatThreadAttachments, async (event, payload) => {
-    assertTrustedSender(event);
     const input = ListChatThreadAttachmentsPayload.parse(payload);
     const { workspace } = await requireEngineCapture(
       input.workspaceId,
@@ -600,6 +591,9 @@ export function registerChatsIpcHandlers<
   registerHandler(CHANNELS.listChatChannels, async (event, payload) => {
     assertTrustedSender(event);
     const input = ListChatChannelsPayload.parse(payload);
+    await withRendererWorkspaceOperation(event.sender, input.workspaceId,
+      "Chats stopped because this window changed workspaces.", async () => undefined);
+    const rowsUncovered = await syncWorkspaceSharedChannels(input.workspaceId);
     return withRendererWorkspaceOperation(
       event.sender,
       input.workspaceId,
@@ -613,8 +607,6 @@ export function registerChatsIpcHandlers<
         // MU-C4: refresh joined shared channels before reading, so opening
         // Chats shows other members' latest messages. Offline, local rows
         // still answer.
-        const rowsUncovered =
-          await syncRendererWorkspaceSharedChannels(operation);
         operation.assertCurrent();
         const store = linkedChatStoreFor(workspace);
         // First chat use auto-creates General.
@@ -696,7 +688,6 @@ export function registerChatsIpcHandlers<
   }
 
   registerWorkspaceHandler(CHANNELS.listChatFollows, async (event, payload) => {
-    assertTrustedSender(event);
     const input = ListChatFollowsPayload.parse(payload);
     const { workspace } = await requireEngineCapture(
       input.workspaceId,
@@ -717,7 +708,6 @@ export function registerChatsIpcHandlers<
   });
 
   registerWorkspaceHandler(CHANNELS.setChatFollow, async (event, payload) => {
-    assertTrustedSender(event);
     const input = SetChatFollowPayload.parse(payload);
     const { workspace } = await requireEngineCapture(
       input.workspaceId,
@@ -773,15 +763,13 @@ export function registerChatsIpcHandlers<
     return SetChatFollowResult.parse({ follow: chatFollowForIpc(follow) });
   });
 
-  registerWorkspaceHandler(CHANNELS.listPersonalChatFeed, async (event, payload) => {
-    assertTrustedSender(event);
+  const readPersonalChatFeed = async (event: Event, payload: unknown, rowsUncovered: number) => {
     const input = ListPersonalChatFeedPayload.parse(payload);
     const { workspace } = await requireEngineCapture(
       input.workspaceId,
       "Chats",
     );
     await warmCredentialCache();
-    const rowsUncovered = await syncWorkspaceSharedChannels(workspace.workspaceId);
     const store = linkedChatStoreFor(workspace);
     const ownerUserId = localUserId();
     await store.ensureDefaultChannelFollows({
@@ -869,10 +857,18 @@ export function registerChatsIpcHandlers<
       ...(page.nextCursor ? { nextCursor: page.nextCursor } : {}),
       ...(page.headCursor ? { headCursor: page.headCursor } : {}),
     });
+  };
+  registerHandler(CHANNELS.listPersonalChatFeed, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = ListPersonalChatFeedPayload.parse(payload);
+    await withRendererWorkspaceOperation(event.sender, input.workspaceId,
+      "This workspace is no longer active.", async () => undefined);
+    const rowsUncovered = await syncWorkspaceSharedChannels(input.workspaceId);
+    return withRendererWorkspaceOperation(event.sender, input.workspaceId,
+      "This workspace is no longer active.", async () => readPersonalChatFeed(event, payload, rowsUncovered));
   });
 
   registerWorkspaceHandler(CHANNELS.markPersonalChatFeedSeen, async (event, payload) => {
-    assertTrustedSender(event);
     const input = MarkPersonalChatFeedSeenPayload.parse(payload);
     const { workspace } = await requireEngineCapture(
       input.workspaceId,
@@ -907,7 +903,6 @@ export function registerChatsIpcHandlers<
   registerWorkspaceHandler(
     CHANNELS.createChatChannel,
     createChatChannelIpcHandler({
-      assertTrustedSender,
       parsePayload: (payload) => CreateChatChannelPayload.parse(payload),
       requireContext: (workspaceId) =>
         requireEngineCapture(workspaceId, "Chats"),
@@ -943,8 +938,7 @@ export function registerChatsIpcHandlers<
     }),
   );
 
-  registerWorkspaceHandler(CHANNELS.listChannelThreads, async (event, payload) => {
-    assertTrustedSender(event);
+  const readChannelThreads = async (event: Event, payload: unknown) => {
     const input = ListChannelThreadsPayload.parse(payload);
     const { workspace } = await requireEngineCapture(
       input.workspaceId,
@@ -965,9 +959,6 @@ export function registerChatsIpcHandlers<
     // view has no poll of its own, and the pass is bounded, so an untargeted
     // sync could leave the channel the user just opened waiting for the
     // rotation. Naming it puts it in this pass.
-    await syncSharedChannelsForChatTarget(workspace.workspaceId, {
-      channelId: input.channelId,
-    });
     const threads = await store.listChannelThreads({
       workspaceId: workspace.workspaceId,
       channelId: input.channelId,
@@ -982,10 +973,18 @@ export function registerChatsIpcHandlers<
       ),
       viewerAuthorId,
     });
+  };
+  registerHandler(CHANNELS.listChannelThreads, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = ListChannelThreadsPayload.parse(payload);
+    await withRendererWorkspaceOperation(event.sender, input.workspaceId,
+      "This workspace is no longer active.", async () => undefined);
+    await syncSharedChannelsForChatTarget(input.workspaceId, { channelId: input.channelId });
+    return withRendererWorkspaceOperation(event.sender, input.workspaceId,
+      "This workspace is no longer active.", async () => readChannelThreads(event, payload));
   });
 
   registerWorkspaceHandler(CHANNELS.startChannelThread, async (event, payload) => {
-    assertTrustedSender(event);
     const input = StartChannelThreadPayload.parse(payload);
     const { workspace, capture } = await requireEngineCapture(
       input.workspaceId,
@@ -1021,7 +1020,6 @@ export function registerChatsIpcHandlers<
   registerWorkspaceHandler(
     CHANNELS.markChatThreadRead,
     createMarkChatThreadReadIpcHandler({
-      assertTrustedSender,
       parsePayload: (payload) => MarkChatThreadReadPayload.parse(payload),
       // Reachable from a share view at every level, view included.
       requireContext: requireChatScope,
@@ -1056,7 +1054,6 @@ export function registerChatsIpcHandlers<
   }
 
   registerWorkspaceHandler(CHANNELS.listChatReactions, async (event, payload) => {
-    assertTrustedSender(event);
     const input = ListChatReactionsPayload.parse(payload);
     // Reachable from a share view at every level. The panel loads
     // messages and reactions together, so a capture gate here refuses the
@@ -1085,7 +1082,6 @@ export function registerChatsIpcHandlers<
   });
 
   registerWorkspaceHandler(CHANNELS.setChatReaction, async (event, payload) => {
-    assertTrustedSender(event);
     const input = SetChatReactionPayload.parse(payload);
     // Reads are reachable from a share view; this mutation is not.
     const scope = await requireChatScope(input.workspaceId);

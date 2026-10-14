@@ -236,7 +236,7 @@ async function harness(sharedStore?: SharedHistoryStore, policyRoot?: string, re
     prepareRecordHistoryPeople,
     retryOwnerLiveDelivery, retryCloudSync,
     retryFileObservation: retry ? id => { void retryFileObservation(id); return retry.read(); } : retryFileObservation,
-    requireWorkspace, assertWritableWorkspace: writable, syncStatusWithOwnedProjection: syncProjection,
+    assertWritableWorkspace: writable, syncStatusWithOwnedProjection: syncProjection,
     activity: { getStatus, hasAgentRun }, workspaceAuthorities: authority, canonicalWorkspaceFor,
     requireEngineSessions: requireSessions, closeDispatchRunActivity: closeActivity,
     probeEngineStoreRefusal: probe, moveEngineStoreAside: move,
@@ -917,7 +917,7 @@ describe("workspace engine IPC registrations", () => {
     const h = await harness();
     h.syncProjection.mockResolvedValue(healthy);
     await expect(h.invoke(CHANNELS.getSyncStatus)).resolves.toEqual(healthy);
-    expect(h.syncProjection).toHaveBeenCalledWith(h.workspace, refused);
+    expect(h.syncProjection).toHaveBeenCalledWith(h.physical, refused);
     expect(h.canonicalWorkspaceFor).not.toHaveBeenCalled();
     h.syncProjection.mockResolvedValue({ ...healthy, pendingChangeCount: -1 });
     await expect(h.invoke(CHANNELS.getSyncStatus)).rejects.toThrow();
@@ -937,7 +937,7 @@ describe("registered engine-store repair", () => {
     );
     await entered.promise;
     const repair = h.invoke(CHANNELS.rebuildEngineStore);
-    expect(h.writable).toHaveBeenCalledWith(h.workspace);
+    expect(h.writable).toHaveBeenCalledWith(h.physical);
     expect(h.canonicalWorkspaceFor).not.toHaveBeenCalled();
     expect(h.requireSessions).not.toHaveBeenCalled();
     release.resolve();

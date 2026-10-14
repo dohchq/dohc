@@ -114,7 +114,7 @@ async function harness(shared = false, hooks: { disposeState?: () => void } = {}
     withRendererWorkspaceOperation,
     requireEngineCapture: requireCapture, linkedChatStoreFor: () => ({ ensureOpen }),
     agentDispatchStoreHandleFor: () => ({ store: { runRecordsForThread: records } }),
-    requireWorkspace, assertAgentRunnableWorkspace: runnable, assertChatRunnerIdle: idle,
+    assertAgentRunnableWorkspace: runnable, assertChatRunnerIdle: idle,
     startAgentRunWithWorkspaceActivity: start,
     agentIntegration: integration,
     mcpShareAccessOf: shareAccess, mcpConfigFor: config,
@@ -189,6 +189,26 @@ describe("agent run IPC registrations", () => {
     await expect(h.invoke(channel, { ...input, workspaceId: "other" })).rejects.toThrow("no longer active");
     services.forEach(service => expect(service).not.toHaveBeenCalled());
   });
+  it("releases admission before a held runner self-test so retirement can finish", async () => {
+    const disposed = vi.fn();
+    const h = await harness(false, { disposeState: disposed });
+    const entered = deferred<void>();
+    const drain = deferred<{ ok: boolean; detail: string }>();
+    h.dispatch.runnerSelfTest.mockImplementation(() => { entered.resolve(); return drain.promise; });
+    const result = h.invoke(CHANNELS.runnerSelfTest);
+    let retiring: Promise<void> | undefined;
+    try {
+      await entered.promise;
+      retiring = h.authority.invalidate(h.workspace.workspaceId);
+      await vi.waitFor(() => expect(disposed).toHaveBeenCalledOnce());
+      await retiring;
+    } finally {
+      drain.resolve({ ok: true, detail: "Ready" });
+      await Promise.allSettled([result, retiring]);
+    }
+    await expect(result).resolves.toEqual({ ok: true, detail: "Ready" });
+  });
+
   it("registers each original group and rejects untrusted callers before parsing", async () => {
     const h = await harness();
     expect(h.groupSizes).toEqual([1, 10]);

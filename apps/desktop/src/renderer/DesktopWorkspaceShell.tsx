@@ -1736,6 +1736,7 @@ export function DesktopWorkspaceShell(props: {
   // by the same rule as every other answer, and issued after the observation,
   // so it is the freshest thing available.
   const refreshAgentLane = useCallback(() => {
+    if (!workspaceIsReady) return;
     const token = ++engineHistoryToken.current;
     agentActiveLane.settle(
       token,
@@ -1746,7 +1747,7 @@ export function DesktopWorkspaceShell(props: {
           refreshAgentLane(),
         ),
     );
-  }, [agentActiveLane, reportLaneFailure, workspaceId]);
+  }, [agentActiveLane, reportLaneFailure, workspaceId, workspaceIsReady]);
   const onSettingsAgentActiveChange = useCallback(
     ({ active, mutated }: { active: boolean; mutated: boolean }) => {
       if (!mutated) {
@@ -6317,6 +6318,7 @@ export function DesktopWorkspaceShell(props: {
       {settingsSection ? (
         <Overlay onClose={closeSettings}>
           <LazyDesktopSettings
+            workspaceIsReady={workspaceIsReady}
             onError={reportSettingsFailure}
             onWorkspaceSettingsRead={onWorkspaceSettingsRead}
             workspaceId={workspaceId}

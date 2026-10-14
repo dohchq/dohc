@@ -1,5 +1,6 @@
 import { desktopPins, settingsSectionPin } from "../../testPins";
 import { useRequestSequence } from "../useRequestSequence";
+import { SkeletonRows } from "../ui/SkeletonRows";
 import { StateMark } from "../ui/StateMark";
 import { AlertTriangle, RefreshCw, X } from "lucide-react";
 import { WORKSPACE_PREVIEW_MODES } from "@dohc/workspace-contracts/workspace-settings-values";
@@ -107,6 +108,7 @@ export function SettingsDialog(props: {
   /** Each workspace settings answer, so the shell can say what the file ignored. */
   onWorkspaceSettingsRead?: (read: WorkspaceSettingsResult) => void;
   workspaceId: string;
+  workspaceIsReady: boolean;
   workspacePath: string;
   /**
    * True when this workspace is a shared view. See the Advanced
@@ -266,7 +268,7 @@ export function SettingsDialog(props: {
     setWorkspaceResult(null);
     void Promise.all([
       bridge().getUserSettings(),
-      bridge().getWorkspaceSettings({ workspaceId: props.workspaceId }),
+      props.workspaceIsReady ? bridge().getWorkspaceSettings({ workspaceId: props.workspaceId }) : undefined,
     ])
       .then(([nextUser, nextWorkspace]) => {
         if (cancelled) return;
@@ -274,7 +276,7 @@ export function SettingsDialog(props: {
         // read and each change. Applying this read again could undo a change
         // that arrived while it was in flight.
         if (!settingsEventFiredRef.current) setUserResult(nextUser);
-        if (!workspaceTokenRef.isCurrent(token)) return;
+        if (!workspaceTokenRef.isCurrent(token) || !nextWorkspace) return;
         setWorkspaceResult(nextWorkspace);
         onWorkspaceSettingsRead?.(nextWorkspace);
       })
@@ -286,13 +288,13 @@ export function SettingsDialog(props: {
     return () => {
       cancelled = true;
     };
-  }, [props.workspaceId]);
+  }, [props.workspaceId, props.workspaceIsReady]);
 
   const filteredSections = useMemo(
     () => SETTINGS_SECTIONS.filter((section) => sectionMatches(section, query)),
     [query],
   );
-  const sharingResults = useSharingSearch(props.workspaceId, !!props.sharedView, props.onOpenSharing ? query : "");
+  const sharingResults = useSharingSearch(props.workspaceId, !!props.sharedView, props.workspaceIsReady && props.onOpenSharing ? query : "");
 
   useEffect(() => {
     if (
@@ -565,6 +567,10 @@ export function SettingsDialog(props: {
           {`No settings match "${query}".`}
         </div>
       );
+    }
+
+    if (!props.workspaceIsReady && activeMeta.scope !== "User") {
+      return <SkeletonRows layout="panel" label="Loading settings..." />;
     }
 
     switch (activeSection) {

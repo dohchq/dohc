@@ -6297,7 +6297,7 @@ export const scheduleHostOperations = {
   readScheduleHost: {
     capabilityId: "automation.host.read",
     scope: "workspace",
-    handlerCheck: {"check":"main.scheduleHostState","reason":"Host selection and credential generation have their own lifetime."},
+    handlerCheck: {"check":"scheduleHostHandlers.currentRendererSession","reason":"The sender must show this workspace; relay calls run without a workspace lease."},
     channel: "desktop:read-schedule-host",
     payload: ScheduleHostWorkspace, result: ScheduleHostResult, guard: "trusted-sender",
   },
@@ -6305,7 +6305,7 @@ export const scheduleHostOperations = {
   chooseScheduleHost: {
     capabilityId: "automation.host.choose",
     scope: "workspace",
-    handlerCheck: {"check":"main.scheduleHostState","reason":"Host selection and credential generation have their own lifetime."},
+    handlerCheck: {"check":"scheduleHostHandlers.currentRendererSession","reason":"The sender must show this workspace; relay calls run without a workspace lease."},
     channel: "desktop:choose-schedule-host",
     payload: ScheduleHostWorkspace.extend({
       installId: z.string().min(1).max(256),
@@ -6317,7 +6317,7 @@ export const scheduleHostOperations = {
   takeOverScheduleHost: {
     capabilityId: "automation.host.takeover",
     scope: "workspace",
-    handlerCheck: {"check":"main.scheduleHostState","reason":"Host selection and credential generation have their own lifetime."},
+    handlerCheck: {"check":"scheduleHostHandlers.currentRendererSession","reason":"The sender must show this workspace; relay calls run without a workspace lease."},
     channel: "desktop:take-over-schedule-host",
     payload: ScheduleHostWorkspace.extend({ generation: z.number().int().nonnegative() }),
     result: ScheduleHostResult, guard: "trusted-sender",
