@@ -152,7 +152,7 @@ export function attemptOutcome(result, grant, { stopped } = {}) {
   return { outcome: "environment", cause: "unfinished", reason: "The receipt has no verdict." };
 }
 
-/** Position among live requests, 1 for the running one. */
+/** Position among live requests, counting the running ones first. */
 export function position(requests, id) {
   const live = requests.filter(entry => !terminalStates.has(entry.status.state))
     .sort((a, b) => (a.status.state === "running" ? -1 : 0) - (b.status.state === "running" ? -1 : 0) || a.id.localeCompare(b.id));
@@ -191,6 +191,12 @@ export function ensureService(root, { start = () => spawnSync("schtasks.exe", ["
   const result = start();
   if (result.status !== 0) throw new Error(`The verification queue service is not installed on this host (${(result.stderr || result.stdout || "").trim()}). Run pnpm verify:queue install from a checkout of origin/main.`);
 }
+
+/** Rough wait before the request at `place` starts: the runs ahead of it, shared across the lanes. */
+export const startsInMs = (place, typical, lanes) => Math.ceil(Math.max(0, place - lanes) / lanes) * typical;
+
+/** The service's lane count and its runs. A service older than two lanes recorded one run, or null. */
+export const serviceRuns = record => ({ lanes: record?.lanes ?? 1, runs: [record?.running ?? []].flat() });
 
 /** Median awake minutes of recent passing attempts, for estimates only. */
 export function typicalRunMs(root) {
@@ -245,9 +251,10 @@ export async function verifyThroughQueue({ root, submission, detach = false, che
     }
     const place = position(requests, id);
     const typical = typicalRunMs(root);
+    const { lanes } = serviceRuns(serviceState(root).record);
     const current = status.state === "running" ? readJson(join(queuePaths(root).attempt(id, status.attempts.at(-1).n), "result.json"))?.timings?.at(-1)?.name : null;
     const line = status.state === "running" ? `running attempt ${status.attempts.at(-1).n}${current ? `, ${current}` : ""}`
-      : `queued at position ${place}${typical && place ? `, about ${Math.round(((place - 1) * typical) / 60_000)} min until it starts` : ""}${status.waiting ? `; ${status.waiting}` : ""}`;
+      : `queued at position ${place}${typical && place ? `, about ${Math.round(startsInMs(place, typical, lanes) / 60_000)} min until it starts` : ""}${status.waiting ? `; ${status.waiting}` : ""}`;
     if (line !== shown || Date.now() - shownAt > 5 * 60_000) { log(line); shown = line; shownAt = Date.now(); }
     await follow();
     await sleep(pollMs);
@@ -330,6 +337,7 @@ function printStatus(root) {
   const requests = listRequests(root);
   const typical = typicalRunMs(root);
   const minutes = ms => `${Math.round(ms / 60_000)} min`;
+  const { lanes, runs } = serviceRuns(record);
   console.log(`service: ${alive ? `running ${record.commit?.slice(0, 12) ?? ""} (pid ${record.pid})` : record ? `not responding since ${record.heartbeatAt}` : "never started"}`);
   if (record?.health?.reason) console.log(`health: ${record.health.reason}`);
   if (record?.health?.diskFreeGb != null) console.log(`free disk: ${record.health.diskFreeGb.toFixed(1)} GB`);
@@ -337,8 +345,8 @@ function printStatus(root) {
   for (const entry of live.sort((a, b) => position(requests, a.id) - position(requests, b.id))) {
     const place = position(requests, entry.id);
     // The service's heartbeat says what a running attempt is doing, such as waiting for the host lane.
-    const phase = record?.running?.id === entry.id && record.running.phase ? `, ${record.running.phase}` : "";
-    const where = entry.status.state === "running" ? `running attempt ${entry.status.attempts.at(-1)?.n}${phase}` : `#${place}${typical ? `, starts in about ${minutes((place - 1) * typical)}` : ""}`;
+    const phase = runs.find(row => row.id === entry.id)?.phase;
+    const where = entry.status.state === "running" ? `running attempt ${entry.status.attempts.at(-1)?.n}${phase ? `, ${phase}` : ""}` : `#${place}${typical ? `, starts in about ${minutes(startsInMs(place, typical, lanes))}` : ""}`;
     console.log(`${entry.id}  ${where}  ${entry.request.scope}  ${entry.request.head.slice(0, 12)}  ${entry.request.branch?.replace("refs/heads/", "") ?? entry.request.checkout}${entry.status.waiting ? `  (${entry.status.waiting})` : ""}`);
   }
   if (!live.length) console.log("no requests waiting");
@@ -356,7 +364,7 @@ async function main([command, ...args]) {
   if (command === "install" || command === "upgrade") return install(root, ref);
   if (command === "restart") {
     const { record, alive } = serviceState(root);
-    if (record?.running && !args.includes("--now")) throw new Error("A run is in progress. Wait for it, or pass --now to stop it; it will be retried.");
+    if (serviceRuns(record).runs.length && !args.includes("--now")) throw new Error("A run is in progress. Wait for it, or pass --now to stop it; it will be retried.");
     // The task's own process is conhost, so ending the task leaves the supervisor running. Stop the supervisor
     // itself; its job stops the service and any run. It is found by its command line, which names this root's
     // script, and stopped through a handle held before that check, so a reused pid is never stopped. The script
