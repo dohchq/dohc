@@ -2274,6 +2274,8 @@ const FILE_VIEW_TEXT_STATES: { label: string; saveState: SaveState }[] = [
 const CLOUD_SIGNED_IN: CloudStatusResult = {
   connected: true,
   email: "sam@hollis.studio",
+  // Fixed, so the account avatar doesn't take this run's installation colour.
+  ownPresentation: { group: "own", hue: "amber", self: true },
   serverUrl: "https://dohc.hollis.studio",
   relayUrl: "https://relay.hollis.studio",
   workspaceSynced: false,
