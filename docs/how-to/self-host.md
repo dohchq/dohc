@@ -171,7 +171,8 @@ Both services must use the same `BETTER_AUTH_SECRET`.
 To keep server data on an attached disk, set it up before the first start.
 You can then [move the server to a new host](self-host-recovery.md#move-to-a-new-host) by moving the disk.
 The disk holds the relay database with its files, the continuity record, and the server's session host and automation copies.
-Accounts in the `dohc_self_host_postgres` volume and Caddy's certificates stay on the host.
+Accounts and Caddy's certificates stay in Docker volumes on the host.
+Docker names the accounts volume `<DOHC_DEPLOYMENT_NAME>_dohc_self_host_postgres`, which is `dohc-self-host_dohc_self_host_postgres` by default.
 
 Mount the disk on the host, for example at `/mnt/dohc-data`, and make the mount persist across restarts.
 Create a deployment folder on the mounted disk with one folder for each kind of data.
@@ -189,16 +190,25 @@ DOHC_DATA_DIRECTORY=/mnt/dohc-data/dohc
 
 Name a folder on the disk, not the mount point.
 If the disk is not mounted, that folder is missing and the deployment fails to start.
-It never creates a new, empty deployment in its place.
+If a folder is missing, mount the disk. Never recreate the folders: a start on empty folders would create a new deployment.
 The setup and recovery commands add the data-disk Compose overlay when `DOHC_DATA_DIRECTORY` is set.
 Leave it empty to keep all data in Docker volumes on the host.
-Do not set or change it after the first start; this guide does not move existing volumes onto a disk.
+
+Set `DOHC_DATA_DIRECTORY` before the first start, and do not change it afterward.
+Docker keeps a volume's storage from when it created the volume.
+If an existing volume keeps its data elsewhere, the setup and move commands refuse to start.
+Restore the previous setting. Never remove the volume: it holds the deployment's data.
+This guide does not move existing volumes onto a disk.
 
 ## Start and check the server
 
 ```sh
 node scripts/check-self-host.mjs --start
 ```
+
+With `DOHC_DATA_DIRECTORY` set, add `--first-start` for the first start only.
+After that, every start and upgrade refuses to run without the relay deployment on the disk.
+A first start refuses when the disk already holds a deployment.
 
 The deployment initializes fresh storage, applies authentication migrations, and starts the services.
 Keep the deployment secrets and volumes across restarts.

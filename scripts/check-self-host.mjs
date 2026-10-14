@@ -1,10 +1,11 @@
 import { existsSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { parseArgs } from 'node:util';
-import { composeArgs, readSettings, supportedComposeVersion, validateSettings } from '../tools/self-host/config.mjs';
+import { composeArgs, composeConfig, dataDiskVolumeErrors, readSettings, relayDeploymentError, supportedComposeVersion, validateSettings } from '../tools/self-host/config.mjs';
 
-const { values } = parseArgs({ options: { start: { type: 'boolean' }, running: { type: 'boolean' }, 'env-file': { type: 'string', default: '.env.self-host' } } });
+const { values } = parseArgs({ options: { start: { type: 'boolean' }, 'first-start': { type: 'boolean' }, running: { type: 'boolean' }, 'env-file': { type: 'string', default: '.env.self-host' } } });
 const envFile = values['env-file'];
+const docker = args => spawnSync('docker', args, { encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 });
 const checks = [];
 const record = (name, ok, detail = '') => { checks.push(ok); console.log(`[${ok ? 'ok' : 'missing'}] ${name}${detail ? ` - ${detail}` : ''}`); };
 const version = spawnSync('docker', ['compose', 'version', '--short'], { encoding: 'utf8' });
@@ -20,7 +21,19 @@ else {
     const compose = spawnSync('docker', composeArgs(envFile, settings, 'config', '--services'), { encoding: 'utf8' });
     const services = new Set((compose.stdout ?? '').trim().split(/\r?\n/).filter(Boolean));
     for (const service of ['postgres', 'postgres-migrate', 'relay-initialize', 'workspace-api', 'sync-relay', 'share-web', 'gateway']) record(`compose service:${service}`, compose.status === 0 && services.has(service));
-    if ((values.start || values.running) && compose.status === 0 && errors.length === 0) {
+    let diskOk = true;
+    if (settings.DOHC_DATA_DIRECTORY && compose.status === 0 && errors.length === 0) {
+      let problems;
+      try { problems = dataDiskVolumeErrors(composeConfig(envFile, settings, docker), docker); } catch (error) { problems = [error.message]; }
+      diskOk = problems.length === 0;
+      record('data disk volumes', diskOk, problems.join(' '));
+      if (diskOk && values.start) {
+        const problem = relayDeploymentError(envFile, settings, docker, Boolean(values['first-start']));
+        diskOk = !problem;
+        record('relay deployment on the data disk', diskOk, problem);
+      }
+    }
+    if ((values.start || values.running) && compose.status === 0 && errors.length === 0 && diskOk) {
       let upOk = true;
       if (values.start) {
         const up = spawnSync('docker', composeArgs(envFile, settings, 'up', '-d', '--wait', '--wait-timeout', '180'), { stdio: 'inherit' });

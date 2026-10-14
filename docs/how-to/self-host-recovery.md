@@ -169,16 +169,23 @@ Use this procedure for a deployment that keeps its data on an [attached disk](se
 It also recovers a server that stopped working while its disk survived.
 The new host continues from the last write the relay committed to the disk. Nothing is rolled back.
 
+Always move the live disk. Never start from a snapshot or copy of the disk.
+A copy rolls back the relay database and its continuity record together, and the relay cannot detect that.
+
 The disk carries the relay database, its continuity record, and the session host and automation copies.
 Bring these separately:
 
 - `.env.self-host`, unchanged. It holds the configuration and the server secrets. Keep a private copy off the server.
 - The same release bundle and image version that the old host ran.
-- The `dohc_self_host_postgres` volume, which holds accounts and sign-in sessions.
+- The accounts volume, which holds accounts and sign-in sessions.
+  Docker names it `<DOHC_DEPLOYMENT_NAME>_dohc_self_host_postgres`, which is `dohc-self-host_dohc_self_host_postgres` by default.
   Copy the stopped volume to the new host before you start the deployment there.
   If the old host is lost, restore this volume from your own backup.
-  An older copy can bring back sessions and accounts that were removed after it was taken.
+  An older copy brings back sessions and accounts that were removed after it was taken.
+  It also loses accounts created after it was taken.
+  Those people cannot open their workspaces, even after they sign up again, because they get new accounts.
   Without this volume, the new server has no accounts, and nobody can open the workspaces on the disk as their owner.
+  The move command refuses to start until the volume holds an accounts database.
 - Nothing for TLS. In public mode, Caddy obtains new certificates when the deployment starts on the new host.
 
 Never copy the disk to run a second server.
@@ -188,9 +195,18 @@ Each copy would accept different work under the same deployment identity.
 
 1. If the old host still responds, run `node tools/self-host/bootstrap.mjs stop` there.
 2. On the old host, run `docker ps` and confirm that no dohc service is running.
-3. Shut down the old host.
-4. Detach the disk from the old host.
-5. In your provider's console, confirm that the old host is off and the disk has no attachment.
+3. On the old host, save the accounts volume to a private file:
+
+   ```sh
+   docker run --rm --network none \
+     --mount type=volume,source=dohc-self-host_dohc_self_host_postgres,target=/pg,readonly \
+     postgres:17.9-alpine tar -C /pg -czf - . > accounts.tar.gz
+   ```
+
+   The file contains password hashes and sign-in sessions. Copy it to the new host over a private channel.
+4. Shut down the old host.
+5. Detach the disk from the old host.
+6. In your provider's console, confirm that the old host is off and the disk has no attachment.
 
 If the old host starts again without the disk, its relay cannot start because its data folder is missing.
 
@@ -198,7 +214,16 @@ If the old host starts again without the disk, its relay cannot start because it
 
 1. Prepare the new host as described in [Set up a dohc server](self-host.md#prepare-the-host).
 2. Copy the release bundle and `.env.self-host` to the new host, then load the release image.
-3. Restore the `dohc_self_host_postgres` volume.
+3. Restore the accounts volume under the same name:
+
+   ```sh
+   docker volume create dohc-self-host_dohc_self_host_postgres
+   docker run --rm -i --network none \
+     --mount type=volume,source=dohc-self-host_dohc_self_host_postgres,target=/pg \
+     postgres:17.9-alpine tar -C /pg -xzf - < accounts.tar.gz
+   ```
+
+   Then delete `accounts.tar.gz` from both hosts, or keep it with your private backups.
 4. Attach the disk and mount it so that `DOHC_DATA_DIRECTORY` names the deployment folder on it.
    If the mount path changed, update `DOHC_DATA_DIRECTORY` in `.env.self-host`.
 5. For public access, point DNS for the server's domain to the new host.
@@ -210,17 +235,26 @@ If the old host starts again without the disk, its relay cannot start because it
 node scripts/self-host/move.mjs
 ```
 
-The command checks the disk through the relay's own volumes.
-If `deployment.json` or the relay database is missing, it refuses to start anything.
+The command refuses to start anything in these cases:
+
+- An existing deployment volume on this host keeps its data somewhere other than the disk.
+- The accounts volume is missing or holds no database.
+- `deployment.json` or the relay database is missing from the disk. The command checks through the relay's own volumes.
+
 Otherwise it starts the deployment and runs the same checks as `node scripts/check-self-host.mjs --running`.
 Use `--env-file PATH` for a different environment file.
+If you changed `DOHC_DEPLOYMENT_NAME`, use that name in the accounts volume commands.
 
-If the command refuses, check the disk mount and `DOHC_DATA_DIRECTORY`.
-Never start the deployment on an empty folder: setup would create a new deployment.
+If the command refuses, check the disk mount, `DOHC_DATA_DIRECTORY` and the accounts volume.
+Never recreate the disk folders, and never start the deployment on an empty folder: setup would create a new deployment.
 If the relay refuses its continuity, keep the services stopped and preserve the disk.
 A host that stopped during a relay write can leave that state, as described above.
 
-Devices connect to the same address and the same relay deployment, so they need no changes.
+Devices need no changes if two conditions hold.
+The accounts volume must be the latest copy from the old host.
+The server's address must resolve to the new host.
+After a restore from an older backup, devices that signed in after that backup must sign in again.
+Sessions revoked after that backup become valid again.
 
 ## Verify the recovery tooling
 
@@ -244,4 +278,6 @@ It hard-kills a deployment that keeps its data in a folder, then starts a fresh 
 It checks that the relay reopens the same deployment without moving continuity back.
 It checks that documents, blobs, shares and accounts survive, and that the relay refuses an older copy of its database.
 It also checks that a missing folder fails to start and that the move command refuses an empty folder.
+It checks that the move command refuses existing volumes stored elsewhere and leaves them unchanged.
+It carries the accounts volume over by name, so it does not prove the accounts volume copy commands.
 A killed container does not lose the host's write cache, so the drill does not prove survival of a power loss.

@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { spawnSync } from "node:child_process";
 import { mkdir, stat } from "node:fs/promises";
-import { basename, dirname, resolve } from "node:path";
+import { basename, dirname, posix, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { archiveDeployment } from "./archive.mjs";
 
@@ -25,6 +25,9 @@ function docker(args) {
   }
   return result.stdout;
 }
+
+const normalizeDirectory = path => path ? posix.normalize(path).replace(/(.)\/+$/, "$1") : undefined;
+const bindDirectory = volume => volume.Options?.o?.split(",").includes("bind") ? normalizeDirectory(volume.Options.device) : undefined;
 
 export function parseRecoveryArguments(args) {
   const [action, directory, ...rest] = args;
@@ -66,26 +69,28 @@ export async function runRecovery(options, run = docker, log = console.log, comp
     throw new Error("This command requires the supported self-host deployment layout.");
   }
   const volumeNames = new Set(Object.values(config.volumes ?? {}).map(volume => volume.name));
-  if (volumeNames.size) run(["volume", "inspect", ...volumeNames]);
+  // A volume bound to a folder shares it with any other volume or bind mount of that folder.
+  const deploymentDirectories = new Set(volumeNames.size ? JSON.parse(run(["volume", "inspect", ...volumeNames])).map(bindDirectory).filter(Boolean) : []);
+  const writers = ids => {
+    if (!ids.length) return [];
+    const containers = JSON.parse(run(["inspect", ...ids]));
+    const others = [...new Set(containers.flatMap(container => (container.Mounts ?? [])
+      .filter(mount => mount.Type === "volume" && !volumeNames.has(mount.Name)).map(mount => mount.Name)))];
+    const sharedVolumes = new Set(others.length ? JSON.parse(run(["volume", "inspect", ...others]))
+      .filter(volume => deploymentDirectories.has(bindDirectory(volume))).map(volume => volume.Name) : []);
+    return containers.filter(container => (container.Mounts ?? []).some(mount => mount.Type === "volume"
+      ? volumeNames.has(mount.Name) || sharedVolumes.has(mount.Name)
+      : mount.Type === "bind" && deploymentDirectories.has(normalizeDirectory(mount.Source))));
+  };
   const current = run([...compose, "ps", "--services", "--filter", "status=running"]).trim().split(/\r?\n/).filter(Boolean);
-  const runningIds = run(["ps", "--quiet"]).trim().split(/\r?\n/).filter(Boolean);
-  if (runningIds.length) {
-    const containers = JSON.parse(run(["inspect", ...runningIds]));
-    for (const container of containers) {
-      if ((container.Mounts ?? []).some(mount => mount.Type === "volume" && volumeNames.has(mount.Name)) &&
-          container.Config?.Labels?.["com.docker.compose.project"] !== config.name) {
-        throw new Error("Another running project uses a deployment volume. Stop it before recovery.");
-      }
-    }
+  if (writers(run(["ps", "--quiet"]).trim().split(/\r?\n/).filter(Boolean))
+    .some(container => container.Config?.Labels?.["com.docker.compose.project"] !== config.name)) {
+    throw new Error("Another running project uses this deployment's storage. Stop it before recovery.");
   }
   log(`Stopping ${config.name} for ${options.action}.`);
   run([...compose, "stop"]);
-  const remaining = run(["ps", "--quiet"]).trim().split(/\r?\n/).filter(Boolean);
-  if (remaining.length) {
-    const containers = JSON.parse(run(["inspect", ...remaining]));
-    if (containers.some(container => (container.Mounts ?? []).some(mount => mount.Type === "volume" && volumeNames.has(mount.Name)))) {
-      throw new Error("A running container still uses a deployment volume. Services remain stopped; stop that writer before recovery.");
-    }
+  if (writers(run(["ps", "--quiet"]).trim().split(/\r?\n/).filter(Boolean)).length) {
+    throw new Error("A running container still uses this deployment's storage. Services remain stopped; stop that writer before recovery.");
   }
   const entrypoint = "/app/services/sync-relay/dist/relay-deployment.js";
   try {

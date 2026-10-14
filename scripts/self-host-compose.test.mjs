@@ -6,7 +6,7 @@ import { parseEnv } from 'node:util';
 import test from 'node:test';
 import { load, YAML11_SCHEMA } from 'js-yaml';
 import { initialSettings, privateRouteInstructions, updateImageSetting } from '../tools/self-host/bootstrap.mjs';
-import { validateSettings, composeArgs, supportedComposeVersion } from '../tools/self-host/config.mjs';
+import { validateSettings, composeArgs, dataDiskVolumeErrors, relayDeploymentError, supportedComposeVersion } from '../tools/self-host/config.mjs';
 import { relayInitializationRequired } from '../tools/self-host/entrypoint.mjs';
 
 const composeText = readFileSync('docker-compose.self-host.yml', 'utf8');
@@ -146,6 +146,37 @@ test('a data directory selects the data-disk overlay for relay, continuity and h
       device: `\${DOHC_DATA_DIRECTORY:?Set DOHC_DATA_DIRECTORY}/${folder}`}});
   }
   assert.deepEqual(compose.services.postgres.volumes, ['dohc_self_host_postgres:/var/lib/postgresql/data']);
+});
+
+test('existing volumes stored anywhere but the configured disk folder are refused without changing them', () => {
+  const device = '/mnt/disk/dohc/continuity', options = {type: 'none', o: 'bind', device};
+  const config = {volumes: {dohc_self_host_postgres: {name: 'p_postgres'}, dohc_self_host_relay_continuity: {name: 'p_continuity', driver: 'local', driver_opts: options}}};
+  const check = existing => {
+    const calls = [];
+    const errors = dataDiskVolumeErrors(config, args => {
+      calls.push(args);
+      return existing ? {status: 0, stdout: JSON.stringify([{Name: args[2], ...existing}])} : {status: 1, stdout: ''};
+    });
+    assert.deepEqual(calls, [['volume', 'inspect', 'p_continuity']]);
+    return errors;
+  };
+  assert.deepEqual(check(undefined), []);
+  assert.deepEqual(check({Driver: 'local', Options: {...options}}), []);
+  assert.match(check({Driver: 'local', Options: null}).join(), /p_continuity keeps its data in Docker storage, not \/mnt\/disk\/dohc\/continuity\. Restore the previous DOHC_DATA_DIRECTORY/);
+  assert.match(check({Driver: 'local', Options: {...options, device: '/mnt/old/dohc/continuity'}}).join(), /keeps its data in \/mnt\/old\/dohc\/continuity, not/);
+  assert.equal(check({Driver: 'other', Options: {...options}}).length, 1);
+});
+
+test('only the first start of a data-disk deployment may initialize its relay', () => {
+  const settings = {DOHC_DATA_DIRECTORY: '/mnt/disk/dohc'};
+  const result = (found, firstStart) => relayDeploymentError('.env.self-host', settings, args => {
+    assert.ok(args.includes('tools/self-host/compose.data-disk.yml') && args.includes('relay-initialize'));
+    return {status: found ? 0 : 1, stdout: ''};
+  }, firstStart);
+  assert.equal(result(true, false), '');
+  assert.equal(result(false, true), '');
+  assert.match(result(false, false), /No relay deployment found in \/mnt\/disk\/dohc\. Mount the data disk there and try again\. Never recreate its folders/);
+  assert.match(result(true, true), /already exists in \/mnt\/disk\/dohc\. Start without --first-start/);
 });
 
 test('the data directory must be an absolute folder without parent segments', () => {

@@ -32,8 +32,8 @@ test("a killed deployment's data disk starts in a fresh Compose project and refu
   const secrets = { POSTGRES_PASSWORD: secret(), BETTER_AUTH_SECRET: secret(), DOHC_RELAY_LINK_KEY: secret(), DOHC_RELAY_EXCHANGE_KEY: secret() };
   const subnet = `10.234.${100 + Math.floor(Math.random() * 100)}`;
   const projects = {};
-  async function project(suffix, dataDirectory, extra = []) {
-    const name = `${owner}-${suffix}`, env = join(scratch, `${suffix}.env`);
+  async function project(suffix, dataDirectory, extra = [], name = `${owner}-${suffix}`) {
+    const env = join(scratch, `${suffix}.env`);
     await writeFile(env, Object.entries({ ...secrets, DOHC_DEPLOYMENT_NAME: name, DOHC_IMAGE: image,
       DOHC_PUBLIC_ORIGIN: "https://drill.dohc.invalid", DOHC_PUBLIC_HOST: "drill.dohc.invalid", DOHC_SERVER_NETWORK_ACCESS: "public",
       DOHC_SMTP_HOST: "smtp.dohc.invalid", DOHC_SMTP_FROM: "drill@dohc.invalid", DOHC_RELAY_AUTOMATIONS: "0", DOHC_DATA_DIRECTORY: dataDirectory,
@@ -57,16 +57,16 @@ test("a killed deployment's data disk starts in a fresh Compose project and refu
     const { buildRelayFixture } = await import("../../services/sync-relay/scripts/build.mjs");
     await buildRelayFixture(fileURLToPath(new URL("./drill-relay.mjs", import.meta.url)), join(drill, "drill.mjs"));
     const first = await project("a", disk);
-    const empty = await project("c", join(scratch, "empty"));
 
     // An unmounted disk leaves the folder missing. The volume mount fails and nothing is created.
     assert.notEqual(compose(first, ["run", "--rm", "--no-deps", "-T", "relay-initialize"], { allowFailure: true }).status, 0);
     assert.equal(existsSync(disk), false);
     asRoot(`const fs=require('node:fs');for(const base of ['/scratch/disk/dohc','/scratch/empty'])for(const folder of ['sync-relay','continuity','host-data']){
       fs.mkdirSync(base+'/'+folder,{recursive:true});fs.chownSync(base+'/'+folder,1000,1000);}fs.mkdirSync('/scratch/old');`);
-    const dockerRun = (command, args) => spawnSync(command, args, { cwd: root, stdio: "inherit", windowsHide: true }).status;
-    assert.throws(() => runMove({ envFile: empty.env }, dockerRun, () => {}), /No relay deployment found/);
-    for (const folder of ["sync-relay", "continuity", "host-data"]) assert.deepEqual(readdirSync(join(scratch, "empty", folder)), []);
+    const dockerRun = (command, args) => {
+      const result = spawnSync(command, args, { cwd: root, encoding: "utf8", stdio: ["ignore", "pipe", "inherit"], windowsHide: true, maxBuffer: 16 * 1024 * 1024 });
+      return { status: result.status, stdout: result.stdout };
+    };
 
     compose(first, ["up", "-d", "--wait", "sync-relay"]);
     compose(first, ["stop"]);
@@ -89,9 +89,13 @@ test("a killed deployment's data disk starts in a fresh Compose project and refu
     // Postgres stays in a Docker volume in this layout, so the drill carries it over separately.
     const override = join(scratch, "postgres.yml");
     await writeFile(override, `volumes:\n  dohc_self_host_postgres:\n    external: true\n    name: ${first.name}_dohc_self_host_postgres\n`);
+    // With the accounts database present, move still refuses an empty folder and leaves it empty.
+    const empty = await project("c", join(scratch, "empty"), ["-f", override]);
+    assert.throws(() => runMove({ envFile: empty.env }, dockerRun, () => {}), /No relay deployment found/);
+    for (const folder of ["sync-relay", "continuity", "host-data"]) assert.deepEqual(readdirSync(join(scratch, "empty", folder)), []);
     const second = await project("b", disk, ["-f", override]);
     runMove({ envFile: second.env }, (command, args) => command === "docker" ? dockerRun(command, args)
-      : compose(second, ["up", "-d", "--wait", "sync-relay"]).status, () => {});
+      : compose(second, ["up", "-d", "--wait", "sync-relay"]), () => {});
     // The relay opens only when its database stamp equals the continuity counter.
     const reopened = continuity();
     assert.equal(reopened.namespace, killed.namespace);
@@ -99,6 +103,17 @@ test("a killed deployment's data disk starts in a fresh Compose project and refu
     assert.equal(accounts(second), "drill-owner\ndrill-reader");
     compose(second, ["stop", "sync-relay"]);
     assert.deepEqual(relayWork(second, "verify"), seeded);
+
+    // Existing volumes keep the storage Docker gave them. Move refuses them and changes nothing.
+    const before = continuity(), relayVolume = `${second.name}_dohc_self_host_sync_relay`;
+    const redirected = await project("b-redirected", join(scratch, "empty"), ["-f", override], second.name);
+    assert.throws(() => runMove({ envFile: redirected.env }, dockerRun, () => {}), /keeps its data in .*\/disk\/dohc\/sync-relay, not .*\/empty\/sync-relay/);
+    assert.equal(JSON.parse(docker(["volume", "inspect", relayVolume]).stdout)[0].Options.device, join(disk, "sync-relay"));
+    const plain = await project("d", disk, ["-f", override]);
+    docker(["volume", "create", "--label", `com.docker.compose.project=${plain.name}`, `${plain.name}_dohc_self_host_sync_relay`]);
+    assert.throws(() => runMove({ envFile: plain.env }, dockerRun, () => {}), /keeps its data in Docker storage/);
+    docker(["volume", "inspect", `${plain.name}_dohc_self_host_sync_relay`]);
+    assert.deepEqual(continuity(), before);
 
     asRoot(`const fs=require('node:fs');const dir='/scratch/disk/dohc/sync-relay';
       for(const name of ['sync-relay.sqlite','sync-relay.sqlite-wal','sync-relay.sqlite-shm'])fs.rmSync(dir+'/'+name,{force:true});

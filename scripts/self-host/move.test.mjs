@@ -12,33 +12,82 @@ async function envFile(t, contents) {
   await writeFile(path, contents);
   return path;
 }
-function runner(checkStatus = 0) {
-  const calls = [];
+const folders = { dohc_self_host_sync_relay: "sync-relay", dohc_self_host_relay_continuity: "continuity", dohc_self_host_host_data: "host-data" };
+const bind = folder => ({ type: "none", o: "bind", device: `/mnt/disk/dohc/${folder}` });
+const config = { name: "dohc-self-host", services: { postgres: { image: "postgres:17.9-alpine" } }, volumes: {
+  dohc_self_host_postgres: { name: "dohc-self-host_dohc_self_host_postgres" },
+  ...Object.fromEntries(Object.entries(folders).map(([key, folder]) => [key, { name: `dohc-self-host_${key}`, driver: "local", driver_opts: bind(folder) }])),
+} };
+const deployment = ["/pg/PG_VERSION", "/continuity/deployment.json", "/data/sync-relay.sqlite"];
+const accounts = { "dohc-self-host_dohc_self_host_postgres": { Driver: "local", Options: null } };
+
+// Runs each Docker check against an in-memory host: `volumes` exist in Docker, `files` exist inside them.
+function host({ files = deployment, volumes = accounts } = {}) {
+  const calls = [], present = new Set(files);
   return { calls, run(command, args) {
     calls.push([command, ...args]);
-    return command === "docker" ? checkStatus : 0;
+    if (command !== "docker") return { status: 0, stdout: "" };
+    if (args.includes("config")) return { status: 0, stdout: JSON.stringify(config) };
+    if (args[0] === "volume" && args[1] === "inspect") {
+      return volumes[args[2]] ? { status: 0, stdout: JSON.stringify([{ Name: args[2], ...volumes[args[2]] }]) } : { status: 1, stdout: "" };
+    }
+    if (args[0] === "run" && args.includes("test")) return { status: args.at(-2) === "-s" && present.has(args.at(-1)) ? 0 : 1, stdout: "" };
+    if (args.includes("relay-initialize")) {
+      const fs = { existsSync: path => present.has(path) }, process = { exitCode: 0 };
+      new Function("require", "process", "console", args.at(-1))(name => { assert.equal(name, "node:fs"); return fs; }, process, { error() {} });
+      return { status: process.exitCode, stdout: "" };
+    }
+    throw new Error(`Unexpected Docker call: ${args.join(" ")}`);
   } };
 }
+const started = calls => calls.some(([command]) => command !== "docker");
+const changed = calls => calls.some(([command, ...args]) => command === "docker" && (args.includes("up") || args.includes("rm") || args.includes("create")));
 
-test("move checks the attached disk through the relay volumes before starting and checking the deployment", async t => {
-  const path = await envFile(t, "DOHC_DATA_DIRECTORY=/mnt/disk/dohc\n"), mock = runner();
+test("move checks volumes, accounts and the relay deployment through Docker before starting and checking the deployment", async t => {
+  const path = await envFile(t, "DOHC_DATA_DIRECTORY=/mnt/disk/dohc\n"), mock = host();
   runMove(parseMoveArguments(["--env-file", path]), mock.run, () => {});
-  assert.equal(mock.calls.length, 2);
-  const [check, start] = mock.calls;
+  const check = mock.calls.find(call => call.includes("relay-initialize"));
   assert.ok(check.includes("tools/self-host/compose.data-disk.yml"));
   assert.deepEqual(check.slice(check.indexOf("run")), ["run", "--rm", "--no-deps", "-T", "--entrypoint", "node", "relay-initialize", "-e", check.at(-1)]);
-  assert.match(check.at(-1), /\/continuity\/deployment\.json/);
-  assert.deepEqual(start.slice(1), ["scripts/check-self-host.mjs", "--start", "--env-file", path]);
+  const probe = mock.calls.find(call => call.includes("test"));
+  assert.ok(probe.includes("type=volume,source=dohc-self-host_dohc_self_host_postgres,target=/pg,readonly"));
+  // The accounts volume is inspected before a container mounts it, so a missing volume is never created.
+  assert.ok(mock.calls.findIndex(call => call.includes("dohc-self-host_dohc_self_host_postgres") && call.includes("inspect")) < mock.calls.indexOf(probe));
+  assert.deepEqual(mock.calls.at(-1).slice(1), ["scripts/check-self-host.mjs", "--start", "--env-file", path]);
+  assert.equal(changed(mock.calls), false);
 });
 
-test("move never starts a disk without a relay deployment", async t => {
-  const path = await envFile(t, "DOHC_DATA_DIRECTORY=/mnt/disk/dohc\n"), mock = runner(1);
-  assert.throws(() => runMove(parseMoveArguments(["--env-file", path]), mock.run, () => {}), /No relay deployment found in \/mnt\/disk\/dohc/);
-  assert.deepEqual(mock.calls.map(([command]) => command), ["docker"]);
+test("move never starts when a file the deployment needs is missing", async t => {
+  const path = await envFile(t, "DOHC_DATA_DIRECTORY=/mnt/disk/dohc\n");
+  const refusals = { "/pg/PG_VERSION": /dohc-self-host_dohc_self_host_postgres holds no accounts database/,
+    "/continuity/deployment.json": /No relay deployment found in \/mnt\/disk\/dohc/, "/data/sync-relay.sqlite": /No relay deployment found in \/mnt\/disk\/dohc/ };
+  for (const [missing, refusal] of Object.entries(refusals)) {
+    const mock = host({ files: deployment.filter(file => file !== missing) });
+    assert.throws(() => runMove(parseMoveArguments(["--env-file", path]), mock.run, () => {}), refusal, missing);
+    assert.equal(started(mock.calls), false, missing);
+    assert.equal(changed(mock.calls), false, missing);
+  }
+});
+
+test("move never mounts a missing accounts volume", async t => {
+  const path = await envFile(t, "DOHC_DATA_DIRECTORY=/mnt/disk/dohc\n"), mock = host({ volumes: {} });
+  assert.throws(() => runMove(parseMoveArguments(["--env-file", path]), mock.run, () => {}), /holds no accounts database/);
+  assert.deepEqual(mock.calls.filter(([, first]) => first === "run"), []);
+  assert.equal(started(mock.calls), false);
+});
+
+test("move refuses existing volumes stored outside the data disk and leaves them unchanged", async t => {
+  const path = await envFile(t, "DOHC_DATA_DIRECTORY=/mnt/disk/dohc\n");
+  for (const relay of [{ Driver: "local", Options: null }, { Driver: "local", Options: { ...bind("sync-relay"), device: "/mnt/old-disk/dohc/sync-relay" } }]) {
+    const mock = host({ volumes: { ...accounts, "dohc-self-host_dohc_self_host_sync_relay": relay } });
+    assert.throws(() => runMove(parseMoveArguments(["--env-file", path]), mock.run, () => {}),
+      /Docker volume dohc-self-host_dohc_self_host_sync_relay keeps its data in .*, not \/mnt\/disk\/dohc\/sync-relay/);
+    assert.ok(mock.calls.every(([command, ...args]) => command === "docker" && (args.includes("config") || args[0] === "volume" && args[1] === "inspect")));
+  }
 });
 
 test("move refuses a deployment that keeps relay data in host volumes before Docker runs", async t => {
-  const path = await envFile(t, "DOHC_DATA_DIRECTORY=\n"), mock = runner();
+  const path = await envFile(t, "DOHC_DATA_DIRECTORY=\n"), mock = host();
   assert.throws(() => runMove(parseMoveArguments(["--env-file", path]), mock.run, () => {}), /Set DOHC_DATA_DIRECTORY/);
   assert.deepEqual(mock.calls, []);
 });

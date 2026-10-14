@@ -1,5 +1,5 @@
 import { readFileSync } from 'node:fs';
-import { parseEnv } from 'node:util';
+import { isDeepStrictEqual, parseEnv } from 'node:util';
 import { resolve } from 'node:path';
 
 export function supportedComposeVersion(value) {
@@ -52,4 +52,40 @@ export function composeArgs(envFile, settings, ...args) {
   return ['compose', '--env-file', resolve(envFile), '-f', 'docker-compose.self-host.yml',
     ...(settings.DOHC_SERVER_NETWORK_ACCESS === 'private' ? ['-f', 'tools/self-host/compose.private.yml'] : []),
     ...(settings.DOHC_DATA_DIRECTORY ? ['-f', 'tools/self-host/compose.data-disk.yml'] : []), ...args];
+}
+
+// Reads through the relay's own volumes, so it checks the folders Docker mounts.
+export const relayDeploymentCheck = "const fs=require('node:fs');const missing=['/continuity/deployment.json','/data/sync-relay.sqlite']" +
+  ".filter(path=>!fs.existsSync(path));if(missing.length){console.error('Missing '+missing.join(', '));process.exitCode=1;}";
+
+/** `docker(args)` returns `{status, stdout}`. */
+export function composeConfig(envFile, settings, docker) {
+  const result = docker(composeArgs(envFile, settings, 'config', '--format', 'json'));
+  // Compose config contains secrets. Never include its output in errors.
+  if (result.status !== 0) throw new Error('Docker Compose could not read the deployment configuration.');
+  return JSON.parse(result.stdout);
+}
+
+/** Docker fixes a volume's storage when it creates it, and Compose reuses an existing volume unchanged. */
+export function dataDiskVolumeErrors(config, docker) {
+  return Object.values(config.volumes ?? {}).filter(volume => volume.driver_opts).flatMap(volume => {
+    const inspected = docker(['volume', 'inspect', volume.name]);
+    if (inspected.status !== 0) return [];
+    const [actual] = JSON.parse(inspected.stdout);
+    if (actual.Driver === (volume.driver ?? 'local') && isDeepStrictEqual(actual.Options ?? {}, volume.driver_opts)) return [];
+    return [`Docker volume ${volume.name} keeps its data in ${actual.Options?.device ?? 'Docker storage'}, not ${volume.driver_opts.device}. ` +
+      'Restore the previous DOHC_DATA_DIRECTORY. Never remove the volume: it holds deployment data.'];
+  });
+}
+
+/** A first start needs an empty disk folder. Every later start needs the deployment on it. */
+export function relayDeploymentError(envFile, settings, docker, firstStart) {
+  const found = docker(composeArgs(envFile, settings, 'run', '--rm', '--no-deps', '-T',
+    '--entrypoint', 'node', 'relay-initialize', '-e', relayDeploymentCheck)).status === 0;
+  if (found && firstStart) return `A relay deployment already exists in ${settings.DOHC_DATA_DIRECTORY}. Start without --first-start.`;
+  if (!found && !firstStart) {
+    return `No relay deployment found in ${settings.DOHC_DATA_DIRECTORY}. Mount the data disk there and try again. ` +
+      'Never recreate its folders: setup would create a new deployment.';
+  }
+  return '';
 }
