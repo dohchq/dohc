@@ -1,3 +1,4 @@
+import { WorkspaceSyncPause, workspaceSyncPauseStatus } from "@dohc/workspace-contracts/workspace-sync";
 import type { CapabilityId } from "@dohc/workspace-contracts/capabilities";
 import {normalizeShareLabel, shareSubjectFallback, shareSenderLabel} from "@dohc/security-contract/share-labels";
 import { sha256Hex } from "@dohc/workspace-core/hash";
@@ -1046,6 +1047,21 @@ export async function workspaceStatus(ctx: ToolContext) {
   const serverUrl = remote?.serverUrl ?? manifest?.serverUrl;
   const synced = !entry?.pausedRemote && (remote !== null || nonEmptyString(manifest?.serverUrl));
   const credential = credentialStatusFor(remote, credentials);
+  const pause = !entry?.shareView ? WorkspaceSyncPause.safeParse(entry?.syncPause) : null;
+  let syncPause: import("@dohc/workspace-contracts/workspace-sync").WorkspaceSyncPauseStatus | undefined;
+  if (pause?.success) {
+    if (pause.data.author.kind === "agent") syncPause = workspaceSyncPauseStatus(pause.data, null, () => undefined);
+    else {
+      const [identity, settings] = await Promise.all([
+        readJson<unknown>(join(ctx.home, "dohc-local-id.json")),
+        readJson<unknown>(join(ctx.home, "dohc-settings.json")),
+      ]);
+      const personId = isRecord(identity) && typeof identity.id === "string" ? identity.id : null;
+      const profile = isRecord(settings) && isRecord(settings.profile) ? settings.profile : null;
+      const name = typeof profile?.preferredName === "string" ? profile.preferredName : undefined;
+      syncPause = workspaceSyncPauseStatus(pause.data, personId, id => id === personId ? name : undefined);
+    }
+  }
   return {
     ...(entry?.shareView ? {receivedShare: {
       subjectName: normalizeShareLabel(entry.shareView.subjectName) ?? shareSubjectFallback(entry.shareView.grantedSelector),
@@ -1053,7 +1069,7 @@ export async function workspaceStatus(ctx: ToolContext) {
       access: ctx.shareAccess ?? null,
     }} : {}),
     synced,
-    ...(entry?.syncPause ? { syncPause: entry.syncPause } : {}),
+    ...(syncPause ? { syncPause } : {}),
     ...removedShareStatus(entry),
     scope: synced ? ("cloud" as const) : ("local" as const),
     ...credential,

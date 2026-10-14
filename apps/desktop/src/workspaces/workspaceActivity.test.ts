@@ -989,3 +989,19 @@ it("still settles healthy workspaces when an outage checkpoint fails",async()=>{
  let release!:()=>void;const healthyDrain=new Promise<void>(done=>{release=done;});const settled=vi.fn(async()=>{});
  const quit=settleYDocsAfterFileObservation([Promise.reject(Error("checkpoint disk full")),healthyDrain],settled);await Promise.resolve();expect(settled).not.toHaveBeenCalled();release();await quit;expect(settled).toHaveBeenCalledOnce();
 });
+
+it("reads current pause metadata even while activity preserves a failure status", async () => {
+  let displayName = "First name";
+  const activity = createPhysicalWorkspaceActivity(vi.fn(), {
+    observationFor: w => idleObservation(w, {} as never),
+    cloudStateFor: () => ({ enabled: false, connected: false, syncPause: { atMs: 42,
+      author: { kind: "person", personId: "local:person", self: true, displayName } } }),
+  });
+  const state = new WorkspaceActivityState();
+  state.preservedStatus = { state: "local-changes", pendingChangeCount: 1, lastSyncedAtMs: null,
+    historyRecordingUnavailable: true, historyShareView: false, liveSessionsGeneration: 0 };
+  expect(activity.getStatus(workspace(), state).syncPause?.author).toMatchObject({ self: true, displayName: "First name" });
+  displayName = "Current name";
+  expect(activity.getStatus(workspace(), state)).toMatchObject({ historyRecordingUnavailable: true,
+    syncPause: { author: { self: true, displayName: "Current name" } } });
+});

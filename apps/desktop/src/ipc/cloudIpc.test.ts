@@ -3,6 +3,7 @@ import { resolve } from "node:path";
 import type { EngineWorkspaceSessions } from "@dohc/workspace-engine-client/daemon";
 import { RelayUnauthorizedError, RelayWorkspaceUnavailableError, RelayClaimRefusedError, RelayKeyEnvelopeMissingError } from "@dohc/workspace-contracts/relay";
 import { CHANNELS } from "./channels";
+import { workspaceSyncPauseStatus } from "@dohc/workspace-contracts/workspace-sync";
 import { createWorkspaceSyncStop } from "../workspaces/stopWorkspaceSync";
 import { enrollWorkspaceKeyEnvelope } from "../workspaces/workspaceKeyEnvelopeEnrollment";
 import { registerCloudIpcHandlers } from "./cloudIpc";
@@ -115,12 +116,15 @@ async function harness() {
     status,
   }));
   const preparePause = vi.fn(async () => () => {});
+  let personName = "Sam";
+  const pauseStatus = (pause: import("@dohc/workspace-contracts/workspace-sync").WorkspaceSyncPause) => workspaceSyncPauseStatus(pause, "local", () => personName);
   const stopOperation = createWorkspaceSyncStop({
-    person: async () => ({ kind: "human", humanId: "local", displayName: "Sam" }),
+    person: async () => ({ kind: "person", personId: "local" }),
+    pauseStatus,
     withOwnerHostPaused: work => work(), prepare: preparePause, resume: enable,
     pauseRemote: (id, syncPause) => { const entry = registry.get(id)!; entry.pausedRemote = entry.remote; delete entry.remote; entry.syncPause = syncPause; },
     closeActivity: async () => {}, closeRelay: async () => {}, openActivity: async () => {},
-    status: () => status, notify: () => {}, cleanupFailed: vi.fn(),
+    status: id => ({ ...status, ...(registry.get(id)?.syncPause ? { syncPause: pauseStatus(registry.get(id)!.syncPause!) } : {}) }), notify: () => {}, cleanupFailed: vi.fn(),
   });
   stopWorkspaceSync.mockImplementation(stopOperation);
   const openActivity = vi.fn<Dependencies["openWorkspaceActivity"]>(async (_entry, options) => { steps.push("open"); await options.afterActivityOpen(); });
@@ -141,6 +145,7 @@ async function harness() {
     closeAllRelayTransportWorkspaces: closeRelay,
     activity: { stopEngines: stop, enableCloud: enable, getStatus: () => status },
     currentWorkspaceId: () => rendererSession.isCurrent() ? rendererSession.workspaceId : null, stopWorkspaceSync,
+    syncPauseFor: workspace => workspace.syncPause ? pauseStatus(workspace.syncPause) : undefined,
     reconcileCloud: () => { steps.push("reconcile"); },
     notifyCloudSessionChanged: ready, notifyCloudSessionChangedWithKey: changing, notifyRenderer: notify,
     findWorkspace: (id) => registry.get(id) ?? null,
@@ -164,7 +169,7 @@ async function harness() {
   const invoke = async (channel: string, payload?: unknown, trusted = true) => handlers.get(channel)!({ sender: "window", trusted }, payload);
   const joinPayload = { rootPath, syncCode: buildSyncCode({ workspaceId: "joined", relayUrl: credentials.relayUrl! }) };
   return {
-    handlers, invoke, stopWorkspaceSync, preparePause, openActivity, downloadKeyEnvelope, uploadKeyEnvelope, joinPayload, roots, workspace, registry, authorities, cache, login,
+    handlers, invoke, stopWorkspaceSync, stopOperation, setPersonName: (name: string) => { personName = name; }, preparePause, openActivity, downloadKeyEnvelope, uploadKeyEnvelope, joinPayload, roots, workspace, registry, authorities, cache, login,
     stop, closeRelay, claim, readSecrets, readDataKey, enroll, bootstrap, probe, readdir, mkdir,
     bindRelay, setRemote, enable, notify, changing, ready, createFolder, cleanup, steps, daemonStartup,
     retireRenderer: () => { rendererCurrent = false; },
@@ -316,7 +321,7 @@ describe("registered cloud handlers", () => {
     await expect(h.invoke(CHANNELS.cloudStatus, { workspaceId: "existing" })).resolves.toEqual({
       connected: true, email: credentials.email, serverUrl: credentials.serverUrl,
       relayUrl: credentials.relayUrl,
-      workspaceSynced: true, workspaceSyncConnected: true, workspaceSecretState: "none",
+      workspaceSyncOwned: true, workspaceSynced: true, workspaceSyncConnected: true, workspaceSecretState: "none",
     });
     h.cache.set({ ...credentials, userId: "other" });
     await expect(h.invoke(CHANNELS.cloudStatus, { workspaceId: "existing" })).resolves.toMatchObject({ workspaceSyncConnected: false });
@@ -514,7 +519,7 @@ it("resumes through cloudEnableSync without replacing an intact protected-file e
   h.workspace.remote = { serverUrl: credentials.serverUrl, ownerUserId: credentials.userId };
   await h.invoke(workspaceSyncOperations.cloudStopSync.channel);
   const pause = h.workspace.syncPause!;
-  expect(await h.invoke(CHANNELS.cloudStatus, { workspaceId: "existing" })).toMatchObject({ workspaceSynced: false, syncPause: pause });
+  expect(await h.invoke(CHANNELS.cloudStatus, { workspaceId: "existing" })).toMatchObject({ workspaceSynced: false, syncPause: workspaceSyncPauseStatus(pause, "local", () => "Sam") });
   const key = Buffer.alloc(32, 42);
   h.readDataKey.mockResolvedValueOnce(key);
   h.enroll.mockImplementation(enrollWorkspaceKeyEnvelope);
@@ -556,7 +561,8 @@ it("queues a stop during join until the joined workspace is enabled", async () =
   const joining = h.invoke(CHANNELS.cloudJoinWorkspace, h.joinPayload);
   await entered.promise;
   const stopping = h.authorities.withOperation("joined", operation => createWorkspaceSyncStop({
-    person: async () => ({ kind: "human", humanId: "local", displayName: "Sam" }),
+    person: async () => ({ kind: "person", personId: "local" }),
+    pauseStatus: pause => workspaceSyncPauseStatus(pause, "local", () => "Sam"),
     withOwnerHostPaused: work => work(), prepare: h.preparePause, resume: h.enable,
     pauseRemote: id => { const entry = h.registry.get(id)!; entry.pausedRemote = entry.remote; delete entry.remote; },
     closeActivity: async () => {}, closeRelay: async () => {}, openActivity: async () => {},
@@ -577,7 +583,7 @@ it("releases the join transition lane before rollback drains a queued stop", asy
   const joinRefused = expect(joining).rejects.toThrow("could not download");
   await entered.promise;
   const stopping = h.authorities.withOperation("joined", operation => {
-    const pending = h.stopWorkspaceSync(operation);
+    const pending = h.stopOperation(operation);
     stopQueued.resolve();
     return pending;
   });
@@ -589,4 +595,27 @@ it("releases the join transition lane before rollback drains a queued stop", asy
   expect(h.cleanup).toHaveBeenCalledWith("joined");
   expect(h.registry.has("joined")).toBe(false);
   expect(() => h.authorities.withOperation("joined", () => {})).toThrow("Unknown workspace");
+});
+
+it("exposes owned sync and pause state while signed out, with names resolved at read time", async () => {
+  const h = await harness();
+  h.workspace.remote = { serverUrl: credentials.serverUrl, ownerUserId: credentials.userId };
+  h.login.status.mockResolvedValue({ connected: false });
+  h.login.credentials.mockResolvedValue(null); h.cache.clear();
+  expect(await h.invoke(CHANNELS.cloudStatus, { workspaceId: "existing" })).toMatchObject({
+    connected: false, workspaceSyncOwned: true, workspaceSynced: true, workspaceSyncConnected: false,
+  });
+  const stopped = await h.invoke(workspaceSyncOperations.cloudStopSync.channel);
+  expect(stopped).toMatchObject({ syncPause: { author: { kind: "person", personId: "local", self: true } } });
+  expect(h.workspace.syncPause?.author).toEqual({ kind: "person", personId: "local" });
+  h.setPersonName("New name");
+  expect(await h.invoke(CHANNELS.cloudStatus, { workspaceId: "existing" })).toMatchObject({
+    connected: false, workspaceSyncOwned: true, workspaceSynced: false,
+    syncPause: { author: { kind: "person", personId: "local", self: true, displayName: "New name" } },
+  });
+  h.workspace.shareView = { shareId: "received", granterEmail: null, genericChatWritable: false,
+    grantedSelector: { paths: ["note.md"], versionId: null, access: "edit" } };
+  const received = await h.invoke(CHANNELS.cloudStatus, { workspaceId: "existing" });
+  expect(received).toMatchObject({ workspaceSyncOwned: false });
+  expect(received).not.toHaveProperty("syncPause");
 });

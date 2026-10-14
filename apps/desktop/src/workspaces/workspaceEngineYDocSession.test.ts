@@ -34,6 +34,7 @@ import {
   YDocPathNotInVersionError,
   YDocUncapturedArtifactError,
 } from "./workspaceEngineCapture";
+import { workspaceSyncPauseStatus } from "@dohc/workspace-contracts/workspace-sync";
 import { createWorkspaceSyncStop } from "./stopWorkspaceSync";
 import { createRegistryStore } from "./registryStore";
 import { createTestScratch } from "./testTemp";
@@ -736,9 +737,10 @@ it("settles live edits into Markdown before stopping sync and permits local edit
     await sessions.closeWorkspace({ workspaceId: WORKSPACE_ID, rootPath: root, attachmentId: ATTACHMENT_ID });
   });
   const stop = createWorkspaceSyncStop({
-    person: async () => ({ kind: "human", humanId: "local", displayName: "Sam" }), cleanupFailed: vi.fn(),
+    person: async () => ({ kind: "person", personId: "local" }), cleanupFailed: vi.fn(),
+    pauseStatus: pause => workspaceSyncPauseStatus(pause, "local", () => "Sam"),
     withOwnerHostPaused: work => work(), prepare: () => capture.settleAndCloseLiveSessionsForSyncPause(), resume: async () => {},
-    pauseRemote: id => registry.pauseRemote(id), closeActivity: async () => {
+    pauseRemote: (id, pause) => registry.pauseRemote(id, pause), closeActivity: async () => {
       await expect(capture.openYDocSession({ path: PATH, onRemoteUpdate: () => undefined })).rejects.toThrow();
       await capture.settleAndCloseAllLiveSessions();
       await capture.stop();
@@ -748,9 +750,11 @@ it("settles live edits into Markdown before stopping sync and permits local edit
         attachmentId: ATTACHMENT_ID, rustEngineSessions: sessions, onError: context => captureErrors.push(context) });
     }, notify: () => {},
     status: () => ({ state: "synced", pendingChangeCount: 0, lastSyncedAtMs: null,
-      historyRecordingUnavailable: false, historyShareView: false, liveSessionsGeneration: 1 }),
+      historyRecordingUnavailable: false, historyShareView: false, liveSessionsGeneration: 1,
+      ...(registry.find(WORKSPACE_ID)?.syncPause ? { syncPause: workspaceSyncPauseStatus(registry.find(WORKSPACE_ID)!.syncPause!, "local", () => "Sam") } : {}) }),
   });
-  await expect(stop({ workspace: registry.find(WORKSPACE_ID)!, assertCurrent: () => {} })).resolves.toMatchObject({ workspaceSynced: false });
+  await expect(stop({ workspace: registry.find(WORKSPACE_ID)!, assertCurrent: () => {} })).resolves.toMatchObject({ workspaceSynced: false, syncPause: { author: { kind: "person", personId: "local", self: true } } });
+  expect(registry.find(WORKSPACE_ID)?.syncPause?.author).toEqual({ kind: "person", personId: "local" });
   expect(closeRelay).toHaveBeenCalledOnce();
   const methods = requests.map(request => request.method);
   expect(methods.indexOf(YDOC_METHOD.settle)).toBeLessThan(methods.indexOf(YDOC_METHOD.close));

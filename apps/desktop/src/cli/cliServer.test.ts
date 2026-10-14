@@ -911,10 +911,10 @@ describe("CLI socket server", () => {
   });
 
   it("derives stop provenance for people, named agents, and agent runs", async () => {
-    const stop = vi.fn<NonNullable<CliWorkspaceContext["stopSync"]>>(async author => ({ ok: true, workspaceId: WORKSPACE_ID, workspaceSynced: false, syncPause: { atMs: 42, author } }));
+    const stop = vi.fn<NonNullable<CliWorkspaceContext["stopSync"]>>(async () => ({ ok: true, workspaceId: WORKSPACE_ID, workspaceSynced: false }));
     context.stopSync = stop;
     await invoke("stopSync", { cwd: workspaceRoot, actor: "human" });
-    expect(stop).toHaveBeenLastCalledWith({ kind: "human", humanId: "person-local", displayName: "Sam" });
+    expect(stop).toHaveBeenLastCalledWith(undefined);
     await invoke("stopSync", { cwd: workspaceRoot, actor: "agent", agent: "Claude" });
     expect(stop).toHaveBeenLastCalledWith({ kind: "agent", agentId: "Claude", onBehalfOf: "person-local", depth: 0 });
     agentRunDepth = 2;

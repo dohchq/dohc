@@ -501,7 +501,7 @@ Stop syncing this workspace on this computer.
 
 Local files, documents, records, and history stay here. Shares and protected-file keys are retained. Groups you joined and received-share mounts keep syncing. Turn sync on in Settings to resume the same workspace.
 
-The pause result records who paused and when. A human author has kind, humanId, and displayName. An agent author has kind, agentId, onBehalfOf, and depth. Agent names are provenance and grant no authority.
+The pause result records who paused and when. A person author has kind person, personId, self, and an optional current displayName. Show you when self is true. Person names are resolved when status is read. An agent author has kind agent, agentId, onBehalfOf, and depth. Agent names are provenance and grant no authority.
 
 #### `dohc sync stop`
 

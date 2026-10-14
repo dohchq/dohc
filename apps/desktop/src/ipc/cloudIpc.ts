@@ -51,6 +51,7 @@ export function registerCloudIpcHandlers<
   };
   currentWorkspaceId(sender: Sender): string | null;
   stopWorkspaceSync(operation: Operation): Promise<CloudStopSyncResult>;
+  syncPauseFor(workspace: RegistryEntry): SyncStatusResult["syncPause"];
   reconcileCloud(): void;
   notifyCloudSessionChanged(phase: "changing" | "ready"): void;
   notifyCloudSessionChangedWithKey(key: string | null, phase: "changing" | "ready"): void;
@@ -94,7 +95,7 @@ export function registerCloudIpcHandlers<
     registerHandler, assertTrustedSender, cloudLogin, clearCachedCredentials,
     refreshCredentialCache, warmCredentialCache, currentCredentials,
     loadAndCacheCurrentCredentials, closeAllRelayTransportWorkspaces, activity,
-    currentWorkspaceId, stopWorkspaceSync, reconcileCloud, notifyCloudSessionChanged, notifyCloudSessionChangedWithKey,
+    currentWorkspaceId, stopWorkspaceSync, syncPauseFor, reconcileCloud, notifyCloudSessionChanged, notifyCloudSessionChangedWithKey,
     notifyRenderer, findWorkspace, engineDaemonStartup,
     requireEngineSessions, currentEngineSessions, withPhysicalWorkspaceOperation,
     withRendererWorkspaceOperation, receivedShareEngine, readWorkspaceSecretState,
@@ -168,8 +169,9 @@ export function registerCloudIpcHandlers<
       ...status,
       ...(input.workspaceId
         ? {
+            workspaceSyncOwned: !!workspace && !workspace.shareView,
             workspaceSynced: !!workspace?.remote,
-            ...(workspace?.syncPause ? { syncPause: workspace.syncPause } : {}),
+            ...(!workspace?.shareView && workspace?.syncPause ? { syncPause: syncPauseFor(workspace) } : {}),
             workspaceSyncConnected:
               !!workspace?.remote &&
               workspaceRemoteMatchesCredentials(

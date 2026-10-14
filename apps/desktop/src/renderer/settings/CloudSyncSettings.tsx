@@ -52,9 +52,8 @@ type WorkspaceSync = Required<Pick<
 
 type PassphrasePurpose = "protect" | "unlock";
 
-// Settings' Sync and sharing page: the signed-in account with Disconnect, and
-// whether this workspace syncs. Connecting a server is a flow, not a setting,
-// so a page with nobody signed in offers the button that opens it.
+// Settings' Sync and sharing page: the server account and this workspace's
+// local sync setting. Pausing needs no account.
 export function CloudSyncSettings(props: {
   workspaceId: string;
   sharedView?: boolean;
@@ -206,7 +205,7 @@ export function CloudSyncSettings(props: {
     );
   }
 
-  if (!status.connected) {
+  if (!status.connected && !status.workspaceSyncOwned) {
     return (
       <SettingRow title="Server" testId="settings-row-server">
         <PrimaryButton size="compact" data-testid="settings-cloud-connect" onClick={props.cloud.onConnect}>
@@ -222,13 +221,19 @@ export function CloudSyncSettings(props: {
 
   return (
     <>
-      <CloudAccountRow
+      {status.connected ? <CloudAccountRow
         email={status.email ?? ""}
         serverUrl={status.serverUrl ?? ""}
         networkAccess={status.networkAccess ?? null}
         onSettled={props.cloud.onChanged}
         onError={props.cloud.onAccountError}
-      />
+      /> : (
+        <SettingRow title="Server" testId="settings-row-server">
+          <PrimaryButton size="compact" data-testid="settings-cloud-connect" onClick={props.cloud.onConnect}>
+            Connect server
+          </PrimaryButton>
+        </SettingRow>
+      )}
       {/* Main refuses to enroll a shared view: it syncs through its share. */}
       {props.sharedView ? null : (
         <>
@@ -251,7 +256,7 @@ export function CloudSyncSettings(props: {
                 resumes sync when it owns the workspace. Another account
                 gets main's reason in a notice, and Disconnect above is the
                 way to the right one. */}
-            {unconfirmed ? (
+            {unconfirmed && status.connected ? (
               <SecondaryButton
                 size="compact"
                 data-testid="cloud-relink-workspace"
@@ -268,7 +273,7 @@ export function CloudSyncSettings(props: {
               label="Sync this workspace"
               checked={syncBusy === "stop" ? false : sync.workspaceSynced || (syncBusy === "enable" && passphrasePurpose === null)}
               busy={syncBusy !== null}
-              disabled={syncBusy !== null || (!sync.workspaceSynced && passphrasePurpose !== null)}
+              disabled={syncBusy !== null || (!sync.workspaceSynced && (!status.connected || passphrasePurpose !== null))}
               onChange={(on) => void (on ? enableSync() : stopSync())}
             />
           </SettingRow>
@@ -314,7 +319,7 @@ function SyncPausedLine(props: { pause: SyncPause }) {
           {author.agentId}
         </span>
       ) : (
-        author.displayName
+        author.self ? "you" : author.displayName ?? "another person"
       )}
       {" · "}
       <time dateTime={time.iso}>{time.label}</time>

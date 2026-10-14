@@ -1,4 +1,4 @@
-import { WorkspaceSyncPause } from "@dohc/workspace-contracts/workspace-sync";
+import { WorkspaceSyncPauseStatus } from "@dohc/workspace-contracts/workspace-sync";
 import { SharedDocumentOpenState } from "./sharedDocumentOpenState";
 import { shareCopyOperations } from "./shareCopyOperations";
 export type { ShareCopyInput, ShareCopyResult } from "@dohc/workspace-contracts/share-copy";
@@ -1307,7 +1307,7 @@ type _AllEngineStoreRefusalsRepresented = AssertNever<
 >;
 
 const SYNC_STATUS_BASE_FIELDS = {
-  syncPause: WorkspaceSyncPause.optional(),
+  syncPause: WorkspaceSyncPauseStatus.optional(),
   state: z.enum([
     "synced",
     "syncing",
@@ -3434,9 +3434,11 @@ export const CloudStatusResult = z.object({
   serverUrl: z.string().optional(),
   relayUrl: z.string().optional(),
   networkAccess: z.enum(["private", "public"]).optional(),
+  // Local ownership is independent of the server account session.
+  workspaceSyncOwned: z.boolean().optional(),
   // Whether the named workspace has cloud sync enabled (registry remote set).
   workspaceSynced: z.boolean().optional(),
-  syncPause: WorkspaceSyncPause.optional(),
+  syncPause: WorkspaceSyncPauseStatus.optional(),
   // Whether that remote is pinned to the current signed-in account.
   workspaceSyncConnected: z.boolean().optional(),
   workspaceSecretState: z
@@ -3526,7 +3528,7 @@ export type CloudStopSyncPayload = z.infer<typeof CloudStopSyncPayload>;
 export const CloudStopSyncResult = z.object({
   workspaceId: WORKSPACE_ID,
   workspaceSynced: z.literal(false),
-  syncPause: WorkspaceSyncPause.optional(),
+  syncPause: WorkspaceSyncPauseStatus.optional(),
   status: SyncStatusResult,
 }).strict();
 export type CloudStopSyncResult = z.infer<typeof CloudStopSyncResult>;

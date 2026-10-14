@@ -275,7 +275,7 @@ function historyPolicyUnreadable(refusal: HistoryPolicyRefusal) {
 }
 
 export interface CliWorkspaceContext extends CliRegistryWorkspace {
-  stopSync?(author: import("@dohc/workspace-contracts/workspace-sync").WorkspaceSyncPauseAuthor): Promise<CliResultByVerb["stopSync"]>;
+  stopSync?(author?: import("@dohc/workspace-contracts/workspace-sync").WorkspaceSyncPauseAuthor): Promise<CliResultByVerb["stopSync"]>;
   access?: {
     object(input: import("zod").infer<typeof import("@dohc/workspace-contracts/access").ObjectAccessInput>): Promise<import("@dohc/workspace-contracts/access").AccessAnswer>;
     sharing(input: import("zod").infer<typeof import("@dohc/workspace-contracts/access").SharingAccessInput>): Promise<import("@dohc/workspace-contracts/access").AccessAnswer>;
@@ -2273,7 +2273,7 @@ async function dispatchWorkspace(
       if (context.readOnly || !context.stopSync) throw new CliCommandError("Open the owning workspace to stop its sync.");
       return context.stopSync(writeActor(request.args.actor, context, options) === "agent"
         ? { kind: "agent", agentId: request.args.agent ?? "dohc-mcp", onBehalfOf: options.localPersonId(), depth: options.agentRunDepth(context.workspaceId) }
-        : { kind: "human", humanId: options.localPersonId(), displayName: options.localUserDisplayName() });
+        : undefined);
     case "accessObject":
       if (!context.access) throw new CliCommandError("Access observations are unavailable.");
       return context.access.object(request.args);

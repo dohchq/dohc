@@ -2276,7 +2276,7 @@ const CLOUD_SIGNED_IN: CloudStatusResult = {
 };
 const SYNC_PAUSED_BY_PERSON: CloudStatusResult["syncPause"] = {
   atMs: new Date(2026, 6, 8, 8, 42).getTime(),
-  author: { kind: "human", humanId: "human-sam", displayName: "Sam Hollis" },
+  author: { kind: "person", self: false, personId: "human-sam", displayName: "Sam Hollis" },
 };
 const SYNC_PAUSED_BY_AGENT: CloudStatusResult["syncPause"] = {
   atMs: new Date(2026, 6, 8, 8, 42).getTime(),

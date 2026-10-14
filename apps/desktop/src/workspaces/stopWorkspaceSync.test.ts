@@ -2,6 +2,7 @@ import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import type { CloudCredentials } from "./cloudCredentialStore";
 import { createRegistryStore } from "./registryStore";
+import { workspaceSyncPauseStatus } from "@dohc/workspace-contracts/workspace-sync";
 import { createWorkspaceSyncStop } from "./stopWorkspaceSync";
 import { createWorkspaceActivity, WorkspaceActivityState, type ActivityWorkspace } from "./workspaceActivity";
 import { idleObservation } from "./workspaceActivity.testSupport";
@@ -28,7 +29,11 @@ async function fixture(synced = true) {
   const watcherStop = vi.fn(async () => { steps.push("watcher-stop"); });
   const service = createWorkspaceActivity(vi.fn(), {
     observationFor: () => ({ ...idleObservation(workspace, {} as never), stop: watcherStop }),
-    cloudStateFor: () => ({ enabled: !!store.find(workspace.workspaceId)?.remote, connected: !!store.find(workspace.workspaceId)?.remote }),
+    cloudStateFor: () => {
+      const entry = store.find(workspace.workspaceId)!;
+      return { enabled: !!entry.remote, connected: !!entry.remote,
+        syncPause: entry.syncPause ? workspaceSyncPauseStatus(entry.syncPause, "local-person", () => "Sam") : undefined };
+    },
     engineFor: () => store.find(workspace.workspaceId)?.remote ? ({
       start: engineStart, stop: engineStop, queueSync: vi.fn(), snapshot: () => ({}),
     } as never) : null,
@@ -45,9 +50,10 @@ async function fixture(synced = true) {
   const closeRelay = vi.fn(async () => { steps.push("relay-close"); });
   const pauseRemote = vi.fn((id: string, pause: import("@dohc/workspace-contracts/workspace-sync").WorkspaceSyncPause) => { steps.push("pause"); store.pauseRemote(id, pause); });
   const cleanupFailed = vi.fn();
-  const person = vi.fn(async () => ({ kind: "human" as const, humanId: "local-person", displayName: "Sam" }));
+  const person = vi.fn(async () => ({ kind: "person" as const, personId: "local-person" }));
   const stop = createWorkspaceSyncStop({
     person, cleanupFailed, nowMs: () => 42,
+    pauseStatus: pause => workspaceSyncPauseStatus(pause, "local-person", () => "Sam"),
     withOwnerHostPaused: async work => { steps.push("host-pause"); try { return await work(); } finally { steps.push("host-resume"); } },
     prepare: () => service.prepareSyncPause(workspace, state), resume: () => service.enableCloud(workspace, state), pauseRemote,
     closeActivity: () => service.close(workspace, state, { notify: false }), closeRelay,
@@ -76,14 +82,16 @@ describe("stop one workspace's sync", () => {
     const h = await fixture();
     const result = await h.stop(h.operation());
     expect(result).toMatchObject({ workspaceId: "workspace", workspaceSynced: false,
-      syncPause: { atMs: 42, author: { kind: "human", humanId: "local-person", displayName: "Sam" } },
+      syncPause: { atMs: 42, author: { kind: "person", personId: "local-person", self: true, displayName: "Sam" } },
       status: { state: "synced", pendingChangeCount: 0 } });
     expect(h.steps.indexOf("settle")).toBeLessThan(h.steps.indexOf("engine-stop"));
     expect(h.steps.indexOf("settle")).toBeLessThan(h.steps.indexOf("pause"));
     expect(h.steps.indexOf("pause")).toBeLessThan(h.steps.indexOf("relay-close"));
     expect(h.service.isOpen(h.state)).toBe(true);
     const persisted = createRegistryStore(h.registryPath).find("workspace");
-    expect(persisted).toMatchObject({ pausedRemote: remote, syncPause: result.syncPause });
+    expect(persisted).toMatchObject({ pausedRemote: remote, syncPause: { atMs: 42, author: { kind: "person", personId: "local-person" } } });
+    expect(persisted?.syncPause?.author).not.toHaveProperty("displayName");
+    expect(persisted?.syncPause?.author).not.toHaveProperty("self");
     expect(persisted?.remote).toBeUndefined();
     await h.service.close(h.workspace, h.state);
   });

@@ -12,7 +12,7 @@ import { DatasetRequest, DatasetResult } from "./dataset";
 import { OwnerAppPublicationRequest, OwnerAppPublicationResult } from "./appPublication";
 import {OwnerAppResponsesRequest,OwnerAppResponsesResult} from "./appResponses";
 
-import { WorkspaceSyncPause } from "@dohc/workspace-contracts/workspace-sync";
+import { WorkspaceSyncPauseStatus } from "@dohc/workspace-contracts/workspace-sync";
 
 export const CLI_PROTOCOL_VERSION = 4;
 export const CLI_JSON_SCHEMA_VERSION = 2;
@@ -1353,7 +1353,7 @@ const automationPressResultSchema = z.union([
 export const cliResultSchemas = {
   stopSync: z.union([
     z.object({ ok: z.literal(true), workspaceId: z.string().min(1), workspaceSynced: z.literal(false),
-      syncPause: WorkspaceSyncPause.optional() }).strict(),
+      syncPause: WorkspaceSyncPauseStatus.optional() }).strict(),
     rawFailureSchema,
   ]),
   accessObject: AccessAnswer,

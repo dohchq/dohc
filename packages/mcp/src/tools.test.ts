@@ -461,6 +461,22 @@ describe("mcp tools operate on allowed paths", () => {
     });
   });
 
+  it("workspace_status resolves this computer's person and current profile name without an account", async () => {
+    await withWorkspace(async ctx => {
+      const syncPause = { atMs: 42, author: { kind: "person", personId: "local:person" } };
+      await writeFile(join(ctx.home, "dohc-local-id.json"), JSON.stringify({ id: "local:person" }));
+      await writeFile(join(ctx.home, "dohc-workspaces.json"), JSON.stringify({ version: 1, workspaces: [{
+        workspaceId: "ws-1", rootPath: ctx.root, kind: "personal", pausedRemote: { serverUrl: "https://server.test", ownerUserId: "owner" }, syncPause,
+      }] }));
+      expect(await workspaceStatus(ctx)).toMatchObject({ synced: false, syncPause: { atMs: 42,
+        author: { kind: "person", personId: "local:person", self: true } } });
+      await writeFile(join(ctx.home, "dohc-settings.json"), JSON.stringify({ profile: { preferredName: "Current name" } }));
+      expect(await workspaceStatus(ctx)).toMatchObject({ syncPause: { author: { self: true, displayName: "Current name" } } });
+      await writeFile(join(ctx.home, "dohc-local-id.json"), JSON.stringify({ id: "local:other" }));
+      const other = await workspaceStatus(ctx);
+      expect(other.syncPause?.author).toEqual({ kind: "person", personId: "local:person", self: false });
+    });
+  });
   it("workspace_status reports a matching cloud credential as connected", async () => {
     await withWorkspace(async (ctx) => {
       await bindCloudWorkspace(ctx);

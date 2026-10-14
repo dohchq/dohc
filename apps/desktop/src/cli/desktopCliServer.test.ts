@@ -153,15 +153,15 @@ describe("desktop CLI workspace context", () => {
     f.dependencies.stopWorkspaceSync = vi.fn(async (operation, author) => {
       operation.assertCurrent();
       expect(operation.workspace.workspaceId).toBe(f.workspace.workspaceId);
-      expect(author).toEqual({ kind: "human", humanId: "local", displayName: "Sam" });
+      expect(author).toBeUndefined();
       return { ok: true as const, workspaceId: operation.workspace.workspaceId, workspaceSynced: false as const };
     });
     const server = f.create();
     const context = await server.openCliWorkspace(f.workspace);
-    await expect(context.stopSync!({ kind: "human", humanId: "local", displayName: "Sam" })).resolves.toMatchObject({ ok: true, workspaceId: "workspace" });
+    await expect(context.stopSync!()).resolves.toMatchObject({ ok: true, workspaceId: "workspace" });
     const retired = f.authorities.invalidate("workspace");
     await retired;
-    await expect(context.stopSync!({ kind: "human", humanId: "local", displayName: "Sam" })).rejects.toThrow();
+    await expect(context.stopSync!()).rejects.toThrow();
     expect(f.dependencies.stopWorkspaceSync).toHaveBeenCalledOnce();
   });
 

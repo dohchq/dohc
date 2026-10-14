@@ -41,7 +41,7 @@ const SYNCED: CloudStatusResult = { ...SIGNED_IN, workspaceSynced: true, workspa
 const PAUSED_AT = Date.UTC(2026, 9, 14, 13, 5);
 const PAUSE_BY_PERSON: NonNullable<CloudStatusResult["syncPause"]> = {
   atMs: PAUSED_AT,
-  author: { kind: "human", humanId: "human-sam", displayName: "Sam Hollis" },
+  author: { kind: "person", personId: "local-sam", self: false, displayName: "Sam Hollis" },
 };
 const PAUSE_BY_AGENT: NonNullable<CloudStatusResult["syncPause"]> = {
   atMs: PAUSED_AT,
@@ -92,6 +92,24 @@ afterEach(() => {
 });
 
 describe("CloudSyncSettings", () => {
+  it("allows a signed-out person to pause an owned synced workspace", async () => {
+    render(<CloudSyncSettings workspaceId="ws-1" cloud={cloud({ connected: false, workspaceSyncOwned: true, workspaceSynced: true })} />);
+    expect(screen.getByTestId("settings-cloud-connect")).toBeTruthy();
+    expect(syncSwitch().getAttribute("aria-checked")).toBe("true");
+    expect((syncSwitch() as HTMLButtonElement).disabled).toBe(false);
+    fireEvent.click(syncSwitch());
+    await waitFor(() => expect(bridgeMock.cloudStopSync).toHaveBeenCalledOnce());
+    await waitFor(() => expect(syncSwitch().getAttribute("aria-checked")).toBe("false"));
+    expect((syncSwitch() as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it("shows a signed-out pause by this computer's person as you", () => {
+    const syncPause = { ...PAUSE_BY_PERSON, author: { kind: "person" as const, personId: "local-sam", self: true } };
+    render(<CloudSyncSettings workspaceId="ws-1" cloud={cloud({ connected: false, workspaceSyncOwned: true, workspaceSynced: false, syncPause })} />);
+    expect(screen.getByTestId("cloud-sync-paused").textContent).toContain("Paused by you");
+    expect((syncSwitch() as HTMLButtonElement).disabled).toBe(true);
+  });
+
   it("shows the account, its server, Disconnect, and the sync switch while signed in", () => {
     render(<CloudSyncSettings workspaceId="ws-1" cloud={cloud(SIGNED_IN)} />);
 

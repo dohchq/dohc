@@ -60,7 +60,7 @@ async function settledMarkdown(rootPath: string, path: string): Promise<string> 
 }
 
 interface DesktopCliServerDependencies<State> {
-  stopWorkspaceSync?(operation: WorkspaceAuthorityOperation<RegistryEntry, State>, author: import("@dohc/workspace-contracts/workspace-sync").WorkspaceSyncPauseAuthor): Promise<import("@dohc/cli/protocol").CliResultByVerb["stopSync"]>;
+  stopWorkspaceSync?(operation: WorkspaceAuthorityOperation<RegistryEntry, State>, author?: import("@dohc/workspace-contracts/workspace-sync").WorkspaceSyncPauseAuthor): Promise<import("@dohc/cli/protocol").CliResultByVerb["stopSync"]>;
   access?(workspaceId: string): NonNullable<CliWorkspaceContext["access"]>;
   recordSuccess?: CliServerOptions["recordSuccess"];
   dataset?(request: import("@dohc/cli/dataset").DatasetRequest, agent: LocalDatasetAgent | null): Promise<import("@dohc/cli/dataset").DatasetResult>;

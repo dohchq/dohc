@@ -589,7 +589,7 @@ describe("keeping the roster current", () => {
     store.pauseRemote(WORKSPACE);
     const { list, rosters: r } = rosters(async () => offline);
     const roster = await r.forRun(WORKSPACE);
-    expect(roster).toEqual(unchecked("Sync this workspace in Settings → Sync and sharing, then try again."));
+    expect(roster).toEqual(unchecked("Turn sync on in Settings → Sync and sharing, then try again."));
     const [reach] = checkAutomationReach(roster, { id: "new-editor", collection: { path: "Trip", name: "Trip" }, codeFiles: [],
       steps: [{ kind: "change-records", collection: { path: "Private", name: "Private" } }] });
     expect(reach.allowed).toBe(false);

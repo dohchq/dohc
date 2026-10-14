@@ -1,7 +1,7 @@
 import { runInKeyedLane } from "../keyedLane";
 import type { CloudStopSyncResult, SyncStatusResult } from "../ipc/bridgeContract";
 import type { RegistryEntry } from "./registryStore";
-import type { WorkspaceSyncPause, WorkspaceSyncPauseAuthor } from "@dohc/workspace-contracts/workspace-sync";
+import type { WorkspaceSyncPause, WorkspaceSyncPauseAuthor, WorkspaceSyncPauseStatus } from "@dohc/workspace-contracts/workspace-sync";
 
 const syncTransitions = new Map<string, Promise<void>>();
 export function withWorkspaceSyncTransition<Result>(workspaceId: string, work: () => Promise<Result>): Promise<Result> {
@@ -15,6 +15,7 @@ export interface SyncStopOperation {
 
 export function createWorkspaceSyncStop(dependencies: {
   person(): Promise<WorkspaceSyncPauseAuthor>;
+  pauseStatus(pause: WorkspaceSyncPause): WorkspaceSyncPauseStatus;
   withOwnerHostPaused<Result>(work: () => Promise<Result>): Promise<Result>;
   prepare(workspace: RegistryEntry): Promise<() => void>;
   resume(workspace: RegistryEntry): Promise<unknown>;
@@ -34,15 +35,13 @@ export function createWorkspaceSyncStop(dependencies: {
       const pausedBy = await author;
       operation.assertCurrent();
       const workspace = operation.workspace;
-      let syncPause = workspace.syncPause;
       let status = dependencies.status(workspaceId);
       const result = (): CloudStopSyncResult => ({
         workspaceId: workspace.workspaceId,
         workspaceSynced: false,
-        ...(syncPause ? { syncPause } : {}),
-        status: syncPause ? { ...status, syncPause } : status,
+        ...(status.syncPause ? { syncPause: status.syncPause } : {}),
+        status,
       });
-      operation.assertCurrent();
       if (workspace.shareView) {
         throw new Error("This workspace syncs through a received share. Open the owner's workspace to stop its sync.");
       }
@@ -56,10 +55,10 @@ export function createWorkspaceSyncStop(dependencies: {
           try {
             resumeAdmission = await dependencies.prepare(workspace);
             operation.assertCurrent();
-            syncPause = { atMs: (dependencies.nowMs ?? Date.now)(), author: pausedBy };
+            const syncPause = { atMs: (dependencies.nowMs ?? Date.now)(), author: pausedBy };
             dependencies.pauseRemote(workspace.workspaceId, syncPause);
             saved = true;
-            status = { ...status, syncPause };
+            status = { ...status, syncPause: dependencies.pauseStatus(syncPause) };
           } catch (error) {
             // A refused pause keeps the original sync setting and failure.
             resumeAdmission?.();

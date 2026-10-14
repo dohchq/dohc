@@ -77,6 +77,7 @@ export interface WorkspaceActivityOptions {
   // Live facts main owns: whether this workspace has cloud sync enabled
   // (registry remote identity) and whether a cloud session exists right now.
   cloudStateFor?: (workspaceId: string) => { enabled: boolean; connected: boolean;
+    syncPause?: SyncStatusResult["syncPause"];
   };
   // Builds a sync engine for a workspace when it is enabled and connected;
   // null keeps the workspace local-only. Called on open and on enableCloud.
@@ -167,13 +168,14 @@ export function createWorkspaceActivity(
   ): SyncStatusResult {
     const { workspaceId } = workspace;
     const liveSessionsGeneration = state.liveSessionsGeneration;
-    const preserved = state.preservedStatus;
-    if (preserved) return { ...preserved, liveSessionsGeneration };
-    const w = state.entry;
     const cloud = options.cloudStateFor?.(workspaceId) ?? {
       enabled: false,
       connected: false,
     };
+    const syncPause = cloud.syncPause;
+    const preserved = state.preservedStatus;
+    if (preserved) return { ...preserved, syncPause, liveSessionsGeneration };
+    const w = state.entry;
     const snap = w?.engine?.snapshot();
     const conflictCount = snap?.conflictCount ?? 0;
     const status = deriveSyncStatus({
@@ -197,6 +199,7 @@ export function createWorkspaceActivity(
     const historyCaptureDetail = w?.historyCaptureDetail ?? null;
     const baseStatus = {
       ...status,
+      ...(syncPause ? { syncPause } : {}),
       conflictCount,
       ...(snap?.claimingIdentity ? { claimingIdentity: true } : {}),
       ...(snap?.updateRequired ? { updateRequired: snap.updateRequired } : {}),
