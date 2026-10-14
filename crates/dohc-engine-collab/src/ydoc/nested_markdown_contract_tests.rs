@@ -419,39 +419,62 @@ fn projected_html_and_definitions_keep_line_start_entities() {
     }
 }
 
+fn assert_fold_reading_cost(source: &str, plain: &str, label: &str) -> bool {
+    let sources = [source, plain];
+    let mut samples = [Vec::new(), Vec::new()];
+    for round in 0..5 {
+        for index in [round % 2, 1 - round % 2] {
+            let doc = Ydoc::wire();
+            let started = std::time::Instant::now();
+            std::hint::black_box(
+                doc.rewrite_content_to_markdown_for_fold(ContentKind::Richdoc, sources[index])
+                    .unwrap(),
+            );
+            samples[index].push(started.elapsed());
+        }
+    }
+    let times = samples.map(|mut values| {
+        values.sort();
+        values[2]
+    });
+    println!(
+        "{label} {} bytes: repeated {:?}, plain {:?}",
+        source.len(),
+        times[0],
+        times[1]
+    );
+    times[0] <= times[1] * 8
+}
+
 #[test]
 fn nested_contract_definition_guard_scales_linearly() {
-    let mut previous = None;
     for bytes in [8_000, 32_000, 1_000_000] {
-        let sources = ["[a]:", "word"].map(|unit| format!("{}x &#1;", unit.repeat(bytes / 4)));
-        let mut samples = [Vec::new(), Vec::new()];
-        for round in 0..5 {
-            for index in [round % 2, 1 - round % 2] {
-                let doc = Ydoc::wire();
-                let started = std::time::Instant::now();
-                std::hint::black_box(
-                    doc.rewrite_content_to_markdown_for_fold(ContentKind::Richdoc, &sources[index])
-                        .unwrap(),
-                );
-                samples[index].push(started.elapsed());
+        let mut distinct = String::from("x ");
+        for width in 1.. {
+            distinct.push_str(&"`".repeat(width));
+            distinct.push(' ');
+            if distinct.len() >= bytes {
+                break;
             }
         }
-        let times = samples.map(|mut values| {
-            values.sort();
-            values[2]
-        });
-        println!(
-            "definition guard {bytes} bytes: repeated {:?}, plain {:?}",
-            times[0], times[1]
-        );
-        assert!(times[0] <= times[1] * 8, "{bytes}: {times:?}");
-        if let Some((smaller_bytes, smaller_time)) = previous {
-            assert!(
-                times[0] <= smaller_time * (bytes / smaller_bytes) as u32 * 3,
-                "nonlinear growth at {bytes}: {smaller_time:?} -> {:?}",
-                times[0]
-            );
+        let mut linear = true;
+        for (label, mut source) in [
+            (
+                "lines before spans",
+                format!("{}{}", "x\n".repeat(bytes / 4), "`a` ".repeat(bytes / 8)),
+            ),
+            ("interleaved spans", "`a`\n".repeat(bytes / 4)),
+            ("distinct runs", distinct),
+            ("definitions", "[a]:".repeat(bytes / 4)),
+        ] {
+            let mut plain: String = source
+                .chars()
+                .map(|ch| if ch == '\n' { ch } else { 'w' })
+                .collect();
+            source.push_str("x &#1;");
+            plain.push_str("x &#1;");
+            linear &= assert_fold_reading_cost(&source, &plain, label);
         }
-        previous = Some((bytes, times[0]));
+        assert!(linear, "superlinear fold reading at {bytes} bytes");
     }
 }

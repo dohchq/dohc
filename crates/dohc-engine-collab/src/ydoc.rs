@@ -2573,8 +2573,6 @@ fn unsupported_markdown_line(line: &str) -> bool {
 
 /// Maximum quote nesting before the parser keeps the rest as paragraph text.
 /// A file fold refuses that overflow because projection escapes its `>` markers.
-/// Projection reading retains that text; Source reading refuses the overflow.
-/// This budget is below the projector's depth limit.
 const QUOTE_FOLD_MAX_DEPTH: usize = 120;
 const MARKDOWN_XML_MAX_DEPTH: usize = 128;
 
@@ -2626,25 +2624,35 @@ fn markdown_fence(line: &str, source: bool) -> Option<(u8, usize, &str)> {
 
 fn inline_code_spans(text: &str) -> Vec<std::ops::Range<usize>> {
     let bytes = text.as_bytes();
-    let mut spans = Vec::new();
+    let mut runs = HashMap::<usize, Vec<usize>>::new();
     let mut at = 0;
-    'outside: while at < bytes.len() {
+    while at < bytes.len() {
+        if bytes[at] == b'`' {
+            let width = bytes[at..].iter().take_while(|&&b| b == b'`').count();
+            runs.entry(width).or_default().push(at);
+            at += width;
+        } else {
+            at += 1;
+        }
+    }
+    for positions in runs.values_mut() {
+        positions.reverse();
+    }
+    let mut spans = Vec::new();
+    at = 0;
+    while at < bytes.len() {
         if bytes[at] == b'\\' {
             at += 2;
         } else if bytes[at] == b'`' {
             let width = bytes[at..].iter().take_while(|&&b| b == b'`').count();
-            let mut close = at + width;
-            while close < bytes.len() {
-                if bytes[close] != b'`' {
-                    close += 1;
-                    continue;
+            if let Some(positions) = runs.get_mut(&width) {
+                while positions.last().is_some_and(|&close| close <= at) {
+                    positions.pop();
                 }
-                let run = bytes[close..].iter().take_while(|&&b| b == b'`').count();
-                close += run;
-                if run == width {
-                    spans.push(at..close);
-                    at = close;
-                    continue 'outside;
+                if let Some(&close) = positions.last() {
+                    spans.push(at..close + width);
+                    at = close + width;
+                    continue;
                 }
             }
             at += width;
@@ -2655,7 +2663,6 @@ fn inline_code_spans(text: &str) -> Vec<std::ops::Range<usize>> {
     spans
 }
 
-/// `depth` counts XML levels; `quote_depth` enforces the separate quote cap.
 fn parse_markdown_blocks_at<'src>(
     lines: &[&'src str],
     depth: usize,
@@ -2868,6 +2875,9 @@ fn parse_markdown_blocks_at<'src>(
                     .into_iter()
                     .map(|(from, to)| from..to),
             );
+            spans.sort_unstable_by_key(|span| span.start);
+            let mut spans = spans.into_iter().peekable();
+            let mut covered = 0;
             paragraph = paragraph
                 .split('\n')
                 .scan(0, |offset, line| {
@@ -2876,7 +2886,10 @@ fn parse_markdown_blocks_at<'src>(
                     Some((at, line))
                 })
                 .map(|(index, line)| {
-                    if spans.iter().any(|span| span.contains(&index)) {
+                    while let Some(span) = spans.next_if(|span| span.start <= index) {
+                        covered = covered.max(span.end);
+                    }
+                    if index < covered {
                         return line.to_owned();
                     }
                     if let Some(rest) = line.strip_prefix("&#9;") {
@@ -3576,12 +3589,12 @@ fn insert_md_paragraph<F: XmlFragment>(
         return;
     }
     let target = el.insert(txn, 0, XmlTextPrelim::new(""));
-    let mut cursor = 0;
-    let mut offset = 0;
+    let prefix = &text[..spans[0].start];
+    target.insert(txn, 0, prefix);
+    let mut cursor = spans[0].start;
+    let mut code = String::new();
     for span in spans {
-        let prefix = &text[cursor..span.start];
-        target.insert(txn, offset, prefix);
-        offset += utf16_len(prefix) as u32;
+        code.push_str(&text[cursor..span.start]);
         let width = text[span.clone()]
             .bytes()
             .take_while(|b| *b == b'`')
@@ -3590,16 +3603,16 @@ fn insert_md_paragraph<F: XmlFragment>(
         if value.starts_with(' ') && value.ends_with(' ') && !value.bytes().all(|b| b == b' ') {
             value = &value[1..value.len() - 1];
         }
-        target.insert_with_attributes(
-            txn,
-            offset,
-            value,
-            [("code".into(), Any::Map(Default::default()))].into(),
-        );
-        offset += utf16_len(value) as u32;
+        code.push_str(value);
         cursor = span.end;
     }
-    target.insert(txn, offset, &text[cursor..]);
+    code.push_str(&text[cursor..]);
+    target.insert_with_attributes(
+        txn,
+        utf16_len(prefix) as u32,
+        &code,
+        [("code".into(), Any::Map(Default::default()))].into(),
+    );
 }
 
 fn insert_md_list_item<F: XmlFragment, const WIRE_DEFAULTS: bool>(
