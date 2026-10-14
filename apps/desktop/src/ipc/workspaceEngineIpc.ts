@@ -1,4 +1,4 @@
-import { registerWorkspaceHandler as createRegisterWorkspaceHandler } from "./rendererWorkspaceHandler";
+import { createWorkspaceHandler } from "./rendererWorkspaceHandler";
 import { shareRecordStatuses } from "../workspaces/shareRecordStatus";
 import { WorkspaceDaemonRequester, type VersionedLiveAdapter } from "@dohc/workspace-engine-client";
 import { z } from "zod";
@@ -121,7 +121,7 @@ export function createWorkspaceEngineIpc<
     signedInAccount,
   });
 
-  const registerWorkspaceHandler = createRegisterWorkspaceHandler(registerHandler, { assertTrustedSender, withRendererWorkspaceOperation });
+  const workspaceHandler = createWorkspaceHandler({ assertTrustedSender, withRendererWorkspaceOperation });
 
   function registerCollections(): void {
     // Collections: read-only engine index queries. list answers
@@ -307,7 +307,7 @@ export function createWorkspaceEngineIpc<
       status: "policy-unreadable", unreadable: policy.unreadable, policyErrors: policy.errors,
     });
 
-    registerWorkspaceHandler(CHANNELS.listEngineMoments, async (event, payload, operation) => {
+    registerHandler(CHANNELS.listEngineMoments, workspaceHandler(async (event, payload, operation) => {
       const input = ListEngineMomentsPayload.parse(payload);
       return readHistory(operation, async (history, rootPath) => {
         const policy = rootPath === null ? null : await readWorkspaceEnginePolicy(rootPath);
@@ -344,9 +344,9 @@ export function createWorkspaceEngineIpc<
           authorNames(input.workspaceId, event.sender),
         );
       });
-    });
+    }));
 
-    registerWorkspaceHandler(CHANNELS.readEngineMoment, async (event, payload, operation) => {
+    registerHandler(CHANNELS.readEngineMoment, workspaceHandler(async (event, payload, operation) => {
       const input = ReadEngineMomentPayload.parse(payload);
       return readHistory(operation, async (history, rootPath) => {
         const policy = rootPath === null ? null : await readWorkspaceEnginePolicy(rootPath);
@@ -361,9 +361,9 @@ export function createWorkspaceEngineIpc<
           moment: moment ? engineMomentDetailForIpc(moment, names) : null,
         });
       });
-    });
+    }));
 
-    registerWorkspaceHandler(CHANNELS.restoreEngineMomentFile, async (event, payload) => {
+    registerHandler(CHANNELS.restoreEngineMomentFile, workspaceHandler(async (event, payload) => {
       const input = RestoreEngineMomentFilePayload.parse(payload);
       const person = await localPerson();
       const { capture } = await requireEngineCapture(
@@ -373,11 +373,11 @@ export function createWorkspaceEngineIpc<
       const result = await capture.restoreFileToBeforeMoment(input.momentId, person);
       notifyRenderer({ workspaceId: input.workspaceId });
       return RestoreEngineMomentFileResult.parse(result);
-    });
+    }));
   }
 
   function registerStatusAndRepair(): void {
-    registerWorkspaceHandler(CHANNELS.getSyncStatus, async (event, payload, operation) => {
+    registerHandler(CHANNELS.getSyncStatus, workspaceHandler(async (event, payload, operation) => {
       const input = WorkspaceIdPayload.parse(payload);
       const workspace = operation.workspace;
       return SyncStatusResult.parse(
@@ -386,7 +386,7 @@ export function createWorkspaceEngineIpc<
           activity.getStatus(input.workspaceId),
         ),
       );
-    });
+    }));
     registerOperations<typeof captureRecoveryOperations, Event, Operation>({
       handle: registerHandler,
       assertTrustedSender,
@@ -480,7 +480,7 @@ export function createWorkspaceEngineIpc<
       );
     });
 
-    registerWorkspaceHandler(CHANNELS.rebuildEngineStore, async (event, payload, operation) => {
+    registerHandler(CHANNELS.rebuildEngineStore, workspaceHandler(async (event, payload, operation) => {
       const input = RebuildEngineStorePayload.parse(payload);
       const registered = operation.workspace;
       assertWritableWorkspace(registered);
@@ -541,7 +541,7 @@ export function createWorkspaceEngineIpc<
           );
         }),
       );
-    });
+    }));
   }
 
   function registerYDoc(): void {
