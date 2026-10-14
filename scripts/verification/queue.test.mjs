@@ -269,7 +269,7 @@ test("a requested restart starts nothing new and waits for the runs in flight", 
 test("a lane setting that cannot be read keeps the lane count the service had, for its slots too", async t => {
   let slots;
   const { request, settled } = harness(t, { lanes: () => { throw new Error("verification-lanes must contain a lane count from 1 to 4."); },
-    holdLane: async ({ lanes }) => { slots = lanes; return { release() {} }; } });
+    holdLane: async ({ lanes }) => { slots = lanes(); return { release() {} }; } });
   assert.equal((await settled((await request("pass")).id)).status.verdict, "PASS");
   assert.equal(slots, 1);
 });

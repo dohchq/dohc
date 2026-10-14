@@ -282,7 +282,7 @@ export async function runService({
       mkdirSync(output, { recursive: true });
       await prepare({ lane: checkout, repo, head: entry.request.head, signal: current.abort.signal });
       current.phase = "waiting for the host lane";
-      lease = await holdLane({ entry, signal: current.abort.signal, lanes: laneCount });
+      lease = await holdLane({ entry, signal: current.abort.signal, lanes: () => laneCount });
       // Rust-only runs need no Docker, so a sweep failure must not stop them.
       await sweep({}).catch(error => log(`container sweep failed: ${error.message}`));
       current.phase = "verifying";

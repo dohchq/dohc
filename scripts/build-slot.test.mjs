@@ -584,6 +584,22 @@ test("a lowered lane count admits nothing until the runs in flight fall under it
   last.release();
 });
 
+test("a caller that tracks the lane count, such as the queue service, also stops admitting when it drops", async t => {
+  const root = slotRoot();
+  t.after(() => rmSync(root, {recursive: true, force: true}));
+  const env = {DOHC_BUILD_SLOT_ROOT: root};
+  let count = 2;
+  const lanes = () => count;
+  const [first, second] = [await verifierLane(env, {lanes}), await verifierLane(env, {lanes})];
+  const waiting = verifierLane(env, {lanes, waitMs: 3000});
+  count = 1;
+  second.release();
+  await assert.rejects(waiting, /no verification slot freed/);
+  first.release();
+  const next = await verifierLane(env, {lanes, waitMs: 3000});
+  next.release();
+});
+
 test("queue status retains claim identity and estimates only from completed lane history", async t => {
   const root = slotRoot();
   t.after(() => rmSync(root, {recursive: true, force: true}));
