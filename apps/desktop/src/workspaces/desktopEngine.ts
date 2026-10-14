@@ -222,7 +222,8 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
         onError: error => console.error("[desktop] owner delivery failed:", error),
         runPass: async (document, lifetime) => {
           const credentials = dependencies.ownerDeliveryCredentials?.();
-          if (!credentials || !relayUrlsMatch(credentials.relayUrl, config.relayUrl) || !dependencies.findWorkspace(document.binding.workspaceId)) return "retry";
+          const workspace = dependencies.findWorkspace(document.binding.workspaceId);
+          if (!credentials || !relayUrlsMatch(credentials.relayUrl, config.relayUrl) || !workspace || workspace.pausedRemote) return "retry";
           if (!workspaceAuthorities.withOperation) throw new Error("Owner delivery workspace authority is unavailable.");
           return workspaceAuthorities.withOperation(document.binding.workspaceId, operation =>
             sessions.run(operation.workspace, async binding => {
@@ -268,7 +269,8 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
         const workspaces = [];
         const bindingChecks: (() => void)[] = [];
         for (const workspaceId of config.workspaceIds) {
-          if (!dependencies.findWorkspace(workspaceId)) continue;
+          const entry = dependencies.findWorkspace(workspaceId);
+          if (!entry || entry.pausedRemote) continue;
           workspaces.push(await workspaceAuthorities.withAuthority(workspaceId,async lease => {
             lease.assertCurrent();
             const workspace = {workspaceId,rootPath: lease.binding.canonicalRootPath,attachmentId: lease.binding.attachmentId};
@@ -574,6 +576,7 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
     get relayClient() { return rustEngineRelayClient; },
     get startup() { return engineDaemonStartup; },
     requireEngineSessions,
+    withOwnerHostPaused: <Result>(work: () => Promise<Result>) => withOwnerHostPaused(true, work),
     closeRelayTransportWorkspace,
     closeAllRelayTransportWorkspaces,
     start() {

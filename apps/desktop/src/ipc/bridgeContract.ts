@@ -3516,6 +3516,34 @@ export const CloudEnableSyncPayload = z.object({
 });
 export type CloudEnableSyncPayload = z.infer<typeof CloudEnableSyncPayload>;
 
+// Main derives the workspace from the requesting window.
+export const CloudStopSyncPayload = z.void();
+export type CloudStopSyncPayload = z.infer<typeof CloudStopSyncPayload>;
+
+export const CloudStopSyncResult = z.object({
+  workspaceId: WORKSPACE_ID,
+  workspaceSynced: z.literal(false),
+  reversible: z.literal(true),
+  irreversibleEffects: z.array(z.string()).length(0),
+  status: SyncStatusResult,
+}).strict();
+export type CloudStopSyncResult = z.infer<typeof CloudStopSyncResult>;
+
+export const workspaceSyncOperations = {
+  cloudStopSync: {
+    capabilityId: "workspace.sync.stop",
+    channel: "desktop:cloud-stop-sync",
+    payload: CloudStopSyncPayload,
+    result: CloudStopSyncResult,
+    guard: "trusted-sender",
+    scope: "workspace",
+    handlerCheck: {
+      check: "withRendererWorkspaceOperation",
+      reason: "Main derives the workspace from the sending window and fences its physical attachment and renderer session.",
+    },
+  },
+} as const satisfies OperationTable;
+
 // Join a synced workspace on this machine (0P-C): a sync code copied from
 // the machine that already has the workspace, plus a local folder chosen
 // through the picker (main re-validates the approved-root provenance).
@@ -6740,7 +6768,8 @@ export const systemMotionOperations = {
 } as const satisfies OperationTable;
 
 export interface DohcDesktopBridge
-  extends OperationBridge<typeof shareCopyOperations>,
+  extends OperationBridge<typeof workspaceSyncOperations>,
+    OperationBridge<typeof shareCopyOperations>,
     OperationBridge<typeof systemMotionOperations>,
     OperationBridge<typeof accessOperations>,
     OperationBridge<typeof workspaceVersionOperations>,

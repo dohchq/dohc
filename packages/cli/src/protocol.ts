@@ -381,6 +381,7 @@ const automationPressArgsSchema = z
   .strict();
 
 export const cliRequestSchema = z.discriminatedUnion("verb", [
+  z.object({ ...requestBase, verb: z.literal("stopSync"), args: z.object(argsBase).strict() }).strict(),
   z.object({ ...requestBase, verb: z.literal("accessObject"), args: ObjectAccessInput.extend(argsBase).strict() }).strict(),
   z.object({ ...requestBase, verb: z.literal("accessSharing"), args: SharingAccessInput.extend(argsBase).strict() }).strict(),
   z.object({ ...requestBase, verb: z.literal("automationButtons"), args: z.object({ ...argsBase, collectionPath: collectionPathArg, table: z.string().min(1).max(256).optional() }).strict() }).strict(),
@@ -503,6 +504,7 @@ export const APP_RESPONSE_CAPABILITIES = {
 } as const satisfies Record<OwnerAppResponsesRequest["action"], CapabilityId>;
 
 export const CLI_CAPABILITIES = {
+  stopSync: ["workspace.sync.stop"],
   accessObject: ["access.object.read"],
   accessSharing: ["access.sharing.read"],
   groups: ["group.list"],
@@ -1347,6 +1349,11 @@ const automationPressResultSchema = z.union([
 ]);
 
 export const cliResultSchemas = {
+  stopSync: z.union([
+    z.object({ ok: z.literal(true), workspaceId: z.string().min(1), workspaceSynced: z.literal(false),
+      reversible: z.literal(true), irreversibleEffects: z.array(z.string()).length(0) }).strict(),
+    rawFailureSchema,
+  ]),
   accessObject: AccessAnswer,
   accessSharing: AccessAnswer,
   automationList: z.discriminatedUnion("ok", [

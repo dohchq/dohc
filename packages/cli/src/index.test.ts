@@ -17,6 +17,18 @@ const WORKSPACE = resolve("/workspace");
 const PROJECT = resolve("/workspace/project");
 
 const TOKEN = "a".repeat(64);
+it("stops sync through main without a caller-supplied workspace or identity", async () => {
+  const request = vi.fn(async () => ({ ok: true, workspaceId: "workspace", workspaceSynced: false,
+    reversible: true, irreversibleEffects: [] }));
+  const result = await executeCli({ argv: ["sync", "stop", "--json", "--as-agent"], cwd: "/workspace", env: {}, request });
+  expect(result.exitCode).toBe(0);
+  expect(request).toHaveBeenCalledWith(expect.objectContaining({
+    verb: "stopSync", args: { cwd: resolve("/workspace"), actor: "agent" },
+  }));
+  expect(JSON.parse(result.stdout)).toMatchObject({ workspaceSynced: false, reversible: true });
+  expect((await executeCli({ argv: ["sync", "stop", "other-workspace"], env: {}, request })).exitCode).toBe(1);
+});
+
 it("lists Button inspection states and confirmations through the desktop socket", async () => {
   const result = { ok: true, buttons: [{ field: "Send", state: { kind: "ready", automationId: "collection:Billing#send", irreversible: [{ name: "destination/send", label: "Send" }] } },
     { field: "Later", state: { kind: "unchecked", reason: "Host unavailable" } }] };

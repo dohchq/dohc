@@ -18,6 +18,7 @@ type ExportScope =
   | { kind: "thread"; thread: string };
 
 type CliCommandBody =
+  | { verb: "stopSync" }
   | { verb: "accessObject"; ref: AccessObjectRef; cursor?: string }
   | { verb: "accessSharing"; lane: "granted" | "received"; cursor?: string }
   | { verb: "documentRead"; path: string }
@@ -945,6 +946,17 @@ const APP_VERBS: Record<string, CliVerbSpec> = Object.fromEntries([
 
 /** Every command and verb the CLI dispatches. Help reads this table too. */
 export const CLI_COMMANDS: Readonly<Record<string, CliCommandSpec>> = {
+  sync: {
+    summary: "Stop syncing this workspace on this computer.",
+    notes: ["Local files, documents, records, and history stay here. Shares and protected-file keys are retained.",
+      "Turn sync on in Settings to resume the same workspace."],
+    verbs: {
+      stop: {
+        capabilityId: "workspace.sync.stop", summary: "Stop this computer's sync after saving live document edits.", operands: "",
+        parse: ({ operands }) => { noExtraArgs(operands, "sync stop"); return { verb: "stopSync" }; },
+      },
+    },
+  },
   access: {
     summary: "Read observed object grants and Sharing inventories.",
     notes: ["Answers describe observed grants, not authorization. An empty page means no matching grants within its coverage.",

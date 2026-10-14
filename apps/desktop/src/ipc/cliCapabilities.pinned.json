@@ -160,6 +160,9 @@
     "ownerAppResponses": [
       "app.responses.list",
       "app.responses.undo"
+    ],
+    "stopSync": [
+      "workspace.sync.stop"
     ]
   },
   "public": {
@@ -233,6 +236,7 @@
     "automation runs": "automation.runs.list",
     "automation run": "automation.run.read",
     "automation retry": "automation.run.retry",
-    "automation press": "automation.button.press"
+    "automation press": "automation.button.press",
+    "sync stop": "workspace.sync.stop"
   }
 }

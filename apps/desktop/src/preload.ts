@@ -20,6 +20,7 @@ import type {
   WorkspaceActivityEvent,
 } from "./ipc/bridgeContract";
 import {
+  workspaceSyncOperations,
   systemMotionOperations,
   SitePreviewReplacedEvent,
   ListOwnerLiveDocumentsPayload,
@@ -262,6 +263,7 @@ const bridge: DohcDesktopBridge = {
     ipcRenderer.invoke(CHANNELS.dismissShareHandoff, payload),
   onShareHandoffStatus: (listener) =>
     onEvent(CHANNELS.shareHandoffStatus, ShareHandoffStatus, listener),
+  ...operationBridge(workspaceSyncOperations, invoke),
   cloudEnableSync: (payload) =>
     ipcRenderer.invoke(CHANNELS.cloudEnableSync, payload),
   cloudJoinWorkspace: (payload) =>

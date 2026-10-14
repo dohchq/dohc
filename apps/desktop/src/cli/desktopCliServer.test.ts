@@ -148,6 +148,23 @@ function fixture(rootPath = resolve("cli-workspace")) {
 afterEach(() => vi.restoreAllMocks());
 
 describe("desktop CLI workspace context", () => {
+  it("binds sync stop to the registered workspace and fences a retired attachment", async () => {
+    const f = fixture();
+    f.dependencies.stopWorkspaceSync = vi.fn(async operation => {
+      operation.assertCurrent();
+      expect(operation.workspace.workspaceId).toBe(f.workspace.workspaceId);
+      return { ok: true as const, workspaceId: operation.workspace.workspaceId, workspaceSynced: false as const,
+        reversible: true as const, irreversibleEffects: [] };
+    });
+    const server = f.create();
+    const context = await server.openCliWorkspace(f.workspace);
+    await expect(context.stopSync!()).resolves.toMatchObject({ ok: true, workspaceId: "workspace", reversible: true });
+    const retired = f.authorities.invalidate("workspace");
+    await retired;
+    await expect(context.stopSync!()).rejects.toThrow();
+    expect(f.dependencies.stopWorkspaceSync).toHaveBeenCalledOnce();
+  });
+
   it("keeps owner app actions bound to the CLI's original physical attachment", async () => {
     const f = fixture();
     const publish = vi.fn<NonNullable<Dependencies["ownerAppPublication"]>>(async () => ({ kind: "cancelled" }));

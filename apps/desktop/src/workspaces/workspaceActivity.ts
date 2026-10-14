@@ -447,6 +447,27 @@ export function createWorkspaceActivity(
     notify({ workspaceId: workspace.workspaceId });
   }
 
+  async function prepareSyncPause(
+    workspace: ActivityWorkspace,
+    state: WorkspaceActivityState,
+  ): Promise<() => void> {
+    const entry = state.entry;
+    if (!entry) throw new Error("This workspace is not open. Open it and try again.");
+    let resumeAdmission: (() => void) | undefined;
+    try {
+      resumeAdmission = await entry.capture?.settleAndCloseLiveSessionsForSyncPause();
+      await entry.engine?.stop();
+      entry.engine = null;
+      return resumeAdmission ?? (() => {});
+    } catch (error) {
+      resumeAdmission?.();
+      throw error;
+    } finally {
+      state.liveSessionsGeneration += 1;
+      notify({ workspaceId: workspace.workspaceId });
+    }
+  }
+
   // Failed-join rollback (0P-C gate fix): stop and forget one workspace —
   // watcher, engine, and capture — so the join handler can remove its
   // folder/registry state without tearing down every other workspace.
@@ -746,6 +767,7 @@ export function createWorkspaceActivity(
     open,
     close,
     enableCloud,
+    prepareSyncPause,
     reconcileCloud,
     stopEngine,
     getStatus,

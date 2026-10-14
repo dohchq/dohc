@@ -62,6 +62,7 @@ export const MCP_TOOL_CAPABILITIES = {
   dohc_publish_app: Object.values(APP_PUBLICATION_CAPABILITIES),
   dohc_list_workspaces: ["workspace.list"],
   dohc_workspace_status: ["workspace.status"],
+  dohc_stop_workspace_sync: ["workspace.sync.stop"],
   dohc_list_changes: ["history.list"],
   dohc_list_kept_copies: ["file.kept.list"],
   dohc_save_kept_copy: ["file.kept.save"],
@@ -1026,6 +1027,11 @@ function removedShareStatus(workspace: RegistryWorkspace | null) {
     message: "The owner removed your access. Your local copy stays readable.",
   }));
   return removedShares.length ? {removedShares} : {};
+}
+
+export async function stopWorkspaceSync(ctx: ToolContext) {
+  if (ctx.shareAccess !== undefined) return { ok: false as const, reason: "Open the owning workspace to stop its sync." };
+  return requestCli(ctx, "stopSync", {});
 }
 
 export async function workspaceStatus(ctx: ToolContext) {

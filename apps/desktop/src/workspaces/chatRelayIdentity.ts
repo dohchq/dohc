@@ -92,10 +92,10 @@ export function resolveWorkspaceRelayAuthorId(
 }
 
 export function assertSyncEnrollmentCredentials(
-  workspace: Pick<RegistryEntry, "remote">,
+  workspace: Pick<RegistryEntry, "remote" | "pausedRemote">,
   credentials: Pick<CloudCredentials, "serverUrl" | "userId">,
 ): void {
-  const remote = workspace.remote;
+  const remote = workspace.remote ?? workspace.pausedRemote;
   if (!remote) return;
   if (!serverUrlsMatch(remote.serverUrl, credentials.serverUrl)) {
     throw new Error("Sign in to the cloud server this workspace uses.");

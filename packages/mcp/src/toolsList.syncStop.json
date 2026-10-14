@@ -1,0 +1,16 @@
+{
+  "ownerToolAdditions": [
+    {
+      "name": "dohc_stop_workspace_sync",
+      "description": "Stop this computer's sync for the owning workspace after saving live document edits. Keep local work, shares, history, and protected-file keys. Resume in Settings.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    }
+  ]
+}

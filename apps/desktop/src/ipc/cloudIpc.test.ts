@@ -4,7 +4,7 @@ import type { EngineWorkspaceSessions } from "@dohc/workspace-engine-client/daem
 import { RelayUnauthorizedError, RelayWorkspaceUnavailableError, RelayClaimRefusedError } from "@dohc/workspace-contracts/relay";
 import { CHANNELS } from "./channels";
 import { registerCloudIpcHandlers } from "./cloudIpc";
-import { type SyncStatusResult } from "./bridgeContract";
+import { workspaceSyncOperations, type SyncStatusResult } from "./bridgeContract";
 import { createWorkspaceRootApproval } from "./workspaceRegistryIpc";
 import { CredentialSessionCache } from "../workspaces/credentialSessionCache";
 import type { CloudCredentials } from "../workspaces/cloudCredentialStore";
@@ -43,12 +43,13 @@ async function harness() {
   const attachmentId = await authorities.withOperation("existing", (operation) => operation.workspace.attachmentId);
   let rendererCurrent = true;
   const session = { workspaceId: "existing", attachmentId, generation: 1, isCurrent: () => rendererCurrent };
+  let rendererSession = session;
   type Event = { sender: string; trusted: boolean };
   type Workspace = PhysicalWorkspace<RegistryEntry>;
   type Operation = ExactRendererWorkspaceOperation<Workspace, object, typeof session>;
   type Dependencies = Parameters<typeof registerCloudIpcHandlers<string, Event, Operation>>[0];
   const withRendererWorkspaceOperation = createRendererWorkspaceOperationRunner<string, Workspace, object, typeof session>({
-    currentSession: () => session,
+    currentSession: () => rendererSession,
     withPhysicalOperation: (id, work) => authorities.withOperation(id, work),
   });
   const cache = new CredentialSessionCache<CloudCredentials>();
@@ -103,6 +104,10 @@ async function harness() {
     release: (reservation, finalize) => authorities.releaseReservation(reservation, finalize),
     closeRelay: cleanup, rollbackComplete: notify, logError: vi.fn(),
   });
+  const stopWorkspaceSync = vi.fn<Dependencies["stopWorkspaceSync"]>(async operation => ({
+    workspaceId: operation.workspace.workspaceId, workspaceSynced: false, reversible: true,
+    irreversibleEffects: [], status,
+  }));
   const handlers = new Map<string, (event: Event, payload: unknown) => unknown>();
   registerCloudIpcHandlers<string, Event, Operation>({
     registerHandler: (channel, handler) => { expect(handlers.has(channel)).toBe(false); handlers.set(channel, handler); },
@@ -119,6 +124,7 @@ async function harness() {
     },
     closeAllRelayTransportWorkspaces: closeRelay,
     activity: { stopEngines: stop, enableCloud: enable, getStatus: () => status },
+    currentWorkspaceId: () => rendererSession.isCurrent() ? rendererSession.workspaceId : null, stopWorkspaceSync,
     reconcileCloud: () => { steps.push("reconcile"); },
     notifyCloudSessionChanged: ready, notifyCloudSessionChangedWithKey: changing, notifyRenderer: notify,
     findWorkspace: (id) => registry.get(id) ?? null,
@@ -142,10 +148,14 @@ async function harness() {
   const invoke = async (channel: string, payload?: unknown, trusted = true) => handlers.get(channel)!({ sender: "window", trusted }, payload);
   const joinPayload = { rootPath, syncCode: buildSyncCode({ workspaceId: "joined", relayUrl: credentials.relayUrl! }) };
   return {
-    handlers, invoke, joinPayload, roots, workspace, registry, authorities, cache, login,
+    handlers, invoke, stopWorkspaceSync, joinPayload, roots, workspace, registry, authorities, cache, login,
     stop, closeRelay, claim, readSecrets, readDataKey, enroll, bootstrap, probe, readdir, mkdir,
     bindRelay, setRemote, enable, notify, changing, ready, createFolder, cleanup, steps, daemonStartup,
     retireRenderer: () => { rendererCurrent = false; },
+    reopenRenderer: () => {
+      rendererCurrent = false;
+      rendererSession = { ...session, generation: 2, isCurrent: () => true };
+    },
   };
 }
 
@@ -154,11 +164,65 @@ describe("registered cloud handlers", () => {
     const h = await harness();
     expect([...h.handlers.keys()]).toEqual([
       CHANNELS.cloudLoginStart, CHANNELS.cloudLoginPoll, CHANNELS.cloudStatus,
-      CHANNELS.cloudLogout, CHANNELS.cloudEnableSync, CHANNELS.cloudJoinWorkspace,
+      CHANNELS.cloudLogout, CHANNELS.cloudEnableSync, workspaceSyncOperations.cloudStopSync.channel, CHANNELS.cloudJoinWorkspace,
     ]);
     for (const channel of h.handlers.keys()) await expect(h.invoke(channel, null, false)).rejects.toThrow("untrusted");
     for (const method of Object.values(h.login)) expect(method).not.toHaveBeenCalled();
     expect(h.steps).toEqual([]);
+  });
+
+  it("derives stop from the current window and refuses renderer-supplied identities", async () => {
+    const h = await harness();
+    await expect(h.invoke(workspaceSyncOperations.cloudStopSync.channel, { workspaceId: "joined" })).rejects.toThrow();
+    expect(h.stopWorkspaceSync).not.toHaveBeenCalled();
+    h.stopWorkspaceSync.mockImplementationOnce(async operation => {
+      expect(operation.workspace).toMatchObject({ workspaceId: "existing", attachmentId: expect.any(Symbol) });
+      return { workspaceId: operation.workspace.workspaceId, workspaceSynced: false, reversible: true, irreversibleEffects: [], status };
+    });
+    await expect(h.invoke(workspaceSyncOperations.cloudStopSync.channel)).resolves.toMatchObject({
+      workspaceId: "existing", workspaceSynced: false, reversible: true, irreversibleEffects: [],
+    });
+    expect(h.stopWorkspaceSync).toHaveBeenCalledOnce();
+  });
+
+  it("rejects a late stop answer for a retired renderer workspace", async () => {
+    const h = await harness();
+    const entered = deferred(), held = deferred();
+    h.stopWorkspaceSync.mockImplementationOnce(async operation => {
+      entered.resolve(); await held.promise;
+      return { workspaceId: operation.workspace.workspaceId, workspaceSynced: false, reversible: true, irreversibleEffects: [], status };
+    });
+    const pending = h.invoke(workspaceSyncOperations.cloudStopSync.channel);
+    await entered.promise;
+    h.retireRenderer(); held.resolve();
+    await expect(pending).rejects.toThrow();
+  });
+
+  it("queues stop behind an in-flight enable of the same workspace", async () => {
+    const h = await harness();
+    const entered = deferred(), held = deferred();
+    h.claim.mockImplementationOnce(() => { entered.resolve(); return held.promise; });
+    const enabling = h.invoke(CHANNELS.cloudEnableSync, { workspaceId: "existing" });
+    await entered.promise;
+    const stopping = h.invoke(workspaceSyncOperations.cloudStopSync.channel);
+    expect(h.stopWorkspaceSync).not.toHaveBeenCalled();
+    held.resolve(); await enabling; await stopping;
+    expect(h.enable).toHaveBeenCalledOnce();
+    expect(h.stopWorkspaceSync).toHaveBeenCalledOnce();
+  });
+
+  it("refuses a queued stop from an earlier visit to the same workspace", async () => {
+    const h = await harness();
+    const entered = deferred(), held = deferred();
+    h.claim.mockImplementationOnce(() => { entered.resolve(); return held.promise; });
+    const enabling = h.invoke(CHANNELS.cloudEnableSync, { workspaceId: "existing" });
+    await entered.promise;
+    const stopping = h.invoke(workspaceSyncOperations.cloudStopSync.channel);
+    h.reopenRenderer();
+    const refused = Promise.all([expect(enabling).rejects.toThrow(), expect(stopping).rejects.toThrow()]);
+    held.resolve(); await refused;
+    expect(h.stopWorkspaceSync).not.toHaveBeenCalled();
+    await expect(h.invoke(workspaceSyncOperations.cloudStopSync.channel)).resolves.toMatchObject({ workspaceId: "existing" });
   });
 
   it("parses login inputs and returns only the public result", async () => {

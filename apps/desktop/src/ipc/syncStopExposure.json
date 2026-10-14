@@ -1,0 +1,19 @@
+{
+  "nameAdditions": [
+    "desktop:cloud-stop-sync"
+  ],
+  "socketVerbAdditions": [
+    "stopSync"
+  ],
+  "publicGroupAdditions": [
+    "sync"
+  ],
+  "publicVerbAdditions": [
+    "sync stop"
+  ],
+  "help": {
+    "top": "Usage: dohc <command> <verb> [arguments] [options]\n\nRun dohc inside a workspace folder while the dohc app is open.\n\nCommands:\n  sync         Stop syncing this workspace on this computer.\n               stop\n  access       Read observed object grants and Sharing inventories.\n               object, sharing\n  document     Read, edit, and create live Markdown documents, and comment on\n               tracked text files.\n               read, edit, create, comment\n  chat         Read and post in Groups and threads.\n               groups, threads, inbox, show, post, reply, react, grep, export\n  dataset      Create, change, and use transactional Collections.\n               list, describe, history, historyRevision, prepareHistoryRestore,\n               permissions, setGrant, removeGrant, lifecycle, archive, restore,\n               deletePreview, delete, pendingAttempts, reconcileAttempt,\n               cancelAttempt, export, prepareRecovery, claimRecovery,\n               discardRecovery, upload, file, createForm,\n               prepareRelationChoices, create, prepare, approve, discard,\n               prepareMigration, migrationPreviewPage, prepareSchemaChange,\n               approveMigration, discardMigration, invoke\n  app          Approve, open, and share apps.\n               createLink, listLocal, prepareLocal, launchLocal, list, prepare,\n               approve, cancel, withdraw, revokeCollection, reviewReactivation,\n               responses, undo-responses\n  history      Read the changes History records for files.\n               list, show\n  automation   Press Button fields, read an automation's runs, and try a failed\n               run again.\n               list, switch, buttons, runs, run, retry, press\n\nOptions:\n  --as-agent   Post and read chat as an agent.\n  --json       Print the result as JSON.\n  --help       Show help. -h does the same.\n\nRun dohc <command> --help to see what each verb does.\n",
+    "sync": "Usage: dohc sync <verb> [arguments] [options]\n\nStop syncing this workspace on this computer.\n\nVerbs:\n  stop   Stop this computer's sync after saving live document edits.\n\nRun dohc inside a workspace folder while the dohc app is open.\nLocal files, documents, records, and history stay here. Shares and\nprotected-file keys are retained.\nTurn sync on in Settings to resume the same workspace.\n\nOptions:\n  --as-agent   Post and read chat as an agent.\n  --json       Print the result as JSON.\n  --help       Show help. -h does the same.\n\nRun dohc sync <verb> --help to see its arguments and options.\n",
+    "sync stop": "Usage: dohc sync stop [options]\n\nStop this computer's sync after saving live document edits.\n\nRun dohc inside a workspace folder while the dohc app is open.\nLocal files, documents, records, and history stay here. Shares and\nprotected-file keys are retained.\nTurn sync on in Settings to resume the same workspace.\n\nOptions:\n  --as-agent   Post and read chat as an agent.\n  --json       Print the result as JSON.\n  --help       Show help. -h does the same.\n"
+  }
+}

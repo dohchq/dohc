@@ -86,6 +86,10 @@ export async function setWorkspaceRemote(
   store().setRemote(workspaceId, remote);
 }
 
+export function pauseWorkspaceRemote(workspaceId: string): void {
+  store().pauseRemote(workspaceId);
+}
+
 export function markWorkspaceOpened(workspaceId: string, atMs = Date.now()): void {
   store().markOpened(workspaceId, atMs);
 }

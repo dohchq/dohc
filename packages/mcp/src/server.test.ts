@@ -11,6 +11,7 @@ import type { ToolContext } from "./tools";
 // The two write tiers a share level decides between. A document write
 // changes the granter's files; a chat write posts to a thread.
 const DOCUMENT_WRITE_TOOLS = [
+  "dohc_stop_workspace_sync",
   "dohc_dataset",
   "dohc_save_kept_copy",
   "dohc_publish_app",
@@ -80,6 +81,17 @@ async function connectedToolNames(
 
 describe("share-level tool profiles", () => {
   const base: ToolContext = { root: "/tmp/shared-view", home: "/tmp/home" };
+
+  it("stops the owner's workspace through the desktop with no caller identity", async () => {
+    const requests: unknown[] = [];
+    const { client } = await connectedToolNames({ ...base, request: async request => {
+      requests.push(request);
+      return { ok: true, workspaceId: "workspace", workspaceSynced: false, reversible: true, irreversibleEffects: [] };
+    } });
+    const result = await client.callTool({ name: "dohc_stop_workspace_sync", arguments: {} });
+    expect(result.isError).not.toBe(true);
+    expect(requests).toMatchObject([{ verb: "stopSync", door: "mcp", args: { cwd: base.root, actor: "agent" } }]);
+  });
 
   it("parses the --share-access flag", () => {
     expect(parseArgs(["--workspace", "/w", "--home", "/h", "--share-access", "comment"])).toMatchObject({

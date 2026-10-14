@@ -75,6 +75,8 @@ function buildCliRequest(
     actor: command.actor,
   } as const;
   switch (command.verb) {
+    case "stopSync":
+      return { verb: command.verb, protocolVersion: common.protocolVersion, args: { cwd: common.cwd, actor: common.actor } };
     case "accessObject":
       return { protocolVersion: common.protocolVersion, verb: command.verb, args: { cwd: common.cwd, actor: common.actor, ref: command.ref, cursor: command.cursor } };
     case "accessSharing":

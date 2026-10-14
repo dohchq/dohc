@@ -145,5 +145,6 @@
   "app.recognition.read",
   "device.motion.read",
   "usage.start",
-  "usage.restore"
+  "usage.restore",
+  "workspace.sync.stop"
 ]

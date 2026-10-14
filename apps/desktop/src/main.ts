@@ -78,6 +78,7 @@ import { workspaceVersionHandlers } from "./ipc/workspaceVersionsIpc";
 import { registerShareProposalsIpcHandlers } from "./ipc/shareProposalsIpc";
 import { createShareDirectWriteDelivery } from "./ipc/shareDirectWriteDelivery";
 import { registerSharedViewsIpcHandlers } from "./ipc/sharedViewsIpc";
+import { createWorkspaceSyncStop, withWorkspaceSyncTransition, type SyncStopOperation } from "./workspaces/stopWorkspaceSync";
 import { registerCloudIpcHandlers } from "./ipc/cloudIpc";
 import { registerSharedChannelsIpcHandlers } from "./ipc/sharedChannelsIpc";
 import { registerShareHandoffIpcHandlers } from "./ipc/shareHandoffIpc";
@@ -231,6 +232,7 @@ import {
   registerWorkspace,
   removeWorkspace as removeRegisteredWorkspace,
   setWorkspaceRemote,
+  pauseWorkspaceRemote,
   acknowledgeWorkspaceShareSkips,
   updateWorkspaceShareMounts,
   markWorkspaceShareRosterPulled,
@@ -2480,6 +2482,10 @@ const activity = {
         options,
       ),
     ),
+  prepareSyncPause: (workspace: RegistryEntry) =>
+    workspaceAuthorities.withAuthority(workspace.workspaceId, lease =>
+      workspaceActivity.prepareSyncPause(canonicalWorkspaceFor(lease), lease.state.activity),
+    ),
   reconcileCloud: (): void => {
     for (const workspaceId of workspaceAuthorities.workspaceIds()) {
       withWorkspaceActivityState(workspaceId, (lease) =>
@@ -4628,6 +4634,10 @@ const { startDesktopCliServer } = createDesktopCliServer({
   findWorkspace,
   listWorkspaces,
   openWorkspaceActivity,
+  stopWorkspaceSync: operation => withWorkspaceSyncTransition(operation.workspace.workspaceId, async () => {
+    const { status: _status, ...result } = await stopWorkspaceSync(operation);
+    return { ok: true as const, ...result };
+  }),
   activity,
   linkedChatStoreFor,
   currentDaemon: () => desktopEngine.daemon,
@@ -5750,6 +5760,22 @@ async function currentDiagnostics(): Promise<string> {
   });
 }
 
+function stopWorkspaceSync(operation: SyncStopOperation) {
+  return createWorkspaceSyncStop({
+    credentials: loadAndCacheCurrentCredentials,
+    currentCredentials: () => cachedCredentials,
+    withOwnerHostPaused: work => desktopEngine.withOwnerHostPaused(work),
+    prepare: workspace => activity.prepareSyncPause(workspace),
+    resume: workspace => activity.enableCloud(workspace),
+    pauseRemote: pauseWorkspaceRemote,
+    closeActivity: workspaceId => activity.close(workspaceId, { notify: false }),
+    closeRelay: workspace => closeRelayTransportWorkspace(workspace),
+    openActivity: workspace => activity.open(workspace),
+    status: workspaceId => activity.getStatus(workspaceId),
+    notify: workspaceId => notifyRenderer({ workspaceId }),
+  })(operation);
+}
+
 function registerIpcHandlers(): void {
   registerSystemMotionIpc(operationBoundary, () => systemPreferences.getAnimationSettings());
   shareDirectWriteDelivery.register(operationBoundary);
@@ -5940,6 +5966,8 @@ function registerIpcHandlers(): void {
     assertTrustedSender, cloudLogin, clearCachedCredentials, refreshCredentialCache,
     warmCredentialCache, currentCredentials: () => cachedCredentials,
     loadAndCacheCurrentCredentials, closeAllRelayTransportWorkspaces, activity,
+    currentWorkspaceId: sender => rendererWorkspaceSessions.current(sender)?.workspaceId ?? null,
+    stopWorkspaceSync,
     reconcileCloud: () => activity.reconcileCloud(),
     notifyCloudSessionChanged, notifyCloudSessionChangedWithKey,
     notifyRenderer, findWorkspace,

@@ -314,6 +314,8 @@ export interface RegistryEntry extends CreatedWorkspace {
   lastOpenedAt?: number;
   // Present only after the user explicitly enables cloud sync.
   remote?: RemoteIdentity;
+  // This device stopped sync; retain the original owner for resumption.
+  pausedRemote?: RemoteIdentity;
   // Durable join gate: true from registration until the first pull has
   // materialized and committed. Boot-time local writers must skip the entry.
   joinBootstrapPending?: true;
@@ -520,9 +522,20 @@ export function createRegistryStore(registryFile: string) {
     setRemote(workspaceId: string, remote: RemoteIdentity): void {
       const entry = read().workspaces.find(entry => entry.workspaceId === workspaceId);
       if (!entry) throw new Error(`Unknown workspace: ${workspaceId}`);
+      const previous = entry.remote ?? entry.pausedRemote;
       const next = { ...entry, remote };
+      delete next.pausedRemote;
       updateWorkspaceEntry(workspaceId, () => next);
-      if (entry.remote?.serverUrl !== remote.serverUrl || entry.remote?.ownerUserId !== remote.ownerUserId) rosters.remove(entry);
+      if (previous?.serverUrl !== remote.serverUrl || previous?.ownerUserId !== remote.ownerUserId) rosters.remove(entry);
+    },
+
+    pauseRemote(workspaceId: string): void {
+      updateWorkspaceEntry(workspaceId, entry => {
+        if (!entry.remote) return undefined;
+        const next = { ...entry, pausedRemote: entry.remote };
+        delete next.remote;
+        return next;
+      });
     },
 
     // Unknown ids are ignored: an open racing a forget must not fail on the

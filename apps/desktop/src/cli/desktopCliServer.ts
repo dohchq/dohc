@@ -60,6 +60,7 @@ async function settledMarkdown(rootPath: string, path: string): Promise<string> 
 }
 
 interface DesktopCliServerDependencies<State> {
+  stopWorkspaceSync?(operation: WorkspaceAuthorityOperation<RegistryEntry, State>): Promise<import("@dohc/cli/protocol").CliResultByVerb["stopSync"]>;
   access?(workspaceId: string): NonNullable<CliWorkspaceContext["access"]>;
   recordSuccess?: CliServerOptions["recordSuccess"];
   dataset?(request: import("@dohc/cli/dataset").DatasetRequest, agent: LocalDatasetAgent | null): Promise<import("@dohc/cli/dataset").DatasetResult>;
@@ -214,6 +215,11 @@ export function createDesktopCliServer<State>(
     };
     return {
       workspaceId: workspace.workspaceId,
+      ...(dependencies.stopWorkspaceSync ? { stopSync: () =>
+        withPhysicalWorkspaceOperation(workspace.workspaceId, operation => {
+          if (operation.signal !== publicationAttachment || publicationAttachment.aborted) throw new Error("This workspace was closed. Open it again.");
+          return dependencies.stopWorkspaceSync!(operation);
+        }) } : {}),
       ...(dependencies.access ? { access: dependencies.access(workspace.workspaceId) } : {}),
       ...(dependencies.dataset ? { dataset: (request: import("@dohc/cli/dataset").DatasetRequest, agent: LocalDatasetAgent | null) =>
         withPhysicalWorkspaceOperation(workspace.workspaceId, operation => {

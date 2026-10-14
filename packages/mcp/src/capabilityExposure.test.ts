@@ -1,5 +1,6 @@
 import { expect, it } from "vitest";
 import { advertisedCapabilityTools } from "./capabilityExposure.fixture";
+import syncStopTools from "./toolsList.syncStop.json";
 import mainTools from "./toolsList.main.json";
 import publicationTools from "./toolsList.pr1659.json";
 import chatBodyTools from "./toolsList.pr1705.json";
@@ -21,7 +22,7 @@ it.each(["owner", "view", "comment", "edit"] as const)("preserves main tools/lis
     for (const tool of publicationTools.ownerToolAdditions) {
       expect(expected.some(existing => existing.name === tool.name)).toBe(false);
     }
-    expected.push(...publicationTools.ownerToolAdditions);
+    expected.push(...publicationTools.ownerToolAdditions, ...syncStopTools.ownerToolAdditions);
     expected.sort((a, b) => a.name.localeCompare(b.name));
   }
   // Hand-reviewed #1705 removals: desktop admission counts normalized UTF-8 bytes.

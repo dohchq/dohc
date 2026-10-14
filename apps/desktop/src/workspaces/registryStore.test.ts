@@ -117,6 +117,22 @@ describe("share roster", () => {
     access: "edit" as const,
   });
 
+  it("retains grants and their roster while paused and after resuming the same owner", () => {
+    const remote = { serverUrl: "https://server.test", ownerUserId: "owner" };
+    store.register({ ...personal, remote });
+    store.setShareRoster("ws-1", { grants: [grant("g-1")], links: [], formerGrants: [], endedGrants: [] }, true);
+    store.pauseRemote("ws-1");
+    const paused = createRegistryStore(registryPath).find("ws-1")!;
+    expect(paused.remote).toBeUndefined();
+    expect(paused.pausedRemote).toEqual(remote);
+    expect(paused.shareRoster?.grants).toEqual([grant("g-1")]);
+    store.setRemote("ws-1", remote);
+    const resumed = createRegistryStore(registryPath).find("ws-1")!;
+    expect(resumed.remote).toEqual(remote);
+    expect(resumed.pausedRemote).toBeUndefined();
+    expect(resumed.shareRoster?.grants).toEqual([grant("g-1")]);
+  });
+
   it("raises the version only when the listing changes, and survives a reopen", () => {
     store.register(personal);
     store.setShareRoster("ws-1", { grants: [grant("g-1")], links: [], formerGrants: [], endedGrants: [] }, false);
