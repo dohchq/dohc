@@ -2192,9 +2192,9 @@ function Pane(props: { theme: "light" | "dark" }) {
             <CloudSyncSettings workspaceId="ws-trip" cloud={settingsCloud(CLOUD_SIGNED_IN)} />
           </div>
         </Specimen>
-        <Specimen label="sync off: paused by a person">
+        <Specimen label="sync off: paused by you">
           <div className="w-[640px]">
-            <CloudSyncSettings workspaceId="ws-trip" cloud={settingsCloud({ ...CLOUD_SIGNED_IN, syncPause: SYNC_PAUSED_BY_PERSON })} />
+            <CloudSyncSettings workspaceId="ws-trip" cloud={settingsCloud({ ...CLOUD_SIGNED_IN, syncPause: SYNC_PAUSED_BY_YOU })} />
           </div>
         </Specimen>
         <Specimen label="sync off: paused by an agent">
@@ -2229,6 +2229,14 @@ function Pane(props: { theme: "light" | "dark" }) {
         <Specimen label="signed out">
           <div className="w-[640px]">
             <CloudSyncSettings workspaceId="ws-trip" cloud={settingsCloud({ connected: false })} />
+          </div>
+        </Specimen>
+        <Specimen label="signed out, paused by you: turning sync on needs the server">
+          <div className="w-[640px]">
+            <CloudSyncSettings
+              workspaceId="ws-trip"
+              cloud={settingsCloud({ connected: false, workspaceSyncOwned: true, workspaceSynced: false, syncPause: SYNC_PAUSED_BY_YOU })}
+            />
           </div>
         </Specimen>
         <Specimen label="the status still loading">
@@ -2274,9 +2282,9 @@ const CLOUD_SIGNED_IN: CloudStatusResult = {
   workspaceSynced: false,
   workspaceSyncConnected: false,
 };
-const SYNC_PAUSED_BY_PERSON: CloudStatusResult["syncPause"] = {
+const SYNC_PAUSED_BY_YOU: CloudStatusResult["syncPause"] = {
   atMs: new Date(2026, 6, 8, 8, 42).getTime(),
-  author: { kind: "person", self: false, personId: "human-sam", displayName: "Sam Hollis" },
+  author: { kind: "person", personId: "local-sam", self: true },
 };
 const SYNC_PAUSED_BY_AGENT: CloudStatusResult["syncPause"] = {
   atMs: new Date(2026, 6, 8, 8, 42).getTime(),

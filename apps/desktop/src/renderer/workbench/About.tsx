@@ -21,7 +21,7 @@ import {
 import { useCallback, useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
 import type { ChatThreadRecord, EngineMomentRecord } from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
-import { SYNC_PAUSED_FOR_ACCOUNT } from "../cloudSyncWords";
+import { SYNC_UNCONFIRMED_ACCOUNT } from "../cloudSyncWords";
 import { ipcErrorMessage } from "../ipcError";
 import { basenameOf } from "../path";
 import { formatChatTime, formatShortTime } from "../time";
@@ -689,7 +689,7 @@ export function AccessUnknown(props: {
       return (
         <AboutNote testId={`${testId}-unknown`} reason="other-account" icon={CloudOff}
           action={{ label: "Sync and sharing", run: setup.openSyncSettings }}>
-          {SYNC_PAUSED_FOR_ACCOUNT} Resume sync to check who has access.
+          {SYNC_UNCONFIRMED_ACCOUNT} Resume sync to check who has access.
         </AboutNote>
       );
     case "unexplained":

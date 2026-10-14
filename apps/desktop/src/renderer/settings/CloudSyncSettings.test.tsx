@@ -4,9 +4,15 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { CloudStatusResult, CloudStopSyncResult } from "../../ipc/bridgeContract";
 import { deferred } from "../../testing/deferred";
-import { SYNC_PAUSED_FOR_ACCOUNT } from "../cloudSyncWords";
+import { SYNC_UNCONFIRMED_ACCOUNT } from "../cloudSyncWords";
 import { DISCONNECT_EXPLANATION, PRIVATE_NETWORK_EXPLANATION } from "./CloudAccountRow";
-import { CloudSyncSettings, SYNC_OFF_KEEPS, SYNC_OFF_KEEPS_WITH_RECEIVED, type CloudSettings } from "./CloudSyncSettings";
+import {
+  CloudSyncSettings,
+  SYNC_OFF_KEEPS,
+  SYNC_OFF_KEEPS_WITH_RECEIVED,
+  SYNC_ON_NEEDS_SERVER,
+  type CloudSettings,
+} from "./CloudSyncSettings";
 
 type SessionEvent = { sessionKey: string | null; phase: "changing" | "ready" };
 const sessionListeners = new Set<(event: SessionEvent) => void>();
@@ -39,15 +45,24 @@ const SIGNED_IN: CloudStatusResult = {
 };
 const SYNCED: CloudStatusResult = { ...SIGNED_IN, workspaceSynced: true, workspaceSyncConnected: true };
 const PAUSED_AT = Date.UTC(2026, 9, 14, 13, 5);
+const PAUSE_BY_YOU: NonNullable<CloudStatusResult["syncPause"]> = {
+  atMs: PAUSED_AT,
+  author: { kind: "person", personId: "local-you", self: true },
+};
 const PAUSE_BY_PERSON: NonNullable<CloudStatusResult["syncPause"]> = {
   atMs: PAUSED_AT,
   author: { kind: "person", personId: "local-sam", self: false, displayName: "Sam Hollis" },
+};
+const PAUSE_BY_UNNAMED: NonNullable<CloudStatusResult["syncPause"]> = {
+  atMs: PAUSED_AT,
+  author: { kind: "person", personId: "local-old", self: false },
 };
 const PAUSE_BY_AGENT: NonNullable<CloudStatusResult["syncPause"]> = {
   atMs: PAUSED_AT,
   author: { kind: "agent", agentId: "codex", onBehalfOf: "human-sam", depth: 1 },
 };
-const stopped = (workspaceId: string, syncPause = PAUSE_BY_PERSON): CloudStopSyncResult => ({
+const SIGNED_OUT_OWNED: CloudStatusResult = { connected: false, workspaceSyncOwned: true, workspaceSynced: false };
+const stopped = (workspaceId: string, syncPause = PAUSE_BY_YOU): CloudStopSyncResult => ({
   workspaceId,
   workspaceSynced: false,
   syncPause,
@@ -92,22 +107,40 @@ afterEach(() => {
 });
 
 describe("CloudSyncSettings", () => {
-  it("allows a signed-out person to pause an owned synced workspace", async () => {
-    render(<CloudSyncSettings workspaceId="ws-1" cloud={cloud({ connected: false, workspaceSyncOwned: true, workspaceSynced: true })} />);
+  // Pausing needs no account. Turning sync on does, so signed out the switch
+  // stays off and says why, below Connect server.
+  it("lets a signed-out owner pause, then says turning sync on needs the server", async () => {
+    render(<CloudSyncSettings workspaceId="ws-1" cloud={cloud({ ...SIGNED_OUT_OWNED, workspaceSynced: true })} />);
     expect(screen.getByTestId("settings-cloud-connect")).toBeTruthy();
+    expect(screen.queryByTestId("settings-row-account")).toBeNull();
+    expect(screen.queryByTestId("cloud-relink-workspace")).toBeNull();
     expect(syncSwitch().getAttribute("aria-checked")).toBe("true");
     expect((syncSwitch() as HTMLButtonElement).disabled).toBe(false);
+
     fireEvent.click(syncSwitch());
+
     await waitFor(() => expect(bridgeMock.cloudStopSync).toHaveBeenCalledOnce());
     await waitFor(() => expect(syncSwitch().getAttribute("aria-checked")).toBe("false"));
     expect((syncSwitch() as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getByTestId("cloud-sync-paused").textContent).toContain("Paused by you");
+    expect(screen.getByTestId("cloud-sync-needs-server").textContent).toBe(SYNC_ON_NEEDS_SERVER);
   });
 
-  it("shows a signed-out pause by this computer's person as you", () => {
-    const syncPause = { ...PAUSE_BY_PERSON, author: { kind: "person" as const, personId: "local-sam", self: true } };
-    render(<CloudSyncSettings workspaceId="ws-1" cloud={cloud({ connected: false, workspaceSyncOwned: true, workspaceSynced: false, syncPause })} />);
-    expect(screen.getByTestId("cloud-sync-paused").textContent).toContain("Paused by you");
+  it.each([
+    ["paused", { ...SIGNED_OUT_OWNED, syncPause: PAUSE_BY_YOU }, true],
+    ["never synced", SIGNED_OUT_OWNED, false],
+  ] as const)("holds a signed-out owner's switch off when %s, with the reason", (_state, status, paused) => {
+    const settings = cloud(status);
+    render(<CloudSyncSettings workspaceId="ws-1" cloud={settings} />);
+
+    expect(syncSwitch().getAttribute("aria-checked")).toBe("false");
     expect((syncSwitch() as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.queryByTestId("cloud-sync-paused") !== null).toBe(paused);
+    expect(screen.getByTestId("cloud-sync-needs-server").textContent).toBe(SYNC_ON_NEEDS_SERVER);
+    fireEvent.click(syncSwitch());
+    expect(bridgeMock.cloudEnableSync).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByTestId("settings-cloud-connect"));
+    expect(settings.onConnect).toHaveBeenCalledOnce();
   });
 
   it("shows the account, its server, Disconnect, and the sync switch while signed in", () => {
@@ -157,7 +190,7 @@ describe("CloudSyncSettings", () => {
     expect(screen.getByRole("tooltip").textContent).toBe(DISCONNECT_EXPLANATION);
   });
 
-  it("offers Connect server while signed out, which opens the connect flow", () => {
+  it("offers only Connect server while signed out in a workspace this person does not own", () => {
     const settings = cloud({ connected: false });
     render(<CloudSyncSettings workspaceId="ws-1" cloud={settings} />);
 
@@ -237,15 +270,18 @@ describe("CloudSyncSettings", () => {
     expect(syncSwitch().getAttribute("aria-checked")).toBe("false");
     expect(syncSwitch().getAttribute("aria-busy")).toBeNull();
     expect((syncSwitch() as HTMLButtonElement).disabled).toBe(false);
-    expect(screen.getByTestId("cloud-sync-paused").textContent).toContain("Paused by Sam Hollis");
+    expect(screen.getByTestId("cloud-sync-paused").textContent).toContain("Paused by you");
+    expect(screen.queryByTestId("cloud-sync-needs-server")).toBeNull();
     expect(screen.queryByTestId("cloud-sync-code-block")).toBeNull();
     expect(settings.onChanged).toHaveBeenCalledOnce();
     expect(settings.onError).not.toHaveBeenCalled();
   });
 
   it.each([
-    ["a person", PAUSE_BY_PERSON, "Paused by Sam Hollis"],
-    ["an agent", PAUSE_BY_AGENT, "Paused by agent codex"],
+    ["you", PAUSE_BY_YOU, "Paused by you ·"],
+    ["another person, by their current name", PAUSE_BY_PERSON, "Paused by Sam Hollis ·"],
+    ["a person whose name is unknown", PAUSE_BY_UNNAMED, "Paused by another person ·"],
+    ["an agent", PAUSE_BY_AGENT, "Paused by agent codex ·"],
   ] as const)("shows a pause by %s from the shell's status", (_who, syncPause, line) => {
     render(<CloudSyncSettings workspaceId="ws-1" cloud={cloud({ ...SIGNED_IN, syncPause })} />);
 
@@ -256,7 +292,7 @@ describe("CloudSyncSettings", () => {
   });
 
   it("resumes a paused workspace through the turn-on path", async () => {
-    const settings = cloud({ ...SIGNED_IN, syncPause: PAUSE_BY_PERSON });
+    const settings = cloud({ ...SIGNED_IN, syncPause: PAUSE_BY_YOU });
     render(<CloudSyncSettings workspaceId="ws-1" cloud={settings} />);
 
     fireEvent.click(syncSwitch());
@@ -530,7 +566,7 @@ describe("CloudSyncSettings", () => {
     const settings = cloud({ ...SYNCED, workspaceSyncConnected: false });
     render(<CloudSyncSettings workspaceId="ws-1" cloud={settings} />);
 
-    expect(screen.getByTestId("cloud-workspace-relink").textContent).toBe(SYNC_PAUSED_FOR_ACCOUNT);
+    expect(screen.getByTestId("cloud-workspace-relink").textContent).toBe(SYNC_UNCONFIRMED_ACCOUNT);
     expect(syncSwitch().getAttribute("aria-checked")).toBe("true");
     expect(screen.queryByTestId("cloud-sync-code-block")).toBeNull();
     fireEvent.click(screen.getByTestId("cloud-relink-workspace"));
@@ -552,7 +588,7 @@ describe("CloudSyncSettings", () => {
 
     await waitFor(() => expect(settings.onError).toHaveBeenCalledOnce());
     expect(vi.mocked(settings.onError).mock.calls[0]![0].message).toBe("Sign in to the account that synced this workspace.");
-    expect(screen.getByTestId("cloud-workspace-relink").textContent).toBe(SYNC_PAUSED_FOR_ACCOUNT);
+    expect(screen.getByTestId("cloud-workspace-relink").textContent).toBe(SYNC_UNCONFIRMED_ACCOUNT);
     expect(screen.getByTestId("cloud-disconnect")).toBeTruthy();
   });
 

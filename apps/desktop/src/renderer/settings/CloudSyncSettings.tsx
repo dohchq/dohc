@@ -3,7 +3,7 @@ import { Sparkles } from "lucide-react";
 import type { CloudStatusResult } from "../../ipc/bridgeContract";
 import { buildSyncCode } from "../../workspaces/syncCode";
 import { bridge } from "../bridge";
-import { SYNC_PAUSED_FOR_ACCOUNT } from "../cloudSyncWords";
+import { SYNC_UNCONFIRMED_ACCOUNT } from "../cloudSyncWords";
 import { ipcErrorMessage } from "../ipcError";
 import type { ConnectionErrorReport } from "../shell/connectionNotices";
 import { formatChatTime } from "../time";
@@ -21,6 +21,9 @@ const MIN_PASSPHRASE_LENGTH = 8;
 export const SYNC_OFF_KEEPS = "Turning this off keeps your work, history, and shares; groups you joined keep syncing.";
 export const SYNC_OFF_KEEPS_WITH_RECEIVED =
   "Turning this off keeps your work, history, and shares; groups you joined and files shared with you keep syncing.";
+// Why the switch cannot turn on while nobody is signed in. Connect server sits
+// in the row above.
+export const SYNC_ON_NEEDS_SERVER = "Connect your server to turn sync on.";
 
 // The shell's own read of this workspace's server connection, so opening
 // Settings reads nothing new.
@@ -205,35 +208,33 @@ export function CloudSyncSettings(props: {
     );
   }
 
-  if (!status.connected && !status.workspaceSyncOwned) {
-    return (
-      <SettingRow title="Server" testId="settings-row-server">
-        <PrimaryButton size="compact" data-testid="settings-cloud-connect" onClick={props.cloud.onConnect}>
-          Connect server
-        </PrimaryButton>
-      </SettingRow>
-    );
-  }
+  const connectRow = (
+    <SettingRow title="Server" testId="settings-row-server">
+      <PrimaryButton size="compact" data-testid="settings-cloud-connect" onClick={props.cloud.onConnect}>
+        Connect server
+      </PrimaryButton>
+    </SettingRow>
+  );
+  // Signed out, a workspace this computer's person owns still offers its
+  // switch: pausing needs no account, and turning sync on does.
+  if (!status.connected && !status.workspaceSyncOwned) return connectRow;
 
   const unconfirmed = sync.workspaceSynced && !sync.workspaceSyncConnected;
   const syncPause = sync.workspaceSynced ? undefined : sync.syncPause;
+  const needsServer = !status.connected && !sync.workspaceSynced;
   const secretState = sync.workspaceSynced && sync.workspaceSyncConnected ? sync.workspaceSecretState : "none";
 
   return (
     <>
-      {status.connected ? <CloudAccountRow
-        email={status.email ?? ""}
-        serverUrl={status.serverUrl ?? ""}
-        networkAccess={status.networkAccess ?? null}
-        onSettled={props.cloud.onChanged}
-        onError={props.cloud.onAccountError}
-      /> : (
-        <SettingRow title="Server" testId="settings-row-server">
-          <PrimaryButton size="compact" data-testid="settings-cloud-connect" onClick={props.cloud.onConnect}>
-            Connect server
-          </PrimaryButton>
-        </SettingRow>
-      )}
+      {status.connected ? (
+        <CloudAccountRow
+          email={status.email ?? ""}
+          serverUrl={status.serverUrl ?? ""}
+          networkAccess={status.networkAccess ?? null}
+          onSettled={props.cloud.onChanged}
+          onError={props.cloud.onAccountError}
+        />
+      ) : connectRow}
       {/* Main refuses to enroll a shared view: it syncs through its share. */}
       {props.sharedView ? null : (
         <>
@@ -243,10 +244,17 @@ export function CloudSyncSettings(props: {
             description={
               unconfirmed ? (
                 <span data-testid="cloud-workspace-relink" className="text-danger">
-                  {SYNC_PAUSED_FOR_ACCOUNT}
+                  {SYNC_UNCONFIRMED_ACCOUNT}
                 </span>
-              ) : syncPause ? (
-                <SyncPausedLine pause={syncPause} />
+              ) : syncPause || needsServer ? (
+                <>
+                  {syncPause ? <SyncPausedLine pause={syncPause} /> : null}
+                  {needsServer ? (
+                    <span data-testid="cloud-sync-needs-server" className="block">
+                      {SYNC_ON_NEEDS_SERVER}
+                    </span>
+                  ) : null}
+                </>
               ) : sync.workspaceSynced ? (
                 props.cloud.hasReceivedShares ? SYNC_OFF_KEEPS_WITH_RECEIVED : SYNC_OFF_KEEPS
               ) : undefined
@@ -273,7 +281,7 @@ export function CloudSyncSettings(props: {
               label="Sync this workspace"
               checked={syncBusy === "stop" ? false : sync.workspaceSynced || (syncBusy === "enable" && passphrasePurpose === null)}
               busy={syncBusy !== null}
-              disabled={syncBusy !== null || (!sync.workspaceSynced && (!status.connected || passphrasePurpose !== null))}
+              disabled={syncBusy !== null || needsServer || (!sync.workspaceSynced && passphrasePurpose !== null)}
               onChange={(on) => void (on ? enableSync() : stopSync())}
             />
           </SettingRow>
@@ -304,8 +312,8 @@ export function CloudSyncSettings(props: {
   );
 }
 
-// Who paused this workspace's sync, and when. An agent's name carries the
-// agent mark.
+// Who paused this workspace's sync, and when. A person goes by their current
+// name, never one saved with the pause. An agent's name carries the agent mark.
 function SyncPausedLine(props: { pause: SyncPause }) {
   const { author } = props.pause;
   const time = formatChatTime(props.pause.atMs);
