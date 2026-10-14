@@ -3229,7 +3229,45 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         sql: "ALTER TABLE owner_ydoc_outbox_entries ADD COLUMN person_edit INTEGER CHECK (person_edit IS NULL OR person_edit=1);",
         sets_user_version: None,
     },
+    Migration {
+        ordinal: 52,
+        id: "v2-replica-frontiers",
+        sql: V2_REPLICA_FRONTIERS_DDL,
+        sets_user_version: None,
+    },
 ];
+
+const V2_REPLICA_FRONTIERS_DDL: &str = "\
+CREATE TABLE replica_frontiers (
+    workspace_id TEXT PRIMARY KEY,
+    revision INTEGER NOT NULL CHECK (revision BETWEEN 1 AND 9007199254740991),
+    log_cursor INTEGER NOT NULL CHECK (log_cursor BETWEEN 0 AND 9007199254740991),
+    journal_cursor INTEGER NOT NULL CHECK (journal_cursor BETWEEN 0 AND 9007199254740991)
+) STRICT;
+CREATE TABLE replica_documents (
+    workspace_id TEXT NOT NULL,
+    main_version_id TEXT NOT NULL,
+    object_id TEXT NOT NULL,
+    lineage_claim_id TEXT NOT NULL CHECK (length(lineage_claim_id)=64 AND lineage_claim_id NOT GLOB '*[^0-9a-f]*'),
+    relay_database_namespace TEXT NOT NULL,
+    restore_generation INTEGER NOT NULL CHECK (restore_generation BETWEEN 1 AND 9007199254740991),
+    event_count INTEGER NOT NULL CHECK (event_count BETWEEN 1 AND 9007199254740991),
+    evidence_digest TEXT NOT NULL CHECK (length(evidence_digest)=64 AND evidence_digest NOT GLOB '*[^0-9a-f]*'),
+    journal_cursor INTEGER NOT NULL CHECK (journal_cursor BETWEEN 1 AND 9007199254740991),
+    PRIMARY KEY(workspace_id,main_version_id,object_id,lineage_claim_id)
+) STRICT;
+CREATE TABLE replica_first_seen (
+    relay_database_namespace TEXT NOT NULL,
+    workspace_id TEXT NOT NULL,
+    main_version_id TEXT NOT NULL,
+    object_id TEXT NOT NULL,
+    lineage_claim_id TEXT NOT NULL CHECK (length(lineage_claim_id)=64 AND lineage_claim_id NOT GLOB '*[^0-9a-f]*'),
+    client_id INTEGER NOT NULL CHECK (client_id BETWEEN 0 AND 9007199254740991),
+    start_clock INTEGER NOT NULL CHECK (start_clock BETWEEN 0 AND 9007199254740991),
+    end_clock INTEGER NOT NULL CHECK (end_clock BETWEEN 1 AND 9007199254740991 AND end_clock>start_clock),
+    PRIMARY KEY(relay_database_namespace,workspace_id,main_version_id,object_id,lineage_claim_id,client_id,start_clock)
+) STRICT;
+";
 
 const V2_OPEN_DOCUMENT_ARTIFACTS_DDL: &str = "\
 CREATE TABLE replication_pending_refusals_next (
@@ -3911,6 +3949,10 @@ mod tests {
             (
                 "v2-owner-outbox-person-edit",
                 "55940512b28bebcdda24b3c86763c66e29416eed55f157b8c06edf9f5b5622df",
+            ),
+            (
+                "v2-replica-frontiers",
+                "b42454c383b3e4b2b7c107a4c2b7abe56476235d857dba46aa3fbbae1a790af3",
             ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());
@@ -5359,7 +5401,7 @@ mod tests {
             INSERT INTO owner_ydoc_outbox_entries(outbox_id,sequence,append_key,delivery_id,update_digest,update_blob_digest,byte_length,created_at_ms,pending,result_pending_bytes,result_oldest_entry_at_ms,result_state) \
             VALUES ('outbox',1,'append','delivery','base','base',1,1,1,1,1,'active');").unwrap();
         assert_eq!(
-            run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).unwrap(),
+            run_migrations(&mut conn, &BASELINE_MIGRATIONS[..=before], &ctx, &NoFaults).unwrap(),
             MigrationOutcome::Applied { newly_applied: 1 }
         );
         let retained: (String, Option<bool>) = conn

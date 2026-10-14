@@ -493,7 +493,7 @@ describe("CLI socket server", () => {
   it("confines Access to the registered workspace and schema-parses every answer without secret fields", async () => {
     const secret = { credentials: "secret", bearerUrl: "secret", invitationUrl: "secret", shareCode: "secret" };
     const answer = { ...secret, ref: { kind: "path", path: "Notes/a.md", versionId: null }, rows: [], visibility: "visible",
-      coverage: { kind: "granted", complete: true, observation: "interval", ...secret }, checkedAtMs: 1, freshness: "stale", nextCursor: null };
+      unknownReason: null, coverage: { kind: "granted", complete: true, observation: "interval", ...secret }, checkedAtMs: 1, freshness: "stale", nextCursor: null };
     const object = vi.fn(async () => answer as never), sharing = vi.fn(async () => ({ ...answer, ref: null }) as never);
     context.access = { object, sharing }; context.readOnly = true;
     const response = await rawRequest({ token, protocolVersion: CLI_PROTOCOL_VERSION, verb: "accessObject",
@@ -2376,7 +2376,7 @@ describe("CLI socket server", () => {
     const output = await comment("tracked.md", "Budget", "Is 400 enough for food?", ["--agent", "claude-code"]);
     expect(output.exitCode, output.stderr).toBe(0);
     const { schemaVersion, ...startedResult } = JSON.parse(output.stdout);
-    expect(schemaVersion).toBe(2);
+    expect(schemaVersion).toBe(3);
     const started = parseCliResult("fileChatStart", startedResult);
     if (!started.ok) throw new Error(started.reason);
     expect(started.path).toBe("tracked.md");
@@ -2417,7 +2417,7 @@ describe("CLI socket server", () => {
     const firstOutput = await comment(once.path, once.title, once.body, retryFlags);
     expect(firstOutput.exitCode, firstOutput.stderr).toBe(0);
     const { schemaVersion: retrySchemaVersion, ...firstResult } = JSON.parse(firstOutput.stdout);
-    expect(retrySchemaVersion).toBe(2);
+    expect(retrySchemaVersion).toBe(3);
     const first = parseCliResult("fileChatStart", firstResult);
     if (!first.ok) throw new Error(first.reason);
     await expect(comment(once.path, once.title, once.body, retryFlags)).resolves.toEqual(firstOutput);
