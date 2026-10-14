@@ -11,10 +11,10 @@ export const WorkspaceSyncPause = z.object({
 }).strict();
 export type WorkspaceSyncPause = z.infer<typeof WorkspaceSyncPause>;
 
-// Resolve the person at read time. The registry stores no frozen profile name.
+// Compare the stored local person id with this computer at read time.
 export const WorkspaceSyncPauseStatus = WorkspaceSyncPause.extend({
   author: z.discriminatedUnion("kind", [
-    Person.extend({ self: z.boolean(), displayName: z.string().min(1).optional() }), Agent,
+    Person.extend({ self: z.boolean() }), Agent,
   ]),
 });
 export type WorkspaceSyncPauseStatus = z.infer<typeof WorkspaceSyncPauseStatus>;
@@ -22,11 +22,9 @@ export type WorkspaceSyncPauseStatus = z.infer<typeof WorkspaceSyncPauseStatus>;
 export function workspaceSyncPauseStatus(
   pause: WorkspaceSyncPause,
   localPersonId: string | null,
-  personName: (personId: string) => string | undefined,
 ): WorkspaceSyncPauseStatus {
   if (pause.author.kind === "agent") return { atMs: pause.atMs, author: pause.author };
-  const displayName = personName(pause.author.personId);
   return { atMs: pause.atMs, author: { ...pause.author,
-    self: pause.author.personId === localPersonId, ...(displayName ? { displayName } : {}),
+    self: pause.author.personId === localPersonId,
   } };
 }

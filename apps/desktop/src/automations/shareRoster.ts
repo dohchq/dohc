@@ -299,7 +299,7 @@ export function createShareRosters(dependencies: {
     if (!entry) return { kind: "unknown", problem: { kind: "unchecked", next: "Open this workspace, then try again." } };
     const noAnswer = state.noAnswer;
     const remote = entry.remote ?? entry.pausedRemote;
-    const next = entry.pausedRemote ? "Turn sync on in Settings → Sync and sharing, then try again." : noAnswer?.next ?? "Try again in a moment.";
+    const next = noAnswer?.next ?? (entry.pausedRemote ? "Turn sync on in Settings → Sync and sharing, then try again." : "Try again in a moment.");
     if (remote && !entry.shareView && (overlapped || stale(workspaceId, state))) {
       return { kind: "unknown", problem: { kind: "unchecked", next: state.markFailed
         ? "Check that your disk has free space, then try again." : next } };

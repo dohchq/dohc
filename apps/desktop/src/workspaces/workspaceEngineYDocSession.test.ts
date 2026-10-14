@@ -738,7 +738,7 @@ it("settles live edits into Markdown before stopping sync and permits local edit
   });
   const stop = createWorkspaceSyncStop({
     person: async () => ({ kind: "person", personId: "local" }), cleanupFailed: vi.fn(),
-    pauseStatus: pause => workspaceSyncPauseStatus(pause, "local", () => "Sam"),
+    pauseStatus: pause => workspaceSyncPauseStatus(pause, "local"),
     withOwnerHostPaused: work => work(), prepare: () => capture.settleAndCloseLiveSessionsForSyncPause(), resume: async () => {},
     pauseRemote: (id, pause) => registry.pauseRemote(id, pause), closeActivity: async () => {
       await expect(capture.openYDocSession({ path: PATH, onRemoteUpdate: () => undefined })).rejects.toThrow();
@@ -751,7 +751,7 @@ it("settles live edits into Markdown before stopping sync and permits local edit
     }, notify: () => {},
     status: () => ({ state: "synced", pendingChangeCount: 0, lastSyncedAtMs: null,
       historyRecordingUnavailable: false, historyShareView: false, liveSessionsGeneration: 1,
-      ...(registry.find(WORKSPACE_ID)?.syncPause ? { syncPause: workspaceSyncPauseStatus(registry.find(WORKSPACE_ID)!.syncPause!, "local", () => "Sam") } : {}) }),
+      ...(registry.find(WORKSPACE_ID)?.syncPause ? { syncPause: workspaceSyncPauseStatus(registry.find(WORKSPACE_ID)!.syncPause!, "local") } : {}) }),
   });
   await expect(stop({ workspace: registry.find(WORKSPACE_ID)!, assertCurrent: () => {} })).resolves.toMatchObject({ workspaceSynced: false, syncPause: { author: { kind: "person", personId: "local", self: true } } });
   expect(registry.find(WORKSPACE_ID)?.syncPause?.author).toEqual({ kind: "person", personId: "local" });

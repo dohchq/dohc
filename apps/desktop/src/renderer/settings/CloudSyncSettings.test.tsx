@@ -49,10 +49,6 @@ const PAUSE_BY_YOU: NonNullable<CloudStatusResult["syncPause"]> = {
   atMs: PAUSED_AT,
   author: { kind: "person", personId: "local-you", self: true },
 };
-const PAUSE_BY_PERSON: NonNullable<CloudStatusResult["syncPause"]> = {
-  atMs: PAUSED_AT,
-  author: { kind: "person", personId: "local-sam", self: false, displayName: "Sam Hollis" },
-};
 const PAUSE_BY_UNNAMED: NonNullable<CloudStatusResult["syncPause"]> = {
   atMs: PAUSED_AT,
   author: { kind: "person", personId: "local-old", self: false },
@@ -279,7 +275,6 @@ describe("CloudSyncSettings", () => {
 
   it.each([
     ["you", PAUSE_BY_YOU, "Paused by you ·"],
-    ["another person, by their current name", PAUSE_BY_PERSON, "Paused by Sam Hollis ·"],
     ["a person whose name is unknown", PAUSE_BY_UNNAMED, "Paused by another person ·"],
     ["an agent", PAUSE_BY_AGENT, "Paused by agent codex ·"],
   ] as const)("shows a pause by %s from the shell's status", (_who, syncPause, line) => {

@@ -35,6 +35,9 @@ export function createWorkspaceSyncStop(dependencies: {
       const pausedBy = await author;
       operation.assertCurrent();
       const workspace = operation.workspace;
+      if (workspace.joinBootstrapPending) {
+        throw new Error("This workspace is still joining. Wait for it to finish, then stop sync.");
+      }
       let status = dependencies.status(workspaceId);
       const result = (): CloudStopSyncResult => ({
         workspaceId: workspace.workspaceId,

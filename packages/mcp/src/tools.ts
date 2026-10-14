@@ -1050,17 +1050,10 @@ export async function workspaceStatus(ctx: ToolContext) {
   const pause = !entry?.shareView ? WorkspaceSyncPause.safeParse(entry?.syncPause) : null;
   let syncPause: import("@dohc/workspace-contracts/workspace-sync").WorkspaceSyncPauseStatus | undefined;
   if (pause?.success) {
-    if (pause.data.author.kind === "agent") syncPause = workspaceSyncPauseStatus(pause.data, null, () => undefined);
-    else {
-      const [identity, settings] = await Promise.all([
-        readJson<unknown>(join(ctx.home, "dohc-local-id.json")),
-        readJson<unknown>(join(ctx.home, "dohc-settings.json")),
-      ]);
-      const personId = isRecord(identity) && typeof identity.id === "string" ? identity.id : null;
-      const profile = isRecord(settings) && isRecord(settings.profile) ? settings.profile : null;
-      const name = typeof profile?.preferredName === "string" ? profile.preferredName : undefined;
-      syncPause = workspaceSyncPauseStatus(pause.data, personId, id => id === personId ? name : undefined);
-    }
+    const identity = pause.data.author.kind === "person"
+      ? await readJson<unknown>(join(ctx.home, "dohc-local-id.json")) : null;
+    const personId = isRecord(identity) && typeof identity.id === "string" ? identity.id : null;
+    syncPause = workspaceSyncPauseStatus(pause.data, personId);
   }
   return {
     ...(entry?.shareView ? {receivedShare: {

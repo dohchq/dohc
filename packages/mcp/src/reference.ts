@@ -488,7 +488,7 @@ function commandSection(name: string, command: CliCommandSpec): string {
     command.summary,
     command.notes.join(" "),
     name === "access" ? ACCESS_NOTES : "",
-    name === "sync" ? "The pause result records who paused and when. A person author has kind person, personId, self, and an optional current displayName. Show you when self is true. Person names are resolved when status is read. An agent author has kind agent, agentId, onBehalfOf, and depth. Agent names are provenance and grant no authority." : "",
+    name === "sync" ? "The pause result records who paused and when. A person author has kind person, personId, and self. Show you when self is true. Person pause labels do not use profile names. An agent author has kind agent, agentId, onBehalfOf, and depth. Agent names are provenance and grant no authority." : "",
     ...verbs.map(([verbName, verb]) => verbSection(name, verbName, verb)),
   ].filter(Boolean).join("\n\n");
 }

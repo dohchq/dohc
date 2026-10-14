@@ -312,8 +312,7 @@ export function CloudSyncSettings(props: {
   );
 }
 
-// Who paused this workspace's sync, and when. A person goes by their current
-// name, never one saved with the pause. An agent's name carries the agent mark.
+// Who paused this workspace's sync, and when. An agent carries the agent mark.
 function SyncPausedLine(props: { pause: SyncPause }) {
   const { author } = props.pause;
   const time = formatChatTime(props.pause.atMs);
@@ -327,7 +326,7 @@ function SyncPausedLine(props: { pause: SyncPause }) {
           {author.agentId}
         </span>
       ) : (
-        author.self ? "you" : author.displayName ?? "another person"
+        author.self ? "you" : "another person"
       )}
       {" · "}
       <time dateTime={time.iso}>{time.label}</time>

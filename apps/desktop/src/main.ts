@@ -250,8 +250,9 @@ import {
 } from "./workspaces/recipientShareReconciliation";
 import { createReceivedShareAcquisition, createReceivedShareStore, listReceivedInventory } from "./workspaces/receivedShareStore";
 import { workspaceSyncPauseStatus, type WorkspaceSyncPause } from "@dohc/workspace-contracts/workspace-sync";
-import { createShareRosters, createHistoryLabels, rosterPersonLabel } from "./automations/shareRoster";
-import { readStoredRoster, listRosterGrants, lookupHistoryAccounts } from "@dohc/automation-executor/roster-listing";
+import { syncPauseFor } from "./workspaces/syncPauseFor";
+import { createShareRosters, createHistoryLabels } from "./automations/shareRoster";
+import { listRosterGrants, lookupHistoryAccounts } from "@dohc/automation-executor/roster-listing";
 import {
   CollectionAutomations,
   type CollectionAutomationsOptions,
@@ -2363,7 +2364,7 @@ const workspaceActivity = createWorkspaceActivity(notifyRenderer, {
     const remote = workspace?.remote;
     return {
       enabled: !!remote,
-      syncPause: workspace ? syncPauseFor(workspace) : undefined,
+      syncPause: workspace ? syncPauseFor(workspace, localInstallationId()) : undefined,
       // Legacy and different-account bindings stay local-only.
       connected:
         !!remote && workspaceRemoteMatchesCredentials(remote, cachedCredentials),
@@ -5763,17 +5764,8 @@ async function currentDiagnostics(): Promise<string> {
   });
 }
 
-function pauseStatus(pause: WorkspaceSyncPause, workspace?: RegistryEntry) {
-  const personId = localInstallationId();
-  return workspaceSyncPauseStatus(pause, personId, id => {
-    if (id === personId) return cachedPreferredName;
-    const name = rosterPersonLabel(readStoredRoster(workspace?.shareRoster), id);
-    return name === "Someone you shared with" ? undefined : name;
-  });
-}
-
-function syncPauseFor(workspace: RegistryEntry) {
-  return !workspace.shareView && workspace.syncPause ? pauseStatus(workspace.syncPause, workspace) : undefined;
+function pauseStatus(pause: WorkspaceSyncPause) {
+  return workspaceSyncPauseStatus(pause, localInstallationId());
 }
 
 const stopWorkspaceSync = createWorkspaceSyncStop({
@@ -5982,7 +5974,7 @@ function registerIpcHandlers(): void {
     warmCredentialCache, currentCredentials: () => cachedCredentials,
     loadAndCacheCurrentCredentials, closeAllRelayTransportWorkspaces, activity,
     currentWorkspaceId: sender => rendererWorkspaceSessions.current(sender)?.workspaceId ?? null,
-    stopWorkspaceSync, syncPauseFor,
+    stopWorkspaceSync, syncPauseFor: workspace => syncPauseFor(workspace, localInstallationId()),
     reconcileCloud: () => activity.reconcileCloud(),
     notifyCloudSessionChanged, notifyCloudSessionChangedWithKey,
     notifyRenderer, findWorkspace,

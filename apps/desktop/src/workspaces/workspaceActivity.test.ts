@@ -991,17 +991,17 @@ it("still settles healthy workspaces when an outage checkpoint fails",async()=>{
 });
 
 it("reads current pause metadata even while activity preserves a failure status", async () => {
-  let displayName = "First name";
+  let atMs = 42;
   const activity = createPhysicalWorkspaceActivity(vi.fn(), {
     observationFor: w => idleObservation(w, {} as never),
-    cloudStateFor: () => ({ enabled: false, connected: false, syncPause: { atMs: 42,
-      author: { kind: "person", personId: "local:person", self: true, displayName } } }),
+    cloudStateFor: () => ({ enabled: false, connected: false, syncPause: { atMs,
+      author: { kind: "person", personId: "local:person", self: true } } }),
   });
   const state = new WorkspaceActivityState();
   state.preservedStatus = { state: "local-changes", pendingChangeCount: 1, lastSyncedAtMs: null,
     historyRecordingUnavailable: true, historyShareView: false, liveSessionsGeneration: 0 };
-  expect(activity.getStatus(workspace(), state).syncPause?.author).toMatchObject({ self: true, displayName: "First name" });
-  displayName = "Current name";
+  expect(activity.getStatus(workspace(), state).syncPause?.atMs).toBe(42);
+  atMs = 84;
   expect(activity.getStatus(workspace(), state)).toMatchObject({ historyRecordingUnavailable: true,
-    syncPause: { author: { self: true, displayName: "Current name" } } });
+    syncPause: { atMs: 84, author: { self: true } } });
 });

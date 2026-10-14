@@ -589,7 +589,7 @@ describe("keeping the roster current", () => {
     store.pauseRemote(WORKSPACE);
     const { list, rosters: r } = rosters(async () => offline);
     const roster = await r.forRun(WORKSPACE);
-    expect(roster).toEqual(unchecked("Turn sync on in Settings → Sync and sharing, then try again."));
+    expect(roster).toEqual(unchecked(offline.next));
     const [reach] = checkAutomationReach(roster, { id: "new-editor", collection: { path: "Trip", name: "Trip" }, codeFiles: [],
       steps: [{ kind: "change-records", collection: { path: "Private", name: "Private" } }] });
     expect(reach.allowed).toBe(false);
@@ -602,6 +602,19 @@ describe("keeping the roster current", () => {
     expect(store.find(WORKSPACE)?.shareRoster?.pulledAfter).toBeUndefined();
     expect(await r.forRun(WORKSPACE)).toMatchObject({ kind: "owner", grants: [] });
     expect(r.observation(WORKSPACE).listing).toEqual(revoked);
+  });
+
+  it("preserves signed-out advice for a paused pulled-after roster", async () => {
+    seed(); store.markShareRosterPulled(WORKSPACE); store.pauseRemote(WORKSPACE);
+    const { rosters: r } = rosters(async () => ({ kind: "unanswered", partial: false, next: "Sign in to your server first." }));
+    expect(await r.forRun(WORKSPACE)).toEqual(unchecked("Sign in to your server first."));
+  });
+
+  it("asks to turn sync on when a paused workspace has no roster or listing answer", async () => {
+    store.pauseRemote(WORKSPACE);
+    const { rosters: r, list } = rosters(async () => offline);
+    expect(await r.cached(WORKSPACE)).toEqual(unchecked("Turn sync on in Settings → Sync and sharing, then try again."));
+    expect(list).not.toHaveBeenCalled();
   });
 
   it("does not read local identity or sync history for a paused owner", async () => {

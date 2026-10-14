@@ -32,7 +32,7 @@ async function fixture(synced = true) {
     cloudStateFor: () => {
       const entry = store.find(workspace.workspaceId)!;
       return { enabled: !!entry.remote, connected: !!entry.remote,
-        syncPause: entry.syncPause ? workspaceSyncPauseStatus(entry.syncPause, "local-person", () => "Sam") : undefined };
+        syncPause: entry.syncPause ? workspaceSyncPauseStatus(entry.syncPause, "local-person") : undefined };
     },
     engineFor: () => store.find(workspace.workspaceId)?.remote ? ({
       start: engineStart, stop: engineStop, queueSync: vi.fn(), snapshot: () => ({}),
@@ -53,7 +53,7 @@ async function fixture(synced = true) {
   const person = vi.fn(async () => ({ kind: "person" as const, personId: "local-person" }));
   const stop = createWorkspaceSyncStop({
     person, cleanupFailed, nowMs: () => 42,
-    pauseStatus: pause => workspaceSyncPauseStatus(pause, "local-person", () => "Sam"),
+    pauseStatus: pause => workspaceSyncPauseStatus(pause, "local-person"),
     withOwnerHostPaused: async work => { steps.push("host-pause"); try { return await work(); } finally { steps.push("host-resume"); } },
     prepare: () => service.prepareSyncPause(workspace, state), resume: () => service.enableCloud(workspace, state), pauseRemote,
     closeActivity: () => service.close(workspace, state, { notify: false }), closeRelay,
@@ -78,11 +78,21 @@ describe("stop one workspace's sync", () => {
     await h.service.close(h.workspace, h.state);
   });
 
+  it.each([false, true])("refuses an unfinished join before any stop work (remote %s)", async synced => {
+    const h = await fixture(synced);
+    const operation = { ...h.operation(), workspace: { ...h.operation().workspace, joinBootstrapPending: true as const } };
+    await expect(h.stop(operation)).rejects.toThrow("This workspace is still joining. Wait for it to finish, then stop sync.");
+    expect(h.steps).toEqual([]);
+    expect(h.pauseRemote).not.toHaveBeenCalled();
+    expect(h.service.isOpen(h.state)).toBe(true);
+    await h.service.close(h.workspace, h.state);
+  });
+
   it("settles before saving a durable pause and reopens local capture", async () => {
     const h = await fixture();
     const result = await h.stop(h.operation());
     expect(result).toMatchObject({ workspaceId: "workspace", workspaceSynced: false,
-      syncPause: { atMs: 42, author: { kind: "person", personId: "local-person", self: true, displayName: "Sam" } },
+      syncPause: { atMs: 42, author: { kind: "person", personId: "local-person", self: true } },
       status: { state: "synced", pendingChangeCount: 0 } });
     expect(h.steps.indexOf("settle")).toBeLessThan(h.steps.indexOf("engine-stop"));
     expect(h.steps.indexOf("settle")).toBeLessThan(h.steps.indexOf("pause"));
