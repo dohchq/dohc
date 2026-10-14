@@ -50,7 +50,6 @@ export function createNamedLiveFrameSession(options: {
   transport: NamedFrameTransport;
   membership?: LiveMembershipSession;
   reserveBytes?: (size: number) => () => void;
-  syncWorkingBytes?: number;
   failed?: (error: unknown) => void;
 }) {
   const { host, transport, membership } = options;
@@ -191,10 +190,10 @@ export function createNamedLiveFrameSession(options: {
             let opened: NamedFrameSync | undefined;
             let releaseBytes: (() => void) | undefined;
             try {
-              releaseBytes = options.reserveBytes?.(options.syncWorkingBytes ?? 0);
               opened = await host.openSync(updateBytes, lifetime.signal); check();
               const bytes = encodeLiveFrameSync({ binding: opened.binding, hostVector: opened.hostVector,
                 missingStateUpdate: opened.missingStateUpdate }, { ...frames.receive, maxSyncBytes: peerSyncBytes });
+              releaseBytes = options.reserveBytes?.(bytes.byteLength);
               const cursor = opened.appliedThroughJournalCursor;
               sync = { nextApplied: opened.nextApplied, close: opened.close }; opened = undefined;
               const releaseOutput = releaseBytes;

@@ -1,3 +1,4 @@
+import {selfHostLiveProfile} from "../../sync-relay/src/selfHostLiveProfile";
 import { describe, expect, it } from "vitest";
 import { MAX_RELAY_URL_LENGTH } from "@dohc/workspace-contracts/relay-values";
 import { loadShareWebConfig } from "./config";
@@ -64,8 +65,8 @@ describe("share-web configuration", () => {
   });
 
   it("keeps named live transport disabled until complete bounds are provisioned", () => {
-    const limits = {maxConnections: 8, maxConnectionsPerSession: 3, maxConnectionsPerPrincipal: 4, maxConnectionsPerGrant: 5, maxBufferedBytes: 134217728,
-      maxFrameBytes: 2048, maxPendingBytes: 4096, maxPendingFrames: 4, maxFragments: 8, maxBufferedChunks: 16,
+    const limits = {maxConnections: 8, maxConnectionsPerWorkspace: 96, reservedOwnerConnections: 0, maxConnectionsPerSession: 3, maxConnectionsPerPrincipal: 4, maxConnectionsPerGrant: 5, maxBufferedBytes: 134217728,
+      maxFrameBytes: 2048, maxPendingBytes: 4 * 1024 * 1024, maxPendingFrames: 4, maxFragments: 8, maxBufferedChunks: 16,
       upgradeTimeoutMs: 2000, idleTimeoutMs: 2000, drainTimeoutMs: 100};
     const env = {...accountEnvironment, DOHC_SHARE_WEB_RELAY_EXCHANGE_KEY: "x".repeat(32),
       DOHC_SHARE_WEB_NAMED_BROWSER_SESSION_LIMITS: JSON.stringify({maxPendingRequests: 2, maxRequestBytes: 2048, maxResponseBytes: 5000, timeoutMs: 1000})};
@@ -273,4 +274,16 @@ describe("share-web configuration", () => {
       }),
     ).toThrow(/requires NODE_ENV=development or test/u);
   });
+});
+
+it.each(["named", "link"])("rejects a %s browser credit window larger than the gateway queue", mode => {
+  const profile = selfHostLiveProfile(), editor = {...profile.editor, provider: {...profile.editor.provider,
+    frames: {...profile.frames, maxQueuedBytes: profile.frames.maxQueuedBytes + 1}}};
+  const env = {NODE_ENV: "test", DOHC_SELF_HOST_LIVE: "1", DOHC_SHARE_WEB_RELAY_URL: "http://relay:1788",
+    DOHC_SHARE_WEB_PUBLIC_RELAY_URL: "https://relay.example.test", DOHC_SHARE_WEB_PUBLIC_HOSTS: "share.example.test",
+    DOHC_SHARE_WEB_PUBLIC_ORIGIN: "https://share.example.test", DOHC_SHARE_WEB_AUTH_URL: "http://workspace-api:1786",
+    DOHC_SHARE_WEB_RELAY_EXCHANGE_KEY: "x".repeat(32)};
+  const override = mode === "named" ? {DOHC_SHARE_WEB_NAMED_EDITOR_LIMITS: JSON.stringify(editor)} :
+    {DOHC_SHARE_WEB_LINK_LIVE_LIMITS: JSON.stringify({requests: profile.requests, gateway: profile.gateway, editor})};
+  expect(() => loadShareWebConfig({...env, ...override})).toThrow("browser frames exceed gateway capacity");
 });

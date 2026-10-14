@@ -188,11 +188,11 @@ function captureLiveFrameHost(options: {
               // Arm before reading. A commit during an empty read resolves this same wake.
               const changed = pendingChange(signal);
               try {
-                let releaseBytes = options.reserveBytes?.(3 * bounds.maxAppliedUpdateBytes);
-                try {
-                  const next = await native.client.readNextLiveApplied(request(), position, bounds.maxAppliedUpdateBytes, signal);
-                  check(signal);
-                  if (next) {
+                const next = await native.client.readNextLiveApplied(request(), position, bounds.maxAppliedUpdateBytes, signal);
+                check(signal);
+                if (next) {
+                  let releaseBytes = options.reserveBytes?.(next.updateBytes.byteLength);
+                  try {
                     if (next.position.eventCount !== position.eventCount + 1 || next.position.journalCursor <= position.journalCursor ||
                       next.ack.journalCursor !== next.position.journalCursor) throw new Error("Native applied cursor changed.");
                     position = { ...next.position };
@@ -201,8 +201,8 @@ function captureLiveFrameHost(options: {
                     const releaseOutput = releaseBytes; releaseBytes = undefined;
                     return { value: { journalCursor: next.position.journalCursor, updateBytes: next.updateBytes },
                       release() { if (!released) { released = true; held = false; releaseOutput?.(); } } };
-                  }
-                } finally { releaseBytes?.(); }
+                  } finally { releaseBytes?.(); }
+                }
                 await changed.promise; check(signal);
               } finally { changed.dispose(); }
             }

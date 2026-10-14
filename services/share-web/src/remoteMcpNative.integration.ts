@@ -31,7 +31,7 @@ const validationPolicy = {maxStructVisits: 1_000_000, maxValueNodeVisits: 5_000_
 const frames = {receive: {maxFrameBytes: 65536, maxStateVectorBytes: 100000, maxUpdateBytes: 1000000, maxSyncBytes: 2000000},
   maxQueuedBytes: 2000000, maxQueuedFrames: 64, maxControlBytes: 131072, maxControlFrames: 8, maxAssemblyBytes: 2000000};
 const requests = {maxPendingRequests: 4, maxRequestBytes: 32768, maxResponseBytes: 65536, timeoutMs: 10000};
-const routeLimits = {maxConnections: 4, maxConnectionsPerSession: 3, maxConnectionsPerPrincipal: 3, maxConnectionsPerGrant: 4, maxBufferedBytes: 134217728,
+const routeLimits = {maxConnections: 4, maxConnectionsPerWorkspace: 96, reservedOwnerConnections: 0, maxConnectionsPerSession: 3, maxConnectionsPerPrincipal: 3, maxConnectionsPerGrant: 4, maxBufferedBytes: 134217728,
   maxPendingRequests: 4, maxRequestBytes: 32768, maxResponseBytes: 65536, maxPendingBytes: 2000000, maxFragments: 8, maxBufferedChunks: 64,
   upgradeTimeoutMs: 10000, idleTimeoutMs: 60000, drainTimeoutMs: 1000};
 const audience = "https://share.example.test", exchangeKey = "mcp-native-exchange-".repeat(2), ticketKey = "mcp-native-tickets-".repeat(2), linkKey = "mcp-native-links-".repeat(2);

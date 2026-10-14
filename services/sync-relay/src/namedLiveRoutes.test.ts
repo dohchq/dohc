@@ -11,10 +11,10 @@ import { WebSocket } from "ws";
 import { afterEach, expect, it, vi } from "vitest";
 import { serveFetchHandler } from "@dohc/service-http";
 import { UnauthorizedError } from "@dohc/workspace-auth/session";
-import { LIVE_FRAME_DECLARED_SUBMIT_MAX_BYTES, createLiveFrameSession, decodeLiveFrame, type LiveFrame } from "@dohc/live-session-contract/live-frame";
+import { LIVE_FRAME_DECLARED_SUBMIT_MAX_BYTES, createLiveFrameSession, decodeLiveFrame, encodeLiveFrame, type LiveFrame } from "@dohc/live-session-contract/live-frame";
 import { createLiveMarkdownJournalValidator } from "@dohc/ydoc-projection/live-journal-validation";
 import { createSyncRelayHandler } from "./server.js";
-import { createOwnerLiveRoutes, createNamedLiveRoutes, type NamedLiveRouteLimits } from "./namedLiveRoutes.js";
+import { createOwnerLiveRoutes, createNamedLiveRoutes, parseNamedLiveRouteLimits, type NamedLiveRouteLimits } from "./namedLiveRoutes.js";
 import { createLinkLiveBrowserResolver } from "./linkLiveBrowserAuth.js";
 import { hashLinkBearer, hashLinkProfileSecret } from "./linkSecurity.js";
 import { createNamedLiveProvider } from "@dohc/ydoc-projection/named-live-provider";
@@ -35,7 +35,7 @@ const frames = { receive: { maxFrameBytes: LIVE_FRAME_DECLARED_SUBMIT_MAX_BYTES,
 const bounds = { maxClientVectorBytes: 1024, maxSyncOutputBytes: 4096, maxAppliedUpdateBytes: 4096, maxSubmissionBytes: 4096, maxAdmissionBytes: 16384 };
 const policy = { maxStructVisits: 10000, maxValueNodeVisits: 10000, maxDecodedPayloadByteVisits: 1000000, maxStructClientGroupVisits: 10000,
   maxDeleteClientGroupVisits: 10000, maxDeleteIntervalVisits: 10000, maxIndexOperations: 100000 };
-const limits: NamedLiveRouteLimits = { maxConnections: 8, maxConnectionsPerSession: 2, maxConnectionsPerPrincipal: 3, maxConnectionsPerGrant: 4, maxBufferedBytes: 134217728,
+const limits: NamedLiveRouteLimits = { maxConnections: 8, maxConnectionsPerWorkspace: 96, reservedOwnerConnections: 0, maxConnectionsPerSession: 2, maxConnectionsPerPrincipal: 3, maxConnectionsPerGrant: 4, maxBufferedBytes: 134217728,
   maxPendingRequests: 4, maxRequestBytes: 4096, maxResponseBytes: 4096, maxPendingBytes: 4096, maxFragments: 8, maxBufferedChunks: 16,
   // Open routes idle between frames while a test sets up its next peer over real
   // sockets; a loaded gate host can stretch that past 5 s.
@@ -299,12 +299,14 @@ function deferred<T>() {
   let resolve!: (value: T) => void;
   const promise = new Promise<T>(done => { resolve = done; }); return { promise, resolve };
 }
-const defaultScope = scope, defaultBinding = binding;
-async function fixture(routeLimits = limits, link = false, membershipPolicy: LiveMembershipPolicy = {maxSessions: 16, maxMembers: 8, maxSnapshotBytes: 153}, owner = false, desktop = false, admission?: ReturnType<typeof createLiveConnectionAdmission>, person = 0, document = 0) {
-  const scope = {...defaultScope, userId: person ? "reader-" + person : defaultScope.userId,
+const defaultScope = scope, defaultBinding = binding, defaultFrames = frames, defaultBounds = bounds;
+async function fixture(routeLimits = limits, link = false, membershipPolicy: LiveMembershipPolicy = {maxSessions: 16, maxMembers: 8, maxSnapshotBytes: 153}, owner = false, desktop = false, admission?: ReturnType<typeof createLiveConnectionAdmission>, person = 0, document = 0, production = false, workspaceId = defaultScope.workspaceId) {
+  const liveProfile = selfHostLiveProfile();
+  const frames = production ? liveProfile.frames : defaultFrames, bounds = production ? liveProfile.namedLive.host : defaultBounds;
+  const scope = {...defaultScope, workspaceId, userId: person ? "reader-" + person : defaultScope.userId,
     grantId: !link && person ? "edit-" + person : defaultScope.grantId};
-  const binding = {...defaultBinding, objectId: document ? "object-" + document : defaultBinding.objectId};
-  const state = await ticketFixture(undefined, {userId: scope.userId, grantId: scope.grantId, objectId: binding.objectId});
+  const binding = {...defaultBinding, workspaceId, objectId: document ? "object-" + document : defaultBinding.objectId};
+  const state = await ticketFixture(undefined, {userId: scope.userId, grantId: scope.grantId, objectId: binding.objectId, workspaceId});
   const routeKind = desktop ? "desktop" : link ? "link" : "named";
   const memberships = createLiveMembershipRegistry(membershipPolicy, state.storage.readLiveAuthority.bind(state.storage));
   const bearer = Buffer.alloc(32, 1).toString("base64url"), profile = Buffer.alloc(32, person || 2).toString("base64url");
@@ -368,7 +370,7 @@ async function fixture(routeLimits = limits, link = false, membershipPolicy: Liv
     });
   }
   cleanups.push(async () => { routes.close(); sockets.forEach(ws => ws.terminate()); await Promise.all(upgrades); await new Promise<void>(done => http.close(() => done())); await state.close(); });
-  const bootstrap = desktop ? await post("/sync/live/desktop-open", {shareId: scope.shareId, path: binding.currentPath}) : link || owner ? Response.json({ discriminator: "abcdefghijkl" }) : await post("/sync/live/named-sessions", { grantId: scope.grantId });
+  const bootstrap = desktop ? await post("/sync/live/desktop-open", {shareId: scope.shareId, path: binding.currentPath}) : link || owner ? Response.json({ discriminator: production && document ? "abcdefghijk" + document.toString(36) : "abcdefghijkl" }) : await post("/sync/live/named-sessions", { grantId: scope.grantId });
   expect(bootstrap.status).toBe(200);
   const bootstrapped = await bootstrap.json() as {discriminator: string; ticket?: {token: string; expiresAtMs: number}};
   let discriminator = bootstrapped.discriminator, initialDesktopTicket = bootstrapped.ticket;
@@ -404,7 +406,7 @@ async function fixture(routeLimits = limits, link = false, membershipPolicy: Liv
     const closed = new Promise<[number, string]>(resolve => ws.once("close", (code, reason) => resolve([code, reason.toString()])));
     return { ws, status, received, until, closed };
   }
-  return { ...state, post, discriminator, mint, connect, currentScope, bearer, profile, memberships, tickets, captureNative, native, changes, invalidated, actor, application, routes, desktopAdmission };
+  return { ...state, frames, binding, post, discriminator, mint, connect, currentScope, bearer, profile, memberships, tickets, captureNative, native, changes, invalidated, actor, application, routes, desktopAdmission };
 }
 
 it.each(["view", "comment"] as const)("names %s access only for an in-scope ticket target", async access => {
@@ -816,7 +818,7 @@ it.each([false, true])("connects 20 people with three documents each under the p
 }, 60_000);
 
 it.each([
-  ["maxConnections", "live_total_limit"], ["maxConnectionsPerGrant", "live_grant_limit"],
+  ["maxConnections", "live_total_limit"], ["maxConnectionsPerWorkspace", "live_workspace_limit"], ["maxConnectionsPerGrant", "live_grant_limit"],
   ["maxConnectionsPerPrincipal", "live_person_limit"], ["maxConnectionsPerSession", "live_session_limit"],
 ] as const)("names %s only after authenticating and redeeming an in-scope ticket", async (limit, code) => {
   const f = await fixture({...limits, [limit]: 1});
@@ -905,4 +907,158 @@ it("bounds authenticated total-limit refusal slots and releases them on close", 
     expect(release).not.toBeNull(); release?.();
   });
   releaseTotal();
+});
+
+type ProductionPeer = {f: Awaited<ReturnType<typeof fixture>>; socket: ReturnType<Awaited<ReturnType<typeof fixture>>["connect"]>};
+
+async function openProductionSync(f: Awaited<ReturnType<typeof fixture>>, socket: ReturnType<Awaited<ReturnType<typeof fixture>>["connect"]>, credit = true) {
+  await vi.waitFor(() => {
+    expect(socket.ws.readyState).toBe(WebSocket.OPEN);
+    expect(socket.received.map(frame => frame.kind)).toContain("credit");
+  }, {timeout: 5000});
+  const send = (frame: LiveFrame) => socket.ws.send(encodeLiveFrame(frame, f.frames.receive.maxFrameBytes));
+  send({kind: "hello", receivePolicy: f.frames.receive});
+  if (credit) send({kind: "credit", grantedBytes: f.frames.maxQueuedBytes, grantedFrames: f.frames.maxQueuedFrames});
+  const vector = Uint8Array.of(0);
+  send({kind: "begin", purpose: "client-vector", transferId: 1, totalBytes: vector.length,
+    digest: createHash("sha256").update(vector).digest("hex")});
+  send({kind: "chunk", transferId: 1, offset: 0, bytes: vector});
+  if (credit) await vi.waitFor(() => {
+    expect(socket.ws.readyState).toBe(WebSocket.OPEN);
+    expect(socket.received.map(frame => frame.kind)).toContain("chunk");
+  }, {timeout: 5000});
+  if (credit) send({kind: "sync-applied", appliedThroughJournalCursor: 0});
+}
+
+it.each([false, true])("delivers one production-size 2 MiB edit to 22 readers of one document; link=%s", async link => {
+  const profile = selfHostLiveProfile(), admission = createLiveConnectionAdmission();
+  const readers: ProductionPeer[] = [];
+  const sharedChanges = createNamedFrameChanges(128);
+  let shared: NamedFrameNativeHost | undefined;
+  for (let person = 1; person <= 22; person++) {
+    const f = await fixture(profile.namedLive.transport, link, undefined, false, false, admission, person, 1, true);
+    if (!shared) shared = {...f.native, changes: sharedChanges};
+    const native = shared;
+    f.captureNative.mockImplementation(async () => native);
+    const socket = f.connect((await f.mint()).token);
+    expect(await socket.status).toBe(101);
+    await openProductionSync(f, socket);
+    readers.push({f, socket});
+  }
+  const updateBytes = Buffer.alloc(profile.namedLive.host.maxAppliedUpdateBytes, 42);
+  vi.mocked(shared!.client.readNextLiveApplied).mockImplementation(async (_request, after) => after.eventCount ? null : {
+    position: {eventCount: 1, journalCursor: 1, evidenceDigest: "cd".repeat(32)}, updateBytes,
+    ack: {deliveryId: "edit", updateDigest: createHash("sha256").update(updateBytes).digest("hex"), journalCursor: 1,
+      acceptingHostEpoch: host.hostEpoch, localYDocSequence: 1, applicationReplayed: false},
+  });
+  await vi.waitFor(() => expect(sharedChanges.listenerCount()).toBe(44));
+  sharedChanges.notify(readers[0]!.f.binding);
+  await vi.waitFor(() => {
+    expect(readers.map(({socket}) => socket.ws.readyState)).toEqual(Array(22).fill(WebSocket.OPEN));
+    expect(readers.map(({socket}) => socket.received.filter(frame => frame.kind === "chunk" && frame.transferId === 2)
+      .reduce((sum, frame) => sum + (frame.kind === "chunk" ? frame.bytes.length : 0), 0))).toEqual(Array(22).fill(updateBytes.length));
+  }, {timeout: 10_000});
+  for (const {socket} of readers) {
+    const chunks = socket.received.filter((frame): frame is Extract<LiveFrame, {kind: "chunk"}> => frame.kind === "chunk" && frame.transferId === 2);
+    expect(Buffer.concat(chunks.map(frame => Buffer.from(frame.bytes))).equals(updateBytes)).toBe(true);
+  }
+  expect(readers.every(({socket}) => socket.ws.readyState === WebSocket.OPEN)).toBe(true);
+  await vi.waitFor(() => expect(admission.buffers(profile.namedLive.transport.maxBufferedBytes).usage()).toBe(0));
+}, 60_000);
+
+it("admits a burst of 22 small-document syncs with production bounds", async () => {
+  const profile = selfHostLiveProfile(), admission = createLiveConnectionAdmission();
+  const peers: ProductionPeer[] = [];
+  for (let person = 1; person <= 22; person++) {
+    const f = await fixture(profile.namedLive.transport, false, undefined, false, false, admission, person, person, true);
+    const socket = f.connect((await f.mint()).token); expect(await socket.status).toBe(101);
+    peers.push({f, socket});
+  }
+  await Promise.all(peers.map(({f, socket}) => openProductionSync(f, socket, false)));
+  await vi.waitFor(() => expect(peers.every(({f}) => vi.mocked(f.native.client.openLiveAppliedSync).mock.calls.length >= 1)).toBe(true));
+  const usage = admission.buffers(profile.namedLive.transport.maxBufferedBytes).usage();
+  expect(usage).toBeGreaterThan(22 * 2); expect(usage).toBeLessThan(32 * 1024);
+  expect(peers.every(({socket}) => socket.ws.readyState === WebSocket.OPEN)).toBe(true);
+  for (const {f, socket} of peers) socket.ws.send(encodeLiveFrame({kind: "credit", grantedBytes: f.frames.maxQueuedBytes,
+    grantedFrames: f.frames.maxQueuedFrames}, f.frames.receive.maxFrameBytes));
+  await Promise.all(peers.map(({socket}) => socket.until(() => socket.received.some(frame => frame.kind === "chunk"))));
+}, 60_000);
+
+it.each([false, true])("contains 11 stalled syncs from one principal while other workspaces and the owner remain live; link=%s", async link => {
+  const profile = selfHostLiveProfile(), admission = createLiveConnectionAdmission(), stalled = [];
+  const others = [];
+  for (const owner of [false, true]) {
+    const f = await fixture(profile.namedLive.transport, false, undefined, owner, false, admission, 23, 1, true, "other-workspace");
+    const socket = f.connect(owner ? "" : (await f.mint()).token); expect(await socket.status).toBe(101);
+    await openProductionSync(f, socket); others.push(socket);
+  }
+  for (let index = 0; index < 11; index++) {
+    const f = await fixture(profile.namedLive.transport, link, undefined, false, false, admission, 1, index + 1, true);
+    const socket = f.connect((await f.mint()).token); expect(await socket.status).toBe(101);
+    stalled.push({f, socket});
+  }
+  for (const {f} of stalled) vi.mocked(f.native.client.openLiveAppliedSync).mockResolvedValue({binding: {...f.binding, selectorPaths: [f.binding.currentPath]},
+    hostVector: Buffer.from([0]), missingStateUpdate: Buffer.alloc(4 * 1024 * 1024 - 1024),
+    observedLocalYDocHeadSequence: 1, position: {eventCount: 0, journalCursor: 0, evidenceDigest: "ab".repeat(32)}});
+  for (let index = 0; index < stalled.length; index++) {
+    const {f, socket} = stalled[index]!;
+    await openProductionSync(f, socket, false);
+    if (index < 3) await vi.waitFor(() => expect(admission.buffers(profile.namedLive.transport.maxBufferedBytes).usage()).toBeGreaterThan(index * 4 * 1024 * 1024 + 3 * 1024 * 1024));
+    else expect(await socket.closed).toEqual([LIVE_CONNECTION_LIMIT_CLOSE_CODE, "live_buffer_limit"]);
+  }
+  for (const socket of others) {
+    const pong = once(socket.ws, "pong"); socket.ws.ping("still-live"); await pong;
+  }
+  expect(admission.buffers(profile.namedLive.transport.maxBufferedBytes).usage()).toBeLessThanOrEqual(12 * 1024 * 1024);
+  expect(stalled.slice(0, 3).every(({socket}) => socket.ws.readyState === WebSocket.OPEN)).toBe(true);
+  expect(others.every(socket => socket.ws.readyState === WebSocket.OPEN)).toBe(true);
+}, 60_000);
+
+it("keeps production workspace and server owner slots after non-owner capacity fills", async () => {
+  const profile = selfHostLiveProfile(), admission = createLiveConnectionAdmission(), maximum = profile.namedLive.transport;
+  const release = admission.reserve([[JSON.stringify(["non-owner-workspace", scope.workspaceId]), maximum.maxConnectionsPerWorkspace - maximum.reservedOwnerConnections]])!;
+  const fill = Array.from({length: 79}, () => admission.reserve([[JSON.stringify(["non-owner-workspace", scope.workspaceId]), 80]])!);
+  const named = await fixture(maximum, false, undefined, false, false, admission, 1, 1, true);
+  const refused = named.connect((await named.mint()).token); expect(await refused.status).toBe(101);
+  await vi.waitFor(() => expect(refused.ws.readyState).toBe(WebSocket.CLOSED), {timeout: 2000});
+  expect(await refused.closed).toEqual([LIVE_CONNECTION_LIMIT_CLOSE_CODE, "live_workspace_limit"]);
+  const owner = await fixture(maximum, false, undefined, true, false, admission, 1, 1, true);
+  const own = owner.connect(""); expect(await own.status).toBe(101); await openProductionSync(owner, own);
+  release(); fill.forEach(release => release());
+  const fullWorkspace = Array.from({length: maximum.maxConnectionsPerWorkspace - 1}, () => admission.reserve([[JSON.stringify(["workspace", scope.workspaceId]), maximum.maxConnectionsPerWorkspace]])!);
+  const full = owner.connect(""); expect(await full.status).toBe(101);
+  await vi.waitFor(() => expect(full.ws.readyState).toBe(WebSocket.CLOSED), {timeout: 2000});
+  expect(await full.closed).toEqual([LIVE_CONNECTION_LIMIT_CLOSE_CODE, "live_workspace_limit"]);
+  fullWorkspace.forEach(release => release());
+  const nonOwners = Array.from({length: maximum.maxConnections - maximum.reservedOwnerConnections}, () => admission.reserve([["non-owner", maximum.maxConnections - maximum.reservedOwnerConnections]])!);
+  const serverRefusal = named.connect((await named.mint()).token); expect(await serverRefusal.status).toBe(101);
+  await vi.waitFor(() => expect(serverRefusal.ws.readyState).toBe(WebSocket.CLOSED), {timeout: 2000});
+  expect(await serverRefusal.closed).toEqual([LIVE_CONNECTION_LIMIT_CLOSE_CODE, "live_total_limit"]);
+  const secondOwner = owner.connect(""); expect(await secondOwner.status).toBe(101); await openProductionSync(owner, secondOwner);
+  nonOwners.forEach(release => release());
+  expect(own.ws.readyState).toBe(WebSocket.OPEN); expect(secondOwner.ws.readyState).toBe(WebSocket.OPEN);
+}, 60_000);
+
+it.each(["principal", "share"])("enforces the production relay %s byte portion after authorization", async mode => {
+  const profile = selfHostLiveProfile(), admission = createLiveConnectionAdmission(), limits = profile.namedLive.transport;
+  const budget = admission.buffers(limits.maxBufferedBytes);
+  const f = await fixture(limits, false, undefined, false, false, admission, 1, 1, true);
+  const key = JSON.stringify(mode === "principal" ? ["principal", "named", "reader-1"] : ["share", scope.workspaceId, scope.shareId]);
+  const size = limits.maxBufferedBytes * (mode === "principal" ? limits.maxConnectionsPerPrincipal : limits.maxConnectionsPerGrant) / limits.maxConnections;
+  const release = budget.reserve(size, [[key, size]]);
+  try {
+    const refused = f.connect((await f.mint()).token); expect(await refused.status).toBe(101);
+    await vi.waitFor(() => expect(refused.ws.readyState).toBe(WebSocket.CLOSED), {timeout: 2000});
+    expect(await refused.closed).toEqual([LIVE_CONNECTION_LIMIT_CLOSE_CODE, "live_buffer_limit"]);
+    const owner = await fixture(limits, false, undefined, true, false, admission, 1, 1, true);
+    const own = owner.connect(""); expect(await own.status).toBe(101); await openProductionSync(owner, own);
+    expect(own.ws.readyState).toBe(WebSocket.OPEN);
+  } finally {release();}
+});
+
+it("rejects an owner reserve that exhausts total or workspace capacity", () => {
+  const profile = selfHostLiveProfile().namedLive.transport;
+  for (const reservedOwnerConnections of [profile.maxConnections, profile.maxConnectionsPerWorkspace])
+    expect(() => parseNamedLiveRouteLimits({...profile, reservedOwnerConnections})).toThrow("Invalid named route limits");
+  expect(parseNamedLiveRouteLimits({...profile, reservedOwnerConnections: 0}).reservedOwnerConnections).toBe(0);
 });

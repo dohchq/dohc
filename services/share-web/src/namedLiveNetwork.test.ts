@@ -27,7 +27,7 @@ const frames = { receive: { maxFrameBytes: 1024, maxStateVectorBytes: 1024, maxU
 // Both network hops are real sockets that a loaded gate host can stall past 2 s,
 // so share-web's relay request, relay handshake, and gateway upgrade allow 10 s.
 const browserLimits = { maxPendingRequests: 4, maxRequestBytes: 2048, maxResponseBytes: 5000, timeoutMs: 10_000 };
-const transport = { maxConnections: 4, maxConnectionsPerSession: 2, maxConnectionsPerPrincipal: 3, maxConnectionsPerGrant: 4, maxBufferedBytes: 134217728,
+const transport = { maxConnections: 4, maxConnectionsPerWorkspace: 96, reservedOwnerConnections: 0, maxConnectionsPerSession: 2, maxConnectionsPerPrincipal: 3, maxConnectionsPerGrant: 4, maxBufferedBytes: 134217728,
   maxPendingRequests: 4, maxRequestBytes: 2048, maxResponseBytes: 5000, maxPendingBytes: 8192, maxFragments: 8, maxBufferedChunks: 16,
   upgradeTimeoutMs: 2000, idleTimeoutMs: 10000, drainTimeoutMs: 100 };
 const policy = { maxStructVisits: 10000, maxValueNodeVisits: 10000, maxDecodedPayloadByteVisits: 1000000, maxStructClientGroupVisits: 10000,
@@ -115,8 +115,8 @@ async function fixture() {
     publicHosts: new Set([new URL(audience).host]), accountAuth: { publicOrigin: audience, upstreamUrl: "http://127.0.0.1:1" },
     namedBrowserSessionLimits: browserLimits, namedLiveTickets: true });
   const gateway = createLiveGateway({ publicOrigin: audience, publicHosts: new Set([new URL(audience).host]),
-    limits: { maxConnections: 4, maxConnectionsPerSession: 2, maxConnectionsPerPrincipal: 3, maxConnectionsPerGrant: 4, maxBufferedBytes: 134217728,
-      maxFrameBytes: 1024, maxPendingBytes: 8192, maxPendingFrames: 32, maxFragments: 8, maxBufferedChunks: 16,
+    limits: { maxConnections: 4, maxConnectionsPerWorkspace: 96, reservedOwnerConnections: 0, maxConnectionsPerSession: 2, maxConnectionsPerPrincipal: 3, maxConnectionsPerGrant: 4, maxBufferedBytes: 134217728,
+      maxFrameBytes: 1024, maxPendingBytes: 4 * 1024 * 1024, maxPendingFrames: 32, maxFragments: 8, maxBufferedChunks: 16,
       upgradeTimeoutMs: 10_000, idleTimeoutMs: 10000, drainTimeoutMs: 100 },
     resolveSession: async (request, discriminator, signal) => {
       const authenticated = namedLiveGatewayRequest(request, audience, signal);

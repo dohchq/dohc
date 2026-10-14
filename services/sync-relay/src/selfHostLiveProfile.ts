@@ -1,4 +1,4 @@
-/** Shared bounds for the supported small-server live-edit deployment. */
+/** Shared live-edit transport bounds. */
 export function selfHostLiveProfile() {
   const MiB = 1024 * 1024;
   const frames = {
@@ -8,7 +8,7 @@ export function selfHostLiveProfile() {
   const validation = {maxStructVisits: 1_000_000, maxValueNodeVisits: 5_000_000, maxDecodedPayloadByteVisits: 100_000_000,
     maxStructClientGroupVisits: 1_000_000, maxDeleteClientGroupVisits: 1_000_000, maxDeleteIntervalVisits: 1_000_000, maxIndexOperations: 10_000_000};
   const requests = {maxPendingRequests: 32, maxRequestBytes: 16 * 1024, maxResponseBytes: 64 * 1024, timeoutMs: 30_000};
-  const connections = {maxConnections: 128, maxConnectionsPerSession: 6, maxConnectionsPerPrincipal: 12, maxConnectionsPerGrant: 80,
+  const connections = {maxConnections: 128, maxConnectionsPerWorkspace: 96, reservedOwnerConnections: 16, maxConnectionsPerSession: 6, maxConnectionsPerPrincipal: 12, maxConnectionsPerGrant: 80,
     maxBufferedBytes: 128 * MiB, maxPendingBytes: 256 * 1024, maxFragments: 16, maxBufferedChunks: 128, upgradeTimeoutMs: 30_000, idleTimeoutMs: 60_000, drainTimeoutMs: 1_000};
   const nativeIngress = {ingress: {aggregateBytes: 512 * MiB, applicationWorkingReserveBytes: 8 * MiB, maxUploads: 4, uploadDeadlineMs: 30_000},
     maxRegistrations: 64, maxAdoptionBytes: 4 * MiB, maxAdoptionEvents: 128, maxApplicationsPerSettlement: 128,
@@ -17,7 +17,7 @@ export function selfHostLiveProfile() {
   const nativeClient = {aggregateBytes: 256 * MiB, maxUploads: 4};
   const editor = {provider: {frames, maxPendingUpdateBytes: 4 * MiB, maxPendingUpdates: 128, maxDeliveryAttempts: 8},
     maxHttpResponseBytes: 64 * 1024, maxSocketBufferedBytes: 4 * MiB, connectTimeoutMs: 30_000, sendTimeoutMs: 30_000, drainPollMs: 10};
-  const gateway = {...connections, maxFrameBytes: frames.receive.maxFrameBytes, maxPendingFrames: 128};
+  const gateway = {...connections, maxPendingBytes: frames.maxQueuedBytes, maxFrameBytes: frames.receive.maxFrameBytes, maxPendingFrames: 128};
   return {
     frames, nativeIngress, nativeClient, editor, gateway, requests, validation,
     desktopReadiness: {maxPendingRequests: 64, maxPendingPerUser: 4, timeoutMs: 30_000},

@@ -457,17 +457,47 @@ it("terminally refuses an oversized submission before validation or journal admi
   expect(f.validate).not.toHaveBeenCalled();
 });
 
-it.each(["read", "submit"] as const)("reserves aggregate %s work before reading native output or journal bytes", async kind => {
+it("reserves journal work before reading journal bytes", async () => {
   const budget = createLiveBufferBudget(12_288), f = await setup(4, budget.reserve);
   const sync = await f.capture.openSync(Uint8Array.of(0), new AbortController().signal);
   const cut = vi.spyOn(f.storage, "readLiveUpdateJournalCut"), release = budget.reserve(12_288);
-  if (kind === "read") {
-    vi.spyOn(f.native.client, "readNextLiveApplied").mockRejectedValue(new Error("Read occurred before budget reservation."));
-    await expect(sync.nextApplied(new AbortController().signal)).rejects.toThrowError(LiveConnectionLimitError);
-  }
-  else await expect(f.capture.submit({deliveryId: "delivery", updateDigest: hash(bytes), updateBytes: bytes}, new AbortController().signal))
+  await expect(f.capture.submit({deliveryId: "delivery", updateDigest: hash(bytes), updateBytes: bytes}, new AbortController().signal))
     .rejects.toThrowError(LiveConnectionLimitError);
   expect(f.peer.requests).toHaveLength(1);
-  if (kind === "read") expect(cut).not.toHaveBeenCalled(); else expect(cut).toHaveBeenCalledOnce();
+  expect(cut).toHaveBeenCalledOnce();
   release(); sync.close(); f.capture.close(); expect(budget.usage()).toBe(0);
+});
+
+it("charges the actual applied payload after a native read and releases it once with the lease", async () => {
+  const budget = createLiveBufferBudget(64), f = await setup(4, budget.reserve);
+  const signal = new AbortController().signal, sync = await f.capture.openSync(Uint8Array.of(0), signal);
+  const updateBytes = Buffer.alloc(31);
+  const read = vi.spyOn(f.native.client, "readNextLiveApplied").mockImplementation(async () => {
+    expect(budget.usage()).toBe(0);
+    return {position: {eventCount: 1, journalCursor: 11, evidenceDigest: "cd".repeat(32)}, ack, updateBytes};
+  });
+  const lease = await sync.nextApplied(signal);
+  expect(read).toHaveBeenCalledOnce(); expect(budget.usage()).toBe(updateBytes.length);
+  lease.release(); lease.release(); expect(budget.usage()).toBe(0);
+});
+
+it("keeps empty reads uncharged and releases a rejected cursor payload", async () => {
+  const budget = createLiveBufferBudget(64), f = await setup(4, budget.reserve), caller = new AbortController();
+  const sync = await f.capture.openSync(Uint8Array.of(0), caller.signal);
+  const read = vi.spyOn(f.native.client, "readNextLiveApplied").mockResolvedValue(null);
+  const pending = sync.nextApplied(caller.signal);
+  await vi.waitFor(() => expect(read).toHaveBeenCalledOnce()); expect(budget.usage()).toBe(0);
+  read.mockResolvedValue({position: {eventCount: 2, journalCursor: 11, evidenceDigest: "cd".repeat(32)}, ack, updateBytes: Buffer.alloc(31)});
+  f.changes.notify(binding);
+  await expect(pending).rejects.toThrow("Native applied cursor changed");
+  expect(budget.usage()).toBe(0);
+});
+
+it("refuses an applied payload only after reading its size without retaining budget", async () => {
+  const budget = createLiveBufferBudget(30), f = await setup(4, budget.reserve), signal = new AbortController().signal;
+  const sync = await f.capture.openSync(Uint8Array.of(0), signal);
+  const read = vi.spyOn(f.native.client, "readNextLiveApplied").mockResolvedValue({position: {eventCount: 1, journalCursor: 11,
+    evidenceDigest: "cd".repeat(32)}, ack, updateBytes: Buffer.alloc(31)});
+  await expect(sync.nextApplied(signal)).rejects.toThrowError(LiveConnectionLimitError);
+  expect(read).toHaveBeenCalledOnce(); expect(budget.usage()).toBe(0);
 });

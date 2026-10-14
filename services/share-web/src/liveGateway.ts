@@ -34,6 +34,8 @@ export interface LiveGatewayHostReceiveOptions {
 
 export interface LiveGatewayLimits {
   readonly maxConnections: number;
+  readonly maxConnectionsPerWorkspace: number;
+  readonly reservedOwnerConnections: number;
   readonly maxConnectionsPerSession: number;
   readonly maxConnectionsPerPrincipal: number;
   readonly maxConnectionsPerGrant: number;
@@ -64,17 +66,19 @@ export interface LiveGatewayOptions {
 }
 
 export function parseLiveGatewayLimits(value: unknown): LiveGatewayLimits {
-  const names: (keyof LiveGatewayLimits)[] = ["maxConnections", "maxConnectionsPerSession", "maxConnectionsPerPrincipal",
+  const names: (keyof LiveGatewayLimits)[] = ["maxConnections", "maxConnectionsPerWorkspace", "reservedOwnerConnections", "maxConnectionsPerSession", "maxConnectionsPerPrincipal",
     "maxConnectionsPerGrant", "maxFrameBytes", "maxBufferedBytes", "maxPendingBytes", "maxPendingFrames", "maxFragments", "maxBufferedChunks",
     "upgradeTimeoutMs", "idleTimeoutMs", "drainTimeoutMs"];
   if (!value || typeof value !== "object" || Array.isArray(value) || Object.keys(value).length !== names.length ||
     Object.keys(value).some(key => !names.includes(key as keyof LiveGatewayLimits))) throw new TypeError("Invalid live gateway limits.");
   const limits = {...value} as LiveGatewayLimits;
   for (const name of names) {
-    if (!Number.isSafeInteger(limits[name]) || limits[name] <= 0 ||
+    if (!Number.isSafeInteger(limits[name]) || (name === "reservedOwnerConnections" ? limits[name] < 0 : limits[name] <= 0) ||
       ((name.endsWith("TimeoutMs") || name === "maxFrameBytes" || name === "maxFragments" || name === "maxBufferedChunks") &&
         limits[name] > 2_147_483_647)) throw new TypeError(`Invalid live gateway limit: ${name}.`);
   }
+  if (limits.reservedOwnerConnections >= Math.min(limits.maxConnections, limits.maxConnectionsPerWorkspace)) throw new TypeError("Invalid live gateway limits.");
+  if (limits.maxPendingBytes < 4 * 1024 * 1024) throw new TypeError("Live gateway pending capacity must cover the browser credit window.");
   return limits;
 }
 
@@ -230,7 +234,8 @@ export function createLiveGateway(options: LiveGatewayOptions) {
       route.invalidated.addEventListener("abort", stop, { once: true });
       if (route.invalidated.aborted || done || socket.destroyed || !socket.readable || !socket.writable) { stop(); return; }
       const reserved = reserve([
-        ["connections", limits.maxConnections, "live_total_limit"],
+        ["connections", limits.maxConnections - limits.reservedOwnerConnections, "live_total_limit"],
+        [JSON.stringify(["workspace", session.workspaceId]), limits.maxConnectionsPerWorkspace - limits.reservedOwnerConnections, "live_workspace_limit"],
         [JSON.stringify(["session", session.kind, session.kind === "named" ? session.userId : session.sessionId,
           session.workspaceId, session.grantId, parsed.session]), limits.maxConnectionsPerSession, "live_session_limit"],
         [JSON.stringify(session.kind === "named" ? ["principal", "named", session.userId] :
@@ -239,6 +244,13 @@ export function createLiveGateway(options: LiveGatewayOptions) {
       ]);
       if (typeof reserved === "string") refusalCode = reserved; else release = reserved;
       if (refusalCode) { refuseLimit(refusalCode); return; }
+      const bufferScopes: [string, number][] = [
+        [JSON.stringify(session.kind === "named" ? ["principal", "named", session.userId] :
+          ["principal", "link", session.workspaceId, session.grantId, session.principalId]),
+          Math.max(1, Math.floor(limits.maxBufferedBytes * Math.min(1, limits.maxConnectionsPerPrincipal / limits.maxConnections)))],
+        [JSON.stringify(["share", session.workspaceId, session.shareId]),
+          Math.max(1, Math.floor(limits.maxBufferedBytes * Math.min(1, limits.maxConnectionsPerGrant / limits.maxConnections)))],
+      ];
       // No asynchronous step may separate this invalidation check from the 101.
       server.handleUpgrade(request, socket, head, accepted => {
         browser = accepted;
@@ -259,7 +271,7 @@ export function createLiveGateway(options: LiveGatewayOptions) {
               pendingFrames >= limits.maxPendingFrames || destination.readyState !== WebSocket.OPEN ||
               destination.bufferedAmount > limits.maxPendingBytes - size) { stop(); return; }
             let releaseBytes: () => void;
-            try { releaseBytes = buffers.reserve(2 * size); } catch { refuseLimit("live_buffer_limit"); return; }
+            try { releaseBytes = buffers.reserve(2 * size, bufferScopes); } catch { refuseLimit("live_buffer_limit"); return; }
             try {
               const bytes = Buffer.from(data);
               pendingBytes += size;

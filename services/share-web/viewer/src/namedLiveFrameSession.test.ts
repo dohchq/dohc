@@ -92,7 +92,7 @@ function fixture(result: "success" | "retry" | "refused" = "success", limitCredi
     pulse();
   }, close() { serverReady.promise.then(server => server.close()); } });
   clientReady.resolve(route);
-  const server = createNamedLiveFrameSession({ host, frames, reserveBytes, syncWorkingBytes: 4096, transport: {
+  const server = createNamedLiveFrameSession({ host, frames, reserveBytes, transport: {
     async send(bytes) {
       const frame = decodeLiveFrame(bytes, frames.receive.maxFrameBytes); sent.push(frame);
       if (stall?.(frame)) { stalled = deferred(); pulse(); await stalled.promise; stalled = undefined; }
@@ -173,7 +173,11 @@ it("holds shared sync output capacity until send completion and releases on clos
   const budget = createLiveBufferBudget(65_536), f = fixture("success", false, budget.reserve);
   f.stall(frame => frame.kind === "chunk");
   await f.until(() => f.metrics().stalled);
-  expect(budget.usage()).toBeGreaterThanOrEqual(4096);
+  const initial = f.sent.find(frame => frame.kind === "begin" && frame.purpose === "initial-sync");
+  expect(initial).toBeDefined();
+  if (initial?.kind !== "begin") throw new Error("Initial sync missing");
+  const chunk = f.sent.at(-1)!;
+  expect(budget.usage()).toBe(initial.totalBytes + encodeLiveFrame(chunk, frames.receive.maxFrameBytes).byteLength);
   f.server.close(); await f.server.settled(); await f.route.settled();
   expect(budget.usage()).toBe(0);
 });
