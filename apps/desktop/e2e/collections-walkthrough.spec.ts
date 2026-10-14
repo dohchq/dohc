@@ -11,7 +11,7 @@ import {
 } from "./helpers/workspace";
 
 // The Phase 2 collections gate walkthrough,
-// driven through the real app: create two collections from the File menu's
+// driven through the real app: create two document collections from the File menu's
 // New Collection command, add a field of every v1 type through the Fields
 // dialog, create records with New record, edit every field type inline in
 // the table, drag a board card and read the write back from the record's
@@ -206,6 +206,8 @@ test("collections walkthrough: create, shape, edit, drag, and rekey without the 
     await newCollectionFromFileMenu(desktop);
     const newCollection = page.getByTestId("new-collection-dialog");
     await expect(newCollection).toBeVisible();
+    // Data is the default; this walkthrough covers Markdown records.
+    await newCollection.getByRole("radio", { name: "Documents", exact: true }).check();
     await newCollection.getByLabel("Collection name").fill("clients");
     // The dialog's first field draft is Name (text) — exactly what clients
     // needs.
@@ -229,6 +231,7 @@ test("collections walkthrough: create, shape, edit, drag, and rekey without the 
     // --- The main "projects" collection.
     await newCollectionFromFileMenu(desktop);
     await expect(newCollection).toBeVisible();
+    await newCollection.getByRole("radio", { name: "Documents", exact: true }).check();
     await newCollection.getByLabel("Collection name").fill("projects");
     await newCollection.getByTestId("new-collection-create").click();
     await expect(page.getByTestId(PROJECTS_TAB)).toBeVisible({ timeout: 15_000 });
