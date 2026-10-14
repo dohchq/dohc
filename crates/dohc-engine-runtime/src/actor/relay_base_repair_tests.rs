@@ -361,6 +361,7 @@ fn base_repair_batch_reuses_answers_when_pending_groups_shift_boundaries() {
                         skipped: 0,
                         current_max_origin_seq: -1,
                         settlement_refusals: Vec::new(),
+                        hosted_refusals: Vec::new(),
                     })
                 } else {
                     relay.answer(&request)

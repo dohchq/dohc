@@ -4,6 +4,7 @@ import { stableJsonStringify } from "./canonicalJson";
 import { badRequest, relayError } from "./errors";
 import { parseString } from "./requestInputs";
 import type { SyncRelayLogInput } from "./storage";
+import { REFUSED_OP_KIND } from "./storage/relayAdmission";
 import { MAX_PAYLOAD_JSON_BYTES } from "./wireLimits";
 
 const MAX_OP_KIND_CHARS = 128;
@@ -71,6 +72,7 @@ export function parseLogOp(value: unknown): SyncRelayLogInput {
     throw badRequest("originSeq must be a non-negative integer");
   }
   const opKind = parseString(op.opKind, "opKind", MAX_OP_KIND_CHARS);
+  if (opKind === REFUSED_OP_KIND) throw badRequest("opKind is reserved for the relay");
   if (!op.payload || typeof op.payload !== "object" || Array.isArray(op.payload)) {
     throw badRequest("payload must be a JSON object");
   }

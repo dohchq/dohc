@@ -488,6 +488,8 @@ struct HostedFeed {
     share_at_pull: Mutex<Option<(usize, String, String)>>,
     pulls: Mutex<Vec<HostedPullRequest>>,
     pushes: Mutex<Vec<PushRequest>>,
+    /// Documents whose new host ops the relay refuses, each kept as a refusal at its coordinate.
+    refusing: Mutex<BTreeSet<String>>,
     /// Every blob a download asked for.
     downloads: Mutex<Vec<String>>,
 }
@@ -504,6 +506,7 @@ impl HostedFeed {
             share_at_pull: Mutex::new(None),
             pulls: Mutex::new(Vec::new()),
             pushes: Mutex::new(Vec::new()),
+            refusing: Mutex::new(BTreeSet::new()),
             downloads: Mutex::new(Vec::new()),
         }
     }
@@ -758,16 +761,39 @@ impl RelayTransport for HostedFeed {
         self.pushes.lock().unwrap().push(req.clone());
         let accepted = req.ops.len();
         let mut inserted = 0;
+        let mut hosted_refusals = Vec::new();
         for op in req.ops {
             let present = self
                 .log
                 .lock()
                 .unwrap()
                 .iter()
-                .any(|row| row.origin_id == op.origin_id && row.origin_seq == op.origin_seq);
-            if !present {
-                self.append(op);
-                inserted += 1;
+                .find(|row| row.origin_id == op.origin_id && row.origin_seq == op.origin_seq)
+                .map(|row| row.op_kind.clone());
+            // A retried coordinate keeps its first decision.
+            let refused = match present {
+                Some(kind) => kind == "relay.refused",
+                None => {
+                    let refused = crate::hosted::hosted_document(&op)
+                        .is_some_and(|object_id| self.refusing.lock().unwrap().contains(object_id));
+                    let mut row = op.clone();
+                    if refused {
+                        row.op_kind = "relay.refused".to_owned();
+                        row.payload =
+                            json!({"opKind": op.op_kind, "reason": "outside-hosted-documents"});
+                    }
+                    self.append(row);
+                    inserted += 1;
+                    refused
+                }
+            };
+            if refused {
+                hosted_refusals.push(HostedPushRefusal {
+                    origin_id: op.origin_id,
+                    origin_seq: op.origin_seq,
+                    op_kind: op.op_kind,
+                    reason: "outside-hosted-documents".to_owned(),
+                });
             }
         }
         let current_max_origin_seq = self
@@ -781,6 +807,7 @@ impl RelayTransport for HostedFeed {
             .unwrap_or(-1);
         Ok(PushResponse {
             settlement_refusals: Vec::new(),
+            hosted_refusals,
             accepted,
             inserted,
             skipped: accepted - inserted,
@@ -2191,6 +2218,276 @@ fn live_writes_journal_and_push_under_the_service_host_origin() {
     assert_eq!(pushes.len(), 1, "one batch to the hosted log, and no probe");
     assert_eq!(pushes[0].origin_id, HOST);
     assert_eq!(read_pushed_seq(&store, "ws", HOST).unwrap(), 1);
+}
+
+/// Journal one live Y.Doc update to a hosted document under the host's origin.
+fn journal_live_update(store: &mut EngineStore, object_id: &str, update: &[u8]) -> i64 {
+    let key = dohc_engine_collab::DocKey::new("ws", "main", object_id).unwrap();
+    let path = format!("{object_id}.md");
+    let outcome = store
+        .write_with(&NoFaults, |tx| {
+            let sha =
+                dohc_engine_storage::put_binary_blob(tx, update).map_err(SyncError::Storage)?;
+            let payload = ydoc_update_payload(
+                &key,
+                &path,
+                dohc_engine_collab::ContentKind::Richdoc,
+                &sha,
+                &"0".repeat(64),
+                None,
+                None,
+                false,
+            );
+            journal_local_op_in_tx(tx, "ws", "ydoc.update", &payload, 3_000)
+        })
+        .unwrap();
+    let TxnOutcome::Committed(seq) = outcome else {
+        panic!("journal must commit")
+    };
+    seq
+}
+
+fn recorded_refusals(store: &EngineStore) -> Vec<(String, i64, String, String)> {
+    store
+        .read_with(|conn| {
+            let mut statement = conn.prepare(
+                "SELECT origin_id,origin_seq,op_kind,reason_message FROM replication_pending_refusals \
+                 WHERE workspace_id='ws' ORDER BY origin_seq",
+            )?;
+            let rows = statement
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)))?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok::<_, rusqlite::Error>(rows)
+        })
+        .unwrap()
+}
+
+#[test]
+fn a_refused_hosted_write_keeps_its_coordinate_and_a_crashed_push_retries_to_the_same_decisions() {
+    let (_scratch, _path, mut store) = hosted_store();
+    host_document(&mut store, "doc-a");
+    host_document(&mut store, "doc-b");
+    for (object_id, update) in [
+        ("doc-a", b"a one".as_slice()),
+        ("doc-b", b"b one"),
+        ("doc-a", b"a two"),
+    ] {
+        journal_live_update(&mut store, object_id, update);
+    }
+    let client = RelaySyncClient::new(HostedFeed::new());
+    client
+        .transport()
+        .refusing
+        .lock()
+        .unwrap()
+        .insert("doc-b".to_owned());
+    let push = |store: &mut EngineStore, faults: &dyn dohc_engine_storage::FaultInjector| {
+        client
+            .push_workspace(store, "ws", faults, &NoLiveLeases, 3_000, 1_000_000)
+            .unwrap()
+    };
+
+    // The relay decides every coordinate, then the host stops before recording them.
+    let crash = ScriptedFaults::crash_at(FaultPoint::SyncAfterPushBeforeCursorPersist);
+    assert!(matches!(
+        push(&mut store, crash.as_ref()),
+        SyncPassOutcome::CrashedAfterRemoteCommit
+    ));
+    assert_eq!(read_pushed_seq(&store, "ws", HOST).unwrap(), -1);
+    assert!(
+        recorded_refusals(&store).is_empty(),
+        "a refusal commits with its push cursor or not at all"
+    );
+
+    // The retry gets the first decisions back and records each once.
+    let refusal = HostedPushRefusal {
+        origin_id: HOST.to_owned(),
+        origin_seq: 1,
+        op_kind: "ydoc.update".to_owned(),
+        reason: "outside-hosted-documents".to_owned(),
+    };
+    let expected = vec![(
+        HOST.to_owned(),
+        1,
+        "ydoc.update".to_owned(),
+        "the relay refused this hosted write: outside-hosted-documents".to_owned(),
+    )];
+    // Then a pass with nothing left to push reports nothing again.
+    for reported in [
+        vec![crate::hosted::push_refusal("ws", &refusal)],
+        Vec::new(),
+    ] {
+        let outcome = push(&mut store, &NoFaults);
+        let SyncPassOutcome::Complete {
+            pushed,
+            refused,
+            refusals,
+            ..
+        } = outcome
+        else {
+            panic!("the retried push completes: {outcome:?}")
+        };
+        assert_eq!((pushed, refused), (0, reported.len()));
+        assert_eq!(refusals, reported);
+        assert_eq!(read_pushed_seq(&store, "ws", HOST).unwrap(), 2);
+        assert_eq!(recorded_refusals(&store), expected);
+    }
+    let relay_rows = |client: &RelaySyncClient<HostedFeed>| {
+        client
+            .transport()
+            .log
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|row| row.origin_id == HOST)
+            .map(|row| (row.origin_seq, row.op_kind.clone()))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        relay_rows(&client),
+        [
+            (0, "ydoc.update".to_owned()),
+            (1, "relay.refused".to_owned()),
+            (2, "ydoc.update".to_owned())
+        ]
+    );
+
+    // Later work lands past the refused coordinate.
+    journal_live_update(&mut store, "doc-a", b"a three");
+    assert!(matches!(
+        push(&mut store, &NoFaults),
+        SyncPassOutcome::Complete {
+            pushed: 1,
+            refused: 0,
+            ..
+        }
+    ));
+    assert_eq!(read_pushed_seq(&store, "ws", HOST).unwrap(), 3);
+    assert_eq!(relay_rows(&client).len(), 4);
+    assert_eq!(recorded_refusals(&store), expected);
+}
+
+#[test]
+fn a_push_response_refuses_only_its_own_batch_and_only_for_a_hosted_push() {
+    let batch = [
+        envelope(HOST, 4, "ydoc.update", json!({})),
+        envelope(HOST, 5, "moment.append", json!({})),
+    ];
+    let refusal = |origin_seq: i64, op_kind: &str, reason: &str| HostedPushRefusal {
+        origin_id: HOST.to_owned(),
+        origin_seq,
+        op_kind: op_kind.to_owned(),
+        reason: reason.to_owned(),
+    };
+    let response = |hosted_refusals: Vec<HostedPushRefusal>, settled: Option<i64>| PushResponse {
+        settlement_refusals: settled
+            .map(|origin_seq| SettlementPublicationRefusal {
+                origin_id: HOST.to_owned(),
+                origin_seq,
+                moment_id: "unavailable".to_owned(),
+                settlement_id: "unavailable".to_owned(),
+                reason: "authorship-mismatch".to_owned(),
+            })
+            .into_iter()
+            .collect(),
+        hosted_refusals,
+        accepted: 2,
+        inserted: 2,
+        skipped: 0,
+        current_max_origin_seq: 5,
+    };
+    let valid = response(
+        vec![refusal(5, "moment.append", "blob-outside-reach")],
+        None,
+    );
+    assert_eq!(
+        crate::hosted::validate_push_refusals(&valid, &batch, true),
+        Ok(())
+    );
+    let long = "x".repeat(257);
+    for (case, hosted) in [
+        (valid.clone(), false),
+        (
+            response(
+                vec![refusal(6, "ydoc.update", "outside-hosted-documents")],
+                None,
+            ),
+            true,
+        ),
+        (
+            response(
+                vec![refusal(4, "moment.append", "outside-hosted-documents")],
+                None,
+            ),
+            true,
+        ),
+        (response(vec![refusal(4, "ydoc.update", "")], None), true),
+        (response(vec![refusal(4, "ydoc.update", &long)], None), true),
+        (
+            response(
+                vec![
+                    refusal(4, "ydoc.update", "outside-hosted-documents"),
+                    refusal(4, "ydoc.update", "outside-hosted-documents"),
+                ],
+                None,
+            ),
+            true,
+        ),
+        (
+            response(
+                vec![refusal(5, "moment.append", "blob-outside-reach")],
+                Some(5),
+            ),
+            true,
+        ),
+    ] {
+        assert_eq!(
+            crate::hosted::validate_push_refusals(&case, &batch, hosted),
+            Err(RelayError::InvalidResponse),
+            "{case:?}"
+        );
+    }
+
+    // Recording takes only this hosted replica's own journaled ops.
+    let (_scratch, _path, mut ordinary) = open_store();
+    let refused = refusal(0, "ydoc.update", "outside-hosted-documents");
+    assert!(matches!(
+        crate::cursor::write_pushed_seq_with_refusals(
+            &mut ordinary,
+            "ws",
+            HOST,
+            0,
+            &[],
+            std::slice::from_ref(&refused),
+            &NoFaults,
+            &NoLiveLeases,
+            3_000
+        ),
+        Err(SyncError::InvalidInput { .. })
+    ));
+    let (_scratch, _path, mut store) = hosted_store();
+    host_document(&mut store, "doc-a");
+    journal_live_update(&mut store, "doc-a", b"a one");
+    for wrong in [
+        refusal(1, "ydoc.update", "outside-hosted-documents"),
+        refusal(0, "moment.append", "outside-hosted-documents"),
+    ] {
+        assert!(matches!(
+            crate::cursor::write_pushed_seq_with_refusals(
+                &mut store,
+                "ws",
+                HOST,
+                0,
+                &[],
+                std::slice::from_ref(&wrong),
+                &NoFaults,
+                &NoLiveLeases,
+                3_000
+            ),
+            Err(SyncError::CoordinateDiverged)
+        ));
+    }
+    assert_eq!(read_pushed_seq(&store, "ws", HOST).unwrap(), -1);
 }
 
 #[test]

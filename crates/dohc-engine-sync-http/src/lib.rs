@@ -1038,6 +1038,7 @@ impl RelayTransport for HttpRelayTransport {
         )?;
         Ok(PushResponse {
             settlement_refusals: wire.settlement_refusals,
+            hosted_refusals: wire.hosted_refusals,
             accepted: wire.accepted,
             inserted: wire.inserted,
             skipped: wire.skipped,
@@ -1211,6 +1212,7 @@ impl HttpRelayTransport {
         )?;
         Ok(PushResponse {
             settlement_refusals: wire.settlement_refusals,
+            hosted_refusals: wire.hosted_refusals,
             accepted: wire.accepted,
             inserted: wire.inserted,
             skipped: wire.skipped,
@@ -1620,6 +1622,9 @@ struct WireCollectionWriteError {
 struct WirePushResponse {
     #[serde(default)]
     settlement_refusals: Vec<dohc_engine_sync::SettlementPublicationRefusal>,
+    /// Only the hosted log refuses ops one at a time. Sync validates which push may carry them.
+    #[serde(default, rename = "refusals")]
+    hosted_refusals: Vec<dohc_engine_sync::HostedPushRefusal>,
     accepted: usize,
     inserted: usize,
     skipped: usize,
@@ -2087,6 +2092,48 @@ mod tests {
                 .collect::<BTreeSet<_>>(),
             BTreeSet::from(["originSeq", "opKind", "payload", "recordedAtMs"])
         );
+    }
+
+    #[test]
+    fn hosted_push_reads_the_relays_refusal_of_each_op() {
+        let op = ReplicationEnvelope {
+            workspace_id: "ws".into(),
+            origin_id: "service-host:host".into(),
+            origin_seq: 3,
+            relay_seq: None,
+            op_kind: "ydoc.update".into(),
+            payload: serde_json::json!({"objectId":"object"}),
+            recorded_at_ms: 7,
+            settlement_admission: None,
+            admitted_author_snapshot: None,
+        };
+        let (base, server) = answer_once(
+            200,
+            r#"{"ok":true,"accepted":1,"inserted":1,"skipped":0,"currentMaxOriginSeq":3,"refusals":[{"originId":"service-host:host","originSeq":3,"opKind":"ydoc.update","reason":"outside-hosted-documents"}]}"#,
+        );
+        let transport = HttpRelayTransport::new_insecure_loopback_for_tests(base, "token")
+            .unwrap()
+            .hosted();
+        let response = transport
+            .push_hosted(PushRequest {
+                workspace_id: "ws".into(),
+                replication_epoch: "epoch".into(),
+                stream_identity: "stream".into(),
+                origin_id: "service-host:host".into(),
+                after_seq: 2,
+                ops: vec![op],
+            })
+            .unwrap();
+        assert_eq!(
+            response.hosted_refusals,
+            [dohc_engine_sync::HostedPushRefusal {
+                origin_id: "service-host:host".into(),
+                origin_seq: 3,
+                op_kind: "ydoc.update".into(),
+                reason: "outside-hosted-documents".into(),
+            }]
+        );
+        assert!(server.join().unwrap().contains("/sync/ws/hosted/log"));
     }
 
     #[test]

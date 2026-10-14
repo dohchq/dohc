@@ -881,6 +881,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     originId: string;
     ops: SyncRelayLogInput[];
     guard?: (context: AppendLogBatchGuardContext) => void;
+    admit?: (ops: SyncRelayLogInput[]) => void;
   }): AppendLogBatchResult {
     return logStorage.appendLogBatch(this, input);
   }

@@ -119,6 +119,7 @@ export interface SyncRelayLogInput {
   recordedAtMs: number;
   admittedAuthorSnapshot?: LiveAuthorSnapshot;
   settlementAdmission?: import("./hostedSettlement").SettlementAdmission;
+  relayAdmission?: import("./relayAdmission").RelayAdmission;
 }
 
 export interface SyncRelayLogRow extends SyncRelayLogInput {
@@ -817,6 +818,9 @@ export interface SyncRelayStorage {
     // a gap where a concurrent revoke commits after the check but before the
     // transaction opens.
     guard?: (context: AppendLogBatchGuardContext) => void;
+    // Runs after the guard, under the same lock, with the ops at coordinates
+    // the log does not hold yet. It may refuse an op or mark it departed.
+    admit?: (ops: SyncRelayLogInput[]) => void;
   }): AppendLogBatchResult;
   fetchLogPage(input: {
     workspaceId: string;

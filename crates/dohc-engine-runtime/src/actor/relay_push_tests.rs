@@ -144,6 +144,7 @@ impl Relay {
                 self.skipped += skipped;
                 RelayIoResponse::Push(PushResponse {
                     settlement_refusals: Vec::new(),
+                    hosted_refusals: Vec::new(),
                     accepted: request.ops.len(),
                     inserted,
                     skipped,
@@ -269,6 +270,7 @@ fn deferred_conflict_rewind_refetches_the_relay_maximum() {
                 probes += 1;
                 Ok(RelayIoResponse::Push(PushResponse {
                     settlement_refusals: Vec::new(),
+                    hosted_refusals: Vec::new(),
                     accepted: 0,
                     inserted: 0,
                     skipped: 0,
@@ -286,6 +288,7 @@ fn deferred_conflict_rewind_refetches_the_relay_maximum() {
                 restored_prefixes += 1;
                 Ok(RelayIoResponse::Push(PushResponse {
                     settlement_refusals: Vec::new(),
+                    hosted_refusals: Vec::new(),
                     accepted: 1,
                     inserted: 1,
                     skipped: 0,

@@ -7,15 +7,27 @@ import {
 import { badRequest, notFound, relayError } from "./errors";
 import { assertChatAuthorship, assertClientLogProvenance, parseAuthenticatedLogOps, type LogAuthorNameLookup } from "./relayLogInputs";
 import { parseCursor, parseLimit, parseString, parseWorkspaceId, readJsonObject } from "./requestInputs";
-import type { EnforceWorkspaceIdentityResult, SyncRelayLogRow, SyncRelayStorage } from "./storage";
+import type { EnforceWorkspaceIdentityResult, SyncRelayLogInput, SyncRelayLogRow, SyncRelayStorage } from "./storage";
+import { readRefusal } from "./storage/relayAdmission";
 import { MAX_DISCUSSION_ACTIVITY_HOLD_MS, MAX_OPS_PER_REQUEST, MAX_ORIGIN_ID_CHARS } from "./wireLimits";
 
 export type WorkspaceReplicationRoute =
   | { route: "bootstrap"; workspaceId: string }
   | { route: "epoch"; workspaceId: string }
   // `serviceHost` marks the service host's own feed, the only writer of its reserved origins.
-  | { route: "log"; workspaceId: string; serviceHost?: boolean }
+  | { route: "log"; workspaceId: string; serviceHost?: HostedAdmission }
   | { route: "log-coordinate"; workspaceId: string; originId: string; originSeq: number };
+
+/**
+ * The service host's per-row decisions. A refused op becomes a relay-written
+ * refusal at its coordinate, and the batch continues.
+ */
+export interface HostedAdmission {
+  /** Before preparation: answers retried refusals, and refuses what the current scope already rules out. */
+  screen(originId: string, ops: SyncRelayLogInput[]): void;
+  /** Under the append's writer, for the ops at coordinates the log does not hold yet. */
+  admit(ops: SyncRelayLogInput[]): void;
+}
 
 const MAX_IDENTITY_BYTES = 512;
 
@@ -128,13 +140,15 @@ export function createWorkspaceReplicationRoutes(
       // parseLogOp and appendLogBatch, so the relay rejects the full batch
       // before it writes any operation.
       assertChatAuthorship(input.ops, actor.userId);
-      assertClientLogProvenance(originId, input.ops, {deferMomentRefusal: true, serviceHost: route.serviceHost === true});
+      assertClientLogProvenance(originId, input.ops, {deferMomentRefusal: true, serviceHost: route.serviceHost !== undefined});
       const ops = await parseAuthenticatedLogOps(input.ops, actor.userId, lookupUserDisplayName);
+      route.serviceHost?.screen(originId, ops);
       await storage.prepareLogAppend({workspaceId:route.workspaceId,originId,ops},request.signal);
       const result = storage.appendLogBatch({
         workspaceId: route.workspaceId,
         originId,
         ops,
+        ...(route.serviceHost ? {admit: route.serviceHost.admit} : {}),
         // Identity claim/verification rides the append's BEGIN IMMEDIATE
         // transaction. A gap/conflict/quota/blob failure later in append
         // rolls back a first-adopt claim together with the batch.
@@ -151,6 +165,10 @@ export function createWorkspaceReplicationRoutes(
       if (result.inserted > 0) {
         discussionActivity.wakeLog(route.workspaceId);
       }
+      const refusals = ops.flatMap(op => {
+        const refusal = readRefusal(op);
+        return refusal ? [{originId, originSeq: op.originSeq, opKind: refusal.opKind, reason: refusal.reason}] : [];
+      });
       return jsonResponse({
         ok: true,
         accepted: ops.length,
@@ -158,6 +176,7 @@ export function createWorkspaceReplicationRoutes(
         skipped: result.skipped,
         currentMaxOriginSeq: result.currentMaxOriginSeq,
         ...(result.settlementRefusals ? {settlementRefusals:result.settlementRefusals} : {}),
+        ...(refusals.length ? {refusals} : {}),
       });
     }
 

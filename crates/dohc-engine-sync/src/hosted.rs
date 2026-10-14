@@ -143,6 +143,109 @@ fn document_named<'a>(op_kind: &str, payload: &'a serde_json::Value) -> Option<&
     .as_str()
 }
 
+/// The longest refusal reason a hosted push response may carry.
+const MAX_PUSH_REFUSAL_REASON_BYTES: usize = 256;
+
+/// Check the relay's refusals of a pushed batch: only a hosted push has any,
+/// and each names one distinct op of the batch, by coordinate and kind, that
+/// is not also a settlement refusal.
+pub(crate) fn validate_push_refusals(
+    response: &crate::PushResponse,
+    batch: &[ReplicationEnvelope],
+    hosted: bool,
+) -> Result<(), crate::RelayError> {
+    if !hosted && !response.hosted_refusals.is_empty() {
+        return Err(crate::RelayError::InvalidResponse);
+    }
+    let mut coordinates = BTreeSet::new();
+    for refusal in &response.hosted_refusals {
+        let coordinate = (refusal.origin_id.as_str(), refusal.origin_seq);
+        if !coordinates.insert(coordinate)
+            || refusal.reason.is_empty()
+            || refusal.reason.len() > MAX_PUSH_REFUSAL_REASON_BYTES
+            || response
+                .settlement_refusals
+                .iter()
+                .any(|settled| (settled.origin_id.as_str(), settled.origin_seq) == coordinate)
+            || !batch.iter().any(|op| {
+                (op.origin_id.as_str(), op.origin_seq) == coordinate
+                    && op.op_kind == refusal.op_kind
+            })
+        {
+            return Err(crate::RelayError::InvalidResponse);
+        }
+    }
+    Ok(())
+}
+
+/// Record the relay's refusals of this replica's own ops, in the transaction
+/// that acknowledges them. A refusal is a recorded outcome, not a fallback:
+/// nothing is journaled again. A retried push records each one once.
+pub(crate) fn record_push_refusals_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    workspace_id: &str,
+    refusals: &[crate::HostedPushRefusal],
+) -> Result<(), SyncError> {
+    if refusals.is_empty() {
+        return Ok(());
+    }
+    if !is_hosted(tx, workspace_id)? {
+        return Err(SyncError::InvalidInput {
+            reason: NOT_A_HOSTED_REPLICA,
+        });
+    }
+    for refusal in refusals {
+        let journaled: bool = tx
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM replication_log WHERE workspace_id=?1 \
+                 AND origin_id=?2 AND origin_seq=?3 AND op_kind=?4 AND imported=0)",
+                params![
+                    workspace_id,
+                    refusal.origin_id,
+                    refusal.origin_seq,
+                    refusal.op_kind
+                ],
+                |row| row.get(0),
+            )
+            .map_err(SyncError::corrupt)?;
+        if !journaled {
+            return Err(SyncError::CoordinateDiverged);
+        }
+        let reason = push_refusal(workspace_id, refusal).reason;
+        tx.execute(
+            "INSERT INTO replication_pending_refusals \
+             (workspace_id,origin_id,origin_seq,op_kind,reason_code,reason_message) \
+             VALUES (?1,?2,?3,?4,?5,?6) ON CONFLICT(workspace_id,origin_id,origin_seq) DO NOTHING",
+            params![
+                workspace_id,
+                refusal.origin_id,
+                refusal.origin_seq,
+                refusal.op_kind,
+                reason.code(),
+                reason.message()
+            ],
+        )
+        .map_err(SyncError::persist)?;
+    }
+    Ok(())
+}
+
+/// How a hosted pass reports an op the relay refused.
+pub(crate) fn push_refusal(
+    workspace_id: &str,
+    refusal: &crate::HostedPushRefusal,
+) -> crate::ReplicationRefusal {
+    crate::ReplicationRefusal {
+        workspace_id: workspace_id.to_owned(),
+        origin_id: refusal.origin_id.clone(),
+        origin_seq: refusal.origin_seq,
+        op_kind: refusal.op_kind.clone(),
+        reason: crate::RefusalReason::InvalidInput {
+            reason: format!("the relay refused this hosted write: {}", refusal.reason),
+        },
+    }
+}
+
 /// [`document_named`] over a `replication_log` row's `op_kind` and
 /// `payload_json`.
 const DOCUMENT_NAMED_SQL: &str = "CASE op_kind \

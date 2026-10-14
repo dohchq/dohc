@@ -7,6 +7,9 @@ import {createReplicaReadPrincipal} from "./replicaReadPrincipal";
 import {hostedRowDecision, hostedWriteAllowed} from "./serviceHostFeed";
 import {parseLogOp, SERVICE_HOST_ORIGIN_PREFIX} from "./relayLogInputs";
 import {referencedBlobShas} from "./storage/blobReferences";
+import {stableJsonStringify} from "./canonicalJson";
+import {filterOpForShare, type AnyShareSelector} from "./shareFilter";
+import {openSyncRelayStorage} from "./storage";
 import nativeAuthoredSettlement from "./testing/fixtures/nativeAuthoredSettlement.json";
 
 const cleanup: Array<() => Promise<void>> = [];
@@ -21,6 +24,8 @@ const HOST_ORIGIN = `${SERVICE_HOST_ORIGIN_PREFIX}native`;
 
 type Op = {relaySeq: number; originId: string; originSeq: number; opKind: string; payload: Record<string, unknown>};
 type Page = {scope: {token: string; documents: Array<{objectId: string; path: string}>}; ops: Op[]; nextCursor: number; hasMore: boolean};
+type PushAnswer = {accepted: number; inserted: number; skipped: number; currentMaxOriginSeq: number;
+  refusals?: Array<{originId: string; originSeq: number; opKind: string; reason: string}>};
 
 const blob = (text: string) => {
   const content = new Uint8Array(new TextEncoder().encode(text));
@@ -186,52 +191,185 @@ it("follows a document across the share boundary by enrollment, never by path al
     .toEqual(["private/secret.md", "private/secret.md", "docs/secret.md"]);
 });
 
-it("refuses writes outside the hosted documents and lets accepted edits settle after revocation", async () => {
+it("refuses each write outside the hosted documents at its own coordinate and lets accepted edits settle after revocation", async () => {
   const f = await fixture();
   const update = blob("settled update");
   await f.upload(update);
-  const refused = async (ops: Array<[string, Record<string, unknown>]>) => {
-    const response = await f.push(ops);
-    expect(response.status).toBe(403);
-    expect(await response.json()).toMatchObject({code: "share_op_rejected"});
-  };
-  await refused([["moment.append", write("object-private", "private/secret.md", update)]]);
-  await refused([["ydoc.update", ydoc("object-private", "private/secret.md", update)]]);
-  await refused([["moment.append", rename(binding.objectId, "docs/a.md", "docs/moved.md", A)]]);
-  await refused([["moment.append", {...write(binding.objectId, "docs/a.md", update), operation: "delete"}]]);
-  await refused([["moment.append", write(binding.objectId, "docs/a.md", update, {beforeObjectId: "object-private"})]]);
-  await refused([["ydoc.update", {...ydoc(binding.objectId, "docs/a.md", update), path: "docs/b.md"}]]);
-  await refused([["workspace.init", {}]]);
-  await refused([["chat.channel.create", {wireId: "general", kind: "channel"}]]);
-  await refused([["ydoc.update", ydoc(binding.objectId, "docs/a.md", update)], ["version.create", {versionId: "branch", forkSnapshots: []}]]);
-  expect(f.hostCoordinate(0)).toBeNull();
+  const outside: Array<[string, Record<string, unknown>]> = [
+    ["moment.append", write("object-private", "private/secret.md", update)],
+    ["ydoc.update", ydoc("object-private", "private/secret.md", update)],
+    ["moment.append", rename(binding.objectId, "docs/a.md", "docs/moved.md", A)],
+    ["moment.append", {...write(binding.objectId, "docs/a.md", update), operation: "delete"}],
+    ["moment.append", write(binding.objectId, "docs/a.md", update, {beforeObjectId: "object-private"})],
+    ["ydoc.update", {...ydoc(binding.objectId, "docs/a.md", update), path: "docs/b.md"}],
+    ["workspace.init", {}],
+    ["chat.channel.create", {wireId: "general", kind: "channel"}],
+    ["version.create", {versionId: "branch", forkSnapshots: []}],
+  ];
+  const edit = ["ydoc.update", ydoc(binding.objectId, "docs/a.md", update)] satisfies [string, Record<string, unknown>];
+  const response = await f.push([...outside.slice(0, 4), edit, ...outside.slice(4)]);
+  expect(response.status).toBe(200);
+  const body = await response.json() as PushAnswer;
+  expect(body).toMatchObject({accepted: 10, inserted: 10, skipped: 0, currentMaxOriginSeq: 9});
+  const refusedSeqs = [0, 1, 2, 3, 5, 6, 7, 8, 9];
+  expect(body.refusals).toEqual(refusedSeqs.map((originSeq, index) =>
+    ({originId: HOST_ORIGIN, originSeq, opKind: outside[index]![0], reason: "outside-hosted-documents"})));
+  // The relay keeps each coordinate with a digest of what it refused, never the payload.
+  for (const [index, originSeq] of refusedSeqs.entries()) {
+    const [opKind, payload] = outside[index]!;
+    expect(f.hostCoordinate(originSeq)).toMatchObject({opKind: "relay.refused",
+      payloadJson: stableJsonStringify({opKind, payloadSha256: sha256Hex(stableJsonStringify(payload)), reason: "outside-hosted-documents"})});
+  }
+  expect(f.hostCoordinate(4)).toMatchObject({opKind: "ydoc.update"});
 
-  expect((await f.push([["ydoc.update", ydoc(binding.objectId, "docs/a.md", update)]])).status).toBe(200);
   f.setGrant(scope.shareId, "status='revoked',revoked_at_ms=20");
   expect(f.objects(await f.read())).toEqual(["workspace"]);
   // The owner's content goes; bytes the host uploaded itself are still its own.
   expect(await f.blobStatus(A.sha256)).toBe(404);
   expect(await f.blobStatus(update.sha256)).toBe(200);
   // Still enrolled: work the relay accepted before revocation can settle.
-  expect((await f.push([["ydoc.update", ydoc(binding.objectId, "docs/a.md", update)]], 1)).status).toBe(200);
+  expect(await (await f.push([edit], 10)).json()).toMatchObject({inserted: 1, currentMaxOriginSeq: 10});
   // Once the session host releases it, the uncovered document retires and the credential ends.
   expect(f.storage.releaseServiceHostEnrollment({workspaceId: ws, objectId: binding.objectId, nowMs: 30})).toMatchObject({enabled: false, retired: true});
-  expect((await f.push([["ydoc.update", ydoc(binding.objectId, "docs/a.md", update)]], 2)).status).toBe(404);
+  expect((await f.push([edit], 11)).status).toBe(404);
 });
 
-it("rechecks the write scope under the append's writer", async () => {
+it("decides each new coordinate again under the append's writer", async () => {
   const f = await fixture();
+  f.enroll("docs/b.md");
   const update = blob("raced update");
   await f.upload(update);
   const prepare = f.storage.prepareLogAppend.bind(f.storage);
-  // The rename lands after the route's first check and before the append.
+  // The release lands after the route's first decision and before the append.
   f.storage.prepareLogAppend = async (...args) => {
-    f.append(["moment.append", rename(binding.objectId, "docs/a.md", "private/a.md", A)]);
+    f.storage.setServiceHostEnrollmentEnabled({workspaceId: ws, path: "docs/a.md", ownerUserId: "owner-1", enabled: false, nowMs: 30, guard() {}});
+    f.storage.releaseServiceHostEnrollment({workspaceId: ws, objectId: binding.objectId, nowMs: 31});
     return prepare(...args);
   };
-  const response = await f.push([["ydoc.update", ydoc(binding.objectId, "docs/a.md", update)]]);
-  expect(response.status).toBe(403);
-  expect(f.hostCoordinate(0)).toBeNull();
+  const response = await f.push([["ydoc.update", ydoc(binding.objectId, "docs/a.md", update)], ["ydoc.update", ydoc("object-b", "docs/b.md", update)]]);
+  expect(await response.json()).toMatchObject({inserted: 2, refusals: [{originSeq: 0, reason: "outside-hosted-documents"}]});
+  expect(f.hostCoordinate(0)).toMatchObject({opKind: "relay.refused"});
+  expect(f.hostCoordinate(1)).toMatchObject({opKind: "ydoc.update"});
+});
+
+it("returns each coordinate's original decision when a batch is retried after its scope changed", async () => {
+  const f = await fixture();
+  f.enroll("docs/b.md");
+  const update = blob("retried update"), late = blob("uploaded late");
+  await f.upload(update);
+  const batch: Array<[string, Record<string, unknown>]> = [
+    ["ydoc.update", ydoc(binding.objectId, "docs/a.md", update)],
+    ["ydoc.update", ydoc("object-private", "private/secret.md", update)],
+    ["ydoc.update", ydoc("object-b", "docs/b.md", update)],
+    ["ydoc.update", ydoc(binding.objectId, "docs/a.md", late)],
+  ];
+  const first = await (await f.push(batch)).json() as PushAnswer;
+  expect(first).toMatchObject({inserted: 4, currentMaxOriginSeq: 3});
+  expect(first.refusals!.map(refusal => [refusal.originSeq, refusal.reason])).toEqual([[1, "outside-hosted-documents"], [3, "blob-outside-reach"]]);
+  // Every decision would now differ: b left the scope, and the late blob is uploaded.
+  f.storage.setServiceHostEnrollmentEnabled({workspaceId: ws, path: "docs/b.md", ownerUserId: "owner-1", enabled: false, nowMs: 30, guard() {}});
+  f.storage.releaseServiceHostEnrollment({workspaceId: ws, objectId: "object-b", nowMs: 31});
+  await f.upload(late);
+  const prepared: string[] = [];
+  const prepare = f.storage.prepareLogAppend.bind(f.storage);
+  f.storage.prepareLogAppend = async (input, signal) => {prepared.push(...input.ops.map(op => op.opKind)); return prepare(input, signal);};
+  const retried = await (await f.push(batch)).json() as PushAnswer;
+  expect(retried).toEqual({...first, inserted: 0, skipped: 4});
+  // A retried refusal is answered from the log, without preparing its payload again.
+  expect(prepared).toEqual(["ydoc.update", "relay.refused", "ydoc.update", "relay.refused"]);
+  // A different payload at a decided coordinate conflicts, whichever the decision was.
+  for (const originSeq of [0, 1]) {
+    expect((await f.push([["ydoc.update", ydoc(binding.objectId, "docs/a.md", A)]], originSeq)).status).toBe(409);
+  }
+  // A later op lands after a refused one.
+  expect(await (await f.push([batch[0]!], 4)).json()).toMatchObject({inserted: 1, currentMaxOriginSeq: 4});
+});
+
+it("keeps a refused row's coordinate without its payload, its blobs or any projection", async () => {
+  const f = await fixture();
+  const projections = () => ["sync_relay_current_files", "sync_relay_object_paths", "sync_relay_object_moments", "sync_relay_version_snapshot_blobs"]
+    .map(table => f.raw.prepare(`SELECT count(*) AS count FROM ${table}`).get()!.count);
+  const before = projections();
+  const response = await f.push([["moment.append", write("object-new", "docs/new.md", P)], ["moment.append", write("object-private", "private/secret.md", P)]]);
+  expect(await response.json()).toMatchObject({inserted: 2, refusals: [{originSeq: 0}, {originSeq: 1}]});
+  expect(projections()).toEqual(before);
+  expect(f.raw.prepare("SELECT relay_admission FROM sync_relay_log WHERE origin_id=? ORDER BY origin_seq").all(HOST_ORIGIN).map(row => row.relay_admission))
+    .toEqual(["refused", "refused"]);
+  expect(await f.blobStatus(P.sha256)).toBe(404);
+  // The owner's ordinary pull reads the refusal, never what was refused.
+  const owner = f.storage.fetchLogPage({workspaceId: ws, sinceRelaySeq: 0, limit: 100}).rows.filter(row => row.originId === HOST_ORIGIN);
+  expect(owner.map(row => row.opKind)).toEqual(["relay.refused", "relay.refused"]);
+  expect(JSON.stringify(owner)).not.toContain(P.sha256);
+  // No reader serves it as a change: not the hosted feed, nor a file, group or chat share.
+  expect(JSON.stringify(await f.read())).not.toContain("relay.refused");
+  const selectors: AnyShareSelector[] = [{paths: ["docs"], versionId: null, access: "edit"},
+    {kind: "group", channelWireId: "general", paths: ["docs"], versionId: null, access: "read-write"},
+    {kind: "chat", channelWireId: "general", access: "read-write"}];
+  for (const selector of selectors) expect(filterOpForShare(selector, "relay.refused", owner[0]!.payloadJson).allowed).toBe(false);
+  // Only the relay writes one.
+  const ordinary = await f.handle(new Request(`https://relay.test/sync/${ws}/log`, {method: "POST",
+    headers: {authorization: `Bearer ${f.bearer}`, "content-type": "application/json"},
+    body: JSON.stringify({replicationEpoch: "epoch", streamIdentity: "stream", originId: "owner-device",
+      ops: [{originSeq: 100, opKind: "relay.refused", recordedAtMs: 3, payload: {}}]})}));
+  expect(ordinary.status).toBe(400);
+  const next = f.storage.maxOriginSeq(ws, "owner-device") + 1;
+  const forged = parseLogOp({originSeq: next, opKind: "moment.append", recordedAtMs: 3, payload: {}});
+  forged.opKind = "relay.refused";
+  expect(() => f.storage.appendLogBatch({workspaceId: ws, originId: "owner-device", ops: [forged]})).toThrow(/written only by the relay/);
+  const marked = parseLogOp({originSeq: next, opKind: "moment.append", recordedAtMs: 3, payload: {}});
+  marked.relayAdmission = "refused";
+  expect(() => f.storage.appendLogBatch({workspaceId: ws, originId: "owner-device", ops: [marked]})).toThrow(/written only by the relay/);
+});
+
+it("settles a moved or replaced document's work without taking back its old location", async () => {
+  const f = await fixture();
+  f.enroll("docs/b.md");
+  const moved = blob("drained after move"), replaced = blob("drained after replace"), successor = blob("new b");
+  f.storage.putBlob({workspaceId: ws, sha256: successor.sha256, content: successor.content, createdAtMs: 1});
+  // Stored directly: an upload through the route would compute each document's reach while it is still shared.
+  for (const content of [moved, replaced]) f.storage.putServiceHostBlob({workspaceId: ws, sha256: content.sha256, content: content.content, createdAtMs: 1});
+  // The owner moves a out of the share, and deletes b and puts another file at its path.
+  f.append(["moment.append", rename(binding.objectId, "docs/a.md", "private/a.md", A)],
+    ["moment.append", {momentId: "delete-b", objectId: "object-b", versionId: "main", operation: "delete", path: "docs/b.md",
+      payloadBeforePath: "docs/b.md", payloadBeforeBlobSha256: B.sha256, recordedAtMs: 2}],
+    ["moment.append", write("object-successor", "docs/b.md", successor)]);
+  const hostedScope = f.storage.readServiceHostFeedScope(ws)!;
+  expect([...hostedScope.departed]).toEqual([binding.objectId, "object-b"]);
+  expect([...hostedScope.shared.keys()]).toEqual([]);
+  const placement = () => ({
+    files: f.raw.prepare("SELECT path, blob_sha256 FROM sync_relay_current_files WHERE workspace_id=? ORDER BY path").all(ws).map(row => [row.path, row.blob_sha256]),
+    paths: f.raw.prepare("SELECT object_id, path FROM sync_relay_object_paths WHERE workspace_id=? ORDER BY object_id").all(ws).map(row => [row.object_id, row.path]),
+    atA: f.storage.objectIdAtPathInVersion({workspaceId: ws, versionId: "main", path: "docs/a.md"}),
+    atB: f.storage.objectIdAtPathInVersion({workspaceId: ws, versionId: "main", path: "docs/b.md"}),
+  });
+  const before = placement();
+  expect(before).toMatchObject({atA: undefined, atB: "object-successor"});
+  // Each write names its own document's earlier content, which the host can no longer read.
+  expect(await f.blobStatus(A.sha256)).toBe(404);
+  const response = await f.push([
+    ["moment.append", write(binding.objectId, "docs/a.md", moved, {momentId: "drain-a", payloadBeforePath: "docs/a.md", payloadBeforeBlobSha256: A.sha256})],
+    ["moment.append", write("object-b", "docs/b.md", replaced, {momentId: "drain-b", payloadBeforePath: "docs/b.md", payloadBeforeBlobSha256: B.sha256})],
+    ["ydoc.update", ydoc(binding.objectId, "docs/a.md", moved)],
+  ]);
+  const body = await response.json() as PushAnswer;
+  expect(body).toMatchObject({inserted: 3, currentMaxOriginSeq: 2});
+  expect(body.refusals).toBeUndefined();
+  // The publications keep their history.
+  expect(f.raw.prepare("SELECT op_kind, json_extract(payload_json,'$.momentId') AS moment, relay_admission FROM sync_relay_log WHERE origin_id=? ORDER BY origin_seq")
+    .all(HOST_ORIGIN).map(row => [row.op_kind, row.moment, row.relay_admission]))
+    .toEqual([["moment.append", "drain-a", "departed"], ["moment.append", "drain-b", "departed"], ["ydoc.update", null, "departed"]]);
+  // Neither the location nor the current file moves back, and neither document is current again.
+  expect(placement()).toEqual(before);
+  expect([...f.storage.readServiceHostFeedScope(ws)!.departed]).toEqual([binding.objectId, "object-b"]);
+  expect(await f.blobStatus(A.sha256)).toBe(404);
+  // Another document's history stays out of a departed document's writes.
+  expect(await (await f.push([["moment.append", write("object-b", "docs/b.md", replaced,
+    {momentId: "borrow", payloadBeforePath: "docs/b.md", payloadBeforeBlobSha256: A.sha256})]], 3)).json())
+    .toMatchObject({refusals: [{originSeq: 3, reason: "blob-outside-reach"}]});
+  // A reopened relay keeps which rows departed, and the column admits nothing else.
+  openSyncRelayStorage(f.path, f.config).close();
+  expect(f.raw.prepare("SELECT count(*) AS count FROM sync_relay_log WHERE relay_admission='departed'").get()!.count).toBe(3);
+  expect(() => f.raw.prepare("UPDATE sync_relay_log SET relay_admission='elsewhere' WHERE origin_id=?").run(HOST_ORIGIN)).toThrow(/CHECK/);
 });
 
 it("refuses a write naming a blob the host never fetched or uploaded, and keeps it unreadable", async () => {
@@ -258,12 +396,15 @@ it("refuses a write naming a blob the host never fetched or uploaded, and keeps 
     ["moment.append", write(binding.objectId, "docs/a.md", own, {payloadBeforePath: "docs/a.md",
       settlementReference: {formatVersion: 1, record: {acceptedStateBlobSha256: sha256}}})],
   ] satisfies Array<[string, Record<string, unknown>]>;
-  let prepared = 0;
+  // Preparation would probe a settlement's digest, so it must only ever see the refusal.
+  const prepared: string[] = [];
   const prepare = f.storage.prepareLogAppend.bind(f.storage);
-  f.storage.prepareLogAppend = async (...args) => {prepared++; return prepare(...args);};
+  f.storage.prepareLogAppend = async (input, signal) => {prepared.push(...input.ops.map(op => op.payloadJson)); return prepare(input, signal);};
+  let next = 0;
   const answer = async (op: [string, Record<string, unknown>]) => {
-    const response = await f.push([op]);
-    return {status: response.status, body: await response.json() as unknown};
+    const originSeq = next++;
+    const response = await f.push([op], originSeq);
+    return {status: response.status, refusals: (await response.json() as PushAnswer).refusals?.map(({originSeq: seq, ...rest}) => ({...rest, seq: seq - originSeq}))};
   };
   const absentSha256 = "e".repeat(64);
   const hostedScope = f.storage.readServiceHostFeedScope(ws)!;
@@ -271,19 +412,19 @@ it("refuses a write naming a blob the host never fetched or uploaded, and keeps 
     // Only the blob refuses it: the document, path and operation are the host's to write.
     expect(hostedWriteAllowed(hostedScope, op[0], op[1]), op[0]).toBe(true);
     const refused = await answer(op);
-    expect(refused, op[0]).toMatchObject({status: 403, body: {code: "share_op_rejected"}});
+    expect(refused, op[0]).toEqual({status: 200, refusals: [{originId: HOST_ORIGIN, seq: 0, opKind: op[0], reason: "blob-outside-reach"}]});
     // A digest the relay holds is refused exactly like one it never saw.
     expect(await answer(named(absentSha256)[index]!), op[0]).toEqual(refused);
   }
-  expect(await answer(["ydoc.update", ydoc(binding.objectId, "docs/a.md", YP)])).toMatchObject({status: 403, body: {code: "share_op_rejected"}});
-  expect(prepared).toBe(0);
-  expect(f.hostCoordinate(0)).toBeNull();
+  expect(await answer(["ydoc.update", ydoc(binding.objectId, "docs/a.md", YP)])).toMatchObject({refusals: [{reason: "blob-outside-reach"}]});
+  expect(prepared.length).toBe(next);
+  expect(prepared.join()).not.toMatch(new RegExp(`${P.sha256}|${YP.sha256}|${absentSha256}`));
   for (const sha256 of [P.sha256, YP.sha256]) expect(await f.blobStatus(sha256)).toBe(404);
 
   // Blobs the host fetched or uploaded remain writable.
-  expect((await f.push([["moment.append", write(binding.objectId, "docs/a.md", own,
+  expect(await (await f.push([["moment.append", write(binding.objectId, "docs/a.md", own,
     {momentId: "host-edit", payloadBeforePath: "docs/a.md", payloadBeforeBlobSha256: replacement.sha256})],
-    ["ydoc.update", ydoc(binding.objectId, "docs/a.md", Y)]])).status).toBe(200);
+    ["ydoc.update", ydoc(binding.objectId, "docs/a.md", Y)]], next)).json()).not.toHaveProperty("refusals");
 });
 
 it("serves a refused row and its status without granting its blobs", async () => {
@@ -361,10 +502,10 @@ it("drops upload proof with its collected blob until the host uploads it again",
   expect(swept.removedSha256s).toEqual([collected.sha256]);
   expect(f.uploads()).toBe(0);
   const edit = ["ydoc.update", ydoc(binding.objectId, "docs/a.md", collected)] satisfies [string, Record<string, unknown>];
-  expect(await (await f.push([edit])).json()).toMatchObject({code: "share_op_rejected"});
+  expect(await (await f.push([edit])).json()).toMatchObject({refusals: [{reason: "blob-outside-reach"}]});
   await f.upload(collected);
   expect(f.uploads()).toBe(1);
-  expect((await f.push([edit])).status).toBe(200);
+  expect(await (await f.push([edit], 1)).json()).not.toHaveProperty("refusals");
 });
 
 it("keeps an aged blob the host uploads again until its write lands", async () => {
@@ -400,9 +541,9 @@ it("drops upload proof when the workspace stops being hosted", async () => {
   expect(uploads()).toBe(0);
   setEnabled("docs/a.md", true);
   const edit = ["ydoc.update", ydoc(binding.objectId, "docs/a.md", kept)] satisfies [string, Record<string, unknown>];
-  expect(await (await f.push([edit])).json()).toMatchObject({code: "share_op_rejected"});
+  expect(await (await f.push([edit])).json()).toMatchObject({refusals: [{reason: "blob-outside-reach"}]});
   await f.upload(kept);
-  expect((await f.push([edit])).status).toBe(200);
+  expect(await (await f.push([edit], 1)).json()).not.toHaveProperty("refusals");
   // A new workspace identity leaves every enrollment behind.
   expect(f.storage.rotateWorkspaceIdentity({workspaceId: ws, ownerUserId: "owner-1", replicationEpoch: "epoch-2", streamIdentity: "stream-2", rotatedAtMs: 40})).toBe("rotated");
   expect(uploads()).toBe(0);
@@ -421,7 +562,8 @@ it("reads only the current scope with the workspace's one credential as document
   expect(f.objects(left)).toEqual(["workspace", binding.objectId]);
   expect(await f.blobStatus(B.sha256)).toBe(404);
   expect((await f.request("GET", `log?${identity}&scope=${left.scope.token}&since=0&object=object-b`)).status).toBe(400);
-  expect((await f.push([["moment.append", write("object-b", "docs/b.md", B)]])).status).toBe(403);
+  expect(await (await f.push([["moment.append", write("object-b", "docs/b.md", B)]])).json())
+    .toMatchObject({refusals: [{reason: "outside-hosted-documents"}]});
   // Ordinary replication stays open to the same credential until the session host switches over.
   expect((await f.handle(new Request(`https://relay.test/sync/${ws}/log?${identity}`, {headers: {authorization: `Bearer ${f.bearer}`}}))).status).toBe(200);
   // A new workspace identity leaves the enrollments, and so the credential, behind.
@@ -484,7 +626,8 @@ it("admits the engine's own settlement batch for its hosted document, both ways"
   const settlement = nativeAuthoredSettlement.find(op => op.opKind === "live.audit.settlement")!;
   const document = (settlement.payload as {record: {binding: {workspaceId: string; objectId: string; currentPath: string}}}).record.binding;
   const held = new Map([[document.objectId, document.currentPath]]);
-  const hosted = {workspaceId: document.workspaceId, replicationEpoch: "epoch", streamIdentity: "stream", hosted: held, shared: held, token: "token"};
+  const hosted = {workspaceId: document.workspaceId, replicationEpoch: "epoch", streamIdentity: "stream", hosted: held,
+    departed: new Set<string>(), shared: held, token: "token"};
   for (const op of nativeAuthoredSettlement) {
     expect(hostedWriteAllowed(hosted, op.opKind, op.payload), op.opKind).toBe(true);
     const row = {opKind: op.opKind, payloadJson: JSON.stringify(op.payload), recordedAtMs: op.recordedAtMs};

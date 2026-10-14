@@ -22,9 +22,11 @@ export interface ServiceHostFeedScope {
   readonly workspaceId: string;
   readonly replicationEpoch: string;
   readonly streamIdentity: string;
-  /** Enrolled documents still at their enrolled path, object to path. The host may settle these. */
+  /** Enrolled documents, object to enrolled path. The host may settle these at that path. */
   readonly hosted: ReadonlyMap<string, string>;
-  /** The hosted documents an active Edit grant covers now. The host may read only these. */
+  /** The hosted documents no longer at their enrolled path. Their publications project nowhere. */
+  readonly departed: ReadonlySet<string>;
+  /** The hosted documents at their path that an active Edit grant covers now. The host may read only these. */
   readonly shared: ReadonlyMap<string, string>;
   /** Changes whenever `shared` or the workspace identity changes. */
   readonly token: string;
@@ -45,14 +47,14 @@ export function readServiceHostFeedScope(storage: StorageContext, workspaceId: s
       const parsed = parseStoredAnyShareSelectorJson(share.selectorJson), selector = parsed && effectiveShareSelector(parsed, "edit");
       return selector && isLiveEditShareSelector(selector) && canonicalLiveSelector(share, selector) ? [selector] : [];
     });
-  const hosted = new Map<string, string>(), shared = new Map<string, string>();
+  const hosted = new Map<string, string>(), departed = new Set<string>(), shared = new Map<string, string>();
   for (const row of enrollments) {
-    if (storage.objectIdAtPathInVersion({workspaceId, versionId: "main", path: row.path}) !== row.objectId) continue;
     hosted.set(row.objectId, row.path);
-    if (selectors.some(selector => pathVisibleThroughShare(selector, row.path))) shared.set(row.objectId, row.path);
+    if (storage.objectIdAtPathInVersion({workspaceId, versionId: "main", path: row.path}) !== row.objectId) departed.add(row.objectId);
+    else if (selectors.some(selector => pathVisibleThroughShare(selector, row.path))) shared.set(row.objectId, row.path);
   }
   const token = createHash("sha256").update(JSON.stringify(["dohc-hosted-scope-v1", workspaceId, replicationEpoch, streamIdentity, [...shared]])).digest("hex");
-  return Object.freeze({workspaceId, replicationEpoch, streamIdentity, hosted, shared, token});
+  return Object.freeze({workspaceId, replicationEpoch, streamIdentity, hosted, departed, shared, token});
 }
 
 /** One document's rows after a relay sequence, in relay order. Callers still decide each row. */

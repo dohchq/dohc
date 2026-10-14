@@ -55,6 +55,8 @@ pub struct PushRequest {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PushResponse {
     pub settlement_refusals: Vec<SettlementPublicationRefusal>,
+    /// Ops the scoped feed refused one at a time. Only a hosted push has any.
+    pub hosted_refusals: Vec<HostedPushRefusal>,
     pub accepted: usize,
     pub inserted: usize,
     pub skipped: usize,
@@ -70,6 +72,18 @@ pub struct SettlementPublicationRefusal {
     pub settlement_id: String,
     pub reason: String,
 }
+
+/// A hosted op the relay refused. It keeps the coordinate as a refusal, so
+/// the origin's later ops still land; the op itself never reaches the log.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct HostedPushRefusal {
+    pub origin_id: String,
+    pub origin_seq: i64,
+    pub op_kind: String,
+    pub reason: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PullRequest {
     pub workspace_id: String,
@@ -1601,7 +1615,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                         }
                         Err(error) => return Err(error),
                     };
-                    validate_push_response(&response, batch, local_max)?;
+                    validate_push_response(&response, batch, local_max, hosted)?;
                     if response.current_max_origin_seq > local_max {
                         return Err(RelayError::OriginDiverged);
                     }
@@ -1614,6 +1628,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                         &origin_id,
                         response.current_max_origin_seq,
                         &response.settlement_refusals,
+                        &response.hosted_refusals,
                         faults,
                         leases,
                         now_ms,
@@ -1636,6 +1651,12 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                             },
                         },
                     ));
+                    publication_refusals.extend(
+                        response
+                            .hosted_refusals
+                            .iter()
+                            .map(|refusal| crate::hosted::push_refusal(workspace_id, refusal)),
+                    );
                     if !enrollment_prepared {
                         sharing_declined.extend(
                             crate::live_audit::enrollment::prepare_exports(
@@ -2976,6 +2997,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             })?;
             if push.accepted != batch.len()
                 || push.inserted.checked_add(push.skipped) != Some(push.accepted)
+                || !push.hosted_refusals.is_empty()
             {
                 return Err(RelayError::InvalidResponse);
             }
@@ -4441,8 +4463,10 @@ fn validate_push_response(
     response: &PushResponse,
     batch: &[ReplicationEnvelope],
     local_max: i64,
+    hosted: bool,
 ) -> Result<(), RelayError> {
     crate::settlement_publication::validate_push_refusals(&response.settlement_refusals, batch)?;
+    crate::hosted::validate_push_refusals(response, batch, hosted)?;
     let last = batch
         .last()
         .map(|op| op.origin_seq)
@@ -4465,6 +4489,7 @@ fn validate_push_response(
 
 fn validate_probe_response(response: &PushResponse) -> Result<(), RelayError> {
     if !response.settlement_refusals.is_empty()
+        || !response.hosted_refusals.is_empty()
         || response.accepted != 0
         || response.inserted != 0
         || response.skipped != 0
