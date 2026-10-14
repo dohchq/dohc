@@ -5369,7 +5369,7 @@ mod tests {
             INSERT INTO owner_ydoc_outbox_entries(outbox_id,sequence,append_key,delivery_id,update_digest,update_blob_digest,byte_length,created_at_ms,pending,result_pending_bytes,result_oldest_entry_at_ms,result_state) \
             VALUES ('outbox',1,'append','delivery','base','base',1,1,1,1,1,'active');").unwrap();
         assert_eq!(
-            run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).unwrap(),
+            run_migrations(&mut conn, &BASELINE_MIGRATIONS[..=before], &ctx, &NoFaults).unwrap(),
             MigrationOutcome::Applied { newly_applied: 1 }
         );
         let retained: (String, Option<bool>) = conn
@@ -5800,12 +5800,12 @@ mod tests {
         let dir = tempdir();
         let mut conn = open_bare(&dir.join("history-operation-index.db"));
         let ctx = MigrationContext::current(1100);
-        let last = BASELINE_MIGRATIONS.len() - 1;
-        assert_eq!(BASELINE_MIGRATIONS[last].ordinal, 53);
-        assert!(BASELINE_MIGRATIONS[last - 1].ordinal < 53);
-        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..last], &ctx, &NoFaults).unwrap();
+        let index = migration_index("v2-history-operation-correlation");
+        assert_eq!(BASELINE_MIGRATIONS[index].ordinal, 53);
+        assert!(BASELINE_MIGRATIONS[index - 1].ordinal < 53);
+        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..index], &ctx, &NoFaults).unwrap();
         assert_eq!(
-            run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).unwrap(),
+            run_migrations(&mut conn, &BASELINE_MIGRATIONS[..=index], &ctx, &NoFaults).unwrap(),
             MigrationOutcome::Applied { newly_applied: 1 }
         );
         let plan: Vec<String> = conn.prepare("EXPLAIN QUERY PLAN SELECT moment_id FROM moments WHERE workspace_id=?1 AND metadata_correlation_id=?2")
@@ -5816,11 +5816,11 @@ mod tests {
             "{plan:?}"
         );
         assert_eq!(
-            run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).unwrap(),
+            run_migrations(&mut conn, &BASELINE_MIGRATIONS[..=index], &ctx, &NoFaults).unwrap(),
             MigrationOutcome::Applied { newly_applied: 0 }
         );
         // Missing lower ordinals can arrive after 53 without applying 53 twice.
-        let mut filled = BASELINE_MIGRATIONS.to_vec();
+        let mut filled = BASELINE_MIGRATIONS[..=index].to_vec();
         let mut missing = 0;
         for ordinal in [51, 52] {
             if !filled.iter().any(|m| m.ordinal == ordinal) {
