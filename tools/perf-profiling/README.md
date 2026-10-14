@@ -170,14 +170,16 @@ Only publications and edits between the first and last trusted key count toward 
 Rates below 18 selections or 4 edits per second fail the workload. Any gap above 100 ms also fails, including either window edge.
 The output records each peer's largest gap and counters.
 Before closing, peers stop generating edits and wait for every pending update acknowledgement, bounded by the fixture signal and 120-second deadline.
+A peer that leaves the live state fails the drain immediately; cleanup preserves that failure.
 The harness then waits up to 120 seconds for the owner's editor to contain exactly the total inserted marker count.
 A delivery timeout reports the observed count. Peers leave before the next document.
-At the last key, the owner must already show at least `sum(windowEdits) - peers` insertions, allowing one in-flight edit per peer.
+Just after the last key's end mark, the owner must already show at least `sum(windowEdits) - peers` insertions, allowing one in-flight edit per peer.
 Later catch-up cannot turn a stalled typing window into a pass.
 
-Before each typing arm, the harness samples the renderer clock between two Node monotonic timestamps.
-Their midpoint supplies the renderer-to-Node offset. Peer ticks and the rebased first-to-last-key window use the Node clock.
-The output retains the offset and round-trip interval; owner awareness uses its original renderer window.
+Before and after each typing arm, the harness takes ten renderer clock samples between Node monotonic timestamps.
+The shortest round trip supplies the midpoint offset. If it exceeds 5 ms, the harness retries once after a paint, then refuses the run.
+The two selected offsets must agree within 3 ms. Peer ticks and the rebased first-to-last-key window use the Node clock.
+The output retains both batches, selected offsets, round-trip intervals, and drift; owner awareness uses its original renderer window.
 The owner observer counts remote awareness updates during the typing window through the Tiptap caret provider's awareness.
 It reports `presenceUpdatesReceived` and the binding explicitly. An unbound baseline reports zero.
 A caret extension without observable awareness or received updates refuses the run.

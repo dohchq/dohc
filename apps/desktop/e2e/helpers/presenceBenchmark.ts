@@ -79,13 +79,23 @@ export async function waitForPresence<T>(read: () => T | Promise<T>, predicate: 
 }
 
 export async function finishPresencePeerSessions(
-  sessions: Array<{ state(): { pendingUpdates: number } }>,
+  sessions: Array<{ state(): { pendingUpdates: number; status: string } }>,
   close: () => Promise<void>,
   signal: AbortSignal,
 ) {
+  let failure: unknown;
   try {
-    await waitForPresence(() => sessions.every(session => session.state().pendingUpdates === 0), Boolean, signal);
-  } finally { await close(); }
+    await waitForPresence(() => {
+      const states = sessions.map(session => session.state());
+      const dead = states.find(state => state.status !== 'live');
+      if (dead) throw new Error('Peer stopped during acknowledgement drain: ' + dead.status);
+      return states.every(state => state.pendingUpdates === 0);
+    }, Boolean, signal);
+  } catch (error) { failure = error; throw error; }
+  finally {
+    try { await close(); }
+    catch (error) { if (!failure) throw error; }
+  }
 }
 
 export function presencePeerSchedulePass(peers: Array<{ selectionHz: number; typingHz: number; maxGapMs: number }>) {

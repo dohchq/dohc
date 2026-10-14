@@ -1,3 +1,4 @@
+import { samplePresenceClock, validatePresenceClocks } from './presence-owner.mjs';
 import assert from 'node:assert/strict';
 import { _electron } from '@playwright/test';
 import { createRequire } from 'node:module';
@@ -38,6 +39,8 @@ try {
       if (window.slow) { const end = performance.now() + 25; while (performance.now() < end) {} }
     }, true);
   });
+  const retryAfterPaint = () => page.evaluate(() => new Promise(done => requestAnimationFrame(() => requestAnimationFrame(done))));
+  const clockBefore = await samplePresenceClock(page, { retryAfterPaint });
   trace = await startTypingTrace(page);
   const samples = [];
   for (let index = 0; index < 8; index++) {
@@ -47,6 +50,7 @@ try {
     const end = await page.evaluate(mark => { performance.mark(mark); return performance.now(); }, typingTraceMark(index, 'after'));
     samples.push({ index, start, end });
   }
+  const clockSync = validatePresenceClocks(clockBefore, await samplePresenceClock(page, { retryAfterPaint }));
   // The final fixture key has a 25 ms handler, so Event Timing must report it.
   // Two animation callbacks can precede compositor presentation. Keep tracing
   // until that key's presentation report arrives instead of ending mid-frame.
@@ -59,9 +63,9 @@ try {
   await writeFile(join(output, 'trace.json'), captured.raw);
   const timing = await page.evaluate(() => { window.timing.events.push(...window.observer.takeRecords().map(event => event.toJSON())); window.observer.disconnect(); return window.timing; });
   const measured = measureTypingTrace(captured.events, samples, timing);
-  const result = { ...measured, browser: captured.browser, categories: captured.categories, timing };
+  const result = { ...measured, browser: captured.browser, categories: captured.categories, clockSync, timing };
   await writeFile(join(output, 'result.json'), JSON.stringify(result, null, 2));
-  console.log(JSON.stringify({ browser: result.browser, categories: result.categories, validation: result.validation }, null, 2));
+  console.log(JSON.stringify({ browser: result.browser, categories: result.categories, clockSync, validation: result.validation }, null, 2));
   assert.equal(result.validation.pass, true);
   assert.ok(result.validation.eventTimingChecked > 0, 'Smoke must exercise the Event Timing cross-check');
 } finally {

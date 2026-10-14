@@ -60,13 +60,32 @@ export function validatePresenceWorkload(workload, owner) {
       (owner.binding === 'unbound' || (owner.binding === 'caret-awareness' && owner.presenceUpdatesReceived > 0)) };
 }
 
-// Sample once before each typing arm. Both peer ticks and the rebased window use
-// Node's monotonic clock; renderer awareness keeps its own, unre-based window.
-export async function samplePresenceClock(page, now = () => performance.now()) {
-  const before = now();
-  const rendererNow = await page.evaluate(() => performance.now());
-  const after = now();
-  return { rendererToNodeOffsetMs: (before + after) / 2 - rendererNow, roundTripMs: after - before };
+// Keep the least queued of ten round trips. Both windows use the Node tick clock.
+export async function samplePresenceClock(page, { now = () => performance.now(), retryAfterPaint } = {}) {
+  const collect = async () => {
+    const samples = [];
+    for (let index = 0; index < 10; index++) {
+      const before = now();
+      const rendererNow = await page.evaluate(() => performance.now());
+      const after = now();
+      samples.push({ rendererToNodeOffsetMs: (before + after) / 2 - rendererNow, roundTripMs: after - before });
+    }
+    return samples;
+  };
+  let samples = await collect();
+  const best = () => samples.reduce((selected, sample) => sample.roundTripMs < selected.roundTripMs ? sample : selected);
+  if (best().roundTripMs > 5 && retryAfterPaint) { await retryAfterPaint(); samples = await collect(); }
+  const selected = best();
+  if (!Number.isFinite(selected.roundTripMs) || selected.roundTripMs < 0 || selected.roundTripMs > 5 || !Number.isFinite(selected.rendererToNodeOffsetMs)) {
+    throw new Error(`Presence clock refused: shortest round trip ${selected.roundTripMs} ms exceeds the 5 ms bound or is invalid`);
+  }
+  return { ...selected, samples };
+}
+
+export function validatePresenceClocks(before, after) {
+  const offsetDeltaMs = Math.abs(after.rendererToNodeOffsetMs - before.rendererToNodeOffsetMs);
+  if (!Number.isFinite(offsetDeltaMs) || offsetDeltaMs > 3) throw new Error(`Presence clock refused: offset changed by ${offsetDeltaMs} ms (limit 3 ms)`);
+  return { before, after, offsetDeltaMs };
 }
 
 export function rebasePresenceWindow(window, clock) {

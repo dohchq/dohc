@@ -61,8 +61,8 @@ test('finish awaits every pending edit acknowledgement before closing the peers'
   let pendingUpdates = 1, closed = false;
   const waiting = Promise.withResolvers();
   const finishing = finishPresencePeerSessions([
-    { state: () => ({ pendingUpdates: 0 }) },
-    { state: () => { waiting.resolve(); return { pendingUpdates }; } },
+    { state: () => ({ pendingUpdates: 0, status: 'live' }) },
+    { state: () => { waiting.resolve(); return { pendingUpdates, status: 'live' }; } },
   ], async () => { assert.equal(pendingUpdates, 0); closed = true; }, AbortSignal.timeout(120_000));
   await waiting.promise;
   assert.equal(closed, false);
@@ -75,7 +75,7 @@ test('acknowledgement drain obeys cancellation and still closes peers', async ()
   let closed = false;
   const cancellation = new AbortController(), waiting = Promise.withResolvers();
   const finishing = finishPresencePeerSessions([
-    { state: () => { waiting.resolve(); return { pendingUpdates: 1 }; } },
+    { state: () => { waiting.resolve(); return { pendingUpdates: 1, status: 'live' }; } },
   ], async () => { closed = true; }, cancellation.signal);
   await waiting.promise;
   cancellation.abort(new Error('cancelled drain'));
@@ -87,4 +87,15 @@ test('peer schedule pass checks the 100 ms gap once alongside the achieved rates
   const peer = { selectionHz: 20, typingHz: 5, maxGapMs: 100 };
   assert.equal(presencePeerSchedulePass([peer]), true);
   assert.equal(presencePeerSchedulePass([{ ...peer, maxGapMs: 100.001 }]), false);
+});
+
+
+test('drain refuses a dead peer immediately and preserves that error through cleanup', async () => {
+  let reads = 0, closed = false;
+  await assert.rejects(finishPresencePeerSessions([
+    { state: () => ({ pendingUpdates: 1, status: 'live' }) },
+    { state: () => { reads++; return { pendingUpdates: 1, status: 'disconnected' }; } },
+  ], async () => { closed = true; throw new Error('leave also failed'); }, AbortSignal.timeout(120_000)), /Peer stopped.*disconnected/);
+  assert.equal(reads, 1);
+  assert.equal(closed, true);
 });

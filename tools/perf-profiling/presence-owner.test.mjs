@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
-import { observePresenceOwner, recordPresenceOwnerLastKey, waitForPresenceOwner, readPresenceOwner, validatePresenceWorkload, samplePresenceClock, rebasePresenceWindow } from './presence-owner.mjs';
+import { observePresenceOwner, recordPresenceOwnerLastKey, waitForPresenceOwner, readPresenceOwner, validatePresenceWorkload, samplePresenceClock, validatePresenceClocks, rebasePresenceWindow } from './presence-owner.mjs';
 const workload = { pass: true, peers: 2, maxGapMs: 50, peerCounts: [{ edits: 5, windowEdits: 5 }, { edits: 6, windowEdits: 6 }] };
 const owner = { binding: 'unbound', receivedEdits: 11, receivedEditsAtLastKey: 9, presenceUpdatesReceived: 0 };
 
@@ -89,11 +89,40 @@ test('owner delivery deadline reports the last observed count', async () => {
   }, 11), error => /received 7 of 11/.test(error.message) && error.cause === deadline);
 });
 
-test('one midpoint clock sample rebases renderer key times to the Node tick clock', async () => {
-  const times = [1000, 1004];
-  const clock = await samplePresenceClock({ evaluate: async () => 500_000 }, () => times.shift());
-  assert.deepEqual(clock, { rendererToNodeOffsetMs: -498_998, roundTripMs: 4 });
-  const window = rebasePresenceWindow({ start: 500_010, end: 500_110 }, clock);
-  assert.deepEqual(window, { start: 1012, end: 1112 });
-  assert.equal(window.end - window.start, 100);
+function clockFixture(roundTrips, offsets = roundTrips.map(() => 42)) {
+  const times = roundTrips.flatMap((roundTrip, index) => [index * 100, index * 100 + roundTrip]);
+  const renderer = roundTrips.map((roundTrip, index) => index * 100 + roundTrip / 2 - offsets[index]);
+  return { page: { evaluate: async () => renderer.shift() }, now: () => times.shift() };
+}
+
+test('clock calibration selects the shortest of ten round trips and rebases its offset', async () => {
+  const fixture = clockFixture([8, 6, 7, 5, 4, 3, 2, 1, .5, 4], [1, 2, 3, 4, 5, 6, 7, 8, 42, 10]);
+  const clock = await samplePresenceClock(fixture.page, { now: fixture.now });
+  assert.equal(clock.samples.length, 10);
+  assert.equal(clock.roundTripMs, .5);
+  assert.equal(clock.rendererToNodeOffsetMs, 42);
+  assert.deepEqual(rebasePresenceWindow({ start: 10, end: 110 }, clock), { start: 52, end: 152 });
+});
+
+test('clock calibration accepts five milliseconds and refuses a shortest trip above it', async () => {
+  const boundary = clockFixture(Array(10).fill(5));
+  assert.equal((await samplePresenceClock(boundary.page, { now: boundary.now })).roundTripMs, 5);
+  const slow = clockFixture(Array(10).fill(5.001));
+  await assert.rejects(samplePresenceClock(slow.page, { now: slow.now }), /clock refused.*5 ms/);
+});
+
+test('clock calibration can retry one batch after a paint, then still refuses a slow batch', async () => {
+  const fixture = clockFixture([...Array(10).fill(8), ...Array(10).fill(1)]);
+  let paints = 0;
+  assert.equal((await samplePresenceClock(fixture.page, { now: fixture.now, retryAfterPaint: async () => { paints++; } })).roundTripMs, 1);
+  assert.equal(paints, 1);
+  const slow = clockFixture(Array(20).fill(6));
+  await assert.rejects(samplePresenceClock(slow.page, { now: slow.now, retryAfterPaint: async () => { paints++; } }), /clock refused/);
+  assert.equal(paints, 2);
+});
+
+test('post-typing clock check accepts three milliseconds and refuses greater drift', () => {
+  const before = { rendererToNodeOffsetMs: 42, roundTripMs: 1 };
+  assert.equal(validatePresenceClocks(before, { ...before, rendererToNodeOffsetMs: 45 }).offsetDeltaMs, 3);
+  assert.throws(() => validatePresenceClocks(before, { ...before, rendererToNodeOffsetMs: 45.001 }), /clock refused.*offset changed/);
 });

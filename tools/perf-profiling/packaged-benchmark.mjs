@@ -1,4 +1,4 @@
-import { observePresenceOwner, recordPresenceOwnerLastKey, waitForPresenceOwner, readPresenceOwner, validatePresenceWorkload, samplePresenceClock, rebasePresenceWindow } from './presence-owner.mjs';
+import { observePresenceOwner, recordPresenceOwnerLastKey, waitForPresenceOwner, readPresenceOwner, validatePresenceWorkload, samplePresenceClock, validatePresenceClocks, rebasePresenceWindow } from './presence-owner.mjs';
 import { startTypingTrace, measureTypingTrace, typingTraceMark } from './presence-typing-trace.mjs';
 import { acquireProfilingSlot } from './admission.mjs';
 import { startWindowController, waitForVisibleWindow } from './window-controller.mjs';
@@ -320,7 +320,7 @@ async function typing(page, name, { rich = false, arm, beforeInput = () => {}, a
   await page.keyboard.press('Control+End');
   await painted(page);
   if (rich) await editor.evaluate(observePresenceOwner);
-  const clockSync = rich ? await samplePresenceClock(page) : null;
+  const clockBefore = rich ? await samplePresenceClock(page, { retryAfterPaint: () => painted(page) }) : null;
   const trace = rich ? await startTypingTrace(page) : null;
   let traceResult;
   try {
@@ -344,14 +344,15 @@ async function typing(page, name, { rich = false, arm, beforeInput = () => {}, a
       await page.keyboard.press('x');
       if (index === keystrokes - 1) {
         await afterInput();
-        if (rich) await editor.evaluate(recordPresenceOwnerLastKey);
       }
       await painted(page);
       const end = await page.evaluate(mark => { if (mark) performance.mark(mark); return performance.now(); }, trace ? typingTraceMark(index, 'after') : null);
       samples.push({ index, start, end, dispatchToTwoRafMs: end - start });
+      if (rich && index === keystrokes - 1) await editor.evaluate(recordPresenceOwnerLastKey);
       // An intentionally paced user workload, not a sleep used as a correctness assertion.
       if (!rich || index < keystrokes - 1) await delay(80, undefined, { signal: benchmarkSignal });
     }
+    const clockSync = rich ? validatePresenceClocks(clockBefore, await samplePresenceClock(page, { retryAfterPaint: () => painted(page) })) : null;
     await page.waitForFunction(count => window.__packagedEvents.inputs.length === count, keystrokes);
     const timing = await page.evaluate(() => {
       const s = window.__packagedEvents;
@@ -367,7 +368,7 @@ async function typing(page, name, { rich = false, arm, beforeInput = () => {}, a
     }
     if (!timing.inputs.every(input => input.trusted)) throw Error('Untrusted input observed');
     const typingWindow = rich ? { start: timing.keys[0].eventTimestamp, end: timing.keys.at(-1).eventTimestamp } : null;
-    const peerTypingWindow = rich ? rebasePresenceWindow(typingWindow, clockSync) : null;
+    const peerTypingWindow = rich ? rebasePresenceWindow(typingWindow, clockBefore) : null;
     const ownerPresence = rich && arm === 'solo' ? await editor.evaluate(readPresenceOwner, typingWindow) : undefined;
     let traceEvidence;
     if (trace) {
