@@ -40,18 +40,20 @@ export async function sweepContainers({ request, command = run } = {}) {
 
 /** Put the lane at `head` with no state from earlier runs except the named caches. */
 export async function prepareLane({ lane, repo, head, signal }) {
+  // Git runs as a child process, never synchronously, so a slow checkout cannot stop the heartbeat of another lane's run.
+  const laneGit = async (args, cwd = lane) => (await run("git", args, { cwd, signal, quietStdout: true, timeoutMs: 15 * 60_000 })).stdout.trim();
   if (!existsSync(join(lane, ".git"))) {
-    git(["worktree", "add", "--detach", "--force", lane, head], repo);
+    await laneGit(["worktree", "add", "--detach", "--force", lane, head], repo);
     // Workspace cleanup keeps locked worktrees, so the lane keeps its warm caches.
-    git(["worktree", "lock", "--reason", "dohc verification queue lane", lane], repo);
+    await laneGit(["worktree", "lock", "--reason", "dohc verification queue lane", lane], repo);
   }
-  const gitDir = git(["rev-parse", "--absolute-git-dir"], lane);
+  const gitDir = await laneGit(["rev-parse", "--absolute-git-dir"]);
   // No worker runs while the lane is prepared, so any Git lock or operation state is stale.
   for (const name of ["index.lock", "HEAD.lock", "MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD", "BISECT_LOG"]) rmSync(join(gitDir, name), { force: true });
-  git(["checkout", "--force", "--detach", head], lane);
-  git(["clean", "-ffdx", "--exclude=node_modules", "--exclude=target"], lane);
-  if (git(["rev-parse", "HEAD"], lane) !== head) throw new Error(`The lane did not check out ${head}.`);
-  if (git(["status", "--porcelain"], lane) !== "") throw new Error("The lane has changes after checkout and clean.");
+  await laneGit(["checkout", "--force", "--detach", head]);
+  await laneGit(["clean", "-ffdx", "--exclude=node_modules", "--exclude=target"]);
+  if (await laneGit(["rev-parse", "HEAD"]) !== head) throw new Error(`The lane did not check out ${head}.`);
+  if (await laneGit(["status", "--porcelain"]) !== "") throw new Error("The lane has changes after checkout and clean.");
   // Installed while the request waits for the lane, so the verifier's own install has nothing left to do in it.
   await run(process.execPath, ["scripts/verification/setup.mjs"], { cwd: lane, signal, quietStdout: true, timeoutMs: 30 * 60_000 });
 }
@@ -61,10 +63,10 @@ export async function dockerResponds(command = run) {
   catch { return false; }
 }
 
-/** Hold the host lane's slot, so a run started by older code cannot overlap this one. */
-async function holdLegacyLane({ entry, signal }) {
+/** Hold a host lane's slot, so runs started by older code and this service never exceed the lane count. */
+async function holdLegacyLane({ entry, signal, lanes }) {
   // No wait limit: a timeout would only send a durable request to the back of the line. Cancel still stops the wait.
-  return acquireVerificationSlot(process.env, { entry: verifierEntry, signal, waitMs: Infinity,
+  return acquireVerificationSlot(process.env, { lanes, entry: verifierEntry, signal, waitMs: Infinity,
     metadata: { purpose: "PR verification (queue)", checkout: entry.request.checkout, commit: entry.request.head, phase: `request ${entry.id}` } });
 }
 
@@ -126,7 +128,6 @@ export async function runService({
   let laneCount = 1;
   let laneError = null;
   let fatal = null;
-  let lastBeat = 0;
   let lastPrune = 0;
   let lastCleanup = 0;
 
@@ -280,7 +281,7 @@ export async function runService({
       mkdirSync(output, { recursive: true });
       await prepare({ lane: checkout, repo, head: entry.request.head, signal: current.abort.signal });
       current.phase = "waiting for the host lane";
-      lease = await holdLane({ entry, signal: current.abort.signal });
+      lease = await holdLane({ entry, signal: current.abort.signal, lanes: laneCount });
       // Rust-only runs need no Docker, so a sweep failure must not stop them.
       await sweep({}).catch(error => log(`container sweep failed: ${error.message}`));
       current.phase = "verifying";
@@ -318,8 +319,14 @@ export async function runService({
       // The idle lanes' build output is the one large thing the service owns and may delete. No run
       // starts while it is removed. Deleting tens of GB takes minutes; it runs beside the loop so heartbeats continue.
       log(`free disk ${health.diskFreeGb.toFixed(1)} GB is under ${floorGb} GB; removing the lanes' target folders`);
-      targetRemoval = Promise.all(targets.map(path => rm(path, { recursive: true, force: true })))
-        .catch(error => { targetRetryAt = Date.now() + cleanupRetryMs; log(`removing the lanes' target folders failed: ${error.message}`); })
+      // Admission stays closed until every removal has settled, so no run starts in a checkout still being emptied.
+      targetRemoval = Promise.allSettled(targets.map(path => rm(path, { recursive: true, force: true })))
+        .then(results => {
+          const failed = results.filter(result => result.status === "rejected");
+          if (!failed.length) return;
+          targetRetryAt = Date.now() + cleanupRetryMs;
+          log(`removing the lanes' target folders failed: ${failed.map(result => result.reason.message).join("; ")}`);
+        })
         .finally(() => { targetRemoval = null; });
     }
     if (requests.some(entry => entry.status.state === "queued" && entry.request.gates?.js) && Date.now() - health.dockerCheckedAt > 60_000) {
@@ -356,6 +363,12 @@ export async function runService({
   }
 
   await beat();
+  // The heartbeat has its own timer, so slow Docker or disk work in the loop never looks like a dead service.
+  // A synchronous call that hangs still stops it, and the supervisor restarts the service.
+  let beating = null;
+  const pulse = setInterval(() => {
+    beating ??= beat().catch(error => log(`heartbeat failed: ${error.message}`)).finally(() => { beating = null; });
+  }, 10_000);
   log(`service ${commit ?? "(unversioned)"} started, pid ${process.pid}`);
   let last = Date.now();
   try {
@@ -366,8 +379,7 @@ export async function runService({
       const now = Date.now();
       try {
       // Count only awake verification time against a run: a gap far over one tick is sleep.
-      // Preparation has its own deadline, but a git call that hangs blocks this loop, and the supervisor's
-      // heartbeat check restarts the service instead. Waiting for the host lane has no limit; only cancel or a stop ends it.
+      // Preparation has its own deadline. Waiting for the host lane has no limit; only cancel or a stop ends it.
       const awake = Math.min(now - last, 3 * tickMs);
       for (const current of running.values()) {
         if (current.phase === "verifying") current.awakeMs += awake;
@@ -401,9 +413,8 @@ export async function runService({
       }
       const stuck = [...running.values()].find(current => current.stoppedAt && now - current.stoppedAt > stopGraceMs);
       if (stuck) throw new Error(`${stuck.id} did not stop within ${stopGraceMs / 60_000} minutes; restarting the service to stop it`);
-      // A requested restart starts nothing new and waits for the runs in flight.
-      const restart = existsSync(join(paths.control, "restart"));
-      if (restart && running.size === 0) { rmSync(join(paths.control, "restart"), { force: true }); log("restart requested"); return 75; }
+      const restart = join(paths.control, "restart");
+      if (existsSync(restart) && running.size === 0) { rmSync(restart, { force: true }); log("restart requested"); return 75; }
       // Docker may be down; a failed cleanup is retried once a minute, not every tick.
       if (cleanupPending.size && now - lastCleanup > cleanupRetryMs) {
         lastCleanup = now;
@@ -417,16 +428,17 @@ export async function runService({
         }
       }
       await checkHealth(requests);
-      // Fill free lanes in line order. A request started here still reads as queued in `requests`.
-      const started = new Set(running.keys());
-      while (!restart && running.size < laneCount && health.pausedUntil <= now) {
+      // Fill free lanes in line order. A request started here still reads as queued in `requests`. A request whose
+      // containers are not yet removed waits, because they carry its id and their removal would stop its next run.
+      // A restart, even one requested during this tick, starts nothing new and waits for the runs in flight.
+      const started = new Set([...running.keys(), ...cleanupPending]);
+      while (running.size < laneCount && health.pausedUntil <= now && !existsSync(restart)) {
         const entry = nextRequest(requests.filter(candidate => !started.has(candidate.id)), health, now);
         if (!entry) break;
         started.add(entry.id);
         attempt(entry).catch(error => { log(`attempt bookkeeping failed: ${error.stack ?? error.message}`); fatal = error; });
       }
       if (now - lastPrune > 10 * 60_000) { prune(requests); lastPrune = now; }
-      if (now - lastBeat > 10_000) { await beat(); lastBeat = now; }
       } catch (error) {
         if ([...running.values()].some(current => current.stoppedAt && now - current.stoppedAt > stopGraceMs)) throw error;
         log(`tick failed: ${error.stack ?? error.message}`);
@@ -434,6 +446,7 @@ export async function runService({
       await sleep(tickMs);
     }
   } finally {
+    clearInterval(pulse);
     instance.close();
   }
 }

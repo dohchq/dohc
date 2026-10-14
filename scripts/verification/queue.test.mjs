@@ -101,6 +101,9 @@ test("machine failures are told apart from failures of the change", () => {
   assert.equal(kind({ step: "tests", commandExitFailure: true }), "check");
   assert.equal(kind({ step: "tests", stderr: "expected ENOSPC: no space left on device", stdout: "0xC0000142" }), "check", "text in test output proves nothing");
   assert.equal(kind({ step: "rust", stdout: "refusing to run the gate: 38.2 GB free on the worktree volume is below the 40 GB floor" }), "environment");
+  // Another lane can use up the disk after this run was admitted.
+  assert.equal(kind({ step: "prepare", environment: "disk space", message: "Build needs 40 GB free; observed 38.2." }), "environment");
+  assert.equal(kind({ step: "yrs-interop", stderr: "Error: Build needs 40 GB free; observed 38.2.\n    at withBuildBudget" }), "environment");
 });
 
 test("a command the Windows job relay cannot start is a machine failure", { skip: process.platform !== "win32" && "the job relay is Windows-only" }, async () => {
@@ -127,7 +130,7 @@ function fixtureRepo() {
 }
 
 /** A service on a private root with a stub verifier: request.checkout names its behavior. */
-function harness(t, { timeLimitMs = 60_000, docker = async () => true, sweep = async () => 0, hostFails = () => {}, holdLane = async () => ({ release() {} }), prepare = async () => {}, prepareLimitMs, lanes } = {}) {
+function harness(t, { timeLimitMs = 60_000, docker = async () => true, sweep = async () => 0, hostFails = () => {}, holdLane = async () => ({ release() {} }), prepare = async () => {}, prepareLimitMs, lanes, cleanupRetryMs = 50 } = {}) {
   const root = mkdtempSync(join(tmpdir(), "dohc-queue-"));
   const fixture = fixtureRepo();
   const calls = [];
@@ -148,7 +151,7 @@ function harness(t, { timeLimitMs = 60_000, docker = async () => true, sweep = a
   };
   const service = runService({ root, repo: fixture.repo, lane: join(root, "lane"), tickMs: 20, timeLimitMs, floorGb: 1,
     freeDisk: () => 100, docker, prepare, sweep, prepareLimitMs,
-    holdLane, worker, retryDelay: () => 50, cleanupRetryMs: 50, lanes, stop: stop.signal, log: () => {} });
+    holdLane, worker, retryDelay: () => 50, cleanupRetryMs, lanes, stop: stop.signal, log: () => {} });
   t.after(async () => { stop.abort(); await service; rmSync(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 }); rmSync(fixture.repo, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 }); });
   const request = async (behavior, fields = {}) => {
     // Each behavior verifies its own commit: one commit with the same gates is one piece of work.
@@ -259,9 +262,12 @@ test("a requested restart starts nothing new and waits for the runs in flight", 
   assert.equal(state(), "queued");
 });
 
-test("a lane setting that cannot be read keeps the lane count the service had", async t => {
-  const { request, settled } = harness(t, { lanes: () => { throw new Error("verification-lanes must contain 1 or 2."); } });
+test("a lane setting that cannot be read keeps the lane count the service had, for its slots too", async t => {
+  let slots;
+  const { request, settled } = harness(t, { lanes: () => { throw new Error("verification-lanes must contain 1 or 2."); },
+    holdLane: async ({ lanes }) => { slots = lanes; return { release() {} }; } });
   assert.equal((await settled((await request("pass")).id)).status.verdict, "PASS");
+  assert.equal(slots, 1);
 });
 
 test("the sweep removes a request's containers and exited ones, never one another lane may be starting", async () => {
@@ -455,6 +461,33 @@ test("a cleanup that fails is retried until it succeeds, and its request is kept
   assert.equal(done.status.verdict, "PASS", "a cleanup failure does not change the verdict");
   await waitFor(() => cleaned.includes(passed.id), "the cleanup must be retried");
   await waitFor(() => readJson(join(queuePaths(root).request(passed.id), "status.json"))?.cleanupPending === false, "the pending cleanup must be cleared");
+});
+
+test("a request whose containers could not be removed waits for that cleanup before it runs again", async t => {
+  let cleanups = 0;
+  let cleanedAfter;
+  // The retry is due long before the cleanup is retried; removing the old containers during the retry would stop it.
+  const { request, settled, calls } = harness(t, { cleanupRetryMs: 500, sweep: async ({ request: id }) => {
+    if (!id) return 0;
+    cleanups += 1;
+    // The cleanup at the end of the attempt and its first retry both fail.
+    if (cleanups <= 2) throw new Error("Docker is not answering");
+    cleanedAfter ??= calls.length;
+    return 1;
+  } });
+  const flaky = await request("flaky-host");
+  assert.equal((await settled(flaky.id)).status.verdict, "PASS");
+  assert.equal(calls.length, 2);
+  assert.equal(cleanedAfter, 1, "the retry started only once the first attempt's containers were gone");
+});
+
+test("a restart requested while the service checks the host starts nothing new", async t => {
+  let root;
+  const { root: queueRoot, request, service } = harness(t, { docker: async () => { writeFileSync(join(queuePaths(root).control, "restart"), ""); return true; } });
+  root = queueRoot;
+  const waiting = await request("pass");
+  assert.equal(await service, 75);
+  assert.equal(listRequests(root).find(candidate => candidate.id === waiting.id).status.state, "queued");
 });
 
 test("a malformed submission is rejected and the service keeps serving", async t => {

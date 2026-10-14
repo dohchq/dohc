@@ -299,7 +299,7 @@ export async function withBuildBudget(action) {
   const budget = resolveBuildBudget();
   if (budget) {
     const free = freeDiskGb(repoRoot);
-    if (free === null || free < budget.diskFloorGb) throw new Error(`Build needs ${budget.diskFloorGb} GB free; observed ${free ?? "unknown"}.`);
+    if (free === null || free < budget.diskFloorGb) throw Object.assign(new Error(`Build needs ${budget.diskFloorGb} GB free; observed ${free ?? "unknown"}.`), { environment: "disk space" });
   }
   const slot = budget ? await acquireBuildSlot({ ...budget, cooperativeCancellation: true }) : null;
   const env = buildEnvironment(budget?.jobs);

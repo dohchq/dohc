@@ -849,12 +849,13 @@ export function verificationLanes(env = process.env) {
  * never exceed the host's lane count. Null on a single-tenant host.
  * A gate can wait behind several others, so this waits up to six hours.
  * Only this checkout's PR verifier may hold it; `entry` is the caller's script.
+ * `lanes` replaces the host setting for a caller that has already read it, such as the queue service.
  */
-export function acquireVerificationSlot(env = process.env, { metadata, waitMs = 6 * 60 * 60_000, observeTicket, entry = process.argv[1], signal } = {}) {
+export function acquireVerificationSlot(env = process.env, { metadata, waitMs = 6 * 60 * 60_000, observeTicket, entry = process.argv[1], signal, lanes } = {}) {
   if (!entry || canonical(entry) !== canonical(verifierEntry)) {
     throw new Error(`Only the PR verifier (${verifierEntry}) may hold a verification lane. Run pnpm verify:pr, or take a build slot for other Cargo work.`);
   }
-  const slots = verificationLanes(env);
+  const slots = lanes ?? verificationLanes(env);
   const budget = resolveBuildBudget(env);
   if (!budget) return null;
   // Verifiers older than the lane setting used one slot and record no count.
