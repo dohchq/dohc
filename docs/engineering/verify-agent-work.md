@@ -88,17 +88,45 @@ Integration suites must run; unavailable prerequisites cause failure rather than
 The native self-host editing proof checks the prepared engine and its complete delivery evidence.
 The `@states-page` pixel gallery runs only on Windows, where its baselines were taken.
 The Rust gate uses the repository build budget and checks its summary verdict.
-On the shared Windows host, one PR verification runs at a time. Runs wait in FIFO order.
-Each PR run owns its checkout until cleanup and receipt writing finish.
-Another PR run in that checkout fails before installation or queue admission and reports the owner.
-The runner checks host tools before queueing and rechecks its source, tools, and disk after admission.
+The runner checks host tools before queueing.
 Before queueing, it also runs the workspace typecheck when the installed dependencies match the lockfile.
 When Rust is selected, it runs `cargo fmt --check`, then clippy and the nextest test build with the gate's arguments and target directory under one build slot.
-A failure stops the run before it joins the queue. The `pre-queue-*` steps record these checks.
-The lane repeats them as evidence. Its clippy and test steps reuse those builds; only the engine binary that preparation rebuilt relinks.
-The runner removes its Postgres container by the recorded container ID.
+A failure stops the run before it joins the queue. The `pre-queue-*` steps record these checks, and the full gate repeats them as evidence.
+The runner labels its Postgres container and removes it by the recorded container ID.
 
-Inspect the host's queues without joining them:
+### The verification queue on the shared Windows host
+
+On the shared Windows host, a queue service runs PR verifications, one per verification lane.
+After the pre-queue checks, `pnpm verify:pr` hands the commit to the service and reports its progress until it finishes.
+The service verifies the commit in its own checkout, `C:\w\_verification\lane` or `C:\w\_verification\lane-2`, so your checkout is free to change while the request waits.
+Stopping `pnpm verify:pr` does not stop the request. Run the same command again to follow it, or to get its result once it has finished.
+Pass `--detach` to submit the request and return at once.
+
+- Requests run in the order the service accepted them.
+- A newer commit on the same branch replaces that branch's waiting request and keeps its place. A running request finishes.
+- The same commit with the same gates joins the existing request, or reuses its pass.
+- A run that fails because of the machine is retried in place, after 30 seconds, 2 minutes, 5 minutes, then every 15 minutes. Machine failures include a program that could not start, too little disk, and Docker or the host tools not responding.
+- A run that fails a check is reported at once. The service never retries it.
+- A run stops and fails after two hours of awake time. Time the machine spends asleep does not count.
+- While Docker does not respond, runs that need the JavaScript gate wait and Rust-only runs continue.
+- While free disk is below the 40 GB floor, no run starts. The service first deletes the build output of its lanes that have no run.
+
+Each attempt has its own evidence folder, `C:\w\_verification\requests\<id>\attempts\<n>`, and its `result.json` names the request and attempt.
+Read the service's verdict from the request's `status.json`, or from the last line `pnpm verify:pr` prints.
+
+Run `pnpm verify:queue status` to see the service, the running requests, the line, and wait estimates.
+Run `pnpm verify:queue cancel <id>` to stop a request. A finished request keeps its verdict.
+
+The `dohc-verification-queue` scheduled task starts the service at logon and every five minutes if it is not running.
+A supervisor runs the service in a Windows job object. When the service exits or its heartbeat stops for two minutes, the supervisor stops it and everything it started, then starts it again.
+A request that was running when the service stopped runs again as a new attempt. A request whose receipt already finished keeps that result.
+Install or upgrade the service from a checkout of `origin/main` with `pnpm verify:queue install`. An upgrade takes effect when the current runs end. No new run starts until then.
+
+CI, other platforms, and runs with their own `DOHC_BUILD_SLOT_ROOT` verify inline in their checkout.
+Pass `--inline` to do the same on the shared host when the service is unavailable. Inline runs still wait for the host's verification lane, so they never overlap a queued run.
+An inline run owns its checkout until cleanup and receipt writing finish. Another PR run in that checkout fails before installation or queue admission and reports the owner.
+
+Inspect the host's Cargo slots and verification lane without joining them:
 
 ```sh
 node tools/rust-engine-program/build-slot.mjs --status
@@ -109,7 +137,7 @@ Each lane reports owners and waiters with their purpose, checkout, commit, phase
 Older records without that metadata have an unknown purpose.
 Wait estimates use the median duration of up to twenty completed runs in the same lane.
 A cold history has no estimate. Estimates do not reject or reorder work.
-Runs wait up to six hours. A live holder keeps its slot even if its heartbeat stops; investigate its recorded PID before changing its resources.
+Inline runs wait up to six hours. A live holder keeps its slot even if its heartbeat stops; investigate its recorded PID before changing its resources.
 Only `pnpm verify:pr` can take a verification slot. Other scripts that request one fail. A verification slot does not provide an idle host for benchmarks.
 Performance measurements must record concurrent host work and use the shared build budget when running Cargo.
 The live-authorship profiling command uses a separate single owner and creates no PR queue ticket.
@@ -117,21 +145,29 @@ It defers when registered gates or builds hold or wait for slots.
 If registered work arrives during measurement, it stops its own child and records the run as failed.
 Its host context covers registered lanes and does not prove that the host was otherwise idle.
 
-The lane count defaults to one. To compare one and two lanes, use an isolated root and explicit trial flags in PowerShell:
+The host runs one verification at a time unless `verification-lanes` in the slot root contains `2`.
+Every verifier and the queue service read that file, so all of them agree on the count.
+The queue service runs the second lane's requests in `C:\w\_verification\lane-2`. That checkout's build output takes about 10 GB more disk.
+
+```powershell
+Set-Content C:\w\_locks\verification-lanes 2
+```
+
+Write `1` to return to one lane. Runs already admitted to the second lane finish first.
+
+To compare lane counts without changing the host, use an isolated root with its own setting in PowerShell:
 
 ```powershell
 $env:DOHC_VERIFICATION_SLOT_ROOT = 'C:\w\_locks-verification-trial'
 $env:DOHC_VERIFICATION_TRIAL = '1'
-$env:DOHC_VERIFICATION_LANES = '2'
-pnpm verify:pr --base origin/main
+pnpm verify:pr --base origin/main --inline
 ```
 
-Use that same trial root with `DOHC_VERIFICATION_LANES=1` for the comparison.
 Keep `DOHC_BUILD_SLOT_ROOT` unchanged. Cargo still uses the host's shared four-lane budget during a verification trial.
 Record other host builds and gates during the comparison; a separate outer queue does not isolate CPU, memory, or disk load.
 Compare elapsed time, queue time, failures, and peak host memory under matching work and cache conditions.
 Do not change the live queue root or remove another run's tickets to conduct a trial.
-Remove the three verification trial environment variables from the shell before returning to ordinary verification.
+Remove the two verification trial environment variables from the shell before returning to ordinary verification.
 
 To schedule jobs separately, use `pnpm verify:pr --base <target-ref> --job js` and `--job rust`.
 Each report states its scope. Every selected job needs passing evidence that covers the change.
