@@ -24,7 +24,7 @@ function readClaim(value: unknown): StoredClaim | null {
   return claim;
 }
 function publicClaim(claim: StoredClaim): RelayReleaseClaim {
-  const {releaseDigest: _secret, ...result} = claim; return result;
+  const {releaseDigest: _releaseDigest, ...result} = claim; return result;
 }
 function claimSummary(claim: StoredClaim): RelayReleaseClaimSummary {
   const {proof: _proof, receipts: _receipts, ...anchor} = claim.anchor;

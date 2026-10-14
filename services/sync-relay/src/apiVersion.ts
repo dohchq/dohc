@@ -3,8 +3,8 @@ import {
 } from "@dohc/workspace-contracts/relay-values";
 import { RelayError, relayError } from "./errors";
 
-// The relay API versions this relay serves. The newest is the one this build
-// speaks. Raise the oldest only when the relay stops serving an older
+// The relay API versions this relay serves. Its maximum can lead the version
+// clients send. Raise the oldest only when the relay stops serving an older
 // contract. A self-hosted relay serves the same range as the release it runs,
 // so its operator updates it the same way dohc updates dohc Drive.
 export const RELAY_API_VERSIONS = Object.freeze({ min: 1, max: 2 });

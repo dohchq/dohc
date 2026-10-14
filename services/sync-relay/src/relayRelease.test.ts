@@ -34,7 +34,7 @@ function fixture(options: Parameters<typeof registered>[0] = {}) {
     const response = await handle(new Request("https://relay.test/sync/workspace/live-host", {method: "POST",
       headers: {authorization: "Bearer owner-token", "content-type": "application/json", [RELAY_API_VERSION_HEADER]:version},
       body: JSON.stringify({release: {action, ...scope, releaseId, computerName: "Laptop", ...changes}})}));
-    return {status: response.status, body: await response.json() as any};
+    return {status: response.status, headers: response.headers, body: await response.json() as any};
   };
   const replication = createWorkspaceReplicationRoutes(f.storage,() => 100,new DiscussionActivityHub());
   const push = async (ops: unknown[], originId = "ordinary") => {
@@ -501,5 +501,52 @@ it("retries a tagged moment's settlement refusal without restoring a client payl
     expect(retry.body).toMatchObject({inserted:0,skipped:1,settlementRefusals:first.body.settlementRefusals});
     const stored=JSON.parse(f.storage.fetchLogPage({workspaceId:"workspace",sinceRelaySeq:0,limit:10}).rows[0]!.payloadJson);
     expect(stored).not.toHaveProperty("authors");
+  } finally {f.close();}
+});
+
+it("round 2: never caches operations outside updates and moments", () => {
+  const get=vi.spyOn(WeakMap.prototype,"get"), set=vi.spyOn(WeakMap.prototype,"set");
+  const op={originSeq:0,opKind:"chat.append",recordedAtMs:0,payloadJson:'{"release":"ordinary content"}'};
+  try {
+    for(let i=0;i<3;i++) expect(releasePublicationTag(op)).toBeNull();
+    expect(get.mock.calls.filter(([key])=>key===op)).toHaveLength(0);
+    expect(set.mock.calls.filter(([key])=>key===op)).toHaveLength(0);
+  } finally {get.mockRestore();set.mockRestore();}
+});
+
+it("round 2: keeps release errors private and uncached", async () => {
+  const f=fixture();
+  try {
+    expect((await f.request("acquire")).status).toBe(200);
+    const responses=[await f.request("acquire",{releaseId:otherId}),await f.request("status",{},"1")];
+    f.setUser("reader"); responses.push(await f.request("status"));
+    expect(responses.map(response=>response.status)).toEqual([409,400,404]);
+    for(const response of responses) expect(response.headers.get("cache-control")).toBe("private, no-store");
+  } finally {f.close();}
+});
+
+it("round 2: checks tagged ownership once per batch including duplicate retries", () => {
+  const f=fixture();
+  try {
+    const ops=[f.tagged(0),f.tagged(1)].map(({payload,...op})=>({...op,payloadJson:JSON.stringify(payload)}));
+    const owned=vi.spyOn(f.storage,"workspaceIsOwnedBy");
+    try {
+      const append=()=>f.storage.appendLogBatch({workspaceId:"workspace",originId:"ordinary",actorUserId:"owner",ops:ops.map(op=>({...op}))});
+      expect(append().inserted).toBe(2);
+      expect(owned).toHaveBeenCalledTimes(1);
+      owned.mockClear();
+      expect(append().skipped).toBe(2);
+      expect(owned).toHaveBeenCalledTimes(1);
+    } finally {owned.mockRestore();}
+  } finally {f.close();}
+});
+
+it("round 2: hashes the lowercase hex release ID text using the drain's fixed vector", async () => {
+  const f=fixture();
+  try {
+    expect(releaseId).toBe("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+    expect((await f.request("acquire")).status).toBe(200);
+    const row=f.raw.prepare("SELECT release_claim_json FROM sync_relay_service_host_enrollments WHERE workspace_id='workspace' AND object_id='object'").get()!;
+    expect(JSON.parse(String(row.release_claim_json)).releaseDigest).toBe("ffe054fe7ae0cb6dc65c3af9b61d5209f439851db43d0ba5997337df154668eb");
   } finally {f.close();}
 });

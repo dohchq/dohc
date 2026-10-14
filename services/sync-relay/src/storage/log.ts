@@ -77,11 +77,13 @@ export function appendLogBatchInTransaction(storage: StorageContext, input: {
       let currentMax = Number(
         maxStmt.get(input.workspaceId, input.originId)?.max_seq ?? -1,
       );
+      let actorOwnsWorkspace: boolean | undefined;
       for (const op of input.ops) {
         const release = releasePublicationTag(op);
         if (release) {
           if (release.document.workspaceId !== input.workspaceId) throw badRequest("Release publication belongs to another workspace.");
-          if (!input.actorUserId || !storage.workspaceIsOwnedBy(input.workspaceId,input.actorUserId)) throw notFound();
+          actorOwnsWorkspace ??= !!input.actorUserId && storage.workspaceIsOwnedBy(input.workspaceId,input.actorUserId);
+          if (!actorOwnsWorkspace) throw notFound();
         }
         if (op.originSeq <= currentMax) {
           const existing = existingStmt.get(
@@ -97,7 +99,6 @@ export function appendLogBatchInTransaction(storage: StorageContext, input: {
             Number(existing.recorded_at_ms) === op.recordedAtMs
           ) {
             if (release) {
-              op.payloadJson = String(existing.payload_json);
               op.settlementAdmission = existing.settlement_admission_json == null ? undefined : JSON.parse(String(existing.settlement_admission_json));
             }
             skipped += 1;

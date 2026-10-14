@@ -10,7 +10,7 @@ import {effectiveShareSelector, isLiveEditShareSelector, parseStoredAnyShareSele
 import {canonicalLiveSelector} from "./storage/liveDocumentAuthority";
 import {parseShareId, parseWorkspaceId} from "./requestInputs";
 import {badRequest, errorResponse, notFound, RelayError, ReleaseClaimRefusal} from "./errors";
-import {relayApiVersionRefusal} from "./apiVersion";
+import {RELAY_API_VERSIONS, relayApiVersionRefusal} from "./apiVersion";
 import {releaseClaimRequest} from "./storage/releaseClaim";
 import type {StorageContext} from "./storage/context";
 
@@ -125,7 +125,7 @@ export function createServiceHostEnrollmentRoutes(options: {
       if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw badRequest("Invalid live host request.");
       const input = raw as Record<string, unknown>;
       if (request.method === "POST" && Object.hasOwn(input,"release")) {
-        const versionRefusal = relayApiVersionRefusal(request.headers,{min:2,max:2});
+        const versionRefusal = relayApiVersionRefusal(request.headers,{min:2,max:RELAY_API_VERSIONS.max});
         if (versionRefusal) throw versionRefusal;
         if (Object.keys(input).length !== 1 || !input.release || typeof input.release !== "object" ||
           (input.release as {document?: {workspaceId?: unknown}}).document?.workspaceId !== workspaceId) throw badRequest("Invalid release workspace.");
@@ -155,7 +155,10 @@ export function createServiceHostEnrollmentRoutes(options: {
       const documents = rows.map(state);
       return response({ok: true, ...(input.path === undefined ? {documents} : documents[0])}, documents.every(row => row.status === "ready") ? 200 : 202);
     } catch (error) {
-      if (error instanceof ServiceHostRetirementConflict) return response({ok:false,code:"restore-fenced",restoreFenceGeneration:error.restoreFenceGeneration},409); return errorResponse(error);
+      if (error instanceof ServiceHostRetirementConflict) return response({ok:false,code:"restore-fenced",restoreFenceGeneration:error.restoreFenceGeneration},409);
+      const refusal = errorResponse(error);
+      refusal.headers.set("cache-control", "private, no-store");
+      return refusal;
     }
   };
 }

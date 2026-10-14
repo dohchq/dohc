@@ -2,6 +2,7 @@ import type {LiveObjectBinding} from "./liveObjectBinding";
 import {parseLiveDocumentKey, parseLiveUpdateDigest, type AdmittedLiveUpdate, type LiveDocumentKey, type LiveUpdateReceipt} from "./liveUpdateAdmission";
 
 export interface ReleasePublicationTag {
+  /** SHA-256 of the 64-character lowercase hexadecimal release ID text, not the decoded bytes. */
   releaseDigest: string;
   restoreFenceGeneration: number;
   document: LiveDocumentKey;

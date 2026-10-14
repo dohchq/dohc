@@ -8,8 +8,8 @@ import {validateUserWritePath} from "@dohc/workspace-core";
 
 const tags = new WeakMap<SyncRelayLogInput,ReleasePublicationTag | null>();
 export function releasePublicationTag(op: SyncRelayLogInput): ReleasePublicationTag | null {
+  if (op.opKind !== "ydoc.update" && op.opKind !== "moment.append") return null;
   const retained = tags.get(op); if (retained !== undefined) return retained;
-  if (op.opKind !== "ydoc.update" && op.opKind !== "moment.append") {tags.set(op,null); return null;}
   if (!op.payloadJson.includes('"release"')) {tags.set(op,null); return null;}
   const payload = JSON.parse(op.payloadJson) as Record<string,unknown>;
   if (!Object.hasOwn(payload,"release")) {tags.set(op,null); return null;}
