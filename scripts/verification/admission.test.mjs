@@ -30,7 +30,7 @@ test("cheap preflight rejects tool and host failures before queueing without too
   const command = (tool, args, options) => {
     calls.push([tool, args]);
     assert.equal(options.env.RUSTUP_AUTO_INSTALL, "0");
-    assert.equal(options.timeout, 10_000);
+    assert.equal(options.timeout, 60_000);
     if (tool === "pwsh.exe") return "7.5.0";
     return `cargo-${args[0]} ${pins[`CARGO_${args[0].toUpperCase()}_VERSION`] ?? "fixture"}`;
   };
