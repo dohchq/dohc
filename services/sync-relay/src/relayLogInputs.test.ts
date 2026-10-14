@@ -19,6 +19,29 @@ describe("named share log author admission", () => {
     expect(JSON.parse(ops[1]!.payloadJson).authorDisplayName).toBe("Writer");
   });
 
+  it("uses one account lookup across document edits, posts, and reactions", async () => {
+    const lookup = vi.fn().mockResolvedValueOnce("Recipient").mockResolvedValue("Renamed recipient");
+    const agent = {agentId: "document-writer", agentName: "Document writer", onBehalfOf: "owner", depth: 1};
+    const document = {originSeq: 0, recordedAtMs: 1, opKind: "ydoc.update", payload: {
+      authorContext: {kind: "account", accountId: "recipient", agent},
+    }};
+    const reaction = {originSeq: 2, recordedAtMs: 3, opKind: "chat.reaction.set", payload: {
+      reactionId: "reaction", messageId: "message", threadId: "thread", emoji: "👍",
+      authorId: "recipient", authorKind: "agent", authorDisplayName: "Owner", state: "added", atMs: 3,
+    }};
+    const ops = await parseNamedShareLogOps([document, {...message("human"), originSeq: 1}, reaction], "recipient", lookup);
+    const human = {kind: "human", humanId: "recipient", humanName: "Recipient"};
+    expect(ops[0]?.admittedAuthorSnapshot).toEqual([human, {kind: "agent", ...agent, onBehalfOf: "recipient"}]);
+    expect(ops.slice(1).map(op => op.admittedAuthorSnapshot)).toEqual([[human], [human]]);
+    expect(ops[0]?.payloadJson).toBe(stableJsonStringify(document.payload));
+    expect(lookup).toHaveBeenCalledExactlyOnceWith("recipient");
+  });
+
+  it.each(["agent", "automation"])("trims a %s post name", async kind => {
+    const [op] = await parseNamedShareLogOps([message(kind, "  Writer \t")], "recipient", () => "Recipient");
+    expect(JSON.parse(op!.payloadJson).authorDisplayName).toBe("Writer");
+  });
+
   it.each(["agent", "automation"])("requires a bounded, well-formed %s name", async kind => {
     for (const name of [null, 5, {}, [], "", " ", "x".repeat(201), "\ud800"]) {
       await expect(parseNamedShareLogOps([message(kind, name)], "recipient", () => "Recipient")).rejects.toThrow("invalid display name");

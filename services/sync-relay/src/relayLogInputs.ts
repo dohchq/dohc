@@ -94,13 +94,17 @@ export async function parseNamedShareLogOps(
   actorUserId: string,
   lookupUserDisplayName?: LogAuthorNameLookup,
 ): Promise<SyncRelayLogInput[]> {
-  const ops = await parseAuthenticatedLogOps(values, actorUserId, lookupUserDisplayName);
-  const messages = ops.filter(op => op.opKind === "chat.message.append");
-  if (messages.length === 0) return ops;
-  const name = await authenticatedDisplayName(actorUserId, lookupUserDisplayName);
+  let displayName: Promise<string> | undefined;
+  const accountDisplayName = () => displayName ??= authenticatedDisplayName(actorUserId, lookupUserDisplayName);
+  const ops = await parseAuthenticatedLogOps(values, actorUserId, accountDisplayName);
+  const chatOps = ops.filter(op => op.opKind === "chat.message.append" || op.opKind === "chat.reaction.set");
+  if (chatOps.length === 0) return ops;
+  const name = await accountDisplayName();
   const humanName = name.length <= 200 && name.isWellFormed() ? name : actorUserId;
   const snapshot = parseLiveAuthorSnapshot([{kind: "human", humanId: actorUserId, humanName}]);
-  for (const op of messages) {
+  for (const op of chatOps) {
+    op.admittedAuthorSnapshot = snapshot;
+    if (op.opKind === "chat.reaction.set") continue;
     const payload = JSON.parse(op.payloadJson) as Record<string, unknown>;
     if (payload.authorKind !== "human" && payload.authorKind !== "agent" && payload.authorKind !== "automation") {
       throw badRequest("invalid author kind");
@@ -110,8 +114,9 @@ export async function parseNamedShareLogOps(
       if (typeof name !== "string" || !name.isWellFormed() || !name.trim() || name.trim().length > 200) {
         throw badRequest("invalid display name");
       }
+      payload.authorDisplayName = name.trim();
+      op.payloadJson = stableJsonStringify(payload);
     }
-    op.admittedAuthorSnapshot = snapshot;
   }
   return ops;
 }

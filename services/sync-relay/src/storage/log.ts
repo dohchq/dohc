@@ -31,7 +31,7 @@ function withAdmittedChatName(op: SyncRelayLogInput, snapshot: LiveAuthorSnapsho
   const human = snapshot.find(author => author.kind === "human");
   if (!human) throw new Error("named chat admission requires an account author");
   const payload = JSON.parse(op.payloadJson) as Record<string, unknown>;
-  if (payload.authorKind === "human") {
+  if (op.opKind === "chat.reaction.set" || payload.authorKind === "human") {
     payload.authorDisplayName = human.humanName;
     delete payload.authorOwnerDisplayName;
   } else {
@@ -91,7 +91,8 @@ export function appendLogBatchInTransaction(storage: StorageContext, input: {
       );
       for (const inputOp of input.ops) {
         const admittedChat = input.originId.startsWith(SHARE_MEMBER_ORIGIN_PREFIX) &&
-          inputOp.opKind === "chat.message.append" && inputOp.admittedAuthorSnapshot !== undefined;
+          (inputOp.opKind === "chat.message.append" || inputOp.opKind === "chat.reaction.set") &&
+          inputOp.admittedAuthorSnapshot !== undefined;
         let op = admittedChat ? withAdmittedChatName(inputOp, inputOp.admittedAuthorSnapshot!) : inputOp;
         if (op.originSeq <= currentMax) {
           const existing = existingStmt.get(
