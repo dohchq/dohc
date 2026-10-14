@@ -129,6 +129,8 @@ function holdInstance(root) {
 export async function runService({
   root, repo, lane = queuePaths(root).lane, commit = null,
   tickMs = 2000, timeLimitMs = 120 * 60_000, floorGb = resolveBuildBudget()?.diskFloorGb ?? 40,
+  // Another run starts only with this much free memory; a check that failed after it fell under the second floor is not trusted.
+  memoryFloorGb = 10, memoryFailGb = 3, freeMemory = () => freemem() / 1024 ** 3,
   freeDisk = () => freeDiskGb(lane) ?? freeDiskGb(root), docker = dockerResponds,
   prepare = prepareLane, sweep = sweepContainers, holdLane = holdLegacyLane,
   worker = defaultWorker, retryDelay = retryDelayMs, cleanupRetryMs = 60_000, prepareLimitMs = 45 * 60_000, stop, log = defaultLog(root),
@@ -328,6 +330,7 @@ export async function runService({
         // A check that failed while the host was failing proves nothing about the change.
         const free = freeDisk();
         const host = free !== null && free < Math.min(floorGb, 5) ? `free disk fell to ${free.toFixed(1)} GB`
+          : current.load.minFreeMemGb < memoryFailGb ? `free memory fell to ${current.load.minFreeMemGb} GB`
           : entry.request.gates?.js && !(await docker()) ? "Docker stopped responding" : null;
         if (host) outcome = { outcome: "environment", cause: "host", reason: `${host} during the run, so its failure is not trusted.` };
       }
@@ -343,6 +346,7 @@ export async function runService({
   async function checkHealth(requests) {
     health.diskFreeGb = freeDisk();
     health.diskOk = !targetRemoval && (health.diskFreeGb === null || health.diskFreeGb >= floorGb);
+    health.memoryOk = host.freeMemGb === null || host.freeMemGb >= memoryFloorGb;
     // A bad setting keeps the current lane count, so it never stops the runs in flight.
     try { laneCount = lanes(); laneError = null; }
     catch (error) { if (error.message !== laneError) log(`keeping ${laneCount} lane(s): ${error.message}`); laneError = error.message; }
@@ -369,7 +373,8 @@ export async function runService({
     health.reason = targetRemoval ? "removing the lanes' build output to free disk"
       : !health.diskOk ? `waiting for disk: ${health.diskFreeGb.toFixed(1)} GB free, ${floorGb} GB needed`
       : health.pausedUntil > Date.now() ? `paused after ${health.environmentStreak} environment failures in a row`
-      : !health.dockerOk ? "Docker is not responding; runs with the JavaScript gate wait" : null;
+      : !health.dockerOk ? "Docker is not responding; runs with the JavaScript gate wait"
+      : !health.memoryOk && running.size ? `waiting for memory: ${host.freeMemGb} GB free, ${memoryFloorGb} GB needed to start another run` : null;
   }
 
   function prune(requests) {
@@ -418,7 +423,7 @@ export async function runService({
     const asleep = now - last > 60_000;
     const sample = cpuTimes();
     host.cpuBusyPercent = Math.round(100 * (sample.busy - cpu.busy) / Math.max(1, sample.all - cpu.all));
-    host.freeMemGb = Math.round(freemem() / 1024 ** 3 * 10) / 10;
+    host.freeMemGb = Math.round(freeMemory() * 10) / 10;
     cpu = sample;
     for (const current of running.values()) {
       // A phase that began since the last tick counts only from its start; a clock set back counts nothing.
@@ -492,7 +497,8 @@ export async function runService({
       // containers are not yet removed waits, because they carry its id and their removal would stop its next run.
       // A restart, even one requested during this tick, starts nothing new and waits for the runs in flight.
       const started = new Set([...running.keys(), ...cleanupPending]);
-      while (running.size < laneCount && health.pausedUntil <= now && !existsSync(restart)) {
+      // A lone run always starts; another one waits while free memory is low.
+      while (running.size < laneCount && (running.size === 0 || health.memoryOk) && health.pausedUntil <= now && !existsSync(restart)) {
         const entry = nextRequest(requests.filter(candidate => !started.has(candidate.id)), health, now);
         if (!entry) break;
         started.add(entry.id);
