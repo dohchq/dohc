@@ -56,7 +56,7 @@ describe("states page", () => {
     expect(screen.getByTestId("states-dark").getAttribute("data-theme")).toBe("dark");
     expect(document.documentElement.dataset.theme).toBe("light");
     // The same sections in both themes, so a capture compares like with like.
-    for (const title of ["Buttons", "Copy", "State mark", "Menu", "Text inputs", "List rows", "Toasts", "Notices", "Dialog", "Kind glyph"]) {
+    for (const title of ["Buttons", "Copy", "State mark", "Menu", "Text inputs", "List rows", "Toasts", "Notices", "Dialog", "Kind glyph", "Page identity"]) {
       expect(screen.getAllByRole("heading", { name: title })).toHaveLength(2);
     }
     // Every forced state names an element the capture can find. A menu's
@@ -68,6 +68,10 @@ describe("states page", () => {
       expect(mark.querySelector(mark.dataset.forceTarget ?? "")).not.toBeNull();
       if (trigger) fireEvent.click(trigger);
     }
+    // The reserved pill is typed when it mounts, and the locked pills are
+    // locked at rest, once per theme.
+    expect(screen.getAllByTestId("property-reserved")).toHaveLength(2);
+    expect(screen.getAllByTestId("properties-locked")).toHaveLength(2);
 
     unmount();
     expect(document.documentElement.dataset.theme).toBe("dark");

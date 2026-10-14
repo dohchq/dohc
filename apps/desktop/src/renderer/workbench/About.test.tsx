@@ -266,7 +266,7 @@ describe("About Access", () => {
   it.each([
     ["not-synced", NOT_SYNCED, "Shares need sync, and this workspace does not sync.", "Sync and sharing", openSyncSettings],
     ["signed-out", SIGNED_OUT, "Connect your server to check who has access.", "Connect server", connect],
-    ["other-account", OTHER_ACCOUNT, "This workspace syncs with another account. Connect that account to check who has access.", "Connect server", connect],
+    ["other-account", OTHER_ACCOUNT, "dohc could not confirm this workspace's account, so sync is paused. Resume sync to check who has access.", "Sync and sharing", openSyncSettings],
   ] as const)("says why an answer covers nothing when %s, with the one action that can change it", async (reason, facts, words, label, action) => {
     bridgeMock.getObjectAccess.mockResolvedValue(UNKNOWN);
     render(<Access facts={facts} />);

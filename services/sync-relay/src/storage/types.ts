@@ -6,6 +6,7 @@ import type { LiveCommittedDeliveryStore } from "./liveCommittedDelivery";
 import type {OwnerRestoreOptions, OwnerRestoreOptionsInput, OwnerRestoreStatus} from "./ownerRestoreOptions";
 import type { StopRestoreIntent, StopRestoreLookup, StopRestoreOperation, StopRestorePlan, StopRestorePlanInput } from "./liveRestoreOperation";
 import type { LiveJournalHistoryAuthority } from "./liveJournalHistory";
+import type {ReplicaLiveJournalRead, ReplicaLiveJournalPage} from "./liveUpdateJournal";
 import type { AdmittedLiveUpdate, AdmittedLiveUpdateMetadata, LiveUpdateSubmissionMetadata, LiveUpdateAcceptResult } from "@dohc/live-session-contract/live-update-admission";
 import type {
   HostControlSnapshot,
@@ -693,6 +694,7 @@ export interface SyncRelayStorage {
   readLiveUpdateJournalCut(input: { document: LiveDocumentKey }): LiveUpdateJournalCutResult;
   commitLiveUpdateJournal(input: LiveUpdateJournalCommitInput, activation?: ServiceActivationAccess): RelayLiveUpdateJournalResult;
   readCommittedLiveUpdate(input: { host: LiveHostConnectionCoordinate; document: LiveDocumentKey; journalCursor: number }): CommittedLiveUpdateResult;
+  readReplicaLiveJournal(input: ReplicaLiveJournalRead): Promise<ReplicaLiveJournalPage>;
 
   close(): void;
   resolveCurrentLiveDocumentBinding(input: CurrentLiveBindingRequest, activation?: ServiceActivationAccess): CurrentLiveBindingResult;

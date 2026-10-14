@@ -253,6 +253,7 @@ pub struct OwnerOutboxEntry {
     pub update: Vec<u8>,
     pub byte_length: i64,
     pub created_at_ms: i64,
+    pub person_edit: bool,
     pub agent_declaration: Option<AgentDeclaration>,
     pub automation_declaration: Option<AutomationDeclaration>,
 }
@@ -489,7 +490,7 @@ pub fn append_in_tx(
     {
         return Err(OwnerOutboxError::Frozen);
     };
-    append_with_retained_base(tx, workspace_id, input, None, None, None, None)
+    append_with_retained_base(tx, workspace_id, input, None, None, None, None, false)
 }
 
 /// An append key names one exact entry: its binding, base, bytes, whether it
@@ -499,6 +500,7 @@ pub fn append_in_tx(
 /// `draft_revision`, the observed binding revision it was queued under. Its
 /// editor's declaration, or an adopted native update's recorded agent, rides
 /// in `agent_declaration`.
+#[allow(clippy::too_many_arguments)]
 fn append_with_retained_base(
     tx: &rusqlite::Transaction<'_>,
     workspace_id: &str,
@@ -507,6 +509,7 @@ fn append_with_retained_base(
     draft_revision: Option<i64>,
     agent_declaration: Option<&AgentDeclaration>,
     automation_declaration: Option<&AutomationDeclaration>,
+    person_edit: bool,
 ) -> Result<OwnerOutboxAppendResult, OwnerOutboxError> {
     let binding = input
         .binding
@@ -617,11 +620,12 @@ fn append_with_retained_base(
         existing_draft_revision,
         existing_automation_json,
         terminal_reason,
+        existing_person_edit,
     )) = tx
         .query_row(
             "SELECT outbox_id,sequence,delivery_id,update_digest,result_pending_bytes,\
                  result_oldest_entry_at_ms,result_state,agent_declaration_json,\
-                 draft_binding_revision,automation_declaration_json,terminal_reason \
+                 draft_binding_revision,automation_declaration_json,terminal_reason,person_edit \
                  FROM owner_ydoc_outbox_entries WHERE append_key=?1",
             [&input.append_key],
             |row| {
@@ -637,6 +641,7 @@ fn append_with_retained_base(
                     row.get::<_, Option<i64>>(8)?,
                     row.get::<_, Option<String>>(9)?,
                     row.get::<_, Option<String>>(10)?,
+                    row.get::<_, Option<bool>>(11)?,
                 ))
             },
         )
@@ -650,6 +655,7 @@ fn append_with_retained_base(
             || parent.base_update_digest != base_update_digest
             || existing_update_digest != update_digest
             || existing_declaration_json != declaration_json
+            || existing_person_edit != person_edit.then_some(true)
             || existing_automation_json != automation_json
             || existing_draft_revision.is_some() != draft_revision.is_some()
         {
@@ -743,8 +749,8 @@ fn append_with_retained_base(
              (outbox_id,sequence,append_key,delivery_id,update_digest,update_blob_digest,\
               byte_length,created_at_ms,pending,result_pending_bytes,\
               result_oldest_entry_at_ms,result_state,agent_declaration_json,\
-              draft_binding_revision,automation_declaration_json) \
-             VALUES (?1,?2,?3,?4,?5,?5,?6,?7,1,?8,?9,?10,?11,?12,?13)",
+              draft_binding_revision,automation_declaration_json,person_edit) \
+             VALUES (?1,?2,?3,?4,?5,?5,?6,?7,1,?8,?9,?10,?11,?12,?13,?14)",
         params![
             parent.outbox_id,
             parent.next_sequence,
@@ -759,6 +765,7 @@ fn append_with_retained_base(
             declaration_json,
             draft_revision,
             automation_json,
+            person_edit.then_some(true),
         ],
     )
     .map_err(write_sql)?;
@@ -882,6 +889,7 @@ pub fn append_adopted_local_update_in_tx(
         None,
         agent_declaration.as_ref(),
         None,
+        source.person_edit().map_err(map)?,
     )
     .map_err(map)?;
     retain_native_source(tx, &result, &source).map_err(map)?;
@@ -905,7 +913,7 @@ pub fn read_pending(
         let mut statement = conn
             .prepare(
                 "SELECT sequence,append_key,delivery_id,update_digest,update_blob_digest,\
-                 byte_length,created_at_ms,agent_declaration_json,automation_declaration_json FROM owner_ydoc_outbox_entries \
+                 byte_length,created_at_ms,agent_declaration_json,automation_declaration_json,person_edit FROM owner_ydoc_outbox_entries \
                  WHERE outbox_id=?1 AND pending=1 ORDER BY sequence",
             )
             .map_err(read_sql)?;
@@ -921,6 +929,7 @@ pub fn read_pending(
                     row.get::<_, i64>(6)?,
                     row.get::<_, Option<String>>(7)?,
                     row.get::<_, Option<String>>(8)?,
+                    row.get::<_, Option<bool>>(9)?,
                 ))
             })
             .map_err(read_sql)?;
@@ -936,6 +945,7 @@ pub fn read_pending(
                 created_at_ms,
                 declaration_json,
                 automation_json,
+                person_edit,
             ) = row.map_err(read_sql)?;
             let update = get_binary_blob(conn, &blob_digest)?.ok_or(OwnerOutboxError::Corrupt)?;
             if update_digest != blob_digest
@@ -952,6 +962,7 @@ pub fn read_pending(
                 update,
                 byte_length,
                 created_at_ms,
+                person_edit: person_edit.unwrap_or(false),
                 agent_declaration: stored_declaration(declaration_json)?,
                 automation_declaration: stored_automation_declaration(automation_json)?,
             });
@@ -1070,16 +1081,17 @@ pub fn read_pending_page(
             }
             EntryHeader | Update => {
                 let entry = tx.query_row(
-                    "SELECT append_key,delivery_id,update_digest,update_blob_digest,byte_length,created_at_ms,agent_declaration_json,automation_declaration_json \
+                    "SELECT append_key,delivery_id,update_digest,update_blob_digest,byte_length,created_at_ms,agent_declaration_json,automation_declaration_json,person_edit \
                      FROM owner_ydoc_outbox_entries WHERE outbox_id=?1 AND sequence=?2 AND pending=1",
                     params![outbox_id, cursor.sequence], |row| Ok((
                         row.get::<_, String>(0)?, row.get::<_, String>(1)?,
                         row.get::<_, String>(2)?, row.get::<_, String>(3)?,
                         row.get::<_, i64>(4)?, row.get::<_, i64>(5)?,
                         row.get::<_, Option<String>>(6)?, row.get::<_, Option<String>>(7)?,
+                        row.get::<_, Option<bool>>(8)?,
                     )),
                 ).optional().map_err(read_sql)?.ok_or(OwnerOutboxError::InvalidInput("invalid read entry"))?;
-                let (append_key, delivery_id, digest, blob_digest, byte_length, created_at_ms, declaration_json, automation_json) = entry;
+                let (append_key, delivery_id, digest, blob_digest, byte_length, created_at_ms, declaration_json, automation_json, person_edit) = entry;
                 if digest != blob_digest || byte_length <= 0 {
                     return Err(OwnerOutboxError::Corrupt);
                 }
@@ -1089,6 +1101,7 @@ pub fn read_pending_page(
                         "deliveryId": delivery_id, "updateDigest": digest,
                         "byteLength": byte_length, "createdAtMs": created_at_ms,
                     });
+                    if person_edit == Some(true) { header["personEdit"] = serde_json::json!(true); }
                     // An entry that declared no agent has no field at all.
                     if let Some(declaration) = stored_declaration(declaration_json)? {
                         header["agentDeclaration"] = serde_json::to_value(declaration)

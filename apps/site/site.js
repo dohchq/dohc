@@ -31,7 +31,7 @@ themeToggle?.addEventListener('click', () => {
 
 syncThemeToggle();
 
-const RELEASES_URL = 'https://github.com/dohc-ai/dohc/releases';
+const RELEASES_URL = 'https://github.com/dohchq/dohc/releases';
 
 function matchesBuild(extension, architecture) {
   const architecturePattern = new RegExp(`(?:^|[-_])${architecture}(?:[-_.]|$)`, 'i');
