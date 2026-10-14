@@ -22,6 +22,8 @@ import { errorBody, errorResponse, notFound } from "./errors";
 import { RELAY_API_VERSIONS, relayApiVersionRefusal } from "./apiVersion";
 import { hashRelayExchangeKey, verifyRelayExchangeKey } from "./linkSecurity";
 import { PresenceHub } from "./presence";
+import { DiscussionActivityHub } from "./discussionActivity";
+import { ReplicaWatches } from "./replicaWatches";
 import { MAX_BLOB_BYTES, createSyncRelayHandler, streamsRequestBody } from "./server";
 import type { OwnerRestoreHost } from "./ownerRestoreRoutes";
 import { automationHostMaxBodyBytes } from "./automationHostRoutes";
@@ -365,6 +367,8 @@ if (testAuthSeam) {
 // transport is never persisted, so it lives only here and is lost on restart
 // (by design — presence is not durable).
 const presence = new PresenceHub();
+const discussionActivity = new DiscussionActivityHub();
+const replicaWatches = new ReplicaWatches(discussionActivity);
 
 let ownerRestoreHost: (() => OwnerRestoreHost | undefined) | undefined;
 const relayApplication = createSyncRelayHandler({
@@ -382,6 +386,8 @@ const relayApplication = createSyncRelayHandler({
   lookupVerifiedUserEmail: (userId) => lookupVerifiedUserEmail(userId),
   lookupUserDisplayName: (userId) => lookupUserDisplayName(userId),
   presence,
+  discussionActivity,
+  replicaWatches,
   linkKey,
   shareWebOrigin,
   relayExchangeKey,
@@ -679,6 +685,7 @@ automations = automationServer && automationReplicaKey && automationRoot ? await
 installShutdown(server, {
   gracePeriodMs: SHUTDOWN_GRACE_PERIOD_MS,
   onClosed: async () => {
+    replicaWatches.dispose();
     await publicationOperator.close();
     await documentProjection?.close();
     await ownerAdmissionRun?.close();
