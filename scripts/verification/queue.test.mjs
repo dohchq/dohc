@@ -4,11 +4,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
-import { attemptOutcome, cancel, listRequests, nextRequest, placeSubmission, position, queuePaths, readJson, serviceRuns, startsInMs, submit, taskDefinition, terminalStates, writeJson } from "./queue.mjs";
+import { attemptOutcome, cancel, lastNightlyPass, listRequests, nextRequest, nightlyTaskDefinition, placeSubmission, position, queuePaths, readJson, serviceRuns, startsInMs, submit, submitNightly, taskDefinition, terminalStates, writeJson } from "./queue.mjs";
 import { laneTemp, runService, sweepContainers } from "./queue-service.mjs";
 import { failureKind, takeGrant } from "./verify.mjs";
 import { run } from "./process.mjs";
@@ -62,6 +62,44 @@ test("only a receipt for this exact attempt counts", () => {
   assert.equal(attemptOutcome(receipt({ verdict: "PASS" }), grant, { stopped: "time limit" }).outcome, "failed");
   assert.equal(attemptOutcome(null, grant, { stopped: "cancelled" }).outcome, "cancelled");
   assert.equal(attemptOutcome(null, grant, { stopped: "time budget" }).outcome, "error", "a run cut short by the shared budget gets no verdict");
+});
+
+test("the nightly run of main goes ahead of the line, and only a ready one does", () => {
+  const first = entry("000000001-aaaaaa", { head: "h1" });
+  const nightly = entry("000000009-nnnnnn", { head: "h9", branch: "refs/heads/main", checkout: "nightly", full: true, nightly: true });
+  const waiting = entry("000000008-mmmmmm", { head: "h8", nightly: true }, "queued", { notBefore: new Date(Date.now() + 60_000).toISOString() });
+  assert.equal(nextRequest([first, nightly], { diskOk: true, dockerOk: true }).id, nightly.id);
+  assert.equal(nextRequest([first, waiting], { diskOk: true, dockerOk: true }).id, first.id, "a nightly in backoff holds back nobody");
+  assert.equal(position([first, nightly, entry("000000000-zzzzzz", { head: "h0" }, "running")], nightly.id), 2);
+  assert.equal(position([first, nightly], first.id), 2);
+});
+
+test("the nightly submission verifies main's head in full, against the last nightly that passed", async t => {
+  const root = mkdtempSync(join(tmpdir(), "dohc-queue-nightly-"));
+  const fixture = fixtureRepo();
+  t.after(() => { rmSync(root, { recursive: true, force: true }); rmSync(fixture.repo, { recursive: true, force: true }); });
+  fixture.git("update-ref", "refs/remotes/origin/main", fixture.head);
+  let fetched = 0;
+  const first = await submitNightly(root, fixture.repo, { fetch: () => { fetched += 1; } });
+  assert.equal(fetched, 1);
+  assert.deepEqual(first, { head: fixture.head, base: fixture.base }, "with no nightly yet, the base is main's previous commit");
+  const [name] = readdirSync(queuePaths(root).inbox);
+  const submission = readJson(join(queuePaths(root).inbox, name));
+  assert.deepEqual({ ...submission, key: undefined, submittedAt: undefined, protocol: undefined },
+    { head: fixture.head, base: fixture.base, scope: "all", full: true, gates: { rust: true, js: true }, branch: "refs/heads/main", checkout: "nightly", nightly: true, key: undefined, submittedAt: undefined, protocol: undefined });
+  // Once a nightly passed, the next one covers everything merged since.
+  await writeJson(join(queuePaths(root).request("000000001-aaaaaa"), "request.json"), { id: "000000001-aaaaaa", sequence: 1, head: fixture.base, base: fixture.base, nightly: true, scope: "all" });
+  await writeJson(join(queuePaths(root).request("000000001-aaaaaa"), "status.json"), { state: "passed", attempts: [] });
+  assert.equal(lastNightlyPass(listRequests(root)).id, "000000001-aaaaaa");
+  assert.deepEqual(await submitNightly(root, fixture.repo, { fetch: () => {} }), { head: fixture.head, base: fixture.base });
+});
+
+test("the nightly task submits the run every night and stops within ten minutes", () => {
+  const xml = nightlyTaskDefinition("C:\\w\\_verification");
+  assert.match(xml, /<CalendarTrigger><Enabled>true<\/Enabled><StartBoundary>2026-01-01T03:07:00<\/StartBoundary><ScheduleByDay><DaysInterval>1<\/DaysInterval><\/ScheduleByDay><\/CalendarTrigger>/u);
+  assert.match(xml, /nightly\.ps1/u);
+  assert.match(xml, /<ExecutionTimeLimit>PT10M<\/ExecutionTimeLimit>/u);
+  assert.match(xml, /<StartWhenAvailable>true<\/StartWhenAvailable>/u, "a night the host slept still gets its run");
 });
 
 test("the service task restarts a dead supervisor from the session that installed it, at normal priority", () => {
