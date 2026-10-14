@@ -17,6 +17,7 @@ import { fixture as relayFixture, limits as relayLimits } from "../../../../serv
 import { createSyncRelayHandler } from "../../../../services/sync-relay/src/server";
 import { createDatasetAuthorityRouter, createRemoteDatasetData, createRemoteDatasetTransferTarget } from "./remoteDataset";
 import { readDatasetResponse } from "../ipc/readDatasetResponse";
+import * as supervisorModule from "@dohc/app-backend-runtime/supervisor";
 import { createDatasetReplica } from "@dohc/app-backend-runtime/replica";
 import { createDatasetJournal } from "@dohc/app-backend-runtime/journal";
 import type { AppRuntimeLauncher } from "@dohc/app-backend-runtime";
@@ -151,6 +152,11 @@ afterEach(async () => {
 
 describe("local dataset owner adapter", () => {
   it("accounts one replaceable replay cache and recovers records and retries after restart", async () => {
+    // Exercise two real cache replacements without 256 unrelated worker writes.
+    const createSupervisor = supervisorModule.createDatasetSupervisor;
+    vi.spyOn(supervisorModule, "createDatasetSupervisor").mockImplementation(options =>
+      createSupervisor({ ...options, materializationEvents: 2 }),
+    );
     const first = await open(), approved = await activate(first.host);
     const db = new DatabaseSync(join(first.workspaceRoot, ".dohc", "datasets", "state.sqlite"));
     const budget = () => Number(db.prepare("SELECT bytes FROM local_dataset_budget").get()!.bytes);
@@ -159,18 +165,18 @@ describe("local dataset owner adapter", () => {
     const initial = call(approved, id(6), "cache-0", {name: "Item 0"});
     try {
       for (let batch = 0; batch < 2; batch++) {
-        for (let index = batch * 128; index < (batch + 1) * 128; index++) {
+        for (let index = batch * 2; index < (batch + 1) * 2; index++) {
           await first.host.action(call(approved, id(6), `cache-${index}`, {name: `Item ${index}`}));
         }
-        expect((await first.host.query(call(approved, id(5)))).result).toHaveLength((batch + 1) * 128);
+        expect((await first.host.query(call(approved, id(5)))).result).toHaveLength((batch + 1) * 2);
         await vi.waitFor(() => {
           const cache = db.prepare("SELECT cursor_json FROM dohc_dataset_materializations").get();
-          expect(cache && JSON.parse(String(cache.cursor_json)).revision).toBe((batch + 1) * 128);
+          expect(cache && JSON.parse(String(cache.cursor_json)).revision).toBe((batch + 1) * 2);
           expect(db.prepare("SELECT count(*) n FROM dohc_dataset_checkpoints WHERE state!=2").get()!.n).toBe(0);
         });
         const caches = db.prepare("SELECT * FROM dohc_dataset_materializations").all();
         expect(caches).toHaveLength(1);
-        expect(JSON.parse(String(caches[0].cursor_json)).revision).toBe((batch + 1) * 128);
+        expect(JSON.parse(String(caches[0].cursor_json)).revision).toBe((batch + 1) * 2);
         expect(db.prepare("SELECT count(*) n FROM dohc_dataset_checkpoints WHERE state!=2").get()!.n).toBe(0);
         const events = Number(db.prepare("SELECT sum(storage_bytes) bytes FROM dohc_dataset_events").get()!.bytes);
         expect(budget()).toBe(baseline + events + Number(caches[0].storage_bytes));
@@ -180,7 +186,7 @@ describe("local dataset owner adapter", () => {
       }
       await first.host.close();
       const restarted = await open({workspaceRoot: first.workspaceRoot});
-      expect((await restarted.host.query(call(approved, id(5)))).result).toHaveLength(256);
+      expect((await restarted.host.query(call(approved, id(5)))).result).toHaveLength(4);
       expect(await restarted.host.action(initial)).toMatchObject({revision: 1, replayed: true, result: {name: "Item 0"}});
       expect(db.prepare("SELECT checkpoint_id FROM dohc_dataset_materializations").get()!.checkpoint_id).toBe(previousCheckpoint);
     } finally { db.close(); }
