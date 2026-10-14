@@ -965,11 +965,7 @@ async fn capture_ignores_a_pending_rename_rollback_delete_until_retry() {
     );
 
     let seed = actor
-        .capture_manifest_seed(
-            WORKSPACE.to_owned(),
-            "main".to_owned(),
-            scratch.path().to_path_buf(),
-        )
+        .capture_manifest_seed(WORKSPACE.to_owned(), "main".to_owned())
         .await
         .expect("capture seed");
     assert!(
@@ -1122,11 +1118,7 @@ async fn conflicted_rename_rollback_terminates_delete_and_capture_sees_survivor(
     drop(connection);
 
     let seed = actor
-        .capture_manifest_seed(
-            WORKSPACE.to_owned(),
-            "main".to_owned(),
-            scratch.path().to_path_buf(),
-        )
+        .capture_manifest_seed(WORKSPACE.to_owned(), "main".to_owned())
         .await
         .expect("capture seed");
     assert!(
@@ -1303,11 +1295,7 @@ async fn capture_ingests_an_inactive_versions_pending_rename_destination() {
     std::fs::write(scratch.path().join("branch-new.bin"), BYTES)
         .expect("user-created active-version file");
     let seed = actor
-        .capture_manifest_seed(
-            WORKSPACE.to_owned(),
-            "main".to_owned(),
-            scratch.path().to_path_buf(),
-        )
+        .capture_manifest_seed(WORKSPACE.to_owned(), "main".to_owned())
         .await
         .expect("main capture seed");
     assert!(
@@ -1589,11 +1577,7 @@ async fn pending_delete_rollback_restore_is_not_seeded_for_capture_retire_on_reo
 
     let reopened = supervisor.open(&db, 40).expect("reopen actor").actor;
     let seed = reopened
-        .capture_manifest_seed(
-            WORKSPACE.to_owned(),
-            "main".to_owned(),
-            scratch.path().to_path_buf(),
-        )
+        .capture_manifest_seed(WORKSPACE.to_owned(), "main".to_owned())
         .await
         .expect("capture seed");
     for entry in seed {
@@ -2230,11 +2214,7 @@ async fn inactive_rollback_write_does_not_hide_active_capture_retire() {
 
     std::fs::remove_file(scratch.path().join("captured.bin")).expect("user deletes main file");
     let seed = actor
-        .capture_manifest_seed(
-            WORKSPACE.to_owned(),
-            "main".to_owned(),
-            scratch.path().to_path_buf(),
-        )
+        .capture_manifest_seed(WORKSPACE.to_owned(), "main".to_owned())
         .await
         .expect("main capture seed");
     assert!(

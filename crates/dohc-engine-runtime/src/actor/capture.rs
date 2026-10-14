@@ -720,21 +720,18 @@ impl ActorHandle {
                 std::collections::HashSet::new()
             } else {
                 store.read_with(|conn| {
-                    let mut query = conn
-                        .prepare_cached(
-                            "SELECT job_id FROM materialization_jobs \
-                         WHERE workspace_id IN (?1,'') AND target_path=?2 AND status='pending'",
-                        )
+                    let paths: std::collections::HashSet<&str> = settlement.paths.iter().map(|path| path.path.as_str()).collect();
+                    let released: std::collections::HashSet<String> = settlement.paths.iter().filter(|path| path.released_hold).map(|path| path.path.to_lowercase()).collect();
+                    let mut query = conn.prepare_cached(
+                        "SELECT job_id,target_path FROM materialization_jobs WHERE workspace_id IN (?1,'') AND status='pending'"
+                    ).map_err(StorageError::corrupt_public)?;
+                    let jobs = query.query_map([&workspace_id], |row| Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?)))
                         .map_err(StorageError::corrupt_public)?;
                     let mut selected = std::collections::HashSet::new();
-                    for path in &settlement.paths {
-                        let jobs = query
-                            .query_map(params![workspace_id, path.path], |row| {
-                                row.get::<_, String>(0)
-                            })
-                            .map_err(StorageError::corrupt_public)?;
-                        for job in jobs {
-                            selected.insert(job.map_err(StorageError::corrupt_public)?);
+                    for job in jobs {
+                        let (id,target) = job.map_err(StorageError::corrupt_public)?;
+                        if paths.contains(target.as_str()) || (!released.is_empty() && id.starts_with("version-switch-") && released.contains(&target.to_lowercase())) {
+                            selected.insert(id);
                         }
                     }
                     Ok::<_, RuntimeError>(selected)
@@ -745,7 +742,7 @@ impl ActorHandle {
                     .paths
                     .iter()
                     .filter(|path| path.released_hold)
-                    .map(|path| path.path.clone())
+                    .map(|path| path.path.to_lowercase())
                     .collect();
                 root_guard.validate(&root_dir)?;
                 let replay = super::materialization::replay_pending_materializations(
@@ -1043,19 +1040,12 @@ impl ActorHandle {
         &self,
         workspace_id: String,
         version_id: String,
-        root_dir: PathBuf,
     ) -> Result<Vec<CaptureManifestSeedEntry>, RuntimeError> {
         self.run(move |store, _| {
             let mut entries = capture_manifest_seed(store, &workspace_id, &version_id)?;
             let holds = store.read_with(|conn| capture_file_holds::list_in(conn, &workspace_id))?;
             let held_paths = dohc_engine_files::PlacementHolds::from_holds(&workspace_id, &holds);
-            entries.retain(|entry| {
-                held_paths
-                    .get(&root_dir, &entry.path)
-                    .ok()
-                    .flatten()
-                    .is_none()
-            });
+            entries.retain(|entry| !held_paths.blocks(&entry.path));
             for hold in holds {
                 entries.push(CaptureManifestSeedEntry {
                     path: hold.path,
@@ -1538,6 +1528,12 @@ fn capture_ingest_in_tx(
         )?;
     }
     if held {
+        capture_file_holds::rebase_switch_jobs_in(
+            tx,
+            &input.workspace_id,
+            &input.path,
+            &dohc_engine_storage::Preimage::Present(result.snapshot.blob_sha256.clone()),
+        )?;
         capture_file_holds::clear_in(tx, &input.workspace_id, &input.path)?;
     }
     result.pending_placement = pending_placement;
@@ -1977,6 +1973,14 @@ fn capture_ingest_binary_on_store(
             pending_placement_in(tx, &input.workspace_id, &input.path, hold.is_some())?;
         result.released_capture_hold = hold.is_some();
         if hold.is_some() {
+            capture_file_holds::rebase_switch_jobs_in(
+                tx,
+                &input.workspace_id,
+                &input.path,
+                &dohc_engine_storage::Preimage::Present(dohc_engine_storage::hex_sha256(
+                    &input.bytes,
+                )),
+            )?;
             capture_file_holds::clear_in(tx, &input.workspace_id, &input.path)?;
         }
         Ok::<_, RuntimeError>(result)
@@ -2242,6 +2246,12 @@ fn capture_retire_on_store(
             pending_placement_in(tx, &input.workspace_id, &input.path, hold.is_some())?;
         result.released_capture_hold = hold.is_some();
         if hold.is_some() {
+            capture_file_holds::rebase_switch_jobs_in(
+                tx,
+                &input.workspace_id,
+                &input.path,
+                &dohc_engine_storage::Preimage::Absent,
+            )?;
             capture_file_holds::clear_in(tx, &input.workspace_id, &input.path)?;
         }
         Ok::<_, RuntimeError>((result, asset_jobs))

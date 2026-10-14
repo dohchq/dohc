@@ -1113,6 +1113,7 @@ fn publish_write_job(
                     self_writes,
                     now_ms,
                     faults,
+                    None,
                 );
                 let settled = !matches!(
                     result.1,
@@ -2365,6 +2366,7 @@ fn versioned_text_rollback_on_store(
                 self_writes,
                 job.created_at_ms,
                 faults,
+                None,
             ),
             JobStatus::Conflict | JobStatus::Cancelled => {
                 (false, PostCommitMaterializeOutcome::Conflict)
@@ -2409,6 +2411,7 @@ fn versioned_text_rollback_on_store(
             self_writes,
             write_job.created_at_ms,
             faults,
+            None,
         ),
         // Follow-up: same pairing rule as the startup replay's
         // "binary-rename-1-delete-mat_" case — a cancelled write means its
@@ -2458,6 +2461,7 @@ fn versioned_text_rollback_on_store(
             self_writes,
             delete_job.created_at_ms,
             faults,
+            None,
         ),
         JobStatus::Conflict | JobStatus::Cancelled => {
             (false, PostCommitMaterializeOutcome::Conflict)
@@ -2624,6 +2628,7 @@ fn materialize_restored_scene_assets(
                     self_writes,
                     job.created_at_ms,
                     faults,
+                    None,
                 )
                 .1
             }
@@ -2895,6 +2900,7 @@ fn versioned_text_merge_on_store(
         self_writes,
         input.now_ms,
         faults,
+        None,
     );
     Ok(MergeExecutionResult {
         merge: result,
@@ -4792,6 +4798,7 @@ mod doc_cache_reset_tests {
                         &(),
                         4,
                         &NoFaults,
+                        None,
                     );
                 assert!(!materialized);
                 assert!(matches!(reported, PostCommitMaterializeOutcome::Skipped));

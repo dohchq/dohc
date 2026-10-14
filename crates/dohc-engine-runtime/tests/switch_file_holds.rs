@@ -131,6 +131,9 @@ fn switch(scratch: &ScratchDir, version: &str, now: i64) -> ActiveVersionSwitch 
 
 async fn preserves_hold(target_path: &str, crash: bool) {
     let scratch = fixture(2, 1, target_path);
+    if target_path == "FILE-0000.TXT" && !scratch.path().join(target_path).exists() {
+        return;
+    }
     let database = engine_db_path(&scratch).unwrap();
     let supervisor = WorkspaceSupervisor::new();
     let actor = supervisor.open(&database, 6).unwrap().actor;
@@ -218,16 +221,17 @@ async fn switch_hold_target_delete_and_back() {
 async fn switch_hold_restart_after_switch_commit() {
     preserves_hold("file-0000.txt", true).await;
 }
-#[cfg(windows)]
 #[tokio::test]
-async fn switch_hold_windows_case_alias() {
+async fn switch_hold_case_alias() {
     preserves_hold("FILE-0000.TXT", false).await;
 }
 
-#[cfg(windows)]
 #[tokio::test]
-async fn switch_hold_missing_windows_case_alias() {
+async fn switch_hold_missing_case_alias() {
     let scratch = fixture(2, 1, "FILE-0000.TXT");
+    if !scratch.path().join("FILE-0000.TXT").exists() {
+        return;
+    }
     std::fs::remove_file(scratch.path().join("file-0000.txt")).unwrap();
     let database = engine_db_path(&scratch).unwrap();
     let supervisor = WorkspaceSupervisor::new();
@@ -246,6 +250,329 @@ async fn switch_hold_missing_windows_case_alias() {
         assert_eq!(actor.capture_file_holds(WS.into()).await.unwrap(), before);
     }
     supervisor.close(&database).unwrap();
+}
+
+fn conflict_texts(scratch: &ScratchDir) -> Vec<String> {
+    std::fs::read_dir(scratch.path())
+        .unwrap()
+        .filter_map(|entry| {
+            let entry = entry.unwrap();
+            entry
+                .file_name()
+                .to_string_lossy()
+                .contains("conflict")
+                .then(|| std::fs::read_to_string(entry.path()).unwrap())
+        })
+        .collect()
+}
+
+fn delete_input() -> dohc_engine_domain::DeleteTextFile {
+    dohc_engine_domain::DeleteTextFile {
+        workspace_id: WS.into(),
+        version_id: "main".into(),
+        path: "file-0000.txt".into(),
+        moment_id: "release-delete".into(),
+        request_id: None,
+        metadata_origin: "api".into(),
+        metadata_summary: None,
+        metadata_correlation_id: None,
+        author_json: None,
+        now_ms: 20,
+    }
+}
+
+fn sync_delete(store: &mut EngineStore) -> Vec<dohc_engine_sync::MomentMaterializationChange> {
+    use dohc_engine_sync::{ApplyDisposition, NoLiveLeases, ReplicationEnvelope};
+    let head = VersionedTextStore::new(store)
+        .read_text(WS, "main", "file-0000.txt")
+        .unwrap()
+        .unwrap();
+    let envelope = ReplicationEnvelope {
+        settlement_admission: None,
+        admitted_author_snapshot: None,
+        workspace_id: WS.into(),
+        origin_id: "peer-delete".into(),
+        origin_seq: 0,
+        relay_seq: Some(1),
+        op_kind: "moment.append".into(),
+        recorded_at_ms: 20,
+        payload: serde_json::json!({
+            "momentId":"peer-delete", "versionId":"main", "objectId":head.object_id,
+            "objectCreatedAtMs":2, "path":head.path, "recordedAtMs":20, "operation":"delete",
+            "payloadBeforeBlobSha256":head.blob_sha256, "payloadBeforePath":head.path,
+            "payloadBeforeContentKind":"text", "payloadBeforeByteLength":head.text.len(),
+            "payloadAfterBlobSha256":head.blob_sha256,
+            "payloadAfterPath":head.path, "payloadAfterContentKind":"text", "payloadAfterByteLength":head.text.len(),
+            "metadata":{"origin":"sync", "summary":null, "correlationId":null},
+            "beforePresent":"present", "beforeObjectId":head.object_id, "beforeVersionId":"main",
+            "beforePath":head.path, "beforeBlobSha256":head.blob_sha256, "beforeContentKind":"text",
+            "beforeByteLength":head.text.len(), "beforeUpdatedAtMs":head.updated_at_ms,
+            "beforeLatestMomentId":head.latest_moment_id,
+            "beforeMetadata":{"origin":"local-file", "summary":head.metadata_summary,
+                "correlationId":head.metadata_correlation_id}
+        }),
+    };
+    let result = dohc_engine_sync::apply_moment_envelope_detailed(
+        store,
+        &envelope,
+        &NoFaults,
+        &NoLiveLeases,
+    )
+    .unwrap();
+    let ApplyDisposition::Applied(result) = result.primary else {
+        panic!("sync delete refused: {result:?}")
+    };
+    result.materialization_changes
+}
+
+async fn release_without_capture(action: &str) {
+    let scratch = if action == "rollback" {
+        let scratch = fixture(0, 0, "");
+        let mut store = EngineStore::open(&engine_db_path(&scratch).unwrap(), 5).unwrap();
+        let object = seed(&mut store, "main", "file-0000.txt", "main\n", 5);
+        seed(&mut store, "target", "file-0000.txt", "target\n", 6);
+        store
+            .write_with(&NoFaults, |tx| {
+                capture_file_holds::record_in(
+                    tx,
+                    &CaptureFileHold {
+                        workspace_id: WS.into(),
+                        source_version_id: "main".into(),
+                        object_id: object,
+                        path: "file-0000.txt".into(),
+                        observed_sha256: dohc_engine_storage::hex_sha256(OUTSIDE.as_bytes()),
+                        observed_size: OUTSIDE.len() as u64,
+                        reason: capture_file_holds::NOT_REPRESENTABLE.into(),
+                        observed_at_ms: 7,
+                        attempt_count: 1,
+                        retry_requested: false,
+                    },
+                )
+            })
+            .unwrap();
+        std::fs::write(scratch.path().join("file-0000.txt"), OUTSIDE).unwrap();
+        scratch
+    } else {
+        fixture(2, 1, "file-0000.txt")
+    };
+    let db = engine_db_path(&scratch).unwrap();
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&db, 6).unwrap().actor;
+    actor
+        .set_active_version(
+            switch(&scratch, "target", 7),
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    supervisor.close(&db).unwrap();
+    let mut store = EngineStore::open(&db, 10).unwrap();
+    let planned = store
+        .list_pending_materialization_jobs()
+        .unwrap()
+        .into_iter()
+        .find(|job| job.target_path == "file-0000.txt" && job.job_id.starts_with("version-switch-"))
+        .unwrap();
+    assert_eq!(
+        planned.preimage,
+        dohc_engine_storage::Preimage::Present(dohc_engine_storage::hex_sha256(b"main\n")),
+        "a parked switch must authorize only a recorded source head"
+    );
+    match action {
+        "delete" => {
+            VersionedTextStore::new(&mut store)
+                .delete_text_file(&delete_input(), &NoFaults)
+                .unwrap();
+        }
+        "rename" => {
+            VersionedTextStore::new(&mut store)
+                .rename_text_file(
+                    &dohc_engine_domain::RenameTextFile {
+                        workspace_id: WS.into(),
+                        version_id: "main".into(),
+                        from_path: "file-0000.txt".into(),
+                        to_path: "renamed.txt".into(),
+                        moment_id: "release-rename".into(),
+                        request_id: None,
+                        metadata_origin: "api".into(),
+                        metadata_summary: None,
+                        metadata_correlation_id: None,
+                        author_json: None,
+                        now_ms: 20,
+                    },
+                    &NoFaults,
+                )
+                .unwrap();
+        }
+        "sync" => {
+            sync_delete(&mut store);
+        }
+        "rollback" => {
+            let head = VersionedTextStore::new(&mut store)
+                .read_text(WS, "main", "file-0000.txt")
+                .unwrap()
+                .unwrap();
+            VersionedTextStore::new(&mut store)
+                .rollback_text_file_mutation(
+                    &dohc_engine_domain::RollbackTextFileMutation {
+                        workspace_id: WS.into(),
+                        version_id: "main".into(),
+                        path: head.path,
+                        mutation_moment_id: head.latest_moment_id,
+                        request_id: None,
+                        metadata_origin: "restore".into(),
+                        author_json: None,
+                    },
+                    &NoFaults,
+                )
+                .unwrap();
+        }
+        _ => unreachable!(),
+    }
+    assert!(
+        store
+            .read_with(|conn| capture_file_holds::list_in(conn, WS))
+            .unwrap()
+            .is_empty()
+    );
+    drop(store);
+    let actor = supervisor.open(&db, 21).unwrap().actor;
+    actor
+        .materialize_replay_pending(scratch.path().to_path_buf(), WS.into(), 22)
+        .await
+        .unwrap();
+    assert_eq!(
+        std::fs::read_to_string(scratch.path().join("file-0000.txt")).unwrap(),
+        OUTSIDE,
+        "an orphan release cannot authorize overwriting an unrecorded observation"
+    );
+    assert_eq!(conflict_texts(&scratch), vec!["target\n".to_owned()]);
+    supervisor.close(&db).unwrap();
+}
+
+#[tokio::test]
+async fn review_hold_delete_without_capture_preserves_outside() {
+    release_without_capture("delete").await;
+}
+#[tokio::test]
+async fn review_hold_rename_without_capture_preserves_outside() {
+    release_without_capture("rename").await;
+}
+#[tokio::test]
+async fn review_hold_sync_without_capture_preserves_outside() {
+    release_without_capture("sync").await;
+}
+#[tokio::test]
+async fn review_hold_rollback_without_capture_preserves_outside() {
+    release_without_capture("rollback").await;
+}
+
+#[tokio::test]
+async fn review_hold_round_trip_keeps_no_switch_jobs() {
+    let scratch = fixture(2, 1, "file-0000.txt");
+    let db = engine_db_path(&scratch).unwrap();
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&db, 6).unwrap().actor;
+    for (version, now) in [("target", 7), ("main", 8)] {
+        actor
+            .set_active_version(
+                switch(&scratch, version, now),
+                Arc::new(NoFaults),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+    }
+    supervisor.close(&db).unwrap();
+    let store = EngineStore::open(&db, 9).unwrap();
+    assert!(
+        !store
+            .list_pending_materialization_jobs()
+            .unwrap()
+            .iter()
+            .any(|job| job.job_id.starts_with("version-switch-")),
+        "returning to the source version must cancel the parked switch intent"
+    );
+}
+
+#[tokio::test]
+async fn review_hold_ancestor_does_not_fail_switch() {
+    let scratch = fixture(2, 1, "file-0000.txt/trip.md");
+    let db = engine_db_path(&scratch).unwrap();
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&db, 6).unwrap().actor;
+    actor
+        .set_active_version(
+            switch(&scratch, "target", 7),
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        std::fs::read_to_string(scratch.path().join("file-0000.txt")).unwrap(),
+        OUTSIDE
+    );
+    supervisor.close(&db).unwrap();
+}
+
+#[tokio::test]
+async fn review_active_sync_delete_keeps_unrecorded_hold_bytes() {
+    let scratch = fixture(2, 1, "file-0000.txt");
+    let db = engine_db_path(&scratch).unwrap();
+    let changes = {
+        let mut store = EngineStore::open(&db, 6).unwrap();
+        sync_delete(&mut store)
+    };
+    assert_eq!(changes.len(), 1);
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&db, 21).unwrap().actor;
+    // A refusal is acceptable; deleting the unrecorded bytes is not.
+    let _ = actor
+        .materialize_relay_page(
+            WS.into(),
+            scratch.path().to_path_buf(),
+            changes,
+            Arc::new(()),
+            22,
+            CancellationToken::new(),
+        )
+        .await;
+    assert_eq!(
+        std::fs::read_to_string(scratch.path().join("file-0000.txt")).unwrap(),
+        OUTSIDE
+    );
+    supervisor.close(&db).unwrap();
+}
+
+#[tokio::test]
+async fn review_new_hold_uses_an_absent_preimage() {
+    let scratch = fixture(2, 1, "file-0000.txt");
+    let db = engine_db_path(&scratch).unwrap();
+    {
+        let mut store = EngineStore::open(&db, 6).unwrap();
+        store.write_with(&NoFaults, |tx| tx.execute("DELETE FROM snapshots WHERE workspace_id=?1 AND version_id='main' AND path='file-0000.txt'", [WS]).map_err(dohc_engine_storage::StorageError::persist_public)).unwrap();
+    }
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&db, 7).unwrap().actor;
+    actor
+        .set_active_version(
+            switch(&scratch, "target", 8),
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    supervisor.close(&db).unwrap();
+    let store = EngineStore::open(&db, 9).unwrap();
+    let job = store
+        .list_pending_materialization_jobs()
+        .unwrap()
+        .into_iter()
+        .find(|job| job.target_path == "file-0000.txt")
+        .unwrap();
+    assert_eq!(job.preimage, dohc_engine_storage::Preimage::Absent);
 }
 
 /// Drive two release test binaries alternately through stdin. Both directions
@@ -306,7 +633,9 @@ fn switch_hold_indexed_read_cost() {
         for sample in 0..24 {
             let start = std::time::Instant::now();
             for _ in 0..1000 {
-                std::hint::black_box(dohc_engine_files::PlacementHolds::load(&store, WS).unwrap());
+                std::hint::black_box(
+                    dohc_engine_files::PlacementHolds::load(&store, WS, scratch.path()).unwrap(),
+                );
             }
             let elapsed_us = start.elapsed().as_secs_f64() * 1000.0;
             if sample >= 3 {

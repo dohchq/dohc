@@ -768,83 +768,141 @@ pub struct MaterializeOptions<'a> {
     pub holds: Option<&'a PlacementHolds>,
 }
 
+/// A held file's source head, never the refused outside observation.
+pub struct PlacementHold {
+    pub source_version_id: String,
+    pub preimage: Preimage,
+}
+
 /// One indexed workspace read, reused throughout a serialized placement batch.
 pub struct PlacementHolds {
     workspace_id: String,
-    paths: std::collections::HashMap<String, String>,
-    #[cfg(windows)]
+    paths: std::collections::HashMap<String, PlacementHold>,
     case_aliases: std::collections::HashMap<String, String>,
+    canonical_root: Option<PathBuf>,
 }
 
 impl PlacementHolds {
-    pub fn load(store: &EngineStore, workspace_id: &str) -> Result<Self, StorageError> {
-        let holds = store.read_with(|conn| {
-            dohc_engine_storage::capture_file_holds::list_in(conn, workspace_id)
+    pub fn load(
+        store: &EngineStore,
+        workspace_id: &str,
+        root: &Path,
+    ) -> Result<Self, MaterializeError> {
+        let paths = store.read_with(|conn| {
+            let mut statement = conn
+                .prepare_cached(
+                    "SELECT h.path,h.source_version_id,CASE COALESCE(s.content_kind,'text') \
+                 WHEN 'binary' THEN s.binary_sha256 ELSE s.blob_sha256 END \
+                 FROM capture_file_holds h LEFT JOIN snapshots s \
+                 ON s.workspace_id=h.workspace_id AND s.version_id=h.source_version_id \
+                 AND s.object_id=h.object_id WHERE h.workspace_id=?1 ORDER BY h.path",
+                )
+                .map_err(StorageError::corrupt_public)?;
+            statement
+                .query_map([workspace_id], |row| {
+                    let recorded: Option<String> = row.get(2)?;
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        PlacementHold {
+                            source_version_id: row.get(1)?,
+                            preimage: recorded.map_or(Preimage::Absent, Preimage::Present),
+                        },
+                    ))
+                })
+                .map_err(StorageError::corrupt_public)?
+                .collect::<Result<std::collections::HashMap<_, _>, _>>()
+                .map_err(StorageError::corrupt_public)
         })?;
-        Ok(Self::from_holds(workspace_id, &holds))
+        let mut holds = Self::from_paths(workspace_id, paths);
+        if !holds.is_empty() {
+            holds.canonical_root = Some(
+                std::fs::canonicalize(root).map_err(|error| MaterializeError::io(root, &error))?,
+            );
+        }
+        Ok(holds)
     }
 
     pub fn from_holds(
         workspace_id: &str,
         holds: &[dohc_engine_storage::capture_file_holds::CaptureFileHold],
     ) -> Self {
+        Self::from_paths(
+            workspace_id,
+            holds
+                .iter()
+                .map(|hold| {
+                    (
+                        hold.path.clone(),
+                        PlacementHold {
+                            source_version_id: hold.source_version_id.clone(),
+                            preimage: Preimage::Absent,
+                        },
+                    )
+                })
+                .collect(),
+        )
+    }
+
+    fn from_paths(
+        workspace_id: &str,
+        paths: std::collections::HashMap<String, PlacementHold>,
+    ) -> Self {
+        let case_aliases = paths
+            .keys()
+            .map(|path| (path.to_lowercase(), path.clone()))
+            .collect();
         Self {
             workspace_id: workspace_id.to_owned(),
-            paths: holds
-                .iter()
-                .map(|hold| (hold.path.clone(), hold.observed_sha256.clone()))
-                .collect(),
-            #[cfg(windows)]
-            case_aliases: holds
-                .iter()
-                .map(|hold| (hold.path.to_lowercase(), hold.path.clone()))
-                .collect(),
+            paths,
+            case_aliases,
+            canonical_root: None,
         }
     }
 
-    fn lexical(&self, path: &str) -> Option<(&str, &str)> {
-        if let Some((path, digest)) = self.paths.get_key_value(path) {
-            return Some((path.as_str(), digest.as_str()));
+    pub fn is_empty(&self) -> bool {
+        self.paths.is_empty()
+    }
+    pub fn entries(&self) -> impl Iterator<Item = (&str, &PlacementHold)> {
+        self.paths.iter().map(|(path, hold)| (path.as_str(), hold))
+    }
+
+    /// Lexical checks never resolve or read the outside file. Lowercase aliases
+    /// deliberately over-park distinct paths on case-sensitive volumes.
+    pub fn get(&self, path: &str) -> Option<(&str, &PlacementHold)> {
+        if let Some((path, hold)) = self.paths.get_key_value(path) {
+            return Some((path, hold));
         }
-        #[cfg(windows)]
-        if !self.case_aliases.is_empty() {
-            let stored = self.case_aliases.get(&path.to_lowercase())?;
-            let (path, digest) = self.paths.get_key_value(stored)?;
-            return Some((path.as_str(), digest.as_str()));
+        if self.is_empty() {
+            return None;
+        }
+        let stored = self.case_aliases.get(&path.to_lowercase())?;
+        self.paths
+            .get_key_value(stored)
+            .map(|(path, hold)| (path.as_str(), hold))
+    }
+
+    pub fn ancestor(&self, mut path: &str) -> Option<(&str, &PlacementHold)> {
+        while let Some((parent, _)) = path.rsplit_once('/') {
+            if let Some(held) = self.get(parent) {
+                return Some(held);
+            }
+            path = parent;
         }
         None
     }
 
-    /// Return the stored spelling and observed digest, including Windows aliases.
-    /// An empty snapshot needs no filesystem lookup.
-    pub fn get(&self, root: &Path, path: &str) -> Result<Option<(&str, &str)>, MaterializeError> {
-        // Case aliases remain held even after the file disappears, before
-        // capture has recorded its deletion and released the hold.
-        if let Some(held) = self.lexical(path) {
-            return Ok(Some(held));
-        }
-        #[cfg(windows)]
-        if !self.paths.is_empty() {
-            let root =
-                std::fs::canonicalize(root).map_err(|error| MaterializeError::io(root, &error))?;
-            let target = resolve_target(&root, path)?;
-            return Ok(self.resolved(&root, &target));
-        }
-        #[cfg(not(windows))]
-        let _ = root;
-        Ok(None)
+    pub fn blocks(&self, path: &str) -> bool {
+        self.get(path).or_else(|| self.ancestor(path)).is_some()
     }
 
-    #[cfg(windows)]
-    fn resolved(&self, root: &Path, target: &Path) -> Option<(&str, &str)> {
+    fn resolved(&self, root: &Path, target: &Path) -> Result<bool, MaterializeError> {
+        let root = self.canonical_root.as_deref().unwrap_or(root);
         let path = target
             .strip_prefix(root)
-            .ok()?
+            .map_err(|_| MaterializeError::UnsafeTargetPath)?
             .to_string_lossy()
             .replace('\\', "/");
-        self.paths
-            .get_key_value(&path)
-            .map(|(path, digest)| (path.as_str(), digest.as_str()))
+        Ok(self.blocks(&path))
     }
 }
 
@@ -3508,7 +3566,8 @@ fn preimage_matches(preimage: &Preimage, current: &CurrentTarget) -> bool {
     }
 }
 
-/// Check both the stored spelling and the filesystem-resolved Windows alias.
+/// Protect lexical aliases and held ancestors on every platform. Filesystem
+/// aliases are checked only here, after the placement boundary resolves them.
 fn placement_is_held(
     store: &EngineStore,
     root: &Path,
@@ -3517,17 +3576,22 @@ fn placement_is_held(
     target: Option<&Path>,
     holds: Option<&PlacementHolds>,
 ) -> Result<bool, MaterializeError> {
+    if target.is_some_and(|target| target.strip_prefix(root).is_err()) {
+        return Err(MaterializeError::UnsafeTargetPath);
+    }
     if let Some(holds) = holds.filter(|holds| holds.workspace_id == workspace) {
-        if holds.lexical(path).is_some() {
+        if holds.blocks(path) {
             return Ok(true);
         }
-        #[cfg(windows)]
-        if !holds.paths.is_empty() {
-            return match target {
-                Some(target) => Ok(holds.resolved(root, target).is_some()),
-                None => Ok(holds.get(root, path)?.is_some()),
-            };
+        if holds.is_empty() {
+            return Ok(false);
         }
+        if let Some(target) = target {
+            return holds.resolved(root, target);
+        }
+        #[cfg(windows)]
+        return holds.resolved(root, &resolve_target(root, path)?);
+        #[cfg(not(windows))]
         return Ok(false);
     }
     if store.placement_is_held(workspace, path)? {
@@ -3536,7 +3600,7 @@ fn placement_is_held(
     #[cfg(windows)]
     {
         let resolved_target;
-        let target: &Path = if let Some(target) = target {
+        let target = if let Some(target) = target {
             target
         } else {
             resolved_target = resolve_target(root, path)?;
@@ -4812,6 +4876,59 @@ mod tests {
         }
     }
 
+    #[test]
+    fn review_snapshot_refuses_a_target_outside_its_root() {
+        let scratch = Scratch::new("held-target-outside-root");
+        let store = EngineStore::open(&scratch.db(), 1).unwrap();
+        let holds = PlacementHolds::from_holds("workspace", &[]);
+        let outside = scratch.root.parent().unwrap().join("outside.md");
+        assert!(matches!(
+            placement_is_held(
+                &store,
+                &scratch.root,
+                "workspace",
+                "file.md",
+                Some(&outside),
+                Some(&holds)
+            ),
+            Err(MaterializeError::UnsafeTargetPath)
+        ));
+    }
+
+    #[test]
+    fn review_durable_hold_matches_case_and_descendants() {
+        let scratch = Scratch::new("held-case-and-descendant");
+        let mut store = EngineStore::open(&scratch.db(), 1).unwrap();
+        store.write_with(&NoFaults, |tx| tx.execute_batch("INSERT INTO versioned_workspaces VALUES ('workspace','main'); INSERT INTO versions(workspace_id,version_id,kind,name,created_at_ms) VALUES ('workspace','main','main','Main',1); INSERT INTO file_objects VALUES ('workspace','held',1);").map_err(StorageError::persist_public)).unwrap();
+        store
+            .write_with(&NoFaults, |tx| {
+                dohc_engine_storage::capture_file_holds::record_in(
+                    tx,
+                    &dohc_engine_storage::capture_file_holds::CaptureFileHold {
+                        workspace_id: "workspace".into(),
+                        source_version_id: "main".into(),
+                        object_id: "held".into(),
+                        path: "Plans".into(),
+                        observed_sha256: dohc_engine_storage::hex_sha256(b"outside"),
+                        observed_size: 7,
+                        reason: "ydoc-resolution-not-representable".into(),
+                        observed_at_ms: 1,
+                        attempt_count: 1,
+                        retry_requested: false,
+                    },
+                )
+            })
+            .unwrap();
+        assert!(
+            store
+                .placement_is_held("workspace", "plans/trip.md")
+                .unwrap()
+        );
+        assert!(store.placement_is_held("workspace", "PLANS").unwrap());
+        assert!(!store.placement_is_held("other", "PLANS").unwrap());
+        assert!(!store.placement_is_held("workspace", "planets.md").unwrap());
+    }
+
     fn options_with(replacer: &dyn AtomicReplacer) -> MaterializeOptions<'_> {
         MaterializeOptions {
             holds: None,
@@ -5761,6 +5878,9 @@ mod tests {
         let root = scratch.root.path().to_path_buf();
         let outside = format!("{} too deep\n", "> ".repeat(121));
         std::fs::write(root.join("held.md"), &outside).unwrap();
+        if path != "held.md" && !root.join(path).exists() {
+            return;
+        }
         let mut store = EngineStore::open(&scratch.db(), 1).unwrap();
         capture_file_hold_fixture(&mut store, outside.as_bytes());
         let sha = store.put_binary_blob(b"Canonical.\n").unwrap();
@@ -5839,7 +5959,6 @@ mod tests {
         }
     }
 
-    #[cfg(windows)]
     #[test]
     fn capture_file_hold_parks_case_alias_placements() {
         capture_hold_parks_job(MaterializationOperation::Write, "HELD.MD", false);
@@ -5851,6 +5970,9 @@ mod tests {
         let outside = format!("{} too deep\n", "> ".repeat(121));
         let previous = b"Unknown bytes from before a crash.\n";
         std::fs::write(root.join("held.md"), &outside).unwrap();
+        if path != "held.md" && !root.join(path).exists() {
+            return;
+        }
         let mut store = EngineStore::open(&scratch.db(), 1).unwrap();
         capture_file_hold_fixture(&mut store, outside.as_bytes());
         enqueue_write_job(&mut store, "held-recovery", path, outside.as_bytes(), 1);
@@ -5896,7 +6018,6 @@ mod tests {
         capture_hold_parks_displacement(false, "held.md");
     }
 
-    #[cfg(windows)]
     #[test]
     fn capture_file_hold_parks_case_alias_recovery_sweep() {
         capture_hold_parks_displacement(true, "HELD.MD");

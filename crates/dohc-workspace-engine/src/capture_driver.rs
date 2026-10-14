@@ -1380,7 +1380,7 @@ async fn manifest_seed(
         Err(error) => return Err(error),
     };
     let entries = actor
-        .capture_manifest_seed(workspace_id.to_owned(), version_id, root.to_path_buf())
+        .capture_manifest_seed(workspace_id.to_owned(), version_id)
         .await?;
     if entries.is_empty() {
         return Ok(ManifestSeed::Existing(None));

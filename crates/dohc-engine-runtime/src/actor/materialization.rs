@@ -605,7 +605,8 @@ pub(super) fn replay_pending_materializations(
     let holds = match scope.holds {
         Some(holds) => holds,
         None => {
-            loaded_holds = dohc_engine_files::PlacementHolds::load(store, scope.workspace_id)?;
+            loaded_holds =
+                dohc_engine_files::PlacementHolds::load(store, scope.workspace_id, root_dir)?;
             &loaded_holds
         }
     };
@@ -639,11 +640,7 @@ pub(super) fn replay_pending_materializations(
     })?;
     for job_id in checked_jobs {
         if let Some(job) = store.load_materialization_job(&job_id)?
-            && holds
-                .get(root_dir, &job.target_path)
-                .ok()
-                .flatten()
-                .is_some()
+            && holds.blocks(&job.target_path)
         {
             continue;
         }
@@ -697,12 +694,7 @@ pub(super) fn replay_pending_materializations(
             if let Some(progress) = scope.progress {
                 progress.fetch_add(1, Ordering::Relaxed);
             }
-            if holds
-                .get(root_dir, &job.target_path)
-                .ok()
-                .flatten()
-                .is_some()
-            {
+            if holds.blocks(&job.target_path) {
                 summary.parked += 1;
                 continue;
             }
@@ -862,7 +854,7 @@ pub(super) fn replay_pending_materializations(
             {
                 if scope
                     .released_hold_paths
-                    .is_some_and(|paths| paths.contains(&job.target_path))
+                    .is_some_and(|paths| paths.contains(&job.target_path.to_lowercase()))
                     && job.operation == MaterializationOperation::Write
                 {
                     match dohc_engine_files::materialize_write_conflict(
@@ -929,7 +921,7 @@ pub(super) fn replay_pending_materializations(
                 }
             }
             let outcome = if let Some(self_writes) = scope.self_writes {
-                let (materialized, reported) = materialize_pending_job_with_holds(
+                let (materialized, reported) = materialize_pending_job(
                     store,
                     root_dir,
                     scope.workspace_id,
@@ -1027,29 +1019,8 @@ pub(super) fn replay_pending_materializations(
     })()
 }
 
-pub(super) fn materialize_pending_job(
-    store: &EngineStore,
-    root_dir: &std::path::Path,
-    workspace_id: &str,
-    job: &MaterializationJob,
-    self_writes: &dyn SelfWriteRecorder,
-    now_ms: i64,
-    faults: &dyn FaultInjector,
-) -> (bool, PostCommitMaterializeOutcome) {
-    materialize_pending_job_with_holds(
-        store,
-        root_dir,
-        workspace_id,
-        job,
-        self_writes,
-        now_ms,
-        faults,
-        None,
-    )
-}
-
 #[allow(clippy::too_many_arguments)]
-fn materialize_pending_job_with_holds(
+pub(super) fn materialize_pending_job(
     store: &EngineStore,
     root_dir: &std::path::Path,
     workspace_id: &str,
@@ -1127,7 +1098,7 @@ pub(super) fn materialize_expected_job(
     match job.status {
         JobStatus::Complete => true,
         JobStatus::Pending => {
-            materialize_pending_job_with_holds(
+            materialize_pending_job(
                 store,
                 root_dir,
                 workspace_id,
