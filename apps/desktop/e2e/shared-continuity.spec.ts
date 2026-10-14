@@ -740,7 +740,7 @@ test("@shared-continuity a live document keeps its person's and agent's work thr
           sharedRestoreRemoved: await removed.innerText(),
           ownerHistory: await page.evaluate(async ({ workspaceId, path }) => {
             const history = await (window as unknown as { dohcDesktop: Api }).dohcDesktop.listEngineMoments({ workspaceId, limit: 50 });
-            return "moments" in history ? history.moments.filter(moment => moment.path === path) : history;
+            return "moments" in history ? { firstPage: history.moments.filter(moment => moment.path === path), more: history.nextCursor !== null } : history;
           }, { workspaceId: workspace.workspaceId, path: PATH }),
         }, null, 2),
       });

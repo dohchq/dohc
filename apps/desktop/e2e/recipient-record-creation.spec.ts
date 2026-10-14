@@ -237,7 +237,8 @@ test("@two-client an Edit recipient's new record opens immediately, becomes edit
       }).toPass({ timeout: 120_000 });
       await test.info().attach("recipient live attribution", { contentType: "application/json",
         body: JSON.stringify({ liveEdits, liveHistory }, null, 2) });
-      for (const moment of liveHistory) expect(moment.authors).toEqual([liveAuthor]);
+      // History records the relay-admitted author; the relay's live-edit list above does not.
+      for (const moment of liveHistory) expect(moment.authors).toEqual([{ ...liveAuthor, relayConfirmed: true }]);
       await test.info().attach("recipient-only restore state", {contentType: "application/json",
         body: JSON.stringify({live: fixture.ownerLiveState(created!.path), disk: await fixture.ownerText(created!.path)}, null, 2)});
       const restored = await fixture.owner.page.evaluate(async workspaceId =>
