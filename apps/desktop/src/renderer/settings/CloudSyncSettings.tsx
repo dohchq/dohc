@@ -73,6 +73,10 @@ export function CloudSyncSettings(props: {
   // Bumped on a workspace switch and when the page closes, so an answer that
   // arrives after either paints nothing here.
   const requests = useRequestSequence([props.workspaceId]);
+  // Protect and Unlock turn sync on, which needs an account, so signing out
+  // also drops an enable still waiting: its answer must not reopen the form.
+  const signedOut = status?.connected === false;
+  const enables = useRequestSequence([props.workspaceId, signedOut]);
 
   useEffect(() => {
     setSyncBusy(null);
@@ -81,11 +85,9 @@ export function CloudSyncSettings(props: {
     setPassphrase("");
   }, [props.workspaceId]);
   useEffect(() => setChanged(null), [status, props.workspaceId]);
-  // Protect and Unlock turn sync on, which needs an account, so signing out
-  // closes the passphrase form.
-  const signedOut = status?.connected === false;
   useEffect(() => {
     if (!signedOut) return;
+    setSyncBusy((busy) => (busy === "enable" ? null : busy));
     setSyncError(null);
     setPassphrasePurpose(null);
     setPassphrase("");
@@ -110,12 +112,12 @@ export function CloudSyncSettings(props: {
   }, [props.workspaceId, relayUrl, sync.workspaceSyncConnected, sync.workspaceSynced]);
 
   async function enableSync() {
-    const request = requests.next();
+    const request = enables.next();
     // The callbacks of the workspace this attempt is for. The page can close
     // before main answers, and the result still matters: the shell's status
     // and its notices hear it, for this workspace only.
     const cloud = props.cloud;
-    const here = () => requests.isCurrent(request);
+    const here = () => enables.isCurrent(request);
     const purpose = passphrasePurpose;
     setSyncBusy("enable");
     setSyncError(null);

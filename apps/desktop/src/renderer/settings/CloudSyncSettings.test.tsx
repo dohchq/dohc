@@ -572,6 +572,23 @@ describe("CloudSyncSettings", () => {
     expect(bridgeMock.cloudEnableSync).not.toHaveBeenCalled();
   });
 
+  it("ignores an unlock that answers after sign-out", async () => {
+    const enable = deferred<void>();
+    bridgeMock.cloudEnableSync.mockReturnValueOnce(enable.promise);
+    const lockedSynced = { ...SYNCED, workspaceSecretState: "protected-key-missing" as const };
+    const { rerender } = render(<CloudSyncSettings workspaceId="ws-1" cloud={cloud(lockedSynced)} />);
+    fireEvent.click(screen.getByTestId("cloud-unlock-secrets"));
+    fireEvent.change(screen.getByTestId("cloud-sync-passphrase"), { target: { value: "shared passphrase" } });
+    fireEvent.click(screen.getByTestId("cloud-sync-passphrase-submit"));
+    await waitFor(() => expect(bridgeMock.cloudEnableSync).toHaveBeenCalledOnce());
+
+    rerender(<CloudSyncSettings workspaceId="ws-1" cloud={cloud({ ...SIGNED_OUT_OWNED, workspaceSynced: true })} />);
+    enable.reject(new Error("Passphrase could not unlock synced secrets."));
+    await waitFor(() => expect(syncSwitch().getAttribute("aria-busy")).not.toBe("true"));
+    expect(screen.queryByTestId("cloud-sync-passphrase")).toBeNull();
+    expect(screen.queryByTestId("cloud-sync-passphrase-submit")).toBeNull();
+  });
+
   // A Disconnect whose file removal failed leaves main's cache empty while
   // the saved session still reads as signed in: the same account, not yet
   // read again. Enabling again reads it and resumes sync.
