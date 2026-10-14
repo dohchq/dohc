@@ -18,6 +18,8 @@ const covered = new Set<CapabilityId>(CLI_USAGE_ACTION_IDS);
 // MCP also uses fileWrite for app.create and data.import, so its file.write
 // count cannot distinguish those capabilities.
 const mcpCovered = new Set<CapabilityId>(CLI_USAGE_ACTION_IDS.filter(id => id !== "file.write"));
+// Automation coverage for dataset.operation.invoke counts successful invocations
+// of write-capable actions, including no-ops: receipts have no change signal.
 const automationCovered = new Set<CapabilityId>(AUTOMATION_USAGE_ACTION_IDS);
 export const DESKTOP_USAGE_COVERAGE = RENDERER_USAGE_COVERAGE.map(pair => ({ ...pair,
   status: (pair.door === "cli" && covered.has(pair.capabilityId)

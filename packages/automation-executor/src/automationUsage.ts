@@ -8,12 +8,12 @@ export const AUTOMATION_USAGE_ACTION_IDS = [
 export type AutomationUsageInvocation = { capabilityId: (typeof AUTOMATION_USAGE_ACTION_IDS)[number]; door: "automation" };
 
 // A completed run counts each capability once, including steps resumed from
-// an earlier attempt. The saved done outcome prevents replay from counting.
+// an earlier attempt. savedRunOf in collectionAutomationRun.ts returns a
+// completed outcome before execution when the claim already has a done run.
 export function automationUsageInvocations(
   run: StoredRun,
   isWriteAction: (effect: Extract<StoredRun["steps"][number]["effects"][number], { kind: "dataset-action" }>) => boolean,
 ): AutomationUsageInvocation[] {
-  if (run.outcome?.state !== "done") return [];
   const ids = new Set<AutomationUsageInvocation["capabilityId"]>();
   let index = 0;
   for (const step of run.steps) for (const effect of step.effects) {

@@ -1079,6 +1079,30 @@ describe("a dataset action a run invokes", () => {
     expect(calls).toEqual([{ capabilityId: "dataset.operation.invoke", door: "automation" }]);
   });
 
+  it("counts a successful no-op invocation of a write-capable action once", async () => {
+    const store = createAutomationRunStore(await createTestScratch("dohc-dataset-noop-usage-"), testMetadataDir);
+    const calls: Array<{ capabilityId: string; door: string }> = [];
+    const record = { id: 12, status: "Paid" };
+    const before = structuredClone(record);
+    const host = actionHost(async () => {
+      // Mark paid returns early for an already-paid record.
+      if (record.status === "Paid") return { result: { alreadyPaid: true }, revision: 9, replayed: false };
+      record.status = "Paid";
+      return { result: { alreadyPaid: false }, revision: 10, replayed: false };
+    });
+    const run = () => runWithRoster({
+      withHost: async work => work(host.surface), evaluator, store, nowMs: () => 2_000, personName: userId => userId, ...sendsNothing,
+      onUsageSuccess: pair => { calls.push(pair); },
+    }, { held: fromLedger(numbered), automation: markPaid, collection: { path: "Budget", name: "Budget" },
+      roster: { kind: "owner", ownerUserId: null, grants: [] }, signal: new AbortController().signal, stopped: new AbortController().signal });
+    expect(await run()).toEqual({ kind: "done" });
+    expect(record).toEqual(before);
+    expect(calls).toEqual([{ capabilityId: "dataset.operation.invoke", door: "automation" }]);
+    expect(await run()).toEqual({ kind: "done" });
+    expect(host.sent).toHaveLength(1);
+    expect(calls).toHaveLength(1);
+  });
+
   it("counts dataset.operation.invoke once on success, excluding refusal, failure and run replay", async () => {
     const store = createAutomationRunStore(await createTestScratch("dohc-dataset-usage-"), testMetadataDir);
     const calls: Array<{ capabilityId: string; door: string }> = [];
