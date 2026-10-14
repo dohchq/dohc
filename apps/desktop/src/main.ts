@@ -2877,7 +2877,7 @@ function agentDispatchStoreHandleFor(workspace: {
 // error.
 async function withEngineAdapter<T>(
   workspace: EngineWorkspace,
-  work: (adapter: VersionedLiveAdapter) => Promise<T>,
+  work: (adapter: VersionedLiveAdapter, assertCurrent?: () => void) => Promise<T>,
 ): Promise<T | null> {
   const sessions = desktopEngine.sessions;
   if (!sessions) return null;
@@ -2887,6 +2887,7 @@ async function withEngineAdapter<T>(
         new VersionedLiveAdapter(binding.client, binding.workspace, {
           workspaceId: workspace.workspaceId,
         }),
+        () => sessions.assertCurrentBinding(engineWorkspace, binding),
       ),
     );
   const registered = findWorkspace(workspace.workspaceId);

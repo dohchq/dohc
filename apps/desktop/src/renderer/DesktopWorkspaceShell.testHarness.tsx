@@ -638,6 +638,11 @@ function makeBaseBridge(
       },
     ),
     onCloudSessionChanged: vi.fn((_callback: () => void) => () => {}),
+    // Folder app offers: no folder is an app unless a test says so.
+    getFolderApp: vi.fn<import("../ipc/bridgeContract").DohcDesktopBridge["getFolderApp"]>(
+      async ({ workspaceId, folder }) => ({ workspaceId, folder, isApp: false, run: null }),
+    ),
+    onFolderAppChanged: vi.fn<import("../ipc/bridgeContract").DohcDesktopBridge["onFolderAppChanged"]>(() => () => undefined),
     onMenuCommand: vi.fn((callback: (command: MenuCommand) => void) => {
       menuCallback = callback;
       return () => {
