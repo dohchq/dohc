@@ -170,7 +170,7 @@ export function DevPanel(props: { workspaceId?: string }) {
       <button
         type="button"
         aria-label="Dev tools"
-        title="Dev tools (Ctrl+Shift+D)"
+        title={"Dev tools (" + shortcutText("dev-panel", window.dohcDesktop?.platform).replaceAll(" ", "+") + ")"}
         onClick={() => setOpen((current) => !current)}
         className={`fixed bottom-9 right-3 z-50 grid size-7 place-items-center rounded-full border border-line transition-colors ${
           open ? "bg-ink text-bg" : "bg-panel text-subtle hover:text-ink"

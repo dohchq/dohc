@@ -1,19 +1,21 @@
 import type { StaticCommandId } from "../renderer/commands/commandRows";
 
 // These ids already have owners outside the palette's command rows.
-type EditorShortcutId = "editor-link" | "editor-bold" | "editor-undo" | "editor-redo" | "editor-find" | "editor-replace"
+type EditorShortcutId = "editor-mac-backspace" | "editor-mac-delete" | "editor-mac-line-start" | "editor-mac-line-end" | "editor-link" | "editor-bold" | "editor-undo" | "editor-redo" | "editor-find" | "editor-replace"
   | "editor-paragraph" | "editor-heading-1" | "editor-heading-2" | "editor-heading-3" | "editor-heading-4" | "editor-heading-5" | "editor-heading-6"
   | "editor-delete-word" | "editor-backspace-word" | "editor-hard-break" | "editor-select-all" | "editor-highlight" | "editor-blockquote" | "editor-bullet-list"
   | "editor-code" | "editor-code-block" | "editor-italic" | "editor-strike" | "editor-underline" | "editor-ordered-list" | "editor-task-list";
 type OwnedShortcutId = "command-palette" | "close-window" | "history-restore-undo"
   | EditorShortcutId
   | "palette-move" | "palette-accept" | "palette-dismiss" | "dev-panel";
-type ShortcutOwner = "shell" | "main" | "native" | "document" | "editor" | "palette" | "dev";
+type ShortcutOwner = "history-restore" | "shell" | "main" | "native" | "document" | "editor" | "palette" | "dev";
 interface ShortcutDefinition {
   owner: ShortcutOwner;
   accelerators: readonly string[];
   macOptionCode?: string;
-  // Preserve existing display spelling even where a hint used a fixed platform name.
+  platform?: "darwin";
+  // Rows with hints are display-only; their key handlers remain with the owner.
+  // Preserve existing spelling even where a hint used a fixed platform name.
   hint?: string;
   keys?: readonly string[];
 }
@@ -27,12 +29,16 @@ export const SHORTCUTS = {
   "close-tab": { owner: "shell", accelerators: ["CommandOrControl+W"] },
   "new-editor-group-right": { owner: "shell", accelerators: ["CommandOrControl+\\"] },
   "settings": { owner: "shell", accelerators: ["CommandOrControl+,"] },
-  "history-restore-undo": { owner: "shell", accelerators: ["CommandOrControl+Z"] },
+  "history-restore-undo": { owner: "history-restore", accelerators: ["CommandOrControl+Z"] },
   "close-window": { owner: "native", accelerators: ["CommandOrControl+Shift+W"] },
   "zoom-reset": { owner: "main", accelerators: ["CommandOrControl+0"] },
   "zoom-in": { owner: "main", accelerators: ["CommandOrControl+=", "CommandOrControl+Plus", "CommandOrControl+numadd"] },
   "zoom-out": { owner: "main", accelerators: ["CommandOrControl+-", "CommandOrControl+numsub"] },
   "toggle-markdown-source": { owner: "document", accelerators: ["CommandOrControl+/"], hint: "Ctrl+/" },
+  "editor-mac-backspace": { owner: "editor", platform: "darwin", accelerators: ["Ctrl+H", "Alt+Backspace"] },
+  "editor-mac-delete": { owner: "editor", platform: "darwin", accelerators: ["Ctrl+D", "Ctrl+Alt+Backspace", "Alt+Delete", "Alt+D"] },
+  "editor-mac-line-start": { owner: "editor", platform: "darwin", accelerators: ["Ctrl+A"] },
+  "editor-mac-line-end": { owner: "editor", platform: "darwin", accelerators: ["Ctrl+E"] },
   "editor-link": { owner: "editor", accelerators: ["CommandOrControl+K"], hint: "Cmd+K" },
   "editor-bold": { owner: "editor", accelerators: ["CommandOrControl+B"] },
   "editor-undo": { owner: "editor", accelerators: ["CommandOrControl+Z", "CommandOrControl+Я"] },
@@ -68,7 +74,7 @@ export const SHORTCUTS = {
 
 export type ShortcutId = keyof typeof SHORTCUTS;
 export type ShellShortcutId = {
-  [Id in ShortcutId]: typeof SHORTCUTS[Id]["owner"] extends "shell" ? Id : never
+  [Id in ShortcutId]: typeof SHORTCUTS[Id]["owner"] extends "shell" | "history-restore" ? Id : never
 }[ShortcutId];
 
 export function shortcutAccelerators(id: StaticCommandId | OwnedShortcutId): readonly string[] {
@@ -95,7 +101,7 @@ export function matchShellShortcut(event: KeyboardEvent): ShellShortcutId | null
     || event.defaultPrevented || event.repeat || event.isComposing) return null;
   for (const id of Object.keys(SHORTCUTS) as ShortcutId[]) {
     const row: ShortcutDefinition = SHORTCUTS[id];
-    if (row.owner !== "shell") continue;
+    if (row.owner !== "shell" && row.owner !== "history-restore") continue;
     for (const accelerator of row.accelerators) {
       const parts = accelerator.split("+");
       if (event.shiftKey !== parts.includes("Shift") || event.altKey !== parts.includes("Alt")) continue;

@@ -3,8 +3,10 @@ import { launchDesktopApp } from "./helpers/desktopApp";
 import { cleanupDesktopWorkspace, createTempWorkspace, openWorkspaceFromFirstRun } from "./helpers/workspace";
 
 // Physical keys go through Electron's accelerator handling, unlike jsdom's
-// key events. Run this on macOS too, where the menu is an unhandled fallback.
-test("shell shortcut ownership prevents native menu duplicates", async () => {
+// key events. Windows does not register these menu keys, so this observes
+// shell actions and absent native messages, not prevention of native execution.
+// Run on macOS to check its native unhandled fallback; that runtime is unverified.
+test("shell shortcut ownership runs actions without native menu messages", async () => {
   const temp = await createTempWorkspace();
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
   try {

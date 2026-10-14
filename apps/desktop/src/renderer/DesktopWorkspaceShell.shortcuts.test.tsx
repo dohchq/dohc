@@ -1,8 +1,8 @@
 // @vitest-environment jsdom
 import { act, fireEvent, screen, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
-import { makeBridge, renderShell, STORED_STATE } from "./DesktopWorkspaceShell.testHarness";
-import { SHORTCUTS, type ShortcutId } from "../shortcuts/shortcutRegistry";
+import { makeBridge, renderShell, STORED_STATE, storedStateWithTabs } from "./DesktopWorkspaceShell.testHarness";
+import { SHORTCUTS, matchShellShortcut, type ShortcutId } from "../shortcuts/shortcutRegistry";
 import { buildMenuTemplate } from "../window/applicationMenu";
 import type { MenuItemConstructorOptions } from "electron";
 
@@ -19,24 +19,44 @@ function keyEvent(accelerator: string, platform: NodeJS.Platform, extra: Keyboar
     shiftKey: parts.includes("Shift"), altKey: parts.includes("Alt"), bubbles: true, cancelable: true, ...extra,
   });
 }
-const shellBindings = Object.entries(SHORTCUTS).filter(([id, row]) => row.owner === "shell" && id !== "history-restore-undo")
+const shellBindings = Object.entries(SHORTCUTS).filter(([, row]) => row.owner === "shell")
   .flatMap(([id, row]) => row.accelerators.map((accelerator) => [id as ShortcutId, accelerator] as const));
 
 describe.each(["win32", "darwin"] as const)("%s shell shortcuts", (platform) => {
-  it.each(shellBindings)("claims %s: %s before native fallback", async (_id, accelerator) => {
+  it("matches the separate history-restore owner without taking editor undo", async () => {
+    await ready(platform);
+    const bindings = Object.values(SHORTCUTS).filter((row) => row.owner === "history-restore")
+      .flatMap((row) => row.accelerators);
+    expect(bindings).toHaveLength(1);
+    for (const binding of bindings) {
+      const event = keyEvent(binding, platform);
+      expect(matchShellShortcut(event)).toBe("history-restore-undo");
+      fireEvent(window, event);
+      expect(event.defaultPrevented).toBe(false);
+      for (const extra of [{ isComposing: true }, { repeat: true }]) {
+        expect(matchShellShortcut(keyEvent(binding, platform, extra))).toBeNull();
+      }
+    }
+  });
+
+  it("pins empty-editor chips as known exceptions pending Correct macOS empty-editor shortcut text", async () => {
+    const bridge = makeBridge(Promise.resolve(storedStateWithTabs([])), platform);
+    renderShell(bridge);
+    await screen.findByText("Select a file, or create one");
+    for (const text of ["Ctrl N · new file", "Ctrl K · commands", "Ctrl P · go to"]) {
+      expect(screen.getByRole("button", { name: text }).textContent?.trim()).toBe(text);
+    }
+  });
+
+  it.each(shellBindings)("claims %s: %s and keeps menu registration disabled", async (_id, accelerator) => {
     const bridge = await ready(platform);
-    const nativeSend = vi.fn();
-    const menu = buildMenuTemplate({ isDev: false, platform, sendCommand: nativeSend, stepZoom: vi.fn(), showAbout: vi.fn() });
+    const menu = buildMenuTemplate({ isDev: false, platform, sendCommand: vi.fn(), stepZoom: vi.fn(), showAbout: vi.fn() });
     const items = menu.flatMap((item) => Array.isArray(item.submenu) ? item.submenu : []) as MenuItemConstructorOptions[];
     const item = items.find((candidate) => candidate.accelerator === accelerator)!;
     const event = keyEvent(accelerator, platform);
     fireEvent(window, event);
     expect(event.defaultPrevented).toBe(true);
     expect(item.registerAccelerator).toBe(false);
-    // macOS invokes its native fallback only after an unhandled renderer key.
-    // Windows does not register these menu accelerators at all.
-    if (platform === "darwin" && !event.defaultPrevented) item.click!(undefined!, undefined!, undefined!);
-    expect(nativeSend).not.toHaveBeenCalled();
     expect(bridge.stepWindowZoom).not.toHaveBeenCalled();
   });
 

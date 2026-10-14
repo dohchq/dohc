@@ -1,5 +1,5 @@
 import type { BrowserWindow, MenuItemConstructorOptions } from "electron";
-import { shortcutAccelerators } from "../shortcuts/shortcutRegistry";
+import { SHORTCUTS, shortcutAccelerators, type ShortcutId } from "../shortcuts/shortcutRegistry";
 import { basename } from "node:path";
 import type { MenuCommand, WorkspaceSummary } from "../ipc/bridgeContract";
 import type { ZoomStep } from "../settings/userSettings";
@@ -34,17 +34,19 @@ export function buildMenuTemplate(options: {
   const command = (
     label: string,
     name: MenuCommand,
-    acceleratorIndex = 0,
     enabled = true,
-  ): MenuItemConstructorOptions => {
-    const accelerator = shortcutAccelerators(name)[acceleratorIndex];
-    return {
-      label,
+  ): MenuItemConstructorOptions[] => {
+    const accelerators = shortcutAccelerators(name);
+    return (accelerators.length ? accelerators : [undefined]).map((accelerator, index) => ({
+      label: index > 0 ? label + " (Alternate)" : label,
       enabled,
-      ...(accelerator ? { accelerator, registerAccelerator: false } : {}),
+      ...(index > 0 ? { visible: false } : {}),
+      ...(accelerator ? { accelerator } : {}),
+      ...(accelerator && SHORTCUTS[name as ShortcutId]?.owner === "shell"
+        ? { registerAccelerator: false } : {}),
       click: (_item, window) =>
         options.sendCommand(window as BrowserWindow | undefined, name),
-    };
+    }));
   };
 
   // macOS renders the first template entry as the application menu (label
@@ -61,11 +63,11 @@ export function buildMenuTemplate(options: {
     {
       label: "File",
       submenu: [
-        command("New File", "new-file"),
-        command("New Folder…", "new-folder"),
-        command("New Collection…", "new-collection"),
+        ...command("New File", "new-file"),
+        ...command("New Folder…", "new-folder"),
+        ...command("New Collection…", "new-collection"),
         { type: "separator" },
-        command("Open Workspace…", "open-workspace"),
+        ...command("Open Workspace…", "open-workspace"),
         {
           label: "Open Recent",
           submenu:
@@ -81,10 +83,10 @@ export function buildMenuTemplate(options: {
                 }))
               : [{ label: "No Recent Workspaces", enabled: false }],
         },
-        command("Import Files…", "import-files"),
-        command("Export Workspace as Zip…", "export-workspace"),
+        ...command("Import Files…", "import-files"),
+        ...command("Export Workspace as Zip…", "export-workspace"),
         { type: "separator" },
-        command("Close Tab", "close-tab"),
+        ...command("Close Tab", "close-tab"),
         // VS Code convention: CommandOrControl+W closes the tab in the
         // renderer. The close role uses a separate window shortcut.
         { role: "close", label: "Close Window", accelerator: shortcutAccelerators("close-window")[0] },
@@ -105,25 +107,17 @@ export function buildMenuTemplate(options: {
     {
       label: "View",
       submenu: [
-        command("Command Palette", "command-palette"),
-        {
-          ...command(
-            "Command Palette (Alternate)",
-            "command-palette",
-            1,
-          ),
-          visible: false,
-        },
-        command("Go To", "quick-open"),
-        command(
+        ...command("Command Palette", "command-palette"),
+        ...command("Go To", "quick-open"),
+        ...command(
           "New Editor Group Right",
           "new-editor-group-right",
         ),
         { type: "separator" },
-        command("Toggle Sidebar", "toggle-sidebar"),
-        command("Toggle About", "toggle-about"),
-        command("Chats", "show-chats"),
-        command("Toggle Theme", "toggle-theme"),
+        ...command("Toggle Sidebar", "toggle-sidebar"),
+        ...command("Toggle About", "toggle-about"),
+        ...command("Chats", "show-chats"),
+        ...command("Toggle Theme", "toggle-theme"),
         { type: "separator" },
         // Main-owned zoom, not the Electron zoom roles: the zoomIn role only
         // answers CommandOrControl+Plus, which needs Shift on most layouts —
@@ -154,18 +148,17 @@ export function buildMenuTemplate(options: {
     },
     {
       label: "Go",
-      submenu: [command("Settings", "settings")],
+      submenu: [...command("Settings", "settings")],
     },
     // Standard macOS Window menu (minimize/zoom/front + window list).
     ...(isMac ? [{ role: "windowMenu" } as const] : []),
     {
       label: "Help",
       submenu: [
-        command("Check for Updates…", "check-updates"),
-        command(
+        ...command("Check for Updates…", "check-updates"),
+        ...command(
           "Update and Restart",
           "install-update",
-          0,
           options.canInstallUpdate === true,
         ),
         { type: "separator" },

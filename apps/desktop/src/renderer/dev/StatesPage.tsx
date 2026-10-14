@@ -1,3 +1,4 @@
+import { shortcutKeys } from "../../shortcuts/shortcutRegistry";
 import type { AccessAnswer, AccessShareRow } from "@dohc/workspace-contracts/access";
 import { FILE_KIND_RECORDS, type FileDisplayKind } from "@dohc/workspace-contracts/kinds";
 import { SAVED_HERE, SAVING, saveProblem, type SaveState } from "@dohc/workspace-contracts/save-state";
@@ -2334,15 +2335,15 @@ const EDITOR_FONT_OPTIONS = [
   { value: "mono", label: "Mono" },
 ];
 
-// Appearance's zoom stepper, with the keys this platform shows.
+// Appearance's zoom stepper keeps its existing Windows specimen text on every host.
 function ZoomSpecimen(props: { percent: number; atMost?: boolean }) {
   return (
     <StepperControl
       setting="zoom"
       value={`${props.percent}%`}
-      decrease={{ label: "Zoom out", keys: ["Ctrl", "-"], onClick: noop }}
-      reset={{ label: "Reset to 100%", to: "100%", keys: ["Ctrl", "0"], onClick: noop }}
-      increase={{ label: "Zoom in", keys: ["Ctrl", "="], disabled: props.atMost, onClick: noop }}
+      decrease={{ label: "Zoom out", keys: shortcutKeys("zoom-out", "win32"), onClick: noop }}
+      reset={{ label: "Reset to 100%", to: "100%", keys: shortcutKeys("zoom-reset", "win32"), onClick: noop }}
+      increase={{ label: "Zoom in", keys: shortcutKeys("zoom-in", "win32"), disabled: props.atMost, onClick: noop }}
     />
   );
 }

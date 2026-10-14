@@ -30,6 +30,13 @@ describe("states page", () => {
     for (const title of ["Buttons", "Copy", "State mark", "Menu", "Text inputs", "List rows", "Toasts", "Notices", "Dialog", "Kind glyph", "Page identity"]) {
       expect(screen.getAllByRole("heading", { name: title })).toHaveLength(2);
     }
+    // The specimen keeps its existing Ctrl text on every host.
+    for (const [label, key] of [["Zoom out", "-"], ["Zoom in", "="], ["Reset zoom to 100%, now 100%", "0"]]) {
+      const button = document.querySelector<HTMLElement>('[aria-label="' + label + '"]')!;
+      fireEvent.mouseEnter(button.parentElement!);
+      expect(Array.from(button.parentElement!.querySelectorAll("[role=tooltip] kbd"), (kbd) => kbd.textContent)).toEqual(["Ctrl", key]);
+      fireEvent.mouseLeave(button.parentElement!);
+    }
     // Every forced state names an element the capture can find. A menu's
     // rows exist while it is open, and one menu is open at a time, so each
     // mark inside a menu opens it, is checked, and closes it again.

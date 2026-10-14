@@ -22,7 +22,6 @@ describe("shortcut menu contract", () => {
     const expected: string[] = [];
     for (const [id, row] of Object.entries(SHORTCUTS)) {
       if (row.owner !== "shell" && row.owner !== "main" && row.owner !== "native") continue;
-      if (id === "history-restore-undo") continue;
       for (const [index, accelerator] of row.accelerators.entries()) {
         expected.push(accelerator);
         const matches = items.filter((item) => item.accelerator === accelerator);
@@ -48,17 +47,50 @@ describe("shortcut menu contract", () => {
     expect(items.filter((item) => item.accelerator).map((item) => item.accelerator).sort()).toEqual(expected.sort());
   });
 
+  it("emits all aliases and disables native registration only for shell owners", () => {
+    const row = SHORTCUTS["new-file"];
+    const originalOwner = row.owner;
+    const originalAccelerators = row.accelerators;
+    Reflect.set(row, "owner", "document");
+    Reflect.set(row, "accelerators", ["CommandOrControl+N", "CommandOrControl+Shift+N"]);
+    try {
+      const { items, sendCommand } = menu("win32");
+      const matches = items.filter((item) => item.label?.startsWith("New File"));
+      expect(matches.map((item) => item.accelerator)).toEqual(row.accelerators);
+      expect(matches.map((item) => item.visible === false)).toEqual([false, true]);
+      for (const item of matches) {
+        expect(item.registerAccelerator).toBeUndefined();
+        sendCommand.mockClear();
+        item.click!(undefined!, undefined!, undefined!);
+        expect(sendCommand).toHaveBeenCalledExactlyOnceWith(undefined, "new-file");
+      }
+    } finally {
+      Reflect.set(row, "owner", originalOwner);
+      Reflect.set(row, "accelerators", originalAccelerators);
+    }
+  });
+
   it("uses B2 command ids for palette actions and keeps the existing non-palette owners explicit", () => {
-    const nonPalette = Object.entries(SHORTCUTS).filter(([id, row]) => !(id in COMMAND_ROWS) && row.owner !== "editor").map(([id]) => id);
+    const nonPalette = Object.entries(SHORTCUTS).filter(([id, row]) => !(id in COMMAND_ROWS) && row.owner !== "editor" && row.owner !== "history-restore").map(([id]) => id);
     expect(nonPalette.sort()).toEqual([
       "close-window", "command-palette", "dev-panel",
-      "history-restore-undo", "palette-accept", "palette-dismiss", "palette-move",
+      "palette-accept", "palette-dismiss", "palette-move",
     ].sort());
     expect(shortcutAccelerators("show-chats")).toEqual([]);
   });
 });
 
 describe("existing shortcut display", () => {
+  it("keeps each display-only hint aligned with its accelerator", () => {
+    const canonical = (chord: string) => chord.toLowerCase().split(/[+ ]/).map((key) =>
+      ["ctrl", "cmd", "commandorcontrol"].includes(key) ? "mod" : key,
+    ).sort();
+    const hints = Object.entries(SHORTCUTS).filter(([, row]) => "hint" in row);
+    expect(hints.map(([id]) => id)).toEqual(["toggle-markdown-source", "editor-link", "dev-panel"]);
+    for (const [id, row] of hints) {
+      if ("hint" in row) expect(canonical(row.hint), id).toEqual(canonical(row.accelerators[0]));
+    }
+  });
   it.each(["win32", "darwin", "linux"])("keeps the exact %s text", (platform) => {
     expect(shortcutText("quick-open", platform)).toBe(platform === "darwin" ? "⌘P" : "Ctrl P");
     for (const [id, key] of [["zoom-in", "="], ["zoom-out", "-"], ["zoom-reset", "0"]] as const) {
