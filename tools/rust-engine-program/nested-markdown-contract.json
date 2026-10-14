@@ -667,7 +667,8 @@
       "note": "CommonMark 0.31.2: <p>Milk 2 litres</p>",
       "rustBase64": "AQTGk66FmNg7ACgBBG1ldGENc2NoZW1hVmVyc2lvbgF9AQcBBGJvZHkDCXBhcmFncmFwaAcAxpOuhZjYOwEGBADGk66FmNg7AhFNaWxrCiAgICAyIGxpdHJlcwA="
     },
-    { "name": "empty-bullet-blank-child-marker", "source": "- \n\n  - b\n - c",
+    { "name": "empty-bullet-blank-child-marker",
+      "nativeSourceRefuse": true, "source": "- \n\n  - b\n - c",
       "canonical": "- \n\n- b\n\n- c",
       "foldRefuse": true,
       "note": "CommonMark 0.31.2: <ul> <li></li> <li> <p>b</p> </li> <li> <p>c</p> </li> </ul>",

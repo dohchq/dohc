@@ -2290,7 +2290,7 @@ fn inline_syntax(text: &str) -> Option<String> {
             .chars()
             .next()
             .is_none_or(|next| next.is_whitespace() || next == '>' || next == '/');
-    if element || html_tag_end(text, true, false).is_some() {
+    if element || html_tag_end(text, true).is_some() {
         return Some(format!("element {name}"));
     }
     let close = text[1..].find(|c: char| c == '>' || c == '<' || c.is_whitespace())? + 1;
@@ -2314,67 +2314,7 @@ fn inline_syntax(text: &str) -> Option<String> {
     (uri || email).then(|| "autolink".into())
 }
 
-fn raw_html_spans(text: &str) -> Vec<std::ops::Range<usize>> {
-    let mut spans = Vec::new();
-    let word = |byte: u8| byte.is_ascii_alphanumeric() || byte == b'_';
-    let mut opened: Vec<(usize, &str)> = Vec::new();
-    let mut until = 0;
-    for (at, _) in text.match_indices('<') {
-        if at < until {
-            continue;
-        }
-        let rest = &text[at..];
-        let special = [("<!--", "-->"), ("<?", "?>"), ("<![CDATA[", "]]>")]
-            .into_iter()
-            .find(|(start, _)| rest.starts_with(start));
-        if let Some((start, terminator)) = special {
-            if let Some(end) = rest[start.len()..].find(terminator) {
-                until = at + start.len() + end + terminator.len();
-                spans.push(at..until);
-            }
-        } else if rest.starts_with("<!")
-            && rest.as_bytes().get(2).is_some_and(u8::is_ascii_alphabetic)
-        {
-            if let Some(end) = rest.find('>') {
-                until = at + end + 1;
-                spans.push(at..until);
-            }
-        } else if let Some(close) = rest.strip_prefix("</") {
-            let name = close
-                .split(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '_' | ':' | '-')))
-                .next()
-                .unwrap();
-            let suffix = close[name.len()..].trim_start();
-            if suffix.starts_with('>') {
-                if let Some(index) = opened.iter().position(|(_, open)| {
-                    name.get(..open.len())
-                        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(open))
-                        && word(*open.as_bytes().last().unwrap())
-                            != name
-                                .as_bytes()
-                                .get(open.len())
-                                .is_some_and(|byte| word(*byte))
-                }) {
-                    spans.push(opened[index].0..at + rest.len() - suffix.len() + 1);
-                    opened.truncate(index);
-                }
-            }
-        } else if let Some(end) = html_tag_end(rest, false, true) {
-            until = at + end;
-            spans.push(at..at + end);
-            if !rest[..end].ends_with("/>") {
-                let name = rest[1..]
-                    .split(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '_' | '-')))
-                    .next()
-                    .unwrap();
-                opened.push((at, name));
-            }
-        }
-    }
-    spans
-}
-
-fn html_tag_end(text: &str, require_attributes: bool, raw_names: bool) -> Option<usize> {
+fn html_tag_end(text: &str, require_attributes: bool) -> Option<usize> {
     let bytes = text.as_bytes();
     let space = |at: usize| matches!(bytes.get(at), Some(b' ' | b'\t' | b'\n' | b'\r' | b'\x0c'));
     let skip_space = |mut at: usize| {
@@ -2387,9 +2327,10 @@ fn html_tag_end(text: &str, require_attributes: bool, raw_names: bool) -> Option
         return None;
     }
     let mut at = 1;
-    while bytes.get(at).is_some_and(|byte| {
-        byte.is_ascii_alphanumeric() || *byte == b'-' || (raw_names && *byte == b'_')
-    }) {
+    while bytes
+        .get(at)
+        .is_some_and(|byte| byte.is_ascii_alphanumeric() || *byte == b'-')
+    {
         at += 1;
     }
     let mut attributes = false;
@@ -2913,14 +2854,22 @@ fn parse_markdown_blocks_at<'src>(
         if in_list {
             paragraph.truncate(paragraph.trim_end_matches([' ', '\t']).len());
         }
-        if reading != MarkdownReading::Source && paragraph.contains("&#") {
+        if reading != MarkdownReading::Source
+            && paragraph.contains("&#")
+            && !paragraph.as_bytes().windows(2).any(|pair| {
+                pair[0] == b'<'
+                    && (pair[1].is_ascii_alphabetic() || matches!(pair[1], b'/' | b'!' | b'?'))
+            })
+            && !paragraph
+                .match_indices('[')
+                .any(|(at, _)| definition_len(&paragraph[at..]).is_some())
+        {
             let mut spans = inline_code_spans(&paragraph);
             spans.extend(
                 empty_link_ranges(&paragraph)
                     .into_iter()
                     .map(|(from, to)| from..to),
             );
-            spans.extend(raw_html_spans(&paragraph));
             paragraph = paragraph
                 .split('\n')
                 .scan(0, |offset, line| {
@@ -3508,15 +3457,13 @@ fn parse_list<'src>(
                             (indent > marker.indent && indent < content_indent)
                                 || (matches!(
                                     reading,
-                                    MarkdownReading::Projection | MarkdownReading::Successor
+                                    MarkdownReading::Source | MarkdownReading::Projection
                                 ) && lines[at..]
                                     .iter()
                                     .skip_while(|line| blank_line(line))
                                     .map_while(|line| list_marker(line, reading))
                                     .take_while(|next| next.indent > marker.indent)
-                                    .any(|next| {
-                                        next.indent > marker.indent && next.indent < content_indent
-                                    }))
+                                    .any(|next| next.indent < content_indent))
                         })
                 } else {
                     line.trim_start_matches(' ').starts_with('\t')

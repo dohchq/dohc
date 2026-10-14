@@ -7626,7 +7626,7 @@ mod tests {
     }
 
     #[test]
-    fn indented_code_conflicts_build_successors_without_strict_witnesses() {
+    fn chosen_conflict_artifacts_build_successors_without_strict_witnesses() {
         for error in [
             dohc_engine_collab::CollabError::MarkdownNotRepresentable,
             dohc_engine_collab::CollabError::MarkdownQuoteDepthExceeded,
@@ -7638,7 +7638,12 @@ mod tests {
                 }
             ));
         }
-        for source in ["- Run:\n\n      npm i foo", "Install:\n\n    npm i foo"] {
+        for source in [
+            "- Run:\n\n      npm i foo",
+            "Install:\n\n    npm i foo",
+            "- \n\n  - b\n - c",
+            "1.\n\n   - b\n  - c",
+        ] {
             let (_scratch, mut store, key) =
                 content_conflict_store("Other settled body", source, None, ContentKind::Richdoc);
             resolve_content_conflict(&mut store, "document-conflict", "document-object", 21);
@@ -7646,7 +7651,11 @@ mod tests {
                 .unwrap()
                 .unwrap();
             let canonical = loaded.doc.project(ContentKind::Richdoc).unwrap().content;
-            assert!(canonical.contains("npm i foo"));
+            if source.contains("npm i foo") {
+                assert!(canonical.contains("npm i foo"));
+            } else {
+                assert!(canonical.contains("b") && canonical.contains("c"));
+            }
             assert!(loaded.doc.preserved_markdown_source(&canonical).is_none());
             assert_eq!(
                 VersionedTextStore::new(&mut store)

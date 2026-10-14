@@ -373,3 +373,48 @@ fn nested_contract_empty_ordered_ends_before_root_list() {
             .unwrap();
     }
 }
+
+#[test]
+fn projected_html_and_definitions_keep_line_start_entities() {
+    for source in [
+        "x <!-->y<foo>z-->\n&#42;\n</foo>",
+        "x <!a<foo>\n&#42;\n</foo>",
+        "[a\n&#42;\nb]: /u",
+        "[a]: /u\n\"t\n&#42;\nx\"",
+        "<foo>\n&#9;b",
+        "<foo>\n&#32;b",
+        "<foo>\n&#42;",
+        "<foo>\n2&#46; b",
+        "</foo>\n&#9;b",
+        "</foo>\n&#32;b",
+        "</foo>\n&#42;",
+        "</foo>\n2&#46; b",
+        "<details>a\n&#9;b",
+        "<details>a\n&#32;b",
+        "<details>a\n&#42;",
+        "<details>a\n2&#46; b",
+        "x <!-->y<foo>z-->\n&#9;b</foo>",
+        "x <!-->y<foo>z-->\n&#32;b</foo>",
+        "x <!-->y<foo>z-->\n&#42;</foo>",
+        "x <!-->y<foo>z-->\n2&#46; b</foo>",
+        "x <!a<foo>\n&#9;b</foo>",
+        "x <!a<foo>\n&#32;b</foo>",
+        "x <!a<foo>\n&#42;</foo>",
+        "x <!a<foo>\n2&#46; b</foo>",
+        "[a\n&#9;b]: /u",
+        "[a\n&#32;b]: /u",
+        "[a\n&#42;]: /u",
+        "[a\n2&#46; b]: /u",
+        "[a]: /u\n\"t\n&#9;b\"",
+        "[a]: /u\n\"t\n&#32;b\"",
+        "[a]: /u\n\"t\n&#42;\"",
+        "[a]: /u\n\"t\n2&#46; b\"",
+    ] {
+        let (blocks, refused) = parse_markdown_blocks_checked(source, MarkdownReading::Projection);
+        assert!(!refused);
+        assert!(
+            matches!(&blocks[0], MdBlock::Paragraph(text) if text == source),
+            "{source:?}: {blocks:?}"
+        );
+    }
+}
