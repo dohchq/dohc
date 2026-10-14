@@ -1,6 +1,7 @@
 import { createShareSummaries } from "./shareSummaries";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { MAX_BROWSER_CHAT_FOLLOWS_PER_WORKSPACE } from "./namedRecipientChat";
+import { authorizeShareAction } from "./shareAuthorization";
+import { createNamedRecipientChat, MAX_BROWSER_CHAT_FOLLOWS_PER_WORKSPACE } from "./namedRecipientChat";
 import type { StorageContext } from "./storage/context";
 import { CHAT_HISTORY_SCAN_WINDOW } from "./storage/log";
 import { linkLogWaitGroup, DiscussionActivityHub } from "./discussionActivity";
@@ -32,8 +33,9 @@ async function fixture(activity = new DiscussionActivityHub(), maxResponseBytes 
   addGrant(storage, grant("read", "reader", "read-only"));
   let clock = 2000;
   const lookupUserEmail = vi.fn((userId: string) => `${userId}@dohc.test`);
+  const lookupUserDisplayName = vi.fn((userId: string): Promise<string | null> | string | null => userId === "alice" ? "Alice" : userId);
   const responseLimits = {...limits, maxResponseBytes, maxPendingRequests};
-  const handler = testHandler(storage, {lookupVerifiedUserEmail: lookupUserEmail, nowMs: () => ++clock, discussionActivity: activity, namedBrowserSessionLimits: responseLimits, relayExchangeKey: RELAY_EXCHANGE_KEY,
+  const handler = testHandler(storage, {lookupUserDisplayName, lookupVerifiedUserEmail: lookupUserEmail, nowMs: () => ++clock, discussionActivity: activity, namedBrowserSessionLimits: responseLimits, relayExchangeKey: RELAY_EXCHANGE_KEY,
     resolveActor: (incoming, workspaceId) => {
       if (incoming.headers.has("cookie")) {
         expect([...incoming.headers.keys()]).toEqual(["cookie"]);
@@ -48,9 +50,9 @@ async function fixture(activity = new DiscussionActivityHub(), maxResponseBytes 
       origin: SHARE_WEB_ORIGIN, "x-dohc-relay-exchange-key": RELAY_EXCHANGE_KEY},
   }));
   const post = (changes: Record<string, unknown> = {}, user = "alice") => call("messages", user, jsonBody({
-    shareId, channelWireId, id: "request-1", body: "hello from browser", authorKind: "human", authorDisplayName: "Alice", ...changes,
+    shareId, channelWireId, id: "request-1", body: "hello from browser", authorKind: "human", ...changes,
   }));
-  return {storage, handler, call, post, activity, lookupUserEmail, responseLimits};
+  return {storage, handler, call, post, activity, lookupUserEmail, lookupUserDisplayName, responseLimits};
 }
 function addGrant(storage: SyncRelayStorage, value: SyncRelayShareGrantRow) {
   const db = inspectDatabase(storagePath(storage));
@@ -118,7 +120,10 @@ describe("named browser chat authorization and replication", () => {
       [{channelWireId: "wire-private"}, 404, "not_found"],
       [{ops: []}, 403, "share_op_rejected"], [{reaction: "yes"}, 403, "share_op_rejected"],
       [{attachment: "object"}, 403, "share_op_rejected"], [{authorKind: "link"}, 400, "bad_request"],
-      [{authorKind: "human", authorOwnerDisplayName: "Owner"}, 400, "bad_request"],
+      [{authorKind: "human", authorDisplayName: "Owner"}, 403, "share_op_rejected"],
+      [{authorKind: "human", authorOwnerDisplayName: "Owner"}, 403, "share_op_rejected"],
+      [{authorKind: "agent", authorDisplayName: "Agent", authorOwnerDisplayName: "Owner"}, 403, "share_op_rejected"],
+      [{authorKind: "automation", authorDisplayName: "Automation"}, 400, "bad_request"],
     ] as const) {
       const response = await f.post(input);
       expect(response.status).toBe(status);
@@ -126,7 +131,7 @@ describe("named browser chat authorization and replication", () => {
       expect(f.storage.fetchLogPage({workspaceId, sinceRelaySeq: 7, limit: 100}).rows).toHaveLength(0);
     }
     expect((await f.call(history.replace(channelWireId, "wire-private"))).status).toBe(404);
-    expect((await f.post({threadId: "thread-team", authorKind: "agent", authorDisplayName: "Agent", authorOwnerDisplayName: "Alice"})).status).toBe(200);
+    expect((await f.post({threadId: "thread-team", authorKind: "agent", authorDisplayName: "Agent"})).status).toBe(200);
     const before = await json(await f.call(history));
     expect(JSON.stringify(before)).not.toContain("SENTINEL");
   });
@@ -232,10 +237,10 @@ describe("named log long polling", () => {
 
 it("normalizes desktop message text and bounds malformed or oversized browser inputs at the relay", async () => {
   const f = await fixture();
-  const result = await json(await f.post({body: "hello\r\nworld \r", authorDisplayName: " Alice "}));
+  const result = await json(await f.post({body: "hello\r\nworld \r"}));
   expect(result).toMatchObject({message: {body: "hello\nworld", authorDisplayName: "Alice"}});
   for (const input of [{body: ""}, {body: " "}, {body: "x".repeat(65537)}, {body: String.fromCharCode(0xd800)},
-    {authorDisplayName: "x".repeat(201)}, {authorDisplayName: ""}, {id: String.fromCharCode(0xd800)}]) {
+    {authorKind: "agent", authorDisplayName: "x".repeat(201)}, {authorKind: "agent", authorDisplayName: ""}, {id: String.fromCharCode(0xd800)}]) {
     expect((await f.post({...input, id: "invalid", ...input})).status).toBe(400);
   }
   expect((await f.call("messages", "alice", {method: "POST", headers: {"content-type": "application/json"}, body: "{"})).status).toBe(400);
@@ -641,4 +646,61 @@ it.each(["older", "newer"] as const)("retains earliest thread bindings after a l
   const page = f.storage.fetchChatMessages({workspaceId, channelWireId, cursor: direction === "older" ? 12 : 7, direction, limit: 100});
   expect(page.rows.map(row => JSON.parse(row.payloadJson).messageId as string)).toEqual(
     direction === "older" ? ["still-shared", "owner-second", "owner-first"] : ["still-shared"]);
+});
+
+it("stores account names for humans and agent owners, with the owner-live missing-name fallback", async () => {
+  const f = await fixture();
+  expect(await json(await f.post())).toMatchObject({message: {authorKind: "human", authorDisplayName: "Alice", authorOwnerDisplayName: null}});
+  const agent = await f.post({id: "agent", authorKind: "agent", authorDisplayName: " Planner "});
+  expect(await json(agent)).toMatchObject({message: {authorKind: "agent", authorDisplayName: "Planner", authorOwnerDisplayName: "Alice", authorUserId: "alice"}});
+  const rows = f.storage.fetchLogPage({workspaceId, sinceRelaySeq: 7, limit: 100}).rows;
+  expect(rows.filter(row => row.opKind === "chat.message.append").map(row => JSON.parse(row.payloadJson))).toEqual([
+    expect.objectContaining({authorDisplayName: "Alice", authorKind: "human"}),
+    expect.objectContaining({authorDisplayName: "Planner", authorOwnerDisplayName: "Alice", authorKind: "agent"}),
+  ]);
+  f.lookupUserDisplayName.mockReturnValue(null);
+  expect(await json(await f.post({id: "unnamed"}))).toMatchObject({message: {authorDisplayName: "Unnamed"}});
+});
+
+it("uses append authorization when reading selects a newer dependent grant", async () => {
+  const f = await fixture();
+  const direct = authorizeShareAction({storage: f.storage, actorUserId: "alice", shareId, action: "append"});
+  if (!direct.ok) throw Error("missing direct authority");
+  const dependent = {...grant("dependent", "alice", "read-write"), createdAtMs: 2, parentGrantId: "parent"};
+  const requireShareAction = vi.fn((_shareId: string, _userId: string, action: "read" | "append") =>
+    action === "read" ? {...direct, grant: dependent} : direct);
+  const chat = createNamedRecipientChat({storage: f.storage, resolveActor: (_request, workspaceId) => ({userId: "alice", workspaceId}),
+    claimPendingShares: async () => {}, activity: f.activity, publicOrigin: SHARE_WEB_ORIGIN, exchangeKey: RELAY_EXCHANGE_KEY,
+    limits, nowMs: () => 2000, requireShareAction, transport: async () => new Response(null), reads: {chatResolverFor: () => {throw Error("unexpected history read");}}});
+  const response = await chat(new Request("http://relay.test/sync/named-chat/channels?grantId=write", {
+    headers: {cookie: "session=alice", origin: SHARE_WEB_ORIGIN, "x-dohc-relay-exchange-key": RELAY_EXCHANGE_KEY},
+  }));
+  expect(await json(response)).toMatchObject({channels: [{access: "read-write"}]});
+  expect(requireShareAction).toHaveBeenCalledWith(shareId, "alice", "append");
+  expect((await f.post()).status).toBe(200);
+});
+
+it("answers a relay deadline with 503 and never appends after a stalled name lookup resumes", async () => {
+  const f = await fixture(), entered = deferred(), release = deferred();
+  f.lookupUserDisplayName.mockImplementation(async () => {entered.resolve(); await release.promise; return "Alice";});
+  vi.useFakeTimers();
+  const pending = f.post();
+  try {
+    await entered.promise;
+    await vi.advanceTimersByTimeAsync(limits.timeoutMs);
+    expect((await pending).status).toBe(503);
+  } finally {release.resolve(); await pending; await vi.advanceTimersByTimeAsync(0);}
+  expect(f.storage.fetchLogPage({workspaceId, sinceRelaySeq: 7, limit: 100}).rows).toHaveLength(0);
+});
+
+it("refuses before appending when server-chosen names make the stored payload exceed its budget", async () => {
+  const f = await fixture();
+  f.responseLimits.maxRequestBytes = 500;
+  const input = {shareId, channelWireId, id: "request-1", body: "x".repeat(100), authorKind: "human"};
+  expect(Buffer.byteLength(JSON.stringify(input))).toBeLessThan(500);
+  f.lookupUserDisplayName.mockReturnValue("名".repeat(40));
+  const response = await f.post({body: input.body});
+  expect(response.status).toBe(413);
+  expect(await json(response)).toMatchObject({code: "payload_too_large"});
+  expect(f.storage.fetchLogPage({workspaceId, sinceRelaySeq: 7, limit: 100}).rows).toHaveLength(0);
 });

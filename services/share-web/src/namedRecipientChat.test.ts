@@ -18,7 +18,7 @@ function request(path = history, user = "alice", input?: unknown): Request {
     ...(input === undefined ? {} : {body: JSON.stringify(input)}),
     headers: {host: "share.example.test", origin, cookie: `${cookieName}=${user}`, "content-type": "application/json"}});
 }
-const message = {shareId: "share", channelWireId: "wire", id: "retry-id", body: "Browser message", authorKind: "human", authorDisplayName: "Alice"};
+const message = {shareId: "share", channelWireId: "wire", id: "retry-id", body: "Browser message", authorKind: "human"};
 
 async function fixture(access: "read-only" | "read-write" = "read-write") {
   const storage = await testStorage(), activity = new DiscussionActivityHub();
@@ -38,7 +38,7 @@ async function fixture(access: "read-only" | "read-write" = "read-write") {
     if (!cookie?.startsWith(`${cookieName}=`) || !userId) throw new UnauthorizedError();
     return {userId, workspaceId};
   });
-  const relay = createSyncRelayHandler({storage, resolveActor, discussionActivity: activity,
+  const relay = createSyncRelayHandler({storage, resolveActor, lookupUserDisplayName: userId => userId === "alice" ? "Alice" : userId, discussionActivity: activity,
     shareWebOrigin: origin, relayExchangeKey: exchangeKey, namedBrowserSessionLimits: {...limits, maxSessions: 8, retentionMs: 60_000}});
   const forwarded: Request[] = [];
   const web = createShareWebApplication({relayUrl: "http://relay.invalid", publicRelayUrl: "https://relay.test", publicHosts: new Set(["share.example.test"]),
@@ -96,8 +96,6 @@ it("enforces same-origin writes, account cookie selection, and request bounds be
     (r: Request) => r.headers.set("host", "other.test"),
     (r: Request) => r.headers.set("sec-fetch-site", "cross-site"),
     (r: Request) => r.headers.set("content-type", "text/plain"),
-    (r: Request) => r.headers.set("cookie", "dohc_link=secret"),
-    (r: Request) => r.headers.set("cookie", `${cookieName}=alice; ${cookieName}=bob`),
   ]) {
     const incoming = request("messages", "alice", message); change(incoming);
     expect((await f.web.handle(incoming)).status).toBe(404);
@@ -272,4 +270,55 @@ it("returns relay non-follow pool exhaustion as 429 through a larger share-web p
     expect(response.status).toBe(429);
     expect(await response.json()).toMatchObject({code: "share_access_rate_limited"});
   } finally {release(); await Promise.all([first, second]);}
+});
+
+it.each(["missing", "link-only", "duplicate"])("answers a %s account cookie with signed_out before looking up the share", async mode => {
+  const f = await fixture();
+  for (const path of [history, "channels?grantId=missing"]) {
+    const incoming = request(path);
+    if (mode === "missing") incoming.headers.delete("cookie");
+    else incoming.headers.set("cookie", mode === "link-only" ? "dohc_link=secret" : cookieName + "=alice; " + cookieName + "=bob");
+    const response = await f.web.handle(incoming);
+    expect(response.status).toBe(401);
+    expect(await response.json()).toMatchObject({code: "signed_out"});
+  }
+  expect(f.forwarded).toHaveLength(0);
+});
+
+it.each(["messages", history + "&since=3", "channels?grantId=grant"])("answers a relay deadline with 503 for %s", async path => {
+  let entered!: () => void, release!: (response: Response) => void;
+  const started = new Promise<void>(resolve => {entered = resolve;});
+  const blocked = new Promise<Response>(resolve => {release = resolve;});
+  const web = createNamedRecipientChatClient({relayUrl: "http://relay.test", publicOrigin: origin, exchangeKey, limits,
+    fetchRelay: async () => {entered(); return blocked;}});
+  vi.useFakeTimers();
+  const pending = web(request(path, "alice", path === "messages" ? message : undefined));
+  try {
+    await started;
+    await vi.advanceTimersByTimeAsync(limits.timeoutMs + (path.includes("since=") ? 30_000 : 0));
+    expect((await pending).status).toBe(503);
+  } finally {release(new Response(null)); await pending; await vi.advanceTimersByTimeAsync(0);}
+});
+
+it.each([500, 502, 503, 504])("answers relay %s with 503 even without JSON", async status => {
+  const web = createNamedRecipientChatClient({relayUrl: "http://relay.test", publicOrigin: origin, exchangeKey, limits,
+    fetchRelay: async () => new Response("relay failed", {status})});
+  expect((await web(request("messages", "alice", message))).status).toBe(503);
+});
+
+it("answers a failed relay connection with 503", async () => {
+  const web = createNamedRecipientChatClient({relayUrl: "http://relay.test", publicOrigin: origin, exchangeKey, limits,
+    fetchRelay: async () => {throw new TypeError("connection failed");}});
+  expect((await web(request("messages", "alice", message))).status).toBe(503);
+});
+
+it.each([
+  {authorDisplayName: "Owner"}, {authorOwnerDisplayName: "Owner"},
+  {authorKind: "agent", authorDisplayName: "Planner", authorOwnerDisplayName: "Owner"},
+  {authorKind: "automation", authorDisplayName: "Automation"},
+])("refuses browser authorship fields before forwarding: %j", async fields => {
+  const f = await fixture();
+  const response = await f.web.handle(request("messages", "alice", {...message, ...fields}));
+  expect(response.status).toBe(fields.authorKind === "automation" ? 400 : 403);
+  expect(f.forwarded).toHaveLength(0);
 });

@@ -97,21 +97,21 @@ export async function followNamedChat(channel: NamedChatChannel, since: number, 
 }
 
 /** Posts a new thread in the channel. Retrying with the same `id` and fields returns the original message. */
-export async function postNamedChatMessage(channel: NamedChatChannel, post: {id: string; body: string; authorDisplayName: string}, signal: AbortSignal) {
+export async function postNamedChatMessage(channel: NamedChatChannel, post: {id: string; body: string}, signal: AbortSignal) {
   const value = await chatRequest("/api/named-chat/messages", signal, {...coordinates(channel), ...post, authorKind: "human"});
   if (value.shareId !== channel.shareId || value.channelWireId !== channel.channelWireId) throw invalid();
   return message(value.message);
 }
 
 /** The body the relay stores, or null when it would refuse it. */
-export function normalizeChatBody(text: string, channel: NamedChatChannel, authorDisplayName: string): string | null {
+export function normalizeChatBody(text: string, channel: NamedChatChannel): string | null {
   const body = text.replace(/\r\n?/gu, "\n").trimEnd();
-  return body && body.isWellFormed() && !chatBodyTooLong(body, channel, authorDisplayName) ? body : null;
+  return body && body.isWellFormed() && !chatBodyTooLong(body, channel) ? body : null;
 }
 
-export function chatBodyTooLong(text: string, channel: NamedChatChannel, authorDisplayName: string): boolean {
+export function chatBodyTooLong(text: string, channel: NamedChatChannel): boolean {
   const body = text.replace(/\r\n?/gu, "\n").trimEnd(), encoder = new TextEncoder();
-  const post = {...coordinates(channel), id: "00000000-0000-0000-0000-000000000000", body, authorKind: "human", authorDisplayName};
+  const post = {...coordinates(channel), id: "00000000-0000-0000-0000-000000000000", body, authorKind: "human"};
   return encoder.encode(body).length > channel.maxBodyBytes || encoder.encode(JSON.stringify(post)).length > channel.maxPostBytes;
 }
 

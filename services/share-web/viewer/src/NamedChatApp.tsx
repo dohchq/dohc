@@ -182,7 +182,7 @@ function ChannelView({channel, account, onEnded}: {channel: NamedChatChannel; ac
     } finally {if (!controller.signal.aborted) olderRef.current = false;}
   };
 
-  const body = normalizeChatBody(draft, channel, account.name), tooLong = chatBodyTooLong(draft, channel, account.name);
+  const body = normalizeChatBody(draft, channel), tooLong = chatBodyTooLong(draft, channel);
   const send = async (event?: FormEvent<HTMLFormElement>) => {
     event?.preventDefault();
     const controller = mounted.current;
@@ -191,7 +191,7 @@ function ChannelView({channel, account, onEnded}: {channel: NamedChatChannel; ac
     const post = intent.current?.body === body ? intent.current : {id: crypto.randomUUID(), body};
     intent.current = post; postingRef.current = true; setPosting(true); setPostError(null);
     try {
-      const message = await postNamedChatMessage(channel, {id: post.id, body: post.body, authorDisplayName: account.name}, controller.signal);
+      const message = await postNamedChatMessage(channel, post, controller.signal);
       if (controller.signal.aborted) return;
       intent.current = null; setDraft(""); receive([message], true);
     } catch (error) {
@@ -311,7 +311,9 @@ export default function NamedChatApp({grantId}: {grantId: string | null}) {
       {account && <div className="header-actions"><span>{account.name}</span><button disabled={pending === "sign-out"} className="handoff-button secondary" onClick={signOut}>Sign out</button></div>}
     </header>
     {!grantId ? <main className="download-card"><p>This invitation is unavailable. Open the invitation the owner shared with you.</p></main> :
-      !account ? <NamedSignIn title="Sign in to chat" busy={busy} error={error} onSignIn={signIn}/> :
+      !account ? <NamedSignIn title="Sign in to chat" busy={busy} error={error} onSignIn={signIn}>
+        {error === CHECK_FAILED && <button className="handoff-button secondary" onClick={check}>Try again</button>}
+      </NamedSignIn> :
       channel ? <>{error && <p className="chat-notice" role="alert">{error}</p>}
         <ChannelView key={`${grantId}\n${channel.shareId}\n${channel.channelWireId}`} channel={channel} account={account} onEnded={end}/></> :
       <main className="download-card">

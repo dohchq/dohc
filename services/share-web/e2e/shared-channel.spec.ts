@@ -58,7 +58,7 @@ test("a group member reads and posts from a phone while a read-only member follo
     const email = cookie?.startsWith(`${cookieName}=`) ? sessions.get(cookie.slice(cookieName.length + 1)) : undefined;
     return email ? accounts[email] : null;
   };
-  const relay = createSyncRelayHandler({ storage, discussionActivity: new DiscussionActivityHub(), shareWebOrigin: viewer, relayExchangeKey: exchangeKey,
+  const relay = createSyncRelayHandler({ storage, lookupUserDisplayName: userId => Object.values(accounts).find(account => account.id === userId)?.name ?? null, discussionActivity: new DiscussionActivityHub(), shareWebOrigin: viewer, relayExchangeKey: exchangeKey,
     namedBrowserSessionLimits: { maxSessions: 16, retentionMs: 60_000, maxPendingRequests: 16, maxRequestBytes: 100_000, maxResponseBytes: 200_000, timeoutMs: 10_000 },
     resolveActor(request, scope) {
       if (request.headers.get("authorization") === "Bearer owner") return { workspaceId: scope, userId: "owner" };
@@ -181,7 +181,7 @@ test("a group member reads and posts from a phone while a read-only member follo
       const response = await fetch("/api/named-chat/messages", { method: "POST", credentials: "same-origin",
         headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
       return { status: response.status, body: await response.json() as unknown };
-    }, { shareId, channelWireId, id: "riley-direct", body: "Read-only post", authorKind: "human", authorDisplayName: "Riley" });
+    }, { shareId, channelWireId, id: "riley-direct", body: "Read-only post", authorKind: "human" });
     expect(refused).toEqual({ status: 403, body: expect.objectContaining({ ok: false, code: "share_read_only" }) });
     await riley.reload();
     await expect(riley.getByText("Flights are confirmed.", { exact: true })).toBeVisible();

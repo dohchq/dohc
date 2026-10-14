@@ -65,7 +65,7 @@ it("signs in with the shared form, reads the channel oldest first, and posts as 
   expect(container.querySelector("h1")?.textContent).toBe("Trip to Lisbon");
   expect([...container.querySelectorAll(".chat-body")].map(node => node.textContent?.trim())).toEqual(["First", "Second"]);
   await type("Booked the **hotel**"); await click("Send"); await settle(() => composer()?.value === "");
-  expect(posts).toEqual([{shareId, channelWireId, id: expect.any(String), body: "Booked the **hotel**", authorKind: "human", authorDisplayName: "Alice"}]);
+  expect(posts).toEqual([{shareId, channelWireId, id: expect.any(String), body: "Booked the **hotel**", authorKind: "human"}]);
   expect(container.querySelector(".chat-list li:last-child strong")?.textContent).toBe("hotel");
 });
 
@@ -266,4 +266,32 @@ it("checks the advertised post budget including author fields and JSON escaping"
   expect(button("Send")?.disabled).toBe(false);
   await click("Send"); await settle(() => composer()?.value === "");
   expect(posts).toHaveLength(1);
+});
+
+it("shows the account owner beside an agent's name", async () => {
+  server({history: () => ({shareId, channelWireId, nextCursor: 10, olderCursor: null,
+    messages: [{...message(2, "Second", "Planner"), authorKind: "agent", authorOwnerDisplayName: "Alice"}]})});
+  await render(); await opened();
+  expect(container.querySelector(".chat-author")?.textContent).toBe("Planner");
+  expect(container.querySelector(".chat-owner")?.textContent).toBe("Owned by Alice");
+});
+
+it("returns to sign-in when a post reports the account cookie is missing", async () => {
+  server({post: () => jsonResponse({ok: false, error: "signed out", code: "signed_out"}, 401)});
+  await render(); await opened(); await type("Draft"); await click("Send");
+  await settle(() => Boolean(container.querySelector('input[name="email"]')));
+  expect(button("Sign out")).toBeUndefined();
+  expect(text()).toContain("Your session ended. Sign in again to keep reading.");
+  expect(follows.every(follow => follow.signal.aborted)).toBe(true);
+});
+
+it("offers Try again when the first account check fails and opens the channel after retry", async () => {
+  const fetch = server();
+  fetch.mockRejectedValueOnce(new TypeError("connection failed"));
+  await render(); await settle(() => Boolean(container.querySelector('[role="alert"]')));
+  expect(text()).toContain("Sign in to chat");
+  expect(text()).toContain("Try again");
+  await click("Try again"); await opened();
+  expect(fetch.mock.calls.filter(([input]) => String(input) === "/api/account/session")).toHaveLength(2);
+  expect(container.querySelector('[role="alert"]')).toBeNull();
 });

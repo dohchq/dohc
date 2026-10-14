@@ -3,12 +3,13 @@ import { readBoundedJson } from "@dohc/service-http";
 import { parseLiveUpdateIdentifier } from "@dohc/live-session-contract/live-update-admission";
 import type { ResolveActor } from "@dohc/workspace-auth/session";
 import { sha256Hex } from "@dohc/workspace-core/hash";
-import { badRequest, errorResponse, notFound, relayError } from "./errors";
+import { badRequest, errorResponse, notFound, RelayError, relayError } from "./errors";
 import { hashRelayExchangeKey, verifyRelayExchangeKey } from "./linkSecurity";
 import { DiscussionActivityCapacityError, linkLogWaitGroup, type DiscussionActivityHub } from "./discussionActivity";
 import type { NamedLiveBrowserHttpLimits } from "./namedLiveBrowserHttp";
 import type { createNamedShareTransportRoutes } from "./namedShareTransportRoutes";
-import { namedShareOrigin } from "./relayLogInputs";
+import { accountDisplayName } from "./discussionRoutes";
+import { namedShareOrigin, type LogAuthorNameLookup } from "./relayLogInputs";
 import { parseLimit, parseString, parseLinkLogHold } from "./requestInputs";
 import type { AuthorizedShareAction } from "./shareAuthorization";
 import { chatSideOf, filterOpForShare } from "./shareFilter";
@@ -65,6 +66,7 @@ function cursor(value: string | null): number {
 export function createNamedRecipientChat(options: {
   storage: SyncRelayStorage;
   resolveActor: ResolveActor;
+  lookupUserDisplayName?: LogAuthorNameLookup;
   claimPendingShares(userId: string, signal?: AbortSignal): Promise<void>;
   activity: Pick<DiscussionActivityHub, "wait">;
   publicOrigin: string;
@@ -81,6 +83,8 @@ export function createNamedRecipientChat(options: {
   const followsByUser = new Map<string, number>();
   const followsByWorkspace = new Map<string, number>();
   const refuse = () => Response.json({ok: false, error: "not found"}, {status: 404, headers: cacheHeaders});
+  const unavailable = () => new Response(null, {status: 503, headers: cacheHeaders});
+  const cancelledResponse = (request: Request) => request.signal.aborted ? refuse() : unavailable();
   const boundedJson = (body: unknown) => {
     const bytes = JSON.stringify(body);
     if (Buffer.byteLength(bytes) > limits.maxResponseBytes) throw relayError("payload_too_large");
@@ -101,7 +105,7 @@ export function createNamedRecipientChat(options: {
     if (following) pendingFollows++; else pending++;
     let followUser: string | undefined, followWorkspace: string | undefined;
     const controller = new AbortController(), abort = () => controller.abort();
-    const cancelled = new Promise<Response>(resolve => controller.signal.addEventListener("abort", () => resolve(refuse()), {once: true}));
+    const cancelled = new Promise<Response>(resolve => controller.signal.addEventListener("abort", () => resolve(cancelledResponse(request)), {once: true}));
     request.signal.addEventListener("abort", abort, {once: true});
     if (request.signal.aborted) abort();
     const timer = setTimeout(abort, Math.min(2_147_483_647, limits.timeoutMs + (request.method === "GET" && url.searchParams.has("since") ? MAX_DISCUSSION_ACTIVITY_HOLD_MS : 0)));
@@ -118,7 +122,7 @@ export function createNamedRecipientChat(options: {
           }
           if (!value || typeof value !== "object" || Array.isArray(value)) throw badRequest("invalid request");
           input = value as Record<string, unknown>;
-          const allowed = new Set(["shareId", "channelWireId", "id", "threadId", "body", "authorKind", "authorDisplayName", "authorOwnerDisplayName", "authorUserId"]);
+          const allowed = new Set(["shareId", "channelWireId", "id", "threadId", "body", "authorKind", "authorDisplayName", "authorUserId"]);
           if (Object.keys(input).some(key => !allowed.has(key))) throw relayError("share_op_rejected");
         } else {
           const allowed = channels ? ["grantId"] : ["shareId", "channelWireId", "before", "since", "hold", "limit"];
@@ -154,7 +158,9 @@ export function createNamedRecipientChat(options: {
           controller.signal.throwIfAborted();
         };
         if (channels) {
-          const writable = chat.access === "read-write" && authority.grant.parentGrantId === null;
+          let writable = false;
+          try {requireShareAction(shareId, actor.userId, "append"); writable = true;}
+          catch (error) {if (!(error instanceof RelayError && error.code === "share_read_only")) throw error;}
           const labels = storage.getShareLabels(shareId);
           recheck();
           return json({shareId, userId: actor.userId, maxPostBytes: limits.maxRequestBytes, maxBodyBytes: MAX_MESSAGE_BODY_BYTES, channels: [{channelWireId: chat.channelWireId, name: labels.subjectName,
@@ -168,11 +174,13 @@ export function createNamedRecipientChat(options: {
           const id = parseString(input.id, "id", 256);
           if (!id.isWellFormed()) throw badRequest("invalid id");
           const authorKind = input.authorKind;
-          if (authorKind !== "human" && authorKind !== "agent" && authorKind !== "automation") throw badRequest("invalid author kind");
-          const authorDisplayName = displayName(input.authorDisplayName);
-          const authorOwnerDisplayName = input.authorOwnerDisplayName === undefined ? undefined :
-            displayName(input.authorOwnerDisplayName);
-          if (authorKind === "human" && authorOwnerDisplayName !== undefined) throw badRequest("invalid author owner");
+          if (authorKind !== "human" && authorKind !== "agent") throw badRequest("invalid author kind");
+          if (authorKind === "human" && Object.hasOwn(input, "authorDisplayName")) throw relayError("share_op_rejected");
+          const agentName = authorKind === "agent" ? displayName(input.authorDisplayName) : undefined;
+          const accountName = await accountDisplayName(options.lookupUserDisplayName, actor.userId) ?? "Unnamed";
+          controller.signal.throwIfAborted();
+          const authorDisplayName = agentName ?? accountName;
+          const authorOwnerDisplayName = authorKind === "agent" ? accountName : undefined;
           if (typeof input.body !== "string" || !input.body.isWellFormed()) throw badRequest("invalid body");
           const body = input.body.replace(/\r\n?/gu, "\n").trimEnd();
           if (!body || Buffer.byteLength(body) > MAX_MESSAGE_BODY_BYTES) throw badRequest("invalid body");
@@ -190,6 +198,7 @@ export function createNamedRecipientChat(options: {
               {opKind: "chat.message.append", payload: {messageId, threadId, body, authorKind, authorDisplayName,
                 authorUserId: actor.userId, ...(authorOwnerDisplayName === undefined ? {} : {authorOwnerDisplayName}), createdAtMs}},
             ].map((op, originSeq) => ({...op, originSeq, recordedAtMs: createdAtMs}));
+            if (Buffer.byteLength(JSON.stringify(ops[ops.length - 1]!.payload)) > limits.maxRequestBytes) throw relayError("payload_too_large");
             boundedJson({shareId, channelWireId, message: messageFromOp({relaySeq: Number.MAX_SAFE_INTEGER,
               opKind: "chat.message.append", payload: ops[ops.length - 1]!.payload})});
             return options.transport(new Request(request.url, {method: "POST", signal: controller.signal,
@@ -269,7 +278,7 @@ export function createNamedRecipientChat(options: {
         }
         const complete = {...envelope, messages};
         return json(truncated || !fits(complete) ? partial(messages) : complete);
-      } catch (error) {return controller.signal.aborted ? refuse() : errorResponse(error);}
+      } catch (error) {return controller.signal.aborted ? cancelledResponse(request) : errorResponse(error);}
       finally {
         if (following) pendingFollows--; else pending--;
         if (followUser !== undefined) {

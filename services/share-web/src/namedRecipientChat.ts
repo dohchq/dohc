@@ -46,10 +46,11 @@ export function createNamedRecipientChatClient(options: {
     throw new TypeError("Invalid named chat configuration.");
   }
   const refuse = () => Response.json({ok: false, error: "not found"}, {status: 404, headers: cacheHeaders});
+  const unavailable = () => new Response(null, {status: 503, headers: cacheHeaders});
   const calls = createNamedRelayCalls({maxPending: limits.maxPendingRequests, timeoutMs: limits.timeoutMs,
-    unrefDeadline: false, refuse, fetchRelay: options.fetchRelay});
+    unrefDeadline: false, refuse, unavailable, fetchRelay: options.fetchRelay});
   const followCalls = createNamedRelayCalls({maxPending: MAX_NAMED_CHAT_FOLLOW_REQUESTS, timeoutMs: limits.timeoutMs,
-    unrefDeadline: false, refuse, fetchRelay: options.fetchRelay});
+    unrefDeadline: false, refuse, unavailable, fetchRelay: options.fetchRelay});
   const followsByCookie = new Map<string, number>();
   const rateLimited = () => Response.json({ok: false, error: "too many chat requests", code: "share_access_rate_limited"},
     {status: 429, headers: cacheHeaders});
@@ -65,7 +66,7 @@ export function createNamedRecipientChatClient(options: {
           request.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase() !== "application/json")) ||
         (!write && request.headers.has("origin") && request.headers.get("origin") !== options.publicOrigin)) return refuse();
     const cookie = namedAccountCookie(request.headers.get("cookie"), options.publicOrigin);
-    if (!cookie) return refuse();
+    if (!cookie) return Response.json({ok: false, error: "signed out", code: "signed_out"}, {status: 401, headers: cacheHeaders});
     if (pool.full || (following && (followsByCookie.get(cookie) ?? 0) >= limits.maxPendingRequests)) {
       return rateLimited();
     }
@@ -80,6 +81,13 @@ export function createNamedRecipientChatClient(options: {
               {ok: false, error: "Post is too large.", code: "payload_too_large"}, {status: 413, headers: cacheHeaders});
             throw error;
           }
+          const input: unknown = JSON.parse(body);
+          if (!record(input) || (input.authorKind !== "human" && input.authorKind !== "agent")) return Response.json(
+            {ok: false, error: "invalid author kind", code: "bad_request"}, {status: 400, headers: cacheHeaders});
+          const allowed = new Set(["shareId", "channelWireId", "id", "threadId", "body", "authorKind", "authorUserId",
+            ...(input.authorKind === "agent" ? ["authorDisplayName"] : [])]);
+          if (Object.keys(input).some(key => !allowed.has(key))) return Response.json(
+            {ok: false, error: "share op rejected", code: "share_op_rejected"}, {status: 403, headers: cacheHeaders});
           if (Buffer.byteLength(body) > limits.maxRequestBytes) return Response.json(
             {ok: false, error: "Post is too large.", code: "payload_too_large"}, {status: 413, headers: cacheHeaders});
         }
@@ -90,9 +98,10 @@ export function createNamedRecipientChatClient(options: {
           headers: {cookie, origin: options.publicOrigin, "x-dohc-relay-exchange-key": options.exchangeKey,
             ...(write ? {"content-type": "application/json"} : {})},
         }));
-        if (response.redirected || response.headers.has("location") ||
-            response.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase() !== "application/json" ||
-            ![200, 400, 401, 403, 404, 409, 413, 429, 503].includes(response.status)) return refuse();
+        if (response.redirected || response.headers.has("location")) return refuse();
+        if (response.status >= 500) return unavailable();
+        if (response.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase() !== "application/json" ||
+            ![200, 400, 401, 403, 404, 409, 413, 429].includes(response.status)) return refuse();
         const result = await readBoundedJson(response, limits.maxResponseBytes, signal);
         if (!record(result)) return refuse();
         if (response.status === 200) {

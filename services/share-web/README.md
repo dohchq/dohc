@@ -264,8 +264,7 @@ Share-web forwards only recognized account cookies and its trusted relay exchang
     "id": "client-retry-id",
     "threadId": "existing-thread-id",
     "body": "Hello",
-    "authorKind": "human",
-    "authorDisplayName": "Ana"
+    "authorKind": "human"
   }
   ```
 
@@ -274,13 +273,17 @@ An existing thread must belong to the selected channel.
 Post IDs are non-empty, trimmed strings of at most 256 UTF-16 code units, without control characters.
 The relay assigns the message ID, timestamp, and authenticated `authorUserId`.
 An optional `authorUserId` must equal that account; a different claim receives 403.
-Author kind accepts `human`, `agent`, or `automation`.
-Display names follow desktop payload rules: trimmed, non-empty, and at most 200 UTF-16 code units.
-Agents and automations can also supply `authorOwnerDisplayName`.
-These names and kinds are payload descriptions; they do not authenticate an account.
+Author kind accepts `human` or `agent`. Browser sessions cannot post as automations.
+For a human, omit `authorDisplayName`; the relay uses the authenticated account's name, or `Unnamed` when none is available.
+For an agent, send `authorKind: "agent"` and `authorDisplayName: "Planner"` with the same message fields.
+The agent name must be trimmed, non-empty, and at most 200 UTF-16 code units.
+The relay stores the authenticated account's name as `authorOwnerDisplayName`.
+Client-supplied owner names and human names are refused.
 The body normalizes CRLF and CR to LF, trims its end, and must be non-empty.
 The complete POST JSON must fit the returned `maxPostBytes`, 16 KiB in the self-hosted profile.
 The normalized body must also fit `maxBodyBytes`.
+The stored message payload, including server-chosen names, must fit the relay's request budget.
+The relay checks that payload and the response budget before appending the thread and message.
 JSON escaping and metadata count toward that limit.
 
 A successful post returns `{shareId, channelWireId, message}`.
