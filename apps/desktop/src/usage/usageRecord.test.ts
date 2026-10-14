@@ -1,4 +1,4 @@
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { CLI_CAPABILITIES } from "@dohc/cli/protocol";
 import { CLI_COMMANDS } from "@dohc/cli/args";
 import { MCP_TOOL_CAPABILITIES } from "@dohc/mcp/tools";
@@ -25,10 +25,22 @@ function setup(options: { readError?: NodeJS.ErrnoException } = {}) {
       if (text === undefined) throw Object.assign(new Error("missing"), { code: "ENOENT" });
       return text;
     }),
+    readdir: vi.fn(async (directory: string) => [...disk.keys()].filter(file => dirname(file) === directory).map(file => basename(file))),
     mkdir: vi.fn(async () => {}),
+    copyFile: vi.fn(async (from: string, to: string) => { disk.set(to, disk.get(from)!); }),
     writeFile: vi.fn(async (path: string, data: string) => { disk.set(path, data); }),
-    rename: vi.fn(async (from: string, to: string) => { disk.set(to, disk.get(from)!); disk.delete(from); }),
+    rename: vi.fn(async (from: string, to: string) => {
+      if (!disk.has(from)) throw Object.assign(new Error("missing"), { code: "ENOENT" });
+      disk.set(to, disk.get(from)!); disk.delete(from);
+    }),
+    link: vi.fn(async (from: string, to: string) => {
+      if (disk.has(to)) throw Object.assign(new Error("exists"), { code: "EEXIST" });
+      disk.set(to, disk.get(from)!);
+    }),
+    unlink: vi.fn(async (path: string) => { disk.delete(path); }),
     rm: vi.fn(async (path: string) => { disk.delete(path); }),
+    sync: vi.fn(async () => {}),
+    syncDirectory: vi.fn(async () => {}),
   } satisfies UsageFileSystem;
   const store = createUsageStore({ stateDir: () => "state", appVersion: "0.1.0", coverage: DESKTOP_USAGE_COVERAGE, io });
   stores.push(store);
@@ -111,9 +123,12 @@ describe("usage record bridge", () => {
 
   it("says a record it cannot read is unreadable, and changes nothing on disk", async () => {
     const { io, call } = setup({ readError: Object.assign(new Error("denied"), { code: "EACCES" }) });
-    await expect(call("readUsageRecord", {})).resolves.toEqual({ status: "unreadable", file: FILE, code: "EACCES" });
+    await expect(call("readUsageRecord", {})).resolves.toEqual({ status: "unreadable", file: FILE, code: "EACCES", setAside: null });
     await expect(call("clearUsageRecord", {})).rejects.toThrow("denied");
     await expect(call("setUsageRecordEnabled", { enabled: false })).rejects.toThrow("denied");
+    await expect(call("startUsageRecord", {})).rejects.toThrow("denied");
+    await expect(call("restoreUsageRecord", {})).rejects.toThrow("denied");
+    expect(io.rename).not.toHaveBeenCalled();
     expect(io.writeFile).not.toHaveBeenCalled();
     expect(io.rm).not.toHaveBeenCalled();
   });
@@ -127,7 +142,7 @@ describe("usage record bridge", () => {
     disk.set(FILE, raw);
     await store.load();
     await expect(call("readUsageRecord", {})).resolves.toEqual({
-      status: "unreadable", file: FILE, code: "INVALID_USAGE_RECORD",
+      status: "unreadable", file: FILE, code: "INVALID_USAGE_RECORD", setAside: null,
     });
     await expect(call("clearUsageRecord", {})).rejects.toMatchObject({ code: "INVALID_USAGE_RECORD" });
     await expect(call("setUsageRecordEnabled", { enabled: true })).rejects.toMatchObject({ code: "INVALID_USAGE_RECORD" });
@@ -137,7 +152,26 @@ describe("usage record bridge", () => {
     expect(disk.get(FILE)).toBe(raw);
     expect(io.writeFile).not.toHaveBeenCalled();
     expect(io.rename).not.toHaveBeenCalled();
-    expect(io.rm).not.toHaveBeenCalled();
+    // A launch clears only a leftover swap beside the record.
+    expect(io.rm.mock.calls.filter(([file]) => !file.startsWith(`${FILE}.incoming`))).toEqual([]);
+  });
+
+  it("starts a new record Off beside an undecodable one, names it, and restores it, never counting itself", async () => {
+    const { store, disk, record, call } = setup();
+    disk.set(FILE, "not JSON");
+    await store.load();
+    record.mockClear();
+    await expect(call("startUsageRecord", {})).resolves.toBeUndefined();
+    await expect(call("readUsageRecord", {})).resolves.toMatchObject({
+      status: "readable", enabled: false, setAside: "dohc-usage.set-aside-1.json" });
+    expect(disk.get(join("state", "dohc-usage.set-aside-1.json"))).toBe("not JSON");
+    await expect(call("restoreUsageRecord", {})).resolves.toBeUndefined();
+    await expect(call("readUsageRecord", {})).resolves.toEqual({
+      status: "unreadable", file: FILE, code: "INVALID_USAGE_RECORD", setAside: "dohc-usage.set-aside-2.json" });
+    expect(disk.get(FILE)).toBe("not JSON");
+    expect(record).not.toHaveBeenCalled();
+    await expect(call("startUsageRecord", {}, false)).rejects.toThrow("Untrusted");
+    await expect(call("restoreUsageRecord", { file: "../x" })).rejects.toThrow();
   });
 
   it("fails a read before the store exists instead of calling it unreadable", async () => {
@@ -164,7 +198,7 @@ describe("usage record bridge", () => {
   });
 
   it("offers no CLI verb, MCP tool or other door for the record", () => {
-    const ids = ["usage.read", "usage.clear", "usage.switch"] as const;
+    const ids = ["usage.read", "usage.clear", "usage.switch", "usage.start", "usage.restore"] as const;
     for (const id of ids) {
       const meta = CAPABILITIES[id];
       for (const level of ["owner", "view", "comment", "edit"] as const) expect(meta.mcp[level]).toEqual([]);
