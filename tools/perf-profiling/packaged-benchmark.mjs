@@ -1,3 +1,4 @@
+import { acquireProfilingSlot } from './admission.mjs';
 import { startWindowController, waitForVisibleWindow } from './window-controller.mjs';
 import { parseOptions, createEvidenceDirectory, benchmarkEnvironment, packagedLaunchArgs, usage } from './packaged-benchmark-options.mjs';
 import { runSoakCycles } from './packaged-soak.mjs';
@@ -26,18 +27,21 @@ if (options.help) {
 }
 if (process.platform !== 'win32') throw Error('The packaged release benchmark requires Windows');
 const root = resolve('.');
-const { output, binary, label, runCount, idleSeconds, keystrokes, switches, scenario, profileRenderer, profileMain, fixtureFiles, soakMinutes, heapSnapshotMinutes, chatMessages, records, findCap, writeCap } = options;
+const { output, binary, label, runCount, idleSeconds, keystrokes, switches, scenario, profileRenderer, profileMain, fixtureFiles, soakMinutes, heapSnapshotMinutes, chatMessages, records, findCap, writeCap, presencePeers } = options;
 await createEvidenceDirectory(output);
 const json = (path, value) => writeFile(path, JSON.stringify(value, null, 2));
 const settings = { runCount, idleSeconds, keystrokes, switches, scenario, profileRenderer, profileMain, fixtureFiles, soakMinutes, heapSnapshotMinutes, chatMessages, records,
-  ...(scenario === 'collection' ? { findCap, writeCap } : {}) };
+  ...(scenario === 'collection' ? { findCap, writeCap } : {}),
+  ...(scenario === 'presence' ? { presencePeers, selectionHz: 20, peerTypingHz: 5 } : {}) };
 const receipt = { label, binary, packageCommit: options.packageCommit, engineCommit: options.engineCommit,
   startedAt: new Date().toISOString(), platform: process.platform, node: process.version, settings, runs: [], status: 'setup' };
 const feedRequests = [];
-let feed, active, windowController, helperStartup, workload, goToFixture;
+let feed, active, windowController, helperStartup, workload, goToFixture, presenceFixture, profilingSlot;
 const automationFailures = [];
 const cancellation = benchmarkCancellation();
 try {
+if (scenario === 'presence') profilingSlot = acquireProfilingSlot(process.env, { metadata: { purpose: 'packaged presence typing', checkout: root } });
+const benchmarkSignal = profilingSlot ? AbortSignal.any([cancellation.signal, profilingSlot.signal]) : cancellation.signal;
 await json(join(output, 'result.json'), receipt);
 const require = createRequire(join(root, 'apps/desktop/package.json'));
 const exec = promisify(execFile);
@@ -86,6 +90,7 @@ Object.assign(receipt, {
   ...(scenario === 'go-to-mixed' ? { goToFixtureSha256: await sha256(join(dirname(fileURLToPath(import.meta.url)), 'go-to-packaged-fixture.mts')),
     goToFixtureGeneratorsSha256: await sha256Tree(root, ['packages/mcp/src/tools.ts', 'apps/desktop/src/renderer/collections/schemaAuthoring.ts',
       'apps/desktop/e2e/helpers/syncRelay.ts', 'apps/desktop/src/testing/relayFilePeer.ts']) } : {}),
+  ...(scenario === 'presence' ? { presenceFixtureSha256: await sha256(join(root, 'apps/desktop/e2e/helpers/presenceBenchmark.ts')), presenceRuleSha256: await sha256(join(root, 'tools/perf-profiling/packaged-presence.mjs')) } : {}),
   ...(scenario === 'chat-history' ? { cliLauncher, seedScript, seedScriptSha256: await sha256(seedScript) } : {}),
   ...(scenario === 'collection' ? { automationsModule, automationsModuleSha256: await sha256(automationsModule), datasetCliScript, datasetCliSha256: await sha256(datasetCliScript) } : {}),
   harnessCheckout: root, harnessCommit: execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim(),
@@ -135,10 +140,10 @@ let profileOrdinal = 0;
 async function waitUntil(read, timeout = 60000) {
   const started = performance.now();
   while (performance.now() - started < timeout) {
-    cancellation.signal.throwIfAborted();
+    benchmarkSignal.throwIfAborted();
     const value = await read();
     if (value) return value;
-    await delay(50, undefined, { signal: cancellation.signal });
+    await delay(50, undefined, { signal: benchmarkSignal });
   }
   throw Error(`Condition did not settle within ${timeout}ms`);
 }
@@ -160,7 +165,7 @@ async function fixture(runDir) {
   const workspaces = [];
   const fixtureHashes = [];
   for (let index = 0; index < 2; index++) {
-    cancellation.signal.throwIfAborted();
+    benchmarkSignal.throwIfAborted();
     const workspace = { workspaceId: `perf4-package-${index}`, rootPath: join(runDir, `workspace-${index}`).replaceAll('\\', '/'), kind: 'personal', mode: 'local-first' };
     await mkdir(join(workspace.rootPath, '.dohc'), { recursive: true });
     await json(join(workspace.rootPath, '.dohc/manifest.json'), { version: 1, workspaceId: workspace.workspaceId, kind: workspace.kind, mode: workspace.mode });
@@ -172,7 +177,7 @@ async function fixture(runDir) {
       workspaceHash.update(`${name}.md\0${content}\0`);
     }
     for (let begin = 2; begin < (scenario === 'go-to-mixed' ? 2 : fixtureFiles); begin += 32) {
-      cancellation.signal.throwIfAborted();
+      benchmarkSignal.throwIfAborted();
       const batch = [];
       for (let n = begin; n < Math.min(fixtureFiles, begin + 32); n++) {
         const name = `fixture-${String(n).padStart(6, '0')}.txt`;
@@ -185,7 +190,7 @@ async function fixture(runDir) {
     const collection = scenario === 'collection' && index === 0 ? collectionFixtureFiles(records) : [];
     if (collection.length) await mkdir(join(workspace.rootPath, dirname(collection[0].path)));
     for (let begin = 0; begin < collection.length; begin += 32) {
-      cancellation.signal.throwIfAborted();
+      benchmarkSignal.throwIfAborted();
       await Promise.all(collection.slice(begin, begin + 32).map(file => {
         workspaceHash.update(`${file.path}\0${file.content}\0`);
         return writeFile(join(workspace.rootPath, file.path), file.content);
@@ -213,8 +218,8 @@ async function launch(runDir, fixture, phase) {
   }
   const started = performance.now();
   const startedAt = Date.now();
-  cancellation.signal.throwIfAborted();
-  const child = spawn(binary, packagedLaunchArgs(fixture.profile, profileArgs), { cwd: root, env, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: false });
+  benchmarkSignal.throwIfAborted();
+  const child = spawn(binary, packagedLaunchArgs(fixture.profile, profileArgs), { cwd: root, env: { ...env, ...fixture.presenceEnvironment }, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: false });
   const launchStages = { spawnReturnedObservedMs: performance.now() - started };
   let logs = '';
   for (const stream of [child.stdout, child.stderr]) stream.on('data', chunk => { logs += chunk; });
@@ -245,7 +250,7 @@ async function launch(runDir, fixture, phase) {
   // The launch failure path owns shutdown if either rejects.
   void readiness.catch(() => {});
   const windowControlStart = performance.now();
-  const windowState = await waitForVisibleWindow(() => setWindowState(active, 'inspect'), { signal: cancellation.signal });
+  const windowState = await waitForVisibleWindow(() => setWindowState(active, 'inspect'), { signal: benchmarkSignal });
   const windowControlObservedMs = performance.now() - windowControlStart;
   if (!windowState.visible || windowState.minimized) throw Error('Fresh release window is not visible; startup sample invalid');
   launchStages.visibleWindowVerifiedObservedMs = performance.now() - started;
@@ -299,11 +304,15 @@ async function openDoc(page, name) {
   await page.locator('[contenteditable="true"]').waitFor({ timeout: 120000 });
   return { openObservedMs, editActivationObservedMs };
 }
-async function typing(page, name) {
+async function typing(page, name, { rich = false, beforeInput = () => {} } = {}) {
   const windowState = await setWindowState(active, 'visible');
   const { openObservedMs, editActivationObservedMs } = await openDoc(page, name);
   console.log(JSON.stringify({ label, phase: 'typing-start', name, openObservedMs, editActivationObservedMs }));
-  const editor = page.locator('[contenteditable="true"]');
+  if (rich && await page.locator('[contenteditable="true"].cm-content').count()) {
+    await page.getByRole('button', { name: 'WYSIWYG', exact: true }).click();
+    await page.locator('[contenteditable="true"].tiptap').waitFor({ timeout: 120000 });
+  }
+  const editor = page.locator(rich ? '[contenteditable="true"].tiptap' : '[contenteditable="true"]');
   const mode = await editor.evaluate(element => element.classList.contains('tiptap') ? 'rich' : element.classList.contains('cm-content') ? 'source' : 'unknown');
   await editor.click({ position: { x: 30, y: 30 } });
   await page.keyboard.press('Control+End');
@@ -319,6 +328,7 @@ async function typing(page, name) {
     state.longObserver = new PerformanceObserver(list => state.longTasks.push(...list.getEntries().map(e => ({ startTime: e.startTime, duration: e.duration }))));
     state.longObserver.observe({ type: 'longtask' });
   });
+  await beforeInput();
   const samples = [];
   for (let index = 0; index < keystrokes; index++) {
     const start = await page.evaluate(() => performance.now());
@@ -327,7 +337,7 @@ async function typing(page, name) {
     const end = await page.evaluate(() => performance.now());
     samples.push({ index, start, end, dispatchToTwoRafMs: end - start });
     // An intentionally paced user workload, not a sleep used as a correctness assertion.
-    await delay(80, undefined, { signal: cancellation.signal });
+    await delay(80, undefined, { signal: benchmarkSignal });
   }
   await page.waitForFunction(count => window.__packagedEvents.inputs.length === count, keystrokes);
   const timing = await page.evaluate(() => {
@@ -398,7 +408,7 @@ async function switchTo(page, index) {
   return { to: index, selectedObservedMs, editablePaintObservedMs, allPhasesObservedMs: performance.now() - started, ...details, cpuProfilePath };
 }
 async function snapshot(pid) {
-  const { stdout } = await exec('pwsh.exe', ['-NoLogo', '-NoProfile', '-NonInteractive', '-File', join(dirname(fileURLToPath(import.meta.url)), 'packaged-process-snapshot.ps1'), '-AppProcessId', String(pid)], { windowsHide: true, signal: cancellation.signal, timeout: 30000, maxBuffer: 4 * 1024 * 1024 });
+  const { stdout } = await exec('pwsh.exe', ['-NoLogo', '-NoProfile', '-NonInteractive', '-File', join(dirname(fileURLToPath(import.meta.url)), 'packaged-process-snapshot.ps1'), '-AppProcessId', String(pid)], { windowsHide: true, signal: benchmarkSignal, timeout: 30000, maxBuffer: 4 * 1024 * 1024 });
   return JSON.parse(stdout);
 }
 async function setWindowState(instance, state) {
@@ -414,7 +424,7 @@ async function idle(instance, state) {
   const samples = [await snapshot(instance.child.pid)];
   const started = performance.now();
   while (performance.now() - started < idleSeconds * 1000) {
-    await delay(Math.min(5000, Math.max(1, idleSeconds * 1000 - (performance.now() - started))), undefined, { signal: cancellation.signal });
+    await delay(Math.min(5000, Math.max(1, idleSeconds * 1000 - (performance.now() - started))), undefined, { signal: benchmarkSignal });
     samples.push(await snapshot(instance.child.pid));
   }
   const deltas = { cpuMs: 0, readBytes: 0, writeBytes: 0, otherBytes: 0, readOperations: 0, writeOperations: 0, otherOperations: 0 };
@@ -621,7 +631,7 @@ async function tableHolds(page, expected, timeoutMs = 180000) {
   }, to);
   for (let held = await scroll('end'); held !== expected; held = await scroll('end')) {
     if (performance.now() - started > timeoutMs) throw Error(`The Collection table held ${held} of ${expected} records after ${timeoutMs}ms`);
-    await delay(250, undefined, { signal: cancellation.signal });
+    await delay(250, undefined, { signal: benchmarkSignal });
   }
   await scroll('top');
   return performance.now() - started;
@@ -644,7 +654,7 @@ async function sampleDuring(settled, pid, root, automation) {
   while (!done) {
     snapshots.push(await snapshot(pid));
     headerPeakBytes = Math.max(headerPeakBytes, (await journalBytes(root, automation)).headerBytes);
-    await Promise.race([finished, delay(1000, undefined, { signal: cancellation.signal })]);
+    await Promise.race([finished, delay(1000, undefined, { signal: benchmarkSignal })]);
   }
   return { snapshots, headerPeakBytes };
 }
@@ -654,7 +664,7 @@ async function verifyDocuments(root, spec, outcome, createdPaths) {
     const verification = verifyCase(spec, outcome, await readDocumentCase(root, spec, loadYaml, createdPaths));
     // Settlement writes the Markdown after the run settles.
     if (verification.ok || performance.now() - started > 120000) return { ...verification, settledOnDiskObservedMs: verification.ok ? performance.now() - started : null };
-    await delay(500, undefined, { signal: cancellation.signal });
+    await delay(500, undefined, { signal: benchmarkSignal });
   }
 }
 async function automationCase(instance, runDir, kind, spec, surface) {
@@ -665,7 +675,7 @@ async function automationCase(instance, runDir, kind, spec, surface) {
   await dismissToasts(page);
   const previousRuns = await readRunJournal(root, automation);
   const previousNotices = await readAutomationNotices(page);
-  const quiet = await waitForQuiet({ sample: () => snapshot(pid), appPid: pid, signal: cancellation.signal });
+  const quiet = await waitForQuiet({ sample: () => snapshot(pid), appPid: pid, signal: benchmarkSignal });
   const before = quiet.snapshot;
   const { settled } = await press(page, name, outcomeTexts(spec.name, surface.label));
   // The closing snapshot starts as the run settles, not after sampling or typing ends.
@@ -722,7 +732,7 @@ async function automationPhase(instance, runDir, data) {
   const written = performance.now();
   await mkdir(join(workspace.rootPath, DOCUMENT_FOLDER));
   for (let begin = 0; begin < files.length; begin += 32) {
-    cancellation.signal.throwIfAborted();
+    benchmarkSignal.throwIfAborted();
     await Promise.all(files.slice(begin, begin + 32).map(file => writeFile(join(workspace.rootPath, file.path), file.content)));
   }
   await page.locator(`[data-testid="tree-row"][data-path="${DOCUMENT_FOLDER}"][data-collection="true"]`).waitFor({ timeout: 120000 });
@@ -746,11 +756,11 @@ async function soak(instance, data, runDir) {
   const sample = async cycle => ({ cycle, ...aggregateByKind(await snapshot(instance.child.pid), instance.child.pid) });
   const result = data.soak = { minutes: soakMinutes, searchQuery: SOAK_SEARCH_QUERY, goToQuery: 'small', cycles: [], samples: [await sample(0)], elapsedMs: null };
   const heaps = heapSnapshotMinutes.length ? await startRendererHeapSnapshots({
-    session: await page.context().newCDPSession(page), output: runDir, minutes: heapSnapshotMinutes, signal: cancellation.signal,
+    session: await page.context().newCDPSession(page), output: runDir, minutes: heapSnapshotMinutes, signal: benchmarkSignal,
   }) : null;
   result.heapSnapshots = heaps?.records ?? [];
   try {
-    await runSoakCycles({ minutes: soakMinutes, heaps, signal: cancellation.signal,
+    await runSoakCycles({ minutes: soakMinutes, heaps, signal: benchmarkSignal,
       runCycle: async index => {
         const started = performance.now();
         const cycle = { index };
@@ -787,12 +797,12 @@ async function soak(instance, data, runDir) {
 
   await cancellation.run(() => (workload = (async () => {
   const helperStarted = performance.now();
-  helperStartup = startWindowController({ signal: cancellation.signal, onSpawn(child) { receipt.windowHelper = { pid: child.pid }; } });
+  helperStartup = startWindowController({ signal: benchmarkSignal, onSpawn(child) { receipt.windowHelper = { pid: child.pid }; } });
   windowController = await helperStartup;
   receipt.windowHelper = { pid: windowController.pid, prewarmMs: performance.now() - helperStarted };
   await json(join(output, 'result.json'), receipt);
   for (let index = 0; index < runCount; index++) {
-    cancellation.signal.throwIfAborted();
+    benchmarkSignal.throwIfAborted();
     const runDir = join(output, `run-${index + 1}`);
     const data = { index: index + 1 };
     receipt.runs.push(data);
@@ -839,6 +849,37 @@ async function soak(instance, data, runDir) {
       await json(join(output, 'result.json'), receipt);
       continue;
     }
+    if (scenario === 'presence') {
+      // Open both canonical engine documents before reading their snapshots at rest.
+      for (const name of ['small.md', 'large.md']) await openDoc(fresh.page, name);
+      await shutdown(runDir, fresh);
+      const relayRequire = createRequire(join(root, 'services/sync-relay/package.json'));
+      const { tsImport } = relayRequire('tsx/esm/api');
+      const { createPresenceFixture } = await tsImport('../../apps/desktop/e2e/helpers/presenceBenchmark.ts', import.meta.url);
+      presenceFixture = await createPresenceFixture({ workspace: f.workspaces[0], profile: f.profile, runDir, signal: benchmarkSignal });
+      f.presenceEnvironment = presenceFixture.environment;
+      fresh = await launch(runDir, f, 'presence-host');
+      await presenceFixture.register();
+      data.presence = { fixture: presenceFixture.receipt, solo: [], peers: [] };
+      for (const name of ['small.md', 'large.md']) {
+        await openDoc(fresh.page, name);
+        await presenceFixture.activate(name);
+        data.presence.solo.push(await typing(fresh.page, name, { rich: true }));
+        const peers = await presenceFixture.peers(name, presencePeers);
+        try {
+          const typed = await typing(fresh.page, name, { rich: true, beforeInput: () => peers.start() });
+          typed.workload = await peers.finish();
+          if (!typed.workload.pass) throw Error('Presence peers did not sustain their configured rates');
+          data.presence.peers.push(typed);
+        } finally { await peers.finish(); }
+        await json(join(output, 'result.json'), receipt);
+      }
+      await shutdown(runDir, fresh);
+      await presenceFixture.stop(); presenceFixture = null;
+      profilingSlot.check();
+      await json(join(output, 'result.json'), receipt);
+      continue;
+    }
     if (scenario === 'go-to-mixed') {
       const relayRequire = createRequire(join(root, 'services/sync-relay/package.json'));
       const { tsImport } = relayRequire('tsx/esm/api');
@@ -850,11 +891,11 @@ async function soak(instance, data, runDir) {
         return api[method](payload);
       }, { method, payload });
       goToFixture = await provisionGoToFixture({ workspace: f.workspaces[0], profile: f.profile, runDir,
-        files: fixtureFiles, signal: cancellation.signal, call: bridgeCall(),
+        files: fixtureFiles, signal: benchmarkSignal, call: bridgeCall(),
         createApp: (appRoot, title, agent) => createApp({ root: f.workspaces[0].rootPath, home: f.profile }, { appRoot, title }, agent),
         cli: async args => (await runOwnedCommand(process.execPath, [cliLauncher, ...args], {
           cwd: f.workspaces[0].rootPath, env: { ...env, DOHC_STATE_DIR: f.profile, NODE_NO_WARNINGS: '1' },
-          timeoutMs: 120000, signal: cancellation.signal, log: join(runDir, 'go-to-cli-' + randomUUID() + '.log'),
+          timeoutMs: 120000, signal: benchmarkSignal, log: join(runDir, 'go-to-cli-' + randomUUID() + '.log'),
         })).stdout,
         signIn: async (baseUrl, userId) => {
           await shutdown(runDir, fresh);
@@ -949,7 +990,7 @@ async function soak(instance, data, runDir) {
     }
     // Idle only once per package, after foreground work has settled for a fixed workload pause.
     if (index === 0) {
-      await delay(10000, undefined, { signal: cancellation.signal });
+      await delay(10000, undefined, { signal: benchmarkSignal });
       console.log(JSON.stringify({ label, phase: 'visible-idle-start', seconds: idleSeconds }));
       data.idle = [await idle(fresh, 'visible')];
       await json(join(output, 'result.json'), receipt);
@@ -970,7 +1011,7 @@ async function soak(instance, data, runDir) {
     await json(join(output, 'result.json'), receipt);
     console.log(JSON.stringify({ label, run: index + 1, phase: 'complete', restartMs: data.restartStartup.editablePaintObservedMs }));
   }
-  cancellation.signal.throwIfAborted();
+  benchmarkSignal.throwIfAborted();
   if (automationFailures.length) throw Error(`Collection automation cases failed: ${automationFailures.join('; ')}`);
   receipt.status = 'complete';
   })()));
@@ -988,6 +1029,10 @@ async function soak(instance, data, runDir) {
   }
   if (!cancellation.signal.aborted) process.exitCode = 1;
 } finally {
+  if (presenceFixture) {
+    try { await presenceFixture.stop(); }
+    catch (cleanupError) { receipt.fixtureCleanupError = cleanupError.stack; receipt.status = 'failed'; process.exitCode = 1; }
+  }
   if (goToFixture) {
     try { await goToFixture.stop(); }
     catch (cleanupError) { receipt.fixtureCleanupError = cleanupError.stack; receipt.status = 'failed'; process.exitCode = 1; }
@@ -1010,6 +1055,7 @@ async function soak(instance, data, runDir) {
     receipt.status = 'failed';
     receipt.error ??= cancellation.signal.reason.stack;
   }
+  if (profilingSlot) { receipt.hostContext = profilingSlot.evidence; profilingSlot.release(); }
   receipt.completedAt = new Date().toISOString(); receipt.feedRequests = feedRequests;
   try { await json(join(output, 'result.json'), receipt); }
   finally { cancellation.dispose(); }

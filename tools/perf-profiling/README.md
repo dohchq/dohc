@@ -43,7 +43,7 @@ Output directories cannot be reused. Failure logs and fixtures remain available 
 Cleanup closes the recorded app and helper; failed startup and shutdown also terminate their owned process trees.
 Ctrl-C and SIGTERM cancel pending launch or idle work, stop owned processes, and preserve the failed-run receipt.
 
-The Collection scenario defaults to five runs; other scenarios default to three. Set `--runs` to override the default.
+The Collection and presence scenarios default to five runs; other scenarios default to three. Set `--runs` to override the default.
 The default workload uses three fresh/restart cycles, 100-paragraph rich editing, 5,000-paragraph source editing,
 30 trusted keystrokes per document, ten switches, and 60 seconds each of visible and minimized idle.
 `--files 5000 --scenario switches` adds deterministic flat files; the two editor documents count toward each workspace's total.
@@ -66,6 +66,7 @@ wall time sits beside each timing in the receipt.
 - `--files 5000 --scenario go-to-mixed`: runs the same Go to samples after provisioning the admitted mixed-kind workload through a dedicated test relay. This arm signs in and relaunches. Use the signed-out `go-to` arm for Pass A comparisons.
 - `--scenario chat-history [--chat-messages 200]`: seeds one #general post and its replies through `packages/cli/bin/dohc.js` against the running package, restarts, then opens the channel to its post card and the thread to its first and to all comment rows. One observer carries both comment milestones from the same click.
 - `--scenario collection [--records 500] [--find-cap 50] [--write-cap 200]`: seeds `records/collection.yaml` and Markdown records with pre-minted ids, waits for the Explorer to mark the folder as a Collection, then opens it to the first table rows. It then runs the typing workload in `small.md`, then the automation phase described below.
+- `--scenario presence [--presence-peers 2]`: owner typing at the end of rich documents with 100 and 5,000 paragraphs, first solo and then with admitted remote editors. See [Presence typing](#presence-typing).
 - `--scenario soak [--soak-minutes 10]`: repeats a mixed cycle (open both documents, Go to typing `small`, command palette, search for `Performance`, two switches) until the time is up and records working set and private bytes per process kind after each cycle. Each cycle records its search query. The document-open and switch timings are the existing harness wall-clock observations.
 - `--scenario soak --soak-minutes 60 --heap-snapshot-minutes 10,60`: also captures renderer heaps at the first completed cycle boundary at or after each requested minute. Minutes must be distinct positive integers within the soak duration. Capture is off by default.
 
@@ -140,6 +141,49 @@ Only the controlled loopback `DOHC_UPDATE_URL` is added.
 Main profiling must produce a log matching the recorded main PID.
 CPU-profiled runs and `--heap-snapshot-minutes` runs are marked diagnostic in summaries.
 The comparison command refuses diagnostic runs. Use separate uninstrumented soaks for the memory budgets.
+
+### Presence typing
+
+Run each package in the reserved measurement slot. Use the same command settings on both sides:
+
+```powershell
+node tools/perf-profiling/packaged-benchmark.mjs --binary <exe> --package-commit <full-build-SHA> --output <new-directory> --label baseline --scenario presence --runs 5 --keystrokes 60 --presence-peers 2
+node tools/perf-profiling/summarize-packaged-benchmark.mjs <baseline-directory>
+node tools/perf-profiling/compare-packaged-benchmark.mjs <baseline-directory> <candidate-directory>
+```
+
+Use `--label candidate` for the second package. Presence refuses fewer than five runs and accepts two to eight peers.
+It uses the existing profiling admission to refuse overlap with registered builds and verification jobs.
+
+Each run first opens both documents in the package, then closes it before reading their canonical engine snapshots.
+The desktop E2E helper `presenceBenchmark.ts` creates an isolated local relay deployment and a TLS endpoint using the checkout's test CA.
+It provisions a device-host credential and writes the native ingress and desktop owner-host configuration from `selfHostLiveProfile`.
+The harness restarts the same profile with fixture-only `DOHC_DESKTOP_OWNER_HOST_CONFIG` and `NODE_EXTRA_CA_CERTS`.
+The packaged desktop's own daemon and open editor serve as the live host through `desktopOwnerHost` and the authenticated device-control bridge.
+There is no service-host substitute. The fixture registers the package's CRDT baseline with the relay and waits for owner adoption before measuring.
+
+For each document, the owner types `--keystrokes` trusted keys at its end, with no peers, using the existing typing collector.
+The fixture then admits N named Edit recipients through `/sync/live/desktop-open` and the production named-live transport.
+Each peer edits its first body block at 5 characters per second and publishes relative selections through the existing presence channel at 20 Hz.
+The driver keeps one tick in flight and records completed publications, edits, live status, and achieved rates.
+Rates below 18 selections or 4 edits per second fail the workload. Peers leave before the next document.
+Both sizes use the rich editor. The retained baseline package may have no Markdown caret binding; record that limitation with the package receipt.
+
+The result stores raw keystrokes and long tasks for each arm and document in every run.
+The summary pools keystrokes within each run to obtain p50 and p95, then preserves those per-run rows.
+For each percentile, the comparison takes the median of the baseline runs and the median of the candidate runs.
+The candidate may exceed baseline by `min(8 ms, max(baseline maximum minus minimum, 2 ms))`.
+Solo and peer typing must both pass, for both document sizes. Neither side may contain a long task.
+Missing timing, a source editor, an incomplete peer workload, or fewer than five runs refuses a passing verdict.
+The presence rule is fixed; the comparison's automation and percentage margin options do not change it.
+
+Only reported Chromium EventTiming durations measure input-to-next-paint. They are quantized to 8 ms and have a 16 ms reporting floor.
+A run with any unreported keystroke cannot decide this comparison. The receipt retains the missing count and the existing two-frame diagnostic separately.
+Do not substitute that diagnostic for input-to-next-paint or infer zero latency from an absent event.
+
+Run `node --test tools/perf-profiling/packaged-presence.test.mjs tools/perf-profiling/presence-packaged-fixture.test.mjs` for the rule tests and a dry TLS/relay setup smoke.
+The dry smoke uses a small canonical snapshot specimen and launches no desktop or live typing workload.
+The full packaged-harness suite includes both files. The orchestrator owns packaged measurements and the final performance verdict.
 
 Run `node --test tools/perf-profiling/packaged-benchmark.test.mjs` for CLI, lifecycle, fixture, and summary checks. The fixture contract check imports the automation executor, so build `@dohc/app-backend-runtime` first, as the JS gate does.
 These tests also run through the canonical root test command. They do not launch the GUI workload.

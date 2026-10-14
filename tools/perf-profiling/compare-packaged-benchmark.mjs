@@ -1,3 +1,4 @@
+import { comparePresence } from './packaged-presence.mjs';
 import { readFile, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -16,7 +17,7 @@ const MIN_AUTOMATION_RUNS = 5;
 
 // Settings that change what a receipt measures. The limits may differ: they decide which cases are
 // comparable, through each case's fixture digest.
-const COMPARED_SETTINGS = ['scenario', 'runCount', 'keystrokes', 'fixtureFiles', 'records', 'idleSeconds', 'switches', 'profileRenderer', 'profileMain'];
+const COMPARED_SETTINGS = ['scenario', 'runCount', 'keystrokes', 'fixtureFiles', 'records', 'idleSeconds', 'switches', 'profileRenderer', 'profileMain', 'presencePeers', 'selectionHz', 'peerTypingHz'];
 
 function check(metric, baseline, candidate, margin, percentile = 'p95') {
   const field = percentile === 'p50' ? 'P50' : 'P95';
@@ -44,6 +45,10 @@ export function compareSummaries(baseline, candidate, margin = DEFAULT_MARGIN) {
     if (JSON.stringify(baseline.settings?.[key]) !== JSON.stringify(candidate.settings?.[key])) problems.push(`The receipts differ in ${key}.`);
   }
   if (baseline.diagnostic || candidate.diagnostic) problems.push('A profiled receipt cannot serve as a performance comparison.');
+  if (baseline.settings?.scenario === 'presence' || candidate.settings?.scenario === 'presence') {
+    const presence = comparePresence(baseline.presence, candidate.presence, candidate.settings);
+    return { ...presence, pass: presence.pass && problems.length === 0, problems: [...problems, ...presence.problems], cases: [] };
+  }
   const fewestRuns = summary => {
     const counts = ['document', 'dataset'].flatMap(kind => Object.values(summary.collectionAutomations?.[kind] ?? {}).map(item => item.runs));
     return counts.length ? Math.min(...counts) : null;
