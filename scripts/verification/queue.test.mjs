@@ -149,7 +149,7 @@ function harness(t, { timeLimitMs = 60_000, docker = async () => true, sweep = a
     else if (behavior === "host-down") receipt({ verdict: "FAIL", error: "Docker did not answer", failure: { kind: "environment", cause: "postgres-start" } });
     // Two slow machine failures, then a run that ends only when it is stopped.
     else if (behavior === "slow-host" && calls.filter(call => call.id === grant.request).length > 2) await new Promise(done => signal.addEventListener("abort", done, { once: true }));
-    else if (behavior === "slow-host") { await sleep(250); receipt({ verdict: "FAIL", error: "Docker did not answer", failure: { kind: "environment", cause: "postgres-start" } }); }
+    else if (behavior === "slow-host") { await sleep(600); receipt({ verdict: "FAIL", error: "Docker did not answer", failure: { kind: "environment", cause: "postgres-start" } }); }
   };
   const service = runService({ root, repo: fixture.repo, lane: join(root, "lane"), tickMs: 20, timeLimitMs, floorGb: 1,
     freeDisk: () => 100, docker, prepare, sweep, prepareLimitMs,
@@ -442,8 +442,8 @@ test("a check that fails while Docker stops answering is retried, and fails on a
 });
 
 test("retries share one time budget, so a request the host keeps failing late ends in error", async t => {
-  // Each slow attempt takes about 300 ms of the 400 ms limit, so two leave the third less than its limit of the 800 ms budget.
-  const { request, settled } = harness(t, { timeLimitMs: 400 });
+  // Each slow attempt takes about 650 ms of the 1 s limit, so two leave the third less than its limit of the 2 s budget.
+  const { request, settled } = harness(t, { timeLimitMs: 1000 });
   const slow = await request("slow-host");
   const ended = await settled(slow.id);
   assert.equal(ended.status.state, "error", "only machine failures retry, so a spent budget gives no verdict");
@@ -485,6 +485,23 @@ test("a request whose containers could not be removed waits for that cleanup bef
   assert.equal((await settled(flaky.id)).status.verdict, "PASS");
   assert.equal(calls.length, 2);
   assert.equal(cleanedAfter, 1, "the retry started only once the first attempt's containers were gone");
+});
+
+test("a container Docker cannot remove never holds back another request's cleanup", async t => {
+  // The first request's container can never be removed; the second's cleanup fails once, then works.
+  let stuck;
+  let failedOnce = false;
+  const { request, settled } = harness(t, { sweep: async ({ request: id }) => {
+    if (!id) return 0;
+    stuck ??= id;
+    if (id === stuck) throw new Error("unable to remove filesystem");
+    if (!failedOnce) { failedOnce = true; throw new Error("Docker is not answering"); }
+    return 1;
+  } });
+  const first = await request("flaky-host");
+  const other = await request("flaky-host", { branch: "refs/heads/other" });
+  assert.equal((await settled(other.id)).status.verdict, "PASS");
+  assert.equal(stuck, first.id);
 });
 
 test("a restart requested while the service checks the host starts nothing new", async t => {

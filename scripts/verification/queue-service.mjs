@@ -426,16 +426,17 @@ export async function runService({
       if (stuck) throw new Error(`${stuck.id} did not stop within ${stopGraceMs / 60_000} minutes; restarting the service to stop it`);
       const restart = join(paths.control, "restart");
       if (existsSync(restart) && running.size === 0) { rmSync(restart, { force: true }); log("restart requested"); return 75; }
-      // Docker may be down; a failed cleanup is retried once a minute, not every tick.
+      // Docker may be down; a failed cleanup is retried once a minute, one request at a time, oldest first.
+      // A failure goes to the back, so a container Docker cannot remove never holds back another request.
       if (cleanupPending.size && now - lastCleanup > cleanupRetryMs) {
         lastCleanup = now;
-        for (const id of [...cleanupPending]) {
-          if (await cleanUp(id)) break;
+        const [id] = cleanupPending;
+        cleanupPending.delete(id);
+        if (!(await cleanUp(id))) {
           // A verdict is never rewritten from a failed read; the next retry records the cleanup instead.
           const status = readJson(statusPath(id));
-          if (!status) { cleanupPending.add(id); continue; }
-          finished.delete(id);
-          await setStatus(id, { ...status, cleanupPending: false });
+          if (!status) cleanupPending.add(id);
+          else { finished.delete(id); await setStatus(id, { ...status, cleanupPending: false }); }
         }
       }
       await checkHealth(requests);
