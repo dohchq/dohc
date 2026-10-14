@@ -5,6 +5,7 @@ import { cancellationScope } from "./cancellation.mjs";
 import { pnpm, repoRoot, run } from "./process.mjs";
 import { startTiming, timed } from "./timing.mjs";
 import { flakyReporter, nodeTestFailures, readFlakyLog } from "./flaky.mjs";
+import { affectedPackages, packageReferences } from "./selection.mjs";
 
 const databasePackages = new Set(["@dohc/workspace-postgres", "@dohc/workspace-auth", "@dohc/workspace-api", "@dohc/share-web"]);
 const longestFirst = ["@dohc/ydoc-projection", "@dohc/desktop", "@dohc/sync-relay", "@dohc/app-backend-runtime"];
@@ -48,7 +49,7 @@ export async function runBounded(tasks, execute, concurrency = 2) {
   if (failure) throw failure;
 }
 
-export async function testWorkspace({ prepared = false, output = join(repoRoot, ".agent-artifacts/js-tests", new Date().toISOString().replaceAll(":", "-")), env = process.env, beforeDesktopScripts, runProofs } = {}) {
+export async function testWorkspace({ prepared = false, output = join(repoRoot, ".agent-artifacts/js-tests", new Date().toISOString().replaceAll(":", "-")), env = process.env, beforeDesktopScripts, runProofs, changed = null } = {}) {
   if (runProofs !== undefined && typeof runProofs !== "function") throw new Error("runProofs must be a function.");
   mkdirSync(output, { recursive: true });
   const report = { version: 1, concurrency: 2, proofs: Boolean(runProofs), steps: [], verdict: "RUNNING" };
@@ -97,8 +98,14 @@ export async function testWorkspace({ prepared = false, output = join(repoRoot, 
     const inventory = await command("inventory", ["-r", "list", "--depth", "-1", "--json"]);
     const packages = JSON.parse(inventory.stdout).filter(pkg => relative(repoRoot, pkg.path) !== "")
       .map(pkg => ({ ...pkg, manifest: JSON.parse(readFileSync(join(pkg.path, "package.json"), "utf8")) }));
-    const tasks = testPlan(packages);
-    if (!tasks.length) throw new Error("No workspace package tests were discovered.");
+    // A change confined to some packages runs only their tests and their dependents'.
+    const relativePackages = packages.map(pkg => ({ ...pkg, path: relative(repoRoot, pkg.path).replaceAll("\\", "/") }));
+    const only = changed && affectedPackages(changed, relativePackages, packageReferences(repoRoot, relativePackages));
+    const planned = testPlan(packages);
+    if (!planned.length) throw new Error("No workspace package tests were discovered.");
+    // A change confined to some packages runs only their tests and their dependents'.
+    const tasks = only ? planned.filter(task => only.includes(task.name)) : planned;
+    if (only) report.skippedPackages = planned.filter(task => !only.includes(task.name)).map(task => task.name);
     report.packages = tasks.map(({name, script, resource}) => ({name, script, resource}));
     save();
     return tasks;

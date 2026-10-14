@@ -14,7 +14,7 @@ import { fileURLToPath } from "node:url";
 import { setTimeout as sleep } from "node:timers/promises";
 import { git, run } from "./process.mjs";
 import { acquireVerificationSlot, freeDiskGb, resolveBuildBudget, verificationLanes } from "../../tools/rust-engine-program/build-slot.mjs";
-import { attemptOutcome, listRequests, nextRequest, placeSubmission, protocol, queuePaths, readJson, retryDelayMs, serviceRuns, terminalStates, writeJson } from "./queue.mjs";
+import { attemptOutcome, lastNightlyPass, listRequests, nextRequest, placeSubmission, protocol, queuePaths, readJson, retryDelayMs, serviceRuns, terminalStates, writeJson } from "./queue.mjs";
 
 const verifierEntry = fileURLToPath(new URL("./verify.mjs", import.meta.url));
 const sha = /^[0-9a-f]{40}$/u;
@@ -367,8 +367,10 @@ export async function runService({
 
   function prune(requests) {
     const cutoff = Date.now() - 7 * 24 * 60 * 60_000;
+    // The last nightly that passed stays, with its pinned commits, as the base of the next one.
+    const keep = lastNightlyPass(requests)?.id;
     for (const entry of requests) {
-      if (!terminalStates.has(entry.status.state) || cleanupPending.has(entry.id) || Date.parse(entry.status.updatedAt ?? 0) > cutoff) continue;
+      if (!terminalStates.has(entry.status.state) || cleanupPending.has(entry.id) || entry.id === keep || Date.parse(entry.status.updatedAt ?? 0) > cutoff) continue;
       rmSync(paths.request(entry.id), { recursive: true, force: true });
       finished.delete(entry.id);
     }

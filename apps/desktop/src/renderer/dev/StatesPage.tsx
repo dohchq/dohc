@@ -524,7 +524,7 @@ const ABOUT_ACCESS: AccessAnswer = {
     aboutGrant({ grantId: "grant-kim", recipientUserId: "kim", recipientEmail: "kim@example.com", status: "revoked", access: null }),
   ],
   visibility: "visible",
-  coverage: { kind: "granted", complete: true, observation: "interval" },
+  unknownReason: null, coverage: { kind: "granted", complete: true, observation: "interval" },
   checkedAtMs: new Date(2026, 6, 8, 9, 40).getTime(),
   freshness: "fresh",
   nextCursor: null,
@@ -532,7 +532,7 @@ const ABOUT_ACCESS: AccessAnswer = {
 const ABOUT_ACCESS_UNKNOWN: AccessAnswer = {
   ...ABOUT_ACCESS,
   rows: [],
-  coverage: { kind: "unavailable", complete: false, observation: "interval" },
+  unknownReason: "not-listed-yet", coverage: { kind: "unavailable", complete: false, observation: "interval" },
   checkedAtMs: null,
   freshness: "unknown",
 };
@@ -669,7 +669,7 @@ const SHARING_GRANTED: AccessAnswer = {
 };
 const SHARING_RECEIVED: AccessAnswer = {
   ...SHARING_GRANTED,
-  coverage: { kind: "received-account", complete: true, observation: "interval" },
+  unknownReason: null, coverage: { kind: "received-account", complete: true, observation: "interval" },
   rows: [
     aboutGrant({ shareId: "in-funnel", grantId: "in-1", via: "received", sharerName: "Sam", granterEmail: "sam@hollis.studio",
       recipientUserId: "me", recipientEmail: null, subjectName: "funnel.csv", selector: { paths: ["data/funnel.csv"], versionId: null }, access: "view" }),
@@ -680,7 +680,7 @@ const SHARING_RECEIVED: AccessAnswer = {
 const SHARING_UNKNOWN: Partial<AccessAnswer> = {
   rows: [],
   visibility: "unknown",
-  coverage: { kind: "unavailable", complete: false, observation: "interval" },
+  unknownReason: "not-listed-yet", coverage: { kind: "unavailable", complete: false, observation: "interval" },
   checkedAtMs: null,
   freshness: "unknown",
 };
@@ -2021,7 +2021,7 @@ function Pane(props: { theme: "light" | "dark" }) {
           <AboutPanelSpecimen>
             <AboutAccessView view={{ status: "ready", answer: ABOUT_ACCESS_UNKNOWN }} expanded onToggle={noop} onRetry={noop}
               onMore={noop} setup={ACCESS_UNEXPLAINED} noun="chat" />
-            <AboutAccessView view={{ status: "ready", answer: { ...ABOUT_ACCESS_UNKNOWN, visibility: "missing" } }} expanded
+            <AboutAccessView view={{ status: "ready", answer: { ...ABOUT_ACCESS_UNKNOWN, visibility: "missing", unknownReason: null } }} expanded
               onToggle={noop} onRetry={noop} onMore={noop} setup={ACCESS_UNEXPLAINED} noun="chat" />
           </AboutPanelSpecimen>
         </Specimen>
