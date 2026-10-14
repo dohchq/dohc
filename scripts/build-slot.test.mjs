@@ -28,6 +28,7 @@ import { setTimeout as poll } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import {
   acquireBuildSlot,
+  admissionSlot,
   acquireExclusiveSlot,
   acquireVerificationSlot,
   buildQueueStatus,
@@ -91,7 +92,8 @@ test("transient sweep and ticket-read errors retry without ending the wait", () 
     for (const code of ["EPERM", "EBUSY", "EACCES", "ENOENT"]) {
       for (const operation of ["lock", "queue", "ticket"]) {
         queueProbe(root, `
-          const holder = await acquireBuildSlot({ root, slots: 1, waitMs: 0 });
+          // Antivirus can fail a first claim for a moment, so the holder retries too.
+          const holder = await acquireBuildSlot({ root, slots: 1, waitMs: 1000, pollMs: 1 });
           const method = ${JSON.stringify(operation)} === "lock" ? "mkdirSync"
             : ${JSON.stringify(operation)} === "queue" ? "readdirSync" : "readFileSync";
           const original = fs[method];
@@ -451,11 +453,11 @@ function plantSlot(root, i, { pid, heartbeatAgeMs, kind = "build-slot" }) {
   return dir;
 }
 
-function plantTicket(root, order, { pid, heartbeatAgeMs = 0, heartbeatMs, kind = "build-slot" }) {
+function plantTicket(root, order, { pid, heartbeatAgeMs = 0, heartbeatMs, kind = "build-slot", slots }) {
   const dir = join(root, `${kind}-queue`);
   mkdirSync(dir, { recursive: true });
   const path = join(dir, `${String(order).padStart(24, "0")}-${pid}.json`);
-  writeFileSync(path, JSON.stringify({ pid, start: new Date().toISOString(), heartbeatMs }));
+  writeFileSync(path, JSON.stringify({ pid, start: new Date().toISOString(), heartbeatMs, slots }));
   const then = new Date(Date.now() - heartbeatAgeMs);
   utimesSync(path, then, then);
   return path;
@@ -503,24 +505,58 @@ test("inherited compiler and test settings cannot exceed a lane's budget", () =>
   assert.throws(() => capBuildParallelism({}, 0), /positive integer/);
 });
 
-test("full capacity stays one unless an isolated two-lane trial is explicit", async t => {
+test("the lane count is one unless the slot root's setting says two", async t => {
   const root = slotRoot();
   t.after(() => rmSync(root, {recursive: true, force: true}));
-  assert.equal(verificationLanes({}), 1);
-  for (const env of [{DOHC_VERIFICATION_LANES: "0"}, {DOHC_VERIFICATION_LANES: "3"},
-    {DOHC_VERIFICATION_LANES: "2"}, {DOHC_VERIFICATION_LANES: "2", DOHC_VERIFICATION_TRIAL: "1", DOHC_BUILD_SLOT_ROOT: root, DOHC_VERIFICATION_SLOT_ROOT: root}]) {
-    assert.throws(() => verificationLanes(env), /must be 1 or 2|isolated/);
+  const env = {DOHC_BUILD_SLOT_ROOT: root};
+  assert.equal(verificationLanes(env), 1);
+  for (const setting of ["0", "3", "two"]) {
+    writeFileSync(join(root, "verification-lanes"), setting);
+    assert.throws(() => verificationLanes(env), /must contain 1 or 2/);
   }
-  const trial = join(root, "trial");
-  const env = {DOHC_BUILD_SLOT_ROOT: root, DOHC_VERIFICATION_SLOT_ROOT: trial, DOHC_VERIFICATION_LANES: "2", DOHC_VERIFICATION_TRIAL: "1"};
-  assert.equal(resolveBuildBudget(env).root, root);
+  assert.throws(() => verificationLanes({...env, DOHC_VERIFICATION_SLOT_ROOT: root, DOHC_VERIFICATION_TRIAL: "1"}), /isolated/);
+  writeFileSync(join(root, "verification-lanes"), "2\n");
+  assert.equal(verificationLanes(env), 2);
   const first = await verifierLane(env);
   const second = await verifierLane(env);
   try {
     assert.notEqual(first.name, second.name);
-    assert.equal(first.dir, join(trial, first.name));
+    assert.equal(first.dir, join(root, first.name));
     await assert.rejects(verifierLane(env, {waitMs: 0}), /all 2 slots are held/);
   } finally { first.release(); second.release(); }
+  // An isolated trial root has its own setting.
+  const trial = join(root, "trial");
+  mkdirSync(trial);
+  const trialEnv = {...env, DOHC_VERIFICATION_SLOT_ROOT: trial, DOHC_VERIFICATION_TRIAL: "1"};
+  assert.equal(verificationLanes(trialEnv), 1);
+  const lease = await verifierLane(trialEnv);
+  try { assert.equal(lease.dir, join(trial, lease.name)); } finally { lease.release(); }
+});
+
+test("older tickets claim first, and code with more slots takes the ones older code cannot use", () => {
+  // One slot count for everyone: the ticket at position k takes the k-th free slot.
+  assert.deepEqual([0, 1, 2].map(position => admissionSlot([2, 3], [4, 4, 4], position)), [2, 3, undefined]);
+  // Older verifiers wait for slot 1 only, so a two-lane ticket behind them takes slot 2.
+  assert.equal(admissionSlot([2], [1, 1, 2], 2), 2);
+  assert.equal(admissionSlot([1, 2], [1, 1, 2], 1), undefined, "slot 1 is the first older ticket's");
+  // A two-lane ticket ahead of an older one leaves it slot 1.
+  assert.deepEqual([0, 1].map(position => admissionSlot([1, 2], [2, 1], position)), [2, 1]);
+  assert.equal(admissionSlot([1, 2], [0, 2], 1), 1, "a ticket gone since the listing claims nothing");
+});
+
+test("an older verifier waiting for slot 1 does not hold back a free second lane", async t => {
+  const root = slotRoot();
+  t.after(() => rmSync(root, {recursive: true, force: true}));
+  writeFileSync(join(root, "verification-lanes"), "2");
+  const env = {DOHC_BUILD_SLOT_ROOT: root};
+  const first = await verifierLane(env);
+  try {
+    assert.equal(first.name, "verification-slot-1");
+    // A waiting verifier from before the lane setting records no slot count.
+    plantTicket(root, 1, {pid: process.pid, kind: "verification-slot"});
+    const second = await verifierLane(env, {waitMs: 5000});
+    try { assert.equal(second.name, "verification-slot-2"); } finally { second.release(); }
+  } finally { first.release(); }
 });
 
 test("queue status retains claim identity and estimates only from completed lane history", async t => {
@@ -569,7 +605,7 @@ test("status CLI reports invalid configuration and preserves an existing second 
   writeFileSync(join(second, "owner.json"), owner);
   const result = spawnSync(process.execPath, [new URL("../tools/rust-engine-program/build-slot.mjs", import.meta.url).pathname.replace(/^\/(\w:)/u, "$1"), "--status"],
     {encoding: "utf8", timeout: 5000, env: {...process.env, DOHC_BUILD_SLOT_ROOT: root,
-      DOHC_VERIFICATION_SLOT_ROOT: root, DOHC_VERIFICATION_LANES: "2", DOHC_VERIFICATION_TRIAL: ""}});
+      DOHC_VERIFICATION_SLOT_ROOT: root, DOHC_VERIFICATION_TRIAL: ""}});
   assert.equal(result.status, 0, result.stderr);
   const status = JSON.parse(result.stdout);
   assert.equal(status.verificationSlots, null);
@@ -584,15 +620,17 @@ test("status CLI reports configured empty trial capacity without acquiring a lan
   const root = slotRoot();
   t.after(() => rmSync(root, {recursive: true, force: true}));
   const trial = join(root, "trial");
+  mkdirSync(trial);
+  writeFileSync(join(trial, "verification-lanes"), "2");
   const result = spawnSync(process.execPath, [new URL("../tools/rust-engine-program/build-slot.mjs", import.meta.url).pathname.replace(/^\/(\w:)/u, "$1"), "--status"],
     {encoding: "utf8", timeout: 5000, env: {...process.env, DOHC_BUILD_SLOT_ROOT: root,
-      DOHC_VERIFICATION_SLOT_ROOT: trial, DOHC_VERIFICATION_LANES: "2", DOHC_VERIFICATION_TRIAL: "1"}});
+      DOHC_VERIFICATION_SLOT_ROOT: trial, DOHC_VERIFICATION_TRIAL: "1"}});
   assert.equal(result.status, 0, result.stderr);
   const status = JSON.parse(result.stdout);
   assert.equal(status.verificationSlots, 2);
   assert.equal(status.verificationConfigurationError, null);
   assert.equal(status.lanes.find(lane => lane.kind === "verification-slot").slots, 2);
-  assert.equal(existsSync(trial), false);
+  assert.deepEqual(readdirSync(trial), ["verification-lanes"]);
 });
 
 test("a verification ticket observer reads the published ticket before any lane exists", async () => {
