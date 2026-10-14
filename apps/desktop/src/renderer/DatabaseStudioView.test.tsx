@@ -725,6 +725,47 @@ describe("DatabaseStudioView", () => {
     expect(document.activeElement).toBe(screen.getByRole("button", { name: "Outside" }));
   });
 
+  it("starts the tab stop on the first row's first cell when the rows load after the grid", async () => {
+    const user = userEvent.setup();
+    const empty = cloneSnapshot();
+    empty.tables[0]!.rows = [];
+    bridgeMock.readWorkspaceDatabase.mockResolvedValueOnce(empty);
+    const { rerender } = render(
+      <DatabaseStudioView workspaceId="ws-1" path="imports/wallet.sqlite" refreshKey={0} />,
+    );
+    await screen.findByTestId("db-empty-rows");
+    const stops = () => [...screen.getByRole("grid", { name: "wallet" }).querySelectorAll('[tabindex="0"]')];
+    // With no rows, the header holds it.
+    expect(stops()).toEqual([screen.getByTestId("db-sort-id")]);
+
+    rerender(<DatabaseStudioView workspaceId="ws-1" path="imports/wallet.sqlite" refreshKey={1} />);
+    await screen.findByTestId("db-cell-id-txn_001");
+    expect(stops()).toEqual([cell("id", "txn_001")]);
+    await user.click(screen.getByTestId("db-filter-input"));
+    await user.tab();
+    expect(document.activeElement).toBe(cell("id", "txn_001"));
+  });
+
+  it("keeps the tab stop on the header when the person went there before the rows loaded", async () => {
+    const user = userEvent.setup();
+    const empty = cloneSnapshot();
+    empty.tables[0]!.rows = [];
+    bridgeMock.readWorkspaceDatabase.mockResolvedValueOnce(empty);
+    const { rerender } = render(
+      <DatabaseStudioView workspaceId="ws-1" path="imports/wallet.sqlite" refreshKey={0} />,
+    );
+    await screen.findByTestId("db-empty-rows");
+    await user.click(screen.getByTestId("db-filter-input"));
+    await user.tab();
+    await user.keyboard("{ArrowRight}");
+    expect(document.activeElement).toBe(screen.getByTestId("db-sort-amount"));
+
+    rerender(<DatabaseStudioView workspaceId="ws-1" path="imports/wallet.sqlite" refreshKey={1} />);
+    await screen.findByTestId("db-cell-id-txn_001");
+    const grid = screen.getByRole("grid", { name: "wallet" });
+    expect([...grid.querySelectorAll('[tabindex="0"]')]).toEqual([screen.getByTestId("db-sort-amount")]);
+  });
+
   it("keeps the only tab stop on the focused cell when an edit moves its row, and Tab still leaves the grid", async () => {
     const user = userEvent.setup();
     // The writes stay unanswered, so the new values decide the order.

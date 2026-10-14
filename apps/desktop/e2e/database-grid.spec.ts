@@ -51,10 +51,13 @@ test("a CSV imported from its tab row opens as a database whose cells edit from 
     const signedUp = grid.getByTestId("db-cell-stage-row_2");
     await expect(signedUp).toHaveText("Signed up");
 
-    // From the search field, Tab enters the grid at its first cell. The
-    // arrow keys move to the cell, Enter opens its editor, and Enter commits.
+    // From the search field, Tab enters the grid at its first cell, the first
+    // row's id. The arrow keys move to the second row's stage, Enter opens
+    // its editor, and Enter commits.
     await page.getByTestId("db-filter-input").focus();
     await page.keyboard.press("Tab");
+    await expect(grid.getByTestId("db-cell-id-row_1")).toBeFocused();
+    await page.keyboard.press("ArrowRight");
     await expect(grid.getByTestId("db-cell-stage-row_1")).toBeFocused();
     await page.keyboard.press("ArrowDown");
     await expect(signedUp).toBeFocused();
@@ -75,6 +78,7 @@ test("a CSV imported from its tab row opens as a database whose cells edit from 
 
     // Escape leaves a cell as it was, and Tab leaves the grid.
     await page.keyboard.press("ArrowUp");
+    await expect(grid.getByTestId("db-cell-stage-row_1")).toBeFocused();
     await page.keyboard.press("F2");
     await page.keyboard.type(" discarded");
     await page.keyboard.press("Escape");

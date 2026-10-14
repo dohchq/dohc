@@ -644,12 +644,12 @@ export function DatabaseGrid(props: {
   );
   // The active cell holds the tab stop. Its row is held by key, so the stop
   // stays on a row that an edit, a sort, a search or a reload moves, and by
-  // its last place for when the row is gone. The header's key is null.
-  const [active, setActive] = useState<{ key: string | null; place: number; column: number }>(() => ({
-    key: rowIds[0]?.key ?? null,
-    place: 0,
-    column: 0,
-  }));
+  // its last place for when the row is gone. The header's key is null. Until
+  // focus first lands in the grid, the stop is the first cell of the first
+  // row, or the header while there are no rows, so rows that load after the
+  // grid still take it.
+  const [chosen, setActive] = useState<{ key: string | null; place: number; column: number } | null>(null);
+  const active = chosen ?? { key: rowIds[0]?.key ?? null, place: 0, column: 0 };
   const found = active.key === null ? -1 : rowIds.findIndex((id) => id.key === active.key);
   const activeRow = active.key === null ? -1 : found !== -1 ? found : Math.min(active.place, rows.length - 1);
   const activeColumn = Math.min(active.column, table.columns.length - 1);
@@ -685,7 +685,7 @@ export function DatabaseGrid(props: {
     if (!place) return;
     const key = place.row === -1 ? null : (rowIds[place.row]?.key ?? null);
     setActive((current) =>
-      current.key === key && current.place === place.row && current.column === place.column
+      current?.key === key && current.place === place.row && current.column === place.column
         ? current
         : { key, place: place.row, column: place.column },
     );
