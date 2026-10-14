@@ -171,6 +171,14 @@ Compare elapsed time, queue time, failures, and peak host memory under matching 
 Do not change the live queue root or remove another run's tickets to conduct a trial.
 Remove the two verification trial environment variables from the shell before returning to ordinary verification.
 
+### Flaky tests
+
+The gate runs a failing test once more before it fails the change.
+nextest, vitest, and Playwright retry the failing test itself. The repository and desktop script steps run again when their report names a failed test; a failed check or build is not retried. The self-host proof runs again from an empty evidence folder.
+A test that passes only on that retry does not fail the gate. `result.json` lists it under `flaky`, the verifier prints it, and the queue history records it.
+A flaky test is a defect. Fix the condition it races, or report it to whoever owns it. A test that fails twice still fails the gate.
+A repository or desktop script step reruns as a whole, after its first attempt's ignored outputs. A test that fails on a clean tree but passes beside those outputs is recorded as flaky like any other, so treat every entry as a real failure until you have read it.
+
 To schedule jobs separately, use `pnpm verify:pr --base <target-ref> --job js` and `--job rust`.
 Each report states its scope. Every selected job needs passing evidence that covers the change.
 An explicit `--job` runs that job even when the filters omit it.
