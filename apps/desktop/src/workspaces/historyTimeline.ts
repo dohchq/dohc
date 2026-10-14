@@ -112,8 +112,8 @@ export function createHistoryTimeline() {
     });
     return () => { state.active--; if (background) state.background--; drain(); };
   }
-  async function remoteRead(reads: TimelineReads, datasetId: string, before: number | undefined, signal: AbortSignal, background?: Prefetch) {
-    const release = await slot(reads.scope, signal, !!background);
+  async function remoteRead(reads: TimelineReads, datasetId: string, before: number | undefined, signal: AbortSignal, background?: Prefetch, queueSignal = signal) {
+    const release = await slot(reads.scope, queueSignal, !!background);
     try {
       signal.throwIfAborted();
       if (background) background.started = true;
@@ -122,14 +122,14 @@ export function createHistoryTimeline() {
     } finally { release(); }
   }
   const key = (reads: TimelineReads, id: string, before: number | undefined) => JSON.stringify([reads.scope, id, before]);
-  async function remotePage(reads: TimelineReads, id: string, before: number | undefined) {
+  async function remotePage(reads: TimelineReads, id: string, before: number | undefined, queueSignal: AbortSignal) {
     const cacheKey = key(reads, id, before), saved = prefetch.get(cacheKey);
     prefetch.delete(cacheKey);
-    if (!saved) return remoteRead(reads, id, before, reads.signal);
+    if (!saved) return remoteRead(reads, id, before, reads.signal, undefined, queueSignal);
     if (!saved.started) {
       // Promote queued work instead of waiting behind background reads.
       saved.controller.abort();
-      return remoteRead(reads, id, before, reads.signal);
+      return remoteRead(reads, id, before, reads.signal, undefined, queueSignal);
     }
     return bounded(reads.signal, async signal => {
       const abort = () => saved.controller.abort(signal.reason);
@@ -139,7 +139,7 @@ export function createHistoryTimeline() {
         catch {
           signal.throwIfAborted();
           // Idle transport failures are retried once while this page waits.
-          return await remoteRead(reads, id, before, signal);
+          return await remoteRead(reads, id, before, signal, undefined, AbortSignal.any([signal, queueSignal]));
         }
       } finally { signal.removeEventListener("abort", abort); }
     });
@@ -216,15 +216,19 @@ export function createHistoryTimeline() {
     }
     for (const source of live()) if (!source.remote && local.transferred.includes(source.datasetId)) { source.excluded = "unavailable"; pages.delete(source.datasetId); }
     if (input.cursor) acceptLocal(selected.filter(s => !s.excluded), local);
+    const pageDeadline = new AbortController();
+    const queueSignal = AbortSignal.any([reads.signal, pageDeadline.signal]);
     const fetchRemote = async (source: Source, before: number | undefined) => {
       try {
-        const p = await remotePage(reads, source.datasetId, before); current();
+        const p = await remotePage(reads, source.datasetId, before, queueSignal); current();
         if (p.archived || p.deleted) { source.done = true; pages.delete(source.datasetId); return; }
         if (!p.lineage) throw new Error("Collection history lineage is unavailable.");
         if (source.lineage === null) { source.lineage = p.lineage; source.fenceRevision = p.headRevision; source.beforeRevision = p.headRevision + 1; source.timeHint = p.olderRecordedAtMs ?? null; }
         checkLineage(source, p); pages.set(source.datasetId, { ...p, entries: [...p.entries] }); setHead(source, p);
       } catch (error) {
         current(); if (error instanceof LineageChanged) throw error;
+        // Stop this page's queued reads; active reads keep their per-slot deadline.
+        if (error instanceof Deadline) pageDeadline.abort(error);
         source.excluded = error instanceof Deadline ? "deadline" : "unavailable"; pages.delete(source.datasetId);
       }
     };

@@ -448,6 +448,33 @@ it("starts each foreground deadline after its slot, including later page-one sou
   expect(page.entries.filter(row => row.kind === "collection")).toHaveLength(12);
 });
 
+it("bounds a dead relay page after its first deadline and discloses queued sources", async () => {
+  const f = await fixture(), ids = Array.from({ length: 12 }, (_, n) => uuid(n + 8)), entered = deferred<void>();
+  await f.write("file", 500);
+  f.reads.local = () => ({ pages: [], transferred: ids, sourceIds: ids, sourceCount: ids.length });
+  const signals: AbortSignal[] = [];
+  f.reads.remote = vi.fn<TimelineReads["remote"]>(async (_id, _before, signal) => {
+    signals.push(signal); if (signals.length === 4) entered.resolve();
+    return new Promise((_, reject) => signal.addEventListener("abort", () => reject(signal.reason), { once: true }));
+  });
+  vi.useFakeTimers();
+  const start = Date.now(); let returned = false;
+  const waiting = f.page().then(page => { returned = true; return page; }); await entered.promise;
+  await vi.advanceTimersByTimeAsync(HISTORY_REMOTE_DEADLINE_MS - 1); expect(returned).toBe(false);
+  await vi.advanceTimersByTimeAsync(HISTORY_REMOTE_DEADLINE_MS + 1);
+  expect(returned).toBe(true);
+  const page = await waiting;
+  expect(Date.now() - start).toBeLessThanOrEqual(2 * HISTORY_REMOTE_DEADLINE_MS);
+  expect(signals.length).toBeLessThan(ids.length);
+  expect(signals.every(signal => signal.aborted)).toBe(true);
+  expect(page.entries.map(label)).toContain("file");
+  expect(page.completeness).toBe("partial");
+  expect(page.unavailableSources).toEqual(ids.map(datasetId => ({ datasetId, reason: "deadline" })));
+  f.reads.remote = vi.fn(async id => remoteReply(id, [1]));
+  expect((await f.page()).unavailableSources).toEqual([]);
+  expect(f.reads.remote).toHaveBeenCalledTimes(ids.length);
+});
+
 it("promotes queued prefetches ahead of background work without excluding foreground sources", async () => {
   const f = await fixture(), ids = Array.from({ length: 8 }, (_, n) => uuid(n + 8)), entered = deferred<void>();
   f.reads.local = () => ({ pages: [], transferred: ids, sourceIds: ids, sourceCount: ids.length });
