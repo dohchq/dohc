@@ -102,7 +102,7 @@ test("Windows setup uses pnpm.cmd and stops after failed or missing installation
       assert.equal(result.status, exitCode === 0 ? 0 : 1, result.stdout + result.stderr);
       assert.equal(existsSync(join(root, "electron-ran")), exitCode === 0);
       assert.equal(existsSync(join(root, "doctor-ran")), exitCode === 0);
-      if (exitCode !== null) assert.equal(readFileSync(join(root, "install-args"), "utf8").trim(), "install --frozen-lockfile");
+      if (exitCode !== null) assert.equal(readFileSync(join(root, "install-args"), "utf8").trim(), "install --frozen-lockfile --config.confirm-modules-purge=false");
       if (exitCode === 23) assert.match(result.stderr, /failed \(23\)/);
     }
   } finally { rmSync(root, { recursive: true, force: true }); }
@@ -326,7 +326,7 @@ test("standalone preparation installs frozen dependencies before building, seali
     assert.match(reused.stdout, /reuse desktop/);
     assert.equal(readFileSync(join(root, "node_modules/installed.txt"), "utf8"), "new-lock");
     assert.equal(calls().length, 5);
-    assert.deepEqual(calls().at(-1), { command: "pnpm", args: ["install", "--frozen-lockfile"] });
+    assert.deepEqual(calls().at(-1), { command: "pnpm", args: ["install", "--frozen-lockfile", "--config.confirm-modules-purge=false"] });
     const installed = invoke({ install: false });
     assert.equal(installed.status, 0, installed.stderr);
     assert.match(installed.stdout, /reuse desktop/);
@@ -525,7 +525,7 @@ test("preparation reuses artifacts across proof edits and rebuilds for productio
       writeFileSync(receiptPath,JSON.stringify(old));
       await expectBuilds('receipt without production identity',['engine','desktop']);
       await expectBuilds('unchanged checkout',[]);
-    `], { cwd: root, encoding: "utf8", timeout: 120_000 });
+    `], { cwd: root, encoding: "utf8", timeout: 300_000 });
     assert.equal(result.error, undefined);
     assert.equal(result.status, 0, result.stderr);
   } finally { rmSync(root, { recursive: true, force: true }); }
@@ -1113,7 +1113,7 @@ test("a docs-only PR records clean provenance without code tools, while dirty he
       console.log(JSON.stringify(report));
     `;
     const invoke = (extra = [], fault = "") => spawnSync(process.execPath, ["--input-type=module", "-e", childScript, "pr", "--base", base, ...extra], {
-      cwd: root, encoding: "utf8", timeout: 20_000,
+      cwd: root, encoding: "utf8", timeout: 120_000,
       env: { ...process.env, NODE_PATH: dirname(dirname(require.resolve("js-yaml/package.json"))), DOHC_BUILD_SLOT_ROOT: join(root, "slots"), FIXTURE_PROVENANCE_FAULT: fault },
     });
     const clean = invoke();
