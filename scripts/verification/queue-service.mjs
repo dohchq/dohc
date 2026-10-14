@@ -213,7 +213,7 @@ export async function runService({
       const last = previousRuns.find(row => row.id === entry.id && row.attempt === attempt?.n)?.awakeMs ?? 0;
       const stopped = entry.status.stopping ?? "service restart";
       // A recovery that cannot be recorded would repeat every tick; restart under the supervisor's backoff instead.
-      try { await finish(entry, attempt && { n: attempt.n, awakeMs: last }, attemptOutcome(result, grant, { stopped }), { cleanup: true }); }
+      try { await finish(entry, attempt && { n: attempt.n, awakeMs: last, flaky: result?.flaky ?? [] }, attemptOutcome(result, grant, { stopped }), { cleanup: true }); }
       catch (error) { fatal = error; return; }
     }
   }
