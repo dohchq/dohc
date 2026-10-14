@@ -317,6 +317,35 @@ function EditorGroupsSpecimen(props: { activeHasTabs: boolean }) {
   );
 }
 
+// More tabs than a narrow strip holds.
+const OVERFLOW_TABS = ["itinerary.md", "budget.csv", "packing-list.md", "flights.md", "restaurants.md", "notes.md"].map(
+  (path) => ({ path }),
+);
+
+// One group's overflowing strip over a strip of paper. The strip scrolls
+// itself to reveal its active tab when it mounts.
+function OverflowStripSpecimen(props: { groupId: string; groupNumber: number; active: string; testId?: string }) {
+  return (
+    <div data-testid={props.testId}>
+      <EditorTabs
+        groupId={props.groupId}
+        groupNumber={props.groupNumber}
+        tabs={OVERFLOW_TABS}
+        activeTab={props.active}
+        activeTabDirty={false}
+        recoveryPaths={NO_RECOVERY}
+        onActivate={noop}
+        onClose={noop}
+        onContextMenu={noop}
+        onMove={noop}
+        onMoveToGroup={noop}
+        onCreateGroupRight={noop}
+      />
+      <div className="h-6 bg-bg" />
+    </div>
+  );
+}
+
 function treeRow(name: string, folder = false): VisibleRow {
   return {
     fullPath: name,
@@ -2229,6 +2258,43 @@ function Pane(props: { theme: "light" | "dark" }) {
         <Specimen label="the status unreadable">
           <div className="w-[640px]">
             <CloudSyncSettings workspaceId="ws-trip" cloud={{ ...settingsCloud(null), unreadable: true }} />
+          </div>
+        </Specimen>
+      </Section>
+
+      {/* Last, so the parts above keep their places. A strip too narrow for
+          its tabs fades each edge it can still scroll past, and none it has
+          reached; its active tab sits clear of the fades. */}
+      <Section part="tab-strip-overflow" title="Tab strip, overflowing" menusAtRest>
+        {(
+          [
+            ["start", "at the start: the end fades", "itinerary.md"],
+            ["middle", "scrolled to the middle: both edges fade", "flights.md"],
+            ["end", "at the end: the start fades", "notes.md"],
+          ] as const
+        ).map(([at, label, active]) => (
+          <Specimen key={at} label={label} className="w-full">
+            <div className="w-[360px] overflow-hidden rounded-lg border border-line">
+              <OverflowStripSpecimen
+                groupId={`overflow-${at}`}
+                groupNumber={1}
+                active={active}
+                testId={`states-tab-strip-overflow-${at}-${theme}`}
+              />
+            </div>
+          </Specimen>
+        ))}
+        <Specimen label="split: the active group's line over its fades, then the other group">
+          <div className="flex w-[640px] overflow-hidden rounded-lg border border-line">
+            <EditorGroupLayout
+              groups={[
+                { id: "first", size: 1, content: <OverflowStripSpecimen groupId="first" groupNumber={1} active="packing-list.md" /> },
+                { id: "second", size: 1, content: <OverflowStripSpecimen groupId="second" groupNumber={2} active="flights.md" /> },
+              ]}
+              activeGroupId="first"
+              onFocusGroup={noop}
+              onResizeGroups={noop}
+            />
           </div>
         </Specimen>
       </Section>

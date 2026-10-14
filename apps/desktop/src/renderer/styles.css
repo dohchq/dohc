@@ -344,13 +344,45 @@ body {
  * hidden (a painted bar would eat a third of the 36px strip and push the
  * fixed-height tabs into vertical overflow). The visible affordance is the
  * overlay thumb EditorTabs draws over the strip's bottom edge (VS Code
- * treatment), plus wheel, active-tab reveal, and the overflow menu. */
+ * treatment), plus edge fades, wheel, active-tab reveal, and the overflow
+ * menu. */
 .dohc-tab-strip {
   scrollbar-width: none;
 }
 
 .dohc-tab-strip::-webkit-scrollbar {
   display: none;
+}
+
+/* An edge the strip can still scroll past fades its last 24px (EDGE_FADE in
+ * EditorTabs, which sets the attributes), so a name cut there reads as
+ * continuing. A mask takes no clicks and tints nothing. The bottom pixel
+ * row stays whole: it is the strip's hairline, and the active tab's join to
+ * the paper below. A dragged tab shows whole at the edge, corners included,
+ * and forced colors keep text at full contrast, so neither fades. */
+.dohc-tab-strip[data-overflow-left] {
+  --tab-strip-fade-left: 24px;
+}
+
+.dohc-tab-strip[data-overflow-right] {
+  --tab-strip-fade-right: 24px;
+}
+
+@media (forced-colors: none) {
+  .dohc-tab-strip:is([data-overflow-left], [data-overflow-right]):not(:has([data-dragging])) {
+    mask-image:
+      linear-gradient(
+        to right,
+        transparent,
+        #000 var(--tab-strip-fade-left, 0px),
+        #000 calc(100% - var(--tab-strip-fade-right, 0px)),
+        transparent
+      ),
+      linear-gradient(#000 0 0);
+    mask-size: 100% 100%, 100% 1px;
+    mask-position: 0 0, 0 100%;
+    mask-repeat: no-repeat;
+  }
 }
 
 /* Native feel: chrome icons and images never produce browser drag ghosts. */
