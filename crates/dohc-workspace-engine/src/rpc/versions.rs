@@ -1320,6 +1320,17 @@ mod tests {
         );
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn placement_gate_probe_refuses_persistent_contention() {
+        let gate = tokio::sync::Mutex::new(());
+        let held = gate.lock().await;
+        assert!(
+            !placement_gate_available(&gate).await,
+            "the probe must refuse a gate held throughout the call"
+        );
+        drop(held);
+    }
+
     async fn undo_placement_proof(mode: u8) {
         use dohc_engine_domain::{RenameTextFile, VersionedTextStore, WriteText};
         use dohc_engine_storage::{EngineStore, NoFaults};
@@ -1556,6 +1567,18 @@ mod tests {
         // Placement stays paused until both probes finish; it cannot release a held gate to pass.
         let sessions_available = placement_gate_available(&open.session_ops).await;
         let capture_available = placement_gate_available(&open.capture_apply_gate).await;
+        if !sessions_available || !capture_available {
+            probe.release_undo_placement();
+            let _ = service.workspace_close(Some(handle.clone())).await;
+        }
+        assert!(
+            sessions_available,
+            "session mutations must resume before file placement"
+        );
+        assert!(
+            capture_available,
+            "capture must resume for unrelated paths before file placement"
+        );
         let protected_key =
             dohc_engine_collab::DocKey::new("undo-placement", "main", "one").unwrap();
         let affected_protected = service.leases.scoped(&open.root).is_held(&protected_key);
@@ -1607,14 +1630,6 @@ mod tests {
         assert!(
             !service.leases.scoped(&open.root).is_held(&protected_key),
             "placed objects must release their leases"
-        );
-        assert!(
-            sessions_available,
-            "session mutations must resume before file placement"
-        );
-        assert!(
-            capture_available,
-            "capture must resume for unrelated paths before file placement"
         );
         if mode != 2 {
             assert_eq!(
