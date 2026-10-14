@@ -1,7 +1,7 @@
 import { expect, it, vi } from "vitest";
 import { VersionedLiveAdapter } from "@dohc/workspace-engine-client";
 import { VersionedLoopbackEngine } from "@dohc/workspace-engine-client/testing";
-import { createEngineFileResolver, resolveEngineFileTargets } from "./resolveEngineFiles";
+import { createEngineFileResolver, resolveEngineFileTargets, workspaceFileRef } from "./resolveEngineFiles";
 
 it("pins batches to one version and isolates an oversized legacy hint", async () => {
   const engine = new VersionedLoopbackEngine();
@@ -36,7 +36,7 @@ it("uses the production chat and graph wrapper without listing the workspace", a
   };
   const resolveEngineFiles = createEngineFileResolver(withAdapter);
   const workspace = { workspaceId: "w" };
-  expect(await resolveEngineFiles(workspace, [{ path: "./notes//a.md" }, { objectId: "photo" }, { objectId: "gone" }])).toEqual([
+  expect(await resolveEngineFiles(workspace, [{ path: "./notes//a.md" }, workspaceFileRef("w", "photo"), workspaceFileRef("w", "gone")])).toEqual([
     { status: "found", objectId: "a", path: "notes/a.md" },
     { status: "found", objectId: "photo", path: "photo.png" },
     { status: "absent" },
@@ -65,4 +65,22 @@ it("counts UTF-8 bytes, JSON escapes, commas, and the pinned version across requ
     expect(Buffer.byteLength(JSON.stringify(request.params))).toBeLessThanOrEqual(48 * 1024);
   }
   for (const request of requests.slice(1)) expect(request.params).toMatchObject({ versionId: "main" });
+});
+
+it("keeps foreign workspace references absent without querying their ids", async () => {
+  const resolveFiles = vi.fn(async () => ({ versionId: "main", results: [] }));
+  const resolve = createEngineFileResolver(async (_workspace, work) => work({ resolveFiles } as unknown as VersionedLiveAdapter));
+  expect(await resolve({ workspaceId: "local" }, [workspaceFileRef("source", "object")])).toEqual([{ status: "absent" }]);
+  expect(resolveFiles).not.toHaveBeenCalled();
+});
+
+it("rejects a binding changed during a file resolution await", async () => {
+  let current = true;
+  const assertCurrent = () => { if (!current) throw new Error("Binding changed"); };
+  const resolveFiles = vi.fn(async () => {
+    current = false;
+    return { versionId: "main", results: [{ status: "found", objectId: "a", path: "a.md" }] };
+  });
+  const resolve = createEngineFileResolver(async (_workspace, work) => work({ resolveFiles } as unknown as VersionedLiveAdapter, assertCurrent));
+  await expect(resolve({ workspaceId: "local" }, [workspaceFileRef("local", "a")])).rejects.toThrow("Binding changed");
 });

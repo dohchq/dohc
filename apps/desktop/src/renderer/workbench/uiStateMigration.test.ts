@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import { GetWorkspaceUiStateResult, WorkspaceUiState } from "../../ipc/bridgeContract";
 import { readUiStateFile, writeUiStateFile } from "../../workspaces/workspaceUiState";
 import { createTestScratch } from "../../workspaces/testTemp";
-import { ABOUT_DEFAULT_WIDTH, allTabs, defaultWorkbenchState, isVirtualTabPath, isRemovedVirtualTabPath, parseUiState, serializeUiState } from "./workbenchState";
+import { ABOUT_DEFAULT_WIDTH, allTabs, defaultWorkbenchState, parseTab, parseUiState, serializeUiState } from "./workbenchState";
 
 async function fixture(version: 2 | 3) {
   return JSON.parse(await readFile(new URL(`./fixtures/ui-state-v${version}.json`, import.meta.url), "utf8"));
@@ -102,8 +102,7 @@ describe("UI-state v2 to v3", () => {
     expect(allTabs(state).map(tab => tab.path)).toEqual(paths);
     expect(state.editorGroups[0].activeTab).toBe("tab:graph");
     for (const path of paths) {
-      expect(isVirtualTabPath(path)).toBe(false);
-      expect(isRemovedVirtualTabPath(path)).toBe(false);
+      expect(parseTab(path).kind).toBe("file");
     }
     expect(parseUiState(serializeUiState(state))).toEqual(state);
   });

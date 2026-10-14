@@ -1,10 +1,11 @@
 import { CAPABILITIES } from "@dohc/workspace-contracts/capabilities";
 import { USAGE_ACTION_IDS, USAGE_DOORS, type UsageBuildPair, type UsageSnapshot } from "@dohc/workspace-contracts/usage";
-import type { UsageRecordResult, UsageRecordRow, usageRecordOperations } from "../ipc/bridgeContract";
+import { INVALID_USAGE_RECORD, type UsageRecordResult, type UsageRecordRow, type usageRecordOperations } from "../ipc/bridgeContract";
 import type { OperationHandlers } from "../ipc/operationTable";
 import type { createUsageStore } from "./usageStore";
 
-type UsageStore = Pick<ReturnType<typeof createUsageStore>, "read" | "clear" | "setEnabled">;
+type UsageStore = Pick<ReturnType<typeof createUsageStore>,
+  "read" | "newestAside" | "clear" | "setEnabled" | "startNewRecord" | "restoreSetAside">;
 
 // One row per counted action: each door's total over the kept days, and
 // whether this build counts that door at all.
@@ -24,7 +25,7 @@ export function usageRecordView(snapshot: UsageSnapshot, coverage: readonly Usag
   }
   const days = snapshot.days.map(day => day.day).sort();
   return { status: "readable", enabled: snapshot.enabled, file, since: days[0] ?? null,
-    incompleteDays: snapshot.days.filter(day => !day.complete).length, rows: [...rows.values()] };
+    incompleteDays: snapshot.days.filter(day => !day.complete).length, rows: [...rows.values()], setAside: null };
 }
 
 // Privacy's handlers. They have no completion observer, so reading or
@@ -42,16 +43,23 @@ export function usageRecordHandlers(deps: {
   return {
     readUsageRecord: async () => {
       const file = deps.file();
+      const current = store();
+      let result: UsageRecordResult;
       try {
-        return usageRecordView(await store().read(), deps.coverage, file);
+        result = usageRecordView(await current.read(), deps.coverage, file);
       } catch (error) {
         // File and decoding errors leave the record unreadable.
         const code = (error as NodeJS.ErrnoException | null)?.code;
         if (typeof code !== "string") throw error;
-        return { status: "unreadable", file, code };
+        result = { status: "unreadable", file, code, setAside: null };
       }
+      // Restore swaps only a record main read or could not decode.
+      if (result.status === "readable" || result.code === INVALID_USAGE_RECORD) result.setAside = await current.newestAside();
+      return result;
     },
     clearUsageRecord: () => store().clear(),
     setUsageRecordEnabled: ({ enabled }) => store().setEnabled(enabled),
+    startUsageRecord: () => store().startNewRecord(),
+    restoreUsageRecord: () => store().restoreSetAside(),
   };
 }

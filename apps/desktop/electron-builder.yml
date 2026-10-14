@@ -141,6 +141,6 @@ protocols:
 # in src/updates/electronUpdater.ts.
 publish:
   provider: github
-  owner: dohc-ai
+  owner: dohchq
   repo: dohc
   channel: latest

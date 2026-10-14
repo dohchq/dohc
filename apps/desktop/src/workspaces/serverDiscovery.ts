@@ -8,7 +8,6 @@ export type ServerDescriptor = {
   authUrl: string;
   relayUrl: string;
   shareUrl: string;
-  name?: string;
   networkAccess?: "private" | "public";
 };
 
@@ -72,7 +71,6 @@ export async function discoverServer(serverUrl: string, fetchImpl: typeof fetch 
   }
   return {
     version: 1, authUrl, relayUrl, shareUrl,
-    ...(isServerDisplayName(descriptor.name) ? { name: descriptor.name } : {}),
     ...(descriptor.networkAccess === "private" || descriptor.networkAccess === "public" ? { networkAccess: descriptor.networkAccess } : {}),
   };
 }
