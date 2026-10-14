@@ -5,7 +5,7 @@ import { compareSummaries } from './compare-packaged-benchmark.mjs';
 import { summarize } from './summarize-packaged-benchmark.mjs';
 import { parseOptions } from './packaged-benchmark-options.mjs';
 const settings = { scenario: 'presence', runCount: 5, keystrokes: 3, presencePeers: 2 };
-const task = (name, value) => ({ name, mode: 'rich', supported: true, samples: [value, value, value].map(inputToNextPaintMs => ({ inputToNextPaintMs })), longTasks: [], workload: { pass: true, peers: 2 } });
+const task = (name, value) => ({ name, mode: 'rich', supported: true, samples: [value, value, value].map(inputToNextPaintMs => ({ inputToNextPaintMs })), longTasks: [], trace: { validation: { pass: true, matchedKeys: 3 } }, workload: { pass: true, peers: 2 } });
 const receipt = values => ({ status: 'complete', settings, runs: values.map((value, index) => ({ index: index + 1, presence: Object.fromEntries(['solo', 'peers'].map(arm => [arm, ['small.md', 'large.md'].map(name => task(name, value))])) })) });
 const compare = (before, after) => comparePresence(summarizePresence(before.runs), summarizePresence(after.runs), settings);
 
@@ -77,6 +77,8 @@ for (const change of [
   row => row.presence.peers[0].workload.pass = false,
   row => row.presence.peers[0].samples[0].inputToNextPaintMs = null,
   row => row.presence.solo[0].mode = 'source',
+  row => row.presence.solo[0].trace.validation.pass = false,
+  row => row.presence.solo[0].trace.validation.matchedKeys = 2,
 ]) test('incomplete measurements and peer workloads fail closed', () => {
   const after = receipt([16, 16, 16, 16, 16]); change(after.runs[0]);
   assert.equal(compare(receipt([16, 16, 16, 16, 16]), after).pass, false);

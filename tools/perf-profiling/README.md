@@ -174,14 +174,33 @@ The summary pools keystrokes within each run to obtain p50 and p95, then preserv
 For each percentile, the comparison takes the median of the baseline runs and the median of the candidate runs.
 The candidate may exceed baseline by `min(8 ms, max(baseline maximum minus minimum, 2 ms))`.
 Solo and peer typing must both pass, for both document sizes. Neither side may contain a long task.
-Missing timing, a source editor, an incomplete peer workload, or fewer than five runs refuses a passing verdict.
+Missing trace timing, a source editor, an incomplete peer workload, or fewer than five runs refuses a passing verdict.
 The presence rule is fixed; the comparison's automation and percentage margin options do not change it.
 
-Only reported Chromium EventTiming durations measure input-to-next-paint. They are quantized to 8 ms and have a 16 ms reporting floor.
-A run with any unreported keystroke cannot decide this comparison. The receipt retains the missing count and the existing two-frame diagnostic separately.
-Do not substitute that diagnostic for input-to-next-paint or infer zero latency from an absent event.
+Both arms use the same CDP trace categories, `input,blink.user_timing`, during the typing window.
+The input category enables Chromium's `EventLatency` slices. User Timing marks bound each trusted key in the trace clock.
+Each key must match one `KEY_PRESSED` slice in the owner's renderer and reach a compositor presentation.
+The slice's presentation timestamp minus its generated timestamp supplies the uncensored input-to-next-paint value in milliseconds.
+The harness retains each raw trace, its categories, browser revision, per-key matches, and validation result.
+Missing, ambiguous, untrusted, or unpresented keys fail the run.
 
-Run `node --test tools/perf-profiling/packaged-presence.test.mjs tools/perf-profiling/presence-packaged-fixture.test.mjs` for the rule tests and a dry TLS/relay setup smoke.
+Event Timing remains supplemental. For each reported keydown, its duration must agree with the trace within 4 ms, half its 8 ms rounding interval.
+A mismatch fails the run. Omitted Event Timing entries do not remove fast trace samples or affect the verdict.
+The output records the checked count, individual differences, maximum difference, and agreement result.
+The two-frame diagnostic remains separate. Required tracing runs in both arms and both packages; optional CPU profiling still prevents performance comparison.
+
+The trace contract was checked against [Chromium 150's recorder](https://github.com/chromium/chromium/blob/69bf1c67cb894365d151bd020bb0171fd583633a/cc/metrics/event_latency_tracing_recorder.cc).
+Run this dry hook smoke against the checkout's Electron before packaged measurements:
+
+```powershell
+node tools/perf-profiling/presence-typing-trace-smoke.mjs --output <new-directory>
+```
+
+The smoke opens an isolated, temporary contenteditable window. It launches no dohc workspace or packaged benchmark.
+Eight keys alternate short and 25 ms fixture handlers to exercise uncensored timing and the Event Timing cross-check.
+It retains the trace and validation receipt, closes its own process, and removes the temporary profile.
+
+Run `node --test tools/perf-profiling/packaged-presence.test.mjs tools/perf-profiling/presence-typing-trace.test.mjs tools/perf-profiling/presence-packaged-fixture.test.mjs` for the rule tests and a dry TLS/relay setup smoke.
 The dry smoke uses a small canonical snapshot specimen and launches no desktop or live typing workload.
 The full packaged-harness suite includes both files. The orchestrator owns packaged measurements and the final performance verdict.
 

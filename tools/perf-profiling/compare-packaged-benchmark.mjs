@@ -17,7 +17,7 @@ const MIN_AUTOMATION_RUNS = 5;
 
 // Settings that change what a receipt measures. The limits may differ: they decide which cases are
 // comparable, through each case's fixture digest.
-const COMPARED_SETTINGS = ['scenario', 'runCount', 'keystrokes', 'fixtureFiles', 'records', 'idleSeconds', 'switches', 'profileRenderer', 'profileMain', 'presencePeers', 'selectionHz', 'peerTypingHz'];
+const COMPARED_SETTINGS = ['scenario', 'runCount', 'keystrokes', 'fixtureFiles', 'records', 'idleSeconds', 'switches', 'profileRenderer', 'profileMain', 'presencePeers', 'selectionHz', 'peerTypingHz', 'presenceTiming'];
 
 function check(metric, baseline, candidate, margin, percentile = 'p95') {
   const field = percentile === 'p50' ? 'P50' : 'P95';

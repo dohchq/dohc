@@ -20,7 +20,7 @@ export function summarizePresence(runs) {
         unreported: (task?.samples.length ?? 0) - values.length,
         p50: percentile(values, .5), p95: percentile(values, .95),
         longTasks: task?.longTasks?.length ?? null, supported: task?.supported ?? false,
-        mode: task?.mode ?? null, workload: task?.workload ?? null };
+        mode: task?.mode ?? null, workload: task?.workload ?? null, traceValidation: task?.trace?.validation ?? null };
     })
   ]))]));
 }
@@ -40,7 +40,7 @@ export function comparePresence(baseline, candidate, settings) {
         problems.push(metric + ': duplicate ' + side + ' runs.'); valid = false;
       }
       for (const row of rows) {
-        if (!row.supported || row.count !== settings.keystrokes || row.keystrokes !== settings.keystrokes ||
+        if (!row.traceValidation?.pass || row.traceValidation.matchedKeys !== settings.keystrokes || row.count !== settings.keystrokes || row.keystrokes !== settings.keystrokes ||
             !Number.isFinite(row.p50) || !Number.isFinite(row.p95) || row.mode !== 'rich') {
           problems.push(metric + ': missing ' + side + ' timing in run ' + row.run + '.'); valid = false;
         }
