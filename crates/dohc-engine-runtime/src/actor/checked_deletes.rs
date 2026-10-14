@@ -56,9 +56,6 @@ fn recover_exported_in_tx(
     if !dohc_engine_domain::moment_has_replication_dependents_in(tx, workspace_id, moment_id)? {
         return Ok(ExportedDeleteRecovery::NotExported);
     }
-    if dohc_engine_files::workspace_recovery_unavailable(root) {
-        return Err(dohc_engine_files::MaterializeError::RecoveryUnavailable.into());
-    }
     let (version_id, object_id): (String, String) = tx
         .query_row(
             "SELECT version_id,object_id FROM moments WHERE workspace_id=?1 AND moment_id=?2",
@@ -76,24 +73,63 @@ fn recover_exported_in_tx(
         )
         .optional()
         .map_err(StorageError::corrupt_public)?;
-    let (path, snapshot_sha) = snapshot
-        .as_ref()
-        .map(|(path, sha)| (path.as_str(), sha.as_str()))
-        .unwrap_or((&job.target_path, &job.content_sha256));
+    let Some((path, snapshot_sha)) = snapshot else {
+        // A later deletion already removed this object. Its old path may now
+        // belong to someone else and must not participate in settlement.
+        super::versioned::settle_checked_delete_in_tx(tx, workspace_id, moment_id, true, false)?;
+        return Ok(ExportedDeleteRecovery::Settled);
+    };
+    if dohc_engine_files::workspace_recovery_unavailable(root) {
+        return Err(dohc_engine_files::MaterializeError::RecoveryUnavailable.into());
+    }
     let key = dohc_engine_collab::DocKey::new(workspace_id, &version_id, &object_id)?;
-    if !dohc_engine_sync::current_ydoc_content_matches_in_tx(tx, &key, path, snapshot_sha)? {
+    if !dohc_engine_sync::current_ydoc_content_matches_in_tx(tx, &key, &path, &snapshot_sha)? {
         return Err(DomainError::WritePreconditionFailed {
-            current_sha256: snapshot.as_ref().map(|(_, sha)| sha.clone()),
+            current_sha256: Some(snapshot_sha),
         }
         .into());
     }
-    let target = read_publication_target(root, path)?;
+    let target = read_publication_target(root, &path)?;
+    let disk_sha256 = match &target {
+        PublicationTarget::Bytes(bytes) => Some(hex_sha256(bytes)),
+        PublicationTarget::Absent | PublicationTarget::Untracked => None,
+    };
+    let recreated =
+        job.status == JobStatus::Complete && !matches!(target, PublicationTarget::Absent);
+    let prepared = path == job.target_path && snapshot_sha == job.content_sha256;
+    let disk_matches = matches!(target, PublicationTarget::Absent)
+        || disk_sha256.as_deref() == Some(snapshot_sha.as_str());
+    if prepared && disk_matches && !recreated {
+        // The materializer rechecks the preimage before it can remove the file.
+        tx.execute(
+            "UPDATE materialization_jobs SET status='pending',completed_at_ms=NULL
+            WHERE workspace_id=?1 AND job_id=?2 AND status='conflict'",
+            params![workspace_id, job_id],
+        )
+        .map_err(StorageError::persist_public)?;
+        return Ok(ExportedDeleteRecovery::Publish);
+    }
     let bytes = match target {
-        PublicationTarget::Bytes(bytes) if capturable(path, &bytes) => Some(bytes),
+        PublicationTarget::Bytes(bytes) if capturable(&path, &bytes) => Some(bytes),
         PublicationTarget::Absent => None,
         PublicationTarget::Bytes(_) | PublicationTarget::Untracked => {
-            // Capture cannot represent this target. Keep disk intact and record D
-            // without a replacement, after checking that no live draft is lost.
+            let blocked_write: bool = tx
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM materialization_jobs
+                 WHERE (workspace_id=?1 OR workspace_id='') AND target_path=?2
+                   AND operation='write' AND status IN ('pending','conflict'))",
+                    params![workspace_id, path],
+                    |row| row.get(0),
+                )
+                .map_err(StorageError::corrupt_public)?;
+            if blocked_write {
+                return Err(DomainError::WritePreconditionFailed {
+                    current_sha256: Some(snapshot_sha),
+                }
+                .into());
+            }
+            // Capture cannot represent this target. Preserve disk and any live
+            // draft or blocked write, then record D without a replacement.
             super::versioned::settle_checked_delete_in_tx(
                 tx,
                 workspace_id,
@@ -107,31 +143,11 @@ fn recover_exported_in_tx(
             return Ok(ExportedDeleteRecovery::Settled);
         }
     };
-    let recreated = job.status == JobStatus::Complete && bytes.is_some();
-    let prepared =
-        snapshot.is_some() && path == job.target_path && snapshot_sha == job.content_sha256;
-    let disk_sha256 = bytes.as_deref().map(hex_sha256);
-    let disk_matches = disk_sha256.as_deref().is_none_or(|sha| sha == snapshot_sha);
-    if prepared && disk_matches && !recreated {
-        // The materializer rechecks the preimage before it can remove the file.
-        tx.execute(
-            "UPDATE materialization_jobs SET status='pending',completed_at_ms=NULL
-            WHERE workspace_id=?1 AND job_id=?2 AND status='conflict'",
-            params![workspace_id, job_id],
-        )
-        .map_err(StorageError::persist_public)?;
-        return Ok(ExportedDeleteRecovery::Publish);
-    }
     // Ordinary replay runs first. A parked write, an uncaptured disk edit, or
     // an absent projection of a newer head must not retire canonical state.
-    let agrees = match (&snapshot, &disk_sha256) {
-        (Some(_), Some(_)) => disk_matches,
-        (None, None) => true,
-        _ => false,
-    };
-    if !agrees {
+    if disk_sha256.is_none() || !disk_matches {
         return Err(DomainError::WritePreconditionFailed {
-            current_sha256: snapshot.as_ref().map(|(_, sha)| sha.clone()),
+            current_sha256: Some(snapshot_sha),
         }
         .into());
     }
@@ -139,7 +155,7 @@ fn recover_exported_in_tx(
     // later state after D, without deleting assets or changing disk.
     super::versioned::settle_checked_delete_in_tx(tx, workspace_id, moment_id, true, false)?;
     if let Some(bytes) = bytes {
-        capture_current_bytes_in_tx(tx, root, workspace_id, &version_id, path, bytes, now_ms)?;
+        capture_current_bytes_in_tx(tx, root, workspace_id, &version_id, &path, bytes, now_ms)?;
     }
     Ok(ExportedDeleteRecovery::Settled)
 }

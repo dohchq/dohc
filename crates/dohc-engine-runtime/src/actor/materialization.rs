@@ -621,10 +621,6 @@ pub(super) fn replay_pending_materializations(
         };
         let mut secret_key: Option<SecretDataKey> = None;
         for job in jobs {
-            // Checked deletes require canonical/live checks and run after ordinary writes.
-            if job.job_id.starts_with("restore-delete-mat_") {
-                continue;
-            }
             if selected.is_some_and(|selected| !selected.contains(&job.job_id)) {
                 continue;
             }

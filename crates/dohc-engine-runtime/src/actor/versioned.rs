@@ -3228,15 +3228,22 @@ mod doc_cache_reset_tests {
     }
 
     fn checked_delete_fixture(binary: bool) -> (ScratchDir, EngineStore, DeleteTextFile, String) {
-        let scratch = ScratchDir::new().unwrap();
-        let mut store =
-            EngineStore::open(&dohc_engine_testkit::engine_db_path(&scratch).unwrap(), 1).unwrap();
-        ensure_mutation_version_on_store(&mut store, "workspace", "main", 1, &NoFaults).unwrap();
         let bytes = if binary {
             b"\0recipient bytes".as_slice()
         } else {
             b"recipient text\n".as_slice()
         };
+        checked_delete_fixture_with_bytes(binary, bytes)
+    }
+
+    fn checked_delete_fixture_with_bytes(
+        binary: bool,
+        bytes: &[u8],
+    ) -> (ScratchDir, EngineStore, DeleteTextFile, String) {
+        let scratch = ScratchDir::new().unwrap();
+        let mut store =
+            EngineStore::open(&dohc_engine_testkit::engine_db_path(&scratch).unwrap(), 1).unwrap();
+        ensure_mutation_version_on_store(&mut store, "workspace", "main", 1, &NoFaults).unwrap();
         std::fs::write(scratch.join("record.md"), bytes).unwrap();
         if binary {
             VersionedTextStore::new(&mut store)
@@ -3768,6 +3775,268 @@ mod doc_cache_reset_tests {
         ).unwrap().query_map([], |row| row.get(0)).unwrap().collect::<Result<_, _>>()).unwrap();
         assert_eq!(aliases, vec!["renamed.md"]);
         assert_legacy_peer(&store, "renamed.md", b"recipient text\n");
+    }
+
+    fn park_unrelated_legacy_write(store: &mut EngineStore, root: &std::path::Path) -> String {
+        use dohc_engine_storage::capture_file_holds::{
+            CaptureFileHold, NOT_REPRESENTABLE, record_in,
+        };
+        std::fs::write(root.join("record.md"), b"B on disk\n").unwrap();
+        let write = VersionedTextStore::new(store)
+            .write_text(
+                &WriteText {
+                    workspace_id: "workspace".into(),
+                    version_id: "main".into(),
+                    object_id: "unrelated".into(),
+                    path: "record.md".into(),
+                    text: "B pending write\n".into(),
+                    moment_id: "unrelated-write".into(),
+                    metadata_origin: "api".into(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    now_ms: 6,
+                    request_id: None,
+                },
+                &NoFaults,
+            )
+            .unwrap();
+        let job_id = "authored-mat_unrelated-write".to_owned();
+        store
+            .write_with(&NoFaults, |tx| {
+                dohc_engine_domain::enqueue_write(
+                    tx,
+                    &write,
+                    Preimage::Present(hex_sha256(b"B on disk\n")),
+                    "authored",
+                )?;
+                record_in(
+                    tx,
+                    &CaptureFileHold {
+                        workspace_id: "workspace".into(),
+                        source_version_id: "main".into(),
+                        object_id: "unrelated".into(),
+                        path: "record.md".into(),
+                        observed_sha256: hex_sha256(b"B on disk\n"),
+                        observed_size: 10,
+                        reason: NOT_REPRESENTABLE.into(),
+                        observed_at_ms: 6,
+                        attempt_count: 1,
+                        retry_requested: false,
+                    },
+                )?;
+                Ok::<_, RuntimeError>(())
+            })
+            .unwrap();
+        assert_eq!(
+            store
+                .load_materialization_job(&job_id)
+                .unwrap()
+                .unwrap()
+                .status,
+            JobStatus::Pending
+        );
+        job_id
+    }
+
+    fn assert_unrelated_legacy_write(
+        store: &mut EngineStore,
+        root: &std::path::Path,
+        job_id: &str,
+    ) {
+        assert_eq!(
+            store
+                .load_materialization_job(job_id)
+                .unwrap()
+                .unwrap()
+                .status,
+            JobStatus::Pending
+        );
+        assert_eq!(
+            std::fs::read(root.join("record.md")).unwrap(),
+            b"B on disk\n"
+        );
+        assert_eq!(
+            VersionedTextStore::new(store)
+                .read_text("workspace", "main", "record.md")
+                .unwrap()
+                .unwrap()
+                .text,
+            "B pending write\n"
+        );
+        assert!(
+            store
+                .read_with(|conn| dohc_engine_storage::capture_file_holds::hold_in(
+                    conn,
+                    "workspace",
+                    "record.md"
+                ))
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn checked_delete_legacy_renamed_cleanup_preserves_unrelated_parked_write() {
+        let (root, mut store) = legacy_export_fixture(false);
+        versioned_text_rename_on_store(
+            &mut store,
+            &RenameTextFile {
+                workspace_id: "workspace".into(),
+                version_id: "main".into(),
+                from_path: "record.md".into(),
+                to_path: "renamed.md".into(),
+                moment_id: "later-rename".into(),
+                metadata_origin: "api".into(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 6,
+                request_id: None,
+            },
+            &root,
+            &(),
+            &NoFaults,
+            &CancellationToken::new(),
+        )
+        .unwrap();
+        std::fs::rename(root.join("record.md"), root.join("renamed.md")).unwrap();
+        let job_id = park_unrelated_legacy_write(&mut store, &root);
+        let mut store = reopen_legacy(store, &root);
+        assert_legacy_pending(&store, false);
+        assert_unrelated_legacy_write(&mut store, &root, &job_id);
+        assert_eq!(
+            std::fs::read(root.join("renamed.md")).unwrap(),
+            b"recipient text\n"
+        );
+    }
+
+    #[test]
+    fn checked_delete_legacy_missing_snapshot_ignores_reused_path() {
+        let (root, mut store) = legacy_export_fixture(false);
+        VersionedTextStore::new(&mut store)
+            .delete_text_file(
+                &DeleteTextFile {
+                    workspace_id: "workspace".into(),
+                    version_id: "main".into(),
+                    path: "record.md".into(),
+                    moment_id: "later-delete".into(),
+                    request_id: None,
+                    metadata_origin: "api".into(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    now_ms: 5,
+                },
+                &NoFaults,
+            )
+            .unwrap();
+        let job_id = park_unrelated_legacy_write(&mut store, &root);
+        let mut store = reopen_legacy(store, &root);
+        assert_legacy_pending(&store, false);
+        assert_unrelated_legacy_write(&mut store, &root, &job_id);
+        let outcome: String = store.read_with(|conn| conn.query_row("SELECT publication_outcome FROM engine_requests WHERE request_id='restore-request'", [], |row| row.get(0))).unwrap();
+        assert_eq!(outcome, "applied");
+    }
+
+    #[test]
+    fn checked_delete_legacy_uncapturable_preserves_blocked_write() {
+        for status in ["pending", "conflict"] {
+            for directory in [false, true] {
+                let (root, mut store) = legacy_export_fixture(true);
+                let bytes = b"\0committed later bytes";
+                VersionedTextStore::new(&mut store)
+                    .write_binary(
+                        &WriteBinary {
+                            workspace_id: "workspace".into(),
+                            version_id: "main".into(),
+                            object_id: "document".into(),
+                            path: "record.md".into(),
+                            bytes: bytes.to_vec(),
+                            moment_id: "blocked-write".into(),
+                            metadata_origin: "api".into(),
+                            metadata_summary: None,
+                            metadata_correlation_id: None,
+                            author_json: None,
+                            now_ms: 6,
+                            request_id: None,
+                        },
+                        &NoFaults,
+                    )
+                    .unwrap();
+                let job_id = dohc_engine_domain::binary_write_job_id("blocked-write");
+                store
+                    .write_with(&NoFaults, |tx| {
+                        tx.execute(
+                            "UPDATE materialization_jobs SET status=?1 WHERE job_id=?2",
+                            params![status, job_id],
+                        )
+                        .map_err(StorageError::persist_public)
+                    })
+                    .unwrap();
+                if directory {
+                    std::fs::remove_file(root.join("record.md")).unwrap();
+                    std::fs::create_dir(root.join("record.md")).unwrap();
+                } else {
+                    std::fs::write(
+                        root.join("record.md"),
+                        vec![0xff; dohc_engine_domain::MAX_CAPTURE_BINARY_FILE_BYTES + 1],
+                    )
+                    .unwrap();
+                }
+                let store = reopen_legacy(store, &root);
+                assert_legacy_pending(&store, true);
+                assert!(matches!(
+                    store
+                        .load_materialization_job(&job_id)
+                        .unwrap()
+                        .unwrap()
+                        .status,
+                    JobStatus::Pending | JobStatus::Conflict
+                ));
+                let sha: String = store
+                    .read_with(|conn| {
+                        conn.query_row(
+                            "SELECT binary_sha256 FROM snapshots WHERE object_id='document'",
+                            [],
+                            |row| row.get(0),
+                        )
+                    })
+                    .unwrap();
+                assert_eq!(sha, hex_sha256(bytes));
+                assert_eq!(root.join("record.md").is_dir(), directory);
+                if !directory {
+                    assert_eq!(
+                        std::fs::read(root.join("record.md")).unwrap(),
+                        vec![0xff; dohc_engine_domain::MAX_CAPTURE_BINARY_FILE_BYTES + 1]
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn checked_delete_legacy_unchanged_large_binary_publishes() {
+        let bytes = vec![0xff; dohc_engine_domain::MAX_CAPTURE_BINARY_FILE_BYTES + 1];
+        let (root, mut store, input, expected) = checked_delete_fixture_with_bytes(true, &bytes);
+        crash_checked_delete(
+            &root,
+            &mut store,
+            &input,
+            &expected,
+            FaultPoint::StorageAfterCommitBeforeAck,
+        );
+        bootstrap_checked_delete(&mut store);
+        seed_legacy_checked_delete_export(&mut store);
+        let store = reopen_legacy(store, &root);
+        assert_legacy_pending(&store, false);
+        assert!(!root.join("record.md").exists());
+        let snapshots: i64 = store
+            .read_with(|conn| {
+                conn.query_row("SELECT count(*) FROM snapshots", [], |row| row.get(0))
+            })
+            .unwrap();
+        assert_eq!(snapshots, 0);
     }
 
     #[test]
