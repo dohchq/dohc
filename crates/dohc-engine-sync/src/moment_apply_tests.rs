@@ -1853,6 +1853,326 @@ fn restore_settlement_skipped_by_a_later_generation_is_refused_and_released() {
     );
 }
 
+#[test]
+fn held_settlement_current_path_recovery_is_refused_and_released() {
+    held_settlement_recovery(RecoveryBinding::Renamed, false);
+}
+
+#[test]
+fn held_settlement_selector_paths_recovery_is_refused_and_released() {
+    held_settlement_recovery(RecoveryBinding::Selectors, false);
+}
+
+#[test]
+fn held_settlement_later_generation_after_rename_is_refused_and_released() {
+    held_settlement_recovery(RecoveryBinding::Renamed, true);
+}
+
+#[test]
+fn held_settlement_same_binding_recovery_applies_and_releases() {
+    held_settlement_recovery(RecoveryBinding::Unchanged, false);
+}
+
+#[test]
+fn held_settlement_rename_away_and_back_applies_and_releases() {
+    held_settlement_recovery(RecoveryBinding::RenamedBack, false);
+}
+
+#[derive(Clone, Copy)]
+enum RecoveryBinding {
+    Renamed,
+    Selectors,
+    Unchanged,
+    RenamedBack,
+}
+
+fn held_settlement_recovery(case: RecoveryBinding, later_generation: bool) {
+    use dohc_engine_collab::owner_outbox::{
+        OwnerOutboxQuarantineInput,
+        draft::append_draft_in_tx,
+        enrollment::{OwnerEnrollmentInput, OwnerEnrollmentPreparation, enroll_in_tx, prepare_in},
+    };
+    let RestoreOwner {
+        _scratch,
+        mut store,
+        mut observed,
+        checkpoint,
+        initial_text,
+        initial_moment,
+    } = restore_owner();
+    let (host, text) = restored_host(&checkpoint, "held host settlement");
+    hydrate_texts(&mut store, &[&text]);
+    let id = format!("moment-ydoc-{}", "b".repeat(64));
+    retain_restore_audit(&store, &observed.binding, "relay", &id, &text, 1);
+    let settlement = restore_settlement("host", &id, &initial_text, &initial_moment, &text);
+    assert_eq!(
+        apply_moment_envelope(&mut store, &settlement, &NoFaults).unwrap(),
+        ApplyOutcome::new(ApplyDisposition::Applied(0))
+    );
+    assert_eq!(
+        store.table_row_count("owner_pending_settlements").unwrap(),
+        1
+    );
+    let waiting =
+        crate::moment_apply::pending::drain_and_claim(&mut store, "ws", &NoFaults, &NoLiveLeases)
+            .unwrap();
+    assert!(waiting.report_id.is_none());
+
+    // Recovery requires a quarantined delivery parent. Use the real draft,
+    // quarantine and enrollment APIs rather than rewriting binding_json.
+    let original_binding = observed.binding.clone();
+    let mut next = original_binding.clone();
+    match case {
+        RecoveryBinding::Renamed | RecoveryBinding::RenamedBack => {
+            next.current_path = "renamed.md".into();
+        }
+        RecoveryBinding::Selectors => next.selector_paths = vec!["folder".into()],
+        RecoveryBinding::Unchanged => {}
+    }
+    let bindings = if matches!(case, RecoveryBinding::RenamedBack) {
+        vec![next, original_binding]
+    } else {
+        vec![next]
+    };
+    let recovery_host = Ydoc::wire();
+    recovery_host.apply(&checkpoint).unwrap();
+    if !later_generation {
+        recovery_host.apply(&host.encode_full_state()).unwrap();
+    }
+    for (step, next) in bindings.iter().enumerate() {
+        let dohc_engine_storage::TxnOutcome::Committed(parent) = store
+            .write_with(&NoFaults, |tx| {
+                append_draft_in_tx(
+                    tx,
+                    "ws",
+                    &observed.binding,
+                    observed.revision,
+                    format!("before-rebind-{step}"),
+                    checkpoint.clone(),
+                    3,
+                )
+            })
+            .unwrap()
+        else {
+            panic!("draft must commit")
+        };
+        dohc_engine_collab::owner_outbox::quarantine(
+            &mut store,
+            "ws",
+            OwnerOutboxQuarantineInput {
+                outbox_id: parent.outbox_id,
+                reason: "binding-changed".into(),
+                observed_binding: None,
+            },
+            4,
+        )
+        .unwrap();
+        store
+            .read_with(|conn| conn.execute("UPDATE ydoc_docs SET path=?1", [&next.current_path]))
+            .unwrap();
+        let OwnerEnrollmentPreparation::Capture { captured } = store
+            .read_with(|conn| prepare_in(conn, next, "relay", true))
+            .unwrap()
+        else {
+            panic!("recovery must capture")
+        };
+        let input = OwnerEnrollmentInput {
+            binding: next.clone(),
+            relay_database_namespace: "relay".into(),
+            captured,
+            journal_cursor: if later_generation || step + 1 < bindings.len() {
+                0
+            } else {
+                1
+            },
+            checkpoint: recovery_host.encode_full_state(),
+            host_vector: recovery_host.encode_state_vector(),
+            recovery: true,
+        };
+        let dohc_engine_storage::TxnOutcome::Committed(recovered) = store
+            .write_with(&NoFaults, |tx| {
+                enroll_in_tx(tx, "ws", &input, &observed.limits, 5)
+            })
+            .unwrap()
+        else {
+            panic!("recovery must commit")
+        };
+        assert_eq!(&recovered.binding, next);
+        assert_eq!(recovered.binding.restore_fence_generation, 0);
+        observed.binding = recovered.binding;
+        observed.revision = recovered.revision;
+    }
+    let mut next = observed.binding.clone();
+    if later_generation {
+        let waiting = crate::moment_apply::pending::drain_and_claim(
+            &mut store,
+            "ws",
+            &NoFaults,
+            &NoLiveLeases,
+        )
+        .unwrap();
+        assert!(
+            waiting.report_id.is_none(),
+            "rename still waits for the cursor"
+        );
+        next.restore_fence_generation = 1;
+        let advanced = enroll_restore(&mut store, &next, &host, 0, &observed.limits);
+        assert_eq!(advanced.binding, next);
+    }
+    let before = snapshot(&store, "object");
+    let mut report =
+        crate::moment_apply::pending::drain_and_claim(&mut store, "ws", &NoFaults, &NoLiveLeases)
+            .unwrap();
+    assert!(
+        report.report_id.is_some(),
+        "a stale binding must reach a final decision"
+    );
+    let applies = matches!(
+        case,
+        RecoveryBinding::Unchanged | RecoveryBinding::RenamedBack
+    );
+    if applies {
+        assert!(!report.changes.is_empty());
+        assert_eq!(disposition(&store, "host").as_deref(), Some("applied"));
+        assert_eq!(snapshot(&store, "object").unwrap().3, id);
+        assert!(
+            crate::list_refusal_notices(&store, "ws")
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            store
+                .read_with(|conn| conn.query_row(
+                    "SELECT COUNT(*) FROM moments WHERE moment_id=?1",
+                    [&id],
+                    |row| row.get::<_, i64>(0),
+                ))
+                .unwrap(),
+            1
+        );
+        // A crash can leave an applied report to reclaim after another rename.
+        let mut rebound = next.clone();
+        rebound.current_path = "renamed-again.md".into();
+        store
+            .read_with(|conn| {
+                conn.execute(
+                    "UPDATE ydoc_owner_bindings SET binding_json=?1",
+                    [serde_json::to_string(&rebound).unwrap()],
+                )
+            })
+            .unwrap();
+        report = crate::moment_apply::pending::drain_and_claim(
+            &mut store,
+            "ws",
+            &NoFaults,
+            &NoLiveLeases,
+        )
+        .unwrap();
+        assert!(report.report_id.is_some());
+        assert_eq!(disposition(&store, "host").as_deref(), Some("applied"));
+        assert!(
+            crate::list_refusal_notices(&store, "ws")
+                .unwrap()
+                .is_empty()
+        );
+    } else {
+        assert!(report.changes.is_empty());
+        assert_eq!(disposition(&store, "host").as_deref(), Some("refused"));
+        let reason = store
+            .read_with(|conn| {
+                conn.query_row(
+                "SELECT reason_message FROM replication_pending_refusals WHERE origin_id='host'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            })
+            .unwrap();
+        assert_eq!(
+            reason,
+            if later_generation {
+                crate::moment_apply::pending::SUPERSEDED
+            } else {
+                "This file's name, location, or sharing changed before this save arrived. Open the file to continue."
+            }
+        );
+        assert_eq!(snapshot(&store, "object"), before);
+        assert_eq!(
+            store
+                .read_with(|conn| conn.query_row(
+                    "SELECT COUNT(*) FROM moments WHERE moment_id=?1",
+                    [&id],
+                    |row| row.get::<_, i64>(0),
+                ))
+                .unwrap(),
+            0
+        );
+        if !later_generation {
+            let notices = crate::list_refusal_notices(&store, "ws").unwrap();
+            assert_eq!(
+                notices[0].document.as_ref().unwrap().path.as_deref(),
+                Some(next.current_path.as_str())
+            );
+        }
+    }
+    crate::commit_relay_cursor(
+        &mut store,
+        "ws",
+        &crate::RelayCursor {
+            bootstrap_complete: true,
+            cursor: 1,
+            replication_epoch: "epoch".into(),
+            stream_identity: "stream".into(),
+            settlement_report_id: report.report_id,
+        },
+        &NoFaults,
+        &NoLiveLeases,
+        6,
+    )
+    .unwrap();
+    assert_eq!(
+        store.table_row_count("owner_pending_settlements").unwrap(),
+        0
+    );
+    assert_eq!(
+        store
+            .table_row_count("owner_pending_settlement_blobs")
+            .unwrap(),
+        0
+    );
+    if !applies {
+        assert_eq!(store.read_with(|conn| conn.query_row(
+        "SELECT COUNT(*) FROM replication_refused_moment_blobs WHERE origin_id='host' AND role='payload-after' AND text_sha256=?1",
+        [text_sha(&text)], |row| row.get::<_, i64>(0),
+    )).unwrap(), 1);
+        if !later_generation {
+            let notices = crate::list_refusal_notices(&store, "ws").unwrap();
+            assert_eq!(
+                notices[0].document.as_ref().unwrap().path.as_deref(),
+                Some(next.current_path.as_str())
+            );
+            next.current_path = "moved-again.md".into();
+            store
+                .read_with(|conn| {
+                    conn.execute(
+                        "UPDATE ydoc_owner_bindings SET binding_json=?1",
+                        [serde_json::to_string(&next).unwrap()],
+                    )
+                })
+                .unwrap();
+            let notices = crate::list_refusal_notices(&store, "ws").unwrap();
+            assert_eq!(
+                notices[0].document.as_ref().unwrap().path.as_deref(),
+                Some("moved-again.md")
+            );
+            store
+                .read_with(|conn| conn.execute("DELETE FROM ydoc_owner_bindings", []))
+                .unwrap();
+            let notices = crate::list_refusal_notices(&store, "ws").unwrap();
+            assert!(notices[0].document.as_ref().unwrap().path.is_none());
+        }
+    }
+}
+
 /// An owner observed at restore generation 0 and accepted cursor 0.
 struct RestoreOwner {
     _scratch: ScratchDir,
