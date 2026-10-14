@@ -189,7 +189,7 @@ test("verification prepares before parallel jobs and runs every JavaScript packa
             return {stdout:'compiled runtime'};
           }
           if(command==='pnpm' && args[0]==='install' && !existsSync(join(repoRoot,'.dohc-dev/verification/build.json.lock'))) {
-            assert.deepEqual(args,['install','--frozen-lockfile']);
+            assert.deepEqual(args,['install','--frozen-lockfile','--config.confirm-modules-purge=false']);
             writeFileSync(join(repoRoot,'node_modules/installed.txt'),readFileSync(join(repoRoot,'pnpm-lock.yaml')));
             return {stdout:''};
           }
