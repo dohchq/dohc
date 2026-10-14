@@ -572,6 +572,25 @@ describe("CloudSyncSettings", () => {
     expect(bridgeMock.cloudEnableSync).not.toHaveBeenCalled();
   });
 
+  it("lets a newer enable retire an older stop's retry", async () => {
+    bridgeMock.cloudStopSync.mockRejectedValueOnce(new Error("A live document could not settle."));
+    const enable = deferred<void>();
+    bridgeMock.cloudEnableSync.mockReturnValueOnce(enable.promise);
+    const settings = cloud({ ...SYNCED, workspaceSecretState: "protected-key-present" as const });
+    render(<CloudSyncSettings workspaceId="ws-1" cloud={settings} />);
+    fireEvent.click(syncSwitch());
+    await waitFor(() => expect(settings.onError).toHaveBeenCalledOnce());
+    const report = vi.mocked(settings.onError).mock.calls[0]![0];
+
+    fireEvent.click(screen.getByTestId("cloud-protect-secrets"));
+    fireEvent.change(screen.getByTestId("cloud-sync-passphrase"), { target: { value: "shared passphrase" } });
+    fireEvent.click(screen.getByTestId("cloud-sync-passphrase-submit"));
+    await waitFor(() => expect(bridgeMock.cloudEnableSync).toHaveBeenCalledOnce());
+
+    expect(report.retry?.()).toBe(false);
+    expect(bridgeMock.cloudStopSync).toHaveBeenCalledOnce();
+  });
+
   it("ignores an unlock that answers after sign-out", async () => {
     const enable = deferred<void>();
     bridgeMock.cloudEnableSync.mockReturnValueOnce(enable.promise);

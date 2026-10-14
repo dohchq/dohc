@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Sparkles } from "lucide-react";
 import type { CloudStatusResult } from "../../ipc/bridgeContract";
 import { buildSyncCode } from "../../workspaces/syncCode";
@@ -75,8 +75,9 @@ export function CloudSyncSettings(props: {
   const requests = useRequestSequence([props.workspaceId]);
   // Protect and Unlock turn sync on, which needs an account, so signing out
   // also drops an enable still waiting: its answer must not reopen the form.
+  // Counted apart from requests, so stops and enables still supersede each other.
   const signedOut = status?.connected === false;
-  const enables = useRequestSequence([props.workspaceId, signedOut]);
+  const signOuts = useRef(0);
 
   useEffect(() => {
     setSyncBusy(null);
@@ -87,6 +88,7 @@ export function CloudSyncSettings(props: {
   useEffect(() => setChanged(null), [status, props.workspaceId]);
   useEffect(() => {
     if (!signedOut) return;
+    signOuts.current += 1;
     setSyncBusy((busy) => (busy === "enable" ? null : busy));
     setSyncError(null);
     setPassphrasePurpose(null);
@@ -112,12 +114,13 @@ export function CloudSyncSettings(props: {
   }, [props.workspaceId, relayUrl, sync.workspaceSyncConnected, sync.workspaceSynced]);
 
   async function enableSync() {
-    const request = enables.next();
+    const request = requests.next();
+    const signOutsAtStart = signOuts.current;
     // The callbacks of the workspace this attempt is for. The page can close
     // before main answers, and the result still matters: the shell's status
     // and its notices hear it, for this workspace only.
     const cloud = props.cloud;
-    const here = () => enables.isCurrent(request);
+    const here = () => requests.isCurrent(request) && signOuts.current === signOutsAtStart;
     const purpose = passphrasePurpose;
     setSyncBusy("enable");
     setSyncError(null);
