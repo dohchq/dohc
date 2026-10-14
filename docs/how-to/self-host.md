@@ -245,6 +245,40 @@ Your provider's backups are the only backups of these accounts.
 A deployment archive does not include them.
 This guide does not move accounts from the bundled database to an external one.
 
+## Run behind Cloudflare
+
+For a public server behind Cloudflare, set `DOHC_BEHIND_CLOUDFLARE=1` in `.env.self-host`.
+The setup and recovery commands then add the Cloudflare gateway overlay.
+Leave it at `0` for direct public access or private Tailscale access.
+Caddy trusts only the shipped Cloudflare IPv4 and IPv6 ranges and reads `CF-Connecting-IP` from those peers.
+It forwards the resolved address to the services for their per-address rate limits.
+From any other peer, Caddy ignores client-address headers and uses the connection's address.
+
+Restrict inbound origin connections to Cloudflare's ranges with a firewall.
+Otherwise, a visitor can bypass Cloudflare and choose their own client-address headers.
+Caddy ignores those forged headers, but a direct connection still bypasses Cloudflare's controls.
+
+Configure Cloudflare to bypass caching for all account, relay, and share responses, including responses marked `private, no-store`.
+Disable bot challenges on `/sync/*` and `/s/*`.
+Agents use these routes with a share link alone and cannot complete browser challenges.
+Certificate setup behind Cloudflare is not covered yet.
+This overlay does not change Caddy's certificate handling.
+
+The release reads `tools/self-host/cloudflare-proxies.caddy` locally and never fetches ranges at startup.
+To refresh it from Cloudflare's published lists, run this command from the checkout or release bundle:
+
+```sh
+node scripts/self-host/refresh-cloudflare-ranges.mjs
+```
+
+Update the origin firewall to match the refreshed ranges.
+Restart the deployment to apply them:
+
+```sh
+node tools/self-host/bootstrap.mjs stop
+node tools/self-host/bootstrap.mjs start
+```
+
 ## Start and check the server
 
 ```sh
