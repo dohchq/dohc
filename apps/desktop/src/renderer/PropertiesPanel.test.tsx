@@ -256,6 +256,129 @@ describe("PropertiesPanel", () => {
     expect(words.hidden).toBe(true);
   });
 
+  describe("pills", () => {
+    it("keeps the keyboard order name, value, remove in each pill, then the +", async () => {
+      const user = userEvent.setup();
+      render(<PropertiesPanel body={"---\nowner: Sam\nstatus: Draft\n---\n"} onChange={vi.fn()} />);
+
+      await user.click(screen.getByLabelText("Property 1 name"));
+      const order = [document.activeElement];
+      for (let step = 0; step < 6; step += 1) {
+        await user.tab();
+        order.push(document.activeElement);
+      }
+      expect(order).toEqual([
+        screen.getByLabelText("Property 1 name"),
+        screen.getByLabelText("Property owner value"),
+        screen.getByLabelText("Remove property owner"),
+        screen.getByLabelText("Property 2 name"),
+        screen.getByLabelText("Property status value"),
+        screen.getByLabelText("Remove property status"),
+        screen.getByTestId("property-add"),
+      ]);
+    });
+
+    it("keeps Add a property as the +'s name and tooltip, and adds then removes a pill", async () => {
+      const user = userEvent.setup();
+      render(<ControlledPropertiesPanel initialBody={"---\nowner: Sam\n---\n\nBody"} />);
+      const add = screen.getByRole("button", { name: "Add a property" });
+      expect(add.getAttribute("title")).toBe("Add a property");
+      expect(add.textContent).toBe("");
+
+      await user.click(add);
+      expect(screen.getAllByTestId("property-row")).toHaveLength(2);
+      await user.type(screen.getByLabelText("Property 2 name"), "release");
+      await user.type(screen.getByLabelText("Property release value"), "September");
+      expect(screen.getByTestId("current-body").textContent).toBe("---\nowner: Sam\nrelease: September\n---\n\nBody");
+
+      await user.click(screen.getByLabelText("Remove property owner"));
+      expect(screen.getAllByTestId("property-row")).toHaveLength(1);
+      expect(screen.getByTestId("current-body").textContent).toBe("---\nrelease: September\n---\n\nBody");
+    });
+
+    it("moves focus to the new pill's name after an add", async () => {
+      const user = userEvent.setup();
+      render(<ControlledPropertiesPanel initialBody={"---\nowner: Sam\n---\n\nBody"} />);
+
+      await user.click(screen.getByTestId("property-add"));
+      expect(document.activeElement).toBe(screen.getByLabelText("Property 2 name"));
+      await user.keyboard("release");
+      expect((screen.getByLabelText("Property 2 name") as HTMLInputElement).value).toBe("release");
+    });
+
+    it("moves focus after a remove to the next pill, else the one before, else the +", async () => {
+      const user = userEvent.setup();
+      render(<ControlledPropertiesPanel initialBody={"---\nowner: Sam\nrelease: September\nstatus: Draft\n---\n\nBody"} />);
+
+      // The middle pill: the next one takes its place.
+      screen.getByLabelText("Remove property release").focus();
+      await user.keyboard("{Enter}");
+      expect(screen.getAllByTestId("property-row")).toHaveLength(2);
+      expect(document.activeElement).toBe(screen.getAllByTestId("property-key")[1]);
+      expect((document.activeElement as HTMLInputElement).value).toBe("status");
+
+      // The last pill: the one before it.
+      screen.getByLabelText("Remove property status").focus();
+      await user.keyboard("{Enter}");
+      expect(document.activeElement).toBe(screen.getAllByTestId("property-key")[0]);
+      expect((document.activeElement as HTMLInputElement).value).toBe("owner");
+
+      // The only pill: the +.
+      screen.getByLabelText("Remove property owner").focus();
+      await user.keyboard("{Enter}");
+      expect(screen.queryAllByTestId("property-row")).toHaveLength(0);
+      expect(document.activeElement).toBe(screen.getByTestId("property-add"));
+    });
+
+    it.each([false, true])("offers no + and no × on a block written on one line (shared: %s)", (shared) => {
+      const body = "---\n{status: draft, owner: Sam}\n---\n\nBody";
+      const doc = markdownToYDoc(body);
+      try {
+        render(shared ? <PropertiesPanel ydoc={doc} /> : <PropertiesPanel body={body} onChange={vi.fn()} />);
+        expect(screen.getByTestId("properties-locked").textContent).toBe("Edit in Source");
+        expect(screen.getAllByTestId("property-row")).toHaveLength(2);
+        expect(screen.queryByTestId("property-add")).toBeNull();
+        expect(screen.queryAllByTestId("property-remove")).toHaveLength(0);
+      } finally { doc.destroy(); }
+    });
+
+    it("keeps a long value whole in its tooltip", () => {
+      const value = "https://example.com/a/very/long/path/that/keeps/going/past/the/width/of/one/pill";
+      render(<PropertiesPanel body={`---\nlink: ${value}\n---\n`} onChange={vi.fn()} />);
+      const input = screen.getByLabelText("Property link value") as HTMLInputElement;
+      expect(input.value).toBe(value);
+      expect(input.title).toBe(value);
+      expect(input.className).toContain("text-ellipsis");
+    });
+
+    it("shows the + alone, hidden until hover or focus, on a page with no properties", () => {
+      render(<PropertiesPanel body={"Body"} onChange={vi.fn()} />);
+      expect(screen.queryAllByTestId("property-row")).toHaveLength(0);
+      const add = screen.getByTestId("property-add");
+      expect(add.className).toContain("opacity-0");
+      expect(add.className).toContain("group-hover/topmatter:opacity-100");
+      expect(add.className).toContain("focus-visible:opacity-100");
+    });
+
+    it("flags a reserved or duplicate name in its pill in place of the value", async () => {
+      const user = userEvent.setup();
+      render(<ControlledPropertiesPanel initialBody={"---\nowner: Sam\nstatus: Draft\n---\n"} />);
+
+      await user.clear(screen.getByLabelText("Property 2 name"));
+      await user.type(screen.getByLabelText("Property 2 name"), "owner");
+      const rows = screen.getAllByTestId("property-row");
+      expect(screen.getAllByTestId("property-duplicate").map((flag) => flag.closest('[data-testid="property-row"]'))).toEqual(rows);
+      expect(screen.queryAllByTestId("property-value")).toHaveLength(0);
+      expect(screen.getByTestId("current-body").textContent).toBe("---\nowner: Sam\nstatus: Draft\n---\n");
+
+      await user.clear(screen.getByLabelText("Property 2 name"));
+      await user.type(screen.getByLabelText("Property 2 name"), "icon");
+      const reserved = screen.getByTestId("property-reserved");
+      expect(reserved.closest('[data-testid="property-row"]')).toBe(screen.getAllByTestId("property-row")[1]);
+      expect(screen.getAllByTestId("property-value")).toHaveLength(1);
+    });
+  });
+
   it("hides the reserved icon key from the user property rows", () => {
     render(
       <PropertiesPanel
@@ -359,9 +482,11 @@ describe("PropertiesPanel", () => {
     const initialBody = `---\n# Keep\n${yaml}\n---\n\n# Plan\n`;
     render(<ControlledPropertiesPanel initialBody={initialBody} />);
 
-    expect(screen.getByTestId("properties-locked")).toBeTruthy();
+    expect(screen.getByTestId("properties-locked").textContent).toBe("Edit in Source");
     await user.type(screen.getByLabelText("Property status value"), "x");
-    await user.click(screen.getByLabelText("Remove property score"));
+    // A locked block offers no + and no ×, which could do nothing.
+    expect(screen.queryByTestId("property-add")).toBeNull();
+    expect(screen.queryAllByTestId("property-remove")).toHaveLength(0);
 
     expect(screen.getByTestId("current-body").textContent).toBe(initialBody);
   });
