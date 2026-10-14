@@ -262,7 +262,7 @@ test("verification prepares before parallel jobs and runs every JavaScript packa
           }
           if(command==='pnpm' && args[2]==='run' && ['test','test:unit'].includes(args[3])) {
             assert.deepEqual(args.slice(0,5),['--filter',args[1],'run',...(args[1]==='@dohc/desktop'?['test:unit','--maxWorkers=${desktopWorkers}']:['test','--maxWorkers=4'])]);
-            assert.deepEqual(args.slice(5,7),['--retry=1','--reporter=default']);assert.match(args[7],/flaky-reporter.mjs$/);assert.equal(args.length,8);
+            assert.deepEqual(args.slice(5,7),['--retry=1','--reporter=default']);assert.match(args[7],/test-record-reporter.mjs$/);assert.equal(args.length,8);
             assert.ok(${JSON.stringify(packages)}.includes(args[1]),'Unknown package executed: '+args[1]);
             assert.equal(options.env.POSTGRES_URL,'postgres://dohc:dohc@127.0.0.1:1234/dohc');
             for(const flag of ['DOHC_REQUIRE_POSTGRES','DOHC_REQUIRE_ENGINE_E2E'])assert.equal(options.env[flag],'1');

@@ -185,7 +185,7 @@ function fixtureRepo() {
 }
 
 /** A service on a private root with a stub verifier: request.checkout names its behavior. */
-function harness(t, { timeLimitMs = 60_000, docker = async () => true, sweep = async () => 0, hostFails = () => {}, holdLane = async () => ({ release() {} }), prepare = async () => {}, prepareLimitMs, lanes, cleanupRetryMs = 50 } = {}) {
+function harness(t, { timeLimitMs = 60_000, docker = async () => true, sweep = async () => 0, hostFails = () => {}, holdLane = async () => ({ release() {} }), prepare = async () => {}, prepareLimitMs, lanes, cleanupRetryMs = 50, freeMemory = () => 32 } = {}) {
   const root = mkdtempSync(join(tmpdir(), "dohc-queue-"));
   const fixture = fixtureRepo();
   const calls = [];
@@ -195,8 +195,10 @@ function harness(t, { timeLimitMs = 60_000, docker = async () => true, sweep = a
     const receipt = fields => writeFileSync(join(output, "result.json"), JSON.stringify({ grant, commit: grant.head, baseCommit: grant.base, final: true, ...fields }));
     const behavior = request.checkout;
     if (behavior === "pass") receipt({ verdict: "PASS" });
-    else if (behavior === "pass-on-retry") receipt({ verdict: "PASS", flaky: [{ step: "repository", test: "times out under load" }] });
+    else if (behavior === "pass-on-retry") receipt({ verdict: "PASS", flaky: [{ step: "repository", test: "times out under load" }],
+      timings: [{ name: "tests", seconds: 1260.4 }, { name: "rust", seconds: 990.2 }], slowest: [{ step: "desktop", test: "restarts", seconds: 66 }] });
     else if (behavior === "fail") receipt({ verdict: "FAIL", error: "a test failed", failure: { kind: "check", cause: "tests" } });
+    else if (behavior === "slow-fail") { await sleep(300); receipt({ verdict: "FAIL", error: "a test failed", failure: { kind: "check", cause: "tests" } }); }
     else if (behavior === "fail-as-host-fails") { hostFails(calls.length); receipt({ verdict: "FAIL", error: "a test failed", failure: { kind: "check", cause: "tests" } }); }
     else if (behavior === "flaky-host") receipt(calls.filter(call => call.id === grant.request).length === 1
       ? { verdict: "FAIL", error: "Docker did not answer", failure: { kind: "environment", cause: "postgres-start" } } : { verdict: "PASS" });
@@ -209,7 +211,7 @@ function harness(t, { timeLimitMs = 60_000, docker = async () => true, sweep = a
   };
   const service = runService({ root, repo: fixture.repo, lane: join(root, "lane"), tickMs: 20, timeLimitMs, floorGb: 1,
     freeDisk: () => 100, docker, prepare, sweep, prepareLimitMs,
-    holdLane, worker, retryDelay: () => 50, cleanupRetryMs, lanes, stop: stop.signal, log: () => {} });
+    holdLane, worker, retryDelay: () => 50, cleanupRetryMs, lanes, freeMemory, stop: stop.signal, log: () => {} });
   t.after(async () => { stop.abort(); await service; rmSync(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 }); rmSync(fixture.repo, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 }); });
   const request = async (behavior, fields = {}) => {
     // Each behavior verifies its own commit: one commit with the same gates is one piece of work.
@@ -333,8 +335,13 @@ test("a pass with tests that needed a retry records them in its attempt and the 
   const expected = [{ step: "repository", test: "times out under load" }];
   assert.equal(passed.status.verdict, "PASS");
   assert.deepEqual(passed.status.attempts[0].flaky, expected);
+  assert.deepEqual(passed.status.attempts[0].steps, { tests: 1260, rust: 990 });
+  assert.deepEqual(passed.status.attempts[0].slowest, [{ step: "desktop", test: "restarts", seconds: 66 }]);
   const finished = readFileSync(queuePaths(root).history, "utf8").trim().split("\n").map(line => JSON.parse(line)).find(event => event.event === "finished" && event.id === passed.id);
   assert.deepEqual(finished.flaky, expected);
+  // The history keeps the step times and slowest tests for the weekly review.
+  assert.deepEqual(finished.steps, { tests: 1260, rust: 990 });
+  assert.deepEqual(finished.slowest, [{ step: "desktop", test: "restarts", seconds: 66 }]);
 });
 
 test("an attempt that never sampled the host records its load as null", async t => {
@@ -371,6 +378,29 @@ test("a request's cleanup removes only its containers, and the sweep never one a
 test("each lane has its own temp folder under the queue root", () => {
   assert.equal(laneTemp(join("C:", "w", "_verification", "lane")), join("C:", "w", "_verification", "tmp", "lane"));
   assert.equal(laneTemp(join("C:", "w", "_verification", "lane-2")), join("C:", "w", "_verification", "tmp", "lane-2"));
+});
+
+test("another run waits while free memory is low, but a lone run still starts", async t => {
+  let memory = 5;
+  const { root, request, calls } = harness(t, { lanes: () => 2, freeMemory: () => memory });
+  const state = id => listRequests(root).find(candidate => candidate.id === id).status.state;
+  const first = await request("hang");
+  await waitFor(() => calls.find(call => call.id === first.id), "a lone run starts on low memory");
+  const second = await request("hang");
+  // A later acceptance means the service has decided about the second since it arrived.
+  await request("pass", { branch: "refs/heads/later" });
+  assert.equal(state(second.id), "queued", "the second run waits for memory");
+  await waitFor(() => /waiting for memory/u.test(readJson(queuePaths(root).service)?.health?.reason ?? "") || null, "status says why", 20_000);
+  memory = 20;
+  await waitFor(() => calls.find(call => call.id === second.id), "the second run starts once memory is back");
+  await cancel(root, first.id);
+  await cancel(root, second.id);
+});
+
+test("a check that fails after free memory ran out is retried as a machine failure", async t => {
+  const { request, calls } = harness(t, { freeMemory: () => 1 });
+  const failed = await request("slow-fail");
+  await waitFor(() => calls.filter(call => call.id === failed.id).length >= 2, "the failure must be retried");
 });
 
 test("a submission the service cannot verify is rejected with a reason", async t => {
