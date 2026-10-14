@@ -9,7 +9,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { attemptOutcome, cancel, listRequests, nextRequest, placeSubmission, position, queuePaths, readJson, serviceRuns, startsInMs, submit, taskDefinition, terminalStates, writeJson } from "./queue.mjs";
-import { runService, sweepContainers } from "./queue-service.mjs";
+import { laneTemp, runService, sweepContainers } from "./queue-service.mjs";
 import { failureKind, takeGrant } from "./verify.mjs";
 import { run } from "./process.mjs";
 
@@ -151,7 +151,7 @@ function harness(t, { timeLimitMs = 60_000, docker = async () => true, sweep = a
     else if (behavior === "host-down") receipt({ verdict: "FAIL", error: "Docker did not answer", failure: { kind: "environment", cause: "postgres-start" } });
     // Two slow machine failures, then a run that ends only when it is stopped.
     else if (behavior === "slow-host" && calls.filter(call => call.id === grant.request).length > 2) await new Promise(done => signal.addEventListener("abort", done, { once: true }));
-    else if (behavior === "slow-host") { await sleep(600); receipt({ verdict: "FAIL", error: "Docker did not answer", failure: { kind: "environment", cause: "postgres-start" } }); }
+    else if (behavior === "slow-host") { await sleep(3000); receipt({ verdict: "FAIL", error: "Docker did not answer", failure: { kind: "environment", cause: "postgres-start" } }); }
   };
   const service = runService({ root, repo: fixture.repo, lane: join(root, "lane"), tickMs: 20, timeLimitMs, floorGb: 1,
     freeDisk: () => 100, docker, prepare, sweep, prepareLimitMs,
@@ -245,6 +245,13 @@ test("two lanes run two requests at once, each in its own checkout, and the next
   await cancel(root, first.id);
   assert.equal((await settled(first.id)).status.state, "cancelled");
   assert.equal(state(second.id), "running", "a stop reaches only its own run");
+  // Each attempt records the load it verified under, in its status and in the history.
+  const load = listRequests(root).find(candidate => candidate.id === first.id).status.attempts[0].load;
+  assert.equal(load.lanes, 2);
+  assert.equal(load.peakRuns, 2);
+  assert.ok(load.minFreeMemGb > 0 && load.cpuBusyPercent >= 0 && load.cpuBusyPercent <= 100, JSON.stringify(load));
+  const finished = readFileSync(queuePaths(root).history, "utf8").trim().split("\n").map(line => JSON.parse(line)).find(event => event.event === "finished" && event.id === first.id);
+  assert.deepEqual(finished.load, load);
   assert.equal((await settled(third.id)).status.verdict, "PASS");
   assert.equal(calls.find(call => call.id === third.id).lane, one.lane, "the next run takes the freed checkout");
   await cancel(root, second.id);
@@ -264,6 +271,14 @@ test("a requested restart starts nothing new and waits for the runs in flight", 
   assert.equal((await settled(hung.id)).status.state, "cancelled");
   assert.equal(await service, 75);
   assert.equal(state(), "queued");
+});
+
+test("an attempt that never sampled the host records its load as null", async t => {
+  const { root, request, settled } = harness(t);
+  const passed = await settled((await request("pass")).id);
+  assert.ok("load" in passed.status.attempts[0], "the attempt row names its load");
+  const finished = readFileSync(queuePaths(root).history, "utf8").trim().split("\n").map(line => JSON.parse(line)).find(event => event.event === "finished" && event.id === passed.id);
+  assert.ok("load" in finished, "the history event names its load");
 });
 
 test("a lane setting that cannot be read keeps the lane count the service had, for its slots too", async t => {
@@ -287,6 +302,11 @@ test("a request's cleanup removes only its containers, and the sweep never one a
   removed = [];
   assert.equal(await sweepContainers({ command }), 1);
   assert.deepEqual(removed, ["exited"]);
+});
+
+test("each lane has its own temp folder under the queue root", () => {
+  assert.equal(laneTemp(join("C:", "w", "_verification", "lane")), join("C:", "w", "_verification", "tmp", "lane"));
+  assert.equal(laneTemp(join("C:", "w", "_verification", "lane-2")), join("C:", "w", "_verification", "tmp", "lane-2"));
 });
 
 test("a submission the service cannot verify is rejected with a reason", async t => {
@@ -444,8 +464,9 @@ test("a check that fails while Docker stops answering is retried, and fails on a
 });
 
 test("retries share one time budget, so a request the host keeps failing late ends in error", async t => {
-  // Each slow attempt takes about 650 ms of the 1 s limit, so two leave the third less than its limit of the 2 s budget.
-  const { request, settled } = harness(t, { timeLimitMs: 1000 });
+  // Each slow attempt takes at least 3 s of the 5 s limit, so two leave the third less than its limit of the 10 s budget.
+  // The 2 s margins hold on a host whose CPU is saturated by other gates.
+  const { request, settled } = harness(t, { timeLimitMs: 5000 });
   const slow = await request("slow-host");
   const ended = await settled(slow.id);
   assert.equal(ended.status.state, "error", "only machine failures retry, so a spent budget gives no verdict");
