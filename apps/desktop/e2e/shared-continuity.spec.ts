@@ -349,8 +349,9 @@ const declaredAuthor = (declaration: Declaration) => expect.objectContaining({
 
 /** The moment that wrote `text` names the declared agent, in its list row and its detail alike. */
 async function expectDeclaredMoment(page: Page, workspaceId: string, text: string, declaration: Declaration): Promise<IntroducingMoment> {
+  let moment: IntroducingMoment | null | undefined;
   try {
-    await expect.poll(async () => (await momentIntroducing(page, workspaceId, text))?.authors ?? [], { timeout: 60_000, intervals: [1_000] })
+    await expect.poll(async () => (moment = await momentIntroducing(page, workspaceId, text))?.authors ?? [], { timeout: 60_000, intervals: [1_000] })
       .toContainEqual(declaredAuthor(declaration));
   } catch (error) {
     const evidence = await readHistoryMoments(page, workspaceId, PATH).then(rows => page.evaluate(async ({ workspaceId, path, text, rows }) => {
@@ -371,9 +372,8 @@ async function expectDeclaredMoment(page: Page, workspaceId: string, text: strin
     }).catch(() => undefined);
     throw error;
   }
-  const moment = (await momentIntroducing(page, workspaceId, text))!;
-  expect(moment.listed).toEqual(moment.authors);
-  return moment;
+  expect(moment!.listed).toEqual(moment!.authors);
+  return moment!;
 }
 
 /**
@@ -646,8 +646,11 @@ test("@shared-continuity a live document keeps its person's and agent's work thr
       await expect(async () => {
         expect(await momentIds(page, recipientWorkspaceId, HIDDEN)).toEqual([]);
       }).toPass({ timeout: 30_000 });
-      const guessed = await momentIds(owner!.page, workspace.workspaceId, HIDDEN);
-      expect(guessed.length).toBeGreaterThan(0);
+      let guessed: string[] = [];
+      await expect(async () => {
+        guessed = await momentIds(owner!.page, workspace.workspaceId, HIDDEN);
+        expect(guessed.length).toBeGreaterThan(0);
+      }).toPass({ timeout: 30_000 });
       for (const momentId of guessed) {
         expect(await page.evaluate(payload =>
           (window as unknown as { dohcDesktop: Api }).dohcDesktop.readEngineMoment(payload), { workspaceId: recipientWorkspaceId, momentId })).toEqual({ moment: null });
@@ -735,7 +738,10 @@ test("@shared-continuity a live document keeps its person's and agent's work thr
           recipientUserId,
           ydocUpdateAuthors: ydocUpdateAuthors(ownerTemp.rootPath),
           sharedRestoreRemoved: await removed.innerText(),
-          ownerHistory: await readHistoryMoments(page, workspace.workspaceId, PATH),
+          ownerHistory: await page.evaluate(async ({ workspaceId, path }) => {
+            const history = await (window as unknown as { dohcDesktop: Api }).dohcDesktop.listEngineMoments({ workspaceId, limit: 50 });
+            return "moments" in history ? history.moments.filter(moment => moment.path === path) : history;
+          }, { workspaceId: workspace.workspaceId, path: PATH }),
         }, null, 2),
       });
       await dialog.getByRole("button", { name: "Restore file" }).click();
