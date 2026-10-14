@@ -4204,7 +4204,7 @@ pub fn apply_ydoc_envelope(
     faults: &dyn FaultInjector,
     leases: &dyn LeaseProbe,
 ) -> Result<ApplyOutcome<YdocApplyResult>, SyncError> {
-    apply_ydoc_envelope_in_batch(store, cache, envelope, faults, leases, false)
+    apply_ydoc_envelope_in_batch(store, cache, envelope, faults, leases, false, None)
 }
 
 pub(crate) fn apply_ydoc_envelope_in_batch(
@@ -4214,9 +4214,18 @@ pub(crate) fn apply_ydoc_envelope_in_batch(
     faults: &dyn FaultInjector,
     leases: &dyn LeaseProbe,
     batch_inactive: bool,
+    hold: Option<&crate::ReleaseHold>,
 ) -> Result<ApplyOutcome<YdocApplyResult>, SyncError> {
     if envelope.op_kind != "ydoc.update" {
         return Err(SyncError::UnsupportedOperation);
+    }
+    if matches!(
+        envelope.settlement_admission,
+        Some(crate::SettlementAdmission::ReleaseRefused { .. })
+    ) {
+        return crate::apply_envelope_with(store, envelope, faults, |_, _| {
+            Err(SyncError::CoordinateDiverged)
+        });
     }
     let payload: YdocUpdatePayload = match Deserialize::deserialize(&envelope.payload) {
         Ok(payload) => payload,
@@ -4320,6 +4329,22 @@ pub(crate) fn apply_ydoc_envelope_in_batch(
             reason: "pulled ydoc.update is missing its relay sequence",
         });
     };
+    if let Some(hold) = hold {
+        dohc_engine_collab::Ydoc::validate_update(&bytes).map_err(|error| {
+            map_collab_payload_error(error, "ydoc.update bytes fail durable validation")
+        })?;
+        return crate::apply_envelope_with(store, envelope, faults, |tx, op| {
+            validate_retryable_ydoc_identity(tx, &key, &payload.path)?;
+            hold.retain_in(tx, op)?;
+            Ok(YdocApplyResult {
+                deferred: true,
+                reason: Some("release-held"),
+                conflicts_opened: 0,
+                lineage_replacement: None,
+                record_facts: Vec::new(),
+            })
+        });
+    }
     if let Some(echo) =
         store.read_with(|conn| live_ordinary_classification(conn, &key, &payload, &bytes))?
     {

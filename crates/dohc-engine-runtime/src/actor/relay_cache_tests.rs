@@ -129,6 +129,7 @@ async fn push(actor: &ActorHandle) {
                     RelayIoRequest::Push(request) if request.ops.is_empty() => {
                         RelayIoResponse::Push(PushResponse {
                             settlement_refusals: Vec::new(),
+                            release_refusals: Vec::new(),
                             accepted: 0,
                             inserted: 0,
                             skipped: 0,
@@ -141,6 +142,7 @@ async fn push(actor: &ActorHandle) {
                     }),
                     RelayIoRequest::Push(request) => RelayIoResponse::Push(PushResponse {
                         settlement_refusals: Vec::new(),
+                        release_refusals: Vec::new(),
                         accepted: request.ops.len(),
                         inserted: request.ops.len(),
                         skipped: 0,

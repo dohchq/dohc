@@ -48,18 +48,100 @@ pub struct ReplicationEnvelope {
     pub recorded_at_ms: i64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "status", rename_all = "camelCase", deny_unknown_fields)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SettlementAdmission {
     Accepted {
-        #[serde(rename = "settlementId")]
         settlement_id: String,
     },
     Refused {
-        #[serde(rename = "settlementId")]
         settlement_id: String,
         reason: String,
     },
+    ReleaseRefused {
+        release_digest: String,
+        reason: String,
+    },
+}
+
+impl<'de> Deserialize<'de> for SettlementAdmission {
+    fn deserialize<D: serde::Deserializer<'de>>(decoder: D) -> Result<Self, D::Error> {
+        // Ordinary admissions decode directly into strings, without a JSON tree.
+        fn present<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<String>, D::Error> {
+            String::deserialize(d).map(Some)
+        }
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase", deny_unknown_fields)]
+        struct Wire {
+            status: String,
+            #[serde(default, deserialize_with = "present")]
+            settlement_id: Option<String>,
+            #[serde(default, deserialize_with = "present")]
+            reason: Option<String>,
+            #[serde(default, deserialize_with = "present")]
+            kind: Option<String>,
+            #[serde(default, deserialize_with = "present")]
+            release_digest: Option<String>,
+        }
+        let wire = Wire::deserialize(decoder)?;
+        match (
+            wire.status.as_str(),
+            wire.settlement_id,
+            wire.reason,
+            wire.kind,
+            wire.release_digest,
+        ) {
+            ("accepted", Some(settlement_id), None, None, None) => {
+                Ok(Self::Accepted { settlement_id })
+            }
+            ("refused", Some(settlement_id), Some(reason), None, None) => Ok(Self::Refused {
+                settlement_id,
+                reason,
+            }),
+            ("refused", None, Some(reason), Some(kind), Some(release_digest))
+                if kind == "release-publication" =>
+            {
+                Ok(Self::ReleaseRefused {
+                    release_digest,
+                    reason,
+                })
+            }
+            _ => Err(serde::de::Error::custom("invalid publication admission")),
+        }
+    }
+}
+impl Serialize for SettlementAdmission {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let mut map = serializer.serialize_map(Some(match self {
+            Self::Accepted { .. } => 2,
+            Self::Refused { .. } => 3,
+            Self::ReleaseRefused { .. } => 4,
+        }))?;
+        match self {
+            SettlementAdmission::Accepted { settlement_id } => {
+                map.serialize_entry("status", "accepted")?;
+                map.serialize_entry("settlementId", settlement_id)?;
+            }
+            SettlementAdmission::Refused {
+                settlement_id,
+                reason,
+            } => {
+                map.serialize_entry("status", "refused")?;
+                map.serialize_entry("settlementId", settlement_id)?;
+                map.serialize_entry("reason", reason)?;
+            }
+            SettlementAdmission::ReleaseRefused {
+                release_digest,
+                reason,
+            } => {
+                map.serialize_entry("status", "refused")?;
+                map.serialize_entry("kind", "release-publication")?;
+                map.serialize_entry("releaseDigest", release_digest)?;
+                map.serialize_entry("reason", reason)?;
+            }
+        }
+        map.end()
+    }
 }
 impl ReplicationEnvelope {
     pub(crate) fn validate(&self) -> Result<(), crate::SyncError> {

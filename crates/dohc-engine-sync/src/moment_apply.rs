@@ -11,7 +11,7 @@ use std::cmp::Ordering;
 use crate::file_search::{
     delete_file_search_index, search_policy_for_store, upsert_file_search_index,
 };
-use crate::{ApplyOutcome, LeaseProbe, ReplicationEnvelope, SyncError, apply_envelope_with};
+use crate::{ApplyOutcome, LeaseProbe, ReplicationEnvelope, SyncError};
 
 #[cfg(test)]
 mod openhold_measurement;
@@ -74,6 +74,8 @@ pub(crate) struct ConflictEffectOwner {
 enum MomentApplyMode {
     Ordinary,
     ConflictParent,
+    Hold,
+    Included,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -370,12 +372,23 @@ pub fn apply_moment_envelope_detailed(
     faults: &dyn FaultInjector,
     leases: &dyn LeaseProbe,
 ) -> Result<ApplyOutcome<MomentApplyResult>, SyncError> {
+    apply_moment_with_hold(store, envelope, faults, leases, None, None)
+}
+
+pub(crate) fn apply_moment_with_hold(
+    store: &mut EngineStore,
+    envelope: &ReplicationEnvelope,
+    faults: &dyn FaultInjector,
+    leases: &dyn LeaseProbe,
+    hold: Option<&crate::ReleaseHold>,
+    replay: Option<&crate::release_hold::ReplayPermit<'_>>,
+) -> Result<ApplyOutcome<MomentApplyResult>, SyncError> {
     if envelope.op_kind != "moment.append" {
         return Err(SyncError::UnsupportedOperation);
     }
     envelope.validate()?;
     let search_policy = search_policy_for_store(store);
-    apply_envelope_with(store, envelope, faults, |tx, envelope| {
+    crate::apply::apply_envelope_with_replay(store, envelope, faults, replay, |tx, envelope| {
         let mut payload: MomentAppendPayload = Deserialize::deserialize(&envelope.payload)
             .map_err(|_| SyncError::InvalidInput {
                 reason: "moment.append payload is malformed",
@@ -422,8 +435,37 @@ pub fn apply_moment_envelope_detailed(
             });
         }
         verify_direct_write_author(tx, envelope, &payload)?;
+        if let Some(hold) = hold {
+            // Validate through the ordinary path without changing visible state.
+            if payload.conflict_id.is_some() || payload.conflict_effect_index.is_some() {
+                tx.execute_batch("SAVEPOINT release_hold_validation")
+                    .map_err(SyncError::persist)?;
+                crate::conflict_resolve_v1::verify_imported_conflict_effect_in_tx(tx, envelope)?;
+                tx.execute_batch(
+                    "ROLLBACK TO release_hold_validation; RELEASE release_hold_validation",
+                )
+                .map_err(SyncError::persist)?;
+            } else {
+                apply_moment_append(
+                    tx,
+                    envelope,
+                    &payload,
+                    search_policy.as_ref(),
+                    MomentApplyMode::Hold,
+                    false,
+                    None,
+                )?;
+            }
+            hold.retain_in(tx, envelope)?;
+            return Ok(crate::apply::MutationOutcome::Applied(MomentApplyResult {
+                conflicts_opened: 0,
+                materialization_changes: Vec::new(),
+                record_facts: None,
+            }));
+        }
         if payload.conflict_id.is_some() || payload.conflict_effect_index.is_some() {
-            return crate::conflict_resolve_v1::verify_imported_conflict_effect_in_tx(tx, envelope);
+            return crate::conflict_resolve_v1::verify_imported_conflict_effect_in_tx(tx, envelope)
+                .map(crate::apply::MutationOutcome::Applied);
         }
         let key = DocKey::new(
             &envelope.workspace_id,
@@ -437,18 +479,38 @@ pub fn apply_moment_envelope_detailed(
             && !(payload.operation == "write"
                 && is_ydoc_settlement_moment_id(&payload.moment_id)
                 && is_bound_owner(tx, &key));
-        apply_moment_append(
+        let mode = if let Some(replay) = replay {
+            let pending:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM owner_pending_settlements WHERE workspace_id=?1 AND origin_id=?2 AND origin_seq=?3)",params![envelope.workspace_id,envelope.origin_id,envelope.origin_seq],|r|r.get(0)).map_err(SyncError::corrupt)?;
+            if pending {
+                if !replay.included_in(tx)? {
+                    return Err(SyncError::RetryableState {
+                        reason: "release settlement is not in the sealed cut",
+                    });
+                }
+                MomentApplyMode::Included
+            } else {
+                MomentApplyMode::Ordinary
+            }
+        } else {
+            MomentApplyMode::Ordinary
+        };
+        let result = apply_moment_append(
             tx,
             envelope,
             &payload,
             search_policy.as_ref(),
-            MomentApplyMode::Ordinary,
+            mode,
             content_held,
             content_held
                 .then(|| leases.bound_claim(&key))
                 .flatten()
                 .as_deref(),
-        )
+        )?;
+        if replay.is_some() {
+            tx.execute("UPDATE release_held_ops SET record_facts_json=?4 WHERE workspace_id=?1 AND origin_id=?2 AND origin_seq=?3",
+                params![envelope.workspace_id,envelope.origin_id,envelope.origin_seq,result.record_facts.as_ref().map(serde_json::to_string).transpose().map_err(SyncError::corrupt)?]).map_err(SyncError::persist)?;
+        }
+        Ok(crate::apply::MutationOutcome::Applied(result))
     })
 }
 
@@ -686,6 +748,70 @@ fn apply_moment_append(
 
     validate_payload_sides(tx, payload)?;
     let remote_before = moment_before_from_payload(tx, payload)?;
+
+    if mode == MomentApplyMode::Hold {
+        let key = DocKey::new(
+            &envelope.workspace_id,
+            &payload.version_id,
+            &payload.object_id,
+        )
+        .map_err(|_| SyncError::CoordinateDiverged)?;
+        if let Some(owner) =
+            dohc_engine_collab::owner_outbox::draft::descriptor_for_key_in(tx, &key)
+                .map_err(SyncError::corrupt)?
+            && is_ydoc_settlement_moment_id(&payload.moment_id)
+        {
+            if let Some(cursor) = crate::live_audit::owner_settlement_cursor_in(
+                tx,
+                &owner,
+                &payload.moment_id,
+                &payload.payload_after_blob_sha256,
+            )? {
+                pending::enqueue(
+                    tx,
+                    envelope,
+                    payload,
+                    &owner.relay_database_namespace,
+                    &owner.binding,
+                    cursor,
+                )?;
+            } else if let Some((binding, cursor)) =
+                crate::live_audit::restore_successor_settlement_in(
+                    tx,
+                    &owner,
+                    &payload.moment_id,
+                    &payload.payload_after_blob_sha256,
+                )?
+            {
+                pending::enqueue(
+                    tx,
+                    envelope,
+                    payload,
+                    &owner.relay_database_namespace,
+                    &binding,
+                    cursor,
+                )?;
+            } else {
+                return Err(SyncError::RetryableState {
+                    reason: "release settlement audit is not ready",
+                });
+            }
+        }
+        return Ok(MomentApplyResult {
+            conflicts_opened: 0,
+            materialization_changes: Vec::new(),
+            record_facts: None,
+        });
+    }
+    if mode == MomentApplyMode::Included {
+        ensure_file_object(tx, &envelope.workspace_id, payload)?;
+        insert_moment(tx, &envelope.workspace_id, payload, &remote_before, true)?;
+        return Ok(MomentApplyResult {
+            conflicts_opened: 0,
+            materialization_changes: Vec::new(),
+            record_facts: None,
+        });
+    }
 
     if mode == MomentApplyMode::Ordinary
         && payload.operation == "write"

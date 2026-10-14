@@ -718,6 +718,7 @@ impl RelayTransport for HttpRelayTransport {
         )?;
         Ok(PushResponse {
             settlement_refusals: wire.settlement_refusals,
+            release_refusals: wire.release_refusals,
             accepted: wire.accepted,
             inserted: wire.inserted,
             skipped: wire.skipped,
@@ -987,6 +988,7 @@ impl RelayTransport for HttpRelayTransport {
         )?;
         Ok(PushResponse {
             settlement_refusals: wire.settlement_refusals,
+            release_refusals: wire.release_refusals,
             accepted: wire.accepted,
             inserted: wire.inserted,
             skipped: wire.skipped,
@@ -1524,6 +1526,8 @@ struct WireCollectionWriteError {
 struct WirePushResponse {
     #[serde(default)]
     settlement_refusals: Vec<dohc_engine_sync::SettlementPublicationRefusal>,
+    #[serde(default)]
+    release_refusals: Vec<dohc_engine_sync::ReleasePublicationRefusal>,
     accepted: usize,
     inserted: usize,
     skipped: usize,
@@ -1968,6 +1972,46 @@ mod tests {
                 .map(String::as_str)
                 .collect::<BTreeSet<_>>(),
             BTreeSet::from(["originSeq", "opKind", "payload", "recordedAtMs"])
+        );
+    }
+
+    #[test]
+    fn release_push_reads_its_separate_refusal_field() {
+        let op = dohc_engine_sync::ReplicationEnvelope {
+            workspace_id: "ws".into(),
+            origin_id: "origin".into(),
+            origin_seq: 0,
+            relay_seq: None,
+            op_kind: "ydoc.update".into(),
+            recorded_at_ms: 7,
+            settlement_admission: None,
+            admitted_author_snapshot: None,
+            payload: serde_json::json!({"versionId":"main","objectId":"object","path":"doc.md",
+                "lineageClaimId":"a".repeat(64),"updateBlobSha256":"b".repeat(64),"contentKind":"richdoc","isBaseState":false,
+                "release":{"releaseDigest":"c".repeat(64),"restoreFenceGeneration":0,"document":{"workspaceId":"ws","mainVersionId":"main","objectId":"object","lineageClaimId":"a".repeat(64)}}}),
+        };
+        let (base, server) = answer_once(200, serde_json::json!({
+            "accepted":1,"inserted":0,"skipped":1,"currentMaxOriginSeq":0,
+            "releaseRefusals":[{"originId":"origin","originSeq":0,"status":"refused","kind":"release-publication","releaseDigest":"c".repeat(64),"reason":"release-generation-fenced"}]
+        }).to_string());
+        let response = HttpRelayTransport::new_insecure_loopback_for_tests(base, "token")
+            .unwrap()
+            .push(PushRequest {
+                workspace_id: "ws".into(),
+                replication_epoch: "epoch".into(),
+                stream_identity: "stream".into(),
+                origin_id: "origin".into(),
+                after_seq: -1,
+                ops: vec![op],
+            })
+            .unwrap();
+        server.join().unwrap();
+        assert!(response.settlement_refusals.is_empty());
+        assert_eq!(response.release_refusals.len(), 1);
+        assert_eq!(response.release_refusals[0].release_digest, "c".repeat(64));
+        assert_eq!(
+            response.release_refusals[0].reason,
+            "release-generation-fenced"
         );
     }
 

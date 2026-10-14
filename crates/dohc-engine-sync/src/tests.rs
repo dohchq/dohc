@@ -25,6 +25,11 @@ use sha2::{Digest, Sha256};
 use crate::apply::apply_chat_tx;
 use crate::*;
 
+mod drain_admission_measurement;
+mod drain_existing_hold;
+mod release_hold;
+mod release_publication;
+
 /// A relay-acked envelope for workspace `ws`, recorded at 2_000 ms, whose
 /// relay sequence equals its origin sequence.
 fn envelope(origin: &str, seq: i64, kind: &str, payload: serde_json::Value) -> ReplicationEnvelope {
@@ -277,6 +282,7 @@ impl RelayTransport for FakeRelay {
         let accepted = req.ops.len();
         let current_max_origin_seq = req.ops.last().map_or(req.after_seq, |op| op.origin_seq);
         Ok(PushResponse {
+            release_refusals: Vec::new(),
             settlement_refusals,
             accepted,
             inserted: accepted,
@@ -590,6 +596,7 @@ impl RelayTransport for PagedRelay {
         }
         Ok(PushResponse {
             settlement_refusals: Vec::new(),
+            release_refusals: Vec::new(),
             accepted,
             inserted,
             skipped: accepted - inserted,
@@ -867,6 +874,7 @@ impl RelayTransport for PagedShareRelay {
             .push(req);
         Ok(PushResponse {
             settlement_refusals: Vec::new(),
+            release_refusals: Vec::new(),
             accepted,
             inserted: accepted,
             skipped: 0,

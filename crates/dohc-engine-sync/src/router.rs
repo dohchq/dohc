@@ -185,6 +185,7 @@ pub(crate) fn apply_replication_envelope_in_batch(
                 faults,
                 leases,
                 batch_inactive,
+                None,
             ),
             |ydoc| RoutedApply {
                 conflicts_opened: ydoc.conflicts_opened,

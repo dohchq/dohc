@@ -252,6 +252,19 @@ pub(crate) fn apply_envelope_with_mutation_outcome<T>(
         &ReplicationEnvelope,
     ) -> Result<MutationOutcome<T>, SyncError>,
 ) -> Result<ApplyOutcome<T>, SyncError> {
+    apply_envelope_with_replay(store, envelope, faults, None, mutation)
+}
+
+pub(crate) fn apply_envelope_with_replay<T>(
+    store: &mut EngineStore,
+    envelope: &ReplicationEnvelope,
+    faults: &dyn FaultInjector,
+    replay: Option<&crate::release_hold::ReplayPermit<'_>>,
+    mutation: impl FnOnce(
+        &Transaction<'_>,
+        &ReplicationEnvelope,
+    ) -> Result<MutationOutcome<T>, SyncError>,
+) -> Result<ApplyOutcome<T>, SyncError> {
     envelope.validate()?;
     crate::settlement_publication::validate(envelope)?;
     let payload_json = envelope.payload_json()?;
@@ -260,8 +273,9 @@ pub(crate) fn apply_envelope_with_mutation_outcome<T>(
         if passive && let Some(cursor) = envelope.relay_seq {
             dohc_engine_storage::replica::advance_frontiers(tx, &envelope.workspace_id, cursor, 0)?;
         }
+        if let Some(replay) = replay { replay.check_in(tx, envelope)?; }
         let acked = read_ack_tx(tx, &envelope.workspace_id, &envelope.origin_id)?;
-        if envelope.origin_seq <= acked {
+        if envelope.origin_seq <= acked && replay.is_none() {
             // A redelivered coordinate at or below the ack must match the row
             // already journaled after relay-compatible JSON canonicalization.
             let existing: Option<(String, String, i64)> = tx
@@ -284,7 +298,7 @@ pub(crate) fn apply_envelope_with_mutation_outcome<T>(
             return Ok(Admission::Skipped);
         }
         let expected = acked.checked_add(1).ok_or(SyncError::CoordinateDiverged)?;
-        if envelope.origin_seq != expected {
+        if envelope.origin_seq != expected && replay.is_none() {
             return Err(SyncError::SequenceGap);
         }
         let existing: Option<(String, String, i64)> = tx
@@ -301,10 +315,12 @@ pub(crate) fn apply_envelope_with_mutation_outcome<T>(
             if !coordinate_matches(&row, envelope, &canonical_payload)? {
                 return Err(SyncError::CoordinateDiverged);
             }
+            if replay.is_none() {
             ack_tx(tx, &envelope.workspace_id, &envelope.origin_id, envelope.origin_seq)?;
             if let Some(refusal) = crate::settlement_publication::refresh_in_tx(tx,envelope)? { return Ok(Admission::Refused(refusal)); }
             crate::live_audit::refresh_confirmed_application_in_tx(tx, envelope)?;
             return Ok(Admission::Skipped);
+            }
         }
         tx.execute_batch("SAVEPOINT dohc_replication_mutation")
             .map_err(SyncError::persist)?;
@@ -336,6 +352,9 @@ pub(crate) fn apply_envelope_with_mutation_outcome<T>(
                 })
             }
             Err(error) => {
+                if replay.is_some() && matches!(error, SyncError::LiveDocumentBindingActive) {
+                    return Err(SyncError::RetryableState { reason: "release replay binding changed" });
+                }
                 let Some(reason) = refusal_reason(&error) else {
                     return Err(error);
                 };
@@ -364,10 +383,18 @@ pub(crate) fn apply_envelope_with_mutation_outcome<T>(
             "applied"
         };
         tx.execute(
-            "INSERT INTO replication_log \
+            if replay.is_some() {
+                "INSERT INTO replication_log \
              (workspace_id, origin_id, origin_seq, op_kind, payload_json, recorded_at_ms, imported, \
               apply_disposition) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1, ?7)",
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1, ?7) \
+             ON CONFLICT(workspace_id,origin_id,origin_seq) DO UPDATE SET apply_disposition=excluded.apply_disposition"
+            } else {
+                "INSERT INTO replication_log \
+             (workspace_id, origin_id, origin_seq, op_kind, payload_json, recorded_at_ms, imported, \
+              apply_disposition) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1, ?7)"
+            },
             params![
                 envelope.workspace_id,
                 envelope.origin_id,
@@ -383,7 +410,7 @@ pub(crate) fn apply_envelope_with_mutation_outcome<T>(
         // the coordinate is new, and this computer's own ops echo back
         // against their journal rows above. A parked op counts now, not
         // when a later drain applies it.
-        if mutation_committed {
+        if mutation_committed && replay.is_none() {
             dohc_engine_storage::count_remote_change_in_tx(tx, &envelope.workspace_id)?;
         }
         if let Admission::Refused(refusal) = &admission
@@ -403,6 +430,7 @@ pub(crate) fn apply_envelope_with_mutation_outcome<T>(
         }
         crate::settlement_publication::refresh_in_tx(tx,envelope)?;
         ack_tx(tx, &envelope.workspace_id, &envelope.origin_id, envelope.origin_seq)?;
+        if let Some(replay) = replay { replay.finish_in(tx)?; }
         if crashes(faults, FaultPoint::SyncBeforeApplyCommit) {
             return Err(SyncError::FaultCrash);
         }

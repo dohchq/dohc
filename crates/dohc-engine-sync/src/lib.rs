@@ -25,6 +25,13 @@ mod model;
 mod moment_apply;
 mod outbound;
 mod owner_publication;
+mod release_hold;
+mod release_publication;
+pub use release_hold::{
+    ReleaseHold, acknowledge_release_replay_in, apply_replication_envelope_with_release_hold,
+    close_release_hold_in, open_release_hold_in, prepare_release_hold_replay_in, read_release_hold,
+    read_release_hold_page, replay_release_held_envelope, seal_release_hold_cut_in,
+};
 mod settlement_publication;
 pub use owner_publication::{
     OwnerAdmissionPending, OwnerPublicationPrefix, owner_publication_prefix,
@@ -109,6 +116,7 @@ pub use relay::{
     SharedChannelRejection, SharedChannelRequest, SharedChannelResponse, SyncPassOutcome,
     collision_key, read_direct_write_status, read_record_creation_statuses,
 };
+pub use release_publication::ReleasePublicationRefusal;
 pub use router::{RoutedApply, apply_replication_envelope};
 pub use secret_apply::apply_secret_envelope;
 pub use share::{

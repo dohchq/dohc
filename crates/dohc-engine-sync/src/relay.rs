@@ -55,6 +55,7 @@ pub struct PushRequest {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PushResponse {
     pub settlement_refusals: Vec<SettlementPublicationRefusal>,
+    pub release_refusals: Vec<crate::ReleasePublicationRefusal>,
     pub accepted: usize,
     pub inserted: usize,
     pub skipped: usize,
@@ -1523,6 +1524,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                         &origin_id,
                         response.current_max_origin_seq,
                         &response.settlement_refusals,
+                        &response.release_refusals,
                         faults,
                         leases,
                         now_ms,
@@ -1545,6 +1547,25 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                             },
                         },
                     ));
+                    publication_refusals.extend(response.release_refusals.iter().map(|refusal| {
+                        crate::ReplicationRefusal {
+                            workspace_id: workspace_id.to_owned(),
+                            origin_id: refusal.origin_id.clone(),
+                            origin_seq: refusal.origin_seq,
+                            op_kind: batch
+                                .iter()
+                                .find(|op| {
+                                    op.origin_id == refusal.origin_id
+                                        && op.origin_seq == refusal.origin_seq
+                                })
+                                .expect("validated refusal coordinate")
+                                .op_kind
+                                .clone(),
+                            reason: crate::RefusalReason::InvalidInput {
+                                reason: crate::release_publication::MESSAGE.into(),
+                            },
+                        }
+                    }));
                     if !enrollment_prepared {
                         sharing_declined.extend(
                             crate::live_audit::enrollment::prepare_exports(
@@ -3121,7 +3142,10 @@ pub(crate) fn collect_blob_refs(
         // unavailable hostile content must not hold up subsequent operations.
         if matches!(
             op.settlement_admission,
-            Some(crate::SettlementAdmission::Refused { .. })
+            Some(
+                crate::SettlementAdmission::Refused { .. }
+                    | crate::SettlementAdmission::ReleaseRefused { .. }
+            )
         ) {
             continue;
         }
@@ -3812,6 +3836,14 @@ fn validate_push_response(
     local_max: i64,
 ) -> Result<(), RelayError> {
     crate::settlement_publication::validate_push_refusals(&response.settlement_refusals, batch)?;
+    crate::release_publication::validate_push_refusals(&response.release_refusals, batch)?;
+    if response.release_refusals.iter().any(|release| {
+        response.settlement_refusals.iter().any(|settlement| {
+            release.origin_id == settlement.origin_id && release.origin_seq == settlement.origin_seq
+        })
+    }) {
+        return Err(RelayError::InvalidResponse);
+    }
     let last = batch
         .last()
         .map(|op| op.origin_seq)
@@ -3834,6 +3866,7 @@ fn validate_push_response(
 
 fn validate_probe_response(response: &PushResponse) -> Result<(), RelayError> {
     if !response.settlement_refusals.is_empty()
+        || !response.release_refusals.is_empty()
         || response.accepted != 0
         || response.inserted != 0
         || response.skipped != 0

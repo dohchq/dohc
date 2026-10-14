@@ -4117,6 +4117,7 @@ impl dohc_engine_sync::RelayTransport for AcceptPushTransport {
     ) -> Result<dohc_engine_sync::PushResponse, dohc_engine_sync::RelayError> {
         Ok(dohc_engine_sync::PushResponse {
             settlement_refusals: Vec::new(),
+            release_refusals: Vec::new(),
             accepted: req.ops.len(),
             inserted: req.ops.len(),
             skipped: 0,

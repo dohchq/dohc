@@ -3241,6 +3241,12 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         sql: V2_OWNER_LIVE_STOPS_DDL,
         sets_user_version: None,
     },
+    Migration {
+        ordinal: 54,
+        id: "v2-release-publication-admissions",
+        sql: V2_RELEASE_PUBLICATION_ADMISSIONS_DDL,
+        sets_user_version: None,
+    },
 ];
 
 const V2_REPLICA_FRONTIERS_DDL: &str = "\
@@ -3273,6 +3279,75 @@ CREATE TABLE replica_first_seen (
     end_clock INTEGER NOT NULL CHECK (end_clock BETWEEN 1 AND 9007199254740991 AND end_clock>start_clock),
     PRIMARY KEY(relay_database_namespace,workspace_id,main_version_id,object_id,lineage_claim_id,client_id,start_clock)
 ) STRICT;
+";
+
+const V2_RELEASE_PUBLICATION_ADMISSIONS_DDL: &str = "\
+CREATE TABLE release_publication_admissions (
+    workspace_id TEXT NOT NULL,
+    origin_id TEXT NOT NULL,
+    origin_seq INTEGER NOT NULL CHECK (origin_seq>=0),
+    op_kind TEXT NOT NULL CHECK (op_kind IN ('ydoc.update','moment.append')),
+    release_digest TEXT NOT NULL CHECK (length(release_digest)=64 AND release_digest NOT GLOB '*[^0-9a-f]*'),
+    reason TEXT NOT NULL CHECK (reason IN ('release-publication-fenced','release-generation-fenced','release-restore-in-progress','release-document-changed')),
+    PRIMARY KEY(workspace_id,origin_id,origin_seq)
+) STRICT;
+CREATE TABLE release_holds (
+    workspace_id TEXT NOT NULL,
+    version_id TEXT NOT NULL,
+    object_id TEXT NOT NULL,
+    release_digest TEXT NOT NULL CHECK(length(release_digest)=64 AND release_digest NOT GLOB '*[^0-9a-f]*'),
+    binding_json TEXT NOT NULL CHECK(json_valid(binding_json)),
+    relay_namespace TEXT NOT NULL,
+    frontier_json TEXT NOT NULL CHECK(json_valid(frontier_json)),
+    anchor_cursor INTEGER CHECK(anchor_cursor IS NULL OR anchor_cursor>=0),
+    anchor_sha256 TEXT REFERENCES binary_blobs(sha256) ON DELETE RESTRICT,
+    replay_ready INTEGER NOT NULL DEFAULT 0 CHECK(replay_ready IN (0,1)),
+    remote_closed INTEGER NOT NULL DEFAULT 0 CHECK(remote_closed IN (0,1)),
+    PRIMARY KEY(workspace_id,version_id,object_id)
+) STRICT;
+CREATE TABLE release_hold_usage (
+    workspace_id TEXT PRIMARY KEY,
+    operation_count INTEGER NOT NULL DEFAULT 0 CHECK(operation_count>=0),
+    retained_bytes INTEGER NOT NULL DEFAULT 0 CHECK(retained_bytes>=0)
+) STRICT;
+CREATE TABLE release_held_ops (
+    arrival INTEGER PRIMARY KEY AUTOINCREMENT,
+    workspace_id TEXT NOT NULL,
+    origin_id TEXT NOT NULL,
+    origin_seq INTEGER NOT NULL CHECK(origin_seq>=0),
+    version_id TEXT NOT NULL,
+    object_id TEXT NOT NULL,
+    release_digest TEXT NOT NULL,
+    envelope_json TEXT NOT NULL CHECK(json_valid(envelope_json)),
+    retained_bytes INTEGER NOT NULL CHECK(retained_bytes>0),
+    stage TEXT NOT NULL DEFAULT 'held' CHECK(stage IN ('held','done','dependency')),
+    record_facts_json TEXT CHECK(record_facts_json IS NULL OR json_valid(record_facts_json)),
+    UNIQUE(workspace_id,origin_id,origin_seq),
+    FOREIGN KEY(workspace_id,origin_id,origin_seq) REFERENCES replication_log(workspace_id,origin_id,origin_seq) DEFERRABLE INITIALLY DEFERRED
+) STRICT;
+CREATE INDEX release_held_ops_by_document ON release_held_ops(workspace_id,version_id,object_id,stage,arrival);
+CREATE TABLE release_held_blobs (
+    workspace_id TEXT NOT NULL,
+    origin_id TEXT NOT NULL,
+    origin_seq INTEGER NOT NULL,
+    sha256 TEXT NOT NULL,
+    is_text INTEGER NOT NULL CHECK(is_text IN (0,1)),
+    text_sha256 TEXT REFERENCES blobs(sha256) ON DELETE RESTRICT,
+    binary_sha256 TEXT REFERENCES binary_blobs(sha256) ON DELETE RESTRICT,
+    CHECK((is_text=1 AND text_sha256=sha256 AND text_sha256 IS NOT NULL AND binary_sha256 IS NULL)
+       OR (is_text=0 AND binary_sha256=sha256 AND binary_sha256 IS NOT NULL AND text_sha256 IS NULL)),
+    PRIMARY KEY(workspace_id,origin_id,origin_seq,sha256,is_text),
+    FOREIGN KEY(workspace_id,origin_id,origin_seq) REFERENCES release_held_ops(workspace_id,origin_id,origin_seq) ON DELETE CASCADE
+) STRICT;
+CREATE INDEX release_held_text_roots ON release_held_blobs(text_sha256);
+CREATE INDEX release_held_binary_roots ON release_held_blobs(binary_sha256);
+CREATE TRIGGER release_hold_count_insert AFTER INSERT ON release_held_ops BEGIN
+    INSERT INTO release_hold_usage VALUES(NEW.workspace_id,1,NEW.retained_bytes)
+      ON CONFLICT(workspace_id) DO UPDATE SET operation_count=operation_count+1,retained_bytes=retained_bytes+NEW.retained_bytes;
+END;
+CREATE TRIGGER release_hold_count_delete AFTER DELETE ON release_held_ops BEGIN
+    UPDATE release_hold_usage SET operation_count=operation_count-1,retained_bytes=retained_bytes-OLD.retained_bytes WHERE workspace_id=OLD.workspace_id;
+END;
 ";
 
 const V2_OWNER_LIVE_STOPS_DDL: &str = "\
@@ -3991,6 +4066,10 @@ mod tests {
             (
                 "v2-owner-live-stops",
                 "fd9a692216dd5b73e9c3f08bee04b16dbcd313084e370a3592db4c8bc59d9adb",
+            ),
+            (
+                "v2-release-publication-admissions",
+                "518a5aa7f8855e407dcf85de5328f8775b3f615ec61e728ce00d9b0f8217a9b2",
             ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());
