@@ -16,7 +16,6 @@ import {
   lazy,
   useCallback,
   useEffect,
-  useLayoutEffect,
   useMemo,
   useReducer,
   useRef,
@@ -954,9 +953,9 @@ export function DesktopWorkspaceShell(props: {
     },
     [reviewingAccountDeletion, openCloud, reportShellFailure],
   );
-  // A layout effect, so a switch hands over in its own commit: an answer to a
-  // delete sent from the previous workspace's shell reports here.
-  useLayoutEffect(
+  // After useShellError's, so this shell attaches with its notices started:
+  // an answer to a delete sent from the previous workspace's shell reports here.
+  useEffect(
     () =>
       attachAccountDeletion({
         cloudStatus,

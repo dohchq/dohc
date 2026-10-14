@@ -49,8 +49,9 @@ export function useAccountDeletion(): { deletion: AccountDeletion; dialog: React
     };
   }, []);
   const deletion = useMemo(() => ({ start, reviewing, attach }), [start, reviewing, attach]);
-  // A parent's effect, so a shell that just opened has started its notices
-  // empty before the held answer arrives in them.
+  // The one place an answer is delivered. A parent's effect runs after the
+  // shell's, so a shell that just opened has started its notices empty and
+  // attached, and a shell that closed has detached.
   useEffect(() => {
     const waiting = held.current;
     if (!waiting || !shell.current) return;
@@ -58,15 +59,14 @@ export function useAccountDeletion(): { deletion: AccountDeletion; dialog: React
     waiting(shell.current);
   });
 
+  // Every answer waits for that effect: ending the review renders this owner.
   function end(notify?: (shell: AccountDeletionShell) => void) {
     open.current = false;
     setReview(null);
-    const finish = (to: AccountDeletionShell) => {
+    held.current = (to) => {
       notify?.(to);
       to.onEnded();
     };
-    if (shell.current) finish(shell.current);
-    else held.current = finish;
   }
 
   // Main already disconnected from the deleted account.
