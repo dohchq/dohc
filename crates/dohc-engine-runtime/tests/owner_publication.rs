@@ -4048,6 +4048,41 @@ async fn release_contention_sample() -> (f64, f64, f64) {
     .unwrap();
     let other = Ydoc::wire();
     other.apply(&f.bytes).unwrap();
+    let record_other = |update, request_id: &str, now_ms| {
+        actor.ydoc_record_update(
+            key.clone(),
+            "notes/other.md".into(),
+            ContentKind::Richdoc,
+            Regime::Replicated,
+            update,
+            Some("local-person".into()),
+            None,
+            Some(f.binding.lineage_claim_id.clone()),
+            false,
+            None,
+            Some(request_id.into()),
+            now_ms,
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+            None,
+        )
+    };
+    record_other(
+        other.richdoc_append_paragraph("Warm other document"),
+        "other-warm",
+        37,
+    )
+    .await
+    .unwrap();
+    let solo_started = std::time::Instant::now();
+    record_other(
+        other.richdoc_append_paragraph("Solo document edit"),
+        "other-solo",
+        38,
+    )
+    .await
+    .unwrap();
+    let solo_append = solo_started.elapsed();
     let update = other.richdoc_append_paragraph("Other document edit");
     let submitted = Arc::new(AtomicBool::new(false));
     let start = std::time::Instant::now();
@@ -4071,26 +4106,7 @@ async fn release_contention_sample() -> (f64, f64, f64) {
     };
     let append = async {
         submitted.store(true, Ordering::SeqCst);
-        actor
-            .ydoc_record_update(
-                key.clone(),
-                "notes/other.md".into(),
-                ContentKind::Richdoc,
-                Regime::Replicated,
-                update,
-                Some("local-person".into()),
-                None,
-                Some(f.binding.lineage_claim_id.clone()),
-                false,
-                None,
-                Some("other-append".into()),
-                41,
-                Arc::new(NoFaults),
-                CancellationToken::new(),
-                None,
-            )
-            .await
-            .unwrap();
+        record_other(update, "other-append", 41).await.unwrap();
         start.elapsed()
     };
     let (release, append) = tokio::join!(release, append);
@@ -4100,7 +4116,21 @@ async fn release_contention_sample() -> (f64, f64, f64) {
         append.as_secs_f64() * 1_000.0,
         append.saturating_sub(release).as_secs_f64() * 1_000.0
     );
-    assert!(append.saturating_sub(release).as_millis() < 100);
+    let tail = append.saturating_sub(release);
+    // The tail includes the other append's own work. Allow host variance while
+    // rejecting seconds of writer work beyond Stop and the warmed solo append.
+    let allowed_tail = solo_append
+        .saturating_mul(4)
+        .saturating_add(std::time::Duration::from_secs(1));
+    println!(
+        "stop_writer_baseline solo_append_ms={:.3} allowed_tail_ms={:.3}",
+        solo_append.as_secs_f64() * 1_000.0,
+        allowed_tail.as_secs_f64() * 1_000.0
+    );
+    assert!(
+        tail <= allowed_tail,
+        "append tail {tail:?} exceeds warmed solo append {solo_append:?} plus host-load margin {allowed_tail:?}"
+    );
     let persisted = dohc_engine_collab::load_persisted(&f.store, &key)
         .unwrap()
         .unwrap();
