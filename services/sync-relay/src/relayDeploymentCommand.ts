@@ -23,6 +23,7 @@ Restore replaces only relay storage; authentication, the live-host volume and co
 Old snapshots and lost continuity require a separate recovery procedure; no reset is provided.
 After an interrupted write, start the relay once to settle continuity.
 Then stop it cleanly before backup, check-backup or restore.
+Restore of a missing or corrupt relay database does not need this step.
 Anyone who can write a snapshot can define restored relay contents. Protect backups like the relay volume.
 
 salvage --directory PATH --output NEW_PATH

@@ -85,6 +85,7 @@ node scripts/self-host/recovery.mjs restore /srv/dohc-backups/relay-before-upgra
 
 After an interrupted write, start the relay once to settle continuity before backup, check-backup or restore.
 Then stop it cleanly.
+If the relay database is missing or corrupt, the relay can't start, so restore without this step.
 The check requires the snapshot stamp and nonce to equal the current continuity record.
 Newer accepted work makes that snapshot unsuitable for repair.
 The restore command checks the copied candidate before replacing any existing relay files.
