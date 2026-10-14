@@ -113,6 +113,30 @@ fn rows(conn: &Connection, workspace_id: &str) -> Result<Vec<RefusalNotice>, Syn
         .map(|(origin_id, origin_seq, reason, payload, code)| {
             let payload: Value = serde_json::from_str(&payload).map_err(SyncError::corrupt)?;
             let mut document = document(&payload);
+            if reason == crate::moment_apply::pending::BINDING_CHANGED {
+                // The audit retains the held lineage after its queue row clears.
+                // Resolve its current path without falling back to the old name.
+                document = conn.query_row(
+                    "SELECT json_extract(a.record_json,'$.binding.mainVersionId'),\
+                            json_extract(a.record_json,'$.binding.objectId'),\
+                            json_extract(a.record_json,'$.binding.lineageClaimId'),\
+                            json_extract(b.binding_json,'$.currentPath') \
+                     FROM live_audit_settlements a LEFT JOIN ydoc_owner_bindings b \
+                       ON b.workspace_id=a.workspace_id \
+                       AND b.main_version_id=json_extract(a.record_json,'$.binding.mainVersionId') \
+                       AND b.object_id=json_extract(a.record_json,'$.binding.objectId') \
+                       AND b.lineage_claim_id=json_extract(a.record_json,'$.binding.lineageClaimId') \
+                       AND b.relay_database_namespace=json_extract(a.record_json,'$.relayDatabaseNamespace') \
+                     WHERE a.workspace_id=?1 AND json_extract(a.record_json,'$.momentId')=?2 \
+                       AND a.markdown_digest=?3 \
+                       AND json_extract(a.record_json,'$.binding.mainVersionId')=?4 \
+                       AND json_extract(a.record_json,'$.binding.objectId')=?5 \
+                       AND (?6 IS NULL OR json_extract(a.record_json,'$.binding.lineageClaimId')=?6) \
+                     ORDER BY json_extract(a.record_json,'$.terminalCursor') DESC LIMIT 1",
+                    params![workspace_id, payload["momentId"].as_str(), payload["payloadAfterBlobSha256"].as_str(), payload["versionId"].as_str(), payload["objectId"].as_str(), document.as_ref().map(|doc| doc.lineage_claim_id.as_str())],
+                    |row| Ok(RefusalDocument { version_id: row.get(0)?, object_id: row.get(1)?, lineage_claim_id: row.get(2)?, path: row.get(3)?, conflict_id: None }),
+                ).optional().map_err(SyncError::corrupt)?;
+            }
             if document.is_none() && code==crate::moment_apply::open_artifacts::RECOVERY_FAILURE_CODE {
                 document=conn.query_row("SELECT p.version_id,p.object_id,p.lineage_claim_id,d.path FROM ydoc_pending_artifacts p JOIN ydoc_docs d USING(workspace_id,version_id,object_id) WHERE p.workspace_id=?1 AND p.origin_id=?2 AND p.origin_seq=?3",
                     params![workspace_id,origin_id,origin_seq],|row|Ok(RefusalDocument {version_id:row.get(0)?,object_id:row.get(1)?,lineage_claim_id:row.get(2)?,path:row.get(3)?,conflict_id:None})).optional().map_err(SyncError::corrupt)?;

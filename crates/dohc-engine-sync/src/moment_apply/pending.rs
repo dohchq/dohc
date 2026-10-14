@@ -5,9 +5,11 @@ use dohc_engine_storage::TxnOutcome;
 const PAGE_SIZE: usize = 64;
 pub(crate) const SUPERSEDED: &str =
     "A later restore replaced this save. Open the file to continue.";
+pub(crate) const BINDING_CHANGED: &str = "This file's name, location, or sharing changed before this save arrived. Open the file to continue.";
 
 /// The row becomes ready once the authenticated owner reaches the held restore
-/// generation and cursor. Replay checks the full binding before publication.
+/// generation and cursor. Any later generation supersedes the row. The drain
+/// refuses a ready row if its binding changed; otherwise replay validates it.
 pub(super) fn enqueue(
     tx: &Transaction<'_>,
     envelope: &ReplicationEnvelope,
@@ -87,12 +89,13 @@ pub(crate) fn drain_and_claim(
     let search_policy = search_policy_for_store(store);
     let result = store.write_with(faults, |tx| {
         // Paths can change during recovery without advancing the generation.
-        // Replay decides whether a ready settlement still matches the binding.
+        // Refuse a changed binding before replaying a ready settlement.
         // A later generation supersedes it regardless of path changes.
-        let mut stmt = tx.prepare(
+        let mut stmt = tx.prepare_cached(
             "SELECT p.origin_id,p.origin_seq,l.payload_json,l.recorded_at_ms,p.applied,\
                     p.main_version_id,p.object_id,p.record_facts_json,\
-                    p.applied=0 AND json_extract(b.binding_json,'$.restoreFenceGeneration')>json_extract(p.binding_json,'$.restoreFenceGeneration') \
+                    p.applied=0 AND json_extract(b.binding_json,'$.restoreFenceGeneration')>json_extract(p.binding_json,'$.restoreFenceGeneration'),\
+                    COALESCE(json(p.binding_json)!=json(b.binding_json),0) \
              FROM owner_pending_settlements p \
              JOIN replication_log l ON l.workspace_id=p.workspace_id \
                AND l.origin_id=p.origin_id AND l.origin_seq=p.origin_seq \
@@ -124,7 +127,7 @@ pub(crate) fn drain_and_claim(
                 payload: serde_json::from_str(&encoded).map_err(SyncError::corrupt)?,
                 recorded_at_ms: row.get(3).map_err(SyncError::corrupt)?,
                 relay_seq: None,
-            }, row.get::<_, bool>(4).map_err(SyncError::corrupt)?, deferred, row.get::<_, Option<String>>(7).map_err(SyncError::corrupt)?, row.get::<_, bool>(8).map_err(SyncError::corrupt)?));
+            }, row.get::<_, bool>(4).map_err(SyncError::corrupt)?, deferred, row.get::<_, Option<String>>(7).map_err(SyncError::corrupt)?, row.get::<_, bool>(8).map_err(SyncError::corrupt)?, row.get::<_, bool>(9).map_err(SyncError::corrupt)?));
             if ready.len() > PAGE_SIZE { break; }
         }
         drop(rows);
@@ -137,11 +140,13 @@ pub(crate) fn drain_and_claim(
         let mut record_facts = Vec::new();
         let mut envelopes = Vec::new();
         let checked_sequence: i64 = tx.query_row("SELECT COALESCE(MAX(checked_sequence),0)+1 FROM owner_pending_settlements WHERE workspace_id=?1", [workspace_id], |r| r.get(0)).map_err(SyncError::corrupt)?;
-        for (envelope, applied, deferred, facts_json, superseded) in ready {
+        for (envelope, applied, deferred, facts_json, superseded, binding_changed) in ready {
             tx.execute("UPDATE owner_pending_settlements SET checked_sequence=?4 WHERE workspace_id=?1 AND origin_id=?2 AND origin_seq=?3", params![workspace_id,envelope.origin_id,envelope.origin_seq,checked_sequence]).map_err(SyncError::persist)?;
             if deferred { continue; }
             if superseded {
                 refuse(tx, workspace_id, &envelope, crate::RefusalReason::InvalidInput { reason: SUPERSEDED.into() })?;
+            } else if !applied && binding_changed {
+                refuse(tx, workspace_id, &envelope, crate::RefusalReason::InvalidInput { reason: BINDING_CHANGED.into() })?;
             } else if !applied {
                 let payload: MomentAppendPayload = serde_json::from_value(envelope.payload.clone()).map_err(SyncError::corrupt)?;
                 envelope.validate()?;

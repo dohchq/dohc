@@ -1266,6 +1266,23 @@ it("rebuilds refusal Notices from the engine and keeps read marks across restart
   expect((await again.store.list()).notices).toEqual([]);
 });
 
+it("names the current file for a terminal binding refusal without suggesting sync again", async () => {
+  const refusalNotices = async () => [{ workspaceId: WORKSPACE, notices: [{
+    noticeId: "sync-refusal-renamed", originId: "host", originSeq: 1,
+    refusalCoordinates: [{ originId: "host", originSeq: 1 }],
+    reason: "This file's name, location, or sharing changed before this save arrived. Open the file to continue.",
+    document: { versionId: "main", path: "renamed.md", objectId: "object-a", lineageClaimId: "lineage", conflictId: null },
+  }] }];
+  const first = await computer(null, { refusalNotices });
+  const [row] = (await first.store.list()).notices;
+  expect(row).toMatchObject({
+    title: "dohc skipped an earlier save",
+    body: "The name, location, or sharing of “renamed.md” changed before this save arrived. Open the file to continue.",
+    target: { path: "renamed.md" },
+  });
+  expect(row!.body).not.toContain("try sync again");
+});
+
 it("lists engine refusals without the local row limit and removes resolved rows", async () => {
   let pending = Array.from({length: 1_001}, (_, index) => ({noticeId: `sync-refusal-${index}`,
     originId: "peer", originSeq: index, refusalCoordinates: [{ originId: "peer", originSeq: index }], reason: "Review this file", document: null}));

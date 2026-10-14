@@ -3,6 +3,7 @@ import { mkdir, readFile, rename } from "node:fs/promises";
 import { atomicWriteFile, type DurableFileOperations } from "../atomicReplaceFile";
 import { join } from "node:path";
 import { z } from "zod";
+import { SETTLEMENT_BINDING_CHANGED } from "./settlementRefusal";
 import { NoticeNotSentError } from "@dohc/automation-executor/automation-chat";
 import {
   isNoticeBody,
@@ -716,12 +717,15 @@ export function createNoticeStore(deps: {
           const document = refusal.document;
           const name = document?.path ? `“${[...document.path].slice(0, 180).join("")}”` : "a file";
           const tooLarge = /too large|exceeds|projection.*limit/iu.test(refusal.reason);
-          const body = `dohc could not update ${name}.${tooLarge ? " The change is too large." : ""} ${document?.conflictId
+          const bindingChanged = refusal.reason === SETTLEMENT_BINDING_CHANGED;
+          const body = bindingChanged
+            ? `The name, location, or sharing of ${name} changed before this save arrived. Open the file to continue.`
+            : `dohc could not update ${name}.${tooLarge ? " The change is too large." : ""} ${document?.conflictId
             ? "Open its conflict and choose a copy."
             : tooLarge ? "Make the file smaller on the other computer, then try sync again." : "Review the file on the other computer, then try sync again."}`;
           rows.push(LocalRow.parse({ noticeId: refusal.noticeId, workspaceId, kind: "sync-refusal",
             refusalCoordinates, pendingRefusalDismissals,
-            title: "A change needs your review", body,
+            title: bindingChanged ? "dohc skipped an earlier save" : "A change needs your review", body,
             detail: [refusal.reason, `Workspace: ${workspaceId}`, `Object: ${document?.objectId ?? "unknown"}`,
               `Lineage: ${document?.lineageClaimId ?? "unknown"}`, `Origin: ${refusal.originId}:${refusal.originSeq}`].join("\n"),
             target: NoticeTargetShape.safeParse(document?.path ? { path: document.path } : {}).data ?? {},
