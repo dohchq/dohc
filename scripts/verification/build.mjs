@@ -318,7 +318,7 @@ export async function prepare({ engineOnly = false, output = join(repoRoot, ".do
   catch (error) { if (error.code === "EEXIST") throw new Error(`Another preparation owns ${lock}. Inspect its PID before removing a stale lock.`); throw error; }
   try {
   await cancellation.checkpoint();
-  if (install) await run(...pnpm(["install", "--frozen-lockfile"]), { log: join(output, "prepare-install.log") });
+  if (install) await run(...pnpm(["install", "--frozen-lockfile", "--config.confirm-modules-purge=false"]), { log: join(output, "prepare-install.log") });
   await cancellation.checkpoint();
   const receipt = readJson(receiptPath) ?? { version: 1 };
   const kinds = engineOnly ? ["engine"] : ["engine", "desktop"];
