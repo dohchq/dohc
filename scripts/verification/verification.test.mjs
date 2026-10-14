@@ -39,20 +39,16 @@ test("desktop proof gets an isolated display only on headless Linux", () => {
   assert.deepEqual(desktopProofCommand(args, {platform: "linux", env: {WAYLAND_DISPLAY: "wayland-0"}}), direct);
 });
 
-test("renderer proofs require persistence smoke and the Windows pixel baseline without onboarding", () => {
-  const proofs = {smoke: true, statesPage: true};
-  assert.deepEqual(desktopProofTags(proofs, {platform: "win32"}), {
-    selected: ["@verification-smoke", "@states-page"], required: ["@verification-smoke", "@states-baselines"],
+test("desktop proofs require smoke and onboarding everywhere and the pixel baseline on Windows", () => {
+  assert.deepEqual(desktopProofTags({platform: "win32"}), {
+    selected: ["@verification-smoke", "@self-host-onboarding", "@states-page"],
+    required: ["@verification-smoke", "@self-host-onboarding", "@states-baselines"],
   });
   for (const platform of ["linux", "darwin"]) {
-    assert.deepEqual(desktopProofTags(proofs, {platform}), {
-      selected: ["@verification-smoke"], required: ["@verification-smoke"],
+    assert.deepEqual(desktopProofTags({platform}), {
+      selected: ["@verification-smoke", "@self-host-onboarding"], required: ["@verification-smoke", "@self-host-onboarding"],
     });
   }
-  assert.deepEqual(desktopProofTags({desktop: true}, {platform: "win32"}), {
-    selected: ["@verification-smoke", "@self-host-onboarding"], required: ["@verification-smoke", "@self-host-onboarding"],
-  });
-  assert.deepEqual(desktopProofTags({}, {platform: "win32"}), {selected: [], required: []});
 });
 
 test("native proof evidence rejects skips, wrong binaries, and incomplete delivery", () => {
@@ -106,7 +102,7 @@ test("Windows setup uses pnpm.cmd and stops after failed or missing installation
       assert.equal(result.status, exitCode === 0 ? 0 : 1, result.stdout + result.stderr);
       assert.equal(existsSync(join(root, "electron-ran")), exitCode === 0);
       assert.equal(existsSync(join(root, "doctor-ran")), exitCode === 0);
-      if (exitCode !== null) assert.equal(readFileSync(join(root, "install-args"), "utf8").trim(), "install --frozen-lockfile");
+      if (exitCode !== null) assert.equal(readFileSync(join(root, "install-args"), "utf8").trim(), "install --frozen-lockfile --config.confirm-modules-purge=false");
       if (exitCode === 23) assert.match(result.stderr, /failed \(23\)/);
     }
   } finally { rmSync(root, { recursive: true, force: true }); }
@@ -330,7 +326,7 @@ test("standalone preparation installs frozen dependencies before building, seali
     assert.match(reused.stdout, /reuse desktop/);
     assert.equal(readFileSync(join(root, "node_modules/installed.txt"), "utf8"), "new-lock");
     assert.equal(calls().length, 5);
-    assert.deepEqual(calls().at(-1), { command: "pnpm", args: ["install", "--frozen-lockfile"] });
+    assert.deepEqual(calls().at(-1), { command: "pnpm", args: ["install", "--frozen-lockfile", "--config.confirm-modules-purge=false"] });
     const installed = invoke({ install: false });
     assert.equal(installed.status, 0, installed.stderr);
     assert.match(installed.stdout, /reuse desktop/);
@@ -1035,10 +1031,10 @@ test("a docs-only PR records clean provenance without code tools, while dirty he
   ], { cwd: root, encoding: "utf8" }).trim();
   try {
     for (const file of [
-      "scripts/verification/verify.mjs", "scripts/verification/ticket-evidence.mjs", "scripts/verification/timing.mjs", "scripts/verification/build.mjs", "scripts/verification/process.mjs", "scripts/verification/doctor.mjs",
-      "scripts/verification/cancellation.mjs", "scripts/verification/js-tests.mjs", "scripts/verification/selection.mjs", "scripts/verification/renderer-selection.mjs", "scripts/verification/admission.mjs", "scripts/verification/rust-reuse.mjs",
+      "scripts/verification/verify.mjs", "scripts/verification/ticket-evidence.mjs", "scripts/verification/queue.mjs", "scripts/verification/timing.mjs", "scripts/verification/build.mjs", "scripts/verification/process.mjs", "scripts/verification/doctor.mjs",
+      "scripts/verification/cancellation.mjs", "scripts/verification/js-tests.mjs", "scripts/verification/selection.mjs", "scripts/verification/admission.mjs", "scripts/verification/rust-reuse.mjs",
       "tools/rust-engine-program/build-slot.mjs", "tools/rust-engine-program/tree-provenance.mjs",
-      "tools/rust-engine-program/git-read.mjs", "tools/rust-engine-program/require-ci-pass-verdict.mjs",
+      "tools/rust-engine-program/git-read.mjs", "tools/rust-engine-program/gate-commands.mjs", "tools/rust-engine-program/require-ci-pass-verdict.mjs",
       "apps/desktop/scripts/require-e2e-engine.mjs", ".github/workflows/pr-checks.yml",
     ]) {
       mkdirSync(dirname(join(root, file)), { recursive: true });

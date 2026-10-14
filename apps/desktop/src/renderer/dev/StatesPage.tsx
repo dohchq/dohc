@@ -1769,8 +1769,14 @@ function Pane(props: { theme: "light" | "dark" }) {
         <Specimen label="nothing counted yet">
           <UsageRecordSpecimen view={{ ...USAGE_RECORD, since: USAGE_TODAY, rows: [] }} />
         </Specimen>
-        <Specimen label="a record dohc cannot read">
-          <UsageRecordSpecimen view={{ status: "unreadable", file: USAGE_RECORD.file, code: "EACCES" }} />
+        <Specimen label="a record dohc cannot open, with Try again">
+          <UsageRecordSpecimen view={{ status: "unreadable", file: USAGE_RECORD.file, code: "EACCES", setAside: null }} />
+        </Specimen>
+        <Specimen label="a record dohc cannot decode, with Start a new record">
+          <UsageRecordSpecimen view={{ status: "unreadable", file: USAGE_RECORD.file, code: "INVALID_USAGE_RECORD", setAside: null }} />
+        </Specimen>
+        <Specimen label="a new record, Off, with the old one set aside">
+          <UsageRecordSpecimen view={{ ...USAGE_RECORD, enabled: false, since: USAGE_TODAY, rows: [], setAside: "dohc-usage.set-aside-1.json" }} />
         </Specimen>
         <Specimen label="loading, then a failed read: words in Notices">
           <div className="flex flex-col gap-3">
@@ -2299,13 +2305,15 @@ const USAGE_RECORD: Extract<UsageRecordResult, { status: "readable" }> = {
     usageRow("chat.post", "Post a chat message", { cli: usageCell(0), mcp: usageCell(0) }),
     usageRow("chat.export", "Export a chat", {}),
   ],
+  setAside: null,
 };
 
 // Privacy's width for the card.
 function UsageRecordSpecimen(props: { view: UsageRecordView }) {
   return (
     <div className="w-[560px] [&>section]:mt-0">
-      <UsageRecordCard view={props.view} today={USAGE_TODAY} onSwitch={noop} onClear={noop} onRetry={noop} />
+      <UsageRecordCard view={props.view} today={USAGE_TODAY} onSwitch={noop} onClear={noop} onRetry={noop}
+        onStart={noop} onRestore={noop} />
     </div>
   );
 }

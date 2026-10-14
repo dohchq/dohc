@@ -8,29 +8,28 @@ export function runOwnerCancellationFixture(root, sourceRoot, kind, signal, clea
   const put = (path, text) => { mkdirSync(dirname(join(root, path)), { recursive: true }); writeFileSync(join(root, path), text); };
   const copy = (path) => put(path, readFileSync(join(sourceRoot, path)));
   put("package.json", '{"type":"module"}');
-  for (const file of ["build.mjs", "verify.mjs", "ticket-evidence.mjs", "js-tests.mjs", "selection.mjs", "renderer-selection.mjs", "cancellation.mjs", "timing.mjs"]) {
+  for (const file of ["build.mjs", "verify.mjs", "ticket-evidence.mjs", "queue.mjs", "js-tests.mjs", "selection.mjs", "cancellation.mjs", "timing.mjs"]) {
     const path = `scripts/verification/${file}`;
     if (existsSync(join(sourceRoot, path))) copy(path);
   }
   put("apps/desktop/package.json", "{}");
   put("scripts/verification/rust-reuse.mjs", "export const rustIdentity=()=>({});export const finishRustEvidence=()=>({kind:'fixture'});export const refreshRustReuse=()=>{throw Error('unexpected reuse');};");
-  put("pnpm-workspace.yaml", "fixture workspace");
-  put("packages/workspace-auth/package.json", '{"name":"@dohc/workspace-auth","scripts":{"test":"vitest run"}}');
   put(".github/workflows/pr-checks.yml", "fixture workflow");
-  put("node_modules/js-yaml/index.js", "exports.load=s=>s==='fixture workspace'?{packages:['packages/*']}:s==='fixture workflow'?{jobs:{changes:{steps:[{with:{filters:'fixture filters'}}]}}}:{rust:[],js:['**']};");
+  put("node_modules/js-yaml/index.js", "exports.load=s=>s==='fixture workflow'?{jobs:{changes:{steps:[{with:{filters:'fixture filters'}}]}}}:{rust:[],js:['**']};");
   put("tools/rust-engine-program/build-slot-real.mjs", readFileSync(join(sourceRoot, "tools/rust-engine-program/build-slot.mjs")));
   put("tools/rust-engine-program/build-slot.mjs", "export {acquireExclusiveSlot} from './build-slot-real.mjs';export const capBuildParallelism=source=>({...source});export const resolveBuildBudget=()=>null;export const freeDiskGb=()=>100;export const acquireBuildSlot=()=>{throw Error('unexpected slot acquisition')};export const acquireVerificationSlot=()=>null;");
   put("apps/desktop/scripts/require-e2e-engine.mjs", "export const requireE2eEngine=()=>{};");
   put("scripts/verification/doctor.mjs", "export const doctor=()=>({checks:[]});");
-  put("scripts/verification/admission.mjs", "export const admissionPreflight=()=>{};export const installedDependenciesMatch=()=>false;export const verificationAdmission=()=>({lightweight:false,reason:'fixture full lane'});");
+  put("scripts/verification/admission.mjs", "export const admissionPreflight=()=>{};export const installedDependenciesMatch=()=>false;");
   put("tools/rust-engine-program/tree-provenance.mjs", "export const readTreeState=()=>({head:'fixture'});export const classifyTreeProvenance=()=>({status:'PASS'});");
-  put("tools/rust-engine-program/git-read.mjs", readFileSync(join(sourceRoot, "tools/rust-engine-program/git-read.mjs")));
+  for (const file of ["git-read.mjs", "gate-commands.mjs"]) copy(`tools/rust-engine-program/${file}`);
   if (kind === "verify") put("scripts/verification/build.mjs", `
     import {existsSync} from 'node:fs';
     import {interruptDuringSync} from './process.mjs';
     export const prepare=async()=>{};
     export const assertPrepared=()=>({});
     export const buildEnvironment=()=>process.env;
+    export const withBuildBudget=action=>action(process.env);
     export const enginePath='fixture-engine';
     export const stagedEnginePath='fixture-staged-engine';
     export const assertIndependentStagedEngine=()=>{};

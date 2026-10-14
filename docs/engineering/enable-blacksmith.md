@@ -64,8 +64,8 @@ gh workflow run pr-checks.yml --repo dohchq/dohc --ref main -f gate=all -f runne
 
 The `gate` input accepts `all`, `js`, or `rust`.
 The `runner_size` input accepts `4` or `8` vCPUs and affects manual Blacksmith runs only.
-Manual runs execute the full requested gates; automatic PR runs select affected gates and JavaScript packages.
-Shared inputs still select full coverage. Each test job has a 60-minute timeout.
+Manual runs execute the requested gates. Automatic PR runs execute the gates that the changed files select.
+Each test job has a 60-minute timeout.
 
 Compare cold and warm runs before choosing larger runners or shorter timeouts.
 Record elapsed time, billed cost, peak memory, and disk use for each gate.
