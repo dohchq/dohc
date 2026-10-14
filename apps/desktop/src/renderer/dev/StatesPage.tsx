@@ -2192,6 +2192,16 @@ function Pane(props: { theme: "light" | "dark" }) {
             <CloudSyncSettings workspaceId="ws-trip" cloud={settingsCloud(CLOUD_SIGNED_IN)} />
           </div>
         </Specimen>
+        <Specimen label="sync off: paused by a person">
+          <div className="w-[640px]">
+            <CloudSyncSettings workspaceId="ws-trip" cloud={settingsCloud({ ...CLOUD_SIGNED_IN, syncPause: SYNC_PAUSED_BY_PERSON })} />
+          </div>
+        </Specimen>
+        <Specimen label="sync off: paused by an agent">
+          <div className="w-[640px]">
+            <CloudSyncSettings workspaceId="ws-trip" cloud={settingsCloud({ ...CLOUD_SIGNED_IN, syncPause: SYNC_PAUSED_BY_AGENT })} />
+          </div>
+        </Specimen>
         <Specimen label="sync paused: dohc could not confirm this workspace's account, with Try again">
           <div className="w-[640px]">
             <CloudSyncSettings workspaceId="ws-trip" cloud={settingsCloud({ ...CLOUD_SIGNED_IN, workspaceSynced: true })} />
@@ -2263,6 +2273,14 @@ const CLOUD_SIGNED_IN: CloudStatusResult = {
   relayUrl: "https://relay.hollis.studio",
   workspaceSynced: false,
   workspaceSyncConnected: false,
+};
+const SYNC_PAUSED_BY_PERSON: CloudStatusResult["syncPause"] = {
+  atMs: new Date(2026, 6, 8, 8, 42).getTime(),
+  author: { kind: "human", humanId: "human-sam", displayName: "Sam Hollis" },
+};
+const SYNC_PAUSED_BY_AGENT: CloudStatusResult["syncPause"] = {
+  atMs: new Date(2026, 6, 8, 8, 42).getTime(),
+  author: { kind: "agent", agentId: "codex", onBehalfOf: "human-sam", depth: 1 },
 };
 const settingsCloud = (status: CloudStatusResult | null): CloudSettings => ({
   status, unreadable: false, onChanged: noop, onConnect: noop, onError: noop, onAccountError: noop,

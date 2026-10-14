@@ -268,8 +268,8 @@ export function SwitchControl(props: {
   label: string;
   checked: boolean;
   disabled?: boolean;
-  // Shows its value at full strength, but this place cannot change it.
-  readOnly?: boolean;
+  // The change it asked for is still running.
+  busy?: boolean;
   onChange: (checked: boolean) => void;
 }) {
   return (
@@ -278,12 +278,12 @@ export function SwitchControl(props: {
       role="switch"
       aria-label={props.label}
       aria-checked={props.checked}
-      aria-readonly={props.readOnly || undefined}
+      aria-busy={props.busy || undefined}
       disabled={props.disabled}
       onClick={() => {
-        if (!props.disabled && !props.readOnly) props.onChange(!props.checked);
+        if (!props.disabled) props.onChange(!props.checked);
       }}
-      className={`relative h-5 w-9 rounded-full border transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-50 aria-readonly:cursor-default ${
+      className={`relative h-5 w-9 rounded-full border transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-50 aria-busy:cursor-progress ${
         props.checked ? "border-accent bg-accent" : "border-line bg-line"
       }`}
     >

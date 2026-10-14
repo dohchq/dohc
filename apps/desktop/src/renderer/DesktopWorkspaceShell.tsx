@@ -947,6 +947,7 @@ export function DesktopWorkspaceShell(props: {
   );
   // Unguarded by workspace: an installation-wide failure is news here.
   useInstallationNotices(reportConnectionError);
+  const hasReceivedShares = workspaceShareMounts.length > 0;
   const cloudSettings = useMemo<CloudSettings>(() => {
     // The page answers after it closed too. Only this workspace's answers
     // reach its status and its notices.
@@ -966,8 +967,9 @@ export function DesktopWorkspaceShell(props: {
         if (current()) reportConnectionError(error);
       },
       onAccountError: reportInstallationFailure,
+      hasReceivedShares,
     };
-  }, [closeSettings, cloudStatus, cloudStatusUnreadable, refreshCloudStatus, reportConnectionError, workspaceId]);
+  }, [closeSettings, cloudStatus, cloudStatusUnreadable, hasReceivedShares, refreshCloudStatus, reportConnectionError, workspaceId]);
   // About's section reads report through this shell's notices, one row per
   // section and file. A repeat keeps an existing row's toast state only for
   // an unchanged message. A changed message, or a missing row, toasts again.
