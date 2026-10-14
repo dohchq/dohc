@@ -232,7 +232,7 @@ function captureLiveFrameHost(options: {
         }
         const validation = await validate({ document, currentPath: binding.currentPath, checkpoint: cut.checkpoint.bytes,
           suffix: cut.suffix.map(row => row.bytes), candidate: updateBytes,
-          retainStateUpdate: liveAuthorCheckpointAnticipated(cut.suffix.map(row => row.metadata),
+          retainStateUpdate: (actor.kind === "owner" && liveAuthorCheckpointAnticipated(cut.suffix.map(row => row.metadata), [])) || liveAuthorCheckpointAnticipated(cut.suffix.map(row => row.metadata),
             limitLiveDeclaredAgents(cut.suffix.map(row => row.metadata), authority,
               trustedAutomation ? [{kind: "automation", ...trustedAutomation}] : deriveLiveAuthorSnapshot(storage as StorageContext, authority, authorContext, trustedAccount))) }, signal);
         check(signal);

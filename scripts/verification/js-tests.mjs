@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { availableParallelism } from "node:os";
 import { join, relative, resolve } from "node:path";
 import { cancellationScope } from "./cancellation.mjs";
@@ -8,23 +8,15 @@ import { startTiming, timed } from "./timing.mjs";
 const databasePackages = new Set(["@dohc/workspace-postgres", "@dohc/workspace-auth", "@dohc/workspace-api", "@dohc/share-web"]);
 const longestFirst = ["@dohc/ydoc-projection", "@dohc/desktop", "@dohc/sync-relay", "@dohc/app-backend-runtime"];
 
-export function testPlan(packages, testFiles = {}, { maxWorkers } = {}) {
-  for (const name of Object.keys(testFiles)) {
-    if (!packages.some(pkg => pkg.name === name && pkg.manifest.scripts?.test)) throw new Error(`No selected test package owns file selection: ${name}.`);
-  }
+export function testPlan(packages) {
   return packages.filter(({ manifest }) => manifest.scripts?.test).map(({ name, manifest }) => {
     const script = name === "@dohc/desktop" ? "test:unit" : name === "@dohc/app-backend-runtime" ? "test:prepared" : "test";
     if (!manifest.scripts[script]) throw new Error(`Missing ${script} in ${name}.`);
-    const workers = maxWorkers ?? (name === "@dohc/app-backend-runtime" ? 1
-      : name === "@dohc/desktop" ? Math.min(4, Math.max(2, Math.floor(availableParallelism() / 4))) : 4);
-    if (!Number.isInteger(workers) || workers < 1 || workers > 4) throw new Error("Test workers must be between 1 and 4.");
+    const workers = name === "@dohc/app-backend-runtime" ? 1
+      : name === "@dohc/desktop" ? Math.min(4, Math.max(2, Math.floor(availableParallelism() / 4))) : 4;
     const vitest = /^vitest run(?: |$)/u.test(manifest.scripts[script]);
-    const files = testFiles[name];
-    if (files && (!vitest || !files.length)) {
-      throw new Error(`Invalid test file selection for ${name}.`);
-    }
-    return { name, script, ...(files ? {files} : {}), resource: databasePackages.has(name) ? "postgres" : null,
-      args: ["--filter", name, "run", script, ...(vitest ? [`--maxWorkers=${workers}`] : []), ...(files ?? [])] };
+    return { name, script, resource: databasePackages.has(name) ? "postgres" : null,
+      args: ["--filter", name, "run", script, ...(vitest ? [`--maxWorkers=${workers}`] : [])] };
   }).sort((a, b) => {
     const priority = name => longestFirst.includes(name) ? longestFirst.indexOf(name) : longestFirst.length;
     return priority(a.name) - priority(b.name) || a.name.localeCompare(b.name);
@@ -54,13 +46,10 @@ export async function runBounded(tasks, execute, concurrency = 2) {
   if (failure) throw failure;
 }
 
-export async function testWorkspace({ prepared = false, output = join(repoRoot, ".agent-artifacts/js-tests", new Date().toISOString().replaceAll(":", "-")), env = process.env, selectedPackages, testFiles = {}, repository = "full", desktopScripts = true, beforeDesktopScripts, runProofs, bounded = false } = {}) {
-  if (!["full", "source"].includes(repository)) throw new Error("Unknown repository test scope.");
-  if (typeof desktopScripts !== "boolean") throw new Error("Desktop script selection must be a boolean.");
-  if (runProofs !== undefined && typeof runProofs !== "function") throw new Error("Proof selection must provide a function.");
-  if (bounded && (!prepared || repository !== "source" || desktopScripts || runProofs || !selectedPackages?.length || selectedPackages.length > 2)) throw new Error("Bounded tests require prepared inputs, source guards, at most two packages, and no desktop scripts or proofs.");
+export async function testWorkspace({ prepared = false, output = join(repoRoot, ".agent-artifacts/js-tests", new Date().toISOString().replaceAll(":", "-")), env = process.env, beforeDesktopScripts, runProofs } = {}) {
+  if (runProofs !== undefined && typeof runProofs !== "function") throw new Error("runProofs must be a function.");
   mkdirSync(output, { recursive: true });
-  const report = { version: 1, concurrency: bounded ? 1 : 2, bounded, repository, desktopScripts, proofs: Boolean(runProofs), steps: [], verdict: "RUNNING" };
+  const report = { version: 1, concurrency: 2, proofs: Boolean(runProofs), steps: [], verdict: "RUNNING" };
   const finish = startTiming(report);
   const save = () => writeFileSync(join(output, "result.json"), JSON.stringify(report, null, 2) + "\n");
   const cancellation = cancellationScope("Workspace tests");
@@ -88,18 +77,9 @@ export async function testWorkspace({ prepared = false, output = join(repoRoot, 
     const inventory = await command("inventory", ["-r", "list", "--depth", "-1", "--json"]);
     const packages = JSON.parse(inventory.stdout).filter(pkg => relative(repoRoot, pkg.path) !== "")
       .map(pkg => ({ ...pkg, manifest: JSON.parse(readFileSync(join(pkg.path, "package.json"), "utf8")) }));
-    if (selectedPackages && selectedPackages.some(name => !packages.some(pkg => pkg.name === name))) {
-      throw new Error("A selected workspace package is missing from the installed inventory.");
-    }
-    const tasks = testPlan(packages.filter(pkg => !selectedPackages || selectedPackages.includes(pkg.name)), testFiles, bounded ? {maxWorkers: 1} : {});
-    if (bounded && tasks.some(task => task.resource || !task.args.includes("--maxWorkers=1"))) throw new Error("Bounded tests cannot run services or custom test commands.");
-    for (const task of tasks) for (const file of task.files ?? []) {
-      const pkg = packages.find(pkg => pkg.name === task.name);
-      if (!existsSync(join(pkg.path, file))) throw new Error(`Selected test file is missing: ${task.name}/${file}.`);
-    }
-    if (!tasks.length && !selectedPackages) throw new Error("No workspace package tests were discovered.");
-    report.selectedPackages = selectedPackages ?? packages.map(pkg => pkg.name);
-    report.packages = tasks.map(({name, script, resource, files}) => ({name, script, resource, ...(files ? {files} : {})}));
+    const tasks = testPlan(packages);
+    if (!tasks.length) throw new Error("No workspace package tests were discovered.");
+    report.packages = tasks.map(({name, script, resource}) => ({name, script, resource}));
     save();
     return tasks;
   }
@@ -107,8 +87,7 @@ export async function testWorkspace({ prepared = false, output = join(repoRoot, 
     if (!prepared) {
       await command("runtime-build", ["--filter", "@dohc/app-backend-runtime", "build"]);
     }
-    const repositoryChecks = command("repository", ["run", repository === "full" ? "test:repo" : "test:repo:source"]);
-    if (bounded) await repositoryChecks;
+    const repositoryChecks = command("repository", ["run", "test:repo"]);
     const plan = planPackages().catch(fail);
     const databasePending = new Set();
     const packages = plan.then(async tasks => {
@@ -132,7 +111,7 @@ export async function testWorkspace({ prepared = false, output = join(repoRoot, 
     const runRepository = async () => {
       await repositoryChecks;
       const tasks = await plan;
-      if (desktopScripts && tasks.some(task => task.name === "@dohc/desktop")) {
+      if (tasks.some(task => task.name === "@dohc/desktop")) {
         await command("desktop-scripts", ["--filter", "@dohc/desktop", "run", "test:scripts:isolated"]);
       }
       if (runProofs) {
@@ -150,7 +129,7 @@ export async function testWorkspace({ prepared = false, output = join(repoRoot, 
     const tasks = results[1].value;
     // Packaging rebuilds dist, which package tests and Rust's public-collection
     // recovery fixture read. Package tests and proofs must also finish first.
-    if (desktopScripts && tasks.some(task => task.name === "@dohc/desktop")) {
+    if (tasks.some(task => task.name === "@dohc/desktop")) {
       await beforeDesktopScripts?.();
       await command("desktop-runtime-packaging", ["--filter", "@dohc/desktop", "run", "test:scripts:runtime"]);
     }

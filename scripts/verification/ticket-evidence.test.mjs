@@ -8,9 +8,12 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { TicketEvidenceError, acquireVerificationSlot } from "../../tools/rust-engine-program/build-slot.mjs";
 import { processIdentity, ticketEvidence } from "./ticket-evidence.mjs";
 
+// The lane guard admits only this checkout's PR verifier as the entry script.
+const verifier = fileURLToPath(new URL("./verify.mjs", import.meta.url));
 const sha256 = bytes => createHash("sha256").update(bytes).digest("hex");
 const producer = { ProcessId: process.pid, CreationTimeUtc: "2026-10-09T08:00:00.1234560Z" };
 
@@ -33,7 +36,7 @@ test("the verifier retains the exact published ticket before admission and recor
   const evidence = ticketEvidence({ output, checkout: "fixture-checkout", commit: "fixture-commit", producer,
     persist: () => persisted.push(JSON.parse(JSON.stringify(evidence.record))) });
   let seen;
-  const slot = await acquireVerificationSlot({ DOHC_BUILD_SLOT_ROOT: slots }, { metadata: { purpose: "full PR verification", checkout: "fixture-checkout", commit: "fixture-commit" },
+  const slot = await acquireVerificationSlot({ DOHC_BUILD_SLOT_ROOT: slots }, { entry: verifier, metadata: { purpose: "full PR verification", checkout: "fixture-checkout", commit: "fixture-commit" },
     observeTicket: ticket => {
       seen = { bytes: readFileSync(ticket.path), laneExists: existsSync(join(slots, "verification-slot-1")) };
       evidence.observe(ticket);
@@ -70,7 +73,7 @@ test("ticket read, parse, and persistence failures reject before admission witho
     const evidence = ticketEvidence({ output, checkout: "fixture-checkout", commit: "fixture-commit", producer,
       persist: () => { if (fault === "persist") throw Object.assign(new Error("fixture receipt write failed"), { code: "EBUSY" }); } });
     let calls = 0;
-    const error = await acquireVerificationSlot({ DOHC_BUILD_SLOT_ROOT: slots }, { observeTicket: ticket => {
+    const error = await acquireVerificationSlot({ DOHC_BUILD_SLOT_ROOT: slots }, { entry: verifier, observeTicket: ticket => {
       calls += 1;
       if (fault === "missing") rmSync(ticket.path);
       if (fault === "corrupt") writeFileSync(ticket.path, "{torn");
@@ -116,7 +119,7 @@ test("a retained copy that differs from the bytes read rejects before admission"
     const { acquireVerificationSlot, TicketEvidenceError } = await import(${JSON.stringify(buildSlotUrl)});
     const evidence = ticketEvidence({ output: join(root, "result"), checkout: "fixture-checkout", commit: "fixture-commit", producer, persist: () => {} });
     let calls = 0;
-    const error = await acquireVerificationSlot({ DOHC_BUILD_SLOT_ROOT: join(root, "slots") }, { observeTicket: ticket => { calls += 1; evidence.observe(ticket); } })
+    const error = await acquireVerificationSlot({ DOHC_BUILD_SLOT_ROOT: join(root, "slots") }, { entry: ${JSON.stringify(verifier)}, observeTicket: ticket => { calls += 1; evidence.observe(ticket); } })
       .then(() => null, error => error);
     assert.ok(error instanceof TicketEvidenceError, String(error));
     assert.match(error.message, /differs from the bytes read/);
@@ -147,7 +150,7 @@ test("a surviving or unreadable own ticket fails cleanup while the acquired lane
     const { ticketEvidence } = await import(${JSON.stringify(helperUrl)});
     const { acquireVerificationSlot } = await import(${JSON.stringify(buildSlotUrl)});
     const evidence = ticketEvidence({ output: join(root, "result"), checkout: "fixture-checkout", commit: "fixture-commit", producer, persist: () => {} });
-    const slot = await acquireVerificationSlot({ DOHC_BUILD_SLOT_ROOT: join(root, "slots") }, { observeTicket: evidence.observe });
+    const slot = await acquireVerificationSlot({ DOHC_BUILD_SLOT_ROOT: join(root, "slots") }, { entry: ${JSON.stringify(verifier)}, observeTicket: evidence.observe });
     const [{ ticket }] = evidence.record.observations;
     assert.match(evidence.settle(), new RegExp(ticket.replaceAll(".", "\\\\.") + " is present"));
     assert.equal(evidence.record.cleanup[0].state, "present");

@@ -55,7 +55,7 @@ export function run(command, args, { cwd = repoRoot, env = process.env, log, onS
     const quotePowerShell = (value) => `'${value.replaceAll("'", "''")}'`;
     const launchArgs = windows ? ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command",
       `& ([scriptblock]::Create([IO.File]::ReadAllText(${quotePowerShell(resolve(import.meta.dirname, "windows-job.ps1"))}))) ${[
-        process.execPath, resolve(import.meta.dirname, "windows-command.mjs"), Buffer.from(JSON.stringify({ command, args })).toString("base64"),
+        process.execPath, resolve(import.meta.dirname, "windows-command.mjs"), Buffer.from(JSON.stringify({ command, args })).toString("base64"), String(process.pid),
       ].map(quotePowerShell).join(" ")}`] : args;
     const child = spawn(launchCommand, launchArgs, { cwd, env, windowsHide: true, detached: !windows, stdio: ["ignore", "pipe", "pipe"] });
     let stdout = "";
