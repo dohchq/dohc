@@ -505,25 +505,26 @@ test("inherited compiler and test settings cannot exceed a lane's budget", () =>
   assert.throws(() => capBuildParallelism({}, 0), /positive integer/);
 });
 
-test("the lane count is one unless the slot root's setting says two", async t => {
+test("the lane count is one unless the slot root's setting says otherwise, up to four", async t => {
   const root = slotRoot();
   t.after(() => rmSync(root, {recursive: true, force: true}));
   const env = {DOHC_BUILD_SLOT_ROOT: root};
   assert.equal(verificationLanes(env), 1);
-  for (const setting of ["0", "3", "two"]) {
+  for (const setting of ["0", "5", "12", "two"]) {
     writeFileSync(join(root, "verification-lanes"), setting);
-    assert.throws(() => verificationLanes(env), /must contain 1 or 2/);
+    assert.throws(() => verificationLanes(env), /must contain a lane count from 1 to 4/);
   }
+  writeFileSync(join(root, "verification-lanes"), "4");
+  assert.equal(verificationLanes(env), 4);
   assert.throws(() => verificationLanes({...env, DOHC_VERIFICATION_SLOT_ROOT: root, DOHC_VERIFICATION_TRIAL: "1"}), /isolated/);
-  writeFileSync(join(root, "verification-lanes"), "2\n");
-  assert.equal(verificationLanes(env), 2);
-  const first = await verifierLane(env);
-  const second = await verifierLane(env);
+  writeFileSync(join(root, "verification-lanes"), "3\n");
+  assert.equal(verificationLanes(env), 3);
+  const lanes = [await verifierLane(env), await verifierLane(env), await verifierLane(env)];
   try {
-    assert.notEqual(first.name, second.name);
-    assert.equal(first.dir, join(root, first.name));
-    await assert.rejects(verifierLane(env, {waitMs: 0}), /all 2 slots are held/);
-  } finally { first.release(); second.release(); }
+    assert.equal(new Set(lanes.map(lane => lane.name)).size, 3);
+    assert.equal(lanes[0].dir, join(root, lanes[0].name));
+    await assert.rejects(verifierLane(env, {waitMs: 0}), /all 3 slots are held/);
+  } finally { for (const lane of lanes) lane.release(); }
   // An isolated trial root has its own setting.
   const trial = join(root, "trial");
   mkdirSync(trial);

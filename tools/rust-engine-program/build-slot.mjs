@@ -825,8 +825,8 @@ const canonical = path => {
 const verifierEntry = fileURLToPath(new URL("../../scripts/verification/verify.mjs", import.meta.url));
 
 /**
- * The host's verification lane count. It is 1 unless `verification-lanes` in
- * the verification slot root contains 2, so every verifier on the host agrees.
+ * The host's verification lane count, from 1 to 4. It is 1 unless `verification-lanes`
+ * in the verification slot root says otherwise, so every verifier on the host agrees.
  */
 export function verificationLanes(env = process.env) {
   const trialRoot = env.DOHC_VERIFICATION_SLOT_ROOT;
@@ -840,7 +840,7 @@ export function verificationLanes(env = process.env) {
   let setting;
   try { setting = readFileSync(path, "utf8").trim(); }
   catch (error) { if (error.code === "ENOENT") return 1; throw error; }
-  if (!["1", "2"].includes(setting)) throw new Error(`${path} must contain 1 or 2.`);
+  if (!/^[1-4]$/u.test(setting)) throw new Error(`${path} must contain a lane count from 1 to 4.`);
   return Number(setting);
 }
 

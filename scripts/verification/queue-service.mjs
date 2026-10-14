@@ -125,7 +125,7 @@ export async function runService({
   const requestBudgetMs = 2 * timeLimitMs;
   // Attempts in flight, by request id. Each holds one of the lane checkouts.
   const running = new Map();
-  const checkouts = [lane, `${lane}-2`];
+  const checkouts = [lane, `${lane}-2`, `${lane}-3`, `${lane}-4`];
   let laneCount = 1;
   let laneError = null;
   let fatal = null;

@@ -268,7 +268,7 @@ test("a requested restart starts nothing new and waits for the runs in flight", 
 
 test("a lane setting that cannot be read keeps the lane count the service had, for its slots too", async t => {
   let slots;
-  const { request, settled } = harness(t, { lanes: () => { throw new Error("verification-lanes must contain 1 or 2."); },
+  const { request, settled } = harness(t, { lanes: () => { throw new Error("verification-lanes must contain a lane count from 1 to 4."); },
     holdLane: async ({ lanes }) => { slots = lanes; return { release() {} }; } });
   assert.equal((await settled((await request("pass")).id)).status.verdict, "PASS");
   assert.equal(slots, 1);
@@ -287,6 +287,15 @@ test("a request's cleanup removes only its containers, and the sweep never one a
   removed = [];
   assert.equal(await sweepContainers({ command }), 1);
   assert.deepEqual(removed, ["exited"]);
+});
+
+test("four lanes run four requests at once, each in its own checkout", async t => {
+  const { root, request, calls } = harness(t, { lanes: () => 4 });
+  const hung = [];
+  for (const branch of ["a", "b", "c", "d"]) hung.push(await request("hang", { branch: `refs/heads/${branch}` }));
+  await waitFor(() => calls.length === 4, "four runs must start");
+  assert.equal(new Set(calls.map(call => call.lane)).size, 4, "each run has its own checkout");
+  for (const entry of hung) await cancel(root, entry.id);
 });
 
 test("a submission the service cannot verify is rejected with a reason", async t => {

@@ -98,7 +98,7 @@ The runner labels its Postgres container and removes it by the recorded containe
 
 On the shared Windows host, a queue service runs PR verifications, one per verification lane.
 After the pre-queue checks, `pnpm verify:pr` hands the commit to the service and reports its progress until it finishes.
-The service verifies the commit in its own checkout, `C:\w\_verification\lane` or `C:\w\_verification\lane-2`, so your checkout is free to change while the request waits.
+The service verifies the commit in one of its own checkouts, `C:\w\_verification\lane` to `lane-4`, so your checkout is free to change while the request waits.
 Stopping `pnpm verify:pr` does not stop the request. Run the same command again to follow it, or to get its result once it has finished.
 Pass `--detach` to submit the request and return at once.
 
@@ -145,15 +145,15 @@ It defers when registered gates or builds hold or wait for slots.
 If registered work arrives during measurement, it stops its own child and records the run as failed.
 Its host context covers registered lanes and does not prove that the host was otherwise idle.
 
-The host runs one verification at a time unless `verification-lanes` in the slot root contains `2`.
+The host runs one verification at a time unless `verification-lanes` in the slot root holds a larger count, up to `4`.
 Every verifier and the queue service read that file, so all of them agree on the count.
-The queue service runs the second lane's requests in `C:\w\_verification\lane-2`. That checkout's build output takes about 10 GB more disk.
+The queue service runs each extra lane's requests in its own checkout, `C:\w\_verification\lane-2` to `lane-4`. Each one's build output takes about 10 GB more disk.
 
 ```powershell
-Set-Content C:\w\_locks\verification-lanes 2
+Set-Content C:\w\_locks\verification-lanes 3
 ```
 
-Write `1` to return to one lane. Runs already admitted to the second lane finish first.
+Write a smaller count to return to fewer lanes. Runs already admitted to a lane finish first.
 
 To compare lane counts without changing the host, use an isolated root with its own setting in PowerShell:
 
