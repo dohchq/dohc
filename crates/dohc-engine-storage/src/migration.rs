@@ -3247,6 +3247,12 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         sql: V2_RELEASE_PUBLICATION_ADMISSIONS_DDL,
         sets_user_version: None,
     },
+    Migration {
+        ordinal: 55,
+        id: "v2-owner-prefix-consumed",
+        sql: "CREATE TABLE owner_prefix_consumed (workspace_id TEXT NOT NULL, version_id TEXT NOT NULL, object_id TEXT NOT NULL, outbox_id TEXT NOT NULL, append_key TEXT NOT NULL, update_digest TEXT NOT NULL CHECK(length(update_digest)=64), native_sequence INTEGER NOT NULL CHECK(native_sequence>0), PRIMARY KEY(workspace_id,version_id,object_id,outbox_id,append_key)) STRICT; CREATE INDEX owner_prefix_pending ON owner_ydoc_outboxes(workspace_id,main_version_id,object_id,lineage_claim_id,restore_fence_generation,created_at_ms,outbox_id) WHERE pending_entry_count>0;",
+        sets_user_version: None,
+    },
 ];
 
 const V2_REPLICA_FRONTIERS_DDL: &str = "\
@@ -4069,6 +4075,10 @@ mod tests {
             (
                 "v2-release-publication-admissions",
                 "ad56d45d0b07bb9e48d22cb8213cea8e8054ff021d463997149a88e78da44ff1",
+            ),
+            (
+                "v2-owner-prefix-consumed",
+                "977735a54c36793cdea48c21c9b4114eec3b3002017178a017fc68d3e9a3ba82",
             ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());

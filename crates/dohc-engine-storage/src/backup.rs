@@ -68,6 +68,7 @@ const COMPARED_TABLES: &[&str] = &[
     "owner_pending_settlements",
     "release_publication_admissions",
     "release_holds",
+    "owner_prefix_consumed",
     "release_hold_usage",
     "release_held_ops",
     "release_held_blobs",

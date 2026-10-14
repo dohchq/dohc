@@ -47,7 +47,7 @@ function fixture() {
   const client = {ownerYDocPrepareEnrollment: vi.fn(async () => ({status: "observed", draft: {outboxId: "outbox"}})),
     ownerYDocReadState: vi.fn(async () => ({revision: 1, acceptedCursor: 1, nativeHeadSequence: 1, stateVector: Buffer.from([0])})),
     ownerYDocApplyInitialSync: vi.fn(async () => ({revision: 2, acceptedCursor: 1, nativeHeadSequence: 1})),
-    ownerYDocIsReceiptApplied: vi.fn(async () => true)};
+    ownerYDocIsReceiptApplied: vi.fn(async () => "applied")};
   return client as typeof client & EngineClient;
 }
 afterEach(() => {for (const close of relay.closers.splice(0)) close(); vi.clearAllMocks();});

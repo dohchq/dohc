@@ -296,11 +296,19 @@ describe("private owner delivery transport", () => {
   });
   it("checks receipt containment separately and rejects a mismatched applied cursor", async () => {
     const peer=new FakePeerConnection(),transport=client(peer,{privateLiveApplication:{aggregateBytes:128*1024*1024,maxUploads:1}});
-    peer.acknowledge();await transport.ready();let wireId=0;
-    peer.onEnvelope=e=>{if(e.type!=="request")return;wireId=e.id;if(e.method==="ydoc.ownerDelivery.isReceiptApplied")peer.send({type:"response",id:e.id,result:{applied:false}});};
+    peer.acknowledge();await transport.ready();let wireId=0; let status:string|string[]="notApplied";
+    peer.onEnvelope=e=>{if(e.type!=="request")return;wireId=e.id;if(e.method==="ydoc.ownerDelivery.isReceiptApplied")peer.send({type:"response",id:e.id,result:{status}});};
     peer.onBlobChunk=frame=>{if(frame.fin)peer.send({type:"response",id:wireId,result:{revision:2,acceptedCursor:18,nativeHeadSequence:3}});};
     try {
-      expect(await transport.ownerYDocIsReceiptApplied(request,{...target,receipt:{deliveryId:"delivery",updateDigest:"ab".repeat(32),journalCursor:19,acceptingHostEpoch:1}})).toBe(false);
+      expect(await transport.ownerYDocIsReceiptApplied(request,{...target,receipt:{deliveryId:"delivery",updateDigest:"ab".repeat(32),journalCursor:19,acceptingHostEpoch:1}})).toBe("notApplied");
+      status="stopping";
+      expect(await transport.ownerYDocIsReceiptApplied({...request,id:972},{...target,receipt:{deliveryId:"delivery",updateDigest:"ab".repeat(32),journalCursor:19,acceptingHostEpoch:1}})).toBe("stopping");
+      status="applied";
+      expect(await transport.ownerYDocIsReceiptApplied({...request,id:973},{...target,receipt:{deliveryId:"delivery",updateDigest:"ab".repeat(32),journalCursor:19,acceptingHostEpoch:1}})).toBe("applied");
+      status="unknown";
+      await expect(transport.ownerYDocIsReceiptApplied({...request,id:974},{...target,receipt:{deliveryId:"delivery",updateDigest:"ab".repeat(32),journalCursor:19,acceptingHostEpoch:1}})).rejects.toThrow("Invalid owner receipt response");
+      status=["applied"];
+      await expect(transport.ownerYDocIsReceiptApplied({...request,id:975},{...target,receipt:{deliveryId:"delivery",updateDigest:"ab".repeat(32),journalCursor:19,acceptingHostEpoch:1}})).rejects.toThrow("Invalid owner receipt response");
       await expect(transport.ownerYDocApplyAcceptedFrame({...request,id:971},{...target,expectedRevision:1,expectedNativeHeadSequence:2,previousAcceptedCursor:0,journalCursor:19,updateBytes:Uint8Array.of(0,0)})).rejects.toThrow("differs from request");
     } finally {transport.close();}
   });

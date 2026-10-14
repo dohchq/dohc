@@ -24,6 +24,8 @@ pub struct OwnerLiveStop {
     pub state: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deferred: Option<DeferredOwnerStop>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prefix: Option<super::prefix::PrefixProgress>,
     #[serde(skip)]
     pub record_facts: Vec<dohc_engine_domain::CollectionRecordApplyFacts>,
 }
@@ -48,7 +50,10 @@ pub struct OwnerStopDocument {
     pub current_path: String,
 }
 
-fn read_in(conn: &Connection, key: &DocKey) -> Result<Option<OwnerLiveStop>, OwnerOutboxError> {
+pub(super) fn read_in(
+    conn: &Connection,
+    key: &DocKey,
+) -> Result<Option<OwnerLiveStop>, OwnerOutboxError> {
     let row: Option<(String,String)> = conn.query_row("SELECT binding_json,state FROM owner_live_stops WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3", params![key.workspace_id,key.version_id,key.object_id], |r| Ok((r.get(0)?,r.get(1)?))).optional().map_err(read_sql)?;
     row.map(|(json, state)| {
         let mut stop: OwnerLiveStop =
@@ -169,12 +174,13 @@ pub fn request_in_tx(
         binding: draft.map(|draft| draft.binding),
         record_facts: Vec::new(),
         deferred: None,
+        prefix: None,
     };
     save_in_tx(tx, key, &stop, now_ms)?;
     Ok(stop)
 }
 
-fn save_in_tx(
+pub(super) fn save_in_tx(
     tx: &rusqlite::Transaction<'_>,
     key: &DocKey,
     stop: &OwnerLiveStop,

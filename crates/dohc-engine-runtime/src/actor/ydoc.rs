@@ -603,14 +603,17 @@ impl ActorHandle {
         receipt: OwnerDeliveryReceipt,
         token: CancellationToken,
         reservation: Arc<dyn Send + Sync>,
-    ) -> Result<Result<bool, OwnerOutboxError>, RuntimeError> {
+    ) -> Result<
+        Result<dohc_engine_collab::owner_outbox::accepted::ReceiptState, OwnerOutboxError>,
+        RuntimeError,
+    > {
         self.run(move |store, _cache| {
             let _reservation = reservation;
             if token.is_cancelled() {
                 return Err(RuntimeError::Cancelled);
             }
             Ok(store.read_with(|conn| {
-                dohc_engine_collab::owner_outbox::accepted::is_receipt_applied_in(
+                dohc_engine_collab::owner_outbox::accepted::receipt_state_in(
                     conn,
                     &binding,
                     &relay_database_namespace,
@@ -2452,9 +2455,11 @@ fn settled_collection_record_reconcile_required(
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub(super) enum SettlementKind {
+pub(super) enum SettlementKind<'a> {
     Document,
     CollectionAdoption,
+    #[allow(dead_code)] // Inert until drain 2b supplies the document task.
+    OwnerPrefix(&'a dohc_engine_collab::owner_outbox::prefix::PrefixSettlement),
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2477,12 +2482,22 @@ pub(super) fn ydoc_settle_on_store(
     root_guard: Option<&dyn WorkspaceRootGuard>,
     live_audit: Option<&dohc_engine_collab::live_update_application::LiveSettlementAudit>,
     restore_generation: Option<i64>,
-    kind: SettlementKind,
+    kind: SettlementKind<'_>,
 ) -> Result<YdocSettleOutcome, RuntimeError> {
+    let prefix = match kind {
+        SettlementKind::OwnerPrefix(capability) => Some(capability),
+        _ => None,
+    };
+    if let Some(capability) = prefix {
+        if live_audit.is_some() || drain_deferred {
+            return Err(dohc_engine_collab::CollabError::OwnerOutboxFrozen.into());
+        }
+        store.read_with(|conn| capability.verify_in(conn))?;
+    }
     if token.is_cancelled() {
         return Err(RuntimeError::Cancelled);
     }
-    if live_audit.is_none() {
+    if live_audit.is_none() && prefix.is_none() {
         store.read_with(|conn| {
             dohc_engine_collab::owner_outbox::require_ordinary_settlement(conn, key)?;
             dohc_engine_collab::live_update_application::require_restore_generation(
@@ -2784,12 +2799,13 @@ pub(super) fn ydoc_settle_on_store(
     };
     // A live settlement names its own moment unless the head already is its
     // latest audited settlement.
-    let reuses_head = match (live_audit, head_probe.as_ref()) {
-        (Some(audit), Some(head)) => store.read_with(|conn| {
-            audit.reuses_head_in(conn, &head.latest_moment_id, &head.blob_sha256)
-        })?,
-        _ => true,
-    };
+    let reuses_head = prefix.is_none_or(|p| p.from_sequence == p.through_sequence)
+        && match (live_audit, head_probe.as_ref()) {
+            (Some(audit), Some(head)) => store.read_with(|conn| {
+                audit.reuses_head_in(conn, &head.latest_moment_id, &head.blob_sha256)
+            })?,
+            _ => true,
+        };
     // Idempotent no-op: when the lineage's last settled content is exactly
     // this projection, re-settling would mint a duplicate moment (the
     // fingerprint's previous-moment input changed) and a redundant
@@ -2811,7 +2827,7 @@ pub(super) fn ydoc_settle_on_store(
             settles_prefix,
             faults,
             path,
-            content_kind == ContentKind::Richdoc,
+            content_kind == ContentKind::Richdoc && prefix.is_none(),
             live_audit,
             &current,
             &projection.source_state_vector_sha256,
@@ -2842,6 +2858,7 @@ pub(super) fn ydoc_settle_on_store(
     // update, a snapshot, a prior settle, no recorded seed source, a moved
     // head or disk — falls through to the write below.
     if live_audit.is_none()
+        && prefix.is_none()
         && let Some(seed_source) = dohc_engine_collab::read_seed_only_lineage_source(store, key)?
         && Some(&seed_source) == probe_sha.as_ref()
         && matches!(
@@ -2882,7 +2899,9 @@ pub(super) fn ydoc_settle_on_store(
     } = projection;
     let projected_text = settled_content_override.unwrap_or(ydoc_projected_text);
     let outcome = store.write_with(faults, |tx| {
-        if live_audit.is_none() {
+        if let Some(capability) = prefix {
+            capability.verify_in(tx).map_err(StorageError::persist_public)?;
+        } else if live_audit.is_none() {
             dohc_engine_collab::owner_outbox::require_ordinary_settlement(tx, key).map_err(
                 |_| DomainError::InvalidInput {
                     reason: "owner-outbox-frozen",
@@ -3043,11 +3062,15 @@ pub(super) fn ydoc_settle_on_store(
                 result.deduped,
             )?;
         }
+        if let Some(capability) = prefix {
+            dohc_engine_sync::journal_prefix_moment_in_tx(tx,&capability.binding,&result.moment.moment_id,now_ms).map_err(StorageError::persist_public)?;
+            dohc_engine_collab::owner_outbox::prefix::history_committed_in_tx(tx,&capability.binding,now_ms).map_err(StorageError::persist_public)?;
+        }
         let reconcile_required = settled_collection_record_reconcile_required_in_tx(
             tx,
             key,
             path,
-            content_kind == ContentKind::Richdoc,
+            content_kind == ContentKind::Richdoc && prefix.is_none(),
         )?;
         Ok((result, reconcile_required))
     })?;
@@ -3572,6 +3595,7 @@ fn drain_deferred_ydoc_for_live_session_rpc(
 
 #[cfg(test)]
 mod scene_seed_transaction_tests {
+    include!("prefix_tests.rs");
     use super::super::materialization::{PostCommitMaterializeOutcome, worse_materialize_outcome};
     use super::*;
     use dohc_engine_storage::FaultPoint;

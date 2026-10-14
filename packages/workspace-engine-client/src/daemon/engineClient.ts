@@ -888,13 +888,13 @@ export class EngineClient implements EngineTransport {
     return position;
   }
 
-  async ownerYDocIsReceiptApplied(request: OwnerYDocDeliveryRequest, input: OwnerYDocDeliveryTarget & {readonly receipt:OwnerYDocDeliveryReceipt}, signal?: AbortSignal): Promise<boolean> {
+  async ownerYDocIsReceiptApplied(request: OwnerYDocDeliveryRequest, input: OwnerYDocDeliveryTarget & {readonly receipt:OwnerYDocDeliveryReceipt}, signal?: AbortSignal): Promise<"applied" | "notApplied" | "stopping"> {
     const receipt={deliveryId:parseLiveUpdateIdentifier(input.receipt.deliveryId,"delivery ID"),updateDigest:parseLiveUpdateDigest(input.receipt.updateDigest),journalCursor:input.receipt.journalCursor,acceptingHostEpoch:input.receipt.acceptingHostEpoch};
     if (!Number.isSafeInteger(receipt.journalCursor) || receipt.journalCursor<1 || !Number.isSafeInteger(receipt.acceptingHostEpoch) || receipt.acceptingHostEpoch<1) throw new TypeError("Invalid owner receipt.");
     const response=await this.sendLiveUpload(request,"ydoc.ownerDelivery.isReceiptApplied",3*1024*1024,()=>({params:{...ownerDeliveryTarget(input),receipt},streams:[]}),signal);
-    const row=response.result as {applied?:unknown};
-    if (!row || typeof row.applied!=="boolean" || Object.keys(row).join()!=="applied") throw new TypeError("Invalid owner receipt response.");
-    return row.applied;
+    const row=response.result as {status?:unknown};
+    if (!row || typeof row.status!=="string" || !["applied", "notApplied", "stopping"].includes(row.status) || Object.keys(row).join()!=="status") throw new TypeError("Invalid owner receipt response.");
+    return row.status as "applied" | "notApplied" | "stopping";
   }
 
   async captureOwnerActivation(

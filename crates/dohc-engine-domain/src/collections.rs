@@ -3531,6 +3531,29 @@ pub fn index_collection_frontmatter_apply_in_tx(
     }))
 }
 
+/// Reconcile visible fields without adding field History or apply facts.
+pub fn reconcile_collection_frontmatter_in_tx(
+    conn: &Connection,
+    workspace: &str,
+    version: &str,
+    object: &str,
+    fields: &Value,
+) -> Result<(), crate::DomainError> {
+    if let Some((record, path, _)) = bound_record(conn, workspace, version, object)? {
+        let schema = load_collection_schema(conn, workspace, version, &path)?;
+        replace_index_for_record(
+            conn,
+            workspace,
+            version,
+            &record,
+            &schema,
+            fields,
+            FieldProvenance::PreserveStored,
+        )?;
+    }
+    Ok(())
+}
+
 /// Index a bound record's frontmatter from a file written on this computer,
 /// for a record whose Y.Doc lineage holds no content to fold the write into:
 /// the file is then the only record of the write. The record's current

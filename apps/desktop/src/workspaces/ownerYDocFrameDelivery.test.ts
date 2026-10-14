@@ -27,7 +27,7 @@ function fixture(overrides: {binding?: typeof binding; initialCursor?: number; i
     readState: vi.fn(async () => ({stateVector: new Uint8Array([0]), journalCursor: 0})),
     applyInitialSync: vi.fn(async () => overrides.initialResult ?? "applied"),
     applyAcceptedFrame: vi.fn(async input => {retained.set(input.journalCursor, hash(input.updateBytes)); feedApplied.resolve(); return "applied" as const;}),
-    isReceiptApplied: vi.fn(async input => {receiptChecked.resolve(); return retained.get(input.receipt.journalCursor) === input.receipt.updateDigest;}),
+    isReceiptApplied: vi.fn(async input => {receiptChecked.resolve(); return retained.get(input.receipt.journalCursor) === input.receipt.updateDigest ? "applied" : "notApplied";}),
     ...overrides.state,
   };
   const submit = vi.fn(async input => {submitted.resolve(); return overrides.result ?? {result: "success" as const, ack: {...receipt, localYDocSequence: 4, applicationReplayed: false}};});
@@ -79,6 +79,14 @@ it("submits the agent a queued edit declared, owned before transport, beside its
   expect(await work).toEqual({kind: "receipt", receipt: f.receipt});
   expect(f.submit).toHaveBeenCalledWith({deliveryId: envelope.deliveryId, updateDigest: envelope.updateDigest, updateBytes: envelope.update,
     authorContext: {kind: "account", accountId: "owner", agent: {agentId: "trip-agent-ü", onBehalfOf: "local-person", depth: 2}}}, expect.any(AbortSignal));
+});
+
+it("ends a stopping receipt attempt without acknowledging the queued edit", async () => {
+  const f = fixture({state: {isReceiptApplied: vi.fn(async () => "stopping" as const)}});
+  const fresh = await f.delivery.freshOwnerAuthority(binding);
+  if (fresh.kind !== "authority") throw new Error("Missing authority");
+  expect(await f.delivery.deliver(fresh.authority, envelope)).toEqual({kind: "retry"});
+  expect(f.acceptedState.applyAcceptedFrame).not.toHaveBeenCalled();
 });
 
 it.each([{}, {agentDeclaration: {agentId: "trip-agent", onBehalfOf: null, depth: 0}}])("retries a credited entry while the recording account is unavailable (%j)", async declaration => {

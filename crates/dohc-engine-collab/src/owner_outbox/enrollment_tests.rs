@@ -238,7 +238,189 @@ fn collection_fixture() -> (ScratchDir, EngineStore, ObservedOwnerBinding, Vec<u
     (dir, store, observed, checkpoint, local)
 }
 
+#[test]
+fn prefix_collection_visibility_and_index_repair_preserve_original_field_history() {
+    use super::super::{prefix, release};
+    let (dir, mut store, observed, checkpoint, local) = collection_fixture();
+    let source = store
+        .read_with(|c| {
+            super::super::native_source::read_native_update_source(
+                c,
+                &observed.binding,
+                "native-credit",
+                1,
+            )
+        })
+        .unwrap();
+    let update = store
+        .read_with(|c| bounded_blob(c, &source.update_digest))
+        .unwrap();
+    let history = field_history(&store);
+    let enrollment = input(&store, &observed, checkpoint);
+    let draft = enroll(&mut store, &enrollment, &observed.limits).unwrap();
+    // Retention of an original native entry follows its credited index write.
+    store
+        .write_with(&NoFaults, |tx| {
+            tx.execute("DELETE FROM owner_ydoc_outbox_entries", [])
+                .map_err(write_sql)?;
+            tx.execute(
+                "UPDATE owner_ydoc_outboxes SET pending_bytes=0,oldest_entry_at_ms=NULL",
+                [],
+            )
+            .map_err(write_sql)?;
+            let base_len = bounded_blob(tx, &source.binding.lineage_claim_id)?.len() as i64;
+            let result = super::super::append_with_retained_base(
+                tx,
+                "workspace",
+                super::super::OwnerOutboxAppendInput {
+                    binding: draft.binding.clone(),
+                    base_update: Vec::new(),
+                    append_key: source.append_key()?,
+                    update,
+                    limits: observed.limits.clone(),
+                    created_at_ms: 10,
+                },
+                Some((source.binding.lineage_claim_id.clone(), base_len)),
+                None,
+                None,
+                None,
+                true,
+            )?;
+            super::super::retain_native_source(tx, &result, &source)
+        })
+        .unwrap();
+    let key = key(&draft.binding).unwrap();
+    let mut visible = local.frontmatter_json();
+    visible.as_object_mut().unwrap().remove("id");
+    store.write_with(&NoFaults,|tx|{
+        tx.execute("DELETE FROM collection_record_fields WHERE record_id='rec_aaaaaaaaaaaaaaaaaaaaaaaaaa'",[]).map_err(write_sql)?;
+        release::request_in_tx(tx,&key,11)?;
+        prefix::seal_in_tx(tx,&draft.binding,&"c".repeat(64),9,12)
+    }).unwrap();
+    assert_visible_fields(&store, &draft.binding, visible.clone());
+    assert_eq!(field_history(&store), history);
+    let mut cache = crate::WriterDocCache::new();
+    let mut credit = Vec::new();
+    prefix::commit_prefix(
+        &mut store,
+        &mut cache,
+        &draft.binding,
+        &"c".repeat(64),
+        13,
+        &NoFaults,
+        |_, _, actor, _, _| {
+            credit.push(actor.map(str::to_owned));
+            Ok(())
+        },
+    )
+    .unwrap();
+    assert!(credit.contains(&Some("person".into())));
+    assert_visible_fields(&store, &draft.binding, visible.clone());
+    assert_eq!(field_history(&store), history);
+    drop(store);
+    let store = EngineStore::open(&dir.join("engine.db"), 14).unwrap();
+    assert_visible_fields(&store, &draft.binding, visible);
+    assert_eq!(field_history(&store), history);
+}
+
 type FieldHistoryRow = (String, Option<String>, Option<String>, Option<String>);
+
+#[test]
+fn prefix_quarantined_collection_fields_keep_original_agent_credit() {
+    use super::super::{draft, prefix, release};
+    let (_dir, mut store, observed, checkpoint, local) = collection_fixture();
+    let enrollment = input(&store, &observed, checkpoint);
+    let draft = enroll(&mut store, &enrollment, &observed.limits).unwrap();
+    for i in 0..40 {
+        draft::append_draft_cached(
+            &mut store,
+            &mut crate::WriterDocCache::new(),
+            "workspace",
+            draft::OwnerDraftAppendInput {
+                binding: draft.binding.clone(),
+                expected_revision: 1,
+                append_key: format!("body-{i}"),
+                update: local.richdoc_append_paragraph(&format!("body {i}")),
+                person_edit: true,
+                agent_declaration: None,
+                automation_declaration: None,
+                now_ms: 11,
+            },
+            &NoFaults,
+        )
+        .unwrap();
+    }
+    let update = local.frontmatter_set("priority", "high").unwrap();
+    let appended = draft::append_draft_cached(
+        &mut store,
+        &mut crate::WriterDocCache::new(),
+        "workspace",
+        draft::OwnerDraftAppendInput {
+            person_edit: false,
+            binding: draft.binding.clone(),
+            expected_revision: 1,
+            append_key: "agent-field".into(),
+            update,
+            now_ms: 11,
+            agent_declaration: Some(AgentDeclaration {
+                agent_id: "field-agent".into(),
+                on_behalf_of: Some("person".into()),
+                depth: 2,
+            }),
+            automation_declaration: None,
+        },
+        &NoFaults,
+    )
+    .unwrap();
+    let original = field_history(&store);
+    assert!(original
+        .iter()
+        .any(|r| r.0 == "priority" && r.3.as_deref() == Some("field-agent")));
+    super::super::quarantine(
+        &mut store,
+        "workspace",
+        super::super::OwnerOutboxQuarantineInput {
+            outbox_id: appended.outbox_id.clone(),
+            reason: "binding-changed".into(),
+            observed_binding: None,
+        },
+        12,
+    )
+    .unwrap();
+    let history = field_history(&store);
+    assert_eq!(&history[..original.len()], &original);
+    let key = key(&draft.binding).unwrap();
+    store.write_with(&NoFaults,|tx|{
+        tx.execute("UPDATE owner_ydoc_outboxes SET current_path='old.md',selector_paths_json='[\"old.md\"]' WHERE outbox_id=?1",[appended.outbox_id]).map_err(write_sql)?;
+        release::request_in_tx(tx,&key,13)?;
+        prefix::seal_in_tx(tx,&draft.binding,&"c".repeat(64),9,14)
+    }).unwrap();
+    let expected = serde_json::json!({"title":"Edited title","status":"done","priority":"high"});
+    assert_visible_fields(&store, &draft.binding, expected.clone());
+    let mut cache = crate::WriterDocCache::new();
+    prefix::commit_prefix(
+        &mut store,
+        &mut cache,
+        &draft.binding,
+        &"c".repeat(64),
+        15,
+        &NoFaults,
+        |_, _, _, _, _| Ok(()),
+    )
+    .unwrap();
+    assert_visible_fields(&store, &draft.binding, expected);
+    assert_eq!(field_history(&store), history);
+    assert!(
+        store
+            .read_with(|c| c.query_row(
+                "SELECT COUNT(*) FROM owner_ydoc_outbox_entries WHERE pending=1",
+                [],
+                |r| r.get::<_, i64>(0)
+            ))
+            .unwrap()
+            > 0
+    );
+}
 
 fn field_history(store: &EngineStore) -> Vec<FieldHistoryRow> {
     store

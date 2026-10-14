@@ -106,6 +106,7 @@ pub fn prepare_in(
     namespace: &str,
     recovery: bool,
 ) -> Result<OwnerEnrollmentPreparation, OwnerOutboxError> {
+    super::prefix::require_delivery_open(conn, binding)?;
     validate_identifier(namespace, "invalid relay namespace")?;
     if let Some(previous) = if recovery {
         recovery_previous(conn, binding)?
@@ -212,6 +213,7 @@ pub fn enroll_in_tx(
     limits: &OwnerOutboxLimits,
     now_ms: i64,
 ) -> Result<OwnerDraftDescriptor, OwnerOutboxError> {
+    super::prefix::require_delivery_open(tx, &input.binding)?;
     require_workspace(workspace, &input.binding.workspace_id)?;
     validate_identifier(&input.relay_database_namespace, "invalid relay namespace")?;
     validate_digest(&input.captured.local_state_digest)?;

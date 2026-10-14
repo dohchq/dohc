@@ -32,6 +32,40 @@ fn corrupt(reason: impl Into<String>) -> CollabError {
 pub struct Authors(BTreeMap<String, Value>);
 
 impl Authors {
+    pub(crate) fn prefix_bytes(&self) -> usize {
+        self.admission_bytes()
+    }
+
+    pub(crate) fn admit_prefix(
+        &mut self,
+        bytes: &mut usize,
+        json: &str,
+    ) -> Result<(), CollabError> {
+        let incoming = entry(json)?;
+        let (identity, author) = incoming
+            .0
+            .into_iter()
+            .next()
+            .ok_or_else(|| corrupt("missing author"))?;
+        let prior = self.0.get(&identity).cloned();
+        let previous_bytes = prior.as_ref().map_or(0, entry_admission_bytes);
+        self.insert(author)?;
+        let next_bytes = entry_admission_bytes(&self.0[&identity]);
+        let next = bytes
+            .saturating_sub(previous_bytes)
+            .saturating_add(next_bytes)
+            .saturating_add(usize::from(prior.is_none() && self.len() > 1));
+        if self.len() > MAX_INTERVAL_AUTHORS || next > MAX_INTERVAL_AUTHOR_BYTES {
+            if let Some(prior) = prior {
+                self.0.insert(identity, prior);
+            } else {
+                self.0.remove(&identity);
+            }
+            return Err(CollabError::AuthorCapacity);
+        }
+        *bytes = next;
+        Ok(())
+    }
     pub fn len(&self) -> usize {
         self.0.len()
     }
@@ -532,7 +566,7 @@ pub fn admit_accepted_in(
     retain_pending_in(conn, key, authors)
 }
 
-fn retain_pending_in(
+pub(crate) fn retain_pending_in(
     conn: &Connection,
     key: &DocKey,
     authors: &[String],

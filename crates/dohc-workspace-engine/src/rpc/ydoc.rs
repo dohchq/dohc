@@ -678,6 +678,13 @@ impl EngineService {
                 }
             }
         }
+        let rows = rows
+            .into_iter()
+            .map(|mut row| {
+                row.prefix = None;
+                row
+            })
+            .collect::<Vec<_>>();
         Ok(json!({"stops":rows}))
     }
 

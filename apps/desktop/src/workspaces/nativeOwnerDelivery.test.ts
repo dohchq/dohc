@@ -26,7 +26,7 @@ it("advances only from captured native positions and checks exact receipts", asy
   const client = {ownerYDocPrepareEnrollment: vi.fn(async () => ({status:"observed", draft:{outboxId:"outbox"}})), ownerYDocReadState: vi.fn(async () => ({revision: 2, acceptedCursor: 3, nativeHeadSequence: 4, stateVector: Buffer.from([0])})),
     ownerYDocApplyInitialSync: vi.fn(async () => ({revision: 5, acceptedCursor: 6, nativeHeadSequence: 7})),
     ownerYDocApplyAcceptedFrame: vi.fn(async () => ({revision: 9, acceptedCursor: 8, nativeHeadSequence: 10})),
-    ownerYDocIsReceiptApplied: vi.fn(async () => false)};
+    ownerYDocIsReceiptApplied: vi.fn(async () => "notApplied")};
   mock.drain.mockImplementation(async () => {
     const {acceptedState: state} = mock.options as OwnerYDocFrameDeliveryOptions;
     expect(await state.readState(binding, new AbortController().signal)).toEqual({stateVector: Buffer.from([0]), journalCursor: 3});
@@ -34,7 +34,7 @@ it("advances only from captured native positions and checks exact receipts", asy
     expect(await state.applyAcceptedFrame({binding, previousAcceptedCursor: 3, journalCursor: 8, updateBytes: new Uint8Array([2])}, new AbortController().signal)).toBe("retry");
     expect(client.ownerYDocApplyAcceptedFrame).not.toHaveBeenCalled();
     await state.applyAcceptedFrame({binding, previousAcceptedCursor: 6, journalCursor: 8, updateBytes: new Uint8Array([2])}, new AbortController().signal);
-    expect(await state.isReceiptApplied({binding, receipt}, new AbortController().signal)).toBe(false);
+    expect(await state.isReceiptApplied({binding, receipt}, new AbortController().signal)).toBe("notApplied");
     await expect(state.readState({...binding, objectId: "foreign"}, new AbortController().signal)).rejects.toThrow("binding changed");
     return "retry";
   });

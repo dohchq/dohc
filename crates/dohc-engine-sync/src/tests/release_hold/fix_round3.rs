@@ -1,5 +1,65 @@
 use super::*;
 
+#[test]
+fn hold_page_work_stays_bounded_at_capacity_and_recovers_reports_first() {
+    let (_dir, mut store, owner, _) = owner_publication::fixture();
+    let hold = open(&mut store, &owner);
+    // Seed retained coordinates directly: this proof measures paging, not admission.
+    store.write_with(&NoFaults, |tx| {
+        for seq in 0..10_000 {
+            let op = envelope("peer", seq, "ydoc.update", json!({"versionId":"main","objectId":"owner"}));
+            let json = serde_json::to_string(&op).unwrap();
+            tx.execute("INSERT INTO replication_log(workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms,imported) VALUES ('ws','peer',?1,'ydoc.update',?2,0,1)", params![seq,op.payload_json().unwrap()]).unwrap();
+            tx.execute("INSERT INTO release_held_ops(workspace_id,origin_id,origin_seq,version_id,object_id,release_digest,envelope_json,retained_bytes) VALUES ('ws','peer',?1,'main','owner',?2,?3,1)", params![seq,"a".repeat(64),json]).unwrap();
+        }
+        Ok::<_, SyncError>(())
+    }).unwrap();
+    for reports in [0, 7, 64, 130] {
+        store
+            .read_with(|c| {
+                c.execute("UPDATE release_held_ops SET stage='held'", [])
+                    .unwrap();
+                for n in 0..reports {
+                    c.execute(
+                        "UPDATE release_held_ops SET stage=?2 WHERE origin_seq=?1",
+                        params![9_999 - n, if n % 2 == 0 { "done" } else { "dependency" }],
+                    )
+                    .unwrap();
+                }
+                Ok::<_, rusqlite::Error>(())
+            })
+            .unwrap();
+        let page = read_release_hold_page(&store, &hold).unwrap();
+        let count = reports.min(64);
+        let expected: Vec<i64> = (10_000 - reports..10_000 - reports + count)
+            .chain(0..64 - count)
+            .collect();
+        assert_eq!(
+            page.iter().map(|op| op.origin_seq).collect::<Vec<_>>(),
+            expected
+        );
+        let steps = store
+            .read_with(|c| {
+                let mut stmt = c
+                    .prepare(crate::release_hold::RELEASE_HOLD_PAGE_SQL)
+                    .unwrap();
+                let rows = stmt
+                    .query_map(params!["ws", "main", "owner", "a".repeat(64)], |r| {
+                        r.get::<_, String>(0)
+                    })
+                    .unwrap();
+                assert_eq!(rows.collect::<Result<Vec<_>, _>>().unwrap().len(), 64);
+                Ok::<_, rusqlite::Error>(stmt.get_status(rusqlite::StatementStatus::VmStep))
+            })
+            .unwrap();
+        println!("hold-page reports={reports} vm-steps={steps}");
+        assert!(
+            steps < 10_000,
+            "one page must not visit the full 10,000-row hold: {steps} VM steps"
+        );
+    }
+}
+
 fn recover_replay_commit(dependency: bool) {
     let (dir, mut store, owner, checkpoint) = owner_publication::fixture();
     let hold = open(&mut store, &owner);

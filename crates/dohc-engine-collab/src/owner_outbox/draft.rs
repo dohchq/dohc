@@ -23,7 +23,7 @@ pub struct OwnerDraft {
 }
 
 #[derive(PartialEq, Eq)]
-struct DraftProof {
+pub(super) struct DraftProof {
     binding_json: String,
     namespace: String,
     revision: i64,
@@ -34,26 +34,26 @@ struct DraftProof {
 }
 
 pub(crate) struct CachedOwnerDraft {
-    draft: OwnerDraft,
-    proof: DraftProof,
+    pub(super) draft: OwnerDraft,
+    pub(super) proof: DraftProof,
     pub(crate) approx_bytes: usize,
     pub(crate) last_used: u64,
 }
 
-fn draft_proof(
+pub(super) fn draft_proof(
     conn: &Connection,
     binding: &LiveObjectBinding,
     revision: i64,
 ) -> Result<DraftProof, OwnerOutboxError> {
-    let observed = super::accepted::current(conn, binding)?;
+    let observed = super::prefix::effective_in(conn, binding)?;
     if observed.revision != revision {
         return Err(OwnerOutboxError::ParentMismatch);
     }
     let parent = find_parent_for_binding(conn, binding)?;
-    if parent
-        .as_ref()
-        .is_some_and(|p| p.binding != *binding || p.state == OwnerOutboxState::Quarantined)
-    {
+    let draining = super::prefix::progress_in(conn, &key(binding)?)?.is_some();
+    if parent.as_ref().is_some_and(|p| {
+        p.binding != *binding || (p.state == OwnerOutboxState::Quarantined && !draining)
+    }) {
         return Err(OwnerOutboxError::Frozen);
     }
     Ok(DraftProof {
@@ -126,6 +126,9 @@ pub fn write_states_in(
             }
             Ok(Some(parent))
         }).transpose()?.flatten();
+        if conn.query_row("SELECT EXISTS(SELECT 1 FROM owner_prefix_consumed WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND outbox_id=?4 AND append_key=?5)",params![b.workspace_id,b.main_version_id,b.object_id,write.outbox_id,write.append_key],|r|r.get::<_,bool>(0)).map_err(read_sql)? && super::release::read_in(conn,&key(b)?)?.is_some_and(|s| s.binding.as_ref()==Some(b)) {
+            return Ok("settled".to_owned());
+        }
         if parent.is_none() { return Ok("absent".to_owned()); }
         if let Some(ref parent) = parent {
             let entry: Option<(bool, bool)> = conn.query_row(
@@ -194,7 +197,7 @@ pub fn descriptor_for_key_in(
     binding
         .validate_canonical()
         .map_err(OwnerOutboxError::InvalidInput)?;
-    let observed = super::accepted::current(conn, &binding)?;
+    let observed = super::prefix::effective_in(conn, &binding)?;
     describe_draft(conn, observed).map(Some)
 }
 
@@ -616,7 +619,7 @@ pub fn open_draft_in(
     binding: &LiveObjectBinding,
     expected_revision: i64,
 ) -> Result<OwnerDraft, OwnerOutboxError> {
-    let observed = read_observed_in(conn, binding)?.ok_or(OwnerOutboxError::NotFound)?;
+    let observed = super::prefix::effective_in(conn, binding)?;
     if observed.revision != expected_revision {
         return Err(OwnerOutboxError::ParentMismatch);
     }
@@ -631,16 +634,26 @@ pub fn open_draft_in(
     {
         return Err(OwnerOutboxError::ParentMismatch);
     }
-    let doc = Ydoc::wire();
-    doc.apply(&bounded_blob(conn, &observed.checkpoint_digest)?)
-        .map_err(collab)?;
-    apply_pending_in(
-        conn,
-        binding,
-        &doc,
-        observed.limits.max_pending_bytes,
-        PendingReplay::Draft,
-    )?;
+    let prefix = super::prefix::progress_in(conn, &key(binding)?)?.is_some();
+    let doc = if prefix {
+        crate::durable::load_doc_in(conn, &key(binding)?).map_err(collab)?
+    } else {
+        let doc = Ydoc::wire();
+        doc.apply(&bounded_blob(conn, &observed.checkpoint_digest)?)
+            .map_err(collab)?;
+        doc
+    };
+    if prefix {
+        super::prefix::apply_remaining_in(conn, binding, &doc)?;
+    } else {
+        apply_pending_in(
+            conn,
+            binding,
+            &doc,
+            observed.limits.max_pending_bytes,
+            PendingReplay::Draft,
+        )?;
+    }
     Ok(OwnerDraft { observed, doc })
 }
 
@@ -815,6 +828,7 @@ fn append_prepared_draft_in_tx(
 
 #[cfg(test)]
 mod tests {
+    include!("prefix_tests.rs");
     use super::*;
     use dohc_engine_domain::{AgentDeclaration, VersionedTextStore, WriteText};
     use dohc_test_scratch::ScratchDir;

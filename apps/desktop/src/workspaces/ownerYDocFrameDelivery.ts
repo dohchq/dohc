@@ -18,7 +18,7 @@ export interface OwnerAcceptedState {
   applyAcceptedFrame(input: {binding: LiveObjectBinding; previousAcceptedCursor: number; journalCursor: number;
     updateBytes: Uint8Array}, signal: AbortSignal): Promise<"applied" | "retry">;
   /** Exact durable cursor/digest association; a higher checkpoint cursor is insufficient. */
-  isReceiptApplied(input: {binding: LiveObjectBinding; receipt: LiveUpdateReceipt}, signal: AbortSignal): Promise<boolean>;
+  isReceiptApplied(input: {binding: LiveObjectBinding; receipt: LiveUpdateReceipt}, signal: AbortSignal): Promise<"applied" | "notApplied" | "stopping">;
 }
 
 export interface OwnerYDocFrameDeliveryOptions {
@@ -264,6 +264,7 @@ export class OwnerYDocFrameDelivery implements OwnerYDocDelivery {
   private async finishReceipt(attempt: Attempt): Promise<void> {
     if (!attempt.receipt) return;
     const applied = await abortable(this.options.acceptedState.isReceiptApplied({binding: attempt.binding, receipt: attempt.receipt}, attempt.signal), attempt.signal); this.check(attempt);
-    if (applied) this.stop(attempt, {kind: "receipt", receipt: attempt.receipt});
+    if (applied === "applied") this.stop(attempt, {kind: "receipt", receipt: attempt.receipt});
+    else if (applied === "stopping") this.stop(attempt);
   }
 }

@@ -34,7 +34,7 @@ async function deliver(route: "desktop" | "outbox", f: ReturnType<typeof registe
     const carrier = new OwnerYDocFrameDelivery({relayUrl: "https://relay.test", shareId: "share", frames, attemptTimeoutMs: 1000,
       signal: lifetime.signal, freshBearer: async () => "owner-session", authenticatedAccountId: async () => "owner",
       acceptedState: {readState: async () => ({stateVector: Uint8Array.of(0), journalCursor: 0}), applyInitialSync: async () => "applied",
-        applyAcceptedFrame: async () => "applied", isReceiptApplied: async () => true},
+        applyAcceptedFrame: async () => "applied", isReceiptApplied: async () => "applied"},
       connect: async input => {
         server = createNamedLiveFrameSession({frames, transport: {send: async bytes => input.receive(bytes), close: input.closed},
           host: {hostEpoch: captured.host.hostEpoch, invalidated: input.signal, assertCurrent() {}, close() {},

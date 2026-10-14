@@ -55,8 +55,9 @@ const MAX_TOTAL_BYTES: usize = 64 * 1024 * 1024;
 /// with equal tuples replay the same byte sequence, except a lineage reset that
 /// later rebuilds the same coordinates over different history. Every such reset
 /// must call [`WriterDocCache::remove`].
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct CacheTuple {
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CacheTuple {
     head_update_seq: i64,
     head_snapshot_seq: i64,
     lineage_claim_id: Option<String>,
@@ -101,7 +102,10 @@ impl CacheTuple {
 
     /// Read the current tuple from the caller's connection, or `None` when the
     /// marker is absent or torn (head row missing).
-    fn read_current(conn: &Connection, key: &DocKey) -> Result<Option<Self>, CollabError> {
+    pub(crate) fn read_current(
+        conn: &Connection,
+        key: &DocKey,
+    ) -> Result<Option<Self>, CollabError> {
         let Some(marker) = read_marker_in(conn, key)? else {
             return Ok(None);
         };
@@ -121,6 +125,7 @@ fn head_row_sha(conn: &Connection, key: &DocKey, seq: i64) -> Result<Option<Stri
 }
 
 struct CacheEntry {
+    prefix_authors: Option<(Option<i64>, crate::author_coverage::Authors, usize)>,
     doc: Ydoc,
     frontier: IntegratedFrontier,
     /// Full-state fork used only for replay-parity check 4. It is never served
@@ -270,7 +275,105 @@ pub struct WriterDocCache {
     max_total_bytes: Option<usize>,
 }
 
+/// A transaction owns this entry until commit. Dropping it also drops every
+/// Y.Doc mutation that SQLite cannot roll back.
+pub(crate) struct PrefixWarm {
+    entry: CacheEntry,
+    pub(crate) authors: crate::author_coverage::Authors,
+    pub(crate) author_bytes: usize,
+    boundary: Option<i64>,
+    #[cfg(feature = "test-support")]
+    pub(crate) validation_ms: f64,
+    #[cfg(feature = "test-support")]
+    pub(crate) fold_ms: f64,
+}
+
+impl PrefixWarm {
+    pub(crate) fn apply(&mut self, bytes: &[u8]) -> Result<(), CollabError> {
+        #[cfg(feature = "test-support")]
+        let start = std::time::Instant::now();
+        let mut mutated = false;
+        let validation = crate::replay_parity::validate_replay_parity_for_cached_gate(
+            &self.entry.doc,
+            Some(&self.entry.frontier),
+            self.entry.gate_scratch.as_ref().map(|s| &s.doc),
+            &mut mutated,
+            bytes,
+        )?;
+        #[cfg(feature = "test-support")]
+        {
+            self.validation_ms += start.elapsed().as_secs_f64() * 1000.0;
+        }
+        #[cfg(feature = "test-support")]
+        let start = std::time::Instant::now();
+        self.entry.doc.apply(bytes)?;
+        self.entry.frontier.fold(validation.candidate);
+        if let Some(doc) = validation.rebuilt_scratch {
+            self.entry.gate_scratch = Some(PersistentGateScratch::new(doc));
+        }
+        self.entry.approx_bytes = self.entry.approx_bytes.saturating_add(bytes.len() * 2);
+        #[cfg(feature = "test-support")]
+        {
+            self.fold_ms += start.elapsed().as_secs_f64() * 1000.0;
+        }
+        Ok(())
+    }
+}
+
 impl WriterDocCache {
+    pub(crate) fn take_prefix(
+        &mut self,
+        conn: &Connection,
+        key: &DocKey,
+    ) -> Result<PrefixWarm, CollabError> {
+        let marker = read_marker_in(conn, key)?.ok_or(CollabError::NoMarker)?;
+        let valid = self.validated_entry(conn, key, &marker)?.is_some();
+        let mut entry = if valid {
+            self.entries.remove(key).expect("validated entry")
+        } else {
+            self.entries.remove(key);
+            let doc = crate::durable::load_doc_in(conn, key)?;
+            let bytes = doc.encode_full_state();
+            let frontier = IntegratedFrontier::from_full_state_bytes(&bytes)?;
+            let scratch = crate::replay_parity::rebuild_persistent_gate_scratch(&bytes, None)?;
+            CacheEntry {
+                prefix_authors: None,
+                doc,
+                frontier,
+                gate_scratch: Some(PersistentGateScratch::new(scratch)),
+                tuple: CacheTuple::read_current(conn, key)?.ok_or(CollabError::NoMarker)?,
+                approx_bytes: bytes.len() * 2,
+                last_used: Cell::new(0),
+            }
+        };
+        let boundary = conn.query_row("SELECT settled_update_seq FROM ydoc_docs WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3", rusqlite::params![key.workspace_id,key.version_id,key.object_id], |r| r.get::<_,Option<i64>>(0)).map_err(map_sql)?;
+        let (authors, author_bytes) = match entry.prefix_authors.take() {
+            Some((saved, authors, bytes)) if saved == boundary => (authors, bytes),
+            _ => {
+                let authors = crate::author_coverage::reserved_in(conn, key)?;
+                let bytes = authors.prefix_bytes();
+                (authors, bytes)
+            }
+        };
+        Ok(PrefixWarm {
+            entry,
+            authors,
+            author_bytes,
+            boundary,
+            #[cfg(feature = "test-support")]
+            validation_ms: 0.0,
+            #[cfg(feature = "test-support")]
+            fold_ms: 0.0,
+        })
+    }
+
+    pub(crate) fn finish_prefix(&mut self, key: &DocKey, mut warm: PrefixWarm, tuple: CacheTuple) {
+        warm.entry.tuple = tuple;
+        warm.entry.prefix_authors = Some((warm.boundary, warm.authors, warm.author_bytes));
+        self.touch(&warm.entry);
+        self.entries.insert(key.clone(), warm.entry);
+        self.evict_to_budget();
+    }
     pub(crate) fn take_owner_draft(
         &mut self,
         key: &DocKey,
@@ -283,7 +386,13 @@ impl WriterDocCache {
         key: DocKey,
         mut draft: crate::owner_outbox::draft::CachedOwnerDraft,
     ) {
-        self.entries.remove(&key);
+        if self
+            .entries
+            .get(&key)
+            .is_none_or(|entry| entry.prefix_authors.is_none())
+        {
+            self.entries.remove(&key);
+        }
         self.tick.set(self.tick.get() + 1);
         draft.last_used = self.tick.get();
         self.owner_drafts.insert(key, draft);
@@ -734,6 +843,7 @@ impl WriterDocCache {
             return;
         }
         let entry = CacheEntry {
+            prefix_authors: None,
             doc,
             frontier,
             gate_scratch,
@@ -807,6 +917,7 @@ impl WriterDocCache {
             .saturating_add(frontier.approx_bytes())
             .saturating_add(gate_scratch.approx_bytes);
         let entry = CacheEntry {
+            prefix_authors: None,
             doc,
             frontier,
             gate_scratch: Some(gate_scratch),

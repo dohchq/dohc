@@ -884,7 +884,9 @@ pub(crate) fn append_validated_and_index_update(
 
 /// Refuse an out-of-bounds declared attribution before any durable write, the
 /// same fail-closed order `validate_actor_origin_id` holds.
-fn validate_attribution(attribution: Option<&ChangeAttribution>) -> Result<(), CollabError> {
+pub(crate) fn validate_attribution(
+    attribution: Option<&ChangeAttribution>,
+) -> Result<(), CollabError> {
     if let Some(attribution) = attribution {
         attribution
             .validate()
@@ -1242,6 +1244,17 @@ pub fn maybe_compact(
     faults: &dyn FaultInjector,
     now_ms: i64,
 ) -> Result<TxnOutcome<CompactOutcome>, CollabError> {
+    compact_with_cache(store, key, threshold, faults, now_ms, None)
+}
+
+pub(crate) fn compact_with_cache(
+    store: &mut EngineStore,
+    key: &DocKey,
+    threshold: u32,
+    faults: &dyn FaultInjector,
+    now_ms: i64,
+    cache: Option<&WriterDocCache>,
+) -> Result<TxnOutcome<CompactOutcome>, CollabError> {
     // A stale cheap read only ever costs an extra full reconstruction below,
     // never a wrong compaction. Forced compaction (`threshold == 0`, used by
     // replicated/persisted close) never takes this shortcut: it must always
@@ -1256,24 +1269,32 @@ pub fn maybe_compact(
         }));
     }
 
-    let persisted = match load_persisted(store, key)? {
-        Some(p) => p,
-        None => return Err(CollabError::NoMarker),
+    let cold;
+    let doc = match cache
+        .map(|cache| store.read_with(|conn| cache.doc_for_consumer(conn, key)))
+        .transpose()?
+        .flatten()
+    {
+        Some(doc) => doc,
+        None => {
+            cold = load_persisted(store, key)?.ok_or(CollabError::NoMarker)?;
+            &cold.doc
+        }
     };
-    let pending = persisted.marker.head_update_seq - persisted.marker.head_snapshot_seq;
+    let pending = marker.head_update_seq - marker.head_snapshot_seq;
     if below_threshold(pending, threshold) {
         return Ok(TxnOutcome::Committed(CompactOutcome::Skipped { pending }));
     }
-    if persisted.doc.has_missing_updates() {
+    if doc.has_missing_updates() {
         return Ok(TxnOutcome::Committed(CompactOutcome::Skipped { pending }));
     }
 
     // Encode the full-state snapshot + its state vector from the reconstructed
     // doc (read phase). Single writer per store ⇒ the head cannot advance
     // between this reconstruct and the write below.
-    let snapshot_bytes = persisted.doc.encode_full_state();
-    let sv_bytes = persisted.doc.encode_state_vector();
-    let up_to = persisted.up_to_seq;
+    let snapshot_bytes = doc.encode_full_state();
+    let sv_bytes = doc.encode_state_vector();
+    let up_to = marker.head_update_seq;
 
     store.write_with(faults, |tx| {
         let snapshot_sha = put_binary_blob(tx, &snapshot_bytes)?;
@@ -1327,6 +1348,9 @@ pub fn maybe_compact(
             ],
         )
         .map_err(map_sql)?;
+        if cache.is_some() {
+            crate::owner_outbox::prefix::refresh_tuple_in_tx(tx, key, now_ms)?;
+        }
         Ok(CompactOutcome::Compacted {
             up_to_seq: up_to,
             snapshot_sha,
@@ -2964,7 +2988,7 @@ pub fn read_marker_in(conn: &Connection, key: &DocKey) -> Result<Option<Marker>,
                 _ => {
                     return Err(CollabError::Corrupt {
                         reason: "invalid file export lane".to_owned(),
-                    })
+                    });
                 }
             },
             content_kind: ContentKind::parse(&row.content_kind)?,

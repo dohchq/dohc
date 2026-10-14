@@ -19,6 +19,7 @@ pub mod accepted;
 pub mod draft;
 pub mod enrollment;
 mod native_source;
+pub mod prefix;
 pub mod publication;
 pub mod release;
 pub(crate) use native_source::retain_native_source;
@@ -158,6 +159,8 @@ pub fn require_ordinary_settlement(
 
 #[derive(Debug, thiserror::Error)]
 pub enum OwnerOutboxError {
+    #[error("this document is stopping live editing")]
+    Stopping,
     #[error("this computer hosts the document")]
     DesktopHost,
     #[error("the document restore is not complete")]
@@ -364,6 +367,7 @@ pub fn refuse_entry_in_tx(
     validate_digest(&input.update_digest)?;
     let parent = read_parent(tx, &input.outbox_id)?.ok_or(OwnerOutboxError::NotFound)?;
     require_workspace(workspace, &parent.binding.workspace_id)?;
+    prefix::require_delivery_open(tx, &parent.binding)?;
     let observed = draft::read_observed_in(tx, &parent.binding)?;
     let entry: Option<(String, bool, Option<String>, Option<String>)> = tx.query_row(
         "SELECT update_digest,pending,accepted_receipt_json,terminal_reason FROM owner_ydoc_outbox_entries WHERE outbox_id=?1 AND delivery_id=?2",
@@ -743,7 +747,8 @@ fn append_with_retained_base(
     let oldest_entry_at_ms = parent.oldest_entry_at_ms.unwrap_or(input.created_at_ms);
     let age_ms = input.created_at_ms.saturating_sub(oldest_entry_at_ms);
     let next_state = if pending_bytes >= input.limits.max_pending_bytes
-        || age_ms >= input.limits.max_pending_age_ms
+        || (age_ms >= input.limits.max_pending_age_ms
+            && prefix::progress_in(tx, &draft::key(&binding)?)?.is_none())
     {
         OwnerOutboxState::Sealed
     } else {

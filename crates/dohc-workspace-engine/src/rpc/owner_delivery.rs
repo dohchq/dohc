@@ -817,7 +817,7 @@ impl EngineService {
                 .await
                 .map_err(map_runtime)?
                 .map_err(map_owner_outbox)?;
-            (json!({"applied":applied}), None)
+            (json!({"status":applied}), None)
         } else {
             let state = guard
                 .open

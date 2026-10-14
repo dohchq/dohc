@@ -52,7 +52,7 @@ async function deliver(accountId: string, declared: typeof agentDeclaration | nu
   const client = {ownerYDocPrepareEnrollment: vi.fn(async () => ({status: "observed", draft: {outboxId: "outbox"}})),
     ownerYDocReadState: vi.fn(async () => ({revision: 1, acceptedCursor: 0, nativeHeadSequence: 1, stateVector: Uint8Array.of(0)})),
     ownerYDocApplyInitialSync: vi.fn(async () => ({revision: 2, acceptedCursor: 0, nativeHeadSequence: 2})),
-    ownerYDocIsReceiptApplied: vi.fn(async () => true)};
+    ownerYDocIsReceiptApplied: vi.fn(async () => "applied")};
   const options = {client: client as unknown as EngineClient, workspaceHandle: "handle", config, document: config.documents[0]!,
     signal: lifetime.signal, bearer: "session-bearer", accountId, assertCurrent() {lifetime.signal.throwIfAborted();}};
   expect(await runNativeOwnerDeliveryPass(options)).toBe("acknowledged");

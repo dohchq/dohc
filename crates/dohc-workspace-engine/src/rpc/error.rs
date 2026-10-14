@@ -47,6 +47,7 @@ pub(super) fn map_owner_outbox(error: OwnerOutboxError) -> WireError {
             return WireError::new(ErrorCode::Overloaded, "owner-stop-restore-pending");
         }
         OwnerOutboxError::StopConflict => "owner-stop-conflict",
+        OwnerOutboxError::Stopping => "owner-document-stopping",
         OwnerOutboxError::InvalidInput(_) => "invalid-owner-outbox-input",
         OwnerOutboxError::WorkspaceMismatch => "owner-outbox-workspace-mismatch",
         OwnerOutboxError::MainVersionMismatch => "owner-outbox-main-version-mismatch",

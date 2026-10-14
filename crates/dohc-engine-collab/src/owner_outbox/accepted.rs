@@ -67,6 +67,7 @@ pub(super) fn current(
     conn: &Connection,
     binding: &LiveObjectBinding,
 ) -> Result<ObservedOwnerBinding, OwnerOutboxError> {
+    super::prefix::require_delivery_open(conn, binding)?;
     let observed = read_observed_in(conn, binding)?.ok_or(OwnerOutboxError::NotFound)?;
     let marker = crate::read_marker_in(conn, &key(binding)?)
         .map_err(collab)?
@@ -295,6 +296,33 @@ fn apply_ordered_in_tx(
         revision,
         accepted_cursor: input.journal_cursor,
         native_head_sequence: marker.head_update_seq,
+    })
+}
+
+/// Check local inclusion only; a higher feed cursor alone is never enough.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ReceiptState {
+    Applied,
+    NotApplied,
+    Stopping,
+}
+
+pub fn receipt_state_in(
+    conn: &Connection,
+    binding: &LiveObjectBinding,
+    namespace: &str,
+    receipt: &OwnerDeliveryReceipt,
+) -> Result<ReceiptState, OwnerOutboxError> {
+    if super::prefix::progress_in(conn, &key(binding)?)?.is_some() {
+        return Ok(ReceiptState::Stopping);
+    }
+    is_receipt_applied_in(conn, binding, namespace, receipt).map(|applied| {
+        if applied {
+            ReceiptState::Applied
+        } else {
+            ReceiptState::NotApplied
+        }
     })
 }
 

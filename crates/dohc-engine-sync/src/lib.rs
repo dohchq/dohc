@@ -25,8 +25,12 @@ mod model;
 mod moment_apply;
 mod outbound;
 mod owner_publication;
+mod prefix_publication;
 mod release_hold;
 mod release_publication;
+pub use prefix_publication::{
+    journal_prefix_moment_in_tx, journal_prefix_op_in_tx, journal_prefix_update_in_tx,
+};
 pub use release_hold::{
     ReleaseHold, acknowledge_release_replay_in, apply_replication_envelope_with_release_hold,
     close_release_hold_in, open_release_hold_in, prepare_release_hold_replay_in, read_release_hold,

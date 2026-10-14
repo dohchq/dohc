@@ -436,15 +436,53 @@ pub fn replay_release_held_envelope(
     }))
 }
 
+// Each stage uses the document index. Merge at most 128 completed reports.
+pub(crate) const RELEASE_HOLD_PAGE_SQL: &str = "
+SELECT envelope_json FROM (
+    SELECT envelope_json FROM (
+        SELECT envelope_json,arrival FROM (
+            SELECT envelope_json,arrival FROM release_held_ops
+            WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND release_digest=?4 AND stage='done'
+            ORDER BY arrival LIMIT 64)
+        UNION ALL
+        SELECT envelope_json,arrival FROM (
+            SELECT envelope_json,arrival FROM release_held_ops
+            WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND release_digest=?4 AND stage='dependency'
+            ORDER BY arrival LIMIT 64)
+    ) ORDER BY arrival LIMIT 64
+)
+UNION ALL
+SELECT envelope_json FROM (
+    SELECT envelope_json FROM release_held_ops
+    WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND release_digest=?4 AND stage='held'
+    ORDER BY arrival LIMIT 64
+)
+LIMIT 64";
+
 /// Recover completed reports first, then held envelopes in arrival order.
 pub fn read_release_hold_page(
     store: &EngineStore,
     hold: &ReleaseHold,
 ) -> Result<Vec<ReplicationEnvelope>, SyncError> {
     store.read_with(|c| {
-        let mut stmt=c.prepare("SELECT envelope_json FROM release_held_ops WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND release_digest=?4 ORDER BY stage='held',arrival LIMIT 64").map_err(SyncError::corrupt)?;
-        let rows=stmt.query_map(params![hold.binding.workspace_id,hold.binding.main_version_id,hold.binding.object_id,hold.digest],|r|r.get::<_,String>(0)).map_err(SyncError::corrupt)?;
-        rows.map(|r|serde_json::from_str(&r.map_err(SyncError::corrupt)?).map_err(SyncError::corrupt)).collect()
+        let mut stmt = c
+            .prepare(RELEASE_HOLD_PAGE_SQL)
+            .map_err(SyncError::corrupt)?;
+        let rows = stmt
+            .query_map(
+                params![
+                    hold.binding.workspace_id,
+                    hold.binding.main_version_id,
+                    hold.binding.object_id,
+                    hold.digest
+                ],
+                |r| r.get::<_, String>(0),
+            )
+            .map_err(SyncError::corrupt)?;
+        rows.map(|r| {
+            serde_json::from_str(&r.map_err(SyncError::corrupt)?).map_err(SyncError::corrupt)
+        })
+        .collect()
     })
 }
 
