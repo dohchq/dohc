@@ -9,6 +9,7 @@ import type {
   ChatChannelRecord,
   ChatMessageRecord,
   ChatThreadRecord,
+  CloudStatusResult,
   EngineMomentRecord,
   HistoryPolicyUnreadableResult,
   SitePackageInfo,
@@ -21,6 +22,8 @@ import { readError, withErrorWords } from "../../ipc/errorWords";
 import { CsvViewActions } from "../CsvView";
 import { DocumentMenu } from "../DocumentMenu";
 import { FrontmatterAsWritten } from "../FrontmatterAsWritten";
+import { PageIdentity } from "../PageIdentity";
+import { PropertiesPanel } from "../PropertiesPanel";
 import { TextViewActions } from "../TextEditorView";
 import { DocumentControls, OPENING_TITLE, OpeningState, ViewActions } from "../fileInspectorUi";
 import { BlockMenu } from "../editor/blockControls";
@@ -29,6 +32,7 @@ import { SlashCommandMenu, type SlashCommandState } from "../editor/slashCommand
 import { buildTableMenu, type TableMenuRow } from "../editor/tableControls";
 import { OverlayFrame } from "../Overlay";
 import { CollectionUnavailable } from "../TransactionalCollectionPage";
+import { CloudSyncSettings, ProtectedFilesRow, type CloudSettings } from "../settings/CloudSyncSettings";
 import { ColorControl, HueControl, SettingRow, StepperControl, SwitchControl, TextControl, ThemeControl } from "../settings/SettingRow";
 import { PreferredNameControl } from "../settings/PreferredNameControl";
 import { SettingsNav } from "../settings/SettingsNav";
@@ -1041,6 +1045,36 @@ function AsWrittenSpecimen(props: { name: string }) {
   );
 }
 
+// A page's top matter on paper, at the editor's font size, as a document
+// pane holds it. The pane is the hover zone that shows a lone +.
+function TopmatterSpecimen(props: { children: ReactNode }) {
+  return (
+    <div className="group/topmatter w-[560px] rounded-lg border border-line bg-bg pb-5 text-[length:var(--dohc-editor-font-size)]">
+      {props.children}
+    </div>
+  );
+}
+
+const PILLS = "---\nowner: Sam\nrelease: September launch\nstatus: In progress\n---\n";
+const LONG_PILL = "---\nowner: Sam\nbrief: https://example.com/plans/2026/q3/product-plan-with-every-goal-and-owner\n---\n";
+
+// A reserved name shows only while a person types it, so the specimen types
+// it into the second pill's name once, as a keystroke would.
+function ReservedPillSpecimen() {
+  const pills = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const name = pills.current?.querySelectorAll<HTMLInputElement>('[data-testid="property-key"]')[1];
+    if (!name) return;
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set?.call(name, "title");
+    name.dispatchEvent(new Event("input", { bubbles: true }));
+  }, []);
+  return (
+    <div ref={pills}>
+      <PropertiesPanel body={PILLS} onChange={noop} />
+    </div>
+  );
+}
+
 function Pane(props: { theme: "light" | "dark" }) {
   const { theme } = props;
   return (
@@ -1839,8 +1873,14 @@ function Pane(props: { theme: "light" | "dark" }) {
         <Specimen label="nothing counted yet">
           <UsageRecordSpecimen view={{ ...USAGE_RECORD, since: USAGE_TODAY, rows: [] }} />
         </Specimen>
-        <Specimen label="a record dohc cannot read">
-          <UsageRecordSpecimen view={{ status: "unreadable", file: USAGE_RECORD.file, code: "EACCES" }} />
+        <Specimen label="a record dohc cannot open, with Try again">
+          <UsageRecordSpecimen view={{ status: "unreadable", file: USAGE_RECORD.file, code: "EACCES", setAside: null }} />
+        </Specimen>
+        <Specimen label="a record dohc cannot decode, with Start a new record">
+          <UsageRecordSpecimen view={{ status: "unreadable", file: USAGE_RECORD.file, code: "INVALID_USAGE_RECORD", setAside: null }} />
+        </Specimen>
+        <Specimen label="a new record, Off, with the old one set aside">
+          <UsageRecordSpecimen view={{ ...USAGE_RECORD, enabled: false, since: USAGE_TODAY, rows: [], setAside: "dohc-usage.set-aside-1.json" }} />
         </Specimen>
         <Specimen label="loading, then a failed read: words in Notices">
           <div className="flex flex-col gap-3">
@@ -2146,6 +2186,157 @@ function Pane(props: { theme: "light" | "dark" }) {
         </Specimen>
       </Section>
 
+      {/* Last, so the parts above keep their places. The body's H1 is the
+          editor's, so the folded specimens show the row above it alone. */}
+      <Section part="page-identity" title="Page identity">
+        <Specimen label="an H1 opens the body: the title folds, at rest">
+          <TopmatterSpecimen>
+            <PageIdentity body={"# Q3 product plan\n"} onChange={noop} filenameStem="product-plan" />
+          </TopmatterSpecimen>
+        </Specimen>
+        <Specimen label="folded, hovered: Add icon and Add title">
+          <TopmatterSpecimen>
+            <div data-force-state="hover" data-force-target={`[data-testid="page-identity"]`}>
+              <PageIdentity body={"# Q3 product plan\n"} onChange={noop} filenameStem="product-plan" />
+            </div>
+          </TopmatterSpecimen>
+        </Specimen>
+        <Specimen label="folded, focused: Add icon and Add title in place, so nothing below moves">
+          <TopmatterSpecimen>
+            <div data-force-state="focus-within" data-force-target={`[data-testid="page-identity"]`}>
+              <div data-force-state="focus" data-force-target={`[data-testid="page-title"]`}>
+                <PageIdentity body={"# Q3 product plan\n"} onChange={noop} filenameStem="product-plan" />
+              </div>
+            </div>
+          </TopmatterSpecimen>
+        </Specimen>
+        <Specimen label="a title property">
+          <TopmatterSpecimen>
+            <PageIdentity body={"---\ntitle: Q3 product plan\n---\n\n# Goals\n"} onChange={noop} filenameStem="product-plan" />
+          </TopmatterSpecimen>
+        </Specimen>
+        <Specimen label="no H1: the file name in place of a title">
+          <TopmatterSpecimen>
+            <PageIdentity body={"Q3 notes\n"} onChange={noop} filenameStem="product-plan" />
+          </TopmatterSpecimen>
+        </Specimen>
+        <Specimen label="pills at rest">
+          <TopmatterSpecimen>
+            <PropertiesPanel body={PILLS} onChange={noop} />
+          </TopmatterSpecimen>
+        </Specimen>
+        <Specimen label="pill hovered: its ×">
+          <TopmatterSpecimen>
+            <div data-force-state="hover" data-force-target={`[data-testid="property-row"]`}>
+              <PropertiesPanel body={PILLS} onChange={noop} />
+            </div>
+          </TopmatterSpecimen>
+        </Specimen>
+        <Specimen label="pill focused: its value, and its ×">
+          <TopmatterSpecimen>
+            <div data-force-state="focus-within" data-force-target={`[data-testid="property-row"]`}>
+              <div data-force-state="focus" data-force-target={`[data-testid="property-value"]`}>
+                <PropertiesPanel body={PILLS} onChange={noop} />
+              </div>
+            </div>
+          </TopmatterSpecimen>
+        </Specimen>
+        <Specimen label="a long value: an ellipsis, all of it in the tooltip">
+          <TopmatterSpecimen>
+            <PropertiesPanel body={LONG_PILL} onChange={noop} />
+          </TopmatterSpecimen>
+        </Specimen>
+        <Specimen label="reserved name, typed">
+          <TopmatterSpecimen>
+            <ReservedPillSpecimen />
+          </TopmatterSpecimen>
+        </Specimen>
+        <Specimen label="duplicate name">
+          <TopmatterSpecimen>
+            <PropertiesPanel body={"---\nowner: Sam\nOwner: Ada\n---\n"} onChange={noop} />
+          </TopmatterSpecimen>
+        </Specimen>
+        <Specimen label="locked: the block must be edited as text">
+          <TopmatterSpecimen>
+            {/* Written on one line, the block cannot change one property
+                without rewriting the others. */}
+            <PropertiesPanel body={"---\n{owner: Sam, status: Draft}\n---\n"} onChange={noop} />
+          </TopmatterSpecimen>
+        </Specimen>
+        <Specimen label="set by an automation">
+          <TopmatterSpecimen>
+            <PropertiesPanel body={PILLS} onChange={noop} fieldMarks={new Map([["status", ["Stamp the status"]]])} />
+          </TopmatterSpecimen>
+        </Specimen>
+        <Specimen label="+ keyboard focus">
+          <TopmatterSpecimen>
+            <div data-force-state="focus-visible" data-force-target={`[data-testid="property-add"]`}>
+              <PropertiesPanel body={PILLS} onChange={noop} />
+            </div>
+          </TopmatterSpecimen>
+        </Specimen>
+        <Specimen label="the + alone, the pointer over the page's top">
+          <div data-force-state="hover" data-force-target=".group\/topmatter">
+            <TopmatterSpecimen>
+              <PropertiesPanel body={"Q3 notes\n"} onChange={noop} />
+            </TopmatterSpecimen>
+          </div>
+        </Specimen>
+      </Section>
+
+      {/* Last, so the parts above keep their places. */}
+      <Section part="settings-sync" title="Settings: Sync and sharing">
+        <Specimen label="signed in, syncing, on a private server; keyboard focus on Disconnect">
+          <div className="w-[640px]" data-force-state="focus focus-visible" data-force-target='[data-testid="cloud-disconnect"]'>
+            <CloudSyncSettings workspaceId="ws-trip" cloud={settingsCloud({ ...CLOUD_SIGNED_IN, networkAccess: "private", workspaceSynced: true, workspaceSyncConnected: true })} />
+          </div>
+        </Specimen>
+        <Specimen label="signed in, not syncing">
+          <div className="w-[640px]">
+            <CloudSyncSettings workspaceId="ws-trip" cloud={settingsCloud(CLOUD_SIGNED_IN)} />
+          </div>
+        </Specimen>
+        <Specimen label="sync paused: dohc could not confirm this workspace's account, with Try again">
+          <div className="w-[640px]">
+            <CloudSyncSettings workspaceId="ws-trip" cloud={settingsCloud({ ...CLOUD_SIGNED_IN, workspaceSynced: true })} />
+          </div>
+        </Specimen>
+        <Specimen label="protected files: the passphrase field and its error">
+          <div className="w-[640px]">
+            <ProtectedFilesRow
+              secretState="protected-key-present"
+              purpose="protect"
+              passphrase="1234567"
+              error="Enter at least 8 characters to protect synced secrets."
+              busy={false}
+              onStart={noop}
+              onPassphrase={noop}
+              onSubmit={noop}
+            />
+          </div>
+        </Specimen>
+        <Specimen label="a shared view: the account, no switch">
+          <div className="w-[640px]">
+            <CloudSyncSettings workspaceId="ws-trip" sharedView cloud={settingsCloud(CLOUD_SIGNED_IN)} />
+          </div>
+        </Specimen>
+        <Specimen label="signed out">
+          <div className="w-[640px]">
+            <CloudSyncSettings workspaceId="ws-trip" cloud={settingsCloud({ connected: false })} />
+          </div>
+        </Specimen>
+        <Specimen label="the status still loading">
+          <div className="w-[640px]">
+            <CloudSyncSettings workspaceId="ws-trip" cloud={settingsCloud(null)} />
+          </div>
+        </Specimen>
+        <Specimen label="the status unreadable">
+          <div className="w-[640px]">
+            <CloudSyncSettings workspaceId="ws-trip" cloud={{ ...settingsCloud(null), unreadable: true }} />
+          </div>
+        </Specimen>
+      </Section>
+
       {/* Last, so the parts above keep their places. Each strip holds a tab
           list, so the part holds them at rest. */}
       <Section part="tab-glyphs" title="Tab glyphs" menusAtRest>
@@ -2196,6 +2387,18 @@ const FILE_VIEW_TEXT_STATES: { label: string; saveState: SaveState }[] = [
   { label: "failed", saveState: FILE_VIEW_FAILED },
 ];
 
+const CLOUD_SIGNED_IN: CloudStatusResult = {
+  connected: true,
+  email: "sam@hollis.studio",
+  serverUrl: "https://dohc.hollis.studio",
+  relayUrl: "https://relay.hollis.studio",
+  workspaceSynced: false,
+  workspaceSyncConnected: false,
+};
+const settingsCloud = (status: CloudStatusResult | null): CloudSettings => ({
+  status, unreadable: false, onChanged: noop, onConnect: noop, onError: noop, onAccountError: noop,
+});
+
 const SETTINGS_WORKSPACE = "C:\\Users\\ada\\Documents\\trip";
 const EDITOR_FONT_OPTIONS = [
   { value: "sans", label: "Sans" },
@@ -2233,13 +2436,15 @@ const USAGE_RECORD: Extract<UsageRecordResult, { status: "readable" }> = {
     usageRow("chat.post", "Post a chat message", { cli: usageCell(0), mcp: usageCell(0) }),
     usageRow("chat.export", "Export a chat", {}),
   ],
+  setAside: null,
 };
 
 // Privacy's width for the card.
 function UsageRecordSpecimen(props: { view: UsageRecordView }) {
   return (
     <div className="w-[560px] [&>section]:mt-0">
-      <UsageRecordCard view={props.view} today={USAGE_TODAY} onSwitch={noop} onClear={noop} onRetry={noop} />
+      <UsageRecordCard view={props.view} today={USAGE_TODAY} onSwitch={noop} onClear={noop} onRetry={noop}
+        onStart={noop} onRestore={noop} />
     </div>
   );
 }

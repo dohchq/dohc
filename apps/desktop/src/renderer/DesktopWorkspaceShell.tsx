@@ -87,6 +87,8 @@ import { useAutomationHolds } from "./shell/useAutomationHolds";
 import { CollectionFieldMarksProvider } from "./collections/collectionFieldMarks";
 import { useCloudPresence } from "./shell/useCloudPresence";
 import type { ConnectionErrorReport } from "./shell/connectionNotices";
+import { reportInstallationFailure, useInstallationNotices } from "./shell/installationNotices";
+import type { CloudSettings } from "./settings/CloudSyncSettings";
 import { useCollectionFolders } from "./shell/useCollectionFolders";
 import { useShareMounts } from "./shell/useShareMounts";
 import { useEditorRegistry } from "./shell/useEditorRegistry";
@@ -99,6 +101,7 @@ import { useReportsNotice } from "./shell/useReportsNotice";
 import { useShareRemovalNotices } from "./shell/useShareRemovalNotices";
 import { useChatDispatchNotices } from "./shell/useChatDispatchNotices";
 import { useWorkspacePathOpenFailures } from "./shell/workspacePathOpenFailures";
+import { useUsageRecordStops } from "./shell/usageRecordStops";
 import { useSyncFailureNotice } from "./shell/useSyncFailureNotice";
 import { useKeptFilesNotice } from "./shell/useKeptFilesNotice";
 import { useDriveLimitNotice } from "./shell/useDriveLimitNotice";
@@ -617,10 +620,6 @@ export function DesktopWorkspaceShell(props: {
     setSettingsSection(CUSTOMIZE_TARGETS[part].section);
   }, []);
   const openAgentSettings = useCallback(() => openSettings("agents"), [openSettings]);
-  const closeSettings = useCallback(() => {
-    setSettingsSection(null);
-    setSettingsFocus(null);
-  }, []);
 
   const { agentSetup, readAgentStatusForHistory } = useAgentSetup(
     props.workspace.workspaceId,
@@ -846,24 +845,6 @@ export function DesktopWorkspaceShell(props: {
     reportError: reportFailureMessage,
   });
 
-  // A connection failure from any panel that embeds CloudLogin. The notice
-  // outlives the panel, so its Try again reopens the connection dialog with
-  // the address that failed when the panel it came from has closed.
-  const reportConnectionError = useCallback(
-    (error: ConnectionErrorReport) => {
-      reportShellFailure({
-        message: error.message,
-        cause: error.cause,
-        retry: () => {
-          if (error.retry?.()) return;
-          setCloudRetryServerUrl(error.serverUrl ?? "");
-          setCloudOpen(true);
-        },
-      });
-    },
-    [reportShellFailure],
-  );
-
   // The live-document dialog's own reads and actions, straight through to
   // main. The dialog passes the workspace it asked for, so a response can
   // never be attributed to another one.
@@ -926,6 +907,67 @@ export function DesktopWorkspaceShell(props: {
   );
   const { chatCollaboration, refreshCloudStatus, workspaceSynced, cloudStatus, cloudStatusUnreadable } =
     useCloudPresence(workspaceId, reportCloudStatusUnavailable);
+  // Closing Settings reads the status again, as the old Cloud dialog did on
+  // close. The page's own refresh after an enable covers only its own
+  // change: another window's Try again can make main adopt this account's
+  // saved session without announcing a session change, so this workspace's
+  // paused status would otherwise outlive the cause.
+  const settingsOpen = settingsSection !== null;
+  const closeSettings = useCallback(() => {
+    if (settingsOpen) refreshCloudStatus();
+    setSettingsSection(null);
+    setSettingsFocus(null);
+  }, [refreshCloudStatus, settingsOpen]);
+  // Connect server, wherever it is asked for. The account and the sync switch
+  // are settings, so only a person known to be signed out gets the Cloud
+  // dialog. A status still loading, or unreadable, opens Settings, which says
+  // which it is.
+  const cloudSignedOut = cloudStatus?.connected === false;
+  const openCloud = useCallback(() => {
+    if (cloudSignedOut) setCloudOpen(true);
+    else openSettings("cloud");
+  }, [cloudSignedOut, openSettings]);
+  // A failure from the Cloud dialog or the Sync and sharing page. The notice
+  // outlives both, so its Try again reopens the dialog with the address that
+  // failed, or whichever of the two now applies, once the source has closed.
+  const reportConnectionError = useCallback(
+    (error: ConnectionErrorReport) => {
+      reportShellFailure({
+        message: error.message,
+        cause: error.cause,
+        retry: () => {
+          if (error.retry?.()) return;
+          if (error.serverUrl === null) return openCloud();
+          setCloudRetryServerUrl(error.serverUrl);
+          setCloudOpen(true);
+        },
+      });
+    },
+    [openCloud, reportShellFailure],
+  );
+  // Unguarded by workspace: an installation-wide failure is news here.
+  useInstallationNotices(reportConnectionError);
+  const cloudSettings = useMemo<CloudSettings>(() => {
+    // The page answers after it closed too. Only this workspace's answers
+    // reach its status and its notices.
+    const forWorkspace = workspaceId;
+    const current = () => workspaceIdRef.current === forWorkspace;
+    return {
+      status: cloudStatus,
+      unreadable: cloudStatusUnreadable,
+      onChanged: () => {
+        if (current()) refreshCloudStatus();
+      },
+      onConnect: () => {
+        closeSettings();
+        setCloudOpen(true);
+      },
+      onError: (error) => {
+        if (current()) reportConnectionError(error);
+      },
+      onAccountError: reportInstallationFailure,
+    };
+  }, [closeSettings, cloudStatus, cloudStatusUnreadable, refreshCloudStatus, reportConnectionError, workspaceId]);
   // About's section reads report through this shell's notices, one row per
   // section and file. A repeat keeps an existing row's toast state only for
   // an unchanged message. A changed message, or a missing row, toasts again.
@@ -950,9 +992,9 @@ export function DesktopWorkspaceShell(props: {
         shareView: isShareView,
       },
       openSyncSettings: () => openSettings("cloud"),
-      connect: () => setCloudOpen(true),
+      connect: openCloud,
     }),
-    [cloudConnected, cloudStatusUnreadable, cloudWorkspaceSyncConnected, cloudWorkspaceSynced, isShareView, openSettings],
+    [cloudConnected, cloudStatusUnreadable, cloudWorkspaceSyncConnected, cloudWorkspaceSynced, isShareView, openCloud, openSettings],
   );
 
   // @-mention roster + agent notifications (Agent Notifications & Mentions).
@@ -1727,6 +1769,7 @@ export function DesktopWorkspaceShell(props: {
     },
     [workspaceAdmission, workspaceId, reportShellFailure, refreshAgentLane],
   );
+  useUsageRecordStops(reportSettingsFailure);
 
   const refreshHistory = useCallback(async () => {
     // Nothing to refresh before main's capture decision lands. Any
@@ -3423,7 +3466,7 @@ export function DesktopWorkspaceShell(props: {
       } else if (command === "open-history") {
         openHistoryView();
       } else if (command === "connect-cloud") {
-        setCloudOpen(true);
+        openCloud();
       } else if (command === "settings") {
         openSettings();
       } else if (command === "check-updates") {
@@ -3440,6 +3483,7 @@ export function DesktopWorkspaceShell(props: {
       closeOtherTabs,
       checkForDesktopUpdates,
       installDesktopUpdate,
+      openCloud,
       openHistoryView,
       openSettings,
       moveTabIntoNewGroup,
@@ -3902,7 +3946,7 @@ export function DesktopWorkspaceShell(props: {
       {
         id: "connect-cloud",
         label: "Connect server",
-        run: () => setCloudOpen(true),
+        run: openCloud,
       },
       {
         id: "settings",
@@ -3971,6 +4015,7 @@ export function DesktopWorkspaceShell(props: {
       requestExplorerCreate,
       checkForDesktopUpdates,
       installDesktopUpdate,
+      openCloud,
       openEditorGroupRight,
       openSettings,
       reportShellError,
@@ -6200,9 +6245,16 @@ export function DesktopWorkspaceShell(props: {
             refreshCloudStatus();
           }}
         >
+          {/* Once signed in, what is left is settings: the account and the
+              sync switch. A session the dialog finds goes there too. */}
           <CloudLogin
-            workspaceId={workspaceId}
-            onConnected={refreshCloudStatus}
+            handOffSession
+            onConnected={() => {
+              setCloudOpen(false);
+              setCloudRetryServerUrl("");
+              refreshCloudStatus();
+              openSettings("cloud");
+            }}
             onConnectionError={reportConnectionError}
             initialServerUrl={cloudRetryServerUrl}
           />
@@ -6284,10 +6336,7 @@ export function DesktopWorkspaceShell(props: {
             {...(askAgent ? { askAgent } : {})}
             onClose={closeSettings}
             onAgentActiveChange={onSettingsAgentActiveChange}
-            onOpenCloud={() => {
-              closeSettings();
-              setCloudOpen(true);
-            }}
+            cloud={cloudSettings}
             onOpenSharing={(target) => {
               closeSettings();
               setSharingFocus(target);

@@ -308,6 +308,13 @@ export function startExistingOwnerDeviceTransport(options: {
           const state = configRecord(response.result,["adoptionId","expectedLocalSequence","throughCursor","outboxId","pendingBytes","outboxState"]);
           registration.outboxId = state.outboxId === null ? undefined : string(state.outboxId);
           result = {outboxId: registration.outboxId ?? null,pendingBytes: integer(state.pendingBytes),state: state.outboxState};
+        } else if (operation.method === "liveApplication.quarantineOwnerOutbox") {
+          if (!registration.adopted || !registration.outboxId) throw new Error("Owner outbox is unavailable.");
+          const params = configRecord(operation.params, ["registrationId", "reason"]);
+          if (params.reason !== "provenance-refused" && params.reason !== "delivery-conflict") throw new Error("Invalid owner quarantine reason.");
+          const response = await config.client.sendRequest({...request, method: "ydoc.ownerOutbox.quarantine",
+            params: {outboxId: registration.outboxId, reason: params.reason}}, signal);
+          owner.assertCurrent(); result = response.result;
         } else if (operation.method === "liveApplication.readOwnerOutbox" || operation.method === "liveApplication.acknowledgeOwnerOutbox") {
           if (!registration.adopted || !registration.outboxId) throw new Error("Owner outbox is unavailable.");
           const reading = operation.method === "liveApplication.readOwnerOutbox";
@@ -404,7 +411,7 @@ export function startExistingOwnerDeviceTransport(options: {
     if (value.type !== "request" || operations.size >= config.maxUploads) throw new Error("Owner operation capacity exceeded.");
     const id = integer(value.id,lastId+1), method = string(value.method), workspace = value.workspace == null ? "" : string(value.workspace);
     const restoring = restoreOperation(method);
-    if ((!restoring && !["liveApplication.hosts","liveApplication.register","liveApplication.fenceRestore","liveApplication.ownerState","liveApplication.ownerOutbox","liveApplication.readOwnerOutbox","liveApplication.acknowledgeOwnerOutbox","liveApplication.adoptOwner","liveApplication.apply","liveApplication.settle","liveApplication.syncOpen","liveApplication.appliedRead","liveApplication.ack"].includes(method)) || (restoring && maxRestoreBytes === undefined) || (method !== "liveApplication.hosts" && !workspaces.has(workspace)) || value.idempotencyKey != null) throw new Error("Owner method is unavailable.");
+    if ((!restoring && !["liveApplication.hosts","liveApplication.register","liveApplication.fenceRestore","liveApplication.ownerState","liveApplication.ownerOutbox","liveApplication.readOwnerOutbox","liveApplication.acknowledgeOwnerOutbox","liveApplication.quarantineOwnerOutbox","liveApplication.adoptOwner","liveApplication.apply","liveApplication.settle","liveApplication.syncOpen","liveApplication.appliedRead","liveApplication.ack"].includes(method)) || (restoring && maxRestoreBytes === undefined) || (method !== "liveApplication.hosts" && !workspaces.has(workspace)) || value.idempotencyKey != null) throw new Error("Owner method is unavailable.");
     const params = value.params as Record<string,unknown>;
     if (!params || typeof params !== "object" || Array.isArray(params)) throw new Error("Invalid owner params.");
     const updateBytes = method === "liveApplication.apply" ? integer(params.updateByteLength,2,20_971_520) : 0;

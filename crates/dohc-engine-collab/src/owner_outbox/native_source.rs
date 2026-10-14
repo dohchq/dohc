@@ -123,6 +123,12 @@ impl OwnerOutboxNativeSource {
         Ok(Some((actor_origin_id.clone(), attribution)))
     }
 
+    pub fn person_edit(&self) -> Result<bool, OwnerOutboxError> {
+        Ok(self.native_author()?.is_some_and(|(_, attribution)| {
+            attribution.is_some_and(|a| a.actor_kind == dohc_engine_domain::ChangeActorKind::Human)
+        }))
+    }
+
     /// The agent this native update's delivery declares: its recorded agent,
     /// exactly as an editor's draft would declare it. A person's, an
     /// automation's, an actorless update, and an adoption seed declare none.
