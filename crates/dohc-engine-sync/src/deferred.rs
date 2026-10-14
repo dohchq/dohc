@@ -292,8 +292,8 @@ pub(crate) fn retain(
             }
             let mut charged = Vec::new();
             for (digest, kinds) in blobs {
-                for kind in kinds {
-                    let text = *kind == BlobKind::Text;
+                // Binary and Y.Doc bytes share one row, so each is charged once.
+                for text in kinds.iter().map(|kind| *kind == BlobKind::Text).collect::<BTreeSet<_>>() {
                     let table = if text { "blobs" } else { "binary_blobs" };
                     let bytes: i64 = tx.query_row(&format!("SELECT byte_length FROM {table} WHERE sha256=?1"),
                         [digest], |r| r.get(0)).map_err(SyncError::corrupt)?;
