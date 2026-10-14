@@ -9,10 +9,8 @@ export function createHistoryCollectionRemote(options: {
   currentGeneration(): number;
   withOperation(work: (operation: Operation) => Promise<Awaited<ReturnType<TimelineReads["remote"]>>>): Promise<Awaited<ReturnType<TimelineReads["remote"]>>>;
   dataFor(signal: AbortSignal, current: () => void): OwnerDatasetData;
-  name(datasetId: string): string;
 }): TimelineReads["remote"] {
   const expectedState = options.expected.state, expectedAttachment = options.expected.workspace.attachmentId;
-  const names = new Map<string, string>();
   return (datasetId, beforeRevision, deadline) => options.withOperation(async operation => {
     const signal = AbortSignal.any([operation.signal, deadline]);
     const current = () => {
@@ -22,11 +20,9 @@ export function createHistoryCollectionRemote(options: {
     };
     current();
     const data = options.dataFor(signal, current);
-    let name = names.get(datasetId);
-    if (name === undefined) { name = options.name(datasetId); names.set(datasetId, name); }
     try {
       const page = await data.history({ datasetId, beforeRevision, limit: 51, metadataOnly: true, signal }); current();
-      return { ...page, name };
+      return page;
     } catch (error) {
       current();
       if (data.deletionStatus && (await data.deletionStatus({ datasetId })).deleted) {

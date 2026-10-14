@@ -9,7 +9,7 @@ export const HISTORY_REMOTE_DEADLINE_MS = 750;
 export const HISTORY_REMOTE_CONCURRENCY = 4;
 const PAGE_LIMIT = 50;
 const PAGE_BYTES = 256 * 1024;
-type CollectionPage = DatasetHistoryPage & { name?: string; deleted?: boolean };
+type CollectionPage = DatasetHistoryPage & { deleted?: boolean };
 type Source = TimelineCursor["collections"][number];
 export interface HistoryHeads {
   transferred: string[];

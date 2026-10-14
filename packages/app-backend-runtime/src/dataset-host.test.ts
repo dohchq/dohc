@@ -997,7 +997,7 @@ it("reads all local history heads in one owner-authorized metadata transaction",
   expect(exec.mock.calls).toEqual([["BEGIN IMMEDIATE"], ["COMMIT"]]);
   expect(prepared.mock.calls.every(([sql]) => !String(sql).includes("e.result_json"))).toBe(true);
   const page = f.host.history("owner", { ...scope, metadataOnly: true });
-  expect(page).toMatchObject({ lineage: heads[0]!.lineage, archived: false, olderRecordedAtMs: expect.any(Number) });
+  expect(page).toMatchObject({ name: "Orders", lineage: heads[0]!.lineage, archived: false, olderRecordedAtMs: expect.any(Number) });
   expect(page.entries[0]!.undo).toBeUndefined();
   for (const caller of ["helper", "friend"] as const) {
     expect(() => f.host.historyHeads(caller, { workspaceId: scope.workspaceId })).toThrow("You do not have access");

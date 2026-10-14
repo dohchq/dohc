@@ -804,9 +804,10 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
         if (!head) throw new DatasetHostError("conflict", "Collection history is unavailable.");
         const before = raw.beforeRevision ?? Number.MAX_SAFE_INTEGER;
         const page = readDatasetHistory(db, key, approved, before, limit, raw.metadataOnly);
+        const name = raw.metadataOnly ? historyStatement(db, "SELECT json_extract(revision_json,'$.definition.name') AS name FROM dohc_dataset_catalog WHERE workspace_id=? AND dataset_id=?").get(key.workspaceId, key.datasetId)?.name : undefined;
         owner(context, key);
         return { datasetId: key.datasetId, headRevision: Number(head.revision), ...page,
-          ...(raw.metadataOnly ? { lineage: historyLineage(key), archived: lifecycle(key).archived } : {}) };
+          ...(raw.metadataOnly ? { lineage: historyLineage(key), name: String(name ?? key.datasetId), archived: lifecycle(key).archived } : {}) };
       });
     },
     historyRevision(context: Context, raw: DatasetScope & { revisionSha256: string }) {

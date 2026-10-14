@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { createWorkspaceAuthorityOwner, type WorkspaceAuthorityOperation } from "./workspaceAuthorityOwner";
 import { createHistoryCollectionRemote } from "./historyCollectionRemote";
-import type { OwnerDatasetData } from "./remoteDataset";
+import { createRemoteDatasetData, type OwnerDatasetData } from "./remoteDataset";
 import { DatabaseSync } from "node:sqlite";
 import { afterEach, expect, it, vi } from "vitest";
 import { VersionedLoopbackEngine } from "@dohc/workspace-engine-client/testing";
@@ -366,13 +366,12 @@ it("finishes a prefetched read under its own real authority lease after the page
   });
   const describe = vi.fn();
   const data = { history, describe } as unknown as OwnerDatasetData;
-  const name = vi.fn(() => "Remote Collection");
   let released: WorkspaceAuthorityOperation<typeof workspace, object> | undefined;
   const list = createHistoryTimeline();
   const owned = (cursor?: import("../ipc/bridgeContract").TimelineCursor) => owner.withOperation("workspace", async operation => {
     released ??= operation;
     f.reads.remote = createHistoryCollectionRemote({ expected: operation, generation: 1, currentGeneration: () => 1,
-      withOperation: work => owner.withOperation("workspace", work), dataFor: () => data, name });
+      withOperation: work => owner.withOperation("workspace", work), dataFor: () => data });
     return list({ workspaceId: "workspace", object: { kind: "dataset", datasetId: remote }, cursor }, { ...f.reads, signal: operation.signal, assertCurrent: operation.assertCurrent });
   });
   const first = await owned(); await entered.promise;
@@ -389,7 +388,7 @@ it("confirms deletion through the owner route and keeps other failures partial",
   const deleted = vi.fn(async () => ({ deleted: true }));
   const data = { history: async () => { throw Error("not available"); }, deletionStatus: deleted } as unknown as OwnerDatasetData;
   const read = createHistoryCollectionRemote({ expected: operation, generation: 1, currentGeneration: () => 1,
-    withOperation: work => work(operation), dataFor: () => data, name: () => "Collection" });
+    withOperation: work => work(operation), dataFor: () => data });
   await expect(read(uuid(8), 2, operation.signal)).resolves.toMatchObject({ deleted: true });
   deleted.mockResolvedValue({ deleted: false });
   await expect(read(uuid(8), 2, operation.signal)).rejects.toThrow("not available");
@@ -524,4 +523,18 @@ it("keeps the most recently active Collections when the source count exceeds the
   expect(page.entries[0]).toMatchObject({ datasetId: ids.at(-1), sortAtMs: ids.length });
   expect(page.nextCursor!.collections.map(s => s.datasetId)).not.toContain(ids[0]);
   expect(page).toMatchObject({ completeness: "partial", omittedSources: 5 });
+});
+
+it("reads the owner's renamed Collection name in the same history reply without describe", async () => {
+  const f = await fixture(), remote = f.initialize(8); f.event(remote, 2); f.event(remote, 1);
+  const operation = { state: {}, workspace: { attachmentId: Symbol() }, signal: f.signal.signal, assertCurrent() {} };
+  const relay = vi.fn(async () => f.host.history("owner", { workspaceId: "workspace", datasetId: remote, metadataOnly: true }));
+  const data = createRemoteDatasetData({ workspaceId: "workspace", credentials: { serverUrl: "https://account.example", relayUrl: "https://relay.example", userId: "owner", token: "test", email: "owner@example.test" },
+    credentialGeneration: 1, signal: operation.signal, currentCredentialGeneration: () => 1, assertCurrent() {}, relayJson: relay });
+  const remoteRead = createHistoryCollectionRemote({ expected: operation, generation: 1, currentGeneration: () => 1,
+    withOperation: work => work(operation), dataFor: () => data });
+  expect(await remoteRead(remote, undefined, operation.signal)).toMatchObject({ name: "Collection 8" });
+  f.db.prepare("UPDATE dohc_dataset_catalog SET revision_json=json_set(revision_json,'$.definition.name',?) WHERE dataset_id=?").run("Owner renamed", remote);
+  expect(await remoteRead(remote, undefined, operation.signal)).toMatchObject({ name: "Owner renamed" });
+  expect(relay).toHaveBeenCalledTimes(2);
 });

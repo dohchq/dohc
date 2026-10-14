@@ -5866,7 +5866,6 @@ function registerIpcHandlers(): void {
         remote: createHistoryCollectionRemote({
           expected: operation, generation, currentGeneration: () => credentialCacheGeneration,
           withOperation: work => withPhysicalWorkspaceOperation(workspace.workspaceId, work),
-          name: datasetId => { try { return local.describe(datasetId, { includeArchived: true }).name; } catch { return datasetId; } },
           dataFor: (signal, current) => createDatasetAuthorityRouter(local, {
             status: async id => { current(); return local.transferStatus(id); },
             remote: async targetOrigin => {

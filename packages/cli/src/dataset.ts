@@ -152,7 +152,7 @@ const DatasetHistoryUndo = z.object({ operationId: identity, revision: z.number(
   fields: z.array(z.object({ fieldId: identity, name: z.string().min(1).max(128), value: json }).strict()).min(1).max(128) }).strict();
 export const DatasetHistoryRevision = z.object({ approvalAgent: PublicationAgent.nullable().optional(), revision, schemaSql: z.string().max(256 * 1024), operationSource: z.string().max(256 * 1024) }).strict();
 export type DatasetHistoryRevision = z.infer<typeof DatasetHistoryRevision>;
-export const DatasetHistoryPage = z.object({ datasetId: identity, lineage: sha256.optional(), olderRecordedAtMs: z.number().int().nullable().optional(), archived: z.boolean().optional(), headRevision: z.number().int().nonnegative(),
+export const DatasetHistoryPage = z.object({ datasetId: identity, name: z.string().min(1).max(128).optional(), lineage: sha256.optional(), olderRecordedAtMs: z.number().int().nullable().optional(), archived: z.boolean().optional(), headRevision: z.number().int().nonnegative(),
   entries: z.array(z.object({ revision: z.number().int().positive(), operation: z.string().min(1).max(64), callerReference: sha256.nullable(),
     recordedAtMs: z.number().int().min(0).max(8_640_000_000_000_000).nullable(), approvedRevisionHash: sha256, changesetBytes: z.number().int().nonnegative(), attachmentCount: z.number().int().nonnegative(), undo: DatasetHistoryUndo.optional(),
     // The automation that made the change. The desktop adds its name from the Collection's automations.yaml.
