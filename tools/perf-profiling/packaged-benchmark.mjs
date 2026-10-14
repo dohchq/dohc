@@ -1,4 +1,4 @@
-import { observePresenceOwner, recordPresenceOwnerLastKey, waitForPresenceOwner, readPresenceOwner, validatePresenceWorkload, samplePresenceClock, validatePresenceClocks, rebasePresenceWindow } from './presence-owner.mjs';
+import { observePresenceOwner, recordPresenceOwnerLastKey, waitForPresenceOwner, readPresenceOwner, validatePresenceWorkload, samplePresenceClock, validatePresenceClocks, rebasePresenceWindow, withPresencePeers } from './presence-owner.mjs';
 import { startTypingTrace, stopTypingTraceAfterFrames, measureTypingTrace, typingTraceMark } from './presence-typing-trace.mjs';
 import { acquireProfilingSlot } from './admission.mjs';
 import { startWindowController, waitForVisibleWindow } from './window-controller.mjs';
@@ -897,7 +897,7 @@ async function soak(instance, data, runDir) {
         await json(join(output, 'result.json'), receipt);
         if (!solo.trace.validation.pass) throw Error('Solo typing trace validation failed: ' + solo.trace.validation.problems.join('; '));
         const peers = await presenceFixture.peers(name, presencePeers);
-        try {
+        await withPresencePeers(peers, async () => {
           const typed = await typing(fresh.page, name, { rich: true, arm: 'peers', beforeInput: () => peers.start(), afterInput: () => peers.stop() });
           typed.workload = await peers.finish(typed.peerTypingWindow);
           const sentEdits = typed.workload.peerCounts.reduce((sum, peer) => sum + peer.edits, 0);
@@ -908,7 +908,7 @@ async function soak(instance, data, runDir) {
           await json(join(output, 'result.json'), receipt);
           if (!typed.workload.pass) throw Error('Presence peer rates, schedule, or owner delivery failed');
           if (!typed.trace.validation.pass) throw Error('Peer typing trace validation failed: ' + typed.trace.validation.problems.join('; '));
-        } finally { await peers.finish(); }
+        });
         await json(join(output, 'result.json'), receipt);
       }
       await shutdown(runDir, fresh);

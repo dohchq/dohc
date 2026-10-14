@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
-import { observePresenceOwner, recordPresenceOwnerLastKey, waitForPresenceOwner, readPresenceOwner, validatePresenceWorkload, samplePresenceClock, validatePresenceClocks, rebasePresenceWindow } from './presence-owner.mjs';
+import { observePresenceOwner, recordPresenceOwnerLastKey, waitForPresenceOwner, readPresenceOwner, validatePresenceWorkload, samplePresenceClock, validatePresenceClocks, rebasePresenceWindow, withPresencePeers } from './presence-owner.mjs';
 const workload = { pass: true, peers: 2, maxGapMs: 50, peerCounts: [{ edits: 5, windowEdits: 5 }, { edits: 6, windowEdits: 6 }] };
 const owner = { binding: 'unbound', receivedEdits: 11, receivedEditsAtLastKey: 9, presenceUpdatesReceived: 0 };
 
@@ -125,4 +125,31 @@ test('post-typing clock check accepts three milliseconds and refuses greater dri
   const before = { rendererToNodeOffsetMs: 42, roundTripMs: 1 };
   assert.equal(validatePresenceClocks(before, { ...before, rendererToNodeOffsetMs: 45 }).offsetDeltaMs, 3);
   assert.throws(() => validatePresenceClocks(before, { ...before, rendererToNodeOffsetMs: 45.001 }), /clock refused.*offset changed/);
+});
+
+
+test('peer cleanup failure keeps the original typing refusal and logs the cleanup error', async t => {
+  const cause = new Error('original clock details');
+  const original = new Error('Presence clock refused', { cause });
+  const finishError = new Error('Peer stopped during acknowledgement drain');
+  const log = t.mock.method(console, 'error', () => {});
+  let finishes = 0;
+  await assert.rejects(withPresencePeers({ finish: async () => { finishes++; throw finishError; } },
+    async () => { throw original; }), error => error === original);
+  assert.equal(original.cause, cause);
+  assert.equal(finishes, 1);
+  assert.equal(log.mock.callCount(), 1);
+  assert.equal(log.mock.calls[0].arguments[1], finishError);
+});
+
+test('peer cleanup failures still reject an otherwise successful workload', async () => {
+  const finishError = new Error('peer loop failed');
+  await assert.rejects(withPresencePeers({ finish: async () => { throw finishError; } },
+    async () => 'typed'), error => error === finishError);
+});
+
+test('successful peer cleanup preserves the workload result', async () => {
+  let finished = false;
+  assert.equal(await withPresencePeers({ finish: async () => { finished = true; } }, async () => 'typed'), 'typed');
+  assert.equal(finished, true);
 });

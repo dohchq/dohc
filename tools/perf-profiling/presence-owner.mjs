@@ -91,3 +91,17 @@ export function validatePresenceClocks(before, after) {
 export function rebasePresenceWindow(window, clock) {
   return { start: window.start + clock.rendererToNodeOffsetMs, end: window.end + clock.rendererToNodeOffsetMs };
 }
+
+
+export async function withPresencePeers(peers, run) {
+  let failed = false;
+  try { return await run(); }
+  catch (error) { failed = true; throw error; }
+  finally {
+    try { await peers.finish(); }
+    catch (error) {
+      if (!failed) throw error;
+      console.error('Presence peer cleanup failed after workload failure:', error);
+    }
+  }
+}
