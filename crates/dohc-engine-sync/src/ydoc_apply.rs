@@ -11,7 +11,7 @@ use dohc_engine_domain::{
 use dohc_engine_storage::{
     EngineStore, FaultInjector, Preimage, StorageError, TxnOutcome, get_binary_blob, hex_sha256,
 };
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::Deserialize;
 
 use dohc_engine_files::{
@@ -4204,7 +4204,49 @@ pub fn apply_ydoc_envelope(
     faults: &dyn FaultInjector,
     leases: &dyn LeaseProbe,
 ) -> Result<ApplyOutcome<YdocApplyResult>, SyncError> {
-    apply_ydoc_envelope_in_batch(store, cache, envelope, faults, leases, false, None)
+    let admission = YdocAdmission::Ordinary;
+    apply_ydoc_envelope_in_batch(store, cache, envelope, faults, leases, false, admission)
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum YdocAdmission<'a> {
+    Ordinary,
+    Hold(&'a crate::ReleaseHold),
+    Replay(&'a crate::release_hold::ReplayPermit<'a>),
+}
+impl YdocAdmission<'_> {
+    fn apply_envelope_with<T>(
+        &self,
+        store: &mut EngineStore,
+        op: &ReplicationEnvelope,
+        faults: &dyn FaultInjector,
+        mutation: impl FnOnce(&Transaction<'_>, &ReplicationEnvelope) -> Result<T, SyncError>,
+    ) -> Result<ApplyOutcome<T>, SyncError> {
+        self.apply_envelope_with_mutation_outcome(store, op, faults, |tx, op| {
+            mutation(tx, op).map(crate::apply::MutationOutcome::Applied)
+        })
+    }
+    fn apply_envelope_with_mutation_outcome<T>(
+        &self,
+        store: &mut EngineStore,
+        op: &ReplicationEnvelope,
+        faults: &dyn FaultInjector,
+        mutation: impl FnOnce(
+            &Transaction<'_>,
+            &ReplicationEnvelope,
+        ) -> Result<crate::apply::MutationOutcome<T>, SyncError>,
+    ) -> Result<ApplyOutcome<T>, SyncError> {
+        crate::apply::apply_envelope_with_replay(
+            store,
+            op,
+            faults,
+            match self {
+                Self::Replay(permit) => Some(*permit),
+                _ => None,
+            },
+            mutation,
+        )
+    }
 }
 
 pub(crate) fn apply_ydoc_envelope_in_batch(
@@ -4214,8 +4256,18 @@ pub(crate) fn apply_ydoc_envelope_in_batch(
     faults: &dyn FaultInjector,
     leases: &dyn LeaseProbe,
     batch_inactive: bool,
-    hold: Option<&crate::ReleaseHold>,
+    admission: YdocAdmission<'_>,
 ) -> Result<ApplyOutcome<YdocApplyResult>, SyncError> {
+    let refuse_ydoc = |store, envelope, faults, reason| {
+        admission.apply_envelope_with(store, envelope, faults, |_, _| {
+            Err(SyncError::InvalidInput { reason })
+        })
+    };
+    let refuse_ydoc_with_reason = |store, envelope, faults, reason| {
+        admission.apply_envelope_with_mutation_outcome(store, envelope, faults, |_, _| {
+            Ok(crate::apply::MutationOutcome::RefusedRetainingMutation { reason })
+        })
+    };
     if envelope.op_kind != "ydoc.update" {
         return Err(SyncError::UnsupportedOperation);
     }
@@ -4223,7 +4275,7 @@ pub(crate) fn apply_ydoc_envelope_in_batch(
         envelope.settlement_admission,
         Some(crate::SettlementAdmission::ReleaseRefused { .. })
     ) {
-        return crate::apply_envelope_with(store, envelope, faults, |_, _| {
+        return admission.apply_envelope_with(store, envelope, faults, |_, _| {
             Err(SyncError::CoordinateDiverged)
         });
     }
@@ -4329,11 +4381,8 @@ pub(crate) fn apply_ydoc_envelope_in_batch(
             reason: "pulled ydoc.update is missing its relay sequence",
         });
     };
-    if let Some(hold) = hold {
-        dohc_engine_collab::Ydoc::validate_update(&bytes).map_err(|error| {
-            map_collab_payload_error(error, "ydoc.update bytes fail durable validation")
-        })?;
-        return crate::apply_envelope_with(store, envelope, faults, |tx, op| {
+    if let YdocAdmission::Hold(hold) = admission {
+        return admission.apply_envelope_with(store, envelope, faults, |tx, op| {
             validate_retryable_ydoc_identity(tx, &key, &payload.path)?;
             hold.retain_in(tx, op)?;
             Ok(YdocApplyResult {
@@ -4348,37 +4397,32 @@ pub(crate) fn apply_ydoc_envelope_in_batch(
     if let Some(echo) =
         store.read_with(|conn| live_ordinary_classification(conn, &key, &payload, &bytes))?
     {
-        return crate::apply::apply_envelope_with_mutation_outcome(
-            store,
-            envelope,
-            faults,
-            |tx, _| {
-                if live_ordinary_classification(tx, &key, &payload, &bytes)? != Some(echo) {
-                    return Err(SyncError::RetryableState {
-                        reason: "native live binding changed",
-                    });
-                }
-                if echo {
-                    Ok(crate::apply::MutationOutcome::Applied(YdocApplyResult {
-                        deferred: false,
-                        reason: Some("native-live-content-echo"),
-                        conflicts_opened: 0,
-                        lineage_replacement: None,
-                        record_facts: Vec::new(),
-                    }))
-                } else {
-                    Ok(crate::apply::MutationOutcome::RefusedRetainingMutation {
-                        reason: LIVE_UNADMITTED_UPDATE.into(),
-                    })
-                }
-            },
-        );
+        return admission.apply_envelope_with_mutation_outcome(store, envelope, faults, |tx, _| {
+            if live_ordinary_classification(tx, &key, &payload, &bytes)? != Some(echo) {
+                return Err(SyncError::RetryableState {
+                    reason: "native live binding changed",
+                });
+            }
+            if echo {
+                Ok(crate::apply::MutationOutcome::Applied(YdocApplyResult {
+                    deferred: false,
+                    reason: Some("native-live-content-echo"),
+                    conflicts_opened: 0,
+                    lineage_replacement: None,
+                    record_facts: Vec::new(),
+                }))
+            } else {
+                Ok(crate::apply::MutationOutcome::RefusedRetainingMutation {
+                    reason: LIVE_UNADMITTED_UPDATE.into(),
+                })
+            }
+        });
     }
     if !payload.is_base_state && store.read_with(|conn| conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM ydoc_inactive_lineages WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND lineage_claim_id=?4)",
         params![key.workspace_id,key.version_id,key.object_id,payload.lineage_claim_id], |row| row.get::<_,bool>(0),
     )).map_err(SyncError::corrupt)? {
-        let mut outcome = crate::apply_envelope_with(store, envelope, faults, |tx, op| {
+        let mut outcome = admission.apply_envelope_with(store, envelope, faults, |tx, op| {
             tx.execute(
                 "INSERT OR IGNORE INTO ydoc_deferred_updates \
                  (workspace_id,version_id,object_id,origin_id,origin_seq,recorded_at_ms,lineage_claim_id,relay_seq) \
@@ -4496,7 +4540,7 @@ pub(crate) fn apply_ydoc_envelope_in_batch(
             });
         }
         let deferred_key = key.clone();
-        return crate::apply_envelope_with(store, envelope, faults, move |tx, op| {
+        return admission.apply_envelope_with(store, envelope, faults, move |tx, op| {
             // Record which coordinate is pending in the same transaction as
             // the ack: drains replay exactly these rows, never the whole
             // imported history (which after compaction would re-append
@@ -4573,7 +4617,7 @@ pub(crate) fn apply_ydoc_envelope_in_batch(
             is_base_state: payload.is_base_state,
         };
         let base_payload = &payload;
-        let outcome = crate::apply_envelope_with(store, envelope, faults, move |tx, op| {
+        let outcome = admission.apply_envelope_with(store, envelope, faults, move |tx, op| {
             let coordinate = dohc_engine_collab::BaseRelayCoordinate::new(
                 op.origin_id.clone(),
                 op.origin_seq,
@@ -4933,7 +4977,7 @@ pub(crate) fn apply_ydoc_envelope_in_batch(
                 };
             }
             let deferred_key = key.clone();
-            return crate::apply::apply_envelope_with_mutation_outcome(
+            return admission.apply_envelope_with_mutation_outcome(
                 store,
                 envelope,
                 faults,
@@ -5024,7 +5068,7 @@ pub(crate) fn apply_ydoc_envelope_in_batch(
             // The relay winner is already known. This coordinate still gets
             // its normal durable ack/log record, but its causal bytes must not
             // enter a different immutable lineage.
-            let outcome = crate::apply::apply_envelope_with_mutation_outcome(
+            let outcome = admission.apply_envelope_with_mutation_outcome(
                 store,
                 envelope,
                 faults,
@@ -5075,7 +5119,7 @@ pub(crate) fn apply_ydoc_envelope_in_batch(
     let mut record_facts = None;
     let mut cache_probe = RemoteAppendProbe::default();
     let gate_cache: &WriterDocCache = cache;
-    let outcome_result = crate::apply::apply_envelope_with_mutation_outcome(
+    let outcome_result = admission.apply_envelope_with_mutation_outcome(
         store,
         envelope,
         faults,
@@ -5534,28 +5578,6 @@ fn map_applied_ydoc_outcome(
         outcome.sharing_declined.insert(0, declined);
     }
     outcome
-}
-
-fn refuse_ydoc(
-    store: &mut EngineStore,
-    envelope: &ReplicationEnvelope,
-    faults: &dyn FaultInjector,
-    reason: &'static str,
-) -> Result<ApplyOutcome<YdocApplyResult>, SyncError> {
-    crate::apply_envelope_with(store, envelope, faults, move |_tx, _op| {
-        Err(SyncError::InvalidInput { reason })
-    })
-}
-
-fn refuse_ydoc_with_reason(
-    store: &mut EngineStore,
-    envelope: &ReplicationEnvelope,
-    faults: &dyn FaultInjector,
-    reason: String,
-) -> Result<ApplyOutcome<YdocApplyResult>, SyncError> {
-    crate::apply::apply_envelope_with_mutation_outcome(store, envelope, faults, move |_tx, _op| {
-        Ok(crate::apply::MutationOutcome::RefusedRetainingMutation { reason })
-    })
 }
 
 fn map_fold_edit_error(error: CollabError) -> SyncError {

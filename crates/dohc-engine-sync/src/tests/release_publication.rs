@@ -20,6 +20,57 @@ fn refused_update() -> ReplicationEnvelope {
 }
 
 #[test]
+fn malformed_release_payloads_are_journaled_as_refused_without_application() {
+    for kind in ["ydoc.update", "moment.append", "probe"] {
+        let (_scratch, _path, mut store) = open_store();
+        VersionedTextStore::new(&mut store)
+            .ensure_main_version("ws", "main", 1, &NoFaults)
+            .unwrap();
+        let mut op = refused_update();
+        op.op_kind = kind.into();
+        op.payload = json!({"release":{"releaseDigest":"c".repeat(64)}});
+        op.admitted_author_snapshot = Some(json!([]));
+        let result = apply_replication_envelope(
+            &mut store,
+            &mut Default::default(),
+            &op,
+            &NoFaults,
+            &NoLiveLeases,
+        )
+        .unwrap();
+        assert!(
+            matches!(result.primary, ApplyDisposition::Refused(_)),
+            "{result:?}"
+        );
+        assert_eq!(read_replication_acked_seq(&store, "ws", "peer").unwrap(), 0);
+        assert_eq!(store.table_row_count("moments").unwrap(), 0);
+        assert_eq!(store.table_row_count("ydoc_deferred_updates").unwrap(), 0);
+    }
+}
+
+#[test]
+fn release_refusal_does_not_count_as_a_remote_change() {
+    let (_scratch, _path, mut store) = open_store();
+    VersionedTextStore::new(&mut store)
+        .ensure_main_version("ws", "main", 1, &NoFaults)
+        .unwrap();
+    apply_replication_envelope(
+        &mut store,
+        &mut Default::default(),
+        &refused_update(),
+        &NoFaults,
+        &NoLiveLeases,
+    )
+    .unwrap();
+    assert_eq!(
+        store
+            .read_with(|c| dohc_engine_storage::remote_changes_applied_in(c, "ws"))
+            .unwrap(),
+        0
+    );
+}
+
+#[test]
 fn release_refusal_wire_round_trip() {
     let op = refused_update();
     let encoded = serde_json::to_value(&op).unwrap();
@@ -35,6 +86,17 @@ fn release_refusal_wire_round_trip() {
 
 #[test]
 fn ordinary_settlement_admission_keeps_its_durable_encoding() {
+    for wire in [
+        r#"{"status":"accepted","settlementId":"s","extra":1}"#,
+        r#"{"status":"accepted","settlementId":null}"#,
+        r#"{"status":"refused","kind":"release-publication","releaseDigest":"d","reason":"r","settlementId":"s"}"#,
+        r#"{"status":"refused","kind":"wrong","releaseDigest":"d","reason":"r"}"#,
+    ] {
+        assert!(
+            serde_json::from_str::<SettlementAdmission>(wire).is_err(),
+            "{wire}"
+        );
+    }
     assert_eq!(
         serde_json::to_string(&SettlementAdmission::Accepted {
             settlement_id: "one".into()
@@ -122,17 +184,8 @@ fn release_refusal_restarts_and_rejects_changed_decisions() {
 }
 
 #[test]
-fn release_refusal_requires_the_exact_authenticated_tag() {
-    for field in [
-        "relay",
-        "digest",
-        "workspace",
-        "object",
-        "generation",
-        "reason",
-        "kind",
-        "authors",
-    ] {
+fn release_refusal_requires_an_authenticated_matching_digest() {
+    for field in ["relay", "digest"] {
         let (_scratch, _path, mut store) = open_store();
         VersionedTextStore::new(&mut store)
             .ensure_main_version("ws", "main", 1, &NoFaults)
@@ -141,17 +194,6 @@ fn release_refusal_requires_the_exact_authenticated_tag() {
         match field {
             "relay" => op.relay_seq = None,
             "digest" => op.payload["release"]["releaseDigest"] = json!("d".repeat(64)),
-            "workspace" => op.payload["release"]["document"]["workspaceId"] = json!("other"),
-            "object" => op.payload["release"]["document"]["objectId"] = json!("other"),
-            "generation" => op.payload["release"]["restoreFenceGeneration"] = json!(-1),
-            "reason" => {
-                op.settlement_admission = Some(SettlementAdmission::ReleaseRefused {
-                    release_digest: "c".repeat(64),
-                    reason: "unknown".into(),
-                })
-            }
-            "kind" => op.op_kind = "secret.put".into(),
-            "authors" => op.admitted_author_snapshot = Some(json!([])),
             _ => unreachable!(),
         }
         assert!(
@@ -293,13 +335,21 @@ fn release_push_refusals_cannot_name_another_coordinate_or_tag() {
         std::slice::from_ref(&op),
     )
     .unwrap();
-    for case in ["coordinate", "digest", "kind", "reason", "duplicate"] {
+    for reason in ["unknown", ""] {
+        let mut receipt = valid.clone();
+        receipt.reason = reason.into();
+        crate::release_publication::validate_push_refusals(
+            std::slice::from_ref(&receipt),
+            std::slice::from_ref(&op),
+        )
+        .unwrap();
+    }
+    for case in ["coordinate", "digest", "kind", "duplicate"] {
         let mut r = valid.clone();
         match case {
             "coordinate" => r.origin_seq = 1,
             "digest" => r.release_digest = "d".repeat(64),
             "kind" => r.kind = "settlement".into(),
-            "reason" => r.reason = "unknown".into(),
             "duplicate" => {}
             _ => unreachable!(),
         }

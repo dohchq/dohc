@@ -105,7 +105,7 @@ pub(crate) fn drain_and_claim(
              WHERE p.workspace_id=?1 AND (p.applied=1 OR (p.relay_namespace=b.relay_database_namespace AND (\
                (p.terminal_cursor<=b.accepted_cursor AND json_extract(p.binding_json,'$.restoreFenceGeneration')=json_extract(b.binding_json,'$.restoreFenceGeneration')) \
                OR json_extract(b.binding_json,'$.restoreFenceGeneration')>json_extract(p.binding_json,'$.restoreFenceGeneration')))) \
-             AND (p.applied=1 OR NOT EXISTS(SELECT 1 FROM release_holds h WHERE h.workspace_id=p.workspace_id AND h.version_id=p.main_version_id AND h.object_id=p.object_id)) \
+             AND (p.applied=1 OR NOT EXISTS(SELECT 1 FROM release_held_ops r WHERE r.workspace_id=p.workspace_id AND r.origin_id=p.origin_id AND r.origin_seq=p.origin_seq)) \
              ORDER BY p.checked_sequence,p.terminal_cursor,p.origin_id,p.origin_seq LIMIT 65",
         ).map_err(SyncError::corrupt)?;
         let mut rows = stmt.query([workspace_id]).map_err(SyncError::corrupt)?;

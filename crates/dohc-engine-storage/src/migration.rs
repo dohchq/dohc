@@ -3286,9 +3286,9 @@ CREATE TABLE release_publication_admissions (
     workspace_id TEXT NOT NULL,
     origin_id TEXT NOT NULL,
     origin_seq INTEGER NOT NULL CHECK (origin_seq>=0),
-    op_kind TEXT NOT NULL CHECK (op_kind IN ('ydoc.update','moment.append')),
+    op_kind TEXT NOT NULL,
     release_digest TEXT NOT NULL CHECK (length(release_digest)=64 AND release_digest NOT GLOB '*[^0-9a-f]*'),
-    reason TEXT NOT NULL CHECK (reason IN ('release-publication-fenced','release-generation-fenced','release-restore-in-progress','release-document-changed')),
+    reason TEXT NOT NULL,
     PRIMARY KEY(workspace_id,origin_id,origin_seq)
 ) STRICT;
 CREATE TABLE release_holds (
@@ -3298,7 +3298,6 @@ CREATE TABLE release_holds (
     release_digest TEXT NOT NULL CHECK(length(release_digest)=64 AND release_digest NOT GLOB '*[^0-9a-f]*'),
     binding_json TEXT NOT NULL CHECK(json_valid(binding_json)),
     relay_namespace TEXT NOT NULL,
-    frontier_json TEXT NOT NULL CHECK(json_valid(frontier_json)),
     anchor_cursor INTEGER CHECK(anchor_cursor IS NULL OR anchor_cursor>=0),
     anchor_sha256 TEXT REFERENCES binary_blobs(sha256) ON DELETE RESTRICT,
     replay_ready INTEGER NOT NULL DEFAULT 0 CHECK(replay_ready IN (0,1)),
@@ -4069,7 +4068,7 @@ mod tests {
             ),
             (
                 "v2-release-publication-admissions",
-                "518a5aa7f8855e407dcf85de5328f8775b3f615ec61e728ce00d9b0f8217a9b2",
+                "ad56d45d0b07bb9e48d22cb8213cea8e8054ff021d463997149a88e78da44ff1",
             ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());

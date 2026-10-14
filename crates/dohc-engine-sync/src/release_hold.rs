@@ -46,8 +46,13 @@ pub fn open_release_hold_in(
     if !valid {
         return Err(waiting());
     }
-    tx.execute("INSERT INTO release_holds(workspace_id,version_id,object_id,release_digest,binding_json,relay_namespace,frontier_json)
-        VALUES (?1,?2,?3,?4,?5,?6,COALESCE((SELECT json_group_object(origin_id,acked_seq) FROM replication_peers WHERE workspace_id=?1),'{}')) ON CONFLICT DO NOTHING",
+    let pending: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM owner_pending_settlements WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND applied=0)",
+        params![binding.workspace_id,binding.main_version_id,binding.object_id], |r|r.get(0)).map_err(SyncError::corrupt)?;
+    if pending {
+        return Err(waiting());
+    }
+    tx.execute("INSERT INTO release_holds(workspace_id,version_id,object_id,release_digest,binding_json,relay_namespace)
+        VALUES (?1,?2,?3,?4,?5,?6) ON CONFLICT DO NOTHING",
         params![binding.workspace_id,binding.main_version_id,binding.object_id,digest,encoded,namespace]).map_err(SyncError::persist)?;
     hold.check_in(tx, false)?;
     Ok(hold)
@@ -104,11 +109,7 @@ impl ReleaseHold {
         op: &ReplicationEnvelope,
     ) -> Result<(), SyncError> {
         self.check_in(tx, false)?;
-        if !self.matches(op)
-            || op.relay_seq.is_none()
-            || (op.op_kind == "ydoc.update"
-                && op.payload["lineageClaimId"] != self.binding.lineage_claim_id)
-        {
+        if !self.matches(op) || op.relay_seq.is_none() {
             return Err(SyncError::CoordinateDiverged);
         }
         let json = serde_json::to_string(op).map_err(SyncError::corrupt)?;
@@ -119,15 +120,15 @@ impl ReleaseHold {
         for (sha, kinds) in refs {
             for kind in kinds {
                 let text = kind == BlobKind::Text;
-                let blob: Vec<u8> = if text {
+                let length: i64 = if text {
                     tx.query_row(
-                        "SELECT CAST(text AS BLOB) FROM blobs WHERE sha256=?1",
+                        "SELECT length(CAST(text AS BLOB)) FROM blobs WHERE sha256=?1",
                         [&sha],
                         |r| r.get(0),
                     )
                 } else {
                     tx.query_row(
-                        "SELECT bytes FROM binary_blobs WHERE sha256=?1",
+                        "SELECT length(bytes) FROM binary_blobs WHERE sha256=?1",
                         [&sha],
                         |r| r.get(0),
                     )
@@ -135,11 +136,8 @@ impl ReleaseHold {
                 .optional()
                 .map_err(SyncError::corrupt)?
                 .ok_or(SyncError::BlobInvalid)?;
-                if dohc_engine_storage::hex_sha256(&blob) != sha {
-                    return Err(SyncError::BlobInvalid);
-                }
                 bytes = bytes
-                    .checked_add(blob.len() as i64)
+                    .checked_add(length)
                     .ok_or(SyncError::CoordinateDiverged)?;
                 roots.push((sha.clone(), text));
             }
@@ -172,12 +170,24 @@ impl ReleaseHold {
 }
 
 /// The caller still owes remote resolution. Local release alone cannot close it.
-pub fn seal_release_hold_cut_in(tx: &Transaction<'_>, hold: &ReleaseHold) -> Result<(), SyncError> {
+pub fn seal_release_hold_cut_in(
+    tx: &Transaction<'_>,
+    hold: &ReleaseHold,
+    expected_anchor: i64,
+) -> Result<(), SyncError> {
     hold.check_in(tx, false)?;
     let encoded = serde_json::to_string(&hold.binding).map_err(SyncError::corrupt)?;
     let row: Option<(i64,String)> = tx.query_row("SELECT accepted_cursor,checkpoint_digest FROM ydoc_owner_bindings WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND json(binding_json)=json(?4) AND relay_database_namespace=?5",
         params![hold.binding.workspace_id,hold.binding.main_version_id,hold.binding.object_id,encoded,hold.namespace],|r|Ok((r.get(0)?,r.get(1)?))).optional().map_err(SyncError::corrupt)?;
     let (cursor, sha) = row.ok_or_else(waiting)?;
+    if cursor != expected_anchor {
+        return Err(waiting());
+    }
+    let sealed: Option<(i64, String)> = tx.query_row("SELECT anchor_cursor,anchor_sha256 FROM release_holds WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND anchor_cursor IS NOT NULL",
+        params![hold.binding.workspace_id,hold.binding.main_version_id,hold.binding.object_id], |r|Ok((r.get(0)?,r.get(1)?))).optional().map_err(SyncError::corrupt)?;
+    if sealed.is_some_and(|s| s != (cursor, sha.clone())) {
+        return Err(waiting());
+    }
     let bytes: Vec<u8> = tx
         .query_row(
             "SELECT bytes FROM binary_blobs WHERE sha256=?1",
@@ -200,6 +210,11 @@ pub fn prepare_release_hold_replay_in(
 ) -> Result<(), SyncError> {
     hold.check_in(tx, false)?;
     hold.check_released_in(tx)?;
+    let sealed: bool = tx.query_row("SELECT anchor_cursor IS NOT NULL AND anchor_sha256 IS NOT NULL FROM release_holds WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+        params![hold.binding.workspace_id,hold.binding.main_version_id,hold.binding.object_id], |r|r.get(0)).map_err(SyncError::corrupt)?;
+    if !sealed {
+        return Err(waiting());
+    }
     tx.execute("UPDATE release_holds SET replay_ready=1,remote_closed=MAX(remote_closed,?4) WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
         params![hold.binding.workspace_id,hold.binding.main_version_id,hold.binding.object_id,remote_closed]).map_err(SyncError::persist)?;
     Ok(())
@@ -239,7 +254,7 @@ pub fn apply_replication_envelope_with_release_hold(
             faults,
             leases,
             false,
-            Some(hold),
+            crate::ydoc_apply::YdocAdmission::Hold(hold),
         )
         .map(|outcome| outcome.map(|_| RoutedApply::default())),
         "moment.append" => {
@@ -263,7 +278,8 @@ impl ReplayPermit<'_> {
               AND json(p.binding_json)=json(h.binding_json) AND p.relay_namespace=h.relay_namespace
               AND NOT EXISTS(SELECT 1 FROM json_each(h.binding_json) b WHERE b.value IS NOT json_extract(a.record_json,'$.binding.'||b.key))
               AND json_extract(a.record_json,'$.relayDatabaseNamespace')=h.relay_namespace
-              AND json_extract(a.record_json,'$.terminalCursor')=p.terminal_cursor",
+              AND json_extract(a.record_json,'$.terminalCursor')=p.terminal_cursor
+              AND a.markdown_digest=json_extract(?4,'$.payloadAfterBlobSha256')",
             params![self.op.workspace_id,self.op.origin_id,self.op.origin_seq,self.op.payload_json()?],|r|Ok((r.get(0)?,r.get(1)?))).optional().map_err(SyncError::corrupt)?;
         let Some((anchor, state)) = row else {
             return Ok(false);
@@ -287,20 +303,17 @@ impl ReplayPermit<'_> {
         doc.apply(&read(&state)?).map_err(SyncError::corrupt)?;
         Ok(!doc.has_pending_dependencies() && doc.encode_full_state() == before)
     }
-    pub(crate) fn check_in(
-        &self,
-        tx: &Transaction<'_>,
-        op: &ReplicationEnvelope,
-    ) -> Result<(), SyncError> {
+    pub(crate) fn check_in(&self, tx: &Transaction<'_>) -> Result<(), SyncError> {
+        let op = self.op;
         self.hold.check_in(tx, true)?;
         let json:String=tx.query_row("SELECT envelope_json FROM release_held_ops WHERE workspace_id=?1 AND origin_id=?2 AND origin_seq=?3 AND release_digest=?4 AND stage='held'",
-            params![op.workspace_id,op.origin_id,op.origin_seq,self.hold.digest],|r|r.get(0)).map_err(SyncError::corrupt)?;
+            params![op.workspace_id,op.origin_id,op.origin_seq,self.hold.digest],|r|r.get(0)).optional().map_err(SyncError::corrupt)?.ok_or(SyncError::CoordinateDiverged)?;
         let saved: ReplicationEnvelope = serde_json::from_str(&json).map_err(SyncError::corrupt)?;
-        if saved != *op || self.op != op {
+        if saved != *op {
             return Err(SyncError::CoordinateDiverged);
         }
-        let earlier:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM release_held_ops WHERE workspace_id=?1 AND origin_id=?2 AND origin_seq<?3 AND stage='held')",
-            params![op.workspace_id,op.origin_id,op.origin_seq],|r|r.get(0)).map_err(SyncError::corrupt)?;
+        let earlier:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM release_held_ops WHERE workspace_id=?1 AND origin_id=?2 AND origin_seq<?3 AND stage='held' AND version_id=?4 AND object_id=?5)",
+            params![op.workspace_id,op.origin_id,op.origin_seq,self.hold.binding.main_version_id,self.hold.binding.object_id],|r|r.get(0)).map_err(SyncError::corrupt)?;
         if earlier {
             return Err(SyncError::SequenceGap);
         }
@@ -331,9 +344,23 @@ pub fn replay_release_held_envelope(
             return Err(SyncError::CoordinateDiverged);
         }
         if stage != "held" {
-            let primary = match crate::read_replayed_refusal(store, op)? {
-                Some(refusal) => crate::ApplyDisposition::Refused(refusal),
-                None => crate::ApplyDisposition::Applied(RoutedApply {
+            let refused: bool = store.read_with(|c|c.query_row("SELECT apply_disposition='refused' FROM replication_log WHERE workspace_id=?1 AND origin_id=?2 AND origin_seq=?3", params![op.workspace_id,op.origin_id,op.origin_seq], |r|r.get(0)).map_err(SyncError::corrupt))?;
+            let primary = if refused {
+                crate::ApplyDisposition::Refused(
+                    crate::read_replayed_refusal(store, op)?.unwrap_or_else(|| {
+                        crate::ReplicationRefusal {
+                            workspace_id: op.workspace_id.clone(),
+                            origin_id: op.origin_id.clone(),
+                            origin_seq: op.origin_seq,
+                            op_kind: op.op_kind.clone(),
+                            reason: crate::RefusalReason::InvalidInput {
+                                reason: "dohc did not apply this edit.".into(),
+                            },
+                        }
+                    }),
+                )
+            } else {
+                crate::ApplyDisposition::Applied(RoutedApply {
                     materialization_changes: crate::router::redelivered_materialization_changes(
                         store, op,
                     )?,
@@ -344,7 +371,7 @@ pub fn replay_release_held_envelope(
                         .into_iter()
                         .collect(),
                     ..RoutedApply::default()
-                }),
+                })
             };
             return Ok(ApplyOutcome::new(primary));
         }
@@ -371,16 +398,33 @@ pub fn replay_release_held_envelope(
     if op.op_kind != "ydoc.update" {
         return Err(SyncError::UnsupportedOperation);
     }
+    if op.payload["isBaseState"] == true {
+        return crate::ydoc_apply::apply_ydoc_envelope_in_batch(
+            store,
+            cache,
+            op,
+            faults,
+            leases,
+            false,
+            crate::ydoc_apply::YdocAdmission::Replay(&permit),
+        )
+        .map(|outcome| {
+            outcome.map(|result| RoutedApply {
+                conflicts_opened: result.conflicts_opened,
+                record_facts: result.record_facts,
+                ..RoutedApply::default()
+            })
+        });
+    }
     let result=store.write_with(faults,|tx| {
-        permit.check_in(tx,op)?;
+        permit.check_in(tx)?;
         tx.execute("INSERT INTO ydoc_deferred_updates(workspace_id,version_id,object_id,origin_id,origin_seq,recorded_at_ms,lineage_claim_id,relay_seq)
             VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
-            params![op.workspace_id,hold.binding.main_version_id,hold.binding.object_id,op.origin_id,op.origin_seq,op.recorded_at_ms,hold.binding.lineage_claim_id,op.relay_seq]).map_err(SyncError::persist)?;
+            params![op.workspace_id,hold.binding.main_version_id,hold.binding.object_id,op.origin_id,op.origin_seq,op.recorded_at_ms,op.payload["lineageClaimId"].as_str().ok_or(SyncError::CoordinateDiverged)?,op.relay_seq]).map_err(SyncError::persist)?;
         tx.execute("UPDATE release_held_ops SET stage='dependency' WHERE workspace_id=?1 AND origin_id=?2 AND origin_seq=?3",
             params![op.workspace_id,op.origin_id,op.origin_seq]).map_err(SyncError::persist)?;
         Ok::<_,SyncError>(())
     })?;
-    let _ = cache;
     Ok(ApplyOutcome::new(match result {
         dohc_engine_storage::TxnOutcome::Committed(()) => {
             crate::ApplyDisposition::Applied(RoutedApply::default())
@@ -397,13 +441,13 @@ pub fn read_release_hold_page(
     hold: &ReleaseHold,
 ) -> Result<Vec<ReplicationEnvelope>, SyncError> {
     store.read_with(|c| {
-        let mut stmt=c.prepare("SELECT envelope_json FROM release_held_ops WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND release_digest=?4 ORDER BY arrival LIMIT 64").map_err(SyncError::corrupt)?;
+        let mut stmt=c.prepare("SELECT envelope_json FROM release_held_ops WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND release_digest=?4 AND stage='held' ORDER BY arrival LIMIT 64").map_err(SyncError::corrupt)?;
         let rows=stmt.query_map(params![hold.binding.workspace_id,hold.binding.main_version_id,hold.binding.object_id,hold.digest],|r|r.get::<_,String>(0)).map_err(SyncError::corrupt)?;
         rows.map(|r|serde_json::from_str(&r.map_err(SyncError::corrupt)?).map_err(SyncError::corrupt)).collect()
     })
 }
 
-/// Call after delivering the replay report. Dependency roots stay until drained.
+/// Call after delivering the report; transferred rows keep their ordinary roots.
 pub fn acknowledge_release_replay_in(
     tx: &Transaction<'_>,
     op: &ReplicationEnvelope,
@@ -416,23 +460,8 @@ pub fn acknowledge_release_replay_in(
     if serde_json::from_str::<ReplicationEnvelope>(&json).map_err(SyncError::corrupt)? != *op {
         return Err(SyncError::CoordinateDiverged);
     }
-    let pending:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM ydoc_deferred_updates WHERE workspace_id=?1 AND origin_id=?2 AND origin_seq=?3)",
-        params![op.workspace_id,op.origin_id,op.origin_seq],|r|r.get(0)).map_err(SyncError::corrupt)?;
-    if stage == "held" || (stage == "dependency" && pending) {
+    if stage == "held" {
         return Err(waiting());
-    }
-    if stage == "dependency" {
-        let key = DocKey::new(
-            &op.workspace_id,
-            op.payload["versionId"]
-                .as_str()
-                .ok_or(SyncError::CoordinateDiverged)?,
-            op.payload["objectId"]
-                .as_str()
-                .ok_or(SyncError::CoordinateDiverged)?,
-        )
-        .map_err(|_| SyncError::CoordinateDiverged)?;
-        crate::ydoc_apply::ensure_ydoc_lineage_complete_in_tx(tx, &key)?;
     }
     if op.op_kind == "moment.append" {
         let refused:bool=tx.query_row("SELECT apply_disposition='refused' FROM replication_log WHERE workspace_id=?1 AND origin_id=?2 AND origin_seq=?3",params![op.workspace_id,op.origin_id,op.origin_seq],|r|r.get(0)).map_err(SyncError::corrupt)?;

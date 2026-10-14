@@ -273,7 +273,7 @@ pub(crate) fn apply_envelope_with_replay<T>(
         if passive && let Some(cursor) = envelope.relay_seq {
             dohc_engine_storage::replica::advance_frontiers(tx, &envelope.workspace_id, cursor, 0)?;
         }
-        if let Some(replay) = replay { replay.check_in(tx, envelope)?; }
+        if let Some(replay) = replay { replay.check_in(tx)?; }
         let acked = read_ack_tx(tx, &envelope.workspace_id, &envelope.origin_id)?;
         if envelope.origin_seq <= acked && replay.is_none() {
             // A redelivered coordinate at or below the ack must match the row
@@ -410,7 +410,7 @@ pub(crate) fn apply_envelope_with_replay<T>(
         // the coordinate is new, and this computer's own ops echo back
         // against their journal rows above. A parked op counts now, not
         // when a later drain applies it.
-        if mutation_committed && replay.is_none() {
+        if mutation_committed && replay.is_none() && !matches!(envelope.settlement_admission, Some(crate::SettlementAdmission::ReleaseRefused { .. })) {
             dohc_engine_storage::count_remote_change_in_tx(tx, &envelope.workspace_id)?;
         }
         if let Admission::Refused(refusal) = &admission

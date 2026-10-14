@@ -1783,6 +1783,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 Err(SyncError::RetryableState { reason }) => {
                     if matches!(op.op_kind.as_str(), "conflict.resolve" | "moment.append")
                         && reason == "ydoc-session-live"
+                        || reason == "release hold capacity reached"
                     {
                         durable_origins.insert(op.origin_id.clone());
                     }
@@ -1828,6 +1829,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                     Err(SyncError::RetryableState { reason }) => {
                         if matches!(op.op_kind.as_str(), "conflict.resolve" | "moment.append")
                             && reason == "ydoc-session-live"
+                            || reason == "release hold capacity reached"
                         {
                             durable_origins.insert(op.origin_id.clone());
                         }

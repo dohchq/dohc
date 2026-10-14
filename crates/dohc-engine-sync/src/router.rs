@@ -3,6 +3,11 @@ use dohc_engine_storage::{EngineStore, FaultInjector};
 
 use crate::{ApplyOutcome, ConflictApplyResult, LeaseProbe, ReplicationEnvelope, SyncError};
 
+#[cfg(test)]
+thread_local! {
+    pub(crate) static TEST_RELEASE_HOLD: std::cell::RefCell<Option<crate::ReleaseHold>> = const { std::cell::RefCell::new(None) };
+}
+
 /// What one routed envelope produced beyond "it applied". A Y.Doc update
 /// parked behind a live lease has its exact coordinate committed to
 /// `ydoc_deferred_updates` with the ack, and lease
@@ -121,6 +126,16 @@ pub(crate) fn apply_replication_envelope_in_batch(
     leases: &dyn LeaseProbe,
     batch_inactive: bool,
 ) -> Result<ApplyOutcome<RoutedApply>, SyncError> {
+    #[cfg(test)]
+    if let Some(hold) = TEST_RELEASE_HOLD.with(|slot| slot.borrow().clone())
+        && hold.matches(envelope)
+        && matches!(envelope.op_kind.as_str(), "ydoc.update" | "moment.append")
+        && envelope.settlement_admission.is_none()
+    {
+        return crate::apply_replication_envelope_with_release_hold(
+            store, cache, envelope, faults, leases, &hold,
+        );
+    }
     if envelope
         .origin_id
         .starts_with(crate::moment_apply::COLLECTION_FILE_ORIGIN_PREFIX)
@@ -185,7 +200,7 @@ pub(crate) fn apply_replication_envelope_in_batch(
                 faults,
                 leases,
                 batch_inactive,
-                None,
+                crate::ydoc_apply::YdocAdmission::Ordinary,
             ),
             |ydoc| RoutedApply {
                 conflicts_opened: ydoc.conflicts_opened,

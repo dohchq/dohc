@@ -479,18 +479,10 @@ pub(crate) fn apply_moment_with_hold(
             && !(payload.operation == "write"
                 && is_ydoc_settlement_moment_id(&payload.moment_id)
                 && is_bound_owner(tx, &key));
-        let mode = if let Some(replay) = replay {
-            let pending:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM owner_pending_settlements WHERE workspace_id=?1 AND origin_id=?2 AND origin_seq=?3)",params![envelope.workspace_id,envelope.origin_id,envelope.origin_seq],|r|r.get(0)).map_err(SyncError::corrupt)?;
-            if pending {
-                if !replay.included_in(tx)? {
-                    return Err(SyncError::RetryableState {
-                        reason: "release settlement is not in the sealed cut",
-                    });
-                }
-                MomentApplyMode::Included
-            } else {
-                MomentApplyMode::Ordinary
-            }
+        let mode = if let Some(replay) = replay
+            && replay.included_in(tx)?
+        {
+            MomentApplyMode::Included
         } else {
             MomentApplyMode::Ordinary
         };
@@ -791,10 +783,6 @@ fn apply_moment_append(
                     &binding,
                     cursor,
                 )?;
-            } else {
-                return Err(SyncError::RetryableState {
-                    reason: "release settlement audit is not ready",
-                });
             }
         }
         return Ok(MomentApplyResult {

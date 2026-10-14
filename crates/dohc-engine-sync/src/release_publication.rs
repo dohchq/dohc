@@ -30,78 +30,14 @@ fn digest(value: &serde_json::Value) -> bool {
     })
 }
 
-pub(crate) fn validate(
-    op: &ReplicationEnvelope,
-    release_digest: &str,
-    reason: &str,
-) -> Result<(), SyncError> {
-    let tag = &op.payload["release"];
-    let document = &tag["document"];
-    let fields = |v: &serde_json::Value, names: &[&str]| {
-        v.as_object()
-            .is_some_and(|o| o.len() == names.len() && names.iter().all(|n| o.contains_key(*n)))
-    };
+pub(crate) fn validate(op: &ReplicationEnvelope, release_digest: &str) -> Result<(), SyncError> {
     if op.relay_seq.is_none()
-        || op.admitted_author_snapshot.is_some()
-        || !matches!(
-            reason,
-            "release-publication-fenced"
-                | "release-generation-fenced"
-                | "release-restore-in-progress"
-                | "release-document-changed"
-        )
-        || !fields(
-            tag,
-            &["releaseDigest", "restoreFenceGeneration", "document"],
-        )
-        || !fields(
-            document,
-            &["workspaceId", "mainVersionId", "objectId", "lineageClaimId"],
-        )
-        || !digest(&tag["releaseDigest"])
-        || tag["releaseDigest"].as_str() != Some(release_digest)
-        || !digest(&document["lineageClaimId"])
-        || !tag["restoreFenceGeneration"]
-            .as_i64()
-            .is_some_and(|n| (0..=crate::MAX_WIRE_INTEGER).contains(&n))
-        || document["workspaceId"].as_str() != Some(&op.workspace_id)
-        || document["mainVersionId"] != "main"
-        || op.payload["versionId"] != document["mainVersionId"]
-        || op.payload["objectId"] != document["objectId"]
-        || !document["objectId"]
-            .as_str()
-            .is_some_and(|s| !s.is_empty() && s.len() <= 512)
+        || !digest(&op.payload["release"]["releaseDigest"])
+        || op.payload["release"]["releaseDigest"].as_str() != Some(release_digest)
     {
         return Err(invalid());
     }
-    let path = op.payload["path"].as_str().ok_or_else(invalid)?;
-    dohc_engine_domain::validate_plaintext_storable_path(path).map_err(|_| invalid())?;
-    match op.op_kind.as_str() {
-        "ydoc.update"
-            if op.payload["lineageClaimId"] == document["lineageClaimId"]
-                && op.payload["contentKind"] == "richdoc"
-                && op.payload["isBaseState"].is_boolean()
-                && digest(&op.payload["updateBlobSha256"]) =>
-        {
-            Ok(())
-        }
-        "moment.append"
-            if op.payload["operation"] == "write"
-                && op.payload["payloadAfterContentKind"] == "text"
-                && op.payload["payloadAfterPath"] == op.payload["path"]
-                && digest(&op.payload["payloadAfterBlobSha256"])
-                && op.payload.get("authors").is_none()
-                && op.payload["momentId"]
-                    .as_str()
-                    .is_some_and(|s| !s.is_empty())
-                && op.payload["payloadAfterByteLength"]
-                    .as_i64()
-                    .is_some_and(|n| (0..=crate::MAX_WIRE_INTEGER).contains(&n)) =>
-        {
-            Ok(())
-        }
-        _ => Err(invalid()),
-    }
+    Ok(())
 }
 
 pub(crate) fn refusal(op: &ReplicationEnvelope) -> ReplicationRefusal {
@@ -122,7 +58,7 @@ pub(crate) fn refresh_in_tx(
     release_digest: &str,
     reason: &str,
 ) -> Result<ReplicationRefusal, SyncError> {
-    validate(op, release_digest, reason)?;
+    validate(op, release_digest)?;
     let previous: Option<(String, String, String)> = tx.query_row("SELECT op_kind,release_digest,reason FROM release_publication_admissions WHERE workspace_id=?1 AND origin_id=?2 AND origin_seq=?3", params![op.workspace_id, op.origin_id, op.origin_seq], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional().map_err(SyncError::corrupt)?;
     if previous.is_some_and(|p| p != (op.op_kind.clone(), release_digest.into(), reason.into())) {
         return Err(SyncError::CoordinateDiverged);
@@ -151,7 +87,7 @@ pub(crate) fn validate_push_refusals(
         if refusal.status != "refused"
             || refusal.kind != "release-publication"
             || !seen.insert((&refusal.origin_id, refusal.origin_seq))
-            || validate(&op, &refusal.release_digest, &refusal.reason).is_err()
+            || validate(&op, &refusal.release_digest).is_err()
         {
             return Err(crate::RelayError::InvalidResponse);
         }

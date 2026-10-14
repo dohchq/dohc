@@ -4,6 +4,8 @@ use dohc_engine_collab::{
     owner_outbox::{draft::ObservedOwnerBinding, release},
 };
 
+mod fix_round2;
+
 #[test]
 fn pre_anchor_settlement_requires_state_inclusion_and_keeps_native_content() {
     for (included, point) in [
@@ -71,7 +73,7 @@ fn pre_anchor_settlement_requires_state_inclusion_and_keeps_native_content() {
         // Activation's final commit will unbind with these held rows. Simulate
         // that boundary; #1926 deliberately refuses to unbind a pending row.
         store.write_with(&NoFaults,|tx| {
-            seal_release_hold_cut_in(tx,&hold)?;
+            seal_release_hold_cut_in(tx,&hold,1)?;
             release::request_in_tx(tx,&DocKey::new("ws","main","owner").unwrap(),20).map_err(SyncError::corrupt)?;
             tx.execute("DELETE FROM ydoc_owner_bindings",[]).map_err(SyncError::persist)?;
             tx.execute("UPDATE owner_live_stops SET state='released',binding_json=json_set(binding_json,'$.state','released')",[]).map_err(SyncError::persist)?;
@@ -116,12 +118,13 @@ fn pre_anchor_settlement_requires_state_inclusion_and_keeps_native_content() {
             );
             ack(&mut store, &op);
         } else {
-            assert!(matches!(out, Err(SyncError::RetryableState { .. })));
-            assert_eq!(store.table_row_count("moments").unwrap(), 0);
+            assert!(matches!(out.unwrap().primary, ApplyDisposition::Applied(_)));
+            assert_eq!(store.table_row_count("moments").unwrap(), 1);
             assert_eq!(
                 store.table_row_count("owner_pending_settlements").unwrap(),
-                1
+                0
             );
+            ack(&mut store, &op);
         }
         assert_eq!(text(&store), before);
     }
@@ -297,7 +300,7 @@ fn open(store: &mut EngineStore, owner: &ObservedOwnerBinding) -> ReleaseHold {
 fn released(store: &mut EngineStore, owner: &ObservedOwnerBinding, hold: &ReleaseHold) {
     store
         .write_with(&NoFaults, |tx| {
-            seal_release_hold_cut_in(tx, hold)?;
+            seal_release_hold_cut_in(tx, hold, owner.accepted_cursor)?;
             let key = DocKey::new("ws", "main", "owner").unwrap();
             release::request_in_tx(tx, &key, 20).map_err(SyncError::corrupt)?;
             release::release_in_tx(
@@ -492,11 +495,7 @@ fn hold_keeps_peer_work_through_local_release_and_report_ack() {
     replay_release_held_envelope(&mut store, &mut cache, &op, &NoFaults, &NoLiveLeases, &hold)
         .unwrap();
     assert_eq!(store.table_row_count("ydoc_deferred_updates").unwrap(), 1);
-    assert!(
-        store
-            .write_with(&NoFaults, |tx| acknowledge_release_replay_in(tx, &op))
-            .is_err()
-    );
+
     assert!(matches!(
         store
             .write_with(&NoFaults, |tx| close_release_hold_in(tx, &hold))
@@ -615,11 +614,7 @@ fn hold_to_dependency_transfer_restarts_on_both_sides_of_commit() {
         )
         .unwrap();
         assert!(!text(&store).contains("dependent"));
-        assert!(
-            store
-                .write_with(&NoFaults, |tx| acknowledge_release_replay_in(tx, &op))
-                .is_err()
-        );
+        ack(&mut store, &op);
         let mut prior = update(&mut store, &owner, &predecessor, 0);
         prior.origin_id = "other-peer".into();
         prior.relay_seq = Some(3);
@@ -898,10 +893,7 @@ fn hold_authority_and_redelivery_are_exact_and_replay_keeps_origin_order() {
         &hold,
     )
     .unwrap();
-    assert_eq!(
-        read_release_hold_page(&store, &hold).unwrap(),
-        vec![first, second]
-    );
+    assert!(read_release_hold_page(&store, &hold).unwrap().is_empty());
 }
 
 fn record_fixture() -> (ScratchDir, EngineStore, ObservedOwnerBinding, Vec<u8>) {

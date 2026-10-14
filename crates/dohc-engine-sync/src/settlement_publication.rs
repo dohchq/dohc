@@ -16,20 +16,15 @@ pub(crate) fn validate(envelope: &ReplicationEnvelope) -> Result<(), SyncError> 
     let Some(admission) = envelope.settlement_admission.as_ref() else {
         return Ok(());
     };
-    if let SettlementAdmission::ReleaseRefused {
-        release_digest,
-        reason,
-    } = admission
-    {
-        return crate::release_publication::validate(envelope, release_digest, reason);
-    }
-    if envelope.op_kind != "moment.append" || envelope.relay_seq.is_none() {
-        return Err(invalid(
-            "settlement admission requires an authenticated relay moment",
-        ));
-    }
     match admission {
-        SettlementAdmission::ReleaseRefused { .. } => unreachable!(),
+        SettlementAdmission::ReleaseRefused { release_digest, .. } => {
+            return crate::release_publication::validate(envelope, release_digest);
+        }
+        _ if envelope.op_kind != "moment.append" || envelope.relay_seq.is_none() => {
+            return Err(invalid(
+                "settlement admission requires an authenticated relay moment",
+            ));
+        }
         SettlementAdmission::Refused {
             settlement_id,
             reason,
@@ -156,14 +151,20 @@ pub(crate) fn refresh_in_tx(
         }
         return Ok(None);
     };
-    if let SettlementAdmission::ReleaseRefused {
-        release_digest,
-        reason,
-    } = admission
-    {
-        return crate::release_publication::refresh_in_tx(tx, envelope, release_digest, reason)
-            .map(Some);
-    }
+    let refusal = match admission {
+        SettlementAdmission::ReleaseRefused {
+            release_digest,
+            reason,
+        } => {
+            return crate::release_publication::refresh_in_tx(tx, envelope, release_digest, reason)
+                .map(Some);
+        }
+        SettlementAdmission::Refused {
+            settlement_id,
+            reason,
+        } => Some((settlement_id, reason)),
+        SettlementAdmission::Accepted { .. } => None,
+    };
     let encoded = serde_json::to_string(admission).map_err(SyncError::corrupt)?;
     let authors = envelope
         .admitted_author_snapshot
@@ -190,25 +191,18 @@ pub(crate) fn refresh_in_tx(
         .transpose()
         .map_err(SyncError::corrupt)?;
     tx.execute("INSERT INTO live_settlement_publication_admissions(workspace_id,origin_id,origin_seq,moment_id,admission_json,authors_json) VALUES (?1,?2,?3,?4,?5,?6) ON CONFLICT(workspace_id,origin_id,origin_seq) DO NOTHING",params![envelope.workspace_id,envelope.origin_id,envelope.origin_seq,moment,encoded,authors]).map_err(SyncError::persist)?;
-    match admission {
-        SettlementAdmission::ReleaseRefused { .. } => unreachable!(),
-        SettlementAdmission::Accepted { .. } => {
-            tx.execute(
+    if let Some((settlement_id, reason)) = refusal {
+        if prior.is_some() {
+            return Ok(Some(publication_refusal(envelope)));
+        }
+        refuse_in_tx(tx, envelope, moment, settlement_id, reason).map(Some)
+    } else {
+        tx.execute(
                 "UPDATE moments SET author_json=?3 WHERE workspace_id=?1 AND moment_id=?2 AND EXISTS(SELECT 1 FROM replication_log r WHERE r.workspace_id=?1 AND r.origin_id=?4 AND r.origin_seq=?5 AND (r.imported=0 OR r.apply_disposition='applied'))",
                 params![envelope.workspace_id, moment, moment_authors,envelope.origin_id,envelope.origin_seq],
             )
             .map_err(SyncError::persist)?;
-            Ok(None)
-        }
-        SettlementAdmission::Refused {
-            settlement_id,
-            reason,
-        } => {
-            if prior.is_some() {
-                return Ok(Some(publication_refusal(envelope)));
-            }
-            refuse_in_tx(tx, envelope, moment, settlement_id, reason).map(Some)
-        }
+        Ok(None)
     }
 }
 
