@@ -581,7 +581,25 @@ fn insert_event(
     tx: &Transaction<'_>,
     record: &ParsedRecord,
     manifest: &Manifest,
+    passive: bool,
 ) -> Result<bool, SyncError> {
+    let receipt = &record.accepted.receipt;
+    let replica: Option<(i64, i64, String, String)> = if passive {
+        tx.query_row(
+        "SELECT event_count,journal_cursor,evidence_digest,update_sha256 FROM live_accepted_updates WHERE relay_database_namespace=?1 AND delivery_id=?2",
+        params![record.header.relay_database_namespace,receipt.delivery_id],
+        |r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional().map_err(SyncError::corrupt)?
+    } else {
+        None
+    };
+    if replica.is_some_and(|(count, cursor, evidence, update)| {
+        count != record.header.event_count
+            || cursor != receipt.journal_cursor
+            || evidence != record.header.evidence_digest
+            || update != receipt.update_digest
+    }) {
+        return Ok(false);
+    }
     let p = scope(
         &record.header.relay_database_namespace,
         &record.accepted.binding,
@@ -1075,9 +1093,10 @@ pub(super) fn apply_event_envelope(
     envelope: &ReplicationEnvelope,
     faults: &dyn FaultInjector,
 ) -> Result<ApplyOutcome<()>, SyncError> {
+    let passive = store.is_passive();
     apply_envelope_with_mutation_outcome(store, envelope, faults, |tx, op| {
         let (payload, mut record) = parse_event_envelope(tx, op)?;
-        if !insert_event(tx, &record, &payload.manifest)? {
+        if !insert_event(tx, &record, &payload.manifest, passive)? {
             tx.execute("INSERT INTO live_audit_event_conflicts(workspace_id,origin_id,origin_seq,record_digest) VALUES (?1,?2,?3,?4)",params![op.workspace_id,op.origin_id,op.origin_seq,payload.manifest.record_digest]).map_err(SyncError::persist)?;
             return Ok(MutationOutcome::RefusedRetainingMutation {
                 reason: "live audit event identity contains different evidence".into(),
@@ -1209,7 +1228,7 @@ pub fn journal_live_event_in_tx(
         .map_err(SyncError::corrupt)?;
     let manifest = writer.finish()?;
     let record = parse(tx, &binding.workspace_id, &manifest)?;
-    if !insert_event(tx, &record, &manifest)? {
+    if !insert_event(tx, &record, &manifest, false)? {
         return Err(invalid(
             "native audit event conflicts with retained history",
         ));

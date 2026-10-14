@@ -2206,6 +2206,76 @@ fn validate_successor_base(
     Ok(())
 }
 
+/// A bounded replay cache borrowed from one transaction, never retained by its writer.
+pub(crate) struct TransactionDocCache<'tx, 'conn> {
+    tx: &'tx Transaction<'conn>,
+    docs: WriterDocCache,
+    missing_after_append: std::collections::HashMap<DocKey, bool>,
+}
+
+impl<'tx, 'conn> TransactionDocCache<'tx, 'conn> {
+    pub(crate) fn new(tx: &'tx Transaction<'conn>) -> Self {
+        Self {
+            tx,
+            docs: WriterDocCache::new(),
+            missing_after_append: std::collections::HashMap::new(),
+        }
+    }
+
+    pub(crate) fn append(
+        &mut self,
+        key: &DocKey,
+        update: &[u8],
+        now_ms: i64,
+    ) -> Result<AppendOutcome, CollabError> {
+        validate_update_bytes(update)?;
+        let marker = read_marker_in(self.tx, key)?.ok_or(CollabError::NoMarker)?;
+        let sha = crate::hex_sha256(update);
+        let mut probe = GateBaseProbe::default();
+        let mut append = append_local_update_cached(
+            self.tx, key, &marker, update, &sha, false, None, None, true, now_ms, false,
+            &self.docs, &mut probe,
+        )?;
+        append.emit_outbound = false;
+        probe.capture_commit(self.tx, key);
+        // Only this transaction's private cache advances before commit.
+        // Rollback discards every entry.
+        self.docs.finish_local_append(
+            key,
+            &TxnOutcome::Committed(append.clone()),
+            update,
+            &sha,
+            probe,
+        );
+        if !append.deduped {
+            match self.docs.missing_updates_after_append(key) {
+                Some(missing) => {
+                    self.missing_after_append.insert(key.clone(), missing);
+                }
+                None => {
+                    self.missing_after_append.remove(key);
+                }
+            }
+        }
+        Ok(append)
+    }
+
+    pub(crate) fn has_missing_updates(&self, key: &DocKey) -> Result<bool, CollabError> {
+        match self.missing_after_append.get(key) {
+            Some(missing) => Ok(*missing),
+            // Dedupe-only documents and removed entries need a page-end read.
+            None => self.read_missing_updates(key),
+        }
+    }
+
+    fn read_missing_updates(&self, key: &DocKey) -> Result<bool, CollabError> {
+        Ok(match self.docs.doc_for_consumer(self.tx, key)? {
+            Some(doc) => doc.has_missing_updates(),
+            None => load_doc_in(self.tx, key)?.has_missing_updates(),
+        })
+    }
+}
+
 /// Append one locally-produced update inside the caller's transaction — the
 /// transaction-composable core of [`record_local_update`]. Validates the
 /// bytes, content-dedupes, runs the replay-parity gate, and advances the
@@ -2792,6 +2862,8 @@ pub(crate) fn validate_update_bytes(update: &[u8]) -> Result<(), CollabError> {
 /// Supply an existing transaction to read the marker, snapshot, and updates from
 /// one snapshot. Appends and lineage changes must use that same transaction.
 pub fn load_doc_in(conn: &Connection, key: &DocKey) -> Result<Ydoc, CollabError> {
+    #[cfg(test)]
+    passive_cache_tests::record_reconstruction();
     read_marker_in(conn, key)?.ok_or(CollabError::NoMarker)?;
     let snapshot = latest_snapshot(conn, key)?;
     let from_seq = snapshot.as_ref().map_or(0, |(seq, _)| *seq);
@@ -3689,3 +3761,7 @@ pub fn record_recovery_update_in_tx(
         rusqlite::params![request_id,hash,-outcome.seq,now_ms]).map_err(map_sql)?;
     Ok(outcome)
 }
+
+#[cfg(test)]
+#[path = "durable/passive_cache_tests.rs"]
+mod passive_cache_tests;

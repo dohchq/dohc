@@ -180,7 +180,7 @@ export async function runService({
 
   async function finish(entry, attempt, outcome, { cleanup = false } = {}) {
     const status = readJson(statusPath(entry.id)) ?? entry.status;
-    const attempts = status.attempts.map(row => row.n === attempt?.n ? { ...row, endedAt: new Date().toISOString(), awakeMs: attempt.awakeMs, load: attempt.load ?? null, ...outcome } : row);
+    const attempts = status.attempts.map(row => row.n === attempt?.n ? { ...row, endedAt: new Date().toISOString(), awakeMs: attempt.awakeMs, load: attempt.load ?? null, flaky: attempt.flaky ?? [], ...outcome } : row);
     // Only the JavaScript gate starts containers.
     if (cleanup && entry.request.gates?.js) status.cleanupPending = await cleanUp(entry.id);
     const failures = attempts.filter(row => row.outcome === "environment").length;
@@ -200,7 +200,7 @@ export async function runService({
         verdict: outcome.outcome === "passed" ? "PASS" : outcome.outcome === "failed" ? "FAIL" : null,
         result: attempt ? join(paths.attempt(entry.id, attempt.n), "result.json") : null, cause: outcome.cause, reason: outcome.reason ?? null });
     }
-    history({ event: "finished", id: entry.id, attempt: attempt?.n, awakeMs: attempt?.awakeMs, load: attempt?.load ?? null, ...outcome });
+    history({ event: "finished", id: entry.id, attempt: attempt?.n, awakeMs: attempt?.awakeMs, load: attempt?.load ?? null, flaky: attempt?.flaky ?? [], ...outcome });
   }
 
   async function recover(requests) {
@@ -213,7 +213,7 @@ export async function runService({
       const last = previousRuns.find(row => row.id === entry.id && row.attempt === attempt?.n)?.awakeMs ?? 0;
       const stopped = entry.status.stopping ?? "service restart";
       // A recovery that cannot be recorded would repeat every tick; restart under the supervisor's backoff instead.
-      try { await finish(entry, attempt && { n: attempt.n, awakeMs: last }, attemptOutcome(result, grant, { stopped }), { cleanup: true }); }
+      try { await finish(entry, attempt && { n: attempt.n, awakeMs: last, flaky: result?.flaky ?? [] }, attemptOutcome(result, grant, { stopped }), { cleanup: true }); }
       catch (error) { fatal = error; return; }
     }
   }
@@ -315,7 +315,8 @@ export async function runService({
       // Only verification counts against the run; its bookkeeping does not.
       current.phase = "finishing";
       lease?.release();
-      let outcome = attemptOutcome(readJson(join(output, "result.json")), grant, { stopped: current.stopped });
+      const receipt = readJson(join(output, "result.json"));
+      let outcome = attemptOutcome(receipt, grant, { stopped: current.stopped });
       if (outcome.outcome === "failed" && outcome.cause === "check") {
         // A check that failed while the host was failing proves nothing about the change.
         const free = freeDisk();
@@ -325,7 +326,7 @@ export async function runService({
       }
       // The attempt stays owned until its outcome is on disk. If that write fails, the
       // service stops, and its replacement recovers the request from the receipt.
-      await finish({ ...entry, status: readJson(statusPath(entry.id)) ?? entry.status }, { n, awakeMs: current.awakeMs, load: runLoad(current) }, outcome, { cleanup: true });
+      await finish({ ...entry, status: readJson(statusPath(entry.id)) ?? entry.status }, { n, awakeMs: current.awakeMs, load: runLoad(current), flaky: receipt?.flaky ?? [] }, outcome, { cleanup: true });
       running.delete(entry.id);
     }
   }

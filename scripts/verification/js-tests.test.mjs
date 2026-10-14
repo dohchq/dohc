@@ -56,6 +56,46 @@ test("a failed package stops admission and waits for its running sibling", async
   assert.deepEqual(started, ["fail", "sibling"]);
 });
 
+test("a node:test step that failed only in its tests runs once more and records them as flaky", t => {
+  const root = mkdtempSync(join(tmpdir(), "dohc-js-rerun-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  mkdirSync(join(root, "scripts/verification"), { recursive: true });
+  for (const file of ["js-tests.mjs", "timing.mjs", "cancellation.mjs", "flaky.mjs"]) copyFileSync(new URL(file, import.meta.url), join(root, "scripts/verification", file));
+  mkdirSync(join(root, "packages/tail"), { recursive: true });
+  writeFileSync(join(root, "packages/tail/package.json"), JSON.stringify({ scripts: { test: "vitest run" } }));
+  // The fake repository step fails in a test the first time and passes the second; a check failure always fails.
+  writeFileSync(join(root, "scripts/verification/process.mjs", ), `
+    import {appendFileSync,existsSync,writeFileSync} from 'node:fs';
+    import {resolve} from 'node:path';
+    export const repoRoot=resolve(import.meta.dirname,'../..');
+    export const pnpm=args=>['pnpm',args];
+    export const calls=[];
+    export async function run(_command,args,{log}){
+      calls.push(args.join(' '));
+      if(args.includes('list'))return {stdout:JSON.stringify([{name:'@dohc/tail',path:resolve('packages/tail')}])};
+      if(args.includes('test:repo')&&process.env.SCENARIO==='check'){writeFileSync(log,'check-brand: 2 files use the old name');throw Object.assign(Error('check failed'),{commandExitFailure:true});}
+      if(args.includes('test:repo')&&!existsSync('ran')){writeFileSync('ran','');writeFileSync(log,'✖ failing tests:\\n\\n✖ times out under load (30231ms)\\n');throw Object.assign(Error('tests failed'),{commandExitFailure:true});}
+      writeFileSync(log,'ok');return {stdout:''};
+    }
+  `);
+  writeFileSync(join(root, "driver.mjs"), `
+    import {readFileSync} from 'node:fs';
+    import {testWorkspace} from './scripts/verification/js-tests.mjs';
+    import {calls} from './scripts/verification/process.mjs';
+    await testWorkspace({prepared:true,output:'evidence'}).catch(error=>console.log('ERROR',error.message));
+    const report=JSON.parse(readFileSync('evidence/result.json','utf8'));
+    console.log(JSON.stringify({repo:calls.filter(call=>call.includes('test:repo')).length,flaky:report.flaky}));
+  `);
+  const drive = scenario => {
+    rmSync(join(root, "ran"), { force: true });
+    rmSync(join(root, "evidence"), { recursive: true, force: true });
+    const result = spawnSync(process.execPath, ["driver.mjs"], { cwd: root, encoding: "utf8", timeout: 20_000, env: { ...process.env, SCENARIO: scenario } });
+    return JSON.parse(result.stdout.trim().split("\n").at(-1));
+  };
+  assert.deepEqual(drive("flaky"), { repo: 2, flaky: [{ step: "repository", test: "times out under load" }] });
+  assert.deepEqual(drive("check"), { repo: 1, flaky: [] });
+});
+
 test("the plan retains every package test and preserves stricter worker caps", () => {
   const pkg = (name, scripts = {test: "vitest run"}) => ({name: `@dohc/${name}`, manifest: {scripts}});
   const tasks = testPlan([pkg("future-package"), pkg("workspace-auth"), pkg("workspace-postgres"), pkg("share-web"), pkg("workspace-api"),
@@ -64,7 +104,10 @@ test("the plan retains every package test and preserves stricter worker caps", (
   assert.equal(tasks.length, 8);
   assert.equal(tasks[0].name, "@dohc/ydoc-projection");
   assert.equal(tasks[1].name, "@dohc/desktop");
-  assert.equal(tasks.find(task => task.name === "@dohc/app-backend-runtime").args.at(-1), "--maxWorkers=1");
+  const runtime = tasks.find(task => task.name === "@dohc/app-backend-runtime").args;
+  assert.ok(runtime.includes("--maxWorkers=1"), runtime.join(" "));
+  // Every vitest package retries a failing test once and records the tests that needed it.
+  assert.ok(runtime.includes("--retry=1") && runtime.some(arg => arg.endsWith("flaky-reporter.mjs")), runtime.join(" "));
   assert.equal(tasks.find(task => task.name === "@dohc/future-package").script, "test");
   assert.equal(tasks.filter(task => task.resource === "postgres").length, 4);
   assert.throws(() => testPlan([pkg("desktop")]), /Missing test:unit/);
@@ -84,7 +127,7 @@ for (const scenario of ["success", "proof-failure", "package-failure", "reposito
           test: "vitest run", ...(name === "desktop" ? {"test:unit": "vitest run"} : {}),
         }}));
       }
-      for (const file of ["js-tests.mjs", "timing.mjs", "cancellation.mjs"]) {
+      for (const file of ["js-tests.mjs", "timing.mjs", "cancellation.mjs", "flaky.mjs"]) {
         put(`scripts/verification/${file}`, readFileSync(new URL(file, import.meta.url)));
       }
       put("scripts/verification/process.mjs", `
@@ -199,7 +242,7 @@ for (const {name, cancel = false, repoFail = false, packageFail = false, overlap
   const put = (path, data) => { mkdirSync(dirname(join(root, path)), {recursive:true}); writeFileSync(join(root, path), data); };
   try {
     put("package.json", '{"type":"module","scripts":{"test":"node scripts/verification/js-tests.mjs"}}');
-    for (const file of ["js-tests.mjs", "timing.mjs", "cancellation.mjs"]) {
+    for (const file of ["js-tests.mjs", "timing.mjs", "cancellation.mjs", "flaky.mjs"]) {
       mkdirSync(join(root, "scripts/verification"), {recursive:true});
       copyFileSync(new URL(file, import.meta.url), join(root, "scripts/verification", file));
     }
