@@ -589,6 +589,7 @@ export function parseRichdocMarkdown(markdown: string, reading: 'source' | 'proj
   // A block escape reads as its character anywhere, as does a leading space or
   // tab. Any other reference reads so only inside a tag the text holds.
   const tagReferences = new Set<string>()
+  const itemWhitespaceEntities = new Set<string>()
   const prepared = markdown.replace(
     PARSE_REFERENCE_RE,
     (entity, code: string | undefined, offset: number, source: string) => {
@@ -596,6 +597,8 @@ export function parseRichdocMarkdown(markdown: string, reading: 'source' | 'proj
       const sentinel = sentinelFor(entity)
       const leading = (code === '9' || code === '32')
         && (offset === 0 || source[offset - 1] === '\n')
+      if ((code === '9' || code === '32') && source[offset - 1] === ' '
+        && /^ *$/u.test(source.slice(source.lastIndexOf('\n', offset - 1) + 1, offset))) itemWhitespaceEntities.add(sentinel)
       if (code && !BLOCK_ESCAPE_CODES.has(Number(code)) && !leading) {
         tagReferences.add(sentinel)
       }
@@ -636,7 +639,7 @@ export function parseRichdocMarkdown(markdown: string, reading: 'source' | 'proj
   }
   return ensureListItemParagraphs(
     entitySentinels.size || markup.used
-      ? restoreBlockEntityParseSentinels(parsed, { decodedEntities, encodedEntities, tagEntities })
+      ? restoreBlockEntityParseSentinels(parsed, { decodedEntities, encodedEntities, tagEntities, itemWhitespaceEntities })
       : parsed,
   )
 }
@@ -678,6 +681,7 @@ function decodeBlockEntity(entity: string): string {
 }
 
 type ParseReferences = {
+  itemWhitespaceEntities: ReadonlySet<string>
   // Each reference's spelling, for code, links, and literal attributes.
   encodedEntities: Map<string, string>
   // Each reference read where the text holds no tag.
@@ -694,8 +698,10 @@ function restoreBlockEntityParseSentinels(
   references: ParseReferences,
   insideCodeBlock = false,
   span?: TextSpan,
+  insideItem = false,
 ): JSONContent {
-  const { decodedEntities, encodedEntities, tagEntities } = references
+  const { decodedEntities, encodedEntities, tagEntities, itemWhitespaceEntities } = references
+  insideItem ||= node.type === 'listItem' || node.type === 'taskItem'
   const restored = node
   const insideCode = insideCodeBlock
     || node.type === 'codeBlock'
@@ -720,7 +726,7 @@ function restoreBlockEntityParseSentinels(
           const inTag = span !== undefined
             && span.from + at >= span.start
             && span.from + at < span.end
-          return (inTag ? tagEntities : decodedEntities).get(sentinel) ?? sentinel
+          return (inTag || (insideItem && itemWhitespaceEntities.has(sentinel)) ? tagEntities : decodedEntities).get(sentinel) ?? sentinel
         })
   }
   if (node.attrs) {
@@ -760,7 +766,7 @@ function restoreBlockEntityParseSentinels(
     restored.content = node.content.map((child, index) => {
       const childSpan = tag && { start: tag.start, end: tag.end, from }
       from += tag?.texts[index]?.length ?? 0
-      return restoreBlockEntityParseSentinels(child, references, insideCode, childSpan)
+      return restoreBlockEntityParseSentinels(child, references, insideCode, childSpan, insideItem)
     })
   }
   return restored

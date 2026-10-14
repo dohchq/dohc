@@ -2849,8 +2849,7 @@ fn parse_markdown_blocks_at<'src>(
             index += consumed;
             continue;
         }
-        *refused |= !in_list
-            && reading != MarkdownReading::ProjectedSource
+        *refused |= reading != MarkdownReading::ProjectedSource
             && indented_code_leading_entity(line).is_some();
         let paragraph_reading = if in_list {
             reading
@@ -3308,6 +3307,13 @@ fn list_marker(line: &str, reading: MarkdownReading) -> Option<ListMarker<'_>> {
             .then(|| (rest.chars().next().unwrap(), &rest[rest.len()..]))
     });
     if let Some((bullet, text)) = bullet {
+        let padding = text.bytes().take_while(|byte| *byte == b' ').count();
+        let padding = if padding < 4 && padding < text.len() {
+            padding
+        } else {
+            0
+        };
+        let text = &text[padding..];
         let task = if text.starts_with('[')
             && (text.len() == 3 || text.as_bytes().get(3) == Some(&b' '))
         {
@@ -3327,7 +3333,7 @@ fn list_marker(line: &str, reading: MarkdownReading) -> Option<ListMarker<'_>> {
             },
             indent,
             start: 1,
-            width: 2,
+            width: 2 + padding,
             checked: task.unwrap_or(false),
             text: if task.is_some() {
                 text.get(4..).unwrap_or_default()
@@ -3338,13 +3344,19 @@ fn list_marker(line: &str, reading: MarkdownReading) -> Option<ListMarker<'_>> {
     }
     let (start, text) = parse_ordered_item(rest, reading != MarkdownReading::Source)?;
     let width = rest.bytes().take_while(u8::is_ascii_digit).count() + 2;
+    let padding = text.bytes().take_while(|byte| *byte == b' ').count();
+    let padding = if padding < 4 && padding < text.len() {
+        padding
+    } else {
+        0
+    };
     Some(ListMarker {
         kind: ListKind::Ordered(rest.as_bytes()[width - 2] as char),
         indent,
         start,
-        width,
+        width: width + padding,
         checked: false,
-        text,
+        text: &text[padding..],
     })
 }
 
