@@ -146,7 +146,7 @@ export async function runService({
   // The host's CPU and free memory at the last clock tick.
   const host = { cpuBusyPercent: null, freeMemGb: null };
   // The load an attempt verified under: the lane count, the most runs at once, the lowest free memory, and the mean CPU use.
-  const runLoad = current => current.load.samples ? { lanes: laneCount, peakRuns: current.load.peakRuns,
+  const runLoad = current => current.load.samples ? { lanes: current.load.lanes, peakRuns: current.load.peakRuns,
     minFreeMemGb: current.load.minFreeMemGb, cpuBusyPercent: Math.round(current.load.cpuBusy / current.load.samples) } : null;
   let laneError = null;
   let fatal = null;
@@ -180,7 +180,7 @@ export async function runService({
 
   async function finish(entry, attempt, outcome, { cleanup = false } = {}) {
     const status = readJson(statusPath(entry.id)) ?? entry.status;
-    const attempts = status.attempts.map(row => row.n === attempt?.n ? { ...row, endedAt: new Date().toISOString(), awakeMs: attempt.awakeMs, load: attempt.load, ...outcome } : row);
+    const attempts = status.attempts.map(row => row.n === attempt?.n ? { ...row, endedAt: new Date().toISOString(), awakeMs: attempt.awakeMs, load: attempt.load ?? null, ...outcome } : row);
     // Only the JavaScript gate starts containers.
     if (cleanup && entry.request.gates?.js) status.cleanupPending = await cleanUp(entry.id);
     const failures = attempts.filter(row => row.outcome === "environment").length;
@@ -200,7 +200,7 @@ export async function runService({
         verdict: outcome.outcome === "passed" ? "PASS" : outcome.outcome === "failed" ? "FAIL" : null,
         result: attempt ? join(paths.attempt(entry.id, attempt.n), "result.json") : null, cause: outcome.cause, reason: outcome.reason ?? null });
     }
-    history({ event: "finished", id: entry.id, attempt: attempt?.n, awakeMs: attempt?.awakeMs, load: attempt?.load, ...outcome });
+    history({ event: "finished", id: entry.id, attempt: attempt?.n, awakeMs: attempt?.awakeMs, load: attempt?.load ?? null, ...outcome });
   }
 
   async function recover(requests) {
@@ -293,7 +293,7 @@ export async function runService({
     }
     const busy = new Set([...running.values()].map(other => other.checkout));
     const checkout = checkouts.find(path => !busy.has(path));
-    const current = { id: entry.id, attempt: n, checkout, startedAt: new Date().toISOString(), phase: "preparing", phaseAt: Date.now(), awakeMs: 0, load: { peakRuns: 0, minFreeMemGb: Infinity, cpuBusy: 0, samples: 0 },
+    const current = { id: entry.id, attempt: n, checkout, startedAt: new Date().toISOString(), phase: "preparing", phaseAt: Date.now(), awakeMs: 0, load: { lanes: 0, peakRuns: 0, minFreeMemGb: Infinity, cpuBusy: 0, samples: 0 },
       limitMs: Math.min(timeLimitMs, requestBudgetMs - used), prepareMs: 0, abort: new AbortController(), stopped: undefined };
     running.set(entry.id, current);
     let lease;
@@ -415,6 +415,7 @@ export async function runService({
       const awake = asleep ? 0 : Math.max(0, now - Math.max(last, current.phaseAt));
       if (current.phase === "verifying") {
         current.awakeMs += awake;
+        current.load.lanes = Math.max(current.load.lanes, laneCount);
         current.load.peakRuns = Math.max(current.load.peakRuns, running.size);
         current.load.minFreeMemGb = Math.min(current.load.minFreeMemGb, host.freeMemGb);
         current.load.cpuBusy += host.cpuBusyPercent;

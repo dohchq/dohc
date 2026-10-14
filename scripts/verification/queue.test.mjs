@@ -273,6 +273,14 @@ test("a requested restart starts nothing new and waits for the runs in flight", 
   assert.equal(state(), "queued");
 });
 
+test("an attempt that never sampled the host records its load as null", async t => {
+  const { root, request, settled } = harness(t);
+  const passed = await settled((await request("pass")).id);
+  assert.ok("load" in passed.status.attempts[0], "the attempt row names its load");
+  const finished = readFileSync(queuePaths(root).history, "utf8").trim().split("\n").map(line => JSON.parse(line)).find(event => event.event === "finished" && event.id === passed.id);
+  assert.ok("load" in finished, "the history event names its load");
+});
+
 test("a lane setting that cannot be read keeps the lane count the service had, for its slots too", async t => {
   let slots;
   const { request, settled } = harness(t, { lanes: () => { throw new Error("verification-lanes must contain 1 or 2."); },
