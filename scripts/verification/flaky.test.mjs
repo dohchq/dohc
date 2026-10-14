@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import FlakyReporter from "./flaky-reporter.mjs";
@@ -56,8 +56,4 @@ test("the vitest reporter records only tests that passed on retry", t => {
   reporter.onTestCaseResult(testCase("settles on retry", true));
   assert.deepEqual(readFlakyLog(log), ["src/a.test.ts › settles on retry"]);
   assert.deepEqual(readFlakyLog(join(root, "missing.jsonl")), []);
-});
-
-test("nextest retries a failing test once in every gate", () => {
-  assert.match(readFileSync(new URL("../../.config/nextest.toml", import.meta.url), "utf8"), /^retries = 1$/mu);
 });

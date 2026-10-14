@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { join, resolve } from "node:path";
 import { nextestFlaky, playwrightFlaky, readLog, vitestFailures } from "./flaky.mjs";
@@ -315,7 +315,9 @@ export async function verify(args) {
         const outcome = await measure("queue", () => verifyThroughQueue({ root: queue, detach, checkpoint: () => cancellation.checkpoint(), submission: {
           head: report.commit, base: report.baseCommit, baseRef: base, scope: report.scope, full,
           gates, branch, checkout: repoRoot, requester: { pid: process.pid } } }));
-        report.queue = outcome; save();
+        report.queue = outcome;
+        try { flaky.push(...(JSON.parse(readLog(outcome.result ?? "") || "{}").flaky ?? [])); } catch { /* The lane receipt is the record. */ }
+        save();
         if (detach) { report.verdict = "QUEUED"; return report; }
         if (outcome.verdict !== "PASS") throw Object.assign(new Error(outcome.reason ?? `The queued run ended ${outcome.state}.`), { queued: outcome.state });
         report.verdict = "PASS";
@@ -372,12 +374,14 @@ export async function verify(args) {
           report.rustEvidence = await checkedStep({name: "rust-reuse", reused: true, report: resolve(reuseRust)},
             () => refreshRustReuse(reuseRust, {root: repoRoot, identity,
               step: (name, command, args) => step(name, command, args, buildEnvironment())}));
+          flaky.push(...nextestFlaky(readLog(report.rustEvidence.log)).map(test => ({ step: "rust", test })));
           save();
           return;
         }
-        await step("rust", process.execPath, ["tools/rust-engine-program/run-rust-checks.mjs", "--prepared-runtime"], buildEnvironment());
-        await step("rust-verdict", process.execPath, ["tools/rust-engine-program/require-ci-pass-verdict.mjs", join(output, "rust.log")]);
-        flaky.push(...nextestFlaky(readLog(join(output, "rust.log"))).map(test => ({ step: "rust", test }))); save();
+        try {
+          await step("rust", process.execPath, ["tools/rust-engine-program/run-rust-checks.mjs", "--prepared-runtime"], buildEnvironment());
+          await step("rust-verdict", process.execPath, ["tools/rust-engine-program/require-ci-pass-verdict.mjs", join(output, "rust.log")]);
+        } finally { flaky.push(...nextestFlaky(readLog(join(output, "rust.log"))).map(test => ({ step: "rust", test }))); save(); }
       } catch (error) {
         report.rustError = error.message; save();
         await checkTree("rust-failure");
@@ -387,6 +391,10 @@ export async function verify(args) {
     async function javascriptJob() {
       async function integrationProofs(env, checkpoint) {
         const proofStep = (name, command, commandArgs, env) => step(name, command, commandArgs, env, checkpoint);
+        const recordPlaywrightFlaky = (name, path) => {
+          try { flaky.push(...playwrightFlaky(JSON.parse(readLog(path) || "{}").suites).map(test => ({ step: name, test }))); } catch { /* No report. */ }
+          save();
+        };
         if (mode === "pr") {
           const nativeOutput = join(output, "self-host-native");
           const nativeHash = hashFile(stagedEnginePath);
@@ -401,16 +409,18 @@ export async function verify(args) {
           catch (error) {
             const failed = error.commandExitFailure ? vitestFailures(join(nativeOutput, "vitest.json")) : [];
             if (!failed.length) throw error;
+            // The failed attempt's evidence stays beside the folder the proof check reads.
+            renameSync(nativeOutput, `${nativeOutput}-attempt-1`);
             await nativeProof("self-host-native-retry");
             flaky.push(...failed.map(test => ({ step: "self-host-native", test })));
           }
           report.selfHostNative = readSelfHostNativeProof(nativeOutput, stagedEnginePath, nativeHash); save();
           await proofStep("browser-install", ...pnpm(["exec", "playwright", "install", "chromium"]), env);
           const accountReport = join(output, "accounts-playwright.json");
-          await proofStep("accounts", process.execPath, ["apps/desktop/scripts/run-playwright.mjs", "--config", "services/workspace-api/playwright.config.ts", "--output", join(output, "accounts"), "--retries=1", "--reporter=list,json"], { ...env, PLAYWRIGHT_JSON_OUTPUT_NAME: accountReport });
+          try { await proofStep("accounts", process.execPath, ["apps/desktop/scripts/run-playwright.mjs", "--config", "services/workspace-api/playwright.config.ts", "--output", join(output, "accounts"), "--retries=1", "--reporter=list,json"], { ...env, PLAYWRIGHT_JSON_OUTPUT_NAME: accountReport }); }
+          finally { recordPlaywrightFlaky("accounts", accountReport); }
           const accounts = JSON.parse(readFileSync(accountReport, "utf8"));
           report.accounts = accounts.stats;
-          flaky.push(...playwrightFlaky(accounts.suites).map(test => ({ step: "accounts", test }))); save();
           if (!(report.accounts?.expected + (report.accounts?.flaky ?? 0)) || report.accounts.unexpected || report.accounts.skipped) throw new Error("Account browser verification did not complete without failures or skips.");
           if (process.platform !== "win32") {
             report.statesPage = `not run: the states page compares pixels on win32 only, and this host is ${process.platform}`; save();
@@ -419,12 +429,14 @@ export async function verify(args) {
         const tags = mode === "pr" ? desktopProofTags() : {selected: ["@verification-smoke"], required: ["@verification-smoke"]};
         const forwarded = mode === "e2e" ? args.slice(1).filter((arg) => arg !== "--") : ["--grep", tags.selected.join("|")];
         const jsonReport = join(output, "playwright.json");
-        await proofStep("desktop", ...desktopProofCommand(["--config", "apps/desktop/playwright.config.ts", "--output", join(output, "desktop"), ...forwarded, ...(mode === "pr" ? ["--retries=1"] : []), "--reporter=list,json"], { env }), { ...env, PLAYWRIGHT_JSON_OUTPUT_NAME: jsonReport, DOHC_QA_OUTPUT: output, DOHC_REQUIRE_ENGINE_E2E: "1" });
+        try { await proofStep("desktop", ...desktopProofCommand(["--config", "apps/desktop/playwright.config.ts", "--output", join(output, "desktop"), ...forwarded, ...(mode === "pr" ? ["--retries=1"] : []), "--reporter=list,json"], { env }), { ...env, PLAYWRIGHT_JSON_OUTPUT_NAME: jsonReport, DOHC_QA_OUTPUT: output, DOHC_REQUIRE_ENGINE_E2E: "1" }); }
+        finally { recordPlaywrightFlaky("desktop", jsonReport); }
         const desktopReport = JSON.parse(readFileSync(jsonReport, "utf8"));
         report.desktop = desktopReport.stats;
         report.desktopProofs = passedSpecTitles(desktopReport.suites);
-        flaky.push(...playwrightFlaky(desktopReport.suites).map(test => ({ step: "desktop", test }))); save();
-        if (!(report.desktop?.expected + (report.desktop?.flaky ?? 0)) || report.desktop.unexpected) throw new Error("Desktop verification did not complete a passing test run.");
+        // Only the PR gate retries proofs, so only it accepts a proof that passed on retry.
+        const retried = mode === "pr" ? report.desktop?.flaky ?? 0 : 0;
+        if (!(report.desktop?.expected + retried) || report.desktop.unexpected || report.desktop.flaky > retried) throw new Error("Desktop verification did not complete a passing test run.");
         if (mode !== "e2e" && report.desktop.skipped) throw new Error("A mandatory desktop smoke test was skipped.");
         if (mode === "pr" && tags.required.some((tag) => !report.desktopProofs.some((title) => title.split(/\s+/u).includes(tag)))) throw new Error(`The desktop gate did not pass every required proof: ${tags.required.join(", ")}.`);
       }

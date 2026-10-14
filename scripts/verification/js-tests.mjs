@@ -88,10 +88,9 @@ export async function testWorkspace({ prepared = false, output = join(repoRoot, 
         row.flaky = failed;
         return result;
       }
-    }, save).then(result => {
+    }, save).finally(() => {
       const flaky = [...(row.flaky ?? []), ...readFlakyLog(flakyLog)];
       if (flaky.length) { row.flaky = flaky; save(); }
-      return result;
     }).catch(fail);
   }
   async function planPackages() {
