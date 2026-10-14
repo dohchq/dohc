@@ -7,6 +7,7 @@ import type { ConnectionErrorReport } from "../shell/connectionNotices";
 import { SecondaryButton } from "../ui/controls";
 import { useRequestSequence } from "../useRequestSequence";
 import { ChatAvatar } from "../workbench/ChatAvatar";
+import { ownPresentation } from "../workbench/actorPresentation";
 import { SettingRow } from "./SettingRow";
 
 export const PRIVATE_NETWORK_EXPLANATION =
@@ -88,7 +89,7 @@ export function CloudAccountRow(props: {
   return (
     <SettingRow
       title={props.email}
-      lead={<ChatAvatar name={props.email} kind="human" own size="row" />}
+      lead={<ChatAvatar presentation={ownPresentation} name={props.email} kind="human" size="row" />}
       description={
         <span className="flex flex-wrap items-center gap-x-2">
           <span data-testid="cloud-connected-server" className="font-mono">{server}</span>
