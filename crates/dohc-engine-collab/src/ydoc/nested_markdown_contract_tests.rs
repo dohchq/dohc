@@ -3,10 +3,27 @@ use super::*;
 fn nested_contract_case(case: &Value) {
     let name = case["name"].as_str().unwrap();
     let doc = Ydoc::wire();
+    if case["nativeSourceRefuse"] == true {
+        assert!(doc
+            .rewrite_content_to_markdown_as(
+                ContentKind::Richdoc,
+                case["source"].as_str().unwrap(),
+                MarkdownReading::Source
+            )
+            .is_err());
+    }
     let result = doc.rewrite_content_to_markdown_as(
         ContentKind::Richdoc,
-        case["source"].as_str().unwrap(),
-        if case["projected"] == true {
+        case["nativeSeedSource"]
+            .as_str()
+            .unwrap_or(if case["nativeSourceRefuse"] == true {
+                case["canonical"].as_str().unwrap()
+            } else {
+                case["source"].as_str().unwrap()
+            }),
+        if case["projected"] == true && case["nativeSeedSource"].is_null()
+            || case["nativeSourceRefuse"] == true
+        {
             MarkdownReading::ProjectedSource
         } else {
             MarkdownReading::Source
@@ -36,6 +53,7 @@ fn nested_contract_case(case: &Value) {
             MarkdownReading::ProjectedSource,
         )
         .unwrap();
+        let canonical = case["nativeRereadCanonical"].as_str().unwrap_or(canonical);
         assert_eq!(doc.project_richdoc().unwrap(), canonical);
         let replay = Ydoc::wire();
         replay.apply(&doc.encode_full_state()).unwrap();
@@ -168,8 +186,16 @@ fn regenerate_nested_contract_seeds() {
         let doc = Ydoc::wire();
         doc.rewrite_content_to_markdown_as(
             ContentKind::Richdoc,
-            case["source"].as_str().unwrap(),
-            if case["projected"] == true {
+            case["nativeSeedSource"]
+                .as_str()
+                .unwrap_or(if case["nativeSourceRefuse"] == true {
+                    case["canonical"].as_str().unwrap()
+                } else {
+                    case["source"].as_str().unwrap()
+                }),
+            if case["projected"] == true && case["nativeSeedSource"].is_null()
+                || case["nativeSourceRefuse"] == true
+            {
                 MarkdownReading::ProjectedSource
             } else {
                 MarkdownReading::Source
@@ -200,7 +226,7 @@ fn fix1_ordinary_block_lines_are_not_list_refusals() {
         "***",
         "___",
         "~~~\ncode\n~~~",
-        "\tliteral",
+        "&#9;literal",
     ] {
         let doc = Ydoc::wire();
         doc.rewrite_content_to_markdown_as(ContentKind::Richdoc, source, MarkdownReading::Source)
@@ -298,5 +324,32 @@ fn fix1_projected_item_prose_is_accepted_unchanged() {
         doc.rewrite_content_to_markdown(ContentKind::Richdoc, source)
             .unwrap();
         assert_eq!(doc.project_richdoc().unwrap(), source);
+    }
+}
+
+#[test]
+fn projected_raw_html_keeps_line_start_entities() {
+    for (open, close) in [
+        ("<foo>", "</foo>"),
+        ("<span class=\"n\">", "</span>"),
+        ("<b>", "</b>"),
+        ("<details>", "</details>"),
+        ("<!--", "-->"),
+        ("<?", "?>"),
+        ("<!A ", ">"),
+        ("<![CDATA[", "]]>"),
+        ("<strong>", "</strong>"),
+        ("<em>", "</em>"),
+    ] {
+        for entity in ["&#9;", "&#32;", "&#42;", "2&#46; "] {
+            let source = format!("{open}a\n{entity}b{close}");
+            let (blocks, refused) =
+                parse_markdown_blocks_checked(&source, MarkdownReading::Projection);
+            assert!(!refused);
+            assert!(
+                matches!(&blocks[0], MdBlock::Paragraph(text) if text == &source),
+                "{source}"
+            );
+        }
     }
 }

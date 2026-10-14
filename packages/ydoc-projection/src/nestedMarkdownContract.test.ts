@@ -87,3 +87,7 @@ it.each(corpus.cases.filter(item => item.name.startsWith('empty-parent-')))('reb
 it.each(['source', 'projection'] as const)('admits an empty child after a same-line quote in %s reading', reading => {
   expect(serializeRichdocBody(parseRichdocMarkdown('- > - \n\n  >    x', reading))).toBe('- \n  > \\- \n\n  >    x')
 })
+
+it.each(['-   a\n      ' + '- '.repeat(5000) + 'x', '1.   a\n       ' + '- '.repeat(5000) + 'x', '-   a\n      - 1. \n\n          x'])('refuses child nesting at the padded marker content column', source => {
+  expect(() => markdownToYDoc(source)).toThrow(/not representable/)
+})

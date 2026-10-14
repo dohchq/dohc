@@ -478,7 +478,7 @@ export function markdownToYDoc(
 // Admission is independent of canonical serialization. Code bodies are opaque;
 // blank lines end lazy continuation, but not an indented continuation block.
 function assertSupportedListMarkdown(markdown: string): string {
-  const parents: Array<{ indent: number; column: number }> = []
+  const parents: Array<{ indent: number; column: number; content?: number }> = []
   const lines = markdown.split('\n')
   let changed = false
   let blank = false
@@ -508,7 +508,7 @@ function assertSupportedListMarkdown(markdown: string): string {
     const rule = indent <= 3 && /^(?:-(?:[ \t]*-){2,}|\*(?:[ \t]*\*){2,}|_(?:[ \t]*_){2,})[ \t]*$/u.test(rest)
     let marker = rule ? null : /^(?:[-+*]|[0-9]{1,9}[.)])(?: |$)/u.exec(rest)
     if (marker && !marker[0].endsWith(' ') && at > 0 && !blank) marker = null
-    if (marker && indent >= 4 && indent >= (parents.at(-1)?.column ?? 0) + 4) marker = null
+    if (marker && indent >= 4 && indent >= (parents.at(-1)?.content ?? parents.at(-1)?.column ?? 0) + 4) marker = null
     if (open && (blank || (!marker && indent < open.column))) {
       if (blank ? indent > open.indent && indent < open.column : rest.startsWith('\t')) refuse()
       parents.pop()
@@ -549,7 +549,8 @@ function assertSupportedListMarkdown(markdown: string): string {
       const itemFence = /^(?:`{3,}|~{3,})/u.exec(body)?.[0] ?? ''
       if (itemFence) { fence = itemFence; fenceInList = true }
       if (parents.length && indent < parents.at(-1)!.column) refuse()
-      parents.push({ indent, column: indent + marker[0].trimEnd().length + 1 })
+      parents.push({ indent, column: indent + marker[0].trimEnd().length + 1,
+        content: indent + marker[0].length + (/^ {0,3}[^ ]/u.test(itemBody) ? /^ */u.exec(itemBody)![0].length : 0) })
       if (itemBody.trim() === '') open = parents.at(-1)
       if (emptyChild) { parents.push(emptyChild); open = emptyChild }
       if (itemBody === '') { lines[at] = lines[at].trimEnd(); changed = true }

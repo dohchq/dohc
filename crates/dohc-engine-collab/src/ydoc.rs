@@ -2283,7 +2283,7 @@ fn inline_syntax(text: &str) -> Option<String> {
             .chars()
             .next()
             .is_none_or(|next| next.is_whitespace() || next == '>' || next == '/');
-    if element || html_tag_with_attributes_end(text).is_some() {
+    if element || html_tag_end(text, true).is_some() {
         return Some(format!("element {name}"));
     }
     let close = text[1..].find(|c: char| c == '>' || c == '<' || c.is_whitespace())? + 1;
@@ -2307,8 +2307,61 @@ fn inline_syntax(text: &str) -> Option<String> {
     (uri || email).then(|| "autolink".into())
 }
 
-/// End byte of a complete CommonMark tag with attributes.
-fn html_tag_with_attributes_end(text: &str) -> Option<usize> {
+fn raw_html_spans(text: &str) -> Vec<std::ops::Range<usize>> {
+    let mut spans = Vec::new();
+    let mut opened: Vec<(usize, &str)> = Vec::new();
+    let mut until = 0;
+    for (at, _) in text.match_indices('<') {
+        if at < until {
+            continue;
+        }
+        let rest = &text[at..];
+        let special = [("<!--", "-->"), ("<?", "?>"), ("<![CDATA[", "]]>")]
+            .into_iter()
+            .find(|(start, _)| rest.starts_with(start));
+        if let Some((start, terminator)) = special {
+            if let Some(end) = rest[start.len()..].find(terminator) {
+                until = at + start.len() + end + terminator.len();
+                spans.push(at..until);
+            }
+        } else if rest.starts_with("<!")
+            && rest.as_bytes().get(2).is_some_and(u8::is_ascii_alphabetic)
+        {
+            if let Some(end) = rest.find('>') {
+                until = at + end + 1;
+                spans.push(at..until);
+            }
+        } else if let Some(close) = rest.strip_prefix("</") {
+            let name = close
+                .split(|c: char| !(c.is_ascii_alphanumeric() || c == '-'))
+                .next()
+                .unwrap();
+            let suffix = close[name.len()..].trim_start();
+            if suffix.starts_with('>') {
+                if let Some(index) = opened
+                    .iter()
+                    .position(|(_, open)| open.eq_ignore_ascii_case(name))
+                {
+                    spans.push(opened[index].0..at + rest.len() - suffix.len() + 1);
+                    opened.truncate(index);
+                }
+            }
+        } else if let Some(end) = html_tag_end(rest, false) {
+            until = at + end;
+            spans.push(at..at + end);
+            if !rest[..end].ends_with("/>") {
+                let name = rest[1..]
+                    .split(|c: char| !(c.is_ascii_alphanumeric() || c == '-'))
+                    .next()
+                    .unwrap();
+                opened.push((at, name));
+            }
+        }
+    }
+    spans
+}
+
+fn html_tag_end(text: &str, require_attributes: bool) -> Option<usize> {
     let bytes = text.as_bytes();
     let space = |at: usize| matches!(bytes.get(at), Some(b' ' | b'\t' | b'\n' | b'\r' | b'\x0c'));
     let skip_space = |mut at: usize| {
@@ -2371,7 +2424,7 @@ fn html_tag_with_attributes_end(text: &str) -> Option<usize> {
     if bytes.get(end) == Some(&b'/') {
         end += 1;
     }
-    (attributes && bytes.get(end) == Some(&b'>')).then_some(end + 1)
+    ((attributes || !require_attributes) && bytes.get(end) == Some(&b'>')).then_some(end + 1)
 }
 
 /// The block a Markdown reader starts on one line of a text run: a heading,
@@ -2797,7 +2850,7 @@ fn parse_markdown_blocks_at<'src>(
             continue;
         }
         *refused |= !in_list
-            && reading == MarkdownReading::Projection
+            && reading != MarkdownReading::ProjectedSource
             && indented_code_leading_entity(line).is_some();
         let paragraph_reading = if in_list {
             reading
@@ -2850,14 +2903,7 @@ fn parse_markdown_blocks_at<'src>(
                     .into_iter()
                     .map(|(from, to)| from..to),
             );
-            if let Some((from, to)) = encoded_tag_span(&paragraph).filter(|_| spans.is_empty()) {
-                let decoded = decode_html_entities_once(&paragraph[from..to]);
-                paragraph.replace_range(from..to, &decoded);
-                spans.push(from..from + decoded.len());
-            }
-            spans.extend(paragraph.match_indices('<').filter_map(|(at, _)| {
-                html_tag_with_attributes_end(&paragraph[at..]).map(|end| at..at + end)
-            }));
+            spans.extend(raw_html_spans(&paragraph));
             paragraph = paragraph
                 .split('\n')
                 .scan(0, |offset, line| {
@@ -3429,7 +3475,16 @@ fn parse_list<'src>(
                         .find(|line| !blank_line(line))
                         .is_some_and(|line| {
                             let indent = line.bytes().take_while(|byte| *byte == b' ').count();
-                            indent > marker.indent && indent < content_indent
+                            (indent > marker.indent && indent < content_indent)
+                                || (reading == MarkdownReading::Projection
+                                    && lines[at..]
+                                        .iter()
+                                        .skip_while(|line| blank_line(line))
+                                        .map_while(|line| list_marker(line, reading))
+                                        .any(|next| {
+                                            next.indent > marker.indent
+                                                && next.indent < content_indent
+                                        }))
                         })
                 } else {
                     line.trim_start_matches(' ').starts_with('\t')
@@ -10416,6 +10471,7 @@ mod projection_tests {
                 "a | b\n--- | ---\nc | d | hidden\n",
             ),
             ("- one\n- two", "* one\n* two\n* hidden\n"),
+            ("Install:\n\n&#32;   npm i foo", "Install:\n\n    npm i foo"),
             ("1. one\n2. two", "1) one\n\n1) two, hidden\n"),
             // Each source below spells, as syntax, text the document holds:
             // a heading in a list item, an HTML comment that ends a table
@@ -10454,6 +10510,8 @@ mod projection_tests {
             [
                 "`c`\n\n<x onmouseover=alert(1)>hover</x>",
                 "`c`\n\n<!-- secret -->",
+                "see [r] <x>.</x>\n>[r]: https://evil.example",
+                "<x>Title.\n===\n</x>",
                 "Approve <?and wire the deposit to 4471?> the invoice",
                 "Approve <!note text here> the invoice",
                 "Approve <![CDATA[wire the deposit]]> the invoice",
@@ -10474,7 +10532,11 @@ mod projection_tests {
             doc.rewrite_content_to_markdown_as(
                 ContentKind::Richdoc,
                 document,
-                MarkdownReading::Source,
+                if document == "<x>Title.\n===\n</x>" || document.starts_with("Install:") {
+                    MarkdownReading::Projection
+                } else {
+                    MarkdownReading::Source
+                },
             )
             .expect("richdoc rewrite");
             let canonical = witness_source(&doc, forged);
