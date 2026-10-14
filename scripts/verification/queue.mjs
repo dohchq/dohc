@@ -285,7 +285,7 @@ export async function verifyThroughQueue({ root, submission, detach = false, che
 
 export const nightlyTaskName = "dohc-verification-nightly";
 
-/** The task that submits the nightly verification of main every night at 03:07. */
+/** The task that submits the nightly verification of main every night at 03:07, and tries again every 10 minutes for an hour if that fails. */
 export function nightlyTaskDefinition(root) {
   const xml = text => text.replace(/[&<>"]/gu, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;" })[c]);
   const user = `${process.env.USERDOMAIN}\\${process.env.USERNAME}`;
@@ -303,6 +303,7 @@ export function nightlyTaskDefinition(root) {
     <StartWhenAvailable>true</StartWhenAvailable>
     <ExecutionTimeLimit>PT10M</ExecutionTimeLimit>
     <Priority>4</Priority>
+    <RestartOnFailure><Interval>PT10M</Interval><Count>6</Count></RestartOnFailure>
   </Settings>
   <Actions Context="Author"><Exec><Command>conhost.exe</Command><Arguments>${xml(command)}</Arguments></Exec></Actions>
 </Task>

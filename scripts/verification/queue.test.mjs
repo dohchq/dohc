@@ -100,6 +100,21 @@ test("the nightly task submits the run every night and stops within ten minutes"
   assert.match(xml, /nightly\.ps1/u);
   assert.match(xml, /<ExecutionTimeLimit>PT10M<\/ExecutionTimeLimit>/u);
   assert.match(xml, /<StartWhenAvailable>true<\/StartWhenAvailable>/u, "a night the host slept still gets its run");
+  assert.match(xml, /<RestartOnFailure><Interval>PT10M<\/Interval><Count>6<\/Count><\/RestartOnFailure>/u, "a failed fetch tries again");
+});
+
+test("pruning keeps the last nightly that passed, however old", async t => {
+  const { root, request, settled } = harness(t);
+  const paths = queuePaths(root);
+  const old = new Date(Date.now() - 30 * 24 * 60 * 60_000).toISOString();
+  for (const [id, nightly] of [["000000001-aaaaaa", true], ["000000002-bbbbbb", false]]) {
+    await writeJson(join(paths.request(id), "request.json"), { id, sequence: Number(id.slice(0, 9)), head: "0".repeat(40), base: "0".repeat(40), scope: "all", nightly });
+    await writeJson(join(paths.request(id), "status.json"), { state: "passed", attempts: [], updatedAt: old });
+  }
+  // Prune runs once the service has been up for ten minutes, or on its first tick.
+  await settled((await request("pass")).id);
+  await waitFor(() => !existsSync(paths.request("000000002-bbbbbb")), "an old request is pruned", 20_000);
+  assert.ok(existsSync(paths.request("000000001-aaaaaa")), "the last passing nightly stays");
 });
 
 test("the service task restarts a dead supervisor from the session that installed it, at normal priority", () => {
