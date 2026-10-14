@@ -105,6 +105,10 @@ function pidAlive(pid) {
 // will not say. Two reads of one process return the same string; a reused pid
 // returns a different one. The value is the OS's own record, so a clock change
 // after the process started cannot alter it.
+// A lookup can outlive a process killed while it waits, and Windows cannot delete a running process's
+// working directory, so lookups run from the Windows directory instead of inheriting the caller's.
+const lookupDirectory = process.env.SystemRoot;
+
 function creationQuery(pid, os) {
   if (os === "win32") {
     return ["pwsh.exe", ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command",
@@ -130,7 +134,7 @@ export function processCreation(pid) {
     const query = creationQuery(pid, platform());
     if (!query) return null;
     return creationOutput(execFileSync(query[0], query[1], {
-      encoding: "utf8", windowsHide: true, timeout: 30_000, stdio: ["ignore", "pipe", "ignore"],
+      encoding: "utf8", windowsHide: true, timeout: 30_000, stdio: ["ignore", "pipe", "ignore"], cwd: lookupDirectory,
     }));
   } catch {
     return null;
@@ -154,7 +158,7 @@ function resolveOwnCreation() {
   return ownCreation = new Promise(done => {
     const finish = value => { ownCreationValue = value; done(value); };
     try {
-      const child = spawn(query[0], query[1], { windowsHide: true, stdio: ["ignore", "pipe", "ignore"] });
+      const child = spawn(query[0], query[1], { windowsHide: true, stdio: ["ignore", "pipe", "ignore"], cwd: lookupDirectory });
       let output = "";
       child.stdout.setEncoding("utf8");
       child.stdout.on("data", chunk => { output += chunk; });
