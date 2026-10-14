@@ -2147,11 +2147,15 @@ body {
   container-name: dohc-editor;
 }
 
+/* Place every child in the one cell. Auto-placement would skip a cell the
+ * outline already occupies and push EditorContent into a second row. */
+.dohc-editor-surface > * {
+  grid-area: 1 / 1;
+}
+
 .dohc-outline {
   position: sticky;
   top: 44px;
-  grid-row: 1;
-  grid-column: 1;
   align-self: start;
   justify-self: end;
   height: 0;

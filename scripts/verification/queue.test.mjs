@@ -245,6 +245,13 @@ test("two lanes run two requests at once, each in its own checkout, and the next
   await cancel(root, first.id);
   assert.equal((await settled(first.id)).status.state, "cancelled");
   assert.equal(state(second.id), "running", "a stop reaches only its own run");
+  // Each attempt records the load it verified under, in its status and in the history.
+  const load = listRequests(root).find(candidate => candidate.id === first.id).status.attempts[0].load;
+  assert.equal(load.lanes, 2);
+  assert.equal(load.peakRuns, 2);
+  assert.ok(load.minFreeMemGb > 0 && load.cpuBusyPercent >= 0 && load.cpuBusyPercent <= 100, JSON.stringify(load));
+  const finished = readFileSync(queuePaths(root).history, "utf8").trim().split("\n").map(line => JSON.parse(line)).find(event => event.event === "finished" && event.id === first.id);
+  assert.deepEqual(finished.load, load);
   assert.equal((await settled(third.id)).status.verdict, "PASS");
   assert.equal(calls.find(call => call.id === third.id).lane, one.lane, "the next run takes the freed checkout");
   await cancel(root, second.id);
@@ -264,6 +271,14 @@ test("a requested restart starts nothing new and waits for the runs in flight", 
   assert.equal((await settled(hung.id)).status.state, "cancelled");
   assert.equal(await service, 75);
   assert.equal(state(), "queued");
+});
+
+test("an attempt that never sampled the host records its load as null", async t => {
+  const { root, request, settled } = harness(t);
+  const passed = await settled((await request("pass")).id);
+  assert.ok("load" in passed.status.attempts[0], "the attempt row names its load");
+  const finished = readFileSync(queuePaths(root).history, "utf8").trim().split("\n").map(line => JSON.parse(line)).find(event => event.event === "finished" && event.id === passed.id);
+  assert.ok("load" in finished, "the history event names its load");
 });
 
 test("a lane setting that cannot be read keeps the lane count the service had, for its slots too", async t => {
