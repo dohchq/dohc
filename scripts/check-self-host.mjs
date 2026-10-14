@@ -15,8 +15,8 @@ if (!existsSync(envFile)) record('self-host env file', false, `${envFile} is mis
 else {
   let settings;
   try { settings = readSettings(envFile); } catch (error) { record('self-host env file', false, error.message); settings = null; }
-  const errors = settings && supportedCompose ? validateSettings(settings) : [];
-  if (settings && supportedCompose) record('self-host env values', errors.length === 0, errors.join(' '));
+  const errors = settings ? validateSettings(settings) : [];
+  if (settings) record('self-host env values', errors.length === 0, errors.join(' '));
   // Invalid settings never reach Docker or the database.
   if (settings && supportedCompose && errors.length === 0) {
     const compose = spawnSync('docker', composeArgs(envFile, settings, 'config', '--services'), { encoding: 'utf8' });

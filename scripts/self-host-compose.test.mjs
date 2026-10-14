@@ -303,7 +303,7 @@ test('an external database needs its host, port, names that survive its connecti
   assert.ok(validateSettings({...external(), POSTGRES_PASSWORD: 'change-me'}).some(error => error.includes('Set POSTGRES_PASSWORD.')));
   const refusals = {
     DOHC_POSTGRES_HOST: ['', 'db.example.com', '-db.invalid', 'db..invalid', 'user@db.invalid', 'db.invalid:5432', 'db.invalid/dohc?sslmode=disable', '[::1]'],
-    DOHC_POSTGRES_PORT: [undefined, '', '0', '65536', '5432x', ' 5432'],
+    DOHC_POSTGRES_PORT: [undefined, '', '0', '05432', '65536', '5432x', ' 5432'],
     DOHC_POSTGRES_CA_FILE: [undefined, '', 'provider-ca.pem', './ca.pem', '/etc/../ca.pem', '/etc/dohc/ca pem', 'C:/ca.pem'],
     POSTGRES_DB: [undefined, '', '.', '..', '...', 'dohc/accounts', 'dohc?x', 'dohc#x', 'dohc accounts', 'dohc%2Faccounts'],
     POSTGRES_USER: [undefined, '', '..', 'dohc@provider', 'dohc:admin', 'dohc admin'],

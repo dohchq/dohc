@@ -35,7 +35,7 @@ export function validateSettings(settings) {
       /(^|\.)example\.(com|net|org)$/i.test(settings.DOHC_POSTGRES_HOST)) {
       errors.push('Set DOHC_POSTGRES_HOST to your database host name or IPv4 address, or leave it empty to use the bundled database.');
     }
-    if (!/^\d+$/.test(settings.DOHC_POSTGRES_PORT ?? '') || Number(settings.DOHC_POSTGRES_PORT) < 1 || Number(settings.DOHC_POSTGRES_PORT) > 65535) {
+    if (!/^[1-9]\d*$/.test(settings.DOHC_POSTGRES_PORT ?? '') || Number(settings.DOHC_POSTGRES_PORT) < 1 || Number(settings.DOHC_POSTGRES_PORT) > 65535) {
       errors.push('Set DOHC_POSTGRES_PORT to your database port.');
     }
     if (!/^(\/(?!\.\.?(\/|$))[a-zA-Z0-9._-]+)+$/.test(settings.DOHC_POSTGRES_CA_FILE ?? '')) {
