@@ -453,7 +453,7 @@ type RunDocument=ConstructorParameters<typeof ServiceActivationDriver>[0]['runDo
 function activationDriver(f:ReturnType<typeof fixture>,captureOwnerActivation:ReturnType<typeof vi.fn>,sendRequest:ReturnType<typeof vi.fn>=vi.fn(async()=>({result:{released:true}})),
   runDocument:RunDocument=(_document,_signal,operation)=>operation(),native:object={}){
   const pull=vi.fn(async()=>({hasMore:false})),target={workspaceId:'workspace',path:'docs/a.md',shareId:'share'}
-  const driver=new ServiceActivationDriver({storage:f.storage,history:f.history,host,
+  const driver=new ServiceActivationDriver({trustedAccount:accountId=>({accountId,name:'Owner'}),storage:f.storage,history:f.history,host,
     client:{...native,captureOwnerActivation,sendRequest} as never,
     workspaces:new Map([['workspace',{handle:'native-workspace',ordinary:{pull} as never}]]),
     config:{targets:[target],validateBaseline,validateJournal,validateAdmission:validateJournal,maxCaptureBytes:1_000_000,maxEntriesPerDrain:10,maxBytesPerDrain:1_000_000,
