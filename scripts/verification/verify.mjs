@@ -9,7 +9,7 @@ import { git, pnpm, repoRoot, run } from "./process.mjs";
 import { cancellationScope } from "./cancellation.mjs";
 import { startTiming, timed } from "./timing.mjs";
 import { testWorkspace } from "./js-tests.mjs";
-import { selectedGates } from "./selection.mjs";
+import { affectedPackages, packageReferences, readWorkspacePackages, selectedGates } from "./selection.mjs";
 import { classifyTreeProvenance, readTreeState } from "../../tools/rust-engine-program/tree-provenance.mjs";
 import { acquireExclusiveSlot, acquireVerificationSlot, resolveBuildBudget } from "../../tools/rust-engine-program/build-slot.mjs";
 import { processIdentity, ticketEvidence } from "./ticket-evidence.mjs";
@@ -206,8 +206,11 @@ export async function verify(args) {
   }
   if (mode === "plan") {
     const {baseCommit, files, gates} = selection();
-    // The JavaScript gate runs every package test and repository check, then these proofs.
-    const javascript = gates.js ? {needs: ["postgres", "engine", "desktop"], proofs: ["self-host-native", "accounts", ...desktopProofTags().required]} : null;
+    // Package tests run for the affected packages only; --full and changes outside packages run every package.
+    const workspace = gates.js && !full ? readWorkspacePackages(repoRoot) : null;
+    const packages = workspace && affectedPackages(files, workspace, packageReferences(repoRoot, workspace));
+    // The JavaScript gate runs the affected packages' tests and every repository check, then these proofs.
+    const javascript = gates.js ? {needs: ["postgres", "engine", "desktop"], packages: packages ?? "all", proofs: ["self-host-native", "accounts", ...desktopProofTags().required]} : null;
     console.log(JSON.stringify({base, baseCommit, files, gates, javascript}, null, 2));
     return;
   }
@@ -450,7 +453,7 @@ export async function verify(args) {
         // escalation before database cleanup, without a competing parent timer.
         try {
           await checkedStep({ name: "tests", runner: "testWorkspace", report: report.jsTests },
-            () => testWorkspace({ prepared: true, output: join(output, "js-tests"), env,
+            () => testWorkspace({ prepared: true, output: join(output, "js-tests"), env, changed: full ? null : report.files,
               beforeDesktopScripts: () => measure("packaging-wait", () => rustSettled),
               runProofs: checkpoint => integrationProofs(env, checkpoint) }));
         } finally {

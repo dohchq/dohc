@@ -120,7 +120,7 @@ test("verification prepares before parallel jobs and runs every JavaScript packa
         }});
       `);
       put(".gitignore", readFileSync(join(root, ".gitignore"), "utf8") + ".agent-artifacts/\napps/desktop/.env.local\n");
-      put("apps/desktop/package.json", '{"name":"@dohc/desktop","scripts":{"test":"unused","test:unit":"vitest run","test:scripts":"scripts","test:scripts:isolated":"isolated","test:scripts:runtime":"runtime"}}');
+      put("apps/desktop/package.json", '{"name":"@dohc/desktop","devDependencies":{"@dohc/fixture":"workspace:*"},"scripts":{"test":"unused","test:unit":"vitest run","test:scripts":"scripts","test:scripts:isolated":"isolated","test:scripts:runtime":"runtime"}}');
       for (const name of ["fixture", "mcp", "share-web", "site", "unrelated", "workspace-api"]) {
         const path = `${name === "workspace-api" ? "services" : name === "site" ? "apps" : "packages"}/${name}`;
         put(`${path}/package.json`, JSON.stringify({name:`@dohc/${name}`,scripts:{test:"vitest run"}}));
@@ -438,9 +438,11 @@ test("verification prepares before parallel jobs and runs every JavaScript packa
           const tests=JSON.parse(readFileSync(report.jsTests,"utf8"));
           assert.equal(tests.proofs, true);
           assert.equal(tests.steps.filter(step => step.name === "proofs").length, 1);
-          assert.deepEqual(tests.packages.map(pkg=>pkg.name).sort(),packages);
+          // A change inside one package tests it and its dependents only.
+          const tested = changed === "packages/fixture/src/index.ts" && !full ? ["@dohc/desktop", "@dohc/fixture"] : packages;
+          assert.deepEqual(tests.packages.map(pkg=>pkg.name).sort(),tested);
           const calls=readFileSync(join(root,".dohc-dev/all-calls.jsonl"),"utf8").trim().split("\n").map(JSON.parse);
-          assert.deepEqual(calls.filter(({args})=>args[2]==="run" && ["test","test:unit"].includes(args[3])).map(({args})=>args[1]).sort(),packages);
+          assert.deepEqual(calls.filter(({args})=>args[2]==="run" && ["test","test:unit"].includes(args[3])).map(({args})=>args[1]).sort(),tested);
           for (const script of ["test:scripts:isolated", "test:scripts:runtime"]) {
             assert.equal(calls.filter(({args}) => args[3] === script).length, 1);
           }
