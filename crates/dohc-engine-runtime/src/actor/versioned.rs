@@ -1410,7 +1410,15 @@ pub(super) fn publish_checked_delete_on_store(
             })?;
     use super::checked_deletes::{ExportedDeleteRecovery, recover_exported_on_store};
     let exported_recovery = if recovery {
-        match recover_exported_on_store(store, root, workspace_id, job_id, now_ms, faults)? {
+        match recover_exported_on_store(
+            store,
+            root,
+            workspace_id,
+            job_id,
+            moment_id,
+            now_ms,
+            faults,
+        )? {
             ExportedDeleteRecovery::Settled => return Ok(()),
             ExportedDeleteRecovery::Publish => {
                 if job.status == JobStatus::Conflict {
@@ -1449,7 +1457,7 @@ pub(super) fn publish_checked_delete_on_store(
                 moment_id,
                 now_ms,
             )?;
-            finish_checked_delete_effects_in_tx(tx, workspace_id, moment_id, false)?;
+            settle_checked_delete_in_tx(tx, workspace_id, moment_id, false, true)?;
             Ok::<_, RuntimeError>(repair_job)
         })?;
         return match discarded {
@@ -1496,8 +1504,7 @@ pub(super) fn publish_checked_delete_on_store(
                 // touching disk. The savepoint rolls back indexes, assets and lineage.
                 tx.execute_batch("SAVEPOINT checked_delete_finish")
                     .map_err(StorageError::persist_public)?;
-                let checked =
-                    finish_checked_delete_effects_in_tx(tx, workspace_id, moment_id, true);
+                let checked = settle_checked_delete_in_tx(tx, workspace_id, moment_id, true, true);
                 let rolled_back = tx
                     .execute_batch(
                         "ROLLBACK TO checked_delete_finish; RELEASE checked_delete_finish",
@@ -1574,7 +1581,15 @@ pub(super) fn publish_checked_delete_on_store(
     }
     if exported_recovery && !applied {
         if matches!(
-            recover_exported_on_store(store, root, workspace_id, job_id, now_ms, faults)?,
+            recover_exported_on_store(
+                store,
+                root,
+                workspace_id,
+                job_id,
+                moment_id,
+                now_ms,
+                faults
+            )?,
             ExportedDeleteRecovery::Settled
         ) {
             return Ok(());
@@ -1593,7 +1608,7 @@ pub(super) fn publish_checked_delete_on_store(
         } else {
             enqueue_discarded_delete_projection_in_tx(tx, root, workspace_id, moment_id, now_ms)?
         };
-        let asset_jobs = finish_checked_delete_effects_in_tx(tx, workspace_id, moment_id, applied)?;
+        let asset_jobs = settle_checked_delete_in_tx(tx, workspace_id, moment_id, applied, true)?;
         Ok::<_, RuntimeError>((asset_jobs, repair_job))
     })?;
     match finalized {
@@ -1706,25 +1721,7 @@ fn enqueue_discarded_delete_projection_in_tx(
     Ok(Some(job_id))
 }
 
-fn finish_checked_delete_effects_in_tx(
-    tx: &rusqlite::Transaction<'_>,
-    workspace_id: &str,
-    moment_id: &str,
-    applied: bool,
-) -> Result<Vec<(String, i64)>, RuntimeError> {
-    settle_checked_delete_in_tx(tx, workspace_id, moment_id, applied, true)
-}
-
-pub(super) fn finish_checked_delete_history_in_tx(
-    tx: &rusqlite::Transaction<'_>,
-    workspace_id: &str,
-    moment_id: &str,
-    applied: bool,
-) -> Result<(), RuntimeError> {
-    settle_checked_delete_in_tx(tx, workspace_id, moment_id, applied, false).map(|_| ())
-}
-
-fn settle_checked_delete_in_tx(
+pub(super) fn settle_checked_delete_in_tx(
     tx: &rusqlite::Transaction<'_>,
     workspace_id: &str,
     moment_id: &str,
@@ -3251,7 +3248,7 @@ mod doc_cache_reset_tests {
                         path: "record.md".into(),
                         bytes: bytes.to_vec(),
                         moment_id: "creation".into(),
-                        metadata_origin: "user".into(),
+                        metadata_origin: "api".into(),
                         metadata_summary: None,
                         metadata_correlation_id: None,
                         author_json: None,
@@ -3271,7 +3268,7 @@ mod doc_cache_reset_tests {
                         path: "record.md".into(),
                         text: String::from_utf8(bytes.to_vec()).unwrap(),
                         moment_id: "creation".into(),
-                        metadata_origin: "user".into(),
+                        metadata_origin: "api".into(),
                         metadata_summary: None,
                         metadata_correlation_id: None,
                         author_json: None,
@@ -3531,6 +3528,435 @@ mod doc_cache_reset_tests {
         );
     }
 
+    fn legacy_export_fixture(binary: bool) -> (ScratchDir, EngineStore) {
+        let (root, mut store, input, expected) = checked_delete_fixture(binary);
+        crash_checked_delete(
+            &root,
+            &mut store,
+            &input,
+            &expected,
+            FaultPoint::StorageAfterCommitBeforeAck,
+        );
+        bootstrap_checked_delete(&mut store);
+        seed_legacy_checked_delete_export(&mut store);
+        (root, store)
+    }
+
+    fn reopen_legacy(store: EngineStore, root: &std::path::Path) -> EngineStore {
+        drop(store);
+        let mut store =
+            EngineStore::open(&dohc_engine_testkit::engine_db_path(root).unwrap(), 7).unwrap();
+        checked_delete_replay(&mut store, root);
+        store
+    }
+
+    fn assert_legacy_pending(store: &EngineStore, pending: bool) {
+        assert_eq!(
+            store
+                .load_materialization_job("restore-delete-mat_restore-delete")
+                .unwrap()
+                .is_some(),
+            pending
+        );
+        assert_eq!(checked_delete_exports(store), 1);
+    }
+
+    fn capture_legacy_bytes(store: &mut EngineStore, path: &str, bytes: &[u8], binary: bool) {
+        store
+            .write_with(&NoFaults, |tx| {
+                let (object_id, moment_id) = if binary {
+                    let result = dohc_engine_domain::capture_ingest_binary_in_tx(
+                        tx,
+                        &dohc_engine_domain::CaptureIngestBinary {
+                            workspace_id: "workspace".into(),
+                            version_id: "main".into(),
+                            path: path.into(),
+                            bytes: bytes.to_vec(),
+                            metadata_origin: "capture".into(),
+                            metadata_summary: None,
+                            metadata_correlation_id: None,
+                            author_json: None,
+                            now_ms: 6,
+                            request_id: None,
+                            claim_foreign_head: true,
+                        },
+                    )?;
+                    (result.object_id, result.moment_id)
+                } else {
+                    let result = dohc_engine_domain::capture_ingest_in_tx(
+                        tx,
+                        &dohc_engine_domain::CaptureIngest {
+                            workspace_id: "workspace".into(),
+                            version_id: "main".into(),
+                            path: path.into(),
+                            text: std::str::from_utf8(bytes).unwrap().into(),
+                            metadata_origin: "capture".into(),
+                            metadata_summary: None,
+                            metadata_correlation_id: None,
+                            author_json: None,
+                            now_ms: 6,
+                            request_id: None,
+                            claim_foreign_head: true,
+                        },
+                    )?;
+                    (result.object.object_id, result.moment.moment_id)
+                };
+                dohc_engine_sync::reconcile_local_resulting_head_in_tx(
+                    tx,
+                    "workspace",
+                    "main",
+                    &object_id,
+                    if binary {
+                        dohc_engine_sync::ResultingHead::BinaryOrAbsent
+                    } else {
+                        dohc_engine_sync::ResultingHead::Text {
+                            path,
+                            text: std::str::from_utf8(bytes).unwrap(),
+                        }
+                    },
+                    None,
+                    None,
+                    6,
+                )?;
+                journal_moment_outbound_in_tx(tx, "workspace", &moment_id, false)?;
+                Ok::<_, RuntimeError>(())
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn checked_delete_legacy_uncaptured_disk_edit_stays_pending() {
+        let (root, mut store) = legacy_export_fixture(false);
+        std::fs::write(root.join("record.md"), b"uncaptured later text\n").unwrap();
+        store = reopen_legacy(store, &root);
+        assert_legacy_pending(&store, true);
+        assert_eq!(
+            std::fs::read_to_string(root.join("record.md")).unwrap(),
+            "uncaptured later text\n"
+        );
+        capture_legacy_bytes(&mut store, "record.md", b"uncaptured later text\n", false);
+        store = reopen_legacy(store, &root);
+        assert_legacy_pending(&store, false);
+        assert_eq!(
+            std::fs::read_to_string(root.join("record.md")).unwrap(),
+            "uncaptured later text\n"
+        );
+    }
+
+    #[test]
+    fn checked_delete_legacy_unsaved_live_edits_stay_pending() {
+        let (root, mut store) = legacy_export_fixture(false);
+        let key = DocKey::new("workspace", "main", "document").unwrap();
+        let doc = store
+            .read_with(|conn| dohc_engine_collab::load_doc_in(conn, &key))
+            .unwrap();
+        let update = doc.plaintext_insert(0, "unsaved ");
+        dohc_engine_collab::record_local_update(
+            &mut store,
+            &mut WriterDocCache::new(),
+            &key,
+            &update,
+            dohc_engine_collab::LocalAppend::default(),
+            &NoFaults,
+            6,
+            |_tx, _outcome, _sha| Ok(()),
+        )
+        .unwrap();
+        let store = reopen_legacy(store, &root);
+        assert_legacy_pending(&store, true);
+        assert_eq!(
+            store
+                .read_with(|conn| dohc_engine_collab::load_doc_in(conn, &key))
+                .unwrap()
+                .plaintext_string(),
+            "unsaved recipient text\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("record.md")).unwrap(),
+            "recipient text\n"
+        );
+    }
+
+    #[test]
+    fn checked_delete_legacy_committed_write_materializes_before_settlement() {
+        let (root, mut store) = legacy_export_fixture(false);
+        let write = versioned_text_write_on_store(
+            &mut store,
+            &WriteText {
+                workspace_id: "workspace".into(),
+                version_id: "main".into(),
+                object_id: "document".into(),
+                path: "record.md".into(),
+                text: "committed later text\n".into(),
+                moment_id: "later-write".into(),
+                metadata_origin: "api".into(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 6,
+                request_id: None,
+            },
+            Some(&root),
+            None,
+            &NoFaults,
+            &CancellationToken::new(),
+        )
+        .unwrap();
+        store
+            .write_with(&NoFaults, |tx| {
+                dohc_engine_domain::enqueue_write(
+                    tx,
+                    &write,
+                    Preimage::Present(hex_sha256(b"recipient text\n")),
+                    "authored",
+                )
+            })
+            .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(root.join("record.md")).unwrap(),
+            "recipient text\n"
+        );
+        let mut store = reopen_legacy(store, &root);
+        assert_legacy_pending(&store, false);
+        assert_eq!(
+            std::fs::read_to_string(root.join("record.md")).unwrap(),
+            "committed later text\n"
+        );
+        assert_eq!(
+            VersionedTextStore::new(&mut store)
+                .read_text("workspace", "main", "record.md")
+                .unwrap()
+                .unwrap()
+                .text,
+            "committed later text\n"
+        );
+    }
+
+    #[test]
+    fn checked_delete_legacy_renamed_object_returns_to_peer() {
+        let (root, mut store) = legacy_export_fixture(false);
+        versioned_text_rename_on_store(
+            &mut store,
+            &RenameTextFile {
+                workspace_id: "workspace".into(),
+                version_id: "main".into(),
+                from_path: "record.md".into(),
+                to_path: "renamed.md".into(),
+                moment_id: "later-rename".into(),
+                metadata_origin: "api".into(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 6,
+                request_id: None,
+            },
+            &root,
+            &(),
+            &NoFaults,
+            &CancellationToken::new(),
+        )
+        .unwrap();
+        std::fs::rename(root.join("record.md"), root.join("renamed.md")).unwrap();
+        let store = reopen_legacy(store, &root);
+        assert_legacy_pending(&store, false);
+        assert_eq!(
+            std::fs::read_to_string(root.join("renamed.md")).unwrap(),
+            "recipient text\n"
+        );
+        let aliases: Vec<String> = store.read_with(|conn| conn.prepare(
+            "SELECT a.path FROM path_aliases a JOIN snapshots s USING(workspace_id,version_id,object_id) WHERE a.path=s.path"
+        ).unwrap().query_map([], |row| row.get(0)).unwrap().collect::<Result<_, _>>()).unwrap();
+        assert_eq!(aliases, vec!["renamed.md"]);
+        assert_legacy_peer(&store, "renamed.md", b"recipient text\n");
+    }
+
+    #[test]
+    fn checked_delete_legacy_uncapturable_targets_settle_without_capture() {
+        for directory in [false, true] {
+            let (root, store) = legacy_export_fixture(true);
+            if directory {
+                std::fs::remove_file(root.join("record.md")).unwrap();
+                std::fs::create_dir(root.join("record.md")).unwrap();
+            } else {
+                std::fs::write(
+                    root.join("record.md"),
+                    vec![0xff; dohc_engine_domain::MAX_CAPTURE_BINARY_FILE_BYTES + 1],
+                )
+                .unwrap();
+            }
+            let store = reopen_legacy(store, &root);
+            assert_legacy_pending(&store, false);
+            assert_eq!(root.join("record.md").is_dir(), directory);
+            if !directory {
+                assert_eq!(
+                    std::fs::read(root.join("record.md")).unwrap(),
+                    vec![0xff; dohc_engine_domain::MAX_CAPTURE_BINARY_FILE_BYTES + 1]
+                );
+            }
+            let snapshots: i64 = store
+                .read_with(|conn| {
+                    conn.query_row("SELECT count(*) FROM snapshots", [], |row| row.get(0))
+                })
+                .unwrap();
+            assert_eq!(snapshots, 0);
+        }
+    }
+
+    #[test]
+    fn checked_delete_legacy_journaled_capture_before_create_keeps_one_peer_conflict() {
+        for binary in [false, true] {
+            let (root, mut store) = legacy_export_fixture(binary);
+            let bytes = if binary {
+                b"\0later bytes".as_slice()
+            } else {
+                b"later text\n".as_slice()
+            };
+            std::fs::write(root.join("record.md"), bytes).unwrap();
+            capture_legacy_bytes(&mut store, "record.md", bytes, binary);
+            let store = reopen_legacy(store, &root);
+            assert_legacy_pending(&store, false);
+            assert_legacy_peer(&store, "record.md", bytes);
+        }
+    }
+
+    fn assert_legacy_peer(source: &EngineStore, path: &str, bytes: &[u8]) {
+        let creation_exported: bool = source.read_with(|conn| conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM replication_log WHERE op_kind='moment.append' AND json_extract(payload_json,'$.momentId')='creation')",
+            [], |row| row.get(0),
+        )).unwrap();
+        let (_root, mut peer) = if creation_exported {
+            let root = ScratchDir::new().unwrap();
+            let mut peer =
+                EngineStore::open(&dohc_engine_testkit::engine_db_path(&root).unwrap(), 8).unwrap();
+            ensure_mutation_version_on_store(&mut peer, "workspace", "main", 8, &NoFaults).unwrap();
+            (root, peer)
+        } else {
+            let (root, mut peer, _, _) = checked_delete_fixture(false);
+            peer.write_with(&NoFaults, |tx| {
+                dohc_engine_sync::retire_ydoc_lineage_in_tx(tx, "workspace", "main", "document")
+            })
+            .unwrap();
+            (root, peer)
+        };
+        let blobs: Vec<String> = source
+            .read_with(|conn| {
+                conn.prepare("SELECT text FROM blobs")
+                    .unwrap()
+                    .query_map([], |r| r.get(0))
+                    .unwrap()
+                    .collect::<Result<_, _>>()
+            })
+            .unwrap();
+        let binary: Vec<Vec<u8>> = source
+            .read_with(|conn| {
+                conn.prepare("SELECT bytes FROM binary_blobs")
+                    .unwrap()
+                    .query_map([], |r| r.get(0))
+                    .unwrap()
+                    .collect::<Result<_, _>>()
+            })
+            .unwrap();
+        peer.write_with(&NoFaults, |tx| {
+            for text in &blobs {
+                tx.execute(
+                    "INSERT OR IGNORE INTO blobs(sha256,byte_length,text) VALUES(?1,?2,?3)",
+                    params![hex_sha256(text.as_bytes()), text.len() as i64, text],
+                )
+                .map_err(StorageError::persist_public)?;
+            }
+            for bytes in &binary {
+                dohc_engine_storage::put_binary_blob(tx, bytes)?;
+            }
+            Ok::<_, StorageError>(())
+        })
+        .unwrap();
+        let origins: Vec<String> = source
+            .read_with(|conn| {
+                conn.prepare("SELECT DISTINCT origin_id FROM replication_log WHERE imported=0")
+                    .unwrap()
+                    .query_map([], |r| r.get(0))
+                    .unwrap()
+                    .collect::<Result<_, _>>()
+            })
+            .unwrap();
+        let mut cache = WriterDocCache::new();
+        for origin in origins {
+            let ops = dohc_engine_sync::list_replication_ops(source, "workspace", &origin, -1, 500)
+                .unwrap();
+            let moments: Vec<_> = ops
+                .iter()
+                .filter(|op| op.op_kind == "moment.append")
+                .collect();
+            let delete = moments
+                .iter()
+                .position(|op| op.payload["momentId"] == "restore-delete")
+                .unwrap();
+            assert!(
+                moments.len() > delete + 2,
+                "the later mutation must already be exported before compensation"
+            );
+            assert_eq!(moments[delete + 1].payload["beforePresent"], "present");
+            assert_eq!(moments.last().unwrap().payload["beforePresent"], "null");
+            for (index, mut op) in ops.into_iter().enumerate() {
+                op.relay_seq = Some(index as i64 + 1);
+
+                let outcome = dohc_engine_sync::apply_replication_envelope(
+                    &mut peer,
+                    &mut cache,
+                    &op,
+                    &NoFaults,
+                    &dohc_engine_sync::NoLiveLeases,
+                )
+                .unwrap_or_else(|error| panic!("{} {}: {error:?}", op.op_kind, op.payload));
+                assert!(
+                    matches!(
+                        outcome.primary,
+                        dohc_engine_sync::ApplyDisposition::Applied(_)
+                    ),
+                    "{}: {outcome:?}",
+                    op.payload
+                );
+                if op.payload["momentId"] == "restore-delete" {
+                    let count: i64 = peer
+                        .read_with(|conn| {
+                            conn.query_row(
+                                "SELECT count(*) FROM snapshots WHERE object_id='document'",
+                                [],
+                                |row| row.get(0),
+                            )
+                        })
+                        .unwrap();
+                    assert_eq!(
+                        count, 0,
+                        "D must have removed the peer's file before W/R arrives"
+                    );
+                }
+            }
+        }
+        let snapshots: Vec<(String, String)> = peer.read_with(|conn| conn.prepare("SELECT path,CASE content_kind WHEN 'binary' THEN binary_sha256 ELSE blob_sha256 END FROM snapshots").unwrap().query_map([], |r| Ok((r.get(0)?, r.get(1)?))).unwrap().collect::<Result<_, _>>()).unwrap();
+        assert_eq!(
+            snapshots,
+            vec![(path.into(), hex_sha256(bytes))],
+            "peer must have only the intended file, with no kept copy"
+        );
+        let conflicts: i64 = peer
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT count(*) FROM conflicts WHERE status='open'",
+                    [],
+                    |r| r.get(0),
+                )
+            })
+            .unwrap();
+        // W/R was already exported against the pre-delete head. Peers retain
+        // that conflict when C restores the file. Exported coordinates cannot
+        // be reordered by this local recovery; keep this outcome explicit.
+        assert_eq!(
+            conflicts, 1,
+            "the already-exported mutation retains one peer conflict"
+        );
+    }
+
     #[test]
     fn checked_delete_legacy_unchanged_settles_on_open() {
         legacy_settles_on_open("unchanged");
@@ -3538,7 +3964,6 @@ mod doc_cache_reset_tests {
 
     #[test]
     fn checked_delete_legacy_changed_bytes_win_on_open() {
-        legacy_settles_on_open("changed");
         legacy_settles_on_open("captured");
     }
 
@@ -3575,6 +4000,7 @@ mod doc_cache_reset_tests {
                     b"later text\n".as_slice()
                 };
                 std::fs::write(root.join("record.md"), bytes).unwrap();
+                capture_legacy_bytes(&mut store, "record.md", bytes, binary);
                 let faults = dohc_engine_testkit::ScriptedFaults::crash_at(point);
                 let result = publish_checked_delete_on_store(
                     &mut store,
@@ -3598,7 +4024,7 @@ mod doc_cache_reset_tests {
                     .is_some();
                 assert_eq!(pending, point == FaultPoint::StorageBeforePersist);
                 let sha: String = store.read_with(|conn| conn.query_row("SELECT CASE content_kind WHEN 'binary' THEN binary_sha256 ELSE blob_sha256 END FROM snapshots WHERE workspace_id='workspace' AND path='record.md'", [], |r| r.get(0))).unwrap();
-                assert_eq!(sha, if pending { expected } else { hex_sha256(bytes) });
+                assert_eq!(sha, hex_sha256(bytes));
                 let journal_count = |store: &EngineStore| {
                     store.read_with(|conn| conn.query_row("SELECT count(*) FROM replication_log WHERE imported=0 AND op_kind='moment.append' AND json_extract(payload_json,'$.payloadAfterPath')='record.md'", [], |r| r.get::<_, i64>(0))).unwrap()
                 };
@@ -3661,50 +4087,9 @@ mod doc_cache_reset_tests {
                 assert!(!root.join("record.md").exists());
                 // Even identical bytes recreated after the completed receipt are later work.
                 std::fs::write(root.join("record.md"), &original).unwrap();
-            } else if matches!(scenario, "changed" | "captured") {
+            } else if scenario == "captured" {
                 std::fs::write(root.join("record.md"), &changed).unwrap();
-                if scenario == "captured" {
-                    store
-                        .write_with(&NoFaults, |tx| {
-                            if binary {
-                                dohc_engine_domain::capture_ingest_binary_in_tx(
-                                    tx,
-                                    &dohc_engine_domain::CaptureIngestBinary {
-                                        workspace_id: "workspace".into(),
-                                        version_id: "main".into(),
-                                        path: "record.md".into(),
-                                        bytes: changed.clone(),
-                                        metadata_origin: "capture".into(),
-                                        metadata_summary: None,
-                                        metadata_correlation_id: None,
-                                        author_json: None,
-                                        now_ms: 6,
-                                        request_id: None,
-                                        claim_foreign_head: true,
-                                    },
-                                )?;
-                            } else {
-                                dohc_engine_domain::capture_ingest_in_tx(
-                                    tx,
-                                    &dohc_engine_domain::CaptureIngest {
-                                        workspace_id: "workspace".into(),
-                                        version_id: "main".into(),
-                                        path: "record.md".into(),
-                                        text: String::from_utf8(changed.clone()).unwrap(),
-                                        metadata_origin: "capture".into(),
-                                        metadata_summary: None,
-                                        metadata_correlation_id: None,
-                                        author_json: None,
-                                        now_ms: 6,
-                                        request_id: None,
-                                        claim_foreign_head: true,
-                                    },
-                                )?;
-                            }
-                            Ok::<_, RuntimeError>(())
-                        })
-                        .unwrap();
-                }
+                capture_legacy_bytes(&mut store, "record.md", &changed, binary);
             }
             if scenario == "blocked" {
                 std::fs::write(root.join(".dohc/engine/displaced"), b"unreadable staging").unwrap();
@@ -3741,7 +4126,7 @@ mod doc_cache_reset_tests {
                 1,
                 "D must not be exported again"
             );
-            let keep = matches!(scenario, "changed" | "captured" | "recreated");
+            let keep = matches!(scenario, "captured" | "recreated");
             assert_eq!(root.join("record.md").exists(), keep, "{scenario}");
             if keep {
                 let bytes = if scenario == "recreated" {
@@ -3802,7 +4187,7 @@ mod doc_cache_reset_tests {
     fn assert_checked_delete_discard_retains_referenced_moment(store: &mut EngineStore) {
         let before = checked_delete_state(store);
         let result = store.write_with(&NoFaults, |tx| {
-            finish_checked_delete_effects_in_tx(tx, "workspace", "restore-delete", false)
+            settle_checked_delete_in_tx(tx, "workspace", "restore-delete", false, true)
         });
         assert!(
             matches!(

@@ -611,47 +611,8 @@ pub(super) fn replay_pending_materializations(
         },
     )?;
     reconcile_settlement_attempts(store, scope.workspace_id, now_ms, faults)?;
-    let checked_jobs = store.read_with(|conn| {
-        let mut stmt = conn
-            .prepare(
-                "SELECT job_id FROM materialization_jobs \
-                 WHERE workspace_id = ?1 AND job_id GLOB 'restore-delete-mat_*'",
-            )
-            .map_err(StorageError::corrupt_public)?;
-        stmt.query_map([scope.workspace_id], |r| r.get::<_, String>(0))
-            .map_err(StorageError::corrupt_public)?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(StorageError::corrupt_public)
-    })?;
-    for job_id in checked_jobs {
-        let recorder: &dyn SelfWriteRecorder = scope.self_writes.unwrap_or(&());
-        match super::versioned::publish_checked_delete_on_store(
-            store,
-            root_dir,
-            scope.workspace_id,
-            &job_id,
-            recorder,
-            now_ms,
-            faults,
-            true,
-            false,
-        ) {
-            Ok(()) => {}
-            Err(RuntimeError::OperationCrashed) => return Err(RuntimeError::OperationCrashed),
-            Err(RuntimeError::CaptureFileHeld { .. }) => {}
-            Err(error) => {
-                let disposition = if matches!(store.load_materialization_job(&job_id), Ok(Some(_)))
-                {
-                    "deferred"
-                } else {
-                    "refused"
-                };
-                eprintln!("engine: checked deletion {disposition} during recovery: {error}");
-            }
-        }
-    }
     let jobs = store.list_pending_materialization_jobs()?;
-    (|| -> Result<MaterializationReplaySummary, RuntimeError> {
+    let summary = (|| -> Result<MaterializationReplaySummary, RuntimeError> {
         let mut summary = MaterializationReplaySummary {
             parked: 0,
             completed: 0,
@@ -660,6 +621,10 @@ pub(super) fn replay_pending_materializations(
         };
         let mut secret_key: Option<SecretDataKey> = None;
         for job in jobs {
+            // Checked deletes require canonical/live checks and run after ordinary writes.
+            if job.job_id.starts_with("restore-delete-mat_") {
+                continue;
+            }
             if selected.is_some_and(|selected| !selected.contains(&job.job_id)) {
                 continue;
             }
@@ -986,7 +951,47 @@ pub(super) fn replay_pending_materializations(
         }
         reconcile_settlement_attempts(store, scope.workspace_id, now_ms, faults)?;
         Ok(summary)
-    })()
+    })()?;
+    let checked_jobs = store.read_with(|conn| {
+        let mut stmt = conn
+            .prepare(
+                "SELECT job_id FROM materialization_jobs \
+                 WHERE workspace_id = ?1 AND job_id GLOB 'restore-delete-mat_*'",
+            )
+            .map_err(StorageError::corrupt_public)?;
+        stmt.query_map([scope.workspace_id], |r| r.get::<_, String>(0))
+            .map_err(StorageError::corrupt_public)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(StorageError::corrupt_public)
+    })?;
+    for job_id in checked_jobs {
+        let recorder: &dyn SelfWriteRecorder = scope.self_writes.unwrap_or(&());
+        match super::versioned::publish_checked_delete_on_store(
+            store,
+            root_dir,
+            scope.workspace_id,
+            &job_id,
+            recorder,
+            now_ms,
+            faults,
+            true,
+            false,
+        ) {
+            Ok(()) => {}
+            Err(RuntimeError::OperationCrashed) => return Err(RuntimeError::OperationCrashed),
+            Err(RuntimeError::CaptureFileHeld { .. }) => {}
+            Err(error) => {
+                let disposition = if matches!(store.load_materialization_job(&job_id), Ok(Some(_)))
+                {
+                    "deferred"
+                } else {
+                    "refused"
+                };
+                eprintln!("engine: checked deletion {disposition} during recovery: {error}");
+            }
+        }
+    }
+    Ok(summary)
 }
 
 pub(super) fn materialize_pending_job(

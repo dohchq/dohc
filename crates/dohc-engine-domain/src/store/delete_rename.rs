@@ -628,7 +628,15 @@ pub fn finish_checked_delete_in_tx(
     let moment = get_moment(tx, workspace_id, moment_id)?.ok_or(DomainError::FileNotFound)?;
     let result = delete_result_from_moment(tx, workspace_id, moment, false)?;
     if applied {
-        tx.execute("DELETE FROM path_aliases WHERE workspace_id=?1 AND version_id=?2 AND path=?3 AND object_id=?4", params![workspace_id, result.moment.version_id, result.moment.path, result.object.object_id]).map_err(DomainError::sql_persist)?;
+        tx.execute(
+            "DELETE FROM path_aliases WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+            params![
+                workspace_id,
+                result.moment.version_id,
+                result.object.object_id
+            ],
+        )
+        .map_err(DomainError::sql_persist)?;
         tx.execute(
             "DELETE FROM snapshots WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
             params![

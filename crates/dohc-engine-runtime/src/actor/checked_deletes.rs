@@ -1,6 +1,6 @@
 use crate::RuntimeError;
 use dohc_engine_domain::{CaptureIngest, CaptureIngestBinary, DomainError};
-use dohc_engine_files::materialize::read_publication_target;
+use dohc_engine_files::materialize::{PublicationTarget, read_publication_target};
 use dohc_engine_storage::{
     EngineStore, FaultInjector, JobStatus, StorageError, TxnOutcome, hex_sha256,
 };
@@ -18,15 +18,10 @@ pub(super) fn recover_exported_on_store(
     root: &Path,
     workspace_id: &str,
     job_id: &str,
+    moment_id: &str,
     now_ms: i64,
     faults: &dyn FaultInjector,
 ) -> Result<ExportedDeleteRecovery, RuntimeError> {
-    let moment_id =
-        job_id
-            .strip_prefix("restore-delete-mat_")
-            .ok_or(DomainError::InvalidInput {
-                reason: "not a checked delete job",
-            })?;
     // Ordinary unpublished recovery needs no extra writer commit. Exported
     // settlement rechecks this reference together with the job inside its write.
     if !store.read_with(|conn| {
@@ -35,7 +30,7 @@ pub(super) fn recover_exported_on_store(
         return Ok(ExportedDeleteRecovery::NotExported);
     }
     match store.write_with(faults, |tx| {
-        recover_exported_in_tx(tx, root, workspace_id, job_id, now_ms)
+        recover_exported_in_tx(tx, root, workspace_id, job_id, moment_id, now_ms)
     })? {
         TxnOutcome::Committed(decision) => Ok(decision),
         TxnOutcome::Crashed { .. } => Err(RuntimeError::OperationCrashed),
@@ -49,6 +44,7 @@ fn recover_exported_in_tx(
     root: &Path,
     workspace_id: &str,
     job_id: &str,
+    moment_id: &str,
     now_ms: i64,
 ) -> Result<ExportedDeleteRecovery, RuntimeError> {
     let Some(job) = dohc_engine_storage::materialize::load_job(tx, job_id)? else {
@@ -57,12 +53,6 @@ fn recover_exported_in_tx(
     if job.workspace_id != workspace_id {
         return Err(DomainError::WorkspaceMismatch.into());
     }
-    let moment_id =
-        job_id
-            .strip_prefix("restore-delete-mat_")
-            .ok_or(DomainError::InvalidInput {
-                reason: "not a checked delete job",
-            })?;
     if !dohc_engine_domain::moment_has_replication_dependents_in(tx, workspace_id, moment_id)? {
         return Ok(ExportedDeleteRecovery::NotExported);
     }
@@ -77,35 +67,52 @@ fn recover_exported_in_tx(
         )
         .map_err(StorageError::corrupt_public)?;
     super::versioned::ensure_publication_version(tx, workspace_id, &version_id)?;
-    let bytes = read_publication_target(root, &job.target_path)?;
-    let snapshot: Option<(String, String)> = tx.query_row(
-        "SELECT object_id,CASE content_kind WHEN 'binary' THEN binary_sha256 ELSE blob_sha256 END
-         FROM snapshots WHERE workspace_id=?1 AND version_id=?2 AND path=?3",
-        params![workspace_id, version_id, job.target_path], |row| Ok((row.get(0)?, row.get(1)?)),
-    ).optional().map_err(StorageError::corrupt_public)?;
-    let snapshot_matches = snapshot
+    let snapshot: Option<(String, String)> = tx
+        .query_row(
+            "SELECT path,CASE content_kind WHEN 'binary' THEN binary_sha256 ELSE blob_sha256 END
+         FROM snapshots WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+            params![workspace_id, version_id, object_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(StorageError::corrupt_public)?;
+    let (path, snapshot_sha) = snapshot
         .as_ref()
-        .is_some_and(|(id, sha)| id == &object_id && sha == &job.content_sha256);
-    let canonical_matches = if snapshot_matches {
-        match super::versioned::check_restore_content_in_tx(
-            tx,
-            workspace_id,
-            &version_id,
-            &job.target_path,
-            &job.content_sha256,
-        ) {
-            Ok(()) => true,
-            Err(RuntimeError::Domain(DomainError::WritePreconditionFailed { .. })) => false,
-            Err(error) => return Err(error),
+        .map(|(path, sha)| (path.as_str(), sha.as_str()))
+        .unwrap_or((&job.target_path, &job.content_sha256));
+    let key = dohc_engine_collab::DocKey::new(workspace_id, &version_id, &object_id)?;
+    if !dohc_engine_sync::current_ydoc_content_matches_in_tx(tx, &key, path, snapshot_sha)? {
+        return Err(DomainError::WritePreconditionFailed {
+            current_sha256: snapshot.as_ref().map(|(_, sha)| sha.clone()),
         }
-    } else {
-        false
+        .into());
+    }
+    let target = read_publication_target(root, path)?;
+    let bytes = match target {
+        PublicationTarget::Bytes(bytes) if capturable(path, &bytes) => Some(bytes),
+        PublicationTarget::Absent => None,
+        PublicationTarget::Bytes(_) | PublicationTarget::Untracked => {
+            // Capture cannot represent this target. Keep disk intact and record D
+            // without a replacement, after checking that no live draft is lost.
+            super::versioned::settle_checked_delete_in_tx(
+                tx,
+                workspace_id,
+                moment_id,
+                true,
+                false,
+            )?;
+            eprintln!(
+                "engine: exported checked deletion settled without capture: target is not a capturable file ({path})"
+            );
+            return Ok(ExportedDeleteRecovery::Settled);
+        }
     };
     let recreated = job.status == JobStatus::Complete && bytes.is_some();
-    let disk_matches = bytes
-        .as_ref()
-        .is_none_or(|bytes| hex_sha256(bytes) == job.content_sha256);
-    if canonical_matches && disk_matches && !recreated {
+    let prepared =
+        snapshot.is_some() && path == job.target_path && snapshot_sha == job.content_sha256;
+    let disk_sha256 = bytes.as_deref().map(hex_sha256);
+    let disk_matches = disk_sha256.as_deref().is_none_or(|sha| sha == snapshot_sha);
+    if prepared && disk_matches && !recreated {
         // The materializer rechecks the preimage before it can remove the file.
         tx.execute(
             "UPDATE materialization_jobs SET status='pending',completed_at_ms=NULL
@@ -115,22 +122,37 @@ fn recover_exported_in_tx(
         .map_err(StorageError::persist_public)?;
         return Ok(ExportedDeleteRecovery::Publish);
     }
-
-    // D is immutable on peers. Apply it in history, then record the later disk
-    // state after D. Do not enqueue D's scene-asset deletions or any disk writes.
-    super::versioned::finish_checked_delete_history_in_tx(tx, workspace_id, moment_id, true)?;
+    // Ordinary replay runs first. A parked write, an uncaptured disk edit, or
+    // an absent projection of a newer head must not retire canonical state.
+    let agrees = match (&snapshot, &disk_sha256) {
+        (Some(_), Some(_)) => disk_matches,
+        (None, None) => true,
+        _ => false,
+    };
+    if !agrees {
+        return Err(DomainError::WritePreconditionFailed {
+            current_sha256: snapshot.as_ref().map(|(_, sha)| sha.clone()),
+        }
+        .into());
+    }
+    // D is immutable on peers. Apply it in history, then record the agreed
+    // later state after D, without deleting assets or changing disk.
+    super::versioned::settle_checked_delete_in_tx(tx, workspace_id, moment_id, true, false)?;
     if let Some(bytes) = bytes {
-        capture_current_bytes_in_tx(
-            tx,
-            root,
-            workspace_id,
-            &version_id,
-            &job.target_path,
-            bytes,
-            now_ms,
-        )?;
+        capture_current_bytes_in_tx(tx, root, workspace_id, &version_id, path, bytes, now_ms)?;
     }
     Ok(ExportedDeleteRecovery::Settled)
+}
+
+fn capturable(path: &str, bytes: &[u8]) -> bool {
+    let media = dohc_engine_files::media::media_type_for_path(path);
+    if dohc_engine_files::media::is_text_media_type(media, path)
+        && let Ok(text) = std::str::from_utf8(bytes)
+        && text.len() <= dohc_engine_domain::MAX_TEXT_BYTES
+    {
+        return true;
+    }
+    bytes.len() <= dohc_engine_domain::MAX_CAPTURE_BINARY_FILE_BYTES
 }
 
 fn capture_current_bytes_in_tx(
