@@ -245,6 +245,9 @@ export function createLiveGateway(options: LiveGatewayOptions) {
       if (typeof reserved === "string") refusalCode = reserved; else release = reserved;
       if (refusalCode) { refuseLimit(refusalCode); return; }
       const bufferScopes: [string, number][] = [
+        [JSON.stringify(["workspace", session.workspaceId]),
+          Math.max(1, Math.floor(limits.maxBufferedBytes * Math.min(1,
+            (limits.maxConnectionsPerWorkspace - limits.reservedOwnerConnections) / limits.maxConnections)))],
         [JSON.stringify(session.kind === "named" ? ["principal", "named", session.userId] :
           ["principal", "link", session.workspaceId, session.grantId, session.principalId]),
           Math.max(1, Math.floor(limits.maxBufferedBytes * Math.min(1, limits.maxConnectionsPerPrincipal / limits.maxConnections)))],

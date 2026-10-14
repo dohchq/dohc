@@ -653,3 +653,36 @@ it("rejects a gateway owner reserve that exhausts total or workspace capacity", 
   for (const reservedOwnerConnections of [profile.maxConnections, profile.maxConnectionsPerWorkspace])
     expect(() => parseLiveGatewayLimits({...profile, reservedOwnerConnections})).toThrow("Invalid live gateway limits");
 });
+
+it("contains stalled writes across two links in one workspace while another workspace stays open", async () => {
+  const profile = selfHostLiveProfile(), limits = profile.gateway, budget = createLiveBufferBudget(limits.maxBufferedBytes);
+  const state = await fixture({limits, bufferBudget: budget}), completions: (() => void)[] = [], browsers = [], MiB = 1024 * 1024;
+  const other = state.browser(); expect(await other.status).toBe(101);
+  const otherHost = state.hosts[0]!;
+  const workspacePortion = limits.maxBufferedBytes * (limits.maxConnectionsPerWorkspace - limits.reservedOwnerConnections) / limits.maxConnections;
+  expect(workspacePortion).toBe(80 * MiB);
+  try {
+    for (let index = 0; index < 21; index++) {
+      state.resolve.mockResolvedValue({kind: "link", workspaceId: "stalled-workspace", shareId: index < 10 ? "first-share" : "second-share",
+        grantId: index < 10 ? "first-link" : "second-link", principalId: "person-" + index, sessionId: "session-" + index});
+      const browser = state.browser(); expect(await browser.status).toBe(101);
+      const route = (await state.open.mock.results.at(-1)!.value)!;
+      vi.spyOn(route.socket, "send").mockImplementation((_data, _options, callback) => {
+        completions.push(() => { if (typeof callback === "function") callback(); });
+      });
+      for (let frame = 0; frame < (index < 20 ? 32 : 1); frame++) browser.socket.send(Buffer.alloc(limits.maxFrameBytes));
+      if (index < 20) {
+        await vi.waitFor(() => expect(budget.usage()).toBe((index + 1) * 4 * MiB)); browsers.push(browser);
+      } else {
+        await vi.waitFor(() => expect(browser.socket.readyState === WebSocket.CLOSED || budget.usage() > workspacePortion).toBe(true));
+        expect(budget.usage()).toBeLessThanOrEqual(workspacePortion);
+        expect(await browser.closed).toEqual([LIVE_CONNECTION_LIMIT_CLOSE_CODE, "live_buffer_limit"]);
+      }
+    }
+    expect(budget.usage()).toBe(workspacePortion);
+    expect(browsers.every(browser => browser.socket.readyState === WebSocket.OPEN)).toBe(true);
+    const received = once(otherHost, "message"); other.socket.send(Buffer.from("still-live"));
+    expect((await received)[0]).toEqual(Buffer.from("still-live")); expect(other.socket.readyState).toBe(WebSocket.OPEN);
+  } finally {completions.forEach(complete => complete());}
+  await vi.waitFor(() => expect(budget.usage()).toBe(0));
+}, 60_000);

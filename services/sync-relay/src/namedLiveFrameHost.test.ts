@@ -1,4 +1,9 @@
 import {createLiveBufferBudget, LiveConnectionLimitError} from "@dohc/live-session-contract/live-connection";
+import * as Y from "yjs";
+import {markdownToYDoc} from "../../../packages/ydoc-projection/src/import-export";
+import {createLiveConnectionAdmission} from "./liveConnectionAdmission";
+import {registered, cleanupLiveDeliveryFixtures, policy as journalPolicy} from "../../../packages/ydoc-projection/src/liveCommittedDeliveryTestSupport";
+import {createLiveMarkdownJournalValidator} from "@dohc/ydoc-projection/live-journal-validation";
 import { EventEmitter } from "node:events";
 import { createHash } from "node:crypto";
 import { afterEach, expect, it, vi } from "vitest";
@@ -13,6 +18,7 @@ import { observeRelayWrites } from "./relayWriteChanges.js";
 import { queueLiveHostRequests } from "./liveHostRequests.js";
 import { createLiveMembershipRegistry } from "./liveMembership.js";
 import type { StorageContext } from "./storage/context.js";
+import type { OwnerOutboxAdmission } from "./ownerOutboxDelivery.js";
 
 const hash = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
 function deferred<T>() {
@@ -20,7 +26,7 @@ function deferred<T>() {
   return {promise: new Promise<T>(done => {resolve = done;}), resolve: (value: T) => resolve(value)};
 }
 const cleanup: (() => Promise<void>)[] = [];
-afterEach(async () => { for (const close of cleanup.splice(0).reverse()) await close(); vi.restoreAllMocks(); });
+afterEach(async () => { for (const close of cleanup.splice(0).reverse()) await close(); vi.restoreAllMocks(); cleanupLiveDeliveryFixtures(); });
 const wireLimits = { maxFrameBytes: 1024 * 1024, maxBlobChunkBytes: 65536, maxStringBytes: 65536,
   maxCollectionLen: 1024, maxBatchLen: 64, maxJsonDepth: 32 };
 class Peer implements EngineClientConnection {
@@ -91,7 +97,7 @@ async function setup(maxListeners = 4, reserveBytes?: (size: number) => () => vo
   const native = { client, workspace: "trusted-native-handle", registrationId: 7, coordinate: host, binding: nativeBinding,
     invalidated: invalidated.signal, changes, deadlineMs: 5000, nextRequestId: () => ++requestId, drain };
   const bounds = { maxClientVectorBytes: 32, maxSyncOutputBytes: 1024, maxAppliedUpdateBytes: 1024, maxSubmissionBytes: 1024, maxAdmissionBytes: 4096 };
-  const capture = captureNamedLiveFrameHost({ ticket, actor: liveBrowserActor(scope), storage: state.storage, validate, native, bounds, reserveBytes });
+  const capture = captureNamedLiveFrameHost({ ticket, actor: liveBrowserActor(scope), storage: state.storage, validate, native, bounds, reserveBytes, validationBudget: reserveBytes ? {reserve: () => () => {}, reserveBytes} : undefined });
   cleanup.push(async () => { capture.close(); });
   return { ...state, peer, client, changes, invalidated, drain, capture, validate, native, bounds };
 }
@@ -462,7 +468,7 @@ it("reserves journal work before reading journal bytes", async () => {
   const sync = await f.capture.openSync(Uint8Array.of(0), new AbortController().signal);
   const cut = vi.spyOn(f.storage, "readLiveUpdateJournalCut"), release = budget.reserve(12_288);
   await expect(f.capture.submit({deliveryId: "delivery", updateDigest: hash(bytes), updateBytes: bytes}, new AbortController().signal))
-    .rejects.toThrowError(LiveConnectionLimitError);
+    .resolves.toEqual({result: "retry", reason: "admission-unavailable"});
   expect(f.peer.requests).toHaveLength(1);
   expect(cut).toHaveBeenCalledOnce();
   release(); sync.close(); f.capture.close(); expect(budget.usage()).toBe(0);
@@ -501,3 +507,60 @@ it("refuses an applied payload only after reading its size without retaining bud
   await expect(sync.nextApplied(signal)).rejects.toThrowError(LiveConnectionLimitError);
   expect(read).toHaveBeenCalledOnce(); expect(budget.usage()).toBe(0);
 });
+
+it("admits an edit to a 2 MiB checkpoint and retries a concurrent validation from the same person", async () => {
+  const MiB = 1024 * 1024, doc = markdownToYDoc("x".repeat(2 * MiB - 1024));
+  const baselineBytes = Y.encodeStateAsUpdate(doc); doc.destroy();
+  const checkpointPolicy = {...journalPolicy, maxDecodedPayloadByteVisits: 500_000_000};
+  const f = registered({deployment: true, baselineBytes, journalPolicy: checkpointPolicy}), peer = await setup(), admission = createLiveConnectionAdmission();
+  cleanup.push(async () => f.close());
+  for (let index = 0; index < Math.ceil(20 * MiB / baselineBytes.length); index++) {
+    const result = f.storage.commitLiveUpdateJournal(f.capture(baselineBytes, "checkpoint-" + index)).result;
+    if (result.kind !== "accepted") throw new Error(JSON.stringify({index, result}));
+  }
+  const document = f.input.evidence.document, cut = f.storage.readLiveUpdateJournalCut({document});
+  if (cut.kind !== "cut") throw new Error("Expected checkpoint cut");
+  expect(cut.cut.checkpoint.cursor).not.toBeNull(); expect(cut.cut.suffix).toEqual([]);
+  expect(cut.cut.checkpoint.bytes.length).toBeGreaterThan(1.9 * MiB);
+  expect(cut.cut.checkpoint.bytes.length).toBeLessThan(4 * MiB);
+  const current = f.storage.resolveCurrentLiveDocumentBinding({document, actor: f.actor});
+  if (current.kind !== "current") throw new Error("Expected current binding");
+  const buffers = admission.buffers(128 * MiB), key = JSON.stringify(["principal", "named", "owner"]);
+  const entered = deferred<void>(), resume = deferred<void>(), validateJournal = createLiveMarkdownJournalValidator(checkpointPolicy);
+  let firstValidation = true;
+  const validate = vi.fn(async ({retainStateUpdate: _retainStateUpdate, ...input}: Parameters<OwnerOutboxAdmission["validate"]>[0]) => {
+    entered.resolve();
+    if (firstValidation) { firstValidation = false; await resume.promise; }
+    return validateJournal(input);
+  });
+  const native = {...peer.native, coordinate: current.host, binding: current.binding,
+    client: {openLiveAppliedSync: peer.native.client.openLiveAppliedSync.bind(peer.native.client),
+      readNextLiveApplied: peer.native.client.readNextLiveApplied.bind(peer.native.client), readLiveApplicationAck: vi.fn(async (_request, identity: {deliveryId: string; updateDigest: string}) => {
+      const row = f.raw.prepare("SELECT journal_cursor FROM sync_relay_live_update_journal WHERE delivery_id=?").get(identity.deliveryId)!;
+      return {...identity, journalCursor: Number(row.journal_cursor), acceptingHostEpoch: current.host.hostEpoch,
+        localYDocSequence: 1, applicationReplayed: false};
+    })}};
+  const capture = () => {
+    const session = captureOwnerLiveFrameHost({authenticatedUserId: "owner", shareId: "share", storage: f.storage, native,
+      bounds: {...peer.bounds, maxAdmissionBytes: 20 * MiB}, validate,
+      reserveBytes: size => buffers.reserve(size, [[key, 12 * MiB]]),
+      validationBudget: {reserve: () => admission.reserve([[JSON.stringify(["validation", key]), 1]]), reserveBytes: buffers.reserve}});
+    cleanup.push(async () => session.close()); return session;
+  };
+  const first = capture(), second = capture(), updateBytes = f.update("title", "Edited after checkpoint");
+  const input = {deliveryId: "large-edit", updateDigest: hash(updateBytes), updateBytes}, signal = new AbortController().signal;
+  const submitting = first.submit(input, signal);
+  await Promise.race([entered.promise, submitting]);
+  expect(validate).toHaveBeenCalledOnce();
+  try {
+    expect(buffers.usage()).toBeGreaterThan(12 * MiB);
+    const retained = buffers.usage();
+    expect(await second.submit({...input, deliveryId: "concurrent-edit"}, signal)).toEqual({result: "retry", reason: "admission-unavailable"});
+    expect(buffers.usage()).toBe(retained); expect(validate).toHaveBeenCalledOnce();
+    expect(first.invalidated.aborted).toBe(false); expect(second.invalidated.aborted).toBe(false);
+  } finally {resume.resolve();}
+  expect(await submitting).toMatchObject({result: "success", ack: {deliveryId: "large-edit"}});
+  expect(buffers.usage()).toBe(0);
+  expect(await second.submit({...input, deliveryId: "next-edit"}, signal)).toMatchObject({result: "success"});
+  expect(validate).toHaveBeenCalledTimes(2); expect(buffers.usage()).toBe(0);
+}, 120_000);

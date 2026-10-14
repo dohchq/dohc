@@ -545,3 +545,17 @@ it("refuses a shared assembly before allocating it", () => {
   expect(() => deliver(client, server, begin("client-vector", 1, 2048))).toThrowError(LiveConnectionLimitError);
   release(); expect(budget.usage()).toBe(0); client.close(); server.close();
 });
+
+it("keeps admission-unavailable retry live and accepts the next correlated attempt", () => {
+  const {client, server} = makeLive();
+  consume(client, server, begin("submit-update", 2));
+  consume(client, server, {kind: "chunk", transferId: 2, offset: 0, bytes: new Uint8Array([0, 0])});
+  consume(server, client, {kind: "result", result: "retry", deliveryId: "d", updateDigest: digest, reason: "admission-unavailable"});
+  expect(server.usage()).toMatchObject({closed: false, live: true}); expect(client.usage()).toMatchObject({closed: false, live: true});
+  grant(server, client, 773, 6);
+  consume(client, server, begin("submit-update", 3));
+  consume(client, server, {kind: "chunk", transferId: 3, offset: 0, bytes: new Uint8Array([0, 0])});
+  consume(server, client, {kind: "result", result: "success", ack: {deliveryId: "d", updateDigest: digest,
+    journalCursor: 19, acceptingHostEpoch: parseHostEpoch(1), localYDocSequence: 3, applicationReplayed: false}});
+  expect(server.usage().closed).toBe(false); expect(client.usage().closed).toBe(false); client.close(); server.close();
+});

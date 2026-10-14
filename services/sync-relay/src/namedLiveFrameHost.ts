@@ -1,3 +1,4 @@
+import { LiveConnectionLimitError } from "@dohc/live-session-contract/live-connection";
 import type { StorageContext } from "./storage/context.js";
 import { parseAutomationDeclaration, parseLiveAuthorContext } from "@dohc/live-session-contract/live-authorship";
 import { createHash } from "node:crypto";
@@ -38,6 +39,11 @@ export interface NamedFrameHostBounds {
   readonly maxAdmissionBytes: number;
 }
 
+export interface NamedFrameValidationBudget {
+  reserve(): (() => void) | null;
+  reserveBytes(size: number): () => void;
+}
+
 /** Wraps an established authenticated native registration. It never owns host retirement. */
 export function captureNamedLiveFrameHost(options: {
   ticket: RedeemedLiveTicket;
@@ -48,6 +54,7 @@ export function captureNamedLiveFrameHost(options: {
   bounds: NamedFrameHostBounds;
   validate: OwnerOutboxAdmission["validate"];
   reserveBytes?: (size: number) => () => void;
+  validationBudget?: NamedFrameValidationBudget;
 }): NamedFrameHostSession & {readonly ticket: RedeemedLiveTicket} {
   const ticket = parseRedeemedLiveTicket(options.ticket);
   Object.freeze(ticket.binding.selectorPaths);
@@ -68,6 +75,7 @@ export function captureOwnerLiveFrameHost(options: {
   bounds: NamedFrameHostBounds;
   validate: OwnerOutboxAdmission["validate"];
   reserveBytes?: (size: number) => () => void;
+  validationBudget?: NamedFrameValidationBudget;
 }): NamedFrameHostSession {
   const binding = parseLiveObjectBinding(options.native.binding);
   const document = {workspaceId: binding.workspaceId, mainVersionId: binding.mainVersionId,
@@ -91,6 +99,7 @@ function captureLiveFrameHost(options: {
   bounds: NamedFrameHostBounds;
   validate: OwnerOutboxAdmission["validate"];
   reserveBytes?: (size: number) => () => void;
+  validationBudget?: NamedFrameValidationBudget;
 }): NamedFrameHostSession {
   const binding = parseLiveObjectBinding(options.binding);
   Object.freeze(binding.selectorPaths); Object.freeze(binding);
@@ -213,7 +222,7 @@ function captureLiveFrameHost(options: {
     async submit(input, caller) {
       check(caller);
       if (submitting) throw new Error("A named submission already owns admission.");
-      let releaseBytes: (() => void) | undefined;
+      let releaseBytes: (() => void) | undefined, releaseValidation: (() => void) | undefined;
       submitting = true;
       const signal = signalFor(caller);
       try {
@@ -231,8 +240,12 @@ function captureLiveFrameHost(options: {
         const authorContext = input.authorContext === undefined ? undefined : parseLiveAuthorContext(input.authorContext);
         if (updateBytes.length < 1 || updateBytes.length > bounds.maxSubmissionBytes) return { result: "refused", reason: "invalid-update" };
         if (createHash("sha256").update(updateBytes).digest("hex") !== updateDigest) return { result: "refused", reason: "invalid-update" };
-        const read = storage.readLiveUpdateJournalCut({ document }, options.reserveBytes ? size => {
-          releaseBytes = options.reserveBytes!(size + 3 * updateBytes.length);
+        if (options.validationBudget) {
+          releaseValidation = options.validationBudget.reserve() ?? undefined;
+          if (!releaseValidation) return {result: "retry", reason: "admission-unavailable"};
+        }
+        const read = storage.readLiveUpdateJournalCut({ document }, options.validationBudget ? size => {
+          releaseBytes = options.validationBudget!.reserveBytes(size + 3 * updateBytes.length);
         } : undefined);
         if (read.kind !== "cut") return { result: "refused", reason: read.reason };
         const cut = read.cut;
@@ -263,7 +276,10 @@ function captureLiveFrameHost(options: {
         if (ack.deliveryId !== deliveryId || ack.updateDigest !== updateDigest || ack.journalCursor !== committed.result.receipt.journalCursor ||
           ack.acceptingHostEpoch !== committed.result.receipt.acceptingHostEpoch) throw new Error("Native application ACK identity changed.");
         return { result: "success", ack };
-      } finally { submitting = false; releaseBytes?.(); }
+      } catch (error) {
+        if (error instanceof LiveConnectionLimitError) return {result: "retry", reason: "admission-unavailable"};
+        throw error;
+      } finally { submitting = false; releaseBytes?.(); releaseValidation?.(); }
     },
   };
 }

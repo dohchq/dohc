@@ -162,7 +162,7 @@ export function createNamedLiveFrameSession(options: {
           try { await transport.send(lease.value); check(); }
           finally { lease.release(); }
           if (held && transfer === held && held.offset === held.bytes.length) { transfer = undefined; held.release(); }
-          if (frame.kind === "result" && frame.result !== "success") { close(); return; }
+          if (frame.kind === "result" && (frame.result === "refused" || (frame.result === "retry" && frame.reason !== "admission-unavailable"))) { close(); return; }
         }
       } finally { pumping = false; }
     });

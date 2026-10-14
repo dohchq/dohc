@@ -300,13 +300,13 @@ function deferred<T>() {
   const promise = new Promise<T>(done => { resolve = done; }); return { promise, resolve };
 }
 const defaultScope = scope, defaultBinding = binding, defaultFrames = frames, defaultBounds = bounds;
-async function fixture(routeLimits = limits, link = false, membershipPolicy: LiveMembershipPolicy = {maxSessions: 16, maxMembers: 8, maxSnapshotBytes: 153}, owner = false, desktop = false, admission?: ReturnType<typeof createLiveConnectionAdmission>, person = 0, document = 0, production = false, workspaceId = defaultScope.workspaceId) {
+async function fixture(routeLimits = limits, link = false, membershipPolicy: LiveMembershipPolicy = {maxSessions: 16, maxMembers: 8, maxSnapshotBytes: 153}, owner = false, desktop = false, admission?: ReturnType<typeof createLiveConnectionAdmission>, person = 0, document = 0, production = false, workspaceId = defaultScope.workspaceId, shareId = defaultScope.shareId) {
   const liveProfile = selfHostLiveProfile();
   const frames = production ? liveProfile.frames : defaultFrames, bounds = production ? liveProfile.namedLive.host : defaultBounds;
-  const scope = {...defaultScope, workspaceId, userId: person ? "reader-" + person : defaultScope.userId,
-    grantId: !link && person ? "edit-" + person : defaultScope.grantId};
+  const scope = {...defaultScope, workspaceId, shareId, userId: person ? "reader-" + person : defaultScope.userId,
+    grantId: link && shareId !== defaultScope.shareId ? shareId + "-link" : !link && person ? "edit-" + person : defaultScope.grantId};
   const binding = {...defaultBinding, workspaceId, objectId: document ? "object-" + document : defaultBinding.objectId};
-  const state = await ticketFixture(undefined, {userId: scope.userId, grantId: scope.grantId, objectId: binding.objectId, workspaceId});
+  const state = await ticketFixture(undefined, {userId: scope.userId, grantId: scope.grantId, objectId: binding.objectId, workspaceId, shareId});
   const routeKind = desktop ? "desktop" : link ? "link" : "named";
   const memberships = createLiveMembershipRegistry(membershipPolicy, state.storage.readLiveAuthority.bind(state.storage));
   const bearer = Buffer.alloc(32, 1).toString("base64url"), profile = Buffer.alloc(32, person || 2).toString("base64url");
@@ -1062,3 +1062,63 @@ it("rejects an owner reserve that exhausts total or workspace capacity", () => {
     expect(() => parseNamedLiveRouteLimits({...profile, reservedOwnerConnections})).toThrow("Invalid named route limits");
   expect(parseNamedLiveRouteLimits({...profile, reservedOwnerConnections: 0}).reservedOwnerConnections).toBe(0);
 });
+
+it.each(["named", "owner", "link"])("keeps %s validation work in the shared budget and retries an occupied person slot", async kind => {
+  const profile = selfHostLiveProfile(), admission = createLiveConnectionAdmission(), limits = profile.namedLive.transport;
+  const f = await fixture(limits, kind === "link", undefined, kind === "owner", false, admission, 1, 1, true);
+  const socket = f.connect(kind === "owner" ? "" : (await f.mint()).token); expect(await socket.status).toBe(101);
+  await openProductionSync(f, socket);
+  const principal = JSON.stringify(kind === "link" ? ["principal", "link", scope.workspaceId, scope.grantId,
+    hashLinkProfileSecret(f.profile, key)] : ["principal", "named", kind === "owner" ? "owner-1" : "reader-1"]);
+  const release = admission.reserve([[JSON.stringify(["validation", principal]), 1]])!;
+  const budget = admission.buffers(limits.maxBufferedBytes), read = vi.spyOn(f.storage, "readLiveUpdateJournalCut").mockImplementation((_input, reserve) => {
+    expect(reserve).toBeDefined(); reserve!(20 * 1024 * 1024);
+    expect(budget.usage()).toBeGreaterThan(20 * 1024 * 1024);
+    return {kind: "refused", reason: "baseline-missing"};
+  });
+  const submit = (deliveryId: string, transferId: number) => {
+    const updateBytes = Uint8Array.of(0, 0);
+    socket.ws.send(encodeLiveFrame({kind: "begin", purpose: "submit-update", deliveryId, transferId, totalBytes: updateBytes.length,
+      digest: createHash("sha256").update(updateBytes).digest("hex")}, f.frames.receive.maxFrameBytes));
+    socket.ws.send(encodeLiveFrame({kind: "chunk", transferId, offset: 0, bytes: updateBytes}, f.frames.receive.maxFrameBytes));
+  };
+  try {
+    submit("occupied", 2);
+    await vi.waitFor(() => expect(socket.received).toContainEqual(expect.objectContaining({kind: "result", result: "retry", reason: "admission-unavailable"})));
+    expect(read).not.toHaveBeenCalled(); expect(socket.ws.readyState).toBe(WebSocket.OPEN);
+  } finally {release();}
+  submit("available", 3);
+  await vi.waitFor(() => expect(socket.received).toContainEqual(expect.objectContaining({kind: "result", deliveryId: "available", reason: "baseline-missing"})));
+  expect(read).toHaveBeenCalledOnce();
+  await vi.waitFor(() => expect(budget.usage()).toBe(0));
+});
+
+it("contains stalled syncs across two links in one workspace while another workspace stays open", async () => {
+  const profile = selfHostLiveProfile(), limits = profile.namedLive.transport, admission = createLiveConnectionAdmission();
+  const other = await fixture(limits, false, undefined, true, false, admission, 23, 1, true, "other-workspace");
+  const owner = other.connect(""); expect(await owner.status).toBe(101); await openProductionSync(other, owner);
+  const stalled = [], budget = admission.buffers(limits.maxBufferedBytes), MiB = 1024 * 1024;
+  const workspacePortion = limits.maxBufferedBytes * (limits.maxConnectionsPerWorkspace - limits.reservedOwnerConnections) / limits.maxConnections;
+  expect(workspacePortion).toBe(80 * MiB);
+  for (let index = 0; index < 21; index++) {
+    const f = await fixture(limits, true, undefined, false, false, admission, index + 1, 1, true, scope.workspaceId,
+      index < 10 ? "first-share" : "second-share");
+    vi.mocked(f.native.client.openLiveAppliedSync).mockResolvedValue({binding: {...f.binding, selectorPaths: [f.binding.currentPath]},
+      hostVector: Buffer.from([0]), missingStateUpdate: Buffer.alloc(4 * MiB - 1024), observedLocalYDocHeadSequence: 1,
+      position: {eventCount: 0, journalCursor: 0, evidenceDigest: "ab".repeat(32)}});
+    const socket = f.connect((await f.mint()).token); expect(await socket.status).toBe(101);
+    await openProductionSync(f, socket, false);
+    if (index < 20) {
+      await vi.waitFor(() => expect(budget.usage()).toBeGreaterThan((index + 1) * (4 * MiB - 1024)));
+      stalled.push(socket);
+    } else {
+      await vi.waitFor(() => expect(socket.ws.readyState === WebSocket.CLOSED || budget.usage() > workspacePortion).toBe(true));
+      expect(budget.usage()).toBeLessThanOrEqual(workspacePortion);
+      expect(await socket.closed).toEqual([LIVE_CONNECTION_LIMIT_CLOSE_CODE, "live_buffer_limit"]);
+    }
+  }
+  expect(budget.usage()).toBeLessThanOrEqual(workspacePortion);
+  expect(stalled.every(socket => socket.ws.readyState === WebSocket.OPEN)).toBe(true);
+  const pong = once(owner.ws, "pong"); owner.ws.ping("still-live"); await pong;
+  expect(owner.ws.readyState).toBe(WebSocket.OPEN);
+}, 60_000);

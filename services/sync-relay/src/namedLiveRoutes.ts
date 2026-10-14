@@ -14,7 +14,7 @@ import type { createLiveTickets } from "./liveTickets.js";
 import { liveBrowserActor, type LiveBrowserContext } from "./liveBrowserContext.js";
 import type { OwnerOutboxAdmission } from "./ownerOutboxDelivery.js";
 import { hashRelayExchangeKey, verifyRelayExchangeKey } from "./linkSecurity.js";
-import { captureNamedLiveFrameHost, captureOwnerLiveFrameHost, type NamedFrameHostBounds, type NamedFrameNativeHost } from "./namedLiveFrameHost.js";
+import { captureNamedLiveFrameHost, captureOwnerLiveFrameHost, type NamedFrameValidationBudget, type NamedFrameHostBounds, type NamedFrameNativeHost } from "./namedLiveFrameHost.js";
 import { createNamedLiveFrameSession, type NamedFrameHostSession } from "./namedLiveFrameSession.js";
 import type { createLiveMembershipRegistry, LiveMembershipSession } from "./liveMembership.js";
 import {createLiveConnectionAdmission} from "./liveConnectionAdmission";
@@ -212,6 +212,7 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions) {
     let ws: WebSocket | undefined, host: NamedFrameHostSession | undefined, session: ReturnType<typeof createNamedLiveFrameSession> | undefined;
     let membership: LiveMembershipSession | undefined;
     let reserveBytes: (size: number) => () => void = buffers.reserve;
+    let validationBudget: NamedFrameValidationBudget | undefined;
     let closingForLimit = false;
     let done = false, opening = true, releaseAuthority: (() => void) | undefined, releaseEditor: (() => void) | undefined;
     let timer = setTimeout(stop, limits.upgradeTimeoutMs);
@@ -263,11 +264,13 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions) {
         ]);
         if (!release) throw new Error("Live connection limit reached.");
         releaseAuthority = release;
-        const scopes: [string, number][] = [[principal, Math.max(1, Math.floor(limits.maxBufferedBytes *
+        const scopes: [string, number][] = [[JSON.stringify(["workspace", workspaceId]), Math.max(1, Math.floor(limits.maxBufferedBytes *
+          Math.min(1, (limits.maxConnectionsPerWorkspace - limits.reservedOwnerConnections) / limits.maxConnections)))], [principal, Math.max(1, Math.floor(limits.maxBufferedBytes *
           Math.min(1, limits.maxConnectionsPerPrincipal / limits.maxConnections)))]];
         if (shareId) scopes.push([JSON.stringify(["share", workspaceId, shareId]), Math.max(1, Math.floor(limits.maxBufferedBytes *
           Math.min(1, limits.maxConnectionsPerGrant / limits.maxConnections)))]);
         reserveBytes = size => buffers.reserve(size, scopes);
+        validationBudget = {reserve: () => admission.reserve([[JSON.stringify(["validation", principal]), 1]]), reserveBytes: buffers.reserve};
       }
       if (options.kind === "owner") {
         const {document, shareId} = ownerTarget!;
@@ -287,7 +290,7 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions) {
         const refreshed = storage.resolveCurrentLiveDocumentBinding({document, actor: {kind: "owner", userId: actor.userId, shareId}});
         if (!isDeepStrictEqual(refreshed, current)) throw new Error("Owner binding changed during capture.");
         const trustedAccount = await accountSnapshot(actor.userId); signal.throwIfAborted(); check();
-        host = captureOwnerLiveFrameHost({authenticatedUserId: actor.userId, trustedAccount, shareId, storage, native, bounds, validate, reserveBytes});
+        host = captureOwnerLiveFrameHost({authenticatedUserId: actor.userId, trustedAccount, shareId, storage, native, bounds, validate, reserveBytes, validationBudget});
       } else {
         const context = await options.sessions.resolve(authenticated, discriminator); signal.throwIfAborted(); check();
         if (!context || context.kind !== kind) { stop(); return; }
@@ -307,7 +310,7 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions) {
         const native = await captureNative(ticket.binding, signal); signal.throwIfAborted(); check();
         const trustedAccount = context.kind === "named" ? await accountSnapshot(context.userId) : undefined;
         signal.throwIfAborted(); check();
-        host = captureNamedLiveFrameHost({ ticket, actor: liveBrowserActor(context), ...(trustedAccount ? {trustedAccount} : {}), storage, native, bounds, validate, reserveBytes });
+        host = captureNamedLiveFrameHost({ ticket, actor: liveBrowserActor(context), ...(trustedAccount ? {trustedAccount} : {}), storage, native, bounds, validate, reserveBytes, validationBudget });
         host.assertCurrent();
         membership = options.membership?.join({ ticket, invalidated: host.invalidated, assertCurrent: host.assertCurrent.bind(host) });
       }
