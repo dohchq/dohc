@@ -39,20 +39,16 @@ test("desktop proof gets an isolated display only on headless Linux", () => {
   assert.deepEqual(desktopProofCommand(args, {platform: "linux", env: {WAYLAND_DISPLAY: "wayland-0"}}), direct);
 });
 
-test("renderer proofs require persistence smoke and the Windows pixel baseline without onboarding", () => {
-  const proofs = {smoke: true, statesPage: true};
-  assert.deepEqual(desktopProofTags(proofs, {platform: "win32"}), {
-    selected: ["@verification-smoke", "@states-page"], required: ["@verification-smoke", "@states-baselines"],
+test("desktop proofs require smoke and onboarding everywhere and the pixel baseline on Windows", () => {
+  assert.deepEqual(desktopProofTags({platform: "win32"}), {
+    selected: ["@verification-smoke", "@self-host-onboarding", "@states-page"],
+    required: ["@verification-smoke", "@self-host-onboarding", "@states-baselines"],
   });
   for (const platform of ["linux", "darwin"]) {
-    assert.deepEqual(desktopProofTags(proofs, {platform}), {
-      selected: ["@verification-smoke"], required: ["@verification-smoke"],
+    assert.deepEqual(desktopProofTags({platform}), {
+      selected: ["@verification-smoke", "@self-host-onboarding"], required: ["@verification-smoke", "@self-host-onboarding"],
     });
   }
-  assert.deepEqual(desktopProofTags({desktop: true}, {platform: "win32"}), {
-    selected: ["@verification-smoke", "@self-host-onboarding"], required: ["@verification-smoke", "@self-host-onboarding"],
-  });
-  assert.deepEqual(desktopProofTags({}, {platform: "win32"}), {selected: [], required: []});
 });
 
 test("native proof evidence rejects skips, wrong binaries, and incomplete delivery", () => {
@@ -1035,10 +1031,10 @@ test("a docs-only PR records clean provenance without code tools, while dirty he
   ], { cwd: root, encoding: "utf8" }).trim();
   try {
     for (const file of [
-      "scripts/verification/verify.mjs", "scripts/verification/ticket-evidence.mjs", "scripts/verification/timing.mjs", "scripts/verification/build.mjs", "scripts/verification/process.mjs", "scripts/verification/doctor.mjs",
-      "scripts/verification/cancellation.mjs", "scripts/verification/js-tests.mjs", "scripts/verification/selection.mjs", "scripts/verification/renderer-selection.mjs", "scripts/verification/admission.mjs", "scripts/verification/rust-reuse.mjs",
+      "scripts/verification/verify.mjs", "scripts/verification/ticket-evidence.mjs", "scripts/verification/queue.mjs", "scripts/verification/timing.mjs", "scripts/verification/build.mjs", "scripts/verification/process.mjs", "scripts/verification/doctor.mjs",
+      "scripts/verification/cancellation.mjs", "scripts/verification/js-tests.mjs", "scripts/verification/selection.mjs", "scripts/verification/admission.mjs", "scripts/verification/rust-reuse.mjs",
       "tools/rust-engine-program/build-slot.mjs", "tools/rust-engine-program/tree-provenance.mjs",
-      "tools/rust-engine-program/git-read.mjs", "tools/rust-engine-program/require-ci-pass-verdict.mjs",
+      "tools/rust-engine-program/git-read.mjs", "tools/rust-engine-program/gate-commands.mjs", "tools/rust-engine-program/require-ci-pass-verdict.mjs",
       "apps/desktop/scripts/require-e2e-engine.mjs", ".github/workflows/pr-checks.yml",
     ]) {
       mkdirSync(dirname(join(root, file)), { recursive: true });
