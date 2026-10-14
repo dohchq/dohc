@@ -508,7 +508,7 @@ function assertSupportedListMarkdown(markdown: string): string {
     const rule = indent <= 3 && /^(?:-(?:[ \t]*-){2,}|\*(?:[ \t]*\*){2,}|_(?:[ \t]*_){2,})[ \t]*$/u.test(rest)
     let marker = rule ? null : /^(?:[-+*]|[0-9]{1,9}[.)])(?: |$)/u.exec(rest)
     if (marker && !marker[0].endsWith(' ') && at > 0 && !blank) marker = null
-    if (open && !marker && (blank || indent < open.column)) {
+    if (open && (blank || (!marker && indent < open.column))) {
       if (blank ? indent > open.indent && indent < open.column : rest.startsWith('\t')) refuse()
       parents.pop()
     }
@@ -530,6 +530,7 @@ function assertSupportedListMarkdown(markdown: string): string {
       if (/^\[[ xX]\]\t/u.test(itemBody)) refuse()
       let body = itemBody.replace(/^\[[ xX]\] /u, '')
       if (/^[ \t]*\t/u.test(body)) refuse()
+      let emptyChild: { indent: number; column: number } | undefined
       let depth = quotes + (parents.length + 1) * 2
       body = body.trimStart()
       while (true) {
@@ -539,6 +540,7 @@ function assertSupportedListMarkdown(markdown: string): string {
         if (!child) break
         if (/^[0-9]/u.test(child[0]) && /^\[[ xX]\](?: |$)/u.test(body.slice(child[0].length))) refuse()
         body = body.slice(child[0].length); depth += 2
+        if (!body.trim()) emptyChild = { indent: indent + rest.length - body.length - child[0].length, column: indent + rest.length - body.length }
       }
       if (/^(?:\*(?:[ \t]*\*){2,}|_(?:[ \t]*_){2,})[ \t]*$/u.test(body)
         || /^[0-9]{1,9}[.)] \[[ xX]\](?: |$)/u.test(body)) refuse()
@@ -547,6 +549,7 @@ function assertSupportedListMarkdown(markdown: string): string {
       if (parents.length && indent < parents.at(-1)!.column) refuse()
       parents.push({ indent, column: indent + marker[0].trimEnd().length + 1 })
       if (itemBody.trim() === '') open = parents.at(-1)
+      if (emptyChild) { parents.push(emptyChild); open = emptyChild }
       if (itemBody === '') { lines[at] = lines[at].trimEnd(); changed = true }
     } else if (parents.length) {
       const parent = parents.at(-1)!

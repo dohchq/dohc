@@ -849,7 +849,8 @@
       "note": "CommonMark 0.31.2: <p>Shopping</p> <ul> <li></li> </ul> <p>Milk 2 litres</p>",
       "projected": true,
       "rustBase64": "AgOBioWL/fiTDwAoAQRtZXRhEmRvaGNNYXJrZG93blNvdXJjZQF3GlNob3BwaW5nCgotCk1pbGsKCTIgbGl0cmVzKAEEbWV0YRhkb2hjTWFya2Rvd25Tb3VyY2VTaGEyNTYBd0BiMjBhZDc3MWY5MTYxNzYxYzUxYmJkOWFmNWI1NzZlZDU4ZjY2NTY4Y2UwN2YxYWNhNmI1NGM5OTEwNTViNTU1KAEEbWV0YSJkb2hjTWFya2Rvd25Tb3VyY2VQcm9qZWN0aW9uU2hhMjU2AXdAMDM1MGIyYjE3NDI0Mzc5ZjUwYjkwMDRmMTQwYzI5MzUwZWQyMjhiMjM3NDE1OTRmMjIxOTQwZTQ2ZmE1ZjBjOQq28ZSbqLaIAQAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwlwYXJhZ3JhcGgHALbxlJuotogBAQYEALbxlJuotogBAghTaG9wcGluZ4e28ZSbqLaIAQEDCmJ1bGxldExpc3QHALbxlJuotogBCwMIbGlzdEl0ZW0HALbxlJuotogBDAMJcGFyYWdyYXBoh7bxlJuotogBCwMJcGFyYWdyYXBoBwC28ZSbqLaIAQ4GBAC28ZSbqLaIAQ8OTWlsawoJMiBsaXRyZXMA",
-      "source": "Shopping\n\n-\nMilk\n\t2 litres"
+      "source": "Shopping\n\n-\nMilk\n\t2 litres",
+      "witnessSeed": true
     },
     {
       "canonical": "Shopping\n\n- \n\nMilk\n&#9;2 litres",
@@ -858,7 +859,8 @@
       "name": "empty-spaced-marker-root-lazy-tab",
       "note": "CommonMark 0.31.2: <p>Shopping</p> <ul> <li></li> </ul> <p>Milk 2 litres</p>",
       "rustBase64": "Agq16bjOy+nGDQAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwlwYXJhZ3JhcGgHALXpuM7L6cYNAQYEALXpuM7L6cYNAghTaG9wcGluZ4e16bjOy+nGDQEDCmJ1bGxldExpc3QHALXpuM7L6cYNCwMIbGlzdEl0ZW0HALXpuM7L6cYNDAMJcGFyYWdyYXBoh7XpuM7L6cYNCwMJcGFyYWdyYXBoBwC16bjOy+nGDQ4GBAC16bjOy+nGDQ8OTWlsawoJMiBsaXRyZXMDj8CHi/u30AIAKAEEbWV0YRJkb2hjTWFya2Rvd25Tb3VyY2UBdxtTaG9wcGluZwoKLSAKTWlsawoJMiBsaXRyZXMoAQRtZXRhGGRvaGNNYXJrZG93blNvdXJjZVNoYTI1NgF3QDEzYWRmNjA1NDAzY2JlNGU2ZDM5OGU1NGI5MzVmMGRmOGM4YTIwYWZlZDExMDMyMWY5YjQzZjdiYzQxM2M1ZjAoAQRtZXRhImRvaGNNYXJrZG93blNvdXJjZVByb2plY3Rpb25TaGEyNTYBd0AwMzUwYjJiMTc0MjQzNzlmNTBiOTAwNGYxNDBjMjkzNTBlZDIyOGIyMzc0MTU5NGYyMjE5NDBlNDZmYTVmMGM5AA==",
-      "source": "Shopping\n\n- \nMilk\n\t2 litres"
+      "source": "Shopping\n\n- \nMilk\n\t2 litres",
+      "witnessSeed": true
     },
     {
       "canonical": "- \n\n---",
@@ -868,7 +870,8 @@
       "note": "CommonMark 0.31.2: <ul> <li></li> </ul> <hr />",
       "projected": true,
       "rustBase64": "AgOSus2/4Pz1DAAoAQRtZXRhEmRvaGNNYXJrZG93blNvdXJjZQF3Bi0KICoqKigBBG1ldGEYZG9oY01hcmtkb3duU291cmNlU2hhMjU2AXdANTk1NWVmMWRlZTIzODg3YzQ2MDdkOWUxZGE1ZmI0MjdmMTNiYTA0ZjczZTMzODEwM2ZhNTJjNWIwMmIxNmE2YSgBBG1ldGEiZG9oY01hcmtkb3duU291cmNlUHJvamVjdGlvblNoYTI1NgF3QDJjMmMyNmJhYTE1MjFiZGFhNzdlNTdiOTM5ZTg1ZTc2NDgyMTUyY2FkNTlhYThlYTU4NmQzY2ZhZGY4MWI4YjgF/PiOnYX76wcAKAEEbWV0YQ1zY2hlbWFWZXJzaW9uAX0BBwEEYm9keQMKYnVsbGV0TGlzdAcA/PiOnYX76wcBAwhsaXN0SXRlbQcA/PiOnYX76wcCAwlwYXJhZ3JhcGiH/PiOnYX76wcBAw5ob3Jpem9udGFsUnVsZQA=",
-      "source": "-\n ***"
+      "source": "-\n ***",
+      "witnessSeed": true
     },
     {
       "canonical": "- \n\n---",
@@ -877,7 +880,8 @@
       "name": "empty-spaced-marker-root-star-rule",
       "note": "CommonMark 0.31.2: <ul> <li></li> </ul> <hr />",
       "rustBase64": "AgOP96C8g5W0BgAoAQRtZXRhEmRvaGNNYXJrZG93blNvdXJjZQF3By0gCiAqKiooAQRtZXRhGGRvaGNNYXJrZG93blNvdXJjZVNoYTI1NgF3QDdhNzgzYzVkZWY1MjI3MGNiNzY1MGM2YmVhZjg2ZjU3ZGQ0NWVhZjQ0MzU5OWQ1NGRlMzdmYTMxNDVmMDkxZWEoAQRtZXRhImRvaGNNYXJrZG93blNvdXJjZVByb2plY3Rpb25TaGEyNTYBd0AyYzJjMjZiYWExNTIxYmRhYTc3ZTU3YjkzOWU4NWU3NjQ4MjE1MmNhZDU5YWE4ZWE1ODZkM2NmYWRmODFiOGI4Bbvjs8PNn6kCACgBBG1ldGENc2NoZW1hVmVyc2lvbgF9AQcBBGJvZHkDCmJ1bGxldExpc3QHALvjs8PNn6kCAQMIbGlzdEl0ZW0HALvjs8PNn6kCAgMJcGFyYWdyYXBoh7vjs8PNn6kCAQMOaG9yaXpvbnRhbFJ1bGUA",
-      "source": "- \n ***"
+      "source": "- \n ***",
+      "witnessSeed": true
     },
     {
       "foldRefuse": true,
@@ -892,6 +896,70 @@
       "note": "CommonMark 0.31.2: <ul> <li> <p>a</p> <ul> <li></li> </ul> </li> </ul> <p>x</p>",
       "refuse": true,
       "source": "- a\n\n  - \n\n x"
+    },
+    {
+      "canonical": "[](u \"x\n&#9;y\")",
+      "fileFold": true,
+      "name": "empty-link-tab-entity",
+      "note": "CommonMark 0.31.2: <p><a href=\"u\" title=\"x y\"></a></p>",
+      "rustBase64": "AQSm/Mess5CmCwAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwlwYXJhZ3JhcGgHAKb8x6yzkKYLAQYEAKb8x6yzkKYLAg9bXSh1ICJ4CiYjOTt5IikA",
+      "source": "[](u \"x\n&#9;y\")"
+    },
+    {
+      "canonical": "- [](u \"x\n  &#9;y\")",
+      "fileFold": true,
+      "name": "item-empty-link-tab-entity",
+      "note": "CommonMark 0.31.2: <ul> <li><a href=\"u\" title=\"x y\"></a></li> </ul>",
+      "rustBase64": "AQapjbmz/urTCQAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwCpjbmz/urTCQEDCGxpc3RJdGVtBwCpjbmz/urTCQIDCXBhcmFncmFwaAcAqY25s/7q0wkDBgQAqY25s/7q0wkED1tdKHUgIngKJiM5O3kiKQA=",
+      "source": "- [](u \"x\n  &#9;y\")"
+    },
+    {
+      "canonical": "&lt;span title&#61;&#34;a\n&amp;&#35;9&#59;b&#34;&gt;x&lt;/span&gt;",
+      "fileFold": true,
+      "name": "raw-tag-tab-entity",
+      "note": "CommonMark 0.31.2: <p><span title=\"a &#9;b\">x</span></p>",
+      "rustBase64": "AQTT6u3u5pLuBgAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwlwYXJhZ3JhcGgHANPq7e7mku4GAQYEANPq7e7mku4GAh48c3BhbiB0aXRsZT0iYQomIzk7YiI+eDwvc3Bhbj4A",
+      "source": "<span title=\"a\n&#9;b\">x</span>",
+      "witnessRefuse": true
+    },
+    {
+      "canonical": "Milk\n&#32;   2 litres",
+      "fileFold": true,
+      "name": "interior-leading-space-closure",
+      "note": "CommonMark 0.31.2: <p>Milk 2 litres</p>",
+      "rustBase64": "AQTGk66FmNg7ACgBBG1ldGENc2NoZW1hVmVyc2lvbgF9AQcBBGJvZHkDCXBhcmFncmFwaAcAxpOuhZjYOwEGBADGk66FmNg7AhFNaWxrCiAgICAyIGxpdHJlcwA=",
+      "source": "Milk\n    2 litres"
+    },
+    {
+      "canonical": "- \n\n- b\n\n- c",
+      "name": "empty-bullet-blank-child-marker",
+      "note": "CommonMark 0.31.2: <ul> <li></li> <li> <p>b</p> </li> <li> <p>c</p> </li> </ul>",
+      "rustBase64": "AQ60t56U8azbBgAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwC0t56U8azbBgEDCGxpc3RJdGVtBwC0t56U8azbBgIDCXBhcmFncmFwaIe0t56U8azbBgEDCmJ1bGxldExpc3QHALS3npTxrNsGBAMIbGlzdEl0ZW0HALS3npTxrNsGBQMJcGFyYWdyYXBoBwC0t56U8azbBgYGBAC0t56U8azbBgcBYoe0t56U8azbBgQDCmJ1bGxldExpc3QHALS3npTxrNsGCQMIbGlzdEl0ZW0HALS3npTxrNsGCgMJcGFyYWdyYXBoBwC0t56U8azbBgsGBAC0t56U8azbBgwBYwA=",
+      "source": "- \n\n  - b\n - c",
+      "sourceCanonical": "- \n- b\n- c"
+    },
+    {
+      "canonical": "1. \n\n- b\n\n- c",
+      "name": "empty-ordered-blank-child-marker",
+      "note": "CommonMark 0.31.2: <ol> <li></li> </ol> <ul> <li>b</li> <li>c</li> </ul>",
+      "projected": true,
+      "rustBase64": "AQ+TrefTqqb0BgAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwtvcmRlcmVkTGlzdCgAk63n06qm9AYBBXN0YXJ0AX0BBwCTrefTqqb0BgEDCGxpc3RJdGVtBwCTrefTqqb0BgMDCXBhcmFncmFwaIeTrefTqqb0BgEDCmJ1bGxldExpc3QHAJOt59OqpvQGBQMIbGlzdEl0ZW0HAJOt59OqpvQGBgMJcGFyYWdyYXBoBwCTrefTqqb0BgcGBACTrefTqqb0BggBYoeTrefTqqb0BgUDCmJ1bGxldExpc3QHAJOt59OqpvQGCgMIbGlzdEl0ZW0HAJOt59OqpvQGCwMJcGFyYWdyYXBoBwCTrefTqqb0BgwGBACTrefTqqb0Bg0BYwA=",
+      "source": "1.\n\n   - b\n  - c",
+      "sourceCanonical": "1. \n\n- b\n- c"
+    },
+    {
+      "foldRefuse": true,
+      "name": "inline-empty-bullet-underindent",
+      "note": "CommonMark 0.31.2: <ul> <li> <ul> <li></li> </ul> <p>x</p> </li> </ul>",
+      "refuse": true,
+      "source": "- - \n\n   x"
+    },
+    {
+      "foldRefuse": true,
+      "name": "inline-empty-ordered-underindent",
+      "note": "CommonMark 0.31.2: <ul> <li> <ol> <li></li> </ol> <p>x</p> </li> </ul>",
+      "refuse": true,
+      "source": "- 1. \n\n    x"
     }
   ],
   "rules": "Blank lines contain only spaces or tabs. Same-kind siblings across blanks form one loose list. An indented line after a blank starts another item paragraph; a nonblank unindented line can lazily continue the current paragraph. Children must reach their parent's marker content column. Task checkboxes are content after a two-column bullet marker. Refusals for ambiguous lines apply inside list bodies; root prose, rules and code remain accepted. Each projector output must be accepted unchanged by its projected reader. Ordered output is capped at nine digits. Letter and Roman prefixes are prose. Thematic breaks take precedence over list markers."

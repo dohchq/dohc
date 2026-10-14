@@ -6,7 +6,7 @@ import { createLiveMarkdownJournalValidator, createLiveMarkdownRegistrationValid
 import { markdownToYDoc, yDocToMarkdown, serializeRichdocBody, parseRichdocMarkdown } from './import-export.js'
 
 const corpus = JSON.parse(readFileSync(new URL('../../../tools/rust-engine-program/nested-markdown-contract.json', import.meta.url), 'utf8')) as {
-  cases: Array<{ name: string; source: string; canonical?: string; sourceCanonical?: string; foldRefuse?: boolean; refuse?: boolean; projected?: boolean; rustBase64?: string }>
+  cases: Array<{ name: string; source: string; canonical?: string; sourceCanonical?: string; witnessSeed?: boolean; foldRefuse?: boolean; refuse?: boolean; projected?: boolean; rustBase64?: string }>
 }
 it.each(corpus.cases)('shares the nested Markdown contract for $name', item => {
   if (item.refuse) {
@@ -47,6 +47,7 @@ it.each(corpus.cases.filter(item => !item.refuse))('validates the Rust-seeded $n
     expect(replay.getMap('meta').get('schemaVersion')).toBe(1)
     expect(yDocToMarkdown(replay)).toBe(item.canonical)
     const input = { document, currentPath: 'tasks/record.md', checkpoint }
+    if (item.witnessSeed) expect(replay.getMap('meta').get('dohcMarkdownSource')).toBe(item.source)
     const expectedMarkdown = replay.getMap('meta').has('dohcMarkdownSource') ? item.source : item.canonical!
     expect(registration(input)).toMatchObject({ kind: 'accepted', evidence: { projectedMarkdown: expectedMarkdown } })
     expect(journal({ ...input, suffix: [], candidate: Y.encodeStateAsUpdate(replay) })).toMatchObject({

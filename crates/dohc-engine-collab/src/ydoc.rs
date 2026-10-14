@@ -1987,6 +1987,15 @@ fn markdown_reads_alike(source: &str, projection: &str, reading: MarkdownReading
     };
     let source_body = normalize(source);
     let projected_body = normalize(projection);
+    // Compare syntax before decoding the projector's inert tag text.
+    let syntax_changed = encoded_tag_span(&projected_body).is_some()
+        && inline_code_spans(&projected_body).is_empty()
+        && empty_link_ranges(&projected_body).is_empty()
+        && read_text(&source_body, TextPlace::Inline).1
+            != read_text(&projected_body, TextPlace::Inline).1;
+    if syntax_changed {
+        return false;
+    }
     let (source, source_refused) = parse_markdown_blocks_checked(&source_body, reading);
     let (projection, projection_refused) =
         parse_markdown_blocks_checked(&projected_body, projected);
@@ -2278,7 +2287,7 @@ fn inline_syntax(text: &str) -> Option<String> {
             .chars()
             .next()
             .is_none_or(|next| next.is_whitespace() || next == '>' || next == '/');
-    if element || html_tag_has_attributes(text) {
+    if element || html_tag_with_attributes_end(text).is_some() {
         return Some(format!("element {name}"));
     }
     let close = text[1..].find(|c: char| c == '>' || c == '<' || c.is_whitespace())? + 1;
@@ -2302,10 +2311,10 @@ fn inline_syntax(text: &str) -> Option<String> {
     (uri || email).then(|| "autolink".into())
 }
 
-/// Whether `text` starts with a complete CommonMark open tag that has
+/// End byte of a complete CommonMark open tag that has
 /// attributes: `<`, a tag name, attributes, optional whitespace and `/`, and
 /// `>`.
-fn html_tag_has_attributes(text: &str) -> bool {
+fn html_tag_with_attributes_end(text: &str) -> Option<usize> {
     let bytes = text.as_bytes();
     let space = |at: usize| matches!(bytes.get(at), Some(b' ' | b'\t' | b'\n' | b'\r' | b'\x0c'));
     let skip_space = |mut at: usize| {
@@ -2315,7 +2324,7 @@ fn html_tag_has_attributes(text: &str) -> bool {
         at
     };
     if !bytes.get(1).is_some_and(u8::is_ascii_alphabetic) {
-        return false;
+        return None;
     }
     let mut at = 1;
     while bytes
@@ -2347,10 +2356,7 @@ fn html_tag_has_attributes(text: &str) -> bool {
         }
         let value = skip_space(equals + 1);
         at = match bytes.get(value) {
-            Some(quote @ (b'"' | b'\'')) => match text[value + 1..].find(char::from(*quote)) {
-                Some(close) => value + close + 2,
-                None => return false,
-            },
+            Some(quote @ (b'"' | b'\'')) => value + text[value + 1..].find(char::from(*quote))? + 2,
             _ => {
                 let mut end = value;
                 while !space(end)
@@ -2361,7 +2367,7 @@ fn html_tag_has_attributes(text: &str) -> bool {
                     end += 1;
                 }
                 if end == value {
-                    return false;
+                    return None;
                 }
                 end
             }
@@ -2371,7 +2377,7 @@ fn html_tag_has_attributes(text: &str) -> bool {
     if bytes.get(end) == Some(&b'/') {
         end += 1;
     }
-    attributes && bytes.get(end) == Some(&b'>')
+    (attributes && bytes.get(end) == Some(&b'>')).then_some(end + 1)
 }
 
 /// The block a Markdown reader starts on one line of a text run: a heading,
@@ -2844,52 +2850,58 @@ fn parse_markdown_blocks_at<'src>(
         if in_list {
             paragraph.truncate(paragraph.trim_end_matches([' ', '\t']).len());
         }
-        if reading != MarkdownReading::Source {
-            if paragraph.contains("&#") {
-                let code_spans = inline_code_spans(&paragraph);
-                paragraph = paragraph
-                    .split('\n')
-                    .scan(0, |offset, line| {
-                        let at = *offset;
-                        *offset += line.len() + 1;
-                        Some((at, line))
-                    })
-                    .map(|(index, line)| {
-                        if code_spans.iter().any(|span| span.contains(&index)) {
-                            return line.to_owned();
-                        }
-                        if let Some(rest) = line.strip_prefix("&#9;") {
-                            return format!("\t{rest}");
-                        }
-                        if index > 0 && line == "&#42;" {
-                            return "*".to_owned();
-                        }
-                        let digits = line.bytes().take_while(u8::is_ascii_digit).count();
-                        let marker = line[digits..]
-                            .strip_prefix("&#46;")
-                            .map(|rest| ('.', rest))
-                            .or_else(|| {
-                                line[digits..].strip_prefix("&#41;").map(|rest| (')', rest))
-                            });
-                        match marker {
-                            Some((marker, rest))
-                                if index > 0
-                                    && (1..=9).contains(&digits)
-                                    && (rest.is_empty() || rest.starts_with([' ', '\t'])) =>
-                            {
-                                format!("{}{marker}{rest}", &line[..digits])
-                            }
-                            _ => line.to_owned(),
-                        }
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n");
+        if reading != MarkdownReading::Source && paragraph.contains("&#") {
+            let mut spans = inline_code_spans(&paragraph);
+            spans.extend(
+                empty_link_ranges(&paragraph)
+                    .into_iter()
+                    .map(|(from, to)| from..to),
+            );
+            if let Some((from, to)) = encoded_tag_span(&paragraph).filter(|_| spans.is_empty()) {
+                let decoded = decode_html_entities_once(&paragraph[from..to]);
+                paragraph.replace_range(from..to, &decoded);
             }
-            if let Some(rest) = paragraph.strip_prefix("&#32;") {
-                paragraph = format!(" {rest}");
-            } else if let Some(rest) = paragraph.strip_prefix("&#9;") {
-                paragraph = format!("\t{rest}");
-            }
+            spans.extend(paragraph.match_indices('<').filter_map(|(at, _)| {
+                html_tag_with_attributes_end(&paragraph[at..]).map(|end| at..at + end)
+            }));
+            paragraph = paragraph
+                .split('\n')
+                .scan(0, |offset, line| {
+                    let at = *offset;
+                    *offset += line.len() + 1;
+                    Some((at, line))
+                })
+                .map(|(index, line)| {
+                    if spans.iter().any(|span| span.contains(&index)) {
+                        return line.to_owned();
+                    }
+                    if let Some(rest) = line.strip_prefix("&#9;") {
+                        return format!("\t{rest}");
+                    }
+                    if let Some(rest) = line.strip_prefix("&#32;") {
+                        return format!(" {rest}");
+                    }
+                    if index > 0 && line == "&#42;" {
+                        return "*".to_owned();
+                    }
+                    let digits = line.bytes().take_while(u8::is_ascii_digit).count();
+                    let marker = line[digits..]
+                        .strip_prefix("&#46;")
+                        .map(|rest| ('.', rest))
+                        .or_else(|| line[digits..].strip_prefix("&#41;").map(|rest| (')', rest)));
+                    match marker {
+                        Some((marker, rest))
+                            if index > 0
+                                && (1..=9).contains(&digits)
+                                && (rest.is_empty() || rest.starts_with([' ', '\t'])) =>
+                        {
+                            format!("{}{marker}{rest}", &line[..digits])
+                        }
+                        _ => line.to_owned(),
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
         }
         if paragraph.contains("&#") {
             for span in inline_code_spans(&paragraph).into_iter().rev() {

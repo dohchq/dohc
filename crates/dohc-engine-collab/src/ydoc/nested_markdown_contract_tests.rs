@@ -180,6 +180,10 @@ fn regenerate_nested_contract_seeds() {
             doc.project_richdoc().unwrap(),
             case["canonical"].as_str().unwrap()
         );
+        if case["witnessSeed"] == true {
+            doc.preserve_folded_markdown_source(case["source"].as_str().unwrap())
+                .unwrap();
+        }
         case["rustBase64"] = json!(base64_encode(&doc.encode_full_state()));
     }
     std::fs::write(path, serde_json::to_string_pretty(&corpus).unwrap() + "\n").unwrap();
