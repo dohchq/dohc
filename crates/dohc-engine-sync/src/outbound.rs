@@ -461,11 +461,6 @@ fn moment_payload_in_tx(
     moment_id: &str,
     portable_before: Option<&PortableBefore>,
 ) -> Result<(serde_json::Value, i64), SyncError> {
-    if checked_delete_is_pending_in_tx(tx, workspace_id, moment_id)? {
-        return Err(SyncError::InvalidInput {
-            reason: "checked-delete-publication-pending",
-        });
-    }
     let row = tx
         .query_row(
             "SELECT m.moment_id, m.version_id, m.object_id, o.created_at_ms, m.path, \

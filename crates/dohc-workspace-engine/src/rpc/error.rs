@@ -423,9 +423,9 @@ fn map_domain(error: DomainError) -> WireError {
         DomainError::InvalidText { .. } => (InvalidParams, "invalid-text"),
         DomainError::NotSecretPath => (InvalidParams, "not-secret-path"),
         DomainError::SecretMomentNotFound => (InvalidParams, "moment-not-found"),
-        DomainError::InvalidInput {
-            reason: "checked delete moment has replication dependents",
-        } => (ErrorCode::Conflict, "checked-delete-replication-dependents"),
+        DomainError::CheckedDeleteReplicationDependents => {
+            (ErrorCode::Conflict, "checked-delete-replication-dependents")
+        }
         DomainError::InvalidInput { .. } => (InvalidParams, "invalid-input"),
         DomainError::StateCorrupt { .. } => (Internal, "state-corrupt"),
         DomainError::Storage(_) => (Internal, "persist-failed"),
@@ -555,9 +555,7 @@ mod tests {
     #[test]
     fn checked_delete_replication_dependents_have_a_known_reason() {
         let wire = super::map_runtime(dohc_engine_runtime::RuntimeError::Domain(
-            dohc_engine_domain::DomainError::InvalidInput {
-                reason: "checked delete moment has replication dependents",
-            },
+            dohc_engine_domain::DomainError::CheckedDeleteReplicationDependents,
         ));
         assert_eq!(wire.code, dohc_engine_protocol::ErrorCode::Conflict);
         assert_eq!(wire.message, "checked-delete-replication-dependents");

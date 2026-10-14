@@ -53,7 +53,7 @@ pub use capture_write::{
 
 pub use delete_rename::{
     delete_text_in_tx, delete_text_in_tx_checked, finish_checked_delete_in_tx,
-    prepare_checked_delete_in_tx, validate_delete_input,
+    moment_has_replication_dependents_in, prepare_checked_delete_in_tx, validate_delete_input,
 };
 
 pub use rollback::{

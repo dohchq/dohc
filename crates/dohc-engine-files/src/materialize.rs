@@ -642,6 +642,22 @@ pub fn probe_projection_target(
     }
 }
 
+/// Read bytes for publication recovery without following links or changing disk.
+/// An oversized or non-file target remains ambiguous and must be retried.
+pub fn read_publication_target(
+    root: &Path,
+    rel: &str,
+) -> Result<Option<Vec<u8>>, MaterializeError> {
+    let root = std::fs::canonicalize(root).map_err(|error| MaterializeError::io(root, &error))?;
+    let target = resolve_target(&root, rel)?;
+    ensure_target_symlink_free(&root, &target)?;
+    match read_current_no_follow(&target)? {
+        CurrentTarget::Present(bytes) => Ok(Some(bytes)),
+        CurrentTarget::Absent => Ok(None),
+        CurrentTarget::Oversized => Err(MaterializeError::RecoveryUnavailable),
+    }
+}
+
 /// Hash a write precondition without applying capture's text or binary caps.
 pub fn write_precondition_sha256(
     root: &Path,

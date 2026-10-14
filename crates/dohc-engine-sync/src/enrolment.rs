@@ -458,8 +458,6 @@ fn backfill_moments_between(
                          AND d.object_id=m.object_id \
                          AND (d.head_update_seq>0 OR d.head_snapshot_seq>0 \
                            OR d.lineage_claim_status != 'unclaimed' OR d.file_export_lane IN (1,2)))) \
-                   AND NOT EXISTS (SELECT 1 FROM materialization_jobs j \
-                     WHERE j.workspace_id=m.workspace_id AND j.job_id='restore-delete-mat_'||m.moment_id) \
                    AND m.moment_order > ?2 \
                    AND (?3 IS NULL OR m.moment_order <= ?3) \
                    AND NOT EXISTS (SELECT 1 FROM replication_pending_conflict_moments p \
@@ -646,7 +644,7 @@ pub(crate) fn file_version_before_in_tx(
     if let Some(last) = last {
         return Ok(crate::outbound::PortableBefore::published(last));
     }
-    let first: String = tx.query_row(concat!("SELECT m.moment_id FROM moments m WHERE ", dohc_engine_domain::exclude_capture_recovery_sql!("m"), " AND m.workspace_id=?1 AND m.version_id=?2 AND m.object_id=?3 AND NOT EXISTS(SELECT 1 FROM replication_log r WHERE r.workspace_id=m.workspace_id AND r.op_kind='moment.append' AND r.imported=1 AND json_extract(r.payload_json,'$.momentId')=+m.moment_id AND NOT EXISTS(SELECT 1 FROM replication_pending_refusals p WHERE p.workspace_id=r.workspace_id AND p.origin_id=r.origin_id AND p.origin_seq=r.origin_seq)) ORDER BY m.moment_order LIMIT 1"), params![key.workspace_id,key.version_id,key.object_id], |r|r.get(0)).map_err(SyncError::corrupt)?;
+    let first: String = tx.query_row(concat!("SELECT m.moment_id FROM moments m WHERE ", dohc_engine_domain::exclude_capture_recovery_sql!("m"), " AND m.workspace_id=?1 AND m.version_id=?2 AND m.object_id=?3 AND NOT EXISTS(SELECT 1 FROM materialization_jobs j WHERE j.workspace_id=m.workspace_id AND j.job_id='restore-delete-mat_'||m.moment_id) AND NOT EXISTS(SELECT 1 FROM replication_log r WHERE r.workspace_id=m.workspace_id AND r.op_kind='moment.append' AND r.imported=1 AND json_extract(r.payload_json,'$.momentId')=+m.moment_id AND NOT EXISTS(SELECT 1 FROM replication_pending_refusals p WHERE p.workspace_id=r.workspace_id AND p.origin_id=r.origin_id AND p.origin_seq=r.origin_seq)) ORDER BY m.moment_order LIMIT 1"), params![key.workspace_id,key.version_id,key.object_id], |r|r.get(0)).map_err(SyncError::corrupt)?;
     let (bootstrap, _) =
         crate::outbound::moment_append_payload_in_tx(tx, &key.workspace_id, &first)?;
     Ok(crate::outbound::PortableBefore::bootstrap(&bootstrap))
@@ -3312,6 +3310,63 @@ mod tests {
         assert_eq!(ops[artifact].1["payloadAfterBlobSha256"], sha);
         sweep(&mut store, 102);
         assert_eq!(local_ops(&store), ops);
+    }
+
+    #[test]
+    fn checked_delete_pending_preimage_does_not_abort_bootstrap() {
+        let (_scratch, _, mut store) = open_store();
+        seed_main(&mut store);
+        seed_retained_artifact(&mut store);
+        let expected = dohc_engine_storage::hex_sha256(b"original seed bytes\n");
+        store.write_with(&NoFaults, |tx| {
+            tx.execute("DELETE FROM materialization_jobs", []).unwrap();
+            tx.execute("INSERT INTO replication_log (workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms,imported) VALUES ('ws','peer',0,'moment.append','{\"momentId\":\"seed-moment\"}',12,1)", []).unwrap();
+            tx.execute("UPDATE moments SET sync_record_only=1 WHERE moment_id='seed-moment'", []).unwrap();
+            let result = dohc_engine_domain::prepare_checked_delete_in_tx(tx, &dohc_engine_domain::DeleteTextFile {
+                workspace_id: "ws".into(), version_id: "main".into(), path: "seed-object.md".into(), moment_id: "pending-delete".into(), request_id: None,
+                metadata_origin: "restore".into(), metadata_summary: None, metadata_correlation_id: None, author_json: None, now_ms: 13,
+            }, Some("seed-object"), &expected).unwrap();
+            dohc_engine_storage::enqueue_delete_job(tx, &dohc_engine_storage::MaterializationJobSpec {
+                job_id: "restore-delete-mat_pending-delete".into(), workspace_id: "ws".into(), target_path: "seed-object.md".into(), content_sha256: expected.clone(),
+                preimage: dohc_engine_storage::Preimage::Present(expected.clone()), target_generation: result.moment.moment_order, now_ms: 13,
+            }).unwrap();
+            Ok::<_, SyncError>(())
+        }).unwrap();
+        write_text(
+            &mut store,
+            "main",
+            "seed-object",
+            "current",
+            "original seed bytes\n",
+            "capture",
+            14,
+        );
+        store
+            .write_with(&NoFaults, |tx| {
+                tx.execute("UPDATE ydoc_docs SET file_export_lane=1", [])
+                    .map_err(SyncError::persist)
+            })
+            .unwrap();
+        sweep(&mut store, 100);
+        store
+            .write_with(&NoFaults, |tx| backfill_file_versions_in_tx(tx, "ws"))
+            .expect("bootstrap file versions must commit");
+        let ops = local_ops(&store);
+        assert!(
+            !ops.iter()
+                .any(|(kind, p)| kind == "moment.append" && p["momentId"] == "pending-delete")
+        );
+        assert!(
+            ops.iter()
+                .any(|(kind, p)| kind == "moment.append" && p["momentId"] == "current")
+        );
+        assert_eq!(
+            crate::read_relay_cursor(&store, "ws")
+                .unwrap()
+                .unwrap()
+                .cursor,
+            100
+        );
     }
 
     #[test]

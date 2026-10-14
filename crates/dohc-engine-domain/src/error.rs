@@ -84,6 +84,9 @@ pub enum DomainError {
     #[error("file changed since it was read")]
     WritePreconditionFailed { current_sha256: Option<String> },
 
+    #[error("checked delete moment has replication dependents")]
+    CheckedDeleteReplicationDependents,
+
     #[error("live document binding is still active")]
     LiveDocumentBindingActive,
 
@@ -231,6 +234,9 @@ impl DomainError {
             DomainError::TextHeadNotBinary => "text-head-not-binary",
             DomainError::CaptureNotOwned => "capture-not-owned",
             DomainError::WritePreconditionFailed { .. } => "write-precondition-failed",
+            DomainError::CheckedDeleteReplicationDependents => {
+                "checked-delete-replication-dependents"
+            }
             DomainError::TargetPathExists => "target-path-exists",
             DomainError::LiveDocumentBindingActive => "live-document-binding-active",
             DomainError::ForkBaseNotFound => "fork-base-not-found",

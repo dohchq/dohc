@@ -31,9 +31,8 @@ use crate::supervisor::ActorOpenMode;
 pub use recovery_import::{
     RecoveryImport, RecoveryImportOutcome, RecoveryImportResult, RecoveryUpdate,
 };
-mod checked_deletes;
-pub use checked_deletes::{CheckedDeleteAction, CheckedDeleteRecovery, CheckedDeleteResolution};
 mod chats;
+mod checked_deletes;
 mod collections;
 mod journal;
 mod live_application;

@@ -604,6 +604,20 @@ fn delete_text_in_tx_prepared(
     Ok(result)
 }
 
+/// Whether immutable replication state still references this moment.
+pub fn moment_has_replication_dependents_in(
+    conn: &Connection,
+    workspace_id: &str,
+    moment_id: &str,
+) -> Result<bool, DomainError> {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM replication_log
+           WHERE workspace_id=?1 AND op_kind='moment.append' AND json_extract(payload_json,'$.momentId')=?2)
+         OR EXISTS(SELECT 1 FROM replication_pending_conflict_moments WHERE workspace_id=?1 AND moment_id=?2)",
+        params![workspace_id,moment_id], |row| row.get(0),
+    ).map_err(DomainError::sql_corrupt)
+}
+
 /// Complete or discard a deletion whose disk publication has not been journaled.
 pub fn finish_checked_delete_in_tx(
     tx: &Transaction<'_>,
@@ -642,24 +656,8 @@ pub fn finish_checked_delete_in_tx(
             result.moment.recorded_at_ms,
         )?;
     } else {
-        let referenced: bool = tx
-            .query_row(
-                "SELECT EXISTS(
-                   SELECT 1 FROM replication_log
-                   WHERE workspace_id=?1 AND op_kind='moment.append'
-                     AND json_extract(payload_json,'$.momentId')=?2
-                 ) OR EXISTS(
-                   SELECT 1 FROM replication_pending_conflict_moments
-                   WHERE workspace_id=?1 AND moment_id=?2
-                 )",
-                params![workspace_id, moment_id],
-                |row| row.get(0),
-            )
-            .map_err(DomainError::sql_corrupt)?;
-        if referenced {
-            return Err(DomainError::InvalidInput {
-                reason: "checked delete moment has replication dependents",
-            });
+        if moment_has_replication_dependents_in(tx, workspace_id, moment_id)? {
+            return Err(DomainError::CheckedDeleteReplicationDependents);
         }
         tx.execute(
             "DELETE FROM engine_requests WHERE result_seq=?1 AND kind='versioned'",

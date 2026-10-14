@@ -1,145 +1,198 @@
-use super::{ActorHandle, SelfWriteRecorder};
 use crate::RuntimeError;
-use dohc_engine_domain::DomainError;
-use dohc_engine_files::{DurabilityPolicy, MaterializeOptions, StdBackoff, StdReplacer};
-use dohc_engine_storage::{EngineStore, JobStatus, NoFaults, StorageError};
-use std::{path::PathBuf, sync::Arc};
+use dohc_engine_domain::{CaptureIngest, CaptureIngestBinary, DomainError};
+use dohc_engine_files::materialize::read_publication_target;
+use dohc_engine_storage::{
+    EngineStore, FaultInjector, JobStatus, StorageError, TxnOutcome, hex_sha256,
+};
+use rusqlite::{OptionalExtension, Transaction, params};
+use std::path::Path;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CheckedDeleteAction {
-    Retry,
-    FinishDelete,
+pub(super) enum ExportedDeleteRecovery {
+    NotExported,
+    Publish,
+    Settled,
 }
 
-#[derive(Debug)]
-pub struct CheckedDeleteResolution {
-    pub moment_id: String,
-    pub expected_sha256: String,
-    pub action: CheckedDeleteAction,
-}
-
-#[derive(Debug)]
-pub struct CheckedDeleteRecovery {
-    pub moment_id: String,
-    pub version_id: String,
-    pub object_id: String,
-    pub path: String,
-    pub expected_sha256: String,
-    pub reason: &'static str,
-    pub action: CheckedDeleteAction,
-}
-
-pub(super) fn pending_on_store(
-    store: &EngineStore,
-    workspace: &str,
-) -> Result<Vec<CheckedDeleteRecovery>, RuntimeError> {
-    store.read_with(|conn| {
-        let mut stmt = conn.prepare("SELECT m.moment_id,m.version_id,m.object_id,j.target_path,j.content_sha256,
-            EXISTS(SELECT 1 FROM replication_log r WHERE r.workspace_id=m.workspace_id AND r.op_kind='moment.append' AND json_extract(r.payload_json,'$.momentId')=m.moment_id)
-            OR EXISTS(SELECT 1 FROM replication_pending_conflict_moments p WHERE p.workspace_id=m.workspace_id AND p.moment_id=m.moment_id)
-            FROM materialization_jobs j JOIN moments m ON m.workspace_id=j.workspace_id AND m.moment_id=substr(j.job_id,20)
-            WHERE j.workspace_id=?1 AND j.job_id GLOB 'restore-delete-mat_*' ORDER BY m.moment_order").map_err(StorageError::corrupt_public)?;
-        stmt.query_map([workspace], |row| {
-            let exported: bool = row.get(5)?;
-            Ok(CheckedDeleteRecovery {
-                moment_id: row.get(0)?, version_id: row.get(1)?, object_id: row.get(2)?, path: row.get(3)?, expected_sha256: row.get(4)?,
-                reason: if exported {"checked-delete-replication-dependents"} else {"checked-delete-publication-pending"},
-                action: if exported {CheckedDeleteAction::FinishDelete} else {CheckedDeleteAction::Retry},
-            })
-        }).map_err(StorageError::corrupt_public)?.collect::<Result<Vec<_>,_>>().map_err(StorageError::corrupt_public)
-    }).map_err(RuntimeError::from)
-}
-
-pub(super) fn resolve_on_store(
+pub(super) fn recover_exported_on_store(
     store: &mut EngineStore,
-    root: &std::path::Path,
-    workspace: &str,
-    input: &CheckedDeleteResolution,
-    recorder: &dyn SelfWriteRecorder,
+    root: &Path,
+    workspace_id: &str,
+    job_id: &str,
+    now_ms: i64,
+    faults: &dyn FaultInjector,
+) -> Result<ExportedDeleteRecovery, RuntimeError> {
+    let moment_id =
+        job_id
+            .strip_prefix("restore-delete-mat_")
+            .ok_or(DomainError::InvalidInput {
+                reason: "not a checked delete job",
+            })?;
+    // Ordinary unpublished recovery needs no extra writer commit. Exported
+    // settlement rechecks this reference together with the job inside its write.
+    if !store.read_with(|conn| {
+        dohc_engine_domain::moment_has_replication_dependents_in(conn, workspace_id, moment_id)
+    })? {
+        return Ok(ExportedDeleteRecovery::NotExported);
+    }
+    match store.write_with(faults, |tx| {
+        recover_exported_in_tx(tx, root, workspace_id, job_id, now_ms)
+    })? {
+        TxnOutcome::Committed(decision) => Ok(decision),
+        TxnOutcome::Crashed { .. } => Err(RuntimeError::OperationCrashed),
+    }
+}
+
+/// The job, export, snapshot and disk observation share this writer transaction.
+/// A later file is captured together with finishing D, without changing disk.
+fn recover_exported_in_tx(
+    tx: &Transaction<'_>,
+    root: &Path,
+    workspace_id: &str,
+    job_id: &str,
+    now_ms: i64,
+) -> Result<ExportedDeleteRecovery, RuntimeError> {
+    let Some(job) = dohc_engine_storage::materialize::load_job(tx, job_id)? else {
+        return Ok(ExportedDeleteRecovery::Settled);
+    };
+    if job.workspace_id != workspace_id {
+        return Err(DomainError::WorkspaceMismatch.into());
+    }
+    let moment_id =
+        job_id
+            .strip_prefix("restore-delete-mat_")
+            .ok_or(DomainError::InvalidInput {
+                reason: "not a checked delete job",
+            })?;
+    if !dohc_engine_domain::moment_has_replication_dependents_in(tx, workspace_id, moment_id)? {
+        return Ok(ExportedDeleteRecovery::NotExported);
+    }
+    if dohc_engine_files::workspace_recovery_unavailable(root) {
+        return Err(dohc_engine_files::MaterializeError::RecoveryUnavailable.into());
+    }
+    let (version_id, object_id): (String, String) = tx
+        .query_row(
+            "SELECT version_id,object_id FROM moments WHERE workspace_id=?1 AND moment_id=?2",
+            params![workspace_id, moment_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(StorageError::corrupt_public)?;
+    super::versioned::ensure_publication_version(tx, workspace_id, &version_id)?;
+    let bytes = read_publication_target(root, &job.target_path)?;
+    let snapshot: Option<(String, String)> = tx.query_row(
+        "SELECT object_id,CASE content_kind WHEN 'binary' THEN binary_sha256 ELSE blob_sha256 END
+         FROM snapshots WHERE workspace_id=?1 AND version_id=?2 AND path=?3",
+        params![workspace_id, version_id, job.target_path], |row| Ok((row.get(0)?, row.get(1)?)),
+    ).optional().map_err(StorageError::corrupt_public)?;
+    let snapshot_matches = snapshot
+        .as_ref()
+        .is_some_and(|(id, sha)| id == &object_id && sha == &job.content_sha256);
+    let canonical_matches = if snapshot_matches {
+        match super::versioned::check_restore_content_in_tx(
+            tx,
+            workspace_id,
+            &version_id,
+            &job.target_path,
+            &job.content_sha256,
+        ) {
+            Ok(()) => true,
+            Err(RuntimeError::Domain(DomainError::WritePreconditionFailed { .. })) => false,
+            Err(error) => return Err(error),
+        }
+    } else {
+        false
+    };
+    let recreated = job.status == JobStatus::Complete && bytes.is_some();
+    let disk_matches = bytes
+        .as_ref()
+        .is_none_or(|bytes| hex_sha256(bytes) == job.content_sha256);
+    if canonical_matches && disk_matches && !recreated {
+        // The materializer rechecks the preimage before it can remove the file.
+        tx.execute(
+            "UPDATE materialization_jobs SET status='pending',completed_at_ms=NULL
+            WHERE workspace_id=?1 AND job_id=?2 AND status='conflict'",
+            params![workspace_id, job_id],
+        )
+        .map_err(StorageError::persist_public)?;
+        return Ok(ExportedDeleteRecovery::Publish);
+    }
+
+    // D is immutable on peers. Apply it in history, then record the later disk
+    // state after D. Do not enqueue D's scene-asset deletions or any disk writes.
+    super::versioned::finish_checked_delete_history_in_tx(tx, workspace_id, moment_id, true)?;
+    if let Some(bytes) = bytes {
+        capture_current_bytes_in_tx(
+            tx,
+            root,
+            workspace_id,
+            &version_id,
+            &job.target_path,
+            bytes,
+            now_ms,
+        )?;
+    }
+    Ok(ExportedDeleteRecovery::Settled)
+}
+
+fn capture_current_bytes_in_tx(
+    tx: &Transaction<'_>,
+    root: &Path,
+    workspace_id: &str,
+    version_id: &str,
+    path: &str,
+    bytes: Vec<u8>,
     now_ms: i64,
 ) -> Result<(), RuntimeError> {
-    let CheckedDeleteResolution {
-        moment_id: moment,
-        expected_sha256: expected,
-        action,
-    } = input;
-    let Some(pending) = pending_on_store(store, workspace)?
-        .into_iter()
-        .find(|row| row.moment_id == *moment)
-    else {
-        return Ok(());
+    let media = dohc_engine_files::media::media_type_for_path(path);
+    let text = dohc_engine_files::media::is_text_media_type(media, path)
+        .then(|| std::str::from_utf8(&bytes).ok())
+        .flatten()
+        .filter(|text| text.len() <= dohc_engine_domain::MAX_TEXT_BYTES);
+    let moment = if let Some(text) = text {
+        let result = dohc_engine_domain::capture_ingest_in_tx(
+            tx,
+            &CaptureIngest {
+                workspace_id: workspace_id.into(),
+                version_id: version_id.into(),
+                path: path.into(),
+                text: text.into(),
+                metadata_origin: "capture".into(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms,
+                request_id: None,
+                claim_foreign_head: true,
+            },
+        )?;
+        crate::search::upsert_file_search_index(
+            tx,
+            root,
+            workspace_id,
+            version_id,
+            &result.object.object_id,
+            path,
+            text,
+        )?;
+        result.moment.moment_id
+    } else {
+        dohc_engine_domain::capture_ingest_binary_in_tx(
+            tx,
+            &CaptureIngestBinary {
+                workspace_id: workspace_id.into(),
+                version_id: version_id.into(),
+                path: path.into(),
+                bytes,
+                metadata_origin: "capture".into(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms,
+                request_id: None,
+                claim_foreign_head: true,
+            },
+        )?
+        .moment_id
     };
-    if pending.expected_sha256 != *expected {
-        return Err(DomainError::WritePreconditionFailed {
-            current_sha256: Some(pending.expected_sha256),
-        }
-        .into());
-    }
-    // Resolve staged files before consulting the target or its durable disk receipt.
-    dohc_engine_files::recover_displacements(
-        store,
-        root,
-        Some(workspace),
-        &MaterializeOptions {
-            policy: DurabilityPolicy::per_os(),
-            replacer: &StdReplacer,
-            backoff: &StdBackoff,
-            now_ms,
-            faults: &NoFaults,
-        },
-    )?;
-    let job_id = format!("restore-delete-mat_{moment}");
-    if *action == CheckedDeleteAction::FinishDelete
-        && let Some(job) = store.load_materialization_job(&job_id)?
-        && matches!(job.status, JobStatus::Pending | JobStatus::Conflict)
-    {
-        let current_sha256 =
-            dohc_engine_files::materialize::write_precondition_sha256(root, &pending.path)?;
-        if current_sha256
-            .as_ref()
-            .is_some_and(|current| current != expected)
-        {
-            return Err(DomainError::WritePreconditionFailed { current_sha256 }.into());
-        }
-        // A refused attempt keeps its export. Explicitly retry the original
-        // precondition instead of leaving a conflict terminal on every open.
-        if job.status == JobStatus::Conflict {
-            store.requeue_materialization_conflict(&job_id)?;
-        }
-    }
-    super::versioned::publish_checked_delete_on_store(
-        store,
-        root,
-        workspace,
-        &job_id,
-        recorder,
-        now_ms,
-        &NoFaults,
-        *action == CheckedDeleteAction::Retry,
-        *action == CheckedDeleteAction::FinishDelete,
-    )
-}
-
-impl ActorHandle {
-    pub async fn pending_checked_deletes(
-        &self,
-        workspace: String,
-    ) -> Result<Vec<CheckedDeleteRecovery>, RuntimeError> {
-        self.run(move |store, _| pending_on_store(store, &workspace))
-            .await
-    }
-
-    pub async fn resolve_checked_delete(
-        &self,
-        root: PathBuf,
-        workspace: String,
-        input: CheckedDeleteResolution,
-        recorder: Arc<dyn SelfWriteRecorder>,
-        now_ms: i64,
-    ) -> Result<(), RuntimeError> {
-        self.run(move |store, _| {
-            resolve_on_store(store, &root, &workspace, &input, recorder.as_ref(), now_ms)
-        })
-        .await
-    }
+    super::journal::journal_moment_outbound_in_tx(tx, workspace_id, &moment, false)?;
+    Ok(())
 }
