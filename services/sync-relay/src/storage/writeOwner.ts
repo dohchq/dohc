@@ -1,10 +1,8 @@
+import { randomUUID } from "node:crypto";
 import type { SqliteDb } from "./types";
 
 export interface RelayContinuity {
-  /** Persist a pending stamp before its transaction can commit. */
-  reserve(previous: number): number;
-  confirm(stamp: number, previous: number): void;
-  cancel(stamp: number, previous: number): void;
+  confirm(stamp: number, nonce: string, previousNonce: string): void;
   close(): void;
 }
 
@@ -15,14 +13,17 @@ export class RelayWriteOwner {
   readonly #unavailable = new AbortController();
   #writing = false;
   #stamp: number;
+  #nonce: string;
   readonly #changes;
   readonly #schema;
   constructor(
     readonly db: SqliteDb,
     readonly continuity?: RelayContinuity,
     stamp = 0,
+    nonce = "",
   ) {
     this.#stamp = stamp;
+    this.#nonce = nonce;
     this.#changes = continuity ? db.prepare("SELECT total_changes() AS count") : undefined;
     this.#schema = continuity ? db.prepare("PRAGMA schema_version") : undefined;
   }
@@ -41,9 +42,9 @@ export class RelayWriteOwner {
     this.captureStanding();
     if (this.#writing) throw new Error("Nested relay transactions are not supported.");
     this.#writing = true;
-    let began = false, reserved = false, committing = false;
+    let began = false, changed = false, committing = false;
     const previous = this.#stamp;
-    let stamp = previous;
+    let stamp = previous, nonce = this.#nonce;
     try {
       this.db.exec("BEGIN IMMEDIATE");
       began = true;
@@ -54,11 +55,13 @@ export class RelayWriteOwner {
       this.captureStanding();
       if (this.continuity && this.mutationState() !== before) {
         // Refused and read-only callbacks do not incur durable sidecar writes.
-        // A failed reservation may have committed. Do not cancel that uncertainty.
-        try { stamp = this.continuity.reserve(previous); reserved = true; }
-        catch (error) { this.invalidate(); throw error; }
-        const changed = this.db.prepare(`UPDATE ${MARKER} SET stamp=? WHERE singleton=1 AND stamp=?`).run(stamp, previous);
-        if (Number(changed.changes) !== 1) {
+        stamp = previous + 1;
+        if (!Number.isSafeInteger(stamp)) throw new Error("Relay continuity stamp is exhausted.");
+        nonce = randomUUID();
+        changed = true;
+        const updated = this.db.prepare(`UPDATE ${MARKER} SET stamp=?,nonce=?,previous_nonce=? WHERE singleton=1 AND stamp=? AND nonce=?`)
+          .run(stamp, nonce, this.#nonce, previous, this.#nonce);
+        if (Number(updated.changes) !== 1) {
           this.invalidate();
           throw new Error("Relay continuity marker changed.");
         }
@@ -66,16 +69,14 @@ export class RelayWriteOwner {
       committing = true;
       this.db.exec("COMMIT");
       began = false;
-      if (reserved) this.continuity!.confirm(stamp, previous);
+      if (changed) this.continuity!.confirm(stamp, nonce, this.#nonce);
       this.#stamp = stamp;
+      this.#nonce = nonce;
       return result;
     } catch (error) {
       if (began) {
         try {
-          // SQLite refuses ROLLBACK when COMMIT already ended the transaction.
-          // Only a successful rollback permits cancelling the reserved stamp.
           this.db.exec("ROLLBACK");
-          if (reserved && !this.unavailable.aborted) this.continuity!.cancel(stamp, previous);
         } catch { this.invalidate(); }
       }
       if (committing) this.invalidate();

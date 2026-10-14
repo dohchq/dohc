@@ -24,9 +24,10 @@ An archive does not prove that its server accepted no later work.
 Losing the original continuity prevents supported deployment restoration.
 You can still salvage available file contents from a completed relay snapshot.
 After an interrupted write, start the relay normally.
-Startup keeps the committed database state and settles its pending continuity stamp.
+Startup makes the committed database state durable, then settles its continuity record.
+An unacknowledged write that committed may be kept.
 The relay confirms continuity before returning a write or serving its result.
-An older database still refuses startup, including a backup from before the last accepted write.
+An older database still refuses startup, including a backup from before the last acknowledged write.
 If startup still refuses, preserve its volumes.
 Offline salvage requires an earlier completed relay snapshot; it cannot read the failed deployment or its archive directly.
 
@@ -82,8 +83,9 @@ node scripts/self-host/recovery.mjs check-backup /srv/dohc-backups/relay-before-
 node scripts/self-host/recovery.mjs restore /srv/dohc-backups/relay-before-upgrade
 ```
 
-If continuity has a pending write, start the relay normally before running backup, check-backup or restore.
-The check requires the snapshot stamp to equal the current confirmed continuity stamp.
+After an interrupted write, start the relay once to settle continuity before backup, check-backup or restore.
+Then stop it cleanly.
+The check requires the snapshot stamp and nonce to equal the current continuity record.
 Newer accepted work makes that snapshot unsuitable for repair.
 The restore command checks the copied candidate before replacing any existing relay files.
 It preserves replaced database and SQLite side files under `/data/recovery-<id>`.

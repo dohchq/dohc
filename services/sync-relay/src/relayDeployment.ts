@@ -18,6 +18,8 @@ export interface DeploymentConfig {
 }
 
 const unavailable = () => new Error("Relay deployment continuity is unavailable.");
+const needsSettlement = () => new Error("Relay continuity needs settling after an interrupted write. Start the relay once, then stop it cleanly before backup, check-backup or restore.");
+const validNonce = (value: unknown): value is string => typeof value === "string" && /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(value);
 const normalized = (path: string) => process.platform === "win32" ? path.toLowerCase() : path;
 function contained(parent: string, path: string): boolean {
   const rel = relative(normalized(parent), normalized(path));
@@ -73,34 +75,12 @@ function matches(record: Record<string, unknown>, config: DeploymentConfig): voi
 }
 
 class DeploymentContinuity implements RelayContinuity {
-  constructor(readonly lock: DatabaseSync, readonly side: DatabaseSync, readonly config: DeploymentConfig) {}
-  reserve(previous: number): number {
+  constructor(readonly lock: DatabaseSync, readonly side: DatabaseSync) {}
+  confirm(stamp: number, nonce: string, previousNonce: string): void {
     this.side.exec("BEGIN IMMEDIATE");
     try {
-      const current = row(this.side, "continuity");
-      matches(current, this.config);
-      const next = current.next_stamp;
-      if (current.confirmed_stamp !== previous || current.pending_stamp !== null || typeof next !== "number" ||
-          !Number.isSafeInteger(next) || next <= previous || next >= Number.MAX_SAFE_INTEGER) throw unavailable();
-      this.side.prepare("UPDATE continuity SET next_stamp=?,pending_stamp=? WHERE singleton=1").run(next + 1, next);
-      this.side.exec("COMMIT");
-      return next;
-    } catch (error) { try { this.side.exec("ROLLBACK"); } catch {} throw error; }
-  }
-  confirm(stamp: number, previous: number): void {
-    this.side.exec("BEGIN IMMEDIATE");
-    try {
-      const changed = this.side.prepare("UPDATE continuity SET confirmed_stamp=?,pending_stamp=NULL WHERE singleton=1 AND confirmed_stamp=? AND pending_stamp=? AND next_stamp>?")
-        .run(stamp, previous, stamp, stamp);
-      if (Number(changed.changes) !== 1) throw unavailable();
-      this.side.exec("COMMIT");
-    } catch (error) { try { this.side.exec("ROLLBACK"); } catch {} throw error; }
-  }
-  cancel(stamp: number, previous: number): void {
-    this.side.exec("BEGIN IMMEDIATE");
-    try {
-      const changed = this.side.prepare("UPDATE continuity SET pending_stamp=NULL WHERE singleton=1 AND confirmed_stamp=? AND pending_stamp=? AND next_stamp>?")
-        .run(previous, stamp, stamp);
+      const changed = this.side.prepare("UPDATE continuity SET confirmed_stamp=?,confirmed_nonce=? WHERE singleton=1 AND confirmed_stamp=? AND confirmed_nonce=?")
+        .run(stamp, nonce, stamp - 1, previousNonce);
       if (Number(changed.changes) !== 1) throw unavailable();
       this.side.exec("COMMIT");
     } catch (error) { try { this.side.exec("ROLLBACK"); } catch {} throw error; }
@@ -124,18 +104,19 @@ export function initializeRelayDeployment(input: { configPath: string; relayPath
   const config = validate(configPath, { version: 1, namespace: randomUUID(), generation: 1, relayPath, continuityDirectory });
   const lock = new DatabaseSync(join(continuityDirectory, "lock.sqlite"));
   let side: DatabaseSync | undefined, relay: DatabaseSync | undefined;
+  const nonce = randomUUID();
   try {
     lock.exec("PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL; CREATE TABLE deployment(namespace TEXT NOT NULL); BEGIN EXCLUSIVE");
     lock.prepare("INSERT INTO deployment VALUES(?)").run(config.namespace);
     // Persist the lock identity before taking its lifetime transaction.
     lock.exec("COMMIT; BEGIN EXCLUSIVE");
     side = new DatabaseSync(join(continuityDirectory, "continuity.sqlite"));
-    side.exec("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; CREATE TABLE continuity(singleton INTEGER PRIMARY KEY CHECK(singleton=1), namespace TEXT NOT NULL, generation INTEGER NOT NULL, next_stamp INTEGER NOT NULL, confirmed_stamp INTEGER NOT NULL, pending_stamp INTEGER) STRICT");
-    side.prepare("INSERT INTO continuity VALUES(1,?,?,1,0,NULL)").run(config.namespace, config.generation);
+    side.exec("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; CREATE TABLE continuity(singleton INTEGER PRIMARY KEY CHECK(singleton=1), namespace TEXT NOT NULL, generation INTEGER NOT NULL, confirmed_stamp INTEGER NOT NULL, confirmed_nonce TEXT NOT NULL) STRICT");
+    side.prepare("INSERT INTO continuity VALUES(1,?,?,0,?)").run(config.namespace, config.generation, nonce);
     const fd = openSync(relayPath, "wx"); closeSync(fd);
     relay = new DatabaseSync(relayPath);
-    relay.exec("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; CREATE TABLE sync_relay_continuity(singleton INTEGER PRIMARY KEY CHECK(singleton=1),namespace TEXT NOT NULL,generation INTEGER NOT NULL,stamp INTEGER NOT NULL) STRICT");
-    relay.prepare("INSERT INTO sync_relay_continuity VALUES(1,?,?,0)").run(config.namespace, config.generation);
+    relay.exec("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; CREATE TABLE sync_relay_continuity(singleton INTEGER PRIMARY KEY CHECK(singleton=1),namespace TEXT NOT NULL,generation INTEGER NOT NULL,stamp INTEGER NOT NULL,nonce TEXT NOT NULL,previous_nonce TEXT) STRICT");
+    relay.prepare("INSERT INTO sync_relay_continuity VALUES(1,?,?,0,?,NULL)").run(config.namespace, config.generation, nonce);
     relay.close(); relay = undefined;
     side.close(); side = undefined;
     // The external config is published last and never overwrites an existing deployment.
@@ -158,12 +139,10 @@ function acquireDeployment(configPath: string) {
     side = openExisting(join(config.continuityDirectory, "continuity.sqlite"));
     if (side.prepare("PRAGMA journal_mode").get()?.journal_mode !== "wal") throw unavailable();
     const current = row(side, "continuity"); matches(current, config);
-    const confirmed = current.confirmed_stamp, pending = current.pending_stamp, next = current.next_stamp;
-    if (typeof confirmed !== "number" || !Number.isSafeInteger(confirmed) || confirmed < 0 ||
-        typeof next !== "number" || !Number.isSafeInteger(next) || next <= confirmed ||
-        (pending !== null && (typeof pending !== "number" || !Number.isSafeInteger(pending) ||
-          pending <= confirmed || pending >= next))) throw unavailable();
-    return { config, lock, side, stamp: confirmed, pending: pending as number | null };
+    const confirmed = current.confirmed_stamp, nonce = current.confirmed_nonce;
+    if (Object.keys(current).sort().join() !== "confirmed_nonce,confirmed_stamp,generation,namespace,singleton" ||
+        typeof confirmed !== "number" || !Number.isSafeInteger(confirmed) || confirmed < 0 || !validNonce(nonce)) throw unavailable();
+    return { config, lock, side, stamp: confirmed, nonce };
   } catch (error) {
     side?.close();
     try { lock.exec("ROLLBACK"); } catch {}
@@ -172,15 +151,29 @@ function acquireDeployment(configPath: string) {
   }
 }
 
-/** Maintenance owns the same writer lock as ordinary startup, without opening or creating relay storage. */
+/** Maintenance owns the writer lock and inspects cold relay storage without settling it. */
 export async function withRelayDeploymentMaintenance<T>(configPath: string,
-  operation: (deployment: { config: Readonly<DeploymentConfig>; stamp: number }) => Promise<T>): Promise<T> {
+  operation: (deployment: { config: Readonly<DeploymentConfig>; stamp: number; nonce: string }) => Promise<T>): Promise<T> {
   const deployment = acquireDeployment(configPath);
   let operationFailed = false;
   try {
-    // Only startup can settle against the crashed database, never a backup.
-    if (deployment.pending !== null) throw unavailable();
-    return await operation({ config: deployment.config, stamp: deployment.stamp });
+    // A missing or corrupt database can still be repaired from a confirmed snapshot.
+    if (["-wal", "-journal"].some(suffix => existsSync(deployment.config.relayPath + suffix))) throw needsSettlement();
+    if (existsSync(deployment.config.relayPath)) {
+      let db: DatabaseSync | undefined;
+      let marker: ReturnType<typeof relayDeploymentMarker> | undefined;
+      try {
+        if (normalized(realpathSync(deployment.config.relayPath)) !== normalized(deployment.config.relayPath)) throw unavailable();
+        const uri = pathToFileURL(deployment.config.relayPath);
+        uri.searchParams.set("immutable", "1");
+        db = new DatabaseSync(uri.href, { readOnly: true });
+        marker = relayDeploymentMarker(db, deployment.config);
+      } catch (error) {
+        if (!(error instanceof Error && "errcode" in error && (error.errcode === 11 || error.errcode === 26))) throw error;
+      } finally { db?.close(); }
+      if (marker) validateRelayDeploymentMarkerValue(marker, deployment.stamp, deployment.nonce);
+    }
+    return await operation({ config: deployment.config, stamp: deployment.stamp, nonce: deployment.nonce });
   }
   catch (error) { operationFailed = true; throw error; }
   finally {
@@ -192,31 +185,42 @@ export async function withRelayDeploymentMaintenance<T>(configPath: string,
   }
 }
 
-function relayDeploymentStamp(db: SqliteDb | DatabaseSync, config: Readonly<DeploymentConfig>): unknown {
+function relayDeploymentMarker(db: SqliteDb | DatabaseSync, config: Readonly<DeploymentConfig>) {
   const marker = row(db, "sync_relay_continuity");
   matches(marker, config);
-  return marker.stamp;
+  if (Object.keys(marker).sort().join() !== "generation,namespace,nonce,previous_nonce,singleton,stamp" ||
+      typeof marker.stamp !== "number" || !Number.isSafeInteger(marker.stamp) || marker.stamp < 0 ||
+      !validNonce(marker.nonce) || (marker.stamp === 0 ? marker.previous_nonce !== null : !validNonce(marker.previous_nonce))) throw unavailable();
+  return { stamp: marker.stamp, nonce: marker.nonce, previousNonce: marker.previous_nonce };
 }
-
-export function validateRelayDeploymentMarker(db: SqliteDb | DatabaseSync, config: Readonly<DeploymentConfig>, stamp: number): void {
-  if (relayDeploymentStamp(db, config) !== stamp) throw unavailable();
+function committedSuccessor(marker: ReturnType<typeof relayDeploymentMarker>, stamp: number, nonce: string): boolean {
+  return marker.stamp === stamp + 1 && marker.previousNonce === nonce;
+}
+function validateRelayDeploymentMarkerValue(marker: ReturnType<typeof relayDeploymentMarker>, stamp: number, nonce: string): void {
+  if (marker.stamp === stamp && marker.nonce === nonce) return;
+  if (committedSuccessor(marker, stamp, nonce)) throw needsSettlement();
+  throw unavailable();
+}
+export function validateRelayDeploymentMarker(db: SqliteDb | DatabaseSync, config: Readonly<DeploymentConfig>, stamp: number, nonce: string): void {
+  validateRelayDeploymentMarkerValue(relayDeploymentMarker(db, config), stamp, nonce);
 }
 
 export function openRelayDeployment(configPath: string, options: OpenSyncRelayStorageOptions = {}) {
-  const { config, lock, side, stamp: confirmed, pending } = acquireDeployment(configPath);
+  const { config, lock, side, stamp: confirmed, nonce } = acquireDeployment(configPath);
   let transferred = false;
   try {
     if (normalized(realpathSync(config.relayPath)) !== normalized(config.relayPath)) throw unavailable();
     const storage = openSyncRelayStorage(config.relayPath, options, db => {
-      const actual = relayDeploymentStamp(db, config);
-      if (actual !== confirmed && (pending === null || actual !== pending)) throw unavailable();
-      const continuity = new DeploymentContinuity(lock, side, config);
-      const stamp = actual === confirmed ? confirmed : pending!;
-      if (pending !== null) {
-        if (stamp === pending) continuity.confirm(pending, confirmed);
-        else continuity.cancel(pending, confirmed);
+      const marker = relayDeploymentMarker(db, config);
+      const continuity = new DeploymentContinuity(lock, side);
+      if (marker.stamp !== confirmed || marker.nonce !== nonce) {
+        if (!committedSuccessor(marker, confirmed, nonce)) throw unavailable();
+        // Sync recovered WAL pages before the independent record can cover them.
+        const checkpoint = db.prepare("PRAGMA wal_checkpoint(FULL)").get();
+        if (checkpoint?.busy !== 0 || checkpoint.log !== checkpoint.checkpointed) throw unavailable();
+        continuity.confirm(marker.stamp, marker.nonce, nonce);
       }
-      const owner = new RelayWriteOwner(db, continuity, stamp);
+      const owner = new RelayWriteOwner(db, continuity, marker.stamp, marker.nonce);
       transferred = true;
       return owner;
     });

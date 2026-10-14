@@ -21,7 +21,8 @@ Backups contain relay data only. Protect the directory as private workspace data
 Restore requires unchanged independent continuity on the original host.
 Restore replaces only relay storage; authentication, the live-host volume and continuity remain untouched.
 Old snapshots and lost continuity require a separate recovery procedure; no reset is provided.
-An interrupted write can advance continuity without committing relay data. Snapshot repair cannot resolve that state.
+After an interrupted write, start the relay once to settle continuity.
+Then stop it cleanly before backup, check-backup or restore.
 Anyone who can write a snapshot can define restored relay contents. Protect backups like the relay volume.
 
 salvage --directory PATH --output NEW_PATH
