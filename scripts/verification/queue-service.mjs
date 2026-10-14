@@ -185,7 +185,8 @@ export async function runService({
 
   async function finish(entry, attempt, outcome, { cleanup = false } = {}) {
     const status = readJson(statusPath(entry.id)) ?? entry.status;
-    const attempts = status.attempts.map(row => row.n === attempt?.n ? { ...row, endedAt: new Date().toISOString(), awakeMs: attempt.awakeMs, load: attempt.load ?? null, flaky: attempt.flaky ?? [], ...outcome } : row);
+    const attempts = status.attempts.map(row => row.n === attempt?.n ? { ...row, endedAt: new Date().toISOString(), awakeMs: attempt.awakeMs, load: attempt.load ?? null, flaky: attempt.flaky ?? [],
+      steps: attempt.steps ?? {}, slowest: attempt.slowest ?? [], ...outcome } : row);
     // Only the JavaScript gate starts containers.
     if (cleanup && entry.request.gates?.js) status.cleanupPending = await cleanUp(entry.id);
     const failures = attempts.filter(row => row.outcome === "environment").length;
@@ -219,7 +220,7 @@ export async function runService({
       const last = previousRuns.find(row => row.id === entry.id && row.attempt === attempt?.n)?.awakeMs ?? 0;
       const stopped = entry.status.stopping ?? "service restart";
       // A recovery that cannot be recorded would repeat every tick; restart under the supervisor's backoff instead.
-      try { await finish(entry, attempt && { n: attempt.n, awakeMs: last, flaky: result?.flaky ?? [] }, attemptOutcome(result, grant, { stopped }), { cleanup: true }); }
+      try { await finish(entry, attempt && { n: attempt.n, awakeMs: last, flaky: result?.flaky ?? [], ...timesOf(result) }, attemptOutcome(result, grant, { stopped }), { cleanup: true }); }
       catch (error) { fatal = error; return; }
     }
   }

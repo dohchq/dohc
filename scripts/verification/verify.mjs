@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { join, resolve } from "node:path";
-import { nextestFlaky, nextestTimes, playwrightFlaky, playwrightTimes, readLog, slowest, vitestFailures } from "./flaky.mjs";
+import { nextestFlaky, nextestTimes, playwrightFlaky, playwrightTimes, readLog, readTestRecord, slowest, testRecordReporter, vitestFailures } from "./flaky.mjs";
 import { prepare, assertPrepared, assertIndependentStagedEngine, sourceFingerprint, buildEnvironment, stagedEnginePath, hashFile, withBuildBudget } from "./build.mjs";
 import { doctor } from "./doctor.mjs";
 import { git, pnpm, repoRoot, run } from "./process.mjs";
@@ -416,8 +416,8 @@ export async function verify(args) {
             rmSync(nativeOutput, {recursive: true, force: true});
             mkdirSync(nativeOutput, {recursive: true});
             return proofStep(name, ...pnpm(["--filter", "@dohc/share-web", "exec", "vitest", "run", "--config", "vitest.self-host-native.config.ts",
-              "--reporter=default", "--reporter=json", `--outputFile.json=${join(nativeOutput, "vitest.json")}`]),
-              {...env, DOHC_SERVICE_HOST_PROOF_BINARY: stagedEnginePath, DOHC_SERVICE_HOST_PROOF_SHA256: nativeHash, DOHC_SERVICE_HOST_PROOF_OUTPUT: nativeOutput});
+              "--reporter=default", "--reporter=json", `--outputFile.json=${join(nativeOutput, "vitest.json")}`, `--reporter=${testRecordReporter}`]),
+              {...env, DOHC_TEST_RECORD: join(nativeOutput, "tests.jsonl"), DOHC_SERVICE_HOST_PROOF_BINARY: stagedEnginePath, DOHC_SERVICE_HOST_PROOF_SHA256: nativeHash, DOHC_SERVICE_HOST_PROOF_OUTPUT: nativeOutput});
           };
           try { await nativeProof("self-host-native"); }
           catch (error) {
@@ -428,6 +428,7 @@ export async function verify(args) {
             await nativeProof("self-host-native-retry");
             flaky.push(...failed.map(test => ({ step: "self-host-native", test })));
           }
+          times.push(...readTestRecord(join(nativeOutput, "tests.jsonl")).map(test => ({ step: "self-host-native", test: test.test, seconds: test.seconds })));
           report.selfHostNative = readSelfHostNativeProof(nativeOutput, stagedEnginePath, nativeHash); save();
           await proofStep("browser-install", ...pnpm(["exec", "playwright", "install", "chromium"]), env);
           const accountReport = join(output, "accounts-playwright.json");

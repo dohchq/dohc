@@ -334,6 +334,8 @@ test("a pass with tests that needed a retry records them in its attempt and the 
   const expected = [{ step: "repository", test: "times out under load" }];
   assert.equal(passed.status.verdict, "PASS");
   assert.deepEqual(passed.status.attempts[0].flaky, expected);
+  assert.deepEqual(passed.status.attempts[0].steps, { tests: 1260, rust: 990 });
+  assert.deepEqual(passed.status.attempts[0].slowest, [{ step: "desktop", test: "restarts", seconds: 66 }]);
   const finished = readFileSync(queuePaths(root).history, "utf8").trim().split("\n").map(line => JSON.parse(line)).find(event => event.event === "finished" && event.id === passed.id);
   assert.deepEqual(finished.flaky, expected);
   // The history keeps the step times and slowest tests for the weekly review.

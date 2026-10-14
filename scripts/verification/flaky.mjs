@@ -19,7 +19,7 @@ const read = readLog;
 
 /** Tests nextest reports as FLAKY: failed, then passed on a retry. */
 export function nextestFlaky(log) {
-  const names = [...plain(log).matchAll(/^\s*FLAKY\s+\d+\/\d+\s+\[[^\]]*\]\s+(?:\(\s*\d+\/\d+\)\s+)?(.+?)\s*$/gmu)].map(match => match[1]);
+  const names = [...plain(log).matchAll(/^\s*FLAKY\s+\d+\/\d+\s+\[[^\]]*\]\s+(?:\([^)]*\)\s+)?(.+?)\s*$/gmu)].map(match => match[1]);
   return [...new Set(names)];
 }
 
@@ -53,10 +53,18 @@ export function readTestRecord(path) {
   return read(path).split(/\r?\n/u).filter(Boolean).flatMap(line => { try { return [JSON.parse(line)]; } catch { return []; } });
 }
 
-/** nextest's per-test times, in seconds. */
+/**
+ * nextest's per-test times, in seconds, one per test: the longest finished
+ * attempt, or for a test that never finished, the longest SLOW report.
+ */
 export function nextestTimes(log) {
-  return [...plain(log).matchAll(/^\s*(?:PASS|FLAKY\s+\d+\/\d+|SLOW)\s+\[\s*([\d.]+)s\]\s+(?:\(\s*\d+\/\d+\)\s+)?(.+?)\s*$/gmu)]
-    .map(match => ({ test: match[2], seconds: Number(match[1]) }));
+  const finished = new Map(), running = new Map();
+  for (const match of plain(log).matchAll(/^\s*(?:TRY \d+ )?(PASS|FAIL|TIMEOUT|FLAKY\s+\d+\/\d+|SLOW)\s+\[\s*>?\s*([\d.]+)s\]\s+(?:\([^)]*\)\s+)?(.+?)\s*$/gmu)) {
+    const times = match[1] === "SLOW" ? running : finished;
+    times.set(match[3], Math.max(times.get(match[3]) ?? 0, Number(match[2])));
+  }
+  for (const [test, seconds] of running) if (!finished.has(test)) finished.set(test, seconds);
+  return [...finished].map(([test, seconds]) => ({ test, seconds }));
 }
 
 /** node:test's per-test times from a spec report, in seconds. */
@@ -64,11 +72,13 @@ export function nodeTestTimes(log) {
   return [...plain(log).matchAll(/^\s*✔ (.+?) \(([\d.]+)ms\)\s*$/gmu)].map(match => ({ test: match[1], seconds: Number(match[2]) / 1000 }));
 }
 
-/** Playwright's per-test times from its JSON report, in seconds: the attempt that passed. */
+/** Playwright's per-test times from its JSON report, in seconds: the attempt that passed. A test with none has no time. */
 export function playwrightTimes(suites = []) {
   return suites.flatMap(suite => [
-    ...(suite.specs ?? []).flatMap(spec => (spec.tests ?? []).map(test => ({ test: `${spec.file} › ${spec.title}`,
-      seconds: (test.results?.at(-1)?.duration ?? 0) / 1000 }))),
+    ...(suite.specs ?? []).flatMap(spec => (spec.tests ?? []).flatMap(test => {
+      const passed = test.results?.find(result => result.status === "passed");
+      return passed ? [{ test: `${spec.file} › ${spec.title}`, seconds: passed.duration / 1000 }] : [];
+    })),
     ...playwrightTimes(suite.suites),
   ]);
 }
