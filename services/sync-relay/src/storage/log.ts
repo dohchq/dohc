@@ -392,6 +392,7 @@ export function appendBrowserChatBatch(storage: StorageContext, input: {
 }): AppendLogBatchResult {
   return storage.tx(() => {
     const existing = fetchChatMessage(storage, input);
+    const storedPayload = existing ? JSON.parse(existing.payloadJson) as Record<string, unknown> : null;
     if (existing) {
       const previous = fetchLogCoordinate(storage, {...input, originSeq: existing.originSeq - 1});
       const createdThread = previous?.opKind === "chat.thread.create" &&
@@ -408,7 +409,10 @@ export function appendBrowserChatBatch(storage: StorageContext, input: {
       const payload = JSON.parse(op.payloadJson) as Record<string, unknown>;
       const recordedAtMs = existing?.recordedAtMs ?? op.recordedAtMs;
       return {...op, originSeq: firstSequence + index, recordedAtMs,
-        payloadJson: JSON.stringify({...payload, createdAtMs: recordedAtMs})};
+        payloadJson: JSON.stringify({...payload, createdAtMs: recordedAtMs,
+          ...(storedPayload && op.opKind === "chat.message.append" ?
+            payload.authorKind === "human" ? {authorDisplayName: storedPayload.authorDisplayName} :
+              {authorOwnerDisplayName: storedPayload.authorOwnerDisplayName} : {})})};
     });
     return appendLogBatchInTransaction(storage, {...input, ops});
   });

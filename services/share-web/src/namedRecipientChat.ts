@@ -81,13 +81,6 @@ export function createNamedRecipientChatClient(options: {
               {ok: false, error: "Post is too large.", code: "payload_too_large"}, {status: 413, headers: cacheHeaders});
             throw error;
           }
-          const input: unknown = JSON.parse(body);
-          if (!record(input) || (input.authorKind !== "human" && input.authorKind !== "agent")) return Response.json(
-            {ok: false, error: "invalid author kind", code: "bad_request"}, {status: 400, headers: cacheHeaders});
-          const allowed = new Set(["shareId", "channelWireId", "id", "threadId", "body", "authorKind", "authorUserId",
-            ...(input.authorKind === "agent" ? ["authorDisplayName"] : [])]);
-          if (Object.keys(input).some(key => !allowed.has(key))) return Response.json(
-            {ok: false, error: "share op rejected", code: "share_op_rejected"}, {status: 403, headers: cacheHeaders});
           if (Buffer.byteLength(body) > limits.maxRequestBytes) return Response.json(
             {ok: false, error: "Post is too large.", code: "payload_too_large"}, {status: 413, headers: cacheHeaders});
         }

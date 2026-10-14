@@ -693,9 +693,48 @@ it("answers a relay deadline with 503 and never appends after a stalled name loo
   expect(f.storage.fetchLogPage({workspaceId, sinceRelaySeq: 7, limit: 100}).rows).toHaveLength(0);
 });
 
-it("refuses before appending when server-chosen names make the stored payload exceed its budget", async () => {
+it.each([
+  ["human", "Alice"], ["human", null], ["agent", "Alice"], ["agent", null],
+] as const)("replays the stored account name after a lookup changes, author=%s, original=%s", async (authorKind, originalName) => {
+  const f = await fixture();
+  f.lookupUserDisplayName.mockReturnValue(originalName);
+  const input = {authorKind, ...(authorKind === "agent" ? {authorDisplayName: "Planner"} : {})};
+  const posted = await f.post(input);
+  expect(posted.status).toBe(200);
+  const first = await json(posted);
+  f.lookupUserDisplayName.mockReturnValue("Renamed Alice");
+  const retry = await f.post(input);
+  expect(retry.status).toBe(200);
+  expect(await json(retry)).toEqual(first);
+  expect((await f.post({...input, body: "changed"})).status).toBe(409);
+  expect((await f.post({...input, threadId: "thread-team"})).status).toBe(409);
+  expect((await f.post(authorKind === "human" ? {authorKind: "agent", authorDisplayName: "Planner"} : {authorKind: "human"})).status).toBe(409);
+  if (authorKind === "agent") expect((await f.post({...input, authorDisplayName: "Changed agent"})).status).toBe(409);
+  const rows = f.storage.fetchLogPage({workspaceId, sinceRelaySeq: 7, limit: 100}).rows;
+  expect(rows.filter(row => row.opKind === "chat.message.append")).toHaveLength(1);
+  expect(rows.filter(row => row.opKind === "chat.thread.create")).toHaveLength(1);
+});
+
+it("accepts a post at the request byte limit even when its stored payload is larger", async () => {
+  const f = await fixture(), budget = 16_384;
+  f.responseLimits.maxRequestBytes = budget;
+  const input = {shareId, channelWireId, id: "request-1", body: "", authorKind: "human"};
+  input.body = "x".repeat(budget - Buffer.byteLength(JSON.stringify(input)));
+  expect(Buffer.byteLength(JSON.stringify(input))).toBe(budget);
+  const response = await f.post({body: input.body});
+  expect(response.status).toBe(200);
+  const first = await json(response), retry = await f.post({body: input.body});
+  expect(retry.status).toBe(200);
+  expect(await json(retry)).toEqual(first);
+  const rows = f.storage.fetchLogPage({workspaceId, sinceRelaySeq: 7, limit: 100}).rows.filter(row => row.opKind === "chat.message.append");
+  expect(rows).toHaveLength(1);
+  expect(Buffer.byteLength(rows[0]!.payloadJson)).toBeGreaterThan(budget);
+});
+
+it("refuses before appending when server-chosen names make the response exceed its budget", async () => {
   const f = await fixture();
   f.responseLimits.maxRequestBytes = 500;
+  f.responseLimits.maxResponseBytes = 500;
   const input = {shareId, channelWireId, id: "request-1", body: "x".repeat(100), authorKind: "human"};
   expect(Buffer.byteLength(JSON.stringify(input))).toBeLessThan(500);
   f.lookupUserDisplayName.mockReturnValue("名".repeat(40));

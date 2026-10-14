@@ -198,7 +198,6 @@ export function createNamedRecipientChat(options: {
               {opKind: "chat.message.append", payload: {messageId, threadId, body, authorKind, authorDisplayName,
                 authorUserId: actor.userId, ...(authorOwnerDisplayName === undefined ? {} : {authorOwnerDisplayName}), createdAtMs}},
             ].map((op, originSeq) => ({...op, originSeq, recordedAtMs: createdAtMs}));
-            if (Buffer.byteLength(JSON.stringify(ops[ops.length - 1]!.payload)) > limits.maxRequestBytes) throw relayError("payload_too_large");
             boundedJson({shareId, channelWireId, message: messageFromOp({relaySeq: Number.MAX_SAFE_INTEGER,
               opKind: "chat.message.append", payload: ops[ops.length - 1]!.payload})});
             return options.transport(new Request(request.url, {method: "POST", signal: controller.signal,

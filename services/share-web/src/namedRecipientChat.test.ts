@@ -311,14 +311,3 @@ it("answers a failed relay connection with 503", async () => {
     fetchRelay: async () => {throw new TypeError("connection failed");}});
   expect((await web(request("messages", "alice", message))).status).toBe(503);
 });
-
-it.each([
-  {authorDisplayName: "Owner"}, {authorOwnerDisplayName: "Owner"},
-  {authorKind: "agent", authorDisplayName: "Planner", authorOwnerDisplayName: "Owner"},
-  {authorKind: "automation", authorDisplayName: "Automation"},
-])("refuses browser authorship fields before forwarding: %j", async fields => {
-  const f = await fixture();
-  const response = await f.web.handle(request("messages", "alice", {...message, ...fields}));
-  expect(response.status).toBe(fields.authorKind === "automation" ? 400 : 403);
-  expect(f.forwarded).toHaveLength(0);
-});

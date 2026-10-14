@@ -282,8 +282,7 @@ Client-supplied owner names and human names are refused.
 The body normalizes CRLF and CR to LF, trims its end, and must be non-empty.
 The complete POST JSON must fit the returned `maxPostBytes`, 16 KiB in the self-hosted profile.
 The normalized body must also fit `maxBodyBytes`.
-The stored message payload, including server-chosen names, must fit the relay's request budget.
-The relay checks that payload and the response budget before appending the thread and message.
+The relay checks the response budget before appending the thread and message.
 JSON escaping and metadata count toward that limit.
 
 A successful post returns `{shareId, channelWireId, message}`.
