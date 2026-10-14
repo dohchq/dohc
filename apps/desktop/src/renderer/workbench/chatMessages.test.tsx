@@ -1,5 +1,5 @@
 import "../../testing/legendListMock";
-import { formatChatDay, formatChatTime } from "../time";
+import { formatChatDay, formatChatTime, formatClock, formatClockDigits } from "../time";
 // @vitest-environment jsdom
 import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
@@ -137,6 +137,40 @@ describe("chat authorship display", () => {
       />,
     );
     expect(screen.getAllByTestId("test-chat-message")[1]?.dataset.continues).toBe(String(test.continues));
+  });
+
+  it("fits a continued message's time in the avatar's column, without AM or PM", () => {
+    // Two runs: "11:05 AM" and "12:45 PM", a two-digit hour in each.
+    const runs = [["Ana", 11, 3], ["Ana", 11, 5], ["Sam", 12, 43], ["Sam", 12, 45]] as const;
+    const messages = runs.map(([name, hour, minute], index): ChatMessageRecord => ({
+      id: `m${index}`, threadId: "thread", authorKind: "human", authorDisplayName: name,
+      body: "Hello", createdAtMs: new Date(2026, 8, 17, hour, minute).getTime(),
+    }));
+    render(
+      <ChatMessageList
+        testIdPrefix="test-chat"
+        messages={messages}
+        loading={false}
+        emptyLabel="No messages"
+        listRef={createRef<ChatMessageListHandle>()}
+      />,
+    );
+    const items = screen.getAllByTestId("test-chat-message");
+    expect(items.map((item) => item.dataset.continues)).toEqual(["false", "true", "false", "true"]);
+    // The avatar and the time share one fixed slot, so the text starts at
+    // the same place whatever the time's length.
+    const slot = (item: HTMLElement) => item.querySelector(".group")!.firstElementChild!;
+    for (const at of [1, 3]) {
+      const { createdAtMs } = messages[at]!;
+      expect(slot(items[at]!).className).toBe(slot(items[at - 1]!).className);
+      expect(slot(items[at]!).className.split(/\s+/)).toEqual(expect.arrayContaining(["w-9", "shrink-0", "justify-end"]));
+      const time = slot(items[at]!).querySelector("time")!;
+      expect(time.textContent).toBe(formatClockDigits(createdAtMs));
+      expect(time.textContent).not.toMatch(/AM|PM/i);
+      expect(time.getAttribute("title")).toBe(formatChatTime(createdAtMs).label);
+      expect(time.getAttribute("aria-hidden")).toBe("true");
+      expect(slot(items[at]!).querySelector(".sr-only")?.textContent).toBe(formatClock(createdAtMs));
+    }
   });
 
   it("renders agent messages as \"their stored name\" and humans by name", () => {

@@ -2,7 +2,7 @@ import { EMOJI_DATA } from "../editor/emojiData";
 import { AgentBadge, useIsOwnAuthor } from "./AgentBadge";
 import { AutomationBadge } from "./AutomationBadge";
 import { LegendList, type LegendListRef, type OnViewableItemsChanged } from "@legendapp/list/react";
-import { formatChatDay, formatChatTime, formatClock, sameChatDay } from "../time";
+import { formatChatDay, formatChatTime, formatClock, formatClockDigits, sameChatDay } from "../time";
 import { ChatAvatar } from "./ChatAvatar";
 import { ComposerSendButton } from "./ComposerSendButton";
 import { basenameOf } from "../path";
@@ -772,15 +772,22 @@ export const ChatMessageList = memo(function ChatMessageList(props: {
           </span>
         ) : null}
         <div className="group -mx-2 flex gap-2.5 rounded-lg px-2 hover:bg-hover">
+          {/* A continued message's time sits in the avatar's column, ending at
+              its edge, so "12:45" fits at every hour. The full time is its
+              tooltip, and a screen reader reads it with AM or PM. */}
           <span className="flex h-5 w-9 shrink-0 items-start justify-end">
             {continues ? (
-              <time
-                dateTime={time.iso}
-                title={time.iso}
-                className="block w-full whitespace-nowrap text-right font-mono text-[10px] leading-[22px] text-subtle opacity-0 group-hover:opacity-100"
-              >
-                {formatClock(message.createdAtMs)}
-              </time>
+              <>
+                <time
+                  aria-hidden
+                  dateTime={time.iso}
+                  title={time.label}
+                  className="whitespace-nowrap font-mono text-[10px] leading-[22px] text-subtle opacity-0 group-hover:opacity-100"
+                >
+                  {formatClockDigits(message.createdAtMs)}
+                </time>
+                <span className="sr-only">{formatClock(message.createdAtMs)}</span>
+              </>
             ) : (
               <ChatAvatar
                 name={message.authorDisplayName}
