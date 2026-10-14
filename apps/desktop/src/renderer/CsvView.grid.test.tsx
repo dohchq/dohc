@@ -213,13 +213,18 @@ describe("CSV grid", () => {
     expect(headerRoom()).toBe("10px");
   });
 
-  it("keeps the whole header in view while the rows scroll", () => {
+  it("keeps the whole header, and the hairline under it, in view while the rows scroll", () => {
     table(FUNNEL);
     // A frame that clips without scrolling, so the pane's scroller holds the header.
     expect(screen.getByRole("table").className).toContain("overflow-clip");
     expect(screen.getByRole("table").className).not.toContain("overflow-hidden");
-    for (const header of screen.getByRole("table").querySelectorAll("thead th")) {
+    const headers = screen.getByRole("table").querySelectorAll("thead th");
+    // The gutter's, each column's, and Add column's.
+    expect(headers).toHaveLength(5);
+    for (const header of headers) {
       expect(header.className).toContain("sticky top-0");
+      // Drawn 1px below the header, where the first row's top border is.
+      expect(header.className).toContain("shadow-[0_1px_0_var(--dohc-line)]");
     }
   });
 });

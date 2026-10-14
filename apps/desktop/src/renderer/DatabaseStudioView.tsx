@@ -339,8 +339,8 @@ export function DatabaseStudioView(props: {
   // over the load it was written on. Its answer replaces the shown rows only
   // while that load is the current one. A failed write stops showing its
   // value, and reports through the shell's error hook with Try again. The
-  // report names the cell, and its identity keeps one Notice per cell: a
-  // cell that fails again replaces its own, whatever the words.
+  // report names the column and table, and its identity keeps one Notice per
+  // cell: a cell that fails again replaces its own, whatever the words.
   const writeCell = useCallback(
     function write(cell: Omit<CellWrite, "loadId">) {
       const pendingWrite: CellWrite = { ...cell, loadId: currentSnapshotRef.current.loadId };
@@ -372,8 +372,11 @@ export function DatabaseStudioView(props: {
             setSnapshot((snapshot) => snapshot && mergeEditPage(snapshot, result));
           }
         } catch (cause) {
+          // A row is named only by a key column the grid shows; a rowid is
+          // SQLite's own number, which no column or row number shows.
+          const row = cell.key.pkColumn === "rowid" ? "" : ` for ${cell.key.pkColumn} ${String(cell.key.rowId)}`;
           onError?.(
-            `dohc could not save the change to ${cell.column} for ${cell.key.pkColumn} ${String(cell.key.rowId)} in ${cell.table}.`,
+            `dohc could not save the change to the ${cell.column} column${row} in the ${cell.table} table.`,
             cause,
             () => write(cell),
             ["database-cell", cell.workspaceId, cell.path, cell.table, editIdentity(cell.key), cell.column].join("\0"),
@@ -799,8 +802,9 @@ export function DatabaseGrid(props: {
 }
 
 // A column's header: its type icon, its name, and its sort arrow. An unsorted
-// column shows the arrow only on hover or focus. The full type is the
-// header's tooltip and accessible description.
+// column shows the arrow only on hover or focus, and in a number column
+// before the icon, so the name ends where the numbers do. The full type is
+// the header's tooltip and accessible description.
 function DatabaseHeader(props: {
   column: Column;
   index: number;
@@ -810,6 +814,12 @@ function DatabaseHeader(props: {
   const { column, sort } = props;
   const Icon = typeIcon(column);
   const Arrow = sort === "desc" ? ArrowDown : ArrowUp;
+  const numeric = isNumericColumn(column);
+  const hidden = sort ? null : (
+    <DataGridColumnAction>
+      <ArrowUp size={12} aria-hidden className="text-subtle" />
+    </DataGridColumnAction>
+  );
   return (
     <DataGridHeaderCell
       column={props.index}
@@ -822,15 +832,10 @@ function DatabaseHeader(props: {
       className="cursor-default select-none"
     >
       <span className="inline-flex max-w-80 items-center gap-1 align-middle">
+        {numeric ? hidden : null}
         {Icon ? <Icon size={12} aria-hidden className="shrink-0 text-subtle" /> : null}
         <span className={`truncate ${sort ? "text-ink" : ""}`}>{column.name}</span>
-        {sort ? (
-          <Arrow size={12} aria-hidden className="shrink-0 text-ink" />
-        ) : (
-          <DataGridColumnAction>
-            <ArrowUp size={12} aria-hidden className="text-subtle" />
-          </DataGridColumnAction>
-        )}
+        {sort ? <Arrow size={12} aria-hidden className="shrink-0 text-ink" /> : numeric ? null : hidden}
       </span>
     </DataGridHeaderCell>
   );
@@ -874,8 +879,10 @@ const DatabaseRow = memo(function DatabaseRow(props: {
             {editor?.column === column.name ? (
               <DatabaseCellEditor draftRef={editor.draftRef} onEnd={editor.onEnd} />
             ) : (
+              // A NULL is subtle and italic, so it reads apart from the text
+              // "NULL" without its colour.
               <span
-                className={`block max-w-80 truncate ${value === null || value === undefined ? "text-subtle" : "text-ink"}`}
+                className={`block max-w-80 truncate ${value === null || value === undefined ? "italic text-subtle" : "text-ink"}`}
                 title={text}
               >
                 {text}
@@ -889,9 +896,10 @@ const DatabaseRow = memo(function DatabaseRow(props: {
 });
 
 // A cell's editor. It fills the cell, which draws the focus outline, and adds
-// no width of its own. Enter commits and Escape cancels, each from the
-// keyboard; leaving the cell commits. Each edit ends once, with the draft, or
-// null when cancelled.
+// no width of its own. It draws the thin underline of a focused text field
+// (styles.css), so an editing cell reads apart from the active one. Enter
+// commits and Escape cancels, each from the keyboard; leaving the cell
+// commits. Each edit ends once, with the draft, or null when cancelled.
 function DatabaseCellEditor({
   draftRef,
   onEnd,
@@ -922,7 +930,7 @@ function DatabaseCellEditor({
         if (event.key === "Enter" && !event.nativeEvent.isComposing) end(draft, true);
         else if (event.key === "Escape") end(null, true);
       }}
-      className="w-full bg-transparent text-ink outline-none [text-align:inherit]"
+      className="w-full bg-transparent text-ink shadow-[inset_0_-1px_0_var(--dohc-muted)] outline-none [text-align:inherit]"
     />
   );
 }

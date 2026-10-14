@@ -448,7 +448,7 @@ describe("DatabaseStudioView", () => {
     expect(cell("category", "txn_001").textContent).toBe("Food");
     expect(onError).toHaveBeenCalledTimes(1);
     expect(onError).toHaveBeenCalledWith(
-      "dohc could not save the change to category for id txn_001 in wallet.",
+      "dohc could not save the change to the category column for id txn_001 in the wallet table.",
       failure,
       expect.any(Function),
       // The cell's identity: workspace, database, table, row key and column.
@@ -511,8 +511,12 @@ describe("DatabaseStudioView", () => {
 
     await waitFor(() => expect(notices()).toHaveLength(2));
     const [first, second] = notices();
-    expect(first!.textContent).toContain("dohc could not save the change to category for id txn_001 in wallet.");
-    expect(second!.textContent).toContain("dohc could not save the change to category for id txn_002 in wallet.");
+    expect(first!.textContent).toContain(
+      "dohc could not save the change to the category column for id txn_001 in the wallet table.",
+    );
+    expect(second!.textContent).toContain(
+      "dohc could not save the change to the category column for id txn_002 in the wallet table.",
+    );
 
     // Each Try again writes its own row's change.
     bridgeMock.applyDatabaseEdit.mockClear();
@@ -760,18 +764,85 @@ describe("DatabaseStudioView", () => {
     const user = userEvent.setup();
     renderStudio();
     await screen.findByTestId("db-cell-amount-txn_001");
-    // Each header's icons: its type, then its sort arrow.
-    const icons = (column: string) => [...screen.getByTestId(`db-sort-${column}`).querySelectorAll("svg")];
+    const icon = (column: string, name: string) =>
+      screen.getByTestId(`db-sort-${column}`).querySelector<SVGElement>(`svg.lucide-${name}`)!;
     const sorted = (column: string) => screen.getByTestId(`db-sort-${column}`).getAttribute("aria-sort");
 
-    await user.click(icons("amount")[0]!);
+    await user.click(icon("amount", "hash"));
     expect(sorted("amount")).toBe("ascending");
-    await user.click(icons("amount")[1]!);
+    await user.click(icon("amount", "arrow-up"));
     expect(sorted("amount")).toBe("descending");
     // An unsorted column's arrow, shown only on hover or focus.
-    await user.click(icons("category")[1]!);
+    await user.click(icon("category", "arrow-up"));
     expect(sorted("category")).toBe("ascending");
     expect(sorted("amount")).toBe("none");
+  });
+
+  it("ends a number column's name where its numbers end, with its hidden sort arrow before its icon", async () => {
+    const user = userEvent.setup();
+    renderStudio();
+    await screen.findByTestId("db-cell-amount-txn_001");
+    // A header's parts, left to right: icons by name, and the column's name.
+    const parts = (column: string) =>
+      [...screen.getByTestId(`db-sort-${column}`).firstElementChild!.children].map((part) => {
+        const svg = part.matches("svg") ? part : part.querySelector("svg");
+        if (!svg) return part.textContent;
+        const name = [...svg.classList].find((name) => name.startsWith("lucide-"))!.slice("lucide-".length);
+        return svg === part ? name : `${name} on hover`;
+      });
+
+    expect(parts("amount")).toEqual(["arrow-up on hover", "hash", "amount"]);
+    expect(parts("category")).toEqual(["type", "category", "arrow-up on hover"]);
+    // A sorted number column keeps its arrow after its name, as drawn.
+    await user.click(screen.getByTestId("db-sort-amount"));
+    expect(parts("amount")).toEqual(["hash", "amount", "arrow-up"]);
+  });
+
+  it("marks a NULL and an editing cell by more than their colour", async () => {
+    const user = userEvent.setup();
+    renderStudio();
+    await screen.findByTestId("db-cell-amount-txn_003");
+    expect(cell("amount", "txn_003").firstElementChild!.className).toMatch(/(^| )italic( |$)/);
+    expect(cell("amount", "txn_001").firstElementChild!.className).not.toMatch(/(^| )italic( |$)/);
+
+    // An editing cell draws a text field's underline; the active cell does not.
+    await user.click(cell("category", "txn_001"));
+    expect(editor().className).toContain("shadow-[inset_0_-1px_0_var(--dohc-muted)]");
+    await user.keyboard("{Escape}");
+    expect(document.activeElement).toBe(cell("category", "txn_001"));
+    expect(cell("category", "txn_001").querySelector("input")).toBeNull();
+  });
+
+  it("names a row in a failed write's Notice only by a key column the grid shows", async () => {
+    const user = userEvent.setup();
+    bridgeMock.readWorkspaceDatabase.mockResolvedValueOnce({
+      path: "imports/wallet.sqlite",
+      tables: [
+        {
+          name: "wallet",
+          columns: [{ name: "category", type: "TEXT" }],
+          rows: [{ __dohc_rowid: 7, category: "Food" }],
+          nextOffset: null,
+        },
+      ],
+    });
+    const failure = new Error("database is locked");
+    bridgeMock.applyDatabaseEdit.mockRejectedValueOnce(failure);
+    const onError = vi.fn();
+    render(<DatabaseStudioView workspaceId="ws-1" path="imports/wallet.sqlite" onError={onError} />);
+    await screen.findByTestId("db-cell-category-7");
+
+    await editCell(user, "category", "7", "Groceries");
+    // A rowid is SQLite's own number: no column shows it, and the gutter
+    // numbers rows as they are sorted and searched.
+    await waitFor(() =>
+      expect(onError).toHaveBeenCalledWith(
+        "dohc could not save the change to the category column in the wallet table.",
+        failure,
+        expect.any(Function),
+        ["database-cell", "ws-1", "imports/wallet.sqlite", "wallet", "rowid", "7", "category"].join("\0"),
+      ),
+    );
   });
 
   it("offers no editor in a database shared to read, and says why with one read-only mark", async () => {

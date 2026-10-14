@@ -74,9 +74,14 @@ export function DataGrid({
   );
 }
 
+// Every header cell stays in view while the rows scroll, with the header's
+// hairline 1px below it. At rest the hairline covers the first row's top
+// border exactly; scrolled, it stays under the header.
+export const STICKY_HEADER = "sticky top-0 z-10 shadow-[0_1px_0_var(--dohc-line)]";
+
 // The header's first cell, over the row numbers.
 export function DataGridGutterHeader({ wide, className, ...props }: ComponentPropsWithoutRef<"th"> & { wide?: boolean }) {
-  return <th {...props} className={`sticky top-0 z-10 ${wide ? "w-10" : "w-8"} bg-panel-2 p-0 ${className ?? ""}`} />;
+  return <th {...props} className={`${STICKY_HEADER} ${wide ? "w-10" : "w-8"} bg-panel-2 p-0 ${className ?? ""}`} />;
 }
 
 // A column's header. Its actions show on hover or focus (DataGridColumnAction).
@@ -92,7 +97,7 @@ export function DataGridHeaderCell({
       {...props}
       data-grid-cell=""
       style={headerStyle(column)}
-      className={`group/column sticky top-0 z-10 h-7 bg-panel-2 px-2.5 text-[12px] font-medium text-muted focus:outline-2 focus:-outline-offset-2 focus:outline-accent has-[input:focus]:outline-2 has-[input:focus]:-outline-offset-2 has-[input:focus]:outline-accent ${className ?? ""}`}
+      className={`group/column ${STICKY_HEADER} h-7 bg-panel-2 px-2.5 text-[12px] font-medium text-muted focus:outline-2 focus:-outline-offset-2 focus:outline-accent has-[input:focus]:outline-2 has-[input:focus]:-outline-offset-2 has-[input:focus]:outline-accent ${className ?? ""}`}
     />
   );
 }

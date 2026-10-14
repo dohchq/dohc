@@ -18,6 +18,7 @@ import {
   DataGridGutterHeader,
   DataGridHeaderCell,
   DataGridRow,
+  STICKY_HEADER,
 } from "./ui/DataGrid";
 import { SegmentedControl, type SegmentedOption } from "./ui/SegmentedControl";
 import { StateMark } from "./ui/StateMark";
@@ -282,7 +283,7 @@ const CsvTableHeader = memo(function CsvTableHeader({
           </DataGridHeaderCell>
         ))}
         {!truncated ? (
-          <th className="sticky top-0 z-10 w-8 border-l border-line bg-panel-2 p-0">
+          <th className={`${STICKY_HEADER} w-8 border-l border-line bg-panel-2 p-0`}>
             <IconButton
               data-testid="csv-add-column"
               aria-label="Add column"
