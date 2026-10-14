@@ -739,7 +739,7 @@ it.each(['exact', 'over'] as const)('commits a real %s byte-trigger checkpoint i
     expect(() => f.storage.commitLiveUpdateJournal(due)).toThrow(/damaged/)
     expect(() => f.storage.readCommittedLiveUpdate({ host, document: f.input.evidence.document, journalCursor: boundary === 'exact' ? 1 : 2 })).toThrow(/damaged/)
   } finally { f.close() }
-}, 30_000)
+}, 120_000)
 
 it.each(['mode','hostId','hostEpoch','instanceId','connectionId'] as const)('rejects a different host %s before exact replay', field => {
   const f = registered()

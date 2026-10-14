@@ -8,8 +8,8 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
-import { attemptOutcome, cancel, listRequests, nextRequest, placeSubmission, position, queuePaths, readJson, submit, taskDefinition, terminalStates, writeJson } from "./queue.mjs";
-import { runService } from "./queue-service.mjs";
+import { attemptOutcome, cancel, listRequests, nextRequest, placeSubmission, position, queuePaths, readJson, serviceRuns, startsInMs, submit, taskDefinition, terminalStates, writeJson } from "./queue.mjs";
+import { laneTemp, runService, sweepContainers } from "./queue-service.mjs";
 import { failureKind, takeGrant } from "./verify.mjs";
 import { run } from "./process.mjs";
 
@@ -39,6 +39,14 @@ test("the oldest runnable request goes next; Docker trouble holds back only Java
   assert.equal(nextRequest([js, rust, later], { diskOk: false, dockerOk: true }), null);
   assert.equal(nextRequest([later], { diskOk: true, dockerOk: true }), null, "a backoff keeps its place but not the lane");
   assert.equal(position([later, rust, entry("000000000-zzzzzz", { head: "h0" }, "running")], rust.id), 2);
+});
+
+test("a wait estimate shares the runs ahead across the lanes, and status reads either heartbeat", () => {
+  assert.deepEqual([1, 2, 3, 4].map(place => startsInMs(place, 10, 1)), [0, 10, 20, 30]);
+  assert.deepEqual([1, 2, 3, 4, 5].map(place => startsInMs(place, 10, 2)), [0, 0, 10, 10, 20]);
+  assert.deepEqual(serviceRuns({ lanes: 2, running: [{ id: "a" }, { id: "b" }] }), { lanes: 2, runs: [{ id: "a" }, { id: "b" }] });
+  assert.deepEqual(serviceRuns({ running: { id: "a" } }), { lanes: 1, runs: [{ id: "a" }] }, "a service older than two lanes");
+  assert.deepEqual(serviceRuns(null), { lanes: 1, runs: [] });
 });
 
 test("only a receipt for this exact attempt counts", () => {
@@ -93,6 +101,9 @@ test("machine failures are told apart from failures of the change", () => {
   assert.equal(kind({ step: "tests", commandExitFailure: true }), "check");
   assert.equal(kind({ step: "tests", stderr: "expected ENOSPC: no space left on device", stdout: "0xC0000142" }), "check", "text in test output proves nothing");
   assert.equal(kind({ step: "rust", stdout: "refusing to run the gate: 38.2 GB free on the worktree volume is below the 40 GB floor" }), "environment");
+  // Another lane can use up the disk after this run was admitted.
+  assert.equal(kind({ step: "prepare", environment: "disk space", message: "Build needs 40 GB free; observed 38.2." }), "environment");
+  assert.equal(kind({ step: "tests", stderr: "Error: Build needs 40 GB free; observed 38.2." }), "check", "a test may print a refusal it expects");
 });
 
 test("a command the Windows job relay cannot start is a machine failure", { skip: process.platform !== "win32" && "the job relay is Windows-only" }, async () => {
@@ -112,6 +123,8 @@ function fixtureRepo() {
   const repo = mkdtempSync(join(tmpdir(), "dohc-queue-repo-"));
   const git = (...args) => execFileSync("git", args, { cwd: repo, encoding: "utf8", windowsHide: true }).trim();
   git("init", "-q", "-b", "main");
+  // A personal signing setup must not reach the fixture.
+  git("config", "commit.gpgsign", "false");
   git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "base");
   const base = git("rev-parse", "HEAD");
   git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "head");
@@ -119,13 +132,13 @@ function fixtureRepo() {
 }
 
 /** A service on a private root with a stub verifier: request.checkout names its behavior. */
-function harness(t, { timeLimitMs = 60_000, docker = async () => true, sweep = async () => 0, hostFails = () => {}, holdLane = async () => ({ release() {} }), prepare = async () => {}, prepareLimitMs } = {}) {
+function harness(t, { timeLimitMs = 60_000, docker = async () => true, sweep = async () => 0, hostFails = () => {}, holdLane = async () => ({ release() {} }), prepare = async () => {}, prepareLimitMs, lanes, cleanupRetryMs = 50 } = {}) {
   const root = mkdtempSync(join(tmpdir(), "dohc-queue-"));
   const fixture = fixtureRepo();
   const calls = [];
   const stop = new AbortController();
-  const worker = async ({ request, grant, output, signal }) => {
-    calls.push({ id: grant.request, attempt: grant.attempt, behavior: request.checkout });
+  const worker = async ({ lane, request, grant, output, signal }) => {
+    calls.push({ id: grant.request, attempt: grant.attempt, behavior: request.checkout, lane });
     const receipt = fields => writeFileSync(join(output, "result.json"), JSON.stringify({ grant, commit: grant.head, baseCommit: grant.base, final: true, ...fields }));
     const behavior = request.checkout;
     if (behavior === "pass") receipt({ verdict: "PASS" });
@@ -136,11 +149,13 @@ function harness(t, { timeLimitMs = 60_000, docker = async () => true, sweep = a
     else if (behavior === "crash") throw new Error("worker crashed without a receipt");
     else if (behavior === "hang") await new Promise(done => signal.addEventListener("abort", done, { once: true }));
     else if (behavior === "host-down") receipt({ verdict: "FAIL", error: "Docker did not answer", failure: { kind: "environment", cause: "postgres-start" } });
-    else if (behavior === "slow-host") { await sleep(250); receipt({ verdict: "FAIL", error: "Docker did not answer", failure: { kind: "environment", cause: "postgres-start" } }); }
+    // Two slow machine failures, then a run that ends only when it is stopped.
+    else if (behavior === "slow-host" && calls.filter(call => call.id === grant.request).length > 2) await new Promise(done => signal.addEventListener("abort", done, { once: true }));
+    else if (behavior === "slow-host") { await sleep(3000); receipt({ verdict: "FAIL", error: "Docker did not answer", failure: { kind: "environment", cause: "postgres-start" } }); }
   };
   const service = runService({ root, repo: fixture.repo, lane: join(root, "lane"), tickMs: 20, timeLimitMs, floorGb: 1,
     freeDisk: () => 100, docker, prepare, sweep, prepareLimitMs,
-    holdLane, worker, retryDelay: () => 50, cleanupRetryMs: 50, stop: stop.signal, log: () => {} });
+    holdLane, worker, retryDelay: () => 50, cleanupRetryMs, lanes, stop: stop.signal, log: () => {} });
   t.after(async () => { stop.abort(); await service; rmSync(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 }); rmSync(fixture.repo, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 }); });
   const request = async (behavior, fields = {}) => {
     // Each behavior verifies its own commit: one commit with the same gates is one piece of work.
@@ -213,6 +228,70 @@ test("a repeated submission attaches, a newer commit replaces a queued one, and 
   await cancel(root, hung.id);
   assert.equal((await settled(hung.id)).status.state, "cancelled");
   assert.equal((await settled(second.id)).status.verdict, "PASS");
+});
+
+test("two lanes run two requests at once, each in its own checkout, and the next takes the freed one", async t => {
+  const { root, request, settled, calls } = harness(t, { lanes: () => 2 });
+  const state = id => listRequests(root).find(candidate => candidate.id === id).status.state;
+  const started = id => waitFor(() => calls.find(call => call.id === id), `${id} must start`);
+  const first = await request("hang");
+  const second = await request("hang");
+  const [one, two] = [await started(first.id), await started(second.id)];
+  assert.notEqual(one.lane, two.lane, "each run has its own checkout");
+  const third = await request("pass");
+  // A later acceptance means the service has filled its lanes since the third arrived.
+  await request("pass", { branch: "refs/heads/later" });
+  assert.equal(state(third.id), "queued", "both lanes are busy");
+  await cancel(root, first.id);
+  assert.equal((await settled(first.id)).status.state, "cancelled");
+  assert.equal(state(second.id), "running", "a stop reaches only its own run");
+  assert.equal((await settled(third.id)).status.verdict, "PASS");
+  assert.equal(calls.find(call => call.id === third.id).lane, one.lane, "the next run takes the freed checkout");
+  await cancel(root, second.id);
+  assert.equal((await settled(second.id)).status.state, "cancelled");
+});
+
+test("a requested restart starts nothing new and waits for the runs in flight", async t => {
+  const { root, request, settled, calls, service } = harness(t, { lanes: () => 2 });
+  const hung = await request("hang");
+  await waitFor(() => calls.find(call => call.id === hung.id), "the hang must start");
+  writeFileSync(join(queuePaths(root).control, "restart"), "");
+  const waiting = await request("pass");
+  await request("pass", { branch: "refs/heads/later" });
+  const state = () => listRequests(root).find(candidate => candidate.id === waiting.id).status.state;
+  assert.equal(state(), "queued", "a free lane takes nothing during a restart");
+  await cancel(root, hung.id);
+  assert.equal((await settled(hung.id)).status.state, "cancelled");
+  assert.equal(await service, 75);
+  assert.equal(state(), "queued");
+});
+
+test("a lane setting that cannot be read keeps the lane count the service had, for its slots too", async t => {
+  let slots;
+  const { request, settled } = harness(t, { lanes: () => { throw new Error("verification-lanes must contain 1 or 2."); },
+    holdLane: async ({ lanes }) => { slots = lanes; return { release() {} }; } });
+  assert.equal((await settled((await request("pass")).id)).status.verdict, "PASS");
+  assert.equal(slots, 1);
+});
+
+test("a request's cleanup removes only its containers, and the sweep never one another lane may be starting", async () => {
+  let removed = [];
+  const command = async (_, args) => {
+    if (args[0] === "rm") { removed.push(...args.slice(2)); return { stdout: "" }; }
+    const filters = args.filter(arg => arg.includes("="));
+    const found = filters.includes("label=dohc.verification=r1") ? "own" : filters.includes("status=exited") ? "exited" : filters.includes("status=created") ? "starting" : "";
+    return { stdout: found };
+  };
+  assert.equal(await sweepContainers({ request: "r1", command }), 1);
+  assert.deepEqual(removed, ["own"], "another request's container cannot fail this cleanup");
+  removed = [];
+  assert.equal(await sweepContainers({ command }), 1);
+  assert.deepEqual(removed, ["exited"]);
+});
+
+test("each lane has its own temp folder under the queue root", () => {
+  assert.equal(laneTemp(join("C:", "w", "_verification", "lane")), join("C:", "w", "_verification", "tmp", "lane"));
+  assert.equal(laneTemp(join("C:", "w", "_verification", "lane-2")), join("C:", "w", "_verification", "tmp", "lane-2"));
 });
 
 test("a submission the service cannot verify is rejected with a reason", async t => {
@@ -370,14 +449,16 @@ test("a check that fails while Docker stops answering is retried, and fails on a
 });
 
 test("retries share one time budget, so a request the host keeps failing late ends in error", async t => {
-  const { request, settled } = harness(t, { timeLimitMs: 300 });
+  // Each slow attempt takes at least 3 s of the 5 s limit, so two leave the third less than its limit of the 10 s budget.
+  // The 2 s margins hold on a host whose CPU is saturated by other gates.
+  const { request, settled } = harness(t, { timeLimitMs: 5000 });
   const slow = await request("slow-host");
   const ended = await settled(slow.id);
   assert.equal(ended.status.state, "error", "only machine failures retry, so a spent budget gives no verdict");
   assert.equal(ended.status.verdict, null);
   assert.equal(ended.status.cause, "time budget");
   assert.equal(ended.status.attempts.at(-1).outcome, "error", "the attempt the budget cut short ends the request itself");
-  assert.ok(ended.status.attempts.length <= 4, `${ended.status.attempts.length} attempts`);
+  assert.equal(ended.status.attempts.length, 3);
 });
 
 test("a cleanup that fails is retried until it succeeds, and its request is kept until then", async t => {
@@ -394,6 +475,50 @@ test("a cleanup that fails is retried until it succeeds, and its request is kept
   assert.equal(done.status.verdict, "PASS", "a cleanup failure does not change the verdict");
   await waitFor(() => cleaned.includes(passed.id), "the cleanup must be retried");
   await waitFor(() => readJson(join(queuePaths(root).request(passed.id), "status.json"))?.cleanupPending === false, "the pending cleanup must be cleared");
+});
+
+test("a request whose containers could not be removed waits for that cleanup before it runs again", async t => {
+  let cleanups = 0;
+  let cleanedAfter;
+  // The retry is due long before the cleanup is retried; removing the old containers during the retry would stop it.
+  const { request, settled, calls } = harness(t, { cleanupRetryMs: 500, sweep: async ({ request: id }) => {
+    if (!id) return 0;
+    cleanups += 1;
+    // The cleanup at the end of the attempt and its first retry both fail.
+    if (cleanups <= 2) throw new Error("Docker is not answering");
+    cleanedAfter ??= calls.length;
+    return 1;
+  } });
+  const flaky = await request("flaky-host");
+  assert.equal((await settled(flaky.id)).status.verdict, "PASS");
+  assert.equal(calls.length, 2);
+  assert.equal(cleanedAfter, 1, "the retry started only once the first attempt's containers were gone");
+});
+
+test("a container Docker cannot remove never holds back another request's cleanup", async t => {
+  // The first request's container can never be removed; the second's cleanup fails once, then works.
+  let stuck;
+  let failedOnce = false;
+  const { request, settled } = harness(t, { sweep: async ({ request: id }) => {
+    if (!id) return 0;
+    stuck ??= id;
+    if (id === stuck) throw new Error("unable to remove filesystem");
+    if (!failedOnce) { failedOnce = true; throw new Error("Docker is not answering"); }
+    return 1;
+  } });
+  const first = await request("flaky-host");
+  const other = await request("flaky-host", { branch: "refs/heads/other" });
+  assert.equal((await settled(other.id)).status.verdict, "PASS");
+  assert.equal(stuck, first.id);
+});
+
+test("a restart requested while the service checks the host starts nothing new", async t => {
+  let root;
+  const { root: queueRoot, request, service } = harness(t, { docker: async () => { writeFileSync(join(queuePaths(root).control, "restart"), ""); return true; } });
+  root = queueRoot;
+  const waiting = await request("pass");
+  assert.equal(await service, 75);
+  assert.equal(listRequests(root).find(candidate => candidate.id === waiting.id).status.state, "queued");
 });
 
 test("a malformed submission is rejected and the service keeps serving", async t => {
