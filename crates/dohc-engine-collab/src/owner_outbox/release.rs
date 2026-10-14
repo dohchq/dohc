@@ -456,6 +456,7 @@ fn contains_pending_in<'a>(
     }
     let vector = accepted.state_vector();
     let deleted = accepted.delete_set();
+    let empty = Default::default();
     let mut before = None;
     for bytes in updates {
         crate::replay_parity::prevalidate_update_bytes(bytes).map_err(collab)?;
@@ -467,7 +468,14 @@ fn contains_pending_in<'a>(
         {
             continue;
         }
-        if !update.delete_set().diff(&deleted).is_empty() {
+        // Decoded entry ranges can be unsorted; subset_of checks each range independently.
+        if update.delete_set().iter().any(|(client, _)| {
+            !update
+                .delete_set()
+                .get(client)
+                .expect("delete-set client")
+                .subset_of(deleted.get(client).unwrap_or(&empty))
+        }) {
             continue;
         }
         if before.is_none() {
