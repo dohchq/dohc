@@ -28,6 +28,8 @@ function docker(args) {
 
 const normalizeDirectory = path => path ? posix.normalize(path).replace(/(.)\/+$/, "$1") : undefined;
 const bindDirectory = volume => volume.Options?.o?.split(",").includes("bind") ? normalizeDirectory(volume.Options.device) : undefined;
+const inside = (path, folder) => path === folder || path.startsWith(folder.endsWith("/") ? folder : `${folder}/`);
+const overlapping = (a, b) => inside(a, b) || inside(b, a);
 
 export function parseRecoveryArguments(args) {
   const [action, directory, ...rest] = args;
@@ -69,18 +71,19 @@ export async function runRecovery(options, run = docker, log = console.log, comp
     throw new Error("This command requires the supported self-host deployment layout.");
   }
   const volumeNames = new Set(Object.values(config.volumes ?? {}).map(volume => volume.name));
-  // A volume bound to a folder shares it with any other volume or bind mount of that folder.
-  const deploymentDirectories = new Set(volumeNames.size ? JSON.parse(run(["volume", "inspect", ...volumeNames])).map(bindDirectory).filter(Boolean) : []);
+  // A writable mount of a deployment folder, or of a folder inside or above it, can change deployment data.
+  const storage = (volumeNames.size ? JSON.parse(run(["volume", "inspect", ...volumeNames])) : [])
+    .flatMap(volume => [bindDirectory(volume), normalizeDirectory(volume.Mountpoint)]).filter(Boolean);
   const writers = ids => {
     if (!ids.length) return [];
     const containers = JSON.parse(run(["inspect", ...ids]));
     const others = [...new Set(containers.flatMap(container => (container.Mounts ?? [])
-      .filter(mount => mount.Type === "volume" && !volumeNames.has(mount.Name)).map(mount => mount.Name)))];
-    const sharedVolumes = new Set(others.length ? JSON.parse(run(["volume", "inspect", ...others]))
-      .filter(volume => deploymentDirectories.has(bindDirectory(volume))).map(volume => volume.Name) : []);
-    return containers.filter(container => (container.Mounts ?? []).some(mount => mount.Type === "volume"
-      ? volumeNames.has(mount.Name) || sharedVolumes.has(mount.Name)
-      : mount.Type === "bind" && deploymentDirectories.has(normalizeDirectory(mount.Source))));
+      .filter(mount => mount.RW && mount.Type === "volume" && !volumeNames.has(mount.Name)).map(mount => mount.Name)))];
+    const devices = new Map(others.length ? JSON.parse(run(["volume", "inspect", ...others])).map(volume => [volume.Name, bindDirectory(volume)]) : []);
+    const writes = mount => mount.RW && [normalizeDirectory(mount.Source), devices.get(mount.Name)]
+      .some(path => path && storage.some(folder => overlapping(path, folder)));
+    return containers.filter(container => (container.Mounts ?? [])
+      .some(mount => mount.Type === "volume" && volumeNames.has(mount.Name) || writes(mount)));
   };
   const current = run([...compose, "ps", "--services", "--filter", "status=running"]).trim().split(/\r?\n/).filter(Boolean);
   if (writers(run(["ps", "--quiet"]).trim().split(/\r?\n/).filter(Boolean))

@@ -6,7 +6,7 @@ import { parseEnv } from 'node:util';
 import test from 'node:test';
 import { load, YAML11_SCHEMA } from 'js-yaml';
 import { initialSettings, privateRouteInstructions, updateImageSetting } from '../tools/self-host/bootstrap.mjs';
-import { validateSettings, composeArgs, dataDiskVolumeErrors, relayDeploymentError, supportedComposeVersion } from '../tools/self-host/config.mjs';
+import { accountsDatabaseError, validateSettings, composeArgs, dataDiskVolumeErrors, relayDeploymentCheck, relayDeploymentError, supportedComposeVersion } from '../tools/self-host/config.mjs';
 import { relayInitializationRequired } from '../tools/self-host/entrypoint.mjs';
 
 const composeText = readFileSync('docker-compose.self-host.yml', 'utf8');
@@ -151,32 +151,78 @@ test('a data directory selects the data-disk overlay for relay, continuity and h
 test('existing volumes stored anywhere but the configured disk folder are refused without changing them', () => {
   const device = '/mnt/disk/dohc/continuity', options = {type: 'none', o: 'bind', device};
   const config = {volumes: {dohc_self_host_postgres: {name: 'p_postgres'}, dohc_self_host_relay_continuity: {name: 'p_continuity', driver: 'local', driver_opts: options}}};
-  const check = existing => {
+  const check = (existing, missing = {status: 1, stdout: '', stderr: 'Error response from daemon: get p_continuity: no such volume'}) => {
     const calls = [];
     const errors = dataDiskVolumeErrors(config, args => {
       calls.push(args);
-      return existing ? {status: 0, stdout: JSON.stringify([{Name: args[2], ...existing}])} : {status: 1, stdout: ''};
+      return existing ? {status: 0, stdout: JSON.stringify([{Name: args[2], ...existing}])} : missing;
     });
     assert.deepEqual(calls, [['volume', 'inspect', 'p_continuity']]);
     return errors;
   };
   assert.deepEqual(check(undefined), []);
+  // Only Docker's own answer establishes that a volume is absent.
+  for (const failure of [{status: 1, stdout: '', stderr: 'Cannot connect to the Docker daemon.'}, {status: null, stdout: ''}]) {
+    assert.throws(() => check(undefined, failure), /Docker could not inspect volume p_continuity/);
+  }
   assert.deepEqual(check({Driver: 'local', Options: {...options}}), []);
   assert.match(check({Driver: 'local', Options: null}).join(), /p_continuity keeps its data in Docker storage, not \/mnt\/disk\/dohc\/continuity\. Restore the previous DOHC_DATA_DIRECTORY/);
   assert.match(check({Driver: 'local', Options: {...options, device: '/mnt/old/dohc/continuity'}}).join(), /keeps its data in \/mnt\/old\/dohc\/continuity, not/);
   assert.equal(check({Driver: 'other', Options: {...options}}).length, 1);
 });
 
+// Runs the relay deployment check against in-memory folders, with the status `node -e` would exit with.
+function relayCheckStatus(files, unreadable = false) {
+  const fs = {statSync: path => files.includes(path) ? {} : undefined, readdirSync: folder => {
+    if (unreadable) throw Object.assign(new Error('permission denied'), {code: 'EACCES'});
+    return files.filter(path => path.startsWith(`${folder}/`));
+  }};
+  const process = {exitCode: 0};
+  try { new Function('require', 'process', 'console', relayDeploymentCheck)(() => fs, process, {error() {}}); } catch { return 1; }
+  return process.exitCode;
+}
+
 test('only the first start of a data-disk deployment may initialize its relay', () => {
   const settings = {DOHC_DATA_DIRECTORY: '/mnt/disk/dohc'};
-  const result = (found, firstStart) => relayDeploymentError('.env.self-host', settings, args => {
+  const record = '/continuity/deployment.json', database = '/data/sync-relay.sqlite';
+  const result = (status, firstStart) => relayDeploymentError('.env.self-host', settings, args => {
     assert.ok(args.includes('tools/self-host/compose.data-disk.yml') && args.includes('relay-initialize'));
-    return {status: found ? 0 : 1, stdout: ''};
+    return {status, stdout: ''};
   }, firstStart);
-  assert.equal(result(true, false), '');
-  assert.equal(result(false, true), '');
-  assert.match(result(false, false), /No relay deployment found in \/mnt\/disk\/dohc\. Mount the data disk there and try again\. Never recreate its folders/);
-  assert.match(result(true, true), /already exists in \/mnt\/disk\/dohc\. Start without --first-start/);
+  const found = relayCheckStatus([record, database]), empty = relayCheckStatus([]);
+  assert.equal(result(found, false), '');
+  assert.equal(result(empty, true), '');
+  assert.match(result(empty, false), /No relay deployment found in \/mnt\/disk\/dohc\. Mount the data disk there and try again\. Never recreate its folders/);
+  for (const files of [[record, database], [record], [database], ['/continuity/history/continuity.sqlite']]) {
+    assert.match(result(relayCheckStatus(files), true), /\/mnt\/disk\/dohc already holds relay data\. Start without --first-start/, files.join());
+  }
+  for (const files of [[record], [database]]) {
+    assert.match(result(relayCheckStatus(files), false), /The relay deployment in \/mnt\/disk\/dohc is missing its record or its database/, files.join());
+  }
+  // A failed check never reads as an empty disk or a found deployment.
+  for (const status of [relayCheckStatus([], true), 1, 125, null]) {
+    for (const firstStart of [false, true]) assert.match(result(status, firstStart), /Could not check the data disk in \/mnt\/disk\/dohc/, `${status}`);
+  }
+});
+
+test('every later start needs an accounts database, checked before any container mounts its volume', () => {
+  const config = {services: {postgres: {image: 'postgres:17.9-alpine'}}, volumes: {dohc_self_host_postgres: {name: 'p_postgres'}}};
+  const check = (inspect, probe) => {
+    const calls = [];
+    const error = accountsDatabaseError(config, args => {
+      calls.push(args);
+      return args[0] === 'volume' ? inspect : probe;
+    });
+    return {error, probed: calls.some(args => args[0] === 'run')};
+  };
+  const exists = {status: 0, stdout: JSON.stringify([{Name: 'p_postgres', Driver: 'local'}])};
+  assert.deepEqual(check(exists, {status: 0}), {error: '', probed: true});
+  assert.match(check(exists, {status: 1}).error, /p_postgres holds no accounts database\. Restore it/);
+  const absent = check({status: 1, stderr: 'Error: No such volume: p_postgres'}, {status: 0});
+  assert.equal(absent.probed, false);
+  assert.match(absent.error, /holds no accounts database/);
+  for (const status of [125, 126, null]) assert.match(check(exists, {status}).error, /Could not check Docker volume p_postgres/);
+  assert.throws(() => check({status: 1, stderr: 'Cannot connect to the Docker daemon.'}, {status: 0}), /Docker could not inspect volume p_postgres/);
 });
 
 test('the data directory must be an absolute folder without parent segments', () => {

@@ -22,23 +22,29 @@ const deployment = ["/pg/PG_VERSION", "/continuity/deployment.json", "/data/sync
 const accounts = { "dohc-self-host_dohc_self_host_postgres": { Driver: "local", Options: null } };
 
 // Runs each Docker check against an in-memory host: `volumes` exist in Docker, `files` exist inside them.
-function host({ files = deployment, volumes = accounts } = {}) {
+// `fail` names a Docker call that fails without saying why, as a busy or restarting daemon does.
+function host({ files = deployment, volumes = accounts, fail = () => false } = {}) {
   const calls = [], present = new Set(files);
   return { calls, run(command, args) {
     calls.push([command, ...args]);
     if (command !== "docker") return { status: 0, stdout: "" };
     if (args.includes("config")) return { status: 0, stdout: JSON.stringify(config) };
+    if (fail(args)) return { status: 125, stdout: "", stderr: "Cannot connect to the Docker daemon." };
     if (args[0] === "volume" && args[1] === "inspect") {
-      return volumes[args[2]] ? { status: 0, stdout: JSON.stringify([{ Name: args[2], ...volumes[args[2]] }]) } : { status: 1, stdout: "" };
+      return volumes[args[2]] ? { status: 0, stdout: JSON.stringify([{ Name: args[2], ...volumes[args[2]] }]) }
+        : { status: 1, stdout: "", stderr: `Error response from daemon: get ${args[2]}: no such volume` };
     }
     if (args[0] === "run" && args.includes("test")) return { status: args.at(-2) === "-s" && present.has(args.at(-1)) ? 0 : 1, stdout: "" };
-    if (args.includes("relay-initialize")) {
-      const fs = { existsSync: path => present.has(path) }, process = { exitCode: 0 };
-      new Function("require", "process", "console", args.at(-1))(name => { assert.equal(name, "node:fs"); return fs; }, process, { error() {} });
-      return { status: process.exitCode, stdout: "" };
-    }
+    if (args.includes("relay-initialize")) return { status: relayCheck(args.at(-1), present), stdout: "" };
     throw new Error(`Unexpected Docker call: ${args.join(" ")}`);
   } };
+}
+function relayCheck(script, present) {
+  const fs = { statSync: path => present.has(path) ? {} : undefined,
+    readdirSync: folder => [...present].filter(path => path.startsWith(`${folder}/`)) };
+  const process = { exitCode: 0 };
+  new Function("require", "process", "console", script)(name => { assert.equal(name, "node:fs"); return fs; }, process, { error() {} });
+  return process.exitCode;
 }
 const started = calls => calls.some(([command]) => command !== "docker");
 const changed = calls => calls.some(([command, ...args]) => command === "docker" && (args.includes("up") || args.includes("rm") || args.includes("create")));
@@ -59,13 +65,31 @@ test("move checks volumes, accounts and the relay deployment through Docker befo
 
 test("move never starts when a file the deployment needs is missing", async t => {
   const path = await envFile(t, "DOHC_DATA_DIRECTORY=/mnt/disk/dohc\n");
-  const refusals = { "/pg/PG_VERSION": /dohc-self-host_dohc_self_host_postgres holds no accounts database/,
-    "/continuity/deployment.json": /No relay deployment found in \/mnt\/disk\/dohc/, "/data/sync-relay.sqlite": /No relay deployment found in \/mnt\/disk\/dohc/ };
-  for (const [missing, refusal] of Object.entries(refusals)) {
-    const mock = host({ files: deployment.filter(file => file !== missing) });
-    assert.throws(() => runMove(parseMoveArguments(["--env-file", path]), mock.run, () => {}), refusal, missing);
-    assert.equal(started(mock.calls), false, missing);
-    assert.equal(changed(mock.calls), false, missing);
+  const incomplete = /The relay deployment in \/mnt\/disk\/dohc is missing its record or its database/;
+  const refusals = [[["/pg/PG_VERSION"], /dohc-self-host_dohc_self_host_postgres holds no accounts database/],
+    [["/continuity/deployment.json"], incomplete], [["/data/sync-relay.sqlite"], incomplete],
+    [["/continuity/deployment.json", "/data/sync-relay.sqlite"], /No relay deployment found in \/mnt\/disk\/dohc/]];
+  for (const [missing, refusal] of refusals) {
+    const mock = host({ files: deployment.filter(file => !missing.includes(file)) });
+    assert.throws(() => runMove(parseMoveArguments(["--env-file", path]), mock.run, () => {}), refusal, missing.join());
+    assert.equal(started(mock.calls), false, missing.join());
+    assert.equal(changed(mock.calls), false, missing.join());
+  }
+});
+
+test("move never starts when Docker cannot complete a check", async t => {
+  const path = await envFile(t, "DOHC_DATA_DIRECTORY=/mnt/disk/dohc\n");
+  const failures = [
+    [args => args.includes("dohc-self-host_dohc_self_host_sync_relay"), /Docker could not inspect volume dohc-self-host_dohc_self_host_sync_relay/],
+    [args => args[0] === "volume" && args.includes("dohc-self-host_dohc_self_host_postgres"), /Docker could not inspect volume dohc-self-host_dohc_self_host_postgres/],
+    [args => args.includes("test"), /Could not check Docker volume dohc-self-host_dohc_self_host_postgres/],
+    [args => args.includes("relay-initialize"), /Could not check the data disk in \/mnt\/disk\/dohc/],
+  ];
+  for (const [fail, refusal] of failures) {
+    // Without the failure every check passes, as the first test shows, so the failed check alone must refuse.
+    const mock = host({ fail });
+    assert.throws(() => runMove(parseMoveArguments(["--env-file", path]), mock.run, () => {}), refusal);
+    assert.equal(started(mock.calls), false, String(refusal));
   }
 });
 

@@ -91,23 +91,36 @@ test("a foreign volume user is refused before stop", async t => {
   await assert.rejects(runRecovery(parseRecoveryArguments(["backup", join(root, "snapshot")]), mock.run, () => {}, ["compose"]), /Another running project/);
   assert.equal(mock.calls.some(args => args.includes("stop")), false);
 });
-test("another project writing the same disk folder is refused before stop, whatever its volume is called", async t => {
+test("another project writing the disk folder, or a folder inside or above it, is refused before stop", async t => {
   const root = await fixture(t);
   for (const options of [
-    { mounts: [{ Type: "volume", Name: "other_relay" }], volumes: { other_relay: bound("/mnt/disk/dohc/sync-relay/") } },
-    { mounts: [{ Type: "bind", Source: "/mnt/disk/dohc/sync-relay" }] },
+    { mounts: [{ Type: "volume", Name: "other_relay", RW: true }], volumes: { other_relay: bound("/mnt/disk/dohc/sync-relay/") } },
+    { mounts: [{ Type: "bind", Source: "/mnt/disk/dohc/sync-relay", RW: true }] },
+    { mounts: [{ Type: "bind", Source: "/mnt/disk/dohc", RW: true }] },
+    { mounts: [{ Type: "bind", Source: "/", RW: true }] },
+    { mounts: [{ Type: "volume", Name: "other_disk", RW: true }], volumes: { other_disk: bound("/mnt/disk/dohc") } },
+    { mounts: [{ Type: "bind", Source: "/mnt/disk/dohc/sync-relay/files", RW: true }] },
+    { mounts: [{ Type: "bind", Source: "/var/lib/docker/volumes", RW: true }],
+      volumes: { recovery_data: { Driver: "local", Mountpoint: "/var/lib/docker/volumes/recovery_data/_data", Options: null } } },
   ]) {
     const mock = runner({ foreign: true, ...options });
-    await assert.rejects(runRecovery(parseRecoveryArguments(["archive", join(root, "archive")]), mock.run, () => {}, ["compose"]), /Another running project/);
+    await assert.rejects(runRecovery(parseRecoveryArguments(["archive", join(root, "archive")]), mock.run, () => {}, ["compose"]), /Another running project/,
+      JSON.stringify(options.mounts));
     assert.equal(mock.calls.some(args => args.includes("stop")), false);
   }
 });
-test("another project on a different folder does not block recovery", async t => {
+test("read-only mounts and other folders do not block recovery", async t => {
   const root = await fixture(t);
-  const mock = runner({ foreign: true, mounts: [{ Type: "volume", Name: "other_relay" }, { Type: "bind", Source: "/mnt/disk/other" }],
-    volumes: { other_relay: bound("/mnt/disk/other/sync-relay") } });
-  await runRecovery(parseRecoveryArguments(["backup", join(root, "snapshot")]), mock.run, () => {}, ["compose"]);
-  assert.ok(mock.calls.some(args => args.includes("run")));
+  for (const [index, options] of [
+    { mounts: [{ Type: "volume", Name: "other_relay", RW: true }, { Type: "bind", Source: "/mnt/disk/other", RW: true }, { Type: "bind", Source: "/mnt/disk/dohc-old", RW: true }],
+      volumes: { other_relay: bound("/mnt/disk/other/sync-relay") } },
+    { mounts: [{ Type: "bind", Source: "/mnt/disk/dohc", RW: false }, { Type: "bind", Source: "/", RW: false }] },
+    { mounts: [{ Type: "volume", Name: "other_disk", RW: false }], volumes: { other_disk: bound("/mnt/disk/dohc") } },
+  ].entries()) {
+    const mock = runner({ foreign: true, ...options });
+    await runRecovery(parseRecoveryArguments(["backup", join(root, `snapshot-${index}`)]), mock.run, () => {}, ["compose"]);
+    assert.ok(mock.calls.some(args => args.includes("run")), JSON.stringify(options.mounts));
+  }
 });
 test("a same-project orphan writer is refused after stop", async t => {
   const root = await fixture(t), mock = runner();

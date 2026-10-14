@@ -195,15 +195,17 @@ Each copy would accept different work under the same deployment identity.
 
 1. If the old host still responds, run `node tools/self-host/bootstrap.mjs stop` there.
 2. On the old host, run `docker ps` and confirm that no dohc service is running.
-3. On the old host, save the accounts volume to a private file:
+3. On the old host, save the accounts volume to a file in a new private folder:
 
    ```sh
-   docker run --rm --network none \
+   (umask 077 && mkdir dohc-accounts && docker run --rm --network none \
      --mount type=volume,source=dohc-self-host_dohc_self_host_postgres,target=/pg,readonly \
-     postgres:17.9-alpine tar -C /pg -czf - . > accounts.tar.gz
+     postgres:17.9-alpine tar -C /pg -czf - . > dohc-accounts/accounts.tar.gz)
    ```
 
-   The file contains password hashes and sign-in sessions. Copy it to the new host over a private channel.
+   The file contains password hashes and sign-in sessions. Only your user can read the folder and the file.
+   Copy the folder to the new host over a private channel and keep its permissions, for example with `scp -rp dohc-accounts NEW_HOST:`.
+   Never put it in a shared or synced folder.
 4. Shut down the old host.
 5. Detach the disk from the old host.
 6. In your provider's console, confirm that the old host is off and the disk has no attachment.
@@ -220,10 +222,10 @@ If the old host starts again without the disk, its relay cannot start because it
    docker volume create dohc-self-host_dohc_self_host_postgres
    docker run --rm -i --network none \
      --mount type=volume,source=dohc-self-host_dohc_self_host_postgres,target=/pg \
-     postgres:17.9-alpine tar -C /pg -xzf - < accounts.tar.gz
+     postgres:17.9-alpine tar -C /pg -xzf - < dohc-accounts/accounts.tar.gz
    ```
 
-   Then delete `accounts.tar.gz` from both hosts, or keep it with your private backups.
+   Then delete the `dohc-accounts` folder from both hosts, or keep it with your private backups.
 4. Attach the disk and mount it so that `DOHC_DATA_DIRECTORY` names the deployment folder on it.
    If the mount path changed, update `DOHC_DATA_DIRECTORY` in `.env.self-host`.
 5. For public access, point DNS for the server's domain to the new host.
@@ -240,6 +242,7 @@ The command refuses to start anything in these cases:
 - An existing deployment volume on this host keeps its data somewhere other than the disk.
 - The accounts volume is missing or holds no database.
 - `deployment.json` or the relay database is missing from the disk. The command checks through the relay's own volumes.
+- Docker cannot complete one of these checks.
 
 Otherwise it starts the deployment and runs the same checks as `node scripts/check-self-host.mjs --running`.
 Use `--env-file PATH` for a different environment file.

@@ -54,11 +54,14 @@ export function composeArgs(envFile, settings, ...args) {
     ...(settings.DOHC_DATA_DIRECTORY ? ['-f', 'tools/self-host/compose.data-disk.yml'] : []), ...args];
 }
 
-// Reads through the relay's own volumes, so it checks the folders Docker mounts.
-export const relayDeploymentCheck = "const fs=require('node:fs');const missing=['/continuity/deployment.json','/data/sync-relay.sqlite']" +
-  ".filter(path=>!fs.existsSync(path));if(missing.length){console.error('Missing '+missing.join(', '));process.exitCode=1;}";
+// Reads through the relay's own volumes, so it checks the folders Docker mounts. Any other exit status means the check failed.
+const relayDeployment = { found: 0, missingFile: 3, empty: 4 };
+export const relayDeploymentCheck = "const fs=require('node:fs');const exists=path=>fs.statSync(path,{throwIfNoEntry:false})!==undefined;" +
+  "const missing=['/continuity/deployment.json','/data/sync-relay.sqlite'].filter(path=>!exists(path));" +
+  "if(missing.length){console.error('Missing '+missing.join(', '));" +
+  `process.exitCode=['/continuity','/data'].every(folder=>fs.readdirSync(folder).length===0)?${relayDeployment.empty}:${relayDeployment.missingFile};}`;
 
-/** `docker(args)` returns `{status, stdout}`. */
+/** `docker(args)` returns `{status, stdout, stderr}`. */
 export function composeConfig(envFile, settings, docker) {
   const result = docker(composeArgs(envFile, settings, 'config', '--format', 'json'));
   // Compose config contains secrets. Never include its output in errors.
@@ -66,26 +69,53 @@ export function composeConfig(envFile, settings, docker) {
   return JSON.parse(result.stdout);
 }
 
+/** Returns undefined only when Docker reports that the volume does not exist. */
+function inspectVolume(name, docker) {
+  const result = docker(['volume', 'inspect', name]);
+  if (result.status === 0) return JSON.parse(result.stdout)[0];
+  if (/no such volume/i.test(result.stderr ?? '')) return undefined;
+  throw new Error(`Docker could not inspect volume ${name}. Check that Docker is running, then try again.`);
+}
+
 /** Docker fixes a volume's storage when it creates it, and Compose reuses an existing volume unchanged. */
 export function dataDiskVolumeErrors(config, docker) {
   return Object.values(config.volumes ?? {}).filter(volume => volume.driver_opts).flatMap(volume => {
-    const inspected = docker(['volume', 'inspect', volume.name]);
-    if (inspected.status !== 0) return [];
-    const [actual] = JSON.parse(inspected.stdout);
-    if (actual.Driver === (volume.driver ?? 'local') && isDeepStrictEqual(actual.Options ?? {}, volume.driver_opts)) return [];
+    const actual = inspectVolume(volume.name, docker);
+    if (!actual || actual.Driver === (volume.driver ?? 'local') && isDeepStrictEqual(actual.Options ?? {}, volume.driver_opts)) return [];
     return [`Docker volume ${volume.name} keeps its data in ${actual.Options?.device ?? 'Docker storage'}, not ${volume.driver_opts.device}. ` +
       'Restore the previous DOHC_DATA_DIRECTORY. Never remove the volume: it holds deployment data.'];
   });
 }
 
-/** A first start needs an empty disk folder. Every later start needs the deployment on it. */
+/** A first start needs empty disk folders. Every later start needs the deployment on them. */
 export function relayDeploymentError(envFile, settings, docker, firstStart) {
-  const found = docker(composeArgs(envFile, settings, 'run', '--rm', '--no-deps', '-T',
-    '--entrypoint', 'node', 'relay-initialize', '-e', relayDeploymentCheck)).status === 0;
-  if (found && firstStart) return `A relay deployment already exists in ${settings.DOHC_DATA_DIRECTORY}. Start without --first-start.`;
-  if (!found && !firstStart) {
-    return `No relay deployment found in ${settings.DOHC_DATA_DIRECTORY}. Mount the data disk there and try again. ` +
+  const { status } = docker(composeArgs(envFile, settings, 'run', '--rm', '--no-deps', '-T',
+    '--entrypoint', 'node', 'relay-initialize', '-e', relayDeploymentCheck));
+  const directory = settings.DOHC_DATA_DIRECTORY;
+  if (![relayDeployment.found, relayDeployment.missingFile, relayDeployment.empty].includes(status)) {
+    return `Could not check the data disk in ${directory}. Check that the disk is mounted there and Docker is running, then try again.`;
+  }
+  if (firstStart) return status === relayDeployment.empty ? '' : `${directory} already holds relay data. Start without --first-start.`;
+  if (status === relayDeployment.empty) {
+    return `No relay deployment found in ${directory}. Mount the data disk there and try again. ` +
       'Never recreate its folders: setup would create a new deployment.';
   }
+  if (status === relayDeployment.missingFile) {
+    return `The relay deployment in ${directory} is missing its record or its database. Keep the disk unchanged and check that it is this deployment's disk.`;
+  }
   return '';
+}
+
+/** Inspects the accounts volume before a container mounts it: mounting a missing volume would create an empty one. */
+export function accountsDatabaseError(config, docker) {
+  const accounts = config.volumes.dohc_self_host_postgres.name;
+  const missing = `Docker volume ${accounts} holds no accounts database. Restore it from the old host or your backup before you start. ` +
+    'Without it, people sign up again as new accounts that cannot open their workspaces.';
+  if (!inspectVolume(accounts, docker)) return missing;
+  // `test` exits 1 when the file is missing or empty. Docker reports its own failures with 125 or higher.
+  const { status } = docker(['run', '--rm', '--network', 'none', '--mount', `type=volume,source=${accounts},target=/pg,readonly`,
+    '--entrypoint', 'test', config.services.postgres.image, '-s', '/pg/PG_VERSION']);
+  if (status === 0) return '';
+  if (status === 1) return missing;
+  return `Could not check Docker volume ${accounts} for the accounts database. Check that Docker is running and the image ${config.services.postgres.image} is available, then try again.`;
 }

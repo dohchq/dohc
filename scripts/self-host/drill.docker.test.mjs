@@ -63,9 +63,16 @@ test("a killed deployment's data disk starts in a fresh Compose project and refu
     assert.equal(existsSync(disk), false);
     asRoot(`const fs=require('node:fs');for(const base of ['/scratch/disk/dohc','/scratch/empty'])for(const folder of ['sync-relay','continuity','host-data']){
       fs.mkdirSync(base+'/'+folder,{recursive:true});fs.chownSync(base+'/'+folder,1000,1000);}fs.mkdirSync('/scratch/old');`);
-    const dockerRun = (command, args) => {
-      const result = spawnSync(command, args, { cwd: root, encoding: "utf8", stdio: ["ignore", "pipe", "inherit"], windowsHide: true, maxBuffer: 16 * 1024 * 1024 });
-      return { status: result.status, stdout: result.stdout };
+    // Move builds its own Compose arguments. Each call gets the project's extra files, such as the Postgres override.
+    const mover = (target, start = () => assert.fail("move started the deployment")) => (command, args) => {
+      if (command !== "docker") return start();
+      if (args[0] === "compose") {
+        const prefix = composeArgs(target.env, readSettings(target.env));
+        assert.deepEqual(args.slice(0, prefix.length), prefix);
+        args = target.args(...args.slice(prefix.length));
+      }
+      const result = spawnSync(command, args, { cwd: root, encoding: "utf8", windowsHide: true, maxBuffer: 16 * 1024 * 1024 });
+      return { status: result.status, stdout: result.stdout, stderr: result.stderr };
     };
 
     compose(first, ["up", "-d", "--wait", "sync-relay"]);
@@ -91,11 +98,12 @@ test("a killed deployment's data disk starts in a fresh Compose project and refu
     await writeFile(override, `volumes:\n  dohc_self_host_postgres:\n    external: true\n    name: ${first.name}_dohc_self_host_postgres\n`);
     // With the accounts database present, move still refuses an empty folder and leaves it empty.
     const empty = await project("c", join(scratch, "empty"), ["-f", override]);
-    assert.throws(() => runMove({ envFile: empty.env }, dockerRun, () => {}), /No relay deployment found/);
+    assert.throws(() => runMove({ envFile: empty.env }, mover(empty), () => {}), /No relay deployment found/);
     for (const folder of ["sync-relay", "continuity", "host-data"]) assert.deepEqual(readdirSync(join(scratch, "empty", folder)), []);
+    // The relay check created this project's network, which uses the same subnet as the next project.
+    compose(empty, ["down"]);
     const second = await project("b", disk, ["-f", override]);
-    runMove({ envFile: second.env }, (command, args) => command === "docker" ? dockerRun(command, args)
-      : compose(second, ["up", "-d", "--wait", "sync-relay"]), () => {});
+    runMove({ envFile: second.env }, mover(second, () => compose(second, ["up", "-d", "--wait", "sync-relay"])), () => {});
     // The relay opens only when its database stamp equals the continuity counter.
     const reopened = continuity();
     assert.equal(reopened.namespace, killed.namespace);
@@ -107,11 +115,11 @@ test("a killed deployment's data disk starts in a fresh Compose project and refu
     // Existing volumes keep the storage Docker gave them. Move refuses them and changes nothing.
     const before = continuity(), relayVolume = `${second.name}_dohc_self_host_sync_relay`;
     const redirected = await project("b-redirected", join(scratch, "empty"), ["-f", override], second.name);
-    assert.throws(() => runMove({ envFile: redirected.env }, dockerRun, () => {}), /keeps its data in .*\/disk\/dohc\/sync-relay, not .*\/empty\/sync-relay/);
+    assert.throws(() => runMove({ envFile: redirected.env }, mover(redirected), () => {}), /keeps its data in .*\/disk\/dohc\/sync-relay, not .*\/empty\/sync-relay/);
     assert.equal(JSON.parse(docker(["volume", "inspect", relayVolume]).stdout)[0].Options.device, join(disk, "sync-relay"));
     const plain = await project("d", disk, ["-f", override]);
     docker(["volume", "create", "--label", `com.docker.compose.project=${plain.name}`, `${plain.name}_dohc_self_host_sync_relay`]);
-    assert.throws(() => runMove({ envFile: plain.env }, dockerRun, () => {}), /keeps its data in Docker storage/);
+    assert.throws(() => runMove({ envFile: plain.env }, mover(plain), () => {}), /keeps its data in Docker storage/);
     docker(["volume", "inspect", `${plain.name}_dohc_self_host_sync_relay`]);
     assert.deepEqual(continuity(), before);
 

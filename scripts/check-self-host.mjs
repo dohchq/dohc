@@ -1,7 +1,7 @@
 import { existsSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { parseArgs } from 'node:util';
-import { composeArgs, composeConfig, dataDiskVolumeErrors, readSettings, relayDeploymentError, supportedComposeVersion, validateSettings } from '../tools/self-host/config.mjs';
+import { accountsDatabaseError, composeArgs, composeConfig, dataDiskVolumeErrors, readSettings, relayDeploymentError, supportedComposeVersion, validateSettings } from '../tools/self-host/config.mjs';
 
 const { values } = parseArgs({ options: { start: { type: 'boolean' }, 'first-start': { type: 'boolean' }, running: { type: 'boolean' }, 'env-file': { type: 'string', default: '.env.self-host' } } });
 const envFile = values['env-file'];
@@ -23,14 +23,24 @@ else {
     for (const service of ['postgres', 'postgres-migrate', 'relay-initialize', 'workspace-api', 'sync-relay', 'share-web', 'gateway']) record(`compose service:${service}`, compose.status === 0 && services.has(service));
     let diskOk = true;
     if (settings.DOHC_DATA_DIRECTORY && compose.status === 0 && errors.length === 0) {
-      let problems;
-      try { problems = dataDiskVolumeErrors(composeConfig(envFile, settings, docker), docker); } catch (error) { problems = [error.message]; }
+      let config, problems;
+      try {
+        config = composeConfig(envFile, settings, docker);
+        problems = dataDiskVolumeErrors(config, docker);
+      } catch (error) { problems = [error.message]; }
       diskOk = problems.length === 0;
       record('data disk volumes', diskOk, problems.join(' '));
       if (diskOk && values.start) {
         const problem = relayDeploymentError(envFile, settings, docker, Boolean(values['first-start']));
         diskOk = !problem;
         record('relay deployment on the data disk', diskOk, problem);
+      }
+      // Every start after the first needs the accounts that own the deployment's workspaces.
+      if (diskOk && values.start && !values['first-start']) {
+        let problem;
+        try { problem = accountsDatabaseError(config, docker); } catch (error) { problem = error.message; }
+        diskOk = !problem;
+        record('accounts database', diskOk, problem);
       }
     }
     if ((values.start || values.running) && compose.status === 0 && errors.length === 0 && diskOk) {
