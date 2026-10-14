@@ -102,7 +102,7 @@ test("Windows setup uses pnpm.cmd and stops after failed or missing installation
       assert.equal(result.status, exitCode === 0 ? 0 : 1, result.stdout + result.stderr);
       assert.equal(existsSync(join(root, "electron-ran")), exitCode === 0);
       assert.equal(existsSync(join(root, "doctor-ran")), exitCode === 0);
-      if (exitCode !== null) assert.equal(readFileSync(join(root, "install-args"), "utf8").trim(), "install --frozen-lockfile");
+      if (exitCode !== null) assert.equal(readFileSync(join(root, "install-args"), "utf8").trim(), "install --frozen-lockfile --config.confirm-modules-purge=false");
       if (exitCode === 23) assert.match(result.stderr, /failed \(23\)/);
     }
   } finally { rmSync(root, { recursive: true, force: true }); }
@@ -326,7 +326,7 @@ test("standalone preparation installs frozen dependencies before building, seali
     assert.match(reused.stdout, /reuse desktop/);
     assert.equal(readFileSync(join(root, "node_modules/installed.txt"), "utf8"), "new-lock");
     assert.equal(calls().length, 5);
-    assert.deepEqual(calls().at(-1), { command: "pnpm", args: ["install", "--frozen-lockfile"] });
+    assert.deepEqual(calls().at(-1), { command: "pnpm", args: ["install", "--frozen-lockfile", "--config.confirm-modules-purge=false"] });
     const installed = invoke({ install: false });
     assert.equal(installed.status, 0, installed.stderr);
     assert.match(installed.stdout, /reuse desktop/);
