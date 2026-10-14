@@ -123,6 +123,8 @@ function fixtureRepo() {
   const repo = mkdtempSync(join(tmpdir(), "dohc-queue-repo-"));
   const git = (...args) => execFileSync("git", args, { cwd: repo, encoding: "utf8", windowsHide: true }).trim();
   git("init", "-q", "-b", "main");
+  // A personal signing setup must not reach the fixture.
+  git("config", "commit.gpgsign", "false");
   git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "base");
   const base = git("rev-parse", "HEAD");
   git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "head");
