@@ -1295,8 +1295,8 @@ it("offers no Open step for a binding refusal whose file is gone", async () => {
   expect(row).toMatchObject({
     title: "dohc skipped an earlier save",
     body: "The name, location, or sharing of a file changed before this save arrived.",
-    target: {},
   });
+  expect(row!.target).toEqual({});
 });
 
 it("lists engine refusals without the local row limit and removes resolved rows", async () => {

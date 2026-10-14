@@ -718,8 +718,9 @@ export function createNoticeStore(deps: {
           const name = document?.path ? `“${[...document.path].slice(0, 180).join("")}”` : "a file";
           const tooLarge = /too large|exceeds|projection.*limit/iu.test(refusal.reason);
           const bindingChanged = refusal.reason === SETTLEMENT_BINDING_CHANGED;
+          const target = NoticeTargetShape.safeParse(document?.path ? { path: document.path } : {}).data ?? {};
           const body = bindingChanged
-            ? `The name, location, or sharing of ${name} changed before this save arrived.${document?.path ? " Open the file to continue." : ""}`
+            ? `The name, location, or sharing of ${name} changed before this save arrived.${target.path ? " Open the file to continue." : ""}`
             : `dohc could not update ${name}.${tooLarge ? " The change is too large." : ""} ${document?.conflictId
             ? "Open its conflict and choose a copy."
             : tooLarge ? "Make the file smaller on the other computer, then try sync again." : "Review the file on the other computer, then try sync again."}`;
@@ -728,7 +729,7 @@ export function createNoticeStore(deps: {
             title: bindingChanged ? "dohc skipped an earlier save" : "A change needs your review", body,
             detail: [refusal.reason, `Workspace: ${workspaceId}`, `Object: ${document?.objectId ?? "unknown"}`,
               `Lineage: ${document?.lineageClaimId ?? "unknown"}`, `Origin: ${refusal.originId}:${refusal.originSeq}`].join("\n"),
-            target: NoticeTargetShape.safeParse(document?.path ? { path: document.path } : {}).data ?? {},
+            target,
             createdAtMs: previous?.dismissedAtMs == null ? previous?.createdAtMs ?? nowMs() : nowMs(),
             readAtMs: withoutCoordinates(refusalCoordinates, previous?.refusalCoordinates ?? []).length === 0
               ? previous?.readAtMs ?? null : null, dismissedAtMs: null }));
