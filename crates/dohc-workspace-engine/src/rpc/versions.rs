@@ -1295,6 +1295,31 @@ mod tests {
         undo_placement_proof(2).await;
     }
 
+    async fn placement_gate_available(gate: &tokio::sync::Mutex<()>) -> bool {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            drop(gate.lock().await);
+        })
+        .await
+        .is_ok()
+    }
+
+    #[tokio::test]
+    async fn placement_gate_probe_waits_for_transient_contention() {
+        let gate = tokio::sync::Mutex::new(());
+        let held = gate.lock().await;
+        assert!(gate.try_lock().is_err());
+        // Poll the probe while an unrelated mutation holds the gate, then release it.
+        let (available, ()) = tokio::join!(
+            biased;
+            placement_gate_available(&gate),
+            async { drop(held) },
+        );
+        assert!(
+            available,
+            "the probe must wait for transient gate contention"
+        );
+    }
+
     async fn undo_placement_proof(mode: u8) {
         use dohc_engine_domain::{RenameTextFile, VersionedTextStore, WriteText};
         use dohc_engine_storage::{EngineStore, NoFaults};
@@ -1528,8 +1553,9 @@ mod tests {
                 None
             );
         }
-        let sessions_available = open.session_ops.try_lock().is_ok();
-        let capture_available = open.capture_apply_gate.try_lock().is_ok();
+        // Placement stays paused until both probes finish; it cannot release a held gate to pass.
+        let sessions_available = placement_gate_available(&open.session_ops).await;
+        let capture_available = placement_gate_available(&open.capture_apply_gate).await;
         let protected_key =
             dohc_engine_collab::DocKey::new("undo-placement", "main", "one").unwrap();
         let affected_protected = service.leases.scoped(&open.root).is_held(&protected_key);
