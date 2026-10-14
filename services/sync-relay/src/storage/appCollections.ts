@@ -2,7 +2,7 @@ import { visibleSharePath } from "@dohc/security-contract/share-selector";
 import { parseLiveAuthorSnapshot } from "@dohc/live-session-contract";
 import { createHash, randomUUID } from "node:crypto";
 import { parseAppPublicationCandidate, parseAppCollectionCapability, APP_COLLECTION_CURSOR_BYTES, type AppCollectionCapability } from "@dohc/security-contract/app-publication";
-import { APP_COLLECTION_MAX_SCHEMA_BYTES, APP_COLLECTION_MAX_RECORD_BYTES, narrowsAppCollectionCapability, exposesAppCollectionSubmittedFields, validateAppCollectionSchema, validateAppCollectionCreateFields, isAppCollectionPageRequest, isAppCollectionRecordTooLarge, projectAppCollectionRecord, pageAppCollectionRecords } from "@dohc/security-contract/app-collection";
+import { APP_COLLECTION_MAX_SCHEMA_BYTES, APP_COLLECTION_MAX_RECORD_BYTES, narrowsAppCollectionCapability, exposesAppCollectionSubmittedFields, validateAppCollectionSchema, validateAppCollectionCreateFields, isAppCollectionPageRequest, projectAppCollectionRecord, pageAppCollectionRecords } from "@dohc/security-contract/app-collection-checks";
 import type { CollectionSchema } from "@dohc/workspace-contracts/collection";
 import { notFound, badRequest, relayError } from "../errors";
 import { effectiveShareSelector, parseStoredAnyShareSelectorJson, targetVersionId } from "../shareFilter";
@@ -119,7 +119,7 @@ export function acceptAppCollection(storage: StorageContext, input: AcceptAppCol
     const acceptanceId = `accepted_${randomUUID()}`, objectId = randomUUID(), momentId = randomUUID(), path = `${capability.collectionPath}/${acceptanceId}.md`;
     const receipt: AppCollectionReceipt = {kind:"accepted",acceptanceId,objectId,path,momentId,acceptedAtMs:input.nowMs};
     const document = Buffer.from(`---\n${JSON.stringify({...response,created_at:input.nowMs,created_by:publicId,acceptance_id:acceptanceId})}\n---\n`);
-    if (isAppCollectionRecordTooLarge(document.byteLength)) throw badRequest("Collection response is too large.");
+    if (document.byteLength > APP_COLLECTION_MAX_RECORD_BYTES) throw badRequest("Collection response is too large.");
     const blobHash = sha(document);
     const receiptJson = JSON.stringify(receipt), receiptBytes = bytes([workspaceId,authority.result.grantId,privateId,input.idempotencyKey,payloadHash,receiptJson])+256;
     const mappingBytes = mapping ? 0 : bytes([workspaceId,authority.result.grantId,privateId,publicId])+128;
@@ -168,7 +168,7 @@ export function readAppCollection(storage: StorageContext, input: ReadAppCollect
       for (const row of rows.slice(0,input.limit)) {
         if (row.byte_length === null || row.byte_length !== row.actual) throw notFound();
         const path = String(row.path);
-        if (row.content_kind !== "text" || isAppCollectionRecordTooLarge(Number(row.byte_length))) {
+        if (row.content_kind !== "text" || Number(row.byte_length) > APP_COLLECTION_MAX_RECORD_BYTES) {
           yield {path,record:null};continue;
         }
         const blob = boundedBlob(storage,authority.workspaceId,String(row.blob_sha256),APP_COLLECTION_MAX_RECORD_BYTES);

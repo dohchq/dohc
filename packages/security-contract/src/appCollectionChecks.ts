@@ -43,17 +43,22 @@ export function isAppCollectionPageRequest(limit: unknown, afterPath: unknown): 
   return typeof limit === "number" && Number.isSafeInteger(limit) && limit >= 1 && limit <= 100 &&
     (afterPath === undefined || (typeof afterPath === "string" && new TextEncoder().encode(afterPath).byteLength <= APP_COLLECTION_CURSOR_BYTES));
 }
-/** Mirrors the relay's SQL filter. SQL still filters before LIMIT and orders paths. */
+/** Matches the relay's SQL filter on normalized workspace paths. Reject raw Windows names and NUL. */
 export function isAppCollectionRecordPath(collectionPath: string, path: string): boolean {
   const prefix = `${collectionPath}/`;
-  return path.startsWith(prefix) && !path.slice(prefix.length).includes("/") && path.slice(-3).toLowerCase() === ".md" &&
+  return !collectionPath.includes("\0") && !collectionPath.includes("\\") && !path.includes("\0") && !path.includes("\\") && path.startsWith(prefix) && !path.slice(prefix.length).includes("/") && path.slice(-3).toLowerCase() === ".md" &&
     new TextEncoder().encode(path).byteLength <= APP_COLLECTION_CURSOR_BYTES;
 }
-export function isAppCollectionRecordTooLarge(byteLength: number): boolean {
-  return byteLength > APP_COLLECTION_MAX_RECORD_BYTES;
+/** Compare paths and cursors by UTF-8 bytes, matching SQLite BINARY ordering. */
+export function compareAppCollectionPaths(a: string, b: string): number {
+  const encoder = new TextEncoder(), left = encoder.encode(a), right = encoder.encode(b);
+  for (let index = 0; index < Math.min(left.length,right.length); index++) {
+    if (left[index] !== right[index]) return left[index]! < right[index]! ? -1 : 1;
+  }
+  return left.length - right.length;
 }
 export function projectAppCollectionRecord(path: string, blob: Uint8Array, capability: AppCollectionCapability, schema: CollectionSchema): AppCollectionPage["records"][number] | null {
-  if (isAppCollectionRecordTooLarge(blob.byteLength)) return null;
+  if (blob.byteLength > APP_COLLECTION_MAX_RECORD_BYTES) return null;
   let value: Record<string, unknown> | null;
   try {value = parseCollectionRecordFields(new TextDecoder("utf-8", {fatal: true}).decode(blob));}
   catch {return null;}
@@ -61,8 +66,8 @@ export function projectAppCollectionRecord(path: string, blob: Uint8Array, capab
   const selected = Object.fromEntries(capability.readFields.filter(name => Object.hasOwn(value,name)).map(name => [name,value[name]]));
   if (Object.keys(selected).length === 0) return null;
   if (Object.entries(selected).some(([name,value]) => {
-    const field = schema.fields.find(field => field.name === name)!;
-    return validateFieldValue(field,value).status !== "valid";
+    const field = schema.fields.find(field => field.name === name);
+    return !field || validateFieldValue(field,value).status !== "valid";
   })) return null;
   return {path,recordId:typeof value.id === "string" && isRecordId(value.id) ? value.id : null,fields:selected};
 }

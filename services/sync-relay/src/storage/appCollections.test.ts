@@ -9,6 +9,7 @@ import { backup, DatabaseSync } from "node:sqlite";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { buildRelayFixture } from "../../scripts/build.mjs";
 import { parseAppPublicationCandidate, APP_COLLECTION_RESPONSE_BYTES, type AppPublicationCandidate, type AppCollectionCapability } from "@dohc/security-contract/app-publication";
+import { compareAppCollectionPaths, isAppCollectionRecordPath } from "@dohc/security-contract/app-collection-checks";
 import { parseCollectionRecordFields } from "@dohc/workspace-contracts/collection-values";
 import { openSyncRelayStorage } from "../storage";
 import { createSyncRelayHandler,type CreateSyncRelayHandlerOptions } from "../server";
@@ -666,11 +667,28 @@ it("operator takedown refuses Collection writes and receipt retries from an exis
 it("keeps SQL path filtering and UTF-8 ordering before the scan limit", () => {
   const f = fixture();
   const text = '---\n{"destination":"Tokyo","name":"Sam"}\n---\n';
-  for (const path of ["responses/000-nested/a.md","responses/001.txt","responses/002.MD","responses/\ue000.md","responses/😀.md"]) f.write(path,text);
+  const paths = ["responses/000-nested/a.md","responses/001.txt","responses/002.MD","responses/\ue000.md","responses/😀.md"];
+  for (const path of paths) f.write(path,text);
+  const scannedPaths: string[] = [];
+  const prepare = f.raw.prepare.bind(f.raw);
+  vi.spyOn(f.raw,"prepare").mockImplementation(query => {
+    const statement = prepare(query);
+    if (query.includes("FROM sync_relay_current_files file LEFT JOIN sync_relay_blobs")) {
+      const all = statement.all.bind(statement);
+      vi.spyOn(statement,"all").mockImplementation((...args) => {
+        const rows = all(...args);
+        scannedPaths.push(...rows.map(row => String(row.path)));
+        return rows;
+      });
+    }
+    return statement;
+  });
   const first = f.storage.readAppCollection({...f.input,limit:1});
   expect(JSON.stringify(first)).toBe(JSON.stringify({records:[{path:"responses/002.MD",recordId:null,fields:{destination:"Tokyo",name:"Sam"}}],nextPath:"responses/002.MD"}));
   const rest = f.storage.readAppCollection({...f.input,limit:10,afterPath:first.nextPath!});
   expect(rest.records.map(record=>record.path)).toEqual(["responses/\ue000.md","responses/😀.md"]);
+  for (const path of scannedPaths) expect(isAppCollectionRecordPath("responses",path),path).toBe(true);
+  expect([...new Set(scannedPaths)]).toEqual(paths.filter(path => isAppCollectionRecordPath("responses",path)).sort(compareAppCollectionPaths));
 });
 
 it("does not inspect corrupt rows after the page byte budget fills", () => {

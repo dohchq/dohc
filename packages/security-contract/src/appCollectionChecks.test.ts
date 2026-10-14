@@ -1,7 +1,6 @@
-import { DatabaseSync } from "node:sqlite";
 import { describe, expect, it } from "vitest";
 import { parseAppCollectionCapability, APP_COLLECTION_CURSOR_BYTES, APP_COLLECTION_FIELDS_BYTES, APP_COLLECTION_PAGE_BYTES, APP_COLLECTION_SERVER_FIELDS, type AppCollectionCapability } from "./appCollection";
-import { APP_COLLECTION_MAX_RECORD_BYTES, isAppCollectionRecordTooLarge, exposesAppCollectionSubmittedFields, isAppCollectionPageRequest, isAppCollectionRecordPath, narrowsAppCollectionCapability, pageAppCollectionRecords, projectAppCollectionRecord, validateAppCollectionCreateFields, validateAppCollectionSchema } from "./appCollectionChecks";
+import { APP_COLLECTION_MAX_RECORD_BYTES, compareAppCollectionPaths, exposesAppCollectionSubmittedFields, isAppCollectionPageRequest, isAppCollectionRecordPath, narrowsAppCollectionCapability, pageAppCollectionRecords, projectAppCollectionRecord, validateAppCollectionCreateFields, validateAppCollectionSchema } from "./appCollectionChecks";
 import { parseCollectionSchema } from "@dohc/workspace-contracts/collection-values";
 
 const capability: AppCollectionCapability = {kind:"collection-create",collectionPath:"responses",schemaSha256:"a".repeat(64),allowedFields:["name","count","tags"],requiredFields:["name"],readFields:["name","count","tags"]};
@@ -104,18 +103,31 @@ describe("page requests and read paths", () => {
     expect(isAppCollectionPageRequest(1,null)).toBe(false);
     expect(isAppCollectionPageRequest(1,"")).toBe(true);
   });
-  it("matches SQLite direct-child, extension and byte filtering", () => {
-    const db = new DatabaseSync(":memory:");
-    try {
-      const prefix = "responses/";
-      const atCap = prefix+"é".repeat((APP_COLLECTION_CURSOR_BYTES-prefix.length-3)/2)+"x.md";
-      const paths = ["responses/a.md","responses/a.MD","responses/a.md\n","responses/.md","responses/nested/a.md","responses/a.txt","responses2/a.md",atCap,atCap+"x",prefix+"x".repeat(APP_COLLECTION_CURSOR_BYTES)+".md"];
-      const query = db.prepare(`SELECT ? AS path WHERE path>=? AND path<? AND length(CAST(path AS BLOB))<=${APP_COLLECTION_CURSOR_BYTES} AND instr(substr(path,length(?)+1),'/')=0 AND path LIKE '%.md'`);
-      for (const path of paths) expect(isAppCollectionRecordPath("responses",path),path).toBe(!!query.get(path,prefix,"responses0",prefix));
-      expect(encode(atCap)).toHaveLength(APP_COLLECTION_CURSOR_BYTES);
-      expect(isAppCollectionRecordPath("responses",atCap)).toBe(true);
-      expect(isAppCollectionRecordPath("responses",atCap.slice(0,-3)+"x.md")).toBe(false);
-    } finally {db.close();}
+  it("accepts direct Markdown children and bounds UTF-8 path bytes", () => {
+    const prefix = "responses/";
+    const atCap = prefix+"é".repeat((APP_COLLECTION_CURSOR_BYTES-prefix.length-3)/2)+"x.md";
+    for (const path of ["responses/a.md","responses/a.MD","responses/.md","responses/\ue000.md","responses/😀.md",atCap]) {
+      expect(isAppCollectionRecordPath("responses",path),path).toBe(true);
+    }
+    for (const path of ["responses/nested/a.md","responses/a.txt","responses2/a.md","responses/a.md\n",atCap.slice(0,-3)+"x.md"]) {
+      expect(isAppCollectionRecordPath("responses",path),path).toBe(false);
+    }
+    expect(encode(atCap)).toHaveLength(APP_COLLECTION_CURSOR_BYTES);
+  });
+  it.each(["responses/sub\\a.md","responses/a\0.md","responses/a.md\0"])("refuses unnormalized raw path %j", path => {
+    expect(isAppCollectionRecordPath("responses",path)).toBe(false);
+  });
+  it.each(["responses\\sub","responses\0"])("refuses unnormalized Collection path %j", collectionPath => {
+    expect(isAppCollectionRecordPath(collectionPath,collectionPath+"/a.md")).toBe(false);
+  });
+  it("compares paths and cursors in SQLite UTF-8 byte order", () => {
+    const privateUse = "responses/\ue000.md", emoji = "responses/😀.md";
+    expect(privateUse > emoji).toBe(true);
+    expect(compareAppCollectionPaths(privateUse,emoji)).toBeLessThan(0);
+    expect(compareAppCollectionPaths(emoji,privateUse)).toBeGreaterThan(0);
+    expect(compareAppCollectionPaths(emoji,emoji)).toBe(0);
+    expect(compareAppCollectionPaths("responses/a","responses/aa")).toBeLessThan(0);
+    expect(compareAppCollectionPaths("responses/aa","responses/a")).toBeGreaterThan(0);
   });
 });
 
@@ -132,12 +144,13 @@ describe("read projection", () => {
     for (const blob of [new Uint8Array([255]),encode("body only")]) expect(projectAppCollectionRecord("responses/a.md",blob,capability,schema)).toBeNull();
     expect(projectAppCollectionRecord("responses/a.md",document({name:"Sam"}),{...capability,readFields:[]},schema)).toBeNull();
   });
+  it("skips a record when its selected read field is absent from the supplied schema", () => {
+    expect(projectAppCollectionRecord("responses/a.md",document({name:"Sam"}),capability,{...schema,fields:[]})).toBeNull();
+  });
   it("counts the complete record at and over the byte cap", () => {
     const blob = document({name:"Sam"});
     const atCap = document({name:"Sam"},"x".repeat(APP_COLLECTION_MAX_RECORD_BYTES-blob.byteLength));
-    expect(isAppCollectionRecordTooLarge(atCap.byteLength)).toBe(false);
     expect(projectAppCollectionRecord("responses/a.md",atCap,capability,schema)).not.toBeNull();
-    expect(isAppCollectionRecordTooLarge(atCap.byteLength+1)).toBe(true);
     expect(projectAppCollectionRecord("responses/a.md",document({name:"Sam"},"x".repeat(APP_COLLECTION_MAX_RECORD_BYTES-blob.byteLength+1)),capability,schema)).toBeNull();
   });
 });
