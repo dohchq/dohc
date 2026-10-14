@@ -779,15 +779,10 @@ pub struct PlacementHolds {
     workspace_id: String,
     paths: std::collections::HashMap<String, PlacementHold>,
     case_aliases: std::collections::HashMap<String, String>,
-    canonical_root: Option<PathBuf>,
 }
 
 impl PlacementHolds {
-    pub fn load(
-        store: &EngineStore,
-        workspace_id: &str,
-        root: &Path,
-    ) -> Result<Self, MaterializeError> {
+    pub fn load(store: &EngineStore, workspace_id: &str) -> Result<Self, MaterializeError> {
         let paths = store.read_with(|conn| {
             let mut statement = conn
                 .prepare_cached(
@@ -813,13 +808,7 @@ impl PlacementHolds {
                 .collect::<Result<std::collections::HashMap<_, _>, _>>()
                 .map_err(StorageError::corrupt_public)
         })?;
-        let mut holds = Self::from_paths(workspace_id, paths);
-        if !holds.is_empty() {
-            holds.canonical_root = Some(
-                std::fs::canonicalize(root).map_err(|error| MaterializeError::io(root, &error))?,
-            );
-        }
-        Ok(holds)
+        Ok(Self::from_paths(workspace_id, paths))
     }
 
     pub fn from_holds(
@@ -855,7 +844,6 @@ impl PlacementHolds {
             workspace_id: workspace_id.to_owned(),
             paths,
             case_aliases,
-            canonical_root: None,
         }
     }
 
@@ -882,6 +870,9 @@ impl PlacementHolds {
     }
 
     pub fn ancestor(&self, mut path: &str) -> Option<(&str, &PlacementHold)> {
+        if self.is_empty() {
+            return None;
+        }
         while let Some((parent, _)) = path.rsplit_once('/') {
             if let Some(held) = self.get(parent) {
                 return Some(held);
@@ -896,7 +887,6 @@ impl PlacementHolds {
     }
 
     fn resolved(&self, root: &Path, target: &Path) -> Result<bool, MaterializeError> {
-        let root = self.canonical_root.as_deref().unwrap_or(root);
         let path = target
             .strip_prefix(root)
             .map_err(|_| MaterializeError::UnsafeTargetPath)?
@@ -1793,13 +1783,21 @@ fn materialize_cross_volume(
     job: &MaterializationJob,
     options: &MaterializeOptions<'_>,
 ) -> Result<JobOutcome, MaterializeError> {
+    let recorded_preimage = match &job.preimage {
+        Preimage::Present(expected) => {
+            expected == &hex_sha256(b"") || store.holds_content(expected)?
+        }
+        Preimage::Absent => true,
+    };
     let replaced = retry_while_locked(
         target,
         target,
         options.backoff,
         MAX_REPLACE_ATTEMPTS,
         || {
-            if !preimage_matches(&job.preimage, &read_current_no_follow(target)?) {
+            if !recorded_preimage
+                || !preimage_matches(&job.preimage, &read_current_no_follow(target)?)
+            {
                 return Ok(Attempt::Done(false));
             }
             let result = match tmp {

@@ -97,6 +97,29 @@ mod capture_file_hold_tests {
         )
     }
 
+    #[test]
+    fn review2_unowned_release_only_reports_an_exact_hold() {
+        let (_scratch, mut store, refused) = seeded();
+        assert_eq!(
+            offer(&mut store, &refused).unwrap_err().code(),
+            "capture-file-held"
+        );
+        for path in ["HELD.MD", "held.md/trip.md"] {
+            assert!(
+                !clear_unowned_capture_hold(&mut store, "hold-proof", path, &NoFaults).unwrap()
+            );
+            assert!(
+                store
+                    .read_with(|conn| capture_file_holds::hold_in(conn, "hold-proof", "held.md"))
+                    .unwrap()
+                    .is_some()
+            );
+        }
+        assert!(
+            clear_unowned_capture_hold(&mut store, "hold-proof", "held.md", &NoFaults).unwrap()
+        );
+    }
+
     fn offer(store: &mut EngineStore, input: &CaptureIngest) -> Result<WriteResult, RuntimeError> {
         capture_ingest_on_store(
             store,
@@ -682,6 +705,41 @@ pub struct CapturePassSettlement {
     pub repair_recoveries: bool,
 }
 
+#[cold]
+fn select_released_switch_jobs(
+    conn: &Connection,
+    workspace_id: &str,
+    paths: &[CapturePlacementPath],
+    selected: &mut std::collections::HashSet<String>,
+) -> Result<(), RuntimeError> {
+    let released: Vec<String> = paths
+        .iter()
+        .filter(|path| path.released_hold)
+        .map(|path| path.path.to_lowercase())
+        .collect();
+    let mut query = conn.prepare_cached(
+        "SELECT job_id,target_path FROM materialization_jobs WHERE workspace_id IN (?1,'') AND status='pending' AND job_id GLOB 'version-switch-*'"
+    ).map_err(StorageError::corrupt_public)?;
+    let jobs = query
+        .query_map([workspace_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .map_err(StorageError::corrupt_public)?;
+    for job in jobs {
+        let (id, target) = job.map_err(StorageError::corrupt_public)?;
+        let target = target.to_lowercase();
+        if released.iter().any(|path| {
+            target == *path
+                || target
+                    .strip_prefix(path)
+                    .is_some_and(|rest| rest.starts_with('/'))
+        }) {
+            selected.insert(id);
+        }
+    }
+    Ok(())
+}
+
 impl ActorHandle {
     pub async fn capture_notices(
         &self,
@@ -720,19 +778,19 @@ impl ActorHandle {
                 std::collections::HashSet::new()
             } else {
                 store.read_with(|conn| {
-                    let paths: std::collections::HashSet<&str> = settlement.paths.iter().map(|path| path.path.as_str()).collect();
-                    let released: std::collections::HashSet<String> = settlement.paths.iter().filter(|path| path.released_hold).map(|path| path.path.to_lowercase()).collect();
                     let mut query = conn.prepare_cached(
-                        "SELECT job_id,target_path FROM materialization_jobs WHERE workspace_id IN (?1,'') AND status='pending'"
+                        "SELECT job_id FROM materialization_jobs WHERE workspace_id IN (?1,'') AND target_path=?2 AND status='pending'"
                     ).map_err(StorageError::corrupt_public)?;
-                    let jobs = query.query_map([&workspace_id], |row| Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?)))
-                        .map_err(StorageError::corrupt_public)?;
                     let mut selected = std::collections::HashSet::new();
-                    for job in jobs {
-                        let (id,target) = job.map_err(StorageError::corrupt_public)?;
-                        if paths.contains(target.as_str()) || (!released.is_empty() && id.starts_with("version-switch-") && released.contains(&target.to_lowercase())) {
-                            selected.insert(id);
-                        }
+                    let mut released = false;
+                    for path in &settlement.paths {
+                        released |= path.released_hold;
+                        let jobs = query.query_map(params![workspace_id, path.path], |row| row.get::<_, String>(0))
+                            .map_err(StorageError::corrupt_public)?;
+                        for job in jobs { selected.insert(job.map_err(StorageError::corrupt_public)?); }
+                    }
+                    if released {
+                        select_released_switch_jobs(conn, &workspace_id, &settlement.paths, &mut selected)?;
                     }
                     Ok::<_, RuntimeError>(selected)
                 })?
@@ -1152,7 +1210,10 @@ fn clear_unowned_capture_hold(
     path: &str,
     faults: &dyn FaultInjector,
 ) -> Result<bool, RuntimeError> {
-    if !store.placement_is_held(workspace_id, path)? {
+    if store
+        .read_with(|conn| capture_file_holds::hold_in(conn, workspace_id, path))?
+        .is_none()
+    {
         return Ok(false);
     }
     match store.write_with(faults, |tx| {

@@ -3743,6 +3743,61 @@ impl AtomicReplacer for CrossVolumeStage {
 }
 
 #[test]
+fn review2_cross_volume_preserves_unknown_matching_preimages() {
+    for delete in [false, true] {
+        let sc = Scratch::new("cross-volume-unknown-preimage");
+        let mut store = EngineStore::open(&sc.db(), 1).unwrap();
+        std::fs::write(sc.target("a.md"), OUTSIDE).unwrap();
+        let job = spec(
+            "unknown-cross-volume",
+            "a.md",
+            &hex_sha256(if delete { b"" } else { OURS }),
+            Preimage::Present(hex_sha256(OUTSIDE)),
+            1,
+            10,
+        );
+        if delete {
+            store.put_binary_blob(b"").unwrap();
+            store
+                .write_with(&NoFaults, |tx| enqueue_delete_job(tx, &job))
+                .unwrap();
+        } else {
+            stage_job(&mut store, OURS, &job);
+        }
+        assert!(!store.holds_content(&hex_sha256(OUTSIDE)).unwrap());
+        assert_eq!(
+            drain(&store, &sc, &CrossVolumeStage { change: false }, &NoFaults),
+            vec![JobOutcome::Conflict]
+        );
+        assert_eq!(read(&sc, "a.md").as_deref(), Some(OUTSIDE));
+        if !delete {
+            assert!(
+                std::fs::read_dir(sc.workspace()).unwrap().any(|entry| {
+                    let path = entry.unwrap().path();
+                    path.is_file()
+                        && path != sc.target("a.md")
+                        && std::fs::read(path).unwrap() == OURS
+                }),
+                "the selected write must survive as a conflict copy"
+            );
+        }
+        drop(store);
+        let store = EngineStore::open(&sc.db(), 30).unwrap();
+        assert!(drain(&store, &sc, &CrossVolumeStage { change: false }, &NoFaults).is_empty());
+        assert_eq!(read(&sc, "a.md").as_deref(), Some(OUTSIDE));
+        assert_eq!(
+            store
+                .load_materialization_job("unknown-cross-volume")
+                .unwrap()
+                .unwrap()
+                .status,
+            JobStatus::Conflict
+        );
+        assert_nothing_displaced(&sc, &store);
+    }
+}
+
+#[test]
 fn cross_volume_targets_use_checked_replace_and_delete() {
     for delete in [false, true] {
         for change in [false, true] {

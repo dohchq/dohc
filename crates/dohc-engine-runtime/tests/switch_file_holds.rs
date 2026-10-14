@@ -326,7 +326,7 @@ fn sync_delete(store: &mut EngineStore) -> Vec<dohc_engine_sync::MomentMateriali
 }
 
 async fn release_without_capture(action: &str) {
-    let scratch = if action == "rollback" {
+    let scratch = if action == "rollback" || action == "actor-rollback" {
         let scratch = fixture(0, 0, "");
         let mut store = EngineStore::open(&engine_db_path(&scratch).unwrap(), 5).unwrap();
         let object = seed(&mut store, "main", "file-0000.txt", "main\n", 5);
@@ -407,6 +407,42 @@ async fn release_without_capture(action: &str) {
         }
         "sync" => {
             sync_delete(&mut store);
+        }
+        "actor-rollback" => {
+            let head = VersionedTextStore::new(&mut store)
+                .read_text(WS, "main", "file-0000.txt")
+                .unwrap()
+                .unwrap();
+            drop(store);
+            let actor = supervisor.open(&db, 20).unwrap().actor;
+            actor
+                .versioned_text_rollback(
+                    dohc_engine_domain::RollbackTextFileMutation {
+                        workspace_id: WS.into(),
+                        version_id: "main".into(),
+                        path: head.path,
+                        mutation_moment_id: head.latest_moment_id,
+                        request_id: None,
+                        metadata_origin: "restore".into(),
+                        author_json: None,
+                    },
+                    scratch.path().into(),
+                    Arc::new(()),
+                    Arc::new(NoFaults),
+                    CancellationToken::new(),
+                )
+                .await
+                .unwrap();
+            supervisor.close(&db).unwrap();
+            store = EngineStore::open(&db, 21).unwrap();
+            let job = store
+                .load_materialization_job(&planned.job_id)
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                job.preimage, planned.preimage,
+                "actor reconcile must retain the parked overwrite authority"
+            );
         }
         "rollback" => {
             let head = VersionedTextStore::new(&mut store)
@@ -633,9 +669,7 @@ fn switch_hold_indexed_read_cost() {
         for sample in 0..24 {
             let start = std::time::Instant::now();
             for _ in 0..1000 {
-                std::hint::black_box(
-                    dohc_engine_files::PlacementHolds::load(&store, WS, scratch.path()).unwrap(),
-                );
+                std::hint::black_box(dohc_engine_files::PlacementHolds::load(&store, WS).unwrap());
             }
             let elapsed_us = start.elapsed().as_secs_f64() * 1000.0;
             if sample >= 3 {
@@ -649,4 +683,84 @@ fn switch_hold_indexed_read_cost() {
             samples[10], samples[19]
         );
     }
+}
+
+#[tokio::test]
+async fn review2_relay_keeps_recorded_hold_preimage() {
+    let scratch = fixture(2, 1, "file-0000.txt");
+    let db = engine_db_path(&scratch).unwrap();
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&db, 6).unwrap().actor;
+    actor
+        .set_active_version(
+            switch(&scratch, "target", 7),
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    supervisor.close(&db).unwrap();
+    {
+        let mut store = EngineStore::open(&db, 8).unwrap();
+        seed(&mut store, "target", "file-0000.txt", "Relay target.\n", 8);
+    }
+    let actor = supervisor.open(&db, 9).unwrap().actor;
+    actor
+        .materialize_relay_page(
+            WS.into(),
+            scratch.path().into(),
+            vec![dohc_engine_sync::MomentMaterializationChange {
+                version_id: "target".into(),
+                path: "file-0000.txt".into(),
+                operation: "write",
+                content_kind: "text",
+            }],
+            Arc::new(()),
+            10,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    supervisor.close(&db).unwrap();
+    let mut store = EngineStore::open(&db, 11).unwrap();
+    let jobs: Vec<_> = store
+        .list_pending_materialization_jobs()
+        .unwrap()
+        .into_iter()
+        .filter(|job| {
+            job.target_path == "file-0000.txt" && job.job_id.starts_with("version-switch-")
+        })
+        .collect();
+    assert!(!jobs.is_empty());
+    for job in &jobs {
+        assert_eq!(
+            job.preimage,
+            dohc_engine_storage::Preimage::Present(dohc_engine_storage::hex_sha256(b"main\n"))
+        );
+    }
+    assert_eq!(
+        jobs.len(),
+        1,
+        "relay must keep only its latest parked intent"
+    );
+    VersionedTextStore::new(&mut store)
+        .delete_text_file(&delete_input(), &NoFaults)
+        .unwrap();
+    drop(store);
+    let actor = supervisor.open(&db, 21).unwrap().actor;
+    actor
+        .materialize_replay_pending(scratch.path().into(), WS.into(), 22)
+        .await
+        .unwrap();
+    assert_eq!(
+        std::fs::read_to_string(scratch.path().join("file-0000.txt")).unwrap(),
+        OUTSIDE
+    );
+    assert_eq!(conflict_texts(&scratch), vec!["Relay target.\n".to_owned()]);
+    supervisor.close(&db).unwrap();
+}
+
+#[tokio::test]
+async fn review2_inactive_actor_rollback_keeps_outside_bytes() {
+    release_without_capture("actor-rollback").await;
 }

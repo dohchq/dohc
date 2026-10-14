@@ -698,3 +698,45 @@ async fn review_round_trip_then_repair_makes_no_conflict_copies() {
     assert_eq!(target, "Target version.\n");
     f.close().await;
 }
+
+async fn review2_ancestor_release(repair: bool) {
+    let child = "held.md/trip.md";
+    let mut f = Fixture::with_target(Some(child)).await;
+    f.call(
+        "versions.setActive",
+        json!({"workspaceId":WS,"versionId":"later"}),
+    )
+    .await;
+    let conn = rusqlite::Connection::open(engine_db_path(&f.scratch).unwrap()).unwrap();
+    let pending: i64 = conn.query_row("SELECT COUNT(*) FROM materialization_jobs WHERE workspace_id=?1 AND target_path=?2 AND status='pending'", [WS,child], |row| row.get(0)).unwrap();
+    assert_eq!(pending, 1, "the descendant must wait as a durable job");
+    if repair {
+        std::fs::write(f.scratch.path().join(HELD), "Source repair.\n").unwrap();
+    } else {
+        std::fs::remove_file(f.scratch.path().join(HELD)).unwrap();
+    }
+    f.scan().await;
+    assert_eq!(f.status().await["heldFiles"], json!([]));
+    assert_eq!(
+        std::fs::read_to_string(f.scratch.path().join(child)).unwrap(),
+        "Target version.\n"
+    );
+    f.reopen().await;
+    let selected: String = conn.query_row("SELECT b.text FROM snapshots s JOIN blobs b ON b.sha256=s.blob_sha256 WHERE s.workspace_id=?1 AND s.version_id='later' AND s.path=?2", [WS,child], |row| row.get(0)).unwrap();
+    assert_eq!(selected, "Target version.\n");
+    assert_eq!(
+        std::fs::read_to_string(f.scratch.path().join(child)).unwrap(),
+        selected
+    );
+    f.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn review2_retirement_places_held_descendant_before_restart() {
+    review2_ancestor_release(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn review2_capture_places_held_descendant_before_restart() {
+    review2_ancestor_release(true).await;
+}

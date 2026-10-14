@@ -605,8 +605,7 @@ pub(super) fn replay_pending_materializations(
     let holds = match scope.holds {
         Some(holds) => holds,
         None => {
-            loaded_holds =
-                dohc_engine_files::PlacementHolds::load(store, scope.workspace_id, root_dir)?;
+            loaded_holds = dohc_engine_files::PlacementHolds::load(store, scope.workspace_id)?;
             &loaded_holds
         }
     };
@@ -639,7 +638,8 @@ pub(super) fn replay_pending_materializations(
             .map_err(StorageError::corrupt_public)
     })?;
     for job_id in checked_jobs {
-        if let Some(job) = store.load_materialization_job(&job_id)?
+        if !holds.is_empty()
+            && let Some(job) = store.load_materialization_job(&job_id)?
             && holds.blocks(&job.target_path)
         {
             continue;
