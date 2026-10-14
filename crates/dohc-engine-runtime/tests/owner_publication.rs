@@ -3998,7 +3998,15 @@ async fn measure_stop_release_pending_entries() {
 
 #[tokio::test]
 async fn stop_release_only_queues_another_documents_append_for_its_duration() {
-    release_contention_sample().await;
+    let mut samples = Vec::new();
+    for _ in 0..3 {
+        samples.push(release_contention_sample().await);
+    }
+    // A host stall can stretch one sample; work queued behind Stop stretches all of them.
+    assert!(
+        samples.iter().any(|(release, _, tail)| tail <= release),
+        "Stop held the writer past its own command in every sample: {samples:?}"
+    );
 }
 
 async fn release_contention_sample() -> (f64, f64, f64) {
@@ -4116,20 +4124,9 @@ async fn release_contention_sample() -> (f64, f64, f64) {
         append.as_secs_f64() * 1_000.0,
         append.saturating_sub(release).as_secs_f64() * 1_000.0
     );
-    let tail = append.saturating_sub(release);
-    // The tail includes the other append's own work. Allow host variance while
-    // rejecting seconds of writer work beyond Stop and the warmed solo append.
-    let allowed_tail = solo_append
-        .saturating_mul(4)
-        .saturating_add(std::time::Duration::from_secs(1));
     println!(
-        "stop_writer_baseline solo_append_ms={:.3} allowed_tail_ms={:.3}",
-        solo_append.as_secs_f64() * 1_000.0,
-        allowed_tail.as_secs_f64() * 1_000.0
-    );
-    assert!(
-        tail <= allowed_tail,
-        "append tail {tail:?} exceeds warmed solo append {solo_append:?} plus host-load margin {allowed_tail:?}"
+        "stop_writer_baseline solo_append_ms={:.3}",
+        solo_append.as_secs_f64() * 1_000.0
     );
     let persisted = dohc_engine_collab::load_persisted(&f.store, &key)
         .unwrap()
