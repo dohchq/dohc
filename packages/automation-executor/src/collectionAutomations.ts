@@ -376,6 +376,7 @@ export interface CollectionAutomationsOptions {
    * dataset's. A drain and a Stop and restore pass each tell it once.
    */
   onRunsChanged(): void;
+  onUsageSuccess?: CollectionAutomationRunDependencies["onUsageSuccess"];
   /**
    * Sends the notice for an automation's newest failure on this computer,
    * and takes back the notice for its failure `replaces` counted, if any.
@@ -5419,6 +5420,7 @@ export class CollectionAutomations {
         return owned === undefined ? false : this.recordVerdicts(roster, [owned], steps);
       },
       makeDurable: (claimId) => this.makeWritesDurable(claimId),
+      onUsageSuccess: this.options.onUsageSuccess,
       withReads: (work) => this.withLiveEngine(work),
       withRecordWrites: this.options.withRecordWrites,
       collectionIdOf: (path) => this.collections.get(path) ?? null,

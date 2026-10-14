@@ -4,6 +4,7 @@
   "private": true,
   "type": "module",
   "exports": {
+    "./automation-usage": "./src/automationUsage.ts",
     "./durable-batch": "./src/durableBatch.ts",
     "./button-presser": "./src/buttonPresser.ts",
     "./automation-buttons": "./src/automationButtons.ts",

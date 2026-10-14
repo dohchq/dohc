@@ -4350,6 +4350,7 @@ function createCollectionAutomationsFor(
       if (!workspaceAuthorities.isCurrentAttachment(workspaceId, attachmentId)) throw new Error("This workspace was closed.");
     }),
     onRunsChanged: () => notifyAutomationRunsChanged(workspaceId),
+    onUsageSuccess: invocation => { usageStore?.recordSuccess(invocation); },
     reportFailure: (report) => sendFailureNotices({
       notices: noticeStore(),
       computer: { installId: localInstallationId(), label: computerLabel(hostname()) },

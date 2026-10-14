@@ -5,6 +5,7 @@ import {
 import { CAPABILITIES, type CapabilityId } from "@dohc/workspace-contracts/capabilities";
 import { USAGE_ACTION_IDS } from "@dohc/workspace-contracts/usage";
 import { RENDERER_USAGE_COVERAGE } from "./rendererUsage";
+import { AUTOMATION_USAGE_ACTION_IDS } from "@dohc/automation-executor/automation-usage";
 
 type ActionId = (typeof USAGE_ACTION_IDS)[number];
 export type CliUsageInvocation = { capabilityId: ActionId; door: "cli" | "mcp" };
@@ -17,8 +18,10 @@ const covered = new Set<CapabilityId>(CLI_USAGE_ACTION_IDS);
 // MCP also uses fileWrite for app.create and data.import, so its file.write
 // count cannot distinguish those capabilities.
 const mcpCovered = new Set<CapabilityId>(CLI_USAGE_ACTION_IDS.filter(id => id !== "file.write"));
+const automationCovered = new Set<CapabilityId>(AUTOMATION_USAGE_ACTION_IDS);
 export const DESKTOP_USAGE_COVERAGE = RENDERER_USAGE_COVERAGE.map(pair => ({ ...pair,
   status: (pair.door === "cli" && covered.has(pair.capabilityId)
+    || pair.door === "automation" && automationCovered.has(pair.capabilityId)
     || pair.door === "mcp" && mcpCovered.has(pair.capabilityId)
       && Object.values(CAPABILITIES[pair.capabilityId].mcp).some(tools => Array.isArray(tools) && tools.length > 0))
     ? "covered" as const : pair.status,

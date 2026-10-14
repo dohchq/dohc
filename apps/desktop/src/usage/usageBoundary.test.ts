@@ -68,6 +68,12 @@ function imports(path: string): string[] {
 }
 
 describe("usage import boundary", () => {
+  it("wires automation completion only to the local aggregate collector", () => {
+    const main = readFileSync(join(root, "apps/desktop/src/main.ts"), "utf8");
+    const options = main.slice(main.indexOf("function createCollectionAutomationsFor("), main.indexOf("function createCollectionAutomationsFor(") + main.slice(main.indexOf("function createCollectionAutomationsFor(")).indexOf("reportFailure:"));
+    expect(options).toContain("onUsageSuccess: invocation => { usageStore?.recordSuccess(invocation); },");
+    expect(options).not.toMatch(/usageReport|telemetry|posthog/i);
+  });
   it("keeps the collector unreachable from CLI, MCP, every service and preload", () => {
     const entries = [
       ...sources(join(root, "packages/cli")), ...sources(join(root, "packages/mcp")),
