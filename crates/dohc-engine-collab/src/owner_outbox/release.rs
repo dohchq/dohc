@@ -469,13 +469,11 @@ fn contains_pending_in<'a>(
             continue;
         }
         // Decoded entry ranges can be unsorted; subset_of checks each range independently.
-        if update.delete_set().iter().any(|(client, _)| {
-            !update
-                .delete_set()
-                .get(client)
-                .expect("delete-set client")
-                .subset_of(deleted.get(client).unwrap_or(&empty))
-        }) {
+        if update
+            .delete_set()
+            .iter()
+            .any(|(client, ranges)| !ranges.subset_of(deleted.get(client).unwrap_or(&empty)))
+        {
             continue;
         }
         if before.is_none() {

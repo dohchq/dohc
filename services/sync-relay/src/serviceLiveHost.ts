@@ -495,7 +495,10 @@ export async function startServiceLiveHost(options: {
       const retiring: {workspaceId: string; objectId: string}[] = [];
       for (const [key, document] of hosted) {
         if (changed.includes(document.target.workspaceId) || isDeepStrictEqual(wanted.get(key), document)) continue;
-        if (await unload(document, joined)) {hosted.delete(key); idle.delete(key); unloading.delete(key);}
+        // A fenced document cannot settle. Keep its durable work in the store, as on an identity change.
+        if (await unload(document, joined) || !storage.serviceHostDocumentEnabled({workspaceId: document.target.workspaceId, objectId: document.objectId})) {
+          activation.removeTarget(document.target); hosted.delete(key); idle.delete(key); unloading.delete(key);
+        }
         else retiring.push({workspaceId: document.target.workspaceId, objectId: document.objectId});
       }
       // Any other workspace detaches only once its last document unloads, so
