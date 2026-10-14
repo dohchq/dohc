@@ -2,7 +2,7 @@ import { ViewActions } from "./fileInspectorUi";
 import { EmptyState, SectionLabel } from "./ui/controls";
 import { SkeletonRows } from "./ui/SkeletonRows";
 import { ArrowDown, ArrowUp, Binary, Database, Hash, Search, TriangleAlert, Type, type LucideIcon } from "lucide-react";
-import { memo, useCallback, useEffect, useMemo, useRef, useState, type FocusEvent, type KeyboardEvent, type MouseEvent } from "react";
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type FocusEvent, type KeyboardEvent, type MouseEvent } from "react";
 import type {
   DatabaseEditResult,
   DatabaseSnapshotResult,
@@ -156,7 +156,7 @@ function mergeEditPage(
 }
 
 // The snapshot with one cell set to `to`, where it still holds `from`. A
-// write shows its value this way at once, and a failed write puts the old
+// write shows its value this way at once, and a failed write puts the saved
 // value back unless the cell has changed since.
 function withCell(snapshot: Snapshot, write: CellWrite, from: unknown, to: unknown): Snapshot {
   const identity = editIdentity(write.key);
@@ -319,11 +319,27 @@ export function DatabaseStudioView(props: {
     setSort(null);
   }
 
-  // Writes one cell. The new value shows at once. A failed write puts the old
-  // value back and reports through the shell's error hook, with Try again.
-  // Either answer repaints only the load it was written from.
+  // Each cell with writes in flight: the value the database last saved in it,
+  // and which write saved it, and the newest write sent to it.
+  const cellWrites = useRef(new Map<string, { saved: unknown; savedBy: number; newest: number; inFlight: number }>());
+  const writeCount = useRef(0);
+
+  // Writes one cell. The new value shows at once. A failed write reports
+  // through the shell's error hook, with Try again, and if no newer write to
+  // the cell is out, puts back the value the database last saved. Either
+  // answer repaints only the load it was written from.
   const writeCell = useCallback(
     function write(cell: CellWrite) {
+      const id = [cell.workspaceId, cell.path, cell.table, editIdentity(cell.key), cell.column].join("\0");
+      const sequence = ++writeCount.current;
+      const writes = cellWrites.current.get(id) ?? { saved: cell.from, savedBy: 0, newest: 0, inFlight: 0 };
+      writes.newest = sequence;
+      writes.inFlight += 1;
+      cellWrites.current.set(id, writes);
+      const settle = () => {
+        writes.inFlight -= 1;
+        if (writes.inFlight === 0) cellWrites.current.delete(id);
+      };
       const loadId = currentSnapshotRef.current.loadId;
       const shown = () => {
         const current = currentSnapshotRef.current;
@@ -348,12 +364,21 @@ export function DatabaseStudioView(props: {
         })
         .then(
           (result) => {
+            if (sequence > writes.savedBy) {
+              writes.saved = cell.to;
+              writes.savedBy = sequence;
+            }
+            settle();
             if (shown() && result.path === cell.path) {
               setSnapshot((current) => current && mergeEditPage(current, result));
             }
           },
           (cause: unknown) => {
-            if (shown()) setSnapshot((current) => current && withCell(current, cell, cell.to, cell.from));
+            const { saved, newest } = writes;
+            settle();
+            if (shown() && newest === sequence) {
+              setSnapshot((current) => current && withCell(current, cell, cell.to, saved));
+            }
             onError?.(
               `dohc could not save the change to ${cell.column} in ${cell.table}.`,
               cause,
@@ -581,8 +606,9 @@ function gridColumn(rows: Row[], column: Column): DataGridColumn {
 // the header, and its column.
 type GridPlace = { row: number; column: number };
 
+// From any element in a cell, including an icon's SVG.
 function placeOf(target: EventTarget): GridPlace | null {
-  const cell = target instanceof HTMLElement ? target.closest<HTMLElement>("[data-grid-row]") : null;
+  const cell = target instanceof Element ? target.closest<HTMLElement>("[data-grid-row]") : null;
   if (!cell) return null;
   return { row: Number(cell.dataset.gridRow), column: Number(cell.dataset.gridColumn) };
 }
@@ -604,11 +630,43 @@ export function DatabaseGrid(props: {
 }) {
   const { table, rows } = props;
   const columns = useGridColumns(table);
-  const [active, setActive] = useState<GridPlace>({ row: 0, column: 0 });
-  // Rows a search hides, or columns a table lacks, move the tab stop to the
-  // nearest cell that is still there.
-  const activeRow = Math.min(active.row, rows.length - 1);
+  // Each row's label for test ids, and its key: the same through sorts,
+  // searches and edits, and through reloads by its rowid.
+  const rowIds = useMemo(
+    () =>
+      rows.map(({ row, sourceIndex }) => {
+        const label = rowLabelOf(table, row, sourceIndex);
+        return { label, key: String(row.__dohc_rowid ?? `${label}-${sourceIndex}`) };
+      }),
+    [table, rows],
+  );
+  // The active cell holds the tab stop. Its row is held by key, so the stop
+  // stays on a row that an edit, a sort, a search or a reload moves, and by
+  // its last place for when the row is gone. The header's key is null.
+  const [active, setActive] = useState<{ key: string | null; place: number; column: number }>(() => ({
+    key: rowIds[0]?.key ?? null,
+    place: 0,
+    column: 0,
+  }));
+  const found = active.key === null ? -1 : rowIds.findIndex((id) => id.key === active.key);
+  const activeRow = active.key === null ? -1 : found !== -1 ? found : Math.min(active.place, rows.length - 1);
   const activeColumn = Math.min(active.column, table.columns.length - 1);
+  const frame = useRef<HTMLDivElement>(null);
+  // Enter and Escape end an edit with focus on its cell, also when the new
+  // value moves the cell's row.
+  const refocus = useRef(false);
+  useLayoutEffect(() => {
+    if (!refocus.current) return;
+    refocus.current = false;
+    frame.current
+      ?.querySelector<HTMLElement>(`[data-grid-row="${activeRow}"][data-grid-column="${activeColumn}"]`)
+      ?.focus();
+  });
+  const endEdit = (draft: string | null, fromKeyboard: boolean) => {
+    refocus.current = fromKeyboard;
+    if (draft === null) props.onCancel();
+    else props.onCommit(draft);
+  };
 
   function beginEdit(place: GridPlace) {
     const entry = rows[place.row];
@@ -620,8 +678,11 @@ export function DatabaseGrid(props: {
   function onFocus(event: FocusEvent<HTMLTableElement>) {
     const place = placeOf(event.target);
     if (!place) return;
+    const key = place.row === -1 ? null : (rowIds[place.row]?.key ?? null);
     setActive((current) =>
-      current.row === place.row && current.column === place.column ? current : { row: place.row, column: place.column },
+      current.key === key && current.place === place.row && current.column === place.column
+        ? current
+        : { key, place: place.row, column: place.column },
     );
   }
 
@@ -671,7 +732,7 @@ export function DatabaseGrid(props: {
 
   const editor = props.editing;
   return (
-    <div className="min-h-0 flex-1 overflow-auto" data-testid="db-table">
+    <div ref={frame} className="min-h-0 flex-1 overflow-auto" data-testid="db-table">
       {/* Room for the type icon and the sort arrow, each 12px with a 4px gap. */}
       <DataGrid
         role="grid"
@@ -709,22 +770,21 @@ export function DatabaseGrid(props: {
               </td>
             </tr>
           ) : null}
-          {rows.map(({ row, sourceIndex }, index) => {
-            const rowLabel = rowLabelOf(table, row, sourceIndex);
+          {rows.map(({ row }, index) => {
             const editKey = editKeyFor(table, row);
             const editingHere = editor !== null && editKey !== null && editor.rowKey === editIdentity(editKey);
             return (
               <DatabaseRow
-                key={String(row.__dohc_rowid ?? `${rowLabel}-${sourceIndex}`)}
+                key={rowIds[index]!.key}
                 table={table}
                 row={row}
-                rowLabel={rowLabel}
+                rowLabel={rowIds[index]!.label}
                 index={index}
                 editable={!props.readOnly}
                 activeColumn={activeRow === index ? activeColumn : -1}
                 editor={
                   editingHere
-                    ? { column: editor.column, draftRef: props.draftRef, onCommit: props.onCommit, onCancel: props.onCancel }
+                    ? { column: editor.column, draftRef: props.draftRef, onEnd: endEdit }
                     : null
                 }
               />
@@ -786,8 +846,7 @@ const DatabaseRow = memo(function DatabaseRow(props: {
   editor: {
     column: string;
     draftRef: { current: string };
-    onCommit: (value: string) => void;
-    onCancel: () => void;
+    onEnd: (draft: string | null, fromKeyboard: boolean) => void;
   } | null;
 }) {
   const { table, row, editor } = props;
@@ -811,11 +870,7 @@ const DatabaseRow = memo(function DatabaseRow(props: {
             className={editable ? "cursor-text" : ""}
           >
             {editor?.column === column.name ? (
-              <DatabaseCellEditor
-                draftRef={editor.draftRef}
-                onCommit={editor.onCommit}
-                onCancel={editor.onCancel}
-              />
+              <DatabaseCellEditor draftRef={editor.draftRef} onEnd={editor.onEnd} />
             ) : (
               <span
                 className={`block max-w-80 truncate ${value === null || value === undefined ? "text-subtle" : "text-ink"}`}
@@ -832,25 +887,22 @@ const DatabaseRow = memo(function DatabaseRow(props: {
 });
 
 // A cell's editor. It fills the cell, which draws the focus outline, and adds
-// no width of its own. Enter commits and Escape cancels, each giving focus
-// back to the cell; leaving the cell commits. Each edit ends once.
+// no width of its own. Enter commits and Escape cancels, each from the
+// keyboard; leaving the cell commits. Each edit ends once, with the draft, or
+// null when cancelled.
 function DatabaseCellEditor({
   draftRef,
-  onCommit,
-  onCancel,
+  onEnd,
 }: {
   draftRef: { current: string };
-  onCommit: (value: string) => void;
-  onCancel: () => void;
+  onEnd: (draft: string | null, fromKeyboard: boolean) => void;
 }) {
   const [draft, setDraft] = useState(draftRef.current);
   const ended = useRef(false);
-  const end = (commit: boolean, cell?: HTMLElement | null) => {
+  const end = (value: string | null, fromKeyboard: boolean) => {
     if (ended.current) return;
     ended.current = true;
-    if (commit) onCommit(draft);
-    else onCancel();
-    cell?.focus();
+    onEnd(value, fromKeyboard);
   };
   return (
     <input
@@ -863,13 +915,10 @@ function DatabaseCellEditor({
         draftRef.current = event.target.value;
         setDraft(event.target.value);
       }}
-      onBlur={() => end(true)}
+      onBlur={() => end(draft, false)}
       onKeyDown={(event) => {
-        if (event.key === "Enter" && !event.nativeEvent.isComposing) {
-          end(true, event.currentTarget.closest("td"));
-        } else if (event.key === "Escape") {
-          end(false, event.currentTarget.closest("td"));
-        }
+        if (event.key === "Enter" && !event.nativeEvent.isComposing) end(draft, true);
+        else if (event.key === "Escape") end(null, true);
       }}
       className="w-full bg-transparent text-ink outline-none [text-align:inherit]"
     />

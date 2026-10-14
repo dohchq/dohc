@@ -118,7 +118,8 @@ beforeEach(() => {
 afterEach(() => {
   cleanup();
   vi.unstubAllGlobals();
-  vi.clearAllMocks();
+  // Also drops one-time answers a failed test left queued.
+  vi.resetAllMocks();
   measured.length = 0;
 });
 
@@ -423,6 +424,96 @@ describe("DatabaseStudioView", () => {
     await act(async () => retry.resolve(walletPage("Groceries")));
     expect(cell("category", "txn_001").textContent).toBe("Groceries");
     expect(onError).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    ["the first fails, then the second", ["fail", "fail"], [0, 1], "Food"],
+    ["the second fails, then the first", ["fail", "fail"], [1, 0], "Food"],
+    ["the first is saved, then the second fails", ["save", "fail"], [0, 1], "Groceries"],
+  ] as const)(
+    "puts back the value the database last saved when overlapping writes to one cell fail: %s",
+    async (_, outcomes, order, shown) => {
+      const user = userEvent.setup();
+      const writes = [deferred<DatabaseEditResult>(), deferred<DatabaseEditResult>()];
+      bridgeMock.applyDatabaseEdit
+        .mockImplementationOnce(() => writes[0]!.promise)
+        .mockImplementationOnce(() => writes[1]!.promise);
+      const onError = vi.fn();
+      render(<DatabaseStudioView workspaceId="ws-1" path="imports/wallet.sqlite" onError={onError} />);
+      await screen.findByTestId("db-cell-category-txn_001");
+
+      // Food to Groceries, then Groceries to Travel, before either answers.
+      await user.click(cell("category", "txn_001"));
+      await user.clear(editor());
+      await user.keyboard("Groceries{Enter}");
+      await user.keyboard("{Enter}");
+      expect(editor().value).toBe("Groceries");
+      await user.clear(editor());
+      await user.keyboard("Travel{Enter}");
+      expect(cell("category", "txn_001").textContent).toBe("Travel");
+
+      for (const index of order) {
+        await act(async () => {
+          if (outcomes[index] === "save") writes[index]!.resolve(walletPage(index === 0 ? "Groceries" : "Travel"));
+          else writes[index]!.reject(new Error("database is locked"));
+        });
+      }
+      expect(cell("category", "txn_001").textContent).toBe(shown);
+      expect(onError).toHaveBeenCalledTimes(outcomes.filter((outcome) => outcome === "fail").length);
+    },
+  );
+
+  it("keeps the only tab stop on the focused cell when an edit moves its row, and Tab still leaves the grid", async () => {
+    const user = userEvent.setup();
+    // The writes stay unanswered, so the new values decide the order.
+    const unanswered = () => new Promise<DatabaseEditResult>(() => {});
+    bridgeMock.applyDatabaseEdit.mockImplementationOnce(unanswered).mockImplementationOnce(unanswered);
+    renderStudio();
+    await screen.findByTestId("db-cell-amount-txn_001");
+    const grid = screen.getByRole("grid", { name: "wallet" });
+    const stops = () => [...grid.querySelectorAll('[tabindex="0"]')];
+    const order = () => screen.getAllByTestId("db-row").map((row) => row.querySelectorAll("td")[1]!.textContent);
+
+    // Amounts ascending: 10, 42, then the NULL.
+    await user.click(screen.getByTestId("db-sort-amount"));
+    expect(order()).toEqual(["txn_002", "txn_001", "txn_003"]);
+
+    // 42 becomes 5, and its row moves up to the first place.
+    await user.click(cell("amount", "txn_001"));
+    await user.clear(editor());
+    await user.keyboard("5{Enter}");
+    expect(order()).toEqual(["txn_001", "txn_002", "txn_003"]);
+    expect(document.activeElement).toBe(cell("amount", "txn_001"));
+    expect(stops()).toEqual([cell("amount", "txn_001")]);
+
+    // 5 becomes 50, and its row moves back down past 10's.
+    await user.keyboard("{Enter}");
+    await user.clear(editor());
+    await user.keyboard("50{Enter}");
+    expect(order()).toEqual(["txn_002", "txn_001", "txn_003"]);
+    expect(document.activeElement).toBe(cell("amount", "txn_001"));
+    expect(stops()).toEqual([cell("amount", "txn_001")]);
+
+    await user.tab();
+    expect(grid.contains(document.activeElement)).toBe(false);
+  });
+
+  it("sorts when a header's type icon or sort arrow is clicked", async () => {
+    const user = userEvent.setup();
+    renderStudio();
+    await screen.findByTestId("db-cell-amount-txn_001");
+    // Each header's icons: its type, then its sort arrow.
+    const icons = (column: string) => [...screen.getByTestId(`db-sort-${column}`).querySelectorAll("svg")];
+    const sorted = (column: string) => screen.getByTestId(`db-sort-${column}`).getAttribute("aria-sort");
+
+    await user.click(icons("amount")[0]!);
+    expect(sorted("amount")).toBe("ascending");
+    await user.click(icons("amount")[1]!);
+    expect(sorted("amount")).toBe("descending");
+    // An unsorted column's arrow, shown only on hover or focus.
+    await user.click(icons("category")[1]!);
+    expect(sorted("category")).toBe("ascending");
+    expect(sorted("amount")).toBe("none");
   });
 
   it("offers no editor in a database shared to read, and says why with one read-only mark", async () => {
