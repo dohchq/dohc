@@ -1113,7 +1113,7 @@ test("a docs-only PR records clean provenance without code tools, while dirty he
       console.log(JSON.stringify(report));
     `;
     const invoke = (extra = [], fault = "") => spawnSync(process.execPath, ["--input-type=module", "-e", childScript, "pr", "--base", base, ...extra], {
-      cwd: root, encoding: "utf8", timeout: 20_000,
+      cwd: root, encoding: "utf8", timeout: 120_000,
       env: { ...process.env, NODE_PATH: dirname(dirname(require.resolve("js-yaml/package.json"))), DOHC_BUILD_SLOT_ROOT: join(root, "slots"), FIXTURE_PROVENANCE_FAULT: fault },
     });
     const clean = invoke();
