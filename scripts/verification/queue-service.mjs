@@ -12,7 +12,7 @@ import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { setTimeout as sleep } from "node:timers/promises";
 import { git, run } from "./process.mjs";
-import { acquireVerificationSlot, freeDiskGb, reclaimStaleSlots, resolveBuildBudget } from "../../tools/rust-engine-program/build-slot.mjs";
+import { acquireVerificationSlot, freeDiskGb, resolveBuildBudget } from "../../tools/rust-engine-program/build-slot.mjs";
 import { attemptOutcome, listRequests, nextRequest, placeSubmission, protocol, queuePaths, readJson, retryDelayMs, terminalStates, writeJson } from "./queue.mjs";
 
 const verifierEntry = fileURLToPath(new URL("./verify.mjs", import.meta.url));
@@ -422,10 +422,6 @@ export async function runService({
   }
 }
 
-function alive(pid) {
-  try { process.kill(pid, 0); return true; } catch (error) { return error.code === "EPERM"; }
-}
-
 async function main(argv) {
   const rootIndex = argv.indexOf("--root");
   const root = rootIndex >= 0 ? argv[rootIndex + 1] : null;
@@ -442,15 +438,6 @@ async function main(argv) {
     let go = false;
     for await (const chunk of process.stdin) if ((go = String(chunk).includes("go"))) break;
     if (!go) throw new Error("The supervisor never said go; this process may be outside its job.");
-    // A dead predecessor's lane slot is this service's own; free it now instead of after the stale window.
-    const previous = readJson(join(root, "service.json"));
-    const slotRoot = process.env.DOHC_VERIFICATION_SLOT_ROOT ?? resolveBuildBudget()?.root;
-    // As in acquireExclusiveSlot, only a recorded dead owner frees at once; a claim still being written keeps its grace.
-    // Only the first lane: a second exists only in trials, and the normal reclaim frees it.
-    const owner = slotRoot ? readJson(join(slotRoot, "verification-slot-1", "owner.json")) : null;
-    if (owner?.pid && owner.pid === previous?.pid && !alive(owner.pid)) {
-      reclaimStaleSlots({ root: slotRoot, slots: 1, kind: "verification-slot", staleMs: -1 });
-    }
   }
   const repo = resolve(git(["rev-parse", "--git-common-dir"], here), "..");
   return runService({ root, repo, commit: git(["rev-parse", "HEAD"], here) });
