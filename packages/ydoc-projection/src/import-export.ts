@@ -508,6 +508,7 @@ function assertSupportedListMarkdown(markdown: string): string {
     const rule = indent <= 3 && /^(?:-(?:[ \t]*-){2,}|\*(?:[ \t]*\*){2,}|_(?:[ \t]*_){2,})[ \t]*$/u.test(rest)
     let marker = rule ? null : /^(?:[-+*]|[0-9]{1,9}[.)])(?: |$)/u.exec(rest)
     if (marker && !marker[0].endsWith(' ') && at > 0 && !blank) marker = null
+    if (marker && indent >= 4 && indent >= (parents.at(-1)?.column ?? 0) + 4) marker = null
     if (open && (blank || (!marker && indent < open.column))) {
       if (blank ? indent > open.indent && indent < open.column : rest.startsWith('\t')) refuse()
       parents.pop()
@@ -531,16 +532,17 @@ function assertSupportedListMarkdown(markdown: string): string {
       let body = itemBody.replace(/^\[[ xX]\] /u, '')
       if (/^[ \t]*\t/u.test(body)) refuse()
       let emptyChild: { indent: number; column: number } | undefined
+      let quoted = false
       let depth = quotes + (parents.length + 1) * 2
       body = body.trimStart()
       while (true) {
         if (depth > 128) refuse()
-        if (body.startsWith('> ')) { body = body.slice(2); depth += 1; continue }
+        if (body.startsWith('> ')) { body = body.slice(2); depth += 1; quoted = true; continue }
         const child = /^(?:[-+*] |[0-9]{1,9}[.)] )/u.exec(body)
         if (!child) break
         if (/^[0-9]/u.test(child[0]) && /^\[[ xX]\](?: |$)/u.test(body.slice(child[0].length))) refuse()
         body = body.slice(child[0].length); depth += 2
-        if (!body.trim()) emptyChild = { indent: indent + rest.length - body.length - child[0].length, column: indent + rest.length - body.length }
+        if (!quoted && !body.trim()) emptyChild = { indent: indent + rest.length - body.length - child[0].length, column: indent + rest.length - body.length }
       }
       if (/^(?:\*(?:[ \t]*\*){2,}|_(?:[ \t]*_){2,})[ \t]*$/u.test(body)
         || /^[0-9]{1,9}[.)] \[[ xX]\](?: |$)/u.test(body)) refuse()

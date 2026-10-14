@@ -1339,7 +1339,6 @@ impl Ydoc {
                 if WIRE_SEED {
                     self.with_delta(edit)
                 } else {
-                    // Witness checks use a disposable document and discard its update.
                     let mut txn = self.doc.transact_mut();
                     edit(&mut txn);
                     Vec::new()
@@ -1987,10 +1986,7 @@ fn markdown_reads_alike(source: &str, projection: &str, reading: MarkdownReading
     };
     let source_body = normalize(source);
     let projected_body = normalize(projection);
-    // Compare syntax before decoding the projector's inert tag text.
     let syntax_changed = encoded_tag_span(&projected_body).is_some()
-        && inline_code_spans(&projected_body).is_empty()
-        && empty_link_ranges(&projected_body).is_empty()
         && read_text(&source_body, TextPlace::Inline).1
             != read_text(&projected_body, TextPlace::Inline).1;
     if syntax_changed {
@@ -2311,9 +2307,7 @@ fn inline_syntax(text: &str) -> Option<String> {
     (uri || email).then(|| "autolink".into())
 }
 
-/// End byte of a complete CommonMark open tag that has
-/// attributes: `<`, a tag name, attributes, optional whitespace and `/`, and
-/// `>`.
+/// End byte of a complete CommonMark tag with attributes.
 fn html_tag_with_attributes_end(text: &str) -> Option<usize> {
     let bytes = text.as_bytes();
     let space = |at: usize| matches!(bytes.get(at), Some(b' ' | b'\t' | b'\n' | b'\r' | b'\x0c'));
@@ -2802,10 +2796,9 @@ fn parse_markdown_blocks_at<'src>(
             index += consumed;
             continue;
         }
-        // Paragraph: consecutive lines until a blank line or a structural
-        // line. Interior single newlines stay inside one text run, which the
-        // projector re-emits verbatim. Only a numbered list that starts at 1
-        // interrupts a paragraph.
+        *refused |= !in_list
+            && reading == MarkdownReading::Projection
+            && indented_code_leading_entity(line).is_some();
         let paragraph_reading = if in_list {
             reading
         } else {
@@ -2860,6 +2853,7 @@ fn parse_markdown_blocks_at<'src>(
             if let Some((from, to)) = encoded_tag_span(&paragraph).filter(|_| spans.is_empty()) {
                 let decoded = decode_html_entities_once(&paragraph[from..to]);
                 paragraph.replace_range(from..to, &decoded);
+                spans.push(from..from + decoded.len());
             }
             spans.extend(paragraph.match_indices('<').filter_map(|(at, _)| {
                 html_tag_with_attributes_end(&paragraph[at..]).map(|end| at..at + end)
@@ -10458,6 +10452,8 @@ mod projection_tests {
             // a reader does not see as written. The document holds each as
             // text.
             [
+                "`c`\n\n<x onmouseover=alert(1)>hover</x>",
+                "`c`\n\n<!-- secret -->",
                 "Approve <?and wire the deposit to 4471?> the invoice",
                 "Approve <!note text here> the invoice",
                 "Approve <![CDATA[wire the deposit]]> the invoice",
@@ -10551,8 +10547,6 @@ mod projection_tests {
 
     #[test]
     fn a_local_settle_keeps_a_source_whose_body_is_the_files_body() {
-        // Raw HTML still reads as syntax while the document keeps it as text.
-        // A local snapshot permits retaining the unchanged file body.
         let file = "---\nid: rec\n---\n\nHello <b>hidden</b> world\n";
         let doc = Ydoc::wire();
         doc.rewrite_content_to_markdown(ContentKind::Richdoc, file)

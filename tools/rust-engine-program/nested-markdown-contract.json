@@ -413,7 +413,7 @@
     },
     {
       "canonical": "***\n\n&#9;code",
-      "fileFold": true,
+      "foldRefuse": true,
       "name": "dash-rule-tab-code",
       "rustBase64": "AQXLi6CB+ajZBwAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5Aw5ob3Jpem9udGFsUnVsZYfLi6CB+ajZBwEDCXBhcmFncmFwaAcAy4uggfmo2QcCBgQAy4uggfmo2QcDBQljb2RlAA==",
       "source": "- - -\n\tcode",
@@ -421,7 +421,7 @@
     },
     {
       "canonical": "- a\n\n---\n\n&#9;code",
-      "fileFold": true,
+      "foldRefuse": true,
       "name": "dash-rule-ends-list-code",
       "rustBase64": "AQqk7+3azv9EACgBBG1ldGENc2NoZW1hVmVyc2lvbgF9AQcBBGJvZHkDCmJ1bGxldExpc3QHAKTv7drO/0QBAwhsaXN0SXRlbQcApO/t2s7/RAIDCXBhcmFncmFwaAcApO/t2s7/RAMGBACk7+3azv9EBAFhh6Tv7drO/0QBAw5ob3Jpem9udGFsUnVsZYek7+3azv9EBgMJcGFyYWdyYXBoBwCk7+3azv9EBwYEAKTv7drO/0QIBQljb2RlAA==",
       "source": "- a\n---\n\tcode",
@@ -960,6 +960,50 @@
       "note": "CommonMark 0.31.2: <ul> <li> <ol> <li></li> </ol> <p>x</p> </li> </ul>",
       "refuse": true,
       "source": "- 1. \n\n    x"
+    },
+    {
+      "canonical": "a\n\n&#32;   -\n&#9;foo",
+      "foldRefuse": true,
+      "name": "root-indented-bare-marker",
+      "note": "CommonMark 0.31.2: <p>a</p> <pre><code>- foo </code></pre> ",
+      "rustBase64": "AQfttqqIhq3dAQAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwlwYXJhZ3JhcGgHAO22qoiGrd0BAQYEAO22qoiGrd0BAgFhh+22qoiGrd0BAQMJcGFyYWdyYXBoBwDttqqIhq3dAQQGBADttqqIhq3dAQUKICAgIC0KCWZvbwA=",
+      "source": "a\n\n    -\n\tfoo",
+      "sourceCanonical": "a\n\n```\n-\nfoo\n```"
+    },
+    {
+      "canonical": "Install:\n\n&#32;   npm i foo",
+      "foldRefuse": true,
+      "name": "root-indented-install",
+      "note": "CommonMark 0.31.2: <p>Install:</p> <pre><code>npm i foo </code></pre> ",
+      "rustBase64": "AQeL5eK77saGBwAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwlwYXJhZ3JhcGgHAIvl4rvuxoYHAQYEAIvl4rvuxoYHAghJbnN0YWxsOoeL5eK77saGBwEDCXBhcmFncmFwaAcAi+Xiu+7GhgcLBgQAi+Xiu+7GhgcMDSAgICBucG0gaSBmb28A",
+      "source": "Install:\n\n    npm i foo",
+      "sourceCanonical": "Install:\n\n```\nnpm i foo\n```"
+    },
+    {
+      "canonical": "a\n\n&#9;code",
+      "foldRefuse": true,
+      "name": "root-tab-code",
+      "note": "CommonMark 0.31.2: <p>a</p> <pre><code>code </code></pre> ",
+      "rustBase64": "AQeD5tWU8cXoCAAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwlwYXJhZ3JhcGgHAIPm1ZTxxegIAQYEAIPm1ZTxxegIAgFhh4Pm1ZTxxegIAQMJcGFyYWdyYXBoBwCD5tWU8cXoCAQGBACD5tWU8cXoCAUFCWNvZGUA",
+      "source": "a\n\n\tcode",
+      "sourceCanonical": "a\n\n```\ncode\n```"
+    },
+    {
+      "canonical": "P\n\n&#32;   1. a\n\n&#32;     b",
+      "foldRefuse": true,
+      "name": "root-indented-ordered-marker",
+      "note": "CommonMark 0.31.2: <p>P</p> <pre><code>1. a    b </code></pre> ",
+      "rustBase64": "AQqK1ImUsr25CwAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwlwYXJhZ3JhcGgHAIrUiZSyvbkLAQYEAIrUiZSyvbkLAgFQh4rUiZSyvbkLAQMJcGFyYWdyYXBoBwCK1ImUsr25CwQGBACK1ImUsr25CwUIICAgIDEuIGGHitSJlLK9uQsEAwlwYXJhZ3JhcGgHAIrUiZSyvbkLDgYEAIrUiZSyvbkLDwcgICAgICBiAA==",
+      "source": "P\n\n    1. a\n\n      b",
+      "sourceCanonical": "P\n\n```\n1. a\n\n  b\n```"
+    },
+    {
+      "canonical": "&lt;b&gt;x\n&amp;&#35;9&#59;y&lt;/b&gt;",
+      "name": "decoded-tag-tab-entity",
+      "note": "CommonMark 0.31.2: <p>&lt;b&gt;x &amp;#9;y&lt;/b&gt;</p> ",
+      "projected": true,
+      "rustBase64": "AQT1jafSmOm0BQAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwlwYXJhZ3JhcGgHAPWNp9KY6bQFAQYEAPWNp9KY6bQFAg48Yj54CiYjOTt5PC9iPgA=",
+      "source": "&lt;b&gt;x\n&amp;&#35;9&#59;y&lt;/b&gt;"
     }
   ],
   "rules": "Blank lines contain only spaces or tabs. Same-kind siblings across blanks form one loose list. An indented line after a blank starts another item paragraph; a nonblank unindented line can lazily continue the current paragraph. Children must reach their parent's marker content column. Task checkboxes are content after a two-column bullet marker. Refusals for ambiguous lines apply inside list bodies; root prose, rules and code remain accepted. Each projector output must be accepted unchanged by its projected reader. Ordered output is capped at nine digits. Letter and Roman prefixes are prose. Thematic breaks take precedence over list markers."

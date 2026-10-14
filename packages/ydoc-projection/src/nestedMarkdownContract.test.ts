@@ -47,8 +47,8 @@ it.each(corpus.cases.filter(item => !item.refuse))('validates the Rust-seeded $n
     expect(replay.getMap('meta').get('schemaVersion')).toBe(1)
     expect(yDocToMarkdown(replay)).toBe(item.canonical)
     const input = { document, currentPath: 'tasks/record.md', checkpoint }
-    if (item.witnessSeed) expect(replay.getMap('meta').get('dohcMarkdownSource')).toBe(item.source)
-    const expectedMarkdown = replay.getMap('meta').has('dohcMarkdownSource') ? item.source : item.canonical!
+    expect(replay.getMap('meta').has('dohcMarkdownSource')).toBe(!!item.witnessSeed)
+    const expectedMarkdown = item.witnessSeed ? item.source : item.canonical!
     expect(registration(input)).toMatchObject({ kind: 'accepted', evidence: { projectedMarkdown: expectedMarkdown } })
     expect(journal({ ...input, suffix: [], candidate: Y.encodeStateAsUpdate(replay) })).toMatchObject({
       kind: 'accepted', evidence: { projectedMarkdownSha256: createHash('sha256').update(expectedMarkdown).digest('hex') },
@@ -82,4 +82,8 @@ it.each(corpus.cases.filter(item => item.name.startsWith('empty-parent-')))('reb
   const original = parseRichdocMarkdown(item.source)
   const file = serializeRichdocBody(original)
   expect(parseRichdocMarkdown(file, 'projection')).toEqual(original)
+})
+
+it.each(['source', 'projection'] as const)('admits an empty child after a same-line quote in %s reading', reading => {
+  expect(serializeRichdocBody(parseRichdocMarkdown('- > - \n\n  >    x', reading))).toBe('- \n  > \\- \n\n  >    x')
 })
