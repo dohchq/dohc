@@ -1462,7 +1462,8 @@ test("a cargo lane keeps its long grace for a dead holder; the verification lane
     plantSlot(root, 1, { pid: deadPid(), heartbeatAgeMs: 3 * 60_000 });
     await assert.rejects(acquireBuildSlot({ root, slots: 1, waitMs: 0 }), /all 1 slots are held/);
     plantSlot(root, 1, { pid: deadPid(), heartbeatAgeMs: 3 * 60_000, kind: "verification-slot" });
-    const lane = await acquireVerificationSlot({ DOHC_BUILD_SLOT_ROOT: root });
+    // Only the PR verifier may hold the lane once that guard is on main; naming it as the entry works either way.
+    const lane = await acquireVerificationSlot({ DOHC_BUILD_SLOT_ROOT: root }, { entry: new URL("./verification/verify.mjs", import.meta.url).pathname.replace(/^\/([A-Za-z]:)/u, "$1") });
     assert.equal(lane.name, "verification-slot-1");
     lane.release();
   } finally {
