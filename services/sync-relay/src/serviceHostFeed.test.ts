@@ -9,6 +9,7 @@ import {parseLogOp, SERVICE_HOST_ORIGIN_PREFIX} from "./relayLogInputs";
 import {referencedBlobShas} from "./storage/blobReferences";
 import {stableJsonStringify} from "./canonicalJson";
 import {filterOpForShare, type AnyShareSelector} from "./shareFilter";
+import {createShareReadQueries} from "./shareReadQueries";
 import {openSyncRelayStorage} from "./storage";
 import nativeAuthoredSettlement from "./testing/fixtures/nativeAuthoredSettlement.json";
 
@@ -254,35 +255,33 @@ it("decides each new coordinate again under the append's writer", async () => {
 
 it("returns each coordinate's original decision when a batch is retried after its scope changed", async () => {
   const f = await fixture();
-  f.enroll("docs/b.md");
-  const update = blob("retried update"), late = blob("uploaded late");
+  const update = blob("retried update");
   await f.upload(update);
   const batch: Array<[string, Record<string, unknown>]> = [
     ["ydoc.update", ydoc(binding.objectId, "docs/a.md", update)],
     ["ydoc.update", ydoc("object-private", "private/secret.md", update)],
     ["ydoc.update", ydoc("object-b", "docs/b.md", update)],
-    ["ydoc.update", ydoc(binding.objectId, "docs/a.md", late)],
   ];
   const first = await (await f.push(batch)).json() as PushAnswer;
-  expect(first).toMatchObject({inserted: 4, currentMaxOriginSeq: 3});
-  expect(first.refusals!.map(refusal => [refusal.originSeq, refusal.reason])).toEqual([[1, "outside-hosted-documents"], [3, "blob-outside-reach"]]);
-  // Every decision would now differ: b left the scope, and the late blob is uploaded.
-  f.storage.setServiceHostEnrollmentEnabled({workspaceId: ws, path: "docs/b.md", ownerUserId: "owner-1", enabled: false, nowMs: 30, guard() {}});
-  f.storage.releaseServiceHostEnrollment({workspaceId: ws, objectId: "object-b", nowMs: 31});
-  await f.upload(late);
+  expect(first).toMatchObject({inserted: 3, currentMaxOriginSeq: 2});
+  expect(first.refusals!.map(refusal => refusal.originSeq)).toEqual([1, 2]);
+  // Two decisions would now differ: b joined the scope, and a left it.
+  f.enroll("docs/b.md");
+  f.storage.setServiceHostEnrollmentEnabled({workspaceId: ws, path: "docs/a.md", ownerUserId: "owner-1", enabled: false, nowMs: 30, guard() {}});
+  f.storage.releaseServiceHostEnrollment({workspaceId: ws, objectId: binding.objectId, nowMs: 31});
   const prepared: string[] = [];
   const prepare = f.storage.prepareLogAppend.bind(f.storage);
   f.storage.prepareLogAppend = async (input, signal) => {prepared.push(...input.ops.map(op => op.opKind)); return prepare(input, signal);};
   const retried = await (await f.push(batch)).json() as PushAnswer;
-  expect(retried).toEqual({...first, inserted: 0, skipped: 4});
+  expect(retried).toEqual({...first, inserted: 0, skipped: 3});
   // A retried refusal is answered from the log, without preparing its payload again.
-  expect(prepared).toEqual(["ydoc.update", "relay.refused", "ydoc.update", "relay.refused"]);
+  expect(prepared).toEqual(["ydoc.update", "relay.refused", "relay.refused"]);
   // A different payload at a decided coordinate conflicts, whichever the decision was.
   for (const originSeq of [0, 1]) {
     expect((await f.push([["ydoc.update", ydoc(binding.objectId, "docs/a.md", A)]], originSeq)).status).toBe(409);
   }
   // A later op lands after a refused one.
-  expect(await (await f.push([batch[0]!], 4)).json()).toMatchObject({inserted: 1, currentMaxOriginSeq: 4});
+  expect(await (await f.push([batch[2]!], 3)).json()).toMatchObject({inserted: 1, currentMaxOriginSeq: 3});
 });
 
 it("keeps a refused row's coordinate without its payload, its blobs or any projection", async () => {
@@ -319,6 +318,23 @@ it("keeps a refused row's coordinate without its payload, its blobs or any proje
   const marked = parseLogOp({originSeq: next, opKind: "moment.append", recordedAtMs: 3, payload: {}});
   marked.relayAdmission = "refused";
   expect(() => f.storage.appendLogBatch({workspaceId: ws, originId: "owner-device", ops: [marked]})).toThrow(/written only by the relay/);
+});
+
+it("lets collection take a blob whose digest only a refusal names, in a small or a scanned sweep", async () => {
+  for (const others of [0, 20]) {
+    const f = await fixture();
+    const refused = ["moment.append", write("object-private", "private/secret.md", P)] satisfies [string, Record<string, unknown>];
+    // Bytes equal to the refused payload, so its digest is the refusal's.
+    const lookalike = blob(stableJsonStringify(refused[1]));
+    for (const content of [lookalike, ...Array.from({length: others}, (_, index) => blob(`unreferenced ${index}`))]) {
+      f.storage.putBlob({workspaceId: ws, sha256: content.sha256, content: content.content, createdAtMs: 1});
+    }
+    expect(await (await f.push([refused])).json()).toMatchObject({refusals: [{originSeq: 0}]});
+    expect(f.hostCoordinate(0)!.payloadJson).toContain(lookalike.sha256);
+    const swept = await f.storage.collectUnreferencedBlobs(ws, {nowMs: Number.MAX_SAFE_INTEGER});
+    expect(swept.removedSha256s, `${others}`).toContain(lookalike.sha256);
+    expect(swept.removed).toBe(others + 1);
+  }
 });
 
 it("settles a moved or replaced document's work without taking back its old location", async () => {
@@ -362,17 +378,53 @@ it("settles a moved or replaced document's work without taking back its old loca
   expect(placement()).toEqual(before);
   expect([...f.storage.readServiceHostFeedScope(ws)!.departed]).toEqual([binding.objectId, "object-b"]);
   expect(await f.blobStatus(A.sha256)).toBe(404);
-  // Another document's history stays out of a departed document's writes.
-  expect(await (await f.push([["moment.append", write("object-b", "docs/b.md", replaced,
-    {momentId: "borrow", payloadBeforePath: "docs/b.md", payloadBeforeBlobSha256: A.sha256})]], 3)).json())
-    .toMatchObject({refusals: [{originSeq: 3, reason: "blob-outside-reach"}]});
+  // A departed document's writes reach neither another document's history
+  // nor the owner's edits since it left: each fails like a blob the relay never had.
+  const privateEdit = blob("edited after leaving");
+  f.storage.putBlob({workspaceId: ws, sha256: privateEdit.sha256, content: privateEdit.content, createdAtMs: 1});
+  f.append(["moment.append", write(binding.objectId, "private/a.md", privateEdit, {momentId: "private-edit"})]);
+  const answer = async (objectId: string, path: string, sha256: string) => {
+    const response = await f.push([["moment.append", write(objectId, path, replaced,
+      {momentId: "named", payloadBeforePath: path, payloadBeforeBlobSha256: sha256})]], 3);
+    return [response.status, (await response.text()).replaceAll(sha256, "named")];
+  };
+  const absent = await answer(binding.objectId, "docs/a.md", "d".repeat(64));
+  expect(absent[0]).toBe(422);
+  expect(await answer(binding.objectId, "docs/a.md", privateEdit.sha256)).toEqual(absent);
+  expect(await answer("object-b", "docs/b.md", A.sha256)).toEqual(absent);
+  expect(f.hostCoordinate(3)).toBeNull();
   // A reopened relay keeps which rows departed, and the column admits nothing else.
   openSyncRelayStorage(f.path, f.config).close();
   expect(f.raw.prepare("SELECT count(*) AS count FROM sync_relay_log WHERE relay_admission='departed'").get()!.count).toBe(3);
   expect(() => f.raw.prepare("UPDATE sync_relay_log SET relay_admission='elsewhere' WHERE origin_id=?").run(HOST_ORIGIN)).toThrow(/CHECK/);
 });
 
-it("refuses a write naming a blob the host never fetched or uploaded, and keeps it unreadable", async () => {
+it("keeps a departed document's writes out of share delivery and in the owner's log", async () => {
+  const f = await fixture();
+  const drained = blob("drained after move");
+  f.storage.putServiceHostBlob({workspaceId: ws, sha256: drained.sha256, content: drained.content, createdAtMs: 1});
+  f.append(["moment.append", rename(binding.objectId, "docs/a.md", "private/a.md", A)]);
+  const queries = createShareReadQueries(f.storage, 500);
+  const selector: AnyShareSelector = {paths: ["docs"], versionId: null, access: "edit"};
+  const freshness = () => queries.newestFilteredOpFreshness(ws, selector, 0);
+  const before = freshness();
+  expect(await (await f.push([["moment.append", write(binding.objectId, "docs/a.md", drained,
+    {momentId: "drain-a", payloadBeforePath: "docs/a.md", payloadBeforeBlobSha256: A.sha256})]])).json()).toMatchObject({inserted: 1});
+  expect(f.storage.fetchLogPage({workspaceId: ws, sinceRelaySeq: 0, limit: 100}).rows.filter(row => row.originId === HOST_ORIGIN)
+    .map(row => [row.opKind, row.relayAdmission])).toEqual([["moment.append", "departed"]]);
+  // A recipient replays every write it is served, so each one's content must be readable through the share.
+  for (const audience of ["authenticated", "accountless"] as const) {
+    const page = queries.filteredLogPage(ws, scope.shareId, selector, 0, 100, audience);
+    expect(JSON.stringify(page)).not.toContain(drained.sha256);
+    for (const op of page.ops) {
+      const after = (op.payload as Record<string, unknown>).payloadAfterBlobSha256;
+      if (typeof after === "string") expect(queries.historicalSharedBlob(ws, selector, after), audience).not.toBeNull();
+    }
+  }
+  expect(freshness()).toEqual(before);
+});
+
+it("fails a write naming a blob the host never fetched or uploaded as missing, and keeps it unreadable", async () => {
   const f = await fixture();
   // The owner replaced a private file's content into the hosted document, so
   // the served row names the private bytes it withholds.
@@ -396,35 +448,34 @@ it("refuses a write naming a blob the host never fetched or uploaded, and keeps 
     ["moment.append", write(binding.objectId, "docs/a.md", own, {payloadBeforePath: "docs/a.md",
       settlementReference: {formatVersion: 1, record: {acceptedStateBlobSha256: sha256}}})],
   ] satisfies Array<[string, Record<string, unknown>]>;
-  // Preparation would probe a settlement's digest, so it must only ever see the refusal.
+  // Preparation would probe a settlement's digest, so it must never see one out of reach.
   const prepared: string[] = [];
   const prepare = f.storage.prepareLogAppend.bind(f.storage);
   f.storage.prepareLogAppend = async (input, signal) => {prepared.push(...input.ops.map(op => op.payloadJson)); return prepare(input, signal);};
-  let next = 0;
-  const answer = async (op: [string, Record<string, unknown>]) => {
-    const originSeq = next++;
-    const response = await f.push([op], originSeq);
-    return {status: response.status, refusals: (await response.json() as PushAnswer).refusals?.map(({originSeq: seq, ...rest}) => ({...rest, seq: seq - originSeq}))};
+  const answer = async (op: [string, Record<string, unknown>], sha256: string) => {
+    const response = await f.push([op]);
+    return [response.status, (await response.text()).replaceAll(sha256, "named")];
   };
   const absentSha256 = "e".repeat(64);
   const hostedScope = f.storage.readServiceHostFeedScope(ws)!;
   for (const [index, op] of named(P.sha256).entries()) {
-    // Only the blob refuses it: the document, path and operation are the host's to write.
+    // Only the blob stops it: the document, path and operation are the host's to write.
     expect(hostedWriteAllowed(hostedScope, op[0], op[1]), op[0]).toBe(true);
-    const refused = await answer(op);
-    expect(refused, op[0]).toEqual({status: 200, refusals: [{originId: HOST_ORIGIN, seq: 0, opKind: op[0], reason: "blob-outside-reach"}]});
-    // A digest the relay holds is refused exactly like one it never saw.
-    expect(await answer(named(absentSha256)[index]!), op[0]).toEqual(refused);
+    const missing = await answer(op, P.sha256);
+    expect(missing[0], op[0]).toBe(422);
+    expect(JSON.parse(String(missing[1])), op[0]).toMatchObject({code: "blob_missing"});
+    // A digest the relay holds fails exactly like one it never saw.
+    expect(await answer(named(absentSha256)[index]!, absentSha256), op[0]).toEqual(missing);
   }
-  expect(await answer(["ydoc.update", ydoc(binding.objectId, "docs/a.md", YP)])).toMatchObject({refusals: [{reason: "blob-outside-reach"}]});
-  expect(prepared.length).toBe(next);
-  expect(prepared.join()).not.toMatch(new RegExp(`${P.sha256}|${YP.sha256}|${absentSha256}`));
+  expect((await answer(["ydoc.update", ydoc(binding.objectId, "docs/a.md", YP)], YP.sha256))[0]).toBe(422);
+  expect(prepared).toEqual([]);
+  expect(f.hostCoordinate(0)).toBeNull();
   for (const sha256 of [P.sha256, YP.sha256]) expect(await f.blobStatus(sha256)).toBe(404);
 
   // Blobs the host fetched or uploaded remain writable.
   expect(await (await f.push([["moment.append", write(binding.objectId, "docs/a.md", own,
     {momentId: "host-edit", payloadBeforePath: "docs/a.md", payloadBeforeBlobSha256: replacement.sha256})],
-    ["ydoc.update", ydoc(binding.objectId, "docs/a.md", Y)]], next)).json()).not.toHaveProperty("refusals");
+    ["ydoc.update", ydoc(binding.objectId, "docs/a.md", Y)]])).json()).toMatchObject({inserted: 2});
 });
 
 it("serves a refused row and its status without granting its blobs", async () => {
@@ -493,7 +544,7 @@ it("keeps upload proof through later uploads and idle time", async () => {
   expect(await f.blobStatus(first.sha256)).toBe(200);
 });
 
-it("drops upload proof with its collected blob until the host uploads it again", async () => {
+it("drops upload proof with its collected blob, and fails the write as retryable until the host uploads it again", async () => {
   const f = await fixture();
   const collected = blob("collected upload");
   await f.upload(collected);
@@ -501,12 +552,34 @@ it("drops upload proof with its collected blob until the host uploads it again",
   const swept = await f.storage.collectUnreferencedBlobs(ws, {nowMs: Number.MAX_SAFE_INTEGER});
   expect(swept.removedSha256s).toEqual([collected.sha256]);
   expect(f.uploads()).toBe(0);
-  const edit = ["ydoc.update", ydoc(binding.objectId, "docs/a.md", collected)] satisfies [string, Record<string, unknown>];
-  expect(await (await f.push([edit])).json()).toMatchObject({refusals: [{reason: "blob-outside-reach"}]});
-  await f.upload(collected);
-  expect(f.uploads()).toBe(1);
-  expect(await (await f.push([edit], 1)).json()).not.toHaveProperty("refusals");
+  await expectMissingUntilUploaded(f, collected);
 });
+
+it("fails a write naming a blob it read through a document that left, until the host uploads it", async () => {
+  const f = await fixture();
+  f.enroll("docs/b.md");
+  expect(await f.blobStatus(B.sha256)).toBe(200);
+  f.storage.setServiceHostEnrollmentEnabled({workspaceId: ws, path: "docs/b.md", ownerUserId: "owner-1", enabled: false, nowMs: 30, guard() {}});
+  f.storage.releaseServiceHostEnrollment({workspaceId: ws, objectId: "object-b", nowMs: 31});
+  await expectMissingUntilUploaded(f, B);
+});
+
+// A write naming a blob out of reach fails without taking its coordinate,
+// `blobs/have` asks for the blob, and the upload lets the same write land.
+async function expectMissingUntilUploaded(f: Awaited<ReturnType<typeof fixture>>, content: Blob) {
+  const edit = ["ydoc.update", ydoc(binding.objectId, "docs/a.md", content)] satisfies [string, Record<string, unknown>];
+  const failed = await f.push([edit]);
+  expect(failed.status).toBe(422);
+  expect(await failed.json()).toMatchObject({code: "blob_missing"});
+  expect(f.hostCoordinate(0)).toBeNull();
+  const have = await f.request("POST", "blobs/have", JSON.stringify({sha256s: [content.sha256]}));
+  expect(await have.json()).toEqual({ok: true, missing: [content.sha256]});
+  await f.upload(content);
+  expect(f.uploads()).toBe(1);
+  const landed = await (await f.push([edit])).json() as PushAnswer;
+  expect(landed).toMatchObject({inserted: 1, currentMaxOriginSeq: 0});
+  expect(landed.refusals).toBeUndefined();
+}
 
 it("keeps an aged blob the host uploads again until its write lands", async () => {
   vi.useFakeTimers({toFake: ["Date"]});
@@ -541,9 +614,9 @@ it("drops upload proof when the workspace stops being hosted", async () => {
   expect(uploads()).toBe(0);
   setEnabled("docs/a.md", true);
   const edit = ["ydoc.update", ydoc(binding.objectId, "docs/a.md", kept)] satisfies [string, Record<string, unknown>];
-  expect(await (await f.push([edit])).json()).toMatchObject({refusals: [{reason: "blob-outside-reach"}]});
+  expect((await f.push([edit])).status).toBe(422);
   await f.upload(kept);
-  expect(await (await f.push([edit], 1)).json()).not.toHaveProperty("refusals");
+  expect(await (await f.push([edit])).json()).toMatchObject({inserted: 1});
   // A new workspace identity leaves every enrollment behind.
   expect(f.storage.rotateWorkspaceIdentity({workspaceId: ws, ownerUserId: "owner-1", replicationEpoch: "epoch-2", streamIdentity: "stream-2", rotatedAtMs: 40})).toBe("rotated");
   expect(uploads()).toBe(0);

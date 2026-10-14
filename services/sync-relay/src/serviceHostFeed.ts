@@ -7,6 +7,7 @@ import { assertSha256, parseCursor, parseLimit, readJsonObject } from "./request
 import { MAX_RAW_ROWS_PER_LINK_PAGE, scanFilteredLog } from "./shareReadQueries";
 import type { SyncRelayLogInput, SyncRelayLogRow, SyncRelayStorage } from "./storage";
 import { referencedBlobShas } from "./storage/blobReferences";
+import { logBlobsMissing } from "./storage/errors";
 import { readRefusal, refuseOp } from "./storage/relayAdmission";
 import type { ServiceHostFeedScope } from "./storage/serviceHostFeed";
 import { MAX_BLOB_BYTES } from "./wireLimits";
@@ -111,23 +112,28 @@ export function hostedWriteAllowed(scope: ServiceHostFeedScope, opKind: string, 
 }
 
 /** Why the relay refused one of the host's ops. */
-export type HostedRefusalReason = "outside-hosted-documents" | "blob-outside-reach";
+export type HostedRefusalReason = "outside-hosted-documents";
 
 /**
  * The decision for one new coordinate. An op may name only blobs the host
  * could already fetch, its own document's, or ones it uploaded, so a write
- * never turns a digest it read into bytes it may fetch. An unknown blob is
- * refused whether or not the relay holds it.
+ * never turns a digest it read into bytes it may fetch. Any other blob fails
+ * the request as missing, whether or not the relay holds it: `blobs/have`
+ * reports it missing too, so the host uploads it and retries.
  */
 function hostedPublication(scope: ServiceHostFeedScope, known: BlobReach, op: SyncRelayLogInput): "accepted" | "departed" | HostedRefusalReason {
   const objectId = hostedWriter(scope, op.opKind, JSON.parse(op.payloadJson));
   if (objectId === null) return "outside-hosted-documents";
   const blobs = referencedBlobShas(op.opKind, op.payloadJson, { workspaceId: scope.workspaceId, recordedAtMs: op.recordedAtMs });
-  if (!blobs.every(sha256 => known(sha256, objectId))) return "blob-outside-reach";
+  const unknown = blobs.filter(sha256 => !known(sha256, objectId));
+  if (unknown.length) throw logBlobsMissing(unknown);
   return scope.departed.has(objectId) ? "departed" : "accepted";
 }
 
-type DocumentReach = { through: number; blobs: Set<string> };
+// `atPath`: the blobs of rows that claim the enrolled path. While the
+// document was shared the host could read each of them, and after it leaves
+// only the host writes there.
+type DocumentReach = { path: string; through: number; blobs: Set<string>; atPath: Set<string> };
 type WorkspaceReach = { documents: Map<string, DocumentReach>; usedAtMs: number };
 /** Whether the host may fetch a blob, or name it in a write to `writer`. */
 type BlobReach = (sha256: string, writer?: string) => boolean;
@@ -157,26 +163,33 @@ function createBlobReach(storage: Pick<SyncRelayStorage, "listServiceHostDocumen
     return entry;
   };
   const documentReach = (scope: ServiceHostFeedScope, entry: WorkspaceReach, objectId: string) => {
+    const path = scope.hosted.get(objectId)!;
     let document = entry.documents.get(objectId);
-    if (!document) entry.documents.set(objectId, document = { through: 0, blobs: new Set() });
+    if (document?.path !== path) entry.documents.set(objectId, document = { path, through: 0, blobs: new Set(), atPath: new Set() });
     for (;;) {
       const rows = storage.listServiceHostDocumentRows({ workspaceId: scope.workspaceId, objectId, afterRelaySeq: document.through, limit: REACH_PAGE_ROWS });
       for (const row of rows) {
         const decision = hostedRowDecision(scope, row, scope.hosted);
-        if (decision.allowed) for (const sha256 of decision.blobSha256s) document.blobs.add(sha256);
         document.through = row.relaySeq;
+        if (!decision.allowed) continue;
+        const atPath = claimedDocument(row.opKind, JSON.parse(row.payloadJson) as Record<string, unknown>)?.path === path;
+        for (const sha256 of decision.blobSha256s) {
+          document.blobs.add(sha256);
+          if (atPath) document.atPath.add(sha256);
+        }
       }
-      if (rows.length < REACH_PAGE_ROWS) return document.blobs;
+      if (rows.length < REACH_PAGE_ROWS) return document;
     }
   };
   return (scope: ServiceHostFeedScope): BlobReach => {
     const entry = workspaceReach(scope.workspaceId);
-    // A released document takes its blobs along. One that left the share keeps
-    // them only for its own writes.
+    // A released document takes its blobs along. One out of the share keeps
+    // only those at its enrolled path, and only for its own writes: the
+    // owner's later edits elsewhere stay out of reach.
     for (const objectId of entry.documents.keys()) if (!scope.hosted.has(objectId)) entry.documents.delete(objectId);
-    const reaches = [...scope.shared.keys()].map(objectId => documentReach(scope, entry, objectId));
+    const reaches = [...scope.shared.keys()].map(objectId => documentReach(scope, entry, objectId).blobs);
     return (sha256, writer) => reaches.some(blobs => blobs.has(sha256)) ||
-      (writer !== undefined && scope.hosted.has(writer) && documentReach(scope, entry, writer).has(sha256)) ||
+      (writer !== undefined && scope.hosted.has(writer) && documentReach(scope, entry, writer).atPath.has(sha256)) ||
       storage.serviceHostUploaded(scope.workspaceId, sha256);
   };
 }
@@ -236,9 +249,10 @@ export function createServiceHostFeed(storage: SyncRelayStorage) {
     if (head === "log" && route.length === 1 && request.method === "POST") {
       // Each coordinate gets its own decision. A refused op still takes its
       // coordinate, as a relay-written refusal, so the host's later ops land.
-      // What the scope already rules out is refused before preparation, which
-      // must never probe a blob the host may not name; the rest is decided
-      // again under the append's writer, where the scope cannot move.
+      // What the scope already rules out is refused, and a blob out of reach
+      // fails the request, before preparation, which must never probe a blob
+      // the host may not name; the rest is decided again under the append's
+      // writer, where the scope cannot move.
       const received = new WeakMap<SyncRelayLogInput, string>();
       const refuse = (op: SyncRelayLogInput, reason: HostedRefusalReason) =>
         refuseOp(op, { opKind: op.opKind, payloadSha256: received.get(op)!, reason });

@@ -207,7 +207,8 @@ export function createShareReadQueries(
         maxRawRows: audience === "accountless" ? MAX_RAW_ROWS_PER_LINK_PAGE : limit,
       },
       (row) => {
-        if (row.settlementAdmission?.status === "refused") return null;
+        // A departed publication names a path its document no longer holds.
+        if (row.settlementAdmission?.status === "refused" || row.relayAdmission !== undefined) return null;
         if (
           audience === "accountless" &&
           !ACCOUNTLESS_FILE_REPLAY_OP_KINDS.has(row.opKind)
@@ -290,7 +291,7 @@ export function createShareReadQueries(
         limit: linkFreshnessPageSize,
       });
       for (const row of rows) {
-        if (row.settlementAdmission?.status === "refused") continue;
+        if (row.settlementAdmission?.status === "refused" || row.relayAdmission !== undefined) continue;
         if (row.relaySeq <= epochLogFloor) {
           return { lastSettledAtMs: null, lastSettledKnown: true };
         }

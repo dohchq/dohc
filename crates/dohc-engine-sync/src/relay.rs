@@ -2995,12 +2995,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 origin_id: identity.origin_id.clone(),
                 ops: batch.iter().map(|(_, op)| op.clone()).collect(),
             })?;
-            if push.accepted != batch.len()
-                || push.inserted.checked_add(push.skipped) != Some(push.accepted)
-                || !push.hosted_refusals.is_empty()
-            {
-                return Err(RelayError::InvalidResponse);
-            }
+            validate_share_push_response(&push, batch.len())?;
             Ok(push.inserted)
         };
         let mut after = scanned;
@@ -4487,7 +4482,21 @@ fn validate_push_response(
     Ok(())
 }
 
-fn validate_probe_response(response: &PushResponse) -> Result<(), RelayError> {
+/// A share log answers for its whole batch: only the hosted log refuses ops one at a time.
+pub(crate) fn validate_share_push_response(
+    push: &PushResponse,
+    batch_len: usize,
+) -> Result<(), RelayError> {
+    if push.accepted != batch_len
+        || push.inserted.checked_add(push.skipped) != Some(push.accepted)
+        || !push.hosted_refusals.is_empty()
+    {
+        return Err(RelayError::InvalidResponse);
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_probe_response(response: &PushResponse) -> Result<(), RelayError> {
     if !response.settlement_refusals.is_empty()
         || !response.hosted_refusals.is_empty()
         || response.accepted != 0

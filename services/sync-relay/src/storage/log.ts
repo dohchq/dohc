@@ -9,7 +9,7 @@ import {
   type SyncRelayLogRow,
   type SqliteDb,
 } from "./types";
-import { SyncRelayConflictError, SyncRelayBlobMissingError } from "./errors";
+import { SyncRelayConflictError, logBlobsMissing } from "./errors";
 import { referencedBlobShas, versionIdFromVersionCreatePayload } from "./blobReferences";
 import {
   OBJECT_PATH_UPSERT_SQL,
@@ -155,12 +155,7 @@ export function appendLogBatchInTransaction(storage: StorageContext, input: {
       }
       if (referencedShas.size > 0) {
         const missing = storage.missingBlobs(input.workspaceId, [...referencedShas]);
-        if (missing.length > 0) {
-          throw new SyncRelayBlobMissingError(
-            `log append references ${missing.length} blob(s) not stored on the relay ` +
-              `(first: ${missing[0]}); (re-)upload the blob(s) and retry`,
-          );
-        }
+        if (missing.length > 0) throw logBlobsMissing(missing);
       }
 
       const insertStmt = storage.db.prepare(
@@ -272,7 +267,7 @@ export function fetchLogPage(storage: StorageContext, input: {
     let statement = logPageStatements.get(storage.db);
     if (!statement) {
       statement = storage.db.prepare(
-        `SELECT workspace_id, origin_id, origin_seq, op_kind, payload_json, recorded_at_ms, relay_seq, admitted_author_snapshot_json, settlement_admission_json
+        `SELECT workspace_id, origin_id, origin_seq, op_kind, payload_json, recorded_at_ms, relay_seq, admitted_author_snapshot_json, settlement_admission_json, relay_admission
          FROM sync_relay_log
          WHERE workspace_id = ? AND relay_seq > ?
          ORDER BY relay_seq
@@ -299,7 +294,7 @@ export function fetchLogPageDescending(storage: StorageContext, input: {
       input.beforeRelaySeq === null
         ? storage.db
             .prepare(
-              `SELECT workspace_id, origin_id, origin_seq, op_kind, payload_json, recorded_at_ms, relay_seq, admitted_author_snapshot_json, settlement_admission_json
+              `SELECT workspace_id, origin_id, origin_seq, op_kind, payload_json, recorded_at_ms, relay_seq, admitted_author_snapshot_json, settlement_admission_json, relay_admission
                FROM sync_relay_log
                WHERE workspace_id = ?
                ORDER BY relay_seq DESC
@@ -308,7 +303,7 @@ export function fetchLogPageDescending(storage: StorageContext, input: {
             .all(input.workspaceId, input.limit)
         : storage.db
             .prepare(
-              `SELECT workspace_id, origin_id, origin_seq, op_kind, payload_json, recorded_at_ms, relay_seq, admitted_author_snapshot_json, settlement_admission_json
+              `SELECT workspace_id, origin_id, origin_seq, op_kind, payload_json, recorded_at_ms, relay_seq, admitted_author_snapshot_json, settlement_admission_json, relay_admission
                FROM sync_relay_log
                WHERE workspace_id = ? AND relay_seq < ?
                ORDER BY relay_seq DESC
@@ -325,7 +320,7 @@ export function fetchLogCoordinate(storage: StorageContext, input: {
   }): SyncRelayLogRow | null {
     const row = storage.db
       .prepare(
-        `SELECT workspace_id, origin_id, origin_seq, op_kind, payload_json, recorded_at_ms, relay_seq, admitted_author_snapshot_json, settlement_admission_json
+        `SELECT workspace_id, origin_id, origin_seq, op_kind, payload_json, recorded_at_ms, relay_seq, admitted_author_snapshot_json, settlement_admission_json, relay_admission
          FROM sync_relay_log
          WHERE workspace_id = ? AND origin_id = ? AND origin_seq = ?`,
       )

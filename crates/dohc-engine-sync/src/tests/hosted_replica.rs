@@ -1,6 +1,6 @@
 use super::*;
 use std::cell::Cell;
-use std::sync::atomic::AtomicI64;
+use std::sync::atomic::{AtomicBool, AtomicI64};
 
 const HOST: &str = "service-host:host";
 
@@ -490,6 +490,8 @@ struct HostedFeed {
     pushes: Mutex<Vec<PushRequest>>,
     /// Documents whose new host ops the relay refuses, each kept as a refusal at its coordinate.
     refusing: Mutex<BTreeSet<String>>,
+    /// Corrupts each push response after the relay recorded the batch.
+    garble: Mutex<Option<fn(&mut PushResponse)>>,
     /// Every blob a download asked for.
     downloads: Mutex<Vec<String>>,
 }
@@ -507,6 +509,7 @@ impl HostedFeed {
             pulls: Mutex::new(Vec::new()),
             pushes: Mutex::new(Vec::new()),
             refusing: Mutex::new(BTreeSet::new()),
+            garble: Mutex::new(None),
             downloads: Mutex::new(Vec::new()),
         }
     }
@@ -805,14 +808,18 @@ impl RelayTransport for HostedFeed {
             .map(|row| row.origin_seq)
             .max()
             .unwrap_or(-1);
-        Ok(PushResponse {
+        let mut response = PushResponse {
             settlement_refusals: Vec::new(),
             hosted_refusals,
             accepted,
             inserted,
             skipped: accepted - inserted,
             current_max_origin_seq,
-        })
+        };
+        if let Some(garble) = *self.garble.lock().unwrap() {
+            garble(&mut response);
+        }
+        Ok(response)
     }
 
     fn lookup_log_coordinate(
@@ -2262,6 +2269,26 @@ fn recorded_refusals(store: &EngineStore) -> Vec<(String, i64, String, String)> 
         .unwrap()
 }
 
+/// Rolls back the first transaction that ends after the relay answered another push.
+struct RollBackAfterPush<'a> {
+    feed: &'a HostedFeed,
+    pushes: usize,
+    armed: AtomicBool,
+}
+
+impl dohc_engine_storage::FaultInjector for RollBackAfterPush<'_> {
+    fn poll(&self, point: FaultPoint) -> dohc_engine_storage::FaultAction {
+        if point == FaultPoint::StorageBeforePersist
+            && self.feed.pushes.lock().unwrap().len() > self.pushes
+            && self.armed.swap(false, Ordering::SeqCst)
+        {
+            dohc_engine_storage::FaultAction::Crash
+        } else {
+            dohc_engine_storage::FaultAction::Continue
+        }
+    }
+}
+
 #[test]
 fn a_refused_hosted_write_keeps_its_coordinate_and_a_crashed_push_retries_to_the_same_decisions() {
     let (_scratch, _path, mut store) = hosted_store();
@@ -2298,6 +2325,21 @@ fn a_refused_hosted_write_keeps_its_coordinate_and_a_crashed_push_retries_to_the
         recorded_refusals(&store).is_empty(),
         "a refusal commits with its push cursor or not at all"
     );
+
+    // The retry gets the same decisions, and the transaction recording them
+    // fails after writing them: it keeps neither them nor the cursor.
+    let rollback = RollBackAfterPush {
+        feed: client.transport(),
+        pushes: client.transport().pushes.lock().unwrap().len(),
+        armed: AtomicBool::new(true),
+    };
+    assert!(matches!(
+        push(&mut store, &rollback),
+        SyncPassOutcome::CrashedAfterRemoteCommit
+    ));
+    assert!(!rollback.armed.load(Ordering::SeqCst), "the fault fired");
+    assert_eq!(read_pushed_seq(&store, "ws", HOST).unwrap(), -1);
+    assert!(recorded_refusals(&store).is_empty());
 
     // The retry gets the first decisions back and records each once.
     let refusal = HostedPushRefusal {
@@ -2397,7 +2439,7 @@ fn a_push_response_refuses_only_its_own_batch_and_only_for_a_hosted_push() {
         current_max_origin_seq: 5,
     };
     let valid = response(
-        vec![refusal(5, "moment.append", "blob-outside-reach")],
+        vec![refusal(5, "moment.append", "outside-hosted-documents")],
         None,
     );
     assert_eq!(
@@ -2435,7 +2477,7 @@ fn a_push_response_refuses_only_its_own_batch_and_only_for_a_hosted_push() {
         ),
         (
             response(
-                vec![refusal(5, "moment.append", "blob-outside-reach")],
+                vec![refusal(5, "moment.append", "outside-hosted-documents")],
                 Some(5),
             ),
             true,
@@ -2447,6 +2489,33 @@ fn a_push_response_refuses_only_its_own_batch_and_only_for_a_hosted_push() {
             "{case:?}"
         );
     }
+
+    // Neither a probe nor a share log push refuses an op.
+    let unrefused = PushResponse {
+        hosted_refusals: Vec::new(),
+        ..valid.clone()
+    };
+    assert_eq!(
+        crate::relay::validate_share_push_response(&unrefused, 2),
+        Ok(())
+    );
+    assert_eq!(
+        crate::relay::validate_share_push_response(&valid, 2),
+        Err(RelayError::InvalidResponse)
+    );
+    let probe = PushResponse {
+        accepted: 0,
+        inserted: 0,
+        ..unrefused
+    };
+    assert_eq!(crate::relay::validate_probe_response(&probe), Ok(()));
+    assert_eq!(
+        crate::relay::validate_probe_response(&PushResponse {
+            hosted_refusals: valid.hosted_refusals.clone(),
+            ..probe
+        }),
+        Err(RelayError::InvalidResponse)
+    );
 
     // Recording takes only this hosted replica's own journaled ops.
     let (_scratch, _path, mut ordinary) = open_store();
@@ -2488,6 +2557,43 @@ fn a_push_response_refuses_only_its_own_batch_and_only_for_a_hosted_push() {
         ));
     }
     assert_eq!(read_pushed_seq(&store, "ws", HOST).unwrap(), -1);
+}
+
+#[test]
+fn a_hosted_push_whose_refusals_name_ops_outside_its_batch_keeps_nothing() {
+    let (_scratch, _path, mut store) = hosted_store();
+    host_document(&mut store, "doc-a");
+    host_document(&mut store, "doc-b");
+    journal_live_update(&mut store, "doc-a", b"a one");
+    journal_live_update(&mut store, "doc-b", b"b one");
+    let garbles: [fn(&mut PushResponse); 2] = [
+        // An op the batch does not hold.
+        |response| {
+            let mut other = response.hosted_refusals[0].clone();
+            other.origin_seq = 7;
+            response.hosted_refusals.push(other);
+        },
+        // The same op twice.
+        |response| {
+            let again = response.hosted_refusals[0].clone();
+            response.hosted_refusals.push(again);
+        },
+    ];
+    for garble in garbles {
+        let client = RelaySyncClient::new(HostedFeed::new());
+        let feed = client.transport();
+        feed.refusing.lock().unwrap().insert("doc-b".to_owned());
+        *feed.garble.lock().unwrap() = Some(garble);
+        assert_eq!(
+            client
+                .push_workspace(&mut store, "ws", &NoFaults, &NoLiveLeases, 3_000, 1_000_000)
+                .unwrap_err(),
+            RelayError::InvalidResponse
+        );
+        assert_eq!(feed.pushes.lock().unwrap().len(), 1);
+        assert_eq!(read_pushed_seq(&store, "ws", HOST).unwrap(), -1);
+        assert!(recorded_refusals(&store).is_empty());
+    }
 }
 
 #[test]
