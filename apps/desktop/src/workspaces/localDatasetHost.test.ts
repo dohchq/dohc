@@ -671,3 +671,12 @@ describe("local dataset owner adapter", () => {
     expect(await readdir(target)).toEqual([]);
   });
 });
+
+it("returns transfer metadata even when the page prunes every local head", async () => {
+  const { host, workspaceRoot } = await open(); await activate(host);
+  expect(host.historyHeads({ positions: [], sourceIds: [id(1)] })).toMatchObject({ transferred: [], pages: [] });
+  const db = new DatabaseSync(join(workspaceRoot, ".dohc", "datasets", "state.sqlite"));
+  try { db.prepare("INSERT INTO local_dataset_transfers VALUES(?,?,?,?,?,?,?,?,?)").run("w", id(1), "transfer", "https://relay.example", "{}", "imported", digest("manifest"), null, null); }
+  finally { db.close(); }
+  expect(host.historyHeads({ positions: [], sourceIds: [id(1)] })).toMatchObject({ transferred: [id(1)], pages: [] });
+});

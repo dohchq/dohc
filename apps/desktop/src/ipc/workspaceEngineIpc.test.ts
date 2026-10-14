@@ -1314,7 +1314,15 @@ describe("merged History IPC", () => {
     h.historyCollections.mockResolvedValue({ scope: "test", local, remote: async () => { throw Error("unexpected remote"); } });
     await expect(h.invoke(historyOperations.listHistory.channel, { workspaceId: "workspace", versionId: "branch" })).resolves.toMatchObject({ versionId: "branch", entries: [] });
     expect(local).not.toHaveBeenCalled();
+    expect(h.historyCollections).not.toHaveBeenCalled();
     await h.invoke(historyOperations.listHistory.channel, { workspaceId: "workspace", versionId: "branch", object: { kind: "file", objectId: "object" } });
     expect(h.capture.listMoments).toHaveBeenLastCalledWith({ limit: 50, versionId: "branch", objectId: "object" });
+    expect(h.historyCollections).not.toHaveBeenCalled();
   });
+});
+
+it("does not start the Collection host for main per-file History", async () => {
+  const h = await harness();
+  await h.invoke(historyOperations.listHistory.channel, { workspaceId: "workspace", object: { kind: "file", objectId: "object" } });
+  expect(h.historyCollections).not.toHaveBeenCalled();
 });

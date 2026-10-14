@@ -1007,3 +1007,12 @@ it("reads all local history heads in one owner-authorized metadata transaction",
   expect(f.host.historyHeads("owner", { workspaceId: scope.workspaceId })).toEqual([]);
   expect(f.host.history("owner", { ...scope, metadataOnly: true }).archived).toBe(true);
 });
+
+it("reuses history statements and targets the requested catalog row", async () => {
+  const f = await fixture(); await f.activate(); await f.invoke("owner", id(6), { value: "private" });
+  const input = { workspaceId: scope.workspaceId, positions: [{ datasetId: scope.datasetId, beforeRevision: 2 }], limit: 1 };
+  f.host.historyHeads("owner", input);
+  const prepared = vi.spyOn(f.db, "prepare");
+  f.host.historyHeads("owner", input);
+  expect(prepared.mock.calls.filter(([sql]) => String(sql).includes("WITH changes") || String(sql).includes("SELECT c.dataset_id") || String(sql).includes("checkpoint_digest AS digest"))).toEqual([]);
+});

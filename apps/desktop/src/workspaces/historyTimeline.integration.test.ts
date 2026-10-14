@@ -1,4 +1,7 @@
 import { createHash } from "node:crypto";
+import { createWorkspaceAuthorityOwner, type WorkspaceAuthorityOperation } from "./workspaceAuthorityOwner";
+import { createHistoryCollectionRemote } from "./historyCollectionRemote";
+import type { OwnerDatasetData } from "./remoteDataset";
 import { DatabaseSync } from "node:sqlite";
 import { afterEach, expect, it, vi } from "vitest";
 import { VersionedLoopbackEngine } from "@dohc/workspace-engine-client/testing";
@@ -10,7 +13,7 @@ import { sharedViewHistory } from "./sharedViewHistory";
 import { mockLiveSessions } from "../testing/liveEngineSessions";
 import { createTestScratch } from "./testTemp";
 import { deferred } from "../testing/deferred";
-import { ListHistoryResult, type ListHistoryPayload, type TimelineEntry } from "../ipc/bridgeContract";
+import { HISTORY_MAX_SOURCES, HISTORY_CURSOR_BYTES, TimelineCursor, ListHistoryResult, type ListHistoryPayload, type TimelineEntry } from "../ipc/bridgeContract";
 import { createHistoryTimeline, HISTORY_REMOTE_DEADLINE_MS, type TimelineReads } from "./historyTimeline";
 
 const uuid = (n: number) => "00000000-0000-4000-8000-" + String(n).padStart(12, "0");
@@ -58,7 +61,7 @@ async function fixture() {
   await store.ensureMainVersion({ workspaceId: "workspace" });
   const write = async (id: string, time: number, path = "notes.md") => { clock = time; return store.writeTextFile({ workspaceId: "workspace", versionId: "main", path, text: id, momentId: id, metadata: { origin: "api" } }); };
   const signal = new AbortController();
-  const local: TimelineReads["local"] = (positions, limit) => ({ pages: host.historyHeads("owner", { workspaceId: "workspace", positions, limit }), transferred: [] });
+  const local: TimelineReads["local"] = (positions, limit) => ({ pages: host.historyHeads("owner", { workspaceId: "workspace", positions, limit }), transferred: [], sourceCount: Number(db.prepare("SELECT count(*) AS count FROM dohc_dataset_catalog WHERE workspace_id=?").get("workspace")?.count) });
   const reads: TimelineReads = { scope: "test", signal: signal.signal, assertCurrent() {}, engine: sharedViewHistory(store, "workspace"), local,
     remote: async () => { throw new Error("unexpected remote"); }, names: { agent: () => undefined, person: () => undefined, automation: () => null, named: a => a.userId } };
   const list = createHistoryTimeline();
@@ -136,19 +139,38 @@ it("excludes a deadline source for the rest of the chain and recovers only on re
   expect((await f.page({ limit: 1 })).entries.map(label)).toEqual([remote + ":1"]);
 });
 
-it("prefetches one remote page ahead and permanently excludes a later deadline", async () => {
-  const f = await fixture(), remote = uuid(8), ahead = deferred<void>();
+it("prefetches the final emitted position with real 51-entry remote pages", async () => {
+  const f = await fixture(), remote = f.initialize(8);
+  for (let t = 1; t <= 120; t++) f.event(remote, t);
   f.reads.local = () => ({ pages: [], transferred: [remote] });
-  f.reads.remote = vi.fn(async (_id, before, signal) => {
-    if (before !== undefined) { ahead.resolve(); return new Promise<never>((_, reject) => signal.addEventListener("abort", () => reject(signal.reason), { once: true })); }
-    return { datasetId: remote, headRevision: 2, lineage: sha("remote"), olderRecordedAtMs: 600,
-      entries: [{ revision: 2, operation: "Add record", recordedAtMs: 600, callerReference: null, approvedRevisionHash: sha("approved"), changesetBytes: 0, attachmentCount: 0 }], nextBeforeRevision: 2 };
+  f.reads.remote = vi.fn(async (_id, before) => f.host.history("owner", { workspaceId: "workspace", datasetId: remote, beforeRevision: before, limit: 51, metadataOnly: true }));
+  const first = await f.page({ object: { kind: "dataset", datasetId: remote } });
+  expect(first.entries).toHaveLength(50);
+  expect(f.reads.remote).toHaveBeenNthCalledWith(2, remote, 71, expect.any(AbortSignal));
+  const second = await f.page({ object: { kind: "dataset", datasetId: remote }, cursor: first.nextCursor! });
+  expect(second.entries.map(label)).toEqual(Array.from({ length: 50 }, (_, n) => remote + ":" + (70 - n)));
+  expect(f.reads.remote).toHaveBeenCalledTimes(3);
+  expect(f.reads.remote).toHaveBeenNthCalledWith(3, remote, 21, expect.any(AbortSignal));
+});
+
+it("starts a prefetched source's deadline when a page waits, not during idle time", async () => {
+  const f = await fixture(), remote = f.initialize(8), entered = deferred<void>();
+  for (let t = 1; t <= 120; t++) f.event(remote, t);
+  f.reads.local = () => ({ pages: [], transferred: [remote] });
+  const background = deferred<Awaited<ReturnType<TimelineReads["remote"]>>>();
+  f.reads.remote = vi.fn(async (_id, before) => {
+    if (before !== 71) return f.host.history("owner", { workspaceId: "workspace", datasetId: remote, beforeRevision: before, limit: 51, metadataOnly: true });
+    entered.resolve(); return background.promise;
   });
-  vi.useFakeTimers(); const first = await f.page({ limit: 1 }); await ahead.promise;
-  expect(f.reads.remote).toHaveBeenCalledTimes(2);
-  await vi.advanceTimersByTimeAsync(HISTORY_REMOTE_DEADLINE_MS);
-  const second = await f.page({ cursor: first.nextCursor! });
-  expect(second).toMatchObject({ completeness: "partial", unavailableSources: [{ datasetId: remote, reason: "deadline" }] });
+  vi.useFakeTimers();
+  const first = await f.page({ object: { kind: "dataset", datasetId: remote } }); await entered.promise;
+  await vi.advanceTimersByTimeAsync(2 * HISTORY_REMOTE_DEADLINE_MS);
+  let returned = false;
+  const waiting = f.page({ object: { kind: "dataset", datasetId: remote }, cursor: first.nextCursor! }).then(page => { returned = true; return page; });
+  await vi.advanceTimersByTimeAsync(HISTORY_REMOTE_DEADLINE_MS - 1); expect(returned).toBe(false);
+  background.resolve(f.host.history("owner", { workspaceId: "workspace", datasetId: remote, beforeRevision: 71, limit: 51, metadataOnly: true }));
+  const second = await waiting;
+  expect(second.completeness).toBe("complete"); expect(second.entries).toHaveLength(50);
 });
 
 it("rejects a stale workspace reply after an asynchronous source returns", async () => {
@@ -199,4 +221,201 @@ it("makes progress through byte-cut pages without dropping unconsumed positions"
     cursor = result.nextCursor ?? undefined;
   } while (cursor);
   expect(seen).toEqual(Array.from({ length: 70 }, (_, n) => 70 - n));
+});
+
+it("keeps file rows before Collection rows at the same timestamp", async () => {
+  const f = await fixture(), a = f.initialize(1); f.event(a, 500); await f.write("file", 500);
+  expect((await f.page({ limit: 2 })).entries.map(label)).toEqual(["file", a + ":1"]);
+});
+
+it("prunes an older Collection before reading heads on later file pages", async () => {
+  const f = await fixture(), a = f.initialize(1); f.event(a, 1);
+  for (let n = 0; n < 100; n++) await f.write("file-" + n, 1000 + n);
+  const local = vi.fn(f.reads.local); f.reads.local = local;
+  let before = f.transactions();
+  const first = await f.page();
+  expect(first.entries.every(row => row.kind === "file")).toBe(true);
+  expect(local).toHaveBeenCalledTimes(1); expect(f.transactions() - before).toBe(1);
+  local.mockClear(); before = f.transactions();
+  const second = await f.page({ cursor: first.nextCursor! });
+  expect(second.entries.every(row => row.kind === "file")).toBe(true);
+  expect(local).toHaveBeenCalledExactlyOnceWith([], 1, [a]); expect(f.transactions() - before).toBe(1);
+});
+
+it("discloses a local Collection transferred between pages instead of declaring it finished", async () => {
+  const f = await fixture(), a = f.initialize(1), b = f.initialize(2);
+  f.event(a, 600); f.event(a, 500); f.event(b, 400);
+  const first = await f.page({ limit: 1 });
+  f.reads.local = (positions, limit) => ({ transferred: [a], pages: f.host.historyHeads("owner", { workspaceId: "workspace", positions, limit, skip: [a] }) });
+  const next = await f.page({ cursor: first.nextCursor! });
+  expect(next).toMatchObject({ completeness: "partial", unavailableSources: [{ datasetId: a, reason: "unavailable" }] });
+  expect(next.entries.map(label)).not.toContain(a + ":1");
+});
+
+it("removes finished sources and discloses the bounded source set", async () => {
+  const f = await fixture();
+  for (let n = 1; n <= HISTORY_MAX_SOURCES + 5; n++) { const id = f.initialize(n); f.event(id, n); }
+  await f.write("file", 1000);
+  const first = await f.page();
+  expect(first).toMatchObject({ completeness: "partial", omittedSources: 5 });
+  expect(first.entries[0]).toMatchObject({ kind: "file" });
+  expect(first.nextCursor!.collections).toHaveLength(HISTORY_MAX_SOURCES - 49);
+  expect(first.nextCursor!.collections.every(s => !s.done)).toBe(true);
+  expect(Buffer.byteLength(JSON.stringify(first.nextCursor))).toBeLessThanOrEqual(HISTORY_CURSOR_BYTES);
+  const next = await f.page({ cursor: first.nextCursor! }); expect(next.omittedSources).toBe(5);
+});
+
+it("rejects duplicate, oversized, malformed-lineage, and mixed-version cursors before remote reads", async () => {
+  const f = await fixture(), a = f.initialize(1); f.event(a, 1); f.event(a, 2);
+  const first = await f.page({ limit: 1 }), cursor = first.nextCursor!, source = cursor.collections[0]!;
+  const remote = vi.fn(f.reads.remote); f.reads.remote = remote;
+  const invalid = [
+    { ...cursor, collections: [source, source] },
+    { ...cursor, collections: Array.from({ length: HISTORY_MAX_SOURCES + 1 }, (_, n) => ({ ...source, datasetId: uuid(n + 1) })) },
+    { ...cursor, collections: [{ ...source, lineage: "not-a-sha" }] },
+    { ...cursor, engine: { ...cursor.engine!, engineUuid: "x".repeat(HISTORY_CURSOR_BYTES) } },
+    { ...cursor, engine: { ...cursor.engine!, versionId: "branch" } },
+    { ...cursor, versionId: "branch", engine: { ...cursor.engine!, versionId: "branch" } },
+  ];
+  for (const value of invalid) {
+    expect(TimelineCursor.safeParse(value).success).toBe(false);
+    await expect(f.page({ cursor: value })).rejects.toThrow();
+  }
+  expect(remote).not.toHaveBeenCalled();
+});
+
+it("caps remote concurrency and does not refetch a cached head outside the window", async () => {
+  const f = await fixture(), ids = Array.from({ length: 6 }, (_, n) => uuid(n + 8)), reached = deferred<void>(), release = deferred<void>();
+  f.reads.local = () => ({ pages: [], transferred: ids });
+  let active = 0, maximum = 0, started = 0;
+  f.reads.remote = vi.fn(async id => {
+    active++; maximum = Math.max(maximum, active); if (++started === 4) reached.resolve();
+    await release.promise; active--;
+    return { datasetId: id, lineage: sha(id), headRevision: 1, entries: [{ revision: 1, recordedAtMs: 10, operation: "Add record", callerReference: null, approvedRevisionHash: sha("approved"), changesetBytes: 0, attachmentCount: 0 }], nextBeforeRevision: null };
+  });
+  const waiting = f.page(); await reached.promise; expect(started).toBe(4); release.resolve(); await waiting;
+  expect(maximum).toBe(4); expect(started).toBe(6);
+
+  const g = await fixture(), remote = g.initialize(8); g.event(remote, 1);
+  for (let n = 0; n < 100; n++) await g.write("file-" + n, 1000 + n);
+  g.reads.local = () => ({ pages: [], transferred: [remote] });
+  const read = vi.fn(async () => g.host.history("owner", { workspaceId: "workspace", datasetId: remote, limit: 51, metadataOnly: true })); g.reads.remote = read;
+  const first = await g.page(); expect(read).toHaveBeenCalledOnce();
+  const second = await g.page({ cursor: first.nextCursor! });
+  expect(second.entries.every(row => row.kind === "file")).toBe(true); expect(read).toHaveBeenCalledOnce();
+});
+
+it("drops a confirmed deleted remote Collection without leaving pages partial", async () => {
+  const f = await fixture(), remote = f.initialize(8); f.event(remote, 600); f.event(remote, 500);
+  f.reads.local = () => ({ pages: [], transferred: [remote] });
+  const reply = deferred<Awaited<ReturnType<TimelineReads["remote"]>>>();
+  f.reads.remote = async (_id, before) => before === undefined ? f.host.history("owner", { workspaceId: "workspace", datasetId: remote, limit: 51, metadataOnly: true }) : reply.promise;
+  const first = await f.page({ object: { kind: "dataset", datasetId: remote }, limit: 1 });
+  reply.resolve({ datasetId: remote, headRevision: 0, entries: [], nextBeforeRevision: null, deleted: true });
+  const next = await f.page({ object: { kind: "dataset", datasetId: remote }, cursor: first.nextCursor! });
+  expect(next).toMatchObject({ completeness: "complete", unavailableSources: [], entries: [], nextCursor: null });
+});
+
+it("returns updating when a refill engine read refuses", async () => {
+  const f = await fixture(); await f.write("hidden", 100, "private/a.md");
+  const base = await f.reads.engine.listMoments();
+  const read = vi.fn<TimelineReads["engine"]["listMoments"]>();
+  read.mockResolvedValueOnce({ ...base, versionMarkers: [], nextCursor: base.startCursor });
+  read.mockRejectedValueOnce({ wireError: { code: "OVERLOADED", message: "History is still updating. Try again." } });
+  f.reads.engine = { listMoments: read }; f.reads.admitted = () => false;
+  expect(await createHistoryTimeline()({ workspaceId: "workspace" }, f.reads)).toEqual({ status: "updating" });
+});
+
+it("emits protected-only pages even when every file path is hidden", async () => {
+  const f = await fixture(); await f.write("protected", 100, "private/a.md");
+  const base = await f.reads.engine.listMoments();
+  f.reads.engine = { listMoments: async () => ({ ...base, versionMarkers: [], moments: base.moments.map(m => ({ ...m, protected: true })), nextCursor: null }) };
+  f.reads.admitted = () => false;
+  const page = await f.page(); expect(page.entries).toHaveLength(1); expect(page.entries[0]).toMatchObject({ kind: "file", moment: { protected: true } });
+});
+
+it("stops after 40 engine pages of hidden rows and carries the exact continuation", async () => {
+  const f = await fixture(); await f.write("hidden", 100, "private/a.md");
+  const base = await f.reads.engine.listMoments();
+  let count = 0;
+  const read = vi.fn<TimelineReads["engine"]["listMoments"]>(async input => {
+    count++;
+    const next = { ...base.startCursor, text: { recordedAtMs: 100, momentOrder: count * 50 } };
+    return { ...base, versionMarkers: [], startCursor: input?.cursor ?? base.startCursor,
+      moments: Array.from({ length: 50 }, (_, n) => ({ ...base.moments[0]!, id: "hidden-" + count + "-" + n, momentOrder: (count - 1) * 50 + n + 1 })), nextCursor: next };
+  });
+  f.reads.engine = { listMoments: read }; f.reads.admitted = () => false;
+  const page = await f.page(); expect(page.entries).toEqual([]); expect(read).toHaveBeenCalledTimes(40);
+  expect(page.nextCursor!.engine!.text!.momentOrder).toBe(2000);
+  f.reads.admitted = () => true; const next = await f.page({ cursor: page.nextCursor!, limit: 1 });
+  expect(next.entries).toHaveLength(1); expect(read.mock.calls[40]![0]?.cursor).toEqual(page.nextCursor!.engine);
+});
+
+it("finishes a prefetched read under its own real authority lease after the page lease releases", async () => {
+  const f = await fixture(), remote = f.initialize(8);
+  for (let n = 1; n <= 120; n++) f.event(remote, n);
+  f.reads.local = () => ({ pages: [], transferred: [remote] });
+  const workspace = { workspaceId: "workspace", rootPath: "root" }, state = {};
+  const owner = createWorkspaceAuthorityOwner({ findWorkspace: () => workspace, canonicalizeRoot: path => path, createState: () => state });
+  cleanups.push(() => owner.close());
+  const entered = deferred<void>(), reply = deferred<void>();
+  const history = vi.fn<OwnerDatasetData["history"]>(async input => {
+    if (input.beforeRevision === 71) { entered.resolve(); await reply.promise; }
+    return f.host.history("owner", { workspaceId: "workspace", ...input });
+  });
+  const describe = vi.fn();
+  const data = { history, describe } as unknown as OwnerDatasetData;
+  const name = vi.fn(() => "Remote Collection");
+  let released: WorkspaceAuthorityOperation<typeof workspace, object> | undefined;
+  const list = createHistoryTimeline();
+  const owned = (cursor?: import("../ipc/bridgeContract").TimelineCursor) => owner.withOperation("workspace", async operation => {
+    released ??= operation;
+    f.reads.remote = createHistoryCollectionRemote({ expected: operation, generation: 1, currentGeneration: () => 1,
+      withOperation: work => owner.withOperation("workspace", work), dataFor: () => data, name });
+    return list({ workspaceId: "workspace", object: { kind: "dataset", datasetId: remote }, cursor }, { ...f.reads, signal: operation.signal, assertCurrent: operation.assertCurrent });
+  });
+  const first = await owned(); await entered.promise;
+  expect(() => released!.assertCurrent()).toThrow("released");
+  reply.resolve();
+  const second = await owned("nextCursor" in first ? first.nextCursor! : undefined);
+  expect(second).toMatchObject({ status: "ready", completeness: "complete" });
+  if (!("entries" in second)) throw Error("Expected ready");
+  expect(second.entries).toHaveLength(50); expect(history).toHaveBeenCalledTimes(3); expect(describe).not.toHaveBeenCalled();
+});
+
+it("confirms deletion through the owner route and keeps other failures partial", async () => {
+  const operation = { state: {}, workspace: { attachmentId: Symbol() }, signal: new AbortController().signal, assertCurrent() {} };
+  const deleted = vi.fn(async () => ({ deleted: true }));
+  const data = { history: async () => { throw Error("not available"); }, deletionStatus: deleted } as unknown as OwnerDatasetData;
+  const read = createHistoryCollectionRemote({ expected: operation, generation: 1, currentGeneration: () => 1,
+    withOperation: work => work(operation), dataFor: () => data, name: () => "Collection" });
+  await expect(read(uuid(8), 2, operation.signal)).resolves.toMatchObject({ deleted: true });
+  deleted.mockResolvedValue({ deleted: false });
+  await expect(read(uuid(8), 2, operation.signal)).rejects.toThrow("not available");
+});
+
+it("discloses an empty single-Collection deadline result and requires refresh", async () => {
+  const f = await fixture(), remote = uuid(8), entered = deferred<void>();
+  f.reads.local = () => ({ pages: [], transferred: [remote] });
+  f.reads.remote = async (_id, _before, signal) => { entered.resolve(); return new Promise((_, reject) => signal.addEventListener("abort", () => reject(signal.reason), { once: true })); };
+  vi.useFakeTimers(); const waiting = f.page({ object: { kind: "dataset", datasetId: remote } }); await entered.promise;
+  await vi.advanceTimersByTimeAsync(HISTORY_REMOTE_DEADLINE_MS);
+  expect(await waiting).toMatchObject({ entries: [], nextCursor: null, completeness: "partial", unavailableSources: [{ datasetId: remote, reason: "deadline" }] });
+});
+
+it("excludes a later prefetched source only after a page has waited 750 ms", async () => {
+  const f = await fixture(), remote = f.initialize(8), entered = deferred<AbortSignal>();
+  for (let n = 1; n <= 120; n++) f.event(remote, n);
+  f.reads.local = () => ({ pages: [], transferred: [remote] });
+  f.reads.remote = async (_id, before, signal) => {
+    if (before === undefined) return f.host.history("owner", { workspaceId: "workspace", datasetId: remote, metadataOnly: true, limit: 51 });
+    entered.resolve(signal); return new Promise((_, reject) => signal.addEventListener("abort", () => reject(signal.reason), { once: true }));
+  };
+  vi.useFakeTimers();
+  const first = await f.page({ object: { kind: "dataset", datasetId: remote } }), backgroundSignal = await entered.promise;
+  await vi.advanceTimersByTimeAsync(HISTORY_REMOTE_DEADLINE_MS * 2); expect(backgroundSignal.aborted).toBe(false);
+  const waiting = f.page({ object: { kind: "dataset", datasetId: remote }, cursor: first.nextCursor! });
+  await vi.advanceTimersByTimeAsync(HISTORY_REMOTE_DEADLINE_MS);
+  expect(await waiting).toMatchObject({ entries: [], nextCursor: null, completeness: "partial", unavailableSources: [{ datasetId: remote, reason: "deadline" }] });
+  expect(backgroundSignal.aborted).toBe(true);
 });
