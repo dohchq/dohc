@@ -5540,7 +5540,9 @@ mod tests {
             VALUES ('outbox',1,'append','delivery','base','base',1,1,1,1,1,'active');").unwrap();
         assert_eq!(
             run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).unwrap(),
-            MigrationOutcome::Applied { newly_applied: 1 }
+            MigrationOutcome::Applied {
+                newly_applied: (BASELINE_MIGRATIONS.len() - before) as u32
+            }
         );
         let retained: (String, Option<bool>) = conn
             .query_row(
