@@ -12,8 +12,8 @@ import { DatasetRequest, DatasetResult } from "./dataset";
 import { OwnerAppPublicationRequest, OwnerAppPublicationResult } from "./appPublication";
 import {OwnerAppResponsesRequest,OwnerAppResponsesResult} from "./appResponses";
 
-export const CLI_PROTOCOL_VERSION = 4;
-export const CLI_JSON_SCHEMA_VERSION = 2;
+export const CLI_PROTOCOL_VERSION = 5;
+export const CLI_JSON_SCHEMA_VERSION = 3;
 
 // Who runs a CLI command. The CLI never writes as an automation.
 const cliActorSchema = z.enum(["human", "agent"]);

@@ -4,11 +4,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
-import { attemptOutcome, cancel, listRequests, nextRequest, placeSubmission, position, queuePaths, readJson, serviceRuns, startsInMs, submit, taskDefinition, terminalStates, writeJson } from "./queue.mjs";
+import { attemptOutcome, cancel, lastNightlyPass, listRequests, nextRequest, nightlyTaskDefinition, placeSubmission, position, queuePaths, readJson, serviceRuns, startsInMs, submit, submitNightly, taskDefinition, terminalStates, writeJson } from "./queue.mjs";
 import { laneTemp, runService, sweepContainers } from "./queue-service.mjs";
 import { failureKind, takeGrant } from "./verify.mjs";
 import { run } from "./process.mjs";
@@ -62,6 +62,59 @@ test("only a receipt for this exact attempt counts", () => {
   assert.equal(attemptOutcome(receipt({ verdict: "PASS" }), grant, { stopped: "time limit" }).outcome, "failed");
   assert.equal(attemptOutcome(null, grant, { stopped: "cancelled" }).outcome, "cancelled");
   assert.equal(attemptOutcome(null, grant, { stopped: "time budget" }).outcome, "error", "a run cut short by the shared budget gets no verdict");
+});
+
+test("the nightly run of main goes ahead of the line, and only a ready one does", () => {
+  const first = entry("000000001-aaaaaa", { head: "h1" });
+  const nightly = entry("000000009-nnnnnn", { head: "h9", branch: "refs/heads/main", checkout: "nightly", full: true, nightly: true });
+  const waiting = entry("000000008-mmmmmm", { head: "h8", nightly: true }, "queued", { notBefore: new Date(Date.now() + 60_000).toISOString() });
+  assert.equal(nextRequest([first, nightly], { diskOk: true, dockerOk: true }).id, nightly.id);
+  assert.equal(nextRequest([first, waiting], { diskOk: true, dockerOk: true }).id, first.id, "a nightly in backoff holds back nobody");
+  assert.equal(position([first, nightly, entry("000000000-zzzzzz", { head: "h0" }, "running")], nightly.id), 2);
+  assert.equal(position([first, nightly], first.id), 2);
+});
+
+test("the nightly submission verifies main's head in full, against the last nightly that passed", async t => {
+  const root = mkdtempSync(join(tmpdir(), "dohc-queue-nightly-"));
+  const fixture = fixtureRepo();
+  t.after(() => { rmSync(root, { recursive: true, force: true }); rmSync(fixture.repo, { recursive: true, force: true }); });
+  fixture.git("update-ref", "refs/remotes/origin/main", fixture.head);
+  let fetched = 0;
+  const first = await submitNightly(root, fixture.repo, { fetch: () => { fetched += 1; } });
+  assert.equal(fetched, 1);
+  assert.deepEqual(first, { head: fixture.head, base: fixture.base }, "with no nightly yet, the base is main's previous commit");
+  const [name] = readdirSync(queuePaths(root).inbox);
+  const submission = readJson(join(queuePaths(root).inbox, name));
+  assert.deepEqual({ ...submission, key: undefined, submittedAt: undefined, protocol: undefined },
+    { head: fixture.head, base: fixture.base, scope: "all", full: true, gates: { rust: true, js: true }, branch: "refs/heads/main", checkout: "nightly", nightly: true, key: undefined, submittedAt: undefined, protocol: undefined });
+  // Once a nightly passed, the next one covers everything merged since.
+  await writeJson(join(queuePaths(root).request("000000001-aaaaaa"), "request.json"), { id: "000000001-aaaaaa", sequence: 1, head: fixture.base, base: fixture.base, nightly: true, scope: "all" });
+  await writeJson(join(queuePaths(root).request("000000001-aaaaaa"), "status.json"), { state: "passed", attempts: [] });
+  assert.equal(lastNightlyPass(listRequests(root)).id, "000000001-aaaaaa");
+  assert.deepEqual(await submitNightly(root, fixture.repo, { fetch: () => {} }), { head: fixture.head, base: fixture.base });
+});
+
+test("the nightly task submits the run every night and stops within ten minutes", () => {
+  const xml = nightlyTaskDefinition("C:\\w\\_verification");
+  assert.match(xml, /<CalendarTrigger><Enabled>true<\/Enabled><StartBoundary>2026-01-01T03:07:00<\/StartBoundary><ScheduleByDay><DaysInterval>1<\/DaysInterval><\/ScheduleByDay><\/CalendarTrigger>/u);
+  assert.match(xml, /nightly\.ps1/u);
+  assert.match(xml, /<ExecutionTimeLimit>PT10M<\/ExecutionTimeLimit>/u);
+  assert.match(xml, /<StartWhenAvailable>true<\/StartWhenAvailable>/u, "a night the host slept still gets its run");
+  assert.match(xml, /<RestartOnFailure><Interval>PT10M<\/Interval><Count>6<\/Count><\/RestartOnFailure>/u, "a failed fetch tries again");
+});
+
+test("pruning keeps the last nightly that passed, however old", async t => {
+  const { root, request, settled } = harness(t);
+  const paths = queuePaths(root);
+  const old = new Date(Date.now() - 30 * 24 * 60 * 60_000).toISOString();
+  for (const [id, nightly] of [["000000001-aaaaaa", true], ["000000002-bbbbbb", false]]) {
+    await writeJson(join(paths.request(id), "request.json"), { id, sequence: Number(id.slice(0, 9)), head: "0".repeat(40), base: "0".repeat(40), scope: "all", nightly });
+    await writeJson(join(paths.request(id), "status.json"), { state: "passed", attempts: [], updatedAt: old });
+  }
+  // Prune runs once the service has been up for ten minutes, or on its first tick.
+  await settled((await request("pass")).id);
+  await waitFor(() => !existsSync(paths.request("000000002-bbbbbb")), "an old request is pruned", 20_000);
+  assert.ok(existsSync(paths.request("000000001-aaaaaa")), "the last passing nightly stays");
 });
 
 test("the service task restarts a dead supervisor from the session that installed it, at normal priority", () => {
@@ -142,6 +195,8 @@ function harness(t, { timeLimitMs = 60_000, docker = async () => true, sweep = a
     const receipt = fields => writeFileSync(join(output, "result.json"), JSON.stringify({ grant, commit: grant.head, baseCommit: grant.base, final: true, ...fields }));
     const behavior = request.checkout;
     if (behavior === "pass") receipt({ verdict: "PASS" });
+    else if (behavior === "pass-on-retry") receipt({ verdict: "PASS", flaky: [{ step: "repository", test: "times out under load" }],
+      timings: [{ name: "tests", seconds: 1260.4 }, { name: "rust", seconds: 990.2 }], slowest: [{ step: "desktop", test: "restarts", seconds: 66 }] });
     else if (behavior === "fail") receipt({ verdict: "FAIL", error: "a test failed", failure: { kind: "check", cause: "tests" } });
     else if (behavior === "fail-as-host-fails") { hostFails(calls.length); receipt({ verdict: "FAIL", error: "a test failed", failure: { kind: "check", cause: "tests" } }); }
     else if (behavior === "flaky-host") receipt(calls.filter(call => call.id === grant.request).length === 1
@@ -273,6 +328,21 @@ test("a requested restart starts nothing new and waits for the runs in flight", 
   assert.equal(state(), "queued");
 });
 
+test("a pass with tests that needed a retry records them in its attempt and the history", async t => {
+  const { root, request, settled } = harness(t);
+  const passed = await settled((await request("pass-on-retry")).id);
+  const expected = [{ step: "repository", test: "times out under load" }];
+  assert.equal(passed.status.verdict, "PASS");
+  assert.deepEqual(passed.status.attempts[0].flaky, expected);
+  assert.deepEqual(passed.status.attempts[0].steps, { tests: 1260, rust: 990 });
+  assert.deepEqual(passed.status.attempts[0].slowest, [{ step: "desktop", test: "restarts", seconds: 66 }]);
+  const finished = readFileSync(queuePaths(root).history, "utf8").trim().split("\n").map(line => JSON.parse(line)).find(event => event.event === "finished" && event.id === passed.id);
+  assert.deepEqual(finished.flaky, expected);
+  // The history keeps the step times and slowest tests for the weekly review.
+  assert.deepEqual(finished.steps, { tests: 1260, rust: 990 });
+  assert.deepEqual(finished.slowest, [{ step: "desktop", test: "restarts", seconds: 66 }]);
+});
+
 test("an attempt that never sampled the host records its load as null", async t => {
   const { root, request, settled } = harness(t);
   const passed = await settled((await request("pass")).id);
@@ -324,7 +394,7 @@ test("a restarted service keeps a finished receipt and retries an interrupted ru
     await writeJson(join(paths.request(id), "request.json"), { id, sequence: Number(id.slice(0, 9)), head: fixture.head, base: fixture.base, scope: "all", gates: { rust: true, js: false }, checkout: "pass", branch: `refs/heads/${id}` });
     await writeJson(join(paths.request(id), "status.json"), { state: "running", attempts: [{ n: 1, startedAt: new Date().toISOString() }] });
     mkdirSync(paths.attempt(id, 1), { recursive: true });
-    if (receipt) writeFileSync(join(paths.attempt(id, 1), "result.json"), JSON.stringify({ grant: { request: id, attempt: 1, head: fixture.head, base: fixture.base }, commit: fixture.head, baseCommit: fixture.base, verdict: "PASS", final: true }));
+    if (receipt) writeFileSync(join(paths.attempt(id, 1), "result.json"), JSON.stringify({ grant: { request: id, attempt: 1, head: fixture.head, base: fixture.base }, commit: fixture.head, baseCommit: fixture.base, verdict: "PASS", final: true, flaky: [{ step: "rust", test: "engine::settles" }] }));
   };
   await plant("000000001-aaaaaa", true);
   await plant("000000002-bbbbbb", false);
@@ -352,6 +422,7 @@ test("a restarted service keeps a finished receipt and retries an interrupted ru
   stop.abort();
   await service;
   assert.deepEqual(finished.map(candidate => candidate.status.verdict), ["PASS", "PASS", "PASS"]);
+  assert.deepEqual(finished[0].status.attempts[0].flaky, [{ step: "rust", test: "engine::settles" }], "a recovered receipt keeps its flaky tests");
   assert.deepEqual(calls.map(grant => [grant.request, grant.attempt]), [["000000002-bbbbbb", 2], ["000000003-cccccc", 2]], "only interrupted requests run again, as new attempts");
 });
 

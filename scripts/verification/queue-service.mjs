@@ -14,7 +14,7 @@ import { fileURLToPath } from "node:url";
 import { setTimeout as sleep } from "node:timers/promises";
 import { git, run } from "./process.mjs";
 import { acquireVerificationSlot, freeDiskGb, resolveBuildBudget, verificationLanes } from "../../tools/rust-engine-program/build-slot.mjs";
-import { attemptOutcome, listRequests, nextRequest, placeSubmission, protocol, queuePaths, readJson, retryDelayMs, serviceRuns, terminalStates, writeJson } from "./queue.mjs";
+import { attemptOutcome, lastNightlyPass, listRequests, nextRequest, placeSubmission, protocol, queuePaths, readJson, retryDelayMs, serviceRuns, terminalStates, writeJson } from "./queue.mjs";
 
 const verifierEntry = fileURLToPath(new URL("./verify.mjs", import.meta.url));
 const sha = /^[0-9a-f]{40}$/u;
@@ -23,6 +23,11 @@ const environmentAttempts = 5;
 // A stopped run that has not ended by then is stopped by restarting the service, whose job kills it.
 const stopGraceMs = 5 * 60_000;
 const names = path => { try { return readdirSync(path); } catch { return []; } };
+// A receipt's step times in seconds, and its ten slowest tests, for the history.
+const timesOf = receipt => ({
+  steps: Object.fromEntries((receipt?.timings ?? []).filter(row => Number.isFinite(row.seconds)).map(row => [row.name, Math.round(row.seconds)])),
+  slowest: (receipt?.slowest ?? []).slice(0, 10),
+});
 const cpuTimes = () => cpus().reduce((total, { times }) => {
   const busy = times.user + times.nice + times.sys + times.irq;
   return { busy: total.busy + busy, all: total.all + busy + times.idle };
@@ -180,7 +185,8 @@ export async function runService({
 
   async function finish(entry, attempt, outcome, { cleanup = false } = {}) {
     const status = readJson(statusPath(entry.id)) ?? entry.status;
-    const attempts = status.attempts.map(row => row.n === attempt?.n ? { ...row, endedAt: new Date().toISOString(), awakeMs: attempt.awakeMs, load: attempt.load ?? null, ...outcome } : row);
+    const attempts = status.attempts.map(row => row.n === attempt?.n ? { ...row, endedAt: new Date().toISOString(), awakeMs: attempt.awakeMs, load: attempt.load ?? null, flaky: attempt.flaky ?? [],
+      steps: attempt.steps ?? {}, slowest: attempt.slowest ?? [], ...outcome } : row);
     // Only the JavaScript gate starts containers.
     if (cleanup && entry.request.gates?.js) status.cleanupPending = await cleanUp(entry.id);
     const failures = attempts.filter(row => row.outcome === "environment").length;
@@ -200,7 +206,8 @@ export async function runService({
         verdict: outcome.outcome === "passed" ? "PASS" : outcome.outcome === "failed" ? "FAIL" : null,
         result: attempt ? join(paths.attempt(entry.id, attempt.n), "result.json") : null, cause: outcome.cause, reason: outcome.reason ?? null });
     }
-    history({ event: "finished", id: entry.id, attempt: attempt?.n, awakeMs: attempt?.awakeMs, load: attempt?.load ?? null, ...outcome });
+    history({ event: "finished", id: entry.id, attempt: attempt?.n, awakeMs: attempt?.awakeMs, load: attempt?.load ?? null, flaky: attempt?.flaky ?? [],
+      steps: attempt?.steps ?? {}, slowest: attempt?.slowest ?? [], ...outcome });
   }
 
   async function recover(requests) {
@@ -213,7 +220,7 @@ export async function runService({
       const last = previousRuns.find(row => row.id === entry.id && row.attempt === attempt?.n)?.awakeMs ?? 0;
       const stopped = entry.status.stopping ?? "service restart";
       // A recovery that cannot be recorded would repeat every tick; restart under the supervisor's backoff instead.
-      try { await finish(entry, attempt && { n: attempt.n, awakeMs: last }, attemptOutcome(result, grant, { stopped }), { cleanup: true }); }
+      try { await finish(entry, attempt && { n: attempt.n, awakeMs: last, flaky: result?.flaky ?? [], ...timesOf(result) }, attemptOutcome(result, grant, { stopped }), { cleanup: true }); }
       catch (error) { fatal = error; return; }
     }
   }
@@ -315,7 +322,8 @@ export async function runService({
       // Only verification counts against the run; its bookkeeping does not.
       current.phase = "finishing";
       lease?.release();
-      let outcome = attemptOutcome(readJson(join(output, "result.json")), grant, { stopped: current.stopped });
+      const receipt = readJson(join(output, "result.json"));
+      let outcome = attemptOutcome(receipt, grant, { stopped: current.stopped });
       if (outcome.outcome === "failed" && outcome.cause === "check") {
         // A check that failed while the host was failing proves nothing about the change.
         const free = freeDisk();
@@ -325,7 +333,7 @@ export async function runService({
       }
       // The attempt stays owned until its outcome is on disk. If that write fails, the
       // service stops, and its replacement recovers the request from the receipt.
-      await finish({ ...entry, status: readJson(statusPath(entry.id)) ?? entry.status }, { n, awakeMs: current.awakeMs, load: runLoad(current) }, outcome, { cleanup: true });
+      await finish({ ...entry, status: readJson(statusPath(entry.id)) ?? entry.status }, { n, awakeMs: current.awakeMs, load: runLoad(current), flaky: receipt?.flaky ?? [], ...timesOf(receipt) }, outcome, { cleanup: true });
       running.delete(entry.id);
     }
   }
@@ -366,8 +374,10 @@ export async function runService({
 
   function prune(requests) {
     const cutoff = Date.now() - 7 * 24 * 60 * 60_000;
+    // The last nightly that passed stays, with its pinned commits, as the base of the next one.
+    const keep = lastNightlyPass(requests)?.id;
     for (const entry of requests) {
-      if (!terminalStates.has(entry.status.state) || cleanupPending.has(entry.id) || Date.parse(entry.status.updatedAt ?? 0) > cutoff) continue;
+      if (!terminalStates.has(entry.status.state) || cleanupPending.has(entry.id) || entry.id === keep || Date.parse(entry.status.updatedAt ?? 0) > cutoff) continue;
       rmSync(paths.request(entry.id), { recursive: true, force: true });
       finished.delete(entry.id);
     }
