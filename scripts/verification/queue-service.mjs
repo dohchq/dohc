@@ -8,7 +8,8 @@ import { createHash, randomBytes } from "node:crypto";
 import { appendFileSync, existsSync, mkdirSync, readdirSync, renameSync, rmSync, statSync } from "node:fs";
 import { rm } from "node:fs/promises";
 import { createServer } from "node:net";
-import { join, resolve } from "node:path";
+import { cpus, freemem } from "node:os";
+import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { setTimeout as sleep } from "node:timers/promises";
 import { git, run } from "./process.mjs";
@@ -22,6 +23,10 @@ const environmentAttempts = 5;
 // A stopped run that has not ended by then is stopped by restarting the service, whose job kills it.
 const stopGraceMs = 5 * 60_000;
 const names = path => { try { return readdirSync(path); } catch { return []; } };
+const cpuTimes = () => cpus().reduce((total, { times }) => {
+  const busy = times.user + times.nice + times.sys + times.irq;
+  return { busy: total.busy + busy, all: total.all + busy + times.idle };
+}, { busy: 0, all: 0 });
 
 /**
  * Remove one request's containers, or without a request, every verification
@@ -39,8 +44,18 @@ export async function sweepContainers({ request, command = run } = {}) {
   return ids.size;
 }
 
+/**
+ * A lane's temp folder, beside the lane under the queue root. Lanes never share one, and the queue root
+ * sits in the host's antivirus exclusion, so a scan cannot hold a test's temp file while it is deleted.
+ */
+export const laneTemp = lane => join(dirname(lane), "tmp", basename(lane));
+
 /** Put the lane at `head` with no state from earlier runs except the named caches. */
 export async function prepareLane({ lane, repo, head, signal }) {
+  // The temp folder keeps only the coming run's files.
+  // Best effort: a file still held by a stray process stays, and every run makes its own folders inside.
+  await rm(laneTemp(lane), { recursive: true, force: true, maxRetries: 5 }).catch(() => {});
+  mkdirSync(laneTemp(lane), { recursive: true });
   // Git runs as a child process, never synchronously, so a slow checkout cannot stop the heartbeat of another lane's run.
   const laneGit = async (args, cwd = lane) => (await run("git", args, { cwd, signal, quietStdout: true, timeoutMs: 15 * 60_000 })).stdout.trim();
   if (!existsSync(join(lane, ".git"))) {
@@ -56,7 +71,8 @@ export async function prepareLane({ lane, repo, head, signal }) {
   if (await laneGit(["rev-parse", "HEAD"]) !== head) throw new Error(`The lane did not check out ${head}.`);
   if (await laneGit(["status", "--porcelain"]) !== "") throw new Error("The lane has changes after checkout and clean.");
   // Installed while the request waits for the lane, so the verifier's own install has nothing left to do in it.
-  await run(process.execPath, ["scripts/verification/setup.mjs"], { cwd: lane, signal, quietStdout: true, timeoutMs: 30 * 60_000 });
+  await run(process.execPath, ["scripts/verification/setup.mjs"], { cwd: lane, signal, quietStdout: true, timeoutMs: 30 * 60_000,
+    env: { ...process.env, TEMP: laneTemp(lane), TMP: laneTemp(lane) } });
 }
 
 export async function dockerResponds(command = run) {
@@ -76,7 +92,7 @@ async function defaultWorker({ lane, request, grant, output, signal }) {
   const args = ["scripts/verification/verify.mjs", "pr", "--base", request.base,
     ...(request.scope === "all" ? [] : ["--job", request.scope]), ...(request.full ? ["--full"] : [])];
   await run(process.execPath, args, { cwd: lane, signal, log: join(output, "worker.log"), quietStdout: true,
-    env: { ...process.env, DOHC_VERIFICATION_GRANT: JSON.stringify(grant), DOHC_VERIFICATION_OUTPUT: output } })
+    env: { ...process.env, TEMP: laneTemp(lane), TMP: laneTemp(lane), DOHC_VERIFICATION_GRANT: JSON.stringify(grant), DOHC_VERIFICATION_OUTPUT: output } })
     .catch(error => { if (!error.commandExitFailure) throw error; });
 }
 
@@ -127,6 +143,11 @@ export async function runService({
   const running = new Map();
   const checkouts = [lane, `${lane}-2`];
   let laneCount = 1;
+  // The host's CPU and free memory at the last clock tick.
+  const host = { cpuBusyPercent: null, freeMemGb: null };
+  // The load an attempt verified under: the lane count, the most runs at once, the lowest free memory, and the mean CPU use.
+  const runLoad = current => current.load.samples ? { lanes: current.load.lanes, peakRuns: current.load.peakRuns,
+    minFreeMemGb: current.load.minFreeMemGb, cpuBusyPercent: Math.round(current.load.cpuBusy / current.load.samples) } : null;
   let laneError = null;
   let fatal = null;
   let lastPrune = 0;
@@ -148,7 +169,7 @@ export async function runService({
   const beat = () => writeJson(paths.service, {
     protocol, pid: process.pid, commit, startedAt, heartbeatAt: new Date().toISOString(), lanes: laneCount,
     running: [...running.values()].map(current => ({ id: current.id, attempt: current.attempt, checkout: current.checkout, phase: current.phase, startedAt: current.startedAt, awakeMs: current.awakeMs })),
-    health: { diskFreeGb: health.diskFreeGb, diskOk: health.diskOk, dockerOk: health.dockerOk,
+    health: { diskFreeGb: health.diskFreeGb, diskOk: health.diskOk, dockerOk: health.dockerOk, cpuBusyPercent: host.cpuBusyPercent, freeMemGb: host.freeMemGb,
       pausedUntil: health.pausedUntil ? new Date(health.pausedUntil).toISOString() : null, reason: health.reason },
   });
 
@@ -159,7 +180,7 @@ export async function runService({
 
   async function finish(entry, attempt, outcome, { cleanup = false } = {}) {
     const status = readJson(statusPath(entry.id)) ?? entry.status;
-    const attempts = status.attempts.map(row => row.n === attempt?.n ? { ...row, endedAt: new Date().toISOString(), awakeMs: attempt.awakeMs, ...outcome } : row);
+    const attempts = status.attempts.map(row => row.n === attempt?.n ? { ...row, endedAt: new Date().toISOString(), awakeMs: attempt.awakeMs, load: attempt.load ?? null, ...outcome } : row);
     // Only the JavaScript gate starts containers.
     if (cleanup && entry.request.gates?.js) status.cleanupPending = await cleanUp(entry.id);
     const failures = attempts.filter(row => row.outcome === "environment").length;
@@ -179,7 +200,7 @@ export async function runService({
         verdict: outcome.outcome === "passed" ? "PASS" : outcome.outcome === "failed" ? "FAIL" : null,
         result: attempt ? join(paths.attempt(entry.id, attempt.n), "result.json") : null, cause: outcome.cause, reason: outcome.reason ?? null });
     }
-    history({ event: "finished", id: entry.id, attempt: attempt?.n, awakeMs: attempt?.awakeMs, ...outcome });
+    history({ event: "finished", id: entry.id, attempt: attempt?.n, awakeMs: attempt?.awakeMs, load: attempt?.load ?? null, ...outcome });
   }
 
   async function recover(requests) {
@@ -272,7 +293,7 @@ export async function runService({
     }
     const busy = new Set([...running.values()].map(other => other.checkout));
     const checkout = checkouts.find(path => !busy.has(path));
-    const current = { id: entry.id, attempt: n, checkout, startedAt: new Date().toISOString(), phase: "preparing", awakeMs: 0,
+    const current = { id: entry.id, attempt: n, checkout, startedAt: new Date().toISOString(), phase: "preparing", phaseAt: Date.now(), awakeMs: 0, load: { lanes: 0, peakRuns: 0, minFreeMemGb: Infinity, cpuBusy: 0, samples: 0 },
       limitMs: Math.min(timeLimitMs, requestBudgetMs - used), prepareMs: 0, abort: new AbortController(), stopped: undefined };
     running.set(entry.id, current);
     let lease;
@@ -286,6 +307,7 @@ export async function runService({
       // Rust-only runs need no Docker, so a sweep failure must not stop them.
       await sweep({}).catch(error => log(`container sweep failed: ${error.message}`));
       current.phase = "verifying";
+      current.phaseAt = Date.now();
       if (!current.stopped) await worker({ lane: checkout, request: entry.request, grant, output, signal: current.abort.signal });
     } catch (error) {
       if (!current.stopped) log(`attempt ${entry.id}/${n} ended early: ${error.stack ?? error.message}`);
@@ -303,7 +325,7 @@ export async function runService({
       }
       // The attempt stays owned until its outcome is on disk. If that write fails, the
       // service stops, and its replacement recovers the request from the receipt.
-      await finish({ ...entry, status: readJson(statusPath(entry.id)) ?? entry.status }, { n, awakeMs: current.awakeMs }, outcome, { cleanup: true });
+      await finish({ ...entry, status: readJson(statusPath(entry.id)) ?? entry.status }, { n, awakeMs: current.awakeMs, load: runLoad(current) }, outcome, { cleanup: true });
       running.delete(entry.id);
     }
   }
@@ -376,16 +398,32 @@ export async function runService({
     beating ??= beat().catch(error => log(`heartbeat failed: ${error.message}`)).finally(() => { beating = null; });
   }, 10_000);
   // Awake time has its own clock too, so slow work in the loop never shortens a run's time.
-  // Only awake time counts against a run: a gap far over one tick is sleep.
+  // Only awake time counts against a run. A gap of over a minute between ticks is the machine sleeping;
+  // a shorter one is a busy host delaying the timer, and the run was working through it.
+  // The same clock samples the host, so each run records the load it verified under.
   let last = Date.now();
+  let cpu = cpuTimes();
   const clock = setInterval(() => {
     const now = Date.now();
-    const awake = Math.min(now - last, 3 * tickMs);
-    last = now;
+    const asleep = now - last > 60_000;
+    const sample = cpuTimes();
+    host.cpuBusyPercent = Math.round(100 * (sample.busy - cpu.busy) / Math.max(1, sample.all - cpu.all));
+    host.freeMemGb = Math.round(freemem() / 1024 ** 3 * 10) / 10;
+    cpu = sample;
     for (const current of running.values()) {
-      if (current.phase === "verifying") current.awakeMs += awake;
+      // A phase that began since the last tick counts only from its start; a clock set back counts nothing.
+      const awake = asleep ? 0 : Math.max(0, now - Math.max(last, current.phaseAt));
+      if (current.phase === "verifying") {
+        current.awakeMs += awake;
+        current.load.lanes = Math.max(current.load.lanes, laneCount);
+        current.load.peakRuns = Math.max(current.load.peakRuns, running.size);
+        current.load.minFreeMemGb = Math.min(current.load.minFreeMemGb, host.freeMemGb);
+        current.load.cpuBusy += host.cpuBusyPercent;
+        current.load.samples += 1;
+      }
       if (current.phase === "preparing") current.prepareMs += awake;
     }
+    last = now;
   }, tickMs);
   log(`service ${commit ?? "(unversioned)"} started, pid ${process.pid}`);
   try {
