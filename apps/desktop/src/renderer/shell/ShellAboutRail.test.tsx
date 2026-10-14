@@ -15,6 +15,7 @@ import { act, cleanup, fireEvent, screen, waitFor, within } from "@testing-libra
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import { CHATS_TAB_PATH, chatTabPath } from "../workbench/workbenchState";
+import type { DohcDesktopBridge } from "../../ipc/bridgeContract";
 import { deferred } from "../../testing/deferred";
 import {
   WORKSPACE,
@@ -181,6 +182,42 @@ describe("About rail (right side)", () => {
     expect((await within(await screen.findByTestId("about-rail")).findByTestId("linked-chats-empty")).textContent).toBe(
       "Open a file or a conversation to see who has access.",
     );
+  });
+
+  it("reveals a file mention in the thread already open in About", async () => {
+    const bridge = Object.assign(makeBridge(Promise.resolve(STORED_STATE)), {
+      listChatMessages: vi.fn<DohcDesktopBridge["listChatMessages"]>(),
+      listChatReactions: vi.fn<DohcDesktopBridge["listChatReactions"]>(async () => ({ reactions: [], viewerAuthorId: "Reader" })),
+      markChatThreadRead: vi.fn<DohcDesktopBridge["markChatThreadRead"]>(async () => ({ lastReadSequence: 300, revision: 1 })),
+      listChatFileMentions: vi.fn<DohcDesktopBridge["listChatFileMentions"]>(),
+    });
+    const thread = { id: "file-thread", title: "Long file conversation", createdAtMs: 1, updatedAtMs: 1 };
+    const messages = Array.from({ length: 300 }, (_, index) => ({
+      id: `file-message-${index}`, threadId: thread.id,
+      authorKind: "human" as const, authorDisplayName: "Reader",
+      body: `File message ${index}`, createdAtMs: index + 1,
+    }));
+    bridge.listFileChats.mockResolvedValue({ fileObjectId: "object-b", threads: [thread] });
+    vi.mocked(bridge.listChatMessages).mockResolvedValue({ messages });
+    bridge.listChatFileMentions.mockResolvedValue({ mentions: [{
+      thread, message: messages[0]!,
+      attachment: { attachmentId: "file-attachment", threadId: thread.id,
+        messageId: messages[0]!.id, targetKind: "file", objectId: "object-b",
+        pathHint: "b.md", createdAtMs: 1 },
+    }] });
+    const scrolled: Array<string | null> = [];
+    vi.mocked(Element.prototype.scrollIntoView).mockImplementation(function (this: Element) {
+      scrolled.push(this.getAttribute("data-message-id"));
+    });
+    const user = userEvent.setup();
+    renderShell(bridge);
+    await user.click(await screen.findByTestId("linked-chat-open"));
+    await within(await screen.findByTestId("linked-chat-thread")).findByText("File message 299");
+    await waitFor(() => expect(scrolled).toContain("file-message-299"));
+    scrolled.length = 0;
+    await user.click(await screen.findByTestId("chat-file-mention"));
+    await waitFor(() => expect(scrolled).toContain("file-message-0"));
+    expect(screen.getByTestId("tab-b.md").dataset.active).toBe("true");
   });
 
   it("opens a chat search hit on another file in About once", async () => {
