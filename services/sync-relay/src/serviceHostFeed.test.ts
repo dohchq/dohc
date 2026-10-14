@@ -360,8 +360,12 @@ it("settles a moved or replaced document's work without taking back its old loca
   });
   const before = placement();
   expect(before).toMatchObject({atA: undefined, atB: "object-successor"});
-  // Each write names its own document's earlier content, which the host can no longer read.
+  // Each write names its own document's earlier content, which the host can no
+  // longer read, so it uploads that content first, as the engine does.
   expect(await f.blobStatus(A.sha256)).toBe(404);
+  const have = await f.request("POST", "blobs/have", JSON.stringify({sha256s: [A.sha256, B.sha256, moved.sha256, replaced.sha256]}));
+  expect(await have.json()).toEqual({ok: true, missing: [A.sha256, B.sha256]});
+  for (const content of [A, B]) await f.upload(content);
   const response = await f.push([
     ["moment.append", write(binding.objectId, "docs/a.md", moved, {momentId: "drain-a", payloadBeforePath: "docs/a.md", payloadBeforeBlobSha256: A.sha256})],
     ["moment.append", write("object-b", "docs/b.md", replaced, {momentId: "drain-b", payloadBeforePath: "docs/b.md", payloadBeforeBlobSha256: B.sha256})],
@@ -377,9 +381,8 @@ it("settles a moved or replaced document's work without taking back its old loca
   // Neither the location nor the current file moves back, and neither document is current again.
   expect(placement()).toEqual(before);
   expect([...f.storage.readServiceHostFeedScope(ws)!.departed]).toEqual([binding.objectId, "object-b"]);
-  expect(await f.blobStatus(A.sha256)).toBe(404);
-  // A departed document's writes reach neither another document's history
-  // nor the owner's edits since it left: each fails like a blob the relay never had.
+  // A departed document's writes reach neither the owner's edits since it
+  // left nor the file now at its path: each fails like a blob the relay never had.
   const privateEdit = blob("edited after leaving");
   f.storage.putBlob({workspaceId: ws, sha256: privateEdit.sha256, content: privateEdit.content, createdAtMs: 1});
   f.append(["moment.append", write(binding.objectId, "private/a.md", privateEdit, {momentId: "private-edit"})]);
@@ -391,7 +394,7 @@ it("settles a moved or replaced document's work without taking back its old loca
   const absent = await answer(binding.objectId, "docs/a.md", "d".repeat(64));
   expect(absent[0]).toBe(422);
   expect(await answer(binding.objectId, "docs/a.md", privateEdit.sha256)).toEqual(absent);
-  expect(await answer("object-b", "docs/b.md", A.sha256)).toEqual(absent);
+  expect(await answer("object-b", "docs/b.md", successor.sha256)).toEqual(absent);
   expect(f.hostCoordinate(3)).toBeNull();
   // A reopened relay keeps which rows departed, and the column admits nothing else.
   openSyncRelayStorage(f.path, f.config).close();
@@ -399,11 +402,40 @@ it("settles a moved or replaced document's work without taking back its old loca
   expect(() => f.raw.prepare("UPDATE sync_relay_log SET relay_admission='elsewhere' WHERE origin_id=?").run(HOST_ORIGIN)).toThrow(/CHECK/);
 });
 
+it("answers a write naming the owner's edits to a revoked document exactly like an absent digest", async () => {
+  const f = await fixture();
+  const own = blob("host edit"), edited = blob("edited after revocation"), away = blob("edited while moved away");
+  await f.upload(own);
+  for (const content of [edited, away]) f.storage.putBlob({workspaceId: ws, sha256: content.sha256, content: content.content, createdAtMs: 1});
+  f.setGrant(scope.shareId, "status='revoked',revoked_at_ms=20");
+  const answer = async (sha256: string) => {
+    const response = await f.push([["moment.append", write(binding.objectId, "docs/a.md", own,
+      {momentId: "named", payloadBeforePath: "docs/a.md", payloadBeforeBlobSha256: sha256})]]);
+    return [response.status, (await response.text()).replaceAll(sha256, "named")];
+  };
+  const absent = await answer("d".repeat(64));
+  expect(absent[0]).toBe(422);
+  // Still enrolled and at its path, so writable, but out of the share.
+  f.append(["moment.append", write(binding.objectId, "docs/a.md", edited, {momentId: "edit-after-revocation"})]);
+  const revoked = f.storage.readServiceHostFeedScope(ws)!;
+  expect([[...revoked.hosted.keys()], revoked.shared.size, revoked.departed.size]).toEqual([[binding.objectId], 0, 0]);
+  expect(await answer(edited.sha256)).toEqual(absent);
+  // Moved away, edited there, and moved back to its enrolled path.
+  f.append(["moment.append", rename(binding.objectId, "docs/a.md", "private/a.md", edited)],
+    ["moment.append", write(binding.objectId, "private/a.md", away, {momentId: "edit-away"})],
+    ["moment.append", {...rename(binding.objectId, "private/a.md", "docs/a.md", away), momentId: "move-back"}]);
+  expect(f.storage.readServiceHostFeedScope(ws)!.departed.size).toBe(0);
+  expect(await answer(away.sha256)).toEqual(absent);
+  expect(f.hostCoordinate(0)).toBeNull();
+  for (const sha256 of [edited.sha256, away.sha256]) expect(await f.blobStatus(sha256)).toBe(404);
+});
+
 it("keeps a departed document's writes out of share delivery and in the owner's log", async () => {
   const f = await fixture();
   const drained = blob("drained after move");
   f.storage.putServiceHostBlob({workspaceId: ws, sha256: drained.sha256, content: drained.content, createdAtMs: 1});
   f.append(["moment.append", rename(binding.objectId, "docs/a.md", "private/a.md", A)]);
+  await f.upload(A);
   const queries = createShareReadQueries(f.storage, 500);
   const selector: AnyShareSelector = {paths: ["docs"], versionId: null, access: "edit"};
   const freshness = () => queries.newestFilteredOpFreshness(ws, selector, 0);

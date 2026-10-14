@@ -2254,6 +2254,42 @@ fn journal_live_update(store: &mut EngineStore, object_id: &str, update: &[u8]) 
     seq
 }
 
+/// A document that leaves the share takes its blobs out of the host's reach,
+/// so the relay reports them missing even after the host uploaded them. Each
+/// push asks again and uploads them, so the drain lands.
+#[test]
+fn each_hosted_push_uploads_what_the_relay_reports_missing() {
+    let (_scratch, _path, mut store) = hosted_store();
+    host_document(&mut store, "doc-a");
+    let client = RelaySyncClient::new(HostedFeed::new());
+    let feed = client.transport();
+    let push = |store: &mut EngineStore| {
+        client
+            .push_workspace(store, "ws", &NoFaults, &NoLiveLeases, 3_000, 1_000_000)
+            .unwrap()
+    };
+    let update = b"drained update";
+    let sha = dohc_engine_storage::hex_sha256(update);
+    journal_live_update(&mut store, "doc-a", update);
+    assert!(matches!(
+        push(&mut store),
+        SyncPassOutcome::Complete { pushed: 1, .. }
+    ));
+    assert!(feed.blobs.lock().unwrap().contains_key(&sha));
+
+    feed.blobs.lock().unwrap().clear();
+    journal_live_update(&mut store, "doc-a", update);
+    assert!(matches!(
+        push(&mut store),
+        SyncPassOutcome::Complete { pushed: 1, .. }
+    ));
+    assert_eq!(
+        feed.blobs.lock().unwrap().get(&sha).map(Vec::as_slice),
+        Some(update.as_slice())
+    );
+    assert_eq!(read_pushed_seq(&store, "ws", HOST).unwrap(), 1);
+}
+
 fn recorded_refusals(store: &EngineStore) -> Vec<(String, i64, String, String)> {
     store
         .read_with(|conn| {
