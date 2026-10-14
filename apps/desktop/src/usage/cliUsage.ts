@@ -19,7 +19,8 @@ const covered = new Set<CapabilityId>(CLI_USAGE_ACTION_IDS);
 // count cannot distinguish those capabilities.
 const mcpCovered = new Set<CapabilityId>(CLI_USAGE_ACTION_IDS.filter(id => id !== "file.write"));
 // Automation coverage for dataset.operation.invoke counts successful invocations
-// of write-capable actions, including no-ops: receipts have no change signal.
+// of write-capable actions, including no-ops. The change signal is not kept
+// through receipt replay or the saved run.
 const automationCovered = new Set<CapabilityId>(AUTOMATION_USAGE_ACTION_IDS);
 export const DESKTOP_USAGE_COVERAGE = RENDERER_USAGE_COVERAGE.map(pair => ({ ...pair,
   status: (pair.door === "cli" && covered.has(pair.capabilityId)
