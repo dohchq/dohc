@@ -71,7 +71,7 @@ function fixture(rootPath = resolve("cli-workspace")) {
         if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
         throw new VersionedTextStoreError("target-path-exists", "File already exists");
       }
-      return { resolvedAbsolutePath: absolutePath, materializeOutcome: "applied" };
+      return { resolvedAbsolutePath: absolutePath, materializeOutcome: "applied", objectId: "object", momentId: "moment", deduped: false };
     }),
     // Runs the move or delete as the capture does, with no live documents to
     // settle: the policy is read once the change runs, History holds every
