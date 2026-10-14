@@ -1,3 +1,4 @@
+import { chatOperations } from "./bridgeContract";
 import { workspaceFileRef } from "../workspaces/resolveEngineFiles";
 import { describe, expect, it, vi } from "vitest";
 import type { ChatBookmark, ChatMessage, ChatThread } from "@dohc/workspace-contracts/engine";
@@ -179,7 +180,7 @@ function fixture(kind: ScopeKind = "local") {
 
 const mutations = [
   { name: "create", channel: CHANNELS.createFileChat, payload: { workspaceId: "workspace", path: "notes/a.md", title: "Notes" }, method: "createThread" },
-  { name: "send", channel: CHANNELS.sendChatMessage, payload: { workspaceId: "workspace", threadId: "thread", body: "Hello" }, method: "sendMessage" },
+  { name: "send", channel: chatOperations.sendChatMessage.channel, payload: { workspaceId: "workspace", threadId: "thread", body: "Hello" }, method: "sendMessage" },
   { name: "decision", channel: CHANNELS.resolveChatDecision, payload: { workspaceId: "workspace", threadId: "thread", messageId: "message", resolvedByMessageId: "reply" }, method: "resolveChatDecision" },
   { name: "reaction", channel: CHANNELS.setChatReaction, payload: { workspaceId: "workspace", threadId: "thread", messageId: "message", emoji: "👍", state: "added" }, method: "setReaction" },
 ] as const;
@@ -196,7 +197,7 @@ describe("the personal feed names each item's viewer", () => {
         matchedBy: ["thread" as const],
       })),
     });
-    const result = await test.invoke(CHANNELS.listPersonalChatFeed, { workspaceId: "workspace" }) as {
+    const result = await test.invoke(chatOperations.listPersonalChatFeed.channel, { workspaceId: "workspace" }) as {
       items: Array<{ viewerAuthorId?: string }>;
     };
     expect(result.items.map((row) => row.viewerAuthorId)).toEqual(["local-owner", "recipient"]);
@@ -218,7 +219,7 @@ describe("the personal feed names each item's viewer", () => {
     test.storeMethods.listPersonalFeed.mockResolvedValueOnce({
       items: [item("thread", "message-own", "local-owner"), item("thread-joined", "message-joined", "local-owner")],
     });
-    const result = await test.invoke(CHANNELS.listPersonalChatFeed, { workspaceId: "workspace" }) as {
+    const result = await test.invoke(chatOperations.listPersonalChatFeed.channel, { workspaceId: "workspace" }) as {
       items: Array<{ viewerAuthorId?: string; reactions: Array<{ authorId: string }> }>;
     };
     expect(result.items.map((row) => row.viewerAuthorId)).toEqual(["verified-owner", "recipient"]);
@@ -300,7 +301,7 @@ describe("registered chat writes", () => {
 
   it("sends as the local person whatever identity the payload claims", async () => {
     const test = fixture();
-    await test.invoke(CHANNELS.sendChatMessage, {
+    await test.invoke(chatOperations.sendChatMessage.channel, {
       workspaceId: "workspace", threadId: "thread", body: "Hello", authorUserId: "forged",
       authorActorKey: '{"kind":"installation","installationId":"forged"}',
       author: { kind: "agent", displayName: "Forged" }, fileReferences: [{ path: "notes/a.md" }],
@@ -350,7 +351,7 @@ describe("registered chat reads and reader-local state", () => {
     const opened = deferred();
     const entered = deferred();
     test.openWorkspaceActivity.mockImplementationOnce(() => { entered.resolve(); return opened.promise; });
-    const read = test.invoke(CHANNELS.listChatMessages, { workspaceId: "workspace", threadId: "thread" });
+    const read = test.invoke(chatOperations.listChatMessages.channel, { workspaceId: "workspace", threadId: "thread" });
     const rejected = expect(read).rejects.toThrow("retired workspace authority");
     await entered.promise;
     const retired = test.authorities.invalidate("workspace");
@@ -379,7 +380,7 @@ describe("registered channels and personal chat projections", () => {
     expect(test.storeMethods.createChannel).toHaveBeenCalledWith({ workspaceId: "workspace", name: "General", kind: "channel", folderPath: "general" });
     expect(test.ensureGroupFolder).toHaveBeenCalledWith(test.workspace, "general");
     expect(test.ensureGroupFolder.mock.invocationCallOrder[0]).toBeLessThan(test.storeMethods.createChannel.mock.invocationCallOrder[0]!);
-    await test.invoke(CHANNELS.startChannelThread, { workspaceId: "workspace", channelId: "channel", body: "First message" });
+    await test.invoke(chatOperations.startChannelThread.channel, { workspaceId: "workspace", channelId: "channel", body: "First message" });
     expect(test.storeMethods.startChannelThread).toHaveBeenCalledWith({
       workspaceId: "workspace", channelId: "channel", body: "First message",
       author: { kind: "human", displayName: "Sam" }, authorUserId: "verified-owner",
@@ -456,11 +457,11 @@ describe("registered channels and personal chat projections", () => {
     expect(test.activity.queueCloudSync).not.toHaveBeenCalled();
   });
 
-  it.each([CHANNELS.createChatChannel, CHANNELS.startChannelThread, CHANNELS.saveChatBookmark, CHANNELS.archiveChatBookmark, CHANNELS.setChatFollow] as const)("keeps workspace-only operation %s behind capture", async channel => {
+  it.each([CHANNELS.createChatChannel, chatOperations.startChannelThread.channel, CHANNELS.saveChatBookmark, CHANNELS.archiveChatBookmark, CHANNELS.setChatFollow] as const)("keeps workspace-only operation %s behind capture", async channel => {
     const test = fixture("edit");
     const payloads = {
       [CHANNELS.createChatChannel]: { workspaceId: "workspace", name: "General" },
-      [CHANNELS.startChannelThread]: { workspaceId: "workspace", channelId: "channel", body: "First" },
+      [chatOperations.startChannelThread.channel]: { workspaceId: "workspace", channelId: "channel", body: "First" },
       [CHANNELS.saveChatBookmark]: { workspaceId: "workspace", target: { kind: "thread", threadId: "thread" }, mode: "live" },
       [CHANNELS.archiveChatBookmark]: { workspaceId: "workspace", bookmarkId: "bookmark" },
       [CHANNELS.setChatFollow]: { workspaceId: "workspace", target: { kind: "thread", threadId: "thread" }, state: "following" },
@@ -491,7 +492,7 @@ describe("targeted file resolution", () => {
       { attachment, thread: test.thread, message: test.message },
       { attachment: { ...attachment, attachmentId: "replacement-attachment", objectId: "replacement" }, thread: test.thread, message: test.message },
     ]);
-    expect(await test.invoke(CHANNELS.listChatFileMentions, { workspaceId: "workspace", path: "./notes//a.md" })).toMatchObject({ mentions: [
+    expect(await test.invoke(chatOperations.listChatFileMentions.channel, { workspaceId: "workspace", path: "./notes//a.md" })).toMatchObject({ mentions: [
       { attachment: { objectId: "replacement", pathHint: "notes/a.md" } },
     ] });
     expect(test.captureMethods.resolveFileForPath).toHaveBeenCalledExactlyOnceWith("./notes//a.md");
@@ -520,8 +521,8 @@ describe("targeted file resolution", () => {
      thread: { ...h.thread, channelId: "channel" }, messageCount: 1, lastReadSequence: 0, unreadCount: 1, openDecisionCount: 0,
      openingMessage: { ...row, bodySnippet: row.body, reactions: [] },
    }]);
-   const listed = await h.invoke(CHANNELS.listChatMessages, { workspaceId: "workspace", threadId: "thread" }) as { messages: ChatMessageRecord[] };
-   const feed = await h.invoke(CHANNELS.listChannelThreads, { workspaceId: "workspace", channelId: "channel" }) as { threads: { openingMessage: { presentation: ChatMessageRecord["presentation"] } }[] };
+   const listed = await h.invoke(chatOperations.listChatMessages.channel, { workspaceId: "workspace", threadId: "thread" }) as { messages: ChatMessageRecord[] };
+   const feed = await h.invoke(chatOperations.listChannelThreads.channel, { workspaceId: "workspace", channelId: "channel" }) as { threads: { openingMessage: { presentation: ChatMessageRecord["presentation"] } }[] };
    expect(feed.threads[0]!.openingMessage.presentation).toEqual(listed.messages[0]!.presentation);
    expect(listed.messages[0]!.presentation.self).toBe(true);
    expect(JSON.stringify(listed)).not.toContain("authorActorKey");
@@ -533,7 +534,7 @@ it("keeps two unknown authors distinct in a received share view", async () => {
   const alice = { ...h.message, author: { kind: "human" as const, displayName: "Alice" }, authorUserId: "alice" };
   const bob = { ...alice, id: "bob", author: { kind: "human" as const, displayName: "Bob" }, authorUserId: "bob" };
   h.storeMethods.listMessages.mockResolvedValueOnce([alice, bob, { ...alice, id: "alice-again" }]);
-  const result = await h.invoke(CHANNELS.listChatMessages, { workspaceId: "workspace", threadId: "thread" }) as { messages: ChatMessageRecord[] };
+  const result = await h.invoke(chatOperations.listChatMessages.channel, { workspaceId: "workspace", threadId: "thread" }) as { messages: ChatMessageRecord[] };
   const tokens = result.messages.map(row => row.presentation);
   expect(tokens[0]).toMatchObject({ hue: null, self: false });
   expect(tokens[1]!.group).not.toBe(tokens[0]!.group);
