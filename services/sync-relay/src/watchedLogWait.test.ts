@@ -150,6 +150,19 @@ describe("owner watched held read", () => {
     expect(await immediate.text()).toBe('{"ok":true,"ops":[],"nextCursor":7,"hasMore":false}');
   });
 
+  it("holds a steady watched read to its full deadline", async () => {
+    const f = await fixture();
+    vi.useFakeTimers();
+    f.setWatched("a", true);
+    let answered = false;
+    const held = f.h(request("owner", "/sync/a/log?since=0&hold=30000&watched=1")).then(r => { answered = true; return r; });
+    await vi.advanceTimersByTimeAsync(29_999);
+    expect(answered).toBe(false);
+    expect(f.activity.stats().waiters).toBe(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(await (await held).text()).toBe('{"ok":true,"ops":[],"nextCursor":0,"hasMore":false,"watched":true}');
+  });
+
   it("a non-owner gets 404 without inspecting or creating watch state", async () => {
     const f = await fixture();
     const response = await f.h(request("stranger", "/sync/a/log?since=0&hold=30000&watched=1"));

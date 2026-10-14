@@ -24,7 +24,6 @@ export class ReplicaWatches {
   private readonly workspaces = new Map<string, WorkspaceWatch>();
   private readonly maxWorkspaces: number;
   private readonly maxHoldersPerWorkspace: number;
-  private holders = 0;
 
   constructor(
     private readonly activity: Pick<DiscussionActivityHub, "wake">,
@@ -55,7 +54,6 @@ export class ReplicaWatches {
       watch = { holders: new Map() };
       this.workspaces.set(workspaceId, watch);
     }
-    if (!watch.holders.has(holderKey)) this.holders += 1;
     watch.holders.set(holderKey, Date.now() + ttlMs);
     this.schedule(workspaceId, watch);
     if (started) this.activity.wake(ownerLogWaitGroup(workspaceId));
@@ -64,7 +62,7 @@ export class ReplicaWatches {
   release(workspaceId: string, holderKey: string): void {
     const watch = this.workspaces.get(workspaceId);
     if (!watch) return;
-    if (watch.holders.delete(holderKey)) this.holders -= 1;
+    watch.holders.delete(holderKey);
     this.expire(workspaceId, watch);
     if (watch.holders.size > 0) this.schedule(workspaceId, watch);
   }
@@ -74,7 +72,9 @@ export class ReplicaWatches {
   }
 
   stats(): { workspaces: number; holders: number } {
-    return { workspaces: this.workspaces.size, holders: this.holders };
+    let holders = 0;
+    for (const watch of this.workspaces.values()) holders += watch.holders.size;
+    return { workspaces: this.workspaces.size, holders };
   }
 
   dispose(): void {
@@ -82,16 +82,12 @@ export class ReplicaWatches {
       watch.holders.clear();
       this.remove(workspaceId, watch);
     }
-    this.holders = 0;
   }
 
   private expire(workspaceId: string, watch: WorkspaceWatch): void {
     const now = Date.now();
     for (const [key, expiresAt] of watch.holders) {
-      if (expiresAt <= now) {
-        watch.holders.delete(key);
-        this.holders -= 1;
-      }
+      if (expiresAt <= now) watch.holders.delete(key);
     }
     if (watch.holders.size === 0) this.remove(workspaceId, watch);
   }
