@@ -355,31 +355,38 @@ async function main([command, ...args]) {
   if (command === "cancel") { await cancel(root, args[0]); return console.log(`asked the service to stop ${args[0]}`); }
   if (command === "install" || command === "upgrade") return install(root, ref);
   if (command === "restart") {
-    const { record } = serviceState(root);
+    const { record, alive } = serviceState(root);
     if (record?.running && !args.includes("--now")) throw new Error("A run is in progress. Wait for it, or pass --now to stop it; it will be retried.");
     // The task's own process is conhost, so ending the task leaves the supervisor running. Stop the supervisor
     // itself; its job stops the service and any run. It is found by its command line, which names this root's
-    // script, and stopped through a handle held before that check, so a reused pid is never stopped.
+    // script, and stopped through a handle held before that check, so a reused pid is never stopped. The script
+    // runs in powershell.exe, never pwsh.exe: its own command line names the supervisor's script too.
     const script = join(root, "supervisor.ps1").replaceAll("'", "''");
     const stopped = spawnSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", `
       $ErrorActionPreference = 'Stop'
-      $mine = { param($id) $p = Get-CimInstance Win32_Process -Filter "ProcessId = $id"; $p -and $p.CommandLine -and $p.CommandLine.Contains('${script}') }
+      $mine = { param($id) $p = Get-CimInstance Win32_Process -Filter "ProcessId = $id"; $p -and $p.CommandLine -and $p.CommandLine.IndexOf('${script}', [StringComparison]::OrdinalIgnoreCase) -ge 0 }
+      $found = 0
       foreach ($candidate in Get-CimInstance Win32_Process -Filter "Name='pwsh.exe'") {
         if (-not (& $mine $candidate.ProcessId)) { continue }
         $process = Get-Process -Id $candidate.ProcessId -ErrorAction SilentlyContinue
         if (-not $process) { continue }
         $null = $process.Handle
         if (-not (& $mine $process.Id)) { continue }
+        $found += 1
         try { $process.Kill() } catch { if (-not $process.HasExited) { throw } }
         if (-not $process.WaitForExit(10000)) { throw "supervisor $($process.Id) did not exit" }
-      }`], { encoding: "utf8", windowsHide: true, timeout: 60_000 });
+      }
+      # A live service always has a supervisor; finding none means this root names it differently.
+      if ($found -eq 0 -and ${alive ? "$true" : "$false"}) { throw 'no supervisor for this queue root was found, though its service is running' }`], { encoding: "utf8", windowsHide: true, timeout: 60_000 });
     if (stopped.status !== 0) throw new Error(`The supervisor could not be stopped, so the service was not restarted: ${(stopped.stderr || stopped.stdout || stopped.error?.message || "").trim()}`);
+    // Every service is stopped now, so the last recorded pid is a dead one, even if the supervisor restarted it meanwhile.
+    const stoppedPid = serviceState(root).record?.pid;
     spawnSync("schtasks.exe", ["/end", "/tn", taskName], { windowsHide: true });
     spawnSync("schtasks.exe", ["/run", "/tn", taskName], { windowsHide: true });
     // Report a restart only once a new service is beating; otherwise the task's five-minute trigger finishes it.
     for (let waited = 0; waited < 30_000; waited += 500) {
       const next = serviceState(root);
-      if (next.alive && next.record.pid !== record?.pid) return console.log(`restarted the verification queue service (pid ${next.record.pid})`);
+      if (next.alive && next.record.pid !== stoppedPid) return console.log(`restarted the verification queue service (pid ${next.record.pid})`);
       await sleep(500);
     }
     return console.log("asked Task Scheduler to restart the verification queue service; it starts within five minutes");
