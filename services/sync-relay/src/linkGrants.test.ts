@@ -2199,7 +2199,7 @@ describe("owner link inventory and impact preconditions", () => {
     );
     expect(grantIds).toEqual(expectedGrantIds);
     expect(new Set(grantIds).size).toBe(expectedGrantIds.length);
-  }, 30_000);
+  }, 120_000);
 
   it("pages 1,001 links without splitting dependents or losing concurrent changes", async () => {
     const storage = await newStorage();

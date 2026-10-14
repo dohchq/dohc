@@ -7,7 +7,7 @@
 [profile.default]
 # Bound every test, so a slow or hung test FAILS the gate loudly instead of
 # stalling it (#809) or quietly doubling its test step. A test still running
-# at period x terminate-after = 3 minutes reports TIMEOUT and fails the run,
+# at period x terminate-after = 6 minutes reports TIMEOUT and fails the run,
 # which makes the gate's `test --workspace` row FAIL. Checked with a 1s period
 # on a 4.5s test: TERMINATING at 1.000s, TIMEOUT at 1.073s, nextest exit 100.
 #
@@ -16,12 +16,13 @@
 # minutes, set by three large-history tests at 496s to 660s. Those three now
 # take 37s to 58s run together. In full collab and runtime suite runs the
 # slowest test is `admitted_baselines_commit_atomically_and_replay_after_reopen`:
-# 37s alone and 85s to 122s beside the rest of its suite. 3 minutes is 1.5x
-# that worst run.
+# 37s alone and 85s to 122s beside the rest of its suite. On Oct 13 a gate run
+# on a loaded host timed out two capacity tests at 3 minutes that took 48s to
+# 63s in another gate run that day. 6 minutes is 3x the worst ordinary run.
 #
 # A test that legitimately needs longer gets its own override here, with its
 # measured time. Make it faster first.
 #
 # `period` keeps nextest's default of 60s, so the SLOW warnings the gate log
 # already prints stay as they are.
-slow-timeout = { period = "60s", terminate-after = 3 }
+slow-timeout = { period = "60s", terminate-after = 6 }
