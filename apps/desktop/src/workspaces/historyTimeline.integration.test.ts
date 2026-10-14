@@ -62,7 +62,11 @@ async function fixture() {
   await store.ensureMainVersion({ workspaceId: "workspace" });
   const write = async (id: string, time: number, path = "notes.md") => { clock = time; return store.writeTextFile({ workspaceId: "workspace", versionId: "main", path, text: id, momentId: id, metadata: { origin: "api" } }); };
   const signal = new AbortController();
-  const local: TimelineReads["local"] = (positions, limit) => ({ pages: host.historyHeads("owner", { workspaceId: "workspace", positions, limit }), transferred: [], sourceCount: Number(db.prepare("SELECT count(*) AS count FROM dohc_dataset_catalog WHERE workspace_id=?").get("workspace")?.count) });
+  const local: TimelineReads["local"] = (positions, limit) => {
+    const pages = host.historyHeads("owner", { workspaceId: "workspace", positions, limit });
+    return { pages, sourceIds: pages.map(page => page.datasetId), transferred: [],
+      sourceCount: Number(db.prepare("SELECT count(*) AS count FROM dohc_dataset_catalog WHERE workspace_id=?").get("workspace")?.count) };
+  };
   const reads: TimelineReads = { scope: "test", signal: signal.signal, assertCurrent() {}, engine: sharedViewHistory(store, "workspace"), local,
     remote: async () => { throw new Error("unexpected remote"); }, names: { agent: () => undefined, person: () => undefined, automation: () => null, named: a => a.userId } };
   const list = createHistoryTimeline();
@@ -123,7 +127,7 @@ it("fixes the source set and drops a deleted Collection without shifting other p
 it("excludes a deadline source for the rest of the chain and recovers only on refresh", async () => {
   const f = await fixture(), a = f.initialize(1), remote = uuid(8), started = deferred<void>();
   f.event(a, 100); f.event(a, 500);
-  f.reads.local = (positions, limit) => ({ pages: f.host.historyHeads("owner", { workspaceId: "workspace", positions, limit }), transferred: [remote] });
+  f.reads.local = (positions, limit) => ({ pages: f.host.historyHeads("owner", { workspaceId: "workspace", positions, limit }), transferred: [remote], sourceIds: [a, remote], sourceCount: 2 });
   const remoteRead = vi.fn<TimelineReads["remote"]>(async (_id, _before, signal) => {
     started.resolve(); return new Promise((_, reject) => signal.addEventListener("abort", () => reject(signal.reason), { once: true }));
   });
@@ -143,7 +147,7 @@ it("excludes a deadline source for the rest of the chain and recovers only on re
 it("prefetches the final emitted position with real 51-entry remote pages", async () => {
   const f = await fixture(), remote = f.initialize(8);
   for (let t = 1; t <= 120; t++) f.event(remote, t);
-  f.reads.local = () => ({ pages: [], transferred: [remote] });
+  f.reads.local = () => ({ pages: [], transferred: [remote], sourceIds: [remote], sourceCount: 1 });
   f.reads.remote = vi.fn(async (_id, before) => f.host.history("owner", { workspaceId: "workspace", datasetId: remote, beforeRevision: before, limit: 51, metadataOnly: true }));
   const first = await f.page({ object: { kind: "dataset", datasetId: remote } });
   expect(first.entries).toHaveLength(50);
@@ -157,7 +161,7 @@ it("prefetches the final emitted position with real 51-entry remote pages", asyn
 it("starts a prefetched source's deadline when a page waits, not during idle time", async () => {
   const f = await fixture(), remote = f.initialize(8), entered = deferred<void>();
   for (let t = 1; t <= 120; t++) f.event(remote, t);
-  f.reads.local = () => ({ pages: [], transferred: [remote] });
+  f.reads.local = () => ({ pages: [], transferred: [remote], sourceIds: [remote], sourceCount: 1 });
   const background = deferred<Awaited<ReturnType<TimelineReads["remote"]>>>();
   f.reads.remote = vi.fn(async (_id, before) => {
     if (before !== 71) return f.host.history("owner", { workspaceId: "workspace", datasetId: remote, beforeRevision: before, limit: 51, metadataOnly: true });
@@ -176,7 +180,7 @@ it("starts a prefetched source's deadline when a page waits, not during idle tim
 
 it("rejects a stale workspace reply after an asynchronous source returns", async () => {
   const f = await fixture(), entered = deferred<void>(), reply = deferred<Awaited<ReturnType<TimelineReads["remote"]>>>();
-  f.reads.local = () => ({ pages: [], transferred: [uuid(8)] });
+  f.reads.local = () => ({ pages: [], transferred: [uuid(8)], sourceIds: [uuid(8)], sourceCount: 1 });
   f.reads.remote = async () => { entered.resolve(); return reply.promise; };
   let current = true; f.reads.assertCurrent = () => { if (!current) throw new Error("workspace changed"); };
   const pending = expect(f.page()).rejects.toThrow("workspace changed"); await entered.promise; current = false;
@@ -247,7 +251,7 @@ it("discloses a local Collection transferred between pages instead of declaring 
   const f = await fixture(), a = f.initialize(1), b = f.initialize(2);
   f.event(a, 600); f.event(a, 500); f.event(b, 400);
   const first = await f.page({ limit: 1 });
-  f.reads.local = (positions, limit) => ({ transferred: [a], pages: f.host.historyHeads("owner", { workspaceId: "workspace", positions, limit, skip: [a] }) });
+  f.reads.local = (positions, limit) => ({ transferred: [a], sourceIds: [a, b], sourceCount: 2, pages: f.host.historyHeads("owner", { workspaceId: "workspace", positions, limit, skip: [a] }) });
   const next = await f.page({ cursor: first.nextCursor! });
   expect(next).toMatchObject({ completeness: "partial", unavailableSources: [{ datasetId: a, reason: "unavailable" }] });
   expect(next.entries.map(label)).not.toContain(a + ":1");
@@ -287,7 +291,7 @@ it("rejects duplicate, oversized, malformed-lineage, and mixed-version cursors b
 
 it("caps remote concurrency and does not refetch a cached head outside the window", async () => {
   const f = await fixture(), ids = Array.from({ length: 6 }, (_, n) => uuid(n + 8)), reached = deferred<void>(), release = deferred<void>();
-  f.reads.local = () => ({ pages: [], transferred: ids });
+  f.reads.local = () => ({ pages: [], transferred: ids, sourceIds: ids, sourceCount: ids.length });
   let active = 0, maximum = 0, started = 0;
   f.reads.remote = vi.fn(async id => {
     active++; maximum = Math.max(maximum, active); if (++started === 4) reached.resolve();
@@ -299,7 +303,7 @@ it("caps remote concurrency and does not refetch a cached head outside the windo
 
   const g = await fixture(), remote = g.initialize(8); g.event(remote, 1);
   for (let n = 0; n < 100; n++) await g.write("file-" + n, 1000 + n);
-  g.reads.local = () => ({ pages: [], transferred: [remote] });
+  g.reads.local = () => ({ pages: [], transferred: [remote], sourceIds: [remote], sourceCount: 1 });
   const read = vi.fn(async () => g.host.history("owner", { workspaceId: "workspace", datasetId: remote, limit: 51, metadataOnly: true })); g.reads.remote = read;
   const first = await g.page(); expect(read).toHaveBeenCalledOnce();
   const second = await g.page({ cursor: first.nextCursor! });
@@ -308,7 +312,7 @@ it("caps remote concurrency and does not refetch a cached head outside the windo
 
 it("drops a confirmed deleted remote Collection without leaving pages partial", async () => {
   const f = await fixture(), remote = f.initialize(8); f.event(remote, 600); f.event(remote, 500);
-  f.reads.local = () => ({ pages: [], transferred: [remote] });
+  f.reads.local = () => ({ pages: [], transferred: [remote], sourceIds: [remote], sourceCount: 1 });
   const reply = deferred<Awaited<ReturnType<TimelineReads["remote"]>>>();
   f.reads.remote = async (_id, before) => before === undefined ? f.host.history("owner", { workspaceId: "workspace", datasetId: remote, limit: 51, metadataOnly: true }) : reply.promise;
   const first = await f.page({ object: { kind: "dataset", datasetId: remote }, limit: 1 });
@@ -355,7 +359,7 @@ it("stops after 40 engine pages of hidden rows and carries the exact continuatio
 it("finishes a prefetched read under its own real authority lease after the page lease releases", async () => {
   const f = await fixture(), remote = f.initialize(8);
   for (let n = 1; n <= 120; n++) f.event(remote, n);
-  f.reads.local = () => ({ pages: [], transferred: [remote] });
+  f.reads.local = () => ({ pages: [], transferred: [remote], sourceIds: [remote], sourceCount: 1 });
   const workspace = { workspaceId: "workspace", rootPath: "root" }, state = {};
   const owner = createWorkspaceAuthorityOwner({ findWorkspace: () => workspace, canonicalizeRoot: path => path, createState: () => state });
   cleanups.push(() => owner.close());
@@ -396,7 +400,7 @@ it("confirms deletion through the owner route and keeps other failures partial",
 
 it("discloses an empty single-Collection deadline result and requires refresh", async () => {
   const f = await fixture(), remote = uuid(8), entered = deferred<void>();
-  f.reads.local = () => ({ pages: [], transferred: [remote] });
+  f.reads.local = () => ({ pages: [], transferred: [remote], sourceIds: [remote], sourceCount: 1 });
   f.reads.remote = async (_id, _before, signal) => { entered.resolve(); return new Promise((_, reject) => signal.addEventListener("abort", () => reject(signal.reason), { once: true })); };
   vi.useFakeTimers(); const waiting = f.page({ object: { kind: "dataset", datasetId: remote } }); await entered.promise;
   await vi.advanceTimersByTimeAsync(HISTORY_REMOTE_DEADLINE_MS);
@@ -406,7 +410,7 @@ it("discloses an empty single-Collection deadline result and requires refresh", 
 it("excludes a later prefetched source only after a page has waited 750 ms", async () => {
   const f = await fixture(), remote = f.initialize(8), entered = deferred<AbortSignal>();
   for (let n = 1; n <= 120; n++) f.event(remote, n);
-  f.reads.local = () => ({ pages: [], transferred: [remote] });
+  f.reads.local = () => ({ pages: [], transferred: [remote], sourceIds: [remote], sourceCount: 1 });
   f.reads.remote = async (_id, before, signal) => {
     if (before === undefined) return f.host.history("owner", { workspaceId: "workspace", datasetId: remote, metadataOnly: true, limit: 51 });
     entered.resolve(signal); return new Promise((_, reject) => signal.addEventListener("abort", () => reject(signal.reason), { once: true }));
@@ -429,7 +433,7 @@ const remoteReply = (datasetId: string, revisions = [2, 1]) => ({
 
 it("starts each foreground deadline after its slot, including later page-one sources", async () => {
   const f = await fixture(), ids = Array.from({ length: 12 }, (_, n) => uuid(n + 8)), entered = deferred<void>();
-  f.reads.local = () => ({ pages: [], transferred: ids });
+  f.reads.local = () => ({ pages: [], transferred: ids, sourceIds: ids, sourceCount: ids.length });
   let started = 0;
   f.reads.remote = async id => {
     if (++started === 4) entered.resolve();
@@ -446,7 +450,7 @@ it("starts each foreground deadline after its slot, including later page-one sou
 
 it("promotes queued prefetches ahead of background work without excluding foreground sources", async () => {
   const f = await fixture(), ids = Array.from({ length: 8 }, (_, n) => uuid(n + 8)), entered = deferred<void>();
-  f.reads.local = () => ({ pages: [], transferred: ids });
+  f.reads.local = () => ({ pages: [], transferred: ids, sourceIds: ids, sourceCount: ids.length });
   let background = true;
   const starts: string[] = [];
   f.reads.remote = async (id, before) => {
@@ -470,7 +474,7 @@ it("promotes queued prefetches ahead of background work without excluding foregr
 
 it("aborts a hung background read after the relay timeout and frees its slot", async () => {
   const f = await fixture(), ids = [uuid(8), uuid(9)], entered = deferred<AbortSignal>(), second = vi.fn();
-  f.reads.local = () => ({ pages: [], transferred: ids });
+  f.reads.local = () => ({ pages: [], transferred: ids, sourceIds: ids, sourceCount: ids.length });
   f.reads.remote = async (id, before, signal) => {
     if (before === undefined) return remoteReply(id);
     if (id === ids[0]) {
@@ -490,7 +494,7 @@ it("aborts a hung background read after the relay timeout and frees its slot", a
 it("gives another workspace its own slots while four foreground reads wait", async () => {
   const f = await fixture(), ids = Array.from({ length: 4 }, (_, n) => uuid(n + 8)), entered = deferred<void>(), release = deferred<void>();
   const list = createHistoryTimeline();
-  f.reads.local = () => ({ pages: [], transferred: ids });
+  f.reads.local = () => ({ pages: [], transferred: ids, sourceIds: ids, sourceCount: ids.length });
   let started = 0;
   f.reads.remote = async id => { if (++started === 4) entered.resolve(); await release.promise; return remoteReply(id, [1]); };
   const waiting = list({ workspaceId: "workspace" }, f.reads); await entered.promise;
@@ -503,7 +507,7 @@ it("gives another workspace its own slots while four foreground reads wait", asy
 
 it("retries a rejected idle prefetch once in the foreground and uses its current name", async () => {
   const f = await fixture(), remote = uuid(8), failed = deferred<void>();
-  f.reads.local = () => ({ pages: [], transferred: [remote] });
+  f.reads.local = () => ({ pages: [], transferred: [remote], sourceIds: [remote], sourceCount: 1 });
   let attempts = 0;
   f.reads.remote = vi.fn(async id => {
     if (++attempts === 1) return remoteReply(id);

@@ -331,7 +331,7 @@ export function createWorkspaceEngineIpc<
         let pending: Promise<NonNullable<typeof resolved>> | undefined;
         const getCollections = () => pending ??= dependencies.historyCollections(operation).then(value => { operation.assertCurrent(); resolved = value; return value; });
         const collections: Pick<TimelineReads, "scope" | "local" | "remote"> = shared
-          ? { scope: operation.scope ?? workspace.workspaceId, local: () => ({ pages: [], transferred: [] }), remote: async () => { throw new Error("Collection History is unavailable in a received share."); } }
+          ? { scope: operation.scope ?? workspace.workspaceId, local: () => ({ pages: [], transferred: [], sourceIds: [], sourceCount: 0 }), remote: async () => { throw new Error("Collection History is unavailable in a received share."); } }
           : { get scope() { return resolved?.scope ?? operation.scope ?? workspace.workspaceId; },
             local: async (positions, limit, sourceIds) => (await getCollections()).local(positions, limit, sourceIds),
             remote: async (datasetId, beforeRevision, signal) => (await getCollections()).remote(datasetId, beforeRevision, signal) };

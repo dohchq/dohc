@@ -13,8 +13,8 @@ type CollectionPage = DatasetHistoryPage & { deleted?: boolean };
 type Source = TimelineCursor["collections"][number];
 export interface HistoryHeads {
   transferred: string[];
-  sourceIds?: string[];
-  sourceCount?: number;
+  sourceIds: string[];
+  sourceCount: number;
   pages: Array<CollectionPage & { name: string; lineage: string }>;
 }
 export interface TimelineReads {
@@ -191,12 +191,12 @@ export function createHistoryTimeline() {
     const selected = live().filter(source => !source.remote && canEnter(source, edge));
     const positions = input.cursor ? selected.map(source => ({ datasetId: source.datasetId, beforeRevision: source.beforeRevision }))
       : requestedObject?.kind === "dataset" ? [{ datasetId: requestedObject.datasetId, beforeRevision: Number.MAX_SAFE_INTEGER }] : undefined;
-    const local = includeCollections ? await reads.local(positions, 1, input.cursor ? state.collections.map(source => source.datasetId) : requestedObject?.kind === "dataset" ? [requestedObject.datasetId] : undefined) : { transferred: [], pages: [] };
+    const local = includeCollections ? await reads.local(positions, 1, input.cursor ? state.collections.map(source => source.datasetId) : requestedObject?.kind === "dataset" ? [requestedObject.datasetId] : undefined) : { transferred: [], sourceIds: [], sourceCount: 0, pages: [] };
     current();
     const pages = new Map<string, CollectionPage>(local.pages.map(p => [p.datasetId, { ...p, entries: [...p.entries] }]));
     if (!input.cursor && includeCollections) {
-      const ids = [...new Set(local.sourceIds ?? [...local.pages.map(p => p.datasetId), ...local.transferred])].filter(id => requestedObject?.kind !== "dataset" || requestedObject.datasetId === id);
-      state.omittedSources = requestedObject?.kind === "dataset" ? 0 : Math.max(0, (local.sourceCount ?? ids.length) - HISTORY_MAX_SOURCES);
+      const ids = [...new Set(local.sourceIds)].filter(id => requestedObject?.kind !== "dataset" || requestedObject.datasetId === id);
+      state.omittedSources = requestedObject?.kind === "dataset" ? 0 : Math.max(0, local.sourceCount - HISTORY_MAX_SOURCES);
       for (const datasetId of ids.slice(0, HISTORY_MAX_SOURCES)) {
         const p = pages.get(datasetId);
         const source: Source = { datasetId, remote: local.transferred.includes(datasetId), fenceRevision: p?.headRevision ?? 0,

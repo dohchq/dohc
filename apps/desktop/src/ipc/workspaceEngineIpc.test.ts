@@ -196,7 +196,7 @@ async function harness(sharedStore?: SharedHistoryStore, policyRoot?: string, re
   const recordHistoryPersonName = vi.fn((_workspaceId: string, userId: string, _sender: Sender): string | null => userId === "person-local" ? null : userId);
   const prepareRecordHistoryPeople = vi.fn<(_workspaceId: string, userIds: readonly string[], _sender: Sender) => void>();
   const prepareNamed = vi.fn<NonNullable<EngineMomentAuthorNames["prepare"]>>();
-  const historyCollections = vi.fn<() => Promise<Pick<TimelineReads, "scope" | "local" | "remote">>>(async () => ({ scope: "test", local: () => ({ pages: [], transferred: [] }), remote: async () => { throw new Error("unexpected remote history"); } }));
+  const historyCollections = vi.fn<() => Promise<Pick<TimelineReads, "scope" | "local" | "remote">>>(async () => ({ scope: "test", local: () => ({ pages: [], transferred: [], sourceIds: [], sourceCount: 0 }), remote: async () => { throw new Error("unexpected remote history"); } }));
   const registrations = createWorkspaceEngineIpc({
     historyCollections,
     readWorkspaceEnginePolicy: readPolicy,
@@ -1311,7 +1311,7 @@ describe("merged History IPC", () => {
   it("keeps Collections out of named versions and routes per-file object identity", async () => {
     const h = await harness();
     h.capture.listMoments.mockResolvedValue({ ...historyPage(), startCursor: { ...historyPageFields.startCursor, versionId: "branch" }, moments: [], nextCursor: null });
-    const local = vi.fn(() => ({ pages: [], transferred: [] }));
+    const local = vi.fn(() => ({ pages: [], transferred: [], sourceIds: [], sourceCount: 0 }));
     h.historyCollections.mockResolvedValue({ scope: "test", local, remote: async () => { throw Error("unexpected remote"); } });
     await expect(h.invoke(historyOperations.listHistory.channel, { workspaceId: "workspace", versionId: "branch" })).resolves.toMatchObject({ versionId: "branch", entries: [] });
     expect(local).not.toHaveBeenCalled();
@@ -1338,7 +1338,7 @@ it("keys timeline prefetches by the lazily resolved workspace attachment scope",
         ...row, operation: "Add record", callerReference: null, approvedRevisionHash: "b".repeat(64), changesetBytes: 0, attachmentCount: 0
       })), nextBeforeRevision: null };
   });
-  h.historyCollections.mockImplementation(async () => ({ scope, local: () => ({ pages: [], transferred: [datasetId] }), remote }));
+  h.historyCollections.mockImplementation(async () => ({ scope, local: () => ({ pages: [], transferred: [datasetId], sourceIds: [datasetId], sourceCount: 1 }), remote }));
   const input = { workspaceId: "workspace", object: { kind: "dataset", datasetId }, limit: 1 };
   await h.invoke(historyOperations.listHistory.channel, input);
   await vi.waitFor(() => expect(calls).toBe(2));
