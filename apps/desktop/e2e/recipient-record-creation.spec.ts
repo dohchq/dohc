@@ -4,7 +4,7 @@ import { readFile, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { join } from "node:path";
 import { mintLocalhostCa } from "../../../services/share-web/src/testing/localhostCa";
-import type { DohcDesktopBridge } from "../src/ipc/bridgeContract";
+import type { DohcDesktopBridge, EngineMomentRecord, HistoryCursor } from "../src/ipc/bridgeContract";
 import { resolveEngineBinary } from "../src/testing/engineBinary";
 import { assertDesktopEngineHealthy, launchDesktopApp, type LaunchedDesktopApp } from "./helpers/desktopApp";
 import { relayJson } from "./helpers/relayPeer";
@@ -57,9 +57,15 @@ function acceptedLiveEdits(relay: SyncRelayHandle, path: string) {
 async function ownerRecordHistory(page: Page, path: string) {
   return page.evaluate(async ({ workspaceId, path }) => {
     const api = (window as unknown as { dohcDesktop: Api }).dohcDesktop;
-    const result = await api.listEngineMoments({ workspaceId, limit: 100 });
-    if (!("moments" in result)) return [];
-    const details = await Promise.all(result.moments.filter(moment => moment.path === path)
+    const moments: EngineMomentRecord[] = [];
+    let cursor: HistoryCursor | undefined;
+    do {
+      const result = await api.listEngineMoments({ workspaceId, limit: 50, cursor });
+      if (!("moments" in result)) throw new Error(`Owner History is ${result.status}.`);
+      moments.push(...result.moments.filter(moment => moment.path === path));
+      cursor = result.nextCursor ?? undefined;
+    } while (cursor !== undefined);
+    const details = await Promise.all(moments
       .map(moment => api.readEngineMoment({ workspaceId, momentId: moment.id })));
     return details.flatMap(result => result.moment === null ? [] : [result.moment]);
   }, { workspaceId: OWNER_ID, path });
@@ -206,8 +212,16 @@ test("@two-client an Edit recipient's new record opens immediately, becomes edit
       await expect.poll(async () => creationOps(await log(fixture.relay)).length, { timeout: 120_000 }).toBe(1);
       expect(creationOps(await log(fixture.relay))[0]!.payload.authors).toMatchObject([{ kind: "named", userId: "e2e-recipient" }]);
       await expect.poll(() => fixture.owner.page.evaluate(async ({ workspaceId, path }) => {
-        const result = await (window as unknown as { dohcDesktop: Api }).dohcDesktop.listEngineMoments({ workspaceId, limit: 100 });
-        return "moments" in result ? result.moments.find(moment => moment.path === path && moment.namedAuthor)?.namedAuthor?.label : null;
+        const api = (window as unknown as { dohcDesktop: Api }).dohcDesktop;
+        let cursor: HistoryCursor | undefined;
+        do {
+          const result = await api.listEngineMoments({ workspaceId, limit: 50, cursor });
+          if (!("moments" in result)) return null;
+          const moment = result.moments.find(moment => moment.path === path && moment.namedAuthor);
+          if (moment) return moment.namedAuthor?.label;
+          cursor = result.nextCursor ?? undefined;
+        } while (cursor !== undefined);
+        return null;
       }, { workspaceId: OWNER_ID, path: created!.path }), { timeout: 120_000 }).toBe(`${RECIPIENT_EMAIL} (Edit)`);
       await openCollection(fixture.owner.page);
       await expect.poll(async () => (await records(fixture.owner.page)).map(record => record.id), { timeout: 120_000 }).toEqual([created!.id]);
