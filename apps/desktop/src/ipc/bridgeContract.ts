@@ -74,10 +74,9 @@ import type {
 } from "@dohc/workspace-engine-client";
 export type { EngineStoreRefusal } from "@dohc/workspace-engine-client";
 import {
-  isChatsTabPath,
-  canonicalSingletonEditorTabPath,
-  isSiteTabPath,
-  isSingletonEditorTabPath,
+  parseTab,
+  TAB_KINDS,
+  singletonTabIdentity,
   MAX_COLLECTION_VIEWS,
   MAX_EXPANDED_FOLDERS,
   MAX_EDITOR_GROUPS,
@@ -3433,7 +3432,6 @@ export const CloudStatusResult = z.object({
   email: z.string().optional(),
   serverUrl: z.string().optional(),
   relayUrl: z.string().optional(),
-  serverName: z.string().max(100).optional(),
   networkAccess: z.enum(["private", "public"]).optional(),
   // Whether the named workspace has cloud sync enabled (registry remote set).
   workspaceSynced: z.boolean().optional(),
@@ -5807,8 +5805,9 @@ export const WorkspaceUiState = z.object({
     const groupSingletons = new Set<string>();
     for (let tabIndex = 0; tabIndex < group.tabs.length; tabIndex++) {
       const tab = group.tabs[tabIndex];
-      if (!isSingletonEditorTabPath(tab)) continue;
-      const identity = canonicalSingletonEditorTabPath(tab);
+      const parsed = parseTab(tab);
+      if (!TAB_KINDS[parsed.kind].singleton) continue;
+      const identity = singletonTabIdentity(parsed);
       if (identity === null || identity !== tab) {
         context.addIssue({
           code: z.ZodIssueCode.custom,
@@ -5823,9 +5822,9 @@ export const WorkspaceUiState = z.object({
           code: z.ZodIssueCode.custom,
           path: ["editorGroups", groupIndex, "tabs", tabIndex],
           message:
-            isChatsTabPath(tab)
+            parsed.kind === "chat"
               ? "Each chat can be open in only one editor group."
-              : isSiteTabPath(tab)
+              : parsed.kind === "site"
                 ? "An app preview can be open in only one editor group."
                 : "This tab can be open in only one editor group.",
         });

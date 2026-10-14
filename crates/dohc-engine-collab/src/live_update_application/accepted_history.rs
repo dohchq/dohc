@@ -6,6 +6,10 @@ mod native_state;
 pub(super) const CHECKPOINT_EVENTS: i64 = 4095;
 const CHECKPOINT_BYTES: i64 = 20_971_520;
 const DOCUMENT: &str = "relay_database_namespace=?1 AND workspace_id=?2 AND main_version_id=?3 AND object_id=?4 AND lineage_claim_id=?5";
+/// Every live application reads this until the next checkpoint. It finds the
+/// fence by its delivery and compares only columns stored before the restore
+/// proof, so it never walks the proof.
+pub(super) const NATIVE_APPEND_FENCE: &str = "SELECT operation_id=?2 AND new_generation=?4 AND workspace_id=?5 AND main_version_id=?6 AND object_id=?7 AND lineage_claim_id=?8 FROM live_restore_fences WHERE relay_database_namespace=?1 AND application_delivery_id=?3";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -380,7 +384,26 @@ fn checkpoint_in(
         let bound = if matches!(mode, CheckpointRead::NativeAppend) {
             // Historical restore JSON and content are checked by state replay.
             // Append still binds this checkpoint to the committed fence row.
-            conn.query_row("SELECT application_delivery_id=?3 AND new_generation=?4 AND workspace_id=?5 AND main_version_id=?6 AND object_id=?7 AND lineage_claim_id=?8 FROM live_restore_fences WHERE relay_database_namespace=?1 AND operation_id=?2",params![held.namespace,id,terminal.as_ref().ok_or(ApplicationError::Corrupt)?.delivery_id,binding.restore_fence_generation,binding.workspace_id,binding.main_version_id,binding.object_id,binding.lineage_claim_id],|r|r.get::<_,bool>(0)).map_err(read_sql)?
+            conn.query_row(
+                NATIVE_APPEND_FENCE,
+                params![
+                    held.namespace,
+                    id,
+                    terminal
+                        .as_ref()
+                        .ok_or(ApplicationError::Corrupt)?
+                        .delivery_id,
+                    binding.restore_fence_generation,
+                    binding.workspace_id,
+                    binding.main_version_id,
+                    binding.object_id,
+                    binding.lineage_claim_id
+                ],
+                |r| r.get::<_, bool>(0),
+            )
+            .optional()
+            .map_err(read_sql)?
+            .unwrap_or(false)
         } else {
             conn.query_row("SELECT application_delivery_id=?3 AND new_generation=?4 AND json_extract(application_json,'$.admitted.accepted.binding')=?5 FROM live_restore_fences WHERE relay_database_namespace=?1 AND operation_id=?2",params![held.namespace,id,terminal.as_ref().ok_or(ApplicationError::Corrupt)?.delivery_id,binding.restore_fence_generation,serde_json::to_string(&binding).map_err(|_|ApplicationError::Corrupt)?],|r|r.get::<_,bool>(0)).map_err(read_sql)?
         };

@@ -5,6 +5,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import type * as Y from "yjs";
 import { bridge } from "./bridge";
 import { displayFrontmatterValue } from "./markdown/frontmatter";
+import { TOPMATTER_MEASURE, TOPMATTER_ROW } from "./pageTopmatter";
 
 // A leading block's text, found cheaply so the block parses again only when
 // it changes. The projection still decides whether it is frontmatter.
@@ -233,8 +234,8 @@ export function FrontmatterAsWritten(props: {
   if (!text) return null;
 
   return (
-    <section data-testid="frontmatter-as-written" className="dohc-page-properties" aria-label="As written in the file">
-      <div className="dohc-page-properties__inner">
+    <section data-testid="frontmatter-as-written" className={`${TOPMATTER_ROW} pt-2`} aria-label="As written in the file">
+      <div className={TOPMATTER_MEASURE}>
         <details
           open={open}
           className="group"
