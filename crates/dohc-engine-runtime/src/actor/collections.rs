@@ -89,6 +89,7 @@ impl ActorHandle {
                             let result = dohc_engine_collab::owner_outbox::draft::append_draft_cached(
                                 store, cache, &key.workspace_id,
                                 dohc_engine_collab::owner_outbox::draft::OwnerDraftAppendInput {
+                                    person_edit: false,
                                     binding: draft.descriptor.binding,
                                     expected_revision: draft.descriptor.revision,
                                     append_key: format!("collection-adoption:{}:{}", candidate.record_id, hex_sha256(&update)),

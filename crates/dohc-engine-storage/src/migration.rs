@@ -3224,6 +3224,12 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         sets_user_version: None,
     },
     Migration {
+        ordinal: 51,
+        id: "v2-owner-outbox-person-edit",
+        sql: "ALTER TABLE owner_ydoc_outbox_entries ADD COLUMN person_edit INTEGER CHECK (person_edit IS NULL OR person_edit=1);",
+        sets_user_version: None,
+    },
+    Migration {
         ordinal: 52,
         id: "v2-persisted-links",
         sql: include_str!("links.sql"),
@@ -3907,6 +3913,10 @@ mod tests {
             (
                 "v2-live-restore-resumed-lookup",
                 "ccc7e17969beb6ae6259e9ce174863fa91d15c2bdad66c3f8232e8b236ff8b8c",
+            ),
+            (
+                "v2-owner-outbox-person-edit",
+                "55940512b28bebcdda24b3c86763c66e29416eed55f157b8c06edf9f5b5622df",
             ),
             (
                 "v2-persisted-links",
@@ -5343,6 +5353,37 @@ mod tests {
         assert_eq!(flag(&conn), 3);
         assert!(
             conn.execute("UPDATE ydoc_docs SET file_export_lane=4", [])
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn owner_person_marker_migration_upgrades_a_populated_store_without_crediting_old_work() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        let ctx = MigrationContext::current(1_000);
+        let before = migration_index("v2-owner-outbox-person-edit");
+        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..before], &ctx, &NoFaults).unwrap();
+        conn.execute_batch("INSERT INTO binary_blobs VALUES ('base',1,X'58'); \
+            INSERT INTO owner_ydoc_outboxes(outbox_id,workspace_id,main_version_id,object_id,lineage_claim_id,current_path,selector_paths_json,restore_fence_generation,base_update_digest,base_blob_digest,base_byte_length,state,pending_bytes,oldest_entry_at_ms,next_sequence,created_at_ms) \
+            VALUES ('outbox','ws','main','doc','base','doc.md','[\"doc.md\"]',0,'base','base',1,'active',1,1,2,1); \
+            INSERT INTO owner_ydoc_outbox_entries(outbox_id,sequence,append_key,delivery_id,update_digest,update_blob_digest,byte_length,created_at_ms,pending,result_pending_bytes,result_oldest_entry_at_ms,result_state) \
+            VALUES ('outbox',1,'append','delivery','base','base',1,1,1,1,1,'active');").unwrap();
+        assert_eq!(
+            run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).unwrap(),
+            MigrationOutcome::Applied { newly_applied: 1 }
+        );
+        let retained: (String, Option<bool>) = conn
+            .query_row(
+                "SELECT delivery_id,person_edit FROM owner_ydoc_outbox_entries",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(retained, ("delivery".into(), None));
+        conn.execute("UPDATE owner_ydoc_outbox_entries SET person_edit=1", [])
+            .unwrap();
+        assert!(
+            conn.execute("UPDATE owner_ydoc_outbox_entries SET person_edit=0", [])
                 .is_err()
         );
     }

@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { releaseAssets } from '../release-assets';
 
 describe('release asset selection', () => {
-  const asset = (name: string) => ({ name, browser_download_url: `https://github.com/dohc-ai/dohc/releases/download/v1/${name}` });
+  const asset = (name: string) => ({ name, browser_download_url: `https://github.com/dohchq/dohc/releases/download/v1/${name}` });
   const fetchReleases = (releases: unknown) => (async () => Response.json(releases)) as typeof fetch;
 
   it('prefers a published stable build over drafts and newer prereleases', async () => {

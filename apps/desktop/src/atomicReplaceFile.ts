@@ -104,33 +104,46 @@ export function atomicReplaceFileSync(
   }
 }
 
+function waitAsync(milliseconds: number): Promise<void> {
+  return new Promise<void>((resolve) => setTimeout(resolve, milliseconds));
+}
+
+export async function renameWithRetry(
+  source: string,
+  destination: string,
+  {
+    rename: replace = rename,
+    wait = waitAsync,
+    platform = process.platform,
+  }: AsyncReplaceDependencies = {},
+  beforeRetry?: () => Promise<void>,
+): Promise<void> {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      await replace(source, destination);
+      return;
+    } catch (error) {
+      const delay = retryDelay(error, attempt, platform);
+      if (delay === undefined) throw error;
+      await wait(delay);
+      if (beforeRetry) await beforeRetry();
+    }
+  }
+}
+
 export async function atomicReplaceFile(
   destination: string,
   writeTemporary: (temporary: string) => Promise<void>,
-  {
-    rename: replace = rename,
-    wait = (milliseconds) => new Promise<void>((resolve) => setTimeout(resolve, milliseconds)),
-    platform = process.platform,
-    syncDirectory = false,
-    open: openDirectory = open,
-  }: AsyncReplaceDependencies & {
+  dependencies: AsyncReplaceDependencies & {
     syncDirectory?: boolean;
     open?: (path: string, flags: string) => Promise<SyncHandle>;
   } = {},
 ): Promise<void> {
+  const { syncDirectory = false, open: openDirectory = open, platform = process.platform } = dependencies;
   const temporary = `${destination}.tmp-${process.pid}-${randomUUID()}`;
   try {
     await writeTemporary(temporary);
-    for (let attempt = 0; ; attempt += 1) {
-      try {
-        await replace(temporary, destination);
-        break;
-      } catch (error) {
-        const delay = retryDelay(error, attempt, platform);
-        if (delay === undefined) throw error;
-        await wait(delay);
-      }
-    }
+    await renameWithRetry(temporary, destination, dependencies);
     if (syncDirectory && platform !== "win32") {
       await syncAndClose(await openDirectory(dirname(destination), "r"));
     }

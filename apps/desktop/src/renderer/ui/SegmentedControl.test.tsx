@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { cleanup, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { Minus, Plus } from "lucide-react";
 import { useState } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { SegmentedControl, type SegmentedOption } from "./SegmentedControl";
@@ -40,6 +41,21 @@ const checked = () => screen.getAllByRole("radio").filter((it) => it.getAttribut
 const tabbable = () => screen.getAllByRole("radio").filter((it) => it.tabIndex === 0).map((it) => it.textContent);
 
 describe("SegmentedControl", () => {
+  it("draws an icon option as a named 24px square with its label as tooltip", () => {
+    const ICONS: ReadonlyArray<SegmentedOption<Size>> = [
+      { value: "small", label: "Small", icon: Minus },
+      { value: "large", label: "Large", icon: Plus },
+    ];
+    render(<Harness options={ICONS} />);
+    for (const name of ["Small", "Large"]) {
+      const option = radio(name);
+      // WCAG 2.5.8: touching targets are at least 24 by 24 CSS pixels.
+      expect(option.classList.contains("size-6")).toBe(true);
+      expect(option.title).toBe(name);
+      expect(option.textContent).toBe("");
+    }
+  });
+
   it("is a radiogroup whose chosen radio alone is in the tab order", () => {
     render(<Harness initial="medium" />);
     expect(screen.getByRole("radiogroup", { name: "Size" })).toBeTruthy();
