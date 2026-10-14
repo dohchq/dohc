@@ -80,10 +80,13 @@ test("verification selects packages and proofs and prepares before parallel jobs
     ...(process.platform === "win32" ? [["pr", "js", "gallery-missing", "apps/desktop/src/renderer/Widget.tsx"]] : []),
     ["pr", null, null, null, true], ["pr", "js", null, null, true], ["pr", "rust", null, null, true],
     ["pr", "js", null, null],
+    ["pr", null, "warm"], ["pr", null, "pre-typecheck"], ["pr", "rust", "pre-clippy"],
   ]) cases.push(t.test([mode, job, fault, changed ?? "empty diff", full ? "full" : ""].filter(Boolean).join(" "), async (context) => {
     const rust = mode === "pr" && job !== "js" && (full || job === "rust" || changed === "pnpm-lock.yaml");
     const js = mode === "pr" && job !== "rust";
     const siteOnly = changed === "apps/site/src/index.ts" && !full;
+    const warm = ["warm", "pre-typecheck"].includes(fault);
+    const preQueueFault = ["pre-typecheck", "pre-clippy"].includes(fault);
     const rendererOnly = changed === "apps/desktop/src/renderer/Widget.tsx" && !full;
     const selected = changed === "packages/fixture/src/index.ts" ? ["@dohc/fixture"]
       : changed === "packages/mcp/src/index.ts" ? ["@dohc/mcp", "@dohc/share-web"]
@@ -121,10 +124,12 @@ test("verification selects packages and proofs and prepares before parallel jobs
         put("node_modules/installed.txt", readFileSync(join(root, "pnpm-lock.yaml")));
         put("scripts/verification/admission.mjs", "export const admissionPreflight=()=>{};export const installedDependenciesMatch=()=>true;export const verificationAdmission=()=>({lightweight:true,reason:'fixture warm light lane'});");
       }
+      if (warm) put("scripts/verification/admission.mjs", "export const admissionPreflight=()=>{};export const installedDependenciesMatch=()=>true;export const verificationAdmission=()=>({lightweight:false,reason:'fixture warm full lane'});");
+      put("tools/rust-engine-program/build-slot.mjs", "import {writeFileSync} from 'node:fs';export const acquireExclusiveSlot=()=>null;export const capBuildParallelism=source=>({...source});export const resolveBuildBudget=()=>null;export const freeDiskGb=()=>100;export const acquireBuildSlot=()=>{throw Error('not expected')};export const acquireVerificationSlot=()=>{writeFileSync('.dohc-dev/queued','yes');return {update(){},release(){}};};");
       git(["config", "core.logAllRefUpdates", "true"]);
       mkdirSync(join(root, ".dohc-dev"), { recursive: true });
       for (const path of ["scripts/verification/verify.mjs", "scripts/verification/ticket-evidence.mjs", "scripts/verification/js-tests.mjs", "scripts/verification/selection.mjs", "scripts/verification/renderer-selection.mjs", "scripts/verification/timing.mjs", "tools/rust-engine-program/tree-provenance.mjs",
-        "tools/rust-engine-program/git-read.mjs",
+        "tools/rust-engine-program/git-read.mjs", "tools/rust-engine-program/gate-commands.mjs",
         "apps/desktop/scripts/require-e2e-engine.mjs", ".github/workflows/pr-checks.yml"]) {
         put(path, readFileSync(join(repoRoot, path)));
       }
@@ -183,6 +188,21 @@ test("verification selects packages and proofs and prepares before parallel jobs
           if(command==='cargo' || args[0]==='tools/rust-engine-program/run-rust-checks.mjs') {
             assert.equal(process.env.CARGO_INCREMENTAL,${JSON.stringify(expectedIncremental)},'Verifier compilation policy');
             assert.equal(options.env.CARGO_INCREMENTAL,${JSON.stringify(expectedIncremental)},'Build child compilation policy');
+          }
+          const queued=existsSync(join(repoRoot,'.dohc-dev/queued'));
+          if(command==='cargo' && (['fmt','clippy'].includes(args[0]) || args.includes('--no-run'))) {
+            assert.ok(${rust},'Unselected Rust check before queueing');
+            assert.equal(queued,false,'Rust check ran after queueing');
+            const {clippy,fmtCheck,nextest}=await import('../../tools/rust-engine-program/gate-commands.mjs');
+            assert.deepEqual(args,args[0]==='fmt'?fmtCheck:args[0]==='clippy'?clippy:[...nextest,'--no-run']);
+            if(args[0]!=='fmt')assert.equal(options.env.CARGO_TARGET_DIR,join(repoRoot,'target'));
+            if(args[0]==='clippy' && process.env.FIXTURE_FAULT==='pre-clippy')throw Error('fixture clippy failed');
+            return {stdout:''};
+          }
+          if(command==='pnpm' && args.at(-1)==='typecheck' && !queued) {
+            assert.ok(${js && (siteOnly || warm)},'Typecheck ran before queueing without installed dependencies');
+            if(process.env.FIXTURE_FAULT==='pre-typecheck')throw Error('fixture typecheck failed');
+            return {stdout:''};
           }
           if(args[0]==='apps/desktop/scripts/ensure-electron-installed.mjs') {
             assert.ok(${desktop},'Unselected Electron installation');
@@ -382,7 +402,14 @@ test("verification selects packages and proofs and prepares before parallel jobs
       assert.deepEqual(JSON.parse(readFileSync(join(root, ".dohc-dev/incremental.json"), "utf8")),
         { value: previousIncremental ?? null, present: previousIncremental !== undefined }, "Verifier must restore the caller's compilation policy");
       const report = JSON.parse(readFileSync(join(root, ".dohc-dev/report.json"), "utf8"));
-      if (fault) {
+      if (preQueueFault) {
+        assert.equal(result.status, 1, result.stderr);
+        assert.match(result.stderr, fault === "pre-clippy" ? /fixture clippy failed/ : /fixture typecheck failed/);
+        assert.equal(report.verdict, "FAIL");
+        assert.equal(existsSync(join(root, ".dohc-dev/queued")), false);
+        assert.equal(report.timings.some(phase => phase.name === "queue"), false);
+        assert.deepEqual(report.steps.map(({name}) => name), [...(rust ? ["pre-queue-fmt"] : []), ...(js ? ["pre-queue-typecheck"] : []), ...(fault === "pre-clippy" ? ["pre-queue-clippy"] : [])]);
+      } else if (fault && !warm) {
         assert.equal(result.status, fault === "rust-cancel" ? 143 : 1, result.stderr);
         assert.equal(report.verdict, "FAIL");
         assert.ok(report.steps.every(step => ["PASS", "FAIL"].includes(step.verdict)));
@@ -430,7 +457,8 @@ test("verification selects packages and proofs and prepares before parallel jobs
           ...(mode === "pr" && !siteOnly ? ["install"] : []),
           ...(desktop ? ["electron-install"] : []),
           ...(!siteOnly ? ["app-backend-runtime"] : []),
-          ...(rust ? ["cargo-deny-version", "cargo-audit-version", "cargo-nextest-version", "rust", "rust-verdict"] : []),
+          ...(rust ? ["pre-queue-fmt", "pre-queue-clippy", "pre-queue-test-build", "cargo-deny-version", "cargo-audit-version", "cargo-nextest-version", "rust", "rust-verdict"] : []),
+          ...(js && (siteOnly || warm) ? ["pre-queue-typecheck"] : []),
           ...(js ? ["typecheck", "tests"] : []),
           ...(nativeProof ? ["self-host-native"] : []), ...(browser ? ["browser-install"] : []),
           ...(accounts ? ["accounts"] : []), ...(desktopProof || smoke || gallery ? ["desktop"] : []),

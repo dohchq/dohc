@@ -25,6 +25,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as poll } from "node:timers/promises";
+import { fileURLToPath } from "node:url";
 import {
   acquireBuildSlot,
   acquireExclusiveSlot,
@@ -40,6 +41,9 @@ import {
 const buildSlotUrl = new URL("../tools/rust-engine-program/build-slot.mjs", import.meta.url).href;
 
 const slotRoot = () => mkdtempSync(join(tmpdir(), "dohc-build-slot-"));
+// The lane guard admits only this checkout's PR verifier as the entry script.
+const verifier = fileURLToPath(new URL("../scripts/verification/verify.mjs", import.meta.url));
+const verifierLane = (env, options) => acquireVerificationSlot(env, { entry: verifier, ...options });
 
 test("exclusive local ownership rejects live owners without creating a queue", t => {
   const root = slotRoot();
@@ -402,7 +406,7 @@ function queueHarness(t) {
       if (observe) options.observeTicket = ticket => { process.send({ type: "observed", ...ticket, text: readFileSync(ticket.path, "utf8") }); };
       try {
         slot = await (${JSON.stringify(kind)} !== "build-slot"
-          ? acquireVerificationSlot({ DOHC_BUILD_SLOT_ROOT: process.argv[1] }, { lightweight: ${JSON.stringify(kind)} === "verification-light-slot", ...options })
+          ? acquireVerificationSlot({ DOHC_BUILD_SLOT_ROOT: process.argv[1] }, { lightweight: ${JSON.stringify(kind)} === "verification-light-slot", entry: ${JSON.stringify(verifier)}, ...options })
           : acquireBuildSlot({ root: process.argv[1], slots: 1, waitMs: 20_000, pollMs: 60_000, ...options }));
         process.send({ type: "acquired", name: slot.name });
       } catch (error) {
@@ -510,12 +514,12 @@ test("full capacity stays one unless an isolated two-lane trial is explicit", as
   const trial = join(root, "trial");
   const env = {DOHC_BUILD_SLOT_ROOT: root, DOHC_VERIFICATION_SLOT_ROOT: trial, DOHC_VERIFICATION_LANES: "2", DOHC_VERIFICATION_TRIAL: "1"};
   assert.equal(resolveBuildBudget(env).root, root);
-  const first = await acquireVerificationSlot(env);
-  const second = await acquireVerificationSlot(env);
+  const first = await verifierLane(env);
+  const second = await verifierLane(env);
   try {
     assert.notEqual(first.name, second.name);
     assert.equal(first.dir, join(trial, first.name));
-    await assert.rejects(acquireVerificationSlot(env, {waitMs: 0}), /all 2 slots are held/);
+    await assert.rejects(verifierLane(env, {waitMs: 0}), /all 2 slots are held/);
   } finally { first.release(); second.release(); }
 });
 
@@ -523,7 +527,7 @@ test("queue status retains claim identity and estimates only from completed lane
   const root = slotRoot();
   t.after(() => rmSync(root, {recursive: true, force: true}));
   const metadata = {purpose: "full PR verification", checkout: "C:\\work\\candidate", commit: "abc123", phase: "prepare"};
-  const slot = await acquireVerificationSlot({DOHC_BUILD_SLOT_ROOT: root}, {metadata});
+  const slot = await verifierLane({DOHC_BUILD_SLOT_ROOT: root}, {metadata});
   try {
     const original = readFileSync(join(slot.dir, "owner.json"), "utf8");
     const ticket = plantTicket(root, 1, {pid: process.pid, kind: "verification-slot"});
@@ -593,10 +597,10 @@ test("status CLI reports configured empty trial capacity without acquiring a lan
 
 test("a bounded light gate completes while eighteen heavy waiters remain queued", async t => {
   const {root, start, message} = queueHarness(t);
-  const holder = await acquireVerificationSlot({DOHC_BUILD_SLOT_ROOT: root});
+  const holder = await verifierLane({DOHC_BUILD_SLOT_ROOT: root});
   t.after(() => holder.release());
   for (let i = 1; i <= 18; i += 1) plantTicket(root, i, {pid: process.pid, kind: "verification-slot"});
-  await assert.rejects(acquireVerificationSlot({DOHC_BUILD_SLOT_ROOT: root}, {waitMs: 0}), /all 1 slots are held/);
+  await assert.rejects(verifierLane({DOHC_BUILD_SLOT_ROOT: root}, {waitMs: 0}), /all 1 slots are held/);
   const started = performance.now();
   const light = start("light", {kind: "verification-light-slot", metadata: {purpose: "light PR verification"}});
   await message(light, "acquired");
@@ -612,10 +616,10 @@ test("a bounded light gate completes while eighteen heavy waiters remain queued"
 
 test("light admission remains capped, cleans up timeouts and cancellation, and preserves full owners", async t => {
   const {root, start, message} = queueHarness(t);
-  const full = await acquireVerificationSlot({DOHC_BUILD_SLOT_ROOT: root});
-  const light = await acquireVerificationSlot({DOHC_BUILD_SLOT_ROOT: root}, {lightweight: true});
+  const full = await verifierLane({DOHC_BUILD_SLOT_ROOT: root});
+  const light = await verifierLane({DOHC_BUILD_SLOT_ROOT: root}, {lightweight: true});
   t.after(() => {full.release(); light.release();});
-  await assert.rejects(acquireVerificationSlot({DOHC_BUILD_SLOT_ROOT: root}, {lightweight: true, waitMs: 0}), /all 1 slots are held/);
+  await assert.rejects(verifierLane({DOHC_BUILD_SLOT_ROOT: root}, {lightweight: true, waitMs: 0}), /all 1 slots are held/);
   assert.deepEqual(tickets(root, "verification-light-slot"), []);
   const waiter = start("cancel-light", {kind: "verification-light-slot"});
   await message(waiter, "waiting");
@@ -631,7 +635,7 @@ test("a verification ticket observer reads the published ticket before any lane 
   const root = slotRoot();
   const observed = [];
   try {
-    const slot = await acquireVerificationSlot({DOHC_BUILD_SLOT_ROOT: root}, {metadata: {purpose: "full PR verification"}, observeTicket: ticket => {
+    const slot = await verifierLane({DOHC_BUILD_SLOT_ROOT: root}, {metadata: {purpose: "full PR verification"}, observeTicket: ticket => {
       observed.push({...ticket, text: readFileSync(ticket.path, "utf8"), laneExists: existsSync(join(root, "verification-slot-1"))});
     }});
     slot.release();
@@ -675,7 +679,7 @@ test("ticket observer failures reject before admission without retry and stop th
         const before = events.map(event => process.listeners(event));
         let calls = 0;
         let published;
-        const error = await acquireVerificationSlot({ DOHC_BUILD_SLOT_ROOT: root }, { observeTicket: ({ path }) => {
+        const error = await acquireVerificationSlot({ DOHC_BUILD_SLOT_ROOT: root }, { entry: ${JSON.stringify(verifier)}, observeTicket: ({ path }) => {
           calls += 1;
           published = path;
           if (fault === "promise") return Promise.reject(new Error("fixture deferred capture"));
@@ -705,9 +709,9 @@ test("ticket observer failures reject before admission without retry and stop th
 
 test("each replacement verification ticket is observed separately", async () => {
   const root = slotRoot();
-  const holder = await acquireVerificationSlot({DOHC_BUILD_SLOT_ROOT: root});
+  const holder = await verifierLane({DOHC_BUILD_SLOT_ROOT: root});
   const observed = [];
-  const pending = acquireVerificationSlot({DOHC_BUILD_SLOT_ROOT: root}, {waitMs: 20_000,
+  const pending = verifierLane({DOHC_BUILD_SLOT_ROOT: root}, {waitMs: 20_000,
     observeTicket: ticket => observed.push({...ticket, text: readFileSync(ticket.path, "utf8")})});
   try {
     await waitFor(() => observed.length === 1, "the first ticket must be observed");
@@ -726,7 +730,7 @@ test("each replacement verification ticket is observed separately", async () => 
 
 test("observed verification waiters keep FIFO order, lane counts, and cancellation", async t => {
   const {root, start, message, acquired} = queueHarness(t);
-  const holder = await acquireVerificationSlot({DOHC_BUILD_SLOT_ROOT: root});
+  const holder = await verifierLane({DOHC_BUILD_SLOT_ROOT: root});
   t.after(() => holder.release());
   const waiters = [];
   for (let id = 1; id <= 2; id += 1) {
@@ -930,9 +934,23 @@ test("two lanes get two different slots", async () => {
   }
 });
 
+test("only this checkout's PR verifier can take a verification lane", async t => {
+  const root = slotRoot();
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const env = { DOHC_BUILD_SLOT_ROOT: root };
+  assert.throws(() => acquireVerificationSlot(env), /Only the PR verifier/);
+  for (const entry of ["", join(root, "run-admitted-host.mjs"), join(root, "scripts/verification/verify.mjs")]) {
+    assert.throws(() => acquireVerificationSlot(env, { entry, lightweight: entry === "" }), /Only the PR verifier/);
+  }
+  assert.deepEqual(readdirSync(root), []);
+  const lane = await verifierLane(env);
+  assert.equal(lane.name, "verification-slot-1");
+  lane.release();
+});
+
 test("three verification waiters acquire in FIFO order with prompt handoff", async (t) => {
   const { root, start, message, acquired } = queueHarness(t);
-  const holder = await acquireVerificationSlot({ DOHC_BUILD_SLOT_ROOT: root });
+  const holder = await verifierLane({ DOHC_BUILD_SLOT_ROOT: root });
   t.after(() => holder.release());
   const waiters = [];
   for (let id = 1; id <= 3; id += 1) {
@@ -1217,8 +1235,8 @@ test("a transient ticket reclaim failure does not reject another waiter's acquis
 test("a PR gate holds the one verification slot beside the cargo lanes", async () => {
   const root = slotRoot();
   try {
-    assert.equal(acquireVerificationSlot({ CI: "1" }), null);
-    const gate = await acquireVerificationSlot({ DOHC_BUILD_SLOT_ROOT: root });
+    assert.equal(verifierLane({ CI: "1" }), null);
+    const gate = await verifierLane({ DOHC_BUILD_SLOT_ROOT: root });
     assert.equal(gate.name, "verification-slot-1");
     const lane = await acquireBuildSlot({ root, slots: 1, waitMs: 0 });
     assert.equal(lane.name, "build-slot-1");
@@ -1227,7 +1245,7 @@ test("a PR gate holds the one verification slot beside the cargo lanes", async (
     assert.equal(existsSync(join(root, "verification-slot-1")), false);
 
     plantSlot(root, 1, { pid: deadPid(), heartbeatAgeMs: 45 * 60_000, kind: "verification-slot" });
-    const next = await acquireVerificationSlot({ DOHC_BUILD_SLOT_ROOT: root });
+    const next = await verifierLane({ DOHC_BUILD_SLOT_ROOT: root });
     assert.equal(next.name, "verification-slot-1");
     next.release();
     assert.match(readFileSync(join(root, "events.log"), "utf8"), /reclaimed verification-slot-1/);

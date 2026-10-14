@@ -118,6 +118,10 @@ The light lane keeps whole-workspace typecheck coverage, with one workspace comm
 It runs repository source guards before sequential package tests, with one Vitest worker.
 `verify:plan` reports admission and the reason before a run joins either queue.
 The runner checks host tools before queueing and rechecks its source, tools, and disk after admission.
+Before queueing, it also runs the workspace typecheck when the installed dependencies match the lockfile.
+When Rust is selected, it runs `cargo fmt --check`, then clippy and the nextest test build with the gate's arguments and target directory under one build slot.
+A failure stops the run before it joins the queue. The `pre-queue-*` steps record these checks.
+The lane repeats them as evidence. Its clippy and test steps reuse those builds; only the engine binary that preparation rebuilt relinks.
 The runner removes its Postgres container by the recorded container ID.
 
 Inspect the host's queues without joining them:
@@ -132,7 +136,7 @@ Older records without that metadata have an unknown purpose.
 Wait estimates use the median duration of up to twenty completed runs in the same lane.
 A cold history has no estimate. Estimates do not reject or reorder work.
 Full runs wait up to six hours. A live holder keeps its slot even if its heartbeat stops; investigate its recorded PID before changing its resources.
-Use verification queues for PR checks. A verification slot does not provide an idle host for benchmarks.
+Only `pnpm verify:pr` can take a verification slot. Other scripts that request one fail. A verification slot does not provide an idle host for benchmarks.
 Performance measurements must record concurrent host work and use the shared build budget when running Cargo.
 The live-authorship profiling command uses a separate single owner and creates no PR queue ticket.
 It defers when registered gates or builds hold or wait for slots.

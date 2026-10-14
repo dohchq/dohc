@@ -788,18 +788,21 @@ export function acquireExclusiveSlot({ root, kind, metadata, cooperativeCancella
   }
 }
 
+const canonical = path => {
+  try { return realpathSync(path).toLowerCase(); }
+  catch { return resolve(path).toLowerCase(); }
+};
+const verifierEntry = fileURLToPath(new URL("../../scripts/verification/verify.mjs", import.meta.url));
+
 /**
  * Hold the host's single verification lane for a whole PR gate, so two gates
  * never compete for the same cores and disk. Null on a single-tenant host.
  * A gate can wait behind several others, so this waits up to six hours.
+ * Only this checkout's PR verifier may hold it; `entry` is the caller's script.
  */
 export function verificationLanes(env = process.env) {
   const requested = env.DOHC_VERIFICATION_LANES ?? "1";
   if (!["1", "2"].includes(requested)) throw new Error("DOHC_VERIFICATION_LANES must be 1 or 2.");
-  const canonical = path => {
-    try { return realpathSync(path).toLowerCase(); }
-    catch { return resolve(path).toLowerCase(); }
-  };
   const trialRoot = env.DOHC_VERIFICATION_SLOT_ROOT;
   const cargoRoot = resolveBuildBudget(env)?.root;
   if (trialRoot && (env.DOHC_VERIFICATION_TRIAL !== "1" || cargoRoot && canonical(trialRoot) === canonical(cargoRoot))) {
@@ -811,7 +814,10 @@ export function verificationLanes(env = process.env) {
   return Number(requested);
 }
 
-export function acquireVerificationSlot(env = process.env, { lightweight = false, metadata, waitMs = 6 * 60 * 60_000, observeTicket } = {}) {
+export function acquireVerificationSlot(env = process.env, { lightweight = false, metadata, waitMs = 6 * 60 * 60_000, observeTicket, entry = process.argv[1] } = {}) {
+  if (!entry || canonical(entry) !== canonical(verifierEntry)) {
+    throw new Error(`Only the PR verifier (${verifierEntry}) may hold a verification lane. Run pnpm verify:pr, or take a build slot for other Cargo work.`);
+  }
   const fullLanes = verificationLanes(env);
   const budget = resolveBuildBudget(env);
   if (!budget) return null;

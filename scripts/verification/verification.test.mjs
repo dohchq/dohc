@@ -1038,7 +1038,7 @@ test("a docs-only PR records clean provenance without code tools, while dirty he
       "scripts/verification/verify.mjs", "scripts/verification/ticket-evidence.mjs", "scripts/verification/timing.mjs", "scripts/verification/build.mjs", "scripts/verification/process.mjs", "scripts/verification/doctor.mjs",
       "scripts/verification/cancellation.mjs", "scripts/verification/js-tests.mjs", "scripts/verification/selection.mjs", "scripts/verification/renderer-selection.mjs", "scripts/verification/admission.mjs", "scripts/verification/rust-reuse.mjs",
       "tools/rust-engine-program/build-slot.mjs", "tools/rust-engine-program/tree-provenance.mjs",
-      "tools/rust-engine-program/git-read.mjs", "tools/rust-engine-program/require-ci-pass-verdict.mjs",
+      "tools/rust-engine-program/git-read.mjs", "tools/rust-engine-program/gate-commands.mjs", "tools/rust-engine-program/require-ci-pass-verdict.mjs",
       "apps/desktop/scripts/require-e2e-engine.mjs", ".github/workflows/pr-checks.yml",
     ]) {
       mkdirSync(dirname(join(root, file)), { recursive: true });
