@@ -249,8 +249,8 @@ export function createNamedLiveProvider(input: NamedLiveProviderLimits,
             held.retryTimer = setTimeout(() => {
               held.retryTimer = undefined;
               void pump(held);
-            }, held.retryDelayMs);
-            held.retryDelayMs = Math.min(10_000, held.retryDelayMs * 2);
+            }, frame.reason === "application-pending" ? held.retryDelayMs : 250);
+            if (frame.reason === "application-pending") held.retryDelayMs = Math.min(10_000, held.retryDelayMs * 2);
             notify();
           }
           else quarantine(frame.reason);

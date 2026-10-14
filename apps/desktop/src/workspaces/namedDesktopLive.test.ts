@@ -14,7 +14,7 @@ vi.mock("@dohc/ydoc-projection/named-live-browser-transport", async importOrigin
   return {...actual, createNamedLiveBrowserTransport: transport.factory};
 });
 const cleanup: (() => Promise<unknown>)[] = [];
-afterEach(async () => { for (const fn of cleanup.splice(0).reverse()) await fn(); vi.clearAllMocks(); });
+afterEach(async () => { for (const fn of cleanup.splice(0).reverse()) await fn(); vi.clearAllMocks(); vi.useRealTimers(); });
 
 function fixture(recordDelivery?: () => Promise<ShareRecordStatus | null>, isOnline = true) {
   const doc = new Y.Doc();
@@ -224,16 +224,54 @@ it("keeps editing on retryable admission and stops on a terminal refusal", async
   await provider.close();
 });
 
-it.each([401, 403, 404])("classifies desktop admission status %s as unavailable authority", async status => {
+it.each([401, 403, 404])("retries desktop admission status %s while access is active", async status => {
   const f = fixture();
   const provider = await f.capture.openYDocSession({path: "docs/a.md", contentKind: "richdoc", onRemoteUpdate: vi.fn()});
-  const options = transport.factory.mock.calls[0]![0] as {
-    authorize(selection: NamedLiveSelection, signal: AbortSignal): Promise<unknown>;
-  };
+  const actual = await vi.importActual<typeof import("@dohc/ydoc-projection/named-live-browser-transport")>("@dohc/ydoc-projection/named-live-browser-transport");
+  const options = transport.factory.mock.calls[0]![0] as Parameters<typeof actual.createNamedLiveBrowserTransport<NamedLiveSelection>>[0];
   const selected = {accountId: "reader", workspaceId: "remote-workspace", grantId: "grant", objectId: "object"};
-  await options.authorize(selected, new AbortController().signal);
-  f.request.mockResolvedValueOnce(new Response(null, {status}));
-  await expect(options.authorize(selected, new AbortController().signal)).rejects.toBeInstanceOf(LiveAuthorityUnavailableError);
+  await options.authorize!(selected, new AbortController().signal);
+  f.request.mockResolvedValue(new Response(null, {status}));
+  vi.useFakeTimers();
+  const openSocket = vi.fn();
+  const manager = actual.createNamedLiveBrowserTransport({...options, openSocket});
+  cleanup.push(async () => manager.close());
+  const session = manager.select(selected);
+  await session.reconnect();
+  expect(session.state()).toMatchObject({status: "disconnected", reason: "connection-failed"});
   expect(f.request).toHaveBeenCalledTimes(2);
+  for (const [index, delay] of [250, 500, 1_000].entries()) {
+    await vi.advanceTimersByTimeAsync(delay - 1);
+    expect(f.request).toHaveBeenCalledTimes(index + 2);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(f.request).toHaveBeenCalledTimes(index + 3);
+    expect(session.state()).toMatchObject({status: "disconnected", reason: "connection-failed"});
+  }
+  expect(openSocket).not.toHaveBeenCalled();
+  session.close();
+  expect(vi.getTimerCount()).toBe(0);
+  await provider.close();
+});
+
+it("stops desktop admission retries when access ends", async () => {
+  const f = fixture();
+  const provider = await f.capture.openYDocSession({path: "docs/a.md", contentKind: "richdoc", onRemoteUpdate: vi.fn()});
+  const actual = await vi.importActual<typeof import("@dohc/ydoc-projection/named-live-browser-transport")>("@dohc/ydoc-projection/named-live-browser-transport");
+  const options = transport.factory.mock.calls[0]![0] as Parameters<typeof actual.createNamedLiveBrowserTransport<NamedLiveSelection>>[0];
+  const selected = {accountId: "reader", workspaceId: "remote-workspace", grantId: "grant", objectId: "object"};
+  await options.authorize!(selected, new AbortController().signal);
+  f.stop(true);
+  await expect(options.authorize!(selected, new AbortController().signal)).rejects.toBeInstanceOf(LiveAuthorityUnavailableError);
+  vi.useFakeTimers();
+  const openSocket = vi.fn();
+  const manager = actual.createNamedLiveBrowserTransport({...options, openSocket});
+  cleanup.push(async () => manager.close());
+  const session = manager.select(selected);
+  await session.reconnect();
+  expect(session.state()).toMatchObject({status: "disconnected", reason: "authority-unavailable"});
+  await vi.advanceTimersByTimeAsync(20_000);
+  expect(f.request).toHaveBeenCalledOnce();
+  expect(openSocket).not.toHaveBeenCalled();
+  expect(vi.getTimerCount()).toBe(0);
   await provider.close();
 });

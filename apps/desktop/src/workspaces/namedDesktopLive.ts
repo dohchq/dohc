@@ -30,7 +30,6 @@ export function createNamedDesktopLiveCapture(options: {
       body: JSON.stringify({ shareId: options.shareId, path }),
     });
     try {
-      if ([401, 403, 404].includes(response.status)) throw new LiveAuthorityUnavailableError("Live editing is unavailable.");
       if (response.status !== 200 || response.redirected || response.headers.get("content-type")?.split(";", 1)[0]?.trim() !== "application/json") throw new Error("Live editing is unavailable.");
       const value = await readBoundedJson(response, ENGINE_YDOC_UPDATE_MAX_BYTES, signal);
       options.assertCurrent(); signal.throwIfAborted();
@@ -77,6 +76,7 @@ export function createNamedDesktopLiveCapture(options: {
       const transport = createNamedLiveBrowserTransport<NamedLiveSelection>({ publicOrigin: origin.origin, limits: first.limits,
         recordingContext: () => ({ kind: "account", accountId: credentials.userId }),
         authorize: async (selection, signal) => {
+          if (options.accessEnded()) throw new LiveAuthorityUnavailableError("Live editing is unavailable.");
           const next = initial ?? await admit(input.path, AbortSignal.any([signal, credentials.signal]));
           initial = undefined;
           if (JSON.stringify(next.selection) !== JSON.stringify(selection)) throw new Error("The shared file changed.");

@@ -364,9 +364,10 @@ describe("named live browser provider", () => {
       await host.send({kind: "result", result: "retry", deliveryId: item.begin.deliveryId, updateDigest: item.begin.digest, reason});
       expect(value.state()).toMatchObject({status: "live", pendingUpdates: 1, reason});
       expect(host.isClosed()).toBe(false);
-      await vi.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(249);
       expect(host.submissions()).toHaveLength(attempt);
-      await vi.advanceTimersByTimeAsync(250 * 2 ** (attempt - 1));
+      await vi.advanceTimersByTimeAsync(1);
+      expect(host.submissions()).toHaveLength(attempt + 1);
       const retry = await host.submitted(attempt + 1);
       expect(retry.bytes).toEqual(first.bytes);
       expect(retry.begin).toMatchObject({deliveryId: item.begin.deliveryId, digest: item.begin.digest});
@@ -517,7 +518,11 @@ it("counts application retries while retaining evidence across mixed retry reaso
     const item = await host.submitted(index + 1);
     if (item.begin.purpose !== "submit-update") throw new Error("Expected submit");
     await host.send({kind: "result", result: "retry", deliveryId: item.begin.deliveryId, updateDigest: item.begin.digest, reason});
-    await vi.advanceTimersByTimeAsync(250 * 2 ** index);
+    const delay = [250, 250, 500][index]!;
+    await vi.advanceTimersByTimeAsync(delay - 1);
+    expect(host.submissions()).toHaveLength(index + 1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(host.submissions()).toHaveLength(index + 2);
   }
   await host.ack(await host.submitted(4));
   expect(value.state()).toMatchObject({status: "live", pendingUpdates: 0});
