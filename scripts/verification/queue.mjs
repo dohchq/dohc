@@ -359,16 +359,21 @@ async function main([command, ...args]) {
     if (record?.running && !args.includes("--now")) throw new Error("A run is in progress. Wait for it, or pass --now to stop it; it will be retried.");
     // The task's own process is conhost, so ending the task leaves the supervisor running. Stop the supervisor
     // itself; its job stops the service and any run. It is found by its command line, which names this root's
-    // script, so a reused pid is never stopped. The task starts a new one once the old one has exited.
+    // script, and stopped through a handle held before that check, so a reused pid is never stopped.
     const script = join(root, "supervisor.ps1").replaceAll("'", "''");
-    const supervisors = () => spawnSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command",
-      `Get-CimInstance Win32_Process -Filter "Name='pwsh.exe'" | Where-Object { $_.CommandLine -and $_.CommandLine.Contains('${script}') } | ForEach-Object { $_.ProcessId }`],
-    { encoding: "utf8", windowsHide: true }).stdout.split(/\r?\n/u).filter(Boolean).map(Number);
-    for (const pid of supervisors()) { try { process.kill(pid); } catch { /* Already stopped. */ } }
-    for (let waited = 0; supervisors().length; waited += 500) {
-      if (waited >= 10_000) throw new Error("The supervisor did not exit, so the service was not restarted. End its pwsh.exe process, then run this again.");
-      await sleep(500);
-    }
+    const stopped = spawnSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", `
+      $ErrorActionPreference = 'Stop'
+      $mine = { param($id) $p = Get-CimInstance Win32_Process -Filter "ProcessId = $id"; $p -and $p.CommandLine -and $p.CommandLine.Contains('${script}') }
+      foreach ($candidate in Get-CimInstance Win32_Process -Filter "Name='pwsh.exe'") {
+        if (-not (& $mine $candidate.ProcessId)) { continue }
+        $process = Get-Process -Id $candidate.ProcessId -ErrorAction SilentlyContinue
+        if (-not $process) { continue }
+        $null = $process.Handle
+        if (-not (& $mine $process.Id)) { continue }
+        try { $process.Kill() } catch { if (-not $process.HasExited) { throw } }
+        if (-not $process.WaitForExit(10000)) { throw "supervisor $($process.Id) did not exit" }
+      }`], { encoding: "utf8", windowsHide: true, timeout: 60_000 });
+    if (stopped.status !== 0) throw new Error(`The supervisor could not be stopped, so the service was not restarted: ${(stopped.stderr || stopped.stdout || stopped.error?.message || "").trim()}`);
     spawnSync("schtasks.exe", ["/end", "/tn", taskName], { windowsHide: true });
     spawnSync("schtasks.exe", ["/run", "/tn", taskName], { windowsHide: true });
     // Report a restart only once a new service is beating; otherwise the task's five-minute trigger finishes it.
