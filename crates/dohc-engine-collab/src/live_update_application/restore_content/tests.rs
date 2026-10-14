@@ -1111,6 +1111,7 @@ fn desktop_automation_draft_without_server_declaration_can_stop_and_restore() {
         &mut WriterDocCache::new(),
         "workspace",
         OwnerDraftAppendInput {
+            person_edit: false,
             binding: f.binding.clone(),
             expected_revision: 1,
             append_key: "desktop-automation".into(),

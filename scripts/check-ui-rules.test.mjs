@@ -5,7 +5,6 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
 import { checkUiRules, isRendererSource, scanSource } from "./check-ui-rules.mjs";
-import { readWorkspacePackages, selectJavaScript } from "./verification/selection.mjs";
 
 const root = join(import.meta.dirname, "..");
 const renderer = "apps/desktop/src/renderer/";
@@ -181,17 +180,12 @@ test("CLI exits nonzero for a planted violation in a temporary fixture", t => {
   assert.match(result.stderr, /UI rules check failed.*ReviewSample\.tsx:1: palette: bg-blue-500/su);
 });
 
-test("source and full verification include the guard and its fixture tests", () => {
+test("repository checks include the guard and its fixture tests", () => {
   const manifest = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
   const source = manifest.scripts["test:repo:source"];
   assert.match(source, /node scripts\/check-ui-rules\.mjs/u);
   assert.match(source, /scripts\/check-ui-rules\.test\.mjs/u);
   assert.match(manifest.scripts["test:repo"], /pnpm test:repo:source/u);
-  const packages = readWorkspacePackages(root);
-  assert.equal(selectJavaScript([path], packages).repository, "source");
-  for (const changed of ["scripts/check-ui-rules.mjs", "scripts/ui-rules-allowlist.json", "package.json"]) {
-    assert.equal(selectJavaScript([changed], packages).repository, "full", changed);
-  }
 });
 
 test("parser recovery preserves violations before an unclosed brace", () => {

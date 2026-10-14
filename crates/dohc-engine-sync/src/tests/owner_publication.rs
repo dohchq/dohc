@@ -104,6 +104,7 @@ fn pending_server_draft_does_not_enter_or_block_the_ordinary_publication_prefix(
         &mut dohc_engine_collab::WriterDocCache::new(),
         "ws",
         dohc_engine_collab::owner_outbox::draft::OwnerDraftAppendInput {
+            person_edit: false,
             binding: observed.binding.clone(),
             expected_revision: 1,
             append_key: "offline-button".into(),

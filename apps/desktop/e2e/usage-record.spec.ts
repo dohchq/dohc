@@ -1,5 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
-import { mkdir, readdir, readFile, stat } from "node:fs/promises";
+import { mkdir, readdir, readFile, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { activityPin, desktopPins, settingsNavPin, settingsSectionPin } from "../src/testPins";
 import { launchDesktopApp, type LaunchedDesktopApp } from "./helpers/desktopApp";
@@ -86,8 +86,9 @@ test("@usage-record Privacy shows a counted action, keeps it while Off, and clea
   }
 });
 
-// A folder where the file should be is a record dohc cannot read.
-test("@usage-record Privacy says a record it cannot read stays as it is, and offers nothing that writes it", async () => {
+// A folder where the file should be is a record dohc cannot read. Try again
+// only reads, so the folder stays as it is.
+test("@usage-record Privacy says a record it cannot read stays as it is, and offers Try again that writes nothing", async () => {
   const temp = await createTempWorkspace();
   let desktop: LaunchedDesktopApp | null = null;
   const file = join(temp.homeDir, "dohc-usage.json");
@@ -103,11 +104,49 @@ test("@usage-record Privacy says a record it cannot read stays as it is, and off
     await expect(record(page).getByRole("switch")).toHaveCount(0);
     await expect(record(page).getByTestId("usage-record-clear")).toHaveCount(0);
     await expect(record(page).getByTestId("usage-record-copy")).toHaveCount(0);
+    await expect(record(page).getByTestId("usage-record-start")).toHaveCount(0);
     // The shell's failure hook carries it too, so it stays in Notices after Settings closes.
     await expect(page.getByTestId("notice-toasts")).toContainText("dohc could not read the usage record (EISDIR).");
     await capture(page, "unreadable");
+    await record(page).getByTestId("usage-record-retry").click();
+    await expect(record(page)).toHaveAttribute("data-state", "unreadable");
     expect((await stat(file)).isDirectory()).toBe(true);
     expect(await readdir(file)).toEqual([]);
+    expect((await readdir(temp.homeDir)).filter(name => name.startsWith("dohc-usage."))).toEqual(["dohc-usage.json"]);
+  } finally {
+    await cleanupDesktopWorkspace(desktop, temp);
+  }
+});
+
+// A file that does not decode: Start a new record sets it aside, and Restore swaps it back.
+test("@usage-record Privacy sets an undecodable record aside, starts a new one Off, and restores the old one", async () => {
+  const temp = await createTempWorkspace();
+  let desktop: LaunchedDesktopApp | null = null;
+  const file = join(temp.homeDir, "dohc-usage.json");
+  const aside = (number: number) => join(temp.homeDir, `dohc-usage.set-aside-${number}.json`);
+
+  try {
+    await writeFile(file, "not a usage record");
+    desktop = await launchDesktopApp({ workspace: temp });
+    const { page } = desktop;
+    await openWorkspaceFromFirstRun(page, temp);
+    await openPrivacy(page);
+    await expect(record(page)).toHaveAttribute("data-state", "unreadable");
+    await capture(page, "undecodable");
+    await record(page).getByTestId("usage-record-start").click();
+    await expect(record(page)).toHaveAttribute("data-state", "off");
+    await expect(toggle(page)).toHaveAttribute("aria-checked", "false");
+    await expect(record(page).getByTestId("usage-record-set-aside")).toContainText("dohc-usage.set-aside-1.json");
+    expect(await readFile(aside(1), "utf8")).toBe("not a usage record");
+    expect(JSON.parse(await readFile(file, "utf8"))).toMatchObject({ enabled: false, counts: [] });
+    await capture(page, "set-aside");
+
+    await record(page).getByTestId("usage-record-restore").click();
+    await expect(record(page)).toHaveAttribute("data-state", "unreadable");
+    await expect(record(page).getByTestId("usage-record-set-aside")).toContainText("dohc-usage.set-aside-2.json");
+    expect(await readFile(file, "utf8")).toBe("not a usage record");
+    expect(JSON.parse(await readFile(aside(2), "utf8"))).toMatchObject({ enabled: false, counts: [] });
+    await expect(stat(aside(1))).rejects.toMatchObject({ code: "ENOENT" });
   } finally {
     await cleanupDesktopWorkspace(desktop, temp);
   }
