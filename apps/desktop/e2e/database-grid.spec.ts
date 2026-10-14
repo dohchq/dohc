@@ -48,14 +48,14 @@ test("a CSV imported from its tab row opens as a database whose cells edit from 
     await expect(page.getByTestId(editorTabTestId("funnel.sqlite"))).toBeVisible();
     const grid = page.getByRole("grid", { name: "funnel" });
     await expect(grid).toBeVisible();
-    const signedUp = grid.getByTestId("db-cell-stage-2");
+    const signedUp = grid.getByTestId("db-cell-stage-row_2");
     await expect(signedUp).toHaveText("Signed up");
 
     // From the search field, Tab enters the grid at its first cell. The
     // arrow keys move to the cell, Enter opens its editor, and Enter commits.
     await page.getByTestId("db-filter-input").focus();
     await page.keyboard.press("Tab");
-    await expect(grid.getByTestId("db-cell-stage-1")).toBeFocused();
+    await expect(grid.getByTestId("db-cell-stage-row_1")).toBeFocused();
     await page.keyboard.press("ArrowDown");
     await expect(signedUp).toBeFocused();
     await page.keyboard.press("Enter");
@@ -78,8 +78,8 @@ test("a CSV imported from its tab row opens as a database whose cells edit from 
     await page.keyboard.press("F2");
     await page.keyboard.type(" discarded");
     await page.keyboard.press("Escape");
-    await expect(grid.getByTestId("db-cell-stage-1")).toHaveText("Visited");
-    await expect(grid.getByTestId("db-cell-stage-1")).toBeFocused();
+    await expect(grid.getByTestId("db-cell-stage-row_1")).toHaveText("Visited");
+    await expect(grid.getByTestId("db-cell-stage-row_1")).toBeFocused();
     await page.keyboard.press("Tab");
     await expect(grid.locator(":focus")).toHaveCount(0);
     expect(storedStage(join(workspace.rootPath, "funnel.sqlite"), 1)).toBe("Visited");
