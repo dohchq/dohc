@@ -252,10 +252,14 @@ export function createSyncRelayHandler({
   readOwnerShares(ownerUserId: string, path: string): Promise<{ status: number; body: unknown }>;
 } {
   const accountActor = resolveActor;
-  resolveActor = async (request, workspaceId) => {
-    const actor = await accountActor(request,workspaceId);
-    if (accountIsFenced(storage,actor.userId)) throw notFound();
+  const requireUnfencedActor = (actor: Awaited<ReturnType<ResolveActor>>) => {
+    if (accountIsFenced(storage, actor.userId)) throw notFound();
     return actor;
+  };
+  resolveActor = (request, workspaceId) => {
+    const actor = accountActor(request, workspaceId);
+    return typeof (actor as {then?: unknown}).then === "function"
+      ? Promise.resolve(actor).then(requireUnfencedActor) : requireUnfencedActor(actor as Awaited<ReturnType<ResolveActor>>);
   };
   const publicEditRelease = parsePublicEditRelease(releaseInput);
   const respondToDataset = datasetHost ? createDatasetRoutes(datasetHost, storage, {limits: appBackendAdmissionLimits, nowMs, pressDataset}) : undefined;
