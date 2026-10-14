@@ -148,7 +148,7 @@ export async function postgres(output, command = run, measure = (_name, action) 
     while (true) {
       const remaining = deadline - Date.now();
       if (remaining <= 0) throw new Error("Verification Postgres did not become healthy.");
-      const health = await command("docker", ["inspect", "--format", "{{.State.Health.Status}}", id], { timeoutMs: Math.min(10_000, remaining) });
+      const health = await command("docker", ["inspect", "--format", "{{.State.Health.Status}}", id], { timeoutMs: Math.min(30_000, remaining) });
       checkCancellation();
       if (health.stdout.trim() === "healthy") break;
       if (Date.now() > deadline || health.stdout.trim() === "unhealthy") throw new Error("Verification Postgres did not become healthy.");
@@ -160,7 +160,7 @@ export async function postgres(output, command = run, measure = (_name, action) 
       });
       checkCancellation();
     }
-    const port = (await command("docker", ["port", id, "5432/tcp"], { timeoutMs: 10_000 })).stdout.trim().match(/^127\.0\.0\.1:(\d+)$/)?.[1];
+    const port = (await command("docker", ["port", id, "5432/tcp"], { timeoutMs: 30_000 })).stdout.trim().match(/^127\.0\.0\.1:(\d+)$/)?.[1];
     checkCancellation();
     if (!port) throw new Error("Docker did not report a loopback Postgres port.");
     return { id, url: `postgres://dohc:dohc@127.0.0.1:${port}/dohc`, stop };
