@@ -1142,6 +1142,13 @@ mod saturation_tests {
             })
             .await
             .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while actor.link_drain_metrics().idle_slots == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("passive actor reaches an idle slot before close");
         supervisor.close(&db).unwrap();
         assert!(refused, "a restart must keep local origination disabled");
         assert_eq!(
