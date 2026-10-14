@@ -92,7 +92,8 @@ test("transient sweep and ticket-read errors retry without ending the wait", () 
     for (const code of ["EPERM", "EBUSY", "EACCES", "ENOENT"]) {
       for (const operation of ["lock", "queue", "ticket"]) {
         queueProbe(root, `
-          const holder = await acquireBuildSlot({ root, slots: 1, waitMs: 0 });
+          // Antivirus can fail a first claim for a moment, so the holder retries too.
+          const holder = await acquireBuildSlot({ root, slots: 1, waitMs: 1000, pollMs: 1 });
           const method = ${JSON.stringify(operation)} === "lock" ? "mkdirSync"
             : ${JSON.stringify(operation)} === "queue" ? "readdirSync" : "readFileSync";
           const original = fs[method];
