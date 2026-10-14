@@ -560,6 +560,30 @@ test("an older verifier waiting for slot 1 does not hold back a free second lane
   } finally { first.release(); }
 });
 
+test("a lowered lane count admits nothing until the runs in flight fall under it, even for a run already waiting", async t => {
+  const root = slotRoot();
+  t.after(() => rmSync(root, {recursive: true, force: true}));
+  const env = {DOHC_BUILD_SLOT_ROOT: root};
+  const setting = count => writeFileSync(join(root, "verification-lanes"), String(count));
+  setting(3);
+  const [first, second, third] = [await verifierLane(env), await verifierLane(env), await verifierLane(env)];
+  first.release();
+  second.release();
+  // Slot 3 still runs, so a count of 1 is already met even though slots 1 and 2 are free.
+  setting(1);
+  await assert.rejects(verifierLane(env, {waitMs: 0}), /no verification slot freed/);
+  setting(2);
+  const fourth = await verifierLane(env, {waitMs: 0});
+  // A run that started waiting under 2 stops admitting once the count drops to 1.
+  const waiting = verifierLane(env, {waitMs: 3000});
+  setting(1);
+  fourth.release();
+  await assert.rejects(waiting, /no verification slot freed/);
+  third.release();
+  const last = await verifierLane(env, {waitMs: 3000});
+  last.release();
+});
+
 test("queue status retains claim identity and estimates only from completed lane history", async t => {
   const root = slotRoot();
   t.after(() => rmSync(root, {recursive: true, force: true}));
@@ -597,10 +621,10 @@ test("status CLI reads absent queues without creating or acquiring anything", t 
   assert.equal(existsSync(absent), false);
 });
 
-test("status CLI reports invalid configuration and preserves an existing second lane", t => {
+test("status CLI reports invalid configuration and shows a lane held above the setting", t => {
   const root = slotRoot();
   t.after(() => rmSync(root, {recursive: true, force: true}));
-  const second = join(root, "verification-slot-2");
+  const second = join(root, "verification-slot-3");
   mkdirSync(second);
   const owner = JSON.stringify({pid: process.pid, start: new Date().toISOString()});
   writeFileSync(join(second, "owner.json"), owner);
@@ -611,7 +635,7 @@ test("status CLI reports invalid configuration and preserves an existing second 
   const status = JSON.parse(result.stdout);
   assert.equal(status.verificationSlots, null);
   assert.match(status.verificationConfigurationError, /isolated/);
-  assert.equal(status.lanes.find(lane => lane.kind === "verification-slot").owners[0].name, "verification-slot-2");
+  assert.equal(status.lanes.find(lane => lane.kind === "verification-slot").owners[0].name, "verification-slot-3");
   assert.equal(readFileSync(join(second, "owner.json"), "utf8"), owner);
   assert.equal(existsSync(join(root, "verification-slot-1")), false);
   assert.equal(existsSync(join(root, "verification-slot-queue")), false);

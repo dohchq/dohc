@@ -824,6 +824,8 @@ const canonical = path => {
 };
 const verifierEntry = fileURLToPath(new URL("../../scripts/verification/verify.mjs", import.meta.url));
 
+export const maxVerificationLanes = 4;
+
 /**
  * The host's verification lane count, from 1 to 4. It is 1 unless `verification-lanes`
  * in the verification slot root says otherwise, so every verifier on the host agrees.
@@ -840,8 +842,9 @@ export function verificationLanes(env = process.env) {
   let setting;
   try { setting = readFileSync(path, "utf8").trim(); }
   catch (error) { if (error.code === "ENOENT") return 1; throw error; }
-  if (!/^[1-4]$/u.test(setting)) throw new Error(`${path} must contain a lane count from 1 to 4.`);
-  return Number(setting);
+  const count = /^\d+$/u.test(setting) ? Number(setting) : 0;
+  if (count < 1 || count > maxVerificationLanes) throw new Error(`${path} must contain a lane count from 1 to ${maxVerificationLanes}.`);
+  return count;
 }
 
 /**
@@ -858,8 +861,10 @@ export function acquireVerificationSlot(env = process.env, { metadata, waitMs = 
   const slots = lanes ?? verificationLanes(env);
   const budget = resolveBuildBudget(env);
   if (!budget) return null;
+  // A lowered setting also holds back runs already waiting; an unreadable one keeps the count this run started with.
+  const limit = () => { if (lanes) return lanes; try { return verificationLanes(env); } catch { return slots; } };
   // Verifiers older than the lane setting used one slot and record no count.
-  return acquireSlot({ root: env.DOHC_VERIFICATION_SLOT_ROOT ?? budget.root, slots, legacySlots: 1,
+  return acquireSlot({ root: env.DOHC_VERIFICATION_SLOT_ROOT ?? budget.root, slots, maxSlots: maxVerificationLanes, limit, legacySlots: 1,
     kind: "verification-slot", lanes: "verification runs", metadata,
     waitMs, pollMs: 60_000, cooperativeCancellation: true, observeTicket, signal });
 }
@@ -883,6 +888,8 @@ export class TicketEvidenceError extends Error {}
 async function acquireSlot({
   root,
   slots,
+  maxSlots = slots,
+  limit = () => slots,
   legacySlots = slots,
   kind,
   lanes,
@@ -939,9 +946,13 @@ async function acquireSlot({
       const tickets = queueTickets(root, kind);
       ahead = tickets.indexOf(ticket.name);
       free = [];
-      for (let i = 1; i <= slots; i += 1) {
-        if (!existsSync(slotDir(root, i, kind))) free.push(i);
+      let held = 0;
+      for (let i = 1; i <= maxSlots; i += 1) {
+        if (existsSync(slotDir(root, i, kind))) held += 1;
+        else if (i <= slots) free.push(i);
       }
+      // Every held slot counts against the current limit, so lowering it admits nothing until the runs in flight fall under it.
+      free = free.slice(0, Math.max(0, limit() - held));
       // Waiting code can use fewer slots than this one only when older code may be waiting too.
       const counts = slots === legacySlots ? tickets.map(() => slots) : tickets.map(name => name === ticket.name ? slots : ticketSlots(root, kind, name, legacySlots));
       slot = ahead < 0 ? undefined : admissionSlot(free, counts, ahead);
@@ -960,7 +971,7 @@ async function acquireSlot({
       const sweepMs = reserved ? Math.min(pollMs, 1000) : pollMs;
       if (Date.now() - lastSweepAt >= sweepMs) {
         lastSweepAt = Date.now();
-        reclaimStaleSlots({ root, slots, staleMs, goneMs, kind });
+        reclaimStaleSlots({ root, slots: maxSlots, staleMs, goneMs, kind });
         refreshQueue();
       }
       if (ahead < 0) {
@@ -1036,9 +1047,10 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   let verificationConfigurationError = null;
   try { verificationSlots = verificationLanes(); }
   catch (error) { verificationConfigurationError = error.message; }
-  // Inspect any existing second lane even when this shell cannot admit one.
-  const inspectedVerificationSlots = verificationRoot && existsSync(join(verificationRoot, "verification-slot-2"))
-    ? Math.max(2, verificationSlots) : verificationSlots;
+  // Show every held lane, including lanes above a lowered or unreadable setting.
+  const heldVerificationSlots = verificationRoot ? Array.from({length: maxVerificationLanes}, (_, index) => index + 1)
+    .filter(index => existsSync(join(verificationRoot, `verification-slot-${index}`))) : [];
+  const inspectedVerificationSlots = Math.max(verificationSlots, ...heldVerificationSlots);
   const lanes = [
     ...(cargoRoot ? [buildQueueStatus({root: cargoRoot, slots: budget?.slots ?? 4})] : []),
     ...(verificationRoot ? [

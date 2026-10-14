@@ -12,7 +12,7 @@ import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { setTimeout as sleep } from "node:timers/promises";
 import { git, run } from "./process.mjs";
-import { acquireVerificationSlot, freeDiskGb, resolveBuildBudget, verificationLanes } from "../../tools/rust-engine-program/build-slot.mjs";
+import { acquireVerificationSlot, freeDiskGb, maxVerificationLanes, resolveBuildBudget, verificationLanes } from "../../tools/rust-engine-program/build-slot.mjs";
 import { attemptOutcome, listRequests, nextRequest, placeSubmission, protocol, queuePaths, readJson, retryDelayMs, serviceRuns, terminalStates, writeJson } from "./queue.mjs";
 
 const verifierEntry = fileURLToPath(new URL("./verify.mjs", import.meta.url));
@@ -125,7 +125,7 @@ export async function runService({
   const requestBudgetMs = 2 * timeLimitMs;
   // Attempts in flight, by request id. Each holds one of the lane checkouts.
   const running = new Map();
-  const checkouts = [lane, `${lane}-2`, `${lane}-3`, `${lane}-4`];
+  const checkouts = Array.from({ length: maxVerificationLanes }, (_, index) => index ? `${lane}-${index + 1}` : lane);
   let laneCount = 1;
   let laneError = null;
   let fatal = null;
