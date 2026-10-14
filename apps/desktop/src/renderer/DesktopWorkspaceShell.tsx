@@ -963,13 +963,22 @@ export function DesktopWorkspaceShell(props: {
         closeSettings();
         setCloudOpen(true);
       },
+      // An enable or a pause. The page holds the switch, signed in or out,
+      // so a retry it can no longer run opens the page again.
       onError: (error) => {
-        if (current()) reportConnectionError(error);
+        if (!current()) return;
+        reportShellFailure({
+          message: error.message,
+          cause: error.cause,
+          retry: () => {
+            if (!error.retry?.()) openSettings("cloud");
+          },
+        });
       },
       onAccountError: reportInstallationFailure,
       hasReceivedShares,
     };
-  }, [closeSettings, cloudStatus, cloudStatusUnreadable, hasReceivedShares, refreshCloudStatus, reportConnectionError, workspaceId]);
+  }, [closeSettings, cloudStatus, cloudStatusUnreadable, hasReceivedShares, openSettings, refreshCloudStatus, reportShellFailure, workspaceId]);
   // About's section reads report through this shell's notices, one row per
   // section and file. A repeat keeps an existing row's toast state only for
   // an unchanged message. A changed message, or a missing row, toasts again.

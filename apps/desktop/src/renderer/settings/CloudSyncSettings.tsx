@@ -81,6 +81,15 @@ export function CloudSyncSettings(props: {
     setPassphrase("");
   }, [props.workspaceId]);
   useEffect(() => setChanged(null), [status, props.workspaceId]);
+  // Protect and Unlock turn sync on, which needs an account, so signing out
+  // closes the passphrase form.
+  const signedOut = status?.connected === false;
+  useEffect(() => {
+    if (!signedOut) return;
+    setSyncError(null);
+    setPassphrasePurpose(null);
+    setPassphrase("");
+  }, [signedOut]);
 
   const sync: WorkspaceSync = changed ?? {
     workspaceSynced: status?.workspaceSynced ?? false,
@@ -316,18 +325,17 @@ export function CloudSyncSettings(props: {
 function SyncPausedLine(props: { pause: SyncPause }) {
   const { author } = props.pause;
   const time = formatChatTime(props.pause.atMs);
+  // A person pause from another installation id (a copied or reset registry) names nobody.
+  const by = author.kind === "agent" ? (
+    <span className="text-agent">
+      <Sparkles size={12} strokeWidth={1.9} aria-hidden className="mr-0.5 inline align-[-2px]" />
+      <span className="sr-only">agent </span>
+      {author.agentId}
+    </span>
+  ) : author.self ? "you" : null;
   return (
     <span data-testid="cloud-sync-paused">
-      Paused by{" "}
-      {author.kind === "agent" ? (
-        <span className="text-agent">
-          <Sparkles size={12} strokeWidth={1.9} aria-hidden className="mr-0.5 inline align-[-2px]" />
-          <span className="sr-only">agent </span>
-          {author.agentId}
-        </span>
-      ) : (
-        author.self ? "you" : "another person"
-      )}
+      Paused{by ? <> by {by}</> : null}
       {" · "}
       <time dateTime={time.iso}>{time.label}</time>
     </span>

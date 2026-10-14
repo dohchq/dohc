@@ -275,7 +275,7 @@ describe("CloudSyncSettings", () => {
 
   it.each([
     ["you", PAUSE_BY_YOU, "Paused by you ·"],
-    ["a person whose name is unknown", PAUSE_BY_UNNAMED, "Paused by another person ·"],
+    ["this computer under an earlier id", PAUSE_BY_UNNAMED, "Paused ·"],
     ["an agent", PAUSE_BY_AGENT, "Paused by agent codex ·"],
   ] as const)("shows a pause by %s from the shell's status", (_who, syncPause, line) => {
     render(<CloudSyncSettings workspaceId="ws-1" cloud={cloud({ ...SIGNED_IN, syncPause })} />);
@@ -552,6 +552,24 @@ describe("CloudSyncSettings", () => {
     );
     expect(screen.getByTestId("cloud-sync-passphrase")).toBeTruthy();
     expect(screen.queryByTestId("cloud-protect-secrets")).toBeNull();
+  });
+
+  // Protect and Unlock turn sync on, which needs an account. Signing out
+  // closes the form; signing back in does not bring the passphrase back.
+  it("closes the passphrase form on sign-out", () => {
+    const protectedSynced = { ...SYNCED, workspaceSecretState: "protected-key-present" as const };
+    const { rerender } = render(<CloudSyncSettings workspaceId="ws-1" cloud={cloud(protectedSynced)} />);
+    fireEvent.click(screen.getByTestId("cloud-protect-secrets"));
+    fireEvent.change(screen.getByTestId("cloud-sync-passphrase"), { target: { value: "shared passphrase" } });
+
+    rerender(<CloudSyncSettings workspaceId="ws-1" cloud={cloud({ ...SIGNED_OUT_OWNED, workspaceSynced: true })} />);
+    expect(screen.queryByTestId("cloud-sync-passphrase")).toBeNull();
+    expect(screen.queryByTestId("settings-row-protected-files")).toBeNull();
+
+    rerender(<CloudSyncSettings workspaceId="ws-1" cloud={cloud(protectedSynced)} />);
+    expect(screen.queryByTestId("cloud-sync-passphrase")).toBeNull();
+    expect(screen.getByTestId("cloud-protect-secrets")).toBeTruthy();
+    expect(bridgeMock.cloudEnableSync).not.toHaveBeenCalled();
   });
 
   // A Disconnect whose file removal failed leaves main's cache empty while

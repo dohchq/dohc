@@ -2202,7 +2202,19 @@ function Pane(props: { theme: "light" | "dark" }) {
             <CloudSyncSettings workspaceId="ws-trip" cloud={settingsCloud({ ...CLOUD_SIGNED_IN, syncPause: SYNC_PAUSED_BY_AGENT })} />
           </div>
         </Specimen>
-        <Specimen label="sync paused: dohc could not confirm this workspace's account, with Try again">
+        <Specimen label="sync off: paused under this computer's earlier id">
+          <div className="w-[640px]">
+            <CloudSyncSettings workspaceId="ws-trip" cloud={settingsCloud({ ...CLOUD_SIGNED_IN, syncPause: SYNC_PAUSED_BY_ANOTHER })} />
+          </div>
+        </Specimen>
+        <Specimen label="turning sync off: the switch holds until main answers">
+          <div className="w-[640px]">
+            <SettingRow title="Sync this workspace">
+              <SwitchControl label="Sync this workspace" checked={false} busy disabled onChange={noop} />
+            </SettingRow>
+          </div>
+        </Specimen>
+        <Specimen label="sync on, account unconfirmed: not syncing, with Try again">
           <div className="w-[640px]">
             <CloudSyncSettings workspaceId="ws-trip" cloud={settingsCloud({ ...CLOUD_SIGNED_IN, workspaceSynced: true })} />
           </div>
@@ -2285,6 +2297,11 @@ const CLOUD_SIGNED_IN: CloudStatusResult = {
 const SYNC_PAUSED_BY_YOU: CloudStatusResult["syncPause"] = {
   atMs: new Date(2026, 6, 8, 8, 42).getTime(),
   author: { kind: "person", personId: "local-sam", self: true },
+};
+// This computer's id file was unreadable, so it took a new id after the pause.
+const SYNC_PAUSED_BY_ANOTHER: CloudStatusResult["syncPause"] = {
+  atMs: new Date(2026, 6, 8, 8, 42).getTime(),
+  author: { kind: "person", personId: "local-old", self: false },
 };
 const SYNC_PAUSED_BY_AGENT: CloudStatusResult["syncPause"] = {
   atMs: new Date(2026, 6, 8, 8, 42).getTime(),
