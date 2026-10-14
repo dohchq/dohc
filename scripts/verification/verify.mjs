@@ -32,7 +32,7 @@ export function failureKind(error) {
   // A program that could not start ran no check, whatever the reason.
   if (String(error?.syscall ?? error?.cause?.syscall ?? "").startsWith("spawn")) return { kind: "environment", cause: `${error.code ?? "failure"} starting a program` };
   if (startupFailures.has(error?.exitCode) || startupFailures.has(error?.status)) return { kind: "environment", cause: "a program could not start" };
-  if (/^(?:refusing to run the gate: |(?:Error: )?Build needs )[\d.]+ GB free/mu.test(String(error?.stdout ?? "").slice(-65536) + String(error?.stderr ?? "").slice(-65536))) return { kind: "environment", cause: "disk space" };
+  if (/^refusing to run the gate: [\d.]+ GB free/mu.test(String(error?.stdout ?? "").slice(-65536) + String(error?.stderr ?? "").slice(-65536))) return { kind: "environment", cause: "disk space" };
   if (hostPhases.has(error?.step)) return { kind: "environment", cause: error.step };
   if (error?.step === "install" && !/ERR_PNPM_(OUTDATED_LOCKFILE|LOCKFILE|PEER)/u.test(`${error?.message ?? ""}\n${String(error?.stderr ?? "").slice(-65536)}`)) return { kind: "environment", cause: "install" };
   return { kind: "check", cause: error?.step ?? "verification" };

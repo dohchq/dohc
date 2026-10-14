@@ -24,8 +24,9 @@ const stopGraceMs = 5 * 60_000;
 const names = path => { try { return readdirSync(path); } catch { return []; } };
 
 /**
- * Remove one request's containers, and any verification container that has
- * exited. Any other container may belong to a run in another lane, so it is never touched.
+ * Remove one request's containers, or without a request, every verification
+ * container that has exited. A container that cannot be removed fails only its
+ * own request's cleanup. Any other container may belong to a run in another lane, so it is never touched.
  */
 export async function sweepContainers({ request, command = run } = {}) {
   const list = async filters => {
@@ -33,7 +34,7 @@ export async function sweepContainers({ request, command = run } = {}) {
     return result.stdout.split(/\s+/u).filter(Boolean);
   };
   const ids = new Set(request ? await list([`label=dohc.verification=${request}`]) : []);
-  for (const status of ["exited", "dead"]) for (const id of await list(["name=dohc-verify-", `status=${status}`])) ids.add(id);
+  if (!request) for (const status of ["exited", "dead"]) for (const id of await list(["name=dohc-verify-", `status=${status}`])) ids.add(id);
   if (ids.size) await command("docker", ["rm", "--force", ...ids], { timeoutMs: 60_000, quietStdout: true });
   return ids.size;
 }
@@ -289,6 +290,8 @@ export async function runService({
     } catch (error) {
       if (!current.stopped) log(`attempt ${entry.id}/${n} ended early: ${error.stack ?? error.message}`);
     } finally {
+      // Only verification counts against the run; its bookkeeping does not.
+      current.phase = "finishing";
       lease?.release();
       let outcome = attemptOutcome(readJson(join(output, "result.json")), grant, { stopped: current.stopped });
       if (outcome.outcome === "failed" && outcome.cause === "check") {
@@ -364,28 +367,36 @@ export async function runService({
 
   await beat();
   // The heartbeat has its own timer, so slow Docker or disk work in the loop never looks like a dead service.
-  // A synchronous call that hangs still stops it, and the supervisor restarts the service.
+  // It stops when the loop has made no progress for 15 minutes, far longer than any tick's own deadlines,
+  // or when a synchronous call hangs. The supervisor then restarts the service.
+  let tickAt = Date.now();
   let beating = null;
   const pulse = setInterval(() => {
+    if (Date.now() - tickAt > 15 * 60_000) return;
     beating ??= beat().catch(error => log(`heartbeat failed: ${error.message}`)).finally(() => { beating = null; });
   }, 10_000);
-  log(`service ${commit ?? "(unversioned)"} started, pid ${process.pid}`);
+  // Awake time has its own clock too, so slow work in the loop never shortens a run's time.
+  // Only awake time counts against a run: a gap far over one tick is sleep.
   let last = Date.now();
+  const clock = setInterval(() => {
+    const now = Date.now();
+    const awake = Math.min(now - last, 3 * tickMs);
+    last = now;
+    for (const current of running.values()) {
+      if (current.phase === "verifying") current.awakeMs += awake;
+      if (current.phase === "preparing") current.prepareMs += awake;
+    }
+  }, tickMs);
+  log(`service ${commit ?? "(unversioned)"} started, pid ${process.pid}`);
   try {
     for (;;) {
       if (stop?.aborted) return 0;
       // A status that could not be written leaves the service unsure of its own state; restart and recover.
       if (fatal) throw fatal;
       const now = Date.now();
+      tickAt = now;
       try {
-      // Count only awake verification time against a run: a gap far over one tick is sleep.
       // Preparation has its own deadline. Waiting for the host lane has no limit; only cancel or a stop ends it.
-      const awake = Math.min(now - last, 3 * tickMs);
-      for (const current of running.values()) {
-        if (current.phase === "verifying") current.awakeMs += awake;
-        if (current.phase === "preparing") current.prepareMs += awake;
-      }
-      last = now;
       // Recovered first, so a submission that arrived during a restart replaces the interrupted request.
       await recover(load());
       if (fatal) continue;
@@ -447,6 +458,7 @@ export async function runService({
     }
   } finally {
     clearInterval(pulse);
+    clearInterval(clock);
     instance.close();
   }
 }

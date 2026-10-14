@@ -103,7 +103,7 @@ test("machine failures are told apart from failures of the change", () => {
   assert.equal(kind({ step: "rust", stdout: "refusing to run the gate: 38.2 GB free on the worktree volume is below the 40 GB floor" }), "environment");
   // Another lane can use up the disk after this run was admitted.
   assert.equal(kind({ step: "prepare", environment: "disk space", message: "Build needs 40 GB free; observed 38.2." }), "environment");
-  assert.equal(kind({ step: "yrs-interop", stderr: "Error: Build needs 40 GB free; observed 38.2.\n    at withBuildBudget" }), "environment");
+  assert.equal(kind({ step: "tests", stderr: "Error: Build needs 40 GB free; observed 38.2." }), "check", "a test may print a refusal it expects");
 });
 
 test("a command the Windows job relay cannot start is a machine failure", { skip: process.platform !== "win32" && "the job relay is Windows-only" }, async () => {
@@ -147,6 +147,8 @@ function harness(t, { timeLimitMs = 60_000, docker = async () => true, sweep = a
     else if (behavior === "crash") throw new Error("worker crashed without a receipt");
     else if (behavior === "hang") await new Promise(done => signal.addEventListener("abort", done, { once: true }));
     else if (behavior === "host-down") receipt({ verdict: "FAIL", error: "Docker did not answer", failure: { kind: "environment", cause: "postgres-start" } });
+    // Two slow machine failures, then a run that ends only when it is stopped.
+    else if (behavior === "slow-host" && calls.filter(call => call.id === grant.request).length > 2) await new Promise(done => signal.addEventListener("abort", done, { once: true }));
     else if (behavior === "slow-host") { await sleep(250); receipt({ verdict: "FAIL", error: "Docker did not answer", failure: { kind: "environment", cause: "postgres-start" } }); }
   };
   const service = runService({ root, repo: fixture.repo, lane: join(root, "lane"), tickMs: 20, timeLimitMs, floorGb: 1,
@@ -270,16 +272,19 @@ test("a lane setting that cannot be read keeps the lane count the service had, f
   assert.equal(slots, 1);
 });
 
-test("the sweep removes a request's containers and exited ones, never one another lane may be starting", async () => {
-  const removed = [];
+test("a request's cleanup removes only its containers, and the sweep never one another lane may be starting", async () => {
+  let removed = [];
   const command = async (_, args) => {
     if (args[0] === "rm") { removed.push(...args.slice(2)); return { stdout: "" }; }
     const filters = args.filter(arg => arg.includes("="));
     const found = filters.includes("label=dohc.verification=r1") ? "own" : filters.includes("status=exited") ? "exited" : filters.includes("status=created") ? "starting" : "";
     return { stdout: found };
   };
-  assert.equal(await sweepContainers({ request: "r1", command }), 2);
-  assert.deepEqual(removed, ["own", "exited"]);
+  assert.equal(await sweepContainers({ request: "r1", command }), 1);
+  assert.deepEqual(removed, ["own"], "another request's container cannot fail this cleanup");
+  removed = [];
+  assert.equal(await sweepContainers({ command }), 1);
+  assert.deepEqual(removed, ["exited"]);
 });
 
 test("a submission the service cannot verify is rejected with a reason", async t => {
@@ -437,14 +442,15 @@ test("a check that fails while Docker stops answering is retried, and fails on a
 });
 
 test("retries share one time budget, so a request the host keeps failing late ends in error", async t => {
-  const { request, settled } = harness(t, { timeLimitMs: 300 });
+  // Each slow attempt takes about 300 ms of the 400 ms limit, so two leave the third less than its limit of the 800 ms budget.
+  const { request, settled } = harness(t, { timeLimitMs: 400 });
   const slow = await request("slow-host");
   const ended = await settled(slow.id);
   assert.equal(ended.status.state, "error", "only machine failures retry, so a spent budget gives no verdict");
   assert.equal(ended.status.verdict, null);
   assert.equal(ended.status.cause, "time budget");
   assert.equal(ended.status.attempts.at(-1).outcome, "error", "the attempt the budget cut short ends the request itself");
-  assert.ok(ended.status.attempts.length <= 4, `${ended.status.attempts.length} attempts`);
+  assert.equal(ended.status.attempts.length, 3);
 });
 
 test("a cleanup that fails is retried until it succeeds, and its request is kept until then", async t => {
