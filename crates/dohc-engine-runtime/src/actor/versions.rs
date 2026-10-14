@@ -446,20 +446,43 @@ fn complete_held_switch_jobs(
     if holds.is_empty() {
         return Ok(());
     }
-    let mut statement = tx.prepare_cached("SELECT job_id,target_path FROM materialization_jobs WHERE workspace_id=?1 AND status='pending' AND job_id GLOB 'version-switch-*'").map_err(StorageError::corrupt_public)?;
-    let jobs = statement
-        .query_map([workspace], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-        })
-        .map_err(StorageError::corrupt_public)?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(StorageError::corrupt_public)?;
+    let jobs = dohc_engine_storage::pending_switch_jobs_in(tx, workspace)?;
     for (id, path) in jobs {
         if holds.blocks(&path) && selected(&id, &path) {
             tx.execute("UPDATE materialization_jobs SET status='complete',completed_at_ms=?2 WHERE job_id=?1",params![id,now_ms]).map_err(StorageError::persist_public)?;
         }
     }
     Ok(())
+}
+
+fn projection_target_contains<'a>(
+    root: &std::path::Path,
+    path: &str,
+    targets: &HashSet<&'a str>,
+    case_paths: &mut Option<HashMap<String, Vec<&'a str>>>,
+) -> bool {
+    if targets.contains(path) {
+        return true;
+    }
+    let aliases = case_paths.get_or_insert_with(|| {
+        let mut aliases: HashMap<String, Vec<&str>> = HashMap::new();
+        for target in targets {
+            aliases
+                .entry(target.to_lowercase())
+                .or_default()
+                .push(target);
+        }
+        aliases
+    });
+    let Some(candidates) = aliases.get(&path.to_lowercase()) else {
+        return false;
+    };
+    let Ok(previous) = std::fs::canonicalize(root.join(path)) else {
+        return false;
+    };
+    candidates.iter().any(|target| {
+        std::fs::canonicalize(root.join(target)).is_ok_and(|target| target == previous)
+    })
 }
 
 #[allow(
@@ -484,6 +507,7 @@ fn plan_plaintext_switch(
         .iter()
         .map(|snapshot| snapshot.path.as_str())
         .collect();
+    let mut target_case_paths = None;
     let target_holds: HashSet<&str> = target_paths
         .iter()
         .filter_map(|path| holds.get(path).map(|(path, _)| path))
@@ -577,7 +601,12 @@ fn plan_plaintext_switch(
             if holds
                 .get(&path)
                 .is_some_and(|(path, _)| target_holds.contains(path))
-                || target_paths.contains(path.as_str())
+                || projection_target_contains(
+                    root_dir,
+                    &path,
+                    &target_paths,
+                    &mut target_case_paths,
+                )
                 || !resolve_effective_policy(
                     &path,
                     policy.files_policy.as_deref(),
@@ -673,6 +702,7 @@ fn plan_secret_switch(
 ) -> Result<Vec<SwitchProjection>, RuntimeError> {
     let target = list_secret_files_keyless(store, workspace_id, target_version_id)?;
     let target_paths: HashSet<&str> = target.iter().map(|stat| stat.path.as_str()).collect();
+    let mut target_case_paths = None;
     let target_holds: HashSet<&str> = target_paths
         .iter()
         .filter_map(|path| holds.get(path).map(|(path, _)| path))
@@ -739,7 +769,12 @@ fn plan_secret_switch(
         if holds
             .get(&stat.path)
             .is_some_and(|(path, _)| target_holds.contains(path))
-            || target_paths.contains(stat.path.as_str())
+            || projection_target_contains(
+                root_dir,
+                &stat.path,
+                &target_paths,
+                &mut target_case_paths,
+            )
         {
             continue;
         }

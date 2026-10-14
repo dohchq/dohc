@@ -375,8 +375,7 @@ fn invalid_job_field(
 const JOB_COLUMNS: &str = "job_id, workspace_id, target_path, content_sha256, preimage_present, \
      preimage_sha256, target_generation, status, created_at_ms, operation";
 
-/// Every pending job, oldest first. Switch deletes precede writes from the
-/// same batch so a released held file can give way to a directory. The set the
+/// Every pending job, oldest first, then by id for determinism. The set the
 /// filesystem pipeline replays at startup and executes on enqueue. Checked
 /// deletes are left to their own recovery.
 pub(crate) fn list_pending_jobs(
@@ -423,8 +422,7 @@ pub(crate) fn list_jobs(
     };
     let sql = format!(
         "SELECT {JOB_COLUMNS} FROM materialization_jobs j \
-         {filter} ORDER BY created_at_ms ASC, \
-         CASE WHEN job_id GLOB 'version-switch-*' AND operation='delete' THEN 0 ELSE 1 END, job_id ASC"
+         {filter} ORDER BY created_at_ms ASC, job_id ASC"
     );
     let mut stmt = conn.prepare_cached(&sql).map_err(StorageError::corrupt)?;
     let rows = stmt
@@ -435,6 +433,21 @@ pub(crate) fn list_jobs(
         jobs.push(job.map_err(StorageError::corrupt)?);
     }
     Ok(jobs)
+}
+
+/// Pending switch intents in the replay workspace, including legacy unscoped rows.
+pub fn pending_switch_jobs_in(
+    conn: &Connection,
+    workspace_id: &str,
+) -> Result<Vec<(String, String)>, StorageError> {
+    let mut statement = conn.prepare_cached(
+        "SELECT job_id,target_path FROM materialization_jobs WHERE workspace_id IN (?1,'') AND status='pending' AND job_id GLOB 'version-switch-*'"
+    ).map_err(StorageError::corrupt_public)?;
+    statement
+        .query_map([workspace_id], |row| Ok((row.get(0)?, row.get(1)?)))
+        .map_err(StorageError::corrupt_public)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(StorageError::corrupt_public)
 }
 
 pub(crate) fn has_pending_job_for_path(

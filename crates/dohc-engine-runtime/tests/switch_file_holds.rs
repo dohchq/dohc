@@ -764,3 +764,34 @@ async fn review2_relay_keeps_recorded_hold_preimage() {
 async fn review2_inactive_actor_rollback_keeps_outside_bytes() {
     release_without_capture("actor-rollback").await;
 }
+
+#[tokio::test]
+async fn review3_case_alias_switch_places_selected_bytes_without_conflicts() {
+    let scratch = fixture(0, 0, "");
+    std::fs::write(scratch.path().join("Notes.md"), "p\n").unwrap();
+    if !scratch.path().join("notes.md").exists() {
+        return; // This alias exists only on a case-insensitive filesystem.
+    }
+    let db = engine_db_path(&scratch).unwrap();
+    {
+        let mut store = EngineStore::open(&db, 2).unwrap();
+        seed(&mut store, "main", "Notes.md", "p\n", 2);
+        seed(&mut store, "target", "notes.md", "X\n", 5);
+    }
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&db, 6).unwrap().actor;
+    actor
+        .set_active_version(
+            switch(&scratch, "target", 7),
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        std::fs::read_to_string(scratch.path().join("notes.md")).unwrap(),
+        "X\n"
+    );
+    assert!(conflict_texts(&scratch).is_empty());
+    supervisor.close(&db).unwrap();
+}

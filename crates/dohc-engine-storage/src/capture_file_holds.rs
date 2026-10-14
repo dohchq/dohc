@@ -171,15 +171,7 @@ pub fn rebase_switch_jobs_in(
     path: &str,
     preimage: &crate::Preimage,
 ) -> Result<(), StorageError> {
-    let mut statement=tx.prepare_cached("SELECT job_id,target_path FROM materialization_jobs WHERE workspace_id=?1 AND status='pending' AND job_id GLOB 'version-switch-*'")
-        .map_err(StorageError::corrupt_public)?;
-    let jobs = statement
-        .query_map([workspace], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-        })
-        .map_err(StorageError::corrupt_public)?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(StorageError::corrupt_public)?;
+    let jobs = crate::pending_switch_jobs_in(tx, workspace)?;
     let path = path.to_lowercase();
     let (present, sha) = match preimage {
         crate::Preimage::Absent => (0, None),

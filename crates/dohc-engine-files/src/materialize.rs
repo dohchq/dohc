@@ -886,6 +886,7 @@ impl PlacementHolds {
         self.get(path).or_else(|| self.ancestor(path)).is_some()
     }
 
+    #[cfg(windows)]
     fn resolved(&self, root: &Path, target: &Path) -> Result<bool, MaterializeError> {
         let path = target
             .strip_prefix(root)
@@ -3584,11 +3585,13 @@ fn placement_is_held(
         if holds.is_empty() {
             return Ok(false);
         }
-        if let Some(target) = target {
-            return holds.resolved(root, target);
-        }
         #[cfg(windows)]
-        return holds.resolved(root, &resolve_target(root, path)?);
+        {
+            if let Some(target) = target {
+                return holds.resolved(root, target);
+            }
+            return holds.resolved(root, &resolve_target(root, path)?);
+        }
         #[cfg(not(windows))]
         return Ok(false);
     }

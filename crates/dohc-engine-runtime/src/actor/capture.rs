@@ -705,7 +705,6 @@ pub struct CapturePassSettlement {
     pub repair_recoveries: bool,
 }
 
-#[cold]
 fn select_released_switch_jobs(
     conn: &Connection,
     workspace_id: &str,
@@ -717,16 +716,7 @@ fn select_released_switch_jobs(
         .filter(|path| path.released_hold)
         .map(|path| path.path.to_lowercase())
         .collect();
-    let mut query = conn.prepare_cached(
-        "SELECT job_id,target_path FROM materialization_jobs WHERE workspace_id IN (?1,'') AND status='pending' AND job_id GLOB 'version-switch-*'"
-    ).map_err(StorageError::corrupt_public)?;
-    let jobs = query
-        .query_map([workspace_id], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-        })
-        .map_err(StorageError::corrupt_public)?;
-    for job in jobs {
-        let (id, target) = job.map_err(StorageError::corrupt_public)?;
+    for (id, target) in dohc_engine_storage::pending_switch_jobs_in(conn, workspace_id)? {
         let target = target.to_lowercase();
         if released.iter().any(|path| {
             target == *path
