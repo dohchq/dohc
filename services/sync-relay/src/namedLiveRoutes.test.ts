@@ -1,3 +1,5 @@
+import {LIVE_CONNECTION_LIMIT_CLOSE_CODE} from "@dohc/live-session-contract/live-connection";
+import {selfHostLiveProfile} from "./selfHostLiveProfile";
 import { createNamedDesktopLive } from "./namedDesktopLive";
 import { notifyRelayWrite } from "./relayWriteChanges";
 import { notifyDesktopReadiness } from "./desktopReadinessChanges";
@@ -33,7 +35,7 @@ const frames = { receive: { maxFrameBytes: LIVE_FRAME_DECLARED_SUBMIT_MAX_BYTES,
 const bounds = { maxClientVectorBytes: 1024, maxSyncOutputBytes: 4096, maxAppliedUpdateBytes: 4096, maxSubmissionBytes: 4096, maxAdmissionBytes: 16384 };
 const policy = { maxStructVisits: 10000, maxValueNodeVisits: 10000, maxDecodedPayloadByteVisits: 1000000, maxStructClientGroupVisits: 10000,
   maxDeleteClientGroupVisits: 10000, maxDeleteIntervalVisits: 10000, maxIndexOperations: 100000 };
-const limits: NamedLiveRouteLimits = { maxConnections: 8, maxConnectionsPerSession: 2, maxConnectionsPerPrincipal: 3, maxConnectionsPerGrant: 4,
+const limits: NamedLiveRouteLimits = { maxConnections: 8, maxConnectionsPerSession: 2, maxConnectionsPerPrincipal: 3, maxConnectionsPerGrant: 4, maxBufferedBytes: 134217728,
   maxPendingRequests: 4, maxRequestBytes: 4096, maxResponseBytes: 4096, maxPendingBytes: 4096, maxFragments: 8, maxBufferedChunks: 16,
   // Open routes idle between frames while a test sets up its next peer over real
   // sockets; a loaded gate host can stretch that past 5 s.
@@ -297,11 +299,15 @@ function deferred<T>() {
   let resolve!: (value: T) => void;
   const promise = new Promise<T>(done => { resolve = done; }); return { promise, resolve };
 }
-async function fixture(routeLimits = limits, link = false, membershipPolicy: LiveMembershipPolicy = {maxSessions: 16, maxMembers: 8, maxSnapshotBytes: 153}, owner = false, desktop = false, admission?: ReturnType<typeof createLiveConnectionAdmission>) {
-  const state = await ticketFixture();
+const defaultScope = scope, defaultBinding = binding;
+async function fixture(routeLimits = limits, link = false, membershipPolicy: LiveMembershipPolicy = {maxSessions: 16, maxMembers: 8, maxSnapshotBytes: 153}, owner = false, desktop = false, admission?: ReturnType<typeof createLiveConnectionAdmission>, person = 0, document = 0) {
+  const scope = {...defaultScope, userId: person ? "reader-" + person : defaultScope.userId,
+    grantId: !link && person ? "edit-" + person : defaultScope.grantId};
+  const binding = {...defaultBinding, objectId: document ? "object-" + document : defaultBinding.objectId};
+  const state = await ticketFixture(undefined, {userId: scope.userId, grantId: scope.grantId, objectId: binding.objectId});
   const routeKind = desktop ? "desktop" : link ? "link" : "named";
   const memberships = createLiveMembershipRegistry(membershipPolicy, state.storage.readLiveAuthority.bind(state.storage));
-  const bearer = Buffer.alloc(32, 1).toString("base64url"), profile = Buffer.alloc(32, 2).toString("base64url");
+  const bearer = Buffer.alloc(32, 1).toString("base64url"), profile = Buffer.alloc(32, person || 2).toString("base64url");
   const currentScope = link ? { kind: "link" as const, workspaceId: scope.workspaceId, shareId: scope.shareId, grantId: scope.grantId,
     sessionId: "link-session", capabilityHash: hashLinkBearer(bearer, key), profileTokenHash: hashLinkProfileSecret(profile, key) } : scope;
   const linkHeaders: Record<string, string> = link ? { authorization: `Bearer ${bearer}`, "x-dohc-link-profile-secret": profile } : {};
@@ -364,9 +370,11 @@ async function fixture(routeLimits = limits, link = false, membershipPolicy: Liv
   cleanups.push(async () => { routes.close(); sockets.forEach(ws => ws.terminate()); await Promise.all(upgrades); await new Promise<void>(done => http.close(() => done())); await state.close(); });
   const bootstrap = desktop ? await post("/sync/live/desktop-open", {shareId: scope.shareId, path: binding.currentPath}) : link || owner ? Response.json({ discriminator: "abcdefghijkl" }) : await post("/sync/live/named-sessions", { grantId: scope.grantId });
   expect(bootstrap.status).toBe(200);
-  let { discriminator } = await bootstrap.json() as { discriminator: string };
+  const bootstrapped = await bootstrap.json() as {discriminator: string; ticket?: {token: string; expiresAtMs: number}};
+  let discriminator = bootstrapped.discriminator, initialDesktopTicket = bootstrapped.ticket;
   async function mint(): Promise<{token: string; expiresAtMs: number; publicPrincipalId?: string}> {
     if (desktop) {
+      if (initialDesktopTicket) { const ticket = initialDesktopTicket; initialDesktopTicket = undefined; return ticket; }
       const response = await post("/sync/live/desktop-open", {shareId: scope.shareId, path: binding.currentPath});
       expect(response.status).toBe(200);
       const admitted = await response.json() as {discriminator: string; ticket: {token: string; expiresAtMs: number}};
@@ -393,7 +401,8 @@ async function fixture(routeLimits = limits, link = false, membershipPolicy: Liv
       if (condition()) return Promise.resolve();
       return new Promise<void>(done => { const notify = () => { if (condition()) { watchers.delete(notify); done(); } }; watchers.add(notify); });
     }
-    return { ws, status, received, until };
+    const closed = new Promise<[number, string]>(resolve => ws.once("close", (code, reason) => resolve([code, reason.toString()])));
+    return { ws, status, received, until, closed };
   }
   return { ...state, post, discriminator, mint, connect, currentScope, bearer, profile, memberships, tickets, captureNative, native, changes, invalidated, actor, application, routes, desktopAdmission };
 }
@@ -414,13 +423,15 @@ it.each(["link", "desktop", "owner"])("shares total connection capacity with the
   const second = await fixture(routeLimits, kind === "link", undefined, kind === "owner", kind === "desktop", admission);
   const firstTicket = await first.mint(), secondTicket = kind === "owner" ? {token: ""} : await second.mint();
   const current = first.connect(firstTicket.token); expect(await current.status).toBe(101);
-  expect(await second.connect(secondTicket.token).status).toBe(404);
+  const refused = second.connect(secondTicket.token);
+  expect(await refused.status).toBe(101);
+  expect(await refused.closed).toEqual([LIVE_CONNECTION_LIMIT_CLOSE_CODE, "live_total_limit"]);
   const released = once(current.ws, "close"); current.ws.terminate(); await released;
   // The route releases capacity when it sees the socket close.
   await vi.waitFor(() => {
     const release = admission.reserve([["connections", 1]]); expect(release).not.toBeNull(); release?.();
   }, {timeout: 10_000});
-  expect(await second.connect(secondTicket.token).status).toBe(101);
+  expect(await second.connect(kind === "owner" ? "" : (await second.mint()).token).status).toBe(101);
 });
 
 it.each([false, true])("mints through actual HTTP auth and redeems once before exposing only live frames; link=%s", async link => {
@@ -730,7 +741,8 @@ it.each(["owner", "fence", "selector"])("rechecks owner %s standing after native
 it("applies owner connection limits and closes captured owners on host invalidation", async () => {
   const f = await fixture({...limits, maxConnectionsPerSession: 1}, false, undefined, true);
   const first = f.connect(""); expect(await first.status).toBe(101);
-  expect(await f.connect("").status).toBe(404);
+  const refused = f.connect(""); expect(await refused.status).toBe(101);
+  expect(await refused.closed).toEqual([LIVE_CONNECTION_LIMIT_CLOSE_CODE, "live_session_limit"]);
   const closed = once(first.ws, "close"); f.invalidated.abort(); await closed;
 });
 
@@ -787,4 +799,110 @@ it("projects file-only link sync metadata before it reaches the browser provider
   expect(JSON.stringify(provider.state().binding)).not.toContain(scope.workspaceId);
   expect(JSON.stringify(provider.state().binding)).not.toContain("docs/");
   expect(f.native.client.openLiveAppliedSync).toHaveBeenCalled();
+});
+
+it.each([false, true])("connects 20 people with three documents each under the promoted profile; link=%s", async link => {
+  const admission = createLiveConnectionAdmission(), profile = selfHostLiveProfile(), sockets: WebSocket[] = [];
+  for (let person = 1; person <= 20; person++) for (let document = 1; document <= 3; document++) {
+    const f = await fixture({...profile.namedLive.transport, idleTimeoutMs: 60_000}, link,
+      {maxSessions: 128, maxMembers: 128, maxSnapshotBytes: 4096}, false, false, admission, person, document);
+    const socket = f.connect((await f.mint()).token);
+    expect(await socket.status).toBe(101);
+    await socket.until(() => socket.received.some(frame => frame.kind === "welcome"));
+    sockets.push(socket.ws);
+  }
+  expect(sockets).toHaveLength(60);
+  expect(sockets.every(socket => socket.readyState === WebSocket.OPEN)).toBe(true);
+}, 60_000);
+
+it.each([
+  ["maxConnections", "live_total_limit"], ["maxConnectionsPerGrant", "live_grant_limit"],
+  ["maxConnectionsPerPrincipal", "live_person_limit"], ["maxConnectionsPerSession", "live_session_limit"],
+] as const)("names %s only after authenticating and redeeming an in-scope ticket", async (limit, code) => {
+  const f = await fixture({...limits, [limit]: 1});
+  const first = f.connect((await f.mint()).token); expect(await first.status).toBe(101);
+  const ticket = await f.mint();
+  expect(await f.connect(ticket.token, "account=other").status).toBe(404);
+  const refused = f.connect(ticket.token); expect(await refused.status).toBe(101);
+  expect(await refused.closed).toEqual([LIVE_CONNECTION_LIMIT_CLOSE_CODE, code]);
+  expect(f.captureNative).toHaveBeenCalledTimes(5);
+});
+
+it("refuses aggregate frame pressure and releases it on close", async () => {
+  const admission = createLiveConnectionAdmission();
+  const f = await fixture({...limits, maxBufferedBytes: 10_000}, false, undefined, false, false, admission);
+  const socket = f.connect((await f.mint()).token); expect(await socket.status).toBe(101);
+  await socket.until(() => socket.received.some(frame => frame.kind === "credit"));
+  const buffers = admission.buffers(10_000), release = buffers.reserve(9_990);
+  const protocol = createLiveFrameSession("client", frames);
+  for (const frame of socket.received) protocol.receive((await import("@dohc/live-session-contract/live-frame")).encodeLiveFrame(frame, frames.receive.maxFrameBytes)).release();
+  const hello = protocol.send({kind: "hello", receivePolicy: frames.receive});
+  socket.ws.send(hello.value); hello.release();
+  expect(await socket.closed).toEqual([LIVE_CONNECTION_LIMIT_CLOSE_CODE, "live_buffer_limit"]);
+  release(); await vi.waitFor(() => expect(buffers.usage()).toBe(0)); protocol.close();
+});
+
+it("charges WebSocket sends until their callback settles", async () => {
+  const admission = createLiveConnectionAdmission(), f = await fixture(limits, false, undefined, false, false, admission);
+  const ticket = await f.mint(), sent = deferred<void>();
+  let callback: (() => void) | undefined, heldBytes = 0;
+  const original = WebSocket.prototype.send;
+  vi.spyOn(WebSocket.prototype, "send").mockImplementation(function(this: WebSocket, ...args: Parameters<WebSocket["send"]>) {
+    if (this.url === undefined) {
+      const bytes = args[0];
+      if (bytes instanceof Uint8Array) heldBytes = bytes.byteLength;
+      const completed = args.at(-1);
+      callback = () => {if (typeof completed === "function") completed();};
+      sent.resolve(); return;
+    }
+    original.apply(this, args);
+  });
+  const socket = f.connect(ticket.token); expect(await socket.status).toBe(101); await sent.promise;
+  const buffers = admission.buffers(limits.maxBufferedBytes);
+  try {
+    expect(buffers.usage()).toBe(2 * heldBytes);
+    socket.ws.terminate(); await socket.closed;
+    expect(buffers.usage()).toBe(2 * heldBytes);
+  } finally { f.routes.close(); callback?.(); }
+  await vi.waitFor(() => expect(buffers.usage()).toBe(0));
+});
+
+it("charges control pong bytes until completion", async () => {
+  const admission = createLiveConnectionAdmission(), f = await fixture(limits, false, undefined, false, false, admission);
+  const socket = f.connect((await f.mint()).token); expect(await socket.status).toBe(101);
+  await socket.until(() => socket.received.some(frame => frame.kind === "credit"));
+  const entered = deferred<void>(); let complete: (() => void) | undefined;
+  const original = WebSocket.prototype.pong;
+  vi.spyOn(WebSocket.prototype, "pong").mockImplementation(function(this: WebSocket, ...args: Parameters<WebSocket["pong"]>) {
+    if (this.url === undefined) {
+      const callback = args.at(-1); complete = () => {if (typeof callback === "function") callback();};
+      entered.resolve(); return;
+    }
+    original.apply(this, args);
+  });
+  const buffers = admission.buffers(limits.maxBufferedBytes);
+  socket.ws.ping("probe"); await entered.promise;
+  try { expect(buffers.usage()).toBe(5); }
+  finally { f.routes.close(); complete?.(); }
+  await vi.waitFor(() => expect(buffers.usage()).toBe(0));
+});
+
+it("bounds authenticated total-limit refusal slots and releases them on close", async () => {
+  const admission = createLiveConnectionAdmission();
+  const f = await fixture({...limits, maxConnections: 1, maxPendingRequests: 1}, false, undefined, false, false, admission);
+  const ticket = await f.mint();
+  const releaseTotal = admission.reserve([["connections", 1]])!;
+  const releaseRefusal = admission.reserve([["upgrade-refusals", 1]])!;
+  f.actor.mockClear();
+  expect(await f.connect(ticket.token).status).toBe(404);
+  expect(f.actor).not.toHaveBeenCalled();
+  releaseRefusal();
+  const refused = f.connect(ticket.token);
+  expect(await refused.status).toBe(101);
+  expect(await refused.closed).toEqual([LIVE_CONNECTION_LIMIT_CLOSE_CODE, "live_total_limit"]);
+  await vi.waitFor(() => {
+    const release = admission.reserve([["upgrade-refusals", 1]]);
+    expect(release).not.toBeNull(); release?.();
+  });
+  releaseTotal();
 });

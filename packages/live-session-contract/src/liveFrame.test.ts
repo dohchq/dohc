@@ -1,3 +1,4 @@
+import {createLiveBufferBudget, LiveConnectionLimitError} from "./liveConnection";
 import { describe, expect, it, vi } from "vitest";
 import vectors from "../vectors/live-frame-vectors.json";
 import { parseHostEpoch } from "./hostControl.js";
@@ -38,8 +39,8 @@ function consume(sender: Session, receiver: Session, frame: LiveFrame) {
   const received = deliver(sender, receiver, frame);
   received.value.transfer?.release(); received.release();
 }
-function pair(serverLimits = limits, hostEpoch = 1) {
-  const client = createLiveFrameSession("client", limits), server = createLiveFrameSession("server", serverLimits);
+function pair(serverLimits = limits, hostEpoch = 1, reserveBytes?: (size: number) => () => void) {
+  const client = createLiveFrameSession("client", limits), server = createLiveFrameSession("server", serverLimits, reserveBytes);
   consume(server, client, { kind: "welcome", hostEpoch: parseHostEpoch(hostEpoch), receivePolicy: serverLimits.receive });
   consume(client, server, { kind: "hello", receivePolicy: limits.receive });
   return { client, server };
@@ -526,4 +527,21 @@ describe("live frame route ownership", () => {
     hello.release(); credits.forEach(credit => credit.release()); client.close();
     expect(client.usage().outgoing.controlFrames).toBe(0);
   });
+});
+
+it("charges shared frame leases and assemblies until their actual release", () => {
+  const budget = createLiveBufferBudget(8192);
+  const {client, server} = pair(limits, 1, budget.reserve);
+  const lease = server.send({kind: "credit", grantedBytes: 586, grantedFrames: 2});
+  expect(budget.usage()).toBe(lease.value.length);
+  client.receive(lease.value).release(); lease.release(); expect(budget.usage()).toBe(0);
+  consume(client, server, begin("client-vector", 1, 2048));
+  expect(budget.usage()).toBe(2048);
+  server.close(); expect(budget.usage()).toBe(0); client.close();
+});
+it("refuses a shared assembly before allocating it", () => {
+  const budget = createLiveBufferBudget(8192), {client, server} = pair(limits, 1, budget.reserve);
+  grant(server, client); const release = budget.reserve(8000);
+  expect(() => deliver(client, server, begin("client-vector", 1, 2048))).toThrowError(LiveConnectionLimitError);
+  release(); expect(budget.usage()).toBe(0); client.close(); server.close();
 });

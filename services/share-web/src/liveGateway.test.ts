@@ -1,3 +1,4 @@
+import {LIVE_CONNECTION_LIMIT_CLOSE_CODE, createLiveBufferBudget} from "@dohc/live-session-contract/live-connection";
 import { createServer, type IncomingMessage } from "node:http";
 import { connect, type Socket } from "node:net";
 import { Duplex } from "node:stream";
@@ -18,7 +19,7 @@ const origin = "https://share.example.test";
 const discriminator = "abcdefghijkl";
 const token = "ab".repeat(32);
 const limits: LiveGatewayLimits = {
-  maxConnections: 8, maxConnectionsPerSession: 3, maxConnectionsPerPrincipal: 4, maxConnectionsPerGrant: 5,
+  maxConnections: 8, maxConnectionsPerSession: 3, maxConnectionsPerPrincipal: 4, maxConnectionsPerGrant: 5, maxBufferedBytes: 134217728,
   // Upgrades open a real host socket and forward real frames; a loaded gate host
   // can stall either past 2 s. Tests of these bounds override them.
   maxFrameBytes: 2048, maxPendingBytes: 4096, maxPendingFrames: 4, maxFragments: 8, maxBufferedChunks: 16,
@@ -97,7 +98,8 @@ async function fixture(overrides: Partial<LiveGatewayOptions> = {}, onUpgrade?: 
       socket.once("unexpected-response", (_request, response) => { response.resume(); accept(response.statusCode!); socket.terminate(); });
       socket.once("error", () => accept(0));
     });
-    return { socket, status, messages };
+    const closed = new Promise<[number, string]>(resolve => socket.once("close", (code, reason) => resolve([code, reason.toString()])));
+    return { socket, status, messages, closed };
   }
   async function raw(headers: string[], handshake = { key: "dGhlIHNhbXBsZSBub25jZQ==", version: "13" }) {
     const socket = connect(port, "127.0.0.1");
@@ -440,12 +442,15 @@ describe("private named live gateway", () => {
   });
 
   it.each(["maxConnections", "maxConnectionsPerSession", "maxConnectionsPerPrincipal", "maxConnectionsPerGrant"] as const)(
-    "refuses %s exhaustion before redemption or host allocation, and releases the reservation", async limit => {
+    "names %s after ticket redemption and releases the reservation", async limit => {
       const state = await fixture({ limits: { ...limits, [limit]: 1 } });
       const first = state.browser();
       expect(await first.status).toBe(101);
-      expect(await state.browser().status).toBe(404);
-        expect(state.open).toHaveBeenCalledTimes(1);
+      const refused = state.browser(); expect(await refused.status).toBe(101);
+      const codes = {maxConnections: "live_total_limit", maxConnectionsPerSession: "live_session_limit",
+        maxConnectionsPerPrincipal: "live_person_limit", maxConnectionsPerGrant: "live_grant_limit"};
+      expect(await refused.closed).toEqual([LIVE_CONNECTION_LIMIT_CLOSE_CODE, codes[limit]]);
+      expect(state.open).toHaveBeenCalledTimes(2);
       const closed = once(state.hosts[0]!, "close");
       first.socket.terminate();
       await closed;
@@ -538,4 +543,41 @@ describe("private named live gateway", () => {
     expect(state.open).toHaveBeenCalledTimes(2);
     expect(redeem).toHaveBeenCalledTimes(2);
   });
+});
+
+it("shares aggregate send capacity across connections and releases completed sends", async () => {
+  const buffers = createLiveBufferBudget(12), state = await fixture({bufferBudget: buffers});
+  const first = state.browser(), second = state.browser();
+  expect(await first.status).toBe(101); expect(await second.status).toBe(101);
+  const route = (await state.open.mock.results[0]!.value)!;
+  let completed: (() => void) | undefined;
+  vi.spyOn(route.socket, "send").mockImplementation((_data, _options, callback) => {completed = () => { if (typeof callback === "function") callback(); };});
+  first.socket.send(Buffer.alloc(6));
+  await vi.waitFor(() => expect(buffers.usage()).toBe(12));
+  second.socket.send(Buffer.alloc(1));
+  expect(await second.closed).toEqual([LIVE_CONNECTION_LIMIT_CLOSE_CODE, "live_buffer_limit"]);
+  completed?.(); expect(buffers.usage()).toBe(0);
+  first.socket.terminate(); await first.closed; expect(buffers.usage()).toBe(0);
+});
+
+it("forwards a relay capacity refusal without replacing its reason", async () => {
+  const state = await fixture(), client = state.browser();
+  expect(await client.status).toBe(101);
+  state.hosts[0]!.close(LIVE_CONNECTION_LIMIT_CLOSE_CODE, "live_grant_limit");
+  expect(await client.closed).toEqual([LIVE_CONNECTION_LIMIT_CLOSE_CODE, "live_grant_limit"]);
+});
+
+it("bounds pending gateway handshakes before authentication", async () => {
+  const state = await fixture({limits: {...limits, maxConnections: 1}});
+  state.resolve.mockImplementation((_request, _discriminator, signal) => new Promise(resolve => {
+    signal.addEventListener("abort", () => resolve(null), {once: true});
+  }));
+  state.browser();
+  await vi.waitFor(() => expect(state.resolve).toHaveBeenCalledTimes(1));
+  state.browser();
+  await vi.waitFor(() => expect(state.resolve).toHaveBeenCalledTimes(2));
+  expect(await state.browser().status).toBe(404);
+  expect(state.resolve).toHaveBeenCalledTimes(2);
+  expect(state.open).not.toHaveBeenCalled();
+  state.gateway.close();
 });

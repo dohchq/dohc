@@ -47,6 +47,7 @@ export function captureNamedLiveFrameHost(options: {
   native: NamedFrameNativeHost;
   bounds: NamedFrameHostBounds;
   validate: OwnerOutboxAdmission["validate"];
+  reserveBytes?: (size: number) => () => void;
 }): NamedFrameHostSession & {readonly ticket: RedeemedLiveTicket} {
   const ticket = parseRedeemedLiveTicket(options.ticket);
   Object.freeze(ticket.binding.selectorPaths);
@@ -66,6 +67,7 @@ export function captureOwnerLiveFrameHost(options: {
   native: NamedFrameNativeHost;
   bounds: NamedFrameHostBounds;
   validate: OwnerOutboxAdmission["validate"];
+  reserveBytes?: (size: number) => () => void;
 }): NamedFrameHostSession {
   const binding = parseLiveObjectBinding(options.native.binding);
   const document = {workspaceId: binding.workspaceId, mainVersionId: binding.mainVersionId,
@@ -88,6 +90,7 @@ function captureLiveFrameHost(options: {
   native: NamedFrameNativeHost;
   bounds: NamedFrameHostBounds;
   validate: OwnerOutboxAdmission["validate"];
+  reserveBytes?: (size: number) => () => void;
 }): NamedFrameHostSession {
   const binding = parseLiveObjectBinding(options.binding);
   Object.freeze(binding.selectorPaths); Object.freeze(binding);
@@ -185,17 +188,21 @@ function captureLiveFrameHost(options: {
               // Arm before reading. A commit during an empty read resolves this same wake.
               const changed = pendingChange(signal);
               try {
-                const next = await native.client.readNextLiveApplied(request(), position, bounds.maxAppliedUpdateBytes, signal);
-                check(signal);
-                if (next) {
-                  if (next.position.eventCount !== position.eventCount + 1 || next.position.journalCursor <= position.journalCursor ||
-                    next.ack.journalCursor !== next.position.journalCursor) throw new Error("Native applied cursor changed.");
-                  position = { ...next.position };
-                  held = true;
-                  let released = false;
-                  return { value: { journalCursor: next.position.journalCursor, updateBytes: next.updateBytes },
-                    release() { if (!released) { released = true; held = false; } } };
-                }
+                let releaseBytes = options.reserveBytes?.(3 * bounds.maxAppliedUpdateBytes);
+                try {
+                  const next = await native.client.readNextLiveApplied(request(), position, bounds.maxAppliedUpdateBytes, signal);
+                  check(signal);
+                  if (next) {
+                    if (next.position.eventCount !== position.eventCount + 1 || next.position.journalCursor <= position.journalCursor ||
+                      next.ack.journalCursor !== next.position.journalCursor) throw new Error("Native applied cursor changed.");
+                    position = { ...next.position };
+                    held = true;
+                    let released = false;
+                    const releaseOutput = releaseBytes; releaseBytes = undefined;
+                    return { value: { journalCursor: next.position.journalCursor, updateBytes: next.updateBytes },
+                      release() { if (!released) { released = true; held = false; releaseOutput?.(); } } };
+                  }
+                } finally { releaseBytes?.(); }
                 await changed.promise; check(signal);
               } finally { changed.dispose(); }
             }
@@ -206,6 +213,7 @@ function captureLiveFrameHost(options: {
     async submit(input, caller) {
       check(caller);
       if (submitting) throw new Error("A named submission already owns admission.");
+      let releaseBytes: (() => void) | undefined;
       submitting = true;
       const signal = signalFor(caller);
       try {
@@ -223,7 +231,9 @@ function captureLiveFrameHost(options: {
         const authorContext = input.authorContext === undefined ? undefined : parseLiveAuthorContext(input.authorContext);
         if (updateBytes.length < 1 || updateBytes.length > bounds.maxSubmissionBytes) return { result: "refused", reason: "invalid-update" };
         if (createHash("sha256").update(updateBytes).digest("hex") !== updateDigest) return { result: "refused", reason: "invalid-update" };
-        const read = storage.readLiveUpdateJournalCut({ document });
+        const read = storage.readLiveUpdateJournalCut({ document }, options.reserveBytes ? size => {
+          releaseBytes = options.reserveBytes!(size + 3 * updateBytes.length);
+        } : undefined);
         if (read.kind !== "cut") return { result: "refused", reason: read.reason };
         const cut = read.cut;
         if (cut.checkpoint.bytes.length + cut.suffix.reduce((sum, row) => sum + row.bytes.length, updateBytes.length) > bounds.maxAdmissionBytes) {
@@ -253,7 +263,7 @@ function captureLiveFrameHost(options: {
         if (ack.deliveryId !== deliveryId || ack.updateDigest !== updateDigest || ack.journalCursor !== committed.result.receipt.journalCursor ||
           ack.acceptingHostEpoch !== committed.result.receipt.acceptingHostEpoch) throw new Error("Native application ACK identity changed.");
         return { result: "success", ack };
-      } finally { submitting = false; }
+      } finally { submitting = false; releaseBytes?.(); }
     },
   };
 }

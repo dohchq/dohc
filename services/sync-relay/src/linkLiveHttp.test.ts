@@ -7,7 +7,7 @@ import {audience, binding, fixture as ticketFixture, key, report, scope} from ".
 
 const bearer = Buffer.alloc(32, 1).toString("base64url"), profile = Buffer.alloc(32, 2).toString("base64url");
 const exchangeKey = "private-link-metadata-exchange-at-least-32", discriminator = "abcdefghijkl";
-const limits = {maxConnections: 8, maxConnectionsPerSession: 2, maxConnectionsPerPrincipal: 3, maxConnectionsPerGrant: 4,
+const limits = {maxConnections: 8, maxConnectionsPerSession: 2, maxConnectionsPerPrincipal: 3, maxConnectionsPerGrant: 4, maxBufferedBytes: 134217728,
   maxPendingRequests: 4, maxRequestBytes: 4096, maxResponseBytes: 4096, maxPendingBytes: 4096, maxFragments: 8, maxBufferedChunks: 16,
   upgradeTimeoutMs: 1000, idleTimeoutMs: 5000, drainTimeoutMs: 100};
 const cleanups: (() => Promise<void>)[] = [];

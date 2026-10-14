@@ -1,3 +1,4 @@
+import {LIVE_CONNECTION_LIMIT_CLOSE_CODE, LIVE_CONNECTION_LIMIT_MESSAGES} from "@dohc/live-session-contract/live-connection";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createHash } from "node:crypto";
 import * as Y from "yjs";
@@ -275,4 +276,13 @@ describe("named browser transport", () => {
     expect(socket.readyState).toBe(3); expect(socket.frames).toHaveLength(0); expect(socket.listenerCount).toBe(0);
     expect(vi.getTimerCount()).toBe(0);
   });
+});
+
+it.each(Object.keys(LIVE_CONNECTION_LIMIT_MESSAGES))("retains %s from a refused socket before initial sync", async reason => {
+  const f = fixture(), connecting = f.value.reconnect(), socket = await f.socketAt(0);
+  socket.open(); await connecting;
+  const event = new Event("close"); Object.assign(event, {code: LIVE_CONNECTION_LIMIT_CLOSE_CODE, reason});
+  socket.dispatchEvent(event);
+  expect(f.value.state()).toMatchObject({status: "disconnected", reason});
+  expect(socket.listenerCount).toBe(0);
 });

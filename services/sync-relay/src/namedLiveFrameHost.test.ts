@@ -1,3 +1,4 @@
+import {createLiveBufferBudget, LiveConnectionLimitError} from "@dohc/live-session-contract/live-connection";
 import { EventEmitter } from "node:events";
 import { createHash } from "node:crypto";
 import { afterEach, expect, it, vi } from "vitest";
@@ -62,7 +63,7 @@ const position = { eventCount: 0, journalCursor: 0, evidenceDigest: "ab".repeat(
 const bytes = Uint8Array.of(0, 0);
 const ack = { deliveryId: "delivery", updateDigest: hash(bytes), journalCursor: 11, acceptingHostEpoch: host.hostEpoch,
   localYDocSequence: 3, applicationReplayed: true };
-async function setup(maxListeners = 4) {
+async function setup(maxListeners = 4, reserveBytes?: (size: number) => () => void) {
   const state = await fixture(); cleanup.push(() => state.close());
   const tickets = createLiveTickets({ storage: state.storage, audience, key, hostReports: { currentBinding: async () => report } });
   const minted = await tickets.mint({ objectId: binding.objectId }, scope);
@@ -90,7 +91,7 @@ async function setup(maxListeners = 4) {
   const native = { client, workspace: "trusted-native-handle", registrationId: 7, coordinate: host, binding: nativeBinding,
     invalidated: invalidated.signal, changes, deadlineMs: 5000, nextRequestId: () => ++requestId, drain };
   const bounds = { maxClientVectorBytes: 32, maxSyncOutputBytes: 1024, maxAppliedUpdateBytes: 1024, maxSubmissionBytes: 1024, maxAdmissionBytes: 4096 };
-  const capture = captureNamedLiveFrameHost({ ticket, actor: liveBrowserActor(scope), storage: state.storage, validate, native, bounds });
+  const capture = captureNamedLiveFrameHost({ ticket, actor: liveBrowserActor(scope), storage: state.storage, validate, native, bounds, reserveBytes });
   cleanup.push(async () => { capture.close(); });
   return { ...state, peer, client, changes, invalidated, drain, capture, validate, native, bounds };
 }
@@ -454,4 +455,19 @@ it("terminally refuses an oversized submission before validation or journal admi
     .toEqual({result: "refused", reason: "invalid-update"});
   expect(commit).not.toHaveBeenCalled();
   expect(f.validate).not.toHaveBeenCalled();
+});
+
+it.each(["read", "submit"] as const)("reserves aggregate %s work before reading native output or journal bytes", async kind => {
+  const budget = createLiveBufferBudget(12_288), f = await setup(4, budget.reserve);
+  const sync = await f.capture.openSync(Uint8Array.of(0), new AbortController().signal);
+  const cut = vi.spyOn(f.storage, "readLiveUpdateJournalCut"), release = budget.reserve(12_288);
+  if (kind === "read") {
+    vi.spyOn(f.native.client, "readNextLiveApplied").mockRejectedValue(new Error("Read occurred before budget reservation."));
+    await expect(sync.nextApplied(new AbortController().signal)).rejects.toThrowError(LiveConnectionLimitError);
+  }
+  else await expect(f.capture.submit({deliveryId: "delivery", updateDigest: hash(bytes), updateBytes: bytes}, new AbortController().signal))
+    .rejects.toThrowError(LiveConnectionLimitError);
+  expect(f.peer.requests).toHaveLength(1);
+  if (kind === "read") expect(cut).not.toHaveBeenCalled(); else expect(cut).toHaveBeenCalledOnce();
+  release(); sync.close(); f.capture.close(); expect(budget.usage()).toBe(0);
 });

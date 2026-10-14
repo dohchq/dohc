@@ -1,3 +1,4 @@
+import {createLiveBufferBudget, LIVE_CONNECTION_LIMIT_CLOSE_CODE, liveConnectionLimitMessage, type LiveConnectionLimitCode} from "@dohc/live-session-contract/live-connection";
 import type { IncomingMessage } from "node:http";
 import type { Duplex } from "node:stream";
 import { WebSocket, WebSocketServer } from "ws";
@@ -38,6 +39,7 @@ export interface LiveGatewayLimits {
   readonly maxConnectionsPerGrant: number;
   readonly maxFrameBytes: number;
   readonly maxPendingBytes: number;
+  readonly maxBufferedBytes: number;
   readonly maxPendingFrames: number;
   readonly maxFragments: number;
   readonly maxBufferedChunks: number;
@@ -51,6 +53,7 @@ export interface LiveGatewayOptions {
   readonly publicOrigin: string;
   readonly path?: "/api/live" | "/api/live/link";
   readonly limits: LiveGatewayLimits;
+  readonly bufferBudget?: ReturnType<typeof createLiveBufferBudget>;
   // The adapter resolves trusted route scope and the account cookie through
   // relay named authentication. The discriminator is a lookup key, not identity.
   resolveSession(request: IncomingMessage, discriminator: string, signal: AbortSignal): Promise<LiveGatewaySession | null>;
@@ -62,7 +65,7 @@ export interface LiveGatewayOptions {
 
 export function parseLiveGatewayLimits(value: unknown): LiveGatewayLimits {
   const names: (keyof LiveGatewayLimits)[] = ["maxConnections", "maxConnectionsPerSession", "maxConnectionsPerPrincipal",
-    "maxConnectionsPerGrant", "maxFrameBytes", "maxPendingBytes", "maxPendingFrames", "maxFragments", "maxBufferedChunks",
+    "maxConnectionsPerGrant", "maxFrameBytes", "maxBufferedBytes", "maxPendingBytes", "maxPendingFrames", "maxFragments", "maxBufferedChunks",
     "upgradeTimeoutMs", "idleTimeoutMs", "drainTimeoutMs"];
   if (!value || typeof value !== "object" || Array.isArray(value) || Object.keys(value).length !== names.length ||
     Object.keys(value).some(key => !names.includes(key as keyof LiveGatewayLimits))) throw new TypeError("Invalid live gateway limits.");
@@ -114,6 +117,7 @@ export function createLiveGateway(options: LiveGatewayOptions) {
   const heldSockets = new WeakSet<Duplex>();
   const refusedSockets = new WeakSet<Duplex>();
   const counts = new Map<string, number>();
+  const buffers = options.bufferBudget ?? createLiveBufferBudget(limits.maxBufferedBytes);
   let closed = false;
 
   function refuse(socket: Duplex) {
@@ -128,8 +132,9 @@ export function createLiveGateway(options: LiveGatewayOptions) {
   }
   server.on("wsClientError", (_error, socket) => refuse(socket));
 
-  function reserve(keys: [string, number][]): (() => void) | null {
-    if (keys.some(([key, maximum]) => (counts.get(key) ?? 0) >= maximum)) return null;
+  function reserve(keys: [string, number, LiveConnectionLimitCode][]): (() => void) | LiveConnectionLimitCode {
+    const exceeded = keys.find(([key, maximum]) => (counts.get(key) ?? 0) >= maximum);
+    if (exceeded) return exceeded[2];
     for (const [key] of keys) counts.set(key, (counts.get(key) ?? 0) + 1);
     return () => {
       for (const [key] of keys) {
@@ -142,7 +147,7 @@ export function createLiveGateway(options: LiveGatewayOptions) {
   async function handleUpgrade(request: IncomingMessage, socket: Duplex, head: Buffer): Promise<void> {
     const parsed = parseRequest(request);
     if (heldSockets.has(socket)) { socket.destroy(); return; }
-    if (!parsed || closed || connections.size >= limits.maxConnections || head.length > limits.maxPendingBytes) {
+    if (!parsed || closed || connections.size >= 2 * limits.maxConnections || head.length > limits.maxPendingBytes) {
       refuse(socket); return;
     }
     heldSockets.add(socket);
@@ -153,7 +158,18 @@ export function createLiveGateway(options: LiveGatewayOptions) {
     let release: (() => void) | undefined;
     let timer: ReturnType<typeof setTimeout> | undefined;
     let done = false;
-    let draining = false;
+    let draining = false, closingForLimit = false;
+    let refusalCode: LiveConnectionLimitCode | undefined;
+    function refuseLimit(code: LiveConnectionLimitCode) {
+      if (done) return;
+      if (!browser) server.handleUpgrade(request, socket, Buffer.alloc(0), accepted => { browser = accepted; accepted.on("error", stop); });
+      if (browser) {
+        closingForLimit = true; browser.close(LIVE_CONNECTION_LIMIT_CLOSE_CODE, code); socket.resume();
+        const deadline = setTimeout(() => browser?.terminate(), limits.drainTimeoutMs); deadline.unref();
+        browser.once("close", () => clearTimeout(deadline));
+      }
+      stop();
+    }
 
     function stop() {
       if (done) return;
@@ -161,11 +177,12 @@ export function createLiveGateway(options: LiveGatewayOptions) {
       clearTimeout(timer);
       abort.abort();
       route?.invalidated.removeEventListener("abort", stop);
-      release?.();
-      connections.delete(stop);
+      const releaseConnection = () => { release?.(); connections.delete(stop); };
+      if (closingForLimit && browser && browser.readyState !== WebSocket.CLOSED) browser.once("close", releaseConnection);
+      else releaseConnection();
       // Refusal and fencing discard queued work. No successful frame is synthesized.
       route?.socket.terminate();
-      if (browser) browser.terminate(); else refuse(socket);
+      if (browser) { if (!closingForLimit) browser.terminate(); } else refuse(socket);
     }
     const touch = () => {
       clearTimeout(timer);
@@ -191,14 +208,6 @@ export function createLiveGateway(options: LiveGatewayOptions) {
       if (done) return;
       if (resolved === null) { stop(); return; }
       const session = copiedSession(resolved);
-      release = reserve([
-        [JSON.stringify(["session", session.kind, session.kind === "named" ? session.userId : session.sessionId,
-          session.workspaceId, session.grantId, parsed.session]), limits.maxConnectionsPerSession],
-        [JSON.stringify(session.kind === "named" ? ["principal", "named", session.userId] :
-          ["principal", "link", session.workspaceId, session.grantId, session.principalId]), limits.maxConnectionsPerPrincipal],
-        [JSON.stringify(["grant", session.workspaceId, session.grantId]), limits.maxConnectionsPerGrant],
-      ]) ?? undefined;
-      if (!release) { stop(); return; }
       const opened = await untilCancelled(openHostRoute({request, discriminator: parsed.session, ticketToken: parsed.ticketToken}, abort.signal, hostReceive), abort.signal, late => {
         if (late !== null) {
           late.socket.on("error", () => undefined);
@@ -209,13 +218,27 @@ export function createLiveGateway(options: LiveGatewayOptions) {
       opened.socket.on("error", stop);
       if (done) { opened.socket.terminate(); return; }
       route = { socket: opened.socket, invalidated: opened.invalidated };
-      route.socket.once("close", stop);
+      route.socket.once("close", (code, reason) => {
+        const limit = reason.toString();
+        if (code === LIVE_CONNECTION_LIMIT_CLOSE_CODE && liveConnectionLimitMessage(limit)) refuseLimit(limit as LiveConnectionLimitCode);
+        else stop();
+      });
       if (route.socket.readyState !== WebSocket.OPEN || !route.socket.isPaused) {
         stop(); return;
       }
       route.socket.binaryType = "nodebuffer";
       route.invalidated.addEventListener("abort", stop, { once: true });
       if (route.invalidated.aborted || done || socket.destroyed || !socket.readable || !socket.writable) { stop(); return; }
+      const reserved = reserve([
+        ["connections", limits.maxConnections, "live_total_limit"],
+        [JSON.stringify(["session", session.kind, session.kind === "named" ? session.userId : session.sessionId,
+          session.workspaceId, session.grantId, parsed.session]), limits.maxConnectionsPerSession, "live_session_limit"],
+        [JSON.stringify(session.kind === "named" ? ["principal", "named", session.userId] :
+          ["principal", "link", session.workspaceId, session.grantId, session.principalId]), limits.maxConnectionsPerPrincipal, "live_person_limit"],
+        [JSON.stringify(["grant", session.workspaceId, session.grantId]), limits.maxConnectionsPerGrant, "live_grant_limit"],
+      ]);
+      if (typeof reserved === "string") refusalCode = reserved; else release = reserved;
+      if (refusalCode) { refuseLimit(refusalCode); return; }
       // No asynchronous step may separate this invalidation check from the 101.
       server.handleUpgrade(request, socket, head, accepted => {
         browser = accepted;
@@ -235,19 +258,21 @@ export function createLiveGateway(options: LiveGatewayOptions) {
             if ((!pong && (size === 0 || size > limits.maxFrameBytes)) || size > limits.maxPendingBytes - pendingBytes ||
               pendingFrames >= limits.maxPendingFrames || destination.readyState !== WebSocket.OPEN ||
               destination.bufferedAmount > limits.maxPendingBytes - size) { stop(); return; }
+            let releaseBytes: () => void;
+            try { releaseBytes = buffers.reserve(2 * size); } catch { refuseLimit("live_buffer_limit"); return; }
             try {
               const bytes = Buffer.from(data);
               pendingBytes += size;
               pendingFrames += 1;
               touch();
               const completed = (error?: Error) => {
-                pendingBytes -= size;
+                releaseBytes(); pendingBytes -= size;
                 pendingFrames -= 1;
                 if (error) stop();
               };
               if (pong) destination.pong(bytes, undefined, completed);
               else destination.send(bytes, { binary: true, compress: false }, completed);
-            } catch { stop(); }
+            } catch { releaseBytes(); stop(); }
           };
         }
         const toBrowser = writer(accepted), toHost = writer(host);

@@ -49,10 +49,13 @@ export function createNamedLiveFrameSession(options: {
   frames: LiveFrameSessionPolicy;
   transport: NamedFrameTransport;
   membership?: LiveMembershipSession;
+  reserveBytes?: (size: number) => () => void;
+  syncWorkingBytes?: number;
+  failed?: (error: unknown) => void;
 }) {
   const { host, transport, membership } = options;
   const frames = { ...options.frames, receive: { ...options.frames.receive } };
-  const protocol = createLiveFrameSession("server", frames);
+  const protocol = createLiveFrameSession("server", frames, options.reserveBytes);
   const lifetime = new AbortController();
   const tasks = new Set<Promise<void>>();
   let closed = false, pumping = false, pulling = false, submitting = false, opening = false;
@@ -84,7 +87,7 @@ export function createNamedLiveFrameSession(options: {
     try { transport.close(); } catch { /* The transport must still settle its borrowed sends. */ }
   }
   function run(action: () => Promise<void>) {
-    const task = action().catch(() => { close(); });
+    const task = action().catch(error => { options.failed?.(error); close(); });
     tasks.add(task);
     void task.finally(() => tasks.delete(task));
   }
@@ -186,14 +189,18 @@ export function createNamedLiveFrameSession(options: {
           opening = true;
           run(async () => {
             let opened: NamedFrameSync | undefined;
+            let releaseBytes: (() => void) | undefined;
             try {
+              releaseBytes = options.reserveBytes?.(options.syncWorkingBytes ?? 0);
               opened = await host.openSync(updateBytes, lifetime.signal); check();
               const bytes = encodeLiveFrameSync({ binding: opened.binding, hostVector: opened.hostVector,
                 missingStateUpdate: opened.missingStateUpdate }, { ...frames.receive, maxSyncBytes: peerSyncBytes });
               const cursor = opened.appliedThroughJournalCursor;
               sync = { nextApplied: opened.nextApplied, close: opened.close }; opened = undefined;
-              outgoing({ purpose: "initial-sync", appliedThroughJournalCursor: cursor }, bytes, () => {});
-            } finally { opening = false; held.release(); opened?.close(); }
+              const releaseOutput = releaseBytes;
+              outgoing({ purpose: "initial-sync", appliedThroughJournalCursor: cursor }, bytes, () => { releaseOutput?.(); });
+              releaseBytes = undefined;
+            } finally { opening = false; held.release(); opened?.close(); releaseBytes?.(); }
             pump();
           });
         } else if (begin.purpose === "submit-update") {
@@ -215,7 +222,7 @@ export function createNamedLiveFrameSession(options: {
       received.release(); received = undefined;
       if (frame.kind === "begin" || frame.kind === "chunk") grant(bytes.length, 1);
       pump();
-    } catch { completed?.release(); close(); }
+    } catch (error) { completed?.release(); options.failed?.(error); close(); }
     finally { received?.release(); }
   }
   host.invalidated.addEventListener("abort", close, { once: true });

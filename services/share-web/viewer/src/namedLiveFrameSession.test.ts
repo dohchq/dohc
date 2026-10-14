@@ -1,3 +1,4 @@
+import {createLiveBufferBudget} from "@dohc/live-session-contract/live-connection";
 import { createHash } from "node:crypto";
 import { afterEach, expect, it, vi } from "vitest";
 import * as Y from "yjs";
@@ -20,7 +21,7 @@ function deferred<T>() {
   const promise = new Promise<T>((yes, no) => { resolve = yes; reject = no; });
   return { promise, resolve, reject };
 }
-function fixture(result: "success" | "retry" | "refused" = "success", limitCredit = false) {
+function fixture(result: "success" | "retry" | "refused" = "success", limitCredit = false, reserveBytes?: (size: number) => () => void) {
   const provider = createNamedLiveProvider({ frames, maxPendingUpdateBytes: 16384, maxPendingUpdates: 8, maxDeliveryAttempts: 4 });
   const doc = new Y.Doc();
   const content = new Y.XmlText(); content.insert(0, "base");
@@ -91,7 +92,7 @@ function fixture(result: "success" | "retry" | "refused" = "success", limitCredi
     pulse();
   }, close() { serverReady.promise.then(server => server.close()); } });
   clientReady.resolve(route);
-  const server = createNamedLiveFrameSession({ host, frames, transport: {
+  const server = createNamedLiveFrameSession({ host, frames, reserveBytes, syncWorkingBytes: 4096, transport: {
     async send(bytes) {
       const frame = decodeLiveFrame(bytes, frames.receive.maxFrameBytes); sent.push(frame);
       if (stall?.(frame)) { stalled = deferred(); pulse(); await stalled.promise; stalled = undefined; }
@@ -166,4 +167,13 @@ it.each(["initial", "submit", "send"] as const)("releases pending %s work on sta
   expect(f.server.usage()).toMatchObject({ closed: true, pulling: false, submitting: false, opening: false });
   expect(f.metrics().leased).toBe(0); expect(f.hostClosed).toHaveBeenCalledTimes(1);
   if (stage === "submit") expect(f.provider.state().pendingUpdates).toBe(1);
+});
+
+it("holds shared sync output capacity until send completion and releases on close", async () => {
+  const budget = createLiveBufferBudget(65_536), f = fixture("success", false, budget.reserve);
+  f.stall(frame => frame.kind === "chunk");
+  await f.until(() => f.metrics().stalled);
+  expect(budget.usage()).toBeGreaterThanOrEqual(4096);
+  f.server.close(); await f.server.settled(); await f.route.settled();
+  expect(budget.usage()).toBe(0);
 });

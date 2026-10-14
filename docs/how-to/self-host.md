@@ -176,6 +176,22 @@ The deployment initializes fresh storage, applies authentication migrations, and
 Keep the deployment secrets and volumes across restarts.
 Do not rerun fresh initialization against an existing deployment.
 
+## Live editing limits
+
+The live editing profile allows 128 connections in the relay, 80 per grant, 12 per principal, and 6 per session.
+Everyone using one share link counts against its link grant.
+One browser holding that link has its own link principal.
+Named accounts count across their grants and devices.
+The relay reserves at most 128 MiB for live frame buffers and transient work across these connections.
+The browser gateway has a separate 128 MiB budget, shared by its named and link routes.
+Each socket can queue at most 256 KiB of outgoing data.
+These budgets exclude the session host's document state, validation heaps, and OS socket buffers.
+
+These limits fit 20 people with three documents open each, with capacity left for owners and other devices.
+They remain provisional until the launch server is measured.
+The numbers come from [the live editing profile](../../services/sync-relay/src/selfHostLiveProfile.ts).
+Custom deployments must supply the same buffer budget to all live routes.
+
 ## Run automations on the server
 
 The self-host bundle enables server automations with `DOHC_RELAY_AUTOMATIONS=1`.

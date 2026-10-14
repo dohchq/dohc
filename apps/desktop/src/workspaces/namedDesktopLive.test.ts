@@ -1,3 +1,4 @@
+import {LIVE_CONNECTION_LIMIT_MESSAGES} from "@dohc/live-session-contract/live-connection";
 import type { ShareRecordStatus } from "./shareRecordStatus";
 import * as Y from "yjs";
 import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
@@ -19,9 +20,9 @@ function fixture(recordDelivery?: () => Promise<ShareRecordStatus | null>, isOnl
   const doc = new Y.Doc();
   cleanup.push(async () => doc.destroy());
   let ended = false;
-  let current = true, status = "disconnected", pendingUpdates = 0;
+  let current = true, status = "disconnected", pendingUpdates = 0, reason: string | null = null;
   const listeners = new Set<(value: ReturnType<typeof state>) => void>();
-  function state() { return {status, pendingUpdates, binding: null}; }
+  function state() { return {status, pendingUpdates, binding: null, reason}; }
   function notify() { for (const listener of listeners) listener(state()); }
   const closed = vi.fn();
   const session = {doc, state, subscribe(fn: (value: ReturnType<typeof state>) => void) {listeners.add(fn); return () => listeners.delete(fn);},
@@ -45,7 +46,7 @@ function fixture(recordDelivery?: () => Promise<ShareRecordStatus | null>, isOnl
     credentials: {relayUrl: "https://relay.test", token: "real-account-token", userId: "reader", signal: new AbortController().signal},
     accessEnded: () => ended,
     assertCurrent() {if (!current) throw new Error("switched");}, fetch: request, preserveDraft, recordDelivery, isOnline: () => isOnline});
-  return {stop(accessEnded: boolean) { ended = accessEnded; session.disconnect(); }, capture, request, closed, preserveDraft, session, switchWorkspace() {current = false;},
+  return {refuse(code: string) { reason = code; status = "disconnected"; notify(); }, stop(accessEnded: boolean) { ended = accessEnded; session.disconnect(); }, capture, request, closed, preserveDraft, session, switchWorkspace() {current = false;},
     quarantineEdit(change: () => void) {doc.transact(change); status = "quarantined"; notify(); return false;},
     ack() {pendingUpdates = 0; notify();}};
 }
@@ -204,4 +205,24 @@ it("returns unavailable when the relay ends a readiness wait", async () => {
   f.request.mockResolvedValueOnce(new Response("waiting\nunavailable\n", {headers: {"content-type": "text/plain"}}));
   expect(await f.capture.waitForAdmission!("docs/a.md", new AbortController().signal)).toBe(false);
   expect(transport.factory).not.toHaveBeenCalled();
+});
+
+it.each(Object.entries(LIVE_CONNECTION_LIMIT_MESSAGES))("shows the %s opening refusal", async (code, message) => {
+  const f = fixture();
+  f.session.reconnect = async () => {};
+  const state = f.session.state;
+  f.session.state = () => ({...state(), reason: code});
+  await expect(f.capture.openYDocSession({path: "docs/a.md", contentKind: "richdoc", onRemoteUpdate: vi.fn()}))
+    .rejects.toMatchObject({waiting: {state: "failed", message}});
+  expect(f.closed).toHaveBeenCalled();
+});
+
+it.each(Object.entries(LIVE_CONNECTION_LIMIT_MESSAGES))("reports the %s session refusal through the desktop notice hook", async (code, message) => {
+  const f = fixture(), onEditRefused = vi.fn(), onSaveState = vi.fn();
+  const provider = await f.capture.openYDocSession({path: "docs/a.md", contentKind: "richdoc", onRemoteUpdate: vi.fn(), onEditRefused, onSaveState});
+  f.refuse(code);
+  expect(onEditRefused).toHaveBeenLastCalledWith(code, message);
+  expect(onSaveState).toHaveBeenLastCalledWith("read-only", 0, "status", undefined, "reconnecting");
+  expect(provider.liveWritable!()).toBe(false);
+  await provider.close();
 });

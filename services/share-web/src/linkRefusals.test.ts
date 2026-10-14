@@ -5,7 +5,7 @@ import {hashLinkBearer} from "../../sync-relay/src/linkSecurity";
 import {audience, fixture, key, scope} from "../../sync-relay/src/liveTickets.test-helper";
 import {createLinkLiveClient} from "./linkLiveClient";
 
-const transport = {maxConnections: 8, maxConnectionsPerSession: 2, maxConnectionsPerPrincipal: 3, maxConnectionsPerGrant: 4,
+const transport = {maxConnections: 8, maxConnectionsPerSession: 2, maxConnectionsPerPrincipal: 3, maxConnectionsPerGrant: 4, maxBufferedBytes: 134217728,
   maxPendingRequests: 4, maxRequestBytes: 4096, maxResponseBytes: 8192, maxPendingBytes: 4096, maxFragments: 8, maxBufferedChunks: 16,
   upgradeTimeoutMs: 1000, idleTimeoutMs: 5000, drainTimeoutMs: 100};
 const editor = {provider: {frames: {receive: {maxFrameBytes: 1024, maxStateVectorBytes: 4096, maxUpdateBytes: 8192, maxSyncBytes: 16384},

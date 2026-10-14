@@ -28,6 +28,15 @@ describe("share-web configuration", () => {
     expect(loadShareWebConfig({...accountEnvironment, DOHC_SELF_HOST_LIVE: "0"}).linkLive).toBeUndefined();
   });
 
+
+  it("rejects different named and link gateway buffer budgets", () => {
+    const env = {...accountEnvironment, DOHC_SELF_HOST_LIVE: "1", DOHC_SHARE_WEB_RELAY_EXCHANGE_KEY: "x".repeat(32)};
+    const config = loadShareWebConfig(env);
+    expect(() => loadShareWebConfig({...env, DOHC_SHARE_WEB_NAMED_LIVE_LIMITS: JSON.stringify({
+      ...config.namedLiveGatewayLimits!, maxBufferedBytes: config.namedLiveGatewayLimits!.maxBufferedBytes + 1,
+    })})).toThrow("Live gateways must share one buffer budget.");
+  });
+
   it("requires the explicit link live profile before accepting a release marker", () => {
     expect(loadShareWebConfig(accountEnvironment).publicEditRelease).toBeUndefined();
     expect(() => loadShareWebConfig({...accountEnvironment, DOHC_PUBLIC_EDIT_RELEASE: '{"version":1}'})).toThrow(/Public Edit release requires/);
@@ -55,7 +64,7 @@ describe("share-web configuration", () => {
   });
 
   it("keeps named live transport disabled until complete bounds are provisioned", () => {
-    const limits = {maxConnections: 8, maxConnectionsPerSession: 3, maxConnectionsPerPrincipal: 4, maxConnectionsPerGrant: 5,
+    const limits = {maxConnections: 8, maxConnectionsPerSession: 3, maxConnectionsPerPrincipal: 4, maxConnectionsPerGrant: 5, maxBufferedBytes: 134217728,
       maxFrameBytes: 2048, maxPendingBytes: 4096, maxPendingFrames: 4, maxFragments: 8, maxBufferedChunks: 16,
       upgradeTimeoutMs: 2000, idleTimeoutMs: 2000, drainTimeoutMs: 100};
     const env = {...accountEnvironment, DOHC_SHARE_WEB_RELAY_EXCHANGE_KEY: "x".repeat(32),

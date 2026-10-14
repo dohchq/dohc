@@ -1,3 +1,4 @@
+import {LIVE_CONNECTION_LIMIT_CLOSE_CODE, liveConnectionLimitMessage} from "@dohc/live-session-contract/live-connection";
 import { parseLiveUpdateIdentifier } from "@dohc/live-session-contract/live-update-admission";
 import { parseLiveTicketToken } from "@dohc/live-session-contract/live-ticket";
 import {createLiveFrameSession} from "@dohc/live-session-contract/live-frame";
@@ -139,6 +140,11 @@ export function createNamedLiveBrowserTransport<Selection extends LiveSelection 
         let opened = false;
         const abort = () => reject(new Error("Attempt retired."));
         const finish = () => { held.controller.signal.removeEventListener("abort", abort); };
+        const onClose = (event: CloseEvent) => {
+          if (event.code === LIVE_CONNECTION_LIMIT_CLOSE_CODE && liveConnectionLimitMessage(event.reason)) {
+            fail(held, "disconnected", event.reason); finish(); reject(new Error(event.reason));
+          } else disconnected();
+        };
         const disconnected = () => { fail(held, "disconnected", "transport-closed"); finish(); reject(new Error("Socket closed.")); };
         function send(bytes: Uint8Array): Promise<void> {
           const work = new Promise<void>((sent, failed) => {
@@ -178,11 +184,11 @@ export function createNamedLiveBrowserTransport<Selection extends LiveSelection 
         socket.addEventListener("open", onOpen);
         socket.addEventListener("message", onMessage);
         socket.addEventListener("error", disconnected);
-        socket.addEventListener("close", disconnected);
+        socket.addEventListener("close", onClose);
         held.controller.signal.addEventListener("abort", abort, { once: true });
         held.removeListeners = () => {
           socket.removeEventListener("open", onOpen); socket.removeEventListener("message", onMessage);
-          socket.removeEventListener("error", disconnected); socket.removeEventListener("close", disconnected); finish();
+          socket.removeEventListener("error", disconnected); socket.removeEventListener("close", onClose); finish();
         };
       });
     }
