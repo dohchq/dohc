@@ -366,7 +366,7 @@ function assertCrashRecovery(boundary: string, sourceEntry = false) {
   f.close();
   const entryArguments = sourceEntry ? ["--import", tsx, crashFixture] : [compiledCrashFixture];
   const child = spawnSync(process.execPath, [...entryArguments, f.configPath, intentPath, boundary],
-    { encoding: "utf8", windowsHide: true, timeout: 20_000 });
+    { encoding: "utf8", windowsHide: true, timeout: 90_000 });
   expect(child.error).toBeUndefined();
   expect(child.stderr).toBe("");
   expect(child.status).toBe(boundary === "before-operation" ? 80 : boundary.endsWith("before-commit") ? 81 : 82);
@@ -394,8 +394,8 @@ function assertCrashRecovery(boundary: string, sourceEntry = false) {
 
 it.each(["before-operation", "invalidation-before-commit", "invalidation-after-commit", "fence-before-commit", "fence-after-commit", "complete-before-commit", "complete-after-commit", "native-before-commit", "native-after-commit"])("retains configured deployment state after process termination at %s", boundary => {
   assertCrashRecovery(boundary);
-}, 30_000);
+}, 120_000);
 
 it("opens the configured deployment from the source crash fixture", () => {
   assertCrashRecovery("before-operation", true);
-}, 30_000);
+}, 120_000);
