@@ -7,6 +7,7 @@ import { closeTestStorages, inspectDatabase, storagePath, tempRoot, testStorage 
 import { createReplicaReadPrincipal } from "./replicaReadPrincipal";
 import { createReplicaSupervisor, type ReplicaChild, type ReplicaChildInput } from "./replicaSupervisor";
 import { createReplicaEngineStarter } from "./replicaEngine";
+import {ReplicaCurrentViewRefused} from "./storage/replicaCurrentViews";
 import {registered, cleanupLiveDeliveryFixtures} from "../../../packages/ydoc-projection/src/liveCommittedDeliveryTestSupport";
 
 const fsFailure = vi.hoisted(() => ({ path: "" }));
@@ -18,6 +19,30 @@ vi.mock("node:fs/promises", async original => {
   } };
 });
 afterEach(async () => { fsFailure.path = ""; vi.restoreAllMocks(); vi.useRealTimers(); await closeTestStorages(); });
+
+const emptyCurrentView=(input: ReplicaChildInput)=>async()=>({workspaceId:input.lease.workspaceId,revision:0,logCursor:0,journalCursor:0,files:[],texts:[],moved:false,nextCursor:null,refusedFiles:[]});
+
+it("collects after each full drain even when a later owner write is queued",async()=>{
+  const {storage}=await fixture(),events:string[]=[];let pulls=0;
+  vi.useFakeTimers({toFake:["setTimeout","clearTimeout"]});
+  const supervisor=createReplicaSupervisor({storage,storeRoot:await tempRoot("view-during-writes"),startChild:async input=>({
+    close:async()=>{},currentView:async()=>{events.push("view");return emptyCurrentView(input)();},
+    pull:async()=>{events.push("pull");if(++pulls===2){storage.appendLogBatch({workspaceId:"w",originId:"o",ops:[{originSeq:0,opKind:"moment.append",payloadJson:"{}",recordedAtMs:1}]});await vi.advanceTimersByTimeAsync(20);}}
+  })});
+  try{await supervisor.activate("w");events.length=0;await supervisor.activate("w");expect(events).toEqual(["pull","view","pull","view"]);}
+  finally{await supervisor.close();}
+});
+
+it("drains queued writes after a view loses a restore race",async()=>{
+  const {storage}=await fixture();let pulls=0;const events:string[]=[];
+  vi.useFakeTimers({toFake:["setTimeout","clearTimeout"]});
+  const supervisor=createReplicaSupervisor({storage,storeRoot:await tempRoot("view-restore-race"),startChild:async input=>({
+    close:async()=>{},currentView:async()=>{events.push("view");return emptyCurrentView(input)();},
+    pull:async()=>{events.push("pull");if(++pulls===2){storage.appendLogBatch({workspaceId:"w",originId:"o",ops:[{originSeq:0,opKind:"moment.append",payloadJson:"{}",recordedAtMs:1}]});await vi.advanceTimersByTimeAsync(20);}}
+  })});
+  try{await supervisor.activate("w");events.length=0;vi.spyOn(storage,"validateReplicaCurrentView").mockImplementationOnce(()=>{throw new ReplicaCurrentViewRefused();});await supervisor.activate("w");expect(events).toEqual(["pull","view","pull","view"]);}
+  finally{await supervisor.close();}
+});
 
 async function fixture(workspaceId = "w") {
   const storage = await testStorage();
@@ -84,7 +109,7 @@ it("wakes on append, caps children, evicts idle stores, and deletes after revoca
   const starts: Array<{ storeDir: string; child: ReplicaChild }> = [];
   const pull = vi.fn(async () => {}), close = vi.fn(async () => {});
   const supervisor = createReplicaSupervisor({ storage, storeRoot: await tempRoot("replicas"), maxRunning: 1, idleMs: 60_000,
-    startChild: async input => { const child = { pull, close }; starts.push({ storeDir: input.storeDir, child }); return child; } });
+    startChild: async input => { const child = { currentView: emptyCurrentView(input), pull, close }; starts.push({ storeDir: input.storeDir, child }); return child; } });
   try {
     await supervisor.activate("w");
     expect(pull).toHaveBeenCalledTimes(1);
@@ -117,7 +142,7 @@ it("wakes for a journal commit without an ordinary log write", async () => {
   f.storage.claimWorkspaceIdentity({workspaceId: "workspace", replicationEpoch: "epoch", streamIdentity: "stream"});
   const pull = vi.fn(async () => {});
   const supervisor = createReplicaSupervisor({storage: f.storage, storeRoot: await tempRoot("journal-wake"),
-    startChild: async () => ({pull, close: async () => {}})});
+    startChild: async input => ({currentView: emptyCurrentView(input), pull, close: async () => {}})});
   try {
     await supervisor.activate("workspace");
     expect(pull).toHaveBeenCalledTimes(1);
@@ -134,7 +159,7 @@ it.skipIf(process.env.DOHC_REPLICA_MEASURE!=="1")("measures the owner's journal 
     const f=registered({deployment:true});
     f.storage.claimWorkspaceIdentity({workspaceId:"workspace",replicationEpoch:"epoch",streamIdentity:"stream"});
     const supervisor=createReplicaSupervisor({storage:f.storage,storeRoot:await tempRoot("journal-push-measure"),
-      startChild:async()=>({pull:async()=>{},close:async()=>{}})});
+      startChild:async input=>({currentView: emptyCurrentView(input), pull:async()=>{},close:async()=>{}})});
     try {
       await supervisor.activate("workspace");let elapsed=0;
       for(let i=0;i<100;i++) {
@@ -154,7 +179,7 @@ it("coalesces an append during pull and never starts two children for one worksp
   const { storage } = await fixture();
   const entered = deferred(), release = deferred();
   const pull = vi.fn(async () => { if (pull.mock.calls.length === 1) { entered.resolve(); await release.promise; } });
-  const startChild = vi.fn(async () => ({ pull, close: async () => {} }));
+  const startChild = vi.fn(async (input: ReplicaChildInput) => ({ currentView: emptyCurrentView(input), pull, close: async () => {} }));
   const supervisor = createReplicaSupervisor({ storage, storeRoot: await tempRoot("coalesce"), startChild });
   try {
     const activation = supervisor.activate("w"); await entered.promise;
@@ -172,7 +197,7 @@ it("revokes a starting child, waits for it, and deletes its private directory", 
   let storeDir = "", bearer = "";
   const pull = vi.fn(async () => {}), close = vi.fn(async () => {});
   const supervisor = createReplicaSupervisor({ storage, storeRoot: await tempRoot("startup"), startChild: async input => {
-    storeDir = input.storeDir; bearer = input.lease.bearer; entered.resolve(); await release.promise; return { pull, close };
+    storeDir = input.storeDir; bearer = input.lease.bearer; entered.resolve(); await release.promise; return { currentView: emptyCurrentView(input), pull, close };
   } });
   const activation = supervisor.activate("w");
   const rejected = expect(activation).rejects.toThrow("standing ended");
@@ -193,7 +218,7 @@ it("rebuilds a failed fresh store once before completing activation", async () =
     paths.push(input.storeDir); bearers.push(input.lease.bearer);
     if (paths.length === 1) { writeFileSync(`${input.storeDir}/broken`, "owner-role store"); throw new Error("start failed"); }
     expect(existsSync(`${input.storeDir}/broken`)).toBe(false);
-    return { pull: async () => {}, close: async () => {} };
+    return { currentView: emptyCurrentView(input), pull: async () => {}, close: async () => {} };
   });
   const supervisor = createReplicaSupervisor({ storage, storeRoot: await tempRoot("failure"), maxRunning: 1,
     onError: (_, error) => errors.push(error), startChild });
@@ -211,7 +236,7 @@ it("reports failure after two fresh attempts and stops background retrying witho
   const errors: unknown[] = [], paths: string[] = [];
   const startChild = vi.fn(async (input: ReplicaChildInput) => {
     if (input.lease.workspaceId === "w") { paths.push(input.storeDir); throw new Error("unrecoverable"); }
-    return { pull: async () => {}, close: async () => {} };
+    return { currentView: emptyCurrentView(input), pull: async () => {}, close: async () => {} };
   });
   const supervisor = createReplicaSupervisor({ storage, storeRoot: await tempRoot("failed"), maxRunning: 1,
     onError: (_, error) => errors.push(error), startChild });
@@ -226,7 +251,7 @@ it("reports failure after two fresh attempts and stops background retrying witho
     expect(errors).toHaveLength(1);
     await supervisor.activate("second");
     await supervisor.evict("second");
-    startChild.mockImplementationOnce(async () => ({ pull: async () => {}, close: async () => {} }));
+    startChild.mockImplementationOnce(async input => ({ currentView: emptyCurrentView(input), pull: async () => {}, close: async () => {} }));
     await supervisor.activate("w");
     expect(errors).toHaveLength(1);
   } finally { await supervisor.close(); }
@@ -235,7 +260,7 @@ it("reports failure after two fresh attempts and stops background retrying witho
 it("rebuilds after an unrecoverable first pull and waits for the old child to close", async () => {
   const { storage } = await fixture();
   const closed = vi.fn(async () => {});
-  const startChild = vi.fn(async () => ({ close: closed,
+  const startChild = vi.fn(async (input: ReplicaChildInput) => ({ currentView: emptyCurrentView(input), close: closed,
     pull: async () => { if (startChild.mock.calls.length === 1) throw new Error("first pull failed"); expect(closed).toHaveBeenCalledTimes(1); } }));
   const supervisor = createReplicaSupervisor({ storage, storeRoot: await tempRoot("first-pull"), startChild });
   try { await supervisor.activate("w"); expect(startChild).toHaveBeenCalledTimes(2); }
@@ -247,7 +272,7 @@ it("settles a pending append notification when shutdown cancels its drain", asyn
   const pull = vi.fn(async () => {}), close = vi.fn(async () => {});
   let storeDir = "";
   const supervisor = createReplicaSupervisor({ storage, storeRoot: await tempRoot("drain-close"), startChild: async input => {
-    storeDir = input.storeDir; return { pull, close };
+    storeDir = input.storeDir; return { currentView: emptyCurrentView(input), pull, close };
   } });
   await supervisor.activate("w");
   storage.appendLogBatch({ workspaceId: "w", originId: "o", ops: [{ originSeq: 0, opKind: "moment.append", payloadJson: "{}", recordedAtMs: 1 }] });
@@ -260,8 +285,8 @@ it("settles a pending append notification when shutdown cancels its drain", asyn
 
 it("refuses unsupported production hosts and invalid limits before starting anything", async () => {
   const { storage } = await fixture();
-  expect(() => createReplicaSupervisor({ storage, storeRoot: "relative", startChild: async () => { throw Error(); } })).toThrow("absolute");
-  expect(() => createReplicaSupervisor({ storage, storeRoot: "C:/private", maxRunning: 0, startChild: async () => { throw Error(); } })).toThrow("budget");
+  expect(() => createReplicaSupervisor({ storage, storeRoot: "relative", startChild: async input => { throw Error(); } })).toThrow("absolute");
+  expect(() => createReplicaSupervisor({ storage, storeRoot: "C:/private", maxRunning: 0, startChild: async input => { throw Error(); } })).toThrow("budget");
   if (process.platform !== "linux") expect(() => createReplicaEngineStarter({ engineExecutable: "C:/daemon.exe", baseUrl: "https://relay.test" })).toThrow("Linux");
 });
 
@@ -274,7 +299,7 @@ it("sweeps stores from a prior process before admitting a child", async () => {
   const supervisor = createReplicaSupervisor({ storage, storeRoot: root, startChild: async input => {
     expect(existsSync(stale)).toBe(false);
     expect(existsSync(join(unrelated, "keep"))).toBe(true);
-    return { pull: async () => {}, close: async () => {} };
+    return { currentView: emptyCurrentView(input), pull: async () => {}, close: async () => {} };
   } });
   try { await supervisor.activate("w"); }
   finally { await supervisor.close().catch(() => {}); }
@@ -286,7 +311,7 @@ it.each(["close", "remove"])("releases capacity and reports a %s error during re
   const supervisor = createReplicaSupervisor({ storage, storeRoot: await tempRoot("retire-failure"), maxRunning: 1,
     onError: (_, error) => errors.push(error), startChild: async input => {
       path = input.storeDir;
-      return { pull: async () => {}, close: async () => { if (stage === "close") throw Error("close failed"); } };
+      return { currentView: emptyCurrentView(input), pull: async () => {}, close: async () => { if (stage === "close") throw Error("close failed"); } };
     } });
   try {
     await supervisor.activate("w");
@@ -304,21 +329,21 @@ it.each(["close", "remove"])("releases capacity and reports a %s error during re
 it("retires an idle dead child immediately and permits a new activation", async () => {
   const { storage } = await fixture(); const exited = deferred(); let path = "";
   const startChild = vi.fn(async (input: ReplicaChildInput) => {
-    path = input.storeDir; return { exited: exited.promise, pull: async () => {}, close: async () => {} };
+    path = input.storeDir; return { currentView: emptyCurrentView(input), exited: exited.promise, pull: async () => {}, close: async () => {} };
   });
   const supervisor = createReplicaSupervisor({ storage, storeRoot: await tempRoot("dead"), startChild });
   try {
     await supervisor.activate("w"); const first = path; exited.resolve();
     await expect.poll(() => existsSync(first)).toBe(false);
     await supervisor.settled("w");
-    startChild.mockImplementation(async input => { path = input.storeDir; return { exited: new Promise<void>(() => {}), pull: async () => {}, close: async () => {} }; });
+    startChild.mockImplementation(async input => { path = input.storeDir; return { currentView: emptyCurrentView(input), exited: new Promise<void>(() => {}), pull: async () => {}, close: async () => {} }; });
     await supervisor.activate("w"); expect(startChild).toHaveBeenCalledTimes(2);
   } finally { await supervisor.close(); }
 });
 
 it("permits reactivation after a transient pull failure in a converged replica", async () => {
   const { storage } = await fixture(); let pulls = 0;
-  const startChild = vi.fn(async () => ({ close: async () => {}, pull: async () => { if (++pulls === 2) throw Error("deadline exceeded"); } }));
+  const startChild = vi.fn(async (input: ReplicaChildInput) => ({ currentView: emptyCurrentView(input), close: async () => {}, pull: async () => { if (++pulls === 2) throw Error("deadline exceeded"); } }));
   const supervisor = createReplicaSupervisor({ storage, storeRoot: await tempRoot("transient"), startChild });
   try {
     await supervisor.activate("w");
@@ -330,7 +355,7 @@ it("permits reactivation after a transient pull failure in a converged replica",
 
 it("observes owner writes only while an entry is running", async () => {
   const { storage } = await fixture();
-  const supervisor = createReplicaSupervisor({ storage, storeRoot: await tempRoot("subscribe"), startChild: async () => ({ pull: async () => {}, close: async () => {} }) });
+  const supervisor = createReplicaSupervisor({ storage, storeRoot: await tempRoot("subscribe"), startChild: async input => ({ currentView: emptyCurrentView(input), pull: async () => {}, close: async () => {} }) });
   try {
     expect(hasRelayWriteObservers(storage)).toBe(false);
     await supervisor.activate("w"); expect(hasRelayWriteObservers(storage)).toBe(true);
@@ -341,7 +366,7 @@ it("observes owner writes only while an entry is running", async () => {
 
 it("reads standing once per idle entry in an owner-write batch", async () => {
   const { storage } = await fixture();
-  const supervisor = createReplicaSupervisor({ storage, storeRoot: await tempRoot("standing"), startChild: async () => ({ pull: async () => {}, close: async () => {} }) });
+  const supervisor = createReplicaSupervisor({ storage, storeRoot: await tempRoot("standing"), startChild: async input => ({ currentView: emptyCurrentView(input), pull: async () => {}, close: async () => {} }) });
   try {
     await supervisor.activate("w");
     const read = vi.spyOn(storage, "readReplicaStanding");

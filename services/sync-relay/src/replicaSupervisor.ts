@@ -1,3 +1,5 @@
+import {ReplicaCurrentViewRefused} from "./storage/replicaCurrentViews";
+import type {ReplicaCurrentView, ReplicaCurrentViewPage, ReplicaCurrentViewPosition, ReplicaCurrentViewCursor, ReplicaCurrentViewSelector} from "@dohc/workspace-engine-client/daemon";
 import { randomUUID } from "node:crypto";
 import { mkdir, mkdtemp, readdir, rm } from "node:fs/promises";
 import { dirname, isAbsolute, join, resolve } from "node:path";
@@ -6,11 +8,12 @@ import { observeRelayWrites } from "./relayWriteChanges";
 import { createReplicaReadPrincipal, type ReplicaReadLease } from "./replicaReadPrincipal";
 
 /** PR 2's catch-up and store budgets belong at the startChild boundary. */
-export const REPLICA_SUPERVISOR_LIMITS = Object.freeze({ maxRunning: 4, idleMs: 5 * 60_000 });
+export const REPLICA_SUPERVISOR_LIMITS = Object.freeze({ maxRunning: 4, idleMs: 5 * 60_000, maxViewTextBytes: 64*1024*1024 });
 export interface ReplicaChild {
   readonly pid?: number;
   readonly exited?: Promise<void>;
   pull(): Promise<void>;
+  currentView(selectors: ReplicaCurrentViewSelector[], knownTextShas: string[], position?: ReplicaCurrentViewPosition, cursor?: ReplicaCurrentViewCursor): Promise<ReplicaCurrentViewPage>;
   close(): Promise<void>;
 }
 export interface ReplicaChildInput {
@@ -23,6 +26,7 @@ export interface ReplicaSupervisorOptions {
   readonly startChild: (input: ReplicaChildInput) => Promise<ReplicaChild>;
   readonly maxRunning?: number;
   readonly idleMs?: number;
+  readonly maxViewTextBytes?: number;
   readonly onError?: (workspaceId: string, error: unknown) => void;
 }
 interface Entry {
@@ -36,6 +40,10 @@ interface Entry {
   run?: Promise<void>;
   retirement?: Promise<void>;
   idle?: ReturnType<typeof setTimeout>;
+  newest?: ReplicaCurrentView;
+  pendingView?: boolean;
+  quiet?: ReturnType<typeof setTimeout>;
+  ceiling?: ReturnType<typeof setTimeout>;
 }
 
 /** Explicit construction only. Production startup must wait for PR 6's readers. */
@@ -43,7 +51,7 @@ export function createReplicaSupervisor(options: ReplicaSupervisorOptions) {
   const limits = { ...REPLICA_SUPERVISOR_LIMITS, ...options };
   if (!isAbsolute(options.storeRoot)) throw new TypeError("Replica store root must be absolute.");
   if (dirname(resolve(options.storeRoot)) === resolve(options.storeRoot)) throw new TypeError("Replica store root must be a private directory.");
-  for (const value of [limits.maxRunning, limits.idleMs]) {
+  for (const value of [limits.maxRunning, limits.idleMs, limits.maxViewTextBytes]) {
     if (!Number.isSafeInteger(value) || value < 1) throw new TypeError("Invalid replica budget.");
   }
   const principal = createReplicaReadPrincipal(options.storage);
@@ -73,15 +81,50 @@ export function createReplicaSupervisor(options: ReplicaSupervisorOptions) {
     finishNotification();
   }
 
+  function persist(entry: Entry, view=entry.newest) {
+    clearTimeout(entry.quiet); clearTimeout(entry.ceiling);
+    entry.quiet=entry.ceiling=undefined;
+    if (entry.pendingView && view && standingCurrent(entry.lease)) {
+      try {
+        options.storage.storeReplicaCurrentView(entry.lease,view);
+        entry.newest=view;entry.pendingView=false;
+      } catch(error) {
+        if (!(error instanceof ReplicaCurrentViewRefused)) throw error;
+        // The next owner write supplies the missing restore or a fresh standing.
+        entry.newest=undefined;entry.pendingView=false;
+      }
+    }
+  }
+  function acceptView(entry: Entry, view: ReplicaCurrentView, spilled: boolean) {
+    if (!principal.current(entry.lease)) return;
+    if(spilled) {entry.pendingView=true;persist(entry,view);return;}
+    const previous=entry.newest;
+    const held=new Map(previous?.texts.map(t=>[t.sha256,t.text]) ?? []);
+    for (const t of view.texts) held.set(t.sha256,t.text);
+    const needed=new Set(view.files.filter(f=>f.contentKind==="text").map(f=>f.sha256));
+    view.texts=[...needed].map(sha256=>{const text=held.get(sha256);if(text===undefined)throw new Error("Replica current view text is missing.");return {sha256,text};});
+    const structure=(v: ReplicaCurrentView)=>JSON.stringify(v.files.map(f=>[f.versionId,f.objectId,f.path,f.contentKind,f.lineageClaimId,f.restoreGeneration]));
+    entry.newest=view;
+    if (previous && JSON.stringify(previous.files)===JSON.stringify(view.files)) return;
+    entry.pendingView=true;
+    if (!previous || structure(previous)!==structure(view)) {persist(entry);return;}
+    const flush=()=>{try {persist(entry);}catch(error){report(entry,error);void retire(entry).catch(e=>report(entry,e));}};
+    clearTimeout(entry.quiet);entry.quiet=setTimeout(flush,2000);entry.quiet.unref();
+    entry.ceiling ??= setTimeout(flush,30_000);entry.ceiling.unref();
+  }
+
   async function retire(entry: Entry): Promise<void> {
     if (entry.retirement) return entry.retirement;
     entry.stopping = true;
-    principal.revoke(entry.lease);
     clearTimeout(entry.idle);
+    clearTimeout(entry.quiet); clearTimeout(entry.ceiling);
     entry.retirement = (async () => {
       // Startup may still own the directory and child. Wait before disposing either.
       try {
         await entry.run?.catch(() => {});
+        try { persist(entry); } catch (error) { report(entry,error); }
+        options.storage.releaseReplicaCurrentView(entry.lease);
+        principal.revoke(entry.lease);
         try { await entry.child?.close(); } catch (error) { report(entry, error); }
         finally {
           try { if (entry.storeDir) await rm(entry.storeDir, { recursive: true, force: true }); }
@@ -118,19 +161,61 @@ export function createReplicaSupervisor(options: ReplicaSupervisorOptions) {
               }
             });
           }
-          while (entry.dirty && !entry.stopping) {
+          draining: while (entry.dirty && !entry.stopping) {
             if (!principal.current(entry.lease)) break;
             entry.dirty = false;
             const standing = options.storage.readReplicaStanding(entry.lease.workspaceId)!;
             await entry.child!.pull();
             entry.frontier = standing.logSeq;
             entry.journalFrontier = standing.journalCursor;
+            if (principal.current(entry.lease)) {
+              const selectors=options.storage.replicaCurrentViewSelectors(entry.lease.workspaceId);
+              for (;;) {
+                if (entry.stopping || !principal.current(entry.lease)) return;
+                let position: ReplicaCurrentViewPosition | undefined, cursor: ReplicaCurrentViewCursor | undefined;
+                const known=new Set(entry.newest?.texts.map(t=>t.sha256)??[]);
+                const held=new Map(entry.newest?.texts.map(t=>[t.sha256,t.text])??[]);
+                let textBytes=[...held.values()].reduce((n,text)=>n+Buffer.byteLength(text),0), spilled=false;
+                let latest: ReplicaCurrentView | undefined;
+                let moved=false;
+                do {
+                  const page=await entry.child!.currentView(selectors,[...known],position,cursor);
+                  if (page.moved) {moved=true;break;}
+                  if (!principal.current(entry.lease) || entry.stopping) return;
+                  position ??= {revision:page.revision,logCursor:page.logCursor,journalCursor:page.journalCursor};
+                  if (page.revision!==position.revision || page.logCursor!==position.logCursor || page.journalCursor!==position.journalCursor) throw new Error("Replica page position changed.");
+                  for(const refusal of page.refusedFiles) report(entry,new Error(`Replica current view omitted ${refusal.path}: ${refusal.reason}`));
+                  latest ??= {...page,files:[],texts:[]};
+                  latest.files.push(...page.files);latest.texts.push(...page.texts);
+                  for(const text of page.texts) {if(!known.has(text.sha256))textBytes+=Buffer.byteLength(text.text);known.add(text.sha256);}
+                  if(spilled || textBytes>limits.maxViewTextBytes) {
+                    const staged=spilled?page:latest;
+                    const texts=new Map(staged.texts.map(t=>[t.sha256,t.text]));
+                    for(const file of staged.files)if(file.contentKind==="text" && held.has(file.sha256))texts.set(file.sha256,held.get(file.sha256)!);
+                    try {options.storage.stageReplicaCurrentView(entry.lease,{...staged,texts:[...texts].map(([sha256,text])=>({sha256,text}))});} catch(error) {
+                      if (error instanceof ReplicaCurrentViewRefused) {if(entry.dirty)continue draining;return;}
+                      throw error;
+                    }
+                    spilled=true;latest.texts=[];
+                  }
+                  if (page.nextCursor && cursor && JSON.stringify(page.nextCursor)===JSON.stringify(cursor)) throw new Error("Replica current view cursor did not progress.");
+                  cursor=page.nextCursor??undefined;
+                } while(cursor);
+                if (moved) continue;
+                try {options.storage.validateReplicaCurrentView(entry.lease,latest!);} catch(error) {
+                  if(error instanceof ReplicaCurrentViewRefused) {if(entry.dirty)continue draining;return;}
+                  throw error;
+                }
+                acceptView(entry,latest!,spilled);break;
+              }
+            }
           }
           return;
         } catch (error) {
           if (!fresh || attempt === 1 || entry.frontier >= 0 || entry.stopping || !principal.current(entry.lease)) throw error;
           // A crash before the passive role is recorded can leave an owner-role store.
-          principal.revoke(entry.lease);
+          options.storage.releaseReplicaCurrentView(entry.lease);
+        principal.revoke(entry.lease);
           await entry.child?.close();
           entry.child = undefined;
           await rm(entry.storeDir!, { recursive: true, force: true });
@@ -138,6 +223,8 @@ export function createReplicaSupervisor(options: ReplicaSupervisorOptions) {
           await mkdir(entry.storeDir!, { mode: 0o700 });
           if (entry.stopping || !standingCurrent(entry.lease)) throw error;
           entry.lease = principal.issue(entry.lease.workspaceId, randomUUID());
+          options.storage.bindReplicaCurrentView(entry.lease);
+          entry.newest=undefined; entry.pendingView=false;
           entry.dirty = true;
         }
       }
@@ -186,6 +273,7 @@ export function createReplicaSupervisor(options: ReplicaSupervisorOptions) {
     if (!entry) {
       if (entries.size >= limits.maxRunning) throw new Error("Replica capacity reached.");
       const lease = principal.issue(workspaceId, randomUUID());
+      options.storage.bindReplicaCurrentView(lease);
       entry = { lease, frontier: -1, journalFrontier: -1, dirty: true, stopping: false };
       entries.set(workspaceId, entry);
       unsubscribe ??= observeRelayWrites(options.storage, observeWrite);
@@ -197,6 +285,15 @@ export function createReplicaSupervisor(options: ReplicaSupervisorOptions) {
   return {
     handle: principal.handle,
     activate,
+    currentView(workspaceId: string) {
+      const entry=entries.get(workspaceId),stored=options.storage.readReplicaCurrentView(workspaceId);
+      const memory=entry && standingCurrent(entry.lease)?entry.newest:undefined;
+      const view=memory && (!stored || memory.logCursor>=stored.logCursor && memory.journalCursor>=stored.journalCursor)?memory:stored;
+      if(!view)return null;
+      const texts=new Map(view.texts.map(t=>[t.sha256,t.text])),allowed=new Set(view.files.filter(f=>f.contentKind==="text").map(f=>f.sha256));
+      return {view:{...view,files:structuredClone(view.files),texts:[]},readText:(sha: string)=>options.storage.readReplicaStanding(workspaceId) &&
+        (!entry || standingCurrent(entry.lease)) && allowed.has(sha)?texts.get(sha)??options.storage.readReplicaCurrentViewText(workspaceId,sha):null};
+    },
     async settled(workspaceId: string): Promise<void> {
       await ready;
       await Promise.resolve();

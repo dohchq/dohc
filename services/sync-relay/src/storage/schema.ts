@@ -1,3 +1,4 @@
+import {initializeReplicaCurrentViewSchema} from "./replicaCurrentViewSchema";
 import {initializeHostedSettlementSchema} from "./hostedSettlementSchema";
 import { initializeLiveAuthorshipSchema, originalLiveJournalSql, liveAuthorSchemaMarked, assertLiveAuthorColumns } from "./liveAuthorshipSchema";
 import { initializeAppPublicationSchema } from "./publicationSchema";
@@ -1273,6 +1274,7 @@ export function initializeSyncRelaySchema(db: SqliteDb): void {
     initializeLiveAuthorshipSchema(db);
     initializeLiveApplicationAuthorshipIndex(db);
     initializeHostedSettlementSchema(db);
+    initializeReplicaCurrentViewSchema(db);
     initializeNoticeSchema(db);
     initializeShareNoticeDeliverySchema(db);
     initializeAutomationHostSchema(db);

@@ -769,6 +769,15 @@ export interface SyncRelayStorage {
     rotatedAtMs: number;
   }): RotateWorkspaceIdentityResult;
   workspaceIsOwnedBy(workspaceId: string, ownerUserId: string): boolean;
+  releaseReplicaCurrentView(lease: import("../replicaReadPrincipal").ReplicaReadLease): void;
+  bindReplicaCurrentView(lease: import("../replicaReadPrincipal").ReplicaReadLease): void;
+  replicaCurrentViewSelectors(workspaceId: string): import("@dohc/workspace-engine-client/daemon").ReplicaCurrentViewSelector[];
+  stageReplicaCurrentView(lease: import("../replicaReadPrincipal").ReplicaReadLease, view: import("@dohc/workspace-engine-client/daemon").ReplicaCurrentView): import("./replicaCurrentViews").StagedCurrentView;
+  flipReplicaCurrentView(lease: import("../replicaReadPrincipal").ReplicaReadLease, staged: import("./replicaCurrentViews").StagedCurrentView): void;
+  storeReplicaCurrentView(lease: import("../replicaReadPrincipal").ReplicaReadLease, view: import("@dohc/workspace-engine-client/daemon").ReplicaCurrentView): void;
+  validateReplicaCurrentView(lease: import("../replicaReadPrincipal").ReplicaReadLease, view: import("@dohc/workspace-engine-client/daemon").ReplicaCurrentView): void;
+  readReplicaCurrentView(workspaceId: string): import("@dohc/workspace-engine-client/daemon").ReplicaCurrentView | null;
+  readReplicaCurrentViewText(workspaceId: string,sha: string): string | null;
   readReplicaStanding(workspaceId: string, shareGrantBindings?: string): ReturnType<typeof import("./replicaReads").readReplicaStanding>;
   putBlob(input: {
     workspaceId: string;

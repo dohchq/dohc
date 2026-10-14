@@ -10,7 +10,7 @@ import { Duplex } from "node:stream";
 import { requireEngineBinaryOrSkip } from "../../../apps/desktop/src/testing/engineBinary";
 import { EngineClient, DuplexEngineClientConnection } from "@dohc/workspace-engine-client/daemon";
 import { openEngineYdocProviderSession } from "../../../packages/workspace-engine-client/src/ydoc/ydocProviderSession";
-import { closeTestStorages, inspectDatabase, storagePath, tempRoot, testHandler, testStorage } from "./testing";
+import { closeTestStorages, closeTestStorage, reopenTestStorage, inspectDatabase, storagePath, tempRoot, testHandler, testStorage } from "./testing";
 import { createReplicaSupervisor } from "./replicaSupervisor";
 import { createReplicaEngineStarter } from "./replicaEngine";
 import { REPLICA_READ_PREFIX } from "./replicaReadPrincipal";
@@ -97,7 +97,7 @@ it.skipIf(engineBinary.missing)("supervised passive child converges through the 
     await rpc(engine, "sync.materializePendingCursor", { workspaceId, pendingCursor: page.pendingCursor });
     await rpc(engine, "sync.commitCursor", { workspaceId, pendingCursor: page.pendingCursor });
   } while (page.hasMore); };
-  const share = (id: string) => storage.createShare({ share: { shareId: id, workspaceId: id, granterUserId: owner, selectorJson: "{}", createdAtMs: 1 },
+  const share = (id: string) => storage.createShare({ share: { shareId: id, workspaceId: id, granterUserId: owner, selectorJson: '{"paths":[],"versionId":null}', createdAtMs: 1 },
     grant: { grantId: id, shareId: id, principalKind: "user", principalUserId: "reader", principalEmail: null,
       access: "view", generation: 1, status: "active", createdAtMs: 1, revokedAtMs: null, parentGrantId: null } });
   const inspect = <T>(id: string, read: (db: DatabaseSync) => T): T => {
@@ -163,8 +163,20 @@ it.skipIf(engineBinary.missing)("supervised passive child converges through the 
       restoreBeforeMomentId: deleted.moment.momentId, origin: "restore", publish: true });
     await push(a); await pull(b); await drain();
     expect(Buffer.from(String(stored("renamed.txt")), "utf8")).toEqual(readFileSync(join(a.dir, "renamed.txt")));
-    storage.revokeShareGrant({ shareId: workspaceId, grantId: workspaceId, revokedAtMs: 2 });
-    await supervisor.settled(workspaceId); expect(existsSync(replica.dir)).toBe(false);
+    const pullWithView=await rpc(b,"sync.pull",{workspaceId});expect(pullWithView.applied).toBe(0);
+    await rpc(b,"sync.materializePendingCursor",{workspaceId,pendingCursor:pullWithView.pendingCursor});await rpc(b,"sync.commitCursor",{workspaceId,pendingCursor:pullWithView.pendingCursor});
+    await supervisor.close();
+    expect(Number(relayDb.prepare("SELECT count(*) AS n FROM sync_relay_replica_cut_files WHERE workspace_id=?").get(workspaceId)!.n)).toBeGreaterThan(0);
+    const dbPath=storagePath(storage);closeTestStorage(storage);const restartedStorage=reopenTestStorage(dbPath);
+    supervisor=createReplicaSupervisor({storage:restartedStorage,storeRoot:join(root,"replicas"),idleMs:20,onError:(_,error)=>failures.push(String(error)),startChild:async input=>{const child=await start(input);stores.set(input.lease.workspaceId,{dir:input.storeDir});return child;}});
+    await supervisor.activate(workspaceId);const idleStore=stores.get(workspaceId)!.dir;
+    await expect.poll(()=>existsSync(idleStore)).toBe(false);
+    expect(Number(relayDb.prepare("SELECT count(*) AS n FROM sync_relay_replica_cut_files WHERE workspace_id=?").get(workspaceId)!.n)).toBeGreaterThan(0);
+    await supervisor.close();closeTestStorage(restartedStorage);const afterIdleRestart=reopenTestStorage(dbPath);
+    expect(Number(relayDb.prepare("SELECT count(*) AS n FROM sync_relay_replica_cut_files WHERE workspace_id=?").get(workspaceId)!.n)).toBeGreaterThan(0);
+    afterIdleRestart.revokeShareGrant({shareId:workspaceId,grantId:workspaceId,revokedAtMs:2});
+    expect(relayDb.prepare("SELECT count(*) AS n FROM sync_relay_replica_cuts").get()!.n).toBe(0);
+    expect(relayDb.prepare("SELECT count(*) AS n FROM sync_relay_replica_cut_texts").get()!.n).toBe(0);expect(failures).toEqual([]);
   } finally {
     for (const provider of providers) await provider.close().catch(() => {});
     await supervisor.close();

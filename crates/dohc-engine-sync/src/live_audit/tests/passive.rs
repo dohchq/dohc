@@ -1214,3 +1214,106 @@ fn measure_passive_wide_500_row_page() {
 }
 
 mod page_measurement;
+
+#[test]
+fn current_view_keeps_nested_list_bytes_and_projects_a_journal_edit() {
+    use crate::replica_cut::{CurrentViewRequest, CurrentViewSelector, collect_current_view};
+    let nested = "- one\n  - child\n    - grandchild\n- two";
+    let preview = dohc_engine_collab::Ydoc::wire();
+    preview
+        .rewrite_content_to_markdown_preserving_source(ContentKind::Richdoc, nested)
+        .unwrap();
+    let canonical = preview.project(ContentKind::Richdoc).unwrap().content;
+    let mut source = fixture_with_binding_generation(true, Some(&canonical), 1);
+    let baseline_doc = dohc_engine_collab::Ydoc::wire();
+    baseline_doc.apply(&source.bytes).unwrap();
+    let canonical = baseline_doc.project(ContentKind::Richdoc).unwrap().content;
+    source.input.projected_markdown_digest = hex_sha256(canonical.as_bytes());
+    source.input.projected_markdown_byte_length = canonical.len() as i64;
+    bootstrap(&mut source, false).unwrap();
+    let (_scratch, _path, mut replica) = receiver(&source);
+    let request = CurrentViewRequest {
+        selectors: vec![CurrentViewSelector {
+            version_id: "main".into(),
+            paths: vec!["note.md".into()],
+        }],
+        resend: true,
+        known_text_shas: String::new(),
+        position: None,
+        cursor: None,
+    };
+    let before = collect_current_view(&replica, "ws", &request).unwrap();
+    assert_eq!(before.texts[0].text, canonical);
+    let doc = dohc_engine_collab::Ydoc::wire();
+    doc.apply(&source.bytes).unwrap();
+    let previous = initial(&source);
+    let first = row(&mut source, 1, &previous, &doc);
+    apply_page(&mut replica, "ws", 0, &[first], &NoFaults).unwrap();
+    let after = collect_current_view(&replica, "ws", &request).unwrap();
+    let expected = replica
+        .read_with(|conn| {
+            crate::ydoc_apply::project_ydoc_with_store(
+                conn,
+                &dohc_engine_collab::DocKey::new("ws", "main", "object").unwrap(),
+                &doc,
+                ContentKind::Richdoc,
+            )
+        })
+        .unwrap()
+        .content;
+    assert_eq!(after.texts[0].text, expected);
+    assert!(after.texts[0].text.contains("grandchild"));
+    assert!(after.texts[0].text.contains("Journal row 1."));
+    assert_eq!(after.files[0].sha256, hex_sha256(expected.as_bytes()));
+    assert_eq!(after.files[0].byte_length, expected.len());
+    assert_eq!(after.files[0].restore_generation, Some(1));
+    assert_eq!(after.journal_cursor, 1);
+    let saved = VersionedTextStore::new(&mut replica)
+        .read_text("ws", "main", "note.md")
+        .unwrap()
+        .unwrap();
+    assert_eq!(saved.text, canonical, "collecting never writes a snapshot");
+}
+
+#[test]
+#[ignore = "release measurement"]
+fn measure_current_view_lanes() {
+    use crate::replica_cut::{CurrentViewRequest, CurrentViewSelector, collect_current_view};
+    let request = CurrentViewRequest {
+        selectors: vec![CurrentViewSelector {
+            version_id: "main".into(),
+            paths: vec![],
+        }],
+        resend: true,
+        known_text_shas: String::new(),
+        position: None,
+        cursor: None,
+    };
+    for bytes in [50_000, 1_000_000] {
+        let text = "x".repeat(bytes);
+        let mut source = fixture_with_binding_generation(true, Some(&text), 1);
+        let baseline = dohc_engine_collab::Ydoc::wire();
+        baseline.apply(&source.bytes).unwrap();
+        let canonical = baseline.project(ContentKind::Richdoc).unwrap().content;
+        source.input.projected_markdown_digest = hex_sha256(canonical.as_bytes());
+        source.input.projected_markdown_byte_length = canonical.len() as i64;
+        bootstrap(&mut source, false).unwrap();
+        let (_scratch, _path, mut replica) = receiver(&source);
+        for _ in 0..21 {
+            println!("VIEW_LANE ordinary bytes={bytes}");
+            let view = collect_current_view(&replica, "ws", &request).unwrap();
+            assert_eq!(view.texts[0].text, canonical);
+        }
+        let doc = dohc_engine_collab::Ydoc::wire();
+        doc.apply(&source.bytes).unwrap();
+        let mut previous = initial(&source);
+        for cursor in 1..=21 {
+            let next = row(&mut source, cursor, &previous, &doc);
+            previous = next.evidence_digest.clone();
+            apply_page(&mut replica, "ws", cursor - 1, &[next], &NoFaults).unwrap();
+            println!("VIEW_LANE journal bytes={bytes}");
+            let view = collect_current_view(&replica, "ws", &request).unwrap();
+            assert_eq!(view.journal_cursor, cursor);
+        }
+    }
+}
