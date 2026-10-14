@@ -35,12 +35,13 @@ it("collects after each full drain even when a later owner write is queued",asyn
 
 it("drains queued writes after a view loses a restore race",async()=>{
   const {storage}=await fixture();let pulls=0;const events:string[]=[];
+  const sha = (text: string) => createHash("sha256").update(text).digest("hex");
   vi.useFakeTimers({toFake:["setTimeout","clearTimeout"]});
-  const supervisor=createReplicaSupervisor({storage,storeRoot:await tempRoot("view-restore-race"),startChild:async input=>({
-    close:async()=>{},currentView:async()=>{events.push("view");return emptyCurrentView(input)();},
+  const supervisor=createReplicaSupervisor({storage,maxViewTextBytes:1,storeRoot:await tempRoot("view-restore-race"),startChild:async input=>({
+    close:async()=>{},currentView:async()=>{events.push("view");const text=String(pulls).repeat(2);return {...await emptyCurrentView(input)(),files:[{versionId:"main",objectId:"a",path:"a.txt",contentKind:"text" as const,sha256:sha(text),byteLength:2,lineageClaimId:null,restoreGeneration:null}],texts:[{sha256:sha(text),text}]};},
     pull:async()=>{events.push("pull");if(++pulls===2){storage.appendLogBatch({workspaceId:"w",originId:"o",ops:[{originSeq:0,opKind:"moment.append",payloadJson:"{}",recordedAtMs:1}]});await vi.advanceTimersByTimeAsync(20);}}
   })});
-  try{await supervisor.activate("w");events.length=0;vi.spyOn(storage,"validateReplicaCurrentView").mockImplementationOnce(()=>{throw new ReplicaCurrentViewRefused();});await supervisor.activate("w");expect(events).toEqual(["pull","view","pull","view"]);}
+  try{await supervisor.activate("w");events.length=0;vi.spyOn(storage,"stageReplicaCurrentView").mockImplementationOnce(()=>{throw new ReplicaCurrentViewRefused();});await supervisor.activate("w");expect(events).toEqual(["pull","view","pull","view"]);}
   finally{await supervisor.close();}
 });
 
@@ -49,7 +50,7 @@ async function fixture(workspaceId = "w") {
   const seed = (id: string) => {
     storage.claimWorkspace({ workspaceId: id, ownerUserId: "owner", createdAtMs: 1 });
     storage.claimWorkspaceIdentity({ workspaceId: id, replicationEpoch: "epoch", streamIdentity: "stream" });
-    storage.createShare({ share: { shareId: id, workspaceId: id, granterUserId: "owner", selectorJson: "{}", createdAtMs: 1 },
+    storage.createShare({ share: { shareId: id, workspaceId: id, granterUserId: "owner", selectorJson: '{"paths":[],"versionId":"main"}', createdAtMs: 1 },
       grant: { grantId: id, shareId: id, principalKind: "user", principalUserId: "reader", principalEmail: null,
         access: "view", generation: 1, status: "active", createdAtMs: 1, revokedAtMs: null, parentGrantId: null } });
   };

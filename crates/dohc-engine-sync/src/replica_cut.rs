@@ -12,7 +12,7 @@ use std::collections::{BTreeMap, BTreeSet};
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CurrentViewSelector {
-    pub version_id: String,
+    pub version_id: Option<String>,
     pub paths: Vec<String>,
 }
 
@@ -20,7 +20,6 @@ pub struct CurrentViewSelector {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CurrentViewRequest {
     pub selectors: Vec<CurrentViewSelector>,
-    pub resend: bool,
     #[serde(default)]
     pub known_text_shas: String,
     #[serde(default)]
@@ -48,6 +47,7 @@ pub struct CurrentViewRefusal {
     pub path: String,
     pub object_id: String,
     pub version_id: String,
+    pub sha256: String,
     pub reason: &'static str,
 }
 
@@ -109,7 +109,9 @@ pub fn collect_current_view_cached(
         });
     }
     if request.selectors.iter().any(|s| {
-        !crate::is_valid_share_version_id(&s.version_id)
+        s.version_id
+            .as_deref()
+            .is_some_and(|version| !crate::is_valid_share_version_id(version))
             || s.paths
                 .iter()
                 .any(|p| classify_share_path(p) != PathClass::Tracked)
@@ -118,9 +120,6 @@ pub fn collect_current_view_cached(
     }
     store.read_with(|conn| {
         let tx = conn.unchecked_transaction().map_err(SyncError::corrupt)?;
-        #[cfg(test)] let started=std::time::Instant::now();
-        #[cfg(test)] let mut projection_ms=0.0;
-        #[cfg(test)] let mut text_ms=0.0;
         let frontier = read_frontiers(&tx, workspace)?;
         let position = CurrentViewPosition {revision: frontier.revision, log_cursor: frontier.log_cursor, journal_cursor: frontier.journal_cursor};
         if request.cursor.is_some() && request.position.is_none() { return Err(SyncError::InvalidInput {reason: "a current view cursor requires its applied position"}); }
@@ -133,13 +132,12 @@ pub fn collect_current_view_cached(
         let header_bytes = serde_json::to_vec(&view).map_err(SyncError::corrupt)?.len() + 128;
         let mut encoded_bytes = header_bytes;
         let mut last = request.cursor.clone();
-        let mut texts = BTreeMap::new();
-        let mut stmt = tx.prepare("SELECT a.version_id,a.object_id,a.path,s.content_kind,COALESCE(s.blob_sha256,s.binary_sha256),COALESCE(b.byte_length,bb.byte_length) FROM path_aliases a JOIN snapshots s ON s.workspace_id=a.workspace_id AND s.version_id=a.version_id AND s.object_id=a.object_id LEFT JOIN blobs b ON b.sha256=s.blob_sha256 LEFT JOIN binary_blobs bb ON bb.sha256=s.binary_sha256 WHERE a.workspace_id=?1 AND (a.path,a.object_id,a.version_id) > (?2,?3,?4) ORDER BY a.path,a.object_id,a.version_id").map_err(SyncError::corrupt)?;
-        let mut rows = stmt.query(params![workspace, request.cursor.as_ref().map_or("", |c| c.path.as_str()),request.cursor.as_ref().map_or("", |c| c.object_id.as_str()),request.cursor.as_ref().map_or("", |c| c.version_id.as_str())]).map_err(SyncError::corrupt)?;
+        let mut stmt = tx.prepare("SELECT a.version_id,a.object_id,a.path,s.content_kind,COALESCE(s.blob_sha256,s.binary_sha256),COALESCE(b.byte_length,bb.byte_length) FROM path_aliases a JOIN snapshots s ON s.workspace_id=a.workspace_id AND s.version_id=a.version_id AND s.object_id=a.object_id AND s.path=a.path LEFT JOIN blobs b ON b.sha256=s.blob_sha256 LEFT JOIN binary_blobs bb ON bb.sha256=s.binary_sha256 WHERE a.workspace_id=?1 AND (a.version_id,a.path) > (?2,?3) ORDER BY a.version_id,a.path").map_err(SyncError::corrupt)?;
+        let mut rows = stmt.query(params![workspace, request.cursor.as_ref().map_or("", |c| c.version_id.as_str()),request.cursor.as_ref().map_or("", |c| c.path.as_str())]).map_err(SyncError::corrupt)?;
         while let Some(row) = rows.next().map_err(SyncError::corrupt)? {
             let version: String = row.get(0).map_err(SyncError::corrupt)?;
             let path: String = row.get(2).map_err(SyncError::corrupt)?;
-            if classify_share_path(&path) != PathClass::Tracked || !request.selectors.iter().any(|s| s.version_id == version && (s.paths.is_empty() || s.paths.iter().any(|p| path == *p || path.starts_with(&format!("{p}/"))))) { continue; }
+            if classify_share_path(&path) != PathClass::Tracked || !request.selectors.iter().any(|s| s.version_id.as_deref().unwrap_or("main") == version && (s.version_id.is_some() && s.paths.is_empty() || s.paths.iter().any(|p| path == *p || path.starts_with(&format!("{p}/"))))) { continue; }
             let object: String = row.get(1).map_err(SyncError::corrupt)?;
 
             let key = DocKey::new(workspace, &version, &object).map_err(map_collab_hard_error)?;
@@ -154,7 +152,6 @@ pub fn collect_current_view_cached(
             let mut text: Option<String> = None;
             let settled: i64 = tx.query_row("SELECT settled_update_seq FROM ydoc_docs WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",params![workspace,version,object],|r|r.get(0)).optional().map_err(SyncError::corrupt)?.unwrap_or(0);
             if let Some(marker) = marker && kind == "text" && marker.head_update_seq > settled {
-                #[cfg(test)] let projecting=std::time::Instant::now();
                 let cache_key=(workspace.to_string(),version.clone(),object.clone());
                 // Scene projections also depend on versioned assets, so their key includes the complete applied revision.
                 let position=format!("{}:{}:{}:{lineage:?}:{:?}",marker.head_update_seq,settled,sha,
@@ -173,24 +170,22 @@ pub fn collect_current_view_cached(
                     }
                 };
                 sha=hex_sha256(projected.as_bytes());len=projected.len();text=Some(projected);
-                #[cfg(test)] {projection_ms+=projecting.elapsed().as_secs_f64()*1000.0;}
-            }
-            if kind == "text" && (request.resend || !known.contains(&sha)) {
-                #[cfg(test)] let reading=std::time::Instant::now();
-                let text=match text {
-                    Some(text)=>text,
-                    None=>tx.query_row("SELECT text FROM blobs WHERE sha256=?1",[&sha],|r|r.get(0)).map_err(SyncError::corrupt)?,
-                };
-                texts.insert(sha.clone(), text);
-                #[cfg(test)] {text_ms+=reading.elapsed().as_secs_f64()*1000.0;}
             }
             let cursor = CurrentViewCursor {path: path.clone(), object_id: object.clone(), version_id: version.clone()};
             let file = CurrentViewFile {version_id: version, object_id: object, path, content_kind: kind, sha256: sha.clone(), byte_length: len, lineage_claim_id: lineage, restore_generation: generation};
-            let text = texts.remove(&sha).map(|text| CurrentViewText {sha256: sha.clone(), text});
-            let size = serde_json::to_vec(&file).map_err(SyncError::corrupt)?.len() + text.as_ref().map(|t| serde_json::to_vec(t).map(|b| b.len())).transpose().map_err(SyncError::corrupt)?.unwrap_or(0) + 2;
+            let file_bytes = serde_json::to_vec(&file).map_err(SyncError::corrupt)?.len();
             let cursor_bytes = serde_json::to_vec(&cursor).map_err(SyncError::corrupt)?.len();
-            if size + header_bytes + cursor_bytes > 14 * 1024 * 1024 {
-                let refusal = CurrentViewRefusal {path: file.path, object_id: file.object_id, version_id: file.version_id, reason: "text-frame-limit"};
+            let empty_text_bytes = serde_json::to_vec(&CurrentViewText {sha256: sha.clone(), text: String::new()}).map_err(SyncError::corrupt)?.len();
+            let oversized_snapshot = file.content_kind == "text" && text.is_none() && len + empty_text_bytes + file_bytes + header_bytes + cursor_bytes + 2 > 14 * 1024 * 1024;
+            let text = if !oversized_snapshot && file.content_kind == "text" && !known.contains(&sha) {
+                Some(CurrentViewText {sha256: sha.clone(), text: match text {
+                    Some(text) => text,
+                    None => tx.query_row("SELECT text FROM blobs WHERE sha256=?1",[&sha],|r|r.get(0)).map_err(SyncError::corrupt)?,
+                }})
+            } else {None};
+            let size = file_bytes + text.as_ref().map(|t| serde_json::to_vec(t).map(|b| b.len())).transpose().map_err(SyncError::corrupt)?.unwrap_or(0) + 2;
+            if oversized_snapshot || size + header_bytes + cursor_bytes > 14 * 1024 * 1024 {
+                let refusal = CurrentViewRefusal {path: file.path, object_id: file.object_id, version_id: file.version_id, sha256: file.sha256, reason: "text-frame-limit"};
                 let refusal_size = serde_json::to_vec(&refusal).map_err(SyncError::corrupt)?.len() + 1;
                 if encoded_bytes + refusal_size + cursor_bytes > 8 * 1024 * 1024 || view.refused_files.len() >= 16_000 {view.next_cursor = last; break;}
                 encoded_bytes += refusal_size;
@@ -208,10 +203,6 @@ pub fn collect_current_view_cached(
         }
         drop(rows); drop(stmt);
         tx.commit().map_err(SyncError::corrupt)?;
-        #[cfg(test)] if std::env::var("DOHC_REPLICA_MEASURE").as_deref()==Ok("1") {
-            let total_ms=started.elapsed().as_secs_f64()*1000.0;
-            println!("VIEW_PHASE_MS {}",serde_json::json!({"total":total_ms,"manifest":total_ms-projection_ms-text_ms,"projection":projection_ms,"text":text_ms,"files":view.files.len(),"bytes":view.files.iter().map(|f|f.byte_length).sum::<usize>()}));
-        }
         Ok(view)
     })
 }

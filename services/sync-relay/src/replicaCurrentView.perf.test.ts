@@ -14,6 +14,7 @@ import {initializeRelayDeployment,openRelayDeployment} from "./relayDeployment";
 import type {SyncRelayStorage} from "./storage";
 import type {RelayWriteOwner} from "./storage/writeOwner";
 import type {StorageContext} from "./storage/context";
+import {nextShareDiscussionRevision} from "./storage/discussion";
 import {openEngineYdocProviderSession} from "../../../packages/workspace-engine-client/src/ydoc/ydocProviderSession";
 
 const binary=requireEngineBinaryOrSkip();
@@ -21,6 +22,60 @@ const deployments:SyncRelayStorage[]=[];
 afterEach(async()=>{for(const storage of deployments.splice(0))storage.close();await closeTestStorages();});
 const measurements=new WeakMap<SyncRelayStorage,{path:string;sidePath:string;reservations:number[]}>();
 const hash=(text: string)=>createHash("sha256").update(text).digest("hex");
+
+it.skipIf(process.env.DOHC_REPLICA_MEASURE!=="1")("round4 measures distinct-file persistence and discussion writes",async()=>{
+  const storage=await fixture(),context=storage as unknown as StorageContext;
+  const lease=createReplicaReadPrincipal(storage).issue("w","distinct");storage.bindReplicaCurrentView(lease);
+  const texts=Array.from({length:20_000},(_,i)=>{const text=`document-${String(i).padStart(6,"0")}`;return {sha256:hash(text),text};});
+  const files=texts.map((t,i)=>({versionId:"main",objectId:`o${i}`,path:`docs/${String(i).padStart(6,"0")}.md`,contentKind:"text" as const,sha256:t.sha256,byteLength:Buffer.byteLength(t.text),lineageClaimId:null,restoreGeneration:null}));
+  const measured=measurements.get(storage)!;measured.reservations.length=0;
+  const start=performance.now();storage.storeReplicaCurrentView(lease,{workspaceId:"w",omitted:[],revision:1,logCursor:0,journalCursor:0,files,texts});
+  const freshMs=performance.now()-start,freshStamps=measured.reservations.length;
+  measured.reservations.length=0;const repeat=performance.now();
+  storage.storeReplicaCurrentView(lease,{workspaceId:"w",omitted:[],revision:2,logCursor:0,journalCursor:0,files,texts});
+  const unchangedMs=performance.now()-repeat,unchangedStamps=measured.reservations.length;
+  const before:number[]=[];for(let i=0;i<21;i++){const t=performance.now();context.tx(()=>nextShareDiscussionRevision(context,"s"));before.push(performance.now()-t);}
+  context.db.exec("BEGIN");
+  try {
+    const workspace=context.db.prepare("INSERT INTO sync_relay_workspaces(workspace_id,owner_user_id,created_at_ms,replication_epoch,stream_identity) VALUES (?,'owner',1,'epoch','stream')");
+    const share=context.db.prepare("INSERT INTO sync_relay_shares(share_id,workspace_id,granter_user_id,selector_json,created_at_ms) VALUES (?,?,'owner','{\"paths\":[],\"versionId\":\"main\"}',1)");
+    const grant=context.db.prepare("INSERT INTO sync_relay_share_grants(grant_id,share_id,principal_kind,principal_user_id,access,generation,status,created_at_ms) VALUES (?,?,'user','reader','view',1,'active',1)");
+    const header=context.db.prepare("INSERT INTO sync_relay_replica_cuts(workspace_id,replication_epoch,stream_identity,incarnation,cut_seq,revision,log_cursor,journal_cursor) VALUES (?,'epoch','stream','test',1,0,0,0)");
+    for(let i=1;i<1000;i++){const id=`wide-${i}`;workspace.run(id);share.run(id,id);grant.run(id,id);header.run(id);}
+    context.db.exec("COMMIT");
+  }catch(e){context.db.exec("ROLLBACK");throw e;}
+  const discussion:number[]=[];
+  for(let i=0;i<21;i++){const t=performance.now();context.tx(()=>nextShareDiscussionRevision(context,"s"));discussion.push(performance.now()-t);}
+  expect(context.db.prepare("SELECT count(*) AS n FROM sync_relay_replica_cuts").get()!.n).toBe(1000);
+  expect(context.db.prepare("SELECT count(*) AS n FROM sync_relay_replica_cut_files").get()!.n).toBe(20000);
+  output("distinct-writes",{freshMs,freshStamps,unchangedMs,unchangedStamps,distinctFiles:20000,logicalBytes:texts.reduce((n,t)=>n+Buffer.byteLength(t.text),0),discussion:{views:1000,p50:quantile(discussion,.5),p95:quantile(discussion,.95)},oneViewDiscussion:{p50:quantile(before,.5),p95:quantile(before,.95)}});
+},600_000);
+it.skipIf(process.env.DOHC_REPLICA_MEASURE!=="1")("round4 measures accepted discussion messages with one thousand views",async()=>{
+  const storage=await fixture(),context=storage as unknown as StorageContext,measured=measurements.get(storage)!;
+  const text="stored",sha=hash(text);
+  context.db.exec("BEGIN");
+  try {
+    const workspace=context.db.prepare("INSERT INTO sync_relay_workspaces(workspace_id,owner_user_id,created_at_ms,replication_epoch,stream_identity) VALUES (?,'owner',1,'epoch','stream')");
+    const share=context.db.prepare("INSERT INTO sync_relay_shares(share_id,workspace_id,granter_user_id,selector_json,created_at_ms) VALUES (?,?,'owner','{\"paths\":[\"docs\"],\"versionId\":null}',1)");
+    const grant=context.db.prepare("INSERT INTO sync_relay_share_grants(grant_id,share_id,principal_kind,principal_user_id,access,generation,status,created_at_ms) VALUES (?,?,'user','reader','view',1,'active',1)");
+    const header=context.db.prepare("INSERT INTO sync_relay_replica_cuts(workspace_id,replication_epoch,stream_identity,incarnation,cut_seq,revision,log_cursor,journal_cursor) VALUES (?,'epoch','stream','test',1,0,0,0)");
+    const file=context.db.prepare("INSERT INTO sync_relay_replica_cut_files VALUES (?,'main','a','docs/a.txt','text',?,6,NULL,NULL)");
+    const blob=context.db.prepare("INSERT INTO sync_relay_replica_cut_texts VALUES (?,?,0,?,1)");
+    for(let i=0;i<1000;i++){const id=i?`message-${i}`:"w";if(i){workspace.run(id);share.run(id,id);grant.run(id,id);}header.run(id);file.run(id,sha);blob.run(id,sha,Buffer.from(text));}
+    context.db.exec("COMMIT");
+  }catch(e){context.db.exec("ROLLBACK");throw e;}
+  const samples:number[]=[];measured.reservations.length=0;const cpu=process.cpuUsage();
+  const guard=()=>{expect(storage.workspaceIsOwnedBy("w","owner")).toBe(true);return "owner" as const;};
+  for(let i=0;i<21;i++) {
+    const started=performance.now();
+    const result=storage.appendAuthenticatedDiscussionMessage({shareId:"s",authorUserId:"owner",displayName:"Owner",body:`Message ${i}`,idempotencyKey:`message-${i}`,createdAtMs:10+i,readGuard:guard,appendGuard:guard});
+    samples.push(performance.now()-started);expect(result.ok).toBe(true);
+  }
+  const used=process.cpuUsage(cpu);
+  expect(context.db.prepare("SELECT count(*) AS n FROM sync_relay_share_discussion_messages").get()!.n).toBe(21);
+  expect(context.db.prepare("SELECT count(*) AS n FROM sync_relay_replica_cuts").get()!.n).toBe(1000);
+  output("discussion-messages",{views:1000,messages:21,p50:quantile(samples,.5),p95:quantile(samples,.95),cpuMsPerMessage:(used.user+used.system)/1000/21,stampReservations:measured.reservations.length,samples});
+},120_000);
 const quantile=(values:number[],q:number)=>[...values].sort((a,b)=>a-b)[Math.floor((values.length-1)*q)]!;
 const output=(name:string,data:unknown)=>{console.log(name,JSON.stringify(data));if(process.env.DOHC_REPLICA_MEASURE_OUT)writeFileSync(`${process.env.DOHC_REPLICA_MEASURE_OUT}.${name}.json`,JSON.stringify(data));};
 async function fixture() {
@@ -131,7 +186,7 @@ it.skipIf(process.env.DOHC_REPLICA_MEASURE!=="1")("measures relay parse, stage c
       const text=String(i).padStart(8,"0")+"x".repeat(size-8),sha256=hash(text),wire=JSON.stringify({workspaceId:"w",revision:i,logCursor:0,journalCursor:0,moved:false,nextCursor:null,refusedFiles:[],
         files:[{versionId:"main",objectId:"a",path:"docs/a.md",contentKind:"text",sha256,byteLength:size,lineageClaimId:hash("measurement-lineage"),restoreGeneration:1}],texts:[{sha256,text}]});
       transactionMs=0;
-      const start=performance.now(),view=decodeReplicaCurrentView(JSON.parse(wire)),parsed=performance.now();const staged=storage.stageReplicaCurrentView(lease,view),checked=performance.now(),stageChecks=checked-parsed-transactionMs;
+      const start=performance.now(),view=decodeReplicaCurrentView(JSON.parse(wire)),parsed=performance.now();const staged=storage.stageReplicaCurrentView(lease,{...view,omitted:[]}),checked=performance.now(),stageChecks=checked-parsed-transactionMs;
       storage.flipReplicaCurrentView(lease,staged);const flipped=performance.now();samples.push({parse:parsed-start,stage:checked-parsed,stageChecks,flip:flipped-checked});logical+=size;
     }
     const written=statSync(wal).size-walBefore;const summarize=(field:keyof typeof samples[number])=>({p50:quantile(samples.map(s=>s[field]),.5),p95:quantile(samples.map(s=>s[field]),.95)});
@@ -149,7 +204,7 @@ it.skipIf(process.env.DOHC_REPLICA_MEASURE!=="1")("measures main-cadence staging
   for(const size of [50_000,1_000_000]) {
     const storage=await fixture(),measured=measurements.get(storage)!,context=storage as unknown as StorageContext;
     context.db.exec("PRAGMA wal_autocheckpoint=0");
-    const page=(revision:number)=>{const text=String(revision).padStart(8,"0")+"x".repeat(size-8),sha256=hash(text);return {workspaceId:"w",revision,logCursor:0,journalCursor:0,moved:false,nextCursor:null,refusedFiles:[],
+    const page=(revision:number)=>{const text=String(revision).padStart(8,"0")+"x".repeat(size-8),sha256=hash(text);return {workspaceId:"w",omitted:[],revision,logCursor:0,journalCursor:0,moved:false,nextCursor:null,refusedFiles:[],
       files:[{versionId:"main",objectId:"a",path:"docs/a.md",contentKind:"text" as const,sha256,byteLength:size,lineageClaimId:hash("measurement-lineage"),restoreGeneration:1}],texts:[{sha256,text}]};};
     let latest=page(0);
     vi.useFakeTimers({toFake:["setTimeout","clearTimeout","Date"]});
@@ -177,7 +232,7 @@ it.skipIf(process.platform!=="win32"||process.env.DOHC_REPLICA_MEASURE!=="1")("m
   for(const size of [50_000,1_000_000])for(const mode of ["main","forced-4Hz"]) {
     const storage=await fixture(),context=storage as unknown as StorageContext;
     const checkpoint=context.db.prepare("PRAGMA wal_autocheckpoint").get();
-    const view=(revision:number)=>{const text=String(revision).padStart(8,"0")+"x".repeat(size-8),sha256=hash(text);return {workspaceId:"w",revision,logCursor:0,journalCursor:0,
+    const view=(revision:number)=>{const text=String(revision).padStart(8,"0")+"x".repeat(size-8),sha256=hash(text);return {workspaceId:"w",omitted:[],revision,logCursor:0,journalCursor:0,
       files:[{versionId:"main",objectId:"a",path:"docs/a.md",contentKind:"text" as const,sha256,byteLength:size,lineageClaimId:hash("measurement-lineage"),restoreGeneration:1}],texts:[{sha256,text}]};};
     let supervisor:ReturnType<typeof createReplicaSupervisor>|undefined;
     try {
@@ -208,9 +263,9 @@ it.skipIf(process.platform!=="win32"||process.env.DOHC_REPLICA_MEASURE!=="1")("m
 it.skipIf(process.env.DOHC_REPLICA_MEASURE!=="1")("measures twenty-thousand-file relay collection and persistence",async()=>{
   const storage=await fixture(),lease=createReplicaReadPrincipal(storage).issue("w","wide");storage.bindReplicaCurrentView(lease);
   const files=Array.from({length:20_000},(_,i)=>({versionId:"main",objectId:`object-${i}`,path:`docs/${String(i).padStart(6,"0")}.md`,contentKind:"text" as const,sha256:hash(""),byteLength:0,lineageClaimId:null,restoreGeneration:null}));
-  const view={workspaceId:"w",revision:1,logCursor:0,journalCursor:0,files,texts:[{sha256:hash(""),text:""}]};
+  const view={workspaceId:"w",omitted:[],revision:1,logCursor:0,journalCursor:0,files,texts:[{sha256:hash(""),text:""}]};
   let latest=view,parseMs=0;
-  const wires=()=>[0,10_000].map(offset=>JSON.stringify({...latest,files:latest.files.slice(offset,offset+10_000),texts:offset?[]:latest.texts,moved:false,refusedFiles:[],nextCursor:offset?null:{path:files[9999]!.path,objectId:files[9999]!.objectId,versionId:"main"}}));
+  const wires=()=>[0,10_000].map(offset=>JSON.stringify({workspaceId:latest.workspaceId,revision:latest.revision,logCursor:latest.logCursor,journalCursor:latest.journalCursor,files:latest.files.slice(offset,offset+10_000),texts:offset?[]:latest.texts,moved:false,refusedFiles:[],nextCursor:offset?null:{path:files[9999]!.path,objectId:files[9999]!.objectId,versionId:"main"}}));
   let pages=wires();const samples:number[]=[],parses:number[]=[],persists:number[]=[];
   const store=storage.storeReplicaCurrentView.bind(storage);storage.storeReplicaCurrentView=(...args)=>{const start=performance.now();try{return store(...args);}finally{persists.push(performance.now()-start);}};
   const supervisor=createReplicaSupervisor({storage,storeRoot:await tempRoot("wide-view"),startChild:async()=>({pull:async()=>{},close:async()=>{},currentView:async(_s,_k,_p,cursor)=>{

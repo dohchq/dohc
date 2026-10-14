@@ -27,7 +27,7 @@ it("changes only view tables and continuity, and refuses a rollback before the v
     const stamp=Number(db.prepare("SELECT stamp FROM sync_relay_continuity").get()!.stamp);
     await backup(db,backupPath);
     const text="current",sha256=createHash("sha256").update(text).digest("hex");
-    storage.storeReplicaCurrentView(lease,{workspaceId:"w",revision:1,logCursor:0,journalCursor:0,
+    storage.storeReplicaCurrentView(lease,{workspaceId:"w",omitted:[],revision:1,logCursor:0,journalCursor:0,
       files:[{versionId:"main",objectId:"a",path:"docs/a.md",contentKind:"text",sha256,byteLength:7,lineageClaimId:null,restoreGeneration:null}],texts:[{sha256,text}]});
     expect(tables.filter(table=>before.get(table)!==JSON.stringify(db.prepare(`SELECT * FROM "${table}"`).all()))).toEqual([]);
     expect(Number(db.prepare("SELECT stamp FROM sync_relay_continuity").get()!.stamp)).toBeGreaterThan(stamp);

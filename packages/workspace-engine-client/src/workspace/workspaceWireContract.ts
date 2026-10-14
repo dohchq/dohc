@@ -440,7 +440,7 @@ type CaptureSetAuthorParams = WorkspaceJsonObject & {
 };
 
 export type WorkspaceMethodParamsMap = {
-  [WORKSPACE_METHOD.replicaCut]: WorkspaceJsonObject & { selectors: Array<{versionId: string; paths: string[]}>; resend: boolean; knownTextShas?: string; position?: {revision:number;logCursor:number;journalCursor:number} | null; cursor?: {path:string;objectId:string;versionId:string} | null };
+  [WORKSPACE_METHOD.replicaCut]: WorkspaceJsonObject & { selectors: Array<{versionId: string | null; paths: string[]}>; knownTextShas?: string; position?: {revision:number;logCursor:number;journalCursor:number} | null; cursor?: {path:string;objectId:string;versionId:string} | null };
   [WORKSPACE_METHOD.open]: WorkspaceOpenParams;
   [WORKSPACE_METHOD.close]: WorkspaceEmptyParams;
   [WORKSPACE_METHOD.conflictsList]: ConflictListParams;
@@ -1258,7 +1258,7 @@ const WorkspaceResultSchemas = {
     texts: Schema.mutable(Schema.Array(mutableStruct({sha256: Schema.String, text: Schema.String}))),
     moved: Schema.Boolean,
     nextCursor: Schema.NullOr(mutableStruct({path: Schema.String, objectId: Schema.String, versionId: Schema.String})),
-    refusedFiles: Schema.mutable(Schema.Array(mutableStruct({path: Schema.String, objectId: Schema.String, versionId: Schema.String, reason: Schema.Literal("text-frame-limit")}))),
+    refusedFiles: Schema.mutable(Schema.Array(mutableStruct({path: Schema.String, objectId: Schema.String, versionId: Schema.String, sha256: Schema.String, reason: Schema.Literal("text-frame-limit")}))),
   }),
   [WORKSPACE_METHOD.open]: mutableStruct({ workspace: Schema.String }),
   [WORKSPACE_METHOD.close]: mutableStruct({ closed: Schema.Boolean }),
@@ -1578,7 +1578,7 @@ export function decodeWorkspaceResult<M extends WorkspaceMethod>(
 }
 
 export type ReplicaCurrentViewPage = WorkspaceMethodResultMap[typeof WORKSPACE_METHOD.replicaCut];
-export type ReplicaCurrentView = Omit<ReplicaCurrentViewPage, "moved" | "nextCursor" | "refusedFiles">;
+export type ReplicaCurrentView = Omit<ReplicaCurrentViewPage, "moved" | "nextCursor" | "refusedFiles"> & {omitted: ReplicaCurrentViewPage["refusedFiles"]};
 export type ReplicaCurrentViewPosition = Pick<ReplicaCurrentView, "revision" | "logCursor" | "journalCursor">;
 export type ReplicaCurrentViewCursor = NonNullable<ReplicaCurrentViewPage["nextCursor"]>;
 export type ReplicaCurrentViewSelector = WorkspaceMethodParamsMap[typeof WORKSPACE_METHOD.replicaCut]["selectors"][number];

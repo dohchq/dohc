@@ -1234,10 +1234,9 @@ fn current_view_keeps_nested_list_bytes_and_projects_a_journal_edit() {
     let (_scratch, _path, mut replica) = receiver(&source);
     let request = CurrentViewRequest {
         selectors: vec![CurrentViewSelector {
-            version_id: "main".into(),
+            version_id: Some("main".into()),
             paths: vec!["note.md".into()],
         }],
-        resend: true,
         known_text_shas: String::new(),
         position: None,
         cursor: None,
@@ -1281,10 +1280,9 @@ fn measure_current_view_lanes() {
     use crate::replica_cut::{CurrentViewRequest, CurrentViewSelector, collect_current_view};
     let request = CurrentViewRequest {
         selectors: vec![CurrentViewSelector {
-            version_id: "main".into(),
+            version_id: Some("main".into()),
             paths: vec![],
         }],
-        resend: true,
         known_text_shas: String::new(),
         position: None,
         cursor: None,

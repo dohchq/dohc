@@ -22,13 +22,11 @@ storage.createShare({share:{shareId:"s",workspaceId:"w",granterUserId:"owner",se
   grant:{grantId:"g",shareId:"s",principalKind:"user",principalUserId:"reader",principalEmail:null,access:"view",generation:1,status:"active",createdAtMs:1,revokedAtMs:null,parentGrantId:null}});
 const owner=createSyncRelayHandler({storage,resolveActor:(_request,workspaceId)=>({workspaceId,userId:"owner"})});
 const failures:string[]=[],reservations:number[]=[],stages:number[]=[],flips:number[]=[];
-const jsonParses:number[]=[],viewChecks:number[]=[],collectWalls:number[]=[];
+const jsonParses:number[]=[],collectWalls:number[]=[];
 if(profile) {
   const parse=JSON.parse;
   JSON.parse=(...args:Parameters<typeof JSON.parse>)=>{const start=performance.now(),value=parse(...args),elapsed=performance.now()-start;
     if(typeof args[0]==="string" && args[0].includes('"refusedFiles"'))jsonParses.push(elapsed);return value;};
-  const validate=storage.validateReplicaCurrentView.bind(storage);
-  storage.validateReplicaCurrentView=(...args)=>{const start=performance.now();try{return validate(...args);}finally{viewChecks.push(performance.now()-start);}};
 }
 const continuity=(storage as unknown as {owner:RelayWriteOwner}).owner.continuity!,reserve=continuity.reserve.bind(continuity);
 continuity.reserve=previous=>{const start=performance.now();try{return reserve(previous);}finally{reservations.push(performance.now()-start);}};
@@ -64,10 +62,10 @@ process.on("message",async message=>{
   try {
     let result:unknown;
     if(command==="activate") {await supervisor.activate("w");result={passiveDir,enginePid,failures};}
-    if(command==="start") {if(profiler){await profiler.post("Profiler.enable");await profiler.post("Profiler.setSamplingInterval",{interval:1000});await profiler.post("Profiler.start");}collections=0;reservations.length=stages.length=flips.length=jsonParses.length=viewChecks.length=collectWalls.length=0;lag.reset();lag.enable();cpu=process.cpuUsage();started=performance.now();}
+    if(command==="start") {if(profiler){await profiler.post("Profiler.enable");await profiler.post("Profiler.setSamplingInterval",{interval:1000});await profiler.post("Profiler.start");}collections=0;reservations.length=stages.length=flips.length=jsonParses.length=collectWalls.length=0;lag.reset();lag.enable();cpu=process.cpuUsage();started=performance.now();}
     if(command==="metrics"||command==="sample") {const elapsed=performance.now()-started,used=process.cpuUsage(cpu);if(command==="metrics")lag.disable();let cpuProfile:string|undefined;
       if(command==="metrics"&&profiler){const captured=await profiler.post("Profiler.stop");cpuProfile=`${process.env.DOHC_REPLICA_MEASURE_OUT}.cpu-${profileName}.json`;writeFileSync(cpuProfile,JSON.stringify(captured.profile));profiler.disconnect();}
-      result={elapsed,collections,cpuMs:(used.user+used.system)/1000,cpuPercent:(used.user+used.system)/1000/elapsed*100,eventLoopP99:lag.percentile(99)/1e6,reservations,stages,flips,jsonParses,viewChecks,collectWalls,cpuProfile};}
+      result={elapsed,collections,cpuMs:(used.user+used.system)/1000,cpuPercent:(used.user+used.system)/1000/elapsed*100,eventLoopP99:lag.percentile(99)/1e6,reservations,stages,flips,jsonParses,collectWalls,cpuProfile};}
     if(command==="verify") {await supervisor.settled("w");const db=new DatabaseSync(join(passiveDir,".dohc/engine/engine.db"),{readOnly:true});try{result={failures,refused:db.prepare("SELECT count(*) AS n FROM replication_log WHERE apply_disposition='refused'").get()!.n,text:db.prepare("SELECT b.text FROM snapshots s JOIN blobs b ON b.sha256=s.blob_sha256 WHERE s.path='docs/a.txt'").get()!.text};}finally{db.close();}}
     if(command==="close") await close();
     process.send!({id,result});

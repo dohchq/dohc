@@ -74,7 +74,7 @@ export function createReplicaEngineStarter(options: ReplicaEngineOptions) {
       };
       return { pid: child.pid, exited: termination, close,
         async currentView(selectors,knownTextShas,position,cursor) {
-          return decodeReplicaCurrentView(await request("replica.cut",{selectors,resend:false,knownTextShas:knownTextShas.join(""),position:position??null,cursor:cursor??null}));
+          return decodeReplicaCurrentView(await request("replica.cut",{selectors,knownTextShas:knownTextShas.join(""),position:position??null,cursor:cursor??null}));
         }, async pull() {
         await pullOrdinary();
         const frontiers = replicaFrontiers(await request("replica.frontiers", {}));

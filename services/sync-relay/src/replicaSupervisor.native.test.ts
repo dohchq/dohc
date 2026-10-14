@@ -97,7 +97,7 @@ it.skipIf(engineBinary.missing)("supervised passive child converges through the 
     await rpc(engine, "sync.materializePendingCursor", { workspaceId, pendingCursor: page.pendingCursor });
     await rpc(engine, "sync.commitCursor", { workspaceId, pendingCursor: page.pendingCursor });
   } while (page.hasMore); };
-  const share = (id: string) => storage.createShare({ share: { shareId: id, workspaceId: id, granterUserId: owner, selectorJson: '{"paths":[],"versionId":null}', createdAtMs: 1 },
+  const share = (id: string) => storage.createShare({ share: { shareId: id, workspaceId: id, granterUserId: owner, selectorJson: '{"paths":[],"versionId":"main"}', createdAtMs: 1 },
     grant: { grantId: id, shareId: id, principalKind: "user", principalUserId: "reader", principalEmail: null,
       access: "view", generation: 1, status: "active", createdAtMs: 1, revokedAtMs: null, parentGrantId: null } });
   const inspect = <T>(id: string, read: (db: DatabaseSync) => T): T => {
