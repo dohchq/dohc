@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { ProtocolShapeError } from "../wireSchema";
-import { decodeOrdinarySyncResult } from "./ordinarySyncWireContract";
+import { decodeHostedSyncResult, decodeOrdinarySyncResult } from "./ordinarySyncWireContract";
 
 const decline = { path: "work.md", objectId: "work.md", versionId: "main", lineagePruned: false, headBlobSha256: null, constraint: "MAX_YDOC_UPDATE_BYTES", limitBytes: 20, observedBytes: 21 };
 const admission = { workspaceId: "workspace", originId: "owner", originSeq: 2, versionId: "main", objectId: "object", path: "work.md" };
@@ -79,5 +79,42 @@ describe("ordinary native sync contract", () => {
       expect(() => decodeOrdinarySyncResult("sync.materializePendingCursor", { materialized: value })).toThrow(ProtocolShapeError);
     }
     expect(() => decodeOrdinarySyncResult("sync.commitCursor", { committed: true })).toThrow(ProtocolShapeError);
+  });
+});
+
+const holds = [
+  { objectId: "a", reason: "hosted-backfill-path-held", path: "docs/a.md", heldBy: "b" },
+  { objectId: "c", reason: "hosted-conflict-parent-withheld", conflictId: "conflict" },
+  { objectId: "d", reason: "hosted-backfill-work-waiting" },
+  { objectId: "e", reason: "hosted-scope-path-mismatch", scopePath: "docs/e.md", headPath: null },
+];
+const hosted = { fetched: 2, applied: 1, refused: 1, skipped: 0, conflictsOpened: 0, hasMore: true,
+  pendingCursor: { kind: "hosted", token: "opaque-issued-token" }, changedPaths: [change], refusals: [refusal], sharingDeclined: [], held: holds };
+
+describe("hosted native sync contract", () => {
+  it("keeps the issued hosted cursor, every hold with its fields, and a pass that adopted a scope", () => {
+    expect(decodeHostedSyncResult("sync.pullHosted", { ...hosted, ignored: true })).toEqual(hosted);
+    expect(decodeHostedSyncResult("sync.pullHosted", { ...hosted, pendingCursor: null, held: [] }).pendingCursor).toBeNull();
+  });
+
+  it("keeps a commit that stands beside the retirement error after it", () => {
+    const retirement = { code: "INTERNAL", message: "hosted file unexpected: docs/a.md", retry: "no" };
+    expect(decodeHostedSyncResult("sync.commitCursor", { committed: true, hasMore: false, retirement, sharingDeclined: [] }))
+      .toEqual({ committed: true, hasMore: false, retirement, sharingDeclined: [] });
+    expect(decodeHostedSyncResult("sync.commitCursor", { committed: false, hasMore: true, retirement: null, sharingDeclined: [] }).committed).toBe(false);
+  });
+
+  it.each([
+    { pendingCursor: { kind: "relay", token: "opaque-issued-token" } }, { pendingCursor: undefined }, { held: undefined },
+    { held: [{ objectId: "a", reason: "hosted-backfill-path-held" }] }, { held: [{ objectId: "a", reason: "unknown" }] },
+    { held: [{ ...holds[3], headPath: "" }] }, { status: "complete", nextCursor: 1, held: null },
+  ])("rejects an unusable hosted pass: %j", patch => {
+    expect(() => decodeHostedSyncResult("sync.pullHosted", { ...hosted, ...patch })).toThrow("hosted sync.pullHosted result");
+  });
+
+  it("rejects an ordinary pull and an ordinary commit as hosted results", () => {
+    expect(() => decodeHostedSyncResult("sync.pullHosted", pull)).toThrow(ProtocolShapeError);
+    expect(() => decodeHostedSyncResult("sync.commitCursor", { committed: true, sharingDeclined: [] })).toThrow(ProtocolShapeError);
+    expect(() => decodeHostedSyncResult("sync.createHostedReplica", { hosted: false })).toThrow(ProtocolShapeError);
   });
 });
