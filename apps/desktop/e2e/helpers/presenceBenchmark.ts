@@ -78,6 +78,20 @@ export async function waitForPresence<T>(read: () => T | Promise<T>, predicate: 
   }
 }
 
+export async function finishPresencePeerSessions(
+  sessions: Array<{ state(): { pendingUpdates: number } }>,
+  close: () => Promise<void>,
+  signal: AbortSignal,
+) {
+  try {
+    await waitForPresence(() => sessions.every(session => session.state().pendingUpdates === 0), Boolean, signal);
+  } finally { await close(); }
+}
+
+export function presencePeerSchedulePass(peers: Array<{ selectionHz: number; typingHz: number; maxGapMs: number }>) {
+  return peers.every(peer => peer.selectionHz >= 18 && peer.typingHz >= 4 && peer.maxGapMs <= 100);
+}
+
 export async function createPresenceFixture(options: { workspace: Workspace; profile: string; runDir: string; signal: AbortSignal }) {
   const { workspace, runDir, signal } = options;
   const profile = selfHostLiveProfile(), documents = readPresenceDocuments(workspace);
@@ -226,12 +240,12 @@ export async function createPresenceFixture(options: { workspace: Workspace; pro
             const cursor = { anchor: Y.relativePositionToJSON(Y.createRelativePositionFromTypeIndex(text, peer.selections % (text.length + 1))), head: Y.relativePositionToJSON(Y.createRelativePositionFromTypeIndex(text, peer.selections % (text.length + 1))) };
             peer.awareness.setLocalState({ cursor });
             await request(peer.user, '/sync/shares/' + peer.shareId + '/presence?topic=' + topic, { clientId: peer.clientId, state: { yc: peer.awareness.clientID, update: Buffer.from(encodeAwarenessUpdate(peer.awareness, [peer.awareness.clientID])).toString('base64') } }); peer.selections++;
-            if (!prime) ticks.push({ time: performance.timeOrigin + performance.now(), peer: index, edited });
+            if (!prime) ticks.push({ time: performance.now(), peer: index, edited });
           }
         };
         await tick(true);
         return { start() {
-          running = true; startedAt = performance.timeOrigin + performance.now();
+          running = true; startedAt = performance.now();
           for (const peer of peers) { peer.selections = 0; peer.edits = 0; }
           loop = (async () => {
             while (running) {
@@ -246,8 +260,9 @@ export async function createPresenceFixture(options: { workspace: Workspace; pro
           finish(window?: { start: number; end: number }) {
             result ??= (async () => {
               running = false;
-              await close();
-              if (failure) throw failure;
+              await loop;
+              if (failure) { await close(); throw failure; }
+              await finishPresencePeerSessions(peers.map(peer => peer.session), close, signal);
               const start = window?.start ?? startedAt, end = window?.end ?? start;
               const elapsedMs = end - start;
               const peerCounts = peers.map((peer, index) => {
@@ -257,7 +272,7 @@ export async function createPresenceFixture(options: { workspace: Workspace; pro
                   selectionHz: during.length * 1000 / elapsedMs, typingHz: during.filter(tick => tick.edited).length * 1000 / elapsedMs,
                   maxGapMs: schedule.maxGapMs };
               });
-              return { peers: count, pass: elapsedMs > 0 && peerCounts.every(peer => peer.selectionHz >= 18 && peer.typingHz >= 4 && peer.maxGapMs <= 100),
+              return { peers: count, pass: elapsedMs > 0 && presencePeerSchedulePass(peerCounts),
                 peerCounts, elapsedMs, maxGapMs: Math.max(...peerCounts.map(peer => peer.maxGapMs)), rates: RATES };
             })();
             return result;

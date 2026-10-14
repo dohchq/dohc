@@ -168,8 +168,16 @@ Each peer edits its first body block at 5 characters per second and publishes re
 The driver keeps one tick in flight and schedules each deadline from the current time, without catch-up bursts.
 Only publications and edits between the first and last trusted key count toward the achieved rates.
 Rates below 18 selections or 4 edits per second fail the workload. Any gap above 100 ms also fails, including either window edge.
-The output records each peer's largest gap and counters. Peers leave before the next document.
-After peers finish, the owner's editor must contain exactly their total inserted marker count; missing edits fail the run.
+The output records each peer's largest gap and counters.
+Before closing, peers stop generating edits and wait for every pending update acknowledgement, bounded by the fixture signal and 120-second deadline.
+The harness then waits up to 120 seconds for the owner's editor to contain exactly the total inserted marker count.
+A delivery timeout reports the observed count. Peers leave before the next document.
+At the last key, the owner must already show at least `sum(windowEdits) - peers` insertions, allowing one in-flight edit per peer.
+Later catch-up cannot turn a stalled typing window into a pass.
+
+Before each typing arm, the harness samples the renderer clock between two Node monotonic timestamps.
+Their midpoint supplies the renderer-to-Node offset. Peer ticks and the rebased first-to-last-key window use the Node clock.
+The output retains the offset and round-trip interval; owner awareness uses its original renderer window.
 The owner observer counts remote awareness updates during the typing window through the Tiptap caret provider's awareness.
 It reports `presenceUpdatesReceived` and the binding explicitly. An unbound baseline reports zero.
 A caret extension without observable awareness or received updates refuses the run.
@@ -208,6 +216,7 @@ node tools/perf-profiling/presence-typing-trace-smoke.mjs --output <new-director
 
 The smoke opens an isolated, temporary contenteditable window. It launches no dohc workspace or packaged benchmark.
 Eight keys alternate short and 25 ms fixture handlers to exercise uncensored timing and the Event Timing cross-check.
+The smoke waits for the final slow key's Event Timing report before stopping the trace.
 It retains the trace and validation receipt, closes its own process, and removes the temporary profile.
 
 Run `node --test tools/perf-profiling/packaged-presence.test.mjs tools/perf-profiling/presence-owner.test.mjs tools/perf-profiling/presence-typing-trace.test.mjs tools/perf-profiling/presence-packaged-fixture.test.mjs` for the rule tests and a dry TLS/relay setup smoke.

@@ -1,4 +1,4 @@
-import { observePresenceOwner, readPresenceOwner, validatePresenceWorkload } from './presence-owner.mjs';
+import { observePresenceOwner, recordPresenceOwnerLastKey, waitForPresenceOwner, readPresenceOwner, validatePresenceWorkload, samplePresenceClock, rebasePresenceWindow } from './presence-owner.mjs';
 import { startTypingTrace, measureTypingTrace, typingTraceMark } from './presence-typing-trace.mjs';
 import { acquireProfilingSlot } from './admission.mjs';
 import { startWindowController, waitForVisibleWindow } from './window-controller.mjs';
@@ -320,6 +320,7 @@ async function typing(page, name, { rich = false, arm, beforeInput = () => {}, a
   await page.keyboard.press('Control+End');
   await painted(page);
   if (rich) await editor.evaluate(observePresenceOwner);
+  const clockSync = rich ? await samplePresenceClock(page) : null;
   const trace = rich ? await startTypingTrace(page) : null;
   let traceResult;
   try {
@@ -341,7 +342,10 @@ async function typing(page, name, { rich = false, arm, beforeInput = () => {}, a
     for (let index = 0; index < keystrokes; index++) {
       const start = await page.evaluate(mark => { if (mark) performance.mark(mark); return performance.now(); }, trace ? typingTraceMark(index, 'before') : null);
       await page.keyboard.press('x');
-      if (index === keystrokes - 1) await afterInput();
+      if (index === keystrokes - 1) {
+        await afterInput();
+        if (rich) await editor.evaluate(recordPresenceOwnerLastKey);
+      }
       await painted(page);
       const end = await page.evaluate(mark => { if (mark) performance.mark(mark); return performance.now(); }, trace ? typingTraceMark(index, 'after') : null);
       samples.push({ index, start, end, dispatchToTwoRafMs: end - start });
@@ -362,8 +366,8 @@ async function typing(page, name, { rich = false, arm, beforeInput = () => {}, a
       sample.events = events;
     }
     if (!timing.inputs.every(input => input.trusted)) throw Error('Untrusted input observed');
-    const typingWindow = rich ? { start: timing.timeOrigin + timing.keys[0].eventTimestamp,
-      end: timing.timeOrigin + timing.keys.at(-1).eventTimestamp } : null;
+    const typingWindow = rich ? { start: timing.keys[0].eventTimestamp, end: timing.keys.at(-1).eventTimestamp } : null;
+    const peerTypingWindow = rich ? rebasePresenceWindow(typingWindow, clockSync) : null;
     const ownerPresence = rich && arm === 'solo' ? await editor.evaluate(readPresenceOwner, typingWindow) : undefined;
     let traceEvidence;
     if (trace) {
@@ -375,7 +379,7 @@ async function typing(page, name, { rich = false, arm, beforeInput = () => {}, a
       traceEvidence = { source: 'EventLatency', categories: traceResult.categories, browser: traceResult.browser, path: tracePath, validation: measured.validation };
     }
     return { name, mode, windowState, paragraphs: name === 'small.md' ? 100 : 5000, openObservedMs, editActivationObservedMs, samples, ...timing,
-      ...(traceEvidence ? { trace: traceEvidence, typingWindow, ownerPresence } : {}) };
+      ...(traceEvidence ? { trace: traceEvidence, typingWindow, peerTypingWindow, clockSync, ownerPresence } : {}) };
   } finally { if (trace && !traceResult) await trace.stop(); }
 }
 function parseNativeLaunchMarks(log) {
@@ -894,7 +898,9 @@ async function soak(instance, data, runDir) {
         const peers = await presenceFixture.peers(name, presencePeers);
         try {
           const typed = await typing(fresh.page, name, { rich: true, arm: 'peers', beforeInput: () => peers.start(), afterInput: () => peers.stop() });
-          typed.workload = await peers.finish(typed.typingWindow);
+          typed.workload = await peers.finish(typed.peerTypingWindow);
+          const sentEdits = typed.workload.peerCounts.reduce((sum, peer) => sum + peer.edits, 0);
+          await waitForPresenceOwner(fresh.page, sentEdits);
           typed.ownerPresence = await fresh.page.locator('[contenteditable="true"].tiptap').evaluate(readPresenceOwner, typed.typingWindow);
           typed.workload = validatePresenceWorkload(typed.workload, typed.ownerPresence);
           data.presence.peers.push(typed);

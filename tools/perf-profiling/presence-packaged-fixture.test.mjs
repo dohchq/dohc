@@ -8,7 +8,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { request } from 'node:https';
 const require = createRequire(new URL('../../services/sync-relay/package.json', import.meta.url));
 const { tsImport } = require('tsx/esm/api');
-const { createPresenceFixture, readPresenceDocuments, summarizePeerSchedule } = await tsImport('../../apps/desktop/e2e/helpers/presenceBenchmark.ts', import.meta.url);
+const { createPresenceFixture, readPresenceDocuments, summarizePeerSchedule, presencePeerSchedulePass, finishPresencePeerSessions } = await tsImport('../../apps/desktop/e2e/helpers/presenceBenchmark.ts', import.meta.url);
 
 test('dry fixture reads canonical snapshots, prepares the desktop host, serves TLS, and closes its listeners', { timeout: 180_000 }, async () => {
   const scratch = await mkdtemp(join(tmpdir(), 'dohc-presence-fixture-'));
@@ -54,4 +54,37 @@ test('dry fixture reads canonical snapshots, prepares the desktop host, serves T
 test('peer rate and gaps use only ticks between the first and last key', () => {
   assert.deepEqual(summarizePeerSchedule([0, 99, 100, 150, 200, 201], 100, 200), { ticks: 3, maxGapMs: 50 });
   assert.deepEqual(summarizePeerSchedule([100, 250], 100, 300), { ticks: 2, maxGapMs: 150 });
+});
+
+
+test('finish awaits every pending edit acknowledgement before closing the peers', async () => {
+  let pendingUpdates = 1, closed = false;
+  const waiting = Promise.withResolvers();
+  const finishing = finishPresencePeerSessions([
+    { state: () => ({ pendingUpdates: 0 }) },
+    { state: () => { waiting.resolve(); return { pendingUpdates }; } },
+  ], async () => { assert.equal(pendingUpdates, 0); closed = true; }, AbortSignal.timeout(120_000));
+  await waiting.promise;
+  assert.equal(closed, false);
+  pendingUpdates = 0;
+  await finishing;
+  assert.equal(closed, true);
+});
+
+test('acknowledgement drain obeys cancellation and still closes peers', async () => {
+  let closed = false;
+  const cancellation = new AbortController(), waiting = Promise.withResolvers();
+  const finishing = finishPresencePeerSessions([
+    { state: () => { waiting.resolve(); return { pendingUpdates: 1 }; } },
+  ], async () => { closed = true; }, cancellation.signal);
+  await waiting.promise;
+  cancellation.abort(new Error('cancelled drain'));
+  await assert.rejects(finishing);
+  assert.equal(closed, true);
+});
+
+test('peer schedule pass checks the 100 ms gap once alongside the achieved rates', () => {
+  const peer = { selectionHz: 20, typingHz: 5, maxGapMs: 100 };
+  assert.equal(presencePeerSchedulePass([peer]), true);
+  assert.equal(presencePeerSchedulePass([{ ...peer, maxGapMs: 100.001 }]), false);
 });

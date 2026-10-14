@@ -47,6 +47,14 @@ try {
     const end = await page.evaluate(mark => { performance.mark(mark); return performance.now(); }, typingTraceMark(index, 'after'));
     samples.push({ index, start, end });
   }
+  // The final fixture key has a 25 ms handler, so Event Timing must report it.
+  // Two animation callbacks can precede compositor presentation. Keep tracing
+  // until that key's presentation report arrives instead of ending mid-frame.
+  await page.waitForFunction(() => {
+    window.timing.events.push(...window.observer.takeRecords().map(event => event.toJSON()));
+    const last = window.timing.keys.at(-1);
+    return window.timing.events.some(event => event.name === 'keydown' && event.interactionId > 0 && Math.abs(event.startTime - last.eventTimestamp) <= 1);
+  }, null, { timeout: 120_000 });
   const captured = await trace.stop();
   await writeFile(join(output, 'trace.json'), captured.raw);
   const timing = await page.evaluate(() => { window.timing.events.push(...window.observer.takeRecords().map(event => event.toJSON())); window.observer.disconnect(); return window.timing; });
