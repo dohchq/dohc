@@ -2,7 +2,7 @@
 
 ## Report a vulnerability
 
-[Report a vulnerability privately on GitHub](https://github.com/dohc-ai/dohc/security/advisories/new).
+[Report a vulnerability privately on GitHub](https://github.com/dohchq/dohc/security/advisories/new).
 
 Do not report security vulnerabilities in public issues or pull requests. Keep details of how to exploit them out of commit messages and GitHub Discussions too.
 

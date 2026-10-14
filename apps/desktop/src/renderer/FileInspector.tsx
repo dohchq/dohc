@@ -15,7 +15,7 @@ import {
 } from "./fileInspectorUi";
 import { TextEditorView } from "./TextEditorView";
 import type { PendingFileUndo } from "./fileEditorUndo";
-import { CsvView } from "./CsvView";
+import { CsvControls, CsvView } from "./CsvView";
 import { ImageView } from "./ImageView";
 import { extensionOf } from "./path";
 import { fileKindForPath } from "@dohc/workspace-contracts/kinds";
@@ -299,6 +299,9 @@ type FileInspectorProps = {
   registerDraftFlush?: (flush: DraftFlush | null) => void;
   knownMarkdownFiles?: ReadonlyArray<WikilinkFile>;
   onSharePath?: (path: string) => void;
+  // This file is the entry of the app in `appFolder`: Run opens its preview.
+  appFolder?: string | null;
+  onRunApp?: (folder: string) => void;
   pendingUndo?: PendingFileUndo;
   onPendingUndoConsumed?: (token: number) => void;
   // Read-only shared views: every editable view refuses edits.
@@ -576,6 +579,8 @@ export const FileInspector = memo(function FileInspector(
   const onShareCurrentPath = props.onSharePath
     ? () => props.onSharePath?.(props.path)
     : undefined;
+  const { appFolder, onRunApp } = props;
+  const runApp = appFolder && onRunApp ? () => onRunApp(appFolder) : undefined;
   // Recovery follows the PATH, not the file kind: an
   // extension-changing rename remaps a markdown draft onto a text/CSV/binary
   // view, and Copy/Dismiss must exist wherever the marker shows. The markdown
@@ -620,6 +625,8 @@ export const FileInspector = memo(function FileInspector(
           disabled: !opening,
         }}
       />
+    ) : kind === "csv" ? (
+      <CsvControls mode="table" importable={props.onOpenPath !== undefined} disabled />
     ) : undefined;
 
   if (notInVersion) {
@@ -674,6 +681,7 @@ export const FileInspector = memo(function FileInspector(
       <div className="flex min-h-0 flex-1 flex-col bg-bg" data-testid="file-inspector">
         <ViewActions
           onShare={onShareCurrentPath}
+          onRun={runApp}
           actions={closedDocumentControls(!error)}
         />
         {engine.engineMayHoldDocument ? (
@@ -793,8 +801,9 @@ export const FileInspector = memo(function FileInspector(
       );
     case "csv":
       return (
+        // CsvView and TextEditorView render their ViewActions themselves: the
+        // save state and the view's controls sit with Share in the tab row.
         <div className="flex min-h-0 flex-1 flex-col bg-bg" data-testid="file-inspector">
-          <ViewActions onShare={onShareCurrentPath} />
           {truncatedNotice}
           {recoveryNotices}
           <CsvView
@@ -815,6 +824,8 @@ export const FileInspector = memo(function FileInspector(
             onSaveStateChange={props.onSaveStateChange}
             registerDraftFlush={props.registerDraftFlush}
             localBuffer={localBuffer}
+            onShare={onShareCurrentPath}
+            onError={props.onButtonError}
           />
         </div>
       );
@@ -823,7 +834,6 @@ export const FileInspector = memo(function FileInspector(
     case "code":
       return (
         <div className="flex min-h-0 flex-1 flex-col bg-bg" data-testid="file-inspector">
-          <ViewActions onShare={onShareCurrentPath} />
           {truncatedNotice}
           {recoveryNotices}
           <TextEditorView
@@ -852,6 +862,8 @@ export const FileInspector = memo(function FileInspector(
             pendingUndo={pendingTextUndo}
             onPendingUndoConsumed={props.onPendingUndoConsumed}
             localBuffer={localBuffer}
+            onShare={onShareCurrentPath}
+            onRun={runApp}
           />
         </div>
       );

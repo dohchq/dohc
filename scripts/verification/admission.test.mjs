@@ -3,50 +3,9 @@ import test from "node:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
-import { admissionPreflight, installedDependenciesMatch, verificationAdmission } from "./admission.mjs";
+import { admissionPreflight, installedDependenciesMatch } from "./admission.mjs";
 
-const desktopFiles = ["src/renderer/tokens.test.ts", "src/renderer/workbench/ChatLane.test.tsx", "src/renderer/workbench/ProductDemo.test.tsx"];
-const packages = [
-  {name: "@dohc/site", manifest: {scripts: {test: "vitest run", typecheck: "tsc --noEmit"}}},
-  {name: "@dohc/desktop", manifest: {scripts: {test: "pnpm test:unit && pnpm test:scripts", "test:unit": "vitest run", typecheck: "tsc --noEmit && tsc --noEmit -p tsconfig.trip-poll.json"}}},
-];
-const plan = () => ({gates: {js: true, rust: false}, javascript: {full: false, packages: packages.map(pkg => pkg.name),
-  testFiles: {"@dohc/desktop": desktopFiles}, repository: "source", desktopScripts: false,
-  needs: {engine: false, desktop: false, postgres: false}, proofs: {accounts: false, selfHostNative: false, desktop: false, statesPage: false}}});
-
-test("warm site and exact desktop compatibility suites use bounded light admission", () => {
-  assert.equal(verificationAdmission(plan(), packages, true).lightweight, true);
-});
-
-test("native, service, unknown, cold, custom, and broad plans retain full admission", () => {
-  for (const change of [
-    p => p.gates.rust = true,
-    p => p.javascript.full = true,
-    p => p.javascript.needs.engine = true,
-    p => p.javascript.needs.postgres = true,
-    p => p.javascript.proofs.accounts = true,
-    p => p.javascript.proofs.smoke = true,
-    p => p.javascript.proofs = {},
-    p => delete p.javascript.needs.engine,
-    p => p.javascript.repository = "full",
-    p => p.javascript.desktopScripts = true,
-    p => p.javascript.packages.push("@dohc/third"),
-    p => p.javascript.packages = ["@dohc/unknown"],
-    p => p.javascript.testFiles["@dohc/desktop"] = ["src/workspaces/twoDaemonSync.e2e.test.ts"],
-    p => delete p.javascript.testFiles["@dohc/desktop"],
-  ]) {
-    const candidate = plan(); change(candidate);
-    assert.equal(verificationAdmission(candidate, packages, true).lightweight, false, JSON.stringify(candidate));
-  }
-  assert.equal(verificationAdmission(plan(), packages, false).lightweight, false);
-  for (const [name, script] of [["test", "vitest run && node spawn.mjs"], ["pretest", "node spawn.mjs"], ["typecheck", "node custom.mjs"], ["posttypecheck", "node spawn.mjs"]]) {
-    const candidate = structuredClone(packages);
-    candidate[0].manifest.scripts[name] = script;
-    assert.equal(verificationAdmission(plan(), candidate, true).lightweight, false, name);
-  }
-});
-
-test("cold or changed installation cannot use the light lane", t => {
+test("cold or changed installation cannot typecheck before queueing", t => {
   const root = mkdtempSync(join(tmpdir(), "dohc-admission-install-"));
   t.after(() => rmSync(root, {recursive: true, force: true}));
   const put = (path, data) => { mkdirSync(dirname(join(root, path)), {recursive: true}); writeFileSync(join(root, path), data); };
@@ -56,7 +15,7 @@ test("cold or changed installation cannot use the light lane", t => {
   put("node_modules/.pnpm/lock.yaml", "installed lock");
   put("node_modules/.modules.yaml", "packageManager: pnpm@11.20.0\n");
   put("apps/desktop/node_modules/pnpm/package.json", JSON.stringify({version: "11.20.0", main: "package.json"}));
-  for (const name of ["typescript", "vitest", "js-yaml"]) put(`apps/desktop/node_modules/${name}/package.json`, "{}");
+  put("apps/desktop/node_modules/typescript/package.json", "{}");
   assert.equal(installedDependenciesMatch(root), true);
   put("pnpm-lock.yaml", "new lock");
   assert.equal(installedDependenciesMatch(root), false);

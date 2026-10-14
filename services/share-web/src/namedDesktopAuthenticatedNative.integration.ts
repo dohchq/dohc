@@ -106,7 +106,7 @@ it("edits and pauses through the desktop capture, IPC, renderer mirror and a rea
     const { storage } = deployment;
     expect(storage.claimWorkspace({ workspaceId: "workspace", ownerUserId: ownerUser.id, createdAtMs: 1 })).toBe("created");
     expect(storage.provisionLiveHostControl({ mode: "service", hostId: "service", updatedAtMs: 1, guard: storage.captureStanding() }).ok).toBe(true);
-    active = await startServiceLiveHost({ configPath: serviceConfig, ...deployment, frameChanges });
+    active = await startServiceLiveHost({trustedAccount: (accountId: string) => ({accountId, name: accountId}), configPath: serviceConfig, ...deployment, frameChanges });
     const baseline = Y.encodeStateAsUpdate(ownerDoc), document = { workspaceId: "workspace", mainVersionId: mainVersionId!, objectId: "object", lineageClaimId: hash(baseline) };
     const registration = createLiveMarkdownRegistrationValidator(validationPolicy)({ document, currentPath: "docs/a.md", checkpoint: baseline });
     if (registration.kind !== "accepted") throw new Error(JSON.stringify(registration));
@@ -258,7 +258,7 @@ it("edits and pauses through the desktop capture, IPC, renderer mirror and a rea
     expect(unavailable.mirror.available).toBe(false); expect(unavailable.mirror.doc).toBeNull();
     expect(unavailable.mirror.liveHostUnavailable).toBe(false); expect(unavailable.mirror.sharedWaiting).toEqual(failedOpen);
     expect(readFileSync(join(unavailable.localRoot, "docs/a.md"), "utf8")).toBe("Hello");
-    active = await startServiceLiveHost({configPath: serviceConfig, ...deployment, frameChanges});
+    active = await startServiceLiveHost({trustedAccount: (accountId: string) => ({accountId, name: accountId}), configPath: serviceConfig, ...deployment, frameChanges});
     const reopened = await desktop(0, "reopened"); expect(reopened.mirror.available).toBe(true);
     if (!reopened.mirror.doc) throw new Error("Missing reopened live renderer mirror.");
     expect(yDocToMarkdown(reopened.mirror.doc)).toBe(yDocToMarkdown(first.mirror.doc));

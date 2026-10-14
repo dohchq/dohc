@@ -1,5 +1,7 @@
+import * as supervisorRuntime from "@dohc/app-backend-runtime/supervisor";
 import { mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { tmpdir } from "node:os";
 import { createHash } from "node:crypto";
 import { afterEach, expect, it, vi } from "vitest";
@@ -136,16 +138,54 @@ it("creates standalone data on the relay connection and recovers app writes afte
 });
 
 it("charges only the current replay cache and retains retries across relay restart", async () => {
+  // This test measures event-threshold caches; seeded replay must not move their boundary.
+  // The interval exceeds the test budget, including on a loaded host.
+  const createSupervisor = supervisorRuntime.createDatasetSupervisor;
+  const replayInterval = vi.spyOn(supervisorRuntime, "createDatasetSupervisor")
+    .mockImplementation(options => createSupervisor({...options, replayCacheMs: 60_000}));
+  cleanups.push(async () => {replayInterval.mockRestore();});
   const f = await fixture(true); await f.activate();
+  expect(replayInterval).toHaveBeenCalled();
   const db = f.storage.db;
   const usage = () => Number(db.prepare("SELECT storage_bytes FROM sync_relay_dataset_usage WHERE workspace_id=? AND dataset_id=?")
     .get(scope.workspaceId, scope.datasetId)!.storage_bytes);
   const baseline = usage(), workspaceBaseline = workspaceUsageBytes(f.storage, "w");
+  // Keep the retry checked after restart on the real invocation path.
+  await f.invoke(owner, id(5), {name: "Person 0"}, undefined, "cache-0");
   let previousCheckpoint: string | undefined;
   for (let batch = 0; batch < 2; batch++) {
-    for (let index = batch * 128; index < (batch + 1) * 128; index++) {
-      await f.invoke(owner, id(5), {name: `Person ${index}`}, undefined, `cache-${index}`);
-    }
+    // Seed the completed prefix in one commit; the threshold write uses the host.
+    const end = (batch + 1) * 128;
+    const seed = new DatabaseSync(":memory:");
+    try {
+      seed.exec(schemaSql);
+      f.storage.tx(() => {
+        const journal = createDatasetJournal({db, transaction: work => work(), nowMs: () => 10});
+        let expected = journal.head(scope, () => {}).cursor;
+        const callerKey = String(db.prepare("SELECT caller_key FROM dohc_dataset_events WHERE revision=1").get()!.caller_key);
+        for (let index = Math.max(1, batch * 128); index < end - 1; index++) {
+          const session = seed.createSession();
+          let changeset: Uint8Array;
+          try {
+            seed.prepare("INSERT INTO people VALUES(?,?)").run(`seed-${index}`, `Person ${index}`);
+            changeset = session.changeset();
+          } finally {session.close();}
+          const hash = (value: string | Uint8Array) => createHash("sha256").update(value).digest("hex");
+          const committed = journal.commitOperation({expected, proposalId: `seed-${index}`, operation: "submit", callerKey,
+            idempotencyKey: `cache-${index}`, payloadSha256: hash(JSON.stringify([revision.revisionSha256, id(5), {name: `Person ${index}`}])),
+            resultJson: JSON.stringify({accepted: true}), changeset, changesetSha256: hash(changeset), attachedFileIds: [], authorize() {},
+            accountAndAttach({bytes}) {
+              expect(db.prepare("UPDATE sync_relay_dataset_usage SET storage_bytes=storage_bytes+? WHERE workspace_id=? AND dataset_id=?")
+                .run(bytes, scope.workspaceId, scope.datasetId).changes).toBe(1);
+              expect(db.prepare("UPDATE sync_relay_workspace_usage SET usage_bytes=usage_bytes+? WHERE workspace_id=?")
+                .run(bytes, scope.workspaceId).changes).toBe(1);
+            }});
+          if (committed.kind !== "committed") throw new Error("Expected a new fixture event.");
+          expected = committed.event.cursor;
+        }
+      });
+    } finally {seed.close();}
+    await f.invoke(owner, id(5), {name: `Person ${end - 1}`}, undefined, `cache-${end - 1}`);
     expect((await f.invoke(owner, id(6))).result).toHaveLength((batch + 1) * 128);
     await vi.waitFor(() => {
       const cache = db.prepare("SELECT cursor_json FROM dohc_dataset_materializations").get();

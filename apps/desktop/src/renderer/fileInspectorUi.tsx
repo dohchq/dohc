@@ -4,7 +4,7 @@ import { CopyButton } from "./ui/CopyButton";
 import { restoreRecoveryDraftText } from "./collab/recoverySnapshot";
 import { dismissOrphanedDraft, useOrphanedDrafts } from "./orphanedDrafts";
 import { DismissDraftControls } from "./RecoveryList";
-import { Share2 } from "lucide-react";
+import { Play, Share2 } from "lucide-react";
 import type { ComponentProps, ReactNode } from "react";
 import { bridge } from "./bridge";
 import type { EngineRemovalInProgress } from "./collab/useEngineDoc";
@@ -26,8 +26,12 @@ import { useShownAfter } from "./ui/useShownAfter";
 // state or a quick open kept for screen readers, draws no box, so loading,
 // ready and failed views take the same width. Outside an editor group, as on the states page, they draw
 // in a row of their own.
+//
+// `onRun` is for an app's entry file: Run opens the app's local preview. It
+// stands left of Share, so when it arrives nothing right of it moves.
 export function ViewActions(props: {
   onShare?: () => void;
+  onRun?: () => void;
   status?: ReactNode;
   actions?: ReactNode;
 }) {
@@ -45,6 +49,17 @@ export function ViewActions(props: {
         >
           {props.status}
         </div>
+      ) : null}
+      {props.onRun ? (
+        <IconButton
+          data-testid="file-run-app"
+          aria-label="Run app"
+          title="Run app"
+          onClick={props.onRun}
+          className="shrink-0"
+        >
+          <Play size={14} aria-hidden />
+        </IconButton>
       ) : null}
       {props.onShare ? (
         <IconButton

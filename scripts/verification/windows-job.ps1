@@ -1,4 +1,4 @@
-param([string]$NodeExecutable, [string]$RelayPath, [string]$Payload)
+param([string]$NodeExecutable, [string]$RelayPath, [string]$Payload, [int]$CallerPid)
 $ErrorActionPreference = 'Stop'
 if ($PSVersionTable.PSVersion.Major -lt 7) { throw 'Verification requires PowerShell 7 (pwsh.exe).' }
 
@@ -38,10 +38,38 @@ public static class VerificationJob {
     static extern bool AssignProcessToJobObject(IntPtr job, IntPtr process);
     [DllImport("kernel32.dll")]
     static extern bool CloseHandle(IntPtr handle);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern IntPtr OpenProcess(uint access, bool inherit, int pid);
+    [DllImport("kernel32.dll")]
+    static extern uint WaitForSingleObject(IntPtr handle, uint milliseconds);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool GetProcessTimes(IntPtr process, out long creation, out long exit, out long kernel, out long user);
+    [DllImport("kernel32.dll")]
+    static extern IntPtr GetCurrentProcess();
 
-    public static int Run(string node, string relay, string payload) {
+    static long Created(IntPtr process) {
+        long creation, exit, kernel, user;
+        if (!GetProcessTimes(process, out creation, out exit, out kernel, out user)) throw new Win32Exception(Marshal.GetLastWin32Error());
+        return creation;
+    }
+
+    // Windows can start this process outside its caller's job: Microsoft Store PowerShell runs as a
+    // packaged app. So the command's lifetime follows the caller's process instead of its job.
+    static IntPtr OpenCaller(int pid) {
+        IntPtr caller = OpenProcess(0x00100000 | 0x1000, false, pid); // SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION
+        if (caller == IntPtr.Zero) throw new Win32Exception(Marshal.GetLastWin32Error(), $"Could not watch caller {pid}; it may have exited before its command started.");
+        // A pid reused after the caller exited names a process created after this one.
+        if (WaitForSingleObject(caller, 0) == 0 || Created(caller) > Created(GetCurrentProcess())) {
+            CloseHandle(caller);
+            throw new InvalidOperationException("The caller exited before its command started.");
+        }
+        return caller;
+    }
+
+    public static int Run(string node, string relay, string payload, int callerPid) {
+        IntPtr caller = OpenCaller(callerPid);
         IntPtr job = CreateJobObject(IntPtr.Zero, null);
-        if (job == IntPtr.Zero) throw new Win32Exception(Marshal.GetLastWin32Error());
+        if (job == IntPtr.Zero) { CloseHandle(caller); throw new Win32Exception(Marshal.GetLastWin32Error()); }
         try {
             var limits = new ExtendedLimits();
             limits.Basic.Flags = 0x2000; // KILL_ON_JOB_CLOSE, without either breakaway flag.
@@ -67,18 +95,21 @@ public static class VerificationJob {
                     child.StandardInput.Close();
                     var stdout = child.StandardOutput.BaseStream.CopyToAsync(Console.OpenStandardOutput());
                     var stderr = child.StandardError.BaseStream.CopyToAsync(Console.OpenStandardError());
-                    child.WaitForExit();
-                    Task.WaitAll(stdout, stderr);
+                    // The caller cannot read the result once it has exited; closing the job stops the command.
+                    // A descendant can hold the output open after the relay exits, so draining watches the caller too.
+                    while (!child.WaitForExit(250)) if (WaitForSingleObject(caller, 0) == 0) return 1;
+                    while (!Task.WaitAll(new Task[] { stdout, stderr }, 250)) if (WaitForSingleObject(caller, 0) == 0) return 1;
                     return child.ExitCode;
                 } finally {
                     if (!child.HasExited) child.Kill();
                     child.WaitForExit();
                 }
             }
-        } finally { CloseHandle(job); }
+        } finally { CloseHandle(job); CloseHandle(caller); }
     }
 }
 '@
 
-try { exit [VerificationJob]::Run($NodeExecutable, $RelayPath, $Payload) }
-catch { [Console]::Error.WriteLine($_.Exception.ToString()); exit 1 }
+try { exit [VerificationJob]::Run($NodeExecutable, $RelayPath, $Payload, $CallerPid) }
+# The command never started; verify.mjs reads this exit code as a machine failure.
+catch { [Console]::Error.WriteLine($_.Exception.ToString()); exit 0xD0C5 }

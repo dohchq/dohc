@@ -66,6 +66,7 @@ import { blockTargetForLine } from "./editor/intraBlock";
 import type { HeadingNavigationTarget } from "./editor/OutlinePanel";
 import type { PropertiesPanelProps } from "./PropertiesPanel";
 import { PageIdentity } from "./PageIdentity";
+import { PROPERTIES_LINE, PROPERTIES_PANEL } from "./pageTopmatter";
 import { FrontmatterAsWritten, LiveFrontmatterAsWritten } from "./FrontmatterAsWritten";
 import { captureOrphanedDraft, useOrphanedDrafts } from "./orphanedDrafts";
 import { BacklinksPanel } from "./BacklinksPanel";
@@ -174,13 +175,13 @@ function DeletedWhileEditingNotice(props: {
   );
 }
 
-// One line in the 28px the empty properties row takes, so the body below
-// does not move when the panel arrives.
+// One line in the 24px a line of pills takes, so the body below does not
+// move when the panel arrives.
 function PropertiesFallback() {
   return (
-    <div className="dohc-page-properties">
-      <div className="dohc-page-properties__inner">
-        <SkeletonRows rows={1} label="Loading properties..." className="h-7 justify-center" />
+    <div className={PROPERTIES_PANEL}>
+      <div className={PROPERTIES_LINE}>
+        <SkeletonRows rows={1} label="Loading properties..." className="h-6 w-full justify-center" />
       </div>
     </div>
   );
@@ -2067,8 +2068,8 @@ export function MarkdownView(props: {
           className="min-h-0 flex-1 overflow-auto bg-bg text-[length:var(--dohc-editor-font-size)] [scrollbar-gutter:stable]"
         >
           {/* Title + inline properties are one top-matter zone (hovering it
-              reveals the quiet "Add a property" affordance on empty docs). */}
-          <div className="dohc-page-topmatter">
+              reveals the quiet "Add a property" + on empty docs). */}
+          <div className="group/topmatter">
             <PageIdentity
               ydoc={displayDoc}
               filenameStem={filenameStem(props.path)}
@@ -2249,7 +2250,7 @@ export function MarkdownView(props: {
           data-dohc-doc-pane=""
           className="min-h-0 flex-1 overflow-auto bg-bg text-[length:var(--dohc-editor-font-size)] [scrollbar-gutter:stable]"
         >
-          <div className="dohc-page-topmatter">
+          <div className="group/topmatter">
             <PageIdentity
               body={draft}
               onChange={onPropertiesDraft}
@@ -2323,7 +2324,7 @@ export function MarkdownView(props: {
           data-testid="view-markdown"
           className="min-h-0 flex-1 overflow-auto [scrollbar-gutter:stable]"
         >
-          <div className="dohc-page-topmatter">
+          <div className="group/topmatter">
             {/* Title, icon and properties autosave through the same disk write
                 as the body, so the opening refusal covers them too. */}
             <PageIdentity

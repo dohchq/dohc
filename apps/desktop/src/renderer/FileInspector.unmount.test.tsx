@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { setupFileInspectorTests } from "./FileInspector.environment-fixture";
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { StrictMode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -38,6 +38,10 @@ import {
   TEST_CONTENT_HASH,
 } from "./FileInspector.draft-fixture";
 import { type DraftFlush } from "./useAutosavedTextDraft";
+
+// A CSV's Table or Raw choice in its actions.
+const csvMode = (name: "Table" | "Raw") =>
+  within(screen.getByTestId("csv-raw-toggle")).getByRole("radio", { name });
 import { deferred } from "../testing/deferred";
 import { EDITOR_WRITE_STALL_MS, hasPendingEditorDrafts, settlePendingEditorDrafts } from "./pendingEditorDrafts";
 import { loadStoredDrafts } from "./orphanedDraftStorage";
@@ -4595,7 +4599,7 @@ describe("markdown editor unmount flush", () => {
     render(<FileInspector workspaceId="ws-1" path="data/table.csv" />);
 
     await screen.findByTestId("view-csv");
-    await user.click(screen.getByTestId("csv-raw-toggle"));
+    await user.click(csvMode("Raw"));
     const parse = vi.spyOn(delimitedTextCodec, "parse");
     try {
       fireEvent.change(screen.getByTestId("csv-raw-editor"), {
@@ -4850,10 +4854,10 @@ describe("markdown editor unmount flush", () => {
     change("Row 1 column 1", "remaining");
     fireEvent.click(screen.getByTestId("csv-add-row"));
     change("Row 2 column 1", "new row");
-    fireEvent.click(screen.getByTestId("csv-raw-toggle"));
+    fireEvent.click(csvMode("Raw"));
     expect((screen.getByTestId("csv-raw-editor") as HTMLTextAreaElement).value).toBe("note,column_3\nremaining,added\nnew row,");
     fireEvent.change(screen.getByTestId("csv-raw-editor"), { target: { value: '"name",note\r\n"raw",before\r\n' } });
-    fireEvent.click(screen.getByTestId("csv-raw-toggle"));
+    fireEvent.click(csvMode("Table"));
     change("Row 1 column 1", "😀");
     change("Row 1 column 2", 'after "raw"');
     view.unmount();
@@ -4928,16 +4932,16 @@ describe("markdown editor unmount flush", () => {
     render(<FileInspector workspaceId="ws-1" path="data/table.csv" />);
 
     await screen.findByTestId("view-csv");
-    await user.click(screen.getByTestId("csv-raw-toggle"));
+    await user.click(csvMode("Raw"));
     const rawEditor = screen.getByTestId("csv-raw-editor") as HTMLTextAreaElement;
     expect(rawEditor.value).toBe(initial);
     fireEvent.change(rawEditor, { target: { value: edited } });
 
-    await user.click(screen.getByTestId("csv-raw-toggle"));
+    await user.click(csvMode("Table"));
     expect(
       (screen.getByLabelText("Row 1 column 1") as HTMLInputElement).value,
     ).toBe("Grace");
-    await user.click(screen.getByTestId("csv-raw-toggle"));
+    await user.click(csvMode("Raw"));
     expect((screen.getByTestId("csv-raw-editor") as HTMLTextAreaElement).value).toBe(
       edited,
     );

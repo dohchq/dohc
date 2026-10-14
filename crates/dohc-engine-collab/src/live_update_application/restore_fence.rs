@@ -34,6 +34,13 @@ pub struct NativeRestoreFenceReceipt {
 // history export has not journaled yet. Unpushed rows bound the scan, not history.
 const UNPUBLISHED_SETTLEMENT_MOMENTS: &str = "SELECT EXISTS(SELECT 1 FROM sync_identity i JOIN replication_log r ON r.workspace_id=i.workspace_id AND r.origin_id=i.origin_id WHERE i.workspace_id=?1 AND r.origin_seq>COALESCE((SELECT pushed_seq FROM sync_relay_push_state p WHERE p.workspace_id=?1 AND p.origin_id=i.origin_id),-1) AND r.imported=0 AND r.op_kind='moment.append' AND EXISTS(SELECT 1 FROM live_device_settlements s WHERE s.relay_database_namespace=?2 AND s.workspace_id=?1 AND s.main_version_id=?3 AND s.object_id=?4 AND s.lineage_claim_id=?5 AND s.moment_id=json_extract(r.payload_json,'$.momentId'))) OR EXISTS(SELECT 1 FROM live_audit_pending_exports e JOIN live_device_settlements s ON s.relay_database_namespace=e.relay_database_namespace AND s.workspace_id=e.workspace_id AND s.main_version_id=e.main_version_id AND s.object_id=e.object_id AND s.lineage_claim_id=e.lineage_claim_id AND s.terminal_cursor>e.after_settlement_cursor WHERE e.workspace_id=?1 AND e.relay_database_namespace=?2 AND e.main_version_id=?3 AND e.object_id=?4 AND e.lineage_claim_id=?5)";
 
+// Every edit and live application on a restored document runs these reads.
+// The fence row stores its restore proof, which can be tens of MiB, before the
+// resume receipt, so the live_restore_resumed index must answer them.
+const CURRENT_GENERATION: &str = "SELECT new_generation,resume_receipt_json IS NOT NULL FROM live_restore_fences WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 ORDER BY new_generation DESC LIMIT 1";
+const RESUMED_REGISTRATION: &str = "SELECT relay_database_namespace,resume_receipt_json FROM live_restore_fences WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND new_generation=?4";
+const RESUMED_BINDING: &str = "SELECT resume_receipt_json FROM live_restore_fences WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND new_generation=?4 AND resume_receipt_json IS NOT NULL";
+
 pub fn require_open(conn: &Connection, key: &DocKey) -> Result<(), CollabError> {
     let stopped: bool = conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM live_restore_fences WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3)",
@@ -48,7 +55,14 @@ pub fn require_open(conn: &Connection, key: &DocKey) -> Result<(), CollabError> 
 
 /// Fresh sessions capture this value; queued work must retain its original value.
 pub fn current_generation(conn: &Connection, key: &DocKey) -> Result<Option<i64>, CollabError> {
-    let row:Option<(i64,bool)>=conn.query_row("SELECT new_generation,resume_receipt_json IS NOT NULL FROM live_restore_fences WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 ORDER BY new_generation DESC LIMIT 1",params![key.workspace_id,key.version_id,key.object_id],|r|Ok((r.get(0)?,r.get(1)?))).optional().map_err(|e|CollabError::Storage(StorageError::corrupt_public(e)))?;
+    let row: Option<(i64, bool)> = conn
+        .query_row(
+            CURRENT_GENERATION,
+            params![key.workspace_id, key.version_id, key.object_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()
+        .map_err(|e| CollabError::Storage(StorageError::corrupt_public(e)))?;
     match row {
         None => Ok(None),
         Some((generation, true)) if (1..=SAFE).contains(&generation) => Ok(Some(generation)),
@@ -81,7 +95,13 @@ pub(crate) fn require_registration(
     if generation != binding.restore_fence_generation {
         return Err(ApplicationError::Conflict);
     };
-    let (saved_namespace,json):(String,String)=conn.query_row("SELECT relay_database_namespace,resume_receipt_json FROM live_restore_fences WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND new_generation=?4",params![key.workspace_id,key.version_id,key.object_id,generation],|r|Ok((r.get(0)?,r.get(1)?))).map_err(read_sql)?;
+    let (saved_namespace, json): (String, String) = conn
+        .query_row(
+            RESUMED_REGISTRATION,
+            params![key.workspace_id, key.version_id, key.object_id, generation],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .map_err(read_sql)?;
     let resumed: NativeRestoreResumeReceipt =
         serde_json::from_str(&json).map_err(|_| ApplicationError::Corrupt)?;
     if saved_namespace != namespace || resumed.binding != *binding {
@@ -366,7 +386,13 @@ pub(crate) fn resumed_binding(
     let Some(generation) = current_generation(conn, key)? else {
         return Ok(None);
     };
-    let json:String=conn.query_row("SELECT resume_receipt_json FROM live_restore_fences WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND new_generation=?4 AND resume_receipt_json IS NOT NULL",params![key.workspace_id,key.version_id,key.object_id,generation],|r|r.get(0)).map_err(|e|CollabError::Storage(StorageError::corrupt_public(e)))?;
+    let json: String = conn
+        .query_row(
+            RESUMED_BINDING,
+            params![key.workspace_id, key.version_id, key.object_id, generation],
+            |r| r.get(0),
+        )
+        .map_err(|e| CollabError::Storage(StorageError::corrupt_public(e)))?;
     let receipt: NativeRestoreResumeReceipt =
         serde_json::from_str(&json).map_err(|_| CollabError::RestoreFenced)?;
     let b = receipt.binding;
@@ -378,4 +404,93 @@ pub(crate) fn resumed_binding(
         return Err(CollabError::RestoreFenced);
     };
     Ok(Some(b))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
+    use std::sync::{Arc, Mutex};
+
+    /// The fence columns `sql` reads, and its query plan.
+    fn inspect(conn: &Connection, sql: &str) -> rusqlite::Result<(Vec<String>, Vec<String>)> {
+        let columns = Arc::new(Mutex::new(Vec::new()));
+        let seen = columns.clone();
+        conn.authorizer(Some(move |context: AuthContext<'_>| {
+            if let AuthAction::Read {
+                table_name: "live_restore_fences",
+                column_name,
+            } = context.action
+            {
+                seen.lock().unwrap().push(column_name.to_owned());
+            }
+            Authorization::Allow
+        }))?;
+        conn.prepare(sql)?;
+        conn.authorizer(None::<fn(AuthContext<'_>) -> Authorization>)?;
+        let mut plan = Vec::new();
+        let mut statement = conn.prepare(&format!("EXPLAIN QUERY PLAN {sql}"))?;
+        let mut rows = statement.raw_query();
+        while let Some(row) = rows.next()? {
+            plan.push(row.get(3)?);
+        }
+        let columns = columns.lock().unwrap().clone();
+        Ok((columns, plan))
+    }
+
+    /// Each edit and live application on a restored document reads its fence.
+    /// None of those reads may reach the restore proof stored in the fence row.
+    #[test]
+    fn restored_document_reads_never_walk_the_restore_proof() {
+        let scratch = dohc_test_scratch::ScratchDir::new_named("restore-proof-reads").unwrap();
+        let store = EngineStore::open(&scratch.join("engine.db"), 0).unwrap();
+        store
+            .read_with(|conn| {
+                let indexed: Vec<String> = conn
+                    .prepare("SELECT name FROM pragma_index_info('live_restore_resumed')")?
+                    .query_map([], |row| row.get(0))?
+                    .collect::<Result<_, _>>()?;
+                for sql in [CURRENT_GENERATION, RESUMED_REGISTRATION, RESUMED_BINDING] {
+                    let (columns, plan) = inspect(conn, sql)?;
+                    assert!(
+                        columns.iter().all(|column| indexed.contains(column)),
+                        "{sql} reads {columns:?}"
+                    );
+                    assert!(
+                        plan.iter().all(|detail| detail.starts_with(
+                            "SEARCH live_restore_fences USING INDEX live_restore_resumed ("
+                        )),
+                        "{sql}: {plan:?}"
+                    );
+                }
+                // The checkpoint bind reads stored columns before the proof,
+                // and generated columns, which derive from input_json.
+                let (stored, generated): (Vec<String>, Vec<String>) = {
+                    let mut statement = conn.prepare(
+                        "SELECT name,hidden FROM pragma_table_xinfo('live_restore_fences') ORDER BY cid",
+                    )?;
+                    let rows: Vec<(String, i64)> = statement
+                        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+                        .collect::<Result<_, _>>()?;
+                    let proof = rows.iter().position(|(name, _)| name == "proposal_json").unwrap();
+                    (
+                        rows[..proof].iter().filter(|(_, hidden)| *hidden == 0).map(|(name, _)| name.clone()).collect(),
+                        rows.iter().filter(|(_, hidden)| *hidden == 2).map(|(name, _)| name.clone()).collect(),
+                    )
+                };
+                let (columns, plan) = inspect(conn, accepted_history::NATIVE_APPEND_FENCE)?;
+                assert!(
+                    columns.iter().all(|column| column == "application_delivery_id"
+                        || stored.contains(column)
+                        || generated.contains(column)),
+                    "the checkpoint bind reads {columns:?}"
+                );
+                assert_eq!(
+                    plan,
+                    ["SEARCH live_restore_fences USING INDEX live_restore_application_delivery (relay_database_namespace=? AND application_delivery_id=?)"]
+                );
+                Ok::<_, rusqlite::Error>(())
+            })
+            .unwrap();
+    }
 }

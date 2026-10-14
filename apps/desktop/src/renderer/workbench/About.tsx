@@ -21,6 +21,7 @@ import {
 import { useCallback, useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
 import type { ChatThreadRecord, EngineMomentRecord } from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
+import { SYNC_PAUSED_FOR_ACCOUNT } from "../cloudSyncWords";
 import { ipcErrorMessage } from "../ipcError";
 import { basenameOf } from "../path";
 import { formatChatTime, formatShortTime } from "../time";
@@ -683,11 +684,12 @@ export function AccessUnknown(props: {
           Connect your server to check who has access.
         </AboutNote>
       );
+    // Settings' Sync and sharing says the same, and holds what resumes it.
     case "other-account":
       return (
-        <AboutNote testId={`${testId}-unknown`} reason="other-account" icon={LogIn}
-          action={{ label: "Connect server", run: setup.connect }}>
-          This workspace syncs with another account. Connect that account to check who has access.
+        <AboutNote testId={`${testId}-unknown`} reason="other-account" icon={CloudOff}
+          action={{ label: "Sync and sharing", run: setup.openSyncSettings }}>
+          {SYNC_PAUSED_FOR_ACCOUNT} Resume sync to check who has access.
         </AboutNote>
       );
     case "unexplained":

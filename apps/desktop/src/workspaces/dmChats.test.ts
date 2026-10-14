@@ -679,6 +679,7 @@ describe("DM request decisions", () => {
     const pull = vi.fn(async () => ({ applied: 1 }));
 
     await reserveAndPullSharedChannel({
+      serverUrl: "HTTPS://ACCOUNTS.TEST:443/",
       relay: { baseUrl: "http://relay.test", token: "token" },
       shareId: "share-c",
       workspaceId: "workspace-c",
@@ -704,6 +705,7 @@ describe("DM request decisions", () => {
     expect(registry.get("workspace-a")).toEqual([]);
     expect(registry.get("workspace-b")).toEqual([]);
     expect(registry.get("workspace-c")?.[0]?.shareId).toBe("share-c");
+    expect(registry.get("workspace-c")?.[0]?.serverUrl).toBe("https://accounts.test");
   });
 
   it("lets only one concurrent workspace reserve the same DM share", async () => {
@@ -730,6 +732,7 @@ describe("DM request decisions", () => {
     const updateSharedChannels = registryUpdater(registry);
     const reserve = (workspaceId: string) =>
       reserveAndPullSharedChannel({
+        serverUrl: "HTTPS://ACCOUNTS.TEST:443/",
         relay: { baseUrl: "http://relay.test", token: "token" },
         shareId: info.shareId,
         workspaceId,
@@ -789,6 +792,7 @@ describe("DM request decisions", () => {
     const pulled: string[] = [];
     const reserve = (workspaceId: string, shareId: string) =>
       reserveAndPullSharedChannel({
+        serverUrl: "https://accounts.test",
         relay: { baseUrl: "http://relay.test", token: "token" },
         shareId,
         workspaceId,
@@ -865,6 +869,7 @@ describe("DM request decisions", () => {
 
     await expect(
       reserveAndPullSharedChannel({
+        serverUrl: "HTTPS://ACCOUNTS.TEST:443/",
         relay: { baseUrl: "http://relay.test", token: "token" },
         shareId: "share-new",
         workspaceId: "workspace-b",
@@ -930,6 +935,7 @@ describe("DM request decisions", () => {
     const updateSharedChannels = workspacesUpdater(workspaces);
     await expect(
       reserveAndPullSharedChannel({
+        serverUrl: "HTTPS://ACCOUNTS.TEST:443/",
         relay: { baseUrl: "http://relay.test", token: "token" },
         shareId: "share-new",
         workspaceId: "workspace-b",
@@ -990,6 +996,7 @@ describe("DM request decisions", () => {
     const pull = vi.fn(async () => ({ applied: 0 }));
     const registry = new Map([["workspace-a", [ended]]]);
     await reserveAndPullSharedChannel({
+      serverUrl: "HTTPS://ACCOUNTS.TEST:443/",
       relay: { baseUrl: "http://relay.test", token: "token" },
       shareId: "share-x",
       workspaceId: "workspace-a",
@@ -1063,6 +1070,7 @@ describe("DM request decisions", () => {
 
     // Accepting elsewhere (workspace-b) succeeds.
     const revived = await reserveAndPullSharedChannel({
+      serverUrl: "HTTPS://ACCOUNTS.TEST:443/",
       relay: { baseUrl: "http://relay.test", token: "token" },
       shareId: "share-live",
       workspaceId: "workspace-b",

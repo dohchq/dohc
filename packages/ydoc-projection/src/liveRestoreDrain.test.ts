@@ -1,5 +1,6 @@
 import {prepareHostedSettlements} from "../../../services/sync-relay/src/storage/hostedSettlement.js";
-import {appendValidatedLiveJournal} from "../../../services/sync-relay/src/storage/liveUpdateJournal.js";
+import {appendValidatedLiveJournal, readReplicaLiveJournal, decodeJournalRow} from "../../../services/sync-relay/src/storage/liveUpdateJournal.js";
+import {verifyRestoreCheckpoint} from "../../../services/sync-relay/src/storage/liveRestoreCheckpoint.js";
 import {stableJsonStringify} from "../../../services/sync-relay/src/canonicalJson.js";
 import {initialAcceptedHistoryDigest} from "../../../services/sync-relay/src/liveAcceptedHistory.js";
 import {createLiveMarkdownRegistrationValidator} from "./liveDocumentValidation.js";
@@ -1392,6 +1393,30 @@ for (const saved of [false,true]) {
     }finally{f.close();}
   });
 }
+
+it("serves the exact retained restore admission and checkpoint before native application", async () => {
+  const f = contentProposalFixture("owner", "device", true);
+  try {
+    const proposed = f.store.recordStopRestoreProposal(f.input, f.encoded, policy, 200);
+    const lifecycle = f.store.admitStopRestoreProposal(f.input, proposed.proposalDigest, policy, 201);
+    expect(lifecycle.application).toBeNull();
+    const raw = f.raw.prepare("SELECT * FROM sync_relay_live_update_journal ORDER BY journal_cursor DESC LIMIT 1").get()!;
+    const decoded = decodeJournalRow(f.context.db, raw);
+    const proof = verifyRestoreCheckpoint(f.context.db, decoded);
+    const cursor = decoded.admitted.metadata.accepted.receipt.journalCursor;
+    const reading = readReplicaLiveJournal(f.context, {workspaceId: "workspace", after: cursor - 1, limit: 1});
+    // The page owns its proof even if retained evidence changes after the transaction closes.
+    f.context.tx(() => f.context.db.exec("UPDATE sync_relay_live_restore_lifecycles SET admission_json='{}'"));
+    const page = await reading;
+    expect(page).toEqual({rows: [{admitted: {metadata: decoded.admitted.metadata, updateBytes: Buffer.from(decoded.admitted.updateBytes).toString("base64")},
+      relayDatabaseNamespace: decoded.history.namespace, evidenceDigest: decoded.history.evidenceDigest, journalCursor: cursor,
+      restore: {operationId: decoded.restoreOperationId, checkpoint: {digest: decoded.checkpoint!.digest, bytes: Buffer.from(decoded.checkpoint!.bytes).toString("base64")}, proof},
+      authority: {lineageClaimId: f.document.lineageClaimId, baselineSequence: 1, restoreFenceGeneration: 2}}], nextCursor: cursor, hasMore: false});
+    const encoded = JSON.stringify(page);
+    for (const secret of ["hostCoordinate", "instanceId", "connectionId", "bearer", "cookie"]) expect(encoded).not.toContain(secret);
+    await expect(readReplicaLiveJournal(f.context, {workspaceId: "workspace", after: cursor - 1, limit: 1})).rejects.toThrow();
+  } finally {f.close();}
+});
 
 it.each([["bootstrap","service"],["bootstrap","device"],["owner","device"]] as const)("admits and resumes one durable restore replacement for %s on %s",(kind,mode)=>{
   const f=contentProposalFixture(kind,mode,kind==="owner");

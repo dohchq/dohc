@@ -205,6 +205,7 @@ mod tests {
                 author_display_name: "Ada".to_owned(),
                 author_owner_display_name: None,
                 author_user_id: None,
+                author_actor_key: None,
                 parent_message_id: None,
                 origin: None,
                 body: "hello".to_owned(),
