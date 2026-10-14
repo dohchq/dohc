@@ -97,6 +97,18 @@ function renderStudio() {
   );
 }
 
+// Answers for the next writes, which the test settles in any order. One may
+// settle before its write goes out behind an earlier write to the table, so
+// each is handled from the start.
+function writeAnswers(count: number) {
+  const answers = Array.from({ length: count }, () => deferred<DatabaseEditResult>());
+  for (const answer of answers) {
+    void answer.promise.catch(() => undefined);
+    bridgeMock.applyDatabaseEdit.mockImplementationOnce(() => answer.promise);
+  }
+  return answers;
+}
+
 const cell = (column: string, row: string) => screen.getByTestId(`db-cell-${column}-${row}`);
 const editor = () => screen.getByTestId("db-cell-input") as HTMLInputElement;
 const categoryEdit = (category: string) => ({
@@ -434,10 +446,7 @@ describe("DatabaseStudioView", () => {
     "puts back the value the database last saved when overlapping writes to one cell fail: %s",
     async (_, outcomes, order, shown) => {
       const user = userEvent.setup();
-      const writes = [deferred<DatabaseEditResult>(), deferred<DatabaseEditResult>()];
-      bridgeMock.applyDatabaseEdit
-        .mockImplementationOnce(() => writes[0]!.promise)
-        .mockImplementationOnce(() => writes[1]!.promise);
+      const writes = writeAnswers(2);
       const onError = vi.fn();
       render(<DatabaseStudioView workspaceId="ws-1" path="imports/wallet.sqlite" onError={onError} />);
       await screen.findByTestId("db-cell-category-txn_001");
@@ -458,10 +467,85 @@ describe("DatabaseStudioView", () => {
           else writes[index]!.reject(new Error("database is locked"));
         });
       }
-      expect(cell("category", "txn_001").textContent).toBe(shown);
+      await waitFor(() => expect(cell("category", "txn_001").textContent).toBe(shown));
       expect(onError).toHaveBeenCalledTimes(outcomes.filter((outcome) => outcome === "fail").length);
     },
   );
+
+  it("sends one write per table at a time, so an older write's answer never lands after a newer one's", async () => {
+    const user = userEvent.setup();
+    const [groceries, travel] = writeAnswers(2);
+    renderStudio();
+    await screen.findByTestId("db-cell-category-txn_001");
+
+    await user.click(cell("category", "txn_001"));
+    await user.clear(editor());
+    await user.keyboard("Groceries{Enter}{Enter}");
+    await user.clear(editor());
+    await user.keyboard("Travel{Enter}");
+    expect(bridgeMock.applyDatabaseEdit).toHaveBeenCalledTimes(1);
+
+    // Travel's success is ready first; Groceries' answers after it.
+    await act(async () => travel!.resolve(walletPage("Travel")));
+    await act(async () => groceries!.resolve(walletPage("Groceries")));
+    await waitFor(() => expect(bridgeMock.applyDatabaseEdit).toHaveBeenCalledTimes(2));
+    expect(bridgeMock.applyDatabaseEdit).toHaveBeenLastCalledWith(categoryEdit("Travel"));
+    await waitFor(() => expect(cell("category", "txn_001").textContent).toBe("Travel"));
+  });
+
+  it("drops writes from an older load: a failure after a refresh shows the refreshed value", async () => {
+    const user = userEvent.setup();
+    const [groceries, travel] = writeAnswers(2);
+    const onError = vi.fn();
+    const { rerender } = render(
+      <DatabaseStudioView workspaceId="ws-1" path="imports/wallet.sqlite" refreshKey={0} onError={onError} />,
+    );
+    await screen.findByTestId("db-cell-category-txn_001");
+    await user.click(cell("category", "txn_001"));
+    await user.clear(editor());
+    await user.keyboard("Groceries{Enter}");
+
+    // Before Food to Groceries answers, a refresh reads Rent.
+    const refreshed = cloneSnapshot();
+    refreshed.tables[0]!.rows[0]!.category = "Rent";
+    bridgeMock.readWorkspaceDatabase.mockResolvedValueOnce(refreshed);
+    rerender(<DatabaseStudioView workspaceId="ws-1" path="imports/wallet.sqlite" refreshKey={1} onError={onError} />);
+    await waitFor(() => expect(cell("category", "txn_001").textContent).toBe("Rent"));
+
+    // Rent to Travel fails, and Food to Groceries answers after the refresh.
+    await user.click(cell("category", "txn_001"));
+    expect(editor().value).toBe("Rent");
+    await user.clear(editor());
+    await user.keyboard("Travel{Enter}");
+    expect(cell("category", "txn_001").textContent).toBe("Travel");
+    await act(async () => travel!.reject(new Error("database is locked")));
+    await act(async () => groceries!.reject(new Error("database is locked")));
+    await waitFor(() => expect(onError).toHaveBeenCalledTimes(2));
+    expect(cell("category", "txn_001").textContent).toBe("Rent");
+  });
+
+  it("leaves focus where another part of the window moved it when an edit ends", async () => {
+    const user = userEvent.setup();
+    // Something outside the grid takes focus on Enter, after the editor's own handler.
+    render(
+      <div
+        onKeyDown={(event) => {
+          if (event.key === "Enter") event.currentTarget.querySelector<HTMLElement>("#outside")!.focus();
+        }}
+      >
+        <button id="outside" type="button">Outside</button>
+        <DatabaseStudioView workspaceId="ws-1" path="imports/wallet.sqlite" />
+      </div>,
+    );
+    await screen.findByTestId("db-cell-category-txn_001");
+    await user.click(cell("category", "txn_001"));
+    await user.clear(editor());
+    await user.keyboard("Groceries{Enter}");
+
+    expect(bridgeMock.applyDatabaseEdit).toHaveBeenCalledWith(categoryEdit("Groceries"));
+    expect(screen.queryByTestId("db-cell-input")).toBeNull();
+    expect(document.activeElement).toBe(screen.getByRole("button", { name: "Outside" }));
+  });
 
   it("keeps the only tab stop on the focused cell when an edit moves its row, and Tab still leaves the grid", async () => {
     const user = userEvent.setup();

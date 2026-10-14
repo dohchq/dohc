@@ -70,14 +70,14 @@ export function editOf(table: Table, row: Row, column: string): EditingCell | nu
   return { rowKey: editIdentity(key), column, key, value: row[column] };
 }
 
-// One cell write, from its old value to the new one.
+// One cell's new value, and the load it was written over.
 interface CellWrite {
   workspaceId: string;
   path: string;
+  loadId: number;
   table: string;
   key: EditKey;
   column: string;
-  from: unknown;
   to: string;
 }
 
@@ -155,24 +155,21 @@ function mergeEditPage(
   return changed ? { ...snapshot, tables } : snapshot;
 }
 
-// The snapshot with one cell set to `to`, where it still holds `from`. A
-// write shows its value this way at once, and a failed write puts the saved
-// value back unless the cell has changed since.
-function withCell(snapshot: Snapshot, write: CellWrite, from: unknown, to: unknown): Snapshot {
+// The snapshot with a pending write's value in its cell.
+function withWrite(snapshot: Snapshot, write: CellWrite): Snapshot {
   const identity = editIdentity(write.key);
-  let changed = false;
-  const tables = snapshot.tables.map((table) => {
-    if (table.name !== write.table) return table;
-    const rows = table.rows.map((row) => {
-      if (!Object.is(row[write.column], from)) return row;
-      const key = editKeyFor(table, row);
-      if (!key || editIdentity(key) !== identity) return row;
-      changed = true;
-      return { ...row, [write.column]: to };
-    });
-    return changed ? { ...table, rows } : table;
-  });
-  return changed ? { ...snapshot, tables } : snapshot;
+  const tables = snapshot.tables.map((table) =>
+    table.name !== write.table
+      ? table
+      : {
+          ...table,
+          rows: table.rows.map((row) => {
+            const key = editKeyFor(table, row);
+            return key && editIdentity(key) === identity ? { ...row, [write.column]: write.to } : row;
+          }),
+        },
+  );
+  return { ...snapshot, tables };
 }
 
 // Visible SQLite studio: browse tables, see schema, and edit a cell. An edit
@@ -191,7 +188,10 @@ export function DatabaseStudioView(props: {
   // The shell's error hook: a failed write is a toast and a Notices row.
   onError?: ReportButtonError;
 }) {
+  // What the database last said, from a load or a write's answer, and the
+  // writes it has not answered yet, which show over it.
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
+  const [pending, setPending] = useState<CellWrite[]>([]);
   const [activeName, setActiveName] = useState<string | null>(null);
   const [editing, setEditing] = useState<EditingCell | null>(null);
   const draftRef = useRef("");
@@ -235,7 +235,9 @@ export function DatabaseStudioView(props: {
         ) {
           return;
         }
+        // Writes over an older load leave with it.
         setSnapshot(result);
+        setPending((writes) => writes.filter((write) => write.loadId === loadId));
         setError(false);
       })
       .catch(() => {
@@ -265,9 +267,13 @@ export function DatabaseStudioView(props: {
     }
   }, [props.fileOpenStartMark, snapshot]);
 
+  const shown = useMemo(
+    () => snapshot && pending.reduce(withWrite, snapshot),
+    [snapshot, pending],
+  );
   const active =
-    snapshot?.tables.find((t) => t.name === activeName) ??
-    snapshot?.tables[0] ??
+    shown?.tables.find((t) => t.name === activeName) ??
+    shown?.tables[0] ??
     null;
   const visibleRows = useMemo(() => {
     if (!active) return [];
@@ -319,73 +325,58 @@ export function DatabaseStudioView(props: {
     setSort(null);
   }
 
-  // Each cell with writes in flight: the value the database last saved in it,
-  // and which write saved it, and the newest write sent to it.
-  const cellWrites = useRef(new Map<string, { saved: unknown; savedBy: number; newest: number; inFlight: number }>());
-  const writeCount = useRef(0);
+  // The last write out or waiting for each table, so its writes go one at a
+  // time and their answers come in order.
+  const tableWrites = useRef(new Map<string, Promise<void>>());
 
-  // Writes one cell. The new value shows at once. A failed write reports
-  // through the shell's error hook, with Try again, and if no newer write to
-  // the cell is out, puts back the value the database last saved. Either
-  // answer repaints only the load it was written from.
+  // Writes one cell. The new value shows at once, over the load it was
+  // written on. Its answer replaces the shown rows only while that load is
+  // the current one. A failed write stops showing its value, and reports
+  // through the shell's error hook with Try again.
   const writeCell = useCallback(
-    function write(cell: CellWrite) {
-      const id = [cell.workspaceId, cell.path, cell.table, editIdentity(cell.key), cell.column].join("\0");
-      const sequence = ++writeCount.current;
-      const writes = cellWrites.current.get(id) ?? { saved: cell.from, savedBy: 0, newest: 0, inFlight: 0 };
-      writes.newest = sequence;
-      writes.inFlight += 1;
-      cellWrites.current.set(id, writes);
-      const settle = () => {
-        writes.inFlight -= 1;
-        if (writes.inFlight === 0) cellWrites.current.delete(id);
-      };
-      const loadId = currentSnapshotRef.current.loadId;
-      const shown = () => {
-        const current = currentSnapshotRef.current;
+    function write(cell: Omit<CellWrite, "loadId">) {
+      const pendingWrite: CellWrite = { ...cell, loadId: currentSnapshotRef.current.loadId };
+      const current = () => {
+        const shown = currentSnapshotRef.current;
         return (
-          current.workspaceId === cell.workspaceId &&
-          current.path === cell.path &&
-          current.loadId === loadId
+          shown.workspaceId === cell.workspaceId &&
+          shown.path === cell.path &&
+          shown.loadId === pendingWrite.loadId
         );
       };
-      if (shown()) setSnapshot((current) => current && withCell(current, cell, cell.from, cell.to));
-      bridge()
-        .applyDatabaseEdit({
-          workspaceId: cell.workspaceId,
-          relativePath: cell.path,
-          edit: {
-            table: cell.table,
-            op: "update",
-            pkColumn: cell.key.pkColumn,
-            rowId: cell.key.rowId,
-            payload: { [cell.column]: cell.to },
-          },
-        })
-        .then(
-          (result) => {
-            if (sequence > writes.savedBy) {
-              writes.saved = cell.to;
-              writes.savedBy = sequence;
-            }
-            settle();
-            if (shown() && result.path === cell.path) {
-              setSnapshot((current) => current && mergeEditPage(current, result));
-            }
-          },
-          (cause: unknown) => {
-            const { saved, newest } = writes;
-            settle();
-            if (shown() && newest === sequence) {
-              setSnapshot((current) => current && withCell(current, cell, cell.to, saved));
-            }
-            onError?.(
-              `dohc could not save the change to ${cell.column} in ${cell.table}.`,
-              cause,
-              () => write(cell),
-            );
-          },
-        );
+      setPending((writes) => [...writes, pendingWrite]);
+      const id = [cell.workspaceId, cell.path, cell.table].join("\0");
+      let queued: Promise<void> | null = null;
+      const send = async () => {
+        try {
+          const result = await bridge().applyDatabaseEdit({
+            workspaceId: cell.workspaceId,
+            relativePath: cell.path,
+            edit: {
+              table: cell.table,
+              op: "update",
+              pkColumn: cell.key.pkColumn,
+              rowId: cell.key.rowId,
+              payload: { [cell.column]: cell.to },
+            },
+          });
+          if (current() && result.path === cell.path) {
+            setSnapshot((snapshot) => snapshot && mergeEditPage(snapshot, result));
+          }
+        } catch (cause) {
+          onError?.(
+            `dohc could not save the change to ${cell.column} in ${cell.table}.`,
+            cause,
+            () => write(cell),
+          );
+        }
+        setPending((writes) => writes.filter((write) => write !== pendingWrite));
+        if (tableWrites.current.get(id) === queued) tableWrites.current.delete(id);
+      };
+      // An idle table sends at once.
+      const previous = tableWrites.current.get(id);
+      queued = previous ? previous.then(send) : send();
+      tableWrites.current.set(id, queued);
     },
     [onError],
   );
@@ -401,7 +392,6 @@ export function DatabaseStudioView(props: {
       table: table.name,
       key: editing.key,
       column: editing.column,
-      from: editing.value,
       to: draft,
     });
   }
@@ -653,11 +643,14 @@ export function DatabaseGrid(props: {
   const activeColumn = Math.min(active.column, table.columns.length - 1);
   const frame = useRef<HTMLDivElement>(null);
   // Enter and Escape end an edit with focus on its cell, also when the new
-  // value moves the cell's row.
+  // value moves the cell's row, unless something outside the grid has taken
+  // focus since.
   const refocus = useRef(false);
   useLayoutEffect(() => {
     if (!refocus.current) return;
     refocus.current = false;
+    const focused = document.activeElement;
+    if (focused && focused !== document.body && !frame.current?.contains(focused)) return;
     frame.current
       ?.querySelector<HTMLElement>(`[data-grid-row="${activeRow}"][data-grid-column="${activeColumn}"]`)
       ?.focus();
