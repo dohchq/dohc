@@ -339,7 +339,8 @@ export function DatabaseStudioView(props: {
   // over the load it was written on. Its answer replaces the shown rows only
   // while that load is the current one. A failed write stops showing its
   // value, and reports through the shell's error hook with Try again. The
-  // report names the cell, so each failed cell keeps its own Notice.
+  // report names the cell, and its identity keeps one Notice per cell: a
+  // cell that fails again replaces its own, whatever the words.
   const writeCell = useCallback(
     function write(cell: Omit<CellWrite, "loadId">) {
       const pendingWrite: CellWrite = { ...cell, loadId: currentSnapshotRef.current.loadId };
@@ -375,6 +376,7 @@ export function DatabaseStudioView(props: {
             `dohc could not save the change to ${cell.column} for ${cell.key.pkColumn} ${String(cell.key.rowId)} in ${cell.table}.`,
             cause,
             () => write(cell),
+            ["database-cell", cell.workspaceId, cell.path, cell.table, editIdentity(cell.key), cell.column].join("\0"),
           );
         }
         setPending((writes) => writes.filter((write) => write !== pendingWrite));

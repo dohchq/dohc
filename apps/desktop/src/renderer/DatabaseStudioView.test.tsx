@@ -13,6 +13,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type {
   DatabaseEditResult,
   DatabaseSnapshotResult,
+  DohcDesktopBridge,
 } from "../ipc/bridgeContract";
 import { rendererMarks } from "../performance/rendererMarks";
 import { DatabaseStudioView } from "./DatabaseStudioView";
@@ -89,7 +90,7 @@ function walletPage(category: string, path = baseSnapshot.path): DatabaseEditRes
 const bridgeMock = {
   readWorkspaceDatabase: vi.fn(async () => cloneSnapshot()),
   readWorkspaceDatabasePage: vi.fn(),
-  applyDatabaseEdit: vi.fn(async (): Promise<DatabaseEditResult> => walletPage("Groceries")),
+  applyDatabaseEdit: vi.fn<DohcDesktopBridge["applyDatabaseEdit"]>(async () => walletPage("Groceries")),
 };
 
 function renderStudio() {
@@ -112,6 +113,32 @@ function writeAnswers(count: number) {
 
 const cell = (column: string, row: string) => screen.getByTestId(`db-cell-${column}-${row}`);
 const editor = () => screen.getByTestId("db-cell-input") as HTMLInputElement;
+
+async function editCell(user: ReturnType<typeof userEvent.setup>, column: string, row: string, value: string) {
+  await user.click(cell(column, row));
+  await user.clear(editor());
+  await user.keyboard(`${value}{Enter}`);
+}
+
+// The shell's error list, each row with its Try again, around a database.
+function WithNotices(props: { path: string }) {
+  const shell = useShellError("ws-1");
+  return (
+    <>
+      <ul aria-label="Notices">
+        {shell.shellErrors.map((notice) => (
+          <li key={notice.id}>
+            {notice.message}
+            <button type="button" onClick={() => shell.retryShellError(notice.id)}>Try again</button>
+          </li>
+        ))}
+      </ul>
+      <DatabaseStudioView workspaceId="ws-1" path={props.path} onError={shell.reportButtonError} />
+    </>
+  );
+}
+
+const notices = () => within(screen.getByRole("list", { name: "Notices" })).queryAllByRole("listitem");
 const categoryEdit = (category: string) => ({
   workspaceId: "ws-1",
   relativePath: "imports/wallet.sqlite",
@@ -424,6 +451,8 @@ describe("DatabaseStudioView", () => {
       "dohc could not save the change to category for id txn_001 in wallet.",
       failure,
       expect.any(Function),
+      // The cell's identity: workspace, database, table, row key and column.
+      ["database-cell", "ws-1", "imports/wallet.sqlite", "wallet", "id", "txn_001", "category"].join("\0"),
     );
     expect(screen.queryByTestId("db-edit-error")).toBeNull();
 
@@ -471,38 +500,17 @@ describe("DatabaseStudioView", () => {
   it("files one Notice with its own Try again for each row whose write fails", async () => {
     const user = userEvent.setup();
     const answers = writeAnswers(2);
-    // The shell's error list, with each row's Try again.
-    function Shell() {
-      const shell = useShellError("ws-1");
-      return (
-        <>
-          <ul aria-label="Notices">
-            {shell.shellErrors.map((notice) => (
-              <li key={notice.id}>
-                {notice.message}
-                <button type="button" onClick={() => shell.retryShellError(notice.id)}>Try again</button>
-              </li>
-            ))}
-          </ul>
-          <DatabaseStudioView workspaceId="ws-1" path="imports/wallet.sqlite" onError={shell.reportShellError} />
-        </>
-      );
-    }
-    render(<Shell />);
+    render(<WithNotices path="imports/wallet.sqlite" />);
     await screen.findByTestId("db-cell-category-txn_001");
 
-    for (const [row, value] of [["txn_001", "Groceries"], ["txn_002", "Travel"]] as const) {
-      await user.click(cell("category", row));
-      await user.clear(editor());
-      await user.keyboard(`${value}{Enter}`);
-    }
+    await editCell(user, "category", "txn_001", "Groceries");
+    await editCell(user, "category", "txn_002", "Travel");
     for (const answer of answers) {
       await act(async () => answer.reject(new Error("database is locked")));
     }
 
-    const notices = within(screen.getByRole("list", { name: "Notices" }));
-    await waitFor(() => expect(notices.getAllByRole("listitem")).toHaveLength(2));
-    const [first, second] = notices.getAllByRole("listitem");
+    await waitFor(() => expect(notices()).toHaveLength(2));
+    const [first, second] = notices();
     expect(first!.textContent).toContain("dohc could not save the change to category for id txn_001 in wallet.");
     expect(second!.textContent).toContain("dohc could not save the change to category for id txn_002 in wallet.");
 
@@ -510,6 +518,97 @@ describe("DatabaseStudioView", () => {
     bridgeMock.applyDatabaseEdit.mockClear();
     await user.click(within(first!).getByRole("button", { name: "Try again" }));
     expect(bridgeMock.applyDatabaseEdit).toHaveBeenCalledWith(categoryEdit("Groceries"));
+    expect(bridgeMock.applyDatabaseEdit).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps one Notice per database when the same table, row and column fail in two of them", async () => {
+    const user = userEvent.setup();
+    const answers = writeAnswers(2);
+    const { rerender } = render(<WithNotices path="imports/wallet.sqlite" />);
+    await screen.findByTestId("db-cell-category-txn_001");
+    await editCell(user, "category", "txn_001", "Groceries");
+    await act(async () => answers[0]!.reject(new Error("database is locked")));
+
+    const other = cloneSnapshot();
+    other.path = "imports/other.sqlite";
+    other.tables[0]!.rows[0]!.category = "Rent";
+    bridgeMock.readWorkspaceDatabase.mockResolvedValueOnce(other);
+    rerender(<WithNotices path="imports/other.sqlite" />);
+    await waitFor(() => expect(cell("category", "txn_001").textContent).toBe("Rent"));
+    await editCell(user, "category", "txn_001", "Travel");
+    await act(async () => answers[1]!.reject(new Error("database is locked")));
+
+    // The same words, for two databases.
+    await waitFor(() => expect(notices()).toHaveLength(2));
+    expect(notices()[0]!.textContent).toBe(notices()[1]!.textContent);
+    bridgeMock.applyDatabaseEdit.mockClear();
+    for (const notice of notices()) {
+      await user.click(within(notice).getByRole("button", { name: "Try again" }));
+    }
+    expect(bridgeMock.applyDatabaseEdit.mock.calls.map(([write]) => [write.relativePath, write.edit.payload])).toEqual([
+      ["imports/wallet.sqlite", { category: "Groceries" }],
+      ["imports/other.sqlite", { category: "Travel" }],
+    ]);
+  });
+
+  it("keeps one Notice per row when long row keys differ only past the words a Notice shows", async () => {
+    const user = userEvent.setup();
+    const [first, second] = ["k".repeat(599) + "1", "k".repeat(599) + "2"];
+    bridgeMock.readWorkspaceDatabase.mockResolvedValueOnce({
+      path: "imports/wallet.sqlite",
+      tables: [
+        {
+          name: "wallet",
+          columns: [
+            { name: "id", type: "TEXT", primaryKey: true, nullable: false },
+            { name: "category", type: "TEXT" },
+          ],
+          rows: [
+            { id: first, category: "Food" },
+            { id: second, category: "Food" },
+          ],
+          nextOffset: null,
+        },
+      ],
+    });
+    const answers = writeAnswers(2);
+    render(<WithNotices path="imports/wallet.sqlite" />);
+    await screen.findByTestId(`db-cell-category-${first}`);
+
+    await editCell(user, "category", first, "Groceries");
+    await editCell(user, "category", second, "Travel");
+    for (const answer of answers) {
+      await act(async () => answer.reject(new Error("database is locked")));
+    }
+
+    // Cut short, both Notices read the same.
+    await waitFor(() => expect(notices()).toHaveLength(2));
+    expect(notices()[0]!.textContent).toBe(notices()[1]!.textContent);
+    bridgeMock.applyDatabaseEdit.mockClear();
+    for (const notice of notices()) {
+      await user.click(within(notice).getByRole("button", { name: "Try again" }));
+    }
+    expect(bridgeMock.applyDatabaseEdit.mock.calls.map(([write]) => write.edit.rowId)).toEqual([first, second]);
+  });
+
+  it("replaces a cell's Notice when the same cell fails again, whatever the reason", async () => {
+    const user = userEvent.setup();
+    const answers = writeAnswers(2);
+    render(<WithNotices path="imports/wallet.sqlite" />);
+    await screen.findByTestId("db-cell-category-txn_001");
+
+    await editCell(user, "category", "txn_001", "Groceries");
+    await act(async () => answers[0]!.reject(new Error("database is locked")));
+    await waitFor(() => expect(notices()).toHaveLength(1));
+    await editCell(user, "category", "txn_001", "Travel");
+    await act(async () => answers[1]!.reject(new Error("disk I/O error")));
+
+    // One Notice, the newer one, whose Try again writes the newer value.
+    await waitFor(() => expect(notices()[0]!.textContent).toContain("disk I/O error"));
+    expect(notices()).toHaveLength(1);
+    bridgeMock.applyDatabaseEdit.mockClear();
+    await user.click(within(notices()[0]!).getByRole("button", { name: "Try again" }));
+    expect(bridgeMock.applyDatabaseEdit).toHaveBeenCalledWith(categoryEdit("Travel"));
     expect(bridgeMock.applyDatabaseEdit).toHaveBeenCalledTimes(1);
   });
 
