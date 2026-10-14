@@ -5,6 +5,7 @@ use dohc_engine_collab::{
 };
 
 mod fix_round2;
+mod fix_round3;
 
 #[test]
 fn pre_anchor_settlement_requires_state_inclusion_and_keeps_native_content() {
@@ -893,6 +894,12 @@ fn hold_authority_and_redelivery_are_exact_and_replay_keeps_origin_order() {
         &hold,
     )
     .unwrap();
+    assert_eq!(
+        read_release_hold_page(&store, &hold).unwrap(),
+        vec![first.clone(), second.clone()]
+    );
+    ack(&mut store, &first);
+    ack(&mut store, &second);
     assert!(read_release_hold_page(&store, &hold).unwrap().is_empty());
 }
 

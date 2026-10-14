@@ -39,7 +39,6 @@ fn dependency_transfers_do_not_hide_later_origins_or_prevent_closure() {
     let doc = Ydoc::wire();
     doc.apply(&checkpoint).unwrap();
     let prior = doc.richdoc_append_paragraph("B predecessor");
-    let mut ops = Vec::new();
     for i in 0..70 {
         let op = update(
             &mut store,
@@ -48,13 +47,11 @@ fn dependency_transfers_do_not_hide_later_origins_or_prevent_closure() {
             i,
         );
         retain(&mut store, &hold, &op);
-        ops.push(op);
     }
     let mut b = update(&mut store, &owner, &prior, 0);
     b.origin_id = "later-B".into();
     b.relay_seq = Some(100);
     retain(&mut store, &hold, &b);
-    ops.push(b);
     released(&mut store, &owner, &hold);
     for expected in [64, 7] {
         let page = read_release_hold_page(&store, &hold).unwrap();
@@ -64,11 +61,14 @@ fn dependency_transfers_do_not_hide_later_origins_or_prevent_closure() {
         }
         drop(store);
         store = EngineStore::open(&engine_db_path(&dir).unwrap(), 4).unwrap();
+        let recovered = read_release_hold_page(&store, &hold).unwrap();
+        assert_eq!(recovered.len(), expected);
+        for op in recovered {
+            replay(&mut store, &hold, &op);
+            ack(&mut store, &op);
+        }
     }
     assert!(read_release_hold_page(&store, &hold).unwrap().is_empty());
-    for op in ops {
-        ack(&mut store, &op);
-    }
     assert!(matches!(
         store
             .write_with(&NoFaults, |tx| close_release_hold_in(tx, &hold))

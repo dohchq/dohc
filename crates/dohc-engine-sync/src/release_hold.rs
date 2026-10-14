@@ -46,8 +46,9 @@ pub fn open_release_hold_in(
     if !valid {
         return Err(waiting());
     }
-    let pending: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM owner_pending_settlements WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND applied=0)",
-        params![binding.workspace_id,binding.main_version_id,binding.object_id], |r|r.get(0)).map_err(SyncError::corrupt)?;
+    let pending: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM owner_pending_settlements p WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND lineage_claim_id=?4 AND relay_namespace=?5 AND applied=0
+        AND NOT EXISTS(SELECT 1 FROM release_held_ops r WHERE r.workspace_id=p.workspace_id AND r.origin_id=p.origin_id AND r.origin_seq=p.origin_seq))",
+        params![binding.workspace_id,binding.main_version_id,binding.object_id,binding.lineage_claim_id,namespace], |r|r.get(0)).map_err(SyncError::corrupt)?;
     if pending {
         return Err(waiting());
     }
@@ -435,13 +436,13 @@ pub fn replay_release_held_envelope(
     }))
 }
 
-/// Restore the original envelopes in arrival order; prior rows of each origin lead.
+/// Recover completed reports first, then held envelopes in arrival order.
 pub fn read_release_hold_page(
     store: &EngineStore,
     hold: &ReleaseHold,
 ) -> Result<Vec<ReplicationEnvelope>, SyncError> {
     store.read_with(|c| {
-        let mut stmt=c.prepare("SELECT envelope_json FROM release_held_ops WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND release_digest=?4 AND stage='held' ORDER BY arrival LIMIT 64").map_err(SyncError::corrupt)?;
+        let mut stmt=c.prepare("SELECT envelope_json FROM release_held_ops WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND release_digest=?4 ORDER BY stage='held',arrival LIMIT 64").map_err(SyncError::corrupt)?;
         let rows=stmt.query_map(params![hold.binding.workspace_id,hold.binding.main_version_id,hold.binding.object_id,hold.digest],|r|r.get::<_,String>(0)).map_err(SyncError::corrupt)?;
         rows.map(|r|serde_json::from_str(&r.map_err(SyncError::corrupt)?).map_err(SyncError::corrupt)).collect()
     })
