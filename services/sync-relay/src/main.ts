@@ -321,7 +321,7 @@ let automations: Awaited<ReturnType<typeof startAutomationServer>> | undefined;
 const serviceReplication = selfHostedLive && deployment && linkKey
   ? (() => {
       const credential = {key: Buffer.from(linkKey), namespace: deployment.history.namespace};
-      return createServiceHostReplication({storage, prefix: "dohc-service-v1.",
+      return createServiceHostReplication({storage, prefix: "dohc-service-v1.", hostedFeed: true,
         authorize: input => authorizeServiceHostReplication(storage, {...credential, ...input})});
     })() : undefined;
 

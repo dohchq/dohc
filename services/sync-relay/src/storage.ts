@@ -7,6 +7,8 @@ import type {ShareLabels} from "@dohc/security-contract/share-labels";
 import type { ServiceActivationAccess } from "./storage/serviceActivationAccess";
 import { ServiceActivationStore } from "./storage/serviceActivation";
 import * as serviceHostEnrollmentStorage from "./storage/serviceHostEnrollment";
+import * as serviceHostFeedStorage from "./storage/serviceHostFeed";
+import * as serviceHostUploadStorage from "./storage/serviceHostUploads";
 import { LiveCommittedDeliveryStore } from "./storage/liveCommittedDelivery";
 import * as liveRestoreOperationStorage from "./storage/liveRestoreOperation";
 import * as ownerRestoreOptionsStorage from "./storage/ownerRestoreOptions";
@@ -388,6 +390,18 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
   }
   currentServiceHostWorkspace(workspaceId: string) {
     return serviceHostEnrollmentStorage.currentServiceHostWorkspace(this, workspaceId);
+  }
+  readServiceHostFeedScope(workspaceId: string) {
+    return serviceHostFeedStorage.readServiceHostFeedScope(this, workspaceId);
+  }
+  listServiceHostDocumentRows(input: Parameters<typeof serviceHostFeedStorage.listServiceHostDocumentRows>[1]) {
+    return serviceHostFeedStorage.listServiceHostDocumentRows(this, input);
+  }
+  putServiceHostBlob(input: Parameters<typeof serviceHostUploadStorage.putServiceHostBlob>[1]) {
+    return serviceHostUploadStorage.putServiceHostBlob(this, input);
+  }
+  serviceHostUploaded(workspaceId: string, sha256: string) {
+    return serviceHostUploadStorage.serviceHostUploaded(this, workspaceId, sha256);
   }
   scanServiceHostCandidateShares(after?: serviceHostEnrollmentStorage.ServiceHostCandidateCursor, workspaceId?: string) {
     return serviceHostEnrollmentStorage.scanServiceHostCandidateShares(this, after, workspaceId);

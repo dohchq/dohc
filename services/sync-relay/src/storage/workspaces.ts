@@ -289,6 +289,13 @@ export function rotateWorkspaceIdentity(storage: StorageContext, input: {
            WHERE workspace_id = ?`,
         )
         .run(input.workspaceId);
+      // Enrollments belong to the old identity, so the workspace is no longer hosted.
+      storage.db
+        .prepare(
+          `DELETE FROM sync_relay_service_host_uploads
+           WHERE workspace_id = ?`,
+        )
+        .run(input.workspaceId);
       return "rotated";
     });
   }

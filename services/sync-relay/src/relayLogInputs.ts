@@ -13,6 +13,10 @@ export const COLLECTION_FILE_ORIGIN_PREFIX = "relay:collection-file:";
 
 export const SHARE_MEMBER_ORIGIN_PREFIX = "relay:share-member:";
 
+// Only the service host's own feed accepts writes from these origins, so they
+// never collide with an owner device's coordinates.
+export const SERVICE_HOST_ORIGIN_PREFIX = "service-host:";
+
 export function namedShareOrigin(shareId: string, userId: string, originId: string): string {
   return `${SHARE_MEMBER_ORIGIN_PREFIX}${sha256Hex(JSON.stringify([shareId, userId, originId]))}`;
 }
@@ -22,8 +26,9 @@ export function namedShareOrigin(shareId: string, userId: string, originId: stri
 // alone mints human, public, named, and link attribution.
 const CLIENT_MOMENT_AUTHOR_KINDS: ReadonlySet<unknown> = new Set(["agent", "automation"]);
 
-export function assertClientLogProvenance(originId: string, rawOps: unknown[], deferMomentRefusal = false): void {
-  assertUnreservedLogOrigin(originId);
+export function assertClientLogProvenance(originId: string, rawOps: unknown[],
+  {deferMomentRefusal = false, serviceHost = false}: {deferMomentRefusal?: boolean; serviceHost?: boolean} = {}): void {
+  assertUnreservedLogOrigin(originId, serviceHost);
   for (const raw of rawOps) {
     if (!raw || typeof raw !== "object" || Array.isArray(raw)) continue;
     const op = raw as Record<string, unknown>;
@@ -34,7 +39,10 @@ export function assertClientLogProvenance(originId: string, rawOps: unknown[], d
   }
 }
 
-function assertUnreservedLogOrigin(originId: string): void {
+function assertUnreservedLogOrigin(originId: string, serviceHost: boolean): void {
+  if (originId.startsWith(SERVICE_HOST_ORIGIN_PREFIX) !== serviceHost) {
+    throw badRequest(serviceHost ? "originId must use the service host prefix" : "originId is reserved for service host writes");
+  }
   if (originId.startsWith(SHARE_MEMBER_ORIGIN_PREFIX)) {
     throw badRequest("originId is reserved for named share writes");
   }

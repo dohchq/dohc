@@ -1,5 +1,6 @@
 import {createWorkspaceReplicationRoutes} from "./workspaceReplicationRoutes";
 import {createWorkspaceBlobRoutes} from "./workspaceBlobRoutes";
+import {createServiceHostFeed} from "./serviceHostFeed";
 import type {SyncRelayLogRow, SyncRelayStorage} from "./storage";
 import {badRequest, errorResponse, notFound} from "./errors";
 import {jsonResponse} from "@dohc/service-http";
@@ -8,8 +9,10 @@ import {REPLICA_LIVE_JOURNAL_MAX_ROWS} from "./storage/liveUpdateJournal";
 /**
  * Replication for a credential this server derived for its own replica.
  * `authorize` answers the workspace owner the credential acts for, or null.
- * Workspace replicas can also read the accepted live journal. Credentials
- * never enter an account resolver or share route.
+ * Workspace replicas can also read the accepted live journal. With
+ * `hostedFeed`, the credential also reads the service host's scoped feed
+ * under `/sync/:workspaceId/hosted/`. Credentials never enter an account
+ * resolver or share route.
  */
 export function createServiceHostReplication(options: {
   storage: SyncRelayStorage;
@@ -17,6 +20,8 @@ export function createServiceHostReplication(options: {
   authorize(input: {workspaceId: string; bearer: string; method: string; pathname: string}): string | null;
   revalidate?: (input: {workspaceId: string; bearer: string; method: string; pathname: string}) => string | null;
   onLogRead?: (input: {workspaceId: string; bearer: string}, rows: readonly SyncRelayLogRow[]) => void;
+  // Only the service host principal enables this route.
+  hostedFeed?: boolean;
   // Only the workspace replica principal enables this route.
   replicaLiveJournal?: boolean;
 }) {
@@ -25,6 +30,7 @@ export function createServiceHostReplication(options: {
     undefined, (request, workspaceId, rows) => options.onLogRead?.({workspaceId,
       bearer: (request.headers.get("authorization") ?? "").slice(7)}, rows));
   const blobs = createWorkspaceBlobRoutes(options.storage, Date.now);
+  const feed = options.hostedFeed ? createServiceHostFeed(options.storage) : undefined;
   return async (request: Request): Promise<Response> => {
     try {
       const url = new URL(request.url), parts = url.pathname.split("/");
@@ -37,6 +43,12 @@ export function createServiceHostReplication(options: {
       if (!ownerUserId) throw notFound();
       const guard = () => {request.signal.throwIfAborted(); if ((options.revalidate ?? options.authorize)(credential) !== ownerUserId) throw notFound();};
       const actor = {userId: ownerUserId};
+      if (parts[3] === "hosted") {
+        if (!feed) throw notFound();
+        let route: string[];
+        try {route = parts.slice(4).map(decodeURIComponent);} catch {throw notFound();}
+        return await feed(request, {workspaceId, route, actor, guard});
+      }
       if (parts[3] === "live-journal" && parts.length === 4) {
         if (!options.replicaLiveJournal || request.method !== "GET") throw notFound();
         const after = replicaJournalQueryInteger(url.searchParams, "after", 0, 0);
