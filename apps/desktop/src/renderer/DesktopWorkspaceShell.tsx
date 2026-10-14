@@ -101,6 +101,7 @@ import { useReportsNotice } from "./shell/useReportsNotice";
 import { useShareRemovalNotices } from "./shell/useShareRemovalNotices";
 import { useChatDispatchNotices } from "./shell/useChatDispatchNotices";
 import { useWorkspacePathOpenFailures } from "./shell/workspacePathOpenFailures";
+import { useUsageRecordStops } from "./shell/usageRecordStops";
 import { useSyncFailureNotice } from "./shell/useSyncFailureNotice";
 import { useKeptFilesNotice } from "./shell/useKeptFilesNotice";
 import { useDriveLimitNotice } from "./shell/useDriveLimitNotice";
@@ -1774,6 +1775,7 @@ export function DesktopWorkspaceShell(props: {
     },
     [workspaceAdmission, workspaceId, reportShellFailure, refreshAgentLane],
   );
+  useUsageRecordStops(reportSettingsFailure);
 
   const refreshHistory = useCallback(async () => {
     // Nothing to refresh before main's capture decision lands. Any

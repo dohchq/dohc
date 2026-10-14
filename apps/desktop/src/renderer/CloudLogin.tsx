@@ -15,7 +15,7 @@ import {
 import { Pill, PrimaryButton } from "./ui/controls";
 
 const SETUP_GUIDE_URL =
-  "https://github.com/dohc-ai/dohc/blob/main/docs/how-to/self-host.md";
+  "https://github.com/dohchq/dohc/blob/main/docs/how-to/self-host.md";
 
 type Phase =
   | { kind: "loading" }
