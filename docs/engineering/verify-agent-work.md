@@ -194,6 +194,12 @@ A change to any file outside the workspace packages, such as a lockfile, a crate
 Repository checks and proofs always run. `pnpm verify:plan` lists the selected packages, and `result.json` records them under `packages` and `js-tests/result.json` under `skippedPackages`.
 Pass `--full` to run every package. The nightly run on main always does.
 
+### Slowest tests
+
+Each gate keeps its 20 slowest tests in `result.json` under `slowest`, and prints the five slowest. The queue history keeps each run's step times and ten slowest tests.
+A test that takes more than a second is a scenario test. Keep it, but make it earn its time: the per-PR gate should take 15 minutes or less on an idle lane.
+A weekly review reads the history, then fixes, splits, or speeds up the tests and suites that cost the most.
+
 To schedule jobs separately, use `pnpm verify:pr --base <target-ref> --job js` and `--job rust`.
 Each report states its scope. Every selected job needs passing evidence that covers the change.
 An explicit `--job` runs that job even when the filters omit it.

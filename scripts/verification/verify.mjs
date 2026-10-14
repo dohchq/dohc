@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { join, resolve } from "node:path";
-import { nextestFlaky, playwrightFlaky, readLog, vitestFailures } from "./flaky.mjs";
+import { nextestFlaky, nextestTimes, playwrightFlaky, playwrightTimes, readLog, readTestRecord, slowest, testRecordReporter, vitestFailures } from "./flaky.mjs";
 import { prepare, assertPrepared, assertIndependentStagedEngine, sourceFingerprint, buildEnvironment, stagedEnginePath, hashFile, withBuildBudget } from "./build.mjs";
 import { doctor } from "./doctor.mjs";
 import { git, pnpm, repoRoot, run } from "./process.mjs";
@@ -220,6 +220,8 @@ export async function verify(args) {
   const report = { version: 1, mode, scope: job ?? "all", full, root: repoRoot, base, ...(grant ? { grant } : {}), ...total, steps: [], timings: [], treeReadings: [], flaky: [], output, verdict: "RUNNING" };
   // Tests that passed only on retry: { step, test }.
   const flaky = report.flaky;
+  // Every test time the gate saw, from which result.json keeps the slowest: { step, test, seconds }.
+  const times = [];
   const reportPath = join(output, "result.json");
   const save = () => writeFileSync(reportPath, JSON.stringify(report, null, 2) + "\n");
   const measure = (name, action) => {
@@ -384,7 +386,12 @@ export async function verify(args) {
         try {
           await step("rust", process.execPath, ["tools/rust-engine-program/run-rust-checks.mjs", "--prepared-runtime"], buildEnvironment());
           await step("rust-verdict", process.execPath, ["tools/rust-engine-program/require-ci-pass-verdict.mjs", join(output, "rust.log")]);
-        } finally { flaky.push(...nextestFlaky(readLog(join(output, "rust.log"))).map(test => ({ step: "rust", test }))); save(); }
+        } finally {
+          const log = readLog(join(output, "rust.log"));
+          flaky.push(...nextestFlaky(log).map(test => ({ step: "rust", test })));
+          times.push(...nextestTimes(log).map(test => ({ step: "rust", ...test })));
+          save();
+        }
       } catch (error) {
         report.rustError = error.message; save();
         await checkTree("rust-failure");
@@ -395,7 +402,11 @@ export async function verify(args) {
       async function integrationProofs(env, checkpoint) {
         const proofStep = (name, command, commandArgs, env) => step(name, command, commandArgs, env, checkpoint);
         const recordPlaywrightFlaky = (name, path) => {
-          try { flaky.push(...playwrightFlaky(JSON.parse(readLog(path) || "{}").suites).map(test => ({ step: name, test }))); } catch { /* No report. */ }
+          try {
+            const suites = JSON.parse(readLog(path) || "{}").suites;
+            flaky.push(...playwrightFlaky(suites).map(test => ({ step: name, test })));
+            times.push(...playwrightTimes(suites).map(test => ({ step: name, ...test })));
+          } catch { /* No report. */ }
           save();
         };
         if (mode === "pr") {
@@ -405,8 +416,8 @@ export async function verify(args) {
             rmSync(nativeOutput, {recursive: true, force: true});
             mkdirSync(nativeOutput, {recursive: true});
             return proofStep(name, ...pnpm(["--filter", "@dohc/share-web", "exec", "vitest", "run", "--config", "vitest.self-host-native.config.ts",
-              "--reporter=default", "--reporter=json", `--outputFile.json=${join(nativeOutput, "vitest.json")}`]),
-              {...env, DOHC_SERVICE_HOST_PROOF_BINARY: stagedEnginePath, DOHC_SERVICE_HOST_PROOF_SHA256: nativeHash, DOHC_SERVICE_HOST_PROOF_OUTPUT: nativeOutput});
+              "--reporter=default", "--reporter=json", `--outputFile.json=${join(nativeOutput, "vitest.json")}`, `--reporter=${testRecordReporter}`]),
+              {...env, DOHC_TEST_RECORD: join(nativeOutput, "tests.jsonl"), DOHC_SERVICE_HOST_PROOF_BINARY: stagedEnginePath, DOHC_SERVICE_HOST_PROOF_SHA256: nativeHash, DOHC_SERVICE_HOST_PROOF_OUTPUT: nativeOutput});
           };
           try { await nativeProof("self-host-native"); }
           catch (error) {
@@ -417,6 +428,7 @@ export async function verify(args) {
             await nativeProof("self-host-native-retry");
             flaky.push(...failed.map(test => ({ step: "self-host-native", test })));
           }
+          times.push(...readTestRecord(join(nativeOutput, "tests.jsonl")).map(test => ({ step: "self-host-native", test: test.test, seconds: test.seconds })));
           report.selfHostNative = readSelfHostNativeProof(nativeOutput, stagedEnginePath, nativeHash); save();
           await proofStep("browser-install", ...pnpm(["exec", "playwright", "install", "chromium"]), env);
           const accountReport = join(output, "accounts-playwright.json");
@@ -457,7 +469,11 @@ export async function verify(args) {
               beforeDesktopScripts: () => measure("packaging-wait", () => rustSettled),
               runProofs: checkpoint => integrationProofs(env, checkpoint) }));
         } finally {
-          try { flaky.push(...(JSON.parse(readFileSync(report.jsTests, "utf8")).flaky ?? [])); } catch { /* No package report. */ }
+          try {
+            const tests = JSON.parse(readFileSync(report.jsTests, "utf8"));
+            flaky.push(...(tests.flaky ?? []));
+            times.push(...(tests.slowest ?? []));
+          } catch { /* No package report. */ }
           save();
         }
       } else if (mode !== "pr") {
@@ -514,7 +530,9 @@ export async function verify(args) {
       finishTiming(); Object.assign(report, total);
       // Nothing after this changes the verdict. The queue accepts only a final receipt.
       report.final = true;
+      report.slowest = slowest(times);
       save(); console.log(`[verification] ${report.verdict} (${report.scope}): ${reportPath}`);
+      if (report.slowest.length) console.log(`[verification] slowest tests:\n${report.slowest.slice(0, 5).map(row => `  ${row.seconds}s ${row.step}: ${row.test}`).join("\n")}`);
       if (flaky.length) console.log(`[verification] ${flaky.length} flaky test(s) passed only on retry. Each one is a defect to fix:\n${flaky.map(row => `  ${row.step}: ${row.test}`).join("\n")}`);
     } finally { checkoutOwner?.release(); }
   }

@@ -3,8 +3,8 @@ import test from "node:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import FlakyReporter from "./flaky-reporter.mjs";
-import { nextestFlaky, nodeTestFailures, playwrightFlaky, readFlakyLog, vitestFailures } from "./flaky.mjs";
+import TestRecordReporter from "./test-record-reporter.mjs";
+import { nextestFlaky, nextestTimes, nodeTestFailures, nodeTestTimes, playwrightFlaky, playwrightTimes, readTestRecord, slowest, vitestFailures } from "./flaky.mjs";
 
 test("nextest's FLAKY lines name each test once", () => {
   const log = [
@@ -44,16 +44,48 @@ test("Playwright and vitest reports name their flaky and failed tests", t => {
   assert.deepEqual(vitestFailures(join(root, "missing.json")), []);
 });
 
-test("the vitest reporter records only tests that passed on retry", t => {
+test("the vitest reporter records the tests that passed on retry, and the slow ones", t => {
   const root = mkdtempSync(join(tmpdir(), "dohc-flaky-"));
-  const log = join(root, "flaky.jsonl");
-  const previous = process.env.DOHC_FLAKY_LOG;
-  process.env.DOHC_FLAKY_LOG = log;
-  t.after(() => { rmSync(root, { recursive: true, force: true }); if (previous === undefined) delete process.env.DOHC_FLAKY_LOG; else process.env.DOHC_FLAKY_LOG = previous; });
-  const testCase = (fullName, flaky) => ({ fullName, module: { moduleId: join(process.cwd(), "src", "a.test.ts") }, diagnostic: () => ({ flaky }) });
-  const reporter = new FlakyReporter();
-  reporter.onTestCaseResult(testCase("steady", false));
-  reporter.onTestCaseResult(testCase("settles on retry", true));
-  assert.deepEqual(readFlakyLog(log), ["src/a.test.ts › settles on retry"]);
-  assert.deepEqual(readFlakyLog(join(root, "missing.jsonl")), []);
+  const log = join(root, "tests.jsonl");
+  const previous = process.env.DOHC_TEST_RECORD;
+  process.env.DOHC_TEST_RECORD = log;
+  t.after(() => { rmSync(root, { recursive: true, force: true }); if (previous === undefined) delete process.env.DOHC_TEST_RECORD; else process.env.DOHC_TEST_RECORD = previous; });
+  const testCase = (fullName, flaky, duration) => ({ fullName, module: { moduleId: join(process.cwd(), "src", "a.test.ts") }, diagnostic: () => ({ flaky, duration }) });
+  const reporter = new TestRecordReporter();
+  reporter.onTestCaseResult(testCase("steady", false, 30));
+  reporter.onTestCaseResult(testCase("settles on retry", true, 40));
+  reporter.onTestCaseResult(testCase("drives a whole scenario", false, 12_500));
+  assert.deepEqual(readTestRecord(log), [
+    { test: "src/a.test.ts › settles on retry", flaky: true, seconds: 0.04 },
+    { test: "src/a.test.ts › drives a whole scenario", flaky: false, seconds: 12.5 },
+  ]);
+  assert.deepEqual(readTestRecord(join(root, "missing.jsonl")), []);
+});
+
+test("each runner's report gives its test times, and the slowest are kept longest first", () => {
+  const rust = [
+    "        PASS [   0.093s] (   1/3900) dohc-engine-collab author_coverage::separate_authors",
+    "        SLOW [> 60.000s] (─────────) dohc-engine-runtime::replay admitted_baselines_commit",
+    "        PASS [  71.250s] (3712/3900) dohc-engine-runtime::replay admitted_baselines_commit",
+    "        SLOW [> 60.000s] (─────────) dohc-engine-collab adoption::rescue_streams_past_a_large_baseline",
+    "  TRY 1 FAIL [   0.900s] (  12/3900) dohc-workspace-engine::configured_live_host reloads",
+    "       FLAKY 2/2 [   1.085s] (  12/3900) dohc-workspace-engine::configured_live_host reloads",
+    "       FLAKY 2/2 [   1.085s] dohc-workspace-engine::configured_live_host reloads",
+  ].join("\n");
+  assert.deepEqual(nextestTimes(rust), [
+    { test: "dohc-engine-collab author_coverage::separate_authors", seconds: 0.093 },
+    { test: "dohc-engine-runtime::replay admitted_baselines_commit", seconds: 71.25 },
+    { test: "dohc-workspace-engine::configured_live_host reloads", seconds: 1.085 },
+    { test: "dohc-engine-collab adoption::rescue_streams_past_a_large_baseline", seconds: 60 },
+  ], "one time per test, a finished attempt over a SLOW report");
+  assert.deepEqual(nextestFlaky(rust), ["dohc-workspace-engine::configured_live_host reloads"], "a padded counter is not part of the name");
+  assert.deepEqual(nodeTestTimes("✔ quick (21.6ms)\n✖ broken (3.1ms)\n  ✔ nested setup (2400.5ms)"), [
+    { test: "quick", seconds: 0.0216 }, { test: "nested setup", seconds: 2.4005 }]);
+  assert.deepEqual(playwrightTimes([{ specs: [
+    { file: "a.spec.ts", title: "restarts", tests: [{ results: [{ status: "failed", duration: 9000 }, { status: "passed", duration: 66_000 }] }] },
+    { file: "a.spec.ts", title: "breaks", tests: [{ results: [{ status: "failed", duration: 5000 }, { status: "failed", duration: 4000 }] }] },
+    { file: "a.spec.ts", title: "skipped", tests: [{ results: [{ status: "skipped", duration: 0 }] }] },
+  ] }]), [{ test: "a.spec.ts › restarts", seconds: 66 }], "the attempt that passed, and no time for a test that never passed");
+  assert.deepEqual(slowest([{ test: "a", seconds: 1.04 }, { test: "b", seconds: 40.26 }, { test: "c", seconds: 3 }], 2),
+    [{ test: "b", seconds: 40.3 }, { test: "c", seconds: 3 }]);
 });
