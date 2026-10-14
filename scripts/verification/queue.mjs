@@ -355,14 +355,19 @@ async function main([command, ...args]) {
   if (command === "cancel") { await cancel(root, args[0]); return console.log(`asked the service to stop ${args[0]}`); }
   if (command === "install" || command === "upgrade") return install(root, ref);
   if (command === "restart") {
-    const { record, alive } = serviceState(root);
+    const { record } = serviceState(root);
     if (record?.running && !args.includes("--now")) throw new Error("A run is in progress. Wait for it, or pass --now to stop it; it will be retried.");
     // The task's own process is conhost, so ending the task leaves the supervisor running. Stop the supervisor
-    // itself; its job stops the service and any run. The task starts a new one once the old one has exited.
-    const exists = pid => { try { process.kill(pid, 0); return true; } catch (error) { return error.code === "EPERM"; } };
-    if (alive && record.supervisor) {
-      try { process.kill(record.supervisor); } catch { /* Already stopped. */ }
-      for (let waited = 0; waited < 10_000 && exists(record.supervisor); waited += 200) await sleep(200);
+    // itself; its job stops the service and any run. It is found by its command line, which names this root's
+    // script, so a reused pid is never stopped. The task starts a new one once the old one has exited.
+    const script = join(root, "supervisor.ps1").replaceAll("'", "''");
+    const supervisors = () => spawnSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command",
+      `Get-CimInstance Win32_Process -Filter "Name='pwsh.exe'" | Where-Object { $_.CommandLine -and $_.CommandLine.Contains('${script}') } | ForEach-Object { $_.ProcessId }`],
+    { encoding: "utf8", windowsHide: true }).stdout.split(/\r?\n/u).filter(Boolean).map(Number);
+    for (const pid of supervisors()) { try { process.kill(pid); } catch { /* Already stopped. */ } }
+    for (let waited = 0; supervisors().length; waited += 500) {
+      if (waited >= 10_000) throw new Error("The supervisor did not exit, so the service was not restarted. End its pwsh.exe process, then run this again.");
+      await sleep(500);
     }
     spawnSync("schtasks.exe", ["/end", "/tn", taskName], { windowsHide: true });
     spawnSync("schtasks.exe", ["/run", "/tn", taskName], { windowsHide: true });

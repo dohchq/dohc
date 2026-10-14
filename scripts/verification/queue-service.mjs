@@ -111,7 +111,6 @@ export async function runService({
   freeDisk = () => freeDiskGb(lane) ?? freeDiskGb(root), docker = dockerResponds,
   prepare = prepareLane, sweep = sweepContainers, holdLane = holdLegacyLane,
   worker = defaultWorker, retryDelay = retryDelayMs, cleanupRetryMs = 60_000, prepareLimitMs = 45 * 60_000, stop, log = defaultLog(root),
-  supervisor = null,
 }) {
   const paths = queuePaths(root);
   for (const path of [paths.inbox, paths.keys, paths.requests, paths.control]) mkdirSync(path, { recursive: true });
@@ -143,7 +142,7 @@ export async function runService({
   const setStatus = (id, status) => writeJson(statusPath(id), { ...status, updatedAt: new Date().toISOString() });
   const history = event => { try { appendFileSync(paths.history, JSON.stringify({ at: new Date().toISOString(), ...event }) + "\n"); } catch { /* History informs estimates only. */ } };
   const beat = () => writeJson(paths.service, {
-    protocol, pid: process.pid, supervisor, commit, startedAt, heartbeatAt: new Date().toISOString(),
+    protocol, pid: process.pid, commit, startedAt, heartbeatAt: new Date().toISOString(),
     running: running && { id: running.id, attempt: running.attempt, phase: running.phase, startedAt: running.startedAt, awakeMs: running.awakeMs },
     health: { diskFreeGb: health.diskFreeGb, diskOk: health.diskOk, dockerOk: health.dockerOk,
       pausedUntil: health.pausedUntil ? new Date(health.pausedUntil).toISOString() : null, reason: health.reason },
@@ -454,8 +453,7 @@ async function main(argv) {
     }
   }
   const repo = resolve(git(["rev-parse", "--git-common-dir"], here), "..");
-  // The supervisor is this process's parent; recording it lets pnpm verify:queue restart stop it.
-  return runService({ root, repo, commit: git(["rev-parse", "HEAD"], here), supervisor: argv.includes("--supervised") ? process.ppid : null });
+  return runService({ root, repo, commit: git(["rev-parse", "HEAD"], here) });
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
