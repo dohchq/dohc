@@ -458,6 +458,8 @@ fn backfill_moments_between(
                          AND d.object_id=m.object_id \
                          AND (d.head_update_seq>0 OR d.head_snapshot_seq>0 \
                            OR d.lineage_claim_status != 'unclaimed' OR d.file_export_lane IN (1,2)))) \
+                   AND NOT EXISTS (SELECT 1 FROM materialization_jobs j \
+                     WHERE j.workspace_id=m.workspace_id AND j.job_id='restore-delete-mat_'||m.moment_id) \
                    AND m.moment_order > ?2 \
                    AND (?3 IS NULL OR m.moment_order <= ?3) \
                    AND NOT EXISTS (SELECT 1 FROM replication_pending_conflict_moments p \

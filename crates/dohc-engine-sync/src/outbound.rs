@@ -266,6 +266,7 @@ impl PortableBefore {
 }
 
 /// Project one committed domain moment into the relay-visible log.
+/// A checked delete stays local until its pending publication job is removed.
 ///
 /// The caller must check [`crate::workspace_replicates_with_relay_in_tx`]
 /// before this function because the local journal requires a sync identity.
@@ -285,7 +286,7 @@ pub fn journal_moment_append_in_tx(
             |row| row.get(0),
         )
         .map_err(SyncError::corrupt)?;
-    if recovery {
+    if recovery || checked_delete_is_pending_in_tx(tx, workspace_id, moment_id)? {
         return Ok(());
     }
     let (payload, recorded_at_ms) =
@@ -293,6 +294,15 @@ pub fn journal_moment_append_in_tx(
     let sequence =
         journal_local_op_in_tx(tx, workspace_id, "moment.append", &payload, recorded_at_ms)?;
     mark_export_in_tx(tx, workspace_id, sequence, payload, recorded_at_ms)
+}
+
+fn checked_delete_is_pending_in_tx(
+    tx: &Transaction<'_>,
+    workspace_id: &str,
+    moment_id: &str,
+) -> Result<bool, SyncError> {
+    tx.query_row("SELECT EXISTS(SELECT 1 FROM materialization_jobs WHERE workspace_id=?1 AND job_id='restore-delete-mat_'||?2)",
+        params![workspace_id, moment_id], |row| row.get(0)).map_err(SyncError::corrupt)
 }
 
 pub(crate) fn lane_before_in_tx(
@@ -451,6 +461,11 @@ fn moment_payload_in_tx(
     moment_id: &str,
     portable_before: Option<&PortableBefore>,
 ) -> Result<(serde_json::Value, i64), SyncError> {
+    if checked_delete_is_pending_in_tx(tx, workspace_id, moment_id)? {
+        return Err(SyncError::InvalidInput {
+            reason: "checked-delete-publication-pending",
+        });
+    }
     let row = tx
         .query_row(
             "SELECT m.moment_id, m.version_id, m.object_id, o.created_at_ms, m.path, \

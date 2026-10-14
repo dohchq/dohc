@@ -35,6 +35,8 @@ export const WORKSPACE_METHOD = {
   captureImportRecovery: "capture.importRecovery",
   keptCopiesList: "keptCopies.list",
   keptCopiesSave: "keptCopies.save",
+  checkedDeletesList: "checkedDeletes.list",
+  checkedDeletesResolve: "checkedDeletes.resolve",
   captureFlush: "capture.flush",
   captureReconcile: "capture.reconcile",
   captureSetAuthor: "capture.setAuthor",
@@ -454,6 +456,10 @@ export type WorkspaceMethodParamsMap = {
   [WORKSPACE_METHOD.watcherStatus]: WorkspaceEmptyParams;
   [WORKSPACE_METHOD.captureClearRecovery]: WorkspaceJsonObject & { momentId: string };
   [WORKSPACE_METHOD.captureImportRecovery]: CaptureRecoveryImportParams;
+  [WORKSPACE_METHOD.checkedDeletesList]: WorkspaceEmptyParams;
+  [WORKSPACE_METHOD.checkedDeletesResolve]: WorkspaceJsonObject & {
+    momentId: string; expectedSha256: string; action: "retry" | "finish-delete";
+  };
   [WORKSPACE_METHOD.keptCopiesList]: WorkspaceEmptyParams;
   [WORKSPACE_METHOD.keptCopiesSave]: WorkspaceJsonObject & { id: number };
   [WORKSPACE_METHOD.captureFlush]: WorkspaceEmptyParams;
@@ -1304,6 +1310,23 @@ const WorkspaceResultSchemas = {
   [WORKSPACE_METHOD.captureClearRecovery]: mutableStruct({ cleared: Schema.Boolean }),
   [WORKSPACE_METHOD.captureImportRecovery]: mutableStruct({ committed: Schema.Literal(true),
     outcome: Schema.Literals(["replayed", "imported", "covered"]), momentId: Schema.NullOr(Schema.String) }),
+  [WORKSPACE_METHOD.checkedDeletesList]: mutableStruct({
+    deletions: Schema.mutable(Schema.Array(Schema.Union([
+      mutableStruct({
+        momentId: Schema.NonEmptyString, versionId: Schema.NonEmptyString,
+        objectId: Schema.NonEmptyString, path: Schema.NonEmptyString,
+        expectedSha256: Schema.String.check(Schema.isPattern(/^[0-9a-f]{64}$/)),
+        reason: Schema.Literal("checked-delete-publication-pending"), action: Schema.Literal("retry"),
+      }),
+      mutableStruct({
+        momentId: Schema.NonEmptyString, versionId: Schema.NonEmptyString,
+        objectId: Schema.NonEmptyString, path: Schema.NonEmptyString,
+        expectedSha256: Schema.String.check(Schema.isPattern(/^[0-9a-f]{64}$/)),
+        reason: Schema.Literal("checked-delete-replication-dependents"), action: Schema.Literal("finish-delete"),
+      }),
+    ]))),
+  }),
+  [WORKSPACE_METHOD.checkedDeletesResolve]: mutableStruct({ settled: Schema.Literal(true) }),
   [WORKSPACE_METHOD.keptCopiesList]: mutableStruct({
     keptCopies: Schema.mutable(
       Schema.Array(

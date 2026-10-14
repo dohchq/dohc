@@ -2,6 +2,7 @@ pub(super) mod author_admission;
 pub(super) mod automations;
 pub(super) mod capture;
 pub(super) mod chats;
+pub(super) mod checked_deletes;
 pub(super) mod collections;
 pub(crate) mod configured_live_host;
 pub(super) mod conflicts;

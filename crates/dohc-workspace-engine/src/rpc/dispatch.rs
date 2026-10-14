@@ -37,6 +37,7 @@ fn method_requires_initial_capture_ready(method: &str) -> bool {
                 | "versionedText.rename"
                 | "versionedText.checkMove"
                 | "versionedText.delete"
+                | "checkedDeletes.resolve"
                 | "versionedText.rollback"
                 | "versionedText.merge"
                 | "versionedText.publicationApplied"
@@ -295,6 +296,11 @@ impl EngineService {
             }
             "liveApplication.register" => {
                 self.live_application_register(&ctx, request.workspace, request.params)
+                    .await?
+            }
+            "checkedDeletes.list" => self.checked_deletes_list(request.workspace).await?,
+            "checkedDeletes.resolve" => {
+                self.checked_deletes_resolve(&ctx, request.workspace, request.params)
                     .await?
             }
             "engine.ping" => engine_ping(),
