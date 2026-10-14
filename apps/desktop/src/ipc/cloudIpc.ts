@@ -142,39 +142,44 @@ export function registerCloudIpcHandlers<
   registerHandler(CHANNELS.cloudStatus, async (event, payload) => {
     assertTrustedSender(event);
     const input = CloudStatusPayload.parse(payload ?? {});
-    const status = await cloudLogin().status();
-    await warmCredentialCache();
-    const workspace = input.workspaceId ? findWorkspace(input.workspaceId) : undefined;
-    let workspaceSecretState: WorkspaceSecretState | undefined;
-    if (workspace) {
-      // The shell asks at mount, which can precede the daemon handshake now
-      // that the window loads during it.
-      await engineDaemonStartup();
-      const sessions = requireEngineSessions();
-      workspaceSecretState = await withPhysicalWorkspaceOperation(
-        workspace.workspaceId,
-        async (operation) =>
-          await readWorkspaceSecretState(
-            receivedShareEngine.workspaceForRegistered(operation.workspace),
-            sessions,
-          ),
-      );
-    }
-    return CloudStatusResult.parse({
-      ...status,
-      ...(input.workspaceId
-        ? {
-            workspaceSynced: !!workspace?.remote,
-            workspaceSyncConnected:
-              !!workspace?.remote &&
-              workspaceRemoteMatchesCredentials(
-                workspace.remote,
-                currentCredentials(),
-              ),
-            ...(workspaceSecretState ? { workspaceSecretState } : {}),
-          }
-        : {}),
-    });
+    const readStatus = async (workspace?: RegistryEntry) => {
+      const status = await cloudLogin().status();
+      await warmCredentialCache();
+      let workspaceSecretState: WorkspaceSecretState | undefined;
+      if (workspace) {
+        // The shell asks at mount, which can precede the daemon handshake now
+        // that the window loads during it.
+        await engineDaemonStartup();
+        const sessions = requireEngineSessions();
+        workspaceSecretState = await withPhysicalWorkspaceOperation(
+          workspace.workspaceId,
+          async (operation) =>
+            await readWorkspaceSecretState(
+              receivedShareEngine.workspaceForRegistered(operation.workspace),
+              sessions,
+            ),
+        );
+      }
+      return CloudStatusResult.parse({
+        ...status,
+        ...(input.workspaceId
+          ? {
+              workspaceSynced: !!workspace?.remote,
+              workspaceSyncConnected:
+                !!workspace?.remote &&
+                workspaceRemoteMatchesCredentials(
+                  workspace.remote,
+                  currentCredentials(),
+                ),
+              ...(workspaceSecretState ? { workspaceSecretState } : {}),
+            }
+          : {}),
+      });
+    };
+    return input.workspaceId
+      ? withRendererWorkspaceOperation(event.sender, input.workspaceId, "This workspace is no longer active.",
+          async operation => readStatus(operation.workspace))
+      : readStatus();
   });
 
   registerHandler(CHANNELS.cloudLogout, async (event) => {

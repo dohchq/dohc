@@ -45,6 +45,25 @@ const refused: SyncStatusResult = { ...healthy, historyCaptureFailed: true, engi
 const openPayload = { workspaceId: "workspace", sessionId: "renderer-session", path: "notes/a.md" };
 const descriptor = { id: "image", mimeType: "image/png", created: 1, ref: "assets/image.png", sha256: "a".repeat(64) };
 
+describe("workspace engine sender binding", () => {
+  it.each([
+    CHANNELS.getSyncStatus, CHANNELS.rebuildEngineStore, CHANNELS.listEngineMoments,
+    CHANNELS.readEngineMoment, CHANNELS.restoreEngineMomentFile,
+  ])("binds %s before reading or changing another open workspace", async channel => {
+    const h = await harness();
+    const input = { workspaceId: "workspace",
+      ...(channel === CHANNELS.readEngineMoment || channel === CHANNELS.restoreEngineMomentFile ? { momentId: "moment" } : {}) };
+    await expect(h.invoke(channel, input)).resolves.toBeDefined();
+    const services = [h.requireEngineCapture, h.requireWorkspace, h.getStatus,
+      h.syncProjection, h.writable, h.canonicalWorkspaceFor, h.requireSessions,
+      h.closeActivity, h.probe, h.move, h.reopen, h.notify,
+      h.capture.listMoments, h.capture.readMoment, h.capture.restoreFileToBeforeMoment];
+    services.forEach(service => service.mockClear());
+    await expect(h.invoke(channel, { ...input, workspaceId: "other" })).rejects.toThrow("no longer active");
+    services.forEach(service => expect(service).not.toHaveBeenCalled());
+  });
+});
+
 type SharedHistoryStore = Pick<ReturnType<ReturnType<typeof createReceivedShareEngineAccess>["storeFor"]>, "listHistoryPage" | "getMoment">;
 
 /** `sharedStore` makes the renderer's workspace a received share view backed by that store. */
@@ -708,9 +727,8 @@ describe("workspace engine IPC registrations", () => {
     await expect(result).rejects.toThrow("window changed workspaces");
   });
 
-  it("keeps history admission independent of renderer admission and omits absent paging fields", async () => {
+  it("reads the sender's history and omits absent paging fields", async () => {
     const h = await harness();
-    await h.renderers.open(h.sender, { workspaceId: "other", attachmentId: Symbol("other") }, "document-1");
     await h.invoke(CHANNELS.listEngineMoments);
     expect(h.requireEngineCapture).toHaveBeenCalledWith("workspace", "Engine history");
     expect(h.capture.listMoments).toHaveBeenLastCalledWith({});

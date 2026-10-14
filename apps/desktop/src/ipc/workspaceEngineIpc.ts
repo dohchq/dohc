@@ -1,3 +1,4 @@
+import { rendererWorkspaceHandler } from "./rendererWorkspaceHandler";
 import { shareRecordStatuses } from "../workspaces/shareRecordStatus";
 import { WorkspaceDaemonRequester, type VersionedLiveAdapter } from "@dohc/workspace-engine-client";
 import { z } from "zod";
@@ -120,6 +121,8 @@ export function createWorkspaceEngineIpc<
     onServer: (workspaceId, automationId, claimId) => serverRuns.shownTo(workspaceId, automationId, claimId),
     signedInAccount,
   });
+
+  const bindWorkspace = rendererWorkspaceHandler({ assertTrustedSender, withRendererWorkspaceOperation });
 
   function registerCollections(): void {
     // Collections: read-only engine index queries. list answers
@@ -309,7 +312,7 @@ export function createWorkspaceEngineIpc<
       status: "policy-unreadable", unreadable: policy.unreadable, policyErrors: policy.errors,
     });
 
-    registerHandler(CHANNELS.listEngineMoments, async (event, payload) => {
+    registerHandler(CHANNELS.listEngineMoments, bindWorkspace(async (event, payload) => {
       assertTrustedSender(event);
       const input = ListEngineMomentsPayload.parse(payload);
       return readHistory(event, input.workspaceId, async (history, rootPath) => {
@@ -347,9 +350,9 @@ export function createWorkspaceEngineIpc<
           authorNames(input.workspaceId, event.sender),
         );
       });
-    });
+    }));
 
-    registerHandler(CHANNELS.readEngineMoment, async (event, payload) => {
+    registerHandler(CHANNELS.readEngineMoment, bindWorkspace(async (event, payload) => {
       assertTrustedSender(event);
       const input = ReadEngineMomentPayload.parse(payload);
       return readHistory(event, input.workspaceId, async (history, rootPath) => {
@@ -365,9 +368,9 @@ export function createWorkspaceEngineIpc<
           moment: moment ? engineMomentDetailForIpc(moment, names) : null,
         });
       });
-    });
+    }));
 
-    registerHandler(CHANNELS.restoreEngineMomentFile, async (event, payload) => {
+    registerHandler(CHANNELS.restoreEngineMomentFile, bindWorkspace(async (event, payload) => {
       assertTrustedSender(event);
       const input = RestoreEngineMomentFilePayload.parse(payload);
       const person = await localPerson();
@@ -378,11 +381,11 @@ export function createWorkspaceEngineIpc<
       const result = await capture.restoreFileToBeforeMoment(input.momentId, person);
       notifyRenderer({ workspaceId: input.workspaceId });
       return RestoreEngineMomentFileResult.parse(result);
-    });
+    }));
   }
 
   function registerStatusAndRepair(): void {
-    registerHandler(CHANNELS.getSyncStatus, async (event, payload) => {
+    registerHandler(CHANNELS.getSyncStatus, bindWorkspace(async (event, payload) => {
       assertTrustedSender(event);
       const input = WorkspaceIdPayload.parse(payload);
       const workspace = requireWorkspace(input.workspaceId);
@@ -392,7 +395,7 @@ export function createWorkspaceEngineIpc<
           activity.getStatus(input.workspaceId),
         ),
       );
-    });
+    }));
     registerOperations<typeof captureRecoveryOperations, Event, Operation>({
       handle: registerHandler,
       assertTrustedSender,
@@ -486,7 +489,7 @@ export function createWorkspaceEngineIpc<
       );
     });
 
-    registerHandler(CHANNELS.rebuildEngineStore, async (event, payload) => {
+    registerHandler(CHANNELS.rebuildEngineStore, bindWorkspace(async (event, payload) => {
       assertTrustedSender(event);
       const input = RebuildEngineStorePayload.parse(payload);
       const registered = requireWorkspace(input.workspaceId);
@@ -548,7 +551,7 @@ export function createWorkspaceEngineIpc<
           );
         }),
       );
-    });
+    }));
   }
 
   function registerYDoc(): void {

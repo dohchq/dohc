@@ -620,12 +620,6 @@ export function DesktopWorkspaceShell(props: {
   }, []);
   const openAgentSettings = useCallback(() => openSettings("agents"), [openSettings]);
 
-  const { agentSetup, readAgentStatusForHistory } = useAgentSetup(
-    props.workspace.workspaceId,
-    props.userSettings,
-    settingsSection,
-  );
-
   const workspaceId = props.workspace.workspaceId;
   const focusRoot = useRef<HTMLDivElement>(null);
   useFocusReturn(true, focusRoot, () => document.querySelector<HTMLElement>('[data-focus-surface="workspace"]'));
@@ -726,6 +720,13 @@ export function DesktopWorkspaceShell(props: {
   const workspaceIsReady =
     workspaceReadyFor?.workspaceId === workspaceId &&
     workspaceReadyFor.selectionGeneration === workspaceSelectionGeneration;
+  const { agentSetup, readAgentStatusForHistory } = useAgentSetup(
+    workspaceId,
+    props.userSettings,
+    settingsSection,
+    workspaceIsReady,
+  );
+
   const [workspaceOpenFailedFor, setWorkspaceOpenFailedFor] = useState<{
     workspaceId: string;
     selectionGeneration: number;
@@ -905,7 +906,7 @@ export function DesktopWorkspaceShell(props: {
     [reportShellError],
   );
   const { chatCollaboration, refreshCloudStatus, workspaceSynced, cloudStatus, cloudStatusUnreadable } =
-    useCloudPresence(workspaceId, reportCloudStatusUnavailable);
+    useCloudPresence(workspaceId, reportCloudStatusUnavailable, workspaceIsReady);
   // Closing Settings reads the status again, as the old Cloud dialog did on
   // close. The page's own refresh after an enable covers only its own
   // change: another window's Try again can make main adopt this account's

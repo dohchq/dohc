@@ -1,3 +1,4 @@
+import { rendererWorkspaceHandler } from "./rendererWorkspaceHandler";
 import { workspaceFileRef, type EngineFileResolver } from "../workspaces/resolveEngineFiles";
 import { nameSlug } from "@dohc/workspace-contracts/names";
 import {
@@ -188,6 +189,10 @@ export function registerChatsIpcHandlers<
   } = dependencies;
   const { requireChatScope, chatFileObjectId, resolveChatFileReferences } = dependencies.chatScope;
   const { materializeChatBookmark } = desktopChatBookmarks;
+  const bindWorkspace = rendererWorkspaceHandler({ assertTrustedSender, withRendererWorkspaceOperation });
+  const registerWorkspaceHandler: typeof registerHandler = (channel, handler) =>
+    registerHandler(channel, bindWorkspace(handler));
+
   function chatThreadForIpc(thread: ChatThread): ChatThreadRecord {
     return {
       id: thread.id,
@@ -214,7 +219,7 @@ export function registerChatsIpcHandlers<
     };
   }
 
-  registerHandler(CHANNELS.listFileChats, async (event, payload) => {
+  registerWorkspaceHandler(CHANNELS.listFileChats, async (event, payload) => {
     assertTrustedSender(event);
     const input = ListFileChatsPayload.parse(payload);
     // Reachable from a share view at every level. The file it names
@@ -238,7 +243,7 @@ export function registerChatsIpcHandlers<
     });
   });
 
-  registerHandler(CHANNELS.listChatFileMentions, async (event, payload) => {
+  registerWorkspaceHandler(CHANNELS.listChatFileMentions, async (event, payload) => {
     assertTrustedSender(event);
     const input = ListChatFileMentionsPayload.parse(payload);
     const { workspace, capture } = await requireEngineCapture(
@@ -322,7 +327,7 @@ export function registerChatsIpcHandlers<
     });
   });
 
-  registerHandler(CHANNELS.listChatBookmarks, async (event, payload) => {
+  registerWorkspaceHandler(CHANNELS.listChatBookmarks, async (event, payload) => {
     assertTrustedSender(event);
     const input = ListChatBookmarksPayload.parse(payload);
     const { workspace } = await requireEngineCapture(
@@ -339,7 +344,7 @@ export function registerChatsIpcHandlers<
     });
   });
 
-  registerHandler(CHANNELS.saveChatBookmark, async (event, payload) => {
+  registerWorkspaceHandler(CHANNELS.saveChatBookmark, async (event, payload) => {
     assertTrustedSender(event);
     const input = SaveChatBookmarkPayload.parse(payload);
     const { workspace, capture } = await requireEngineCapture(
@@ -383,7 +388,7 @@ export function registerChatsIpcHandlers<
     });
   });
 
-  registerHandler(CHANNELS.archiveChatBookmark, async (event, payload) => {
+  registerWorkspaceHandler(CHANNELS.archiveChatBookmark, async (event, payload) => {
     assertTrustedSender(event);
     const input = ArchiveChatBookmarkPayload.parse(payload);
     const { workspace, capture } = await requireEngineCapture(
@@ -402,7 +407,7 @@ export function registerChatsIpcHandlers<
     });
   });
 
-  registerHandler(CHANNELS.createFileChat, async (event, payload) => {
+  registerWorkspaceHandler(CHANNELS.createFileChat, async (event, payload) => {
     assertTrustedSender(event);
     const input = CreateFileChatPayload.parse(payload);
     // Reads are reachable from every received share. This mutation resolves
@@ -423,7 +428,7 @@ export function registerChatsIpcHandlers<
     return CreateFileChatResult.parse({ thread: chatThreadForIpc(thread) });
   });
 
-  registerHandler(CHANNELS.listChatMessages, async (event, payload) => {
+  registerWorkspaceHandler(CHANNELS.listChatMessages, async (event, payload) => {
     assertTrustedSender(event);
     const input = ListChatMessagesPayload.parse(payload);
     // Reachable from a share view at every level, for a thread on
@@ -438,7 +443,7 @@ export function registerChatsIpcHandlers<
     });
   });
 
-  registerHandler(CHANNELS.getChatThreadRevision, async (event, payload) => {
+  registerWorkspaceHandler(CHANNELS.getChatThreadRevision, async (event, payload) => {
     assertTrustedSender(event);
     const input = GetChatThreadRevisionPayload.parse(payload);
     const { workspace, store } = await requireChatScope(input.workspaceId);
@@ -449,7 +454,7 @@ export function registerChatsIpcHandlers<
     return GetChatThreadRevisionResult.parse({ revision });
   });
 
-  registerHandler(CHANNELS.sendChatMessage, async (event, payload) => {
+  registerWorkspaceHandler(CHANNELS.sendChatMessage, async (event, payload) => {
     assertTrustedSender(event);
     const input = SendChatMessagePayload.parse(payload);
     // A share view resolves a scope instead of a capture so reads still work.
@@ -470,7 +475,7 @@ export function registerChatsIpcHandlers<
     return SendChatMessageResult.parse({ message: chatMessageForIpc(message, automationCollectionOf(scope.workspace.workspaceId)) });
   });
 
-  registerHandler(CHANNELS.listChatThreadDecisions, async (event, payload) => {
+  registerWorkspaceHandler(CHANNELS.listChatThreadDecisions, async (event, payload) => {
     assertTrustedSender(event);
     const input = ListChatThreadDecisionsPayload.parse(payload);
     const { workspace } = await requireEngineCapture(
@@ -496,7 +501,7 @@ export function registerChatsIpcHandlers<
     });
   });
 
-  registerHandler(CHANNELS.resolveChatDecision, async (event, payload) => {
+  registerWorkspaceHandler(CHANNELS.resolveChatDecision, async (event, payload) => {
     assertTrustedSender(event);
     const input = ResolveChatDecisionPayload.parse(payload);
     // Reads are reachable from a share view; this mutation is not.
@@ -522,7 +527,7 @@ export function registerChatsIpcHandlers<
     });
   });
 
-  registerHandler(CHANNELS.listChatThreadAttachments, async (event, payload) => {
+  registerWorkspaceHandler(CHANNELS.listChatThreadAttachments, async (event, payload) => {
     assertTrustedSender(event);
     const input = ListChatThreadAttachmentsPayload.parse(payload);
     const { workspace } = await requireEngineCapture(
@@ -690,7 +695,7 @@ export function registerChatsIpcHandlers<
     };
   }
 
-  registerHandler(CHANNELS.listChatFollows, async (event, payload) => {
+  registerWorkspaceHandler(CHANNELS.listChatFollows, async (event, payload) => {
     assertTrustedSender(event);
     const input = ListChatFollowsPayload.parse(payload);
     const { workspace } = await requireEngineCapture(
@@ -711,7 +716,7 @@ export function registerChatsIpcHandlers<
     return ListChatFollowsResult.parse({ follows: follows.map(chatFollowForIpc) });
   });
 
-  registerHandler(CHANNELS.setChatFollow, async (event, payload) => {
+  registerWorkspaceHandler(CHANNELS.setChatFollow, async (event, payload) => {
     assertTrustedSender(event);
     const input = SetChatFollowPayload.parse(payload);
     const { workspace } = await requireEngineCapture(
@@ -768,7 +773,7 @@ export function registerChatsIpcHandlers<
     return SetChatFollowResult.parse({ follow: chatFollowForIpc(follow) });
   });
 
-  registerHandler(CHANNELS.listPersonalChatFeed, async (event, payload) => {
+  registerWorkspaceHandler(CHANNELS.listPersonalChatFeed, async (event, payload) => {
     assertTrustedSender(event);
     const input = ListPersonalChatFeedPayload.parse(payload);
     const { workspace } = await requireEngineCapture(
@@ -866,7 +871,7 @@ export function registerChatsIpcHandlers<
     });
   });
 
-  registerHandler(CHANNELS.markPersonalChatFeedSeen, async (event, payload) => {
+  registerWorkspaceHandler(CHANNELS.markPersonalChatFeedSeen, async (event, payload) => {
     assertTrustedSender(event);
     const input = MarkPersonalChatFeedSeenPayload.parse(payload);
     const { workspace } = await requireEngineCapture(
@@ -899,7 +904,7 @@ export function registerChatsIpcHandlers<
     return copy === undefined ? error : new Error(copy);
   }
 
-  registerHandler(
+  registerWorkspaceHandler(
     CHANNELS.createChatChannel,
     createChatChannelIpcHandler({
       assertTrustedSender,
@@ -938,7 +943,7 @@ export function registerChatsIpcHandlers<
     }),
   );
 
-  registerHandler(CHANNELS.listChannelThreads, async (event, payload) => {
+  registerWorkspaceHandler(CHANNELS.listChannelThreads, async (event, payload) => {
     assertTrustedSender(event);
     const input = ListChannelThreadsPayload.parse(payload);
     const { workspace } = await requireEngineCapture(
@@ -979,7 +984,7 @@ export function registerChatsIpcHandlers<
     });
   });
 
-  registerHandler(CHANNELS.startChannelThread, async (event, payload) => {
+  registerWorkspaceHandler(CHANNELS.startChannelThread, async (event, payload) => {
     assertTrustedSender(event);
     const input = StartChannelThreadPayload.parse(payload);
     const { workspace, capture } = await requireEngineCapture(
@@ -1013,7 +1018,7 @@ export function registerChatsIpcHandlers<
     });
   });
 
-  registerHandler(
+  registerWorkspaceHandler(
     CHANNELS.markChatThreadRead,
     createMarkChatThreadReadIpcHandler({
       assertTrustedSender,
@@ -1050,7 +1055,7 @@ export function registerChatsIpcHandlers<
     };
   }
 
-  registerHandler(CHANNELS.listChatReactions, async (event, payload) => {
+  registerWorkspaceHandler(CHANNELS.listChatReactions, async (event, payload) => {
     assertTrustedSender(event);
     const input = ListChatReactionsPayload.parse(payload);
     // Reachable from a share view at every level. The panel loads
@@ -1079,7 +1084,7 @@ export function registerChatsIpcHandlers<
     });
   });
 
-  registerHandler(CHANNELS.setChatReaction, async (event, payload) => {
+  registerWorkspaceHandler(CHANNELS.setChatReaction, async (event, payload) => {
     assertTrustedSender(event);
     const input = SetChatReactionPayload.parse(payload);
     // Reads are reachable from a share view; this mutation is not.

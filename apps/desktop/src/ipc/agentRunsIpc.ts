@@ -1,3 +1,4 @@
+import { rendererWorkspaceHandler } from "./rendererWorkspaceHandler";
 import type { ShareAccess } from "@dohc/security-contract/share-selector";
 import {
   ChatRunRecordsForThreadPayload, ChatRunRecordsForThreadResult, AgentRunPayload,
@@ -58,8 +59,10 @@ export function createAgentRunsIpc<
     openWorkspaceActivity,
   } = dependencies;
 
+  const bindWorkspace = rendererWorkspaceHandler({ assertTrustedSender, withRendererWorkspaceOperation });
+
   function registerChatRunRecords(): void {
-    registerHandler(CHANNELS.chatRunRecordsForThread, async (event, payload) => {
+    registerHandler(CHANNELS.chatRunRecordsForThread, bindWorkspace(async (event, payload) => {
       assertTrustedSender(event);
       const input = ChatRunRecordsForThreadPayload.parse(payload);
       const { workspace } = await requireEngineCapture(
@@ -92,7 +95,7 @@ export function createAgentRunsIpc<
         ]),
       );
       return ChatRunRecordsForThreadResult.parse({ runs });
-    });
+    }));
   }
 
   function registerAgentRuns(): void {
@@ -115,7 +118,7 @@ export function createAgentRunsIpc<
     });
     // Enabling agents starts a local run: the workspace must already be open (the
     // watcher must be live for the run slot to attach), so open it first.
-    registerHandler(CHANNELS.startAgentRun, async (event, payload) => {
+    registerHandler(CHANNELS.startAgentRun, bindWorkspace(async (event, payload) => {
       assertTrustedSender(event);
       const input = AgentRunPayload.parse(payload);
       const workspace = requireWorkspace(input.workspaceId);
@@ -124,25 +127,25 @@ export function createAgentRunsIpc<
       return StartAgentRunResult.parse(
         await startAgentRunWithWorkspaceActivity(workspace),
       );
-    });
+    }));
 
-    registerHandler(CHANNELS.endAgentRun, async (event, payload) => {
+    registerHandler(CHANNELS.endAgentRun, bindWorkspace(async (event, payload) => {
       assertTrustedSender(event);
       const input = EndAgentRunPayload.parse(payload);
       requireWorkspace(input.workspaceId);
       await agentIntegration.endAgentRun(input.workspaceId, input.runId, input.status ?? "complete");
-    });
+    }));
 
-    registerHandler(CHANNELS.getAgentRunStatus, async (event, payload) => {
+    registerHandler(CHANNELS.getAgentRunStatus, bindWorkspace(async (event, payload) => {
       assertTrustedSender(event);
       const input = AgentRunPayload.parse(payload);
       requireWorkspace(input.workspaceId);
       return AgentRunStatusResult.parse(await agentIntegration.getAgentRunStatus(input.workspaceId));
-    });
+    }));
 
     // The copyable MCP config snippet for the user's AI tool. Main owns the real
     // command/args so the renderer never invents a launch path.
-    registerHandler(CHANNELS.getMcpConfig, (event, payload) => {
+    registerHandler(CHANNELS.getMcpConfig, bindWorkspace(async (event, payload) => {
       assertTrustedSender(event);
       const input = AgentRunPayload.parse(payload);
       const workspace = requireWorkspace(input.workspaceId);
@@ -150,7 +153,7 @@ export function createAgentRunsIpc<
       // tool is offered only the write tools the grant allows.
       const shareAccess = mcpShareAccessOf(workspace.shareView);
       return McpConfigResult.parse(mcpConfigFor(workspace.rootPath, shareAccess));
-    });
+    }));
 
     registerHandler(CHANNELS.stopAgentRun, async (event, payload) => {
       assertTrustedSender(event);
@@ -165,7 +168,7 @@ export function createAgentRunsIpc<
       );
     });
 
-    registerHandler(CHANNELS.chatDispatchStateForThread, async (event, payload) => {
+    registerHandler(CHANNELS.chatDispatchStateForThread, bindWorkspace(async (event, payload) => {
       assertTrustedSender(event);
       const input = ChatDispatchStateForThreadPayload.parse(payload);
       await requireEngineCapture(
@@ -178,9 +181,9 @@ export function createAgentRunsIpc<
           input.threadId,
         ),
       );
-    });
+    }));
 
-    registerHandler(CHANNELS.resumeThreadDispatch, async (event, payload) => {
+    registerHandler(CHANNELS.resumeThreadDispatch, bindWorkspace(async (event, payload) => {
       assertTrustedSender(event);
       const input = ResumeThreadDispatchPayload.parse(payload);
       const { workspace } = await requireEngineCapture(
@@ -192,9 +195,9 @@ export function createAgentRunsIpc<
         input.workspaceId,
         input.threadId,
       );
-    });
+    }));
 
-    registerHandler(CHANNELS.runnerSelfTest, async (event, payload) => {
+    registerHandler(CHANNELS.runnerSelfTest, bindWorkspace(async (event, payload) => {
       assertTrustedSender(event);
       const input = RunnerSelfTestPayload.parse(payload);
       const workspace = requireWorkspace(input.workspaceId);
@@ -203,7 +206,7 @@ export function createAgentRunsIpc<
       return RunnerSelfTestResult.parse(
         await chatDispatchService.runnerSelfTest(input.workspaceId),
       );
-    });
+    }));
   }
 
   return { registerChatRunRecords, registerAgentRuns };

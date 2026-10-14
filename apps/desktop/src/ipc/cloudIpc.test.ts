@@ -28,6 +28,17 @@ const status: SyncStatusResult = {
   historyRecordingUnavailable: false, historyShareView: false, liveSessionsGeneration: 0,
 };
 
+it("binds workspace cloud status before reading services", async () => {
+  const h = await harness();
+  h.registry.set("other", { ...h.workspace, workspaceId: "other", rootPath: `${h.workspace.rootPath}-other` });
+  await expect(h.invoke(CHANNELS.cloudStatus, { workspaceId: "existing" })).resolves.toMatchObject({ connected: true });
+  const services = [h.login.status, h.daemonStartup, h.readSecrets];
+  services.forEach(service => service.mockClear());
+  await expect(h.invoke(CHANNELS.cloudStatus, { workspaceId: "other" })).rejects.toThrow("no longer active");
+  services.forEach(service => expect(service).not.toHaveBeenCalled());
+  await expect(h.invoke(CHANNELS.cloudStatus, {})).resolves.toMatchObject({ connected: true });
+});
+
 async function harness() {
   const steps: string[] = [];
   const home = resolve("/cloud-ipc-home").replace(/\\/g, "/");
