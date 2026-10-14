@@ -45,6 +45,8 @@ export interface OwnerYDocOutboxEntry {
   readonly update: Uint8Array;
   readonly byteLength: number;
   readonly createdAtMs: number;
+  /** Present when the engine recorded the queued edit as a person's. Never authority. */
+  readonly personEdit?: true;
   /** The agent the queued edit declared; absent when it declared none. Never authority. */
   readonly agentDeclaration?: AgentDeclaration;
   readonly automationDeclaration?: AutomationDeclaration;
@@ -357,12 +359,14 @@ export class OwnerYDocOutbox {
       const updateDigest = digestField(entry, "updateDigest");
       const update = await readPart("update", sequence, byteLength, updateDigest);
       if (Object.hasOwn(entry, "agentDeclaration") && Object.hasOwn(entry, "automationDeclaration")) throw new TypeError("Owner draft declares two author kinds.");
+      if (Object.hasOwn(entry, "personEdit") && entry.personEdit !== true) throw new TypeError("Invalid owner person marker.");
       entries.push({
         sequence,
         appendKey: stringField(entry, "appendKey"),
         deliveryId: stringField(entry, "deliveryId"),
         updateDigest, update, byteLength,
         createdAtMs: wireInteger(entry, "createdAtMs"),
+        ...(entry.personEdit === true ? {personEdit: true as const} : {}),
         ...(Object.hasOwn(entry, "automationDeclaration") ? {automationDeclaration: parseAutomationDeclaration(entry.automationDeclaration)} : {}),
         ...(Object.hasOwn(entry, "agentDeclaration")
           ? { agentDeclaration: parseAgentDeclaration(entry.agentDeclaration) }

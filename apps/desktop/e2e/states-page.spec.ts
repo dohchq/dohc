@@ -69,6 +69,8 @@ const PARTS = [
   "about-conversation",
   "file-view-actions",
   "offers",
+  "page-identity",
+  "settings-sync",
 ];
 // A fixed instant for the page's clock. The capture pauses the clock an
 // hour past it, so the real time that passes between installing and

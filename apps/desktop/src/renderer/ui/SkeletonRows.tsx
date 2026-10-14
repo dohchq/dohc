@@ -20,7 +20,7 @@ const LAYOUT = {
   list: "",
   panel: "min-h-0 flex-1 p-3",
   // The editor's 720px measure inside its 56px gutters (styles.css,
-  // .dohc-notion-editor and .dohc-page-identity). The width is explicit:
+  // .dohc-notion-editor and .dohc-page-identity; pageTopmatter.ts). The width is explicit:
   // auto margins alone would shrink the column to nothing in a flex parent.
   // Put it in a pane that keeps its scrollbar's room, as document panes do,
   // or it centres 5px off a long document.
