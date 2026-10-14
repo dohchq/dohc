@@ -10,6 +10,7 @@ import type {
   ChatMessageRecord,
   ChatThreadRecord,
   CloudStatusResult,
+  DatabaseSnapshotResult,
   EngineMomentRecord,
   HistoryPolicyUnreadableResult,
   SitePackageInfo,
@@ -19,6 +20,7 @@ import type {
 } from "../../ipc/bridgeContract";
 import { readError, withErrorWords } from "../../ipc/errorWords";
 import { CsvPreviewBound, CsvTable, CsvViewActions, csvColumns } from "../CsvView";
+import { DatabaseGrid, DatabaseViewActions, editOf } from "../DatabaseStudioView";
 import { DocumentMenu } from "../DocumentMenu";
 import { FrontmatterAsWritten } from "../FrontmatterAsWritten";
 import { PageIdentity } from "../PageIdentity";
@@ -2235,8 +2237,10 @@ function Pane(props: { theme: "light" | "dark" }) {
 
       {/* Last, so the parts above keep their places. A CSV's rows and
           columns: numbers at the right in mono, row numbers in the gutter,
-          and each row's and column's actions only on hover or focus. */}
-      <Section part="data-grid" title="Data grid">
+          and each row's and column's actions only on hover or focus. A
+          database table: each column's type as an icon, the active cell,
+          the editing cell, a sort, and the read-only mark. */}
+      <Section part="data-grid" title="Data grid" menusAtRest>
         <Specimen label="CSV at rest: numbers, Add row and Add column">
           <CsvGridSpecimen />
         </Specimen>
@@ -2274,6 +2278,33 @@ function Pane(props: { theme: "light" | "dark" }) {
         <Specimen label="CSV the preview's bound">
           <CsvPreviewBound rowCount={1240} />
         </Specimen>
+        <Specimen label="database at rest: text, numbers, bytes and an untyped column">
+          <DatabaseGridSpecimen />
+        </Specimen>
+        <Specimen label="database sorted by count, descending">
+          <DatabaseGridSpecimen sort={{ column: "count", direction: "desc" }} />
+        </Specimen>
+        {/* The cell holds focus itself, as an arrow key or a click leaves it. */}
+        <Specimen label="database the active cell">
+          <div data-force-state="focus focus-visible focus-within" data-force-target="tbody tr:nth-child(2) td:nth-child(2)">
+            <DatabaseGridSpecimen />
+          </div>
+        </Specimen>
+        <Specimen label="database the editing cell">
+          <div data-force-state="focus-within" data-force-target="tbody tr:nth-child(2) td:nth-child(2)">
+            <div data-force-state="focus focus-visible" data-force-target="tbody tr:nth-child(2) td:nth-child(2) input">
+              <DatabaseGridSpecimen editing />
+            </div>
+          </div>
+        </Specimen>
+        <Specimen label="database read-only, shared with you to read" className="w-full">
+          <TabRowActionsSpecimen width="w-full" path="data/funnel.sqlite">
+            <DatabaseViewActions onShare={noop} readOnlyReason="This database is shared with you to read." />
+            <div className="bg-bg px-4 pt-3">
+              <DatabaseGridSpecimen readOnly />
+            </div>
+          </TabRowActionsSpecimen>
+        </Specimen>
       </Section>
     </section>
   );
@@ -2292,6 +2323,47 @@ function CsvGridSpecimen(props: { rows?: string[][]; locked?: boolean }) {
   return (
     <CsvTable rows={rows} columns={csvColumns(rows)} locked={props.locked ?? false}
       onUpdateCell={noop} onEndEdit={noop} onDeleteRow={noop} onDeleteColumn={noop} onAddRow={noop} onAddColumn={noop} />
+  );
+}
+
+const GRID_DATABASE: DatabaseSnapshotResult["tables"][number] = {
+  name: "funnel",
+  columns: [
+    { name: "stage", type: "TEXT" },
+    { name: "count", type: "INTEGER", nullable: false },
+    { name: "conversion", type: "REAL" },
+    { name: "export", type: "BLOB" },
+    { name: "note", type: "" },
+  ],
+  rows: [
+    { __dohc_rowid: 1, stage: "Visited", count: 4820, conversion: 1, export: "<blob 16 bytes>", note: null },
+    { __dohc_rowid: 2, stage: "Signed up", count: 1290, conversion: 0.27, export: "<blob 16 bytes>", note: "trial" },
+    { __dohc_rowid: 3, stage: "Created doc", count: 860, conversion: 0.18, export: null, note: null },
+    { __dohc_rowid: 4, stage: "Invited agent", count: 340, conversion: 0.07, export: null, note: "team" },
+  ],
+  nextOffset: null,
+};
+const GRID_DATABASE_ROWS = GRID_DATABASE.rows.map((row, sourceIndex) => ({ row, sourceIndex }));
+
+function DatabaseGridSpecimen(props: {
+  sort?: ComponentProps<typeof DatabaseGrid>["sort"];
+  editing?: boolean;
+  readOnly?: boolean;
+}) {
+  // The rows are already in descending count, as the sort specimen shows them.
+  return (
+    <DatabaseGrid
+      table={GRID_DATABASE}
+      rows={GRID_DATABASE_ROWS}
+      readOnly={props.readOnly ?? false}
+      editing={props.editing ? editOf(GRID_DATABASE, GRID_DATABASE.rows[1]!, "stage") : null}
+      draftRef={{ current: "Signed in" }}
+      sort={props.sort ?? null}
+      onSort={noop}
+      onBeginEdit={noop}
+      onCommit={noop}
+      onCancel={noop}
+    />
   );
 }
 

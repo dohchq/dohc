@@ -9,6 +9,7 @@ import { ViewActions } from "./fileInspectorUi";
 import { extensionOf } from "./path";
 import type { SharedLocalDocument } from "./sharedLocalDocument";
 import {
+  cellMeasure,
   DataGrid,
   DataGridCell,
   type DataGridColumn,
@@ -281,7 +282,7 @@ const CsvTableHeader = memo(function CsvTableHeader({
           </DataGridHeaderCell>
         ))}
         {!truncated ? (
-          <th className="w-8 border-l border-line bg-panel-2 p-0">
+          <th className="sticky top-0 z-10 w-8 border-l border-line bg-panel-2 p-0">
             <IconButton
               data-testid="csv-add-column"
               aria-label="Add column"
@@ -743,7 +744,8 @@ export function CsvTable(props: {
   const columnCount = columnCountFor(rows);
   return (
     <div className="min-h-0 flex-1 overflow-auto p-4">
-      <DataGrid columns={columns} headerAction={!locked} trailing={!locked}>
+      {/* Room for Delete column: its 20px button and a 4px gap. */}
+      <DataGrid columns={columns} headerRoom={locked ? 0 : 24} trailing={!locked}>
         <CsvTableHeader
           header={header}
           columnCount={columnCount}
@@ -820,17 +822,6 @@ function csvColumn(rows: string[][], column: number): DataGridColumn {
     }
   }
   return { numeric, header: rows[0]?.[column] ?? "", cell };
-}
-
-// Measures a cell's text as the grid draws it: 12px mono for numbers, 13px
-// sans otherwise. Where no canvas can measure (a test DOM), it counts
-// characters.
-function cellMeasure(numeric: boolean): (text: string) => number {
-  const context = typeof OffscreenCanvas === "undefined" ? null : new OffscreenCanvas(1, 1).getContext("2d");
-  if (!context) return (text) => text.length;
-  const root = getComputedStyle(document.documentElement);
-  context.font = numeric ? `12px ${root.getPropertyValue("--font-mono")}` : `13px ${root.getPropertyValue("--font-sans")}`;
-  return (text) => context.measureText(text).width;
 }
 
 function holdsNumbers(rows: string[][], column: number): boolean {

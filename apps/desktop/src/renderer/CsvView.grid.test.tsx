@@ -202,6 +202,26 @@ describe("CSV grid", () => {
     expect(screen.getByTestId("data-grid-widths").getAttribute("aria-hidden")).toBe("true");
     expect(screen.getByTestId("data-grid-widths").querySelector("input, button")).toBeNull();
   });
+
+  it("leaves room in each header's width for Delete column, and none in a read-only table", () => {
+    const headerRoom = () =>
+      (screen.getByTestId("data-grid-widths").querySelectorAll("td")[1]!.firstElementChild as HTMLElement).style.paddingRight;
+    table(FUNNEL);
+    expect(headerRoom()).toBe("34px");
+    cleanup();
+    table(FUNNEL, true);
+    expect(headerRoom()).toBe("10px");
+  });
+
+  it("keeps the whole header in view while the rows scroll", () => {
+    table(FUNNEL);
+    // A frame that clips without scrolling, so the pane's scroller holds the header.
+    expect(screen.getByRole("table").className).toContain("overflow-clip");
+    expect(screen.getByRole("table").className).not.toContain("overflow-hidden");
+    for (const header of screen.getByRole("table").querySelectorAll("thead th")) {
+      expect(header.className).toContain("sticky top-0");
+    }
+  });
 });
 
 describe("CSV view while typing", () => {
