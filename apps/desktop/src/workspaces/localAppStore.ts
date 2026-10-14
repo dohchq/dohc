@@ -51,17 +51,29 @@ export function createLocalAppStore(options: {
     db.prepare("INSERT INTO local_app_roots VALUES(?,?,?,?) ON CONFLICT(app_root) DO UPDATE SET revision=excluded.revision,active_kind=excluded.active_kind,active_publication_id=excluded.active_publication_id")
       .run(row.appRoot, revision, active ? row.kind : null, active ? row.publicationId : null);
   }
+  function assertCanAdvance(revisions: string, values: string[] = []) {
+    if (db.prepare('SELECT 1 FROM (' + revisions + ') WHERE revision<0 OR revision>=? LIMIT 1').get(...values, Number.MAX_SAFE_INTEGER))
+      throw new Error("Invalid app authority revision.");
+  }
   options.transaction(() => {
     db.exec("CREATE TABLE IF NOT EXISTS local_app_roots(app_root TEXT PRIMARY KEY,revision INTEGER NOT NULL,active_kind TEXT,active_publication_id TEXT,CHECK((active_kind IS NULL)=(active_publication_id IS NULL))) STRICT");
+    db.exec("CREATE TABLE IF NOT EXISTS local_app_approval_provenance(publication_id TEXT PRIMARY KEY,provenance TEXT NOT NULL) STRICT");
+    for (const storage of options.sources) storage.ensureSchema();
     for (const storage of options.sources) {
-      storage.ensureSchema();
-      if (!db.prepare('PRAGMA table_info(' + storage.publicationTable + ')').all().some(column => column.name === "approval_provenance"))
-        db.exec('ALTER TABLE ' + storage.publicationTable + ' ADD COLUMN approval_provenance TEXT');
-      for (const row of rows(storage, "", [])) {
-        const previous = root(row.appRoot);
-        if (!previous || row.authorityRevision >= previous.revision) writeRoot(row, row.authorityRevision, row.active);
-      }
+      const table = storage.publicationTable;
+      db.prepare('INSERT INTO local_app_roots SELECT app_root,authority_revision,CASE WHEN active=1 THEN ? END,CASE WHEN active=1 THEN publication_id END FROM ' + table + ' WHERE 1 ON CONFLICT(app_root) DO NOTHING').run(storage.kind);
+      // Older builds can delete, withdraw, or replace rows without updating roots.
+      const stale = 'active_kind=? AND NOT EXISTS(SELECT 1 FROM ' + table + ' p WHERE p.app_root=local_app_roots.app_root AND p.publication_id=local_app_roots.active_publication_id AND p.active=1 AND p.authority_revision=local_app_roots.revision)';
+      assertCanAdvance('SELECT revision FROM local_app_roots WHERE ' + stale, [storage.kind]);
+      db.prepare('UPDATE local_app_roots SET revision=revision+1,active_kind=NULL,active_publication_id=NULL WHERE ' + stale).run(storage.kind);
+      const untracked = 'active=1 AND NOT EXISTS(SELECT 1 FROM local_app_roots r WHERE r.app_root=p.app_root AND r.active_kind=? AND r.active_publication_id=p.publication_id AND r.revision=p.authority_revision)';
+      const revision = 'MAX(authority_revision,(SELECT revision FROM local_app_roots r WHERE r.app_root=p.app_root))';
+      assertCanAdvance('SELECT ' + revision + ' AS revision FROM ' + table + ' p WHERE ' + untracked, [storage.kind]);
+      db.prepare('UPDATE ' + table + ' AS p SET authority_revision=' + revision + '+1 WHERE ' + untracked).run(storage.kind);
+      db.prepare('INSERT INTO local_app_roots SELECT app_root,authority_revision,?,publication_id FROM ' + table + ' WHERE active=1 ON CONFLICT(app_root) DO UPDATE SET revision=excluded.revision,active_kind=excluded.active_kind,active_publication_id=excluded.active_publication_id').run(storage.kind);
+      db.exec('UPDATE local_app_roots AS r SET revision=MAX(revision,COALESCE((SELECT MAX(authority_revision) FROM ' + table + ' p WHERE p.app_root=r.app_root),0)) WHERE active_publication_id IS NULL');
     }
+    db.exec('DELETE FROM local_app_approval_provenance WHERE ' + options.sources.map(storage => 'NOT EXISTS(SELECT 1 FROM ' + storage.publicationTable + ' p WHERE p.publication_id=local_app_approval_provenance.publication_id)').join(' AND '));
   });
   function lookup(publicationId: string) {
     options.assertCurrent();
@@ -111,13 +123,15 @@ export function createLocalAppStore(options: {
         if (!currentRoot?.active_publication_id && count >= 64) throw new Error("Remove an app before approving another one.");
         authorityRevision = nextRevision(candidate.appRoot);
         if (previous) {
+          db.prepare('DELETE FROM local_app_approval_provenance WHERE publication_id=?').run(previous.publicationId);
           db.prepare('DELETE FROM ' + storage.artifactTable + ' WHERE publication_id=?').run(previous.publicationId);
           db.prepare('DELETE FROM ' + storage.publicationTable + ' WHERE publication_id=?').run(previous.publicationId);
           options.charge(previous.kind, previous.resourceId, -previous.storageBytes);
         }
         options.charge(input.kind, input.resourceId, storageBytes);
-        db.prepare('INSERT INTO ' + storage.publicationTable + '(publication_id,app_root,' + storage.resourceColumn + ',authority_revision,candidate,storage_bytes,active,approval_provenance) VALUES(?,?,?,?,?,?,1,?)')
-          .run(input.publicationId, candidate.appRoot, input.resourceId, authorityRevision, json, storageBytes, provenance);
+        db.prepare('INSERT INTO ' + storage.publicationTable + '(publication_id,app_root,' + storage.resourceColumn + ',authority_revision,candidate,storage_bytes,active) VALUES(?,?,?,?,?,?,1)')
+          .run(input.publicationId, candidate.appRoot, input.resourceId, authorityRevision, json, storageBytes);
+        db.prepare('INSERT INTO local_app_approval_provenance VALUES(?,?)').run(input.publicationId, provenance);
         for (const file of files) db.prepare('INSERT INTO ' + storage.artifactTable + ' VALUES(?,?,?)').run(input.publicationId, file.path, file.bytes);
         writeRoot({ appRoot: candidate.appRoot, kind: input.kind, publicationId: input.publicationId }, authorityRevision, true);
       });
@@ -149,12 +163,13 @@ export function createLocalAppStore(options: {
     deleteResources(kind: LocalAppKind, resourceId: string) {
       options.assertCurrent();
       const storage = source(kind);
-      for (const value of rows(storage, 'WHERE ' + storage.resourceColumn + '=?', [resourceId])) {
-        const authority = root(value.appRoot);
-        if (authority?.active_kind === kind && authority.active_publication_id === value.publicationId) writeRoot(value, nextRevision(value.appRoot), false);
-        db.prepare('DELETE FROM ' + storage.artifactTable + ' WHERE publication_id=?').run(value.publicationId);
-        db.prepare('DELETE FROM ' + storage.publicationTable + ' WHERE publication_id=?').run(value.publicationId);
-      }
+      const publications = 'SELECT publication_id FROM ' + storage.publicationTable + ' WHERE ' + storage.resourceColumn + '=?';
+      const active = 'active_kind=? AND active_publication_id IN (' + publications + ')';
+      assertCanAdvance('SELECT revision FROM local_app_roots WHERE ' + active, [kind, resourceId]);
+      db.prepare('UPDATE local_app_roots SET revision=revision+1,active_kind=NULL,active_publication_id=NULL WHERE ' + active).run(kind, resourceId);
+      db.prepare('DELETE FROM local_app_approval_provenance WHERE publication_id IN (' + publications + ')').run(resourceId);
+      db.prepare('DELETE FROM ' + storage.artifactTable + ' WHERE publication_id IN (' + publications + ')').run(resourceId);
+      db.prepare('DELETE FROM ' + storage.publicationTable + ' WHERE ' + storage.resourceColumn + '=?').run(resourceId);
     },
   };
 }

@@ -11,7 +11,6 @@ export function createLocalApps(store: LocalAppStore, dataset: ReturnType<typeof
       return store.browserPublication(publicationId);
     },
     assertBrowserPublication(publicationId, authorityRevision) {
-      store.assertBrowserPublication(publicationId, authorityRevision);
       dataset.current(publicationId, authorityRevision);
     },
     request: (publicationId, action, input, signal) => dataset.request(publicationId, action, input, signal),

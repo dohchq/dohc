@@ -3240,7 +3240,7 @@ describe("workspaceEngineCapture agent attribution", () => {
     try {
       const draft = await engine.createVersion("Draft");
       await expect(engine.writeAuthoredFile(join(root, "pending.md"), "pending\n", author,
-        { createOnly: true, requestId: "saved-request", momentId: "saved-moment", versionId: "main" })).rejects.toThrow();
+        { createOnly: true, requestId: "saved-request", momentId: "saved-moment", versionId: "main" })).rejects.toMatchObject({ code: "invalid-version" });
       expect(requests.findLast(request => request.method === VERSIONED_METHOD.textWrite)).toMatchObject({ params: { versionId: "main" } });
       expect(draft.activeVersionId).not.toBe("main");
       expect(await readFile(join(root, "pending.md"), "utf8").catch(() => null)).toBeNull();
