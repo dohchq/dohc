@@ -719,7 +719,7 @@ export function createNoticeStore(deps: {
           const tooLarge = /too large|exceeds|projection.*limit/iu.test(refusal.reason);
           const bindingChanged = refusal.reason === SETTLEMENT_BINDING_CHANGED;
           const body = bindingChanged
-            ? `The name, location, or sharing of ${name} changed before this save arrived. Open the file to continue.`
+            ? `The name, location, or sharing of ${name} changed before this save arrived.${document?.path ? " Open the file to continue." : ""}`
             : `dohc could not update ${name}.${tooLarge ? " The change is too large." : ""} ${document?.conflictId
             ? "Open its conflict and choose a copy."
             : tooLarge ? "Make the file smaller on the other computer, then try sync again." : "Review the file on the other computer, then try sync again."}`;
