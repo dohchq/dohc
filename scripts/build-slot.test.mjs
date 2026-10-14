@@ -48,10 +48,10 @@ const verifierLane = (env, options) => acquireVerificationSlot(env, { entry: ver
 test("exclusive local ownership rejects live owners without creating a queue", t => {
   const root = slotRoot();
   t.after(() => rmSync(root, {recursive: true, force: true}));
-  const options = {root, kind: "checkout", metadata: {purpose: "light verification", checkout: "fixture-checkout", commit: "fixture-sha"}};
+  const options = {root, kind: "checkout", metadata: {purpose: "PR verification", checkout: "fixture-checkout", commit: "fixture-sha"}};
   const owner = acquireExclusiveSlot(options);
   t.after(() => owner.release());
-  assert.throws(() => acquireExclusiveSlot(options), new RegExp(`pid ${process.pid}.*light verification.*fixture-checkout.*fixture-sha`));
+  assert.throws(() => acquireExclusiveSlot(options), new RegExp(`pid ${process.pid}.*PR verification.*fixture-checkout.*fixture-sha`));
   assert.equal(existsSync(join(root, "checkout-queue")), false);
   owner.release();
   const next = acquireExclusiveSlot(options);
@@ -406,7 +406,7 @@ function queueHarness(t) {
       if (observe) options.observeTicket = ticket => { process.send({ type: "observed", ...ticket, text: readFileSync(ticket.path, "utf8") }); };
       try {
         slot = await (${JSON.stringify(kind)} !== "build-slot"
-          ? acquireVerificationSlot({ DOHC_BUILD_SLOT_ROOT: process.argv[1] }, { lightweight: ${JSON.stringify(kind)} === "verification-light-slot", entry: ${JSON.stringify(verifier)}, ...options })
+          ? acquireVerificationSlot({ DOHC_BUILD_SLOT_ROOT: process.argv[1] }, { entry: ${JSON.stringify(verifier)}, ...options })
           : acquireBuildSlot({ root: process.argv[1], slots: 1, waitMs: 20_000, pollMs: 60_000, ...options }));
         process.send({ type: "acquired", name: slot.name });
       } catch (error) {
@@ -555,7 +555,7 @@ test("status CLI reads absent queues without creating or acquiring anything", t 
   const result = spawnSync(process.execPath, [new URL("../tools/rust-engine-program/build-slot.mjs", import.meta.url).pathname.replace(/^\/(\w:)/u, "$1"), "--status", "--root", absent], {encoding: "utf8", timeout: 5000});
   assert.equal(result.status, 0, result.stderr);
   const status = JSON.parse(result.stdout);
-  assert.equal(status.lanes.length, 3);
+  assert.deepEqual(status.lanes.map(lane => lane.kind), ["build-slot", "verification-slot"]);
   assert.ok(status.lanes.every(lane => !lane.owners.length && !lane.queued));
   assert.equal(existsSync(absent), false);
 });
@@ -593,42 +593,6 @@ test("status CLI reports configured empty trial capacity without acquiring a lan
   assert.equal(status.verificationConfigurationError, null);
   assert.equal(status.lanes.find(lane => lane.kind === "verification-slot").slots, 2);
   assert.equal(existsSync(trial), false);
-});
-
-test("a bounded light gate completes while eighteen heavy waiters remain queued", async t => {
-  const {root, start, message} = queueHarness(t);
-  const holder = await verifierLane({DOHC_BUILD_SLOT_ROOT: root});
-  t.after(() => holder.release());
-  for (let i = 1; i <= 18; i += 1) plantTicket(root, i, {pid: process.pid, kind: "verification-slot"});
-  await assert.rejects(verifierLane({DOHC_BUILD_SLOT_ROOT: root}, {waitMs: 0}), /all 1 slots are held/);
-  const started = performance.now();
-  const light = start("light", {kind: "verification-light-slot", metadata: {purpose: "light PR verification"}});
-  await message(light, "acquired");
-  const elapsed = performance.now() - started;
-  assert.ok(elapsed < 5000, `light admission took ${elapsed.toFixed(1)}ms`);
-  assert.equal(tickets(root, "verification-slot").length, 18);
-  assert.equal(existsSync(holder.dir), true);
-  light.send("release");
-  await waitFor(() => light.closed, "light gate must finish while heavy holder remains");
-  assert.equal(existsSync(holder.dir), true);
-  t.diagnostic(`Isolated scheduler: light admission ${elapsed.toFixed(1)}ms; heavy backlog 18; heavy holder stayed active.`);
-});
-
-test("light admission remains capped, cleans up timeouts and cancellation, and preserves full owners", async t => {
-  const {root, start, message} = queueHarness(t);
-  const full = await verifierLane({DOHC_BUILD_SLOT_ROOT: root});
-  const light = await verifierLane({DOHC_BUILD_SLOT_ROOT: root}, {lightweight: true});
-  t.after(() => {full.release(); light.release();});
-  await assert.rejects(verifierLane({DOHC_BUILD_SLOT_ROOT: root}, {lightweight: true, waitMs: 0}), /all 1 slots are held/);
-  assert.deepEqual(tickets(root, "verification-light-slot"), []);
-  const waiter = start("cancel-light", {kind: "verification-light-slot"});
-  await message(waiter, "waiting");
-  waiter.send("SIGINT");
-  await waitFor(() => waiter.closed, "cancelled light waiter must exit");
-  assert.equal(waiter.exitCode, 130);
-  assert.deepEqual(tickets(root, "verification-light-slot"), []);
-  assert.equal(existsSync(full.dir), true);
-  assert.equal(existsSync(light.dir), true);
 });
 
 test("a verification ticket observer reads the published ticket before any lane exists", async () => {
@@ -749,18 +713,13 @@ test("observed verification waiters keep FIFO order, lane counts, and cancellati
   await waitFor(() => cancelled.closed, "cancelled observed waiter must exit");
   assert.equal(cancelled.exitCode, 130);
   assert.equal(tickets(root, "verification-slot").length, 2);
-  const light = start("light", {kind: "verification-light-slot", observe: true});
-  assert.equal((await message(light, "observed")).kind, "verification-light-slot");
-  await message(light, "acquired");
-  assert.deepEqual(tickets(root, "verification-light-slot"), []);
   holder.release();
   for (let id = 1; id <= 2; id += 1) {
-    await waitFor(() => acquired.length > id, "released slot must hand off in FIFO order", 5000);
-    assert.deepEqual(acquired, ["light", ...Array.from({length: id}, (_, index) => index + 1)]);
+    await waitFor(() => acquired.length >= id, "released slot must hand off in FIFO order", 5000);
+    assert.deepEqual(acquired, Array.from({length: id}, (_, index) => index + 1));
     waiters[id - 1].send("release");
     await waitFor(() => waiters[id - 1].closed, "released waiter must exit");
   }
-  light.send("release");
 });
 
 test("Windows CI is uncapped unless an explicit slot root requests the workstation budget", () => {
@@ -940,7 +899,7 @@ test("only this checkout's PR verifier can take a verification lane", async t =>
   const env = { DOHC_BUILD_SLOT_ROOT: root };
   assert.throws(() => acquireVerificationSlot(env), /Only the PR verifier/);
   for (const entry of ["", join(root, "run-admitted-host.mjs"), join(root, "scripts/verification/verify.mjs")]) {
-    assert.throws(() => acquireVerificationSlot(env, { entry, lightweight: entry === "" }), /Only the PR verifier/);
+    assert.throws(() => acquireVerificationSlot(env, { entry }), /Only the PR verifier/);
   }
   assert.deepEqual(readdirSync(root), []);
   const lane = await verifierLane(env);
