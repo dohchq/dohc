@@ -10,11 +10,32 @@ export function relayInitializationRequired(config, dataDirectory, continuityDir
   return true;
 }
 
+/** The bundled database stays inside the Compose network. An external one must present a certificate signed by the provider's CA. */
+export function postgresUrl(env) {
+  const credentials = `${encodeURIComponent(env.POSTGRES_USER ?? 'dohc')}:${encodeURIComponent(env.POSTGRES_PASSWORD)}`;
+  const database = encodeURIComponent(env.POSTGRES_DB ?? 'dohc');
+  if (!env.DOHC_POSTGRES_HOST) return `postgres://${credentials}@postgres:5432/${database}`;
+  return `postgres://${credentials}@${env.DOHC_POSTGRES_HOST}:${env.DOHC_POSTGRES_PORT}/${database}?sslmode=verify-full&sslrootcert=/etc/dohc/postgres-ca.pem`;
+}
+
+/** Migrations record every applied id, so a database without one has never held dohc's accounts. */
+export async function accountsSchemaState(client) {
+  const { rows: [table] } = await client.query("select to_regclass('dohc_migrations') is not null as present");
+  if (!table.present) return 'missing';
+  const { rows: [applied] } = await client.query('select exists (select 1 from dohc_migrations) as present');
+  return applied.present ? 'present' : 'missing';
+}
+
+async function checkAccounts() {
+  const { default: pg } = await import('pg');
+  const client = new pg.Client({ connectionString: process.env.POSTGRES_URL, connectionTimeoutMillis: 10_000 });
+  await client.connect();
+  try { console.log(await accountsSchemaState(client)); } finally { await client.end(); }
+}
+
 async function main(action) {
-  const password = process.env.POSTGRES_PASSWORD;
-  if (password !== undefined) {
-    process.env.POSTGRES_URL = `postgres://${encodeURIComponent(process.env.POSTGRES_USER ?? 'dohc')}:${encodeURIComponent(password)}@postgres:5432/${encodeURIComponent(process.env.POSTGRES_DB ?? 'dohc')}`;
-  }
+  if (process.env.POSTGRES_PASSWORD !== undefined) process.env.POSTGRES_URL = postgresUrl(process.env);
+  if (action === 'check-accounts') return checkAccounts();
   const entrypoints = {
     'workspace-api': '/app/services/workspace-api/dist/main.js',
     'sync-relay': '/app/services/sync-relay/dist/main.js',
@@ -32,7 +53,7 @@ async function main(action) {
     }
     return;
   }
-  if (!Object.hasOwn(entrypoints, action)) throw new Error('Expected workspace-api, sync-relay, share-web, migrate, or initialize.');
+  if (!Object.hasOwn(entrypoints, action)) throw new Error('Expected workspace-api, sync-relay, share-web, migrate, initialize, or check-accounts.');
   await import(pathToFileURL(entrypoints[action]).href);
 }
 

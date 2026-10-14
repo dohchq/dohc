@@ -13,7 +13,7 @@ Use the same environment file and Compose overrides as your running deployment.
 | `restore` | Repairs missing or corrupt relay storage from a matching snapshot | Refuses snapshots older than accepted relay writes |
 | `archive` | All named deployment volumes, configuration, secrets and image identities | Preserves evidence; no full-deployment restore command |
 | `salvage` | Exports settled tracked file contents from an old snapshot | Creates ordinary files; does not restore a running deployment |
-| `move.mjs` | Starts the deployment on a new host from its attached data disk | Requires the data-disk layout; accounts move separately |
+| `move.mjs` | Starts the deployment on a new host from its attached data disk | Requires the data-disk layout; accounts move separately unless they are in an external database |
 
 The relay keeps an independent continuity record outside its database volume.
 Every accepted mutation advances that record, including permission changes and schema migrations.
@@ -102,6 +102,7 @@ node scripts/self-host/recovery.mjs archive /srv/dohc-backups/deployment-before-
 
 The command stops the project and archives each named volume without modifying it.
 This includes authentication, relay, live-host, continuity and TLS data declared by Compose.
+With an [external database](self-host.md#keep-accounts-in-an-external-postgres), the archive does not include accounts.
 It also saves the environment, resolved Compose configuration, bound configuration files and image identities.
 Bound directories are refused because this procedure does not define their backup scope.
 The command resumes previously running services after success.
@@ -186,6 +187,7 @@ Bring these separately:
   Those people cannot open their workspaces, even after they sign up again, because they get new accounts.
   Without this volume, the new server has no accounts, and nobody can open the workspaces on the disk as their owner.
   The move command refuses to start until the volume holds an accounts database.
+  With an [external database](#accounts-in-an-external-database), skip the accounts volume.
 - Nothing for TLS. In public mode, Caddy obtains new certificates when the deployment starts on the new host.
 
 Never copy the disk to run a second server.
@@ -195,7 +197,8 @@ Each copy would accept different work under the same deployment identity.
 
 1. If the old host still responds, run `node tools/self-host/bootstrap.mjs stop` there.
 2. On the old host, run `docker ps` and confirm that no dohc service is running.
-3. On the old host, save the accounts volume to a file in a new private folder:
+3. With an external database, skip this step.
+   Otherwise, on the old host, save the accounts volume to a file in a new private folder:
 
    ```sh
    (umask 077 && mkdir dohc-accounts && docker run --rm --network none \
@@ -211,12 +214,15 @@ Each copy would accept different work under the same deployment identity.
 6. In your provider's console, confirm that the old host is off and the disk has no attachment.
 
 If the old host starts again without the disk, its relay cannot start because its data folder is missing.
+With an external database, its sign-in service can still start and use that database. Keep the old host off.
 
 ### Start the deployment on the new host
 
 1. Prepare the new host as described in [Set up a dohc server](self-host.md#prepare-the-host).
 2. Copy the release bundle and `.env.self-host` to the new host, then load the release image.
-3. From the folder that holds `dohc-accounts`, restore the accounts volume under the same name:
+3. With an external database, copy its CA certificate to the path that `DOHC_POSTGRES_CA_FILE` names, and skip the rest of this step.
+   If your provider limits which addresses can connect, allow the new host's address.
+   Otherwise, from the folder that holds `dohc-accounts`, restore the accounts volume under the same name:
 
    ```sh
    docker volume create dohc-self-host_dohc_self_host_postgres
@@ -241,6 +247,7 @@ The command refuses to start anything in these cases:
 
 - An existing deployment volume on this host keeps its data somewhere other than the disk.
 - The accounts volume is missing or holds no database.
+- With an external database, the database is unreachable or holds no dohc accounts.
 - `deployment.json` or the relay database is missing from the disk. The command checks through the relay's own volumes.
 - Docker cannot complete one of these checks.
 
@@ -254,10 +261,26 @@ If the relay refuses its continuity, keep the services stopped and preserve the 
 A host that stopped during a relay write can leave that state, as described above.
 
 Devices need no changes if two conditions hold.
-The accounts volume must be the latest copy from the old host.
+The accounts must be current: the latest copy of the accounts volume from the old host, or the external database unchanged.
 The server's address must resolve to the new host.
 After a restore from an older backup, devices that signed in after that backup must sign in again.
 Sessions revoked after that backup become valid again.
+
+### Accounts in an external database
+
+With [`DOHC_POSTGRES_HOST` set](self-host.md#keep-accounts-in-an-external-postgres), accounts and sign-in sessions live in your provider's database.
+A move needs no accounts copy: the new host connects to the same database.
+Backups of the accounts are your provider's job. The recovery commands do not save or restore them.
+
+Restore an older backup of that database only when the current one is lost.
+An older backup brings back sessions and accounts that were removed after it was taken.
+It also loses accounts created after it was taken.
+Those people cannot open their workspaces, even after they sign up again, because they get new accounts.
+Devices that signed in after the backup must sign in again.
+
+If the database is lost and you have no backup, the server has no accounts.
+Every start after the first refuses an empty database, so the deployment does not create new accounts by mistake.
+Never start it with `--first-start` to get past this check: nobody could open the workspaces on the disk as their owner.
 
 ## Verify the recovery tooling
 

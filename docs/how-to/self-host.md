@@ -171,7 +171,8 @@ Both services must use the same `BETTER_AUTH_SECRET`.
 To keep server data on an attached disk, set it up before the first start.
 You can then [move the server to a new host](self-host-recovery.md#move-to-a-new-host) by moving the disk.
 The disk holds the relay database with its files, the continuity record, and the server's session host and automation copies.
-Accounts and Caddy's certificates stay in Docker volumes on the host.
+Caddy's certificates stay in a Docker volume on the host.
+Accounts stay in a Docker volume on the host too, unless you [keep them in an external Postgres](#keep-accounts-in-an-external-postgres).
 Docker names the accounts volume `<DOHC_DEPLOYMENT_NAME>_dohc_self_host_postgres`, which is `dohc-self-host_dohc_self_host_postgres` by default.
 
 Mount the disk on the host, for example at `/mnt/dohc-data`, and make the mount persist across restarts.
@@ -200,14 +201,62 @@ If an existing volume keeps its data elsewhere, the setup and move commands refu
 Restore the previous setting. Never remove the volume: it holds the deployment's data.
 This guide does not move existing volumes onto a disk.
 
+## Keep accounts in an external Postgres
+
+By default, the deployment runs its own Postgres for accounts and sign-in sessions, in a Docker volume on the host.
+To keep them in a managed Postgres instead, set it up before the first start.
+A lost host or disk then loses no accounts.
+Relay data stays on the host or its attached disk either way.
+
+The database must accept TLS connections.
+Every service verifies the database's certificate and host name against your provider's CA certificate.
+The setup has no option to turn this check off.
+
+1. Create a database for this deployment only, and a user that owns it.
+   If your provider limits which addresses can connect, allow the server's address.
+2. Download your provider's CA certificate to the server.
+   The services run as UID 1000 and need to read it:
+
+   ```sh
+   sudo install -D -m 0644 provider-ca.pem /etc/dohc/postgres-ca.pem
+   ```
+
+3. Set the database in `.env.self-host`:
+
+   ```dotenv
+   DOHC_POSTGRES_HOST=db.your-provider.com
+   DOHC_POSTGRES_PORT=5432
+   DOHC_POSTGRES_CA_FILE=/etc/dohc/postgres-ca.pem
+   POSTGRES_DB=dohc
+   POSTGRES_USER=dohc
+   POSTGRES_PASSWORD=your-database-password
+   ```
+
+   Use the host name that the provider's certificate names.
+   `POSTGRES_PASSWORD` replaces the password that `init` generated.
+
+With `DOHC_POSTGRES_HOST` set, the setup and recovery commands add the external-database Compose overlay.
+The deployment then does not start the bundled Postgres or create its volume.
+Migrations run against your database.
+Leave `DOHC_POSTGRES_HOST`, `DOHC_POSTGRES_PORT` and `DOHC_POSTGRES_CA_FILE` empty to use the bundled database.
+
+Your provider's backups are the only backups of these accounts.
+A deployment archive does not include them.
+This guide does not move accounts from the bundled database to an external one.
+
 ## Start and check the server
 
 ```sh
 node scripts/check-self-host.mjs --start
 ```
 
-With `DOHC_DATA_DIRECTORY` set, add `--first-start` for the first start only.
-After that, every start and upgrade refuses to run without the relay deployment on the disk and the accounts database in its volume.
+With `DOHC_DATA_DIRECTORY` or `DOHC_POSTGRES_HOST` set, add `--first-start` for the first start only.
+After that, every start and upgrade refuses to run in these cases:
+
+- With `DOHC_DATA_DIRECTORY` set, the disk does not hold the relay deployment.
+- With `DOHC_POSTGRES_HOST` set, the external database is unreachable or holds no dohc accounts.
+- With only `DOHC_DATA_DIRECTORY` set, the accounts volume on the host holds no accounts database.
+
 A first start refuses unless the disk folders are empty.
 A start also refuses when Docker cannot complete these checks.
 

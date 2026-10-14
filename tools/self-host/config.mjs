@@ -26,8 +26,24 @@ export function validateSettings(settings) {
     'DOHC_RELAY_EXCHANGE_KEY', 'DOHC_SMTP_HOST', 'DOHC_SMTP_FROM']) {
     if (!settings[name] || /change-me|example\.(com|net|org)/i.test(settings[name])) errors.push(`Set ${name}.`);
   }
-  for (const name of ['POSTGRES_PASSWORD', 'BETTER_AUTH_SECRET', 'DOHC_RELAY_LINK_KEY', 'DOHC_RELAY_EXCHANGE_KEY']) {
+  // The bootstrap generates the bundled database's password. An external database keeps its provider's password.
+  for (const name of [...(settings.DOHC_POSTGRES_HOST ? [] : ['POSTGRES_PASSWORD']), 'BETTER_AUTH_SECRET', 'DOHC_RELAY_LINK_KEY', 'DOHC_RELAY_EXCHANGE_KEY']) {
     if ((settings[name]?.length ?? 0) < 32) errors.push(`${name} must contain at least 32 characters.`);
+  }
+  if (settings.DOHC_POSTGRES_HOST) {
+    if (!/^(?=.{1,253}$)[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?)*$/.test(settings.DOHC_POSTGRES_HOST) ||
+      /(^|\.)example\.(com|net|org)$/i.test(settings.DOHC_POSTGRES_HOST)) {
+      errors.push('Set DOHC_POSTGRES_HOST to your database host name or IPv4 address, or leave it empty to use the bundled database.');
+    }
+    if (!/^\d+$/.test(settings.DOHC_POSTGRES_PORT ?? '') || Number(settings.DOHC_POSTGRES_PORT) < 1 || Number(settings.DOHC_POSTGRES_PORT) > 65535) {
+      errors.push('Set DOHC_POSTGRES_PORT to your database port.');
+    }
+    for (const name of ['POSTGRES_DB', 'POSTGRES_USER']) if (!settings[name]) errors.push(`Set ${name} for the external database.`);
+    if (!/^(\/(?!\.\.?(\/|$))[a-zA-Z0-9._-]+)+$/.test(settings.DOHC_POSTGRES_CA_FILE ?? '')) {
+      errors.push("Set DOHC_POSTGRES_CA_FILE to the absolute path of your database provider's CA certificate.");
+    }
+  } else if (settings.DOHC_POSTGRES_PORT || settings.DOHC_POSTGRES_CA_FILE) {
+    errors.push('Set DOHC_POSTGRES_HOST to use an external database, or leave DOHC_POSTGRES_PORT and DOHC_POSTGRES_CA_FILE empty.');
   }
   try {
     const origin = new URL(settings.DOHC_PUBLIC_ORIGIN);
@@ -51,7 +67,8 @@ export function validateSettings(settings) {
 export function composeArgs(envFile, settings, ...args) {
   return ['compose', '--env-file', resolve(envFile), '-f', 'docker-compose.self-host.yml',
     ...(settings.DOHC_SERVER_NETWORK_ACCESS === 'private' ? ['-f', 'tools/self-host/compose.private.yml'] : []),
-    ...(settings.DOHC_DATA_DIRECTORY ? ['-f', 'tools/self-host/compose.data-disk.yml'] : []), ...args];
+    ...(settings.DOHC_DATA_DIRECTORY ? ['-f', 'tools/self-host/compose.data-disk.yml'] : []),
+    ...(settings.DOHC_POSTGRES_HOST ? ['-f', 'tools/self-host/compose.external-postgres.yml'] : []), ...args];
 }
 
 // Reads through the relay's own volumes, so it checks the folders Docker mounts. Any other exit status means the check failed.
@@ -106,17 +123,50 @@ export function relayDeploymentError(envFile, settings, docker, firstStart) {
   return '';
 }
 
-/** Inspects the accounts volume before a container mounts it: mounting a missing volume would create an empty one. */
-export function accountsDatabaseError(config, docker) {
+const lostAccounts = 'Without it, people sign up again as new accounts that cannot open their workspaces.';
+
+/** An external database must hold dohc's schema. The bundled accounts volume is inspected before a container mounts it: mounting a missing volume would create an empty one. */
+export function accountsDatabaseError(envFile, settings, config, docker) {
+  // Each check prints its result, because Docker exits 1 for some of its own failures too.
+  if (settings.DOHC_POSTGRES_HOST) {
+    const { status, stdout } = docker(composeArgs(envFile, settings, 'run', '--rm', '--no-deps', '-T', 'postgres-migrate', 'check-accounts'));
+    const result = status === 0 ? stdout?.trim() : undefined, database = `${settings.POSTGRES_DB} on ${settings.DOHC_POSTGRES_HOST}`;
+    if (result === 'present') return '';
+    if (result === 'missing') return `Database ${database} holds no dohc accounts. Check DOHC_POSTGRES_HOST and POSTGRES_DB, or restore the database from your provider's backup. ${lostAccounts}`;
+    return `Could not check database ${database}. Check that Docker is running and that its host, port, user, password and DOHC_POSTGRES_CA_FILE are correct, then try again.`;
+  }
   const accounts = config.volumes.dohc_self_host_postgres.name;
-  const missing = `Docker volume ${accounts} holds no accounts database. Restore it from the old host or your backup before you start. ` +
-    'Without it, people sign up again as new accounts that cannot open their workspaces.';
+  const missing = `Docker volume ${accounts} holds no accounts database. Restore it from the old host or your backup before you start. ${lostAccounts}`;
   if (!inspectVolume(accounts, docker)) return missing;
-  // The probe prints its result, because Docker exits 1 for some of its own failures too.
   const { status, stdout } = docker(['run', '--rm', '--network', 'none', '--mount', `type=volume,source=${accounts},target=/pg,readonly`,
     '--entrypoint', 'sh', config.services.postgres.image, '-c', 'if test -s /pg/PG_VERSION; then echo present; else echo missing; fi']);
   const result = status === 0 ? stdout?.trim() : undefined;
   if (result === 'present') return '';
   if (result === 'missing') return missing;
   return `Could not check Docker volume ${accounts} for the accounts database. Check that Docker is running and the image ${config.services.postgres.image} is available, then try again.`;
+}
+
+/** Returns `[name, problem]` pairs to check before Compose mounts any volume. An empty problem passes; the first problem ends the checks. */
+export function deploymentChecks(envFile, settings, docker, { start, firstStart }) {
+  const checks = [];
+  let config;
+  if (settings.DOHC_DATA_DIRECTORY) {
+    let problems;
+    try {
+      config = composeConfig(envFile, settings, docker);
+      problems = dataDiskVolumeErrors(config, docker);
+    } catch (error) { problems = [error.message]; }
+    checks.push(['data disk volumes', problems.join(' ')]);
+    if (problems.length || !start) return checks;
+    const problem = relayDeploymentError(envFile, settings, docker, firstStart);
+    checks.push(['relay deployment on the data disk', problem]);
+    if (problem) return checks;
+  }
+  // Every start after the first needs the accounts that own the deployment's workspaces.
+  if (start && !firstStart && (settings.DOHC_DATA_DIRECTORY || settings.DOHC_POSTGRES_HOST)) {
+    let problem;
+    try { problem = accountsDatabaseError(envFile, settings, config, docker); } catch (error) { problem = error.message; }
+    checks.push(['accounts database', problem]);
+  }
+  return checks;
 }

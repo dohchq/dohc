@@ -10,6 +10,7 @@ const usage = `node scripts/self-host/move.mjs [--env-file PATH]
 Starts this deployment on a new host from its attached data disk, then checks it.
 Stop the old server first and make sure it cannot start again.
 The command refuses to start without the accounts database and the relay deployment on the disk.
+With DOHC_POSTGRES_HOST set, the accounts database is the external one and must already hold dohc's accounts.
 See "Move to a new host" in docs/how-to/self-host-recovery.md.`;
 
 function spawn(command, args) {
@@ -34,7 +35,7 @@ export function runMove(options, run = spawn, log = console.log) {
   const config = composeConfig(options.envFile, settings, docker);
   const errors = dataDiskVolumeErrors(config, docker);
   if (errors.length) throw new Error(errors.join("\n"));
-  const problem = accountsDatabaseError(config, docker) || relayDeploymentError(options.envFile, settings, docker, false);
+  const problem = accountsDatabaseError(options.envFile, settings, config, docker) || relayDeploymentError(options.envFile, settings, docker, false);
   if (problem) throw new Error(problem);
   log("Found the accounts database and the relay deployment. Starting the deployment.");
   if (run(process.execPath, ["scripts/check-self-host.mjs", "--start", "--env-file", options.envFile]).status !== 0) {

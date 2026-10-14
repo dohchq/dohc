@@ -4,10 +4,10 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { parseEnv } from 'node:util';
 import test from 'node:test';
-import { load, YAML11_SCHEMA } from 'js-yaml';
+import { defineMappingTag, defineScalarTag, load, YAML11_SCHEMA } from 'js-yaml';
 import { initialSettings, privateRouteInstructions, updateImageSetting } from '../tools/self-host/bootstrap.mjs';
-import { accountsDatabaseError, validateSettings, composeArgs, dataDiskVolumeErrors, relayDeploymentCheck, relayDeploymentError, supportedComposeVersion } from '../tools/self-host/config.mjs';
-import { relayInitializationRequired } from '../tools/self-host/entrypoint.mjs';
+import { accountsDatabaseError, deploymentChecks, validateSettings, composeArgs, dataDiskVolumeErrors, relayDeploymentCheck, relayDeploymentError, supportedComposeVersion } from '../tools/self-host/config.mjs';
+import { accountsSchemaState, postgresUrl, relayInitializationRequired } from '../tools/self-host/entrypoint.mjs';
 
 const composeText = readFileSync('docker-compose.self-host.yml', 'utf8');
 const compose = load(composeText, { schema: YAML11_SCHEMA });
@@ -209,7 +209,7 @@ test('every later start needs an accounts database, checked before any container
   const config = {services: {postgres: {image: 'postgres:17.9-alpine'}}, volumes: {dohc_self_host_postgres: {name: 'p_postgres'}}};
   const check = (inspect, probe) => {
     const calls = [];
-    const error = accountsDatabaseError(config, args => {
+    const error = accountsDatabaseError('.env.self-host', {}, config, args => {
       calls.push(args);
       return args[0] === 'volume' ? inspect : probe;
     });
@@ -226,6 +226,117 @@ test('every later start needs an accounts database, checked before any container
     assert.match(check(exists, probe).error, /Could not check Docker volume p_postgres/, JSON.stringify(probe));
   }
   assert.throws(() => check({status: 1, stderr: 'Cannot connect to the Docker daemon.'}, {status: 0}), /Docker could not inspect volume p_postgres/);
+});
+
+const RESET = Symbol('!reset');
+const overlaySchema = YAML11_SCHEMA.withTags(defineScalarTag('!reset', {resolve: () => RESET}),
+  defineMappingTag('!reset', {create: () => RESET, addPair: () => '', has: () => false, keys: () => [], get: () => undefined}));
+const externalOverlay = () => load(readFileSync('tools/self-host/compose.external-postgres.yml', 'utf8'), { schema: overlaySchema });
+const external = () => ({...settings(), DOHC_POSTGRES_HOST: 'db.provider.invalid', DOHC_POSTGRES_PORT: '25060',
+  DOHC_POSTGRES_CA_FILE: '/etc/dohc/provider-ca.pem', POSTGRES_PASSWORD: 'provider-password'});
+
+test('an external database leaves out the bundled database, its volume and every wait on it', () => {
+  assert.ok(!composeArgs('.env.self-host', settings(), 'up').includes('tools/self-host/compose.external-postgres.yml'));
+  const args = composeArgs('.env.self-host', {...external(), DOHC_DATA_DIRECTORY: '/mnt/disk/dohc'}, 'up');
+  assert.ok(args.indexOf('tools/self-host/compose.data-disk.yml') < args.indexOf('tools/self-host/compose.external-postgres.yml'));
+  assert.ok(args.indexOf('tools/self-host/compose.external-postgres.yml') < args.indexOf('up'));
+  const overlay = externalOverlay();
+  assert.equal(overlay.services.postgres, RESET);
+  assert.deepEqual(overlay.volumes, {dohc_self_host_postgres: RESET});
+  // These are the only references to the bundled database in the base file, and the overlay resets each one.
+  assert.deepEqual(Object.keys(compose.services).filter(name => compose.services[name].depends_on?.postgres), ['postgres-migrate']);
+  assert.equal(overlay.services['postgres-migrate'].depends_on, RESET);
+  assert.deepEqual(Object.keys(compose.services).filter(name => (compose.services[name].volumes ?? []).some(volume => String(volume).startsWith('dohc_self_host_postgres:'))), ['postgres']);
+  // Every service that connects to the database gets the external host and the provider's CA certificate.
+  const clients = Object.keys(compose.services).filter(name => name !== 'postgres' && compose.services[name].environment?.POSTGRES_PASSWORD);
+  assert.deepEqual(clients, ['postgres-migrate', 'workspace-api', 'sync-relay']);
+  assert.deepEqual(Object.keys(overlay.services).filter(name => name !== 'postgres'), clients);
+  for (const name of clients) {
+    assert.deepEqual(overlay.services[name].environment, {DOHC_POSTGRES_HOST: '${DOHC_POSTGRES_HOST:?Set DOHC_POSTGRES_HOST}',
+      DOHC_POSTGRES_PORT: '${DOHC_POSTGRES_PORT:?Set DOHC_POSTGRES_PORT}'});
+    // Docker creates a missing source path as an empty folder unless the mount forbids it.
+    assert.deepEqual(overlay.services[name].volumes, [{type: 'bind', source: '${DOHC_POSTGRES_CA_FILE:?Set DOHC_POSTGRES_CA_FILE}',
+      target: '/etc/dohc/postgres-ca.pem', read_only: true, bind: {create_host_path: false}}]);
+  }
+});
+
+test('services reach an external database only over TLS that verifies its certificate against the provider CA', () => {
+  const env = {POSTGRES_USER: 'dohc admin', POSTGRES_PASSWORD: 'p@ss/word?#', POSTGRES_DB: 'dohc'};
+  assert.equal(postgresUrl(env), 'postgres://dohc%20admin:p%40ss%2Fword%3F%23@postgres:5432/dohc');
+  const url = new URL(postgresUrl({...env, DOHC_POSTGRES_HOST: 'db.provider.invalid', DOHC_POSTGRES_PORT: '25060'}));
+  assert.equal(url.host, 'db.provider.invalid:25060');
+  assert.equal(decodeURIComponent(url.password), 'p@ss/word?#');
+  assert.deepEqual([...url.searchParams], [['sslmode', 'verify-full'], ['sslrootcert', externalOverlay().services['workspace-api'].volumes[0].target]]);
+});
+
+test('an external database needs its host, port, names and CA certificate', () => {
+  assert.deepEqual(validateSettings(external()), []);
+  // The provider sets an external database's password, so only the bundled one needs the generated length.
+  assert.ok(validateSettings({...settings(), POSTGRES_PASSWORD: 'provider-password'}).some(error => error.includes('POSTGRES_PASSWORD must contain')));
+  assert.ok(validateSettings({...external(), POSTGRES_PASSWORD: 'change-me'}).some(error => error.includes('Set POSTGRES_PASSWORD.')));
+  const refusals = {
+    DOHC_POSTGRES_HOST: ['', 'db.example.com', '-db.invalid', 'db..invalid', 'user@db.invalid', 'db.invalid:5432', 'db.invalid/dohc?sslmode=disable', '[::1]'],
+    DOHC_POSTGRES_PORT: [undefined, '', '0', '65536', '5432x', ' 5432'],
+    DOHC_POSTGRES_CA_FILE: [undefined, '', 'provider-ca.pem', './ca.pem', '/etc/../ca.pem', '/etc/dohc/ca pem', 'C:/ca.pem'],
+    POSTGRES_DB: [undefined, ''], POSTGRES_USER: [undefined, ''],
+  };
+  for (const [name, values] of Object.entries(refusals)) {
+    for (const value of values) assert.ok(validateSettings({...external(), [name]: value}).some(error => error.includes(name)), `${name}=${value}`);
+  }
+  // A port or CA certificate without a host would quietly keep the bundled database.
+  for (const name of ['DOHC_POSTGRES_PORT', 'DOHC_POSTGRES_CA_FILE']) {
+    assert.ok(validateSettings({...settings(), [name]: external()[name]}).some(error => error.includes('Set DOHC_POSTGRES_HOST to use an external database')), name);
+  }
+});
+
+test('a later start with an external database needs dohc accounts there, checked through the migration service', () => {
+  const check = reply => {
+    const calls = [];
+    // No Compose configuration: the check never inspects or mounts a local accounts volume.
+    const error = accountsDatabaseError('.env.self-host', external(), undefined, args => { calls.push(args); return reply; });
+    assert.equal(calls.length, 1);
+    assert.ok(calls[0].includes('tools/self-host/compose.external-postgres.yml'));
+    assert.deepEqual(calls[0].slice(calls[0].indexOf('run')), ['run', '--rm', '--no-deps', '-T', 'postgres-migrate', 'check-accounts']);
+    return error;
+  };
+  assert.equal(check({status: 0, stdout: 'present\n'}), '');
+  assert.match(check({status: 0, stdout: 'missing\n'}), /Database dohc on db\.provider\.invalid holds no dohc accounts\. .*Without it, people sign up again/);
+  // Docker exits 1 for some of its own failures, so only the check's own output decides.
+  for (const reply of [{status: 1, stdout: 'present\n'}, {status: 1, stdout: ''}, {status: 0, stdout: ''}, {status: 125, stdout: ''}, {status: null}]) {
+    assert.match(check(reply), /Could not check database dohc on db\.provider\.invalid/, JSON.stringify(reply));
+  }
+});
+
+test('the accounts check finds dohc accounts only where migrations recorded an applied id', async () => {
+  const client = (table, applied) => ({ async query(sql) {
+    if (sql.includes('to_regclass')) return {rows: [{present: table}]};
+    assert.ok(table, 'queried a table that does not exist');
+    return {rows: [{present: applied}]};
+  } });
+  assert.equal(await accountsSchemaState(client(false, false)), 'missing');
+  assert.equal(await accountsSchemaState(client(true, false)), 'missing');
+  assert.equal(await accountsSchemaState(client(true, true)), 'present');
+});
+
+test('with an external database, every start but the first refuses an empty database before Compose starts it', () => {
+  const run = (options, state = 'missing') => {
+    const calls = [];
+    const checks = deploymentChecks('.env.self-host', external(), args => {
+      calls.push(args);
+      if (args.includes('check-accounts')) return {status: 0, stdout: `${state}\n`};
+      throw new Error(`Unexpected Docker call: ${args.join(' ')}`);
+    }, options);
+    return {checks, calls: calls.length};
+  };
+  const later = {start: true, firstStart: false};
+  const refused = run(later).checks;
+  assert.deepEqual(refused.map(([name]) => name), ['accounts database']);
+  assert.match(refused[0][1], /holds no dohc accounts/);
+  assert.deepEqual(run(later, 'present'), {checks: [['accounts database', '']], calls: 1});
+  assert.deepEqual(run({start: true, firstStart: true}), {checks: [], calls: 0});
+  assert.deepEqual(run({start: false, firstStart: false}), {checks: [], calls: 0});
+  // Without an external database or a data disk, a start checks neither, as before.
+  assert.deepEqual(deploymentChecks('.env.self-host', settings(), () => assert.fail('Docker ran'), later), []);
 });
 
 test('the data directory must be an absolute folder without parent segments', () => {

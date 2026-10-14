@@ -18,18 +18,23 @@ const config = { name: "dohc-self-host", services: { postgres: { image: "postgre
   dohc_self_host_postgres: { name: "dohc-self-host_dohc_self_host_postgres" },
   ...Object.fromEntries(Object.entries(folders).map(([key, folder]) => [key, { name: `dohc-self-host_${key}`, driver: "local", driver_opts: bind(folder) }])),
 } };
+// The external-database overlay leaves out the bundled database and its volume.
+const externalConfig = { ...config, services: {}, volumes: Object.fromEntries(Object.entries(config.volumes).filter(([key]) => key !== "dohc_self_host_postgres")) };
+const externalSettings = "DOHC_DATA_DIRECTORY=/mnt/disk/dohc\nDOHC_POSTGRES_HOST=db.provider.invalid\nDOHC_POSTGRES_PORT=25060\nPOSTGRES_DB=dohc\n";
 const deployment = ["/pg/PG_VERSION", "/continuity/deployment.json", "/data/sync-relay.sqlite"];
 const accounts = { "dohc-self-host_dohc_self_host_postgres": { Driver: "local", Options: null } };
 
 // Runs each Docker check against an in-memory host: `volumes` exist in Docker, `files` exist inside them.
 // `fail` names a Docker call that fails without saying why, as a busy or restarting daemon does.
-function host({ files = deployment, volumes = accounts, fail = () => false } = {}) {
+// `external` is what the external database's accounts check prints.
+function host({ files = deployment, volumes = accounts, fail = () => false, external } = {}) {
   const calls = [], present = new Set(files);
   return { calls, run(command, args) {
     calls.push([command, ...args]);
     if (command !== "docker") return { status: 0, stdout: "" };
-    if (args.includes("config")) return { status: 0, stdout: JSON.stringify(config) };
+    if (args.includes("config")) return { status: 0, stdout: JSON.stringify(external ? externalConfig : config) };
     if (fail(args)) return { status: 125, stdout: "", stderr: "Cannot connect to the Docker daemon." };
+    if (external && args.includes("check-accounts")) return { status: 0, stdout: `${external}\n` };
     if (args[0] === "volume" && args[1] === "inspect") {
       return volumes[args[2]] ? { status: 0, stdout: JSON.stringify([{ Name: args[2], ...volumes[args[2]] }]) }
         : { status: 1, stdout: "", stderr: `Error response from daemon: get ${args[2]}: no such volume` };
@@ -101,6 +106,27 @@ test("move never mounts a missing accounts volume", async t => {
   assert.throws(() => runMove(parseMoveArguments(["--env-file", path]), mock.run, () => {}), /holds no accounts database/);
   assert.deepEqual(mock.calls.filter(([, first]) => first === "run"), []);
   assert.equal(started(mock.calls), false);
+});
+
+test("with an external database, move needs dohc accounts there and keeps every relay check", async t => {
+  const path = await envFile(t, externalSettings);
+  const accountsCheck = calls => calls.find(call => call.includes("check-accounts"));
+  const moved = host({ external: "present", files: deployment.slice(1) });
+  runMove(parseMoveArguments(["--env-file", path]), moved.run, () => {});
+  assert.ok(accountsCheck(moved.calls).includes("tools/self-host/compose.external-postgres.yml"));
+  assert.ok(moved.calls.some(call => call.includes("relay-initialize")));
+  // No local accounts volume exists, so nothing inspects or mounts one.
+  assert.ok(!moved.calls.some(call => call.some(value => value.includes("dohc_self_host_postgres"))));
+  assert.deepEqual(moved.calls.at(-1).slice(1), ["scripts/check-self-host.mjs", "--start", "--env-file", path]);
+  const refusals = [[{ external: "missing" }, /Database dohc on db\.provider\.invalid holds no dohc accounts/],
+    [{ external: "present", fail: args => args.includes("check-accounts") }, /Could not check database dohc on db\.provider\.invalid/],
+    [{ external: "present", files: ["/continuity/deployment.json"] }, /missing its record or its database/]];
+  for (const [options, refusal] of refusals) {
+    const mock = host(options);
+    assert.throws(() => runMove(parseMoveArguments(["--env-file", path]), mock.run, () => {}), refusal);
+    assert.equal(started(mock.calls), false, String(refusal));
+    assert.equal(changed(mock.calls), false, String(refusal));
+  }
 });
 
 test("move refuses existing volumes stored outside the data disk and leaves them unchanged", async t => {
