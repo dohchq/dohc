@@ -111,6 +111,7 @@ Pass `--detach` to submit the request and return at once.
 - While Docker does not respond, runs that need the JavaScript gate wait and Rust-only runs continue.
 - While free disk is below the 40 GB floor, no run starts. The service first deletes the build output of its lanes that have no run.
 
+Each lane runs with its own temp folder, `C:\w\_verification\tmp\<lane>`, which antivirus skips and the service empties before each run.
 Each attempt has its own evidence folder, `C:\w\_verification\requests\<id>\attempts\<n>`, and its `result.json` names the request and attempt.
 Read the service's verdict from the request's `status.json`, or from the last line `pnpm verify:pr` prints.
 
