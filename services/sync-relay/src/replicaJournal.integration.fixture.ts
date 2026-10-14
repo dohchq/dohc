@@ -356,6 +356,7 @@ async function command(name: string, input: Record<string, any>): Promise<Record
       try {
         for (;;) {
           assert.equal(completedPages, completed, "missed page transaction");
+          assert(performance.now() < until, "Native page did not acquire its write transaction");
           try {db.exec("BEGIN IMMEDIATE; ROLLBACK;");}
           catch (error) {
             if (!(error instanceof Error) || !("errcode" in error) || error.errcode !== 5) throw error;
@@ -363,12 +364,12 @@ async function command(name: string, input: Record<string, any>): Promise<Record
             const frontier = db.prepare("SELECT * FROM replica_frontiers").get();
             const accepted = db.prepare("SELECT COUNT(*) AS n FROM live_accepted_updates").get();
             if (input.relay) {
-              await replica.close(); await closeHost();
+              // Leave the host's registration open, as a crash would.
+              void replica.close(); client.close(); hostProcess.kill("SIGKILL");
               return {frontier, accepted, crashRelay: true};
             }
             await replica.close(); return {frontier, accepted};
           }
-          assert(performance.now() < until, "Native page did not acquire its write transaction");
           await new Promise<void>(resolve => setImmediate(resolve));
         }
       } finally {db.close();}
