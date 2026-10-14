@@ -15,7 +15,7 @@ const frames = { receive: { maxFrameBytes: 1024, maxStateVectorBytes: 4096, maxU
 const binding = { workspaceId: "workspace", mainVersionId: "main", objectId: "document", lineageClaimId: "lineage",
   currentPath: "document.md", selectorPaths: ["document.md"], restoreFenceGeneration: 0 };
 const stops: (() => Promise<void>)[] = [];
-afterEach(async () => { for (const stop of stops.splice(0).reverse()) await stop(); });
+afterEach(async () => { for (const stop of stops.splice(0).reverse()) await stop(); vi.useRealTimers(); });
 function deferred<T>() {
   let resolve!: (value: T) => void, reject!: (error: unknown) => void;
   const promise = new Promise<T>((yes, no) => { resolve = yes; reject = no; });
@@ -104,6 +104,7 @@ function fixture(result: "success" | "retry" | "refused" = "success", limitCredi
   stops.push(async () => { server.close(); provider.close(); await server.settled(); await route.settled(); doc.destroy(); provider.doc.destroy(); });
   return { provider, doc, route, server, submitted, sent, until, invalidated, syncClosed, hostClosed,
     metrics: () => ({ pulls, leased, releases, stalled: !!stalled }),
+    accept() { result = "success"; },
     edit(text: string) { const content = (provider.body.get(0) as Y.XmlElement).get(0) as Y.XmlText; content.insert(content.length, text); },
     peerEdit(text: string) { const vector = Y.encodeStateVector(doc); content.insert(content.length, text); pull.resolve({ journalCursor: ++cursor, updateBytes: Y.encodeStateAsUpdate(doc, vector) }); },
     stall(predicate: (frame: LiveFrame) => boolean) { stall = predicate; },
@@ -128,10 +129,23 @@ it("round-trips canonical V1 bytes and exact application ACK identity through th
   expect(f.submitted).toHaveLength(1);
 });
 
-it.each(["retry", "refused"] as const)("preserves the browser draft after a server %s", async result => {
-  const f = fixture(result); await f.until(() => f.provider.state().status === "live"); f.edit(" draft");
-  await f.until(() => f.provider.state().status === (result === "retry" ? "disconnected" : "quarantined"));
-  expect(f.provider.state()).toMatchObject({ pendingUpdates: 1, lastApplied: null });
+it("keeps a retry result live and acknowledges resubmission on the same session", async () => {
+  const f = fixture("retry"); await f.until(() => f.provider.state().status === "live");
+  vi.useFakeTimers(); f.edit(" draft");
+  await f.until(() => f.provider.state().reason === "application-pending");
+  expect(f.server.usage().closed).toBe(false); expect(f.hostClosed).not.toHaveBeenCalled();
+  expect(f.provider.state()).toMatchObject({status: "live", pendingUpdates: 1});
+  f.accept();
+  await vi.advanceTimersByTimeAsync(250);
+  await f.until(() => f.provider.state().pendingUpdates === 0);
+  expect(f.submitted).toHaveLength(2);
+  expect(f.submitted[1]).toEqual(f.submitted[0]);
+  expect(f.server.usage().closed).toBe(false);
+});
+it("closes a terminal refusal and retains the browser draft", async () => {
+  const f = fixture("refused"); await f.until(() => f.provider.state().status === "live"); f.edit(" draft");
+  await f.until(() => f.provider.state().status === "quarantined");
+  expect(f.provider.state()).toMatchObject({pendingUpdates: 1, lastApplied: null});
   expect(f.provider.body.toString()).toContain("draft"); await f.server.settled();
   expect(f.server.usage().closed).toBe(true); expect(f.hostClosed).toHaveBeenCalledTimes(1);
 });

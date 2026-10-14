@@ -11,7 +11,7 @@ import { WebSocket } from "ws";
 import { afterEach, expect, it, vi } from "vitest";
 import { serveFetchHandler } from "@dohc/service-http";
 import { UnauthorizedError } from "@dohc/workspace-auth/session";
-import { LIVE_FRAME_DECLARED_SUBMIT_MAX_BYTES, createLiveFrameSession, decodeLiveFrame, encodeLiveFrame, type LiveFrame } from "@dohc/live-session-contract/live-frame";
+import { LIVE_FRAME_DECLARED_SUBMIT_MAX_BYTES, createLiveFrameSession, decodeLiveFrame, encodeLiveFrame, encodeLiveFrameSync, type LiveFrame } from "@dohc/live-session-contract/live-frame";
 import { createLiveMarkdownJournalValidator } from "@dohc/ydoc-projection/live-journal-validation";
 import { createSyncRelayHandler } from "./server.js";
 import { createOwnerLiveRoutes, createNamedLiveRoutes, parseNamedLiveRouteLimits, type NamedLiveRouteLimits } from "./namedLiveRoutes.js";
@@ -1122,3 +1122,32 @@ it("contains stalled syncs across two links in one workspace while another works
   const pong = once(owner.ws, "pong"); owner.ws.ping("still-live"); await pong;
   expect(owner.ws.readyState).toBe(WebSocket.OPEN);
 }, 60_000);
+
+it("opens an owner 4 MiB sync while the non-owner workspace byte portion is full", async () => {
+  const profile = selfHostLiveProfile(), limits = profile.namedLive.transport, admission = createLiveConnectionAdmission(), MiB = 1024 * 1024;
+  const budget = admission.buffers(limits.maxBufferedBytes), workspacePortion = 80 * MiB;
+  const release = budget.reserve(workspacePortion, [[JSON.stringify(["workspace", scope.workspaceId]), workspacePortion]]);
+  const owner = await fixture(limits, false, undefined, true, false, admission, 1, 1, true);
+  const syncBinding = {...owner.binding, selectorPaths: [owner.binding.currentPath]}, hostVector = Buffer.from([0]);
+  const current = owner.storage.resolveCurrentLiveDocumentBinding({document: {workspaceId: owner.binding.workspaceId,
+    mainVersionId: owner.binding.mainVersionId, objectId: owner.binding.objectId, lineageClaimId: owner.binding.lineageClaimId},
+    actor: {kind: "owner", userId: "owner-1", shareId: scope.shareId}});
+  if (current.kind !== "current") throw new Error("Expected current owner binding");
+  const overhead = encodeLiveFrameSync({binding: current.binding, hostVector, missingStateUpdate: Uint8Array.of(0)}, owner.frames.receive).length - 1;
+  const missingStateUpdate = Buffer.alloc(4 * MiB - overhead);
+  expect(encodeLiveFrameSync({binding: current.binding, hostVector, missingStateUpdate}, owner.frames.receive)).toHaveLength(4 * MiB);
+  vi.mocked(owner.native.client.openLiveAppliedSync).mockResolvedValue({binding: syncBinding,
+    hostVector, missingStateUpdate, observedLocalYDocHeadSequence: 1,
+    position: {eventCount: 0, journalCursor: 0, evidenceDigest: "ab".repeat(32)}});
+  const own = owner.connect("");
+  try {
+    const named = await fixture(limits, false, undefined, false, false, admission, 2, 1, true);
+    const refused = named.connect((await named.mint()).token); expect(await refused.status).toBe(101);
+    expect(await refused.closed).toEqual([LIVE_CONNECTION_LIMIT_CLOSE_CODE, "live_buffer_limit"]);
+    expect(await own.status).toBe(101); await openProductionSync(owner, own, false);
+    await vi.waitFor(() => expect(budget.usage()).toBeGreaterThanOrEqual(workspacePortion + 4 * MiB));
+    expect(budget.usage()).toBeLessThan(limits.maxBufferedBytes);
+    expect(own.ws.readyState).toBe(WebSocket.OPEN);
+  } finally {release(); own.ws.terminate();}
+  await vi.waitFor(() => expect(budget.usage()).toBe(0));
+});

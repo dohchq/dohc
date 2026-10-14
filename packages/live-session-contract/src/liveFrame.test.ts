@@ -509,13 +509,24 @@ describe("live frame route ownership", () => {
       else expect(() => client.receive(encodeLiveFrame({ kind: "result", result: "retry", deliveryId: "other", updateDigest: digest, reason: "application-pending" }, 586))).toThrow();
     }
   });
-  it("terminal retry leaves held frames charged until transport release", () => {
-    const { client, server } = makeLive(); consume(client, server, begin("submit-update", 2));
-    consume(client, server, { kind: "chunk", transferId: 2, offset: 0, bytes: new Uint8Array([0, 0]) });
-    const sent = server.send({ kind: "result", result: "retry", deliveryId: "d", updateDigest: digest, reason: "application-pending" });
-    expect(server.usage().closed).toBe(true); expect(server.usage().outgoing.controlBytes).toBe(sent.value.length);
-    const received = client.receive(sent.value); expect(client.usage().closed).toBe(true);
-    sent.release(); received.release(); expect(server.usage().outgoing.controlBytes).toBe(0); expect(client.usage().incoming.controlBytes).toBe(0);
+  it.each(["retry", "refused"] as const)("releases held RESULT frames and closes only a terminal %s", result => {
+    const {client, server} = makeLive(); consume(client, server, begin("submit-update", 2));
+    consume(client, server, {kind: "chunk", transferId: 2, offset: 0, bytes: new Uint8Array([0, 0])});
+    const sent = server.send(result === "retry"
+      ? {kind: "result", result, deliveryId: "d", updateDigest: digest, reason: "application-pending"}
+      : {kind: "result", result, deliveryId: "d", updateDigest: digest, reason: "authority-refused"});
+    expect(server.usage().closed).toBe(result === "refused");
+    expect(server.usage().outgoing.controlBytes).toBe(sent.value.length);
+    const received = client.receive(sent.value); expect(client.usage().closed).toBe(result === "refused");
+    sent.release(); received.release();
+    expect(server.usage().outgoing.controlBytes).toBe(0); expect(client.usage().incoming.controlBytes).toBe(0);
+    if (result === "retry") {
+      grant(server, client, 773, 6);
+      consume(client, server, begin("submit-update", 3));
+      consume(client, server, {kind: "chunk", transferId: 3, offset: 0, bytes: new Uint8Array([0, 0])});
+      expect(server.usage()).toMatchObject({closed: false, live: true});
+    }
+    client.close(); server.close();
   });
   it("bounds control queues and snapshots policies and retained metadata", () => {
     const mutable = { ...limits, receive: { ...limits.receive } }; const client = createLiveFrameSession("client", mutable);

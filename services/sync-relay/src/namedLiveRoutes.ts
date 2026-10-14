@@ -12,7 +12,7 @@ import type { LiveObjectBinding } from "@dohc/live-session-contract/live-object-
 import type { SyncRelayStorage } from "./storage.js";
 import type { createLiveTickets } from "./liveTickets.js";
 import { liveBrowserActor, type LiveBrowserContext } from "./liveBrowserContext.js";
-import type { OwnerOutboxAdmission } from "./ownerOutboxDelivery.js";
+import type { CapacityLiveAdmissionValidator } from "./ownerOutboxDelivery.js";
 import { hashRelayExchangeKey, verifyRelayExchangeKey } from "./linkSecurity.js";
 import { captureNamedLiveFrameHost, captureOwnerLiveFrameHost, type NamedFrameValidationBudget, type NamedFrameHostBounds, type NamedFrameNativeHost } from "./namedLiveFrameHost.js";
 import { createNamedLiveFrameSession, type NamedFrameHostSession } from "./namedLiveFrameSession.js";
@@ -64,7 +64,7 @@ interface LiveRouteOptions {
   frames: LiveFrameSessionPolicy;
   bounds: NamedFrameHostBounds;
   captureNative(binding: LiveObjectBinding, signal: AbortSignal): Promise<NamedFrameNativeHost>;
-  validate: OwnerOutboxAdmission["validate"];
+  validate: CapacityLiveAdmissionValidator;
   lookupUserDisplayName?: (userId: string) => Promise<string | null> | string | null;
   admission?: ReturnType<typeof createLiveConnectionAdmission>;
 }
@@ -264,9 +264,10 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions) {
         ]);
         if (!release) throw new Error("Live connection limit reached.");
         releaseAuthority = release;
-        const scopes: [string, number][] = [[JSON.stringify(["workspace", workspaceId]), Math.max(1, Math.floor(limits.maxBufferedBytes *
-          Math.min(1, (limits.maxConnectionsPerWorkspace - limits.reservedOwnerConnections) / limits.maxConnections)))], [principal, Math.max(1, Math.floor(limits.maxBufferedBytes *
+        const scopes: [string, number][] = [[principal, Math.max(1, Math.floor(limits.maxBufferedBytes *
           Math.min(1, limits.maxConnectionsPerPrincipal / limits.maxConnections)))]];
+        if (kind !== "owner") scopes.push([JSON.stringify(["workspace", workspaceId]), Math.max(1, Math.floor(limits.maxBufferedBytes *
+          Math.min(1, (limits.maxConnectionsPerWorkspace - limits.reservedOwnerConnections) / limits.maxConnections)))]);
         if (shareId) scopes.push([JSON.stringify(["share", workspaceId, shareId]), Math.max(1, Math.floor(limits.maxBufferedBytes *
           Math.min(1, limits.maxConnectionsPerGrant / limits.maxConnections)))]);
         reserveBytes = size => buffers.reserve(size, scopes);

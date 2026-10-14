@@ -5,7 +5,7 @@ import * as Y from "yjs";
 import { WebSocket as NodeWebSocket } from "ws";
 import { readBoundedJson } from "@dohc/service-http";
 import { parseLiveUpdateIdentifier } from "@dohc/live-session-contract/live-update-admission";
-import { createNamedLiveBrowserTransport, parseNamedLiveBrowserLimits, type NamedLiveSelection } from "@dohc/ydoc-projection/named-live-browser-transport";
+import { createNamedLiveBrowserTransport, LiveAuthorityUnavailableError, parseNamedLiveBrowserLimits, type NamedLiveSelection } from "@dohc/ydoc-projection/named-live-browser-transport";
 import { ENGINE_YDOC_UPDATE_MAX_BYTES } from "../ipc/channels";
 import { RELAY_FETCH_TIMEOUT_MS, relayApiFetch } from "./sharedChannels";
 import type { LiveDraft } from "./liveDraftRecovery";
@@ -77,6 +77,7 @@ export function createNamedDesktopLiveCapture(options: {
       const transport = createNamedLiveBrowserTransport<NamedLiveSelection>({ publicOrigin: origin.origin, limits: first.limits,
         recordingContext: () => ({ kind: "account", accountId: credentials.userId }),
         authorize: async (selection, signal) => {
+          if (options.accessEnded()) throw new LiveAuthorityUnavailableError("Live editing is unavailable.");
           const next = initial ?? await admit(input.path, AbortSignal.any([signal, credentials.signal]));
           initial = undefined;
           if (JSON.stringify(next.selection) !== JSON.stringify(selection)) throw new Error("The shared file changed.");
