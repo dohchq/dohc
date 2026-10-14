@@ -17,7 +17,7 @@ export function releasePublicationTag(op: SyncRelayLogInput): ReleasePublication
     const tag = parseReleasePublicationTag(payload.release);
     const path = typeof payload.path === "string" ? validateUserWritePath(payload.path) : null;
     const sha = op.opKind === "ydoc.update" ? payload.updateBlobSha256 : payload.payloadAfterBlobSha256;
-    if (!["ydoc.update","moment.append"].includes(op.opKind) || payload.versionId !== tag.document.mainVersionId ||
+    if (payload.versionId !== tag.document.mainVersionId ||
       payload.objectId !== tag.document.objectId || !path?.ok || path.normalized !== payload.path ||
       typeof sha !== "string" || !/^[0-9a-f]{64}$/.test(sha) ||
       (op.opKind === "ydoc.update" && (payload.lineageClaimId !== tag.document.lineageClaimId || payload.contentKind !== "richdoc" || typeof payload.isBaseState !== "boolean")) ||

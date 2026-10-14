@@ -381,7 +381,7 @@ it("scopes retired catch-up to owner, current object, lineage, namespace, stream
 });
 
 
-it("review round: keeps ordinary API1 usable and requires API2 only for release actions", async () => {
+it("keeps ordinary API1 usable and requires API2 only for release actions", async () => {
   const f=fixture();
   try {
     expect(RELAY_API_VERSION).toBe(1);
@@ -393,7 +393,7 @@ it("review round: keeps ordinary API1 usable and requires API2 only for release 
   } finally {f.close();}
 });
 
-it("review round: returns standard errors and small claims with the holding computer and retry first", async () => {
+it("returns standard errors and small claims with the holding computer and retry first", async () => {
   const f=fixture();
   try {
     const acquired=await f.request("acquire");
@@ -409,7 +409,7 @@ it("review round: returns standard errors and small claims with the holding comp
   } finally {f.close();}
 });
 
-it("review round: status and catch-up use read snapshots without reconciling the live host", async () => {
+it("status and catch-up use read snapshots without reconciling the live host", async () => {
   const f=fixture();
   try {
     expect((await f.request("acquire")).status).toBe(200);
@@ -424,14 +424,14 @@ it("review round: status and catch-up use read snapshots without reconciling the
   } finally {f.close();}
 });
 
-it("review round: caches absent tags across parse, duplicate validation and admission", () => {
+it("caches absent tags across parse, duplicate validation and admission", () => {
   let scans=0;
   const op={originSeq:0,opKind:"ydoc.update",recordedAtMs:0,get payloadJson() {scans++; return '{"work":"ordinary"}';}};
   for(let i=0;i<3;i++) expect(releasePublicationTag(op)).toBeNull();
   expect(scans).toBe(1);
 });
 
-it("review round: rejects client authors on tagged moments before storing a refusal", async () => {
+it("rejects client authors on tagged moments before storing a refusal", async () => {
   const f=fixture();
   try {
     const tagged=f.tagged(0,2,"moment.append");
@@ -441,7 +441,7 @@ it("review round: rejects client authors on tagged moments before storing a refu
   } finally {f.close();}
 });
 
-it("review round: status cannot close an abandoned sent-ID obligation even with a successor", async () => {
+it("status cannot close an abandoned sent-ID obligation even with a successor", async () => {
   const f=fixture();
   try {
     const acquired=await f.request("acquire");
@@ -453,7 +453,7 @@ it("review round: status cannot close an abandoned sent-ID obligation even with 
   } finally {f.close();}
 });
 
-it("review round: publishes only the digest and cannot complete with a disclosed tag", async () => {
+it("publishes only the digest and cannot complete with a disclosed tag", async () => {
   const f=fixture();
   try {
     expect((await f.request("acquire")).status).toBe(200);
@@ -475,7 +475,7 @@ it("review round: publishes only the digest and cannot complete with a disclosed
   } finally {f.close();}
 });
 
-it("review round: abandonment refunds usage and succeeds while the workspace is over quota", async () => {
+it("abandonment refunds usage and succeeds while the workspace is over quota", async () => {
   const f=fixture({workspaceQuotaBytes:1_000_000});
   try {
     const acquired=await f.request("acquire");
@@ -504,7 +504,7 @@ it("retries a tagged moment's settlement refusal without restoring a client payl
   } finally {f.close();}
 });
 
-it("round 2: never caches operations outside updates and moments", () => {
+it("never caches operations outside updates and moments", () => {
   const get=vi.spyOn(WeakMap.prototype,"get"), set=vi.spyOn(WeakMap.prototype,"set");
   const op={originSeq:0,opKind:"chat.append",recordedAtMs:0,payloadJson:'{"release":"ordinary content"}'};
   try {
@@ -514,7 +514,7 @@ it("round 2: never caches operations outside updates and moments", () => {
   } finally {get.mockRestore();set.mockRestore();}
 });
 
-it("round 2: keeps release errors private and uncached", async () => {
+it("keeps release errors private and uncached", async () => {
   const f=fixture();
   try {
     expect((await f.request("acquire")).status).toBe(200);
@@ -525,7 +525,7 @@ it("round 2: keeps release errors private and uncached", async () => {
   } finally {f.close();}
 });
 
-it("round 2: checks tagged ownership once per batch including duplicate retries", () => {
+it("checks tagged ownership once per batch including duplicate retries", () => {
   const f=fixture();
   try {
     const ops=[f.tagged(0),f.tagged(1)].map(({payload,...op})=>({...op,payloadJson:JSON.stringify(payload)}));
@@ -541,7 +541,7 @@ it("round 2: checks tagged ownership once per batch including duplicate retries"
   } finally {f.close();}
 });
 
-it("round 2: hashes the lowercase hex release ID text using the drain's fixed vector", async () => {
+it("hashes the lowercase hex release ID text using the drain's fixed vector", async () => {
   const f=fixture();
   try {
     expect(releaseId).toBe("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
