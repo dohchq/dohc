@@ -179,6 +179,13 @@ A test that passes only on that retry does not fail the gate. `result.json` list
 A flaky test is a defect. Fix the condition it races, or report it to whoever owns it. A test that fails twice still fails the gate.
 A repository or desktop script step reruns as a whole, after its first attempt's ignored outputs. A test that fails on a clean tree but passes beside those outputs is recorded as flaky like any other, so treat every entry as a real failure until you have read it.
 
+### Nightly run
+
+Every night at 03:07, the `dohc-verification-nightly` scheduled task submits a full verification of main's head: every gate, every package, and every proof.
+It covers everything merged since the last nightly that passed, and it runs before the rest of the line. A head that already passed is not verified again.
+`pnpm verify:queue status` shows the last passing nightly. Submit one by hand with `pnpm verify:queue nightly`.
+A failed nightly means a merged change broke main or an affected-package selection missed something. Find the change that broke it and revert or fix it the same day.
+
 To schedule jobs separately, use `pnpm verify:pr --base <target-ref> --job js` and `--job rust`.
 Each report states its scope. Every selected job needs passing evidence that covers the change.
 An explicit `--job` runs that job even when the filters omit it.
