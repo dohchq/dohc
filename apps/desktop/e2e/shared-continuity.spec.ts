@@ -9,6 +9,7 @@ import { expect, test, type BrowserContext, type Page, type TestInfo } from "@pl
 import type { DohcDesktopBridge, EngineMomentRecord } from "../src/ipc/bridgeContract";
 import { assertDesktopEngineHealthy, launchDesktopApp, type LaunchedDesktopApp } from "./helpers/desktopApp";
 import { DohcCliFailure, runDohcCli, waitForCliEndpoint } from "./helpers/dohcCli";
+import { readHistoryMoments } from "./helpers/history";
 import { liveDocumentFold, ownerAuditRecord, ownerEnrollment, ownerOutboxDeclarations, ownerSettlementState, ydocUpdateAuthors, type LiveAuditRecord } from "./helpers/engineDb";
 import { approveDesktop, createVerifiedAccount, openDesktopApproval, startSelfHostOnboardingStack, trustFixtureCa } from "./helpers/selfHostOnboarding";
 import {
@@ -87,11 +88,9 @@ async function hostedAgentEdit(temp: TempWorkspace, find: string, text: string, 
 }
 
 async function momentIds(page: Page, workspaceId: string, path: string): Promise<string[]> {
-  return page.evaluate(async ({ workspaceId, path }) => {
-    const history = await (window as unknown as { dohcDesktop: Api }).dohcDesktop.listEngineMoments({ workspaceId, limit: 100 });
-    if (!("moments" in history)) throw new Error("History is still updating.");
-    return history.moments.filter(moment => moment.path === path).map(moment => moment.id);
-  }, { workspaceId, path });
+  const moments = await readHistoryMoments(page, workspaceId, path);
+  if (moments === null) throw new Error("History is unavailable.");
+  return moments.map(moment => moment.id);
 }
 
 // The last views ownerSettled compared, attached when the test fails so a
@@ -316,18 +315,18 @@ interface IntroducingMoment { id: string; momentOrder: number; origin: string; l
 
 /** The earliest moment of the document whose change wrote `text`, with the authors its list row and its detail report. Null until history records it. */
 async function momentIntroducing(page: Page, workspaceId: string, text: string): Promise<IntroducingMoment | null> {
-  return page.evaluate(async ({ workspaceId, path, text }) => {
+  const rows = await readHistoryMoments(page, workspaceId, PATH);
+  if (rows === null) return null;
+  return page.evaluate(async ({ workspaceId, rows, text }) => {
     const bridge = (window as unknown as { dohcDesktop: Api }).dohcDesktop;
-    const history = await bridge.listEngineMoments({ workspaceId, limit: 100 });
-    if (!("moments" in history)) return null;
-    for (const row of history.moments.filter(moment => moment.path === path).sort((a, b) => a.momentOrder - b.momentOrder)) {
+    for (const row of rows.sort((a, b) => a.momentOrder - b.momentOrder)) {
       const { moment } = await bridge.readEngineMoment({ workspaceId, momentId: row.id });
       if (moment?.afterText?.includes(text) && !moment.beforeText?.includes(text)) {
         return { id: row.id, momentOrder: row.momentOrder, origin: moment.origin, listed: row.authors, authors: moment.authors };
       }
     }
     return null;
-  }, { workspaceId, path: PATH, text });
+  }, { workspaceId, rows, text });
 }
 
 type HostedEvidence = ReturnType<Awaited<ReturnType<typeof startSelfHostOnboardingStack>>["hostedAgentEvidence"]>;
@@ -354,11 +353,9 @@ async function expectDeclaredMoment(page: Page, workspaceId: string, text: strin
     await expect.poll(async () => (await momentIntroducing(page, workspaceId, text))?.authors ?? [], { timeout: 60_000, intervals: [1_000] })
       .toContainEqual(declaredAuthor(declaration));
   } catch (error) {
-    const evidence = await page.evaluate(async ({ workspaceId, path, text }) => {
+    const evidence = await readHistoryMoments(page, workspaceId, PATH).then(rows => page.evaluate(async ({ workspaceId, path, text, rows }) => {
       const bridge = (window as unknown as { dohcDesktop: Api }).dohcDesktop;
-      const history = await bridge.listEngineMoments({ workspaceId, limit: 100 });
-      if (!("moments" in history)) return { workspaceId, path, historyReady: false };
-      const rows = history.moments.filter(moment => moment.path === path);
+      if (rows === null) return { workspaceId, path, historyReady: false };
       const details = [];
       for (const row of rows.slice(0, 8)) {
         const { moment } = await bridge.readEngineMoment({ workspaceId, momentId: row.id });
@@ -368,7 +365,7 @@ async function expectDeclaredMoment(page: Page, workspaceId: string, text: strin
           listed: row.authors, authors: moment?.authors ?? null });
       }
       return { workspaceId, path, historyReady: true, pathRowCount: rows.length, details };
-    }, { workspaceId, path: PATH, text }).catch(cause => ({ error: cause instanceof Error ? cause.message : String(cause) }));
+    }, { workspaceId, path: PATH, text, rows })).catch(cause => ({ error: cause instanceof Error ? cause.message : String(cause) }));
     await test.info().attach(`declared agent history ${declaration.agentId}`, {
       contentType: "application/json", body: JSON.stringify(evidence, null, 2),
     }).catch(() => undefined);
@@ -387,11 +384,11 @@ async function expectDeclaredMoment(page: Page, workspaceId: string, text: strin
  * position in `authorLabels`. Null until history records the moment.
  */
 async function recipientCredit(page: Page, workspaceId: string, text: string, humanId: string) {
-  return page.evaluate(async ({ workspaceId, path, text, humanId }) => {
+  const rows = await readHistoryMoments(page, workspaceId, PATH);
+  if (rows === null) return null;
+  return page.evaluate(async ({ workspaceId, rows, text, humanId }) => {
     const bridge = (window as unknown as { dohcDesktop: Api }).dohcDesktop;
-    const history = await bridge.listEngineMoments({ workspaceId, limit: 100 });
-    if (!("moments" in history)) return null;
-    for (const row of history.moments.filter(moment => moment.path === path).sort((a, b) => a.momentOrder - b.momentOrder)) {
+    for (const row of rows.sort((a, b) => a.momentOrder - b.momentOrder)) {
       const { moment } = await bridge.readEngineMoment({ workspaceId, momentId: row.id });
       if (!moment?.afterText?.includes(text) || moment.beforeText?.includes(text)) continue;
       const index = (row.authors ?? []).findIndex(author => author.kind === "human" && author.humanId === humanId);
@@ -399,7 +396,7 @@ async function recipientCredit(page: Page, workspaceId: string, text: string, hu
       return { id: row.id, momentOrder: row.momentOrder, listed: row.authors, authors: moment.authors, label };
     }
     return null;
-  }, { workspaceId, path: PATH, text, humanId });
+  }, { workspaceId, rows, text, humanId });
 }
 
 test("@shared-continuity a live document keeps its person's and agent's work through restart, a recipient continues it, the owner restores it, and the work continues with a new recipient", async ({ browser }, testInfo) => {
@@ -562,7 +559,9 @@ test("@shared-continuity a live document keeps its person's and agent's work thr
     await test.step("the owner changes the private file and history records it", async () => {
       const edited = await runDohcCli(ownerTemp, ["--json", "document", "edit", HIDDEN, "--find", HIDDEN_TEXT, "--text", `${HIDDEN_TEXT} ${HIDDEN_EDIT}`]);
       expect(JSON.parse(edited.stdout)).toMatchObject({ ok: true, path: HIDDEN, changed: true });
-      await expect.poll(() => momentIds(owner!.page, workspace.workspaceId, HIDDEN), { timeout: 30_000 }).not.toEqual([]);
+      await expect(async () => {
+        expect(await momentIds(owner!.page, workspace.workspaceId, HIDDEN)).not.toEqual([]);
+      }).toPass({ timeout: 30_000 });
     });
 
     await test.step("both edits survive the owner's restart", async () => {
@@ -644,7 +643,9 @@ test("@shared-continuity a live document keeps its person's and agent's work thr
       await expect(editor(page)).toContainText(HA);
       provenance.hostedRecipient = await expectDeclaredMoment(page, recipientWorkspaceId, HA, admittedAgent(hosted!.change.authorSnapshot));
       // The share holds one file: no history of the hidden one, even by the owner's moment IDs.
-      expect(await momentIds(page, recipientWorkspaceId, HIDDEN)).toEqual([]);
+      await expect(async () => {
+        expect(await momentIds(page, recipientWorkspaceId, HIDDEN)).toEqual([]);
+      }).toPass({ timeout: 30_000 });
       const guessed = await momentIds(owner!.page, workspace.workspaceId, HIDDEN);
       expect(guessed.length).toBeGreaterThan(0);
       for (const momentId of guessed) {
@@ -734,10 +735,7 @@ test("@shared-continuity a live document keeps its person's and agent's work thr
           recipientUserId,
           ydocUpdateAuthors: ydocUpdateAuthors(ownerTemp.rootPath),
           sharedRestoreRemoved: await removed.innerText(),
-          ownerHistory: await page.evaluate(async ({ workspaceId, path }) => {
-            const history = await (window as unknown as { dohcDesktop: Api }).dohcDesktop.listEngineMoments({ workspaceId, limit: 100 });
-            return "moments" in history ? history.moments.filter(moment => moment.path === path) : history;
-          }, { workspaceId: workspace.workspaceId, path: PATH }),
+          ownerHistory: await readHistoryMoments(page, workspace.workspaceId, PATH),
         }, null, 2),
       });
       await dialog.getByRole("button", { name: "Restore file" }).click();
