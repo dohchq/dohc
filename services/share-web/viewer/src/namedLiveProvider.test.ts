@@ -352,7 +352,8 @@ describe("named live browser provider", () => {
     expect(value.state()).toMatchObject({ status: "quarantined", reason: "delivery-attempt-limit", pendingUpdates: 1 });
     expect(second.submissions()).toHaveLength(0);
   });
-  it.each(["admission-unavailable", "application-pending"] as const)("resubmits %s without disconnecting or exhausting ambiguous attempts", async reason => {
+  it("resubmits unavailable admission without spending delivery attempts", async () => {
+    const reason = "admission-unavailable";
     const {value, host} = await live(provider({...limits(), maxDeliveryAttempts: 1}));
     vi.useFakeTimers();
     edit(value, " draft");
@@ -365,7 +366,7 @@ describe("named live browser provider", () => {
       expect(host.isClosed()).toBe(false);
       await vi.advanceTimersByTimeAsync(0);
       expect(host.submissions()).toHaveLength(attempt);
-      await vi.advanceTimersByTimeAsync(250);
+      await vi.advanceTimersByTimeAsync(250 * 2 ** (attempt - 1));
       const retry = await host.submitted(attempt + 1);
       expect(retry.bytes).toEqual(first.bytes);
       expect(retry.begin).toMatchObject({deliveryId: item.begin.deliveryId, digest: item.begin.digest});
@@ -509,15 +510,69 @@ it("retains earlier application evidence when a later admission retry precedes r
   await second.ack(retry, 1);
   expect(value.state()).toMatchObject({status: "live", pendingUpdates: 0});
 });
-it("keeps mixed retry reasons within the same ambiguous delivery attempt", async () => {
-  const {value, host} = await live(provider({...limits(), maxDeliveryAttempts: 1}));
+it("counts application retries while retaining evidence across mixed retry reasons", async () => {
+  const {value, host} = await live(provider({...limits(), maxDeliveryAttempts: 3}));
   vi.useFakeTimers(); edit(value, " draft");
   for (const [index, reason] of (["application-pending", "admission-unavailable", "application-pending"] as const).entries()) {
     const item = await host.submitted(index + 1);
     if (item.begin.purpose !== "submit-update") throw new Error("Expected submit");
     await host.send({kind: "result", result: "retry", deliveryId: item.begin.deliveryId, updateDigest: item.begin.digest, reason});
-    await vi.advanceTimersByTimeAsync(250);
+    await vi.advanceTimersByTimeAsync(250 * 2 ** index);
   }
   await host.ack(await host.submitted(4));
   expect(value.state()).toMatchObject({status: "live", pendingUpdates: 0});
+});
+
+it("backs off pending application retries to ten seconds and resets after success", async () => {
+  const value = provider({...limits(), maxDeliveryAttempts: 12});
+  const doc = document("base"), host = peer(value, 1, {replenish: true});
+  await host.greet(); await host.initial(doc);
+  vi.useFakeTimers();
+  edit(value, " draft");
+  let item = await host.submitted(), count = 1;
+  async function retry() {
+    if (item.begin.purpose !== "submit-update") throw new Error("Expected submit");
+    await host.send({kind: "result", result: "retry", deliveryId: item.begin.deliveryId, updateDigest: item.begin.digest, reason: "application-pending"});
+  }
+  for (const delay of [250, 500, 1_000, 2_000, 4_000, 8_000, 10_000, 10_000]) {
+    await retry();
+    await vi.advanceTimersByTimeAsync(delay - 1);
+    expect(host.submissions()).toHaveLength(count);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(host.submissions()).toHaveLength(count + 1);
+    item = await host.submitted(++count);
+  }
+  await host.ack(item);
+  expect(value.state().pendingUpdates).toBe(0);
+  edit(value, " next");
+  item = await host.submitted(++count);
+  await retry();
+  await vi.advanceTimersByTimeAsync(249);
+  expect(host.submissions()).toHaveLength(count);
+  await vi.advanceTimersByTimeAsync(1);
+  expect(host.submissions()).toHaveLength(count + 1);
+  await host.submitted(++count);
+  expect(value.state().status).toBe("live");
+});
+it("bounds pending application resubmissions and retains the draft at the attempt limit", async () => {
+  const {value, host} = await live(provider({...limits(), maxDeliveryAttempts: 2}));
+  vi.useFakeTimers();
+  edit(value, " draft");
+  const first = await host.submitted();
+  async function retry(item: Received) {
+    if (item.begin.purpose !== "submit-update") throw new Error("Expected submit");
+    await host.send({kind: "result", result: "retry", deliveryId: item.begin.deliveryId, updateDigest: item.begin.digest, reason: "application-pending"});
+  }
+  await retry(first);
+  await vi.advanceTimersByTimeAsync(250);
+  const second = await host.submitted(2);
+  expect(second.bytes).toEqual(first.bytes);
+  expect(second.begin).toMatchObject({deliveryId: (first.begin as {deliveryId: string}).deliveryId, digest: first.begin.digest});
+  await retry(second);
+  await vi.advanceTimersByTimeAsync(500);
+  expect(value.state()).toMatchObject({status: "quarantined", reason: "delivery-attempt-limit", pendingUpdates: 1});
+  expect(value.body.toString()).toContain("draft");
+  await vi.advanceTimersByTimeAsync(20_000);
+  expect(host.submissions()).toHaveLength(2);
+  expect(vi.getTimerCount()).toBe(0);
 });

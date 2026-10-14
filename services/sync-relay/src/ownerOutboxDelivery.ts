@@ -29,6 +29,7 @@ export interface OwnerOutboxAdmission {
 }
 
 export type CapacityLiveAdmissionValidator = OwnerOutboxAdmission["validate"] & {
+  hasCapacity?(): boolean;
   /** Pooled validators wait without retaining a journal cut. */
   waitForCapacity?(signal?: AbortSignal): Promise<void>;
 };

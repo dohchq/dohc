@@ -83,9 +83,9 @@ export function createNamedLiveBrowserTransport<Selection extends LiveSelection 
       if (!automatic || closed || reconnectTimer !== undefined || value.status !== "disconnected" || value.reason === "authority-unavailable") return;
       reconnectTimer = setTimeout(() => {
         reconnectTimer = undefined;
+        reconnectDelayMs = Math.min(10_000, reconnectDelayMs * 2);
         void reconnect();
       }, reconnectDelayMs);
-      reconnectDelayMs = Math.min(10_000, reconnectDelayMs * 2);
     }
     const state = (): NamedLiveBrowserState => ({ ...provider.state(), ...override });
     const notify = () => { for (const listener of listeners) { try { listener(state()); } catch { /* Observer owns its failure. */ } } };
@@ -98,6 +98,7 @@ export function createNamedLiveBrowserTransport<Selection extends LiveSelection 
       previous.controller.abort();
       previous.removeListeners?.();
       previous.route?.disconnect();
+      clearTimeout(reconnectTimer); reconnectTimer = undefined;
       try { previous.socket?.close(); } catch { /* The attempt is already retired. */ }
       const prior = retiring;
       retiring = Promise.allSettled([prior, previous.route?.settled(), ...previous.writes]).then(() => undefined);

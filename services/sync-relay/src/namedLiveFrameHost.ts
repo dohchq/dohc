@@ -234,6 +234,7 @@ function captureLiveFrameHost(options: {
           for (;;) {
             await waitForCapacity?.(admissionSignal);
             check(admissionSignal);
+            if (validate.hasCapacity?.() === false) continue;
             const read = storage.readLiveUpdateJournalCut({ document });
             if (read.kind !== "cut") return { result: "refused", reason: read.reason };
             const cut = read.cut;

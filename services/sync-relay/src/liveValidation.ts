@@ -43,13 +43,14 @@ export function createLiveValidationExecutor() {
   const slots = new Set<{ worker: Worker; busy: boolean }>();
   const waiters = new Set<() => void>();
   let closed = false;
+  const hasCapacity = () => !closed && (slots.size < 2 || [...slots].some((slot) => !slot.busy));
   const notify = () => {
     for (const wake of [...waiters]) wake();
   };
   function waitForCapacity(signal?: AbortSignal): Promise<void> {
     signal?.throwIfAborted();
     if (closed) return Promise.reject(new Error("Live validation closed."));
-    if (slots.size < 2 || [...slots].some((slot) => !slot.busy))
+    if (hasCapacity())
       return Promise.resolve();
     return new Promise<void>((resolve, reject) => {
       const dispose = () => {
@@ -161,7 +162,7 @@ export function createLiveValidationExecutor() {
         { kind: "journal", policy: ownedPolicy, input },
         signal,
       );
-    return Object.assign(validate, { waitForCapacity });
+    return Object.assign(validate, { waitForCapacity, hasCapacity });
   }
   async function close() {
     closed = true;

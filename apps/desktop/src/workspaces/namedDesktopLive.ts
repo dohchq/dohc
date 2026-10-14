@@ -4,7 +4,7 @@ import * as Y from "yjs";
 import { WebSocket as NodeWebSocket } from "ws";
 import { readBoundedJson } from "@dohc/service-http";
 import { parseLiveUpdateIdentifier } from "@dohc/live-session-contract/live-update-admission";
-import { createNamedLiveBrowserTransport, parseNamedLiveBrowserLimits, type NamedLiveSelection } from "@dohc/ydoc-projection/named-live-browser-transport";
+import { createNamedLiveBrowserTransport, LiveAuthorityUnavailableError, parseNamedLiveBrowserLimits, type NamedLiveSelection } from "@dohc/ydoc-projection/named-live-browser-transport";
 import { ENGINE_YDOC_UPDATE_MAX_BYTES } from "../ipc/channels";
 import { RELAY_FETCH_TIMEOUT_MS, relayApiFetch } from "./sharedChannels";
 import type { LiveDraft } from "./liveDraftRecovery";
@@ -30,6 +30,7 @@ export function createNamedDesktopLiveCapture(options: {
       body: JSON.stringify({ shareId: options.shareId, path }),
     });
     try {
+      if ([401, 403, 404].includes(response.status)) throw new LiveAuthorityUnavailableError("Live editing is unavailable.");
       if (response.status !== 200 || response.redirected || response.headers.get("content-type")?.split(";", 1)[0]?.trim() !== "application/json") throw new Error("Live editing is unavailable.");
       const value = await readBoundedJson(response, ENGINE_YDOC_UPDATE_MAX_BYTES, signal);
       options.assertCurrent(); signal.throwIfAborted();

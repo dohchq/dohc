@@ -348,3 +348,30 @@ it("caps automatic reconnect backoff at ten seconds", async () => {
   }
   f.value.disconnect(); expect(vi.getTimerCount()).toBe(0);
 });
+
+it("does not retry a ticket authority refusal over twenty seconds", async () => {
+  vi.useFakeTimers();
+  const f = fixture();
+  f.intercept(path => path === "/api/live/named-ticket" ? new Response(null, {status: 404}) : undefined);
+  await f.value.reconnect();
+  expect(f.value.state()).toMatchObject({status: "disconnected", reason: "authority-unavailable"});
+  expect(f.requests).toHaveLength(3);
+  await vi.advanceTimersByTimeAsync(20_000);
+  expect(f.requests).toHaveLength(3);
+  expect(f.sockets).toHaveLength(0);
+  expect(vi.getTimerCount()).toBe(0);
+});
+it("reconnects a live route once without tearing down the replacement", async () => {
+  const f = await live();
+  vi.useFakeTimers();
+  const reconnecting = f.value.reconnect();
+  const socket = await f.socketAt(1), peer = host(socket, f.value);
+  socket.open(); await reconnecting; await peer.greet(); await peer.initial(f.doc);
+  expect(f.value.state().status).toBe("live");
+  expect(vi.getTimerCount()).toBe(0);
+  await vi.advanceTimersByTimeAsync(20_000);
+  expect(f.sockets).toHaveLength(2);
+  expect(f.requests).toHaveLength(6);
+  expect(socket.closed).toBe(0);
+  expect(f.value.state().status).toBe("live");
+});

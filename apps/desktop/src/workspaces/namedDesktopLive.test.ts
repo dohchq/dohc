@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
 import { createNamedDesktopLiveCapture, waitForNamedDesktopAdmission } from "./namedDesktopLive";
+import { LiveAuthorityUnavailableError, type NamedLiveSelection } from "@dohc/ydoc-projection/named-live-browser-transport";
 import { preserveLiveDraft } from "./liveDraftRecovery";
 
 const transport = vi.hoisted(() => ({ factory: vi.fn() }));
@@ -220,5 +221,19 @@ it("keeps editing on retryable admission and stops on a terminal refusal", async
   f.terminal();
   expect(provider.liveWritable?.()).toBe(false);
   expect(onSaveState).toHaveBeenLastCalledWith("read-only", 1, "status", undefined, "reconnecting");
+  await provider.close();
+});
+
+it.each([401, 403, 404])("classifies desktop admission status %s as unavailable authority", async status => {
+  const f = fixture();
+  const provider = await f.capture.openYDocSession({path: "docs/a.md", contentKind: "richdoc", onRemoteUpdate: vi.fn()});
+  const options = transport.factory.mock.calls[0]![0] as {
+    authorize(selection: NamedLiveSelection, signal: AbortSignal): Promise<unknown>;
+  };
+  const selected = {accountId: "reader", workspaceId: "remote-workspace", grantId: "grant", objectId: "object"};
+  await options.authorize(selected, new AbortController().signal);
+  f.request.mockResolvedValueOnce(new Response(null, {status}));
+  await expect(options.authorize(selected, new AbortController().signal)).rejects.toBeInstanceOf(LiveAuthorityUnavailableError);
+  expect(f.request).toHaveBeenCalledTimes(2);
   await provider.close();
 });

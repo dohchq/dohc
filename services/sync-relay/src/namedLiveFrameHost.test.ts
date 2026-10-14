@@ -447,3 +447,45 @@ it("terminally refuses an oversized submission before validation or journal admi
   expect(commit).not.toHaveBeenCalled();
   expect(f.validate).not.toHaveBeenCalled();
 });
+
+it("reads one cut when one slot frees for thirty waiting submissions", async () => {
+  const f = await setup(64);
+  journal(f);
+  const read = vi.mocked(f.storage.readLiveUpdateJournalCut);
+  let available = false;
+  const waiters = new Set<() => void>();
+  const waiting = deferred<void>();
+  const validate = Object.assign(vi.fn(() => {
+    if (!available) return {kind: "retry" as const, reason: "admission-unavailable" as const, waitForCapacity};
+    available = false;
+    return {kind: "refused" as const, reason: "invalid-update" as const, source: "candidate" as const};
+  }), {hasCapacity: () => available, waitForCapacity});
+  function waitForCapacity(signal?: AbortSignal) {
+    if (available) return Promise.resolve();
+    return new Promise<void>((resolve, reject) => {
+      const wake = () => { waiters.delete(wake); signal?.removeEventListener("abort", abort); resolve(); };
+      const abort = () => { waiters.delete(wake); reject(signal!.reason); };
+      waiters.add(wake); signal?.addEventListener("abort", abort, {once: true});
+      if (waiters.size === 30) waiting.resolve();
+    });
+  }
+  const caller = new AbortController();
+  const captures = Array.from({length: 30}, () => captureNamedLiveFrameHost({
+    ticket: f.capture.ticket, actor: liveBrowserActor(scope), storage: f.storage,
+    native: f.native, bounds: f.bounds, validate,
+  }));
+  cleanup.push(async () => { captures.forEach(capture => capture.close()); });
+  const outcomes = captures.map(capture => capture.submit({
+    deliveryId: ack.deliveryId, updateDigest: hash(bytes), updateBytes: bytes,
+  }, caller.signal));
+  const settled = Promise.allSettled(outcomes);
+  await waiting.promise;
+  expect(read).not.toHaveBeenCalled();
+  available = true;
+  for (const wake of [...waiters]) wake();
+  expect(await Promise.race(outcomes)).toEqual({result: "success", ack});
+  expect(read).toHaveBeenCalledOnce();
+  expect(validate).toHaveBeenCalledOnce();
+  caller.abort();
+  await settled;
+});
