@@ -485,7 +485,39 @@ impl ReconcileController {
             .map(|c| (c.path.as_str(), (c.size, c.sha256.as_str())))
             .collect();
         let mut next = self.manifest.clone();
+        let held: std::collections::BTreeMap<_, _> = result
+            .held_observations
+            .iter()
+            .map(|held| (held.path.as_str(), held))
+            .collect();
         for op in &plan.ops {
+            if let Some(held) = held.get(op.path()) {
+                let CaptureOp::Ingest {
+                    size,
+                    sha256,
+                    mtime_ms,
+                    ..
+                } = op
+                else {
+                    return Err(FilesError::InvalidCaptureReceipt {
+                        path: held.path.clone(),
+                    });
+                };
+                let mtime_ms = if *size == held.size && sha256 == &held.sha256 {
+                    *mtime_ms
+                } else {
+                    0
+                };
+                next.insert(
+                    held.path.clone(),
+                    ManifestEntry {
+                        size: held.size,
+                        sha256: held.sha256.clone(),
+                        mtime_ms,
+                    },
+                );
+                continue;
+            }
             if not_owned.contains(op.path()) {
                 next.remove(op.path());
                 continue;
@@ -797,6 +829,7 @@ mod ack_receipt_tests {
             not_owned_paths: Vec::new(),
             failed_applies: Vec::new(),
             deferred_paths: Vec::new(),
+            held_observations: Vec::new(),
             crashed_after_durable_boundary: None,
             degraded: false,
         }
@@ -836,6 +869,7 @@ mod ack_receipt_tests {
             not_owned_paths: vec!["over-cap.md".to_owned()],
             failed_applies: Vec::new(),
             deferred_paths: Vec::new(),
+            held_observations: Vec::new(),
             crashed_after_durable_boundary: None,
             degraded: false,
         };

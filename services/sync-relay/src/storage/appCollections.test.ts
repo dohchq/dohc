@@ -645,3 +645,19 @@ it("rechecks owner authority after an approval upload yields",async()=>{
   body.send({expectedAuthorityRevision:2,capability:null});expect((await pending).status).toBe(404);
   expect(f.raw.prepare("SELECT authority_revision FROM sync_relay_app_publications").get()!.authority_revision).toBe(2);
 });
+
+it("operator takedown refuses Collection writes and receipt retries from an existing launch", () => {
+  const f = fixture();
+  f.accept();
+  const before = f.storage.maxOriginSeq("w", "relay:collection-create:g");
+  const disabled = f.storage.disableAppPublication({publicationId: f.owner.publicationId, reason: "Confirmed phishing", nowMs: 30});
+  expect(disabled.authorityRevision).toBe(3);
+  expect(() => f.accept()).toThrow(/not found/i);
+  expect(() => f.accept({idempotencyKey: "after-takedown"})).toThrow(/not found/i);
+  expect(() => f.accept({idempotencyKey: "guessed-revision", expectedAuthorityRevision: 3})).toThrow(/not found/i);
+  expect(() => f.storage.reactivateAppPublication({...f.owner, expectedAuthorityRevision: 3})).toThrow(/operator disabled/);
+  f.restart();
+  expect(() => f.accept({idempotencyKey: "after-restart"})).toThrow(/not found/i);
+  expect(f.storage.maxOriginSeq("w", "relay:collection-create:g")).toBe(before);
+  expect(f.raw.prepare("SELECT COUNT(*) n FROM sync_relay_app_collection_receipts").get()!.n).toBe(1);
+});

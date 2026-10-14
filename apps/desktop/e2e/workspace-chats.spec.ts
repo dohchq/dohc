@@ -105,6 +105,7 @@ test("general channel, composer-first chats, relaunch persistence, unread, searc
         expect(general).not.toBeNull();
         if (!general) throw new Error("general channel missing");
         await chats.startChannelThread({
+          authorActorKey: null,
           workspaceId,
           channelId: general.id,
           author: { kind: "agent", displayName: "Nova" },
@@ -328,6 +329,7 @@ test("performance: channel-list first paint and composer send latency", async ()
           });
           for (let threadIndex = 0; threadIndex < 10; threadIndex += 1) {
             await chats.startChannelThread({
+              authorActorKey: null,
               workspaceId,
               channelId: channel.id,
               author: { kind: "human", displayName: "You" },
@@ -342,6 +344,7 @@ test("performance: channel-list first paint and composer send latency", async ()
         if (!general) throw new Error("general channel missing");
         for (let threadIndex = 0; threadIndex < 10; threadIndex += 1) {
           await chats.startChannelThread({
+            authorActorKey: null,
             workspaceId,
             channelId: general.id,
             author: { kind: "human", displayName: "You" },

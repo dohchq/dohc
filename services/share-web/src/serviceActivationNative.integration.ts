@@ -243,12 +243,12 @@ it("resumes a real configured service activation after a lost native adoption re
       settlement: {maxApplicationsPerSettlement: 8}, adoption: {maxBytes: 1_000_000, maxEvents: 100, ownerOutbox: {maxPendingBytes: 1_000_000, maxPendingAgeMs: 600000}},
       sync: {policy: {maxClientVectorBytes: 100000, maxHostVectorBytes: 100000, maxOutputBytes: 1_000_000, maxReadBytes: 4_000_000}, workingReserveBytes: 4_000_000},
       activation: {targets: [{workspaceId: "workspace", path: "docs/a.md", shareId: "share"}], validation: validationPolicy, maxCaptureBytes: 1_000_000, maxEntriesPerDrain: 8,
-        maxBytesPerDrain: 1_000_000, maxDocumentsPerPass: 1, pollIntervalMs: 100, passDeadlineMs: 30000},
+        maxBytesPerDrain: 1_000_000, maxDocumentsPerPass: 1, pollIntervalMs: 100, passDeadlineMs: 30000, idleUnloadMs: 600000, idleRetryMs: 30000},
       ingress: {aggregateBytes: 512 * 1024 * 1024, applicationWorkingReserveBytes: 8 * 1024 * 1024, maxUploads: 4, uploadDeadlineMs: 30000},
       client: {aggregateBytes: 200_000_000, maxUploads: 4, connectTimeoutMs: 30000, requestDeadlineMs: 30000}}));
     let committed!: () => void; const adoptionCommitted = new Promise<void>(resolve => {committed = resolve;}); harness.committed = committed;
     const activationFailed = new Promise<Error>(resolve => {harness.failed = resolve;});
-    active = await startServiceLiveHost({configPath: serviceConfig, storage, history, frameChanges});
+    active = await startServiceLiveHost({trustedAccount: (accountId: string) => ({accountId, name: accountId}), configPath: serviceConfig, storage, history, frameChanges});
     const activationOutcome = await Promise.race([adoptionCommitted, activationFailed]);
     if (activationOutcome instanceof Error) throw activationOutcome;
     const pending = storage.createServiceActivationStore(history).read("workspace", "docs/a.md", 1_000_000)!;
@@ -257,7 +257,7 @@ it("resumes a real configured service activation after a lost native adoption re
     const firstConnectionId = active.coordinate.connectionId;
     await active.close(); active = undefined;
     expect(storage.createServiceActivationStore(history).read("workspace", "docs/a.md", 1_000_000)!.activationId).toBe(pending.activationId);
-    active = await startServiceLiveHost({configPath: serviceConfig, storage, history, frameChanges});
+    active = await startServiceLiveHost({trustedAccount: (accountId: string) => ({accountId, name: accountId}), configPath: serviceConfig, storage, history, frameChanges});
     expect(active.coordinate.connectionId).not.toBe(firstConnectionId);
     await vi.waitFor(() => expect(storage.createServiceActivationStore(history).read("workspace", "docs/a.md", 1_000_000)?.completed).toBe(true), {timeout: 30000});
     const completed = storage.createServiceActivationStore(history).read("workspace", "docs/a.md", 1_000_000)!;

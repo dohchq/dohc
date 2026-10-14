@@ -469,6 +469,10 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     return liveUpdateJournalStorage.readCommittedLiveUpdate(this, input);
   }
 
+  readReplicaLiveJournal(input: liveUpdateJournalStorage.ReplicaLiveJournalRead): Promise<liveUpdateJournalStorage.ReplicaLiveJournalPage> {
+    return liveUpdateJournalStorage.readReplicaLiveJournal(this, input);
+  }
+
   createLiveCommittedDeliveryStore(history: LiveJournalHistoryAuthority, activation?: ServiceActivationAccess): LiveCommittedDeliveryStore {
     return new LiveCommittedDeliveryStore(this, history, activation);
   }
@@ -794,6 +798,10 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
 
   withdrawAppPublication(input: publicationStorage.WithdrawAppPublicationInput) {
     return publicationStorage.withdrawAppPublication(this, input);
+  }
+
+  disableAppPublication(input: publicationStorage.DisableAppPublicationInput) {
+    return publicationStorage.disableAppPublication(this, input);
   }
 
   reactivateAppPublication(input: publicationStorage.ReactivateAppPublicationInput) {

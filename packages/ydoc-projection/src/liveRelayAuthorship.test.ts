@@ -5,6 +5,7 @@ import type { LiveAuthorContext } from '@dohc/live-session-contract'
 import type { LiveUpdateJournalCommitInput } from '../../../services/sync-relay/src/storage.js'
 import type { StorageContext } from '../../../services/sync-relay/src/storage/context.js'
 import { createLiveJournalHistoryAuthority } from '../../../services/sync-relay/src/storage/liveJournalHistory.js'
+import { assessLiveAuthorWindow } from '../../../services/sync-relay/src/storage/liveAuthorWindow.js'
 import { deriveLiveAuthorSnapshot, ensureLiveLinkPublicPrincipal } from '../../../services/sync-relay/src/storage/liveAuthorSnapshot.js'
 import { liveBrowserActor } from '../../../services/sync-relay/src/liveBrowserContext.js'
 import { hashLinkBearer, hashLinkProfileSecret } from '../../../services/sync-relay/src/linkSecurity.js'
@@ -105,14 +106,26 @@ it('keeps Alice deletion coverage when Bob rewraps it with a new edit', () => {
   expect(f.journalRows().journal[1]!.first_seen_deletes_json).toBe(JSON.stringify(deleted.admitted?.metadata.firstSeenDeletes))
 })
 
-it('refuses a reconstructed delta containing two unbound authored clients without writing', () => {
+it('admits an owner delta reconstructed from two unbound clients unattributed and replays its unchanged context', () => {
   const f = setup(), one = replica(f, 101), two = replica(f, 202)
   const mixed = Y.mergeUpdates([edit(one, 'one', 'Alice'), edit(two, 'two', 'Alice')])
-  const input = authored(f.capture(mixed, 'mixed')), before = f.journalRows()
+  const input = authored(f.capture(mixed, 'mixed'))
   expect(input.validation.kind).toBe('accepted')
-  expect(f.storage.commitLiveUpdateJournal(input)).toEqual({ result: { kind: 'refused', reason: 'provenance-refused' }, admitted: null })
-  expect(f.journalRows()).toEqual(before)
+  const result = f.storage.commitLiveUpdateJournal(input)
+  expect(result.result).toMatchObject({ kind: 'accepted', replayed: false })
+  expect(result.admitted?.metadata.authorSnapshot).toEqual([])
+  expect(result.admitted?.metadata.firstSeen).toEqual([
+    { clientId: 101, startClock: 0, endClock: 1 }, { clientId: 202, startClock: 0, endClock: 1 },
+  ])
+  expect(assessLiveAuthorWindow([], { authorSnapshot: result.admitted!.metadata.authorSnapshot!,
+    firstSeen: result.admitted!.metadata.firstSeen, firstSeenDeletes: [] }).coverage).toEqual([
+    { author: { kind: 'unattributed' }, structRanges: result.admitted!.metadata.firstSeen, deletionRanges: [] },
+  ])
+  expect(f.journalRows().journal[0]!.author_context_json).toBe(JSON.stringify(input.metadata.authorContext))
   expect(f.raw.prepare('SELECT COUNT(*) AS n FROM sync_relay_live_author_clients').get()!.n).toBe(0)
+  const beforeReplay = f.journalRows()
+  expect(f.storage.commitLiveUpdateJournal(input)).toEqual({ ...result, result: { ...result.result, replayed: true } })
+  expect(f.journalRows()).toEqual(beforeReplay)
 })
 
 it('refuses new structs from a client already bound to another identity', () => {
@@ -125,7 +138,7 @@ it('refuses new structs from a client already bound to another identity', () => 
   expect(f.journalRows()).toEqual(before)
 })
 
-it('admits originals after account, agent name, depth, or declared person changes, preserving bound credit', () => {
+it('preserves bound credit after name, depth, or declared person changes and admits a changed owner agent unattributed', () => {
   const f = setup(), agent = {agentId: 'writer', agentName: 'First name', onBehalfOf: 'owner', depth: 1}
   const context = {kind: 'account' as const, accountId: 'owner', agent}
   const first = f.storage.commitLiveUpdateJournal(authored(f.capture(f.update('first'), 'first'), context))
@@ -137,10 +150,21 @@ it('admits originals after account, agent name, depth, or declared person change
     {...context, agent: {...agent, onBehalfOf: 'other'}}))
   expect(third.result.kind).toBe('accepted')
   expect(third.admitted?.metadata.authorSnapshot).toEqual(first.admitted?.metadata.authorSnapshot)
-  const before = f.journalRows()
-  expect(f.storage.commitLiveUpdateJournal(authored(f.capture(f.update('fourth'), 'changed-agent'),
-    {...context, agent: {...agent, agentId: 'other-agent'}})).result).toEqual({kind: 'refused', reason: 'provenance-refused'})
-  expect(f.journalRows()).toEqual(before)
+  const bindings = f.raw.prepare('SELECT * FROM sync_relay_live_author_clients').all()
+  const changed = authored(f.capture(f.update('fourth'), 'changed-agent'),
+    {...context, agent: {...agent, agentId: 'other-agent'}})
+  const fourth = f.storage.commitLiveUpdateJournal(changed)
+  expect(fourth.result).toMatchObject({kind: 'accepted', replayed: false})
+  expect(fourth.admitted?.metadata.authorSnapshot).toEqual([])
+  expect(assessLiveAuthorWindow([], {authorSnapshot: fourth.admitted!.metadata.authorSnapshot!,
+    firstSeen: fourth.admitted!.metadata.firstSeen, firstSeenDeletes: []}).coverage).toEqual([
+    {author: {kind: 'unattributed'}, structRanges: fourth.admitted!.metadata.firstSeen, deletionRanges: []},
+  ])
+  expect(f.journalRows().journal[3]!.author_context_json).toBe(JSON.stringify(changed.metadata.authorContext))
+  expect(f.raw.prepare('SELECT * FROM sync_relay_live_author_clients').all()).toEqual(bindings)
+  const beforeReplay = f.journalRows()
+  expect(f.storage.commitLiveUpdateJournal(changed)).toEqual({...fourth, result: {...fourth.result, replayed: true}})
+  expect(f.journalRows()).toEqual(beforeReplay)
 })
 
 it('admits fresh agent declarations beyond 16 unnamed without forcing an author checkpoint', () => {

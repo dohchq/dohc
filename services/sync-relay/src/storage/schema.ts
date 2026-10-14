@@ -902,7 +902,7 @@ function assertLiveJournalSchema(db: SqliteDb): void {
     if (table === LIVE_JOURNAL_TABLE && liveAuthorSchemaMarked(db)) assertLiveAuthorColumns(db);
     same(db.prepare(`PRAGMA table_info(${table})`).all().filter(r => table !== LIVE_JOURNAL_TABLE || !liveAuthorSchemaMarked(db) || Number(r.cid) < 24).map(r => [r.cid,r.name,r.type,r.notnull,r.dflt_value,r.pk]), expected.columns);
     same(db.prepare(`PRAGMA foreign_key_list(${table})`).all().map(r => [r.id,r.seq,r.table,r.from,r.to,r.on_update,r.on_delete,r.match]), expected.foreignKeys);
-    same(db.prepare(`PRAGMA index_list(${table})`).all().filter(r => r.name !== LIVE_APPLICATION_AUTHORSHIP_INDEX).map(r => [r.name,r.unique,r.origin,r.partial]).sort((a,b) => String(a[0]).localeCompare(String(b[0]))), expected.indexes);
+    same(db.prepare(`PRAGMA index_list(${table})`).all().filter(r => r.name !== LIVE_APPLICATION_AUTHORSHIP_INDEX && r.name !== LIVE_JOURNAL_WORKSPACE_INDEX).map(r => [r.name,r.unique,r.origin,r.partial]).sort((a,b) => String(a[0]).localeCompare(String(b[0]))), expected.indexes);
     for (const [name, columns] of Object.entries(expected.indexColumns)) same(db.prepare(`PRAGMA index_info(${name})`).all().map(r => [r.seqno,r.cid,r.name]), columns);
   }
 }
@@ -914,6 +914,23 @@ function initializeLiveJournalSchema(db: SqliteDb): void {
   for (const sql of Object.values(LIVE_JOURNAL_SCHEMA)) db.exec(sql);
   assertLiveJournalSchema(db);
   db.prepare("INSERT INTO sync_relay_migrations(migration_id,completed_at_ms) VALUES (?,?)").run(LIVE_JOURNAL_MARKER,Date.now());
+}
+
+const LIVE_JOURNAL_WORKSPACE_INDEX = "idx_sync_relay_live_update_journal_workspace";
+const LIVE_JOURNAL_WORKSPACE_MIGRATION = "live-update-journal-workspace-index-v1";
+const LIVE_JOURNAL_WORKSPACE_SQL = `CREATE INDEX ${LIVE_JOURNAL_WORKSPACE_INDEX}
+  ON sync_relay_live_update_journal(workspace_id,journal_cursor)`;
+function initializeLiveJournalWorkspaceIndex(db: SqliteDb): void {
+  const marked = db.prepare("SELECT 1 FROM sync_relay_migrations WHERE migration_id=?").get(LIVE_JOURNAL_WORKSPACE_MIGRATION);
+  const row = db.prepare("SELECT type,tbl_name,sql FROM sqlite_schema WHERE name=?").get(LIVE_JOURNAL_WORKSPACE_INDEX);
+  if (!marked) {
+    if (row) throw new Error("unmarked live journal workspace index exists");
+    db.exec(LIVE_JOURNAL_WORKSPACE_SQL);
+    db.prepare("INSERT INTO sync_relay_migrations(migration_id,completed_at_ms) VALUES (?,?)").run(LIVE_JOURNAL_WORKSPACE_MIGRATION, Date.now());
+  } else if (row?.type !== "index" || row.tbl_name !== LIVE_JOURNAL_TABLE ||
+    typeof row.sql !== "string" || normalizedSchemaSql(row.sql) !== normalizedSchemaSql(LIVE_JOURNAL_WORKSPACE_SQL)) {
+    throw new Error("live journal workspace index is missing or damaged");
+  }
 }
 
 export const LIVE_APPLICATION_AUTHORSHIP_INDEX = "idx_sync_relay_live_application_authorship";
@@ -1243,6 +1260,7 @@ export function initializeSyncRelaySchema(db: SqliteDb): void {
     initializeServiceHostEnrollmentSchema(db);
     initializeLiveRestoreOperationSchema(db);
     initializeLiveJournalSchema(db);
+    initializeLiveJournalWorkspaceIndex(db);
     initializeLiveCommittedDeliverySchema(db);
     initializeLiveTicketSchema(db);
     initializeAppPublicationSchema(db);

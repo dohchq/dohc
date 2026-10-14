@@ -2,7 +2,7 @@ import {shareSenderLabel, shareAccessLabel} from "@dohc/security-contract/share-
 import {ShareSender} from "../ShareSender";
 import { MessageReactions } from "./chatMessages";
 import { chatEditorPath, chatEditorTitle } from "../shell/chatsNav";
-import { parseChatTabPath } from "./workbenchState";
+import { parseTab } from "./workbenchState";
 import { configuredRunnerCommand } from "../../agents/agentToolCatalog";
 import { agentIsSetUp } from "../askAgent";
 import { PostFeedList } from "./PostFeedList";
@@ -2447,7 +2447,8 @@ export function ChatsView(props: {
   useEffect(() => {
     if (seededRef.current || overview.status !== "ready") return;
     let seed = props.initialNav;
-    const target = parseChatTabPath(props.editorTabPath ?? null);
+    const tab = parseTab(props.editorTabPath ?? null);
+    const target = tab?.kind === "chat" ? tab.target : null;
     if (!seed && target?.kind === "channel") {
       const channel = overview.channels.find((entry) => entry.id === target.id);
       seed = channel ? { level: "channel", channel } : { level: "channels" };
@@ -2981,7 +2982,8 @@ export function ChatsView(props: {
     if (!activeChannel || activeWireId === null) {
       // The tab's conversation is gone, or Chats could not list it: About
       // has nothing to show. Until then it is still loading.
-      const target = parseChatTabPath(props.editorTabPath);
+      const tab = parseTab(props.editorTabPath);
+      const target = tab.kind === "chat" ? tab.target : null;
       if (overview.status === "unavailable") return "none";
       if (overview.status !== "ready") return null;
       if (target?.kind === "channel") {
@@ -3613,8 +3615,9 @@ export function ChatsView(props: {
     [goBack, nav.level, replyTarget, resolveTargetMessageId, variant],
   );
 
+  const editorTab = parseTab(props.editorTabPath ?? null);
   if (overview.status === "loading" || (overview.status === "ready" && variant === "page" && !props.initialNav &&
-    parseChatTabPath(props.editorTabPath ?? null)?.kind === "dm" && !dmRestoreReady)) {
+    editorTab?.kind === "chat" && editorTab.target.kind === "dm" && !dmRestoreReady)) {
     return <SkeletonRows inSlot layout="panel" label="Loading Chats..." />;
   }
 

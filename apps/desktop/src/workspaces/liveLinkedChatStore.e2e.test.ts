@@ -36,12 +36,14 @@ describe("live linked chat store real daemon", () => {
           kind: "channel",
         });
         const started = await store.startChannelThread({
+          authorActorKey: null,
           workspaceId: workspace.workspaceId,
           channelId: channel.id,
           author: { kind: "human", displayName: "Sam" },
           body: "First message",
         });
         const reply = await store.sendMessage({
+          authorActorKey: null,
           workspaceId: workspace.workspaceId,
           threadId: started.thread.id,
           author: { kind: "agent", displayName: "Codex" },

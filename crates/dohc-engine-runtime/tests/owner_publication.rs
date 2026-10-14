@@ -511,9 +511,11 @@ async fn accepted_prefix_settles_past_a_private_tail_at_author_capacity() {
     let remote_bytes = remote.richdoc_append_paragraph(REMOTE);
     f.doc.apply(&remote_bytes).unwrap();
     // Keep each settlement interval inside the configured maximum while the
-    // accepted checkpoint segment accumulates discarded metadata above60MiB.
+    // accepted checkpoint segment accumulates large discarded metadata.
     mark("fixture-private-edit");
-    const PREFIX: i64 = 700;
+    // Twice the settlements' 8 MiB working reserve, so none can hold the segment.
+    const LARGE_HISTORY_BYTES: i64 = 16 * 1024 * 1024;
+    const PREFIX: i64 = 200;
     let mut accepted_head = None;
     for cursor in 1..=PREFIX {
         let (receipt, result) =
@@ -552,7 +554,7 @@ async fn accepted_prefix_settles_past_a_private_tail_at_author_capacity() {
             )
         })
         .unwrap();
-    assert!(metadata > 60 * 1024 * 1024);
+    assert!(metadata > LARGE_HISTORY_BYTES);
     let remote_bytes = remote.richdoc_append_paragraph("Capacity remote paragraph");
     f.doc.apply(&remote_bytes).unwrap();
     let mut admitted = 0;

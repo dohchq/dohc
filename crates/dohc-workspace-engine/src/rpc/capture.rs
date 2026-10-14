@@ -28,6 +28,22 @@ use tokio::time::Instant;
 
 pub(super) const MAX_DESKTOP_CAPTURE_TEXT_BYTES: usize = 128 * 1024;
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RetryHeldParams {
+    path: String,
+}
+
+fn held_files_json(holds: &[dohc_engine_storage::capture_file_holds::CaptureFileHold]) -> Value {
+    json!(holds.iter().map(|hold| json!({
+        "workspaceId": hold.workspace_id, "sourceVersionId": hold.source_version_id,
+        "objectId": hold.object_id, "path": hold.path, "observedSha256": hold.observed_sha256,
+        "observedSize": hold.observed_size, "reason": hold.reason,
+        "observedAtMs": hold.observed_at_ms, "attemptCount": hold.attempt_count,
+        "retryRequested": hold.retry_requested,
+    })).collect::<Vec<_>>())
+}
+
 /// How long a hold lasts without a renewal. The holder renews well inside
 /// this while its change runs, so a hold whose reply was lost, or whose
 /// holder died with the connection up, ends on its own.
@@ -206,6 +222,40 @@ pub(super) fn reject_capture_origin(origin: Option<&str>) -> Result<(), WireErro
 }
 
 impl EngineService {
+    pub(super) async fn capture_retry_held(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let input: RetryHeldParams = parse(params)?;
+        let open = self.open(handle.as_ref())?;
+        if !open.is_local_owner() {
+            return Err(WireError::new(
+                ErrorCode::Forbidden,
+                "capture.retryHeld needs the workspace's owning handle",
+            ));
+        }
+        let path = dohc_engine_domain::validate_addressable_plaintext_path(&input.path)
+            .map_err(|error| map_runtime(error.into()))?;
+        let cancellation = OperationCancellation::new(ctx);
+        let gate = tokio::select! {
+            () = cancellation.token.cancelled() => return Err(cancellation.interruption("capture.retryHeld (queued)")),
+            guard = Arc::clone(&open.capture_apply_gate).lock_owned() => guard,
+        };
+        let retried = open
+            .actor
+            .retry_capture_file(open.workspace_id.clone(), path)
+            .await
+            .map_err(map_runtime)?;
+        if retried && let Some(driver) = lock(&open.capture).as_ref() {
+            driver.request_manifest_refresh();
+        }
+        drop(gate);
+        let mut response = self.capture_flush(ctx, handle).await?;
+        response["retried"] = json!(retried);
+        Ok(response)
+    }
     pub(super) async fn capture_clear_recovery(
         &self,
         handle: Option<WorkspaceHandle>,
@@ -232,11 +282,12 @@ impl EngineService {
             .kept_materialization_files(open.workspace_id.clone(), open.root.clone())
             .await
             .unwrap_or_default();
-        let capture_recoveries = open
+        let (capture_recoveries, holds) = open
             .actor
-            .capture_recoveries(open.workspace_id.clone())
+            .capture_notices(open.workspace_id.clone())
             .await
             .map_err(map_runtime)?;
+        let held_files = held_files_json(&holds);
         let guard = lock(&open.capture);
         Ok(match guard.as_ref() {
             Some(driver) => {
@@ -252,6 +303,7 @@ impl EngineService {
                     "noAtomicPlacement": no_atomic_placement,
                     "keptFiles": kept_files,
                     "captureRecoveries": capture_recoveries,
+                    "heldFiles": held_files,
                     "recoveryUnavailable": recovery_unavailable,
                 })
             }
@@ -265,6 +317,7 @@ impl EngineService {
                 "noAtomicPlacement": no_atomic_placement,
                 "keptFiles": kept_files,
                 "captureRecoveries": capture_recoveries,
+                "heldFiles": held_files,
                     "recoveryUnavailable": recovery_unavailable,
             }),
         })
@@ -287,10 +340,18 @@ impl EngineService {
     ) -> Result<Value, WireError> {
         let open = self.open(handle.as_ref())?;
         let outcome = self.capture_flush_once(ctx, &open, "capture.flush").await?;
+        let held_files = held_files_json(
+            &open
+                .actor
+                .capture_file_holds(open.workspace_id.clone())
+                .await
+                .map_err(map_runtime)?,
+        );
         Ok(json!({
             "settled": outcome.settled,
             "running": outcome.running,
             "degraded": outcome.degraded,
+            "heldFiles": held_files,
         }))
     }
 

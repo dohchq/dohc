@@ -8,6 +8,7 @@ import { useShellError } from "./useShellError";
 import { shareCaptureNoticeState } from "../../workspaces/shareCaptureNotice";
 import { CreationPartialError } from "@dohc/cli/creation";
 import { errorDetails } from "./copyDetails";
+import { flushDatasetSourceCapture } from "../../workspaces/datasetSourceCapture";
 
 afterEach(cleanup);
 
@@ -16,6 +17,29 @@ const strict = ({ children }: { children: ReactNode }) => (
 );
 
 describe("useShellError", () => {
+  it("keeps a held source error in Notices with the repair words and retry", async () => {
+    const capture = { running: true, settled: true, degraded: false, heldFiles: [{
+      workspaceId: "ws-a", sourceVersionId: "main", objectId: "object", path: "sources/note.md",
+      observedSha256: "digest", observedSize: 4, reason: "ydoc-resolution-not-representable" as const,
+      observedAtMs: 1, attemptCount: 1, retryRequested: false,
+    }] };
+    const adapter = { reconcileCapture: async () => capture, flushCapture: async () => capture };
+    const failure = await flushDatasetSourceCapture(adapter, new AbortController().signal).catch(error => error as Error);
+    expect(failure).toBeInstanceOf(Error);
+    if (!(failure instanceof Error)) throw Error("Expected a held source refusal");
+    const retry = vi.fn();
+    const { result } = renderHook(() => useShellError("ws-a"));
+    act(() => result.current.reportShellError("dohc could not prepare this Collection change.",
+      new Error(`Error invoking remote method 'dataset': Error: ${failure.message}`), retry));
+    const notice = result.current.shellErrors[0]!;
+    expect(notice.message).toBe("dohc could not prepare this Collection change. dohc cannot use the content in sources/note.md. The file is still on this computer. Edit it in another editor.");
+    expect(notice.seen).toBe(false);
+    expect(notice.retry).toBe(retry);
+    act(() => result.current.hideShellError(notice.id));
+    expect(result.current.shellErrors[0]).toMatchObject({ id: notice.id, seen: true });
+    act(() => result.current.shellErrors[0]!.retry!());
+    expect(retry).toHaveBeenCalledOnce();
+  });
   it("routes an additional Notice action independently of its primary action", () => {
     const first=vi.fn();const discard=vi.fn();const {result}=renderHook(()=>useShellError("workspace"));
     act(()=>result.current.reportShellFailure({message:"Kept typing",action:{label:"Copy your typing",run:first,additional:[{label:"Discard your typing",run:discard}]}}));
@@ -298,6 +322,39 @@ describe("useShellError", () => {
     act(() => result.current.reportShellFailure({ message: "Saved copy is stale." }));
     rerender({ id: "ws-b" });
     expect(result.current.shellErrors).toEqual([]);
+  });
+
+  it("files a quiet failure as a row without a toast, and keeps an open toast open", () => {
+    const { result } = renderHook(() => useShellError("ws-a"));
+    act(() => result.current.reportShellFailure({ message: "Could not read site.", identity: "folder-app:site", quiet: true }));
+    expect(result.current.shellErrors.map((error) => error.seen)).toEqual([true]);
+    act(() => result.current.dismissShellError(result.current.shellErrors[0]!.id));
+    act(() => result.current.reportShellFailure({ message: "Could not read site.", identity: "folder-app:site" }));
+    act(() => result.current.reportShellFailure({ message: "Could not read site.", identity: "folder-app:site", quiet: true }));
+    expect(result.current.shellErrors.map((error) => error.seen)).toEqual([false]);
+  });
+
+  // The toast is the newest unseen row, by time, then by place in the list.
+  it("updates a quiet repeat in place, so another failure's newer toast stays the one shown", () => {
+    const now = vi.spyOn(Date, "now");
+    try {
+      const { result } = renderHook(() => useShellError("ws-a"));
+      now.mockReturnValue(1_000);
+      act(() => result.current.reportShellFailure({ message: "Could not read site.", identity: "folder-app:site", retry: vi.fn() }));
+      now.mockReturnValue(2_000);
+      act(() => result.current.reportShellFailure({ message: "Could not read docs.", identity: "folder-app:docs" }));
+      const [siteBefore] = result.current.shellErrors;
+
+      now.mockReturnValue(3_000);
+      const retry = vi.fn();
+      act(() => result.current.reportShellFailure({ message: "Could not read site again.", identity: "folder-app:site", retry, quiet: true }));
+      const [site, docs] = result.current.shellErrors;
+      expect(result.current.shellErrors).toHaveLength(2);
+      expect(site).toMatchObject({ id: siteBefore!.id, atMs: 1_000, seen: false, message: "Could not read site again.", retry });
+      expect(docs).toMatchObject({ identity: "folder-app:docs", atMs: 2_000, seen: false });
+    } finally {
+      now.mockRestore();
+    }
   });
 
   it("replaces a repeated failure's row and keeps that row's toast, open or closed", () => {

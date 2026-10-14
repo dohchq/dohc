@@ -178,12 +178,14 @@ test("agent-authored messages render as \"their stored name\"", async () => {
           linkedFile: { objectId: seeded.object.id, pathHint: "notes/agenda.md" },
         });
         await chats.sendMessage({
+          authorActorKey: null,
           workspaceId,
           threadId: thread.id,
           author: { kind: "human", displayName: "Sam Rivera" },
           body: "Can you tighten the agenda?",
         });
         await chats.sendMessage({
+          authorActorKey: null,
           workspaceId,
           threadId: thread.id,
           author: { kind: "agent", displayName: "Nova" },
