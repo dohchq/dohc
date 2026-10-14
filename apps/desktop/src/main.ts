@@ -1,3 +1,4 @@
+import { createHistoryCollectionRemote } from "./workspaces/historyCollectionRemote";
 import { createEngineFileResolver } from "./workspaces/resolveEngineFiles";
 import { createTypingQuitRecovery } from "./workspaces/typingQuitRecovery";
 import { writeTypingCheckpointSync, typingRecoveryFailure, hasUnresolvedTypingCheckpoints, flushTypingCheckpoints, writeTypingCheckpoint, readTypingCheckpoints, retireTypingCheckpoint, importTypingCheckpoints, type TypingRecoveryFailure } from "./workspaces/outageTypingRecovery";
@@ -5856,30 +5857,26 @@ function registerIpcHandlers(): void {
       const local = await localDatasetHostFor(workspace, operation.signal);
       operation.assertCurrent();
       const generation = credentialCacheGeneration;
+      let remoteReady: ReturnType<typeof remoteForWorkspace> | undefined;
       let scope = historyScopeIds.get(operation.state);
       if (!scope) { scope = randomUUID(); historyScopeIds.set(operation.state, scope); }
       return {
         scope: JSON.stringify([scope, generation]),
-        local: (positions, limit) => local.historyHeads({ positions, limit }),
-        remote: async (datasetId, beforeRevision, deadline) => {
-          const signal = AbortSignal.any([operation.signal, deadline]);
-          const current = () => { signal.throwIfAborted(); operation.assertCurrent();
-            if (generation !== credentialCacheGeneration) throw new Error("Your server session changed. Reopen this workspace."); };
-          current();
-          const data = createDatasetAuthorityRouter(local, {
+        local: (positions, limit, sourceIds) => local.historyHeads({ positions, limit, sourceIds }),
+        remote: createHistoryCollectionRemote({
+          expected: operation, generation, currentGeneration: () => credentialCacheGeneration,
+          withOperation: work => withPhysicalWorkspaceOperation(workspace.workspaceId, work),
+          name: datasetId => { try { return local.describe(datasetId, { includeArchived: true }).name; } catch { return datasetId; } },
+          dataFor: (signal, current) => createDatasetAuthorityRouter(local, {
             status: async id => { current(); return local.transferStatus(id); },
             remote: async targetOrigin => {
-              const remote = await remoteForWorkspace(workspace); current();
+              const remote = await (remoteReady ??= remoteForWorkspace(workspace)); current();
               if (!remote.credentials.relayUrl || new URL(remote.credentials.relayUrl).origin !== targetOrigin) throw new Error("Collection host unavailable.");
               return createRemoteDatasetData({ workspaceId: workspace.workspaceId, ...remote, signal,
                 currentCredentialGeneration: () => credentialCacheGeneration, assertCurrent: current, relayJson: relayShareJsonWithCredentials });
             },
-          });
-          const page = await data.history({ datasetId, beforeRevision, limit: 51, metadataOnly: true, signal }); current();
-          if (page.archived) return page;
-          const description = await data.describe(datasetId); current();
-          return { ...page, name: description.name };
-        },
+          }),
+        }),
       };
     },
     recordHistoryPersonName: (workspaceId, userId, sender) => {

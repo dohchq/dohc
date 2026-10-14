@@ -327,10 +327,14 @@ export function createWorkspaceEngineIpc<
           rootPath: workspace.rootPath, attachmentId: workspace.attachmentId }), workspace.workspaceId)
           : (await requireEngineCapture(workspace.workspaceId, "Engine history")).capture;
         operation.assertCurrent();
-        const collections = shared ? { scope: operation.scope ?? workspace.workspaceId, local: () => ({ pages: [], transferred: [] }),
-          remote: async () => { throw new Error("Collection History is unavailable in a received share."); } }
-          : await dependencies.historyCollections(operation);
-        operation.assertCurrent();
+        let resolved: Awaited<ReturnType<typeof dependencies.historyCollections>> | undefined;
+        let pending: Promise<NonNullable<typeof resolved>> | undefined;
+        const getCollections = () => pending ??= dependencies.historyCollections(operation).then(value => { operation.assertCurrent(); resolved = value; return value; });
+        const collections: Pick<TimelineReads, "scope" | "local" | "remote"> = shared
+          ? { scope: operation.scope ?? workspace.workspaceId, local: () => ({ pages: [], transferred: [] }), remote: async () => { throw new Error("Collection History is unavailable in a received share."); } }
+          : { get scope() { return resolved?.scope ?? operation.scope ?? workspace.workspaceId; },
+            local: async (positions, limit, sourceIds) => (await getCollections()).local(positions, limit, sourceIds),
+            remote: async (datasetId, beforeRevision, signal) => (await getCollections()).remote(datasetId, beforeRevision, signal) };
         return timeline(input, { ...collections, engine, signal: operation.signal, assertCurrent: () => operation.assertCurrent(),
           names: authorNames(workspace.workspaceId, event.sender), ...(policy ? { admitted: historyPathAdmission(policy) } : {}) });
       },

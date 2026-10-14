@@ -18,7 +18,8 @@ import { createRecoveryInstaller, type RecoveryInstallOptions } from "./recovery
 import { equalRecoveryCursor } from "./recovery-record.js";
 import type { CheckpointStageAllocation } from "./checkpoint-storage.js";
 import { createDatasetReplicaHost } from "./replica-host.js";
-import { readDatasetHistory, readDatasetHistoryRevision } from "./dataset-history.js";
+import { historyStatement, readDatasetHistory, readDatasetHistoryRevision } from "./dataset-history.js";
+export { historyStatement } from "./dataset-history.js";
 import { initializeDatasetAttempts, reviewDatasetAttempts, reconcileDatasetAttempt, cancelDatasetAttempt, assertDatasetAttemptsCommitted, assertDatasetAttemptNotCancelled } from "./dataset-attempts.js";
 import { createDatasetAutomationClaims, DATASET_AUTOMATION_CHAIN_DEPTH, type DatasetActor, type DatasetPressed, type DatasetPressInput } from "./dataset-automation-claims.js";
 
@@ -293,7 +294,7 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
     return parseDatasetRevision(JSON.parse(String(row.revision_json)));
   }
   function historyLineage(key: DatasetScope): string {
-    const row = db.prepare("SELECT checkpoint_digest AS digest FROM dohc_dataset_journals WHERE workspace_id=? AND dataset_id=? AND checkpoint_revision=0 UNION ALL SELECT json_extract(cursor_json,'$.digest') AS digest FROM dohc_dataset_checkpoint_history WHERE workspace_id=? AND dataset_id=? AND revision=0 LIMIT 1")
+    const row = historyStatement(db, "SELECT checkpoint_digest AS digest FROM dohc_dataset_journals WHERE workspace_id=? AND dataset_id=? AND checkpoint_revision=0 UNION ALL SELECT json_extract(cursor_json,'$.digest') AS digest FROM dohc_dataset_checkpoint_history WHERE workspace_id=? AND dataset_id=? AND revision=0 LIMIT 1")
       .get(key.workspaceId, key.datasetId, key.workspaceId, key.datasetId);
     if (!row) throw new DatasetHostError("conflict", "Collection history lineage is unavailable.");
     return String(row.digest);
@@ -773,14 +774,17 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
       return { revision: revision(key), ...artifacts(key), active: current.active && !lifecycle(key).archived, cursor: current.cursor };
     },
     /** All local heads share one metadata snapshot; no source, records, or undo receipts. */
-    historyHeads(context: Context, raw: { workspaceId: string; positions?: Array<{ datasetId: string; beforeRevision: number }>; skip?: string[]; limit?: number }) {
+    historyHeads(context: Context, raw: { workspaceId: string; positions?: Array<{ datasetId: string; beforeRevision: number }>; skip?: string[]; limit?: number; maxSources?: number }) {
       const workspaceId = text(raw.workspaceId), limit = raw.limit ?? 51;
       if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) throw new DatasetHostError("invalid", "Invalid Collection history page.");
       const positions = raw.positions && new Map(raw.positions.map(p => [p.datasetId, p.beforeRevision]));
       const skip = new Set(raw.skip);
       return transaction(() => {
         owner(context, { workspaceId });
-        const rows = db.prepare("SELECT c.dataset_id,json_extract(c.revision_json,'$.definition.name') AS name,j.revision FROM dohc_dataset_catalog c JOIN dohc_dataset_journals j ON j.workspace_id=c.workspace_id AND j.dataset_id=c.dataset_id LEFT JOIN dohc_dataset_lifecycle l ON l.workspace_id=c.workspace_id AND l.dataset_id=c.dataset_id WHERE c.workspace_id=? AND COALESCE(l.archived,0)=0 ORDER BY c.dataset_id").all(workspaceId);
+        const select = "SELECT c.dataset_id,json_extract(c.revision_json,'$.definition.name') AS name,j.revision FROM dohc_dataset_catalog c JOIN dohc_dataset_journals j ON j.workspace_id=c.workspace_id AND j.dataset_id=c.dataset_id LEFT JOIN dohc_dataset_lifecycle l ON l.workspace_id=c.workspace_id AND l.dataset_id=c.dataset_id WHERE c.workspace_id=? AND COALESCE(l.archived,0)=0";
+        const rows = positions
+          ? [...positions.keys()].flatMap(datasetId => { const row = historyStatement(db, select + " AND c.dataset_id=?").get(workspaceId, datasetId); return row ? [row] : []; })
+          : historyStatement(db, select + " ORDER BY c.dataset_id LIMIT ?").all(workspaceId, raw.maxSources ?? 129);
         const pages = rows.filter(row => !skip.has(String(row.dataset_id)) && (!positions || positions.has(String(row.dataset_id)))).map(row => {
           const datasetId = String(row.dataset_id), key = { workspaceId, datasetId }, before = positions?.get(datasetId) ?? Number.MAX_SAFE_INTEGER;
           if (!Number.isSafeInteger(before) || before < 1) throw new DatasetHostError("invalid", "Invalid Collection history position.");

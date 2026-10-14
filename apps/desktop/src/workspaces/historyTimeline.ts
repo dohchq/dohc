@@ -1,15 +1,18 @@
 import { isWorkspaceUpdatingRefusal } from "@dohc/workspace-engine-client";
 import type { DatasetHistoryPage } from "@dohc/cli/dataset";
-import { TimelineCursor as CursorSchema, type TimelineCursor, type TimelineEntry, type ListHistoryPayload, type ListHistoryResult } from "../ipc/bridgeContract";
+import { HISTORY_MAX_SOURCES, HISTORY_CURSOR_BYTES, TimelineCursor as CursorSchema, type TimelineCursor, type TimelineEntry, type ListHistoryPayload, type ListHistoryResult } from "../ipc/bridgeContract";
 import { engineMomentForIpc, type EngineMomentAuthorNames } from "../ipc/engineHistoryIpc";
 import type { WorkspaceEngineCapture, WorkspaceEngineMomentPage } from "./workspaceEngineCapture";
 
 export const HISTORY_REMOTE_DEADLINE_MS = 750;
+export const HISTORY_REMOTE_CONCURRENCY = 4;
 const PAGE_LIMIT = 50;
 const PAGE_BYTES = 256 * 1024;
-type CollectionPage = DatasetHistoryPage & { name?: string };
+type CollectionPage = DatasetHistoryPage & { name?: string; deleted?: boolean };
+type Source = TimelineCursor["collections"][number];
 export interface HistoryHeads {
   transferred: string[];
+  sourceCount?: number;
   pages: Array<CollectionPage & { name: string; lineage: string }>;
 }
 export interface TimelineReads {
@@ -17,12 +20,16 @@ export interface TimelineReads {
   signal: AbortSignal;
   assertCurrent(): void;
   engine: Pick<WorkspaceEngineCapture, "listMoments">;
-  local(positions?: Array<{ datasetId: string; beforeRevision: number }>, limit?: number): Promise<HistoryHeads> | HistoryHeads;
+  local(positions?: Array<{ datasetId: string; beforeRevision: number }>, limit?: number, sourceIds?: string[]): Promise<HistoryHeads> | HistoryHeads;
+  // Each call owns its authority operation, including background reads after a page returns.
   remote(datasetId: string, beforeRevision: number | undefined, signal: AbortSignal): Promise<CollectionPage>;
   names: EngineMomentAuthorNames;
   admitted?(path: string): boolean;
 }
 class Deadline extends Error {}
+class LineageChanged extends Error {
+  constructor() { super("History lineage changed. Refresh History."); }
+}
 async function bounded<T>(signal: AbortSignal, work: (signal: AbortSignal) => Promise<T>): Promise<T> {
   signal.throwIfAborted();
   const controller = new AbortController();
@@ -37,48 +44,90 @@ async function bounded<T>(signal: AbortSignal, work: (signal: AbortSignal) => Pr
   try { return await Promise.race([work(controller.signal), stopped]); }
   finally { clearTimeout(timer); signal.removeEventListener("abort", abort); controller.signal.removeEventListener("abort", onAbort); }
 }
-const time = (row: TimelineEntry) => row.kind === "file" ? row.moment.recordedAtMs : row.kind === "version" ? row.version.createdAtMs : row.sortAtMs;
-const kind = (row: TimelineEntry) => row.kind === "file" ? row.moment.protected ? 1 : 0 : row.kind === "version" ? 2 : 3;
-const id = (row: TimelineEntry) => row.kind === "file" ? "" : row.kind === "version" ? row.version.id : row.datasetId;
-const position = (row: TimelineEntry) => row.kind === "file" ? row.moment.momentOrder : row.kind === "collection" ? row.change.revision : 0;
-export function compareTimelineEntries(a: TimelineEntry, b: TimelineEntry): number {
-  const at = time(a), bt = time(b);
-  if (at !== bt) return at === null ? 1 : bt === null ? -1 : bt - at;
-  const identity = id(a) < id(b) ? -1 : id(a) > id(b) ? 1 : 0;
-  return kind(a) - kind(b) || (a.kind === "version" ? -identity : identity) || position(b) - position(a);
+type Order = { time: number | null; kind: number; id: string; position: number };
+function order(row: TimelineEntry): Order {
+  if (row.kind === "file") return { time: row.moment.recordedAtMs, kind: row.moment.protected ? 1 : 0, id: "", position: row.moment.momentOrder };
+  if (row.kind === "version") return { time: row.version.createdAtMs, kind: 2, id: row.version.id, position: 0 };
+  return { time: row.sortAtMs, kind: 3, id: row.datasetId, position: row.change.revision };
+}
+function compare(a: Order, b: Order): number {
+  if (a.time !== b.time) return a.time === null ? 1 : b.time === null ? -1 : b.time - a.time;
+  const identity = a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+  return a.kind - b.kind || (a.kind === 2 ? -identity : identity) || b.position - a.position;
+}
+export const compareTimelineEntries = (a: TimelineEntry, b: TimelineEntry) => compare(order(a), order(b));
+function sourceOrder(source: Source): Order | null {
+  return source.head && { time: source.head.sortAtMs, kind: 3, id: source.datasetId, position: source.head.revision };
+}
+function collectionEntry(source: Source, page: CollectionPage): TimelineEntry | null {
+  const change = page.entries[0];
+  if (!change) return null;
+  const { undo: _, ...summary } = change;
+  return { kind: "collection", datasetId: source.datasetId, name: page.name ?? source.datasetId,
+    sortAtMs: change.recordedAtMs ?? source.timeHint ?? page.olderRecordedAtMs ?? null, change: summary };
+}
+function setHead(source: Source, page: CollectionPage) {
+  const row = collectionEntry(source, page);
+  source.head = row?.kind === "collection" ? { revision: row.change.revision, sortAtMs: row.sortAtMs } : null;
+  if (!row && page.nextBeforeRevision === null) source.done = true;
+}
+function checkLineage(source: Source, page: CollectionPage) {
+  if (page.lineage !== source.lineage || page.headRevision < source.fenceRevision) throw new LineageChanged();
 }
 
-/** Canonical source positions live in the cursor. Prefetch is disposable acceleration. */
+/** Cursor positions are canonical. Bounded caches only accelerate the same read. */
 export function createHistoryTimeline() {
-  const prefetch = new Map<string, Promise<CollectionPage>>();
-  const key = (reads: TimelineReads, datasetId: string, before: number | undefined) => JSON.stringify([reads.scope, datasetId, before]);
-  function remotePage(reads: TimelineReads, datasetId: string, before: number | undefined) {
-    const cacheKey = key(reads, datasetId, before), saved = prefetch.get(cacheKey);
+  const prefetch = new Map<string, { promise: Promise<CollectionPage>; controller: AbortController }>();
+  const waiting: Array<() => void> = [];
+  let active = 0;
+  async function remoteRead(reads: TimelineReads, datasetId: string, before: number | undefined, signal: AbortSignal) {
+    signal.throwIfAborted();
+    await new Promise<void>((resolve, reject) => {
+      const grant = () => { signal.removeEventListener("abort", abort); active++; resolve(); };
+      const abort = () => { const index = waiting.indexOf(grant); if (index >= 0) waiting.splice(index, 1); reject(signal.reason); };
+      if (active < HISTORY_REMOTE_CONCURRENCY) grant();
+      else { waiting.push(grant); signal.addEventListener("abort", abort, { once: true }); }
+    });
+    try { signal.throwIfAborted(); return await reads.remote(datasetId, before, signal); }
+    finally { active--; waiting.shift()?.(); }
+  }
+  const key = (reads: TimelineReads, id: string, before: number | undefined) => JSON.stringify([reads.scope, id, before]);
+  function remotePage(reads: TimelineReads, id: string, before: number | undefined) {
+    const cacheKey = key(reads, id, before), saved = prefetch.get(cacheKey);
     prefetch.delete(cacheKey);
-    return bounded(reads.signal, signal => saved ?? reads.remote(datasetId, before, signal));
+    return bounded(reads.signal, async signal => {
+      if (!saved) return remoteRead(reads, id, before, signal);
+      const abort = () => saved.controller.abort(signal.reason);
+      signal.addEventListener("abort", abort, { once: true });
+      try { return await saved.promise; }
+      finally { signal.removeEventListener("abort", abort); }
+    });
   }
-  function ahead(reads: TimelineReads, page: CollectionPage) {
-    if (page.nextBeforeRevision === null) return;
-    const cacheKey = key(reads, page.datasetId, page.nextBeforeRevision);
+  function ahead(reads: TimelineReads, source: Source, page: CollectionPage, consumed: boolean) {
+    const cacheKey = key(reads, source.datasetId, source.beforeRevision);
     if (prefetch.has(cacheKey)) return;
-    const pending = bounded(reads.signal, signal => reads.remote(page.datasetId, page.nextBeforeRevision!, signal));
-    // Rejections remain visible when this source needs the page, without an unhandled rejection.
-    void pending.catch(() => {});
-    prefetch.set(cacheKey, pending);
-    if (prefetch.size > 512) prefetch.delete(prefetch.keys().next().value!);
+    const controller = new AbortController();
+    const promise = consumed ? remoteRead(reads, source.datasetId, source.beforeRevision, controller.signal) : Promise.resolve(page);
+    void promise.catch(() => {});
+    prefetch.set(cacheKey, { promise, controller });
+    if (prefetch.size > HISTORY_MAX_SOURCES) {
+      const oldest = prefetch.keys().next().value!;
+      prefetch.get(oldest)!.controller.abort(); prefetch.delete(oldest);
+    }
   }
-  return async function listHistory(input: ListHistoryPayload, reads: TimelineReads): Promise<ListHistoryResult> {
+  async function page(input: ListHistoryPayload, reads: TimelineReads): Promise<ListHistoryResult> {
     const current = () => { reads.signal.throwIfAborted(); reads.assertCurrent(); };
     current();
-    const requestedObject = input.object ?? null;
+    const requestedObject = input.object ?? null, limit = input.limit ?? PAGE_LIMIT;
     let cursor = input.cursor ? structuredClone(CursorSchema.parse(input.cursor)) : null;
-    if (cursor && (cursor.workspaceId !== input.workspaceId || cursor.versionId !== (input.versionId ?? cursor.versionId) || JSON.stringify(cursor.object) !== JSON.stringify(requestedObject))) throw new Error("History cursor scope changed. Refresh History.");
+    if (cursor && (cursor.workspaceId !== input.workspaceId || input.versionId !== undefined && cursor.versionId !== input.versionId || JSON.stringify(cursor.object) !== JSON.stringify(requestedObject))) throw new Error("History cursor scope changed. Refresh History.");
     const engineRows: TimelineEntry[] = [];
     const engineState: { page: WorkspaceEngineMomentPage | null } = { page: null };
+    let scannedEnginePages = 0;
     const readEngine = async () => {
-      current();
+      current(); scannedEnginePages++;
       engineState.page = await reads.engine.listMoments({ limit: PAGE_LIMIT, ...(input.versionId ? { versionId: input.versionId } : {}),
-        ...(requestedObject?.kind === "file" ? { objectId: requestedObject.objectId } : {}), ...(cursor?.engine ? { cursor: cursor.engine } : {}) });
+        ...(requestedObject?.kind === "file" ? { objectId: requestedObject.objectId } : {}), ...(cursor?.engine ? { cursor: structuredClone(cursor.engine) } : {}) });
       current();
       reads.names.prepare?.(engineState.page.moments.flatMap(m => m.authors ?? []));
       engineRows.push(...engineState.page.moments.map(moment => ({ kind: "file" as const, moment: engineMomentForIpc(moment, reads.names) })),
@@ -86,140 +135,130 @@ export function createHistoryTimeline() {
       engineRows.sort(compareTimelineEntries);
       return engineState.page;
     };
-    let initialEngine: WorkspaceEngineMomentPage | null = null;
-    try {
-      if (requestedObject?.kind !== "dataset" && !cursor?.engineDone) initialEngine = await readEngine();
-    } catch (error) { current(); if (isWorkspaceUpdatingRefusal(error)) return { status: "updating" }; throw error; }
+    const initialEngine = requestedObject?.kind !== "dataset" && !cursor?.engineDone ? await readEngine() : null;
     cursor ??= { format: 1, workspaceId: input.workspaceId, versionId: initialEngine?.startCursor.versionId ?? input.versionId ?? "main", object: requestedObject,
-      engine: initialEngine?.startCursor ?? null, engineDone: requestedObject?.kind === "dataset", collections: [] };
+      engine: initialEngine?.startCursor ?? null, engineDone: requestedObject?.kind === "dataset", collections: [], omittedSources: 0 };
     const state = cursor;
-    if (initialEngine) state.engine = initialEngine.startCursor;
+    if (initialEngine) { state.engine = structuredClone(initialEngine.startCursor); if (state.versionId !== state.engine.versionId) throw new Error("History cursor scope changed. Refresh History."); }
     const includeCollections = state.versionId === "main" && requestedObject?.kind !== "file";
-    const local = includeCollections ? await reads.local(input.cursor ? state.collections.filter(s => !s.remote && !s.done && !s.excluded).map(s => ({ datasetId: s.datasetId, beforeRevision: s.beforeRevision })) : undefined, 1) : { transferred: [], pages: [] };
+    const live = () => state.collections.filter(source => !source.done && !source.excluded);
+    const boundary = () => [...engineRows.filter(row => row.kind !== "file" || row.moment.protected || !reads.admitted || reads.admitted(row.moment.path)).map(order),
+      ...live().flatMap(source => sourceOrder(source) ?? [])].sort(compare)[limit - 1];
+    const canEnter = (source: Source, edge: Order | undefined) => !edge || !source.head || compare(sourceOrder(source)!, edge) <= 0;
+    const edge = boundary();
+    const selected = live().filter(source => !source.remote && canEnter(source, edge));
+    const positions = input.cursor ? selected.map(source => ({ datasetId: source.datasetId, beforeRevision: source.beforeRevision }))
+      : requestedObject?.kind === "dataset" ? [{ datasetId: requestedObject.datasetId, beforeRevision: Number.MAX_SAFE_INTEGER }] : undefined;
+    const local = includeCollections ? await reads.local(positions, 1, input.cursor ? state.collections.map(source => source.datasetId) : requestedObject?.kind === "dataset" ? [requestedObject.datasetId] : undefined) : { transferred: [], pages: [] };
     current();
-    const pages = new Map<string, CollectionPage>(local.pages.map(p => [p.datasetId, p]));
+    const pages = new Map<string, CollectionPage>(local.pages.map(p => [p.datasetId, { ...p, entries: [...p.entries] }]));
     if (!input.cursor && includeCollections) {
-      const ids = [...new Set([...local.pages.map(p => p.datasetId), ...local.transferred])].sort();
-      for (const datasetId of ids) {
-        if (requestedObject?.kind === "dataset" && requestedObject.datasetId !== datasetId) continue;
+      const ids = [...new Set([...local.pages.map(p => p.datasetId), ...local.transferred])].sort().filter(id => requestedObject?.kind !== "dataset" || requestedObject.datasetId === id);
+      state.omittedSources = requestedObject?.kind === "dataset" ? 0 : Math.max(0, (local.sourceCount ?? ids.length) - HISTORY_MAX_SOURCES);
+      for (const datasetId of ids.slice(0, HISTORY_MAX_SOURCES)) {
         const p = pages.get(datasetId);
-        state.collections.push({ datasetId, remote: local.transferred.includes(datasetId), fenceRevision: p?.headRevision ?? 0,
+        const source: Source = { datasetId, remote: local.transferred.includes(datasetId), fenceRevision: p?.headRevision ?? 0,
           beforeRevision: p ? p.headRevision + 1 : Number.MAX_SAFE_INTEGER, lineage: p?.lineage ?? null,
-          timeHint: p?.olderRecordedAtMs ?? null, done: false, excluded: null });
+          timeHint: p?.olderRecordedAtMs ?? null, head: null, done: false, excluded: null };
+        if (p) setHead(source, p);
+        state.collections.push(source);
       }
     }
-    const fetchRemote = async (source: TimelineCursor["collections"][number], before: number | undefined) => {
+    function acceptLocal(sources: Source[], result: HistoryHeads) {
+      for (const source of sources) {
+        if (result.transferred.includes(source.datasetId)) { source.excluded = "unavailable"; pages.delete(source.datasetId); continue; }
+        const p = result.pages.find(p => p.datasetId === source.datasetId);
+        if (!p) { source.done = true; pages.delete(source.datasetId); continue; }
+        checkLineage(source, p); pages.set(source.datasetId, { ...p, entries: [...p.entries] }); setHead(source, p);
+      }
+    }
+    for (const source of live()) if (!source.remote && local.transferred.includes(source.datasetId)) { source.excluded = "unavailable"; pages.delete(source.datasetId); }
+    if (input.cursor) acceptLocal(selected.filter(s => !s.excluded), local);
+    const fetchRemote = async (source: Source, before: number | undefined) => {
       try {
-        const page = await remotePage(reads, source.datasetId, before); current();
-        if (page.archived) { source.done = true; pages.delete(source.datasetId); return; }
-        if (!page.lineage) throw new Error("Collection history lineage is unavailable.");
-        if (source.lineage !== null && page.lineage !== source.lineage) throw new Error("History lineage changed. Refresh History.");
-        if (source.lineage === null) { source.lineage = page.lineage; source.fenceRevision = page.headRevision; source.beforeRevision = page.headRevision + 1; source.timeHint = page.olderRecordedAtMs ?? null; }
-        pages.set(source.datasetId, { ...page, entries: [...page.entries] }); ahead(reads, page);
+        const p = await remotePage(reads, source.datasetId, before); current();
+        if (p.archived || p.deleted) { source.done = true; pages.delete(source.datasetId); return; }
+        if (!p.lineage) throw new Error("Collection history lineage is unavailable.");
+        if (source.lineage === null) { source.lineage = p.lineage; source.fenceRevision = p.headRevision; source.beforeRevision = p.headRevision + 1; source.timeHint = p.olderRecordedAtMs ?? null; }
+        checkLineage(source, p); pages.set(source.datasetId, { ...p, entries: [...p.entries] }); setHead(source, p);
       } catch (error) {
-        current();
-        if (error instanceof Error && error.message === "History lineage changed. Refresh History.") throw error;
-        source.excluded = error instanceof Deadline ? "deadline" : "unavailable";
-        pages.delete(source.datasetId);
+        current(); if (error instanceof LineageChanged) throw error;
+        source.excluded = error instanceof Deadline ? "deadline" : "unavailable"; pages.delete(source.datasetId);
       }
     };
-    await Promise.all(state.collections.filter(s => s.remote && !s.done && !s.excluded).map(s => fetchRemote(s, input.cursor ? s.beforeRevision : undefined)));
+    const remoteEdge = boundary();
+    await Promise.all(live().filter(source => source.remote && canEnter(source, remoteEdge)).map(source => fetchRemote(source, input.cursor ? source.beforeRevision : undefined)));
     current();
-    for (const source of state.collections) {
-      const page = pages.get(source.datasetId);
-      if (source.done || source.excluded) continue;
-      if (!page) { source.done = true; continue; }
-      if (page.lineage !== source.lineage || page.headRevision < source.fenceRevision) throw new Error("History lineage changed. Refresh History.");
-      if (!source.remote && local.transferred.includes(source.datasetId)) { source.excluded = "unavailable"; pages.delete(source.datasetId); }
-    }
-    // Only sources that can enter this page need more than their metadata head.
-    const windowHeads: TimelineEntry[] = engineRows.filter(row => row.kind !== "file" || row.moment.protected || !reads.admitted || reads.admitted(row.moment.path));
-    const localHeads = new Map<string, TimelineEntry>();
-    for (const source of state.collections) {
-      const page = pages.get(source.datasetId), change = page?.entries[0];
-      if (source.done || source.excluded || !change) continue;
-      const { undo: _, ...summary } = change;
-      const head: TimelineEntry = { kind: "collection", datasetId: source.datasetId, name: page!.name ?? source.datasetId,
-        sortAtMs: change.recordedAtMs ?? source.timeHint ?? page?.olderRecordedAtMs ?? null, change: summary };
-      windowHeads.push(head);
-      if (!source.remote) localHeads.set(source.datasetId, head);
-    }
-    windowHeads.sort(compareTimelineEntries);
-    const boundary = windowHeads[(input.limit ?? PAGE_LIMIT) - 1];
-    const needed = state.collections.filter(s => localHeads.has(s.datasetId) && (!boundary || compareTimelineEntries(localHeads.get(s.datasetId)!, boundary) <= 0));
+    const localEdge = boundary();
+    const needed = live().filter(source => !source.remote && pages.has(source.datasetId) && canEnter(source, localEdge));
     if (needed.length) {
-      const expanded = await reads.local(needed.map(s => ({ datasetId: s.datasetId, beforeRevision: s.beforeRevision })), PAGE_LIMIT + 1);
-      current();
-      for (const source of needed) {
-        const page = expanded.pages.find(p => p.datasetId === source.datasetId);
-        if (!page) { source.done = true; pages.delete(source.datasetId); continue; }
-        if (page.lineage !== source.lineage || page.headRevision < source.fenceRevision) throw new Error("History lineage changed. Refresh History.");
-        pages.set(source.datasetId, page);
-      }
+      const expanded = await reads.local(needed.map(source => ({ datasetId: source.datasetId, beforeRevision: source.beforeRevision })), PAGE_LIMIT + 1, state.collections.map(source => source.datasetId));
+      current(); acceptLocal(needed, expanded);
     }
+    const consumed = new Set<string>();
     const entries: TimelineEntry[] = [];
-    // Reserve the cursor, missing-source disclosure, and bounded position growth.
-    let bytes = Buffer.byteLength(JSON.stringify(state)) + Buffer.byteLength(JSON.stringify(state.collections.filter(s => s.excluded !== null).map(s => ({ datasetId: s.datasetId, reason: s.excluded })))) + 2048;
+    const cursorBytes = Math.min(HISTORY_CURSOR_BYTES, Buffer.byteLength(JSON.stringify(state)) + state.collections.length * 128);
+    let bytes = cursorBytes + state.collections.length * 96 + 2048;
     const advanceEngine = (row: TimelineEntry) => {
       if (!state.engine) throw new Error("History engine cursor is unavailable.");
       if (row.kind === "file") state.engine[row.moment.protected ? "protected" : "text"] = { recordedAtMs: row.moment.recordedAtMs, momentOrder: row.moment.momentOrder };
       else if (row.kind === "version") state.engine.marker = { createdAtMs: row.version.createdAtMs, versionId: row.version.id };
       engineRows.shift();
     };
-    let scannedEnginePages = 0;
-    while (entries.length < (input.limit ?? PAGE_LIMIT)) {
+    while (entries.length < limit) {
       current();
       if (!state.engineDone && !engineRows.length && engineState.page) {
         if (engineState.page.nextCursor === null) state.engineDone = true;
         else {
           state.engine = engineState.page.nextCursor;
-          if (++scannedEnginePages > 40) break;
-          await readEngine();
+          if (scannedEnginePages >= 40) break;
+          await readEngine(); continue;
+        }
+      }
+      for (const source of live().filter(source => !source.head)) {
+        if (source.remote) await fetchRemote(source, source.beforeRevision);
+        else { const refill = await reads.local([{ datasetId: source.datasetId, beforeRevision: source.beforeRevision }], PAGE_LIMIT + 1, state.collections.map(s => s.datasetId)); current(); acceptLocal([source], refill); }
+      }
+      const heads = live().map(source => ({ source, order: sourceOrder(source)! })).filter(h => h.order);
+      heads.sort((a, b) => compare(a.order, b.order));
+      const winner = heads[0];
+      let row = engineRows[0];
+      if (winner && (!row || compare(winner.order, order(row)) < 0)) {
+        const source = winner.source;
+        let p = pages.get(source.datasetId);
+        if (!p?.entries.length) {
+          if (source.remote) await fetchRemote(source, source.beforeRevision);
+          else { const refill = await reads.local([{ datasetId: source.datasetId, beforeRevision: source.beforeRevision }], PAGE_LIMIT + 1, state.collections.map(s => s.datasetId)); current(); acceptLocal([source], refill); }
           continue;
         }
+        row = collectionEntry(source, p)!;
+        if (row.kind === "collection" && (row.change.revision > source.fenceRevision || row.change.revision >= source.beforeRevision)) throw new Error("Collection history position changed. Refresh History.");
       }
-      const candidates: TimelineEntry[] = engineRows.length ? [engineRows[0]!] : [];
-      for (const source of state.collections) {
-        if (source.done || source.excluded) continue;
-        let page = pages.get(source.datasetId);
-        if (!page) continue;
-        if (!page.entries.length && page.nextBeforeRevision !== null) {
-          if (source.remote) { await fetchRemote(source, source.beforeRevision); page = pages.get(source.datasetId); }
-          else {
-            const refill = await reads.local([{ datasetId: source.datasetId, beforeRevision: source.beforeRevision }], PAGE_LIMIT + 1);
-            current(); page = refill.pages.find(p => p.datasetId === source.datasetId);
-            if (page && (page.lineage !== source.lineage || page.headRevision < source.fenceRevision)) throw new Error("History lineage changed. Refresh History.");
-            if (page) pages.set(source.datasetId, page); else pages.delete(source.datasetId);
-          }
-        }
-        const change = page?.entries[0];
-        if (!change) { if (!source.excluded) source.done = true; continue; }
-        if (change.revision > source.fenceRevision || change.revision >= source.beforeRevision) throw new Error("Collection history position changed. Refresh History.");
-        const { undo: _, ...summary } = change;
-        candidates.push({ kind: "collection", datasetId: source.datasetId, name: page!.name ?? source.datasetId, sortAtMs: change.recordedAtMs ?? source.timeHint ?? page?.olderRecordedAtMs ?? null, change: summary });
-      }
-      candidates.sort(compareTimelineEntries);
-      const row = candidates[0];
       if (!row) break;
       if (row.kind === "file" && !row.moment.protected && reads.admitted && !reads.admitted(row.moment.path)) { advanceEngine(row); continue; }
       const size = Buffer.byteLength(JSON.stringify(row));
-      if (bytes + size > PAGE_BYTES) {
-        if (!entries.length) throw new Error("History summary exceeds the page byte limit.");
-        break;
-      }
+      if (bytes + size > PAGE_BYTES) { if (!entries.length) throw new Error("History summary exceeds the page byte limit."); break; }
       entries.push(row); bytes += size;
       if (row.kind === "collection") {
-        const source = state.collections.find(s => s.datasetId === row.datasetId)!;
+        const source = winner!.source;
         source.beforeRevision = row.change.revision; source.timeHint = row.sortAtMs;
-        const page = pages.get(row.datasetId)!; page.entries.shift();
-        if (!page.entries.length && page.nextBeforeRevision === null) source.done = true;
+        const p = pages.get(row.datasetId)!; p.entries.shift(); setHead(source, p); consumed.add(source.datasetId);
       } else advanceEngine(row);
     }
     if (!engineRows.length && engineState.page?.nextCursor === null) state.engineDone = true;
-    current();
+    state.collections = state.collections.filter(source => !source.done);
+    current(); CursorSchema.parse(state);
+    for (const source of live().filter(source => source.remote)) {
+      const p = pages.get(source.datasetId);
+      if (p) ahead(reads, source, p, consumed.has(source.datasetId));
+    }
     const unavailableSources = state.collections.filter(s => s.excluded !== null).map(s => ({ datasetId: s.datasetId, reason: s.excluded! }));
     return { status: "ready", workspaceId: state.workspaceId, versionId: state.versionId, entries,
-      nextCursor: state.engineDone && state.collections.every(s => s.done || s.excluded) ? null : state,
-      unavailableSources, completeness: unavailableSources.length ? "partial" : "complete" };
+      nextCursor: state.engineDone && state.collections.every(s => s.excluded) ? null : state,
+      unavailableSources, omittedSources: state.omittedSources, completeness: unavailableSources.length || state.omittedSources ? "partial" : "complete" };
+  }
+  return async (input: ListHistoryPayload, reads: TimelineReads): Promise<ListHistoryResult> => {
+    try { return await page(input, reads); }
+    catch (error) { reads.signal.throwIfAborted(); reads.assertCurrent(); if (isWorkspaceUpdatingRefusal(error)) return { status: "updating" }; throw error; }
   };
 }

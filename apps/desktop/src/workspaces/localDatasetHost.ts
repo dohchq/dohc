@@ -1,3 +1,4 @@
+import { historyStatement } from "@dohc/app-backend-runtime/dataset-host";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { lstat, mkdir, realpath } from "node:fs/promises";
 import { createRequire } from "node:module";
@@ -436,10 +437,14 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
       reconcileAttempt(input: { datasetId: string; reference: string; acknowledge: true }) { assertCurrent(); return host.reconcileAttempt(owner, { workspaceId, ...input }); },
       cancelAttempt(input: { datasetId: string; reference: string; acknowledge: true }) { assertCurrent(); return host.cancelAttempt(owner, { workspaceId, ...input }); },
       historyRevision(input: { datasetId: string; revisionSha256: string }) { assertCurrent(); return host.historyRevision(owner, { workspaceId, ...input }); },
-      historyHeads(input: { positions?: Array<{ datasetId: string; beforeRevision: number }>; limit?: number } = {}) {
+      historyHeads(input: { positions?: Array<{ datasetId: string; beforeRevision: number }>; limit?: number; sourceIds?: string[] } = {}) {
         assertCurrent();
-        const transferred = db.prepare("SELECT dataset_id FROM local_dataset_transfers WHERE workspace_id=? ORDER BY dataset_id").all(workspaceId).map(row => String(row.dataset_id));
-        return { transferred, pages: host.historyHeads(owner, { workspaceId, ...input, skip: transferred }) };
+        const transferred = historyStatement(db, input.sourceIds
+          ? "SELECT dataset_id FROM local_dataset_transfers WHERE workspace_id=? AND dataset_id IN (SELECT value FROM json_each(?)) ORDER BY dataset_id"
+          : "SELECT dataset_id FROM local_dataset_transfers WHERE workspace_id=? ORDER BY dataset_id LIMIT 129")
+          .all(workspaceId, ...(input.sourceIds ? [JSON.stringify(input.sourceIds)] : [])).map(row => String(row.dataset_id));
+        const sourceCount = input.positions ? 0 : Number(historyStatement(db, "SELECT count(*) AS count FROM (SELECT c.dataset_id FROM dohc_dataset_catalog c LEFT JOIN dohc_dataset_lifecycle l ON l.workspace_id=c.workspace_id AND l.dataset_id=c.dataset_id WHERE c.workspace_id=? AND COALESCE(l.archived,0)=0 UNION SELECT dataset_id FROM local_dataset_transfers WHERE workspace_id=?)").get(workspaceId, workspaceId)?.count ?? 0);
+        return { transferred, sourceCount, pages: host.historyHeads(owner, { workspaceId, positions: input.positions, limit: input.limit, maxSources: 129, skip: transferred }) };
       },
       history(input: { datasetId: string; beforeRevision?: number; limit?: number; metadataOnly?: boolean; signal?: AbortSignal }) { assertCurrent(); return host.history(owner, { workspaceId, ...input }); },
       async permissions(input: { datasetId: string; after?: string; limit?: number }) {
