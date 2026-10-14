@@ -186,7 +186,7 @@ test("the plan retains every package test and preserves stricter worker caps", (
   const runtime = tasks.find(task => task.name === "@dohc/app-backend-runtime").args;
   assert.ok(runtime.includes("--maxWorkers=1"), runtime.join(" "));
   // Every vitest package retries a failing test once and records the tests that needed it.
-  assert.ok(runtime.includes("--retry=1") && runtime.some(arg => arg.endsWith("flaky-reporter.mjs")), runtime.join(" "));
+  assert.ok(runtime.includes("--retry=1") && runtime.some(arg => arg.endsWith("test-record-reporter.mjs")), runtime.join(" "));
   assert.equal(tasks.find(task => task.name === "@dohc/future-package").script, "test");
   assert.equal(tasks.filter(task => task.resource === "postgres").length, 4);
   assert.throws(() => testPlan([pkg("desktop")]), /Missing test:unit/);

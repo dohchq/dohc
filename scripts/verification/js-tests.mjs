@@ -4,7 +4,7 @@ import { join, relative, resolve } from "node:path";
 import { cancellationScope } from "./cancellation.mjs";
 import { pnpm, repoRoot, run } from "./process.mjs";
 import { startTiming, timed } from "./timing.mjs";
-import { flakyReporter, nodeTestFailures, readFlakyLog } from "./flaky.mjs";
+import { nodeTestFailures, nodeTestTimes, readLog, readTestRecord, slowest, testRecordReporter } from "./flaky.mjs";
 import { affectedPackages, packageReferences } from "./selection.mjs";
 
 const databasePackages = new Set(["@dohc/workspace-postgres", "@dohc/workspace-auth", "@dohc/workspace-api", "@dohc/share-web"]);
@@ -18,8 +18,8 @@ export function testPlan(packages) {
       : name === "@dohc/desktop" ? Math.min(4, Math.max(2, Math.floor(availableParallelism() / 4))) : 4;
     const vitest = /^vitest run(?: |$)/u.test(manifest.scripts[script]);
     return { name, script, resource: databasePackages.has(name) ? "postgres" : null,
-      // A failing test runs once more; the reporter records each one that passed only on retry.
-      args: ["--filter", name, "run", script, ...(vitest ? [`--maxWorkers=${workers}`, "--retry=1", "--reporter=default", `--reporter=${flakyReporter}`] : [])] };
+      // A failing test runs once more; the reporter records each one that passed only on retry, and the slow ones.
+      args: ["--filter", name, "run", script, ...(vitest ? [`--maxWorkers=${workers}`, "--retry=1", "--reporter=default", `--reporter=${testRecordReporter}`] : [])] };
   }).sort((a, b) => {
     const priority = name => longestFirst.includes(name) ? longestFirst.indexOf(name) : longestFirst.length;
     return priority(a.name) - priority(b.name) || a.name.localeCompare(b.name);
@@ -75,8 +75,8 @@ export async function testWorkspace({ prepared = false, output = join(repoRoot, 
     const file = join(output, name.replaceAll(/[^\w.-]/gu, "_"));
     const row = { name, args, log: `${file}.log` };
     report.steps.push(row);
-    const flakyLog = `${file}.flaky.jsonl`;
-    const execute = log => run(...pnpm(args), { env: { ...env, DOHC_FLAKY_LOG: flakyLog }, log });
+    const record = `${file}.tests.jsonl`;
+    const execute = log => run(...pnpm(args), { env: { ...env, DOHC_TEST_RECORD: record }, log });
     return timed(row, async () => {
       try { return await execute(row.log); }
       catch (error) {
@@ -90,8 +90,13 @@ export async function testWorkspace({ prepared = false, output = join(repoRoot, 
         return result;
       }
     }, save).finally(() => {
-      const flaky = [...(row.flaky ?? []), ...readFlakyLog(flakyLog)];
-      if (flaky.length) { row.flaky = flaky; save(); }
+      const recorded = readTestRecord(record);
+      const flaky = [...(row.flaky ?? []), ...recorded.filter(test => test.flaky).map(test => test.test)];
+      if (flaky.length) row.flaky = flaky;
+      // vitest's slow tests come from its reporter; node:test's from the spec report of the attempt that ran last.
+      const times = [...recorded.filter(test => test.seconds >= 2), ...nodeTestTimes(readLog(row.retryLog ?? row.log)).filter(test => test.seconds >= 2)];
+      if (times.length) row.slowest = slowest(times);
+      save();
     }).catch(fail);
   }
   async function planPackages() {
@@ -170,6 +175,7 @@ export async function testWorkspace({ prepared = false, output = join(repoRoot, 
     const interrupted = await cancellation.dispose();
     if (interrupted) { report.verdict = "FAIL"; report.error ??= interrupted.message; }
     report.flaky = report.steps.flatMap(step => (step.flaky ?? []).map(test => ({ step: step.name, test })));
+    report.slowest = slowest(report.steps.flatMap(step => (step.slowest ?? []).map(test => ({ step: step.name, ...test }))));
     finish(); save();
   }
 }

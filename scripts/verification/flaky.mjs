@@ -1,12 +1,16 @@
-// Tests that passed only on retry. The gate retries a failing test once, so a
-// flaky test no longer fails a change it has nothing to do with, and records
-// each one here so it gets fixed instead of hidden.
+// Tests that passed only on retry, and the slowest tests. The gate retries a
+// failing test once, so a flaky test no longer fails a change it has nothing to
+// do with, and records each one here so it gets fixed instead of hidden. It also
+// records the slowest tests, so the suites' time can be kept in budget.
 
 import { existsSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
-/** The vitest reporter that records which tests passed only on retry. */
-export const flakyReporter = fileURLToPath(new URL("./flaky-reporter.mjs", import.meta.url));
+/** The vitest reporter that records the tests that passed only on retry, and the slow ones. */
+export const testRecordReporter = fileURLToPath(new URL("./test-record-reporter.mjs", import.meta.url));
+
+/** How many of the slowest tests a report keeps. */
+export const slowestKept = 20;
 
 const plain = text => text.replace(/\x1b\[[0-9;]*m/gu, "");
 /** A log or report as text, empty when it is missing or unreadable. */
@@ -15,7 +19,7 @@ const read = readLog;
 
 /** Tests nextest reports as FLAKY: failed, then passed on a retry. */
 export function nextestFlaky(log) {
-  const names = [...plain(log).matchAll(/^\s*FLAKY\s+\d+\/\d+\s+\[[^\]]*\]\s+(?:\(\d+\/\d+\)\s+)?(.+?)\s*$/gmu)].map(match => match[1]);
+  const names = [...plain(log).matchAll(/^\s*FLAKY\s+\d+\/\d+\s+\[[^\]]*\]\s+(?:\(\s*\d+\/\d+\)\s+)?(.+?)\s*$/gmu)].map(match => match[1]);
   return [...new Set(names)];
 }
 
@@ -44,7 +48,31 @@ export function vitestFailures(path) {
   } catch { return []; }
 }
 
-/** The tests the vitest reporter recorded in `path`. */
-export function readFlakyLog(path) {
-  return read(path).split(/\r?\n/u).filter(Boolean).flatMap(line => { try { return [JSON.parse(line).test]; } catch { return []; } });
+/** The tests the vitest reporter recorded in `path`: { test, flaky, seconds }. */
+export function readTestRecord(path) {
+  return read(path).split(/\r?\n/u).filter(Boolean).flatMap(line => { try { return [JSON.parse(line)]; } catch { return []; } });
 }
+
+/** nextest's per-test times, in seconds. */
+export function nextestTimes(log) {
+  return [...plain(log).matchAll(/^\s*(?:PASS|FLAKY\s+\d+\/\d+|SLOW)\s+\[\s*([\d.]+)s\]\s+(?:\(\s*\d+\/\d+\)\s+)?(.+?)\s*$/gmu)]
+    .map(match => ({ test: match[2], seconds: Number(match[1]) }));
+}
+
+/** node:test's per-test times from a spec report, in seconds. */
+export function nodeTestTimes(log) {
+  return [...plain(log).matchAll(/^\s*✔ (.+?) \(([\d.]+)ms\)\s*$/gmu)].map(match => ({ test: match[1], seconds: Number(match[2]) / 1000 }));
+}
+
+/** Playwright's per-test times from its JSON report, in seconds: the attempt that passed. */
+export function playwrightTimes(suites = []) {
+  return suites.flatMap(suite => [
+    ...(suite.specs ?? []).flatMap(spec => (spec.tests ?? []).map(test => ({ test: `${spec.file} › ${spec.title}`,
+      seconds: (test.results?.at(-1)?.duration ?? 0) / 1000 }))),
+    ...playwrightTimes(suite.suites),
+  ]);
+}
+
+/** The slowest rows, longest first. */
+export const slowest = (rows, count = slowestKept) => rows.toSorted((a, b) => b.seconds - a.seconds).slice(0, count)
+  .map(row => ({ ...row, seconds: Math.round(row.seconds * 10) / 10 }));
