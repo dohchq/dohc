@@ -2046,6 +2046,7 @@ const {
   syncWorkspaceSharedChannels,
   syncSharedChannelsForChatTarget,
   syncRendererSharedChannelsForChatTarget,
+  syncRendererWorkspaceSharedChannels,
 } = createDesktopSharedChannelSync<
   DesktopWorkspaceAuthorityState,
   DesktopRendererWorkspaceOperation
@@ -6632,7 +6633,7 @@ function registerIpcHandlers(): void {
     assertTrustedSender, chatScope, requireEngineCapture, linkedChatStoreFor, chatWrites,
     assertWritableWorkspace, warmCredentialCache, localUserId,
     localInstallationId, currentCredentials: () => cachedCredentials, chatRelayIdentityFor,
-    syncWorkspaceSharedChannels, syncSharedChannelsForChatTarget,
+    syncWorkspaceSharedChannels, syncSharedChannelsForChatTarget, syncRendererWorkspaceSharedChannels,
     withRendererWorkspaceOperation, resolveEngineFiles,
     activity, desktopChatBookmarks, notifyRenderer,
     automationCollectionOf: (workspaceId) => {

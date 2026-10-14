@@ -157,6 +157,7 @@ export function registerChatsIpcHandlers<
   syncSharedChannelsForChatTarget(
     workspaceId: string, target: ChatRelayIdentityTarget,
   ): Promise<unknown>;
+  syncRendererWorkspaceSharedChannels(operation: Operation): Promise<number>;
   withRendererWorkspaceOperation<Result>(
     sender: Sender, workspaceId: string, message: string,
     work: (operation: Operation) => Result | Promise<Result>,
@@ -182,7 +183,7 @@ export function registerChatsIpcHandlers<
     registerHandler, assertTrustedSender, requireEngineCapture, linkedChatStoreFor, chatWrites,
     assertWritableWorkspace, warmCredentialCache, localUserId, localInstallationId,
     currentCredentials, chatRelayIdentityFor, syncWorkspaceSharedChannels,
-    syncSharedChannelsForChatTarget,
+    syncSharedChannelsForChatTarget, syncRendererWorkspaceSharedChannels,
     withRendererWorkspaceOperation, resolveEngineFiles, activity, desktopChatBookmarks,
     notifyRenderer, ensureGroupFolder, automationCollectionOf,
   } = dependencies;
@@ -239,11 +240,14 @@ export function registerChatsIpcHandlers<
     });
   });
 
-  const readChatFileMentions = async (event: Event, payload: unknown, rowsUncovered: number) => {
+  registerWorkspaceHandler(CHANNELS.listChatFileMentions, async (event, payload) => {
     const input = ListChatFileMentionsPayload.parse(payload);
     const { workspace, capture } = await requireEngineCapture(
       input.workspaceId,
       "Chats",
+    );
+    const rowsUncovered = await syncWorkspaceSharedChannels(
+      workspace.workspaceId,
     );
     const requestedFile = await capture.resolveFileForPath(input.path);
     const objectId = requestedFile?.objectId ?? null;
@@ -317,15 +321,6 @@ export function registerChatsIpcHandlers<
         ];
       }),
     });
-  };
-  registerHandler(CHANNELS.listChatFileMentions, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = ListChatFileMentionsPayload.parse(payload);
-    await withRendererWorkspaceOperation(event.sender, input.workspaceId,
-      "This workspace is no longer active.", async () => undefined);
-    const rowsUncovered = await syncWorkspaceSharedChannels(input.workspaceId);
-    return withRendererWorkspaceOperation(event.sender, input.workspaceId,
-      "This workspace is no longer active.", async () => readChatFileMentions(event, payload, rowsUncovered));
   });
 
   registerWorkspaceHandler(CHANNELS.listChatBookmarks, async (event, payload) => {
@@ -591,9 +586,6 @@ export function registerChatsIpcHandlers<
   registerHandler(CHANNELS.listChatChannels, async (event, payload) => {
     assertTrustedSender(event);
     const input = ListChatChannelsPayload.parse(payload);
-    await withRendererWorkspaceOperation(event.sender, input.workspaceId,
-      "Chats stopped because this window changed workspaces.", async () => undefined);
-    const rowsUncovered = await syncWorkspaceSharedChannels(input.workspaceId);
     return withRendererWorkspaceOperation(
       event.sender,
       input.workspaceId,
@@ -603,10 +595,11 @@ export function registerChatsIpcHandlers<
           operation.workspace,
           "Chats",
         );
-        operation.assertCurrent();
         // MU-C4: refresh joined shared channels before reading, so opening
         // Chats shows other members' latest messages. Offline, local rows
         // still answer.
+        const rowsUncovered =
+          await syncRendererWorkspaceSharedChannels(operation);
         operation.assertCurrent();
         const store = linkedChatStoreFor(workspace);
         // First chat use auto-creates General.
@@ -763,13 +756,14 @@ export function registerChatsIpcHandlers<
     return SetChatFollowResult.parse({ follow: chatFollowForIpc(follow) });
   });
 
-  const readPersonalChatFeed = async (event: Event, payload: unknown, rowsUncovered: number) => {
+  registerWorkspaceHandler(CHANNELS.listPersonalChatFeed, async (event, payload) => {
     const input = ListPersonalChatFeedPayload.parse(payload);
     const { workspace } = await requireEngineCapture(
       input.workspaceId,
       "Chats",
     );
     await warmCredentialCache();
+    const rowsUncovered = await syncWorkspaceSharedChannels(workspace.workspaceId);
     const store = linkedChatStoreFor(workspace);
     const ownerUserId = localUserId();
     await store.ensureDefaultChannelFollows({
@@ -857,15 +851,6 @@ export function registerChatsIpcHandlers<
       ...(page.nextCursor ? { nextCursor: page.nextCursor } : {}),
       ...(page.headCursor ? { headCursor: page.headCursor } : {}),
     });
-  };
-  registerHandler(CHANNELS.listPersonalChatFeed, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = ListPersonalChatFeedPayload.parse(payload);
-    await withRendererWorkspaceOperation(event.sender, input.workspaceId,
-      "This workspace is no longer active.", async () => undefined);
-    const rowsUncovered = await syncWorkspaceSharedChannels(input.workspaceId);
-    return withRendererWorkspaceOperation(event.sender, input.workspaceId,
-      "This workspace is no longer active.", async () => readPersonalChatFeed(event, payload, rowsUncovered));
   });
 
   registerWorkspaceHandler(CHANNELS.markPersonalChatFeedSeen, async (event, payload) => {
@@ -938,7 +923,7 @@ export function registerChatsIpcHandlers<
     }),
   );
 
-  const readChannelThreads = async (event: Event, payload: unknown) => {
+  registerWorkspaceHandler(CHANNELS.listChannelThreads, async (event, payload) => {
     const input = ListChannelThreadsPayload.parse(payload);
     const { workspace } = await requireEngineCapture(
       input.workspaceId,
@@ -959,6 +944,9 @@ export function registerChatsIpcHandlers<
     // view has no poll of its own, and the pass is bounded, so an untargeted
     // sync could leave the channel the user just opened waiting for the
     // rotation. Naming it puts it in this pass.
+    await syncSharedChannelsForChatTarget(workspace.workspaceId, {
+      channelId: input.channelId,
+    });
     const threads = await store.listChannelThreads({
       workspaceId: workspace.workspaceId,
       channelId: input.channelId,
@@ -973,15 +961,6 @@ export function registerChatsIpcHandlers<
       ),
       viewerAuthorId,
     });
-  };
-  registerHandler(CHANNELS.listChannelThreads, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = ListChannelThreadsPayload.parse(payload);
-    await withRendererWorkspaceOperation(event.sender, input.workspaceId,
-      "This workspace is no longer active.", async () => undefined);
-    await syncSharedChannelsForChatTarget(input.workspaceId, { channelId: input.channelId });
-    return withRendererWorkspaceOperation(event.sender, input.workspaceId,
-      "This workspace is no longer active.", async () => readChannelThreads(event, payload));
   });
 
   registerWorkspaceHandler(CHANNELS.startChannelThread, async (event, payload) => {

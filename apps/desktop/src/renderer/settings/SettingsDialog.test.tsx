@@ -199,6 +199,18 @@ afterEach(() => {
 });
 
 describe("SettingsDialog", () => {
+  it("shows a failed-open state instead of loading workspace settings", async () => {
+    const props = { workspaceId: "ws-1", workspacePath: "/x", initialSection: "agents" as const,
+      workspaceIsReady: false, workspaceOpenFailed: true, onClose: vi.fn() };
+    render(<SettingsDialog {...props} />);
+    expect(screen.getByText("This workspace did not open.")).toBeTruthy();
+    expect(screen.queryByText("Loading settings...")).toBeNull();
+    await waitFor(() => expect(bridge.getUserSettings).toHaveBeenCalled());
+    expect(bridge.getWorkspaceSettings).not.toHaveBeenCalled();
+    expect(bridge.getMcpConfig).not.toHaveBeenCalled();
+    expect(bridge.getAgentRunStatus).not.toHaveBeenCalled();
+  });
+
   it.each(["agents", "files", "workbench", "privacy", "cloud", "advanced"] as const)("holds the %s section and workspace search until admission", async initialSection => {
     const onError = vi.fn();
     const props = { workspaceId: "ws-1", workspacePath: "/x", initialSection, onClose: vi.fn(), onError, onOpenSharing: vi.fn() };

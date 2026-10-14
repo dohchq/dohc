@@ -154,16 +154,10 @@ function fixture(kind: ScopeKind = "local") {
   const held = authorities.acquire(workspace.workspaceId);
   const session = { workspaceId: workspace.workspaceId, attachmentId: held.binding.attachmentId, generation: 1, isCurrent: () => true };
   held.release();
-  let activeOperations = 0;
-  const runRendererOperation = createRendererWorkspaceOperationRunner({
+  const withRendererWorkspaceOperation = createRendererWorkspaceOperationRunner({
     currentSession: (value: Event["sender"]) => value === sender ? session : undefined,
     withPhysicalOperation: authorities.withOperation.bind(authorities),
   });
-  const withRendererWorkspaceOperation: Parameters<typeof registerChatsIpcHandlers<Event["sender"], Event, Operation>>[0]["withRendererWorkspaceOperation"] =
-    (sender, workspaceId, message, work) => runRendererOperation(sender, workspaceId, message, async operation => {
-      activeOperations++;
-      try { return await work(operation); } finally { activeOperations--; }
-    });
   const syncWorkspaceSharedChannels = vi.fn(async (_workspaceId: string) => 0);
   const assertTrustedSender = vi.fn((event: Event) => {
     if (!event.sender.trusted) throw new Error("Untrusted sender");
@@ -176,6 +170,11 @@ function fixture(kind: ScopeKind = "local") {
     localInstallationId: () => "local-owner", currentCredentials: () => null,
     chatRelayIdentityFor,
     syncWorkspaceSharedChannels, syncSharedChannelsForChatTarget,
+    syncRendererWorkspaceSharedChannels: async operation => {
+      const rows = await syncWorkspaceSharedChannels(operation.workspace.workspaceId);
+      operation.assertCurrent();
+      return rows;
+    },
     withRendererWorkspaceOperation,
     resolveEngineFiles, activity, desktopChatBookmarks, notifyRenderer: () => undefined, automationCollectionOf: () => () => null,
     ensureGroupFolder,
@@ -186,7 +185,6 @@ function fixture(kind: ScopeKind = "local") {
     return await handler(event, payload);
   }
   return { invoke, workspace, thread, message, bookmark, storeMethods, captureMethods, capture, ensureGroupFolder,
-    get activeOperations() { return activeOperations; }, syncWorkspaceSharedChannels,
     authorities, chatScope, requireEngineCapture, linkedChatStoreFor, openWorkspaceActivity,
     activity, syncSharedChannelsForChatTarget, resolveEngineFiles, readOwnedWorkspaceText,
     warmCredentialCache, chatRelayIdentityFor, scanChatDispatch, projectChatBookmarks, desktopChatBookmarks,
@@ -561,27 +559,4 @@ describe("targeted file resolution", () => {
     ] });
     expect(test.resolveEngineFiles).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: "workspace" }), [workspaceFileRef("workspace", "object"), workspaceFileRef("workspace", "gone")]);
   });
-});
-
-it.each([
-  { channel: CHANNELS.listChatFileMentions, payload: { workspaceId: "workspace", path: "notes/a.md" } },
-  { channel: CHANNELS.listPersonalChatFeed, payload: { workspaceId: "workspace" } },
-  { channel: CHANNELS.listChannelThreads, payload: { workspaceId: "workspace", channelId: "channel" } },
-  { channel: CHANNELS.listChatChannels, payload: { workspaceId: "workspace" } },
-])("releases sender admission during the relay refresh for $channel", async ({ channel, payload }) => {
-  const h = fixture();
-  const entered = deferred();
-  const drain = deferred<number>();
-  const hold = () => { entered.resolve(); return drain.promise; };
-  h.syncWorkspaceSharedChannels.mockImplementation(hold);
-  h.syncSharedChannelsForChatTarget.mockImplementation(hold);
-  const result = h.invoke(channel, payload);
-  try {
-    await entered.promise;
-    expect(h.activeOperations).toBe(0);
-  } finally {
-    drain.resolve(0);
-    await result;
-    await h.authorities.close();
-  }
 });

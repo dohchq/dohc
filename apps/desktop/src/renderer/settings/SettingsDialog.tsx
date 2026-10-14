@@ -109,6 +109,7 @@ export function SettingsDialog(props: {
   onWorkspaceSettingsRead?: (read: WorkspaceSettingsResult) => void;
   workspaceId: string;
   workspaceIsReady: boolean;
+  workspaceOpenFailed?: boolean;
   workspacePath: string;
   /**
    * True when this workspace is a shared view. See the Advanced
@@ -570,6 +571,9 @@ export function SettingsDialog(props: {
     }
 
     if (!props.workspaceIsReady && activeMeta.scope !== "User") {
+      if (props.workspaceOpenFailed) {
+        return <p className="text-sm text-muted">This workspace did not open.</p>;
+      }
       return <SkeletonRows layout="panel" label="Loading settings..." />;
     }
 

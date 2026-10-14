@@ -1412,6 +1412,21 @@ describe("native workbench context menus", () => {
 });
 
 describe("settings entry points", () => {
+  it("shows Settings Agents as unavailable after the workspace fails to open", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.openWorkspace.mockRejectedValue(new Error("Workspace unavailable"));
+    renderShell(bridge);
+    await screen.findByTestId("workspace-open-failed");
+    const user = userEvent.setup();
+    await user.keyboard("{Control>},{/Control}");
+    await screen.findByTestId("settings-dialog");
+    await user.click(screen.getByRole("button", { name: "Agents" }));
+    expect(screen.getByText("This workspace did not open.")).toBeTruthy();
+    expect(screen.queryByText("Loading settings...")).toBeNull();
+    expect(bridge.getMcpConfig).not.toHaveBeenCalled();
+    expect(bridge.getAgentRunStatus).not.toHaveBeenCalled();
+  });
+
   it("holds Settings Agents before admission without a toast or Notice, then loads", async () => {
     const bridge = makeBridge(Promise.resolve(null));
     const admitted = deferred<Awaited<ReturnType<typeof bridge.openWorkspace>>>();

@@ -147,16 +147,18 @@ export function registerCloudIpcHandlers<
       // that the window loads during it.
       await engineDaemonStartup();
       const sessions = requireEngineSessions();
-      workspaceSecretState = await withRendererWorkspaceOperation(
+      ({ workspace, workspaceSecretState } = await withRendererWorkspaceOperation(
         event.sender, input.workspaceId, "This workspace is no longer active.",
         async (operation) => {
-          workspace = operation.workspace;
-          return readWorkspaceSecretState(
-            receivedShareEngine.workspaceForRegistered(operation.workspace),
-            sessions,
-          );
+          return {
+            workspace: operation.workspace,
+            workspaceSecretState: await readWorkspaceSecretState(
+              receivedShareEngine.workspaceForRegistered(operation.workspace),
+              sessions,
+            ),
+          };
         },
-      );
+      ));
     }
     return CloudStatusResult.parse({
       ...status,

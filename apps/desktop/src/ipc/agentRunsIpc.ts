@@ -61,7 +61,7 @@ export function createAgentRunsIpc<
   const registerWorkspaceHandler = createRegisterWorkspaceHandler(registerHandler, { assertTrustedSender, withRendererWorkspaceOperation });
 
   function registerChatRunRecords(): void {
-    registerWorkspaceHandler(CHANNELS.chatRunRecordsForThread, async (event, payload, operation) => {
+    registerWorkspaceHandler(CHANNELS.chatRunRecordsForThread, async (event, payload) => {
       const input = ChatRunRecordsForThreadPayload.parse(payload);
       const { workspace } = await requireEngineCapture(
         input.workspaceId,
@@ -126,12 +126,12 @@ export function createAgentRunsIpc<
       );
     });
 
-    registerWorkspaceHandler(CHANNELS.endAgentRun, async (event, payload, operation) => {
+    registerWorkspaceHandler(CHANNELS.endAgentRun, async (event, payload) => {
       const input = EndAgentRunPayload.parse(payload);
       await agentIntegration.endAgentRun(input.workspaceId, input.runId, input.status ?? "complete");
     });
 
-    registerWorkspaceHandler(CHANNELS.getAgentRunStatus, async (event, payload, operation) => {
+    registerWorkspaceHandler(CHANNELS.getAgentRunStatus, async (event, payload) => {
       const input = AgentRunPayload.parse(payload);
       return AgentRunStatusResult.parse(await agentIntegration.getAgentRunStatus(input.workspaceId));
     });
@@ -160,7 +160,7 @@ export function createAgentRunsIpc<
       );
     });
 
-    registerWorkspaceHandler(CHANNELS.chatDispatchStateForThread, async (event, payload, operation) => {
+    registerWorkspaceHandler(CHANNELS.chatDispatchStateForThread, async (event, payload) => {
       const input = ChatDispatchStateForThreadPayload.parse(payload);
       await requireEngineCapture(
         input.workspaceId,
@@ -174,7 +174,7 @@ export function createAgentRunsIpc<
       );
     });
 
-    registerWorkspaceHandler(CHANNELS.resumeThreadDispatch, async (event, payload, operation) => {
+    registerWorkspaceHandler(CHANNELS.resumeThreadDispatch, async (event, payload) => {
       const input = ResumeThreadDispatchPayload.parse(payload);
       const { workspace } = await requireEngineCapture(
         input.workspaceId,

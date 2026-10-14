@@ -6319,6 +6319,7 @@ export function DesktopWorkspaceShell(props: {
         <Overlay onClose={closeSettings}>
           <LazyDesktopSettings
             workspaceIsReady={workspaceIsReady}
+            workspaceOpenFailed={!!workspaceOpenFailure}
             onError={reportSettingsFailure}
             onWorkspaceSettingsRead={onWorkspaceSettingsRead}
             workspaceId={workspaceId}

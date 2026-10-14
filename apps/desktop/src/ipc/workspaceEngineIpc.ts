@@ -363,7 +363,7 @@ export function createWorkspaceEngineIpc<
       });
     });
 
-    registerWorkspaceHandler(CHANNELS.restoreEngineMomentFile, async (event, payload, operation) => {
+    registerWorkspaceHandler(CHANNELS.restoreEngineMomentFile, async (event, payload) => {
       const input = RestoreEngineMomentFilePayload.parse(payload);
       const person = await localPerson();
       const { capture } = await requireEngineCapture(
