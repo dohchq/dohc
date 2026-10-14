@@ -27,7 +27,8 @@ function docker(args) {
 }
 
 const normalizeDirectory = path => path ? posix.normalize(path).replace(/(.)\/+$/, "$1") : undefined;
-const bindDirectory = volume => volume.Options?.o?.split(",").includes("bind") ? normalizeDirectory(volume.Options.device) : undefined;
+const bindDirectory = volume => volume.Options?.o?.split(",").some(option => option === "bind" || option === "rbind")
+  ? normalizeDirectory(volume.Options.device) : undefined;
 const inside = (path, folder) => path === folder || path.startsWith(folder.endsWith("/") ? folder : `${folder}/`);
 const overlapping = (a, b) => inside(a, b) || inside(b, a);
 
@@ -74,26 +75,29 @@ export async function runRecovery(options, run = docker, log = console.log, comp
   // A writable mount of a deployment folder, or of a folder inside or above it, can change deployment data.
   const storage = (volumeNames.size ? JSON.parse(run(["volume", "inspect", ...volumeNames])) : [])
     .flatMap(volume => [bindDirectory(volume), normalizeDirectory(volume.Mountpoint)]).filter(Boolean);
-  const writers = ids => {
+  // Returns each running container's writable mount that reaches deployment storage.
+  const writers = () => {
+    const ids = run(["ps", "--quiet"]).trim().split(/\r?\n/).filter(Boolean);
     if (!ids.length) return [];
-    const containers = JSON.parse(run(["inspect", ...ids]));
-    const others = [...new Set(containers.flatMap(container => (container.Mounts ?? [])
-      .filter(mount => mount.RW && mount.Type === "volume" && !volumeNames.has(mount.Name)).map(mount => mount.Name)))];
+    const writable = JSON.parse(run(["inspect", ...ids]))
+      .flatMap(container => (container.Mounts ?? []).filter(mount => mount.RW).map(mount => ({ container, mount })));
+    const others = [...new Set(writable.filter(({ mount }) => mount.Type === "volume" && !volumeNames.has(mount.Name)).map(({ mount }) => mount.Name))];
     const devices = new Map(others.length ? JSON.parse(run(["volume", "inspect", ...others])).map(volume => [volume.Name, bindDirectory(volume)]) : []);
-    const writes = mount => mount.RW && [normalizeDirectory(mount.Source), devices.get(mount.Name)]
-      .some(path => path && storage.some(folder => overlapping(path, folder)));
-    return containers.filter(container => (container.Mounts ?? [])
-      .some(mount => mount.Type === "volume" && volumeNames.has(mount.Name) || writes(mount)));
+    return writable.filter(({ mount }) => mount.Type === "volume" && volumeNames.has(mount.Name) ||
+      [normalizeDirectory(mount.Source), devices.get(mount.Name)].some(path => path && storage.some(folder => overlapping(path, folder))));
   };
+  const describe = matches => [...new Set(matches.map(({ container, mount }) =>
+    `${container.Name?.replace(/^\//, "") || container.Id} (${mount.Type === "volume" ? mount.Name : mount.Source})`))].join(", ");
   const current = run([...compose, "ps", "--services", "--filter", "status=running"]).trim().split(/\r?\n/).filter(Boolean);
-  if (writers(run(["ps", "--quiet"]).trim().split(/\r?\n/).filter(Boolean))
-    .some(container => container.Config?.Labels?.["com.docker.compose.project"] !== config.name)) {
-    throw new Error("Another running project uses this deployment's storage. Stop it before recovery.");
+  const foreign = writers().filter(({ container }) => container.Config?.Labels?.["com.docker.compose.project"] !== config.name);
+  if (foreign.length) {
+    throw new Error(`Running containers outside ${config.name} can write its storage. Stop them before recovery: ${describe(foreign)}.`);
   }
   log(`Stopping ${config.name} for ${options.action}.`);
   run([...compose, "stop"]);
-  if (writers(run(["ps", "--quiet"]).trim().split(/\r?\n/).filter(Boolean)).length) {
-    throw new Error("A running container still uses this deployment's storage. Services remain stopped; stop that writer before recovery.");
+  const remaining = writers();
+  if (remaining.length) {
+    throw new Error(`Running containers can still write this deployment's storage. Services remain stopped; stop them before recovery: ${describe(remaining)}.`);
   }
   const entrypoint = "/app/services/sync-relay/dist/relay-deployment.js";
   try {

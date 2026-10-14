@@ -216,12 +216,15 @@ test('every later start needs an accounts database, checked before any container
     return {error, probed: calls.some(args => args[0] === 'run')};
   };
   const exists = {status: 0, stdout: JSON.stringify([{Name: 'p_postgres', Driver: 'local'}])};
-  assert.deepEqual(check(exists, {status: 0}), {error: '', probed: true});
-  assert.match(check(exists, {status: 1}).error, /p_postgres holds no accounts database\. Restore it/);
-  const absent = check({status: 1, stderr: 'Error: No such volume: p_postgres'}, {status: 0});
+  assert.deepEqual(check(exists, {status: 0, stdout: 'present\n'}), {error: '', probed: true});
+  assert.match(check(exists, {status: 0, stdout: 'missing\n'}).error, /p_postgres holds no accounts database\. Restore it/);
+  const absent = check({status: 1, stderr: 'Error: No such volume: p_postgres'}, {status: 0, stdout: 'present\n'});
   assert.equal(absent.probed, false);
   assert.match(absent.error, /holds no accounts database/);
-  for (const status of [125, 126, null]) assert.match(check(exists, {status}).error, /Could not check Docker volume p_postgres/);
+  // Docker exits 1 for a failed attach, so only the probe's own output decides.
+  for (const probe of [{status: 1, stdout: ''}, {status: 1, stdout: 'missing\n'}, {status: 0, stdout: ''}, {status: 125, stdout: ''}, {status: 126}, {status: null}]) {
+    assert.match(check(exists, probe).error, /Could not check Docker volume p_postgres/, JSON.stringify(probe));
+  }
   assert.throws(() => check({status: 1, stderr: 'Cannot connect to the Docker daemon.'}, {status: 0}), /Docker could not inspect volume p_postgres/);
 });
 

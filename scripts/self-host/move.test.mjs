@@ -34,7 +34,10 @@ function host({ files = deployment, volumes = accounts, fail = () => false } = {
       return volumes[args[2]] ? { status: 0, stdout: JSON.stringify([{ Name: args[2], ...volumes[args[2]] }]) }
         : { status: 1, stdout: "", stderr: `Error response from daemon: get ${args[2]}: no such volume` };
     }
-    if (args[0] === "run" && args.includes("test")) return { status: args.at(-2) === "-s" && present.has(args.at(-1)) ? 0 : 1, stdout: "" };
+    if (args[0] === "run" && args.includes("sh")) {
+      const [, file] = /^if test -s (\S+); then echo present; else echo missing; fi$/.exec(args.at(-1));
+      return { status: 0, stdout: present.has(file) ? "present\n" : "missing\n" };
+    }
     if (args.includes("relay-initialize")) return { status: relayCheck(args.at(-1), present), stdout: "" };
     throw new Error(`Unexpected Docker call: ${args.join(" ")}`);
   } };
@@ -55,7 +58,7 @@ test("move checks volumes, accounts and the relay deployment through Docker befo
   const check = mock.calls.find(call => call.includes("relay-initialize"));
   assert.ok(check.includes("tools/self-host/compose.data-disk.yml"));
   assert.deepEqual(check.slice(check.indexOf("run")), ["run", "--rm", "--no-deps", "-T", "--entrypoint", "node", "relay-initialize", "-e", check.at(-1)]);
-  const probe = mock.calls.find(call => call.includes("test"));
+  const probe = mock.calls.find(call => call.includes("sh"));
   assert.ok(probe.includes("type=volume,source=dohc-self-host_dohc_self_host_postgres,target=/pg,readonly"));
   // The accounts volume is inspected before a container mounts it, so a missing volume is never created.
   assert.ok(mock.calls.findIndex(call => call.includes("dohc-self-host_dohc_self_host_postgres") && call.includes("inspect")) < mock.calls.indexOf(probe));
@@ -82,7 +85,7 @@ test("move never starts when Docker cannot complete a check", async t => {
   const failures = [
     [args => args.includes("dohc-self-host_dohc_self_host_sync_relay"), /Docker could not inspect volume dohc-self-host_dohc_self_host_sync_relay/],
     [args => args[0] === "volume" && args.includes("dohc-self-host_dohc_self_host_postgres"), /Docker could not inspect volume dohc-self-host_dohc_self_host_postgres/],
-    [args => args.includes("test"), /Could not check Docker volume dohc-self-host_dohc_self_host_postgres/],
+    [args => args.includes("sh"), /Could not check Docker volume dohc-self-host_dohc_self_host_postgres/],
     [args => args.includes("relay-initialize"), /Could not check the data disk in \/mnt\/disk\/dohc/],
   ];
   for (const [fail, refusal] of failures) {

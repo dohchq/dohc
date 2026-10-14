@@ -216,7 +216,7 @@ If the old host starts again without the disk, its relay cannot start because it
 
 1. Prepare the new host as described in [Set up a dohc server](self-host.md#prepare-the-host).
 2. Copy the release bundle and `.env.self-host` to the new host, then load the release image.
-3. Restore the accounts volume under the same name:
+3. From the folder that holds `dohc-accounts`, restore the accounts volume under the same name:
 
    ```sh
    docker volume create dohc-self-host_dohc_self_host_postgres

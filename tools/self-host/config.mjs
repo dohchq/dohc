@@ -112,10 +112,11 @@ export function accountsDatabaseError(config, docker) {
   const missing = `Docker volume ${accounts} holds no accounts database. Restore it from the old host or your backup before you start. ` +
     'Without it, people sign up again as new accounts that cannot open their workspaces.';
   if (!inspectVolume(accounts, docker)) return missing;
-  // `test` exits 1 when the file is missing or empty. Docker reports its own failures with 125 or higher.
-  const { status } = docker(['run', '--rm', '--network', 'none', '--mount', `type=volume,source=${accounts},target=/pg,readonly`,
-    '--entrypoint', 'test', config.services.postgres.image, '-s', '/pg/PG_VERSION']);
-  if (status === 0) return '';
-  if (status === 1) return missing;
+  // The probe prints its result, because Docker exits 1 for some of its own failures too.
+  const { status, stdout } = docker(['run', '--rm', '--network', 'none', '--mount', `type=volume,source=${accounts},target=/pg,readonly`,
+    '--entrypoint', 'sh', config.services.postgres.image, '-c', 'if test -s /pg/PG_VERSION; then echo present; else echo missing; fi']);
+  const result = status === 0 ? stdout?.trim() : undefined;
+  if (result === 'present') return '';
+  if (result === 'missing') return missing;
   return `Could not check Docker volume ${accounts} for the accounts database. Check that Docker is running and the image ${config.services.postgres.image} is available, then try again.`;
 }

@@ -22,8 +22,8 @@ async function fixture(t) {
   t.after(() => rm(root, { recursive: true, force: true }));
   return root;
 }
-const bound = device => ({ Driver: "local", Options: { type: "none", o: "bind", device } });
-function runner({ failMaintenance = false, foreign = false, missingVolume = false, mounts = [{ Type: "volume", Name: "recovery_data" }], volumes = {} } = {}) {
+const bound = (device, o = "bind") => ({ Driver: "local", Options: { type: "none", o, device } });
+function runner({ failMaintenance = false, foreign = false, missingVolume = false, mounts = [{ Type: "volume", Name: "recovery_data", RW: true }], volumes = {} } = {}) {
   const calls = [];
   const known = { recovery_data: bound("/mnt/disk/dohc/sync-relay"), ...volumes };
   return { calls, run(args) {
@@ -34,7 +34,7 @@ function runner({ failMaintenance = false, foreign = false, missingVolume = fals
       return JSON.stringify(args.slice(2).map(name => { if (!known[name]) throw new Error("no such volume"); return { Name: name, ...known[name] }; }));
     }
     if (args[0] === "ps") return foreign ? "foreign-container\n" : "";
-    if (args[0] === "inspect") return JSON.stringify([{ Mounts: mounts, Config: { Labels: { "com.docker.compose.project": "other" } } }]);
+    if (args[0] === "inspect") return JSON.stringify([{ Name: "/portainer_agent", Mounts: mounts, Config: { Labels: { "com.docker.compose.project": "other" } } }]);
     if (args.includes("ps")) return "sync-relay\nshare-web\n";
     if (args.includes("run") && failMaintenance) throw new Error("refused");
     return "done";
@@ -86,15 +86,19 @@ test("restore and failed maintenance remain stopped", async t => {
     assert.equal(mock.calls.some(args => args.includes("start")), false);
   }
 });
-test("a foreign volume user is refused before stop", async t => {
+test("a foreign volume writer is refused before stop and named with its mount", async t => {
   const root = await fixture(t), mock = runner({ foreign: true });
-  await assert.rejects(runRecovery(parseRecoveryArguments(["backup", join(root, "snapshot")]), mock.run, () => {}, ["compose"]), /Another running project/);
+  await assert.rejects(runRecovery(parseRecoveryArguments(["backup", join(root, "snapshot")]), mock.run, () => {}, ["compose"]),
+    { message: "Running containers outside recovery-test can write its storage. Stop them before recovery: portainer_agent (recovery_data)." });
   assert.equal(mock.calls.some(args => args.includes("stop")), false);
 });
 test("another project writing the disk folder, or a folder inside or above it, is refused before stop", async t => {
   const root = await fixture(t);
   for (const options of [
     { mounts: [{ Type: "volume", Name: "other_relay", RW: true }], volumes: { other_relay: bound("/mnt/disk/dohc/sync-relay/") } },
+    { mounts: [{ Type: "volume", Name: "other_relay", RW: true }], volumes: { other_relay: bound("/mnt/disk/dohc", "rbind") } },
+    { mounts: [{ Type: "volume", Name: "other_relay", RW: true }], volumes: { other_relay: bound("/mnt/disk/dohc/sync-relay", "rw,rbind") } },
+    { mounts: [{ Type: "bind", Source: "/mnt/disk/data", RW: true }], volumes: { recovery_data: bound("/mnt/disk/data/sync-relay", "rbind") } },
     { mounts: [{ Type: "bind", Source: "/mnt/disk/dohc/sync-relay", RW: true }] },
     { mounts: [{ Type: "bind", Source: "/mnt/disk/dohc", RW: true }] },
     { mounts: [{ Type: "bind", Source: "/", RW: true }] },
@@ -103,8 +107,9 @@ test("another project writing the disk folder, or a folder inside or above it, i
     { mounts: [{ Type: "bind", Source: "/var/lib/docker/volumes", RW: true }],
       volumes: { recovery_data: { Driver: "local", Mountpoint: "/var/lib/docker/volumes/recovery_data/_data", Options: null } } },
   ]) {
-    const mock = runner({ foreign: true, ...options });
-    await assert.rejects(runRecovery(parseRecoveryArguments(["archive", join(root, "archive")]), mock.run, () => {}, ["compose"]), /Another running project/,
+    const mock = runner({ foreign: true, ...options }), [mount] = options.mounts;
+    await assert.rejects(runRecovery(parseRecoveryArguments(["archive", join(root, "archive")]), mock.run, () => {}, ["compose"]),
+      { message: `Running containers outside recovery-test can write its storage. Stop them before recovery: portainer_agent (${mount.Name ?? mount.Source}).` },
       JSON.stringify(options.mounts));
     assert.equal(mock.calls.some(args => args.includes("stop")), false);
   }
@@ -116,6 +121,8 @@ test("read-only mounts and other folders do not block recovery", async t => {
       volumes: { other_relay: bound("/mnt/disk/other/sync-relay") } },
     { mounts: [{ Type: "bind", Source: "/mnt/disk/dohc", RW: false }, { Type: "bind", Source: "/", RW: false }] },
     { mounts: [{ Type: "volume", Name: "other_disk", RW: false }], volumes: { other_disk: bound("/mnt/disk/dohc") } },
+    { mounts: [{ Type: "volume", Name: "other_disk", RW: false }], volumes: { other_disk: bound("/mnt/disk/dohc", "rbind") } },
+    { mounts: [{ Type: "volume", Name: "recovery_data", RW: false }] },
   ].entries()) {
     const mock = runner({ foreign: true, ...options });
     await runRecovery(parseRecoveryArguments(["backup", join(root, `snapshot-${index}`)]), mock.run, () => {}, ["compose"]);
@@ -128,9 +135,10 @@ test("a same-project orphan writer is refused after stop", async t => {
   const run = args => {
     if (args.includes("stop")) stopped = true;
     if (stopped && args[0] === "ps") return "orphan\n";
-    if (stopped && args[0] === "inspect") return JSON.stringify([{ Mounts: [{ Type: "volume", Name: "recovery_data" }] }]);
+    if (stopped && args[0] === "inspect") return JSON.stringify([{ Name: "/recovery-test-orphan-1", Mounts: [{ Type: "volume", Name: "recovery_data", RW: true }] }]);
     return mock.run(args);
   };
-  await assert.rejects(runRecovery(parseRecoveryArguments(["backup", join(root, "snapshot")]), run, () => {}, ["compose"]), /still uses/);
+  await assert.rejects(runRecovery(parseRecoveryArguments(["backup", join(root, "snapshot")]), run, () => {}, ["compose"]),
+    { message: "Running containers can still write this deployment's storage. Services remain stopped; stop them before recovery: recovery-test-orphan-1 (recovery_data)." });
   assert.equal(mock.calls.some(args => args.includes("run")), false);
 });
