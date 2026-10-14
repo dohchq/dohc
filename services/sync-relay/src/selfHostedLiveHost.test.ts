@@ -11,6 +11,7 @@ import {createNamedFrameChanges} from "./liveHostChanges";
 import {hasRelayWriteObservers, notifyRelayWrite} from "./relayWriteChanges";
 import {serviceHostDocumentEnabled} from "./storage/serviceHostEnrollment";
 import type {StorageContext} from "./storage/context";
+import {releaseClaimRequest} from "./storage/releaseClaim";
 
 const cleanup: Array<() => Promise<void>> = [];
 afterEach(async () => {vi.restoreAllMocks(); for (const close of cleanup.splice(0).reverse()) await close();});
@@ -269,6 +270,31 @@ it("drops a stopped last document whose unload is pending and settles the select
   expect(f.updates).toHaveLength(updateCount);
   expect(f.pending.has(binding.objectId)).toBe(true);
   expect(f.host.current()).toBeDefined(); expect(f.starts[0]!.close).not.toHaveBeenCalled();
+});
+
+it.each([false,true])("drops a release-claimed document without losing its claim or pending work (sibling=%s)", async sibling => {
+  const f=await fixture();
+  if(sibling) f.add();
+  await f.waitStarted(1); await f.waitUpdate(sibling?["docs/a.md","docs/b.md"]:["docs/a.md"]);
+  f.storage.createServiceActivationStore(f.history);
+  f.pending.add(binding.objectId);
+  const scope={document:{workspaceId:binding.workspaceId,mainVersionId:binding.mainVersionId,objectId:binding.objectId,lineageClaimId:binding.lineageClaimId},
+    relayDatabaseNamespace:f.history.namespace,replicationEpoch:"epoch",streamIdentity:"stream",restoreFenceGeneration:binding.restoreFenceGeneration,
+    releaseId:"a".repeat(64),computerName:"Laptop"};
+  const request=(action:string)=>releaseClaimRequest(f.storage as StorageContext,"owner-1",{action,...scope},()=>{});
+  const acquired=request("acquire"), history=request("catch-up");
+  expect(acquired).toMatchObject({ok:true,status:"held"});
+  expect(history).toHaveProperty("history");
+  await f.waitUpdate(sibling?["docs/b.md"]:[]);
+  expect(f.holds(binding.objectId)).toBe(false);
+  expect(f.attachedAfter.at(-1)).toEqual(sibling?[scope.document.workspaceId]:[]);
+  expect(f.pending.has(binding.objectId)).toBe(true);
+  expect(f.storage.releaseServiceHostEnrollment({workspaceId:binding.workspaceId,objectId:binding.objectId,nowMs:20})).toBeNull();
+  expect(request("acquire")).toEqual(acquired);
+  expect(request("status")).toMatchObject({ok:true,status:"held"});
+  expect(request("catch-up")).toEqual(history);
+  expect(f.enrollment()).toMatchObject({enabled:false,retired:true,ownerStop:"retire"});
+  expect(f.starts).toHaveLength(1); expect(f.starts[0]!.close).not.toHaveBeenCalled();
 });
 
 it("retires the last document without stopping the daemon", async () => {

@@ -4,6 +4,7 @@ import {openSyncRelayStorage} from "../storage";
 import {authorizeServiceHostReplication, deriveServiceHostBearer, serviceHostReplicationRoute} from "../serviceHostCredential";
 import {serviceHostDocumentEnabled, SERVICE_HOST_ENROLLMENTS} from "./serviceHostEnrollment";
 import type {StorageContext} from "./context";
+import {RELEASE_CLAIM_MIGRATION, RELEASE_TOMBSTONES} from "./releaseClaimSchema";
 
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => {for (const close of cleanups.splice(0).reverse()) await close();});
@@ -221,6 +222,8 @@ const V1_SQL = `CREATE TABLE ${SERVICE_HOST_ENROLLMENTS} (
 /** Rewrites the fixture's enrollments into the v1 layout, keeping each row's enabled and retired state. */
 function downgradeToV1(f: Awaited<ReturnType<typeof fixture>>, sql = V1_SQL, marker: string | null = "service-host-enrollments-v1") {
   f.raw.exec(`BEGIN;
+    DROP TABLE ${RELEASE_TOMBSTONES};
+    DELETE FROM sync_relay_migrations WHERE migration_id='${RELEASE_CLAIM_MIGRATION}';
     ALTER TABLE ${SERVICE_HOST_ENROLLMENTS} RENAME TO enrollments_v2;
     ${sql};
     INSERT INTO ${SERVICE_HOST_ENROLLMENTS}(workspace_id,object_id,path,owner_user_id,share_id,replication_epoch,stream_identity,credential_nonce,enabled,retired,created_at_ms,updated_at_ms,accounted_bytes)
@@ -248,6 +251,10 @@ it("migrates v1 enrollments in place and keeps the enabled document hosted", asy
   for (let open = 0; open < 2; open++) {
     const reopened = openSyncRelayStorage(f.path, f.config);
     try {
+      expect(f.raw.prepare(`PRAGMA table_info(${SERVICE_HOST_ENROLLMENTS})`).all().at(-1)).toMatchObject({name:"release_claim_json",cid:13});
+      expect(f.raw.prepare(`SELECT release_claim_json FROM ${SERVICE_HOST_ENROLLMENTS}`).all().every(row=>row.release_claim_json===null)).toBe(true);
+      expect(f.raw.prepare(`PRAGMA foreign_key_list(${RELEASE_TOMBSTONES})`).all().every(row=>row.table===SERVICE_HOST_ENROLLMENTS)).toBe(true);
+      expect(f.raw.prepare("SELECT 1 FROM sync_relay_migrations WHERE migration_id=?").get(RELEASE_CLAIM_MIGRATION)).toBeDefined();
       expect(f.raw.prepare(`SELECT path,enabled,retired,accounted_bytes FROM ${SERVICE_HOST_ENROLLMENTS} ORDER BY path`).all()).toEqual(before);
       expect(reopened.listServiceHostEnrollments(scope.workspaceId).map(row => [row.path, row.enabled, row.ownerStop]))
         .toEqual([["docs/a.md", true, null], ["docs/paused.md", false, "pause"]]);
@@ -262,6 +269,23 @@ it("migrates v1 enrollments in place and keeps the enabled document hosted", asy
   }
   expect(f.raw.prepare("SELECT migration_id FROM sync_relay_migrations WHERE migration_id LIKE 'service-host-enrollments-%' ORDER BY migration_id").all()
     .map(row => row.migration_id)).toEqual(["service-host-enrollments-v1", "service-host-enrollments-v2"]);
+});
+
+it("installs release claims on an existing v2 store and keeps it valid on the next open", async () => {
+  const f=await fixture(), enabled=f.enroll();
+  f.raw.exec(`BEGIN;
+    DROP TABLE ${RELEASE_TOMBSTONES};
+    ALTER TABLE ${SERVICE_HOST_ENROLLMENTS} DROP COLUMN release_claim_json;
+    DELETE FROM sync_relay_migrations WHERE migration_id='${RELEASE_CLAIM_MIGRATION}';
+    COMMIT;`);
+  for(let open=0;open<2;open++) {
+    const reopened=openSyncRelayStorage(f.path,f.config);
+    try {
+      expect(reopened.readServiceHostEnrollment(scope.workspaceId,enabled.path)).toEqual(enabled);
+      expect(f.raw.prepare(`SELECT release_claim_json FROM ${SERVICE_HOST_ENROLLMENTS}`).get()).toEqual({release_claim_json:null});
+      expect(f.raw.prepare("SELECT 1 FROM sync_relay_migrations WHERE migration_id=?").get(RELEASE_CLAIM_MIGRATION)).toBeDefined();
+    } finally {reopened.close();}
+  }
 });
 
 it("refuses an enrollment table it does not recognize", async () => {

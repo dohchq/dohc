@@ -170,7 +170,7 @@ export function releaseClaimRequest(storage: StorageContext, ownerUserId: string
       restoreFenceGeneration:scope.restoreFenceGeneration,cursor,proof:history.proof,receipts:receiptsAt(storage,scope,cursor,history.proof.eventCount)}};
     const acquired: StoredClaim = {...identity,digest:digest(JSON.stringify(identity))};
     setClaim(storage,document,acquired,enrollment.release_claim_json);
-    storage.db.prepare(`UPDATE ${SERVICE_HOST_ENROLLMENTS} SET enabled=0,retired=1 WHERE workspace_id=? AND object_id=?`).run(document.workspaceId,document.objectId);
+    storage.db.prepare(`UPDATE ${SERVICE_HOST_ENROLLMENTS} SET owner_stop='retire',enabled=0,retired=1 WHERE workspace_id=? AND object_id=?`).run(document.workspaceId,document.objectId);
     return {ok:true,status:"held",claim:publicClaim(acquired)};
   });
 }

@@ -18,6 +18,8 @@ import type { NativeOwnerActivation } from "@dohc/workspace-engine-client/daemon
 import { parseLiveObjectBinding } from "@dohc/live-session-contract/live-object-binding";
 import { markdownToYDoc } from "../../../packages/ydoc-projection/src/import-export.js";
 import { createLiveMarkdownJournalValidator, createLiveMarkdownRegistrationValidator } from "../../../packages/ydoc-projection/src/liveDocumentValidation.js";
+import {releaseClaimRequest} from "./storage/releaseClaim";
+import type {StorageContext} from "./storage/context";
 
 const spawn = vi.hoisted(() => vi.fn());
 vi.mock("node:fs/promises",async importOriginal => {
@@ -784,6 +786,33 @@ it.each(["settlement-pending", "delivery-pending"])("drops a stopped document wi
   const calls = o.membership.length;
   expect(await o.host.update({workspaces: [], documents: []})).toEqual([]);
   expect(o.membership).toHaveLength(calls);
+  expect(o.client().close).not.toHaveBeenCalled();
+});
+
+it.each(["settlement-pending","delivery-pending"])("drops a release-claimed document with %s while retaining its anchor and catch-up", async reason => {
+  const o=await emptyServiceHost(), storage=o.f.storage as StorageContext;
+  o.f.storage.enrollServiceHostDocument({workspaceId:"workspace",ownerUserId:"owner",shareId:"share",path:o.sibling.path,nowMs:10,guard() {}});
+  await o.host.update({workspaces:[o.workspace],documents:[o.sibling]});
+  await vi.waitFor(()=>expect(o.host.isDocumentReady(o.document)).toBe(true));
+  const cut=o.f.storage.readLiveUpdateJournalCut({document:o.document});
+  const scope={document:o.document,relayDatabaseNamespace:o.f.history.namespace,replicationEpoch:"epoch",streamIdentity:"stream",
+    restoreFenceGeneration:o.raw.prepare("SELECT restore_fence_generation FROM sync_relay_live_documents WHERE workspace_id='workspace' AND object_id='object' AND lineage_state='current'").get()!.restore_fence_generation,
+    releaseId:"a".repeat(64),computerName:"Laptop"};
+  const request=(action:string)=>releaseClaimRequest(storage,"owner",{action,...scope},()=>{});
+  const acquired=request("acquire"), history=request("catch-up");
+  expect(acquired).toMatchObject({ok:true,status:"held"});
+  expect(history).toHaveProperty("history");
+  o.unloads.push({status:"pending",reason});
+  expect(await o.host.update({workspaces:[],documents:[]})).toEqual([]);
+  expect(o.host.holds(o.sibling)).toBe(false);
+  expect(o.host.isDocumentReady(o.document)).toBe(false);
+  expect(o.host.automationLedger("workspace")).toBeNull();
+  expect(o.membership.at(-1)).toEqual({method:"liveApplication.detachWorkspace",workspace:"attached-handle",params:{}});
+  expect(request("acquire")).toEqual(acquired);
+  expect(request("status")).toMatchObject({ok:true,status:"held"});
+  expect(request("catch-up")).toEqual(history);
+  expect(o.f.storage.readLiveUpdateJournalCut({document:o.document})).toEqual(cut);
+  expect(()=>o.f.storage.enrollServiceHostDocument({workspaceId:"workspace",ownerUserId:"owner",shareId:"share",path:o.sibling.path,nowMs:20,guard() {}})).toThrow("stopping");
   expect(o.client().close).not.toHaveBeenCalled();
 });
 

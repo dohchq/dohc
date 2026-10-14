@@ -1,7 +1,7 @@
 import {afterEach, expect, it, vi} from "vitest";
 import {registered, cleanupLiveDeliveryFixtures, policy, hash} from "../../../packages/ydoc-projection/src/liveCommittedDeliveryTestSupport";
 import {createLiveJournalHistoryAuthority} from "./storage/liveJournalHistory";
-import {createServiceHostEnrollmentRoutes} from "./serviceHostEnrollmentRoutes";
+import {createServiceHostEnrollmentRoutes, discoverServiceHostDocuments} from "./serviceHostEnrollmentRoutes";
 import {createWorkspaceReplicationRoutes} from "./workspaceReplicationRoutes";
 import {DiscussionActivityHub} from "./discussionActivity";
 import {errorResponse} from "./errors";
@@ -348,7 +348,7 @@ it("blocks every enrollment while claimed, names the document and rolls back the
     expect(() => f.storage.setServiceHostEnrollmentEnabled({...f.enrollment, enabled: true})).toThrow("docs/a.md");
     f.write(db => db.prepare(`INSERT INTO sync_relay_object_moments SELECT workspace_id,'second',2,'second','main','docs/b.md',blob_sha256,content_kind,byte_length,recorded_at_ms FROM sync_relay_object_moments LIMIT 1`).run());
     expect(() => f.storage.enrollServiceHostDocuments([{...f.enrollment, path: "docs/b.md"}, f.enrollment])).toThrow("docs/a.md");
-    expect(f.storage.hasServiceHostEnrollment("workspace", "docs/b.md")).toBe(false);
+    expect(f.storage.hasKeptServiceHostEnrollment("workspace", "docs/b.md")).toBe(false);
     expect((await f.push([{originSeq:0,opKind:"noop",payload:{},recordedAtMs:1}])).status).toBe(200);
     f.write(db => db.prepare("INSERT INTO sync_relay_current_files VALUES ('workspace','main','docs/a.md',?,'text',1)").run(f.input.evidence.projectedMarkdownSha256));
     expect(await f.enrollShare()).toMatchObject({status:409,body:{code:"release-claimed",path:"docs/a.md",claim:{computerName:"Laptop"}}});
@@ -377,6 +377,25 @@ it("scopes retired catch-up to owner, current object, lineage, namespace, stream
       expect((await f.request("catch-up", changes)).status).toBe(409);
     }
     f.setUser("reader"); expect((await f.request("catch-up")).status).toBe(404);
+  } finally {f.close();}
+});
+
+it.each(["complete","abandon"])("keeps release retirement out of automatic discovery after %s until explicit Start", async action => {
+  const f=fixture();
+  try {
+    const acquired=await f.request("acquire"); expect(acquired.status).toBe(200);
+    expect(f.storage.readServiceHostEnrollment("workspace","docs/a.md")).toMatchObject({enabled:false,retired:true,ownerStop:"retire"});
+    expect(f.storage.hasKeptServiceHostEnrollment("workspace","docs/a.md")).toBe(true);
+    expect(f.storage.releaseServiceHostEnrollment({workspaceId:"workspace",objectId:"object",nowMs:20})).toBeNull();
+    expect((await f.request("status")).body.claim.digest).toBe(acquired.body.claim.digest);
+    expect((await f.push([{originSeq:0,opKind:"noop",payload:{},recordedAtMs:1}])).status).toBe(200);
+    f.write(db=>db.prepare("INSERT INTO sync_relay_current_files VALUES ('workspace','main','docs/a.md',?,'text',1)").run(f.input.evidence.projectedMarkdownSha256));
+    expect((await f.request(action,{claimDigest:acquired.body.claim.digest})).status).toBe(200);
+    expect(discoverServiceHostDocuments(f.storage)).toBeNull();
+    expect(f.storage.readServiceHostEnrollment("workspace","docs/a.md")).toMatchObject({enabled:false,retired:true,ownerStop:"retire"});
+    expect((await f.request("catch-up")).status).toBe(200);
+    expect(f.storage.enrollServiceHostDocument(f.enrollment)).toMatchObject({enabled:true,retired:false,ownerStop:null});
+    if (action==="abandon") expect((await f.push([f.tagged(1,1)])).body.releaseRefusals[0].reason).toBe("release-publication-fenced");
   } finally {f.close();}
 });
 

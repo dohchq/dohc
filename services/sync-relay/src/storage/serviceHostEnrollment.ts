@@ -118,8 +118,8 @@ export function initializeServiceHostEnrollmentSchema(db: SqliteDb): void {
   const exact = (sql: string) => !!existing && existing.type === "table" && typeof existing.sql === "string" &&
     existing.sql.replace(/\s+/g, " ").trim() === sql.replace(/\s+/g, " ").trim();
   if (marked) {
-    // The release-claim migration adds a column after the last one, so compare without whitespace.
-    const expected = isMarked(RELEASE_CLAIM_MIGRATION) ? SQL.replace("  PRIMARY KEY", `  ${RELEASE_CLAIM_COLUMN},\n  PRIMARY KEY`) : SQL;
+    // SQLite adds the column before the table-level constraints; compare without whitespace.
+    const expected = isMarked(RELEASE_CLAIM_MIGRATION) ? SQL.replace("  CHECK (enabled=1", `  ${RELEASE_CLAIM_COLUMN},\n  CHECK (enabled=1`) : SQL;
     if (!existing || existing.type !== "table" || typeof existing.sql !== "string" ||
       existing.sql.replace(/\s+/g, "") !== expected.replace(/\s+/g, "")) throw new Error("Service host enrollment storage is damaged.");
   } else if (isMarked(V1_MIGRATION)) {
