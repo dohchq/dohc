@@ -211,24 +211,26 @@ Finish implementation, self-simplification, and focused checks before requesting
 
 The canonical local runner selects JavaScript and Rust gates from the [`PR checks` workflow's filters](.github/workflows/pr-checks.yml).
 Use `pnpm verify:plan --base <target-ref>` to inspect that selection locally.
-The plan narrows JavaScript packages and integration proofs through workspace dependencies and external test inputs.
-Shared configuration and unknown code inputs retain full verification.
+A selected JavaScript gate runs the complete JavaScript suite with every integration proof.
 
 - One agent owns verification and the PR's evidence. Other agents run focused checks for their changes.
+- Run focused checks while implementing and during review rounds.
+- After the required reviews finish with no open blocking findings, the verification owner runs `pnpm verify:pr` once, unless passing cloud evidence already covers the reviewed head. If it fails, fix the cause, get the affected delta reviewed, and run it again.
 - Before merging, require passing canonical gate evidence that covers the PR's changes.
 - After a rebase or merge, inspect the delta and reuse passing evidence when it still covers the change.
-- Rerun only checks affected by source, dependency, configuration, or conflict-resolution changes. Advancing main alone does not require another gate run.
+- When reusing passing evidence, rerun only checks affected by source, dependency, configuration, or conflict-resolution changes. Advancing main alone does not require another gate run.
 - Require every selected job to pass. A missing, cancelled, or failed run is not a pass.
 - If a job reads a changed file outside its filter, correct the filter and run that job.
-- When impact is unclear, use `pnpm verify:pr --base <target-ref> --full` to run both complete jobs.
-- Record the tested commit, target ref, selected gates and JavaScript scope, result, and evidence location. Explain any reuse across commits.
+- When impact is unclear, use `pnpm verify:pr --base <target-ref> --full` to run both jobs.
+- Record the tested commit, target ref, selected gates, result, and evidence location. Explain any reuse across commits.
 - If no code gate applies, record the runner's selection and reason.
 - Add focused platform verification when changed behavior depends on Windows or macOS.
 
 Use `pnpm verify:pr --base <target-ref>` as the single full-verification entry point.
 It owns the service setup, prebuilds, gate selection, and evidence. Follow [the verification procedure](docs/engineering/verify-agent-work.md#verify-a-pull-request).
-Keep the checkout unchanged during each run. Preserve the original commit and target in its `result.json`.
+On the shared Windows host it queues the commit with the verification service, which verifies it in its own checkout; stopping the command does not stop the request. Elsewhere, keep the checkout unchanged during each run. Preserve the original commit and target in its `result.json`.
 The Rust gate retains its build budget and mandatory summary-verdict checks.
+Only `verify:pr` holds the host's verification lane. Run focused checks, benchmarks, and packaging outside it.
 
 ### Select reviewers
 

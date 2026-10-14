@@ -1,48 +1,21 @@
 import { useRequestSequence } from "./useRequestSequence";
-import { Cloud, ExternalLink, LogOut, Trash2 } from "lucide-react";
+import { Cloud, ExternalLink } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { CloudStatusResult } from "../ipc/bridgeContract";
 import { canonicalCloudOrigin } from "../workspaces/cloudConfiguration";
-import { buildSyncCode } from "../workspaces/syncCode";
 import { bridge } from "./bridge";
 import { ipcErrorMessage } from "./ipcError";
 import { openLinkExternally } from "./linkActivation";
+import { CloudAccountRow } from "./settings/CloudAccountRow";
 import {
   ConnectionNotices,
   useConnectionNotices,
   type ConnectionNoticeHost,
 } from "./shell/connectionNotices";
-import { Pill, PrimaryButton, SecondaryButton } from "./ui/controls";
-import { CopyField, type CopySecret } from "./ui/CopyButton";
-import { ServerAccountDeleteDialog, type ServerAccountDeleted } from "./ServerAccountDeleteDialog";
-
-const SYNC_CODE_SECRET: CopySecret = { what: "the workspace code", again: "Copy it again from Settings." };
+import { Pill, PrimaryButton } from "./ui/controls";
 
 const SETUP_GUIDE_URL =
-  "https://github.com/dohc-ai/dohc/blob/main/docs/how-to/self-host.md";
-
-type WorkspaceSyncState = Required<Pick<
-  CloudStatusResult,
-  "workspaceSynced" | "workspaceSyncConnected" | "workspaceSecretState"
->>;
-const UNSYNCED: WorkspaceSyncState = {
-  workspaceSynced: false,
-  workspaceSyncConnected: false,
-  workspaceSecretState: "none",
-};
-
-function normalizeWorkspaceSyncState(
-  status: CloudStatusResult,
-): WorkspaceSyncState {
-  return {
-    workspaceSynced: status.workspaceSynced ?? false,
-    workspaceSyncConnected: status.workspaceSyncConnected ?? false,
-    workspaceSecretState: status.workspaceSecretState ?? "none",
-  };
-}
-
-type PassphrasePurpose = "enable" | "protect" | "unlock";
-const MIN_PASSPHRASE_LENGTH = 8;
+  "https://github.com/dohchq/dohc/blob/main/docs/how-to/self-host.md";
 
 type Phase =
   | { kind: "loading" }
@@ -82,19 +55,23 @@ function checkServerAddress(
   return { problem: "Enter the server address like https://dohc.example.com." };
 }
 
-// Sync and sharing: one server address, then the device-authorization flow.
-// Show a short code, send the user to the browser to approve it, poll until
-// the session lands. The token never reaches this process — main stores it
-// encrypted; we only ever render status, server, and email. Main discovers the
-// sync relay from the server, so there is no relay field here. Local work
+// Connecting a server: one server address, then the device-authorization
+// flow. Show a short code, send the user to the browser to approve it, poll
+// until the session lands. The token never reaches this process — main stores
+// it encrypted; we only ever render status, server, and email. Main discovers
+// the sync relay from the server, so there is no relay field here. Local work
 // needs none of this: this panel only ever adds sync and sharing on top.
-// The session belongs to the installation rather than to one workspace, so
-// connecting and disconnecting here reach every workspace on this machine.
+// Syncing a workspace is a setting, on Settings' Sync and sharing page. Hosts
+// outside a workspace have no such page, so a session found here shows its
+// account row, the same one that page shows.
 export function CloudLogin(props: {
-  workspaceId?: string;
   // Fired when a device-flow login completes inside this panel (the join
-  // surface re-checks its own gate on it).
+  // surface re-checks its own gate on it; the shell moves on to Settings).
   onConnected?: () => void;
+  // Also fire onConnected when the first check finds a session already here.
+  // The shell's dialog uses it to hand an existing session to Settings, where
+  // its account row and sync switch live.
+  handOffSession?: boolean;
   // Nested inside another elevated card (join/open-shared/handoff signed-out
   // gates): drop this panel's own frame so cards never stack elevation, and
   // drop the standalone explanation the host surface already gives.
@@ -109,27 +86,12 @@ export function CloudLogin(props: {
   // components.
 } & ConnectionNoticeHost) {
   const [phase, setPhase] = useState<Phase>({ kind: "loading" });
-  const [workspaceSyncState, setWorkspaceSyncState] = useState(UNSYNCED);
-  const { workspaceSynced, workspaceSyncConnected, workspaceSecretState } =
-    workspaceSyncState;
-  const [syncBusy, setSyncBusy] = useState(false);
-  const [syncError, setSyncError] = useState<string | null>(null);
-  const [needsPassphrase, setNeedsPassphrase] = useState(false);
-  const [passphrasePurpose, setPassphrasePurpose] = useState<PassphrasePurpose>("enable");
-  const [passphrase, setPassphrase] = useState("");
   const [statusAttempt, setStatusAttempt] = useState(0);
   // Inline only for what the user can fix in the field in front of them.
   const [addressProblem, setAddressProblem] = useState<string | null>(null);
-  const [disconnectBusy, setDisconnectBusy] = useState(false);
-  // Each opening is a new review; a notice's Try again opens another.
-  const [deleteReview, setDeleteReview] = useState<number | null>(null);
   const [serverUrl, setServerUrl] = useState(props.initialServerUrl ?? "");
-  // Kept from the connected session only — the sync code carries the relay the
-  // other machine joins through, and main is the one that discovers it.
-  const [relayUrl, setRelayUrl] = useState("");
-  // Reported by the server itself: the name it calls itself, and whether it
-  // answers from the open internet or only from a private network.
-  const [serverName, setServerName] = useState("");
+  // Reported by the server itself: whether it answers from the open internet
+  // or only from a private network.
   const [networkAccess, setNetworkAccess] = useState<"private" | "public" | null>(
     null,
   );
@@ -139,17 +101,6 @@ export function CloudLogin(props: {
   const recheckRef = useRef(false);
   const serverUrlInput = useRef<HTMLInputElement | null>(null);
   const sessionRef = useRequestSequence();
-  const statusReads = useRequestSequence();
-  const signInRetries = useRequestSequence();
-  // Set while a deletion review is open. The review answers a session change
-  // itself: it closes, or reports the deletion it already sent. No status
-  // read applies while it is open, and the panel reads the session once it
-  // ends.
-  const reviewOpen = useRef(false);
-  // Whether the host already knows this machine is connected. A mount or a
-  // workspace switch is not news: the host ran its own check. After that,
-  // the host hears each time the panel turns connected.
-  const hostKnowsConnected = useRef(true);
   // Used only when nothing above this panel owns connection notices, so a
   // panel rendered on its own still reaches the same toast and Notices row.
   const ownNotices = useConnectionNotices();
@@ -159,12 +110,6 @@ export function CloudLogin(props: {
     [ownNotices.reporter],
   );
   const reportConnectionError = props.onConnectionError ?? reportOwnError;
-  const reportConnectionNotice = props.onConnectionNotice ?? ((notice: { message: string; tone: "success" | "warning" }) =>
-    notice.tone === "success" ? ownNotices.showSuccess(notice.message) : ownNotices.showWarning(notice.message));
-  const protectPassphraseTooShort =
-    needsPassphrase &&
-    passphrasePurpose === "protect" &&
-    passphrase.length < MIN_PASSPHRASE_LENGTH;
 
   function clearPollTimer() {
     if (pollTimer.current) {
@@ -173,59 +118,30 @@ export function CloudLogin(props: {
     }
   }
 
-  function statusQuery() {
-    return props.workspaceId ? { workspaceId: props.workspaceId } : {};
-  }
-
   // Runs the status check again. The ref is what tells that run it was asked
-  // for, so a session the panel then shows reaches the host like a fresh
-  // sign-in does.
+  // for, so a session it finds reaches the host like a fresh sign-in does.
   function recheckStatus() {
     recheckRef.current = true;
     setStatusAttempt((attempt) => attempt + 1);
   }
 
   // A retry the owner can hold after this panel closes. It answers false once
-  // the panel is gone, has started a newer attempt, or no longer wants this
-  // one, and the owner reopens the panel instead of rerunning an attempt
-  // nothing is watching. An open deletion review owns the panel until it
-  // ends, so a retry then does nothing and still answers true: a reopen would
-  // reset the panel and drop the review's pending result.
-  function retryFor(session: number, run: () => void, wanted = () => true): () => boolean {
+  // the panel is gone or has started a newer attempt, and the owner reopens
+  // the panel instead of rerunning an attempt nothing is watching.
+  function retryFor(session: number, run: () => void): () => boolean {
     return () => {
-      if (reviewOpen.current) return true;
       if (!sessionRef.isCurrent(session)) return false;
-      if (!wanted()) return false;
       run();
       return true;
     };
   }
 
-  // A session the panel shows retires every failed sign-in's Try again.
-  function signInAgain(session: number, origin: string): () => boolean {
-    const turn = signInRetries.current();
-    return retryFor(session, () => void connect(origin), () => signInRetries.isCurrent(turn));
-  }
-
-  // Every status read in the panel takes the next turn, so only the newest
-  // answer applies: a slow read from before a session change never repaints
-  // after it. None applies under an open deletion review, whose close reads
-  // again.
-  function nextStatusRead(session: number): () => boolean {
-    const read = statusReads.next();
-    return () => sessionRef.isCurrent(session) && statusReads.isCurrent(read) && !reviewOpen.current;
-  }
-
-  // Main owns the truth about the session. The address and relay only move
-  // when main reports them, so a status without them leaves what the user
-  // typed in place to retry with.
+  // Main owns the truth about the session. The address only moves when main
+  // reports it, so a status without one leaves what the user typed in place
+  // to retry with.
   function applyStatus(status: CloudStatusResult, email?: string) {
-    setWorkspaceSyncState(normalizeWorkspaceSyncState(status));
     if (status.serverUrl) setServerUrl(status.serverUrl);
-    if (status.relayUrl) setRelayUrl(status.relayUrl);
-    setServerName(status.serverName ?? "");
     setNetworkAccess(status.networkAccess ?? null);
-    if (status.connected) signInRetries.next();
     setPhase(
       status.connected
         ? { kind: "connected", email: email ?? status.email ?? "" }
@@ -235,32 +151,24 @@ export function CloudLogin(props: {
 
   useEffect(() => {
     const session = sessionRef.next();
-    hostKnowsConnected.current = !recheckRef.current;
+    // Only a user-asked recheck tells the host about a session it found. A
+    // mount is not news: the host ran its own check, unless it asked to hear.
+    const announceSession = recheckRef.current || props.handOffSession === true;
     recheckRef.current = false;
     clearPollTimer();
     setPhase({ kind: "loading" });
-    setWorkspaceSyncState(UNSYNCED);
-    setSyncBusy(false);
-    setSyncError(null);
-    setNeedsPassphrase(false);
-    setPassphrasePurpose("enable");
-    setPassphrase("");
     setAddressProblem(null);
-    setDisconnectBusy(false);
-    reviewOpen.current = false;
-    setDeleteReview(null);
     setServerUrl(props.initialServerUrl ?? "");
-    setRelayUrl("");
-    setServerName("");
     setNetworkAccess(null);
-    const current = nextStatusRead(session);
     void bridge()
-      .cloudStatus(statusQuery())
+      .cloudStatus()
       .then((status) => {
-        if (current()) applyStatus(status);
+        if (!sessionRef.isCurrent(session)) return;
+        applyStatus(status);
+        if (announceSession && status.connected) props.onConnected?.();
       })
       .catch((cause: unknown) => {
-        if (!current()) return;
+        if (!sessionRef.isCurrent(session)) return;
         // Nothing on screen can recover this one, so the notice carries the
         // only way back: run the check again.
         setPhase({ kind: "unknown" });
@@ -275,114 +183,10 @@ export function CloudLogin(props: {
       });
     return () => {
       if (sessionRef.isCurrent(session)) sessionRef.next();
-      reviewOpen.current = false;
       clearPollTimer();
     };
     // A notice can retry a different address while this panel is already open.
-  }, [props.workspaceId, props.initialServerUrl, statusAttempt]);
-
-  // Another window or the CLI signed in, switched, disconnected, or deleted
-  // the account. Read the session again, but leave a sign-in this panel is
-  // running alone: its poll reads the session when it finishes.
-  const phaseRef = useRef(phase);
-  phaseRef.current = phase;
-  useEffect(() => bridge().onCloudSessionChanged(({ phase: transition }) => {
-    const signingIn = phaseRef.current.kind === "connecting" || phaseRef.current.kind === "code";
-    if (transition !== "ready" || signingIn || reviewOpen.current) return;
-    refreshStatus();
-  }), [props.workspaceId]);
-
-  // The host hears about the connection the panel shows, whichever read
-  // found it.
-  useEffect(() => {
-    if (phase.kind === "connected") {
-      if (!hostKnowsConnected.current) props.onConnected?.();
-      hostKnowsConnected.current = true;
-    } else if (phase.kind !== "loading") {
-      hostKnowsConnected.current = false;
-    }
-  }, [phase]);
-
-  function refreshStatus() {
-    const session = sessionRef.current();
-    const current = nextStatusRead(session);
-    void bridge()
-      .cloudStatus(statusQuery())
-      .then((status) => {
-        if (current()) applyStatus(status);
-      })
-      .catch((cause: unknown) => {
-        if (!current()) return;
-        setPhase({ kind: "unknown" });
-        reportConnectionError({
-          message: "dohc could not check this connection.",
-          cause,
-          serverUrl: null,
-          retry: retryFor(session, recheckStatus),
-        });
-      });
-  }
-
-  async function enableSync() {
-    if (!props.workspaceId || syncBusy) return;
-    const session = sessionRef.current();
-    setSyncBusy(true);
-    setSyncError(null);
-    try {
-      await bridge().cloudEnableSync({
-        workspaceId: props.workspaceId,
-        ...(needsPassphrase ? { passphrase } : {}),
-      });
-      if (sessionRef.isCurrent(session)) {
-        setWorkspaceSyncState((current) => ({
-          workspaceSynced: true,
-          workspaceSyncConnected: true,
-          workspaceSecretState:
-            passphrasePurpose === "unlock"
-              ? "protected-key-present"
-              : current.workspaceSecretState,
-        }));
-        setNeedsPassphrase(false);
-        setPassphrase("");
-      }
-    } catch (cause) {
-      if (!sessionRef.isCurrent(session)) return;
-      const message = cause instanceof Error ? cause.message : String(cause);
-      if (/passphrase/i.test(message)) {
-        setNeedsPassphrase(true);
-        setPassphrasePurpose(/unlock/i.test(message) ? "unlock" : "protect");
-        setSyncError(
-          /could not/i.test(message)
-            ? "That passphrase couldn't unlock synced secrets."
-            : "Enter at least 8 characters to protect synced secrets.",
-        );
-      } else {
-        // Nothing in this panel can fix an engine, relay, or claim failure,
-        // so it leaves with the same toast and Notices row every other
-        // operational failure uses.
-        reportConnectionError({
-          message: ipcErrorMessage(cause, "dohc could not enable sync for this workspace."),
-          cause,
-          serverUrl: null,
-          retry: retryFor(session, () => void enableSync()),
-        });
-      }
-    } finally {
-      if (sessionRef.isCurrent(session)) setSyncBusy(false);
-    }
-  }
-
-  function startSecretPassphrase(purpose: PassphrasePurpose) {
-    if (syncBusy) return;
-    if (needsPassphrase && passphrasePurpose === purpose) {
-      void enableSync();
-      return;
-    }
-    setPassphrasePurpose(purpose);
-    setNeedsPassphrase(true);
-    setPassphrase("");
-    setSyncError(null);
-  }
+  }, [props.initialServerUrl, statusAttempt]);
 
   function pollUntilDone(session: number, origin: string) {
     pollTimer.current = setTimeout(() => {
@@ -392,18 +196,18 @@ export function CloudLogin(props: {
           if (!sessionRef.isCurrent(session)) return;
           if (result.status === "pending") return pollUntilDone(session, origin);
           if (result.status === "complete") {
-            const current = nextStatusRead(session);
             void bridge()
-              .cloudStatus(statusQuery())
+              .cloudStatus()
               .then((status) => {
-                if (!current()) return;
+                if (!sessionRef.isCurrent(session)) return;
                 // Main owns the session, and this answer is newer than the
                 // poll. A browser approval that did not leave a session on
                 // this machine has to read as disconnected.
                 applyStatus(status, result.email ?? status.email ?? "");
+                if (status.connected) props.onConnected?.();
               })
               .catch((cause: unknown) => {
-                if (!current()) return;
+                if (!sessionRef.isCurrent(session)) return;
                 // The approval happened, but nothing here can say what the
                 // session is now. Do not announce a connection main has not
                 // confirmed; the notice carries the way to ask again.
@@ -434,7 +238,7 @@ export function CloudLogin(props: {
             message: ipcErrorMessage(cause, "dohc could not reach the server."),
             cause,
             serverUrl: origin,
-            retry: signInAgain(session, origin),
+            retry: retryFor(session, () => void connect(origin)),
           });
         });
     }, 3000);
@@ -457,9 +261,7 @@ export function CloudLogin(props: {
     clearPollTimer();
     setAddressProblem(null);
     setServerUrl(origin);
-    setServerName("");
     setNetworkAccess(null);
-    setRelayUrl("");
     setPhase({ kind: "connecting" });
     try {
       const started = await bridge().cloudLoginStart({ serverUrl: origin });
@@ -478,102 +280,26 @@ export function CloudLogin(props: {
         ),
         cause,
         serverUrl: origin,
-        retry: signInAgain(session, origin),
+        retry: retryFor(session, () => void connect(origin)),
       });
     }
   }
 
-  // The join handle for a synced workspace: one copyable line carrying the
-  // workspace id and its relay. Null when anything needed is missing (an
-  // unsynced workspace, or a session without a relay) — the block simply
-  // doesn't render rather than showing a broken code.
-  const syncCode = useMemo(() => {
-    if (
-      !props.workspaceId ||
-      !workspaceSynced ||
-      !workspaceSyncConnected ||
-      !relayUrl.trim()
-    ) {
-      return null;
-    }
-    try {
-      return buildSyncCode({ workspaceId: props.workspaceId, relayUrl: relayUrl.trim() });
-    } catch {
-      return null;
-    }
-  }, [
-    props.workspaceId,
-    relayUrl,
-    workspaceSyncConnected,
-    workspaceSynced,
-  ]);
-
-  // The server the session actually uses, in the form the user typed it.
-  const connectedServer = canonicalCloudOrigin(serverUrl) ?? serverUrl.trim();
-
-  // Main drops the cached credentials before the cleanup that can fail, so a
-  // rejection here says nothing about whether the session survived. Report the
-  // reason, then ask main what the state actually is.
-  async function disconnect() {
-    if (disconnectBusy) return;
-    const session = sessionRef.current();
-    setDisconnectBusy(true);
-    try {
-      await bridge().cloudLogout();
-      if (!sessionRef.isCurrent(session)) return;
-      clearPollTimer();
+  // A failed disconnect is already reported, so the read after it raises no
+  // second notice: the panel just stops claiming to know.
+  async function settleDisconnect(failed: boolean) {
+    const session = sessionRef.next();
+    clearPollTimer();
+    if (!failed) {
       setPhase({ kind: "disconnected" });
-      setDisconnectBusy(false);
-      sessionRef.next();
-    } catch (cause) {
-      if (!sessionRef.isCurrent(session)) return;
-      clearPollTimer();
-      reportConnectionError({
-        message: ipcErrorMessage(cause, "dohc could not finish disconnecting."),
-        cause,
-        serverUrl: null,
-        retry: retryFor(session, () => void disconnect()),
-      });
-      const current = nextStatusRead(session);
-      try {
-        const status = await bridge().cloudStatus(statusQuery());
-        if (current()) applyStatus(status);
-      } catch {
-        // The disconnect failure is already reported. A second notice for the
-        // recheck would say the same thing twice, so the panel just stops
-        // claiming to know.
-        if (current()) setPhase({ kind: "unknown" });
-      }
-    } finally {
-      if (sessionRef.isCurrent(session)) setDisconnectBusy(false);
+      return;
     }
-  }
-
-  // Main already disconnected from the deleted account, if this computer was
-  // still connected to it. Closing the review asks main what the session is
-  // now.
-  function accountDeleted(deleted: ServerAccountDeleted) {
-    reportConnectionNotice(deleted.finished
-      ? { tone: "success", message: `Deleted ${deleted.email} on ${deleted.server}. Workspaces on this computer stay.` }
-      : { tone: "warning", message: `${deleted.server} blocked ${deleted.email} and will finish deleting its data. Workspaces on this computer stay.` });
-    endReview();
-  }
-
-  function startReview() {
-    reviewOpen.current = true;
-    setDeleteReview((review) => (review ?? 0) + 1);
-  }
-
-  function endReview() {
-    reviewOpen.current = false;
-    setDeleteReview(null);
-    refreshStatus();
-  }
-
-  // A review needs the connected account it reviews. Without one, the owner
-  // reopens the panel, which shows what the session is now.
-  function reviewDeletionAgain(session: number): () => boolean {
-    return retryFor(session, startReview, () => phaseRef.current.kind === "connected");
+    try {
+      const status = await bridge().cloudStatus();
+      if (sessionRef.isCurrent(session)) applyStatus(status);
+    } catch {
+      if (sessionRef.isCurrent(session)) setPhase({ kind: "unknown" });
+    }
   }
 
   const panel = (
@@ -727,208 +453,14 @@ export function CloudLogin(props: {
       ) : null}
 
       {phase.kind === "connected" ? (
-        <div data-testid="cloud-connected">
-          {/* The session covers the installation, so say so once here rather
-              than leaving "connected" to read as a property of this
-              workspace. The server names itself; the origin stays visible
-              underneath because that is the part the user typed and can
-              check. */}
-          <p className="mb-0 mt-2 text-xs leading-relaxed text-muted">
-            This machine is connected
-            {serverName ? (
-              <>
-                {" to "}
-                <span data-testid="cloud-connected-server-name" className="text-ink">
-                  {serverName}
-                </span>
-              </>
-            ) : null}{" "}
-            as{" "}
-            <span data-testid="cloud-connected-email" className="text-ink">
-              {phase.email}
-            </span>
-            .
-          </p>
-          {connectedServer ? (
-            <p
-              data-testid="cloud-connected-server"
-              className="mb-0 mt-1 font-mono text-[11px] text-subtle"
-            >
-              {connectedServer}
-            </p>
-          ) : null}
-          {networkAccess === "private" ? (
-            <p
-              data-testid="cloud-network-access"
-              className="mb-0 mt-2 text-[11px] leading-relaxed text-muted"
-            >
-              This server is on a private network. Everyone you share with
-              needs access to that network, from every device they use.
-            </p>
-          ) : null}
-          {props.workspaceId ? (
-            workspaceSynced ? (
-              <>
-                {workspaceSyncConnected ? (
-                  <>
-                    <p
-                      data-testid="cloud-workspace-synced"
-                      className="mb-0 mt-2 text-xs text-success"
-                    >
-                      This workspace syncs to the server — edits flow
-                      automatically.
-                    </p>
-                    {syncCode ? (
-                      <div
-                        data-testid="cloud-sync-code-block"
-                        className="mt-3 rounded-lg border border-line bg-panel-2 p-3"
-                      >
-                        <p className="m-0 text-[11px] font-semibold text-ink">
-                          Add this workspace on another machine
-                        </p>
-                        <p className="m-0 mt-1 text-[11px] leading-relaxed text-muted">
-                          On the other machine, sign in with the same account,
-                          choose “Join a synced workspace”, and paste this code.
-                        </p>
-                        <div className="mt-2">
-                          <CopyField
-                            copyTestId="cloud-copy-sync-code"
-                            getText={() => syncCode}
-                            sensitive={SYNC_CODE_SECRET}
-                          >
-                            <code data-testid="cloud-sync-code" title={syncCode}>{syncCode}</code>
-                          </CopyField>
-                        </div>
-                      </div>
-                    ) : null}
-                    {workspaceSecretState === "protected-key-present" ? (
-                      <SecondaryButton
-                        type="button"
-                        data-testid="cloud-protect-secrets"
-                        disabled={
-                          syncBusy || protectPassphraseTooShort
-                        }
-                        onClick={() => startSecretPassphrase("protect")}
-                        className="mt-3"
-                      >
-                        {syncBusy && passphrasePurpose === "protect"
-                          ? "Protecting…"
-                          : "Protect sync with a passphrase"}
-                      </SecondaryButton>
-                    ) : null}
-                    {workspaceSecretState === "protected-key-missing" ? (
-                      <SecondaryButton
-                        type="button"
-                        data-testid="cloud-unlock-secrets"
-                        disabled={
-                          syncBusy ||
-                          (needsPassphrase &&
-                            passphrasePurpose === "unlock" &&
-                            passphrase.length === 0)
-                        }
-                        onClick={() => startSecretPassphrase("unlock")}
-                        className="mt-3"
-                      >
-                        {syncBusy && passphrasePurpose === "unlock"
-                          ? "Unlocking…"
-                          : "Unlock protected files"}
-                      </SecondaryButton>
-                    ) : null}
-                  </>
-                ) : (
-                  <>
-                    <p
-                      data-testid="cloud-workspace-relink"
-                      className="mb-0 mt-2 text-xs text-danger"
-                    >
-                      Sync is paused until dohc verifies this account.
-                    </p>
-                    <p className="mb-0 mt-1 text-xs leading-relaxed text-muted">
-                      Check your connection and account, then retry.
-                    </p>
-                    <SecondaryButton
-                      type="button"
-                      data-testid="cloud-relink-workspace"
-                      disabled={syncBusy}
-                      onClick={() => void enableSync()}
-                      className="mt-3"
-                    >
-                      {syncBusy ? "Reconnecting…" : "Retry sync"}
-                    </SecondaryButton>
-                  </>
-                )}
-              </>
-            ) : (
-              <PrimaryButton
-                type="button"
-                data-testid="cloud-enable-sync"
-                disabled={
-                  syncBusy || protectPassphraseTooShort
-                }
-                onClick={() => void enableSync()}
-                className="mt-3"
-              >
-                {syncBusy ? "Turning on sync…" : "Sync this workspace"}
-              </PrimaryButton>
-            )
-          ) : null}
-          {needsPassphrase ? (
-            <label className="mt-3 block text-[11px] font-medium text-subtle">
-              Passphrase
-              <input
-                spellCheck={false}
-                data-testid="cloud-sync-passphrase"
-                value={passphrase}
-                type="password"
-                onChange={(event) => setPassphrase(event.currentTarget.value)}
-                className="mt-1 w-full rounded-md border border-line bg-bg px-2.5 py-1.5 text-[13px] text-ink outline-none placeholder:text-subtle focus:border-ink"
-              />
-            </label>
-          ) : null}
-          {syncError ? (
-            <p data-testid="cloud-sync-error" className="mb-0 mt-2 text-xs text-danger">
-              {syncError}
-            </p>
-          ) : null}
-          <p className="mb-0 mt-4 text-[11px] leading-relaxed text-subtle">
-            Disconnecting stops sync for every workspace on this machine. Your
-            files stay where they are.
-          </p>
-          <SecondaryButton
-            data-testid="cloud-disconnect"
-            disabled={disconnectBusy}
-            onClick={() => void disconnect()}
-            className="mt-2 flex items-center gap-1.5"
-          >
-            <LogOut size={12} aria-hidden />
-            {disconnectBusy ? "Disconnecting…" : "Disconnect"}
-          </SecondaryButton>
-          {props.embedded ? null : (
-            // The secondary recipe in the danger color: it ends the account.
-            <button
-              type="button"
-              data-testid="cloud-delete-account"
-              disabled={disconnectBusy}
-              onClick={startReview}
-              className="mt-4 flex items-center gap-1.5 rounded-lg border border-line bg-transparent px-3 py-1.5 text-xs text-danger transition-colors hover:bg-hover disabled:opacity-50"
-            >
-              <Trash2 size={12} aria-hidden />
-              Delete account…
-            </button>
-          )}
-          {deleteReview !== null ? (
-            <ServerAccountDeleteDialog
-              key={deleteReview}
-              email={phase.email}
-              server={connectedServer}
-              onClose={endReview}
-              onDeleted={accountDeleted}
-              onError={(message, cause) => {
-                reportConnectionError({ message, cause, serverUrl: null, retry: reviewDeletionAgain(sessionRef.current()) });
-                endReview();
-              }}
-            />
-          ) : null}
+        <div data-testid="cloud-connected" className="mt-2">
+          <CloudAccountRow
+            email={phase.email}
+            serverUrl={serverUrl}
+            networkAccess={networkAccess}
+            onSettled={settleDisconnect}
+            onError={reportConnectionError}
+          />
         </div>
       ) : null}
     </div>

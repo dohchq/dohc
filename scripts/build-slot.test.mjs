@@ -2,7 +2,8 @@
 //
 // The contract under test is the machine's build budget: four slots,
 // atomic directory acquisition, owner-safe reclamation (stale heartbeat AND
-// dead pid, never either alone), and a denial that names the constraint. The
+// an owner that is gone: a dead pid or a pid that now names another process,
+// never either alone), and a denial that names the constraint. The
 // gate holds a slot for its whole run, so a defect here either deadlocks
 // every lane or lets five unbounded cargos share one machine — the crash this
 // module exists to prevent.
@@ -24,6 +25,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as poll } from "node:timers/promises";
+import { fileURLToPath } from "node:url";
 import {
   acquireBuildSlot,
   acquireExclusiveSlot,
@@ -32,20 +34,24 @@ import {
   capBuildParallelism,
   reclaimStaleSlots,
   resolveBuildBudget,
+  processCreation,
   verificationLanes,
 } from "../tools/rust-engine-program/build-slot.mjs";
 
 const buildSlotUrl = new URL("../tools/rust-engine-program/build-slot.mjs", import.meta.url).href;
 
 const slotRoot = () => mkdtempSync(join(tmpdir(), "dohc-build-slot-"));
+// The lane guard admits only this checkout's PR verifier as the entry script.
+const verifier = fileURLToPath(new URL("../scripts/verification/verify.mjs", import.meta.url));
+const verifierLane = (env, options) => acquireVerificationSlot(env, { entry: verifier, ...options });
 
 test("exclusive local ownership rejects live owners without creating a queue", t => {
   const root = slotRoot();
   t.after(() => rmSync(root, {recursive: true, force: true}));
-  const options = {root, kind: "checkout", metadata: {purpose: "light verification", checkout: "fixture-checkout", commit: "fixture-sha"}};
+  const options = {root, kind: "checkout", metadata: {purpose: "PR verification", checkout: "fixture-checkout", commit: "fixture-sha"}};
   const owner = acquireExclusiveSlot(options);
   t.after(() => owner.release());
-  assert.throws(() => acquireExclusiveSlot(options), new RegExp(`pid ${process.pid}.*light verification.*fixture-checkout.*fixture-sha`));
+  assert.throws(() => acquireExclusiveSlot(options), new RegExp(`pid ${process.pid}.*PR verification.*fixture-checkout.*fixture-sha`));
   assert.equal(existsSync(join(root, "checkout-queue")), false);
   owner.release();
   const next = acquireExclusiveSlot(options);
@@ -400,7 +406,7 @@ function queueHarness(t) {
       if (observe) options.observeTicket = ticket => { process.send({ type: "observed", ...ticket, text: readFileSync(ticket.path, "utf8") }); };
       try {
         slot = await (${JSON.stringify(kind)} !== "build-slot"
-          ? acquireVerificationSlot({ DOHC_BUILD_SLOT_ROOT: process.argv[1] }, { lightweight: ${JSON.stringify(kind)} === "verification-light-slot", ...options })
+          ? acquireVerificationSlot({ DOHC_BUILD_SLOT_ROOT: process.argv[1] }, { entry: ${JSON.stringify(verifier)}, ...options })
           : acquireBuildSlot({ root: process.argv[1], slots: 1, waitMs: 20_000, pollMs: 60_000, ...options }));
         process.send({ type: "acquired", name: slot.name });
       } catch (error) {
@@ -508,12 +514,12 @@ test("full capacity stays one unless an isolated two-lane trial is explicit", as
   const trial = join(root, "trial");
   const env = {DOHC_BUILD_SLOT_ROOT: root, DOHC_VERIFICATION_SLOT_ROOT: trial, DOHC_VERIFICATION_LANES: "2", DOHC_VERIFICATION_TRIAL: "1"};
   assert.equal(resolveBuildBudget(env).root, root);
-  const first = await acquireVerificationSlot(env);
-  const second = await acquireVerificationSlot(env);
+  const first = await verifierLane(env);
+  const second = await verifierLane(env);
   try {
     assert.notEqual(first.name, second.name);
     assert.equal(first.dir, join(trial, first.name));
-    await assert.rejects(acquireVerificationSlot(env, {waitMs: 0}), /all 2 slots are held/);
+    await assert.rejects(verifierLane(env, {waitMs: 0}), /all 2 slots are held/);
   } finally { first.release(); second.release(); }
 });
 
@@ -521,7 +527,7 @@ test("queue status retains claim identity and estimates only from completed lane
   const root = slotRoot();
   t.after(() => rmSync(root, {recursive: true, force: true}));
   const metadata = {purpose: "full PR verification", checkout: "C:\\work\\candidate", commit: "abc123", phase: "prepare"};
-  const slot = await acquireVerificationSlot({DOHC_BUILD_SLOT_ROOT: root}, {metadata});
+  const slot = await verifierLane({DOHC_BUILD_SLOT_ROOT: root}, {metadata});
   try {
     const original = readFileSync(join(slot.dir, "owner.json"), "utf8");
     const ticket = plantTicket(root, 1, {pid: process.pid, kind: "verification-slot"});
@@ -549,7 +555,7 @@ test("status CLI reads absent queues without creating or acquiring anything", t 
   const result = spawnSync(process.execPath, [new URL("../tools/rust-engine-program/build-slot.mjs", import.meta.url).pathname.replace(/^\/(\w:)/u, "$1"), "--status", "--root", absent], {encoding: "utf8", timeout: 5000});
   assert.equal(result.status, 0, result.stderr);
   const status = JSON.parse(result.stdout);
-  assert.equal(status.lanes.length, 3);
+  assert.deepEqual(status.lanes.map(lane => lane.kind), ["build-slot", "verification-slot"]);
   assert.ok(status.lanes.every(lane => !lane.owners.length && !lane.queued));
   assert.equal(existsSync(absent), false);
 });
@@ -589,47 +595,11 @@ test("status CLI reports configured empty trial capacity without acquiring a lan
   assert.equal(existsSync(trial), false);
 });
 
-test("a bounded light gate completes while eighteen heavy waiters remain queued", async t => {
-  const {root, start, message} = queueHarness(t);
-  const holder = await acquireVerificationSlot({DOHC_BUILD_SLOT_ROOT: root});
-  t.after(() => holder.release());
-  for (let i = 1; i <= 18; i += 1) plantTicket(root, i, {pid: process.pid, kind: "verification-slot"});
-  await assert.rejects(acquireVerificationSlot({DOHC_BUILD_SLOT_ROOT: root}, {waitMs: 0}), /all 1 slots are held/);
-  const started = performance.now();
-  const light = start("light", {kind: "verification-light-slot", metadata: {purpose: "light PR verification"}});
-  await message(light, "acquired");
-  const elapsed = performance.now() - started;
-  assert.ok(elapsed < 5000, `light admission took ${elapsed.toFixed(1)}ms`);
-  assert.equal(tickets(root, "verification-slot").length, 18);
-  assert.equal(existsSync(holder.dir), true);
-  light.send("release");
-  await waitFor(() => light.closed, "light gate must finish while heavy holder remains");
-  assert.equal(existsSync(holder.dir), true);
-  t.diagnostic(`Isolated scheduler: light admission ${elapsed.toFixed(1)}ms; heavy backlog 18; heavy holder stayed active.`);
-});
-
-test("light admission remains capped, cleans up timeouts and cancellation, and preserves full owners", async t => {
-  const {root, start, message} = queueHarness(t);
-  const full = await acquireVerificationSlot({DOHC_BUILD_SLOT_ROOT: root});
-  const light = await acquireVerificationSlot({DOHC_BUILD_SLOT_ROOT: root}, {lightweight: true});
-  t.after(() => {full.release(); light.release();});
-  await assert.rejects(acquireVerificationSlot({DOHC_BUILD_SLOT_ROOT: root}, {lightweight: true, waitMs: 0}), /all 1 slots are held/);
-  assert.deepEqual(tickets(root, "verification-light-slot"), []);
-  const waiter = start("cancel-light", {kind: "verification-light-slot"});
-  await message(waiter, "waiting");
-  waiter.send("SIGINT");
-  await waitFor(() => waiter.closed, "cancelled light waiter must exit");
-  assert.equal(waiter.exitCode, 130);
-  assert.deepEqual(tickets(root, "verification-light-slot"), []);
-  assert.equal(existsSync(full.dir), true);
-  assert.equal(existsSync(light.dir), true);
-});
-
 test("a verification ticket observer reads the published ticket before any lane exists", async () => {
   const root = slotRoot();
   const observed = [];
   try {
-    const slot = await acquireVerificationSlot({DOHC_BUILD_SLOT_ROOT: root}, {metadata: {purpose: "full PR verification"}, observeTicket: ticket => {
+    const slot = await verifierLane({DOHC_BUILD_SLOT_ROOT: root}, {metadata: {purpose: "full PR verification"}, observeTicket: ticket => {
       observed.push({...ticket, text: readFileSync(ticket.path, "utf8"), laneExists: existsSync(join(root, "verification-slot-1"))});
     }});
     slot.release();
@@ -673,7 +643,7 @@ test("ticket observer failures reject before admission without retry and stop th
         const before = events.map(event => process.listeners(event));
         let calls = 0;
         let published;
-        const error = await acquireVerificationSlot({ DOHC_BUILD_SLOT_ROOT: root }, { observeTicket: ({ path }) => {
+        const error = await acquireVerificationSlot({ DOHC_BUILD_SLOT_ROOT: root }, { entry: ${JSON.stringify(verifier)}, observeTicket: ({ path }) => {
           calls += 1;
           published = path;
           if (fault === "promise") return Promise.reject(new Error("fixture deferred capture"));
@@ -703,9 +673,9 @@ test("ticket observer failures reject before admission without retry and stop th
 
 test("each replacement verification ticket is observed separately", async () => {
   const root = slotRoot();
-  const holder = await acquireVerificationSlot({DOHC_BUILD_SLOT_ROOT: root});
+  const holder = await verifierLane({DOHC_BUILD_SLOT_ROOT: root});
   const observed = [];
-  const pending = acquireVerificationSlot({DOHC_BUILD_SLOT_ROOT: root}, {waitMs: 20_000,
+  const pending = verifierLane({DOHC_BUILD_SLOT_ROOT: root}, {waitMs: 20_000,
     observeTicket: ticket => observed.push({...ticket, text: readFileSync(ticket.path, "utf8")})});
   try {
     await waitFor(() => observed.length === 1, "the first ticket must be observed");
@@ -724,7 +694,7 @@ test("each replacement verification ticket is observed separately", async () => 
 
 test("observed verification waiters keep FIFO order, lane counts, and cancellation", async t => {
   const {root, start, message, acquired} = queueHarness(t);
-  const holder = await acquireVerificationSlot({DOHC_BUILD_SLOT_ROOT: root});
+  const holder = await verifierLane({DOHC_BUILD_SLOT_ROOT: root});
   t.after(() => holder.release());
   const waiters = [];
   for (let id = 1; id <= 2; id += 1) {
@@ -743,18 +713,13 @@ test("observed verification waiters keep FIFO order, lane counts, and cancellati
   await waitFor(() => cancelled.closed, "cancelled observed waiter must exit");
   assert.equal(cancelled.exitCode, 130);
   assert.equal(tickets(root, "verification-slot").length, 2);
-  const light = start("light", {kind: "verification-light-slot", observe: true});
-  assert.equal((await message(light, "observed")).kind, "verification-light-slot");
-  await message(light, "acquired");
-  assert.deepEqual(tickets(root, "verification-light-slot"), []);
   holder.release();
   for (let id = 1; id <= 2; id += 1) {
-    await waitFor(() => acquired.length > id, "released slot must hand off in FIFO order", 5000);
-    assert.deepEqual(acquired, ["light", ...Array.from({length: id}, (_, index) => index + 1)]);
+    await waitFor(() => acquired.length >= id, "released slot must hand off in FIFO order", 5000);
+    assert.deepEqual(acquired, Array.from({length: id}, (_, index) => index + 1));
     waiters[id - 1].send("release");
     await waitFor(() => waiters[id - 1].closed, "released waiter must exit");
   }
-  light.send("release");
 });
 
 test("Windows CI is uncapped unless an explicit slot root requests the workstation budget", () => {
@@ -928,9 +893,23 @@ test("two lanes get two different slots", async () => {
   }
 });
 
+test("only this checkout's PR verifier can take a verification lane", async t => {
+  const root = slotRoot();
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const env = { DOHC_BUILD_SLOT_ROOT: root };
+  assert.throws(() => acquireVerificationSlot(env), /Only the PR verifier/);
+  for (const entry of ["", join(root, "run-admitted-host.mjs"), join(root, "scripts/verification/verify.mjs")]) {
+    assert.throws(() => acquireVerificationSlot(env, { entry }), /Only the PR verifier/);
+  }
+  assert.deepEqual(readdirSync(root), []);
+  const lane = await verifierLane(env);
+  assert.equal(lane.name, "verification-slot-1");
+  lane.release();
+});
+
 test("three verification waiters acquire in FIFO order with prompt handoff", async (t) => {
   const { root, start, message, acquired } = queueHarness(t);
-  const holder = await acquireVerificationSlot({ DOHC_BUILD_SLOT_ROOT: root });
+  const holder = await verifierLane({ DOHC_BUILD_SLOT_ROOT: root });
   t.after(() => holder.release());
   const waiters = [];
   for (let id = 1; id <= 3; id += 1) {
@@ -1215,8 +1194,8 @@ test("a transient ticket reclaim failure does not reject another waiter's acquis
 test("a PR gate holds the one verification slot beside the cargo lanes", async () => {
   const root = slotRoot();
   try {
-    assert.equal(acquireVerificationSlot({ CI: "1" }), null);
-    const gate = await acquireVerificationSlot({ DOHC_BUILD_SLOT_ROOT: root });
+    assert.equal(verifierLane({ CI: "1" }), null);
+    const gate = await verifierLane({ DOHC_BUILD_SLOT_ROOT: root });
     assert.equal(gate.name, "verification-slot-1");
     const lane = await acquireBuildSlot({ root, slots: 1, waitMs: 0 });
     assert.equal(lane.name, "build-slot-1");
@@ -1225,7 +1204,7 @@ test("a PR gate holds the one verification slot beside the cargo lanes", async (
     assert.equal(existsSync(join(root, "verification-slot-1")), false);
 
     plantSlot(root, 1, { pid: deadPid(), heartbeatAgeMs: 45 * 60_000, kind: "verification-slot" });
-    const next = await acquireVerificationSlot({ DOHC_BUILD_SLOT_ROOT: root });
+    const next = await verifierLane({ DOHC_BUILD_SLOT_ROOT: root });
     assert.equal(next.name, "verification-slot-1");
     next.release();
     assert.match(readFileSync(join(root, "events.log"), "utf8"), /reclaimed verification-slot-1/);
@@ -1390,6 +1369,193 @@ test("the heartbeat keeps restoring the owner file's freshness", async () => {
       "an interval tick must restore the heartbeat",
     );
     slot.release();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+function plantOwner(root, i, owner, heartbeatAgeMs, kind = "build-slot") {
+  const dir = join(root, `${kind}-${i}`);
+  mkdirSync(dir, { recursive: true });
+  const ownerPath = join(dir, "owner.json");
+  writeFileSync(ownerPath, JSON.stringify({ start: new Date().toISOString(), ...owner }));
+  const then = new Date(Date.now() - heartbeatAgeMs);
+  utimesSync(ownerPath, then, then);
+  return dir;
+}
+
+test("a dead owner frees its slot after two missed heartbeats, not the whole stale window", () => {
+  const root = slotRoot();
+  try {
+    plantOwner(root, 1, { pid: deadPid() }, 60_000);
+    plantOwner(root, 2, { pid: deadPid() }, 3 * 60_000);
+    assert.equal(reclaimStaleSlots({ root, slots: 2, staleMs: 30 * 60_000 }), 1);
+    assert.equal(existsSync(join(root, "build-slot-1")), true, "one missed heartbeat is not enough");
+    assert.equal(existsSync(join(root, "build-slot-2")), false);
+    assert.match(readFileSync(join(root, "events.log"), "utf8"), /reclaimed build-slot-2: pid \d+ dead, heartbeat 3 min stale/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a pid now owned by another process frees the slot; the claimer's own identity keeps it", () => {
+  const root = slotRoot();
+  try {
+    const owner = { pid: process.pid, created: "reuse-test-claimer" };
+    plantOwner(root, 1, owner, 3 * 60_000);
+    assert.equal(reclaimStaleSlots({ root, slots: 1, staleMs: 30 * 60_000, identify: () => null }), 0,
+      "an unknown identity proves nothing");
+    assert.equal(reclaimStaleSlots({ root, slots: 1, staleMs: 30 * 60_000, identify: () => "later process" }), 1);
+    assert.equal(existsSync(join(root, "build-slot-1")), false);
+    assert.match(readFileSync(join(root, "events.log"), "utf8"), /reclaimed build-slot-1: pid \d+ reused \(claimed by process created reuse-test-claimer, now later process\)/);
+    plantOwner(root, 1, owner, 3 * 60_000);
+    assert.equal(reclaimStaleSlots({ root, slots: 1, staleMs: 30 * 60_000, identify: () => owner.created }), 0,
+      "a silent owner that is still the claiming process keeps its slot");
+    // A confirmed match is remembered for five minutes. It can delay a reclaim, never cause one.
+    assert.equal(reclaimStaleSlots({ root, slots: 1, staleMs: 30 * 60_000, identify: () => "later process" }), 0);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a fresh heartbeat outweighs any identity answer, even for exclusive slots", () => {
+  const root = slotRoot();
+  try {
+    plantOwner(root, 1, { pid: process.pid, created: "fresh-test-claimer" }, 0, "checkout");
+    plantOwner(root, 1, { pid: process.pid, created: "fresh-test-claimer" }, 90_000);
+    let probes = 0;
+    const identify = () => { probes += 1; return "other"; };
+    assert.equal(reclaimStaleSlots({ root, slots: 1, kind: "checkout", staleMs: -1, identify }), 0);
+    assert.equal(reclaimStaleSlots({ root, slots: 1, staleMs: 30 * 60_000, identify }), 0);
+    assert.equal(probes, 0, "no lookup runs before two heartbeats are missed");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a cargo lane keeps its long grace for a dead holder; the verification lane frees in minutes", async () => {
+  const root = slotRoot();
+  try {
+    plantSlot(root, 1, { pid: deadPid(), heartbeatAgeMs: 3 * 60_000 });
+    await assert.rejects(acquireBuildSlot({ root, slots: 1, waitMs: 0 }), /all 1 slots are held/);
+    plantSlot(root, 1, { pid: deadPid(), heartbeatAgeMs: 3 * 60_000, kind: "verification-slot" });
+    // Only the PR verifier may hold the lane once that guard is on main; naming it as the entry works either way.
+    const lane = await acquireVerificationSlot({ DOHC_BUILD_SLOT_ROOT: root }, { entry: new URL("./verification/verify.mjs", import.meta.url).pathname.replace(/^\/([A-Za-z]:)/u, "$1") });
+    assert.equal(lane.name, "verification-slot-1");
+    lane.release();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("an owner record without an identity is never judged reused", () => {
+  const root = slotRoot();
+  try {
+    plantOwner(root, 1, { pid: process.pid }, 45 * 60_000);
+    plantOwner(root, 2, { pid: process.pid, created: null }, 45 * 60_000);
+    let probes = 0;
+    assert.equal(reclaimStaleSlots({ root, slots: 2, staleMs: 30 * 60_000, identify: () => { probes += 1; return "other"; } }), 0);
+    assert.equal(probes, 0);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a heartbeat during the identity probe cancels the reclaim", () => {
+  const root = slotRoot();
+  try {
+    const dir = plantOwner(root, 1, { pid: process.pid, created: "probe-heartbeat-claimer" }, 3 * 60_000);
+    const identify = () => {
+      const now = new Date();
+      utimesSync(join(dir, "owner.json"), now, now);
+      return "later process";
+    };
+    assert.equal(reclaimStaleSlots({ root, slots: 1, staleMs: 30 * 60_000, identify }), 0);
+    assert.equal(existsSync(join(dir, "owner.json")), true);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+for (const [when, successorOwner] of [["after it wrote its owner", "successor"], ["before it wrote its owner", null]]) {
+  test(`a sweep that lost its lock stops and leaves a successor's lock taken ${when}`, () => {
+    const root = slotRoot();
+    try {
+      plantOwner(root, 1, { pid: process.pid, created: "lost-lock-claimer" }, 3 * 60_000);
+      const lock = join(root, "reclaim.lock");
+      const identify = () => {
+        // A successor takes the lock over while this sweep is suspended in its probe.
+        rmSync(lock, { recursive: true, force: true });
+        mkdirSync(lock);
+        if (successorOwner) writeFileSync(join(lock, "owner"), successorOwner);
+        return "later process";
+      };
+      assert.equal(reclaimStaleSlots({ root, slots: 1, staleMs: 30 * 60_000, identify }), 0);
+      assert.equal(existsSync(join(root, "build-slot-1")), true);
+      assert.deepEqual(readdirSync(lock), successorOwner ? ["owner"] : []);
+      if (successorOwner) assert.equal(readFileSync(join(lock, "owner"), "utf8"), successorOwner);
+      assert.deepEqual(readdirSync(root).filter(name => name.startsWith("reclaim.lock.")), []);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+}
+
+test("a sweeper that resumes after a takeover finds the lock owned and backs off", () => {
+  const root = slotRoot();
+  try {
+    plantSlot(root, 1, { pid: deadPid(), heartbeatAgeMs: 3 * 60_000, kind: "verification-slot" });
+    // The sweeper creates the lock, then a successor takes it over before the sweeper writes its owner file.
+    const result = spawnSync(process.execPath, ["--input-type=module", "-e", `
+      import fs from "node:fs";
+      import { join } from "node:path";
+      import { syncBuiltinESMExports } from "node:module";
+      import { reclaimStaleSlots } from ${JSON.stringify(buildSlotUrl)};
+      const root = process.argv[1];
+      const lock = join(root, "reclaim.lock");
+      const mkdir = fs.mkdirSync;
+      fs.mkdirSync = (path, ...args) => {
+        const made = mkdir(path, ...args);
+        if (path === lock) {
+          fs.rmSync(lock, { recursive: true, force: true });
+          mkdir(lock);
+          fs.writeFileSync(join(lock, "owner"), "successor");
+        }
+        return made;
+      };
+      syncBuiltinESMExports();
+      console.log(reclaimStaleSlots({ root, slots: 1, kind: "verification-slot", staleMs: 30 * 60_000 }));
+    `, root], { encoding: "utf8", timeout: 15_000 });
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.stdout.trim(), "0");
+    assert.equal(readFileSync(join(root, "reclaim.lock", "owner"), "utf8"), "successor");
+    assert.equal(existsSync(join(root, "verification-slot-1")), true);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("process creation identity is stable for a live process and absent for a dead one", t => {
+  const own = processCreation(process.pid);
+  if (own === null) return t.skip(`no creation identity on ${process.platform}`);
+  assert.equal(processCreation(process.pid), own);
+  assert.equal(processCreation(deadPid()), null);
+  assert.equal(processCreation(0), null);
+});
+
+test("a held slot adopts its process identity and still releases by identity", async t => {
+  if (processCreation(process.pid) === null) return t.skip(`no creation identity on ${process.platform}`);
+  const root = slotRoot();
+  try {
+    const slot = await acquireBuildSlot({ root, slots: 1, waitMs: 0, identityDelayMs: 0 });
+    const ownerPath = join(slot.dir, "owner.json");
+    await waitFor(() => typeof JSON.parse(readFileSync(ownerPath, "utf8")).created === "string",
+      "the claim must record its process identity", 60_000);
+    const owner = readFileSync(ownerPath, "utf8");
+    assert.equal(JSON.parse(owner).created, processCreation(process.pid));
+    assert.equal(JSON.parse(readFileSync(join(slot.dir, "status.json"), "utf8")).owner, owner);
+    slot.release();
+    assert.equal(existsSync(slot.dir), false);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

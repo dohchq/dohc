@@ -135,7 +135,8 @@ export class OwnerYDocFrameDelivery implements OwnerYDocDelivery {
       attempt.accountId = await this.options.authenticatedAccountId?.(attempt.signal); this.check(attempt);
       const bearer = await abortable(this.options.freshBearer(attempt.signal), attempt.signal); this.check(attempt);
       const transport = await abortable((this.options.connect ?? connectOwnerLiveTransport)({url: this.routeUrl(binding), bearer,
-        maxFrameBytes: attempt.maxFrameBytes, signal: attempt.signal, receive: bytes => this.receive(attempt, bytes), closed: () => {if (this.active === attempt) this.stop(attempt);}}), attempt.signal);
+        maxFrameBytes: attempt.maxFrameBytes, signal: attempt.signal, receive: bytes => this.receive(attempt, bytes),
+        closed: () => {void attempt.receiving.then(() => {if (this.active === attempt) this.stop(attempt);});}}), attempt.signal);
       if (!this.current(attempt)) {transport.close(); return {kind: "retry"};}
       attempt.transport = transport;
       this.grant(attempt, this.options.frames.maxQueuedBytes, this.options.frames.maxQueuedFrames);
@@ -151,9 +152,12 @@ export class OwnerYDocFrameDelivery implements OwnerYDocDelivery {
     const declared = envelopeValue.agentDeclaration;
     let agentDeclaration: AgentDeclaration | undefined;
     try {agentDeclaration = declared === undefined ? undefined : parseAgentDeclaration(declared);} catch {this.stop(attempt); return {kind: "retry"};}
+    const credited = envelopeValue.personEdit || agentDeclaration;
+    if (credited && !attempt.accountId) {this.stop(attempt); return {kind: "retry"};}
     attempt.envelope = {deliveryId: envelopeValue.deliveryId, updateDigest: envelopeValue.updateDigest, update: Uint8Array.from(envelopeValue.update),
-      ...(attempt.accountId && agentDeclaration ? {authorContext: {kind: "account", accountId: attempt.accountId, agent: {agentId: agentDeclaration.agentId,
-        ...(agentDeclaration.onBehalfOf !== null ? {onBehalfOf: agentDeclaration.onBehalfOf} : {}), depth: agentDeclaration.depth}}} : {})};
+      ...(credited ? {authorContext: {kind: "account", accountId: attempt.accountId!,
+        ...(agentDeclaration ? {agent: {agentId: agentDeclaration.agentId,
+          ...(agentDeclaration.onBehalfOf !== null ? {onBehalfOf: agentDeclaration.onBehalfOf} : {}), depth: agentDeclaration.depth}} : {})}} : {})};
     void this.pump(attempt);
     return attempt.delivered.promise;
   }
@@ -229,7 +233,7 @@ export class OwnerYDocFrameDelivery implements OwnerYDocDelivery {
             attempt.receipt = {deliveryId, updateDigest, journalCursor, acceptingHostEpoch};
             await this.finishReceipt(attempt);
           }
-          else if (frame.result === "refused" && ["stale-binding", "restore-fenced"].includes(frame.reason)) this.stop(attempt, {kind: "quarantine", reason: frame.reason});
+          else if (frame.result === "refused" && ["stale-binding", "restore-fenced", "delivery-conflict", "provenance-refused"].includes(frame.reason)) this.stop(attempt, {kind: "quarantine", reason: frame.reason});
           else this.stop(attempt);
         }
         if (transfer && this.current(attempt)) {

@@ -12,7 +12,6 @@ const bridgeMock = {
   cloudLoginPoll: vi.fn(),
   cloudLogout: vi.fn(),
   openExternalUrl: vi.fn(),
-  onCloudSessionChanged: () => () => undefined,
 };
 
 vi.mock("./bridge", () => ({

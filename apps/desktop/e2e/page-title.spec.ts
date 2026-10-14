@@ -80,6 +80,40 @@ test("a wrapped page title keeps ArrowDown, selection, and paste inside the titl
   }
 });
 
+// A page whose body opens with an H1 folds its empty title beside "Add icon".
+// Focus and blur leave it folded, so the + below does not move between the
+// press that blurs the title and the release that clicks the +.
+test("a click on + while the empty folded title has focus adds a property", async () => {
+  const temp = await createTempWorkspace();
+  let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
+
+  try {
+    await writeWorkspaceFiles(temp, [{ path: "plan.md", contents: "# Plan\n\nBody text.\n" }]);
+    desktop = await launchDesktopApp({ workspace: temp });
+    const page = desktop.page;
+    await openWorkspaceFromFirstRun(page, temp);
+
+    await explorerRow(page, "plan.md").click();
+    const title = page.getByTestId("page-title");
+    await expect(title).toHaveAttribute("placeholder", "Add title", { timeout: 20_000 });
+    await expect(page.locator(".dohc-tiptap-editor")).toHaveAttribute("data-collab-state", "disabled");
+    const add = page.getByTestId("property-add");
+    const before = await add.boundingBox();
+
+    await title.click();
+    await expect(title).toBeFocused();
+    await expect(title).toHaveAttribute("placeholder", "Add title");
+    expect(await add.boundingBox()).toEqual(before);
+
+    await add.click();
+    await expect(page.getByTestId("property-row")).toHaveCount(1);
+    await expect(page.getByTestId("property-key")).toBeFocused();
+    await expect(title).toHaveAttribute("placeholder", "Add title");
+  } finally {
+    await cleanupDesktopWorkspace(desktop, temp);
+  }
+});
+
 // Mixed-direction text lays one line out as several boxes. The last line is
 // still the last line.
 test("ArrowDown leaves a mixed-direction title from its last line, and only there", async () => {

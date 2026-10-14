@@ -60,6 +60,7 @@ import { createDatasetHandler } from "./ipc/datasetIpc";
 import { DatasetRequest, DatasetResult } from "@dohc/cli/dataset";
 import { createHash } from "node:crypto";
 import { createDatasetSources, type SourceCreationProgress } from "./workspaces/datasetSourceCreation";
+import { flushDatasetSourceCapture } from "./workspaces/datasetSourceCapture";
 import { createLocalAppLaunchHost, type LocalAppLaunchHost } from "./workspaces/localAppLaunch";
 import { createDesktopAppRuntimeLauncher } from "./workspaces/localAppBackendRuntime";
 import {registerOwnerAppResponsesIpc,createOwnerAppResponsesHandler} from "./ipc/ownerAppResponsesIpc";
@@ -526,6 +527,12 @@ makeProcessDiagnosticsNonFatal();
 
 let usageStore: ReturnType<typeof createUsageStore> | undefined;
 let usageLoad: ReturnType<typeof setImmediate> | undefined;
+// Each window reports it to Notices, with Try again to read the file again.
+function usageRecordStopped(): void {
+  for (const window of BrowserWindow.getAllWindows()) {
+    if (!window.isDestroyed()) window.webContents.send(CHANNELS.usageRecordStopped);
+  }
+}
 const rendererUsage = createRendererUsage<IpcMainInvokeEvent>(invocation => usageStore?.recordSuccess(invocation));
 
 const crashFacts = () => ({
@@ -2873,7 +2880,7 @@ function agentDispatchStoreHandleFor(workspace: {
 // error.
 async function withEngineAdapter<T>(
   workspace: EngineWorkspace,
-  work: (adapter: VersionedLiveAdapter) => Promise<T>,
+  work: (adapter: VersionedLiveAdapter, assertCurrent?: () => void) => Promise<T>,
 ): Promise<T | null> {
   const sessions = desktopEngine.sessions;
   if (!sessions) return null;
@@ -2883,6 +2890,7 @@ async function withEngineAdapter<T>(
         new VersionedLiveAdapter(binding.client, binding.workspace, {
           workspaceId: workspace.workspaceId,
         }),
+        () => sessions.assertCurrentBinding(engineWorkspace, binding),
       ),
     );
   const registered = findWorkspace(workspace.workspaceId);
@@ -5395,7 +5403,8 @@ const appLifecycle = createAppLifecycle<BrowserWindow, WorkspaceSummary, Desktop
       usageLoad = setImmediate(() => {
         usageLoad = undefined;
         try {
-          usageStore = createUsageStore({ stateDir, appVersion: app.getVersion(), coverage: DESKTOP_USAGE_COVERAGE });
+          usageStore = createUsageStore({ stateDir, appVersion: app.getVersion(), coverage: DESKTOP_USAGE_COVERAGE,
+            onStop: usageRecordStopped });
         } catch {
           usageStore = undefined;
           return;
@@ -6085,14 +6094,7 @@ function registerIpcHandlers(): void {
     flushSourceCapture: async (workspace: DesktopRendererWorkspaceOperation["workspace"], signal: AbortSignal) => {
       await openWorkspaceActivity(workspace);
       const captured = await withEngineAdapter(workspace, async adapter => {
-        signal.throwIfAborted();
-        let capture = await adapter.reconcileCapture();
-        for (let attempt = 0; !capture.settled && !capture.degraded && attempt < 8; attempt++) {
-          signal.throwIfAborted();
-          capture = await adapter.flushCapture();
-        }
-        signal.throwIfAborted();
-        if (!capture.settled || !capture.running || capture.degraded) throw new Error("dohc could not capture these Collection files. Reopen the workspace and try again.");
+        await flushDatasetSourceCapture(adapter, signal);
         return true;
       });
       if (!captured) throw new Error("The workspace engine is unavailable. Reopen the workspace.");
@@ -6108,12 +6110,7 @@ function registerIpcHandlers(): void {
         register: () => openWorkspaceActivity(workspace),
         capture: async () => {
           const captured = await withEngineAdapter(workspace, async adapter => {
-            let capture = await adapter.reconcileCapture();
-            for (let attempt = 0; !capture.settled && !capture.degraded && attempt < 8; attempt++) {
-              signal.throwIfAborted();
-              capture = await adapter.flushCapture();
-            }
-            if (!capture.settled || !capture.running || capture.degraded) throw new Error("dohc could not capture the saved files.");
+            await flushDatasetSourceCapture(adapter, signal, Object.keys(files));
             return true;
           });
           if (!captured) throw new Error("The workspace engine is unavailable. Reopen the workspace.");
@@ -6697,7 +6694,7 @@ function registerIpcHandlers(): void {
     remoteForWorkspace, relayShareJsonWithCredentials, normalizeServerUrl, listWorkspaces,
     stateDir, peekedReceivedGrantKinds, syncRendererSharedChannelsForChatTarget,
     assertShareNotHeldElsewhere, reserveAndPullSharedChannelForWorkspace,
-    endWorkspaceJoinedChannel, chatScope, localUserDisplayName, activity, chatDispatchService,
+    endWorkspaceJoinedChannel, chatScope, localUserDisplayName, localInstallationId, activity, chatDispatchService,
   });
 
   registerPresenceIpcHandlers<IpcMainInvokeEvent>({

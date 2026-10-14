@@ -46,7 +46,7 @@ export interface CloudLoginOptions {
 export interface CloudLogin {
   start(serverUrl: string): Promise<{ userCode: string; verificationUri: string }>;
   poll(): Promise<{ status: "pending" | "complete" | "denied" | "expired"; email?: string }>;
-  status(): Promise<{ connected: boolean; email?: string; serverUrl?: string; relayUrl?: string; serverName?: string; networkAccess?: "private" | "public" }>;
+  status(): Promise<{ connected: boolean; email?: string; serverUrl?: string; relayUrl?: string; networkAccess?: "private" | "public" }>;
   logout(): Promise<void>;
   // Atomically clear the saved session only while it still matches the given
   // identity. Runs inside the store's mutation queue, so a login save cannot
@@ -174,7 +174,6 @@ type PendingLogin = {
   epoch: number;
   serverUrl: string;
   relayUrl?: string;
-  serverName?: string;
   networkAccess?: "private" | "public";
   deviceCode: string;
 };
@@ -389,7 +388,6 @@ export function createCloudLogin(options: CloudLoginOptions): CloudLogin {
       const credentials = {
         serverUrl,
         ...(relayUrl ? { relayUrl } : {}),
-        ...(attempt.serverName ? { serverName: attempt.serverName } : {}),
         ...(attempt.networkAccess ? { networkAccess: attempt.networkAccess } : {}),
         email,
         userId,
@@ -465,7 +463,6 @@ export function createCloudLogin(options: CloudLoginOptions): CloudLogin {
         epoch,
         serverUrl: descriptor.authUrl,
         relayUrl: descriptor.relayUrl,
-        ...(descriptor.name ? { serverName: descriptor.name } : {}),
         ...(descriptor.networkAccess ? { networkAccess: descriptor.networkAccess } : {}),
         deviceCode: data.device_code,
       };
@@ -499,7 +496,6 @@ export function createCloudLogin(options: CloudLoginOptions): CloudLogin {
         email: credentials.email,
         serverUrl: credentials.serverUrl,
         ...(credentials.relayUrl ? { relayUrl: credentials.relayUrl } : {}),
-        ...(credentials.serverName ? { serverName: credentials.serverName } : {}),
         ...(credentials.networkAccess ? { networkAccess: credentials.networkAccess } : {}),
       };
     },

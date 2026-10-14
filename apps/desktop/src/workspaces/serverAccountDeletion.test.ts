@@ -5,7 +5,7 @@ import type { CloudCredentials } from "./cloudCredentialStore";
 import { createServerAccountDeletion } from "./serverAccountDeletion";
 
 const credentials: CloudCredentials = {
-  serverUrl: "https://account.example.test", relayUrl: "https://relay.example.test", serverName: "Example",
+  serverUrl: "https://account.example.test", relayUrl: "https://relay.example.test",
   token: "session-token", userId: "member", email: "member@example.test",
 };
 const scope = {

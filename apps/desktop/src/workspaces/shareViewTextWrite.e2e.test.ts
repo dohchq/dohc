@@ -307,6 +307,7 @@ describe("share-view text writes through the real store", () => {
       const view = await harness("dohc-share-text-capture-posture-", "edit");
 
       await expect(flushCapture(view)).resolves.toEqual({
+        heldFiles: [],
         running: false,
         settled: false,
         degraded: true,

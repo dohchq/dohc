@@ -361,7 +361,7 @@ describe("createCaptureLiveStores", () => {
       id: request.id,
       result:
         request.method === WORKSPACE_METHOD.captureFlush
-          ? { settled: true, running: true, degraded: false }
+          ? { settled: true, running: true, degraded: false, heldFiles: [] }
           : { updated: true },
     }));
     const { store } = createCaptureLiveStores(
@@ -393,7 +393,7 @@ describe("createCaptureLiveStores", () => {
       if (request.method === WORKSPACE_METHOD.captureSetAuthor) throw SENTINEL;
       return {
         id: request.id,
-        result: { settled: true, running: true, degraded: false },
+        result: { settled: true, running: true, degraded: false, heldFiles: [] },
       };
     });
     const { store } = createCaptureLiveStores(
@@ -423,9 +423,9 @@ describe("createCaptureLiveStores", () => {
               degraded: false,
               terminal: false,
               phase: "ready",
-              noAtomicPlacement: false, recoveryUnavailable: false, keptFiles: [], captureRecoveries: [],
+              noAtomicPlacement: false, recoveryUnavailable: false, keptFiles: [], captureRecoveries: [], heldFiles: [],
             }
-          : { settled: false, running: true, degraded: true },
+          : { settled: false, running: true, degraded: true, heldFiles: [] },
       };
     });
     const { store } = createCaptureLiveStores(
@@ -463,8 +463,8 @@ describe("createCaptureLiveStores", () => {
         }
         return { id: request.id, result: request.method === WORKSPACE_METHOD.watcherStatus
           ? { running: true, degraded: false, terminal: false, phase: "ready",
-              noAtomicPlacement: false, recoveryUnavailable: false, keptFiles: [], captureRecoveries: [] }
-          : { settled: false, running: true, degraded: false } };
+              noAtomicPlacement: false, recoveryUnavailable: false, keptFiles: [], captureRecoveries: [], heldFiles: [] }
+          : { settled: false, running: true, degraded: false, heldFiles: [] } };
       });
       const { store } = createCaptureLiveStores(
         { workspaceId: WORKSPACE_ID, rootPath: "C:/workspace" }, sessionsFor(client),
@@ -510,7 +510,7 @@ describe("createCaptureLiveStores", () => {
       if (request.method === WORKSPACE_METHOD.captureFlush) {
         started.resolve();
         await reply.promise;
-        return { id: request.id, result: { settled: false, running: true, degraded: false } };
+        return { id: request.id, result: { settled: false, running: true, degraded: false, heldFiles: [] } };
       }
       throw new Error(`Unexpected method: ${request.method}`);
     });
@@ -553,10 +553,10 @@ describe("createCaptureLiveStores", () => {
       requests.push(request);
       if (request.method === WORKSPACE_METHOD.captureFlush) {
         await new Promise<void>(resolve => setTimeout(resolve, 29_990));
-        return { id: request.id, result: { settled: false, running: true, degraded: false } };
+        return { id: request.id, result: { settled: false, running: true, degraded: false, heldFiles: [] } };
       }
       return { id: request.id, result: { running: true, degraded: false, terminal: false, phase: "ready",
-        noAtomicPlacement: false, recoveryUnavailable: false, keptFiles: [], captureRecoveries: [] } };
+        noAtomicPlacement: false, recoveryUnavailable: false, keptFiles: [], captureRecoveries: [], heldFiles: [] } };
     });
     const { store } = createCaptureLiveStores(
       { workspaceId: WORKSPACE_ID, rootPath: "C:/workspace" }, sessionsFor(client),
@@ -591,8 +591,8 @@ describe("createCaptureLiveStores", () => {
       now += durations[requests.length - 1]!;
       return { id: request.id, result: request.method === WORKSPACE_METHOD.watcherStatus
         ? { running: true, degraded: false, terminal: false, phase: "ready",
-            noAtomicPlacement: false, recoveryUnavailable: false, keptFiles: [], captureRecoveries: [] }
-        : { settled: requests.length === 4, running: true, degraded: false } };
+            noAtomicPlacement: false, recoveryUnavailable: false, keptFiles: [], captureRecoveries: [], heldFiles: [] }
+        : { settled: requests.length === 4, running: true, degraded: false, heldFiles: [] } };
     });
     const { store } = createCaptureLiveStores(
       { workspaceId: WORKSPACE_ID, rootPath: "C:/workspace" }, sessionsFor(client),
@@ -614,7 +614,7 @@ describe("createCaptureLiveStores", () => {
     const binding = new Promise<void>(resolve => { bind = resolve; });
     const client = clientFor(async request => {
       requests.push(request);
-      return { id: request.id, result: { settled: true, running: true, degraded: false } };
+      return { id: request.id, result: { settled: true, running: true, degraded: false, heldFiles: [] } };
     });
     const sessions = sessionsFor(client);
     const run = sessions.run.bind(sessions);
@@ -659,7 +659,7 @@ describe("createCaptureLiveStores", () => {
     const requests: Request[] = [];
     const client = clientFor(async request => {
       requests.push(request);
-      return { id: request.id, result: { settled: true, running: true, degraded: false } };
+      return { id: request.id, result: { settled: true, running: true, degraded: false, heldFiles: [] } };
     });
     const { store } = createCaptureLiveStores(
       { workspaceId: WORKSPACE_ID, rootPath: "C:/workspace" }, sessionsFor(client),
@@ -677,7 +677,7 @@ describe("createCaptureLiveStores", () => {
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "performance"] });
     const client = clientFor(async request => {
       vi.spyOn(performance, "now").mockReturnValue(30_001);
-      return { id: request.id, result: { settled: true, running: true, degraded: false } };
+      return { id: request.id, result: { settled: true, running: true, degraded: false, heldFiles: [] } };
     });
     const { store } = createCaptureLiveStores(
       { workspaceId: WORKSPACE_ID, rootPath: "C:/workspace" }, sessionsFor(client),
@@ -695,7 +695,7 @@ describe("createCaptureLiveStores", () => {
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "performance"] });
     const client = clientFor(async request => {
       await new Promise<void>(resolve => setTimeout(resolve, 6_000));
-      return { id: request.id, result: { settled: true, running: true, degraded: false } };
+      return { id: request.id, result: { settled: true, running: true, degraded: false, heldFiles: [] } };
     });
     const { store } = createCaptureLiveStores(
       { workspaceId: WORKSPACE_ID, rootPath: "C:/workspace" }, sessionsFor(client),
@@ -726,10 +726,10 @@ describe("createCaptureLiveStores", () => {
       requests.push(request);
       if (request.method === WORKSPACE_METHOD.watcherStatus) {
         return { id: request.id, result: { running: true, degraded: false, terminal: false, phase: "ready",
-          noAtomicPlacement: false, recoveryUnavailable: false, keptFiles: [], captureRecoveries: [] } };
+          noAtomicPlacement: false, recoveryUnavailable: false, keptFiles: [], captureRecoveries: [], heldFiles: [] } };
       }
       await new Promise<void>(resolve => setTimeout(resolve, 6_000));
-      return { id: request.id, result: { settled: false, running: true, degraded: false } };
+      return { id: request.id, result: { settled: false, running: true, degraded: false, heldFiles: [] } };
     });
     const { store } = createCaptureLiveStores(
       { workspaceId: WORKSPACE_ID, rootPath: "C:/workspace" }, sessionsFor(client),
@@ -762,7 +762,7 @@ describe("createCaptureLiveStores", () => {
     const client = clientFor(async request => {
       entered();
       await pending;
-      return {id: request.id, result: {settled: true, running: true, degraded: false}};
+      return {id: request.id, result: {settled: true, running: true, degraded: false, heldFiles: []}};
     });
     const {store} = createCaptureLiveStores({workspaceId: WORKSPACE_ID, rootPath: "C:/workspace"}, sessionsFor(client), controller.signal);
     const flushing = store.flushCapture!();
@@ -789,10 +789,10 @@ describe("createCaptureLiveStores", () => {
         controller.abort();
         return { id: request.id, result: {
           running: true, degraded: false, terminal: false, phase: "ready",
-          noAtomicPlacement: false, recoveryUnavailable: false, keptFiles: [], captureRecoveries: [],
+          noAtomicPlacement: false, recoveryUnavailable: false, keptFiles: [], captureRecoveries: [], heldFiles: [],
         } };
       }
-      return { id: request.id, result: { settled: false, running: true, degraded: false } };
+      return { id: request.id, result: { settled: false, running: true, degraded: false, heldFiles: [] } };
     });
     const { store } = createCaptureLiveStores(
       { workspaceId: WORKSPACE_ID, rootPath: "C:/workspace" },
@@ -828,9 +828,9 @@ describe("createCaptureLiveStores", () => {
         result: request.method === WORKSPACE_METHOD.watcherStatus
           ? {
               running: true, degraded: false, terminal: false, phase: "ready",
-              noAtomicPlacement: false, recoveryUnavailable: false, keptFiles: [], captureRecoveries: [],
+              noAtomicPlacement: false, recoveryUnavailable: false, keptFiles: [], captureRecoveries: [], heldFiles: [],
             }
-          : { settled: false, running: true, degraded: false },
+          : { settled: false, running: true, degraded: false, heldFiles: [] },
       };
     });
     const { store } = createCaptureLiveStores(
@@ -863,9 +863,9 @@ describe("createCaptureLiveStores", () => {
                 degraded: false,
                 terminal: false,
                 phase: "importing",
-                noAtomicPlacement: false, recoveryUnavailable: false, keptFiles: [], captureRecoveries: [],
+                noAtomicPlacement: false, recoveryUnavailable: false, keptFiles: [], captureRecoveries: [], heldFiles: [],
               }
-            : { settled: false, running: true, degraded: false },
+            : { settled: false, running: true, degraded: false, heldFiles: [] },
       };
     });
     const { store } = createCaptureLiveStores(

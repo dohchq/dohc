@@ -86,7 +86,7 @@ describe("cloud device-flow login", () => {
     }
   });
 
-  it("keeps the discovered server name and network scope in status", async () => {
+  it("keeps the discovered network scope in status, and not the server's name", async () => {
     const { impl } = fakeFetch({
       "/api/auth/device/code": () => ({ body: DEVICE }),
       "/api/auth/device/token": () => ({ body: { access_token: "secret" } }),
@@ -100,7 +100,9 @@ describe("cloud device-flow login", () => {
     });
     await login.start("https://cloud.test");
     await login.poll();
-    await expect(login.status()).resolves.toMatchObject({ connected: true, serverName: "Research server", networkAccess: "private" });
+    const status = await login.status();
+    expect(status).toMatchObject({ connected: true, networkAccess: "private" });
+    expect(status).not.toHaveProperty("serverName");
   });
 
   it.each([

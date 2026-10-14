@@ -8,9 +8,11 @@ const { command, args } = JSON.parse(Buffer.from(payload, "base64").toString("ut
 const env = { ...process.env };
 if (nodeOptions !== null) env.NODE_OPTIONS = nodeOptions;
 const child = spawn(command, args, { env, windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
+// verify.mjs reads this exit code as a command that never started, a machine failure.
+const startFailed = 0xD0C5;
 let spawnFailed = false;
 child.stdout.pipe(process.stdout);
 child.stderr.pipe(process.stderr);
-child.once("error", (error) => { spawnFailed = true; console.error(error.message); process.exitCode = 1; });
+child.once("error", (error) => { spawnFailed = true; console.error(error.message); process.exitCode = startFailed; });
 // Keep the job owner alive until inherited output pipes also close.
 child.once("close", (code) => { if (!spawnFailed) process.exitCode = code ?? 1; });

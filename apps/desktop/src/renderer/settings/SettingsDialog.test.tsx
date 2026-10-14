@@ -1193,18 +1193,21 @@ describe("SettingsDialog", () => {
 
   // Settings holds values. The share lists live in the Sharing view.
   it("keeps share lists out of sync and sharing", async () => {
+    const onConnect = vi.fn();
     render(
       <SettingsDialog
         workspaceId="ws-1"
         workspacePath="/x"
         initialSection="cloud"
+        cloud={{ status: { connected: false }, unreadable: false, onChanged: vi.fn(), onConnect, onError: vi.fn(), onAccountError: vi.fn(), onDeleteAccount: vi.fn() }}
         onOpenSharing={() => {}}
         onClose={() => {}}
       />,
     );
 
     const section = await screen.findByTestId("settings-section-cloud");
-    expect(within(section).getByRole("button", { name: "Open sync and sharing" })).toBeTruthy();
+    await userEvent.setup().click(within(section).getByRole("button", { name: "Connect server" }));
+    expect(onConnect).toHaveBeenCalledOnce();
     expect(section.textContent).not.toContain("Shared by me");
     expect(section.textContent).not.toContain("Shared with me");
     expect(within(section).queryByRole("list")).toBeNull();

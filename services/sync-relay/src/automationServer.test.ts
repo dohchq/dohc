@@ -228,7 +228,7 @@ async function server(storage: SyncRelayStorage, h: Pick<ReturnType<typeof testH
       // Most fake replicas keep no History. A test can provide a real client or override these instance reads.
       if (input.client === undefined) await executors[0]!.options.withEngine(async (engine) => {
         if (!(engine instanceof VersionedLiveAdapter)) throw new Error("Expected the replica adapter");
-        vi.spyOn(engine, "flushCapture").mockResolvedValue({ settled: true, running: false, degraded: false });
+        vi.spyOn(engine, "flushCapture").mockResolvedValue({ settled: true, running: false, degraded: false, heldFiles: [] });
         vi.spyOn(engine, "getActiveVersion").mockImplementation((params) => {
           // Existing write tests supply a prototype implementation.
           return vi.isMockFunction(VersionedLiveAdapter.prototype.getActiveVersion)

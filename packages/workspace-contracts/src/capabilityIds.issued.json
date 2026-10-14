@@ -144,6 +144,8 @@
   "document.typing.recovery",
   "app.recognition.read",
   "device.motion.read",
+  "usage.start",
+  "usage.restore",
   "account.delete.preview",
   "account.delete"
 ]

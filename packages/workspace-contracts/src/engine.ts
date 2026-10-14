@@ -467,7 +467,7 @@ interface VersionedTextMomentPayload {
 interface VersionedTextWriteResult {
   deduped?: boolean;
   materialized?: boolean;
-  materializeOutcome?: "applied" | "skipped" | "conflict" | "superseded" | "error";
+  materializeOutcome?: "applied" | "skipped" | "parked" | "conflict" | "superseded" | "error";
   object: FileObjectRecord;
   snapshot: TextFileSnapshot;
   moment: VersionedTextMoment;
@@ -833,6 +833,8 @@ export interface ChatMessage {
   // display name.
   authorOwnerDisplayName?: string;
   authorUserId?: string;
+  // Serialized by this device at trusted admission. Never replicated or projected into a share.
+  authorActorKey?: string;
   parentMessageId?: ChatMessageId;
   origin?: "cli";
   body: string;
@@ -1039,6 +1041,8 @@ export interface LinkedChatStore {
     // it for relay verification. Omit for solo (byte-identical to today).
     authorOwnerDisplayName?: string;
     authorUserId?: string;
+    // Local admission metadata, separate from the immutable replicated payload.
+    authorActorKey: string | null;
     origin?: "cli";
     body: string;
     needsDecision?: boolean;
@@ -1090,6 +1094,8 @@ export interface LinkedChatStore {
     // it for relay verification. Omit for solo (byte-identical to today).
     authorOwnerDisplayName?: string;
     authorUserId?: string;
+    // Local admission metadata, separate from the immutable replicated payload.
+    authorActorKey: string | null;
     parentMessageId?: ChatMessageId;
     origin?: "cli";
     body: string;

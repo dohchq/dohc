@@ -1,13 +1,14 @@
-import { EyeOff, HardDrive, Shield, TriangleAlert } from "lucide-react";
+import { Archive, EyeOff, HardDrive, Shield, TriangleAlert } from "lucide-react";
 import { useCallback, useEffect, useId, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import type { UsageRecordResult, UsageRecordRow } from "../../ipc/bridgeContract";
+import { INVALID_USAGE_RECORD, type UsageRecordResult, type UsageRecordRow } from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
 import { withErrorWords } from "../../ipc/errorWords";
 import { ConfirmDialog, ConfirmDialogCard } from "../ui/ConfirmDialog";
 import { CopyButton } from "../ui/CopyButton";
 import { EmptyState, SecondaryButton } from "../ui/controls";
 import { SkeletonRows } from "../ui/SkeletonRows";
+import { unreadableNotice, unreadableWords } from "../shell/usageRecordStops";
 import { SwitchControl } from "./SettingRow";
 
 // The usage record: counts dohc keeps on this computer and never sends. It is
@@ -24,8 +25,11 @@ const DOORS: readonly { door: Door; name: string }[] = [
 ];
 export const NOT_COUNTED = "Not counted by this version";
 const SWITCH_LABEL = "Keep a usage record";
-const UNREADABLE_HINT = "dohc leaves the file as it is and counts nothing. Restart dohc to try again.";
-const unreadableWords = (code: string) => `dohc could not read the usage record (${code}).`;
+// What to do next. A file dohc cannot decode can be set aside; one it cannot
+// open needs the person to fix it.
+const unreadableHint = (code: string) => code === INVALID_USAGE_RECORD
+  ? "This version of dohc does not recognize its contents. Start a new record, and dohc keeps this file in the same folder."
+  : "Fix the file or its permissions at the path below, then try again.";
 
 function total(row: UsageRecordRow): number {
   return DOORS.reduce((sum, { door }) => sum + row.doors[door].count, 0);
@@ -146,12 +150,16 @@ export function UsageRecordCard(props: {
   onSwitch(enabled: boolean): void;
   onClear(): void;
   onRetry(): void;
+  onStart(): void;
+  onRestore(): void;
 }) {
   const { view } = props;
   const titleId = useId();
   const readable = view.status === "readable" ? view : null;
   const used = readable ? readable.rows.some((row) => total(row) > 0) : false;
-  const clear = (
+  // Off with nothing saved has nothing to keep or clear; the empty state says so.
+  const keptOff = readable && !readable.enabled && used;
+  const clear = used && (
     <SecondaryButton size="row" data-testid="usage-record-clear" disabled={props.busy} aria-disabled={props.busy}
       onClick={props.onClear}>
       Clear
@@ -167,7 +175,7 @@ export function UsageRecordCard(props: {
           <span className="font-mono text-[11px] text-subtle">since {dayWords(readable.since, props.today)}</span>
         ) : null}
         <span className="ml-auto flex items-center gap-2">
-          {readable && !readable.enabled ? clear : null}
+          {keptOff ? clear : null}
           {readable ? (
             <SwitchControl label={SWITCH_LABEL} checked={readable.enabled} disabled={props.busy} onChange={props.onSwitch} />
           ) : (
@@ -175,7 +183,7 @@ export function UsageRecordCard(props: {
           )}
         </span>
       </header>
-      {readable && !readable.enabled ? (
+      {keptOff ? (
         <p data-testid="usage-record-off" className="m-0 border-b border-line bg-panel-2 px-4 py-2 text-[12px] text-muted">
           Off. dohc keeps the saved counts and adds none. Clear removes them.
         </p>
@@ -191,7 +199,16 @@ export function UsageRecordCard(props: {
       ) : view.status === "unreadable" ? (
         <div className="py-6">
           <EmptyState icon={TriangleAlert} tone="danger" data-testid="usage-record-unreadable"
-            title={unreadableWords(view.code)} hint={UNREADABLE_HINT} />
+            title={unreadableWords(view.code)} hint={unreadableHint(view.code)}>
+            {view.code === INVALID_USAGE_RECORD ? (
+              <SecondaryButton size="row" data-testid="usage-record-start" disabled={props.busy} aria-disabled={props.busy}
+                onClick={props.onStart}>
+                Start a new record
+              </SecondaryButton>
+            ) : (
+              <SecondaryButton size="row" data-testid="usage-record-retry" onClick={props.onRetry}>Try again</SecondaryButton>
+            )}
+          </EmptyState>
         </div>
       ) : used ? (
         <Table rows={view.rows} today={props.today} />
@@ -229,9 +246,30 @@ export function UsageRecordCard(props: {
           ) : null}
         </footer>
       ) : null}
+      {(view.status === "readable" || view.status === "unreadable") && view.setAside ? (
+        <SetAsideRow name={view.setAside} busy={props.busy} onRestore={props.onRestore} />
+      ) : null}
     </section>
   );
 }
+
+// The record set aside last, in the record's folder. Restore swaps it back.
+function SetAsideRow(props: { name: string; busy?: boolean | undefined; onRestore(): void }) {
+  return (
+    <div data-testid="usage-record-set-aside" role="group" aria-label="Usage record set aside"
+      className="flex items-center gap-1.5 border-t border-line px-4 py-2.5 text-[12px] text-muted">
+      <Archive size={12} aria-hidden className="shrink-0 text-subtle" />
+      <code title={props.name} className="min-w-0 select-text truncate font-mono text-[11px] text-ink">{props.name}</code>
+      <CopyButton iconOnly label="Copy the file name" testId="usage-record-set-aside-copy" getText={() => props.name} />
+      <SecondaryButton size="row" data-testid="usage-record-restore" className="ml-auto" disabled={props.busy}
+        aria-disabled={props.busy} onClick={props.onRestore}>
+        Restore
+      </SecondaryButton>
+    </div>
+  );
+}
+
+type ReportFailure = (message: string, cause?: unknown, retry?: () => Promise<void>) => void;
 
 /** Clear's confirm. It offers Copy first, because Clear cannot be undone. */
 export function UsageRecordClearConfirm(props: { record: Readable; card?: boolean; onCancel(): void; onConfirm(): void }) {
@@ -252,8 +290,9 @@ export function UsageRecordClearConfirm(props: { record: Readable; card?: boolea
 
 /** Privacy's usage record. It reads once when Privacy opens and after each
  * change, and never polls. A read that answers after Privacy closed, or after
- * a newer read started, is dropped. */
-export function UsageRecordSettings(props: { onError?: ((message: string, cause?: unknown) => void) | undefined }) {
+ * a newer read started, is dropped, unless Try again in Notices asked for it
+ * after Privacy closed. */
+export function UsageRecordSettings(props: { onError?: ReportFailure | undefined }) {
   const [view, setView] = useState<UsageRecordView>({ status: "loading" });
   const [busy, setBusy] = useState(false);
   const [confirming, setConfirming] = useState(false);
@@ -262,19 +301,19 @@ export function UsageRecordSettings(props: { onError?: ((message: string, cause?
   const onError = useRef(props.onError);
   onError.current = props.onError;
 
-  const read = useCallback(async () => {
+  const read = useCallback(async function read(fromNotices = false): Promise<void> {
     const attempt = ++reads.current;
     const current = () => live.current && attempt === reads.current;
+    const owed = () => current() || fromNotices && !live.current;
+    const retry = () => read(true);
     try {
       const result = await bridge().readUsageRecord({});
-      if (!current()) return;
-      setView(result);
+      if (current()) setView(result);
       // The card keeps the record safe from writes; Notices keeps the problem.
-      if (result.status === "unreadable") onError.current?.(`${unreadableWords(result.code)} ${UNREADABLE_HINT}`);
+      if (result.status === "unreadable" && owed()) onError.current?.(unreadableNotice(result.code), undefined, retry);
     } catch (cause) {
-      if (!current()) return;
-      setView({ status: "failed" });
-      onError.current?.(withErrorWords("dohc could not open the usage record.", cause), cause);
+      if (current()) setView({ status: "failed" });
+      if (owed()) onError.current?.(withErrorWords("dohc could not open the usage record.", cause), cause, retry);
     }
   }, []);
 
@@ -286,13 +325,16 @@ export function UsageRecordSettings(props: { onError?: ((message: string, cause?
     };
   }, [read]);
 
-  const change = async (run: () => Promise<void>, failure: string) => {
+  // `retryable` offers Try again in Notices. Clear never does: it confirms first.
+  const change = async (run: () => Promise<void>, failure: string, retryable = false): Promise<void> => {
     setBusy(true);
     try {
       await run();
     } catch (cause) {
       // Reported even after Privacy closed: the shell keeps it in Notices.
-      onError.current?.(withErrorWords(failure, cause), cause);
+      const words = withErrorWords(failure, cause);
+      if (retryable) onError.current?.(words, cause, () => change(run, failure, true));
+      else onError.current?.(words, cause);
     }
     // Read after a failure too, so the card shows what main kept.
     await read();
@@ -314,6 +356,8 @@ export function UsageRecordSettings(props: { onError?: ((message: string, cause?
           setView({ status: "loading" });
           void read();
         }}
+        onStart={() => void change(() => bridge().startUsageRecord({}), "dohc could not start a new usage record.", true)}
+        onRestore={() => void change(() => bridge().restoreUsageRecord({}), "dohc could not restore the usage record set aside.", true)}
       />
       {confirming && view.status === "readable"
         ? createPortal(

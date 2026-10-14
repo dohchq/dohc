@@ -1,13 +1,15 @@
 import type { AccessAnswer, AccessShareRow } from "@dohc/workspace-contracts/access";
 import { FILE_KIND_RECORDS, type FileDisplayKind } from "@dohc/workspace-contracts/kinds";
+import { SAVED_HERE, SAVING, saveProblem, type SaveState } from "@dohc/workspace-contracts/save-state";
 import { AlertTriangle, Bot, CheckCircle2, Globe2, MessageSquare, MoreHorizontal, SearchX } from "lucide-react";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import type { ReactNode } from "react";
+import type { ComponentProps, ReactNode } from "react";
 import type {
   ChannelThreadRecord,
   ChatChannelRecord,
   ChatMessageRecord,
   ChatThreadRecord,
+  CloudStatusResult,
   EngineMomentRecord,
   HistoryPolicyUnreadableResult,
   SitePackageInfo,
@@ -16,14 +18,20 @@ import type {
   UsageRecordRow,
 } from "../../ipc/bridgeContract";
 import { readError, withErrorWords } from "../../ipc/errorWords";
+import { CsvViewActions } from "../CsvView";
 import { DocumentMenu } from "../DocumentMenu";
 import { FrontmatterAsWritten } from "../FrontmatterAsWritten";
+import { PageIdentity } from "../PageIdentity";
+import { PropertiesPanel } from "../PropertiesPanel";
+import { TextViewActions } from "../TextEditorView";
 import { DocumentControls, OPENING_TITLE, OpeningState, ViewActions } from "../fileInspectorUi";
 import { BlockMenu } from "../editor/blockControls";
+import { UrlPasteOfferRow } from "../editor/UrlPasteOffer";
 import { SlashCommandMenu, type SlashCommandState } from "../editor/slashCommands";
 import { buildTableMenu, type TableMenuRow } from "../editor/tableControls";
 import { OverlayFrame } from "../Overlay";
 import { CollectionUnavailable } from "../TransactionalCollectionPage";
+import { CloudSyncSettings, ProtectedFilesRow, type CloudSettings } from "../settings/CloudSyncSettings";
 import { ColorControl, HueControl, SettingRow, StepperControl, SwitchControl, TextControl, ThemeControl } from "../settings/SettingRow";
 import { PreferredNameControl } from "../settings/PreferredNameControl";
 import { SettingsNav } from "../settings/SettingsNav";
@@ -193,10 +201,29 @@ function EditorGroupSpecimen(props: { groupId: string; groupNumber: number; tabs
   );
 }
 
+// A URL pasted on its own line, on a strip of paper, with the offer's row
+// where the editor floats it: under the line. A pasted URL is already a link,
+// so Link is pressed before a choice. Only Plain text changes it: the URL is
+// then plain text and the row offers Undo.
+function UrlOfferSpecimen(props: { force?: string; chosen?: boolean }) {
+  return (
+    <div className="w-[420px] rounded-lg border border-line bg-bg px-4 pb-10 pt-3 text-[15px] text-ink">
+      <p className={`m-0 ${props.chosen ? "" : "underline"}`}>https://example.com/trip/itinerary</p>
+      <div
+        className="mt-1"
+        data-force-state={props.force ? "focus-visible" : undefined}
+        data-force-target={props.force ? `[data-testid="${props.force}"]` : undefined}
+      >
+        <UrlPasteOfferRow form={props.chosen ? "plain" : "link"} chosen={props.chosen ?? false} />
+      </div>
+    </div>
+  );
+}
+
 // One group's tab row carrying an open document's actions, as the shell lays
 // it out, over a strip of paper.
-function TabRowActionsSpecimen(props: { width: string; testId?: string; children: ReactNode }) {
-  const path = "trip/plan.md";
+function TabRowActionsSpecimen(props: { width: string; testId?: string; path?: string; children: ReactNode }) {
+  const path = props.path ?? "trip/plan.md";
   return (
     <div data-testid={props.testId} className={`${props.width} rounded-lg border border-line`}>
       <EditorGroupFrame
@@ -221,6 +248,49 @@ function TabRowActionsSpecimen(props: { width: string; testId?: string; children
         {props.children}
         <div className="h-4 rounded-b-lg bg-bg" />
       </EditorGroupFrame>
+    </div>
+  );
+}
+
+// Two groups side by side, each with one file open and that file's actions
+// in its own tab row.
+function FileViewSplitSpecimen(props: { left: { path: string; actions: ReactNode }; right: { path: string; actions: ReactNode } }) {
+  const group = (id: string, groupNumber: number, file: { path: string; actions: ReactNode }) => ({
+    id,
+    size: 1,
+    content: (
+      <EditorGroupFrame
+        tabs={(actionsRef) => (
+          <EditorTabs
+            actionsRef={actionsRef}
+            groupId={id}
+            groupNumber={groupNumber}
+            tabs={[{ path: file.path }]}
+            activeTab={file.path}
+            activeTabDirty={false}
+            recoveryPaths={NO_RECOVERY}
+            onActivate={noop}
+            onClose={noop}
+            onContextMenu={noop}
+            onMove={noop}
+            onMoveToGroup={noop}
+            onCreateGroupRight={noop}
+          />
+        )}
+      >
+        {file.actions}
+        <div className="h-4 bg-bg" />
+      </EditorGroupFrame>
+    ),
+  });
+  return (
+    <div className="flex w-full overflow-hidden rounded-lg border border-line">
+      <EditorGroupLayout
+        groups={[group("left", 1, props.left), group("right", 2, props.right)]}
+        activeGroupId="left"
+        onFocusGroup={noop}
+        onResizeGroups={noop}
+      />
     </div>
   );
 }
@@ -276,6 +346,7 @@ const treeRowCallbacks = {
 function Row(props: {
   name: string;
   folder?: boolean;
+  app?: boolean;
   selected?: boolean;
   active?: boolean;
   drop?: boolean;
@@ -284,8 +355,9 @@ function Row(props: {
   return (
     <div data-force-state={props.force} data-force-target="button">
       <TreeRow
-        row={treeRow(props.name, props.folder)}
+        row={treeRow(props.name, props.folder || props.app)}
         collection={false}
+        app={props.app ?? false}
         selected={props.selected ?? false}
         active={props.active ?? false}
         tabbable={false}
@@ -325,6 +397,7 @@ function KindRows(props: { label: string; selected: boolean }) {
             kind: kind.displayKind === "database" ? "database" : "file",
           }}
           collection={false}
+          app={false}
           selected={props.selected}
           active={false}
           tabbable={false}
@@ -879,6 +952,36 @@ function AsWrittenSpecimen(props: { name: string }) {
   return (
     <div className="w-[420px] rounded-lg border border-line bg-bg">
       <FrontmatterAsWritten markdown={`---\n# Monthly\n${props.name}: 100 # euros\n---\n\nBody`} propertiesShown />
+    </div>
+  );
+}
+
+// A page's top matter on paper, at the editor's font size, as a document
+// pane holds it. The pane is the hover zone that shows a lone +.
+function TopmatterSpecimen(props: { children: ReactNode }) {
+  return (
+    <div className="group/topmatter w-[560px] rounded-lg border border-line bg-bg pb-5 text-[length:var(--dohc-editor-font-size)]">
+      {props.children}
+    </div>
+  );
+}
+
+const PILLS = "---\nowner: Sam\nrelease: September launch\nstatus: In progress\n---\n";
+const LONG_PILL = "---\nowner: Sam\nbrief: https://example.com/plans/2026/q3/product-plan-with-every-goal-and-owner\n---\n";
+
+// A reserved name shows only while a person types it, so the specimen types
+// it into the second pill's name once, as a keystroke would.
+function ReservedPillSpecimen() {
+  const pills = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const name = pills.current?.querySelectorAll<HTMLInputElement>('[data-testid="property-key"]')[1];
+    if (!name) return;
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set?.call(name, "title");
+    name.dispatchEvent(new Event("input", { bubbles: true }));
+  }, []);
+  return (
+    <div ref={pills}>
+      <PropertiesPanel body={PILLS} onChange={noop} />
     </div>
   );
 }
@@ -1666,8 +1769,14 @@ function Pane(props: { theme: "light" | "dark" }) {
         <Specimen label="nothing counted yet">
           <UsageRecordSpecimen view={{ ...USAGE_RECORD, since: USAGE_TODAY, rows: [] }} />
         </Specimen>
-        <Specimen label="a record dohc cannot read">
-          <UsageRecordSpecimen view={{ status: "unreadable", file: USAGE_RECORD.file, code: "EACCES" }} />
+        <Specimen label="a record dohc cannot open, with Try again">
+          <UsageRecordSpecimen view={{ status: "unreadable", file: USAGE_RECORD.file, code: "EACCES", setAside: null }} />
+        </Specimen>
+        <Specimen label="a record dohc cannot decode, with Start a new record">
+          <UsageRecordSpecimen view={{ status: "unreadable", file: USAGE_RECORD.file, code: "INVALID_USAGE_RECORD", setAside: null }} />
+        </Specimen>
+        <Specimen label="a new record, Off, with the old one set aside">
+          <UsageRecordSpecimen view={{ ...USAGE_RECORD, enabled: false, since: USAGE_TODAY, rows: [], setAside: "dohc-usage.set-aside-1.json" }} />
         </Specimen>
         <Specimen label="loading, then a failed read: words in Notices">
           <div className="flex flex-col gap-3">
@@ -1917,9 +2026,247 @@ function Pane(props: { theme: "light" | "dark" }) {
           </AboutPanelSpecimen>
         </Specimen>
       </Section>
+
+      {/* Last, so the parts above keep their places. A CSV and a text file
+          draw their save state, Share and controls in the tab row, as a
+          document does: a calm save state says so only to screen readers. */}
+      <Section part="file-view-actions" title="File view actions" menusAtRest>
+        {FILE_VIEW_CSV_STATES.map((specimen) => (
+          <Specimen key={specimen.label} label={`CSV ${specimen.label}`} className="w-full">
+            <TabRowActionsSpecimen width="w-full" path="data/funnel.csv">
+              <CsvViewActions onShare={noop} onModeChange={noop} onImport={noop} {...specimen.view} />
+            </TabRowActionsSpecimen>
+          </Specimen>
+        ))}
+        {FILE_VIEW_TEXT_STATES.map((specimen) => (
+          <Specimen key={specimen.label} label={`text ${specimen.label}`} className="w-full">
+            <TabRowActionsSpecimen width="w-full" path="src/useFunnel.ts">
+              <TextViewActions testId="view-text" onShare={noop} saveState={specimen.saveState} />
+            </TabRowActionsSpecimen>
+          </Specimen>
+        ))}
+        <Specimen label="split: text failed beside a CSV in Raw" className="w-full">
+          <FileViewSplitSpecimen
+            left={{ path: "src/useFunnel.ts", actions: <TextViewActions testId="view-text" onShare={noop} saveState={FILE_VIEW_FAILED} /> }}
+            right={{
+              path: "data/funnel.csv",
+              actions: <CsvViewActions onShare={noop} onModeChange={noop} onImport={noop} saveState={SAVED_HERE} mode="raw" />,
+            }}
+          />
+        </Specimen>
+      </Section>
+
+      {/* Last, so the parts above keep their places. Offers sit in space
+          already there: a folder row's glyph, the tab row's end, and a row
+          floating under a pasted line. */}
+      <Section part="offers" title="Offers" menusAtRest>
+        <Specimen label="an app folder in Files: at rest, selected, focused">
+          <ul role="tree" aria-label="App folders" className="m-0 w-64 list-none rounded-lg border border-line bg-panel py-1">
+            <Row name="trip-planner" app />
+            <Row name="signup" app selected />
+            <Row name="dashboard" app force="focus-visible" />
+          </ul>
+        </Specimen>
+        <Specimen label="Run in the tab row of an app's entry file" className="w-full">
+          <TabRowActionsSpecimen width="w-full" path="trip-planner/index.html">
+            <ViewActions onShare={noop} onRun={noop} />
+          </TabRowActionsSpecimen>
+        </Specimen>
+        <Specimen label="a URL pasted on its own line, Link pressed: Link focused, Plain text focused, then Undo after Plain text">
+          <div className="flex flex-col gap-3">
+            {(["link", "plain"] as const).map((focused) => (
+              <UrlOfferSpecimen key={focused} force={focused === "link" ? "url-paste-link" : "url-paste-plain"} />
+            ))}
+            <UrlOfferSpecimen chosen />
+          </div>
+        </Specimen>
+      </Section>
+
+      {/* Last, so the parts above keep their places. The body's H1 is the
+          editor's, so the folded specimens show the row above it alone. */}
+      <Section part="page-identity" title="Page identity">
+        <Specimen label="an H1 opens the body: the title folds, at rest">
+          <TopmatterSpecimen>
+            <PageIdentity body={"# Q3 product plan\n"} onChange={noop} filenameStem="product-plan" />
+          </TopmatterSpecimen>
+        </Specimen>
+        <Specimen label="folded, hovered: Add icon and Add title">
+          <TopmatterSpecimen>
+            <div data-force-state="hover" data-force-target={`[data-testid="page-identity"]`}>
+              <PageIdentity body={"# Q3 product plan\n"} onChange={noop} filenameStem="product-plan" />
+            </div>
+          </TopmatterSpecimen>
+        </Specimen>
+        <Specimen label="folded, focused: Add icon and Add title in place, so nothing below moves">
+          <TopmatterSpecimen>
+            <div data-force-state="focus-within" data-force-target={`[data-testid="page-identity"]`}>
+              <div data-force-state="focus" data-force-target={`[data-testid="page-title"]`}>
+                <PageIdentity body={"# Q3 product plan\n"} onChange={noop} filenameStem="product-plan" />
+              </div>
+            </div>
+          </TopmatterSpecimen>
+        </Specimen>
+        <Specimen label="a title property">
+          <TopmatterSpecimen>
+            <PageIdentity body={"---\ntitle: Q3 product plan\n---\n\n# Goals\n"} onChange={noop} filenameStem="product-plan" />
+          </TopmatterSpecimen>
+        </Specimen>
+        <Specimen label="no H1: the file name in place of a title">
+          <TopmatterSpecimen>
+            <PageIdentity body={"Q3 notes\n"} onChange={noop} filenameStem="product-plan" />
+          </TopmatterSpecimen>
+        </Specimen>
+        <Specimen label="pills at rest">
+          <TopmatterSpecimen>
+            <PropertiesPanel body={PILLS} onChange={noop} />
+          </TopmatterSpecimen>
+        </Specimen>
+        <Specimen label="pill hovered: its ×">
+          <TopmatterSpecimen>
+            <div data-force-state="hover" data-force-target={`[data-testid="property-row"]`}>
+              <PropertiesPanel body={PILLS} onChange={noop} />
+            </div>
+          </TopmatterSpecimen>
+        </Specimen>
+        <Specimen label="pill focused: its value, and its ×">
+          <TopmatterSpecimen>
+            <div data-force-state="focus-within" data-force-target={`[data-testid="property-row"]`}>
+              <div data-force-state="focus" data-force-target={`[data-testid="property-value"]`}>
+                <PropertiesPanel body={PILLS} onChange={noop} />
+              </div>
+            </div>
+          </TopmatterSpecimen>
+        </Specimen>
+        <Specimen label="a long value: an ellipsis, all of it in the tooltip">
+          <TopmatterSpecimen>
+            <PropertiesPanel body={LONG_PILL} onChange={noop} />
+          </TopmatterSpecimen>
+        </Specimen>
+        <Specimen label="reserved name, typed">
+          <TopmatterSpecimen>
+            <ReservedPillSpecimen />
+          </TopmatterSpecimen>
+        </Specimen>
+        <Specimen label="duplicate name">
+          <TopmatterSpecimen>
+            <PropertiesPanel body={"---\nowner: Sam\nOwner: Ada\n---\n"} onChange={noop} />
+          </TopmatterSpecimen>
+        </Specimen>
+        <Specimen label="locked: the block must be edited as text">
+          <TopmatterSpecimen>
+            {/* Written on one line, the block cannot change one property
+                without rewriting the others. */}
+            <PropertiesPanel body={"---\n{owner: Sam, status: Draft}\n---\n"} onChange={noop} />
+          </TopmatterSpecimen>
+        </Specimen>
+        <Specimen label="set by an automation">
+          <TopmatterSpecimen>
+            <PropertiesPanel body={PILLS} onChange={noop} fieldMarks={new Map([["status", ["Stamp the status"]]])} />
+          </TopmatterSpecimen>
+        </Specimen>
+        <Specimen label="+ keyboard focus">
+          <TopmatterSpecimen>
+            <div data-force-state="focus-visible" data-force-target={`[data-testid="property-add"]`}>
+              <PropertiesPanel body={PILLS} onChange={noop} />
+            </div>
+          </TopmatterSpecimen>
+        </Specimen>
+        <Specimen label="the + alone, the pointer over the page's top">
+          <div data-force-state="hover" data-force-target=".group\/topmatter">
+            <TopmatterSpecimen>
+              <PropertiesPanel body={"Q3 notes\n"} onChange={noop} />
+            </TopmatterSpecimen>
+          </div>
+        </Specimen>
+      </Section>
+
+      {/* Last, so the parts above keep their places. */}
+      <Section part="settings-sync" title="Settings: Sync and sharing">
+        <Specimen label="signed in, syncing, on a private server; keyboard focus on Disconnect">
+          <div className="w-[640px]" data-force-state="focus focus-visible" data-force-target='[data-testid="cloud-disconnect"]'>
+            <CloudSyncSettings workspaceId="ws-trip" cloud={settingsCloud({ ...CLOUD_SIGNED_IN, networkAccess: "private", workspaceSynced: true, workspaceSyncConnected: true })} />
+          </div>
+        </Specimen>
+        <Specimen label="signed in, not syncing">
+          <div className="w-[640px]">
+            <CloudSyncSettings workspaceId="ws-trip" cloud={settingsCloud(CLOUD_SIGNED_IN)} />
+          </div>
+        </Specimen>
+        <Specimen label="sync paused: dohc could not confirm this workspace's account, with Try again">
+          <div className="w-[640px]">
+            <CloudSyncSettings workspaceId="ws-trip" cloud={settingsCloud({ ...CLOUD_SIGNED_IN, workspaceSynced: true })} />
+          </div>
+        </Specimen>
+        <Specimen label="protected files: the passphrase field and its error">
+          <div className="w-[640px]">
+            <ProtectedFilesRow
+              secretState="protected-key-present"
+              purpose="protect"
+              passphrase="1234567"
+              error="Enter at least 8 characters to protect synced secrets."
+              busy={false}
+              onStart={noop}
+              onPassphrase={noop}
+              onSubmit={noop}
+            />
+          </div>
+        </Specimen>
+        <Specimen label="a shared view: the account, no switch">
+          <div className="w-[640px]">
+            <CloudSyncSettings workspaceId="ws-trip" sharedView cloud={settingsCloud(CLOUD_SIGNED_IN)} />
+          </div>
+        </Specimen>
+        <Specimen label="signed out">
+          <div className="w-[640px]">
+            <CloudSyncSettings workspaceId="ws-trip" cloud={settingsCloud({ connected: false })} />
+          </div>
+        </Specimen>
+        <Specimen label="the status still loading">
+          <div className="w-[640px]">
+            <CloudSyncSettings workspaceId="ws-trip" cloud={settingsCloud(null)} />
+          </div>
+        </Specimen>
+        <Specimen label="the status unreadable">
+          <div className="w-[640px]">
+            <CloudSyncSettings workspaceId="ws-trip" cloud={{ ...settingsCloud(null), unreadable: true }} />
+          </div>
+        </Specimen>
+      </Section>
     </section>
   );
 }
+
+const FILE_VIEW_FAILED = saveProblem("error", "dohc couldn't write the file.");
+
+const FILE_VIEW_CSV_STATES: {
+  label: string;
+  view: Pick<ComponentProps<typeof CsvViewActions>, "saveState" | "mode" | "readOnly" | "truncated" | "importing">;
+}[] = [
+  { label: "saved, as a table", view: { saveState: SAVED_HERE, mode: "table" } },
+  { label: "saving", view: { saveState: SAVING, mode: "table" } },
+  { label: "failed", view: { saveState: FILE_VIEW_FAILED, mode: "table" } },
+  { label: "read-only", view: { saveState: SAVED_HERE, mode: "table", readOnly: true } },
+  { label: "too large", view: { saveState: SAVED_HERE, mode: "table", truncated: true } },
+  { label: "raw", view: { saveState: SAVED_HERE, mode: "raw" } },
+  { label: "importing", view: { saveState: SAVED_HERE, mode: "table", importing: true } },
+];
+
+const FILE_VIEW_TEXT_STATES: { label: string; saveState: SaveState }[] = [
+  { label: "saved", saveState: SAVED_HERE },
+  { label: "failed", saveState: FILE_VIEW_FAILED },
+];
+
+const CLOUD_SIGNED_IN: CloudStatusResult = {
+  connected: true,
+  email: "sam@hollis.studio",
+  serverUrl: "https://dohc.hollis.studio",
+  relayUrl: "https://relay.hollis.studio",
+  workspaceSynced: false,
+  workspaceSyncConnected: false,
+};
+const settingsCloud = (status: CloudStatusResult | null): CloudSettings => ({
+  status, unreadable: false, onChanged: noop, onConnect: noop, onError: noop, onAccountError: noop, onDeleteAccount: noop,
+});
 
 const SETTINGS_WORKSPACE = "C:\\Users\\ada\\Documents\\trip";
 const EDITOR_FONT_OPTIONS = [
@@ -1958,13 +2305,15 @@ const USAGE_RECORD: Extract<UsageRecordResult, { status: "readable" }> = {
     usageRow("chat.post", "Post a chat message", { cli: usageCell(0), mcp: usageCell(0) }),
     usageRow("chat.export", "Export a chat", {}),
   ],
+  setAside: null,
 };
 
 // Privacy's width for the card.
 function UsageRecordSpecimen(props: { view: UsageRecordView }) {
   return (
     <div className="w-[560px] [&>section]:mt-0">
-      <UsageRecordCard view={props.view} today={USAGE_TODAY} onSwitch={noop} onClear={noop} onRetry={noop} />
+      <UsageRecordCard view={props.view} today={USAGE_TODAY} onSwitch={noop} onClear={noop} onRetry={noop}
+        onStart={noop} onRestore={noop} />
     </div>
   );
 }

@@ -30,9 +30,6 @@ export interface ConnectionErrorReport {
 // reopens the surface to retry.
 export interface ConnectionNoticeHost {
   onConnectionError?: (error: ConnectionErrorReport) => void;
-  // A finished change to the connection, such as a deleted account. Warning
-  // when the server has not finished it yet.
-  onConnectionNotice?: (notice: { message: string; tone: "success" | "warning" }) => void;
   initialServerUrl?: string;
 }
 
@@ -52,7 +49,6 @@ export function useConnectionNotices() {
     reportShellFailure,
     reportShellError,
     showSuccessNotice,
-    showWarningNotice,
     retryShellError,
     hideShellError,
     dismissShellError,
@@ -101,7 +97,6 @@ export function useConnectionNotices() {
     reportError: reportShellError,
     reportFailure: reportShellFailure,
     showSuccess: showSuccessNotice,
-    showWarning: showWarningNotice,
     notices,
     retryNotice: retryShellError,
     hideNotice: hideShellError,

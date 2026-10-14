@@ -299,6 +299,7 @@ export function registerSharedChannelsIpcHandlers<
     shareId: string;
     recipientUserId: string;
     relayUrl: string;
+    serverUrl: string;
     preWrite?: (info: SharedChannelInfo) => void;
   }): Promise<JoinedSharedChannel> {
     const workspace = input.operation.workspace;
@@ -310,6 +311,7 @@ export function registerSharedChannelsIpcHandlers<
       rootPath: workspace.rootPath,
       recipientUserId: input.recipientUserId,
       relayUrl: input.relayUrl,
+      serverUrl: input.serverUrl,
       preWrite: input.preWrite,
       updateSharedChannels: async (workspaceId, update) => {
         if (workspaceId !== workspace.workspaceId) {
@@ -556,6 +558,7 @@ export function registerSharedChannelsIpcHandlers<
             shareId: input.shareId,
             recipientUserId: joinedRecipientUserId,
             relayUrl: joinedRelayUrl,
+            serverUrl: joinCredentials.serverUrl,
             preWrite: (info) => {
               grant.info = info;
             },

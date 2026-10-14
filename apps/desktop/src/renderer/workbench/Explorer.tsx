@@ -1,7 +1,7 @@
 import { FILE_KIND_RECORDS, fileKindForPath, type FileKindRecord } from "@dohc/workspace-contracts/kinds";
 import { useFocusSurface } from "../ui/focusReturn";
 import { DangerButton, SecondaryButton, SectionLabel } from "../ui/controls";
-import { KindGlyph } from "../ui/KindGlyph";
+import { AppGlyph, KindGlyph } from "../ui/KindGlyph";
 import { basenameOf, dirnameOf } from "../path";
 import {
   ChevronsUp,
@@ -33,7 +33,6 @@ import type { WorkspaceFileEntry } from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
 import type { DraftFlush } from "../useAutosavedTextDraft";
 import { Overlay } from "../Overlay";
-import { momentDiffName } from "./EditorTabs";
 import { planDrop, type DragSource } from "./file-tree-dnd";
 import { navigateTree, type FlatRow } from "./file-tree-nav";
 import { withMarkdownDefault, withRenameDefault } from "./new-file-name";
@@ -44,20 +43,10 @@ import {
 } from "./file-tree-optimistic";
 import { buildTree, type TreeNode } from "./path-tree";
 import {
+  parseTab,
+  TAB_KINDS,
   type EditorGroup,
   clampOpenEditorsHeight,
-  isCollectionTabPath,
-  isChatsTabPath,
-  chatTabDefaultTitle,
-  isGraphTabPath,
-  isHistoryTabPath,
-  isMomentDiffTabPath,
-  isSiteTabPath,
-  isVersionCompareTabPath,
-  isVirtualTabPath,
-  parseCollectionTabPath,
-  parseTransactionalCollectionTabPath,
-  parseSiteTabPath,
 } from "./workbenchState";
 import { useCommitOnRelease } from "./useCommitOnRelease";
 import { ipcErrorMessage } from "../ipcError";
@@ -119,6 +108,9 @@ export interface ExplorerProps {
   // collection's views; the chevron still expands the folder in place, and
   // keyboard expand/collapse is untouched.
   collectionFolders: ReadonlySet<string>;
+  // Folders main recognizes as apps. Their rows draw the app glyph; a row
+  // still opens and expands as any folder's does.
+  appFolders?: ReadonlySet<string>;
   onOpenCollection: (path: string) => void;
   dataCollections?: Array<{ datasetId: string; datasetPath: string | null; tableId: string; name: string; archived?: boolean }>;
   includeArchivedCollections?: boolean;
@@ -247,25 +239,15 @@ function resolveTypedPath(value: string, contextDir: string): string {
 }
 
 export function editorTitle(path: string, label?: string): string {
-  if (parseTransactionalCollectionTabPath(path)) return label ?? "Collection";
-  if (isChatsTabPath(path)) return label ?? chatTabDefaultTitle(path);
-  if (isGraphTabPath(path)) return "Graph";
-  if (isCollectionTabPath(path)) {
-    return basenameOf(parseCollectionTabPath(path) ?? "Collection");
-  }
-  if (isHistoryTabPath(path)) return "History";
-  if (isMomentDiffTabPath(path)) {
-    return momentDiffName(label);
-  }
-  if (isSiteTabPath(path)) return `App: ${parseSiteTabPath(path) ?? "preview"}`;
-  if (isVersionCompareTabPath(path)) return "Compare with Main";
-  return basenameOf(path);
+  const tab = parseTab(path);
+  return TAB_KINDS[tab.kind].explorerTitle(tab, label);
 }
 
 function OpenEditorIcon(props: { path: string; kind: WorkspaceFileEntry["kind"] | null; active: boolean }) {
   const tone = glyphTone(props.active);
-  if (isVirtualTabPath(props.path)) {
-    const Icon = isSiteTabPath(props.path) ? Globe2 : LayoutGrid;
+  const tab = parseTab(props.path);
+  if (TAB_KINDS[tab.kind].virtual) {
+    const Icon = tab.kind === "site" ? Globe2 : LayoutGrid;
     return <Icon size={GLYPH_SIZE} aria-hidden className={`shrink-0 ${tone}`} />;
   }
   return <KindGlyph kind={explorerFileKind(props.path, props.kind)} size={GLYPH_SIZE} className={tone} />;
@@ -335,6 +317,9 @@ export const TreeRow = memo(function TreeRow(props: {
   // views. Exposed as data-collection so tests can gate on the state before
   // clicking.
   collection: boolean;
+  // Main recognizes this folder as an app: the row draws the app glyph in
+  // the folder glyph's place, and says so as data-app.
+  app: boolean;
   selected: boolean;
   active: boolean;
   tabbable: boolean;
@@ -372,6 +357,7 @@ export const TreeRow = memo(function TreeRow(props: {
         data-path={row.fullPath}
         data-kind={row.isFolder ? "folder" : "file"}
         data-collection={props.collection ? "true" : undefined}
+        data-app={props.app ? "true" : undefined}
         data-drop-state={props.dropPreview?.kind}
         aria-level={row.depth + 1}
         aria-posinset={row.positionInSet}
@@ -442,7 +428,9 @@ export const TreeRow = memo(function TreeRow(props: {
                 className={`shrink-0 text-subtle transition-transform ${row.isExpanded ? "rotate-90" : ""}`}
               />
             </span>
-            {row.isExpanded ? (
+            {props.app ? (
+              <AppGlyph size={GLYPH_SIZE} className={glyphClass} />
+            ) : row.isExpanded ? (
               <FolderOpen size={GLYPH_SIZE} aria-hidden className={`shrink-0 ${glyphClass}`} />
             ) : (
               <Folder size={GLYPH_SIZE} aria-hidden className={`shrink-0 ${glyphClass}`} />
@@ -824,7 +812,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
     const target =
       focusedPath ??
       selectedPath ??
-      (activeTab && !isVirtualTabPath(activeTab) ? activeTab : null);
+      (activeTab && !TAB_KINDS[parseTab(activeTab).kind].virtual ? activeTab : null);
     if (!target) return "";
     return isFolderPath(target) ? target : dirnameOf(target);
   }, [activeTab, focusedPath, isFolderPath, selection]);
@@ -1615,6 +1603,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
           key={item.key}
           row={row}
           collection={row.isFolder && props.collectionFolders.has(row.fullPath)}
+          app={row.isFolder && (props.appFolders?.has(row.fullPath) ?? false)}
           selected={selection.has(row.fullPath)}
           active={activeTab === row.fullPath}
           tabbable={tabbablePath === row.fullPath}
@@ -1959,7 +1948,9 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
                           }}
                           className="flex h-7 w-full items-center gap-1.5 px-3 text-left text-[13px] text-muted hover:bg-hover hover:text-ink"
                         >
-                          {isFolderPath(path) ? (
+                          {props.appFolders?.has(path) ? (
+                            <AppGlyph size={GLYPH_SIZE} className={glyphTone(false)} />
+                          ) : isFolderPath(path) ? (
                             <Folder size={GLYPH_SIZE} aria-hidden className={`shrink-0 ${glyphTone(false)}`} />
                           ) : (
                             fileGlyph(path)
