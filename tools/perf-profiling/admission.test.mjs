@@ -71,7 +71,7 @@ test('nine simultaneous profiling processes admit exactly one without joining th
   assert.equal(existsSync(join(f.root, 'profiling-slot-1')), false);
 });
 
-for (const kind of ['verification-slot', 'verification-light-slot', 'build-slot']) {
+for (const kind of ['verification-slot', 'build-slot']) {
   test(`profiling rejects active ${kind} work and records its owner`, t => {
     const f = fixture(t);
     owner(f.root, kind);

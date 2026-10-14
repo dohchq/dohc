@@ -14,7 +14,26 @@ export function SettingRow(props: {
   highlighted?: boolean;
   // Under the title, such as the way to ask your agent.
   aside?: ReactNode;
+  // Before the title, such as the signed-in account's avatar.
+  lead?: ReactNode;
 }) {
+  const text = (
+    <div className="min-w-0">
+      {/* The dot hangs left of the title, so marking a row moves nothing in it. */}
+      <div className="relative flex items-center">
+        {props.modified ? (
+          <span title="Modified" className="absolute right-full top-1/2 mr-1 size-1.5 -translate-y-1/2 rounded-full bg-accent">
+            <span className="sr-only">Modified</span>
+          </span>
+        ) : null}
+        <span className="text-[13px] font-medium text-ink">{props.title}</span>
+      </div>
+      {props.description ? (
+        <p className="m-0 mt-0.5 text-[11px] text-muted">{props.description}</p>
+      ) : null}
+      {props.aside ? <div className="mt-2">{props.aside}</div> : null}
+    </div>
+  );
   return (
     <div
       data-testid={props.testId}
@@ -25,21 +44,14 @@ export function SettingRow(props: {
         props.highlighted ? "-mx-3 rounded-lg bg-selected px-3" : ""
       }`}
     >
-      <div className="min-w-0">
-        {/* The dot hangs left of the title, so marking a row moves nothing in it. */}
-        <div className="relative flex items-center">
-          {props.modified ? (
-            <span title="Modified" className="absolute right-full top-1/2 mr-1 size-1.5 -translate-y-1/2 rounded-full bg-accent">
-              <span className="sr-only">Modified</span>
-            </span>
-          ) : null}
-          <span className="text-[13px] font-medium text-ink">{props.title}</span>
+      {props.lead ? (
+        <div className="flex min-w-0 items-center gap-3">
+          {props.lead}
+          {text}
         </div>
-        {props.description ? (
-          <p className="m-0 mt-0.5 text-[11px] text-muted">{props.description}</p>
-        ) : null}
-        {props.aside ? <div className="mt-2">{props.aside}</div> : null}
-      </div>
+      ) : (
+        text
+      )}
       <div className="flex min-w-0 items-center justify-end gap-2 max-[720px]:justify-start">
         {props.children}
         {/* Every row keeps the reset's place, so controls share a right edge
@@ -256,6 +268,8 @@ export function SwitchControl(props: {
   label: string;
   checked: boolean;
   disabled?: boolean;
+  // Shows its value at full strength, but this place cannot change it.
+  readOnly?: boolean;
   onChange: (checked: boolean) => void;
 }) {
   return (
@@ -264,11 +278,12 @@ export function SwitchControl(props: {
       role="switch"
       aria-label={props.label}
       aria-checked={props.checked}
+      aria-readonly={props.readOnly || undefined}
       disabled={props.disabled}
       onClick={() => {
-        if (!props.disabled) props.onChange(!props.checked);
+        if (!props.disabled && !props.readOnly) props.onChange(!props.checked);
       }}
-      className={`relative h-5 w-9 rounded-full border transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-50 ${
+      className={`relative h-5 w-9 rounded-full border transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-50 aria-readonly:cursor-default ${
         props.checked ? "border-accent bg-accent" : "border-line bg-line"
       }`}
     >

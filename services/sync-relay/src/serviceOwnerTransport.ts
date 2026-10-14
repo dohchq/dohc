@@ -74,6 +74,14 @@ export function serviceOwnerTransport(options: {
       return {id:request.id,result:{adoptionId:capture.activationId,expectedLocalSequence:capture.source.nativeHeadSequence,
         throughCursor:state.throughCursor??0,sessionId:capture.sessionId}};
     }
+    if(request.method==="liveApplication.quarantineOwnerOutbox") {
+      const params=configRecord(request.params,["registrationId","reason"]);
+      registration(params.registrationId);
+      if(!adopted || !outboxId)throw new Error("Service owner outbox is unavailable.");
+      if(params.reason!=="provenance-refused" && params.reason!=="delivery-conflict")throw new Error("Invalid owner quarantine reason.");
+      const response=await client.sendRequest({...request,method:"ydoc.ownerOutbox.quarantine",params:{outboxId,reason:params.reason}},signal);
+      check(signal);return response;
+    }
     if(request.method==="liveApplication.readOwnerOutbox" || request.method==="liveApplication.acknowledgeOwnerOutbox") {
       const reading=request.method==="liveApplication.readOwnerOutbox";
       const params=configRecord(request.params,reading?["registrationId"]:["registrationId","receipts"],reading?["cursor"]:[]);
