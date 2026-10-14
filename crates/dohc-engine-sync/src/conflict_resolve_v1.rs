@@ -7638,11 +7638,11 @@ mod tests {
                 }
             ));
         }
-        for source in [
-            "- Run:\n\n      npm i foo",
-            "Install:\n\n    npm i foo",
-            "- \n\n  - b\n - c",
-            "1.\n\n   - b\n  - c",
+        for (source, expected) in [
+            ("- Run:\n\n      npm i foo", "- Run:\n\n  &#32;   npm i foo"),
+            ("Install:\n\n    npm i foo", "Install:\n\n&#32;   npm i foo"),
+            ("- \n\n  - b\n - c", "- \n\n- b\n\n- c"),
+            ("1.\n\n   - b\n  - c", "1. \n\n- b\n\n- c"),
         ] {
             let (_scratch, mut store, key) =
                 content_conflict_store("Other settled body", source, None, ContentKind::Richdoc);
@@ -7651,11 +7651,7 @@ mod tests {
                 .unwrap()
                 .unwrap();
             let canonical = loaded.doc.project(ContentKind::Richdoc).unwrap().content;
-            if source.contains("npm i foo") {
-                assert!(canonical.contains("npm i foo"));
-            } else {
-                assert!(canonical.contains("b") && canonical.contains("c"));
-            }
+            assert_eq!(canonical, expected, "{source:?}");
             assert!(loaded.doc.preserved_markdown_source(&canonical).is_none());
             assert_eq!(
                 VersionedTextStore::new(&mut store)

@@ -2860,9 +2860,7 @@ fn parse_markdown_blocks_at<'src>(
                 pair[0] == b'<'
                     && (pair[1].is_ascii_alphabetic() || matches!(pair[1], b'/' | b'!' | b'?'))
             })
-            && !paragraph
-                .match_indices('[')
-                .any(|(at, _)| definition_len(&paragraph[at..]).is_some())
+            && !paragraph.contains("]:")
         {
             let mut spans = inline_code_spans(&paragraph);
             spans.extend(

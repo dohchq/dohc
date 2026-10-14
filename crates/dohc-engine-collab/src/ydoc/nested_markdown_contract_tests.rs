@@ -418,3 +418,40 @@ fn projected_html_and_definitions_keep_line_start_entities() {
         );
     }
 }
+
+#[test]
+fn nested_contract_definition_guard_scales_linearly() {
+    let mut previous = None;
+    for bytes in [8_000, 32_000, 1_000_000] {
+        let sources = ["[a]:", "word"].map(|unit| format!("{}x &#1;", unit.repeat(bytes / 4)));
+        let mut samples = [Vec::new(), Vec::new()];
+        for round in 0..5 {
+            for index in [round % 2, 1 - round % 2] {
+                let doc = Ydoc::wire();
+                let started = std::time::Instant::now();
+                std::hint::black_box(
+                    doc.rewrite_content_to_markdown_for_fold(ContentKind::Richdoc, &sources[index])
+                        .unwrap(),
+                );
+                samples[index].push(started.elapsed());
+            }
+        }
+        let times = samples.map(|mut values| {
+            values.sort();
+            values[2]
+        });
+        println!(
+            "definition guard {bytes} bytes: repeated {:?}, plain {:?}",
+            times[0], times[1]
+        );
+        assert!(times[0] <= times[1] * 8, "{bytes}: {times:?}");
+        if let Some((smaller_bytes, smaller_time)) = previous {
+            assert!(
+                times[0] <= smaller_time * (bytes / smaller_bytes) as u32 * 3,
+                "nonlinear growth at {bytes}: {smaller_time:?} -> {:?}",
+                times[0]
+            );
+        }
+        previous = Some((bytes, times[0]));
+    }
+}
