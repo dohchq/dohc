@@ -592,7 +592,7 @@ export function createLiveFrameSession(role: Side, input: LiveFrameSessionPolicy
       const identity = frame.result === "success" ? frame.ack : frame;
       requireFrame(sender === "server" && live && pending?.complete && pending.deliveryId === identity.deliveryId && pending.updateDigest === identity.updateDigest, "state");
       pending = undefined;
-      if (frame.result !== "success") close();
+      if (frame.result === "refused") close();
       return;
     }
     if (frame.kind === "begin") {

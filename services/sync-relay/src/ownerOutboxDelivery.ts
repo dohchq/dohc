@@ -28,6 +28,11 @@ export interface OwnerOutboxAdmission {
     retainStateUpdate?: boolean}, signal?: AbortSignal): LiveAdmissionValidation | Promise<LiveAdmissionValidation>;
 }
 
+export type CapacityLiveAdmissionValidator = OwnerOutboxAdmission["validate"] & {
+  /** Pooled validators wait without retaining a journal cut. */
+  waitForCapacity?(signal?: AbortSignal): Promise<void>;
+};
+
 /**
  * The adoption this queue belongs to, as the relay recorded it from the host's
  * adoption ACK. A divergent adoption queues its local seed first, under

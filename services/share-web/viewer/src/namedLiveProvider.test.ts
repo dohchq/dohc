@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { createHash } from "node:crypto";
 import * as Y from "yjs";
 import { getDohcYDocBodyFragment } from "@dohc/ydoc-projection/body-fragment";
@@ -20,7 +20,7 @@ const hash = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("h
 type Provider = ReturnType<typeof createNamedLiveProvider>;
 type Received = { begin: LiveFrameBegin; bytes: Uint8Array };
 const cleanup: (() => void)[] = [];
-afterEach(() => { for (const stop of cleanup.splice(0)) stop(); });
+afterEach(() => { for (const stop of cleanup.splice(0)) stop(); vi.useRealTimers(); });
 function provider(options = limits(), context?: LiveAuthorContext) {
   const value = createNamedLiveProvider(options, undefined, context);
   cleanup.push(() => { value.close(); value.doc.destroy(); });
@@ -264,7 +264,7 @@ describe("named live browser provider", () => {
     await host.send(result === "retry"
       ? { kind: "result", result, deliveryId: item.begin.deliveryId, updateDigest: item.begin.digest, reason: "application-pending" }
       : { kind: "result", result, deliveryId: item.begin.deliveryId, updateDigest: item.begin.digest, reason: "restore-fenced" });
-    expect(value.state()).toMatchObject({ status: result === "retry" ? "disconnected" : "quarantined", pendingUpdates: 1 });
+    expect(value.state()).toMatchObject({ status: result === "retry" ? "live" : "quarantined", pendingUpdates: 1 });
   });
   it("does not skip peer updates when its own ACK has a later cursor", async () => {
     const { value, host, doc } = await live(); edit(value, " mine"); await host.ack(await host.submitted(), 1, 4);
@@ -352,22 +352,29 @@ describe("named live browser provider", () => {
     expect(value.state()).toMatchObject({ status: "quarantined", reason: "delivery-attempt-limit", pendingUpdates: 1 });
     expect(second.submissions()).toHaveLength(0);
   });
-  it("keeps a busy server from exhausting the ambiguous delivery budget", async () => {
-    const { value, host, doc } = await live(provider({ ...limits(), maxDeliveryAttempts: 1 }));
+  it.each(["admission-unavailable", "application-pending"] as const)("resubmits %s without disconnecting or exhausting ambiguous attempts", async reason => {
+    const {value, host} = await live(provider({...limits(), maxDeliveryAttempts: 1}));
+    vi.useFakeTimers();
     edit(value, " draft");
-    let current = host;
-    const first = await current.submitted();
-    for (let attempt = 0; attempt < 3; attempt++) {
-      const item = await current.submitted();
+    const first = await host.submitted();
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      const item = await host.submitted(attempt);
       if (item.begin.purpose !== "submit-update") throw new Error("Expected submit.");
-      await current.send({ kind: "result", result: "retry", deliveryId: item.begin.deliveryId,
-        updateDigest: item.begin.digest, reason: "admission-unavailable" });
-      expect(value.state()).toMatchObject({ status: "disconnected", pendingUpdates: 1 });
-      current = peer(value); await current.greet(); await current.initial(doc);
-      expect((await current.submitted()).bytes).toEqual(first.bytes);
+      await host.send({kind: "result", result: "retry", deliveryId: item.begin.deliveryId, updateDigest: item.begin.digest, reason});
+      expect(value.state()).toMatchObject({status: "live", pendingUpdates: 1, reason});
+      expect(host.isClosed()).toBe(false);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(host.submissions()).toHaveLength(attempt);
+      await vi.advanceTimersByTimeAsync(250);
+      const retry = await host.submitted(attempt + 1);
+      expect(retry.bytes).toEqual(first.bytes);
+      expect(retry.begin).toMatchObject({deliveryId: item.begin.deliveryId, digest: item.begin.digest});
     }
-    await current.ack(await current.submitted());
-    expect(value.state()).toMatchObject({ status: "live", pendingUpdates: 0 });
+    edit(value, " more");
+    expect(value.state()).toMatchObject({status: "live", pendingUpdates: 2});
+    await host.ack(await host.submitted(4));
+    await host.ack(await host.submitted(5), 1, 2);
+    expect(value.state()).toMatchObject({status: "live", pendingUpdates: 0, reason: null});
   });
   it("quarantines a sync cut that predates observed host application", async () => {
     const { value, host, doc } = await live(); edit(value, " applied"); const item = await host.submitted();
@@ -471,4 +478,46 @@ describe("named live browser provider", () => {
     expect(value.state()).toMatchObject({ status: "quarantined", reason: "invalid-frame" });
     expect(value.body.toString()).toBe(before);
   });
+});
+
+it("cancels a pending retry when its route retires", async () => {
+  const {value, host} = await live(); vi.useFakeTimers(); edit(value, " draft");
+  const item = await host.submitted();
+  if (item.begin.purpose !== "submit-update") throw new Error("Expected submit");
+  await host.send({kind: "result", result: "retry", deliveryId: item.begin.deliveryId, updateDigest: item.begin.digest, reason: "admission-unavailable"});
+  expect(vi.getTimerCount()).toBe(1);
+  host.route.disconnect(); await host.route.settled();
+  expect(vi.getTimerCount()).toBe(0);
+  await vi.advanceTimersByTimeAsync(10_000);
+  expect(host.submissions()).toHaveLength(1);
+});
+
+it("retains earlier application evidence when a later admission retry precedes reconnect", async () => {
+  const {value, host, doc} = await live(provider({...limits(), maxDeliveryAttempts: 2}));
+  vi.useFakeTimers(); edit(value, " draft");
+  const first = await host.submitted();
+  if (first.begin.purpose !== "submit-update") throw new Error("Expected submit");
+  Y.applyUpdate(doc, first.bytes);
+  await host.send({kind: "result", result: "retry", deliveryId: first.begin.deliveryId, updateDigest: first.begin.digest, reason: "application-pending"});
+  await vi.advanceTimersByTimeAsync(250);
+  await host.submitted(2);
+  await host.send({kind: "result", result: "retry", deliveryId: first.begin.deliveryId, updateDigest: first.begin.digest, reason: "admission-unavailable"});
+  host.route.disconnect(); await host.route.settled();
+  const second = peer(value, 2); await second.greet(); await second.initial(doc, binding, 1);
+  const retry = await second.submitted();
+  expect(retry.bytes).toEqual(first.bytes);
+  await second.ack(retry, 1);
+  expect(value.state()).toMatchObject({status: "live", pendingUpdates: 0});
+});
+it("keeps mixed retry reasons within the same ambiguous delivery attempt", async () => {
+  const {value, host} = await live(provider({...limits(), maxDeliveryAttempts: 1}));
+  vi.useFakeTimers(); edit(value, " draft");
+  for (const [index, reason] of (["application-pending", "admission-unavailable", "application-pending"] as const).entries()) {
+    const item = await host.submitted(index + 1);
+    if (item.begin.purpose !== "submit-update") throw new Error("Expected submit");
+    await host.send({kind: "result", result: "retry", deliveryId: item.begin.deliveryId, updateDigest: item.begin.digest, reason});
+    await vi.advanceTimersByTimeAsync(250);
+  }
+  await host.ack(await host.submitted(4));
+  expect(value.state()).toMatchObject({status: "live", pendingUpdates: 0});
 });

@@ -19,9 +19,9 @@ function fixture(recordDelivery?: () => Promise<ShareRecordStatus | null>, isOnl
   const doc = new Y.Doc();
   cleanup.push(async () => doc.destroy());
   let ended = false;
-  let current = true, status = "disconnected", pendingUpdates = 0;
+  let current = true, status = "disconnected", pendingUpdates = 0, reason: string | null = null;
   const listeners = new Set<(value: ReturnType<typeof state>) => void>();
-  function state() { return {status, pendingUpdates, binding: null}; }
+  function state() { return {status, reason, pendingUpdates, binding: null}; }
   function notify() { for (const listener of listeners) listener(state()); }
   const closed = vi.fn();
   const session = {doc, state, subscribe(fn: (value: ReturnType<typeof state>) => void) {listeners.add(fn); return () => listeners.delete(fn);},
@@ -47,7 +47,9 @@ function fixture(recordDelivery?: () => Promise<ShareRecordStatus | null>, isOnl
     assertCurrent() {if (!current) throw new Error("switched");}, fetch: request, preserveDraft, recordDelivery, isOnline: () => isOnline});
   return {stop(accessEnded: boolean) { ended = accessEnded; session.disconnect(); }, capture, request, closed, preserveDraft, session, switchWorkspace() {current = false;},
     quarantineEdit(change: () => void) {doc.transact(change); status = "quarantined"; notify(); return false;},
-    ack() {pendingUpdates = 0; notify();}};
+    retry() {status = "live"; reason = "admission-unavailable"; notify();},
+    terminal() {status = "quarantined"; reason = "authority-refused"; notify();},
+    ack() {pendingUpdates = 0; reason = null; notify();}};
 }
 
 it.each(["pending", "refused"] as const)("does not open body or field editing for a %s record draft", async state => {
@@ -204,4 +206,19 @@ it("returns unavailable when the relay ends a readiness wait", async () => {
   f.request.mockResolvedValueOnce(new Response("waiting\nunavailable\n", {headers: {"content-type": "text/plain"}}));
   expect(await f.capture.waitForAdmission!("docs/a.md", new AbortController().signal)).toBe(false);
   expect(transport.factory).not.toHaveBeenCalled();
+});
+
+it("keeps editing on retryable admission and stops on a terminal refusal", async () => {
+  const f = fixture(), onSaveState = vi.fn();
+  const provider = await f.capture.openYDocSession({path: "docs/a.md", contentKind: "richdoc", onRemoteUpdate: vi.fn(), onSaveState});
+  const edit = new Y.Doc(); edit.getText("body").insert(0, "pending");
+  provider.applyLocalUpdate(Y.encodeStateAsUpdate(edit)); edit.destroy();
+  f.retry();
+  expect(provider.liveWritable?.()).toBe(true);
+  expect(onSaveState.mock.calls.some(([state]) => state === "read-only")).toBe(false);
+  f.ack(); expect(onSaveState).toHaveBeenLastCalledWith("saved-to-host", 1, "outcome");
+  f.terminal();
+  expect(provider.liveWritable?.()).toBe(false);
+  expect(onSaveState).toHaveBeenLastCalledWith("read-only", 1, "status", undefined, "reconnecting");
+  await provider.close();
 });

@@ -2,7 +2,7 @@ import { createRequire } from "node:module";
 import { pathToFileURL } from "node:url";
 import { Worker } from "node:worker_threads";
 import type { OrderedLiveUpdateCutPolicy } from "@dohc/ydoc-projection/live-journal-validation";
-import type { OwnerOutboxAdmission } from "./ownerOutboxDelivery.js";
+import type { OwnerOutboxAdmission, CapacityLiveAdmissionValidator } from "./ownerOutboxDelivery.js";
 import type { LiveJournalValidation } from "./storage/types.js";
 
 export type SettlementNormalizationInput = {
@@ -154,13 +154,14 @@ export function createLiveValidationExecutor() {
   }
   function validator(
     policy: OrderedLiveUpdateCutPolicy,
-  ): OwnerOutboxAdmission["validate"] {
+  ): CapacityLiveAdmissionValidator {
     const ownedPolicy = Object.freeze({ ...policy });
-    return (input, signal) =>
+    const validate: OwnerOutboxAdmission["validate"] = (input, signal) =>
       submit<LiveJournalValidation>(
         { kind: "journal", policy: ownedPolicy, input },
         signal,
       );
+    return Object.assign(validate, { waitForCapacity });
   }
   async function close() {
     closed = true;

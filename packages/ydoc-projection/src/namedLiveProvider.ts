@@ -58,6 +58,9 @@ interface Route {
   transfer?: Transfer;
   vectorSent: boolean;
   awaitingAck: boolean;
+  retrying?: boolean;
+  attemptRecorded?: boolean;
+  retryTimer?: ReturnType<typeof setTimeout>;
   pumping: boolean;
   receiving: Promise<void>;
   grantedBytes: number;
@@ -119,6 +122,7 @@ export function createNamedLiveProvider(input: NamedLiveProviderLimits,
   function retire(next: NamedLiveProviderState["status"], why: string | null) {
     const previous = route;
     route = undefined; status = next; reason = why; membership = null;
+    clearTimeout(previous?.retryTimer);
     previous?.protocol.close();
     if (previous) {
       previous.controls.length = 0;
@@ -154,12 +158,14 @@ export function createNamedLiveProvider(input: NamedLiveProviderLimits,
             const hash = await digest(bytes);
             if (!current(held)) return;
             held.transfer = { begin: { kind: "begin", purpose: "client-vector", transferId: held.nextTransfer++, totalBytes: bytes.length, digest: hash }, bytes, begun: false, offset: 0 };
-          } else if (status === "live" && pending.length && !held.awaitingAck) {
+          } else if (status === "live" && pending.length && !held.awaitingAck && !held.retryTimer) {
             const update = pending[0]!;
-            if (update.epochs.length >= limits.maxDeliveryAttempts) { quarantine("delivery-attempt-limit"); return; }
+            if (!held.retrying && update.epochs.length >= limits.maxDeliveryAttempts) { quarantine("delivery-attempt-limit"); return; }
             update.digest ??= await digest(update.bytes);
             if (!current(held)) return;
-            update.epochs.push(held.epoch);
+            held.attemptRecorded = !held.retrying;
+            if (held.attemptRecorded) update.epochs.push(held.epoch);
+            held.retrying = false;
             held.transfer = { begin: { kind: "begin", purpose: "submit-update", deliveryId: update.id, transferId: held.nextTransfer++, totalBytes: update.bytes.length, digest: update.digest,
               ...(update.authorContext ? { authorContext: update.authorContext } : {}) }, bytes: update.bytes, begun: false, offset: 0 };
           } else return;
@@ -233,13 +239,21 @@ export function createNamedLiveProvider(input: NamedLiveProviderLimits,
           if (frame.result === "success") {
             if (!update.epochs.includes(frame.ack.acceptingHostEpoch)) { quarantine("foreign-ack-epoch"); return; }
             pending.shift(); pendingBytes -= update.bytes.length; held.awaitingAck = false;
+            reason = null;
             lastApplied = { ...frame.ack };
             highestObservedCursor = Math.max(highestObservedCursor, frame.ack.journalCursor);
             notify();
           } else if (frame.result === "retry") {
-            // Admission did not commit, so this attempt has no ambiguous receipt to retain.
-            if (frame.reason === "admission-unavailable") update.epochs.pop();
-            retire("disconnected", frame.reason);
+            // Drop only this send's uncommitted attempt; earlier application evidence still matters.
+            if (frame.reason === "admission-unavailable" && held.attemptRecorded) update.epochs.pop();
+            held.awaitingAck = false;
+            held.retrying = frame.reason !== "admission-unavailable" || !held.attemptRecorded;
+            reason = frame.reason;
+            held.retryTimer = setTimeout(() => {
+              held.retryTimer = undefined;
+              void pump(held);
+            }, 250);
+            notify();
           }
           else quarantine(frame.reason);
         } else if (frame.kind === "close") {

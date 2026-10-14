@@ -11,7 +11,7 @@ import type { LiveObjectBinding } from "@dohc/live-session-contract/live-object-
 import type { SyncRelayStorage } from "./storage.js";
 import type { createLiveTickets } from "./liveTickets.js";
 import { liveBrowserActor, type LiveBrowserContext } from "./liveBrowserContext.js";
-import type { OwnerOutboxAdmission } from "./ownerOutboxDelivery.js";
+import type { CapacityLiveAdmissionValidator } from "./ownerOutboxDelivery.js";
 import { hashRelayExchangeKey, verifyRelayExchangeKey } from "./linkSecurity.js";
 import { captureNamedLiveFrameHost, captureOwnerLiveFrameHost, type NamedFrameHostBounds, type NamedFrameNativeHost } from "./namedLiveFrameHost.js";
 import { createNamedLiveFrameSession, type NamedFrameHostSession } from "./namedLiveFrameSession.js";
@@ -58,7 +58,7 @@ interface LiveRouteOptions {
   frames: LiveFrameSessionPolicy;
   bounds: NamedFrameHostBounds;
   captureNative(binding: LiveObjectBinding, signal: AbortSignal): Promise<NamedFrameNativeHost>;
-  validate: OwnerOutboxAdmission["validate"];
+  validate: CapacityLiveAdmissionValidator;
   lookupUserDisplayName?: (userId: string) => Promise<string | null> | string | null;
   admission?: ReturnType<typeof createLiveConnectionAdmission>;
 }
