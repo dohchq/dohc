@@ -1177,6 +1177,13 @@ fn expected_relay_error(code: &str) -> RelayError {
         | "dependents_changed"
         | "notice_list_full"
         | "restore-in-progress"
+        | "restore-fenced"
+        | "release-abandoned"
+        | "release-claimed"
+        | "release-changed"
+        | "workspace-changed"
+        | "document-unavailable"
+        | "live-again"
         | "stale" => RelayError::Conflict,
         "collection_write_rate_limited" => RelayError::HttpStatus(429),
         "discussion_limit_reached" => RelayError::QuotaExceeded,

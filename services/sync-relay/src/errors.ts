@@ -1,7 +1,7 @@
 import { jsonResponse } from "@dohc/service-http";
 import { UnauthorizedError } from "@dohc/workspace-auth/session";
 import {LINK_REFUSALS} from "@dohc/security-contract/link-refusal";
-import type {ReleaseClaimRefusalCode, RelayReleaseClaim} from "@dohc/live-session-contract/release-claim";
+import type {ReleaseClaimRefusalCode, RelayReleaseClaimSummary} from "@dohc/live-session-contract/release-claim";
 
 export const RELAY_ERROR_STATUSES = Object.freeze({
   ambiguous_selector: 400,
@@ -17,6 +17,13 @@ export const RELAY_ERROR_STATUSES = Object.freeze({
   collection_write_rate_limited: 429,
   conflict: 409,
   "restore-in-progress": 409,
+  "restore-fenced": 409,
+  "release-abandoned": 409,
+  "release-claimed": 409,
+  "release-changed": 409,
+  "workspace-changed": 409,
+  "document-unavailable": 409,
+  "live-again": 409,
   dependents_changed: 409,
   discussion_limit_reached: 413,
   discussion_rate_limited: 429,
@@ -85,7 +92,14 @@ export const RELAY_ERROR_MESSAGES: Readonly<Record<RelayErrorCode, string>> = Ob
   blob_not_found: "blob not found",
   collection_write_rate_limited: "too many direct writes",
   conflict: "conflict",
-  "restore-in-progress": "Stop live editing is waiting. You can keep editing.",
+  "restore-in-progress": "A restore is in progress. Try again when it finishes.",
+  "restore-fenced": "This document changed during a restore. Try again.",
+  "release-abandoned": "This stop ended on another computer. Keep editing this file locally.",
+  "release-claimed": "Another computer is stopping live editing. Try again when it finishes, or end that stop.",
+  "release-changed": "The stop changed on another computer. Check its status again.",
+  "workspace-changed": "This workspace changed. Open it again before stopping live editing.",
+  "document-unavailable": "This document is unavailable. Check its status again.",
+  "live-again": "Live editing resumed on another computer. Keep editing this file locally.",
   dependents_changed: "active dependent grants changed",
   discussion_limit_reached: "discussion message limit reached",
   discussion_rate_limited: "discussion message rate limit reached",
@@ -125,12 +139,6 @@ export const RELAY_ERROR_MESSAGES: Readonly<Record<RelayErrorCode, string>> = Ob
 });
 
 /** An error the relay answers with its own status, code, and message. */
-export class ReleaseClaimRefusal extends Error {
-  constructor(readonly code: ReleaseClaimRefusalCode, readonly claim?: RelayReleaseClaim, readonly path?: string) {
-    super(path ? `Live editing for ${path} is stopping. End that stop before starting live editing.` : code);
-  }
-}
-
 export class RelayError extends Error {
   readonly statusCode: number;
 
@@ -141,6 +149,15 @@ export class RelayError extends Error {
   ) {
     super(message);
     this.statusCode = statusCode;
+  }
+}
+
+export class ReleaseClaimRefusal extends RelayError {
+  declare readonly code: ReleaseClaimRefusalCode;
+  constructor(code: ReleaseClaimRefusalCode, readonly claim?: RelayReleaseClaimSummary, readonly path?: string) {
+    super(code, code === "release-claimed" && claim
+      ? `${claim.computerName} is stopping live editing${path ? ` for ${path}` : ""}. Try again when it finishes, or end that stop.`
+      : RELAY_ERROR_MESSAGES[code]);
   }
 }
 
@@ -170,11 +187,9 @@ export function errorBody(code: RelayErrorCode): Response {
  * answered with a generic 500, never with its message.
  */
 export function errorResponse(error: unknown): Response {
-  if (error instanceof ReleaseClaimRefusal) return Response.json({ok:false,code:error.code,
-    ...(error.claim ? {claim:error.claim} : {}),...(error.path ? {path:error.path,message:error.message} : {})},
-    {status:409,headers:{"cache-control":"private, no-store"}});
   if (error instanceof RelayError) {
-    return jsonResponse({ ok: false, error: error.message, code: error.code }, error.statusCode);
+    return jsonResponse({ ok: false, error: error.message, code: error.code,
+      ...(error instanceof ReleaseClaimRefusal ? {...(error.claim ? {claim:error.claim} : {}), ...(error.path ? {path:error.path} : {})} : {}) }, error.statusCode);
   }
   if (error instanceof UnauthorizedError) {
     return jsonResponse({ ok: false, error: error.message, code: error.code }, error.statusCode);

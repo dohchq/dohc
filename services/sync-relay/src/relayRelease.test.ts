@@ -1,4 +1,4 @@
-import {afterEach, expect, it} from "vitest";
+import {afterEach, expect, it, vi} from "vitest";
 import {registered, cleanupLiveDeliveryFixtures, policy, hash} from "../../../packages/ydoc-projection/src/liveCommittedDeliveryTestSupport";
 import {createLiveJournalHistoryAuthority} from "./storage/liveJournalHistory";
 import {createServiceHostEnrollmentRoutes} from "./serviceHostEnrollmentRoutes";
@@ -14,6 +14,7 @@ import {relayApiVersionRefusal} from "./apiVersion";
 import {RELAY_API_VERSION, RELAY_API_VERSION_HEADER} from "@dohc/workspace-contracts/relay-values";
 import * as Y from "yjs";
 import {appendValidatedLiveJournal} from "./storage/liveUpdateJournal";
+import {releasePublicationTag} from "./storage/releasePublication";
 import {createOwnerRestoreRoutes} from "./ownerRestoreRoutes";
 
 afterEach(cleanupLiveDeliveryFixtures);
@@ -24,14 +25,14 @@ function fixture(options: Parameters<typeof registered>[0] = {}) {
   const enrollment = {workspaceId: "workspace", ownerUserId: "owner", shareId: "share", path: "docs/a.md", nowMs: 10, guard() {}};
   f.storage.enrollServiceHostDocument(enrollment);
   const history = createLiveJournalHistoryAuthority({namespace: "release-test", reconciled: true});
-  let userId = "owner";
+  let userId = "owner", reconciliations = 0;
   const handle = createServiceHostEnrollmentRoutes({storage: f.storage, history, resolveActor: async () => ({workspaceId: "workspace", userId}),
-    host: {ready: () => false, reconcile() {}, unavailable: false}});
+    host: {ready: () => false, reconcile() {reconciliations++;}, unavailable: false}});
   const scope = {document: f.input.evidence.document, relayDatabaseNamespace: history.namespace, restoreFenceGeneration: 1,
     replicationEpoch: "epoch", streamIdentity: "stream"};
-  const request = async (action: string, changes = {}) => {
+  const request = async (action: string, changes = {}, version = "2") => {
     const response = await handle(new Request("https://relay.test/sync/workspace/live-host", {method: "POST",
-      headers: {authorization: "Bearer owner-token", "content-type": "application/json"},
+      headers: {authorization: "Bearer owner-token", "content-type": "application/json", [RELAY_API_VERSION_HEADER]:version},
       body: JSON.stringify({release: {action, ...scope, releaseId, computerName: "Laptop", ...changes}})}));
     return {status: response.status, body: await response.json() as any};
   };
@@ -39,7 +40,7 @@ function fixture(options: Parameters<typeof registered>[0] = {}) {
   const push = async (ops: unknown[], originId = "ordinary") => {
     let response: Response;
     try {response = await replication.respondToWorkspaceReplication(new Request("https://relay.test/sync/workspace/log",{method:"POST",
-      headers:{"content-type":"application/json"},body:JSON.stringify({originId,ops,replicationEpoch:"epoch",streamIdentity:"stream"})}),
+      headers:{"content-type":"application/json",[RELAY_API_VERSION_HEADER]:"1"},body:JSON.stringify({originId,ops,replicationEpoch:"epoch",streamIdentity:"stream"})}),
       {route:"log",workspaceId:"workspace"},{userId},() => {if (!f.storage.workspaceIsOwnedBy("workspace",userId)) throw Error("unauthorized");});}
     catch (error) {response = errorResponse(error);}
     return {status:response.status,body:await response.json() as any};
@@ -50,14 +51,14 @@ function fixture(options: Parameters<typeof registered>[0] = {}) {
     return {originSeq,opKind,recordedAtMs:originSeq,payload:{versionId:"main",objectId:"object",path:"docs/a.md",
       ...(opKind === "ydoc.update" ? {contentKind:"richdoc",isBaseState:false,lineageClaimId:scope.document.lineageClaimId,updateBlobSha256:sha}
         : {momentId:`tagged-${originSeq}`,operation:"write",payloadAfterPath:"docs/a.md",payloadAfterContentKind:"text",payloadAfterBlobSha256:sha,payloadAfterByteLength:bytes.length}),
-      release:{releaseId,restoreFenceGeneration:generation,document:scope.document}}};
+      release:{releaseDigest:hash(Buffer.from(releaseId)),restoreFenceGeneration:generation,document:scope.document}}};
   };
   const enrollShare = async () => {
     const response=await handle(new Request("https://relay.test/sync/workspace/live-host",{method:"POST",
       headers:{authorization:"Bearer owner-token","content-type":"application/json"},body:JSON.stringify({shareId:"share"})}));
     return {status:response.status,body:await response.json() as any};
   };
-  return {...f, enrollment, scope, request, push, tagged, enrollShare, setUser(value: string) {userId = value;}};
+  return {...f, enrollment, scope, request, push, tagged, enrollShare, reconciliations: () => reconciliations, setUser(value: string) {userId = value;}};
 }
 
 it.each([[true,"owner"],[false,"owner"],[true,"peer"],[false,"peer"]] as const)("anchors every earlier acceptance and refuses every later acceptance (accept first=%s, %s)", async (first, principal) => {
@@ -133,9 +134,10 @@ it("blocks acquisition and catch-up during a real unfinished restore and gives t
     expect(f.storage.beginStopRestore(plan.intent,100).phase).toBe("authority-invalidated");
     expect((await f.request("acquire",{releaseId:otherId})).body.code).toBe("restore-in-progress");
     expect((await f.request("catch-up")).body.code).toBe("restore-in-progress");
-    expect((await f.request("status")).body).toMatchObject({status:"unresolved",code:"restore-in-progress"});
+    expect((await f.request("status")).body.code).toBe("release-abandoned");
+    expect((await f.request("status",{releaseId:otherId})).body).toMatchObject({status:"unresolved",code:"restore-in-progress"});
     expect((await f.push([f.tagged(0,1)])).body.releaseRefusals[0].reason).toBe("release-publication-fenced");
-    const other=f.tagged(1,1); other.payload.release.releaseId=otherId;
+    const other=f.tagged(1,1); other.payload.release.releaseDigest=hash(Buffer.from(otherId));
     expect((await f.push([other])).body.releaseRefusals[0].reason).toBe("release-restore-in-progress");
     expect((await f.request("acquire")).body.code).toBe("release-abandoned");
     expect((await f.request("complete")).body.code).toBe("release-abandoned");
@@ -143,8 +145,8 @@ it("blocks acquisition and catch-up during a real unfinished restore and gives t
 });
 
 it("an old API1 relay confirms the API2 capability cannot be held", () => {
-  expect(RELAY_API_VERSION).toBe(2);
-  expect(relayApiVersionRefusal(new Headers({[RELAY_API_VERSION_HEADER]:String(RELAY_API_VERSION)}),{min:1,max:1})).toMatchObject({code:"api_version_too_new",statusCode:400});
+  expect(RELAY_API_VERSION).toBe(1);
+  expect(relayApiVersionRefusal(new Headers({[RELAY_API_VERSION_HEADER]:"2"}),{min:1,max:1})).toMatchObject({code:"api_version_too_new",statusCode:400});
 });
 
 it.each([false,true])("serializes abandonment against acquisition retries (abandon first=%s)", async abandonFirst => {
@@ -154,7 +156,7 @@ it.each([false,true])("serializes abandonment against acquisition retries (aband
     const actions = [() => f.request("acquire"), () => f.request("abandon",{claimDigest:first.body.claim.digest})];
     const results = await Promise.all((abandonFirst ? actions.reverse() : actions).map(action => action()));
     expect(results.every(result => result.status === 200 || result.body.code === "release-abandoned")).toBe(true);
-    expect((await f.request("status")).body.status).toBe("not-held");
+    expect((await f.request("status")).body.code).toBe("release-abandoned");
     expect((await f.request("acquire")).body.code).toBe("release-abandoned");
   } finally {f.close();}
 });
@@ -166,7 +168,7 @@ it.each(["ydoc.update","moment.append"])("commits a refused tagged %s, later unr
     const before = f.raw.prepare("SELECT * FROM sync_relay_object_moments").all();
     const result = await f.push([tagged,later]);
     expect(result.status).toBe(200); expect(result.body.currentMaxOriginSeq).toBe(1);
-    expect(result.body.releaseRefusals).toEqual([{status:"refused",kind:"release-publication",releaseId,reason:"release-generation-fenced",originId:"ordinary",originSeq:0}]);
+    expect(result.body.releaseRefusals).toEqual([{status:"refused",kind:"release-publication",releaseDigest:hash(Buffer.from(releaseId)),reason:"release-generation-fenced",originId:"ordinary",originSeq:0}]);
     expect(result.body).not.toHaveProperty("settlementRefusals");
     expect(f.raw.prepare("SELECT * FROM sync_relay_object_moments").all()).toEqual(before);
     f.write(db => db.prepare("UPDATE sync_relay_live_documents SET restore_fence_generation=2").run());
@@ -285,7 +287,7 @@ it("preserves same-generation publication after completion and rejects malformed
     expect((await f.push([{...f.tagged(1),payload:{...valid.payload,release:{...valid.payload.release,restoreFenceGeneration:-1}}}])).status).toBe(400);
     const wrong = f.tagged(1); wrong.payload.release.document = {...wrong.payload.release.document,workspaceId:"foreign"};
     expect((await f.push([wrong])).status).toBe(400);
-    expect(() => f.storage.appendLogBatch({workspaceId:"workspace",originId:"foreign",ownerUserId:"reader",ops:[{originSeq:0,opKind:"ydoc.update",payloadJson:JSON.stringify(f.tagged().payload),recordedAtMs:0}]})).toThrow();
+    expect(() => f.storage.appendLogBatch({workspaceId:"workspace",originId:"foreign",actorUserId:"reader",ops:[{originSeq:0,opKind:"ydoc.update",payloadJson:JSON.stringify(f.tagged().payload),recordedAtMs:0}]})).toThrow();
     expect(f.storage.maxOriginSeq("workspace","foreign")).toBe(-1);
   } finally {f.close();}
 });
@@ -302,7 +304,7 @@ it.each([true,false])("retains the claim and catch-up through plain retirement, 
     const acquired = await f.request("acquire"); expect(acquired.status).toBe(200);
     f.storage.setServiceHostEnrollmentEnabled({...f.enrollment,enabled:false,retire:true});
     if (!renameFirst) rename();
-    expect((await f.request("status")).body).toMatchObject({status:"held",claim:acquired.body.claim});
+    expect((await f.request("status")).body).toMatchObject({status:"held",claim:{digest:acquired.body.claim.digest,computerName:"Laptop",anchor:{cursor:acquired.body.claim.anchor.cursor}}});
     expect((await f.request("catch-up")).body.history.proof.terminal).toEqual(accepted.admitted!.metadata.accepted.receipt);
     expect(() => f.storage.enrollServiceHostDocument({...f.enrollment,path:"docs/renamed.md"})).toThrow("docs/renamed.md");
     const reopened = openSyncRelayStorage(f.path);
@@ -375,5 +377,129 @@ it("scopes retired catch-up to owner, current object, lineage, namespace, stream
       expect((await f.request("catch-up", changes)).status).toBe(409);
     }
     f.setUser("reader"); expect((await f.request("catch-up")).status).toBe(404);
+  } finally {f.close();}
+});
+
+
+it("review round: keeps ordinary API1 usable and requires API2 only for release actions", async () => {
+  const f=fixture();
+  try {
+    expect(RELAY_API_VERSION).toBe(1);
+    expect(relayApiVersionRefusal(new Headers({[RELAY_API_VERSION_HEADER]:"1"}),{min:1,max:1})).toBeNull();
+    expect((await f.push([{originSeq:0,opKind:"noop",recordedAtMs:0,payload:{}}])).status).toBe(200);
+    expect(await f.request("acquire",{},"1")).toMatchObject({status:400,body:{code:"api_version_too_old"}});
+    expect(f.storage.readServiceHostEnrollment("workspace","docs/a.md")?.enabled).toBe(true);
+    expect((await f.request("acquire")).status).toBe(200);
+  } finally {f.close();}
+});
+
+it("review round: returns standard errors and small claims with the holding computer and retry first", async () => {
+  const f=fixture();
+  try {
+    const acquired=await f.request("acquire");
+    expect(acquired.body.claim.anchor).toHaveProperty("proof");
+    const status=await f.request("status");
+    expect(status.body.claim.digest).toBe(acquired.body.claim.digest);
+    expect(status.body.claim.anchor).not.toHaveProperty("proof");
+    expect(status.body.claim.anchor).not.toHaveProperty("receipts");
+    const refusal=await f.request("acquire",{releaseId:otherId});
+    expect(refusal.body).toMatchObject({ok:false,code:"release-claimed",error:"Laptop is stopping live editing for docs/a.md. Try again when it finishes, or end that stop."});
+    expect(refusal.body).not.toHaveProperty("message");
+    expect(refusal.body.claim).toEqual(status.body.claim);
+  } finally {f.close();}
+});
+
+it("review round: status and catch-up use read snapshots without reconciling the live host", async () => {
+  const f=fixture();
+  try {
+    expect((await f.request("acquire")).status).toBe(200);
+    const writes=vi.spyOn(f.storage as StorageContext,"tx"), reads=vi.spyOn(f.storage as StorageContext,"readTx");
+    const reconciliations=f.reconciliations();
+    expect((await f.request("status")).status).toBe(200);
+    expect((await f.request("catch-up")).status).toBe(200);
+    expect(writes).not.toHaveBeenCalled();
+    expect(reads).toHaveBeenCalledTimes(2);
+    expect(f.reconciliations()).toBe(reconciliations);
+    writes.mockRestore(); reads.mockRestore();
+  } finally {f.close();}
+});
+
+it("review round: caches absent tags across parse, duplicate validation and admission", () => {
+  let scans=0;
+  const op={originSeq:0,opKind:"ydoc.update",recordedAtMs:0,get payloadJson() {scans++; return '{"work":"ordinary"}';}};
+  for(let i=0;i<3;i++) expect(releasePublicationTag(op)).toBeNull();
+  expect(scans).toBe(1);
+});
+
+it("review round: rejects client authors on tagged moments before storing a refusal", async () => {
+  const f=fixture();
+  try {
+    const tagged=f.tagged(0,2,"moment.append");
+    const payload={...tagged.payload,authors:[{kind:"unattributed"}]};
+    expect((await f.push([{...tagged,payload}])).status).toBe(400);
+    expect(f.storage.maxOriginSeq("workspace","ordinary")).toBe(-1);
+  } finally {f.close();}
+});
+
+it("review round: status cannot close an abandoned sent-ID obligation even with a successor", async () => {
+  const f=fixture();
+  try {
+    const acquired=await f.request("acquire");
+    expect((await f.request("abandon",{claimDigest:acquired.body.claim.digest})).status).toBe(200);
+    expect((await f.request("status")).body.code).toBe("release-abandoned");
+    expect((await f.request("status",{releaseId:undefined})).body.status).toBe("not-held");
+    expect((await f.request("acquire",{releaseId:otherId})).status).toBe(200);
+    expect((await f.request("status")).body.code).toBe("release-abandoned");
+  } finally {f.close();}
+});
+
+it("review round: publishes only the digest and cannot complete with a disclosed tag", async () => {
+  const f=fixture();
+  try {
+    expect((await f.request("acquire")).status).toBe(200);
+    const tagged=f.tagged(0,2);
+    expect((await f.push([tagged])).status).toBe(200);
+    const row=f.storage.fetchLogPage({workspaceId:"workspace",sinceRelaySeq:0,limit:10}).rows[0]!;
+    const published=JSON.stringify({payload:JSON.parse(row.payloadJson),admission:row.settlementAdmission});
+    expect(published).not.toContain(releaseId);
+    const releaseDigest=JSON.parse(row.payloadJson).release.releaseDigest;
+    expect(releaseDigest).toBe(hash(Buffer.from(releaseId)));
+    expect(row.settlementAdmission).toMatchObject({releaseDigest});
+    expect((await f.request("complete",{releaseId:releaseDigest})).status).toBe(200);
+    expect((await f.request("status")).body.status).toBe("held");
+    const accepted=f.tagged(1,1,"moment.append");
+    expect((await f.push([accepted])).body).not.toHaveProperty("releaseRefusals");
+    const shared=createShareReadQueries(f.storage,500).filteredLogPage("workspace","share",{paths:["docs"],versionId:null,access:"edit"},0,10,"authenticated");
+    expect(JSON.stringify(shared)).not.toContain(releaseId);
+    expect(shared.ops).toHaveLength(1);
+  } finally {f.close();}
+});
+
+it("review round: abandonment refunds usage and succeeds while the workspace is over quota", async () => {
+  const f=fixture({workspaceQuotaBytes:1_000_000});
+  try {
+    const acquired=await f.request("acquire");
+    const before=2_000_000;
+    f.write(db=>db.prepare("UPDATE sync_relay_workspace_usage SET usage_bytes=? WHERE workspace_id='workspace'").run(before));
+    expect((await f.request("abandon",{claimDigest:acquired.body.claim.digest})).status).toBe(200);
+    expect(Number(f.raw.prepare("SELECT usage_bytes FROM sync_relay_workspace_usage WHERE workspace_id='workspace'").get()!.usage_bytes)).toBeLessThan(before);
+    expect((await f.request("status")).body.code).toBe("release-abandoned");
+  } finally {f.close();}
+});
+
+
+it("retries a tagged moment's settlement refusal without restoring a client payload", async () => {
+  const f=fixture();
+  try {
+    const tagged=f.tagged(0,1,"moment.append"), op={...tagged,payload:{...tagged.payload,settlementReference:{}}};
+    const first=await f.push([op]);
+    expect(first.status).toBe(200);
+    expect(first.body.settlementRefusals).toHaveLength(1);
+    expect(first.body).not.toHaveProperty("releaseRefusals");
+    const retry=await f.push([op]);
+    expect(retry.status).toBe(200);
+    expect(retry.body).toMatchObject({inserted:0,skipped:1,settlementRefusals:first.body.settlementRefusals});
+    const stored=JSON.parse(f.storage.fetchLogPage({workspaceId:"workspace",sinceRelaySeq:0,limit:10}).rows[0]!.payloadJson);
+    expect(stored).not.toHaveProperty("authors");
   } finally {f.close();}
 });

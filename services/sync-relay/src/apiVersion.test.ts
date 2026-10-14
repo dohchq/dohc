@@ -11,7 +11,9 @@ function headers(version?: string): Headers {
 
 describe("relay API version", () => {
   it("serves the version this build speaks, and a request that names none", () => {
-    expect(RELAY_API_VERSIONS.max).toBe(RELAY_API_VERSION);
+    expect(RELAY_API_VERSION).toBe(1);
+    expect(RELAY_API_VERSIONS).toEqual({min:1,max:2});
+    expect(relayApiVersionRefusal(headers("2"))).toBeNull();
     expect(relayApiVersionRefusal(headers(String(RELAY_API_VERSION)))).toBeNull();
     expect(relayApiVersionRefusal(headers())).toBeNull();
   });

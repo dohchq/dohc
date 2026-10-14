@@ -2,19 +2,19 @@ import type {LiveObjectBinding} from "./liveObjectBinding";
 import {parseLiveDocumentKey, parseLiveUpdateDigest, type AdmittedLiveUpdate, type LiveDocumentKey, type LiveUpdateReceipt} from "./liveUpdateAdmission";
 
 export interface ReleasePublicationTag {
-  releaseId: string;
+  releaseDigest: string;
   restoreFenceGeneration: number;
   document: LiveDocumentKey;
 }
 export function parseReleasePublicationTag(value: unknown): ReleasePublicationTag {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new TypeError("Invalid release tag.");
   const raw = value as Record<string,unknown>;
-  if (Object.keys(raw).sort().join() !== "document,releaseId,restoreFenceGeneration" ||
+  if (Object.keys(raw).sort().join() !== "document,releaseDigest,restoreFenceGeneration" ||
     !Number.isSafeInteger(raw.restoreFenceGeneration) || Number(raw.restoreFenceGeneration) < 0) throw new TypeError("Invalid release tag.");
   const document = parseLiveDocumentKey(raw.document);
   parseLiveUpdateDigest(document.lineageClaimId);
   if (document.mainVersionId !== "main") throw new TypeError("Invalid release document.");
-  return {releaseId:parseLiveUpdateDigest(raw.releaseId),restoreFenceGeneration:Number(raw.restoreFenceGeneration),document};
+  return {releaseDigest:parseLiveUpdateDigest(raw.releaseDigest),restoreFenceGeneration:Number(raw.restoreFenceGeneration),document};
 }
 export interface ReleaseHistoryProof {
   checkpoint: {eventCount: number; terminal: LiveUpdateReceipt | null; binding: LiveObjectBinding;
@@ -24,16 +24,19 @@ export interface ReleaseHistoryProof {
   terminal: LiveUpdateReceipt | null;
   evidenceDigest: string;
 }
-export interface RelayReleaseClaim {
+export interface RelayReleaseClaimSummary {
   digest: string;
   computerName: string;
   anchor: {document: LiveDocumentKey; relayDatabaseNamespace: string; replicationEpoch: string; streamIdentity: string;
-    restoreFenceGeneration: number; cursor: number; proof: ReleaseHistoryProof; receipts: ReleaseDeliveryReceipt[]};
+    restoreFenceGeneration: number; cursor: number};
+}
+export interface RelayReleaseClaim extends RelayReleaseClaimSummary {
+  anchor: RelayReleaseClaimSummary["anchor"] & {proof: ReleaseHistoryProof; receipts: ReleaseDeliveryReceipt[]};
 }
 export interface ReleaseDeliveryReceipt {deliveryId: string; metadata: AdmittedLiveUpdate["metadata"] | null}
 export type ReleaseClaimRefusalCode = "release-abandoned" | "release-claimed" | "release-changed" | "restore-in-progress" |
   "restore-fenced" | "workspace-changed" | "document-unavailable" | "live-again";
-export interface RelayReleaseRefusal {ok: false; code: ReleaseClaimRefusalCode; claim?: RelayReleaseClaim; path?: string; message?: string}
+export interface RelayReleaseRefusal {ok: false; code: ReleaseClaimRefusalCode; claim?: RelayReleaseClaimSummary; path?: string; error: string}
 export interface RelayReleaseRequest {
   action: "acquire" | "status" | "complete" | "abandon" | "catch-up";
   document: LiveDocumentKey;
@@ -49,8 +52,8 @@ export interface RelayReleaseRequest {
 }
 export type RelayReleaseResponse =
   | RelayReleaseRefusal
-  | {ok: true; status: "held"; claim: RelayReleaseClaim}
-  | {ok: true; status: "not-held"; claim?: RelayReleaseClaim}
+  | {ok: true; status: "held"; claim: RelayReleaseClaimSummary | RelayReleaseClaim}
+  | {ok: true; status: "not-held"; claim?: RelayReleaseClaimSummary}
   | {ok: true; status: "unresolved"; code: ReleaseClaimRefusalCode}
   | {ok: true; history: {checkpoint: {cursor: number; bytes: string; digest: string};
       events: {metadata: AdmittedLiveUpdate["metadata"]; updateBytes: string}[]; proof: ReleaseHistoryProof; receipts: ReleaseDeliveryReceipt[]}};
@@ -58,7 +61,7 @@ export type ReleasePublicationRefusalReason = "release-publication-fenced" | "re
 export interface ReleasePublicationAdmission {
   status: "refused";
   kind: "release-publication";
-  releaseId: string;
+  releaseDigest: string;
   reason: ReleasePublicationRefusalReason;
 }
 export interface ReleasePushRefusal extends ReleasePublicationAdmission {originId: string; originSeq: number}

@@ -1,7 +1,7 @@
 import {createHash} from "node:crypto";
 import {parseLiveDocumentKey, parseLiveUpdateDigest, parseLiveUpdateIdentifier, type LiveDocumentKey} from "@dohc/live-session-contract/live-update-admission";
 import {type LiveObjectBinding} from "@dohc/live-session-contract/live-object-binding";
-import type {RelayReleaseClaim, RelayReleaseRequest, RelayReleaseResponse} from "@dohc/live-session-contract/release-claim";
+import type {RelayReleaseClaim, RelayReleaseClaimSummary, RelayReleaseRequest, RelayReleaseResponse} from "@dohc/live-session-contract/release-claim";
 import type {StorageContext} from "./context";
 import {badRequest, notFound, ReleaseClaimRefusal} from "../errors";
 import {SERVICE_HOST_ENROLLMENTS} from "./serviceHostEnrollment";
@@ -26,6 +26,10 @@ function readClaim(value: unknown): StoredClaim | null {
 function publicClaim(claim: StoredClaim): RelayReleaseClaim {
   const {releaseDigest: _secret, ...result} = claim; return result;
 }
+function claimSummary(claim: StoredClaim): RelayReleaseClaimSummary {
+  const {proof: _proof, receipts: _receipts, ...anchor} = claim.anchor;
+  return {digest:claim.digest,computerName:claim.computerName,anchor};
+}
 const enablementStatements = new WeakMap<SqliteDb,{claim: ReturnType<SqliteDb["prepare"]>; fence: ReturnType<SqliteDb["prepare"]>}>();
 function enablementQueries(storage: StorageContext) {
   let queries=enablementStatements.get(storage.db);
@@ -47,7 +51,7 @@ function ownedEnrollment(storage: StorageContext, document: LiveDocumentKey, own
 export function requireNoReleaseClaim(storage: StorageContext, document: {workspaceId: string; objectId: string}, path?: string): void {
   const row = enablementQueries(storage).claim.get(document.workspaceId,document.objectId);
   const claim = readClaim(row?.release_claim_json);
-  if (claim) throw new ReleaseClaimRefusal("release-claimed", publicClaim(claim), path ?? String(row!.path));
+  if (claim) throw new ReleaseClaimRefusal("release-claimed", claimSummary(claim), path ?? String(row!.path));
 }
 export function requireReleaseEnablement(storage: StorageContext, document: {workspaceId: string; objectId: string}, path?: string): void {
   requireNoReleaseClaim(storage,document,path);
@@ -117,9 +121,10 @@ export function releaseClaimRequest(storage: StorageContext, ownerUserId: string
     }
   } catch {throw badRequest("Invalid release identity.");}
   const scope = {...request,document};
-  return storage.tx(() => {
+  const transact = request.action === "status" || request.action === "catch-up" ? storage.readTx.bind(storage) : storage.tx.bind(storage);
+  return transact((): RelayReleaseResponse => {
     guard(); const enrollment = ownedEnrollment(storage,document,ownerUserId);
-    if ((request.action === "acquire" || request.action === "complete") && tombstone(storage,document,releaseDigest!)) throw new ReleaseClaimRefusal("release-abandoned");
+    if (releaseDigest && ["acquire","complete","status"].includes(request.action) && tombstone(storage,document,releaseDigest)) throw new ReleaseClaimRefusal("release-abandoned");
     if (!enrollment) {
       if (request.action === "complete") return {ok:true,status:"not-held"};
       throw new ReleaseClaimRefusal("document-unavailable");
@@ -132,9 +137,9 @@ export function releaseClaimRequest(storage: StorageContext, ownerUserId: string
     if (request.action === "abandon") {
       if (storage.db.prepare(`SELECT 1 FROM ${RELEASE_TOMBSTONES} WHERE workspace_id=? AND object_id=? AND claim_digest=?`)
         .get(document.workspaceId,document.objectId,request.claimDigest)) return {ok:true,status:"not-held"};
-      if (!claim || claim.digest !== request.claimDigest) throw new ReleaseClaimRefusal("release-changed",claim ? publicClaim(claim) : undefined);
+      if (!claim || claim.digest !== request.claimDigest) throw new ReleaseClaimRefusal("release-changed",claim ? claimSummary(claim) : undefined);
       const charge = Buffer.byteLength(JSON.stringify([document.workspaceId,document.objectId,claim.releaseDigest,claim.digest,0]));
-      setClaim(storage,document,null,enrollment.release_claim_json); assertWorkspaceQuota(storage,document.workspaceId,charge);
+      setClaim(storage,document,null,enrollment.release_claim_json);
       storage.db.prepare(`INSERT INTO ${RELEASE_TOMBSTONES} VALUES (?,?,?,?,0)`).run(document.workspaceId,document.objectId,claim.releaseDigest,claim.digest);
       storage.db.prepare("UPDATE sync_relay_workspace_usage SET usage_bytes=usage_bytes+? WHERE workspace_id=?").run(charge,document.workspaceId);
       return {ok:true,status:"not-held"};
@@ -143,11 +148,11 @@ export function releaseClaimRequest(storage: StorageContext, ownerUserId: string
       try {currentScope(storage,scope,enrollment);} catch (error) {
         if (!(error instanceof ReleaseClaimRefusal)) throw error; return {ok:true,status:"unresolved",code:error.code};
       }
-      if (claim?.releaseDigest === releaseDigest && claim) return {ok:true,status:"held",claim:publicClaim(claim)};
-      return {ok:true,status:"not-held",...(claim ? {claim:publicClaim(claim)} : {})};
+      if (claim && claim.releaseDigest === releaseDigest) return {ok:true,status:"held",claim:claimSummary(claim)};
+      return {ok:true,status:"not-held",...(claim ? {claim:claimSummary(claim)} : {})};
     }
     if (request.action === "acquire" && claim) {
-      if (claim.releaseDigest !== releaseDigest) throw new ReleaseClaimRefusal("release-claimed",publicClaim(claim),String(enrollment.path));
+      if (claim.releaseDigest !== releaseDigest) throw new ReleaseClaimRefusal("release-claimed",claimSummary(claim),String(enrollment.path));
       return {ok:true,status:"held",claim:publicClaim(claim)};
     }
     const {authority,cursor} = currentScope(storage,scope,enrollment);

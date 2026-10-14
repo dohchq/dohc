@@ -805,7 +805,7 @@ export interface SyncRelayStorage {
     workspaceId: string;
     originId: string;
     ops: SyncRelayLogInput[];
-    ownerUserId?: string;
+    actorUserId?: string;
     // MU-C4 revoke-race gate: runs inside the append's BEGIN IMMEDIATE
     // transaction, i.e. under the SQLite write lock that serializes revokes,
     // before anything is inserted. A throwing guard rolls the whole batch

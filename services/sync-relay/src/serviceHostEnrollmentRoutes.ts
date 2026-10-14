@@ -10,6 +10,7 @@ import {effectiveShareSelector, isLiveEditShareSelector, parseStoredAnyShareSele
 import {canonicalLiveSelector} from "./storage/liveDocumentAuthority";
 import {parseShareId, parseWorkspaceId} from "./requestInputs";
 import {badRequest, errorResponse, notFound, RelayError, ReleaseClaimRefusal} from "./errors";
+import {relayApiVersionRefusal} from "./apiVersion";
 import {releaseClaimRequest} from "./storage/releaseClaim";
 import type {StorageContext} from "./storage/context";
 
@@ -124,10 +125,13 @@ export function createServiceHostEnrollmentRoutes(options: {
       if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw badRequest("Invalid live host request.");
       const input = raw as Record<string, unknown>;
       if (request.method === "POST" && Object.hasOwn(input,"release")) {
+        const versionRefusal = relayApiVersionRefusal(request.headers,{min:2,max:2});
+        if (versionRefusal) throw versionRefusal;
         if (Object.keys(input).length !== 1 || !input.release || typeof input.release !== "object" ||
           (input.release as {document?: {workspaceId?: unknown}}).document?.workspaceId !== workspaceId) throw badRequest("Invalid release workspace.");
         const result = releaseClaimRequest(storage as StorageContext,actor.userId,input.release,guard);
-        host.reconcile(); return response(result);
+        if (["acquire","complete","abandon"].includes((input.release as {action:string}).action)) host.reconcile();
+        return response(result);
       }
       if (request.method === "DELETE") {
         if (Object.keys(input).some(key => !["path","objectId","retire","restoreFenceGeneration"].includes(key)) || typeof input.path !== "string" ||

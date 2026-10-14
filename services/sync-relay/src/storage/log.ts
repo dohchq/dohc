@@ -23,7 +23,8 @@ import {
 import { rowToLogRow } from "./rows";
 import { notifyDesktopReadiness } from "../desktopReadinessChanges";
 import {confirmLiveApplication} from "./liveApplicationAuthorship";
-import {admitReleasePublication, releasePublicationTag, originalReleasePayload} from "./releasePublication";
+import {badRequest, notFound} from "../errors";
+import {admitReleasePublication, releasePublicationTag} from "./releasePublication";
 
 const logPageStatements = new WeakMap<SqliteDb, ReturnType<SqliteDb["prepare"]>>();
 
@@ -31,7 +32,7 @@ export function appendLogBatch(storage: StorageContext, input: {
     workspaceId: string;
     originId: string;
     ops: SyncRelayLogInput[];
-    ownerUserId?: string;
+    actorUserId?: string;
     guard?: (context: AppendLogBatchGuardContext) => void;
   }): AppendLogBatchResult {
     return storage.tx(() => appendLogBatchInTransaction(storage, input));
@@ -42,7 +43,7 @@ export function appendLogBatchInTransaction(storage: StorageContext, input: {
   workspaceId: string;
   originId: string;
   ops: SyncRelayLogInput[];
-  ownerUserId?: string;
+  actorUserId?: string;
   guard?: (context: AppendLogBatchGuardContext) => void;
 }): AppendLogBatchResult {
       for (const op of input.ops) {
@@ -78,9 +79,9 @@ export function appendLogBatchInTransaction(storage: StorageContext, input: {
       );
       for (const op of input.ops) {
         const release = releasePublicationTag(op);
-        if (release && (release.document.workspaceId !== input.workspaceId || !input.ownerUserId || !storage.workspaceIsOwnedBy(input.workspaceId,input.ownerUserId))) {
-          // Recheck tagged workspace authority even for duplicate coordinates.
-          admitReleasePublication(storage,op,input.workspaceId,input.ownerUserId);
+        if (release) {
+          if (release.document.workspaceId !== input.workspaceId) throw badRequest("Release publication belongs to another workspace.");
+          if (!input.actorUserId || !storage.workspaceIsOwnedBy(input.workspaceId,input.actorUserId)) throw notFound();
         }
         if (op.originSeq <= currentMax) {
           const existing = existingStmt.get(
@@ -91,7 +92,7 @@ export function appendLogBatchInTransaction(storage: StorageContext, input: {
           if (
             existing &&
             existing.op_kind === op.opKind &&
-            existing.payload_json === (originalReleasePayload(op) ?? op.payloadJson) &&
+            existing.payload_json === op.payloadJson &&
             (release || existing.settlement_admission_json === (op.settlementAdmission === undefined ? null : JSON.stringify(op.settlementAdmission))) &&
             Number(existing.recorded_at_ms) === op.recordedAtMs
           ) {
@@ -121,10 +122,9 @@ export function appendLogBatchInTransaction(storage: StorageContext, input: {
 
       let batchCoordinates: Map<number, SyncRelayLogInput> | undefined;
       for (const op of newOps) {
-        admitReleasePublication(storage,op,input.workspaceId,input.ownerUserId);
+        admitReleasePublication(storage,op,input.workspaceId);
         if (op.settlementAdmission && "kind" in op.settlementAdmission) continue;
         commitHostedSettlement(storage, op, input.workspaceId, input.originId);
-        if (op.settlementAdmission?.status === "refused") op.payloadJson = originalReleasePayload(op) ?? op.payloadJson;
         if (op.opKind === "live.audit.application") {
           batchCoordinates ??= new Map(newOps.map(entry => [entry.originSeq, entry]));
           confirmLiveApplication(storage, op, input.workspaceId, input.originId, batchCoordinates);
