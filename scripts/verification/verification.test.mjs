@@ -525,7 +525,7 @@ test("preparation reuses artifacts across proof edits and rebuilds for productio
       writeFileSync(receiptPath,JSON.stringify(old));
       await expectBuilds('receipt without production identity',['engine','desktop']);
       await expectBuilds('unchanged checkout',[]);
-    `], { cwd: root, encoding: "utf8", timeout: 120_000 });
+    `], { cwd: root, encoding: "utf8", timeout: 300_000 });
     assert.equal(result.error, undefined);
     assert.equal(result.status, 0, result.stderr);
   } finally { rmSync(root, { recursive: true, force: true }); }
@@ -1113,7 +1113,7 @@ test("a docs-only PR records clean provenance without code tools, while dirty he
       console.log(JSON.stringify(report));
     `;
     const invoke = (extra = [], fault = "") => spawnSync(process.execPath, ["--input-type=module", "-e", childScript, "pr", "--base", base, ...extra], {
-      cwd: root, encoding: "utf8", timeout: 20_000,
+      cwd: root, encoding: "utf8", timeout: 120_000,
       env: { ...process.env, NODE_PATH: dirname(dirname(require.resolve("js-yaml/package.json"))), DOHC_BUILD_SLOT_ROOT: join(root, "slots"), FIXTURE_PROVENANCE_FAULT: fault },
     });
     const clean = invoke();

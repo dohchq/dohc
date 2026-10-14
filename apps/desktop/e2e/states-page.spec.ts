@@ -228,7 +228,8 @@ async function press(page: Page, button: Locator): Promise<void> {
 // @states-page and must not stand in for the pixels.
 test("@states-page @states-baselines every shared part matches its baseline in both themes", async () => {
   test.skip(process.platform !== "win32", "the baselines were taken on Windows");
-  test.setTimeout(240_000);
+  // About 210s unloaded (3.5 min in gate logs), and over 240s with a gate or build alongside.
+  test.setTimeout(480_000);
   await withDesktop({ DOHC_DEV_TOOLS: "1" }, async (page) => {
     expect(await page.evaluate(() => window.devicePixelRatio), "the baselines are one device pixel per CSS pixel").toBe(1);
     await page.setViewportSize({ width: WIDTH, height: 900 });
