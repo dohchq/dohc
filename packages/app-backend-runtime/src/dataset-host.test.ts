@@ -987,3 +987,23 @@ it("pins owner-local agent approvals to initial and migrated rule history", asyn
   expect(f.host.history("owner",scope).entries[0]).toMatchObject({approvalAgent:agent,schema:{revisionHash:revision.revisionSha256}});
   expect(f.host.historyRevision("owner",{...scope,revisionSha256:revision.revisionSha256})).toMatchObject({approvalAgent:agent});
 });
+
+it("reads all local history heads in one owner-authorized metadata transaction", async () => {
+  const f = await fixture(); await f.activate();
+  await f.invoke("owner", id(6), { value: "private" });
+  const prepared = vi.spyOn(f.db, "prepare"), exec = vi.spyOn(f.db, "exec");
+  const heads = f.host.historyHeads("owner", { workspaceId: scope.workspaceId, limit: 1 });
+  expect(heads).toMatchObject([{ datasetId: scope.datasetId, name: "Orders", headRevision: 1, lineage: expect.stringMatching(/^[a-f0-9]{64}$/), entries: [{ revision: 1 }] }]);
+  expect(exec.mock.calls).toEqual([["BEGIN IMMEDIATE"], ["COMMIT"]]);
+  expect(prepared.mock.calls.every(([sql]) => !String(sql).includes("e.result_json"))).toBe(true);
+  const page = f.host.history("owner", { ...scope, metadataOnly: true });
+  expect(page).toMatchObject({ lineage: heads[0]!.lineage, archived: false, olderRecordedAtMs: expect.any(Number) });
+  expect(page.entries[0]!.undo).toBeUndefined();
+  for (const caller of ["helper", "friend"] as const) {
+    expect(() => f.host.historyHeads(caller, { workspaceId: scope.workspaceId })).toThrow("You do not have access");
+    expect(() => f.host.history(caller, { ...scope, metadataOnly: true })).toThrow("You do not have access");
+  }
+  f.host.archiveDataset("owner", scope);
+  expect(f.host.historyHeads("owner", { workspaceId: scope.workspaceId })).toEqual([]);
+  expect(f.host.history("owner", { ...scope, metadataOnly: true }).archived).toBe(true);
+});

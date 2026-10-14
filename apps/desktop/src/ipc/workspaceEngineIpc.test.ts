@@ -12,7 +12,7 @@ import { createWorkspaceEngineIpc } from "./workspaceEngineIpc";
 import { CHANNELS } from "./channels";
 import type { EngineMomentRecord, RebuildEngineStoreResult, SyncStatusResult } from "./bridgeContract";
 import type { EngineMomentAuthorNames } from "./engineHistoryIpc";
-import { GetCollectionRecordHistoryResult, captureRecoveryOperations, fileObservationOperations, engineYDocAdmissionOperations, engineYDocSaveOperations } from "./bridgeContract";
+import { GetCollectionRecordHistoryResult, historyOperations, captureRecoveryOperations, fileObservationOperations, engineYDocAdmissionOperations, engineYDocSaveOperations } from "./bridgeContract";
 import { operationBridge } from "./operationTable";
 import { engineMomentSourceLabel } from "../renderer/workbench/EngineHistory";
 import { createWorkspaceAuthorityOwner, type WorkspaceAuthorityLease } from "../workspaces/workspaceAuthorityOwner";
@@ -195,7 +195,9 @@ async function harness(sharedStore?: SharedHistoryStore, policyRoot?: string, re
   const recordHistoryPersonName = vi.fn((_workspaceId: string, userId: string, _sender: Sender): string | null => userId === "person-local" ? null : userId);
   const prepareRecordHistoryPeople = vi.fn<(_workspaceId: string, userIds: readonly string[], _sender: Sender) => void>();
   const prepareNamed = vi.fn<NonNullable<EngineMomentAuthorNames["prepare"]>>();
+  const historyCollections = vi.fn(async () => ({ scope: "test", local: () => ({ pages: [], transferred: [] }), remote: async () => { throw new Error("unexpected remote history"); } }));
   const registrations = createWorkspaceEngineIpc({
+    historyCollections,
     readWorkspaceEnginePolicy: readPolicy,
     localPersonId: () => "person-local",
     localPersonName: () => "Ice",
@@ -237,7 +239,7 @@ async function harness(sharedStore?: SharedHistoryStore, policyRoot?: string, re
     adapter, capture, requireEngineCapture, getStatus, hasAgentRun, closeActivity, probe, move, reopen,
     notify, writable, requireWorkspace, displayName, syncProjection, canonicalWorkspaceFor, requireSessions,
     events, handlers, invoke, routed, retryOwnerLiveDelivery, retryCloudSync, retryFileObservation, automationRunOnThisComputer, relay, setMissingAdapter: () => { missingAdapter = true; },
-    storeWorkspaces, readPolicy,
+    storeWorkspaces, readPolicy, historyCollections,
     sent, recordHistoryPersonName, prepareRecordHistoryPeople,
     signIn: (account: string | null) => { session.account = account; session.generation += 1; },
     /** A credential load begins: no account is known until it reads the store. Resolves the load with its account. */
@@ -253,7 +255,7 @@ async function harness(sharedStore?: SharedHistoryStore, policyRoot?: string, re
 
 const channels = [
   CHANNELS.listCollections, CHANNELS.getCollection, CHANNELS.queryCollectionRecords, CHANNELS.getCollectionRecordHistory,
-  CHANNELS.locateRecordHistoryRun, CHANNELS.listEngineMoments, CHANNELS.readEngineMoment, CHANNELS.restoreEngineMomentFile,
+  CHANNELS.locateRecordHistoryRun, historyOperations.listHistory.channel, CHANNELS.listEngineMoments, CHANNELS.readEngineMoment, CHANNELS.restoreEngineMomentFile,
   CHANNELS.getSyncStatus, captureRecoveryOperations.getCaptureRecoveryStatus.channel, captureRecoveryOperations.clearCaptureRecovery.channel,
   fileObservationOperations.retryFileObservation.channel, CHANNELS.retryFileRecovery, CHANNELS.retryOwnerLiveDelivery, CHANNELS.retryCloudSync,
   CHANNELS.rebuildEngineStore,
@@ -1263,5 +1265,56 @@ describe("owner History path policy", () => {
     expect(h.capture.readMoment).not.toHaveBeenCalled();
     expect(h.readPolicy).not.toHaveBeenCalled();
     expect(h.notify).not.toHaveBeenCalled();
+  });
+});
+
+describe("merged History IPC", () => {
+  it("rejects a reply after this renderer changes workspace", async () => {
+    const h = await harness(), reached = deferred<void>(), reply = deferred<Awaited<ReturnType<WorkspaceEngineCapture["listMoments"]>>>();
+    h.capture.listMoments.mockImplementation(async () => { reached.resolve(); return reply.promise; });
+    const result = Promise.resolve(h.invoke(historyOperations.listHistory.channel));
+    const rejected = expect(result).rejects.toThrow("window changed workspaces");
+    await reached.promise;
+    await h.renderers.open(h.sender, { workspaceId: "other", attachmentId: Symbol("other") }, "document-1");
+    reply.resolve({ ...historyPage(), nextCursor: null });
+    await rejected;
+  });
+
+  it("fails closed before reading either source when policy is unreadable", async () => {
+    const h = await harness();
+    h.readPolicy.mockResolvedValue({ filesPolicy: null, visibilityPolicy: null, errors: ["Invalid policy"], unreadable: [".dohc/files.toml"] });
+    await expect(h.invoke(historyOperations.listHistory.channel)).resolves.toMatchObject({ status: "policy-unreadable" });
+    expect(h.capture.listMoments).not.toHaveBeenCalled();
+    expect(h.historyCollections).not.toHaveBeenCalled();
+  });
+
+  it("discards policy-hidden positions and retains protected activity", async () => {
+    const h = await harness();
+    h.readPolicy.mockResolvedValue({ filesPolicy: [{ path: "private/**", tracked: false }], visibilityPolicy: null, errors: [], unreadable: [] });
+    const hidden = historyPage("private/a.md").moments[0]!;
+    h.capture.listMoments.mockResolvedValue({ ...historyPage(), moments: [hidden, { ...hidden, id: "protected", protected: true, momentOrder: 9 }], nextCursor: null });
+    await expect(h.invoke(historyOperations.listHistory.channel)).resolves.toMatchObject({ status: "ready", entries: [{ kind: "file", moment: { id: "protected" } }], nextCursor: null });
+  });
+
+  it("reads imported share scope without owner capture, policy, or Collection access", async () => {
+    const listHistoryPage = vi.fn(async () => ({ activeVersion: { id: "main" }, ...historyPageFields,
+      moments: historyPage().moments, nextCursor: null, latestMomentOrder: 10, protectedMoments: [] }));
+    const h = await harness({ listHistoryPage, getMoment: vi.fn(async () => null) } as unknown as SharedHistoryStore);
+    await expect(h.invoke(historyOperations.listHistory.channel, { workspaceId: "workspace", object: { kind: "file", objectId: "object" } })).resolves.toMatchObject({ status: "ready", entries: [{ kind: "file" }] });
+    expect(listHistoryPage).toHaveBeenCalledWith({ workspaceId: "workspace", objectId: "object", limit: 50 });
+    expect(h.requireEngineCapture).not.toHaveBeenCalled();
+    expect(h.readPolicy).not.toHaveBeenCalled();
+    expect(h.historyCollections).not.toHaveBeenCalled();
+  });
+
+  it("keeps Collections out of named versions and routes per-file object identity", async () => {
+    const h = await harness();
+    h.capture.listMoments.mockResolvedValue({ ...historyPage(), startCursor: { ...historyPageFields.startCursor, versionId: "branch" }, moments: [], nextCursor: null });
+    const local = vi.fn(() => ({ pages: [], transferred: [] }));
+    h.historyCollections.mockResolvedValue({ scope: "test", local, remote: async () => { throw Error("unexpected remote"); } });
+    await expect(h.invoke(historyOperations.listHistory.channel, { workspaceId: "workspace", versionId: "branch" })).resolves.toMatchObject({ versionId: "branch", entries: [] });
+    expect(local).not.toHaveBeenCalled();
+    await h.invoke(historyOperations.listHistory.channel, { workspaceId: "workspace", versionId: "branch", object: { kind: "file", objectId: "object" } });
+    expect(h.capture.listMoments).toHaveBeenLastCalledWith({ limit: 50, versionId: "branch", objectId: "object" });
   });
 });

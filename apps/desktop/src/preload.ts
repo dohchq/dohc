@@ -68,6 +68,7 @@ import {
   workspaceSearchOperations,
   folderAppOfferOperations,
   workspaceVersionOperations,
+  historyOperations,
   engineYDocAdmissionOperations,
   engineYDocSaveOperations,
   parseWorkspaceActivityEventForIpc,
@@ -115,6 +116,7 @@ const rendererDocumentId = crypto.randomUUID();
 
 const bridge: DohcDesktopBridge = {
   ...operationBridge(systemMotionOperations, invoke),
+  ...operationBridge(historyOperations, invoke),
   ...operationBridge(shareDirectWriteDeliveryOperations, invoke),
   ...operationBridge(shareCopyOperations, invoke),
   ...operationBridge(accessOperations, invoke),

@@ -436,7 +436,12 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
       reconcileAttempt(input: { datasetId: string; reference: string; acknowledge: true }) { assertCurrent(); return host.reconcileAttempt(owner, { workspaceId, ...input }); },
       cancelAttempt(input: { datasetId: string; reference: string; acknowledge: true }) { assertCurrent(); return host.cancelAttempt(owner, { workspaceId, ...input }); },
       historyRevision(input: { datasetId: string; revisionSha256: string }) { assertCurrent(); return host.historyRevision(owner, { workspaceId, ...input }); },
-      history(input: { datasetId: string; beforeRevision?: number; limit?: number }) { assertCurrent(); return host.history(owner, { workspaceId, ...input }); },
+      historyHeads(input: { positions?: Array<{ datasetId: string; beforeRevision: number }>; limit?: number } = {}) {
+        assertCurrent();
+        const transferred = db.prepare("SELECT dataset_id FROM local_dataset_transfers WHERE workspace_id=? ORDER BY dataset_id").all(workspaceId).map(row => String(row.dataset_id));
+        return { transferred, pages: host.historyHeads(owner, { workspaceId, ...input, skip: transferred }) };
+      },
+      history(input: { datasetId: string; beforeRevision?: number; limit?: number; metadataOnly?: boolean; signal?: AbortSignal }) { assertCurrent(); return host.history(owner, { workspaceId, ...input }); },
       async permissions(input: { datasetId: string; after?: string; limit?: number }) {
         assertCurrent();
         return DatasetPermissionsPage.parse(host.permissions(owner, { workspaceId, datasetId: input.datasetId, after: input.after, limit: input.limit }));

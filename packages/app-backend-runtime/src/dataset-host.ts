@@ -292,6 +292,12 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
     if (!row) denied();
     return parseDatasetRevision(JSON.parse(String(row.revision_json)));
   }
+  function historyLineage(key: DatasetScope): string {
+    const row = db.prepare("SELECT checkpoint_digest AS digest FROM dohc_dataset_journals WHERE workspace_id=? AND dataset_id=? AND checkpoint_revision=0 UNION ALL SELECT json_extract(cursor_json,'$.digest') AS digest FROM dohc_dataset_checkpoint_history WHERE workspace_id=? AND dataset_id=? AND revision=0 LIMIT 1")
+      .get(key.workspaceId, key.datasetId, key.workspaceId, key.datasetId);
+    if (!row) throw new DatasetHostError("conflict", "Collection history lineage is unavailable.");
+    return String(row.digest);
+  }
   function lifecycle(key: DatasetScope): { archived: boolean; generation: number; reason: string } {
     const row = db.prepare("SELECT archived,generation,reason FROM dohc_dataset_lifecycle WHERE workspace_id=? AND dataset_id=?").get(key.workspaceId,key.datasetId);
     return row ? { archived: Number(row.archived) === 1, generation: Number(row.generation), reason: String(row.reason) } : { archived: false, generation: 0, reason: "" };
@@ -766,17 +772,37 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
       const current = journal.head(key, () => { owner(context, key); });
       return { revision: revision(key), ...artifacts(key), active: current.active && !lifecycle(key).archived, cursor: current.cursor };
     },
-    history(context: Context, raw: DatasetScope & { beforeRevision?: number; limit?: number }) {
+    /** All local heads share one metadata snapshot; no source, records, or undo receipts. */
+    historyHeads(context: Context, raw: { workspaceId: string; positions?: Array<{ datasetId: string; beforeRevision: number }>; skip?: string[]; limit?: number }) {
+      const workspaceId = text(raw.workspaceId), limit = raw.limit ?? 51;
+      if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) throw new DatasetHostError("invalid", "Invalid Collection history page.");
+      const positions = raw.positions && new Map(raw.positions.map(p => [p.datasetId, p.beforeRevision]));
+      const skip = new Set(raw.skip);
+      return transaction(() => {
+        owner(context, { workspaceId });
+        const rows = db.prepare("SELECT c.dataset_id,json_extract(c.revision_json,'$.definition.name') AS name,j.revision FROM dohc_dataset_catalog c JOIN dohc_dataset_journals j ON j.workspace_id=c.workspace_id AND j.dataset_id=c.dataset_id LEFT JOIN dohc_dataset_lifecycle l ON l.workspace_id=c.workspace_id AND l.dataset_id=c.dataset_id WHERE c.workspace_id=? AND COALESCE(l.archived,0)=0 ORDER BY c.dataset_id").all(workspaceId);
+        const pages = rows.filter(row => !skip.has(String(row.dataset_id)) && (!positions || positions.has(String(row.dataset_id)))).map(row => {
+          const datasetId = String(row.dataset_id), key = { workspaceId, datasetId }, before = positions?.get(datasetId) ?? Number.MAX_SAFE_INTEGER;
+          if (!Number.isSafeInteger(before) || before < 1) throw new DatasetHostError("invalid", "Invalid Collection history position.");
+          return { datasetId, name: String(row.name), headRevision: Number(row.revision), lineage: historyLineage(key),
+            ...readDatasetHistory(db, key, undefined, before, limit, true) };
+        });
+        owner(context, { workspaceId });
+        return pages;
+      });
+    },
+    history(context: Context, raw: DatasetScope & { beforeRevision?: number; limit?: number; metadataOnly?: boolean }) {
       const key = scope(raw), limit = raw.limit ?? 50;
       if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100 || raw.beforeRevision !== undefined && (!Number.isSafeInteger(raw.beforeRevision) || raw.beforeRevision < 1)) throw new DatasetHostError("invalid", "Invalid Collection history page.");
       return transaction(() => {
-        owner(context, key); const approved = revision(key);
+        owner(context, key); const approved = raw.metadataOnly ? undefined : revision(key);
         const head = db.prepare("SELECT revision FROM dohc_dataset_journals WHERE workspace_id=? AND dataset_id=?").get(key.workspaceId, key.datasetId);
         if (!head) throw new DatasetHostError("conflict", "Collection history is unavailable.");
         const before = raw.beforeRevision ?? Number.MAX_SAFE_INTEGER;
-        const page = readDatasetHistory(db, key, approved, before, limit);
+        const page = readDatasetHistory(db, key, approved, before, limit, raw.metadataOnly);
         owner(context, key);
-        return { datasetId: key.datasetId, headRevision: Number(head.revision), ...page };
+        return { datasetId: key.datasetId, headRevision: Number(head.revision), ...page,
+          ...(raw.metadataOnly ? { lineage: historyLineage(key), archived: lifecycle(key).archived } : {}) };
       });
     },
     historyRevision(context: Context, raw: DatasetScope & { revisionSha256: string }) {

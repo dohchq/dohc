@@ -5839,6 +5839,7 @@ function registerIpcHandlers(): void {
   });
   workspaceFilesIpc.registerListing();
 
+  const historyScopeIds = new WeakMap<object, string>();
   const workspaceEngineIpc = createWorkspaceEngineIpc<
     WebContents,
     IpcMainInvokeEvent,
@@ -5850,6 +5851,37 @@ function registerIpcHandlers(): void {
     assertTrustedSender, withRendererWorkspaceOperation, receivedShareEngine,
     withEngineAdapter, requireEngineCapture, readWorkspaceEnginePolicy, localAgentDisplayName: () => cachedAgentName ?? "Agent", localPersonId: localUserId,
     localPersonName: localUserDisplayName, localPerson,
+    historyCollections: async operation => {
+      const { workspace } = operation;
+      const local = await localDatasetHostFor(workspace, operation.signal);
+      operation.assertCurrent();
+      const generation = credentialCacheGeneration;
+      let scope = historyScopeIds.get(operation.state);
+      if (!scope) { scope = randomUUID(); historyScopeIds.set(operation.state, scope); }
+      return {
+        scope: JSON.stringify([scope, generation]),
+        local: (positions, limit) => local.historyHeads({ positions, limit }),
+        remote: async (datasetId, beforeRevision, deadline) => {
+          const signal = AbortSignal.any([operation.signal, deadline]);
+          const current = () => { signal.throwIfAborted(); operation.assertCurrent();
+            if (generation !== credentialCacheGeneration) throw new Error("Your server session changed. Reopen this workspace."); };
+          current();
+          const data = createDatasetAuthorityRouter(local, {
+            status: async id => { current(); return local.transferStatus(id); },
+            remote: async targetOrigin => {
+              const remote = await remoteForWorkspace(workspace); current();
+              if (!remote.credentials.relayUrl || new URL(remote.credentials.relayUrl).origin !== targetOrigin) throw new Error("Collection host unavailable.");
+              return createRemoteDatasetData({ workspaceId: workspace.workspaceId, ...remote, signal,
+                currentCredentialGeneration: () => credentialCacheGeneration, assertCurrent: current, relayJson: relayShareJsonWithCredentials });
+            },
+          });
+          const page = await data.history({ datasetId, beforeRevision, limit: 51, metadataOnly: true, signal }); current();
+          if (page.archived) return page;
+          const description = await data.describe(datasetId); current();
+          return { ...page, name: description.name };
+        },
+      };
+    },
     recordHistoryPersonName: (workspaceId, userId, sender) => {
       const workspace = findWorkspace(workspaceId);
       if (!recordHistoryPersonIsNamed(userId, workspace?.remote?.ownerUserId ?? localUserId())) return null;

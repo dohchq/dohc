@@ -10,6 +10,8 @@ import { WORKSPACE_POLICY_PATHS } from "@dohc/security-contract/effective-policy
 import type {OwnerRestoreRequest, OwnerRestoreAction, OwnerRestoreResult} from "./ownerRestoreContract";
 import { PublicationAgent } from "@dohc/cli/app-publication";
 import type {OwnerAppPublicationRequest, OwnerAppPublicationResult} from "./ownerAppPublicationContract";
+import type { WorkspaceRefTarget } from "@dohc/workspace-contracts/workspace-ref";
+import { DatasetHistoryPage } from "@dohc/cli/dataset";
 import type { DatasetRequest, DatasetResult } from "@dohc/cli/dataset";
 import type {OwnerAppResponsesRequest,OwnerAppResponsesResult} from "@dohc/cli/app-responses";
 import { normalizeShareDiscussionBody } from "@dohc/security-contract/share-discussion";
@@ -1706,6 +1708,51 @@ export const ListEngineMomentsResponse = z.union([
 export type ListEngineMomentsResponse = z.infer<
   typeof ListEngineMomentsResponse
 >;
+
+export type HistoryObject = Extract<WorkspaceRefTarget, { kind: "file" | "dataset" }>;
+export const HistoryObject: z.ZodType<HistoryObject> = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("file"), objectId: OPAQUE_ID }).strict(),
+  z.object({ kind: z.literal("dataset"), datasetId: z.string().uuid() }).strict(),
+]);
+export const TimelineCollectionCursor = z.object({
+  datasetId: z.string().uuid(), remote: z.boolean(), fenceRevision: z.number().int().nonnegative(),
+  beforeRevision: z.number().int().positive().safe(), lineage: z.string().nullable(),
+  timeHint: z.number().int().nullable(), done: z.boolean(),
+  excluded: z.enum(["deadline", "unavailable"]).nullable(),
+}).strict();
+export const TimelineCursor = z.object({
+  format: z.literal(1), workspaceId: WORKSPACE_ID, versionId: OPAQUE_ID, object: HistoryObject.nullable(),
+  engine: HistoryCursor.nullable(), engineDone: z.boolean(),
+  collections: z.array(TimelineCollectionCursor),
+}).strict();
+export type TimelineCursor = z.infer<typeof TimelineCursor>;
+export const TimelineEntry = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("file"), moment: EngineMomentRecord }).strict(),
+  z.object({ kind: z.literal("version"), version: HistoryVersionMarker }).strict(),
+  z.object({ kind: z.literal("collection"), datasetId: z.string().uuid(), name: z.string(),
+    sortAtMs: z.number().int().nullable(), change: DatasetHistoryPage.shape.entries.element.omit({ undo: true }) }).strict(),
+]);
+export type TimelineEntry = z.infer<typeof TimelineEntry>;
+export const ListHistoryPayload = z.object({
+  workspaceId: WORKSPACE_ID, versionId: OPAQUE_ID.optional(), object: HistoryObject.optional(),
+  limit: z.number().int().min(1).max(50).optional(), cursor: TimelineCursor.optional(),
+}).strict();
+export type ListHistoryPayload = z.infer<typeof ListHistoryPayload>;
+export const ListHistoryPage = z.object({
+  status: z.literal("ready"), workspaceId: WORKSPACE_ID, versionId: OPAQUE_ID,
+  entries: z.array(TimelineEntry).max(50), nextCursor: TimelineCursor.nullable(),
+  unavailableSources: z.array(z.object({ datasetId: z.string().uuid(), reason: z.enum(["deadline", "unavailable"]) }).strict()),
+  completeness: z.enum(["complete", "partial"]),
+}).strict();
+export const ListHistoryResult = z.union([ListHistoryPage, ListEngineMomentsUpdatingResult, HistoryPolicyUnreadableResult]);
+export type ListHistoryResult = z.infer<typeof ListHistoryResult>;
+export const historyOperations = {
+  listHistory: {
+    capabilityId: "history.list", channel: "desktop:list-history", guard: "active-workspace", scope: "workspace",
+    inactiveMessage: "History stopped loading because this window changed workspaces.",
+    payload: ListHistoryPayload, result: ListHistoryResult,
+  },
+} as const satisfies OperationTable;
 
 export const ReadEngineMomentPayload = z.object({
   workspaceId: WORKSPACE_ID,
@@ -6744,6 +6791,7 @@ export interface DohcDesktopBridge
     OperationBridge<typeof systemMotionOperations>,
     OperationBridge<typeof accessOperations>,
     OperationBridge<typeof workspaceVersionOperations>,
+    OperationBridge<typeof historyOperations>,
     OperationBridge<typeof captureRecoveryOperations>,
     OperationBridge<typeof fileObservationOperations>,
     OperationBridge<typeof workspaceSearchOperations>,
