@@ -228,7 +228,7 @@ A selected JavaScript gate runs the complete JavaScript suite with every integra
 
 Use `pnpm verify:pr --base <target-ref>` as the single full-verification entry point.
 It owns the service setup, prebuilds, gate selection, and evidence. Follow [the verification procedure](docs/engineering/verify-agent-work.md#verify-a-pull-request).
-Keep the checkout unchanged during each run. Preserve the original commit and target in its `result.json`.
+On the shared Windows host it queues the commit with the verification service, which verifies it in its own checkout; stopping the command does not stop the request. Elsewhere, keep the checkout unchanged during each run. Preserve the original commit and target in its `result.json`.
 The Rust gate retains its build budget and mandatory summary-verdict checks.
 Only `verify:pr` holds the host's verification lane. Run focused checks, benchmarks, and packaging outside it.
 
