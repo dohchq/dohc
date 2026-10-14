@@ -145,7 +145,7 @@ if (config) {
     ? config.publish[0]
     : config.publish;
   if (publishConfig?.provider === "github") {
-    check(publishConfig.owner === "dohc-ai", "publish GitHub owner is dohc-ai");
+    check(publishConfig.owner === "dohchq", "publish GitHub owner is dohchq");
     check(publishConfig.repo === "dohc", "publish GitHub repo is dohc");
     check(
       publishConfig.channel === "latest" || publishConfig.channel === "nightly",

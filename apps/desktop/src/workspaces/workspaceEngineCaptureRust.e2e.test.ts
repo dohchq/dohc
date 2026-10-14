@@ -845,7 +845,7 @@ it.skipIf(engine.missing)(
   60_000,
 );
 
-// dohc-ai/dohc#337 item 5, driven by its own mechanism: another app holds the
+// dohchq/dohc#337 item 5, driven by its own mechanism: another app holds the
 // `.md` open without FILE_SHARE_DELETE, so every attempt to replace it fails
 // with a sharing violation. An ACL cannot model this — the workspace folder
 // grants FILE_DELETE_CHILD, which lets the replace through a deny-write ACE on

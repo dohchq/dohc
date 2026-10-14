@@ -6,9 +6,20 @@ import {
 } from "@dohc/workspace-engine-client/daemon";
 import type { VersionedLiveAdapter } from "@dohc/workspace-engine-client";
 
+import type { WorkspaceFileRef } from "@dohc/workspace-contracts/workspace-ref";
+
+export function workspaceFileRef(workspaceId: string, objectId: string): WorkspaceFileRef {
+  return {
+    workspaceId, target: { kind: "file", objectId },
+    labels: { name: "", displayKind: "binary" },
+  };
+}
+
+export type EngineFileReferenceTarget = { path: string } | WorkspaceFileRef;
+
 export type EngineFileResolver<Workspace> = (
   workspace: Workspace,
-  targets: readonly FileResolveTarget[],
+  targets: readonly EngineFileReferenceTarget[],
 ) => Promise<readonly FileResolution[]>;
 
 /** Pin the first version across bounded batches, including oversized legacy hints. */
@@ -16,6 +27,7 @@ export async function resolveEngineFileTargets(
   adapter: Pick<VersionedLiveAdapter, "resolveFiles">,
   workspaceId: string,
   targets: readonly FileResolveTarget[],
+  assertCurrent?: () => void,
 ): Promise<FileResolution[]> {
   const results: FileResolution[] = [];
   let versionId: string | undefined;
@@ -24,11 +36,13 @@ export async function resolveEngineFileTargets(
   let batchBytes = emptyRequestBytes();
   const flush = async () => {
     if (!batch.length) return;
+    assertCurrent?.();
     const resolved = await adapter.resolveFiles({
       workspaceId,
       ...(versionId !== undefined ? { versionId } : {}),
       targets: batch,
     });
+    assertCurrent?.();
     versionId = resolved.versionId;
     results.push(...resolved.results);
     batch = [];
@@ -53,13 +67,24 @@ export async function resolveEngineFileTargets(
 export function createEngineFileResolver<Workspace extends { workspaceId: string }>(
   withEngineAdapter: <T>(
     workspace: Workspace,
-    work: (adapter: VersionedLiveAdapter) => Promise<T>,
+    work: (adapter: VersionedLiveAdapter, assertCurrent?: () => void) => Promise<T>,
   ) => Promise<T | null>,
 ): EngineFileResolver<Workspace> {
   return async (workspace, targets) => {
-    const results = await withEngineAdapter(workspace, adapter =>
-      resolveEngineFileTargets(adapter, workspace.workspaceId, targets));
-    if (results === null) throw new Error("Workspace engine is unavailable.");
+    const selected = targets.flatMap((target, index) => {
+      if ("target" in target) {
+        return target.workspaceId === workspace.workspaceId
+          ? [{ index, target: { objectId: target.target.objectId } as FileResolveTarget }] : [];
+      }
+      return [{ index, target }];
+    });
+    const files = await withEngineAdapter(workspace, (adapter, assertCurrent) =>
+      resolveEngineFileTargets(adapter, workspace.workspaceId, selected.map(row => row.target), assertCurrent));
+    if (files === null) throw new Error("Workspace engine is unavailable.");
+    const results: FileResolution[] = targets.map(() => ({ status: "absent" }));
+    files.forEach((file, index) => {
+      results[selected[index]!.index] = file;
+    });
     return results;
   };
 }

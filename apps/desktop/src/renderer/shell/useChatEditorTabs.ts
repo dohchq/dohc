@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { bridge } from "../bridge";
-import { parseChatTabPath } from "../workbench/workbenchState";
+import { parseTab } from "../workbench/workbenchState";
 import type { ChatsDrafts, ChatsNav } from "../workbench/ChatsView";
 import { chatEditorPath, chatEditorTitle, chatsNavigationLeavesConversation, chatsNavigationRequiresRemount } from "./chatsNav";
 
@@ -59,7 +59,8 @@ export function useChatEditorTabs(input: {
         session.current.key = sessionKey;
         session.current.generation += 1;
         for (const path of store.current.entries.keys()) {
-          const kind = parseChatTabPath(path)?.kind;
+          const tab = parseTab(path);
+          const kind = tab.kind === "chat" ? tab.target.kind : null;
           if (kind !== "dm" && kind !== "new") continue;
           store.current.entries.delete(path);
         }
@@ -161,7 +162,8 @@ export function useChatEditorTabs(input: {
       .map((path) => {
         const entry = get(path);
         entry.restoreAttempted = true;
-        return { path, entry, target: parseChatTabPath(path) };
+        const tab = parseTab(path);
+        return { path, entry, target: tab.kind === "chat" ? tab.target : null };
       });
     const remember = (path: string, entry: ChatEditor, nav?: ChatsNav) => {
       if (!owner.active || store.current !== owner || !session.current.ready ||

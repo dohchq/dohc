@@ -639,6 +639,11 @@ function makeBaseBridge(
       },
     ),
     onCloudSessionChanged: vi.fn((_callback: () => void) => () => {}),
+    // Folder app offers: no folder is an app unless a test says so.
+    getFolderApp: vi.fn<import("../ipc/bridgeContract").DohcDesktopBridge["getFolderApp"]>(
+      async ({ workspaceId, folder }) => ({ workspaceId, folder, isApp: false, run: null }),
+    ),
+    onFolderAppChanged: vi.fn<import("../ipc/bridgeContract").DohcDesktopBridge["onFolderAppChanged"]>(() => () => undefined),
     onMenuCommand: vi.fn((callback: (command: MenuCommand) => void) => {
       menuCallback = callback;
       return () => {
@@ -692,9 +697,11 @@ function makeBaseBridge(
     readDiagnostics: vi.fn(async (_payload: Record<string, never>) => ({ text: "dohc diagnostics", available: { usage: false, errors: false } })),
     saveDiagnostics: vi.fn(async (_payload: Record<string, never>) => ({ saved: true })),
     readUsageRecord: vi.fn(async (_payload: Record<string, never>): Promise<UsageRecordResult> =>
-      ({ status: "readable", enabled: true, file: "/state/dohc-usage.json", since: null, incompleteDays: 0, rows: [] })),
+      ({ status: "readable", enabled: true, file: "/state/dohc-usage.json", since: null, incompleteDays: 0, rows: [], setAside: null })),
     clearUsageRecord: vi.fn(async (_payload: Record<string, never>) => undefined),
     setUsageRecordEnabled: vi.fn(async (_payload: { enabled: boolean }) => undefined),
+    startUsageRecord: vi.fn(async (_payload: Record<string, never>) => undefined),
+    restoreUsageRecord: vi.fn(async (_payload: Record<string, never>) => undefined),
     reportRendererError: vi.fn(async (_payload: unknown) => undefined),
     emitCrashReportChanged: () => {
       for (const callback of [...crashReportCallbacks]) callback();
@@ -703,6 +710,7 @@ function makeBaseBridge(
       crashReportCallbacks.add(listener);
       return () => crashReportCallbacks.delete(listener);
     }),
+    onUsageRecordStopped: vi.fn((_listener: () => void) => () => {}),
     emitMenuCommand: (command: MenuCommand) => menuCallback?.(command),
     onUpdateState: vi.fn(() => () => {}),
     // Content search (E5.0): the shell subscribes on mount.

@@ -521,15 +521,19 @@ test("@shared-continuity a live document keeps its person's and agent's work thr
       const opened = await openWorkspaceFromFirstRun(owner.page, ownerTemp);
       await owner.page.getByTestId(activityPin("settings")).click();
       await owner.page.getByTestId(settingsNavPin("cloud")).click();
-      await owner.page.getByRole("button", { name: "Open sync and sharing" }).click();
+      await owner.page.getByTestId("settings-cloud-connect").click();
       await expect(owner.page.getByTestId("cloud-sync-panel")).toBeVisible();
       const ownerPage = await ownerBrowser!.newPage();
       const approval = await openDesktopApproval(owner, ownerPage, origin);
       await createVerifiedAccount(ownerPage, stack!.account, ownerAccount, approval);
       await approveDesktop(ownerPage, ownerAccount);
-      await expect(owner.page.getByTestId("cloud-connected-email")).toHaveText(ownerAccount.email);
-      await owner.page.getByTestId("cloud-enable-sync").click();
-      await expect(owner.page.getByTestId("cloud-workspace-synced")).toBeVisible();
+      await expect(owner.page.getByTestId("settings-row-account")).toContainText(ownerAccount.email);
+      const syncSwitch = owner.page.getByRole("switch", { name: "Sync this workspace" });
+      await syncSwitch.click();
+      // The switch shows on from the click. The workspace code shows only once
+      // main has enabled sync.
+      await expect(owner.page.getByTestId("cloud-sync-code")).toBeVisible();
+      await expect(syncSwitch).toHaveAttribute("aria-checked", "true");
       await owner.page.keyboard.press("Escape");
       await waitForWorkspaceFile(owner.page, opened.workspaceId, PATH);
       ownerWorkspaceId = opened.workspaceId;

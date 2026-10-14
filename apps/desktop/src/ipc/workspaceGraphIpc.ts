@@ -1,4 +1,4 @@
-import type { EngineFileResolver } from "../workspaces/resolveEngineFiles";
+import { workspaceFileRef, type EngineFileReferenceTarget, type EngineFileResolver } from "../workspaces/resolveEngineFiles";
 import { CHANNELS } from "./channels";
 import {
   GetBacklinksPayload,
@@ -11,7 +11,6 @@ import {
   type ReadWorkspaceTextResult,
 } from "./bridgeContract";
 import type { RegistryEntry } from "../workspaces/registryStore";
-import type { FileResolveTarget } from "@dohc/workspace-engine-client/daemon";
 import type { EngineWorkspace } from "@dohc/workspace-engine-client/daemon";
 import type { DesktopLinkedChatStore } from "../workspaces/liveLinkedChatStore";
 import type { WorkspaceGraphIndex } from "../workspaces/workspaceGraph";
@@ -140,8 +139,8 @@ export function registerWorkspaceGraphIpcHandlers<
           ),
         );
         const threadAttachments = await Promise.all(threads.map(thread => store.listThreadAttachments(engineWorkspace.workspaceId, thread.id)));
-        const mentionTargets = threadAttachments.flat().flatMap<FileResolveTarget>(attachment => attachment.objectId
-          ? [{ objectId: attachment.objectId }]
+        const mentionTargets = threadAttachments.flat().flatMap<EngineFileReferenceTarget>(attachment => attachment.objectId
+          ? [workspaceFileRef(engineWorkspace.workspaceId, attachment.objectId)]
           : attachment.pathHint ? [{ path: attachment.pathHint }] : []);
         const targets = [...new Map(mentionTargets.map(target => [JSON.stringify(target), target])).values()];
         const resolvedFiles = await resolveEngineFiles(engineWorkspace, targets);

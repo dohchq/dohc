@@ -39,6 +39,7 @@ import { ChatAvatar } from "../workbench/ChatAvatar";
 import { useDesktopUpdateStateFeed } from "../useDesktopUpdateStateFeed";
 import { AskAgentButton, type AskAgent } from "../askAgent";
 import { AgentsMcpSettings } from "./AgentsMcpSettings";
+import { CloudSyncSettings, type CloudSettings } from "./CloudSyncSettings";
 import type { CustomizeTarget } from "./customize";
 import { PreferredNameControl } from "./PreferredNameControl";
 import { ScheduleHostRow } from "./ScheduleHostRow";
@@ -136,7 +137,8 @@ export function SettingsDialog(props: {
      */
     mutated: boolean;
   }) => void;
-  onOpenCloud?: () => void;
+  /** The shell's server connection for this workspace, for Sync and sharing. */
+  cloud?: CloudSettings;
   /** Closes Settings and opens the Sharing view on a lane or a share search found. */
   onOpenSharing?: (target: SharingFocus) => void;
   /**
@@ -777,20 +779,9 @@ export function SettingsDialog(props: {
       case "cloud":
         return (
           <div data-testid={settingsSectionPin("cloud")}>
-            <SettingRow
-              title="Sync and sharing"
-              description="Connect a server and sync this workspace."
-            >
-              <button
-                type="button"
-                aria-label="Open sync and sharing"
-                onClick={props.onOpenCloud}
-                className="rounded-md bg-accent px-3 py-1.5 text-[11px] font-medium text-bg transition-opacity hover:opacity-90 disabled:opacity-50"
-                disabled={!props.onOpenCloud}
-              >
-                Open
-              </button>
-            </SettingRow>
+            {props.cloud ? (
+              <CloudSyncSettings workspaceId={props.workspaceId} sharedView={props.sharedView} cloud={props.cloud} />
+            ) : null}
             {!props.sharedView && props.onOpenLiveDocuments ? (
               <SettingRow
                 title="Live documents"
