@@ -129,6 +129,8 @@ function holdInstance(root) {
 export async function runService({
   root, repo, lane = queuePaths(root).lane, commit = null,
   tickMs = 2000, timeLimitMs = 120 * 60_000, floorGb = resolveBuildBudget()?.diskFloorGb ?? 40,
+  // Another run starts only with this much free memory; a check that failed after it fell under the second floor is not trusted.
+  memoryFloorGb = 10, memoryFailGb = 3, freeMemory = () => freemem() / 1024 ** 3,
   freeDisk = () => freeDiskGb(lane) ?? freeDiskGb(root), docker = dockerResponds,
   prepare = prepareLane, sweep = sweepContainers, holdLane = holdLegacyLane,
   worker = defaultWorker, retryDelay = retryDelayMs, cleanupRetryMs = 60_000, prepareLimitMs = 45 * 60_000, stop, log = defaultLog(root),
@@ -152,7 +154,7 @@ export async function runService({
   const host = { cpuBusyPercent: null, freeMemGb: null };
   // The load an attempt verified under: the lane count, the most runs at once, the lowest free memory, and the mean CPU use.
   const runLoad = current => current.load.samples ? { lanes: current.load.lanes, peakRuns: current.load.peakRuns,
-    minFreeMemGb: current.load.minFreeMemGb, cpuBusyPercent: Math.round(current.load.cpuBusy / current.load.samples) } : null;
+    minFreeMemGb: Math.round(current.load.minFreeMemGb * 10) / 10, cpuBusyPercent: Math.round(current.load.cpuBusy / current.load.samples) } : null;
   let laneError = null;
   let fatal = null;
   let lastPrune = 0;
@@ -328,6 +330,7 @@ export async function runService({
         // A check that failed while the host was failing proves nothing about the change.
         const free = freeDisk();
         const host = free !== null && free < Math.min(floorGb, 5) ? `free disk fell to ${free.toFixed(1)} GB`
+          : current.load.minFreeMemGb < memoryFailGb ? `free memory fell to ${current.load.minFreeMemGb.toFixed(1)} GB`
           : entry.request.gates?.js && !(await docker()) ? "Docker stopped responding" : null;
         if (host) outcome = { outcome: "environment", cause: "host", reason: `${host} during the run, so its failure is not trusted.` };
       }
@@ -369,7 +372,8 @@ export async function runService({
     health.reason = targetRemoval ? "removing the lanes' build output to free disk"
       : !health.diskOk ? `waiting for disk: ${health.diskFreeGb.toFixed(1)} GB free, ${floorGb} GB needed`
       : health.pausedUntil > Date.now() ? `paused after ${health.environmentStreak} environment failures in a row`
-      : !health.dockerOk ? "Docker is not responding; runs with the JavaScript gate wait" : null;
+      : !health.dockerOk ? "Docker is not responding; runs with the JavaScript gate wait"
+      : running.size && freeMemory() < memoryFloorGb ? `waiting for memory: ${freeMemory().toFixed(1)} GB free, ${memoryFloorGb} GB needed to start another run` : null;
   }
 
   function prune(requests) {
@@ -418,7 +422,8 @@ export async function runService({
     const asleep = now - last > 60_000;
     const sample = cpuTimes();
     host.cpuBusyPercent = Math.round(100 * (sample.busy - cpu.busy) / Math.max(1, sample.all - cpu.all));
-    host.freeMemGb = Math.round(freemem() / 1024 ** 3 * 10) / 10;
+    const memoryGb = freeMemory();
+    host.freeMemGb = Math.round(memoryGb * 10) / 10;
     cpu = sample;
     for (const current of running.values()) {
       // A phase that began since the last tick counts only from its start; a clock set back counts nothing.
@@ -427,7 +432,7 @@ export async function runService({
         current.awakeMs += awake;
         current.load.lanes = Math.max(current.load.lanes, laneCount);
         current.load.peakRuns = Math.max(current.load.peakRuns, running.size);
-        current.load.minFreeMemGb = Math.min(current.load.minFreeMemGb, host.freeMemGb);
+        current.load.minFreeMemGb = Math.min(current.load.minFreeMemGb, memoryGb);
         current.load.cpuBusy += host.cpuBusyPercent;
         current.load.samples += 1;
       }
@@ -492,7 +497,8 @@ export async function runService({
       // containers are not yet removed waits, because they carry its id and their removal would stop its next run.
       // A restart, even one requested during this tick, starts nothing new and waits for the runs in flight.
       const started = new Set([...running.keys(), ...cleanupPending]);
-      while (running.size < laneCount && health.pausedUntil <= now && !existsSync(restart)) {
+      // A lone run always starts; another one waits while free memory is low.
+      while (running.size < laneCount && (running.size === 0 || freeMemory() >= memoryFloorGb) && health.pausedUntil <= now && !existsSync(restart)) {
         const entry = nextRequest(requests.filter(candidate => !started.has(candidate.id)), health, now);
         if (!entry) break;
         started.add(entry.id);
