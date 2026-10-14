@@ -362,71 +362,69 @@ export function registerCloudIpcHandlers<
     await mkdir(rootPath, { recursive: true });
     let summary!: ReturnType<typeof WorkspaceSummary.parse>;
     desktopMarks.mark("workspace-join-start");
-    await withWorkspaceSyncTransition(parsed.workspaceId, async () => {
-      await createJoinedWorkspace({
-        workspaceId: parsed.workspaceId,
-        rootPath,
-        prepare: async (created) => {
-          summary = WorkspaceSummary.parse(created);
-          // Bootstrap the relay coordinate through a capture-free daemon session
-          // before registration exposes the workspace or activity.open can build
-          // capture and start its watcher. An unset relay is claimed; otherwise
-          // the pristine daemon adopts the relay's existing epoch and stream with
-          // its own new origin. The bootstrap session closes before the captured
-          // activity session opens.
-          const daemonRelay = relayClientForWorkspace({
-            workspaceId: parsed.workspaceId,
-            accountId: credentials.userId,
-            rootPath: created.rootPath,
-            relay,
-          });
-          await bootstrapJoinedWorkspace({
-            workspaceId: parsed.workspaceId,
-            identity: probe.identity,
-            ...(input.passphrase === undefined
-              ? {}
-              : { passphrase: input.passphrase }),
-            transport: daemonRelay,
-            installDataKey: async (unwrapped) =>
-              await installWorkspaceDataKey(created.rootPath, unwrapped),
-          });
+    await createJoinedWorkspace({
+      workspaceId: parsed.workspaceId,
+      rootPath,
+      prepare: async (created) => {
+        summary = WorkspaceSummary.parse(created);
+        // Bootstrap the relay coordinate through a capture-free daemon session
+        // before registration exposes the workspace or activity.open can build
+        // capture and start its watcher. An unset relay is claimed; otherwise
+        // the pristine daemon adopts the relay's existing epoch and stream with
+        // its own new origin. The bootstrap session closes before the captured
+        // activity session opens.
+        const daemonRelay = relayClientForWorkspace({
+          workspaceId: parsed.workspaceId,
+          accountId: credentials.userId,
+          rootPath: created.rootPath,
+          relay,
+        });
+        await bootstrapJoinedWorkspace({
+          workspaceId: parsed.workspaceId,
+          identity: probe.identity,
+          ...(input.passphrase === undefined
+            ? {}
+            : { passphrase: input.passphrase }),
+          transport: daemonRelay,
+          installDataKey: async (unwrapped) =>
+            await installWorkspaceDataKey(created.rootPath, unwrapped),
+        });
 
-          return { ...created, joinBootstrapPending: true };
-        },
-        populate: async (created) => {
-          refreshNativeWorkspaceSurfaces();
+        return { ...created, joinBootstrapPending: true };
+      },
+      populate: async (created) => {
+        refreshNativeWorkspaceSurfaces();
 
-          // Now open capture, bind the remote, and enable the pull-first engine.
-          // joinBootstrap makes the engine PULL-FIRST:
-          // its start() is the first pull (materialize + cursor commit), and no
-          // push can reach the relay before that pull succeeds — a fresh join can
-          // never seed boilerplate into the remote or conflict against it.
-          await openWorkspaceActivity(created, {
-            afterActivityOpen: async () => {
-              await setWorkspaceRemote(created.workspaceId, {
-                serverUrl: credentials.serverUrl,
-                ownerUserId: credentials.userId,
-              });
-              await activity.enableCloud(created, { joinBootstrap: true });
-              completeWorkspaceJoinBootstrap(created.workspaceId);
-            },
-          });
-        },
-        rollbackLabel: "join",
-        cleanupFailureMessage:
-          `dohc could not close the failed download. Files remain in ${rootPath}. Restart dohc. If this folder appears in the workspace list, choose Forget from its menu before joining again. Forget keeps the folder. Then choose another empty folder.`,
-        failure: (error) => {
-          if (
-            error instanceof Error &&
-            /^(?:Passphrase required|Passphrase could not)\b/u.test(error.message)
-          ) {
-            return new Error(`${error.message} Files remain in ${rootPath}. Choose another empty folder to try again.`);
-          }
-          return new Error(
-            `dohc could not download the workspace. Files remain in ${rootPath}. Check your connection, then choose another empty folder.`,
-          );
-        },
-      });
+        // Now open capture, bind the remote, and enable the pull-first engine.
+        // joinBootstrap makes the engine PULL-FIRST:
+        // its start() is the first pull (materialize + cursor commit), and no
+        // push can reach the relay before that pull succeeds — a fresh join can
+        // never seed boilerplate into the remote or conflict against it.
+        await openWorkspaceActivity(created, {
+          afterActivityOpen: () => withWorkspaceSyncTransition(created.workspaceId, async () => {
+            await setWorkspaceRemote(created.workspaceId, {
+              serverUrl: credentials.serverUrl,
+              ownerUserId: credentials.userId,
+            });
+            await activity.enableCloud(created, { joinBootstrap: true });
+            completeWorkspaceJoinBootstrap(created.workspaceId);
+          }),
+        });
+      },
+      rollbackLabel: "join",
+      cleanupFailureMessage:
+        `dohc could not close the failed download. Files remain in ${rootPath}. Restart dohc. If this folder appears in the workspace list, choose Forget from its menu before joining again. Forget keeps the folder. Then choose another empty folder.`,
+      failure: (error) => {
+        if (
+          error instanceof Error &&
+          /^(?:Passphrase required|Passphrase could not)\b/u.test(error.message)
+        ) {
+          return new Error(`${error.message} Files remain in ${rootPath}. Choose another empty folder to try again.`);
+        }
+        return new Error(
+          `dohc could not download the workspace. Files remain in ${rootPath}. Check your connection, then choose another empty folder.`,
+        );
+      },
     });
     desktopMarks.measureSince("workspace-join", "workspace-join-start");
     // Scope-free: the join added a registry entry no window has active yet.

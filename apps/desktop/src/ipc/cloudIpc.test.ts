@@ -552,7 +552,7 @@ it("keeps resume pinned to the original paused owner", async () => {
 it("queues a stop during join until the joined workspace is enabled", async () => {
   const h = await harness();
   const entered = deferred(), held = deferred();
-  h.openActivity.mockImplementationOnce(async (_entry, options) => { entered.resolve(); await held.promise; await options.afterActivityOpen(); });
+  h.enable.mockImplementationOnce(async () => { entered.resolve(); await held.promise; });
   const joining = h.invoke(CHANNELS.cloudJoinWorkspace, h.joinPayload);
   await entered.promise;
   const stopping = h.authorities.withOperation("joined", operation => createWorkspaceSyncStop({
@@ -567,4 +567,26 @@ it("queues a stop during join until the joined workspace is enabled", async () =
   await expect(stopping).resolves.toMatchObject({ workspaceSynced: false });
   expect(h.registry.get("joined")?.remote).toBeUndefined();
   expect(h.registry.get("joined")?.pausedRemote).toBeDefined();
+});
+
+it("releases the join transition lane before rollback drains a queued stop", async () => {
+  const h = await harness();
+  const entered = deferred(), held = deferred(), stopQueued = deferred();
+  h.enable.mockImplementationOnce(async () => { entered.resolve(); await held.promise; throw new Error("first pull failed"); });
+  const joining = h.invoke(CHANNELS.cloudJoinWorkspace, h.joinPayload);
+  const joinRefused = expect(joining).rejects.toThrow("could not download");
+  await entered.promise;
+  const stopping = h.authorities.withOperation("joined", operation => {
+    const pending = h.stopWorkspaceSync(operation);
+    stopQueued.resolve();
+    return pending;
+  });
+  const stopRefused = expect(stopping).rejects.toThrow("workspace");
+  await stopQueued.promise;
+  expect(h.preparePause).not.toHaveBeenCalled();
+  held.resolve();
+  await Promise.all([joinRefused, stopRefused]);
+  expect(h.cleanup).toHaveBeenCalledWith("joined");
+  expect(h.registry.has("joined")).toBe(false);
+  expect(() => h.authorities.withOperation("joined", () => {})).toThrow("Unknown workspace");
 });

@@ -1493,7 +1493,7 @@ const shareRosters = createShareRosters({
   listRoster: async (workspace) => {
     let credentials: CloudSessionCredentials;
     try {
-      ({ credentials } = await remoteForWorkspace(workspace));
+      ({ credentials } = await remoteForWorkspace(workspace, { allowPaused: true }));
     } catch (error) {
       // Signed out, or signed in to another account or server: the message
       // says which, and dohc could not ask.
@@ -1535,7 +1535,7 @@ function historyLabelsFor(sender: WebContents): ReturnType<typeof createHistoryL
     snapshot: (workspaceId) => {
       const workspace = findWorkspace(workspaceId);
       return { roster: shareRosters.observation(workspaceId).listing, shareView: workspace?.shareView,
-        owner: !sender.isDestroyed() && !!workspace?.remote && !workspace.shareView && cachedCredentials?.userId === workspace.remote.ownerUserId,
+        owner: !sender.isDestroyed() && !!(workspace?.remote ?? workspace?.pausedRemote) && !workspace?.shareView && cachedCredentials?.userId === (workspace?.remote ?? workspace?.pausedRemote)?.ownerUserId,
         context: rosterContext(workspaceId), inventory: workspace?.shareRoster?.version };
     },
     ready: workspaceId => {
