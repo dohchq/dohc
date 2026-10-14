@@ -299,10 +299,13 @@ async function install(root, ref) {
   }
   const check = spawnSync(process.execPath, [join(dir, "scripts/verification/queue-service.mjs"), "--self-test", "--root", root], { encoding: "utf8", windowsHide: true, timeout: 120_000 });
   if (check.status !== 0) throw new Error(`The service at ${short} failed its self-test, so the current one stays active:\n${check.stderr || check.stdout}`);
-  copyFileSync(join(dir, "scripts/verification/queue-supervisor.ps1"), join(root, "supervisor.ps1"));
+  // The running supervisor keeps its script and its task's settings until it restarts.
+  const supervisorScript = join(root, "supervisor.ps1");
+  const definition = join(root, "task.xml");
+  const before = [supervisorScript, definition].map(path => existsSync(path) ? readFileSync(path) : null);
+  copyFileSync(join(dir, "scripts/verification/queue-supervisor.ps1"), supervisorScript);
   const previous = existsSync(paths.current) ? readFileSync(paths.current, "utf8").trim() : null;
   await withFileRetry(() => { writeFileSync(`${paths.current}.tmp`, short); renameSync(`${paths.current}.tmp`, paths.current); });
-  const definition = join(root, "task.xml");
   writeFileSync(definition, `﻿${taskDefinition(root)}`, "utf16le");
   const created = spawnSync("schtasks.exe", ["/create", "/tn", taskName, "/xml", definition, "/f"], { encoding: "utf8", windowsHide: true });
   if (created.status !== 0) throw new Error(`Task Scheduler refused the service task: ${created.stderr || created.stdout}`);
@@ -318,6 +321,8 @@ async function install(root, ref) {
     catch (error) { console.error(`could not remove the old install ${name}: ${error.message}`); }
   }
   console.log(`verification queue service ${short} installed at ${root}${previous && previous !== short ? `, replacing ${previous} once the current run ends` : ""}.`);
+  const changed = [supervisorScript, definition].some((path, index) => !before[index]?.equals(readFileSync(path)));
+  if (changed && serviceState(root).alive) console.log("The supervisor or its task changed. Run pnpm verify:queue restart when no run is in progress to apply it.");
 }
 
 function printStatus(root) {
@@ -348,8 +353,15 @@ async function main([command, ...args]) {
   if (command === "cancel") { await cancel(root, args[0]); return console.log(`asked the service to stop ${args[0]}`); }
   if (command === "install" || command === "upgrade") return install(root, ref);
   if (command === "restart") {
-    // Ending the task closes the supervisor's job, which stops the service and its current run.
-    if (serviceState(root).record?.running && !args.includes("--now")) throw new Error("A run is in progress. Wait for it, or pass --now to stop it; it will be retried.");
+    const { record, alive } = serviceState(root);
+    if (record?.running && !args.includes("--now")) throw new Error("A run is in progress. Wait for it, or pass --now to stop it; it will be retried.");
+    // The task's own process is conhost, so ending the task leaves the supervisor running. Stop the supervisor
+    // itself; its job stops the service and any run. The task starts a new one once the old one has exited.
+    const exists = pid => { try { process.kill(pid, 0); return true; } catch (error) { return error.code === "EPERM"; } };
+    if (alive && record.supervisor) {
+      try { process.kill(record.supervisor); } catch { /* Already stopped. */ }
+      for (let waited = 0; waited < 10_000 && exists(record.supervisor); waited += 200) await sleep(200);
+    }
     spawnSync("schtasks.exe", ["/end", "/tn", taskName], { windowsHide: true });
     spawnSync("schtasks.exe", ["/run", "/tn", taskName], { windowsHide: true });
     return console.log("restarted the verification queue service");
