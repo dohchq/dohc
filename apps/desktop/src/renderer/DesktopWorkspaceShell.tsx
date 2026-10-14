@@ -16,6 +16,7 @@ import {
   lazy,
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useReducer,
   useRef,
@@ -86,7 +87,7 @@ import { useCrashReport } from "./shell/useCrashReport";
 import { useAutomationHolds } from "./shell/useAutomationHolds";
 import { CollectionFieldMarksProvider } from "./collections/collectionFieldMarks";
 import { useCloudPresence } from "./shell/useCloudPresence";
-import { useAccountDeletion } from "./shell/useAccountDeletion";
+import type { AccountDeletion } from "./shell/useAccountDeletion";
 import type { ConnectionErrorReport } from "./shell/connectionNotices";
 import { reportInstallationFailure, useInstallationNotices } from "./shell/installationNotices";
 import type { CloudSettings } from "./settings/CloudSyncSettings";
@@ -514,6 +515,8 @@ export function DesktopWorkspaceShell(props: {
   onShareHandoffOpened?: () => void;
   // Notices sent to this person, owned above the shell.
   sentNotices?: SentNotices;
+  // The account deletion review, owned above the shell.
+  accountDeletion: AccountDeletion;
   openOnReady?: OpenOnSwitch;
 }) {
   const workspaceShareMounts = props.workspace.shareMounts ?? EMPTY_SHARE_MOUNTS;
@@ -908,13 +911,8 @@ export function DesktopWorkspaceShell(props: {
   );
   const { chatCollaboration, refreshCloudStatus, workspaceSynced, cloudStatus, cloudStatusUnreadable } =
     useCloudPresence(workspaceId, reportCloudStatusUnavailable);
-  const accountDeletion = useAccountDeletion({
-    cloudStatus,
-    report: (error) => reportConnectionError(error),
-    showSuccess: showSuccessNotice,
-    showWarning: showWarningNotice,
-    onEnded: refreshCloudStatus,
-  });
+  const { start: startAccountDeletion, reviewing: reviewingAccountDeletion, attach: attachAccountDeletion } =
+    props.accountDeletion;
   // Closing Settings reads the status again, as the old Cloud dialog did on
   // close. The page's own refresh after an enable covers only its own
   // change: another window's Try again can make main adopt this account's
@@ -946,7 +944,7 @@ export function DesktopWorkspaceShell(props: {
         message: error.message,
         cause: error.cause,
         retry: () => {
-          if (accountDeletion.reviewing()) return;
+          if (reviewingAccountDeletion()) return;
           if (error.retry?.()) return;
           if (error.serverUrl === null) return openCloud();
           setCloudRetryServerUrl(error.serverUrl);
@@ -954,7 +952,20 @@ export function DesktopWorkspaceShell(props: {
         },
       });
     },
-    [accountDeletion.reviewing, openCloud, reportShellFailure],
+    [reviewingAccountDeletion, openCloud, reportShellFailure],
+  );
+  // A layout effect, so a switch hands over in its own commit: an answer to a
+  // delete sent from the previous workspace's shell reports here.
+  useLayoutEffect(
+    () =>
+      attachAccountDeletion({
+        cloudStatus,
+        report: reportConnectionError,
+        showSuccess: showSuccessNotice,
+        showWarning: showWarningNotice,
+        onEnded: refreshCloudStatus,
+      }),
+    [attachAccountDeletion, cloudStatus, refreshCloudStatus, reportConnectionError, showSuccessNotice, showWarningNotice],
   );
   // Unguarded by workspace: an installation-wide failure is news here.
   useInstallationNotices(reportConnectionError);
@@ -977,9 +988,9 @@ export function DesktopWorkspaceShell(props: {
         if (current()) reportConnectionError(error);
       },
       onAccountError: reportInstallationFailure,
-      onDeleteAccount: accountDeletion.start,
+      onDeleteAccount: startAccountDeletion,
     };
-  }, [accountDeletion.start, closeSettings, cloudStatus, cloudStatusUnreadable, refreshCloudStatus, reportConnectionError, workspaceId]);
+  }, [startAccountDeletion, closeSettings, cloudStatus, cloudStatusUnreadable, refreshCloudStatus, reportConnectionError, workspaceId]);
   // About's section reads report through this shell's notices, one row per
   // section and file. A repeat keeps an existing row's toast state only for
   // an unchanged message. A changed message, or a missing row, toasts again.
@@ -6363,7 +6374,6 @@ export function DesktopWorkspaceShell(props: {
           />
         </Overlay>
       ) : null}
-      {accountDeletion.dialog}
       {liveDocumentsWorkspaceId === workspaceId && !shareView ? (
         <LiveDocumentsDialog
           workspaceId={workspaceId}

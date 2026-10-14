@@ -104,13 +104,18 @@ import {
 import { resetSharedLocalDocumentsForTests } from "./sharedLocalDocument";
 import { forgetSyncFailureNoticesForTests } from "./shell/useSyncFailureNotice";
 import { RecoveryList } from "./RecoveryList";
+import { useAccountDeletion } from "./shell/useAccountDeletion";
 
-// The shell under the session's reaction owner, as DesktopRoot mounts it. A
-// key on this element remounts the owner too.
-export function DesktopWorkspaceShell(props: ComponentProps<typeof ProductionDesktopWorkspaceShell>) {
+// The shell under the session's reaction owner and account deletion, as
+// DesktopRoot mounts it. A key on this element remounts both owners too.
+export function DesktopWorkspaceShell(
+  props: Omit<ComponentProps<typeof ProductionDesktopWorkspaceShell>, "accountDeletion">,
+) {
+  const accountDeletion = useAccountDeletion();
   return (
     <ReactionStoreProvider workspaceId={props.workspace.workspaceId}>
-      <ProductionDesktopWorkspaceShell {...props} />
+      <ProductionDesktopWorkspaceShell {...props} accountDeletion={accountDeletion.deletion} />
+      {accountDeletion.dialog}
     </ReactionStoreProvider>
   );
 }

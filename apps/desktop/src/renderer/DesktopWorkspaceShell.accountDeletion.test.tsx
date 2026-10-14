@@ -1,10 +1,14 @@
 // @vitest-environment jsdom
 import "./DesktopWorkspaceShell.testSupport";
-import { act, fireEvent, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import type { ServerAccountDeletionPreview } from "@dohc/cli/account";
+import type { ShareHandoffStatus } from "../ipc/bridgeContract";
 import { deferred } from "../testing/deferred";
-import { makeBridge, renderShell } from "./DesktopWorkspaceShell.testHarness";
+import { CollectionFieldWriteHost } from "./collections/recordFieldWrites";
+import { DesktopRoot } from "./DesktopRoot";
+import type { Workspace } from "./DesktopWorkspaceShell";
+import { makeBridge, OTHER_WORKSPACE, renderShell, WORKSPACE } from "./DesktopWorkspaceShell.testHarness";
 
 type SessionEvent = { sessionKey: string | null; phase: "changing" | "ready" };
 type DeleteResult =
@@ -164,5 +168,114 @@ describe("deleting the server account from Settings", () => {
     expect(screen.queryByTestId("server-account-delete")).toBeNull();
     expect(bridge.previewServerAccountDeletion).toHaveBeenCalledTimes(1);
     expect(screen.getByTestId("settings-section-cloud")).toBeTruthy();
+  });
+});
+
+// File ▸ Open Workspace… while a delete is pending: the real DesktopRoot
+// remounts the shell for the other workspace, and the answer reports there.
+describe("a workspace switch while a delete is pending", () => {
+  function renderRoot(deleteAccount: () => Promise<DeleteResult>) {
+    const { bridge, disconnect } = deletionBridge(deleteAccount);
+    let registry: Workspace[] = [WORKSPACE, OTHER_WORKSPACE];
+    let activate: ((workspace: Workspace) => void) | null = null;
+    const root = Object.assign(bridge, {
+      windowRole: "workspace" as const,
+      getWorkspaceRegistry: vi.fn(async () => ({ workspaces: registry })),
+      listNotices: vi.fn(async () => ({ account: null, notices: [] })),
+      onNoticesChanged: vi.fn(() => () => undefined),
+      onWorkspacePathOpenFailed: vi.fn(() => () => undefined),
+      takeWorkspacePathOpenFailures: vi.fn(async () => []),
+      onShareHandoffStatus: vi.fn(() => () => undefined),
+      getShareHandoffStatus: vi.fn(async (): Promise<ShareHandoffStatus> => ({ status: "idle" })),
+      onWorkspaceActivated: vi.fn((callback: (workspace: Workspace) => void) => {
+        activate = callback;
+        return () => {
+          activate = null;
+        };
+      }),
+      pickWorkspaceRoot: vi.fn(async () => OTHER_WORKSPACE.rootPath),
+      attachWorkspaceFolder: vi.fn(async () => OTHER_WORKSPACE),
+      getDefaultWorkspaceRoot: vi.fn(async () => "/home/sam/dohc/new"),
+    });
+    vi.stubGlobal("dohcDesktop", root);
+    render(
+      <>
+        <CollectionFieldWriteHost />
+        <DesktopRoot />
+      </>,
+    );
+    return {
+      bridge: root,
+      disconnect,
+      // Every workspace leaves the registry, as a Forget in the manager window does.
+      forgetAll: async () => {
+        registry = [];
+        await act(async () => root.emitWorkspaceActivity());
+      },
+      activate: (workspace: Workspace) => act(() => activate?.(workspace)),
+    };
+  }
+
+  async function switchWhileDeleting(bridge: ReturnType<typeof renderRoot>["bridge"]) {
+    await sendDelete(bridge);
+    const shellA = screen.getByTestId("workspace-shell");
+    act(() => bridge.emitMenuCommand("open-workspace"));
+    await waitFor(() => {
+      const shell = screen.getByTestId("workspace-shell");
+      expect(shell).not.toBe(shellA);
+      expect(shell.dataset.ready).toBe("true");
+    });
+    expect(bridge.attachWorkspaceFolder).toHaveBeenCalledTimes(1);
+    expect(shellA.isConnected).toBe(false);
+    // The sent delete stays on screen over the other workspace.
+    expect(screen.getByTestId("server-account-delete-confirm").textContent).toBe("Deleting…");
+  }
+
+  it.each([
+    [true, DELETED],
+    [false, `${server} blocked me@dohc.test and will finish deleting its data. Workspaces on this computer stay.`],
+  ])("reports the answer in the workspace switched to (finished: %s)", async (finished, notice) => {
+    const answer = deferred<DeleteResult>();
+    const { bridge, disconnect } = renderRoot(() => answer.promise);
+    await switchWhileDeleting(bridge);
+    const shellB = screen.getByTestId("workspace-shell");
+
+    disconnect();
+    await act(async () => answer.resolve({ ok: true, finished, email: "me@dohc.test", server }));
+    expect((await screen.findAllByText(notice)).length).toBeGreaterThan(0);
+    expect(screen.queryByTestId("server-account-delete")).toBeNull();
+    expect(screen.getByTestId("workspace-shell")).toBe(shellB);
+  });
+
+  it("reports a failure in the workspace switched to, whose Try again opens a new review", async () => {
+    const answer = deferred<DeleteResult>();
+    const { bridge } = renderRoot(() => answer.promise);
+    await switchWhileDeleting(bridge);
+
+    await act(async () => answer.reject(new Error("dohc could not reach this server.")));
+    expect((await screen.findByTestId("workspace-shell-error")).textContent).toContain("dohc could not reach this server.");
+    expect(screen.queryByTestId("server-account-delete")).toBeNull();
+
+    fireEvent.click(screen.getByTestId("workspace-shell-error-retry"));
+    await screen.findByTestId("server-account-delete-scope");
+    expect(bridge.previewServerAccountDeletion).toHaveBeenCalledTimes(2);
+  });
+
+  it("holds the answer through first run and reports it in the next workspace that opens", async () => {
+    const answer = deferred<DeleteResult>();
+    const { bridge, disconnect, forgetAll, activate } = renderRoot(() => answer.promise);
+    await sendDelete(bridge);
+
+    await forgetAll();
+    await waitFor(() => expect(screen.queryByTestId("workspace-shell")).toBeNull());
+    expect(screen.getByTestId("server-account-delete-confirm").textContent).toBe("Deleting…");
+
+    disconnect();
+    await act(async () => answer.resolve({ ok: true, finished: true, email: "me@dohc.test", server }));
+    expect(screen.queryByTestId("server-account-delete")).toBeNull();
+
+    activate(OTHER_WORKSPACE);
+    await screen.findByTestId("workspace-shell");
+    expect((await screen.findAllByText(DELETED)).length).toBeGreaterThan(0);
   });
 });
