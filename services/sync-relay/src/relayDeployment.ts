@@ -152,16 +152,15 @@ function acquireDeployment(configPath: string) {
 }
 
 /** Maintenance owns the writer lock and inspects cold relay storage without settling it. */
-export async function withRelayDeploymentMaintenance<T>(configPath: string,
+export async function withRelayDeploymentMaintenance<T>(configPath: string, operationKind: "backup" | "check-backup" | "restore",
   operation: (deployment: { config: Readonly<DeploymentConfig>; stamp: number; nonce: string }) => Promise<T>): Promise<T> {
   const deployment = acquireDeployment(configPath);
   let operationFailed = false;
   try {
     // A missing or corrupt database can still be repaired from a confirmed snapshot.
-    if (["-wal", "-journal"].some(suffix => existsSync(deployment.config.relayPath + suffix))) throw needsSettlement();
+    let marker: ReturnType<typeof relayDeploymentMarker> | undefined;
     if (existsSync(deployment.config.relayPath)) {
       let db: DatabaseSync | undefined;
-      let marker: ReturnType<typeof relayDeploymentMarker> | undefined;
       try {
         if (normalized(realpathSync(deployment.config.relayPath)) !== normalized(deployment.config.relayPath)) throw unavailable();
         const uri = pathToFileURL(deployment.config.relayPath);
@@ -171,8 +170,9 @@ export async function withRelayDeploymentMaintenance<T>(configPath: string,
       } catch (error) {
         if (!(error instanceof Error && "errcode" in error && (error.errcode === 11 || error.errcode === 26))) throw error;
       } finally { db?.close(); }
-      if (marker) validateRelayDeploymentMarkerValue(marker, deployment.stamp, deployment.nonce);
     }
+    if ((marker || operationKind !== "restore") && ["-wal", "-journal"].some(suffix => existsSync(deployment.config.relayPath + suffix))) throw needsSettlement();
+    if (marker) validateRelayDeploymentMarkerValue(marker, deployment.stamp, deployment.nonce);
     return await operation({ config: deployment.config, stamp: deployment.stamp, nonce: deployment.nonce });
   }
   catch (error) { operationFailed = true; throw error; }
@@ -213,8 +213,12 @@ export function openRelayDeployment(configPath: string, options: OpenSyncRelaySt
     const storage = openSyncRelayStorage(config.relayPath, options, db => {
       const marker = relayDeploymentMarker(db, config);
       const continuity = new DeploymentContinuity(lock, side);
-      if (marker.stamp !== confirmed || marker.nonce !== nonce) {
-        if (!committedSuccessor(marker, confirmed, nonce)) throw unavailable();
+      const confirmedMarker = marker.stamp === confirmed && marker.nonce === nonce;
+      if (!confirmedMarker && !committedSuccessor(marker, confirmed, nonce)) throw unavailable();
+      // Sync a record recovered from an interrupted COMMIT before accepting writes.
+      const recordCheckpoint = side.prepare("PRAGMA wal_checkpoint(FULL)").get();
+      if (recordCheckpoint?.busy !== 0 || recordCheckpoint.log !== recordCheckpoint.checkpointed) throw unavailable();
+      if (!confirmedMarker) {
         // Sync recovered WAL pages before the independent record can cover them.
         const checkpoint = db.prepare("PRAGMA wal_checkpoint(FULL)").get();
         if (checkpoint?.busy !== 0 || checkpoint.log !== checkpoint.checkpointed) throw unavailable();

@@ -61,14 +61,9 @@ async function inspectSnapshot(path: string, deployment: Deployment): Promise<vo
 
 /** A cold snapshot contains relay data only. Independent continuity remains on the original host. */
 export async function backupRelayDeployment(configPath: string, directory: string): Promise<void> {
-  await withRelayDeploymentMaintenance(configPath, async deployment => {
+  await withRelayDeploymentMaintenance(configPath, "backup", async deployment => {
     await directoryOutsideDeployment(directory, deployment, true, configPath);
     await canonical(deployment.config.relayPath);
-    for (const suffix of ["-wal", "-journal"]) {
-      if (await stat(deployment.config.relayPath + suffix).then(() => true, error => { if (error.code === "ENOENT") return false; throw error; })) {
-        throw new Error("Stop the relay cleanly before backup. SQLite has an outstanding journal; no snapshot was taken.");
-      }
-    }
     const uri = pathToFileURL(deployment.config.relayPath);
     uri.searchParams.set("immutable", "1");
     const source = new DatabaseSync(uri.href, { readOnly: true });
@@ -110,12 +105,12 @@ async function checkedSnapshot(directory: string, deployment: Deployment): Promi
 }
 
 export async function checkRelayBackup(configPath: string, directory: string): Promise<void> {
-  await withRelayDeploymentMaintenance(configPath, async deployment => { await checkedSnapshot(directory, deployment); });
+  await withRelayDeploymentMaintenance(configPath, "check-backup", async deployment => { await checkedSnapshot(directory, deployment); });
 }
 
 /** Restore only current relay authority. Auth, service-host data and continuity are never replaced. */
 export async function restoreRelayDeployment(configPath: string, directory: string): Promise<{ preservedDirectory: string }> {
-  return withRelayDeploymentMaintenance(configPath, async deployment => {
+  return withRelayDeploymentMaintenance(configPath, "restore", async deployment => {
     const source = await checkedSnapshot(directory, deployment);
     const relayPath = deployment.config.relayPath;
     const parent = dirname(relayPath);

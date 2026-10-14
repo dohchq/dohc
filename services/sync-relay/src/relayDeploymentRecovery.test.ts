@@ -150,6 +150,39 @@ describe("relay recovery snapshots", () => {
     finally { reopened.storage.close(); }
   });
 
+  it.each(["corrupt", "missing"])("restores %s storage with leftover SQLite journals", async damage => {
+    const f = fixture(), backup = join(f.root, "backup"), live = openRelayDeployment(f.configPath);
+    live.storage.claimWorkspace({ workspaceId: "acknowledged", ownerUserId: "owner", createdAtMs: 1 });
+    live.storage.close();
+    await backupRelayDeployment(f.configPath, backup);
+    const child = spawnSync(process.execPath, ["--import", "tsx", fileURLToPath(new URL("./relayDeploymentCrash.fixture.ts", import.meta.url)), f.configPath, "after-commit"],
+      { encoding: "utf8", windowsHide: true, timeout: 45_000 });
+    expect(child.error).toBeUndefined();
+    expect(child.stderr).toBe("");
+    expect(child.status).toBe(82);
+    expect(existsSync(f.relayPath + "-wal")).toBe(true);
+    const wal = readFileSync(f.relayPath + "-wal"), shm = readFileSync(f.relayPath + "-shm");
+    writeFileSync(f.relayPath + "-journal", "unfinished journal");
+    if (damage === "corrupt") writeFileSync(f.relayPath, "damaged database");
+    else rmSync(f.relayPath);
+    const before = continuity(f.continuityDirectory);
+    await expect(backupRelayDeployment(f.configPath, join(f.root, "refused"))).rejects.toThrow(/continuity needs settling/);
+    await expect(checkRelayBackup(f.configPath, backup)).rejects.toThrow(/continuity needs settling/);
+    expect(existsSync(join(f.root, "refused"))).toBe(false);
+    const result = await restoreRelayDeployment(f.configPath, backup);
+    expect(continuity(f.continuityDirectory)).toEqual(before);
+    expect(existsSync(join(result.preservedDirectory, "original.sqlite"))).toBe(damage === "corrupt");
+    if (damage === "corrupt") expect(readFileSync(join(result.preservedDirectory, "original.sqlite"), "utf8")).toBe("damaged database");
+    expect(readFileSync(join(result.preservedDirectory, "original.sqlite-wal"))).toEqual(wal);
+    expect(readFileSync(join(result.preservedDirectory, "original.sqlite-shm"))).toEqual(shm);
+    expect(readFileSync(join(result.preservedDirectory, "original.sqlite-journal"), "utf8")).toBe("unfinished journal");
+    const reopened = openRelayDeployment(f.configPath);
+    try {
+      expect(reopened.storage.claimWorkspace({ workspaceId: "acknowledged", ownerUserId: "owner", createdAtMs: 1 })).toBe("owned");
+      expect(reopened.storage.claimWorkspace({ workspaceId: "interrupted", ownerUserId: "owner", createdAtMs: 2 })).toBe("created");
+    } finally { reopened.storage.close(); }
+  }, 55_000);
+
   it("refuses maintenance while the production writer holds its lock", async () => {
     const f = fixture(), backup = join(f.root, "backup");
     await backupRelayDeployment(f.configPath, backup);
@@ -179,11 +212,19 @@ describe("relay recovery snapshots", () => {
     await expect(backupRelayDeployment(a.configPath, join(a.root, "control", "backup"))).rejects.toThrow(/outside/);
   });
 
-  it("reports an outstanding SQLite journal before taking a snapshot", async () => {
-    const f = fixture(), backup = join(f.root, "backup");
-    writeFileSync(f.relayPath + "-journal", "unfinished journal");
-    await expect(backupRelayDeployment(f.configPath, backup)).rejects.toThrow(/continuity needs settling/);
-    expect(existsSync(backup)).toBe(false);
+  it.each(["-wal", "-journal"])("refuses healthy storage with an outstanding %s", async suffix => {
+    const f = fixture(), backup = join(f.root, "backup"), refused = join(f.root, "refused"), live = openRelayDeployment(f.configPath);
+    live.storage.close();
+    await backupRelayDeployment(f.configPath, backup);
+    writeFileSync(f.relayPath + suffix, "unfinished journal");
+    await expect(backupRelayDeployment(f.configPath, refused)).rejects.toThrow(/continuity needs settling/);
+    await expect(checkRelayBackup(f.configPath, backup)).rejects.toThrow(/continuity needs settling/);
+    await expect(restoreRelayDeployment(f.configPath, backup)).rejects.toThrow(/continuity needs settling/);
+    expect(existsSync(refused)).toBe(false);
+    const restarted = openRelayDeployment(f.configPath); restarted.storage.close();
+    await backupRelayDeployment(f.configPath, refused);
+    await checkRelayBackup(f.configPath, backup);
+    await restoreRelayDeployment(f.configPath, backup);
   });
 
   it("does not accept a changed manifest", async () => {

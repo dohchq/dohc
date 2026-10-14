@@ -135,7 +135,7 @@ describe("relay deployment continuity", () => {
     const prepare = DatabaseSync.prototype.prepare;
     let checkpointed = false;
     DatabaseSync.prototype.prepare = function(sql: string) {
-      if (sql === "PRAGMA wal_checkpoint(FULL)") checkpointed = true;
+      if (sql === "PRAGMA wal_checkpoint(FULL)" && prepare.call(this, "SELECT 1 FROM sqlite_schema WHERE name='sync_relay_continuity'").get()) checkpointed = true;
       return prepare.call(this, sql);
     };
     try { expect(() => openRelayDeployment(f.configPath)).toThrow(/continuity/); }
@@ -256,6 +256,60 @@ describe("relay deployment continuity", () => {
     } finally { reopened.storage.close(); }
   });
 
+  it("checkpoints the continuity record once before accepting storage and never per write", () => {
+    const f = fixture(), prepare = DatabaseSync.prototype.prepare, exec = DatabaseSync.prototype.exec;
+    let checkpoints = 0;
+    DatabaseSync.prototype.prepare = function(sql: string) {
+      const query = prepare.call(this, sql);
+      if (sql === "PRAGMA wal_checkpoint(FULL)" && prepare.call(this, "SELECT 1 FROM sqlite_schema WHERE name='continuity'").get()) {
+        const get = query.get.bind(query);
+        query.get = () => {
+          expect(prepare.call(this, "PRAGMA synchronous").get()?.synchronous).toBe(2);
+          const result = get();
+          checkpoints++;
+          return result;
+        };
+      }
+      return query;
+    };
+    DatabaseSync.prototype.exec = function(sql: string) {
+      if (sql === "BEGIN IMMEDIATE") expect(checkpoints).toBe(1);
+      return exec.call(this, sql);
+    };
+    try {
+      const current = openRelayDeployment(f.configPath);
+      try {
+        expect(checkpoints).toBe(1);
+        current.storage.claimWorkspace({workspaceId: "first", ownerUserId: "owner", createdAtMs: 1});
+        current.storage.claimWorkspace({workspaceId: "second", ownerUserId: "owner", createdAtMs: 2});
+        expect(checkpoints).toBe(1);
+      } finally { current.storage.close(); }
+    } finally { DatabaseSync.prototype.prepare = prepare; DatabaseSync.prototype.exec = exec; }
+  });
+
+  it.each(["busy", "partial", "io-error"])("refuses startup when the continuity record checkpoint is %s", failure => {
+    const f = fixture(), live = openRelayDeployment(f.configPath);
+    live.storage.claimWorkspace({workspaceId: "acknowledged", ownerUserId: "owner", createdAtMs: 1});
+    live.storage.close();
+    const side = join(f.continuityDirectory, "continuity.sqlite"), before = read(side, "continuity");
+    const relayBefore = readFileSync(f.relayPath), prepare = DatabaseSync.prototype.prepare;
+    DatabaseSync.prototype.prepare = function(sql: string) {
+      const query = prepare.call(this, sql);
+      if (sql === "PRAGMA wal_checkpoint(FULL)" && prepare.call(this, "SELECT 1 FROM sqlite_schema WHERE name='continuity'").get()) query.get = () => {
+        if (failure === "io-error") throw new Error("checkpoint I/O error");
+        return {busy: failure === "busy" ? 1 : 0, log: 2, checkpointed: failure === "busy" ? 2 : 1};
+      };
+      return query;
+    };
+    try { expect(() => { const opened = openRelayDeployment(f.configPath); opened.storage.close(); }).toThrow(/continuity|checkpoint/); }
+    finally { DatabaseSync.prototype.prepare = prepare; }
+    expect(read(side, "continuity")).toEqual(before);
+    expect(readFileSync(f.relayPath)).toEqual(relayBefore);
+    const restarted = openRelayDeployment(f.configPath);
+    try { expect(restarted.storage.claimWorkspace({workspaceId: "acknowledged", ownerUserId: "owner", createdAtMs: 2})).toBe("owned"); }
+    finally { restarted.storage.close(); }
+  });
+
   it.each(["busy", "partial", "io-error"])("does not settle continuity when the durability checkpoint is %s", failure => {
     const f = fixture(), live = openRelayDeployment(f.configPath);
     const storage = live.storage as StorageContext, exec = DatabaseSync.prototype.exec;
@@ -269,7 +323,7 @@ describe("relay deployment continuity", () => {
     const prepare = DatabaseSync.prototype.prepare;
     DatabaseSync.prototype.prepare = function(sql: string) {
       const query = prepare.call(this, sql);
-      if (sql === "PRAGMA wal_checkpoint(FULL)") query.get = () => {
+      if (sql === "PRAGMA wal_checkpoint(FULL)" && prepare.call(this, "SELECT 1 FROM sqlite_schema WHERE name='sync_relay_continuity'").get()) query.get = () => {
         if (failure === "io-error") throw new Error("checkpoint I/O error");
         return {busy: failure === "busy" ? 1 : 0, log: 2, checkpointed: failure === "busy" ? 2 : 1};
       };

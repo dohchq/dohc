@@ -15,7 +15,7 @@ const exec = DatabaseSync.prototype.exec;
 const prepare = DatabaseSync.prototype.prepare;
 function installCrash() {
   DatabaseSync.prototype.prepare = function(sql: string) {
-    if (sql === "PRAGMA wal_checkpoint(FULL)" && boundary === "before-checkpoint") process.exit(83);
+    if (sql === "PRAGMA wal_checkpoint(FULL)" && boundary === "before-checkpoint" && prepare.call(this, "SELECT 1 FROM sqlite_schema WHERE name='sync_relay_continuity'").get()) process.exit(83);
     return prepare.call(this, sql);
   };
   DatabaseSync.prototype.exec = function(sql: string) {
