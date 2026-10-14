@@ -265,6 +265,7 @@ Cloudflare can still serve IPv6 visitors while connecting to the origin over IPv
 Restrict inbound origin connections to Cloudflare's ranges using your provider's network firewall or Docker's `DOCKER-USER` chain.
 Docker's published-port rules run before ufw and firewalld rules.
 An allowlist in ufw or firewalld alone can leave port 443 open.
+`DOCKER-USER` filters only IPv4, so also block inbound IPv6 on ports 80 and 443 in the host firewall, or use the provider's firewall.
 Otherwise, a visitor can bypass Cloudflare and choose their own client-address headers.
 Caddy ignores those forged headers, but a direct connection still bypasses Cloudflare's controls.
 
