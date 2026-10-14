@@ -32,7 +32,7 @@ const MAX_KEY_ENVELOPE_ACK_BYTES: u64 = 64 * 1024;
 /// Every engine request to the relay names the relay API version this build
 /// speaks. Keep both equal to `packages/workspace-contracts/src/relayValues.ts`.
 const RELAY_API_VERSION_HEADER: &str = "x-dohc-api-version";
-const RELAY_API_VERSION: &str = "1";
+const RELAY_API_VERSION: &str = "2";
 const CANCELLABLE_BODY_READ_POLL_INTERVAL: Duration = Duration::from_millis(25);
 /// A canceled synchronous read may live until its transport timeout. Each
 /// limit matches the runtime's concurrency for that kind of read and is

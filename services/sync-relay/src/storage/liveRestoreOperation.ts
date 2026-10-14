@@ -3,6 +3,7 @@ import {requireResumedBinding,retainedRestoreLifecycle} from "./liveRestoreLifec
 import {readServiceActivationOrigin} from "./serviceActivationOrigin";
 import {readServiceActivation} from "./serviceActivationAccess";
 import {SERVICE_HOST_ENROLLMENTS} from "./serviceHostEnrollment";
+import {requireNoReleaseClaim} from "./releaseClaim";
 import { isDeepStrictEqual } from "node:util";
 import { createHash } from "node:crypto";
 import { parseLiveObjectBinding, type LiveObjectBinding } from "@dohc/live-session-contract/live-object-binding";
@@ -116,6 +117,7 @@ function requireNoPendingActivation(storage: StorageContext, document: LiveDocum
   if (readServiceActivation(storage, document)?.completion_json === null) refuse();
 }
 function requireUnretiredEnrollment(storage: StorageContext, document: LiveDocumentKey): void {
+  requireNoReleaseClaim(storage,document);
   // Enrollments are main-only and keyed by workspace/object, even after a path moves.
   if (document.mainVersionId !== "main" || storage.db.prepare(`SELECT 1 FROM ${SERVICE_HOST_ENROLLMENTS} WHERE workspace_id=? AND object_id=? AND retired=1`)
     .get(document.workspaceId, document.objectId)) refuse();

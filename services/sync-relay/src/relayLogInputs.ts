@@ -5,6 +5,7 @@ import { badRequest, relayError } from "./errors";
 import { parseString } from "./requestInputs";
 import type { SyncRelayLogInput } from "./storage";
 import { MAX_PAYLOAD_JSON_BYTES } from "./wireLimits";
+import {releasePublicationTag} from "./storage/releasePublication";
 
 const MAX_OP_KIND_CHARS = 128;
 
@@ -74,7 +75,9 @@ export function parseLogOp(value: unknown): SyncRelayLogInput {
   if (Buffer.byteLength(payloadJson, "utf8") > MAX_PAYLOAD_JSON_BYTES) {
     throw badRequest("payload is too large");
   }
-  return { originSeq, opKind, payloadJson, recordedAtMs };
+  const result = { originSeq, opKind, payloadJson, recordedAtMs };
+  releasePublicationTag(result);
+  return result;
 }
 
 export type LogAuthorNameLookup = (userId: string) => Promise<string | null> | string | null;

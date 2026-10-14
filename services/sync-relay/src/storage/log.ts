@@ -23,6 +23,7 @@ import {
 import { rowToLogRow } from "./rows";
 import { notifyDesktopReadiness } from "../desktopReadinessChanges";
 import {confirmLiveApplication} from "./liveApplicationAuthorship";
+import {admitReleasePublication, releasePublicationTag, originalReleasePayload} from "./releasePublication";
 
 const logPageStatements = new WeakMap<SqliteDb, ReturnType<SqliteDb["prepare"]>>();
 
@@ -30,6 +31,7 @@ export function appendLogBatch(storage: StorageContext, input: {
     workspaceId: string;
     originId: string;
     ops: SyncRelayLogInput[];
+    ownerUserId?: string;
     guard?: (context: AppendLogBatchGuardContext) => void;
   }): AppendLogBatchResult {
     return storage.tx(() => appendLogBatchInTransaction(storage, input));
@@ -40,6 +42,7 @@ export function appendLogBatchInTransaction(storage: StorageContext, input: {
   workspaceId: string;
   originId: string;
   ops: SyncRelayLogInput[];
+  ownerUserId?: string;
   guard?: (context: AppendLogBatchGuardContext) => void;
 }): AppendLogBatchResult {
       for (const op of input.ops) {
@@ -74,6 +77,11 @@ export function appendLogBatchInTransaction(storage: StorageContext, input: {
         maxStmt.get(input.workspaceId, input.originId)?.max_seq ?? -1,
       );
       for (const op of input.ops) {
+        const release = releasePublicationTag(op);
+        if (release && (release.document.workspaceId !== input.workspaceId || !input.ownerUserId || !storage.workspaceIsOwnedBy(input.workspaceId,input.ownerUserId))) {
+          // Recheck tagged workspace authority even for duplicate coordinates.
+          admitReleasePublication(storage,op,input.workspaceId,input.ownerUserId);
+        }
         if (op.originSeq <= currentMax) {
           const existing = existingStmt.get(
             input.workspaceId,
@@ -83,10 +91,14 @@ export function appendLogBatchInTransaction(storage: StorageContext, input: {
           if (
             existing &&
             existing.op_kind === op.opKind &&
-            existing.payload_json === op.payloadJson &&
-            existing.settlement_admission_json === (op.settlementAdmission === undefined ? null : JSON.stringify(op.settlementAdmission)) &&
+            existing.payload_json === (originalReleasePayload(op) ?? op.payloadJson) &&
+            (release || existing.settlement_admission_json === (op.settlementAdmission === undefined ? null : JSON.stringify(op.settlementAdmission))) &&
             Number(existing.recorded_at_ms) === op.recordedAtMs
           ) {
+            if (release) {
+              op.payloadJson = String(existing.payload_json);
+              op.settlementAdmission = existing.settlement_admission_json == null ? undefined : JSON.parse(String(existing.settlement_admission_json));
+            }
             skipped += 1;
             continue;
           }
@@ -109,7 +121,10 @@ export function appendLogBatchInTransaction(storage: StorageContext, input: {
 
       let batchCoordinates: Map<number, SyncRelayLogInput> | undefined;
       for (const op of newOps) {
+        admitReleasePublication(storage,op,input.workspaceId,input.ownerUserId);
+        if (op.settlementAdmission && "kind" in op.settlementAdmission) continue;
         commitHostedSettlement(storage, op, input.workspaceId, input.originId);
+        if (op.settlementAdmission?.status === "refused") op.payloadJson = originalReleasePayload(op) ?? op.payloadJson;
         if (op.opKind === "live.audit.application") {
           batchCoordinates ??= new Map(newOps.map(entry => [entry.originSeq, entry]));
           confirmLiveApplication(storage, op, input.workspaceId, input.originId, batchCoordinates);
@@ -234,9 +249,14 @@ export function appendLogBatchInTransaction(storage: StorageContext, input: {
           Number(result.lastInsertRowid),
         );
       }
-      const settlementRefusals=input.ops.filter(op=>op.settlementAdmission?.status === "refused").map(op=>({originId:input.originId,originSeq:op.originSeq,
-        momentId:settlementResponseIdentifier((JSON.parse(op.payloadJson) as Record<string,unknown>).momentId),settlementId:op.settlementAdmission!.settlementId,reason:"authorship-mismatch"}));
-      return { inserted, skipped, currentMaxOriginSeq: currentMax,...(settlementRefusals.length?{settlementRefusals}:{}) };
+      let settlementRefusals: AppendLogBatchResult["settlementRefusals"], releaseRefusals: AppendLogBatchResult["releaseRefusals"];
+      for (const op of input.ops) {
+        const admission=op.settlementAdmission; if (admission?.status !== "refused") continue;
+        if ("kind" in admission) (releaseRefusals ??=[]).push({...admission,originId:input.originId,originSeq:op.originSeq});
+        else (settlementRefusals ??=[]).push({originId:input.originId,originSeq:op.originSeq,
+          momentId:settlementResponseIdentifier((JSON.parse(op.payloadJson) as Record<string,unknown>).momentId),settlementId:admission.settlementId,reason:"authorship-mismatch"});
+      }
+      return { inserted, skipped, currentMaxOriginSeq: currentMax,...(settlementRefusals?{settlementRefusals}:{}),...(releaseRefusals?{releaseRefusals}:{}) };
   }
 
 export function maxOriginSeq(storage: StorageContext, workspaceId: string, originId: string): number {

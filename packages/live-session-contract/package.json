@@ -12,6 +12,7 @@
     "./live-object-binding": "./src/liveObjectBinding.ts",
     "./live-ticket": "./src/liveTicket.ts",
     "./live-frame": "./src/liveFrame.ts",
+    "./release-claim": "./src/releaseClaim.ts",
     "./limits": "./src/limits.ts"
   },
   "scripts": {

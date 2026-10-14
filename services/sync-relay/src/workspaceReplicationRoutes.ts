@@ -136,6 +136,7 @@ export function createWorkspaceReplicationRoutes(
         workspaceId: route.workspaceId,
         originId,
         ops,
+        ownerUserId: actor.userId,
         // Identity claim/verification rides the append's BEGIN IMMEDIATE
         // transaction. A gap/conflict/quota/blob failure later in append
         // rolls back a first-adopt claim together with the batch.
@@ -159,6 +160,7 @@ export function createWorkspaceReplicationRoutes(
         skipped: result.skipped,
         currentMaxOriginSeq: result.currentMaxOriginSeq,
         ...(result.settlementRefusals ? {settlementRefusals:result.settlementRefusals} : {}),
+        ...(result.releaseRefusals ? {releaseRefusals:result.releaseRefusals} : {}),
       });
     }
 

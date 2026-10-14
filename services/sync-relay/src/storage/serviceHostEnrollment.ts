@@ -10,6 +10,8 @@ import {canonicalLiveSelector, currentLiveDocumentMoment} from "./liveDocumentAu
 import {LIVE_RESTORE_OPERATIONS} from "./liveRestoreOperationSchema";
 import {assertWorkspaceQuota} from "./workspaces";
 import {badRequest, notFound, relayError} from "../errors";
+import {initializeReleaseClaimSchema, RELEASE_CLAIM_COLUMN, RELEASE_CLAIM_MIGRATION} from "./releaseClaimSchema";
+import {requireReleaseEnablement} from "./releaseClaim";
 
 export const SERVICE_HOST_ENROLLMENTS = "sync_relay_service_host_enrollments";
 export const SERVICE_HOST_MAX_DOCUMENTS = 64;
@@ -116,7 +118,10 @@ export function initializeServiceHostEnrollmentSchema(db: SqliteDb): void {
   const exact = (sql: string) => !!existing && existing.type === "table" && typeof existing.sql === "string" &&
     existing.sql.replace(/\s+/g, " ").trim() === sql.replace(/\s+/g, " ").trim();
   if (marked) {
-    if (!exact(SQL)) throw new Error("Service host enrollment storage is damaged.");
+    // The release-claim migration adds a column after the last one, so compare without whitespace.
+    const expected = isMarked(RELEASE_CLAIM_MIGRATION) ? SQL.replace("  PRIMARY KEY", `  ${RELEASE_CLAIM_COLUMN},\n  PRIMARY KEY`) : SQL;
+    if (!existing || existing.type !== "table" || typeof existing.sql !== "string" ||
+      existing.sql.replace(/\s+/g, "") !== expected.replace(/\s+/g, "")) throw new Error("Service host enrollment storage is damaged.");
   } else if (isMarked(V1_MIGRATION)) {
     if (!exact(V1_SQL)) throw new Error("Service host enrollment storage is damaged.");
     assertServiceHostEnrollmentConstraints(db);
@@ -139,6 +144,7 @@ export function initializeServiceHostEnrollmentSchema(db: SqliteDb): void {
   }
   assertServiceHostEnrollmentConstraints(db);
   if (!marked) db.prepare("INSERT INTO sync_relay_migrations (migration_id,completed_at_ms) VALUES (?,?)").run(MIGRATION, Date.now());
+  initializeReleaseClaimSchema(db);
 }
 /** The v1 and v2 layouts share these indexes, so one check covers both. */
 function assertServiceHostEnrollmentConstraints(db: SqliteDb): void {
@@ -250,6 +256,7 @@ function enrollInsideTransaction(storage: StorageContext, input: EnrollServiceHo
     input.guard();
     const identity = ownedIdentity(storage, workspaceId, ownerUserId);
     const objectId = assertOwnedEditableDocument(storage, {workspaceId, path, shareId, ownerUserId});
+    requireReleaseEnablement(storage, {workspaceId,objectId}, path);
     const current = read(storage, workspaceId, path);
     if (current) {
       assertCurrent(storage, current, ownerUserId);
@@ -335,6 +342,7 @@ export function setServiceHostEnrollmentEnabled(storage: StorageContext, input: 
       acceptedCursor = timestamp(high?.cursor ?? 0);
     }
     if (input.enabled) {
+      requireReleaseEnablement(storage, current);
       assertCurrent(storage, current, input.ownerUserId);
       if (assertOwnedEditableDocument(storage, current) !== current.objectId) throw new Error("Service host enrollment path belongs to another document.");
       if (current.retired) assertCapacity(storage, workspaceId);

@@ -1,6 +1,7 @@
 import { jsonResponse } from "@dohc/service-http";
 import { UnauthorizedError } from "@dohc/workspace-auth/session";
 import {LINK_REFUSALS} from "@dohc/security-contract/link-refusal";
+import type {ReleaseClaimRefusalCode, RelayReleaseClaim} from "@dohc/live-session-contract/release-claim";
 
 export const RELAY_ERROR_STATUSES = Object.freeze({
   ambiguous_selector: 400,
@@ -124,6 +125,12 @@ export const RELAY_ERROR_MESSAGES: Readonly<Record<RelayErrorCode, string>> = Ob
 });
 
 /** An error the relay answers with its own status, code, and message. */
+export class ReleaseClaimRefusal extends Error {
+  constructor(readonly code: ReleaseClaimRefusalCode, readonly claim?: RelayReleaseClaim, readonly path?: string) {
+    super(path ? `Live editing for ${path} is stopping. End that stop before starting live editing.` : code);
+  }
+}
+
 export class RelayError extends Error {
   readonly statusCode: number;
 
@@ -163,6 +170,9 @@ export function errorBody(code: RelayErrorCode): Response {
  * answered with a generic 500, never with its message.
  */
 export function errorResponse(error: unknown): Response {
+  if (error instanceof ReleaseClaimRefusal) return Response.json({ok:false,code:error.code,
+    ...(error.claim ? {claim:error.claim} : {}),...(error.path ? {path:error.path,message:error.message} : {})},
+    {status:409,headers:{"cache-control":"private, no-store"}});
   if (error instanceof RelayError) {
     return jsonResponse({ ok: false, error: error.message, code: error.code }, error.statusCode);
   }

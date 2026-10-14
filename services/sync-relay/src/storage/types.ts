@@ -118,7 +118,7 @@ export interface SyncRelayLogInput {
   payloadJson: string;
   recordedAtMs: number;
   admittedAuthorSnapshot?: LiveAuthorSnapshot;
-  settlementAdmission?: import("./hostedSettlement").SettlementAdmission;
+  settlementAdmission?: import("./hostedSettlement").SettlementAdmission | import("@dohc/live-session-contract/release-claim").ReleasePublicationAdmission;
 }
 
 export interface SyncRelayLogRow extends SyncRelayLogInput {
@@ -132,6 +132,7 @@ export interface AppendLogBatchResult {
   skipped: number;
   currentMaxOriginSeq: number;
   settlementRefusals?: {originId:string;originSeq:number;momentId:string;settlementId:string;reason:string}[];
+  releaseRefusals?: import("@dohc/live-session-contract/release-claim").ReleasePushRefusal[];
 }
 
 export interface FetchLogPageResult {
@@ -804,6 +805,7 @@ export interface SyncRelayStorage {
     workspaceId: string;
     originId: string;
     ops: SyncRelayLogInput[];
+    ownerUserId?: string;
     // MU-C4 revoke-race gate: runs inside the append's BEGIN IMMEDIATE
     // transaction, i.e. under the SQLite write lock that serializes revokes,
     // before anything is inserted. A throwing guard rolls the whole batch

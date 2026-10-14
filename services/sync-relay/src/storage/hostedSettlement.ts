@@ -347,7 +347,7 @@ export async function prepareHostedSettlements(
     });
     if (
       existing &&
-      existing.payloadJson === (existing.settlementAdmission?.status === "refused"
+      existing.payloadJson === (existing.settlementAdmission?.status === "refused" && "settlementId" in existing.settlementAdmission
         ? withoutClientAuthors(op.payloadJson) : op.payloadJson) &&
       existing.opKind === op.opKind &&
       existing.recordedAtMs === op.recordedAtMs
@@ -670,7 +670,7 @@ export function commitHostedSettlement(
     commitPreparedHostedSettlement(storage, op, workspaceId, originId);
   } catch (error) {
     if (!(error instanceof SettlementProofRefusal)) throw error;
-    refuseSettlement(op, op.settlementAdmission?.settlementId ?? "unavailable");
+    refuseSettlement(op, op.settlementAdmission && "settlementId" in op.settlementAdmission ? op.settlementAdmission.settlementId : "unavailable");
   }
   if (op.settlementAdmission?.status === "refused") op.payloadJson = withoutClientAuthors(op.payloadJson);
 }

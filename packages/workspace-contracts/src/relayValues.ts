@@ -37,4 +37,4 @@ export function relayUrlsMatch(left: string, right: string): boolean {
 // relay route, body, or code changes meaning, and keep the Rust relay client's
 // copy in `crates/dohc-engine-sync-http` equal.
 export const RELAY_API_VERSION_HEADER = "x-dohc-api-version";
-export const RELAY_API_VERSION = 1;
+export const RELAY_API_VERSION = 2;

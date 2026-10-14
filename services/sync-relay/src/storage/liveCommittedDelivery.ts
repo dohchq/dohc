@@ -1,3 +1,4 @@
+import {requireReleaseEnablement} from "./releaseClaim";
 import {SETTLEMENT_CUTS} from "./hostedSettlementSchema";
 import {nativeSourceAuthorMatches} from "./liveNativeSourceAuthors";
 import {parseNativeRestoreApplicationReceipt,parseNativeRestoreSettlementReceipt,parseNativeRestoreResumeReceipt,type RestoreLifecycle,type NativeRestoreApplicationReceipt,type NativeRestoreSettlementReceipt,type NativeRestoreResumeReceipt} from "../liveRestoreLifecycle";
@@ -1429,6 +1430,7 @@ export class LiveCommittedDeliveryStore {
       integrity(this.#storage.db.prepare(`UPDATE ${LIVE_RESTORE_OPERATIONS} SET phase=? WHERE relay_database_namespace=? AND operation_id=? AND phase=?`)
         .run(lifecycle.phase,this.#history.namespace,input.operationId,saved.lifecycle.phase).changes===1);
       if (stage==="resume") {
+        requireReleaseEnablement(this.#storage,saved.operation.intent.document);
         integrity(this.#storage.db.prepare(`UPDATE sync_relay_live_documents SET admission_state='open' WHERE ${WHERE_DOCUMENT} AND restore_fence_generation=? AND admission_state='closed' AND lineage_state='current'`)
           .run(...documentParams(saved.operation.intent.document),saved.operation.newFence).changes===1);
       }

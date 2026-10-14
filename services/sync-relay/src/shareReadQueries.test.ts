@@ -119,7 +119,7 @@ it("serves only relay-admitted settlement authors, keeps owner bytes, and advanc
  const storage={fetchLogPage:({sinceRelaySeq}:{sinceRelaySeq:number})=>({rows:rows.filter(row=>row.relaySeq>sinceRelaySeq),nextCursor:3,hasMore:false}),
    hasRefusedSettlement:(input:Parameters<import("./storage").SyncRelayStorage["hasRefusedSettlement"]>[0])=>rows.some(row=>
      row.workspaceId === input.workspaceId && row.originId === input.originId && row.originSeq < input.originSeq &&
-     row.settlementAdmission?.status === "refused" && row.settlementAdmission.settlementId === input.settlementId &&
+     row.settlementAdmission?.status === "refused" && "settlementId" in row.settlementAdmission && row.settlementAdmission.settlementId === input.settlementId &&
      row.settlementAdmission.reason === input.reason && JSON.parse(row.payloadJson).momentId === input.momentId)};
  const queries=createShareReadQueries(storage as unknown as Parameters<typeof createShareReadQueries>[0],500);
  const served=queries.filteredLogPage("workspace", "share",selector,0,10,"authenticated");

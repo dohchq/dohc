@@ -9,7 +9,9 @@ import type {startSelfHostedLiveHost} from "./selfHostedLiveHost";
 import {effectiveShareSelector, isLiveEditShareSelector, parseStoredAnyShareSelectorJson} from "./shareFilter";
 import {canonicalLiveSelector} from "./storage/liveDocumentAuthority";
 import {parseShareId, parseWorkspaceId} from "./requestInputs";
-import {badRequest, errorResponse, notFound, RelayError} from "./errors";
+import {badRequest, errorResponse, notFound, RelayError, ReleaseClaimRefusal} from "./errors";
+import {releaseClaimRequest} from "./storage/releaseClaim";
+import type {StorageContext} from "./storage/context";
 
 export function serviceHostSharePaths(storage: SyncRelayStorage, input: {workspaceId: string; ownerUserId: string; shareId: string; missingOnly?: boolean}): string[] {
   const share = storage.getShare(input.shareId), parsed = share && parseStoredAnyShareSelectorJson(share.selectorJson);
@@ -37,7 +39,7 @@ export function discoverServiceHostDocuments(storage: SyncRelayStorage, onRefuse
       const key = JSON.stringify([share.workspaceId, path]);
       if (existing.has(key) || storage.hasKeptServiceHostEnrollment(share.workspaceId, path)) continue;
       try {storage.enrollServiceHostDocument({workspaceId: share.workspaceId, ownerUserId, shareId: share.shareId, path, nowMs: Date.now(), guard: storage.captureStanding()});}
-      catch (error) {if (error instanceof RelayError) {onRefused?.(error); continue;} throw error;}
+      catch (error) {if (error instanceof ReleaseClaimRefusal) continue; if (error instanceof RelayError) {onRefused?.(error); continue;} throw error;}
       existing.add(key);
     }
   }
@@ -121,6 +123,12 @@ export function createServiceHostEnrollmentRoutes(options: {
       const raw = await readBoundedJson(request, 16 * 1024, request.signal); guard();
       if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw badRequest("Invalid live host request.");
       const input = raw as Record<string, unknown>;
+      if (request.method === "POST" && Object.hasOwn(input,"release")) {
+        if (Object.keys(input).length !== 1 || !input.release || typeof input.release !== "object" ||
+          (input.release as {document?: {workspaceId?: unknown}}).document?.workspaceId !== workspaceId) throw badRequest("Invalid release workspace.");
+        const result = releaseClaimRequest(storage as StorageContext,actor.userId,input.release,guard);
+        host.reconcile(); return response(result);
+      }
       if (request.method === "DELETE") {
         if (Object.keys(input).some(key => !["path","objectId","retire","restoreFenceGeneration"].includes(key)) || typeof input.path !== "string" ||
           (input.objectId !== undefined && (typeof input.objectId !== "string" || input.retire !== true)) ||
@@ -142,6 +150,8 @@ export function createServiceHostEnrollmentRoutes(options: {
       host.reconcile();
       const documents = rows.map(state);
       return response({ok: true, ...(input.path === undefined ? {documents} : documents[0])}, documents.every(row => row.status === "ready") ? 200 : 202);
-    } catch (error) {if (error instanceof ServiceHostRetirementConflict) return response({ok:false,code:"restore-fenced",restoreFenceGeneration:error.restoreFenceGeneration},409); return errorResponse(error);}
+    } catch (error) {
+      if (error instanceof ServiceHostRetirementConflict) return response({ok:false,code:"restore-fenced",restoreFenceGeneration:error.restoreFenceGeneration},409); return errorResponse(error);
+    }
   };
 }

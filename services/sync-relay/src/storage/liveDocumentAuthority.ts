@@ -1,3 +1,4 @@
+import {requireReleaseEnablement} from "./releaseClaim";
 import { visibleSharePath } from "@dohc/security-contract/share-selector";
 import { ensureLiveLinkPublicPrincipal } from "./liveAuthorSnapshot";
 import type { StoredLiveDocumentAuthority } from "./types";
@@ -596,6 +597,7 @@ function registerValidatedBaseline(storage: StorageContext, owned: LiveDocumentB
         return { kind: "registered", document: { ...document }, currentPath,
           restoreFenceGeneration: current.binding.restoreFenceGeneration, registeredAtMs: current.registeredAtMs, replayed: true };
       }
+      requireReleaseEnablement(storage,document,currentPath);
       prepareLiveDeliveryWorkspace(storage, document.workspaceId, coordinate.hostId);
       const metadata = [document.workspaceId, document.mainVersionId, document.objectId, document.lineageClaimId,
         null, currentPath, latest.relay_seq as number, evidence.projectedMarkdownSha256,

@@ -1501,6 +1501,34 @@ const lifecycleRows=(f:Pick<ReturnType<typeof contentProposalFixture>,"raw"|"jou
   operations:f.raw.prepare("SELECT * FROM sync_relay_live_restore_operations").all(),owners:f.raw.prepare("SELECT * FROM sync_relay_live_delivery_owners").all(),
   edges:f.raw.prepare("SELECT * FROM sync_relay_live_delivery_edges").all()});
 
+it.each([true,false])("release claim guards and publication-fences restore resume atomically (held=%s)", held => {
+  const f=admittedRestoreFixture();
+  try {
+    f.store.acknowledgeStopRestoreReplacement(f.input,f.application);
+    f.store.acknowledgeStopRestoreSettlement(f.input,f.settlement);
+    const identity={releaseDigest:"a".repeat(64),computerName:"Laptop",anchor:{}};
+    const claim={...identity,digest:jsonHash(identity)};
+    // Install enrollment metadata independently of the already-closed restore authority.
+    f.context.tx(() => {
+      f.context.db.prepare(`INSERT INTO sync_relay_service_host_enrollments
+        (workspace_id,object_id,path,owner_user_id,share_id,replication_epoch,stream_identity,credential_nonce,enabled,retired,created_at_ms,updated_at_ms,accounted_bytes,release_claim_json)
+        VALUES (?,?,'docs/a.md','owner','share','epoch','stream',?,1,0,1,1,1,?)`)
+        .run(f.document.workspaceId,f.document.objectId,"b".repeat(64),held?JSON.stringify(claim):null);
+      if (!held) f.context.db.prepare("INSERT INTO sync_relay_release_tombstones VALUES (?,?,?,?,0)")
+        .run(f.document.workspaceId,f.document.objectId,identity.releaseDigest,claim.digest);
+    });
+    if (held) {
+      const before=lifecycleRows(f);
+      expect(() => f.store.acknowledgeStopRestoreResume(f.input,f.resume)).toThrow("stopping");
+      expect(lifecycleRows(f)).toEqual(before);
+      expect(f.raw.prepare("SELECT admission_state FROM sync_relay_live_documents WHERE lineage_state='current'").get()!.admission_state).toBe("closed");
+    } else {
+      expect(f.store.acknowledgeStopRestoreResume(f.input,f.resume).phase).toBe("resumed");
+      expect(f.raw.prepare("SELECT publication_fenced FROM sync_relay_release_tombstones").get()!.publication_fenced).toBe(1);
+    }
+  } finally {f.close();}
+});
+
 function repeatedReviewFixture(rounds = 1) {
   const f = admittedRestoreFixture("owner", "deleted");
   try {
