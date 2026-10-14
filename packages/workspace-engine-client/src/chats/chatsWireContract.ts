@@ -146,6 +146,7 @@ type ChatThreadStartParams = ChatsJsonObject & {
   authorDisplayName: string;
   authorOwnerDisplayName?: string;
   authorUserId?: string;
+  authorActorKey?: string;
   origin?: "cli";
   body: string;
   needsDecision?: boolean;
@@ -183,6 +184,7 @@ type ChatMessageSendParams = ChatsJsonObject & {
   authorDisplayName: string;
   authorOwnerDisplayName?: string;
   authorUserId?: string;
+  authorActorKey?: string;
   parentMessageId?: string;
   origin?: "cli";
   body: string;
@@ -509,6 +511,7 @@ const ChatMessageSchema = mutableStruct({
   threadId: Schema.String,
   author: ChatActorSchema,
   authorOwnerDisplayName: Schema.optionalKey(Schema.String),
+  authorActorKey: Schema.optionalKey(Schema.String),
   authorUserId: Schema.optionalKey(Schema.String),
   parentMessageId: Schema.optionalKey(Schema.String),
   origin: Schema.optionalKey(Schema.Literal("cli")),

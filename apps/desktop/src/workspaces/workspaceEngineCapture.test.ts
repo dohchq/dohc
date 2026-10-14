@@ -215,7 +215,7 @@ describe("probeEngineStoreRefusal", () => {
     const sessions = mockLiveSessions(
       new VersionedLoopbackEngine(),
       undefined,
-      () => ({ settled: true, running: true, degraded: false }),
+      () => ({ settled: true, running: true, degraded: false, heldFiles: [] }),
       async () => {
         throw probeError;
       },
@@ -1623,7 +1623,7 @@ describe("workspaceEngineCapture batch capture", () => {
     let settled = true;
     const sessions = mockLiveSessions(loopback, requests, () => {
       if (!settled) polling.resolve();
-      return { settled, running: true, degraded: !settled };
+      return { settled, running: true, heldFiles: [], degraded: !settled };
     });
     const closeWorkspace = vi.spyOn(sessions, "closeWorkspace");
     const engine = capture(root, { rustEngineSessions: sessions });
@@ -1651,7 +1651,7 @@ describe("workspaceEngineCapture batch capture", () => {
     const sessions = mockLiveSessions(loopback, undefined, () => ({
       settled,
       running: true,
-      degraded: !settled,
+      heldFiles: [], degraded: !settled,
     }));
     const closeWorkspace = vi.spyOn(sessions, "closeWorkspace");
     const engine = capture(root, {
@@ -2624,7 +2624,7 @@ describe("workspaceEngineCapture relay sync materialization", () => {
         rustEngineSessions: mockLiveSessions(loopback, requests, () => ({
           settled,
           running: true,
-          degraded: !settled,
+          heldFiles: [], degraded: !settled,
         })),
       });
       loopback.seedTextFile({
@@ -3489,7 +3489,7 @@ describe("workspaceEngineCapture agent attribution", () => {
         rustEngineSessions: mockLiveSessions(loopback, requests, () => ({
           settled,
           running: true,
-          degraded: !settled,
+          heldFiles: [], degraded: !settled,
         })),
       });
 

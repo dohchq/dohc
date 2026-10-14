@@ -90,6 +90,20 @@ describe("ViewActions", () => {
     expect(precedes(toggle, within(row).getByTestId("create-editor-group-right"))).toBe(true);
   });
 
+  // Run arrives once main answers that the file is an app's entry. It stands
+  // left of Share, so Share and the controls right of it stay put.
+  it("puts Run for an app's entry left of Share, and nothing without one", () => {
+    const onRun = vi.fn();
+    const { rerender } = render(<ViewActions onShare={noop} actions={<button type="button">Source</button>} />);
+    expect(screen.queryByRole("button", { name: "Run app" })).toBeNull();
+    rerender(<ViewActions onShare={noop} onRun={onRun} actions={<button type="button">Source</button>} />);
+    const run = screen.getByRole("button", { name: "Run app" });
+    expect(run.dataset.testid).toBe("file-run-app");
+    expect(precedes(run, screen.getByRole("button", { name: "Share file" }))).toBe(true);
+    fireEvent.click(run);
+    expect(onRun).toHaveBeenCalledOnce();
+  });
+
   // Saved, saving and saved-to-host pass on their own, so the row says them
   // only to screen readers, and typing never changes what the row draws. A
   // held file, a lasting pending share or a failed save keeps its words.

@@ -1,4 +1,5 @@
 import type {LiveObjectBinding} from "@dohc/live-session-contract/live-object-binding";
+import type {OwnerOutboxAdmission} from "./ownerOutboxDelivery";
 import {isDeepStrictEqual} from "node:util";
 import {EngineRequestError,type EngineClient,type NativeOwnerActivation} from "@dohc/workspace-engine-client/daemon";
 import {parseLiveDocumentKey,parseLiveUpdateIdentifier,type LiveDocumentKey} from "@dohc/live-session-contract/live-update-admission";
@@ -61,7 +62,7 @@ export class ServiceActivationDriver {
   readonly #loaded=new Set<string>();
   // Hosted targets the engine unloaded while idle, with their documents. Passes skip them until they wake.
   readonly #dormant=new Map<string,string>();
-  constructor(readonly options:{storage:SyncRelayStorage;history:LiveJournalHistoryAuthority;client:EngineClient;host:LiveHostConnectionCoordinate;
+  constructor(readonly options:{trustedAccount: OwnerOutboxAdmission["trustedAccount"];storage:SyncRelayStorage;history:LiveJournalHistoryAuthority;client:EngineClient;host:LiveHostConnectionCoordinate;
     workspaces:ReadonlyMap<string,{handle:string;ordinary:ServiceOrdinaryReplication}>;config:ServiceActivationConfig;
     adoption:{maxBytes:number;maxEvents:number};restore?:LiveRestorePreparation;nextRequestId():number;deadlineMs:number;
     assertCurrent():void;registered():void;
@@ -261,7 +262,7 @@ export class ServiceActivationDriver {
     const consumer=new OwnerCommittedDelivery(o.storage,o.history,{client:transport.client,workspace:workspace.handle,
       host:o.host,deadlineMs:o.deadlineMs,nextRequestId:o.nextRequestId,bounds:o.adoption,restore:o.restore,
       publishOrdinary:signal=>workspace.ordinary.publish(signal),
-      ownerAdmission:{activation:access,shares:new Map([[target.workspaceId,target.shareId]]),
+      ownerAdmission:{trustedAccount:o.trustedAccount,activation:access,shares:new Map([[target.workspaceId,target.shareId]]),
         maxEntriesPerDrain:c.maxEntriesPerDrain,maxBytesPerDrain:c.maxBytesPerDrain,validate:c.validateAdmission}});
     return {consumer,transport,completed:false,target:targetKey(target),...state};
   }

@@ -49,7 +49,7 @@ for (const kind of ["prepare", "verify"]) for (const signal of ["SIGINT", "SIGTE
         assert.equal(result.lockExists, false);
         assert.equal(result.containerExists, cleanupFails);
         assert.equal(result.commands.some(({ command }) => command === "cargo"), false);
-        if (kind === "prepare") assert.deepEqual(result.commands, [{ command: "pnpm", args: ["install", "--frozen-lockfile"] }]);
+        if (kind === "prepare") assert.deepEqual(result.commands, [{ command: "pnpm", args: ["install", "--frozen-lockfile", "--config.confirm-modules-purge=false"] }]);
         else {
           assert.equal(result.outcome.checkoutReleased, true);
           assert.equal(result.report.verdict, "FAIL");

@@ -1952,14 +1952,17 @@ fn resumed_owner_retains_old_pending_sources_and_creates_an_independent_generati
     assert_eq!(historic.binding.restore_fence_generation, 1);
 }
 
+/// Twice the rescue's 8 MiB working reserve, so the rescue cannot hold the proof.
+const LARGE_PROOF_BYTES: usize = 16 * 1024 * 1024;
+
 #[test]
 fn restored_owner_capacity_rescue_streams_past_a_large_prior_proof_and_private_tail() {
-    restored_owner_capacity_rescue(350, true);
+    restored_owner_capacity_rescue(100, true);
 }
 
 #[test]
 fn restored_owner_capacity_rescue_streams_past_a_large_baseline_restore_proof_and_private_tail() {
-    restored_owner_capacity_rescue(700, false);
+    restored_owner_capacity_rescue(200, false);
 }
 
 fn restored_owner_capacity_rescue(events: i64, select_terminal: bool) {
@@ -2007,7 +2010,7 @@ fn restored_owner_capacity_rescue(events: i64, select_terminal: bool) {
     mark("ingress");
     let mut preparation = native_tail_input(&mut f, terminal, sequence);
     // The selected current point retains a second authentic copy of the
-    // accepted suffix: >60MiB of proof with half as many ingress operations.
+    // accepted suffix: a large proof with half as many ingress operations.
     if select_terminal {
         preparation.point.journal_cursor = events;
     }
@@ -2034,7 +2037,7 @@ fn restored_owner_capacity_rescue(events: i64, select_terminal: bool) {
             )
         })
         .unwrap();
-    assert!(proof_length > 60 * 1024 * 1024);
+    assert!(proof_length > LARGE_PROOF_BYTES as i64);
     mark("prepare-proof");
     let mut binding = f.binding.clone();
     binding.restore_fence_generation = 1;
@@ -2240,7 +2243,7 @@ fn restored_owner_capacity_rescue(events: i64, select_terminal: bool) {
             &held,
             terminal.unwrap().journal_cursor,
             &mut restore_content::Budget {
-                remaining: 60 * 1024 * 1024
+                remaining: LARGE_PROOF_BYTES
             },
             4095
         )),

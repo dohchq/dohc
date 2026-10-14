@@ -2095,20 +2095,25 @@ describe("owner live documents", () => {
     );
     expect(screen.queryByTestId("settings-row-live-documents")).toBeNull();
     expect(
-      screen.getByRole("button", { name: "Open sync and sharing" }),
-    ).toBeTruthy();
+      (await screen.findByRole("switch", { name: "Sync this workspace" })).getAttribute("aria-checked"),
+    ).toBe("false");
   });
 
-  // Closing the connection dialog re-reads the status this gate is derived
-  // from, so the list arrives without a restart or a workspace switch.
+  // Turning sync on re-reads the status this gate is derived from, so the
+  // list arrives without a restart or a workspace switch.
   it("offers the live document list once this workspace syncs", async () => {
-    const bridge = makeBridge(Promise.resolve(null));
     let workspaceSynced = false;
+    const bridge = Object.assign(makeBridge(Promise.resolve(null)), {
+      cloudEnableSync: vi.fn(async () => {
+        workspaceSynced = true;
+      }),
+    });
     bridge.cloudStatus = vi.fn(async () => ({
       connected: true,
       email: "me@dohc.test",
       serverUrl: "https://cloud.dohc.test",
       workspaceSynced,
+      workspaceSyncConnected: workspaceSynced,
     }));
     const user = userEvent.setup();
     renderShell(bridge);
@@ -2117,14 +2122,370 @@ describe("owner live documents", () => {
     await waitFor(() => expect(bridge.cloudStatus).toHaveBeenCalled());
     expect(screen.queryByTestId("settings-row-live-documents")).toBeNull();
 
-    await user.click(screen.getByRole("button", { name: "Open sync and sharing" }));
-    await screen.findByTestId("cloud-sync-panel");
-    workspaceSynced = true;
+    await user.click(await screen.findByRole("switch", { name: "Sync this workspace" }));
+
+    expect(bridge.cloudEnableSync).toHaveBeenCalledWith({ workspaceId: WORKSPACE.workspaceId });
+    expect(await screen.findByTestId("settings-row-live-documents")).toBeTruthy();
+  });
+});
+
+// Connect server is one path: signed in, the account and the sync switch are
+// settings; signed out, connecting is the Cloud dialog.
+describe("Connect server", () => {
+  const SIGNED_OUT = { connected: false, email: "", serverUrl: "", workspaceSynced: false };
+  const openFromPalette = async (user: ReturnType<typeof userEvent.setup>) => {
+    await user.keyboard("{Control>}k{/Control}");
+    await user.click(await screen.findByText("Connect server"));
+  };
+
+  it("opens Settings' Sync and sharing page while signed in", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.cloudStatus = vi.fn(async () => ({
+      connected: true,
+      email: "me@dohc.test",
+      serverUrl: "https://cloud.dohc.test",
+      workspaceSynced: false,
+    }));
+    const user = userEvent.setup();
+    renderShell(bridge);
+    await waitFor(() => expect(bridge.cloudStatus).toHaveBeenCalled());
+
+    await openFromPalette(user);
+
+    const section = await screen.findByTestId("settings-section-cloud");
+    expect(within(section).getByTestId("settings-row-account").textContent).toContain("me@dohc.test");
+    expect(screen.queryByTestId("cloud-sync-panel")).toBeNull();
+  });
+
+  it("opens the Cloud dialog while signed out, from the palette and from Settings", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.cloudStatus = vi.fn(async () => SIGNED_OUT);
+    const user = userEvent.setup();
+    renderShell(bridge);
+    await waitFor(() => expect(bridge.cloudStatus).toHaveBeenCalled());
+
+    await openFromPalette(user);
+    expect(await screen.findByTestId("cloud-server-url")).toBeTruthy();
+    expect(screen.queryByTestId("settings-dialog")).toBeNull();
     await user.keyboard("{Escape}");
     await waitFor(() => expect(screen.queryByTestId("cloud-sync-panel")).toBeNull());
 
-    await openCloudSettings(user);
-    expect(await screen.findByTestId("settings-row-live-documents")).toBeTruthy();
+    await user.click(await screen.findByTestId("activity-settings"));
+    await user.click(await screen.findByTestId("settings-nav-cloud"));
+    await user.click(await screen.findByTestId("settings-cloud-connect"));
+    expect(await screen.findByTestId("cloud-server-url")).toBeTruthy();
+    expect(screen.queryByTestId("settings-dialog")).toBeNull();
+  });
+
+  // The next step after signing in is the sync switch, so the dialog hands
+  // over to the page that holds it.
+  it("moves on to Settings' Sync and sharing page once sign-in completes", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      let connected = false;
+      const bridge = Object.assign(makeBridge(Promise.resolve(null)), {
+        cloudLoginStart: vi.fn(async () => ({ userCode: "ABCD", verificationUri: "https://cloud.dohc.test/device" })),
+        cloudLoginPoll: vi.fn(async () => {
+          connected = true;
+          return { status: "complete" as const, email: "me@dohc.test" };
+        }),
+      });
+      bridge.cloudStatus = vi.fn(async () =>
+        connected
+          ? { connected: true, email: "me@dohc.test", serverUrl: "https://cloud.dohc.test", workspaceSynced: false }
+          : SIGNED_OUT,
+      );
+      const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+      renderShell(bridge);
+      await waitFor(() => expect(bridge.cloudStatus).toHaveBeenCalled());
+
+      await openFromPalette(user);
+      await user.type(await screen.findByTestId("cloud-server-url"), "https://cloud.dohc.test");
+      await user.click(screen.getByTestId("cloud-connect-start"));
+      await screen.findByTestId("cloud-user-code");
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(3000);
+      });
+
+      const section = await screen.findByTestId("settings-section-cloud");
+      expect(screen.queryByTestId("cloud-sync-panel")).toBeNull();
+      expect((await within(section).findByTestId("settings-row-account")).textContent).toContain("me@dohc.test");
+      expect(within(section).getByRole("switch", { name: "Sync this workspace" })).toBeTruthy();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // The titlebar's workspace menu holds Connect server.
+  const connectFromTitlebarMenu = async (bridge: ReturnType<typeof makeBridge>) => {
+    bridge.showWorkbenchMenu.mockResolvedValueOnce("connect-cloud");
+    fireEvent.contextMenu(await screen.findByTestId("workspace-switcher"));
+    await waitFor(() => expect(bridge.showWorkbenchMenu).toHaveBeenCalledWith(expect.objectContaining({ context: "status" })));
+  };
+
+  it.each([
+    ["signed in, to Settings", { connected: true, email: "me@dohc.test", serverUrl: "https://cloud.dohc.test", workspaceSynced: false }, "settings-section-cloud"],
+    ["signed out, to the Cloud dialog", SIGNED_OUT, "cloud-server-url"],
+  ] as const)("routes the titlebar menu's Connect server the same way: %s", async (_case, status, opens) => {
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.cloudStatus = vi.fn(async () => status);
+    renderShell(bridge, WORKSPACE, [WORKSPACE, OTHER_WORKSPACE]);
+    await waitFor(() => expect(bridge.cloudStatus).toHaveBeenCalled());
+    await act(async () => {});
+
+    await connectFromTitlebarMenu(bridge);
+
+    expect(await screen.findByTestId(opens)).toBeTruthy();
+    if (status.connected) expect(screen.queryByTestId("cloud-sync-panel")).toBeNull();
+    else expect(screen.queryByTestId("settings-dialog")).toBeNull();
+  });
+
+  // Nobody knows yet whether the person is signed in. The dialog would show
+  // a session's account row a second time, so Settings answers instead.
+  it("opens Settings while the status is still unknown", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.cloudStatus = vi.fn(() => new Promise<never>(() => {}));
+    renderShell(bridge, WORKSPACE, [WORKSPACE, OTHER_WORKSPACE]);
+    await waitFor(() => expect(bridge.cloudStatus).toHaveBeenCalled());
+
+    await connectFromTitlebarMenu(bridge);
+
+    expect(await screen.findByTestId("settings-cloud-checking")).toBeTruthy();
+    expect(screen.queryByTestId("cloud-sync-panel")).toBeNull();
+  });
+
+  // The shell's status said signed out, but the dialog's own check finds a
+  // session: the dialog hands it to Settings rather than showing the account.
+  it("hands a session the dialog finds to Settings", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.cloudStatus = vi.fn()
+      .mockResolvedValueOnce(SIGNED_OUT)
+      .mockResolvedValue({ connected: true, email: "me@dohc.test", serverUrl: "https://cloud.dohc.test", workspaceSynced: false });
+    const user = userEvent.setup();
+    renderShell(bridge);
+    await waitFor(() => expect(bridge.cloudStatus).toHaveBeenCalledTimes(1));
+    await act(async () => {});
+
+    await openFromPalette(user);
+
+    const section = await screen.findByTestId("settings-section-cloud");
+    await waitFor(() => expect(screen.queryByTestId("cloud-sync-panel")).toBeNull());
+    expect((await within(section).findByTestId("settings-row-account")).textContent).toContain("me@dohc.test");
+    expect(screen.getAllByTestId("settings-row-account")).toHaveLength(1);
+  });
+
+  // Access's setup notes, in About and the Sharing view: signed out, Connect
+  // server starts the connect flow; signed in to an account the workspace's
+  // sync does not match, the note opens Settings, where Try again lives.
+  it.each([
+    ["signed out", SIGNED_OUT, "sharing-received-unknown", "signed-out", "Connect server", "cloud-server-url"],
+    [
+      "paused for its account",
+      { connected: true, email: "me@dohc.test", serverUrl: "https://cloud.dohc.test", workspaceSynced: true, workspaceSyncConnected: false },
+      "sharing-granted-unknown", "other-account", "Sync and sharing", "settings-section-cloud",
+    ],
+  ] as const)("routes Access's setup action when %s", async (_case, status, noteId, reason, action, opens) => {
+    const unknownAnswer = {
+      ref: null, rows: [], visibility: "unknown" as const, nextCursor: null, checkedAtMs: null, freshness: "unknown" as const,
+      coverage: { kind: "unavailable" as const, complete: false, observation: "interval" as const },
+    };
+    const bridge = Object.assign(makeBridge(Promise.resolve(null)), {
+      listSharingAccess: vi.fn(async () => unknownAnswer),
+      requestAccessRefresh: vi.fn(async () => undefined),
+    });
+    bridge.cloudStatus = vi.fn(async () => status);
+    const user = userEvent.setup();
+    renderShell(bridge);
+    await waitFor(() => expect(bridge.cloudStatus).toHaveBeenCalled());
+
+    await user.click(await screen.findByTestId("activity-sharing"));
+    const note = await screen.findByTestId(noteId);
+    await waitFor(() => expect(note.getAttribute("data-reason")).toBe(reason));
+    await user.click(within(note).getByRole("button", { name: action }));
+
+    expect(await screen.findByTestId(opens)).toBeTruthy();
+    if (opens === "settings-section-cloud") {
+      expect(screen.queryByTestId("cloud-sync-panel")).toBeNull();
+      expect(await screen.findByTestId("cloud-relink-workspace")).toBeTruthy();
+    } else {
+      expect(screen.queryByTestId("settings-dialog")).toBeNull();
+    }
+  });
+});
+
+// Turning sync on sends no session event, and the switch shows on from the
+// click, which invites closing Settings. The answer still reaches the shell.
+describe("sync answers after Settings closed", () => {
+  const SIGNED_IN = { connected: true, email: "me@dohc.test", serverUrl: "https://cloud.dohc.test", workspaceSynced: false };
+
+  async function startEnableThenClose(bridge: ReturnType<typeof makeBridge> & { cloudEnableSync: ReturnType<typeof vi.fn> }) {
+    const user = userEvent.setup();
+    await user.click(await screen.findByTestId("activity-settings"));
+    await user.click(await screen.findByTestId("settings-nav-cloud"));
+    await user.click(await screen.findByRole("switch", { name: "Sync this workspace" }));
+    await waitFor(() => expect(bridge.cloudEnableSync).toHaveBeenCalled());
+    await user.keyboard("{Escape}");
+    await waitFor(() => expect(screen.queryByTestId("settings-dialog")).toBeNull());
+  }
+
+  it("reads the status again when an enable finishes after Settings closed", async () => {
+    const enable = deferred<void>();
+    let synced = false;
+    const bridge = Object.assign(makeBridge(Promise.resolve(null)), {
+      cloudEnableSync: vi.fn(async () => {
+        await enable.promise;
+        synced = true;
+      }),
+    });
+    bridge.cloudStatus = vi.fn(async () => ({ ...SIGNED_IN, workspaceSynced: synced, workspaceSyncConnected: synced }));
+    renderShell(bridge);
+
+    await startEnableThenClose(bridge);
+    // Closing reads once, before the enable has finished.
+    await waitFor(() => expect(bridge.cloudStatus).toHaveBeenCalledTimes(2));
+    expect(await bridge.cloudStatus.mock.results[1]!.value).toMatchObject({ workspaceSynced: false });
+    await act(async () => {
+      enable.resolve();
+    });
+
+    await waitFor(() => expect(bridge.cloudStatus).toHaveBeenCalledTimes(3));
+    expect(await bridge.cloudStatus.mock.results[2]!.value).toMatchObject({ workspaceSynced: true });
+    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+  });
+
+  // Another window's Try again can make main adopt this account's saved
+  // session without a session announcement. Closing Settings reads the
+  // status again, so reopening shows the workspace syncing.
+  it("reads the status again when Settings closes, after it changed elsewhere", async () => {
+    let paused = true;
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.cloudStatus = vi.fn(async () => ({ ...SIGNED_IN, workspaceSynced: true, workspaceSyncConnected: !paused }));
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await user.click(await screen.findByTestId("activity-settings"));
+    await user.click(await screen.findByTestId("settings-nav-cloud"));
+    expect(await screen.findByTestId("cloud-workspace-relink")).toBeTruthy();
+    expect(bridge.cloudStatus).toHaveBeenCalledTimes(1);
+
+    paused = false;
+    await user.keyboard("{Escape}");
+    await waitFor(() => expect(screen.queryByTestId("settings-dialog")).toBeNull());
+    await waitFor(() => expect(bridge.cloudStatus).toHaveBeenCalledTimes(2));
+
+    await user.click(await screen.findByTestId("activity-settings"));
+    await user.click(await screen.findByTestId("settings-nav-cloud"));
+    await screen.findByTestId("settings-row-sync-workspace");
+    expect(screen.queryByTestId("cloud-workspace-relink")).toBeNull();
+  });
+
+  it("reports an enable that fails after Settings closed, and its Try again opens Settings", async () => {
+    const enable = deferred<void>();
+    const bridge = Object.assign(makeBridge(Promise.resolve(null)), {
+      cloudEnableSync: vi.fn(() => enable.promise),
+    });
+    bridge.cloudStatus = vi.fn(async () => SIGNED_IN);
+    renderShell(bridge);
+
+    await startEnableThenClose(bridge);
+    await act(async () => {
+      enable.reject(new Error("dohc could not reach the relay."));
+    });
+
+    const toast = await screen.findByTestId("workspace-shell-error");
+    expect(toast.textContent).toContain("dohc could not reach the relay.");
+    // No page is watching the attempt, and the notice carries no address, so
+    // Try again opens the place that holds the switch.
+    await userEvent.setup().click(screen.getByTestId("workspace-shell-error-retry"));
+    expect(await screen.findByTestId("settings-section-cloud")).toBeTruthy();
+    expect(screen.queryByTestId("cloud-sync-panel")).toBeNull();
+    expect(bridge.cloudEnableSync).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not show one workspace's failed enable in the next workspace", async () => {
+    const enable = deferred<void>();
+    const bridge = Object.assign(makeBridge(Promise.resolve(null)), {
+      cloudEnableSync: vi.fn(() => enable.promise),
+    });
+    bridge.cloudStatus = vi.fn(async () => SIGNED_IN);
+    vi.stubGlobal("dohcDesktop", bridge);
+    const shell = (workspace: Workspace) => (
+      <DesktopWorkspaceShell
+        workspace={workspace}
+        workspaces={[WORKSPACE, OTHER_WORKSPACE]}
+        {...shellBootstrapProps(bridge)}
+        onSwitchWorkspace={() => {}}
+      />
+    );
+    const view = render(shell(WORKSPACE));
+
+    await startEnableThenClose(bridge);
+    view.rerender(shell(OTHER_WORKSPACE));
+    const reads = bridge.cloudStatus.mock.calls.length;
+    await act(async () => {
+      enable.reject(new Error("dohc could not reach the relay."));
+    });
+
+    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+    expect(bridge.cloudStatus.mock.calls.length).toBe(reads);
+  });
+});
+
+// Disconnect reaches every workspace, so its failure is news in whichever
+// workspace is open when it arrives, unlike an enable.
+describe("a Disconnect failure after the workspace changed", () => {
+  it.each([
+    ["the same shell, given another workspace", false],
+    ["a new shell for the other workspace", true],
+  ])("reaches the open workspace's notices: %s", async (_case, remount) => {
+    const logout = deferred<void>();
+    let signedIn = true;
+    const sessionListeners: Array<(event: { sessionKey: string | null; phase: "changing" | "ready" }) => void> = [];
+    const bridge = Object.assign(makeBridge(Promise.resolve(null)), {
+      cloudLogout: vi.fn(() => logout.promise),
+    });
+    bridge.onCloudSessionChanged = vi.fn((listener: (event: { sessionKey: string | null; phase: "changing" | "ready" }) => void) => {
+      sessionListeners.push(listener);
+      return () => {};
+    });
+    bridge.cloudStatus = vi.fn(async () =>
+      signedIn
+        ? { connected: true, email: "me@dohc.test", serverUrl: "https://cloud.dohc.test", workspaceSynced: false }
+        : { connected: false, email: "", serverUrl: "", workspaceSynced: false },
+    );
+    vi.stubGlobal("dohcDesktop", bridge);
+    const shell = (workspace: Workspace) => (
+      <DesktopWorkspaceShell
+        {...(remount ? { key: workspace.workspaceId } : {})}
+        workspace={workspace}
+        workspaces={[WORKSPACE, OTHER_WORKSPACE]}
+        {...shellBootstrapProps(bridge)}
+        onSwitchWorkspace={() => {}}
+      />
+    );
+    const view = render(shell(WORKSPACE));
+    const user = userEvent.setup();
+    await user.click(await screen.findByTestId("activity-settings"));
+    await user.click(await screen.findByTestId("settings-nav-cloud"));
+    await user.click(await screen.findByTestId("cloud-disconnect"));
+    await waitFor(() => expect(bridge.cloudLogout).toHaveBeenCalled());
+
+    // Main announces the logout before the step that fails: the shell drops
+    // its status, and the account row leaves the page.
+    signedIn = false;
+    act(() => {
+      for (const listener of [...sessionListeners]) listener({ sessionKey: null, phase: "ready" });
+    });
+    await waitFor(() => expect(screen.queryByTestId("settings-row-account")).toBeNull());
+
+    view.rerender(shell(OTHER_WORKSPACE));
+    await act(async () => {
+      logout.reject(new Error("dohc could not stop sync for Notes."));
+    });
+
+    expect((await screen.findByTestId("workspace-shell-error")).textContent).toContain(
+      "dohc could not stop sync for Notes.",
+    );
   });
 });
 

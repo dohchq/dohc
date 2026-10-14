@@ -273,8 +273,9 @@ test("dragging an image onto the page top-matter (outside ProseMirror) still emb
     await waitForWorkspaceFile(page, workspace.workspaceId, "note.md");
     await openMarkdownDoc(page, "note.md");
 
-    // Aim at the document TITLE — inside the pane, outside the editor content.
-    const title = page.locator(".dohc-page-identity__title").first();
+    // Aim at the page title, folded beside "Add icon" because the body opens
+    // with an H1: inside the pane, outside the editor content.
+    const title = page.getByTestId("page-title").first();
     await expect(title).toBeVisible();
     const box = await title.boundingBox();
     if (!box) throw new Error("no title box");

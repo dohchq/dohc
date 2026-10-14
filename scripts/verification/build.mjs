@@ -95,7 +95,7 @@ export function sourceFingerprint(kind, root = repoRoot, selectedPaths, contents
     if (executable) { hash.update(name + "\0" + executable + "\0"); hash.update(readFileSync(executable)); }
   }
   if (kind === "engine") {
-    hash.update(execFileSync("rustc", ["-vV"], { cwd: root, env: { ...process.env, RUSTUP_AUTO_INSTALL: "0" } }));
+    hash.update(execFileSync("rustc", ["-vV"], { cwd: root, windowsHide: true, env: { ...process.env, RUSTUP_AUTO_INSTALL: "0" } }));
     // Cargo discovers configuration from its working directory through the filesystem root.
     for (let directory = resolve(root); dirname(directory) !== directory;) {
       directory = dirname(directory);
@@ -299,7 +299,7 @@ export async function withBuildBudget(action) {
   const budget = resolveBuildBudget();
   if (budget) {
     const free = freeDiskGb(repoRoot);
-    if (free === null || free < budget.diskFloorGb) throw new Error(`Build needs ${budget.diskFloorGb} GB free; observed ${free ?? "unknown"}.`);
+    if (free === null || free < budget.diskFloorGb) throw Object.assign(new Error(`Build needs ${budget.diskFloorGb} GB free; observed ${free ?? "unknown"}.`), { environment: "disk space" });
   }
   const slot = budget ? await acquireBuildSlot({ ...budget, cooperativeCancellation: true }) : null;
   const env = buildEnvironment(budget?.jobs);
@@ -318,7 +318,7 @@ export async function prepare({ engineOnly = false, output = join(repoRoot, ".do
   catch (error) { if (error.code === "EEXIST") throw new Error(`Another preparation owns ${lock}. Inspect its PID before removing a stale lock.`); throw error; }
   try {
   await cancellation.checkpoint();
-  if (install) await run(...pnpm(["install", "--frozen-lockfile"]), { log: join(output, "prepare-install.log") });
+  if (install) await run(...pnpm(["install", "--frozen-lockfile", "--config.confirm-modules-purge=false"]), { log: join(output, "prepare-install.log") });
   await cancellation.checkpoint();
   const receipt = readJson(receiptPath) ?? { version: 1 };
   const kinds = engineOnly ? ["engine"] : ["engine", "desktop"];
