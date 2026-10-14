@@ -16,6 +16,7 @@ import type {
 } from "../ipc/bridgeContract";
 import { rendererMarks } from "../performance/rendererMarks";
 import { DatabaseStudioView } from "./DatabaseStudioView";
+import { useShellError } from "./shell/useShellError";
 import { deferred } from "../testing/deferred";
 
 // Every cell text the grid measures for its column widths.
@@ -420,7 +421,7 @@ describe("DatabaseStudioView", () => {
     expect(cell("category", "txn_001").textContent).toBe("Food");
     expect(onError).toHaveBeenCalledTimes(1);
     expect(onError).toHaveBeenCalledWith(
-      "dohc could not save the change to category in wallet.",
+      "dohc could not save the change to category for id txn_001 in wallet.",
       failure,
       expect.any(Function),
     );
@@ -436,6 +437,80 @@ describe("DatabaseStudioView", () => {
     await act(async () => retry.resolve(walletPage("Groceries")));
     expect(cell("category", "txn_001").textContent).toBe("Groceries");
     expect(onError).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows a retried write only in its own database, not in the one open when Try again is chosen", async () => {
+    const user = userEvent.setup();
+    const [failed, retried] = writeAnswers(2);
+    const onError = vi.fn();
+    const { rerender } = render(
+      <DatabaseStudioView workspaceId="ws-1" path="imports/wallet.sqlite" onError={onError} />,
+    );
+    await screen.findByTestId("db-cell-category-txn_001");
+    await user.click(cell("category", "txn_001"));
+    await user.clear(editor());
+    await user.keyboard("Groceries{Enter}");
+    await act(async () => failed!.reject(new Error("database is locked")));
+    expect(onError).toHaveBeenCalledTimes(1);
+
+    // Another database with a table and a row of the same names.
+    const other = cloneSnapshot();
+    other.path = "imports/other.sqlite";
+    other.tables[0]!.rows[0]!.category = "Rent";
+    bridgeMock.readWorkspaceDatabase.mockResolvedValueOnce(other);
+    rerender(<DatabaseStudioView workspaceId="ws-1" path="imports/other.sqlite" onError={onError} />);
+    await waitFor(() => expect(cell("category", "txn_001").textContent).toBe("Rent"));
+
+    act(() => (onError.mock.calls[0]![2] as () => void)());
+    expect(bridgeMock.applyDatabaseEdit).toHaveBeenLastCalledWith(categoryEdit("Groceries"));
+    expect(cell("category", "txn_001").textContent).toBe("Rent");
+    await act(async () => retried!.resolve(walletPage("Groceries")));
+    expect(cell("category", "txn_001").textContent).toBe("Rent");
+  });
+
+  it("files one Notice with its own Try again for each row whose write fails", async () => {
+    const user = userEvent.setup();
+    const answers = writeAnswers(2);
+    // The shell's error list, with each row's Try again.
+    function Shell() {
+      const shell = useShellError("ws-1");
+      return (
+        <>
+          <ul aria-label="Notices">
+            {shell.shellErrors.map((notice) => (
+              <li key={notice.id}>
+                {notice.message}
+                <button type="button" onClick={() => shell.retryShellError(notice.id)}>Try again</button>
+              </li>
+            ))}
+          </ul>
+          <DatabaseStudioView workspaceId="ws-1" path="imports/wallet.sqlite" onError={shell.reportShellError} />
+        </>
+      );
+    }
+    render(<Shell />);
+    await screen.findByTestId("db-cell-category-txn_001");
+
+    for (const [row, value] of [["txn_001", "Groceries"], ["txn_002", "Travel"]] as const) {
+      await user.click(cell("category", row));
+      await user.clear(editor());
+      await user.keyboard(`${value}{Enter}`);
+    }
+    for (const answer of answers) {
+      await act(async () => answer.reject(new Error("database is locked")));
+    }
+
+    const notices = within(screen.getByRole("list", { name: "Notices" }));
+    await waitFor(() => expect(notices.getAllByRole("listitem")).toHaveLength(2));
+    const [first, second] = notices.getAllByRole("listitem");
+    expect(first!.textContent).toContain("dohc could not save the change to category for id txn_001 in wallet.");
+    expect(second!.textContent).toContain("dohc could not save the change to category for id txn_002 in wallet.");
+
+    // Each Try again writes its own row's change.
+    bridgeMock.applyDatabaseEdit.mockClear();
+    await user.click(within(first!).getByRole("button", { name: "Try again" }));
+    expect(bridgeMock.applyDatabaseEdit).toHaveBeenCalledWith(categoryEdit("Groceries"));
+    expect(bridgeMock.applyDatabaseEdit).toHaveBeenCalledTimes(1);
   });
 
   it.each([

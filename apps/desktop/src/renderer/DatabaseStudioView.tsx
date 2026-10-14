@@ -267,9 +267,15 @@ export function DatabaseStudioView(props: {
     }
   }, [props.fileOpenStartMark, snapshot]);
 
+  // A write shows only in the database it was written to, while it is open.
   const shown = useMemo(
-    () => snapshot && pending.reduce(withWrite, snapshot),
-    [snapshot, pending],
+    () =>
+      snapshot &&
+      pending.reduce(
+        (rows, write) => (write.workspaceId === workspaceId && write.path === path ? withWrite(rows, write) : rows),
+        snapshot,
+      ),
+    [snapshot, pending, workspaceId, path],
   );
   const active =
     shown?.tables.find((t) => t.name === activeName) ??
@@ -329,10 +335,11 @@ export function DatabaseStudioView(props: {
   // time and their answers come in order.
   const tableWrites = useRef(new Map<string, Promise<void>>());
 
-  // Writes one cell. The new value shows at once, over the load it was
-  // written on. Its answer replaces the shown rows only while that load is
-  // the current one. A failed write stops showing its value, and reports
-  // through the shell's error hook with Try again.
+  // Writes one cell. The new value shows at once, in its own database and
+  // over the load it was written on. Its answer replaces the shown rows only
+  // while that load is the current one. A failed write stops showing its
+  // value, and reports through the shell's error hook with Try again. The
+  // report names the cell, so each failed cell keeps its own Notice.
   const writeCell = useCallback(
     function write(cell: Omit<CellWrite, "loadId">) {
       const pendingWrite: CellWrite = { ...cell, loadId: currentSnapshotRef.current.loadId };
@@ -365,7 +372,7 @@ export function DatabaseStudioView(props: {
           }
         } catch (cause) {
           onError?.(
-            `dohc could not save the change to ${cell.column} in ${cell.table}.`,
+            `dohc could not save the change to ${cell.column} for ${cell.key.pkColumn} ${String(cell.key.rowId)} in ${cell.table}.`,
             cause,
             () => write(cell),
           );
