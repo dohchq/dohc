@@ -28,6 +28,7 @@ import { setTimeout as poll } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import {
   acquireBuildSlot,
+  admissionSlot,
   acquireExclusiveSlot,
   acquireVerificationSlot,
   buildQueueStatus,
@@ -451,11 +452,11 @@ function plantSlot(root, i, { pid, heartbeatAgeMs, kind = "build-slot" }) {
   return dir;
 }
 
-function plantTicket(root, order, { pid, heartbeatAgeMs = 0, heartbeatMs, kind = "build-slot" }) {
+function plantTicket(root, order, { pid, heartbeatAgeMs = 0, heartbeatMs, kind = "build-slot", slots }) {
   const dir = join(root, `${kind}-queue`);
   mkdirSync(dir, { recursive: true });
   const path = join(dir, `${String(order).padStart(24, "0")}-${pid}.json`);
-  writeFileSync(path, JSON.stringify({ pid, start: new Date().toISOString(), heartbeatMs }));
+  writeFileSync(path, JSON.stringify({ pid, start: new Date().toISOString(), heartbeatMs, slots }));
   const then = new Date(Date.now() - heartbeatAgeMs);
   utimesSync(path, then, then);
   return path;
@@ -529,6 +530,32 @@ test("the lane count is one unless the slot root's setting says two", async t =>
   assert.equal(verificationLanes(trialEnv), 1);
   const lease = await verifierLane(trialEnv);
   try { assert.equal(lease.dir, join(trial, lease.name)); } finally { lease.release(); }
+});
+
+test("older tickets claim first, and code with more slots takes the ones older code cannot use", () => {
+  // One slot count for everyone: the ticket at position k takes the k-th free slot.
+  assert.deepEqual([0, 1, 2].map(position => admissionSlot([2, 3], [4, 4, 4], position)), [2, 3, undefined]);
+  // Older verifiers wait for slot 1 only, so a two-lane ticket behind them takes slot 2.
+  assert.equal(admissionSlot([2], [1, 1, 2], 2), 2);
+  assert.equal(admissionSlot([1, 2], [1, 1, 2], 1), undefined, "slot 1 is the first older ticket's");
+  // A two-lane ticket ahead of an older one leaves it slot 1.
+  assert.deepEqual([0, 1].map(position => admissionSlot([1, 2], [2, 1], position)), [2, 1]);
+  assert.equal(admissionSlot([1, 2], [0, 2], 1), 1, "a ticket gone since the listing claims nothing");
+});
+
+test("an older verifier waiting for slot 1 does not hold back a free second lane", async t => {
+  const root = slotRoot();
+  t.after(() => rmSync(root, {recursive: true, force: true}));
+  writeFileSync(join(root, "verification-lanes"), "2");
+  const env = {DOHC_BUILD_SLOT_ROOT: root};
+  const first = await verifierLane(env);
+  try {
+    assert.equal(first.name, "verification-slot-1");
+    // A waiting verifier from before the lane setting records no slot count.
+    plantTicket(root, 1, {pid: process.pid, kind: "verification-slot"});
+    const second = await verifierLane(env, {waitMs: 5000});
+    try { assert.equal(second.name, "verification-slot-2"); } finally { second.release(); }
+  } finally { first.release(); }
 });
 
 test("queue status retains claim identity and estimates only from completed lane history", async t => {
