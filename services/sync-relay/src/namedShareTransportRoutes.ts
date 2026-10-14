@@ -3,7 +3,7 @@ import { sha256Hex } from "@dohc/workspace-core/hash";
 import type { DiscussionActivityHub } from "./discussionActivity";
 import { badRequest, notFound, RelayError, relayError } from "./errors";
 import { arrayBufferForBytes, readBytes } from "./relayBytes";
-import { assertChatAuthorship, assertClientLogProvenance, namedShareOrigin, parseAuthenticatedLogOps, type LogAuthorNameLookup } from "./relayLogInputs";
+import { assertChatAuthorship, assertClientLogProvenance, namedShareOrigin, parseNamedShareLogOps, type LogAuthorNameLookup } from "./relayLogInputs";
 import { assertSha256, parseCursor, parseLimit, parseString, readJsonObject } from "./requestInputs";
 import type { AuthorizedShareAction } from "./shareAuthorization";
 import {
@@ -187,7 +187,7 @@ export function createNamedShareTransportRoutes(
           storage.objectCurrentPath(share.workspaceId, objectId),
         objectIdAtPath: (path) => storage.objectIdAtPath(share.workspaceId, path),
       };
-      const ops = await parseAuthenticatedLogOps(input.ops, actor.userId, lookupUserDisplayName);
+      const ops = await parseNamedShareLogOps(input.ops, actor.userId, lookupUserDisplayName);
       for (const op of ops) {
         // The write filter, never the read one: what a recipient may see is
         // not what it may push into the granter's log (#646 PR3-0).
