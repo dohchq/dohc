@@ -13,17 +13,23 @@
   handle @account {
     reverse_proxy workspace-api:1786 {
       header_up X-Forwarded-For {client_ip}
+      header_up X-Forwarded-Host {host}
+      header_up X-Forwarded-Proto https
     }
   }
   @relay path /sync/*
   handle @relay {
     reverse_proxy sync-relay:1788 {
       header_up X-Forwarded-For {client_ip}
+      header_up X-Forwarded-Host {host}
+      header_up X-Forwarded-Proto https
     }
   }
   handle {
     reverse_proxy share-web:1790 {
       header_up X-Forwarded-For {client_ip}
+      header_up X-Forwarded-Host {host}
+      header_up X-Forwarded-Proto https
     }
   }
 }

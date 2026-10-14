@@ -1,8 +1,10 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { linkSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { BlockList, isIP } from 'node:net';
 import { join } from 'node:path';
 import { parseEnv } from 'node:util';
+import { pathToFileURL } from 'node:url';
 import test from 'node:test';
 import { defineSequenceTag, load, YAML11_SCHEMA } from 'js-yaml';
 import { initialSettings } from '../../tools/self-host/bootstrap.mjs';
@@ -53,14 +55,35 @@ test('overlay replaces only gateway mounts, keeps certificate volumes and refuse
   ]);
 });
 
-test('gateway reads only the static Cloudflare trust file and CF-Connecting-IP, and overwrites X-Forwarded-For on every route', () => {
+test('network instructions restrict Cloudflare origins without changing direct or private access', () => {
+  const folder = mkdtempSync(join(process.cwd(), '.cloudflare-test-')), envFile = join(folder, 'settings');
+  try {
+    for (const mode of ['public', 'private']) {
+      for (const enabled of ['0', '1']) {
+        writeFileSync(envFile, Object.entries({ ...settings(), DOHC_SERVER_NETWORK_ACCESS: mode, DOHC_BEHIND_CLOUDFLARE: enabled })
+          .map(([key, value]) => key + '=' + value).join('\n'));
+        const result = spawnSync(process.execPath, ['tools/self-host/bootstrap.mjs', 'network', '--env-file', envFile], { encoding: 'utf8' });
+        assert.equal(result.status, 0, result.stderr);
+        if (mode === 'private') assert.match(result.stdout, /tailscale serve/);
+        else if (enabled === '1') {
+          assert.match(result.stdout, /only to this host's IPv4 \(A\) record\. Do not configure an origin AAAA record/);
+          assert.match(result.stdout, /Cloudflare's ranges/);
+          assert.match(result.stdout, /provider's network firewall or Docker's DOCKER-USER chain/);
+          assert.doesNotMatch(result.stdout, /Permit inbound TCP 80 and 443/);
+        } else assert.match(result.stdout, /Permit inbound TCP 80 and 443/);
+      }
+    }
+  } finally { rmSync(folder, { recursive: true, force: true }); }
+});
+
+test('gateway reads only the static Cloudflare trust file and CF-Connecting-IP, and pins forwarded address, host and protocol on every route', () => {
   const caddy = read('tools/self-host/Caddyfile.cloudflare');
   assert.match(caddy, /servers {\s+import \/etc\/caddy\/cloudflare-proxies\.caddy\s+client_ip_headers CF-Connecting-IP\s+}/);
-  const proxies = [...caddy.matchAll(/reverse_proxy (\S+) {\s+header_up X-Forwarded-For {client_ip}\s+}/g)].map(match => match[1]);
+  const proxies = [...caddy.matchAll(/reverse_proxy (\S+) {\s+header_up X-Forwarded-For {client_ip}\s+header_up X-Forwarded-Host {host}\s+header_up X-Forwarded-Proto https\s+}/g)].map(match => match[1]);
   assert.deepEqual(proxies, ['workspace-api:1786', 'sync-relay:1788', 'share-web:1790']);
   assert.equal((caddy.match(/reverse_proxy /g) ?? []).length, proxies.length);
   // Removing address handling must leave the existing public gateway, including its TLS behavior, unchanged.
-  assert.equal(caddy.replace(/  servers {[^}]+}\n/, '').replace(/reverse_proxy (\S+) {\s+header_up X-Forwarded-For {client_ip}\s+}/g, 'reverse_proxy $1'),
+  assert.equal(caddy.replace(/  servers {[^}]+}\n/, '').replace(/reverse_proxy (\S+) {\s+header_up X-Forwarded-For {client_ip}\s+header_up X-Forwarded-Host {host}\s+header_up X-Forwarded-Proto https\s+}/g, 'reverse_proxy $1'),
     read('tools/self-host/Caddyfile'));
 });
 
@@ -89,15 +112,19 @@ test('shipped trust file parses as one static directive with valid IPv4 and IPv6
   assert.equal(block.check('2001:db8::10', 'ipv6'), false);
 });
 
-test('range parser rejects empty lists, wrong families, invalid masks, non-IP text and universal trust', () => {
+test('range parser rejects empty lists, wrong families, invalid masks, non-IP text, wide prefixes and nonzero host bits', () => {
   assert.deepEqual(parseCloudflareRanges('173.245.48.0/20\r\n 103.21.244.0/22\n', 4), ['173.245.48.0/20', '103.21.244.0/22']);
   assert.deepEqual(parseCloudflareRanges('2606:4700::/32\n', 6), ['2606:4700::/32']);
   for (const [family, entries] of [
     [4, ['', ' \n', '<html>error</html>', '999.0.0.0/24', '173.245.48.0', '173.245.48.0/-1', '173.245.48.0/1.5',
-      '173.245.48.0/33', '0.0.0.0/0', '173.245.48.0/020', '2606:4700::/32']],
-    [6, ['', '2606:4700::/129', '::/0', 'invalid::ip/64', '2606:4700::%eth0/32', '173.245.48.0/20']],
+      '104.16.0.0/1', '0.0.0.0/7', '104.16.0.1/13', '104.16.0.0/11', '173.245.48.0/33', '0.0.0.0/0', '173.245.48.0/020', '2606:4700::/32']],
+    [6, ['', '2606:4700::/3', '2600::/23', '2606:4700::1/32', '2606:4701::/31', '2606:4700::/129', '::/0', 'invalid::ip/64', '2606:4700::%eth0/32', '173.245.48.0/20']],
   ]) {
     for (const value of entries) assert.throws(() => parseCloudflareRanges(value, family), /invalid.*CIDR/, value);
+  }
+  for (const [family, value] of [[4, '104.0.0.0/8'], [4, '104.16.0.0/13'], [6, '2606:4700::/24'],
+    [6, '2606:4700::/33'], [6, '2001:db8:0:0:0:0:0:0/32'], [6, '::ffff:192.0.2.0/120']]) {
+    assert.deepEqual(parseCloudflareRanges(value, family), [value]);
   }
   assert.deepEqual(parseCloudflareRanges('192.0.2.1/32', 4), ['192.0.2.1/32']);
   assert.deepEqual(parseCloudflareRanges('2001:db8::1/128', 6), ['2001:db8::1/128']);
@@ -108,11 +135,16 @@ test('refresh validates both successful HTTP responses before replacing the prev
   const old = 'previous valid ranges\n';
   try {
     const calls = [];
+    writeFileSync(output, old);
+    const previous = join(folder, 'previous.caddy');
+    linkSync(output, previous);
     await refreshCloudflareRanges({ output, fetch: async (url, options) => {
       calls.push(url);
       assert.ok(options.signal instanceof AbortSignal);
       return { ok: true, text: async () => url.endsWith('v4') ? '173.245.48.0/20\n' : '2606:4700::/32\n' };
     } });
+    assert.equal(readFileSync(previous, 'utf8'), old, 'refresh must replace the file, not truncate it');
+    assert.deepEqual(readdirSync(folder).sort(), ['previous.caddy', 'ranges.caddy']);
     assert.deepEqual(calls, ['https://www.cloudflare.com/ips-v4', 'https://www.cloudflare.com/ips-v6']);
     assert.match(readFileSync(output, 'utf8'), /\ntrusted_proxies static 173\.245\.48\.0\/20 2606:4700::\/32\n$/);
     for (const failingUrl of calls) {
@@ -129,6 +161,11 @@ test('refresh validates both successful HTTP responses before replacing the prev
         assert.equal(readFileSync(output, 'utf8'), old, failingUrl + ' ' + failure);
       }
     }
+    rmSync(output);
+    mkdirSync(output);
+    await assert.rejects(refreshCloudflareRanges({ output: pathToFileURL(output), fetch: async url =>
+      ({ ok: true, text: async () => url.endsWith('v4') ? '173.245.48.0/20' : '2606:4700::/32' }) }));
+    assert.deepEqual(readdirSync(folder).sort(), ['previous.caddy', 'ranges.caddy'], 'failed rename must remove staged files');
   } finally { rmSync(folder, { recursive: true, force: true }); }
 });
 
