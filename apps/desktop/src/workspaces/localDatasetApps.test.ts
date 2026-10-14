@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -65,6 +65,31 @@ async function fixture(agentRun?: () => LocalDatasetAgent | null) {
   return { host, workspaceRoot, revision, files, prepareApp, app, published, invocation };
 }
 
+// Baseline publication/binding writes leave the later root and provenance tables alone.
+function approveAsOlderBuild(db: DatabaseSync, app: Awaited<ReturnType<typeof fixture>>["app"]) {
+  const candidate = app.candidate, capability = candidate.capabilities[0];
+  if (capability?.kind !== "dataset") throw new Error("Expected Dataset app.");
+  const previous = db.prepare("SELECT * FROM local_dataset_apps WHERE app_root=?").get(candidate.appRoot);
+  const publicationId = hash(JSON.stringify(["dohc-local-dataset-app-v1", "w", candidate]));
+  const authorityRevision = Number(previous?.authority_revision ?? 0) + 1;
+  const json = JSON.stringify(candidate), { operations: _, name: _name, ...binding } = capability;
+  db.exec("BEGIN");
+  try {
+    if (previous) {
+      if (previous.publication_id !== publicationId) db.prepare("DELETE FROM dohc_dataset_bindings WHERE app_id=?").run(previous.publication_id);
+      db.prepare("DELETE FROM local_dataset_app_artifacts WHERE publication_id=?").run(previous.publication_id);
+      db.prepare("DELETE FROM local_dataset_apps WHERE publication_id=?").run(previous.publication_id);
+    }
+    db.prepare("INSERT INTO dohc_dataset_bindings VALUES(?,?,?,?,?) ON CONFLICT(workspace_id,dataset_id,app_id) DO UPDATE SET binding_json=excluded.binding_json,token=excluded.token")
+      .run("w", capability.datasetId, publicationId, JSON.stringify(binding), randomUUID());
+    const bytes = Buffer.byteLength(json) + app.files.reduce((total, file) => total + file.bytes.byteLength, 0) + 512;
+    db.prepare("INSERT INTO local_dataset_apps VALUES(?,?,?,?,?,?,1)").run(publicationId, candidate.appRoot, capability.datasetId, authorityRevision, json, bytes);
+    for (const file of app.files) db.prepare("INSERT INTO local_dataset_app_artifacts VALUES(?,?,?)").run(publicationId, file.path, file.bytes);
+    db.exec("COMMIT");
+  } catch (error) { db.exec("ROLLBACK"); throw error; }
+  return { publicationId, authorityRevision };
+}
+
 describe("local approved dataset apps", () => {
   it("persists approval provenance with the captured candidate without changing app authority", async () => {
     const f = await fixture();
@@ -80,6 +105,14 @@ describe("local approved dataset apps", () => {
     } finally { db.close(); }
     expect(await f.host.apps.activate(f.app, new AbortController().signal, null)).toEqual(publication);
     expect(f.host.apps.list("app")).toMatchObject([{ active: true, authorityRevision: publication.authorityRevision }]);
+    await f.host.close();
+    const reopened = await createLocalDatasetHost({ localPersonId: () => "person-local", workspaceId: "w", workspaceRoot: f.workspaceRoot }); hosts.push(reopened);
+    expect(reopened.apps.list("app")).toMatchObject([{ active: true, authorityRevision: publication.authorityRevision }]);
+    const inspection = new DatabaseSync(join(f.workspaceRoot, ".dohc/datasets/state.sqlite"));
+    try {
+      const stored = inspection.prepare("SELECT provenance FROM local_app_approval_provenance WHERE publication_id=?").get(publication.publicationId)!;
+      expect(JSON.parse(String(stored.provenance))).toMatchObject({ agent, committedCandidateDigest: hash(JSON.stringify(f.app.candidate)) });
+    } finally { inspection.close(); }
   });
   it("upgrades the baseline app tables without losing artifacts or charging root rows", async () => {
     const f = await fixture();
@@ -185,8 +218,76 @@ describe("local approved dataset apps", () => {
     const again = await createLocalDatasetHost({ localPersonId: () => "person-local", workspaceId: "w", workspaceRoot: f.workspaceRoot }); hosts.push(again);
     expect(again.apps.list("app")).toMatchObject([{ active: true, authorityRevision: adopted.authorityRevision }]);
     const inspection = new DatabaseSync(join(f.workspaceRoot, ".dohc/datasets/state.sqlite"));
-    try { expect(inspection.prepare("SELECT revision FROM local_app_roots WHERE app_root='app'").get()!.revision).toBe(adopted.authorityRevision); }
+    try {
+      expect(inspection.prepare("SELECT revision FROM local_app_roots WHERE app_root='app'").get()!.revision).toBe(adopted.authorityRevision);
+      expect(inspection.prepare("SELECT * FROM local_app_approval_provenance WHERE publication_id=?").get(adopted.publicationId)).toBeUndefined();
+    }
     finally { inspection.close(); }
+  });
+
+  it("discards stale provenance after an older build withdraws and reapproves the same app", async () => {
+    const f = await fixture(); await f.host.close();
+    const db = new DatabaseSync(join(f.workspaceRoot, ".dohc/datasets/state.sqlite"));
+    let oldApproval;
+    try {
+      expect(db.prepare("SELECT provenance FROM local_app_approval_provenance WHERE publication_id=?").get(f.published.publicationId)).toBeDefined();
+      db.prepare("UPDATE local_dataset_apps SET active=0,authority_revision=authority_revision+1 WHERE publication_id=?").run(f.published.publicationId);
+      db.prepare("DELETE FROM dohc_dataset_bindings WHERE app_id=?").run(f.published.publicationId);
+      oldApproval = approveAsOlderBuild(db, f.app);
+      expect(oldApproval).toEqual({ publicationId: f.published.publicationId, authorityRevision: 3 });
+    } finally { db.close(); }
+    const reopened = await createLocalDatasetHost({ localPersonId: () => "person-local", workspaceId: "w", workspaceRoot: f.workspaceRoot }); hosts.push(reopened);
+    const [adopted] = reopened.apps.list("app");
+    expect(adopted).toMatchObject({ active: true, publicationId: oldApproval.publicationId });
+    expect(adopted.authorityRevision).toBeGreaterThan(oldApproval.authorityRevision);
+    expect(() => reopened.apps.assertBrowserPublication(adopted.publicationId, f.published.authorityRevision)).toThrow(/approval changed/);
+    expect(() => reopened.apps.assertBrowserPublication(adopted.publicationId, oldApproval.authorityRevision)).toThrow(/approval changed/);
+    expect(await reopened.apps.request(adopted.publicationId, "invoke", { ...f.invocation(), authorityRevision: adopted.authorityRevision })).toMatchObject({ replayed: false });
+    const inspection = new DatabaseSync(join(f.workspaceRoot, ".dohc/datasets/state.sqlite"));
+    try { expect(inspection.prepare("SELECT * FROM local_app_approval_provenance WHERE publication_id=?").get(adopted.publicationId)).toBeUndefined(); }
+    finally { inspection.close(); }
+  });
+
+  it("adopts an older build's replacement on the same root without a Dataset deletion", async () => {
+    const f = await fixture(), replacement = structuredClone(f.app);
+    replacement.candidate.sourceRevision = hash("older-build-replacement");
+    await f.host.close();
+    const db = new DatabaseSync(join(f.workspaceRoot, ".dohc/datasets/state.sqlite"));
+    let oldApproval;
+    try {
+      oldApproval = approveAsOlderBuild(db, replacement);
+      expect(oldApproval.publicationId).not.toBe(f.published.publicationId);
+      expect(oldApproval.authorityRevision).toBe(2);
+      expect(db.prepare("SELECT active_publication_id FROM local_app_roots WHERE app_root='app'").get()!.active_publication_id).toBe(f.published.publicationId);
+    } finally { db.close(); }
+    const reopened = await createLocalDatasetHost({ localPersonId: () => "person-local", workspaceId: "w", workspaceRoot: f.workspaceRoot }); hosts.push(reopened);
+    const [adopted] = reopened.apps.list("app");
+    expect(adopted).toMatchObject({ active: true, publicationId: oldApproval.publicationId });
+    expect(adopted.authorityRevision).toBeGreaterThan(oldApproval.authorityRevision);
+    expect(() => reopened.apps.assertBrowserPublication(f.published.publicationId, f.published.authorityRevision)).toThrow(/approval changed/);
+    expect(await reopened.apps.request(adopted.publicationId, "invoke", { ...f.invocation(), authorityRevision: adopted.authorityRevision })).toMatchObject({ replayed: false });
+    expect(reopened.describe(id(1)).name).toBe("Registrations");
+  });
+
+  it("adopts an older build's new approval on a root cleared at a higher revision", async () => {
+    const f = await fixture();
+    const withdrawn = f.host.apps.withdraw(f.published.publicationId, f.published.authorityRevision);
+    await f.host.close();
+    const db = new DatabaseSync(join(f.workspaceRoot, ".dohc/datasets/state.sqlite"));
+    let oldApproval;
+    try {
+      db.exec("PRAGMA foreign_keys=ON");
+      db.prepare("DELETE FROM local_dataset_apps WHERE dataset_id=?").run(id(1));
+      oldApproval = approveAsOlderBuild(db, f.app);
+      expect(oldApproval.authorityRevision).toBe(1);
+      expect(db.prepare("SELECT * FROM local_app_roots WHERE app_root='app'").get()).toMatchObject({ revision: withdrawn.authorityRevision, active_kind: null, active_publication_id: null });
+    } finally { db.close(); }
+    const reopened = await createLocalDatasetHost({ localPersonId: () => "person-local", workspaceId: "w", workspaceRoot: f.workspaceRoot }); hosts.push(reopened);
+    const [adopted] = reopened.apps.list("app");
+    expect(adopted).toMatchObject({ active: true, publicationId: oldApproval.publicationId });
+    expect(adopted.authorityRevision).toBeGreaterThan(withdrawn.authorityRevision);
+    expect(() => reopened.apps.assertBrowserPublication(adopted.publicationId, oldApproval.authorityRevision)).toThrow(/approval changed/);
+    expect(await reopened.apps.request(adopted.publicationId, "invoke", { ...f.invocation(), authorityRevision: adopted.authorityRevision })).toMatchObject({ replayed: false });
   });
 
   it("opens and deletes a Dataset even when a stored app candidate no longer parses", async () => {

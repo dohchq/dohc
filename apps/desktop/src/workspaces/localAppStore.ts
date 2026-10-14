@@ -69,6 +69,7 @@ export function createLocalAppStore(options: {
       const untracked = 'active=1 AND NOT EXISTS(SELECT 1 FROM local_app_roots r WHERE r.app_root=p.app_root AND r.active_kind=? AND r.active_publication_id=p.publication_id AND r.revision=p.authority_revision)';
       const revision = 'MAX(authority_revision,(SELECT revision FROM local_app_roots r WHERE r.app_root=p.app_root))';
       assertCanAdvance('SELECT ' + revision + ' AS revision FROM ' + table + ' p WHERE ' + untracked, [storage.kind]);
+      db.prepare('DELETE FROM local_app_approval_provenance WHERE publication_id IN (SELECT publication_id FROM ' + table + ' p WHERE ' + untracked + ')').run(storage.kind);
       db.prepare('UPDATE ' + table + ' AS p SET authority_revision=' + revision + '+1 WHERE ' + untracked).run(storage.kind);
       db.prepare('INSERT INTO local_app_roots SELECT app_root,authority_revision,?,publication_id FROM ' + table + ' WHERE active=1 ON CONFLICT(app_root) DO UPDATE SET revision=excluded.revision,active_kind=excluded.active_kind,active_publication_id=excluded.active_publication_id').run(storage.kind);
       db.exec('UPDATE local_app_roots AS r SET revision=MAX(revision,COALESCE((SELECT MAX(authority_revision) FROM ' + table + ' p WHERE p.app_root=r.app_root),0)) WHERE active_publication_id IS NULL');
@@ -159,7 +160,6 @@ export function createLocalAppStore(options: {
       });
       return { publicationId, authorityRevision: checked.authorityRevision, appRoot: checked.appRoot, files };
     },
-    assertBrowserPublication(publicationId: string, expected: number) { row(publicationId, expected); },
     deleteResources(kind: LocalAppKind, resourceId: string) {
       options.assertCurrent();
       const storage = source(kind);
