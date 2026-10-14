@@ -66,7 +66,8 @@ export async function dockerResponds(command = run) {
 
 /** Hold the host lane's slot, so a run started by older code cannot overlap this one. */
 async function holdLegacyLane({ entry, signal }) {
-  return acquireVerificationSlot(process.env, { entry: verifierEntry, signal,
+  // No wait limit: a timeout would only send a durable request to the back of the line. Cancel still stops the wait.
+  return acquireVerificationSlot(process.env, { entry: verifierEntry, signal, waitMs: Infinity,
     metadata: { purpose: "PR verification (queue)", checkout: entry.request.checkout, commit: entry.request.head, phase: `request ${entry.id}` } });
 }
 
