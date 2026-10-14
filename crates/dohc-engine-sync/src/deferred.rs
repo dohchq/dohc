@@ -233,14 +233,18 @@ pub(crate) fn check_redelivery(
     }).map_err(local)
 }
 
+/// Retain `ops` within the workspace's limit. Past it, an ordinary replica
+/// fails and retains nothing. A hosted replica never fails: a document whose
+/// next op would pass it retains no more, and is answered so its read can
+/// stop at that op instead.
 pub(crate) fn retain(
     store: &mut EngineStore,
     identity: &SyncIdentity,
     ops: &[&ReplicationEnvelope],
     faults: &dyn FaultInjector,
-) -> Result<(), RelayError> {
+) -> Result<BTreeSet<String>, RelayError> {
     if ops.is_empty() {
-        return Ok(());
+        return Ok(BTreeSet::new());
     }
     let blobs = ops
         .iter()
@@ -248,6 +252,10 @@ pub(crate) fn retain(
         .collect::<Result<Vec<_>, _>>()?;
     let outcome = store.write_with(faults, |tx| {
         let hosted = crate::hosted::is_hosted(tx, &ops[0].workspace_id)?;
+        let (mut count, mut bytes): (i64,i64) = tx.query_row(
+            "SELECT COUNT(*),COALESCE(SUM(retained_bytes),0) FROM relay_deferred_ops WHERE workspace_id=?1",
+            [&ops[0].workspace_id], |r| Ok((r.get(0)?,r.get(1)?))).map_err(SyncError::corrupt)?;
+        let mut unretained = BTreeSet::new();
         for (op, blobs) in ops.iter().zip(&blobs) {
             op.validate()?;
             let json = serde_json::to_string(op).map_err(SyncError::corrupt)?;
@@ -278,6 +286,30 @@ pub(crate) fn retain(
                 if last.checked_add(1) != Some(op.origin_seq) { return Err(SyncError::SequenceGap); }
                 None
             };
+            // A document's retained work stays a prefix of its unapplied work.
+            if let Some((object_id, _)) = placed && unretained.contains(object_id) {
+                continue;
+            }
+            let mut charged = Vec::new();
+            for (digest, kinds) in blobs {
+                for kind in kinds {
+                    let text = *kind == BlobKind::Text;
+                    let table = if text { "blobs" } else { "binary_blobs" };
+                    let bytes: i64 = tx.query_row(&format!("SELECT byte_length FROM {table} WHERE sha256=?1"),
+                        [digest], |r| r.get(0)).map_err(SyncError::corrupt)?;
+                    charged.push((digest, text, bytes));
+                }
+            }
+            let cost = json.len() as i64 + charged.iter().map(|(_, _, bytes)| bytes).sum::<i64>();
+            if count >= MAX_PENDING_OPS || bytes + cost > MAX_PENDING_BYTES {
+                match placed {
+                    Some((object_id, _)) => {
+                        unretained.insert(object_id.to_owned());
+                        continue;
+                    }
+                    None => return Err(SyncError::RetryableState { reason: "deferred relay work limit reached; close the conflicting editor to resume sync" }),
+                }
+            }
             // It waits its turn with the rest of its document's work or, on an
             // ordinary replica, its origin's.
             let turn: Option<i64> = match placed {
@@ -295,7 +327,7 @@ pub(crate) fn retain(
                  (workspace_id,origin_id,origin_seq,replication_epoch,stream_identity,envelope_json,retained_bytes,checked_sequence)
                  VALUES (?1,?2,?3,?4,?5,?6,?7,
                     COALESCE(?8,(SELECT MAX(checked_sequence) FROM relay_deferred_ops WHERE workspace_id=?1),0))",
-                params![op.workspace_id,op.origin_id,op.origin_seq,identity.replication_epoch,identity.stream_identity,json,json.len() as i64,turn])
+                params![op.workspace_id,op.origin_id,op.origin_seq,identity.replication_epoch,identity.stream_identity,json,cost,turn])
                 .map_err(SyncError::persist)?;
             if inserted == 0 { continue; }
             if let Some((object_id, relay_seq)) = placed {
@@ -305,36 +337,21 @@ pub(crate) fn retain(
                     params![op.workspace_id,op.origin_id,op.origin_seq,object_id,relay_seq])
                     .map_err(SyncError::persist)?;
             }
-            for (digest, kinds) in blobs {
-                for kind in kinds {
-                    let text = *kind == BlobKind::Text;
-                    let table = if text { "blobs" } else { "binary_blobs" };
-                    let bytes: i64 = tx.query_row(&format!("SELECT byte_length FROM {table} WHERE sha256=?1"),
-                        [digest], |r| r.get(0)).map_err(SyncError::corrupt)?;
-                    let inserted = tx.execute(
-                        "INSERT OR IGNORE INTO relay_deferred_blobs
-                         (workspace_id,origin_id,origin_seq,sha256,is_text,text_sha256,binary_sha256)
-                         VALUES (?1,?2,?3,?4,?5,?6,?7)",
-                        params![op.workspace_id,op.origin_id,op.origin_seq,digest,text,text.then_some(digest),(!text).then_some(digest)])
-                        .map_err(SyncError::persist)?;
-                    if inserted != 0 {
-                        tx.execute("UPDATE relay_deferred_ops SET retained_bytes=retained_bytes+?4
-                            WHERE workspace_id=?1 AND origin_id=?2 AND origin_seq=?3",
-                            params![op.workspace_id,op.origin_id,op.origin_seq,bytes]).map_err(SyncError::persist)?;
-                    }
-                }
+            for (digest, text, _) in charged {
+                tx.execute(
+                    "INSERT OR IGNORE INTO relay_deferred_blobs
+                     (workspace_id,origin_id,origin_seq,sha256,is_text,text_sha256,binary_sha256)
+                     VALUES (?1,?2,?3,?4,?5,?6,?7)",
+                    params![op.workspace_id,op.origin_id,op.origin_seq,digest,text,text.then_some(digest),(!text).then_some(digest)])
+                    .map_err(SyncError::persist)?;
             }
+            count += 1;
+            bytes += cost;
         }
-        let (count, bytes): (i64,i64) = tx.query_row(
-            "SELECT COUNT(*),COALESCE(SUM(retained_bytes),0) FROM relay_deferred_ops WHERE workspace_id=?1",
-            [&ops[0].workspace_id], |r| Ok((r.get(0)?,r.get(1)?))).map_err(SyncError::corrupt)?;
-        if count > MAX_PENDING_OPS || bytes > MAX_PENDING_BYTES {
-            return Err(SyncError::RetryableState { reason: "deferred relay work limit reached; close the conflicting editor to resume sync" });
-        }
-        Ok::<_,SyncError>(())
+        Ok::<_,SyncError>(unretained)
     }).map_err(local)?;
     match outcome {
-        TxnOutcome::Committed(()) => Ok(()),
+        TxnOutcome::Committed(unretained) => Ok(unretained),
         TxnOutcome::Crashed { .. } => Err(local("injected-crash")),
     }
 }

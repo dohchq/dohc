@@ -1903,38 +1903,7 @@ fn a_held_document_releases_the_work_it_retained_while_ready() {
     }
     hydrated(&mut store, &["edited live".to_owned()]);
     retain_behind_closed_editor(&client, &mut store, moment);
-    // Later retained rows of the document, past the replay page, fill the
-    // workspace's cap.
-    let identity = read_sync_identity(&store, "ws").unwrap().unwrap();
-    store
-        .write_with(&NoFaults, |tx| {
-            for seq in 0..9_995 {
-                let mut op = document_op(seq, child_seq + 4 + seq, "hosted-object");
-                op.origin_id = "filler".to_owned();
-                let json = serde_json::to_string(&op).unwrap();
-                tx.execute(
-                    "INSERT INTO relay_deferred_ops (workspace_id,origin_id,origin_seq, \
-                     replication_epoch,stream_identity,envelope_json,retained_bytes) \
-                     VALUES ('ws','filler',?1,?2,?3,?4,?5)",
-                    params![
-                        seq,
-                        identity.replication_epoch,
-                        identity.stream_identity,
-                        json,
-                        json.len() as i64
-                    ],
-                )
-                .map_err(SyncError::persist)?;
-                tx.execute(
-                    "INSERT INTO hosted_deferred_ops (workspace_id,origin_id,origin_seq,object_id,relay_seq) \
-                     VALUES ('ws','filler',?1,'hosted-object',?2)",
-                    params![seq, child_seq + 4 + seq],
-                )
-                .map_err(SyncError::persist)?;
-            }
-            Ok::<_, SyncError>(())
-        })
-        .unwrap();
+    fill_retained(&mut store, "hosted-object", child_seq + 4, 9_995);
     assert_eq!(retained(&store), 10_000);
 
     sync(&client, &mut store);
@@ -1968,8 +1937,150 @@ fn a_held_document_releases_the_work_it_retained_while_ready() {
         document_op(0, child_seq + 10_000, "other-object"),
         document_op(1, child_seq + 10_001, "other-object"),
     ];
-    crate::deferred::retain(&mut store, &identity, &[&other[0], &other[1]], &NoFaults)
-        .expect("another document retains work under the freed cap");
+    let identity = read_sync_identity(&store, "ws").unwrap().unwrap();
+    assert!(
+        crate::deferred::retain(&mut store, &identity, &[&other[0], &other[1]], &NoFaults)
+            .unwrap()
+            .is_empty(),
+        "another document retains work under the freed cap"
+    );
+}
+
+/// Retain `count` later rows of `object_id`, from relay position `from`, as
+/// work past the replay page that fills the workspace's cap.
+fn fill_retained(store: &mut EngineStore, object_id: &str, from: i64, count: i64) {
+    let identity = read_sync_identity(store, "ws").unwrap().unwrap();
+    store
+        .write_with(&NoFaults, |tx| {
+            for seq in 0..count {
+                let mut op = document_op(seq, from + seq, object_id);
+                op.origin_id = "filler".to_owned();
+                let json = serde_json::to_string(&op).unwrap();
+                tx.execute(
+                    "INSERT INTO relay_deferred_ops (workspace_id,origin_id,origin_seq, \
+                     replication_epoch,stream_identity,envelope_json,retained_bytes) \
+                     VALUES ('ws','filler',?1,?2,?3,?4,?5)",
+                    params![
+                        seq,
+                        identity.replication_epoch,
+                        identity.stream_identity,
+                        json,
+                        json.len() as i64
+                    ],
+                )
+                .map_err(SyncError::persist)?;
+                tx.execute(
+                    "INSERT INTO hosted_deferred_ops (workspace_id,origin_id,origin_seq,object_id,relay_seq) \
+                     VALUES ('ws','filler',?1,?2,?3)",
+                    params![seq, object_id, from + seq],
+                )
+                .map_err(SyncError::persist)?;
+            }
+            Ok::<_, SyncError>(())
+        })
+        .unwrap();
+}
+
+/// Sol's review of the release above: the cap was full of a ready
+/// document's retained work, ending at a conflict child whose parent the
+/// feed withholds. Its editor closed while another document's moment waited
+/// behind that document's open editor. Replay applied the first document's
+/// moment and stopped at the child, but retaining the other's moment passed
+/// the cap, so the pass failed before the commit that releases the first
+/// document's work, and so did every later pass. The other document is held
+/// at its moment instead, retaining nothing, and the pass commits. Once its
+/// editor closes, the moment applies and it is ready.
+#[test]
+fn a_full_retention_limit_holds_a_document_instead_of_failing_the_pass() {
+    let (_scratch, _path, mut store) = hosted_store();
+    let (_parent, child, _) = withheld_conflict(&mut store);
+    let feed = HostedFeed::new();
+    feed.append(envelope("owner", 2, "workspace.init", json!({})));
+    feed.create(
+        "peer",
+        0,
+        "hosted-object",
+        "hosted.md",
+        "before the conflict",
+    );
+    feed.create("other", 0, "other-object", "other.md", "other before");
+    feed.share("hosted-object", "hosted.md");
+    feed.share("other-object", "other.md");
+    let client = RelaySyncClient::new(feed);
+    sync(&client, &mut store);
+    assert!(ready(&store, "hosted-object"));
+    assert!(ready(&store, "other-object"));
+
+    let feed = client.transport();
+    feed.replace(
+        "peer",
+        1,
+        "hosted-object",
+        "hosted.md",
+        "edited live",
+        ("hosted-object", "before the conflict", "moment-peer-0"),
+    );
+    let moment = feed.log.lock().unwrap().len();
+    feed.append(child);
+    let child_seq = moment as i64 + 1;
+    hydrated(&mut store, &["edited live".to_owned()]);
+    retain_behind_closed_editor(&client, &mut store, moment);
+    fill_retained(&mut store, "hosted-object", child_seq + 100, 9_998);
+    assert_eq!(retained(&store), 10_000);
+
+    feed.replace(
+        "other",
+        1,
+        "other-object",
+        "other.md",
+        "other edited",
+        ("other-object", "other before", "moment-other-0"),
+    );
+    let other_seq = feed.log.lock().unwrap().len() as i64;
+    let editing_other = client
+        .pull_hosted_workspace(
+            &mut store,
+            &mut WriterDocCache::new(),
+            "ws",
+            &NoFaults,
+            &LiveSession("other-object"),
+        )
+        .expect("a full retention limit never fails a hosted pass");
+    assert_eq!(
+        count(
+            &store,
+            "SELECT COUNT(*) FROM hosted_deferred_ops WHERE object_id='other-object'"
+        ),
+        0,
+        "the other document retains nothing"
+    );
+    assert_eq!(
+        editing_other.pending_cursor.as_ref().unwrap().reads["other-object"],
+        HostedRead {
+            cursor: other_seq - 1,
+            stopped: Some(HostedHold::WorkWaiting),
+            complete: false
+        },
+        "before its moment"
+    );
+    assert!(commit(&client, &mut store, &editing_other));
+    let (heads, _) = content(&store);
+    assert_eq!(heads["hosted-object"], "edited live");
+    assert_eq!(heads["other-object"], "other before");
+    assert_eq!(hold(&store, "hosted-object"), Some(parent_withheld()));
+    assert_eq!(hold(&store, "other-object"), Some(HostedHold::WorkWaiting));
+    assert_eq!(retained(&store), 0, "the commit released the full cap");
+    assert_eq!(
+        document(&store, "other-object").unwrap().backfill_cursor,
+        other_seq - 1
+    );
+
+    // The other editor closed.
+    sync(&client, &mut store);
+    assert!(ready(&store, "other-object"));
+    assert_eq!(content(&store).0["other-object"], "other edited");
+    assert_eq!(hold(&store, "hosted-object"), Some(parent_withheld()));
+    assert_eq!(retained(&store), 0);
 }
 
 /// Opus's review: a read that stops below its document's read position, with

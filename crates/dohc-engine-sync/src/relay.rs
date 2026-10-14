@@ -2086,7 +2086,8 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             leases,
         )?;
         // A ready document that stopped at a conflict child whose parent the
-        // feed withholds is held from there and reads its own rows.
+        // feed withholds, or at work past the retention limit, is held from
+        // there and reads its own rows.
         for (object_id, op) in &pass.stopped {
             if replica
                 .documents
@@ -2367,7 +2368,19 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 {
                     return Err(RelayError::Local("retryable-state".to_owned()));
                 }
-                crate::deferred::retain(store, identity, &retained, faults)?;
+                // A hosted document that would pass the retention limit is
+                // held at its first op still to apply, as one that is not
+                // ready, so the pass still commits and releases other work.
+                let unretained = crate::deferred::retain(store, identity, &retained, faults)?;
+                for op in retained {
+                    if let Some(object_id) = crate::hosted::hosted_document(op)
+                        .filter(|object_id| unretained.contains(*object_id))
+                    {
+                        pass.stopped
+                            .entry(object_id.to_owned())
+                            .or_insert_with(|| op.clone());
+                    }
+                }
                 break;
             }
             first = false;
@@ -4324,9 +4337,9 @@ struct AppliedPass {
     settlement_report_id: Option<String>,
     /// Settlement or deferred replay left work for another pass.
     has_more: bool,
-    /// Each hosted document that is not ready, or that stopped at a withheld
-    /// conflict parent, whose ops did not all apply, with the first that did
-    /// not.
+    /// Each hosted document that is not ready, that stopped at a withheld
+    /// conflict parent, or whose work would pass the retention limit, whose
+    /// ops did not all apply, with the first that did not.
     stopped: BTreeMap<String, ReplicationEnvelope>,
 }
 

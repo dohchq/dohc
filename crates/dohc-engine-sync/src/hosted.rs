@@ -421,7 +421,8 @@ pub enum HostedHold {
     /// withholds. Its work waits until the relay serves it.
     ConflictParentWithheld { conflict_id: String },
     /// Its work waits for another reason: a live session, or a departed
-    /// document or retired file still holding its path.
+    /// document or retired file still holding its path, while the document
+    /// is not ready or the workspace's retained work is full.
     WorkWaiting,
     /// Its history leaves it at `head_path`, or at no path, while the scope
     /// names it at `scope_path`. It waits for the row that moves it there.
@@ -666,7 +667,8 @@ pub struct HostedCursor {
     pub main_cursor: Option<i64>,
     /// Each document whose own rows the pass read, by object id: the one
     /// backfilling, if any, every held one, and every ready one that stopped
-    /// at a conflict child whose parent the feed withholds.
+    /// at a conflict child whose parent the feed withholds or at work past
+    /// the retention limit.
     pub reads: BTreeMap<String, HostedRead>,
     /// Local-only ownership token for applied settlements and deferred relay work.
     pub settlement_report_id: Option<String>,
