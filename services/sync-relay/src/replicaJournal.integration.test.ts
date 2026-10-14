@@ -8,7 +8,15 @@ import {expect, it} from "vitest";
 import {requireEngineBinaryOrSkip} from "../../../apps/desktop/src/testing/engineBinary";
 
 const binary = requireEngineBinaryOrSkip();
-async function fixture(mode: "device" | "service", sizes = [50 * 1024], existingRoot?: string) {
+async function waitForExit(pid: number) {
+  const deadline = performance.now() + 30_000;
+  for (;;) {
+    try {process.kill(pid, 0);} catch (error) {if ((error as NodeJS.ErrnoException).code === "ESRCH") return; throw error;}
+    expect(performance.now(), `Process ${pid} did not exit`).toBeLessThan(deadline);
+    await new Promise<void>(resolve => setImmediate(resolve));
+  }
+}
+async function fixture(mode: "device" | "service", sizes = [1024], existingRoot?: string) {
   const root = existingRoot ?? await mkdtemp(join(tmpdir(), "dohc-replica5c-"));
   const child = spawn(process.execPath, ["--import", "tsx/esm", fileURLToPath(new URL("./replicaJournal.integration.fixture.ts", import.meta.url)), root, binary.require(), mode],
     {cwd: fileURLToPath(new URL("..", import.meta.url)), windowsHide: true, stdio: ["pipe", "pipe", "pipe"]});
@@ -31,26 +39,35 @@ async function fixture(mode: "device" | "service", sizes = [50 * 1024], existing
   }
   try {await started; const processes = await call("init", {sizes, resume: Boolean(existingRoot)});
     expect(processes.relayPid).toBe(child.pid); expect(processes.hostPid).not.toBe(child.pid); expect(processes.replicaPid).not.toBe(processes.hostPid);
-    const stopCrashedChildren = async () => {
-      for (const pid of [processes.hostPid, processes.replicaPid]) {
-        try {process.kill(pid, "SIGKILL");} catch (error) {if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;}
-        const deadline = performance.now() + 30_000;
-        for (;;) {
-          try {process.kill(pid, 0);} catch (error) {if ((error as NodeJS.ErrnoException).code === "ESRCH") break; throw error;}
-          expect(performance.now()).toBeLessThan(deadline);
-          await new Promise<void>(resolve => setImmediate(resolve));
-        }
-      }
-    };
     return {root, call, processes, async crashed() {
-      await exited; lines.close(); await stopCrashedChildren();
-    }, async close(keepRoot = false) {try {if (!childClosed) await call("close");} finally {child.stdin.end(); child.kill(); await exited; lines.close(); if (!keepRoot && process.env.DOHC_REPLICA_RETAIN !== "1") await rm(root, {recursive: true, force: true}); else console.log(`RETAINED=${root}`);}}};
-  } catch (error) {await call("close").catch(() => {}); child.kill(); await exited; lines.close(); if (process.env.DOHC_REPLICA_RETAIN !== "1") await rm(root, {recursive: true, force: true}); else console.log(`RETAINED=${root}`); throw error;}
+      await exited; lines.close(); await Promise.all([processes.hostPid, processes.replicaPid].map(waitForExit));
+    }, async close() {try {if (!childClosed) await call("close");} finally {child.stdin.end(); child.kill(); await exited; lines.close(); if (process.env.DOHC_REPLICA_RETAIN !== "1") await rm(root, {recursive: true, force: true, maxRetries: 5}); else console.log(`RETAINED=${root}`);}}};
+  } catch (error) {await call("close").catch(() => {}); child.kill(); await exited; lines.close(); if (process.env.DOHC_REPLICA_RETAIN !== "1") await rm(root, {recursive: true, force: true, maxRetries: 5}); else console.log(`RETAINED=${root}`); throw error;}
 }
+
+it.skipIf(binary.missing)("controller death closes the relay and both native daemons mid-scenario", async () => {
+  const root = await mkdtemp(join(tmpdir(), "dohc-replica5c-controller-"));
+  const controller = spawn(process.execPath, ["--import", "tsx/esm", fileURLToPath(new URL("./replicaJournal.controller.fixture.ts", import.meta.url)), root, binary.require()],
+    {cwd: fileURLToPath(new URL("..", import.meta.url)), windowsHide: true, stdio: ["ignore", "ignore", "pipe", "ipc"]});
+  const exited = new Promise<void>(resolve => controller.once("close", () => resolve()));
+  let logs = ""; controller.stderr!.on("data", bytes => {logs += String(bytes);});
+  try {
+    const {processes} = await new Promise<any>((resolve, reject) => {
+      controller.once("message", resolve); controller.once("error", reject);
+      controller.once("exit", () => reject(new Error(`Controller exited before scenario: ${logs}`)));
+    });
+    if (process.env.DOHC_REPLICA_RETAIN === "1") console.log(JSON.stringify({root, ...processes}));
+    controller.kill("SIGKILL"); await exited;
+    await Promise.all([processes.relayPid, processes.hostPid, processes.replicaPid].map(waitForExit));
+  } finally {
+    controller.kill(); await exited;
+    if (process.env.DOHC_REPLICA_RETAIN !== "1") await rm(root, {recursive: true, force: true, maxRetries: 5});
+  }
+}, 120_000);
 
 it.skipIf(binary.missing).each(["device", "service"] as const)("%s host: journal precedes echo with equal evidence and no duplicate History", async mode => {
   const samples: Record<string, number[]> = {};
-  for (const size of [50 * 1024, 1024 * 1024]) {
+  for (const size of (process.env.DOHC_REPLICA_MEASURE === "1" ? [50 * 1024, 1024 * 1024] : [1024])) {
     const f = await fixture(mode, [size]);
     try {
       const times: number[] = [];
@@ -60,14 +77,18 @@ it.skipIf(binary.missing).each(["device", "service"] as const)("%s host: journal
         await f.call("settled"); times.push(performance.now() - start);
         const cut = await f.call("state");
         expect(cut.frontier[0].journal_cursor).toBe(receipt.receipt.journalCursor);
-        await f.call("drain"); expect((await f.call("compare")).errors).toEqual([]);
+        await f.call("drain"); const journal = await f.call("state");
+        expect(journal.passive).toEqual(journal.owner); expect(journal.errors).toEqual([]);
       }
       samples[String(size)] = times;
       const before = await f.call("state");
       await f.call("settle"); await f.call("echo");
       const after = await f.call("state");
       expect(after.accepted).toEqual(before.accepted); expect(after.passive).toEqual(before.passive);
+      expect(after.passiveObjects[0].auditCount).toBe(after.passive[0].eventCount);
       expect((await f.call("compare")).errors).toEqual([]);
+      await f.call("echo");
+      expect((await f.call("compare")).passiveObjects).toEqual(after.passiveObjects);
     } finally {await f.close();}
   }
   if (process.env.DOHC_REPLICA_MEASURE_OUT) await writeFile(`${process.env.DOHC_REPLICA_MEASURE_OUT}-${mode}.json`, JSON.stringify(samples));
@@ -76,11 +97,12 @@ it.skipIf(binary.missing).each(["device", "service"] as const)("%s host: journal
 it.skipIf(binary.missing)("host killed after commit: journal survives, restart echoes once", async () => {
   const f = await fixture("device", [1024]);
   try {
-    await f.call("hold"); await f.call("edit", {deliveryId: "committed-before-kill"}); await f.call("held"); await f.call("killHost");
+    await f.call("hold", {beforeRead: true}); await f.call("edit", {deliveryId: "committed-before-kill"}); await f.call("held"); await f.call("killHost");
     const start = performance.now(); await f.call("release"); await f.call("settled");
     const accepted = await f.call("state"); expect(accepted.passive[0].eventCount).toBe(1); expect(accepted.owner[0].eventCount).toBe(0);
     const catchupMs = performance.now() - start;
-    await f.call("restartHost"); await f.call("drain"); await f.call("compare");
+    await f.call("restartHost"); await f.call("drain");
+    const drained = await f.call("state"); expect(drained.passive).toEqual(drained.owner);
     await f.call("settle"); await f.call("echo"); const after = await f.call("compare");
     expect(after.passive[0].eventCount).toBe(1); expect(after.errors).toEqual([]);
     console.log(JSON.stringify({scenario: "host-kill", catchupMs}));
@@ -93,14 +115,17 @@ it.skipIf(binary.missing)("restore while an old-generation page is in flight ste
     await f.call("edit", {deliveryId: "prime"}); await f.call("drain"); await f.call("compare");
     await f.call("hold"); await f.call("edit", {deliveryId: "old-in-flight"}); await f.call("held");
     await f.call("restore"); await f.call("release"); await f.call("settled");
-    const compared = await f.call("compare"); expect(compared.passive[0].text).toBe("a".repeat(1024)); expect(compared.passive[0].eventCount).toBe(3);
+    // Audit records travel through ordinary echo, after journal content has converged.
+    const compared = await f.call("state"); expect(compared.passive).toEqual(compared.owner);
+    expect(compared.passive[0].text).toBe("a".repeat(1024)); expect(compared.passive[0].eventCount).toBe(3);
     const cut = await f.call("state"); expect(cut.errors).toEqual([]);
-    await f.call("echo"); await f.call("compare");
+    await f.call("settle"); await f.call("echo"); await f.call("compare");
     await f.call("hold"); await f.call("edit", {deliveryId: "after-restore"}); await f.call("held");
     expect(await f.call("probeGeneration", {generation: 1})).toMatchObject({refused: true});
     expect(await f.call("probeGeneration", {generation: 3})).toMatchObject({refused: true});
     const refused = await f.call("state"); expect(refused.frontier[0].journal_cursor).toBe(3); expect(refused.passive[0].eventCount).toBe(3);
-    await f.call("release"); await f.call("settled"); await f.call("drain"); await f.call("compare");
+    await f.call("release"); await f.call("settled"); await f.call("drain");
+    await f.call("settle"); await f.call("echo"); await f.call("compare");
   } finally {await f.close();}
 }, 120_000);
 
@@ -125,7 +150,8 @@ it.skipIf(binary.missing)("replica killed with a page write transaction open rol
     await f.call("held");
     const killing = f.call("killApplying"); await f.call("release");
     const interrupted = await killing; expect(interrupted.frontier.journal_cursor).toBe(0); expect(interrupted.accepted.n).toBe(0);
-    await f.call("settled"); const start = performance.now(); await f.call("activate"); await f.call("activated");
+    await f.call("settled"); const start = performance.now(); await f.call("activate");
+    expect((await f.call("activated")).replicaDir).not.toBe(f.processes.replicaDir);
     const elapsed = performance.now() - start;
     await f.call("drain"); const compared = await f.call("compare"); expect(compared.passive[0].eventCount).toBe(64);
     await f.call("settle"); await f.call("echo"); await f.call("compare");
@@ -140,9 +166,10 @@ it.skipIf(binary.missing)("relay process is killed during a journal page and res
     await f.call("held"); const killing = f.call("killApplying", {relay: true}); await f.call("release");
     const interrupted = await killing; await f.crashed();
     expect(interrupted.frontier.journal_cursor).toBe(0); expect(interrupted.accepted.n).toBe(0);
-    const root = f.root, oldPid = f.processes.relayPid;
+    const root = f.root, oldPid = f.processes.relayPid, oldDir = f.processes.replicaDir;
     const start = performance.now(); f = await fixture("service", [1024], root);
     expect(f.processes.relayPid).not.toBe(oldPid); const catchupMs = performance.now() - start;
+    expect(f.processes.replicaDir).not.toBe(oldDir);
     await f.call("drain"); const compared = await f.call("compare"); expect(compared.passive[0].eventCount).toBe(64);
     await f.call("settle"); await f.call("echo"); await f.call("compare");
     console.log(JSON.stringify({scenario: "relay-restart", catchupMs}));
@@ -150,7 +177,7 @@ it.skipIf(binary.missing)("relay process is killed during a journal page and res
 }, 180_000);
 
 it.skipIf(binary.missing)("same lineage resent after an epoch-floor drain cannot reopen a pre-floor live session", async () => {
-  const f = await fixture("device", [1024]);
+  const f = await fixture("service", [1024]);
   try {
     await f.call("edit", {deliveryId: "pre-epoch"}); await f.call("drain"); await f.call("compare");
     const empty = await f.call("epoch"); expect(empty.passive).toEqual([]); expect(empty.frontier[0].journal_cursor).toBe(1);

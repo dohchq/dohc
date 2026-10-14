@@ -55,10 +55,13 @@ function gate(name: string) {
 let holdPage = false, holdBeforeRead = false;
 let passiveClient: EngineClient, passiveWorkspace: string, passiveId = 1_000_000;
 const applications: {applied: number; skipped: number; journalCursor: number}[] = [];
+let applyingPage = false, completedPages = 0;
 const applyPage = EngineClient.prototype.applyReplicaJournalPage;
 EngineClient.prototype.applyReplicaJournalPage = async function (...args) {
   passiveClient = this; passiveWorkspace = args[0].workspace;
-  const result = await applyPage.apply(this, args); applications.push(result); return result;
+  applyingPage = true;
+  try {const result = await applyPage.apply(this, args); applications.push(result); return result;}
+  finally {applyingPage = false; completedPages++;}
 };
 async function ordinaryInFlight() {
   let page: Record<string, any>;
@@ -87,7 +90,7 @@ const server = createServer(async (incoming, outgoing) => {
     }
     const response = await (isReplica ? supervisor.handle(request) : ownerRoute(request));
     const bytes = Buffer.from(await response.arrayBuffer());
-    appendFileSync(join(root, "requests.log"), JSON.stringify({method: incoming.method, path: incoming.url, status: response.status,
+    if (process.env.DOHC_REPLICA_RETAIN === "1") appendFileSync(join(root, "requests.log"), JSON.stringify({method: incoming.method, path: incoming.url, status: response.status,
       ...(response.status >= 400 ? {body: bytes.toString()} : {})}) + "\n");
     if (holdPage && isReplica && incoming.url?.includes("/live-journal?") && JSON.parse(bytes.toString()).rows.length > 0) {
       holdPage = false; gates.get("page")!.enter(); await gates.get("page")!.released;
@@ -104,8 +107,7 @@ const supervisor = createReplicaSupervisor({storage, storeRoot: join(root, "repl
     starts++; replicaDir = input.storeDir; replica = await startReplica(input); return replica;
   }});
 async function rpc(method: string, params: Record<string, unknown> = {}) {
-  writeFileSync(join(root, "native-rpc.json"), JSON.stringify({method, params, stage: "started"}));
-  try {const response = (await client.sendRequest({id: id++, method, workspace: handle, deadlineMs: 120_000, params: params as never})).result as Record<string, any>; writeFileSync(join(root, "native-rpc.json"), JSON.stringify({method, stage: "done"})); return response;}
+  try {return (await client.sendRequest({id: id++, method, workspace: handle, deadlineMs: 120_000, params: params as never})).result as Record<string, any>;}
   catch (error) {throw new Error(`${method}: ${String(error)}`);}
 }
 async function openHost(configured = true) {
@@ -170,8 +172,8 @@ async function openHost(configured = true) {
 }
 async function closeHost() {
   await bridge?.close(); bridge = undefined;
-  client.close(); hostProcess.kill("SIGKILL"); await client.waitForExit();
-  storage.disconnectLiveHost({...coordinate, updatedAtMs: Date.now(), guard: storage.captureStanding()});
+  if (client) {client.close(); hostProcess.kill("SIGKILL"); await client.waitForExit();
+    storage.disconnectLiveHost({...coordinate, updatedAtMs: Date.now(), guard: storage.captureStanding()});}
 }
 const document = (objectId: string) => ({workspaceId: "workspace", mainVersionId: main, objectId: docs.get(objectId)!.objectId, lineageClaimId: docs.get(objectId)!.lineageClaimId});
 function append(opKind: string, payload: unknown) {
@@ -197,14 +199,22 @@ function state(dir: string) {
     });
   });
 }
+function objects(dir: string) {
+  return inspect(dir, db => db.prepare(`SELECT f.object_id AS objectId,
+    COALESCE(s.path, (SELECT m.path FROM moments m WHERE m.workspace_id=f.workspace_id AND m.object_id=f.object_id AND m.version_id=? ORDER BY m.moment_order DESC LIMIT 1)) AS path,
+    s.object_id IS NOT NULL AS present, COALESCE(s.blob_sha256, s.binary_sha256) AS head, s.content_kind AS contentKind,
+    (SELECT COUNT(*) FROM live_audit_events a WHERE a.workspace_id=f.workspace_id AND a.object_id=f.object_id AND a.main_version_id=?) AS auditCount
+    FROM file_objects f LEFT JOIN snapshots s ON s.workspace_id=f.workspace_id AND s.object_id=f.object_id AND s.version_id=?
+    ORDER BY f.object_id`).all(main, main, main));
+}
 let running: Promise<void> | undefined;
+let closing: Promise<void> | undefined;
 async function command(name: string, input: Record<string, any>): Promise<Record<string, any>> {
   switch (name) {
     case "init": {
       if (!input.resume && mode === "service") {ownerDir = join(root, "seed"); mkdirSync(ownerDir, {recursive: true});}
-      await openHost(false);
       if (input.resume) {
-        await closeHost(); await openHost();
+        await openHost();
         const saved = JSON.parse(readFileSync(join(root, "documents.json"), "utf8")) as {label: string; objectId: string; path: string; baseline: string; lineageClaimId: string}[];
         for (const entry of saved) {
           const baseline = Buffer.from(entry.baseline, "base64"), doc = new Y.Doc(); Y.applyUpdate(doc, baseline);
@@ -215,6 +225,7 @@ async function command(name: string, input: Record<string, any>): Promise<Record
         await supervisor.activate("workspace");
         return {relayPid: process.pid, hostPid: hostProcess.pid, replicaPid: replica.pid, ownerDir, replicaDir, main};
       }
+      await openHost(false);
       for (const [index, size] of (input.sizes as number[]).entries()) {
         const label = `doc-${index}`, path = `docs/${label}.md`;
         const bytes = Buffer.from("a".repeat(mode === "device" ? Math.min(size, 1024) : size));
@@ -285,19 +296,21 @@ async function command(name: string, input: Record<string, any>): Promise<Record
     case "settled": await supervisor.settled("workspace"); return {errors, starts};
     case "compare": {await supervisor.settled("workspace"); const owner = state(ownerDir), passive = state(replicaDir);
       assert.deepEqual(passive, owner, JSON.stringify(inspect(replicaDir, db => db.prepare("SELECT op_kind,payload_json,apply_disposition FROM replication_log ORDER BY rowid DESC LIMIT 10").all())));
-      return {owner, passive, errors, starts};}
+      const ownerObjects = objects(ownerDir), passiveObjects = objects(replicaDir);
+      assert.deepEqual(passiveObjects, ownerObjects);
+      return {owner, passive, ownerObjects, passiveObjects, errors, starts};}
     case "state": return {owner: state(ownerDir), passive: state(replicaDir), errors, starts,
+      ownerObjects: objects(ownerDir), passiveObjects: objects(replicaDir), replicaDir,
       frontier: inspect(replicaDir, db => db.prepare("SELECT * FROM replica_frontiers").all()),
       accepted: inspect(replicaDir, db => db.prepare("SELECT COUNT(*) AS n FROM live_accepted_updates").get()),
-      audit: inspect(replicaDir, db => db.prepare("SELECT COUNT(*) AS n FROM live_audit_events").get()), applications};
+      applications};
     case "hold": gate("page"); holdPage = true; holdBeforeRead = input.beforeRead === true; return {};
     case "held": await gates.get("page")!.entered; return {};
     case "release": gates.get("page")!.release(); return {};
     case "activate": running = supervisor.activate("workspace"); void running.catch(() => {}); return {};
-    case "activated": await running; return {errors, starts};
+    case "activated": await running; return {errors, starts, replicaDir};
     case "killHost": await closeHost(); return {};
     case "restartHost": return await openHost();
-    case "killReplica": await replica.close(); return {};
     case "ordinaryInFlight": await ordinaryInFlight(); return {};
     case "probeGeneration": {
       const position = inspect(replicaDir, db => db.prepare("SELECT event_count,evidence_digest,journal_cursor FROM replica_documents WHERE object_id=?").get(docs.get("doc-0")!.objectId)!);
@@ -339,15 +352,18 @@ async function command(name: string, input: Record<string, any>): Promise<Record
     case "killApplying": {
       const db = new DatabaseSync(join(replicaDir, ".dohc", "engine", "engine.db"));
       const until = performance.now() + 30_000;
+      const completed = completedPages;
       try {
         for (;;) {
+          assert.equal(completedPages, completed, "missed page transaction");
           try {db.exec("BEGIN IMMEDIATE; ROLLBACK;");}
           catch (error) {
             if (!(error instanceof Error) || !("errcode" in error) || error.errcode !== 5) throw error;
+            if (!applyingPage) {await new Promise<void>(resolve => setImmediate(resolve)); continue;}
             const frontier = db.prepare("SELECT * FROM replica_frontiers").get();
             const accepted = db.prepare("SELECT COUNT(*) AS n FROM live_accepted_updates").get();
             if (input.relay) {
-              process.kill(replica.pid!, "SIGKILL");
+              await replica.close(); await closeHost();
               return {frontier, accepted, crashRelay: true};
             }
             await replica.close(); return {frontier, accepted};
@@ -393,20 +409,23 @@ async function command(name: string, input: Record<string, any>): Promise<Record
       return restored;
     }
     case "close": {
-      for (const value of gates.values()) value.release(); await supervisor.close(); await closeHost();
-      await new Promise<void>(resolve => server.close(() => resolve())); storage.close(); for (const entry of docs.values()) entry.doc.destroy(); return {};
+      closing ??= (async () => {
+        for (const value of gates.values()) value.release(); await supervisor.close(); await closeHost();
+        server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve()));
+        storage.close(); for (const entry of docs.values()) entry.doc.destroy();
+      })();
+      await closing; return {};
     }
     default: throw Error(`Unknown command ${name}`);
   }
 }
 createInterface({input: process.stdin}).on("line", line => {
   const {id: requestId, name, input = {}} = JSON.parse(line);
-  writeFileSync(join(root, "progress.json"), JSON.stringify({name, input, at: Date.now()}));
   void command(name, input).then(result => {
     process.stdout.write(JSON.stringify({id: requestId, result}) + "\n", () => {
       if (result.crashRelay) process.kill(process.pid, "SIGKILL");
     });
   },
     error => process.stdout.write(JSON.stringify({id: requestId, error: String(error), stack: `${name}: ${error.stack}`}) + "\n"));
-});
+}).on("close", () => void command("close", {}).finally(() => process.exit(1)));
 process.stdout.write(JSON.stringify({ready: true, pid: process.pid}) + "\n");
