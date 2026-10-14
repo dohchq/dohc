@@ -661,3 +661,27 @@ it("operator takedown refuses Collection writes and receipt retries from an exis
   expect(f.storage.maxOriginSeq("w", "relay:collection-create:g")).toBe(before);
   expect(f.raw.prepare("SELECT COUNT(*) n FROM sync_relay_app_collection_receipts").get()!.n).toBe(1);
 });
+
+
+it("keeps SQL path filtering and UTF-8 ordering before the scan limit", () => {
+  const f = fixture();
+  const text = '---\n{"destination":"Tokyo","name":"Sam"}\n---\n';
+  for (const path of ["responses/000-nested/a.md","responses/001.txt","responses/002.MD","responses/\ue000.md","responses/😀.md"]) f.write(path,text);
+  const first = f.storage.readAppCollection({...f.input,limit:1});
+  expect(JSON.stringify(first)).toBe(JSON.stringify({records:[{path:"responses/002.MD",recordId:null,fields:{destination:"Tokyo",name:"Sam"}}],nextPath:"responses/002.MD"}));
+  const rest = f.storage.readAppCollection({...f.input,limit:10,afterPath:first.nextPath!});
+  expect(rest.records.map(record=>record.path)).toEqual(["responses/\ue000.md","responses/😀.md"]);
+});
+
+it("does not inspect corrupt rows after the page byte budget fills", () => {
+  const f = fixture();
+  for (let index=0;index<6;index++) {
+    f.write(`responses/00${index}.md`,`---\n${JSON.stringify({destination:"Tokyo",name:String(index)+"x".repeat(15_000)})}\n---\n`);
+  }
+  const corrupt = f.raw.prepare("SELECT blob_sha256 FROM sync_relay_current_files WHERE path='responses/005.md'").get()!;
+  f.raw.prepare("UPDATE sync_relay_blobs SET byte_length=byte_length+1 WHERE sha256=?").run(corrupt.blob_sha256);
+  const page = f.storage.readAppCollection({...f.input,limit:10});
+  expect(page.records.map(record=>record.path)).toEqual(["responses/000.md","responses/001.md","responses/002.md","responses/003.md"]);
+  expect(page.nextPath).toBe("responses/003.md");
+  expect(()=>f.storage.readAppCollection({...f.input,limit:10,afterPath:page.nextPath!})).toThrow(/not found/i);
+});
