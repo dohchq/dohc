@@ -419,7 +419,7 @@ fn projected_html_and_definitions_keep_line_start_entities() {
     }
 }
 
-fn assert_fold_reading_cost(source: &str, plain: &str, label: &str) -> bool {
+fn fold_reading_cost(source: &str, plain: &str, label: &str) -> f64 {
     let sources = [source, plain];
     let mut samples = [Vec::new(), Vec::new()];
     for round in 0..5 {
@@ -443,11 +443,12 @@ fn assert_fold_reading_cost(source: &str, plain: &str, label: &str) -> bool {
         times[0],
         times[1]
     );
-    times[0] <= times[1] * 8
+    times[0].as_secs_f64() / times[1].as_secs_f64()
 }
 
 #[test]
 fn nested_contract_definition_guard_scales_linearly() {
+    let mut previous = [0.0; 2];
     for bytes in [8_000, 32_000, 1_000_000] {
         let mut distinct = String::from("x ");
         for width in 1.. {
@@ -458,7 +459,7 @@ fn nested_contract_definition_guard_scales_linearly() {
             }
         }
         let mut linear = true;
-        for (label, mut source) in [
+        for (shape, (label, mut source)) in [
             (
                 "lines before spans",
                 format!("{}{}", "x\n".repeat(bytes / 4), "`a` ".repeat(bytes / 8)),
@@ -466,15 +467,60 @@ fn nested_contract_definition_guard_scales_linearly() {
             ("interleaved spans", "`a`\n".repeat(bytes / 4)),
             ("distinct runs", distinct),
             ("definitions", "[a]:".repeat(bytes / 4)),
-        ] {
+        ]
+        .into_iter()
+        .enumerate()
+        {
             let mut plain: String = source
                 .chars()
                 .map(|ch| if ch == '\n' { ch } else { 'w' })
                 .collect();
             source.push_str("x &#1;");
             plain.push_str("x &#1;");
-            linear &= assert_fold_reading_cost(&source, &plain, label);
+            let ratio = fold_reading_cost(&source, &plain, label);
+            linear &= if shape < 2 {
+                let bounded = previous[shape] == 0.0 || ratio <= previous[shape] * 2.0;
+                previous[shape] = ratio;
+                bounded
+            } else {
+                ratio <= 8.0
+            };
         }
         assert!(linear, "superlinear fold reading at {bytes} bytes");
+    }
+}
+
+#[test]
+fn folded_code_marks_stop_at_each_span() {
+    let doc = Ydoc::wire();
+    doc.rewrite_content_to_markdown_for_fold(ContentKind::Richdoc, "a `b` c `d` e &#1;")
+        .unwrap();
+    assert_eq!(
+        doc.canonical_content()["body"]["children"][0]["children"][0]["delta"],
+        json!([
+            {"insert":"a "}, {"insert":"b","attrs":{"code":{}}}, {"insert":" c "},
+            {"insert":"d","attrs":{"code":{}}}, {"insert":" e &#1;"}
+        ])
+    );
+}
+
+#[test]
+fn folded_code_keeps_following_markdown_on_first_edit() {
+    for (source, expected) in [
+        ("a `b` *c* [l](u) &#1;", "a `b` *c* [l](u) &amp;#1;"),
+        (
+            "Write `&amp;` as `&#38;` in HTML.",
+            "Write `&amp;` as `&#38;` in HTML.",
+        ),
+    ] {
+        let doc = Ydoc::wire();
+        doc.rewrite_content_to_markdown_for_fold(ContentKind::Richdoc, source)
+            .unwrap();
+        doc.preserve_folded_markdown_source(source).unwrap();
+        doc.richdoc_append_paragraph("Edited");
+        assert_eq!(
+            doc.project(ContentKind::Richdoc).unwrap().content,
+            format!("{expected}\n\nEdited")
+        );
     }
 }

@@ -1244,8 +1244,7 @@ impl Ydoc {
         self.rewrite_content_to_markdown_checked::<true>(content_kind, markdown, reading, false)
     }
 
-    /// Rewrite a file fold, refusing nested items and quote-depth overflow
-    /// before mutation. A new fold invalidates the previous exact-source witness.
+    /// File folds refuse nested items and quote overflow before mutation and invalidate the old source witness.
     pub fn rewrite_content_to_markdown_for_fold(
         &self,
         content_kind: ContentKind,
@@ -2573,6 +2572,7 @@ fn unsupported_markdown_line(line: &str) -> bool {
 
 /// Maximum quote nesting before the parser keeps the rest as paragraph text.
 /// A file fold refuses that overflow because projection escapes its `>` markers.
+/// This budget is below the projector's depth limit.
 const QUOTE_FOLD_MAX_DEPTH: usize = 120;
 const MARKDOWN_XML_MAX_DEPTH: usize = 128;
 
@@ -2663,6 +2663,7 @@ fn inline_code_spans(text: &str) -> Vec<std::ops::Range<usize>> {
     spans
 }
 
+/// `depth` counts XML levels; `quote_depth` enforces the separate quote cap.
 fn parse_markdown_blocks_at<'src>(
     lines: &[&'src str],
     depth: usize,
@@ -2680,8 +2681,8 @@ fn parse_markdown_blocks_at<'src>(
     let mut blocks = Vec::new();
     let mut index = 0usize;
     // Find fence closers once; repeated unclosed openers must not rescan the body.
-    let mut closers: Option<Vec<(usize, u8, usize)>> = None;
-    let mut next_closer = BTreeMap::<(u8, usize), usize>::new();
+    let mut closers = None;
+    let mut next_closer = 0;
     while index < lines.len() {
         let line = lines[index];
         if blank_line(line) {
@@ -2689,8 +2690,8 @@ fn parse_markdown_blocks_at<'src>(
             continue;
         }
         if let Some((delimiter, width, fence_language)) = markdown_fence(line, source_fences) {
-            let closers = closers.get_or_insert_with(|| {
-                lines
+            let (closers, longest) = closers.get_or_insert_with(|| {
+                let found: Vec<_> = lines
                     .iter()
                     .enumerate()
                     .filter_map(|(at, line)| {
@@ -2700,18 +2701,29 @@ fn parse_markdown_blocks_at<'src>(
                         let (delimiter, width, rest) = markdown_fence(line, false)?;
                         rest.trim().is_empty().then_some((at, delimiter, width))
                     })
-                    .collect()
+                    .collect();
+                let mut longest = vec![[0; 2]; found.len() + 1];
+                for (at, &(_, character, length)) in found.iter().enumerate().rev() {
+                    longest[at] = longest[at + 1];
+                    let kind = &mut longest[at][usize::from(character == b'~')];
+                    *kind = (*kind).max(length);
+                }
+                (found, longest)
             });
-            let cursor = next_closer.entry((delimiter, width)).or_default();
             while closers
-                .get(*cursor)
-                .is_some_and(|&(at, character, length)| {
-                    at <= index || character != delimiter || length < width
-                })
+                .get(next_closer)
+                .is_some_and(|&(at, _, _)| at <= index)
             {
-                *cursor += 1;
+                next_closer += 1;
             }
-            if let Some(&(closer, _, _)) = closers.get(*cursor) {
+            let closer = (longest[next_closer][usize::from(delimiter == b'~')] >= width)
+                .then(|| {
+                    closers[next_closer..]
+                        .iter()
+                        .find(|&&(_, c, l)| c == delimiter && l >= width)
+                })
+                .flatten();
+            if let Some(&(closer, _, _)) = closer {
                 blocks.push(MdBlock::CodeBlock {
                     language: if source_fences {
                         fence_language
@@ -3589,30 +3601,24 @@ fn insert_md_paragraph<F: XmlFragment>(
         return;
     }
     let target = el.insert(txn, 0, XmlTextPrelim::new(""));
-    let prefix = &text[..spans[0].start];
-    target.insert(txn, 0, prefix);
-    let mut cursor = spans[0].start;
-    let mut code = String::new();
+    use yrs::types::{Attrs, Delta};
+    let code: Attrs = [("code".into(), Any::Map(Default::default()))].into();
+    let mut cursor = 0;
+    let mut runs = Vec::new();
     for span in spans {
-        code.push_str(&text[cursor..span.start]);
-        let width = text[span.clone()]
-            .bytes()
-            .take_while(|b| *b == b'`')
-            .count();
+        runs.push(Delta::Inserted(text[cursor..span.start].to_owned(), None));
+        let content = &text[span.clone()];
+        let width = content.bytes().take_while(|b| *b == b'`').count();
         let mut value = &text[span.start + width..span.end - width];
         if value.starts_with(' ') && value.ends_with(' ') && !value.bytes().all(|b| b == b' ') {
             value = &value[1..value.len() - 1];
         }
-        code.push_str(value);
+        let value = value.to_owned();
+        runs.push(Delta::Inserted(value, Some(Box::new(code.clone()))));
         cursor = span.end;
     }
-    code.push_str(&text[cursor..]);
-    target.insert_with_attributes(
-        txn,
-        utf16_len(prefix) as u32,
-        &code,
-        [("code".into(), Any::Map(Default::default()))].into(),
-    );
+    runs.push(Delta::Inserted(text[cursor..].to_owned(), None));
+    target.apply_delta(txn, runs);
 }
 
 fn insert_md_list_item<F: XmlFragment, const WIRE_DEFAULTS: bool>(
