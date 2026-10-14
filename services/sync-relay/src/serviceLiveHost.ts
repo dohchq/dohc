@@ -496,6 +496,7 @@ export async function startServiceLiveHost(options: {
       for (const [key, document] of hosted) {
         if (changed.includes(document.target.workspaceId) || isDeepStrictEqual(wanted.get(key), document)) continue;
         // A fenced document cannot settle. Keep its durable work in the store, as on an identity change.
+        // The engine keeps it loaded until its workspace detaches; Start activates it again.
         if (await unload(document, joined) || !storage.serviceHostDocumentEnabled({workspaceId: document.target.workspaceId, objectId: document.objectId})) {
           activation.removeTarget(document.target); hosted.delete(key); idle.delete(key); unloading.delete(key);
         }
