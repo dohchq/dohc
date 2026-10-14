@@ -35,6 +35,7 @@ import {
   utimesSync,
   writeFileSync,
 } from "node:fs";
+import { execFileSync, spawn } from "node:child_process";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
@@ -100,6 +101,79 @@ function pidAlive(pid) {
   }
 }
 
+// Creation identity of the process that now has `pid`, or null when the OS
+// will not say. Two reads of one process return the same string; a reused pid
+// returns a different one. The value is the OS's own record, so a clock change
+// after the process started cannot alter it.
+// A lookup can outlive a process killed while it waits, and Windows cannot delete a running process's
+// working directory, so lookups run from the Windows directory instead of inheriting the caller's.
+const lookupDirectory = process.env.SystemRoot;
+
+function creationQuery(pid, os) {
+  if (os === "win32") {
+    return ["pwsh.exe", ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command",
+      `(Get-Process -Id ${pid} -ErrorAction Stop).StartTime.ToUniversalTime().ToString('o')`]];
+  }
+  return null;
+}
+
+function linuxCreation(pid) {
+  // starttime is field 22; the command name in field 2 may contain spaces.
+  const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+  const start = stat.slice(stat.lastIndexOf(")") + 2).split(" ")[19];
+  const boot = readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim();
+  return /^\d+$/u.test(start) && boot ? `${boot}/${start}` : null;
+}
+
+const creationOutput = output => /^\d{4}-\d{2}-\d{2}T[\d:.]+Z$/u.test(output.trim()) ? output.trim() : null;
+
+export function processCreation(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return null;
+  try {
+    if (platform() === "linux") return linuxCreation(pid);
+    const query = creationQuery(pid, platform());
+    if (!query) return null;
+    return creationOutput(execFileSync(query[0], query[1], {
+      encoding: "utf8", windowsHide: true, timeout: 30_000, stdio: ["ignore", "pipe", "ignore"], cwd: lookupDirectory,
+    }));
+  } catch {
+    return null;
+  }
+}
+
+// This process's identity, looked up once in the background. Windows needs a
+// PowerShell start (about two seconds), so claims never wait for it: a claim
+// made first gains the identity when it arrives, and the lookup never keeps a
+// finished process alive.
+let ownCreation;
+let ownCreationValue = null;
+function linuxOwnCreation() {
+  if (platform() !== "linux") return null;
+  try { return ownCreationValue ??= linuxCreation(process.pid); } catch { return null; }
+}
+function resolveOwnCreation() {
+  if (ownCreation) return ownCreation;
+  const query = creationQuery(process.pid, platform());
+  if (!query) return ownCreation = Promise.resolve(linuxOwnCreation());
+  return ownCreation = new Promise(done => {
+    const finish = value => { ownCreationValue = value; done(value); };
+    try {
+      const child = spawn(query[0], query[1], { windowsHide: true, stdio: ["ignore", "pipe", "ignore"], cwd: lookupDirectory });
+      let output = "";
+      child.stdout.setEncoding("utf8");
+      child.stdout.on("data", chunk => { output += chunk; });
+      const timer = setTimeout(() => child.kill(), 30_000);
+      timer.unref();
+      child.once("error", () => { clearTimeout(timer); finish(null); });
+      child.once("close", code => { clearTimeout(timer); finish(code === 0 ? creationOutput(output) : null); });
+      child.unref();
+      child.stdout.unref();
+    } catch {
+      finish(null);
+    }
+  });
+}
+
 function logEvent(root, line) {
   try {
     appendFileSync(join(root, "events.log"), `${new Date().toISOString()} ${line}\n`);
@@ -113,6 +187,7 @@ function slotDir(root, i, kind) {
 }
 
 const defaultHeartbeatMs = 60_000;
+const defaultIdentityDelayMs = 10_000;
 
 function checkQueueAccess(root, kind) {
   for (const directory of [root, join(root, `${kind}-queue`)]) {
@@ -150,7 +225,10 @@ function holders(root, slots, kind) {
       const status = readStatus(dir, owner);
       const detail = [status.purpose, status.checkout, status.commit?.slice(0, 12), status.phase].filter(Boolean).join(", ");
       const elapsed = Math.max(0, Date.now() - Date.parse(owner.start));
-      held.push(`${kind}-${i}: pid ${owner.pid} since ${owner.start}, elapsed ${Math.round(elapsed / 1000)}s${detail ? ` (${detail})` : ""}`);
+      const heartbeat = Math.max(0, Date.now() - statSync(join(dir, "owner.json")).mtimeMs);
+      // Without an identity, a reused pid keeps the slot until that other process exits.
+      held.push(`${kind}-${i}: pid ${owner.pid}${owner.created ? "" : " (no process identity)"} since ${owner.start}, ` +
+        `elapsed ${Math.round(elapsed / 1000)}s, last heartbeat ${Math.round(heartbeat / 1000)}s ago${detail ? ` (${detail})` : ""}`);
     } catch {
       if (existsSync(dir)) held.push(`${kind}-${i}: owner unreadable`);
     }
@@ -282,22 +360,74 @@ function withSweepLock(root, sweep) {
       throw retakeError;
     }
   }
+  // A sweep suspended past the takeover window loses its lock to a successor.
+  // One owner file, created exclusively, names the lock's holder: a late
+  // writer finds it taken and backs off, and `owns` lets a running sweep stop
+  // mutating once its lock is gone.
+  const token = randomBytes(8).toString("hex");
+  const ownerPath = join(sweepLock, "owner");
+  const owns = () => {
+    try { return readFileSync(ownerPath, "utf8") === token; }
+    catch { return false; }
+  };
   try {
-    return sweep();
+    writeFileSync(ownerPath, token, { flag: "wx" });
+  } catch (error) {
+    // EEXIST: a successor owns it now. ENOENT: a takeover removed it. Neither is ours to clean.
+    if (error.code === "EEXIST" || error.code === "ENOENT") return null;
+    throw error;
+  }
+  try {
+    return sweep(owns);
   } finally {
-    rmSync(sweepLock, { recursive: true, force: true });
+    // A lock this sweeper lost stays where it is. Its own lock is moved aside
+    // and deleted only if the owner inside is still this token; a successor
+    // that took the name between the check and the move gets it back.
+    // Residual, accepted: if a third sweeper takes the name in that instant,
+    // the moved lock's holder sees `owns` turn false and stops. Slot safety
+    // never rests on this lock: every reclaim validates its tombstone.
+    if (owns()) {
+      const moved = `${sweepLock}.release-${randomBytes(4).toString("hex")}`;
+      let renamed = false;
+      for (let attempt = 0; attempt < 5 && !renamed; attempt += 1) {
+        try { renameSync(sweepLock, moved); renamed = true; }
+        catch (error) {
+          // A scanner briefly holding the owner file open blocks a directory rename on Windows.
+          if (!["EPERM", "EBUSY", "EACCES"].includes(error.code)) break;
+          Atomics.wait(releaseWait, 0, 0, 50 * (attempt + 1));
+        }
+      }
+      if (!renamed) logEvent(root, "sweep lock release failed; the next sweeper takes it over after 5 minutes");
+      else if (readOwner(moved) === token) rmSync(moved, { recursive: true, force: true });
+      else {
+        try { renameSync(moved, sweepLock); }
+        catch { logEvent(root, `a successor's sweep lock could not be restored (${moved}); its sweep stops`); }
+      }
+    }
   }
 }
 
+const releaseWait = new Int32Array(new SharedArrayBuffer(4));
+function readOwner(lock) {
+  try { return readFileSync(join(lock, "owner"), "utf8"); }
+  catch { return null; }
+}
+
 /**
- * Reclaim dead slots. The owner file's mtime IS the heartbeat: a live owner
- * refreshes it every minute whatever its content, so a slot is a candidate
- * only when that heartbeat is more than `staleMs` old. A readable owner must
- * ALSO be provably dead — a wedged-but-alive lane stops heartbeating and
- * still owns its slot. A slot whose owner file is missing or unreadable for
- * that long has no working heartbeat by construction (a crash between mkdir
- * and the owner write, or a torn write) and is reclaimed too — refusing
- * those permanently eats a lane on every interrupted acquisition.
+ * Reclaim slots whose owner is gone. The owner file's mtime IS the heartbeat:
+ * a live owner refreshes it every minute whatever its content.
+ *
+ * A readable owner is reclaimed once its heartbeat is `goneMs` old (at most
+ * `staleMs`) and its pid is dead, or once the pid belongs to a different
+ * process than the one that claimed. Owners record the OS creation identity
+ * of their process; a different identity behind the same pid proves reuse,
+ * and is trusted only after two missed heartbeats, because a fresh heartbeat
+ * proves the claimer lives. A live owner with its own or an unknown identity
+ * keeps its slot even when its heartbeat stops; stopping it safely needs
+ * process ownership this sweep does not have. A slot whose owner file is
+ * missing or unreadable for `staleMs` has no working heartbeat by
+ * construction (a crash between mkdir and the owner write, or a torn write)
+ * and is reclaimed too.
  *
  * Sweeps are serialized through a `reclaim.lock` directory: two concurrent
  * sweepers could otherwise both judge one slot dead, and the slower rename
@@ -305,11 +435,11 @@ function withSweepLock(root, sweep) {
  * re-claimed. The lock is held for milliseconds; one left by a dead sweeper
  * is removed after 5 minutes. Returns how many slots were freed.
  */
-export function reclaimStaleSlots({ root, slots, staleMs, kind = "build-slot" }) {
+export function reclaimStaleSlots({ root, slots, staleMs, kind = "build-slot", goneMs = 2 * defaultHeartbeatMs, identify = processCreation }) {
   try {
-    return withSweepLock(root, () => {
-      reclaimStaleTickets({ root, kind });
-      return reclaimSlots({ root, slots, kind, staleMs });
+    return withSweepLock(root, owns => {
+      reclaimStaleTickets({ root, kind, owns });
+      return reclaimSlots({ root, slots, kind, staleMs, goneMs, identify, owns });
     }) ?? 0;
   } catch (error) {
     if (!transientFilesystemError(error, root, kind)) throw error;
@@ -317,7 +447,25 @@ export function reclaimStaleSlots({ root, slots, staleMs, kind = "build-slot" })
   }
 }
 
-function reclaimSlots({ root, slots, staleMs, kind }) {
+// A matching identity only keeps a slot, so it is cached to spare repeated
+// sweeps a PowerShell start. A mismatch frees a slot, so it is never cached.
+const sameCreation = new Map();
+function confirmsOwner(pid, created, identify) {
+  const cached = sameCreation.get(pid);
+  if (cached?.created === created && Date.now() - cached.at < 5 * 60_000) return { same: true };
+  const current = identify(pid);
+  if (current === created) sameCreation.set(pid, { created, at: Date.now() });
+  return { same: current === null || current === created, current };
+}
+
+function heartbeatOf(dir) {
+  return statSync(join(dir, "owner.json"), { throwIfNoEntry: false })?.mtimeMs
+    ?? statSync(dir, { throwIfNoEntry: false })?.mtimeMs;
+}
+
+function reclaimSlots({ root, slots, staleMs, goneMs = 2 * defaultHeartbeatMs, kind, identify = processCreation, owns = () => true }) {
+  const deadAfter = Math.min(staleMs, goneMs);
+  const reusedAfter = Math.max(deadAfter, 2 * defaultHeartbeatMs);
   let reclaimed = 0;
   for (let i = 1; i <= slots; i += 1) {
     const dir = slotDir(root, i, kind);
@@ -334,7 +482,8 @@ function reclaimSlots({ root, slots, staleMs, kind }) {
         continue; // Slot is free.
       }
     }
-    if (Date.now() - heartbeatAt <= staleMs) continue;
+    const age = Date.now() - heartbeatAt;
+    if (age <= deadAfter) continue;
     let inspectedOwner = null;
     try {
       inspectedOwner = readFileSync(ownerPath, "utf8");
@@ -342,23 +491,36 @@ function reclaimSlots({ root, slots, staleMs, kind }) {
       if (error.code !== "ENOENT" && transientFilesystemError(error, root, kind)) continue;
       // A missing owner file is judged by `why` below.
     }
+    // Without a readable pid, only the heartbeat speaks for the owner.
+    let ownerGone = false;
     if (why === undefined) {
-      let pid;
+      let owner;
       try {
-        pid = JSON.parse(inspectedOwner).pid;
+        owner = JSON.parse(inspectedOwner);
       } catch {
-        pid = null;
+        owner = null;
       }
+      const pid = owner === null ? null : owner.pid;
       if (pid === null) {
         why = "owner unreadable";
       } else if (!Number.isInteger(pid) || pid <= 0) {
         why = `owner pid invalid (${pid})`;
-      } else if (pidAlive(pid)) {
-        continue;
-      } else {
+      } else if (!pidAlive(pid)) {
         why = `pid ${pid} dead`;
+        ownerGone = true;
+      } else if (typeof owner.created === "string" && age > reusedAfter) {
+        const { same, current } = confirmsOwner(pid, owner.created, identify);
+        if (same) continue;
+        why = `pid ${pid} reused (claimed by process created ${owner.created}, now ${current})`;
+        ownerGone = true;
+      } else {
+        continue; // Live, and nothing proves the pid changed hands.
       }
     }
+    if (!ownerGone && age <= staleMs) continue;
+    // The identity probe can take seconds. A heartbeat during it, or a sweep
+    // takeover while this one was suspended, cancels the decision.
+    if (heartbeatOf(dir) !== heartbeatAt || !owns()) continue;
     const tomb = `${dir}.tomb-${randomBytes(4).toString("hex")}`;
     try {
       renameSync(dir, tomb);
@@ -369,14 +531,14 @@ function reclaimSlots({ root, slots, staleMs, kind }) {
     // rename while the slot was reclaimed and RE-CLAIMED by a live lane —
     // the rename moves whatever is at the path now. The tombstone still
     // holds the owner it actually moved; if that is not the owner this
-    // sweep inspected, put it back.
+    // sweep inspected, or that owner heartbeated after the check, put it back.
     let movedOwner = null;
     try {
       movedOwner = readFileSync(join(tomb, "owner.json"), "utf8");
     } catch {
-      // Both null when neither had an owner file: identical claims.
+      // Both null when neither had an owner file; the heartbeat still tells them apart.
     }
-    if (movedOwner !== inspectedOwner) {
+    if (movedOwner !== inspectedOwner || heartbeatOf(tomb) !== heartbeatAt) {
       try {
         renameSync(tomb, dir);
       } catch {
@@ -422,9 +584,10 @@ function queueTickets(root, kind) {
 // tickets expire after three, even if the OS reused their dead waiter's pid.
 // Each record supplies its heartbeat interval. Temporary records get two
 // heartbeats of grace, with the default interval for missing or torn records.
-// The caller holds reclaim.lock.
-function reclaimStaleTickets({ root, kind }) {
+// The caller holds reclaim.lock, and stops when it no longer `owns` it.
+function reclaimStaleTickets({ root, kind, owns = () => true }) {
   for (const name of queueEntries(root, kind)) {
+    if (!owns()) return;
     const temporary = name.endsWith(".json.tmp");
     if (!temporary && !name.endsWith(".json")) continue;
     const path = join(root, `${kind}-queue`, name);
@@ -493,10 +656,12 @@ function createTicket(root, kind, heartbeatMs, metadata) {
   return { name, path, remove };
 }
 
-function claimSlot(dir, name, heartbeatMs, cooperativeCancellation, removeTicket, root, kind, metadata) {
+function claimSlot(dir, name, heartbeatMs, cooperativeCancellation, removeTicket, root, kind, metadata, identityDelayMs = defaultIdentityDelayMs) {
   const ownerPath = join(dir, "owner.json");
-  const ownerRecord = JSON.stringify({
+  let ownerRecord = JSON.stringify({
     pid: process.pid,
+    // Lets a sweep tell this process from a later one that reuses its pid.
+    created: ownCreationValue ?? linuxOwnCreation(),
     start: new Date().toISOString(),
     ...metadataFields(metadata),
   });
@@ -529,11 +694,29 @@ function claimSlot(dir, name, heartbeatMs, cooperativeCancellation, removeTicket
     } catch { /* Status writes must not lose an acquired slot or its release handle. */ }
   };
   update(metadata);
+  // Only a held slot needs an identity; claims released within seconds never
+  // pay the lookup. A sweep that read the identity-less record sees new bytes
+  // and backs off.
+  const identify = identityDelayMs !== null && JSON.parse(ownerRecord).created === null ? setTimeout(() => resolveOwnCreation().then(created => {
+    if (released || created === null) return;
+    try {
+      if (readFileSync(ownerPath, "utf8") !== ownerRecord) return;
+      const record = JSON.stringify({ ...JSON.parse(ownerRecord), created });
+      // Rename, so a failed write leaves the old record and release still matches it.
+      const temporary = `${ownerPath}.${randomBytes(4).toString("hex")}.tmp`;
+      writeFileSync(temporary, record);
+      renameSync(temporary, ownerPath);
+      ownerRecord = record;
+      update({});
+    } catch { /* The slot keeps its pid-only record. */ }
+  }), identityDelayMs) : null;
+  identify?.unref();
   historyEvent(root, { event: "admit", kind, name, pid: process.pid, ...metadataFields(metadata) });
   const release = () => {
     if (released) return;
     released = true;
     clearInterval(beat);
+    clearTimeout(identify);
     process.off("exit", release);
     process.off("SIGINT", onSigint);
     process.off("SIGTERM", onSigterm);
@@ -578,11 +761,12 @@ function claimSlot(dir, name, heartbeatMs, cooperativeCancellation, removeTicket
  * Take one of the host's four cargo lanes for a build or test run.
  */
 export function acquireBuildSlot(options) {
-  return acquireSlot({ ...options, kind: "build-slot", lanes: "cargo lanes" });
+  // A dead holder's compilers can outlive it, so a cargo lane keeps the long grace.
+  return acquireSlot({ goneMs: 30 * 60_000, ...options, kind: "build-slot", lanes: "cargo lanes" });
 }
 
 /** Fail-fast ownership for mutable local resources; this creates no waiter queue. */
-export function acquireExclusiveSlot({ root, kind, metadata, cooperativeCancellation = true }) {
+export function acquireExclusiveSlot({ root, kind, metadata, cooperativeCancellation = true, identityDelayMs = defaultIdentityDelayMs }) {
   mkdirSync(root, { recursive: true });
   const dir = slotDir(root, 1, kind);
   for (let attempt = 0; attempt < 2; attempt += 1) {
@@ -600,7 +784,7 @@ export function acquireExclusiveSlot({ root, kind, metadata, cooperativeCancella
       reclaimStaleSlots({ root, slots: 1, kind, staleMs });
       continue;
     }
-    return claimSlot(dir, `${kind}-1`, defaultHeartbeatMs, cooperativeCancellation, () => {}, root, kind, metadata);
+    return claimSlot(dir, `${kind}-1`, defaultHeartbeatMs, cooperativeCancellation, () => {}, root, kind, metadata, identityDelayMs);
   }
 }
 
@@ -664,6 +848,8 @@ async function acquireSlot({
   cooperativeCancellation = false,
   metadata,
   observeTicket,
+  identityDelayMs,
+  goneMs,
 }) {
   mkdirSync(root, { recursive: true });
   const label = kind.replace("-", " ");
@@ -719,7 +905,7 @@ async function acquireSlot({
       const sweepMs = reserved ? Math.min(pollMs, 1000) : pollMs;
       if (Date.now() - lastSweepAt >= sweepMs) {
         lastSweepAt = Date.now();
-        reclaimStaleSlots({ root, slots, staleMs, kind });
+        reclaimStaleSlots({ root, slots, staleMs, goneMs, kind });
         refreshQueue();
       }
       if (ahead < 0) {
@@ -738,13 +924,15 @@ async function acquireSlot({
         } catch (error) {
           if (error.code !== "EEXIST") throw error;
         }
-        if (created) return claimSlot(dir, `${kind}-${i}`, heartbeatMs, cooperativeCancellation, removeTicket, root, kind, metadata);
+        if (created) return claimSlot(dir, `${kind}-${i}`, heartbeatMs, cooperativeCancellation, removeTicket, root, kind, metadata, identityDelayMs);
       }
     } catch (error) {
       if (error instanceof TicketEvidenceError || !transientFilesystemError(error, root, kind)) throw error;
       ahead = -1; // This snapshot cannot grant admission; retry after the sleep.
     }
     if (!denied) {
+      // A waiter has time to learn its identity before it claims.
+      resolveOwnCreation();
       denied = true;
       logEvent(root, free.length === 0
         ? `denied: pid ${process.pid} found all ${slots} slots held`
@@ -757,8 +945,9 @@ async function acquireSlot({
           `at ${root} ${free.length === 0
             ? `and all ${slots} slots are held — ${holders(root, slots, kind)}`
             : `with ${ahead < 0 ? "queue position unavailable" : `queue position ${ahead + 1} behind older waiters`}; ${holders(root, slots, kind) || "no current holder"}`}. Wait for a lane to finish and ` +
-          `rerun; a dead lane's slot is reclaimed automatically once its ` +
-          `heartbeat is 30 minutes stale.`,
+          `rerun; a slot is reclaimed automatically ` +
+          `${Math.round(Math.min(staleMs, goneMs ?? 2 * defaultHeartbeatMs) / 60_000)} minutes after its holder's last ` +
+          `heartbeat once its process exits, or once its pid passes to another process and the holder recorded its identity.`,
       );
     }
     if (Date.now() >= nextMessageAt) {

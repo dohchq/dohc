@@ -2,7 +2,8 @@
 //
 // The contract under test is the machine's build budget: four slots,
 // atomic directory acquisition, owner-safe reclamation (stale heartbeat AND
-// dead pid, never either alone), and a denial that names the constraint. The
+// an owner that is gone: a dead pid or a pid that now names another process,
+// never either alone), and a denial that names the constraint. The
 // gate holds a slot for its whole run, so a defect here either deadlocks
 // every lane or lets five unbounded cargos share one machine — the crash this
 // module exists to prevent.
@@ -32,6 +33,7 @@ import {
   capBuildParallelism,
   reclaimStaleSlots,
   resolveBuildBudget,
+  processCreation,
   verificationLanes,
 } from "../tools/rust-engine-program/build-slot.mjs";
 
@@ -1390,6 +1392,193 @@ test("the heartbeat keeps restoring the owner file's freshness", async () => {
       "an interval tick must restore the heartbeat",
     );
     slot.release();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+function plantOwner(root, i, owner, heartbeatAgeMs, kind = "build-slot") {
+  const dir = join(root, `${kind}-${i}`);
+  mkdirSync(dir, { recursive: true });
+  const ownerPath = join(dir, "owner.json");
+  writeFileSync(ownerPath, JSON.stringify({ start: new Date().toISOString(), ...owner }));
+  const then = new Date(Date.now() - heartbeatAgeMs);
+  utimesSync(ownerPath, then, then);
+  return dir;
+}
+
+test("a dead owner frees its slot after two missed heartbeats, not the whole stale window", () => {
+  const root = slotRoot();
+  try {
+    plantOwner(root, 1, { pid: deadPid() }, 60_000);
+    plantOwner(root, 2, { pid: deadPid() }, 3 * 60_000);
+    assert.equal(reclaimStaleSlots({ root, slots: 2, staleMs: 30 * 60_000 }), 1);
+    assert.equal(existsSync(join(root, "build-slot-1")), true, "one missed heartbeat is not enough");
+    assert.equal(existsSync(join(root, "build-slot-2")), false);
+    assert.match(readFileSync(join(root, "events.log"), "utf8"), /reclaimed build-slot-2: pid \d+ dead, heartbeat 3 min stale/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a pid now owned by another process frees the slot; the claimer's own identity keeps it", () => {
+  const root = slotRoot();
+  try {
+    const owner = { pid: process.pid, created: "reuse-test-claimer" };
+    plantOwner(root, 1, owner, 3 * 60_000);
+    assert.equal(reclaimStaleSlots({ root, slots: 1, staleMs: 30 * 60_000, identify: () => null }), 0,
+      "an unknown identity proves nothing");
+    assert.equal(reclaimStaleSlots({ root, slots: 1, staleMs: 30 * 60_000, identify: () => "later process" }), 1);
+    assert.equal(existsSync(join(root, "build-slot-1")), false);
+    assert.match(readFileSync(join(root, "events.log"), "utf8"), /reclaimed build-slot-1: pid \d+ reused \(claimed by process created reuse-test-claimer, now later process\)/);
+    plantOwner(root, 1, owner, 3 * 60_000);
+    assert.equal(reclaimStaleSlots({ root, slots: 1, staleMs: 30 * 60_000, identify: () => owner.created }), 0,
+      "a silent owner that is still the claiming process keeps its slot");
+    // A confirmed match is remembered for five minutes. It can delay a reclaim, never cause one.
+    assert.equal(reclaimStaleSlots({ root, slots: 1, staleMs: 30 * 60_000, identify: () => "later process" }), 0);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a fresh heartbeat outweighs any identity answer, even for exclusive slots", () => {
+  const root = slotRoot();
+  try {
+    plantOwner(root, 1, { pid: process.pid, created: "fresh-test-claimer" }, 0, "checkout");
+    plantOwner(root, 1, { pid: process.pid, created: "fresh-test-claimer" }, 90_000);
+    let probes = 0;
+    const identify = () => { probes += 1; return "other"; };
+    assert.equal(reclaimStaleSlots({ root, slots: 1, kind: "checkout", staleMs: -1, identify }), 0);
+    assert.equal(reclaimStaleSlots({ root, slots: 1, staleMs: 30 * 60_000, identify }), 0);
+    assert.equal(probes, 0, "no lookup runs before two heartbeats are missed");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a cargo lane keeps its long grace for a dead holder; the verification lane frees in minutes", async () => {
+  const root = slotRoot();
+  try {
+    plantSlot(root, 1, { pid: deadPid(), heartbeatAgeMs: 3 * 60_000 });
+    await assert.rejects(acquireBuildSlot({ root, slots: 1, waitMs: 0 }), /all 1 slots are held/);
+    plantSlot(root, 1, { pid: deadPid(), heartbeatAgeMs: 3 * 60_000, kind: "verification-slot" });
+    // Only the PR verifier may hold the lane once that guard is on main; naming it as the entry works either way.
+    const lane = await acquireVerificationSlot({ DOHC_BUILD_SLOT_ROOT: root }, { entry: new URL("./verification/verify.mjs", import.meta.url).pathname.replace(/^\/([A-Za-z]:)/u, "$1") });
+    assert.equal(lane.name, "verification-slot-1");
+    lane.release();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("an owner record without an identity is never judged reused", () => {
+  const root = slotRoot();
+  try {
+    plantOwner(root, 1, { pid: process.pid }, 45 * 60_000);
+    plantOwner(root, 2, { pid: process.pid, created: null }, 45 * 60_000);
+    let probes = 0;
+    assert.equal(reclaimStaleSlots({ root, slots: 2, staleMs: 30 * 60_000, identify: () => { probes += 1; return "other"; } }), 0);
+    assert.equal(probes, 0);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a heartbeat during the identity probe cancels the reclaim", () => {
+  const root = slotRoot();
+  try {
+    const dir = plantOwner(root, 1, { pid: process.pid, created: "probe-heartbeat-claimer" }, 3 * 60_000);
+    const identify = () => {
+      const now = new Date();
+      utimesSync(join(dir, "owner.json"), now, now);
+      return "later process";
+    };
+    assert.equal(reclaimStaleSlots({ root, slots: 1, staleMs: 30 * 60_000, identify }), 0);
+    assert.equal(existsSync(join(dir, "owner.json")), true);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+for (const [when, successorOwner] of [["after it wrote its owner", "successor"], ["before it wrote its owner", null]]) {
+  test(`a sweep that lost its lock stops and leaves a successor's lock taken ${when}`, () => {
+    const root = slotRoot();
+    try {
+      plantOwner(root, 1, { pid: process.pid, created: "lost-lock-claimer" }, 3 * 60_000);
+      const lock = join(root, "reclaim.lock");
+      const identify = () => {
+        // A successor takes the lock over while this sweep is suspended in its probe.
+        rmSync(lock, { recursive: true, force: true });
+        mkdirSync(lock);
+        if (successorOwner) writeFileSync(join(lock, "owner"), successorOwner);
+        return "later process";
+      };
+      assert.equal(reclaimStaleSlots({ root, slots: 1, staleMs: 30 * 60_000, identify }), 0);
+      assert.equal(existsSync(join(root, "build-slot-1")), true);
+      assert.deepEqual(readdirSync(lock), successorOwner ? ["owner"] : []);
+      if (successorOwner) assert.equal(readFileSync(join(lock, "owner"), "utf8"), successorOwner);
+      assert.deepEqual(readdirSync(root).filter(name => name.startsWith("reclaim.lock.")), []);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+}
+
+test("a sweeper that resumes after a takeover finds the lock owned and backs off", () => {
+  const root = slotRoot();
+  try {
+    plantSlot(root, 1, { pid: deadPid(), heartbeatAgeMs: 3 * 60_000, kind: "verification-slot" });
+    // The sweeper creates the lock, then a successor takes it over before the sweeper writes its owner file.
+    const result = spawnSync(process.execPath, ["--input-type=module", "-e", `
+      import fs from "node:fs";
+      import { join } from "node:path";
+      import { syncBuiltinESMExports } from "node:module";
+      import { reclaimStaleSlots } from ${JSON.stringify(buildSlotUrl)};
+      const root = process.argv[1];
+      const lock = join(root, "reclaim.lock");
+      const mkdir = fs.mkdirSync;
+      fs.mkdirSync = (path, ...args) => {
+        const made = mkdir(path, ...args);
+        if (path === lock) {
+          fs.rmSync(lock, { recursive: true, force: true });
+          mkdir(lock);
+          fs.writeFileSync(join(lock, "owner"), "successor");
+        }
+        return made;
+      };
+      syncBuiltinESMExports();
+      console.log(reclaimStaleSlots({ root, slots: 1, kind: "verification-slot", staleMs: 30 * 60_000 }));
+    `, root], { encoding: "utf8", timeout: 15_000 });
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.stdout.trim(), "0");
+    assert.equal(readFileSync(join(root, "reclaim.lock", "owner"), "utf8"), "successor");
+    assert.equal(existsSync(join(root, "verification-slot-1")), true);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("process creation identity is stable for a live process and absent for a dead one", t => {
+  const own = processCreation(process.pid);
+  if (own === null) return t.skip(`no creation identity on ${process.platform}`);
+  assert.equal(processCreation(process.pid), own);
+  assert.equal(processCreation(deadPid()), null);
+  assert.equal(processCreation(0), null);
+});
+
+test("a held slot adopts its process identity and still releases by identity", async t => {
+  if (processCreation(process.pid) === null) return t.skip(`no creation identity on ${process.platform}`);
+  const root = slotRoot();
+  try {
+    const slot = await acquireBuildSlot({ root, slots: 1, waitMs: 0, identityDelayMs: 0 });
+    const ownerPath = join(slot.dir, "owner.json");
+    await waitFor(() => typeof JSON.parse(readFileSync(ownerPath, "utf8")).created === "string",
+      "the claim must record its process identity", 60_000);
+    const owner = readFileSync(ownerPath, "utf8");
+    assert.equal(JSON.parse(owner).created, processCreation(process.pid));
+    assert.equal(JSON.parse(readFileSync(join(slot.dir, "status.json"), "utf8")).owner, owner);
+    slot.release();
+    assert.equal(existsSync(slot.dir), false);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

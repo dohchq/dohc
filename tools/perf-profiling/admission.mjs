@@ -49,7 +49,8 @@ export function acquireProfilingSlot(env = process.env, {
   let lane, timer;
   try {
     check();
-    if (budget) lane = acquireExclusiveSlot({ root: budget.root, kind: 'profiling-slot', metadata });
+    // No background identity lookup: it would start a PowerShell process during the measurement.
+    if (budget) lane = acquireExclusiveSlot({ root: budget.root, kind: 'profiling-slot', metadata, identityDelayMs: null });
     check();
     timer = schedule(() => {
       try { check(); }
