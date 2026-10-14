@@ -35,8 +35,9 @@ describe.skipIf(!available)("account deletion against Postgres",()=>{
     const account=await auth.api.signUpEmail({body:{email,password,name:"Delete me"}});
     const userId=account.user.id,token=account.token!;
     const post=(path:string,body:unknown={},credential=token)=>auth.handler(new Request(baseURL+"/api/auth"+path,{method:"POST",headers:{authorization:"Bearer "+credential,"content-type":"application/json",[CLIENT_IP_HEADER]:clientIp},body:JSON.stringify(body)}));
+    const claim=(userCode:string)=>auth.handler(new Request(baseURL+"/api/auth/device?user_code="+encodeURIComponent(userCode),{headers:{authorization:"Bearer "+token,[CLIENT_IP_HEADER]:clientIp}}));
     const preview=async()=>{const response=await post("/account/deletion-preview");expect(response.status).toBe(200);return await response.json() as {previewToken:string;email:string;serverOrigin:string;workspaceIds:string[]};};
-    return {deletion,auth,post,preview,userId,email,token,sent,get finished(){return finished;},get purgeCalls(){return purgeCalls;},get previewCalls(){return previewCalls;},syncBytes(){scope={...scope,storedBytes:999};},changeScope(){scope={...scope,ownedShareCount:4};},disconnectRelay(){relayAvailable=false;},connectRelay(){relayAvailable=true;}};
+    return {deletion,auth,post,claim,preview,userId,email,token,sent,get finished(){return finished;},get purgeCalls(){return purgeCalls;},get previewCalls(){return previewCalls;},syncBytes(){scope={...scope,storedBytes:999};},changeScope(){scope={...scope,ownedShareCount:4};},disconnectRelay(){relayAvailable=false;},connectRelay(){relayAvailable=true;}};
   }
   it("previews the exact account and refuses link or app credentials",async()=>{
     const f=await fixture();expect(await f.preview()).toMatchObject({email:f.email,serverOrigin:baseURL,workspaceIds:["owned-workspace"],workspaceCount:1,ownedShareCount:2,heldGrantCount:3,storedBytes:123,passwordRequired:true});
@@ -63,6 +64,7 @@ describe.skipIf(!available)("account deletion against Postgres",()=>{
     const f=await fixture();
     await pool.query(`UPDATE "session" SET "createdAt"=now()-interval '1 day' WHERE "userId"=$1`,[f.userId]);
     const device=await f.auth.api.deviceCode({body:{client_id:"desktop"}});
+    expect((await f.claim(device.user_code)).status).toBe(200);
     expect((await f.post("/device/approve",{userCode:device.user_code})).status).toBe(200);
     const token=await f.auth.api.deviceToken({body:{grant_type:"urn:ietf:params:oauth:grant-type:device_code",device_code:device.device_code,client_id:"desktop"}});
     const previewResponse=await f.post("/account/deletion-preview",{},token.access_token);
@@ -94,6 +96,7 @@ describe.skipIf(!available)("account deletion against Postgres",()=>{
     const f=await fixture(),preview=await f.preview();
     await pool.query(`INSERT INTO "deviceCode" (id,"deviceCode","userCode","userId","expiresAt",status) VALUES($1,$1,$1,$2,now()+interval '10 minutes','approved')` ,["approved-device",f.userId]);
     const device=await f.post("/device/code",{client_id:"desktop"});const codes=await device.json() as {user_code:string};expect(device.status).toBe(200);
+    expect((await f.claim(codes.user_code)).status).toBe(200);
     f.disconnectRelay();const response=await f.post("/account/delete",{...preview,password});
     expect(response.status).toBe(200);expect(await response.json()).toEqual({finished:false,pending:true});
     expect((await pool.query('SELECT * FROM "user" WHERE id=$1',[f.userId])).rows).toHaveLength(1);
