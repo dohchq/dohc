@@ -79,6 +79,8 @@ export const CAPABILITIES = {
   "usage.read": capability("Read this computer's usage record.", {ipc: ["readUsageRecord"]}),
   "usage.clear": capability("Clear this computer's usage record.", {ipc: ["clearUsageRecord"]}),
   "usage.switch": capability("Turn this computer's usage record on or off.", {ipc: ["setUsageRecordEnabled"]}),
+  "usage.start": capability("Set aside a usage record dohc cannot read, and start a new one.", {ipc: ["startUsageRecord"]}),
+  "usage.restore": capability("Restore the usage record set aside last.", {ipc: ["restoreUsageRecord"]}),
   "chat.dispatch.notices.read": capability("Read chat dispatch notices.", {ipc: ["registerChatDispatchNotices"]}),
   "chat.dispatch.notice.dismiss": capability("Dismiss a chat dispatch notice.", {ipc: ["dismissChatDispatchNotice"]}),
   "automation.host.read": capability("Read the computer that runs schedules.", {ipc: ["readScheduleHost"]}),

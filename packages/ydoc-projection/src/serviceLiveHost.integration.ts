@@ -61,7 +61,7 @@ it.each(["before-native-fence", "after-native-fence"] as const)("bootstraps and 
     const { storage } = deployment;
     expect(storage.claimWorkspace({ workspaceId: "workspace", ownerUserId: "owner", createdAtMs: 1 })).toBe("created");
     expect(storage.provisionLiveHostControl({ mode: "service", hostId: "service", updatedAtMs: 1, guard: storage.captureStanding() }).ok).toBe(true);
-    active = await startServiceLiveHost({ configPath: serviceConfig, ...deployment, frameChanges });
+    active = await startServiceLiveHost({ trustedAccount: accountId => ({accountId, name: "Owner"}), configPath: serviceConfig, ...deployment, frameChanges });
     const baseline = Y.encodeStateAsUpdate(doc);
     const document = { workspaceId: "workspace", mainVersionId: mainVersionId!, objectId: "object", lineageClaimId: hash(baseline) };
     const registration = createLiveMarkdownRegistrationValidator(policy)({ document, currentPath: "docs/a.md", checkpoint: baseline });
@@ -121,7 +121,7 @@ it.each(["before-native-fence", "after-native-fence"] as const)("bootstraps and 
     expect(firstReader.capture.invalidated.aborted).toBe(true);
     deployment.storage.close();
     deployment = openRelayDeployment(deploymentConfig);
-    active = await startServiceLiveHost({ configPath: serviceConfig, ...deployment, frameChanges });
+    active = await startServiceLiveHost({ trustedAccount: accountId => ({accountId, name: "Owner"}), configPath: serviceConfig, ...deployment, frameChanges });
     const second = await active.drain(document);
     expect(second).toEqual(first);
     expect(await active.settle(document)).toEqual(firstSettlement);
@@ -169,7 +169,7 @@ it.each(["before-native-fence", "after-native-fence"] as const)("bootstraps and 
     finally {stopped.close();}
     deployment.storage.close();
     deployment = openRelayDeployment(deploymentConfig);
-    active = await startServiceLiveHost({configPath: serviceConfig, ...deployment, frameChanges});
+    active = await startServiceLiveHost({trustedAccount: accountId => ({accountId, name: "Owner"}), configPath: serviceConfig, ...deployment, frameChanges});
     const restored = await active.stopRestore(lookup);
     if (nativeReceipt !== null) expect(restored).toEqual({kind: "done", receipt: nativeReceipt});
     expect(restored).toMatchObject({receipt: {operation: {origin: {kind: "bootstrap"}, terminal: {deliveryId: "stop-cut", updateDigest: finalDigest}, newFence: authority.binding.restoreFenceGeneration + 1}}});
@@ -191,7 +191,7 @@ it.each(["before-native-fence", "after-native-fence"] as const)("bootstraps and 
       const restart = async () => {
         await active?.close(); active = undefined;
         deployment.storage.close(); deployment = openRelayDeployment(deploymentConfig);
-        active = await startServiceLiveHost({configPath: serviceConfig, ...deployment, frameChanges});
+        active = await startServiceLiveHost({trustedAccount: accountId => ({accountId, name: "Owner"}), configPath: serviceConfig, ...deployment, frameChanges});
       };
       await restart();
       const prepared = await active!.prepareRestore(lookup);

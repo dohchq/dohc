@@ -525,6 +525,12 @@ makeProcessDiagnosticsNonFatal();
 
 let usageStore: ReturnType<typeof createUsageStore> | undefined;
 let usageLoad: ReturnType<typeof setImmediate> | undefined;
+// Each window reports it to Notices, with Try again to read the file again.
+function usageRecordStopped(): void {
+  for (const window of BrowserWindow.getAllWindows()) {
+    if (!window.isDestroyed()) window.webContents.send(CHANNELS.usageRecordStopped);
+  }
+}
 const rendererUsage = createRendererUsage<IpcMainInvokeEvent>(invocation => usageStore?.recordSuccess(invocation));
 
 const crashFacts = () => ({
@@ -5367,7 +5373,8 @@ const appLifecycle = createAppLifecycle<BrowserWindow, WorkspaceSummary, Desktop
       usageLoad = setImmediate(() => {
         usageLoad = undefined;
         try {
-          usageStore = createUsageStore({ stateDir, appVersion: app.getVersion(), coverage: DESKTOP_USAGE_COVERAGE });
+          usageStore = createUsageStore({ stateDir, appVersion: app.getVersion(), coverage: DESKTOP_USAGE_COVERAGE,
+            onStop: usageRecordStopped });
         } catch {
           usageStore = undefined;
           return;

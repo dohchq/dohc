@@ -154,7 +154,7 @@ it("exercises public Edit through owner creation, exchange and native applicatio
     const { storage } = deployment;
     expect(storage.claimWorkspace({ workspaceId: "workspace", ownerUserId: ownerUser.id, createdAtMs: 1 })).toBe("created");
     expect(storage.provisionLiveHostControl({ mode: "service", hostId: "service", updatedAtMs: 1, guard: storage.captureStanding() }).ok).toBe(true);
-    active = await startServiceLiveHost({ configPath: serviceConfig, ...deployment, frameChanges });
+    active = await startServiceLiveHost({trustedAccount: (accountId: string) => ({accountId, name: accountId}), configPath: serviceConfig, ...deployment, frameChanges });
     const baseline = Y.encodeStateAsUpdate(ownerDoc), document = { workspaceId: "workspace", mainVersionId: mainVersionId!, objectId: "object", lineageClaimId: hash(baseline) };
     const registration = createLiveMarkdownRegistrationValidator(validationPolicy)({ document, currentPath: "docs/a.md", checkpoint: baseline });
     if (registration.kind !== "accepted") throw new Error(JSON.stringify(registration));
@@ -402,7 +402,7 @@ it("exercises public Edit through owner creation, exchange and native applicatio
     await browserExpect.poll(() => frameChanges.captureCount()).toBe(capacity.admittedConcurrency);
     await active.close(); active = undefined;
     await oldEpoch.hostileSend(epochPartial); await oldEpoch.until(() => oldEpoch.closed !== undefined);
-    active = await startServiceLiveHost({configPath: serviceConfig, ...deployment, frameChanges});
+    active = await startServiceLiveHost({trustedAccount: (accountId: string) => ({accountId, name: accountId}), configPath: serviceConfig, ...deployment, frameChanges});
     const newEpoch = await wire.connect(freshFirst.context, await wire.ticket(freshFirst.context, freshFirst.discriminator, "object"), "fresh-epoch-control"); await newEpoch.sync();
     // A service reconnect keeps the provisioned epoch; the closed old socket
     // is the restart fence. Epoch changes belong to an explicit host transition.
@@ -507,7 +507,7 @@ it("exercises public Edit through owner creation, exchange and native applicatio
     const transitionHarness: PublicTransitionHarness = {root, workspace, audience, concurrency: capacity.admittedConcurrency,
       timeoutMs: routeLimits.upgradeTimeoutMs, storage, evidence: results, ownerUserId: ownerUser.id, host: () => {
         if (!active) throw new Error("Transition host is offline."); return active;
-      }, restart: async () => {await active!.close(); active = undefined; active = await startServiceLiveHost({configPath: serviceConfig, ...deployment, frameChanges});},
+      }, restart: async () => {await active!.close(); active = undefined; active = await startServiceLiveHost({trustedAccount: (accountId: string) => ({accountId, name: accountId}), configPath: serviceConfig, ...deployment, frameChanges});},
       publishSettled: async (document, path) => {
         // These documents are registered directly, without an ordinary owner
         // history. Publish the actual native file through the fixture relay;
@@ -577,7 +577,7 @@ it("exercises public Edit through owner creation, exchange and native applicatio
     results.automaticView = await runPublicAutomaticView({h: transitionHarness, selected: transitions.cases.view, admission: capacity.automaticView,
       executable, relayUrl, ownerToken, native: capacity.native, validation: validationPolicy, maxRegistrations: capacity.maxRegistrations,
       replaceHost: async config => {await active!.close(); active = undefined; writeFileSync(serviceConfig, JSON.stringify(config));
-        active = await startServiceLiveHost({configPath: serviceConfig, ...deployment, frameChanges});},
+        active = await startServiceLiveHost({trustedAccount: (accountId: string) => ({accountId, name: accountId}), configPath: serviceConfig, ...deployment, frameChanges});},
       newView: async url => {
         const context = await browser!.newContext({ignoreHTTPSErrors: true}); contexts.push(context); const page = await context.newPage();
         page.on("pageerror", error => browserErrors.push(String(error)));
