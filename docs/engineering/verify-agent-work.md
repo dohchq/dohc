@@ -186,6 +186,14 @@ It covers everything merged since the last nightly that passed, and it runs befo
 `pnpm verify:queue status` shows the last passing nightly. Submit one by hand with `pnpm verify:queue nightly`.
 A failed nightly means a merged change broke main or an affected-package selection missed something. Find the change that broke it and revert or fix it the same day.
 
+### Affected packages
+
+The JavaScript gate runs package tests only for the packages a change affects: the packages its files are in, and every package that depends on them.
+A package depends on another when its manifest says so, or when its files reach into the other's files by a relative path, as some tests import another package's source.
+A change to any file outside the workspace packages, such as a lockfile, a crate, or a root script, runs every package. Documentation changes run none.
+Repository checks and proofs always run. `pnpm verify:plan` lists the selected packages, and `result.json` records them under `packages` and `js-tests/result.json` under `skippedPackages`.
+Pass `--full` to run every package. The nightly run on main always does.
+
 To schedule jobs separately, use `pnpm verify:pr --base <target-ref> --job js` and `--job rust`.
 Each report states its scope. Every selected job needs passing evidence that covers the change.
 An explicit `--job` runs that job even when the filters omit it.
