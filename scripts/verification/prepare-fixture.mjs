@@ -31,7 +31,7 @@ export function createPrepareFixture(root, buildSource, { commit = true } = {}) 
       appendFileSync(join(repoRoot,'.dohc-dev/calls.jsonl'),JSON.stringify({command,args})+'\\n');
       if(command==='pnpm' && args[0]==='install') {
         put(log,'preparation install output');
-        assert.deepEqual(args,['install','--frozen-lockfile']);
+        assert.deepEqual(args,['install','--frozen-lockfile','--config.confirm-modules-purge=false']);
         assert.ok(existsSync(join(repoRoot,'.dohc-dev/verification/build.json.lock')));
         if(process.env.FIXTURE_INSTALL_FAIL==='1') throw new Error('frozen install rejected');
         put(join(repoRoot,'node_modules/installed.txt'),readFileSync(join(repoRoot,'pnpm-lock.yaml')));
