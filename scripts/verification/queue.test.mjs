@@ -142,6 +142,7 @@ function harness(t, { timeLimitMs = 60_000, docker = async () => true, sweep = a
     const receipt = fields => writeFileSync(join(output, "result.json"), JSON.stringify({ grant, commit: grant.head, baseCommit: grant.base, final: true, ...fields }));
     const behavior = request.checkout;
     if (behavior === "pass") receipt({ verdict: "PASS" });
+    else if (behavior === "pass-on-retry") receipt({ verdict: "PASS", flaky: [{ step: "repository", test: "times out under load" }] });
     else if (behavior === "fail") receipt({ verdict: "FAIL", error: "a test failed", failure: { kind: "check", cause: "tests" } });
     else if (behavior === "fail-as-host-fails") { hostFails(calls.length); receipt({ verdict: "FAIL", error: "a test failed", failure: { kind: "check", cause: "tests" } }); }
     else if (behavior === "flaky-host") receipt(calls.filter(call => call.id === grant.request).length === 1
@@ -271,6 +272,16 @@ test("a requested restart starts nothing new and waits for the runs in flight", 
   assert.equal((await settled(hung.id)).status.state, "cancelled");
   assert.equal(await service, 75);
   assert.equal(state(), "queued");
+});
+
+test("a pass with tests that needed a retry records them in its attempt and the history", async t => {
+  const { root, request, settled } = harness(t);
+  const passed = await settled((await request("pass-on-retry")).id);
+  const expected = [{ step: "repository", test: "times out under load" }];
+  assert.equal(passed.status.verdict, "PASS");
+  assert.deepEqual(passed.status.attempts[0].flaky, expected);
+  const finished = readFileSync(queuePaths(root).history, "utf8").trim().split("\n").map(line => JSON.parse(line)).find(event => event.event === "finished" && event.id === passed.id);
+  assert.deepEqual(finished.flaky, expected);
 });
 
 test("an attempt that never sampled the host records its load as null", async t => {
