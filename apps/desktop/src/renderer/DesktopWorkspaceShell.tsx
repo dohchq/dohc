@@ -5615,6 +5615,9 @@ export function DesktopWorkspaceShell(props: {
                 <span className="text-sm text-muted">
                   Select a file, or create one
                 </span>
+                {/* Known exceptions to the shortcut registry, pinned in
+                    DesktopWorkspaceShell.shortcuts.test.tsx until macOS
+                    shows its own keys here. */}
                 <div className="flex items-center gap-2">
                   <button
                     type="button"
